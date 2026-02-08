@@ -13,10 +13,9 @@
 use anyhow::Result;
 use std::ops::Bound;
 use std::time::Duration;
-use tokio::sync::oneshot;
 
 use super::name_hash::NameHash;
-use super::reader::{Processor, QueryExecutor, QueryProcessor};
+use super::reader::{QueryExecutor, QueryRequest};
 use super::scan::{self, Visitable};
 use super::HotColumnFamilyRecord;
 use super::summary_hash::SummaryHash;
@@ -28,6 +27,8 @@ use super::schema::{
 use super::{ColumnFamily, ColumnFamilySerde};
 use super::Storage;
 use crate::{Id, TimestampMilli};
+use crate::request::{new_request_id, RequestMeta};
+use tokio::sync::oneshot;
 
 // ============================================================================
 // Name Resolution Helpers
@@ -981,7 +982,6 @@ macro_rules! iterate_cf {
 // ============================================================================
 
 /// Query enum representing all possible query types.
-/// Uses dispatch wrappers internally for channel/timeout handling.
 ///
 /// **Note**: This is internal infrastructure for the query dispatch pipeline.
 /// Users interact with query parameter structs directly via the `Runnable` trait.
@@ -991,97 +991,152 @@ macro_rules! iterate_cf {
 #[doc(hidden)]
 #[allow(private_interfaces)]
 pub enum Query {
-    NodeById(NodeByIdDispatch),
-    NodesByIdsMulti(NodesByIdsMultiDispatch),
-    EdgeSummaryBySrcDstName(EdgeSummaryBySrcDstNameDispatch),
-    NodeFragmentsByIdTimeRange(NodeFragmentsByIdTimeRangeDispatch),
-    EdgeFragmentsByIdTimeRange(EdgeFragmentsByIdTimeRangeDispatch),
-    OutgoingEdges(OutgoingEdgesDispatch),
-    IncomingEdges(IncomingEdgesDispatch),
-    AllNodes(AllNodesDispatch),
-    AllEdges(AllEdgesDispatch),
+    NodeById(NodeById),
+    NodesByIdsMulti(NodesByIdsMulti),
+    EdgeSummaryBySrcDstName(EdgeSummaryBySrcDstName),
+    NodeFragmentsByIdTimeRange(NodeFragmentsByIdTimeRange),
+    EdgeFragmentsByIdTimeRange(EdgeFragmentsByIdTimeRange),
+    OutgoingEdges(OutgoingEdges),
+    IncomingEdges(IncomingEdges),
+    AllNodes(AllNodes),
+    AllEdges(AllEdges),
     // CONTENT-ADDRESS reverse lookup queries
-    NodesBySummaryHash(NodesBySummaryHashDispatch),
-    EdgesBySummaryHash(EdgesBySummaryHashDispatch),
+    NodesBySummaryHash(NodesBySummaryHash),
+    EdgesBySummaryHash(EdgesBySummaryHash),
 }
 
 impl std::fmt::Display for Query {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Query::NodeById(q) => write!(f, "NodeById: id={}", q.params.id),
+            Query::NodeById(q) => write!(f, "NodeById: id={}", q.id),
             Query::NodesByIdsMulti(q) => {
-                write!(f, "NodesByIdsMulti: count={}", q.params.ids.len())
+                write!(f, "NodesByIdsMulti: count={}", q.ids.len())
             }
             Query::EdgeSummaryBySrcDstName(q) => write!(
                 f,
                 "EdgeBySrcDstName: source={}, dest={}, name={}",
-                q.params.source_id, q.params.dest_id, q.params.name
+                q.source_id, q.dest_id, q.name
             ),
             Query::NodeFragmentsByIdTimeRange(q) => {
                 write!(
                     f,
                     "NodeFragmentsByIdTimeRange: id={}, range={:?}",
-                    q.params.id, q.params.time_range
+                    q.id, q.time_range
                 )
             }
             Query::EdgeFragmentsByIdTimeRange(q) => {
                 write!(
                     f,
                     "EdgeFragmentsByIdTimeRange: source={}, dest={}, name={}, range={:?}",
-                    q.params.source_id, q.params.dest_id, q.params.edge_name, q.params.time_range
+                    q.source_id, q.dest_id, q.edge_name, q.time_range
                 )
             }
-            Query::OutgoingEdges(q) => write!(f, "OutgoingEdges: id={}", q.params.id),
-            Query::IncomingEdges(q) => write!(f, "IncomingEdges: id={}", q.params.id),
-            Query::AllNodes(q) => write!(f, "AllNodes: limit={}", q.params.limit),
-            Query::AllEdges(q) => write!(f, "AllEdges: limit={}", q.params.limit),
+            Query::OutgoingEdges(q) => write!(f, "OutgoingEdges: id={}", q.id),
+            Query::IncomingEdges(q) => write!(f, "IncomingEdges: id={}", q.id),
+            Query::AllNodes(q) => write!(f, "AllNodes: limit={}", q.limit),
+            Query::AllEdges(q) => write!(f, "AllEdges: limit={}", q.limit),
             Query::NodesBySummaryHash(q) => write!(
                 f,
                 "NodesBySummaryHash: hash={:?}, current_only={}",
-                q.params.hash, q.params.current_only
+                q.hash, q.current_only
             ),
             Query::EdgesBySummaryHash(q) => write!(
                 f,
                 "EdgesBySummaryHash: hash={:?}, current_only={}",
-                q.params.hash, q.params.current_only
+                q.hash, q.current_only
             ),
         }
     }
 }
 
-// Use macro to implement QueryProcessor for dispatch types
-crate::impl_query_processor!(
-    NodeByIdDispatch,
-    NodesByIdsMultiDispatch,
-    EdgeSummaryBySrcDstNameDispatch,
-    NodeFragmentsByIdTimeRangeDispatch,
-    EdgeFragmentsByIdTimeRangeDispatch,
-    OutgoingEdgesDispatch,
-    IncomingEdgesDispatch,
-    AllNodesDispatch,
-    AllEdgesDispatch,
-    NodesBySummaryHashDispatch,
-    EdgesBySummaryHashDispatch,
-);
+#[derive(Debug)]
+pub enum QueryResult {
+    NodeById((NodeName, NodeSummary)),
+    NodesByIdsMulti(Vec<(Id, NodeName, NodeSummary)>),
+    EdgeSummaryBySrcDstName((EdgeSummary, Option<f64>)),
+    NodeFragmentsByIdTimeRange(Vec<(TimestampMilli, FragmentContent)>),
+    EdgeFragmentsByIdTimeRange(Vec<(TimestampMilli, FragmentContent)>),
+    OutgoingEdges(Vec<(Option<f64>, SrcId, DstId, EdgeName)>),
+    IncomingEdges(Vec<(Option<f64>, DstId, SrcId, EdgeName)>),
+    AllNodes(Vec<(Id, NodeName, NodeSummary)>),
+    AllEdges(Vec<(Option<f64>, SrcId, DstId, EdgeName)>),
+    NodesBySummaryHash(Vec<NodeSummaryLookupResult>),
+    EdgesBySummaryHash(Vec<EdgeSummaryLookupResult>),
+}
 
-#[async_trait::async_trait]
-impl QueryProcessor for Query {
-    async fn process_and_send<P: Processor>(self, processor: &P) {
+impl Query {
+    pub async fn execute(&self, storage: &Storage) -> Result<QueryResult> {
         match self {
-            Query::NodeById(q) => q.process_and_send(processor).await,
-            Query::NodesByIdsMulti(q) => q.process_and_send(processor).await,
-            Query::EdgeSummaryBySrcDstName(q) => q.process_and_send(processor).await,
-            Query::NodeFragmentsByIdTimeRange(q) => q.process_and_send(processor).await,
-            Query::EdgeFragmentsByIdTimeRange(q) => q.process_and_send(processor).await,
-            Query::OutgoingEdges(q) => q.process_and_send(processor).await,
-            Query::IncomingEdges(q) => q.process_and_send(processor).await,
-            Query::AllNodes(q) => q.process_and_send(processor).await,
-            Query::AllEdges(q) => q.process_and_send(processor).await,
-            Query::NodesBySummaryHash(q) => q.process_and_send(processor).await,
-            Query::EdgesBySummaryHash(q) => q.process_and_send(processor).await,
+            Query::NodeById(q) => q.execute(storage).await.map(QueryResult::NodeById),
+            Query::NodesByIdsMulti(q) => q.execute(storage).await.map(QueryResult::NodesByIdsMulti),
+            Query::EdgeSummaryBySrcDstName(q) => {
+                q.execute(storage).await.map(QueryResult::EdgeSummaryBySrcDstName)
+            }
+            Query::NodeFragmentsByIdTimeRange(q) => {
+                q.execute(storage).await.map(QueryResult::NodeFragmentsByIdTimeRange)
+            }
+            Query::EdgeFragmentsByIdTimeRange(q) => {
+                q.execute(storage).await.map(QueryResult::EdgeFragmentsByIdTimeRange)
+            }
+            Query::OutgoingEdges(q) => q.execute(storage).await.map(QueryResult::OutgoingEdges),
+            Query::IncomingEdges(q) => q.execute(storage).await.map(QueryResult::IncomingEdges),
+            Query::AllNodes(q) => q.execute(storage).await.map(QueryResult::AllNodes),
+            Query::AllEdges(q) => q.execute(storage).await.map(QueryResult::AllEdges),
+            Query::NodesBySummaryHash(q) => {
+                q.execute(storage).await.map(QueryResult::NodesBySummaryHash)
+            }
+            Query::EdgesBySummaryHash(q) => {
+                q.execute(storage).await.map(QueryResult::EdgesBySummaryHash)
+            }
         }
     }
 }
+
+impl RequestMeta for Query {
+    type Reply = QueryResult;
+    type Options = ();
+
+    fn request_kind(&self) -> &'static str {
+        match self {
+            Query::NodeById(q) => q.request_kind(),
+            Query::NodesByIdsMulti(q) => q.request_kind(),
+            Query::EdgeSummaryBySrcDstName(q) => q.request_kind(),
+            Query::NodeFragmentsByIdTimeRange(q) => q.request_kind(),
+            Query::EdgeFragmentsByIdTimeRange(q) => q.request_kind(),
+            Query::OutgoingEdges(q) => q.request_kind(),
+            Query::IncomingEdges(q) => q.request_kind(),
+            Query::AllNodes(q) => q.request_kind(),
+            Query::AllEdges(q) => q.request_kind(),
+            Query::NodesBySummaryHash(q) => q.request_kind(),
+            Query::EdgesBySummaryHash(q) => q.request_kind(),
+        }
+    }
+}
+
+macro_rules! impl_request_meta {
+    ($ty:ty, $reply:ty, $kind:expr) => {
+        impl RequestMeta for $ty {
+            type Reply = $reply;
+            type Options = ();
+
+            fn request_kind(&self) -> &'static str {
+                $kind
+            }
+        }
+    };
+}
+
+impl_request_meta!(NodeById, (NodeName, NodeSummary), "node_by_id");
+impl_request_meta!(NodesByIdsMulti, Vec<(Id, NodeName, NodeSummary)>, "nodes_by_ids_multi");
+impl_request_meta!(EdgeSummaryBySrcDstName, (EdgeSummary, Option<f64>), "edge_summary_by_src_dst_name");
+impl_request_meta!(NodeFragmentsByIdTimeRange, Vec<(TimestampMilli, FragmentContent)>, "node_fragments_by_id_time_range");
+impl_request_meta!(EdgeFragmentsByIdTimeRange, Vec<(TimestampMilli, FragmentContent)>, "edge_fragments_by_id_time_range");
+impl_request_meta!(OutgoingEdges, Vec<(Option<f64>, SrcId, DstId, EdgeName)>, "outgoing_edges");
+impl_request_meta!(IncomingEdges, Vec<(Option<f64>, DstId, SrcId, EdgeName)>, "incoming_edges");
+impl_request_meta!(AllNodes, Vec<(Id, NodeName, NodeSummary)>, "all_nodes");
+impl_request_meta!(AllEdges, Vec<(Option<f64>, SrcId, DstId, EdgeName)>, "all_edges");
+impl_request_meta!(NodesBySummaryHash, Vec<NodeSummaryLookupResult>, "nodes_by_summary_hash");
+impl_request_meta!(EdgesBySummaryHash, Vec<EdgeSummaryLookupResult>, "edges_by_summary_hash");
 
 /// Query parameters for finding a node by its ID.
 ///
@@ -1110,13 +1165,6 @@ pub struct NodeById {
     pub as_of_system_time: Option<TimestampMilli>,
 }
 
-/// Internal dispatch wrapper for NodeById query execution.
-#[derive(Debug)]
-pub(crate) struct NodeByIdDispatch {
-    pub(crate) params: NodeById,
-    pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<(NodeName, NodeSummary)>>,
-}
 
 /// Query parameters for batch lookup of multiple nodes by ID.
 ///
@@ -1146,13 +1194,6 @@ pub struct NodesByIdsMulti {
     pub as_of_system_time: Option<TimestampMilli>,
 }
 
-/// Internal dispatch wrapper for NodesByIdsMulti query execution.
-#[derive(Debug)]
-pub(crate) struct NodesByIdsMultiDispatch {
-    pub(crate) params: NodesByIdsMulti,
-    pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<Vec<(Id, NodeName, NodeSummary)>>>,
-}
 
 /// Query parameters for scanning node fragments by ID with time range filtering.
 ///
@@ -1173,13 +1214,6 @@ pub struct NodeFragmentsByIdTimeRange {
     pub reference_ts_millis: Option<TimestampMilli>,
 }
 
-/// Internal dispatch wrapper for NodeFragmentsByIdTimeRange query execution.
-#[derive(Debug)]
-pub(crate) struct NodeFragmentsByIdTimeRangeDispatch {
-    pub(crate) params: NodeFragmentsByIdTimeRange,
-    pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<Vec<(TimestampMilli, FragmentContent)>>>,
-}
 
 /// Query parameters for scanning edge fragments by source ID, destination ID, edge name, and time range.
 ///
@@ -1206,13 +1240,6 @@ pub struct EdgeFragmentsByIdTimeRange {
     pub reference_ts_millis: Option<TimestampMilli>,
 }
 
-/// Internal dispatch wrapper for EdgeFragmentsByIdTimeRange query execution.
-#[derive(Debug)]
-pub(crate) struct EdgeFragmentsByIdTimeRangeDispatch {
-    pub(crate) params: EdgeFragmentsByIdTimeRange,
-    pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<Vec<(TimestampMilli, FragmentContent)>>>,
-}
 
 /// Query parameters for finding an edge by source ID, destination ID, and name.
 ///
@@ -1239,13 +1266,6 @@ pub struct EdgeSummaryBySrcDstName {
     pub as_of_system_time: Option<TimestampMilli>,
 }
 
-/// Internal dispatch wrapper for EdgeSummaryBySrcDstName query execution.
-#[derive(Debug)]
-pub(crate) struct EdgeSummaryBySrcDstNameDispatch {
-    pub(crate) params: EdgeSummaryBySrcDstName,
-    pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<(EdgeSummary, Option<f64>)>>,
-}
 
 /// Query parameters for finding all outgoing edges from a node.
 ///
@@ -1281,19 +1301,6 @@ pub struct OutgoingEdges {
     pub as_of_system_time: Option<TimestampMilli>,
 }
 
-/// Internal dispatch wrapper for OutgoingEdges query execution.
-/// Contains the query parameters plus channel/timeout for async dispatch.
-#[derive(Debug)]
-pub(crate) struct OutgoingEdgesDispatch {
-    /// The query parameters
-    pub(crate) params: OutgoingEdges,
-
-    /// Timeout for this query execution
-    pub(crate) timeout: Duration,
-
-    /// Channel to send the result back to the client
-    pub(crate) result_tx: oneshot::Sender<Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>>>,
-}
 
 /// Query parameters for finding all incoming edges to a node.
 ///
@@ -1316,19 +1323,6 @@ pub struct IncomingEdges {
     pub as_of_system_time: Option<TimestampMilli>,
 }
 
-/// Internal dispatch wrapper for IncomingEdges query execution.
-/// Contains the query parameters plus channel/timeout for async dispatch.
-#[derive(Debug)]
-pub(crate) struct IncomingEdgesDispatch {
-    /// The query parameters
-    pub(crate) params: IncomingEdges,
-
-    /// Timeout for this query execution
-    pub(crate) timeout: Duration,
-
-    /// Channel to send the result back to the client
-    pub(crate) result_tx: oneshot::Sender<Result<Vec<(Option<f64>, DstId, SrcId, EdgeName)>>>,
-}
 
 /// Query parameters for enumerating all nodes with pagination.
 ///
@@ -1364,13 +1358,6 @@ pub struct AllNodes {
     pub reference_ts_millis: Option<TimestampMilli>,
 }
 
-/// Internal dispatch wrapper for AllNodes query execution.
-#[derive(Debug)]
-pub(crate) struct AllNodesDispatch {
-    pub(crate) params: AllNodes,
-    pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<Vec<(Id, NodeName, NodeSummary)>>>,
-}
 
 /// Query parameters for enumerating all edges with pagination.
 ///
@@ -1406,13 +1393,6 @@ pub struct AllEdges {
     pub reference_ts_millis: Option<TimestampMilli>,
 }
 
-/// Internal dispatch wrapper for AllEdges query execution.
-#[derive(Debug)]
-pub(crate) struct AllEdgesDispatch {
-    pub(crate) params: AllEdges,
-    pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>>>,
-}
 
 impl NodeById {
     /// Create a new query request for the current version.
@@ -1434,45 +1414,10 @@ impl NodeById {
     }
 }
 
-impl NodeByIdDispatch {
-    /// Create a new dispatch wrapper.
-    pub(crate) fn new(
-        params: NodeById,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<(NodeName, NodeSummary)>>,
-    ) -> Self {
-        Self {
-            params,
-            timeout,
-            result_tx,
-        }
-    }
-
-    /// Send the result back to the client (consumes self).
-    pub(crate) fn send_result(self, result: Result<(NodeName, NodeSummary)>) {
-        let _ = self.result_tx.send(result);
-    }
-
-    /// Execute a NodeById query directly without dispatch machinery.
-    /// This is used by the unified query module for composition.
-    pub(crate) async fn execute_params(
-        params: &NodeById,
-        storage: &Storage,
-    ) -> Result<(NodeName, NodeSummary)> {
-        let (tx, _rx) = oneshot::channel();
-        let dispatch = NodeByIdDispatch {
-            params: params.clone(),
-            timeout: Duration::from_secs(0),
-            result_tx: tx,
-        };
-        <NodeByIdDispatch as super::reader::QueryExecutor>::execute(&dispatch, storage).await
-    }
-}
-
 impl NodeById {
     /// Execute this query directly on storage (for testing and simple use cases).
     pub async fn execute_on(&self, storage: &Storage) -> Result<(NodeName, NodeSummary)> {
-        NodeByIdDispatch::execute_params(self, storage).await
+        self.execute(storage).await
     }
 }
 
@@ -1493,41 +1438,6 @@ impl NodesByIdsMulti {
             reference_ts_millis,
             as_of_system_time: Some(system_time),
         }
-    }
-}
-
-impl NodesByIdsMultiDispatch {
-    /// Create a new dispatch wrapper.
-    pub(crate) fn new(
-        params: NodesByIdsMulti,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<(Id, NodeName, NodeSummary)>>>,
-    ) -> Self {
-        Self {
-            params,
-            timeout,
-            result_tx,
-        }
-    }
-
-    /// Send the result back to the client (consumes self).
-    pub(crate) fn send_result(self, result: Result<Vec<(Id, NodeName, NodeSummary)>>) {
-        let _ = self.result_tx.send(result);
-    }
-
-    /// Execute a NodesByIdsMulti query directly without dispatch machinery.
-    /// This is used by the unified query module for composition.
-    pub(crate) async fn execute_params(
-        params: &NodesByIdsMulti,
-        storage: &Storage,
-    ) -> Result<Vec<(Id, NodeName, NodeSummary)>> {
-        let (tx, _rx) = oneshot::channel();
-        let dispatch = NodesByIdsMultiDispatch {
-            params: params.clone(),
-            timeout: Duration::from_secs(0),
-            result_tx: tx,
-        };
-        <NodesByIdsMultiDispatch as super::reader::QueryExecutor>::execute(&dispatch, storage).await
     }
 }
 
@@ -1552,45 +1462,7 @@ impl NodeFragmentsByIdTimeRange {
 
     /// Execute this query directly on storage (for testing and simple use cases).
     pub async fn execute_on(&self, storage: &Storage) -> Result<Vec<(TimestampMilli, FragmentContent)>> {
-        NodeFragmentsByIdTimeRangeDispatch::execute_params(self, storage).await
-    }
-}
-
-impl NodeFragmentsByIdTimeRangeDispatch {
-    /// Create a new dispatch wrapper.
-    pub(crate) fn new(
-        params: NodeFragmentsByIdTimeRange,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<(TimestampMilli, FragmentContent)>>>,
-    ) -> Self {
-        Self {
-            params,
-            timeout,
-            result_tx,
-        }
-    }
-
-    /// Send the result back to the client (consumes self).
-    pub(crate) fn send_result(self, result: Result<Vec<(TimestampMilli, FragmentContent)>>) {
-        let _ = self.result_tx.send(result);
-    }
-
-    /// Execute a NodeFragmentsByIdTimeRange query directly without dispatch machinery.
-    /// This is used by the unified query module for composition.
-    pub(crate) async fn execute_params(
-        params: &NodeFragmentsByIdTimeRange,
-        storage: &Storage,
-    ) -> Result<Vec<(TimestampMilli, FragmentContent)>> {
-        let (tx, _rx) = oneshot::channel();
-        let dispatch = NodeFragmentsByIdTimeRangeDispatch {
-            params: params.clone(),
-            timeout: Duration::from_secs(0),
-            result_tx: tx,
-        };
-        <NodeFragmentsByIdTimeRangeDispatch as super::reader::QueryExecutor>::execute(
-            &dispatch, storage,
-        )
-        .await
+        self.execute(storage).await
     }
 }
 
@@ -1615,44 +1487,6 @@ impl EdgeFragmentsByIdTimeRange {
     /// Check if a timestamp falls within this range.
     pub fn contains(&self, ts: TimestampMilli) -> bool {
         timestamp_in_range(ts, &self.time_range)
-    }
-}
-
-impl EdgeFragmentsByIdTimeRangeDispatch {
-    /// Create a new dispatch wrapper.
-    pub(crate) fn new(
-        params: EdgeFragmentsByIdTimeRange,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<(TimestampMilli, FragmentContent)>>>,
-    ) -> Self {
-        Self {
-            params,
-            timeout,
-            result_tx,
-        }
-    }
-
-    /// Send the result back to the client (consumes self).
-    pub(crate) fn send_result(self, result: Result<Vec<(TimestampMilli, FragmentContent)>>) {
-        let _ = self.result_tx.send(result);
-    }
-
-    /// Execute an EdgeFragmentsByIdTimeRange query directly without dispatch machinery.
-    /// This is used by the unified query module for composition.
-    pub(crate) async fn execute_params(
-        params: &EdgeFragmentsByIdTimeRange,
-        storage: &Storage,
-    ) -> Result<Vec<(TimestampMilli, FragmentContent)>> {
-        let (tx, _rx) = oneshot::channel();
-        let dispatch = EdgeFragmentsByIdTimeRangeDispatch {
-            params: params.clone(),
-            timeout: Duration::from_secs(0),
-            result_tx: tx,
-        };
-        <EdgeFragmentsByIdTimeRangeDispatch as super::reader::QueryExecutor>::execute(
-            &dispatch, storage,
-        )
-        .await
     }
 }
 
@@ -1691,48 +1525,10 @@ impl EdgeSummaryBySrcDstName {
     }
 }
 
-impl EdgeSummaryBySrcDstNameDispatch {
-    /// Create a new dispatch wrapper.
-    pub(crate) fn new(
-        params: EdgeSummaryBySrcDstName,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<(EdgeSummary, Option<f64>)>>,
-    ) -> Self {
-        Self {
-            params,
-            timeout,
-            result_tx,
-        }
-    }
-
-    /// Send the result back to the client (consumes self).
-    pub(crate) fn send_result(self, result: Result<(EdgeSummary, Option<f64>)>) {
-        let _ = self.result_tx.send(result);
-    }
-
-    /// Execute an EdgeSummaryBySrcDstName query directly without dispatch machinery.
-    /// This is used by the unified query module for composition.
-    pub(crate) async fn execute_params(
-        params: &EdgeSummaryBySrcDstName,
-        storage: &Storage,
-    ) -> Result<(EdgeSummary, Option<f64>)> {
-        let (tx, _rx) = oneshot::channel();
-        let dispatch = EdgeSummaryBySrcDstNameDispatch {
-            params: params.clone(),
-            timeout: Duration::from_secs(0),
-            result_tx: tx,
-        };
-        <EdgeSummaryBySrcDstNameDispatch as super::reader::QueryExecutor>::execute(
-            &dispatch, storage,
-        )
-        .await
-    }
-}
-
 impl EdgeSummaryBySrcDstName {
     /// Execute this query directly on storage (for testing and simple use cases).
     pub async fn execute_on(&self, storage: &Storage) -> Result<(EdgeSummary, Option<f64>)> {
-        EdgeSummaryBySrcDstNameDispatch::execute_params(self, storage).await
+        self.execute(storage).await
     }
 }
 
@@ -1757,42 +1553,7 @@ impl OutgoingEdges {
 
     /// Execute this query directly on storage (for testing and simple use cases).
     pub async fn execute_on(&self, storage: &Storage) -> Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>> {
-        OutgoingEdgesDispatch::execute_params(self, storage).await
-    }
-}
-
-impl OutgoingEdgesDispatch {
-    /// Create a new dispatch wrapper
-    pub(crate) fn new(
-        params: OutgoingEdges,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>>>,
-    ) -> Self {
-        Self {
-            params,
-            timeout,
-            result_tx,
-        }
-    }
-
-    /// Send the result back to the client (consumes self)
-    pub(crate) fn send_result(self, result: Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>>) {
-        let _ = self.result_tx.send(result);
-    }
-
-    /// Execute an OutgoingEdges query directly without dispatch machinery.
-    /// This is used by the unified query module for composition.
-    pub(crate) async fn execute_params(
-        params: &OutgoingEdges,
-        storage: &Storage,
-    ) -> Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>> {
-        let (tx, _rx) = oneshot::channel();
-        let dispatch = OutgoingEdgesDispatch {
-            params: params.clone(),
-            timeout: Duration::from_secs(0),
-            result_tx: tx,
-        };
-        <OutgoingEdgesDispatch as super::reader::QueryExecutor>::execute(&dispatch, storage).await
+        self.execute(storage).await
     }
 }
 
@@ -1817,42 +1578,7 @@ impl IncomingEdges {
 
     /// Execute this query directly on storage (for testing and simple use cases).
     pub async fn execute_on(&self, storage: &Storage) -> Result<Vec<(Option<f64>, DstId, SrcId, EdgeName)>> {
-        IncomingEdgesDispatch::execute_params(self, storage).await
-    }
-}
-
-impl IncomingEdgesDispatch {
-    /// Create a new dispatch wrapper
-    pub(crate) fn new(
-        params: IncomingEdges,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<(Option<f64>, DstId, SrcId, EdgeName)>>>,
-    ) -> Self {
-        Self {
-            params,
-            timeout,
-            result_tx,
-        }
-    }
-
-    /// Send the result back to the client (consumes self)
-    pub(crate) fn send_result(self, result: Result<Vec<(Option<f64>, DstId, SrcId, EdgeName)>>) {
-        let _ = self.result_tx.send(result);
-    }
-
-    /// Execute an IncomingEdges query directly without dispatch machinery.
-    /// This is used by the unified query module for composition.
-    pub(crate) async fn execute_params(
-        params: &IncomingEdges,
-        storage: &Storage,
-    ) -> Result<Vec<(Option<f64>, DstId, SrcId, EdgeName)>> {
-        let (tx, _rx) = oneshot::channel();
-        let dispatch = IncomingEdgesDispatch {
-            params: params.clone(),
-            timeout: Duration::from_secs(0),
-            result_tx: tx,
-        };
-        <IncomingEdgesDispatch as super::reader::QueryExecutor>::execute(&dispatch, storage).await
+        self.execute(storage).await
     }
 }
 
@@ -1879,41 +1605,6 @@ impl AllNodes {
     }
 }
 
-impl AllNodesDispatch {
-    /// Create a new dispatch wrapper.
-    pub(crate) fn new(
-        params: AllNodes,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<(Id, NodeName, NodeSummary)>>>,
-    ) -> Self {
-        Self {
-            params,
-            timeout,
-            result_tx,
-        }
-    }
-
-    /// Send the result back to the client (consumes self).
-    pub(crate) fn send_result(self, result: Result<Vec<(Id, NodeName, NodeSummary)>>) {
-        let _ = self.result_tx.send(result);
-    }
-
-    /// Execute an AllNodes query directly without dispatch machinery.
-    /// This is used by the unified query module for composition.
-    pub(crate) async fn execute_params(
-        params: &AllNodes,
-        storage: &Storage,
-    ) -> Result<Vec<(Id, NodeName, NodeSummary)>> {
-        let (tx, _rx) = oneshot::channel();
-        let dispatch = AllNodesDispatch {
-            params: params.clone(),
-            timeout: Duration::from_secs(0),
-            result_tx: tx,
-        };
-        <AllNodesDispatch as super::reader::QueryExecutor>::execute(&dispatch, storage).await
-    }
-}
-
 impl AllEdges {
     /// Create a new AllEdges query with the specified limit.
     pub fn new(limit: usize) -> Self {
@@ -1937,168 +1628,182 @@ impl AllEdges {
     }
 }
 
-impl AllEdgesDispatch {
-    /// Create a new dispatch wrapper.
-    pub(crate) fn new(
-        params: AllEdges,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>>>,
-    ) -> Self {
-        Self {
-            params,
-            timeout,
-            result_tx,
+// ============================================================================
+// QueryReply - typed replies for graph queries
+// ============================================================================
+
+pub trait QueryReply: Send {
+    type Reply: Send + 'static;
+    fn into_query(self) -> Query;
+    fn from_result(result: QueryResult) -> Result<Self::Reply>;
+}
+
+#[async_trait::async_trait]
+impl<Q> Runnable<super::Reader> for Q
+where
+    Q: QueryReply,
+{
+    type Output = Q::Reply;
+
+    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
+        let (result_tx, result_rx) = oneshot::channel();
+        let request = QueryRequest {
+            payload: self.into_query(),
+            options: (),
+            reply: Some(result_tx),
+            timeout: Some(timeout),
+            request_id: new_request_id(),
+            created_at: std::time::Instant::now(),
+        };
+        reader.send_query(request).await?;
+        let result = result_rx.await??;
+        Q::from_result(result)
+    }
+}
+
+impl QueryReply for NodeById {
+    type Reply = (NodeName, NodeSummary);
+
+    fn into_query(self) -> Query {
+        Query::NodeById(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::NodeById(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
         }
     }
+}
 
-    /// Send the result back to the client (consumes self).
-    pub(crate) fn send_result(self, result: Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>>) {
-        let _ = self.result_tx.send(result);
+impl QueryReply for NodesByIdsMulti {
+    type Reply = Vec<(Id, NodeName, NodeSummary)>;
+
+    fn into_query(self) -> Query {
+        Query::NodesByIdsMulti(self)
     }
 
-    /// Execute an AllEdges query directly without dispatch machinery.
-    /// This is used by the unified query module for composition.
-    pub(crate) async fn execute_params(
-        params: &AllEdges,
-        storage: &Storage,
-    ) -> Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>> {
-        let (tx, _rx) = oneshot::channel();
-        let dispatch = AllEdgesDispatch {
-            params: params.clone(),
-            timeout: Duration::from_secs(0),
-            result_tx: tx,
-        };
-        <AllEdgesDispatch as super::reader::QueryExecutor>::execute(&dispatch, storage).await
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::NodesByIdsMulti(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
     }
 }
 
-/// Implement Runnable<Reader> for NodeById
-#[async_trait::async_trait]
-impl Runnable<super::Reader> for NodeById {
-    type Output = (NodeName, NodeSummary);
+impl QueryReply for NodeFragmentsByIdTimeRange {
+    type Reply = Vec<(TimestampMilli, FragmentContent)>;
 
-    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let dispatch = NodeByIdDispatch::new(self, timeout, result_tx);
-        reader.send_query(Query::NodeById(dispatch)).await?;
-        result_rx.await?
+    fn into_query(self) -> Query {
+        Query::NodeFragmentsByIdTimeRange(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::NodeFragmentsByIdTimeRange(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
     }
 }
 
-/// Implement Runnable<Reader> for NodesByIdsMulti
-#[async_trait::async_trait]
-impl Runnable<super::Reader> for NodesByIdsMulti {
-    type Output = Vec<(Id, NodeName, NodeSummary)>;
+impl QueryReply for EdgeFragmentsByIdTimeRange {
+    type Reply = Vec<(TimestampMilli, FragmentContent)>;
 
-    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let dispatch = NodesByIdsMultiDispatch::new(self, timeout, result_tx);
-        reader.send_query(Query::NodesByIdsMulti(dispatch)).await?;
-        result_rx.await?
+    fn into_query(self) -> Query {
+        Query::EdgeFragmentsByIdTimeRange(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::EdgeFragmentsByIdTimeRange(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
     }
 }
 
-/// Implement Runnable<Reader> for NodeFragmentsByIdTimeRange
-#[async_trait::async_trait]
-impl Runnable<super::Reader> for NodeFragmentsByIdTimeRange {
-    type Output = Vec<(TimestampMilli, FragmentContent)>;
+impl QueryReply for EdgeSummaryBySrcDstName {
+    type Reply = (EdgeSummary, Option<f64>);
 
-    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let dispatch = NodeFragmentsByIdTimeRangeDispatch::new(self, timeout, result_tx);
-        reader
-            .send_query(Query::NodeFragmentsByIdTimeRange(dispatch))
-            .await?;
-        result_rx.await?
+    fn into_query(self) -> Query {
+        Query::EdgeSummaryBySrcDstName(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::EdgeSummaryBySrcDstName(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
     }
 }
 
-/// Implement Runnable<Reader> for EdgeFragmentsByIdTimeRange
-#[async_trait::async_trait]
-impl Runnable<super::Reader> for EdgeFragmentsByIdTimeRange {
-    type Output = Vec<(TimestampMilli, FragmentContent)>;
+impl QueryReply for OutgoingEdges {
+    type Reply = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
 
-    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let dispatch = EdgeFragmentsByIdTimeRangeDispatch::new(self, timeout, result_tx);
-        reader
-            .send_query(Query::EdgeFragmentsByIdTimeRange(dispatch))
-            .await?;
-        result_rx.await?
+    fn into_query(self) -> Query {
+        Query::OutgoingEdges(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::OutgoingEdges(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
     }
 }
 
-/// Implement Runnable<Reader> for EdgeSummaryBySrcDstName
-#[async_trait::async_trait]
-impl Runnable<super::Reader> for EdgeSummaryBySrcDstName {
-    type Output = (EdgeSummary, Option<f64>);
+impl QueryReply for IncomingEdges {
+    type Reply = Vec<(Option<f64>, DstId, SrcId, EdgeName)>;
 
-    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let dispatch = EdgeSummaryBySrcDstNameDispatch::new(self, timeout, result_tx);
-        reader
-            .send_query(Query::EdgeSummaryBySrcDstName(dispatch))
-            .await?;
-        result_rx.await?
+    fn into_query(self) -> Query {
+        Query::IncomingEdges(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::IncomingEdges(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
     }
 }
 
-#[async_trait::async_trait]
-impl Runnable<super::Reader> for OutgoingEdges {
-    type Output = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
+impl QueryReply for AllNodes {
+    type Reply = Vec<(Id, NodeName, NodeSummary)>;
 
-    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let dispatch = OutgoingEdgesDispatch::new(self, timeout, result_tx);
-        reader.send_query(Query::OutgoingEdges(dispatch)).await?;
-        result_rx.await?
+    fn into_query(self) -> Query {
+        Query::AllNodes(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::AllNodes(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
     }
 }
 
-#[async_trait::async_trait]
-impl Runnable<super::Reader> for IncomingEdges {
-    type Output = Vec<(Option<f64>, DstId, SrcId, EdgeName)>;
+impl QueryReply for AllEdges {
+    type Reply = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
 
-    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let dispatch = IncomingEdgesDispatch::new(self, timeout, result_tx);
-        reader.send_query(Query::IncomingEdges(dispatch)).await?;
-        result_rx.await?
+    fn into_query(self) -> Query {
+        Query::AllEdges(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::AllEdges(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
     }
 }
 
-#[async_trait::async_trait]
-impl Runnable<super::Reader> for AllNodes {
-    type Output = Vec<(Id, NodeName, NodeSummary)>;
-
-    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let dispatch = AllNodesDispatch::new(self, timeout, result_tx);
-        reader.send_query(Query::AllNodes(dispatch)).await?;
-        result_rx.await?
-    }
-}
-
-#[async_trait::async_trait]
-impl Runnable<super::Reader> for AllEdges {
-    type Output = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
-
-    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let dispatch = AllEdgesDispatch::new(self, timeout, result_tx);
-        reader.send_query(Query::AllEdges(dispatch)).await?;
-        result_rx.await?
-    }
-}
-
-/// Implement QueryExecutor for NodeByIdDispatch
+/// Implement QueryExecutor for NodeById
 /// (claude, 2026-02-06: VERSIONING with point-in-time query support)
 #[async_trait::async_trait]
-impl QueryExecutor for NodeByIdDispatch {
+impl QueryExecutor for NodeById {
     type Output = (NodeName, NodeSummary);
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let params = &self.params;
+        let params = self;
         tracing::debug!(
             id = %params.id,
             as_of = ?params.as_of_system_time,
@@ -2153,22 +1858,18 @@ impl QueryExecutor for NodeByIdDispatch {
 
         Ok((node_name, summary))
     }
-
-    fn timeout(&self) -> Duration {
-        self.timeout
-    }
 }
 
-/// Implement QueryExecutor for NodesByIdsMultiDispatch
+/// Implement QueryExecutor for NodesByIdsMulti
 ///
 /// (claude, 2026-02-06: VERSIONING with point-in-time query support)
 /// Missing nodes and temporally invalid nodes are silently omitted from results.
 #[async_trait::async_trait]
-impl QueryExecutor for NodesByIdsMultiDispatch {
+impl QueryExecutor for NodesByIdsMulti {
     type Output = Vec<(Id, NodeName, NodeSummary)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let params = &self.params;
+        let params = self;
         tracing::debug!(
             count = params.ids.len(),
             as_of = ?params.as_of_system_time,
@@ -2236,19 +1937,15 @@ impl QueryExecutor for NodesByIdsMultiDispatch {
 
         Ok(output)
     }
-
-    fn timeout(&self) -> Duration {
-        self.timeout
-    }
 }
 
-/// Implement QueryExecutor for NodeFragmentsByIdTimeRangeDispatch
+/// Implement QueryExecutor for NodeFragmentsByIdTimeRange
 #[async_trait::async_trait]
-impl QueryExecutor for NodeFragmentsByIdTimeRangeDispatch {
+impl QueryExecutor for NodeFragmentsByIdTimeRange {
     type Output = Vec<(TimestampMilli, FragmentContent)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let params = &self.params;
+        let params = self;
         tracing::debug!(id = %params.id, time_range = ?params.time_range, "Executing NodeFragmentsByIdTimeRange query");
 
         use std::ops::Bound;
@@ -2316,19 +2013,15 @@ impl QueryExecutor for NodeFragmentsByIdTimeRangeDispatch {
 
         Ok(fragments)
     }
-
-    fn timeout(&self) -> Duration {
-        self.timeout
-    }
 }
 
-/// Implement QueryExecutor for EdgeFragmentsByIdTimeRangeDispatch
+/// Implement QueryExecutor for EdgeFragmentsByIdTimeRange
 #[async_trait::async_trait]
-impl QueryExecutor for EdgeFragmentsByIdTimeRangeDispatch {
+impl QueryExecutor for EdgeFragmentsByIdTimeRange {
     type Output = Vec<(TimestampMilli, FragmentContent)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let params = &self.params;
+        let params = self;
         tracing::debug!(
             src_id = %params.source_id,
             dst_id = %params.dest_id,
@@ -2411,20 +2104,16 @@ impl QueryExecutor for EdgeFragmentsByIdTimeRangeDispatch {
 
         Ok(fragments)
     }
-
-    fn timeout(&self) -> Duration {
-        self.timeout
-    }
 }
 
-/// Implement QueryExecutor for EdgeSummaryBySrcDstNameDispatch
+/// Implement QueryExecutor for EdgeSummaryBySrcDstName
 /// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
 #[async_trait::async_trait]
-impl QueryExecutor for EdgeSummaryBySrcDstNameDispatch {
+impl QueryExecutor for EdgeSummaryBySrcDstName {
     type Output = (EdgeSummary, Option<f64>);
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let params = &self.params;
+        let params = self;
         tracing::debug!(
             src_id = %params.source_id,
             dst_id = %params.dest_id,
@@ -2499,20 +2188,16 @@ impl QueryExecutor for EdgeSummaryBySrcDstNameDispatch {
         let summary = resolve_edge_summary(storage, value.3)?;
         Ok((summary, value.2))
     }
-
-    fn timeout(&self) -> Duration {
-        self.timeout
-    }
 }
 
-/// Implement QueryExecutor for OutgoingEdgesDispatch
+/// Implement QueryExecutor for OutgoingEdges
 #[async_trait::async_trait]
 /// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
-impl QueryExecutor for OutgoingEdgesDispatch {
+impl QueryExecutor for OutgoingEdges {
     type Output = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let params = &self.params;
+        let params = self;
         tracing::debug!(node_id = %params.id, "Executing OutgoingEdges query");
 
         // Default None to current time for temporal validity checks
@@ -2641,20 +2326,16 @@ impl QueryExecutor for OutgoingEdgesDispatch {
         }
         Ok(edges)
     }
-
-    fn timeout(&self) -> Duration {
-        self.timeout
-    }
 }
 
-/// Implement QueryExecutor for IncomingEdgesDispatch
+/// Implement QueryExecutor for IncomingEdges
 /// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
 #[async_trait::async_trait]
-impl QueryExecutor for IncomingEdgesDispatch {
+impl QueryExecutor for IncomingEdges {
     type Output = Vec<(Option<f64>, DstId, SrcId, EdgeName)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let params = &self.params;
+        let params = self;
         tracing::debug!(node_id = %params.id, "Executing IncomingEdges query");
 
         // Default None to current time for temporal validity checks
@@ -2808,19 +2489,16 @@ impl QueryExecutor for IncomingEdgesDispatch {
         Ok(edges)
     }
 
-    fn timeout(&self) -> Duration {
-        self.timeout
-    }
 }
 
-/// Implement QueryExecutor for AllNodesDispatch
+/// Implement QueryExecutor for AllNodes
 /// Delegates to the scan module's Visitable implementation.
 #[async_trait::async_trait]
-impl QueryExecutor for AllNodesDispatch {
+impl QueryExecutor for AllNodes {
     type Output = Vec<(Id, NodeName, NodeSummary)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let params = &self.params;
+        let params = self;
         tracing::debug!(limit = params.limit, has_cursor = params.last.is_some(), "Executing AllNodes query");
 
         // Create scan request matching scan::AllNodes
@@ -2840,20 +2518,16 @@ impl QueryExecutor for AllNodesDispatch {
 
         Ok(results)
     }
-
-    fn timeout(&self) -> Duration {
-        self.timeout
-    }
 }
 
-/// Implement QueryExecutor for AllEdgesDispatch
+/// Implement QueryExecutor for AllEdges
 /// Delegates to the scan module's Visitable implementation.
 #[async_trait::async_trait]
-impl QueryExecutor for AllEdgesDispatch {
+impl QueryExecutor for AllEdges {
     type Output = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let params = &self.params;
+        let params = self;
         tracing::debug!(limit = params.limit, has_cursor = params.last.is_some(), "Executing AllEdges query");
 
         // Create scan request matching scan::AllEdges
@@ -2872,10 +2546,6 @@ impl QueryExecutor for AllEdgesDispatch {
         })?;
 
         Ok(results)
-    }
-
-    fn timeout(&self) -> Duration {
-        self.timeout
     }
 }
 
@@ -3597,33 +3267,6 @@ pub struct NodeSummaryLookupResult {
     pub is_current: bool,
 }
 
-/// Internal dispatch wrapper for NodesBySummaryHash query execution.
-#[derive(Debug)]
-pub(crate) struct NodesBySummaryHashDispatch {
-    pub(crate) params: NodesBySummaryHash,
-    pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<Vec<NodeSummaryLookupResult>>>,
-}
-
-impl NodesBySummaryHashDispatch {
-    pub(crate) fn new(
-        params: NodesBySummaryHash,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<NodeSummaryLookupResult>>>,
-    ) -> Self {
-        Self {
-            params,
-            timeout,
-            result_tx,
-        }
-    }
-
-    /// Send the result back to the client (consumes self).
-    pub(crate) fn send_result(self, result: Result<Vec<NodeSummaryLookupResult>>) {
-        let _ = self.result_tx.send(result);
-    }
-}
-
 impl NodesBySummaryHash {
     /// Create a new query for all nodes (any version) with the given hash.
     pub fn all(hash: SummaryHash) -> Self {
@@ -3643,9 +3286,7 @@ impl NodesBySummaryHash {
 
     /// Execute this query directly on storage (for testing and simple use cases).
     pub async fn execute_on(&self, storage: &Storage) -> Result<Vec<NodeSummaryLookupResult>> {
-        let (tx, _rx) = oneshot::channel();
-        let dispatch = NodesBySummaryHashDispatch::new(self.clone(), Duration::from_secs(0), tx);
-        <NodesBySummaryHashDispatch as super::reader::QueryExecutor>::execute(&dispatch, storage).await
+        self.execute(storage).await
     }
 }
 
@@ -3677,33 +3318,6 @@ pub struct EdgeSummaryLookupResult {
     pub is_current: bool,
 }
 
-/// Internal dispatch wrapper for EdgesBySummaryHash query execution.
-#[derive(Debug)]
-pub(crate) struct EdgesBySummaryHashDispatch {
-    pub(crate) params: EdgesBySummaryHash,
-    pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<Vec<EdgeSummaryLookupResult>>>,
-}
-
-impl EdgesBySummaryHashDispatch {
-    pub(crate) fn new(
-        params: EdgesBySummaryHash,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<EdgeSummaryLookupResult>>>,
-    ) -> Self {
-        Self {
-            params,
-            timeout,
-            result_tx,
-        }
-    }
-
-    /// Send the result back to the client (consumes self).
-    pub(crate) fn send_result(self, result: Result<Vec<EdgeSummaryLookupResult>>) {
-        let _ = self.result_tx.send(result);
-    }
-}
-
 impl EdgesBySummaryHash {
     /// Create a new query for all edges (any version) with the given hash.
     pub fn all(hash: SummaryHash) -> Self {
@@ -3723,30 +3337,36 @@ impl EdgesBySummaryHash {
 }
 
 // ============================================================================
-// Runnable Implementations for Reverse Lookup Queries
+// QueryReply Implementations for Reverse Lookup Queries
 // ============================================================================
 
-#[async_trait::async_trait]
-impl Runnable<super::Reader> for NodesBySummaryHash {
-    type Output = Vec<NodeSummaryLookupResult>;
+impl QueryReply for NodesBySummaryHash {
+    type Reply = Vec<NodeSummaryLookupResult>;
 
-    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = oneshot::channel();
-        let dispatch = NodesBySummaryHashDispatch::new(self, timeout, result_tx);
-        reader.send_query(Query::NodesBySummaryHash(dispatch)).await?;
-        result_rx.await?
+    fn into_query(self) -> Query {
+        Query::NodesBySummaryHash(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::NodesBySummaryHash(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
     }
 }
 
-#[async_trait::async_trait]
-impl Runnable<super::Reader> for EdgesBySummaryHash {
-    type Output = Vec<EdgeSummaryLookupResult>;
+impl QueryReply for EdgesBySummaryHash {
+    type Reply = Vec<EdgeSummaryLookupResult>;
 
-    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = oneshot::channel();
-        let dispatch = EdgesBySummaryHashDispatch::new(self, timeout, result_tx);
-        reader.send_query(Query::EdgesBySummaryHash(dispatch)).await?;
-        result_rx.await?
+    fn into_query(self) -> Query {
+        Query::EdgesBySummaryHash(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::EdgesBySummaryHash(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
     }
 }
 
@@ -3755,13 +3375,13 @@ impl Runnable<super::Reader> for EdgesBySummaryHash {
 // ============================================================================
 
 #[async_trait::async_trait]
-impl QueryExecutor for NodesBySummaryHashDispatch {
+impl QueryExecutor for NodesBySummaryHash {
     type Output = Vec<NodeSummaryLookupResult>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         use schema::NodeSummaryIndex;
 
-        let params = &self.params;
+        let params = self;
         tracing::debug!(hash = ?params.hash, current_only = params.current_only, "Executing NodesBySummaryHash query");
 
         let txn_db = storage.transaction_db()?;
@@ -3801,20 +3421,16 @@ impl QueryExecutor for NodesBySummaryHashDispatch {
 
         Ok(results)
     }
-
-    fn timeout(&self) -> Duration {
-        self.timeout
-    }
 }
 
 #[async_trait::async_trait]
-impl QueryExecutor for EdgesBySummaryHashDispatch {
+impl QueryExecutor for EdgesBySummaryHash {
     type Output = Vec<EdgeSummaryLookupResult>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         use schema::EdgeSummaryIndex;
 
-        let params = &self.params;
+        let params = self;
         tracing::debug!(hash = ?params.hash, current_only = params.current_only, "Executing EdgesBySummaryHash query");
 
         let txn_db = storage.transaction_db()?;
@@ -3856,10 +3472,6 @@ impl QueryExecutor for EdgesBySummaryHashDispatch {
 
         Ok(results)
     }
-
-    fn timeout(&self) -> Duration {
-        self.timeout
-    }
 }
 
 // ============================================================================
@@ -3871,7 +3483,7 @@ mod tests {
     use super::super::mutation::AddNode;
     use crate::writer::Runnable as MutRunnable;
     use super::super::reader::{
-        create_query_reader, spawn_consumer, Consumer, QueryWithTimeout, Reader, ReaderConfig,
+        create_query_reader, spawn_consumer, Consumer, Reader, ReaderConfig,
     };
     use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
     use super::super::{Processor, Storage};
@@ -3948,55 +3560,6 @@ mod tests {
 
         // Wait for consumer to finish
         consumer_handle.await.unwrap().unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_query_timeout() {
-        // Create a custom QueryExecutor that sleeps longer than the timeout
-        struct SlowNodeByIdQuery {
-            id: Id,
-            timeout: Duration,
-        }
-
-        #[async_trait::async_trait]
-        impl QueryExecutor for SlowNodeByIdQuery {
-            type Output = (NodeName, NodeSummary);
-
-            async fn execute(&self, _storage: &Storage) -> Result<Self::Output> {
-                // Sleep longer than the query timeout
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                Ok((
-                    "should_not_get_here".to_string(),
-                    DataUrl::from_markdown("Should not get here"),
-                ))
-            }
-
-            fn timeout(&self) -> Duration {
-                self.timeout
-            }
-        }
-
-        // Create a temporary database
-        let temp_dir = TempDir::new().unwrap();
-        let db_path = temp_dir.path().join("test_db");
-
-        let mut storage = Storage::readwrite(&db_path);
-        storage.ready().unwrap();
-
-        let processor = Processor::new(Arc::new(storage));
-
-        // Test the timeout directly using QueryWithTimeout trait
-        let slow_query = SlowNodeByIdQuery {
-            id: Id::new(),
-            timeout: Duration::from_millis(50), // Short timeout
-        };
-
-        let result = slow_query.result(&processor).await;
-
-        // Should timeout because query takes 200ms but timeout is 50ms
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("timeout") || err_msg.contains("Query timeout"));
     }
 
     #[tokio::test]

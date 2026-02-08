@@ -6,16 +6,16 @@
 //! - Consumer - processes queries from channel
 //! - Spawn functions for creating consumers
 //!
-//! Also contains the query executor traits (QueryExecutor, QueryWithTimeout, Processor, QueryProcessor)
+//! Also contains the query executor traits (QueryExecutor, Processor)
 //! which define how queries execute against the storage layer.
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
-use std::time::Duration;
 
 use super::processor::Processor as GraphProcessor;
 use super::query::Query;
 use super::Storage;
+use crate::request::RequestEnvelope;
 
 // ============================================================================
 // QueryExecutor Trait
@@ -45,46 +45,6 @@ pub trait QueryExecutor: Send + Sync {
     /// Execute this query against the storage layer
     /// Each query type knows how to fetch its own data
     async fn execute(&self, storage: &Storage) -> Result<Self::Output>;
-
-    /// Get the timeout for this query
-    fn timeout(&self) -> Duration;
-}
-
-// ============================================================================
-// QueryWithTimeout Trait - Blanket implementation for QueryExecutor
-// ============================================================================
-
-/// Trait for queries that produce results with timeout handling.
-/// Note: This trait is automatically implemented for all QueryExecutor types.
-#[async_trait::async_trait]
-pub trait QueryWithTimeout: Send + Sync {
-    /// The type of result this query produces
-    type ResultType: Send;
-
-    /// Execute the query with timeout and return the result
-    async fn result<P: Processor>(&self, processor: &P) -> Result<Self::ResultType>;
-
-    /// Get the timeout for this query
-    fn timeout(&self) -> Duration;
-}
-
-/// Blanket implementation: any QueryExecutor automatically gets QueryWithTimeout
-#[async_trait::async_trait]
-impl<T: QueryExecutor> QueryWithTimeout for T {
-    type ResultType = T::Output;
-
-    async fn result<P: Processor>(&self, processor: &P) -> Result<Self::ResultType> {
-        let result = tokio::time::timeout(self.timeout(), self.execute(processor.storage())).await;
-
-        match result {
-            Ok(r) => r,
-            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", self.timeout())),
-        }
-    }
-
-    fn timeout(&self) -> Duration {
-        QueryExecutor::timeout(self)
-    }
 }
 
 // ============================================================================
@@ -105,33 +65,24 @@ pub trait Processor: Send + Sync {
 }
 
 // ============================================================================
-// QueryProcessor Trait
+// QueryRequest
 // ============================================================================
 
-/// Trait for processing queries without needing to know the result type.
-/// Allows the Consumer to process queries polymorphically.
-#[async_trait::async_trait]
-pub trait QueryProcessor: Send {
-    /// Process the query and send the result (consumes self)
-    async fn process_and_send<P: Processor>(self, processor: &P);
-}
+pub type QueryRequest = RequestEnvelope<Query>;
 
-/// Macro to implement QueryProcessor for query types.
-/// Reduces boilerplate by using the QueryWithTimeout::result method.
-#[macro_export]
-macro_rules! impl_query_processor {
-    ($($query_type:ty),+ $(,)?) => {
-        $(
-            #[async_trait::async_trait]
-            impl $crate::graph::reader::QueryProcessor for $query_type {
-                async fn process_and_send<P: $crate::graph::reader::Processor>(self, processor: &P) {
-                    use $crate::graph::reader::QueryWithTimeout;
-                    let result = self.result(processor).await;
-                    self.send_result(result);
-                }
-            }
-        )+
+async fn execute_request(processor: &GraphProcessor, mut request: QueryRequest) {
+    tracing::debug!(query = %request.payload, "Processing graph query");
+
+    let exec = request.payload.execute(processor.storage());
+    let result = match request.timeout {
+        Some(timeout) => match tokio::time::timeout(timeout, exec).await {
+            Ok(r) => r,
+            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", timeout)),
+        },
+        None => exec.await,
     };
+
+    request.respond(result);
 }
 
 // ============================================================================
@@ -158,7 +109,7 @@ impl Default for ReaderConfig {
 /// (claude, 2026-02-07, FIXED: P2.3 - Reader holds Arc<Processor> like vector::Reader)
 #[derive(Clone)]
 pub struct Reader {
-    sender: flume::Sender<Query>,
+    sender: flume::Sender<QueryRequest>,
     /// Processor for cache-aware reads and direct query access
     processor: Option<Arc<GraphProcessor>>,
 }
@@ -177,13 +128,13 @@ impl Reader {
     ///
     /// Note: Most users should use `create_query_reader()` instead.
     #[doc(hidden)]
-    pub fn new(sender: flume::Sender<Query>) -> Self {
+    pub fn new(sender: flume::Sender<QueryRequest>) -> Self {
         Reader { sender, processor: None }
     }
 
     /// Create a new Reader with processor for cache-aware reads.
     /// (claude, 2026-02-07, FIXED: P2.3 - Primary construction with Processor)
-    pub(crate) fn with_processor(sender: flume::Sender<Query>, processor: Arc<GraphProcessor>) -> Self {
+    pub(crate) fn with_processor(sender: flume::Sender<QueryRequest>, processor: Arc<GraphProcessor>) -> Self {
         Reader { sender, processor: Some(processor) }
     }
 
@@ -197,9 +148,9 @@ impl Reader {
     ///
     /// Note: Most users should use `Runnable::run()` instead.
     #[doc(hidden)]
-    pub async fn send_query(&self, query: Query) -> Result<()> {
+    pub async fn send_query(&self, request: QueryRequest) -> Result<()> {
         self.sender
-            .send_async(query)
+            .send_async(request)
             .await
             .context("Failed to send query to reader queue")
     }
@@ -212,7 +163,7 @@ impl Reader {
 
 /// Create a new query reader and receiver pair
 #[doc(hidden)]
-pub fn create_query_reader(config: ReaderConfig) -> (Reader, flume::Receiver<Query>) {
+pub fn create_query_reader(config: ReaderConfig) -> (Reader, flume::Receiver<QueryRequest>) {
     let (sender, receiver) = flume::bounded(config.channel_buffer_size);
     let reader = Reader::new(sender);
     (reader, receiver)
@@ -225,7 +176,7 @@ pub fn create_query_reader(config: ReaderConfig) -> (Reader, flume::Receiver<Que
 /// Generic consumer that processes queries using a Processor
 #[doc(hidden)]
 pub struct Consumer<P: Processor> {
-    receiver: flume::Receiver<Query>,
+    receiver: flume::Receiver<QueryRequest>,
     config: ReaderConfig,
     processor: P,
 }
@@ -233,7 +184,7 @@ pub struct Consumer<P: Processor> {
 impl<P: Processor> Consumer<P> {
     /// Create a new Consumer
     #[doc(hidden)]
-    pub fn new(receiver: flume::Receiver<Query>, config: ReaderConfig, processor: P) -> Self {
+    pub fn new(receiver: flume::Receiver<QueryRequest>, config: ReaderConfig, processor: P) -> Self {
         Self {
             receiver,
             config,
@@ -250,9 +201,9 @@ impl<P: Processor> Consumer<P> {
         loop {
             // Wait for the next query (MPMC semantics via flume)
             match self.receiver.recv_async().await {
-                Ok(query) => {
+                Ok(request) => {
                     // Process the query immediately
-                    self.process_query(query).await;
+                    self.process_query(request).await;
                 }
                 Err(_) => {
                     // Channel closed
@@ -264,10 +215,22 @@ impl<P: Processor> Consumer<P> {
     }
 
     /// Process a single query
-    #[tracing::instrument(skip(self), fields(query_type = %query))]
-    async fn process_query(&self, query: Query) {
-        tracing::debug!(query = %query, "Processing query");
-        query.process_and_send(&self.processor).await;
+    #[tracing::instrument(skip(self, request), fields(query_type = %request.payload))]
+    async fn process_query(&self, mut request: QueryRequest) {
+        tracing::debug!(query = %request.payload, "Processing query");
+
+        let exec = request.payload.execute(self.processor.storage());
+        let result = match request.timeout {
+            Some(timeout) => {
+                match tokio::time::timeout(timeout, exec).await {
+                    Ok(r) => r,
+                    Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", timeout)),
+                }
+            }
+            None => exec.await,
+        };
+
+        request.respond(result);
     }
 }
 
@@ -300,7 +263,7 @@ use tokio::task::JoinHandle;
 /// # Returns
 /// JoinHandle for the spawned consumer task
 pub fn spawn_query_consumer(
-    receiver: flume::Receiver<Query>,
+    receiver: flume::Receiver<QueryRequest>,
     config: ReaderConfig,
     db_path: &Path,
 ) -> JoinHandle<Result<()>> {
@@ -328,7 +291,7 @@ pub fn spawn_query_consumer(
 /// # Returns
 /// Vec of JoinHandles for spawned workers
 pub fn spawn_query_consumer_pool_shared(
-    receiver: flume::Receiver<Query>,
+    receiver: flume::Receiver<QueryRequest>,
     processor: Arc<GraphProcessor>,
     num_workers: usize,
 ) -> Vec<JoinHandle<()>> {
@@ -345,7 +308,7 @@ pub fn spawn_query_consumer_pool_shared(
 // (claude, 2026-02-07, ADDED: Fill gap - README documented but function was missing)
 #[doc(hidden)]
 pub fn spawn_query_consumer_pool_readonly(
-    receiver: flume::Receiver<Query>,
+    receiver: flume::Receiver<QueryRequest>,
     config: ReaderConfig,
     db_path: &Path,
     num_workers: usize,
@@ -373,9 +336,9 @@ pub fn spawn_query_consumer_pool_readonly(
             let processor = GraphProcessor::new(Arc::new(storage));
 
             // Process queries from shared channel
-            while let Ok(query) = receiver.recv_async().await {
-                tracing::debug!(worker_id, query = %query, "Processing graph query");
-                query.process_and_send(&processor).await;
+            while let Ok(request) = receiver.recv_async().await {
+                tracing::debug!(worker_id, query = %request.payload, "Processing graph query");
+                execute_request(&processor, request).await;
             }
 
             tracing::info!(worker_id, "Graph query worker shutting down");
@@ -405,7 +368,7 @@ pub fn spawn_query_consumer_pool_readonly(
 /// # Returns
 /// JoinHandle for the spawned consumer task
 pub fn spawn_query_consumer_with_processor(
-    receiver: flume::Receiver<Query>,
+    receiver: flume::Receiver<QueryRequest>,
     config: ReaderConfig,
     processor: Arc<GraphProcessor>,
 ) -> JoinHandle<Result<()>> {
@@ -428,7 +391,7 @@ pub fn spawn_query_consumer_with_processor(
 ///
 /// # Returns
 /// Reader with embedded Processor
-pub fn create_reader_with_storage(storage: Arc<Storage>, config: ReaderConfig) -> (Reader, flume::Receiver<Query>) {
+pub fn create_reader_with_storage(storage: Arc<Storage>, config: ReaderConfig) -> (Reader, flume::Receiver<QueryRequest>) {
     let processor = Arc::new(GraphProcessor::new(storage));
     create_reader_with_processor(processor, config)
 }
@@ -443,7 +406,7 @@ pub fn create_reader_with_storage(storage: Arc<Storage>, config: ReaderConfig) -
 ///
 /// # Returns
 /// Reader with Processor reference
-pub(crate) fn create_reader_with_processor(processor: Arc<GraphProcessor>, config: ReaderConfig) -> (Reader, flume::Receiver<Query>) {
+pub(crate) fn create_reader_with_processor(processor: Arc<GraphProcessor>, config: ReaderConfig) -> (Reader, flume::Receiver<QueryRequest>) {
     let (sender, receiver) = flume::bounded(config.channel_buffer_size);
     let reader = Reader::with_processor(sender, processor);
     (reader, receiver)
@@ -499,9 +462,9 @@ pub(crate) fn spawn_query_consumers_with_processor(
             tracing::info!(worker_id, "Query worker starting (processor mode)");
 
             // Process queries using shared Processor
-            while let Ok(query) = receiver.recv_async().await {
-                tracing::debug!(worker_id, query = %query, "Processing query (processor mode)");
-                query.process_and_send(&*processor).await;
+            while let Ok(request) = receiver.recv_async().await {
+                tracing::debug!(worker_id, query = %request.payload, "Processing query (processor mode)");
+                execute_request(&processor, request).await;
             }
 
             tracing::info!(worker_id, "Query worker shutting down");
@@ -531,7 +494,7 @@ pub(crate) fn spawn_query_consumers_with_processor(
 /// # Returns
 /// Vec of JoinHandles for spawned workers
 pub fn spawn_consumer_pool_with_processor(
-    receiver: flume::Receiver<Query>,
+    receiver: flume::Receiver<QueryRequest>,
     processor: Arc<GraphProcessor>,
     num_workers: usize,
 ) -> Vec<JoinHandle<()>> {
@@ -543,9 +506,9 @@ pub fn spawn_consumer_pool_with_processor(
         let handle = tokio::spawn(async move {
             tracing::info!(worker_id, "Query worker starting (processor mode)");
 
-            while let Ok(query) = receiver.recv_async().await {
-                tracing::debug!(worker_id, query = %query, "Processing query (processor mode)");
-                query.process_and_send(&*processor).await;
+            while let Ok(request) = receiver.recv_async().await {
+                tracing::debug!(worker_id, query = %request.payload, "Processing query (processor mode)");
+                execute_request(&processor, request).await;
             }
 
             tracing::info!(worker_id, "Query worker shutting down");

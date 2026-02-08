@@ -27,6 +27,7 @@ use crate::vector::schema::{
 ///
 /// Contains the allocated VecId and deferred cache updates to apply
 /// after transaction commit.
+#[derive(Debug, Clone)]
 pub struct InsertResult {
     /// Allocated internal vector ID
     pub vec_id: VecId,
@@ -60,6 +61,7 @@ impl InsertResult {
 // ============================================================================
 
 /// Result of a batch vector insertion.
+#[derive(Debug, Clone)]
 pub struct InsertBatchResult {
     /// Allocated internal vector IDs (same order as input)
     pub vec_ids: Vec<VecId>,

@@ -66,9 +66,9 @@ VERSIONING Behavioral Tests (missing)
 - Restore/index:
   - Restore marks prior CURRENT summary index entry as STALE.
   - Restore does not leave multiple CURRENT markers.
-  - RestoreEdges batch also marks prior CURRENT entries STALE and records orphan candidates.
+  - RestoreEdge (batch of single restores) also marks prior CURRENT entries STALE and records orphan candidates.
   - RestoreNode/RestoreEdge fail if referenced summary hash is missing (GC’d).
-- RestoreEdges dry_run validates and fails on missing summaries without writing.
+- RestoreEdge dry_run (ExecOptions) validates and fails on missing summaries without writing.
 
 Index and Denormalization Tests (missing)
 - Reverse edge temporal denormalization:
@@ -210,7 +210,7 @@ Post-Refactor (ARCH2) Testing Adjustments
 | Time travel AsOf | ✅ | tests.rs | test_point_in_time_node_query |
 | Active period | ✅ | tests.rs | test_active_period_filtering |
 | Weight history | ✅ | tests.rs | test_edge_weight_update_creates_version |
-| RestoreEdges batch | ❌ | MISSING | Need: batch marks STALE, records orphans |
+| RestoreEdge (batch) | ❌ | MISSING | Need: batch marks STALE, records orphans |
 | Restore missing summary | ❌ | MISSING | Need: fail if summary GC'd |
 
 #### Index and Denormalization - Status
@@ -292,7 +292,7 @@ Post-Refactor (ARCH2) Testing Adjustments
    - Add `test_edge_weight_update_creates_version`
    - Verify: UpdateEdge (with new_weight) → new version (no in-place mutation)
 
-8. **RestoreEdges Batch Test** (`tests.rs`)
+8. **RestoreEdge Batch Test** (`tests.rs`)
    - Add `test_restore_edges_batch_marks_stale`
    - Add `test_restore_edges_skips_missing_summaries`
 

@@ -65,7 +65,7 @@
 //! │  ┌────────────────────────────────────────────────────────────────────┐ │
 //! │  │                    Mutation Pipeline                                │ │
 //! │  │  User sends: AddNode, AddEdge, AddNodeFragment, AddEdgeFragment,   │ │
-//! │  │              UpdateNode, UpdateEdge, MutationBatch                 │ │
+//! │  │              UpdateNode, UpdateEdge, Vec<Mutation>                 │ │
 //! │  └────────────────────────────────────────────────────────────────────┘ │
 //! │                              │                                           │
 //! │                              ▼                                           │
@@ -391,10 +391,10 @@ impl WriterBuilder {
 
 /// Spawn the graph mutation consumer with chaining to fulltext.
 fn spawn_graph_consumer_with_next(
-    receiver: mpsc::Receiver<Vec<Mutation>>,
+    receiver: mpsc::Receiver<graph::writer::MutationRequest>,
     config: graph::writer::WriterConfig,
     processor: Arc<graph::Processor>,
-    next: mpsc::Sender<Vec<Mutation>>,
+    next: mpsc::Sender<graph::writer::MutationRequest>,
 ) -> JoinHandle<Result<()>> {
     // Arc<Processor> implements Processor trait
     let consumer = graph::writer::Consumer::with_next(receiver, config, processor, next);
@@ -403,7 +403,7 @@ fn spawn_graph_consumer_with_next(
 
 /// Spawn the fulltext mutation consumer.
 fn spawn_fulltext_consumer(
-    receiver: mpsc::Receiver<Vec<Mutation>>,
+    receiver: mpsc::Receiver<graph::writer::MutationRequest>,
     index: Arc<fulltext::Index>,
 ) -> JoinHandle<Result<()>> {
     let config = graph::writer::WriterConfig::default();

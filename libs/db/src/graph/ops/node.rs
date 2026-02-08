@@ -24,7 +24,7 @@ pub(crate) fn add_node(
     txn_db: &rocksdb::TransactionDB,
     mutation: &AddNode,
     cache: Option<&NameCache>,
-) -> Result<()> {
+) -> Result<(Id, schema::Version)> {
     tracing::debug!(id = %mutation.id, name = %mutation.name, "Executing AddNode op");
 
     let name_hash = match cache {
@@ -71,7 +71,7 @@ pub(crate) fn add_node(
     let history_value_bytes = NodeVersionHistory::value_to_bytes(&history_value)?;
     txn.put_cf(history_cf, history_key_bytes, history_value_bytes)?;
 
-    Ok(())
+    Ok((mutation.id, 1))
 }
 
 /// Consolidated node update with optimistic locking.
@@ -85,7 +85,7 @@ pub(crate) fn update_node(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
     mutation: &UpdateNode,
-) -> Result<()> {
+) -> Result<(Id, schema::Version)> {
     tracing::debug!(
         id = %mutation.id,
         expected_version = mutation.expected_version,
@@ -95,7 +95,7 @@ pub(crate) fn update_node(
     // Check if any field is being updated
     if mutation.new_active_period.is_none() && mutation.new_summary.is_none() {
         tracing::warn!(id = %mutation.id, "UpdateNode called with no changes");
-        return Ok(());
+        return Ok((mutation.id, mutation.expected_version));
     }
 
     let nodes_cf = txn_db
@@ -225,7 +225,7 @@ pub(crate) fn update_node(
         "UpdateNode completed"
     );
 
-    Ok(())
+    Ok((mutation.id, new_version))
 }
 
 pub(crate) fn delete_node(
@@ -324,7 +324,7 @@ pub(crate) fn restore_node(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
     mutation: &RestoreNode,
-) -> Result<()> {
+) -> Result<(Id, schema::Version)> {
     tracing::debug!(
         id = %mutation.id,
         as_of = ?mutation.as_of,
@@ -379,6 +379,17 @@ pub(crate) fn restore_node(
     if let Some((current_key_bytes, current)) = find_current_node_version(txn, txn_db, mutation.id)? {
         let current_version = current.4;
         let current_hash = current.3;
+
+        if let Some(expected) = mutation.expected_version {
+            if current_version != expected {
+                return Err(anyhow::anyhow!(
+                    "Version mismatch for node {}: expected {}, actual {}",
+                    mutation.id,
+                    expected,
+                    current_version
+                ));
+            }
+        }
 
         if !current.5 {
             return Err(anyhow::anyhow!(
@@ -462,8 +473,16 @@ pub(crate) fn restore_node(
             "RestoreNode completed"
         );
 
-        Ok(())
+        Ok((mutation.id, new_version))
     } else {
+        if let Some(expected) = mutation.expected_version {
+            return Err(anyhow::anyhow!(
+                "Version mismatch for node {}: expected {}, no current version",
+                mutation.id,
+                expected
+            ));
+        }
+
         let now = crate::TimestampMilli::now();
         let new_version = 1;
 
@@ -512,7 +531,7 @@ pub(crate) fn restore_node(
             "RestoreNode completed (created new node)"
         );
 
-        Ok(())
+        Ok((mutation.id, new_version))
     }
 }
 
@@ -540,63 +559,6 @@ fn find_current_node_version(
         }
     }
     Ok(None)
-}
-
-fn update_node_valid_range(
-    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-    txn_db: &rocksdb::TransactionDB,
-    node_id: Id,
-    new_range: schema::ActivePeriod,
-) -> Result<()> {
-    let nodes_cf = txn_db
-        .cf_handle(Nodes::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("Nodes CF not found"))?;
-    let history_cf = txn_db
-        .cf_handle(NodeVersionHistory::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("NodeVersionHistory CF not found"))?;
-
-    let (current_key_bytes, current) = find_current_node_version(txn, txn_db, node_id)?
-        .ok_or_else(|| anyhow::anyhow!("Node not found for id: {}", node_id))?;
-
-    let now = crate::TimestampMilli::now();
-    let new_version = current.4 + 1;
-
-    let old_node_value = NodeCfValue(
-        Some(now),
-        current.1.clone(),
-        current.2,
-        current.3,
-        current.4,
-        current.5,
-    );
-    let old_node_bytes = Nodes::value_to_bytes(&old_node_value)?;
-    txn.put_cf(nodes_cf, &current_key_bytes, old_node_bytes)?;
-
-    let new_node_key = NodeCfKey(node_id, now);
-    let new_node_key_bytes = Nodes::key_to_bytes(&new_node_key);
-    let new_node_value = NodeCfValue(
-        None,
-        Some(new_range),
-        current.2,
-        current.3,
-        new_version,
-        current.5,
-    );
-    let new_node_bytes = Nodes::value_to_bytes(&new_node_value)?;
-    txn.put_cf(nodes_cf, new_node_key_bytes, new_node_bytes)?;
-
-    let history_key = NodeVersionHistoryCfKey(node_id, now, new_version);
-    let history_key_bytes = NodeVersionHistory::key_to_bytes(&history_key);
-    let history_value = NodeVersionHistoryCfValue(
-        now,
-        current.3,
-        current.2,
-        Some(new_range),
-    );
-    let history_value_bytes = NodeVersionHistory::value_to_bytes(&history_value)?;
-    txn.put_cf(history_cf, history_key_bytes, history_value_bytes)?;
-
-    Ok(())
 }
 
 fn find_connected_edges(

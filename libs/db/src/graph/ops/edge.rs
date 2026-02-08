@@ -8,7 +8,7 @@ use super::summary::{
     verify_edge_summary_exists,
 };
 use super::super::mutation::{
-    AddEdge, DeleteEdge, RestoreEdge, RestoreEdges, RestoreEdgesReport, UpdateEdge,
+    AddEdge, DeleteEdge, RestoreEdge, UpdateEdge,
 };
 use super::super::name_hash::{NameCache, NameHash};
 use super::super::schema::{
@@ -24,7 +24,7 @@ pub(crate) fn add_edge(
     txn_db: &rocksdb::TransactionDB,
     mutation: &AddEdge,
     cache: Option<&NameCache>,
-) -> Result<()> {
+) -> Result<schema::Version> {
     tracing::debug!(
         src = %mutation.source_node_id,
         dst = %mutation.target_node_id,
@@ -94,7 +94,7 @@ pub(crate) fn add_edge(
     let history_value_bytes = EdgeVersionHistory::value_to_bytes(&history_value)?;
     txn.put_cf(history_cf, history_key_bytes, history_value_bytes)?;
 
-    Ok(())
+    Ok(1)
 }
 
 /// Consolidated edge update with optimistic locking.
@@ -105,7 +105,7 @@ pub(crate) fn update_edge(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
     mutation: &UpdateEdge,
-) -> Result<()> {
+) -> Result<schema::Version> {
     // Validate at least one field is being updated
     if mutation.new_weight.is_none()
         && mutation.new_active_period.is_none()
@@ -303,7 +303,7 @@ pub(crate) fn update_edge(
         "UpdateEdge completed"
     );
 
-    Ok(())
+    Ok(new_version)
 }
 
 pub(crate) fn delete_edge(
@@ -417,7 +417,7 @@ pub(crate) fn restore_edge(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
     mutation: &RestoreEdge,
-) -> Result<()> {
+) -> Result<schema::Version> {
     tracing::debug!(
         src = %mutation.src_id,
         dst = %mutation.dst_id,
@@ -486,6 +486,18 @@ pub(crate) fn restore_edge(
     {
         let current_version = current.4;
         let current_hash = current.3;
+
+        if let Some(expected) = mutation.expected_version {
+            if current_version != expected {
+                return Err(anyhow::anyhow!(
+                    "Version mismatch for edge {}→{}: expected {}, actual {}",
+                    mutation.src_id,
+                    mutation.dst_id,
+                    expected,
+                    current_version
+                ));
+            }
+        }
 
         if !current.5 {
             return Err(anyhow::anyhow!(
@@ -590,8 +602,17 @@ pub(crate) fn restore_edge(
             "RestoreEdge completed"
         );
 
-        Ok(())
+        Ok(new_version)
     } else {
+        if let Some(expected) = mutation.expected_version {
+            return Err(anyhow::anyhow!(
+                "Version mismatch for edge {}→{}: expected {}, no current version",
+                mutation.src_id,
+                mutation.dst_id,
+                expected
+            ));
+        }
+
         let now = crate::TimestampMilli::now();
         let new_version = 1;
 
@@ -649,354 +670,10 @@ pub(crate) fn restore_edge(
             "RestoreEdge completed (created new edge)"
         );
 
-        Ok(())
+        Ok(new_version)
     }
 }
 
-pub(crate) fn restore_edges(
-    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-    txn_db: &rocksdb::TransactionDB,
-    mutation: &RestoreEdges,
-) -> Result<()> {
-    restore_edges_with_report(txn, txn_db, mutation).map(|_| ())
-}
-
-pub(crate) fn restore_edges_with_report(
-    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-    txn_db: &rocksdb::TransactionDB,
-    mutation: &RestoreEdges,
-) -> Result<RestoreEdgesReport> {
-    tracing::debug!(
-        src = %mutation.src_id,
-        name = ?mutation.name,
-        as_of = ?mutation.as_of,
-        "Executing RestoreEdges op"
-    );
-
-    let history_cf = txn_db
-        .cf_handle(EdgeVersionHistory::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("EdgeVersionHistory CF not found"))?;
-
-    let forward_cf = txn_db
-        .cf_handle(ForwardEdges::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
-    let reverse_cf = txn_db
-        .cf_handle(ReverseEdges::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("ReverseEdges CF not found"))?;
-
-    let filter_hash = mutation.name.as_ref().map(|name| NameHash::from_name(name));
-
-    let prefix = mutation.src_id.into_bytes().to_vec();
-    let iter = txn.iterator_cf(
-        forward_cf,
-        rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
-    );
-
-    let mut edges_to_restore: Vec<(Id, NameHash)> = Vec::new();
-    let mut seen: std::collections::HashSet<(Id, NameHash)> = std::collections::HashSet::new();
-
-    for item in iter {
-        let (key_bytes, value_bytes) = item?;
-        if !key_bytes.starts_with(&prefix) {
-            break;
-        }
-        let key: ForwardEdgeCfKey = ForwardEdges::key_from_bytes(&key_bytes)?;
-        let value: ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&value_bytes)?;
-
-        if value.0.is_some() {
-            continue;
-        }
-
-        let dst_id = key.1;
-        let name_hash = key.2;
-
-        if let Some(filter) = filter_hash {
-            if name_hash != filter {
-                continue;
-            }
-        }
-
-        if seen.insert((dst_id, name_hash)) {
-            edges_to_restore.push((dst_id, name_hash));
-        }
-    }
-
-    let now = crate::TimestampMilli::now();
-    let mut restored_count = 0u32;
-    let mut report = RestoreEdgesReport {
-        candidates: edges_to_restore.len() as u32,
-        restorable: 0,
-        skipped_no_version: Vec::new(),
-    };
-
-    for (dst_id, name_hash) in edges_to_restore {
-        let mut history_prefix = Vec::with_capacity(40);
-        history_prefix.extend_from_slice(&mutation.src_id.into_bytes());
-        history_prefix.extend_from_slice(&dst_id.into_bytes());
-        history_prefix.extend_from_slice(name_hash.as_bytes());
-
-        let history_iter = txn.prefix_iterator_cf(history_cf, &history_prefix);
-
-        let mut target_history: Option<(EdgeVersionHistoryCfKey, EdgeVersionHistoryCfValue)> = None;
-        for item in history_iter {
-            let (key_bytes, value_bytes) = item?;
-            if !key_bytes.starts_with(&history_prefix) {
-                break;
-            }
-            let key: EdgeVersionHistoryCfKey = EdgeVersionHistory::key_from_bytes(&key_bytes)?;
-            let value: EdgeVersionHistoryCfValue = EdgeVersionHistory::value_from_bytes(&value_bytes)?;
-
-            if value.0 <= mutation.as_of {
-                if target_history.is_none() || value.0 > target_history.as_ref().unwrap().1.0 {
-                    target_history = Some((key, value));
-                }
-            }
-        }
-
-        let Some((_history_key, history_value)) = target_history else {
-            tracing::debug!(
-                src = %mutation.src_id,
-                dst = %dst_id,
-                "No version found at as_of for edge, skipping"
-            );
-            report.skipped_no_version.push((dst_id, name_hash));
-            continue;
-        };
-
-        let current_edge = find_current_forward_edge_version(
-            txn,
-            txn_db,
-            mutation.src_id,
-            dst_id,
-            name_hash,
-        )?;
-        let current_hash = current_edge.as_ref().and_then(|(_, current)| current.3);
-
-        if let Some(hash) = history_value.1 {
-            let summary_exists = verify_edge_summary_exists(txn, txn_db, hash)?;
-            if !summary_exists {
-                return Err(anyhow::anyhow!(
-                    "Cannot restore edge {}→{} - summary hash {:?} not found in EdgeSummaries",
-                    mutation.src_id,
-                    dst_id,
-                    hash
-                ));
-            }
-        }
-
-        if let Some(hash) = current_hash {
-            if history_value.1.map_or(true, |history| history != hash) {
-                let summary_exists = verify_edge_summary_exists(txn, txn_db, hash)?;
-                if !summary_exists {
-                    return Err(anyhow::anyhow!(
-                        "Cannot restore edge {}→{} - current summary hash {:?} not found in EdgeSummaries",
-                        mutation.src_id,
-                        dst_id,
-                        hash
-                    ));
-                }
-            }
-        }
-
-        if let Some((current_key_bytes, current)) = current_edge {
-            let current_version = current.4;
-
-            if !current.5 {
-                return Err(anyhow::anyhow!(
-                    "Cannot restore edge {}→{} because it is not deleted",
-                    mutation.src_id,
-                    dst_id
-                ));
-            }
-
-            if mutation.dry_run {
-                report.restorable += 1;
-                restored_count += 1;
-                continue;
-            }
-
-            let old_edge_value = ForwardEdgeCfValue(
-                Some(now),
-                current.1.clone(),
-                current.2,
-                current.3,
-                current.4,
-                current.5,
-            );
-            let old_edge_bytes = ForwardEdges::value_to_bytes(&old_edge_value)
-                .map_err(|e| anyhow::anyhow!("Failed to serialize old edge version: {}", e))?;
-            txn.put_cf(forward_cf, &current_key_bytes, old_edge_bytes)?;
-
-            if let Some((reverse_key_bytes, reverse)) =
-                find_current_reverse_edge_version(txn, txn_db, dst_id, mutation.src_id, name_hash)?
-            {
-                let old_reverse_value = ReverseEdgeCfValue(
-                    Some(now),
-                    reverse.1.clone(),
-                );
-                let old_reverse_bytes = ReverseEdges::value_to_bytes(&old_reverse_value)?;
-                txn.put_cf(reverse_cf, &reverse_key_bytes, old_reverse_bytes)?;
-            }
-
-            let new_version = current_version + 1;
-            let new_forward_key = ForwardEdgeCfKey(mutation.src_id, dst_id, name_hash, now);
-            let new_forward_key_bytes = ForwardEdges::key_to_bytes(&new_forward_key);
-            let new_forward_value = ForwardEdgeCfValue(
-                None,
-                history_value.3.clone(),
-                history_value.2,
-                history_value.1,
-                new_version,
-                false,
-            );
-            let new_forward_bytes = ForwardEdges::value_to_bytes(&new_forward_value)?;
-            txn.put_cf(forward_cf, new_forward_key_bytes, new_forward_bytes)?;
-
-            let new_reverse_key = ReverseEdgeCfKey(dst_id, mutation.src_id, name_hash, now);
-            let new_reverse_key_bytes = ReverseEdges::key_to_bytes(&new_reverse_key);
-            let new_reverse_value = ReverseEdgeCfValue(
-                None,
-                history_value.3.clone(),
-            );
-            let new_reverse_bytes = ReverseEdges::value_to_bytes(&new_reverse_value)?;
-            txn.put_cf(reverse_cf, new_reverse_key_bytes, new_reverse_bytes)?;
-
-            if let Some(hash) = history_value.1 {
-                remove_summary_from_orphans(txn, txn_db, hash)?;
-            }
-
-            if let Some(old_hash) = current_hash {
-                mark_edge_summary_orphan_candidate(txn, txn_db, old_hash)?;
-            }
-
-            if let Some(hash) = history_value.1 {
-                let index_cf = txn_db
-                    .cf_handle(EdgeSummaryIndex::CF_NAME)
-                    .ok_or_else(|| anyhow::anyhow!("EdgeSummaryIndex CF not found"))?;
-                let index_key = EdgeSummaryIndexCfKey(hash, mutation.src_id, dst_id, name_hash, new_version);
-                let index_key_bytes = EdgeSummaryIndex::key_to_bytes(&index_key);
-                let current_value_bytes = EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::current())?;
-                txn.put_cf(index_cf, index_key_bytes, current_value_bytes)?;
-            }
-
-            if let Some(old_hash) = current_hash {
-                let index_cf = txn_db
-                    .cf_handle(EdgeSummaryIndex::CF_NAME)
-                    .ok_or_else(|| anyhow::anyhow!("EdgeSummaryIndex CF not found"))?;
-                let index_key = EdgeSummaryIndexCfKey(old_hash, mutation.src_id, dst_id, name_hash, current_version);
-                let index_key_bytes = EdgeSummaryIndex::key_to_bytes(&index_key);
-                let stale_value_bytes = EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::stale())?;
-                txn.put_cf(index_cf, index_key_bytes, stale_value_bytes)?;
-            }
-
-            let history_key = EdgeVersionHistoryCfKey(mutation.src_id, dst_id, name_hash, now, new_version);
-            let history_key_bytes = EdgeVersionHistory::key_to_bytes(&history_key);
-            let history_value = EdgeVersionHistoryCfValue(
-                now,
-                history_value.1,
-                history_value.2,
-                history_value.3,
-            );
-            let history_value_bytes = EdgeVersionHistory::value_to_bytes(&history_value)?;
-            txn.put_cf(history_cf, history_key_bytes, history_value_bytes)?;
-
-            tracing::info!(
-                src = %mutation.src_id,
-                dst = %dst_id,
-                old_version = current_version,
-                new_version = new_version,
-                "RestoreEdge completed"
-            );
-        } else {
-            if mutation.dry_run {
-                report.restorable += 1;
-                restored_count += 1;
-                continue;
-            }
-
-            let new_version = 1;
-
-            let new_forward_key = ForwardEdgeCfKey(mutation.src_id, dst_id, name_hash, now);
-            let new_forward_key_bytes = ForwardEdges::key_to_bytes(&new_forward_key);
-            let new_forward_value = ForwardEdgeCfValue(
-                None,
-                history_value.3.clone(),
-                history_value.2,
-                history_value.1,
-                new_version,
-                false,
-            );
-            let new_forward_bytes = ForwardEdges::value_to_bytes(&new_forward_value)?;
-            txn.put_cf(forward_cf, new_forward_key_bytes, new_forward_bytes)?;
-
-            let new_reverse_key = ReverseEdgeCfKey(dst_id, mutation.src_id, name_hash, now);
-            let new_reverse_key_bytes = ReverseEdges::key_to_bytes(&new_reverse_key);
-            let new_reverse_value = ReverseEdgeCfValue(
-                None,
-                history_value.3.clone(),
-            );
-            let new_reverse_bytes = ReverseEdges::value_to_bytes(&new_reverse_value)?;
-            txn.put_cf(reverse_cf, new_reverse_key_bytes, new_reverse_bytes)?;
-
-            if let Some(hash) = history_value.1 {
-                remove_summary_from_orphans(txn, txn_db, hash)?;
-            }
-
-            if let Some(hash) = history_value.1 {
-                let index_cf = txn_db
-                    .cf_handle(EdgeSummaryIndex::CF_NAME)
-                    .ok_or_else(|| anyhow::anyhow!("EdgeSummaryIndex CF not found"))?;
-                let index_key = EdgeSummaryIndexCfKey(hash, mutation.src_id, dst_id, name_hash, new_version);
-                let index_key_bytes = EdgeSummaryIndex::key_to_bytes(&index_key);
-                let current_value_bytes = EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::current())?;
-                txn.put_cf(index_cf, index_key_bytes, current_value_bytes)?;
-            }
-
-            let history_key = EdgeVersionHistoryCfKey(mutation.src_id, dst_id, name_hash, now, new_version);
-            let history_key_bytes = EdgeVersionHistory::key_to_bytes(&history_key);
-            let history_value = EdgeVersionHistoryCfValue(
-                now,
-                history_value.1,
-                history_value.2,
-                history_value.3,
-            );
-            let history_value_bytes = EdgeVersionHistory::value_to_bytes(&history_value)?;
-            txn.put_cf(history_cf, history_key_bytes, history_value_bytes)?;
-
-            tracing::info!(
-                src = %mutation.src_id,
-                dst = %dst_id,
-                new_version = new_version,
-                "RestoreEdge completed (created new edge)"
-            );
-        }
-
-        restored_count += 1;
-        report.restorable += 1;
-    }
-
-    tracing::info!(
-        src = %mutation.src_id,
-        name = ?mutation.name,
-        as_of = ?mutation.as_of,
-        restored_count = restored_count,
-        dry_run = mutation.dry_run,
-        "RestoreEdges batch completed"
-    );
-    if mutation.dry_run {
-        tracing::info!(
-            src = %mutation.src_id,
-            name = ?mutation.name,
-            as_of = ?mutation.as_of,
-            candidates = report.candidates,
-            restorable = report.restorable,
-            skipped_no_version = ?report.skipped_no_version,
-            "RestoreEdges dry_run report"
-        );
-    }
-
-    Ok(report)
-}
 
 fn find_current_forward_edge_version(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
@@ -1058,93 +735,4 @@ fn find_current_reverse_edge_version(
         }
     }
     Ok(None)
-}
-
-pub(crate) fn update_edge_valid_range(
-    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-    txn_db: &rocksdb::TransactionDB,
-    src_id: Id,
-    dst_id: Id,
-    name_hash: NameHash,
-    new_range: schema::ActivePeriod,
-) -> Result<()> {
-    let forward_cf = txn_db
-        .cf_handle(ForwardEdges::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
-    let reverse_cf = txn_db
-        .cf_handle(ReverseEdges::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("ReverseEdges CF not found"))?;
-    let history_cf = txn_db
-        .cf_handle(EdgeVersionHistory::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("EdgeVersionHistory CF not found"))?;
-
-    let (current_forward_key_bytes, current_forward) =
-        find_current_forward_edge_version(txn, txn_db, src_id, dst_id, name_hash)?
-            .ok_or_else(|| anyhow::anyhow!(
-                "ForwardEdge not found: src={}, dst={}, name_hash={}",
-                src_id, dst_id, name_hash
-            ))?;
-
-    let (current_reverse_key_bytes, current_reverse) =
-        find_current_reverse_edge_version(txn, txn_db, dst_id, src_id, name_hash)?
-            .ok_or_else(|| anyhow::anyhow!(
-                "ReverseEdge not found: src={}, dst={}, name_hash={}",
-                src_id, dst_id, name_hash
-            ))?;
-
-    let now = crate::TimestampMilli::now();
-    let new_version = current_forward.4 + 1;
-
-    let old_forward_value = ForwardEdgeCfValue(
-        Some(now),
-        current_forward.1.clone(),
-        current_forward.2,
-        current_forward.3,
-        current_forward.4,
-        current_forward.5,
-    );
-    let old_forward_bytes = ForwardEdges::value_to_bytes(&old_forward_value)?;
-    txn.put_cf(forward_cf, &current_forward_key_bytes, old_forward_bytes)?;
-
-    let old_reverse_value = ReverseEdgeCfValue(
-        Some(now),
-        current_reverse.1.clone(),
-    );
-    let old_reverse_bytes = ReverseEdges::value_to_bytes(&old_reverse_value)?;
-    txn.put_cf(reverse_cf, &current_reverse_key_bytes, old_reverse_bytes)?;
-
-    let new_forward_key = ForwardEdgeCfKey(src_id, dst_id, name_hash, now);
-    let new_forward_key_bytes = ForwardEdges::key_to_bytes(&new_forward_key);
-    let new_forward_value = ForwardEdgeCfValue(
-        None,
-        Some(new_range.clone()),
-        current_forward.2,
-        current_forward.3,
-        new_version,
-        current_forward.5,
-    );
-    let new_forward_bytes = ForwardEdges::value_to_bytes(&new_forward_value)?;
-    txn.put_cf(forward_cf, new_forward_key_bytes, new_forward_bytes)?;
-
-    let new_reverse_key = ReverseEdgeCfKey(dst_id, src_id, name_hash, now);
-    let new_reverse_key_bytes = ReverseEdges::key_to_bytes(&new_reverse_key);
-    let new_reverse_value = ReverseEdgeCfValue(
-        None,
-        Some(new_range.clone()),
-    );
-    let new_reverse_bytes = ReverseEdges::value_to_bytes(&new_reverse_value)?;
-    txn.put_cf(reverse_cf, new_reverse_key_bytes, new_reverse_bytes)?;
-
-    let history_key = EdgeVersionHistoryCfKey(src_id, dst_id, name_hash, now, new_version);
-    let history_key_bytes = EdgeVersionHistory::key_to_bytes(&history_key);
-    let history_value = EdgeVersionHistoryCfValue(
-        now,
-        current_forward.3,
-        current_forward.2,
-        Some(new_range),
-    );
-    let history_value_bytes = EdgeVersionHistory::value_to_bytes(&history_value)?;
-    txn.put_cf(history_cf, history_key_bytes, history_value_bytes)?;
-
-    Ok(())
 }

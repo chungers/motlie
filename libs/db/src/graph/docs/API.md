@@ -28,7 +28,7 @@ The graph module provides a content-addressed, versioned graph database on top o
 
 - **Nodes and Edges** with optional summaries and fragments
 - **Time-travel** via `ValidSince/ValidUntil` and `VersionHistory`
-- **Rollback** via `RestoreNode/RestoreEdge/RestoreEdges`
+- **Rollback** via `RestoreNode/RestoreEdge` (batch via `Vec<Mutation>`)
 - **Content-addressed summaries** with orphan-index GC
 - **Two API styles**: Sync (Processor) and Async (Writer/Reader)
 
@@ -145,6 +145,37 @@ let node = NodeById::new(node_id, None)
     .await?;
 ```
 
+**Typed Query Replies (QueryReply)**
+
+Graph queries implement a `QueryReply` mapping that binds each query type
+to its specific output variant. The user experience is unchanged (still
+`Runnable::run`), but the mapping is now explicit on the type:
+
+```rust
+use motlie_db::graph::query::NodeById;
+use motlie_db::reader::Runnable as QueryRunnable;
+use std::time::Duration;
+
+let timeout = Duration::from_secs(5);
+let (name, summary) = NodeById::new(node_id, None)
+    .run(&reader, timeout)
+    .await?;
+```
+
+**Typed Mutation Replies (run_with_result)**
+
+Mutations define their reply type on the mutation itself. The reply
+includes `request_id` and `elapsed_time` for tracing/metrics.
+
+```rust
+use motlie_db::graph::mutation::{UpdateNode, ExecOptions, RunnableWithResult};
+
+let reply = UpdateNode { /* ... */ }
+    .run_with_result(&writer, ExecOptions::default())
+    .await?;
+let (id, version) = reply.payload;
+```
+
 **Architecture:**
 
 ```
@@ -185,9 +216,29 @@ let node = NodeById::new(node_id, None)
 | `UpdateEdge` | Update edge (weight, active_period, and/or summary) | `src_id`, `dst_id`, `name`, `expected_version`, `new_weight?`, `new_active_period?`, `new_summary?` |
 | `DeleteNode` | Tombstone a node | `id`, `expected_version` |
 | `DeleteEdge` | Tombstone an edge | `src_id`, `dst_id`, `name`, `expected_version` |
-| `RestoreNode` | Restore node to prior time | `id`, `as_of` |
-| `RestoreEdge` | Restore edge to prior time | `src_id`, `dst_id`, `name`, `as_of` |
-| `RestoreEdges` | Batch restore outgoing edges | `src_id`, `name?`, `as_of`, `dry_run` |
+| `RestoreNode` | Restore node to prior time | `id`, `as_of`, `expected_version?` |
+| `RestoreEdge` | Restore edge to prior time | `src_id`, `dst_id`, `name`, `as_of`, `expected_version?` |
+
+### Mutation Execution Matrix (Sync vs Async, Dry Run vs Execute)
+
+| API | Input | Output | `dry_run=false` | `dry_run=true` |
+|-----|-------|--------|----------------|----------------|
+| `Processor::process_mutations(&[Mutation])` | mutations | `Result<()>` | Executes + commits | N/A |
+| `Processor::process_mutations_with_options(&[Mutation], ExecOptions)` | mutations + options | `Result<ReplyEnvelope<Vec<MutationResult>>>` | Executes + commits | Validates only (no commit) |
+| `Processor::execute_mutation(&Mutation)` | single mutation | `Result<()>` | Executes + commits | N/A |
+| `Processor::execute_mutation_with_options(&Mutation, ExecOptions)` | single + options | `Result<ReplyEnvelope<MutationResult>>` | Executes + commits | Validates only (no commit) |
+| `Mutation::run(&Writer)` | single mutation | `Result<()>` | Executes (async) | N/A |
+| `Vec<Mutation>::run(&Writer)` | batch | `Result<()>` | Executes (async) | N/A |
+| `Writer::send(Vec<Mutation>)` | batch | `Result<()>` | Enqueue (fire-and-forget) | N/A |
+| `Writer::send_sync(Vec<Mutation>)` | batch | `Result<()>` | Enqueue + wait for commit | N/A |
+| `Vec<Mutation>::run_with_result(&Writer, ExecOptions)` | batch + options | `Result<ReplyEnvelope<Vec<MutationResult>>>` | Executes + commits | Validates only (no commit) |
+| `Writer::send_with_result(Vec<Mutation>, ExecOptions)` | batch + options | `Result<ReplyEnvelope<Vec<MutationResult>>>` | Executes + commits | Validates only (no commit) |
+| `Mutation::run_with_result(&Writer, ExecOptions)` | single + options | `Result<ReplyEnvelope<T>>` | Executes + commits | Validates only (no commit) |
+
+**Reply semantics (`MutationResult`):**
+- `AddNode` / `UpdateNode` / `DeleteNode` / `RestoreNode`: `(id, version)`
+- `AddEdge` / `UpdateEdge` / `DeleteEdge` / `RestoreEdge`: `version`
+- Fragment mutations return unit `()`
 
 ### Query Types
 
@@ -626,13 +677,14 @@ use motlie_db::graph::mutation::RestoreNode;
 RestoreNode {
     id: alice_id,
     as_of: TimestampMilli(1_700_000_000_000),
+    expected_version: None,
 }
 .run(&writer)
 .await?;
 
 // The node now has a new (incremented) version with old data
 let restored = NodeById::new(alice_id, None).run(&reader, timeout).await?;
-// restored.version is now current_version + 1
+// restored reflects the latest version (incremented)
 // but data matches what it was at as_of time
 ```
 
@@ -646,65 +698,68 @@ RestoreEdge {
     dst_id: bob_id,
     name: "knows".to_string(),
     as_of: TimestampMilli(1_700_000_000_000),
+    expected_version: None,
 }
 .run(&writer)
 .await?;
 ```
 
-### Batch Restore Outgoing Edges
+### Batch Restore Edges (Vec<Mutation> of RestoreEdge)
 
 ```rust
-use motlie_db::graph::mutation::RestoreEdges;
+use motlie_db::graph::mutation::RestoreEdge;
 
-// Restore all outgoing edges from Alice
-RestoreEdges {
-    src_id: alice_id,
-    name: None,  // All edge names
-    as_of: TimestampMilli(1_700_000_000_000),
-    dry_run: false,
-}
-.run(&writer)
-.await?;
-
-// Restore only "knows" edges from Alice
-RestoreEdges {
-    src_id: alice_id,
-    name: Some("knows".to_string()),
-    as_of: TimestampMilli(1_700_000_000_000),
-    dry_run: false,
-}
-.run(&writer)
-.await?;
+// Restore multiple edges in a single transaction
+vec![
+    RestoreEdge {
+        src_id: alice_id,
+        dst_id: bob_id,
+        name: "knows".to_string(),
+        as_of: TimestampMilli(1_700_000_000_000),
+        expected_version: None,
+    }.into(),
+    RestoreEdge {
+        src_id: alice_id,
+        dst_id: carol_id,
+        name: "knows".to_string(),
+        as_of: TimestampMilli(1_700_000_000_000),
+        expected_version: None,
+    }.into(),
+].run(&writer).await?;
 ```
 
 ### Validate Restore Before Executing
 
 ```rust
-// Dry run to check what would be restored
-let report = RestoreEdges {
+use motlie_db::graph::mutation::{ExecOptions, MutationBatchExt, MutationResult};
+
+// Dry run to validate (no writes, still checks summaries + versions)
+let reply = vec![
+    RestoreEdge {
+        src_id: alice_id,
+        dst_id: bob_id,
+        name: "knows".to_string(),
+        as_of: TimestampMilli(1_700_000_000_000),
+        expected_version: None,
+    }.into(),
+].run_with_result(&writer, ExecOptions { dry_run: true }).await?;
+
+let version = reply
+    .payload
+    .first()
+    .and_then(|r| match r { MutationResult::RestoreEdge { version } => Some(*version), _ => None });
+println!("Restored version (if executed): {:?}", version);
+
+// If satisfied, run for real
+RestoreEdge {
     src_id: alice_id,
-    name: None,
+    dst_id: bob_id,
+    name: "knows".to_string(),
     as_of: TimestampMilli(1_700_000_000_000),
-    dry_run: true,  // Validate only, don't write
+    expected_version: None,
 }
 .run(&writer)
 .await?;
-
-println!("Candidates: {}", report.candidates);
-println!("Restorable: {}", report.restorable);
-println!("Skipped (no version at as_of): {:?}", report.skipped_no_version);
-
-// If satisfied, run for real
-if report.restorable > 0 {
-    RestoreEdges {
-        src_id: alice_id,
-        name: None,
-        as_of: TimestampMilli(1_700_000_000_000),
-        dry_run: false,
-    }
-    .run(&writer)
-    .await?;
-}
 ```
 
 ### Restore Guard
@@ -716,6 +771,7 @@ Restore operations fail if the historical summary was garbage collected:
 let result = RestoreNode {
     id: alice_id,
     as_of: very_old_timestamp,
+    expected_version: None,
 }.run(&writer).await;
 
 match result {
@@ -763,21 +819,6 @@ txn.write(AddEdge {
 
 // Atomic commit
 txn.commit()?;
-```
-
-### Transaction RestoreEdges Validation
-
-```rust
-let mut txn = writer.transaction()?;
-
-let report = txn.validate_restore_edges(RestoreEdges {
-    src_id: alice_id,
-    name: Some("likes".to_string()),
-    as_of: TimestampMilli::now(),
-    dry_run: true,
-})?;
-
-println!("Would restore {} edges", report.restorable);
 ```
 
 **Transaction Requirements:**

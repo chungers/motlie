@@ -91,7 +91,7 @@ use tokio::task::JoinHandle;
 
 use crate::fulltext;
 use crate::graph;
-use crate::query::{Query, QueryProcessor};
+use crate::query::QueryRequest;
 
 // ============================================================================
 // ReaderConfig - Composes graph and fulltext configs
@@ -215,7 +215,7 @@ impl CompositeStorage {
 #[derive(Clone)]
 pub struct Reader {
     /// Sender for unified search queries (Nodes, Edges with hydration)
-    sender: flume::Sender<Query>,
+    sender: flume::Sender<QueryRequest>,
 
     /// Graph reader for direct graph queries (NodeById, OutgoingEdges, etc.)
     graph_reader: graph::Reader,
@@ -229,7 +229,7 @@ pub struct Reader {
 
 impl Reader {
     /// Send a unified search query to the consumer pool.
-    pub async fn send_query(&self, query: Query) -> Result<()> {
+    pub async fn send_query(&self, query: QueryRequest) -> Result<()> {
         self.sender
             .send_async(query)
             .await
@@ -376,7 +376,7 @@ impl ReaderBuilder {
 /// composite storage (fulltext search + graph hydration).
 #[doc(hidden)]
 pub fn spawn_consumer_pool(
-    receiver: flume::Receiver<Query>,
+    receiver: flume::Receiver<QueryRequest>,
     storage: Arc<CompositeStorage>,
     num_workers: usize,
 ) -> Vec<JoinHandle<()>> {
@@ -385,8 +385,16 @@ pub fn spawn_consumer_pool(
             let receiver = receiver.clone();
             let storage = storage.clone();
             tokio::spawn(async move {
-                while let Ok(query) = receiver.recv_async().await {
-                    query.process_and_send(&storage).await;
+                while let Ok(mut request) = receiver.recv_async().await {
+                    let exec = request.payload.execute(&storage);
+                    let result = match request.timeout {
+                        Some(timeout) => match tokio::time::timeout(timeout, exec).await {
+                            Ok(r) => r,
+                            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", timeout)),
+                        },
+                        None => exec.await,
+                    };
+                    request.respond(result);
                 }
             })
         })

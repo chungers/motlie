@@ -78,6 +78,52 @@ The vector module has two layers of API:
 
 **Reader + Runnable (public, async):**
 - Async operations via MPSC channel to consumer workers
+
+## Async Queries (Typed Replies)
+
+Vector queries implement a `QueryReply` mapping so each query type owns its
+result conversion. User code still calls `Runnable::run`, but the mapping is now
+explicit on the query type:
+
+```rust
+use motlie_db::vector::query::GetVector;
+use motlie_db::reader::Runnable as QueryRunnable;
+use std::time::Duration;
+
+let timeout = Duration::from_secs(5);
+let vector = GetVector::new(embedding.code(), id)
+    .run(&reader, timeout)
+    .await?;
+```
+
+`SearchKNN` requires a Processor-backed reader (same as before), but uses the
+same `Runnable` entry point:
+
+```rust
+use motlie_db::vector::query::SearchKNN;
+use motlie_db::reader::Runnable as QueryRunnable;
+use std::time::Duration;
+
+let timeout = Duration::from_secs(5);
+let results = SearchKNN::new(&embedding, query_vec, 10)
+    .with_ef(100)
+    .run(&reader, timeout)
+    .await?;
+```
+
+## Async Mutations (Typed Replies)
+
+Mutations expose typed replies via `run_with_result()`. The reply includes
+`request_id` and `elapsed_time` for tracing/metrics.
+
+```rust
+use motlie_db::vector::mutation::{InsertVector, RunnableWithResult};
+
+let reply = InsertVector::new(embedding.code(), id, vec)
+    .run_with_result(&writer)
+    .await?;
+let result = reply.payload; // InsertResult
+```
 - Work distribution across multiple consumers
 - Backpressure via bounded channel buffer
 - The recommended public API for all operations
@@ -2015,7 +2061,7 @@ impl MutationRunnable for InsertVector { ... }
 impl MutationRunnable for InsertVectorBatch { ... }
 impl MutationRunnable for DeleteVector { ... }
 impl MutationRunnable for AddEmbeddingSpec { ... }
-impl MutationRunnable for MutationBatch { ... }
+impl MutationRunnable for Vec<Mutation> { ... }
 ```
 
 **Example:**
@@ -2053,33 +2099,25 @@ let results: Vec<SearchResult> = SearchKNN::new(&embedding, query, 10)
     .await?;
 ```
 
-### MutationBatch Helper
+### Batch Helper (Vec<Mutation>)
 
 Batch multiple mutations into a single channel send for efficiency.
 
 ```rust
-pub struct MutationBatch(pub Vec<Mutation>);
-
-impl MutationBatch {
-    pub fn new() -> Self;
-    pub fn push<M: Into<Mutation>>(mut self, mutation: M) -> Self;
-    pub fn len(&self) -> usize;
-    pub fn is_empty(&self) -> bool;
-}
-
-impl MutationRunnable for MutationBatch {
+impl MutationRunnable for Vec<Mutation> {
     async fn run(self, writer: &Writer) -> Result<()>;
 }
 ```
 
 **Example:**
 ```rust
-MutationBatch::new()
-    .push(InsertVector::new(&embedding, key1, vec1))
-    .push(InsertVector::new(&embedding, key2, vec2))
-    .push(DeleteVector::new(&embedding, old_key))
-    .run(&writer)
-    .await?;
+vec![
+    InsertVector::new(&embedding, key1, vec1).into(),
+    InsertVector::new(&embedding, key2, vec2).into(),
+    DeleteVector::new(&embedding, old_key).into(),
+]
+.run(&writer)
+.await?;
 ```
 
 ### MPSC / Channel API (Public)
@@ -2088,24 +2126,25 @@ The async API uses channels for mutations (MPSC) and queries (MPMC).
 
 ```rust
 // Mutations (Writer - MPSC)
-pub struct Writer { /* mpsc::Sender<Vec<Mutation>> */ }
+pub struct Writer { /* mpsc::Sender<MutationRequest> */ }
 impl Writer {
     pub async fn send(&self, mutations: Vec<Mutation>) -> Result<()>;
+    pub async fn send_with_result(&self, mutations: Vec<Mutation>) -> Result<ReplyEnvelope<Vec<MutationResult>>>;
     pub async fn send_sync(&self, mutations: Vec<Mutation>) -> Result<()>;
     pub async fn flush(&self) -> Result<()>;
     pub fn is_closed(&self) -> bool;
 }
 
 pub struct WriterConfig { pub channel_buffer_size: usize }
-pub fn create_writer(config: WriterConfig) -> (Writer, mpsc::Receiver<Vec<Mutation>>);
+pub fn create_writer(config: WriterConfig) -> (Writer, mpsc::Receiver<MutationRequest>);
 pub fn spawn_mutation_consumer_with_storage(
-    receiver: mpsc::Receiver<Vec<Mutation>>,
+    receiver: mpsc::Receiver<MutationRequest>,
     config: WriterConfig,
     storage: Arc<Storage>,
     registry: Arc<EmbeddingRegistry>,
 ) -> tokio::task::JoinHandle<Result<()>>;
 pub fn spawn_mutation_consumer_with_storage_autoreg(
-    receiver: mpsc::Receiver<Vec<Mutation>>,
+    receiver: mpsc::Receiver<MutationRequest>,
     config: WriterConfig,
     storage: Arc<Storage>,
 ) -> tokio::task::JoinHandle<Result<()>>;
@@ -2175,7 +2214,7 @@ timeouts ergonomically.
 ```rust
 use motlie_db::vector::{
     create_writer, spawn_mutation_consumer_with_storage, WriterConfig,
-    InsertVector, DeleteVector, MutationBatch, EmbeddingBuilder, EmbeddingRegistry, Distance, ExternalKey, Storage,
+    InsertVector, DeleteVector, EmbeddingBuilder, EmbeddingRegistry, Distance, ExternalKey, Storage,
 };
 use motlie_db::Id;
 use std::path::Path;
@@ -2210,10 +2249,8 @@ insert.run(&writer).await?;
 delete.run(&writer).await?;
 writer.flush().await?;
 
-// Batch helper (sends Vec<Mutation> under the hood)
-MutationBatch::new()
-    .push(insert)
-    .push(delete)
+// Batch helper (Vec<Mutation>)
+vec![insert.into(), delete.into()]
     .run(&writer)
     .await?;
 ```

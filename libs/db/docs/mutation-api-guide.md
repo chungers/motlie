@@ -29,7 +29,7 @@ MutationType { ...fields }
 
 1. **Type-Driven** - Mutation type determines behavior
 2. **Consistent with Query API** - Same `.run()` pattern
-3. **Zero-Cost Batching** - Use `mutations![]` macro or `MutationBatch`
+3. **Zero-Cost Batching** - Use `mutations![]` macro or `Vec<Mutation>`
 4. **No Builder Boilerplate** - Direct mutation construction
 5. **Async-First** - Built on `tokio` for concurrent mutations
 6. **Composable** - Mutations are values that can be stored and reused
@@ -79,47 +79,28 @@ impl Runnable for Vec<Mutation> {
 - Heap allocation overhead - every `.run()` call boxes the future (~50-100μs per 1,000 mutations)
 - Loss of zero-cost abstraction - Rust async/await is normally stack-allocated
 
-#### Option 2: MutationBatch Wrapper
+#### Option 2: Newtype Wrapper (Rejected)
 
-**Approach**: Create a newtype wrapper `MutationBatch(Vec<Mutation>)` with native async methods.
+**Approach**: Create a newtype wrapper around `Vec<Mutation>`.
 
-```rust
-pub struct MutationBatch(pub Vec<Mutation>);
-
-impl Runnable for MutationBatch {
-    async fn run(self, writer: &Writer) -> Result<()> {
-        writer.send(self.0).await
-    }
-}
-```
-
-**Pros**:
-- **Zero allocation overhead** - No boxing required
-- **Better type safety** - Distinct type signals "this is a batch"
-- **Extensible** - Can add validation, size limits, etc.
-- **No external dependencies** - No need for `async_trait`
-- **Future-proof** - Ready for when Rust stabilizes async in traits
-
-**Cons**:
-- Requires wrapper type instead of using `Vec` directly
-- Slightly more verbose than `vec![]`
+**Status**: Rejected in favor of `Vec<Mutation>` for ergonomics and fewer types.
 
 #### Option 3: mutations![] Macro
 
-**Approach**: Provide a `vec![]`-like macro that returns `MutationBatch`.
+**Approach**: Provide a `vec![]`-like macro that returns `Vec<Mutation>`.
 
 ```rust
 #[macro_export]
 macro_rules! mutations {
-    () => { $crate::MutationBatch::new() };
+    () => { Vec::<Mutation>::new() };
     ($($mutation:expr),+ $(,)?) => {
-        $crate::MutationBatch(vec![$($mutation.into()),+])
+        vec![$($mutation.into()),+]
     };
 }
 ```
 
 **Pros**:
-- **Zero overhead** - Macro expands to `MutationBatch(vec![...])`
+- **Zero overhead** - Macro expands to `vec![...]`
 - **Ergonomic** - Familiar syntax like `vec![]`
 - **Auto-conversion** - Uses `.into()` to convert mutation types
 - **Type safe** - Compiler checks mutation types
@@ -129,7 +110,7 @@ macro_rules! mutations {
 
 ### Final Decision
 
-**We chose Option 2 + Option 3**: `MutationBatch` wrapper + `mutations![]` macro.
+**We chose Option 2 + Option 3**: `Vec<Mutation>` wrapper + `mutations![]` macro.
 
 This provides:
 - ✅ Zero-cost abstraction (no heap allocation)
@@ -256,7 +237,7 @@ mutations![
 ].run(&writer).await?;
 
 // Manual construction
-let mut batch = MutationBatch::new();
+let mut batch = Vec<Mutation>::new();
 batch.push(AddNode { /* ... */ });
 batch.push(AddEdge { /* ... */ });
 batch.run(&writer).await?;
@@ -559,7 +540,7 @@ async fn bulk_import_users(
     writer: &Writer,
     users: Vec<(String, String)>  // (name, bio)
 ) -> anyhow::Result<()> {
-    let mut batch = MutationBatch::new();
+    let mut batch = Vec<Mutation>::new();
 
     for (name, bio) in users {
         let user_id = Id::new();
@@ -593,7 +574,7 @@ async fn update_user_conditionally(
     new_name: Option<String>,
     new_bio: Option<String>
 ) -> anyhow::Result<()> {
-    let mut batch = MutationBatch::new();
+    let mut batch = Vec<Mutation>::new();
 
     if let Some(name) = new_name {
         batch.push(AddNode {
@@ -715,7 +696,7 @@ async fn create_post_with_tags(
     .await?;
 
     // Create tags and edges
-    let mut batch = MutationBatch::new();
+    let mut batch = Vec<Mutation>::new();
 
     batch.push(AddEdge {
         source_node_id: author_id,
@@ -763,7 +744,7 @@ async fn bulk_import_with_batching(
     batch_size: usize
 ) -> anyhow::Result<()> {
     for chunk in items.chunks(batch_size) {
-        let mut batch = MutationBatch::with_capacity(chunk.len());
+        let mut batch = Vec<Mutation>::with_capacity(chunk.len());
 
         for name in chunk {
             batch.push(AddNode {
@@ -851,8 +832,8 @@ mutations![
     AddEdge { /* ... */ },
 ].run(&writer).await?;
 
-// Or using MutationBatch
-let mut batch = MutationBatch::new();
+// Or using Vec<Mutation>
+let mut batch = Vec<Mutation>::new();
 batch.push(AddNode { /* ... */ });
 batch.push(AddEdge { /* ... */ });
 batch.run(&writer).await?;
@@ -930,7 +911,7 @@ UpdateEdge {
 
 1. ✅ Import new types:
    ```rust
-   use motlie_db::{mutations, MutationBatch, MutationRunnable, EdgeSummary};
+   use motlie_db::{mutations, Vec<Mutation>, MutationRunnable, EdgeSummary};
    ```
 
 2. ✅ Update helper method calls:
@@ -1016,7 +997,7 @@ node.run(&writer).await?;
 ## Best Practices
 
 1. **Use the mutations![] Macro for Batches**
-   - Cleaner syntax than manual MutationBatch construction
+   - Cleaner syntax than manual Vec<Mutation> construction
    - Auto-conversion via `.into()`
    - Familiar `vec![]`-like syntax
 
@@ -1058,7 +1039,7 @@ Batching provides significant performance improvements:
 
 ### Memory Considerations
 
-- `MutationBatch` has zero overhead beyond the `Vec<Mutation>` itself
+- `Vec<Mutation>` has zero overhead beyond the `Vec<Mutation>` itself
 - Each mutation struct is ~200-300 bytes
 - 1,000 mutations ≈ 200-300 KB memory
 

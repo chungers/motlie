@@ -48,18 +48,18 @@ C. **Flush method**: Keep fire-and-forget but add `writer.flush().await?`
 **Question**: Should the unified writer support both batch and streaming patterns?
 
 **Current State**:
-- `MutationBatch` allows sending multiple mutations atomically
+- `Vec<Mutation>` allows sending multiple mutations atomically
 - Individual mutations use `run(&writer)` pattern
 
 **Options**:
 
-A. **Keep current approach**: Batch via `MutationBatch`, individual via `run()`
+A. **Keep current approach**: Batch via `Vec<Mutation>`, individual via `run()`
    ```rust
    // Individual
    AddNode { ... }.run(&writer).await?;
 
    // Batch
-   MutationBatch::new()
+   Vec<Mutation>::new()
        .add_node(...)
        .add_edge(...)
        .run(&writer)

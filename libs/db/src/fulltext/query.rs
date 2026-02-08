@@ -28,10 +28,11 @@ use tantivy::query::{BooleanQuery, Occur, QueryParser, RegexQuery};
 use tantivy::schema::{Field, Value};
 use tokio::sync::oneshot;
 
-use super::reader::{Processor, QueryExecutor, QueryProcessor, Reader};
-use crate::reader::Runnable;
+use super::reader::{QueryExecutor, QueryRequest, Reader};
 use super::search::{EdgeHit, MatchSource, NodeHit};
 use super::Storage;
+use crate::reader::Runnable;
+use crate::request::{new_request_id, RequestMeta};
 use crate::Id;
 
 // ============================================================================
@@ -166,7 +167,6 @@ impl FuzzyLevel {
 // ============================================================================
 
 /// Query enum representing all possible fulltext query types.
-/// Uses dispatch wrappers internally for channel/timeout handling.
 ///
 /// **Note**: This is internal infrastructure for the query dispatch pipeline.
 /// Users interact with `Nodes`/`Edges`/`Facets` directly via the `Runnable` trait.
@@ -176,9 +176,9 @@ impl FuzzyLevel {
 #[doc(hidden)]
 #[allow(private_interfaces)]
 pub enum Search {
-    Nodes(NodesDispatch),
-    Edges(EdgesDispatch),
-    Facets(FacetsDispatch),
+    Nodes(Nodes),
+    Edges(Edges),
+    Facets(Facets),
 }
 
 impl std::fmt::Display for Search {
@@ -187,19 +187,99 @@ impl std::fmt::Display for Search {
             Search::Nodes(q) => write!(
                 f,
                 "FulltextNodes: query={}, limit={}",
-                q.params.query, q.params.limit
+                q.query, q.limit
             ),
             Search::Edges(q) => write!(
                 f,
                 "FulltextEdges: query={}, limit={}",
-                q.params.query, q.params.limit
+                q.query, q.limit
             ),
             Search::Facets(q) => write!(
                 f,
                 "FulltextFacets: doc_type_filter={:?}, tags_limit={}",
-                q.params.doc_type_filter, q.params.tags_limit
+                q.doc_type_filter, q.tags_limit
             ),
         }
+    }
+}
+
+#[derive(Debug)]
+pub enum SearchResult {
+    Nodes(Vec<NodeHit>),
+    Edges(Vec<EdgeHit>),
+    Facets(super::search::FacetCounts),
+}
+
+impl Search {
+    pub async fn execute(&self, storage: &Storage) -> Result<SearchResult> {
+        match self {
+            Search::Nodes(q) => q.execute(storage).await.map(SearchResult::Nodes),
+            Search::Edges(q) => q.execute(storage).await.map(SearchResult::Edges),
+            Search::Facets(q) => q.execute(storage).await.map(SearchResult::Facets),
+        }
+    }
+}
+
+impl RequestMeta for Search {
+    type Reply = SearchResult;
+    type Options = ();
+
+    fn request_kind(&self) -> &'static str {
+        match self {
+            Search::Nodes(q) => q.request_kind(),
+            Search::Edges(q) => q.request_kind(),
+            Search::Facets(q) => q.request_kind(),
+        }
+    }
+}
+
+macro_rules! impl_request_meta {
+    ($ty:ty, $reply:ty, $kind:expr) => {
+        impl RequestMeta for $ty {
+            type Reply = $reply;
+            type Options = ();
+
+            fn request_kind(&self) -> &'static str {
+                $kind
+            }
+        }
+    };
+}
+
+impl_request_meta!(Nodes, Vec<NodeHit>, "fulltext_nodes");
+impl_request_meta!(Edges, Vec<EdgeHit>, "fulltext_edges");
+impl_request_meta!(Facets, super::search::FacetCounts, "fulltext_facets");
+
+// ============================================================================
+// QueryReply - typed replies for fulltext queries
+// ============================================================================
+
+pub trait QueryReply: Send {
+    type Reply: Send + 'static;
+    fn into_search(self) -> Search;
+    fn from_result(result: SearchResult) -> Result<Self::Reply>;
+}
+
+#[async_trait::async_trait]
+impl<Q> Runnable<Reader> for Q
+where
+    Q: QueryReply,
+{
+    type Output = Q::Reply;
+
+    async fn run(self, reader: &Reader, timeout: Duration) -> Result<Self::Output> {
+        let (result_tx, result_rx) = oneshot::channel();
+        let request = QueryRequest {
+            payload: self.into_search(),
+            options: (),
+            reply: Some(result_tx),
+            timeout: Some(timeout),
+            request_id: new_request_id(),
+            created_at: std::time::Instant::now(),
+        };
+        reader.send_query(request).await?;
+        let result = result_rx.await??;
+        Q::from_result(result)
     }
 }
 
@@ -297,89 +377,40 @@ impl Nodes {
     ///     .await?;
     /// ```
     pub async fn execute(&self, storage: &Storage) -> Result<Vec<NodeHit>> {
-        NodesDispatch::execute_params(self, storage).await
-    }
-}
-
-/// Internal dispatch wrapper for Nodes query execution.
-/// Contains the query parameters plus channel/timeout for async dispatch.
-#[derive(Debug)]
-pub(crate) struct NodesDispatch {
-    /// The query parameters
-    pub(crate) params: Nodes,
-
-    /// Timeout for this query execution
-    pub(crate) timeout: Duration,
-
-    /// Channel to send the result back to the client
-    pub(crate) result_tx: oneshot::Sender<Result<Vec<NodeHit>>>,
-}
-
-impl NodesDispatch {
-    /// Create a new dispatch wrapper
-    pub(crate) fn new(
-        params: Nodes,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<NodeHit>>>,
-    ) -> Self {
-        Self {
-            params,
-            timeout,
-            result_tx,
-        }
-    }
-
-    /// Send the result back to the client (consumes self)
-    pub(crate) fn send_result(self, result: Result<Vec<NodeHit>>) {
-        // Ignore error if receiver was dropped (client timeout/cancellation)
-        let _ = self.result_tx.send(result);
+        <Nodes as QueryExecutor>::execute(self, storage).await
     }
 
     /// Execute a Nodes query directly without dispatch machinery.
     /// This is used by the unified query module for composition.
     pub(crate) async fn execute_params(params: &Nodes, storage: &Storage) -> Result<Vec<NodeHit>> {
-        // Create a temporary dispatch just to access the execute logic
-        // We use a dummy oneshot channel that we won't actually use
-        let (tx, _rx) = oneshot::channel();
-        let dispatch = NodesDispatch {
-            params: params.clone(),
-            timeout: Duration::from_secs(0), // Not used
-            result_tx: tx,
-        };
-        <NodesDispatch as super::reader::QueryExecutor>::execute(&dispatch, storage).await
+        <Nodes as QueryExecutor>::execute(params, storage).await
     }
 }
 
-#[async_trait::async_trait]
-impl Runnable<Reader> for Nodes {
-    type Output = Vec<NodeHit>;
+impl QueryReply for Nodes {
+    type Reply = Vec<NodeHit>;
 
-    async fn run(self, reader: &Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = oneshot::channel();
+    fn into_search(self) -> Search {
+        Search::Nodes(self)
+    }
 
-        let dispatch = NodesDispatch::new(self, timeout, result_tx);
-
-        reader.send_query(Search::Nodes(dispatch)).await?;
-
-        // Wait for result with timeout
-        match tokio::time::timeout(timeout, result_rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(anyhow::anyhow!("Query channel closed")),
-            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", timeout)),
+    fn from_result(result: SearchResult) -> Result<Self::Reply> {
+        match result {
+            SearchResult::Nodes(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
         }
     }
 }
 
 #[async_trait::async_trait]
-impl QueryExecutor for NodesDispatch {
+impl QueryExecutor for Nodes {
     type Output = Vec<NodeHit>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let params = &self.params;
         tracing::debug!(
-            query = %params.query,
-            fuzzy_level = ?params.fuzzy_level,
-            limit = params.limit,
+            query = %self.query,
+            fuzzy_level = ?self.fuzzy_level,
+            limit = self.limit,
             "Executing fulltext Nodes query"
         );
 
@@ -398,11 +429,11 @@ impl QueryExecutor for NodesDispatch {
         let searcher = reader.searcher();
 
         // Build text query - check for wildcards first, then exact or fuzzy
-        let fuzzy_level = params.fuzzy_level.unwrap_or(FuzzyLevel::None);
+        let fuzzy_level = self.fuzzy_level.unwrap_or(FuzzyLevel::None);
         let text_query: Box<dyn tantivy::query::Query> = if fuzzy_level == FuzzyLevel::None {
             // Check for wildcard patterns (e.g., lik*, test?)
             if let Some(wildcard_query) = build_wildcard_query(
-                &params.query,
+                &self.query,
                 &[fields.content_field, fields.node_name_field],
             ) {
                 wildcard_query
@@ -412,15 +443,15 @@ impl QueryExecutor for NodesDispatch {
                     index,
                     vec![fields.content_field, fields.node_name_field],
                 );
-                let parsed = query_parser.parse_query(&params.query).map_err(|e| {
-                    anyhow::anyhow!("Failed to parse query '{}': {}", params.query, e)
+                let parsed = query_parser.parse_query(&self.query).map_err(|e| {
+                    anyhow::anyhow!("Failed to parse query '{}': {}", self.query, e)
                 })?;
                 parsed
             }
         } else {
             // Fuzzy match: build FuzzyTermQuery for each term in both fields
             let distance = fuzzy_level.to_distance();
-            let terms: Vec<&str> = params.query.split_whitespace().collect();
+            let terms: Vec<&str> = self.query.split_whitespace().collect();
 
             if terms.is_empty() {
                 return Ok(vec![]);
@@ -476,9 +507,9 @@ impl QueryExecutor for NodesDispatch {
 
         // Add tag filters if specified (ANY tag must match - OR semantics)
         // Tags are stored as /tag/{name}, so we construct the facet path accordingly
-        if !params.tags.is_empty() {
+        if !self.tags.is_empty() {
             let mut tag_clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = Vec::new();
-            for tag in &params.tags {
+            for tag in &self.tags {
                 let facet = tantivy::schema::Facet::from(&format!("/tag/{}", tag));
                 let tag_term = Term::from_facet(fields.tags_facet, &facet);
                 tag_clauses.push((
@@ -493,7 +524,7 @@ impl QueryExecutor for NodesDispatch {
 
         // Search with TopDocs collector - get extra results since we'll dedupe by node ID
         let top_docs = searcher
-            .search(&combined_query, &TopDocs::with_limit(params.limit * 3))
+            .search(&combined_query, &TopDocs::with_limit(self.limit * 3))
             .map_err(|e| anyhow::anyhow!("Search failed: {}", e))?;
 
         // Collect results, deduplicating by node ID and keeping best score + match source
@@ -552,19 +583,11 @@ impl QueryExecutor for NodesDispatch {
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        results.truncate(params.limit);
+        results.truncate(self.limit);
 
         Ok(results)
     }
-
-    fn timeout(&self) -> Duration {
-        self.timeout
-    }
 }
-
-// Use macro to implement QueryProcessor for dispatch types
-crate::impl_fulltext_query_processor!(NodesDispatch);
-
 // ============================================================================
 // Edges Query - Search for edges by text
 // ============================================================================
@@ -655,85 +678,36 @@ impl Edges {
     ///     .await?;
     /// ```
     pub async fn execute(&self, storage: &Storage) -> Result<Vec<EdgeHit>> {
-        EdgesDispatch::execute_params(self, storage).await
-    }
-}
-
-/// Internal dispatch wrapper for Edges query execution.
-/// Contains the query parameters plus channel/timeout for async dispatch.
-#[derive(Debug)]
-pub(crate) struct EdgesDispatch {
-    /// The query parameters
-    pub(crate) params: Edges,
-
-    /// Timeout for this query execution
-    pub(crate) timeout: Duration,
-
-    /// Channel to send the result back to the client
-    pub(crate) result_tx: oneshot::Sender<Result<Vec<EdgeHit>>>,
-}
-
-impl EdgesDispatch {
-    /// Create a new dispatch wrapper
-    pub(crate) fn new(
-        params: Edges,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<EdgeHit>>>,
-    ) -> Self {
-        Self {
-            params,
-            timeout,
-            result_tx,
-        }
-    }
-
-    /// Send the result back to the client (consumes self)
-    pub(crate) fn send_result(self, result: Result<Vec<EdgeHit>>) {
-        // Ignore error if receiver was dropped (client timeout/cancellation)
-        let _ = self.result_tx.send(result);
+        <Edges as QueryExecutor>::execute(self, storage).await
     }
 
     /// Execute an Edges query directly without dispatch machinery.
     /// This is used by the unified query module for composition.
     pub(crate) async fn execute_params(params: &Edges, storage: &Storage) -> Result<Vec<EdgeHit>> {
-        // Create a temporary dispatch just to access the execute logic
-        // We use a dummy oneshot channel that we won't actually use
-        let (tx, _rx) = oneshot::channel();
-        let dispatch = EdgesDispatch {
-            params: params.clone(),
-            timeout: Duration::from_secs(0), // Not used
-            result_tx: tx,
-        };
-        <EdgesDispatch as super::reader::QueryExecutor>::execute(&dispatch, storage).await
+        <Edges as QueryExecutor>::execute(params, storage).await
     }
 }
 
-#[async_trait::async_trait]
-impl Runnable<Reader> for Edges {
-    type Output = Vec<EdgeHit>;
+impl QueryReply for Edges {
+    type Reply = Vec<EdgeHit>;
 
-    async fn run(self, reader: &Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = oneshot::channel();
+    fn into_search(self) -> Search {
+        Search::Edges(self)
+    }
 
-        let dispatch = EdgesDispatch::new(self, timeout, result_tx);
-
-        reader.send_query(Search::Edges(dispatch)).await?;
-
-        // Wait for result with timeout
-        match tokio::time::timeout(timeout, result_rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(anyhow::anyhow!("Query channel closed")),
-            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", timeout)),
+    fn from_result(result: SearchResult) -> Result<Self::Reply> {
+        match result {
+            SearchResult::Edges(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
         }
     }
 }
 
 #[async_trait::async_trait]
-impl QueryExecutor for EdgesDispatch {
+impl QueryExecutor for Edges {
     type Output = Vec<EdgeHit>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let params = &self.params;
         use std::collections::HashMap;
         use tantivy::query::{BooleanQuery, FuzzyTermQuery, Occur, TermQuery};
         use tantivy::schema::IndexRecordOption;
@@ -749,7 +723,7 @@ impl QueryExecutor for EdgesDispatch {
         let searcher = reader.searcher();
 
         tracing::debug!(
-            query = %params.query,
+            query = %self.query,
             index_docs = searcher.num_docs(),
             content_field = ?fields.content_field,
             edge_name_field = ?fields.edge_name_field,
@@ -758,11 +732,11 @@ impl QueryExecutor for EdgesDispatch {
         );
 
         // Build text query - check for wildcards first, then exact or fuzzy
-        let fuzzy_level = params.fuzzy_level.unwrap_or(FuzzyLevel::None);
+        let fuzzy_level = self.fuzzy_level.unwrap_or(FuzzyLevel::None);
         let text_query: Box<dyn tantivy::query::Query> = if fuzzy_level == FuzzyLevel::None {
             // Check for wildcard patterns (e.g., lik*, test?)
             if let Some(wildcard_query) = build_wildcard_query(
-                &params.query,
+                &self.query,
                 &[fields.content_field, fields.edge_name_field],
             ) {
                 wildcard_query
@@ -772,15 +746,15 @@ impl QueryExecutor for EdgesDispatch {
                     index,
                     vec![fields.content_field, fields.edge_name_field],
                 );
-                let parsed = query_parser.parse_query(&params.query).map_err(|e| {
-                    anyhow::anyhow!("Failed to parse query '{}': {}", params.query, e)
+                let parsed = query_parser.parse_query(&self.query).map_err(|e| {
+                    anyhow::anyhow!("Failed to parse query '{}': {}", self.query, e)
                 })?;
                 parsed
             }
         } else {
             // Fuzzy match: build FuzzyTermQuery for each term in both fields
             let distance = fuzzy_level.to_distance();
-            let terms: Vec<&str> = params.query.split_whitespace().collect();
+            let terms: Vec<&str> = self.query.split_whitespace().collect();
 
             if terms.is_empty() {
                 return Ok(vec![]);
@@ -836,9 +810,9 @@ impl QueryExecutor for EdgesDispatch {
 
         // Add tag filters if specified (ANY tag must match - OR semantics)
         // Tags are stored as /tag/{name}, so we construct the facet path accordingly
-        if !params.tags.is_empty() {
+        if !self.tags.is_empty() {
             let mut tag_clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = Vec::new();
-            for tag in &params.tags {
+            for tag in &self.tags {
                 let facet = tantivy::schema::Facet::from(&format!("/tag/{}", tag));
                 let tag_term = Term::from_facet(fields.tags_facet, &facet);
                 tag_clauses.push((
@@ -853,12 +827,12 @@ impl QueryExecutor for EdgesDispatch {
 
         // Search with TopDocs collector - get extra results since we'll dedupe by edge key
         let top_docs = searcher
-            .search(&combined_query, &TopDocs::with_limit(params.limit * 3))
+            .search(&combined_query, &TopDocs::with_limit(self.limit * 3))
             .map_err(|e| anyhow::anyhow!("Search failed: {}", e))?;
 
         tracing::debug!(
             result_count = top_docs.len(),
-            query = %params.query,
+            query = %self.query,
             "[FulltextEdges] Search returned raw results"
         );
 
@@ -949,17 +923,11 @@ impl QueryExecutor for EdgesDispatch {
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        results.truncate(params.limit);
+        results.truncate(self.limit);
 
         Ok(results)
     }
-
-    fn timeout(&self) -> Duration {
-        self.timeout
-    }
 }
-
-crate::impl_fulltext_query_processor!(EdgesDispatch);
 
 // ============================================================================
 // Facets Query - Get facet counts from the index
@@ -1041,42 +1009,7 @@ impl Facets {
     ///     .await?;
     /// ```
     pub async fn execute(&self, storage: &Storage) -> Result<super::search::FacetCounts> {
-        FacetsDispatch::execute_params(self, storage).await
-    }
-}
-
-/// Internal dispatch wrapper for Facets query execution.
-/// Contains the query parameters plus channel/timeout for async dispatch.
-#[derive(Debug)]
-pub(crate) struct FacetsDispatch {
-    /// The query parameters
-    pub(crate) params: Facets,
-
-    /// Timeout for this query execution
-    pub(crate) timeout: Duration,
-
-    /// Channel to send the result back to the client
-    pub(crate) result_tx: oneshot::Sender<Result<super::search::FacetCounts>>,
-}
-
-impl FacetsDispatch {
-    /// Create a new dispatch wrapper
-    pub(crate) fn new(
-        params: Facets,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<super::search::FacetCounts>>,
-    ) -> Self {
-        Self {
-            params,
-            timeout,
-            result_tx,
-        }
-    }
-
-    /// Send the result back to the client (consumes self)
-    pub(crate) fn send_result(self, result: Result<super::search::FacetCounts>) {
-        // Ignore error if receiver was dropped (client timeout/cancellation)
-        let _ = self.result_tx.send(result);
+        <Facets as QueryExecutor>::execute(self, storage).await
     }
 
     /// Execute a Facets query directly without dispatch machinery.
@@ -1085,46 +1018,32 @@ impl FacetsDispatch {
         params: &Facets,
         storage: &Storage,
     ) -> Result<super::search::FacetCounts> {
-        // Create a temporary dispatch just to access the execute logic
-        // We use a dummy oneshot channel that we won't actually use
-        let (tx, _rx) = oneshot::channel();
-        let dispatch = FacetsDispatch {
-            params: params.clone(),
-            timeout: Duration::from_secs(0), // Not used
-            result_tx: tx,
-        };
-        <FacetsDispatch as super::reader::QueryExecutor>::execute(&dispatch, storage).await
+        <Facets as QueryExecutor>::execute(params, storage).await
     }
 }
 
-#[async_trait::async_trait]
-impl Runnable<Reader> for Facets {
-    type Output = super::search::FacetCounts;
+impl QueryReply for Facets {
+    type Reply = super::search::FacetCounts;
 
-    async fn run(self, reader: &Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = oneshot::channel();
+    fn into_search(self) -> Search {
+        Search::Facets(self)
+    }
 
-        let dispatch = FacetsDispatch::new(self, timeout, result_tx);
-
-        reader.send_query(Search::Facets(dispatch)).await?;
-
-        // Wait for result with timeout
-        match tokio::time::timeout(timeout, result_rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(anyhow::anyhow!("Query channel closed")),
-            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", timeout)),
+    fn from_result(result: SearchResult) -> Result<Self::Reply> {
+        match result {
+            SearchResult::Facets(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
         }
     }
 }
 
 #[async_trait::async_trait]
-impl QueryExecutor for FacetsDispatch {
+impl QueryExecutor for Facets {
     type Output = super::search::FacetCounts;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let params = &self.params;
         tracing::debug!(
-            doc_type_filter = ?params.doc_type_filter,
+            doc_type_filter = ?self.doc_type_filter,
             "Executing fulltext Facets query"
         );
 
@@ -1143,12 +1062,12 @@ impl QueryExecutor for FacetsDispatch {
         let searcher = reader.searcher();
 
         // Build query - either all docs or filtered by doc_type
-        let query: Box<dyn tantivy::query::Query> = if params.doc_type_filter.is_empty() {
+        let query: Box<dyn tantivy::query::Query> = if self.doc_type_filter.is_empty() {
             Box::new(AllQuery)
         } else {
             // Build doc_type filter
             let mut doc_type_clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = Vec::new();
-            for doc_type in &params.doc_type_filter {
+            for doc_type in &self.doc_type_filter {
                 let term = Term::from_field_text(fields.doc_type_field, doc_type);
                 doc_type_clauses.push((
                     Occur::Should,
@@ -1191,7 +1110,7 @@ impl QueryExecutor for FacetsDispatch {
         // Extract tag facets (/tag/rust, /tag/programming, etc.)
         let mut tag_count = 0;
         for (facet, count) in tags_counts.get("/tag") {
-            if tag_count >= params.tags_limit {
+            if tag_count >= self.tags_limit {
                 break;
             }
             let facet_str = facet.to_string();
@@ -1210,23 +1129,6 @@ impl QueryExecutor for FacetsDispatch {
         }
 
         Ok(result)
-    }
-
-    fn timeout(&self) -> Duration {
-        self.timeout
-    }
-}
-
-crate::impl_fulltext_query_processor!(FacetsDispatch);
-
-#[async_trait::async_trait]
-impl QueryProcessor for Search {
-    async fn process_and_send<P: Processor + Sync>(self, processor: &P) {
-        match self {
-            Search::Nodes(q) => q.process_and_send(processor).await,
-            Search::Edges(q) => q.process_and_send(processor).await,
-            Search::Facets(q) => q.process_and_send(processor).await,
-        }
     }
 }
 

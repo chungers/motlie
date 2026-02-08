@@ -122,13 +122,15 @@
 //! - [`fulltext::query`](crate::fulltext::query) - Raw fulltext queries (returns hits with scores)
 //! - [`graph::query`](crate::graph::query) - Graph-only queries
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tokio::sync::oneshot;
 
 use crate::fulltext;
 use crate::graph;
+use crate::graph::reader::QueryExecutor;
+use crate::request::{new_request_id, RequestEnvelope, RequestMeta};
 
 // Re-export Runnable trait from reader module
 pub use crate::reader::Runnable;
@@ -284,32 +286,42 @@ pub type EdgeResult = (SrcId, DstId, EdgeName, EdgeSummary);
 pub type EdgeDetailsResult = (Option<f64>, SrcId, DstId, EdgeName, EdgeSummary);
 
 // ============================================================================
-// Query Enum for Dispatch
+// Unified Query Types and Execution
 // ============================================================================
+
+#[derive(Debug, Clone)]
+pub struct NodesQuery {
+    pub params: fulltext::query::Nodes,
+    pub offset: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct EdgesQuery {
+    pub params: fulltext::query::Edges,
+    pub offset: usize,
+}
 
 /// Wrapper enum for dispatching queries through the unified reader.
 ///
-/// This wraps query types and adds oneshot channels for result delivery.
-/// Used internally by the reader infrastructure. Users should not construct
-/// this directly - use `Runnable::run()` instead.
+/// Users should not construct this directly - use `Runnable::run()` instead.
 #[derive(Debug)]
 #[doc(hidden)]
 #[allow(private_interfaces)]
 pub enum Query {
     // Fulltext search queries (with hydration)
-    Nodes(NodesDispatch),
-    Edges(EdgesDispatch),
+    Nodes(NodesQuery),
+    Edges(EdgesQuery),
     // Graph queries (forwarded to graph storage)
-    NodeById(NodeByIdDispatch),
-    NodesByIdsMulti(NodesByIdsMultiDispatch),
-    OutgoingEdges(OutgoingEdgesDispatch),
-    IncomingEdges(IncomingEdgesDispatch),
-    EdgeDetails(EdgeDetailsDispatch),
-    NodeFragments(NodeFragmentsDispatch),
-    EdgeFragments(EdgeFragmentsDispatch),
+    NodeById(graph::query::NodeById),
+    NodesByIdsMulti(graph::query::NodesByIdsMulti),
+    OutgoingEdges(graph::query::OutgoingEdges),
+    IncomingEdges(graph::query::IncomingEdges),
+    EdgeDetails(graph::query::EdgeSummaryBySrcDstName),
+    NodeFragments(graph::query::NodeFragmentsByIdTimeRange),
+    EdgeFragments(graph::query::EdgeFragmentsByIdTimeRange),
     // Graph enumeration queries
-    AllNodes(AllNodesDispatch),
-    AllEdges(AllEdgesDispatch),
+    AllNodes(graph::query::AllNodes),
+    AllEdges(graph::query::AllEdges),
 }
 
 impl std::fmt::Display for Query {
@@ -325,541 +337,164 @@ impl std::fmt::Display for Query {
                 "UnifiedEdges: query={}, limit={}, offset={}",
                 q.params.query, q.params.limit, q.offset
             ),
-            Query::NodeById(q) => write!(f, "NodeById: id={}", q.params.id),
+            Query::NodeById(q) => write!(f, "NodeById: id={}", q.id),
             Query::NodesByIdsMulti(q) => {
-                write!(f, "NodesByIdsMulti: count={}", q.params.ids.len())
+                write!(f, "NodesByIdsMulti: count={}", q.ids.len())
             }
-            Query::OutgoingEdges(q) => write!(f, "OutgoingEdges: id={}", q.params.id),
-            Query::IncomingEdges(q) => write!(f, "IncomingEdges: id={}", q.params.id),
+            Query::OutgoingEdges(q) => write!(f, "OutgoingEdges: id={}", q.id),
+            Query::IncomingEdges(q) => write!(f, "IncomingEdges: id={}", q.id),
             Query::EdgeDetails(q) => write!(
                 f,
                 "EdgeDetails: src={}, dst={}, edge={}",
-                q.params.source_id, q.params.dest_id, q.params.name
+                q.source_id, q.dest_id, q.name
             ),
-            Query::NodeFragments(q) => write!(f, "NodeFragments: id={}", q.params.id),
+            Query::NodeFragments(q) => write!(f, "NodeFragments: id={}", q.id),
             Query::EdgeFragments(q) => write!(
                 f,
                 "EdgeFragments: src={}, dst={}, edge={}",
-                q.params.source_id, q.params.dest_id, q.params.edge_name
+                q.source_id, q.dest_id, q.edge_name
             ),
-            Query::AllNodes(q) => write!(f, "AllNodes: limit={}", q.params.limit),
-            Query::AllEdges(q) => write!(f, "AllEdges: limit={}", q.params.limit),
+            Query::AllNodes(q) => write!(f, "AllNodes: limit={}", q.limit),
+            Query::AllEdges(q) => write!(f, "AllEdges: limit={}", q.limit),
         }
     }
 }
 
-// ============================================================================
-// NodesDispatch - Internal wrapper for query dispatch
-// ============================================================================
-
-/// Internal dispatch wrapper for unified Nodes query execution.
-/// Users interact with `fulltext::Nodes` directly via the `Runnable` trait.
 #[derive(Debug)]
-pub(crate) struct NodesDispatch {
-    /// The underlying fulltext Nodes query params
-    pub(crate) params: fulltext::query::Nodes,
-
-    /// Offset for pagination (skip first N results from fulltext)
-    pub(crate) offset: usize,
-
-    /// Channel to send the result back to the client
-    result_tx: oneshot::Sender<Result<Vec<NodeResult>>>,
+pub enum QueryResult {
+    Nodes(Vec<NodeResult>),
+    Edges(Vec<EdgeResult>),
+    NodeById((NodeName, NodeSummary)),
+    NodesByIdsMulti(Vec<(Id, NodeName, NodeSummary)>),
+    OutgoingEdges(Vec<(Option<f64>, SrcId, DstId, EdgeName)>),
+    IncomingEdges(Vec<(Option<f64>, DstId, SrcId, EdgeName)>),
+    EdgeDetails(EdgeDetailsResult),
+    NodeFragments(Vec<(TimestampMilli, FragmentContent)>),
+    EdgeFragments(Vec<(TimestampMilli, FragmentContent)>),
+    AllNodes(Vec<(Id, NodeName, NodeSummary)>),
+    AllEdges(Vec<(Option<f64>, SrcId, DstId, EdgeName)>),
 }
 
-impl NodesDispatch {
-    /// Send the result back to the client (consumes self)
-    fn send_result(self, result: Result<Vec<NodeResult>>) {
-        let _ = self.result_tx.send(result);
-    }
-
-    /// Execute against composite storage
-    pub(crate) async fn execute(
-        &self,
-        storage: &super::reader::CompositeStorage,
-    ) -> Result<Vec<NodeResult>> {
-        // Step 1: REUSE existing fulltext query execution to get hits
-        use crate::fulltext::query::NodesDispatch as FulltextNodesDispatch;
-        use crate::fulltext::reader::Processor as FulltextProcessor;
-        use crate::graph::reader::Processor as GraphProcessor;
-
-        let fulltext_storage = FulltextProcessor::storage(storage.fulltext.as_ref());
-        let hits: Vec<NodeHit> =
-            FulltextNodesDispatch::execute_params(&self.params, fulltext_storage).await?;
-
-        // Step 2: Hydrate each hit from graph storage
-        use crate::graph::query::NodeByIdDispatch;
-
-        let graph_storage = GraphProcessor::storage(storage.graph.as_ref());
-        let mut results = Vec::with_capacity(hits.len());
-
-        for hit in hits.into_iter().skip(self.offset) {
-            let query = graph::query::NodeById::new(hit.id, None);
-            match NodeByIdDispatch::execute_params(&query, graph_storage).await {
-                Ok((name, summary)) => {
-                    results.push((hit.id, name, summary));
-                }
-                Err(_) => {
-                    // Stale index entry - skip silently (log at debug level)
-                    tracing::debug!(id = %hit.id, "Node in fulltext but not in graph, skipping");
-                    continue;
-                }
-            }
-        }
-
-        Ok(results)
-    }
-
-    /// Process and send result
-    pub(crate) async fn process_and_send(self, storage: &super::reader::CompositeStorage) {
-        let result = self.execute(storage).await;
-        self.send_result(result);
-    }
-}
-
-// ============================================================================
-// EdgesDispatch - Internal wrapper for query dispatch
-// ============================================================================
-
-/// Internal dispatch wrapper for unified Edges query execution.
-/// Users interact with `fulltext::Edges` directly via the `Runnable` trait.
-#[derive(Debug)]
-pub(crate) struct EdgesDispatch {
-    /// The underlying fulltext Edges query params
-    pub(crate) params: fulltext::query::Edges,
-
-    /// Offset for pagination (skip first N results from fulltext)
-    pub(crate) offset: usize,
-
-    /// Channel to send the result back to the client
-    result_tx: oneshot::Sender<Result<Vec<EdgeResult>>>,
-}
-
-impl EdgesDispatch {
-    /// Send the result back to the client (consumes self)
-    fn send_result(self, result: Result<Vec<EdgeResult>>) {
-        let _ = self.result_tx.send(result);
-    }
-
-    /// Execute against composite storage
-    pub(crate) async fn execute(
-        &self,
-        storage: &super::reader::CompositeStorage,
-    ) -> Result<Vec<EdgeResult>> {
-        // Step 1: REUSE existing fulltext query execution to get hits
-        use crate::fulltext::query::EdgesDispatch as FulltextEdgesDispatch;
-        use crate::fulltext::reader::Processor as FulltextProcessor;
-        use crate::graph::reader::Processor as GraphProcessor;
-
-        let fulltext_storage = FulltextProcessor::storage(storage.fulltext.as_ref());
-        let hits: Vec<EdgeHit> =
-            FulltextEdgesDispatch::execute_params(&self.params, fulltext_storage).await?;
-
-        // Step 2: Hydrate each hit from graph storage
-        use crate::graph::query::EdgeSummaryBySrcDstNameDispatch;
-
-        let graph_storage = GraphProcessor::storage(storage.graph.as_ref());
-        let mut results = Vec::with_capacity(hits.len());
-
-        for hit in hits.into_iter().skip(self.offset) {
-            let query = graph::query::EdgeSummaryBySrcDstName::new(
-                hit.src_id,
-                hit.dst_id,
-                hit.edge_name.clone(),
-                None,
-            );
-            match EdgeSummaryBySrcDstNameDispatch::execute_params(&query, graph_storage).await {
-                Ok((summary, _weight)) => {
-                    results.push((hit.src_id, hit.dst_id, hit.edge_name, summary));
-                }
-                Err(_) => {
-                    // Stale index entry - skip silently (log at debug level)
-                    tracing::debug!(
-                        src_id = %hit.src_id,
-                        dst_id = %hit.dst_id,
-                        edge_name = %hit.edge_name,
-                        "Edge in fulltext but not in graph, skipping"
-                    );
-                    continue;
-                }
-            }
-        }
-
-        Ok(results)
-    }
-
-    /// Process and send result
-    pub(crate) async fn process_and_send(self, storage: &super::reader::CompositeStorage) {
-        let result = self.execute(storage).await;
-        self.send_result(result);
-    }
-}
-
-// ============================================================================
-// NodeByIdDispatch - Internal wrapper for NodeById dispatch
-// ============================================================================
-
-/// Internal dispatch wrapper for NodeById query execution.
-#[derive(Debug)]
-pub(crate) struct NodeByIdDispatch {
-    /// The underlying graph query params
-    pub(crate) params: graph::query::NodeById,
-
-    /// Channel to send the result back to the client
-    result_tx: oneshot::Sender<Result<(NodeName, NodeSummary)>>,
-}
-
-impl NodeByIdDispatch {
-    fn send_result(self, result: Result<(NodeName, NodeSummary)>) {
-        let _ = self.result_tx.send(result);
-    }
-
-    pub(crate) async fn execute(
-        &self,
-        storage: &super::reader::CompositeStorage,
-    ) -> Result<(NodeName, NodeSummary)> {
-        use crate::graph::query::NodeByIdDispatch as GraphNodeByIdDispatch;
-        use crate::graph::reader::Processor as GraphProcessor;
-
-        let graph_storage = GraphProcessor::storage(storage.graph.as_ref());
-        GraphNodeByIdDispatch::execute_params(&self.params, graph_storage).await
-    }
-
-    pub(crate) async fn process_and_send(self, storage: &super::reader::CompositeStorage) {
-        let result = self.execute(storage).await;
-        self.send_result(result);
-    }
-}
-
-// ============================================================================
-// NodesByIdsMultiDispatch - Internal wrapper for NodesByIdsMulti dispatch
-// ============================================================================
-
-/// Internal dispatch wrapper for NodesByIdsMulti query execution.
-#[derive(Debug)]
-pub(crate) struct NodesByIdsMultiDispatch {
-    /// The underlying graph query params
-    pub(crate) params: graph::query::NodesByIdsMulti,
-
-    /// Channel to send the result back to the client
-    /// Returns (id, node_name, node_summary) tuples for found nodes
-    result_tx: oneshot::Sender<Result<Vec<(Id, NodeName, NodeSummary)>>>,
-}
-
-impl NodesByIdsMultiDispatch {
-    fn send_result(self, result: Result<Vec<(Id, NodeName, NodeSummary)>>) {
-        let _ = self.result_tx.send(result);
-    }
-
-    pub(crate) async fn execute(
-        &self,
-        storage: &super::reader::CompositeStorage,
-    ) -> Result<Vec<(Id, NodeName, NodeSummary)>> {
-        use crate::graph::query::NodesByIdsMultiDispatch as GraphNodesByIdsMultiDispatch;
-        use crate::graph::reader::Processor as GraphProcessor;
-
-        let graph_storage = GraphProcessor::storage(storage.graph.as_ref());
-        GraphNodesByIdsMultiDispatch::execute_params(&self.params, graph_storage).await
-    }
-
-    pub(crate) async fn process_and_send(self, storage: &super::reader::CompositeStorage) {
-        let result = self.execute(storage).await;
-        self.send_result(result);
-    }
-}
-
-// ============================================================================
-// OutgoingEdgesDispatch - Internal wrapper for OutgoingEdges dispatch
-// ============================================================================
-
-/// Internal dispatch wrapper for OutgoingEdges query execution.
-#[derive(Debug)]
-pub(crate) struct OutgoingEdgesDispatch {
-    /// The underlying graph query params
-    pub(crate) params: graph::query::OutgoingEdges,
-
-    /// Channel to send the result back to the client
-    /// Returns (weight, src_id, dst_id, edge_name) tuples
-    result_tx: oneshot::Sender<Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>>>,
-}
-
-impl OutgoingEdgesDispatch {
-    fn send_result(self, result: Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>>) {
-        let _ = self.result_tx.send(result);
-    }
-
-    pub(crate) async fn execute(
-        &self,
-        storage: &super::reader::CompositeStorage,
-    ) -> Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>> {
-        use crate::graph::query::OutgoingEdgesDispatch as GraphOutgoingEdgesDispatch;
-        use crate::graph::reader::Processor as GraphProcessor;
-
-        let graph_storage = GraphProcessor::storage(storage.graph.as_ref());
-        GraphOutgoingEdgesDispatch::execute_params(&self.params, graph_storage).await
-    }
-
-    pub(crate) async fn process_and_send(self, storage: &super::reader::CompositeStorage) {
-        let result = self.execute(storage).await;
-        self.send_result(result);
-    }
-}
-
-// ============================================================================
-// IncomingEdgesDispatch - Internal wrapper for IncomingEdges dispatch
-// ============================================================================
-
-/// Internal dispatch wrapper for IncomingEdges query execution.
-#[derive(Debug)]
-pub(crate) struct IncomingEdgesDispatch {
-    /// The underlying graph query params
-    pub(crate) params: graph::query::IncomingEdges,
-
-    /// Channel to send the result back to the client
-    /// Returns (weight, dst_id, src_id, edge_name) tuples
-    result_tx: oneshot::Sender<Result<Vec<(Option<f64>, DstId, SrcId, EdgeName)>>>,
-}
-
-impl IncomingEdgesDispatch {
-    fn send_result(self, result: Result<Vec<(Option<f64>, DstId, SrcId, EdgeName)>>) {
-        let _ = self.result_tx.send(result);
-    }
-
-    pub(crate) async fn execute(
-        &self,
-        storage: &super::reader::CompositeStorage,
-    ) -> Result<Vec<(Option<f64>, DstId, SrcId, EdgeName)>> {
-        use crate::graph::query::IncomingEdgesDispatch as GraphIncomingEdgesDispatch;
-        use crate::graph::reader::Processor as GraphProcessor;
-
-        let graph_storage = GraphProcessor::storage(storage.graph.as_ref());
-        GraphIncomingEdgesDispatch::execute_params(&self.params, graph_storage).await
-    }
-
-    pub(crate) async fn process_and_send(self, storage: &super::reader::CompositeStorage) {
-        let result = self.execute(storage).await;
-        self.send_result(result);
-    }
-}
-
-// ============================================================================
-// EdgeDetailsDispatch - Internal wrapper for EdgeSummaryBySrcDstName dispatch
-// ============================================================================
-
-/// Internal dispatch wrapper for EdgeSummaryBySrcDstName query execution.
-#[derive(Debug)]
-pub(crate) struct EdgeDetailsDispatch {
-    /// The underlying graph query params
-    pub(crate) params: graph::query::EdgeSummaryBySrcDstName,
-
-    /// Channel to send the result back to the client
-    /// Returns (weight, src_id, dst_id, edge_name, edge_summary) tuples
-    result_tx: oneshot::Sender<Result<EdgeDetailsResult>>,
-}
-
-impl EdgeDetailsDispatch {
-    fn send_result(self, result: Result<EdgeDetailsResult>) {
-        let _ = self.result_tx.send(result);
-    }
-
-    pub(crate) async fn execute(
-        &self,
-        storage: &super::reader::CompositeStorage,
-    ) -> Result<EdgeDetailsResult> {
-        use crate::graph::query::EdgeSummaryBySrcDstNameDispatch;
-        use crate::graph::reader::Processor as GraphProcessor;
-
-        let graph_storage = GraphProcessor::storage(storage.graph.as_ref());
-        let (summary, weight) =
-            EdgeSummaryBySrcDstNameDispatch::execute_params(&self.params, graph_storage).await?;
-
-        // Return EdgeDetailsResult with weight included
-        Ok((
-            weight,
-            self.params.source_id,
-            self.params.dest_id,
-            self.params.name.clone(),
-            summary,
-        ))
-    }
-
-    pub(crate) async fn process_and_send(self, storage: &super::reader::CompositeStorage) {
-        let result = self.execute(storage).await;
-        self.send_result(result);
-    }
-}
-
-// ============================================================================
-// NodeFragmentsDispatch - Internal wrapper for NodeFragmentsByIdTimeRange dispatch
-// ============================================================================
-
-/// Internal dispatch wrapper for NodeFragmentsByIdTimeRange query execution.
-#[derive(Debug)]
-pub(crate) struct NodeFragmentsDispatch {
-    /// The underlying graph query params
-    pub(crate) params: graph::query::NodeFragmentsByIdTimeRange,
-
-    /// Channel to send the result back to the client
-    result_tx: oneshot::Sender<Result<Vec<(TimestampMilli, FragmentContent)>>>,
-}
-
-impl NodeFragmentsDispatch {
-    fn send_result(self, result: Result<Vec<(TimestampMilli, FragmentContent)>>) {
-        let _ = self.result_tx.send(result);
-    }
-
-    pub(crate) async fn execute(
-        &self,
-        storage: &super::reader::CompositeStorage,
-    ) -> Result<Vec<(TimestampMilli, FragmentContent)>> {
-        use crate::graph::query::NodeFragmentsByIdTimeRangeDispatch;
-        use crate::graph::reader::Processor as GraphProcessor;
-
-        let graph_storage = GraphProcessor::storage(storage.graph.as_ref());
-        NodeFragmentsByIdTimeRangeDispatch::execute_params(&self.params, graph_storage).await
-    }
-
-    pub(crate) async fn process_and_send(self, storage: &super::reader::CompositeStorage) {
-        let result = self.execute(storage).await;
-        self.send_result(result);
-    }
-}
-
-// ============================================================================
-// EdgeFragmentsDispatch - Internal wrapper for EdgeFragmentsByIdTimeRange dispatch
-// ============================================================================
-
-/// Internal dispatch wrapper for EdgeFragmentsByIdTimeRange query execution.
-#[derive(Debug)]
-pub(crate) struct EdgeFragmentsDispatch {
-    /// The underlying graph query params
-    pub(crate) params: graph::query::EdgeFragmentsByIdTimeRange,
-
-    /// Channel to send the result back to the client
-    result_tx: oneshot::Sender<Result<Vec<(TimestampMilli, FragmentContent)>>>,
-}
-
-impl EdgeFragmentsDispatch {
-    fn send_result(self, result: Result<Vec<(TimestampMilli, FragmentContent)>>) {
-        let _ = self.result_tx.send(result);
-    }
-
-    pub(crate) async fn execute(
-        &self,
-        storage: &super::reader::CompositeStorage,
-    ) -> Result<Vec<(TimestampMilli, FragmentContent)>> {
-        use crate::graph::query::EdgeFragmentsByIdTimeRangeDispatch;
-        use crate::graph::reader::Processor as GraphProcessor;
-
-        let graph_storage = GraphProcessor::storage(storage.graph.as_ref());
-        EdgeFragmentsByIdTimeRangeDispatch::execute_params(&self.params, graph_storage).await
-    }
-
-    pub(crate) async fn process_and_send(self, storage: &super::reader::CompositeStorage) {
-        let result = self.execute(storage).await;
-        self.send_result(result);
-    }
-}
-
-// ============================================================================
-// AllNodesDispatch - Internal wrapper for AllNodes dispatch
-// ============================================================================
-
-/// Internal dispatch wrapper for AllNodes query execution.
-#[derive(Debug)]
-pub(crate) struct AllNodesDispatch {
-    /// The underlying graph query params
-    pub(crate) params: graph::query::AllNodes,
-
-    /// Channel to send the result back to the client
-    result_tx: oneshot::Sender<Result<Vec<(Id, NodeName, NodeSummary)>>>,
-}
-
-impl AllNodesDispatch {
-    fn send_result(self, result: Result<Vec<(Id, NodeName, NodeSummary)>>) {
-        let _ = self.result_tx.send(result);
-    }
-
-    pub(crate) async fn execute(
-        &self,
-        storage: &super::reader::CompositeStorage,
-    ) -> Result<Vec<(Id, NodeName, NodeSummary)>> {
-        use crate::graph::query::AllNodesDispatch as GraphAllNodesDispatch;
-        use crate::graph::reader::Processor as GraphProcessor;
-
-        let graph_storage = GraphProcessor::storage(storage.graph.as_ref());
-        GraphAllNodesDispatch::execute_params(&self.params, graph_storage).await
-    }
-
-    pub(crate) async fn process_and_send(self, storage: &super::reader::CompositeStorage) {
-        let result = self.execute(storage).await;
-        self.send_result(result);
-    }
-}
-
-// ============================================================================
-// AllEdgesDispatch - Internal wrapper for AllEdges dispatch
-// ============================================================================
-
-/// Internal dispatch wrapper for AllEdges query execution.
-#[derive(Debug)]
-pub(crate) struct AllEdgesDispatch {
-    /// The underlying graph query params
-    pub(crate) params: graph::query::AllEdges,
-
-    /// Channel to send the result back to the client
-    result_tx: oneshot::Sender<Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>>>,
-}
-
-impl AllEdgesDispatch {
-    fn send_result(self, result: Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>>) {
-        let _ = self.result_tx.send(result);
-    }
-
-    pub(crate) async fn execute(
-        &self,
-        storage: &super::reader::CompositeStorage,
-    ) -> Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>> {
-        use crate::graph::query::AllEdgesDispatch as GraphAllEdgesDispatch;
-        use crate::graph::reader::Processor as GraphProcessor;
-
-        let graph_storage = GraphProcessor::storage(storage.graph.as_ref());
-        GraphAllEdgesDispatch::execute_params(&self.params, graph_storage).await
-    }
-
-    pub(crate) async fn process_and_send(self, storage: &super::reader::CompositeStorage) {
-        let result = self.execute(storage).await;
-        self.send_result(result);
-    }
-}
-
-// ============================================================================
-// QueryProcessor Trait for Search enum
-// ============================================================================
-
-/// Trait for processing queries polymorphically.
-#[async_trait::async_trait]
-pub trait QueryProcessor: Send {
-    /// Process the query and send the result (consumes self)
-    async fn process_and_send(self, processor: &super::reader::CompositeStorage);
-}
-
-#[async_trait::async_trait]
-impl QueryProcessor for Query {
-    async fn process_and_send(self, processor: &super::reader::CompositeStorage) {
+impl RequestMeta for Query {
+    type Reply = QueryResult;
+    type Options = ();
+
+    fn request_kind(&self) -> &'static str {
         match self {
-            Query::Nodes(q) => q.process_and_send(processor).await,
-            Query::Edges(q) => q.process_and_send(processor).await,
-            Query::NodeById(q) => q.process_and_send(processor).await,
-            Query::NodesByIdsMulti(q) => q.process_and_send(processor).await,
-            Query::OutgoingEdges(q) => q.process_and_send(processor).await,
-            Query::IncomingEdges(q) => q.process_and_send(processor).await,
-            Query::EdgeDetails(q) => q.process_and_send(processor).await,
-            Query::NodeFragments(q) => q.process_and_send(processor).await,
-            Query::EdgeFragments(q) => q.process_and_send(processor).await,
-            Query::AllNodes(q) => q.process_and_send(processor).await,
-            Query::AllEdges(q) => q.process_and_send(processor).await,
+            Query::Nodes(_) => "unified_nodes",
+            Query::Edges(_) => "unified_edges",
+            Query::NodeById(_) => "node_by_id",
+            Query::NodesByIdsMulti(_) => "nodes_by_ids_multi",
+            Query::OutgoingEdges(_) => "outgoing_edges",
+            Query::IncomingEdges(_) => "incoming_edges",
+            Query::EdgeDetails(_) => "edge_details",
+            Query::NodeFragments(_) => "node_fragments",
+            Query::EdgeFragments(_) => "edge_fragments",
+            Query::AllNodes(_) => "all_nodes",
+            Query::AllEdges(_) => "all_edges",
         }
     }
+}
+
+pub type QueryRequest = RequestEnvelope<Query>;
+
+impl Query {
+    pub async fn execute(&self, storage: &super::reader::CompositeStorage) -> Result<QueryResult> {
+        match self {
+            Query::Nodes(q) => execute_nodes_query(q, storage).await.map(QueryResult::Nodes),
+            Query::Edges(q) => execute_edges_query(q, storage).await.map(QueryResult::Edges),
+            Query::NodeById(q) => q.execute(storage.graph.storage().as_ref()).await.map(QueryResult::NodeById),
+            Query::NodesByIdsMulti(q) => {
+                q.execute(storage.graph.storage().as_ref()).await.map(QueryResult::NodesByIdsMulti)
+            }
+            Query::OutgoingEdges(q) => {
+                q.execute(storage.graph.storage().as_ref()).await.map(QueryResult::OutgoingEdges)
+            }
+            Query::IncomingEdges(q) => {
+                q.execute(storage.graph.storage().as_ref()).await.map(QueryResult::IncomingEdges)
+            }
+            Query::EdgeDetails(q) => {
+                let (summary, weight) = q.execute(storage.graph.storage().as_ref()).await?;
+                Ok(QueryResult::EdgeDetails((
+                    weight,
+                    q.source_id,
+                    q.dest_id,
+                    q.name.clone(),
+                    summary,
+                )))
+            }
+            Query::NodeFragments(q) => {
+                q.execute(storage.graph.storage().as_ref()).await.map(QueryResult::NodeFragments)
+            }
+            Query::EdgeFragments(q) => {
+                q.execute(storage.graph.storage().as_ref()).await.map(QueryResult::EdgeFragments)
+            }
+            Query::AllNodes(q) => q.execute(storage.graph.storage().as_ref()).await.map(QueryResult::AllNodes),
+            Query::AllEdges(q) => q.execute(storage.graph.storage().as_ref()).await.map(QueryResult::AllEdges),
+        }
+    }
+}
+
+async fn execute_nodes_query(
+    query: &NodesQuery,
+    storage: &super::reader::CompositeStorage,
+) -> Result<Vec<NodeResult>> {
+    use crate::fulltext::reader::Processor as FulltextProcessor;
+    use crate::graph::reader::Processor as GraphProcessor;
+
+    let fulltext_storage = FulltextProcessor::storage(storage.fulltext.as_ref());
+    let hits: Vec<NodeHit> = fulltext::query::Nodes::execute_params(&query.params, fulltext_storage).await?;
+
+    let graph_storage = GraphProcessor::storage(storage.graph.as_ref());
+    let mut results = Vec::with_capacity(hits.len());
+
+    for hit in hits.into_iter().skip(query.offset) {
+        let query = graph::query::NodeById::new(hit.id, None);
+        match query.execute(graph_storage).await {
+            Ok((name, summary)) => results.push((hit.id, name, summary)),
+            Err(_) => {
+                tracing::debug!(id = %hit.id, "Node in fulltext but not in graph, skipping");
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+async fn execute_edges_query(
+    query: &EdgesQuery,
+    storage: &super::reader::CompositeStorage,
+) -> Result<Vec<EdgeResult>> {
+    use crate::fulltext::reader::Processor as FulltextProcessor;
+    use crate::graph::reader::Processor as GraphProcessor;
+
+    let fulltext_storage = FulltextProcessor::storage(storage.fulltext.as_ref());
+    let hits: Vec<EdgeHit> = fulltext::query::Edges::execute_params(&query.params, fulltext_storage).await?;
+
+    let graph_storage = GraphProcessor::storage(storage.graph.as_ref());
+    let mut results = Vec::with_capacity(hits.len());
+
+    for hit in hits.into_iter().skip(query.offset) {
+        let query = graph::query::EdgeSummaryBySrcDstName::new(
+            hit.src_id,
+            hit.dst_id,
+            hit.edge_name.clone(),
+            None,
+        );
+        match query.execute(graph_storage).await {
+            Ok((summary, _weight)) => results.push((hit.src_id, hit.dst_id, hit.edge_name, summary)),
+            Err(_) => {
+                tracing::debug!(
+                    src_id = %hit.src_id,
+                    dst_id = %hit.dst_id,
+                    edge_name = %hit.edge_name,
+                    "Edge in fulltext but not in graph, skipping"
+                );
+            }
+        }
+    }
+
+    Ok(results)
 }
 
 // ============================================================================
@@ -888,347 +523,258 @@ impl<T> WithOffset for T {
     }
 }
 
-#[async_trait::async_trait]
-impl Runnable<super::reader::Reader> for Nodes {
-    type Output = Vec<NodeResult>;
+// ============================================================================
+// QueryReply - typed replies for unified queries
+// ============================================================================
 
-    async fn run(self, reader: &super::reader::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = oneshot::channel();
-
-        let dispatch = NodesDispatch {
-            params: self,
-            offset: 0,
-            result_tx,
-        };
-
-        reader.send_query(Query::Nodes(dispatch)).await?;
-
-        match tokio::time::timeout(timeout, result_rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(anyhow::anyhow!("Query channel closed")),
-            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", timeout)),
-        }
-    }
+pub trait QueryReply: Send {
+    type Reply: Send + 'static;
+    fn into_query(self) -> Query;
+    fn from_result(result: QueryResult) -> Result<Self::Reply>;
 }
 
 #[async_trait::async_trait]
-impl Runnable<super::reader::Reader> for QueryWithOffset<Nodes> {
-    type Output = Vec<NodeResult>;
+impl<Q> Runnable<super::reader::Reader> for Q
+where
+    Q: QueryReply,
+{
+    type Output = Q::Reply;
 
     async fn run(self, reader: &super::reader::Reader, timeout: Duration) -> Result<Self::Output> {
         let (result_tx, result_rx) = oneshot::channel();
-
-        let dispatch = NodesDispatch {
-            params: self.query,
-            offset: self.offset,
-            result_tx,
+        let request = QueryRequest {
+            payload: self.into_query(),
+            options: (),
+            reply: Some(result_tx),
+            timeout: Some(timeout),
+            request_id: new_request_id(),
+            created_at: Instant::now(),
         };
 
-        reader.send_query(Query::Nodes(dispatch)).await?;
-
-        match tokio::time::timeout(timeout, result_rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(anyhow::anyhow!("Query channel closed")),
-            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", timeout)),
-        }
+        reader.send_query(request).await?;
+        let result = result_rx.await??;
+        Q::from_result(result)
     }
 }
-
-// ============================================================================
-// Runnable<reader::Reader> Implementation for Edges
-// ============================================================================
-
-#[async_trait::async_trait]
-impl Runnable<super::reader::Reader> for Edges {
-    type Output = Vec<EdgeResult>;
-
-    async fn run(self, reader: &super::reader::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = oneshot::channel();
-
-        let dispatch = EdgesDispatch {
-            params: self,
-            offset: 0,
-            result_tx,
-        };
-
-        reader.send_query(Query::Edges(dispatch)).await?;
-
-        match tokio::time::timeout(timeout, result_rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(anyhow::anyhow!("Query channel closed")),
-            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", timeout)),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl Runnable<super::reader::Reader> for QueryWithOffset<Edges> {
-    type Output = Vec<EdgeResult>;
-
-    async fn run(self, reader: &super::reader::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = oneshot::channel();
-
-        let dispatch = EdgesDispatch {
-            params: self.query,
-            offset: self.offset,
-            result_tx,
-        };
-
-        reader.send_query(Query::Edges(dispatch)).await?;
-
-        match tokio::time::timeout(timeout, result_rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(anyhow::anyhow!("Query channel closed")),
-            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", timeout)),
-        }
-    }
-}
-
-// ============================================================================
-// Runnable<reader::Reader> Implementation for EdgeDetails (EdgeSummaryBySrcDstName)
-// ============================================================================
-
-#[async_trait::async_trait]
-impl Runnable<super::reader::Reader> for EdgeDetails {
-    type Output = EdgeDetailsResult;
-
-    async fn run(self, reader: &super::reader::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = oneshot::channel();
-
-        let dispatch = EdgeDetailsDispatch {
-            params: self,
-            result_tx,
-        };
-
-        reader.send_query(Query::EdgeDetails(dispatch)).await?;
-
-        match tokio::time::timeout(timeout, result_rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(anyhow::anyhow!("Query channel closed")),
-            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", timeout)),
-        }
-    }
-}
-
-// ============================================================================
-// Runnable<reader::Reader> Implementation for NodeFragments (NodeFragmentsByIdTimeRange)
-// ============================================================================
-
-#[async_trait::async_trait]
-impl Runnable<super::reader::Reader> for NodeFragments {
-    type Output = Vec<(TimestampMilli, FragmentContent)>;
-
-    async fn run(self, reader: &super::reader::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = oneshot::channel();
-
-        let dispatch = NodeFragmentsDispatch {
-            params: self,
-            result_tx,
-        };
-
-        reader.send_query(Query::NodeFragments(dispatch)).await?;
-
-        match tokio::time::timeout(timeout, result_rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(anyhow::anyhow!("Query channel closed")),
-            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", timeout)),
-        }
-    }
-}
-
-// ============================================================================
-// Runnable<reader::Reader> Implementation for EdgeFragments (EdgeFragmentsByIdTimeRange)
-// ============================================================================
-
-#[async_trait::async_trait]
-impl Runnable<super::reader::Reader> for EdgeFragments {
-    type Output = Vec<(TimestampMilli, FragmentContent)>;
-
-    async fn run(self, reader: &super::reader::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = oneshot::channel();
-
-        let dispatch = EdgeFragmentsDispatch {
-            params: self,
-            result_tx,
-        };
-
-        reader.send_query(Query::EdgeFragments(dispatch)).await?;
-
-        match tokio::time::timeout(timeout, result_rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(anyhow::anyhow!("Query channel closed")),
-            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", timeout)),
-        }
-    }
-}
-
-// ============================================================================
-// Runnable<reader::Reader> Implementation for NodeById
-// ============================================================================
-
-#[async_trait::async_trait]
-impl Runnable<super::reader::Reader> for NodeById {
-    type Output = (NodeName, NodeSummary);
-
-    async fn run(self, reader: &super::reader::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = oneshot::channel();
-
-        let dispatch = NodeByIdDispatch {
-            params: self,
-            result_tx,
-        };
-
-        reader.send_query(Query::NodeById(dispatch)).await?;
-
-        match tokio::time::timeout(timeout, result_rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(anyhow::anyhow!("Query channel closed")),
-            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", timeout)),
-        }
-    }
-}
-
-// ============================================================================
-// Runnable<reader::Reader> Implementation for NodesByIdsMulti
-// ============================================================================
 
 /// Result type for NodesByIdsMulti query: (id, node_name, node_summary)
 pub type NodesByIdsMultiResult = Vec<(Id, NodeName, NodeSummary)>;
 
-#[async_trait::async_trait]
-impl Runnable<super::reader::Reader> for NodesByIdsMulti {
-    type Output = NodesByIdsMultiResult;
-
-    async fn run(self, reader: &super::reader::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = oneshot::channel();
-
-        let dispatch = NodesByIdsMultiDispatch {
-            params: self,
-            result_tx,
-        };
-
-        reader.send_query(Query::NodesByIdsMulti(dispatch)).await?;
-
-        match tokio::time::timeout(timeout, result_rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(anyhow::anyhow!("Query channel closed")),
-            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", timeout)),
-        }
-    }
-}
-
-// ============================================================================
-// Runnable<reader::Reader> Implementation for OutgoingEdges
-// ============================================================================
-
 /// Result type for OutgoingEdges query: (weight, src_id, dst_id, edge_name)
 pub type OutgoingEdgesResult = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
-
-#[async_trait::async_trait]
-impl Runnable<super::reader::Reader> for OutgoingEdges {
-    type Output = OutgoingEdgesResult;
-
-    async fn run(self, reader: &super::reader::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = oneshot::channel();
-
-        let dispatch = OutgoingEdgesDispatch {
-            params: self,
-            result_tx,
-        };
-
-        reader.send_query(Query::OutgoingEdges(dispatch)).await?;
-
-        match tokio::time::timeout(timeout, result_rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(anyhow::anyhow!("Query channel closed")),
-            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", timeout)),
-        }
-    }
-}
-
-// ============================================================================
-// Runnable<reader::Reader> Implementation for IncomingEdges
-// ============================================================================
 
 /// Result type for IncomingEdges query: (weight, dst_id, src_id, edge_name)
 pub type IncomingEdgesResult = Vec<(Option<f64>, DstId, SrcId, EdgeName)>;
 
-#[async_trait::async_trait]
-impl Runnable<super::reader::Reader> for IncomingEdges {
-    type Output = IncomingEdgesResult;
-
-    async fn run(self, reader: &super::reader::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = oneshot::channel();
-
-        let dispatch = IncomingEdgesDispatch {
-            params: self,
-            result_tx,
-        };
-
-        reader.send_query(Query::IncomingEdges(dispatch)).await?;
-
-        match tokio::time::timeout(timeout, result_rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(anyhow::anyhow!("Query channel closed")),
-            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", timeout)),
-        }
-    }
-}
-
-// ============================================================================
-// Runnable<reader::Reader> Implementation for AllNodes
-// ============================================================================
-
 /// Result type for AllNodes query: (id, node_name, node_summary)
 pub type AllNodesResult = Vec<(Id, NodeName, NodeSummary)>;
-
-#[async_trait::async_trait]
-impl Runnable<super::reader::Reader> for AllNodes {
-    type Output = AllNodesResult;
-
-    async fn run(self, reader: &super::reader::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = oneshot::channel();
-
-        let dispatch = AllNodesDispatch {
-            params: self,
-            result_tx,
-        };
-
-        reader.send_query(Query::AllNodes(dispatch)).await?;
-
-        match tokio::time::timeout(timeout, result_rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(anyhow::anyhow!("Query channel closed")),
-            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", timeout)),
-        }
-    }
-}
-
-// ============================================================================
-// Runnable<reader::Reader> Implementation for AllEdges
-// ============================================================================
 
 /// Result type for AllEdges query: (weight, src_id, dst_id, edge_name)
 pub type AllEdgesResult = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
 
-#[async_trait::async_trait]
-impl Runnable<super::reader::Reader> for AllEdges {
-    type Output = AllEdgesResult;
+impl QueryReply for Nodes {
+    type Reply = Vec<NodeResult>;
 
-    async fn run(self, reader: &super::reader::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = oneshot::channel();
-
-        let dispatch = AllEdgesDispatch {
+    fn into_query(self) -> Query {
+        Query::Nodes(NodesQuery {
             params: self,
-            result_tx,
-        };
+            offset: 0,
+        })
+    }
 
-        reader.send_query(Query::AllEdges(dispatch)).await?;
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::Nodes(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
+    }
+}
 
-        match tokio::time::timeout(timeout, result_rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(anyhow::anyhow!("Query channel closed")),
-            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", timeout)),
+impl QueryReply for QueryWithOffset<Nodes> {
+    type Reply = Vec<NodeResult>;
+
+    fn into_query(self) -> Query {
+        Query::Nodes(NodesQuery {
+            params: self.query,
+            offset: self.offset,
+        })
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::Nodes(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
+    }
+}
+
+impl QueryReply for Edges {
+    type Reply = Vec<EdgeResult>;
+
+    fn into_query(self) -> Query {
+        Query::Edges(EdgesQuery {
+            params: self,
+            offset: 0,
+        })
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::Edges(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
+    }
+}
+
+impl QueryReply for QueryWithOffset<Edges> {
+    type Reply = Vec<EdgeResult>;
+
+    fn into_query(self) -> Query {
+        Query::Edges(EdgesQuery {
+            params: self.query,
+            offset: self.offset,
+        })
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::Edges(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
+    }
+}
+
+impl QueryReply for EdgeDetails {
+    type Reply = EdgeDetailsResult;
+
+    fn into_query(self) -> Query {
+        Query::EdgeDetails(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::EdgeDetails(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
+    }
+}
+
+impl QueryReply for NodeFragments {
+    type Reply = Vec<(TimestampMilli, FragmentContent)>;
+
+    fn into_query(self) -> Query {
+        Query::NodeFragments(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::NodeFragments(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
+    }
+}
+
+impl QueryReply for EdgeFragments {
+    type Reply = Vec<(TimestampMilli, FragmentContent)>;
+
+    fn into_query(self) -> Query {
+        Query::EdgeFragments(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::EdgeFragments(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
+    }
+}
+
+impl QueryReply for NodeById {
+    type Reply = (NodeName, NodeSummary);
+
+    fn into_query(self) -> Query {
+        Query::NodeById(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::NodeById(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
+    }
+}
+
+impl QueryReply for NodesByIdsMulti {
+    type Reply = NodesByIdsMultiResult;
+
+    fn into_query(self) -> Query {
+        Query::NodesByIdsMulti(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::NodesByIdsMulti(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
+    }
+}
+
+impl QueryReply for OutgoingEdges {
+    type Reply = OutgoingEdgesResult;
+
+    fn into_query(self) -> Query {
+        Query::OutgoingEdges(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::OutgoingEdges(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
+    }
+}
+
+impl QueryReply for IncomingEdges {
+    type Reply = IncomingEdgesResult;
+
+    fn into_query(self) -> Query {
+        Query::IncomingEdges(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::IncomingEdges(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
+    }
+}
+
+impl QueryReply for AllNodes {
+    type Reply = AllNodesResult;
+
+    fn into_query(self) -> Query {
+        Query::AllNodes(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::AllNodes(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
+    }
+}
+
+impl QueryReply for AllEdges {
+    type Reply = AllEdgesResult;
+
+    fn into_query(self) -> Query {
+        Query::AllEdges(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::AllEdges(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
         }
     }
 }

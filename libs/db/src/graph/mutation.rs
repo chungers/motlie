@@ -14,11 +14,96 @@ use super::name_hash::NameHash;
 use super::ops;
 use super::schema::{
     self, EdgeFragmentCfKey, EdgeFragmentCfValue, EdgeFragments, NodeFragmentCfKey,
-    NodeFragmentCfValue, NodeFragments,
+    NodeFragmentCfValue, NodeFragments, Version,
 };
 use super::writer::{MutationExecutor, Writer};
 use crate::writer::Runnable;
 use crate::{Id, TimestampMilli};
+use crate::request::{ReplyEnvelope, RequestMeta};
+
+// ============================================================================
+// Execution Options + Replies
+// ============================================================================
+
+/// Execution options applied at runtime (not part of mutation payload).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ExecOptions {
+    pub dry_run: bool,
+}
+
+/// Mutation execution result used by run_with_result paths.
+#[derive(Debug, Clone)]
+pub enum MutationResult {
+    AddNode { id: Id, version: Version },
+    AddEdge { version: Version },
+    AddNodeFragment,
+    AddEdgeFragment,
+    UpdateNode { id: Id, version: Version },
+    UpdateEdge { version: Version },
+    DeleteNode { id: Id, version: Version },
+    DeleteEdge { version: Version },
+    RestoreNode { id: Id, version: Version },
+    RestoreEdge { version: Version },
+    Flush,
+}
+
+impl MutationResult {
+    fn as_update_node(self) -> Result<(Id, Version)> {
+        match self {
+            MutationResult::UpdateNode { id, version } => Ok((id, version)),
+            other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
+        }
+    }
+
+    fn as_add_node(self) -> Result<(Id, Version)> {
+        match self {
+            MutationResult::AddNode { id, version } => Ok((id, version)),
+            other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
+        }
+    }
+
+    fn as_restore_node(self) -> Result<(Id, Version)> {
+        match self {
+            MutationResult::RestoreNode { id, version } => Ok((id, version)),
+            other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
+        }
+    }
+
+    fn as_delete_node(self) -> Result<(Id, Version)> {
+        match self {
+            MutationResult::DeleteNode { id, version } => Ok((id, version)),
+            other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
+        }
+    }
+
+    fn as_add_edge(self) -> Result<Version> {
+        match self {
+            MutationResult::AddEdge { version } => Ok(version),
+            other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
+        }
+    }
+
+    fn as_update_edge(self) -> Result<Version> {
+        match self {
+            MutationResult::UpdateEdge { version } => Ok(version),
+            other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
+        }
+    }
+
+    fn as_restore_edge(self) -> Result<Version> {
+        match self {
+            MutationResult::RestoreEdge { version } => Ok(version),
+            other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
+        }
+    }
+
+    fn as_delete_edge(self) -> Result<Version> {
+        match self {
+            MutationResult::DeleteEdge { version } => Ok(version),
+            other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
+        }
+    }
+}
 
 // ============================================================================
 // Flush Marker
@@ -104,10 +189,9 @@ pub enum Mutation {
     DeleteNode(DeleteNode),
     DeleteEdge(DeleteEdge),
     // (codex, 2026-02-07, eval: VERSIONING plan includes RestoreNode/RestoreEdge and rollback mutations; missing here, so rollback API is incomplete.)
-    // (claude, 2026-02-07, FIXED: Added RestoreNode/RestoreEdge/RestoreEdges mutations below)
+    // (claude, 2026-02-07, FIXED: Added RestoreNode/RestoreEdge mutations below)
     RestoreNode(RestoreNode),
     RestoreEdge(RestoreEdge),
-    RestoreEdges(RestoreEdges),
 
     /// Flush marker for synchronization.
     ///
@@ -138,6 +222,15 @@ pub struct AddNode {
     pub summary: schema::NodeSummary,
 }
 
+impl RequestMeta for AddNode {
+    type Reply = ReplyEnvelope<(Id, Version)>;
+    type Options = ExecOptions;
+
+    fn request_kind(&self) -> &'static str {
+        "add_node"
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AddEdge {
     /// The UUID of the source Node
@@ -162,6 +255,15 @@ pub struct AddEdge {
     pub weight: Option<f64>,
 }
 
+impl RequestMeta for AddEdge {
+    type Reply = ReplyEnvelope<Version>;
+    type Options = ExecOptions;
+
+    fn request_kind(&self) -> &'static str {
+        "add_edge"
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AddNodeFragment {
     /// The UUID of the Node this fragment belongs to
@@ -175,6 +277,15 @@ pub struct AddNodeFragment {
 
     /// The temporal validity range for this fragment
     pub valid_range: Option<schema::ActivePeriod>,
+}
+
+impl RequestMeta for AddNodeFragment {
+    type Reply = ReplyEnvelope<()>;
+    type Options = ExecOptions;
+
+    fn request_kind(&self) -> &'static str {
+        "add_node_fragment"
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -196,6 +307,15 @@ pub struct AddEdgeFragment {
 
     /// The temporal validity range for this fragment
     pub valid_range: Option<schema::ActivePeriod>,
+}
+
+impl RequestMeta for AddEdgeFragment {
+    type Reply = ReplyEnvelope<()>;
+    type Options = ExecOptions;
+
+    fn request_kind(&self) -> &'static str {
+        "add_edge_fragment"
+    }
 }
 
 /// Consolidated node update mutation with optimistic locking.
@@ -239,6 +359,15 @@ pub struct UpdateNode {
 
     /// Optional: Update node summary/description
     pub new_summary: Option<schema::NodeSummary>,
+}
+
+impl RequestMeta for UpdateNode {
+    type Reply = ReplyEnvelope<(Id, Version)>;
+    type Options = ExecOptions;
+
+    fn request_kind(&self) -> &'static str {
+        "update_node"
+    }
 }
 
 /// Consolidated edge update mutation with optimistic locking.
@@ -299,6 +428,15 @@ pub struct UpdateEdge {
     pub new_summary: Option<schema::EdgeSummary>,
 }
 
+impl RequestMeta for UpdateEdge {
+    type Reply = ReplyEnvelope<schema::Version>;
+    type Options = ExecOptions;
+
+    fn request_kind(&self) -> &'static str {
+        "update_edge"
+    }
+}
+
 
 
 /// Delete a node with tombstone semantics.
@@ -319,6 +457,15 @@ pub struct DeleteNode {
     pub expected_version: schema::Version,
 }
 
+impl RequestMeta for DeleteNode {
+    type Reply = ReplyEnvelope<(Id, Version)>;
+    type Options = ExecOptions;
+
+    fn request_kind(&self) -> &'static str {
+        "delete_node"
+    }
+}
+
 /// Delete an edge with tombstone semantics.
 #[derive(Debug, Clone)]
 pub struct DeleteEdge {
@@ -335,6 +482,15 @@ pub struct DeleteEdge {
     pub expected_version: schema::Version,
 }
 
+impl RequestMeta for DeleteEdge {
+    type Reply = ReplyEnvelope<Version>;
+    type Options = ExecOptions;
+
+    fn request_kind(&self) -> &'static str {
+        "delete_edge"
+    }
+}
+
 // (claude, 2026-02-07, FIXED: Added RestoreNode/RestoreEdge for VERSIONING rollback API)
 // (claude, 2026-02-07, FIXED: Changed to as_of timestamp per Codex Item 1 review)
 
@@ -349,6 +505,18 @@ pub struct RestoreNode {
 
     /// The timestamp to restore to (finds version active at this time)
     pub as_of: crate::TimestampMilli,
+
+    /// Optional optimistic check against current version (if present).
+    pub expected_version: Option<Version>,
+}
+
+impl RequestMeta for RestoreNode {
+    type Reply = ReplyEnvelope<(Id, Version)>;
+    type Options = ExecOptions;
+
+    fn request_kind(&self) -> &'static str {
+        "restore_node"
+    }
 }
 
 /// Restore an edge to state at a previous time.
@@ -368,47 +536,107 @@ pub struct RestoreEdge {
 
     /// The timestamp to restore to (finds version active at this time)
     pub as_of: crate::TimestampMilli,
+
+    /// Optional optimistic check against current version (if present).
+    pub expected_version: Option<Version>,
 }
 
-/// Restore all outgoing edges from a source node to state at a previous time.
-/// (claude, 2026-02-07, FIXED: Added RestoreEdges batch API per VERSIONING.md)
-///
-/// VERSIONING rollback: Finds all edges from src (optionally filtered by name),
-/// looks up their state at `as_of` time in EdgeVersionHistory, and creates
-/// new current edges with that state. Strict by default (missing summaries
-/// fail); set `dry_run` to validate and use `Transaction::validate_restore_edges`
-/// for a structured report.
-#[derive(Debug, Clone)]
-pub struct RestoreEdges {
-    /// The UUID of the source Node
-    pub src_id: Id,
+impl RequestMeta for RestoreEdge {
+    type Reply = ReplyEnvelope<Version>;
+    type Options = ExecOptions;
 
-    /// Optional edge name filter (None = restore all edge names)
-    pub name: Option<schema::EdgeName>,
-
-    /// The timestamp to restore to (finds version active at this time)
-    pub as_of: crate::TimestampMilli,
-
-    /// Dry run: validate and report blockers without writing.
-    pub dry_run: bool,
+    fn request_kind(&self) -> &'static str {
+        "restore_edge"
+    }
 }
 
-#[derive(Debug, Clone)]
-pub struct RestoreEdgesReport {
-    pub candidates: u32,
-    pub restorable: u32,
-    pub skipped_no_version: Vec<(Id, NameHash)>,
+// ============================================================================
+// MutationReply - typed reply mapping for each mutation type
+// ============================================================================
+
+impl MutationReply for AddNode {
+    type Reply = (Id, Version);
+
+    fn from_result(result: MutationResult) -> Result<Self::Reply> {
+        result.as_add_node()
+    }
 }
 
-impl RestoreEdges {
-    /// Create a RestoreEdges request (strict, writes enabled by default).
-    pub fn new(src_id: Id, name: Option<schema::EdgeName>, as_of: crate::TimestampMilli) -> Self {
-        Self {
-            src_id,
-            name,
-            as_of,
-            dry_run: false,
+impl MutationReply for AddEdge {
+    type Reply = Version;
+
+    fn from_result(result: MutationResult) -> Result<Self::Reply> {
+        result.as_add_edge()
+    }
+}
+
+impl MutationReply for AddNodeFragment {
+    type Reply = ();
+
+    fn from_result(result: MutationResult) -> Result<Self::Reply> {
+        match result {
+            MutationResult::AddNodeFragment => Ok(()),
+            other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
         }
+    }
+}
+
+impl MutationReply for AddEdgeFragment {
+    type Reply = ();
+
+    fn from_result(result: MutationResult) -> Result<Self::Reply> {
+        match result {
+            MutationResult::AddEdgeFragment => Ok(()),
+            other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
+        }
+    }
+}
+
+impl MutationReply for UpdateNode {
+    type Reply = (Id, Version);
+
+    fn from_result(result: MutationResult) -> Result<Self::Reply> {
+        result.as_update_node()
+    }
+}
+
+impl MutationReply for UpdateEdge {
+    type Reply = Version;
+
+    fn from_result(result: MutationResult) -> Result<Self::Reply> {
+        result.as_update_edge()
+    }
+}
+
+impl MutationReply for DeleteNode {
+    type Reply = (Id, Version);
+
+    fn from_result(result: MutationResult) -> Result<Self::Reply> {
+        result.as_delete_node()
+    }
+}
+
+impl MutationReply for DeleteEdge {
+    type Reply = Version;
+
+    fn from_result(result: MutationResult) -> Result<Self::Reply> {
+        result.as_delete_edge()
+    }
+}
+
+impl MutationReply for RestoreNode {
+    type Reply = (Id, Version);
+
+    fn from_result(result: MutationResult) -> Result<Self::Reply> {
+        result.as_restore_node()
+    }
+}
+
+impl MutationReply for RestoreEdge {
+    type Reply = Version;
+
+    fn from_result(result: MutationResult) -> Result<Self::Reply> {
+        result.as_restore_edge()
     }
 }
 
@@ -447,7 +675,7 @@ impl MutationExecutor for AddNode {
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
     ) -> Result<()> {
-        ops::node::add_node(txn, txn_db, self, None)
+        ops::node::add_node(txn, txn_db, self, None).map(|_| ())
     }
 
     fn execute_with_cache(
@@ -456,7 +684,21 @@ impl MutationExecutor for AddNode {
         txn_db: &rocksdb::TransactionDB,
         cache: &super::name_hash::NameCache,
     ) -> Result<()> {
-        ops::node::add_node(txn, txn_db, self, Some(cache))
+        ops::node::add_node(txn, txn_db, self, Some(cache)).map(|_| ())
+    }
+
+    fn execute_with_cache_and_options(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        cache: &super::name_hash::NameCache,
+        _options: ExecOptions,
+    ) -> Result<MutationResult> {
+        let (node_id, version) = ops::node::add_node(txn, txn_db, self, Some(cache))?;
+        Ok(MutationResult::AddNode {
+            id: node_id,
+            version,
+        })
     }
 }
 
@@ -466,7 +708,7 @@ impl MutationExecutor for AddEdge {
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
     ) -> Result<()> {
-        ops::edge::add_edge(txn, txn_db, self, None)
+        ops::edge::add_edge(txn, txn_db, self, None).map(|_| ())
     }
 
     fn execute_with_cache(
@@ -475,7 +717,18 @@ impl MutationExecutor for AddEdge {
         txn_db: &rocksdb::TransactionDB,
         cache: &super::name_hash::NameCache,
     ) -> Result<()> {
-        ops::edge::add_edge(txn, txn_db, self, Some(cache))
+        ops::edge::add_edge(txn, txn_db, self, Some(cache)).map(|_| ())
+    }
+
+    fn execute_with_cache_and_options(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        cache: &super::name_hash::NameCache,
+        _options: ExecOptions,
+    ) -> Result<MutationResult> {
+        let version = ops::edge::add_edge(txn, txn_db, self, Some(cache))?;
+        Ok(MutationResult::AddEdge { version })
     }
 }
 
@@ -486,6 +739,16 @@ impl MutationExecutor for AddNodeFragment {
         txn_db: &rocksdb::TransactionDB,
     ) -> Result<()> {
         ops::fragment::add_node_fragment(txn, txn_db, self)
+    }
+
+    fn execute_with_options(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        _options: ExecOptions,
+    ) -> Result<MutationResult> {
+        self.execute(txn, txn_db)?;
+        Ok(MutationResult::AddNodeFragment)
     }
 }
 
@@ -506,6 +769,16 @@ impl MutationExecutor for AddEdgeFragment {
     ) -> Result<()> {
         ops::fragment::add_edge_fragment(txn, txn_db, self, Some(cache))
     }
+
+    fn execute_with_options(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        _options: ExecOptions,
+    ) -> Result<MutationResult> {
+        self.execute(txn, txn_db)?;
+        Ok(MutationResult::AddEdgeFragment)
+    }
 }
 
 impl MutationExecutor for UpdateNode {
@@ -516,7 +789,20 @@ impl MutationExecutor for UpdateNode {
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
     ) -> Result<()> {
-        ops::node::update_node(txn, txn_db, self)
+        ops::node::update_node(txn, txn_db, self).map(|_| ())
+    }
+
+    fn execute_with_options(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        _options: ExecOptions,
+    ) -> Result<MutationResult> {
+        let (node_id, version) = ops::node::update_node(txn, txn_db, self)?;
+        Ok(MutationResult::UpdateNode {
+            id: node_id,
+            version,
+        })
     }
 }
 
@@ -528,7 +814,17 @@ impl MutationExecutor for UpdateEdge {
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
     ) -> Result<()> {
-        ops::edge::update_edge(txn, txn_db, self)
+        ops::edge::update_edge(txn, txn_db, self).map(|_| ())
+    }
+
+    fn execute_with_options(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        _options: ExecOptions,
+    ) -> Result<MutationResult> {
+        let version = ops::edge::update_edge(txn, txn_db, self)?;
+        Ok(MutationResult::UpdateEdge { version })
     }
 }
 
@@ -543,6 +839,19 @@ impl MutationExecutor for DeleteNode {
     ) -> Result<()> {
         ops::node::delete_node(txn, txn_db, self)
     }
+
+    fn execute_with_options(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        _options: ExecOptions,
+    ) -> Result<MutationResult> {
+        ops::node::delete_node(txn, txn_db, self)?;
+        Ok(MutationResult::DeleteNode {
+            id: self.id,
+            version: self.expected_version + 1,
+        })
+    }
 }
 
 impl MutationExecutor for DeleteEdge {
@@ -554,6 +863,18 @@ impl MutationExecutor for DeleteEdge {
     ) -> Result<()> {
         ops::edge::delete_edge(txn, txn_db, self)
     }
+
+    fn execute_with_options(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        _options: ExecOptions,
+    ) -> Result<MutationResult> {
+        ops::edge::delete_edge(txn, txn_db, self)?;
+        Ok(MutationResult::DeleteEdge {
+            version: self.expected_version + 1,
+        })
+    }
 }
 
 // (claude, 2026-02-07, FIXED: Added MutationExecutor for RestoreNode/RestoreEdge - Codex Item 1)
@@ -564,7 +885,20 @@ impl MutationExecutor for RestoreNode {
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
     ) -> Result<()> {
-        ops::node::restore_node(txn, txn_db, self)
+        ops::node::restore_node(txn, txn_db, self).map(|_| ())
+    }
+
+    fn execute_with_options(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        _options: ExecOptions,
+    ) -> Result<MutationResult> {
+        let (node_id, version) = ops::node::restore_node(txn, txn_db, self)?;
+        Ok(MutationResult::RestoreNode {
+            id: node_id,
+            version,
+        })
     }
 }
 
@@ -574,22 +908,20 @@ impl MutationExecutor for RestoreEdge {
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
     ) -> Result<()> {
-        ops::edge::restore_edge(txn, txn_db, self)
+        ops::edge::restore_edge(txn, txn_db, self).map(|_| ())
     }
-}
 
-impl MutationExecutor for RestoreEdges {
-    /// Execute batch edge restore: restores all outgoing edges from src (optionally filtered by name)
-    /// to their state at as_of time.
-    /// (claude, 2026-02-07, FIXED: Added RestoreEdges batch API per VERSIONING.md)
-    fn execute(
+    fn execute_with_options(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
-    ) -> Result<()> {
-        ops::edge::restore_edges(txn, txn_db, self)
+        _options: ExecOptions,
+    ) -> Result<MutationResult> {
+        let version = ops::edge::restore_edge(txn, txn_db, self)?;
+        Ok(MutationResult::RestoreEdge { version })
     }
 }
+
 
 
 impl Mutation {
@@ -610,10 +942,9 @@ impl Mutation {
             Mutation::UpdateEdge(m) => m.execute(txn, txn_db),
             Mutation::DeleteNode(m) => m.execute(txn, txn_db),
             Mutation::DeleteEdge(m) => m.execute(txn, txn_db),
-            // (claude, 2026-02-07, FIXED: Added RestoreNode/RestoreEdge/RestoreEdges dispatch)
+            // (claude, 2026-02-07, FIXED: Added RestoreNode/RestoreEdge dispatch)
             Mutation::RestoreNode(m) => m.execute(txn, txn_db),
             Mutation::RestoreEdge(m) => m.execute(txn, txn_db),
-            Mutation::RestoreEdges(m) => m.execute(txn, txn_db),
             // Flush is not a storage operation - it's handled by the consumer
             // for synchronization purposes only
             Mutation::Flush(_) => Ok(()),
@@ -641,11 +972,33 @@ impl Mutation {
             Mutation::UpdateEdge(m) => m.execute(txn, txn_db), // No new names
             Mutation::DeleteNode(m) => m.execute(txn, txn_db),
             Mutation::DeleteEdge(m) => m.execute(txn, txn_db),
-            // (claude, 2026-02-07, FIXED: Added RestoreNode/RestoreEdge/RestoreEdges dispatch)
+            // (claude, 2026-02-07, FIXED: Added RestoreNode/RestoreEdge dispatch)
             Mutation::RestoreNode(m) => m.execute(txn, txn_db),
             Mutation::RestoreEdge(m) => m.execute(txn, txn_db),
-            Mutation::RestoreEdges(m) => m.execute(txn, txn_db),
             Mutation::Flush(_) => Ok(()),
+        }
+    }
+
+    /// Execute this mutation with access to the name cache and runtime options.
+    pub fn execute_with_cache_and_options(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        cache: &super::name_hash::NameCache,
+        options: ExecOptions,
+    ) -> Result<MutationResult> {
+        match self {
+            Mutation::AddNode(m) => m.execute_with_cache_and_options(txn, txn_db, cache, options),
+            Mutation::AddEdge(m) => m.execute_with_cache_and_options(txn, txn_db, cache, options),
+            Mutation::AddNodeFragment(m) => m.execute_with_options(txn, txn_db, options),
+            Mutation::AddEdgeFragment(m) => m.execute_with_cache_and_options(txn, txn_db, cache, options),
+            Mutation::UpdateNode(m) => m.execute_with_options(txn, txn_db, options),
+            Mutation::UpdateEdge(m) => m.execute_with_options(txn, txn_db, options),
+            Mutation::DeleteNode(m) => m.execute_with_options(txn, txn_db, options),
+            Mutation::DeleteEdge(m) => m.execute_with_options(txn, txn_db, options),
+            Mutation::RestoreNode(m) => m.execute_with_options(txn, txn_db, options),
+            Mutation::RestoreEdge(m) => m.execute_with_options(txn, txn_db, options),
+            Mutation::Flush(_) => Ok(MutationResult::Flush),
         }
     }
 
@@ -732,11 +1085,55 @@ impl Runnable for RestoreEdge {
     }
 }
 
-// (claude, 2026-02-07, FIXED: Added RestoreEdges Runnable impl per VERSIONING.md)
+// ============================================================================
+// RunnableWithResult - Typed replies for single mutations
+// ============================================================================
+
 #[async_trait::async_trait]
-impl Runnable for RestoreEdges {
-    async fn run(self, writer: &Writer) -> Result<()> {
-        writer.send(vec![Mutation::RestoreEdges(self)]).await
+pub trait RunnableWithResult<R> {
+    async fn run_with_result(self, writer: &Writer, options: ExecOptions) -> Result<ReplyEnvelope<R>>;
+}
+
+pub trait MutationReply: Into<Mutation> + Send {
+    type Reply;
+    fn from_result(result: MutationResult) -> Result<Self::Reply>;
+}
+
+fn single_result(
+    reply: ReplyEnvelope<Vec<MutationResult>>,
+) -> Result<ReplyEnvelope<MutationResult>> {
+    let mut results = reply.payload;
+    if results.len() != 1 {
+        return Err(anyhow::anyhow!(
+            "Expected exactly one mutation result, got {}",
+            results.len()
+        ));
+    }
+    Ok(ReplyEnvelope::new(
+        reply.request_id,
+        reply.elapsed_time,
+        results.remove(0),
+    ))
+}
+
+#[async_trait::async_trait]
+impl<M> RunnableWithResult<M::Reply> for M
+where
+    M: MutationReply,
+{
+    async fn run_with_result(
+        self,
+        writer: &Writer,
+        options: ExecOptions,
+    ) -> Result<ReplyEnvelope<M::Reply>> {
+        let reply = writer.send_with_result(vec![self.into()], options).await?;
+        let single = single_result(reply)?;
+        let payload = M::from_result(single.payload)?;
+        Ok(ReplyEnvelope::new(
+            single.request_id,
+            single.elapsed_time,
+            payload,
+        ))
     }
 }
 
@@ -806,80 +1203,45 @@ impl From<RestoreEdge> for Mutation {
     }
 }
 
-// (claude, 2026-02-07, FIXED: Added RestoreEdges From impl per VERSIONING.md)
-impl From<RestoreEdges> for Mutation {
-    fn from(m: RestoreEdges) -> Self {
-        Mutation::RestoreEdges(m)
-    }
-}
 
 // ============================================================================
-// MutationBatch - Zero-overhead batching
+// Vec<Mutation> - Zero-overhead batching
 // ============================================================================
 
-/// A batch of mutations to be executed atomically.
-///
-/// This type provides zero-overhead batching of mutations without requiring
-/// heap allocation via boxing (unlike implementing Runnable on Vec<Mutation>).
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// use motlie_db::{MutationBatch, AddNode, AddEdge, Mutation, Runnable};
-///
-/// // Manual construction
-/// let batch = MutationBatch(vec![
-///     Mutation::AddNode(AddNode { /* ... */ }),
-///     Mutation::AddEdge(AddEdge { /* ... */ }),
-/// ]);
-/// batch.run(&writer).await?;
-///
-/// // Using the mutations![] macro (recommended)
-/// mutations![
-///     AddNode { /* ... */ },
-///     AddEdge { /* ... */ },
-/// ].run(&writer).await?;
-/// ```
-#[derive(Debug, Clone)]
-pub struct MutationBatch(pub Vec<Mutation>);
+impl RequestMeta for Vec<Mutation> {
+    type Reply = ReplyEnvelope<Vec<MutationResult>>;
+    type Options = ExecOptions;
 
-impl MutationBatch {
-    /// Create a new empty mutation batch
-    pub fn new() -> Self {
-        Self(Vec::new())
-    }
-
-    /// Create a new mutation batch with the given capacity
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self(Vec::with_capacity(capacity))
-    }
-
-    /// Add a mutation to the batch
-    pub fn push(&mut self, mutation: impl Into<Mutation>) {
-        self.0.push(mutation.into());
-    }
-
-    /// Get the number of mutations in the batch
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    /// Check if the batch is empty
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-}
-
-impl Default for MutationBatch {
-    fn default() -> Self {
-        Self::new()
+    fn request_kind(&self) -> &'static str {
+        "mutation_batch"
     }
 }
 
 #[async_trait::async_trait]
-impl Runnable for MutationBatch {
+impl Runnable for Vec<Mutation> {
     async fn run(self, writer: &Writer) -> Result<()> {
-        writer.send(self.0).await
+        writer.send(self).await
+    }
+}
+
+/// Extension trait for batch-only helpers on Vec<Mutation>.
+#[async_trait::async_trait]
+pub trait MutationBatchExt {
+    async fn run_with_result(
+        self,
+        writer: &Writer,
+        options: ExecOptions,
+    ) -> Result<ReplyEnvelope<Vec<MutationResult>>>;
+}
+
+#[async_trait::async_trait]
+impl MutationBatchExt for Vec<Mutation> {
+    async fn run_with_result(
+        self,
+        writer: &Writer,
+        options: ExecOptions,
+    ) -> Result<ReplyEnvelope<Vec<MutationResult>>> {
+        writer.send_with_result(self, options).await
     }
 }
 
@@ -887,7 +1249,7 @@ impl Runnable for MutationBatch {
 // mutations![] Macro - Ergonomic batch construction
 // ============================================================================
 
-/// Convenience macro for creating a MutationBatch with automatic type conversion.
+/// Convenience macro for creating a Vec<Mutation> with automatic type conversion.
 ///
 /// This macro provides `vec![]`-like syntax for creating mutation batches,
 /// with automatic conversion from mutation types to the Mutation enum.
@@ -920,10 +1282,10 @@ impl Runnable for MutationBatch {
 #[macro_export]
 macro_rules! mutations {
     () => {
-        $crate::MutationBatch::new()
+        Vec::<$crate::Mutation>::new()
     };
     ($($mutation:expr),+ $(,)?) => {
-        $crate::MutationBatch(vec![$($mutation.into()),+])
+        vec![$($mutation.into()),+]
     };
 }
 
