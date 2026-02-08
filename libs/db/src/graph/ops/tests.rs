@@ -13,7 +13,7 @@ use crate::graph::schema::{
     NodeVersionHistoryCfKey, Nodes, ReverseEdgeCfKey, ReverseEdges,
 };
 use crate::graph::{AddEdge, AddNode, DeleteEdge, DeleteNode, UpdateNode, UpdateEdge};
-use crate::graph::mutation::{AddNodeFragment, RestoreEdges};
+use crate::graph::mutation::{AddNodeFragment, RestoreEdge};
 use crate::graph::ops::summary::verify_edge_summary_exists;
 use crate::graph::name_hash::NameHash;
 use crate::graph::SummaryHash;
@@ -296,16 +296,17 @@ fn ops_restore_edges_dry_run_strict() {
         assert!(!missing, "expected summary to be missing before restore");
     }
 
-    let dry_run_restore = RestoreEdges {
+    let restore_missing_summary = RestoreEdge {
         src_id: src,
-        name: Some("likes".to_string()),
+        dst_id: dst,
+        name: "likes".to_string(),
         as_of: add_edge.ts_millis,
-        dry_run: true,
+        expected_version: None,
     };
     {
         let txn = txn_db.transaction();
-        let result = edge::restore_edges(&txn, txn_db, &dry_run_restore);
-        assert!(result.is_err(), "dry_run strict should fail on missing summary");
+        let result = edge::restore_edge(&txn, txn_db, &restore_missing_summary);
+        assert!(result.is_err(), "restore should fail on missing summary");
     }
 }
 

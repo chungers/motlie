@@ -317,7 +317,7 @@ Problems:
 | `Writer` | `flush()` | **Unchanged** |
 | `Writer` | `send_sync()` | **Unchanged** |
 | `Writer` | `transaction()` | **Unchanged** |
-| `Reader` | `send_query(Query)` | **Unchanged** |
+| `Reader` | `send_query(QueryRequest)` | **Unchanged** |
 | `Runnable` (mutations) | `run(self, &Writer)` | **Unchanged** |
 | `Runnable<Reader>` (queries) | `run(self, &Reader, Duration)` | **Unchanged** |
 | `Mutation` enum | All variants | **Unchanged** |
@@ -338,7 +338,15 @@ writer.send(vec![Mutation::AddNode(...)]).await?;
 NodeById::new(id, None).run(&reader, timeout).await?;
 
 // Which calls:
-reader.send_query(Query::NodeById(dispatch)).await?;
+let request = QueryRequest {
+    payload: Query::NodeById(query),
+    options: (),
+    reply: Some(result_tx),
+    timeout: Some(timeout),
+    request_id: new_request_id(),
+    created_at: Instant::now(),
+};
+reader.send_query(request).await?;
 ```
 
 This pattern is **not affected** by the refactor. Users continue to:
@@ -1204,7 +1212,7 @@ impl Processor {
 }
 
 // Query consumers also access via Processor
-impl QueryExecutor for NodeByIdDispatch {
+impl QueryExecutor for NodeById {
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         // Can use storage.db() for readonly
         // Or storage.transaction_db() for read-write

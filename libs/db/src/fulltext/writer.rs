@@ -19,7 +19,7 @@ use tantivy::IndexWriter;
 use super::schema::DocumentFields;
 use super::{Index, Storage};
 use crate::graph::mutation::Mutation;
-use crate::graph::writer::{Consumer, Processor, WriterConfig};
+use crate::graph::writer::{Consumer, MutationRequest, Processor, WriterConfig};
 
 // ============================================================================
 // MutationExecutor Trait
@@ -78,12 +78,11 @@ impl Processor for Index {
                 Mutation::UpdateEdge(m) => m.index(&mut writer, fields)?,
                 Mutation::DeleteNode(m) => m.index(&mut writer, fields)?,
                 Mutation::DeleteEdge(m) => m.index(&mut writer, fields)?,
-                // (claude, 2026-02-07, FIXED: RestoreNode/RestoreEdge/RestoreEdges no-op for fulltext)
+                // (claude, 2026-02-07, FIXED: RestoreNode/RestoreEdge no-op for fulltext)
                 // Restore mutations don't need fulltext indexing - they restore from existing summaries
                 // which are already indexed. The restored summary hash points to existing content.
                 Mutation::RestoreNode(_) => {}
                 Mutation::RestoreEdge(_) => {}
-                Mutation::RestoreEdges(_) => {}
                 // Flush is graph-only - no-op for fulltext
                 // (fulltext flush would require a separate mechanism in future phases)
                 Mutation::Flush(_) => {}
@@ -132,7 +131,7 @@ pub(super) fn create_readonly_index(index_path: &Path) -> Index {
 
 /// Create a new full-text mutation consumer with default parameters
 pub fn create_mutation_consumer(
-    receiver: mpsc::Receiver<Vec<Mutation>>,
+    receiver: mpsc::Receiver<MutationRequest>,
     config: WriterConfig,
     index_path: &Path,
 ) -> Consumer<Index> {
@@ -142,10 +141,10 @@ pub fn create_mutation_consumer(
 
 /// Create a new full-text mutation consumer with default parameters that chains to another processor
 pub fn create_mutation_consumer_with_next(
-    receiver: mpsc::Receiver<Vec<Mutation>>,
+    receiver: mpsc::Receiver<MutationRequest>,
     config: WriterConfig,
     index_path: &Path,
-    next: mpsc::Sender<Vec<Mutation>>,
+    next: mpsc::Sender<MutationRequest>,
 ) -> Consumer<Index> {
     let processor = create_readwrite_index(index_path);
     Consumer::with_next(receiver, config, processor, next)
@@ -153,7 +152,7 @@ pub fn create_mutation_consumer_with_next(
 
 /// Create a new full-text mutation consumer with custom BM25 parameters
 pub fn create_mutation_consumer_with_params(
-    receiver: mpsc::Receiver<Vec<Mutation>>,
+    receiver: mpsc::Receiver<MutationRequest>,
     config: WriterConfig,
     index_path: &Path,
     _k1: f32,
@@ -166,12 +165,12 @@ pub fn create_mutation_consumer_with_params(
 
 /// Create a new full-text mutation consumer with custom BM25 parameters that chains to another processor
 pub fn create_mutation_consumer_with_params_and_next(
-    receiver: mpsc::Receiver<Vec<Mutation>>,
+    receiver: mpsc::Receiver<MutationRequest>,
     config: WriterConfig,
     index_path: &Path,
     _k1: f32,
     _b: f32,
-    next: mpsc::Sender<Vec<Mutation>>,
+    next: mpsc::Sender<MutationRequest>,
 ) -> Consumer<Index> {
     // Note: BM25 params not currently used - Tantivy uses defaults
     let processor = create_readwrite_index(index_path);
@@ -184,7 +183,7 @@ pub fn create_mutation_consumer_with_params_and_next(
 
 /// Spawn the full-text mutation consumer as a background task with default parameters
 pub fn spawn_mutation_consumer(
-    receiver: mpsc::Receiver<Vec<Mutation>>,
+    receiver: mpsc::Receiver<MutationRequest>,
     config: WriterConfig,
     index_path: &Path,
 ) -> JoinHandle<Result<()>> {
@@ -221,10 +220,10 @@ pub fn spawn_mutation_consumer(
 /// # }
 /// ```
 pub fn spawn_mutation_consumer_with_next(
-    receiver: mpsc::Receiver<Vec<Mutation>>,
+    receiver: mpsc::Receiver<MutationRequest>,
     config: WriterConfig,
     index_path: &Path,
-    next: mpsc::Sender<Vec<Mutation>>,
+    next: mpsc::Sender<MutationRequest>,
 ) -> JoinHandle<Result<()>> {
     let consumer = create_mutation_consumer_with_next(receiver, config, index_path, next);
     crate::graph::writer::spawn_consumer(consumer)
@@ -232,7 +231,7 @@ pub fn spawn_mutation_consumer_with_next(
 
 /// Spawn the full-text mutation consumer as a background task with custom BM25 parameters
 pub fn spawn_mutation_consumer_with_params(
-    receiver: mpsc::Receiver<Vec<Mutation>>,
+    receiver: mpsc::Receiver<MutationRequest>,
     config: WriterConfig,
     index_path: &Path,
     k1: f32,
@@ -244,12 +243,12 @@ pub fn spawn_mutation_consumer_with_params(
 
 /// Spawn the full-text mutation consumer as a background task with custom BM25 parameters and chaining
 pub fn spawn_mutation_consumer_with_params_and_next(
-    receiver: mpsc::Receiver<Vec<Mutation>>,
+    receiver: mpsc::Receiver<MutationRequest>,
     config: WriterConfig,
     index_path: &Path,
     k1: f32,
     b: f32,
-    next: mpsc::Sender<Vec<Mutation>>,
+    next: mpsc::Sender<MutationRequest>,
 ) -> JoinHandle<Result<()>> {
     let consumer =
         create_mutation_consumer_with_params_and_next(receiver, config, index_path, k1, b, next);

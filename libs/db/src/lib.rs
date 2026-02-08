@@ -14,6 +14,7 @@ pub mod graph;
 // Vector module - HNSW-based vector storage and search
 // Users access via fully qualified paths: motlie_db::vector::*
 pub mod vector;
+pub mod request;
 
 // Fulltext module - Tantivy-based fulltext search
 // Users access via fully qualified paths: motlie_db::fulltext::*
@@ -44,6 +45,7 @@ pub mod reader;
 // Users access via fully qualified paths: motlie_db::mutation::*, motlie_db::writer::*
 pub mod mutation;
 pub mod writer;
+pub use request::{RequestEnvelope, RequestMeta};
 
 /// Custom error type for Id parsing
 #[derive(Debug, Clone, PartialEq, Eq)]

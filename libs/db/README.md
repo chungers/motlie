@@ -177,34 +177,34 @@ data is committed. Use the **Flush API** to ensure read-after-write consistency.
 | `flush()` | Waits for all pending mutations to commit | Read-after-write consistency |
 | `send_sync(Vec<Mutation>)` | `send()` + `flush()` combined | Simple consistency |
 
-### Pattern 1: MutationBatch
+### Pattern 1: Vec<Mutation>
 
-Use `MutationBatch` to group multiple mutations into an atomic batch:
+Use `Vec<Mutation>` to group multiple mutations into an atomic batch:
 
 ```rust
-use motlie_db::mutation::{MutationBatch, AddNode, AddEdge, Runnable};
+use motlie_db::mutation::{Mutation, AddNode, AddEdge, Runnable};
 use motlie_db::{Id, TimestampMilli};
 
 let alice_id = Id::new();
 let bob_id = Id::new();
 
 // Build a batch of mutations
-MutationBatch(vec![
-    AddNode {
+vec![
+    Mutation::AddNode(AddNode {
         id: alice_id,
         ts_millis: TimestampMilli::now(),
         name: "Alice".to_string(),
         summary: NodeSummary::from_text("A person"),
         valid_range: None,
-    }.into(),
-    AddNode {
+    }),
+    Mutation::AddNode(AddNode {
         id: bob_id,
         ts_millis: TimestampMilli::now(),
         name: "Bob".to_string(),
         summary: NodeSummary::from_text("Another person"),
         valid_range: None,
-    }.into(),
-    AddEdge {
+    }),
+    Mutation::AddEdge(AddEdge {
         source_node_id: alice_id,
         target_node_id: bob_id,
         ts_millis: TimestampMilli::now(),
@@ -212,8 +212,8 @@ MutationBatch(vec![
         summary: EdgeSummary::from_text("Alice knows Bob"),
         weight: Some(1.0),
         valid_range: None,
-    }.into(),
-]).run(handles.writer()).await?;
+    }),
+].run(handles.writer()).await?;
 
 // Wait for commit before reading
 handles.writer().flush().await?;
@@ -286,6 +286,50 @@ handles.writer().send_sync(vec![
 
 // Immediately visible - no separate flush needed
 ```
+
+## Request Envelope and Result Handling
+
+The project is standardizing a **RequestEnvelope** pattern to carry:
+- **Payload** (typed request)
+- **Execution options** (e.g., dry_run for mutations)
+- **Reply channel** (optional; enables run-with-result)
+- **Tracing/metrics metadata** (request_id, request kind, etc.)
+
+This is being piloted in the graph crate and will become the common pattern across
+graph/fulltext/vector for both queries and mutations.
+
+### Why an envelope?
+- Unifies **fire-and-forget** and **request/response** flows.
+- Centralizes **timeouts**, **tracing spans**, and **metrics labels**.
+- Removes per-request “dispatch” wrappers while keeping strong typing.
+
+### Example (Mutations)
+
+```rust
+// Fire-and-forget (no reply)
+vec![AddNode { /* ... */ }.into()].run(&writer).await?;
+
+// Run with result (reply channel is used internally)
+use motlie_db::graph::mutation::MutationBatchExt;
+let replies = vec![AddNode { /* ... */ }.into()]
+    .run_with_result(&writer, ExecOptions { dry_run: true })
+    .await?;
+```
+
+### Example (Queries)
+
+```rust
+// Queries use the same envelope pattern under the hood.
+let result = NodeById::new(node_id, None)
+    .run(&reader, timeout)
+    .await?;
+```
+
+### Key Principles
+- **Timeouts are execution-level** (not part of query structs).
+- **Request kind** is a stable string for metrics/tracing.
+- **Default policy** lives in the envelope implementation; per-type behavior is
+  provided via a trait when needed.
 
 ### Flush Consistency Guarantees
 
@@ -375,7 +419,7 @@ handles.writer().flush().await?;
 | `AddEdgeFragment` | Add timestamped content to an edge |
 | `UpdateNode` | Update node (active_period and/or summary) |
 | `UpdateEdge` | Update edge (weight, active_period, and/or summary) |
-| `MutationBatch` | Batch multiple mutations atomically |
+| `Vec<Mutation>` | Batch multiple mutations atomically |
 | `Mutation` | Enum wrapping all mutation types |
 | `NodeSummary` | Node summary content wrapper |
 | `EdgeSummary` | Edge summary content wrapper |

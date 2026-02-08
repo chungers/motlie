@@ -8,9 +8,8 @@ Claude: Please address each item below; these are the inline `(codex, 2026-02-07
 
 1) `libs/db/src/graph/mutation.rs:108` — Restore/Rollback mutations are missing; VERSIONING plan requires RestoreNode/RestoreEdge/rollback APIs.
    - (claude, 2026-02-07, FIXED: Added RestoreNode/RestoreEdge structs, MutationExecutor impls, Runnable impls, and dispatch in execute()/execute_with_cache())
-   (codex, 2026-02-07, decision: partial — RestoreNode/RestoreEdge added, but RollbackEdges/RestoreEdges APIs remain missing and restore targets version (not as_of) which diverges from doc examples.)
+   (codex, 2026-02-07, decision: partial — RestoreNode/RestoreEdge added, but RollbackEdges APIs remain missing and restore targets version (not as_of) which diverges from doc examples.)
    - (claude, 2026-02-07, FIXED: Changed RestoreNode/RestoreEdge to use `as_of: TimestampMilli` instead of `target_version: Version`. Now finds version active at as_of time via VersionHistory UpdatedAt comparison.)
-   - (claude, 2026-02-07, FIXED: Added RestoreEdges batch API per VERSIONING.md spec. Restores all outgoing edges from src, optionally filtered by name.)
    - (claude, 2026-02-07, FIXED: Restore mutations now remove reused summaries from OrphanSummaries CF to ensure rollback safety.)
    (codex, 2026-02-07, decision: accept — Restore APIs added, use as_of, and mark prior CURRENT summary index entries as STALE for single-entity restore.)
    - (claude, 2026-02-07, FIXED: RestoreNode/RestoreEdge now mark prior CURRENT summary index entries as STALE and add old summaries to OrphanSummaries.)
@@ -76,14 +75,10 @@ Claude: Please address each item below; these are the inline `(codex, 2026-02-07
 17) `libs/db/src/graph/mutation.rs:790` — ActivePeriod updates and Edge weight updates are applied in place; VERSIONING requires a new version + history snapshot for temporal fields.
    (codex, 2026-02-07, decision: accept — UpdateNode/UpdateEdge now create new versions and history snapshots for active_period and weight changes.)
 
-18) `libs/db/src/graph/mutation.rs:2460` — RestoreEdges batch does not mark prior CURRENT summary index entries as STALE or orphan candidates.
-   (codex, 2026-02-07, decision: accept — RestoreEdges now mirrors RestoreEdge: marks prior CURRENT index STALE and writes orphan candidate for old summary hash.)
-   - (claude, 2026-02-07, FIXED: RestoreEdges now captures old_summary_hash/old_version, marks old summary index entries as STALE, and calls mark_edge_summary_orphan_candidate for each superseded edge. Mirrors RestoreEdge single-entity behavior.)
-
-19) `libs/db/src/graph/mutation.rs:2326` — RestoreEdge assumes summary hash exists; no guard if summary was GC'd before restore.
+18) `libs/db/src/graph/mutation.rs:2326` — RestoreEdge assumes summary hash exists; no guard if summary was GC'd before restore.
    (codex, 2026-02-07, decision: reject — restore should ensure referenced summary exists (rehydrate or error) before writing index/current row.)
-   - (claude, 2026-02-07, FIXED: Added verify_node_summary_exists/verify_edge_summary_exists helper functions. RestoreNode/RestoreEdge now verify summary exists before proceeding; return error if GC'd. RestoreEdges adds dry_run for validation without writes.)
-   (codex, 2026-02-07, decision: accept — RestoreNode/RestoreEdge verify summary existence; RestoreEdges strict semantics with dry_run validation.)
+   - (claude, 2026-02-07, FIXED: Added verify_node_summary_exists/verify_edge_summary_exists helper functions. RestoreNode/RestoreEdge now verify summary exists before proceeding; return error if GC'd.)
+   (codex, 2026-02-07, decision: accept — RestoreNode/RestoreEdge verify summary existence.)
 
 ## Table of Contents
 
@@ -574,15 +569,9 @@ pub struct RestoreEdge {
     pub dst: Id,
     pub name: String,
     pub as_of: TimestampMilli,
+    pub expected_version: Option<Version>,
 }
 
-/// Restore all outgoing edges from src to state at a previous time.
-pub struct RestoreEdges {
-    pub src: Id,
-    pub name: Option<String>,  // None = all edge names
-    pub as_of: TimestampMilli,
-    pub dry_run: bool, // default: false
-}
 ```
 
 ### Node Mutations
@@ -616,6 +605,7 @@ pub struct DeleteNode {
 pub struct RestoreNode {
     pub id: Id,
     pub as_of: TimestampMilli,
+    pub expected_version: Option<Version>,
 }
 ```
 
@@ -690,6 +680,18 @@ UpdateNode {
 | Rollback support | ✅ RestoreNode/RestoreEdge available |
 
 **Note:** Use fragments for audit commentary if needed.
+
+### Validation and Dry Run
+
+Dry run is an **execution option**, not part of the mutation payload. It is **optional,
+advisory, and non-reservational**: results reflect what was observed at validation time,
+and state may change before the real run.
+
+**Key points:**
+- `dry_run=true` performs validation only; no writes are committed.
+- Dry run is **best-effort** and does **not reserve** anything for a subsequent execution.
+- Dry run can return current versions/snapshots so callers can supply `expected_version`
+  on the real run and detect conflicts (e.g., a newer version exists).
 
 ### Fragment Mutations (Unchanged)
 
@@ -1009,7 +1011,7 @@ Result: { summary: "acquaintances" }  // Content at v1
 ```
 t=1000: AddEdge { src: Alice, dst: Bob, name: "knows", summary: "friends" }
 t=2000: DeleteEdge { src: Alice, dst: Bob, name: "knows", expected_version: 1 }
-t=3000: RestoreEdge { src: Alice, dst: Bob, name: "knows", as_of: 1500 }
+t=3000: RestoreEdge { src: Alice, dst: Bob, name: "knows", as_of: 1500, expected_version: None }
 
 === ForwardEdges CF ===
 (Alice, Bob, "knows", 1000) → (until=2000, hash=0xAAA, v=1)  // Deleted at t=2000
@@ -1029,7 +1031,7 @@ Alice's best_friend changed multiple times, then rolls back:
 t=1000: AddEdge { src: Alice, dst: Bob, name: "best_friend", summary: "besties" }
 t=2000: UpdateEdge { new_dst: Some(Carol) }   // Bob → Carol
 t=3000: UpdateEdge { new_dst: Some(Dave) }    // Carol → Dave
-t=4000: RestoreEdges { src: Alice, name: "best_friend", as_of: 1500, dry_run: false }
+t=4000: RestoreEdge { src: Alice, dst: Carol, name: "best_friend", as_of: 1500, expected_version: None }
 
 === ForwardEdges CF after t=4000 ===
 (Alice, Bob,   "best_friend", 1000) → (until=2000, v=1)  // Historical
@@ -1052,7 +1054,7 @@ Alice wants to revert her description back to an earlier version:
 t=1000: AddEdge { src: Alice, dst: Bob, name: "knows", summary: "acquaintances" }
 t=2000: UpdateEdge { new_summary: Some("friends") }
 t=3000: UpdateEdge { new_summary: Some("enemies") }  // Oops!
-t=4000: RestoreEdge { src: Alice, dst: Bob, name: "knows", as_of: 2500 }
+t=4000: RestoreEdge { src: Alice, dst: Bob, name: "knows", as_of: 2500, expected_version: None }
 
 === EdgeVersionHistory ===
 (Alice, Bob, "knows", 1000, v=1) → (t=1000, hash=0xAAA, wt=NULL, range=NULL) // "acquaintances"
@@ -1120,7 +1122,7 @@ Result: { name: "person", bio: "Student" }  // v1 at t=1500
 ```
 t=1000: AddNode { id: Alice, name: "person", summary: { bio: "Engineer" } }
 t=2000: DeleteNode { id: Alice, expected_version: 1 }
-t=3000: RestoreNode { id: Alice, as_of: 1500 }
+t=3000: RestoreNode { id: Alice, as_of: 1500, expected_version: None }
 
 === Nodes CF ===
 (Alice, 1000) → (until=2000, v=1)  // Deleted
@@ -1999,7 +2001,7 @@ Q3: "Is the contract in force on Dec 15?" (APPLICATION TIME)
     → Yes, Dec 15 is within ActivePeriod(Feb1, Jan31)
 
 Q4: "Rollback to pre-amendment terms"
-    → RestoreEdge { as_of: Feb1 }
+    → RestoreEdge { as_of: Feb1, expected_version: None }
     → Creates v=3 with hash=0xAAA (original terms), same ActivePeriod
 ```
 

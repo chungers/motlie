@@ -45,12 +45,14 @@
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::mpsc;
 
-use super::mutation::{Mutation, RestoreEdges, RestoreEdgesReport};
+use super::mutation::{ExecOptions, Mutation};
+use super::writer::MutationRequest;
 use super::name_hash::NameCache;
-use super::ops;
 use super::query::TransactionQueryExecutor;
+use crate::request::new_request_id;
 
 /// A transaction scope for read-your-writes operations.
 ///
@@ -102,7 +104,7 @@ pub struct Transaction<'a> {
 
     /// Optional sender to forward mutations on commit.
     /// If None, mutations are not forwarded anywhere.
-    forward_to: Option<mpsc::Sender<Vec<Mutation>>>,
+    forward_to: Option<mpsc::Sender<MutationRequest>>,
 
     /// Name cache for efficient hash-to-name resolution.
     name_cache: Arc<NameCache>,
@@ -115,7 +117,7 @@ impl<'a> Transaction<'a> {
     pub(crate) fn new(
         txn: rocksdb::Transaction<'a, rocksdb::TransactionDB>,
         txn_db: &'a rocksdb::TransactionDB,
-        forward_to: Option<mpsc::Sender<Vec<Mutation>>>,
+        forward_to: Option<mpsc::Sender<MutationRequest>>,
         name_cache: Arc<NameCache>,
     ) -> Self {
         Self {
@@ -188,20 +190,6 @@ impl<'a> Transaction<'a> {
             self.write(mutation)?;
         }
         Ok(())
-    }
-
-    /// Validate RestoreEdges without writing (strict dry-run).
-    ///
-    /// Returns a report with candidates, restorable count, and skipped edges.
-    pub fn validate_restore_edges(&self, mut mutation: RestoreEdges) -> Result<RestoreEdgesReport> {
-        let txn = self.txn.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("Transaction already finished (committed or rolled back)")
-        })?;
-
-        mutation.dry_run = true;
-        ops::edge::restore_edges_with_report(txn, self.txn_db, &mutation).with_context(|| {
-            format!("Failed to validate RestoreEdges in transaction: {:?}", mutation)
-        })
     }
 
     /// Read using a query (sees uncommitted writes in this transaction).
@@ -280,7 +268,14 @@ impl<'a> Transaction<'a> {
 
             if !mutations.is_empty() {
                 // Best-effort send using try_send (non-blocking)
-                if let Err(e) = sender.try_send(mutations) {
+                if let Err(e) = sender.try_send(MutationRequest {
+                    payload: mutations,
+                    options: ExecOptions::default(),
+                    reply: None,
+                    timeout: None,
+                    request_id: new_request_id(),
+                    created_at: Instant::now(),
+                }) {
                     tracing::warn!(
                         error = %e,
                         "Transaction forwarding failed - channel full or closed"

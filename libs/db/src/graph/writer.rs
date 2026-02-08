@@ -19,11 +19,12 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
-use super::mutation::{FlushMarker, Mutation};
+use super::mutation::{ExecOptions, FlushMarker, Mutation, MutationResult};
 use super::name_hash::NameCache;
 use super::processor::Processor as GraphProcessor;
 use super::transaction::Transaction;
 use super::Storage;
+use crate::request::{new_request_id, ReplyEnvelope, RequestEnvelope};
 
 // ============================================================================
 // MutationExecutor Trait
@@ -45,6 +46,19 @@ pub trait MutationExecutor: Send + Sync {
         txn_db: &rocksdb::TransactionDB,
     ) -> Result<()>;
 
+    /// Execute this mutation with runtime options, returning a reply payload.
+    ///
+    /// Default implementation delegates to `execute()` and returns an empty reply.
+    fn execute_with_options(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        _options: ExecOptions,
+    ) -> Result<MutationResult> {
+        self.execute(txn, txn_db)?;
+        Ok(MutationResult::Flush)
+    }
+
     /// Execute this mutation with access to the name cache.
     ///
     /// The cache is used to:
@@ -59,6 +73,19 @@ pub trait MutationExecutor: Send + Sync {
         _cache: &NameCache,
     ) -> Result<()> {
         self.execute(txn, txn_db)
+    }
+
+    /// Execute with cache and runtime options, returning a reply payload.
+    ///
+    /// Default implementation ignores cache and delegates to execute_with_options().
+    fn execute_with_cache_and_options(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        _cache: &NameCache,
+        options: ExecOptions,
+    ) -> Result<MutationResult> {
+        self.execute_with_options(txn, txn_db, options)
     }
 }
 
@@ -105,6 +132,16 @@ pub trait Processor: Send + Sync {
     /// * `Ok(())` if all mutations were processed successfully
     /// * `Err(_)` if processing failed (implementations should rollback on error)
     async fn process_mutations(&self, mutations: &[Mutation]) -> Result<()>;
+
+    /// Process a batch of mutations with execution options, returning per-mutation replies.
+    async fn process_mutations_with_options(
+        &self,
+        mutations: &[Mutation],
+        _options: ExecOptions,
+    ) -> Result<Vec<MutationResult>> {
+        self.process_mutations(mutations).await?;
+        Ok(vec![MutationResult::Flush; mutations.len()])
+    }
 }
 
 // ============================================================================
@@ -125,6 +162,13 @@ impl Default for WriterConfig {
         }
     }
 }
+
+// ============================================================================
+// MutationRequest
+// ============================================================================
+
+/// Envelope for mutation batches with execution options and optional reply.
+pub type MutationRequest = RequestEnvelope<Vec<Mutation>>;
 
 /// Handle for sending mutations to the writer with batching support.
 ///
@@ -182,12 +226,12 @@ impl Default for WriterConfig {
 /// See [Mutation API Guide](../docs/mutation-api-guide.md) for complete documentation.
 #[derive(Clone)]
 pub struct Writer {
-    sender: mpsc::Sender<Vec<Mutation>>,
+    sender: mpsc::Sender<MutationRequest>,
     /// Processor for creating transactions (optional - only present when configured)
     /// (claude, 2026-02-07, FIXED: P2.2 - Writer holds Arc<Processor> instead of Storage)
     processor: Option<Arc<GraphProcessor>>,
     /// Optional sender for transaction mutation forwarding (e.g., to fulltext)
-    transaction_forward_to: Option<mpsc::Sender<Vec<Mutation>>>,
+    transaction_forward_to: Option<mpsc::Sender<MutationRequest>>,
 }
 
 impl std::fmt::Debug for Writer {
@@ -208,7 +252,7 @@ impl Writer {
     ///
     /// This creates a basic writer without transaction support.
     /// Use `with_processor()` to enable transaction features.
-    pub fn new(sender: mpsc::Sender<Vec<Mutation>>) -> Self {
+    pub fn new(sender: mpsc::Sender<MutationRequest>) -> Self {
         Writer {
             sender,
             processor: None,
@@ -218,7 +262,7 @@ impl Writer {
 
     /// Create a new MutationWriter with processor for transaction support.
     /// (claude, 2026-02-07, FIXED: P2.2 - Primary construction with Processor)
-    pub(crate) fn with_processor(sender: mpsc::Sender<Vec<Mutation>>, processor: Arc<GraphProcessor>) -> Self {
+    pub(crate) fn with_processor(sender: mpsc::Sender<MutationRequest>, processor: Arc<GraphProcessor>) -> Self {
         Writer {
             sender,
             processor: Some(processor),
@@ -240,7 +284,7 @@ impl Writer {
     ///
     /// When transactions commit, their mutations will be forwarded
     /// to this sender (best-effort, non-blocking).
-    pub fn set_transaction_forward_to(&mut self, sender: mpsc::Sender<Vec<Mutation>>) {
+    pub fn set_transaction_forward_to(&mut self, sender: mpsc::Sender<MutationRequest>) {
         self.transaction_forward_to = Some(sender);
     }
 
@@ -327,9 +371,44 @@ impl Writer {
     /// ```
     pub async fn send(&self, mutations: Vec<Mutation>) -> Result<()> {
         self.sender
-            .send(mutations)
+            .send(MutationRequest {
+                payload: mutations,
+                options: ExecOptions::default(),
+                reply: None,
+                timeout: None,
+                request_id: new_request_id(),
+                created_at: std::time::Instant::now(),
+            })
             .await
             .context("Failed to send mutations to writer queue")
+    }
+
+    /// Send mutations with execution options and wait for a reply.
+    ///
+    /// Returns a per-mutation reply vector in the same order as the input.
+    pub async fn send_with_result(
+        &self,
+        mutations: Vec<Mutation>,
+        options: ExecOptions,
+    ) -> Result<ReplyEnvelope<Vec<MutationResult>>> {
+        if mutations.is_empty() {
+            return Ok(ReplyEnvelope::new(new_request_id(), 0, Vec::new()));
+        }
+
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(MutationRequest {
+                payload: mutations,
+                options,
+                reply: Some(tx),
+                timeout: None,
+                request_id: new_request_id(),
+                created_at: std::time::Instant::now(),
+            })
+            .await
+            .context("Failed to send mutations to writer queue")?;
+
+        rx.await.context("Mutation reply channel dropped")?
     }
 
     /// Flush all pending mutations and wait for commit.
@@ -367,7 +446,14 @@ impl Writer {
 
         // Send flush marker through the same channel as mutations
         self.sender
-            .send(vec![Mutation::Flush(FlushMarker::new(tx))])
+            .send(MutationRequest {
+                payload: vec![Mutation::Flush(FlushMarker::new(tx))],
+                options: ExecOptions::default(),
+                reply: None,
+                timeout: None,
+                request_id: new_request_id(),
+                created_at: std::time::Instant::now(),
+            })
             .await
             .context("Failed to send flush marker - channel closed")?;
 
@@ -410,7 +496,7 @@ impl Writer {
 }
 
 /// Create a new mutation writer and receiver pair
-pub fn create_mutation_writer(config: WriterConfig) -> (Writer, mpsc::Receiver<Vec<Mutation>>) {
+pub fn create_mutation_writer(config: WriterConfig) -> (Writer, mpsc::Receiver<MutationRequest>) {
     let (sender, receiver) = mpsc::channel(config.channel_buffer_size);
     let writer = Writer::new(sender);
     (writer, receiver)
@@ -422,17 +508,17 @@ pub fn create_mutation_writer(config: WriterConfig) -> (Writer, mpsc::Receiver<V
 
 /// Generic consumer that processes mutations using a Processor
 pub struct Consumer<P: Processor> {
-    receiver: mpsc::Receiver<Vec<Mutation>>,
+    receiver: mpsc::Receiver<MutationRequest>,
     config: WriterConfig,
     processor: P,
     /// Optional sender to forward mutations to the next consumer in the chain
-    next: Option<mpsc::Sender<Vec<Mutation>>>,
+    next: Option<mpsc::Sender<MutationRequest>>,
 }
 
 impl<P: Processor> Consumer<P> {
     /// Create a new Consumer
     pub fn new(
-        receiver: mpsc::Receiver<Vec<Mutation>>,
+        receiver: mpsc::Receiver<MutationRequest>,
         config: WriterConfig,
         processor: P,
     ) -> Self {
@@ -446,10 +532,10 @@ impl<P: Processor> Consumer<P> {
 
     /// Create a new Consumer that forwards mutations to the next consumer in the chain
     pub fn with_next(
-        receiver: mpsc::Receiver<Vec<Mutation>>,
+        receiver: mpsc::Receiver<MutationRequest>,
         config: WriterConfig,
         processor: P,
-        next: mpsc::Sender<Vec<Mutation>>,
+        next: mpsc::Sender<MutationRequest>,
     ) -> Self {
         Self {
             receiver,
@@ -467,11 +553,9 @@ impl<P: Processor> Consumer<P> {
         loop {
             // Wait for the next batch of mutations
             match self.receiver.recv().await {
-                Some(mutations) => {
+                Some(request) => {
                     // Process the batch immediately
-                    self.process_batch(&mutations)
-                        .await
-                        .with_context(|| format!("Failed to process mutations: {:?}", mutations))?;
+                    self.process_request(request).await?;
                 }
                 None => {
                     // Channel closed
@@ -483,10 +567,20 @@ impl<P: Processor> Consumer<P> {
     }
 
     /// Process a batch of mutations
-    #[tracing::instrument(skip(self, mutations), fields(batch_size = mutations.len()))]
-    async fn process_batch(&self, mutations: &[Mutation]) -> Result<()> {
+    #[tracing::instrument(skip(self, request), fields(batch_size = request.payload.len()))]
+    async fn process_request(&self, request: MutationRequest) -> Result<()> {
+        let request_id = request.request_id;
+        let elapsed = request.elapsed_nanos();
+        let MutationRequest {
+            payload,
+            options,
+            reply,
+            ..
+        } = request;
+        let mutations = payload;
+
         // Log what we're processing
-        for mutation in mutations {
+        for mutation in &mutations {
             match mutation {
                 Mutation::AddNode(args) => {
                     tracing::debug!(id = %args.id, name = %args.name, "Processing AddNode");
@@ -570,15 +664,6 @@ impl<P: Processor> Consumer<P> {
                         "Processing RestoreEdge"
                     );
                 }
-                // (claude, 2026-02-07, FIXED: Added RestoreEdges logging per VERSIONING.md)
-                Mutation::RestoreEdges(args) => {
-                    tracing::debug!(
-                        src = %args.src_id,
-                        name = ?args.name,
-                        as_of = ?args.as_of,
-                        "Processing RestoreEdges batch"
-                    );
-                }
                 Mutation::Flush(_) => {
                     tracing::debug!("Processing Flush marker");
                 }
@@ -587,11 +672,31 @@ impl<P: Processor> Consumer<P> {
 
         // Process all mutations in a single call
         // (Flush markers are no-ops in storage but are included for ordering)
-        self.processor.process_mutations(mutations).await?;
+        let replies_result = self
+            .processor
+            .process_mutations_with_options(&mutations, options)
+            .await
+            .with_context(|| format!("Failed to process mutations: {:?}", mutations));
+
+        let _replies = match replies_result {
+            Ok(replies) => {
+                let envelope = ReplyEnvelope::new(request_id, elapsed, replies);
+                if let Some(sender) = reply {
+                    let _ = sender.send(Ok(envelope.clone()));
+                }
+                envelope
+            }
+            Err(err) => {
+                if let Some(sender) = reply {
+                    let _ = sender.send(Err(anyhow::anyhow!(err.to_string())));
+                }
+                return Err(err);
+            }
+        };
 
         // After successful commit, signal completion for any flush markers
         // This guarantees that all mutations before the flush are now visible to readers
-        for mutation in mutations {
+        for mutation in &mutations {
             if let Mutation::Flush(marker) = mutation {
                 if let Some(completion) = marker.take_completion() {
                     // Signal that flush is complete - ignore send errors
@@ -606,14 +711,25 @@ impl<P: Processor> Consumer<P> {
         // This is a best-effort send - if the buffer is full, we log and continue
         // Note: We filter out Flush markers when forwarding - they are local to this consumer
         if let Some(sender) = &self.next {
+            if options.dry_run {
+                return Ok(());
+            }
+
             let non_flush_mutations: Vec<_> = mutations
                 .iter()
-                .filter(|m| !m.is_flush())
+                .filter(|m: &&Mutation| !m.is_flush())
                 .cloned()
                 .collect();
 
             if !non_flush_mutations.is_empty() {
-                if let Err(e) = sender.try_send(non_flush_mutations) {
+                if let Err(e) = sender.try_send(MutationRequest {
+                    payload: non_flush_mutations,
+                    options,
+                    reply: None,
+                    timeout: None,
+                    request_id: new_request_id(),
+                    created_at: std::time::Instant::now(),
+                }) {
                     tracing::warn!(
                         err = %e,
                         count = mutations.len(),
@@ -657,7 +773,7 @@ use tokio::task::JoinHandle;
 /// # Returns
 /// JoinHandle for the spawned consumer task
 pub fn spawn_mutation_consumer(
-    receiver: mpsc::Receiver<Vec<Mutation>>,
+    receiver: mpsc::Receiver<MutationRequest>,
     config: WriterConfig,
     db_path: &Path,
 ) -> JoinHandle<Result<()>> {
@@ -686,10 +802,10 @@ pub fn spawn_mutation_consumer(
 /// # Returns
 /// JoinHandle for the spawned consumer task
 pub fn spawn_mutation_consumer_with_next(
-    receiver: mpsc::Receiver<Vec<Mutation>>,
+    receiver: mpsc::Receiver<MutationRequest>,
     config: WriterConfig,
     db_path: &Path,
-    next: mpsc::Sender<Vec<Mutation>>,
+    next: mpsc::Sender<MutationRequest>,
 ) -> JoinHandle<Result<()>> {
     // Create storage at path
     let mut storage = Storage::readwrite(db_path);
@@ -715,7 +831,7 @@ pub fn spawn_mutation_consumer_with_next(
 /// # Returns
 /// JoinHandle for the spawned consumer task
 pub fn spawn_mutation_consumer_with_receiver(
-    receiver: mpsc::Receiver<Vec<Mutation>>,
+    receiver: mpsc::Receiver<MutationRequest>,
     config: WriterConfig,
     processor: Arc<GraphProcessor>,
 ) -> JoinHandle<Result<()>> {

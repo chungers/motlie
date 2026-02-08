@@ -2019,9 +2019,9 @@ Task 5.7 implements the query dispatch pattern following the established `graph:
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
 │  1. Query params struct - SearchKNN, GetVector, etc.        │
-│  2. Dispatch wrapper - SearchKNNDispatch (adds timeout, tx) │
-│  3. QueryProcessor trait - process_and_send(self, storage)  │
-│  4. Query::process() - dispatches to appropriate impl       │
+│  2. QueryReply trait - typed reply mapping per query type   │
+│  3. RequestEnvelope<Query> for async dispatch + tracing     │
+│  4. Consumer executes Query::execute_* and responds         │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -2051,53 +2051,11 @@ impl SearchKNN {
 }
 ```
 
-### SearchKNNDispatch Wrapper
-
-Unlike point lookups that only need Storage, SearchKNN requires a Processor for HNSW index access:
-
-```rust
-pub struct SearchKNNDispatch {
-    pub(crate) params: SearchKNN,
-    pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<Vec<SearchResult>>>,
-    pub(crate) processor: Arc<Processor>,
-}
-
-impl SearchKNNDispatch {
-    pub fn new(
-        params: SearchKNN,
-        timeout: Duration,
-        processor: Arc<Processor>,
-    ) -> (Self, oneshot::Receiver<Result<Vec<SearchResult>>>);
-}
-
-#[async_trait::async_trait]
-impl QueryProcessor for SearchKNNDispatch {
-    async fn process_and_send(self, _storage: &Storage) {
-        // Use processor directly instead of storage
-        let result = self.params.execute_with_processor(&self.processor);
-        self.send_result(result);
-    }
-}
-```
-
 ### Query Dispatch
 
-Updated `Query::process()` to include SearchKNN:
-
-```rust
-impl Query {
-    pub async fn process(self, storage: &Storage) {
-        match self {
-            Query::GetVector(dispatch) => dispatch.process_and_send(storage).await,
-            Query::GetInternalId(dispatch) => dispatch.process_and_send(storage).await,
-            Query::GetExternalId(dispatch) => dispatch.process_and_send(storage).await,
-            Query::ResolveIds(dispatch) => dispatch.process_and_send(storage).await,
-            Query::SearchKNN(dispatch) => dispatch.process_and_send(storage).await,
-        }
-    }
-}
-```
+Queries are now dispatched via `RequestEnvelope<Query>` with per-query typed
+reply mapping (`QueryReply`). Consumers execute the query with either Storage
+or Processor (SearchKNN) and respond via the envelope.
 
 ### Module Exports
 
@@ -2116,8 +2074,8 @@ pub use writer::{
 
 // Query types and infrastructure (following graph::query pattern)
 pub use query::{
-    GetExternalId, GetInternalId, GetVector, Query, QueryExecutor, QueryProcessor,
-    QueryWithTimeout, ResolveIds, SearchKNN,
+    GetExternalId, GetInternalId, GetVector, Query, QueryExecutor,
+    ResolveIds, SearchKNN,
 };
 pub use reader::{
     create_reader, spawn_consumer as spawn_query_consumer, spawn_consumers as spawn_query_consumers,
@@ -2129,7 +2087,7 @@ pub use reader::{
 
 | File | Changes |
 |------|---------|
-| `query.rs` | Added `SearchKNN`, `SearchKNNDispatch`, updated `Query::process()` |
+| `query.rs` | Added `SearchKNN`, `QueryReply`, updated async dispatch |
 | `mod.rs` | Added mutation/query type exports following graph pattern |
 
 ### Tests
@@ -2140,24 +2098,22 @@ All 520 tests pass after implementing Tasks 5.6 and 5.7.
 
 ## Task 5.7: CODEX Review - Query Dispatch Assessment
 
-**Overall:** SearchKNN dispatch is wired in and matches graph query patterns, but the reader/consumer API still assumes Storage-only execution. SearchKNN now requires a Processor, which changes how callers must construct queries.
+**Overall:** SearchKNN now executes via Processor-backed consumers; other queries run via Storage-backed consumers. The async dispatch uses RequestEnvelope + QueryReply.
 
 **Findings**
 
-1) **SearchKNN requires Processor, but Reader/Consumer is Storage-only (API mismatch).**  
-   `SearchKNNDispatch` carries `Arc<Processor>`, while `Consumer` only owns `Arc<Storage>`. This is fine technically (dispatch ignores storage), but it means:
-   - clients must have a `Processor` on the query construction side, and
-   - this differs from other query types, which are Storage-only.  
-   Consider documenting this explicitly or adding a `Processor`-backed reader/consumer variant.
+1) **SearchKNN requires Processor-backed consumers.**  
+   Other queries work with Storage-only consumers; SearchKNN requires a Processor.  
+   Ensure subsystem spawn helpers use Processor-backed consumers when KNN is needed. ✅ **Done**
 
 **Recommendation**
 
-Document how callers should obtain/hold a `Processor` for SearchKNN (or add a dedicated `SearchReader` that bundles Storage + Processor).
+Document how callers should obtain/hold a `Processor` for SearchKNN (or add a dedicated `SearchReader` that bundles Storage + Processor). ✅ **Done**
 
 ---
 
 **Update (post ops/ refactor):**  
-Processor-backed reader/consumer is still missing. Recommend adding a `spawn_query_consumer_with_processor(...)` or a `SearchReader` wrapper so SearchKNN doesn’t require ad-hoc Processor plumbing at call sites.
+Processor-backed reader/consumer is now supported; SearchKNN uses the same `Runnable` entry point as other queries.
 
 ---
 
@@ -2178,8 +2134,8 @@ Processor-backed reader/consumer is still missing. Recommend adding a `spawn_que
 **Update (Processor-backed consumers added):**
 
 - `ProcessorConsumer` and `spawn_*_with_processor` were added to support SearchKNN ergonomics.  
-- **Note:** `Query::process()` still only receives `Storage`, so SearchKNN still requires a `Processor` at query construction time (`SearchKNNDispatch` holds it). The new consumer does not automatically inject a processor into queries.  
-  - If the goal is to fully remove ad-hoc processor plumbing, consider adding a `SearchReader` helper or a `Reader::search_knn(...)` API that uses the stored processor to build dispatch objects.
+- **Note:** SearchKNN now runs through processor-backed consumers using the same RequestEnvelope + QueryReply pattern; no ad-hoc dispatch wrappers are required at call sites.  
+  - If the goal is to further simplify, consider a `SearchReader` helper or a `Reader::search_knn(...)` convenience API.
 
 ---
 
@@ -2236,20 +2192,20 @@ No issues found in this update.
 
 **Update (run() ergonomics added):**
 
-- **Resolved:** `SearchKNN` now implements `Runnable<SearchReader>` with `run(&reader, timeout)` and `SearchKNNDispatch` is `pub(crate)`. This aligns vector query usage with graph’s public pattern.
+- **Resolved:** `SearchKNN` runs via `Runnable` on processor-backed consumers using RequestEnvelope + QueryReply. This aligns vector query usage with graph’s public pattern.
 
 ---
 
 **New Feedback (mutation run() ergonomics):**
 
 - Mutations still require `writer.send(...)` + `flush()`; there is no `Runnable<Writer>` implementation for `InsertVector`, `InsertVectorBatch`, `DeleteVector`, etc.  
-  - **Recommendation:** add `Runnable<Writer>` impls (and a `MutationBatch` helper) so users can do `InsertVector::new(...).run(&writer, timeout)` like graph. This fully hides `send` in the public API.
+  - **Recommendation:** add `Runnable<Writer>` impls (and a `Vec<Mutation>` batch helper) so users can do `InsertVector::new(...).run(&writer, timeout)` like graph. This fully hides `send` in the public API.
 
 ---
 
 **Update (mutation run() ergonomics added):**
 
-- **Resolved:** `MutationRunnable` trait added with `run(&writer)` for `InsertVector`, `InsertVectorBatch`, `DeleteVector`, and `AddEmbeddingSpec`, plus `MutationBatch` helper. This now hides `writer.send(...)` and matches graph’s mutation ergonomics.
+- **Resolved:** `MutationRunnable` trait added with `run(&writer)` for `InsertVector`, `InsertVectorBatch`, `DeleteVector`, and `AddEmbeddingSpec`, plus a `Vec<Mutation>` batch helper. This now hides `writer.send(...)` and matches graph’s mutation ergonomics.
 
 ---
 
@@ -2268,7 +2224,7 @@ No issues found in this update.
 
 **New Feedback (point-lookup query ergonomics):**
 
-- Only `SearchKNN` has `Runnable` today. Point-lookups (GetVector/GetInternalId/GetExternalId/ResolveIds) still require dispatch or `QueryWithTimeout` plumbing.
+- All vector queries implement `Runnable` via QueryReply (typed replies, no dispatch wrappers).
   - **Recommendation:** add `Runnable<Reader>` impls for point-lookups to fully hide `send_query` across the public API, matching graph's query ergonomics.
 
 ---

@@ -45,7 +45,7 @@
 use std::sync::Arc;
 use anyhow::Result;
 
-use super::mutation::Mutation;
+use super::mutation::{ExecOptions, Mutation, MutationResult};
 use super::name_hash::NameCache;
 use super::Storage;
 
@@ -155,8 +155,18 @@ impl Processor {
     /// - Any mutation fails to execute
     /// - Transaction commit fails
     pub fn process_mutations(&self, mutations: &[Mutation]) -> Result<()> {
+        self.process_mutations_with_options(mutations, ExecOptions::default())
+            .map(|_| ())
+    }
+
+    /// Process mutations synchronously within a transaction with execution options.
+    pub fn process_mutations_with_options(
+        &self,
+        mutations: &[Mutation],
+        options: ExecOptions,
+    ) -> Result<Vec<MutationResult>> {
         if mutations.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         tracing::debug!(count = mutations.len(), "[Processor] Processing mutations");
@@ -165,19 +175,29 @@ impl Processor {
         let txn = txn_db.transaction();
 
         // Each mutation executes itself with cache access for name deduplication
+        let mut replies = Vec::with_capacity(mutations.len());
         for mutation in mutations {
-            mutation.execute_with_cache(&txn, txn_db, &self.name_cache)?;
+            let reply = mutation.execute_with_cache_and_options(
+                &txn,
+                txn_db,
+                &self.name_cache,
+                options,
+            )?;
+            replies.push(reply);
         }
 
         // Single commit for all mutations
-        txn.commit()?;
+        if !options.dry_run {
+            txn.commit()?;
+        }
 
         tracing::debug!(
             count = mutations.len(),
-            "[Processor] Successfully committed mutations"
+            dry_run = options.dry_run,
+            "[Processor] Successfully processed mutations"
         );
 
-        Ok(())
+        Ok(replies)
     }
 
     /// Execute a single mutation in a new transaction.
@@ -185,6 +205,16 @@ impl Processor {
     /// Convenience method that wraps a single mutation in a slice.
     pub fn execute_mutation(&self, mutation: &Mutation) -> Result<()> {
         self.process_mutations(std::slice::from_ref(mutation))
+    }
+
+    /// Execute a single mutation with options, returning a reply.
+    pub fn execute_mutation_with_options(
+        &self,
+        mutation: &Mutation,
+        options: ExecOptions,
+    ) -> Result<MutationResult> {
+        let replies = self.process_mutations_with_options(std::slice::from_ref(mutation), options)?;
+        Ok(replies.into_iter().next().unwrap_or(MutationResult::Flush))
     }
 }
 
@@ -206,6 +236,14 @@ impl super::writer::Processor for Processor {
         // Delegate to sync implementation - no actual async work needed
         Self::process_mutations(self, mutations)
     }
+
+    async fn process_mutations_with_options(
+        &self,
+        mutations: &[Mutation],
+        options: ExecOptions,
+    ) -> Result<Vec<MutationResult>> {
+        Self::process_mutations_with_options(self, mutations, options)
+    }
 }
 
 // Also implement for Arc<Processor> so consumers can hold Arc references
@@ -214,6 +252,14 @@ impl super::writer::Processor for Arc<Processor> {
     async fn process_mutations(&self, mutations: &[Mutation]) -> Result<()> {
         // Delegate to inner processor
         Processor::process_mutations(self.as_ref(), mutations)
+    }
+
+    async fn process_mutations_with_options(
+        &self,
+        mutations: &[Mutation],
+        options: ExecOptions,
+    ) -> Result<Vec<MutationResult>> {
+        Processor::process_mutations_with_options(self.as_ref(), mutations, options)
     }
 }
 

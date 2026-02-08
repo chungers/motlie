@@ -50,7 +50,8 @@ mod tests;
 
 // Re-export commonly used types from submodules
 pub use mutation::{
-    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation, MutationBatch,
+    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, ExecOptions, Mutation,
+    MutationResult, RunnableWithResult,
     // CONTENT-ADDRESS: Update/Delete mutations with optimistic locking
     UpdateNode, UpdateEdge, DeleteNode, DeleteEdge,
 };
@@ -76,8 +77,6 @@ pub use reader::{
     Consumer as QueryConsumer,
     Processor as ReaderProcessor,
     QueryExecutor,
-    QueryProcessor,
-    QueryWithTimeout,
     Reader,
     ReaderConfig,
 };
