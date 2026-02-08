@@ -210,7 +210,7 @@ pub(crate) fn format_bytes(bytes: usize) -> String {
 mod tests {
     use super::*;
     use crate::graph::mutation::{
-        AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation, UpdateNodeActivePeriod,
+        AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation, UpdateNode,
     };
     use crate::graph::writer::Processor;
     use crate::{DataUrl, Id, TimestampMilli};
@@ -427,13 +427,14 @@ mod tests {
         assert_eq!(top_docs.len(), 1);
 
         // Now update its temporal range (which should delete the document)
-        let update = Mutation::UpdateNodeActivePeriod(UpdateNodeActivePeriod {
+        let update = Mutation::UpdateNode(UpdateNode {
             id: node_id,
-            temporal_range: crate::ActivePeriod(
+            expected_version: 1,
+            new_active_period: Some(Some(crate::ActivePeriod(
                 Some(TimestampMilli(0)),
                 Some(TimestampMilli(1000)),
-            ),
-            reason: "test invalidation".to_string(),
+            ))),
+            new_summary: None,
         });
 
         // Process the update - this calls delete_term

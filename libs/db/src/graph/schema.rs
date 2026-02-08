@@ -332,6 +332,8 @@ pub type EdgeName = String;
 pub type NodeSummary = DataUrl;
 pub type EdgeSummary = DataUrl;
 pub type FragmentContent = DataUrl;
+/// Edge weight for weighted graph algorithms
+pub type EdgeWeight = f64;
 
 impl ColumnFamily for Nodes {
     const CF_NAME: &'static str = "graph/nodes";

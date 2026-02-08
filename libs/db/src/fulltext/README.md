@@ -498,7 +498,7 @@ Node and Edge fragments in motlie-db are **append-only** - each fragment represe
 4. **Delete Operations Require INDEXED Fields**
    - `IndexWriter::delete_term()` only works on INDEXED fields
    - ID fields (`id_field`, `src_id_field`, `dst_id_field`) are defined with `STORED | FAST | INDEXED`
-   - This enables `UpdateNodeActivePeriod` and `UpdateEdgeActivePeriod` to delete documents
+   - This enables `UpdateNode` and `UpdateEdge` to delete documents when active period changes
 
 ### Fragment vs Node/Edge Deletion Behavior
 
@@ -506,10 +506,10 @@ Node and Edge fragments in motlie-db are **append-only** - each fragment represe
 |----------|----------|
 | `AddNodeFragment` | Appends new document (never overwrites) |
 | `AddEdgeFragment` | Appends new document (never overwrites) |
-| `UpdateNodeActivePeriod` | Deletes **all** documents with matching `id_field` |
-| `UpdateEdgeActivePeriod` | Deletes **all** documents with matching `src_id_field` |
+| `UpdateNode` | Deletes **all** documents with matching `id_field` (when active period changes) |
+| `UpdateEdge` | Deletes **all** documents with matching `src_id_field` (when active period changes) |
 
-**Important**: `UpdateNodeActivePeriod` deletes the node **and** all its fragments from the fulltext index. This is by design - when a node's validity changes, all its indexed content should be removed from search results. The authoritative data remains in RocksDB.
+**Important**: When `UpdateNode` changes the active period, it deletes the node **and** all its fragments from the fulltext index. This is by design - when a node's validity changes, all its indexed content should be removed from search results. The authoritative data remains in RocksDB.
 
 ### Consistency with RocksDB
 

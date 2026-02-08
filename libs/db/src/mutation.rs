@@ -19,9 +19,8 @@
 //! | [`AddEdge`] | Create an edge between two nodes |
 //! | [`AddNodeFragment`] | Add timestamped content fragment to a node |
 //! | [`AddEdgeFragment`] | Add timestamped content fragment to an edge |
-//! | [`UpdateNodeActivePeriod`] | Update node's temporal validity range |
-//! | [`UpdateEdgeActivePeriod`] | Update edge's temporal validity range |
-//! | [`UpdateEdgeWeight`] | Update edge weight |
+//! | [`UpdateNode`] | Update node (active period and/or summary) |
+//! | [`UpdateEdge`] | Update edge (weight, active period, and/or summary) |
 //!
 //! # Usage
 //!
@@ -102,7 +101,7 @@ pub use crate::writer::Runnable;
 // Re-export all mutation types from graph::mutation
 pub use crate::graph::mutation::{
     AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation, MutationBatch,
-    UpdateEdgeActivePeriod, UpdateEdgeWeight, UpdateNodeActivePeriod,
+    UpdateNode, UpdateEdge,
 };
 
 // Re-export schema types commonly used with mutations

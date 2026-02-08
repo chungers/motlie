@@ -2,14 +2,13 @@ use anyhow::Result;
 
 use crate::rocksdb::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord};
 
-use super::edge::update_edge_valid_range;
 use super::name::{write_name_to_cf, write_name_to_cf_cached};
 use super::summary::{
     ensure_node_summary, mark_node_summary_orphan_candidate, remove_summary_from_orphans,
     verify_node_summary_exists,
 };
 use super::super::mutation::{
-    AddNode, DeleteNode, RestoreNode, UpdateNodeSummary, UpdateNodeActivePeriod,
+    AddNode, DeleteNode, RestoreNode, UpdateNode,
 };
 use super::super::name_hash::{NameCache, NameHash};
 use super::super::schema::{
@@ -75,41 +74,29 @@ pub(crate) fn add_node(
     Ok(())
 }
 
-pub(crate) fn update_node_active_period(
+/// Consolidated node update with optimistic locking.
+/// Handles any combination of active_period and summary updates.
+///
+/// ## Option<Option<T>> pattern:
+/// - `None` = no change
+/// - `Some(None)` = reset/clear the field
+/// - `Some(Some(value))` = set to specific value
+pub(crate) fn update_node(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
-    mutation: &UpdateNodeActivePeriod,
-) -> Result<()> {
-    let node_id = mutation.id;
-    let new_range = mutation.temporal_range;
-
-    update_node_valid_range(txn, txn_db, node_id, new_range)?;
-
-    let edges = find_connected_edges(txn, txn_db, node_id)?;
-
-    tracing::info!(
-        node_id = %node_id,
-        edge_count = edges.len(),
-        "[UpdateNodeActivePeriod] Updating node and connected edges"
-    );
-
-    for (src_id, dst_id, name_hash) in edges {
-        update_edge_valid_range(txn, txn_db, src_id, dst_id, name_hash, new_range)?;
-    }
-
-    Ok(())
-}
-
-pub(crate) fn update_node_summary(
-    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-    txn_db: &rocksdb::TransactionDB,
-    mutation: &UpdateNodeSummary,
+    mutation: &UpdateNode,
 ) -> Result<()> {
     tracing::debug!(
         id = %mutation.id,
         expected_version = mutation.expected_version,
-        "Executing UpdateNodeSummary op"
+        "Executing UpdateNode op"
     );
+
+    // Check if any field is being updated
+    if mutation.new_active_period.is_none() && mutation.new_summary.is_none() {
+        tracing::warn!(id = %mutation.id, "UpdateNode called with no changes");
+        return Ok(());
+    }
 
     let nodes_cf = txn_db
         .cf_handle(Nodes::CF_NAME)
@@ -140,37 +127,58 @@ pub(crate) fn update_node_summary(
     }
 
     let new_version = current_version + 1;
-    let new_hash = SummaryHash::from_summary(&mutation.new_summary)?;
-
-    ensure_node_summary(txn, txn_db, new_hash, &mutation.new_summary)?;
-
-    if let Some(old_h) = old_hash {
-        mark_node_summary_orphan_candidate(txn, txn_db, old_h)?;
-    }
-
-    if let Some(old_h) = old_hash {
-        let index_cf = txn_db
-            .cf_handle(NodeSummaryIndex::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("NodeSummaryIndex CF not found"))?;
-        let old_index_key = NodeSummaryIndexCfKey(old_h, mutation.id, current_version);
-        let old_index_key_bytes = NodeSummaryIndex::key_to_bytes(&old_index_key);
-        let stale_value_bytes = NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::stale())?;
-        txn.put_cf(index_cf, old_index_key_bytes, stale_value_bytes)?;
-    }
-
-    let index_cf = txn_db
-        .cf_handle(NodeSummaryIndex::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("NodeSummaryIndex CF not found"))?;
-    let new_index_key = NodeSummaryIndexCfKey(new_hash, mutation.id, new_version);
-    let new_index_key_bytes = NodeSummaryIndex::key_to_bytes(&new_index_key);
-    let current_value_bytes = NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::current())?;
-    txn.put_cf(index_cf, new_index_key_bytes, current_value_bytes)?;
-
     let now = crate::TimestampMilli::now();
 
+    // Compute new active_period
+    let new_active_period = match &mutation.new_active_period {
+        None => current.1.clone(),           // No change
+        Some(None) => None,                  // Reset/clear
+        Some(Some(p)) => Some(p.clone()),    // Set to specific period
+    };
+
+    // Compute new summary_hash
+    let new_hash = if let Some(ref new_summary) = mutation.new_summary {
+        let hash = SummaryHash::from_summary(new_summary)?;
+        ensure_node_summary(txn, txn_db, hash, new_summary)?;
+        Some(hash)
+    } else {
+        old_hash
+    };
+
+    // Mark old summary as orphan candidate if summary changed
+    if mutation.new_summary.is_some() {
+        if let Some(old_h) = old_hash {
+            mark_node_summary_orphan_candidate(txn, txn_db, old_h)?;
+        }
+    }
+
+    // Update summary index (mark old as stale, add new as current)
+    if mutation.new_summary.is_some() {
+        if let Some(old_h) = old_hash {
+            let index_cf = txn_db
+                .cf_handle(NodeSummaryIndex::CF_NAME)
+                .ok_or_else(|| anyhow::anyhow!("NodeSummaryIndex CF not found"))?;
+            let old_index_key = NodeSummaryIndexCfKey(old_h, mutation.id, current_version);
+            let old_index_key_bytes = NodeSummaryIndex::key_to_bytes(&old_index_key);
+            let stale_value_bytes = NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::stale())?;
+            txn.put_cf(index_cf, old_index_key_bytes, stale_value_bytes)?;
+        }
+
+        if let Some(new_h) = new_hash {
+            let index_cf = txn_db
+                .cf_handle(NodeSummaryIndex::CF_NAME)
+                .ok_or_else(|| anyhow::anyhow!("NodeSummaryIndex CF not found"))?;
+            let new_index_key = NodeSummaryIndexCfKey(new_h, mutation.id, new_version);
+            let new_index_key_bytes = NodeSummaryIndex::key_to_bytes(&new_index_key);
+            let current_value_bytes = NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::current())?;
+            txn.put_cf(index_cf, new_index_key_bytes, current_value_bytes)?;
+        }
+    }
+
+    // Mark old node version with superseded_at
     let old_node_value = NodeCfValue(
         Some(now),
-        current.1,
+        current.1.clone(),
         current.2,
         current.3,
         current.4,
@@ -180,13 +188,14 @@ pub(crate) fn update_node_summary(
         .map_err(|e| anyhow::anyhow!("Failed to serialize old node version: {}", e))?;
     txn.put_cf(nodes_cf, &node_key_bytes, old_node_bytes)?;
 
+    // Write new node version
     let new_node_key = NodeCfKey(mutation.id, now);
     let new_node_key_bytes = Nodes::key_to_bytes(&new_node_key);
     let new_node_value = NodeCfValue(
         None,
-        current.1,
+        new_active_period.clone(),
         current.2,
-        Some(new_hash),
+        new_hash,
         new_version,
         false,
     );
@@ -194,6 +203,7 @@ pub(crate) fn update_node_summary(
         .map_err(|e| anyhow::anyhow!("Failed to serialize new node version: {}", e))?;
     txn.put_cf(nodes_cf, new_node_key_bytes, new_node_bytes)?;
 
+    // Write to NodeVersionHistory
     let history_cf = txn_db
         .cf_handle(NodeVersionHistory::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("NodeVersionHistory CF not found"))?;
@@ -201,9 +211,9 @@ pub(crate) fn update_node_summary(
     let history_key_bytes = NodeVersionHistory::key_to_bytes(&history_key);
     let history_value = NodeVersionHistoryCfValue(
         now,
-        Some(new_hash),
+        new_hash,
         current.2,
-        current.1.clone(),
+        new_active_period,
     );
     let history_value_bytes = NodeVersionHistory::value_to_bytes(&history_value)?;
     txn.put_cf(history_cf, history_key_bytes, history_value_bytes)?;
@@ -212,7 +222,7 @@ pub(crate) fn update_node_summary(
         id = %mutation.id,
         old_version = current_version,
         new_version = new_version,
-        "UpdateNodeSummary completed"
+        "UpdateNode completed"
     );
 
     Ok(())

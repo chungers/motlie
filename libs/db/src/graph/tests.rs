@@ -1,7 +1,6 @@
 use crate::graph::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord, Processor, Storage};
 use crate::graph::mutation::{
-    AddEdge, AddNode, AddNodeFragment, UpdateEdgeActivePeriod,
-    UpdateNodeActivePeriod,
+    AddEdge, AddNode, AddNodeFragment, UpdateEdge, UpdateNode,
 };
 use crate::writer::Runnable as MutRunnable;
 use crate::reader::Runnable;
@@ -143,21 +142,24 @@ use tokio::time::Duration;
         // Give consumer time to process the node and edge
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        UpdateNodeActivePeriod {
+        UpdateNode {
             id: node_id,
-            temporal_range: ActivePeriod(None, None),
-            reason: "test node invalidation".to_string(),
+            expected_version: 1,
+            new_active_period: Some(Some(ActivePeriod(None, None))),
+            new_summary: None,
         }
         .run(&writer)
         .await
         .unwrap();
 
-        UpdateEdgeActivePeriod {
+        UpdateEdge {
             src_id: edge_src_id,
             dst_id: edge_dst_id,
             name: edge_name,
-            temporal_range: ActivePeriod(None, None),
-            reason: "test edge invalidation".to_string(),
+            expected_version: 1,
+            new_weight: None,
+            new_active_period: Some(Some(ActivePeriod(None, None))),
+            new_summary: None,
         }
         .run(&writer)
         .await
@@ -2568,7 +2570,7 @@ mod content_address_tests {
         NodeSummaries, NodeSummaryCfKey, NodeSummaryCfValue,
         EdgeSummaries, EdgeSummaryCfKey, EdgeSummaryCfValue,
     };
-    use crate::graph::mutation::{UpdateNodeSummary, UpdateEdgeSummary, DeleteNode, DeleteEdge};
+    use crate::graph::mutation::{UpdateNode, UpdateEdge, DeleteNode, DeleteEdge};
 
     /// Helper to check if node summary exists in storage
     /// (VERSIONING: Refcount removed - just check existence)
@@ -2762,7 +2764,7 @@ mod content_address_tests {
         assert!(exists, "Shared edge summary should exist");
     }
 
-    /// Test: UpdateNodeSummary creates new summary, old stays for GC
+    /// Test: UpdateNode (summary) creates new summary, old stays for GC
     #[tokio::test]
     async fn test_update_node_summary_adjusts_refcounts() {
         let temp_dir = TempDir::new().unwrap();
@@ -2791,10 +2793,11 @@ mod content_address_tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Update node summary (old stays for GC, new is created)
-        UpdateNodeSummary {
+        UpdateNode {
             id: node_id,
-            new_summary: new_summary.clone(),
             expected_version: 1,
+            new_active_period: None,
+            new_summary: Some(new_summary.clone()),
         }.run(&writer).await.unwrap();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2814,7 +2817,7 @@ mod content_address_tests {
         assert!(new_exists, "New summary should exist");
     }
 
-    /// Test: UpdateEdgeSummary creates new summary, old stays for GC
+    /// Test: UpdateEdge (summary) creates new summary, old stays for GC
     #[tokio::test]
     async fn test_update_edge_summary_adjusts_refcounts() {
         let temp_dir = TempDir::new().unwrap();
@@ -2847,12 +2850,14 @@ mod content_address_tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Update edge summary (old stays for GC, new is created)
-        UpdateEdgeSummary {
+        UpdateEdge {
             src_id,
             dst_id,
             name: edge_name.clone(),
-            new_summary: new_summary.clone(),
             expected_version: 1,
+            new_weight: None,
+            new_active_period: None,
+            new_summary: Some(new_summary.clone()),
         }.run(&writer).await.unwrap();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -3046,10 +3051,11 @@ mod content_address_tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Update to same content (same hash) - idempotent
-        UpdateNodeSummary {
+        UpdateNode {
             id: node_id,
-            new_summary: summary.clone(),
             expected_version: 1,
+            new_active_period: None,
+            new_summary: Some(summary.clone()),
         }.run(&writer).await.unwrap();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -3115,10 +3121,11 @@ mod content_address_tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Step 2: Update node1 from A to C
-        UpdateNodeSummary {
+        UpdateNode {
             id: node1_id,
-            new_summary: summary_c.clone(),
             expected_version: 1,
+            new_active_period: None,
+            new_summary: Some(summary_c.clone()),
         }.run(&writer).await.unwrap();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -3132,10 +3139,11 @@ mod content_address_tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Step 4: Update node3 from B to C
-        UpdateNodeSummary {
+        UpdateNode {
             id: node3_id,
-            new_summary: summary_c.clone(),
             expected_version: 1,
+            new_active_period: None,
+            new_summary: Some(summary_c.clone()),
         }.run(&writer).await.unwrap();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -3166,7 +3174,7 @@ mod versioning_tests {
     use super::*;
     use crate::graph::query::{NodeById, OutgoingEdges, EdgeSummaryBySrcDstName};
     use crate::graph::schema::{NodeSummary, EdgeSummary};
-    use crate::graph::mutation::{AddNode, AddEdge, UpdateNodeSummary, UpdateEdgeSummary, DeleteNode, DeleteEdge};
+    use crate::graph::mutation::{AddNode, AddEdge, UpdateNode, UpdateEdge, DeleteNode, DeleteEdge};
     use crate::{Id, TimestampMilli, ActivePeriod};
     use std::time::Duration;
 
@@ -3208,10 +3216,11 @@ mod versioning_tests {
         tokio::time::sleep(Duration::from_millis(10)).await;
 
         // Update to v2
-        UpdateNodeSummary {
+        UpdateNode {
             id: node_id,
-            new_summary: summary_v2.clone(),
             expected_version: 1,
+            new_active_period: None,
+            new_summary: Some(summary_v2.clone()),
         }.run(&writer).await.unwrap();
 
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -3219,10 +3228,11 @@ mod versioning_tests {
         tokio::time::sleep(Duration::from_millis(10)).await;
 
         // Update to v3
-        UpdateNodeSummary {
+        UpdateNode {
             id: node_id,
-            new_summary: summary_v3.clone(),
             expected_version: 2,
+            new_active_period: None,
+            new_summary: Some(summary_v3.clone()),
         }.run(&writer).await.unwrap();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -3383,13 +3393,13 @@ mod versioning_tests {
         let time_after_v1 = TimestampMilli::now();
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        // Update node with new ActivePeriod [3000, 4000)
-        // Note: UpdateNodeSummary doesn't change ActivePeriod, so we'll just update summary
+        // Update node with new summary
         // to demonstrate that system time and application time are independent
-        UpdateNodeSummary {
+        UpdateNode {
             id: node_id,
-            new_summary: NodeSummary::from_text("V2: Same ActivePeriod"),
             expected_version: 1,
+            new_active_period: None,
+            new_summary: Some(NodeSummary::from_text("V2: Same ActivePeriod")),
         }.run(&writer).await.unwrap();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -3599,10 +3609,11 @@ mod versioning_tests {
         tokio::time::sleep(Duration::from_millis(10)).await;
 
         // Update to V2
-        UpdateNodeSummary {
+        UpdateNode {
             id: node_id,
-            new_summary: NodeSummary::from_text("Version 2"),
             expected_version: 1,
+            new_active_period: None,
+            new_summary: Some(NodeSummary::from_text("Version 2")),
         }.run(&writer).await.unwrap();
 
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -3610,10 +3621,11 @@ mod versioning_tests {
         tokio::time::sleep(Duration::from_millis(10)).await;
 
         // Update to V3
-        UpdateNodeSummary {
+        UpdateNode {
             id: node_id,
-            new_summary: NodeSummary::from_text("Version 3"),
             expected_version: 2,
+            new_active_period: None,
+            new_summary: Some(NodeSummary::from_text("Version 3")),
         }.run(&writer).await.unwrap();
 
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -3674,10 +3686,11 @@ mod versioning_tests {
         tokio::time::sleep(Duration::from_millis(10)).await;
 
         // Update to V2 (unwanted change)
-        UpdateNodeSummary {
+        UpdateNode {
             id: node_id,
-            new_summary: NodeSummary::from_text("Unwanted change"),
             expected_version: 1,
+            new_active_period: None,
+            new_summary: Some(NodeSummary::from_text("Unwanted change")),
         }.run(&writer).await.unwrap();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -3705,10 +3718,11 @@ mod versioning_tests {
         let consumer_handle = spawn_mutation_consumer(receiver, config, &db_path);
 
         // Create rollback version (V3 = copy of V1)
-        UpdateNodeSummary {
+        UpdateNode {
             id: node_id,
-            new_summary: old_summary,
             expected_version: 2,
+            new_active_period: None,
+            new_summary: Some(old_summary),
         }.run(&writer).await.unwrap();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -3772,12 +3786,14 @@ mod versioning_tests {
         tokio::time::sleep(Duration::from_millis(10)).await;
 
         // Update edge to V2
-        UpdateEdgeSummary {
+        UpdateEdge {
             src_id,
             dst_id,
             name: edge_name.clone(),
-            new_summary: EdgeSummary::from_text("Edge V2"),
             expected_version: 1,
+            new_weight: None,
+            new_active_period: None,
+            new_summary: Some(EdgeSummary::from_text("Edge V2")),
         }.run(&writer).await.unwrap();
 
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -4182,10 +4198,10 @@ mod versioning_tests {
     // Phase 2: VERSIONING Behavioral Validation Tests (claude, 2026-02-07)
     // ============================================================================
 
-    /// Validates: UpdateNodeSummary creates a new version history entry.
+    /// Validates: UpdateNode creates a new version history entry.
     #[tokio::test]
     async fn test_node_update_creates_version_history() {
-        use crate::graph::mutation::UpdateNodeSummary;
+        use crate::graph::mutation::UpdateNode;
         use crate::graph::query::NodeById;
         use crate::graph::schema::Nodes;
         use crate::graph::ColumnFamily;
@@ -4212,10 +4228,11 @@ mod versioning_tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Update the summary (first version is 1)
-        UpdateNodeSummary {
+        UpdateNode {
             id: node_id,
-            new_summary: NodeSummary::from_text("Version 2"),
             expected_version: 1,
+            new_active_period: None,
+            new_summary: Some(NodeSummary::from_text("Version 2")),
         }.run(&writer).await.unwrap();
 
         writer.flush().await.unwrap();
@@ -4253,10 +4270,10 @@ mod versioning_tests {
         assert!(version_count >= 2, "Should have at least 2 versions in Nodes CF, got {}", version_count);
     }
 
-    /// Validates: UpdateEdgeSummary creates a new version history entry.
+    /// Validates: UpdateEdge (summary) creates a new version history entry.
     #[tokio::test]
     async fn test_edge_update_creates_version_history() {
-        use crate::graph::mutation::UpdateEdgeSummary;
+        use crate::graph::mutation::UpdateEdge;
         use crate::graph::query::EdgeSummaryBySrcDstName;
         use crate::graph::schema::ForwardEdges;
         use crate::graph::name_hash::NameHash;
@@ -4304,13 +4321,15 @@ mod versioning_tests {
         writer.flush().await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // Update edge summary (first version is 1)
-        UpdateEdgeSummary {
+        // Update edge summary using consolidated UpdateEdge
+        UpdateEdge {
             src_id,
             dst_id,
             name: edge_name.clone(),
-            new_summary: EdgeSummary::from_text("Edge V2"),
             expected_version: 1,
+            new_weight: None,
+            new_active_period: None,
+            new_summary: Some(EdgeSummary::from_text("Edge V2")),
         }.run(&writer).await.unwrap();
 
         writer.flush().await.unwrap();
@@ -4355,7 +4374,7 @@ mod versioning_tests {
     /// Validates: Edge weight update creates new version (no in-place mutation).
     #[tokio::test]
     async fn test_edge_weight_update_creates_version() {
-        use crate::graph::mutation::UpdateEdgeWeight;
+        use crate::graph::mutation::UpdateEdge;
         use crate::graph::query::EdgeSummaryBySrcDstName;
 
         let temp_dir = TempDir::new().unwrap();
@@ -4400,12 +4419,15 @@ mod versioning_tests {
         let time_with_weight_1 = TimestampMilli::now();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // Update weight
-        UpdateEdgeWeight {
+        // Update weight using consolidated UpdateEdge
+        UpdateEdge {
             src_id,
             dst_id,
             name: edge_name.clone(),
-            weight: 5.0,
+            expected_version: 1,
+            new_weight: Some(Some(5.0)),
+            new_active_period: None,
+            new_summary: None,
         }.run(&writer).await.unwrap();
 
         writer.flush().await.unwrap();
@@ -4545,7 +4567,7 @@ mod versioning_tests {
     /// The Nodes CF key is (Id, ValidSince), so iterations are ordered by time.
     #[tokio::test]
     async fn test_version_scan_returns_latest_first() {
-        use crate::graph::mutation::UpdateNodeSummary;
+        use crate::graph::mutation::UpdateNode;
         use crate::graph::schema::Nodes;
         use crate::graph::ColumnFamily;
 
@@ -4571,20 +4593,22 @@ mod versioning_tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         // Update to V2
-        UpdateNodeSummary {
+        UpdateNode {
             id: node_id,
-            new_summary: NodeSummary::from_text("V2"),
             expected_version: 1,
+            new_active_period: None,
+            new_summary: Some(NodeSummary::from_text("V2")),
         }.run(&writer).await.unwrap();
 
         writer.flush().await.unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         // Update to V3
-        UpdateNodeSummary {
+        UpdateNode {
             id: node_id,
-            new_summary: NodeSummary::from_text("V3"),
             expected_version: 2,
+            new_active_period: None,
+            new_summary: Some(NodeSummary::from_text("V3")),
         }.run(&writer).await.unwrap();
 
         writer.flush().await.unwrap();
@@ -4635,7 +4659,7 @@ mod versioning_tests {
     /// Validates: Concurrent writers to same node maintain consistent history.
     #[tokio::test]
     async fn test_concurrent_writers_same_node() {
-        use crate::graph::mutation::UpdateNodeSummary;
+        use crate::graph::mutation::UpdateNode;
         use crate::graph::query::NodeById;
 
         let temp_dir = TempDir::new().unwrap();

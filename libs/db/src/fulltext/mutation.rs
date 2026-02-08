@@ -8,10 +8,9 @@ use tantivy::schema::*;
 use tantivy::{doc, IndexWriter};
 
 use crate::graph::mutation::{
-    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, UpdateEdgeActivePeriod,
-    UpdateEdgeWeight, UpdateNodeActivePeriod,
+    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment,
     // CONTENT-ADDRESS: Update/Delete mutations
-    UpdateNodeSummary, UpdateEdgeSummary, DeleteNode, DeleteEdge,
+    UpdateNode, UpdateEdge, DeleteNode, DeleteEdge,
 };
 
 use super::schema::{compute_validity_facet, extract_tags, DocumentFields};
@@ -249,152 +248,136 @@ impl MutationExecutor for AddEdgeFragment {
     }
 }
 
-impl MutationExecutor for UpdateNodeActivePeriod {
+impl MutationExecutor for UpdateNode {
     fn index(&self, index_writer: &IndexWriter, fields: &DocumentFields) -> Result<()> {
-        // Delete existing documents for this node ID
-        let id_term = tantivy::Term::from_field_bytes(fields.id_field, self.id.as_bytes());
-        index_writer.delete_term(id_term);
+        // Only re-index if summary changed
+        if let Some(ref new_summary) = self.new_summary {
+            // Delete existing document for this node
+            let id_term = tantivy::Term::from_field_bytes(fields.id_field, self.id.as_bytes());
+            index_writer.delete_term(id_term.clone());
 
-        tracing::debug!(
-            id = %self.id,
-            reason = %self.reason,
-            "[FullText] Deleted node documents for temporal update"
-        );
+            // Decode new summary content
+            let summary_text = new_summary
+                .decode_string()
+                .unwrap_or_else(|_| String::new());
+
+            // Extract tags from summary
+            let tags = extract_tags(&summary_text);
+
+            // Re-index with new summary content
+            // Note: We don't have the node name here, so we use empty string
+            // In practice, the graph query should be used to fetch full node details
+            let mut doc = doc!(
+                fields.id_field => self.id.as_bytes().to_vec(),
+                fields.doc_type_field => "nodes",
+                fields.content_field => summary_text,
+            );
+
+            // Add facets
+            doc.add_facet(fields.doc_type_facet, Facet::from("/type/nodes"));
+
+            // Add user-defined tags as facets
+            for tag in tags {
+                doc.add_facet(fields.tags_facet, Facet::from(&format!("/tag/{}", tag)));
+            }
+
+            index_writer
+                .add_document(doc)
+                .context("Failed to re-index UpdateNode")?;
+
+            tracing::debug!(
+                id = %self.id,
+                expected_version = self.expected_version,
+                "[FullText] Updated node summary"
+            );
+        } else if self.new_active_period.is_some() {
+            // For active period updates, delete existing documents
+            let id_term = tantivy::Term::from_field_bytes(fields.id_field, self.id.as_bytes());
+            index_writer.delete_term(id_term);
+
+            tracing::debug!(
+                id = %self.id,
+                "[FullText] Deleted node documents for temporal update"
+            );
+        }
+        // No change if neither summary nor active_period is updated
         Ok(())
     }
 }
 
-impl MutationExecutor for UpdateEdgeActivePeriod {
+impl MutationExecutor for UpdateEdge {
     fn index(&self, index_writer: &IndexWriter, fields: &DocumentFields) -> Result<()> {
-        // Delete existing documents for this edge
-        // We need to delete by composite key (src_id + dst_id + edge_name)
-        // Tantivy doesn't support composite term deletion directly, so we delete by src_id
-        // and let the search handle filtering
-        let src_term = tantivy::Term::from_field_bytes(fields.src_id_field, self.src_id.as_bytes());
-        index_writer.delete_term(src_term);
+        // Only re-index if summary changed
+        if let Some(ref new_summary) = self.new_summary {
+            // Delete existing documents for this edge by src_id
+            // Note: Tantivy doesn't support composite term deletion, so we delete by src_id
+            let src_term = tantivy::Term::from_field_bytes(fields.src_id_field, self.src_id.as_bytes());
+            index_writer.delete_term(src_term);
 
-        tracing::debug!(
-            src = %self.src_id,
-            dst = %self.dst_id,
-            name = %self.name,
-            reason = %self.reason,
-            "[FullText] Deleted edge documents for temporal update"
-        );
-        Ok(())
-    }
-}
+            // Decode new summary content
+            let summary_text = new_summary
+                .decode_string()
+                .unwrap_or_else(|_| String::new());
 
-impl MutationExecutor for UpdateEdgeWeight {
-    fn index(&self, _index_writer: &IndexWriter, _fields: &DocumentFields) -> Result<()> {
-        // For weight updates, we'd need to delete and re-index
-        // For now, just log as this is primarily a graph operation
-        tracing::debug!(
-            src = %self.src_id,
-            dst = %self.dst_id,
-            name = %self.name,
-            weight = self.weight,
-            "[FullText] Edge weight updated (no index change needed)"
-        );
+            // Extract tags from summary
+            let tags = extract_tags(&summary_text);
+
+            // Re-index with new summary content
+            let mut doc = doc!(
+                fields.src_id_field => self.src_id.as_bytes().to_vec(),
+                fields.dst_id_field => self.dst_id.as_bytes().to_vec(),
+                fields.edge_name_field => self.name.to_string(),
+                fields.content_field => summary_text,
+                fields.doc_type_field => "edges",
+            );
+
+            // Add facets
+            doc.add_facet(fields.doc_type_facet, Facet::from("/type/edges"));
+
+            // Add user-defined tags as facets
+            for tag in tags {
+                doc.add_facet(fields.tags_facet, Facet::from(&format!("/tag/{}", tag)));
+            }
+
+            index_writer
+                .add_document(doc)
+                .context("Failed to re-index UpdateEdge")?;
+
+            tracing::debug!(
+                src = %self.src_id,
+                dst = %self.dst_id,
+                name = %self.name,
+                expected_version = self.expected_version,
+                "[FullText] Updated edge summary"
+            );
+        } else if self.new_active_period.is_some() {
+            // For active period updates, delete existing documents
+            let src_term = tantivy::Term::from_field_bytes(fields.src_id_field, self.src_id.as_bytes());
+            index_writer.delete_term(src_term);
+
+            tracing::debug!(
+                src = %self.src_id,
+                dst = %self.dst_id,
+                name = %self.name,
+                "[FullText] Deleted edge documents for temporal update"
+            );
+        } else {
+            // Weight-only update: no fulltext index change needed
+            tracing::debug!(
+                src = %self.src_id,
+                dst = %self.dst_id,
+                name = %self.name,
+                new_weight = ?self.new_weight,
+                "[FullText] Edge weight updated (no index change needed)"
+            );
+        }
         Ok(())
     }
 }
 
 // ============================================================================
-// CONTENT-ADDRESS: Update/Delete Mutation Implementations
+// CONTENT-ADDRESS: Delete Mutation Implementations
 // ============================================================================
-
-impl MutationExecutor for UpdateNodeSummary {
-    fn index(&self, index_writer: &IndexWriter, fields: &DocumentFields) -> Result<()> {
-        // Delete existing document for this node
-        let id_term = tantivy::Term::from_field_bytes(fields.id_field, self.id.as_bytes());
-        index_writer.delete_term(id_term.clone());
-
-        // Decode new summary content
-        let summary_text = self
-            .new_summary
-            .decode_string()
-            .unwrap_or_else(|_| String::new());
-
-        // Extract tags from summary
-        let tags = extract_tags(&summary_text);
-
-        // Re-index with new summary content
-        // Note: We don't have the node name here, so we use empty string
-        // In practice, the graph query should be used to fetch full node details
-        let mut doc = doc!(
-            fields.id_field => self.id.as_bytes().to_vec(),
-            fields.doc_type_field => "nodes",
-            fields.content_field => summary_text,
-        );
-
-        // Add facets
-        doc.add_facet(fields.doc_type_facet, Facet::from("/type/nodes"));
-
-        // Add user-defined tags as facets
-        for tag in tags {
-            doc.add_facet(fields.tags_facet, Facet::from(&format!("/tag/{}", tag)));
-        }
-
-        index_writer
-            .add_document(doc)
-            .context("Failed to re-index UpdateNodeSummary")?;
-
-        tracing::debug!(
-            id = %self.id,
-            expected_version = self.expected_version,
-            "[FullText] Updated node summary"
-        );
-        Ok(())
-    }
-}
-
-impl MutationExecutor for UpdateEdgeSummary {
-    fn index(&self, index_writer: &IndexWriter, fields: &DocumentFields) -> Result<()> {
-        // Delete existing documents for this edge by src_id
-        // Note: Tantivy doesn't support composite term deletion, so we delete by src_id
-        let src_term = tantivy::Term::from_field_bytes(fields.src_id_field, self.src_id.as_bytes());
-        index_writer.delete_term(src_term);
-
-        // Decode new summary content
-        let summary_text = self
-            .new_summary
-            .decode_string()
-            .unwrap_or_else(|_| String::new());
-
-        // Extract tags from summary
-        let tags = extract_tags(&summary_text);
-
-        // Re-index with new summary content
-        let mut doc = doc!(
-            fields.src_id_field => self.src_id.as_bytes().to_vec(),
-            fields.dst_id_field => self.dst_id.as_bytes().to_vec(),
-            fields.edge_name_field => self.name.to_string(),
-            fields.content_field => summary_text,
-            fields.doc_type_field => "edges",
-        );
-
-        // Add facets
-        doc.add_facet(fields.doc_type_facet, Facet::from("/type/edges"));
-
-        // Add user-defined tags as facets
-        for tag in tags {
-            doc.add_facet(fields.tags_facet, Facet::from(&format!("/tag/{}", tag)));
-        }
-
-        index_writer
-            .add_document(doc)
-            .context("Failed to re-index UpdateEdgeSummary")?;
-
-        tracing::debug!(
-            src = %self.src_id,
-            dst = %self.dst_id,
-            name = %self.name,
-            expected_version = self.expected_version,
-            "[FullText] Updated edge summary"
-        );
-        Ok(())
-    }
-}
 
 impl MutationExecutor for DeleteNode {
     fn index(&self, index_writer: &IndexWriter, fields: &DocumentFields) -> Result<()> {
@@ -414,7 +397,7 @@ impl MutationExecutor for DeleteNode {
 impl MutationExecutor for DeleteEdge {
     fn index(&self, index_writer: &IndexWriter, fields: &DocumentFields) -> Result<()> {
         // Delete all documents for this edge
-        // We delete by src_id (same limitation as UpdateEdgeActivePeriod)
+        // We delete by src_id (same limitation as UpdateEdge)
         let src_term = tantivy::Term::from_field_bytes(fields.src_id_field, self.src_id.as_bytes());
         index_writer.delete_term(src_term);
 

@@ -351,33 +351,26 @@ AddEdgeFragment {
 
 ### Updating Entities
 
-**Update Edge Weight:**
+**Update Edge (weight, active period, and/or summary):**
 ```rust
-UpdateEdgeWeight {
+UpdateEdge {
     src_id,
     dst_id,
     name: "edge_name".to_string(),
-    weight: 2.5,
+    expected_version: current_version,
+    new_weight: Some(Some(2.5)),           // Set weight to 2.5
+    new_active_period: Some(Some(ActivePeriod(Some(start), Some(end)))),
+    new_summary: None,                      // No change to summary
 }.run(&writer).await
 ```
 
-**Update Edge Active period:**
+**Update Node (active period and/or summary):**
 ```rust
-UpdateEdgeActivePeriod {
-    src_id,
-    dst_id,
-    name: "edge_name".to_string(),
-    temporal_range: ActivePeriod(Some(start), Some(end)),
-    reason: "Invalidating old edge".to_string(),
-}.run(&writer).await
-```
-
-**Update Node Active period:**
-```rust
-UpdateNodeActivePeriod {
+UpdateNode {
     id: node_id,
-    temporal_range: ActivePeriod(Some(start), Some(end)),
-    reason: "Invalidating old node".to_string(),
+    expected_version: current_version,
+    new_active_period: Some(Some(ActivePeriod(Some(start), Some(end)))),
+    new_summary: None,  // No change to summary
 }.run(&writer).await
 ```
 
@@ -434,13 +427,13 @@ UpdateNodeActivePeriod {
 - ✅ **EdgeFragments CF** - Separate fragments for edges
 - ✅ **Edge weights** - Optional f64 weight per edge
 - ✅ **Edge summary in ForwardEdges** - Moved from Edges CF
-- ✅ **UpdateEdgeWeight mutation** - Update edge weights
+- ✅ **UpdateEdge mutation** - Update edge weight, active period, and/or summary
 
 ### Changed
 
 - ⚠️ **Fragments CF** → **NodeFragments CF** - Renamed for clarity
 - ⚠️ **AddEdge** - Now includes summary and weight fields
-- ⚠️ **UpdateEdgeActivePeriod** - Uses topology instead of edge_id
+- ⚠️ **UpdateEdge** - Uses topology instead of edge_id
 - ⚠️ **EdgeSummaryBySrcDstName** - Returns (summary, weight) instead of (id, summary)
 
 ### Benefits

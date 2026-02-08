@@ -372,20 +372,42 @@ AddEdgeFragment {
 - `content: DataUrl` - Fragment content (text, JSON, binary, etc.)
 - `valid_range: Option<ActivePeriod>` - Optional validity period
 
-### 5. UpdateNodeActivePeriod
+### 5. UpdateNode (Consolidated)
 
-Update the active period of a node:
+Update a node's active period and/or summary with optimistic locking:
 
 ```rust
-use motlie_db::{UpdateNodeActivePeriod, Id, TimestampMilli, ActivePeriod, MutationRunnable};
+use motlie_db::{UpdateNode, Id, ActivePeriod, NodeSummary, MutationRunnable};
 
-UpdateNodeActivePeriod {
+// Update only summary
+UpdateNode {
     id: node_id,
-    temporal_range: ActivePeriod {
-        valid_from: TimestampMilli::now(),
-        valid_to: Some(future_timestamp),
-    },
-    reason: "Updated validity period".to_string(),
+    expected_version: 1,
+    new_active_period: None,  // No change
+    new_summary: Some(NodeSummary::from_text("Updated description")),
+}
+.run(&writer)
+.await?;
+
+// Update only active period
+UpdateNode {
+    id: node_id,
+    expected_version: 2,
+    new_active_period: Some(Some(ActivePeriod(
+        Some(TimestampMilli::now()),
+        Some(future_timestamp),
+    ))),
+    new_summary: None,  // No change
+}
+.run(&writer)
+.await?;
+
+// Clear active period
+UpdateNode {
+    id: node_id,
+    expected_version: 3,
+    new_active_period: Some(None),  // Reset/clear
+    new_summary: None,
 }
 .run(&writer)
 .await?;
@@ -393,25 +415,39 @@ UpdateNodeActivePeriod {
 
 **Fields**:
 - `id: Id` - Node ID to update
-- `temporal_range: ActivePeriod` - New active period
-- `reason: String` - Reason for the update
+- `expected_version: u32` - Expected version for optimistic locking
+- `new_active_period: Option<Option<ActivePeriod>>` - `None` = no change, `Some(None)` = clear, `Some(Some(period))` = set
+- `new_summary: Option<NodeSummary>` - `None` = no change, `Some(summary)` = set
 
-### 6. UpdateEdgeActivePeriod
+### 6. UpdateEdge (Consolidated)
 
-Update the active period of an edge (using topology instead of edge ID):
+Update an edge's weight, active period, and/or summary with optimistic locking:
 
 ```rust
-use motlie_db::{UpdateEdgeActivePeriod, Id, TimestampMilli, ActivePeriod, MutationRunnable};
+use motlie_db::{UpdateEdge, Id, ActivePeriod, EdgeSummary, MutationRunnable};
 
-UpdateEdgeActivePeriod {
+// Update only weight
+UpdateEdge {
     src_id: alice_id,
     dst_id: bob_id,
     name: "follows".to_string(),
-    temporal_range: ActivePeriod {
-        valid_from: TimestampMilli::now(),
-        valid_to: Some(future_timestamp),
-    },
-    reason: "Updated validity period".to_string(),
+    expected_version: 1,
+    new_weight: Some(Some(2.5)),
+    new_active_period: None,
+    new_summary: None,
+}
+.run(&writer)
+.await?;
+
+// Clear weight
+UpdateEdge {
+    src_id: alice_id,
+    dst_id: bob_id,
+    name: "follows".to_string(),
+    expected_version: 2,
+    new_weight: Some(None),  // Reset/clear
+    new_active_period: None,
+    new_summary: None,
 }
 .run(&writer)
 .await?;
@@ -421,31 +457,10 @@ UpdateEdgeActivePeriod {
 - `src_id: Id` - Source node ID
 - `dst_id: Id` - Destination node ID
 - `name: String` - Edge name/type
-- `temporal_range: ActivePeriod` - New active period
-- `reason: String` - Reason for the update
-
-### 7. UpdateEdgeWeight
-
-Update the weight of an edge (for weighted graph algorithms):
-
-```rust
-use motlie_db::{UpdateEdgeWeight, Id, MutationRunnable};
-
-UpdateEdgeWeight {
-    src_id: alice_id,
-    dst_id: bob_id,
-    name: "follows".to_string(),
-    weight: 2.5,
-}
-.run(&writer)
-.await?;
-```
-
-**Fields**:
-- `src_id: Id` - Source node ID
-- `dst_id: Id` - Destination node ID
-- `name: String` - Edge name/type
-- `weight: f64` - New weight value
+- `expected_version: u32` - Expected version for optimistic locking
+- `new_weight: Option<Option<f64>>` - `None` = no change, `Some(None)` = clear, `Some(Some(w))` = set
+- `new_active_period: Option<Option<ActivePeriod>>` - `None` = no change, `Some(None)` = clear, `Some(Some(p))` = set
+- `new_summary: Option<EdgeSummary>` - `None` = no change, `Some(summary)` = set
 
 ## Common Patterns
 
@@ -889,31 +904,23 @@ AddEdgeFragment {
 - Added: `summary: EdgeSummary` - Summary information for the edge
 - Added: `weight: Option<f64>` - Optional weight for weighted graphs
 
-**UpdateEdgeActivePeriod Changes**:
-- Now uses topology (src_id, dst_id, name) instead of edge_id
+**Consolidated UpdateEdge Mutation**:
+- Uses topology (src_id, dst_id, name) to identify edge
+- Combines weight, active period, and summary updates in one mutation
+- Uses `Option<Option<T>>` pattern: `None` = no change, `Some(None)` = clear, `Some(Some(v))` = set
 - Example:
 ```rust
-UpdateEdgeActivePeriod {
+UpdateEdge {
     src_id: alice_id,
     dst_id: bob_id,
     name: "follows".to_string(),
-    temporal_range: ActivePeriod {
+    expected_version: current_version,
+    new_weight: Some(Some(2.5)),  // Set weight to 2.5
+    new_active_period: Some(Some(ActivePeriod {
         valid_from: TimestampMilli::now(),
         valid_to: Some(future_timestamp),
-    },
-    reason: "Updated validity period".to_string(),
-}
-.run(&writer)
-.await?;
-```
-
-**New Mutation: UpdateEdgeWeight**:
-```rust
-UpdateEdgeWeight {
-    src_id: alice_id,
-    dst_id: bob_id,
-    name: "follows".to_string(),
-    weight: 2.5,
+    })),
+    new_summary: None,  // No change to summary
 }
 .run(&writer)
 .await?;
@@ -957,16 +964,25 @@ UpdateEdgeWeight {
    AddEdgeFragment { src_id, dst_id, edge_name, /* ... */ }
    ```
 
-5. ✅ Update UpdateEdgeActivePeriod to use topology:
+5. ✅ Use consolidated UpdateNode and UpdateEdge:
    ```rust
-   // Old: used edge_id
-   // New: uses src_id, dst_id, and name
-   UpdateEdgeActivePeriod {
+   // UpdateNode: consolidated node update (active period and/or summary)
+   UpdateNode {
+       id: node_id,
+       expected_version: 1,
+       new_active_period: Some(Some(period)),  // or None, or Some(None)
+       new_summary: Some(NodeSummary::from_text("...")),  // or None
+   }
+
+   // UpdateEdge: consolidated edge update (weight, active period, and/or summary)
+   UpdateEdge {
        src_id: alice_id,
        dst_id: bob_id,
        name: "follows".to_string(),
-       temporal_range: /* ... */,
-       reason: "...".to_string(),
+       expected_version: 1,
+       new_weight: Some(Some(2.5)),  // or None, or Some(None)
+       new_active_period: None,
+       new_summary: None,
    }
    ```
 

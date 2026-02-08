@@ -96,12 +96,11 @@ pub enum Mutation {
     AddEdge(AddEdge),
     AddNodeFragment(AddNodeFragment),
     AddEdgeFragment(AddEdgeFragment),
-    UpdateNodeActivePeriod(UpdateNodeActivePeriod),
-    UpdateEdgeActivePeriod(UpdateEdgeActivePeriod),
-    UpdateEdgeWeight(UpdateEdgeWeight),
     // CONTENT-ADDRESS: Update/Delete with optimistic locking
-    UpdateNodeSummary(UpdateNodeSummary),
-    UpdateEdgeSummary(UpdateEdgeSummary),
+    /// Consolidated node update: active_period and/or summary
+    UpdateNode(UpdateNode),
+    /// Consolidated edge update: weight, active_period, and/or summary
+    UpdateEdge(UpdateEdge),
     DeleteNode(DeleteNode),
     DeleteEdge(DeleteEdge),
     // (codex, 2026-02-07, eval: VERSIONING plan includes RestoreNode/RestoreEdge and rollback mutations; missing here, so rollback API is incomplete.)
@@ -199,82 +198,78 @@ pub struct AddEdgeFragment {
     pub valid_range: Option<schema::ActivePeriod>,
 }
 
-#[derive(Debug, Clone)]
-pub struct UpdateNodeActivePeriod {
-    /// The UUID of the Node
-    pub id: Id,
-
-    /// The temporal validity range for this fragment
-    pub temporal_range: schema::ActivePeriod,
-
-    /// The reason for invalidation
-    pub reason: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct UpdateEdgeActivePeriod {
-    /// The UUID of the source Node
-    pub src_id: Id,
-
-    /// The UUID of the destination Node
-    pub dst_id: Id,
-
-    /// The name of the Edge
-    pub name: schema::EdgeName,
-
-    /// The temporal validity range for this edge
-    pub temporal_range: schema::ActivePeriod,
-
-    /// The reason for invalidation
-    pub reason: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct UpdateEdgeWeight {
-    /// The UUID of the source Node
-    pub src_id: Id,
-
-    /// The UUID of the destination Node
-    pub dst_id: Id,
-
-    /// The name of the Edge
-    pub name: schema::EdgeName,
-
-    /// The new weight value
-    pub weight: f64,
-}
-
-// ============================================================================
-// CONTENT-ADDRESS: Update/Delete Mutations with Optimistic Locking
-// (claude, 2026-02-02, implementing)
-// ============================================================================
-
-/// Update a node's summary with optimistic locking.
+/// Consolidated node update mutation with optimistic locking.
 ///
-/// This mutation:
-/// 1. Reads the current node to get version and old summary hash
-/// 2. Verifies version matches expected_version (optimistic lock check)
-/// 3. Increments version
-/// 4. Writes new summary to NodeSummaries CF
-/// 5. Flips old index entry to STALE
-/// 6. Writes new index entry with CURRENT marker
-/// 7. Updates Nodes CF with new version and summary hash
+/// All updates require node id and expected_version.
+/// Mutable fields are optional - only non-None fields are updated.
+/// At least one optional field must be Some for the mutation to have effect.
+///
+/// ## Version Semantics
+/// - `expected_version`: Must match current node version (optimistic locking)
+/// - On success, creates a new version
+/// - On version mismatch, returns `Err(VersionMismatch)`
+///
+/// ## Example
+/// ```rust,ignore
+/// use motlie_db::graph::UpdateNode;
+///
+/// // Update summary only
+/// let update = UpdateNode {
+///     id: node_id,
+///     expected_version: 1,
+///     new_active_period: None,
+///     new_summary: Some(NodeSummary::from_text("Updated description")),
+/// };
+/// update.run(&writer).await?;
+/// ```
 #[derive(Debug, Clone)]
-pub struct UpdateNodeSummary {
+pub struct UpdateNode {
     /// The UUID of the Node to update
     pub id: Id,
 
-    /// The new summary content
-    pub new_summary: schema::NodeSummary,
-
-    /// Expected version for optimistic locking
-    /// If the current version doesn't match, the update fails
+    /// Expected version for optimistic locking.
+    /// If the current version doesn't match, the update fails.
     pub expected_version: schema::Version,
+
+    /// Optional: Update active period (valid_since, valid_until)
+    /// - `None` = no change
+    /// - `Some(None)` = reset/clear active period
+    /// - `Some(Some(period))` = set to specific period
+    pub new_active_period: Option<Option<schema::ActivePeriod>>,
+
+    /// Optional: Update node summary/description
+    pub new_summary: Option<schema::NodeSummary>,
 }
 
-/// Update an edge's summary with optimistic locking.
+/// Consolidated edge update mutation with optimistic locking.
+///
+/// All updates require edge identity (src_id, dst_id, name) and expected_version.
+/// Mutable fields are optional - only non-None fields are updated.
+/// At least one optional field must be Some for the mutation to have effect.
+///
+/// ## Version Semantics
+/// - `expected_version`: Must match current edge version (optimistic locking)
+/// - On success, creates a new version
+/// - On version mismatch, returns `Err(VersionMismatch)`
+///
+/// ## Example
+/// ```rust,ignore
+/// use motlie_db::graph::UpdateEdge;
+///
+/// // Update weight only
+/// let update = UpdateEdge {
+///     src_id,
+///     dst_id,
+///     name: "knows".to_string(),
+///     expected_version: 1,
+///     new_weight: Some(Some(0.8)),
+///     new_active_period: None,
+///     new_summary: None,
+/// };
+/// update.run(&writer).await?;
+/// ```
 #[derive(Debug, Clone)]
-pub struct UpdateEdgeSummary {
+pub struct UpdateEdge {
     /// The UUID of the source Node
     pub src_id: Id,
 
@@ -284,12 +279,27 @@ pub struct UpdateEdgeSummary {
     /// The name of the Edge
     pub name: schema::EdgeName,
 
-    /// The new summary content
-    pub new_summary: schema::EdgeSummary,
-
-    /// Expected version for optimistic locking
+    /// Expected version for optimistic locking.
+    /// If the current version doesn't match, the update fails.
     pub expected_version: schema::Version,
+
+    /// Optional: Update edge weight
+    /// - `None` = no change
+    /// - `Some(None)` = reset/clear weight
+    /// - `Some(Some(value))` = set to specific weight
+    pub new_weight: Option<Option<schema::EdgeWeight>>,
+
+    /// Optional: Update active period (valid_since, valid_until)
+    /// - `None` = no change
+    /// - `Some(None)` = reset/clear active period
+    /// - `Some(Some(period))` = set to specific period
+    pub new_active_period: Option<Option<schema::ActivePeriod>>,
+
+    /// Optional: Update edge summary/description
+    pub new_summary: Option<schema::EdgeSummary>,
 }
+
+
 
 /// Delete a node with tombstone semantics.
 ///
@@ -498,64 +508,31 @@ impl MutationExecutor for AddEdgeFragment {
     }
 }
 
-impl MutationExecutor for UpdateNodeActivePeriod {
+impl MutationExecutor for UpdateNode {
+    /// Consolidated node update with optimistic locking.
+    /// Updates any combination of active_period and summary.
     fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
     ) -> Result<()> {
-        ops::node::update_node_active_period(txn, txn_db, self)
+        ops::node::update_node(txn, txn_db, self)
     }
 }
 
-impl MutationExecutor for UpdateEdgeActivePeriod {
+impl MutationExecutor for UpdateEdge {
+    /// Consolidated edge update with optimistic locking.
+    /// Updates any combination of weight, active_period, and summary.
     fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
     ) -> Result<()> {
-        ops::edge::update_edge_active_period(txn, txn_db, self)
+        ops::edge::update_edge(txn, txn_db, self)
     }
 }
 
-impl MutationExecutor for UpdateEdgeWeight {
-    /// Update edge weight with proper VERSIONING semantics.
-    /// (claude, 2026-02-07, FIXED: Create new version + history snapshot per Codex Item 17)
-    fn execute(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-    ) -> Result<()> {
-        ops::edge::update_edge_weight(txn, txn_db, self)
-    }
-}
 
-// ============================================================================
-// CONTENT-ADDRESS: MutationExecutor Implementations for Update/Delete
-// (claude, 2026-02-02, implementing)
-// ============================================================================
-
-impl MutationExecutor for UpdateNodeSummary {
-    /// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
-    fn execute(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-    ) -> Result<()> {
-        ops::node::update_node_summary(txn, txn_db, self)
-    }
-}
-
-impl MutationExecutor for UpdateEdgeSummary {
-    /// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
-    fn execute(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-    ) -> Result<()> {
-        ops::edge::update_edge_summary(txn, txn_db, self)
-    }
-}
 
 impl MutationExecutor for DeleteNode {
     /// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
@@ -628,12 +605,9 @@ impl Mutation {
             Mutation::AddEdge(m) => m.execute(txn, txn_db),
             Mutation::AddNodeFragment(m) => m.execute(txn, txn_db),
             Mutation::AddEdgeFragment(m) => m.execute(txn, txn_db),
-            Mutation::UpdateNodeActivePeriod(m) => m.execute(txn, txn_db),
-            Mutation::UpdateEdgeActivePeriod(m) => m.execute(txn, txn_db),
-            Mutation::UpdateEdgeWeight(m) => m.execute(txn, txn_db),
             // CONTENT-ADDRESS: Update/Delete with optimistic locking
-            Mutation::UpdateNodeSummary(m) => m.execute(txn, txn_db),
-            Mutation::UpdateEdgeSummary(m) => m.execute(txn, txn_db),
+            Mutation::UpdateNode(m) => m.execute(txn, txn_db),
+            Mutation::UpdateEdge(m) => m.execute(txn, txn_db),
             Mutation::DeleteNode(m) => m.execute(txn, txn_db),
             Mutation::DeleteEdge(m) => m.execute(txn, txn_db),
             // (claude, 2026-02-07, FIXED: Added RestoreNode/RestoreEdge/RestoreEdges dispatch)
@@ -662,12 +636,9 @@ impl Mutation {
             Mutation::AddEdge(m) => m.execute_with_cache(txn, txn_db, cache),
             Mutation::AddNodeFragment(m) => m.execute(txn, txn_db), // No names
             Mutation::AddEdgeFragment(m) => m.execute_with_cache(txn, txn_db, cache),
-            Mutation::UpdateNodeActivePeriod(m) => m.execute(txn, txn_db), // No new names
-            Mutation::UpdateEdgeActivePeriod(m) => m.execute(txn, txn_db), // No new names
-            Mutation::UpdateEdgeWeight(m) => m.execute(txn, txn_db), // No new names
             // CONTENT-ADDRESS: Update/Delete with optimistic locking (no new names)
-            Mutation::UpdateNodeSummary(m) => m.execute(txn, txn_db),
-            Mutation::UpdateEdgeSummary(m) => m.execute(txn, txn_db),
+            Mutation::UpdateNode(m) => m.execute(txn, txn_db), // No new names
+            Mutation::UpdateEdge(m) => m.execute(txn, txn_db), // No new names
             Mutation::DeleteNode(m) => m.execute(txn, txn_db),
             Mutation::DeleteEdge(m) => m.execute(txn, txn_db),
             // (claude, 2026-02-07, FIXED: Added RestoreNode/RestoreEdge/RestoreEdges dispatch)
@@ -717,43 +688,18 @@ impl Runnable for AddEdgeFragment {
     }
 }
 
-#[async_trait::async_trait]
-impl Runnable for UpdateNodeActivePeriod {
-    async fn run(self, writer: &Writer) -> Result<()> {
-        writer
-            .send(vec![Mutation::UpdateNodeActivePeriod(self)])
-            .await
-    }
-}
-
-#[async_trait::async_trait]
-impl Runnable for UpdateEdgeActivePeriod {
-    async fn run(self, writer: &Writer) -> Result<()> {
-        writer
-            .send(vec![Mutation::UpdateEdgeActivePeriod(self)])
-            .await
-    }
-}
-
-#[async_trait::async_trait]
-impl Runnable for UpdateEdgeWeight {
-    async fn run(self, writer: &Writer) -> Result<()> {
-        writer.send(vec![Mutation::UpdateEdgeWeight(self)]).await
-    }
-}
-
 // CONTENT-ADDRESS: Runnable for Update/Delete mutations
 #[async_trait::async_trait]
-impl Runnable for UpdateNodeSummary {
+impl Runnable for UpdateNode {
     async fn run(self, writer: &Writer) -> Result<()> {
-        writer.send(vec![Mutation::UpdateNodeSummary(self)]).await
+        writer.send(vec![Mutation::UpdateNode(self)]).await
     }
 }
 
 #[async_trait::async_trait]
-impl Runnable for UpdateEdgeSummary {
+impl Runnable for UpdateEdge {
     async fn run(self, writer: &Writer) -> Result<()> {
-        writer.send(vec![Mutation::UpdateEdgeSummary(self)]).await
+        writer.send(vec![Mutation::UpdateEdge(self)]).await
     }
 }
 
@@ -822,34 +768,16 @@ impl From<AddEdgeFragment> for Mutation {
     }
 }
 
-impl From<UpdateNodeActivePeriod> for Mutation {
-    fn from(m: UpdateNodeActivePeriod) -> Self {
-        Mutation::UpdateNodeActivePeriod(m)
-    }
-}
-
-impl From<UpdateEdgeActivePeriod> for Mutation {
-    fn from(m: UpdateEdgeActivePeriod) -> Self {
-        Mutation::UpdateEdgeActivePeriod(m)
-    }
-}
-
-impl From<UpdateEdgeWeight> for Mutation {
-    fn from(m: UpdateEdgeWeight) -> Self {
-        Mutation::UpdateEdgeWeight(m)
-    }
-}
-
 // CONTENT-ADDRESS: From for Update/Delete mutations
-impl From<UpdateNodeSummary> for Mutation {
-    fn from(m: UpdateNodeSummary) -> Self {
-        Mutation::UpdateNodeSummary(m)
+impl From<UpdateNode> for Mutation {
+    fn from(m: UpdateNode) -> Self {
+        Mutation::UpdateNode(m)
     }
 }
 
-impl From<UpdateEdgeSummary> for Mutation {
-    fn from(m: UpdateEdgeSummary) -> Self {
-        Mutation::UpdateEdgeSummary(m)
+impl From<UpdateEdge> for Mutation {
+    fn from(m: UpdateEdge) -> Self {
+        Mutation::UpdateEdge(m)
     }
 }
 

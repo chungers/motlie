@@ -1,6 +1,6 @@
 # Graph Module API Reference
 
-**Module:** `motlie_db::graph`  
+**Module:** `motlie_db::graph`
 **Purpose:** Content-addressed, versioned graph storage with async mutation/query pipelines
 
 ---
@@ -8,17 +8,17 @@
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [API Architecture](#api-architecture)
-3. [Part 1: Storage + Processor](#part-1-storage--processor)
-4. [Part 2: Mutations (Writer)](#part-2-mutations-writer)
-5. [Part 3: Queries (Reader)](#part-3-queries-reader)
-6. [Part 4: VERSIONING & Time-Travel](#part-4-versioning--time-travel)
-7. [Part 5: Transactions (Read-Your-Writes)](#part-5-transactions-read-your-writes)
-8. [Part 6: Garbage Collection](#part-6-garbage-collection)
-9. [Part 7: Subsystem Lifecycle](#part-7-subsystem-lifecycle)
-10. [Part 8: Concurrency Guarantees](#part-8-concurrency-guarantees)
-11. [Complete Usage Flow](#complete-usage-flow)
-12. [Public API Catalog](#public-api-catalog)
+2. [Two API Styles](#two-api-styles)
+3. [Complete Operation Catalog](#complete-operation-catalog)
+4. [CRUD Operations](#crud-operations)
+5. [Update Operations](#update-operations)
+6. [Version Queries & Time-Travel](#version-queries--time-travel)
+7. [Edge Retargeting](#edge-retargeting)
+8. [Rollback Operations](#rollback-operations)
+9. [Transactions (Read-Your-Writes)](#transactions-read-your-writes)
+10. [Storage Modes](#storage-modes)
+11. [Subsystem Lifecycle](#subsystem-lifecycle)
+12. [Concurrency Guarantees](#concurrency-guarantees)
 
 ---
 
@@ -30,367 +30,784 @@ The graph module provides a content-addressed, versioned graph database on top o
 - **Time-travel** via `ValidSince/ValidUntil` and `VersionHistory`
 - **Rollback** via `RestoreNode/RestoreEdge/RestoreEdges`
 - **Content-addressed summaries** with orphan-index GC
-- **Async public API** (Writer/Reader) with a sync internal Processor
+- **Two API styles**: Sync (Processor) and Async (Writer/Reader)
 
 ### Key Concepts
 
 | Concept | Description |
-|--------|-------------|
-| **Processor** | Synchronous core (Storage + NameCache) used by async consumers |
-| **Writer** | Async mutation interface via MPSC channel |
-| **Reader** | Async query interface via MPMC channel |
-| **Fragments** | Append-only content events |
+|---------|-------------|
+| **Processor** | Synchronous core (Storage + NameCache) for direct RocksDB operations |
+| **Writer** | Async mutation interface via MPSC channel with backpressure |
+| **Reader** | Async query interface via MPMC channel with worker pool |
+| **Fragments** | Append-only timestamped content events |
 | **Summaries** | Content-addressed summaries indexed by hash |
-| **VERSIONING** | System time (ValidSince/ValidUntil) + Application time (ActivePeriod) |
+| **Version** | Monotonic counter incremented on each mutation |
+| **ActivePeriod** | Business/application validity interval |
+| **ValidSince/ValidUntil** | System time version history for time-travel |
 
 ---
 
-## API Architecture
+## Two API Styles
 
-The graph module separates **internal sync execution** from **public async APIs**:
+The graph module provides two complementary API styles:
+
+### Style 1: Synchronous Processor API
+
+Direct, blocking operations on RocksDB. Use when:
+- You need synchronous execution
+- You're already in a sync context
+- You want fine-grained control over transactions
+
+```rust
+use motlie_db::graph::{Processor, Storage};
+use motlie_db::graph::mutation::{AddNode, Mutation};
+use motlie_db::{Id, TimestampMilli};
+use std::sync::Arc;
+
+// Setup
+let mut storage = Storage::readwrite(&db_path)?;
+storage.ready()?;
+let processor = Processor::new(Arc::new(storage));
+
+// Single mutation
+let mutation: Mutation = AddNode {
+    id: Id::new(),
+    ts_millis: TimestampMilli::now(),
+    name: "Alice".to_string(),
+    summary: NodeSummary::from_text("A person"),
+    valid_range: None,
+}.into();
+processor.execute_mutation(&mutation)?;
+
+// Batch mutations (atomic)
+let mutations: Vec<Mutation> = vec![
+    AddNode { /* ... */ }.into(),
+    AddEdge { /* ... */ }.into(),
+];
+processor.process_mutations(&mutations)?;
+```
+
+**Processor API Methods:**
+
+| Method | Purpose |
+|--------|---------|
+| `Processor::new(storage)` | Create Processor with Storage + NameCache |
+| `Processor::with_cache(storage, cache)` | Create with explicit NameCache |
+| `execute_mutation(&mutation)` | Execute single mutation (sync) |
+| `process_mutations(&[mutations])` | Execute batch atomically (sync) |
+| `storage()` | Access underlying Storage |
+| `name_cache()` | Access NameCache |
+| `transaction_db()` | Access RocksDB TransactionDB |
+
+### Style 2: Async Writer/Reader API
+
+Channel-based async operations with backpressure. Use when:
+- You need async/await integration
+- You want automatic batching and backpressure
+- You're building a concurrent application
+
+```rust
+use motlie_db::graph::mutation::AddNode;
+use motlie_db::graph::query::NodeById;
+use motlie_db::graph::writer::spawn_mutation_consumer_with_storage;
+use motlie_db::graph::reader::spawn_query_consumers_with_storage;
+use motlie_db::writer::Runnable as MutationRunnable;
+use motlie_db::reader::Runnable as QueryRunnable;
+use std::time::Duration;
+
+// Setup writer and reader
+let (writer, _w_handle) = spawn_mutation_consumer_with_storage(
+    storage.clone(),
+    WriterConfig::default()
+);
+let (reader, _r_handles) = spawn_query_consumers_with_storage(
+    storage.clone(),
+    ReaderConfig::default(),
+    4  // number of query workers
+);
+
+// Mutations use writer::Runnable trait
+let node_id = Id::new();
+AddNode {
+    id: node_id,
+    ts_millis: TimestampMilli::now(),
+    name: "Alice".to_string(),
+    summary: NodeSummary::from_text("A person"),
+    valid_range: None,
+}
+.run(&writer)
+.await?;
+
+// Queries use reader::Runnable trait
+let timeout = Duration::from_secs(5);
+let node = NodeById::new(node_id, None)
+    .run(&reader, timeout)
+    .await?;
+```
+
+**Architecture:**
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    graph::Processor                              │
+│                    graph::Processor (sync core)                  │
 ├─────────────────────────────────────────────────────────────────┤
 │ Owned State:                                                     │
 │   - Arc<Storage>              // RocksDB access                  │
 │   - Arc<NameCache>            // NameHash ↔ String deduplication │
-├─────────────────────────────────────────────────────────────────┤
-│ Sync API (public):                                               │
-│   - process_mutations()       // Batch mutation execution        │
-│   - execute_mutation()        // Single mutation                 │
-│   - storage()                 // Get storage reference           │
-│   - name_cache()              // Get cache reference             │
-│   - transaction_db()          // Get TransactionDB               │
 └─────────────────────────────────────────────────────────────────┘
                           │
          ┌────────────────┴────────────────┐
          │                                 │
     ┌────▼─────┐                     ┌─────▼────┐
-    │  Writer  │ (pub)               │  Reader  │ (pub)
-    │  MPSC    │                     │  MPMC    │
-    │  async   │                     │  async   │
+    │  Writer  │ (async MPSC)        │  Reader  │ (async MPMC)
+    │ Runnable │                     │ Runnable │
     └────┬─────┘                     └─────┬────┘
          │                                 │
     ┌────▼─────┐                     ┌─────▼────┐
     │ Consumer │                     │ Consumer │
-    │holds Arc │                     │holds Arc │
-    │<Processor>                     │<Processor>
+    │ Pool (1) │                     │ Pool (N) │
     └──────────┘                     └──────────┘
 ```
 
-**Public API:** `Writer` and `Reader` (async, channel-based).  
-**Internal core:** `Processor` (sync, direct RocksDB operations).
+---
+
+## Complete Operation Catalog
+
+### Mutation Types
+
+| Mutation | Purpose | Key Fields |
+|----------|---------|------------|
+| `AddNode` | Create a new node | `id`, `name`, `summary`, `valid_range?` |
+| `AddEdge` | Create edge between nodes | `source_node_id`, `target_node_id`, `name`, `summary`, `weight?`, `valid_range?` |
+| `AddNodeFragment` | Append timestamped content to node | `id`, `content`, `valid_range?` |
+| `AddEdgeFragment` | Append timestamped content to edge | `src_id`, `dst_id`, `edge_name`, `content`, `valid_range?` |
+| `UpdateNode` | Update node (active_period and/or summary) | `id`, `expected_version`, `new_active_period?`, `new_summary?` |
+| `UpdateEdge` | Update edge (weight, active_period, and/or summary) | `src_id`, `dst_id`, `name`, `expected_version`, `new_weight?`, `new_active_period?`, `new_summary?` |
+| `DeleteNode` | Tombstone a node | `id`, `expected_version` |
+| `DeleteEdge` | Tombstone an edge | `src_id`, `dst_id`, `name`, `expected_version` |
+| `RestoreNode` | Restore node to prior time | `id`, `as_of` |
+| `RestoreEdge` | Restore edge to prior time | `src_id`, `dst_id`, `name`, `as_of` |
+| `RestoreEdges` | Batch restore outgoing edges | `src_id`, `name?`, `as_of`, `dry_run` |
+
+### Query Types
+
+| Query | Purpose | Key Fields |
+|-------|---------|------------|
+| `NodeById` | Get node by ID | `id`, `as_of?` |
+| `NodesByIdsMulti` | Get multiple nodes by IDs | `ids`, `as_of?` |
+| `OutgoingEdges` | Get edges from a node | `src_id`, `as_of?` |
+| `IncomingEdges` | Get edges to a node | `dst_id`, `as_of?` |
+| `EdgeSummaryBySrcDstName` | Get edge by topology | `src_id`, `dst_id`, `name`, `as_of?` |
+| `NodeFragmentsByIdTimeRange` | Get node fragments in time range | `id`, `start`, `end` |
+| `EdgeFragmentsByIdTimeRange` | Get edge fragments in time range | `src_id`, `dst_id`, `name`, `start`, `end` |
+| `AllNodes` | Scan all nodes | `limit?`, `cursor?` |
+| `AllEdges` | Scan all edges | `limit?`, `cursor?` |
+| `NodesBySummaryHash` | Reverse lookup by summary hash | `hash` |
+| `EdgesBySummaryHash` | Reverse lookup by summary hash | `hash` |
 
 ---
 
-## Internal Processor API (Synchronous)
+## CRUD Operations
 
-This is the **internal, synchronous** API used by the async consumers. It is the source of truth for graph operations and is **not channel-buffered**.
-
-### Methods
-
-| Method | Purpose |
-|--------|---------|
-| `Processor::new(storage: Arc<Storage>)` | Create Processor with Storage + NameCache |
-| `Processor::with_cache(storage: Arc<Storage>, name_cache: Arc<NameCache>)` | Create Processor with explicit cache |
-| `Processor::storage(&self) -> &Arc<Storage>` | Access underlying storage |
-| `Processor::name_cache(&self) -> &Arc<NameCache>` | Access NameCache |
-| `Processor::transaction_db(&self) -> Result<&TransactionDB>` | Access TransactionDB |
-| `Processor::process_mutations(&self, mutations: &[Mutation]) -> Result<()>` | Execute batch atomically (sync) |
-| `Processor::execute_mutation(&self, mutation: &Mutation) -> Result<()>` | Execute single mutation (sync) |
-
-### Internal Usage Examples
-
-#### Direct synchronous batch write
-
-```rust
-use motlie_db::graph::{Processor, Storage};
-use motlie_db::graph::mutation::Mutation;
-use std::sync::Arc;
-
-let mut storage = Storage::readwrite(&db_path);
-storage.ready()?;
-let processor = Processor::new(Arc::new(storage));
-
-let mutations: Vec<Mutation> = vec![
-    // AddNode { ... }.into(),
-    // AddEdge { ... }.into(),
-];
-
-processor.process_mutations(&mutations)?;
-```
-
-#### Direct synchronous single mutation
-
-```rust
-use motlie_db::graph::{Processor, Storage};
-use motlie_db::graph::mutation::Mutation;
-use std::sync::Arc;
-
-let mut storage = Storage::readwrite(&db_path);
-storage.ready()?;
-let processor = Processor::new(Arc::new(storage));
-
-let mutation: Mutation = /* AddNode { ... }.into() */;
-processor.execute_mutation(&mutation)?;
-```
-
-### Relationship to Async APIs
-
-The async layer is a **thin, buffered wrapper**:
-
-```
-Writer (async MPSC)
-  └─ Consumer (async loop)
-      └─ Processor::process_mutations(...)  // sync core
-
-Reader (async MPMC)
-  └─ Consumer pool (async loops)
-      └─ Query::process_and_send(...) → QueryExecutor::execute(storage)
-         (Processor provides storage access)
-```
-
-The async APIs exist for **backpressure and concurrency**, not different semantics.
-
----
-
-## Part 1: Storage + Processor
-
-### Storage
-
-```rust
-use motlie_db::graph::Storage;
-
-// ReadWrite mode (exclusive writer)
-let mut storage = Storage::readwrite(&db_path);
-storage.ready()?;
-
-// ReadOnly mode (multiple readers)
-let mut storage = Storage::readonly(&db_path);
-storage.ready()?;
-
-// Secondary mode (replica/follower)
-let mut storage = Storage::secondary(&db_path, &secondary_path);
-storage.ready()?;
-storage.try_catch_up_with_primary()?;
-```
-
-### Processor
-
-```rust
-use motlie_db::graph::{Processor, Storage};
-use std::sync::Arc;
-
-let mut storage = Storage::readwrite(&db_path);
-storage.ready()?;
-let storage = Arc::new(storage);
-
-let processor = Processor::new(storage);
-processor.process_mutations(&mutations)?;
-```
-
----
-
-## Part 2: Mutations (Writer)
-
-### Core Mutations
-
-| Mutation | Purpose |
-|---------|---------|
-| `AddNode` | Create node with name/summary |
-| `AddEdge` | Create edge between nodes |
-| `AddNodeFragment` | Append node fragment |
-| `AddEdgeFragment` | Append edge fragment |
-| `UpdateNodeSummary` | Versioned summary update |
-| `UpdateEdgeSummary` | Versioned summary update |
-| `DeleteNode` | Tombstone node |
-| `DeleteEdge` | Tombstone edge |
-| `RestoreNode` | Restore node to prior time |
-| `RestoreEdge` | Restore edge to prior time |
-| `RestoreEdges` | Batch restore outgoing edges |
-| `UpdateNodeActivePeriod` | Versioned ActivePeriod update |
-| `UpdateEdgeActivePeriod` | Versioned ActivePeriod update |
-| `UpdateEdgeWeight` | Versioned weight update |
-
-### Sending Mutations (Async)
+### Create Node
 
 ```rust
 use motlie_db::graph::mutation::AddNode;
-use motlie_db::graph::writer::WriterConfig;
-use motlie_db::writer::Runnable;
+use motlie_db::graph::schema::NodeSummary;
 use motlie_db::{Id, TimestampMilli};
 
-let (writer, receiver) = motlie_db::graph::writer::create_mutation_writer(WriterConfig::default());
-
-// Spawn consumer with storage (recommended)
-let _handle = motlie_db::graph::writer::spawn_mutation_consumer(
-    receiver,
-    WriterConfig::default(),
-    &db_path,
-);
-
+let node_id = Id::new();
 AddNode {
-    id: Id::new(),
+    id: node_id,
     ts_millis: TimestampMilli::now(),
     name: "Alice".to_string(),
-    summary: motlie_db::graph::schema::NodeSummary::from_text("A person"),
+    summary: NodeSummary::from_text("Software engineer at Acme Corp"),
+    valid_range: None,  // No business validity constraint
+}
+.run(&writer)
+.await?;
+```
+
+### Create Edge
+
+```rust
+use motlie_db::graph::mutation::AddEdge;
+use motlie_db::graph::schema::EdgeSummary;
+
+AddEdge {
+    source_node_id: alice_id,
+    target_node_id: bob_id,
+    ts_millis: TimestampMilli::now(),
+    name: "knows".to_string(),
+    summary: EdgeSummary::from_text("Met at conference 2024"),
+    weight: Some(0.8),  // Optional relationship strength
     valid_range: None,
 }
 .run(&writer)
 .await?;
 ```
 
-### Spawn Helpers
-
-```rust
-use motlie_db::graph::writer::{
-    spawn_mutation_consumer_with_storage,
-    spawn_mutation_consumer_with_receiver,
-};
-
-// With storage (creates Processor internally)
-let (writer, handle) = spawn_mutation_consumer_with_storage(storage.clone(), config);
-
-// With shared Processor (e.g., in subsystem)
-let handle = spawn_mutation_consumer_with_receiver(receiver, config, processor.clone());
-```
-
----
-
-## Part 3: Queries (Reader)
-
-### Core Queries
-
-| Query | Purpose |
-|-------|---------|
-| `NodeById` | Get node by ID (current or as_of) |
-| `OutgoingEdges` | Edges from node |
-| `IncomingEdges` | Edges to node |
-| `EdgeSummaryBySrcDstName` | Edge lookup by (src,dst,name) |
-| `NodeFragmentsByIdTimeRange` | Node fragments in time range |
-| `EdgeFragmentsByIdTimeRange` | Edge fragments in time range |
-| `NodesBySummaryHash` | Reverse lookup by summary hash |
-| `EdgesBySummaryHash` | Reverse lookup by summary hash |
-
-### Running Queries (Async)
+### Read Node
 
 ```rust
 use motlie_db::graph::query::NodeById;
-use motlie_db::reader::Runnable as QueryRunnable;
 use std::time::Duration;
 
 let timeout = Duration::from_secs(5);
-let result = NodeById::new(node_id, None)
+
+// Get current version
+let node = NodeById::new(alice_id, None)
+    .run(&reader, timeout)
+    .await?;
+
+println!("Name: {}, Version: {}", node.name, node.version);
+```
+
+### Read Edges
+
+```rust
+use motlie_db::graph::query::{OutgoingEdges, IncomingEdges, EdgeSummaryBySrcDstName};
+
+// Get all outgoing edges from Alice
+let outgoing = OutgoingEdges::new(alice_id, None)
+    .run(&reader, timeout)
+    .await?;
+
+for edge in outgoing {
+    println!("{} --{}-> {}", edge.src_id, edge.name, edge.dst_id);
+}
+
+// Get all incoming edges to Bob
+let incoming = IncomingEdges::new(bob_id, None)
+    .run(&reader, timeout)
+    .await?;
+
+// Get specific edge by topology
+let edge = EdgeSummaryBySrcDstName::new(alice_id, bob_id, "knows".to_string(), None)
     .run(&reader, timeout)
     .await?;
 ```
 
-### Spawn Helpers
+### Delete Node
 
 ```rust
-use motlie_db::graph::reader::{
-    spawn_query_consumers_with_storage,
-    spawn_query_consumer_with_processor,
-};
+use motlie_db::graph::mutation::DeleteNode;
 
-// With storage (creates Processor internally)
-let (reader, handles) = spawn_query_consumers_with_storage(storage.clone(), config, 4);
+// First, get current version for optimistic locking
+let node = NodeById::new(alice_id, None).run(&reader, timeout).await?;
 
-// With shared Processor (e.g., in subsystem)
-let handle = spawn_query_consumer_with_processor(receiver, config, processor.clone());
+DeleteNode {
+    id: alice_id,
+    expected_version: node.version,
+}
+.run(&writer)
+.await?;
+```
+
+### Delete Edge
+
+```rust
+use motlie_db::graph::mutation::DeleteEdge;
+
+// Get current edge version
+let edge = EdgeSummaryBySrcDstName::new(alice_id, bob_id, "knows".to_string(), None)
+    .run(&reader, timeout)
+    .await?;
+
+DeleteEdge {
+    src_id: alice_id,
+    dst_id: bob_id,
+    name: "knows".to_string(),
+    expected_version: edge.version,
+}
+.run(&writer)
+.await?;
 ```
 
 ---
 
-## Part 4: VERSIONING & Time-Travel
+## Update Operations
 
-The graph uses **system time** for version history and **application time** for ActivePeriod.
+Updates use the `Option<Option<T>>` pattern to distinguish:
+- `None` = no change to this field
+- `Some(None)` = clear/reset this field
+- `Some(Some(value))` = set to specific value
 
-| Field | Meaning |
-|-------|---------|
-| `ValidSince` | When this version became current in the DB |
-| `ValidUntil` | When this version was superseded |
-| `ActivePeriod` | Business validity interval |
-
-### Time-Travel Query
+### Update Node Summary
 
 ```rust
-use motlie_db::graph::query::NodeById;
-use motlie_db::TimestampMilli;
+use motlie_db::graph::mutation::UpdateNode;
+use motlie_db::graph::schema::NodeSummary;
 
-let as_of = Some(TimestampMilli(1_700_000_000_000));
-let node = NodeById::new(node_id, as_of).run(&reader, timeout).await?;
+let node = NodeById::new(alice_id, None).run(&reader, timeout).await?;
+
+UpdateNode {
+    id: alice_id,
+    expected_version: node.version,
+    new_active_period: None,  // No change
+    new_summary: Some(NodeSummary::from_text("Senior engineer at Acme Corp")),
+}
+.run(&writer)
+.await?;
 ```
 
-### Restore to Prior Time
+### Update Node Active Period
+
+```rust
+use motlie_db::graph::schema::ActivePeriod;
+
+UpdateNode {
+    id: alice_id,
+    expected_version: node.version,
+    new_active_period: Some(Some(ActivePeriod {
+        valid_from: Some(TimestampMilli::now()),
+        valid_to: Some(TimestampMilli(1_800_000_000_000)),  // Future date
+    })),
+    new_summary: None,  // No change
+}
+.run(&writer)
+.await?;
+```
+
+### Clear Node Active Period
+
+```rust
+UpdateNode {
+    id: alice_id,
+    expected_version: node.version,
+    new_active_period: Some(None),  // Clear the active period
+    new_summary: None,
+}
+.run(&writer)
+.await?;
+```
+
+### Update Edge Weight
+
+```rust
+use motlie_db::graph::mutation::UpdateEdge;
+
+let edge = EdgeSummaryBySrcDstName::new(alice_id, bob_id, "knows".to_string(), None)
+    .run(&reader, timeout)
+    .await?;
+
+UpdateEdge {
+    src_id: alice_id,
+    dst_id: bob_id,
+    name: "knows".to_string(),
+    expected_version: edge.version,
+    new_weight: Some(Some(0.95)),  // Increase relationship strength
+    new_active_period: None,
+    new_summary: None,
+}
+.run(&writer)
+.await?;
+```
+
+### Update Multiple Edge Fields
+
+```rust
+UpdateEdge {
+    src_id: alice_id,
+    dst_id: bob_id,
+    name: "knows".to_string(),
+    expected_version: edge.version,
+    new_weight: Some(Some(1.0)),
+    new_active_period: Some(Some(ActivePeriod {
+        valid_from: Some(TimestampMilli::now()),
+        valid_to: None,
+    })),
+    new_summary: Some(EdgeSummary::from_text("Close friends since 2024")),
+}
+.run(&writer)
+.await?;
+```
+
+---
+
+## Version Queries & Time-Travel
+
+Every mutation creates a new version with `ValidSince` timestamp. Time-travel queries use `as_of` to retrieve historical state.
+
+### Query Current Version
+
+```rust
+// as_of = None means "current version"
+let node = NodeById::new(alice_id, None)
+    .run(&reader, timeout)
+    .await?;
+
+println!("Current version: {}", node.version);
+```
+
+### Query at Specific Point in Time
+
+```rust
+// Query state as it was at a specific timestamp
+let historical_timestamp = TimestampMilli(1_700_000_000_000);  // Nov 2023
+
+let node_then = NodeById::new(alice_id, Some(historical_timestamp))
+    .run(&reader, timeout)
+    .await?;
+
+println!("Version at {}: {}", historical_timestamp.0, node_then.version);
+println!("Name was: {}", node_then.name);
+```
+
+### Query Historical Edges
+
+```rust
+let past = Some(TimestampMilli(1_700_000_000_000));
+
+// Get edges as they existed at that time
+let outgoing_then = OutgoingEdges::new(alice_id, past)
+    .run(&reader, timeout)
+    .await?;
+
+// Get specific edge at that time
+let edge_then = EdgeSummaryBySrcDstName::new(
+    alice_id,
+    bob_id,
+    "knows".to_string(),
+    past
+)
+.run(&reader, timeout)
+.await?;
+```
+
+### Version History Example
+
+```rust
+// Create node
+let node_id = Id::new();
+AddNode { id: node_id, name: "V1".into(), /* ... */ }.run(&writer).await?;
+let t1 = TimestampMilli::now();
+
+// Update node
+std::thread::sleep(std::time::Duration::from_millis(10));
+let node = NodeById::new(node_id, None).run(&reader, timeout).await?;
+UpdateNode {
+    id: node_id,
+    expected_version: node.version,
+    new_summary: Some(NodeSummary::from_text("Updated")),
+    new_active_period: None,
+}.run(&writer).await?;
+let t2 = TimestampMilli::now();
+
+// Query different points in time
+let v1 = NodeById::new(node_id, Some(t1)).run(&reader, timeout).await?;
+let v2 = NodeById::new(node_id, Some(t2)).run(&reader, timeout).await?;
+let current = NodeById::new(node_id, None).run(&reader, timeout).await?;
+
+assert_eq!(v1.version, 1);
+assert_eq!(v2.version, 2);
+assert_eq!(current.version, 2);
+```
+
+---
+
+## Edge Retargeting
+
+Edges are identified by topology `(src_id, dst_id, name)`. To "retarget" an edge to a different destination, delete the old edge and create a new one.
+
+### Retarget Edge to New Destination
+
+```rust
+use motlie_db::graph::mutation::{DeleteEdge, AddEdge};
+
+// Alice "knows" Bob, but we want to change it to Alice "knows" Charlie
+
+// Step 1: Get current edge version
+let old_edge = EdgeSummaryBySrcDstName::new(
+    alice_id,
+    bob_id,
+    "knows".to_string(),
+    None
+).run(&reader, timeout).await?;
+
+// Step 2: Delete old edge
+DeleteEdge {
+    src_id: alice_id,
+    dst_id: bob_id,
+    name: "knows".to_string(),
+    expected_version: old_edge.version,
+}
+.run(&writer)
+.await?;
+
+// Step 3: Create new edge to Charlie
+AddEdge {
+    source_node_id: alice_id,
+    target_node_id: charlie_id,  // New destination
+    ts_millis: TimestampMilli::now(),
+    name: "knows".to_string(),
+    summary: old_edge.summary.clone(),  // Preserve summary
+    weight: old_edge.weight,            // Preserve weight
+    valid_range: None,
+}
+.run(&writer)
+.await?;
+```
+
+### Retarget with Transaction (Atomic)
+
+```rust
+// Use transaction for atomic retarget
+let mut txn = writer.transaction()?;
+
+// Read current edge
+let old_edge = txn.read(EdgeSummaryBySrcDstName::new(
+    alice_id, bob_id, "knows".to_string(), None
+))?;
+
+// Delete old
+txn.write(DeleteEdge {
+    src_id: alice_id,
+    dst_id: bob_id,
+    name: "knows".to_string(),
+    expected_version: old_edge.version,
+})?;
+
+// Create new
+txn.write(AddEdge {
+    source_node_id: alice_id,
+    target_node_id: charlie_id,
+    ts_millis: TimestampMilli::now(),
+    name: "knows".to_string(),
+    summary: old_edge.summary,
+    weight: old_edge.weight,
+    valid_range: None,
+})?;
+
+// Atomic commit
+txn.commit()?;
+```
+
+### Rename Edge (Change Edge Name)
+
+```rust
+// Similar pattern: delete old name, create new name
+let old_edge = EdgeSummaryBySrcDstName::new(
+    alice_id, bob_id, "knows".to_string(), None
+).run(&reader, timeout).await?;
+
+// Delete "knows"
+DeleteEdge {
+    src_id: alice_id,
+    dst_id: bob_id,
+    name: "knows".to_string(),
+    expected_version: old_edge.version,
+}.run(&writer).await?;
+
+// Create "friends_with"
+AddEdge {
+    source_node_id: alice_id,
+    target_node_id: bob_id,
+    ts_millis: TimestampMilli::now(),
+    name: "friends_with".to_string(),  // New name
+    summary: old_edge.summary,
+    weight: old_edge.weight,
+    valid_range: None,
+}.run(&writer).await?;
+```
+
+---
+
+## Rollback Operations
+
+Rollback restores entities to their state at a previous point in time by creating a new version with historical data.
+
+### Restore Node to Prior State
 
 ```rust
 use motlie_db::graph::mutation::RestoreNode;
 
+// Restore Alice to state as of November 2023
 RestoreNode {
-    id: node_id,
+    id: alice_id,
+    as_of: TimestampMilli(1_700_000_000_000),
+}
+.run(&writer)
+.await?;
+
+// The node now has a new (incremented) version with old data
+let restored = NodeById::new(alice_id, None).run(&reader, timeout).await?;
+// restored.version is now current_version + 1
+// but data matches what it was at as_of time
+```
+
+### Restore Single Edge
+
+```rust
+use motlie_db::graph::mutation::RestoreEdge;
+
+RestoreEdge {
+    src_id: alice_id,
+    dst_id: bob_id,
+    name: "knows".to_string(),
     as_of: TimestampMilli(1_700_000_000_000),
 }
 .run(&writer)
 .await?;
 ```
 
-**Restore Guard:** If the summary referenced by the historical version was GC’d, `RestoreNode/RestoreEdge/RestoreEdges` returns an error. `RestoreEdges` supports `dry_run` to validate without writing. For a structured report, use `Transaction::validate_restore_edges`.
+### Batch Restore Outgoing Edges
+
+```rust
+use motlie_db::graph::mutation::RestoreEdges;
+
+// Restore all outgoing edges from Alice
+RestoreEdges {
+    src_id: alice_id,
+    name: None,  // All edge names
+    as_of: TimestampMilli(1_700_000_000_000),
+    dry_run: false,
+}
+.run(&writer)
+.await?;
+
+// Restore only "knows" edges from Alice
+RestoreEdges {
+    src_id: alice_id,
+    name: Some("knows".to_string()),
+    as_of: TimestampMilli(1_700_000_000_000),
+    dry_run: false,
+}
+.run(&writer)
+.await?;
+```
+
+### Validate Restore Before Executing
+
+```rust
+// Dry run to check what would be restored
+let report = RestoreEdges {
+    src_id: alice_id,
+    name: None,
+    as_of: TimestampMilli(1_700_000_000_000),
+    dry_run: true,  // Validate only, don't write
+}
+.run(&writer)
+.await?;
+
+println!("Candidates: {}", report.candidates);
+println!("Restorable: {}", report.restorable);
+println!("Skipped (no version at as_of): {:?}", report.skipped_no_version);
+
+// If satisfied, run for real
+if report.restorable > 0 {
+    RestoreEdges {
+        src_id: alice_id,
+        name: None,
+        as_of: TimestampMilli(1_700_000_000_000),
+        dry_run: false,
+    }
+    .run(&writer)
+    .await?;
+}
+```
+
+### Restore Guard
+
+Restore operations fail if the historical summary was garbage collected:
+
+```rust
+// This will error if the summary at as_of was GC'd
+let result = RestoreNode {
+    id: alice_id,
+    as_of: very_old_timestamp,
+}.run(&writer).await;
+
+match result {
+    Err(e) if e.to_string().contains("summary") => {
+        println!("Cannot restore: historical summary was garbage collected");
+    }
+    Err(e) => return Err(e),
+    Ok(_) => println!("Restored successfully"),
+}
+```
 
 ---
 
-## Part 5: Transactions (Read-Your-Writes)
+## Transactions (Read-Your-Writes)
 
-Writer transactions allow interleaved reads/writes before commit.
+Transactions allow interleaved reads and writes with read-your-writes semantics.
+
+```rust
+// Create transaction from writer
+let mut txn = writer.transaction()?;
+
+// Write a node
+let alice_id = Id::new();
+txn.write(AddNode {
+    id: alice_id,
+    ts_millis: TimestampMilli::now(),
+    name: "Alice".to_string(),
+    summary: NodeSummary::from_text("New user"),
+    valid_range: None,
+})?;
+
+// Read it back (sees uncommitted write)
+let alice = txn.read(NodeById::new(alice_id, None))?;
+assert_eq!(alice.name, "Alice");
+
+// Write an edge
+let bob_id = Id::new();
+txn.write(AddNode { id: bob_id, /* ... */ })?;
+txn.write(AddEdge {
+    source_node_id: alice_id,
+    target_node_id: bob_id,
+    name: "knows".to_string(),
+    /* ... */
+})?;
+
+// Atomic commit
+txn.commit()?;
+```
+
+### Transaction RestoreEdges Validation
 
 ```rust
 let mut txn = writer.transaction()?;
 
-txn.write(AddNode { ... })?;
-let node = txn.read(NodeById::new(id, None))?; // sees uncommitted writes
-txn.commit()?;
-```
-
-**RestoreEdges validation:**
-
-```rust
 let report = txn.validate_restore_edges(RestoreEdges {
-    src_id,
+    src_id: alice_id,
     name: Some("likes".to_string()),
     as_of: TimestampMilli::now(),
     dry_run: true,
 })?;
+
+println!("Would restore {} edges", report.restorable);
 ```
 
-`RestoreEdgesReport` includes:
-- `candidates`: number of deleted edges considered
-- `restorable`: number of edges that would be restored
-- `skipped_no_version`: edges with no version at `as_of`
-
-**Requirements:**
+**Transaction Requirements:**
 - Writer must be configured with a Processor (via `set_processor` or spawn helpers)
-- Storage must be read-write
+- Storage must be read-write mode
 
 ---
 
-## Part 6: Garbage Collection
+## Storage Modes
 
-GC cleans:
-- stale summary index entries
-- tombstones (future)
-- orphan summaries (VERSIONING)
+```rust
+use motlie_db::graph::Storage;
 
-**Lifecycle:**
-- Start via `GraphGarbageCollector::start(storage, config)`
-- Shutdown via owned `gc.shutdown()`
+// ReadWrite mode (exclusive writer, required for mutations)
+let mut storage = Storage::readwrite(&db_path)?;
+storage.ready()?;
 
-Orphan summaries are tracked in `OrphanSummaries` CF and deleted after retention if no CURRENT references remain.
+// ReadOnly mode (multiple readers, no mutations)
+let mut storage = Storage::readonly(&db_path)?;
+storage.ready()?;
+
+// Secondary mode (replica/follower, catches up with primary)
+let mut storage = Storage::secondary(&db_path, &secondary_path)?;
+storage.ready()?;
+storage.try_catch_up_with_primary()?;
+```
 
 ---
 
-## Part 7: Subsystem Lifecycle
+## Subsystem Lifecycle
 
 Subsystem manages end-to-end lifecycle (Writer, Reader, GC, caches):
 
@@ -398,86 +815,86 @@ Subsystem manages end-to-end lifecycle (Writer, Reader, GC, caches):
 use motlie_db::graph::{Subsystem, WriterConfig, ReaderConfig, GraphGcConfig};
 
 let subsystem = Subsystem::new();
+
+// Build storage with subsystem
 let storage = StorageBuilder::new(path)
     .with_rocksdb(Box::new(subsystem))
     .build()?;
 
+// Start writer, reader, and GC
 let (writer, reader) = subsystem.start(
     storage.graph_storage().clone(),
     WriterConfig::default(),
     ReaderConfig::default(),
-    4,
-    Some(GraphGcConfig::default()),
+    4,  // query worker count
+    Some(GraphGcConfig::default()),  // enable GC
 );
+
+// Use writer and reader...
+
+// Shutdown (flush → consumers → GC)
+subsystem.shutdown().await?;
 ```
 
-**Shutdown order:** flush → consumers → GC
-
 ---
 
-## Part 8: Concurrency Guarantees
+## Concurrency Guarantees
 
-- Writer uses bounded MPSC channel → backpressure
-- Reader uses MPMC flume → multiple query workers
-- Processor is `Send + Sync`, shared by Arc
-- Transactions use RocksDB TransactionDB semantics
+| Component | Guarantee |
+|-----------|-----------|
+| Writer | Bounded MPSC channel with backpressure |
+| Reader | MPMC flume with configurable worker pool |
+| Processor | `Send + Sync`, shared via `Arc` |
+| Transactions | RocksDB TransactionDB semantics (serializable) |
+| Updates | Optimistic locking via `expected_version` |
 
----
-
-## Complete Usage Flow
+### Optimistic Locking Example
 
 ```rust
-use motlie_db::graph::{Storage, WriterConfig, ReaderConfig};
-use motlie_db::graph::writer::spawn_mutation_consumer_with_storage;
-use motlie_db::graph::reader::spawn_query_consumers_with_storage;
-use motlie_db::graph::mutation::AddNode;
-use motlie_db::writer::Runnable;
-use std::time::Duration;
+// Two concurrent updates to same node
+let node = NodeById::new(alice_id, None).run(&reader, timeout).await?;
 
-let mut storage = Storage::readwrite(&db_path);
-storage.ready()?;
-let storage = Arc::new(storage);
+// Update 1 succeeds
+UpdateNode {
+    id: alice_id,
+    expected_version: node.version,  // version = 1
+    new_summary: Some(NodeSummary::from_text("Update 1")),
+    new_active_period: None,
+}.run(&writer).await?;
 
-let (writer, _w_handle) = spawn_mutation_consumer_with_storage(storage.clone(), WriterConfig::default());
-let (reader, _q_handles) = spawn_query_consumers_with_storage(storage.clone(), ReaderConfig::default(), 4);
+// Update 2 fails (version mismatch)
+let result = UpdateNode {
+    id: alice_id,
+    expected_version: node.version,  // still 1, but current is now 2
+    new_summary: Some(NodeSummary::from_text("Update 2")),
+    new_active_period: None,
+}.run(&writer).await;
 
-AddNode { ... }.run(&writer).await?;
-let node = NodeById::new(id, None).run(&reader, Duration::from_secs(5)).await?;
+assert!(result.is_err());  // VersionMismatch error
 ```
 
 ---
 
-## Public API Catalog
+## Spawn Helpers Reference
 
-### Core Types
-- `Storage`
-- `Processor`
-- `Writer`, `WriterConfig`
-- `Reader`, `ReaderConfig`
-- `Transaction`
+### Writer Helpers
 
-### Mutation Types (selected)
-- `AddNode`, `AddEdge`
-- `AddNodeFragment`, `AddEdgeFragment`
-- `UpdateNodeSummary`, `UpdateEdgeSummary`
-- `DeleteNode`, `DeleteEdge`
-- `RestoreNode`, `RestoreEdge`, `RestoreEdges`
+| Helper | Purpose |
+|--------|---------|
+| `create_mutation_writer(config)` | Create writer + receiver channels |
+| `spawn_mutation_consumer(receiver, config, &db_path)` | Spawn consumer with new storage |
+| `spawn_mutation_consumer_with_storage(storage, config)` | Spawn with existing storage |
+| `spawn_mutation_consumer_with_receiver(receiver, config, processor)` | Spawn with shared processor |
+| `spawn_mutation_consumer_with_next(receiver, config, storage, next)` | Chain to next consumer |
 
-### Query Types (selected)
-- `NodeById`, `OutgoingEdges`, `IncomingEdges`
-- `NodeFragmentsByIdTimeRange`, `EdgeFragmentsByIdTimeRange`
-- `NodesBySummaryHash`, `EdgesBySummaryHash`
+### Reader Helpers
 
-### Spawn Helpers
-- `create_mutation_writer`
-- `spawn_mutation_consumer`
-- `spawn_mutation_consumer_with_next`
-- `spawn_mutation_consumer_with_receiver`
-- `spawn_mutation_consumer_with_storage`
-- `create_query_reader`
-- `spawn_query_consumer`
-- `spawn_query_consumer_with_processor`
-- `spawn_query_consumer_pool_shared`
-- `spawn_query_consumers_with_storage`
+| Helper | Purpose |
+|--------|---------|
+| `create_query_reader(config)` | Create reader + receiver channels |
+| `spawn_query_consumer(receiver, config, &db_path)` | Spawn consumer with new storage |
+| `spawn_query_consumers_with_storage(storage, config, count)` | Spawn pool with existing storage |
+| `spawn_query_consumer_with_processor(receiver, config, processor)` | Spawn with shared processor |
+| `spawn_query_consumer_pool_shared(reader, config, processor, count)` | Spawn pool with shared processor |
 
 ---

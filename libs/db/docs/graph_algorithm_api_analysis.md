@@ -44,9 +44,8 @@ This document evaluates motlie_db's current API capabilities for implementing po
 | `AddEdge` | Create a new edge with optional weight |
 | `AddNodeFragment` | Add time-series data to node |
 | `AddEdgeFragment` | Add time-series data to edge |
-| `UpdateNodeActivePeriod` | Update active period of node |
-| `UpdateEdgeActivePeriod` | Update active period of edge |
-| `UpdateEdgeWeight` | Modify edge weight |
+| `UpdateNode` | Update node (active period and/or summary) |
+| `UpdateEdge` | Update edge (weight, active period, and/or summary) |
 
 ### Key Features
 
@@ -931,7 +930,7 @@ Both Kahn's algorithm and DFS-based topological sort work seamlessly with:
 2. **Edge Weight Support**
    - `Option<f64>` weights available for weighted algorithms
    - Retrievable via `EdgeSummaryBySrcDstName`
-   - `UpdateEdgeWeight` mutation for dynamic updates
+   - `UpdateEdge` mutation for dynamic weight updates
 
 3. **Temporal Queries**
    - `ActivePeriod` support unique to motlie_db

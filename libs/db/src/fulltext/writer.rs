@@ -73,12 +73,9 @@ impl Processor for Index {
                 Mutation::AddEdge(m) => m.index(&mut writer, fields)?,
                 Mutation::AddNodeFragment(m) => m.index(&mut writer, fields)?,
                 Mutation::AddEdgeFragment(m) => m.index(&mut writer, fields)?,
-                Mutation::UpdateNodeActivePeriod(m) => m.index(&mut writer, fields)?,
-                Mutation::UpdateEdgeActivePeriod(m) => m.index(&mut writer, fields)?,
-                Mutation::UpdateEdgeWeight(m) => m.index(&mut writer, fields)?,
                 // CONTENT-ADDRESS: Update/Delete mutations
-                Mutation::UpdateNodeSummary(m) => m.index(&mut writer, fields)?,
-                Mutation::UpdateEdgeSummary(m) => m.index(&mut writer, fields)?,
+                Mutation::UpdateNode(m) => m.index(&mut writer, fields)?,
+                Mutation::UpdateEdge(m) => m.index(&mut writer, fields)?,
                 Mutation::DeleteNode(m) => m.index(&mut writer, fields)?,
                 Mutation::DeleteEdge(m) => m.index(&mut writer, fields)?,
                 // (claude, 2026-02-07, FIXED: RestoreNode/RestoreEdge/RestoreEdges no-op for fulltext)
