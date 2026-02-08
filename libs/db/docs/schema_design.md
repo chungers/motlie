@@ -363,7 +363,7 @@ UpdateEdgeWeight {
 
 **Update Edge Temporal Range:**
 ```rust
-UpdateEdgeValidSinceUntil {
+UpdateEdgeActivePeriod {
     src_id,
     dst_id,
     name: "edge_name".to_string(),
@@ -374,7 +374,7 @@ UpdateEdgeValidSinceUntil {
 
 **Update Node Temporal Range:**
 ```rust
-UpdateNodeValidSinceUntil {
+UpdateNodeActivePeriod {
     id: node_id,
     temporal_range: ActivePeriod(Some(start), Some(end)),
     reason: "Invalidating old node".to_string(),
@@ -440,7 +440,7 @@ UpdateNodeValidSinceUntil {
 
 - ⚠️ **Fragments CF** → **NodeFragments CF** - Renamed for clarity
 - ⚠️ **AddEdge** - Now includes summary and weight fields
-- ⚠️ **UpdateEdgeValidSinceUntil** - Uses topology instead of edge_id
+- ⚠️ **UpdateEdgeActivePeriod** - Uses topology instead of edge_id
 - ⚠️ **EdgeSummaryBySrcDstName** - Returns (summary, weight) instead of (id, summary)
 
 ### Benefits

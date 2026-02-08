@@ -9,7 +9,7 @@ use super::summary::{
     verify_node_summary_exists,
 };
 use super::super::mutation::{
-    AddNode, DeleteNode, RestoreNode, UpdateNodeSummary, UpdateNodeValidSinceUntil,
+    AddNode, DeleteNode, RestoreNode, UpdateNodeSummary, UpdateNodeActivePeriod,
 };
 use super::super::name_hash::{NameCache, NameHash};
 use super::super::schema::{
@@ -75,10 +75,10 @@ pub(crate) fn add_node(
     Ok(())
 }
 
-pub(crate) fn update_node_valid_since_until(
+pub(crate) fn update_node_active_period(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
-    mutation: &UpdateNodeValidSinceUntil,
+    mutation: &UpdateNodeActivePeriod,
 ) -> Result<()> {
     let node_id = mutation.id;
     let new_range = mutation.temporal_range;
@@ -90,7 +90,7 @@ pub(crate) fn update_node_valid_since_until(
     tracing::info!(
         node_id = %node_id,
         edge_count = edges.len(),
-        "[UpdateNodeValidSinceUntil] Updating node and connected edges"
+        "[UpdateNodeActivePeriod] Updating node and connected edges"
     );
 
     for (src_id, dst_id, name_hash) in edges {

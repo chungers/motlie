@@ -8,8 +8,8 @@ use tantivy::schema::*;
 use tantivy::{doc, IndexWriter};
 
 use crate::graph::mutation::{
-    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, UpdateEdgeValidSinceUntil,
-    UpdateEdgeWeight, UpdateNodeValidSinceUntil,
+    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, UpdateEdgeActivePeriod,
+    UpdateEdgeWeight, UpdateNodeActivePeriod,
     // CONTENT-ADDRESS: Update/Delete mutations
     UpdateNodeSummary, UpdateEdgeSummary, DeleteNode, DeleteEdge,
 };
@@ -249,7 +249,7 @@ impl MutationExecutor for AddEdgeFragment {
     }
 }
 
-impl MutationExecutor for UpdateNodeValidSinceUntil {
+impl MutationExecutor for UpdateNodeActivePeriod {
     fn index(&self, index_writer: &IndexWriter, fields: &DocumentFields) -> Result<()> {
         // Delete existing documents for this node ID
         let id_term = tantivy::Term::from_field_bytes(fields.id_field, self.id.as_bytes());
@@ -264,7 +264,7 @@ impl MutationExecutor for UpdateNodeValidSinceUntil {
     }
 }
 
-impl MutationExecutor for UpdateEdgeValidSinceUntil {
+impl MutationExecutor for UpdateEdgeActivePeriod {
     fn index(&self, index_writer: &IndexWriter, fields: &DocumentFields) -> Result<()> {
         // Delete existing documents for this edge
         // We need to delete by composite key (src_id + dst_id + edge_name)
@@ -414,7 +414,7 @@ impl MutationExecutor for DeleteNode {
 impl MutationExecutor for DeleteEdge {
     fn index(&self, index_writer: &IndexWriter, fields: &DocumentFields) -> Result<()> {
         // Delete all documents for this edge
-        // We delete by src_id (same limitation as UpdateEdgeValidSinceUntil)
+        // We delete by src_id (same limitation as UpdateEdgeActivePeriod)
         let src_term = tantivy::Term::from_field_bytes(fields.src_id_field, self.src_id.as_bytes());
         index_writer.delete_term(src_term);
 

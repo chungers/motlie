@@ -538,7 +538,7 @@ we use **temporal ranges** to "hide" edges rather than delete them:
 
 ```rust
 // Prune an edge by setting valid_until to current time
-UpdateEdgeValidSinceUntil {
+UpdateEdgeActivePeriod {
     src_id: source,
     dst_id: target,
     name: edge_name,
@@ -696,7 +696,7 @@ Phase 2: Build graph (2 passes)
 | Store vector | `AddNode` + `AddNodeFragment` | JSON-encoded Vec<f32> |
 | Add edge | `AddEdge` | name="vamana", weight=distance |
 | Get neighbors | `OutgoingEdges` | Filters by name="vamana" |
-| Prune edge | `UpdateEdgeValidSinceUntil` | Sets valid_until=now |
+| Prune edge | `UpdateEdgeActivePeriod` | Sets valid_until=now |
 | Count neighbors | `OutgoingEdges` + `.len()` | O(degree) enumeration |
 
 #### Code Structure

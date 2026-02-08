@@ -1,7 +1,7 @@
 use crate::graph::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord, Processor, Storage};
 use crate::graph::mutation::{
-    AddEdge, AddNode, AddNodeFragment, UpdateEdgeValidSinceUntil,
-    UpdateNodeValidSinceUntil,
+    AddEdge, AddNode, AddNodeFragment, UpdateEdgeActivePeriod,
+    UpdateNodeActivePeriod,
 };
 use crate::writer::Runnable as MutRunnable;
 use crate::reader::Runnable;
@@ -143,7 +143,7 @@ use tokio::time::Duration;
         // Give consumer time to process the node and edge
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        UpdateNodeValidSinceUntil {
+        UpdateNodeActivePeriod {
             id: node_id,
             temporal_range: ActivePeriod(None, None),
             reason: "test node invalidation".to_string(),
@@ -152,7 +152,7 @@ use tokio::time::Duration;
         .await
         .unwrap();
 
-        UpdateEdgeValidSinceUntil {
+        UpdateEdgeActivePeriod {
             src_id: edge_src_id,
             dst_id: edge_dst_id,
             name: edge_name,

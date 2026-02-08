@@ -9,8 +9,8 @@ use crate::ToolCall;
 use async_trait::async_trait;
 use motlie_db::mutation::{
     AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, EdgeSummary, NodeSummary,
-    Runnable as MutationRunnable, UpdateEdgeValidSinceUntil, UpdateEdgeWeight,
-    UpdateNodeValidSinceUntil,
+    Runnable as MutationRunnable, UpdateEdgeActivePeriod, UpdateEdgeWeight,
+    UpdateNodeActivePeriod,
 };
 use motlie_db::query::{
     EdgeDetails, EdgeFragments, Edges, IncomingEdges, NodeById, NodeFragments, Nodes,
@@ -291,7 +291,7 @@ impl ToolCall for UpdateNodeActivePeriodParams {
         let id = Id::from_str(&self.id)
             .map_err(|e| McpError::invalid_params(format!("Invalid node ID: {}", e), None))?;
 
-        let mutation = UpdateNodeValidSinceUntil {
+        let mutation = UpdateNodeActivePeriod {
             id,
             temporal_range: self.temporal_range.clone().to_schema(),
             reason: self.reason.clone(),
@@ -345,7 +345,7 @@ impl ToolCall for UpdateEdgeActivePeriodParams {
         let dst_id = Id::from_str(&self.dst_id)
             .map_err(|e| McpError::invalid_params(format!("Invalid destination node ID: {}", e), None))?;
 
-        let mutation = UpdateEdgeValidSinceUntil {
+        let mutation = UpdateEdgeActivePeriod {
             src_id,
             dst_id,
             name: self.name.clone(),

@@ -96,8 +96,8 @@ pub enum Mutation {
     AddEdge(AddEdge),
     AddNodeFragment(AddNodeFragment),
     AddEdgeFragment(AddEdgeFragment),
-    UpdateNodeValidSinceUntil(UpdateNodeValidSinceUntil),
-    UpdateEdgeValidSinceUntil(UpdateEdgeValidSinceUntil),
+    UpdateNodeActivePeriod(UpdateNodeActivePeriod),
+    UpdateEdgeActivePeriod(UpdateEdgeActivePeriod),
     UpdateEdgeWeight(UpdateEdgeWeight),
     // CONTENT-ADDRESS: Update/Delete with optimistic locking
     UpdateNodeSummary(UpdateNodeSummary),
@@ -200,7 +200,7 @@ pub struct AddEdgeFragment {
 }
 
 #[derive(Debug, Clone)]
-pub struct UpdateNodeValidSinceUntil {
+pub struct UpdateNodeActivePeriod {
     /// The UUID of the Node
     pub id: Id,
 
@@ -212,7 +212,7 @@ pub struct UpdateNodeValidSinceUntil {
 }
 
 #[derive(Debug, Clone)]
-pub struct UpdateEdgeValidSinceUntil {
+pub struct UpdateEdgeActivePeriod {
     /// The UUID of the source Node
     pub src_id: Id,
 
@@ -498,23 +498,23 @@ impl MutationExecutor for AddEdgeFragment {
     }
 }
 
-impl MutationExecutor for UpdateNodeValidSinceUntil {
+impl MutationExecutor for UpdateNodeActivePeriod {
     fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
     ) -> Result<()> {
-        ops::node::update_node_valid_since_until(txn, txn_db, self)
+        ops::node::update_node_active_period(txn, txn_db, self)
     }
 }
 
-impl MutationExecutor for UpdateEdgeValidSinceUntil {
+impl MutationExecutor for UpdateEdgeActivePeriod {
     fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
     ) -> Result<()> {
-        ops::edge::update_edge_valid_since_until(txn, txn_db, self)
+        ops::edge::update_edge_active_period(txn, txn_db, self)
     }
 }
 
@@ -628,8 +628,8 @@ impl Mutation {
             Mutation::AddEdge(m) => m.execute(txn, txn_db),
             Mutation::AddNodeFragment(m) => m.execute(txn, txn_db),
             Mutation::AddEdgeFragment(m) => m.execute(txn, txn_db),
-            Mutation::UpdateNodeValidSinceUntil(m) => m.execute(txn, txn_db),
-            Mutation::UpdateEdgeValidSinceUntil(m) => m.execute(txn, txn_db),
+            Mutation::UpdateNodeActivePeriod(m) => m.execute(txn, txn_db),
+            Mutation::UpdateEdgeActivePeriod(m) => m.execute(txn, txn_db),
             Mutation::UpdateEdgeWeight(m) => m.execute(txn, txn_db),
             // CONTENT-ADDRESS: Update/Delete with optimistic locking
             Mutation::UpdateNodeSummary(m) => m.execute(txn, txn_db),
@@ -662,8 +662,8 @@ impl Mutation {
             Mutation::AddEdge(m) => m.execute_with_cache(txn, txn_db, cache),
             Mutation::AddNodeFragment(m) => m.execute(txn, txn_db), // No names
             Mutation::AddEdgeFragment(m) => m.execute_with_cache(txn, txn_db, cache),
-            Mutation::UpdateNodeValidSinceUntil(m) => m.execute(txn, txn_db), // No new names
-            Mutation::UpdateEdgeValidSinceUntil(m) => m.execute(txn, txn_db), // No new names
+            Mutation::UpdateNodeActivePeriod(m) => m.execute(txn, txn_db), // No new names
+            Mutation::UpdateEdgeActivePeriod(m) => m.execute(txn, txn_db), // No new names
             Mutation::UpdateEdgeWeight(m) => m.execute(txn, txn_db), // No new names
             // CONTENT-ADDRESS: Update/Delete with optimistic locking (no new names)
             Mutation::UpdateNodeSummary(m) => m.execute(txn, txn_db),
@@ -718,19 +718,19 @@ impl Runnable for AddEdgeFragment {
 }
 
 #[async_trait::async_trait]
-impl Runnable for UpdateNodeValidSinceUntil {
+impl Runnable for UpdateNodeActivePeriod {
     async fn run(self, writer: &Writer) -> Result<()> {
         writer
-            .send(vec![Mutation::UpdateNodeValidSinceUntil(self)])
+            .send(vec![Mutation::UpdateNodeActivePeriod(self)])
             .await
     }
 }
 
 #[async_trait::async_trait]
-impl Runnable for UpdateEdgeValidSinceUntil {
+impl Runnable for UpdateEdgeActivePeriod {
     async fn run(self, writer: &Writer) -> Result<()> {
         writer
-            .send(vec![Mutation::UpdateEdgeValidSinceUntil(self)])
+            .send(vec![Mutation::UpdateEdgeActivePeriod(self)])
             .await
     }
 }
@@ -822,15 +822,15 @@ impl From<AddEdgeFragment> for Mutation {
     }
 }
 
-impl From<UpdateNodeValidSinceUntil> for Mutation {
-    fn from(m: UpdateNodeValidSinceUntil) -> Self {
-        Mutation::UpdateNodeValidSinceUntil(m)
+impl From<UpdateNodeActivePeriod> for Mutation {
+    fn from(m: UpdateNodeActivePeriod) -> Self {
+        Mutation::UpdateNodeActivePeriod(m)
     }
 }
 
-impl From<UpdateEdgeValidSinceUntil> for Mutation {
-    fn from(m: UpdateEdgeValidSinceUntil) -> Self {
-        Mutation::UpdateEdgeValidSinceUntil(m)
+impl From<UpdateEdgeActivePeriod> for Mutation {
+    fn from(m: UpdateEdgeActivePeriod) -> Self {
+        Mutation::UpdateEdgeActivePeriod(m)
     }
 }
 

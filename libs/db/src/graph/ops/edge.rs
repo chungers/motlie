@@ -9,7 +9,7 @@ use super::summary::{
 };
 use super::super::mutation::{
     AddEdge, DeleteEdge, RestoreEdge, RestoreEdges, RestoreEdgesReport, UpdateEdgeSummary,
-    UpdateEdgeValidSinceUntil, UpdateEdgeWeight,
+    UpdateEdgeActivePeriod, UpdateEdgeWeight,
 };
 use super::super::name_hash::{NameCache, NameHash};
 use super::super::schema::{
@@ -98,10 +98,10 @@ pub(crate) fn add_edge(
     Ok(())
 }
 
-pub(crate) fn update_edge_valid_since_until(
+pub(crate) fn update_edge_active_period(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
-    mutation: &UpdateEdgeValidSinceUntil,
+    mutation: &UpdateEdgeActivePeriod,
 ) -> Result<()> {
     let name_hash = NameHash::from_name(&mutation.name);
     update_edge_valid_range(

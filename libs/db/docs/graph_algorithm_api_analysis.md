@@ -44,8 +44,8 @@ This document evaluates motlie_db's current API capabilities for implementing po
 | `AddEdge` | Create a new edge with optional weight |
 | `AddNodeFragment` | Add time-series data to node |
 | `AddEdgeFragment` | Add time-series data to edge |
-| `UpdateNodeValidSinceUntil` | Update temporal validity of node |
-| `UpdateEdgeValidSinceUntil` | Update temporal validity of edge |
+| `UpdateNodeActivePeriod` | Update temporal validity of node |
+| `UpdateEdgeActivePeriod` | Update temporal validity of edge |
 | `UpdateEdgeWeight` | Modify edge weight |
 
 ### Key Features

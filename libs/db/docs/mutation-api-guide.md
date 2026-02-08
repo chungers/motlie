@@ -372,14 +372,14 @@ AddEdgeFragment {
 - `content: DataUrl` - Fragment content (text, JSON, binary, etc.)
 - `valid_range: Option<ActivePeriod>` - Optional validity period
 
-### 5. UpdateNodeValidSinceUntil
+### 5. UpdateNodeActivePeriod
 
 Update the temporal validity range of a node:
 
 ```rust
-use motlie_db::{UpdateNodeValidSinceUntil, Id, TimestampMilli, ActivePeriod, MutationRunnable};
+use motlie_db::{UpdateNodeActivePeriod, Id, TimestampMilli, ActivePeriod, MutationRunnable};
 
-UpdateNodeValidSinceUntil {
+UpdateNodeActivePeriod {
     id: node_id,
     temporal_range: ActivePeriod {
         valid_from: TimestampMilli::now(),
@@ -396,14 +396,14 @@ UpdateNodeValidSinceUntil {
 - `temporal_range: ActivePeriod` - New temporal validity range
 - `reason: String` - Reason for the update
 
-### 6. UpdateEdgeValidSinceUntil
+### 6. UpdateEdgeActivePeriod
 
 Update the temporal validity range of an edge (using topology instead of edge ID):
 
 ```rust
-use motlie_db::{UpdateEdgeValidSinceUntil, Id, TimestampMilli, ActivePeriod, MutationRunnable};
+use motlie_db::{UpdateEdgeActivePeriod, Id, TimestampMilli, ActivePeriod, MutationRunnable};
 
-UpdateEdgeValidSinceUntil {
+UpdateEdgeActivePeriod {
     src_id: alice_id,
     dst_id: bob_id,
     name: "follows".to_string(),
@@ -889,11 +889,11 @@ AddEdgeFragment {
 - Added: `summary: EdgeSummary` - Summary information for the edge
 - Added: `weight: Option<f64>` - Optional weight for weighted graphs
 
-**UpdateEdgeValidSinceUntil Changes**:
+**UpdateEdgeActivePeriod Changes**:
 - Now uses topology (src_id, dst_id, name) instead of edge_id
 - Example:
 ```rust
-UpdateEdgeValidSinceUntil {
+UpdateEdgeActivePeriod {
     src_id: alice_id,
     dst_id: bob_id,
     name: "follows".to_string(),
@@ -957,11 +957,11 @@ UpdateEdgeWeight {
    AddEdgeFragment { src_id, dst_id, edge_name, /* ... */ }
    ```
 
-5. ✅ Update UpdateEdgeValidSinceUntil to use topology:
+5. ✅ Update UpdateEdgeActivePeriod to use topology:
    ```rust
    // Old: used edge_id
    // New: uses src_id, dst_id, and name
-   UpdateEdgeValidSinceUntil {
+   UpdateEdgeActivePeriod {
        src_id: alice_id,
        dst_id: bob_id,
        name: "follows".to_string(),

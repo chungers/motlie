@@ -73,8 +73,8 @@ impl Processor for Index {
                 Mutation::AddEdge(m) => m.index(&mut writer, fields)?,
                 Mutation::AddNodeFragment(m) => m.index(&mut writer, fields)?,
                 Mutation::AddEdgeFragment(m) => m.index(&mut writer, fields)?,
-                Mutation::UpdateNodeValidSinceUntil(m) => m.index(&mut writer, fields)?,
-                Mutation::UpdateEdgeValidSinceUntil(m) => m.index(&mut writer, fields)?,
+                Mutation::UpdateNodeActivePeriod(m) => m.index(&mut writer, fields)?,
+                Mutation::UpdateEdgeActivePeriod(m) => m.index(&mut writer, fields)?,
                 Mutation::UpdateEdgeWeight(m) => m.index(&mut writer, fields)?,
                 // CONTENT-ADDRESS: Update/Delete mutations
                 Mutation::UpdateNodeSummary(m) => m.index(&mut writer, fields)?,

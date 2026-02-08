@@ -278,7 +278,7 @@ txn.commit()?;
 | `AddNodeFragment` | Store vector embedding | `node_fragments` |
 | `AddEdge` | Create graph edge | `forward_edges`, `reverse_edges` |
 | `UpdateEdgeWeight` | Update edge distance | `forward_edges` |
-| `UpdateNodeValidSinceUntil` | Soft delete node | `nodes`, edges |
+| `UpdateNodeActivePeriod` | Soft delete node | `nodes`, edges |
 
 ### 6.2 Queries
 
