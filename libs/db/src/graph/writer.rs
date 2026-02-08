@@ -515,20 +515,20 @@ impl<P: Processor> Consumer<P> {
                         "Processing AddEdgeFragment"
                     );
                 }
-                Mutation::UpdateNodeValidSinceUntil(args) => {
+                Mutation::UpdateNodeActivePeriod(args) => {
                     tracing::debug!(
                         id = %args.id,
                         reason = %args.reason,
-                        "Processing UpdateNodeValidSinceUntil"
+                        "Processing UpdateNodeActivePeriod"
                     );
                 }
-                Mutation::UpdateEdgeValidSinceUntil(args) => {
+                Mutation::UpdateEdgeActivePeriod(args) => {
                     tracing::debug!(
                         src = %args.src_id,
                         dst = %args.dst_id,
                         name = %args.name,
                         reason = %args.reason,
-                        "Processing UpdateEdgeValidSinceUntil"
+                        "Processing UpdateEdgeActivePeriod"
                     );
                 }
                 Mutation::UpdateEdgeWeight(args) => {
@@ -818,7 +818,7 @@ pub(crate) fn create_mutation_writer_with_processor(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::mutation::{AddEdge, AddNode, AddNodeFragment, UpdateEdgeValidSinceUntil};
+    use super::super::mutation::{AddEdge, AddNode, AddNodeFragment, UpdateEdgeActivePeriod};
     use crate::writer::Runnable as MutRunnable;
     use super::super::schema::{EdgeSummary, NodeSummary};
     use crate::{DataUrl, Id, TimestampMilli};
@@ -872,7 +872,7 @@ mod tests {
 
         let src_id = Id::new();
         let dst_id = Id::new();
-        let invalidate_args = UpdateEdgeValidSinceUntil {
+        let invalidate_args = UpdateEdgeActivePeriod {
             src_id,
             dst_id,
             name: "test_edge".to_string(),

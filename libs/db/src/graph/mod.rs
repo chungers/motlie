@@ -50,7 +50,7 @@ mod tests;
 // Re-export commonly used types from submodules
 pub use mutation::{
     AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation, MutationBatch,
-    UpdateEdgeValidSinceUntil, UpdateEdgeWeight, UpdateNodeValidSinceUntil,
+    UpdateEdgeActivePeriod, UpdateEdgeWeight, UpdateNodeActivePeriod,
     // CONTENT-ADDRESS: Update/Delete mutations with optimistic locking
     UpdateNodeSummary, UpdateEdgeSummary, DeleteNode, DeleteEdge,
 };

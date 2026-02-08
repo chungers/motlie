@@ -1635,7 +1635,7 @@ AFTER:
 | Update `AddNode` executor: hash + write to Names CF | `src/graph/mutation.rs` | ✅ |
 | Update `AddEdge` executor: hash + write to Names CF | `src/graph/mutation.rs` | ✅ |
 | Update `AddEdgeFragment` executor | `src/graph/mutation.rs` | ✅ |
-| Update `UpdateEdgeValidSinceUntil` executor | `src/graph/mutation.rs` | ✅ |
+| Update `UpdateEdgeActivePeriod` executor | `src/graph/mutation.rs` | ✅ |
 | Update `UpdateEdgeWeight` executor | `src/graph/mutation.rs` | ✅ |
 | Add name resolution helpers to `query.rs` | `src/graph/query.rs` | ✅ |
 | Update `NodeById` query with name resolution | `src/graph/query.rs` | ✅ |

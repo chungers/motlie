@@ -74,7 +74,7 @@ Claude: Please address each item below; these are the inline `(codex, 2026-02-07
     - (claude, 2026-02-07, FIXED: Created StorageAccess enum and unified find_node_version_unified/find_edge_version_unified helpers. Deduplicates readonly/readwrite/txn logic.)
 
 17) `libs/db/src/graph/mutation.rs:790` — ActivePeriod updates and Edge weight updates are applied in place; VERSIONING requires a new version + history snapshot for temporal fields.
-   (codex, 2026-02-07, decision: accept — UpdateNodeValidSinceUntil/UpdateEdgeValidSinceUntil/UpdateEdgeWeight now create new versions and history snapshots.)
+   (codex, 2026-02-07, decision: accept — UpdateNodeActivePeriod/UpdateEdgeActivePeriod/UpdateEdgeWeight now create new versions and history snapshots.)
 
 18) `libs/db/src/graph/mutation.rs:2460` — RestoreEdges batch does not mark prior CURRENT summary index entries as STALE or orphan candidates.
    (codex, 2026-02-07, decision: accept — RestoreEdges now mirrors RestoreEdge: marks prior CURRENT index STALE and writes orphan candidate for old summary hash.)
@@ -623,13 +623,13 @@ pub struct RestoreNode {
 **BEFORE (current API):**
 ```rust
 /// Patches ActivePeriod directly - no versioning, no optimistic locking
-pub struct UpdateNodeValidSinceUntil {
+pub struct UpdateNodeActivePeriod {
     pub id: Id,
     pub temporal_range: ActivePeriod,
     pub reason: String,
 }
 
-pub struct UpdateEdgeValidSinceUntil {
+pub struct UpdateEdgeActivePeriod {
     pub src_id: Id,
     pub dst_id: Id,
     pub name: EdgeName,
@@ -640,12 +640,12 @@ pub struct UpdateEdgeValidSinceUntil {
 
 **AFTER (VERSIONING):**
 
-The `UpdateNodeValidSinceUntil` and `UpdateEdgeValidSinceUntil` mutations are **DEPRECATED**.
+The `UpdateNodeActivePeriod` and `UpdateEdgeActivePeriod` mutations are **DEPRECATED**.
 Use `UpdateNode` and `UpdateEdge` with `new_temporal_range` instead:
 
 ```rust
 // BEFORE: No version tracking
-UpdateNodeValidSinceUntil {
+UpdateNodeActivePeriod {
     id: alice,
     temporal_range: ActivePeriod(Dec1, Dec10),
     reason: "extended promo",

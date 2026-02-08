@@ -63,8 +63,8 @@ Defined in `mutation.rs`:
 | `AddEdge` | Create an edge between two nodes |
 | `AddNodeFragment` | Add timestamped content fragment to a node |
 | `AddEdgeFragment` | Add timestamped content fragment to an edge |
-| `UpdateNodeValidSinceUntil` | Update node's temporal validity range |
-| `UpdateEdgeValidSinceUntil` | Update edge's temporal validity range |
+| `UpdateNodeActivePeriod` | Update node's temporal validity range |
+| `UpdateEdgeActivePeriod` | Update edge's temporal validity range |
 | `UpdateEdgeWeight` | Update edge weight |
 
 ### Runnable Trait

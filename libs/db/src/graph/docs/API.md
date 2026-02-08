@@ -210,8 +210,8 @@ processor.process_mutations(&mutations)?;
 | `RestoreNode` | Restore node to prior time |
 | `RestoreEdge` | Restore edge to prior time |
 | `RestoreEdges` | Batch restore outgoing edges |
-| `UpdateNodeValidSinceUntil` | Versioned ActivePeriod update |
-| `UpdateEdgeValidSinceUntil` | Versioned ActivePeriod update |
+| `UpdateNodeActivePeriod` | Versioned ActivePeriod update |
+| `UpdateEdgeActivePeriod` | Versioned ActivePeriod update |
 | `UpdateEdgeWeight` | Versioned weight update |
 
 ### Sending Mutations (Async)

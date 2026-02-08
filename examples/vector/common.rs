@@ -15,7 +15,7 @@ pub use motlie_core::telemetry::{BuildInfo, log_build_info, print_build_info};
 use anyhow::Result;
 use motlie_db::mutation::{
     AddEdge, AddNode, AddNodeFragment, EdgeSummary, NodeSummary,
-    Runnable as MutationRunnable, UpdateEdgeValidSinceUntil,
+    Runnable as MutationRunnable, UpdateEdgeActivePeriod,
 };
 use motlie_db::query::{NodeFragments, OutgoingEdges, Runnable as QueryRunnable};
 use motlie_db::reader::Reader;
@@ -326,7 +326,7 @@ pub async fn prune_edge(
     // ActivePeriod::valid_until returns Option<ActivePeriod>, we need to unwrap
     // since the mutation field expects ActivePeriod directly
     let now = TimestampMilli::now();
-    UpdateEdgeValidSinceUntil {
+    UpdateEdgeActivePeriod {
         src_id: source,
         dst_id: target,
         name: edge_name.to_string(),

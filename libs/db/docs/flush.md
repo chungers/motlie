@@ -153,8 +153,8 @@ pub enum Mutation {
     AddNodeFragment(AddNodeFragment),
     AddEdge(AddEdge),
     AddEdgeFragment(AddEdgeFragment),
-    UpdateNodeValidSinceUntil(UpdateNodeValidSinceUntil),
-    UpdateEdgeValidSinceUntil(UpdateEdgeValidSinceUntil),
+    UpdateNodeActivePeriod(UpdateNodeActivePeriod),
+    UpdateEdgeActivePeriod(UpdateEdgeActivePeriod),
     UpdateEdgeWeight(UpdateEdgeWeight),
 
     /// Flush marker - signals completion via oneshot channel.

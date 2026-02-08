@@ -65,7 +65,7 @@
 //! │  ┌────────────────────────────────────────────────────────────────────┐ │
 //! │  │                    Mutation Pipeline                                │ │
 //! │  │  User sends: AddNode, AddEdge, AddNodeFragment, AddEdgeFragment,   │ │
-//! │  │              UpdateNodeValidSinceUntil, UpdateEdgeValidSinceUntil, │ │
+//! │  │              UpdateNodeActivePeriod, UpdateEdgeActivePeriod, │ │
 //! │  │              UpdateEdgeWeight, MutationBatch                       │ │
 //! │  └────────────────────────────────────────────────────────────────────┘ │
 //! │                              │                                           │

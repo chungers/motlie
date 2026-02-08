@@ -373,8 +373,8 @@ handles.writer().flush().await?;
 | `AddEdge` | Create an edge between nodes |
 | `AddNodeFragment` | Add timestamped content to a node |
 | `AddEdgeFragment` | Add timestamped content to an edge |
-| `UpdateNodeValidSinceUntil` | Update node's temporal validity |
-| `UpdateEdgeValidSinceUntil` | Update edge's temporal validity |
+| `UpdateNodeActivePeriod` | Update node's temporal validity |
+| `UpdateEdgeActivePeriod` | Update edge's temporal validity |
 | `UpdateEdgeWeight` | Update edge weight |
 | `MutationBatch` | Batch multiple mutations atomically |
 | `Mutation` | Enum wrapping all mutation types |
