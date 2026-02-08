@@ -47,8 +47,9 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use super::mutation::Mutation;
+use super::mutation::{Mutation, RestoreEdges, RestoreEdgesReport};
 use super::name_hash::NameCache;
+use super::ops;
 use super::query::TransactionQueryExecutor;
 
 /// A transaction scope for read-your-writes operations.
@@ -187,6 +188,20 @@ impl<'a> Transaction<'a> {
             self.write(mutation)?;
         }
         Ok(())
+    }
+
+    /// Validate RestoreEdges without writing (strict dry-run).
+    ///
+    /// Returns a report with candidates, restorable count, and skipped edges.
+    pub fn validate_restore_edges(&self, mut mutation: RestoreEdges) -> Result<RestoreEdgesReport> {
+        let txn = self.txn.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Transaction already finished (committed or rolled back)")
+        })?;
+
+        mutation.dry_run = true;
+        ops::edge::restore_edges_with_report(txn, self.txn_db, &mutation).with_context(|| {
+            format!("Failed to validate RestoreEdges in transaction: {:?}", mutation)
+        })
     }
 
     /// Read using a query (sees uncommitted writes in this transaction).

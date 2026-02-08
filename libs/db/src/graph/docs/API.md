@@ -337,7 +337,7 @@ RestoreNode {
 .await?;
 ```
 
-**Restore Guard:** If the summary referenced by the historical version was GC’d, `RestoreNode/RestoreEdge` returns an error. `RestoreEdges` skips those edges and logs a warning.
+**Restore Guard:** If the summary referenced by the historical version was GC’d, `RestoreNode/RestoreEdge/RestoreEdges` returns an error. `RestoreEdges` supports `dry_run` to validate without writing. For a structured report, use `Transaction::validate_restore_edges`.
 
 ---
 
@@ -352,6 +352,22 @@ txn.write(AddNode { ... })?;
 let node = txn.read(NodeById::new(id, None))?; // sees uncommitted writes
 txn.commit()?;
 ```
+
+**RestoreEdges validation:**
+
+```rust
+let report = txn.validate_restore_edges(RestoreEdges {
+    src_id,
+    name: Some("likes".to_string()),
+    as_of: TimestampMilli::now(),
+    dry_run: true,
+})?;
+```
+
+`RestoreEdgesReport` includes:
+- `candidates`: number of deleted edges considered
+- `restorable`: number of edges that would be restored
+- `skipped_no_version`: edges with no version at `as_of`
 
 **Requirements:**
 - Writer must be configured with a Processor (via `set_processor` or spawn helpers)
