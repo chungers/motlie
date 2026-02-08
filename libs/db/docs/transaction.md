@@ -507,7 +507,7 @@ impl TransactionQueryExecutor for NodeById {
 
         let value: NodeCfValue = Nodes::value_from_bytes(&value_bytes)?;
 
-        // Temporal validity check
+        // Active period check
         let ref_time = self.reference_ts_millis.unwrap_or_else(TimestampMilli::now);
         if !schema::is_valid_at_time(&value.0, ref_time) {
             return Err(anyhow!("Node not valid at reference time"));

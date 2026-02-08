@@ -44,15 +44,15 @@ This document evaluates motlie_db's current API capabilities for implementing po
 | `AddEdge` | Create a new edge with optional weight |
 | `AddNodeFragment` | Add time-series data to node |
 | `AddEdgeFragment` | Add time-series data to edge |
-| `UpdateNodeActivePeriod` | Update temporal validity of node |
-| `UpdateEdgeActivePeriod` | Update temporal validity of edge |
+| `UpdateNodeActivePeriod` | Update active period of node |
+| `UpdateEdgeActivePeriod` | Update active period of edge |
 | `UpdateEdgeWeight` | Modify edge weight |
 
 ### Key Features
 
 **Edge Weights:** Supported via `Option<f64>` in `AddEdge` and retrievable via `EdgeSummaryBySrcDstName`
 
-**Temporal Validity:** All entities support optional `ActivePeriod` for time-based queries
+**Active period:** All entities support optional `ActivePeriod` for time-based queries
 
 **Bi-directional Traversal:** Both `OutgoingEdges` and `IncomingEdges` available
 
@@ -181,7 +181,7 @@ for (weight, src, dst, edge_name) in edges {
 ```
 
 **Design Rationale:**
-- Weight is metadata about the edge (like temporal validity)
+- Weight is metadata about the edge (like active period)
 - Topology (src, dst, name) identifies the edge
 - Metadata-first ordering is consistent with storage layer design
 
@@ -1071,7 +1071,7 @@ pub struct EdgesByKeys {
 
 **Key Insight:** With the new weight-first edge queries, the API now provides excellent support for the vast majority of graph algorithms. The inclusion of edge weights in `OutgoingEdges` and `IncomingEdges` eliminates the N+1 query problem that previously affected weighted algorithms. The remaining enhancements (graph enumeration, batch lookups) would provide further optimization but are not critical for most use cases.
 
-**Temporal Graph Algorithms:** motlie_db's unique temporal validity support opens possibilities for:
+**Temporal Graph Algorithms:** motlie_db's unique active period support opens possibilities for:
 - Time-evolving PageRank
 - Temporal path finding (find paths valid at specific times)
 - Community detection over time windows
@@ -1324,7 +1324,7 @@ This section provides a comprehensive analysis of remaining API gaps, their prio
 **✅ Fully Implemented (85% Algorithm Support):**
 - Edge weights in topology queries (`OutgoingEdges`, `IncomingEdges`)
 - Bidirectional traversal (forward and reverse edges)
-- Temporal validity filtering
+- Active period filtering
 - Point lookups (nodes and edges by ID/topology)
 - Name-based prefix searching
 
@@ -1346,7 +1346,7 @@ use motlie_db::query::{AllNodes, Runnable};
 // Get all nodes with pagination
 let nodes = AllNodes::new(1000)  // limit
     .with_cursor(last_id)        // optional: pagination cursor
-    .with_reference_time(ts)     // optional: temporal validity
+    .with_reference_time(ts)     // optional: active period
     .run(handles.reader(), timeout)
     .await?;
 // Returns: Vec<(Id, NodeName, NodeSummary)>
@@ -1359,7 +1359,7 @@ use motlie_db::query::{AllEdges, Runnable};
 // Get all edges with pagination
 let edges = AllEdges::new(1000)  // limit
     .with_cursor((src, dst, name))  // optional: pagination cursor
-    .with_reference_time(ts)        // optional: temporal validity
+    .with_reference_time(ts)        // optional: active period
     .run(handles.reader(), timeout)
     .await?;
 // Returns: Vec<(Option<f64>, SrcId, DstId, EdgeName)>

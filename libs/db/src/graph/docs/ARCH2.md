@@ -378,6 +378,30 @@ impl Consumer {
 - Matches vector crate pattern
 - Processor methods can be called directly in tests
 
+### Task 1b: Introduce `graph::ops` as single source of truth
+
+> (codex, 2026-02-07, eval: ARCH2 currently omits the vector-style `ops` module, which centralizes mutation/query business logic. Graph should adopt the same pattern to avoid logic drift across MutationExecutor impls, transactions, and tests.)
+
+**Goal:** Move graph business logic into `graph::ops::*` helpers, leaving `mutation.rs` and `query.rs` as thin dispatch layers.
+
+**What to add:**
+- `libs/db/src/graph/ops/mod.rs` with submodules:
+  - `ops::node` (add/update/delete/restore node, valid ranges, summary updates)
+  - `ops::edge` (add/update/delete/restore edge, weight/valid ranges, summary updates)
+  - `ops::fragment` (append node/edge fragments, idempotence checks)
+  - `ops::versioning` (version history writes, current marker handling)
+  - `ops::summary` (summary CF updates + refcount/valid-until handling)
+
+**What to refactor:**
+- `mutation.rs`: keep type definitions + `MutationExecutor` impls, but delegate all write logic to `ops::*`.
+- `query.rs`: where feasible, delegate complex query logic or shared index scans to `ops::query` helpers (optional but recommended for reuse).
+- `transaction.rs`: ensure `execute_mutation()` and `execute_in_transaction()` call the same ops logic as the async consumers.
+
+**Success criteria:**
+- Any change to denormalized CF updates (reverse edges, summaries, version history) is done in exactly one ops function.
+- Mutation executors are ≤ ~10 lines each and contain no CF-specific logic.
+- Tests can target `ops` functions directly for fine-grained correctness, then keep a smaller set of end-to-end tests for dispatch wiring.
+
 ---
 
 ## Implementation Tasks
@@ -1297,6 +1321,7 @@ INVARIANTS:
 - [ ] `spawn_*_with_processor()` helpers are pub(crate) for shared use
 - [ ] `Graph` facade removed; all call sites migrated (~15 in query.rs tests)
 - [ ] on_ready() prewarm occurs before consumers start (Phase 1, not Phase 4)
+- [ ] Business logic centralized in `graph::ops` (single source of truth, like vector)
 
 ### Phase 1: Fix Critical Bugs (PREREQUISITE)
 

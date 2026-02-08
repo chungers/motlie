@@ -199,12 +199,12 @@ Claude Desktop supports MCP servers via a JSON configuration file.
 
 | Tool | Description |
 |------|-------------|
-| `add_node` | Create a new node with name and optional temporal range |
+| `add_node` | Create a new node with name and optional active period |
 | `add_edge` | Create an edge between two nodes with optional weight |
 | `add_node_fragment` | Add content fragment to a node |
 | `add_edge_fragment` | Add content fragment to an edge |
-| `update_node_valid_range` | Update temporal validity of a node |
-| `update_edge_valid_range` | Update temporal validity of an edge |
+| `update_node_valid_range` | Update active period of a node |
+| `update_edge_valid_range` | Update active period of an edge |
 | `update_edge_weight` | Update the weight of an edge |
 
 **Query Tools:**
@@ -323,7 +323,7 @@ Yes. All conversations using the same MCP server access the same database.
 - **Fragments** are timestamped content attached to nodes or edges
 
 **Q: Can I delete nodes or edges?**
-No. Use temporal validity ranges to mark items as no longer valid.
+No. Use active period ranges to mark items as no longer valid.
 
 ## References
 

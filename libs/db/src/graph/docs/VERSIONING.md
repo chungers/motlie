@@ -82,8 +82,8 @@ Claude: Please address each item below; these are the inline `(codex, 2026-02-07
 
 19) `libs/db/src/graph/mutation.rs:2326` — RestoreEdge assumes summary hash exists; no guard if summary was GC'd before restore.
    (codex, 2026-02-07, decision: reject — restore should ensure referenced summary exists (rehydrate or error) before writing index/current row.)
-   - (claude, 2026-02-07, FIXED: Added verify_node_summary_exists/verify_edge_summary_exists helper functions. RestoreNode/RestoreEdge now verify summary exists before proceeding; return error if GC'd. RestoreEdges skips edges with GC'd summaries with warning.)
-   (codex, 2026-02-07, decision: accept — RestoreNode/RestoreEdge verify summary existence; RestoreEdges skips GC'd summaries with warning.)
+   - (claude, 2026-02-07, FIXED: Added verify_node_summary_exists/verify_edge_summary_exists helper functions. RestoreNode/RestoreEdge now verify summary exists before proceeding; return error if GC'd. RestoreEdges adds dry_run for validation without writes.)
+   (codex, 2026-02-07, decision: accept — RestoreNode/RestoreEdge verify summary existence; RestoreEdges strict semantics with dry_run validation.)
 
 ## Table of Contents
 
@@ -498,7 +498,7 @@ pub struct OrphanSummaryCfValue(pub SummaryKind);  // 1 byte
 |-------|------|---------|
 | `valid_since` | `u64` | Timestamp when entity became valid (part of key) |
 | `valid_until` | `Option<u64>` | Timestamp when entity stopped being valid (`None` = still valid) |
-| `version` | `u32` | Monotonic counter for content changes within a temporal range |
+| `version` | `u32` | Monotonic counter for content changes within a active period |
 
 **Entity is current if:** `valid_until.is_none() || valid_until > now()`
 
@@ -581,6 +581,7 @@ pub struct RestoreEdges {
     pub src: Id,
     pub name: Option<String>,  // None = all edge names
     pub as_of: TimestampMilli,
+    pub dry_run: bool, // default: false
 }
 ```
 
@@ -1010,7 +1011,7 @@ Alice's best_friend changed multiple times, then rolls back:
 t=1000: AddEdge { src: Alice, dst: Bob, name: "best_friend", summary: "besties" }
 t=2000: UpdateEdge { new_dst: Some(Carol) }   // Bob → Carol
 t=3000: UpdateEdge { new_dst: Some(Dave) }    // Carol → Dave
-t=4000: RestoreEdges { src: Alice, name: "best_friend", as_of: 1500 }
+t=4000: RestoreEdges { src: Alice, name: "best_friend", as_of: 1500, dry_run: false }
 
 === ForwardEdges CF after t=4000 ===
 (Alice, Bob,   "best_friend", 1000) → (until=2000, v=1)  // Historical

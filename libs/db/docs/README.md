@@ -90,7 +90,7 @@ The following documents capture design discussions, analyses, and decisions made
 - Node, Edge, and Fragment column families
 - Key and value layouts
 - Edge weights (Optional<f64>)
-- Temporal validity support
+- Active period support
 - Query patterns and performance characteristics
 
 **Status**: ✅ Current - **Required reading for schema understanding**
@@ -197,8 +197,8 @@ Executive summary of the MessagePack analysis and direct encoding solution.
 
 ---
 
-#### [temporal-range-design.md](temporal-range-design.md) 🌟
-**COMPREHENSIVE**: Complete design and implementation documentation for temporal validity support.
+#### [active-period-design.md](active-period-design.md) 🌟
+**COMPREHENSIVE**: Complete design and implementation documentation for active period support.
 
 **Contents**:
 - Design options evaluation (4 approaches considered)
@@ -235,7 +235,7 @@ Comprehensive benchmark strategy to measure performance improvements.
 ### 2. Design Evolution
 Documents tracking the evolution of API design:
 - `query-and-mutation-processor-simplification.md` ⭐ - **IMPLEMENTED**: Unified trait-based execution for queries and mutations
-- `temporal-range-design.md` 🌟 - **IMPLEMENTED**: Temporal validity support
+- `active-period-design.md` 🌟 - **IMPLEMENTED**: Active period support
 
 ### 3. Schema & Performance
 Critical documents for understanding database internals:
@@ -282,7 +282,7 @@ Understanding the design process:
 1. [`query-api-guide.md`](query-api-guide.md) - **Current Query API** (v0.2.0+) ⭐
 2. [`mutation-api-guide.md`](mutation-api-guide.md) - **Current Mutation API** (v0.3.0+) ⭐
 3. [`query-and-mutation-processor-simplification.md`](query-and-mutation-processor-simplification.md) - Trait-based refactoring ✅
-4. [`temporal-range-design.md`](temporal-range-design.md) - Temporal validity implementation ✅
+4. [`active-period-design.md`](active-period-design.md) - Active period implementation ✅
 
 Shows the iterative refinement process and decision rationale.
 

@@ -7,7 +7,7 @@ The `motlie db` command provides tools for inspecting and scanning Motlie graph 
 The database commands allow you to:
 - List available column families in the database schema
 - Scan and dump contents of any column family
-- Filter records by temporal validity
+- Filter records by active period
 - Paginate through large datasets
 - Output in TSV or formatted table format
 
@@ -46,7 +46,7 @@ motlie db -p <db_dir> scan <column_family> [datetime] [OPTIONS]
 
 **Arguments:**
 - `<column_family>` - Column family to scan (see table below)
-- `[datetime]` - Optional reference time for temporal validity filtering
+- `[datetime]` - Optional reference time for active period filtering
 
 **Options:**
 - `-p, --db-dir <path>` - Path to the RocksDB database directory (required)
@@ -59,7 +59,7 @@ motlie db -p <db_dir> scan <column_family> [datetime] [OPTIONS]
 
 | Column Family | CLI Value | Description |
 |--------------|-----------|-------------|
-| Nodes | `nodes` | Node metadata (ID, name, temporal validity) |
+| Nodes | `nodes` | Node metadata (ID, name, active period) |
 | Node Fragments | `node-fragments` | Node content fragments with timestamps |
 | Edge Fragments | `edge-fragments` | Edge content fragments with timestamps |
 | Outgoing Edges | `outgoing-edges` | Forward edges (source → destination) |
@@ -67,7 +67,7 @@ motlie db -p <db_dir> scan <column_family> [datetime] [OPTIONS]
 
 ## Output Columns
 
-Each column family outputs different columns. All include `SINCE` and `UNTIL` columns for temporal validity.
+Each column family outputs different columns. All include `SINCE` and `UNTIL` columns for active period.
 
 ### Nodes
 ```
@@ -126,7 +126,7 @@ SINCE                 UNTIL                 ID                          NAME
 
 ## Temporal Filtering
 
-Filter records by temporal validity. Only records valid at the specified time are returned.
+Filter records by active period. Only records valid at the specified time are returned.
 
 ### Datetime Formats
 
@@ -145,7 +145,7 @@ motlie db -p /data/graph-db scan nodes 2024-01-01
 motlie db -p /data/graph-db scan nodes 2024-06-15-14:30:00
 ```
 
-### Temporal Validity Display
+### Active period Display
 
 The `SINCE` and `UNTIL` columns show:
 

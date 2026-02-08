@@ -63,8 +63,8 @@ Defined in `mutation.rs`:
 | `AddEdge` | Create an edge between two nodes |
 | `AddNodeFragment` | Add timestamped content fragment to a node |
 | `AddEdgeFragment` | Add timestamped content fragment to an edge |
-| `UpdateNodeActivePeriod` | Update node's temporal validity range |
-| `UpdateEdgeActivePeriod` | Update edge's temporal validity range |
+| `UpdateNodeActivePeriod` | Update node's active period |
+| `UpdateEdgeActivePeriod` | Update edge's active period |
 | `UpdateEdgeWeight` | Update edge weight |
 
 ### Runnable Trait
@@ -146,10 +146,10 @@ Defined in `schema.rs`. The graph uses 5 column families:
 | `nodes` | `(Id)` | `(ActivePeriod?, NodeName, NodeSummary)` | Node metadata |
 | `node-fragments` | `(Id, TimestampMilli)` | `(ActivePeriod?, FragmentContent)` | Node content fragments |
 | `outgoing-edges` | `(SrcId, DstId, EdgeName)` | `(ActivePeriod?, Weight?, EdgeSummary)` | Edges by source |
-| `incoming-edges` | `(DstId, SrcId, EdgeName)` | `(ActivePeriod?)` | Reverse edge index with denormalized temporal range |
+| `incoming-edges` | `(DstId, SrcId, EdgeName)` | `(ActivePeriod?)` | Reverse edge index with denormalized active period |
 | `edge-fragments` | `(SrcId, DstId, EdgeName, TimestampMilli)` | `(ActivePeriod?, FragmentContent)` | Edge content fragments |
 
-**Note**: `incoming-edges` denormalizes `ActivePeriod` for fast inbound scans with temporal filtering. Temporal range updates must write both `outgoing-edges` and `incoming-edges` in the same transaction.
+**Note**: `incoming-edges` denormalizes `ActivePeriod` for fast inbound scans with temporal filtering. Active period updates must write both `outgoing-edges` and `incoming-edges` in the same transaction.
 
 **Note**: Name-based lookups (finding nodes/edges by name) are handled by the fulltext search module using Tantivy indexing.
 
