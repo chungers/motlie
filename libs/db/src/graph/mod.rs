@@ -25,6 +25,7 @@ pub(crate) use crate::rocksdb::{
 // Submodules
 pub mod mutation;
 pub mod name_hash;
+pub(crate) mod ops;
 pub mod processor;
 pub mod query;
 pub mod reader;
