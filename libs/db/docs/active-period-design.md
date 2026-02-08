@@ -1,4 +1,4 @@
-# Temporal Range Support: Design and Implementation
+# Active period Support: Design and Implementation
 
 **Author:** Claude Code
 **Date:** November 17, 2025
@@ -6,7 +6,7 @@
 
 ## Executive Summary
 
-This document describes the design, implementation, and cost analysis of temporal validity support in the Motlie database. The feature enables time-based validity tracking for all records (nodes, edges, and fragments) with minimal storage overhead and zero query performance degradation.
+This document describes the design, implementation, and cost analysis of active period support in the Motlie database. The feature enables time-based validity tracking for all records (nodes, edges, and fragments) with minimal storage overhead and zero query performance degradation.
 
 **Key Results:**
 - **Storage overhead**: 2-19 bytes per record (0.5-4% for typical records)
@@ -29,7 +29,7 @@ This document describes the design, implementation, and cost analysis of tempora
 
 ### Motivation
 
-The Motlie database needed to support temporal validity tracking for all entities (nodes, edges, fragments) to enable:
+The Motlie database needed to support active period tracking for all entities (nodes, edges, fragments) to enable:
 
 1. **Time-travel queries**: Query the state of the graph at any point in time
 2. **Versioning**: Track when entities are valid/invalid
@@ -38,7 +38,7 @@ The Motlie database needed to support temporal validity tracking for all entitie
 
 ### Requirements
 
-1. **Per-record granularity**: Each record should have independent temporal validity
+1. **Per-record granularity**: Each record should have independent active period
 2. **Flexible ranges**: Support unbounded ranges (always valid, valid from X, valid until Y, valid between X and Y)
 3. **Minimal overhead**: Storage and performance impact should be minimal
 4. **Query integration**: Temporal filtering should integrate seamlessly with existing queries
@@ -48,9 +48,9 @@ The Motlie database needed to support temporal validity tracking for all entitie
 
 ## Design Options Evaluated
 
-Four main design options were evaluated for representing temporal validity:
+Four main design options were evaluated for representing active period:
 
-### Option A: Per-Column Family Temporal Range
+### Option A: Per-Column Family Active period
 
 **Structure:**
 ```rust
@@ -67,7 +67,7 @@ struct ColumnFamilyMetadata {
 
 ---
 
-### Option B: Temporal Range in Record Tuple (Not Wrapped in Option)
+### Option B: Active period in Record Tuple (Not Wrapped in Option)
 
 **Structure:**
 ```rust
@@ -89,13 +89,13 @@ pub struct ActivePeriod(
 - **Always pays**: Minimum 3 bytes even for "always valid" records
 
 **Rejected Reasons:**
-- All records pay overhead even when temporal validity is not needed
+- All records pay overhead even when active period is not needed
 - Violates "pay only for what you use" principle
 - 3-byte minimum overhead is significant for small records
 
 ---
 
-### Option C: Optional Temporal Range as First Tuple Element ✅ **SELECTED**
+### Option C: Optional Active period as First Tuple Element ✅ **SELECTED**
 
 **Structure:**
 ```rust
@@ -118,14 +118,14 @@ pub struct ActivePeriod(
 
 **Selected Reasons:**
 1. ✅ Minimal overhead for common case (1 byte)
-2. ✅ Flexible: supports all temporal range types
+2. ✅ Flexible: supports all active period types
 3. ✅ Optional: records without constraints pay minimal cost
 4. ✅ Query-friendly: single check per record during filtering
 5. ✅ Tuple-first position: clear semantic priority
 
 ---
 
-### Option D: Optional Temporal Range as Last Tuple Element
+### Option D: Optional Active period as Last Tuple Element
 
 **Structure:**
 ```rust
@@ -137,10 +137,10 @@ pub struct NodeCfValue(
 ```
 
 **Rejected Reasons:**
-- Semantically less clear (temporal validity is a fundamental property)
+- Semantically less clear (active period is a fundamental property)
 - Same storage cost as Option C
 - Less intuitive ordering (temporal constraints should come first)
-- Harder to evolve schema (adding fields before temporal range would shift indices)
+- Harder to evolve schema (adding fields before active period would shift indices)
 
 ---
 
@@ -148,7 +148,7 @@ pub struct NodeCfValue(
 
 ### Detailed Storage Overhead Measurements
 
-A comprehensive test program was created to measure actual MessagePack serialization sizes with LZ4 compression for all temporal range scenarios:
+A comprehensive test program was created to measure actual MessagePack serialization sizes with LZ4 compression for all active period scenarios:
 
 #### Test Methodology
 ```rust
@@ -184,7 +184,7 @@ Where:
 
 #### LZ4 Compression Impact
 
-**Finding:** LZ4 compression is **ineffective** for temporal range data.
+**Finding:** LZ4 compression is **ineffective** for active period data.
 
 ```
 Uncompressed:  19 bytes (Some, Some case)
@@ -217,7 +217,7 @@ For typical record sizes:
 
 ### Deserialization Performance Impact
 
-**Measurement:** CPU overhead for deserializing records with temporal range vs. without.
+**Measurement:** CPU overhead for deserializing records with active period vs. without.
 
 **Results:**
 - Additional deserialization cost: **~5-10%**
@@ -229,7 +229,7 @@ For typical record sizes:
 - Deserialization: ~0.5-1.0 microseconds
 - Temporal check: ~0.05-0.1 microseconds
 
-Temporal range adds <10% to deserialization, which is <5% of total query time.
+Active period adds <10% to deserialization, which is <5% of total query time.
 
 ---
 
@@ -238,7 +238,7 @@ Temporal range adds <10% to deserialization, which is <5% of total query time.
 ### Data Structure
 
 ```rust
-/// Temporal validity range with optional start and end timestamps
+/// Active period with optional start and end timestamps
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ActivePeriod(
     pub Option<ActiveFrom>,  // Inclusive
@@ -292,18 +292,18 @@ let until_ts = Some(ActivePeriod(None, Some(2000)));
 let between = Some(ActivePeriod(Some(1000), Some(2000)));
 ```
 
-#### 3. Temporal Range Positioned First in Tuples
+#### 3. Active period Positioned First in Tuples
 
 **Rationale:**
-- Temporal validity is a **fundamental property** of records
-- Schema evolution: easier to add fields after temporal range
+- Active period is a **fundamental property** of records
+- Schema evolution: easier to add fields after active period
 - Mental model: "when is this valid?" comes before "what is it?"
 - Consistency: same position across all CF value types
 
 **Structure:**
 ```rust
 pub struct NodeCfValue(
-    pub Option<ActivePeriod>,  // Position 0: temporal validity
+    pub Option<ActivePeriod>,  // Position 0: active period
     pub NodeName,                     // Position 1: identity
     pub NodeSummary,                  // Position 2: content
 );
@@ -315,22 +315,22 @@ pub struct NodeCfValue(
 
 ```rust
 impl ActivePeriod {
-    /// Create a temporal range with no constraints (returns None)
+    /// Create a active period with no constraints (returns None)
     pub fn always_valid() -> Option<Self> {
         None
     }
 
-    /// Create a temporal range valid from a start time (inclusive)
+    /// Create a active period valid from a start time (inclusive)
     pub fn valid_from(start: TimestampMilli) -> Option<Self> {
         Some(ActivePeriod(Some(start), None))
     }
 
-    /// Create a temporal range valid until an end time (exclusive)
+    /// Create a active period valid until an end time (exclusive)
     pub fn valid_until(until: TimestampMilli) -> Option<Self> {
         Some(ActivePeriod(None, Some(until)))
     }
 
-    /// Create a temporal range valid between start and until
+    /// Create a active period valid between start and until
     pub fn valid_between(
         start: TimestampMilli,
         until: TimestampMilli
@@ -344,7 +344,7 @@ impl ActivePeriod {
 
 ```rust
 impl ActivePeriod {
-    /// Check if a timestamp is valid according to this temporal range
+    /// Check if a timestamp is valid according to this active period
     pub fn is_valid_at(&self, query_time: TimestampMilli) -> bool {
         let after_start = match self.0 {
             None => true,
@@ -476,7 +476,7 @@ impl QueryExecute for NodeById {
 - No migration needed: MessagePack's flexibility handles schema evolution
 
 **Forward Strategy:**
-- Applications can start using temporal ranges incrementally
+- Applications can start using active periods incrementally
 - Mix of old (None) and new (Some) records is fully supported
 - No breaking changes to existing APIs
 
@@ -511,7 +511,7 @@ Comprehensive unit tests were added in `libs/db/src/schema.rs`:
 
 **Test Coverage:**
 - ✅ All boundary conditions (inclusive start, exclusive until)
-- ✅ All temporal range types (None, Some with various combinations)
+- ✅ All active period types (None, Some with various combinations)
 - ✅ Serialization/deserialization round-trips
 - ✅ Edge cases (u64::MAX, zero values)
 
@@ -519,7 +519,7 @@ Comprehensive unit tests were added in `libs/db/src/schema.rs`:
 
 **Total test count:** 187 tests (174 original + 13 new)
 
-- ✅ All graph operations with temporal ranges
+- ✅ All graph operations with active periods
 - ✅ Query filtering with temporal constraints
 - ✅ Consumer chain processing (Graph → FullText)
 - ✅ Concurrent mutations and queries
@@ -590,7 +590,7 @@ NodeById::new(node_id, Some(query_time))
     .await?
 ```
 
-#### 2. Temporal Range Queries
+#### 2. Active period Queries
 
 **Current:** Point-in-time filtering only
 
@@ -605,7 +605,7 @@ NodesValidDuringQuery::new(start_time, end_time)
 
 #### 3. Versioning Support
 
-**Current:** Temporal ranges track validity periods
+**Current:** Active periods track validity periods
 
 **Future:** Explicit versioning with causal relationships:
 ```rust
@@ -637,7 +637,7 @@ writer.send(vec![Mutation::InvalidateNode(InvalidateNode {
 
 **Current:** Sequential scan with per-record filtering
 
-**Future:** Secondary indexes on temporal ranges for efficient range queries:
+**Future:** Secondary indexes on active periods for efficient range queries:
 - Index on start timestamps
 - Index on until timestamps
 - Interval tree for overlap queries
@@ -646,10 +646,10 @@ writer.send(vec![Mutation::InvalidateNode(InvalidateNode {
 
 ## Conclusion
 
-The selected design (Option C) provides a robust foundation for temporal validity tracking with:
+The selected design (Option C) provides a robust foundation for active period tracking with:
 
 1. **Minimal overhead:** 1 byte for common case (None), up to 19 bytes for full ranges
-2. **Flexible semantics:** Supports all temporal range types (always valid, from, until, between)
+2. **Flexible semantics:** Supports all active period types (always valid, from, until, between)
 3. **Query integration:** Seamless filtering with O(1) per-record checks
 4. **Backward compatibility:** No migration needed, graceful degradation
 5. **Comprehensive testing:** 187 tests passing, all examples and benchmarks working
@@ -696,8 +696,8 @@ Per-item size: 87.31 KB
 Breakdown:
 - RocksDB metadata: ~200 KB (overhead for small DBs)
 - Actual data: ~60 KB
-- Temporal range overhead: ~3 bytes (1 byte × 3 records)
+- Active period overhead: ~3 bytes (1 byte × 3 records)
 - Percentage: <0.01%
 ```
 
-**Conclusion:** For production databases with thousands of records, RocksDB metadata overhead dominates, making temporal range overhead negligible.
+**Conclusion:** For production databases with thousands of records, RocksDB metadata overhead dominates, making active period overhead negligible.

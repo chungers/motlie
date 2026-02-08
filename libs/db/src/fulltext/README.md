@@ -456,7 +456,7 @@ The fulltext index uses the following schema:
 | Facet | Path Pattern | Description |
 |-------|--------------|-------------|
 | `doc_type_facet` | `/type/nodes`, `/type/edges`, etc. | Document type categorization |
-| `validity_facet` | `/validity/unbounded`, `/validity/bounded`, etc. | Temporal validity structure |
+| `validity_facet` | `/validity/unbounded`, `/validity/bounded`, etc. | Active period structure |
 | `tags_facet` | `/tag/rust`, `/tag/programming`, etc. | User-defined hashtags |
 
 ### Note on Temporal Queries
@@ -845,7 +845,7 @@ let similar = MoreLikeThis::new(node_id)
 - [x] Tag filtering via `with_tags()` builder method
 - [x] Multiple query consumers with shared Index
 - [x] Readonly/Readwrite storage modes
-- [x] Temporal validity fields (valid_since, valid_until)
+- [x] Active period fields (valid_since, valid_until)
 - [x] Time range queries on creation_timestamp and validity fields
 - [x] `FulltextFacets` query for facet statistics (doc_types, tags, validity)
 - [x] `MatchSource` enum to indicate where the match came from (name vs fragment)

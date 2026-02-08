@@ -587,7 +587,7 @@ if neighbors.len() <= m_max {
 |-----------|------|---|-------------|
 | **Vector Data** | 6.5KB | 25% | 1024 × 4 bytes × 1.6 (JSON overhead) |
 | **Node Metadata** | 0.2KB | 1% | Name, summary, timestamps |
-| **Fragment Metadata** | 0.1KB | <1% | Temporal range, content ref |
+| **Fragment Metadata** | 0.1KB | <1% | Active period, content ref |
 | **Edges (HNSW)** | 12.8KB | 50% | ~32 edges × 200 bytes each |
 | **Edge Components** | - | - | - |
 | ├─ Key (src+dst+name) | 48 bytes | - | 16+16+16 |

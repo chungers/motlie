@@ -281,7 +281,7 @@ AddNode {
     id: Id::new(),
     name: "Alice".to_string(),
     ts_millis: TimestampMilli::now(),
-    valid_range: None,  // Optional validity range
+    valid_range: None,  // Optional active period
 }
 .run(&writer)
 .await?;
@@ -374,7 +374,7 @@ AddEdgeFragment {
 
 ### 5. UpdateNodeActivePeriod
 
-Update the temporal validity range of a node:
+Update the active period of a node:
 
 ```rust
 use motlie_db::{UpdateNodeActivePeriod, Id, TimestampMilli, ActivePeriod, MutationRunnable};
@@ -393,12 +393,12 @@ UpdateNodeActivePeriod {
 
 **Fields**:
 - `id: Id` - Node ID to update
-- `temporal_range: ActivePeriod` - New temporal validity range
+- `temporal_range: ActivePeriod` - New active period
 - `reason: String` - Reason for the update
 
 ### 6. UpdateEdgeActivePeriod
 
-Update the temporal validity range of an edge (using topology instead of edge ID):
+Update the active period of an edge (using topology instead of edge ID):
 
 ```rust
 use motlie_db::{UpdateEdgeActivePeriod, Id, TimestampMilli, ActivePeriod, MutationRunnable};
@@ -421,7 +421,7 @@ UpdateEdgeActivePeriod {
 - `src_id: Id` - Source node ID
 - `dst_id: Id` - Destination node ID
 - `name: String` - Edge name/type
-- `temporal_range: ActivePeriod` - New temporal validity range
+- `temporal_range: ActivePeriod` - New active period
 - `reason: String` - Reason for the update
 
 ### 7. UpdateEdgeWeight
@@ -606,7 +606,7 @@ async fn update_user_conditionally(
 }
 ```
 
-### Pattern 6: Temporal Validity
+### Pattern 6: Active period
 
 ```rust
 use motlie_db::schema::ActivePeriod;
@@ -1014,10 +1014,10 @@ node.run(&writer).await?;
    - For real-time updates: 1-10 mutations per batch
    - Monitor RocksDB transaction limits
 
-4. **Use Temporal Validity When Needed**
+4. **Use Active period When Needed**
    - Set `valid_to` for time-limited data
    - Leave None for permanent data
-   - Remember: queries can filter by temporal validity
+   - Remember: queries can filter by active period
 
 5. **Handle Errors Appropriately**
    - Mutations are atomic - failed batches roll back

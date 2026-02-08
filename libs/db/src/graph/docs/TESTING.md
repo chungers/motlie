@@ -57,7 +57,7 @@ VERSIONING Behavioral Tests (missing)
   - AsOf reads return correct version for Node/Edge.
   - AsOf reads respect ValidSince/ValidUntil.
   - AsOf reads across multiple updates ordered correctly.
-- Validity range:
+- Active period:
   - ValidUntil updates do not mutate in place without history.
   - Range queries return edges active during interval.
 - Weight/history:
@@ -68,7 +68,7 @@ VERSIONING Behavioral Tests (missing)
   - Restore does not leave multiple CURRENT markers.
   - RestoreEdges batch also marks prior CURRENT entries STALE and records orphan candidates.
   - RestoreNode/RestoreEdge fail if referenced summary hash is missing (GC’d).
-  - RestoreEdges skips edges with missing summaries and logs warning.
+- RestoreEdges dry_run validates and fails on missing summaries without writing.
 
 Index and Denormalization Tests (missing)
 - Reverse edge temporal denormalization:
@@ -208,7 +208,7 @@ Post-Refactor (ARCH2) Testing Adjustments
 | Restore CURRENT marker | ❌ | MISSING | Need: no multiple CURRENT markers |
 | Restore summary reuse | ❌ | MISSING | Need: reuses existing hash if present |
 | Time travel AsOf | ✅ | tests.rs | test_point_in_time_node_query |
-| Validity range | ✅ | tests.rs | test_active_period_filtering |
+| Active period | ✅ | tests.rs | test_active_period_filtering |
 | Weight history | ✅ | tests.rs | test_edge_weight_update_creates_version |
 | RestoreEdges batch | ❌ | MISSING | Need: batch marks STALE, records orphans |
 | Restore missing summary | ❌ | MISSING | Need: fail if summary GC'd |

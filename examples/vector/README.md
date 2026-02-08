@@ -171,14 +171,14 @@ We implement two popular ANN algorithms:
 - **HNSW** (Hierarchical Navigable Small World) - Multi-layer graph for fast approximate search
 - **Vamana** (DiskANN) - Single-layer graph optimized for disk-based search
 
-Both algorithms leverage `motlie_db`'s graph primitives (nodes, edges, weights, temporal ranges) to build and query vector indices.
+Both algorithms leverage `motlie_db`'s graph primitives (nodes, edges, weights, active periods) to build and query vector indices.
 
 ## Current Status
 
 | Aspect | Status | Notes |
 |--------|--------|-------|
 | **Index Construction** | ✅ Working | Both HNSW and Vamana build correct graph structures |
-| **Graph Storage** | ✅ Working | Nodes, edges, weights, temporal ranges all persist correctly |
+| **Graph Storage** | ✅ Working | Nodes, edges, weights, active periods all persist correctly |
 | **Flush API** | ✅ Implemented | Proper read-after-write consistency (replaces 10ms sleep) |
 | **HNSW Search** | ✅ Working | ~50-80% recall@10 (see [Recall Analysis](#recall-analysis)) |
 | **Vamana Search** | ✅ Working | ~25-60% recall@10 (see [Recall Analysis](#recall-analysis)) |
@@ -531,10 +531,10 @@ Edge naming convention:
 - "hnsw_L{max_level}": Top layer (entry point)
 ```
 
-### Edge Pruning via Temporal Ranges
+### Edge Pruning via Active periods
 
 When edges are pruned during index construction (e.g., RNG-style pruning in Vamana),
-we use **temporal ranges** to "hide" edges rather than delete them:
+we use **active periods** to "hide" edges rather than delete them:
 
 ```rust
 // Prune an edge by setting valid_until to current time
@@ -1626,7 +1626,7 @@ Vamana requires fundamental changes for online updates:
 | **Read-after-write consistency** | Critical | Eliminate sleep delays, immediate edge visibility |
 | **Atomic multi-edge transactions** | Critical | Insert + bidirectional edges + prune as single operation |
 | **Connection count tracking** | High | O(1) prune decisions, critical for insert performance |
-| **Soft-delete for nodes** | High | Vector deletion via temporal range |
+| **Soft-delete for nodes** | High | Vector deletion via active period |
 | **Batch edge operations** | Medium | Efficient multi-edge insert/prune |
 
 #### Algorithm Requirements
@@ -1635,7 +1635,7 @@ Vamana requires fundamental changes for online updates:
 |-------------|------|--------|
 | **Concurrent read/write** | Add RwLock around entry_point, max_level | N/A (batch only) |
 | **Insert transaction** | Group insert + edges + prune atomically | Implement FreshDiskANN |
-| **Delete operation** | Soft-delete node + edges via temporal range | Full rebuild required |
+| **Delete operation** | Soft-delete node + edges via active period | Full rebuild required |
 | **Cache invalidation** | Subscribe to mutation events | N/A |
 
 ### Online Update Performance Targets
@@ -1912,7 +1912,7 @@ UpdateNodeValidUntil {
 
 ### 7. 🟡 Edge Name Prefix Filtering
 
-**Current State**: `OutgoingEdges` returns all edges from a node, filtered by temporal range.
+**Current State**: `OutgoingEdges` returns all edges from a node, filtered by active period.
 
 **Needed**: Prefix filtering by edge name pattern for layer-specific queries.
 
@@ -2065,7 +2065,7 @@ Priorities are ordered based on enabling **online updates** while maintaining se
 
 | Optimization | Effort | Impact | Why |
 |--------------|--------|--------|-----|
-| **Soft-delete for Nodes** | Medium | High | Enable vector deletion via temporal range |
+| **Soft-delete for Nodes** | Medium | High | Enable vector deletion via active period |
 | **Batch Fragment Retrieval** | Medium | High | Fast neighbor loading during insert/search |
 | **Cache Invalidation Events** | Medium | High | Notify caches when vectors are updated/deleted |
 | **Edge Name Prefix Filtering** | Low | Medium | Faster HNSW layer queries during insert |

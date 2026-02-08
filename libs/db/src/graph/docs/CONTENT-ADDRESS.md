@@ -97,7 +97,7 @@ pub struct ReverseEdgeCfValue(pub Option<ActivePeriod>);
 // ActivePeriod is denormalized here for fast inbound scans with time filtering.
 // Other edge details (weight, summary, version) remain authoritative in ForwardEdges.
 
-**Consistency rule:** whenever an edge's temporal range is updated, update both ForwardEdges and ReverseEdges in the same transaction to keep this denormalized field in sync.
+**Consistency rule:** whenever an edge's active period is updated, update both ForwardEdges and ReverseEdges in the same transaction to keep this denormalized field in sync.
 (codex, 2026-02-02, validated)
 ```
 

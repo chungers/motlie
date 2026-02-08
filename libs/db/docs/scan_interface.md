@@ -70,7 +70,7 @@ All scan types support the following fields:
 - `last`: Optional cursor for pagination (type depends on scan type)
 - `limit`: Maximum number of records to return
 - `reverse`: Scan in reverse direction (from end to start)
-- `reference_ts_millis`: Optional reference timestamp for temporal validity filtering (if Some, only records valid at this time are returned)
+- `reference_ts_millis`: Optional reference timestamp for active period filtering (if Some, only records valid at this time are returned)
 
 ### Visitable Trait
 
@@ -214,7 +214,7 @@ motlie db -p /path/to/db dump nodes -f table
 motlie db -p /path/to/db dump nodes --reverse
 motlie db -p /path/to/db dump nodes -r  # short flag
 
-# Temporal validity filtering (only return records valid at the specified time)
+# Active period filtering (only return records valid at the specified time)
 motlie db -p /path/to/db dump nodes 2024-01-01              # Date only (midnight)
 motlie db -p /path/to/db dump nodes 2024-01-01-12:30:45     # Date and time
 

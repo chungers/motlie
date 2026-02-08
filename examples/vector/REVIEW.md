@@ -424,7 +424,7 @@ Based on clarifying discussion, the following design decisions have been made:
 
 **Decision:** Vector index remains **temporal-agnostic**. Temporal visibility is enforced during re-ranking via graph RocksDB lookup.
 
-**Rationale:** The vectors represent node/edge summaries and fragments. The graph storage is the source of truth for temporal validity. This separation of concerns keeps the vector index simpler and avoids synchronization complexity.
+**Rationale:** The vectors represent node/edge summaries and fragments. The graph storage is the source of truth for active period. This separation of concerns keeps the vector index simpler and avoids synchronization complexity.
 
 #### Architecture: Over-Fetch + Temporal Filter
 
@@ -533,7 +533,7 @@ fn search_with_temporal_filter(
 
 - **Batch optimization**: Use `MultiGet` for graph lookups to amortize RocksDB overhead
 - **Pipeline**: While computing distances for batch N, prefetch graph data for batch N+1
-- **Cache warming**: Graph temporal ranges are small (~16 bytes), cache efficiently
+- **Cache warming**: Graph active periods are small (~16 bytes), cache efficiently
 
 ---
 
