@@ -12,8 +12,8 @@ use crate::graph::schema::{
     NodeCfValue, NodeFragments, NodeSummaryIndex, NodeSummaryIndexCfKey, NodeVersionHistory,
     NodeVersionHistoryCfKey, Nodes, ReverseEdgeCfKey, ReverseEdges,
 };
-use crate::graph::{AddEdge, AddNode, DeleteEdge, DeleteNode, UpdateNodeSummary, UpdateEdgeSummary};
-use crate::graph::mutation::{AddNodeFragment, RestoreEdges, UpdateEdgeWeight};
+use crate::graph::{AddEdge, AddNode, DeleteEdge, DeleteNode, UpdateNode, UpdateEdge};
+use crate::graph::mutation::{AddNodeFragment, RestoreEdges};
 use crate::graph::ops::summary::verify_edge_summary_exists;
 use crate::graph::name_hash::NameHash;
 use crate::graph::SummaryHash;
@@ -122,7 +122,7 @@ fn ops_add_edge_writes_forward_reverse_and_history() {
 }
 
 #[test]
-fn ops_update_node_summary_updates_index() {
+fn ops_update_node_updates_index() {
     let (_temp_dir, storage) = setup_storage();
     let txn_db = storage.transaction_db().unwrap();
 
@@ -143,15 +143,16 @@ fn ops_update_node_summary_updates_index() {
     }
 
     let new_summary = DataUrl::from_text("updated summary");
-    let update = UpdateNodeSummary {
+    let update = UpdateNode {
         id,
-        new_summary: new_summary.clone(),
         expected_version: 1,
+        new_active_period: None,
+        new_summary: Some(new_summary.clone()),
     };
 
     {
         let txn = txn_db.transaction();
-        node::update_node_summary(&txn, txn_db, &update).unwrap();
+        node::update_node(&txn, txn_db, &update).unwrap();
         txn.commit().unwrap();
     }
 
@@ -525,7 +526,7 @@ fn ops_fragment_append_idempotency() {
 // Phase 2: VERSIONING Tests (migrated from tests.rs)
 // ============================================================================
 
-/// Validates: UpdateNodeSummary creates a new version in Nodes CF.
+/// Validates: UpdateNode creates a new version in Nodes CF.
 #[test]
 fn ops_node_update_creates_version_history() {
     let (_temp_dir, storage) = setup_storage();
@@ -553,10 +554,11 @@ fn ops_node_update_creates_version_history() {
     // Update summary (version 1 -> 2)
     {
         let txn = txn_db.transaction();
-        node::update_node_summary(&txn, txn_db, &UpdateNodeSummary {
+        node::update_node(&txn, txn_db, &UpdateNode {
             id: node_id,
-            new_summary: DataUrl::from_text("Version 2"),
             expected_version: 1,
+            new_active_period: None,
+            new_summary: Some(DataUrl::from_text("Version 2")),
         }).unwrap();
         txn.commit().unwrap();
     }
@@ -580,7 +582,7 @@ fn ops_node_update_creates_version_history() {
     assert!(version_count >= 2, "Should have at least 2 versions in Nodes CF, got {}", version_count);
 }
 
-/// Validates: UpdateEdgeSummary creates a new version in ForwardEdges CF.
+/// Validates: UpdateEdge (summary) creates a new version in ForwardEdges CF.
 #[test]
 fn ops_edge_update_creates_version_history() {
     let (_temp_dir, storage) = setup_storage();
@@ -624,15 +626,17 @@ fn ops_edge_update_creates_version_history() {
     // Ensure distinct timestamp for the update
     std::thread::sleep(std::time::Duration::from_millis(5));
 
-    // Update edge summary
+    // Update edge summary using consolidated UpdateEdge
     {
         let txn = txn_db.transaction();
-        edge::update_edge_summary(&txn, txn_db, &UpdateEdgeSummary {
+        edge::update_edge(&txn, txn_db, &UpdateEdge {
             src_id,
             dst_id,
             name: edge_name.clone(),
-            new_summary: DataUrl::from_text("Edge V2"),
             expected_version: 1,
+            new_weight: None,
+            new_active_period: None,
+            new_summary: Some(DataUrl::from_text("Edge V2")),
         }).unwrap();
         txn.commit().unwrap();
     }
@@ -660,7 +664,7 @@ fn ops_edge_update_creates_version_history() {
     assert!(version_count >= 2, "Should have at least 2 edge versions, got {}", version_count);
 }
 
-/// Validates: UpdateEdgeWeight creates a new version.
+/// Validates: UpdateEdge (weight) creates a new version.
 #[test]
 fn ops_edge_weight_update_creates_version() {
     let (_temp_dir, storage) = setup_storage();
@@ -704,14 +708,17 @@ fn ops_edge_weight_update_creates_version() {
     // Ensure distinct timestamp for the update
     std::thread::sleep(std::time::Duration::from_millis(5));
 
-    // Update weight
+    // Update weight using consolidated UpdateEdge
     {
         let txn = txn_db.transaction();
-        edge::update_edge_weight(&txn, txn_db, &UpdateEdgeWeight {
+        edge::update_edge(&txn, txn_db, &UpdateEdge {
             src_id,
             dst_id,
             name: edge_name.clone(),
-            weight: 5.0,
+            expected_version: 1,
+            new_weight: Some(Some(5.0)),
+            new_active_period: None,
+            new_summary: None,
         }).unwrap();
         txn.commit().unwrap();
     }
@@ -871,10 +878,11 @@ fn ops_version_scan_ordering() {
     // Update to V2
     {
         let txn = txn_db.transaction();
-        node::update_node_summary(&txn, txn_db, &UpdateNodeSummary {
+        node::update_node(&txn, txn_db, &UpdateNode {
             id: node_id,
-            new_summary: DataUrl::from_text("V2"),
             expected_version: 1,
+            new_active_period: None,
+            new_summary: Some(DataUrl::from_text("V2")),
         }).unwrap();
         txn.commit().unwrap();
     }
@@ -884,10 +892,11 @@ fn ops_version_scan_ordering() {
     // Update to V3
     {
         let txn = txn_db.transaction();
-        node::update_node_summary(&txn, txn_db, &UpdateNodeSummary {
+        node::update_node(&txn, txn_db, &UpdateNode {
             id: node_id,
-            new_summary: DataUrl::from_text("V3"),
             expected_version: 2,
+            new_active_period: None,
+            new_summary: Some(DataUrl::from_text("V3")),
         }).unwrap();
         txn.commit().unwrap();
     }
@@ -982,10 +991,11 @@ fn ops_version_mismatch_rejected() {
     // Try to update with wrong expected_version
     {
         let txn = txn_db.transaction();
-        let result = node::update_node_summary(&txn, txn_db, &UpdateNodeSummary {
+        let result = node::update_node(&txn, txn_db, &UpdateNode {
             id: node_id,
-            new_summary: DataUrl::from_text("V2"),
             expected_version: 99, // Wrong version
+            new_active_period: None,
+            new_summary: Some(DataUrl::from_text("V2")),
         });
         assert!(result.is_err(), "Should reject version mismatch");
         let err_msg = result.unwrap_err().to_string();
@@ -1071,10 +1081,11 @@ fn ops_update_deleted_node_rejected() {
     // Try to update deleted node
     {
         let txn = txn_db.transaction();
-        let result = node::update_node_summary(&txn, txn_db, &UpdateNodeSummary {
+        let result = node::update_node(&txn, txn_db, &UpdateNode {
             id: node_id,
-            new_summary: DataUrl::from_text("Should fail"),
             expected_version: 2,
+            new_active_period: None,
+            new_summary: Some(DataUrl::from_text("Should fail")),
         });
         assert!(result.is_err(), "Update of deleted node should be rejected");
         let err_msg = result.unwrap_err().to_string();

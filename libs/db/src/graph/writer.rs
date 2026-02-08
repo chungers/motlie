@@ -515,46 +515,26 @@ impl<P: Processor> Consumer<P> {
                         "Processing AddEdgeFragment"
                     );
                 }
-                Mutation::UpdateNodeActivePeriod(args) => {
-                    tracing::debug!(
-                        id = %args.id,
-                        reason = %args.reason,
-                        "Processing UpdateNodeActivePeriod"
-                    );
-                }
-                Mutation::UpdateEdgeActivePeriod(args) => {
-                    tracing::debug!(
-                        src = %args.src_id,
-                        dst = %args.dst_id,
-                        name = %args.name,
-                        reason = %args.reason,
-                        "Processing UpdateEdgeActivePeriod"
-                    );
-                }
-                Mutation::UpdateEdgeWeight(args) => {
-                    tracing::debug!(
-                        src = %args.src_id,
-                        dst = %args.dst_id,
-                        name = %args.name,
-                        weight = args.weight,
-                        "Processing UpdateEdgeWeight"
-                    );
-                }
                 // CONTENT-ADDRESS: Update/Delete mutations
-                Mutation::UpdateNodeSummary(args) => {
+                Mutation::UpdateNode(args) => {
                     tracing::debug!(
                         id = %args.id,
                         expected_version = args.expected_version,
-                        "Processing UpdateNodeSummary"
+                        has_active_period = args.new_active_period.is_some(),
+                        has_summary = args.new_summary.is_some(),
+                        "Processing UpdateNode"
                     );
                 }
-                Mutation::UpdateEdgeSummary(args) => {
+                Mutation::UpdateEdge(args) => {
                     tracing::debug!(
                         src = %args.src_id,
                         dst = %args.dst_id,
                         name = %args.name,
                         expected_version = args.expected_version,
-                        "Processing UpdateEdgeSummary"
+                        has_weight = args.new_weight.is_some(),
+                        has_active_period = args.new_active_period.is_some(),
+                        has_summary = args.new_summary.is_some(),
+                        "Processing UpdateEdge"
                     );
                 }
                 Mutation::DeleteNode(args) => {
@@ -818,7 +798,7 @@ pub(crate) fn create_mutation_writer_with_processor(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::mutation::{AddEdge, AddNode, AddNodeFragment, UpdateEdgeActivePeriod};
+    use super::super::mutation::{AddEdge, AddNode, AddNodeFragment, UpdateEdge};
     use crate::writer::Runnable as MutRunnable;
     use super::super::schema::{EdgeSummary, NodeSummary};
     use crate::{DataUrl, Id, TimestampMilli};
@@ -872,18 +852,20 @@ mod tests {
 
         let src_id = Id::new();
         let dst_id = Id::new();
-        let invalidate_args = UpdateEdgeActivePeriod {
+        let update_args = UpdateEdge {
             src_id,
             dst_id,
             name: "test_edge".to_string(),
-            temporal_range: crate::ActivePeriod(None, None),
-            reason: "test reason".to_string(),
+            expected_version: 1,
+            new_weight: Some(Some(0.5)),
+            new_active_period: None,
+            new_summary: None,
         };
 
         // Test new mutation API
         node_args.run(&writer).await.unwrap();
         edge_args.run(&writer).await.unwrap();
         fragment_args.run(&writer).await.unwrap();
-        invalidate_args.run(&writer).await.unwrap();
+        update_args.run(&writer).await.unwrap();
     }
 }

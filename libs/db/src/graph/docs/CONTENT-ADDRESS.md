@@ -575,7 +575,7 @@ summary row. To safely GC these rows, `NodeSummaryCfValue` and
 **Implementation details (VERSIONING):**
 - Helper functions: `ensure_node_summary()`, `ensure_edge_summary()` - idempotent create-if-not-exists
 - Orphan candidate functions: `mark_node_summary_orphan_candidate()`, `mark_edge_summary_orphan_candidate()`
-- All mutations (AddNode, AddEdge, UpdateNodeSummary, UpdateEdgeSummary, DeleteNode, DeleteEdge)
+- All mutations (AddNode, AddEdge, UpdateNode, UpdateEdge, DeleteNode, DeleteEdge)
   use these helpers
 - Actual summary deletion is deferred to GC via OrphanSummaries CF scanning
 - This supports rollback by allowing orphaned summaries to be reclaimed only after retention period
@@ -1060,7 +1060,7 @@ impl GraphGarbageCollector {
 ```rust
 // RefCount handles summary cleanup inline during mutations:
 // - AddNode/AddEdge: increment refcount (create row if missing)
-// - UpdateNodeSummary/UpdateEdgeSummary: increment new, decrement old
+// - UpdateNode/UpdateEdge: increment new, decrement old
 // - DeleteNode/DeleteEdge: decrement refcount
 // When refcount reaches 0, summary row is deleted immediately.
 ```
@@ -1240,7 +1240,7 @@ fn repair_forward_reverse_consistency(&self) -> Result<RepairMetrics> {
 - [x] Insert write paths with CURRENT marker - mutation.rs (AddNode, AddEdge)
 - [x] Reverse lookup query APIs - query.rs (NodesBySummaryHash, EdgesBySummaryHash)
 - [x] GraphMeta CF for GC cursors - schema.rs, subsystem.rs
-- [x] Update/Delete mutations with optimistic locking - mutation.rs (UpdateNodeSummary, UpdateEdgeSummary, DeleteNode, DeleteEdge)
+- [x] Update/Delete mutations with optimistic locking - mutation.rs (UpdateNode, UpdateEdge, DeleteNode, DeleteEdge)
 - [x] RefCount for content-addressed summaries - schema.rs (NodeSummaryCfValue, EdgeSummaryCfValue include RefCount)
 - [x] RefCount increment/decrement in mutations - mutation.rs (all Add/Update/Delete mutations handle refcount)
 - [x] GC implementation - gc.rs (GraphGarbageCollector with cursor-based incremental GC for stale index entries)
@@ -1262,7 +1262,7 @@ fn repair_forward_reverse_consistency(&self) -> Result<RepairMetrics> {
 |-----------|-----------|---------|
 | AddNode | 3 puts | Names, NodeSummaries, Nodes |
 | AddEdge | 4 puts | Names, EdgeSummaries, ForwardEdges, ReverseEdges |
-| UpdateEdgeWeight | 1 get + 1 put | Read-modify-write on ForwardEdges |
+| UpdateEdge | 1 get + 1 put | Read-modify-write on ForwardEdges |
 (codex, 2026-02-02, validated)
 **Note:** Summary writes are conditional on non-empty summaries; counts assume summaries are present. (codex, 2026-02-02, validated)
 

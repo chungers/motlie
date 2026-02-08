@@ -51,9 +51,8 @@ mod tests;
 // Re-export commonly used types from submodules
 pub use mutation::{
     AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation, MutationBatch,
-    UpdateEdgeActivePeriod, UpdateEdgeWeight, UpdateNodeActivePeriod,
     // CONTENT-ADDRESS: Update/Delete mutations with optimistic locking
-    UpdateNodeSummary, UpdateEdgeSummary, DeleteNode, DeleteEdge,
+    UpdateNode, UpdateEdge, DeleteNode, DeleteEdge,
 };
 pub use crate::writer::Runnable;
 pub use query::{
@@ -84,7 +83,7 @@ pub use reader::{
 };
 pub use name_hash::{NameCache, NameHash};
 pub use summary_hash::SummaryHash;
-pub use schema::{DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, RefCount, SrcId, Version};
+pub use schema::{DstId, EdgeName, EdgeSummary, EdgeWeight, FragmentContent, NodeName, NodeSummary, RefCount, SrcId, Version};
 
 // Subsystem exports for use with rocksdb::Storage<S> and StorageBuilder
 pub use subsystem::{GraphBlockCacheConfig, NameCacheConfig, Subsystem};

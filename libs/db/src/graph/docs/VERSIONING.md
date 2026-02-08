@@ -47,10 +47,10 @@ Claude: Please address each item below; these are the inline `(codex, 2026-02-07
 9) `libs/db/src/graph/mutation.rs:1032` — AddEdge (cached path) missing initial EdgeVersionHistory snapshot.
    - (claude, 2026-02-07, FIXED: Added initial EdgeVersionHistory snapshot in execute_with_cache())
    (codex, 2026-02-07, decision: accept)
-10) `libs/db/src/graph/mutation.rs:1337` — UpdateNodeSummary missing NodeVersionHistory snapshot per version.
+10) `libs/db/src/graph/mutation.rs:1337` — UpdateNode missing NodeVersionHistory snapshot per version.
     - (claude, 2026-02-07, FIXED: Added NodeVersionHistory snapshot after creating new node version)
     (codex, 2026-02-07, decision: accept)
-11) `libs/db/src/graph/mutation.rs:1470` — UpdateEdgeSummary missing EdgeVersionHistory snapshot per version.
+11) `libs/db/src/graph/mutation.rs:1470` — UpdateEdge missing EdgeVersionHistory snapshot per version.
     - (claude, 2026-02-07, FIXED: Added EdgeVersionHistory snapshot after creating new edge version)
     (codex, 2026-02-07, decision: accept)
 12) `libs/db/src/graph/schema.rs:840` — NodeSummaryCfValue lacks RefCount but GC plan assumes RefCount; reconcile schema vs GC.
@@ -74,7 +74,7 @@ Claude: Please address each item below; these are the inline `(codex, 2026-02-07
     - (claude, 2026-02-07, FIXED: Created StorageAccess enum and unified find_node_version_unified/find_edge_version_unified helpers. Deduplicates readonly/readwrite/txn logic.)
 
 17) `libs/db/src/graph/mutation.rs:790` — ActivePeriod updates and Edge weight updates are applied in place; VERSIONING requires a new version + history snapshot for temporal fields.
-   (codex, 2026-02-07, decision: accept — UpdateNodeActivePeriod/UpdateEdgeActivePeriod/UpdateEdgeWeight now create new versions and history snapshots.)
+   (codex, 2026-02-07, decision: accept — UpdateNode/UpdateEdge now create new versions and history snapshots for active_period and weight changes.)
 
 18) `libs/db/src/graph/mutation.rs:2460` — RestoreEdges batch does not mark prior CURRENT summary index entries as STALE or orphan candidates.
    (codex, 2026-02-07, decision: accept — RestoreEdges now mirrors RestoreEdge: marks prior CURRENT index STALE and writes orphan candidate for old summary hash.)
@@ -619,59 +619,77 @@ pub struct RestoreNode {
 }
 ```
 
-### API Migration: ActivePeriod Updates
+### Consolidated Update APIs
 
-**BEFORE (current API):**
+The graph module uses consolidated `UpdateNode` and `UpdateEdge` mutations that combine
+active period and summary updates in a single versioned operation:
+
 ```rust
-/// Patches ActivePeriod directly - no versioning, no optimistic locking
-pub struct UpdateNodeActivePeriod {
+/// Consolidated node update with Option<Option<T>> pattern
+pub struct UpdateNode {
     pub id: Id,
-    pub temporal_range: ActivePeriod,
-    pub reason: String,
+    pub expected_version: Version,
+    /// None = no change, Some(None) = clear, Some(Some(p)) = set
+    pub new_active_period: Option<Option<ActivePeriod>>,
+    /// None = no change, Some(summary) = set new summary
+    pub new_summary: Option<NodeSummary>,
 }
 
-pub struct UpdateEdgeActivePeriod {
+/// Consolidated edge update with Option<Option<T>> pattern
+pub struct UpdateEdge {
     pub src_id: Id,
     pub dst_id: Id,
-    pub name: EdgeName,
-    pub temporal_range: ActivePeriod,
-    pub reason: String,
+    pub name: String,
+    pub expected_version: Version,
+    /// None = no change, Some(None) = clear, Some(Some(p)) = set
+    pub new_active_period: Option<Option<ActivePeriod>>,
+    /// None = no change, Some(None) = clear, Some(Some(w)) = set
+    pub new_weight: Option<Option<f32>>,
+    /// None = no change, Some(summary) = set new summary
+    pub new_summary: Option<EdgeSummary>,
 }
 ```
 
-**AFTER (VERSIONING):**
-
-The `UpdateNodeActivePeriod` and `UpdateEdgeActivePeriod` mutations are **DEPRECATED**.
-Use `UpdateNode` and `UpdateEdge` with `new_temporal_range` instead:
+**Example usage:**
 
 ```rust
-// BEFORE: No version tracking
-UpdateNodeActivePeriod {
-    id: alice,
-    temporal_range: ActivePeriod(Dec1, Dec10),
-    reason: "extended promo",
-}
-
-// AFTER: Version tracked, history preserved
+// Update only active period (leave summary unchanged)
 UpdateNode {
     id: alice,
-    new_temporal_range: Some(ActivePeriod(Dec1, Dec10)),
     expected_version: 1,
-    ..Default::default()
+    new_active_period: Some(Some(ActivePeriod(Dec1, Dec10))),
+    new_summary: None,
+}
+
+// Update only summary (leave active period unchanged)
+UpdateNode {
+    id: alice,
+    expected_version: 1,
+    new_active_period: None,
+    new_summary: Some(NodeSummary::from_text("Updated bio")),
+}
+
+// Clear active period
+UpdateNode {
+    id: alice,
+    expected_version: 1,
+    new_active_period: Some(None),  // Clears the active period
+    new_summary: None,
 }
 ```
 
-**Key differences:**
+**Key features of consolidated APIs:**
 
-| Aspect | Before | After |
-|--------|--------|-------|
-| Version increment | ❌ No | ✅ Yes |
-| Optimistic locking | ❌ No | ✅ Yes (expected_version) |
-| History preserved | ❌ No | ✅ Yes (VersionHistory) |
-| Rollback support | ❌ No | ✅ Yes |
-| Combined with other changes | ❌ No | ✅ Yes (same UpdateNode/UpdateEdge) |
+| Feature | Description |
+|---------|-------------|
+| Version increment | ✅ Each update increments version |
+| Optimistic locking | ✅ `expected_version` prevents conflicts |
+| History preserved | ✅ VersionHistory tracks all changes |
+| Option<Option<T>> | Distinguishes no-change vs clear vs set |
+| Combined changes | Single mutation updates multiple fields atomically |
+| Rollback support | ✅ RestoreNode/RestoreEdge available |
 
-**Note:** The `reason` field is removed. Use fragments for audit commentary if needed.
+**Note:** Use fragments for audit commentary if needed.
 
 ### Fragment Mutations (Unchanged)
 

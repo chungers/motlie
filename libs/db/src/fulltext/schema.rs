@@ -59,7 +59,7 @@ pub fn build_schema() -> (schema::Schema, DocumentFields) {
     let mut schema_builder = schema::Schema::builder();
 
     // ID fields - STORED for RocksDB lookups, INDEXED for delete_term operations
-    // IMPORTANT: INDEXED is required for delete_term to work (e.g., UpdateNodeActivePeriod)
+    // IMPORTANT: INDEXED is required for delete_term to work (e.g., UpdateNode)
     let id_field = schema_builder.add_bytes_field("id", STORED | FAST | INDEXED);
     let src_id_field = schema_builder.add_bytes_field("src_id", STORED | FAST | INDEXED);
     let dst_id_field = schema_builder.add_bytes_field("dst_id", STORED | FAST | INDEXED);

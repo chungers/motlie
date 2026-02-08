@@ -281,7 +281,7 @@ Post-Refactor (ARCH2) Testing Adjustments
 5. **VersionHistory Update Test** (`tests.rs`)
    - Add `test_node_update_creates_version_history`
    - Add `test_edge_update_creates_version_history`
-   - Verify: UpdateNodeSummary → new history entry with ValidSince
+   - Verify: UpdateNode → new history entry with ValidSince
 
 6. **Restore Semantics Tests** (`tests.rs`)
    - Add `test_restore_node_returns_correct_version`
@@ -290,7 +290,7 @@ Post-Refactor (ARCH2) Testing Adjustments
 
 7. **Weight History Test** (`tests.rs`)
    - Add `test_edge_weight_update_creates_version`
-   - Verify: UpdateEdgeWeight → new version (no in-place mutation)
+   - Verify: UpdateEdge (with new_weight) → new version (no in-place mutation)
 
 8. **RestoreEdges Batch Test** (`tests.rs`)
    - Add `test_restore_edges_batch_marks_stale`
