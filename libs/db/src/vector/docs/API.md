@@ -895,7 +895,7 @@ registry.prewarm()?;
 let (writer, writer_rx) = create_writer(WriterConfig::default());
 spawn_mutation_consumer_with_storage_autoreg(writer_rx, WriterConfig::default(), storage.clone());
 
-let (reader, reader_rx) = create_reader_with_storage(ReaderConfig::default(), storage.clone());
+let (reader, reader_rx) = create_reader_with_storage(ReaderConfig::default());
 spawn_query_consumers_with_storage_autoreg(reader_rx, ReaderConfig::default(), storage.clone(), 4);
 
 // Spawn multiple reader threads
@@ -1258,7 +1258,7 @@ let embedding = registry.register(
 let (writer, writer_rx) = create_writer(WriterConfig::default());
 spawn_mutation_consumer_with_storage_autoreg(writer_rx, WriterConfig::default(), storage.clone());
 
-let (reader, reader_rx) = create_reader_with_storage(ReaderConfig::default(), storage.clone());
+let (reader, reader_rx) = create_reader_with_storage(ReaderConfig::default());
 spawn_query_consumers_with_storage_autoreg(reader_rx, ReaderConfig::default(), storage.clone(), 2);
 
 // 4. Insert vectors (immediate indexing)
@@ -1311,7 +1311,7 @@ let embedding = registry.register(
 let (writer, writer_rx) = create_writer(WriterConfig::default());
 spawn_mutation_consumer_with_storage_autoreg(writer_rx, WriterConfig::default(), storage.clone());
 
-let (reader, reader_rx) = create_reader_with_storage(ReaderConfig::default(), storage.clone());
+let (reader, reader_rx) = create_reader_with_storage(ReaderConfig::default());
 spawn_query_consumers_with_storage_autoreg(reader_rx, ReaderConfig::default(), storage.clone(), 2);
 
 // 4. Insert vectors (binary codes cached on insert)
@@ -2160,7 +2160,7 @@ impl Reader {
 pub struct ReaderConfig { pub channel_buffer_size: usize }
 pub struct QueryConsumer { /* receiver, config, storage */ }
 // Recommended: create with storage (auto-creates internal processor)
-pub fn create_reader_with_storage(config: ReaderConfig, storage: Arc<Storage>) -> (Reader, flume::Receiver<Query>);
+pub fn create_reader_with_storage(config: ReaderConfig) -> (Reader, flume::Receiver<QueryRequest>);
 pub fn spawn_query_consumer(consumer: QueryConsumer) -> tokio::task::JoinHandle<Result<()>>;
 pub fn spawn_query_consumers(
     receiver: flume::Receiver<Query>,
@@ -2304,10 +2304,7 @@ let mutation_handle = spawn_mutation_consumer_with_storage(
 );
 
 // Create search reader + query consumers (4 workers for parallel query processing)
-let (reader, query_rx) = create_reader_with_storage(
-    ReaderConfig::default(),
-    storage.clone(),
-);
+let (reader, query_rx) = create_reader_with_storage(ReaderConfig::default());
 let query_handles = spawn_query_consumers_with_storage(
     query_rx,
     ReaderConfig::default(),
@@ -2448,7 +2445,7 @@ let mutation_handle = {
 
 // Create search reader + query consumers
 let (reader, query_rx) = rt.block_on(async {
-    create_reader_with_storage(ReaderConfig::default(), storage.clone())
+    create_reader_with_storage(ReaderConfig::default())
 });
 let query_handles: Vec<_> = {
     let rt = rt.clone();
@@ -2639,7 +2636,7 @@ use std::time::Duration;
 // Assume storage/embedding are already created (see Flow 1 above)
 
 // Create reader + consumer
-let (reader, receiver) = create_reader_with_storage(ReaderConfig::default(), storage.clone());
+let (reader, receiver) = create_reader_with_storage(ReaderConfig::default());
 spawn_query_consumers_with_storage_autoreg(receiver, ReaderConfig::default(), storage.clone(), 2);
 
 // Runnable helper (SearchKNN implements Runnable for Reader)
