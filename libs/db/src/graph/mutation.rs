@@ -12,6 +12,7 @@ use crate::rocksdb::MutationCodec;
 
 use super::name_hash::NameHash;
 use super::ops;
+use super::processor::Processor;
 use super::schema::{
     self, EdgeFragmentCfKey, EdgeFragmentCfValue, EdgeFragments, NodeFragmentCfKey,
     NodeFragmentCfValue, NodeFragments, Version,
@@ -102,6 +103,29 @@ impl MutationResult {
             MutationResult::DeleteEdge { version } => Ok(version),
             other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
         }
+    }
+}
+
+// ============================================================================
+// MutationOutcome (aligned with vector pattern)
+// ============================================================================
+
+/// Outcome of a mutation execution.
+///
+/// This struct aligns with vector's `MutationOutcome` pattern, combining
+/// the result with any deferred cache updates to be applied after commit.
+#[derive(Debug, Clone)]
+pub struct MutationOutcome {
+    /// The mutation result (ID, version, etc.)
+    pub result: MutationResult,
+    // Note: Graph mutations update NameCache inline during execution,
+    // so no deferred cache_update field is needed (unlike vector).
+}
+
+impl MutationOutcome {
+    /// Create an outcome with just a result (no cache update needed).
+    pub fn new(result: MutationResult) -> Self {
+        Self { result }
     }
 }
 
@@ -666,7 +690,7 @@ impl MutationCodec for AddEdgeFragment {
 }
 
 // ============================================================================
-// MutationExecutor Implementations
+// MutationExecutor Implementations (processor-centric, aligned with vector)
 // ============================================================================
 
 impl MutationExecutor for AddNode {
@@ -674,31 +698,14 @@ impl MutationExecutor for AddNode {
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
-    ) -> Result<()> {
-        ops::node::add_node(txn, txn_db, self, None).map(|_| ())
-    }
-
-    fn execute_with_cache(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        cache: &super::name_hash::NameCache,
-    ) -> Result<()> {
-        ops::node::add_node(txn, txn_db, self, Some(cache)).map(|_| ())
-    }
-
-    fn execute_with_cache_and_options(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        cache: &super::name_hash::NameCache,
-        _options: ExecOptions,
-    ) -> Result<MutationResult> {
-        let (node_id, version) = ops::node::add_node(txn, txn_db, self, Some(cache))?;
-        Ok(MutationResult::AddNode {
+        processor: &Processor,
+    ) -> Result<MutationOutcome> {
+        let cache = processor.name_cache();
+        let (node_id, version) = ops::node::add_node(txn, txn_db, self, Some(cache.as_ref()))?;
+        Ok(MutationOutcome::new(MutationResult::AddNode {
             id: node_id,
             version,
-        })
+        }))
     }
 }
 
@@ -707,28 +714,11 @@ impl MutationExecutor for AddEdge {
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
-    ) -> Result<()> {
-        ops::edge::add_edge(txn, txn_db, self, None).map(|_| ())
-    }
-
-    fn execute_with_cache(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        cache: &super::name_hash::NameCache,
-    ) -> Result<()> {
-        ops::edge::add_edge(txn, txn_db, self, Some(cache)).map(|_| ())
-    }
-
-    fn execute_with_cache_and_options(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        cache: &super::name_hash::NameCache,
-        _options: ExecOptions,
-    ) -> Result<MutationResult> {
-        let version = ops::edge::add_edge(txn, txn_db, self, Some(cache))?;
-        Ok(MutationResult::AddEdge { version })
+        processor: &Processor,
+    ) -> Result<MutationOutcome> {
+        let cache = processor.name_cache();
+        let version = ops::edge::add_edge(txn, txn_db, self, Some(cache.as_ref()))?;
+        Ok(MutationOutcome::new(MutationResult::AddEdge { version }))
     }
 }
 
@@ -737,18 +727,10 @@ impl MutationExecutor for AddNodeFragment {
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
-    ) -> Result<()> {
-        ops::fragment::add_node_fragment(txn, txn_db, self)
-    }
-
-    fn execute_with_options(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        _options: ExecOptions,
-    ) -> Result<MutationResult> {
-        self.execute(txn, txn_db)?;
-        Ok(MutationResult::AddNodeFragment)
+        _processor: &Processor,
+    ) -> Result<MutationOutcome> {
+        ops::fragment::add_node_fragment(txn, txn_db, self)?;
+        Ok(MutationOutcome::new(MutationResult::AddNodeFragment))
     }
 }
 
@@ -757,148 +739,82 @@ impl MutationExecutor for AddEdgeFragment {
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
-    ) -> Result<()> {
-        ops::fragment::add_edge_fragment(txn, txn_db, self, None)
-    }
-
-    fn execute_with_cache(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        cache: &super::name_hash::NameCache,
-    ) -> Result<()> {
-        ops::fragment::add_edge_fragment(txn, txn_db, self, Some(cache))
-    }
-
-    fn execute_with_options(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        _options: ExecOptions,
-    ) -> Result<MutationResult> {
-        self.execute(txn, txn_db)?;
-        Ok(MutationResult::AddEdgeFragment)
+        processor: &Processor,
+    ) -> Result<MutationOutcome> {
+        let cache = processor.name_cache();
+        ops::fragment::add_edge_fragment(txn, txn_db, self, Some(cache.as_ref()))?;
+        Ok(MutationOutcome::new(MutationResult::AddEdgeFragment))
     }
 }
 
 impl MutationExecutor for UpdateNode {
-    /// Consolidated node update with optimistic locking.
-    /// Updates any combination of active_period and summary.
     fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
-    ) -> Result<()> {
-        ops::node::update_node(txn, txn_db, self).map(|_| ())
-    }
-
-    fn execute_with_options(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        _options: ExecOptions,
-    ) -> Result<MutationResult> {
+        _processor: &Processor,
+    ) -> Result<MutationOutcome> {
         let (node_id, version) = ops::node::update_node(txn, txn_db, self)?;
-        Ok(MutationResult::UpdateNode {
+        Ok(MutationOutcome::new(MutationResult::UpdateNode {
             id: node_id,
             version,
-        })
+        }))
     }
 }
 
 impl MutationExecutor for UpdateEdge {
-    /// Consolidated edge update with optimistic locking.
-    /// Updates any combination of weight, active_period, and summary.
     fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
-    ) -> Result<()> {
-        ops::edge::update_edge(txn, txn_db, self).map(|_| ())
-    }
-
-    fn execute_with_options(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        _options: ExecOptions,
-    ) -> Result<MutationResult> {
+        _processor: &Processor,
+    ) -> Result<MutationOutcome> {
         let version = ops::edge::update_edge(txn, txn_db, self)?;
-        Ok(MutationResult::UpdateEdge { version })
+        Ok(MutationOutcome::new(MutationResult::UpdateEdge { version }))
     }
 }
 
-
-
 impl MutationExecutor for DeleteNode {
-    /// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
     fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
-    ) -> Result<()> {
-        ops::node::delete_node(txn, txn_db, self)
-    }
-
-    fn execute_with_options(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        _options: ExecOptions,
-    ) -> Result<MutationResult> {
+        _processor: &Processor,
+    ) -> Result<MutationOutcome> {
         ops::node::delete_node(txn, txn_db, self)?;
-        Ok(MutationResult::DeleteNode {
+        Ok(MutationOutcome::new(MutationResult::DeleteNode {
             id: self.id,
             version: self.expected_version + 1,
-        })
+        }))
     }
 }
 
 impl MutationExecutor for DeleteEdge {
-    /// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
     fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
-    ) -> Result<()> {
-        ops::edge::delete_edge(txn, txn_db, self)
-    }
-
-    fn execute_with_options(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        _options: ExecOptions,
-    ) -> Result<MutationResult> {
+        _processor: &Processor,
+    ) -> Result<MutationOutcome> {
         ops::edge::delete_edge(txn, txn_db, self)?;
-        Ok(MutationResult::DeleteEdge {
+        Ok(MutationOutcome::new(MutationResult::DeleteEdge {
             version: self.expected_version + 1,
-        })
+        }))
     }
 }
 
-// (claude, 2026-02-07, FIXED: Added MutationExecutor for RestoreNode/RestoreEdge - Codex Item 1)
-// (claude, 2026-02-07, FIXED: Changed to as_of timestamp lookup per Codex review)
 impl MutationExecutor for RestoreNode {
     fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
-    ) -> Result<()> {
-        ops::node::restore_node(txn, txn_db, self).map(|_| ())
-    }
-
-    fn execute_with_options(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        _options: ExecOptions,
-    ) -> Result<MutationResult> {
+        _processor: &Processor,
+    ) -> Result<MutationOutcome> {
         let (node_id, version) = ops::node::restore_node(txn, txn_db, self)?;
-        Ok(MutationResult::RestoreNode {
+        Ok(MutationOutcome::new(MutationResult::RestoreNode {
             id: node_id,
             version,
-        })
+        }))
     }
 }
 
@@ -907,18 +823,10 @@ impl MutationExecutor for RestoreEdge {
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
-    ) -> Result<()> {
-        ops::edge::restore_edge(txn, txn_db, self).map(|_| ())
-    }
-
-    fn execute_with_options(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        _options: ExecOptions,
-    ) -> Result<MutationResult> {
+        _processor: &Processor,
+    ) -> Result<MutationOutcome> {
         let version = ops::edge::restore_edge(txn, txn_db, self)?;
-        Ok(MutationResult::RestoreEdge { version })
+        Ok(MutationOutcome::new(MutationResult::RestoreEdge { version }))
     }
 }
 
@@ -926,79 +834,27 @@ impl MutationExecutor for RestoreEdge {
 
 impl Mutation {
     /// Execute this mutation directly against storage.
-    /// Delegates to the specific mutation type's executor.
+    ///
+    /// Delegates to the specific mutation type's executor, passing the processor
+    /// for access to caches and storage context.
     pub fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
-    ) -> Result<()> {
+        processor: &Processor,
+    ) -> Result<MutationOutcome> {
         match self {
-            Mutation::AddNode(m) => m.execute(txn, txn_db),
-            Mutation::AddEdge(m) => m.execute(txn, txn_db),
-            Mutation::AddNodeFragment(m) => m.execute(txn, txn_db),
-            Mutation::AddEdgeFragment(m) => m.execute(txn, txn_db),
-            // CONTENT-ADDRESS: Update/Delete with optimistic locking
-            Mutation::UpdateNode(m) => m.execute(txn, txn_db),
-            Mutation::UpdateEdge(m) => m.execute(txn, txn_db),
-            Mutation::DeleteNode(m) => m.execute(txn, txn_db),
-            Mutation::DeleteEdge(m) => m.execute(txn, txn_db),
-            // (claude, 2026-02-07, FIXED: Added RestoreNode/RestoreEdge dispatch)
-            Mutation::RestoreNode(m) => m.execute(txn, txn_db),
-            Mutation::RestoreEdge(m) => m.execute(txn, txn_db),
-            // Flush is not a storage operation - it's handled by the consumer
-            // for synchronization purposes only
-            Mutation::Flush(_) => Ok(()),
-        }
-    }
-
-    /// Execute this mutation with access to the name cache.
-    ///
-    /// Uses the cache to:
-    /// 1. Skip redundant Names CF writes for already-interned names
-    /// 2. Intern new names for future lookups
-    pub fn execute_with_cache(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        cache: &super::name_hash::NameCache,
-    ) -> Result<()> {
-        match self {
-            Mutation::AddNode(m) => m.execute_with_cache(txn, txn_db, cache),
-            Mutation::AddEdge(m) => m.execute_with_cache(txn, txn_db, cache),
-            Mutation::AddNodeFragment(m) => m.execute(txn, txn_db), // No names
-            Mutation::AddEdgeFragment(m) => m.execute_with_cache(txn, txn_db, cache),
-            // CONTENT-ADDRESS: Update/Delete with optimistic locking (no new names)
-            Mutation::UpdateNode(m) => m.execute(txn, txn_db), // No new names
-            Mutation::UpdateEdge(m) => m.execute(txn, txn_db), // No new names
-            Mutation::DeleteNode(m) => m.execute(txn, txn_db),
-            Mutation::DeleteEdge(m) => m.execute(txn, txn_db),
-            // (claude, 2026-02-07, FIXED: Added RestoreNode/RestoreEdge dispatch)
-            Mutation::RestoreNode(m) => m.execute(txn, txn_db),
-            Mutation::RestoreEdge(m) => m.execute(txn, txn_db),
-            Mutation::Flush(_) => Ok(()),
-        }
-    }
-
-    /// Execute this mutation with access to the name cache and runtime options.
-    pub fn execute_with_cache_and_options(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        cache: &super::name_hash::NameCache,
-        options: ExecOptions,
-    ) -> Result<MutationResult> {
-        match self {
-            Mutation::AddNode(m) => m.execute_with_cache_and_options(txn, txn_db, cache, options),
-            Mutation::AddEdge(m) => m.execute_with_cache_and_options(txn, txn_db, cache, options),
-            Mutation::AddNodeFragment(m) => m.execute_with_options(txn, txn_db, options),
-            Mutation::AddEdgeFragment(m) => m.execute_with_cache_and_options(txn, txn_db, cache, options),
-            Mutation::UpdateNode(m) => m.execute_with_options(txn, txn_db, options),
-            Mutation::UpdateEdge(m) => m.execute_with_options(txn, txn_db, options),
-            Mutation::DeleteNode(m) => m.execute_with_options(txn, txn_db, options),
-            Mutation::DeleteEdge(m) => m.execute_with_options(txn, txn_db, options),
-            Mutation::RestoreNode(m) => m.execute_with_options(txn, txn_db, options),
-            Mutation::RestoreEdge(m) => m.execute_with_options(txn, txn_db, options),
-            Mutation::Flush(_) => Ok(MutationResult::Flush),
+            Mutation::AddNode(m) => m.execute(txn, txn_db, processor),
+            Mutation::AddEdge(m) => m.execute(txn, txn_db, processor),
+            Mutation::AddNodeFragment(m) => m.execute(txn, txn_db, processor),
+            Mutation::AddEdgeFragment(m) => m.execute(txn, txn_db, processor),
+            Mutation::UpdateNode(m) => m.execute(txn, txn_db, processor),
+            Mutation::UpdateEdge(m) => m.execute(txn, txn_db, processor),
+            Mutation::DeleteNode(m) => m.execute(txn, txn_db, processor),
+            Mutation::DeleteEdge(m) => m.execute(txn, txn_db, processor),
+            Mutation::RestoreNode(m) => m.execute(txn, txn_db, processor),
+            Mutation::RestoreEdge(m) => m.execute(txn, txn_db, processor),
+            Mutation::Flush(_) => Ok(MutationOutcome::new(MutationResult::Flush)),
         }
     }
 
