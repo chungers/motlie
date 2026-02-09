@@ -15,7 +15,7 @@ use motlie_db::graph::mutation::{AddEdge, AddNode, AddNodeFragment};
 use motlie_db::writer::Runnable as MutationRunnable;
 use motlie_db::graph::query::{NodeById, OutgoingEdges};
 use motlie_db::graph::reader::{
-    create_query_reader, spawn_query_consumer_pool_shared, ReaderConfig,
+    create_reader_with_storage, spawn_query_consumer_pool_shared, ReaderConfig,
 };
 use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
 use motlie_db::graph::writer::{
@@ -233,12 +233,12 @@ async fn test_multi_consumer_query_channels() {
     let mut storage = Storage::readwrite(&db_path);
     storage.ready().unwrap();
     let storage = Arc::new(storage);
-    let graph = Arc::new(Processor::new(storage));
+    let graph = Arc::new(Processor::new(storage.clone()));
 
     let reader_config = ReaderConfig {
         channel_buffer_size: 100,
     };
-    let (graph_reader, graph_query_receiver) = create_query_reader(reader_config.clone());
+    let (graph_reader, graph_query_receiver) = create_reader_with_storage(storage.clone(), reader_config.clone());
 
     // Spawn 2 graph query consumers sharing the same channel
     let graph_consumer_handles =
@@ -403,12 +403,12 @@ async fn test_concurrent_mixed_queries() {
     let mut storage = Storage::readwrite(&db_path);
     storage.ready().unwrap();
     let storage = Arc::new(storage);
-    let graph = Arc::new(Processor::new(storage));
+    let graph = Arc::new(Processor::new(storage.clone()));
 
     let reader_config = ReaderConfig {
         channel_buffer_size: 100,
     };
-    let (graph_reader, graph_query_receiver) = create_query_reader(reader_config.clone());
+    let (graph_reader, graph_query_receiver) = create_reader_with_storage(storage.clone(), reader_config.clone());
     let graph_consumer_handles =
         spawn_query_consumer_pool_shared(graph_query_receiver, graph.clone(), 2);
 
@@ -597,11 +597,15 @@ async fn test_complete_pipeline_architecture() {
     // Graph query consumers (2)
     let mut storage = Storage::readwrite(&db_path);
     storage.ready().unwrap();
-    let graph = Arc::new(Processor::new(Arc::new(storage)));
+    let storage = Arc::new(storage);
+    let graph = Arc::new(Processor::new(storage.clone()));
 
-    let (graph_reader, graph_query_receiver) = create_query_reader(ReaderConfig {
-        channel_buffer_size: 100,
-    });
+    let (graph_reader, graph_query_receiver) = create_reader_with_storage(
+        storage.clone(),
+        ReaderConfig {
+            channel_buffer_size: 100,
+        },
+    );
     let graph_query_handles = spawn_query_consumer_pool_shared(graph_query_receiver, graph, 2);
 
     // FullText query consumers (2 - using readonly Index)

@@ -97,6 +97,14 @@ processor.process_mutations(&mutations)?;
 | `Processor::with_cache(storage, cache)` | Create with explicit NameCache |
 | `execute_mutation(&mutation)` | Execute single mutation (sync) |
 | `process_mutations(&[mutations])` | Execute batch atomically (sync) |
+| `execute_query(&Query)` | Execute any query via Processor (async) |
+| `node_by_id(&NodeById)` | Execute node lookup (async) |
+| `nodes_by_ids_multi(&NodesByIdsMulti)` | Execute multi-node lookup (async) |
+| `edge_summary_by_src_dst_name(&EdgeSummaryBySrcDstName)` | Execute edge summary lookup (async) |
+| `outgoing_edges(&OutgoingEdges)` | Execute outgoing edge query (async) |
+| `incoming_edges(&IncomingEdges)` | Execute incoming edge query (async) |
+| `all_nodes(&AllNodes)` | Execute all-nodes scan (async) |
+| `all_edges(&AllEdges)` | Execute all-edges scan (async) |
 | `storage()` | Access underlying Storage |
 | `name_cache()` | Access NameCache |
 | `transaction_db()` | Access RocksDB TransactionDB |
@@ -1092,10 +1100,10 @@ assert!(result.is_err());  // VersionMismatch error
 
 | Helper | Purpose |
 |--------|---------|
-| `create_query_reader(config)` | Create reader + receiver channels |
+| `create_reader_with_storage(storage, config)` | Create reader + receiver with shared Processor |
 | `spawn_query_consumer(receiver, config, &db_path)` | Spawn consumer with new storage |
 | `spawn_query_consumers_with_storage(storage, config, count)` | Spawn pool with existing storage |
 | `spawn_query_consumer_with_processor(receiver, config, processor)` | Spawn with shared processor |
-| `spawn_query_consumer_pool_shared(reader, config, processor, count)` | Spawn pool with shared processor |
+| `spawn_query_consumer_pool_shared(receiver, processor, count)` | Spawn pool with shared processor |
 
 ---

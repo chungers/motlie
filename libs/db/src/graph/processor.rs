@@ -47,6 +47,12 @@ use anyhow::Result;
 
 use super::mutation::{ExecOptions, Mutation, MutationResult};
 use super::name_hash::NameCache;
+use super::query::{
+    AllEdges, AllNodes, EdgeFragmentsByIdTimeRange, EdgeSummaryBySrcDstName, EdgesBySummaryHash,
+    IncomingEdges, NodeById, NodeFragmentsByIdTimeRange, NodesByIdsMulti, NodesBySummaryHash,
+    OutgoingEdges, Query, QueryResult,
+};
+use super::reader::QueryExecutor;
 use super::Storage;
 
 // ============================================================================
@@ -216,12 +222,111 @@ impl Processor {
         let replies = self.process_mutations_with_options(std::slice::from_ref(mutation), options)?;
         Ok(replies.into_iter().next().unwrap_or(MutationResult::Flush))
     }
-}
 
-// Implement the reader::Processor trait for query support
-impl super::reader::Processor for Processor {
-    fn storage(&self) -> &Storage {
-        &self.storage
+    // ========================================================================
+    // Query API (async, Processor-backed)
+    // ========================================================================
+
+    /// Execute any graph query via the Processor.
+    pub async fn execute_query(&self, query: &Query) -> Result<QueryResult> {
+        match query {
+            Query::NodeById(q) => self.node_by_id(q).await.map(QueryResult::NodeById),
+            Query::NodesByIdsMulti(q) => {
+                self.nodes_by_ids_multi(q).await.map(QueryResult::NodesByIdsMulti)
+            }
+            Query::EdgeSummaryBySrcDstName(q) => self
+                .edge_summary_by_src_dst_name(q)
+                .await
+                .map(QueryResult::EdgeSummaryBySrcDstName),
+            Query::NodeFragmentsByIdTimeRange(q) => self
+                .node_fragments_by_id_time_range(q)
+                .await
+                .map(QueryResult::NodeFragmentsByIdTimeRange),
+            Query::EdgeFragmentsByIdTimeRange(q) => self
+                .edge_fragments_by_id_time_range(q)
+                .await
+                .map(QueryResult::EdgeFragmentsByIdTimeRange),
+            Query::OutgoingEdges(q) => self.outgoing_edges(q).await.map(QueryResult::OutgoingEdges),
+            Query::IncomingEdges(q) => self.incoming_edges(q).await.map(QueryResult::IncomingEdges),
+            Query::AllNodes(q) => self.all_nodes(q).await.map(QueryResult::AllNodes),
+            Query::AllEdges(q) => self.all_edges(q).await.map(QueryResult::AllEdges),
+            Query::NodesBySummaryHash(q) => self
+                .nodes_by_summary_hash(q)
+                .await
+                .map(QueryResult::NodesBySummaryHash),
+            Query::EdgesBySummaryHash(q) => self
+                .edges_by_summary_hash(q)
+                .await
+                .map(QueryResult::EdgesBySummaryHash),
+        }
+    }
+
+    pub async fn node_by_id(&self, query: &NodeById) -> Result<<NodeById as QueryExecutor>::Output> {
+        query.execute(self.storage()).await
+    }
+
+    pub async fn nodes_by_ids_multi(
+        &self,
+        query: &NodesByIdsMulti,
+    ) -> Result<<NodesByIdsMulti as QueryExecutor>::Output> {
+        query.execute(self.storage()).await
+    }
+
+    pub async fn edge_summary_by_src_dst_name(
+        &self,
+        query: &EdgeSummaryBySrcDstName,
+    ) -> Result<<EdgeSummaryBySrcDstName as QueryExecutor>::Output> {
+        query.execute(self.storage()).await
+    }
+
+    pub async fn node_fragments_by_id_time_range(
+        &self,
+        query: &NodeFragmentsByIdTimeRange,
+    ) -> Result<<NodeFragmentsByIdTimeRange as QueryExecutor>::Output> {
+        query.execute(self.storage()).await
+    }
+
+    pub async fn edge_fragments_by_id_time_range(
+        &self,
+        query: &EdgeFragmentsByIdTimeRange,
+    ) -> Result<<EdgeFragmentsByIdTimeRange as QueryExecutor>::Output> {
+        query.execute(self.storage()).await
+    }
+
+    pub async fn outgoing_edges(
+        &self,
+        query: &OutgoingEdges,
+    ) -> Result<<OutgoingEdges as QueryExecutor>::Output> {
+        query.execute(self.storage()).await
+    }
+
+    pub async fn incoming_edges(
+        &self,
+        query: &IncomingEdges,
+    ) -> Result<<IncomingEdges as QueryExecutor>::Output> {
+        query.execute(self.storage()).await
+    }
+
+    pub async fn all_nodes(&self, query: &AllNodes) -> Result<<AllNodes as QueryExecutor>::Output> {
+        query.execute(self.storage()).await
+    }
+
+    pub async fn all_edges(&self, query: &AllEdges) -> Result<<AllEdges as QueryExecutor>::Output> {
+        query.execute(self.storage()).await
+    }
+
+    pub async fn nodes_by_summary_hash(
+        &self,
+        query: &NodesBySummaryHash,
+    ) -> Result<<NodesBySummaryHash as QueryExecutor>::Output> {
+        query.execute(self.storage()).await
+    }
+
+    pub async fn edges_by_summary_hash(
+        &self,
+        query: &EdgesBySummaryHash,
+    ) -> Result<<EdgesBySummaryHash as QueryExecutor>::Output> {
+        query.execute(self.storage()).await
     }
 }
 
@@ -260,13 +365,6 @@ impl super::writer::Processor for Arc<Processor> {
         options: ExecOptions,
     ) -> Result<Vec<MutationResult>> {
         Processor::process_mutations_with_options(self.as_ref(), mutations, options)
-    }
-}
-
-// Implement reader::Processor for Arc<Processor>
-impl super::reader::Processor for Arc<Processor> {
-    fn storage(&self) -> &Storage {
-        self.as_ref().storage()
     }
 }
 

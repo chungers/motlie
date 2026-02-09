@@ -16,7 +16,6 @@
 //! - `reader.rs` - Reader infrastructure and query consumers
 //! - `scan.rs` - Scan API for pagination
 
-use anyhow::Result;
 
 // Re-export CF traits from rocksdb module
 pub(crate) use crate::rocksdb::{
@@ -67,7 +66,7 @@ pub use transaction::Transaction;
 pub use crate::reader::Runnable as QueryRunnable;
 pub use reader::{
     // Query consumer functions
-    create_query_reader,
+    create_reader_with_storage,
     spawn_query_consumers_with_storage,
     spawn_consumer_pool_with_processor,
     spawn_query_consumer,
@@ -75,7 +74,6 @@ pub use reader::{
     spawn_query_consumer_pool_readonly,
     spawn_query_consumer_with_processor,
     Consumer as QueryConsumer,
-    Processor as ReaderProcessor,
     QueryExecutor,
     Reader,
     ReaderConfig,

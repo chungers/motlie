@@ -21,7 +21,7 @@ use motlie_db::graph::mutation::{AddEdge, AddNode};
 use motlie_db::writer::Runnable as MutationRunnable;
 use motlie_db::graph::query::NodeById;
 use motlie_db::reader::Runnable as QueryRunnable;
-use motlie_db::graph::reader::{Reader, ReaderConfig, spawn_query_consumer_with_processor};
+use motlie_db::graph::reader::{create_reader_with_storage, ReaderConfig, spawn_query_consumer_with_processor};
 use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
 use motlie_db::graph::writer::{
     create_mutation_writer, spawn_mutation_consumer_with_receiver, WriterConfig,
@@ -135,14 +135,12 @@ async fn reader_task_shared_graph(
     }
 
     // Create reader
-    let (reader, reader_rx) = {
-        let config = ReaderConfig {
+    let (reader, reader_rx) = create_reader_with_storage(
+        graph.storage().clone(),
+        ReaderConfig {
             channel_buffer_size: 10,
-        };
-        let (sender, receiver) = flume::bounded(config.channel_buffer_size);
-        let reader = Reader::new(sender);
-        (reader, receiver)
-    };
+        },
+    );
 
     // Spawn query consumer with SHARED graph
     // All readers share the same Arc<Processor> which wraps the single TransactionDB

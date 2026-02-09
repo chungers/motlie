@@ -22,6 +22,7 @@ use super::ops::summary::{
     resolve_node_summary_from_txn,
 };
 use super::ops::util::timestamp_in_range;
+use super::processor::Processor as GraphProcessor;
 use super::reader::{QueryExecutor, QueryRequest};
 use super::scan::{self, Visitable};
 use super::summary_hash::SummaryHash;
@@ -242,30 +243,8 @@ pub enum QueryResult {
 }
 
 impl Query {
-    pub async fn execute(&self, storage: &Storage) -> Result<QueryResult> {
-        match self {
-            Query::NodeById(q) => q.execute(storage).await.map(QueryResult::NodeById),
-            Query::NodesByIdsMulti(q) => q.execute(storage).await.map(QueryResult::NodesByIdsMulti),
-            Query::EdgeSummaryBySrcDstName(q) => {
-                q.execute(storage).await.map(QueryResult::EdgeSummaryBySrcDstName)
-            }
-            Query::NodeFragmentsByIdTimeRange(q) => {
-                q.execute(storage).await.map(QueryResult::NodeFragmentsByIdTimeRange)
-            }
-            Query::EdgeFragmentsByIdTimeRange(q) => {
-                q.execute(storage).await.map(QueryResult::EdgeFragmentsByIdTimeRange)
-            }
-            Query::OutgoingEdges(q) => q.execute(storage).await.map(QueryResult::OutgoingEdges),
-            Query::IncomingEdges(q) => q.execute(storage).await.map(QueryResult::IncomingEdges),
-            Query::AllNodes(q) => q.execute(storage).await.map(QueryResult::AllNodes),
-            Query::AllEdges(q) => q.execute(storage).await.map(QueryResult::AllEdges),
-            Query::NodesBySummaryHash(q) => {
-                q.execute(storage).await.map(QueryResult::NodesBySummaryHash)
-            }
-            Query::EdgesBySummaryHash(q) => {
-                q.execute(storage).await.map(QueryResult::EdgesBySummaryHash)
-            }
-        }
+    pub async fn execute(&self, processor: &GraphProcessor) -> Result<QueryResult> {
+        processor.execute_query(self).await
     }
 }
 
@@ -2693,7 +2672,7 @@ mod tests {
     use super::super::mutation::AddNode;
     use crate::writer::Runnable as MutRunnable;
     use super::super::reader::{
-        create_query_reader, spawn_consumer, Consumer, Reader, ReaderConfig,
+        create_reader_with_processor, spawn_consumer, Consumer, ReaderConfig,
     };
     use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
     use super::super::{Processor, Storage};
@@ -2741,14 +2720,15 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let processor = Processor::new(Arc::new(storage));
+        let storage = Arc::new(storage);
+        let processor = Arc::new(Processor::new(storage));
 
         // Create reader and query consumer
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
 
-        let (reader, receiver) = create_query_reader(reader_config.clone());
+        let (reader, receiver) = create_reader_with_processor(processor.clone(), reader_config.clone());
 
         let consumer = Consumer::new(receiver, reader_config, processor);
 
@@ -2849,18 +2829,15 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let processor = Processor::new(Arc::new(storage));
+        let storage = Arc::new(storage);
+        let processor = Arc::new(Processor::new(storage));
 
         // Create reader and query consumer
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
 
-        let (reader, receiver) = {
-            let (sender, receiver) = flume::bounded(reader_config.channel_buffer_size);
-            let reader = Reader::new(sender);
-            (reader, receiver)
-        };
+        let (reader, receiver) = create_reader_with_processor(processor.clone(), reader_config.clone());
 
         let consumer = Consumer::new(receiver, reader_config, processor);
 
@@ -3005,18 +2982,15 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let processor = Processor::new(Arc::new(storage));
+        let storage = Arc::new(storage);
+        let processor = Arc::new(Processor::new(storage));
 
         // Create reader and query consumer
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
 
-        let (reader, receiver) = {
-            let (sender, receiver) = flume::bounded(reader_config.channel_buffer_size);
-            let reader = Reader::new(sender);
-            (reader, receiver)
-        };
+        let (reader, receiver) = create_reader_with_processor(processor.clone(), reader_config.clone());
 
         let consumer = Consumer::new(receiver, reader_config, processor);
 
@@ -3165,17 +3139,14 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let processor = Processor::new(Arc::new(storage));
+        let storage = Arc::new(storage);
+        let processor = Arc::new(Processor::new(storage));
 
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
 
-        let (reader, receiver) = {
-            let (sender, receiver) = flume::bounded(reader_config.channel_buffer_size);
-            let reader = Reader::new(sender);
-            (reader, receiver)
-        };
+        let (reader, receiver) = create_reader_with_processor(processor.clone(), reader_config.clone());
 
         let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
@@ -3360,17 +3331,14 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let processor = Processor::new(Arc::new(storage));
+        let storage = Arc::new(storage);
+        let processor = Arc::new(Processor::new(storage));
 
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
 
-        let (reader, receiver) = {
-            let (sender, receiver) = flume::bounded(reader_config.channel_buffer_size);
-            let reader = Reader::new(sender);
-            (reader, receiver)
-        };
+        let (reader, receiver) = create_reader_with_processor(processor.clone(), reader_config.clone());
 
         let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
@@ -3498,17 +3466,14 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let processor = Processor::new(Arc::new(storage));
+        let storage = Arc::new(storage);
+        let processor = Arc::new(Processor::new(storage));
 
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
 
-        let (reader, receiver) = {
-            let (sender, receiver) = flume::bounded(reader_config.channel_buffer_size);
-            let reader = Reader::new(sender);
-            (reader, receiver)
-        };
+        let (reader, receiver) = create_reader_with_processor(processor.clone(), reader_config.clone());
 
         let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
@@ -3571,14 +3536,15 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let processor = Processor::new(Arc::new(storage));
+        let storage = Arc::new(storage);
+        let processor = Arc::new(Processor::new(storage));
 
         // Create reader and query consumer
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
 
-        let (reader, receiver) = create_query_reader(reader_config.clone());
+        let (reader, receiver) = create_reader_with_processor(processor.clone(), reader_config.clone());
         let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
@@ -3641,14 +3607,15 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let processor = Processor::new(Arc::new(storage));
+        let storage = Arc::new(storage);
+        let processor = Arc::new(Processor::new(storage));
 
         // Create reader and query consumer
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
 
-        let (reader, receiver) = create_query_reader(reader_config.clone());
+        let (reader, receiver) = create_reader_with_processor(processor.clone(), reader_config.clone());
         let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
@@ -3709,13 +3676,14 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let processor = Processor::new(Arc::new(storage));
+        let storage = Arc::new(storage);
+        let processor = Arc::new(Processor::new(storage));
 
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
 
-        let (reader, receiver) = create_query_reader(reader_config.clone());
+        let (reader, receiver) = create_reader_with_processor(processor.clone(), reader_config.clone());
         let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
@@ -3768,13 +3736,14 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let processor = Processor::new(Arc::new(storage));
+        let storage = Arc::new(storage);
+        let processor = Arc::new(Processor::new(storage));
 
         // Create reader and query consumer
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
-        let (reader, receiver) = create_query_reader(reader_config.clone());
+        let (reader, receiver) = create_reader_with_processor(processor.clone(), reader_config.clone());
         let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
@@ -3836,13 +3805,14 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let processor = Processor::new(Arc::new(storage));
+        let storage = Arc::new(storage);
+        let processor = Arc::new(Processor::new(storage));
 
         // Create reader and query consumer
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
-        let (reader, receiver) = create_query_reader(reader_config.clone());
+        let (reader, receiver) = create_reader_with_processor(processor.clone(), reader_config.clone());
         let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
@@ -3946,13 +3916,14 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let processor = Processor::new(Arc::new(storage));
+        let storage = Arc::new(storage);
+        let processor = Arc::new(Processor::new(storage));
 
         // Create reader and query consumer
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
-        let (reader, receiver) = create_query_reader(reader_config.clone());
+        let (reader, receiver) = create_reader_with_processor(processor.clone(), reader_config.clone());
         let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
@@ -4013,12 +3984,13 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let processor = Processor::new(Arc::new(storage));
+        let storage = Arc::new(storage);
+        let processor = Arc::new(Processor::new(storage));
 
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
-        let (reader, receiver) = create_query_reader(reader_config.clone());
+        let (reader, receiver) = create_reader_with_processor(processor.clone(), reader_config.clone());
         let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 

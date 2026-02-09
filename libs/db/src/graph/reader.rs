@@ -6,7 +6,7 @@
 //! - Consumer - processes queries from channel
 //! - Spawn functions for creating consumers
 //!
-//! Also contains the query executor traits (QueryExecutor, Processor)
+//! Also contains the query executor traits (QueryExecutor)
 //! which define how queries execute against the storage layer.
 
 use anyhow::{Context, Result};
@@ -48,22 +48,6 @@ pub trait QueryExecutor: Send + Sync {
 }
 
 // ============================================================================
-// Processor Trait - bridges query execution to storage
-// (claude, 2026-02-07, FIXED: Updated comment - Processor provides storage access per codex eval)
-// ============================================================================
-
-/// Trait for processing different types of queries.
-///
-/// This trait provides access to storage. Query types implement QueryExecutor
-/// to execute themselves against storage, following the same pattern as mutations.
-/// The `graph::Processor` struct implements this trait, serving as the central
-/// state hub for all graph operations.
-pub trait Processor: Send + Sync {
-    /// Get access to the underlying storage
-    /// Query types use this to execute themselves via QueryExecutor::execute()
-    fn storage(&self) -> &Storage;
-}
-
 // ============================================================================
 // QueryRequest
 // ============================================================================
@@ -73,7 +57,7 @@ pub type QueryRequest = RequestEnvelope<Query>;
 async fn execute_request(processor: &GraphProcessor, mut request: QueryRequest) {
     tracing::debug!(query = %request.payload, "Processing graph query");
 
-    let exec = request.payload.execute(processor.storage());
+    let exec = processor.execute_query(&request.payload);
     let result = match request.timeout {
         Some(timeout) => match tokio::time::timeout(timeout, exec).await {
             Ok(r) => r,
@@ -111,14 +95,14 @@ impl Default for ReaderConfig {
 pub struct Reader {
     sender: flume::Sender<QueryRequest>,
     /// Processor for cache-aware reads and direct query access
-    processor: Option<Arc<GraphProcessor>>,
+    processor: Arc<GraphProcessor>,
 }
 
 impl std::fmt::Debug for Reader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Reader")
             .field("sender", &"<flume::Sender>")
-            .field("processor", &self.processor.as_ref().map(|_| "<Arc<Processor>>"))
+            .field("processor", &"<Arc<Processor>>")
             .finish()
     }
 }
@@ -126,23 +110,20 @@ impl std::fmt::Debug for Reader {
 impl Reader {
     /// Create a new Reader with the given sender.
     ///
-    /// Note: Most users should use `create_query_reader()` instead.
+    /// Note: Most users should use `create_reader_with_storage()` instead.
     #[doc(hidden)]
-    pub fn new(sender: flume::Sender<QueryRequest>) -> Self {
-        Reader { sender, processor: None }
+    pub(crate) fn new(sender: flume::Sender<QueryRequest>, processor: Arc<GraphProcessor>) -> Self {
+        Reader { sender, processor }
     }
 
-    /// Create a new Reader with processor for cache-aware reads.
-    /// (claude, 2026-02-07, FIXED: P2.3 - Primary construction with Processor)
-    pub(crate) fn with_processor(sender: flume::Sender<QueryRequest>, processor: Arc<GraphProcessor>) -> Self {
-        Reader { sender, processor: Some(processor) }
-    }
 
     /// Send a query to the reader queue.
     ///
     /// Note: Most users should use `Runnable::run()` instead.
     #[doc(hidden)]
     pub async fn send_query(&self, request: QueryRequest) -> Result<()> {
+        // Keep the Processor alive for the Reader's lifetime (aligns with vector::Reader pattern).
+        let _ = &self.processor;
         self.sender
             .send_async(request)
             .await
@@ -155,30 +136,26 @@ impl Reader {
     }
 }
 
-/// Create a new query reader and receiver pair
-#[doc(hidden)]
-pub fn create_query_reader(config: ReaderConfig) -> (Reader, flume::Receiver<QueryRequest>) {
-    let (sender, receiver) = flume::bounded(config.channel_buffer_size);
-    let reader = Reader::new(sender);
-    (reader, receiver)
-}
-
 // ============================================================================
 // Consumer
 // ============================================================================
 
 /// Generic consumer that processes queries using a Processor
 #[doc(hidden)]
-pub struct Consumer<P: Processor> {
+pub struct Consumer {
     receiver: flume::Receiver<QueryRequest>,
     config: ReaderConfig,
-    processor: P,
+    processor: Arc<GraphProcessor>,
 }
 
-impl<P: Processor> Consumer<P> {
+impl Consumer {
     /// Create a new Consumer
     #[doc(hidden)]
-    pub fn new(receiver: flume::Receiver<QueryRequest>, config: ReaderConfig, processor: P) -> Self {
+    pub fn new(
+        receiver: flume::Receiver<QueryRequest>,
+        config: ReaderConfig,
+        processor: Arc<GraphProcessor>,
+    ) -> Self {
         Self {
             receiver,
             config,
@@ -213,7 +190,7 @@ impl<P: Processor> Consumer<P> {
     async fn process_query(&self, mut request: QueryRequest) {
         tracing::debug!(query = %request.payload, "Processing query");
 
-        let exec = request.payload.execute(self.processor.storage());
+        let exec = self.processor.execute_query(&request.payload);
         let result = match request.timeout {
             Some(timeout) => {
                 match tokio::time::timeout(timeout, exec).await {
@@ -230,9 +207,7 @@ impl<P: Processor> Consumer<P> {
 
 /// Spawn a query consumer as a background task
 #[doc(hidden)]
-pub fn spawn_consumer<P: Processor + 'static>(
-    consumer: Consumer<P>,
-) -> tokio::task::JoinHandle<Result<()>> {
+pub fn spawn_consumer(consumer: Consumer) -> tokio::task::JoinHandle<Result<()>> {
     tokio::spawn(async move { consumer.run().await })
 }
 
@@ -250,7 +225,7 @@ use tokio::task::JoinHandle;
 /// Uses the new Processor-based infrastructure internally.
 ///
 /// # Arguments
-/// * `receiver` - Query receiver from create_query_reader
+/// * `receiver` - Query receiver from create_reader_with_storage
 /// * `config` - Reader configuration
 /// * `db_path` - Path to create/open the database
 ///
@@ -278,7 +253,7 @@ pub fn spawn_query_consumer(
 /// Creates multiple consumers sharing a Processor.
 ///
 /// # Arguments
-/// * `receiver` - Query receiver from create_query_reader
+/// * `receiver` - Query receiver from create_reader_with_storage
 /// * `processor` - Shared GraphProcessor instance
 /// * `num_workers` - Number of query workers to spawn
 ///
@@ -355,7 +330,7 @@ pub fn spawn_query_consumer_pool_readonly(
 /// Uses the Processor to process queries.
 ///
 /// # Arguments
-/// * `receiver` - Query receiver from create_query_reader
+/// * `receiver` - Query receiver from create_reader_with_storage
 /// * `config` - Reader configuration
 /// * `processor` - Shared GraphProcessor instance
 ///
@@ -402,7 +377,7 @@ pub fn create_reader_with_storage(storage: Arc<Storage>, config: ReaderConfig) -
 /// Reader with Processor reference
 pub(crate) fn create_reader_with_processor(processor: Arc<GraphProcessor>, config: ReaderConfig) -> (Reader, flume::Receiver<QueryRequest>) {
     let (sender, receiver) = flume::bounded(config.channel_buffer_size);
-    let reader = Reader::with_processor(sender, processor);
+    let reader = Reader::new(sender, processor);
     (reader, receiver)
 }
 
@@ -445,7 +420,7 @@ pub(crate) fn spawn_query_consumers_with_processor(
     num_workers: usize,
 ) -> (Reader, Vec<JoinHandle<()>>) {
     let (sender, receiver) = flume::bounded(config.channel_buffer_size);
-    let reader = Reader::with_processor(sender, processor.clone());
+    let reader = Reader::new(sender, processor.clone());
 
     let mut handles = Vec::with_capacity(num_workers);
     for worker_id in 0..num_workers {
@@ -547,11 +522,17 @@ pub(crate) fn create_reader_with_processor_and_spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[tokio::test]
     async fn test_reader_closed_detection() {
         let config = ReaderConfig::default();
-        let (reader, receiver) = create_query_reader(config);
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("reader_test_closed");
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+        let storage = Arc::new(storage);
+        let (reader, receiver) = create_reader_with_storage(storage, config);
 
         assert!(!reader.is_closed());
 
@@ -568,7 +549,12 @@ mod tests {
     #[tokio::test]
     async fn test_reader_send_operations() {
         let config = ReaderConfig::default();
-        let (reader, _receiver) = create_query_reader(config);
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("reader_test_send");
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+        let storage = Arc::new(storage);
+        let (reader, _receiver) = create_reader_with_storage(storage, config);
 
         // Test that reader is not closed initially
         assert!(!reader.is_closed());

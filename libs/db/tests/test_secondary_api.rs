@@ -58,15 +58,14 @@ async fn test_secondary_instance_basic() {
         .expect("Failed to catch up");
 
     // Create reader on secondary
-    let _processor = motlie_db::graph::Processor::new(std::sync::Arc::new(secondary_storage));
-    let (reader, reader_rx) = {
-        let config = motlie_db::graph::reader::ReaderConfig {
+    let secondary_storage = std::sync::Arc::new(secondary_storage);
+    let _processor = motlie_db::graph::Processor::new(secondary_storage.clone());
+    let (reader, reader_rx) = motlie_db::graph::reader::create_reader_with_storage(
+        secondary_storage.clone(),
+        motlie_db::graph::reader::ReaderConfig {
             channel_buffer_size: 10,
-        };
-        let (sender, receiver) = flume::bounded(config.channel_buffer_size);
-        let reader = motlie_db::graph::reader::Reader::new(sender);
-        (reader, receiver)
-    };
+        },
+    );
 
     let consumer_handle =
         motlie_db::graph::reader::spawn_query_consumer(reader_rx, Default::default(), &primary_path);

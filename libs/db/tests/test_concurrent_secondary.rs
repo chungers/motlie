@@ -19,7 +19,7 @@ mod common;
 use common::concurrent_test_utils::{writer_task, Metrics, TestContext};
 use motlie_db::graph::query::NodeById;
 use motlie_db::reader::Runnable as QueryRunnable;
-use motlie_db::graph::reader::{spawn_query_consumer, Reader, ReaderConfig};
+use motlie_db::graph::reader::{create_reader_with_storage, spawn_query_consumer, ReaderConfig};
 use motlie_db::graph::Storage;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -126,14 +126,12 @@ async fn reader_task_with_secondary(
     let _ = storage.try_catch_up_with_primary();
 
     // Create reader
-    let (reader, reader_rx) = {
-        let config = ReaderConfig {
+    let (reader, reader_rx) = create_reader_with_storage(
+        storage.clone(),
+        ReaderConfig {
             channel_buffer_size: 10,
-        };
-        let (sender, receiver) = flume::bounded(config.channel_buffer_size);
-        let reader = Reader::new(sender);
-        (reader, receiver)
-    };
+        },
+    );
 
     // Spawn query consumer
     let consumer_handle = spawn_query_consumer(
