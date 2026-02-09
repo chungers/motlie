@@ -1517,42 +1517,34 @@ pub(crate) struct GraphMeta;
 /// The discriminant byte is stored in the key, the value bytes depend on variant.
 #[derive(Debug, Clone)]
 pub(crate) enum GraphMetaField {
-    /// GC cursor for NodeSummaries CF - stores last processed key bytes
-    GcCursorNodeSummaries(Vec<u8>),      // 0x00
-    /// GC cursor for EdgeSummaries CF
-    GcCursorEdgeSummaries(Vec<u8>),      // 0x01
     /// GC cursor for NodeSummaryIndex CF
-    GcCursorNodeSummaryIndex(Vec<u8>),   // 0x02
+    GcCursorNodeSummaryIndex(Vec<u8>),   // 0x00
     /// GC cursor for EdgeSummaryIndex CF
-    GcCursorEdgeSummaryIndex(Vec<u8>),   // 0x03
+    GcCursorEdgeSummaryIndex(Vec<u8>),   // 0x01
     /// GC cursor for Node tombstones
-    GcCursorNodeTombstones(Vec<u8>),     // 0x04
+    GcCursorNodeTombstones(Vec<u8>),     // 0x02
     /// GC cursor for Edge tombstones
-    GcCursorEdgeTombstones(Vec<u8>),     // 0x05
+    GcCursorEdgeTombstones(Vec<u8>),     // 0x03
 }
 
 impl GraphMetaField {
     /// Get the discriminant byte for key serialization
     pub fn discriminant(&self) -> u8 {
         match self {
-            Self::GcCursorNodeSummaries(_) => 0x00,
-            Self::GcCursorEdgeSummaries(_) => 0x01,
-            Self::GcCursorNodeSummaryIndex(_) => 0x02,
-            Self::GcCursorEdgeSummaryIndex(_) => 0x03,
-            Self::GcCursorNodeTombstones(_) => 0x04,
-            Self::GcCursorEdgeTombstones(_) => 0x05,
+            Self::GcCursorNodeSummaryIndex(_) => 0x00,
+            Self::GcCursorEdgeSummaryIndex(_) => 0x01,
+            Self::GcCursorNodeTombstones(_) => 0x02,
+            Self::GcCursorEdgeTombstones(_) => 0x03,
         }
     }
 
     /// Create a field variant from discriminant (with empty payload)
     pub fn from_discriminant(d: u8) -> anyhow::Result<Self> {
         match d {
-            0x00 => Ok(Self::GcCursorNodeSummaries(vec![])),
-            0x01 => Ok(Self::GcCursorEdgeSummaries(vec![])),
-            0x02 => Ok(Self::GcCursorNodeSummaryIndex(vec![])),
-            0x03 => Ok(Self::GcCursorEdgeSummaryIndex(vec![])),
-            0x04 => Ok(Self::GcCursorNodeTombstones(vec![])),
-            0x05 => Ok(Self::GcCursorEdgeTombstones(vec![])),
+            0x00 => Ok(Self::GcCursorNodeSummaryIndex(vec![])),
+            0x01 => Ok(Self::GcCursorEdgeSummaryIndex(vec![])),
+            0x02 => Ok(Self::GcCursorNodeTombstones(vec![])),
+            0x03 => Ok(Self::GcCursorEdgeTombstones(vec![])),
             _ => anyhow::bail!("Unknown GraphMetaField discriminant: {}", d),
         }
     }
@@ -1560,9 +1552,7 @@ impl GraphMetaField {
     /// Get the inner cursor bytes
     pub fn cursor_bytes(&self) -> &[u8] {
         match self {
-            Self::GcCursorNodeSummaries(v)
-            | Self::GcCursorEdgeSummaries(v)
-            | Self::GcCursorNodeSummaryIndex(v)
+            Self::GcCursorNodeSummaryIndex(v)
             | Self::GcCursorEdgeSummaryIndex(v)
             | Self::GcCursorNodeTombstones(v)
             | Self::GcCursorEdgeTombstones(v) => v,
@@ -1575,16 +1565,6 @@ impl GraphMetaField {
 pub(crate) struct GraphMetaCfKey(pub(crate) GraphMetaField);
 
 impl GraphMetaCfKey {
-    /// Create key for NodeSummaries GC cursor
-    pub fn gc_cursor_node_summaries() -> Self {
-        Self(GraphMetaField::GcCursorNodeSummaries(vec![]))
-    }
-
-    /// Create key for EdgeSummaries GC cursor
-    pub fn gc_cursor_edge_summaries() -> Self {
-        Self(GraphMetaField::GcCursorEdgeSummaries(vec![]))
-    }
-
     /// Create key for NodeSummaryIndex GC cursor
     pub fn gc_cursor_node_summary_index() -> Self {
         Self(GraphMetaField::GcCursorNodeSummaryIndex(vec![]))
@@ -1649,12 +1629,10 @@ impl GraphMeta {
     /// Deserialize value using key's field variant for type info
     pub fn value_from_bytes(key: &GraphMetaCfKey, bytes: &[u8]) -> anyhow::Result<GraphMetaCfValue> {
         let field = match key.0.discriminant() {
-            0x00 => GraphMetaField::GcCursorNodeSummaries(bytes.to_vec()),
-            0x01 => GraphMetaField::GcCursorEdgeSummaries(bytes.to_vec()),
-            0x02 => GraphMetaField::GcCursorNodeSummaryIndex(bytes.to_vec()),
-            0x03 => GraphMetaField::GcCursorEdgeSummaryIndex(bytes.to_vec()),
-            0x04 => GraphMetaField::GcCursorNodeTombstones(bytes.to_vec()),
-            0x05 => GraphMetaField::GcCursorEdgeTombstones(bytes.to_vec()),
+            0x00 => GraphMetaField::GcCursorNodeSummaryIndex(bytes.to_vec()),
+            0x01 => GraphMetaField::GcCursorEdgeSummaryIndex(bytes.to_vec()),
+            0x02 => GraphMetaField::GcCursorNodeTombstones(bytes.to_vec()),
+            0x03 => GraphMetaField::GcCursorEdgeTombstones(bytes.to_vec()),
             d => anyhow::bail!("Unknown discriminant: {}", d),
         };
         Ok(GraphMetaCfValue(field))
