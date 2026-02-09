@@ -144,7 +144,7 @@ Acceptance Criteria
 
 (codex, 2026-02-07, eval: updated to include lifecycle/metrics coverage and new VERSIONING gaps for restore markers, shared-summary safety, and versioned temporal fields.)
 
-Post-Refactor (ARCH2) Testing Adjustments
+Post-Refactor (ARCH) Testing Adjustments
 - Processor API tests: direct sync calls validate mutation/query behavior without async overhead.
 - Consumer wiring: Writer/Reader consumers use shared `Arc<Processor>` and still behave identically.
 - Facade removal: tests no longer instantiate `Graph` (or verify it is optional/removed).
@@ -240,7 +240,7 @@ Post-Refactor (ARCH2) Testing Adjustments
 | Idempotency | ✅ | tests.rs | test_replay_mutation_idempotent |
 | Shutdown under load | ✅ | tests.rs | test_shutdown_during_writes_no_corruption |
 
-#### ARCH2 Post-Refactor - Status
+#### ARCH Post-Refactor - Status
 
 | Requirement | Status | Location | Notes |
 |-------------|--------|----------|-------|
@@ -371,7 +371,7 @@ Post-Refactor (ARCH2) Testing Adjustments
 - [ ] All Index tests implemented (4 items)
 - [ ] All GC tests implemented (4 items)
 - [ ] All Concurrency tests implemented (4 items)
-- [ ] All ARCH2 tests implemented (7 items)
+- [ ] All ARCH tests implemented (7 items)
 - [ ] Test fixtures created and used consistently
 - [ ] Redundant tests consolidated
 - [ ] Tests renamed for clarity post-Graph removal

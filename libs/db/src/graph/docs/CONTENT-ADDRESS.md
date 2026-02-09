@@ -1,8 +1,8 @@
-# CONTENT-ADDRESS: Reverse Index with Versioning, Optimistic Locking, and GC
+# CONTENT-ADDRESS: Reverse Index and Content Addressing (Current)
 
 **Status:** Implementation accepted as complete for current scope. (codex, 2026-02-05, accepted)
 
-**Note:** When VERSIONING.md is implemented, summary RefCount behavior changes to append-only (no decrement) to enable rollback. See VERSIONING.md for the superseding design. (claude, 2026-02-05)
+**Note:** Summary lifecycle/GC is now defined in VERSIONING.md (orphan-index retention). This document focuses on reverse index and content addressing; defer GC behavior to VERSIONING.md. (codex, 2026-02-08)
 
 ## Problem
 
@@ -70,7 +70,7 @@ pub struct ForwardEdgeCfKey(
 
 pub struct ForwardEdgeCfValue(
     pub Option<ActivePeriod>,
-    pub Option<f64>,           // weight
+    pub Option<EdgeWeight>,           // weight
     pub Option<SummaryHash>,   // Content hash
     pub Version,               // Version [NEW]
     pub bool,                  // deleted flag (tombstone) [NEW]
@@ -80,7 +80,7 @@ pub struct ForwardEdgeCfValue(
 
 **Tombstone Semantics:**
 - `deleted = true`: Entity is logically deleted but retained for audit/time-travel
-- Index entries are preserved until GC; summaries may be deleted inline when RefCount reaches 0
+- Index entries are preserved until GC; summary lifecycle is handled via orphan-index retention (see VERSIONING.md)
 - `current_*_for_summary()` filters by marker; tombstone filtering is optional and not enforced in current reverse-lookup queries
 - Tombstone retention is configurable; hard-delete of tombstoned entities is future work
 (codex, 2026-02-05, validated)
@@ -105,7 +105,7 @@ pub struct ReverseEdgeCfValue(pub Option<ActivePeriod>);
 
 ## 1.2 Content Column Families (COLD)
 
-**Content-addressed by SummaryHash with RefCount.** Summaries are deduplicated by content hash to avoid storage blowup for templated summaries; RefCount tracks references for safe inline deletion. (codex, 2026-02-03, validated) (claude, 2026-02-02, implemented)
+**Content-addressed by SummaryHash.** Summaries are deduplicated by content hash to avoid storage blowup for templated summaries; lifecycle/GC is handled via orphan-index retention (see VERSIONING.md). (codex, 2026-02-03, validated) (codex, 2026-02-08, updated)
 
 ### NodeSummaries
 
@@ -115,10 +115,8 @@ pub struct NodeSummaryCfKey(pub SummaryHash);  // 8 bytes
 
 /// Reference count for content-addressed summaries.
 /// Use u32 to bound storage overhead while allowing billions of references.
-pub type RefCount = u32;
-
-// Value stores refcount + summary to enable safe GC of shared content
-pub struct NodeSummaryCfValue(pub RefCount, pub NodeSummary); // (refcount, summary)
+// Value stores summary content; lifecycle/GC uses orphan-index retention
+pub struct NodeSummaryCfValue(pub NodeSummary);
 ```
 (codex, 2026-02-03, validated)
 
@@ -128,8 +126,8 @@ pub struct NodeSummaryCfValue(pub RefCount, pub NodeSummary); // (refcount, summ
 // CURRENT (implemented): content-addressed
 pub struct EdgeSummaryCfKey(pub SummaryHash);  // 8 bytes
 
-// Value stores refcount + summary to enable safe GC of shared content
-pub struct EdgeSummaryCfValue(pub RefCount, pub EdgeSummary); // (refcount, summary)
+// Value stores summary content; lifecycle/GC uses orphan-index retention
+pub struct EdgeSummaryCfValue(pub EdgeSummary);
 ```
 (codex, 2026-02-03, validated)
 
@@ -508,7 +506,7 @@ fn insert_edge(
     dst: Id,
     name: &str,
     summary: EdgeSummary,
-    weight: Option<f64>,
+    weight: Option<EdgeWeight>,
 ) -> Result<()> {
     let txn = self.txn_db.transaction();
 
@@ -554,31 +552,11 @@ fn insert_edge(
 ## 3.2 Write Path: Update (Optimistic Locking)
 (codex, 2026-02-03, validated)
 
-### Refcount Handling for Content-Addressed Summaries
+### Summary Lifecycle (GC per VERSIONING)
 
 When summaries are keyed by `SummaryHash`, multiple entities can share the same
-summary row. To safely GC these rows, `NodeSummaryCfValue` and
-`EdgeSummaryCfValue` store a refcount.
-
-**Rules (must occur in the same transaction as the entity update):**
-
-- **Insert (new entity with summary hash H):** increment refcount(H), create row if missing.
-- **Update (old hash H1 → new hash H2):**
-  - increment refcount(H2)
-  - decrement refcount(H1)
-  - if refcount(H1) reaches 0, delete the summary row.
-- **Delete (tombstone, hash H):** Mark summary as orphan candidate (deferred to GC).
-
-(codex, 2026-02-03, validated) (claude, 2026-02-02, IMPLEMENTED in mutation.rs)
-(claude, 2026-02-06, UPDATED for VERSIONING: RefCount replaced with OrphanSummaries-based GC)
-
-**Implementation details (VERSIONING):**
-- Helper functions: `ensure_node_summary()`, `ensure_edge_summary()` - idempotent create-if-not-exists
-- Orphan candidate functions: `mark_node_summary_orphan_candidate()`, `mark_edge_summary_orphan_candidate()`
-- All mutations (AddNode, AddEdge, UpdateNode, UpdateEdge, DeleteNode, DeleteEdge)
-  use these helpers
-- Actual summary deletion is deferred to GC via OrphanSummaries CF scanning
-- This supports rollback by allowing orphaned summaries to be reclaimed only after retention period
+summary row. Summary lifecycle and deletion are handled via the orphan-index
+retention model described in VERSIONING.md (no inline refcount deletion).
 
 ### Update Node
 
@@ -873,7 +851,7 @@ pub fn current_edges_for_summary(&self, hash: SummaryHash) -> Result<Vec<Forward
 ---
 
 ## 3.4 Garbage Collection
-(codex, 2026-02-03, validated) (claude, 2026-02-02, implemented in gc.rs - GraphGarbageCollector with cursor-based incremental processing, RefCount eliminates orphan summary scans)
+(codex, 2026-02-03, validated) (codex, 2026-02-08, updated: summary GC is orphan-index based; see VERSIONING.md)
 
 ### GcConfig
 
@@ -1012,13 +990,13 @@ impl GraphMeta {
 
 | Target | Key Pattern | Retention Policy |
 |--------|-------------|------------------|
-| NodeSummaries | `(SummaryHash)` | **RefCount handles inline** - deleted when refcount reaches 0 during mutation |
-| EdgeSummaries | `(SummaryHash)` | **RefCount handles inline** - deleted when refcount reaches 0 during mutation |
+| NodeSummaries | `(SummaryHash)` | Summary lifecycle via orphan-index retention (see VERSIONING.md) |
+| EdgeSummaries | `(SummaryHash)` | Summary lifecycle via orphan-index retention (see VERSIONING.md) |
 | NodeSummaryIndex | `(Hash, Id, version)` | GC deletes if marker=STALE and version not in retained set |
 | EdgeSummaryIndex | `(Hash, EdgeKey, version)` | GC deletes if marker=STALE and version not in retained set |
 | Tombstones (Nodes) | `(Id)` where deleted=true | **DEFERRED**: Hard delete after `tombstone_retention` period |
 | Tombstones (Edges) | `(EdgeKey)` where deleted=true | **DEFERRED**: Hard delete after `tombstone_retention` period |
-(codex, 2026-02-03, validated) (claude, 2026-02-02, RefCount implemented - no orphan scan needed)
+(codex, 2026-02-03, validated) (codex, 2026-02-08, updated: orphan-index retention model)
 
 **Note on Tombstone GC:** Tombstone hard deletion is deferred. Currently, deleted entities remain in storage indefinitely (marked `deleted=true`). The `tombstone_retention` config field exists but the purge logic is not implemented. This is acceptable for most use cases - tombstones have minimal storage overhead and preserve audit history.
 
@@ -1027,7 +1005,7 @@ impl GraphMeta {
 ```rust
 #[derive(Default)]
 pub struct GcMetrics {
-    // Note: node_summaries_deleted/edge_summaries_deleted removed - RefCount handles inline
+    // Note: summary cleanup handled by orphan-index retention (see VERSIONING.md)
     pub node_index_entries_deleted: AtomicU64,
     pub edge_index_entries_deleted: AtomicU64,
     pub node_tombstones_deleted: AtomicU64,
@@ -1053,18 +1031,11 @@ impl GraphGarbageCollector {
 }
 ```
 
-### GC Logic: Summary Cleanup (Handled by RefCount)
+### GC Logic: Summary Cleanup (Orphan Index Retention)
 
-**Note:** Summary GC is handled inline by RefCount - no background scan needed. When a mutation decrements a summary's refcount to 0, the summary row is deleted in the same transaction. This is more efficient than background orphan scans.
-
-```rust
-// RefCount handles summary cleanup inline during mutations:
-// - AddNode/AddEdge: increment refcount (create row if missing)
-// - UpdateNode/UpdateEdge: increment new, decrement old
-// - DeleteNode/DeleteEdge: decrement refcount
-// When refcount reaches 0, summary row is deleted immediately.
-```
-(claude, 2026-02-02, implemented in mutation.rs)
+Summary cleanup is handled via the orphan-index retention model described in VERSIONING.md.
+Summaries are not deleted inline; they are marked as orphan candidates and reclaimed by GC
+after the retention window if no CURRENT references remain.
 
 ### GC Logic: Reverse Index (with Cursor)
 
@@ -1206,7 +1177,7 @@ fn repair_forward_reverse_consistency(&self) -> Result<RepairMetrics> {
 
 | File | Changes |
 |------|---------|
-| **schema.rs** | Add `version: Version` and `deleted: bool` to entity values; add index CfValue with marker byte; keep summary CF keys content-addressed with RefCount; add `NodeSummaryIndex` and `EdgeSummaryIndex` CFs; add `GraphMeta` CF with discriminated enum pattern (borrowed from vector::GraphMeta); update `ALL_COLUMN_FAMILIES` |
+| **schema.rs** | Add `version: Version` and `deleted: bool` to entity values; add index CfValue with marker byte; keep summary CF keys content-addressed; add `NodeSummaryIndex` and `EdgeSummaryIndex` CFs; add `GraphMeta` CF with discriminated enum pattern (borrowed from vector::GraphMeta); update `ALL_COLUMN_FAMILIES` |
 | **mutation.rs** | Update `AddNode`/`AddEdge` to set version=1, deleted=false, and write index with CURRENT marker; add `UpdateNode`/`UpdateEdge` with optimistic locking (flip old index to STALE); add `DeleteNode`/`DeleteEdge` tombstone mutations |
 | **query.rs** | Add `all_nodes_for_summary()`, `current_nodes_for_summary()`, `node_versions_for_summary()`, and edge equivalents; filter by marker byte in current queries; filter out deleted entities |
 | **gc.rs** | New file: `GraphGcConfig` with cursor support and tombstone retention; incremental GC with resume cursor; `GraphGarbageCollector` with background worker |
@@ -1221,13 +1192,13 @@ fn repair_forward_reverse_consistency(&self) -> Result<RepairMetrics> {
 |--------|--------|--------|
 | **Reverse index** | `(SummaryHash, EntityKey, Version)` → 1-byte marker (CURRENT/STALE) | ✅ Complete |
 | **Multi-version support** | Index returns all versions; query API provides `all_*` and `current_*` variants | ✅ Complete |
-| **Content storage** | Content-addressed by `SummaryHash` with RefCount for safe GC | ✅ Complete |
-| **RefCount** | Summaries track reference count; deleted inline when refcount=0 | ✅ Complete |
+| **Content storage** | Content-addressed by `SummaryHash` | ✅ Complete |
+| **Summary lifecycle** | Orphan-index retention (see VERSIONING.md) | ✅ Complete |
 | **Optimistic locking** | Version in entity value; reject update if mismatch | ✅ Complete |
 | **Delete semantics** | Tombstone flag in entity value; retained for audit | ✅ Complete |
 | **Version overflow** | Reject writes at VERSION_MAX; documented policy | ✅ Complete |
 | **GC: Stale index** | Incremental cursor for stale index entries | ✅ Complete |
-| **GC: Summaries** | RefCount handles cleanup inline (no background scan) | ✅ Complete |
+| **GC: Summaries** | Orphan-index scan with CURRENT reference checks | ✅ Complete |
 | **GC: Tombstones** | Hard delete after retention period | 🔮 Deferred |
 | **Repair** | Periodic forward↔reverse consistency check | ✅ Complete |
 (codex, 2026-02-03, validated) (claude, 2026-02-04, status updated)
@@ -1241,13 +1212,13 @@ fn repair_forward_reverse_consistency(&self) -> Result<RepairMetrics> {
 - [x] Reverse lookup query APIs - query.rs (NodesBySummaryHash, EdgesBySummaryHash)
 - [x] GraphMeta CF for GC cursors - schema.rs, subsystem.rs
 - [x] Update/Delete mutations with optimistic locking - mutation.rs (UpdateNode, UpdateEdge, DeleteNode, DeleteEdge)
-- [x] RefCount for content-addressed summaries - schema.rs (NodeSummaryCfValue, EdgeSummaryCfValue include RefCount)
-- [x] RefCount increment/decrement in mutations - mutation.rs (all Add/Update/Delete mutations handle refcount)
+- [x] Content-addressed summaries (NodeSummaries/EdgeSummaries by SummaryHash)
+- [x] Orphan-index retention for summary lifecycle (see VERSIONING.md)
 - [x] GC implementation - gc.rs (GraphGarbageCollector with cursor-based incremental GC for stale index entries)
-- [x] GC simplified - RefCount eliminates orphan summary scans (summaries deleted inline when refcount=0)
+- [x] GC scans orphan index and checks CURRENT references
 - [x] Reverse index repair task - repair.rs (GraphRepairer with forward↔reverse consistency checking)
 - [x] Fulltext index updates for Update/Delete - fulltext/mutation.rs
-- [x] Unit tests - tests.rs (content_address_tests module with 23 tests including 13 RefCount invariant tests)
+- [x] Unit tests - tests.rs (content_address_tests module covering summary index + GC behavior)
 - [x] Integration tests - test_storage_builder.rs updated for new CF count
 
 ---
@@ -1425,7 +1396,7 @@ Recommended CF-specific tuning:
 | ~15-25% write throughput | Vector search → graph entity resolution |
 (codex, 2026-02-02, estimated)
 
-**Storage cost note:** If summaries were per-entity/per-version (instead of content-addressed), templated edge summaries (e.g., “Friends”, “co-workers”) would duplicate across many edges and versions. Content-addressed summaries avoid this duplication but require refcounting for safe GC. (codex, 2026-02-03, validated)
+**Storage cost note:** If summaries were per-entity/per-version (instead of content-addressed), templated edge summaries (e.g., “Friends”, “co-workers”) would duplicate across many edges and versions. Content-addressed summaries avoid this duplication; GC uses orphan-index retention for safe cleanup. (codex, 2026-02-03, validated) (codex, 2026-02-08, updated)
 
 **Conclusion:** The reverse index capability enables the core use case (vector search results resolving to graph entities). The write amplification cost is acceptable and can be mitigated through batching. (codex, 2026-02-02, estimated)
 

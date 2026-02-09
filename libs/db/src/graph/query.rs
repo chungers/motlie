@@ -21,8 +21,9 @@ use super::HotColumnFamilyRecord;
 use super::summary_hash::SummaryHash;
 use crate::reader::Runnable;
 use super::schema::{
-    self, DstId, EdgeName, EdgeSummary, EdgeSummaries, EdgeSummaryCfKey, FragmentContent,
-    Names, NameCfKey, NodeName, NodeSummary, NodeSummaries, NodeSummaryCfKey, SrcId,
+    self, DstId, EdgeName, EdgeSummary, EdgeSummaries, EdgeSummaryCfKey, EdgeWeight,
+    FragmentContent, Names, NameCfKey, NodeName, NodeSummary, NodeSummaries, NodeSummaryCfKey,
+    SrcId, Version,
 };
 use super::{ColumnFamily, ColumnFamilySerde};
 use super::Storage;
@@ -885,7 +886,7 @@ fn resolve_node_summary_from_txn(
 /// txn.write(AddNode { id, ... })?;
 ///
 /// // Read sees the uncommitted node!
-/// let (name, summary) = txn.read(NodeById::new(id, None))?;
+/// let (name, summary, version) = txn.read(NodeById::new(id, None))?;
 ///
 /// txn.commit()?;
 /// ```
@@ -1051,15 +1052,15 @@ impl std::fmt::Display for Query {
 
 #[derive(Debug)]
 pub enum QueryResult {
-    NodeById((NodeName, NodeSummary)),
-    NodesByIdsMulti(Vec<(Id, NodeName, NodeSummary)>),
-    EdgeSummaryBySrcDstName((EdgeSummary, Option<f64>)),
+    NodeById((NodeName, NodeSummary, Version)),
+    NodesByIdsMulti(Vec<(Id, NodeName, NodeSummary, Version)>),
+    EdgeSummaryBySrcDstName((EdgeSummary, Option<EdgeWeight>, Version)),
     NodeFragmentsByIdTimeRange(Vec<(TimestampMilli, FragmentContent)>),
     EdgeFragmentsByIdTimeRange(Vec<(TimestampMilli, FragmentContent)>),
-    OutgoingEdges(Vec<(Option<f64>, SrcId, DstId, EdgeName)>),
-    IncomingEdges(Vec<(Option<f64>, DstId, SrcId, EdgeName)>),
-    AllNodes(Vec<(Id, NodeName, NodeSummary)>),
-    AllEdges(Vec<(Option<f64>, SrcId, DstId, EdgeName)>),
+    OutgoingEdges(Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>),
+    IncomingEdges(Vec<(Option<EdgeWeight>, DstId, SrcId, EdgeName, Version)>),
+    AllNodes(Vec<(Id, NodeName, NodeSummary, Version)>),
+    AllEdges(Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>),
     NodesBySummaryHash(Vec<NodeSummaryLookupResult>),
     EdgesBySummaryHash(Vec<EdgeSummaryLookupResult>),
 }
@@ -1126,15 +1127,15 @@ macro_rules! impl_request_meta {
     };
 }
 
-impl_request_meta!(NodeById, (NodeName, NodeSummary), "node_by_id");
-impl_request_meta!(NodesByIdsMulti, Vec<(Id, NodeName, NodeSummary)>, "nodes_by_ids_multi");
-impl_request_meta!(EdgeSummaryBySrcDstName, (EdgeSummary, Option<f64>), "edge_summary_by_src_dst_name");
+impl_request_meta!(NodeById, (NodeName, NodeSummary, Version), "node_by_id");
+impl_request_meta!(NodesByIdsMulti, Vec<(Id, NodeName, NodeSummary, Version)>, "nodes_by_ids_multi");
+impl_request_meta!(EdgeSummaryBySrcDstName, (EdgeSummary, Option<EdgeWeight>, Version), "edge_summary_by_src_dst_name");
 impl_request_meta!(NodeFragmentsByIdTimeRange, Vec<(TimestampMilli, FragmentContent)>, "node_fragments_by_id_time_range");
 impl_request_meta!(EdgeFragmentsByIdTimeRange, Vec<(TimestampMilli, FragmentContent)>, "edge_fragments_by_id_time_range");
-impl_request_meta!(OutgoingEdges, Vec<(Option<f64>, SrcId, DstId, EdgeName)>, "outgoing_edges");
-impl_request_meta!(IncomingEdges, Vec<(Option<f64>, DstId, SrcId, EdgeName)>, "incoming_edges");
-impl_request_meta!(AllNodes, Vec<(Id, NodeName, NodeSummary)>, "all_nodes");
-impl_request_meta!(AllEdges, Vec<(Option<f64>, SrcId, DstId, EdgeName)>, "all_edges");
+impl_request_meta!(OutgoingEdges, Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>, "outgoing_edges");
+impl_request_meta!(IncomingEdges, Vec<(Option<EdgeWeight>, DstId, SrcId, EdgeName, Version)>, "incoming_edges");
+impl_request_meta!(AllNodes, Vec<(Id, NodeName, NodeSummary, Version)>, "all_nodes");
+impl_request_meta!(AllEdges, Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>, "all_edges");
 impl_request_meta!(NodesBySummaryHash, Vec<NodeSummaryLookupResult>, "nodes_by_summary_hash");
 impl_request_meta!(EdgesBySummaryHash, Vec<EdgeSummaryLookupResult>, "edges_by_summary_hash");
 
@@ -1178,7 +1179,7 @@ pub struct NodeById {
 /// let nodes = NodesByIdsMulti::new(vec![id1, id2, id3], None)
 ///     .run(&reader, timeout)
 ///     .await?;
-/// // Returns Vec<(Id, NodeName, NodeSummary)> for found nodes
+/// // Returns Vec<(Id, NodeName, NodeSummary, Version)> for found nodes
 /// ```
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct NodesByIdsMulti {
@@ -1416,7 +1417,7 @@ impl NodeById {
 
 impl NodeById {
     /// Execute this query directly on storage (for testing and simple use cases).
-    pub async fn execute_on(&self, storage: &Storage) -> Result<(NodeName, NodeSummary)> {
+    pub async fn execute_on(&self, storage: &Storage) -> Result<(NodeName, NodeSummary, Version)> {
         self.execute(storage).await
     }
 }
@@ -1527,7 +1528,7 @@ impl EdgeSummaryBySrcDstName {
 
 impl EdgeSummaryBySrcDstName {
     /// Execute this query directly on storage (for testing and simple use cases).
-    pub async fn execute_on(&self, storage: &Storage) -> Result<(EdgeSummary, Option<f64>)> {
+    pub async fn execute_on(&self, storage: &Storage) -> Result<(EdgeSummary, Option<EdgeWeight>, Version)> {
         self.execute(storage).await
     }
 }
@@ -1552,7 +1553,7 @@ impl OutgoingEdges {
     }
 
     /// Execute this query directly on storage (for testing and simple use cases).
-    pub async fn execute_on(&self, storage: &Storage) -> Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>> {
+    pub async fn execute_on(&self, storage: &Storage) -> Result<Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>> {
         self.execute(storage).await
     }
 }
@@ -1577,7 +1578,7 @@ impl IncomingEdges {
     }
 
     /// Execute this query directly on storage (for testing and simple use cases).
-    pub async fn execute_on(&self, storage: &Storage) -> Result<Vec<(Option<f64>, DstId, SrcId, EdgeName)>> {
+    pub async fn execute_on(&self, storage: &Storage) -> Result<Vec<(Option<EdgeWeight>, DstId, SrcId, EdgeName, Version)>> {
         self.execute(storage).await
     }
 }
@@ -1662,7 +1663,7 @@ where
 }
 
 impl QueryReply for NodeById {
-    type Reply = (NodeName, NodeSummary);
+    type Reply = (NodeName, NodeSummary, Version);
 
     fn into_query(self) -> Query {
         Query::NodeById(self)
@@ -1677,7 +1678,7 @@ impl QueryReply for NodeById {
 }
 
 impl QueryReply for NodesByIdsMulti {
-    type Reply = Vec<(Id, NodeName, NodeSummary)>;
+    type Reply = Vec<(Id, NodeName, NodeSummary, Version)>;
 
     fn into_query(self) -> Query {
         Query::NodesByIdsMulti(self)
@@ -1722,7 +1723,7 @@ impl QueryReply for EdgeFragmentsByIdTimeRange {
 }
 
 impl QueryReply for EdgeSummaryBySrcDstName {
-    type Reply = (EdgeSummary, Option<f64>);
+    type Reply = (EdgeSummary, Option<EdgeWeight>, Version);
 
     fn into_query(self) -> Query {
         Query::EdgeSummaryBySrcDstName(self)
@@ -1737,7 +1738,7 @@ impl QueryReply for EdgeSummaryBySrcDstName {
 }
 
 impl QueryReply for OutgoingEdges {
-    type Reply = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
+    type Reply = Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>;
 
     fn into_query(self) -> Query {
         Query::OutgoingEdges(self)
@@ -1752,7 +1753,7 @@ impl QueryReply for OutgoingEdges {
 }
 
 impl QueryReply for IncomingEdges {
-    type Reply = Vec<(Option<f64>, DstId, SrcId, EdgeName)>;
+    type Reply = Vec<(Option<EdgeWeight>, DstId, SrcId, EdgeName, Version)>;
 
     fn into_query(self) -> Query {
         Query::IncomingEdges(self)
@@ -1767,7 +1768,7 @@ impl QueryReply for IncomingEdges {
 }
 
 impl QueryReply for AllNodes {
-    type Reply = Vec<(Id, NodeName, NodeSummary)>;
+    type Reply = Vec<(Id, NodeName, NodeSummary, Version)>;
 
     fn into_query(self) -> Query {
         Query::AllNodes(self)
@@ -1782,7 +1783,7 @@ impl QueryReply for AllNodes {
 }
 
 impl QueryReply for AllEdges {
-    type Reply = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
+    type Reply = Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>;
 
     fn into_query(self) -> Query {
         Query::AllEdges(self)
@@ -1800,7 +1801,7 @@ impl QueryReply for AllEdges {
 /// (claude, 2026-02-06: VERSIONING with point-in-time query support)
 #[async_trait::async_trait]
 impl QueryExecutor for NodeById {
-    type Output = (NodeName, NodeSummary);
+    type Output = (NodeName, NodeSummary, Version);
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         let params = self;
@@ -1856,7 +1857,7 @@ impl QueryExecutor for NodeById {
         // Resolve summary from cold CF - SummaryHash is at index 3
         let summary = resolve_node_summary(storage, value.3)?;
 
-        Ok((node_name, summary))
+        Ok((node_name, summary, value.4))
     }
 }
 
@@ -1866,7 +1867,7 @@ impl QueryExecutor for NodeById {
 /// Missing nodes and temporally invalid nodes are silently omitted from results.
 #[async_trait::async_trait]
 impl QueryExecutor for NodesByIdsMulti {
-    type Output = Vec<(Id, NodeName, NodeSummary)>;
+    type Output = Vec<(Id, NodeName, NodeSummary, Version)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         let params = self;
@@ -1888,7 +1889,8 @@ impl QueryExecutor for NodesByIdsMulti {
         // With VERSIONING, we need prefix scans for each ID to find version at time
         // Collect valid entries with their NameHash and SummaryHash first, then resolve
         // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=NameHash, 3=SummaryHash, 4=Version, 5=Deleted
-        let mut valid_entries: Vec<(Id, NameHash, Option<SummaryHash>)> = Vec::with_capacity(params.ids.len());
+        let mut valid_entries: Vec<(Id, NameHash, Option<SummaryHash>, Version)> =
+            Vec::with_capacity(params.ids.len());
 
         for id in &params.ids {
             let result = if let Ok(db) = storage.db() {
@@ -1908,7 +1910,7 @@ impl QueryExecutor for NodesByIdsMulti {
                     // Check temporal validity (ActivePeriod is at index 1)
                     if schema::is_active_at_time(&value.1, ref_time) {
                         // NameHash at index 2, SummaryHash at index 3
-                        valid_entries.push((*id, value.2, value.3));
+                        valid_entries.push((*id, value.2, value.3, value.4));
                     } else {
                         tracing::trace!(
                             id = %id,
@@ -1929,10 +1931,10 @@ impl QueryExecutor for NodesByIdsMulti {
 
         // Resolve NameHashes to Strings and SummaryHashes to Summaries
         let mut output = Vec::with_capacity(valid_entries.len());
-        for (id, name_hash, summary_hash) in valid_entries {
+        for (id, name_hash, summary_hash, version) in valid_entries {
             let node_name = resolve_name(storage, name_hash)?;
             let summary = resolve_node_summary(storage, summary_hash)?;
-            output.push((id, node_name, summary));
+            output.push((id, node_name, summary, version));
         }
 
         Ok(output)
@@ -2110,7 +2112,7 @@ impl QueryExecutor for EdgeFragmentsByIdTimeRange {
 /// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
 #[async_trait::async_trait]
 impl QueryExecutor for EdgeSummaryBySrcDstName {
-    type Output = (EdgeSummary, Option<f64>);
+    type Output = (EdgeSummary, Option<EdgeWeight>, Version);
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         let params = self;
@@ -2186,7 +2188,7 @@ impl QueryExecutor for EdgeSummaryBySrcDstName {
         // Field order: ValidUntil, ActivePeriod, Weight, SummaryHash, Version, Deleted
         // Return (summary, weight) - resolve summary from cold CF
         let summary = resolve_edge_summary(storage, value.3)?;
-        Ok((summary, value.2))
+        Ok((summary, value.2, value.4))
     }
 }
 
@@ -2194,7 +2196,7 @@ impl QueryExecutor for EdgeSummaryBySrcDstName {
 #[async_trait::async_trait]
 /// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
 impl QueryExecutor for OutgoingEdges {
-    type Output = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
+    type Output = Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         let params = self;
@@ -2208,7 +2210,8 @@ impl QueryExecutor for OutgoingEdges {
         let id = params.id;
         // Use HashSet for deduplication with versioned keys
         let mut seen_edges: std::collections::HashSet<(Id, Id, NameHash)> = std::collections::HashSet::new();
-        let mut edges_with_hash: Vec<(Option<f64>, SrcId, DstId, NameHash)> = Vec::new();
+        let mut edges_with_hash: Vec<(Option<EdgeWeight>, SrcId, DstId, NameHash, Version)> =
+            Vec::new();
         let prefix = id.into_bytes();
 
         if let Ok(db) = storage.db() {
@@ -2259,7 +2262,7 @@ impl QueryExecutor for OutgoingEdges {
                 let edge_topology = (source_id, dest_id, edge_name_hash);
                 if seen_edges.insert(edge_topology) {
                     let weight = value.2;
-                    edges_with_hash.push((weight, source_id, dest_id, edge_name_hash));
+                    edges_with_hash.push((weight, source_id, dest_id, edge_name_hash, value.4));
                 }
             }
         } else {
@@ -2313,16 +2316,16 @@ impl QueryExecutor for OutgoingEdges {
                 let edge_topology = (source_id, dest_id, edge_name_hash);
                 if seen_edges.insert(edge_topology) {
                     let weight = value.2;
-                    edges_with_hash.push((weight, source_id, dest_id, edge_name_hash));
+                    edges_with_hash.push((weight, source_id, dest_id, edge_name_hash, value.4));
                 }
             }
         }
 
         // Resolve NameHashes to Strings (uses cache)
         let mut edges = Vec::with_capacity(edges_with_hash.len());
-        for (weight, src_id, dst_id, name_hash) in edges_with_hash {
+        for (weight, src_id, dst_id, name_hash, version) in edges_with_hash {
             let edge_name = resolve_name(storage, name_hash)?;
-            edges.push((weight, src_id, dst_id, edge_name));
+            edges.push((weight, src_id, dst_id, edge_name, version));
         }
         Ok(edges)
     }
@@ -2332,7 +2335,7 @@ impl QueryExecutor for OutgoingEdges {
 /// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
 #[async_trait::async_trait]
 impl QueryExecutor for IncomingEdges {
-    type Output = Vec<(Option<f64>, DstId, SrcId, EdgeName)>;
+    type Output = Vec<(Option<EdgeWeight>, DstId, SrcId, EdgeName, Version)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         let params = self;
@@ -2346,7 +2349,8 @@ impl QueryExecutor for IncomingEdges {
         let id = params.id;
         // Use HashSet for deduplication with versioned keys
         let mut seen_edges: std::collections::HashSet<(Id, Id, NameHash)> = std::collections::HashSet::new();
-        let mut edges_with_hash: Vec<(Option<f64>, DstId, SrcId, NameHash)> = Vec::new();
+        let mut edges_with_hash: Vec<(Option<EdgeWeight>, DstId, SrcId, NameHash, Version)> =
+            Vec::new();
         let prefix = id.into_bytes();
 
         if let Ok(db) = storage.db() {
@@ -2398,19 +2402,23 @@ impl QueryExecutor for IncomingEdges {
                 }
 
                 // Lookup weight from ForwardEdges CF via prefix scan
-                let weight = if let Some((_, forward_value)) =
-                    find_current_forward_edge_readonly(db, source_id, dest_id, edge_name_hash)?
-                {
-                    // Skip if deleted
-                    if forward_value.5 {
-                        continue;
+                let (weight, version) = match find_current_forward_edge_readonly(
+                    db,
+                    source_id,
+                    dest_id,
+                    edge_name_hash,
+                )? {
+                    Some((_, forward_value)) => {
+                        // Skip if deleted
+                        if forward_value.5 {
+                            continue;
+                        }
+                        (forward_value.2, forward_value.4)
                     }
-                    forward_value.2 // Extract weight from field 2
-                } else {
-                    None
+                    None => continue,
                 };
 
-                edges_with_hash.push((weight, dest_id, source_id, edge_name_hash));
+                edges_with_hash.push((weight, dest_id, source_id, edge_name_hash, version));
             }
         } else {
             let txn_db = storage.transaction_db()?;
@@ -2464,27 +2472,31 @@ impl QueryExecutor for IncomingEdges {
                 }
 
                 // Lookup weight from ForwardEdges CF via prefix scan
-                let weight = if let Some((_, forward_value)) =
-                    find_current_forward_edge_readwrite(txn_db, source_id, dest_id, edge_name_hash)?
-                {
-                    // Skip if deleted
-                    if forward_value.5 {
-                        continue;
+                let (weight, version) = match find_current_forward_edge_readwrite(
+                    txn_db,
+                    source_id,
+                    dest_id,
+                    edge_name_hash,
+                )? {
+                    Some((_, forward_value)) => {
+                        // Skip if deleted
+                        if forward_value.5 {
+                            continue;
+                        }
+                        (forward_value.2, forward_value.4)
                     }
-                    forward_value.2 // Extract weight from field 2
-                } else {
-                    None
+                    None => continue,
                 };
 
-                edges_with_hash.push((weight, dest_id, source_id, edge_name_hash));
+                edges_with_hash.push((weight, dest_id, source_id, edge_name_hash, version));
             }
         }
 
         // Resolve NameHashes to Strings (uses cache)
         let mut edges = Vec::with_capacity(edges_with_hash.len());
-        for (weight, dst_id, src_id, name_hash) in edges_with_hash {
+        for (weight, dst_id, src_id, name_hash, version) in edges_with_hash {
             let edge_name = resolve_name(storage, name_hash)?;
-            edges.push((weight, dst_id, src_id, edge_name));
+            edges.push((weight, dst_id, src_id, edge_name, version));
         }
         Ok(edges)
     }
@@ -2495,7 +2507,7 @@ impl QueryExecutor for IncomingEdges {
 /// Delegates to the scan module's Visitable implementation.
 #[async_trait::async_trait]
 impl QueryExecutor for AllNodes {
-    type Output = Vec<(Id, NodeName, NodeSummary)>;
+    type Output = Vec<(Id, NodeName, NodeSummary, Version)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         let params = self;
@@ -2512,7 +2524,12 @@ impl QueryExecutor for AllNodes {
         // Collect results via visitor pattern
         let mut results = Vec::with_capacity(params.limit);
         scan_request.accept(storage, &mut |record: &scan::NodeRecord| {
-            results.push((record.id, record.name.clone(), record.summary.clone()));
+            results.push((
+                record.id,
+                record.name.clone(),
+                record.summary.clone(),
+                record.version,
+            ));
             true // continue
         })?;
 
@@ -2524,7 +2541,7 @@ impl QueryExecutor for AllNodes {
 /// Delegates to the scan module's Visitable implementation.
 #[async_trait::async_trait]
 impl QueryExecutor for AllEdges {
-    type Output = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
+    type Output = Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         let params = self;
@@ -2541,7 +2558,13 @@ impl QueryExecutor for AllEdges {
         // Collect results via visitor pattern
         let mut results = Vec::with_capacity(params.limit);
         scan_request.accept(storage, &mut |record: &scan::EdgeRecord| {
-            results.push((record.weight, record.src_id, record.dst_id, record.name.clone()));
+            results.push((
+                record.weight,
+                record.src_id,
+                record.dst_id,
+                record.name.clone(),
+                record.version,
+            ));
             true // continue
         })?;
 
@@ -2556,7 +2579,7 @@ impl QueryExecutor for AllEdges {
 /// Implement TransactionQueryExecutor for NodeById
 /// (claude, 2026-02-06, in-progress: VERSIONING prefix scan for current version)
 impl TransactionQueryExecutor for NodeById {
-    type Output = (NodeName, NodeSummary);
+    type Output = (NodeName, NodeSummary, Version);
 
     fn execute_in_transaction(
         &self,
@@ -2594,14 +2617,14 @@ impl TransactionQueryExecutor for NodeById {
         let node_name = resolve_name_from_txn(txn, txn_db, value.2, cache)?;
         // Resolve SummaryHash to NodeSummary (from cold CF) - SummaryHash is at index 3
         let summary = resolve_node_summary_from_txn(txn, txn_db, value.3)?;
-        Ok((node_name, summary))
+        Ok((node_name, summary, value.4))
     }
 }
 
 /// Implement TransactionQueryExecutor for NodesByIdsMulti
 /// (claude, 2026-02-06, in-progress: VERSIONING prefix scan for current versions)
 impl TransactionQueryExecutor for NodesByIdsMulti {
-    type Output = Vec<(Id, NodeName, NodeSummary)>;
+    type Output = Vec<(Id, NodeName, NodeSummary, Version)>;
 
     fn execute_in_transaction(
         &self,
@@ -2621,7 +2644,8 @@ impl TransactionQueryExecutor for NodesByIdsMulti {
 
         // Collect entries with NameHash and SummaryHash first
         // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=NameHash, 3=SummaryHash, 4=Version, 5=Deleted
-        let mut entries_with_hash: Vec<(Id, NameHash, Option<SummaryHash>)> = Vec::with_capacity(self.ids.len());
+        let mut entries_with_hash: Vec<(Id, NameHash, Option<SummaryHash>, Version)> =
+            Vec::with_capacity(self.ids.len());
 
         for id in &self.ids {
             // Find current version via prefix scan (VERSIONING)
@@ -2634,7 +2658,7 @@ impl TransactionQueryExecutor for NodesByIdsMulti {
                     // Check temporal validity (ActivePeriod is at index 1)
                     if schema::is_active_at_time(&value.1, ref_time) {
                         // NameHash at index 2, SummaryHash at index 3
-                        entries_with_hash.push((*id, value.2, value.3));
+                        entries_with_hash.push((*id, value.2, value.3, value.4));
                     }
                 }
                 Ok(None) => {
@@ -2648,10 +2672,10 @@ impl TransactionQueryExecutor for NodesByIdsMulti {
 
         // Resolve NameHashes to Strings and SummaryHashes to Summaries
         let mut output = Vec::with_capacity(entries_with_hash.len());
-        for (id, name_hash, summary_hash) in entries_with_hash {
+        for (id, name_hash, summary_hash, version) in entries_with_hash {
             let node_name = resolve_name_from_txn(txn, txn_db, name_hash, cache)?;
             let summary = resolve_node_summary_from_txn(txn, txn_db, summary_hash)?;
-            output.push((id, node_name, summary));
+            output.push((id, node_name, summary, version));
         }
 
         Ok(output)
@@ -2816,7 +2840,7 @@ impl TransactionQueryExecutor for EdgeFragmentsByIdTimeRange {
 /// Implement TransactionQueryExecutor for EdgeSummaryBySrcDstName
 /// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
 impl TransactionQueryExecutor for EdgeSummaryBySrcDstName {
-    type Output = (EdgeSummary, Option<f64>);
+    type Output = (EdgeSummary, Option<EdgeWeight>, Version);
 
     fn execute_in_transaction(
         &self,
@@ -2873,14 +2897,14 @@ impl TransactionQueryExecutor for EdgeSummaryBySrcDstName {
 
         // Resolve SummaryHash to EdgeSummary (from cold CF)
         let summary = resolve_edge_summary_from_txn(txn, txn_db, value.3)?;
-        Ok((summary, value.2))
+        Ok((summary, value.2, value.4))
     }
 }
 
 /// Implement TransactionQueryExecutor for OutgoingEdges
 /// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
 impl TransactionQueryExecutor for OutgoingEdges {
-    type Output = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
+    type Output = Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>;
 
     fn execute_in_transaction(
         &self,
@@ -2907,7 +2931,8 @@ impl TransactionQueryExecutor for OutgoingEdges {
         let prefix = self.id.into_bytes();
         // Use HashSet for deduplication with versioned keys
         let mut seen_edges: std::collections::HashSet<(Id, Id, NameHash)> = std::collections::HashSet::new();
-        let mut edges_with_hash: Vec<(Option<f64>, SrcId, DstId, NameHash)> = Vec::new();
+        let mut edges_with_hash: Vec<(Option<EdgeWeight>, SrcId, DstId, NameHash, Version)> =
+            Vec::new();
 
         // NOTE: We use iterator_cf instead of prefix_iterator_cf because the CF has a
         // 40-byte prefix extractor but we're searching with a 16-byte prefix (src_id only).
@@ -2946,15 +2971,15 @@ impl TransactionQueryExecutor for OutgoingEdges {
             let edge_topology = (source_id, dest_id, edge_name_hash);
             if seen_edges.insert(edge_topology) {
                 let weight = value.2;
-                edges_with_hash.push((weight, source_id, dest_id, edge_name_hash));
+                edges_with_hash.push((weight, source_id, dest_id, edge_name_hash, value.4));
             }
         }
 
         // Resolve NameHashes to Strings (uses cache)
         let mut results = Vec::with_capacity(edges_with_hash.len());
-        for (weight, src_id, dst_id, name_hash) in edges_with_hash {
+        for (weight, src_id, dst_id, name_hash, version) in edges_with_hash {
             let edge_name = resolve_name_from_txn(txn, txn_db, name_hash, cache)?;
-            results.push((weight, src_id, dst_id, edge_name));
+            results.push((weight, src_id, dst_id, edge_name, version));
         }
 
         Ok(results)
@@ -2964,7 +2989,7 @@ impl TransactionQueryExecutor for OutgoingEdges {
 /// Implement TransactionQueryExecutor for IncomingEdges
 /// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
 impl TransactionQueryExecutor for IncomingEdges {
-    type Output = Vec<(Option<f64>, DstId, SrcId, EdgeName)>;
+    type Output = Vec<(Option<EdgeWeight>, DstId, SrcId, EdgeName, Version)>;
 
     fn execute_in_transaction(
         &self,
@@ -2991,7 +3016,8 @@ impl TransactionQueryExecutor for IncomingEdges {
         let prefix = self.id.into_bytes();
         // Use HashSet for deduplication with versioned keys
         let mut seen_edges: std::collections::HashSet<(Id, Id, NameHash)> = std::collections::HashSet::new();
-        let mut edges_with_hash: Vec<(Option<f64>, DstId, SrcId, NameHash)> = Vec::new();
+        let mut edges_with_hash: Vec<(Option<EdgeWeight>, DstId, SrcId, NameHash, Version)> =
+            Vec::new();
 
         // NOTE: We use iterator_cf instead of prefix_iterator_cf because the CF has a
         // 40-byte prefix extractor but we're searching with a 16-byte prefix (dst_id only).
@@ -3030,27 +3056,32 @@ impl TransactionQueryExecutor for IncomingEdges {
                 continue;
             }
 
-            // Lookup weight from ForwardEdges CF via prefix scan
-            let weight = if let Some((_, forward_value)) =
-                find_current_forward_edge_txn(txn, txn_db, source_id, dest_id, edge_name_hash)?
-            {
-                // Skip if deleted
-                if forward_value.5 {
-                    continue;
+            // Lookup weight/version from ForwardEdges CF via prefix scan
+            let (weight, version) = match find_current_forward_edge_txn(
+                txn,
+                txn_db,
+                source_id,
+                dest_id,
+                edge_name_hash,
+            )? {
+                Some((_, forward_value)) => {
+                    // Skip if deleted
+                    if forward_value.5 {
+                        continue;
+                    }
+                    (forward_value.2, forward_value.4)
                 }
-                forward_value.2 // Extract weight from field 2
-            } else {
-                None
+                None => continue,
             };
 
-            edges_with_hash.push((weight, dest_id, source_id, edge_name_hash));
+            edges_with_hash.push((weight, dest_id, source_id, edge_name_hash, version));
         }
 
         // Resolve NameHashes to Strings (uses cache)
         let mut results = Vec::with_capacity(edges_with_hash.len());
-        for (weight, dst_id, src_id, name_hash) in edges_with_hash {
+        for (weight, dst_id, src_id, name_hash, version) in edges_with_hash {
             let edge_name = resolve_name_from_txn(txn, txn_db, name_hash, cache)?;
-            results.push((weight, dst_id, src_id, edge_name));
+            results.push((weight, dst_id, src_id, edge_name, version));
         }
 
         Ok(results)
@@ -3060,7 +3091,7 @@ impl TransactionQueryExecutor for IncomingEdges {
 /// Implement TransactionQueryExecutor for AllNodes
 /// (claude, 2026-02-06, in-progress: VERSIONING iteration with deduplication)
 impl TransactionQueryExecutor for AllNodes {
-    type Output = Vec<(Id, NodeName, NodeSummary)>;
+    type Output = Vec<(Id, NodeName, NodeSummary, Version)>;
 
     fn execute_in_transaction(
         &self,
@@ -3133,7 +3164,7 @@ impl TransactionQueryExecutor for AllNodes {
                 let node_name = resolve_name_from_txn(txn, txn_db, value.2, cache)?;
                 // Resolve SummaryHash to NodeSummary (from cold CF) - index 3
                 let summary = resolve_node_summary_from_txn(txn, txn_db, value.3)?;
-                results.push((node_id, node_name, summary));
+                results.push((node_id, node_name, summary, value.4));
             }
 
             last_node_id = Some(node_id);
@@ -3146,7 +3177,7 @@ impl TransactionQueryExecutor for AllNodes {
 /// Implement TransactionQueryExecutor for AllEdges
 /// (claude, 2026-02-06, in-progress: VERSIONING iteration with deduplication)
 impl TransactionQueryExecutor for AllEdges {
-    type Output = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
+    type Output = Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>;
 
     fn execute_in_transaction(
         &self,
@@ -3190,7 +3221,8 @@ impl TransactionQueryExecutor for AllEdges {
 
         // Use HashSet for deduplication with versioned keys
         let mut seen_edges: std::collections::HashSet<(Id, Id, NameHash)> = std::collections::HashSet::new();
-        let mut edges_with_hash: Vec<(Option<f64>, SrcId, DstId, NameHash)> = Vec::new();
+        let mut edges_with_hash: Vec<(Option<EdgeWeight>, SrcId, DstId, NameHash, Version)> =
+            Vec::new();
 
         for item in iter {
             let (key_bytes, value_bytes) = item?;
@@ -3223,15 +3255,15 @@ impl TransactionQueryExecutor for AllEdges {
             let edge_topology = (source_id, dest_id, edge_name_hash);
             if seen_edges.insert(edge_topology) {
                 let weight = value.2;
-                edges_with_hash.push((weight, source_id, dest_id, edge_name_hash));
+                edges_with_hash.push((weight, source_id, dest_id, edge_name_hash, value.4));
             }
         }
 
         // Resolve NameHashes to Strings (uses cache)
         let mut results = Vec::with_capacity(edges_with_hash.len());
-        for (weight, src_id, dst_id, name_hash) in edges_with_hash {
+        for (weight, src_id, dst_id, name_hash, version) in edges_with_hash {
             let edge_name = resolve_name_from_txn(txn, txn_db, name_hash, cache)?;
-            results.push((weight, src_id, dst_id, edge_name));
+            results.push((weight, src_id, dst_id, edge_name, version));
         }
 
         Ok(results)
@@ -3546,7 +3578,7 @@ mod tests {
         let consumer_handle = spawn_consumer(consumer);
 
         // Query the node we just created
-        let (returned_name, returned_summary) = NodeById::new(node_id, None)
+        let (returned_name, returned_summary, _version) = NodeById::new(node_id, None)
             .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
@@ -3658,7 +3690,7 @@ mod tests {
         let consumer_handle = spawn_consumer(consumer);
 
         // Query the edge using EdgeSummaryBySrcDstName with Runnable pattern
-        let (returned_summary, returned_weight) =
+        let (returned_summary, returned_weight, _version) =
             EdgeSummaryBySrcDstName::new(source_id, dest_id, edge_name.to_string(), None)
                 .run(&reader, Duration::from_secs(5))
                 .await
@@ -4382,7 +4414,7 @@ mod tests {
         assert_eq!(results.len(), 5);
 
         // Verify each node is present
-        for (id, name, _summary) in &results {
+        for (id, name, _summary, _version) in &results {
             assert!(node_ids.contains(id));
             assert!(name.starts_with("node_"));
         }
@@ -4459,7 +4491,7 @@ mod tests {
         assert_eq!(results.len(), 2);
 
         // Verify only existing IDs are in results
-        for (id, _name, _summary) in &results {
+        for (id, _name, _summary, _version) in &results {
             assert!(existing_ids.contains(id));
         }
 
@@ -4578,7 +4610,7 @@ mod tests {
         assert_eq!(results.len(), 5, "Should return all 5 nodes");
 
         // Verify each node has expected data
-        for (id, name, summary) in &results {
+        for (id, name, summary, _version) in &results {
             assert!(!id.is_nil(), "Node ID should not be nil");
             assert!(name.starts_with("node_"), "Node name should start with 'node_'");
             assert!(
@@ -4653,8 +4685,10 @@ mod tests {
         assert_eq!(page2.len(), 3, "Second page should have 3 nodes");
 
         // Ensure no overlap between pages
-        let page1_ids: std::collections::HashSet<_> = page1.iter().map(|(id, _, _)| *id).collect();
-        let page2_ids: std::collections::HashSet<_> = page2.iter().map(|(id, _, _)| *id).collect();
+        let page1_ids: std::collections::HashSet<_> =
+            page1.iter().map(|(id, _, _, _)| *id).collect();
+        let page2_ids: std::collections::HashSet<_> =
+            page2.iter().map(|(id, _, _, _)| *id).collect();
         assert!(
             page1_ids.is_disjoint(&page2_ids),
             "Pages should not overlap"
@@ -4754,12 +4788,13 @@ mod tests {
         assert_eq!(results.len(), 2, "Should return 2 edges");
 
         // Verify edge data
-        let edge_names: Vec<_> = results.iter().map(|(_, _, _, name)| name.as_str()).collect();
+        let edge_names: Vec<_> =
+            results.iter().map(|(_, _, _, name, _)| name.as_str()).collect();
         assert!(edge_names.contains(&"connects"), "Should contain 'connects' edge");
         assert!(edge_names.contains(&"links"), "Should contain 'links' edge");
 
         // Verify weights are present
-        for (weight, _, _, _) in &results {
+        for (weight, _, _, _, _version) in &results {
             assert!(weight.is_some(), "Edge weight should be present");
         }
 

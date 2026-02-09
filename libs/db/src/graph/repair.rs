@@ -35,7 +35,7 @@ use super::schema::{
     ReverseEdges, ReverseEdgeCfKey, ReverseEdgeCfValue,
     GraphMeta, GraphMetaCfKey, GraphMetaCfValue, GraphMetaField,
 };
-use super::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord, Storage};
+use super::{ColumnFamily, HotColumnFamilyRecord, Storage};
 
 // ============================================================================
 // Configuration

@@ -14,7 +14,6 @@ use motlie_db::fulltext::{
 use motlie_db::graph::mutation::{AddEdge, AddNode, AddNodeFragment};
 use motlie_db::writer::Runnable as MutationRunnable;
 use motlie_db::graph::query::{NodeById, OutgoingEdges};
-use motlie_db::reader::Runnable as QueryRunnable;
 use motlie_db::graph::reader::{
     create_query_reader, spawn_query_consumer_pool_shared, ReaderConfig,
 };

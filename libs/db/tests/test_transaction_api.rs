@@ -67,7 +67,7 @@ async fn test_transaction_write_then_read() {
     println!("  Written node {} (not committed)", node_id);
 
     // Read the node back - should see uncommitted write!
-    let (name, summary) = txn.read(NodeById::new(node_id, None)).unwrap();
+    let (name, summary, _version) = txn.read(NodeById::new(node_id, None)).unwrap();
     assert_eq!(name, node_name);
     println!("  Read node back: name='{}' (read-your-writes works!)", name);
 
@@ -80,7 +80,7 @@ async fn test_transaction_write_then_read() {
 
     // After commit, verify data is visible in a new transaction
     let verify_txn = writer.transaction().unwrap();
-    let (verify_name, _) = verify_txn.read(NodeById::new(node_id, None)).unwrap();
+    let (verify_name, _, _version) = verify_txn.read(NodeById::new(node_id, None)).unwrap();
     assert_eq!(verify_name, node_name, "Node should be visible after commit");
     verify_txn.rollback().unwrap();
     println!("  Verified node is visible after commit");
@@ -149,7 +149,7 @@ async fn test_transaction_interleaved_writes_reads() {
     println!("  Written vector fragment");
 
     // 3. Read the node back (simulating greedy search would read this)
-    let (name, _summary) = txn.read(NodeById::new(new_node_id, None)).unwrap();
+    let (name, _summary, _version) = txn.read(NodeById::new(new_node_id, None)).unwrap();
     assert_eq!(name, "NewVector");
     println!("  Read new node (for greedy search): {}", name);
 
@@ -334,7 +334,7 @@ async fn test_transaction_all_query_types() {
     println!("  Added 3 edges");
 
     // Test NodeById
-    let (name, _) = txn.read(NodeById::new(node_a, None)).unwrap();
+    let (name, _, _version) = txn.read(NodeById::new(node_a, None)).unwrap();
     assert_eq!(name, "NodeA");
     println!("  ✓ NodeById works");
 
@@ -559,7 +559,7 @@ async fn test_transaction_commit_visibility() {
     println!("  Step 1: Written new node and fragment");
 
     // Step 2: Read-your-writes - verify uncommitted node is readable
-    let (name, _) = txn.read(NodeById::new(new_node_id, None)).unwrap();
+    let (name, _, _version) = txn.read(NodeById::new(new_node_id, None)).unwrap();
     assert_eq!(name, "NewNode");
     println!("  Step 2: Read-your-writes OK (uncommitted node readable)");
 

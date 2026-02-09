@@ -28,7 +28,7 @@ use super::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord};
 use super::schema::{
     self, is_active_at_time, DstId, EdgeName, EdgeSummary, EdgeSummaries, EdgeSummaryCfKey,
     FragmentContent, Names, NameCfKey, NodeName, NodeSummary, NodeSummaries, NodeSummaryCfKey,
-    SrcId, ActivePeriod,
+    SrcId, ActivePeriod, Version,
 };
 use super::Storage;
 use crate::{Id, TimestampMilli};
@@ -198,6 +198,7 @@ pub struct NodeRecord {
     pub name: NodeName,
     pub summary: NodeSummary,
     pub valid_range: Option<ActivePeriod>,
+    pub version: Version,
 }
 
 /// A forward edge record as seen by scan visitors.
@@ -207,8 +208,9 @@ pub struct EdgeRecord {
     pub dst_id: DstId,
     pub name: EdgeName,
     pub summary: EdgeSummary,
-    pub weight: Option<f64>,
+    pub weight: Option<schema::EdgeWeight>,
     pub valid_range: Option<ActivePeriod>,
+    pub version: Version,
 }
 
 /// A reverse edge record as seen by scan visitors (index only, no summary/weight).
@@ -659,6 +661,7 @@ impl Visitable for AllNodes {
                     name,
                     summary,
                     valid_range: value.1, // ActivePeriod at index 1
+                    version: value.4,
                 })
             },
             |record| &record.valid_range,
@@ -750,6 +753,7 @@ impl Visitable for AllEdges {
                     summary,
                     weight: value.2,           // Weight at index 2
                     valid_range: value.1,      // ActivePeriod at index 1
+                    version: value.4,
                 })
             },
             |record| &record.valid_range,

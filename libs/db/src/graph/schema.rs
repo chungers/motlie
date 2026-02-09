@@ -285,7 +285,7 @@ pub(crate) struct ForwardEdgeCfKey(
 pub(crate) struct ForwardEdgeCfValue(
     pub(crate) Option<ValidUntil>,   // Field 0: System time when version stopped being valid (None = current)
     pub(crate) Option<ActivePeriod>, // Field 1: Business validity (application time)
-    pub(crate) Option<f64>,          // Field 2: Optional weight
+    pub(crate) Option<EdgeWeight>,          // Field 2: Optional weight
     pub(crate) Option<SummaryHash>,  // Field 3: Content hash; full summary in EdgeSummaries CF
     pub(crate) Version,              // Field 4: Monotonic version for optimistic locking
     pub(crate) bool,                 // Field 5: Deleted flag (tombstone)
@@ -1356,7 +1356,7 @@ pub(crate) struct EdgeVersionHistoryCfKey(
 pub(crate) struct EdgeVersionHistoryCfValue(
     pub(crate) TimestampMilli,        // UpdatedAt: when this version was created
     pub(crate) Option<SummaryHash>,   // Content hash at this version
-    pub(crate) Option<f64>,           // Weight at this version
+    pub(crate) Option<EdgeWeight>,           // Weight at this version
     pub(crate) Option<ActivePeriod>,  // Business validity at this version
 );
 
