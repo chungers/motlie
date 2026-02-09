@@ -443,17 +443,17 @@ async fn execute_nodes_query(
     storage: &super::reader::CompositeStorage,
 ) -> Result<Vec<NodeResult>> {
     use crate::fulltext::reader::Processor as FulltextProcessor;
-    use crate::graph::reader::Processor as GraphProcessor;
+    use crate::graph::Processor as GraphProcessor;
 
     let fulltext_storage = FulltextProcessor::storage(storage.fulltext.as_ref());
     let hits: Vec<NodeHit> = fulltext::query::Nodes::execute_params(&query.params, fulltext_storage).await?;
 
-    let graph_storage = GraphProcessor::storage(storage.graph.as_ref());
+    let graph_processor: &GraphProcessor = storage.graph.as_ref();
     let mut results = Vec::with_capacity(hits.len());
 
     for hit in hits.into_iter().skip(query.offset) {
         let query = graph::query::NodeById::new(hit.id, None);
-        match query.execute(graph_storage).await {
+        match graph_processor.node_by_id(&query).await {
             Ok((name, summary, _version)) => results.push((hit.id, name, summary)),
             Err(_) => {
                 tracing::debug!(id = %hit.id, "Node in fulltext but not in graph, skipping");
@@ -469,12 +469,12 @@ async fn execute_edges_query(
     storage: &super::reader::CompositeStorage,
 ) -> Result<Vec<EdgeResult>> {
     use crate::fulltext::reader::Processor as FulltextProcessor;
-    use crate::graph::reader::Processor as GraphProcessor;
+    use crate::graph::Processor as GraphProcessor;
 
     let fulltext_storage = FulltextProcessor::storage(storage.fulltext.as_ref());
     let hits: Vec<EdgeHit> = fulltext::query::Edges::execute_params(&query.params, fulltext_storage).await?;
 
-    let graph_storage = GraphProcessor::storage(storage.graph.as_ref());
+    let graph_processor: &GraphProcessor = storage.graph.as_ref();
     let mut results = Vec::with_capacity(hits.len());
 
     for hit in hits.into_iter().skip(query.offset) {
@@ -484,7 +484,7 @@ async fn execute_edges_query(
             hit.edge_name.clone(),
             None,
         );
-        match query.execute(graph_storage).await {
+        match graph_processor.edge_summary_by_src_dst_name(&query).await {
             Ok((summary, _weight, _version)) => {
                 results.push((hit.src_id, hit.dst_id, hit.edge_name, summary))
             }

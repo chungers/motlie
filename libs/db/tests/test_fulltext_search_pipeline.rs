@@ -24,7 +24,7 @@ use motlie_db::graph::query::{EdgeSummaryBySrcDstName, NodeById};
 // Only import graph::query::Runnable - fulltext queries use .run() on types
 // that only implement fulltext::query::Runnable so there's no ambiguity
 use motlie_db::graph::reader::{
-    create_query_reader, Reader as GraphReader,
+    create_reader_with_storage, Reader as GraphReader,
     spawn_query_consumer_pool_shared, ReaderConfig,
 };
 use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
@@ -85,12 +85,13 @@ fn setup_query_infrastructure(
     // Graph query consumers
     let mut storage = Storage::readwrite(db_path);
     storage.ready().unwrap();
-    let graph = Arc::new(Processor::new(Arc::new(storage)));
+    let storage = Arc::new(storage);
+    let graph = Arc::new(Processor::new(storage.clone()));
 
     let reader_config = ReaderConfig {
         channel_buffer_size: 100,
     };
-    let (graph_reader, graph_query_receiver) = create_query_reader(reader_config);
+    let (graph_reader, graph_query_receiver) = create_reader_with_storage(storage, reader_config);
     let graph_consumer_handles =
         spawn_query_consumer_pool_shared(graph_query_receiver, graph, 2);
 

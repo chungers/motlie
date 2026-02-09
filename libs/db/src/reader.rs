@@ -334,7 +334,7 @@ impl ReaderBuilder {
 
         // Create graph reader and consumer pool
         let (graph_reader, graph_receiver) =
-            graph::reader::create_query_reader(self.config.graph.clone());
+            graph::reader::create_reader_with_processor(self.graph.clone(), self.config.graph.clone());
         let graph_handles = graph::reader::spawn_consumer_pool_with_processor(
             graph_receiver,
             self.graph.clone(),
