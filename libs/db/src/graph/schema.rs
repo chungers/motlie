@@ -50,7 +50,6 @@ use super::ColumnFamily;
 use super::ColumnFamilyConfig;
 use super::ColumnFamilySerde;
 use super::HotColumnFamilyRecord;
-use super::ActivePeriodPatchable;
 
 use crate::DataUrl;
 use crate::Id;
@@ -198,64 +197,10 @@ pub(crate) struct NodeCfValue(
     pub(crate) bool,                 // Deleted flag (tombstone) for soft deletes
 );
 
-impl ActivePeriodPatchable for Nodes {
-    /// (claude, 2026-02-06, in-progress: VERSIONING ActivePeriod is now at index 1)
-    fn patch_valid_range(
-        &self,
-        old_value: &[u8],
-        new_range: ActivePeriod,
-    ) -> Result<Vec<u8>, anyhow::Error> {
-        use crate::graph::HotColumnFamilyRecord;
-
-        let mut value = Nodes::value_from_bytes(old_value)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
-        value.1 = Some(new_range);  // ActivePeriod is now at index 1
-        Nodes::value_to_bytes(&value)
-            .map(|aligned_vec| aligned_vec.to_vec())
-            .map_err(|e| anyhow::anyhow!("Failed to serialize value: {}", e))
-    }
-}
-
 /// Id of edge source node
 pub type SrcId = Id;
 /// Id of edge destination node
 pub type DstId = Id;
-
-impl ActivePeriodPatchable for ForwardEdges {
-    /// (claude, 2026-02-06, in-progress: VERSIONING ActivePeriod is now at index 1)
-    fn patch_valid_range(
-        &self,
-        old_value: &[u8],
-        new_range: ActivePeriod,
-    ) -> Result<Vec<u8>, anyhow::Error> {
-        use crate::graph::HotColumnFamilyRecord;
-
-        let mut value = ForwardEdges::value_from_bytes(old_value)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
-        value.1 = Some(new_range);  // ActivePeriod is now at index 1
-        ForwardEdges::value_to_bytes(&value)
-            .map(|aligned_vec| aligned_vec.to_vec())
-            .map_err(|e| anyhow::anyhow!("Failed to serialize value: {}", e))
-    }
-}
-
-impl ActivePeriodPatchable for ReverseEdges {
-    /// (claude, 2026-02-06, in-progress: VERSIONING ActivePeriod is now at index 1)
-    fn patch_valid_range(
-        &self,
-        old_value: &[u8],
-        new_range: ActivePeriod,
-    ) -> Result<Vec<u8>, anyhow::Error> {
-        use crate::graph::HotColumnFamilyRecord;
-
-        let mut value = ReverseEdges::value_from_bytes(old_value)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
-        value.1 = Some(new_range);  // ActivePeriod is now at index 1
-        ReverseEdges::value_to_bytes(&value)
-            .map(|aligned_vec| aligned_vec.to_vec())
-            .map_err(|e| anyhow::anyhow!("Failed to serialize value: {}", e))
-    }
-}
 
 /// Forward edges column family (HOT - optimized for graph traversal).
 ///

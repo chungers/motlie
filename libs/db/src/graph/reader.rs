@@ -138,12 +138,6 @@ impl Reader {
         Reader { sender, processor: Some(processor) }
     }
 
-    /// Get the processor if configured.
-    /// (claude, 2026-02-07, FIXED: P2.3 - Processor accessor like vector::Reader:118)
-    pub(crate) fn processor(&self) -> Option<&Arc<GraphProcessor>> {
-        self.processor.as_ref()
-    }
-
     /// Send a query to the reader queue.
     ///
     /// Note: Most users should use `Runnable::run()` instead.
@@ -523,27 +517,6 @@ pub fn spawn_consumer_pool_with_processor(
     );
 
     handles
-}
-
-/// Create reader and spawn consumers with processor, also returning the processor.
-///
-/// Convenience helper that returns all components for subsystem integration.
-///
-/// # Arguments
-/// * `storage` - Shared storage instance
-/// * `config` - Reader configuration
-/// * `num_workers` - Number of query workers to spawn
-///
-/// # Returns
-/// Tuple of (Reader, Arc<GraphProcessor>, Vec<JoinHandle>)
-pub(crate) fn create_reader_with_processor_and_spawn(
-    storage: Arc<Storage>,
-    config: ReaderConfig,
-    num_workers: usize,
-) -> (Reader, Arc<GraphProcessor>, Vec<JoinHandle<()>>) {
-    let processor = Arc::new(GraphProcessor::new(storage));
-    let (reader, handles) = spawn_query_consumers_with_processor(processor.clone(), config, num_workers);
-    (reader, processor, handles)
 }
 
 // ============================================================================

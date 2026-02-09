@@ -10,7 +10,7 @@ use super::summary::{
 use super::super::mutation::{
     AddNode, DeleteNode, RestoreNode, UpdateNode,
 };
-use super::super::name_hash::{NameCache, NameHash};
+use super::super::name_hash::NameCache;
 use super::super::schema::{
     self, NodeCfKey, NodeCfValue, NodeSummaryIndex, NodeSummaryIndexCfKey,
     NodeSummaryIndexCfValue, NodeVersionHistory, NodeVersionHistoryCfKey,
@@ -559,59 +559,4 @@ fn find_current_node_version(
         }
     }
     Ok(None)
-}
-
-fn find_connected_edges(
-    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-    txn_db: &rocksdb::TransactionDB,
-    node_id: Id,
-) -> Result<Vec<(Id, Id, NameHash)>> {
-    use super::super::schema::{
-        ForwardEdgeCfKey, ForwardEdgeCfValue, ForwardEdges, ReverseEdgeCfKey, ReverseEdgeCfValue,
-        ReverseEdges,
-    };
-
-    let mut edge_topologies = std::collections::HashSet::new();
-
-    let forward_cf = txn_db
-        .cf_handle(ForwardEdges::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
-    let forward_prefix = node_id.into_bytes().to_vec();
-    let forward_iter = txn.prefix_iterator_cf(forward_cf, &forward_prefix);
-
-    for item in forward_iter {
-        let (key_bytes, value_bytes) = item?;
-        if !key_bytes.starts_with(&forward_prefix) {
-            break;
-        }
-        let key: ForwardEdgeCfKey = ForwardEdges::key_from_bytes(&key_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize ForwardEdge key: {}", e))?;
-        let value: ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&value_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize ForwardEdge value: {}", e))?;
-        if value.0.is_none() {
-            edge_topologies.insert((key.0, key.1, key.2));
-        }
-    }
-
-    let reverse_cf = txn_db
-        .cf_handle(ReverseEdges::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("ReverseEdges CF not found"))?;
-    let reverse_prefix = node_id.into_bytes().to_vec();
-    let reverse_iter = txn.prefix_iterator_cf(reverse_cf, &reverse_prefix);
-
-    for item in reverse_iter {
-        let (key_bytes, value_bytes) = item?;
-        if !key_bytes.starts_with(&reverse_prefix) {
-            break;
-        }
-        let key: ReverseEdgeCfKey = ReverseEdges::key_from_bytes(&key_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize ReverseEdge key: {}", e))?;
-        let value: ReverseEdgeCfValue = ReverseEdges::value_from_bytes(&value_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize ReverseEdge value: {}", e))?;
-        if value.0.is_none() {
-            edge_topologies.insert((key.1, key.0, key.2));
-        }
-    }
-
-    Ok(edge_topologies.into_iter().collect())
 }

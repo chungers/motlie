@@ -698,7 +698,7 @@ impl Visitable for AllEdges {
             .unwrap_or_default();
 
         // Track last seen edge topology for deduplication
-        let mut last_seen_edge: Option<(crate::Id, crate::Id, NameHash)> = None;
+        let last_seen_edge: Option<(crate::Id, crate::Id, NameHash)> = None;
 
         iterate_and_visit_hot::<schema::ForwardEdges, _, _, _, _>(
             storage,
@@ -790,7 +790,7 @@ impl Visitable for AllReverseEdges {
             .unwrap_or_default();
 
         // Track last seen edge topology for deduplication
-        let mut last_seen_edge: Option<(crate::Id, crate::Id, NameHash)> = None;
+        let last_seen_edge: Option<(crate::Id, crate::Id, NameHash)> = None;
 
         iterate_and_visit_hot::<schema::ReverseEdges, _, _, _, _>(
             storage,
