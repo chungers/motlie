@@ -23,7 +23,6 @@ use motlie_db::writer::Runnable as MutationRunnable;
 use motlie_db::graph::query::{EdgeSummaryBySrcDstName, NodeById};
 // Only import graph::query::Runnable - fulltext queries use .run() on types
 // that only implement fulltext::query::Runnable so there's no ambiguity
-use motlie_db::reader::Runnable as GraphQueryRunnable;
 use motlie_db::graph::reader::{
     create_query_reader, Reader as GraphReader,
     spawn_query_consumer_pool_shared, ReaderConfig,
@@ -32,7 +31,7 @@ use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
 use motlie_db::graph::writer::{
     create_mutation_writer, spawn_mutation_consumer_with_next, Writer as GraphWriter, WriterConfig,
 };
-use motlie_db::graph::{Graph, Storage};
+use motlie_db::graph::{Processor, Storage};
 use motlie_db::{DataUrl, Id, TimestampMilli};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -86,7 +85,7 @@ fn setup_query_infrastructure(
     // Graph query consumers
     let mut storage = Storage::readwrite(db_path);
     storage.ready().unwrap();
-    let graph = Arc::new(Graph::new(Arc::new(storage)));
+    let graph = Arc::new(Processor::new(Arc::new(storage)));
 
     let reader_config = ReaderConfig {
         channel_buffer_size: 100,
@@ -241,7 +240,7 @@ async fn test_fulltext_node_search_resolves_to_rocksdb() {
             .await;
 
         match node_result {
-            Ok((name, summary)) => {
+            Ok((name, summary, _version)) => {
                 println!("      -> Resolved to node: name='{}', summary='{}'", name, summary.decode_string().unwrap_or_default());
                 resolved_ids.insert(hit.id);
 
@@ -275,7 +274,7 @@ async fn test_fulltext_node_search_resolves_to_rocksdb() {
     assert!(rust_hit.is_some(), "Should find the Rust node");
 
     // Verify hit resolves to correct node
-    let (name, _) = NodeById::new(rust_id, None)
+    let (name, _, _version) = NodeById::new(rust_id, None)
         .run(&graph_reader, timeout)
         .await
         .unwrap();
@@ -520,7 +519,7 @@ async fn test_fulltext_edge_search_resolves_to_rocksdb() {
         .await;
 
         match edge_result {
-            Ok((summary, weight)) => {
+            Ok((summary, weight, _version)) => {
                 println!("      -> Resolved to edge: summary='{}', weight={:?}",
                     summary.decode_string().unwrap_or_default(), weight);
                 resolved_edges.insert((hit.src_id, hit.dst_id, hit.edge_name.clone()));
@@ -561,7 +560,7 @@ async fn test_fulltext_edge_search_resolves_to_rocksdb() {
     assert!(js_edge_hit.is_some(), "Should find JavaScript -> WebDev edge");
 
     // Verify it resolves correctly
-    let (summary, _) = EdgeSummaryBySrcDstName::new(
+    let (summary, _, _version) = EdgeSummaryBySrcDstName::new(
         javascript_id,
         webdev_id,
         "powers".to_string(),
@@ -878,7 +877,7 @@ async fn test_fulltext_fragment_deduplication_behavior() {
     );
 
     // Verify hit resolves to correct node
-    let (name, _) = NodeById::new(hit.id, None)
+    let (name, _, _version) = NodeById::new(hit.id, None)
         .run(&graph_reader, timeout)
         .await
         .unwrap();

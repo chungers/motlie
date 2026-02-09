@@ -49,10 +49,10 @@ pub use writer::{
 
 /// Full-text search processor using Tantivy, wrapping Arc<Storage>.
 ///
-/// Following the same pattern as `graph::Graph` wrapping `Arc<graph::Storage>`,
+/// Following the same pattern as `graph::Processor` wrapping `Arc<graph::Storage>`,
 /// this type provides the interface for both mutation processing and query processing.
 ///
-/// # Usage Pattern (matches graph::Graph)
+/// # Usage Pattern (matches graph::Processor)
 /// ```no_run
 /// use motlie_db::fulltext::{Storage, Index};
 /// use std::sync::Arc;
@@ -83,7 +83,7 @@ impl Index {
     /// Create a new Index from Arc<Storage>.
     ///
     /// The Storage should already be `ready()` before creating the Index.
-    /// This follows the same pattern as `graph::Graph::new(Arc<Storage>)`.
+    /// This follows the same pattern as `graph::Processor::new(Arc<Storage>)`.
     pub fn new(storage: Arc<Storage>) -> Self {
         Self { storage }
     }
@@ -210,7 +210,7 @@ pub(crate) fn format_bytes(bytes: usize) -> String {
 mod tests {
     use super::*;
     use crate::graph::mutation::{
-        AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation, UpdateNodeValidSinceUntil,
+        AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation, UpdateNode,
     };
     use crate::graph::writer::Processor;
     use crate::{DataUrl, Id, TimestampMilli};
@@ -427,13 +427,14 @@ mod tests {
         assert_eq!(top_docs.len(), 1);
 
         // Now update its temporal range (which should delete the document)
-        let update = Mutation::UpdateNodeValidSinceUntil(UpdateNodeValidSinceUntil {
+        let update = Mutation::UpdateNode(UpdateNode {
             id: node_id,
-            temporal_range: crate::ActivePeriod(
+            expected_version: 1,
+            new_active_period: Some(Some(crate::ActivePeriod(
                 Some(TimestampMilli(0)),
                 Some(TimestampMilli(1000)),
-            ),
-            reason: "test invalidation".to_string(),
+            ))),
+            new_summary: None,
         });
 
         // Process the update - this calls delete_term

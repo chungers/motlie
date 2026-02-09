@@ -1,8 +1,7 @@
-//! Mutation module providing mutation types and their business logic implementations.
+//! Mutation module providing mutation types and dispatch glue.
 //!
-//! This module contains only business logic - mutation type definitions and their
-//! MutationExecutor implementations. Infrastructure (traits, Writer, Consumer, spawn
-//! functions) is in the `writer` module.
+//! Business logic lives in `graph::ops`. MutationExecutor impls delegate to ops helpers.
+//! Infrastructure (traits, Writer, Consumer, spawn functions) is in the `writer` module.
 
 use std::sync::Mutex;
 
@@ -12,14 +11,99 @@ use tokio::sync::oneshot;
 use crate::rocksdb::MutationCodec;
 
 use super::name_hash::NameHash;
+use super::ops;
 use super::schema::{
     self, EdgeFragmentCfKey, EdgeFragmentCfValue, EdgeFragments, NodeFragmentCfKey,
-    NodeFragmentCfValue, NodeFragments,
+    NodeFragmentCfValue, NodeFragments, Version,
 };
 use super::writer::{MutationExecutor, Writer};
-use super::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord};
 use crate::writer::Runnable;
 use crate::{Id, TimestampMilli};
+use crate::request::{ReplyEnvelope, RequestMeta};
+
+// ============================================================================
+// Execution Options + Replies
+// ============================================================================
+
+/// Execution options applied at runtime (not part of mutation payload).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ExecOptions {
+    pub dry_run: bool,
+}
+
+/// Mutation execution result used by run_with_result paths.
+#[derive(Debug, Clone)]
+pub enum MutationResult {
+    AddNode { id: Id, version: Version },
+    AddEdge { version: Version },
+    AddNodeFragment,
+    AddEdgeFragment,
+    UpdateNode { id: Id, version: Version },
+    UpdateEdge { version: Version },
+    DeleteNode { id: Id, version: Version },
+    DeleteEdge { version: Version },
+    RestoreNode { id: Id, version: Version },
+    RestoreEdge { version: Version },
+    Flush,
+}
+
+impl MutationResult {
+    fn as_update_node(self) -> Result<(Id, Version)> {
+        match self {
+            MutationResult::UpdateNode { id, version } => Ok((id, version)),
+            other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
+        }
+    }
+
+    fn as_add_node(self) -> Result<(Id, Version)> {
+        match self {
+            MutationResult::AddNode { id, version } => Ok((id, version)),
+            other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
+        }
+    }
+
+    fn as_restore_node(self) -> Result<(Id, Version)> {
+        match self {
+            MutationResult::RestoreNode { id, version } => Ok((id, version)),
+            other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
+        }
+    }
+
+    fn as_delete_node(self) -> Result<(Id, Version)> {
+        match self {
+            MutationResult::DeleteNode { id, version } => Ok((id, version)),
+            other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
+        }
+    }
+
+    fn as_add_edge(self) -> Result<Version> {
+        match self {
+            MutationResult::AddEdge { version } => Ok(version),
+            other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
+        }
+    }
+
+    fn as_update_edge(self) -> Result<Version> {
+        match self {
+            MutationResult::UpdateEdge { version } => Ok(version),
+            other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
+        }
+    }
+
+    fn as_restore_edge(self) -> Result<Version> {
+        match self {
+            MutationResult::RestoreEdge { version } => Ok(version),
+            other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
+        }
+    }
+
+    fn as_delete_edge(self) -> Result<Version> {
+        match self {
+            MutationResult::DeleteEdge { version } => Ok(version),
+            other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
+        }
+    }
+}
 
 // ============================================================================
 // Flush Marker
@@ -97,14 +181,17 @@ pub enum Mutation {
     AddEdge(AddEdge),
     AddNodeFragment(AddNodeFragment),
     AddEdgeFragment(AddEdgeFragment),
-    UpdateNodeValidSinceUntil(UpdateNodeValidSinceUntil),
-    UpdateEdgeValidSinceUntil(UpdateEdgeValidSinceUntil),
-    UpdateEdgeWeight(UpdateEdgeWeight),
     // CONTENT-ADDRESS: Update/Delete with optimistic locking
-    UpdateNodeSummary(UpdateNodeSummary),
-    UpdateEdgeSummary(UpdateEdgeSummary),
+    /// Consolidated node update: active_period and/or summary
+    UpdateNode(UpdateNode),
+    /// Consolidated edge update: weight, active_period, and/or summary
+    UpdateEdge(UpdateEdge),
     DeleteNode(DeleteNode),
     DeleteEdge(DeleteEdge),
+    // (codex, 2026-02-07, eval: VERSIONING plan includes RestoreNode/RestoreEdge and rollback mutations; missing here, so rollback API is incomplete.)
+    // (claude, 2026-02-07, FIXED: Added RestoreNode/RestoreEdge mutations below)
+    RestoreNode(RestoreNode),
+    RestoreEdge(RestoreEdge),
 
     /// Flush marker for synchronization.
     ///
@@ -135,6 +222,15 @@ pub struct AddNode {
     pub summary: schema::NodeSummary,
 }
 
+impl RequestMeta for AddNode {
+    type Reply = ReplyEnvelope<(Id, Version)>;
+    type Options = ExecOptions;
+
+    fn request_kind(&self) -> &'static str {
+        "add_node"
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AddEdge {
     /// The UUID of the source Node
@@ -156,7 +252,16 @@ pub struct AddEdge {
     pub summary: schema::EdgeSummary,
 
     /// Optional weight for weighted graph algorithms
-    pub weight: Option<f64>,
+    pub weight: Option<schema::EdgeWeight>,
+}
+
+impl RequestMeta for AddEdge {
+    type Reply = ReplyEnvelope<Version>;
+    type Options = ExecOptions;
+
+    fn request_kind(&self) -> &'static str {
+        "add_edge"
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -172,6 +277,15 @@ pub struct AddNodeFragment {
 
     /// The temporal validity range for this fragment
     pub valid_range: Option<schema::ActivePeriod>,
+}
+
+impl RequestMeta for AddNodeFragment {
+    type Reply = ReplyEnvelope<()>;
+    type Options = ExecOptions;
+
+    fn request_kind(&self) -> &'static str {
+        "add_node_fragment"
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -195,82 +309,96 @@ pub struct AddEdgeFragment {
     pub valid_range: Option<schema::ActivePeriod>,
 }
 
-#[derive(Debug, Clone)]
-pub struct UpdateNodeValidSinceUntil {
-    /// The UUID of the Node
-    pub id: Id,
+impl RequestMeta for AddEdgeFragment {
+    type Reply = ReplyEnvelope<()>;
+    type Options = ExecOptions;
 
-    /// The temporal validity range for this fragment
-    pub temporal_range: schema::ActivePeriod,
-
-    /// The reason for invalidation
-    pub reason: String,
+    fn request_kind(&self) -> &'static str {
+        "add_edge_fragment"
+    }
 }
 
-#[derive(Debug, Clone)]
-pub struct UpdateEdgeValidSinceUntil {
-    /// The UUID of the source Node
-    pub src_id: Id,
-
-    /// The UUID of the destination Node
-    pub dst_id: Id,
-
-    /// The name of the Edge
-    pub name: schema::EdgeName,
-
-    /// The temporal validity range for this edge
-    pub temporal_range: schema::ActivePeriod,
-
-    /// The reason for invalidation
-    pub reason: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct UpdateEdgeWeight {
-    /// The UUID of the source Node
-    pub src_id: Id,
-
-    /// The UUID of the destination Node
-    pub dst_id: Id,
-
-    /// The name of the Edge
-    pub name: schema::EdgeName,
-
-    /// The new weight value
-    pub weight: f64,
-}
-
-// ============================================================================
-// CONTENT-ADDRESS: Update/Delete Mutations with Optimistic Locking
-// (claude, 2026-02-02, implementing)
-// ============================================================================
-
-/// Update a node's summary with optimistic locking.
+/// Consolidated node update mutation with optimistic locking.
 ///
-/// This mutation:
-/// 1. Reads the current node to get version and old summary hash
-/// 2. Verifies version matches expected_version (optimistic lock check)
-/// 3. Increments version
-/// 4. Writes new summary to NodeSummaries CF
-/// 5. Flips old index entry to STALE
-/// 6. Writes new index entry with CURRENT marker
-/// 7. Updates Nodes CF with new version and summary hash
+/// All updates require node id and expected_version.
+/// Mutable fields are optional - only non-None fields are updated.
+/// At least one optional field must be Some for the mutation to have effect.
+///
+/// ## Version Semantics
+/// - `expected_version`: Must match current node version (optimistic locking)
+/// - On success, creates a new version
+/// - On version mismatch, returns `Err(VersionMismatch)`
+///
+/// ## Example
+/// ```rust,ignore
+/// use motlie_db::graph::UpdateNode;
+///
+/// // Update summary only
+/// let update = UpdateNode {
+///     id: node_id,
+///     expected_version: 1,
+///     new_active_period: None,
+///     new_summary: Some(NodeSummary::from_text("Updated description")),
+/// };
+/// update.run(&writer).await?;
+/// ```
 #[derive(Debug, Clone)]
-pub struct UpdateNodeSummary {
+pub struct UpdateNode {
     /// The UUID of the Node to update
     pub id: Id,
 
-    /// The new summary content
-    pub new_summary: schema::NodeSummary,
-
-    /// Expected version for optimistic locking
-    /// If the current version doesn't match, the update fails
+    /// Expected version for optimistic locking.
+    /// If the current version doesn't match, the update fails.
     pub expected_version: schema::Version,
+
+    /// Optional: Update active period (valid_since, valid_until)
+    /// - `None` = no change
+    /// - `Some(None)` = reset/clear active period
+    /// - `Some(Some(period))` = set to specific period
+    pub new_active_period: Option<Option<schema::ActivePeriod>>,
+
+    /// Optional: Update node summary/description
+    pub new_summary: Option<schema::NodeSummary>,
 }
 
-/// Update an edge's summary with optimistic locking.
+impl RequestMeta for UpdateNode {
+    type Reply = ReplyEnvelope<(Id, Version)>;
+    type Options = ExecOptions;
+
+    fn request_kind(&self) -> &'static str {
+        "update_node"
+    }
+}
+
+/// Consolidated edge update mutation with optimistic locking.
+///
+/// All updates require edge identity (src_id, dst_id, name) and expected_version.
+/// Mutable fields are optional - only non-None fields are updated.
+/// At least one optional field must be Some for the mutation to have effect.
+///
+/// ## Version Semantics
+/// - `expected_version`: Must match current edge version (optimistic locking)
+/// - On success, creates a new version
+/// - On version mismatch, returns `Err(VersionMismatch)`
+///
+/// ## Example
+/// ```rust,ignore
+/// use motlie_db::graph::UpdateEdge;
+///
+/// // Update weight only
+/// let update = UpdateEdge {
+///     src_id,
+///     dst_id,
+///     name: "knows".to_string(),
+///     expected_version: 1,
+///     new_weight: Some(Some(0.8)),
+///     new_active_period: None,
+///     new_summary: None,
+/// };
+/// update.run(&writer).await?;
+/// ```
 #[derive(Debug, Clone)]
-pub struct UpdateEdgeSummary {
+pub struct UpdateEdge {
     /// The UUID of the source Node
     pub src_id: Id,
 
@@ -280,12 +408,36 @@ pub struct UpdateEdgeSummary {
     /// The name of the Edge
     pub name: schema::EdgeName,
 
-    /// The new summary content
-    pub new_summary: schema::EdgeSummary,
-
-    /// Expected version for optimistic locking
+    /// Expected version for optimistic locking.
+    /// If the current version doesn't match, the update fails.
     pub expected_version: schema::Version,
+
+    /// Optional: Update edge weight
+    /// - `None` = no change
+    /// - `Some(None)` = reset/clear weight
+    /// - `Some(Some(value))` = set to specific weight
+    pub new_weight: Option<Option<schema::EdgeWeight>>,
+
+    /// Optional: Update active period (valid_since, valid_until)
+    /// - `None` = no change
+    /// - `Some(None)` = reset/clear active period
+    /// - `Some(Some(period))` = set to specific period
+    pub new_active_period: Option<Option<schema::ActivePeriod>>,
+
+    /// Optional: Update edge summary/description
+    pub new_summary: Option<schema::EdgeSummary>,
 }
+
+impl RequestMeta for UpdateEdge {
+    type Reply = ReplyEnvelope<schema::Version>;
+    type Options = ExecOptions;
+
+    fn request_kind(&self) -> &'static str {
+        "update_edge"
+    }
+}
+
+
 
 /// Delete a node with tombstone semantics.
 ///
@@ -305,6 +457,15 @@ pub struct DeleteNode {
     pub expected_version: schema::Version,
 }
 
+impl RequestMeta for DeleteNode {
+    type Reply = ReplyEnvelope<(Id, Version)>;
+    type Options = ExecOptions;
+
+    fn request_kind(&self) -> &'static str {
+        "delete_node"
+    }
+}
+
 /// Delete an edge with tombstone semantics.
 #[derive(Debug, Clone)]
 pub struct DeleteEdge {
@@ -319,6 +480,164 @@ pub struct DeleteEdge {
 
     /// Expected version for optimistic locking
     pub expected_version: schema::Version,
+}
+
+impl RequestMeta for DeleteEdge {
+    type Reply = ReplyEnvelope<Version>;
+    type Options = ExecOptions;
+
+    fn request_kind(&self) -> &'static str {
+        "delete_edge"
+    }
+}
+
+// (claude, 2026-02-07, FIXED: Added RestoreNode/RestoreEdge for VERSIONING rollback API)
+// (claude, 2026-02-07, FIXED: Changed to as_of timestamp per Codex Item 1 review)
+
+/// Restore a node to state at a previous time.
+///
+/// VERSIONING rollback: Finds the version that was active at `as_of` time
+/// in NodeVersionHistory, creates a new current version with that state.
+#[derive(Debug, Clone)]
+pub struct RestoreNode {
+    /// The UUID of the Node to restore
+    pub id: Id,
+
+    /// The timestamp to restore to (finds version active at this time)
+    pub as_of: crate::TimestampMilli,
+
+    /// Optional optimistic check against current version (if present).
+    pub expected_version: Option<Version>,
+}
+
+impl RequestMeta for RestoreNode {
+    type Reply = ReplyEnvelope<(Id, Version)>;
+    type Options = ExecOptions;
+
+    fn request_kind(&self) -> &'static str {
+        "restore_node"
+    }
+}
+
+/// Restore an edge to state at a previous time.
+///
+/// VERSIONING rollback: Finds the version that was active at `as_of` time
+/// in EdgeVersionHistory, creates a new current edge with that state.
+#[derive(Debug, Clone)]
+pub struct RestoreEdge {
+    /// The UUID of the source Node
+    pub src_id: Id,
+
+    /// The UUID of the destination Node
+    pub dst_id: Id,
+
+    /// The name of the Edge
+    pub name: schema::EdgeName,
+
+    /// The timestamp to restore to (finds version active at this time)
+    pub as_of: crate::TimestampMilli,
+
+    /// Optional optimistic check against current version (if present).
+    pub expected_version: Option<Version>,
+}
+
+impl RequestMeta for RestoreEdge {
+    type Reply = ReplyEnvelope<Version>;
+    type Options = ExecOptions;
+
+    fn request_kind(&self) -> &'static str {
+        "restore_edge"
+    }
+}
+
+// ============================================================================
+// MutationReply - typed reply mapping for each mutation type
+// ============================================================================
+
+impl MutationReply for AddNode {
+    type Reply = (Id, Version);
+
+    fn from_result(result: MutationResult) -> Result<Self::Reply> {
+        result.as_add_node()
+    }
+}
+
+impl MutationReply for AddEdge {
+    type Reply = Version;
+
+    fn from_result(result: MutationResult) -> Result<Self::Reply> {
+        result.as_add_edge()
+    }
+}
+
+impl MutationReply for AddNodeFragment {
+    type Reply = ();
+
+    fn from_result(result: MutationResult) -> Result<Self::Reply> {
+        match result {
+            MutationResult::AddNodeFragment => Ok(()),
+            other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
+        }
+    }
+}
+
+impl MutationReply for AddEdgeFragment {
+    type Reply = ();
+
+    fn from_result(result: MutationResult) -> Result<Self::Reply> {
+        match result {
+            MutationResult::AddEdgeFragment => Ok(()),
+            other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
+        }
+    }
+}
+
+impl MutationReply for UpdateNode {
+    type Reply = (Id, Version);
+
+    fn from_result(result: MutationResult) -> Result<Self::Reply> {
+        result.as_update_node()
+    }
+}
+
+impl MutationReply for UpdateEdge {
+    type Reply = Version;
+
+    fn from_result(result: MutationResult) -> Result<Self::Reply> {
+        result.as_update_edge()
+    }
+}
+
+impl MutationReply for DeleteNode {
+    type Reply = (Id, Version);
+
+    fn from_result(result: MutationResult) -> Result<Self::Reply> {
+        result.as_delete_node()
+    }
+}
+
+impl MutationReply for DeleteEdge {
+    type Reply = Version;
+
+    fn from_result(result: MutationResult) -> Result<Self::Reply> {
+        result.as_delete_edge()
+    }
+}
+
+impl MutationReply for RestoreNode {
+    type Reply = (Id, Version);
+
+    fn from_result(result: MutationResult) -> Result<Self::Reply> {
+        result.as_restore_node()
+    }
+}
+
+impl MutationReply for RestoreEdge {
+    type Reply = Version;
+
+    fn from_result(result: MutationResult) -> Result<Self::Reply> {
+        result.as_restore_edge()
+    }
 }
 
 // ============================================================================
@@ -347,351 +666,6 @@ impl MutationCodec for AddEdgeFragment {
 }
 
 // ============================================================================
-// Helper Functions - Shared logic for mutation execution
-// ============================================================================
-
-/// Helper function to write a name to the Names CF.
-///
-/// This is idempotent: writing the same name twice has no effect since
-/// the same hash always maps to the same name.
-fn write_name_to_cf(
-    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-    txn_db: &rocksdb::TransactionDB,
-    name: &str,
-) -> Result<NameHash> {
-    use super::schema::{Names, NameCfKey, NameCfValue};
-
-    let name_hash = NameHash::from_name(name);
-
-    let names_cf = txn_db
-        .cf_handle(Names::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", Names::CF_NAME))?;
-
-    let key_bytes = Names::key_to_bytes(&NameCfKey(name_hash));
-    let value_bytes = Names::value_to_bytes(&NameCfValue(name.to_string()))?;
-
-    txn.put_cf(names_cf, key_bytes, value_bytes)?;
-
-    Ok(name_hash)
-}
-
-/// Helper function to write a name to the Names CF with cache optimization.
-///
-/// Uses the cache to:
-/// 1. Check if the name is already interned (skip DB write)
-/// 2. Intern new names for future lookups
-///
-/// Returns the NameHash and whether a DB write was performed.
-fn write_name_to_cf_cached(
-    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-    txn_db: &rocksdb::TransactionDB,
-    name: &str,
-    cache: &super::name_hash::NameCache,
-) -> Result<NameHash> {
-    use super::schema::{Names, NameCfKey, NameCfValue};
-
-    // Check cache first - if already interned, skip DB write
-    let (name_hash, is_new) = cache.intern_if_new(name);
-
-    if is_new {
-        // New name - write to Names CF
-        let names_cf = txn_db
-            .cf_handle(Names::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", Names::CF_NAME))?;
-
-        let key_bytes = Names::key_to_bytes(&NameCfKey(name_hash));
-        let value_bytes = Names::value_to_bytes(&NameCfValue(name.to_string()))?;
-
-        txn.put_cf(names_cf, key_bytes, value_bytes)?;
-        tracing::trace!(name = %name, "Wrote new name to Names CF");
-    } else {
-        tracing::trace!(name = %name, "Name already cached, skipping DB write");
-    }
-
-    Ok(name_hash)
-}
-
-// ============================================================================
-// RefCount Helper Functions for Content-Addressed Summaries
-// ============================================================================
-
-use super::summary_hash::SummaryHash;
-use super::schema::{NodeSummary, EdgeSummary, RefCount};
-
-/// Increment refcount for a node summary, creating the row if it doesn't exist.
-/// Returns the new refcount.
-fn increment_node_summary_refcount(
-    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-    txn_db: &rocksdb::TransactionDB,
-    hash: SummaryHash,
-    summary: &NodeSummary,
-) -> Result<RefCount> {
-    use super::schema::{NodeSummaries, NodeSummaryCfKey, NodeSummaryCfValue};
-
-    let cf = txn_db
-        .cf_handle(NodeSummaries::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("NodeSummaries CF not found"))?;
-    let key_bytes = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(hash));
-
-    // Read existing value (if any)
-    let new_refcount = match txn.get_cf(cf, &key_bytes)? {
-        Some(existing_bytes) => {
-            let existing: NodeSummaryCfValue = NodeSummaries::value_from_bytes(&existing_bytes)?;
-            existing.0.saturating_add(1)
-        }
-        None => 1, // First reference
-    };
-
-    // Write with updated refcount
-    let value = NodeSummaryCfValue(new_refcount, summary.clone());
-    let value_bytes = NodeSummaries::value_to_bytes(&value)?;
-    txn.put_cf(cf, key_bytes, value_bytes)?;
-
-    tracing::trace!(hash = ?hash, refcount = new_refcount, "Incremented node summary refcount");
-    Ok(new_refcount)
-}
-
-/// Decrement refcount for a node summary, deleting the row if it reaches 0.
-/// Returns the new refcount (0 means deleted).
-fn decrement_node_summary_refcount(
-    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-    txn_db: &rocksdb::TransactionDB,
-    hash: SummaryHash,
-) -> Result<RefCount> {
-    use super::schema::{NodeSummaries, NodeSummaryCfKey, NodeSummaryCfValue};
-
-    let cf = txn_db
-        .cf_handle(NodeSummaries::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("NodeSummaries CF not found"))?;
-    let key_bytes = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(hash));
-
-    // Read existing value
-    let existing_bytes = txn.get_cf(cf, &key_bytes)?
-        .ok_or_else(|| anyhow::anyhow!("Cannot decrement refcount: NodeSummary not found for hash {:?}", hash))?;
-    let existing: NodeSummaryCfValue = NodeSummaries::value_from_bytes(&existing_bytes)?;
-    let new_refcount = existing.0.saturating_sub(1);
-
-    if new_refcount == 0 {
-        // Delete the row
-        txn.delete_cf(cf, key_bytes)?;
-        tracing::trace!(hash = ?hash, "Deleted node summary (refcount reached 0)");
-    } else {
-        // Write with decremented refcount
-        let value = NodeSummaryCfValue(new_refcount, existing.1);
-        let value_bytes = NodeSummaries::value_to_bytes(&value)?;
-        txn.put_cf(cf, key_bytes, value_bytes)?;
-        tracing::trace!(hash = ?hash, refcount = new_refcount, "Decremented node summary refcount");
-    }
-
-    Ok(new_refcount)
-}
-
-/// Increment refcount for an edge summary, creating the row if it doesn't exist.
-/// Returns the new refcount.
-fn increment_edge_summary_refcount(
-    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-    txn_db: &rocksdb::TransactionDB,
-    hash: SummaryHash,
-    summary: &EdgeSummary,
-) -> Result<RefCount> {
-    use super::schema::{EdgeSummaries, EdgeSummaryCfKey, EdgeSummaryCfValue};
-
-    let cf = txn_db
-        .cf_handle(EdgeSummaries::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("EdgeSummaries CF not found"))?;
-    let key_bytes = EdgeSummaries::key_to_bytes(&EdgeSummaryCfKey(hash));
-
-    // Read existing value (if any)
-    let new_refcount = match txn.get_cf(cf, &key_bytes)? {
-        Some(existing_bytes) => {
-            let existing: EdgeSummaryCfValue = EdgeSummaries::value_from_bytes(&existing_bytes)?;
-            existing.0.saturating_add(1)
-        }
-        None => 1, // First reference
-    };
-
-    // Write with updated refcount
-    let value = EdgeSummaryCfValue(new_refcount, summary.clone());
-    let value_bytes = EdgeSummaries::value_to_bytes(&value)?;
-    txn.put_cf(cf, key_bytes, value_bytes)?;
-
-    tracing::trace!(hash = ?hash, refcount = new_refcount, "Incremented edge summary refcount");
-    Ok(new_refcount)
-}
-
-/// Decrement refcount for an edge summary, deleting the row if it reaches 0.
-/// Returns the new refcount (0 means deleted).
-fn decrement_edge_summary_refcount(
-    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-    txn_db: &rocksdb::TransactionDB,
-    hash: SummaryHash,
-) -> Result<RefCount> {
-    use super::schema::{EdgeSummaries, EdgeSummaryCfKey, EdgeSummaryCfValue};
-
-    let cf = txn_db
-        .cf_handle(EdgeSummaries::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("EdgeSummaries CF not found"))?;
-    let key_bytes = EdgeSummaries::key_to_bytes(&EdgeSummaryCfKey(hash));
-
-    // Read existing value
-    let existing_bytes = txn.get_cf(cf, &key_bytes)?
-        .ok_or_else(|| anyhow::anyhow!("Cannot decrement refcount: EdgeSummary not found for hash {:?}", hash))?;
-    let existing: EdgeSummaryCfValue = EdgeSummaries::value_from_bytes(&existing_bytes)?;
-    let new_refcount = existing.0.saturating_sub(1);
-
-    if new_refcount == 0 {
-        // Delete the row
-        txn.delete_cf(cf, key_bytes)?;
-        tracing::trace!(hash = ?hash, "Deleted edge summary (refcount reached 0)");
-    } else {
-        // Write with decremented refcount
-        let value = EdgeSummaryCfValue(new_refcount, existing.1);
-        let value_bytes = EdgeSummaries::value_to_bytes(&value)?;
-        txn.put_cf(cf, key_bytes, value_bytes)?;
-        tracing::trace!(hash = ?hash, refcount = new_refcount, "Decremented edge summary refcount");
-    }
-
-    Ok(new_refcount)
-}
-
-/// Helper function to update ActivePeriod for a single node.
-/// Updates the Nodes CF.
-fn update_node_valid_range(
-    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-    txn_db: &rocksdb::TransactionDB,
-    node_id: Id,
-    new_range: schema::ActivePeriod,
-) -> Result<()> {
-    use super::ActivePeriodPatchable;
-    use super::schema::{NodeCfKey, Nodes};
-
-    // Patch Nodes CF
-    let nodes_cf = txn_db
-        .cf_handle(Nodes::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("Nodes CF not found"))?;
-
-    let node_key = NodeCfKey(node_id);
-    let node_key_bytes = Nodes::key_to_bytes(&node_key);
-
-    let node_value_bytes = txn
-        .get_cf(nodes_cf, &node_key_bytes)?
-        .ok_or_else(|| anyhow::anyhow!("Node not found for id: {}", node_id))?;
-
-    let nodes = Nodes;
-    let patched_node_bytes = nodes.patch_valid_range(&node_value_bytes, new_range)?;
-    txn.put_cf(nodes_cf, &node_key_bytes, patched_node_bytes)?;
-
-    Ok(())
-}
-
-/// Helper function to update ActivePeriod for a single edge in ForwardEdges and ReverseEdges CFs.
-/// This is the core logic shared by UpdateEdgeValidSinceUntil and UpdateNodeValidSinceUntil.
-///
-/// Note: This function accepts a NameHash directly. The caller is responsible for
-/// computing the hash from the edge name string.
-fn update_edge_valid_range(
-    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-    txn_db: &rocksdb::TransactionDB,
-    src_id: Id,
-    dst_id: Id,
-    name_hash: NameHash,
-    new_range: schema::ActivePeriod,
-) -> Result<()> {
-    use super::ActivePeriodPatchable;
-    use super::schema::{ForwardEdgeCfKey, ForwardEdges, ReverseEdgeCfKey, ReverseEdges};
-
-    // Patch ForwardEdges CF
-    let forward_cf = txn_db
-        .cf_handle(ForwardEdges::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
-
-    let forward_key = ForwardEdgeCfKey(src_id, dst_id, name_hash);
-    let forward_key_bytes = ForwardEdges::key_to_bytes(&forward_key);
-
-    let forward_value_bytes = txn.get_cf(forward_cf, &forward_key_bytes)?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "ForwardEdge not found: src={}, dst={}, name_hash={}",
-            src_id,
-            dst_id,
-            name_hash
-        )
-    })?;
-
-    let forward_edges = ForwardEdges;
-    let patched_forward_bytes = forward_edges.patch_valid_range(&forward_value_bytes, new_range)?;
-    txn.put_cf(forward_cf, &forward_key_bytes, patched_forward_bytes)?;
-
-    // Patch ReverseEdges CF
-    let reverse_cf = txn_db
-        .cf_handle(ReverseEdges::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("ReverseEdges CF not found"))?;
-
-    let reverse_key = ReverseEdgeCfKey(dst_id, src_id, name_hash);
-    let reverse_key_bytes = ReverseEdges::key_to_bytes(&reverse_key);
-
-    let reverse_value_bytes = txn.get_cf(reverse_cf, &reverse_key_bytes)?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "ReverseEdge not found: src={}, dst={}, name_hash={}",
-            src_id,
-            dst_id,
-            name_hash
-        )
-    })?;
-
-    let reverse_edges = ReverseEdges;
-    let patched_reverse_bytes = reverse_edges.patch_valid_range(&reverse_value_bytes, new_range)?;
-    txn.put_cf(reverse_cf, &reverse_key_bytes, patched_reverse_bytes)?;
-
-    Ok(())
-}
-
-/// Helper function to find all edges connected to a node.
-/// Returns a deduplicated list of (src_id, dst_id, name_hash) tuples.
-fn find_connected_edges(
-    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-    txn_db: &rocksdb::TransactionDB,
-    node_id: Id,
-) -> Result<Vec<(Id, Id, NameHash)>> {
-
-    use super::schema::{ForwardEdgeCfKey, ForwardEdges, ReverseEdgeCfKey, ReverseEdges};
-
-    let mut edge_topologies = Vec::new();
-
-    // Find outgoing edges (where this node is the source)
-    let forward_cf = txn_db
-        .cf_handle(ForwardEdges::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
-    let forward_prefix = node_id.into_bytes().to_vec();
-    let forward_iter = txn.prefix_iterator_cf(forward_cf, &forward_prefix);
-
-    for item in forward_iter {
-        let (key_bytes, _) = item?;
-        let key: ForwardEdgeCfKey = ForwardEdges::key_from_bytes(&key_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize ForwardEdge key: {}", e))?;
-        edge_topologies.push((key.0, key.1, key.2));
-    }
-
-    // Find incoming edges (where this node is the destination)
-    let reverse_cf = txn_db
-        .cf_handle(ReverseEdges::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("ReverseEdges CF not found"))?;
-    let reverse_prefix = node_id.into_bytes().to_vec();
-    let reverse_iter = txn.prefix_iterator_cf(reverse_cf, &reverse_prefix);
-
-    for item in reverse_iter {
-        let (key_bytes, _) = item?;
-        let key: ReverseEdgeCfKey = ReverseEdges::key_from_bytes(&key_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize ReverseEdge key: {}", e))?;
-        // ReverseEdgeCfKey is (dst_id, src_id, name_hash), extract as (src_id, dst_id, name_hash)
-        edge_topologies.push((key.1, key.0, key.2));
-    }
-
-    // Deduplicate edges
-    let unique_edges: std::collections::HashSet<_> = edge_topologies.into_iter().collect();
-    Ok(unique_edges.into_iter().collect())
-}
-
-// ============================================================================
 // MutationExecutor Implementations
 // ============================================================================
 
@@ -701,42 +675,7 @@ impl MutationExecutor for AddNode {
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
     ) -> Result<()> {
-        tracing::debug!(id = %self.id, name = %self.name, "Executing AddNode mutation");
-
-        use super::schema::{
-            Nodes, NodeSummaryIndex, NodeSummaryIndexCfKey, NodeSummaryIndexCfValue,
-        };
-
-        // Write name to Names CF (idempotent)
-        write_name_to_cf(txn, txn_db, &self.name)?;
-
-        // Write summary to NodeSummaries CF (cold) if non-empty
-        // Increment refcount (or create with refcount=1)
-        // Also write reverse index entry with CURRENT marker
-        if !self.summary.is_empty() {
-            if let Ok(summary_hash) = SummaryHash::from_summary(&self.summary) {
-                // Increment refcount (creates row if missing)
-                increment_node_summary_refcount(txn, txn_db, summary_hash, &self.summary)?;
-
-                // Write reverse index entry with CURRENT marker (version=1 for new nodes)
-                let index_cf = txn_db
-                    .cf_handle(NodeSummaryIndex::CF_NAME)
-                    .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", NodeSummaryIndex::CF_NAME))?;
-                let index_key = NodeSummaryIndexCfKey(summary_hash, self.id, 1);
-                let index_key_bytes = NodeSummaryIndex::key_to_bytes(&index_key);
-                let index_value_bytes = NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::current())?;
-                txn.put_cf(index_cf, index_key_bytes, index_value_bytes)?;
-            }
-        }
-
-        // Write to Nodes CF (hot)
-        let nodes_cf = txn_db
-            .cf_handle(Nodes::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", Nodes::CF_NAME))?;
-        let (node_key, node_value) = Nodes::create_bytes(self)?;
-        txn.put_cf(nodes_cf, node_key, node_value)?;
-
-        Ok(())
+        ops::node::add_node(txn, txn_db, self, None).map(|_| ())
     }
 
     fn execute_with_cache(
@@ -745,42 +684,21 @@ impl MutationExecutor for AddNode {
         txn_db: &rocksdb::TransactionDB,
         cache: &super::name_hash::NameCache,
     ) -> Result<()> {
-        tracing::debug!(id = %self.id, name = %self.name, "Executing AddNode mutation (cached)");
+        ops::node::add_node(txn, txn_db, self, Some(cache)).map(|_| ())
+    }
 
-        use super::schema::{
-            Nodes, NodeSummaryIndex, NodeSummaryIndexCfKey, NodeSummaryIndexCfValue,
-        };
-
-        // Write name to Names CF with cache optimization
-        write_name_to_cf_cached(txn, txn_db, &self.name, cache)?;
-
-        // Write summary to NodeSummaries CF (cold) if non-empty
-        // Increment refcount (or create with refcount=1)
-        // Also write reverse index entry with CURRENT marker
-        if !self.summary.is_empty() {
-            if let Ok(summary_hash) = SummaryHash::from_summary(&self.summary) {
-                // Increment refcount (creates row if missing)
-                increment_node_summary_refcount(txn, txn_db, summary_hash, &self.summary)?;
-
-                // Write reverse index entry with CURRENT marker (version=1 for new nodes)
-                let index_cf = txn_db
-                    .cf_handle(NodeSummaryIndex::CF_NAME)
-                    .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", NodeSummaryIndex::CF_NAME))?;
-                let index_key = NodeSummaryIndexCfKey(summary_hash, self.id, 1);
-                let index_key_bytes = NodeSummaryIndex::key_to_bytes(&index_key);
-                let index_value_bytes = NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::current())?;
-                txn.put_cf(index_cf, index_key_bytes, index_value_bytes)?;
-            }
-        }
-
-        // Write to Nodes CF (hot)
-        let nodes_cf = txn_db
-            .cf_handle(Nodes::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", Nodes::CF_NAME))?;
-        let (node_key, node_value) = Nodes::create_bytes(self)?;
-        txn.put_cf(nodes_cf, node_key, node_value)?;
-
-        Ok(())
+    fn execute_with_cache_and_options(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        cache: &super::name_hash::NameCache,
+        _options: ExecOptions,
+    ) -> Result<MutationResult> {
+        let (node_id, version) = ops::node::add_node(txn, txn_db, self, Some(cache))?;
+        Ok(MutationResult::AddNode {
+            id: node_id,
+            version,
+        })
     }
 }
 
@@ -790,61 +708,7 @@ impl MutationExecutor for AddEdge {
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
     ) -> Result<()> {
-        tracing::debug!(
-            src = %self.source_node_id,
-            dst = %self.target_node_id,
-            name = %self.name,
-            "Executing AddEdge mutation"
-        );
-
-        use super::schema::{
-            ForwardEdges, ReverseEdges,
-            EdgeSummaryIndex, EdgeSummaryIndexCfKey, EdgeSummaryIndexCfValue,
-        };
-
-        // Write name to Names CF (idempotent)
-        let name_hash = write_name_to_cf(txn, txn_db, &self.name)?;
-
-        // Write summary to EdgeSummaries CF (cold) if non-empty
-        // Increment refcount (or create with refcount=1)
-        // Also write reverse index entry with CURRENT marker
-        if !self.summary.is_empty() {
-            if let Ok(summary_hash) = SummaryHash::from_summary(&self.summary) {
-                // Increment refcount (creates row if missing)
-                increment_edge_summary_refcount(txn, txn_db, summary_hash, &self.summary)?;
-
-                // Write reverse index entry with CURRENT marker (version=1 for new edges)
-                let index_cf = txn_db
-                    .cf_handle(EdgeSummaryIndex::CF_NAME)
-                    .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", EdgeSummaryIndex::CF_NAME))?;
-                let index_key = EdgeSummaryIndexCfKey(
-                    summary_hash,
-                    self.source_node_id,
-                    self.target_node_id,
-                    name_hash,
-                    1, // version=1 for new edges
-                );
-                let index_key_bytes = EdgeSummaryIndex::key_to_bytes(&index_key);
-                let index_value_bytes = EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::current())?;
-                txn.put_cf(index_cf, index_key_bytes, index_value_bytes)?;
-            }
-        }
-
-        // Write to ForwardEdges CF (hot)
-        let forward_cf = txn_db.cf_handle(ForwardEdges::CF_NAME).ok_or_else(|| {
-            anyhow::anyhow!("Column family '{}' not found", ForwardEdges::CF_NAME)
-        })?;
-        let (forward_key, forward_value) = ForwardEdges::create_bytes(self)?;
-        txn.put_cf(forward_cf, forward_key, forward_value)?;
-
-        // Write to ReverseEdges CF (hot)
-        let reverse_cf = txn_db.cf_handle(ReverseEdges::CF_NAME).ok_or_else(|| {
-            anyhow::anyhow!("Column family '{}' not found", ReverseEdges::CF_NAME)
-        })?;
-        let (reverse_key, reverse_value) = ReverseEdges::create_bytes(self)?;
-        txn.put_cf(reverse_cf, reverse_key, reverse_value)?;
-
-        Ok(())
+        ops::edge::add_edge(txn, txn_db, self, None).map(|_| ())
     }
 
     fn execute_with_cache(
@@ -853,61 +717,18 @@ impl MutationExecutor for AddEdge {
         txn_db: &rocksdb::TransactionDB,
         cache: &super::name_hash::NameCache,
     ) -> Result<()> {
-        tracing::debug!(
-            src = %self.source_node_id,
-            dst = %self.target_node_id,
-            name = %self.name,
-            "Executing AddEdge mutation (cached)"
-        );
+        ops::edge::add_edge(txn, txn_db, self, Some(cache)).map(|_| ())
+    }
 
-        use super::schema::{
-            ForwardEdges, ReverseEdges,
-            EdgeSummaryIndex, EdgeSummaryIndexCfKey, EdgeSummaryIndexCfValue,
-        };
-
-        // Write name to Names CF with cache optimization
-        let name_hash = write_name_to_cf_cached(txn, txn_db, &self.name, cache)?;
-
-        // Write summary to EdgeSummaries CF (cold) if non-empty
-        // Increment refcount (or create with refcount=1)
-        // Also write reverse index entry with CURRENT marker
-        if !self.summary.is_empty() {
-            if let Ok(summary_hash) = SummaryHash::from_summary(&self.summary) {
-                // Increment refcount (creates row if missing)
-                increment_edge_summary_refcount(txn, txn_db, summary_hash, &self.summary)?;
-
-                // Write reverse index entry with CURRENT marker (version=1 for new edges)
-                let index_cf = txn_db
-                    .cf_handle(EdgeSummaryIndex::CF_NAME)
-                    .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", EdgeSummaryIndex::CF_NAME))?;
-                let index_key = EdgeSummaryIndexCfKey(
-                    summary_hash,
-                    self.source_node_id,
-                    self.target_node_id,
-                    name_hash,
-                    1, // version=1 for new edges
-                );
-                let index_key_bytes = EdgeSummaryIndex::key_to_bytes(&index_key);
-                let index_value_bytes = EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::current())?;
-                txn.put_cf(index_cf, index_key_bytes, index_value_bytes)?;
-            }
-        }
-
-        // Write to ForwardEdges CF (hot)
-        let forward_cf = txn_db.cf_handle(ForwardEdges::CF_NAME).ok_or_else(|| {
-            anyhow::anyhow!("Column family '{}' not found", ForwardEdges::CF_NAME)
-        })?;
-        let (forward_key, forward_value) = ForwardEdges::create_bytes(self)?;
-        txn.put_cf(forward_cf, forward_key, forward_value)?;
-
-        // Write to ReverseEdges CF (hot)
-        let reverse_cf = txn_db.cf_handle(ReverseEdges::CF_NAME).ok_or_else(|| {
-            anyhow::anyhow!("Column family '{}' not found", ReverseEdges::CF_NAME)
-        })?;
-        let (reverse_key, reverse_value) = ReverseEdges::create_bytes(self)?;
-        txn.put_cf(reverse_cf, reverse_key, reverse_value)?;
-
-        Ok(())
+    fn execute_with_cache_and_options(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        cache: &super::name_hash::NameCache,
+        _options: ExecOptions,
+    ) -> Result<MutationResult> {
+        let version = ops::edge::add_edge(txn, txn_db, self, Some(cache))?;
+        Ok(MutationResult::AddEdge { version })
     }
 }
 
@@ -917,20 +738,17 @@ impl MutationExecutor for AddNodeFragment {
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
     ) -> Result<()> {
-        tracing::debug!(
-            id = %self.id,
-            ts = %self.ts_millis.0,
-            content_len = self.content.as_ref().len(),
-            "Executing AddNodeFragment mutation"
-        );
+        ops::fragment::add_node_fragment(txn, txn_db, self)
+    }
 
-        let cf = txn_db.cf_handle(NodeFragments::CF_NAME).ok_or_else(|| {
-            anyhow::anyhow!("Column family '{}' not found", NodeFragments::CF_NAME)
-        })?;
-        let (key, value) = self.to_cf_bytes()?;
-        txn.put_cf(cf, key, value)?;
-
-        Ok(())
+    fn execute_with_options(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        _options: ExecOptions,
+    ) -> Result<MutationResult> {
+        self.execute(txn, txn_db)?;
+        Ok(MutationResult::AddNodeFragment)
     }
 }
 
@@ -940,25 +758,7 @@ impl MutationExecutor for AddEdgeFragment {
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
     ) -> Result<()> {
-        tracing::debug!(
-            src = %self.src_id,
-            dst = %self.dst_id,
-            edge_name = %self.edge_name,
-            ts = %self.ts_millis.0,
-            content_len = self.content.as_ref().len(),
-            "Executing AddEdgeFragment mutation"
-        );
-
-        // Write name to Names CF (idempotent)
-        write_name_to_cf(txn, txn_db, &self.edge_name)?;
-
-        let cf = txn_db.cf_handle(EdgeFragments::CF_NAME).ok_or_else(|| {
-            anyhow::anyhow!("Column family '{}' not found", EdgeFragments::CF_NAME)
-        })?;
-        let (key, value) = self.to_cf_bytes()?;
-        txn.put_cf(cf, key, value)?;
-
-        Ok(())
+        ops::fragment::add_edge_fragment(txn, txn_db, self, None)
     }
 
     fn execute_with_cache(
@@ -967,531 +767,162 @@ impl MutationExecutor for AddEdgeFragment {
         txn_db: &rocksdb::TransactionDB,
         cache: &super::name_hash::NameCache,
     ) -> Result<()> {
-        tracing::debug!(
-            src = %self.src_id,
-            dst = %self.dst_id,
-            edge_name = %self.edge_name,
-            ts = %self.ts_millis.0,
-            content_len = self.content.as_ref().len(),
-            "Executing AddEdgeFragment mutation (cached)"
-        );
+        ops::fragment::add_edge_fragment(txn, txn_db, self, Some(cache))
+    }
 
-        // Write name to Names CF with cache optimization
-        write_name_to_cf_cached(txn, txn_db, &self.edge_name, cache)?;
-
-        let cf = txn_db.cf_handle(EdgeFragments::CF_NAME).ok_or_else(|| {
-            anyhow::anyhow!("Column family '{}' not found", EdgeFragments::CF_NAME)
-        })?;
-        let (key, value) = self.to_cf_bytes()?;
-        txn.put_cf(cf, key, value)?;
-
-        Ok(())
+    fn execute_with_options(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        _options: ExecOptions,
+    ) -> Result<MutationResult> {
+        self.execute(txn, txn_db)?;
+        Ok(MutationResult::AddEdgeFragment)
     }
 }
 
-impl MutationExecutor for UpdateNodeValidSinceUntil {
+impl MutationExecutor for UpdateNode {
+    /// Consolidated node update with optimistic locking.
+    /// Updates any combination of active_period and summary.
     fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
     ) -> Result<()> {
-        let node_id = self.id;
-        let new_range = self.temporal_range;
+        ops::node::update_node(txn, txn_db, self).map(|_| ())
+    }
 
-        // 1. Update the node (1 operation)
-        update_node_valid_range(txn, txn_db, node_id, new_range)?;
-
-        // 2. Find all connected edges (N edges) - returns (src_id, dst_id, name_hash)
-        let edges = find_connected_edges(txn, txn_db, node_id)?;
-
-        tracing::info!(
-            node_id = %node_id,
-            edge_count = edges.len(),
-            "[UpdateNodeValidSinceUntil] Updating node and connected edges"
-        );
-
-        // 3. Update each edge (N × 2 operations = 2N operations)
-        for (src_id, dst_id, name_hash) in edges {
-            update_edge_valid_range(txn, txn_db, src_id, dst_id, name_hash, new_range)?;
-        }
-
-        Ok(())
+    fn execute_with_options(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        _options: ExecOptions,
+    ) -> Result<MutationResult> {
+        let (node_id, version) = ops::node::update_node(txn, txn_db, self)?;
+        Ok(MutationResult::UpdateNode {
+            id: node_id,
+            version,
+        })
     }
 }
 
-impl MutationExecutor for UpdateEdgeValidSinceUntil {
+impl MutationExecutor for UpdateEdge {
+    /// Consolidated edge update with optimistic locking.
+    /// Updates any combination of weight, active_period, and summary.
     fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
     ) -> Result<()> {
-        tracing::debug!(
-            src = %self.src_id,
-            dst = %self.dst_id,
-            name = %self.name,
-            reason = %self.reason,
-            "Executing UpdateEdgeValidSinceUntil mutation"
-        );
-
-        // Compute hash from edge name
-        let name_hash = NameHash::from_name(&self.name);
-
-        // Simply delegate to the helper
-        update_edge_valid_range(
-            txn,
-            txn_db,
-            self.src_id,
-            self.dst_id,
-            name_hash,
-            self.temporal_range,
-        )
+        ops::edge::update_edge(txn, txn_db, self).map(|_| ())
     }
-}
 
-impl MutationExecutor for UpdateEdgeWeight {
-    fn execute(
+    fn execute_with_options(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
-    ) -> Result<()> {
-        tracing::debug!(
-            src = %self.src_id,
-            dst = %self.dst_id,
-            name = %self.name,
-            weight = self.weight,
-            "Executing UpdateEdgeWeight mutation"
-        );
-
-
-        use super::schema::{ForwardEdgeCfKey, ForwardEdgeCfValue, ForwardEdges};
-
-        let cf = txn_db.cf_handle(ForwardEdges::CF_NAME).ok_or_else(|| {
-            anyhow::anyhow!("Column family '{}' not found", ForwardEdges::CF_NAME)
-        })?;
-
-        // Compute hash from edge name
-        let name_hash = NameHash::from_name(&self.name);
-        let key = ForwardEdgeCfKey(self.src_id, self.dst_id, name_hash);
-        let key_bytes = ForwardEdges::key_to_bytes(&key);
-
-        // Read current value
-        let current_value_bytes = txn
-            .get_cf(cf, &key_bytes)?
-            .ok_or_else(|| anyhow::anyhow!("Edge not found for update"))?;
-
-        // Deserialize, modify weight field, reserialize
-        let mut value: ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&current_value_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize: {}", e))?;
-
-        value.1 = Some(self.weight); // Update weight (field 1)
-
-        let new_value_bytes = ForwardEdges::value_to_bytes(&value)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize: {}", e))?;
-
-        txn.put_cf(cf, key_bytes, new_value_bytes)?;
-
-        Ok(())
+        _options: ExecOptions,
+    ) -> Result<MutationResult> {
+        let version = ops::edge::update_edge(txn, txn_db, self)?;
+        Ok(MutationResult::UpdateEdge { version })
     }
 }
 
-// ============================================================================
-// CONTENT-ADDRESS: MutationExecutor Implementations for Update/Delete
-// (claude, 2026-02-02, implementing)
-// ============================================================================
 
-impl MutationExecutor for UpdateNodeSummary {
-    fn execute(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-    ) -> Result<()> {
-        tracing::debug!(
-            id = %self.id,
-            expected_version = self.expected_version,
-            "Executing UpdateNodeSummary mutation"
-        );
-
-        use super::schema::{
-            NodeCfKey, NodeCfValue, Nodes,
-            NodeSummaryIndex, NodeSummaryIndexCfKey, NodeSummaryIndexCfValue, VERSION_MAX,
-        };
-
-        // 1. Read current node
-        let nodes_cf = txn_db
-            .cf_handle(Nodes::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("Nodes CF not found"))?;
-        let node_key = NodeCfKey(self.id);
-        let node_key_bytes = Nodes::key_to_bytes(&node_key);
-
-        let current_bytes = txn
-            .get_cf(nodes_cf, &node_key_bytes)?
-            .ok_or_else(|| anyhow::anyhow!("Node not found: {}", self.id))?;
-        let current: NodeCfValue = Nodes::value_from_bytes(&current_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize node: {}", e))?;
-
-        let current_version = current.3;
-        let old_hash = current.2;
-        let is_deleted = current.4;
-
-        // 2. Check if already deleted
-        if is_deleted {
-            return Err(anyhow::anyhow!("Cannot update deleted node: {}", self.id));
-        }
-
-        // 3. Optimistic lock check
-        if current_version != self.expected_version {
-            return Err(anyhow::anyhow!(
-                "Version mismatch for node {}: expected {}, actual {}",
-                self.id,
-                self.expected_version,
-                current_version
-            ));
-        }
-
-        // 4. Version overflow check
-        if current_version == VERSION_MAX {
-            return Err(anyhow::anyhow!("Version overflow for node: {}", self.id));
-        }
-
-        // 5. Compute new version and hash
-        let new_version = current_version + 1;
-        let new_hash = SummaryHash::from_summary(&self.new_summary)?;
-
-        // 6. Increment refcount for new summary (creates row if missing)
-        increment_node_summary_refcount(txn, txn_db, new_hash, &self.new_summary)?;
-
-        // 7. Decrement refcount for old summary (deletes row if refcount reaches 0)
-        if let Some(old_h) = old_hash {
-            decrement_node_summary_refcount(txn, txn_db, old_h)?;
-        }
-
-        // 9. Flip old index entry to STALE (if exists)
-        if let Some(old_h) = old_hash {
-            let index_cf = txn_db
-                .cf_handle(NodeSummaryIndex::CF_NAME)
-                .ok_or_else(|| anyhow::anyhow!("NodeSummaryIndex CF not found"))?;
-            let old_index_key = NodeSummaryIndexCfKey(old_h, self.id, current_version);
-            let old_index_key_bytes = NodeSummaryIndex::key_to_bytes(&old_index_key);
-            let stale_value_bytes = NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::stale())?;
-            txn.put_cf(index_cf, old_index_key_bytes, stale_value_bytes)?;
-        }
-
-        // 10. Write new index entry with CURRENT marker
-        let index_cf = txn_db
-            .cf_handle(NodeSummaryIndex::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("NodeSummaryIndex CF not found"))?;
-        let new_index_key = NodeSummaryIndexCfKey(new_hash, self.id, new_version);
-        let new_index_key_bytes = NodeSummaryIndex::key_to_bytes(&new_index_key);
-        let current_value_bytes = NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::current())?;
-        txn.put_cf(index_cf, new_index_key_bytes, current_value_bytes)?;
-
-        // 11. Update Nodes CF with new version and summary hash
-        let new_node_value = NodeCfValue(current.0, current.1, Some(new_hash), new_version, false);
-        let new_node_bytes = Nodes::value_to_bytes(&new_node_value)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize node: {}", e))?;
-        txn.put_cf(nodes_cf, node_key_bytes, new_node_bytes)?;
-
-        tracing::info!(
-            id = %self.id,
-            old_version = current_version,
-            new_version = new_version,
-            "UpdateNodeSummary completed"
-        );
-
-        Ok(())
-    }
-}
-
-impl MutationExecutor for UpdateEdgeSummary {
-    fn execute(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-    ) -> Result<()> {
-        tracing::debug!(
-            src = %self.src_id,
-            dst = %self.dst_id,
-            name = %self.name,
-            expected_version = self.expected_version,
-            "Executing UpdateEdgeSummary mutation"
-        );
-
-        use super::schema::{
-            ForwardEdgeCfKey, ForwardEdgeCfValue, ForwardEdges,
-            EdgeSummaryIndex, EdgeSummaryIndexCfKey, EdgeSummaryIndexCfValue, VERSION_MAX,
-        };
-
-        let name_hash = NameHash::from_name(&self.name);
-
-        // 1. Read current edge
-        let forward_cf = txn_db
-            .cf_handle(ForwardEdges::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
-        let edge_key = ForwardEdgeCfKey(self.src_id, self.dst_id, name_hash);
-        let edge_key_bytes = ForwardEdges::key_to_bytes(&edge_key);
-
-        let current_bytes = txn
-            .get_cf(forward_cf, &edge_key_bytes)?
-            .ok_or_else(|| anyhow::anyhow!("Edge not found: {}→{}", self.src_id, self.dst_id))?;
-        let current: ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&current_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize edge: {}", e))?;
-
-        let current_version = current.3;
-        let old_hash = current.2;
-        let is_deleted = current.4;
-
-        // 2. Check if already deleted
-        if is_deleted {
-            return Err(anyhow::anyhow!("Cannot update deleted edge: {}→{}", self.src_id, self.dst_id));
-        }
-
-        // 3. Optimistic lock check
-        if current_version != self.expected_version {
-            return Err(anyhow::anyhow!(
-                "Version mismatch for edge {}→{}: expected {}, actual {}",
-                self.src_id,
-                self.dst_id,
-                self.expected_version,
-                current_version
-            ));
-        }
-
-        // 4. Version overflow check
-        if current_version == VERSION_MAX {
-            return Err(anyhow::anyhow!("Version overflow for edge: {}→{}", self.src_id, self.dst_id));
-        }
-
-        // 5. Compute new version and hash
-        let new_version = current_version + 1;
-        let new_hash = SummaryHash::from_summary(&self.new_summary)?;
-
-        // 6. Increment refcount for new summary (creates row if missing)
-        increment_edge_summary_refcount(txn, txn_db, new_hash, &self.new_summary)?;
-
-        // 7. Decrement refcount for old summary (deletes row if refcount reaches 0)
-        if let Some(old_h) = old_hash {
-            decrement_edge_summary_refcount(txn, txn_db, old_h)?;
-        }
-
-        // 8. Flip old index entry to STALE (if exists)
-        if let Some(old_h) = old_hash {
-            let index_cf = txn_db
-                .cf_handle(EdgeSummaryIndex::CF_NAME)
-                .ok_or_else(|| anyhow::anyhow!("EdgeSummaryIndex CF not found"))?;
-            let old_index_key = EdgeSummaryIndexCfKey(old_h, self.src_id, self.dst_id, name_hash, current_version);
-            let old_index_key_bytes = EdgeSummaryIndex::key_to_bytes(&old_index_key);
-            let stale_value_bytes = EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::stale())?;
-            txn.put_cf(index_cf, old_index_key_bytes, stale_value_bytes)?;
-        }
-
-        // 9. Write new index entry with CURRENT marker
-        let index_cf = txn_db
-            .cf_handle(EdgeSummaryIndex::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("EdgeSummaryIndex CF not found"))?;
-        let new_index_key = EdgeSummaryIndexCfKey(new_hash, self.src_id, self.dst_id, name_hash, new_version);
-        let new_index_key_bytes = EdgeSummaryIndex::key_to_bytes(&new_index_key);
-        let current_value_bytes = EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::current())?;
-        txn.put_cf(index_cf, new_index_key_bytes, current_value_bytes)?;
-
-        // 10. Update ForwardEdges CF with new version and summary hash
-        let new_edge_value = ForwardEdgeCfValue(current.0, current.1, Some(new_hash), new_version, false);
-        let new_edge_bytes = ForwardEdges::value_to_bytes(&new_edge_value)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize edge: {}", e))?;
-        txn.put_cf(forward_cf, edge_key_bytes, new_edge_bytes)?;
-
-        tracing::info!(
-            src = %self.src_id,
-            dst = %self.dst_id,
-            old_version = current_version,
-            new_version = new_version,
-            "UpdateEdgeSummary completed"
-        );
-
-        Ok(())
-    }
-}
 
 impl MutationExecutor for DeleteNode {
+    /// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
     fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
     ) -> Result<()> {
-        tracing::debug!(
-            id = %self.id,
-            expected_version = self.expected_version,
-            "Executing DeleteNode mutation"
-        );
+        ops::node::delete_node(txn, txn_db, self)
+    }
 
-        use super::schema::{
-            NodeCfKey, NodeCfValue, Nodes,
-            NodeSummaryIndex, NodeSummaryIndexCfKey, NodeSummaryIndexCfValue, VERSION_MAX,
-        };
-
-        // 1. Read current node
-        let nodes_cf = txn_db
-            .cf_handle(Nodes::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("Nodes CF not found"))?;
-        let node_key = NodeCfKey(self.id);
-        let node_key_bytes = Nodes::key_to_bytes(&node_key);
-
-        let current_bytes = txn
-            .get_cf(nodes_cf, &node_key_bytes)?
-            .ok_or_else(|| anyhow::anyhow!("Node not found: {}", self.id))?;
-        let current: NodeCfValue = Nodes::value_from_bytes(&current_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize node: {}", e))?;
-
-        let current_version = current.3;
-        let current_hash = current.2;
-        let is_deleted = current.4;
-
-        // 2. Check if already deleted
-        if is_deleted {
-            return Err(anyhow::anyhow!("Node already deleted: {}", self.id));
-        }
-
-        // 3. Optimistic lock check
-        if current_version != self.expected_version {
-            return Err(anyhow::anyhow!(
-                "Version mismatch for node {}: expected {}, actual {}",
-                self.id,
-                self.expected_version,
-                current_version
-            ));
-        }
-
-        // 4. Version overflow check
-        if current_version == VERSION_MAX {
-            return Err(anyhow::anyhow!("Version overflow for node: {}", self.id));
-        }
-
-        // 5. Increment version and set deleted flag
-        let new_version = current_version + 1;
-        let new_node_value = NodeCfValue(current.0, current.1, current.2, new_version, true);
-        let new_node_bytes = Nodes::value_to_bytes(&new_node_value)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize node: {}", e))?;
-        txn.put_cf(nodes_cf, &node_key_bytes, new_node_bytes)?;
-
-        // 6. Decrement refcount for the summary (deletes row if refcount reaches 0)
-        if let Some(hash) = current_hash {
-            decrement_node_summary_refcount(txn, txn_db, hash)?;
-        }
-
-        // 7. Flip current index entry to STALE
-        if let Some(hash) = current_hash {
-            let index_cf = txn_db
-                .cf_handle(NodeSummaryIndex::CF_NAME)
-                .ok_or_else(|| anyhow::anyhow!("NodeSummaryIndex CF not found"))?;
-            let index_key = NodeSummaryIndexCfKey(hash, self.id, current_version);
-            let index_key_bytes = NodeSummaryIndex::key_to_bytes(&index_key);
-            let stale_value_bytes = NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::stale())?;
-            txn.put_cf(index_cf, index_key_bytes, stale_value_bytes)?;
-        }
-
-        tracing::info!(
-            id = %self.id,
-            old_version = current_version,
-            new_version = new_version,
-            "DeleteNode completed (tombstoned)"
-        );
-
-        Ok(())
+    fn execute_with_options(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        _options: ExecOptions,
+    ) -> Result<MutationResult> {
+        ops::node::delete_node(txn, txn_db, self)?;
+        Ok(MutationResult::DeleteNode {
+            id: self.id,
+            version: self.expected_version + 1,
+        })
     }
 }
 
 impl MutationExecutor for DeleteEdge {
+    /// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
     fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
     ) -> Result<()> {
-        tracing::debug!(
-            src = %self.src_id,
-            dst = %self.dst_id,
-            name = %self.name,
-            expected_version = self.expected_version,
-            "Executing DeleteEdge mutation"
-        );
+        ops::edge::delete_edge(txn, txn_db, self)
+    }
 
-        use super::schema::{
-            ForwardEdgeCfKey, ForwardEdgeCfValue, ForwardEdges,
-            EdgeSummaryIndex, EdgeSummaryIndexCfKey, EdgeSummaryIndexCfValue, VERSION_MAX,
-        };
-
-        let name_hash = NameHash::from_name(&self.name);
-
-        // 1. Read current edge
-        let forward_cf = txn_db
-            .cf_handle(ForwardEdges::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
-        let edge_key = ForwardEdgeCfKey(self.src_id, self.dst_id, name_hash);
-        let edge_key_bytes = ForwardEdges::key_to_bytes(&edge_key);
-
-        let current_bytes = txn
-            .get_cf(forward_cf, &edge_key_bytes)?
-            .ok_or_else(|| anyhow::anyhow!("Edge not found: {}→{}", self.src_id, self.dst_id))?;
-        let current: ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&current_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize edge: {}", e))?;
-
-        let current_version = current.3;
-        let current_hash = current.2;
-        let is_deleted = current.4;
-
-        // 2. Check if already deleted
-        if is_deleted {
-            return Err(anyhow::anyhow!("Edge already deleted: {}→{}", self.src_id, self.dst_id));
-        }
-
-        // 3. Optimistic lock check
-        if current_version != self.expected_version {
-            return Err(anyhow::anyhow!(
-                "Version mismatch for edge {}→{}: expected {}, actual {}",
-                self.src_id,
-                self.dst_id,
-                self.expected_version,
-                current_version
-            ));
-        }
-
-        // 4. Version overflow check
-        if current_version == VERSION_MAX {
-            return Err(anyhow::anyhow!("Version overflow for edge: {}→{}", self.src_id, self.dst_id));
-        }
-
-        // 5. Increment version and set deleted flag
-        let new_version = current_version + 1;
-        let new_edge_value = ForwardEdgeCfValue(current.0, current.1, current.2, new_version, true);
-        let new_edge_bytes = ForwardEdges::value_to_bytes(&new_edge_value)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize edge: {}", e))?;
-        txn.put_cf(forward_cf, &edge_key_bytes, new_edge_bytes)?;
-
-        // 6. Decrement refcount for the summary (deletes row if refcount reaches 0)
-        if let Some(hash) = current_hash {
-            decrement_edge_summary_refcount(txn, txn_db, hash)?;
-        }
-
-        // 7. Flip current index entry to STALE
-        if let Some(hash) = current_hash {
-            let index_cf = txn_db
-                .cf_handle(EdgeSummaryIndex::CF_NAME)
-                .ok_or_else(|| anyhow::anyhow!("EdgeSummaryIndex CF not found"))?;
-            let index_key = EdgeSummaryIndexCfKey(hash, self.src_id, self.dst_id, name_hash, current_version);
-            let index_key_bytes = EdgeSummaryIndex::key_to_bytes(&index_key);
-            let stale_value_bytes = EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::stale())?;
-            txn.put_cf(index_cf, index_key_bytes, stale_value_bytes)?;
-        }
-
-        tracing::info!(
-            src = %self.src_id,
-            dst = %self.dst_id,
-            old_version = current_version,
-            new_version = new_version,
-            "DeleteEdge completed (tombstoned)"
-        );
-
-        Ok(())
+    fn execute_with_options(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        _options: ExecOptions,
+    ) -> Result<MutationResult> {
+        ops::edge::delete_edge(txn, txn_db, self)?;
+        Ok(MutationResult::DeleteEdge {
+            version: self.expected_version + 1,
+        })
     }
 }
+
+// (claude, 2026-02-07, FIXED: Added MutationExecutor for RestoreNode/RestoreEdge - Codex Item 1)
+// (claude, 2026-02-07, FIXED: Changed to as_of timestamp lookup per Codex review)
+impl MutationExecutor for RestoreNode {
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<()> {
+        ops::node::restore_node(txn, txn_db, self).map(|_| ())
+    }
+
+    fn execute_with_options(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        _options: ExecOptions,
+    ) -> Result<MutationResult> {
+        let (node_id, version) = ops::node::restore_node(txn, txn_db, self)?;
+        Ok(MutationResult::RestoreNode {
+            id: node_id,
+            version,
+        })
+    }
+}
+
+impl MutationExecutor for RestoreEdge {
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<()> {
+        ops::edge::restore_edge(txn, txn_db, self).map(|_| ())
+    }
+
+    fn execute_with_options(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        _options: ExecOptions,
+    ) -> Result<MutationResult> {
+        let version = ops::edge::restore_edge(txn, txn_db, self)?;
+        Ok(MutationResult::RestoreEdge { version })
+    }
+}
+
+
 
 impl Mutation {
     /// Execute this mutation directly against storage.
@@ -1506,14 +937,14 @@ impl Mutation {
             Mutation::AddEdge(m) => m.execute(txn, txn_db),
             Mutation::AddNodeFragment(m) => m.execute(txn, txn_db),
             Mutation::AddEdgeFragment(m) => m.execute(txn, txn_db),
-            Mutation::UpdateNodeValidSinceUntil(m) => m.execute(txn, txn_db),
-            Mutation::UpdateEdgeValidSinceUntil(m) => m.execute(txn, txn_db),
-            Mutation::UpdateEdgeWeight(m) => m.execute(txn, txn_db),
             // CONTENT-ADDRESS: Update/Delete with optimistic locking
-            Mutation::UpdateNodeSummary(m) => m.execute(txn, txn_db),
-            Mutation::UpdateEdgeSummary(m) => m.execute(txn, txn_db),
+            Mutation::UpdateNode(m) => m.execute(txn, txn_db),
+            Mutation::UpdateEdge(m) => m.execute(txn, txn_db),
             Mutation::DeleteNode(m) => m.execute(txn, txn_db),
             Mutation::DeleteEdge(m) => m.execute(txn, txn_db),
+            // (claude, 2026-02-07, FIXED: Added RestoreNode/RestoreEdge dispatch)
+            Mutation::RestoreNode(m) => m.execute(txn, txn_db),
+            Mutation::RestoreEdge(m) => m.execute(txn, txn_db),
             // Flush is not a storage operation - it's handled by the consumer
             // for synchronization purposes only
             Mutation::Flush(_) => Ok(()),
@@ -1536,15 +967,38 @@ impl Mutation {
             Mutation::AddEdge(m) => m.execute_with_cache(txn, txn_db, cache),
             Mutation::AddNodeFragment(m) => m.execute(txn, txn_db), // No names
             Mutation::AddEdgeFragment(m) => m.execute_with_cache(txn, txn_db, cache),
-            Mutation::UpdateNodeValidSinceUntil(m) => m.execute(txn, txn_db), // No new names
-            Mutation::UpdateEdgeValidSinceUntil(m) => m.execute(txn, txn_db), // No new names
-            Mutation::UpdateEdgeWeight(m) => m.execute(txn, txn_db), // No new names
             // CONTENT-ADDRESS: Update/Delete with optimistic locking (no new names)
-            Mutation::UpdateNodeSummary(m) => m.execute(txn, txn_db),
-            Mutation::UpdateEdgeSummary(m) => m.execute(txn, txn_db),
+            Mutation::UpdateNode(m) => m.execute(txn, txn_db), // No new names
+            Mutation::UpdateEdge(m) => m.execute(txn, txn_db), // No new names
             Mutation::DeleteNode(m) => m.execute(txn, txn_db),
             Mutation::DeleteEdge(m) => m.execute(txn, txn_db),
+            // (claude, 2026-02-07, FIXED: Added RestoreNode/RestoreEdge dispatch)
+            Mutation::RestoreNode(m) => m.execute(txn, txn_db),
+            Mutation::RestoreEdge(m) => m.execute(txn, txn_db),
             Mutation::Flush(_) => Ok(()),
+        }
+    }
+
+    /// Execute this mutation with access to the name cache and runtime options.
+    pub fn execute_with_cache_and_options(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        cache: &super::name_hash::NameCache,
+        options: ExecOptions,
+    ) -> Result<MutationResult> {
+        match self {
+            Mutation::AddNode(m) => m.execute_with_cache_and_options(txn, txn_db, cache, options),
+            Mutation::AddEdge(m) => m.execute_with_cache_and_options(txn, txn_db, cache, options),
+            Mutation::AddNodeFragment(m) => m.execute_with_options(txn, txn_db, options),
+            Mutation::AddEdgeFragment(m) => m.execute_with_cache_and_options(txn, txn_db, cache, options),
+            Mutation::UpdateNode(m) => m.execute_with_options(txn, txn_db, options),
+            Mutation::UpdateEdge(m) => m.execute_with_options(txn, txn_db, options),
+            Mutation::DeleteNode(m) => m.execute_with_options(txn, txn_db, options),
+            Mutation::DeleteEdge(m) => m.execute_with_options(txn, txn_db, options),
+            Mutation::RestoreNode(m) => m.execute_with_options(txn, txn_db, options),
+            Mutation::RestoreEdge(m) => m.execute_with_options(txn, txn_db, options),
+            Mutation::Flush(_) => Ok(MutationResult::Flush),
         }
     }
 
@@ -1587,43 +1041,18 @@ impl Runnable for AddEdgeFragment {
     }
 }
 
-#[async_trait::async_trait]
-impl Runnable for UpdateNodeValidSinceUntil {
-    async fn run(self, writer: &Writer) -> Result<()> {
-        writer
-            .send(vec![Mutation::UpdateNodeValidSinceUntil(self)])
-            .await
-    }
-}
-
-#[async_trait::async_trait]
-impl Runnable for UpdateEdgeValidSinceUntil {
-    async fn run(self, writer: &Writer) -> Result<()> {
-        writer
-            .send(vec![Mutation::UpdateEdgeValidSinceUntil(self)])
-            .await
-    }
-}
-
-#[async_trait::async_trait]
-impl Runnable for UpdateEdgeWeight {
-    async fn run(self, writer: &Writer) -> Result<()> {
-        writer.send(vec![Mutation::UpdateEdgeWeight(self)]).await
-    }
-}
-
 // CONTENT-ADDRESS: Runnable for Update/Delete mutations
 #[async_trait::async_trait]
-impl Runnable for UpdateNodeSummary {
+impl Runnable for UpdateNode {
     async fn run(self, writer: &Writer) -> Result<()> {
-        writer.send(vec![Mutation::UpdateNodeSummary(self)]).await
+        writer.send(vec![Mutation::UpdateNode(self)]).await
     }
 }
 
 #[async_trait::async_trait]
-impl Runnable for UpdateEdgeSummary {
+impl Runnable for UpdateEdge {
     async fn run(self, writer: &Writer) -> Result<()> {
-        writer.send(vec![Mutation::UpdateEdgeSummary(self)]).await
+        writer.send(vec![Mutation::UpdateEdge(self)]).await
     }
 }
 
@@ -1638,6 +1067,73 @@ impl Runnable for DeleteNode {
 impl Runnable for DeleteEdge {
     async fn run(self, writer: &Writer) -> Result<()> {
         writer.send(vec![Mutation::DeleteEdge(self)]).await
+    }
+}
+
+// (claude, 2026-02-07, FIXED: Added Runnable impls for RestoreNode/RestoreEdge)
+#[async_trait::async_trait]
+impl Runnable for RestoreNode {
+    async fn run(self, writer: &Writer) -> Result<()> {
+        writer.send(vec![Mutation::RestoreNode(self)]).await
+    }
+}
+
+#[async_trait::async_trait]
+impl Runnable for RestoreEdge {
+    async fn run(self, writer: &Writer) -> Result<()> {
+        writer.send(vec![Mutation::RestoreEdge(self)]).await
+    }
+}
+
+// ============================================================================
+// RunnableWithResult - Typed replies for single mutations
+// ============================================================================
+
+#[async_trait::async_trait]
+pub trait RunnableWithResult<R> {
+    async fn run_with_result(self, writer: &Writer, options: ExecOptions) -> Result<ReplyEnvelope<R>>;
+}
+
+pub trait MutationReply: Into<Mutation> + Send {
+    type Reply;
+    fn from_result(result: MutationResult) -> Result<Self::Reply>;
+}
+
+fn single_result(
+    reply: ReplyEnvelope<Vec<MutationResult>>,
+) -> Result<ReplyEnvelope<MutationResult>> {
+    let mut results = reply.payload;
+    if results.len() != 1 {
+        return Err(anyhow::anyhow!(
+            "Expected exactly one mutation result, got {}",
+            results.len()
+        ));
+    }
+    Ok(ReplyEnvelope::new(
+        reply.request_id,
+        reply.elapsed_time,
+        results.remove(0),
+    ))
+}
+
+#[async_trait::async_trait]
+impl<M> RunnableWithResult<M::Reply> for M
+where
+    M: MutationReply,
+{
+    async fn run_with_result(
+        self,
+        writer: &Writer,
+        options: ExecOptions,
+    ) -> Result<ReplyEnvelope<M::Reply>> {
+        let reply = writer.send_with_result(vec![self.into()], options).await?;
+        let single = single_result(reply)?;
+        let payload = M::from_result(single.payload)?;
+        Ok(ReplyEnvelope::new(
+            single.request_id,
+            single.elapsed_time,
+            payload,
+        ))
     }
 }
 
@@ -1669,34 +1165,16 @@ impl From<AddEdgeFragment> for Mutation {
     }
 }
 
-impl From<UpdateNodeValidSinceUntil> for Mutation {
-    fn from(m: UpdateNodeValidSinceUntil) -> Self {
-        Mutation::UpdateNodeValidSinceUntil(m)
-    }
-}
-
-impl From<UpdateEdgeValidSinceUntil> for Mutation {
-    fn from(m: UpdateEdgeValidSinceUntil) -> Self {
-        Mutation::UpdateEdgeValidSinceUntil(m)
-    }
-}
-
-impl From<UpdateEdgeWeight> for Mutation {
-    fn from(m: UpdateEdgeWeight) -> Self {
-        Mutation::UpdateEdgeWeight(m)
-    }
-}
-
 // CONTENT-ADDRESS: From for Update/Delete mutations
-impl From<UpdateNodeSummary> for Mutation {
-    fn from(m: UpdateNodeSummary) -> Self {
-        Mutation::UpdateNodeSummary(m)
+impl From<UpdateNode> for Mutation {
+    fn from(m: UpdateNode) -> Self {
+        Mutation::UpdateNode(m)
     }
 }
 
-impl From<UpdateEdgeSummary> for Mutation {
-    fn from(m: UpdateEdgeSummary) -> Self {
-        Mutation::UpdateEdgeSummary(m)
+impl From<UpdateEdge> for Mutation {
+    fn from(m: UpdateEdge) -> Self {
+        Mutation::UpdateEdge(m)
     }
 }
 
@@ -1712,73 +1190,58 @@ impl From<DeleteEdge> for Mutation {
     }
 }
 
-// ============================================================================
-// MutationBatch - Zero-overhead batching
-// ============================================================================
-
-/// A batch of mutations to be executed atomically.
-///
-/// This type provides zero-overhead batching of mutations without requiring
-/// heap allocation via boxing (unlike implementing Runnable on Vec<Mutation>).
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// use motlie_db::{MutationBatch, AddNode, AddEdge, Mutation, Runnable};
-///
-/// // Manual construction
-/// let batch = MutationBatch(vec![
-///     Mutation::AddNode(AddNode { /* ... */ }),
-///     Mutation::AddEdge(AddEdge { /* ... */ }),
-/// ]);
-/// batch.run(&writer).await?;
-///
-/// // Using the mutations![] macro (recommended)
-/// mutations![
-///     AddNode { /* ... */ },
-///     AddEdge { /* ... */ },
-/// ].run(&writer).await?;
-/// ```
-#[derive(Debug, Clone)]
-pub struct MutationBatch(pub Vec<Mutation>);
-
-impl MutationBatch {
-    /// Create a new empty mutation batch
-    pub fn new() -> Self {
-        Self(Vec::new())
-    }
-
-    /// Create a new mutation batch with the given capacity
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self(Vec::with_capacity(capacity))
-    }
-
-    /// Add a mutation to the batch
-    pub fn push(&mut self, mutation: impl Into<Mutation>) {
-        self.0.push(mutation.into());
-    }
-
-    /// Get the number of mutations in the batch
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    /// Check if the batch is empty
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+// (claude, 2026-02-07, FIXED: Added From impls for RestoreNode/RestoreEdge)
+impl From<RestoreNode> for Mutation {
+    fn from(m: RestoreNode) -> Self {
+        Mutation::RestoreNode(m)
     }
 }
 
-impl Default for MutationBatch {
-    fn default() -> Self {
-        Self::new()
+impl From<RestoreEdge> for Mutation {
+    fn from(m: RestoreEdge) -> Self {
+        Mutation::RestoreEdge(m)
+    }
+}
+
+
+// ============================================================================
+// Vec<Mutation> - Zero-overhead batching
+// ============================================================================
+
+impl RequestMeta for Vec<Mutation> {
+    type Reply = ReplyEnvelope<Vec<MutationResult>>;
+    type Options = ExecOptions;
+
+    fn request_kind(&self) -> &'static str {
+        "mutation_batch"
     }
 }
 
 #[async_trait::async_trait]
-impl Runnable for MutationBatch {
+impl Runnable for Vec<Mutation> {
     async fn run(self, writer: &Writer) -> Result<()> {
-        writer.send(self.0).await
+        writer.send(self).await
+    }
+}
+
+/// Extension trait for batch-only helpers on Vec<Mutation>.
+#[async_trait::async_trait]
+pub trait MutationBatchExt {
+    async fn run_with_result(
+        self,
+        writer: &Writer,
+        options: ExecOptions,
+    ) -> Result<ReplyEnvelope<Vec<MutationResult>>>;
+}
+
+#[async_trait::async_trait]
+impl MutationBatchExt for Vec<Mutation> {
+    async fn run_with_result(
+        self,
+        writer: &Writer,
+        options: ExecOptions,
+    ) -> Result<ReplyEnvelope<Vec<MutationResult>>> {
+        writer.send_with_result(self, options).await
     }
 }
 
@@ -1786,7 +1249,7 @@ impl Runnable for MutationBatch {
 // mutations![] Macro - Ergonomic batch construction
 // ============================================================================
 
-/// Convenience macro for creating a MutationBatch with automatic type conversion.
+/// Convenience macro for creating a Vec<Mutation> with automatic type conversion.
 ///
 /// This macro provides `vec![]`-like syntax for creating mutation batches,
 /// with automatic conversion from mutation types to the Mutation enum.
@@ -1819,10 +1282,10 @@ impl Runnable for MutationBatch {
 #[macro_export]
 macro_rules! mutations {
     () => {
-        $crate::MutationBatch::new()
+        Vec::<$crate::Mutation>::new()
     };
     ($($mutation:expr),+ $(,)?) => {
-        $crate::MutationBatch(vec![$($mutation.into()),+])
+        vec![$($mutation.into()),+]
     };
 }
 
@@ -1834,7 +1297,7 @@ macro_rules! mutations {
 mod tests {
     use super::*;
     use super::super::writer::{
-        create_mutation_writer, spawn_consumer, Consumer, Processor, WriterConfig,
+        spawn_consumer, Consumer, Processor, WriterConfig,
     };
     use crate::Id;
     use std::sync::atomic::{AtomicUsize, Ordering};

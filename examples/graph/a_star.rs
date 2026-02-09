@@ -218,13 +218,13 @@ async fn astar_motlie(
             let mut current = end;
 
             // Get end node name
-            let (name, _) = motlie_db::graph::query::NodeById::new(current, None)
+            let (name, _, _) = motlie_db::graph::query::NodeById::new(current, None)
                 .run(reader, timeout)
                 .await?;
             path.push(name);
 
             while let Some(&prev_node) = prev.get(&current) {
-                let (name, _) = motlie_db::graph::query::NodeById::new(prev_node, None)
+                let (name, _, _) = motlie_db::graph::query::NodeById::new(prev_node, None)
                     .run(reader, timeout)
                     .await?;
                 path.push(name);
@@ -245,7 +245,7 @@ async fn astar_motlie(
         // Check all neighbors
         let edges = OutgoingEdges::new(node, None).run(reader, timeout).await?;
 
-        for (weight_opt, _src, dst, _name) in edges {
+        for (weight_opt, _src, dst, _name, _version) in edges {
             let weight = weight_opt.unwrap_or(1.0);
             let tentative_g = g_score + weight;
 

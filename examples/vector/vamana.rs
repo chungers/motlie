@@ -440,7 +440,7 @@ impl VamanaIndex {
         // Remove edges not in pruned set
         for (_, neighbor_id) in &candidates {
             if !pruned_set.contains(neighbor_id) {
-                prune_edge(writer, node_id, *neighbor_id, edge_name).await?;
+                prune_edge(writer, node_id, *neighbor_id, edge_name, 1).await?;
             }
         }
 

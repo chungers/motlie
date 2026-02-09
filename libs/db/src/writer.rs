@@ -65,8 +65,7 @@
 //! │  ┌────────────────────────────────────────────────────────────────────┐ │
 //! │  │                    Mutation Pipeline                                │ │
 //! │  │  User sends: AddNode, AddEdge, AddNodeFragment, AddEdgeFragment,   │ │
-//! │  │              UpdateNodeValidSinceUntil, UpdateEdgeValidSinceUntil, │ │
-//! │  │              UpdateEdgeWeight, MutationBatch                       │ │
+//! │  │              UpdateNode, UpdateEdge, Vec<Mutation>                 │ │
 //! │  └────────────────────────────────────────────────────────────────────┘ │
 //! │                              │                                           │
 //! │                              ▼                                           │
@@ -326,7 +325,7 @@ impl Deref for Writer {
 ///     .build();
 /// ```
 pub struct WriterBuilder {
-    graph: Arc<graph::Graph>,
+    graph: Arc<graph::Processor>,
     fulltext: Arc<fulltext::Index>,
     config: WriterConfig,
 }
@@ -337,7 +336,7 @@ impl WriterBuilder {
     /// # Arguments
     /// * `graph` - The graph processor (RocksDB)
     /// * `fulltext` - The fulltext processor (Tantivy)
-    pub fn new(graph: Arc<graph::Graph>, fulltext: Arc<fulltext::Index>) -> Self {
+    pub fn new(graph: Arc<graph::Processor>, fulltext: Arc<fulltext::Index>) -> Self {
         Self {
             graph,
             fulltext,
@@ -370,9 +369,9 @@ impl WriterBuilder {
         let (mut graph_writer, graph_rx) =
             graph::writer::create_mutation_writer(self.config.graph.clone());
 
-        // Configure the writer with storage for transaction support
+        // Configure the writer with processor for transaction support
         // and forward transaction mutations to fulltext
-        graph_writer.set_storage(self.graph.storage().clone());
+        graph_writer.set_processor(self.graph.clone());
         graph_writer.set_transaction_forward_to(fulltext_tx.clone());
 
         // Spawn graph consumer with chaining to fulltext
@@ -392,18 +391,19 @@ impl WriterBuilder {
 
 /// Spawn the graph mutation consumer with chaining to fulltext.
 fn spawn_graph_consumer_with_next(
-    receiver: mpsc::Receiver<Vec<Mutation>>,
+    receiver: mpsc::Receiver<graph::writer::MutationRequest>,
     config: graph::writer::WriterConfig,
-    graph: Arc<graph::Graph>,
-    next: mpsc::Sender<Vec<Mutation>>,
+    processor: Arc<graph::Processor>,
+    next: mpsc::Sender<graph::writer::MutationRequest>,
 ) -> JoinHandle<Result<()>> {
-    let consumer = graph::writer::Consumer::with_next(receiver, config, (*graph).clone(), next);
+    // Arc<Processor> implements Processor trait
+    let consumer = graph::writer::Consumer::with_next(receiver, config, processor, next);
     graph::writer::spawn_consumer(consumer)
 }
 
 /// Spawn the fulltext mutation consumer.
 fn spawn_fulltext_consumer(
-    receiver: mpsc::Receiver<Vec<Mutation>>,
+    receiver: mpsc::Receiver<graph::writer::MutationRequest>,
     index: Arc<fulltext::Index>,
 ) -> JoinHandle<Result<()>> {
     let config = graph::writer::WriterConfig::default();
@@ -427,7 +427,7 @@ fn spawn_fulltext_consumer(
 /// # Returns
 /// A tuple of (Writer, handles)
 pub fn create_writer(
-    graph: Arc<graph::Graph>,
+    graph: Arc<graph::Processor>,
     fulltext: Arc<fulltext::Index>,
 ) -> (Writer, Vec<JoinHandle<Result<()>>>) {
     WriterBuilder::new(graph, fulltext).build()
@@ -443,7 +443,7 @@ pub fn create_writer(
 /// # Returns
 /// A tuple of (Writer, handles)
 pub fn create_writer_with_config(
-    graph: Arc<graph::Graph>,
+    graph: Arc<graph::Processor>,
     fulltext: Arc<fulltext::Index>,
     config: WriterConfig,
 ) -> (Writer, Vec<JoinHandle<Result<()>>>) {

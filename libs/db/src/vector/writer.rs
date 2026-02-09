@@ -26,12 +26,14 @@
 //! ```
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use tokio::sync::{mpsc, oneshot};
 
 use super::hnsw::CacheUpdate;
-use super::mutation::{FlushMarker, Mutation};
+use super::mutation::{FlushMarker, Mutation, MutationOutcome, MutationResult};
+use crate::request::{new_request_id, ReplyEnvelope, RequestEnvelope};
 use super::processor::Processor;
 use super::schema::{AdcCorrection, EmbeddingCode, VecId};
 
@@ -209,7 +211,7 @@ pub(crate) trait MutationExecutor: Send + Sync {
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
         processor: &Processor,
-    ) -> Result<Option<MutationCacheUpdate>>;
+    ) -> Result<MutationOutcome>;
 }
 
 // ============================================================================
@@ -226,7 +228,7 @@ pub(crate) trait MutationExecutor: Send + Sync {
 #[async_trait::async_trait]
 pub trait MutationProcessor: Send + Sync {
     /// Process a batch of mutations atomically.
-    async fn process_mutations(&self, mutations: &[Mutation]) -> Result<()>;
+    async fn process_mutations(&self, mutations: &[Mutation]) -> Result<Vec<MutationResult>>;
 }
 
 // ============================================================================
@@ -252,6 +254,8 @@ impl Default for WriterConfig {
 // Writer
 // ============================================================================
 
+pub type MutationRequest = RequestEnvelope<Vec<Mutation>>;
+
 /// Handle for sending vector mutations to be processed asynchronously.
 ///
 /// The Writer sends mutations through an MPSC channel as `Vec<Mutation>` to enable
@@ -274,7 +278,7 @@ impl Default for WriterConfig {
 /// ```
 #[derive(Clone)]
 pub struct Writer {
-    sender: mpsc::Sender<Vec<Mutation>>,
+    sender: mpsc::Sender<MutationRequest>,
 }
 
 impl std::fmt::Debug for Writer {
@@ -287,7 +291,7 @@ impl std::fmt::Debug for Writer {
 
 impl Writer {
     /// Create a new Writer with the given sender.
-    pub fn new(sender: mpsc::Sender<Vec<Mutation>>) -> Self {
+    pub fn new(sender: mpsc::Sender<MutationRequest>) -> Self {
         Self { sender }
     }
 
@@ -297,10 +301,45 @@ impl Writer {
     /// Use `flush()` to wait for mutations to be committed, or use
     /// `send_sync()` to send and wait in one call.
     pub async fn send(&self, mutations: Vec<Mutation>) -> Result<()> {
+        if mutations.is_empty() {
+            return Ok(());
+        }
+        let request = MutationRequest {
+            payload: mutations,
+            options: (),
+            reply: None,
+            timeout: None,
+            request_id: new_request_id(),
+            created_at: Instant::now(),
+        };
         self.sender
-            .send(mutations)
+            .send(request)
             .await
             .context("Failed to send mutations to writer queue")
+    }
+
+    /// Send a batch of mutations and wait for the consumer to process them.
+    pub async fn send_with_result(
+        &self,
+        mutations: Vec<Mutation>,
+    ) -> Result<ReplyEnvelope<Vec<MutationResult>>> {
+        if mutations.is_empty() {
+            return Ok(ReplyEnvelope::new(new_request_id(), 0, Vec::new()));
+        }
+        let (tx, rx) = oneshot::channel();
+        let request = MutationRequest {
+            payload: mutations,
+            options: (),
+            reply: Some(tx),
+            timeout: None,
+            request_id: new_request_id(),
+            created_at: Instant::now(),
+        };
+        self.sender
+            .send(request)
+            .await
+            .context("Failed to send mutations to writer queue")?;
+        rx.await.context("Mutation response channel closed")?
     }
 
     /// Flush all pending mutations and wait for commit.
@@ -312,8 +351,16 @@ impl Writer {
         let marker = FlushMarker::new(tx);
 
         // Send flush marker through the same channel as mutations
+        let request = MutationRequest {
+            payload: vec![Mutation::Flush(marker)],
+            options: (),
+            reply: None,
+            timeout: None,
+            request_id: new_request_id(),
+            created_at: Instant::now(),
+        };
         self.sender
-            .send(vec![Mutation::Flush(marker)])
+            .send(request)
             .await
             .context("Failed to send flush marker - channel closed")?;
 
@@ -329,9 +376,6 @@ impl Writer {
     /// This is a convenience method equivalent to `send()` followed by `flush()`.
     /// Returns when all mutations are visible to readers.
     pub async fn send_sync(&self, mutations: Vec<Mutation>) -> Result<()> {
-        if mutations.is_empty() {
-            return Ok(());
-        }
         self.send(mutations).await?;
         self.flush().await
     }
@@ -343,7 +387,7 @@ impl Writer {
 }
 
 /// Create a new mutation writer and receiver pair.
-pub fn create_writer(config: WriterConfig) -> (Writer, mpsc::Receiver<Vec<Mutation>>) {
+pub fn create_writer(config: WriterConfig) -> (Writer, mpsc::Receiver<MutationRequest>) {
     let (sender, receiver) = mpsc::channel(config.channel_buffer_size);
     let writer = Writer::new(sender);
     (writer, receiver)
@@ -358,7 +402,7 @@ pub fn create_writer(config: WriterConfig) -> (Writer, mpsc::Receiver<Vec<Mutati
 /// The consumer receives mutation batches and delegates to a Processor
 /// for database operations.
 pub(crate) struct Consumer {
-    receiver: mpsc::Receiver<Vec<Mutation>>,
+    receiver: mpsc::Receiver<MutationRequest>,
     config: WriterConfig,
     processor: Arc<Processor>,
 }
@@ -366,7 +410,7 @@ pub(crate) struct Consumer {
 impl Consumer {
     /// Create a new Consumer.
     pub(crate) fn new(
-        receiver: mpsc::Receiver<Vec<Mutation>>,
+        receiver: mpsc::Receiver<MutationRequest>,
         config: WriterConfig,
         processor: Arc<Processor>,
     ) -> Self {
@@ -384,10 +428,22 @@ impl Consumer {
 
         loop {
             match self.receiver.recv().await {
-                Some(mutations) => {
-                    self.process_batch(mutations)
-                        .await
-                        .with_context(|| "Failed to process vector mutations")?;
+                Some(mut request) => {
+                    let mutations = std::mem::take(&mut request.payload);
+                    match self.process_batch(mutations).await {
+                        Ok(replies) => {
+                            let envelope = ReplyEnvelope::new(
+                                request.request_id,
+                                request.elapsed_nanos(),
+                                replies,
+                            );
+                            request.respond(Ok(envelope));
+                        }
+                        Err(err) => {
+                            request.respond(Err(anyhow::anyhow!(err.to_string())));
+                            return Err(err).with_context(|| "Failed to process vector mutations");
+                        }
+                    }
                 }
                 None => {
                     // Channel closed
@@ -400,7 +456,7 @@ impl Consumer {
 
     /// Process a batch of mutations.
     #[tracing::instrument(skip(self, mutations), fields(batch_size = mutations.len()))]
-    async fn process_batch(&self, mutations: Vec<Mutation>) -> Result<()> {
+    async fn process_batch(&self, mutations: Vec<Mutation>) -> Result<Vec<MutationResult>> {
         // Log what we're processing
         for mutation in &mutations {
             match mutation {
@@ -441,7 +497,7 @@ impl Consumer {
         }
 
         // Process all mutations in the batch
-        self.execute_mutations(&mutations).await?;
+        let results = self.execute_mutations(&mutations).await?;
 
         // Signal completion for any flush markers
         for mutation in &mutations {
@@ -454,40 +510,27 @@ impl Consumer {
             }
         }
 
-        Ok(())
+        Ok(results)
     }
 
     /// Execute mutations against storage.
     ///
     /// All mutations are executed within a single transaction for atomicity.
     /// Cache updates (navigation + binary code) are deferred until after commit.
-    async fn execute_mutations(&self, mutations: &[Mutation]) -> Result<()> {
+    async fn execute_mutations(&self, mutations: &[Mutation]) -> Result<Vec<MutationResult>> {
         let txn_db = self.processor.storage().transaction_db()?;
         let txn = txn_db.transaction();
 
         // Collect cache updates to apply after commit
         let mut cache_updates: Vec<MutationCacheUpdate> = Vec::new();
+        let mut results: Vec<MutationResult> = Vec::with_capacity(mutations.len());
 
         for mutation in mutations {
-            // Expand batch mutations into individual operations
-            // This ensures we collect cache updates from each vector
-            if let Mutation::InsertVectorBatch(batch) = mutation {
-                for (external_key, vector) in &batch.vectors {
-                    let single = super::mutation::InsertVector {
-                        embedding: batch.embedding,
-                        external_key: external_key.clone(),
-                        vector: vector.clone(),
-                        immediate_index: batch.immediate_index,
-                    };
-                    if let Some(update) =
-                        self.execute_single(&txn, &txn_db, &Mutation::InsertVector(single))?
-                    {
-                        cache_updates.push(update);
-                    }
-                }
-            } else if let Some(update) = self.execute_single(&txn, &txn_db, mutation)? {
+            let outcome = self.execute_single(&txn, &txn_db, mutation)?;
+            if let Some(update) = outcome.cache_update {
                 cache_updates.push(update);
             }
+            results.push(outcome.result);
         }
 
         // Commit transaction - all mutations are atomic
@@ -499,7 +542,7 @@ impl Consumer {
             update.apply(self.processor.nav_cache(), self.processor.code_cache());
         }
 
-        Ok(())
+        Ok(results)
     }
 
     /// Execute a single mutation.
@@ -514,7 +557,7 @@ impl Consumer {
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
         mutation: &Mutation,
-    ) -> Result<Option<MutationCacheUpdate>> {
+    ) -> Result<MutationOutcome> {
         mutation.execute(txn, txn_db, &self.processor)
     }
 }
@@ -560,7 +603,7 @@ pub(crate) fn spawn_consumer(consumer: Consumer) -> tokio::task::JoinHandle<Resu
 /// writer.send(vec![mutation.into()]).await?;
 /// ```
 pub fn spawn_mutation_consumer_with_storage(
-    receiver: mpsc::Receiver<Vec<Mutation>>,
+    receiver: mpsc::Receiver<MutationRequest>,
     config: WriterConfig,
     storage: Arc<super::Storage>,
     registry: Arc<super::registry::EmbeddingRegistry>,
@@ -585,7 +628,7 @@ pub fn spawn_mutation_consumer_with_storage(
 ///
 /// A JoinHandle for the spawned consumer task.
 pub fn spawn_mutation_consumer_with_storage_autoreg(
-    receiver: mpsc::Receiver<Vec<Mutation>>,
+    receiver: mpsc::Receiver<MutationRequest>,
     config: WriterConfig,
     storage: Arc<super::Storage>,
 ) -> tokio::task::JoinHandle<Result<()>> {
@@ -605,7 +648,7 @@ pub fn spawn_mutation_consumer_with_storage_autoreg(
 /// which hides the Processor abstraction.
 #[allow(dead_code)] // Available for advanced use cases requiring custom processors
 pub(crate) fn spawn_mutation_consumer_with_processor(
-    receiver: mpsc::Receiver<Vec<Mutation>>,
+    receiver: mpsc::Receiver<MutationRequest>,
     config: WriterConfig,
     processor: Arc<Processor>,
 ) -> tokio::task::JoinHandle<Result<()>> {
@@ -662,7 +705,7 @@ mod tests {
 
         // Should receive it
         let received = receiver.recv().await.unwrap();
-        assert_eq!(received.len(), 1);
+        assert_eq!(received.payload.len(), 1);
     }
 
     #[tokio::test]

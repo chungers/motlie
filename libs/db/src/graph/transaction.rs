@@ -26,7 +26,7 @@
 //! txn.write(AddNode { id: node_id, ... })?;
 //!
 //! // Read sees uncommitted writes!
-//! let (name, summary) = txn.read(NodeById::new(node_id, None))?;
+//! let (name, summary, version) = txn.read(NodeById::new(node_id, None))?;
 //!
 //! // Write more based on read results
 //! txn.write(AddEdge { src: node_id, dst: other, ... })?;
@@ -45,11 +45,14 @@
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::mpsc;
 
-use super::mutation::Mutation;
+use super::mutation::{ExecOptions, Mutation};
+use super::writer::MutationRequest;
 use super::name_hash::NameCache;
 use super::query::TransactionQueryExecutor;
+use crate::request::new_request_id;
 
 /// A transaction scope for read-your-writes operations.
 ///
@@ -101,7 +104,7 @@ pub struct Transaction<'a> {
 
     /// Optional sender to forward mutations on commit.
     /// If None, mutations are not forwarded anywhere.
-    forward_to: Option<mpsc::Sender<Vec<Mutation>>>,
+    forward_to: Option<mpsc::Sender<MutationRequest>>,
 
     /// Name cache for efficient hash-to-name resolution.
     name_cache: Arc<NameCache>,
@@ -114,7 +117,7 @@ impl<'a> Transaction<'a> {
     pub(crate) fn new(
         txn: rocksdb::Transaction<'a, rocksdb::TransactionDB>,
         txn_db: &'a rocksdb::TransactionDB,
-        forward_to: Option<mpsc::Sender<Vec<Mutation>>>,
+        forward_to: Option<mpsc::Sender<MutationRequest>>,
         name_cache: Arc<NameCache>,
     ) -> Self {
         Self {
@@ -200,7 +203,7 @@ impl<'a> Transaction<'a> {
     /// txn.write(AddNode { id, ... })?;
     ///
     /// // Sees the uncommitted AddNode!
-    /// let (name, summary) = txn.read(NodeById::new(id, None))?;
+    /// let (name, summary, version) = txn.read(NodeById::new(id, None))?;
     ///
     /// // Get edges (sees uncommitted edges too)
     /// let edges = txn.read(OutgoingEdges::new(id, Some("hnsw")))?;
@@ -265,7 +268,14 @@ impl<'a> Transaction<'a> {
 
             if !mutations.is_empty() {
                 // Best-effort send using try_send (non-blocking)
-                if let Err(e) = sender.try_send(mutations) {
+                if let Err(e) = sender.try_send(MutationRequest {
+                    payload: mutations,
+                    options: ExecOptions::default(),
+                    reply: None,
+                    timeout: None,
+                    request_id: new_request_id(),
+                    created_at: Instant::now(),
+                }) {
                     tracing::warn!(
                         error = %e,
                         "Transaction forwarding failed - channel full or closed"
@@ -355,8 +365,6 @@ impl<'a> Drop for Transaction<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     // Note: Full integration tests require a RocksDB instance.
     // These are basic unit tests for the Transaction struct.
 

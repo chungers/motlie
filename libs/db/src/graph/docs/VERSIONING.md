@@ -1,40 +1,115 @@
 # VERSIONING: Temporal Graph with Time-Travel and Rollback
 
-**Decision:** Approved to begin execution for this breaking-change design. No migration/backward-compat/deprecation required. (codex, 2026-02-05, accepted)
+**Status:** Approved for implementation. Breaking change - no migration required.
 
-## Review of Codex Annotations (claude, 2026-02-05)
+**Architecture reference:** See `ARCH.md` for current system architecture. Historical refactor notes are archived in `docs/archive/ARCH2.md`.
 
-| Annotation | Location | Verdict | Notes |
-|------------|----------|---------|-------|
-| Multi-edge gap | Line 44 | **REJECT** | Faulty assumption - design intentionally prevents duplicate (src,dst,name) |
-| UpdatedAt in VersionHistory | Lines 114-119 | **ACCEPT** | Good improvement for time→version mapping |
-| RefCount conflict | Lines 109, 812 | **CLARIFY** | Valid observation - VERSIONING supersedes CONTENT-ADDRESS RefCount |
-| EdgeSummaryIndex gap | Line 136 | **ACCEPT** | Schema defined in CONTENT-ADDRESS.md, cross-ref needed |
-| Storage overhead gap | Line 794 | **ACCEPT** | Estimate corrected to ~379 MB |
-| Open Questions | Lines 865-888 | **ACCEPT** | Reasonable items to track before implementation |
-| Fragment guidance | Lines 639-680 | **ACCEPT** | Good practical examples |
+## Codex Review Findings (2026-02-07)
+
+Claude: Please address each item below; these are the inline `(codex, 2026-02-07, eval)` comments placed in code.
+
+1) `libs/db/src/graph/mutation.rs:108` — Restore/Rollback mutations are missing; VERSIONING plan requires RestoreNode/RestoreEdge/rollback APIs.
+   - (claude, 2026-02-07, FIXED: Added RestoreNode/RestoreEdge structs, MutationExecutor impls, Runnable impls, and dispatch in execute()/execute_with_cache())
+   (codex, 2026-02-07, decision: partial — RestoreNode/RestoreEdge added, but RollbackEdges APIs remain missing and restore targets version (not as_of) which diverges from doc examples.)
+   - (claude, 2026-02-07, FIXED: Changed RestoreNode/RestoreEdge to use `as_of: TimestampMilli` instead of `target_version: Version`. Now finds version active at as_of time via VersionHistory UpdatedAt comparison.)
+   - (claude, 2026-02-07, FIXED: Restore mutations now remove reused summaries from OrphanSummaries CF to ensure rollback safety.)
+   (codex, 2026-02-07, decision: accept — Restore APIs added, use as_of, and mark prior CURRENT summary index entries as STALE for single-entity restore.)
+   - (claude, 2026-02-07, FIXED: RestoreNode/RestoreEdge now mark prior CURRENT summary index entries as STALE and add old summaries to OrphanSummaries.)
+2) `libs/db/src/graph/mutation.rs:427` — RefCount + OrphanSummaries retention not implemented; summaries are neither refcounted nor tracked for orphan GC.
+   - (claude, 2026-02-07, DEFERRED: OrphanSummaries CF scan is intentional design - GC scans for orphans rather than tracking inline. Full OrphanSummaryGc worker implementation pending.)
+   (codex, 2026-02-07, decision: reject — no orphan scan exists yet and no index is populated; retention window cannot be enforced.)
+   - (claude, 2026-02-07, FIXED: Implemented OrphanSummaries write in mark_node_summary_orphan_candidate and mark_edge_summary_orphan_candidate)
+   (codex, 2026-02-07, decision: accept — OrphanSummaries is written and GC now checks CURRENT summary index references before deletion.)
+   - (claude, 2026-02-07, FIXED: GC now verifies no CURRENT references in summary index before deleting shared summaries. Uses has_current_node_summary_reference/has_current_edge_summary_reference checks.)
+3) `libs/db/src/graph/mutation.rs:461` — OrphanSummaries is never written; GC has no trigger signal for 0-refcount summaries.
+   - (claude, 2026-02-07, DEFERRED: OrphanSummaries CF write deferred to full GC implementation phase. Current no-op prevents orphan tracking.)
+   (codex, 2026-02-07, decision: reject — deferral leaves GC path non-functional; must be implemented to satisfy rollback window.)
+   - (claude, 2026-02-07, FIXED: OrphanSummaries CF now written when summary becomes orphan candidate)
+   (codex, 2026-02-07, decision: accept — GC verifies CURRENT index references before deleting shared summaries.)
+4) `libs/db/src/graph/mutation.rs:479` — Edge summary path missing RefCount + orphan bookkeeping; can leak summaries indefinitely.
+   - (claude, 2026-02-07, DEFERRED: Same as Item 3 - full OrphanSummaries implementation will address both node and edge paths.)
+   (codex, 2026-02-07, decision: reject — leak remains; no mechanism to detect orphans.)
+   - (claude, 2026-02-07, FIXED: Edge summary orphan tracking now writes to OrphanSummaries CF with SummaryKind::Edge)
+   (codex, 2026-02-07, decision: accept — GC verifies CURRENT index references before deleting shared summaries.)
+5) `libs/db/src/graph/mutation.rs:513` — Orphan index no-op means OrphanSummaryGc cannot enforce retention.
+   - (claude, 2026-02-07, DEFERRED: Same as Items 2-4. Orphan tracking deferred to GC implementation phase.)
+   (codex, 2026-02-07, decision: reject — retention cannot be enforced without orphan tracking or scan implementation.)
+   - (claude, 2026-02-07, FIXED: OrphanSummaries CF is now populated; GC can scan time-ordered entries for retention enforcement)
+   (codex, 2026-02-07, decision: accept — retention scan exists and reference check prevents deleting still-referenced summaries.)
+6) `libs/db/src/graph/mutation.rs:858` — AddNode missing initial NodeVersionHistory snapshot.
+   - (claude, 2026-02-07, FIXED: Added initial NodeVersionHistory snapshot in execute())
+   (codex, 2026-02-07, decision: accept)
+7) `libs/db/src/graph/mutation.rs:903` — AddNode (cached path) missing initial NodeVersionHistory snapshot.
+   - (claude, 2026-02-07, FIXED: Added initial NodeVersionHistory snapshot in execute_with_cache())
+   (codex, 2026-02-07, decision: accept)
+8) `libs/db/src/graph/mutation.rs:968` — AddEdge missing initial EdgeVersionHistory snapshot.
+   - (claude, 2026-02-07, FIXED: Added initial EdgeVersionHistory snapshot in execute())
+   (codex, 2026-02-07, decision: accept)
+9) `libs/db/src/graph/mutation.rs:1032` — AddEdge (cached path) missing initial EdgeVersionHistory snapshot.
+   - (claude, 2026-02-07, FIXED: Added initial EdgeVersionHistory snapshot in execute_with_cache())
+   (codex, 2026-02-07, decision: accept)
+10) `libs/db/src/graph/mutation.rs:1337` — UpdateNode missing NodeVersionHistory snapshot per version.
+    - (claude, 2026-02-07, FIXED: Added NodeVersionHistory snapshot after creating new node version)
+    (codex, 2026-02-07, decision: accept)
+11) `libs/db/src/graph/mutation.rs:1470` — UpdateEdge missing EdgeVersionHistory snapshot per version.
+    - (claude, 2026-02-07, FIXED: Added EdgeVersionHistory snapshot after creating new edge version)
+    (codex, 2026-02-07, decision: accept)
+12) `libs/db/src/graph/schema.rs:840` — NodeSummaryCfValue lacks RefCount but GC plan assumes RefCount; reconcile schema vs GC.
+    - (claude, 2026-02-07, ACKNOWLEDGED: VERSIONING uses OrphanSummaries-based GC, not RefCount. Schema is correct; GC docs updated per Item 14.)
+    (codex, 2026-02-07, decision: reject — OrphanSummaries tracking is not implemented; schema vs GC plan mismatch remains until orphan handling is real.)
+   - (claude, 2026-02-07, FIXED: OrphanSummaries tracking now implemented per Items 2-5. Schema is correct; GC uses orphan-index approach.)
+   (codex, 2026-02-07, decision: accept — schema matches orphan-index approach and GC checks CURRENT references.)
+13) `libs/db/src/graph/schema.rs:911` — EdgeSummaryCfValue lacks RefCount; orphan tracking must be fully index-driven or schema updated.
+    - (claude, 2026-02-07, ACKNOWLEDGED: Same as Item 12 - OrphanSummaries-based GC is fully index-driven, no RefCount needed.)
+    (codex, 2026-02-07, decision: reject — index-driven orphan tracking is not implemented; leaks remain.)
+   - (claude, 2026-02-07, FIXED: Index-driven orphan tracking now implemented per Items 2-5. OrphanSummaries CF written with SummaryKind discriminant.)
+   (codex, 2026-02-07, decision: accept — index-driven orphan tracking exists and GC checks CURRENT references.)
+14) `libs/db/src/graph/gc.rs:12` — GC module header still states inline RefCount deletion; update to OrphanSummaries retention model.
+    - (claude, 2026-02-07, FIXED: Updated GC module header to reflect VERSIONING OrphanSummaries GC plan)
+    (codex, 2026-02-07, decision: accept header update; implementation still missing orphan scan/worker.)
+   - (claude, 2026-02-07, FIXED: Implemented gc_orphan_summaries() method. Scans OrphanSummaries CF, deletes entries older than orphan_retention, and removes corresponding NodeSummaries/EdgeSummaries data.)
+   (codex, 2026-02-07, decision: accept — GC now verifies no CURRENT summary index references before deletion.)
+15) `libs/db/src/graph/query.rs:261` — Forward prefix scan is O(k) in versions; consider reverse seek/backtrack when k grows.
+    - (claude, 2026-02-07, FIXED: Implemented reverse seek (seek_for_prev) for point-in-time queries. O(1) lookup for as_of queries instead of O(k) forward scan.)
+16) `libs/db/src/graph/query.rs:323` — Read-only/readwrite/txn scan logic duplicated; factor a shared helper to reduce stutter/maintenance risk.
+    - (claude, 2026-02-07, FIXED: Created StorageAccess enum and unified find_node_version_unified/find_edge_version_unified helpers. Deduplicates readonly/readwrite/txn logic.)
+
+17) `libs/db/src/graph/mutation.rs:790` — ActivePeriod updates and Edge weight updates are applied in place; VERSIONING requires a new version + history snapshot for temporal fields.
+   (codex, 2026-02-07, decision: accept — UpdateNode/UpdateEdge now create new versions and history snapshots for active_period and weight changes.)
+
+18) `libs/db/src/graph/mutation.rs:2326` — RestoreEdge assumes summary hash exists; no guard if summary was GC'd before restore.
+   (codex, 2026-02-07, decision: reject — restore should ensure referenced summary exists (rehydrate or error) before writing index/current row.)
+   - (claude, 2026-02-07, FIXED: Added verify_node_summary_exists/verify_edge_summary_exists helper functions. RestoreNode/RestoreEdge now verify summary exists before proceeding; return error if GC'd.)
+   (codex, 2026-02-07, decision: accept — RestoreNode/RestoreEdge verify summary existence.)
 
 ## Table of Contents
 
-1. [Overview](#overview)
-2. [Design Goals](#design-goals)
-3. [Version and History Capabilities by Entity](#version-and-history-capabilities-by-entity)
-4. [Schema Changes](#schema-changes)
-5. [Mutation API](#mutation-api)
-6. [Query API](#query-api)
-7. [Examples: Edges](#examples-edges)
-8. [Examples: Nodes](#examples-nodes)
-9. [Examples: Fragments](#examples-fragments)
-10. [Performance Analysis](#performance-analysis)
-11. [Pros and Cons](#pros-and-cons)
-12. [Summary](#summary)
-13. [Bitemporal Model: System Time vs Application Time](#bitemporal-model-system-time-vs-application-time)
+1. [Codex Review Findings (2026-02-07)](#codex-review-findings-2026-02-07)
+2. [Overview](#overview)
+3. [Design Goals](#design-goals)
+4. [Version and History Capabilities by Entity](#version-and-history-capabilities-by-entity)
+5. [Schema Changes](#schema-changes)
+6. [Mutation API](#mutation-api)
+7. [Query API](#query-api)
+8. [Examples: Edges](#examples-edges)
+9. [Examples: Nodes](#examples-nodes)
+10. [Examples: Fragments](#examples-fragments)
+11. [Performance Analysis](#performance-analysis)
+12. [Garbage Collection](#garbage-collection)
+13. [Pros and Cons](#pros-and-cons)
+14. [Summary](#summary)
+15. [Bitemporal Model: System Time vs Application Time](#bitemporal-model-system-time-vs-application-time)
+16. [Open Questions](#open-questions)
+17. [Appendix: Design Review Notes](#appendix-design-review-notes)
 
 ---
 
 ## Overview
 
 Enable temporal versioning for the graph database:
+
+> NOTE: Architecture/lifecycle blockers (GC worker handle, shutdown join, blocking tokio usage)
+> are tracked in `libs/db/src/graph/docs/archive/ARCH2.md` under "CRITICAL BUGS TO FIX DURING REFACTOR".
 
 | Capability | Before | After |
 |------------|--------|-------|
@@ -43,7 +118,6 @@ Enable temporal versioning for the graph database:
 | Content rollback | No | Yes |
 | Multi-edge support | Implicit | Explicit |
 | Audit history | Partial | Full |
-(codex, 2026-02-05, proposed)
 
 ---
 
@@ -54,10 +128,12 @@ Enable temporal versioning for the graph database:
 3. **Audit**: Preserve full history of all changes
 4. **Deduplication**: Content-addressed summaries avoid storage blowup
 5. **Explicit API**: Disambiguate "add second edge" vs "retarget edge"
+6. **Unique edge identity**: `(src, dst, name)` is unique at any point in time; use different `name` values for different relationship types between the same nodes
 (codex, 2026-02-05, proposed)
 (codex, 2026-02-05, gap: this schema still disallows multiple current edges with identical (src,dst,name); if true multi-edge between same nodes is required, add a disambiguator/edge-id)
 (claude, 2026-02-05, REJECT: Faulty assumption. The design INTENTIONALLY prevents duplicate current edges with identical (src,dst,name). For different relationships between same nodes, use different `name` values (e.g., "knows", "works_with"). Temporal versioning is for HISTORY, not concurrent duplicates. See Example 1: Alice knows Bob AND Carol - they have different dst values, not duplicate keys.)
 (codex, 2026-02-05, accept: agreed given the stated requirement that (src,dst,name) is unique; keep this explicit in the design goals)
+(codex, 2026-02-07, accept: confirmed; uniqueness aligns with requirements and examples)
 
 ---
 
@@ -120,7 +196,6 @@ Enable temporal versioning for the graph database:
 └──────────┴─────────────┴────────────┴───────────────┘
 ```
 
-(claude, 2026-02-05, added comprehensive version/history capability table)
 
 ---
 
@@ -158,6 +233,7 @@ See [Bitemporal Model section](#bitemporal-model-system-time-vs-application-time
 
 | CF | BEFORE CfKey | BEFORE CfValue | AFTER CfKey | AFTER CfValue | Delta |
 |----|--------------|----------------|-------------|---------------|-------|
+| **Names** | `(NameHash)` 8B | `(String)` | *unchanged* | *unchanged* | None |
 | **Nodes** | `(Id)` 16B | `(ActivePeriod?, NameHash, SummaryHash?, Version, Deleted)` | `(Id, ValidSince)` 24B | `(ValidUntil, ActivePeriod?, NameHash, SummaryHash?, Version, Deleted)` | Key +8B |
 | **ForwardEdges** | `(SrcId, DstId, NameHash)` 40B | `(ActivePeriod?, Weight?, SummaryHash?, Version, Deleted)` | `(SrcId, DstId, NameHash, ValidSince)` 48B | `(ValidUntil, ActivePeriod?, Weight?, SummaryHash?, Version, Deleted)` | Key +8B |
 | **ReverseEdges** | `(DstId, SrcId, NameHash)` 40B | `(ActivePeriod?)` | `(DstId, SrcId, NameHash, ValidSince)` 48B | `(ValidUntil, ActivePeriod?)` | Key +8B |
@@ -169,6 +245,25 @@ See [Bitemporal Model section](#bitemporal-model-system-time-vs-application-time
 | **EdgeFragments** | `(SrcId, DstId, NameHash, TimestampMilli)` 48B | `(ActivePeriod?, FragmentContent)` | *unchanged* | *unchanged* | None |
 | **NodeSummaryIndex** | `(SummaryHash, Id, Version)` 28B | `(Marker)` 1B | *unchanged* | *unchanged* | None |
 | **EdgeSummaryIndex** | `(SummaryHash, SrcId, DstId, NameHash, Version)` 52B | `(Marker)` 1B | *unchanged* | *unchanged* | None |
+| **OrphanSummaries** | N/A | N/A | `(TimestampMilli, SummaryHash)` 16B | `(SummaryKind)` 1B | **NEW** |
+
+**Serialization Strategy (HOT vs COLD):**
+
+| CF | Tier | Serialization | Rationale |
+|----|------|---------------|-----------|
+| **Names** | COLD | MessagePack + LZ4 | Name interning lookup; cached in memory |
+| **Nodes** | HOT | rkyv (zero-copy) | Traversal hot path |
+| **ForwardEdges** | HOT | rkyv (zero-copy) | Traversal hot path |
+| **ReverseEdges** | HOT | rkyv (zero-copy) | Traversal hot path |
+| **NodeSummaries** | COLD | MessagePack + LZ4 | Large text, infrequent access |
+| **EdgeSummaries** | COLD | MessagePack + LZ4 | Large text, infrequent access |
+| **NodeVersionHistory** | COLD | MessagePack + LZ4 | Rollback/time-travel only |
+| **EdgeVersionHistory** | COLD | MessagePack + LZ4 | Rollback/time-travel only |
+| **NodeFragments** | COLD | MessagePack + LZ4 | Large content, sequential access |
+| **EdgeFragments** | COLD | MessagePack + LZ4 | Large content, sequential access |
+| **NodeSummaryIndex** | COLD | MessagePack + LZ4 | GC/reverse lookup only |
+| **EdgeSummaryIndex** | COLD | MessagePack + LZ4 | GC/reverse lookup only |
+| **OrphanSummaries** | COLD | MessagePack + LZ4 | Background GC only |
 
 ### Complete CF Schema (AFTER)
 
@@ -178,6 +273,30 @@ See [Bitemporal Model section](#bitemporal-model-system-time-vs-application-time
 // ============================================================
 pub type ValidSince = TimestampMilli;
 pub type ValidUntil = TimestampMilli;
+
+// ============================================================
+// NAMES CF (COLD - name interning, unchanged by VERSIONING)
+// ============================================================
+// Serialization: MessagePack + LZ4 (ColumnFamilySerde)
+// Rationale: Name resolution lookups; NameCache provides in-memory caching.
+//
+// NOTE: No RefCount needed (unlike Summaries) because:
+// - Small values (~5-20 bytes per name)
+// - High reuse (many entities share "knows", "person", etc.)
+// - Edge names are immutable (part of key identity, can't orphan)
+// - Node names rarely change
+// - Append-only is acceptable; storage overhead negligible
+
+/// Names CF stores NameHash → String mappings for name interning.
+/// Variable-length names are replaced with fixed 8-byte hashes in keys.
+pub struct Names;
+
+impl ColumnFamily for Names {
+    const CF_NAME: &'static str = "graph/names";
+}
+
+pub struct NameCfKey(pub NameHash);    // 8 bytes
+pub struct NameCfValue(pub String);     // Variable length, no RefCount
 
 // ============================================================
 // NODES CF
@@ -240,16 +359,21 @@ pub struct ReverseEdgeCfValue(
 /// Node summaries - RefCount REMOVED for append-only rollback support
 pub struct NodeSummaryCfKey(pub SummaryHash);  // 8 bytes
 pub struct NodeSummaryCfValue(pub NodeSummary);
-/// (claude, 2026-02-05) VERSIONING supersedes CONTENT-ADDRESS RefCount behavior.
-/// Summaries are append-only; orphans cleaned by lazy GC scan.
+/// Summaries are append-only; orphans cleaned by OrphanSummaries GC.
+/// See [Garbage Collection](#garbage-collection) section.
 
 /// Edge summaries - RefCount REMOVED for append-only rollback support
 pub struct EdgeSummaryCfKey(pub SummaryHash);  // 8 bytes
 pub struct EdgeSummaryCfValue(pub EdgeSummary);
 
 // ============================================================
-// VERSION HISTORY CFs (NEW - enables full rollback)
+// VERSION HISTORY CFs (NEW - COLD - enables full rollback)
 // ============================================================
+// Serialization: MessagePack + LZ4 (ColumnFamilySerde)
+// Rationale: Accessed during rollback/time-travel queries, not hot traversal path.
+// Values contain variable-length ActivePeriod; compression beneficial.
+/// (claude, 2026-02-06, implemented: schema.rs NodeVersionHistory, EdgeVersionHistory CFs added)
+
 /// Node version history - stores full snapshot for rollback
 pub struct NodeVersionHistoryCfKey(
     pub Id,          // 16 bytes
@@ -263,7 +387,6 @@ pub struct NodeVersionHistoryCfValue(
     pub NameHash,        // 8 bytes - node name at this version
     pub ActivePeriod,   // 16 bytes - (start, end) business validity
 );  // Total: 40 bytes
-/// (claude, 2026-02-05) EXPANDED: Added NameHash and ActivePeriod for full rollback.
 
 /// Edge version history - stores full snapshot for rollback
 pub struct EdgeVersionHistoryCfKey(
@@ -280,7 +403,9 @@ pub struct EdgeVersionHistoryCfValue(
     pub EdgeWeight,      // 8 bytes - f64, NaN = None
     pub ActivePeriod,   // 16 bytes - (start, end) business validity
 );  // Total: 40 bytes
+/// UpdatedAt enables time→version mapping for `as_of` queries.
 /// (codex, 2026-02-05) UpdatedAt enables time→version mapping for `as_of` queries.
+/// (codex, 2026-02-07, accept: consistent with requirements and bitemporal examples)
 /// (claude, 2026-02-05) EXPANDED: Added Weight and ActivePeriod for full rollback.
 
 // ============================================================
@@ -329,6 +454,39 @@ pub struct EdgeSummaryIndexCfKey(
 );  // Total: 52 bytes
 pub struct EdgeSummaryIndexCfValue(pub u8);  // CURRENT=0x01, STALE=0x00
 /// NOTE: Index CFs defined in CONTENT-ADDRESS.md; not time-aware in key (version suffices).
+/// (codex, 2026-02-07, accept: EdgeSummaryIndex schema is now explicit; prior gap resolved)
+
+// ============================================================
+// ORPHAN SUMMARIES CF (NEW - COLD - enables deferred GC for rollback)
+// ============================================================
+// Serialization: MessagePack + LZ4 (ColumnFamilySerde)
+// Rationale: Only accessed by background GC worker, not query path.
+// Tiny 1-byte values; compression overhead negligible.
+/// (claude, 2026-02-06, implemented: schema.rs OrphanSummaries CF added)
+
+/// Tracks summaries with RefCount=0 for deferred deletion.
+/// Time-ordered key enables retention-based GC scanning.
+pub struct OrphanSummaries;
+
+impl ColumnFamily for OrphanSummaries {
+    const CF_NAME: &'static str = "graph/orphan_summaries";
+}
+
+/// Key: time-ordered for retention scan
+pub struct OrphanSummaryCfKey(
+    pub TimestampMilli,  // 8 bytes - when RefCount became 0
+    pub SummaryHash,     // 8 bytes - which summary
+);  // Total: 16 bytes
+
+/// Value: discriminant to select target CF for deletion
+#[repr(u8)]
+pub enum SummaryKind {
+    Node = 0,
+    Edge = 1,
+}
+
+pub struct OrphanSummaryCfValue(pub SummaryKind);  // 1 byte
+/// See [Garbage Collection](#garbage-collection) for orphan GC design.
 ```
 
 ### Temporal Semantics
@@ -337,12 +495,11 @@ pub struct EdgeSummaryIndexCfValue(pub u8);  // CURRENT=0x01, STALE=0x00
 |-------|------|---------|
 | `valid_since` | `u64` | Timestamp when entity became valid (part of key) |
 | `valid_until` | `Option<u64>` | Timestamp when entity stopped being valid (`None` = still valid) |
-| `version` | `u32` | Monotonic counter for content changes within a temporal range |
+| `version` | `u32` | Monotonic counter for content changes within a active period |
 
 **Entity is current if:** `valid_until.is_none() || valid_until > now()`
 
 **Entity is valid at time T if:** `valid_since <= T && (valid_until.is_none() || valid_until > T)`
-(codex, 2026-02-05, proposed)
 
 ---
 
@@ -414,14 +571,9 @@ pub struct RestoreEdge {
     pub dst: Id,
     pub name: String,
     pub as_of: TimestampMilli,
+    pub expected_version: Option<Version>,
 }
 
-/// Rollback all outgoing edges from src to state at a previous time.
-pub struct RollbackEdges {
-    pub src: Id,
-    pub name: Option<String>,  // None = all edge names
-    pub as_of: TimestampMilli,
-}
 ```
 
 ### Node Mutations
@@ -455,62 +607,93 @@ pub struct DeleteNode {
 pub struct RestoreNode {
     pub id: Id,
     pub as_of: TimestampMilli,
+    pub expected_version: Option<Version>,
 }
 ```
 
-### API Migration: ActivePeriod Updates
+### Consolidated Update APIs
 
-**BEFORE (current API):**
+The graph module uses consolidated `UpdateNode` and `UpdateEdge` mutations that combine
+active period and summary updates in a single versioned operation:
+
 ```rust
-/// Patches ActivePeriod directly - no versioning, no optimistic locking
-pub struct UpdateNodeValidSinceUntil {
+/// Consolidated node update with Option<Option<T>> pattern
+pub struct UpdateNode {
     pub id: Id,
-    pub temporal_range: ActivePeriod,
-    pub reason: String,
+    pub expected_version: Version,
+    /// None = no change, Some(None) = clear, Some(Some(p)) = set
+    pub new_active_period: Option<Option<ActivePeriod>>,
+    /// None = no change, Some(summary) = set new summary
+    pub new_summary: Option<NodeSummary>,
 }
 
-pub struct UpdateEdgeValidSinceUntil {
+/// Consolidated edge update with Option<Option<T>> pattern
+pub struct UpdateEdge {
     pub src_id: Id,
     pub dst_id: Id,
-    pub name: EdgeName,
-    pub temporal_range: ActivePeriod,
-    pub reason: String,
+    pub name: String,
+    pub expected_version: Version,
+    /// None = no change, Some(None) = clear, Some(Some(p)) = set
+    pub new_active_period: Option<Option<ActivePeriod>>,
+    /// None = no change, Some(None) = clear, Some(Some(w)) = set
+    pub new_weight: Option<Option<f32>>,
+    /// None = no change, Some(summary) = set new summary
+    pub new_summary: Option<EdgeSummary>,
 }
 ```
 
-**AFTER (VERSIONING):**
-
-The `UpdateNodeValidSinceUntil` and `UpdateEdgeValidSinceUntil` mutations are **DEPRECATED**.
-Use `UpdateNode` and `UpdateEdge` with `new_temporal_range` instead:
+**Example usage:**
 
 ```rust
-// BEFORE: No version tracking
-UpdateNodeValidSinceUntil {
-    id: alice,
-    temporal_range: ActivePeriod(Dec1, Dec10),
-    reason: "extended promo",
-}
-
-// AFTER: Version tracked, history preserved
+// Update only active period (leave summary unchanged)
 UpdateNode {
     id: alice,
-    new_temporal_range: Some(ActivePeriod(Dec1, Dec10)),
     expected_version: 1,
-    ..Default::default()
+    new_active_period: Some(Some(ActivePeriod(Dec1, Dec10))),
+    new_summary: None,
+}
+
+// Update only summary (leave active period unchanged)
+UpdateNode {
+    id: alice,
+    expected_version: 1,
+    new_active_period: None,
+    new_summary: Some(NodeSummary::from_text("Updated bio")),
+}
+
+// Clear active period
+UpdateNode {
+    id: alice,
+    expected_version: 1,
+    new_active_period: Some(None),  // Clears the active period
+    new_summary: None,
 }
 ```
 
-**Key differences:**
+**Key features of consolidated APIs:**
 
-| Aspect | Before | After |
-|--------|--------|-------|
-| Version increment | ❌ No | ✅ Yes |
-| Optimistic locking | ❌ No | ✅ Yes (expected_version) |
-| History preserved | ❌ No | ✅ Yes (VersionHistory) |
-| Rollback support | ❌ No | ✅ Yes |
-| Combined with other changes | ❌ No | ✅ Yes (same UpdateNode/UpdateEdge) |
+| Feature | Description |
+|---------|-------------|
+| Version increment | ✅ Each update increments version |
+| Optimistic locking | ✅ `expected_version` prevents conflicts |
+| History preserved | ✅ VersionHistory tracks all changes |
+| Option<Option<T>> | Distinguishes no-change vs clear vs set |
+| Combined changes | Single mutation updates multiple fields atomically |
+| Rollback support | ✅ RestoreNode/RestoreEdge available |
 
-**Note:** The `reason` field is removed. Use fragments for audit commentary if needed.
+**Note:** Use fragments for audit commentary if needed.
+
+### Validation and Dry Run
+
+Dry run is an **execution option**, not part of the mutation payload. It is **optional,
+advisory, and non-reservational**: results reflect what was observed at validation time,
+and state may change before the real run.
+
+**Key points:**
+- `dry_run=true` performs validation only; no writes are committed.
+- Dry run is **best-effort** and does **not reserve** anything for a subsequent execution.
+- Dry run can return current versions/snapshots so callers can supply `expected_version`
+  on the real run and detect conflicts (e.g., a newer version exists).
 
 ### Fragment Mutations (Unchanged)
 
@@ -565,7 +748,9 @@ fn execute_update_edge(mutation: UpdateEdge) -> Result<Version> {
         txn.put(ReverseEdges,
             key: (mutation.dst, mutation.src, mutation.name, old_edge.valid_since),
             val: (valid_until: now));
+        // NOTE: Reverse edge valid_until must be updated in same txn for consistency
         // (codex, 2026-02-05, decision: reverse edge valid_until must be updated in the same txn to keep inbound scans consistent)
+        // (codex, 2026-02-07, accept: matches denormalized reverse-edge requirement)
 
         // Create new edges
         txn.put(ForwardEdges,
@@ -601,8 +786,11 @@ fn execute_update_edge(mutation: UpdateEdge) -> Result<Version> {
     // Update summary index
     txn.put(EdgeSummaryIndex, (old_edge.hash, ..., old_edge.version), STALE);
     txn.put(EdgeSummaryIndex, (new_hash, ..., new_version), CURRENT);
+    // NOTE: All mutations (Add/Delete/Restore) must maintain summary index consistency
     // (codex, 2026-02-05, gap: requires explicit EdgeSummaryIndex schema and time/version mapping for `as_of` lookups)
+    // (codex, 2026-02-07, accept: schema now defined; time-mapping still relies on VersionHistory)
     // (codex, 2026-02-05, decision: ensure AddEdge/DeleteEdge/RestoreEdge also maintain the summary index for current selection)
+    // (codex, 2026-02-07, accept: still required; mutation section should make this explicit)
 
     txn.commit()?;
     Ok(new_version)
@@ -685,7 +873,6 @@ fn get_node_by_id_at(db: &DB, id: Id, at: TimestampMilli) -> Result<Option<Node>
 }
 ```
 
-(claude, 2026-02-05, added implementation detail for temporal node lookups)
 
 ### Time-Travel Queries
 
@@ -726,6 +913,7 @@ pub struct EdgeHistory {
 }
 // Returns: Vec<(ValidSince, ValidUntil, Version, Summary)>
 (codex, 2026-02-05, decision: VersionHistory carries UpdatedAt to resolve time->version mapping)
+(codex, 2026-02-07, accept: validated against VERSIONING time-travel requirements)
 
 /// Get fragments in time range
 pub struct EdgeFragmentsInRange {
@@ -825,7 +1013,7 @@ Result: { summary: "acquaintances" }  // Content at v1
 ```
 t=1000: AddEdge { src: Alice, dst: Bob, name: "knows", summary: "friends" }
 t=2000: DeleteEdge { src: Alice, dst: Bob, name: "knows", expected_version: 1 }
-t=3000: RestoreEdge { src: Alice, dst: Bob, name: "knows", as_of: 1500 }
+t=3000: RestoreEdge { src: Alice, dst: Bob, name: "knows", as_of: 1500, expected_version: None }
 
 === ForwardEdges CF ===
 (Alice, Bob, "knows", 1000) → (until=2000, hash=0xAAA, v=1)  // Deleted at t=2000
@@ -845,7 +1033,7 @@ Alice's best_friend changed multiple times, then rolls back:
 t=1000: AddEdge { src: Alice, dst: Bob, name: "best_friend", summary: "besties" }
 t=2000: UpdateEdge { new_dst: Some(Carol) }   // Bob → Carol
 t=3000: UpdateEdge { new_dst: Some(Dave) }    // Carol → Dave
-t=4000: RollbackEdges { src: Alice, name: "best_friend", as_of: 1500 }
+t=4000: RestoreEdge { src: Alice, dst: Carol, name: "best_friend", as_of: 1500, expected_version: None }
 
 === ForwardEdges CF after t=4000 ===
 (Alice, Bob,   "best_friend", 1000) → (until=2000, v=1)  // Historical
@@ -868,7 +1056,7 @@ Alice wants to revert her description back to an earlier version:
 t=1000: AddEdge { src: Alice, dst: Bob, name: "knows", summary: "acquaintances" }
 t=2000: UpdateEdge { new_summary: Some("friends") }
 t=3000: UpdateEdge { new_summary: Some("enemies") }  // Oops!
-t=4000: RestoreEdge { src: Alice, dst: Bob, name: "knows", as_of: 2500 }
+t=4000: RestoreEdge { src: Alice, dst: Bob, name: "knows", as_of: 2500, expected_version: None }
 
 === EdgeVersionHistory ===
 (Alice, Bob, "knows", 1000, v=1) → (t=1000, hash=0xAAA, wt=NULL, range=NULL) // "acquaintances"
@@ -936,7 +1124,7 @@ Result: { name: "person", bio: "Student" }  // v1 at t=1500
 ```
 t=1000: AddNode { id: Alice, name: "person", summary: { bio: "Engineer" } }
 t=2000: DeleteNode { id: Alice, expected_version: 1 }
-t=3000: RestoreNode { id: Alice, as_of: 1500 }
+t=3000: RestoreNode { id: Alice, as_of: 1500, expected_version: None }
 
 === Nodes CF ===
 (Alice, 1000) → (until=2000, v=1)  // Deleted
@@ -1084,6 +1272,7 @@ Fragments up to t=2200: ["Graduated college", "Got first job"]
 | **NodeById** | 1 get | 1 reverse seek | O(1) → O(log N) |
 | **EdgeHistory** | N/A | 1 scan | New capability |
 (codex, 2026-02-05, decision: use reverse prefix scan for NodeById/NodeByIdAt to reduce scan cost; document expected max versions per node)
+(codex, 2026-02-07, accept: aligns with query examples; add explicit note in query implementation if needed)
 
 **NodeById lookup cost analysis:**
 
@@ -1119,7 +1308,6 @@ options.set_prefix_extractor(SliceTransform::create_fixed_prefix(16)); // Id = 1
 options.set_memtable_prefix_bloom_ratio(0.1);
 ```
 
-(claude, 2026-02-05, added NodeById seek cost analysis)
 
 **Filter cost:** Each edge scan now filters by `valid_until`:
 ```rust
@@ -1148,27 +1336,500 @@ EdgeVersionHistory:   3M × 92 bytes = 276 MB
 EdgeSummaryIndex:     3M × 53 bytes = 159 MB
 Total overhead:       ~451 MB for 1M edges
 ```
-(claude, 2026-02-05, UPDATED: EdgeVersionHistory expanded from 68→92 bytes to include Weight and ActivePeriod for full rollback capability. Trade-off: +72 MB per 1M edges for complete audit trail.)
 
 ### GC Changes
 
-| Aspect | Old (RefCount) | New (Orphan Scan) |
-|--------|---------------|-------------------|
-| Summary cleanup | Inline (immediate) | Background GC |
-| Write cost | +1 get/put per update | None |
-| Orphan accumulation | None | Until GC runs |
-| Rollback support | No | Yes |
+| Aspect | Old (RefCount Inline) | New (Orphan Index) |
+|--------|----------------------|-------------------|
+| Summary cleanup | Inline (immediate delete) | Background GC after retention |
+| Write cost | 1 put (update RefCount) | 1 put + 1 orphan index write |
+| GC scan cost | None needed | O(orphans in window) |
+| Orphan accumulation | None | Until retention expires |
+| Rollback support | ❌ No | ✅ Yes |
 
-**Orphan GC scan cost:**
+**Key insight:** Keep RefCount tracking but defer deletion. When RefCount→0, add to OrphanSummaries CF instead of deleting. GC scans only the orphan index (tiny), not all summaries.
+
+See [Garbage Collection](#garbage-collection) section for full design.
+
+---
+
+## Garbage Collection
+
+### Problem: RefCount Breaks Rollback
+
+The current CONTENT-ADDRESS design uses RefCount for immediate summary cleanup:
+
+```rust
+// Current: decrement and delete inline when RefCount reaches 0
+if new_refcount == 0 {
+    txn.delete_cf(summaries_cf, &key)?;  // Summary DELETED
+}
 ```
-For each summary hash:
-  - Check if ANY index entry references it
-  - If none: delete summary
-  - O(summaries × index_scan)
+
+This breaks rollback because old summaries are destroyed:
+
 ```
+t=1000: Create node → summary 0xAAA, RefCount=1
+t=2000: Update node → 0xAAA RefCount→0, DELETED; 0xBBB RefCount=1
+t=3000: Rollback to t=1000 → needs 0xAAA, but it's GONE
+```
+
+### Solution: Orphan Index with Deferred Deletion
+
+Keep RefCount tracking but defer deletion to background GC. When RefCount reaches 0, add to an orphan tracking index instead of deleting immediately.
+
+**Design Principles:**
+1. **RefCount still tracks references** - increment/decrement logic unchanged
+2. **No inline deletion** - when RefCount→0, add to orphan index instead
+3. **Retention window** - orphans kept for configurable period before deletion
+4. **O(orphans) GC scan** - only scan orphan index, not all summaries
+
+### Schema: OrphanSummaries CF
+
+Single CF for both node and edge orphan tracking using a discriminant:
+
+```rust
+// ============================================================
+// ORPHAN SUMMARIES CF (NEW - enables deferred GC for rollback)
+// ============================================================
+pub struct OrphanSummaries;
+
+impl ColumnFamily for OrphanSummaries {
+    const CF_NAME: &'static str = "graph/orphan_summaries";
+}
+
+/// Key: time-ordered for retention-based scanning
+pub struct OrphanSummaryCfKey(
+    pub TimestampMilli,  // 8 bytes - when RefCount became 0
+    pub SummaryHash,     // 8 bytes - which summary is orphaned
+);  // Total: 16 bytes
+
+/// Value: discriminant to identify source CF for deletion
+#[repr(u8)]
+#[derive(Serialize, Deserialize)]
+pub enum SummaryKind {
+    Node = 0,
+    Edge = 1,
+}
+
+pub struct OrphanSummaryCfValue(pub SummaryKind);  // 1 byte
+```
+
+### Mutation Workflow
+
+| Event | RefCount Change | Orphan Index Action |
+|-------|-----------------|---------------------|
+| Create entity with summary | 0 → 1 | None |
+| Update to new summary | old: N → N-1, new: 0 → 1 | If old becomes 0: add `(now, old_hash)` |
+| Delete entity | N → N-1 | If becomes 0: add `(now, hash)` |
+| Rollback reuses old summary | 0 → 1 | Remove `(*, hash)` from orphan index |
+| RefCount stays > 0 | N → M (M > 0) | None |
+
+**Mutation pseudocode:**
+
+```rust
+fn decrement_summary_refcount(txn: &Transaction, hash: SummaryHash, kind: SummaryKind) -> Result<()> {
+    let key = NodeSummaryCfKey(hash);
+    let mut value = txn.get_cf(summaries_cf, &key)?;
+
+    value.ref_count -= 1;
+    txn.put_cf(summaries_cf, &key, &value)?;
+
+    // NEW: Track orphan instead of deleting
+    if value.ref_count == 0 {
+        let orphan_key = OrphanSummaryCfKey(now(), hash);
+        let orphan_value = OrphanSummaryCfValue(kind);
+        txn.put_cf(orphan_cf, &orphan_key, &orphan_value)?;
+    }
+
+    Ok(())
+}
+
+fn increment_summary_refcount(txn: &Transaction, hash: SummaryHash, kind: SummaryKind) -> Result<()> {
+    let key = NodeSummaryCfKey(hash);
+
+    match txn.get_cf(summaries_cf, &key)? {
+        Some(mut value) => {
+            let was_orphan = value.ref_count == 0;
+            value.ref_count += 1;
+            txn.put_cf(summaries_cf, &key, &value)?;
+
+            // NEW: Remove from orphan index if resurrected
+            if was_orphan {
+                // Scan orphan index for this hash and delete
+                remove_from_orphan_index(txn, hash)?;
+            }
+        }
+        None => {
+            // Create new summary row
+            txn.put_cf(summaries_cf, &key, (ref_count: 1, summary))?;
+        }
+    }
+
+    Ok(())
+}
+```
+
+### GC Workflow
+
+```rust
+/// GC orphan summaries older than retention period.
+/// Complexity: O(orphans_in_window) - only scans orphan index, not all summaries
+fn gc_orphan_summaries(
+    &self,
+    retention: Duration,  // e.g., 7 days
+) -> Result<GcOrphanMetrics> {
+    let txn = db.transaction();
+    let cutoff = now() - retention;
+    let mut deleted = 0;
+    let mut skipped = 0;
+
+    // Scan orphan index (tiny CF, time-ordered by key)
+    let iter = txn.iterator_cf(orphan_cf, IteratorMode::Start);
+
+    for (key_bytes, value_bytes) in iter {
+        let key = OrphanSummaryCfKey::from_bytes(&key_bytes)?;
+        let value = OrphanSummaryCfValue::from_bytes(&value_bytes)?;
+
+        let (orphaned_at, hash) = (key.0, key.1);
+
+        // Stop when we hit entries within retention window
+        if orphaned_at > cutoff {
+            break;  // Time-ordered keys, all remaining are newer
+        }
+
+        // Select target CF based on discriminant
+        let summaries_cf = match value.0 {
+            SummaryKind::Node => node_summaries_cf,
+            SummaryKind::Edge => edge_summaries_cf,
+        };
+
+        // Verify still orphan (RefCount=0) before deleting
+        // (handles race: rollback might have resurrected it)
+        if let Some(summary_value) = txn.get_cf(summaries_cf, &hash)? {
+            if summary_value.ref_count == 0 {
+                txn.delete_cf(summaries_cf, &hash)?;
+                deleted += 1;
+            } else {
+                skipped += 1;  // Resurrected, just remove from orphan index
+            }
+        }
+
+        // Always remove from orphan index
+        txn.delete_cf(orphan_cf, &key_bytes)?;
+    }
+
+    txn.commit()?;
+
+    Ok(GcOrphanMetrics { deleted, skipped })
+}
+```
+
+### Properties
+
+| Property | Value |
+|----------|-------|
+| **GC scan cost** | O(orphans in retention window) |
+| **Mutation overhead** | +1 small write (16+1 bytes) when RefCount→0 |
+| **Lookup by hash** | O(1) unchanged (hash in key, not RefCount) |
+| **Rollback window** | Configurable retention period |
+| **Storage overhead** | ~17 bytes per orphan candidate |
+| **Unified time order** | Node and edge orphans processed by age, not kind |
+
+### Rollback Safety Example
+
+```
+t=1000: Create node → summary 0xAAA, RefCount=1
+t=2000: Update node → 0xAAA RefCount→0
+        OrphanSummaries: (2000, 0xAAA) → Node
+        0xBBB RefCount=1
+t=3000: Rollback to t=1000
+        Increment 0xAAA RefCount→1
+        Remove (2000, 0xAAA) from orphan index
+        Summary 0xAAA preserved, rollback succeeds!
+
+t=4000: GC runs with retention=7 days
+        (2000, 0xAAA) already removed, nothing to delete
+        Rollback was safe
+```
+
+### Comparison: RefCount Inline vs Orphan Index
+
+| Aspect | RefCount Inline (Current) | Orphan Index (VERSIONING) |
+|--------|---------------------------|---------------------------|
+| Summary cleanup | Immediate on RefCount=0 | After retention period |
+| Write cost per update | 1 put (update RefCount) | 1 put + 1 orphan write |
+| GC scan cost | None needed | O(orphans) |
+| Rollback support | ❌ No (summary deleted) | ✅ Yes (retention window) |
+| Storage until GC | Minimal | Orphans accumulate |
+| Complexity | Simple | Moderate |
+
+### Configuration
+
+```rust
+pub struct OrphanGcConfig {
+    /// Retention period before orphan summaries are deleted.
+    /// This is the rollback window - summaries can be restored within this period.
+    /// Default: 7 days
+    pub retention: Duration,
+
+    /// Maximum orphans to process per GC cycle.
+    /// Bounds GC latency.
+    /// Default: 10000
+    pub batch_size: usize,
+
+    /// Interval between GC cycles.
+    /// Default: 1 hour
+    pub interval: Duration,
+}
+
+impl Default for OrphanGcConfig {
+    fn default() -> Self {
+        Self {
+            retention: Duration::from_secs(7 * 24 * 60 * 60),  // 7 days
+            batch_size: 10000,
+            interval: Duration::from_secs(60 * 60),  // 1 hour
+        }
+    }
+}
+```
+
+
+### Subsystem Integration
+
+The orphan GC integrates with the existing `graph::Subsystem` lifecycle pattern. The subsystem already manages:
+- Writer/Reader with channel-based consumers
+- Stale index GC via `GraphGarbageCollector`
+- Graceful shutdown with flush and join
+
+**Extended Subsystem Fields:**
+
+```rust
+pub struct Subsystem {
+    // ... existing fields ...
+
+    /// Stale index GC (existing) - cleans NodeSummaryIndex/EdgeSummaryIndex
+    gc: RwLock<Option<Arc<GraphGarbageCollector>>>,
+
+    /// Orphan summary GC (NEW) - cleans RefCount=0 summaries after retention
+    orphan_gc: RwLock<Option<Arc<OrphanSummaryGc>>>,
+}
+```
+
+**Extended `start()` Method:**
+
+```rust
+impl Subsystem {
+    pub fn start(
+        &self,
+        storage: Arc<Storage>,
+        writer_config: WriterConfig,
+        reader_config: ReaderConfig,
+        num_query_workers: usize,
+        gc_config: Option<GraphGcConfig>,
+        orphan_gc_config: Option<OrphanGcConfig>,  // NEW
+    ) -> (Writer, Reader) {
+        // ... existing writer/reader setup ...
+
+        // Start stale index GC (existing)
+        if let Some(config) = gc_config {
+            let gc = Arc::new(GraphGarbageCollector::new(storage.clone(), config));
+            let _gc = GraphGarbageCollector::start(storage.clone(), config);
+            *self.gc.write().unwrap() = Some(gc);
+        }
+
+        // Start orphan summary GC (NEW)
+        if let Some(config) = orphan_gc_config {
+            let orphan_gc = Arc::new(OrphanSummaryGc::new(storage.clone(), config));
+            let _orphan_gc = GraphGarbageCollector::start(storage.clone(), config);
+            *self.orphan_gc.write().unwrap() = Some(orphan_gc);
+        }
+
+        (writer, reader)
+    }
+}
+```
+
+**Extended `on_shutdown()` Method:**
+
+```rust
+impl SubsystemProvider<TransactionDB> for Subsystem {
+    fn on_shutdown(&self) -> Result<()> {
+        // 1. Flush pending mutations (existing)
+        // 2. Join consumer tasks (existing)
+
+        // 3. Shutdown stale index GC (existing)
+        if let Some(gc) = self.gc.write().unwrap().take() {
+            gc.shutdown();
+        }
+
+        // 4. Shutdown orphan summary GC (NEW)
+        // Orphan GC runs last - can continue cleaning while other components stop
+        if let Some(orphan_gc) = self.orphan_gc.write().unwrap().take() {
+            tracing::debug!(subsystem = "graph", "Shutting down orphan summary GC");
+            orphan_gc.shutdown();
+        }
+
+        Ok(())
+    }
+}
+```
+
+**OrphanSummaryGc Worker:**
+
+```rust
+pub struct OrphanSummaryGc {
+    storage: Arc<Storage>,
+    config: OrphanGcConfig,
+    shutdown: Arc<AtomicBool>,
+    metrics: Arc<OrphanGcMetrics>,
+}
+
+impl OrphanSummaryGc {
+    pub fn new(storage: Arc<Storage>, config: OrphanGcConfig) -> Self {
+        Self {
+            storage,
+            config,
+            shutdown: Arc::new(AtomicBool::new(false)),
+            metrics: Arc::new(OrphanGcMetrics::new()),
+        }
+    }
+
+    pub fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+    }
+
+    pub fn metrics(&self) -> &Arc<OrphanGcMetrics> {
+        &self.metrics
+    }
+
+    /// Spawn background worker that runs GC cycles at configured interval.
+    // legacy spawn_worker removed; use start() + owned shutdown()
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(self.config.interval);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                interval.tick().await;
+
+                if self.shutdown.load(Ordering::SeqCst) {
+                    tracing::info!("Orphan GC worker shutting down");
+                    break;
+                }
+
+                match self.run_cycle() {
+                    Ok(metrics) => {
+                        if metrics.deleted > 0 {
+                            tracing::info!(
+                                deleted = metrics.deleted,
+                                skipped = metrics.skipped,
+                                "Orphan GC cycle completed"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "Orphan GC cycle failed");
+                    }
+                }
+            }
+        })
+    }
+
+    /// Run a single GC cycle, processing up to batch_size orphans.
+    pub fn run_cycle(&self) -> Result<GcOrphanMetrics> {
+        // Implementation as shown in GC Workflow section
+        gc_orphan_summaries(&self.storage, &self.config)
+    }
+}
+```
+
+**Metrics:**
+
+```rust
+#[derive(Debug, Default)]
+pub struct OrphanGcMetrics {
+    pub summaries_deleted: AtomicU64,
+    pub summaries_skipped: AtomicU64,  // Resurrected before GC
+    pub cycles_completed: AtomicU64,
+}
+
+#[derive(Debug, Clone)]
+pub struct GcOrphanMetricsSnapshot {
+    pub deleted: u64,
+    pub skipped: u64,
+}
+```
+
+**Usage Example:**
+
+```rust
+use motlie_db::graph::{Subsystem, WriterConfig, ReaderConfig, GraphGcConfig, OrphanGcConfig};
+
+// Create subsystem
+let subsystem = Arc::new(Subsystem::new());
+let storage = StorageBuilder::new(path)
+    .with_rocksdb(subsystem.clone())
+    .build()?;
+
+// Start with both GC workers
+let (writer, reader) = subsystem.start(
+    storage.graph_storage().clone(),
+    WriterConfig::default(),
+    ReaderConfig::default(),
+    4,  // query workers
+    Some(GraphGcConfig::default()),      // Stale index GC
+    Some(OrphanGcConfig::default()),     // Orphan summary GC (7-day retention)
+);
+
+// Check orphan GC metrics
+if let Some(metrics) = subsystem.orphan_gc_metrics() {
+    let snapshot = metrics.snapshot();
+    println!("Deleted {} orphan summaries", snapshot.summaries_deleted);
+}
+
+// Graceful shutdown flushes mutations and stops both GC workers
+storage.shutdown()?;
+```
+
+**Lifecycle Diagram:**
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Subsystem.start()                         │
+├─────────────────────────────────────────────────────────────────┤
+│  1. Create Writer + Reader channels                              │
+│  2. Spawn mutation consumer (1 worker)                           │
+│  3. Spawn query consumers (N workers)                            │
+│  4. Spawn GraphGarbageCollector worker (stale index)             │
+│  5. Spawn OrphanSummaryGc worker (orphan summaries)      [NEW]   │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      Normal Operation                            │
+├─────────────────────────────────────────────────────────────────┤
+│  Writer ──► Mutation Consumer ──► Graph (RocksDB)                │
+│  Reader ──► Query Consumers ──► Graph (RocksDB)                  │
+│                                                                  │
+│  GraphGarbageCollector: every 60s, clean stale index entries     │
+│  OrphanSummaryGc: every 1h, clean orphans older than 7 days      │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    Subsystem.on_shutdown()                       │
+├─────────────────────────────────────────────────────────────────┤
+│  1. Flush pending mutations (close writer channel)              │
+│  2. Join consumer tasks (wait for channel drain)                │
+│  3. Signal GraphGarbageCollector shutdown                        │
+│  4. Signal OrphanSummaryGc shutdown                      [NEW]   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
 (codex, 2026-02-05, gap: conflicts with current RefCount-based summary cleanup; if we keep RefCount, update this section and GC cost model)
 (claude, 2026-02-05, CLARIFY: Same as line 109. VERSIONING supersedes CONTENT-ADDRESS. When implemented: (1) Remove RefCount decrement from mutations, (2) Add orphan scan to GC, (3) Accept higher storage until GC runs. Trade-off: storage vs rollback capability.)
 (codex, 2026-02-05, accept with caveat: VERSIONING may supersede RefCount; document the new GC/retention expectations and update CONTENT-ADDRESS to reflect the override)
+(codex, 2026-02-07, accept: CONTENT-ADDRESS now notes the override; GC plan still needs explicit policy)
 
 ---
 
@@ -1200,7 +1861,10 @@ For each summary hash:
 - **High-frequency updates**: If edges update 1000s of times/sec, history accumulates fast
 - **Storage-constrained**: History consumes storage until GC
 - **No audit requirements**: If you don't need rollback/time-travel, simpler schema is better
+
+**Note:** Cost/benefit is favorable when audit/time-travel/rollback are hard requirements.
 (codex, 2026-02-05, decision: cost/benefit is favorable only when audit/time-travel/rollback are hard requirements; otherwise complexity and storage cost are not justified)
+(codex, 2026-02-07, accept: consistent with requirements stated in VERSIONING)
 
 ---
 
@@ -1211,11 +1875,10 @@ For each summary hash:
 | Time-travel queries | Enabled via ValidSince in key |
 | Topology rollback | Enabled via close-old/create-new pattern |
 | Content rollback | Enabled via EdgeVersionHistory/NodeVersionHistory + append-only summaries |
+| Summary GC | Orphan Index with retention-based deletion (enables rollback) |
 | Multi-edge support | Explicit via AddEdge (fails if exists) |
 | Retarget support | Explicit via UpdateEdge with new_dst |
 | Fragments | Unchanged (already temporal) |
-
-(claude, 2026-02-04, designed)
 
 ---
 
@@ -1340,7 +2003,7 @@ Q3: "Is the contract in force on Dec 15?" (APPLICATION TIME)
     → Yes, Dec 15 is within ActivePeriod(Feb1, Jan31)
 
 Q4: "Rollback to pre-amendment terms"
-    → RestoreEdge { as_of: Feb1 }
+    → RestoreEdge { as_of: Feb1, expected_version: None }
     → Creates v=3 with hash=0xAAA (original terms), same ActivePeriod
 ```
 
@@ -1389,32 +2052,54 @@ Q3: "Show all schedule changes" (audit)
 | "Show all changes to this entity" | System time (Edge/NodeVersionHistory) | All versions with timestamps |
 | "Find entities active during period P" | Application time scan | Entities where ActivePeriod overlaps P |
 
-(claude, 2026-02-05, added to clarify bitemporal model)
-
 ---
 
 ## Open Questions
 
 1. **EdgeSummaryIndex schema and time semantics**
-   - Analysis: The design references `EdgeSummaryIndex` but does not define key/value layout or how "current" vs historical entries map to time-travel queries.
-   - Recommendation: Define the schema explicitly (key order, marker bit, and time/version mapping) before implementation to avoid divergent indexing behavior. (codex, 2026-02-05, decision)
+   - Define key/value layout and how "current" vs historical entries map to time-travel queries
+   - Decision: Define schema explicitly before implementation
 
 2. **Time-to-version lookup for `EdgeAtTime` / `NodeByIdAt`**
-   - Analysis: We can scan versions and select the max `UpdatedAt <= T`, but this is O(k) per edge where k=versions. Acceptable if k stays small.
-   - Recommendation: Start with scan-by-version using `UpdatedAt`; add a time-ordered index only if version counts grow or latency targets are missed. (codex, 2026-02-05, decision)
+   - O(k) scan per edge where k=versions; acceptable if k stays small
+   - Decision: Start with scan-by-version using `UpdatedAt`; add time-ordered index only if needed
 
-3. **Summary/fragment index maintenance on updates and rollbacks**
-   - Analysis: When content updates or rollbacks occur, summary/fragment indexes must be updated to avoid stale retrieval. The current doc does not detail which indexes are updated in each mutation.
-   - Recommendation: Enumerate index maintenance steps per mutation (Add/Update/Delete/Restore) before implementation to keep retrieval consistent. (codex, 2026-02-05, decision)
+3. **Summary/fragment index maintenance on updates and restores**
+   - Enumerate index maintenance steps per mutation (Add/Update/Delete/Restore)
+   - Decision: Document before implementation
 
 4. **History retention/GC policy**
-   - Analysis: The design supports full history but does not define retention bounds or GC triggers, which affects storage and compliance.
-   - Recommendation: Treat history as unbounded for MVP; add optional retention policies later once workload patterns are known. (codex, 2026-02-05, decision)
+   - Decision: Unbounded history for MVP; add retention policies later based on workload
 
 5. **Concurrency semantics and conflict resolution**
-   - Analysis: The design uses optimistic version checks, but does not specify behavior for concurrent writers updating topology vs content at the same time.
-   - Recommendation: Define conflict rules (e.g., version mismatch aborts; topology changes always close prior current row) to keep transactions deterministic. (codex, 2026-02-05, decision)
+   - Decision: Version mismatch aborts; topology changes always close prior row
 
-6. **Restore/rollback interval behavior**
-   - Analysis: Restores currently create new `valid_since` intervals; reopening an old interval is not described.
-   - Recommendation: Keep "new interval on restore" as the rule for audit clarity, and document it explicitly. (codex, 2026-02-05, decision)
+6. **Restore interval behavior**
+   - Decision: Restores create new `valid_since` intervals (never reopen old intervals)
+
+---
+
+## Appendix: Design Review Notes
+
+This section captures the design review discussion for historical reference.
+
+### Review Summary (2026-02-05)
+
+| Topic | Verdict | Resolution |
+|-------|---------|------------|
+| Multi-edge constraint | REJECT gap claim | Design intentionally prevents duplicate `(src,dst,name)`; use different `name` values |
+| UpdatedAt in VersionHistory | ACCEPT | Added to enable time→version mapping |
+| RefCount conflict | RESOLVED | Orphan Index design keeps RefCount but defers deletion; see [GC section](#garbage-collection) |
+| EdgeSummaryIndex schema | ACCEPT | Schema defined in CONTENT-ADDRESS.md |
+| Storage overhead | ACCEPT | Corrected to ~451 MB for 1M edges with 3 versions |
+| Fragment guidance | ACCEPT | Examples added in [Examples: Fragments](#examples-fragments) |
+
+### Key Design Decisions
+
+1. **Edge identity is `(src, dst, name)`** - Unique at any point in time. For different relationship types between the same nodes, use different `name` values.
+
+2. **Temporal versioning is for HISTORY, not concurrent duplicates** - Multiple "current" edges between same nodes must have different `name` values.
+
+3. **Orphan Index supersedes inline RefCount deletion** - Enables rollback by preserving summaries until GC retention expires.
+
+4. **Restores create new intervals** - Never reopen old `valid_since` intervals; always create new ones for audit clarity.

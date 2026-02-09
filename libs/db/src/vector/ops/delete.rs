@@ -27,6 +27,7 @@ use crate::vector::schema::{
 // ============================================================================
 
 /// Result of a vector deletion.
+#[derive(Debug, Clone)]
 pub enum DeleteResult {
     /// Vector was deleted successfully
     Deleted {

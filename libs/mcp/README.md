@@ -199,12 +199,12 @@ See `examples/mcp/all.rs` for a complete example.
 **Mutations (7)**
 | Tool | Description |
 |------|-------------|
-| `add_node` | Create a new node with name and optional temporal validity |
+| `add_node` | Create a new node with name and optional active period |
 | `add_edge` | Create an edge between two nodes |
 | `add_node_fragment` | Add a text fragment to a node |
 | `add_edge_fragment` | Add a text fragment to an edge |
-| `update_node_valid_range` | Update node temporal validity |
-| `update_edge_valid_range` | Update edge temporal validity |
+| `update_node_valid_range` | Update node active period |
+| `update_edge_valid_range` | Update edge active period |
 | `update_edge_weight` | Update edge weight |
 
 **Queries (8)**

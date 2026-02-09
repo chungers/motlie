@@ -19,9 +19,8 @@
 //! | [`AddEdge`] | Create an edge between two nodes |
 //! | [`AddNodeFragment`] | Add timestamped content fragment to a node |
 //! | [`AddEdgeFragment`] | Add timestamped content fragment to an edge |
-//! | [`UpdateNodeValidSinceUntil`] | Update node's temporal validity range |
-//! | [`UpdateEdgeValidSinceUntil`] | Update edge's temporal validity range |
-//! | [`UpdateEdgeWeight`] | Update edge weight |
+//! | [`UpdateNode`] | Update node (active period and/or summary) |
+//! | [`UpdateEdge`] | Update edge (weight, active period, and/or summary) |
 //!
 //! # Usage
 //!
@@ -80,14 +79,15 @@
 //!
 //! # Batch Mutations
 //!
-//! Use [`MutationBatch`] to send multiple mutations atomically:
+//! Use `Vec<Mutation>` to send multiple mutations atomically:
 //!
 //! ```ignore
-//! use motlie_db::mutation::{MutationBatch, Mutation, AddNode, AddEdge, Runnable};
+//! use motlie_db::mutation::{Mutation, AddNode, AddEdge, Runnable};
 //!
-//! let mut batch = MutationBatch::new();
-//! batch.push(Mutation::AddNode(AddNode { /* ... */ }));
-//! batch.push(Mutation::AddEdge(AddEdge { /* ... */ }));
+//! let batch = vec![
+//!     Mutation::AddNode(AddNode { /* ... */ }),
+//!     Mutation::AddEdge(AddEdge { /* ... */ }),
+//! ];
 //! batch.run(handles.writer()).await?;
 //! ```
 //!
@@ -101,8 +101,8 @@ pub use crate::writer::Runnable;
 
 // Re-export all mutation types from graph::mutation
 pub use crate::graph::mutation::{
-    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation, MutationBatch,
-    UpdateEdgeValidSinceUntil, UpdateEdgeWeight, UpdateNodeValidSinceUntil,
+    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation,
+    UpdateNode, UpdateEdge,
 };
 
 // Re-export schema types commonly used with mutations

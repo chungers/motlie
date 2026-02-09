@@ -13,223 +13,29 @@
 use anyhow::Result;
 use std::ops::Bound;
 use std::time::Duration;
-use tokio::sync::oneshot;
 
 use super::name_hash::NameHash;
-use super::reader::{Processor, QueryExecutor, QueryProcessor};
-use super::scan::{self, Visitable};
-use super::HotColumnFamilyRecord;
-use super::summary_hash::SummaryHash;
-use crate::reader::Runnable;
-use super::schema::{
-    self, DstId, EdgeName, EdgeSummary, EdgeSummaries, EdgeSummaryCfKey, FragmentContent,
-    Names, NameCfKey, NodeName, NodeSummary, NodeSummaries, NodeSummaryCfKey, SrcId,
+use super::ops::name::{resolve_name, resolve_name_from_txn};
+use super::ops::read::{find_edge_version, find_node_version, StorageAccess};
+use super::ops::summary::{
+    resolve_edge_summary, resolve_edge_summary_from_txn, resolve_node_summary,
+    resolve_node_summary_from_txn,
 };
-use super::{ColumnFamily, ColumnFamilySerde};
+use super::ops::util::timestamp_in_range;
+use super::reader::{QueryExecutor, QueryRequest};
+use super::scan::{self, Visitable};
+use super::summary_hash::SummaryHash;
+use super::HotColumnFamilyRecord;
 use super::Storage;
+use super::{ColumnFamily, ColumnFamilySerde};
+use crate::reader::Runnable;
+use crate::request::{new_request_id, RequestMeta};
 use crate::{Id, TimestampMilli};
-
-// ============================================================================
-// Name Resolution Helpers
-// ============================================================================
-
-/// Resolve a NameHash to its full String name.
-///
-/// Uses the in-memory NameCache first for O(1) lookup, falling back to
-/// Names CF lookup only for cache misses. On cache miss, the name is
-/// added to the cache for future lookups.
-///
-/// This is the primary function for QueryExecutor implementations that
-/// have access to Storage.
-fn resolve_name(storage: &Storage, name_hash: NameHash) -> Result<String> {
-    // Check cache first (O(1) DashMap lookup)
-    let cache = storage.cache();
-    if let Some(name) = cache.get(&name_hash) {
-        return Ok((*name).clone());
-    }
-
-    // Cache miss: fetch from Names CF
-    let key_bytes = Names::key_to_bytes(&NameCfKey(name_hash));
-
-    let value_bytes = if let Ok(db) = storage.db() {
-        let names_cf = db
-            .cf_handle(Names::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("Names CF not found"))?;
-        db.get_cf(names_cf, &key_bytes)?
-    } else {
-        let txn_db = storage.transaction_db()?;
-        let names_cf = txn_db
-            .cf_handle(Names::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("Names CF not found"))?;
-        txn_db.get_cf(names_cf, &key_bytes)?
-    };
-
-    let value_bytes = value_bytes
-        .ok_or_else(|| anyhow::anyhow!("Name not found for hash: {}", name_hash))?;
-
-    let value = Names::value_from_bytes(&value_bytes)?;
-    let name = value.0;
-
-    // Populate cache for future lookups
-    cache.insert(name_hash, name.clone());
-
-    Ok(name)
-}
-
-/// Resolve a NameHash from a Transaction (sees uncommitted writes).
-///
-/// For TransactionQueryExecutor implementations that need read-your-writes
-/// semantics. Uses cache first, then falls back to transaction lookup.
-fn resolve_name_from_txn(
-    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-    txn_db: &rocksdb::TransactionDB,
-    name_hash: NameHash,
-    cache: &super::name_hash::NameCache,
-) -> Result<String> {
-    // Check cache first (O(1) DashMap lookup)
-    if let Some(name) = cache.get(&name_hash) {
-        return Ok((*name).clone());
-    }
-
-    // Cache miss: fetch from transaction (sees uncommitted writes)
-    let names_cf = txn_db
-        .cf_handle(Names::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("Names CF not found"))?;
-
-    let key_bytes = Names::key_to_bytes(&NameCfKey(name_hash));
-
-    let value_bytes = txn
-        .get_cf(names_cf, &key_bytes)?
-        .ok_or_else(|| anyhow::anyhow!("Name not found for hash: {}", name_hash))?;
-
-    let value = Names::value_from_bytes(&value_bytes)?;
-    let name = value.0;
-
-    // Populate cache for future lookups
-    cache.insert(name_hash, name.clone());
-
-    Ok(name)
-}
-
-/// Resolve a node summary from the NodeSummaries cold CF.
-///
-/// If the summary_hash is None or the summary is not found, returns an empty DataUrl.
-fn resolve_node_summary(
-    storage: &Storage,
-    summary_hash: Option<SummaryHash>,
-) -> Result<NodeSummary> {
-    let Some(hash) = summary_hash else {
-        return Ok(NodeSummary::from_text(""));
-    };
-
-    let key_bytes = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(hash));
-
-    let value_bytes = if let Ok(db) = storage.db() {
-        let summaries_cf = db
-            .cf_handle(NodeSummaries::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("NodeSummaries CF not found"))?;
-        db.get_cf(summaries_cf, &key_bytes)?
-    } else {
-        let txn_db = storage.transaction_db()?;
-        let summaries_cf = txn_db
-            .cf_handle(NodeSummaries::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("NodeSummaries CF not found"))?;
-        txn_db.get_cf(summaries_cf, &key_bytes)?
-    };
-
-    match value_bytes {
-        Some(bytes) => {
-            let value = NodeSummaries::value_from_bytes(&bytes)?;
-            Ok(value.1) // .1 is the summary, .0 is the refcount
-        }
-        None => Ok(NodeSummary::from_text("")),
-    }
-}
-
-/// Resolve an edge summary from the EdgeSummaries cold CF.
-///
-/// If the summary_hash is None or the summary is not found, returns an empty DataUrl.
-fn resolve_edge_summary(
-    storage: &Storage,
-    summary_hash: Option<SummaryHash>,
-) -> Result<EdgeSummary> {
-    let Some(hash) = summary_hash else {
-        return Ok(EdgeSummary::from_text(""));
-    };
-
-    let key_bytes = EdgeSummaries::key_to_bytes(&EdgeSummaryCfKey(hash));
-
-    let value_bytes = if let Ok(db) = storage.db() {
-        let summaries_cf = db
-            .cf_handle(EdgeSummaries::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("EdgeSummaries CF not found"))?;
-        db.get_cf(summaries_cf, &key_bytes)?
-    } else {
-        let txn_db = storage.transaction_db()?;
-        let summaries_cf = txn_db
-            .cf_handle(EdgeSummaries::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("EdgeSummaries CF not found"))?;
-        txn_db.get_cf(summaries_cf, &key_bytes)?
-    };
-
-    match value_bytes {
-        Some(bytes) => {
-            let value = EdgeSummaries::value_from_bytes(&bytes)?;
-            Ok(value.1) // .1 is the summary, .0 is the refcount
-        }
-        None => Ok(EdgeSummary::from_text("")),
-    }
-}
-
-/// Resolve an edge summary from a transaction context (for read-your-writes).
-fn resolve_edge_summary_from_txn(
-    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-    txn_db: &rocksdb::TransactionDB,
-    summary_hash: Option<SummaryHash>,
-) -> Result<EdgeSummary> {
-    let Some(hash) = summary_hash else {
-        return Ok(EdgeSummary::from_text(""));
-    };
-
-    let summaries_cf = txn_db
-        .cf_handle(EdgeSummaries::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("EdgeSummaries CF not found"))?;
-
-    let key_bytes = EdgeSummaries::key_to_bytes(&EdgeSummaryCfKey(hash));
-
-    match txn.get_cf(summaries_cf, &key_bytes)? {
-        Some(bytes) => {
-            let value = EdgeSummaries::value_from_bytes(&bytes)?;
-            Ok(value.1) // .1 is the summary, .0 is the refcount
-        }
-        None => Ok(EdgeSummary::from_text("")),
-    }
-}
-
-/// Resolve a node summary from a transaction context (for read-your-writes).
-fn resolve_node_summary_from_txn(
-    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-    txn_db: &rocksdb::TransactionDB,
-    summary_hash: Option<SummaryHash>,
-) -> Result<NodeSummary> {
-    let Some(hash) = summary_hash else {
-        return Ok(NodeSummary::from_text(""));
-    };
-
-    let summaries_cf = txn_db
-        .cf_handle(NodeSummaries::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("NodeSummaries CF not found"))?;
-
-    let key_bytes = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(hash));
-
-    match txn.get_cf(summaries_cf, &key_bytes)? {
-        Some(bytes) => {
-            let value = NodeSummaries::value_from_bytes(&bytes)?;
-            Ok(value.1) // .1 is the summary, .0 is the refcount
-        }
-        None => Ok(NodeSummary::from_text("")),
-    }
-}
+use super::schema::{
+    self, DstId, EdgeName, EdgeSummary, EdgeWeight, FragmentContent, NodeName, NodeSummary, SrcId,
+    Version,
+};
+use tokio::sync::oneshot;
 
 // ============================================================================
 // TransactionQueryExecutor Trait
@@ -278,7 +84,7 @@ fn resolve_node_summary_from_txn(
 /// txn.write(AddNode { id, ... })?;
 ///
 /// // Read sees the uncommitted node!
-/// let (name, summary) = txn.read(NodeById::new(id, None))?;
+/// let (name, summary, version) = txn.read(NodeById::new(id, None))?;
 ///
 /// txn.commit()?;
 /// ```
@@ -304,28 +110,6 @@ pub trait TransactionQueryExecutor: Send + Sync {
         txn_db: &rocksdb::TransactionDB,
         cache: &super::name_hash::NameCache,
     ) -> Result<Self::Output>;
-}
-
-/// Helper function to check if a timestamp falls within a time range
-fn timestamp_in_range(
-    ts: TimestampMilli,
-    time_range: &(Bound<TimestampMilli>, Bound<TimestampMilli>),
-) -> bool {
-    let (start_bound, end_bound) = time_range;
-
-    let start_ok = match start_bound {
-        Bound::Unbounded => true,
-        Bound::Included(start) => ts.0 >= start.0,
-        Bound::Excluded(start) => ts.0 > start.0,
-    };
-
-    let end_ok = match end_bound {
-        Bound::Unbounded => true,
-        Bound::Included(end) => ts.0 <= end.0,
-        Bound::Excluded(end) => ts.0 < end.0,
-    };
-
-    start_ok && end_ok
 }
 
 /// Macro to iterate over a column family in both readonly and readwrite storage modes
@@ -375,7 +159,6 @@ macro_rules! iterate_cf {
 // ============================================================================
 
 /// Query enum representing all possible query types.
-/// Uses dispatch wrappers internally for channel/timeout handling.
 ///
 /// **Note**: This is internal infrastructure for the query dispatch pipeline.
 /// Users interact with query parameter structs directly via the `Runnable` trait.
@@ -385,120 +168,180 @@ macro_rules! iterate_cf {
 #[doc(hidden)]
 #[allow(private_interfaces)]
 pub enum Query {
-    NodeById(NodeByIdDispatch),
-    NodesByIdsMulti(NodesByIdsMultiDispatch),
-    EdgeSummaryBySrcDstName(EdgeSummaryBySrcDstNameDispatch),
-    NodeFragmentsByIdTimeRange(NodeFragmentsByIdTimeRangeDispatch),
-    EdgeFragmentsByIdTimeRange(EdgeFragmentsByIdTimeRangeDispatch),
-    OutgoingEdges(OutgoingEdgesDispatch),
-    IncomingEdges(IncomingEdgesDispatch),
-    AllNodes(AllNodesDispatch),
-    AllEdges(AllEdgesDispatch),
+    NodeById(NodeById),
+    NodesByIdsMulti(NodesByIdsMulti),
+    EdgeSummaryBySrcDstName(EdgeSummaryBySrcDstName),
+    NodeFragmentsByIdTimeRange(NodeFragmentsByIdTimeRange),
+    EdgeFragmentsByIdTimeRange(EdgeFragmentsByIdTimeRange),
+    OutgoingEdges(OutgoingEdges),
+    IncomingEdges(IncomingEdges),
+    AllNodes(AllNodes),
+    AllEdges(AllEdges),
     // CONTENT-ADDRESS reverse lookup queries
-    NodesBySummaryHash(NodesBySummaryHashDispatch),
-    EdgesBySummaryHash(EdgesBySummaryHashDispatch),
+    NodesBySummaryHash(NodesBySummaryHash),
+    EdgesBySummaryHash(EdgesBySummaryHash),
 }
 
 impl std::fmt::Display for Query {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Query::NodeById(q) => write!(f, "NodeById: id={}", q.params.id),
+            Query::NodeById(q) => write!(f, "NodeById: id={}", q.id),
             Query::NodesByIdsMulti(q) => {
-                write!(f, "NodesByIdsMulti: count={}", q.params.ids.len())
+                write!(f, "NodesByIdsMulti: count={}", q.ids.len())
             }
             Query::EdgeSummaryBySrcDstName(q) => write!(
                 f,
                 "EdgeBySrcDstName: source={}, dest={}, name={}",
-                q.params.source_id, q.params.dest_id, q.params.name
+                q.source_id, q.dest_id, q.name
             ),
             Query::NodeFragmentsByIdTimeRange(q) => {
                 write!(
                     f,
                     "NodeFragmentsByIdTimeRange: id={}, range={:?}",
-                    q.params.id, q.params.time_range
+                    q.id, q.time_range
                 )
             }
             Query::EdgeFragmentsByIdTimeRange(q) => {
                 write!(
                     f,
                     "EdgeFragmentsByIdTimeRange: source={}, dest={}, name={}, range={:?}",
-                    q.params.source_id, q.params.dest_id, q.params.edge_name, q.params.time_range
+                    q.source_id, q.dest_id, q.edge_name, q.time_range
                 )
             }
-            Query::OutgoingEdges(q) => write!(f, "OutgoingEdges: id={}", q.params.id),
-            Query::IncomingEdges(q) => write!(f, "IncomingEdges: id={}", q.params.id),
-            Query::AllNodes(q) => write!(f, "AllNodes: limit={}", q.params.limit),
-            Query::AllEdges(q) => write!(f, "AllEdges: limit={}", q.params.limit),
+            Query::OutgoingEdges(q) => write!(f, "OutgoingEdges: id={}", q.id),
+            Query::IncomingEdges(q) => write!(f, "IncomingEdges: id={}", q.id),
+            Query::AllNodes(q) => write!(f, "AllNodes: limit={}", q.limit),
+            Query::AllEdges(q) => write!(f, "AllEdges: limit={}", q.limit),
             Query::NodesBySummaryHash(q) => write!(
                 f,
                 "NodesBySummaryHash: hash={:?}, current_only={}",
-                q.params.hash, q.params.current_only
+                q.hash, q.current_only
             ),
             Query::EdgesBySummaryHash(q) => write!(
                 f,
                 "EdgesBySummaryHash: hash={:?}, current_only={}",
-                q.params.hash, q.params.current_only
+                q.hash, q.current_only
             ),
         }
     }
 }
 
-// Use macro to implement QueryProcessor for dispatch types
-crate::impl_query_processor!(
-    NodeByIdDispatch,
-    NodesByIdsMultiDispatch,
-    EdgeSummaryBySrcDstNameDispatch,
-    NodeFragmentsByIdTimeRangeDispatch,
-    EdgeFragmentsByIdTimeRangeDispatch,
-    OutgoingEdgesDispatch,
-    IncomingEdgesDispatch,
-    AllNodesDispatch,
-    AllEdgesDispatch,
-    NodesBySummaryHashDispatch,
-    EdgesBySummaryHashDispatch,
-);
+#[derive(Debug)]
+pub enum QueryResult {
+    NodeById((NodeName, NodeSummary, Version)),
+    NodesByIdsMulti(Vec<(Id, NodeName, NodeSummary, Version)>),
+    EdgeSummaryBySrcDstName((EdgeSummary, Option<EdgeWeight>, Version)),
+    NodeFragmentsByIdTimeRange(Vec<(TimestampMilli, FragmentContent)>),
+    EdgeFragmentsByIdTimeRange(Vec<(TimestampMilli, FragmentContent)>),
+    OutgoingEdges(Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>),
+    IncomingEdges(Vec<(Option<EdgeWeight>, DstId, SrcId, EdgeName, Version)>),
+    AllNodes(Vec<(Id, NodeName, NodeSummary, Version)>),
+    AllEdges(Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>),
+    NodesBySummaryHash(Vec<NodeSummaryLookupResult>),
+    EdgesBySummaryHash(Vec<EdgeSummaryLookupResult>),
+}
 
-#[async_trait::async_trait]
-impl QueryProcessor for Query {
-    async fn process_and_send<P: Processor>(self, processor: &P) {
+impl Query {
+    pub async fn execute(&self, storage: &Storage) -> Result<QueryResult> {
         match self {
-            Query::NodeById(q) => q.process_and_send(processor).await,
-            Query::NodesByIdsMulti(q) => q.process_and_send(processor).await,
-            Query::EdgeSummaryBySrcDstName(q) => q.process_and_send(processor).await,
-            Query::NodeFragmentsByIdTimeRange(q) => q.process_and_send(processor).await,
-            Query::EdgeFragmentsByIdTimeRange(q) => q.process_and_send(processor).await,
-            Query::OutgoingEdges(q) => q.process_and_send(processor).await,
-            Query::IncomingEdges(q) => q.process_and_send(processor).await,
-            Query::AllNodes(q) => q.process_and_send(processor).await,
-            Query::AllEdges(q) => q.process_and_send(processor).await,
-            Query::NodesBySummaryHash(q) => q.process_and_send(processor).await,
-            Query::EdgesBySummaryHash(q) => q.process_and_send(processor).await,
+            Query::NodeById(q) => q.execute(storage).await.map(QueryResult::NodeById),
+            Query::NodesByIdsMulti(q) => q.execute(storage).await.map(QueryResult::NodesByIdsMulti),
+            Query::EdgeSummaryBySrcDstName(q) => {
+                q.execute(storage).await.map(QueryResult::EdgeSummaryBySrcDstName)
+            }
+            Query::NodeFragmentsByIdTimeRange(q) => {
+                q.execute(storage).await.map(QueryResult::NodeFragmentsByIdTimeRange)
+            }
+            Query::EdgeFragmentsByIdTimeRange(q) => {
+                q.execute(storage).await.map(QueryResult::EdgeFragmentsByIdTimeRange)
+            }
+            Query::OutgoingEdges(q) => q.execute(storage).await.map(QueryResult::OutgoingEdges),
+            Query::IncomingEdges(q) => q.execute(storage).await.map(QueryResult::IncomingEdges),
+            Query::AllNodes(q) => q.execute(storage).await.map(QueryResult::AllNodes),
+            Query::AllEdges(q) => q.execute(storage).await.map(QueryResult::AllEdges),
+            Query::NodesBySummaryHash(q) => {
+                q.execute(storage).await.map(QueryResult::NodesBySummaryHash)
+            }
+            Query::EdgesBySummaryHash(q) => {
+                q.execute(storage).await.map(QueryResult::EdgesBySummaryHash)
+            }
         }
     }
 }
+
+impl RequestMeta for Query {
+    type Reply = QueryResult;
+    type Options = ();
+
+    fn request_kind(&self) -> &'static str {
+        match self {
+            Query::NodeById(q) => q.request_kind(),
+            Query::NodesByIdsMulti(q) => q.request_kind(),
+            Query::EdgeSummaryBySrcDstName(q) => q.request_kind(),
+            Query::NodeFragmentsByIdTimeRange(q) => q.request_kind(),
+            Query::EdgeFragmentsByIdTimeRange(q) => q.request_kind(),
+            Query::OutgoingEdges(q) => q.request_kind(),
+            Query::IncomingEdges(q) => q.request_kind(),
+            Query::AllNodes(q) => q.request_kind(),
+            Query::AllEdges(q) => q.request_kind(),
+            Query::NodesBySummaryHash(q) => q.request_kind(),
+            Query::EdgesBySummaryHash(q) => q.request_kind(),
+        }
+    }
+}
+
+macro_rules! impl_request_meta {
+    ($ty:ty, $reply:ty, $kind:expr) => {
+        impl RequestMeta for $ty {
+            type Reply = $reply;
+            type Options = ();
+
+            fn request_kind(&self) -> &'static str {
+                $kind
+            }
+        }
+    };
+}
+
+impl_request_meta!(NodeById, (NodeName, NodeSummary, Version), "node_by_id");
+impl_request_meta!(NodesByIdsMulti, Vec<(Id, NodeName, NodeSummary, Version)>, "nodes_by_ids_multi");
+impl_request_meta!(EdgeSummaryBySrcDstName, (EdgeSummary, Option<EdgeWeight>, Version), "edge_summary_by_src_dst_name");
+impl_request_meta!(NodeFragmentsByIdTimeRange, Vec<(TimestampMilli, FragmentContent)>, "node_fragments_by_id_time_range");
+impl_request_meta!(EdgeFragmentsByIdTimeRange, Vec<(TimestampMilli, FragmentContent)>, "edge_fragments_by_id_time_range");
+impl_request_meta!(OutgoingEdges, Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>, "outgoing_edges");
+impl_request_meta!(IncomingEdges, Vec<(Option<EdgeWeight>, DstId, SrcId, EdgeName, Version)>, "incoming_edges");
+impl_request_meta!(AllNodes, Vec<(Id, NodeName, NodeSummary, Version)>, "all_nodes");
+impl_request_meta!(AllEdges, Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>, "all_edges");
+impl_request_meta!(NodesBySummaryHash, Vec<NodeSummaryLookupResult>, "nodes_by_summary_hash");
+impl_request_meta!(EdgesBySummaryHash, Vec<EdgeSummaryLookupResult>, "edges_by_summary_hash");
 
 /// Query parameters for finding a node by its ID.
 ///
 /// This struct contains only user-facing parameters and can be:
 /// - Constructed via struct initialization
 /// - Cloned and reused
+///
+/// # Time Dimensions
+///
+/// The graph supports two orthogonal time dimensions:
+/// - **System time** (`as_of_system_time`): When versions were created/superseded (ValidSince/ValidUntil)
+/// - **Application time** (`reference_ts_millis`): Business validity (ActivePeriod)
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodeById {
     /// The entity ID to search for
     pub id: Id,
 
-    /// Reference timestamp for temporal validity checks
-    /// If None, defaults to current time in the query executor
+    /// Reference timestamp for ActivePeriod (application/business time) validity checks.
+    /// If None, defaults to current time in the query executor.
+    /// Records without an ActivePeriod (None) are considered always valid.
     pub reference_ts_millis: Option<TimestampMilli>,
+
+    /// Point-in-time query for system time (ValidSince/ValidUntil).
+    /// If None, returns the current version (ValidUntil = None).
+    /// If Some(ts), returns the version that was valid at that system time.
+    pub as_of_system_time: Option<TimestampMilli>,
 }
 
-/// Internal dispatch wrapper for NodeById query execution.
-#[derive(Debug)]
-pub(crate) struct NodeByIdDispatch {
-    pub(crate) params: NodeById,
-    pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<(NodeName, NodeSummary)>>,
-}
 
 /// Query parameters for batch lookup of multiple nodes by ID.
 ///
@@ -512,25 +355,22 @@ pub(crate) struct NodeByIdDispatch {
 /// let nodes = NodesByIdsMulti::new(vec![id1, id2, id3], None)
 ///     .run(&reader, timeout)
 ///     .await?;
-/// // Returns Vec<(Id, NodeName, NodeSummary)> for found nodes
+/// // Returns Vec<(Id, NodeName, NodeSummary, Version)> for found nodes
 /// ```
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct NodesByIdsMulti {
     /// Node IDs to look up
     pub ids: Vec<Id>,
 
-    /// Reference timestamp for temporal validity checks
-    /// If None, defaults to current time in the query executor
+    /// Reference timestamp for ActivePeriod (application time) validity checks.
+    /// If None, defaults to current time in the query executor.
     pub reference_ts_millis: Option<TimestampMilli>,
+
+    /// Point-in-time query for system time (ValidSince/ValidUntil).
+    /// If None, returns the current version. If Some(ts), returns versions valid at that time.
+    pub as_of_system_time: Option<TimestampMilli>,
 }
 
-/// Internal dispatch wrapper for NodesByIdsMulti query execution.
-#[derive(Debug)]
-pub(crate) struct NodesByIdsMultiDispatch {
-    pub(crate) params: NodesByIdsMulti,
-    pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<Vec<(Id, NodeName, NodeSummary)>>>,
-}
 
 /// Query parameters for scanning node fragments by ID with time range filtering.
 ///
@@ -551,13 +391,6 @@ pub struct NodeFragmentsByIdTimeRange {
     pub reference_ts_millis: Option<TimestampMilli>,
 }
 
-/// Internal dispatch wrapper for NodeFragmentsByIdTimeRange query execution.
-#[derive(Debug)]
-pub(crate) struct NodeFragmentsByIdTimeRangeDispatch {
-    pub(crate) params: NodeFragmentsByIdTimeRange,
-    pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<Vec<(TimestampMilli, FragmentContent)>>>,
-}
 
 /// Query parameters for scanning edge fragments by source ID, destination ID, edge name, and time range.
 ///
@@ -584,13 +417,6 @@ pub struct EdgeFragmentsByIdTimeRange {
     pub reference_ts_millis: Option<TimestampMilli>,
 }
 
-/// Internal dispatch wrapper for EdgeFragmentsByIdTimeRange query execution.
-#[derive(Debug)]
-pub(crate) struct EdgeFragmentsByIdTimeRangeDispatch {
-    pub(crate) params: EdgeFragmentsByIdTimeRange,
-    pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<Vec<(TimestampMilli, FragmentContent)>>>,
-}
 
 /// Query parameters for finding an edge by source ID, destination ID, and name.
 ///
@@ -608,18 +434,15 @@ pub struct EdgeSummaryBySrcDstName {
     /// Edge name
     pub name: String,
 
-    /// Reference timestamp for temporal validity checks
-    /// If None, defaults to current time in the query executor
+    /// Reference timestamp for ActivePeriod (application time) validity checks.
+    /// If None, defaults to current time in the query executor.
     pub reference_ts_millis: Option<TimestampMilli>,
+
+    /// Point-in-time query for system time (ValidSince/ValidUntil).
+    /// If None, returns current version. If Some(ts), returns version valid at that time.
+    pub as_of_system_time: Option<TimestampMilli>,
 }
 
-/// Internal dispatch wrapper for EdgeSummaryBySrcDstName query execution.
-#[derive(Debug)]
-pub(crate) struct EdgeSummaryBySrcDstNameDispatch {
-    pub(crate) params: EdgeSummaryBySrcDstName,
-    pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<(EdgeSummary, Option<f64>)>>,
-}
 
 /// Query parameters for finding all outgoing edges from a node.
 ///
@@ -645,26 +468,16 @@ pub struct OutgoingEdges {
     /// The node ID to search for
     pub id: Id,
 
-    /// Reference timestamp for temporal validity checks
-    /// If None, defaults to current time in the query executor
-    /// Temporal validity is always checked against the ActivePeriod in the record
-    /// Records without a ActivePeriod (None) are considered always valid
+    /// Reference timestamp for ActivePeriod (application time) validity checks.
+    /// If None, defaults to current time in the query executor.
+    /// Records without an ActivePeriod (None) are considered always valid.
     pub reference_ts_millis: Option<TimestampMilli>,
+
+    /// Point-in-time query for system time (ValidSince/ValidUntil).
+    /// If None, returns current versions. If Some(ts), returns versions valid at that time.
+    pub as_of_system_time: Option<TimestampMilli>,
 }
 
-/// Internal dispatch wrapper for OutgoingEdges query execution.
-/// Contains the query parameters plus channel/timeout for async dispatch.
-#[derive(Debug)]
-pub(crate) struct OutgoingEdgesDispatch {
-    /// The query parameters
-    pub(crate) params: OutgoingEdges,
-
-    /// Timeout for this query execution
-    pub(crate) timeout: Duration,
-
-    /// Channel to send the result back to the client
-    pub(crate) result_tx: oneshot::Sender<Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>>>,
-}
 
 /// Query parameters for finding all incoming edges to a node.
 ///
@@ -677,26 +490,16 @@ pub struct IncomingEdges {
     /// The node ID to search for
     pub id: DstId,
 
-    /// Reference timestamp for temporal validity checks
-    /// If None, defaults to current time in the query executor
-    /// Temporal validity is always checked against the ActivePeriod in the record
-    /// Records without a ActivePeriod (None) are considered always valid
+    /// Reference timestamp for ActivePeriod (application time) validity checks.
+    /// If None, defaults to current time in the query executor.
+    /// Records without an ActivePeriod (None) are considered always valid.
     pub reference_ts_millis: Option<TimestampMilli>,
+
+    /// Point-in-time query for system time (ValidSince/ValidUntil).
+    /// If None, returns current versions. If Some(ts), returns versions valid at that time.
+    pub as_of_system_time: Option<TimestampMilli>,
 }
 
-/// Internal dispatch wrapper for IncomingEdges query execution.
-/// Contains the query parameters plus channel/timeout for async dispatch.
-#[derive(Debug)]
-pub(crate) struct IncomingEdgesDispatch {
-    /// The query parameters
-    pub(crate) params: IncomingEdges,
-
-    /// Timeout for this query execution
-    pub(crate) timeout: Duration,
-
-    /// Channel to send the result back to the client
-    pub(crate) result_tx: oneshot::Sender<Result<Vec<(Option<f64>, DstId, SrcId, EdgeName)>>>,
-}
 
 /// Query parameters for enumerating all nodes with pagination.
 ///
@@ -732,13 +535,6 @@ pub struct AllNodes {
     pub reference_ts_millis: Option<TimestampMilli>,
 }
 
-/// Internal dispatch wrapper for AllNodes query execution.
-#[derive(Debug)]
-pub(crate) struct AllNodesDispatch {
-    pub(crate) params: AllNodes,
-    pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<Vec<(Id, NodeName, NodeSummary)>>>,
-}
 
 /// Query parameters for enumerating all edges with pagination.
 ///
@@ -774,101 +570,51 @@ pub struct AllEdges {
     pub reference_ts_millis: Option<TimestampMilli>,
 }
 
-/// Internal dispatch wrapper for AllEdges query execution.
-#[derive(Debug)]
-pub(crate) struct AllEdgesDispatch {
-    pub(crate) params: AllEdges,
-    pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>>>,
-}
 
 impl NodeById {
-    /// Create a new query request.
+    /// Create a new query request for the current version.
     pub fn new(id: Id, reference_ts_millis: Option<TimestampMilli>) -> Self {
         Self {
             id,
             reference_ts_millis,
+            as_of_system_time: None,
+        }
+    }
+
+    /// Create a point-in-time query at a specific system time.
+    pub fn as_of(id: Id, system_time: TimestampMilli, reference_ts_millis: Option<TimestampMilli>) -> Self {
+        Self {
+            id,
+            reference_ts_millis,
+            as_of_system_time: Some(system_time),
         }
     }
 }
 
-impl NodeByIdDispatch {
-    /// Create a new dispatch wrapper.
-    pub(crate) fn new(
-        params: NodeById,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<(NodeName, NodeSummary)>>,
-    ) -> Self {
-        Self {
-            params,
-            timeout,
-            result_tx,
-        }
-    }
-
-    /// Send the result back to the client (consumes self).
-    pub(crate) fn send_result(self, result: Result<(NodeName, NodeSummary)>) {
-        let _ = self.result_tx.send(result);
-    }
-
-    /// Execute a NodeById query directly without dispatch machinery.
-    /// This is used by the unified query module for composition.
-    pub(crate) async fn execute_params(
-        params: &NodeById,
-        storage: &Storage,
-    ) -> Result<(NodeName, NodeSummary)> {
-        let (tx, _rx) = oneshot::channel();
-        let dispatch = NodeByIdDispatch {
-            params: params.clone(),
-            timeout: Duration::from_secs(0),
-            result_tx: tx,
-        };
-        <NodeByIdDispatch as super::reader::QueryExecutor>::execute(&dispatch, storage).await
+impl NodeById {
+    /// Execute this query directly on storage (for testing and simple use cases).
+    pub async fn execute_on(&self, storage: &Storage) -> Result<(NodeName, NodeSummary, Version)> {
+        self.execute(storage).await
     }
 }
 
 impl NodesByIdsMulti {
-    /// Create a new batch query request.
+    /// Create a new batch query request for current versions.
     pub fn new(ids: Vec<Id>, reference_ts_millis: Option<TimestampMilli>) -> Self {
         Self {
             ids,
             reference_ts_millis,
+            as_of_system_time: None,
         }
     }
-}
 
-impl NodesByIdsMultiDispatch {
-    /// Create a new dispatch wrapper.
-    pub(crate) fn new(
-        params: NodesByIdsMulti,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<(Id, NodeName, NodeSummary)>>>,
-    ) -> Self {
+    /// Create a point-in-time batch query at a specific system time.
+    pub fn as_of(ids: Vec<Id>, system_time: TimestampMilli, reference_ts_millis: Option<TimestampMilli>) -> Self {
         Self {
-            params,
-            timeout,
-            result_tx,
+            ids,
+            reference_ts_millis,
+            as_of_system_time: Some(system_time),
         }
-    }
-
-    /// Send the result back to the client (consumes self).
-    pub(crate) fn send_result(self, result: Result<Vec<(Id, NodeName, NodeSummary)>>) {
-        let _ = self.result_tx.send(result);
-    }
-
-    /// Execute a NodesByIdsMulti query directly without dispatch machinery.
-    /// This is used by the unified query module for composition.
-    pub(crate) async fn execute_params(
-        params: &NodesByIdsMulti,
-        storage: &Storage,
-    ) -> Result<Vec<(Id, NodeName, NodeSummary)>> {
-        let (tx, _rx) = oneshot::channel();
-        let dispatch = NodesByIdsMultiDispatch {
-            params: params.clone(),
-            timeout: Duration::from_secs(0),
-            result_tx: tx,
-        };
-        <NodesByIdsMultiDispatch as super::reader::QueryExecutor>::execute(&dispatch, storage).await
     }
 }
 
@@ -890,43 +636,10 @@ impl NodeFragmentsByIdTimeRange {
     pub fn contains(&self, ts: TimestampMilli) -> bool {
         timestamp_in_range(ts, &self.time_range)
     }
-}
 
-impl NodeFragmentsByIdTimeRangeDispatch {
-    /// Create a new dispatch wrapper.
-    pub(crate) fn new(
-        params: NodeFragmentsByIdTimeRange,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<(TimestampMilli, FragmentContent)>>>,
-    ) -> Self {
-        Self {
-            params,
-            timeout,
-            result_tx,
-        }
-    }
-
-    /// Send the result back to the client (consumes self).
-    pub(crate) fn send_result(self, result: Result<Vec<(TimestampMilli, FragmentContent)>>) {
-        let _ = self.result_tx.send(result);
-    }
-
-    /// Execute a NodeFragmentsByIdTimeRange query directly without dispatch machinery.
-    /// This is used by the unified query module for composition.
-    pub(crate) async fn execute_params(
-        params: &NodeFragmentsByIdTimeRange,
-        storage: &Storage,
-    ) -> Result<Vec<(TimestampMilli, FragmentContent)>> {
-        let (tx, _rx) = oneshot::channel();
-        let dispatch = NodeFragmentsByIdTimeRangeDispatch {
-            params: params.clone(),
-            timeout: Duration::from_secs(0),
-            result_tx: tx,
-        };
-        <NodeFragmentsByIdTimeRangeDispatch as super::reader::QueryExecutor>::execute(
-            &dispatch, storage,
-        )
-        .await
+    /// Execute this query directly on storage (for testing and simple use cases).
+    pub async fn execute_on(&self, storage: &Storage) -> Result<Vec<(TimestampMilli, FragmentContent)>> {
+        self.execute(storage).await
     }
 }
 
@@ -954,46 +667,8 @@ impl EdgeFragmentsByIdTimeRange {
     }
 }
 
-impl EdgeFragmentsByIdTimeRangeDispatch {
-    /// Create a new dispatch wrapper.
-    pub(crate) fn new(
-        params: EdgeFragmentsByIdTimeRange,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<(TimestampMilli, FragmentContent)>>>,
-    ) -> Self {
-        Self {
-            params,
-            timeout,
-            result_tx,
-        }
-    }
-
-    /// Send the result back to the client (consumes self).
-    pub(crate) fn send_result(self, result: Result<Vec<(TimestampMilli, FragmentContent)>>) {
-        let _ = self.result_tx.send(result);
-    }
-
-    /// Execute an EdgeFragmentsByIdTimeRange query directly without dispatch machinery.
-    /// This is used by the unified query module for composition.
-    pub(crate) async fn execute_params(
-        params: &EdgeFragmentsByIdTimeRange,
-        storage: &Storage,
-    ) -> Result<Vec<(TimestampMilli, FragmentContent)>> {
-        let (tx, _rx) = oneshot::channel();
-        let dispatch = EdgeFragmentsByIdTimeRangeDispatch {
-            params: params.clone(),
-            timeout: Duration::from_secs(0),
-            result_tx: tx,
-        };
-        <EdgeFragmentsByIdTimeRangeDispatch as super::reader::QueryExecutor>::execute(
-            &dispatch, storage,
-        )
-        .await
-    }
-}
-
 impl EdgeSummaryBySrcDstName {
-    /// Create a new query request.
+    /// Create a new query request for the current version.
     pub fn new(
         source_id: SrcId,
         dest_id: DstId,
@@ -1005,135 +680,82 @@ impl EdgeSummaryBySrcDstName {
             dest_id,
             name,
             reference_ts_millis,
+            as_of_system_time: None,
+        }
+    }
+
+    /// Create a point-in-time query at a specific system time.
+    pub fn as_of(
+        source_id: SrcId,
+        dest_id: DstId,
+        name: String,
+        system_time: TimestampMilli,
+        reference_ts_millis: Option<TimestampMilli>,
+    ) -> Self {
+        Self {
+            source_id,
+            dest_id,
+            name,
+            reference_ts_millis,
+            as_of_system_time: Some(system_time),
         }
     }
 }
 
-impl EdgeSummaryBySrcDstNameDispatch {
-    /// Create a new dispatch wrapper.
-    pub(crate) fn new(
-        params: EdgeSummaryBySrcDstName,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<(EdgeSummary, Option<f64>)>>,
-    ) -> Self {
-        Self {
-            params,
-            timeout,
-            result_tx,
-        }
-    }
-
-    /// Send the result back to the client (consumes self).
-    pub(crate) fn send_result(self, result: Result<(EdgeSummary, Option<f64>)>) {
-        let _ = self.result_tx.send(result);
-    }
-
-    /// Execute an EdgeSummaryBySrcDstName query directly without dispatch machinery.
-    /// This is used by the unified query module for composition.
-    pub(crate) async fn execute_params(
-        params: &EdgeSummaryBySrcDstName,
-        storage: &Storage,
-    ) -> Result<(EdgeSummary, Option<f64>)> {
-        let (tx, _rx) = oneshot::channel();
-        let dispatch = EdgeSummaryBySrcDstNameDispatch {
-            params: params.clone(),
-            timeout: Duration::from_secs(0),
-            result_tx: tx,
-        };
-        <EdgeSummaryBySrcDstNameDispatch as super::reader::QueryExecutor>::execute(
-            &dispatch, storage,
-        )
-        .await
+impl EdgeSummaryBySrcDstName {
+    /// Execute this query directly on storage (for testing and simple use cases).
+    pub async fn execute_on(&self, storage: &Storage) -> Result<(EdgeSummary, Option<EdgeWeight>, Version)> {
+        self.execute(storage).await
     }
 }
 
 impl OutgoingEdges {
-    /// Create a new query request.
+    /// Create a new query request for current versions.
     pub fn new(id: Id, reference_ts_millis: Option<TimestampMilli>) -> Self {
         Self {
             id,
             reference_ts_millis,
+            as_of_system_time: None,
         }
     }
-}
 
-impl OutgoingEdgesDispatch {
-    /// Create a new dispatch wrapper
-    pub(crate) fn new(
-        params: OutgoingEdges,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>>>,
-    ) -> Self {
+    /// Create a point-in-time query at a specific system time.
+    pub fn as_of(id: Id, system_time: TimestampMilli, reference_ts_millis: Option<TimestampMilli>) -> Self {
         Self {
-            params,
-            timeout,
-            result_tx,
+            id,
+            reference_ts_millis,
+            as_of_system_time: Some(system_time),
         }
     }
 
-    /// Send the result back to the client (consumes self)
-    pub(crate) fn send_result(self, result: Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>>) {
-        let _ = self.result_tx.send(result);
-    }
-
-    /// Execute an OutgoingEdges query directly without dispatch machinery.
-    /// This is used by the unified query module for composition.
-    pub(crate) async fn execute_params(
-        params: &OutgoingEdges,
-        storage: &Storage,
-    ) -> Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>> {
-        let (tx, _rx) = oneshot::channel();
-        let dispatch = OutgoingEdgesDispatch {
-            params: params.clone(),
-            timeout: Duration::from_secs(0),
-            result_tx: tx,
-        };
-        <OutgoingEdgesDispatch as super::reader::QueryExecutor>::execute(&dispatch, storage).await
+    /// Execute this query directly on storage (for testing and simple use cases).
+    pub async fn execute_on(&self, storage: &Storage) -> Result<Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>> {
+        self.execute(storage).await
     }
 }
 
 impl IncomingEdges {
-    /// Create a new query request.
+    /// Create a new query request for current versions.
     pub fn new(id: DstId, reference_ts_millis: Option<TimestampMilli>) -> Self {
         Self {
             id,
             reference_ts_millis,
+            as_of_system_time: None,
         }
     }
-}
 
-impl IncomingEdgesDispatch {
-    /// Create a new dispatch wrapper
-    pub(crate) fn new(
-        params: IncomingEdges,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<(Option<f64>, DstId, SrcId, EdgeName)>>>,
-    ) -> Self {
+    /// Create a point-in-time query at a specific system time.
+    pub fn as_of(id: DstId, system_time: TimestampMilli, reference_ts_millis: Option<TimestampMilli>) -> Self {
         Self {
-            params,
-            timeout,
-            result_tx,
+            id,
+            reference_ts_millis,
+            as_of_system_time: Some(system_time),
         }
     }
 
-    /// Send the result back to the client (consumes self)
-    pub(crate) fn send_result(self, result: Result<Vec<(Option<f64>, DstId, SrcId, EdgeName)>>) {
-        let _ = self.result_tx.send(result);
-    }
-
-    /// Execute an IncomingEdges query directly without dispatch machinery.
-    /// This is used by the unified query module for composition.
-    pub(crate) async fn execute_params(
-        params: &IncomingEdges,
-        storage: &Storage,
-    ) -> Result<Vec<(Option<f64>, DstId, SrcId, EdgeName)>> {
-        let (tx, _rx) = oneshot::channel();
-        let dispatch = IncomingEdgesDispatch {
-            params: params.clone(),
-            timeout: Duration::from_secs(0),
-            result_tx: tx,
-        };
-        <IncomingEdgesDispatch as super::reader::QueryExecutor>::execute(&dispatch, storage).await
+    /// Execute this query directly on storage (for testing and simple use cases).
+    pub async fn execute_on(&self, storage: &Storage) -> Result<Vec<(Option<EdgeWeight>, DstId, SrcId, EdgeName, Version)>> {
+        self.execute(storage).await
     }
 }
 
@@ -1160,41 +782,6 @@ impl AllNodes {
     }
 }
 
-impl AllNodesDispatch {
-    /// Create a new dispatch wrapper.
-    pub(crate) fn new(
-        params: AllNodes,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<(Id, NodeName, NodeSummary)>>>,
-    ) -> Self {
-        Self {
-            params,
-            timeout,
-            result_tx,
-        }
-    }
-
-    /// Send the result back to the client (consumes self).
-    pub(crate) fn send_result(self, result: Result<Vec<(Id, NodeName, NodeSummary)>>) {
-        let _ = self.result_tx.send(result);
-    }
-
-    /// Execute an AllNodes query directly without dispatch machinery.
-    /// This is used by the unified query module for composition.
-    pub(crate) async fn execute_params(
-        params: &AllNodes,
-        storage: &Storage,
-    ) -> Result<Vec<(Id, NodeName, NodeSummary)>> {
-        let (tx, _rx) = oneshot::channel();
-        let dispatch = AllNodesDispatch {
-            params: params.clone(),
-            timeout: Duration::from_secs(0),
-            result_tx: tx,
-        };
-        <AllNodesDispatch as super::reader::QueryExecutor>::execute(&dispatch, storage).await
-    }
-}
-
 impl AllEdges {
     /// Create a new AllEdges query with the specified limit.
     pub fn new(limit: usize) -> Self {
@@ -1218,200 +805,221 @@ impl AllEdges {
     }
 }
 
-impl AllEdgesDispatch {
-    /// Create a new dispatch wrapper.
-    pub(crate) fn new(
-        params: AllEdges,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>>>,
-    ) -> Self {
-        Self {
-            params,
-            timeout,
-            result_tx,
+// ============================================================================
+// QueryReply - typed replies for graph queries
+// ============================================================================
+
+pub trait QueryReply: Send {
+    type Reply: Send + 'static;
+    fn into_query(self) -> Query;
+    fn from_result(result: QueryResult) -> Result<Self::Reply>;
+}
+
+#[async_trait::async_trait]
+impl<Q> Runnable<super::Reader> for Q
+where
+    Q: QueryReply,
+{
+    type Output = Q::Reply;
+
+    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
+        let (result_tx, result_rx) = oneshot::channel();
+        let request = QueryRequest {
+            payload: self.into_query(),
+            options: (),
+            reply: Some(result_tx),
+            timeout: Some(timeout),
+            request_id: new_request_id(),
+            created_at: std::time::Instant::now(),
+        };
+        reader.send_query(request).await?;
+        let result = result_rx.await??;
+        Q::from_result(result)
+    }
+}
+
+impl QueryReply for NodeById {
+    type Reply = (NodeName, NodeSummary, Version);
+
+    fn into_query(self) -> Query {
+        Query::NodeById(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::NodeById(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
         }
     }
+}
 
-    /// Send the result back to the client (consumes self).
-    pub(crate) fn send_result(self, result: Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>>) {
-        let _ = self.result_tx.send(result);
+impl QueryReply for NodesByIdsMulti {
+    type Reply = Vec<(Id, NodeName, NodeSummary, Version)>;
+
+    fn into_query(self) -> Query {
+        Query::NodesByIdsMulti(self)
     }
 
-    /// Execute an AllEdges query directly without dispatch machinery.
-    /// This is used by the unified query module for composition.
-    pub(crate) async fn execute_params(
-        params: &AllEdges,
-        storage: &Storage,
-    ) -> Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>> {
-        let (tx, _rx) = oneshot::channel();
-        let dispatch = AllEdgesDispatch {
-            params: params.clone(),
-            timeout: Duration::from_secs(0),
-            result_tx: tx,
-        };
-        <AllEdgesDispatch as super::reader::QueryExecutor>::execute(&dispatch, storage).await
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::NodesByIdsMulti(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
     }
 }
 
-/// Implement Runnable<Reader> for NodeById
-#[async_trait::async_trait]
-impl Runnable<super::Reader> for NodeById {
-    type Output = (NodeName, NodeSummary);
+impl QueryReply for NodeFragmentsByIdTimeRange {
+    type Reply = Vec<(TimestampMilli, FragmentContent)>;
 
-    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let dispatch = NodeByIdDispatch::new(self, timeout, result_tx);
-        reader.send_query(Query::NodeById(dispatch)).await?;
-        result_rx.await?
+    fn into_query(self) -> Query {
+        Query::NodeFragmentsByIdTimeRange(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::NodeFragmentsByIdTimeRange(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
     }
 }
 
-/// Implement Runnable<Reader> for NodesByIdsMulti
-#[async_trait::async_trait]
-impl Runnable<super::Reader> for NodesByIdsMulti {
-    type Output = Vec<(Id, NodeName, NodeSummary)>;
+impl QueryReply for EdgeFragmentsByIdTimeRange {
+    type Reply = Vec<(TimestampMilli, FragmentContent)>;
 
-    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let dispatch = NodesByIdsMultiDispatch::new(self, timeout, result_tx);
-        reader.send_query(Query::NodesByIdsMulti(dispatch)).await?;
-        result_rx.await?
+    fn into_query(self) -> Query {
+        Query::EdgeFragmentsByIdTimeRange(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::EdgeFragmentsByIdTimeRange(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
     }
 }
 
-/// Implement Runnable<Reader> for NodeFragmentsByIdTimeRange
-#[async_trait::async_trait]
-impl Runnable<super::Reader> for NodeFragmentsByIdTimeRange {
-    type Output = Vec<(TimestampMilli, FragmentContent)>;
+impl QueryReply for EdgeSummaryBySrcDstName {
+    type Reply = (EdgeSummary, Option<EdgeWeight>, Version);
 
-    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let dispatch = NodeFragmentsByIdTimeRangeDispatch::new(self, timeout, result_tx);
-        reader
-            .send_query(Query::NodeFragmentsByIdTimeRange(dispatch))
-            .await?;
-        result_rx.await?
+    fn into_query(self) -> Query {
+        Query::EdgeSummaryBySrcDstName(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::EdgeSummaryBySrcDstName(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
     }
 }
 
-/// Implement Runnable<Reader> for EdgeFragmentsByIdTimeRange
-#[async_trait::async_trait]
-impl Runnable<super::Reader> for EdgeFragmentsByIdTimeRange {
-    type Output = Vec<(TimestampMilli, FragmentContent)>;
+impl QueryReply for OutgoingEdges {
+    type Reply = Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>;
 
-    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let dispatch = EdgeFragmentsByIdTimeRangeDispatch::new(self, timeout, result_tx);
-        reader
-            .send_query(Query::EdgeFragmentsByIdTimeRange(dispatch))
-            .await?;
-        result_rx.await?
+    fn into_query(self) -> Query {
+        Query::OutgoingEdges(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::OutgoingEdges(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
     }
 }
 
-/// Implement Runnable<Reader> for EdgeSummaryBySrcDstName
-#[async_trait::async_trait]
-impl Runnable<super::Reader> for EdgeSummaryBySrcDstName {
-    type Output = (EdgeSummary, Option<f64>);
+impl QueryReply for IncomingEdges {
+    type Reply = Vec<(Option<EdgeWeight>, DstId, SrcId, EdgeName, Version)>;
 
-    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let dispatch = EdgeSummaryBySrcDstNameDispatch::new(self, timeout, result_tx);
-        reader
-            .send_query(Query::EdgeSummaryBySrcDstName(dispatch))
-            .await?;
-        result_rx.await?
+    fn into_query(self) -> Query {
+        Query::IncomingEdges(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::IncomingEdges(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
     }
 }
 
-#[async_trait::async_trait]
-impl Runnable<super::Reader> for OutgoingEdges {
-    type Output = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
+impl QueryReply for AllNodes {
+    type Reply = Vec<(Id, NodeName, NodeSummary, Version)>;
 
-    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let dispatch = OutgoingEdgesDispatch::new(self, timeout, result_tx);
-        reader.send_query(Query::OutgoingEdges(dispatch)).await?;
-        result_rx.await?
+    fn into_query(self) -> Query {
+        Query::AllNodes(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::AllNodes(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
     }
 }
 
-#[async_trait::async_trait]
-impl Runnable<super::Reader> for IncomingEdges {
-    type Output = Vec<(Option<f64>, DstId, SrcId, EdgeName)>;
+impl QueryReply for AllEdges {
+    type Reply = Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>;
 
-    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let dispatch = IncomingEdgesDispatch::new(self, timeout, result_tx);
-        reader.send_query(Query::IncomingEdges(dispatch)).await?;
-        result_rx.await?
+    fn into_query(self) -> Query {
+        Query::AllEdges(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::AllEdges(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
     }
 }
 
+/// Implement QueryExecutor for NodeById
+/// (claude, 2026-02-06: VERSIONING with point-in-time query support)
 #[async_trait::async_trait]
-impl Runnable<super::Reader> for AllNodes {
-    type Output = Vec<(Id, NodeName, NodeSummary)>;
-
-    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let dispatch = AllNodesDispatch::new(self, timeout, result_tx);
-        reader.send_query(Query::AllNodes(dispatch)).await?;
-        result_rx.await?
-    }
-}
-
-#[async_trait::async_trait]
-impl Runnable<super::Reader> for AllEdges {
-    type Output = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
-
-    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let dispatch = AllEdgesDispatch::new(self, timeout, result_tx);
-        reader.send_query(Query::AllEdges(dispatch)).await?;
-        result_rx.await?
-    }
-}
-
-/// Implement QueryExecutor for NodeByIdDispatch
-#[async_trait::async_trait]
-impl QueryExecutor for NodeByIdDispatch {
-    type Output = (NodeName, NodeSummary);
+impl QueryExecutor for NodeById {
+    type Output = (NodeName, NodeSummary, Version);
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let params = &self.params;
-        tracing::debug!(id = %params.id, "Executing NodeById query");
+        let params = self;
+        tracing::debug!(
+            id = %params.id,
+            as_of = ?params.as_of_system_time,
+            "Executing NodeById query"
+        );
 
-        // Default None to current time for temporal validity checks
+        // Default None to current time for ActivePeriod validity checks
         let ref_time = params
             .reference_ts_millis
             .unwrap_or_else(|| TimestampMilli::now());
 
         let id = params.id;
 
-        let key = schema::NodeCfKey(id);
-        let key_bytes = schema::Nodes::key_to_bytes(&key);
-
-        // Handle both readonly and readwrite modes
-        let value_bytes = if let Ok(db) = storage.db() {
-            let cf = db.cf_handle(schema::Nodes::CF_NAME).ok_or_else(|| {
-                anyhow::anyhow!("Column family '{}' not found", schema::Nodes::CF_NAME)
-            })?;
-            db.get_cf(cf, key_bytes)?
+        // Find version via prefix scan (VERSIONING)
+        // If as_of_system_time is Some, find version valid at that time
+        // Otherwise find current version (ValidUntil = None)
+        let (_key_bytes, value) = if let Ok(db) = storage.db() {
+            find_node_version(StorageAccess::Readonly(db), id, params.as_of_system_time)?
         } else {
             let txn_db = storage.transaction_db()?;
-            let cf = txn_db.cf_handle(schema::Nodes::CF_NAME).ok_or_else(|| {
-                anyhow::anyhow!("Column family '{}' not found", schema::Nodes::CF_NAME)
-            })?;
-            txn_db.get_cf(cf, key_bytes)?
-        };
+            find_node_version(StorageAccess::Readwrite(txn_db), id, params.as_of_system_time)?
+        }
+        .ok_or_else(|| {
+            if params.as_of_system_time.is_some() {
+                anyhow::anyhow!("Node {} not found at system time {:?}", id, params.as_of_system_time)
+            } else {
+                anyhow::anyhow!("Node not found: {}", id)
+            }
+        })?;
 
-        let value_bytes = value_bytes.ok_or_else(|| anyhow::anyhow!("Node not found: {}", id))?;
+        // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=NameHash, 3=SummaryHash, 4=Version, 5=Deleted
+        // Check if deleted (only for current time queries, not time-travel)
+        // For time-travel queries, we want to see the node's state at that past time
+        if params.as_of_system_time.is_none() && value.5 {
+            return Err(anyhow::anyhow!("Node {} has been deleted", id));
+        }
 
-        let value: schema::NodeCfValue = schema::Nodes::value_from_bytes(&value_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
-
-        // Always check temporal validity
-        if !schema::is_active_at_time(&value.0, ref_time) {
+        // Check temporal validity (ActivePeriod at index 1)
+        if !schema::is_active_at_time(&value.1, ref_time) {
             return Err(anyhow::anyhow!(
                 "Node {} not valid at time {}",
                 id,
@@ -1419,31 +1027,31 @@ impl QueryExecutor for NodeByIdDispatch {
             ));
         }
 
-        // Resolve NameHash to String (uses cache)
-        let node_name = resolve_name(storage, value.1)?;
+        // Resolve NameHash to String (uses cache) - NameHash is at index 2
+        let node_name = resolve_name(storage, value.2)?;
 
-        // Resolve summary from cold CF
-        let summary = resolve_node_summary(storage, value.2)?;
+        // Resolve summary from cold CF - SummaryHash is at index 3
+        let summary = resolve_node_summary(storage, value.3)?;
 
-        Ok((node_name, summary))
-    }
-
-    fn timeout(&self) -> Duration {
-        self.timeout
+        Ok((node_name, summary, value.4))
     }
 }
 
-/// Implement QueryExecutor for NodesByIdsMultiDispatch
+/// Implement QueryExecutor for NodesByIdsMulti
 ///
-/// Uses RocksDB's `multi_get_cf()` for efficient batch lookups.
+/// (claude, 2026-02-06: VERSIONING with point-in-time query support)
 /// Missing nodes and temporally invalid nodes are silently omitted from results.
 #[async_trait::async_trait]
-impl QueryExecutor for NodesByIdsMultiDispatch {
-    type Output = Vec<(Id, NodeName, NodeSummary)>;
+impl QueryExecutor for NodesByIdsMulti {
+    type Output = Vec<(Id, NodeName, NodeSummary, Version)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let params = &self.params;
-        tracing::debug!(count = params.ids.len(), "Executing NodesByIdsMulti query");
+        let params = self;
+        tracing::debug!(
+            count = params.ids.len(),
+            as_of = ?params.as_of_system_time,
+            "Executing NodesByIdsMulti query"
+        );
 
         if params.ids.is_empty() {
             return Ok(Vec::new());
@@ -1454,49 +1062,37 @@ impl QueryExecutor for NodesByIdsMultiDispatch {
             .reference_ts_millis
             .unwrap_or_else(|| TimestampMilli::now());
 
-        // Prepare keys for batch lookup
-        let keys: Vec<Vec<u8>> = params
-            .ids
-            .iter()
-            .map(|id| schema::Nodes::key_to_bytes(&schema::NodeCfKey(*id)))
-            .collect();
-
-        // Use multi_get_cf for batch lookup - handles both readonly and readwrite modes
-        let results: Vec<Result<Option<Vec<u8>>, rocksdb::Error>> = if let Ok(db) = storage.db() {
-            let cf = db.cf_handle(schema::Nodes::CF_NAME).ok_or_else(|| {
-                anyhow::anyhow!("Column family '{}' not found", schema::Nodes::CF_NAME)
-            })?;
-            db.multi_get_cf(keys.iter().map(|k| (&cf, k.as_slice())))
-        } else {
-            let txn_db = storage.transaction_db()?;
-            let cf = txn_db.cf_handle(schema::Nodes::CF_NAME).ok_or_else(|| {
-                anyhow::anyhow!("Column family '{}' not found", schema::Nodes::CF_NAME)
-            })?;
-            txn_db.multi_get_cf(keys.iter().map(|k| (&cf, k.as_slice())))
-        };
-
-        // Parse results, skipping missing entries and temporally invalid nodes
+        // With VERSIONING, we need prefix scans for each ID to find version at time
         // Collect valid entries with their NameHash and SummaryHash first, then resolve
-        let mut valid_entries: Vec<(Id, NameHash, Option<SummaryHash>)> = Vec::with_capacity(results.len());
-        for (id, result) in params.ids.iter().zip(results) {
+        // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=NameHash, 3=SummaryHash, 4=Version, 5=Deleted
+        let mut valid_entries: Vec<(Id, NameHash, Option<SummaryHash>, Version)> =
+            Vec::with_capacity(params.ids.len());
+
+        for id in &params.ids {
+            let result = if let Ok(db) = storage.db() {
+                find_node_version(StorageAccess::Readonly(db), *id, params.as_of_system_time)
+            } else {
+                let txn_db = storage.transaction_db()?;
+                find_node_version(StorageAccess::Readwrite(txn_db), *id, params.as_of_system_time)
+            };
+
             match result {
-                Ok(Some(value_bytes)) => {
-                    match schema::Nodes::value_from_bytes(&value_bytes) {
-                        Ok(value) => {
-                            // Check temporal validity - skip invalid nodes
-                            if schema::is_active_at_time(&value.0, ref_time) {
-                                valid_entries.push((*id, value.1, value.2));
-                            } else {
-                                tracing::trace!(
-                                    id = %id,
-                                    "Skipping node: not valid at time {}",
-                                    ref_time.0
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(id = %id, error = %e, "Failed to deserialize node value");
-                        }
+                Ok(Some((_key_bytes, value))) => {
+                    // Skip deleted nodes
+                    if value.5 {
+                        tracing::trace!(id = %id, "Skipping node: deleted");
+                        continue;
+                    }
+                    // Check temporal validity (ActivePeriod is at index 1)
+                    if schema::is_active_at_time(&value.1, ref_time) {
+                        // NameHash at index 2, SummaryHash at index 3
+                        valid_entries.push((*id, value.2, value.3, value.4));
+                    } else {
+                        tracing::trace!(
+                            id = %id,
+                            "Skipping node: not valid at time {}",
+                            ref_time.0
+                        );
                     }
                 }
                 Ok(None) => {
@@ -1504,34 +1100,30 @@ impl QueryExecutor for NodesByIdsMultiDispatch {
                     tracing::trace!(id = %id, "Node not found");
                 }
                 Err(e) => {
-                    tracing::warn!(id = %id, error = %e, "RocksDB error fetching node");
+                    tracing::warn!(id = %id, error = %e, "Error fetching node");
                 }
             }
         }
 
         // Resolve NameHashes to Strings and SummaryHashes to Summaries
         let mut output = Vec::with_capacity(valid_entries.len());
-        for (id, name_hash, summary_hash) in valid_entries {
+        for (id, name_hash, summary_hash, version) in valid_entries {
             let node_name = resolve_name(storage, name_hash)?;
             let summary = resolve_node_summary(storage, summary_hash)?;
-            output.push((id, node_name, summary));
+            output.push((id, node_name, summary, version));
         }
 
         Ok(output)
     }
-
-    fn timeout(&self) -> Duration {
-        self.timeout
-    }
 }
 
-/// Implement QueryExecutor for NodeFragmentsByIdTimeRangeDispatch
+/// Implement QueryExecutor for NodeFragmentsByIdTimeRange
 #[async_trait::async_trait]
-impl QueryExecutor for NodeFragmentsByIdTimeRangeDispatch {
+impl QueryExecutor for NodeFragmentsByIdTimeRange {
     type Output = Vec<(TimestampMilli, FragmentContent)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let params = &self.params;
+        let params = self;
         tracing::debug!(id = %params.id, time_range = ?params.time_range, "Executing NodeFragmentsByIdTimeRange query");
 
         use std::ops::Bound;
@@ -1599,19 +1191,15 @@ impl QueryExecutor for NodeFragmentsByIdTimeRangeDispatch {
 
         Ok(fragments)
     }
-
-    fn timeout(&self) -> Duration {
-        self.timeout
-    }
 }
 
-/// Implement QueryExecutor for EdgeFragmentsByIdTimeRangeDispatch
+/// Implement QueryExecutor for EdgeFragmentsByIdTimeRange
 #[async_trait::async_trait]
-impl QueryExecutor for EdgeFragmentsByIdTimeRangeDispatch {
+impl QueryExecutor for EdgeFragmentsByIdTimeRange {
     type Output = Vec<(TimestampMilli, FragmentContent)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let params = &self.params;
+        let params = self;
         tracing::debug!(
             src_id = %params.source_id,
             dst_id = %params.dest_id,
@@ -1694,19 +1282,16 @@ impl QueryExecutor for EdgeFragmentsByIdTimeRangeDispatch {
 
         Ok(fragments)
     }
-
-    fn timeout(&self) -> Duration {
-        self.timeout
-    }
 }
 
-/// Implement QueryExecutor for EdgeSummaryBySrcDstNameDispatch
+/// Implement QueryExecutor for EdgeSummaryBySrcDstName
+/// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
 #[async_trait::async_trait]
-impl QueryExecutor for EdgeSummaryBySrcDstNameDispatch {
-    type Output = (EdgeSummary, Option<f64>);
+impl QueryExecutor for EdgeSummaryBySrcDstName {
+    type Output = (EdgeSummary, Option<EdgeWeight>, Version);
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let params = &self.params;
+        let params = self;
         tracing::debug!(
             src_id = %params.source_id,
             dst_id = %params.dest_id,
@@ -1725,45 +1310,48 @@ impl QueryExecutor for EdgeSummaryBySrcDstNameDispatch {
         // Convert edge name to NameHash for key construction
         let name_hash = NameHash::from_name(name);
 
-        let key = schema::ForwardEdgeCfKey(source_id, dest_id, name_hash);
-        let key_bytes = schema::ForwardEdges::key_to_bytes(&key);
-
-        let value_bytes = if let Ok(db) = storage.db() {
-            let cf = db.cf_handle(schema::ForwardEdges::CF_NAME).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Column family '{}' not found",
-                    schema::ForwardEdges::CF_NAME
-                )
-            })?;
-            db.get_cf(cf, key_bytes)?
+        // Find edge version via prefix scan (point-in-time if as_of_system_time is set)
+        let value = if let Ok(db) = storage.db() {
+            find_edge_version(StorageAccess::Readonly(db), source_id, dest_id, name_hash, params.as_of_system_time)?
+                .map(|(_, v)| v)
         } else {
             let txn_db = storage.transaction_db()?;
-            let cf = txn_db
-                .cf_handle(schema::ForwardEdges::CF_NAME)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Column family '{}' not found",
-                        schema::ForwardEdges::CF_NAME
-                    )
-                })?;
-            txn_db.get_cf(cf, key_bytes)?
+            find_edge_version(StorageAccess::Readwrite(txn_db), source_id, dest_id, name_hash, params.as_of_system_time)?
+                .map(|(_, v)| v)
         };
 
-        let value_bytes = value_bytes.ok_or_else(|| {
-            anyhow::anyhow!(
-                "Edge not found: source={}, dest={}, name={}",
+        let value = value.ok_or_else(|| {
+            if params.as_of_system_time.is_some() {
+                anyhow::anyhow!(
+                    "Edge not found at system time {:?}: source={}, dest={}, name={}",
+                    params.as_of_system_time,
+                    source_id,
+                    dest_id,
+                    name
+                )
+            } else {
+                anyhow::anyhow!(
+                    "Edge not found: source={}, dest={}, name={}",
+                    source_id,
+                    dest_id,
+                    name
+                )
+            }
+        })?;
+
+        // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=Weight, 3=SummaryHash, 4=Version, 5=Deleted
+        // Check if deleted (only for current time queries, not time-travel)
+        if params.as_of_system_time.is_none() && value.5 {
+            return Err(anyhow::anyhow!(
+                "Edge deleted: source={}, dest={}, name={}",
                 source_id,
                 dest_id,
                 name
-            )
-        })?;
+            ));
+        }
 
-        let value: schema::ForwardEdgeCfValue =
-            schema::ForwardEdges::value_from_bytes(&value_bytes)
-                .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
-
-        // Always check temporal validity
-        if !schema::is_active_at_time(&value.0, ref_time) {
+        // Check temporal validity (ActivePeriod at index 1)
+        if !schema::is_active_at_time(&value.1, ref_time) {
             return Err(anyhow::anyhow!(
                 "Edge not valid at time {}: source={}, dest={}, name={}",
                 ref_time.0,
@@ -1773,24 +1361,21 @@ impl QueryExecutor for EdgeSummaryBySrcDstNameDispatch {
             ));
         }
 
-        // ForwardEdgeCfValue is (temporal_range, weight, summary_hash)
+        // Field order: ValidUntil, ActivePeriod, Weight, SummaryHash, Version, Deleted
         // Return (summary, weight) - resolve summary from cold CF
-        let summary = resolve_edge_summary(storage, value.2)?;
-        Ok((summary, value.1))
-    }
-
-    fn timeout(&self) -> Duration {
-        self.timeout
+        let summary = resolve_edge_summary(storage, value.3)?;
+        Ok((summary, value.2, value.4))
     }
 }
 
-/// Implement QueryExecutor for OutgoingEdgesDispatch
+/// Implement QueryExecutor for OutgoingEdges
 #[async_trait::async_trait]
-impl QueryExecutor for OutgoingEdgesDispatch {
-    type Output = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
+/// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
+impl QueryExecutor for OutgoingEdges {
+    type Output = Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let params = &self.params;
+        let params = self;
         tracing::debug!(node_id = %params.id, "Executing OutgoingEdges query");
 
         // Default None to current time for temporal validity checks
@@ -1799,8 +1384,10 @@ impl QueryExecutor for OutgoingEdgesDispatch {
             .unwrap_or_else(|| TimestampMilli::now());
 
         let id = params.id;
-        // Collect edges with NameHash first, then resolve to String
-        let mut edges_with_hash: Vec<(Option<f64>, SrcId, DstId, NameHash)> = Vec::new();
+        // Use HashSet for deduplication with versioned keys
+        let mut seen_edges: std::collections::HashSet<(Id, Id, NameHash)> = std::collections::HashSet::new();
+        let mut edges_with_hash: Vec<(Option<EdgeWeight>, SrcId, DstId, NameHash, Version)> =
+            Vec::new();
         let prefix = id.into_bytes();
 
         if let Ok(db) = storage.db() {
@@ -1818,29 +1405,41 @@ impl QueryExecutor for OutgoingEdgesDispatch {
 
             for item in iter {
                 let (key_bytes, value_bytes) = item?;
+                // Stop if we've gone past our prefix (src_id = 16 bytes)
+                if !key_bytes.starts_with(&prefix) {
+                    break;
+                }
+
                 let key: schema::ForwardEdgeCfKey =
                     schema::ForwardEdges::key_from_bytes(&key_bytes)
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
-                let source_id = key.0;
-                if source_id != id {
-                    break;
-                }
-
-                // Deserialize and check temporal validity
                 let value: schema::ForwardEdgeCfValue =
                     schema::ForwardEdges::value_from_bytes(&value_bytes)
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
 
-                // Always check temporal validity - skip invalid edges
-                if !schema::is_active_at_time(&value.0, ref_time) {
+                // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=Weight, 3=SummaryHash, 4=Version, 5=Deleted
+                // Skip non-current versions
+                if value.0.is_some() {
+                    continue;
+                }
+                // Skip deleted edges
+                if value.5 {
+                    continue;
+                }
+                // Check temporal validity (ActivePeriod at index 1)
+                if !schema::is_active_at_time(&value.1, ref_time) {
                     continue;
                 }
 
+                let source_id = key.0;
                 let dest_id = key.1;
                 let edge_name_hash = key.2;
-                let weight = value.1;
-                edges_with_hash.push((weight, source_id, dest_id, edge_name_hash));
+                let edge_topology = (source_id, dest_id, edge_name_hash);
+                if seen_edges.insert(edge_topology) {
+                    let weight = value.2;
+                    edges_with_hash.push((weight, source_id, dest_id, edge_name_hash, value.4));
+                }
             }
         } else {
             let txn_db = storage.transaction_db()?;
@@ -1860,53 +1459,62 @@ impl QueryExecutor for OutgoingEdgesDispatch {
 
             for item in iter {
                 let (key_bytes, value_bytes) = item?;
+                // Stop if we've gone past our prefix (src_id = 16 bytes)
+                if !key_bytes.starts_with(&prefix) {
+                    break;
+                }
+
                 let key: schema::ForwardEdgeCfKey =
                     schema::ForwardEdges::key_from_bytes(&key_bytes)
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
-                let source_id = key.0;
-                if source_id != id {
-                    break;
-                }
-
-                // Deserialize and check temporal validity
                 let value: schema::ForwardEdgeCfValue =
                     schema::ForwardEdges::value_from_bytes(&value_bytes)
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
 
-                // Always check temporal validity - skip invalid edges
-                if !schema::is_active_at_time(&value.0, ref_time) {
+                // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=Weight, 3=SummaryHash, 4=Version, 5=Deleted
+                // Skip non-current versions
+                if value.0.is_some() {
+                    continue;
+                }
+                // Skip deleted edges
+                if value.5 {
+                    continue;
+                }
+                // Check temporal validity (ActivePeriod at index 1)
+                if !schema::is_active_at_time(&value.1, ref_time) {
                     continue;
                 }
 
+                let source_id = key.0;
                 let dest_id = key.1;
                 let edge_name_hash = key.2;
-                let weight = value.1;
-                edges_with_hash.push((weight, source_id, dest_id, edge_name_hash));
+                let edge_topology = (source_id, dest_id, edge_name_hash);
+                if seen_edges.insert(edge_topology) {
+                    let weight = value.2;
+                    edges_with_hash.push((weight, source_id, dest_id, edge_name_hash, value.4));
+                }
             }
         }
 
         // Resolve NameHashes to Strings (uses cache)
         let mut edges = Vec::with_capacity(edges_with_hash.len());
-        for (weight, src_id, dst_id, name_hash) in edges_with_hash {
+        for (weight, src_id, dst_id, name_hash, version) in edges_with_hash {
             let edge_name = resolve_name(storage, name_hash)?;
-            edges.push((weight, src_id, dst_id, edge_name));
+            edges.push((weight, src_id, dst_id, edge_name, version));
         }
         Ok(edges)
     }
-
-    fn timeout(&self) -> Duration {
-        self.timeout
-    }
 }
 
-/// Implement QueryExecutor for IncomingEdgesDispatch
+/// Implement QueryExecutor for IncomingEdges
+/// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
 #[async_trait::async_trait]
-impl QueryExecutor for IncomingEdgesDispatch {
-    type Output = Vec<(Option<f64>, DstId, SrcId, EdgeName)>;
+impl QueryExecutor for IncomingEdges {
+    type Output = Vec<(Option<EdgeWeight>, DstId, SrcId, EdgeName, Version)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let params = &self.params;
+        let params = self;
         tracing::debug!(node_id = %params.id, "Executing IncomingEdges query");
 
         // Default None to current time for temporal validity checks
@@ -1915,8 +1523,10 @@ impl QueryExecutor for IncomingEdgesDispatch {
             .unwrap_or_else(|| TimestampMilli::now());
 
         let id = params.id;
-        // Collect edges with NameHash, then resolve to String
-        let mut edges_with_hash: Vec<(Option<f64>, DstId, SrcId, NameHash)> = Vec::new();
+        // Use HashSet for deduplication with versioned keys
+        let mut seen_edges: std::collections::HashSet<(Id, Id, NameHash)> = std::collections::HashSet::new();
+        let mut edges_with_hash: Vec<(Option<EdgeWeight>, DstId, SrcId, NameHash, Version)> =
+            Vec::new();
         let prefix = id.into_bytes();
 
         if let Ok(db) = storage.db() {
@@ -1927,13 +1537,6 @@ impl QueryExecutor for IncomingEdgesDispatch {
                 )
             })?;
 
-            let forward_cf = db.cf_handle(schema::ForwardEdges::CF_NAME).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Column family '{}' not found",
-                    schema::ForwardEdges::CF_NAME
-                )
-            })?;
-
             let iter = db.iterator_cf(
                 reverse_cf,
                 rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
@@ -1941,47 +1544,58 @@ impl QueryExecutor for IncomingEdgesDispatch {
 
             for item in iter {
                 let (key_bytes, value_bytes) = item?;
+                // Stop if we've gone past our prefix (dst_id = 16 bytes)
+                if !key_bytes.starts_with(&prefix) {
+                    break;
+                }
+
                 let key: schema::ReverseEdgeCfKey =
                     schema::ReverseEdges::key_from_bytes(&key_bytes)
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
-                let dest_id = key.0;
-                if dest_id != id {
-                    break;
-                }
-
-                // Deserialize and check temporal validity
                 let value: schema::ReverseEdgeCfValue =
                     schema::ReverseEdges::value_from_bytes(&value_bytes)
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
 
-                // Always check temporal validity - skip invalid edges
-                if !schema::is_active_at_time(&value.0, ref_time) {
+                // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod
+                // Skip non-current versions
+                if value.0.is_some() {
+                    continue;
+                }
+                // Check temporal validity (ActivePeriod at index 1)
+                if !schema::is_active_at_time(&value.1, ref_time) {
                     continue;
                 }
 
+                let dest_id = key.0;
                 let source_id = key.1;
                 let edge_name_hash = key.2;
 
-                // Lookup weight from ForwardEdges CF
-                // ReverseEdgeCfKey is (dst_id, src_id, NameHash)
-                // ForwardEdgeCfKey is (src_id, dst_id, NameHash)
-                let forward_key = schema::ForwardEdgeCfKey(source_id, dest_id, edge_name_hash);
-                let forward_key_bytes = schema::ForwardEdges::key_to_bytes(&forward_key);
+                // Deduplication check
+                let edge_topology = (source_id, dest_id, edge_name_hash);
+                if !seen_edges.insert(edge_topology) {
+                    continue;
+                }
 
-                let weight = if let Some(forward_value_bytes) =
-                    db.get_cf(forward_cf, forward_key_bytes)?
-                {
-                    let forward_value: schema::ForwardEdgeCfValue =
-                        schema::ForwardEdges::value_from_bytes(&forward_value_bytes).map_err(
-                            |e| anyhow::anyhow!("Failed to deserialize forward edge value: {}", e),
-                        )?;
-                    forward_value.1 // Extract weight from field 1
-                } else {
-                    None
+                // Lookup weight from ForwardEdges CF via prefix scan
+                let (weight, version) = match find_edge_version(
+                    StorageAccess::Readonly(db),
+                    source_id,
+                    dest_id,
+                    edge_name_hash,
+                    None,
+                )? {
+                    Some((_, forward_value)) => {
+                        // Skip if deleted
+                        if forward_value.5 {
+                            continue;
+                        }
+                        (forward_value.2, forward_value.4)
+                    }
+                    None => continue,
                 };
 
-                edges_with_hash.push((weight, dest_id, source_id, edge_name_hash));
+                edges_with_hash.push((weight, dest_id, source_id, edge_name_hash, version));
             }
         } else {
             let txn_db = storage.transaction_db()?;
@@ -1994,15 +1608,6 @@ impl QueryExecutor for IncomingEdgesDispatch {
                     )
                 })?;
 
-            let forward_cf = txn_db
-                .cf_handle(schema::ForwardEdges::CF_NAME)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Column family '{}' not found",
-                        schema::ForwardEdges::CF_NAME
-                    )
-                })?;
-
             let iter = txn_db.iterator_cf(
                 reverse_cf,
                 rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
@@ -2010,72 +1615,80 @@ impl QueryExecutor for IncomingEdgesDispatch {
 
             for item in iter {
                 let (key_bytes, value_bytes) = item?;
+                // Stop if we've gone past our prefix (dst_id = 16 bytes)
+                if !key_bytes.starts_with(&prefix) {
+                    break;
+                }
+
                 let key: schema::ReverseEdgeCfKey =
                     schema::ReverseEdges::key_from_bytes(&key_bytes)
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
-                let dest_id = key.0;
-                if dest_id != id {
-                    break;
-                }
-
-                // Deserialize and check temporal validity
                 let value: schema::ReverseEdgeCfValue =
                     schema::ReverseEdges::value_from_bytes(&value_bytes)
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
 
-                // Always check temporal validity - skip invalid edges
-                if !schema::is_active_at_time(&value.0, ref_time) {
+                // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod
+                // Skip non-current versions
+                if value.0.is_some() {
+                    continue;
+                }
+                // Check temporal validity (ActivePeriod at index 1)
+                if !schema::is_active_at_time(&value.1, ref_time) {
                     continue;
                 }
 
+                let dest_id = key.0;
                 let source_id = key.1;
                 let edge_name_hash = key.2;
 
-                // Lookup weight from ForwardEdges CF
-                // ReverseEdgeCfKey is (dst_id, src_id, NameHash)
-                // ForwardEdgeCfKey is (src_id, dst_id, NameHash)
-                let forward_key = schema::ForwardEdgeCfKey(source_id, dest_id, edge_name_hash);
-                let forward_key_bytes = schema::ForwardEdges::key_to_bytes(&forward_key);
+                // Deduplication check
+                let edge_topology = (source_id, dest_id, edge_name_hash);
+                if !seen_edges.insert(edge_topology) {
+                    continue;
+                }
 
-                let weight = if let Some(forward_value_bytes) =
-                    txn_db.get_cf(forward_cf, forward_key_bytes)?
-                {
-                    let forward_value: schema::ForwardEdgeCfValue =
-                        schema::ForwardEdges::value_from_bytes(&forward_value_bytes).map_err(
-                            |e| anyhow::anyhow!("Failed to deserialize forward edge value: {}", e),
-                        )?;
-                    forward_value.1 // Extract weight from field 1
-                } else {
-                    None
+                // Lookup weight from ForwardEdges CF via prefix scan
+                let (weight, version) = match find_edge_version(
+                    StorageAccess::Readwrite(txn_db),
+                    source_id,
+                    dest_id,
+                    edge_name_hash,
+                    None,
+                )? {
+                    Some((_, forward_value)) => {
+                        // Skip if deleted
+                        if forward_value.5 {
+                            continue;
+                        }
+                        (forward_value.2, forward_value.4)
+                    }
+                    None => continue,
                 };
 
-                edges_with_hash.push((weight, dest_id, source_id, edge_name_hash));
+                edges_with_hash.push((weight, dest_id, source_id, edge_name_hash, version));
             }
         }
 
         // Resolve NameHashes to Strings (uses cache)
         let mut edges = Vec::with_capacity(edges_with_hash.len());
-        for (weight, dst_id, src_id, name_hash) in edges_with_hash {
+        for (weight, dst_id, src_id, name_hash, version) in edges_with_hash {
             let edge_name = resolve_name(storage, name_hash)?;
-            edges.push((weight, dst_id, src_id, edge_name));
+            edges.push((weight, dst_id, src_id, edge_name, version));
         }
         Ok(edges)
     }
 
-    fn timeout(&self) -> Duration {
-        self.timeout
-    }
 }
 
-/// Implement QueryExecutor for AllNodesDispatch
+/// Implement QueryExecutor for AllNodes
 /// Delegates to the scan module's Visitable implementation.
 #[async_trait::async_trait]
-impl QueryExecutor for AllNodesDispatch {
-    type Output = Vec<(Id, NodeName, NodeSummary)>;
+impl QueryExecutor for AllNodes {
+    type Output = Vec<(Id, NodeName, NodeSummary, Version)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let params = &self.params;
+        let params = self;
         tracing::debug!(limit = params.limit, has_cursor = params.last.is_some(), "Executing AllNodes query");
 
         // Create scan request matching scan::AllNodes
@@ -2089,26 +1702,27 @@ impl QueryExecutor for AllNodesDispatch {
         // Collect results via visitor pattern
         let mut results = Vec::with_capacity(params.limit);
         scan_request.accept(storage, &mut |record: &scan::NodeRecord| {
-            results.push((record.id, record.name.clone(), record.summary.clone()));
+            results.push((
+                record.id,
+                record.name.clone(),
+                record.summary.clone(),
+                record.version,
+            ));
             true // continue
         })?;
 
         Ok(results)
     }
-
-    fn timeout(&self) -> Duration {
-        self.timeout
-    }
 }
 
-/// Implement QueryExecutor for AllEdgesDispatch
+/// Implement QueryExecutor for AllEdges
 /// Delegates to the scan module's Visitable implementation.
 #[async_trait::async_trait]
-impl QueryExecutor for AllEdgesDispatch {
-    type Output = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
+impl QueryExecutor for AllEdges {
+    type Output = Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let params = &self.params;
+        let params = self;
         tracing::debug!(limit = params.limit, has_cursor = params.last.is_some(), "Executing AllEdges query");
 
         // Create scan request matching scan::AllEdges
@@ -2122,15 +1736,17 @@ impl QueryExecutor for AllEdgesDispatch {
         // Collect results via visitor pattern
         let mut results = Vec::with_capacity(params.limit);
         scan_request.accept(storage, &mut |record: &scan::EdgeRecord| {
-            results.push((record.weight, record.src_id, record.dst_id, record.name.clone()));
+            results.push((
+                record.weight,
+                record.src_id,
+                record.dst_id,
+                record.name.clone(),
+                record.version,
+            ));
             true // continue
         })?;
 
         Ok(results)
-    }
-
-    fn timeout(&self) -> Duration {
-        self.timeout
     }
 }
 
@@ -2139,8 +1755,9 @@ impl QueryExecutor for AllEdgesDispatch {
 // ============================================================================
 
 /// Implement TransactionQueryExecutor for NodeById
+/// (claude, 2026-02-06, in-progress: VERSIONING prefix scan for current version)
 impl TransactionQueryExecutor for NodeById {
-    type Output = (NodeName, NodeSummary);
+    type Output = (NodeName, NodeSummary, Version);
 
     fn execute_in_transaction(
         &self,
@@ -2155,23 +1772,18 @@ impl TransactionQueryExecutor for NodeById {
             .reference_ts_millis
             .unwrap_or_else(|| TimestampMilli::now());
 
-        let key = schema::NodeCfKey(self.id);
-        let key_bytes = schema::Nodes::key_to_bytes(&key);
-
-        let cf = txn_db.cf_handle(schema::Nodes::CF_NAME).ok_or_else(|| {
-            anyhow::anyhow!("Column family '{}' not found", schema::Nodes::CF_NAME)
-        })?;
-
-        // Use txn.get_cf to see uncommitted writes
-        let value_bytes = txn
-            .get_cf(cf, &key_bytes)?
+        // Find current version via prefix scan (VERSIONING)
+        let (_key_bytes, value) = find_node_version(StorageAccess::Transaction(txn, txn_db), self.id, None)?
             .ok_or_else(|| anyhow::anyhow!("Node not found: {}", self.id))?;
 
-        let value: schema::NodeCfValue = schema::Nodes::value_from_bytes(&value_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
+        // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=NameHash, 3=SummaryHash, 4=Version, 5=Deleted
+        // Check if deleted
+        if value.5 {
+            return Err(anyhow::anyhow!("Node {} has been deleted", self.id));
+        }
 
-        // Check temporal validity
-        if !schema::is_active_at_time(&value.0, ref_time) {
+        // Check temporal validity (ActivePeriod is at index 1)
+        if !schema::is_active_at_time(&value.1, ref_time) {
             return Err(anyhow::anyhow!(
                 "Node {} not valid at time {}",
                 self.id,
@@ -2179,17 +1791,18 @@ impl TransactionQueryExecutor for NodeById {
             ));
         }
 
-        // Resolve NameHash to String (uses cache)
-        let node_name = resolve_name_from_txn(txn, txn_db, value.1, cache)?;
-        // Resolve SummaryHash to NodeSummary (from cold CF)
-        let summary = resolve_node_summary_from_txn(txn, txn_db, value.2)?;
-        Ok((node_name, summary))
+        // Resolve NameHash to String (uses cache) - NameHash is at index 2
+        let node_name = resolve_name_from_txn(txn, txn_db, value.2, cache)?;
+        // Resolve SummaryHash to NodeSummary (from cold CF) - SummaryHash is at index 3
+        let summary = resolve_node_summary_from_txn(txn, txn_db, value.3)?;
+        Ok((node_name, summary, value.4))
     }
 }
 
 /// Implement TransactionQueryExecutor for NodesByIdsMulti
+/// (claude, 2026-02-06, in-progress: VERSIONING prefix scan for current versions)
 impl TransactionQueryExecutor for NodesByIdsMulti {
-    type Output = Vec<(Id, NodeName, NodeSummary)>;
+    type Output = Vec<(Id, NodeName, NodeSummary, Version)>;
 
     fn execute_in_transaction(
         &self,
@@ -2207,38 +1820,40 @@ impl TransactionQueryExecutor for NodesByIdsMulti {
             .reference_ts_millis
             .unwrap_or_else(|| TimestampMilli::now());
 
-        let cf = txn_db.cf_handle(schema::Nodes::CF_NAME).ok_or_else(|| {
-            anyhow::anyhow!("Column family '{}' not found", schema::Nodes::CF_NAME)
-        })?;
-
         // Collect entries with NameHash and SummaryHash first
-        let mut entries_with_hash: Vec<(Id, NameHash, Option<SummaryHash>)> = Vec::with_capacity(self.ids.len());
+        // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=NameHash, 3=SummaryHash, 4=Version, 5=Deleted
+        let mut entries_with_hash: Vec<(Id, NameHash, Option<SummaryHash>, Version)> =
+            Vec::with_capacity(self.ids.len());
 
         for id in &self.ids {
-            let key = schema::NodeCfKey(*id);
-            let key_bytes = schema::Nodes::key_to_bytes(&key);
-
-            // Use txn.get_cf for each key (transaction doesn't have multi_get)
-            if let Some(value_bytes) = txn.get_cf(cf, &key_bytes)? {
-                match schema::Nodes::value_from_bytes(&value_bytes) {
-                    Ok(value) => {
-                        if schema::is_active_at_time(&value.0, ref_time) {
-                            entries_with_hash.push((*id, value.1, value.2));
-                        }
+            // Find current version via prefix scan (VERSIONING)
+            match find_node_version(StorageAccess::Transaction(txn, txn_db), *id, None) {
+                Ok(Some((_key_bytes, value))) => {
+                    // Skip deleted nodes
+                    if value.5 {
+                        continue;
                     }
-                    Err(e) => {
-                        tracing::warn!(id = %id, error = %e, "Failed to deserialize node value");
+                    // Check temporal validity (ActivePeriod is at index 1)
+                    if schema::is_active_at_time(&value.1, ref_time) {
+                        // NameHash at index 2, SummaryHash at index 3
+                        entries_with_hash.push((*id, value.2, value.3, value.4));
                     }
+                }
+                Ok(None) => {
+                    // Node not found - silently skip
+                }
+                Err(e) => {
+                    tracing::warn!(id = %id, error = %e, "Failed to find node version");
                 }
             }
         }
 
         // Resolve NameHashes to Strings and SummaryHashes to Summaries
         let mut output = Vec::with_capacity(entries_with_hash.len());
-        for (id, name_hash, summary_hash) in entries_with_hash {
+        for (id, name_hash, summary_hash, version) in entries_with_hash {
             let node_name = resolve_name_from_txn(txn, txn_db, name_hash, cache)?;
             let summary = resolve_node_summary_from_txn(txn, txn_db, summary_hash)?;
-            output.push((id, node_name, summary));
+            output.push((id, node_name, summary, version));
         }
 
         Ok(output)
@@ -2401,8 +2016,9 @@ impl TransactionQueryExecutor for EdgeFragmentsByIdTimeRange {
 }
 
 /// Implement TransactionQueryExecutor for EdgeSummaryBySrcDstName
+/// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
 impl TransactionQueryExecutor for EdgeSummaryBySrcDstName {
-    type Output = (EdgeSummary, Option<f64>);
+    type Output = (EdgeSummary, Option<EdgeWeight>, Version);
 
     fn execute_in_transaction(
         &self,
@@ -2421,27 +2037,11 @@ impl TransactionQueryExecutor for EdgeSummaryBySrcDstName {
             .reference_ts_millis
             .unwrap_or_else(|| TimestampMilli::now());
 
-        let cf = txn_db
-            .cf_handle(schema::ForwardEdges::CF_NAME)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Column family '{}' not found",
-                    schema::ForwardEdges::CF_NAME
-                )
-            })?;
-
         // Convert edge name to NameHash for key construction
         let name_hash = NameHash::from_name(&self.name);
 
-        let key = schema::ForwardEdgeCfKey(
-            self.source_id,
-            self.dest_id,
-            name_hash,
-        );
-        let key_bytes = schema::ForwardEdges::key_to_bytes(&key);
-
-        let value_bytes = txn
-            .get_cf(cf, &key_bytes)?
+        // Find current edge version via prefix scan
+        let (_, value) = find_edge_version(StorageAccess::Transaction(txn, txn_db), self.source_id, self.dest_id, name_hash, None)?
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "Edge not found: {} -> {} ({})",
@@ -2451,11 +2051,19 @@ impl TransactionQueryExecutor for EdgeSummaryBySrcDstName {
                 )
             })?;
 
-        let value: schema::ForwardEdgeCfValue =
-            schema::ForwardEdges::value_from_bytes(&value_bytes)?;
+        // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=Weight, 3=SummaryHash, 4=Version, 5=Deleted
+        // Check if deleted
+        if value.5 {
+            return Err(anyhow::anyhow!(
+                "Edge deleted: {} -> {} ({})",
+                self.source_id,
+                self.dest_id,
+                self.name
+            ));
+        }
 
-        // Check temporal validity
-        if !schema::is_active_at_time(&value.0, ref_time) {
+        // Check temporal validity (ActivePeriod at index 1)
+        if !schema::is_active_at_time(&value.1, ref_time) {
             return Err(anyhow::anyhow!(
                 "Edge {} -> {} ({}) not valid at time {}",
                 self.source_id,
@@ -2466,14 +2074,15 @@ impl TransactionQueryExecutor for EdgeSummaryBySrcDstName {
         }
 
         // Resolve SummaryHash to EdgeSummary (from cold CF)
-        let summary = resolve_edge_summary_from_txn(txn, txn_db, value.2)?;
-        Ok((summary, value.1))
+        let summary = resolve_edge_summary_from_txn(txn, txn_db, value.3)?;
+        Ok((summary, value.2, value.4))
     }
 }
 
 /// Implement TransactionQueryExecutor for OutgoingEdges
+/// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
 impl TransactionQueryExecutor for OutgoingEdges {
-    type Output = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
+    type Output = Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>;
 
     fn execute_in_transaction(
         &self,
@@ -2498,38 +2107,57 @@ impl TransactionQueryExecutor for OutgoingEdges {
 
         // Use source ID as prefix for iteration
         let prefix = self.id.into_bytes();
-        // Collect edges with NameHash first
-        let mut edges_with_hash: Vec<(Option<f64>, SrcId, DstId, NameHash)> = Vec::new();
+        // Use HashSet for deduplication with versioned keys
+        let mut seen_edges: std::collections::HashSet<(Id, Id, NameHash)> = std::collections::HashSet::new();
+        let mut edges_with_hash: Vec<(Option<EdgeWeight>, SrcId, DstId, NameHash, Version)> =
+            Vec::new();
 
-        let iter = txn.iterator_cf(
-            cf,
-            rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
-        );
+        // NOTE: We use iterator_cf instead of prefix_iterator_cf because the CF has a
+        // 40-byte prefix extractor but we're searching with a 16-byte prefix (src_id only).
+        // Using prefix_iterator with mismatched prefix length causes bloom filter issues.
+        let iter = txn.iterator_cf(cf, rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward));
 
         for item in iter {
             let (key_bytes, value_bytes) = item?;
-
-            let key: schema::ForwardEdgeCfKey = schema::ForwardEdges::key_from_bytes(&key_bytes)?;
-
-            // Check if still same source
-            if key.0 != self.id {
+            // Stop if we've gone past our prefix (src_id = 16 bytes)
+            if !key_bytes.starts_with(&prefix) {
                 break;
             }
+
+            let key: schema::ForwardEdgeCfKey = schema::ForwardEdges::key_from_bytes(&key_bytes)?;
 
             let value: schema::ForwardEdgeCfValue =
                 schema::ForwardEdges::value_from_bytes(&value_bytes)?;
 
-            // Check temporal validity
-            if schema::is_active_at_time(&value.0, ref_time) {
-                edges_with_hash.push((value.1, key.0, key.1, key.2));
+            // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=Weight, 3=SummaryHash, 4=Version, 5=Deleted
+            // Skip non-current versions
+            if value.0.is_some() {
+                continue;
+            }
+            // Skip deleted edges
+            if value.5 {
+                continue;
+            }
+            // Check temporal validity (ActivePeriod at index 1)
+            if !schema::is_active_at_time(&value.1, ref_time) {
+                continue;
+            }
+
+            let source_id = key.0;
+            let dest_id = key.1;
+            let edge_name_hash = key.2;
+            let edge_topology = (source_id, dest_id, edge_name_hash);
+            if seen_edges.insert(edge_topology) {
+                let weight = value.2;
+                edges_with_hash.push((weight, source_id, dest_id, edge_name_hash, value.4));
             }
         }
 
         // Resolve NameHashes to Strings (uses cache)
         let mut results = Vec::with_capacity(edges_with_hash.len());
-        for (weight, src_id, dst_id, name_hash) in edges_with_hash {
+        for (weight, src_id, dst_id, name_hash, version) in edges_with_hash {
             let edge_name = resolve_name_from_txn(txn, txn_db, name_hash, cache)?;
-            results.push((weight, src_id, dst_id, edge_name));
+            results.push((weight, src_id, dst_id, edge_name, version));
         }
 
         Ok(results)
@@ -2537,8 +2165,9 @@ impl TransactionQueryExecutor for OutgoingEdges {
 }
 
 /// Implement TransactionQueryExecutor for IncomingEdges
+/// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
 impl TransactionQueryExecutor for IncomingEdges {
-    type Output = Vec<(Option<f64>, DstId, SrcId, EdgeName)>;
+    type Output = Vec<(Option<EdgeWeight>, DstId, SrcId, EdgeName, Version)>;
 
     fn execute_in_transaction(
         &self,
@@ -2561,67 +2190,76 @@ impl TransactionQueryExecutor for IncomingEdges {
                 )
             })?;
 
-        let forward_cf = txn_db
-            .cf_handle(schema::ForwardEdges::CF_NAME)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Column family '{}' not found",
-                    schema::ForwardEdges::CF_NAME
-                )
-            })?;
-
         // Use destination ID as prefix for iteration
         let prefix = self.id.into_bytes();
-        // Collect edges with NameHash first
-        let mut edges_with_hash: Vec<(Option<f64>, DstId, SrcId, NameHash)> = Vec::new();
+        // Use HashSet for deduplication with versioned keys
+        let mut seen_edges: std::collections::HashSet<(Id, Id, NameHash)> = std::collections::HashSet::new();
+        let mut edges_with_hash: Vec<(Option<EdgeWeight>, DstId, SrcId, NameHash, Version)> =
+            Vec::new();
 
-        let iter = txn.iterator_cf(
-            reverse_cf,
-            rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
-        );
+        // NOTE: We use iterator_cf instead of prefix_iterator_cf because the CF has a
+        // 40-byte prefix extractor but we're searching with a 16-byte prefix (dst_id only).
+        // Using prefix_iterator with mismatched prefix length causes bloom filter issues.
+        let iter = txn.iterator_cf(reverse_cf, rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward));
 
         for item in iter {
             let (key_bytes, value_bytes) = item?;
-
-            let key: schema::ReverseEdgeCfKey = schema::ReverseEdges::key_from_bytes(&key_bytes)?;
-
-            // Check if still same destination
-            if key.0 != self.id {
+            // Stop if we've gone past our prefix (dst_id = 16 bytes)
+            if !key_bytes.starts_with(&prefix) {
                 break;
             }
+
+            let key: schema::ReverseEdgeCfKey = schema::ReverseEdges::key_from_bytes(&key_bytes)?;
 
             let value: schema::ReverseEdgeCfValue =
                 schema::ReverseEdges::value_from_bytes(&value_bytes)?;
 
-            // Check temporal validity
-            if schema::is_active_at_time(&value.0, ref_time) {
-                let dest_id = key.0;
-                let source_id = key.1;
-                let edge_name_hash = key.2;
-
-                // Lookup weight from ForwardEdges CF
-                let forward_key = schema::ForwardEdgeCfKey(source_id, dest_id, edge_name_hash);
-                let forward_key_bytes = schema::ForwardEdges::key_to_bytes(&forward_key);
-
-                let weight = if let Some(forward_value_bytes) =
-                    txn.get_cf(forward_cf, &forward_key_bytes)?
-                {
-                    let forward_value: schema::ForwardEdgeCfValue =
-                        schema::ForwardEdges::value_from_bytes(&forward_value_bytes)?;
-                    forward_value.1
-                } else {
-                    None
-                };
-
-                edges_with_hash.push((weight, dest_id, source_id, edge_name_hash));
+            // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod
+            // Skip non-current versions
+            if value.0.is_some() {
+                continue;
             }
+            // Check temporal validity (ActivePeriod at index 1)
+            if !schema::is_active_at_time(&value.1, ref_time) {
+                continue;
+            }
+
+            let dest_id = key.0;
+            let source_id = key.1;
+            let edge_name_hash = key.2;
+
+            // Deduplication check
+            let edge_topology = (source_id, dest_id, edge_name_hash);
+            if !seen_edges.insert(edge_topology) {
+                continue;
+            }
+
+            // Lookup weight/version from ForwardEdges CF via prefix scan
+            let (weight, version) = match find_edge_version(
+                StorageAccess::Transaction(txn, txn_db),
+                source_id,
+                dest_id,
+                edge_name_hash,
+                None,
+            )? {
+                Some((_, forward_value)) => {
+                    // Skip if deleted
+                    if forward_value.5 {
+                        continue;
+                    }
+                    (forward_value.2, forward_value.4)
+                }
+                None => continue,
+            };
+
+            edges_with_hash.push((weight, dest_id, source_id, edge_name_hash, version));
         }
 
         // Resolve NameHashes to Strings (uses cache)
         let mut results = Vec::with_capacity(edges_with_hash.len());
-        for (weight, dst_id, src_id, name_hash) in edges_with_hash {
+        for (weight, dst_id, src_id, name_hash, version) in edges_with_hash {
             let edge_name = resolve_name_from_txn(txn, txn_db, name_hash, cache)?;
-            results.push((weight, dst_id, src_id, edge_name));
+            results.push((weight, dst_id, src_id, edge_name, version));
         }
 
         Ok(results)
@@ -2629,8 +2267,9 @@ impl TransactionQueryExecutor for IncomingEdges {
 }
 
 /// Implement TransactionQueryExecutor for AllNodes
+/// (claude, 2026-02-06, in-progress: VERSIONING iteration with deduplication)
 impl TransactionQueryExecutor for AllNodes {
-    type Output = Vec<(Id, NodeName, NodeSummary)>;
+    type Output = Vec<(Id, NodeName, NodeSummary, Version)>;
 
     fn execute_in_transaction(
         &self,
@@ -2650,11 +2289,15 @@ impl TransactionQueryExecutor for AllNodes {
 
         let mut results = Vec::with_capacity(self.limit);
 
-        // Determine start position - need to create bytes outside the if-let
-        // to avoid lifetime issues
+        // With VERSIONING, key is (Id, ValidSince). Cursor is just the Id.
+        // We use Id prefix (16 bytes) for positioning, skipping past all versions
+        // Field indices: 0=ValidUntil, 1=ActivePeriod, 2=NameHash, 3=SummaryHash, 4=Version, 5=Deleted
         let start_bytes: Option<Vec<u8>> = self.last.as_ref().map(|cursor| {
-            let start_key = schema::NodeCfKey(*cursor);
-            schema::Nodes::key_to_bytes(&start_key)
+            // Create a prefix that starts after all versions of the cursor ID
+            // by appending max timestamp
+            let mut bytes = cursor.into_bytes().to_vec();
+            bytes.extend_from_slice(&u64::MAX.to_be_bytes());
+            bytes
         });
 
         let iter = if let Some(ref bytes) = start_bytes {
@@ -2663,32 +2306,46 @@ impl TransactionQueryExecutor for AllNodes {
             txn.iterator_cf(cf, rocksdb::IteratorMode::Start)
         };
 
-        let mut skip_first = self.last.is_some();
+        let mut last_node_id: Option<Id> = None;
 
         for item in iter {
             let (key_bytes, value_bytes) = item?;
-
-            // Skip the cursor position itself
-            if skip_first {
-                skip_first = false;
-                continue;
-            }
 
             if results.len() >= self.limit {
                 break;
             }
 
             let key: schema::NodeCfKey = schema::Nodes::key_from_bytes(&key_bytes)?;
+            let node_id = key.0;
+
+            // Skip duplicate node_ids (we already saw this node's current version)
+            if last_node_id == Some(node_id) {
+                continue;
+            }
+
             let value: schema::NodeCfValue = schema::Nodes::value_from_bytes(&value_bytes)?;
 
-            // Check temporal validity
-            if schema::is_active_at_time(&value.0, ref_time) {
-                // Resolve NameHash to String (uses cache)
-                let node_name = resolve_name_from_txn(txn, txn_db, value.1, cache)?;
-                // Resolve SummaryHash to NodeSummary (from cold CF)
-                let summary = resolve_node_summary_from_txn(txn, txn_db, value.2)?;
-                results.push((key.0, node_name, summary));
+            // Only process current versions (ValidUntil = None)
+            if value.0.is_some() {
+                continue;
             }
+
+            // Skip deleted nodes
+            if value.5 {
+                last_node_id = Some(node_id);
+                continue;
+            }
+
+            // Check temporal validity (ActivePeriod at index 1)
+            if schema::is_active_at_time(&value.1, ref_time) {
+                // Resolve NameHash to String (uses cache) - index 2
+                let node_name = resolve_name_from_txn(txn, txn_db, value.2, cache)?;
+                // Resolve SummaryHash to NodeSummary (from cold CF) - index 3
+                let summary = resolve_node_summary_from_txn(txn, txn_db, value.3)?;
+                results.push((node_id, node_name, summary, value.4));
+            }
+
+            last_node_id = Some(node_id);
         }
 
         Ok(results)
@@ -2696,8 +2353,9 @@ impl TransactionQueryExecutor for AllNodes {
 }
 
 /// Implement TransactionQueryExecutor for AllEdges
+/// (claude, 2026-02-06, in-progress: VERSIONING iteration with deduplication)
 impl TransactionQueryExecutor for AllEdges {
-    type Output = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
+    type Output = Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>;
 
     fn execute_in_transaction(
         &self,
@@ -2720,12 +2378,17 @@ impl TransactionQueryExecutor for AllEdges {
                 )
             })?;
 
-        // Determine start position - need to create bytes outside the if-let
-        // to avoid lifetime issues. Convert name to NameHash for cursor.
+        // With VERSIONING, key is (SrcId, DstId, NameHash, ValidSince). Cursor is (SrcId, DstId, Name).
+        // Create a prefix that starts after all versions of the cursor edge.
         let start_bytes: Option<Vec<u8>> = self.last.as_ref().map(|(src, dst, name)| {
             let name_hash = NameHash::from_name(name);
-            let start_key = schema::ForwardEdgeCfKey(*src, *dst, name_hash);
-            schema::ForwardEdges::key_to_bytes(&start_key)
+            // Append max timestamp to skip all versions of cursor edge
+            let mut bytes = Vec::with_capacity(48);
+            bytes.extend_from_slice(&src.into_bytes());
+            bytes.extend_from_slice(&dst.into_bytes());
+            bytes.extend_from_slice(name_hash.as_bytes());
+            bytes.extend_from_slice(&u64::MAX.to_be_bytes());
+            bytes
         });
 
         let iter = if let Some(ref bytes) = start_bytes {
@@ -2734,18 +2397,13 @@ impl TransactionQueryExecutor for AllEdges {
             txn.iterator_cf(cf, rocksdb::IteratorMode::Start)
         };
 
-        let mut skip_first = self.last.is_some();
-        // Collect edges with NameHash first
-        let mut edges_with_hash: Vec<(Option<f64>, SrcId, DstId, NameHash)> = Vec::new();
+        // Use HashSet for deduplication with versioned keys
+        let mut seen_edges: std::collections::HashSet<(Id, Id, NameHash)> = std::collections::HashSet::new();
+        let mut edges_with_hash: Vec<(Option<EdgeWeight>, SrcId, DstId, NameHash, Version)> =
+            Vec::new();
 
         for item in iter {
             let (key_bytes, value_bytes) = item?;
-
-            // Skip the cursor position itself
-            if skip_first {
-                skip_first = false;
-                continue;
-            }
 
             if edges_with_hash.len() >= self.limit {
                 break;
@@ -2755,17 +2413,35 @@ impl TransactionQueryExecutor for AllEdges {
             let value: schema::ForwardEdgeCfValue =
                 schema::ForwardEdges::value_from_bytes(&value_bytes)?;
 
-            // Check temporal validity
-            if schema::is_active_at_time(&value.0, ref_time) {
-                edges_with_hash.push((value.1, key.0, key.1, key.2));
+            // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=Weight, 3=SummaryHash, 4=Version, 5=Deleted
+            // Skip non-current versions
+            if value.0.is_some() {
+                continue;
+            }
+            // Skip deleted edges
+            if value.5 {
+                continue;
+            }
+            // Check temporal validity (ActivePeriod at index 1)
+            if !schema::is_active_at_time(&value.1, ref_time) {
+                continue;
+            }
+
+            let source_id = key.0;
+            let dest_id = key.1;
+            let edge_name_hash = key.2;
+            let edge_topology = (source_id, dest_id, edge_name_hash);
+            if seen_edges.insert(edge_topology) {
+                let weight = value.2;
+                edges_with_hash.push((weight, source_id, dest_id, edge_name_hash, value.4));
             }
         }
 
         // Resolve NameHashes to Strings (uses cache)
         let mut results = Vec::with_capacity(edges_with_hash.len());
-        for (weight, src_id, dst_id, name_hash) in edges_with_hash {
+        for (weight, src_id, dst_id, name_hash, version) in edges_with_hash {
             let edge_name = resolve_name_from_txn(txn, txn_db, name_hash, cache)?;
-            results.push((weight, src_id, dst_id, edge_name));
+            results.push((weight, src_id, dst_id, edge_name, version));
         }
 
         Ok(results)
@@ -2801,33 +2477,6 @@ pub struct NodeSummaryLookupResult {
     pub is_current: bool,
 }
 
-/// Internal dispatch wrapper for NodesBySummaryHash query execution.
-#[derive(Debug)]
-pub(crate) struct NodesBySummaryHashDispatch {
-    pub(crate) params: NodesBySummaryHash,
-    pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<Vec<NodeSummaryLookupResult>>>,
-}
-
-impl NodesBySummaryHashDispatch {
-    pub(crate) fn new(
-        params: NodesBySummaryHash,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<NodeSummaryLookupResult>>>,
-    ) -> Self {
-        Self {
-            params,
-            timeout,
-            result_tx,
-        }
-    }
-
-    /// Send the result back to the client (consumes self).
-    pub(crate) fn send_result(self, result: Result<Vec<NodeSummaryLookupResult>>) {
-        let _ = self.result_tx.send(result);
-    }
-}
-
 impl NodesBySummaryHash {
     /// Create a new query for all nodes (any version) with the given hash.
     pub fn all(hash: SummaryHash) -> Self {
@@ -2843,6 +2492,11 @@ impl NodesBySummaryHash {
             hash,
             current_only: true,
         }
+    }
+
+    /// Execute this query directly on storage (for testing and simple use cases).
+    pub async fn execute_on(&self, storage: &Storage) -> Result<Vec<NodeSummaryLookupResult>> {
+        self.execute(storage).await
     }
 }
 
@@ -2874,33 +2528,6 @@ pub struct EdgeSummaryLookupResult {
     pub is_current: bool,
 }
 
-/// Internal dispatch wrapper for EdgesBySummaryHash query execution.
-#[derive(Debug)]
-pub(crate) struct EdgesBySummaryHashDispatch {
-    pub(crate) params: EdgesBySummaryHash,
-    pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<Vec<EdgeSummaryLookupResult>>>,
-}
-
-impl EdgesBySummaryHashDispatch {
-    pub(crate) fn new(
-        params: EdgesBySummaryHash,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<EdgeSummaryLookupResult>>>,
-    ) -> Self {
-        Self {
-            params,
-            timeout,
-            result_tx,
-        }
-    }
-
-    /// Send the result back to the client (consumes self).
-    pub(crate) fn send_result(self, result: Result<Vec<EdgeSummaryLookupResult>>) {
-        let _ = self.result_tx.send(result);
-    }
-}
-
 impl EdgesBySummaryHash {
     /// Create a new query for all edges (any version) with the given hash.
     pub fn all(hash: SummaryHash) -> Self {
@@ -2920,30 +2547,36 @@ impl EdgesBySummaryHash {
 }
 
 // ============================================================================
-// Runnable Implementations for Reverse Lookup Queries
+// QueryReply Implementations for Reverse Lookup Queries
 // ============================================================================
 
-#[async_trait::async_trait]
-impl Runnable<super::Reader> for NodesBySummaryHash {
-    type Output = Vec<NodeSummaryLookupResult>;
+impl QueryReply for NodesBySummaryHash {
+    type Reply = Vec<NodeSummaryLookupResult>;
 
-    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = oneshot::channel();
-        let dispatch = NodesBySummaryHashDispatch::new(self, timeout, result_tx);
-        reader.send_query(Query::NodesBySummaryHash(dispatch)).await?;
-        result_rx.await?
+    fn into_query(self) -> Query {
+        Query::NodesBySummaryHash(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::NodesBySummaryHash(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
     }
 }
 
-#[async_trait::async_trait]
-impl Runnable<super::Reader> for EdgesBySummaryHash {
-    type Output = Vec<EdgeSummaryLookupResult>;
+impl QueryReply for EdgesBySummaryHash {
+    type Reply = Vec<EdgeSummaryLookupResult>;
 
-    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = oneshot::channel();
-        let dispatch = EdgesBySummaryHashDispatch::new(self, timeout, result_tx);
-        reader.send_query(Query::EdgesBySummaryHash(dispatch)).await?;
-        result_rx.await?
+    fn into_query(self) -> Query {
+        Query::EdgesBySummaryHash(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::EdgesBySummaryHash(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
     }
 }
 
@@ -2952,13 +2585,13 @@ impl Runnable<super::Reader> for EdgesBySummaryHash {
 // ============================================================================
 
 #[async_trait::async_trait]
-impl QueryExecutor for NodesBySummaryHashDispatch {
+impl QueryExecutor for NodesBySummaryHash {
     type Output = Vec<NodeSummaryLookupResult>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         use schema::NodeSummaryIndex;
 
-        let params = &self.params;
+        let params = self;
         tracing::debug!(hash = ?params.hash, current_only = params.current_only, "Executing NodesBySummaryHash query");
 
         let txn_db = storage.transaction_db()?;
@@ -2998,20 +2631,16 @@ impl QueryExecutor for NodesBySummaryHashDispatch {
 
         Ok(results)
     }
-
-    fn timeout(&self) -> Duration {
-        self.timeout
-    }
 }
 
 #[async_trait::async_trait]
-impl QueryExecutor for EdgesBySummaryHashDispatch {
+impl QueryExecutor for EdgesBySummaryHash {
     type Output = Vec<EdgeSummaryLookupResult>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         use schema::EdgeSummaryIndex;
 
-        let params = &self.params;
+        let params = self;
         tracing::debug!(hash = ?params.hash, current_only = params.current_only, "Executing EdgesBySummaryHash query");
 
         let txn_db = storage.transaction_db()?;
@@ -3053,10 +2682,6 @@ impl QueryExecutor for EdgesBySummaryHashDispatch {
 
         Ok(results)
     }
-
-    fn timeout(&self) -> Duration {
-        self.timeout
-    }
 }
 
 // ============================================================================
@@ -3068,10 +2693,10 @@ mod tests {
     use super::super::mutation::AddNode;
     use crate::writer::Runnable as MutRunnable;
     use super::super::reader::{
-        create_query_reader, spawn_consumer, Consumer, QueryWithTimeout, Reader, ReaderConfig,
+        create_query_reader, spawn_consumer, Consumer, Reader, ReaderConfig,
     };
     use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
-    use super::super::{Graph, Storage};
+    use super::super::{Processor, Storage};
     use super::*;
     use crate::{DataUrl, Id, TimestampMilli};
     use std::sync::Arc;
@@ -3116,7 +2741,7 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let graph = Graph::new(Arc::new(storage));
+        let processor = Processor::new(Arc::new(storage));
 
         // Create reader and query consumer
         let reader_config = ReaderConfig {
@@ -3125,13 +2750,13 @@ mod tests {
 
         let (reader, receiver) = create_query_reader(reader_config.clone());
 
-        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer = Consumer::new(receiver, reader_config, processor);
 
         // Spawn query consumer
         let consumer_handle = spawn_consumer(consumer);
 
         // Query the node we just created
-        let (returned_name, returned_summary) = NodeById::new(node_id, None)
+        let (returned_name, returned_summary, _version) = NodeById::new(node_id, None)
             .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
@@ -3145,55 +2770,6 @@ mod tests {
 
         // Wait for consumer to finish
         consumer_handle.await.unwrap().unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_query_timeout() {
-        // Create a custom QueryExecutor that sleeps longer than the timeout
-        struct SlowNodeByIdQuery {
-            id: Id,
-            timeout: Duration,
-        }
-
-        #[async_trait::async_trait]
-        impl QueryExecutor for SlowNodeByIdQuery {
-            type Output = (NodeName, NodeSummary);
-
-            async fn execute(&self, _storage: &Storage) -> Result<Self::Output> {
-                // Sleep longer than the query timeout
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                Ok((
-                    "should_not_get_here".to_string(),
-                    DataUrl::from_markdown("Should not get here"),
-                ))
-            }
-
-            fn timeout(&self) -> Duration {
-                self.timeout
-            }
-        }
-
-        // Create a temporary database
-        let temp_dir = TempDir::new().unwrap();
-        let db_path = temp_dir.path().join("test_db");
-
-        let mut storage = Storage::readwrite(&db_path);
-        storage.ready().unwrap();
-
-        let graph = Graph::new(Arc::new(storage));
-
-        // Test the timeout directly using QueryWithTimeout trait
-        let slow_query = SlowNodeByIdQuery {
-            id: Id::new(),
-            timeout: Duration::from_millis(50), // Short timeout
-        };
-
-        let result = slow_query.result(&graph).await;
-
-        // Should timeout because query takes 200ms but timeout is 50ms
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("timeout") || err_msg.contains("Query timeout"));
     }
 
     #[tokio::test]
@@ -3273,7 +2849,7 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let graph = Graph::new(Arc::new(storage));
+        let processor = Processor::new(Arc::new(storage));
 
         // Create reader and query consumer
         let reader_config = ReaderConfig {
@@ -3286,13 +2862,13 @@ mod tests {
             (reader, receiver)
         };
 
-        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer = Consumer::new(receiver, reader_config, processor);
 
         // Spawn query consumer
         let consumer_handle = spawn_consumer(consumer);
 
         // Query the edge using EdgeSummaryBySrcDstName with Runnable pattern
-        let (returned_summary, returned_weight) =
+        let (returned_summary, returned_weight, _version) =
             EdgeSummaryBySrcDstName::new(source_id, dest_id, edge_name.to_string(), None)
                 .run(&reader, Duration::from_secs(5))
                 .await
@@ -3429,7 +3005,7 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let graph = Graph::new(Arc::new(storage));
+        let processor = Processor::new(Arc::new(storage));
 
         // Create reader and query consumer
         let reader_config = ReaderConfig {
@@ -3442,7 +3018,7 @@ mod tests {
             (reader, receiver)
         };
 
-        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer = Consumer::new(receiver, reader_config, processor);
 
         // Spawn query consumer
         let consumer_handle = spawn_consumer(consumer);
@@ -3589,7 +3165,7 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let graph = Graph::new(Arc::new(storage));
+        let processor = Processor::new(Arc::new(storage));
 
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
@@ -3601,7 +3177,7 @@ mod tests {
             (reader, receiver)
         };
 
-        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
         // Test 1: Query with inclusive bounds [t2, t4]
@@ -3784,7 +3360,7 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let graph = Graph::new(Arc::new(storage));
+        let processor = Processor::new(Arc::new(storage));
 
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
@@ -3796,7 +3372,7 @@ mod tests {
             (reader, receiver)
         };
 
-        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
         // Query at reference time 2500 - should see fragments 1, 2, and 3
@@ -3922,7 +3498,7 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let graph = Graph::new(Arc::new(storage));
+        let processor = Processor::new(Arc::new(storage));
 
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
@@ -3934,7 +3510,7 @@ mod tests {
             (reader, receiver)
         };
 
-        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
         // Query should return empty vector
@@ -3995,7 +3571,7 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let graph = Graph::new(Arc::new(storage));
+        let processor = Processor::new(Arc::new(storage));
 
         // Create reader and query consumer
         let reader_config = ReaderConfig {
@@ -4003,7 +3579,7 @@ mod tests {
         };
 
         let (reader, receiver) = create_query_reader(reader_config.clone());
-        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
         // Query all nodes with batch lookup
@@ -4016,7 +3592,7 @@ mod tests {
         assert_eq!(results.len(), 5);
 
         // Verify each node is present
-        for (id, name, _summary) in &results {
+        for (id, name, _summary, _version) in &results {
             assert!(node_ids.contains(id));
             assert!(name.starts_with("node_"));
         }
@@ -4065,7 +3641,7 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let graph = Graph::new(Arc::new(storage));
+        let processor = Processor::new(Arc::new(storage));
 
         // Create reader and query consumer
         let reader_config = ReaderConfig {
@@ -4073,7 +3649,7 @@ mod tests {
         };
 
         let (reader, receiver) = create_query_reader(reader_config.clone());
-        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
         // Query with a mix of existing and non-existing IDs
@@ -4093,7 +3669,7 @@ mod tests {
         assert_eq!(results.len(), 2);
 
         // Verify only existing IDs are in results
-        for (id, _name, _summary) in &results {
+        for (id, _name, _summary, _version) in &results {
             assert!(existing_ids.contains(id));
         }
 
@@ -4133,14 +3709,14 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let graph = Graph::new(Arc::new(storage));
+        let processor = Processor::new(Arc::new(storage));
 
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
 
         let (reader, receiver) = create_query_reader(reader_config.clone());
-        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
         // Query with empty input
@@ -4192,14 +3768,14 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let graph = Graph::new(Arc::new(storage));
+        let processor = Processor::new(Arc::new(storage));
 
         // Create reader and query consumer
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
         let (reader, receiver) = create_query_reader(reader_config.clone());
-        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
         // Query all nodes
@@ -4212,7 +3788,7 @@ mod tests {
         assert_eq!(results.len(), 5, "Should return all 5 nodes");
 
         // Verify each node has expected data
-        for (id, name, summary) in &results {
+        for (id, name, summary, _version) in &results {
             assert!(!id.is_nil(), "Node ID should not be nil");
             assert!(name.starts_with("node_"), "Node name should start with 'node_'");
             assert!(
@@ -4260,14 +3836,14 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let graph = Graph::new(Arc::new(storage));
+        let processor = Processor::new(Arc::new(storage));
 
         // Create reader and query consumer
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
         let (reader, receiver) = create_query_reader(reader_config.clone());
-        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
         // Get first page of 3 nodes
@@ -4287,8 +3863,10 @@ mod tests {
         assert_eq!(page2.len(), 3, "Second page should have 3 nodes");
 
         // Ensure no overlap between pages
-        let page1_ids: std::collections::HashSet<_> = page1.iter().map(|(id, _, _)| *id).collect();
-        let page2_ids: std::collections::HashSet<_> = page2.iter().map(|(id, _, _)| *id).collect();
+        let page1_ids: std::collections::HashSet<_> =
+            page1.iter().map(|(id, _, _, _)| *id).collect();
+        let page2_ids: std::collections::HashSet<_> =
+            page2.iter().map(|(id, _, _, _)| *id).collect();
         assert!(
             page1_ids.is_disjoint(&page2_ids),
             "Pages should not overlap"
@@ -4368,14 +3946,14 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let graph = Graph::new(Arc::new(storage));
+        let processor = Processor::new(Arc::new(storage));
 
         // Create reader and query consumer
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
         let (reader, receiver) = create_query_reader(reader_config.clone());
-        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
         // Query all edges
@@ -4388,12 +3966,13 @@ mod tests {
         assert_eq!(results.len(), 2, "Should return 2 edges");
 
         // Verify edge data
-        let edge_names: Vec<_> = results.iter().map(|(_, _, _, name)| name.as_str()).collect();
+        let edge_names: Vec<_> =
+            results.iter().map(|(_, _, _, name, _)| name.as_str()).collect();
         assert!(edge_names.contains(&"connects"), "Should contain 'connects' edge");
         assert!(edge_names.contains(&"links"), "Should contain 'links' edge");
 
         // Verify weights are present
-        for (weight, _, _, _) in &results {
+        for (weight, _, _, _, _version) in &results {
             assert!(weight.is_some(), "Edge weight should be present");
         }
 
@@ -4434,13 +4013,13 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let graph = Graph::new(Arc::new(storage));
+        let processor = Processor::new(Arc::new(storage));
 
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
         let (reader, receiver) = create_query_reader(reader_config.clone());
-        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
         // Query with limit 0 should return empty

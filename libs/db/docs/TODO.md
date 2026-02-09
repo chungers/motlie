@@ -48,18 +48,18 @@ C. **Flush method**: Keep fire-and-forget but add `writer.flush().await?`
 **Question**: Should the unified writer support both batch and streaming patterns?
 
 **Current State**:
-- `MutationBatch` allows sending multiple mutations atomically
+- `Vec<Mutation>` allows sending multiple mutations atomically
 - Individual mutations use `run(&writer)` pattern
 
 **Options**:
 
-A. **Keep current approach**: Batch via `MutationBatch`, individual via `run()`
+A. **Keep current approach**: Batch via `Vec<Mutation>`, individual via `run()`
    ```rust
    // Individual
    AddNode { ... }.run(&writer).await?;
 
    // Batch
-   MutationBatch::new()
+   Vec<Mutation>::new()
        .add_node(...)
        .add_edge(...)
        .run(&writer)
@@ -155,3 +155,80 @@ impl StorageHandle {
 - [ ] Add `motlie_db::mutation` module with re-exports
 - [ ] Update documentation and examples
 - [ ] Add integration tests for read-after-write scenarios
+
+---
+
+## Graph Module: Batch Restore Improvements
+
+**Status**: Open (added 2026-02-08, post-unify-request-envelopes refactor)
+
+The `RestoreEdges` batch mutation was removed in favor of `Vec<RestoreEdge>`. While this simplifies the API, two features were lost that may be worth re-adding:
+
+### 1. Batch Restore Validation Report
+
+**Previous API**:
+```rust
+let report = RestoreEdges {
+    src_id,
+    name: Some("likes".to_string()),
+    as_of: TimestampMilli::now(),
+    dry_run: true,
+}.run(&writer).await?;
+
+// RestoreEdgesReport provided:
+// - candidates: number of deleted edges considered
+// - restorable: number of edges that would be restored
+// - skipped_no_version: edges with no version at as_of
+```
+
+**Current API**:
+```rust
+// dry_run works but returns Vec<MutationResult>, not a structured report
+vec![RestoreEdge { ... }.into()]
+    .run_with_result(&writer, ExecOptions { dry_run: true })
+    .await?;
+```
+
+**Proposal**: Add `RestoreEdgesReport` query or helper that scans edges from a source and returns validation info without requiring manual `Vec<RestoreEdge>` construction.
+
+### 2. Convenience Helper for Batch Edge Restore
+
+**Previous API**:
+```rust
+RestoreEdges {
+    src_id: alice_id,
+    name: None,  // All edge names from this source
+    as_of: timestamp,
+    dry_run: false,
+}.run(&writer).await?;
+```
+
+**Current API** (manual construction required):
+```rust
+// User must query edges, build Vec<RestoreEdge>, then run
+let edges = OutgoingEdges::new(alice_id, None).run(&reader, timeout).await?;
+let restores: Vec<Mutation> = edges.iter()
+    .map(|e| RestoreEdge {
+        src_id: alice_id,
+        dst_id: e.dst_id,
+        name: e.name.clone(),
+        as_of: timestamp,
+        expected_version: None,
+    }.into())
+    .collect();
+restores.run(&writer).await?;
+```
+
+**Proposal**: Add helper function in `graph::mutation`:
+```rust
+/// Build RestoreEdge mutations for all outgoing edges from a source.
+pub async fn restore_outgoing_edges(
+    reader: &Reader,
+    src_id: Id,
+    name_filter: Option<&str>,
+    as_of: TimestampMilli,
+    timeout: Duration,
+) -> Result<Vec<Mutation>>
+```
+
+This maintains the unified `Vec<Mutation>` pattern while providing ergonomic batch construction.

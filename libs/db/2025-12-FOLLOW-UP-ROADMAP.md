@@ -814,7 +814,7 @@ pub(crate) struct ForwardEdgeCfKey(
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ForwardEdgeCfValue(
-    pub(crate) Option<ActivePeriod>, // Field 0: Temporal validity
+    pub(crate) Option<ActivePeriod>, // Field 0: Active period
     pub(crate) Option<f64>,           // Field 1: Optional weight
     pub(crate) EdgeSummary,           // Field 2: Edge summary (inline)
 );
@@ -834,7 +834,7 @@ pub(crate) struct ForwardEdgeCfKey(
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ForwardEdgeCfValue(
-    pub(crate) Option<ActivePeriod>, // Field 0: Temporal validity
+    pub(crate) Option<ActivePeriod>, // Field 0: Active period
     pub(crate) Option<f64>,           // Field 1: Optional weight
     pub(crate) Option<SummaryHash>,   // Field 2: Content hash; full summary in EdgeSummaries CF
 );
@@ -968,7 +968,7 @@ impl OutgoingEdges {
             let key = ForwardEdges::key_from_bytes(&key_bytes)?;
             let value = ForwardEdges::value_from_bytes(&value_bytes)?;
 
-            // Check temporal validity
+            // Check active period
             if !value.0.as_ref().map_or(true, |tr| tr.is_valid_now()) {
                 continue;
             }
@@ -1095,7 +1095,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 #[archive_attr(derive(Debug, PartialEq, Eq, PartialOrd, Ord))]
 pub struct TimestampMilli(pub u64);
 
-/// Temporal validity range.
+/// Active period.
 /// Must have rkyv derives for use in hot CF values.
 #[derive(Archive, RkyvDeserialize, RkyvSerialize)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1171,7 +1171,7 @@ use rkyv::CheckBytes;
 
 /// Trait for hot column families using rkyv (zero-copy serialization).
 ///
-/// Hot CFs store small, frequently-accessed data (topology, weights, temporal ranges).
+/// Hot CFs store small, frequently-accessed data (topology, weights, active periods).
 /// Values are serialized with rkyv for zero-copy access during graph traversal.
 pub(crate) trait HotColumnFamilyRecord {
     const CF_NAME: &'static str;
@@ -1214,13 +1214,13 @@ pub(crate) trait HotColumnFamilyRecord {
 }
 ```
 
-### Temporal Validity Check on Archived Data
+### Active period Check on Archived Data
 
 ```rust
 // libs/db/src/graph/schema.rs
 
 impl ArchivedActivePeriod {
-    /// Check if this temporal range is valid at the given timestamp.
+    /// Check if this active period is valid at the given timestamp.
     ///
     /// Works directly on archived data without deserialization.
     pub fn is_valid_at(&self, ts: TimestampMilli) -> bool {
@@ -1235,7 +1235,7 @@ impl ArchivedActivePeriod {
         start_ok && end_ok
     }
 
-    /// Check if this temporal range is currently valid.
+    /// Check if this active period is currently valid.
     pub fn is_valid_now(&self) -> bool {
         let now = TimestampMilli::now();
         self.is_valid_at(now)
@@ -1243,7 +1243,7 @@ impl ArchivedActivePeriod {
 }
 
 impl ArchivedNodeCfValue {
-    /// Check temporal validity without deserialization.
+    /// Check active period without deserialization.
     pub fn is_valid_at(&self, ts: TimestampMilli) -> bool {
         self.temporal_range
             .as_ref()
@@ -1252,7 +1252,7 @@ impl ArchivedNodeCfValue {
 }
 
 impl ArchivedForwardEdgeCfValue {
-    /// Check temporal validity without deserialization.
+    /// Check active period without deserialization.
     pub fn is_valid_at(&self, ts: TimestampMilli) -> bool {
         self.temporal_range
             .as_ref()
@@ -1287,7 +1287,7 @@ impl OutgoingEdges {
             // Zero-copy: just validate and cast, no allocation
             let archived = ForwardEdges::value_archived(&value_bytes)?;
 
-            // Check temporal validity directly on archived data
+            // Check active period directly on archived data
             if !archived.is_valid_at(now) {
                 continue;
             }
@@ -1433,7 +1433,7 @@ impl OutgoingEdges {
             // Zero-copy: just validate and cast, no allocation
             let archived = ForwardEdgesHot::value_archived(&value_bytes)?;
 
-            // Check temporal validity directly on archived data
+            // Check active period directly on archived data
             if !is_valid_archived(&archived.valid_range, self.reference_ts) {
                 continue;
             }
@@ -1635,7 +1635,7 @@ AFTER:
 | Update `AddNode` executor: hash + write to Names CF | `src/graph/mutation.rs` | ✅ |
 | Update `AddEdge` executor: hash + write to Names CF | `src/graph/mutation.rs` | ✅ |
 | Update `AddEdgeFragment` executor | `src/graph/mutation.rs` | ✅ |
-| Update `UpdateEdgeValidSinceUntil` executor | `src/graph/mutation.rs` | ✅ |
+| Update `UpdateEdgeActivePeriod` executor | `src/graph/mutation.rs` | ✅ |
 | Update `UpdateEdgeWeight` executor | `src/graph/mutation.rs` | ✅ |
 | Add name resolution helpers to `query.rs` | `src/graph/query.rs` | ✅ |
 | Update `NodeById` query with name resolution | `src/graph/query.rs` | ✅ |
@@ -2215,7 +2215,7 @@ vector_opts.set_blob_compression_type(CompressionType::None); // Vectors don't c
 **Key findings:**
 1. **Zero-copy access:** rkyv's `value_archived()` allows reading data directly from RocksDB buffers without copying or deserializing
 2. **Validation overhead:** The 88-230ns is primarily rkyv's safety validation (`check_archived_root`), which can be disabled in release for ~10x speedup
-3. **Hot path optimization:** Graph traversal can now access topology data (temporal ranges, name hashes, summary hashes) without any memory allocation
+3. **Hot path optimization:** Graph traversal can now access topology data (active periods, name hashes, summary hashes) without any memory allocation
 
 ### Unit Test Coverage
 

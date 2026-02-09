@@ -9,8 +9,7 @@ use crate::ToolCall;
 use async_trait::async_trait;
 use motlie_db::mutation::{
     AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, EdgeSummary, NodeSummary,
-    Runnable as MutationRunnable, UpdateEdgeValidSinceUntil, UpdateEdgeWeight,
-    UpdateNodeValidSinceUntil,
+    Runnable as MutationRunnable, UpdateEdge, UpdateNode,
 };
 use motlie_db::query::{
     EdgeDetails, EdgeFragments, Edges, IncomingEdges, NodeById, NodeFragments, Nodes,
@@ -270,19 +269,24 @@ impl ToolCall for AddEdgeFragmentParams {
     }
 }
 
-/// Parameters for updating node temporal validity
+/// Parameters for updating a node (consolidated API)
+///
+/// Updates any combination of active period and summary.
+/// At least one optional field must be provided.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct UpdateNodeActivePeriodParams {
+pub struct UpdateNodeParams {
     /// Node UUID
     pub id: String,
-    /// New temporal validity range
-    pub temporal_range: TemporalRangeParam,
-    /// Reason for the update
-    pub reason: String,
+    /// Expected version for optimistic locking
+    pub expected_version: u32,
+    /// Optional: new temporal validity range (null to reset, omit for no change)
+    pub new_active_period: Option<Option<TemporalRangeParam>>,
+    /// Optional: new summary content
+    pub new_summary: Option<String>,
 }
 
 #[async_trait]
-impl ToolCall for UpdateNodeActivePeriodParams {
+impl ToolCall for UpdateNodeParams {
     type Resource = DbResource;
 
     async fn call(self, res: &DbResource) -> Result<CallToolResult, McpError> {
@@ -291,50 +295,60 @@ impl ToolCall for UpdateNodeActivePeriodParams {
         let id = Id::from_str(&self.id)
             .map_err(|e| McpError::invalid_params(format!("Invalid node ID: {}", e), None))?;
 
-        let mutation = UpdateNodeValidSinceUntil {
+        let mutation = UpdateNode {
             id,
-            temporal_range: self.temporal_range.clone().to_schema(),
-            reason: self.reason.clone(),
+            expected_version: self.expected_version,
+            new_active_period: self.new_active_period.clone().map(|opt| opt.map(|r| r.to_schema())),
+            new_summary: self.new_summary.as_ref().map(|s| NodeSummary::from_text(s)),
         };
 
         mutation.run(writer).await.map_err(|e| {
-            McpError::internal_error(format!("Failed to update node validity: {}", e), None)
+            McpError::internal_error(format!("Failed to update node: {}", e), None)
         })?;
 
         tracing::info!(
-            "Updated validity range for node: {} ({})",
+            "Updated node: {}, version {}",
             self.id,
-            self.reason
+            self.expected_version
         );
 
         Ok(CallToolResult::success(vec![Content::text(
             json!({
                 "success": true,
-                "message": format!("Successfully updated validity range for node {}", self.id),
-                "node_id": self.id
+                "message": format!("Successfully updated node {}", self.id),
+                "node_id": self.id,
+                "new_active_period": self.new_active_period.as_ref().map(|opt| opt.as_ref().map(|r| format!("{} - {}", r.valid_since, r.valid_until))),
+                "new_summary": self.new_summary.as_ref().map(|s| if s.len() > 50 { format!("{}...", &s[..50]) } else { s.clone() })
             })
             .to_string(),
         )]))
     }
 }
 
-/// Parameters for updating edge temporal validity
+/// Parameters for updating an edge (consolidated API)
+///
+/// Updates any combination of weight, active period, and summary.
+/// At least one optional field must be provided.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct UpdateEdgeActivePeriodParams {
+pub struct UpdateEdgeParams {
     /// Source node UUID
     pub src_id: String,
     /// Destination node UUID
     pub dst_id: String,
     /// Edge name
     pub name: String,
-    /// New temporal validity range
-    pub temporal_range: TemporalRangeParam,
-    /// Reason for the update
-    pub reason: String,
+    /// Expected version for optimistic locking
+    pub expected_version: u32,
+    /// Optional: new weight value
+    pub new_weight: Option<f64>,
+    /// Optional: new temporal validity range
+    pub new_active_period: Option<TemporalRangeParam>,
+    /// Optional: new summary content
+    pub new_summary: Option<String>,
 }
 
 #[async_trait]
-impl ToolCall for UpdateEdgeActivePeriodParams {
+impl ToolCall for UpdateEdgeParams {
     type Resource = DbResource;
 
     async fn call(self, res: &DbResource) -> Result<CallToolResult, McpError> {
@@ -345,91 +359,38 @@ impl ToolCall for UpdateEdgeActivePeriodParams {
         let dst_id = Id::from_str(&self.dst_id)
             .map_err(|e| McpError::invalid_params(format!("Invalid destination node ID: {}", e), None))?;
 
-        let mutation = UpdateEdgeValidSinceUntil {
+        let mutation = UpdateEdge {
             src_id,
             dst_id,
             name: self.name.clone(),
-            temporal_range: self.temporal_range.clone().to_schema(),
-            reason: self.reason.clone(),
+            expected_version: self.expected_version,
+            new_weight: self.new_weight.map(Some),
+            new_active_period: self.new_active_period.clone().map(|r| Some(r.to_schema())),
+            new_summary: self.new_summary.as_ref().map(|s| EdgeSummary::from_text(s)),
         };
 
         mutation.run(writer).await.map_err(|e| {
-            McpError::internal_error(format!("Failed to update edge validity: {}", e), None)
+            McpError::internal_error(format!("Failed to update edge: {}", e), None)
         })?;
 
         tracing::info!(
-            "Updated validity range for edge: {} -> {} ({}, {})",
+            "Updated edge: {} -> {} ({}), version {}",
             self.src_id,
             self.dst_id,
             self.name,
-            self.reason
+            self.expected_version
         );
 
         Ok(CallToolResult::success(vec![Content::text(
             json!({
                 "success": true,
-                "message": format!("Successfully updated validity range for edge {} -> {} ({})", self.src_id, self.dst_id, self.name),
-                "src_id": self.src_id,
-                "dst_id": self.dst_id,
-                "edge_name": self.name
-            })
-            .to_string(),
-        )]))
-    }
-}
-
-/// Parameters for updating edge weight
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct UpdateEdgeWeightParams {
-    /// Source node UUID
-    pub src_id: String,
-    /// Destination node UUID
-    pub dst_id: String,
-    /// Edge name
-    pub name: String,
-    /// New weight value
-    pub weight: f64,
-}
-
-#[async_trait]
-impl ToolCall for UpdateEdgeWeightParams {
-    type Resource = DbResource;
-
-    async fn call(self, res: &DbResource) -> Result<CallToolResult, McpError> {
-        let writer = res.writer().await?;
-
-        let src_id = Id::from_str(&self.src_id)
-            .map_err(|e| McpError::invalid_params(format!("Invalid source node ID: {}", e), None))?;
-        let dst_id = Id::from_str(&self.dst_id)
-            .map_err(|e| McpError::invalid_params(format!("Invalid destination node ID: {}", e), None))?;
-
-        let mutation = UpdateEdgeWeight {
-            src_id,
-            dst_id,
-            name: self.name.clone(),
-            weight: self.weight,
-        };
-
-        mutation.run(writer).await.map_err(|e| {
-            McpError::internal_error(format!("Failed to update edge weight: {}", e), None)
-        })?;
-
-        tracing::info!(
-            "Updated weight for edge: {} -> {} ({}) = {}",
-            self.src_id,
-            self.dst_id,
-            self.name,
-            self.weight
-        );
-
-        Ok(CallToolResult::success(vec![Content::text(
-            json!({
-                "success": true,
-                "message": format!("Successfully updated weight for edge {} -> {} ({}) to {}", self.src_id, self.dst_id, self.name, self.weight),
+                "message": format!("Successfully updated edge {} -> {} ({})", self.src_id, self.dst_id, self.name),
                 "src_id": self.src_id,
                 "dst_id": self.dst_id,
                 "edge_name": self.name,
-                "weight": self.weight
+                "new_weight": self.new_weight,
+                "new_active_period": self.new_active_period.map(|r| format!("{} - {}", r.valid_since, r.valid_until)),
+                "new_summary": self.new_summary.as_ref().map(|s| if s.len() > 50 { format!("{}...", &s[..50]) } else { s.clone() })
             })
             .to_string(),
         )]))
@@ -461,7 +422,7 @@ impl ToolCall for QueryNodeByIdParams {
 
         let query = NodeById::new(id, self.reference_ts_millis.map(TimestampMilli));
 
-        let (name, summary) = query
+        let (name, summary, _version) = query
             .run(reader, res.query_timeout())
             .await
             .map_err(|e| McpError::internal_error(format!("Failed to query node: {}", e), None))?;
@@ -515,7 +476,7 @@ impl ToolCall for QueryEdgeParams {
             self.reference_ts_millis.map(TimestampMilli),
         );
 
-        let (weight, _src, _dst, _name, summary): (Option<f64>, Id, Id, String, EdgeSummary) = query
+        let (weight, _src, _dst, _name, summary, _version) = query
             .run(reader, res.query_timeout())
             .await
             .map_err(|e| McpError::internal_error(format!("Failed to query edge: {}", e), None))?;
@@ -565,7 +526,7 @@ impl ToolCall for QueryOutgoingEdgesParams {
 
         let query = OutgoingEdges::new(id, self.reference_ts_millis.map(TimestampMilli));
 
-        let edges: Vec<(Option<f64>, Id, Id, String)> =
+        let edges =
             query.run(reader, res.query_timeout()).await.map_err(|e| {
                 McpError::internal_error(format!("Failed to query outgoing edges: {}", e), None)
             })?;
@@ -578,7 +539,7 @@ impl ToolCall for QueryOutgoingEdgesParams {
 
         let edges_list: Vec<serde_json::Value> = edges
             .into_iter()
-            .map(|(weight, _src, dst, name)| {
+            .map(|(weight, _src, dst, name, _version)| {
                 json!({
                     "target_id": dst.as_str(),
                     "name": name,
@@ -619,7 +580,7 @@ impl ToolCall for QueryIncomingEdgesParams {
 
         let query = IncomingEdges::new(id, self.reference_ts_millis.map(TimestampMilli));
 
-        let edges: Vec<(Option<f64>, Id, Id, String)> =
+        let edges =
             query.run(reader, res.query_timeout()).await.map_err(|e| {
                 McpError::internal_error(format!("Failed to query incoming edges: {}", e), None)
             })?;
@@ -632,7 +593,7 @@ impl ToolCall for QueryIncomingEdgesParams {
 
         let edges_list: Vec<serde_json::Value> = edges
             .into_iter()
-            .map(|(weight, _dst, src, name)| {
+            .map(|(weight, _dst, src, name, _version)| {
                 json!({
                     "source_id": src.as_str(),
                     "name": name,

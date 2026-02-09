@@ -115,7 +115,7 @@ match query.run(&reader, Duration::from_millis(100)).await {
 
 ### Temporal Queries
 
-All queries support temporal validity filtering via an optional reference timestamp:
+All queries support active period filtering via an optional reference timestamp:
 
 ```rust
 let ref_time = TimestampMilli::now();
@@ -635,7 +635,7 @@ assert_eq!(result1, result2);
 5. **Consider Temporal Queries**
    - Pass `None` for current state (most common)
    - Use specific timestamps for historical queries
-   - Remember: temporal validity is optional (None = always valid)
+   - Remember: active period is optional (None = always valid)
 
 ## Performance Considerations
 

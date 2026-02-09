@@ -2273,7 +2273,7 @@ mod motlie_impl {
             node: Id,
             reader: &motlie_db::graph::reader::Reader,
             timeout: Duration,
-        ) -> Result<Vec<(Option<f64>, Id, Id, String)>> {
+        ) -> Result<Vec<(Option<f64>, Id, Id, String, u32)>> {
             let start = std::time::Instant::now();
             let edges = OutgoingEdges::new(node, None)
                 .run(reader, timeout)
@@ -2288,7 +2288,7 @@ mod motlie_impl {
             node: Id,
             reader: &motlie_db::graph::reader::Reader,
             timeout: Duration,
-        ) -> Result<Vec<(Option<f64>, Id, Id, String)>> {
+        ) -> Result<Vec<(Option<f64>, Id, Id, String, u32)>> {
             let start = std::time::Instant::now();
             let edges = IncomingEdges::new(node, None)
                 .run(reader, timeout)
@@ -2433,7 +2433,7 @@ mod motlie_impl {
 
                 let edges = timer.query_outgoing_edges(current, reader, timeout).await?;
 
-                for (_weight, _src, dst, _name) in edges {
+                for (_weight, _src, dst, _name, _version) in edges {
                     if !visited.contains(&dst) {
                         visited.insert(dst);
                         let mut new_path = current_path.clone();
@@ -2511,7 +2511,7 @@ mod motlie_impl {
 
             let edges = timer.query_outgoing_edges(current, reader, timeout).await?;
 
-            for (_weight, _src, dst, _name) in edges {
+            for (_weight, _src, dst, _name, _version) in edges {
                 if !visited.contains_key(&dst) {
                     visited.insert(dst, depth + 1);
                     queue.push_back((dst, depth + 1));
@@ -2617,7 +2617,7 @@ mod motlie_impl {
 
             let edges = timer.query_outgoing_edges(node, reader, timeout).await?;
 
-            for (weight_opt, _src, dst, _name) in edges {
+            for (weight_opt, _src, dst, _name, _version) in edges {
                 let weight = weight_opt.unwrap_or(1.0);
                 let next_cost = cost + weight;
 
@@ -2714,7 +2714,7 @@ mod motlie_impl {
 
                 let edges = timer.query_outgoing_edges(current, reader, timeout).await?;
 
-                for (_weight, _src, dst, _name) in edges {
+                for (_weight, _src, dst, _name, _version) in edges {
                     if !visited.contains(&dst) {
                         visited.insert(dst);
                         queue.push_back(dst);
@@ -2816,7 +2816,7 @@ mod motlie_impl {
 
                 let edges = timer.query_outgoing_edges(current, reader, timeout).await?;
 
-                for (_weight, _src, dst, _name) in edges {
+                for (_weight, _src, dst, _name, _version) in edges {
                     if !visited.contains(&dst) {
                         visited.insert(dst);
                         queue.push_back(dst);
@@ -2875,7 +2875,7 @@ mod motlie_impl {
 
                 let edges = timer.query_outgoing_edges(current, reader, timeout).await?;
 
-                for (_weight, _src, dst, _name) in edges {
+                for (_weight, _src, dst, _name, _version) in edges {
                     if !visited.contains(&dst) {
                         visited.insert(dst);
 
@@ -2934,7 +2934,7 @@ mod motlie_impl {
         // Collect all edges
         for &node in all_node_ids {
             let edges = timer.query_outgoing_edges(node, reader, timeout).await?;
-            for (_weight, src, dst, _name) in edges {
+            for (_weight, src, dst, _name, _version) in edges {
                 adj.entry(src).or_insert_with(Vec::new).push(dst);
                 rev_adj.entry(dst).or_insert_with(Vec::new).push(src);
             }
@@ -3021,7 +3021,7 @@ mod motlie_impl {
             let edges = OutgoingEdges::new(workload, None)
                 .run(reader, timeout)
                 .await?;
-            for (_weight, _src, dst, _name) in edges {
+            for (_weight, _src, dst, _name, _version) in edges {
                 if let Some(name) = id_to_name.get(&dst) {
                     if name.starts_with("role-") {
                         assumed_roles.insert(dst);
@@ -3096,7 +3096,7 @@ mod motlie_impl {
         // Count degrees by querying edges for each node
         for &node in all_node_ids {
             let edges = timer.query_outgoing_edges(node, reader, timeout).await?;
-            for (_weight, src, dst, _name) in edges {
+            for (_weight, src, dst, _name, _version) in edges {
                 *out_degrees.entry(src).or_insert(0) += 1;
                 *in_degrees.entry(dst).or_insert(0) += 1;
             }
@@ -3206,7 +3206,7 @@ mod motlie_impl {
         }
         for &node in all_node_ids {
             let edges = timer.query_outgoing_edges(node, reader, timeout).await?;
-            for (weight_opt, src, dst, _name) in edges {
+            for (weight_opt, src, dst, _name, _version) in edges {
                 let weight = weight_opt.unwrap_or(1.0);
                 adj.entry(src).or_insert_with(Vec::new).push((dst, weight));
             }
@@ -3374,7 +3374,7 @@ mod motlie_impl {
                 }
 
                 let edges = timer.query_outgoing_edges(current, reader, timeout).await?;
-                for (_weight, _src, dst, _name) in edges {
+                for (_weight, _src, dst, _name, _version) in edges {
                     if !visited.contains(&dst) {
                         stack.push(dst);
                     }
@@ -3454,7 +3454,7 @@ mod motlie_impl {
 
         for &node in all_node_ids {
             let edges = timer.query_outgoing_edges(node, reader, timeout).await?;
-            for (_weight, src, dst, _name) in edges {
+            for (_weight, src, dst, _name, _version) in edges {
                 in_edges.entry(dst).or_insert_with(Vec::new).push(src);
                 *out_degrees.entry(src).or_insert(0) += 1;
             }
@@ -4389,14 +4389,14 @@ async fn run_analysis_from_input(input: UseCaseInput, state: VisualizationState)
         let mut name_to_id: HashMap<String, Id> = HashMap::new();
 
         // Add nodes
-        for (id, name, _summary) in &scanned_nodes {
+        for (id, name, _summary, _version) in &scanned_nodes {
             let idx = pg_graph.add_node(name.clone());
             id_to_idx.insert(*id, idx);
             name_to_id.insert(name.clone(), *id);
         }
 
         // Add edges
-        for (weight, src_id, dst_id, _name) in &scanned_edges {
+        for (weight, src_id, dst_id, _name, _version) in &scanned_edges {
             if let (Some(&src_idx), Some(&dst_idx)) = (id_to_idx.get(src_id), id_to_idx.get(dst_id)) {
                 pg_graph.add_edge(src_idx, dst_idx, weight.unwrap_or(1.0));
             }
@@ -4486,9 +4486,9 @@ async fn run_analysis_from_input(input: UseCaseInput, state: VisualizationState)
         let scan_start = std::time::Instant::now();
         let scanned_nodes = AllNodes::new(1_000_000).run(reader, timeout).await?;
         timer_scan.record_elapsed(scan_start.elapsed());
-        // AllNodes returns Vec<(Id, NodeName, NodeSummary)>, extract (name, id)
-        let name_to_id: HashMap<String, Id> = scanned_nodes.iter().map(|(id, name, _)| (name.clone(), *id)).collect();
-        let id_to_name: HashMap<Id, String> = scanned_nodes.iter().map(|(id, name, _)| (*id, name.clone())).collect();
+        // AllNodes returns Vec<(Id, NodeName, NodeSummary, Version)>, extract (name, id)
+        let name_to_id: HashMap<String, Id> = scanned_nodes.iter().map(|(id, name, _, _)| (name.clone(), *id)).collect();
+        let id_to_name: HashMap<Id, String> = scanned_nodes.iter().map(|(id, name, _, _)| (*id, name.clone())).collect();
 
         // Build category ID lists
         let user_ids: Vec<Id> = metadata.user_names.iter()
@@ -4516,8 +4516,8 @@ async fn run_analysis_from_input(input: UseCaseInput, state: VisualizationState)
             let edge_scan_start = std::time::Instant::now();
             let edges = AllEdges::new(1_000_000).run(reader, timeout).await?;
             timer_scan.record_elapsed(edge_scan_start.elapsed());
-            // AllEdges returns Vec<(Option<f64>, SrcId, DstId, EdgeName)>
-            edges.into_iter().map(|(weight, src, dst, name)| (src, dst, weight, name)).collect()
+            // AllEdges returns Vec<(Option<f64>, SrcId, DstId, EdgeName, Version)>
+            edges.into_iter().map(|(weight, src, dst, name, _version)| (src, dst, weight, name)).collect()
         } else {
             Vec::new()
         };

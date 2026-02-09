@@ -147,7 +147,7 @@ async fn dfs_motlie(
         visited.insert(current_id);
 
         // Get node name
-        let (name, _summary) = NodeById::new(current_id, None)
+        let (name, _summary, _version) = NodeById::new(current_id, None)
             .run(reader, timeout)
             .await?;
 
@@ -159,7 +159,7 @@ async fn dfs_motlie(
             .await?;
 
         // Add neighbors to stack (in reverse order to maintain left-to-right traversal)
-        for (_weight, _src, dst, _name) in edges.iter().rev() {
+        for (_weight, _src, dst, _name, _version) in edges.iter().rev() {
             if !visited.contains(dst) {
                 stack.push(*dst);
             }

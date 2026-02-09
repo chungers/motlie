@@ -50,7 +50,7 @@ The current implementation uses **5 column families**:
    - `forward_edges`: 16-byte prefix (all edges from a source)
    - `node_fragments`: 16-byte prefix (all fragments for a node)
 
-3. **Temporal validity** on all records
+3. **Active period** on all records
    - Supports point-in-time queries
    - Enables soft deletes via `valid_until` timestamps
 
@@ -82,7 +82,7 @@ Edges are stored in both `forward_edges` and `reverse_edges`:
 ```rust
 // libs/db/src/graph/schema.rs:77-85
 pub struct ForwardEdgeCfValue(
-    pub Option<ActivePeriod>, // Temporal validity
+    pub Option<ActivePeriod>, // Active period
     pub Option<f64>,           // Edge weight (distance)
     pub EdgeSummary,           // Edge metadata
 );
@@ -278,7 +278,7 @@ txn.commit()?;
 | `AddNodeFragment` | Store vector embedding | `node_fragments` |
 | `AddEdge` | Create graph edge | `forward_edges`, `reverse_edges` |
 | `UpdateEdgeWeight` | Update edge distance | `forward_edges` |
-| `UpdateNodeValidSinceUntil` | Soft delete node | `nodes`, edges |
+| `UpdateNodeActivePeriod` | Soft delete node | `nodes`, edges |
 
 ### 6.2 Queries
 

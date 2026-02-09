@@ -5,15 +5,16 @@
 //!
 //! ## Module Structure
 //!
-//! - `mod.rs` - Storage, Graph struct, and module exports
+//! - `mod.rs` - Storage, Processor, and module exports
+//! - `processor.rs` - Processor struct (central state hub with Storage + NameCache)
+// (claude, 2026-02-07, FIXED: Updated header to reflect Graph→Processor migration per codex eval)
+//! - `ops/` - Business logic helpers (single source of truth for mutations/queries)
 //! - `schema.rs` - RocksDB schema definitions (column families)
 //! - `mutation.rs` - Mutation types (AddNode, AddEdge, etc.)
 //! - `writer.rs` - Writer infrastructure and mutation consumers
 //! - `query.rs` - Query types (NodeById, EdgeSummaryBySrcDstName, etc.)
 //! - `reader.rs` - Reader infrastructure and query consumers
 //! - `scan.rs` - Scan API for pagination
-
-use std::sync::Arc;
 
 use anyhow::Result;
 
@@ -25,6 +26,8 @@ pub(crate) use crate::rocksdb::{
 // Submodules
 pub mod mutation;
 pub mod name_hash;
+pub(crate) mod ops;
+pub mod processor;
 pub mod query;
 pub mod reader;
 pub mod schema;
@@ -47,10 +50,10 @@ mod tests;
 
 // Re-export commonly used types from submodules
 pub use mutation::{
-    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation, MutationBatch,
-    UpdateEdgeValidSinceUntil, UpdateEdgeWeight, UpdateNodeValidSinceUntil,
+    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, ExecOptions, Mutation,
+    MutationResult, RunnableWithResult,
     // CONTENT-ADDRESS: Update/Delete mutations with optimistic locking
-    UpdateNodeSummary, UpdateEdgeSummary, DeleteNode, DeleteEdge,
+    UpdateNode, UpdateEdge, DeleteNode, DeleteEdge,
 };
 pub use crate::writer::Runnable;
 pub use query::{
@@ -64,25 +67,22 @@ pub use transaction::Transaction;
 pub use crate::reader::Runnable as QueryRunnable;
 pub use reader::{
     // Query consumer functions
-    create_query_consumer,
-    create_query_consumer_readwrite,
     create_query_reader,
+    spawn_query_consumers_with_storage,
+    spawn_consumer_pool_with_processor,
     spawn_query_consumer,
-    spawn_query_consumer_pool_readonly,
     spawn_query_consumer_pool_shared,
-    spawn_query_consumer_readwrite,
-    spawn_query_consumer_with_graph,
+    spawn_query_consumer_pool_readonly,
+    spawn_query_consumer_with_processor,
     Consumer as QueryConsumer,
     Processor as ReaderProcessor,
     QueryExecutor,
-    QueryProcessor,
-    QueryWithTimeout,
     Reader,
     ReaderConfig,
 };
 pub use name_hash::{NameCache, NameHash};
 pub use summary_hash::SummaryHash;
-pub use schema::{DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, RefCount, SrcId, Version};
+pub use schema::{DstId, EdgeName, EdgeSummary, EdgeWeight, FragmentContent, NodeName, NodeSummary, RefCount, SrcId, Version};
 
 // Subsystem exports for use with rocksdb::Storage<S> and StorageBuilder
 pub use subsystem::{GraphBlockCacheConfig, NameCacheConfig, Subsystem};
@@ -98,12 +98,11 @@ pub type Storage = crate::rocksdb::Storage<Subsystem>;
 
 pub use writer::{
     // Mutation consumer functions
-    create_mutation_consumer,
-    create_mutation_consumer_with_next,
     create_mutation_writer,
+    spawn_mutation_consumer_with_storage,
     spawn_mutation_consumer,
-    spawn_mutation_consumer_with_graph,
     spawn_mutation_consumer_with_next,
+    spawn_mutation_consumer_with_receiver,
     Consumer as MutationConsumer,
     MutationExecutor,
     Processor as MutationProcessor,
@@ -111,8 +110,8 @@ pub use writer::{
     WriterConfig,
 };
 
-// Internal imports
-use writer::Processor;
+// Processor struct - the central graph processing hub
+pub use processor::Processor;
 
 
 
@@ -126,73 +125,4 @@ pub(crate) trait ActivePeriodPatchable {
 }
 
 // Note: SystemInfo functionality is now in Subsystem which implements SubsystemInfo
-
-// ============================================================================
-// Graph - Mutation Processor
-// ============================================================================
-
-/// Graph-specific mutation processor
-pub struct Graph {
-    storage: Arc<Storage>,
-}
-
-impl Graph {
-    /// Create a new GraphProcessor
-    pub fn new(storage: Arc<Storage>) -> Self {
-        Self { storage }
-    }
-
-    /// Get a reference to the storage.
-    ///
-    /// This is used internally for transaction support.
-    pub fn storage(&self) -> &Arc<Storage> {
-        &self.storage
-    }
-}
-
-impl Clone for Graph {
-    fn clone(&self) -> Self {
-        Self {
-            storage: self.storage.clone(), // Arc<Storage> is already Clone
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl Processor for Graph {
-    /// Process a batch of mutations
-    #[tracing::instrument(skip(self, mutations), fields(mutation_count = mutations.len()))]
-    async fn process_mutations(&self, mutations: &[Mutation]) -> Result<()> {
-        if mutations.is_empty() {
-            return Ok(());
-        }
-
-        tracing::info!(count = mutations.len(), "[Graph] About to insert mutations");
-
-        // Get transaction and name cache
-        let txn_db = self.storage.transaction_db()?;
-        let txn = txn_db.transaction();
-        let name_cache = self.storage.cache();
-
-        // Each mutation executes itself with cache access for name deduplication
-        for mutation in mutations {
-            mutation.execute_with_cache(&txn, txn_db, name_cache)?;
-        }
-
-        // Single commit for all mutations
-        txn.commit()?;
-
-        tracing::info!(
-            count = mutations.len(),
-            "[Graph] Successfully committed mutations"
-        );
-        Ok(())
-    }
-}
-
-/// Implement query processor for Graph
-impl reader::Processor for Graph {
-    fn storage(&self) -> &Storage {
-        &self.storage
-    }
-}
+// Graph struct removed - use processor::Processor instead (claude, 2026-02-07)

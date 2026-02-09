@@ -100,7 +100,7 @@ pub use gc::{GarbageCollector, GcConfig, GcMetrics};
 // Graph repair requires full rebuild - no partial repair API exposed
 pub use mutation::{
     AddEmbeddingSpec, DeleteVector, FlushMarker, InsertVector, InsertVectorBatch, Mutation,
-    MutationBatch, Runnable as MutationRunnable,
+    MutationResult, Runnable as MutationRunnable, RunnableWithResult, MutationBatchExt,
 };
 pub use writer::{
     create_writer,
@@ -114,7 +114,7 @@ pub use writer::{
 pub use crate::reader::Runnable;
 pub use query::{
     FindEmbeddings, GetExternalId, GetInternalId, GetVector, ListEmbeddings, Query,
-    QueryExecutor, QueryProcessor, QueryWithTimeout, ResolveIds, SearchKNN,
+    QueryExecutor, ResolveIds, SearchKNN,
 };
 pub use reader::{
     create_reader_with_storage,

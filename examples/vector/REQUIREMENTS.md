@@ -353,7 +353,7 @@ Vector Search (ef=200) → ID Mapping → Temporal Filter (Graph) → Re-rank �
 | ID | Assumption | Rationale |
 |----|------------|-----------|
 | <a id="arch-11"></a>**ARCH-11** | Vectors represent node/edge summaries and fragments | Graph entities are the primary data model |
-| <a id="arch-12"></a>**ARCH-12** | Graph RocksDB is source of truth for entity visibility | Temporal range, existence, relationships |
+| <a id="arch-12"></a>**ARCH-12** | Graph RocksDB is source of truth for entity visibility | Active period, existence, relationships |
 
 ---
 

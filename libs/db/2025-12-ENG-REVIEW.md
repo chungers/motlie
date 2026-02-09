@@ -147,7 +147,7 @@ impl RunDirect<Reader> for NodeById {
         if let Some(val_bytes) = db.get_cf(reader.graph().nodes_cf(), key_bytes)? {
             let val = schema::Nodes::value_from_bytes(&val_bytes)?;
             
-            // Perform temporal validity check inline
+            // Perform active period check inline
             let ref_time = self.reference_ts_millis.unwrap_or_else(TimestampMilli::now);
             if !schema::is_valid_at_time(&val.0, ref_time) {
                 return Ok(None);

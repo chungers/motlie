@@ -20,11 +20,9 @@
 //! - `GetGraphMeta` - HNSW graph metadata
 //! - `GetNeighbors` - Get HNSW neighbors at a layer
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
-use tokio::sync::oneshot;
+use anyhow::Result;
 
 use super::embedding::Embedding;
 use super::processor::{Processor, SearchResult};
@@ -34,6 +32,7 @@ use super::schema::{
 };
 use super::search::SearchConfig;
 use super::Storage;
+use crate::request::{new_request_id, RequestEnvelope, RequestMeta};
 use crate::rocksdb::ColumnFamily;
 use crate::Id;
 
@@ -54,27 +53,27 @@ pub enum Query {
     // Point Lookups
     // ─────────────────────────────────────────────────────────────
     /// Get vector by external ID
-    GetVector(GetVectorDispatch),
+    GetVector(GetVector),
     /// Get internal vec_id for external ID
-    GetInternalId(GetInternalIdDispatch),
+    GetInternalId(GetInternalId),
     /// Get external ID for internal vec_id
-    GetExternalId(GetExternalIdDispatch),
+    GetExternalId(GetExternalId),
     /// Batch resolve vec_ids to external IDs
-    ResolveIds(ResolveIdsDispatch),
+    ResolveIds(ResolveIds),
 
     // ─────────────────────────────────────────────────────────────
     // Registry Queries
     // ─────────────────────────────────────────────────────────────
     /// List all registered embeddings
-    ListEmbeddings(ListEmbeddingsDispatch),
+    ListEmbeddings(ListEmbeddings),
     /// Find embeddings by filter criteria
-    FindEmbeddings(FindEmbeddingsDispatch),
+    FindEmbeddings(FindEmbeddings),
 
     // ─────────────────────────────────────────────────────────────
     // Search Operations
     // ─────────────────────────────────────────────────────────────
     /// K-nearest neighbor search via HNSW
-    SearchKNN(SearchKNNDispatch),
+    SearchKNN(SearchKNN),
 
     // ─────────────────────────────────────────────────────────────
     // Graph Introspection (Future)
@@ -86,39 +85,65 @@ pub enum Query {
 impl std::fmt::Display for Query {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Query::GetVector(q) => {
-                write!(f, "GetVector: embedding={}, id={}", q.params.embedding, q.params.id)
-            }
+            Query::GetVector(q) => write!(f, "GetVector: embedding={}, id={}", q.embedding, q.id),
             Query::GetInternalId(q) => {
-                write!(f, "GetInternalId: embedding={}, key={:?}", q.params.embedding, q.params.external_key)
+                write!(f, "GetInternalId: embedding={}, key={:?}", q.embedding, q.external_key)
             }
             Query::GetExternalId(q) => write!(
                 f,
                 "GetExternalId: embedding={}, vec_id={}",
-                q.params.embedding, q.params.vec_id
+                q.embedding, q.vec_id
             ),
             Query::ResolveIds(q) => write!(
                 f,
                 "ResolveIds: embedding={}, count={}",
-                q.params.embedding,
-                q.params.vec_ids.len()
+                q.embedding,
+                q.vec_ids.len()
             ),
             Query::ListEmbeddings(_) => write!(f, "ListEmbeddings"),
             Query::FindEmbeddings(q) => write!(
                 f,
                 "FindEmbeddings: model={:?}, dim={:?}, distance={:?}",
-                q.params.filter.model,
-                q.params.filter.dim,
-                q.params.filter.distance
+                q.filter.model,
+                q.filter.dim,
+                q.filter.distance
             ),
             Query::SearchKNN(q) => write!(
                 f,
                 "SearchKNN: embedding={}, k={}, ef={}, exact={}",
-                q.params.embedding.code(),
-                q.params.k,
-                q.params.ef,
-                q.params.exact
+                q.embedding.code(),
+                q.k,
+                q.ef,
+                q.exact
             ),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum QueryResult {
+    GetVector(Option<Vec<f32>>),
+    GetInternalId(Option<VecId>),
+    GetExternalId(Option<ExternalKey>),
+    ResolveIds(Vec<Option<ExternalKey>>),
+    ListEmbeddings(Vec<Embedding>),
+    FindEmbeddings(Vec<Embedding>),
+    SearchKNN(Vec<SearchResult>),
+}
+
+impl RequestMeta for Query {
+    type Reply = QueryResult;
+    type Options = ();
+
+    fn request_kind(&self) -> &'static str {
+        match self {
+            Query::GetVector(_) => "get_vector",
+            Query::GetInternalId(_) => "get_internal_id",
+            Query::GetExternalId(_) => "get_external_id",
+            Query::ResolveIds(_) => "resolve_ids",
+            Query::ListEmbeddings(_) => "list_embeddings",
+            Query::FindEmbeddings(_) => "find_embeddings",
+            Query::SearchKNN(_) => "search_knn",
         }
     }
 }
@@ -138,58 +163,6 @@ pub trait QueryExecutor: Send + Sync {
 
     /// Execute this query against the storage layer
     async fn execute(&self, storage: &Storage) -> Result<Self::Output>;
-
-    /// Get the timeout for this query
-    fn timeout(&self) -> Duration;
-}
-
-// ============================================================================
-// QueryWithTimeout Trait - Blanket implementation for QueryExecutor
-// ============================================================================
-
-/// Trait for queries that produce results with timeout handling.
-/// Automatically implemented for all QueryExecutor types.
-#[async_trait::async_trait]
-pub trait QueryWithTimeout: Send + Sync {
-    /// The type of result this query produces
-    type ResultType: Send;
-
-    /// Execute the query with timeout and return the result
-    async fn result(&self, storage: &Storage) -> Result<Self::ResultType>;
-
-    /// Get the timeout for this query
-    fn timeout(&self) -> Duration;
-}
-
-/// Blanket implementation: any QueryExecutor automatically gets QueryWithTimeout
-#[async_trait::async_trait]
-impl<T: QueryExecutor> QueryWithTimeout for T {
-    type ResultType = T::Output;
-
-    async fn result(&self, storage: &Storage) -> Result<Self::ResultType> {
-        let result = tokio::time::timeout(self.timeout(), self.execute(storage)).await;
-
-        match result {
-            Ok(r) => r,
-            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", self.timeout())),
-        }
-    }
-
-    fn timeout(&self) -> Duration {
-        QueryExecutor::timeout(self)
-    }
-}
-
-// ============================================================================
-// QueryProcessor Trait
-// ============================================================================
-
-/// Trait for processing queries without needing to know the result type.
-/// Allows the Consumer to process queries polymorphically.
-#[async_trait::async_trait]
-pub trait QueryProcessor: Send {
-    /// Process the query and send the result (consumes self)
-    async fn process_and_send(self, storage: &Storage);
 }
 
 // ============================================================================
@@ -222,30 +195,9 @@ impl GetVector {
     }
 }
 
-/// Dispatch wrapper with oneshot channel for GetVector.
-#[derive(Debug)]
-pub(crate) struct GetVectorDispatch {
-    pub(crate) params: GetVector,
-    pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<Option<Vec<f32>>>>,
-}
-
-impl GetVectorDispatch {
-    /// Send the result back to the caller.
-    pub fn send_result(self, result: Result<Option<Vec<f32>>>) {
-        let _ = self.result_tx.send(result);
-    }
-}
-
 impl From<GetVector> for Query {
     fn from(q: GetVector) -> Self {
-        // This is used when we have a default timeout; caller should use dispatch directly
-        let (tx, _rx) = oneshot::channel();
-        Query::GetVector(GetVectorDispatch {
-            params: q,
-            timeout: Duration::from_secs(5),
-            result_tx: tx,
-        })
+        Query::GetVector(q)
     }
 }
 
@@ -285,17 +237,6 @@ impl QueryExecutor for GetVector {
         }
     }
 
-    fn timeout(&self) -> Duration {
-        Duration::from_secs(5)
-    }
-}
-
-#[async_trait::async_trait]
-impl QueryProcessor for GetVectorDispatch {
-    async fn process_and_send(self, storage: &Storage) {
-        let result = self.params.result(storage).await;
-        self.send_result(result);
-    }
 }
 
 // ============================================================================
@@ -321,20 +262,6 @@ impl GetInternalId {
     }
 }
 
-/// Dispatch wrapper with oneshot channel for GetInternalId.
-#[derive(Debug)]
-pub(crate) struct GetInternalIdDispatch {
-    pub(crate) params: GetInternalId,
-    pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<Option<VecId>>>,
-}
-
-impl GetInternalIdDispatch {
-    /// Send the result back to the caller.
-    pub fn send_result(self, result: Result<Option<VecId>>) {
-        let _ = self.result_tx.send(result);
-    }
-}
 
 #[async_trait::async_trait]
 impl QueryExecutor for GetInternalId {
@@ -355,17 +282,6 @@ impl QueryExecutor for GetInternalId {
         }
     }
 
-    fn timeout(&self) -> Duration {
-        Duration::from_secs(5)
-    }
-}
-
-#[async_trait::async_trait]
-impl QueryProcessor for GetInternalIdDispatch {
-    async fn process_and_send(self, storage: &Storage) {
-        let result = self.params.result(storage).await;
-        self.send_result(result);
-    }
 }
 
 // ============================================================================
@@ -391,20 +307,6 @@ impl GetExternalId {
     }
 }
 
-/// Dispatch wrapper with oneshot channel for GetExternalId.
-#[derive(Debug)]
-pub(crate) struct GetExternalIdDispatch {
-    pub(crate) params: GetExternalId,
-    pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<Option<ExternalKey>>>,
-}
-
-impl GetExternalIdDispatch {
-    /// Send the result back to the caller.
-    pub fn send_result(self, result: Result<Option<ExternalKey>>) {
-        let _ = self.result_tx.send(result);
-    }
-}
 
 #[async_trait::async_trait]
 impl QueryExecutor for GetExternalId {
@@ -428,17 +330,6 @@ impl QueryExecutor for GetExternalId {
         }
     }
 
-    fn timeout(&self) -> Duration {
-        Duration::from_secs(5)
-    }
-}
-
-#[async_trait::async_trait]
-impl QueryProcessor for GetExternalIdDispatch {
-    async fn process_and_send(self, storage: &Storage) {
-        let result = self.params.result(storage).await;
-        self.send_result(result);
-    }
 }
 
 // ============================================================================
@@ -461,21 +352,6 @@ impl ResolveIds {
     /// Create a new ResolveIds query.
     pub fn new(embedding: EmbeddingCode, vec_ids: Vec<VecId>) -> Self {
         Self { embedding, vec_ids }
-    }
-}
-
-/// Dispatch wrapper with oneshot channel for ResolveIds.
-#[derive(Debug)]
-pub(crate) struct ResolveIdsDispatch {
-    pub(crate) params: ResolveIds,
-    pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<Vec<Option<ExternalKey>>>>,
-}
-
-impl ResolveIdsDispatch {
-    /// Send the result back to the caller.
-    pub fn send_result(self, result: Result<Vec<Option<ExternalKey>>>) {
-        let _ = self.result_tx.send(result);
     }
 }
 
@@ -520,18 +396,6 @@ impl QueryExecutor for ResolveIds {
 
         Ok(resolved)
     }
-
-    fn timeout(&self) -> Duration {
-        Duration::from_secs(10) // Longer timeout for batch operations
-    }
-}
-
-#[async_trait::async_trait]
-impl QueryProcessor for ResolveIdsDispatch {
-    async fn process_and_send(self, storage: &Storage) {
-        let result = self.params.result(storage).await;
-        self.send_result(result);
-    }
 }
 
 // ============================================================================
@@ -563,39 +427,12 @@ impl ListEmbeddings {
     }
 }
 
-/// Dispatch wrapper with oneshot channel for ListEmbeddings.
-#[derive(Debug)]
-pub(crate) struct ListEmbeddingsDispatch {
-    pub(crate) params: ListEmbeddings,
-    pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<Vec<Embedding>>>,
-}
-
-impl ListEmbeddingsDispatch {
-    /// Send the result back to the caller.
-    pub fn send_result(self, result: Result<Vec<Embedding>>) {
-        let _ = self.result_tx.send(result);
-    }
-}
-
 #[async_trait::async_trait]
 impl QueryExecutor for ListEmbeddings {
     type Output = Vec<Embedding>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         Ok(storage.cache().list_all())
-    }
-
-    fn timeout(&self) -> Duration {
-        Duration::from_secs(5)
-    }
-}
-
-#[async_trait::async_trait]
-impl QueryProcessor for ListEmbeddingsDispatch {
-    async fn process_and_send(self, storage: &Storage) {
-        let result = self.params.result(storage).await;
-        self.send_result(result);
     }
 }
 
@@ -644,39 +481,12 @@ impl FindEmbeddings {
     }
 }
 
-/// Dispatch wrapper with oneshot channel for FindEmbeddings.
-#[derive(Debug)]
-pub(crate) struct FindEmbeddingsDispatch {
-    pub(crate) params: FindEmbeddings,
-    pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<Vec<Embedding>>>,
-}
-
-impl FindEmbeddingsDispatch {
-    /// Send the result back to the caller.
-    pub fn send_result(self, result: Result<Vec<Embedding>>) {
-        let _ = self.result_tx.send(result);
-    }
-}
-
 #[async_trait::async_trait]
 impl QueryExecutor for FindEmbeddings {
     type Output = Vec<Embedding>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         Ok(storage.cache().find(&self.filter))
-    }
-
-    fn timeout(&self) -> Duration {
-        Duration::from_secs(5)
-    }
-}
-
-#[async_trait::async_trait]
-impl QueryProcessor for FindEmbeddingsDispatch {
-    async fn process_and_send(self, storage: &Storage) {
-        let result = self.params.result(storage).await;
-        self.send_result(result);
     }
 }
 
@@ -790,343 +600,171 @@ impl SearchKNN {
     }
 }
 
-/// Dispatch wrapper with oneshot channel for SearchKNN.
-///
-/// Unlike point lookups that only need Storage, SearchKNN requires a Processor
-/// for HNSW index access. The dispatch wraps the query along with a reference
-/// to the processor.
-/// Internal dispatch wrapper - users should use `SearchKNN::run()` instead.
-pub(crate) struct SearchKNNDispatch {
-    pub(crate) params: SearchKNN,
-    pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<Vec<SearchResult>>>,
-    pub(crate) processor: Arc<Processor>,
-}
-
-impl std::fmt::Debug for SearchKNNDispatch {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SearchKNNDispatch")
-            .field("params", &self.params)
-            .field("timeout", &self.timeout)
-            .field("result_tx", &"<oneshot::Sender>")
-            .field("processor", &"<Arc<Processor>>")
-            .finish()
-    }
-}
-
-impl SearchKNNDispatch {
-    /// Create a new dispatch wrapper.
-    pub fn new(
-        params: SearchKNN,
-        timeout: Duration,
-        processor: Arc<Processor>,
-    ) -> (Self, oneshot::Receiver<Result<Vec<SearchResult>>>) {
-        let (tx, rx) = oneshot::channel();
-        (
-            Self {
-                params,
-                timeout,
-                result_tx: tx,
-                processor,
-            },
-            rx,
-        )
-    }
-
-    /// Send the result back to the caller.
-    pub fn send_result(self, result: Result<Vec<SearchResult>>) {
-        let _ = self.result_tx.send(result);
-    }
-}
-
-#[async_trait::async_trait]
-impl QueryProcessor for SearchKNNDispatch {
-    async fn process_and_send(self, _storage: &Storage) {
-        // Use processor directly instead of storage
-        let result = self.params.execute_with_processor(&self.processor);
-        self.send_result(result);
-    }
-}
-
 // ============================================================================
-// Runnable Implementation for SearchKNN
+// QueryReply - typed replies for vector queries
 // ============================================================================
 
-/// Runnable implementation for SearchKNN with Reader.
-///
-/// This allows the ergonomic pattern:
-/// ```rust,ignore
-/// let results = SearchKNN::new(&embedding, query, 10)
-///     .with_ef(100)
-///     .run(&reader, timeout)
-///     .await?;
-/// ```
-#[async_trait::async_trait]
-impl crate::reader::Runnable<super::reader::Reader> for SearchKNN {
-    type Output = Vec<SearchResult>;
+pub type QueryRequest = RequestEnvelope<Query>;
 
-    async fn run(
-        self,
-        reader: &super::reader::Reader,
-        timeout: Duration,
-    ) -> Result<Self::Output> {
-        let (dispatch, rx) =
-            SearchKNNDispatch::new(self, timeout, reader.processor().clone());
-
-        reader
-            .send_query(Query::SearchKNN(dispatch))
-            .await
-            .context("Failed to send SearchKNN query")?;
-
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(anyhow::anyhow!("SearchKNN query channel closed")),
-            Err(_) => Err(anyhow::anyhow!("SearchKNN query timeout after {:?}", timeout)),
-        }
-    }
+pub trait QueryReply: Send {
+    type Reply: Send + 'static;
+    fn into_query(self) -> Query;
+    fn from_result(result: QueryResult) -> Result<Self::Reply>;
 }
 
-// ============================================================================
-// Runnable Implementations for Point Lookups
-// ============================================================================
-
-/// Runnable implementation for GetVector.
-///
-/// # Example
-/// ```rust,ignore
-/// let vector = GetVector::new(embedding.code(), id)
-///     .run(&reader, timeout)
-///     .await?;
-/// ```
 #[async_trait::async_trait]
-impl crate::reader::Runnable<super::reader::Reader> for GetVector {
-    type Output = Option<Vec<f32>>;
+impl<Q> crate::reader::Runnable<super::reader::Reader> for Q
+where
+    Q: QueryReply,
+{
+    type Output = Q::Reply;
 
-    async fn run(
-        self,
-        reader: &super::reader::Reader,
-        timeout: Duration,
-    ) -> Result<Self::Output> {
-        let (tx, rx) = oneshot::channel();
-        let dispatch = GetVectorDispatch {
-            params: self,
-            timeout,
-            result_tx: tx,
+    async fn run(self, reader: &super::reader::Reader, timeout: Duration) -> Result<Self::Output> {
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let request = QueryRequest {
+            payload: self.into_query(),
+            options: (),
+            reply: Some(result_tx),
+            timeout: Some(timeout),
+            request_id: new_request_id(),
+            created_at: Instant::now(),
         };
 
-        reader
-            .send_query(Query::GetVector(dispatch))
-            .await
-            .context("Failed to send GetVector query")?;
-
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(anyhow::anyhow!("GetVector query channel closed")),
-            Err(_) => Err(anyhow::anyhow!("GetVector query timeout after {:?}", timeout)),
-        }
+        reader.send_query(request).await?;
+        let result = result_rx.await??;
+        Q::from_result(result)
     }
 }
-
-/// Runnable implementation for GetInternalId.
-///
-/// # Example
-/// ```rust,ignore
-/// let vec_id = GetInternalId::new(embedding.code(), external_id)
-///     .run(&reader, timeout)
-///     .await?;
-/// ```
-#[async_trait::async_trait]
-impl crate::reader::Runnable<super::reader::Reader> for GetInternalId {
-    type Output = Option<VecId>;
-
-    async fn run(
-        self,
-        reader: &super::reader::Reader,
-        timeout: Duration,
-    ) -> Result<Self::Output> {
-        let (tx, rx) = oneshot::channel();
-        let dispatch = GetInternalIdDispatch {
-            params: self,
-            timeout,
-            result_tx: tx,
-        };
-
-        reader
-            .send_query(Query::GetInternalId(dispatch))
-            .await
-            .context("Failed to send GetInternalId query")?;
-
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(anyhow::anyhow!("GetInternalId query channel closed")),
-            Err(_) => Err(anyhow::anyhow!("GetInternalId query timeout after {:?}", timeout)),
-        }
-    }
-}
-
-/// Runnable implementation for GetExternalId.
-///
-/// # Example
-/// ```rust,ignore
-/// let external_id = GetExternalId::new(embedding.code(), vec_id)
-///     .run(&reader, timeout)
-///     .await?;
-/// ```
-#[async_trait::async_trait]
-impl crate::reader::Runnable<super::reader::Reader> for GetExternalId {
-    type Output = Option<ExternalKey>;
-
-    async fn run(
-        self,
-        reader: &super::reader::Reader,
-        timeout: Duration,
-    ) -> Result<Self::Output> {
-        let (tx, rx) = oneshot::channel();
-        let dispatch = GetExternalIdDispatch {
-            params: self,
-            timeout,
-            result_tx: tx,
-        };
-
-        reader
-            .send_query(Query::GetExternalId(dispatch))
-            .await
-            .context("Failed to send GetExternalId query")?;
-
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(anyhow::anyhow!("GetExternalId query channel closed")),
-            Err(_) => Err(anyhow::anyhow!("GetExternalId query timeout after {:?}", timeout)),
-        }
-    }
-}
-
-/// Runnable implementation for ResolveIds.
-///
-/// # Example
-/// ```rust,ignore
-/// let external_ids = ResolveIds::new(embedding.code(), vec_ids)
-///     .run(&reader, timeout)
-///     .await?;
-/// ```
-#[async_trait::async_trait]
-impl crate::reader::Runnable<super::reader::Reader> for ResolveIds {
-    type Output = Vec<Option<ExternalKey>>;
-
-    async fn run(
-        self,
-        reader: &super::reader::Reader,
-        timeout: Duration,
-    ) -> Result<Self::Output> {
-        let (tx, rx) = oneshot::channel();
-        let dispatch = ResolveIdsDispatch {
-            params: self,
-            timeout,
-            result_tx: tx,
-        };
-
-        reader
-            .send_query(Query::ResolveIds(dispatch))
-            .await
-            .context("Failed to send ResolveIds query")?;
-
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(anyhow::anyhow!("ResolveIds query channel closed")),
-            Err(_) => Err(anyhow::anyhow!("ResolveIds query timeout after {:?}", timeout)),
-        }
-    }
-}
-
-/// Runnable implementation for ListEmbeddings.
-///
-/// # Example
-/// ```rust,ignore
-/// let embeddings = ListEmbeddings::new()
-///     .run(&reader, timeout)
-///     .await?;
-/// ```
-#[async_trait::async_trait]
-impl crate::reader::Runnable<super::reader::Reader> for ListEmbeddings {
-    type Output = Vec<Embedding>;
-
-    async fn run(
-        self,
-        reader: &super::reader::Reader,
-        timeout: Duration,
-    ) -> Result<Self::Output> {
-        let (tx, rx) = oneshot::channel();
-        let dispatch = ListEmbeddingsDispatch {
-            params: self,
-            timeout,
-            result_tx: tx,
-        };
-
-        reader
-            .send_query(Query::ListEmbeddings(dispatch))
-            .await
-            .context("Failed to send ListEmbeddings query")?;
-
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(anyhow::anyhow!("ListEmbeddings query channel closed")),
-            Err(_) => Err(anyhow::anyhow!("ListEmbeddings query timeout after {:?}", timeout)),
-        }
-    }
-}
-
-/// Runnable implementation for FindEmbeddings.
-///
-/// # Example
-/// ```rust,ignore
-/// let embeddings = FindEmbeddings::new(
-///     EmbeddingFilter::default().distance(Distance::Cosine)
-/// ).run(&reader, timeout).await?;
-/// ```
-#[async_trait::async_trait]
-impl crate::reader::Runnable<super::reader::Reader> for FindEmbeddings {
-    type Output = Vec<Embedding>;
-
-    async fn run(
-        self,
-        reader: &super::reader::Reader,
-        timeout: Duration,
-    ) -> Result<Self::Output> {
-        let (tx, rx) = oneshot::channel();
-        let dispatch = FindEmbeddingsDispatch {
-            params: self,
-            timeout,
-            result_tx: tx,
-        };
-
-        reader
-            .send_query(Query::FindEmbeddings(dispatch))
-            .await
-            .context("Failed to send FindEmbeddings query")?;
-
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(anyhow::anyhow!("FindEmbeddings query channel closed")),
-            Err(_) => Err(anyhow::anyhow!("FindEmbeddings query timeout after {:?}", timeout)),
-        }
-    }
-}
-
-// ============================================================================
-// Query Dispatch
-// ============================================================================
 
 impl Query {
-    /// Process this query and send the result.
-    pub async fn process(self, storage: &Storage) {
+    pub async fn execute_with_storage(&self, storage: &Storage) -> Result<QueryResult> {
         match self {
-            Query::GetVector(dispatch) => dispatch.process_and_send(storage).await,
-            Query::GetInternalId(dispatch) => dispatch.process_and_send(storage).await,
-            Query::GetExternalId(dispatch) => dispatch.process_and_send(storage).await,
-            Query::ResolveIds(dispatch) => dispatch.process_and_send(storage).await,
-            Query::ListEmbeddings(dispatch) => dispatch.process_and_send(storage).await,
-            Query::FindEmbeddings(dispatch) => dispatch.process_and_send(storage).await,
-            Query::SearchKNN(dispatch) => dispatch.process_and_send(storage).await,
+            Query::GetVector(q) => q.execute(storage).await.map(QueryResult::GetVector),
+            Query::GetInternalId(q) => q.execute(storage).await.map(QueryResult::GetInternalId),
+            Query::GetExternalId(q) => q.execute(storage).await.map(QueryResult::GetExternalId),
+            Query::ResolveIds(q) => q.execute(storage).await.map(QueryResult::ResolveIds),
+            Query::ListEmbeddings(q) => q.execute(storage).await.map(QueryResult::ListEmbeddings),
+            Query::FindEmbeddings(q) => q.execute(storage).await.map(QueryResult::FindEmbeddings),
+            Query::SearchKNN(_) => Err(anyhow::anyhow!(
+                "SearchKNN requires a Processor-backed reader"
+            )),
+        }
+    }
+
+    pub(crate) async fn execute_with_processor(
+        &self,
+        processor: &Processor,
+    ) -> Result<QueryResult> {
+        match self {
+            Query::SearchKNN(q) => q
+                .execute_with_processor(processor)
+                .map(QueryResult::SearchKNN),
+            _ => self.execute_with_storage(processor.storage()).await,
+        }
+    }
+}
+
+impl QueryReply for GetVector {
+    type Reply = Option<Vec<f32>>;
+
+    fn into_query(self) -> Query {
+        Query::GetVector(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::GetVector(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
+    }
+}
+
+impl QueryReply for GetInternalId {
+    type Reply = Option<VecId>;
+
+    fn into_query(self) -> Query {
+        Query::GetInternalId(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::GetInternalId(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
+    }
+}
+
+impl QueryReply for GetExternalId {
+    type Reply = Option<ExternalKey>;
+
+    fn into_query(self) -> Query {
+        Query::GetExternalId(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::GetExternalId(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
+    }
+}
+
+impl QueryReply for ResolveIds {
+    type Reply = Vec<Option<ExternalKey>>;
+
+    fn into_query(self) -> Query {
+        Query::ResolveIds(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::ResolveIds(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
+    }
+}
+
+impl QueryReply for ListEmbeddings {
+    type Reply = Vec<Embedding>;
+
+    fn into_query(self) -> Query {
+        Query::ListEmbeddings(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::ListEmbeddings(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
+    }
+}
+
+impl QueryReply for FindEmbeddings {
+    type Reply = Vec<Embedding>;
+
+    fn into_query(self) -> Query {
+        Query::FindEmbeddings(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::FindEmbeddings(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
+    }
+}
+
+impl QueryReply for SearchKNN {
+    type Reply = Vec<SearchResult>;
+
+    fn into_query(self) -> Query {
+        Query::SearchKNN(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::SearchKNN(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
         }
     }
 }
@@ -1175,62 +813,27 @@ mod tests {
         let id = Id::new();
 
         // Test GetVector display
-        let (tx, _rx) = oneshot::channel();
-        let query = Query::GetVector(GetVectorDispatch {
-            params: GetVector::new(1, id),
-            timeout: Duration::from_secs(5),
-            result_tx: tx,
-        });
+        let query = Query::GetVector(GetVector::new(1, id));
         let display = format!("{}", query);
         assert!(display.contains("GetVector"));
         assert!(display.contains("embedding=1"));
 
         // Test GetInternalId display
-        let (tx, _rx) = oneshot::channel();
-        let query = Query::GetInternalId(GetInternalIdDispatch {
-            params: GetInternalId::new(2, ExternalKey::NodeId(id)),
-            timeout: Duration::from_secs(5),
-            result_tx: tx,
-        });
+        let query = Query::GetInternalId(GetInternalId::new(2, ExternalKey::NodeId(id)));
         let display = format!("{}", query);
         assert!(display.contains("GetInternalId"));
         assert!(display.contains("embedding=2"));
 
         // Test GetExternalId display
-        let (tx, _rx) = oneshot::channel();
-        let query = Query::GetExternalId(GetExternalIdDispatch {
-            params: GetExternalId::new(3, 100),
-            timeout: Duration::from_secs(5),
-            result_tx: tx,
-        });
+        let query = Query::GetExternalId(GetExternalId::new(3, 100));
         let display = format!("{}", query);
         assert!(display.contains("GetExternalId"));
         assert!(display.contains("vec_id=100"));
 
         // Test ResolveIds display
-        let (tx, _rx) = oneshot::channel();
-        let query = Query::ResolveIds(ResolveIdsDispatch {
-            params: ResolveIds::new(4, vec![1, 2, 3]),
-            timeout: Duration::from_secs(10),
-            result_tx: tx,
-        });
+        let query = Query::ResolveIds(ResolveIds::new(4, vec![1, 2, 3]));
         let display = format!("{}", query);
         assert!(display.contains("ResolveIds"));
         assert!(display.contains("count=3"));
-    }
-
-    #[test]
-    fn test_query_timeout() {
-        let query = GetVector::new(1, Id::new());
-        assert_eq!(QueryExecutor::timeout(&query), Duration::from_secs(5));
-
-        let query = GetInternalId::new(1, ExternalKey::NodeId(Id::new()));
-        assert_eq!(QueryExecutor::timeout(&query), Duration::from_secs(5));
-
-        let query = GetExternalId::new(1, 0);
-        assert_eq!(QueryExecutor::timeout(&query), Duration::from_secs(5));
-
-        let query = ResolveIds::new(1, vec![1, 2, 3]);
-        assert_eq!(QueryExecutor::timeout(&query), Duration::from_secs(10));
     }
 }

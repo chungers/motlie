@@ -26,8 +26,8 @@ mod tests {
     use crate::vector::hnsw::{self, insert};
     use crate::vector::id::IdAllocator;
     use crate::vector::schema::{
-        EmbeddingCode, EmbeddingSpec, GraphMeta, GraphMetaCfKey, GraphMetaField, IdForward,
-        IdForwardCfKey, VecId, VectorCfKey, VectorElementType, Vectors,
+        EmbeddingCode, EmbeddingSpec, GraphMeta, GraphMetaCfKey, GraphMetaField, VecId,
+        VectorCfKey, VectorElementType, Vectors,
     };
     use crate::vector::{Distance, Storage};
 
