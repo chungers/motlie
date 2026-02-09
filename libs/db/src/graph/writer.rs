@@ -288,12 +288,6 @@ impl Writer {
         self.transaction_forward_to = Some(sender);
     }
 
-    /// Get the processor if configured.
-    /// (claude, 2026-02-07, FIXED: P2.2 - Processor accessor)
-    pub(crate) fn processor(&self) -> Option<&Arc<GraphProcessor>> {
-        self.processor.as_ref()
-    }
-
     /// Begin a transaction for read-your-writes semantics.
     ///
     /// The returned Transaction allows interleaved writes and reads
@@ -886,25 +880,6 @@ pub(crate) fn spawn_mutation_consumer_with_processor(
     let handle = spawn_consumer(consumer);
 
     (writer, handle)
-}
-
-/// Create a mutation writer and spawn consumer with processor, also returning the processor.
-///
-/// Convenience helper that returns all components for subsystem integration.
-///
-/// # Arguments
-/// * `storage` - Shared storage instance
-/// * `config` - Writer configuration
-///
-/// # Returns
-/// Tuple of (Writer, Arc<GraphProcessor>, JoinHandle)
-pub(crate) fn create_mutation_writer_with_processor(
-    storage: Arc<Storage>,
-    config: WriterConfig,
-) -> (Writer, Arc<GraphProcessor>, JoinHandle<Result<()>>) {
-    let processor = Arc::new(GraphProcessor::new(storage));
-    let (writer, handle) = spawn_mutation_consumer_with_processor(processor.clone(), config);
-    (writer, processor, handle)
 }
 
 // ============================================================================
