@@ -174,16 +174,11 @@ impl Processor {
         let txn_db = self.storage.transaction_db()?;
         let txn = txn_db.transaction();
 
-        // Each mutation executes itself with cache access for name deduplication
-        let mut replies = Vec::with_capacity(mutations.len());
+        // Each mutation executes itself with processor access (aligned with vector pattern)
+        let mut results = Vec::with_capacity(mutations.len());
         for mutation in mutations {
-            let reply = mutation.execute_with_cache_and_options(
-                &txn,
-                txn_db,
-                &self.name_cache,
-                options,
-            )?;
-            replies.push(reply);
+            let outcome = mutation.execute(&txn, txn_db, self)?;
+            results.push(outcome.result);
         }
 
         // Single commit for all mutations
@@ -197,7 +192,7 @@ impl Processor {
             "[Processor] Successfully processed mutations"
         );
 
-        Ok(replies)
+        Ok(results)
     }
 
     /// Execute a single mutation in a new transaction.

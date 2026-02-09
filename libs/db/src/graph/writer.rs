@@ -19,8 +19,7 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
-use super::mutation::{ExecOptions, FlushMarker, Mutation, MutationResult};
-use super::name_hash::NameCache;
+use super::mutation::{ExecOptions, FlushMarker, Mutation, MutationOutcome, MutationResult};
 use super::processor::Processor as GraphProcessor;
 use super::transaction::Transaction;
 use super::Storage;
@@ -35,58 +34,30 @@ use crate::request::{new_request_id, ReplyEnvelope, RequestEnvelope};
 /// This trait defines HOW to write the mutation to the database.
 /// Each mutation type knows how to execute its own database write operations.
 ///
-/// Following the same pattern as QueryExecutor for queries.
+/// # Design
+///
+/// This trait follows the processor-centric pattern (aligned with vector crate):
+/// - Single `execute` method takes processor reference
+/// - Processor provides all context (storage, caches)
+/// - Returns `MutationOutcome` with result
+///
 /// Note: This is synchronous because RocksDB operations are blocking.
 pub trait MutationExecutor: Send + Sync {
     /// Execute this mutation directly against a RocksDB transaction.
-    /// Each mutation type knows how to write itself to storage.
+    ///
+    /// # Arguments
+    /// * `txn` - Active RocksDB transaction
+    /// * `txn_db` - TransactionDB for CF handles
+    /// * `processor` - Processor providing context (name cache, storage)
+    ///
+    /// # Returns
+    /// * `MutationOutcome` containing the result
     fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
-    ) -> Result<()>;
-
-    /// Execute this mutation with runtime options, returning a reply payload.
-    ///
-    /// Default implementation delegates to `execute()` and returns an empty reply.
-    fn execute_with_options(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        _options: ExecOptions,
-    ) -> Result<MutationResult> {
-        self.execute(txn, txn_db)?;
-        Ok(MutationResult::Flush)
-    }
-
-    /// Execute this mutation with access to the name cache.
-    ///
-    /// The cache is used to:
-    /// 1. Skip redundant Names CF writes for already-interned names
-    /// 2. Intern new names for future lookups
-    ///
-    /// Default implementation delegates to `execute()` (ignoring the cache).
-    fn execute_with_cache(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        _cache: &NameCache,
-    ) -> Result<()> {
-        self.execute(txn, txn_db)
-    }
-
-    /// Execute with cache and runtime options, returning a reply payload.
-    ///
-    /// Default implementation ignores cache and delegates to execute_with_options().
-    fn execute_with_cache_and_options(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        _cache: &NameCache,
-        options: ExecOptions,
-    ) -> Result<MutationResult> {
-        self.execute_with_options(txn, txn_db, options)
-    }
+        processor: &GraphProcessor,
+    ) -> Result<MutationOutcome>;
 }
 
 // ============================================================================
@@ -112,7 +83,7 @@ pub trait MutationExecutor: Send + Sync {
 ///         let txn = txn_db.transaction();
 ///
 ///         for mutation in mutations {
-///             mutation.execute_with_cache(&txn, txn_db, self.name_cache())?;
+///             mutation.execute(&txn, txn_db, self)?;  // Processor-centric pattern
 ///         }
 ///
 ///         txn.commit()?;  // Single commit for entire batch
@@ -120,7 +91,6 @@ pub trait MutationExecutor: Send + Sync {
 ///     }
 /// }
 /// ```
-// (claude, 2026-02-07, FIXED: Updated example to use graph::Processor instead of Graph per codex eval)
 #[async_trait::async_trait]
 pub trait Processor: Send + Sync {
     /// Process a batch of mutations atomically.
@@ -333,9 +303,8 @@ impl Writer {
 
         let txn_db = processor.transaction_db()?;
         let txn = txn_db.transaction();
-        let name_cache = processor.name_cache().clone();
 
-        Ok(Transaction::new(txn, txn_db, self.transaction_forward_to.clone(), name_cache))
+        Ok(Transaction::new(txn, txn_db, self.transaction_forward_to.clone(), processor.clone()))
     }
 
     /// Check if transactions are supported by this writer.

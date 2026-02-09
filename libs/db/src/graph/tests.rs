@@ -1370,14 +1370,18 @@ use tokio::time::Duration;
     #[test]
     fn test_add_node_with_no_summary_and_query() {
         use crate::graph::mutation::AddNode;
+        use crate::graph::processor::Processor;
         use crate::graph::query::{NodeById, TransactionQueryExecutor};
         use crate::graph::writer::MutationExecutor;
         use crate::graph::Storage;
         use crate::{DataUrl, Id, TimestampMilli};
+        use std::sync::Arc;
 
         let temp_dir = tempfile::tempdir().unwrap();
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().unwrap();
+        let storage = Arc::new(storage);
+        let processor = Processor::new(storage.clone());
 
         // Create a node with an empty summary
         let node_id = Id::new();
@@ -1395,7 +1399,7 @@ use tokio::time::Duration;
         let txn_db = storage.transaction_db().unwrap();
         let txn = txn_db.transaction();
 
-        add_node.execute(&txn, txn_db).unwrap();
+        add_node.execute(&txn, txn_db, &processor).unwrap();
 
         // Query the node back using transaction executor
         let query = NodeById::new(node_id, None);
@@ -1413,14 +1417,18 @@ use tokio::time::Duration;
     #[test]
     fn test_add_edge_with_no_summary_and_query() {
         use crate::graph::mutation::{AddEdge, AddNode};
+        use crate::graph::processor::Processor;
         use crate::graph::query::{EdgeSummaryBySrcDstName, TransactionQueryExecutor};
         use crate::graph::writer::MutationExecutor;
         use crate::graph::Storage;
         use crate::{DataUrl, Id, TimestampMilli};
+        use std::sync::Arc;
 
         let temp_dir = tempfile::tempdir().unwrap();
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().unwrap();
+        let storage = Arc::new(storage);
+        let processor = Processor::new(storage.clone());
 
         // Create source and destination nodes first
         let src_id = Id::new();
@@ -1458,9 +1466,9 @@ use tokio::time::Duration;
         let txn_db = storage.transaction_db().unwrap();
         let txn = txn_db.transaction();
 
-        add_src.execute(&txn, txn_db).unwrap();
-        add_dst.execute(&txn, txn_db).unwrap();
-        add_edge.execute(&txn, txn_db).unwrap();
+        add_src.execute(&txn, txn_db, &processor).unwrap();
+        add_dst.execute(&txn, txn_db, &processor).unwrap();
+        add_edge.execute(&txn, txn_db, &processor).unwrap();
 
         // Query the edge back using transaction executor
         let query = EdgeSummaryBySrcDstName::new(src_id, dst_id, "CONNECTS".to_string(), None);
@@ -1477,14 +1485,18 @@ use tokio::time::Duration;
     #[test]
     fn test_add_node_with_summary_and_query() {
         use crate::graph::mutation::AddNode;
+        use crate::graph::processor::Processor;
         use crate::graph::query::{NodeById, TransactionQueryExecutor};
         use crate::graph::writer::MutationExecutor;
         use crate::graph::Storage;
         use crate::{DataUrl, Id, TimestampMilli};
+        use std::sync::Arc;
 
         let temp_dir = tempfile::tempdir().unwrap();
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().unwrap();
+        let storage = Arc::new(storage);
+        let processor = Processor::new(storage.clone());
 
         // Create a node with a non-empty summary
         let node_id = Id::new();
@@ -1503,7 +1515,7 @@ use tokio::time::Duration;
         let txn_db = storage.transaction_db().unwrap();
         let txn = txn_db.transaction();
 
-        add_node.execute(&txn, txn_db).unwrap();
+        add_node.execute(&txn, txn_db, &processor).unwrap();
 
         // Query the node back using transaction executor
         let query = NodeById::new(node_id, None);
@@ -1522,14 +1534,18 @@ use tokio::time::Duration;
     #[test]
     fn test_add_edge_with_summary_and_query() {
         use crate::graph::mutation::{AddEdge, AddNode};
+        use crate::graph::processor::Processor;
         use crate::graph::query::{EdgeSummaryBySrcDstName, TransactionQueryExecutor};
         use crate::graph::writer::MutationExecutor;
         use crate::graph::Storage;
         use crate::{DataUrl, Id, TimestampMilli};
+        use std::sync::Arc;
 
         let temp_dir = tempfile::tempdir().unwrap();
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().unwrap();
+        let storage = Arc::new(storage);
+        let processor = Processor::new(storage.clone());
 
         // Create source and destination nodes first
         let src_id = Id::new();
@@ -1568,9 +1584,9 @@ use tokio::time::Duration;
         let txn_db = storage.transaction_db().unwrap();
         let txn = txn_db.transaction();
 
-        add_src.execute(&txn, txn_db).unwrap();
-        add_dst.execute(&txn, txn_db).unwrap();
-        add_edge.execute(&txn, txn_db).unwrap();
+        add_src.execute(&txn, txn_db, &processor).unwrap();
+        add_dst.execute(&txn, txn_db, &processor).unwrap();
+        add_edge.execute(&txn, txn_db, &processor).unwrap();
 
         // Query the edge back using transaction executor
         let query = EdgeSummaryBySrcDstName::new(src_id, dst_id, "STRONG_LINK".to_string(), None);
@@ -1589,15 +1605,19 @@ use tokio::time::Duration;
     #[test]
     fn test_summary_deduplication() {
         use crate::graph::mutation::AddNode;
+        use crate::graph::processor::Processor;
         use crate::graph::query::{NodeById, TransactionQueryExecutor};
         use crate::graph::writer::MutationExecutor;
         use crate::graph::Storage;
         use crate::graph::SummaryHash;
         use crate::{DataUrl, Id, TimestampMilli};
+        use std::sync::Arc;
 
         let temp_dir = tempfile::tempdir().unwrap();
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().unwrap();
+        let storage = Arc::new(storage);
+        let processor = Processor::new(storage.clone());
 
         // Create two nodes with the SAME summary content
         let shared_summary = DataUrl::from_markdown("This is a shared summary.");
@@ -1624,8 +1644,8 @@ use tokio::time::Duration;
         let txn_db = storage.transaction_db().unwrap();
         let txn = txn_db.transaction();
 
-        add_node1.execute(&txn, txn_db).unwrap();
-        add_node2.execute(&txn, txn_db).unwrap();
+        add_node1.execute(&txn, txn_db, &processor).unwrap();
+        add_node2.execute(&txn, txn_db, &processor).unwrap();
 
         // Both nodes should return the same summary content
         let query1 = NodeById::new(node1_id, None);
@@ -1660,6 +1680,7 @@ use tokio::time::Duration;
     #[test]
     fn test_summary_sharing_and_update() {
         use crate::graph::mutation::AddNode;
+        use crate::graph::processor::Processor;
         use crate::graph::schema::{
             NodeCfKey, NodeCfValue, NodeSummaries, NodeSummaryCfKey, NodeSummaryCfValue, Nodes,
         };
@@ -1668,10 +1689,13 @@ use tokio::time::Duration;
         use crate::graph::Storage;
         use crate::graph::SummaryHash;
         use crate::{DataUrl, Id, TimestampMilli};
+        use std::sync::Arc;
 
         let temp_dir = tempfile::tempdir().unwrap();
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().unwrap();
+        let storage = Arc::new(storage);
+        let processor = Processor::new(storage.clone());
 
         // Create two nodes with the SAME summary content
         let shared_summary = DataUrl::from_markdown("This is a shared summary for testing.");
@@ -1698,8 +1722,8 @@ use tokio::time::Duration;
         let txn_db = storage.transaction_db().unwrap();
         let txn = txn_db.transaction();
 
-        add_node1.execute(&txn, txn_db).unwrap();
-        add_node2.execute(&txn, txn_db).unwrap();
+        add_node1.execute(&txn, txn_db, &processor).unwrap();
+        add_node2.execute(&txn, txn_db, &processor).unwrap();
         txn.commit().unwrap();
 
         // ========================================================================
