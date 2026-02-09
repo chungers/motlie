@@ -49,7 +49,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Instant;
 
 // ============================================================================
@@ -548,6 +548,7 @@ impl VamanaIndex {
     }
 
     /// Compute distance between two nodes by ID with DB fallback
+    #[allow(dead_code)]
     async fn compute_distance_by_id_async(
         &mut self,
         reader: &Reader,
@@ -565,6 +566,7 @@ impl VamanaIndex {
     }
 
     /// Ensure a vector is loaded into cache
+    #[allow(dead_code)]
     async fn ensure_vector_cached(&mut self, reader: &Reader, node_id: &Id) {
         if self.cache.contains(node_id) {
             return;
@@ -576,6 +578,7 @@ impl VamanaIndex {
     }
 
     /// Ensure multiple vectors are loaded into cache
+    #[allow(dead_code)]
     async fn ensure_vectors_cached(&mut self, reader: &Reader, node_ids: &[Id]) {
         for id in node_ids {
             self.ensure_vector_cached(reader, id).await;

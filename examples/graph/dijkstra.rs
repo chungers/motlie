@@ -244,7 +244,7 @@ async fn main() -> Result<()> {
     let num_nodes = nodes.len();
     let num_edges = edges.len();
 
-    let name_to_id: HashMap<String, Id> = nodes
+    let _name_to_id: HashMap<String, Id> = nodes
         .iter()
         .map(|n| (n.name.clone(), n.id))
         .collect();

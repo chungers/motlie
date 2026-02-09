@@ -453,12 +453,15 @@ async fn execute_nodes_query(
 
     for hit in hits.into_iter().skip(query.offset) {
         let query = graph::query::NodeById::new(hit.id, None);
-        match graph_processor.node_by_id(&query).await {
-            Ok((name, summary, _version)) => results.push((hit.id, name, summary)),
-            Err(_) => {
+        let query = graph::query::Query::NodeById(query);
+        match query.execute_with_processor(graph_processor).await {
+            Ok(graph::query::QueryResult::NodeById((name, summary, _version))) => {
+                results.push((hit.id, name, summary))
+            }
+            Ok(_) | Err(_) => {
                 tracing::debug!(id = %hit.id, "Node in fulltext but not in graph, skipping");
             }
-        }
+        };
     }
 
     Ok(results)
@@ -484,11 +487,14 @@ async fn execute_edges_query(
             hit.edge_name.clone(),
             None,
         );
-        match graph_processor.edge_summary_by_src_dst_name(&query).await {
-            Ok((summary, _weight, _version)) => {
-                results.push((hit.src_id, hit.dst_id, hit.edge_name, summary))
-            }
-            Err(_) => {
+        let query = graph::query::Query::EdgeSummaryBySrcDstName(query);
+        match query.execute_with_processor(graph_processor).await {
+            Ok(graph::query::QueryResult::EdgeSummaryBySrcDstName((
+                summary,
+                _weight,
+                _version,
+            ))) => results.push((hit.src_id, hit.dst_id, hit.edge_name, summary)),
+            Ok(_) | Err(_) => {
                 tracing::debug!(
                     src_id = %hit.src_id,
                     dst_id = %hit.dst_id,
@@ -496,7 +502,7 @@ async fn execute_edges_query(
                     "Edge in fulltext but not in graph, skipping"
                 );
             }
-        }
+        };
     }
 
     Ok(results)

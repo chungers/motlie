@@ -42,7 +42,7 @@ async fn test_transaction_write_then_read() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("graph_db");
 
-    let (storage, writer) = setup_test_storage(&db_path);
+    let (_storage, writer) = setup_test_storage(&db_path);
 
     println!("=== Test 1: Transaction Write Then Read ===");
 
@@ -67,7 +67,7 @@ async fn test_transaction_write_then_read() {
     println!("  Written node {} (not committed)", node_id);
 
     // Read the node back - should see uncommitted write!
-    let (name, summary, _version) = txn.read(NodeById::new(node_id, None)).unwrap();
+    let (name, _summary, _version) = txn.read(NodeById::new(node_id, None)).unwrap();
     assert_eq!(name, node_name);
     println!("  Read node back: name='{}' (read-your-writes works!)", name);
 

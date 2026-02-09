@@ -86,7 +86,7 @@ async fn test_mutation_via_writer_consumer() {
 
     // Create Reader for verification
     let (search_reader, reader_rx) =
-        create_reader_with_storage(ReaderConfig::default(), storage.clone());
+        create_reader_with_storage(ReaderConfig::default());
     let _reader_handles = spawn_query_consumers_with_storage_autoreg(
         reader_rx,
         ReaderConfig::default(),
@@ -164,7 +164,7 @@ async fn test_query_via_reader_pool() {
     // Create Reader with 4-worker pool (tests MPMC distribution)
     let num_workers = 4;
     let (search_reader, reader_rx) =
-        create_reader_with_storage(ReaderConfig::default(), storage.clone());
+        create_reader_with_storage(ReaderConfig::default());
     let _reader_handles = spawn_query_consumers_with_storage_autoreg(
         reader_rx,
         ReaderConfig::default(),
@@ -230,7 +230,7 @@ async fn test_concurrent_queries_mpmc() {
     // Create Reader with 8-worker pool for concurrent queries
     let num_workers = 8;
     let (search_reader, reader_rx) =
-        create_reader_with_storage(ReaderConfig::default(), storage.clone());
+        create_reader_with_storage(ReaderConfig::default());
     let _reader_handles = spawn_query_consumers_with_storage_autoreg(
         reader_rx,
         ReaderConfig::default(),
@@ -402,7 +402,7 @@ async fn test_writer_flush_semantics() {
     );
 
     let (search_reader, reader_rx) =
-        create_reader_with_storage(ReaderConfig::default(), storage.clone());
+        create_reader_with_storage(ReaderConfig::default());
     let _reader_handles = spawn_query_consumers_with_storage_autoreg(
         reader_rx,
         ReaderConfig::default(),
@@ -446,7 +446,7 @@ async fn test_channel_close_propagation() {
     let temp_dir = TempDir::new().expect("temp dir");
     let mut storage = Storage::readwrite(temp_dir.path());
     storage.ready().expect("storage ready");
-    let storage = Arc::new(storage);
+    let _storage = Arc::new(storage);
 
     // Create Writer but don't spawn consumer (simulates consumer shutdown)
     let (writer, receiver) = create_writer(WriterConfig::default());
@@ -466,7 +466,7 @@ async fn test_channel_close_propagation() {
 
     // Same test for Reader
     let (search_reader, query_receiver) =
-        create_reader_with_storage(ReaderConfig::default(), storage.clone());
+        create_reader_with_storage(ReaderConfig::default());
 
     assert!(
         !search_reader.is_closed(),
@@ -514,7 +514,7 @@ async fn test_concurrent_deletes_vs_searches() {
 
     // Create Reader with 4-worker pool
     let (search_reader, reader_rx) =
-        create_reader_with_storage(ReaderConfig::default(), storage.clone());
+        create_reader_with_storage(ReaderConfig::default());
     let _reader_handles = spawn_query_consumers_with_storage_autoreg(
         reader_rx,
         ReaderConfig::default(),

@@ -166,6 +166,7 @@ async fn bfs_motlie(
 /// Calculate the distance (level) from start node to each visited node
 ///
 /// Uses level-order processing with NodesByIdsMulti for efficient batch lookups.
+#[allow(dead_code)]
 async fn bfs_with_levels(
     start_node: Id,
     reader: &motlie_db::reader::Reader,

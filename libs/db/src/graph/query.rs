@@ -15,16 +15,14 @@ use std::ops::Bound;
 use std::time::Duration;
 
 use super::name_hash::NameHash;
-use super::ops::name::{resolve_name, resolve_name_from_txn};
+use super::ops::name::resolve_name_from_txn;
 use super::ops::read::{find_edge_version, find_node_version, StorageAccess};
 use super::ops::summary::{
-    resolve_edge_summary, resolve_edge_summary_from_txn, resolve_node_summary,
-    resolve_node_summary_from_txn,
+    resolve_edge_summary_from_txn, resolve_node_summary_from_txn,
 };
 use super::ops::util::timestamp_in_range;
 use super::processor::Processor as GraphProcessor;
 use super::reader::{QueryExecutor, QueryRequest};
-use super::scan::{self, Visitable};
 use super::summary_hash::SummaryHash;
 use super::HotColumnFamilyRecord;
 use super::Storage;
@@ -111,48 +109,6 @@ pub trait TransactionQueryExecutor: Send + Sync {
         txn_db: &rocksdb::TransactionDB,
         cache: &super::name_hash::NameCache,
     ) -> Result<Self::Output>;
-}
-
-/// Macro to iterate over a column family in both readonly and readwrite storage modes
-/// This reduces boilerplate for the common pattern of handling both DB and TransactionDB
-/// The process_body should be a block of code that can access variables from the enclosing scope
-macro_rules! iterate_cf {
-    ($storage:expr, $cf_type:ty, $start_key:expr, |$item:ident| $process_body:block) => {{
-        if let Ok(db) = $storage.db() {
-            let cf = db
-                .cf_handle(<$cf_type>::CF_NAME)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Column family '{}' not found",
-                        <$cf_type>::CF_NAME
-                    )
-                })?;
-
-            let iter = db.iterator_cf(
-                cf,
-                rocksdb::IteratorMode::From(&$start_key, rocksdb::Direction::Forward),
-            );
-
-            for $item in iter $process_body
-        } else {
-            let txn_db = $storage.transaction_db()?;
-            let cf = txn_db
-                .cf_handle(<$cf_type>::CF_NAME)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Column family '{}' not found",
-                        <$cf_type>::CF_NAME
-                    )
-                })?;
-
-            let iter = txn_db.iterator_cf(
-                cf,
-                rocksdb::IteratorMode::From(&$start_key, rocksdb::Direction::Forward),
-            );
-
-            for $item in iter $process_body
-        }
-    }};
 }
 
 // ============================================================================
@@ -243,8 +199,40 @@ pub enum QueryResult {
 }
 
 impl Query {
-    pub async fn execute(&self, processor: &GraphProcessor) -> Result<QueryResult> {
-        processor.execute_query(self).await
+    pub async fn execute_with_storage(&self, storage: &Storage) -> Result<QueryResult> {
+        match self {
+            Query::NodeById(q) => q.execute(storage).await.map(QueryResult::NodeById),
+            Query::NodesByIdsMulti(q) => q
+                .execute(storage)
+                .await
+                .map(QueryResult::NodesByIdsMulti),
+            Query::EdgeSummaryBySrcDstName(q) => q
+                .execute(storage)
+                .await
+                .map(QueryResult::EdgeSummaryBySrcDstName),
+            Query::NodeFragmentsByIdTimeRange(q) => q
+                .execute(storage)
+                .await
+                .map(QueryResult::NodeFragmentsByIdTimeRange),
+            Query::EdgeFragmentsByIdTimeRange(q) => q
+                .execute(storage)
+                .await
+                .map(QueryResult::EdgeFragmentsByIdTimeRange),
+            Query::OutgoingEdges(q) => q.execute(storage).await.map(QueryResult::OutgoingEdges),
+            Query::IncomingEdges(q) => q.execute(storage).await.map(QueryResult::IncomingEdges),
+            Query::AllNodes(q) => q.execute(storage).await.map(QueryResult::AllNodes),
+            Query::AllEdges(q) => q.execute(storage).await.map(QueryResult::AllEdges),
+            Query::NodesBySummaryHash(q) => {
+                q.execute(storage).await.map(QueryResult::NodesBySummaryHash)
+            }
+            Query::EdgesBySummaryHash(q) => {
+                q.execute(storage).await.map(QueryResult::EdgesBySummaryHash)
+            }
+        }
+    }
+
+    pub async fn execute_with_processor(&self, processor: &GraphProcessor) -> Result<QueryResult> {
+        self.execute_with_storage(processor.storage()).await
     }
 }
 
@@ -959,60 +947,7 @@ impl QueryExecutor for NodeById {
     type Output = (NodeName, NodeSummary, Version);
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let params = self;
-        tracing::debug!(
-            id = %params.id,
-            as_of = ?params.as_of_system_time,
-            "Executing NodeById query"
-        );
-
-        // Default None to current time for ActivePeriod validity checks
-        let ref_time = params
-            .reference_ts_millis
-            .unwrap_or_else(|| TimestampMilli::now());
-
-        let id = params.id;
-
-        // Find version via prefix scan (VERSIONING)
-        // If as_of_system_time is Some, find version valid at that time
-        // Otherwise find current version (ValidUntil = None)
-        let (_key_bytes, value) = if let Ok(db) = storage.db() {
-            find_node_version(StorageAccess::Readonly(db), id, params.as_of_system_time)?
-        } else {
-            let txn_db = storage.transaction_db()?;
-            find_node_version(StorageAccess::Readwrite(txn_db), id, params.as_of_system_time)?
-        }
-        .ok_or_else(|| {
-            if params.as_of_system_time.is_some() {
-                anyhow::anyhow!("Node {} not found at system time {:?}", id, params.as_of_system_time)
-            } else {
-                anyhow::anyhow!("Node not found: {}", id)
-            }
-        })?;
-
-        // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=NameHash, 3=SummaryHash, 4=Version, 5=Deleted
-        // Check if deleted (only for current time queries, not time-travel)
-        // For time-travel queries, we want to see the node's state at that past time
-        if params.as_of_system_time.is_none() && value.5 {
-            return Err(anyhow::anyhow!("Node {} has been deleted", id));
-        }
-
-        // Check temporal validity (ActivePeriod at index 1)
-        if !schema::is_active_at_time(&value.1, ref_time) {
-            return Err(anyhow::anyhow!(
-                "Node {} not valid at time {}",
-                id,
-                ref_time.0
-            ));
-        }
-
-        // Resolve NameHash to String (uses cache) - NameHash is at index 2
-        let node_name = resolve_name(storage, value.2)?;
-
-        // Resolve summary from cold CF - SummaryHash is at index 3
-        let summary = resolve_node_summary(storage, value.3)?;
-
-        Ok((node_name, summary, value.4))
+        super::ops::read::node_by_id(storage, self)
     }
 }
 
@@ -1025,74 +960,7 @@ impl QueryExecutor for NodesByIdsMulti {
     type Output = Vec<(Id, NodeName, NodeSummary, Version)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let params = self;
-        tracing::debug!(
-            count = params.ids.len(),
-            as_of = ?params.as_of_system_time,
-            "Executing NodesByIdsMulti query"
-        );
-
-        if params.ids.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Default None to current time for temporal validity checks
-        let ref_time = params
-            .reference_ts_millis
-            .unwrap_or_else(|| TimestampMilli::now());
-
-        // With VERSIONING, we need prefix scans for each ID to find version at time
-        // Collect valid entries with their NameHash and SummaryHash first, then resolve
-        // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=NameHash, 3=SummaryHash, 4=Version, 5=Deleted
-        let mut valid_entries: Vec<(Id, NameHash, Option<SummaryHash>, Version)> =
-            Vec::with_capacity(params.ids.len());
-
-        for id in &params.ids {
-            let result = if let Ok(db) = storage.db() {
-                find_node_version(StorageAccess::Readonly(db), *id, params.as_of_system_time)
-            } else {
-                let txn_db = storage.transaction_db()?;
-                find_node_version(StorageAccess::Readwrite(txn_db), *id, params.as_of_system_time)
-            };
-
-            match result {
-                Ok(Some((_key_bytes, value))) => {
-                    // Skip deleted nodes
-                    if value.5 {
-                        tracing::trace!(id = %id, "Skipping node: deleted");
-                        continue;
-                    }
-                    // Check temporal validity (ActivePeriod is at index 1)
-                    if schema::is_active_at_time(&value.1, ref_time) {
-                        // NameHash at index 2, SummaryHash at index 3
-                        valid_entries.push((*id, value.2, value.3, value.4));
-                    } else {
-                        tracing::trace!(
-                            id = %id,
-                            "Skipping node: not valid at time {}",
-                            ref_time.0
-                        );
-                    }
-                }
-                Ok(None) => {
-                    // Node not found - silently skip
-                    tracing::trace!(id = %id, "Node not found");
-                }
-                Err(e) => {
-                    tracing::warn!(id = %id, error = %e, "Error fetching node");
-                }
-            }
-        }
-
-        // Resolve NameHashes to Strings and SummaryHashes to Summaries
-        let mut output = Vec::with_capacity(valid_entries.len());
-        for (id, name_hash, summary_hash, version) in valid_entries {
-            let node_name = resolve_name(storage, name_hash)?;
-            let summary = resolve_node_summary(storage, summary_hash)?;
-            output.push((id, node_name, summary, version));
-        }
-
-        Ok(output)
+        super::ops::read::nodes_by_ids_multi(storage, self)
     }
 }
 
@@ -1102,73 +970,7 @@ impl QueryExecutor for NodeFragmentsByIdTimeRange {
     type Output = Vec<(TimestampMilli, FragmentContent)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let params = self;
-        tracing::debug!(id = %params.id, time_range = ?params.time_range, "Executing NodeFragmentsByIdTimeRange query");
-
-        use std::ops::Bound;
-
-        // Default None to current time for temporal validity checks
-        let ref_time = params
-            .reference_ts_millis
-            .unwrap_or_else(|| TimestampMilli::now());
-
-        let id = params.id;
-        let mut fragments: Vec<(TimestampMilli, FragmentContent)> = Vec::new();
-
-        // Construct optimal starting key based on start bound
-        let start_key = match &params.time_range.0 {
-            Bound::Unbounded => {
-                let mut key = Vec::with_capacity(24);
-                key.extend_from_slice(&id.into_bytes());
-                key.extend_from_slice(&0u64.to_be_bytes());
-                key
-            }
-            Bound::Included(start_ts) => {
-                schema::NodeFragments::key_to_bytes(&schema::NodeFragmentCfKey(id, *start_ts))
-            }
-            Bound::Excluded(start_ts) => schema::NodeFragments::key_to_bytes(
-                &schema::NodeFragmentCfKey(id, TimestampMilli(start_ts.0 + 1)),
-            ),
-        };
-
-        iterate_cf!(storage, schema::NodeFragments, start_key, |item| {
-            let (key_bytes, value_bytes) = item?;
-            let key: schema::NodeFragmentCfKey = schema::NodeFragments::key_from_bytes(&key_bytes)
-                .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
-
-            if key.0 != id {
-                break;
-            }
-
-            let timestamp = key.1;
-
-            match &params.time_range.1 {
-                Bound::Unbounded => { /* continue scanning */ }
-                Bound::Included(end_ts) => {
-                    if timestamp.0 > end_ts.0 {
-                        break;
-                    }
-                }
-                Bound::Excluded(end_ts) => {
-                    if timestamp.0 >= end_ts.0 {
-                        break;
-                    }
-                }
-            }
-
-            let value: schema::NodeFragmentCfValue =
-                schema::NodeFragments::value_from_bytes(&value_bytes)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
-
-            // Always check temporal validity - skip invalid fragments
-            if !schema::is_active_at_time(&value.0, ref_time) {
-                continue;
-            }
-
-            fragments.push((timestamp, value.1));
-        });
-
-        Ok(fragments)
+        super::ops::read::node_fragments_by_id_time_range(storage, self)
     }
 }
 
@@ -1178,88 +980,7 @@ impl QueryExecutor for EdgeFragmentsByIdTimeRange {
     type Output = Vec<(TimestampMilli, FragmentContent)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let params = self;
-        tracing::debug!(
-            src_id = %params.source_id,
-            dst_id = %params.dest_id,
-            edge_name = %params.edge_name,
-            time_range = ?params.time_range,
-            "Executing EdgeFragmentsByIdTimeRange query"
-        );
-
-        use std::ops::Bound;
-
-        // Default None to current time for temporal validity checks
-        let ref_time = params
-            .reference_ts_millis
-            .unwrap_or_else(|| TimestampMilli::now());
-
-        let source_id = params.source_id;
-        let dest_id = params.dest_id;
-        // Convert edge_name String to NameHash for key construction
-        let edge_name_hash = NameHash::from_name(&params.edge_name);
-        let mut fragments: Vec<(TimestampMilli, FragmentContent)> = Vec::new();
-
-        // Construct optimal starting key based on start bound
-        // EdgeFragmentCfKey: (SrcId, DstId, NameHash, TimestampMilli) - now fixed 40 bytes
-        let start_key = match &params.time_range.0 {
-            Bound::Unbounded => {
-                schema::EdgeFragments::key_to_bytes(
-                    &schema::EdgeFragmentCfKey(source_id, dest_id, edge_name_hash, TimestampMilli(0)),
-                )
-            }
-            Bound::Included(start_ts) => schema::EdgeFragments::key_to_bytes(
-                &schema::EdgeFragmentCfKey(source_id, dest_id, edge_name_hash, *start_ts),
-            ),
-            Bound::Excluded(start_ts) => {
-                schema::EdgeFragments::key_to_bytes(&schema::EdgeFragmentCfKey(
-                    source_id,
-                    dest_id,
-                    edge_name_hash,
-                    TimestampMilli(start_ts.0 + 1),
-                ))
-            }
-        };
-
-        iterate_cf!(storage, schema::EdgeFragments, start_key, |item| {
-            let (key_bytes, value_bytes) = item?;
-            let key: schema::EdgeFragmentCfKey = schema::EdgeFragments::key_from_bytes(&key_bytes)
-                .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
-
-            // Check if we're still in the same edge (source_id, dest_id, edge_name_hash)
-            if key.0 != source_id || key.1 != dest_id || key.2 != edge_name_hash {
-                break;
-            }
-
-            let timestamp = key.3;
-
-            match &params.time_range.1 {
-                Bound::Unbounded => { /* continue scanning */ }
-                Bound::Included(end_ts) => {
-                    if timestamp.0 > end_ts.0 {
-                        break;
-                    }
-                }
-                Bound::Excluded(end_ts) => {
-                    if timestamp.0 >= end_ts.0 {
-                        break;
-                    }
-                }
-            }
-
-            let value: schema::EdgeFragmentCfValue =
-                schema::EdgeFragments::value_from_bytes(&value_bytes)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
-
-            // Always check temporal validity - skip invalid fragments
-            if !schema::is_active_at_time(&value.0, ref_time) {
-                continue;
-            }
-
-            fragments.push((timestamp, value.1));
-        });
-
-        Ok(fragments)
+        super::ops::read::edge_fragments_by_id_time_range(storage, self)
     }
 }
 
@@ -1270,80 +991,7 @@ impl QueryExecutor for EdgeSummaryBySrcDstName {
     type Output = (EdgeSummary, Option<EdgeWeight>, Version);
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let params = self;
-        tracing::debug!(
-            src_id = %params.source_id,
-            dst_id = %params.dest_id,
-            name = %params.name,
-            "Executing EdgeSummaryBySrcDstName query"
-        );
-
-        // Default None to current time for temporal validity checks
-        let ref_time = params
-            .reference_ts_millis
-            .unwrap_or_else(|| TimestampMilli::now());
-
-        let source_id = params.source_id;
-        let dest_id = params.dest_id;
-        let name = &params.name;
-        // Convert edge name to NameHash for key construction
-        let name_hash = NameHash::from_name(name);
-
-        // Find edge version via prefix scan (point-in-time if as_of_system_time is set)
-        let value = if let Ok(db) = storage.db() {
-            find_edge_version(StorageAccess::Readonly(db), source_id, dest_id, name_hash, params.as_of_system_time)?
-                .map(|(_, v)| v)
-        } else {
-            let txn_db = storage.transaction_db()?;
-            find_edge_version(StorageAccess::Readwrite(txn_db), source_id, dest_id, name_hash, params.as_of_system_time)?
-                .map(|(_, v)| v)
-        };
-
-        let value = value.ok_or_else(|| {
-            if params.as_of_system_time.is_some() {
-                anyhow::anyhow!(
-                    "Edge not found at system time {:?}: source={}, dest={}, name={}",
-                    params.as_of_system_time,
-                    source_id,
-                    dest_id,
-                    name
-                )
-            } else {
-                anyhow::anyhow!(
-                    "Edge not found: source={}, dest={}, name={}",
-                    source_id,
-                    dest_id,
-                    name
-                )
-            }
-        })?;
-
-        // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=Weight, 3=SummaryHash, 4=Version, 5=Deleted
-        // Check if deleted (only for current time queries, not time-travel)
-        if params.as_of_system_time.is_none() && value.5 {
-            return Err(anyhow::anyhow!(
-                "Edge deleted: source={}, dest={}, name={}",
-                source_id,
-                dest_id,
-                name
-            ));
-        }
-
-        // Check temporal validity (ActivePeriod at index 1)
-        if !schema::is_active_at_time(&value.1, ref_time) {
-            return Err(anyhow::anyhow!(
-                "Edge not valid at time {}: source={}, dest={}, name={}",
-                ref_time.0,
-                source_id,
-                dest_id,
-                name
-            ));
-        }
-
-        // Field order: ValidUntil, ActivePeriod, Weight, SummaryHash, Version, Deleted
-        // Return (summary, weight) - resolve summary from cold CF
-        let summary = resolve_edge_summary(storage, value.3)?;
-        Ok((summary, value.2, value.4))
+        super::ops::read::edge_summary_by_src_dst_name(storage, self)
     }
 }
 
@@ -1354,135 +1002,7 @@ impl QueryExecutor for OutgoingEdges {
     type Output = Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let params = self;
-        tracing::debug!(node_id = %params.id, "Executing OutgoingEdges query");
-
-        // Default None to current time for temporal validity checks
-        let ref_time = params
-            .reference_ts_millis
-            .unwrap_or_else(|| TimestampMilli::now());
-
-        let id = params.id;
-        // Use HashSet for deduplication with versioned keys
-        let mut seen_edges: std::collections::HashSet<(Id, Id, NameHash)> = std::collections::HashSet::new();
-        let mut edges_with_hash: Vec<(Option<EdgeWeight>, SrcId, DstId, NameHash, Version)> =
-            Vec::new();
-        let prefix = id.into_bytes();
-
-        if let Ok(db) = storage.db() {
-            let cf = db.cf_handle(schema::ForwardEdges::CF_NAME).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Column family '{}' not found",
-                    schema::ForwardEdges::CF_NAME
-                )
-            })?;
-
-            let iter = db.iterator_cf(
-                cf,
-                rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
-            );
-
-            for item in iter {
-                let (key_bytes, value_bytes) = item?;
-                // Stop if we've gone past our prefix (src_id = 16 bytes)
-                if !key_bytes.starts_with(&prefix) {
-                    break;
-                }
-
-                let key: schema::ForwardEdgeCfKey =
-                    schema::ForwardEdges::key_from_bytes(&key_bytes)
-                        .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
-
-                let value: schema::ForwardEdgeCfValue =
-                    schema::ForwardEdges::value_from_bytes(&value_bytes)
-                        .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
-
-                // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=Weight, 3=SummaryHash, 4=Version, 5=Deleted
-                // Skip non-current versions
-                if value.0.is_some() {
-                    continue;
-                }
-                // Skip deleted edges
-                if value.5 {
-                    continue;
-                }
-                // Check temporal validity (ActivePeriod at index 1)
-                if !schema::is_active_at_time(&value.1, ref_time) {
-                    continue;
-                }
-
-                let source_id = key.0;
-                let dest_id = key.1;
-                let edge_name_hash = key.2;
-                let edge_topology = (source_id, dest_id, edge_name_hash);
-                if seen_edges.insert(edge_topology) {
-                    let weight = value.2;
-                    edges_with_hash.push((weight, source_id, dest_id, edge_name_hash, value.4));
-                }
-            }
-        } else {
-            let txn_db = storage.transaction_db()?;
-            let cf = txn_db
-                .cf_handle(schema::ForwardEdges::CF_NAME)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Column family '{}' not found",
-                        schema::ForwardEdges::CF_NAME
-                    )
-                })?;
-
-            let iter = txn_db.iterator_cf(
-                cf,
-                rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
-            );
-
-            for item in iter {
-                let (key_bytes, value_bytes) = item?;
-                // Stop if we've gone past our prefix (src_id = 16 bytes)
-                if !key_bytes.starts_with(&prefix) {
-                    break;
-                }
-
-                let key: schema::ForwardEdgeCfKey =
-                    schema::ForwardEdges::key_from_bytes(&key_bytes)
-                        .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
-
-                let value: schema::ForwardEdgeCfValue =
-                    schema::ForwardEdges::value_from_bytes(&value_bytes)
-                        .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
-
-                // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=Weight, 3=SummaryHash, 4=Version, 5=Deleted
-                // Skip non-current versions
-                if value.0.is_some() {
-                    continue;
-                }
-                // Skip deleted edges
-                if value.5 {
-                    continue;
-                }
-                // Check temporal validity (ActivePeriod at index 1)
-                if !schema::is_active_at_time(&value.1, ref_time) {
-                    continue;
-                }
-
-                let source_id = key.0;
-                let dest_id = key.1;
-                let edge_name_hash = key.2;
-                let edge_topology = (source_id, dest_id, edge_name_hash);
-                if seen_edges.insert(edge_topology) {
-                    let weight = value.2;
-                    edges_with_hash.push((weight, source_id, dest_id, edge_name_hash, value.4));
-                }
-            }
-        }
-
-        // Resolve NameHashes to Strings (uses cache)
-        let mut edges = Vec::with_capacity(edges_with_hash.len());
-        for (weight, src_id, dst_id, name_hash, version) in edges_with_hash {
-            let edge_name = resolve_name(storage, name_hash)?;
-            edges.push((weight, src_id, dst_id, edge_name, version));
-        }
-        Ok(edges)
+        super::ops::read::outgoing_edges(storage, self)
     }
 }
 
@@ -1493,169 +1013,7 @@ impl QueryExecutor for IncomingEdges {
     type Output = Vec<(Option<EdgeWeight>, DstId, SrcId, EdgeName, Version)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let params = self;
-        tracing::debug!(node_id = %params.id, "Executing IncomingEdges query");
-
-        // Default None to current time for temporal validity checks
-        let ref_time = params
-            .reference_ts_millis
-            .unwrap_or_else(|| TimestampMilli::now());
-
-        let id = params.id;
-        // Use HashSet for deduplication with versioned keys
-        let mut seen_edges: std::collections::HashSet<(Id, Id, NameHash)> = std::collections::HashSet::new();
-        let mut edges_with_hash: Vec<(Option<EdgeWeight>, DstId, SrcId, NameHash, Version)> =
-            Vec::new();
-        let prefix = id.into_bytes();
-
-        if let Ok(db) = storage.db() {
-            let reverse_cf = db.cf_handle(schema::ReverseEdges::CF_NAME).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Column family '{}' not found",
-                    schema::ReverseEdges::CF_NAME
-                )
-            })?;
-
-            let iter = db.iterator_cf(
-                reverse_cf,
-                rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
-            );
-
-            for item in iter {
-                let (key_bytes, value_bytes) = item?;
-                // Stop if we've gone past our prefix (dst_id = 16 bytes)
-                if !key_bytes.starts_with(&prefix) {
-                    break;
-                }
-
-                let key: schema::ReverseEdgeCfKey =
-                    schema::ReverseEdges::key_from_bytes(&key_bytes)
-                        .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
-
-                let value: schema::ReverseEdgeCfValue =
-                    schema::ReverseEdges::value_from_bytes(&value_bytes)
-                        .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
-
-                // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod
-                // Skip non-current versions
-                if value.0.is_some() {
-                    continue;
-                }
-                // Check temporal validity (ActivePeriod at index 1)
-                if !schema::is_active_at_time(&value.1, ref_time) {
-                    continue;
-                }
-
-                let dest_id = key.0;
-                let source_id = key.1;
-                let edge_name_hash = key.2;
-
-                // Deduplication check
-                let edge_topology = (source_id, dest_id, edge_name_hash);
-                if !seen_edges.insert(edge_topology) {
-                    continue;
-                }
-
-                // Lookup weight from ForwardEdges CF via prefix scan
-                let (weight, version) = match find_edge_version(
-                    StorageAccess::Readonly(db),
-                    source_id,
-                    dest_id,
-                    edge_name_hash,
-                    None,
-                )? {
-                    Some((_, forward_value)) => {
-                        // Skip if deleted
-                        if forward_value.5 {
-                            continue;
-                        }
-                        (forward_value.2, forward_value.4)
-                    }
-                    None => continue,
-                };
-
-                edges_with_hash.push((weight, dest_id, source_id, edge_name_hash, version));
-            }
-        } else {
-            let txn_db = storage.transaction_db()?;
-            let reverse_cf = txn_db
-                .cf_handle(schema::ReverseEdges::CF_NAME)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Column family '{}' not found",
-                        schema::ReverseEdges::CF_NAME
-                    )
-                })?;
-
-            let iter = txn_db.iterator_cf(
-                reverse_cf,
-                rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
-            );
-
-            for item in iter {
-                let (key_bytes, value_bytes) = item?;
-                // Stop if we've gone past our prefix (dst_id = 16 bytes)
-                if !key_bytes.starts_with(&prefix) {
-                    break;
-                }
-
-                let key: schema::ReverseEdgeCfKey =
-                    schema::ReverseEdges::key_from_bytes(&key_bytes)
-                        .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
-
-                let value: schema::ReverseEdgeCfValue =
-                    schema::ReverseEdges::value_from_bytes(&value_bytes)
-                        .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
-
-                // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod
-                // Skip non-current versions
-                if value.0.is_some() {
-                    continue;
-                }
-                // Check temporal validity (ActivePeriod at index 1)
-                if !schema::is_active_at_time(&value.1, ref_time) {
-                    continue;
-                }
-
-                let dest_id = key.0;
-                let source_id = key.1;
-                let edge_name_hash = key.2;
-
-                // Deduplication check
-                let edge_topology = (source_id, dest_id, edge_name_hash);
-                if !seen_edges.insert(edge_topology) {
-                    continue;
-                }
-
-                // Lookup weight from ForwardEdges CF via prefix scan
-                let (weight, version) = match find_edge_version(
-                    StorageAccess::Readwrite(txn_db),
-                    source_id,
-                    dest_id,
-                    edge_name_hash,
-                    None,
-                )? {
-                    Some((_, forward_value)) => {
-                        // Skip if deleted
-                        if forward_value.5 {
-                            continue;
-                        }
-                        (forward_value.2, forward_value.4)
-                    }
-                    None => continue,
-                };
-
-                edges_with_hash.push((weight, dest_id, source_id, edge_name_hash, version));
-            }
-        }
-
-        // Resolve NameHashes to Strings (uses cache)
-        let mut edges = Vec::with_capacity(edges_with_hash.len());
-        for (weight, dst_id, src_id, name_hash, version) in edges_with_hash {
-            let edge_name = resolve_name(storage, name_hash)?;
-            edges.push((weight, dst_id, src_id, edge_name, version));
-        }
-        Ok(edges)
+        super::ops::read::incoming_edges(storage, self)
     }
 
 }
@@ -1667,30 +1025,7 @@ impl QueryExecutor for AllNodes {
     type Output = Vec<(Id, NodeName, NodeSummary, Version)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let params = self;
-        tracing::debug!(limit = params.limit, has_cursor = params.last.is_some(), "Executing AllNodes query");
-
-        // Create scan request matching scan::AllNodes
-        let scan_request = scan::AllNodes {
-            last: params.last,
-            limit: params.limit,
-            reverse: false,
-            reference_ts_millis: params.reference_ts_millis,
-        };
-
-        // Collect results via visitor pattern
-        let mut results = Vec::with_capacity(params.limit);
-        scan_request.accept(storage, &mut |record: &scan::NodeRecord| {
-            results.push((
-                record.id,
-                record.name.clone(),
-                record.summary.clone(),
-                record.version,
-            ));
-            true // continue
-        })?;
-
-        Ok(results)
+        super::ops::read::all_nodes(storage, self)
     }
 }
 
@@ -1701,31 +1036,7 @@ impl QueryExecutor for AllEdges {
     type Output = Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let params = self;
-        tracing::debug!(limit = params.limit, has_cursor = params.last.is_some(), "Executing AllEdges query");
-
-        // Create scan request matching scan::AllEdges
-        let scan_request = scan::AllEdges {
-            last: params.last.clone(),
-            limit: params.limit,
-            reverse: false,
-            reference_ts_millis: params.reference_ts_millis,
-        };
-
-        // Collect results via visitor pattern
-        let mut results = Vec::with_capacity(params.limit);
-        scan_request.accept(storage, &mut |record: &scan::EdgeRecord| {
-            results.push((
-                record.weight,
-                record.src_id,
-                record.dst_id,
-                record.name.clone(),
-                record.version,
-            ));
-            true // continue
-        })?;
-
-        Ok(results)
+        super::ops::read::all_edges(storage, self)
     }
 }
 
@@ -2568,47 +1879,7 @@ impl QueryExecutor for NodesBySummaryHash {
     type Output = Vec<NodeSummaryLookupResult>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        use schema::NodeSummaryIndex;
-
-        let params = self;
-        tracing::debug!(hash = ?params.hash, current_only = params.current_only, "Executing NodesBySummaryHash query");
-
-        let txn_db = storage.transaction_db()?;
-        let cf = txn_db
-            .cf_handle(NodeSummaryIndex::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("NodeSummaryIndex CF not found"))?;
-
-        // Use prefix scan with just the hash (8 bytes)
-        let prefix = params.hash.as_bytes();
-        let iter = txn_db.prefix_iterator_cf(cf, prefix);
-
-        let mut results = Vec::new();
-        for item in iter {
-            let (key_bytes, value_bytes) = item?;
-
-            // Check if key still starts with our prefix (prefix iterator may overrun)
-            if key_bytes.len() < 8 || &key_bytes[0..8] != prefix {
-                break;
-            }
-
-            let index_key = NodeSummaryIndex::key_from_bytes(&key_bytes)?;
-            let index_value = NodeSummaryIndex::value_from_bytes(&value_bytes)?;
-
-            let is_current = index_value.is_current();
-
-            // Filter by current_only if requested
-            if params.current_only && !is_current {
-                continue;
-            }
-
-            results.push(NodeSummaryLookupResult {
-                node_id: index_key.1,
-                version: index_key.2,
-                is_current,
-            });
-        }
-
-        Ok(results)
+        super::ops::read::nodes_by_summary_hash(storage, self)
     }
 }
 
@@ -2617,49 +1888,7 @@ impl QueryExecutor for EdgesBySummaryHash {
     type Output = Vec<EdgeSummaryLookupResult>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        use schema::EdgeSummaryIndex;
-
-        let params = self;
-        tracing::debug!(hash = ?params.hash, current_only = params.current_only, "Executing EdgesBySummaryHash query");
-
-        let txn_db = storage.transaction_db()?;
-        let cf = txn_db
-            .cf_handle(EdgeSummaryIndex::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("EdgeSummaryIndex CF not found"))?;
-
-        // Use prefix scan with just the hash (8 bytes)
-        let prefix = params.hash.as_bytes();
-        let iter = txn_db.prefix_iterator_cf(cf, prefix);
-
-        let mut results = Vec::new();
-        for item in iter {
-            let (key_bytes, value_bytes) = item?;
-
-            // Check if key still starts with our prefix (prefix iterator may overrun)
-            if key_bytes.len() < 8 || &key_bytes[0..8] != prefix {
-                break;
-            }
-
-            let index_key = EdgeSummaryIndex::key_from_bytes(&key_bytes)?;
-            let index_value = EdgeSummaryIndex::value_from_bytes(&value_bytes)?;
-
-            let is_current = index_value.is_current();
-
-            // Filter by current_only if requested
-            if params.current_only && !is_current {
-                continue;
-            }
-
-            results.push(EdgeSummaryLookupResult {
-                src_id: index_key.1,
-                dst_id: index_key.2,
-                name_hash: index_key.3,
-                version: index_key.4,
-                is_current,
-            });
-        }
-
-        Ok(results)
+        super::ops::read::edges_by_summary_hash(storage, self)
     }
 }
 

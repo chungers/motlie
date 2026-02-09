@@ -58,6 +58,7 @@ struct Position {
 
 impl Position {
     /// Manhattan distance heuristic (admissible for grid movement)
+    #[allow(dead_code)]
     fn manhattan_distance(&self, other: &Position) -> f64 {
         ((self.x - other.x).abs() + (self.y - other.y).abs()) as f64
     }
@@ -313,7 +314,7 @@ async fn main() -> Result<()> {
     let num_edges = edges.len();
 
     // Build name-to-position map for reference implementation
-    let name_to_id: HashMap<String, Id> = nodes.iter().map(|n| (n.name.clone(), n.id)).collect();
+    let _name_to_id: HashMap<String, Id> = nodes.iter().map(|n| (n.name.clone(), n.id)).collect();
     let name_to_pos: HashMap<String, Position> = nodes
         .iter()
         .map(|n| (n.name.clone(), *positions.get(&n.id).unwrap()))

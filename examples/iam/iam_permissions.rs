@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports, unused_variables)]
 /// IAM Permissions Graph Analysis - Interactive Web UI
 ///
 /// This example creates a large-scale simulated cloud IAM graph and provides

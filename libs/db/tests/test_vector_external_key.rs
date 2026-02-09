@@ -59,7 +59,7 @@ async fn test_mixed_external_key_types() {
 
     // Create reader and consumers
     let (search_reader, search_rx) =
-        create_reader_with_storage(ReaderConfig::default(), storage.clone());
+        create_reader_with_storage(ReaderConfig::default());
     let _query_handles = spawn_query_consumers_with_storage_autoreg(
         search_rx,
         ReaderConfig::default(),
