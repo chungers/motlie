@@ -1011,15 +1011,6 @@ impl Facets {
     pub async fn execute(&self, storage: &Storage) -> Result<super::search::FacetCounts> {
         <Facets as QueryExecutor>::execute(self, storage).await
     }
-
-    /// Execute a Facets query directly without dispatch machinery.
-    /// This is used by the unified query module for composition.
-    pub(crate) async fn execute_params(
-        params: &Facets,
-        storage: &Storage,
-    ) -> Result<super::search::FacetCounts> {
-        <Facets as QueryExecutor>::execute(params, storage).await
-    }
 }
 
 impl QueryReply for Facets {
