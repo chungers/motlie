@@ -99,7 +99,7 @@ async fn bfs_motlie_original(
 
     while let Some(current_id) = queue.pop_front() {
         // Individual NodeById call for each node
-        let (name, _summary) = NodeById::new(current_id, None)
+        let (name, _summary, _version) = NodeById::new(current_id, None)
             .run(reader, timeout)
             .await?;
 
@@ -109,7 +109,7 @@ async fn bfs_motlie_original(
             .run(reader, timeout)
             .await?;
 
-        for (_weight, _src, dst, _name) in edges {
+        for (_weight, _src, dst, _name, _version) in edges {
             if !visited.contains(&dst) {
                 visited.insert(dst);
                 queue.push_back(dst);

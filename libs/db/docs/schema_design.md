@@ -6,7 +6,7 @@ This document describes the complete schema for all column families in the motli
 
 ## Overview
 
-Motlie is a temporal graph database built on RocksDB, using column families for efficient storage and querying of nodes, edges, and fragments with temporal validity tracking and optional edge weights.
+Motlie is a temporal graph database built on RocksDB, using column families for efficient storage and querying of nodes, edges, and fragments with active period tracking and optional edge weights.
 
 ## Column Families
 
@@ -22,7 +22,7 @@ Motlie is a temporal graph database built on RocksDB, using column families for 
 **Value Layout (MessagePack + LZ4):**
 ```rust
 NodeCfValue(
-    Option<ActivePeriod>,  // Temporal validity
+    Option<ActivePeriod>,  // Active period
     NodeName,                     // String name
     NodeSummary,                  // DataUrl (markdown content)
 )
@@ -49,7 +49,7 @@ NodeCfValue(
 **Value Layout (MessagePack + LZ4):**
 ```rust
 ForwardEdgeCfValue(
-    Option<ActivePeriod>,  // Field 0: Temporal validity
+    Option<ActivePeriod>,  // Field 0: Active period
     Option<f64>,                  // Field 1: Optional weight
     EdgeSummary,                  // Field 2: Edge summary (DataUrl)
 )
@@ -60,7 +60,7 @@ ForwardEdgeCfValue(
 2. `Option<f64>` - Small (9 bytes), frequently accessed by graph algorithms
 3. `EdgeSummary` - Large (100-1000 bytes), accessed when edge details needed
 
-This ordering optimizes deserialization: algorithms can read temporal range + weight without deserializing the large EdgeSummary if not needed.
+This ordering optimizes deserialization: algorithms can read active period + weight without deserializing the large EdgeSummary if not needed.
 
 **Key Encoding:** Raw bytes (no MessagePack)
 **Value Encoding:** MessagePack serialization + LZ4 compression
@@ -87,7 +87,7 @@ This ordering optimizes deserialization: algorithms can read temporal range + we
 **Value Layout (MessagePack + LZ4):**
 ```rust
 ReverseEdgeCfValue(
-    Option<ActivePeriod>,  // Temporal validity only
+    Option<ActivePeriod>,  // Active period only
 )
 ```
 
@@ -118,7 +118,7 @@ ReverseEdgeCfValue(
 **Value Layout (MessagePack + LZ4):**
 ```rust
 NodeFragmentCfValue(
-    Option<ActivePeriod>,  // Temporal validity
+    Option<ActivePeriod>,  // Active period
     FragmentContent,              // DataUrl (markdown/text/etc)
 )
 ```
@@ -146,7 +146,7 @@ NodeFragmentCfValue(
 **Value Layout (MessagePack + LZ4):**
 ```rust
 EdgeFragmentCfValue(
-    Option<ActivePeriod>,  // Temporal validity
+    Option<ActivePeriod>,  // Active period
     FragmentContent,              // DataUrl (markdown/text/etc)
 )
 ```
@@ -191,9 +191,9 @@ EdgeFragmentCfValue(
 
 ---
 
-## Temporal Validity
+## Active period
 
-All column families support optional temporal validity ranges:
+All column families support optional active period ranges:
 
 ```rust
 pub struct ActivePeriod(
@@ -206,12 +206,12 @@ pub struct ActivePeriod(
 - Record is valid at time T if: `valid_since <= T < valid_until`
 - `None` for `valid_since` means valid from beginning of time
 - `None` for `valid_until` means valid until end of time
-- Records without temporal range (`None`) are always valid
+- Records without active period (`None`) are always valid
 
 **Query Behavior:**
 - All queries accept optional `reference_ts_millis` parameter
 - If `None`, defaults to current time
-- Records are filtered by temporal validity during query execution
+- Records are filtered by active period during query execution
 
 ---
 
@@ -250,7 +250,7 @@ All keys use raw byte encoding (no MessagePack):
 ### Field Ordering in Values
 
 Value fields are ordered by access pattern:
-1. **Frequently accessed small fields first** (temporal range, weight)
+1. **Frequently accessed small fields first** (active period, weight)
 2. **Rarely accessed large fields last** (summaries, content)
 
 **Benefits:**
@@ -351,33 +351,26 @@ AddEdgeFragment {
 
 ### Updating Entities
 
-**Update Edge Weight:**
+**Update Edge (weight, active period, and/or summary):**
 ```rust
-UpdateEdgeWeight {
+UpdateEdge {
     src_id,
     dst_id,
     name: "edge_name".to_string(),
-    weight: 2.5,
+    expected_version: current_version,
+    new_weight: Some(Some(2.5)),           // Set weight to 2.5
+    new_active_period: Some(Some(ActivePeriod(Some(start), Some(end)))),
+    new_summary: None,                      // No change to summary
 }.run(&writer).await
 ```
 
-**Update Edge Temporal Range:**
+**Update Node (active period and/or summary):**
 ```rust
-UpdateEdgeValidSinceUntil {
-    src_id,
-    dst_id,
-    name: "edge_name".to_string(),
-    temporal_range: ActivePeriod(Some(start), Some(end)),
-    reason: "Invalidating old edge".to_string(),
-}.run(&writer).await
-```
-
-**Update Node Temporal Range:**
-```rust
-UpdateNodeValidSinceUntil {
+UpdateNode {
     id: node_id,
-    temporal_range: ActivePeriod(Some(start), Some(end)),
-    reason: "Invalidating old node".to_string(),
+    expected_version: current_version,
+    new_active_period: Some(Some(ActivePeriod(Some(start), Some(end)))),
+    new_summary: None,  // No change to summary
 }.run(&writer).await
 ```
 
@@ -388,13 +381,13 @@ UpdateNodeValidSinceUntil {
 ### Storage Costs (Per Edge)
 
 **ForwardEdges:**
-- Temporal range: 1-17 bytes
+- Active period: 1-17 bytes
 - Weight: 9 bytes
 - Summary: 100-1000 bytes
 - **Total:** 110-1026 bytes
 
 **ReverseEdges:**
-- Temporal range: 1-17 bytes
+- Active period: 1-17 bytes
 - **Total:** 1-17 bytes
 
 **Combined:** 111-1043 bytes per edge
@@ -434,13 +427,13 @@ UpdateNodeValidSinceUntil {
 - ✅ **EdgeFragments CF** - Separate fragments for edges
 - ✅ **Edge weights** - Optional f64 weight per edge
 - ✅ **Edge summary in ForwardEdges** - Moved from Edges CF
-- ✅ **UpdateEdgeWeight mutation** - Update edge weights
+- ✅ **UpdateEdge mutation** - Update edge weight, active period, and/or summary
 
 ### Changed
 
 - ⚠️ **Fragments CF** → **NodeFragments CF** - Renamed for clarity
 - ⚠️ **AddEdge** - Now includes summary and weight fields
-- ⚠️ **UpdateEdgeValidSinceUntil** - Uses topology instead of edge_id
+- ⚠️ **UpdateEdge** - Uses topology instead of edge_id
 - ⚠️ **EdgeSummaryBySrcDstName** - Returns (summary, weight) instead of (id, summary)
 
 ### Benefits

@@ -9,7 +9,7 @@ Both modules follow the same architectural pattern:
 | Component | Graph Module | Fulltext Module |
 |-----------|--------------|-----------------|
 | **Storage** | `graph::Storage` (RocksDB) | `fulltext::Storage` (Tantivy) |
-| **Processor** | `graph::Graph` | `fulltext::Index` |
+| **Processor** | `graph::Processor` | `fulltext::Index` |
 | **Modes** | ReadOnly, ReadWrite, Secondary | ReadOnly, ReadWrite |
 | **QueryExecutor** | `execute(&self, storage: &Storage)` | `execute(&self, storage: &Storage)` |
 | **Processor trait** | `fn storage(&self) -> &Storage` | `fn storage(&self) -> &Storage` |
@@ -33,19 +33,19 @@ storage.ready()?;
 let storage = Arc::new(storage);
 ```
 
-### Processor Layer (Graph/Index)
+### Processor Layer (Processor/Index)
 
 Both modules wrap `Arc<Storage>` in a processor type:
 
 ```rust
 // Graph
-let graph = Graph::new(Arc::new(storage));
+let processor = graph::Processor::new(Arc::new(storage));
 
 // Fulltext (identical pattern)
 let index = fulltext::Index::new(Arc::new(storage));
 ```
 
-**Clone Behavior**: Both `Graph` and `fulltext::Index` clone the `Arc<Storage>`, preserving full read/write capability.
+**Clone Behavior**: Both `graph::Processor` and `fulltext::Index` clone the `Arc<Storage>`, preserving full read/write capability.
 
 ### QueryExecutor Pattern
 
@@ -74,12 +74,12 @@ impl QueryExecutor for Nodes {
 | **Mutation Consumers** | |
 | `spawn_mutation_consumer(receiver, config, path)` | Single mutation consumer |
 | `spawn_mutation_consumer_with_next(receiver, config, path, next_tx)` | Mutation consumer that chains to next |
-| `spawn_mutation_consumer_with_graph(receiver, config, graph)` | Mutation consumer with existing Graph |
+| `spawn_mutation_consumer_with_receiver(receiver, config, processor)` | Mutation consumer with existing Processor |
 | **Query Consumers** | |
-| `spawn_query_consumer(receiver, config, path)` | Single query consumer with new Graph |
-| `spawn_query_consumer_with_graph(receiver, config, graph)` | Query consumer with existing Graph |
-| `spawn_query_consumer_pool_shared(receiver, graph, n)` | Pool sharing one Arc\<Graph\> |
-| `spawn_query_consumer_pool_readonly(receiver, config, path, n)` | Pool with individual readonly Graphs |
+| `spawn_query_consumer(receiver, config, path)` | Single query consumer with new Processor |
+| `spawn_query_consumer_with_processor(receiver, config, processor)` | Query consumer with existing Processor |
+| `spawn_query_consumer_pool_shared(receiver, processor, n)` | Pool sharing one Arc\<Processor\> |
+| `spawn_query_consumer_pool_readonly(receiver, config, path, n)` | Pool with individual readonly Processors |
 
 ### Fulltext Module
 
@@ -102,7 +102,7 @@ impl QueryExecutor for Nodes {
 ```rust
 use motlie_db::graph::{
     create_query_reader, spawn_query_consumer_pool_shared,
-    Graph, Storage, WriterConfig, ReaderConfig,
+    Processor, Storage, WriterConfig, ReaderConfig,
 };
 use motlie_db::fulltext::{
     create_query_reader as create_fulltext_query_reader,
@@ -160,15 +160,15 @@ let graph_mutation_handle = spawn_mutation_consumer(
 let graph_config = ReaderConfig { channel_buffer_size: 100 };
 let (graph_reader, graph_query_receiver) = create_query_reader(graph_config);
 
-// Create shared readonly Graph
+// Create shared readonly Processor
 let mut storage = Storage::readonly(&db_path);
 storage.ready()?;
-let graph = Arc::new(Graph::new(Arc::new(storage)));
+let processor = Arc::new(graph::Processor::new(Arc::new(storage)));
 
-// Spawn 2 graph query consumers sharing the same Graph
+// Spawn 2 graph query consumers sharing the same Processor
 let graph_handles = spawn_query_consumer_pool_shared(
     graph_query_receiver,
-    graph,
+    processor,
     2,  // 2 workers
 );
 
@@ -285,7 +285,7 @@ let (r1, r2, r3) = tokio::join!(client1, client2, client3);
                     │                      │         │              │        ││
                     │                      │         ▼              ▼        ││
                     │                      │    ┌─────────────────────┐      ││
-                    │                      │    │   Arc<Graph>        │      ││
+                    │                      │    │  Arc<Processor>     │      ││
                     │                      │    │   (shared Storage)  │      ││
                     │                      │    └─────────────────────┘      ││
                     │                      └─────────────────────────────────┘│
@@ -310,11 +310,11 @@ let (r1, r2, r3) = tokio::join!(client1, client2, client3);
 
 ## Key Design Principles
 
-1. **Separation of Storage and Processor**: `Storage` handles the underlying database, while `Graph`/`Index` provides the query/mutation interface.
+1. **Separation of Storage and Processor**: `Storage` handles the underlying database, while `Processor`/`Index` provides the query/mutation interface.
 
 2. **Readonly vs Readwrite Modes**: Readonly mode allows multiple concurrent readers. Readwrite mode provides exclusive write access.
 
-3. **Arc-based Sharing**: Multiple query consumers share a single `Arc<Graph>` or `Arc<Index>`, minimizing memory usage and ensuring consistency.
+3. **Arc-based Sharing**: Multiple query consumers share a single `Arc<Processor>` or `Arc<Index>`, minimizing memory usage and ensuring consistency.
 
 4. **Channel-based Communication**: MPMC (multi-producer, multi-consumer) channels enable concurrent query processing.
 
@@ -456,7 +456,7 @@ The fulltext index uses the following schema:
 | Facet | Path Pattern | Description |
 |-------|--------------|-------------|
 | `doc_type_facet` | `/type/nodes`, `/type/edges`, etc. | Document type categorization |
-| `validity_facet` | `/validity/unbounded`, `/validity/bounded`, etc. | Temporal validity structure |
+| `validity_facet` | `/validity/unbounded`, `/validity/bounded`, etc. | Active period structure |
 | `tags_facet` | `/tag/rust`, `/tag/programming`, etc. | User-defined hashtags |
 
 ### Note on Temporal Queries
@@ -498,7 +498,7 @@ Node and Edge fragments in motlie-db are **append-only** - each fragment represe
 4. **Delete Operations Require INDEXED Fields**
    - `IndexWriter::delete_term()` only works on INDEXED fields
    - ID fields (`id_field`, `src_id_field`, `dst_id_field`) are defined with `STORED | FAST | INDEXED`
-   - This enables `UpdateNodeValidSinceUntil` and `UpdateEdgeValidSinceUntil` to delete documents
+   - This enables `UpdateNode` and `UpdateEdge` to delete documents when active period changes
 
 ### Fragment vs Node/Edge Deletion Behavior
 
@@ -506,10 +506,10 @@ Node and Edge fragments in motlie-db are **append-only** - each fragment represe
 |----------|----------|
 | `AddNodeFragment` | Appends new document (never overwrites) |
 | `AddEdgeFragment` | Appends new document (never overwrites) |
-| `UpdateNodeValidSinceUntil` | Deletes **all** documents with matching `id_field` |
-| `UpdateEdgeValidSinceUntil` | Deletes **all** documents with matching `src_id_field` |
+| `UpdateNode` | Deletes **all** documents with matching `id_field` (when active period changes) |
+| `UpdateEdge` | Deletes **all** documents with matching `src_id_field` (when active period changes) |
 
-**Important**: `UpdateNodeValidSinceUntil` deletes the node **and** all its fragments from the fulltext index. This is by design - when a node's validity changes, all its indexed content should be removed from search results. The authoritative data remains in RocksDB.
+**Important**: When `UpdateNode` changes the active period, it deletes the node **and** all its fragments from the fulltext index. This is by design - when a node's validity changes, all its indexed content should be removed from search results. The authoritative data remains in RocksDB.
 
 ### Consistency with RocksDB
 
@@ -845,7 +845,7 @@ let similar = MoreLikeThis::new(node_id)
 - [x] Tag filtering via `with_tags()` builder method
 - [x] Multiple query consumers with shared Index
 - [x] Readonly/Readwrite storage modes
-- [x] Temporal validity fields (valid_since, valid_until)
+- [x] Active period fields (valid_since, valid_until)
 - [x] Time range queries on creation_timestamp and validity fields
 - [x] `FulltextFacets` query for facet statistics (doc_types, tags, validity)
 - [x] `MatchSource` enum to indicate where the match came from (name vs fragment)

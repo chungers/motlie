@@ -248,9 +248,8 @@ Error types:
 | `add_edge` | `AddEdge` | Create an edge | `source_node_id`, `target_node_id`, `name`, `summary`, `weight?`, `ts_millis?`, `temporal_range?` |
 | `add_node_fragment` | `AddNodeFragment` | Add text content fragment to a node | `id`, `content`, `ts_millis?`, `temporal_range?` |
 | `add_edge_fragment` | `AddEdgeFragment` | Add text content fragment to an edge | `src_id`, `dst_id`, `edge_name`, `content`, `ts_millis?`, `temporal_range?` |
-| `update_node_valid_range` | `UpdateNodeValidSinceUntil` | Update temporal validity of a node | `id`, `temporal_range`, `reason` |
-| `update_edge_valid_range` | `UpdateEdgeValidSinceUntil` | Update temporal validity of an edge | `src_id`, `dst_id`, `name`, `temporal_range`, `reason` |
-| `update_edge_weight` | `UpdateEdgeWeight` | Update the weight of an edge | `src_id`, `dst_id`, `name`, `weight` |
+| `update_node` | `UpdateNode` | Update node (active period and/or summary) | `id`, `expected_version`, `new_active_period?`, `new_summary?` |
+| `update_edge` | `UpdateEdge` | Update edge (weight, active period, and/or summary) | `src_id`, `dst_id`, `name`, `expected_version`, `new_weight?`, `new_active_period?`, `new_summary?` |
 
 ### Query Tools
 

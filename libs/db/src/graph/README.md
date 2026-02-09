@@ -6,7 +6,7 @@ This module provides RocksDB-based graph storage with async query/mutation proce
 
 ```
 graph/
-├── mod.rs       # Storage, Graph struct, module exports
+├── mod.rs       # Storage, Processor, module exports
 ├── schema.rs    # Column family definitions, key/value types
 ├── mutation.rs  # Mutation types (AddNode, AddEdge, etc.)
 ├── writer.rs    # Writer/MutationConsumer infrastructure
@@ -40,17 +40,17 @@ storage.ready()?;
 storage.try_catch_up_with_primary()?;
 ```
 
-### Graph
+### Processor
 
-`Graph` wraps `Arc<Storage>` and provides the execution interface:
+`Processor` wraps `Arc<Storage>` and provides the execution interface:
 
 ```rust
-use motlie_db::{Graph, Storage};
+use motlie_db::{Processor, Storage};
 use std::sync::Arc;
 
 let mut storage = Storage::readwrite(&db_path);
 storage.ready()?;
-let graph = Graph::new(Arc::new(storage));
+let processor = Processor::new(Arc::new(storage));
 ```
 
 ## Mutation Types
@@ -63,9 +63,8 @@ Defined in `mutation.rs`:
 | `AddEdge` | Create an edge between two nodes |
 | `AddNodeFragment` | Add timestamped content fragment to a node |
 | `AddEdgeFragment` | Add timestamped content fragment to an edge |
-| `UpdateNodeValidSinceUntil` | Update node's temporal validity range |
-| `UpdateEdgeValidSinceUntil` | Update edge's temporal validity range |
-| `UpdateEdgeWeight` | Update edge weight |
+| `UpdateNode` | Update node's active period and/or summary |
+| `UpdateEdge` | Update edge's weight, active period, and/or summary |
 
 ### Runnable Trait
 
@@ -126,15 +125,15 @@ let result = NodeById::new(node_id, None)
 |----------|-------------|
 | `spawn_mutation_consumer(receiver, config, path)` | Creates storage and processes mutations |
 | `spawn_mutation_consumer_with_next(receiver, config, path, next_tx)` | Chains to next consumer |
-| `spawn_mutation_consumer_with_graph(receiver, config, graph)` | Uses existing Arc\<Graph\> |
+| `spawn_mutation_consumer_with_receiver(receiver, config, processor)` | Uses existing Arc\<Processor\> |
 
 ### Query Consumers
 
 | Function | Description |
 |----------|-------------|
 | `spawn_query_consumer(receiver, config, path)` | Creates storage and processes queries |
-| `spawn_query_consumer_with_graph(receiver, config, graph)` | Uses existing Arc\<Graph\> |
-| `spawn_query_consumer_pool_shared(receiver, graph, n)` | N workers sharing one Graph |
+| `spawn_query_consumer_with_processor(receiver, config, processor)` | Uses existing Arc\<Processor\> |
+| `spawn_query_consumer_pool_shared(receiver, processor, n)` | N workers sharing one Processor |
 | `spawn_query_consumer_pool_readonly(receiver, config, path, n)` | N workers with own readonly storage |
 
 ## Schema
@@ -146,10 +145,10 @@ Defined in `schema.rs`. The graph uses 5 column families:
 | `nodes` | `(Id)` | `(ActivePeriod?, NodeName, NodeSummary)` | Node metadata |
 | `node-fragments` | `(Id, TimestampMilli)` | `(ActivePeriod?, FragmentContent)` | Node content fragments |
 | `outgoing-edges` | `(SrcId, DstId, EdgeName)` | `(ActivePeriod?, Weight?, EdgeSummary)` | Edges by source |
-| `incoming-edges` | `(DstId, SrcId, EdgeName)` | `(ActivePeriod?)` | Reverse edge index with denormalized temporal range |
+| `incoming-edges` | `(DstId, SrcId, EdgeName)` | `(ActivePeriod?)` | Reverse edge index with denormalized active period |
 | `edge-fragments` | `(SrcId, DstId, EdgeName, TimestampMilli)` | `(ActivePeriod?, FragmentContent)` | Edge content fragments |
 
-**Note**: `incoming-edges` denormalizes `ActivePeriod` for fast inbound scans with temporal filtering. Temporal range updates must write both `outgoing-edges` and `incoming-edges` in the same transaction.
+**Note**: `incoming-edges` denormalizes `ActivePeriod` for fast inbound scans with temporal filtering. Active period updates must write both `outgoing-edges` and `incoming-edges` in the same transaction.
 
 **Note**: Name-based lookups (finding nodes/edges by name) are handled by the fulltext search module using Tantivy indexing.
 

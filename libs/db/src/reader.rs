@@ -70,7 +70,7 @@
 //! │              │                                 │                        │
 //! │              ▼                                 ▼                        │
 //! │  ┌─────────────────────────┐   ┌─────────────────────────────────┐     │
-//! │  │   graph::Graph          │   │      fulltext::Index            │     │
+//! │  │   graph::Processor      │   │      fulltext::Index            │     │
 //! │  │   (RocksDB)             │   │      (Tantivy)                  │     │
 //! │  └─────────────────────────┘   └─────────────────────────────────┘     │
 //! └─────────────────────────────────────────────────────────────────────────┘
@@ -91,7 +91,7 @@ use tokio::task::JoinHandle;
 
 use crate::fulltext;
 use crate::graph;
-use crate::query::{Query, QueryProcessor};
+use crate::query::QueryRequest;
 
 // ============================================================================
 // ReaderConfig - Composes graph and fulltext configs
@@ -177,8 +177,8 @@ pub trait Runnable<R> {
 /// This is used by the consumer pools to execute queries. It holds Arc references
 /// to the initialized storage backends.
 pub struct CompositeStorage {
-    /// Graph storage (RocksDB) - source of truth for node/edge data
-    pub graph: Arc<graph::Graph>,
+    /// Graph processor (RocksDB) - source of truth for node/edge data
+    pub graph: Arc<graph::Processor>,
 
     /// Fulltext storage (Tantivy) - for search and ranking
     pub fulltext: Arc<fulltext::Index>,
@@ -186,7 +186,7 @@ pub struct CompositeStorage {
 
 impl CompositeStorage {
     /// Create a new CompositeStorage from graph and fulltext components.
-    pub fn new(graph: Arc<graph::Graph>, fulltext: Arc<fulltext::Index>) -> Self {
+    pub fn new(graph: Arc<graph::Processor>, fulltext: Arc<fulltext::Index>) -> Self {
         Self { graph, fulltext }
     }
 }
@@ -215,7 +215,7 @@ impl CompositeStorage {
 #[derive(Clone)]
 pub struct Reader {
     /// Sender for unified search queries (Nodes, Edges with hydration)
-    sender: flume::Sender<Query>,
+    sender: flume::Sender<QueryRequest>,
 
     /// Graph reader for direct graph queries (NodeById, OutgoingEdges, etc.)
     graph_reader: graph::Reader,
@@ -229,7 +229,7 @@ pub struct Reader {
 
 impl Reader {
     /// Send a unified search query to the consumer pool.
-    pub async fn send_query(&self, query: Query) -> Result<()> {
+    pub async fn send_query(&self, query: QueryRequest) -> Result<()> {
         self.sender
             .send_async(query)
             .await
@@ -281,7 +281,7 @@ impl Reader {
 ///         .build();
 /// ```
 pub struct ReaderBuilder {
-    graph: Arc<graph::Graph>,
+    graph: Arc<graph::Processor>,
     fulltext: Arc<fulltext::Index>,
     config: ReaderConfig,
     num_workers: usize,
@@ -291,9 +291,9 @@ impl ReaderBuilder {
     /// Create a new ReaderBuilder.
     ///
     /// # Arguments
-    /// * `graph` - The graph storage (RocksDB)
+    /// * `graph` - The graph processor (RocksDB)
     /// * `fulltext` - The fulltext index (Tantivy)
-    pub fn new(graph: Arc<graph::Graph>, fulltext: Arc<fulltext::Index>) -> Self {
+    pub fn new(graph: Arc<graph::Processor>, fulltext: Arc<fulltext::Index>) -> Self {
         Self {
             graph,
             fulltext,
@@ -335,7 +335,7 @@ impl ReaderBuilder {
         // Create graph reader and consumer pool
         let (graph_reader, graph_receiver) =
             graph::reader::create_query_reader(self.config.graph.clone());
-        let graph_handles = graph::reader::spawn_query_consumer_pool_shared(
+        let graph_handles = graph::reader::spawn_consumer_pool_with_processor(
             graph_receiver,
             self.graph.clone(),
             self.num_workers,
@@ -376,7 +376,7 @@ impl ReaderBuilder {
 /// composite storage (fulltext search + graph hydration).
 #[doc(hidden)]
 pub fn spawn_consumer_pool(
-    receiver: flume::Receiver<Query>,
+    receiver: flume::Receiver<QueryRequest>,
     storage: Arc<CompositeStorage>,
     num_workers: usize,
 ) -> Vec<JoinHandle<()>> {
@@ -385,8 +385,16 @@ pub fn spawn_consumer_pool(
             let receiver = receiver.clone();
             let storage = storage.clone();
             tokio::spawn(async move {
-                while let Ok(query) = receiver.recv_async().await {
-                    query.process_and_send(&storage).await;
+                while let Ok(mut request) = receiver.recv_async().await {
+                    let exec = request.payload.execute(&storage);
+                    let result = match request.timeout {
+                        Some(timeout) => match tokio::time::timeout(timeout, exec).await {
+                            Ok(r) => r,
+                            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", timeout)),
+                        },
+                        None => exec.await,
+                    };
+                    request.respond(result);
                 }
             })
         })
@@ -403,13 +411,13 @@ pub fn spawn_consumer_pool(
 /// configuration and 4 workers per subsystem.
 ///
 /// # Arguments
-/// * `graph` - The graph storage (RocksDB)
+/// * `graph` - The graph processor (RocksDB)
 /// * `fulltext` - The fulltext index (Tantivy)
 ///
 /// # Returns
 /// A tuple of (Reader, unified_handles, graph_handles, fulltext_handles)
 pub fn create_reader(
-    graph: Arc<graph::Graph>,
+    graph: Arc<graph::Processor>,
     fulltext: Arc<fulltext::Index>,
 ) -> (
     Reader,
@@ -423,7 +431,7 @@ pub fn create_reader(
 /// Create a unified Reader with custom configuration.
 ///
 /// # Arguments
-/// * `graph` - The graph storage (RocksDB)
+/// * `graph` - The graph processor (RocksDB)
 /// * `fulltext` - The fulltext index (Tantivy)
 /// * `config` - Reader configuration
 /// * `num_workers` - Number of worker tasks per subsystem
@@ -431,7 +439,7 @@ pub fn create_reader(
 /// # Returns
 /// A tuple of (Reader, unified_handles, graph_handles, fulltext_handles)
 pub fn create_reader_with_config(
-    graph: Arc<graph::Graph>,
+    graph: Arc<graph::Processor>,
     fulltext: Arc<fulltext::Index>,
     config: ReaderConfig,
     num_workers: usize,

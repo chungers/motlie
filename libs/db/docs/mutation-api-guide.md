@@ -29,7 +29,7 @@ MutationType { ...fields }
 
 1. **Type-Driven** - Mutation type determines behavior
 2. **Consistent with Query API** - Same `.run()` pattern
-3. **Zero-Cost Batching** - Use `mutations![]` macro or `MutationBatch`
+3. **Zero-Cost Batching** - Use `mutations![]` macro or `Vec<Mutation>`
 4. **No Builder Boilerplate** - Direct mutation construction
 5. **Async-First** - Built on `tokio` for concurrent mutations
 6. **Composable** - Mutations are values that can be stored and reused
@@ -79,47 +79,28 @@ impl Runnable for Vec<Mutation> {
 - Heap allocation overhead - every `.run()` call boxes the future (~50-100μs per 1,000 mutations)
 - Loss of zero-cost abstraction - Rust async/await is normally stack-allocated
 
-#### Option 2: MutationBatch Wrapper
+#### Option 2: Newtype Wrapper (Rejected)
 
-**Approach**: Create a newtype wrapper `MutationBatch(Vec<Mutation>)` with native async methods.
+**Approach**: Create a newtype wrapper around `Vec<Mutation>`.
 
-```rust
-pub struct MutationBatch(pub Vec<Mutation>);
-
-impl Runnable for MutationBatch {
-    async fn run(self, writer: &Writer) -> Result<()> {
-        writer.send(self.0).await
-    }
-}
-```
-
-**Pros**:
-- **Zero allocation overhead** - No boxing required
-- **Better type safety** - Distinct type signals "this is a batch"
-- **Extensible** - Can add validation, size limits, etc.
-- **No external dependencies** - No need for `async_trait`
-- **Future-proof** - Ready for when Rust stabilizes async in traits
-
-**Cons**:
-- Requires wrapper type instead of using `Vec` directly
-- Slightly more verbose than `vec![]`
+**Status**: Rejected in favor of `Vec<Mutation>` for ergonomics and fewer types.
 
 #### Option 3: mutations![] Macro
 
-**Approach**: Provide a `vec![]`-like macro that returns `MutationBatch`.
+**Approach**: Provide a `vec![]`-like macro that returns `Vec<Mutation>`.
 
 ```rust
 #[macro_export]
 macro_rules! mutations {
-    () => { $crate::MutationBatch::new() };
+    () => { Vec::<Mutation>::new() };
     ($($mutation:expr),+ $(,)?) => {
-        $crate::MutationBatch(vec![$($mutation.into()),+])
+        vec![$($mutation.into()),+]
     };
 }
 ```
 
 **Pros**:
-- **Zero overhead** - Macro expands to `MutationBatch(vec![...])`
+- **Zero overhead** - Macro expands to `vec![...]`
 - **Ergonomic** - Familiar syntax like `vec![]`
 - **Auto-conversion** - Uses `.into()` to convert mutation types
 - **Type safe** - Compiler checks mutation types
@@ -129,7 +110,7 @@ macro_rules! mutations {
 
 ### Final Decision
 
-**We chose Option 2 + Option 3**: `MutationBatch` wrapper + `mutations![]` macro.
+**We chose Option 2 + Option 3**: `Vec<Mutation>` wrapper + `mutations![]` macro.
 
 This provides:
 - ✅ Zero-cost abstraction (no heap allocation)
@@ -256,7 +237,7 @@ mutations![
 ].run(&writer).await?;
 
 // Manual construction
-let mut batch = MutationBatch::new();
+let mut batch = Vec<Mutation>::new();
 batch.push(AddNode { /* ... */ });
 batch.push(AddEdge { /* ... */ });
 batch.run(&writer).await?;
@@ -281,7 +262,7 @@ AddNode {
     id: Id::new(),
     name: "Alice".to_string(),
     ts_millis: TimestampMilli::now(),
-    valid_range: None,  // Optional validity range
+    valid_range: None,  // Optional active period
 }
 .run(&writer)
 .await?;
@@ -372,20 +353,42 @@ AddEdgeFragment {
 - `content: DataUrl` - Fragment content (text, JSON, binary, etc.)
 - `valid_range: Option<ActivePeriod>` - Optional validity period
 
-### 5. UpdateNodeValidSinceUntil
+### 5. UpdateNode (Consolidated)
 
-Update the temporal validity range of a node:
+Update a node's active period and/or summary with optimistic locking:
 
 ```rust
-use motlie_db::{UpdateNodeValidSinceUntil, Id, TimestampMilli, ActivePeriod, MutationRunnable};
+use motlie_db::{UpdateNode, Id, ActivePeriod, NodeSummary, MutationRunnable};
 
-UpdateNodeValidSinceUntil {
+// Update only summary
+UpdateNode {
     id: node_id,
-    temporal_range: ActivePeriod {
-        valid_from: TimestampMilli::now(),
-        valid_to: Some(future_timestamp),
-    },
-    reason: "Updated validity period".to_string(),
+    expected_version: 1,
+    new_active_period: None,  // No change
+    new_summary: Some(NodeSummary::from_text("Updated description")),
+}
+.run(&writer)
+.await?;
+
+// Update only active period
+UpdateNode {
+    id: node_id,
+    expected_version: 2,
+    new_active_period: Some(Some(ActivePeriod(
+        Some(TimestampMilli::now()),
+        Some(future_timestamp),
+    ))),
+    new_summary: None,  // No change
+}
+.run(&writer)
+.await?;
+
+// Clear active period
+UpdateNode {
+    id: node_id,
+    expected_version: 3,
+    new_active_period: Some(None),  // Reset/clear
+    new_summary: None,
 }
 .run(&writer)
 .await?;
@@ -393,25 +396,39 @@ UpdateNodeValidSinceUntil {
 
 **Fields**:
 - `id: Id` - Node ID to update
-- `temporal_range: ActivePeriod` - New temporal validity range
-- `reason: String` - Reason for the update
+- `expected_version: u32` - Expected version for optimistic locking
+- `new_active_period: Option<Option<ActivePeriod>>` - `None` = no change, `Some(None)` = clear, `Some(Some(period))` = set
+- `new_summary: Option<NodeSummary>` - `None` = no change, `Some(summary)` = set
 
-### 6. UpdateEdgeValidSinceUntil
+### 6. UpdateEdge (Consolidated)
 
-Update the temporal validity range of an edge (using topology instead of edge ID):
+Update an edge's weight, active period, and/or summary with optimistic locking:
 
 ```rust
-use motlie_db::{UpdateEdgeValidSinceUntil, Id, TimestampMilli, ActivePeriod, MutationRunnable};
+use motlie_db::{UpdateEdge, Id, ActivePeriod, EdgeSummary, MutationRunnable};
 
-UpdateEdgeValidSinceUntil {
+// Update only weight
+UpdateEdge {
     src_id: alice_id,
     dst_id: bob_id,
     name: "follows".to_string(),
-    temporal_range: ActivePeriod {
-        valid_from: TimestampMilli::now(),
-        valid_to: Some(future_timestamp),
-    },
-    reason: "Updated validity period".to_string(),
+    expected_version: 1,
+    new_weight: Some(Some(2.5)),
+    new_active_period: None,
+    new_summary: None,
+}
+.run(&writer)
+.await?;
+
+// Clear weight
+UpdateEdge {
+    src_id: alice_id,
+    dst_id: bob_id,
+    name: "follows".to_string(),
+    expected_version: 2,
+    new_weight: Some(None),  // Reset/clear
+    new_active_period: None,
+    new_summary: None,
 }
 .run(&writer)
 .await?;
@@ -421,31 +438,10 @@ UpdateEdgeValidSinceUntil {
 - `src_id: Id` - Source node ID
 - `dst_id: Id` - Destination node ID
 - `name: String` - Edge name/type
-- `temporal_range: ActivePeriod` - New temporal validity range
-- `reason: String` - Reason for the update
-
-### 7. UpdateEdgeWeight
-
-Update the weight of an edge (for weighted graph algorithms):
-
-```rust
-use motlie_db::{UpdateEdgeWeight, Id, MutationRunnable};
-
-UpdateEdgeWeight {
-    src_id: alice_id,
-    dst_id: bob_id,
-    name: "follows".to_string(),
-    weight: 2.5,
-}
-.run(&writer)
-.await?;
-```
-
-**Fields**:
-- `src_id: Id` - Source node ID
-- `dst_id: Id` - Destination node ID
-- `name: String` - Edge name/type
-- `weight: f64` - New weight value
+- `expected_version: u32` - Expected version for optimistic locking
+- `new_weight: Option<Option<f64>>` - `None` = no change, `Some(None)` = clear, `Some(Some(w))` = set
+- `new_active_period: Option<Option<ActivePeriod>>` - `None` = no change, `Some(None)` = clear, `Some(Some(p))` = set
+- `new_summary: Option<EdgeSummary>` - `None` = no change, `Some(summary)` = set
 
 ## Common Patterns
 
@@ -544,7 +540,7 @@ async fn bulk_import_users(
     writer: &Writer,
     users: Vec<(String, String)>  // (name, bio)
 ) -> anyhow::Result<()> {
-    let mut batch = MutationBatch::new();
+    let mut batch = Vec<Mutation>::new();
 
     for (name, bio) in users {
         let user_id = Id::new();
@@ -578,7 +574,7 @@ async fn update_user_conditionally(
     new_name: Option<String>,
     new_bio: Option<String>
 ) -> anyhow::Result<()> {
-    let mut batch = MutationBatch::new();
+    let mut batch = Vec<Mutation>::new();
 
     if let Some(name) = new_name {
         batch.push(AddNode {
@@ -606,7 +602,7 @@ async fn update_user_conditionally(
 }
 ```
 
-### Pattern 6: Temporal Validity
+### Pattern 6: Active period
 
 ```rust
 use motlie_db::schema::ActivePeriod;
@@ -700,7 +696,7 @@ async fn create_post_with_tags(
     .await?;
 
     // Create tags and edges
-    let mut batch = MutationBatch::new();
+    let mut batch = Vec<Mutation>::new();
 
     batch.push(AddEdge {
         source_node_id: author_id,
@@ -748,7 +744,7 @@ async fn bulk_import_with_batching(
     batch_size: usize
 ) -> anyhow::Result<()> {
     for chunk in items.chunks(batch_size) {
-        let mut batch = MutationBatch::with_capacity(chunk.len());
+        let mut batch = Vec<Mutation>::with_capacity(chunk.len());
 
         for name in chunk {
             batch.push(AddNode {
@@ -836,8 +832,8 @@ mutations![
     AddEdge { /* ... */ },
 ].run(&writer).await?;
 
-// Or using MutationBatch
-let mut batch = MutationBatch::new();
+// Or using Vec<Mutation>
+let mut batch = Vec<Mutation>::new();
 batch.push(AddNode { /* ... */ });
 batch.push(AddEdge { /* ... */ });
 batch.run(&writer).await?;
@@ -889,31 +885,23 @@ AddEdgeFragment {
 - Added: `summary: EdgeSummary` - Summary information for the edge
 - Added: `weight: Option<f64>` - Optional weight for weighted graphs
 
-**UpdateEdgeValidSinceUntil Changes**:
-- Now uses topology (src_id, dst_id, name) instead of edge_id
+**Consolidated UpdateEdge Mutation**:
+- Uses topology (src_id, dst_id, name) to identify edge
+- Combines weight, active period, and summary updates in one mutation
+- Uses `Option<Option<T>>` pattern: `None` = no change, `Some(None)` = clear, `Some(Some(v))` = set
 - Example:
 ```rust
-UpdateEdgeValidSinceUntil {
+UpdateEdge {
     src_id: alice_id,
     dst_id: bob_id,
     name: "follows".to_string(),
-    temporal_range: ActivePeriod {
+    expected_version: current_version,
+    new_weight: Some(Some(2.5)),  // Set weight to 2.5
+    new_active_period: Some(Some(ActivePeriod {
         valid_from: TimestampMilli::now(),
         valid_to: Some(future_timestamp),
-    },
-    reason: "Updated validity period".to_string(),
-}
-.run(&writer)
-.await?;
-```
-
-**New Mutation: UpdateEdgeWeight**:
-```rust
-UpdateEdgeWeight {
-    src_id: alice_id,
-    dst_id: bob_id,
-    name: "follows".to_string(),
-    weight: 2.5,
+    })),
+    new_summary: None,  // No change to summary
 }
 .run(&writer)
 .await?;
@@ -923,7 +911,7 @@ UpdateEdgeWeight {
 
 1. ✅ Import new types:
    ```rust
-   use motlie_db::{mutations, MutationBatch, MutationRunnable, EdgeSummary};
+   use motlie_db::{mutations, Vec<Mutation>, MutationRunnable, EdgeSummary};
    ```
 
 2. ✅ Update helper method calls:
@@ -957,16 +945,25 @@ UpdateEdgeWeight {
    AddEdgeFragment { src_id, dst_id, edge_name, /* ... */ }
    ```
 
-5. ✅ Update UpdateEdgeValidSinceUntil to use topology:
+5. ✅ Use consolidated UpdateNode and UpdateEdge:
    ```rust
-   // Old: used edge_id
-   // New: uses src_id, dst_id, and name
-   UpdateEdgeValidSinceUntil {
+   // UpdateNode: consolidated node update (active period and/or summary)
+   UpdateNode {
+       id: node_id,
+       expected_version: 1,
+       new_active_period: Some(Some(period)),  // or None, or Some(None)
+       new_summary: Some(NodeSummary::from_text("...")),  // or None
+   }
+
+   // UpdateEdge: consolidated edge update (weight, active period, and/or summary)
+   UpdateEdge {
        src_id: alice_id,
        dst_id: bob_id,
        name: "follows".to_string(),
-       temporal_range: /* ... */,
-       reason: "...".to_string(),
+       expected_version: 1,
+       new_weight: Some(Some(2.5)),  // or None, or Some(None)
+       new_active_period: None,
+       new_summary: None,
    }
    ```
 
@@ -1000,7 +997,7 @@ node.run(&writer).await?;
 ## Best Practices
 
 1. **Use the mutations![] Macro for Batches**
-   - Cleaner syntax than manual MutationBatch construction
+   - Cleaner syntax than manual Vec<Mutation> construction
    - Auto-conversion via `.into()`
    - Familiar `vec![]`-like syntax
 
@@ -1014,10 +1011,10 @@ node.run(&writer).await?;
    - For real-time updates: 1-10 mutations per batch
    - Monitor RocksDB transaction limits
 
-4. **Use Temporal Validity When Needed**
+4. **Use Active period When Needed**
    - Set `valid_to` for time-limited data
    - Leave None for permanent data
-   - Remember: queries can filter by temporal validity
+   - Remember: queries can filter by active period
 
 5. **Handle Errors Appropriately**
    - Mutations are atomic - failed batches roll back
@@ -1042,7 +1039,7 @@ Batching provides significant performance improvements:
 
 ### Memory Considerations
 
-- `MutationBatch` has zero overhead beyond the `Vec<Mutation>` itself
+- `Vec<Mutation>` has zero overhead beyond the `Vec<Mutation>` itself
 - Each mutation struct is ~200-300 bytes
 - 1,000 mutations ≈ 200-300 KB memory
 

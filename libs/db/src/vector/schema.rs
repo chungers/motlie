@@ -760,8 +760,13 @@ pub(crate) struct EdgeCfKey(
     pub(crate) HnswLayer,
 );
 
-/// Edges value: serialized RoaringBitmap of neighbor vec_ids
+/// Edges value: serialized RoaringBitmap of neighbor vec_ids.
+///
+/// NOTE: This type isn't constructed directly in most call paths; edge updates
+/// are applied via RocksDB merge operators using raw bytes. We keep the wrapper
+/// to document the CF value shape and for potential future typed access.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub(crate) struct EdgeCfValue(pub(crate) RoaringBitmapBytes);
 
 impl ColumnFamily for Edges {
@@ -815,12 +820,16 @@ impl Edges {
         Ok(EdgeCfKey(embedding_code, vec_id, layer))
     }
 
-    /// Serialize edge value (RoaringBitmap bytes passthrough)
+    /// Serialize edge value (RoaringBitmap bytes passthrough).
+    /// Not currently used in hot paths; merge ops operate on raw bytes.
+    #[allow(dead_code)]
     pub fn value_to_bytes(value: &EdgeCfValue) -> Vec<u8> {
         value.0.clone()
     }
 
-    /// Deserialize edge value (RoaringBitmap bytes passthrough)
+    /// Deserialize edge value (RoaringBitmap bytes passthrough).
+    /// Not currently used in hot paths; merge ops operate on raw bytes.
+    #[allow(dead_code)]
     pub fn value_from_bytes(bytes: &[u8]) -> Result<EdgeCfValue> {
         Ok(EdgeCfValue(bytes.to_vec()))
     }

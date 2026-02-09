@@ -16,6 +16,7 @@ use std::sync::Mutex;
 use anyhow::Result;
 use tokio::sync::oneshot;
 
+use crate::request::{ReplyEnvelope, RequestMeta};
 use crate::rocksdb::MutationCodec;
 
 use super::distance::Distance;
@@ -65,6 +66,25 @@ pub enum Mutation {
 }
 
 // ============================================================================
+// MutationResult / MutationOutcome
+// ============================================================================
+
+#[derive(Debug)]
+pub enum MutationResult {
+    AddEmbeddingSpec,
+    InsertVector(super::ops::InsertResult),
+    DeleteVector(super::ops::DeleteResult),
+    InsertVectorBatch(super::ops::InsertBatchResult),
+    Flush,
+}
+
+#[derive(Debug)]
+pub struct MutationOutcome {
+    pub result: MutationResult,
+    pub cache_update: Option<MutationCacheUpdate>,
+}
+
+// ============================================================================
 // AddEmbeddingSpec
 // ============================================================================
 
@@ -111,6 +131,28 @@ impl From<AddEmbeddingSpec> for Mutation {
         Mutation::AddEmbeddingSpec(op)
     }
 }
+
+// ============================================================================
+// RequestMeta for mutation types
+// ============================================================================
+
+macro_rules! impl_request_meta {
+    ($ty:ty, $reply:ty, $kind:expr) => {
+        impl RequestMeta for $ty {
+            type Reply = ReplyEnvelope<$reply>;
+            type Options = ();
+
+            fn request_kind(&self) -> &'static str {
+                $kind
+            }
+        }
+    };
+}
+
+impl_request_meta!(AddEmbeddingSpec, (), "add_embedding_spec");
+impl_request_meta!(InsertVector, super::ops::InsertResult, "insert_vector");
+impl_request_meta!(DeleteVector, super::ops::DeleteResult, "delete_vector");
+impl_request_meta!(InsertVectorBatch, super::ops::InsertBatchResult, "insert_vector_batch");
 
 // ============================================================================
 // MutationCodec Implementations
@@ -350,20 +392,22 @@ impl Mutation {
     /// This is the main dispatch method that routes to the appropriate
     /// `MutationExecutor` implementation based on the mutation variant.
     ///
-    /// Returns an optional `MutationCacheUpdate` for cache updates.
-    /// The cache update should be applied AFTER transaction commit.
+    /// Returns the mutation result and any cache update (to be applied after commit).
     pub(crate) fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
         processor: &Processor,
-    ) -> Result<Option<MutationCacheUpdate>> {
+    ) -> Result<MutationOutcome> {
         match self {
             Mutation::AddEmbeddingSpec(op) => op.execute(txn, txn_db, processor),
             Mutation::InsertVector(op) => op.execute(txn, txn_db, processor),
             Mutation::DeleteVector(op) => op.execute(txn, txn_db, processor),
             Mutation::InsertVectorBatch(op) => op.execute(txn, txn_db, processor),
-            Mutation::Flush(_) => Ok(None), // No-op for storage
+            Mutation::Flush(_) => Ok(MutationOutcome {
+                result: MutationResult::Flush,
+                cache_update: None,
+            }),
         }
     }
 }
@@ -378,10 +422,13 @@ impl MutationExecutor for AddEmbeddingSpec {
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
         processor: &Processor,
-    ) -> Result<Option<MutationCacheUpdate>> {
+    ) -> Result<MutationOutcome> {
         // Delegate to shared ops helper (also updates in-memory registry)
         super::ops::embedding::spec(txn, txn_db, processor, self)?;
-        Ok(None)
+        Ok(MutationOutcome {
+            result: MutationResult::AddEmbeddingSpec,
+            cache_update: None,
+        })
     }
 }
 
@@ -391,7 +438,7 @@ impl MutationExecutor for InsertVector {
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
         processor: &Processor,
-    ) -> Result<Option<MutationCacheUpdate>> {
+    ) -> Result<MutationOutcome> {
         // Delegate to shared ops helper (includes all validation)
         let result = super::ops::insert::vector(
             txn,
@@ -404,12 +451,15 @@ impl MutationExecutor for InsertVector {
         )?;
 
         // Return combined cache update for both nav and code caches
-        Ok(MutationCacheUpdate::from_insert(
-            self.embedding,
-            result.vec_id,
-            result.nav_cache_update,
-            result.code_cache_update,
-        ))
+        Ok(MutationOutcome {
+            result: MutationResult::InsertVector(result.clone()),
+            cache_update: MutationCacheUpdate::from_insert(
+                self.embedding,
+                result.vec_id,
+                result.nav_cache_update,
+                result.code_cache_update,
+            ),
+        })
     }
 }
 
@@ -419,7 +469,7 @@ impl MutationExecutor for DeleteVector {
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
         processor: &Processor,
-    ) -> Result<Option<MutationCacheUpdate>> {
+    ) -> Result<MutationOutcome> {
         // Delegate to shared ops helper (handles soft-delete when HNSW enabled)
         let result =
             super::ops::delete::vector(txn, txn_db, processor, self.embedding, self.external_key.clone())?;
@@ -432,7 +482,10 @@ impl MutationExecutor for DeleteVector {
             );
         }
 
-        Ok(None)
+        Ok(MutationOutcome {
+            result: MutationResult::DeleteVector(result),
+            cache_update: None,
+        })
     }
 }
 
@@ -442,7 +495,7 @@ impl MutationExecutor for InsertVectorBatch {
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
         processor: &Processor,
-    ) -> Result<Option<MutationCacheUpdate>> {
+    ) -> Result<MutationOutcome> {
         // Delegate to shared ops helper (includes batch validation)
         let result = super::ops::insert::batch(
             txn,
@@ -459,12 +512,15 @@ impl MutationExecutor for InsertVectorBatch {
         );
 
         // Return combined batch cache update
-        Ok(MutationCacheUpdate::from_batch(
-            self.embedding,
-            &result.vec_ids,
-            result.nav_cache_updates,
-            result.code_cache_updates,
-        ))
+        Ok(MutationOutcome {
+            result: MutationResult::InsertVectorBatch(result.clone()),
+            cache_update: MutationCacheUpdate::from_batch(
+                self.embedding,
+                &result.vec_ids,
+                result.nav_cache_updates,
+                result.code_cache_updates,
+            ),
+        })
     }
 }
 
@@ -486,6 +542,19 @@ impl MutationExecutor for InsertVectorBatch {
 pub trait Runnable {
     /// Execute this mutation against the writer.
     async fn run(self, writer: &super::writer::Writer) -> Result<()>;
+}
+
+#[async_trait::async_trait]
+pub trait RunnableWithResult<R> {
+    async fn run_with_result(
+        self,
+        writer: &super::writer::Writer,
+    ) -> Result<ReplyEnvelope<R>>;
+}
+
+pub trait MutationReply: Into<Mutation> + Send {
+    type Reply;
+    fn from_result(result: MutationResult) -> Result<Self::Reply>;
 }
 
 #[async_trait::async_trait]
@@ -517,62 +586,115 @@ impl Runnable for AddEmbeddingSpec {
 }
 
 // ============================================================================
-// MutationBatch - Batch helper for multiple mutations
+// Typed replies for mutations
 // ============================================================================
 
-/// Batch of mutations for efficient bulk operations.
-///
-/// Enables the pattern:
-/// ```rust,ignore
-/// MutationBatch::new()
-///     .push(InsertVector::new(...))
-///     .push(InsertVector::new(...))
-///     .run(&writer)
-///     .await?;
-/// ```
-#[derive(Debug, Default)]
-pub struct MutationBatch(pub Vec<Mutation>);
-
-impl MutationBatch {
-    /// Create a new empty batch.
-    pub fn new() -> Self {
-        Self(Vec::new())
+#[async_trait::async_trait]
+impl<M> RunnableWithResult<M::Reply> for M
+where
+    M: MutationReply,
+{
+    async fn run_with_result(
+        self,
+        writer: &super::writer::Writer,
+    ) -> Result<ReplyEnvelope<M::Reply>> {
+        let reply = writer.send_with_result(vec![self.into()]).await?;
+        if reply.payload.len() != 1 {
+            return Err(anyhow::anyhow!(
+                "Expected exactly one mutation result, got {}",
+                reply.payload.len()
+            ));
+        }
+        let mut results = reply.payload;
+        let result = results.remove(0);
+        let payload = M::from_result(result)?;
+        Ok(ReplyEnvelope::new(
+            reply.request_id,
+            reply.elapsed_time,
+            payload,
+        ))
     }
+}
 
-    /// Create a batch with pre-allocated capacity.
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self(Vec::with_capacity(capacity))
+impl MutationReply for AddEmbeddingSpec {
+    type Reply = ();
+
+    fn from_result(result: MutationResult) -> Result<Self::Reply> {
+        match result {
+            MutationResult::AddEmbeddingSpec => Ok(()),
+            other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
+        }
     }
+}
 
-    /// Add a mutation to the batch.
-    pub fn push<M: Into<Mutation>>(mut self, mutation: M) -> Self {
-        self.0.push(mutation.into());
-        self
+impl MutationReply for InsertVector {
+    type Reply = super::ops::InsertResult;
+
+    fn from_result(result: MutationResult) -> Result<Self::Reply> {
+        match result {
+            MutationResult::InsertVector(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
+        }
     }
+}
 
-    /// Get the number of mutations in the batch.
-    pub fn len(&self) -> usize {
-        self.0.len()
+impl MutationReply for DeleteVector {
+    type Reply = super::ops::DeleteResult;
+
+    fn from_result(result: MutationResult) -> Result<Self::Reply> {
+        match result {
+            MutationResult::DeleteVector(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
+        }
     }
+}
 
-    /// Check if the batch is empty.
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+impl MutationReply for InsertVectorBatch {
+    type Reply = super::ops::InsertBatchResult;
+
+    fn from_result(result: MutationResult) -> Result<Self::Reply> {
+        match result {
+            MutationResult::InsertVectorBatch(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
+        }
     }
+}
 
-    /// Consume the batch and return the underlying mutations.
-    pub fn into_inner(self) -> Vec<Mutation> {
-        self.0
+impl RequestMeta for Vec<Mutation> {
+    type Reply = ReplyEnvelope<Vec<MutationResult>>;
+    type Options = ();
+
+    fn request_kind(&self) -> &'static str {
+        "vector_mutation_batch"
     }
 }
 
 #[async_trait::async_trait]
-impl Runnable for MutationBatch {
+impl Runnable for Vec<Mutation> {
     async fn run(self, writer: &super::writer::Writer) -> Result<()> {
         if self.is_empty() {
             return Ok(());
         }
-        writer.send(self.0).await
+        writer.send(self).await
+    }
+}
+
+/// Extension trait for batch-only helpers on Vec<Mutation>.
+#[async_trait::async_trait]
+pub trait MutationBatchExt {
+    async fn run_with_result(
+        self,
+        writer: &super::writer::Writer,
+    ) -> Result<ReplyEnvelope<Vec<MutationResult>>>;
+}
+
+#[async_trait::async_trait]
+impl MutationBatchExt for Vec<Mutation> {
+    async fn run_with_result(
+        self,
+        writer: &super::writer::Writer,
+    ) -> Result<ReplyEnvelope<Vec<MutationResult>>> {
+        writer.send_with_result(self).await
     }
 }
 

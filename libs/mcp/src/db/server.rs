@@ -105,26 +105,18 @@ impl MotlieMcpServer {
         params.call(&self.resource).await
     }
 
-    #[tool(description = "Update the temporal validity range of a node")]
-    async fn update_node_valid_range(
+    #[tool(description = "Update a node (active period and/or summary)")]
+    async fn update_node(
         &self,
-        Parameters(params): Parameters<UpdateNodeActivePeriodParams>,
+        Parameters(params): Parameters<UpdateNodeParams>,
     ) -> Result<CallToolResult, McpError> {
         params.call(&self.resource).await
     }
 
-    #[tool(description = "Update the temporal validity range of an edge")]
-    async fn update_edge_valid_range(
+    #[tool(description = "Update an edge (weight, active period, and/or summary)")]
+    async fn update_edge(
         &self,
-        Parameters(params): Parameters<UpdateEdgeActivePeriodParams>,
-    ) -> Result<CallToolResult, McpError> {
-        params.call(&self.resource).await
-    }
-
-    #[tool(description = "Update the weight of an edge for graph algorithms")]
-    async fn update_edge_weight(
-        &self,
-        Parameters(params): Parameters<UpdateEdgeWeightParams>,
+        Parameters(params): Parameters<UpdateEdgeParams>,
     ) -> Result<CallToolResult, McpError> {
         params.call(&self.resource).await
     }

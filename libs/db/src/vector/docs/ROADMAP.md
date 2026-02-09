@@ -1517,6 +1517,7 @@ fn bench_allocation_throughput(b: &mut Bencher) {
 │  │                                 │    │                                 │     │
 │  │  send(Vec<Mutation>)           │    │  send_query(Query)              │     │
 │  │  flush() -> oneshot            │    │  is_closed()                    │     │
+│  │  send_with_result(Vec<Mutation>)│   │                                 │     │
 │  │  send_sync(Vec<Mutation>)      │    │                                 │     │
 │  └──────────────┬──────────────────┘    └──────────────┬──────────────────┘     │
 │                 │                                       │                        │
@@ -1594,6 +1595,7 @@ fn bench_allocation_throughput(b: &mut Bencher) {
 
 **Writer:**
 - `send(Vec<Mutation>)` - Fire-and-forget async send
+- `send_with_result(Vec<Mutation>)` - Send + await consumer processing
 - `flush()` - Wait for pending mutations to commit (uses `FlushMarker` oneshot)
 - `send_sync(Vec<Mutation>)` - Send + flush in one call
 - `is_closed()` - Check if consumer dropped
@@ -7265,7 +7267,7 @@ fn reader_workload(storage: Arc<Storage>, metrics: Arc<BenchMetrics>, duration: 
 │  Mutation Path (MPSC):                                                       │
 │  ┌────────────┐     MPSC      ┌────────────┐     ┌────────────┐             │
 │  │ Writer     │───────────────│ Consumer   │────►│ Processor  │             │
-│  │ (handle)   │  Vec<Mutation>│ (loop)     │     │ (Phase 5)  │             │
+│  │ (handle)   │ Vec<Mutation> │ (loop)     │     │ (Phase 5)  │             │
 │  └────────────┘               └────────────┘     └────────────┘             │
 │       │                                                                      │
 │       │ .flush() ──► FlushMarker ──► oneshot response                       │
@@ -7369,7 +7371,7 @@ impl MutationExecutor for AddEmbeddingSpec {
 **Implementation:** `libs/db/src/vector/writer.rs`
 
 Implemented with:
-- `Writer` handle with `send()`, `send_sync()`, `flush()`, `is_closed()`
+- `Writer` handle with `send()`, `send_with_result()`, `send_sync()`, `flush()`, `is_closed()`
 - `Consumer` with MPSC receiver and Processor
 - `spawn_mutation_consumer_with_storage_autoreg()` for auto-registration
 - FlushMarker with oneshot for blocking flush semantics
@@ -7384,12 +7386,12 @@ Implement mutation consumer following graph::writer pattern:
 
 /// Consumer that processes mutations from MPSC channel.
 pub struct Consumer {
-    receiver: mpsc::Receiver<Vec<Mutation>>,
+    receiver: mpsc::Receiver<MutationRequest>,
     processor: Arc<Processor>,
 }
 
 impl Consumer {
-    pub fn new(receiver: mpsc::Receiver<Vec<Mutation>>, processor: Arc<Processor>) -> Self {
+    pub fn new(receiver: mpsc::Receiver<MutationRequest>, processor: Arc<Processor>) -> Self {
         Self { receiver, processor }
     }
 

@@ -413,7 +413,7 @@ impl HnswIndex {
 
         // Prune edges beyond m_max
         for (_, neighbor_id) in with_distances.iter().skip(m_max) {
-            prune_edge(writer, node_id, *neighbor_id, &layer_prefix).await?;
+            prune_edge(writer, node_id, *neighbor_id, &layer_prefix, 1).await?;
         }
 
         Ok(())

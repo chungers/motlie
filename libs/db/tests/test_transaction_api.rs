@@ -25,7 +25,8 @@ fn setup_test_storage(db_path: &std::path::Path) -> (Arc<Storage>, motlie_db::gr
     let (mut writer, _receiver) = create_mutation_writer(config);
 
     // Configure writer with storage for transaction support
-    writer.set_storage(storage.clone());
+    let processor = Arc::new(motlie_db::graph::Processor::new(storage.clone()));
+    writer.set_processor(processor);
 
     (storage, writer)
 }
@@ -66,7 +67,7 @@ async fn test_transaction_write_then_read() {
     println!("  Written node {} (not committed)", node_id);
 
     // Read the node back - should see uncommitted write!
-    let (name, summary) = txn.read(NodeById::new(node_id, None)).unwrap();
+    let (name, summary, _version) = txn.read(NodeById::new(node_id, None)).unwrap();
     assert_eq!(name, node_name);
     println!("  Read node back: name='{}' (read-your-writes works!)", name);
 
@@ -79,7 +80,7 @@ async fn test_transaction_write_then_read() {
 
     // After commit, verify data is visible in a new transaction
     let verify_txn = writer.transaction().unwrap();
-    let (verify_name, _) = verify_txn.read(NodeById::new(node_id, None)).unwrap();
+    let (verify_name, _, _version) = verify_txn.read(NodeById::new(node_id, None)).unwrap();
     assert_eq!(verify_name, node_name, "Node should be visible after commit");
     verify_txn.rollback().unwrap();
     println!("  Verified node is visible after commit");
@@ -148,7 +149,7 @@ async fn test_transaction_interleaved_writes_reads() {
     println!("  Written vector fragment");
 
     // 3. Read the node back (simulating greedy search would read this)
-    let (name, _summary) = txn.read(NodeById::new(new_node_id, None)).unwrap();
+    let (name, _summary, _version) = txn.read(NodeById::new(new_node_id, None)).unwrap();
     assert_eq!(name, "NewVector");
     println!("  Read new node (for greedy search): {}", name);
 
@@ -333,7 +334,7 @@ async fn test_transaction_all_query_types() {
     println!("  Added 3 edges");
 
     // Test NodeById
-    let (name, _) = txn.read(NodeById::new(node_a, None)).unwrap();
+    let (name, _, _version) = txn.read(NodeById::new(node_a, None)).unwrap();
     assert_eq!(name, "NodeA");
     println!("  ✓ NodeById works");
 
@@ -481,17 +482,24 @@ async fn test_concurrent_transactions() {
     println!("✅ Test 7 passed: Concurrent transactions work\n");
 }
 
-/// Combined test: Full HNSW-style insert simulation.
+/// Tests transaction commit visibility: writes in one transaction become visible
+/// to subsequent transactions after commit.
+///
+/// This test verifies:
+/// 1. Read-your-writes within a transaction (uncommitted data visible to same txn)
+/// 2. Commit visibility (committed data visible to new transactions)
+/// 3. Complex write patterns (nodes, fragments, bidirectional edges)
+/// 4. Edge queries work correctly after commit
 #[tokio::test]
-async fn test_hnsw_insert_simulation() {
+async fn test_transaction_commit_visibility() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("graph_db");
 
     let (_storage, writer) = setup_test_storage(&db_path);
 
-    println!("=== HNSW Insert Simulation ===");
+    println!("=== Transaction Commit Visibility ===");
 
-    // Pre-create some "existing" nodes (committed)
+    // Pre-create some existing nodes (committed)
     let mut existing_nodes = Vec::new();
     for i in 0..10 {
         let node_id = Id::new();
@@ -513,8 +521,8 @@ async fn test_hnsw_insert_simulation() {
                 source_node_id: existing_nodes[i - 1],
                 target_node_id: node_id,
                 ts_millis: TimestampMilli::now(),
-                name: "hnsw_layer0".to_string(),
-                summary: EdgeSummary::from_text("HNSW connection"),
+                name: "connects_to".to_string(),
+                summary: EdgeSummary::from_text("Connection"),
                 weight: Some(0.5),
                 valid_range: None,
             })
@@ -523,20 +531,20 @@ async fn test_hnsw_insert_simulation() {
 
         txn.commit().unwrap();
     }
-    println!("  Created {} existing nodes with edges", existing_nodes.len());
+    println!("  Setup: Created {} existing nodes with edges", existing_nodes.len());
 
-    // Now simulate HNSW insert of a new vector
+    // Create a new node with complex write pattern
     let new_node_id = Id::new();
-    let max_connections = 3;
+    let num_edges = 3;
 
     let mut txn = writer.transaction().unwrap();
 
-    // Step 1: Write new node + vector fragment
+    // Step 1: Write new node + fragment
     txn.write(AddNode {
         id: new_node_id,
         ts_millis: TimestampMilli::now(),
-        name: "NewVector".to_string(),
-        summary: NodeSummary::from_text("New vector to insert"),
+        name: "NewNode".to_string(),
+        summary: NodeSummary::from_text("New node to insert"),
         valid_range: None,
     })
     .unwrap();
@@ -544,20 +552,20 @@ async fn test_hnsw_insert_simulation() {
     txn.write(AddNodeFragment {
         id: new_node_id,
         ts_millis: TimestampMilli::now(),
-        content: DataUrl::from_text("vector: [0.1, 0.2, 0.3, 0.4, 0.5]"),
+        content: DataUrl::from_text("fragment data"),
         valid_range: None,
     })
     .unwrap();
-    println!("  Step 1: Written new node and vector fragment");
+    println!("  Step 1: Written new node and fragment");
 
-    // Step 2: Verify we can read the new node (greedy search simulation)
-    let (name, _) = txn.read(NodeById::new(new_node_id, None)).unwrap();
-    assert_eq!(name, "NewVector");
-    println!("  Step 2: Verified new node is readable (greedy search OK)");
+    // Step 2: Read-your-writes - verify uncommitted node is readable
+    let (name, _, _version) = txn.read(NodeById::new(new_node_id, None)).unwrap();
+    assert_eq!(name, "NewNode");
+    println!("  Step 2: Read-your-writes OK (uncommitted node readable)");
 
-    // Step 3: "Find nearest neighbors" (simulated - use first few existing nodes)
-    let neighbors = &existing_nodes[0..max_connections];
-    println!("  Step 3: Found {} nearest neighbors", neighbors.len());
+    // Step 3: Select nodes to connect to
+    let neighbors = &existing_nodes[0..num_edges];
+    println!("  Step 3: Selected {} neighbors to connect", neighbors.len());
 
     // Step 4: Add bidirectional edges to neighbors
     for neighbor_id in neighbors {
@@ -566,8 +574,8 @@ async fn test_hnsw_insert_simulation() {
             source_node_id: new_node_id,
             target_node_id: *neighbor_id,
             ts_millis: TimestampMilli::now(),
-            name: "hnsw_layer0".to_string(),
-            summary: EdgeSummary::from_text("HNSW connection from new node"),
+            name: "connects_to".to_string(),
+            summary: EdgeSummary::from_text("Outgoing connection"),
             weight: Some(0.9),
             valid_range: None,
         })
@@ -578,8 +586,8 @@ async fn test_hnsw_insert_simulation() {
             source_node_id: *neighbor_id,
             target_node_id: new_node_id,
             ts_millis: TimestampMilli::now(),
-            name: "hnsw_layer0".to_string(),
-            summary: EdgeSummary::from_text("HNSW connection to new node"),
+            name: "connects_to".to_string(),
+            summary: EdgeSummary::from_text("Incoming connection"),
             weight: Some(0.9),
             valid_range: None,
         })
@@ -590,51 +598,43 @@ async fn test_hnsw_insert_simulation() {
         neighbors.len() * 2
     );
 
-    // Step 5: Check if any neighbor needs pruning (read current edges)
+    // Step 5: Read-your-writes for edges (uncommitted edges readable)
     for neighbor_id in neighbors {
         let edges = txn.read(OutgoingEdges::new(*neighbor_id, None)).unwrap();
-        println!(
-            "    Neighbor {} has {} outgoing edges",
-            neighbor_id,
-            edges.len()
-        );
-
-        // In a real implementation, we'd prune if edges.len() > max_connections
-        // For this test, we just verify we can read the edges
+        // Each neighbor should have 2 edges: one from setup + one to new_node
+        assert!(edges.len() >= 1, "Neighbor should have edges");
     }
-    println!("  Step 5: Checked neighbor edge counts for pruning");
+    println!("  Step 5: Read-your-writes OK (uncommitted edges readable)");
 
     // Step 6: Commit atomically
     txn.commit().unwrap();
-    println!("  Step 6: Committed HNSW insert atomically");
+    println!("  Step 6: Committed transaction");
 
-    // Verify the insert worked
+    // Step 7: Verify commit visibility - new transaction sees committed data
     let verify_txn = writer.transaction().unwrap();
     let outgoing = verify_txn.read(OutgoingEdges::new(new_node_id, None)).unwrap();
     assert_eq!(
         outgoing.len(),
-        max_connections,
-        "New node should have {} outgoing edges",
-        max_connections
+        num_edges,
+        "New node should have {} outgoing edges after commit",
+        num_edges
     );
     let incoming = verify_txn.read(IncomingEdges::new(new_node_id, None)).unwrap();
     assert_eq!(
         incoming.len(),
-        max_connections,
-        "New node should have {} incoming edges",
-        max_connections
+        num_edges,
+        "New node should have {} incoming edges after commit",
+        num_edges
     );
     verify_txn.rollback().unwrap();
 
     println!(
-        "  Verified: new node has {} outgoing and {} incoming edges",
-        max_connections, max_connections
+        "  Step 7: Commit visibility OK ({} outgoing, {} incoming edges)",
+        num_edges, num_edges
     );
 
-    println!("\n✅ HNSW Insert Simulation passed!");
-    println!("   - Node + vector fragment written atomically");
-    println!("   - Greedy search sees uncommitted writes");
-    println!("   - Bidirectional edges added");
-    println!("   - Neighbor edge counts checked for pruning");
-    println!("   - All committed atomically");
+    println!("\n✅ Transaction Commit Visibility passed!");
+    println!("   - Read-your-writes works for uncommitted data");
+    println!("   - Committed data visible to new transactions");
+    println!("   - Complex write patterns (node + fragment + edges) work");
 }

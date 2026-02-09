@@ -272,8 +272,6 @@ mod tests {
 
     #[test]
     fn test_full_merge_empty_existing() {
-        use rocksdb::{MergeOperands, Options};
-
         // Create operands manually since MergeOperands is opaque
         // We'll test the logic directly instead
         let mut bitmap = RoaringBitmap::new();

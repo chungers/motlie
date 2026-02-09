@@ -28,7 +28,7 @@ use super::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord};
 use super::schema::{
     self, is_active_at_time, DstId, EdgeName, EdgeSummary, EdgeSummaries, EdgeSummaryCfKey,
     FragmentContent, Names, NameCfKey, NodeName, NodeSummary, NodeSummaries, NodeSummaryCfKey,
-    SrcId, ActivePeriod,
+    SrcId, ActivePeriod, Version,
 };
 use super::Storage;
 use crate::{Id, TimestampMilli};
@@ -107,7 +107,7 @@ fn resolve_node_summary(storage: &Storage, summary_hash: Option<SummaryHash>) ->
     match value_bytes {
         Some(bytes) => {
             let value = NodeSummaries::value_from_bytes(&bytes)?;
-            Ok(value.1) // .1 is the summary, .0 is the refcount
+            Ok(value.0) // .0 is the summary (no refcount in VERSIONING)
         }
         None => Ok(NodeSummary::from_text("")),
     }
@@ -139,7 +139,7 @@ fn resolve_edge_summary(storage: &Storage, summary_hash: Option<SummaryHash>) ->
     match value_bytes {
         Some(bytes) => {
             let value = EdgeSummaries::value_from_bytes(&bytes)?;
-            Ok(value.1) // .1 is the summary, .0 is the refcount
+            Ok(value.0) // .0 is the summary (no refcount in VERSIONING)
         }
         None => Ok(EdgeSummary::from_text("")),
     }
@@ -198,6 +198,7 @@ pub struct NodeRecord {
     pub name: NodeName,
     pub summary: NodeSummary,
     pub valid_range: Option<ActivePeriod>,
+    pub version: Version,
 }
 
 /// A forward edge record as seen by scan visitors.
@@ -207,8 +208,9 @@ pub struct EdgeRecord {
     pub dst_id: DstId,
     pub name: EdgeName,
     pub summary: EdgeSummary,
-    pub weight: Option<f64>,
+    pub weight: Option<schema::EdgeWeight>,
     pub valid_range: Option<ActivePeriod>,
+    pub version: Version,
 }
 
 /// A reverse edge record as seen by scan visitors (index only, no summary/weight).
@@ -362,7 +364,8 @@ where
     };
 
     let mut count = 0;
-    let mut skipped_cursor = !skip_cursor;
+    // Note: skip_cursor parameter is used by cursor_matches closure, not by this variable
+    let _ = skip_cursor;
 
     // Handle readonly/secondary mode
     if let Ok(db) = storage.db() {
@@ -377,14 +380,22 @@ where
 
             let (key_bytes, value_bytes) = item?;
 
-            // Skip the cursor record if needed
-            if !skipped_cursor && cursor_matches(&key_bytes) {
-                skipped_cursor = true;
+            // VERSIONING: Always check cursor_matches to skip all versions of cursor record
+            if cursor_matches(&key_bytes) {
                 continue;
             }
-            skipped_cursor = true;
 
-            let record = transform(&key_bytes, &value_bytes)?;
+            // VERSIONING: transform may return skip errors for non-current versions
+            let record = match transform(&key_bytes, &value_bytes) {
+                Ok(r) => r,
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.starts_with("skip_") {
+                        continue;
+                    }
+                    return Err(e);
+                }
+            };
 
             // Check temporal validity if reference time is specified
             if let Some(ref_ts) = reference_ts_millis {
@@ -412,14 +423,22 @@ where
 
             let (key_bytes, value_bytes) = item?;
 
-            // Skip the cursor record if needed
-            if !skipped_cursor && cursor_matches(&key_bytes) {
-                skipped_cursor = true;
+            // VERSIONING: Always check cursor_matches to skip all versions of cursor record
+            if cursor_matches(&key_bytes) {
                 continue;
             }
-            skipped_cursor = true;
 
-            let record = transform(&key_bytes, &value_bytes)?;
+            // VERSIONING: transform may return skip errors for non-current versions
+            let record = match transform(&key_bytes, &value_bytes) {
+                Ok(r) => r,
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.starts_with("skip_") {
+                        continue;
+                    }
+                    return Err(e);
+                }
+            };
 
             // Check temporal validity if reference time is specified
             if let Some(ref_ts) = reference_ts_millis {
@@ -475,7 +494,8 @@ where
     };
 
     let mut count = 0;
-    let mut skipped_cursor = !skip_cursor;
+    // Note: skip_cursor parameter is used by cursor_matches closure, not by this variable
+    let _ = skip_cursor;
 
     // Handle readonly/secondary mode
     if let Ok(db) = storage.db() {
@@ -490,14 +510,22 @@ where
 
             let (key_bytes, value_bytes) = item?;
 
-            // Skip the cursor record if needed
-            if !skipped_cursor && cursor_matches(&key_bytes) {
-                skipped_cursor = true;
+            // VERSIONING: Always check cursor_matches to skip all versions of cursor record
+            if cursor_matches(&key_bytes) {
                 continue;
             }
-            skipped_cursor = true;
 
-            let record = transform(&key_bytes, &value_bytes)?;
+            // VERSIONING: transform may return skip errors for non-current versions
+            let record = match transform(&key_bytes, &value_bytes) {
+                Ok(r) => r,
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.starts_with("skip_") {
+                        continue;
+                    }
+                    return Err(e);
+                }
+            };
 
             // Check temporal validity if reference time is specified
             if let Some(ref_ts) = reference_ts_millis {
@@ -525,14 +553,22 @@ where
 
             let (key_bytes, value_bytes) = item?;
 
-            // Skip the cursor record if needed
-            if !skipped_cursor && cursor_matches(&key_bytes) {
-                skipped_cursor = true;
+            // VERSIONING: Always check cursor_matches to skip all versions of cursor record
+            if cursor_matches(&key_bytes) {
                 continue;
             }
-            skipped_cursor = true;
 
-            let record = transform(&key_bytes, &value_bytes)?;
+            // VERSIONING: transform may return skip errors for non-current versions
+            let record = match transform(&key_bytes, &value_bytes) {
+                Ok(r) => r,
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.starts_with("skip_") {
+                        continue;
+                    }
+                    return Err(e);
+                }
+            };
 
             // Check temporal validity if reference time is specified
             if let Some(ref_ts) = reference_ts_millis {
@@ -558,6 +594,7 @@ where
 impl Visitable for AllNodes {
     type Record = NodeRecord;
 
+    /// (claude, 2026-02-06, in-progress: VERSIONING uses node_id prefix for seek)
     fn accept<V: Visitor<Self::Record>>(
         &self,
         storage: &Storage,
@@ -565,39 +602,66 @@ impl Visitable for AllNodes {
     ) -> Result<usize> {
         tracing::debug!(limit = self.limit, reverse = self.reverse, has_cursor = self.last.is_some(), "Executing AllNodes scan");
 
+        // With VERSIONING, key is (Id, ValidSince). For cursor positioning,
+        // we seek past all versions of the cursor ID by using max timestamp.
         let seek_key = self
             .last
-            .map(|id| schema::Nodes::key_to_bytes(&schema::NodeCfKey(id)))
+            .map(|id| {
+                let mut bytes = id.into_bytes().to_vec();
+                bytes.extend_from_slice(&u64::MAX.to_be_bytes());
+                bytes
+            })
             .unwrap_or_default();
 
-        let last_id = self.last;
+        let cursor_id = self.last;
 
         iterate_and_visit_hot::<schema::Nodes, _, _, _, _>(
             storage,
             seek_key,
             self.limit,
-            self.last.is_some(),
+            false, // Don't skip first - we handle cursor skipping explicitly below
             self.reverse,
             self.reference_ts_millis,
             |key_bytes| {
-                if let Some(last) = last_id {
-                    key_bytes == last.into_bytes()
-                } else {
-                    false
+                // VERSIONING: Skip all versions of the cursor node_id.
+                // For forward iteration, seek_key = (cursor_id, MAX) puts us past the cursor.
+                // For reverse iteration, we might land on cursor versions and need to skip them.
+                if let Some(cursor) = cursor_id {
+                    if key_bytes.len() >= 16 {
+                        let mut id_bytes = [0u8; 16];
+                        id_bytes.copy_from_slice(&key_bytes[0..16]);
+                        let node_id = crate::Id::from_bytes(id_bytes);
+                        if node_id == cursor {
+                            return true; // Skip cursor node
+                        }
+                    }
                 }
+                false
             },
             |key_bytes, value_bytes| {
                 let key = schema::Nodes::key_from_bytes(key_bytes)?;
                 let value = schema::Nodes::value_from_bytes(value_bytes)?;
-                // Resolve NameHash to String
-                let name = resolve_name(storage, value.1)?;
-                // Resolve SummaryHash to NodeSummary
-                let summary = resolve_node_summary(storage, value.2)?;
+
+                // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=NameHash, 3=SummaryHash, 4=Version, 5=Deleted
+                // Only process current versions (ValidUntil = None)
+                if value.0.is_some() {
+                    return Err(anyhow::anyhow!("skip_non_current"));
+                }
+                // Skip deleted nodes
+                if value.5 {
+                    return Err(anyhow::anyhow!("skip_deleted"));
+                }
+
+                // Resolve NameHash to String (index 2)
+                let name = resolve_name(storage, value.2)?;
+                // Resolve SummaryHash to NodeSummary (index 3)
+                let summary = resolve_node_summary(storage, value.3)?;
                 Ok(NodeRecord {
                     id: key.0,
                     name,
                     summary,
-                    valid_range: value.0,
+                    valid_range: value.1, // ActivePeriod at index 1
+                    version: value.4,
                 })
             },
             |record| &record.valid_range,
@@ -609,6 +673,7 @@ impl Visitable for AllNodes {
 impl Visitable for AllEdges {
     type Record = EdgeRecord;
 
+    /// (claude, 2026-02-06, in-progress: VERSIONING uses edge topology prefix for seek)
     fn accept<V: Visitor<Self::Record>>(
         &self,
         storage: &Storage,
@@ -616,57 +681,79 @@ impl Visitable for AllEdges {
     ) -> Result<usize> {
         tracing::debug!(limit = self.limit, reverse = self.reverse, has_cursor = self.last.is_some(), "Executing AllEdges scan");
 
-        // Convert String cursor to NameHash for key construction
+        // With VERSIONING, key is (SrcId, DstId, NameHash, ValidSince). For cursor positioning,
+        // we seek past all versions of the cursor edge by using max timestamp.
         let seek_key = self
             .last
             .as_ref()
             .map(|(src, dst, name)| {
                 let name_hash = NameHash::from_name(name);
-                schema::ForwardEdges::key_to_bytes(&schema::ForwardEdgeCfKey(
-                    *src,
-                    *dst,
-                    name_hash,
-                ))
+                let mut bytes = Vec::with_capacity(48);
+                bytes.extend_from_slice(&src.into_bytes());
+                bytes.extend_from_slice(&dst.into_bytes());
+                bytes.extend_from_slice(name_hash.as_bytes());
+                bytes.extend_from_slice(&u64::MAX.to_be_bytes());
+                bytes
             })
             .unwrap_or_default();
 
-        // Pre-compute cursor key hash for comparison
-        let last_cursor_hash = self.last.as_ref().map(|(src, dst, name)| {
-            let name_hash = NameHash::from_name(name);
-            (*src, *dst, name_hash)
-        });
+        // Track last seen edge topology for deduplication
+        let mut last_seen_edge: Option<(crate::Id, crate::Id, NameHash)> = None;
 
         iterate_and_visit_hot::<schema::ForwardEdges, _, _, _, _>(
             storage,
             seek_key,
             self.limit,
-            self.last.is_some(),
+            false, // Don't skip first - our seek key is already past cursor
             self.reverse,
             self.reference_ts_millis,
             |key_bytes| {
-                if let Some((src, dst, name_hash)) = &last_cursor_hash {
-                    let cursor_key = schema::ForwardEdges::key_to_bytes(
-                        &schema::ForwardEdgeCfKey(*src, *dst, *name_hash),
-                    );
-                    key_bytes == cursor_key.as_slice()
-                } else {
-                    false
+                // With VERSIONING, check if this is a duplicate edge topology
+                // by comparing first 40 bytes (src_id + dst_id + name_hash)
+                if key_bytes.len() >= 40 {
+                    let mut src_bytes = [0u8; 16];
+                    src_bytes.copy_from_slice(&key_bytes[0..16]);
+                    let mut dst_bytes = [0u8; 16];
+                    dst_bytes.copy_from_slice(&key_bytes[16..32]);
+                    let mut name_bytes = [0u8; 8];
+                    name_bytes.copy_from_slice(&key_bytes[32..40]);
+
+                    let src_id = crate::Id::from_bytes(src_bytes);
+                    let dst_id = crate::Id::from_bytes(dst_bytes);
+                    let name_hash = NameHash::from_bytes(name_bytes);
+
+                    if last_seen_edge == Some((src_id, dst_id, name_hash)) {
+                        return true; // Skip duplicates
+                    }
                 }
+                false
             },
             |key_bytes, value_bytes| {
                 let key = schema::ForwardEdges::key_from_bytes(key_bytes)?;
                 let value = schema::ForwardEdges::value_from_bytes(value_bytes)?;
+
+                // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=Weight, 3=SummaryHash, 4=Version, 5=Deleted
+                // Only process current versions (ValidUntil = None)
+                if value.0.is_some() {
+                    return Err(anyhow::anyhow!("skip_non_current"));
+                }
+                // Skip deleted edges
+                if value.5 {
+                    return Err(anyhow::anyhow!("skip_deleted"));
+                }
+
                 // Resolve NameHash to String
                 let name = resolve_name(storage, key.2)?;
-                // Resolve SummaryHash to EdgeSummary
-                let summary = resolve_edge_summary(storage, value.2)?;
+                // Resolve SummaryHash to EdgeSummary (index 3)
+                let summary = resolve_edge_summary(storage, value.3)?;
                 Ok(EdgeRecord {
                     src_id: key.0,
                     dst_id: key.1,
                     name,
                     summary,
-                    weight: value.1,
-                    valid_range: value.0,
+                    weight: value.2,           // Weight at index 2
+                    valid_range: value.1,      // ActivePeriod at index 1
+                    version: value.4,
                 })
             },
             |record| &record.valid_range,
@@ -678,6 +765,7 @@ impl Visitable for AllEdges {
 impl Visitable for AllReverseEdges {
     type Record = ReverseEdgeRecord;
 
+    /// (claude, 2026-02-06, in-progress: VERSIONING uses edge topology prefix for seek)
     fn accept<V: Visitor<Self::Record>>(
         &self,
         storage: &Storage,
@@ -685,53 +773,70 @@ impl Visitable for AllReverseEdges {
     ) -> Result<usize> {
         tracing::debug!(limit = self.limit, reverse = self.reverse, has_cursor = self.last.is_some(), "Executing AllReverseEdges scan");
 
-        // Convert String cursor to NameHash for key construction
+        // With VERSIONING, key is (DstId, SrcId, NameHash, ValidSince). For cursor positioning,
+        // we seek past all versions of the cursor edge by using max timestamp.
         let seek_key = self
             .last
             .as_ref()
             .map(|(dst, src, name)| {
                 let name_hash = NameHash::from_name(name);
-                schema::ReverseEdges::key_to_bytes(&schema::ReverseEdgeCfKey(
-                    *dst,
-                    *src,
-                    name_hash,
-                ))
+                let mut bytes = Vec::with_capacity(48);
+                bytes.extend_from_slice(&dst.into_bytes());
+                bytes.extend_from_slice(&src.into_bytes());
+                bytes.extend_from_slice(name_hash.as_bytes());
+                bytes.extend_from_slice(&u64::MAX.to_be_bytes());
+                bytes
             })
             .unwrap_or_default();
 
-        // Pre-compute cursor key hash for comparison
-        let last_cursor_hash = self.last.as_ref().map(|(dst, src, name)| {
-            let name_hash = NameHash::from_name(name);
-            (*dst, *src, name_hash)
-        });
+        // Track last seen edge topology for deduplication
+        let mut last_seen_edge: Option<(crate::Id, crate::Id, NameHash)> = None;
 
         iterate_and_visit_hot::<schema::ReverseEdges, _, _, _, _>(
             storage,
             seek_key,
             self.limit,
-            self.last.is_some(),
+            false, // Don't skip first - our seek key is already past cursor
             self.reverse,
             self.reference_ts_millis,
             |key_bytes| {
-                if let Some((dst, src, name_hash)) = &last_cursor_hash {
-                    let cursor_key = schema::ReverseEdges::key_to_bytes(
-                        &schema::ReverseEdgeCfKey(*dst, *src, *name_hash),
-                    );
-                    key_bytes == cursor_key.as_slice()
-                } else {
-                    false
+                // With VERSIONING, check if this is a duplicate edge topology
+                // by comparing first 40 bytes (dst_id + src_id + name_hash)
+                if key_bytes.len() >= 40 {
+                    let mut dst_bytes = [0u8; 16];
+                    dst_bytes.copy_from_slice(&key_bytes[0..16]);
+                    let mut src_bytes = [0u8; 16];
+                    src_bytes.copy_from_slice(&key_bytes[16..32]);
+                    let mut name_bytes = [0u8; 8];
+                    name_bytes.copy_from_slice(&key_bytes[32..40]);
+
+                    let dst_id = crate::Id::from_bytes(dst_bytes);
+                    let src_id = crate::Id::from_bytes(src_bytes);
+                    let name_hash = NameHash::from_bytes(name_bytes);
+
+                    if last_seen_edge == Some((dst_id, src_id, name_hash)) {
+                        return true; // Skip duplicates
+                    }
                 }
+                false
             },
             |key_bytes, value_bytes| {
                 let key = schema::ReverseEdges::key_from_bytes(key_bytes)?;
                 let value = schema::ReverseEdges::value_from_bytes(value_bytes)?;
+
+                // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod
+                // Only process current versions (ValidUntil = None)
+                if value.0.is_some() {
+                    return Err(anyhow::anyhow!("skip_non_current"));
+                }
+
                 // Resolve NameHash to String
                 let name = resolve_name(storage, key.2)?;
                 Ok(ReverseEdgeRecord {
                     dst_id: key.0,
                     src_id: key.1,
                     name,
-                    valid_range: value.0,
+                    valid_range: value.1, // ActivePeriod at index 1
                 })
             },
             |record| &record.valid_range,

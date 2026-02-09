@@ -281,7 +281,7 @@ impl Storage<ReadOnly> {
         let mut graph_storage = graph::Storage::readonly(&graph_path);
         graph_storage.ready()?;
         let graph_arc = Arc::new(graph_storage);
-        let graph = Arc::new(graph::Graph::new(graph_arc));
+        let graph = Arc::new(graph::Processor::new(graph_arc));
 
         // Initialize fulltext storage in read-only mode
         let mut fulltext_storage = fulltext::Storage::readonly(&fulltext_path);
@@ -350,7 +350,7 @@ impl Storage<ReadWrite> {
         let mut graph_storage = graph::Storage::readwrite(&graph_path);
         graph_storage.ready()?;
         let graph_arc = Arc::new(graph_storage);
-        let graph = Arc::new(graph::Graph::new(graph_arc));
+        let graph = Arc::new(graph::Processor::new(graph_arc));
 
         // Initialize fulltext storage in read-write mode
         let mut fulltext_storage = fulltext::Storage::readwrite(&fulltext_path);

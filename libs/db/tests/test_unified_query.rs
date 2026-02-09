@@ -55,7 +55,7 @@ use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
 use motlie_db::graph::writer::{
     create_mutation_writer, spawn_mutation_consumer_with_next, WriterConfig,
 };
-use motlie_db::graph::{Graph, Storage as GraphStorage};
+use motlie_db::graph::{Processor, Storage as GraphStorage};
 use motlie_db::mutation::Runnable as MutationRunnable;
 use motlie_db::query::{
     AllEdges, AllNodes, EdgeDetails, Edges, FuzzyLevel, IncomingEdges, NodeById, NodeFragments,
@@ -162,7 +162,7 @@ async fn setup_test_env(
     // Manual initialization (lower-level API)
     let mut graph_storage = GraphStorage::readonly(&db_path);
     graph_storage.ready().unwrap();
-    let graph = Arc::new(Graph::new(Arc::new(graph_storage)));
+    let graph = Arc::new(Processor::new(Arc::new(graph_storage)));
 
     let mut fulltext_storage = FulltextStorage::readonly(&index_path);
     fulltext_storage.ready().unwrap();
@@ -557,7 +557,7 @@ async fn setup_tagged_test_env(
     // Open storage for reading
     let mut graph_storage = GraphStorage::readonly(&db_path);
     graph_storage.ready().unwrap();
-    let graph = Arc::new(Graph::new(Arc::new(graph_storage)));
+    let graph = Arc::new(Processor::new(Arc::new(graph_storage)));
 
     let mut fulltext_storage = FulltextStorage::readonly(&index_path);
     fulltext_storage.ready().unwrap();
@@ -1058,8 +1058,8 @@ async fn test_edge_details_query() {
         .await
         .unwrap();
 
-    // EdgeDetails returns EdgeDetailsResult: (Option<f64>, SrcId, DstId, EdgeName, EdgeSummary)
-    let (detail_weight, detail_src, detail_dst, detail_name, detail_summary) = edge_detail;
+    // EdgeDetails returns EdgeDetailsResult: (Option<f64>, SrcId, DstId, EdgeName, EdgeSummary, Version)
+    let (detail_weight, detail_src, detail_dst, detail_name, detail_summary, _version) = edge_detail;
 
     assert_eq!(detail_src, *src_id, "Source ID should match");
     assert_eq!(detail_dst, *dst_id, "Destination ID should match");
@@ -1148,7 +1148,7 @@ async fn test_node_by_id_and_edge_queries() {
     // =========================================================================
     // 1. NodeById - Direct graph lookup by ID
     // =========================================================================
-    let (name, summary) = NodeById::new(*rust_id, None)
+    let (name, summary, _version) = NodeById::new(*rust_id, None)
         .run(handle.reader(), timeout)
         .await
         .unwrap();
@@ -1177,7 +1177,7 @@ async fn test_node_by_id_and_edge_queries() {
 
     // The test data has Rust -> JavaScript (influences) edge
     println!("OutgoingEdges from Rust: {} edges", outgoing.len());
-    for (weight, src_id, dst_id, edge_name) in &outgoing {
+    for (weight, src_id, dst_id, edge_name, _version) in &outgoing {
         println!(
             "  {} -> {} via '{}' (weight: {:?})",
             src_id, dst_id, edge_name, weight
@@ -1205,7 +1205,7 @@ async fn test_node_by_id_and_edge_queries() {
             .unwrap();
 
         println!("IncomingEdges to {}: {} edges", js_name, incoming.len());
-        for (weight, src_id, dst_id, edge_name) in &incoming {
+        for (weight, src_id, dst_id, edge_name, _version) in &incoming {
             println!(
                 "  {} -> {} via '{}' (weight: {:?})",
                 src_id, dst_id, edge_name, weight
@@ -1223,7 +1223,7 @@ async fn test_node_by_id_and_edge_queries() {
         // The tuple format is (weight, src_id, dst_id, edge_name) from the edge's perspective
         // For incoming edges to js_id, we look for edges where dst_id == js_id (target)
         // OR where the edge connects rust and js
-        let rust_to_js_edge = incoming.iter().find(|(_, src, dst, _)| {
+        let rust_to_js_edge = incoming.iter().find(|(_, src, dst, _, _)| {
             (*src == *rust_id && *dst == *js_id) || (*dst == *rust_id && *src == *js_id)
         });
         assert!(
@@ -1271,7 +1271,7 @@ async fn test_nodes_by_ids_multi() {
     );
 
     // Verify the IDs match
-    for (id, _name, _summary) in &batch_results {
+    for (id, _name, _summary, _version) in &batch_results {
         assert!(
             found_ids.contains(id),
             "Each result ID should be in our lookup list"
@@ -1299,7 +1299,7 @@ async fn test_nodes_by_ids_multi() {
     );
 
     // Verify non-existing ID is not in results
-    for (id, _, _) in &mixed_results {
+    for (id, _, _, _) in &mixed_results {
         assert_ne!(
             *id, non_existing_id,
             "Non-existing ID should not be in results"
@@ -1339,14 +1339,14 @@ async fn test_all_nodes_via_unified_api() {
     // Should return all 3 nodes
     assert_eq!(results.len(), 3, "Should return all 3 nodes from test data");
 
-    // Verify results are tuples: (Id, NodeName, NodeSummary)
-    let names: Vec<&str> = results.iter().map(|(_, name, _)| name.as_str()).collect();
+    // Verify results are tuples: (Id, NodeName, NodeSummary, Version)
+    let names: Vec<&str> = results.iter().map(|(_, name, _, _)| name.as_str()).collect();
     assert!(names.contains(&"Rust"), "Should contain Rust node");
     assert!(names.contains(&"Python"), "Should contain Python node");
     assert!(names.contains(&"JavaScript"), "Should contain JavaScript node");
 
     // Verify each node has valid data
-    for (id, name, summary) in &results {
+    for (id, name, summary, _version) in &results {
         assert!(!id.is_nil(), "Node ID should not be nil");
         assert!(!name.is_empty(), "Node name should not be empty");
         assert!(
@@ -1386,8 +1386,8 @@ async fn test_all_nodes_pagination_via_unified_api() {
     assert_eq!(page2.len(), 1, "Second page should have 1 remaining node");
 
     // Verify no overlap between pages
-    let page1_ids: std::collections::HashSet<_> = page1.iter().map(|(id, _, _)| *id).collect();
-    let page2_ids: std::collections::HashSet<_> = page2.iter().map(|(id, _, _)| *id).collect();
+    let page1_ids: std::collections::HashSet<_> = page1.iter().map(|(id, _, _, _)| *id).collect();
+    let page2_ids: std::collections::HashSet<_> = page2.iter().map(|(id, _, _, _)| *id).collect();
     assert!(
         page1_ids.is_disjoint(&page2_ids),
         "Pages should not overlap"
@@ -1421,8 +1421,9 @@ async fn test_all_edges_via_unified_api() {
     // Should return all 2 edges
     assert_eq!(results.len(), 2, "Should return all 2 edges from test data");
 
-    // Verify results are tuples: (Option<f64>, SrcId, DstId, EdgeName)
-    let edge_names: Vec<&str> = results.iter().map(|(_, _, _, name)| name.as_str()).collect();
+    // Verify results are tuples: (Option<f64>, SrcId, DstId, EdgeName, Version)
+    let edge_names: Vec<&str> =
+        results.iter().map(|(_, _, _, name, _)| name.as_str()).collect();
     assert!(
         edge_names.contains(&"influences"),
         "Should contain 'influences' edge"
@@ -1433,7 +1434,7 @@ async fn test_all_edges_via_unified_api() {
     );
 
     // Verify each edge has valid data
-    for (weight, src_id, dst_id, name) in &results {
+    for (weight, src_id, dst_id, name, _version) in &results {
         assert!(!src_id.is_nil(), "Source ID should not be nil");
         assert!(!dst_id.is_nil(), "Destination ID should not be nil");
         assert!(!name.is_empty(), "Edge name should not be empty");
@@ -1441,7 +1442,7 @@ async fn test_all_edges_via_unified_api() {
     }
 
     // Verify weights match test data
-    for (weight, _, _, name) in &results {
+    for (weight, _, _, name, _version) in &results {
         match name.as_str() {
             "influences" => assert_eq!(*weight, Some(0.8), "influences edge should have weight 0.8"),
             "used_with" => assert_eq!(*weight, Some(0.9), "used_with edge should have weight 0.9"),
@@ -1470,7 +1471,7 @@ async fn test_all_edges_pagination_via_unified_api() {
     assert_eq!(page1.len(), 1, "First page should have 1 edge");
 
     // Get second page using cursor from last result
-    let (_, src, dst, name) = page1.last().unwrap();
+    let (_, src, dst, name, _version) = page1.last().unwrap();
     let page2 = AllEdges::new(1)
         .with_cursor((*src, *dst, name.clone()))
         .run(handle.reader(), timeout)
@@ -1481,9 +1482,9 @@ async fn test_all_edges_pagination_via_unified_api() {
 
     // Verify no overlap - different edge names
     let page1_names: std::collections::HashSet<_> =
-        page1.iter().map(|(_, _, _, name)| name.as_str()).collect();
+        page1.iter().map(|(_, _, _, name, _)| name.as_str()).collect();
     let page2_names: std::collections::HashSet<_> =
-        page2.iter().map(|(_, _, _, name)| name.as_str()).collect();
+        page2.iter().map(|(_, _, _, name, _)| name.as_str()).collect();
     assert!(
         page1_names.is_disjoint(&page2_names),
         "Pages should not overlap"

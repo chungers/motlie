@@ -30,7 +30,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 
 use super::processor::Processor;
-use super::query::Query;
+use super::query::QueryRequest;
 use super::Storage;
 
 // ============================================================================
@@ -86,20 +86,20 @@ impl Default for ReaderConfig {
 /// ```
 #[derive(Clone)]
 pub struct Reader {
-    sender: flume::Sender<Query>,
+    sender: flume::Sender<QueryRequest>,
     processor: Arc<Processor>,
 }
 
 impl Reader {
     /// Create a new Reader with the given sender and processor.
-    pub(crate) fn new(sender: flume::Sender<Query>, processor: Arc<Processor>) -> Self {
+    pub(crate) fn new(sender: flume::Sender<QueryRequest>, processor: Arc<Processor>) -> Self {
         Self { sender, processor }
     }
 
     /// Send a query to the reader queue.
     ///
     /// This is typically called by the Runnable trait implementation.
-    pub async fn send_query(&self, query: Query) -> Result<()> {
+    pub async fn send_query(&self, query: QueryRequest) -> Result<()> {
         self.sender
             .send_async(query)
             .await
@@ -156,7 +156,7 @@ impl std::fmt::Debug for Reader {
 pub fn create_reader_with_storage(
     config: ReaderConfig,
     storage: Arc<super::Storage>,
-) -> (Reader, flume::Receiver<Query>) {
+) -> (Reader, flume::Receiver<QueryRequest>) {
     let registry = storage.cache().clone();
     let processor = Arc::new(Processor::new(storage, registry));
     let (sender, receiver) = flume::bounded(config.channel_buffer_size);
@@ -171,7 +171,7 @@ pub fn create_reader_with_storage(
 pub(crate) fn create_reader(
     config: ReaderConfig,
     processor: Arc<Processor>,
-) -> (Reader, flume::Receiver<Query>) {
+) -> (Reader, flume::Receiver<QueryRequest>) {
     let (sender, receiver) = flume::bounded(config.channel_buffer_size);
     let reader = Reader::new(sender, processor);
     (reader, receiver)
@@ -186,7 +186,7 @@ pub(crate) fn create_reader(
 /// Multiple consumers can be spawned to process queries in parallel
 /// thanks to flume's MPMC semantics.
 pub struct Consumer {
-    receiver: flume::Receiver<Query>,
+    receiver: flume::Receiver<QueryRequest>,
     config: ReaderConfig,
     storage: Arc<Storage>,
 }
@@ -194,7 +194,7 @@ pub struct Consumer {
 impl Consumer {
     /// Create a new Consumer.
     pub fn new(
-        receiver: flume::Receiver<Query>,
+        receiver: flume::Receiver<QueryRequest>,
         config: ReaderConfig,
         storage: Arc<Storage>,
     ) -> Self {
@@ -212,8 +212,8 @@ impl Consumer {
 
         loop {
             match self.receiver.recv_async().await {
-                Ok(query) => {
-                    self.process_query(query).await;
+                Ok(mut request) => {
+                    self.process_query(&mut request).await;
                 }
                 Err(_) => {
                     // Channel closed
@@ -225,10 +225,19 @@ impl Consumer {
     }
 
     /// Process a single query.
-    #[tracing::instrument(skip(self), fields(query_type = %query))]
-    async fn process_query(&self, query: Query) {
-        tracing::debug!(query = %query, "Processing vector query");
-        query.process(&self.storage).await;
+    #[tracing::instrument(skip(self, request), fields(query_type = %request.payload))]
+    async fn process_query(&self, request: &mut QueryRequest) {
+        tracing::debug!(query = %request.payload, "Processing vector query");
+        let result = if let Some(timeout) = request.timeout {
+            match tokio::time::timeout(timeout, request.payload.execute_with_storage(&self.storage)).await
+            {
+                Ok(result) => result,
+                Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", timeout)),
+            }
+        } else {
+            request.payload.execute_with_storage(&self.storage).await
+        };
+        request.respond(result);
     }
 }
 
@@ -255,7 +264,7 @@ pub fn spawn_consumer(consumer: Consumer) -> tokio::task::JoinHandle<Result<()>>
 ///
 /// Vector of JoinHandles for all spawned consumers
 pub fn spawn_consumers(
-    receiver: flume::Receiver<Query>,
+    receiver: flume::Receiver<QueryRequest>,
     config: ReaderConfig,
     storage: Arc<Storage>,
     count: usize,
@@ -279,7 +288,7 @@ pub fn spawn_consumers(
 ///
 /// Use this when your query workload includes SearchKNN.
 pub(crate) struct ProcessorConsumer {
-    receiver: flume::Receiver<Query>,
+    receiver: flume::Receiver<QueryRequest>,
     config: ReaderConfig,
     processor: Arc<Processor>,
 }
@@ -287,7 +296,7 @@ pub(crate) struct ProcessorConsumer {
 impl ProcessorConsumer {
     /// Create a new ProcessorConsumer.
     pub(crate) fn new(
-        receiver: flume::Receiver<Query>,
+        receiver: flume::Receiver<QueryRequest>,
         config: ReaderConfig,
         processor: Arc<Processor>,
     ) -> Self {
@@ -305,8 +314,8 @@ impl ProcessorConsumer {
 
         loop {
             match self.receiver.recv_async().await {
-                Ok(query) => {
-                    self.process_query(query).await;
+                Ok(mut request) => {
+                    self.process_query(&mut request).await;
                 }
                 Err(_) => {
                     tracing::info!("Vector query consumer shutting down - channel closed");
@@ -317,10 +326,23 @@ impl ProcessorConsumer {
     }
 
     /// Process a single query.
-    #[tracing::instrument(skip(self), fields(query_type = %query))]
-    async fn process_query(&self, query: Query) {
-        tracing::debug!(query = %query, "Processing vector query");
-        query.process(self.processor.storage()).await;
+    #[tracing::instrument(skip(self, request), fields(query_type = %request.payload))]
+    async fn process_query(&self, request: &mut QueryRequest) {
+        tracing::debug!(query = %request.payload, "Processing vector query");
+        let result = if let Some(timeout) = request.timeout {
+            match tokio::time::timeout(
+                timeout,
+                request.payload.execute_with_processor(&self.processor),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", timeout)),
+            }
+        } else {
+            request.payload.execute_with_processor(&self.processor).await
+        };
+        request.respond(result);
     }
 
     /// Get the processor reference (for SearchKNN dispatch setup).
@@ -352,7 +374,7 @@ pub(crate) fn spawn_consumer_with_processor(
 ///
 /// Vector of JoinHandles for all spawned consumers
 pub(crate) fn spawn_consumers_with_processor(
-    receiver: flume::Receiver<Query>,
+    receiver: flume::Receiver<QueryRequest>,
     config: ReaderConfig,
     processor: Arc<Processor>,
     count: usize,
@@ -383,7 +405,7 @@ pub(crate) fn spawn_consumers_with_processor(
 ///
 /// Vector of JoinHandles for all spawned consumers.
 pub fn spawn_query_consumers_with_storage(
-    receiver: flume::Receiver<Query>,
+    receiver: flume::Receiver<QueryRequest>,
     config: ReaderConfig,
     storage: Arc<super::Storage>,
     registry: Arc<super::registry::EmbeddingRegistry>,
@@ -398,7 +420,7 @@ pub fn spawn_query_consumers_with_storage(
 /// Convenience function for quick setup - creates the embedding registry
 /// from storage automatically.
 pub fn spawn_query_consumers_with_storage_autoreg(
-    receiver: flume::Receiver<Query>,
+    receiver: flume::Receiver<QueryRequest>,
     config: ReaderConfig,
     storage: Arc<super::Storage>,
     count: usize,

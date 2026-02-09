@@ -19,15 +19,16 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
-use super::mutation::{FlushMarker, Mutation};
+use super::mutation::{ExecOptions, FlushMarker, Mutation, MutationResult};
+use super::name_hash::NameCache;
+use super::processor::Processor as GraphProcessor;
 use super::transaction::Transaction;
 use super::Storage;
+use crate::request::{new_request_id, ReplyEnvelope, RequestEnvelope};
 
 // ============================================================================
 // MutationExecutor Trait
 // ============================================================================
-
-use super::name_hash::NameCache;
 
 /// Trait for mutations to execute themselves directly against storage.
 ///
@@ -45,6 +46,19 @@ pub trait MutationExecutor: Send + Sync {
         txn_db: &rocksdb::TransactionDB,
     ) -> Result<()>;
 
+    /// Execute this mutation with runtime options, returning a reply payload.
+    ///
+    /// Default implementation delegates to `execute()` and returns an empty reply.
+    fn execute_with_options(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        _options: ExecOptions,
+    ) -> Result<MutationResult> {
+        self.execute(txn, txn_db)?;
+        Ok(MutationResult::Flush)
+    }
+
     /// Execute this mutation with access to the name cache.
     ///
     /// The cache is used to:
@@ -59,6 +73,19 @@ pub trait MutationExecutor: Send + Sync {
         _cache: &NameCache,
     ) -> Result<()> {
         self.execute(txn, txn_db)
+    }
+
+    /// Execute with cache and runtime options, returning a reply payload.
+    ///
+    /// Default implementation ignores cache and delegates to execute_with_options().
+    fn execute_with_cache_and_options(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        _cache: &NameCache,
+        options: ExecOptions,
+    ) -> Result<MutationResult> {
+        self.execute_with_options(txn, txn_db, options)
     }
 }
 
@@ -78,24 +105,22 @@ pub trait MutationExecutor: Send + Sync {
 ///
 /// ```rust,ignore
 /// #[async_trait::async_trait]
-/// impl Processor for Graph {
+/// impl Processor for graph::Processor {
 ///     async fn process_mutations(&self, mutations: &[Mutation]) -> Result<()> {
-///         // Each mutation generates its own storage operations
-///         let mut operations = Vec::new();
+///         // Execute mutations in a single RocksDB transaction
+///         let txn_db = self.storage().transaction_db()?;
+///         let txn = txn_db.transaction();
+///
 ///         for mutation in mutations {
-///             operations.extend(mutation.plan()?);
+///             mutation.execute_with_cache(&txn, txn_db, self.name_cache())?;
 ///         }
 ///
-///         // Execute all operations in a single RocksDB transaction
-///         let txn = self.storage.transaction();
-///         for op in operations {
-///             txn.put_cf(cf, key, value)?;
-///         }
 ///         txn.commit()?;  // Single commit for entire batch
 ///         Ok(())
 ///     }
 /// }
 /// ```
+// (claude, 2026-02-07, FIXED: Updated example to use graph::Processor instead of Graph per codex eval)
 #[async_trait::async_trait]
 pub trait Processor: Send + Sync {
     /// Process a batch of mutations atomically.
@@ -107,6 +132,16 @@ pub trait Processor: Send + Sync {
     /// * `Ok(())` if all mutations were processed successfully
     /// * `Err(_)` if processing failed (implementations should rollback on error)
     async fn process_mutations(&self, mutations: &[Mutation]) -> Result<()>;
+
+    /// Process a batch of mutations with execution options, returning per-mutation replies.
+    async fn process_mutations_with_options(
+        &self,
+        mutations: &[Mutation],
+        _options: ExecOptions,
+    ) -> Result<Vec<MutationResult>> {
+        self.process_mutations(mutations).await?;
+        Ok(vec![MutationResult::Flush; mutations.len()])
+    }
 }
 
 // ============================================================================
@@ -127,6 +162,13 @@ impl Default for WriterConfig {
         }
     }
 }
+
+// ============================================================================
+// MutationRequest
+// ============================================================================
+
+/// Envelope for mutation batches with execution options and optional reply.
+pub type MutationRequest = RequestEnvelope<Vec<Mutation>>;
 
 /// Handle for sending mutations to the writer with batching support.
 ///
@@ -184,18 +226,19 @@ impl Default for WriterConfig {
 /// See [Mutation API Guide](../docs/mutation-api-guide.md) for complete documentation.
 #[derive(Clone)]
 pub struct Writer {
-    sender: mpsc::Sender<Vec<Mutation>>,
-    /// Storage for creating transactions (optional - only present in read-write mode)
-    storage: Option<Arc<Storage>>,
+    sender: mpsc::Sender<MutationRequest>,
+    /// Processor for creating transactions (optional - only present when configured)
+    /// (claude, 2026-02-07, FIXED: P2.2 - Writer holds Arc<Processor> instead of Storage)
+    processor: Option<Arc<GraphProcessor>>,
     /// Optional sender for transaction mutation forwarding (e.g., to fulltext)
-    transaction_forward_to: Option<mpsc::Sender<Vec<Mutation>>>,
+    transaction_forward_to: Option<mpsc::Sender<MutationRequest>>,
 }
 
 impl std::fmt::Debug for Writer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Writer")
             .field("sender", &"<mpsc::Sender>")
-            .field("storage", &self.storage.as_ref().map(|_| "<Arc<Storage>>"))
+            .field("processor", &self.processor.as_ref().map(|_| "<Arc<Processor>>"))
             .field(
                 "transaction_forward_to",
                 &self.transaction_forward_to.as_ref().map(|_| "<mpsc::Sender>"),
@@ -208,43 +251,54 @@ impl Writer {
     /// Create a new MutationWriter with the given sender.
     ///
     /// This creates a basic writer without transaction support.
-    /// Use `with_storage()` or `with_transaction_forward_to()` to
-    /// enable transaction features.
-    pub fn new(sender: mpsc::Sender<Vec<Mutation>>) -> Self {
+    /// Use `with_processor()` to enable transaction features.
+    pub fn new(sender: mpsc::Sender<MutationRequest>) -> Self {
         Writer {
             sender,
-            storage: None,
+            processor: None,
             transaction_forward_to: None,
         }
     }
 
-    /// Create a new MutationWriter with storage for transaction support.
-    pub fn with_storage(sender: mpsc::Sender<Vec<Mutation>>, storage: Arc<Storage>) -> Self {
+    /// Create a new MutationWriter with processor for transaction support.
+    /// (claude, 2026-02-07, FIXED: P2.2 - Primary construction with Processor)
+    pub(crate) fn with_processor(sender: mpsc::Sender<MutationRequest>, processor: Arc<GraphProcessor>) -> Self {
         Writer {
             sender,
-            storage: Some(storage),
+            processor: Some(processor),
             transaction_forward_to: None,
         }
     }
 
-    /// Set the storage for transaction support.
-    pub fn set_storage(&mut self, storage: Arc<Storage>) {
-        self.storage = Some(storage);
+    /// Set the processor for transaction support.
+    ///
+    /// This enables transaction creation via `Writer::transaction()`.
+    /// The processor provides access to the underlying storage for
+    /// executing mutations and queries within a transaction scope.
+    // (claude, 2026-02-07, FIXED: Made public for integration test access per codex eval)
+    pub fn set_processor(&mut self, processor: Arc<GraphProcessor>) {
+        self.processor = Some(processor);
     }
 
     /// Set the sender for transaction mutation forwarding.
     ///
     /// When transactions commit, their mutations will be forwarded
     /// to this sender (best-effort, non-blocking).
-    pub fn set_transaction_forward_to(&mut self, sender: mpsc::Sender<Vec<Mutation>>) {
+    pub fn set_transaction_forward_to(&mut self, sender: mpsc::Sender<MutationRequest>) {
         self.transaction_forward_to = Some(sender);
+    }
+
+    /// Get the processor if configured.
+    /// (claude, 2026-02-07, FIXED: P2.2 - Processor accessor)
+    pub(crate) fn processor(&self) -> Option<&Arc<GraphProcessor>> {
+        self.processor.as_ref()
     }
 
     /// Begin a transaction for read-your-writes semantics.
     ///
     /// The returned Transaction allows interleaved writes and reads
     /// within a single atomic scope. Transaction lifetime is tied to
-    /// the Writer's storage.
+    /// the Writer's processor/storage.
     ///
     /// # Example
     ///
@@ -274,27 +328,29 @@ impl Writer {
     /// # Errors
     ///
     /// Returns error if:
-    /// - Storage is not configured (writer created without storage)
+    /// - Processor/Storage is not configured
     /// - Storage is not in read-write mode
     pub fn transaction(&self) -> Result<Transaction<'_>> {
-        let storage = self
-            .storage
+        // (claude, 2026-02-07, FIXED: P2.2/P3.3 - Use processor for transactions)
+        let processor = self
+            .processor
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Writer not configured with storage for transactions"))?;
+            .ok_or_else(|| anyhow::anyhow!("Writer not configured with processor for transactions"))?;
 
-        let txn_db = storage.transaction_db()?;
+        let txn_db = processor.transaction_db()?;
         let txn = txn_db.transaction();
-        let name_cache = storage.cache().clone();
+        let name_cache = processor.name_cache().clone();
 
         Ok(Transaction::new(txn, txn_db, self.transaction_forward_to.clone(), name_cache))
     }
 
     /// Check if transactions are supported by this writer.
     pub fn supports_transactions(&self) -> bool {
-        self.storage
-            .as_ref()
-            .map(|s| s.is_transactional())
-            .unwrap_or(false)
+        // Check processor's storage if available
+        if let Some(p) = &self.processor {
+            return p.storage().is_transactional();
+        }
+        false
     }
 
     /// Send a batch of mutations to be processed asynchronously.
@@ -315,9 +371,44 @@ impl Writer {
     /// ```
     pub async fn send(&self, mutations: Vec<Mutation>) -> Result<()> {
         self.sender
-            .send(mutations)
+            .send(MutationRequest {
+                payload: mutations,
+                options: ExecOptions::default(),
+                reply: None,
+                timeout: None,
+                request_id: new_request_id(),
+                created_at: std::time::Instant::now(),
+            })
             .await
             .context("Failed to send mutations to writer queue")
+    }
+
+    /// Send mutations with execution options and wait for a reply.
+    ///
+    /// Returns a per-mutation reply vector in the same order as the input.
+    pub async fn send_with_result(
+        &self,
+        mutations: Vec<Mutation>,
+        options: ExecOptions,
+    ) -> Result<ReplyEnvelope<Vec<MutationResult>>> {
+        if mutations.is_empty() {
+            return Ok(ReplyEnvelope::new(new_request_id(), 0, Vec::new()));
+        }
+
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(MutationRequest {
+                payload: mutations,
+                options,
+                reply: Some(tx),
+                timeout: None,
+                request_id: new_request_id(),
+                created_at: std::time::Instant::now(),
+            })
+            .await
+            .context("Failed to send mutations to writer queue")?;
+
+        rx.await.context("Mutation reply channel dropped")?
     }
 
     /// Flush all pending mutations and wait for commit.
@@ -355,7 +446,14 @@ impl Writer {
 
         // Send flush marker through the same channel as mutations
         self.sender
-            .send(vec![Mutation::Flush(FlushMarker::new(tx))])
+            .send(MutationRequest {
+                payload: vec![Mutation::Flush(FlushMarker::new(tx))],
+                options: ExecOptions::default(),
+                reply: None,
+                timeout: None,
+                request_id: new_request_id(),
+                created_at: std::time::Instant::now(),
+            })
             .await
             .context("Failed to send flush marker - channel closed")?;
 
@@ -398,7 +496,7 @@ impl Writer {
 }
 
 /// Create a new mutation writer and receiver pair
-pub fn create_mutation_writer(config: WriterConfig) -> (Writer, mpsc::Receiver<Vec<Mutation>>) {
+pub fn create_mutation_writer(config: WriterConfig) -> (Writer, mpsc::Receiver<MutationRequest>) {
     let (sender, receiver) = mpsc::channel(config.channel_buffer_size);
     let writer = Writer::new(sender);
     (writer, receiver)
@@ -410,17 +508,17 @@ pub fn create_mutation_writer(config: WriterConfig) -> (Writer, mpsc::Receiver<V
 
 /// Generic consumer that processes mutations using a Processor
 pub struct Consumer<P: Processor> {
-    receiver: mpsc::Receiver<Vec<Mutation>>,
+    receiver: mpsc::Receiver<MutationRequest>,
     config: WriterConfig,
     processor: P,
     /// Optional sender to forward mutations to the next consumer in the chain
-    next: Option<mpsc::Sender<Vec<Mutation>>>,
+    next: Option<mpsc::Sender<MutationRequest>>,
 }
 
 impl<P: Processor> Consumer<P> {
     /// Create a new Consumer
     pub fn new(
-        receiver: mpsc::Receiver<Vec<Mutation>>,
+        receiver: mpsc::Receiver<MutationRequest>,
         config: WriterConfig,
         processor: P,
     ) -> Self {
@@ -434,10 +532,10 @@ impl<P: Processor> Consumer<P> {
 
     /// Create a new Consumer that forwards mutations to the next consumer in the chain
     pub fn with_next(
-        receiver: mpsc::Receiver<Vec<Mutation>>,
+        receiver: mpsc::Receiver<MutationRequest>,
         config: WriterConfig,
         processor: P,
-        next: mpsc::Sender<Vec<Mutation>>,
+        next: mpsc::Sender<MutationRequest>,
     ) -> Self {
         Self {
             receiver,
@@ -455,11 +553,9 @@ impl<P: Processor> Consumer<P> {
         loop {
             // Wait for the next batch of mutations
             match self.receiver.recv().await {
-                Some(mutations) => {
+                Some(request) => {
                     // Process the batch immediately
-                    self.process_batch(&mutations)
-                        .await
-                        .with_context(|| format!("Failed to process mutations: {:?}", mutations))?;
+                    self.process_request(request).await?;
                 }
                 None => {
                     // Channel closed
@@ -471,10 +567,20 @@ impl<P: Processor> Consumer<P> {
     }
 
     /// Process a batch of mutations
-    #[tracing::instrument(skip(self, mutations), fields(batch_size = mutations.len()))]
-    async fn process_batch(&self, mutations: &[Mutation]) -> Result<()> {
+    #[tracing::instrument(skip(self, request), fields(batch_size = request.payload.len()))]
+    async fn process_request(&self, request: MutationRequest) -> Result<()> {
+        let request_id = request.request_id;
+        let elapsed = request.elapsed_nanos();
+        let MutationRequest {
+            payload,
+            options,
+            reply,
+            ..
+        } = request;
+        let mutations = payload;
+
         // Log what we're processing
-        for mutation in mutations {
+        for mutation in &mutations {
             match mutation {
                 Mutation::AddNode(args) => {
                     tracing::debug!(id = %args.id, name = %args.name, "Processing AddNode");
@@ -503,46 +609,26 @@ impl<P: Processor> Consumer<P> {
                         "Processing AddEdgeFragment"
                     );
                 }
-                Mutation::UpdateNodeValidSinceUntil(args) => {
-                    tracing::debug!(
-                        id = %args.id,
-                        reason = %args.reason,
-                        "Processing UpdateNodeValidSinceUntil"
-                    );
-                }
-                Mutation::UpdateEdgeValidSinceUntil(args) => {
-                    tracing::debug!(
-                        src = %args.src_id,
-                        dst = %args.dst_id,
-                        name = %args.name,
-                        reason = %args.reason,
-                        "Processing UpdateEdgeValidSinceUntil"
-                    );
-                }
-                Mutation::UpdateEdgeWeight(args) => {
-                    tracing::debug!(
-                        src = %args.src_id,
-                        dst = %args.dst_id,
-                        name = %args.name,
-                        weight = args.weight,
-                        "Processing UpdateEdgeWeight"
-                    );
-                }
                 // CONTENT-ADDRESS: Update/Delete mutations
-                Mutation::UpdateNodeSummary(args) => {
+                Mutation::UpdateNode(args) => {
                     tracing::debug!(
                         id = %args.id,
                         expected_version = args.expected_version,
-                        "Processing UpdateNodeSummary"
+                        has_active_period = args.new_active_period.is_some(),
+                        has_summary = args.new_summary.is_some(),
+                        "Processing UpdateNode"
                     );
                 }
-                Mutation::UpdateEdgeSummary(args) => {
+                Mutation::UpdateEdge(args) => {
                     tracing::debug!(
                         src = %args.src_id,
                         dst = %args.dst_id,
                         name = %args.name,
                         expected_version = args.expected_version,
-                        "Processing UpdateEdgeSummary"
+                        has_weight = args.new_weight.is_some(),
+                        has_active_period = args.new_active_period.is_some(),
+                        has_summary = args.new_summary.is_some(),
+                        "Processing UpdateEdge"
                     );
                 }
                 Mutation::DeleteNode(args) => {
@@ -561,6 +647,23 @@ impl<P: Processor> Consumer<P> {
                         "Processing DeleteEdge"
                     );
                 }
+                // (claude, 2026-02-07, FIXED: use as_of instead of target_version - Codex Item 1)
+                Mutation::RestoreNode(args) => {
+                    tracing::debug!(
+                        id = %args.id,
+                        as_of = ?args.as_of,
+                        "Processing RestoreNode"
+                    );
+                }
+                Mutation::RestoreEdge(args) => {
+                    tracing::debug!(
+                        src = %args.src_id,
+                        dst = %args.dst_id,
+                        name = %args.name,
+                        as_of = ?args.as_of,
+                        "Processing RestoreEdge"
+                    );
+                }
                 Mutation::Flush(_) => {
                     tracing::debug!("Processing Flush marker");
                 }
@@ -569,11 +672,31 @@ impl<P: Processor> Consumer<P> {
 
         // Process all mutations in a single call
         // (Flush markers are no-ops in storage but are included for ordering)
-        self.processor.process_mutations(mutations).await?;
+        let replies_result = self
+            .processor
+            .process_mutations_with_options(&mutations, options)
+            .await
+            .with_context(|| format!("Failed to process mutations: {:?}", mutations));
+
+        let _replies = match replies_result {
+            Ok(replies) => {
+                let envelope = ReplyEnvelope::new(request_id, elapsed, replies);
+                if let Some(sender) = reply {
+                    let _ = sender.send(Ok(envelope.clone()));
+                }
+                envelope
+            }
+            Err(err) => {
+                if let Some(sender) = reply {
+                    let _ = sender.send(Err(anyhow::anyhow!(err.to_string())));
+                }
+                return Err(err);
+            }
+        };
 
         // After successful commit, signal completion for any flush markers
         // This guarantees that all mutations before the flush are now visible to readers
-        for mutation in mutations {
+        for mutation in &mutations {
             if let Mutation::Flush(marker) = mutation {
                 if let Some(completion) = marker.take_completion() {
                     // Signal that flush is complete - ignore send errors
@@ -588,14 +711,25 @@ impl<P: Processor> Consumer<P> {
         // This is a best-effort send - if the buffer is full, we log and continue
         // Note: We filter out Flush markers when forwarding - they are local to this consumer
         if let Some(sender) = &self.next {
+            if options.dry_run {
+                return Ok(());
+            }
+
             let non_flush_mutations: Vec<_> = mutations
                 .iter()
-                .filter(|m| !m.is_flush())
+                .filter(|m: &&Mutation| !m.is_flush())
                 .cloned()
                 .collect();
 
             if !non_flush_mutations.is_empty() {
-                if let Err(e) = sender.try_send(non_flush_mutations) {
+                if let Err(e) = sender.try_send(MutationRequest {
+                    payload: non_flush_mutations,
+                    options,
+                    reply: None,
+                    timeout: None,
+                    request_id: new_request_id(),
+                    created_at: std::time::Instant::now(),
+                }) {
                     tracing::warn!(
                         err = %e,
                         count = mutations.len(),
@@ -619,81 +753,158 @@ pub fn spawn_consumer<P: Processor + 'static>(
 }
 
 // ============================================================================
-// Graph-specific Consumer Functions
+// Path-based Consumer Functions (Test convenience)
+// (claude, 2026-02-07) - Convenience wrappers for tests
 // ============================================================================
 
 use std::path::Path;
 use tokio::task::JoinHandle;
 
-use super::Graph;
-
-/// Create a new graph mutation consumer
-pub fn create_mutation_consumer(
-    receiver: mpsc::Receiver<Vec<Mutation>>,
-    config: WriterConfig,
-    db_path: &Path,
-) -> Consumer<Graph> {
-    let mut storage = Storage::readwrite(db_path);
-    storage.ready().expect("Failed to ready storage");
-    let storage = Arc::new(storage);
-    let processor = Graph::new(storage);
-    Consumer::new(receiver, config, processor)
-}
-
-/// Create a new graph mutation consumer that chains to another processor
-pub fn create_mutation_consumer_with_next(
-    receiver: mpsc::Receiver<Vec<Mutation>>,
-    config: WriterConfig,
-    db_path: &Path,
-    next: mpsc::Sender<Vec<Mutation>>,
-) -> Consumer<Graph> {
-    let mut storage = Storage::readwrite(db_path);
-    storage.ready().expect("Failed to ready storage");
-    let storage = Arc::new(storage);
-    let processor = Graph::new(storage);
-    Consumer::with_next(receiver, config, processor, next)
-}
-
-/// Spawn the graph mutation consumer as a background task
-pub fn spawn_mutation_consumer(
-    receiver: mpsc::Receiver<Vec<Mutation>>,
-    config: WriterConfig,
-    db_path: &Path,
-) -> JoinHandle<Result<()>> {
-    let consumer = create_mutation_consumer(receiver, config, db_path);
-    spawn_consumer(consumer)
-}
-
-/// Spawn the graph mutation consumer as a background task with chaining to next processor
-pub fn spawn_mutation_consumer_with_next(
-    receiver: mpsc::Receiver<Vec<Mutation>>,
-    config: WriterConfig,
-    db_path: &Path,
-    next: mpsc::Sender<Vec<Mutation>>,
-) -> JoinHandle<Result<()>> {
-    let consumer = create_mutation_consumer_with_next(receiver, config, db_path, next);
-    spawn_consumer(consumer)
-}
-
-/// Spawn a graph mutation consumer using an existing Graph instance
+/// Spawn a mutation consumer with path-based storage creation.
 ///
-/// This allows using a shared Storage/TransactionDB instance for writes.
-/// Use this when you want the writer to share the same TransactionDB as readers.
+/// Convenience function for tests that creates storage at the given path.
+/// Uses the new Processor-based infrastructure internally.
 ///
 /// # Arguments
-/// * `receiver` - Channel to receive mutation batches from
+/// * `receiver` - Mutation receiver from create_mutation_writer
 /// * `config` - Writer configuration
-/// * `graph` - Shared Graph instance (wrapping the Storage/TransactionDB)
+/// * `db_path` - Path to create/open the database
 ///
 /// # Returns
-/// A JoinHandle for the spawned consumer task
-pub fn spawn_mutation_consumer_with_graph(
-    receiver: mpsc::Receiver<Vec<Mutation>>,
+/// JoinHandle for the spawned consumer task
+pub fn spawn_mutation_consumer(
+    receiver: mpsc::Receiver<MutationRequest>,
     config: WriterConfig,
-    graph: Arc<Graph>,
+    db_path: &Path,
 ) -> JoinHandle<Result<()>> {
-    let consumer = Consumer::new(receiver, config, (*graph).clone());
+    // Create storage at path
+    let mut storage = Storage::readwrite(db_path);
+    storage.ready().expect("Failed to initialize storage");
+    let storage = Arc::new(storage);
+
+    // Create processor and consumer
+    let processor = Arc::new(GraphProcessor::new(storage));
+    let consumer = Consumer::new(receiver, config, processor);
     spawn_consumer(consumer)
+}
+
+/// Spawn a mutation consumer with chaining to next consumer.
+///
+/// Convenience function for tests that creates storage at the given path
+/// and forwards mutations to a next consumer in the chain.
+///
+/// # Arguments
+/// * `receiver` - Mutation receiver from create_mutation_writer
+/// * `config` - Writer configuration
+/// * `db_path` - Path to create/open the database
+/// * `next` - Sender for forwarding mutations to next consumer
+///
+/// # Returns
+/// JoinHandle for the spawned consumer task
+pub fn spawn_mutation_consumer_with_next(
+    receiver: mpsc::Receiver<MutationRequest>,
+    config: WriterConfig,
+    db_path: &Path,
+    next: mpsc::Sender<MutationRequest>,
+) -> JoinHandle<Result<()>> {
+    // Create storage at path
+    let mut storage = Storage::readwrite(db_path);
+    storage.ready().expect("Failed to initialize storage");
+    let storage = Arc::new(storage);
+
+    // Create processor and consumer with chaining
+    let processor = Arc::new(GraphProcessor::new(storage));
+    let consumer = Consumer::with_next(receiver, config, processor, next);
+    spawn_consumer(consumer)
+}
+
+/// Spawn a mutation consumer with shared Processor and existing receiver.
+///
+/// Convenience function that matches the old `spawn_mutation_consumer_with_graph` signature.
+/// Uses the Processor to process mutations from an existing receiver.
+///
+/// # Arguments
+/// * `receiver` - Mutation receiver from create_mutation_writer
+/// * `config` - Writer configuration
+/// * `processor` - Shared GraphProcessor instance
+///
+/// # Returns
+/// JoinHandle for the spawned consumer task
+pub fn spawn_mutation_consumer_with_receiver(
+    receiver: mpsc::Receiver<MutationRequest>,
+    config: WriterConfig,
+    processor: Arc<GraphProcessor>,
+) -> JoinHandle<Result<()>> {
+    let consumer = Consumer::new(receiver, config, processor);
+    spawn_consumer(consumer)
+}
+
+// ============================================================================
+// Processor-based Consumer Functions (ARCH2 Pattern)
+// (claude, 2026-02-07, FIXED: P2.4 - Construction helpers)
+// ============================================================================
+
+/// Spawn a mutation consumer with storage.
+///
+/// This is the primary public construction helper.
+/// Creates Processor internally and spawns consumer task.
+///
+/// # Arguments
+/// * `storage` - Shared storage instance
+/// * `config` - Writer configuration
+///
+/// # Returns
+/// Tuple of (Writer, JoinHandle) for the spawned consumer
+pub fn spawn_mutation_consumer_with_storage(
+    storage: Arc<Storage>,
+    config: WriterConfig,
+) -> (Writer, JoinHandle<Result<()>>) {
+    let processor = Arc::new(GraphProcessor::new(storage));
+    spawn_mutation_consumer_with_processor(processor, config)
+}
+
+/// Spawn a mutation consumer with existing processor.
+///
+/// Used when Processor is shared (e.g., with Reader).
+/// This is pub(crate) - use spawn_mutation_consumer_with_storage for public API.
+///
+/// # Arguments
+/// * `processor` - Shared GraphProcessor instance
+/// * `config` - Writer configuration
+///
+/// # Returns
+/// Tuple of (Writer, JoinHandle) for the spawned consumer
+pub(crate) fn spawn_mutation_consumer_with_processor(
+    processor: Arc<GraphProcessor>,
+    config: WriterConfig,
+) -> (Writer, JoinHandle<Result<()>>) {
+    let (sender, receiver) = mpsc::channel(config.channel_buffer_size);
+    let writer = Writer::with_processor(sender, processor.clone());
+
+    // Create consumer with processor (implements writer::Processor trait)
+    let consumer = Consumer::new(receiver, config, processor);
+    let handle = spawn_consumer(consumer);
+
+    (writer, handle)
+}
+
+/// Create a mutation writer and spawn consumer with processor, also returning the processor.
+///
+/// Convenience helper that returns all components for subsystem integration.
+///
+/// # Arguments
+/// * `storage` - Shared storage instance
+/// * `config` - Writer configuration
+///
+/// # Returns
+/// Tuple of (Writer, Arc<GraphProcessor>, JoinHandle)
+pub(crate) fn create_mutation_writer_with_processor(
+    storage: Arc<Storage>,
+    config: WriterConfig,
+) -> (Writer, Arc<GraphProcessor>, JoinHandle<Result<()>>) {
+    let processor = Arc::new(GraphProcessor::new(storage));
+    let (writer, handle) = spawn_mutation_consumer_with_processor(processor.clone(), config);
+    (writer, processor, handle)
 }
 
 // ============================================================================
@@ -703,7 +914,7 @@ pub fn spawn_mutation_consumer_with_graph(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::mutation::{AddEdge, AddNode, AddNodeFragment, UpdateEdgeValidSinceUntil};
+    use super::super::mutation::{AddEdge, AddNode, AddNodeFragment, UpdateEdge};
     use crate::writer::Runnable as MutRunnable;
     use super::super::schema::{EdgeSummary, NodeSummary};
     use crate::{DataUrl, Id, TimestampMilli};
@@ -757,18 +968,20 @@ mod tests {
 
         let src_id = Id::new();
         let dst_id = Id::new();
-        let invalidate_args = UpdateEdgeValidSinceUntil {
+        let update_args = UpdateEdge {
             src_id,
             dst_id,
             name: "test_edge".to_string(),
-            temporal_range: crate::ActivePeriod(None, None),
-            reason: "test reason".to_string(),
+            expected_version: 1,
+            new_weight: Some(Some(0.5)),
+            new_active_period: None,
+            new_summary: None,
         };
 
         // Test new mutation API
         node_args.run(&writer).await.unwrap();
         edge_args.run(&writer).await.unwrap();
         fragment_args.run(&writer).await.unwrap();
-        invalidate_args.run(&writer).await.unwrap();
+        update_args.run(&writer).await.unwrap();
     }
 }
