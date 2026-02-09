@@ -353,7 +353,7 @@ async fn test_concurrent_mixed_queries() {
     let categories = ["engineering", "science", "business", "design"];
     let mut all_node_ids = Vec::new();
 
-    for (cat_idx, category) in categories.iter().enumerate() {
+    for (_cat_idx, category) in categories.iter().enumerate() {
         for i in 0..5 {
             let node_id = Id::new();
             all_node_ids.push((node_id, category.to_string()));

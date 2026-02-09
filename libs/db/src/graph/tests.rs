@@ -4202,7 +4202,6 @@ mod versioning_tests {
     /// Validates: UpdateNode creates a new version history entry.
     #[tokio::test]
     async fn test_node_update_creates_version_history() {
-        use crate::graph::mutation::UpdateNode;
         use crate::graph::query::NodeById;
         use crate::graph::schema::Nodes;
         use crate::graph::ColumnFamily;
@@ -4660,7 +4659,6 @@ mod versioning_tests {
     /// Validates: Concurrent writers to same node maintain consistent history.
     #[tokio::test]
     async fn test_concurrent_writers_same_node() {
-        use crate::graph::mutation::UpdateNode;
         use crate::graph::query::NodeById;
 
         let temp_dir = TempDir::new().unwrap();
@@ -4775,7 +4773,7 @@ mod versioning_tests {
 
         // Replay the SAME mutation (same ID, same timestamp)
         // This simulates a retry scenario
-        let replay_result = mutation.run(&writer).await;
+        let _replay_result = mutation.run(&writer).await;
 
         // Replay might succeed or fail depending on idempotency design
         // What matters is the data remains consistent
@@ -4802,7 +4800,7 @@ mod versioning_tests {
     /// Validates: Shutdown during writes doesn't corrupt column families.
     #[tokio::test]
     async fn test_shutdown_during_writes_no_corruption() {
-        use crate::graph::query::NodeById;
+        // use crate::graph::query::NodeById;
         use crate::graph::schema::Nodes;
         use crate::graph::ColumnFamily;
 

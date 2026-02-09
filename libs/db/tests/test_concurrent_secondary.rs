@@ -326,7 +326,7 @@ async fn test_concurrent_read_write_with_secondary() {
 
     println!("\n--- Data Consistency ---");
     let final_node_count = context.node_count().await;
-    let final_edge_count = context.edge_count().await;
+    let _final_edge_count = context.edge_count().await;
     println!("  Nodes written: {}", final_node_count);
     println!("  Expected nodes: {}", num_nodes);
     println!("  Write operations: {}", write_metrics.success_count);

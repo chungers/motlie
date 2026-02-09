@@ -10,7 +10,6 @@
 
 // Re-export from motlie-core
 pub use motlie_core::distance;
-pub use motlie_core::telemetry::{BuildInfo, log_build_info, print_build_info};
 
 use anyhow::Result;
 use motlie_db::mutation::{
@@ -46,7 +45,6 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 // ============================================================================
 
 // Re-export simd_level for checking the active SIMD implementation
-pub use distance::simd_level;
 
 /// Compute Euclidean (L2) distance between two vectors
 ///

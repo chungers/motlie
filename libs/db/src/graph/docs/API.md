@@ -97,17 +97,14 @@ processor.process_mutations(&mutations)?;
 | `Processor::with_cache(storage, cache)` | Create with explicit NameCache |
 | `execute_mutation(&mutation)` | Execute single mutation (sync) |
 | `process_mutations(&[mutations])` | Execute batch atomically (sync) |
-| `execute_query(&Query)` | Execute any query via Processor (async) |
-| `node_by_id(&NodeById)` | Execute node lookup (async) |
-| `nodes_by_ids_multi(&NodesByIdsMulti)` | Execute multi-node lookup (async) |
-| `edge_summary_by_src_dst_name(&EdgeSummaryBySrcDstName)` | Execute edge summary lookup (async) |
-| `outgoing_edges(&OutgoingEdges)` | Execute outgoing edge query (async) |
-| `incoming_edges(&IncomingEdges)` | Execute incoming edge query (async) |
-| `all_nodes(&AllNodes)` | Execute all-nodes scan (async) |
-| `all_edges(&AllEdges)` | Execute all-edges scan (async) |
 | `storage()` | Access underlying Storage |
 | `name_cache()` | Access NameCache |
 | `transaction_db()` | Access RocksDB TransactionDB |
+
+**Query execution (direct):**
+
+- `query.execute_with_storage(&storage).await?`
+- `query.execute_with_processor(&processor).await?`
 
 ### Style 2: Async Writer/Reader API
 

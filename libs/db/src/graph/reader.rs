@@ -57,7 +57,7 @@ pub type QueryRequest = RequestEnvelope<Query>;
 async fn execute_request(processor: &GraphProcessor, mut request: QueryRequest) {
     tracing::debug!(query = %request.payload, "Processing graph query");
 
-    let exec = processor.execute_query(&request.payload);
+    let exec = request.payload.execute_with_processor(processor);
     let result = match request.timeout {
         Some(timeout) => match tokio::time::timeout(timeout, exec).await {
             Ok(r) => r,
@@ -189,7 +189,7 @@ impl Consumer {
     async fn process_query(&self, mut request: QueryRequest) {
         tracing::debug!(query = %request.payload, "Processing query");
 
-        let exec = self.processor.execute_query(&request.payload);
+        let exec = request.payload.execute_with_processor(&self.processor);
         let result = match request.timeout {
             Some(timeout) => {
                 match tokio::time::timeout(timeout, exec).await {
