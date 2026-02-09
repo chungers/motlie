@@ -138,12 +138,6 @@ impl Reader {
         Reader { sender, processor: Some(processor) }
     }
 
-    /// Get the processor if configured.
-    /// (claude, 2026-02-07, FIXED: P2.3 - Processor accessor like vector::Reader:118)
-    pub(crate) fn processor(&self) -> Option<&Arc<GraphProcessor>> {
-        self.processor.as_ref()
-    }
-
     /// Send a query to the reader queue.
     ///
     /// Note: Most users should use `Runnable::run()` instead.

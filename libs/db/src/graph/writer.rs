@@ -288,12 +288,6 @@ impl Writer {
         self.transaction_forward_to = Some(sender);
     }
 
-    /// Get the processor if configured.
-    /// (claude, 2026-02-07, FIXED: P2.2 - Processor accessor)
-    pub(crate) fn processor(&self) -> Option<&Arc<GraphProcessor>> {
-        self.processor.as_ref()
-    }
-
     /// Begin a transaction for read-your-writes semantics.
     ///
     /// The returned Transaction allows interleaved writes and reads
