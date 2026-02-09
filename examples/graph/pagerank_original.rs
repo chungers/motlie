@@ -127,7 +127,7 @@ async fn pagerank_motlie_original(
         ranks.insert(node_id, initial_rank);
         new_ranks.insert(node_id, 0.0);
 
-        let (name, _summary) = motlie_db::graph::query::NodeById::new(node_id, None)
+        let (name, _summary, _version) = motlie_db::graph::query::NodeById::new(node_id, None)
             .run(reader, timeout)
             .await?;
         name_map.insert(node_id, name);
@@ -149,7 +149,7 @@ async fn pagerank_motlie_original(
                 .await?;
 
             let mut rank_sum = 0.0;
-            for (_weight, _dst, src, _name) in incoming {
+            for (_weight, _dst, src, _name, _version) in incoming {
                 let src_id = src;
                 let src_rank = ranks[&src_id];
                 let src_out_count = outgoing_counts[&src_id] as f64;

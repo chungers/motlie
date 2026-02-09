@@ -422,7 +422,7 @@ impl ToolCall for QueryNodeByIdParams {
 
         let query = NodeById::new(id, self.reference_ts_millis.map(TimestampMilli));
 
-        let (name, summary) = query
+        let (name, summary, _version) = query
             .run(reader, res.query_timeout())
             .await
             .map_err(|e| McpError::internal_error(format!("Failed to query node: {}", e), None))?;
@@ -476,7 +476,7 @@ impl ToolCall for QueryEdgeParams {
             self.reference_ts_millis.map(TimestampMilli),
         );
 
-        let (weight, _src, _dst, _name, summary): (Option<f64>, Id, Id, String, EdgeSummary) = query
+        let (weight, _src, _dst, _name, summary, _version) = query
             .run(reader, res.query_timeout())
             .await
             .map_err(|e| McpError::internal_error(format!("Failed to query edge: {}", e), None))?;
@@ -526,7 +526,7 @@ impl ToolCall for QueryOutgoingEdgesParams {
 
         let query = OutgoingEdges::new(id, self.reference_ts_millis.map(TimestampMilli));
 
-        let edges: Vec<(Option<f64>, Id, Id, String)> =
+        let edges =
             query.run(reader, res.query_timeout()).await.map_err(|e| {
                 McpError::internal_error(format!("Failed to query outgoing edges: {}", e), None)
             })?;
@@ -539,7 +539,7 @@ impl ToolCall for QueryOutgoingEdgesParams {
 
         let edges_list: Vec<serde_json::Value> = edges
             .into_iter()
-            .map(|(weight, _src, dst, name)| {
+            .map(|(weight, _src, dst, name, _version)| {
                 json!({
                     "target_id": dst.as_str(),
                     "name": name,
@@ -580,7 +580,7 @@ impl ToolCall for QueryIncomingEdgesParams {
 
         let query = IncomingEdges::new(id, self.reference_ts_millis.map(TimestampMilli));
 
-        let edges: Vec<(Option<f64>, Id, Id, String)> =
+        let edges =
             query.run(reader, res.query_timeout()).await.map_err(|e| {
                 McpError::internal_error(format!("Failed to query incoming edges: {}", e), None)
             })?;
@@ -593,7 +593,7 @@ impl ToolCall for QueryIncomingEdgesParams {
 
         let edges_list: Vec<serde_json::Value> = edges
             .into_iter()
-            .map(|(weight, _dst, src, name)| {
+            .map(|(weight, _dst, src, name, _version)| {
                 json!({
                     "source_id": src.as_str(),
                     "name": name,

@@ -173,7 +173,7 @@ async fn pagerank_motlie(
         .await?;
 
     // Build name map from batch results
-    for (id, name, _summary) in node_data {
+    for (id, name, _summary, _version) in node_data {
         name_map.insert(id, name);
     }
 
@@ -203,7 +203,7 @@ async fn pagerank_motlie(
                 .await?;
 
             let mut rank_sum = 0.0;
-            for (_weight, _dst, src, _name) in incoming {
+            for (_weight, _dst, src, _name, _version) in incoming {
                 let src_id = src;
                 let src_rank = ranks[&src_id];
                 let src_out_count = outgoing_counts[&src_id] as f64;

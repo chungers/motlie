@@ -127,7 +127,7 @@ async fn toposort_motlie(
         in_degree.insert(node_id, 0);
 
         // Get node name
-        let (name, _summary) = motlie_db::graph::query::NodeById::new(node_id, None)
+        let (name, _summary, _version) = motlie_db::graph::query::NodeById::new(node_id, None)
             .run(reader, timeout)
             .await?;
         name_map.insert(node_id, name);
@@ -139,7 +139,7 @@ async fn toposort_motlie(
             .run(reader, timeout)
             .await?;
 
-        for (_weight, _src, dst, _name) in outgoing {
+        for (_weight, _src, dst, _name, _version) in outgoing {
             *in_degree.entry(dst).or_insert(0) += 1;
         }
     }
@@ -162,7 +162,7 @@ async fn toposort_motlie(
             .await?;
 
         // Decrease in-degree of neighbors
-        for (_weight, _src, dst, _name) in outgoing {
+        for (_weight, _src, dst, _name, _version) in outgoing {
             if let Some(degree) = in_degree.get_mut(&dst) {
                 *degree -= 1;
                 if *degree == 0 {
