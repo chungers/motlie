@@ -528,6 +528,76 @@ let edge_then = EdgeSummaryBySrcDstName::new(
 .await?;
 ```
 
+### ActivePeriod + System Time for Edge Lists
+
+Example: A promotion edge is **written now** (system time), but becomes
+**active next week** (business time / ActivePeriod).
+
+```rust
+use motlie_db::graph::mutation::{AddNode, AddEdge, Runnable};
+use motlie_db::graph::query::{OutgoingEdges, IncomingEdges};
+use motlie_db::graph::schema::{ActivePeriod, EdgeSummary, NodeSummary};
+use motlie_db::{TimestampMilli, Id};
+
+let now = TimestampMilli::now();
+let next_week = TimestampMilli(now.0 + 7 * 24 * 60 * 60 * 1000);
+let next_week_end = TimestampMilli(next_week.0 + 2 * 24 * 60 * 60 * 1000);
+
+let store_id = Id::new();
+let user_id = Id::new();
+
+AddNode {
+    id: store_id,
+    ts_millis: now,
+    name: "Store".into(),
+    valid_range: None,
+    summary: NodeSummary::from_text("Store profile"),
+}.run(&writer).await?;
+
+AddNode {
+    id: user_id,
+    ts_millis: now,
+    name: "User".into(),
+    valid_range: None,
+    summary: NodeSummary::from_text("User profile"),
+}.run(&writer).await?;
+
+// Write edge now, but ActivePeriod is in the future.
+AddEdge {
+    source_node_id: store_id,
+    target_node_id: user_id,
+    ts_millis: now, // system time of insertion
+    name: "promotion".into(),
+    valid_range: Some(ActivePeriod::new(next_week, Some(next_week_end))),
+    summary: EdgeSummary::from_text("Promo active next week"),
+    weight: None,
+}.run(&writer).await?;
+
+// 1) Current system time + current business time -> NOT visible yet.
+let outgoing_now = OutgoingEdges::new(store_id, Some(now))
+    .run(&reader, timeout)
+    .await?;
+assert!(outgoing_now.is_empty());
+
+// 2) Current system time + business time in future window -> visible.
+let outgoing_future = OutgoingEdges::new(store_id, Some(next_week))
+    .run(&reader, timeout)
+    .await?;
+assert!(!outgoing_future.is_empty());
+
+// 3) System time as-of insertion + business time outside window -> not visible.
+let outgoing_as_of_insert = OutgoingEdges::as_of(store_id, now, Some(now))
+    .run(&reader, timeout)
+    .await?;
+assert!(outgoing_as_of_insert.is_empty());
+
+// 4) Incoming edges use the same semantics.
+let incoming_future = IncomingEdges::new(user_id, Some(next_week))
+    .run(&reader, timeout)
+    .await?;
+assert!(!incoming_future.is_empty());
+```
+
 ### Version History Example
 
 ```rust
@@ -555,6 +625,94 @@ let current = NodeById::new(node_id, None).run(&reader, timeout).await?;
 assert_eq!(v1.version, 1);
 assert_eq!(v2.version, 2);
 assert_eq!(current.version, 2);
+```
+
+#### Promotion ActivePeriod Update + Point-in-Time + Rollback
+
+Example: Update a promotion’s ActivePeriod, query old vs. new periods,
+then roll back by restoring the prior ActivePeriod.
+
+```rust
+use motlie_db::graph::mutation::{AddEdge, UpdateEdge, RestoreEdge, Runnable};
+use motlie_db::graph::query::EdgeSummaryBySrcDstName;
+use motlie_db::graph::schema::{ActivePeriod, EdgeSummary};
+use motlie_db::{TimestampMilli, Id};
+
+// Use case setup:
+// - A store offers a promotion to a user.
+// - The promo is scheduled for a future window (business time).
+// - Marketing later shifts the window, then decides to roll it back.
+let store_id = Id::new();
+let user_id = Id::new();
+let edge_name = "promotion".to_string();
+
+let now = TimestampMilli::now();
+let week1_start = TimestampMilli(now.0 + 7 * 24 * 60 * 60 * 1000);
+let week1_end = TimestampMilli(week1_start.0 + 2 * 24 * 60 * 60 * 1000);
+let week2_start = TimestampMilli(now.0 + 14 * 24 * 60 * 60 * 1000);
+let week2_end = TimestampMilli(week2_start.0 + 2 * 24 * 60 * 60 * 1000);
+
+// Create promotion edge with week1 ActivePeriod (business time)
+// - system time: now (when we write)
+// - ActivePeriod: next week (when it's valid for the business domain)
+AddEdge {
+    source_node_id: store_id,
+    target_node_id: user_id,
+    ts_millis: now,
+    name: edge_name.clone(),
+    valid_range: Some(ActivePeriod::new(week1_start, Some(week1_end))),
+    summary: EdgeSummary::from_text("Promo v1"),
+    weight: None,
+}.run(&writer).await?;
+
+// Capture system time after v1 write (for point-in-time query)
+let t1 = TimestampMilli::now();
+
+// Update ActivePeriod to week2 (new business-time window)
+let current = EdgeSummaryBySrcDstName::new(store_id, user_id, edge_name.clone(), None)
+    .run(&reader, timeout)
+    .await?;
+
+UpdateEdge {
+    source_node_id: store_id,
+    target_node_id: user_id,
+    name: edge_name.clone(),
+    expected_version: current.version,
+    new_active_period: Some(Some(ActivePeriod::new(week2_start, Some(week2_end)))),
+    new_summary: Some(EdgeSummary::from_text("Promo v2")),
+    new_weight: None,
+}.run(&writer).await?;
+
+// Capture system time after v2 write (for point-in-time query)
+let t2 = TimestampMilli::now();
+
+// Point-in-time query (system time): as-of t1 should reflect week1
+let v1 = EdgeSummaryBySrcDstName::as_of(store_id, user_id, edge_name.clone(), t1, None)
+    .run(&reader, timeout)
+    .await?;
+
+// Current query (system time): reflects week2
+let v2 = EdgeSummaryBySrcDstName::new(store_id, user_id, edge_name.clone(), None)
+    .run(&reader, timeout)
+    .await?;
+
+assert!(v1.summary.decode_string().unwrap().contains("Promo v1"));
+assert!(v2.summary.decode_string().unwrap().contains("Promo v2"));
+
+// Rollback: restore to the earlier version (version from v1)
+// This creates a new current version that matches v1's content/ActivePeriod.
+RestoreEdge {
+    source_node_id: store_id,
+    target_node_id: user_id,
+    name: edge_name.clone(),
+    version: v1.version,
+}.run(&writer).await?;
+
+// Current query should now reflect the rollback (week1)
+let rolled_back = EdgeSummaryBySrcDstName::new(store_id, user_id, edge_name, None)
+    .run(&reader, timeout)
+    .await?;
+assert!(rolled_back.summary.decode_string().unwrap().contains("Promo v1"));
 ```
 
 ---
