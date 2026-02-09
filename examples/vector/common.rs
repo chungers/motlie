@@ -350,7 +350,7 @@ pub async fn get_neighbors(
         .await?;
 
     let mut neighbors = Vec::new();
-    for (weight, _src, dst, name) in edges {
+    for (weight, _src, dst, name, _version) in edges {
         // Filter by layer prefix if specified
         if let Some(prefix) = layer_prefix {
             if !name.starts_with(prefix) {

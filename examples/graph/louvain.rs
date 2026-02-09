@@ -437,7 +437,7 @@ async fn louvain_motlie(
         let mut neighbors = Vec::new();
         let mut degree = 0.0;
 
-        for (weight_opt, _src, dst, _name) in outgoing {
+        for (weight_opt, _src, dst, _name, _version) in outgoing {
             let weight = weight_opt.unwrap_or(1.0);
             neighbors.push((dst, weight));
             degree += weight;

@@ -130,7 +130,7 @@ async fn bfs_motlie(
         // Build a map of id -> name for ordering
         let id_to_name: HashMap<Id, String> = node_data
             .into_iter()
-            .map(|(id, name, _summary)| (id, name))
+            .map(|(id, name, _summary, _version)| (id, name))
             .collect();
 
         // Add names to visit order (preserving queue order)
@@ -149,7 +149,7 @@ async fn bfs_motlie(
                 .await?;
 
             // Add unvisited neighbors to next level
-            for (_weight, _src, dst, _name) in edges {
+            for (_weight, _src, dst, _name, _version) in edges {
                 if !visited.contains(&dst) {
                     visited.insert(dst);
                     next_level.push(dst);
@@ -186,7 +186,7 @@ async fn bfs_with_levels(
             .await?;
 
         // Record levels for all nodes in this level
-        for (id, name, _summary) in node_data {
+        for (id, name, _summary, _version) in node_data {
             levels.insert(name, current_depth);
             // Note: we use id from node_data to ensure we have the right mapping
             let _ = id;
@@ -201,7 +201,7 @@ async fn bfs_with_levels(
                 .await?;
 
             // Add unvisited neighbors to next level
-            for (_weight, _src, dst, _name) in edges {
+            for (_weight, _src, dst, _name, _version) in edges {
                 if !visited.contains(&dst) {
                     visited.insert(dst);
                     next_level.push(dst);
