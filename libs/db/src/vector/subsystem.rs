@@ -303,7 +303,7 @@ impl Subsystem {
         let mutation_handle = spawn_consumer(mutation_consumer);
 
         // Create and spawn query consumers
-        let (reader, query_receiver) = create_reader(reader_config.clone(), processor.clone());
+        let (reader, query_receiver) = create_reader(reader_config.clone());
         let query_handles = spawn_consumers_with_processor(
             query_receiver,
             reader_config,
