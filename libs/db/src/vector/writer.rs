@@ -102,7 +102,7 @@ impl MutationCacheUpdate {
     /// a single `Batch` variant for efficient application.
     pub fn from_batch(
         embedding: EmbeddingCode,
-        vec_ids: &[VecId],
+        _vec_ids: &[VecId],
         nav_updates: Vec<CacheUpdate>,
         code_updates: Vec<(VecId, Vec<u8>, AdcCorrection)>,
     ) -> Option<Self> {

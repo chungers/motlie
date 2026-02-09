@@ -882,25 +882,6 @@ pub(crate) fn spawn_mutation_consumer_with_processor(
     (writer, handle)
 }
 
-/// Create a mutation writer and spawn consumer with processor, also returning the processor.
-///
-/// Convenience helper that returns all components for subsystem integration.
-///
-/// # Arguments
-/// * `storage` - Shared storage instance
-/// * `config` - Writer configuration
-///
-/// # Returns
-/// Tuple of (Writer, Arc<GraphProcessor>, JoinHandle)
-pub(crate) fn create_mutation_writer_with_processor(
-    storage: Arc<Storage>,
-    config: WriterConfig,
-) -> (Writer, Arc<GraphProcessor>, JoinHandle<Result<()>>) {
-    let processor = Arc::new(GraphProcessor::new(storage));
-    let (writer, handle) = spawn_mutation_consumer_with_processor(processor.clone(), config);
-    (writer, processor, handle)
-}
-
 // ============================================================================
 // Tests
 // ============================================================================

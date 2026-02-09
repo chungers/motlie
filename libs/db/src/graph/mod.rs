@@ -16,7 +16,6 @@
 //! - `reader.rs` - Reader infrastructure and query consumers
 //! - `scan.rs` - Scan API for pagination
 
-
 // Re-export CF traits from rocksdb module
 pub(crate) use crate::rocksdb::{
     ColumnFamily, ColumnFamilyConfig, ColumnFamilySerde, HotColumnFamilyRecord,
@@ -110,8 +109,6 @@ pub use writer::{
 
 // Processor struct - the central graph processing hub
 pub use processor::Processor;
-
-
 
 // Note: SystemInfo functionality is now in Subsystem which implements SubsystemInfo
 // Graph struct removed - use processor::Processor instead (claude, 2026-02-07)
