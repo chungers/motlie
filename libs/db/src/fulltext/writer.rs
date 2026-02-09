@@ -265,7 +265,6 @@ mod tests {
     use crate::graph::mutation::{AddNode, AddNodeFragment};
     use crate::writer::Runnable as MutRunnable;
     use crate::graph::writer::create_mutation_writer;
-    use crate::graph::schema::NodeSummary;
     use crate::{DataUrl, Id, TimestampMilli};
     use std::time::Duration;
     use tantivy::collector::TopDocs;

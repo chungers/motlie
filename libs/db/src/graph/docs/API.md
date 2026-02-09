@@ -32,6 +32,8 @@ The graph module provides a content-addressed, versioned graph database on top o
 - **Content-addressed summaries** with orphan-index GC
 - **Two API styles**: Sync (Processor) and Async (Writer/Reader)
 
+See `ARCH.md` for current architecture and `VERSIONING.md` for temporal/rollback semantics.
+
 ### Key Concepts
 
 | Concept | Description |
@@ -157,7 +159,7 @@ use motlie_db::reader::Runnable as QueryRunnable;
 use std::time::Duration;
 
 let timeout = Duration::from_secs(5);
-let (name, summary) = NodeById::new(node_id, None)
+let (name, summary, version) = NodeById::new(node_id, None)
     .run(&reader, timeout)
     .await?;
 ```

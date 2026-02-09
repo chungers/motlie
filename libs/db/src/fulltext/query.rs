@@ -1146,7 +1146,6 @@ mod tests {
     use crate::fulltext::{Index, Storage};
     use crate::graph::mutation::{AddNode, AddNodeFragment};
     use crate::writer::Runnable as MutRunnable;
-    use crate::graph::schema::NodeSummary;
     use crate::graph::writer::{create_mutation_writer, WriterConfig};
     use crate::{DataUrl, TimestampMilli};
     use std::sync::Arc;

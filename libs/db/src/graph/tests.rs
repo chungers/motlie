@@ -1210,7 +1210,7 @@ use tokio::time::Duration;
 
     #[test]
     fn test_lz4_compression_round_trip() {
-        use crate::graph::schema::{NodeCfValue, NodeSummary, Nodes};
+        use crate::graph::schema::{NodeCfValue, Nodes};
         use crate::graph::NameHash;
         use crate::graph::SummaryHash;
         use crate::DataUrl;
@@ -1292,7 +1292,7 @@ use tokio::time::Duration;
 
     #[test]
     fn test_node_summaries_cf_round_trip() {
-        use crate::graph::schema::{NodeSummaries, NodeSummaryCfKey, NodeSummaryCfValue, NodeSummary};
+        use crate::graph::schema::{NodeSummaries, NodeSummaryCfKey, NodeSummaryCfValue};
         use crate::graph::SummaryHash;
         use crate::DataUrl;
 
@@ -1322,7 +1322,7 @@ use tokio::time::Duration;
 
     #[test]
     fn test_edge_summaries_cf_round_trip() {
-        use crate::graph::schema::{EdgeSummaries, EdgeSummaryCfKey, EdgeSummaryCfValue, EdgeSummary};
+        use crate::graph::schema::{EdgeSummaries, EdgeSummaryCfKey, EdgeSummaryCfValue};
         use crate::graph::SummaryHash;
         use crate::DataUrl;
 
@@ -1352,7 +1352,6 @@ use tokio::time::Duration;
 
     #[test]
     fn test_empty_summary_produces_none_hash() {
-        use crate::graph::schema::NodeSummary;
         use crate::DataUrl;
 
         // Empty summary (from_text("")) should not produce a SummaryHash in mutations
@@ -1403,7 +1402,7 @@ use tokio::time::Duration;
         let result = query.execute_in_transaction(&txn, txn_db, storage.cache());
 
         assert!(result.is_ok(), "Query should succeed for node with empty summary");
-        let (name, summary) = result.unwrap();
+        let (name, summary, _version) = result.unwrap();
         assert_eq!(name, "EmptyNode", "Node name should match");
         // Empty summary should be returned as empty DataUrl
         assert!(summary.is_empty(), "Summary should be empty for node with no summary");
@@ -1468,7 +1467,7 @@ use tokio::time::Duration;
         let result = query.execute_in_transaction(&txn, txn_db, storage.cache());
 
         assert!(result.is_ok(), "Query should succeed for edge with empty summary");
-        let (summary, weight) = result.unwrap();
+        let (summary, weight, _version) = result.unwrap();
         assert!(summary.is_empty(), "Summary should be empty for edge with no summary");
         assert_eq!(weight, Some(1.5), "Weight should match");
 
@@ -1511,7 +1510,7 @@ use tokio::time::Duration;
         let result = query.execute_in_transaction(&txn, txn_db, storage.cache());
 
         assert!(result.is_ok(), "Query should succeed for node with summary");
-        let (name, summary) = result.unwrap();
+        let (name, summary, _version) = result.unwrap();
         assert_eq!(name, "SummaryNode", "Node name should match");
         assert!(!summary.is_empty(), "Summary should not be empty");
         let decoded = summary.decode_string().unwrap();
@@ -1578,7 +1577,7 @@ use tokio::time::Duration;
         let result = query.execute_in_transaction(&txn, txn_db, storage.cache());
 
         assert!(result.is_ok(), "Query should succeed for edge with summary");
-        let (summary, weight) = result.unwrap();
+        let (summary, weight, _version) = result.unwrap();
         assert!(!summary.is_empty(), "Summary should not be empty");
         let decoded: String = summary.decode_string().unwrap();
         assert!(decoded.contains(edge_summary_content), "Summary content should match");
@@ -1632,8 +1631,10 @@ use tokio::time::Duration;
         let query1 = NodeById::new(node1_id, None);
         let query2 = NodeById::new(node2_id, None);
 
-        let (_, summary1) = query1.execute_in_transaction(&txn, txn_db, storage.cache()).unwrap();
-        let (_, summary2) = query2.execute_in_transaction(&txn, txn_db, storage.cache()).unwrap();
+        let (_, summary1, _version1) =
+            query1.execute_in_transaction(&txn, txn_db, storage.cache()).unwrap();
+        let (_, summary2, _version2) =
+            query2.execute_in_transaction(&txn, txn_db, storage.cache()).unwrap();
 
         let decoded1: String = summary1.decode_string().unwrap();
         let decoded2: String = summary2.decode_string().unwrap();
@@ -2567,8 +2568,8 @@ mod content_address_tests {
     // =========================================================================
 
     use crate::graph::schema::{
-        NodeSummaries, NodeSummaryCfKey, NodeSummaryCfValue,
-        EdgeSummaries, EdgeSummaryCfKey, EdgeSummaryCfValue,
+        NodeSummaries, NodeSummaryCfKey,
+        EdgeSummaries, EdgeSummaryCfKey,
     };
     use crate::graph::mutation::{UpdateNode, UpdateEdge, DeleteNode, DeleteEdge};
 
@@ -3172,7 +3173,7 @@ mod content_address_tests {
 
 mod versioning_tests {
     use super::*;
-    use crate::graph::query::{NodeById, OutgoingEdges, EdgeSummaryBySrcDstName};
+    use crate::graph::query::{NodeById, EdgeSummaryBySrcDstName};
     use crate::graph::schema::{NodeSummary, EdgeSummary};
     use crate::graph::mutation::{AddNode, AddEdge, UpdateNode, UpdateEdge, DeleteNode, DeleteEdge};
     use crate::{Id, TimestampMilli, ActivePeriod};
@@ -3247,7 +3248,7 @@ mod versioning_tests {
         let current_query = NodeById::new(node_id, None);
         let result = current_query.execute_on(&storage).await;
         assert!(result.is_ok(), "Current query should succeed");
-        let (_, summary) = result.unwrap();
+        let (_, summary, _version) = result.unwrap();
         assert!(
             summary.decode_string().unwrap().contains("Version 3"),
             "Current version should be v3"
@@ -3257,7 +3258,7 @@ mod versioning_tests {
         let v1_query = NodeById::as_of(node_id, time_after_v1, None);
         let result = v1_query.execute_on(&storage).await;
         assert!(result.is_ok(), "Point-in-time query at v1 should succeed");
-        let (_, summary) = result.unwrap();
+        let (_, summary, _version) = result.unwrap();
         assert!(
             summary.decode_string().unwrap().contains("Version 1"),
             "Query at time_after_v1 should return v1 summary"
@@ -3267,7 +3268,7 @@ mod versioning_tests {
         let v2_query = NodeById::as_of(node_id, time_after_v2, None);
         let result = v2_query.execute_on(&storage).await;
         assert!(result.is_ok(), "Point-in-time query at v2 should succeed");
-        let (_, summary) = result.unwrap();
+        let (_, summary, _version) = result.unwrap();
         assert!(
             summary.decode_string().unwrap().contains("Version 2"),
             "Query at time_after_v2 should return v2 summary"
@@ -3417,7 +3418,7 @@ mod versioning_tests {
         };
         let result = bitemporal_v1_valid.execute_on(&storage).await;
         assert!(result.is_ok(), "Bitemporal query (v1, within period) should succeed");
-        let (_, summary) = result.unwrap();
+        let (_, summary, _version) = result.unwrap();
         assert!(
             summary.decode_string().unwrap().contains("V1"),
             "Should get V1 content"
@@ -3497,7 +3498,7 @@ mod versioning_tests {
         let current_query = EdgeSummaryBySrcDstName::new(src_id, dst_id, edge_name.clone(), None);
         let result = current_query.execute_on(&storage).await;
         assert!(result.is_ok(), "Current edge query should succeed");
-        let (summary, weight) = result.unwrap();
+        let (summary, weight, _version) = result.unwrap();
         assert!(summary.decode_string().unwrap().contains("Edge V1"));
         assert_eq!(weight, Some(1.0));
 
@@ -3574,7 +3575,7 @@ mod versioning_tests {
         let past_query = NodeById::as_of(node_id, time_when_existed, None);
         let result = past_query.execute_on(&storage).await;
         assert!(result.is_ok(), "Time-travel query to when node existed should succeed");
-        let (name, summary) = result.unwrap();
+        let (name, summary, _version) = result.unwrap();
         assert_eq!(name, "deletable_node");
         assert!(summary.decode_string().unwrap().contains("deleted"));
     }
@@ -3707,7 +3708,7 @@ mod versioning_tests {
 
         // Rollback: Read old version and write it as new version
         let old_query = NodeById::as_of(node_id, time_original, None);
-        let (_name, old_summary) = old_query.execute_on(&storage).await.unwrap();
+        let (_name, old_summary, _version) = old_query.execute_on(&storage).await.unwrap();
 
         // Close storage before creating new writer (to release lock)
         storage.close().unwrap();
@@ -3889,7 +3890,7 @@ mod versioning_tests {
         );
         let result = past_query.execute_on(&storage).await;
         assert!(result.is_ok(), "Time-travel query to when edge existed should succeed");
-        let (summary, _weight) = result.unwrap();
+        let (summary, _weight, _version) = result.unwrap();
         assert!(summary.decode_string().unwrap().contains("Edge content"));
     }
 
@@ -3955,9 +3956,9 @@ mod versioning_tests {
         let result = incoming.execute_on(&storage).await.unwrap();
 
         // Should have exactly one incoming edge from src_id
-        // IncomingEdges returns Vec<(Option<f64>, DstId, SrcId, EdgeName)> = (weight, dst_id, src_id, name)
+        // IncomingEdges returns Vec<(Option<EdgeWeight>, DstId, SrcId, EdgeName, Version)> = (weight, dst_id, src_id, name, version)
         assert_eq!(result.len(), 1, "Should have exactly 1 incoming edge");
-        let (_weight, _found_dst, found_src, found_name) = &result[0];
+        let (_weight, _found_dst, found_src, found_name, _version) = &result[0];
         assert_eq!(*found_src, src_id, "Incoming edge source should match");
         assert_eq!(*found_name, edge_name, "Incoming edge name should match");
 
@@ -4017,14 +4018,14 @@ mod versioning_tests {
         storage.ready().unwrap();
 
         // Check forward direction (OutgoingEdges)
-        // OutgoingEdges returns Vec<(Option<f64>, SrcId, DstId, EdgeName)> = (weight, src_id, dst_id, name)
+        // OutgoingEdges returns Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)> = (weight, src_id, dst_id, name, version)
         let outgoing = OutgoingEdges::new(src_id, None);
         let out_result = outgoing.execute_on(&storage).await.unwrap();
         assert_eq!(out_result.len(), 1, "Should have 1 outgoing edge");
         assert_eq!(out_result[0].2, dst_id, "Outgoing edge target should match");
 
         // Check reverse direction (IncomingEdges)
-        // IncomingEdges returns Vec<(Option<f64>, DstId, SrcId, EdgeName)> = (weight, dst_id, src_id, name)
+        // IncomingEdges returns Vec<(Option<EdgeWeight>, DstId, SrcId, EdgeName, Version)> = (weight, dst_id, src_id, name, version)
         let incoming = IncomingEdges::new(dst_id, None);
         let in_result = incoming.execute_on(&storage).await.unwrap();
         assert_eq!(in_result.len(), 1, "Should have 1 incoming edge");
@@ -4245,7 +4246,7 @@ mod versioning_tests {
 
         // Query current version
         let query = NodeById::new(node_id, None);
-        let (_, current_summary) = query.execute_on(&storage).await.unwrap();
+        let (_, current_summary, _version) = query.execute_on(&storage).await.unwrap();
         assert!(
             current_summary.decode_string().unwrap().contains("Version 2"),
             "Current version should be Version 2"
@@ -4341,7 +4342,7 @@ mod versioning_tests {
         storage.ready().unwrap();
 
         let query = EdgeSummaryBySrcDstName::new(src_id, dst_id, edge_name.clone(), None);
-        let (summary, _) = query.execute_on(&storage).await.unwrap();
+        let (summary, _, _version) = query.execute_on(&storage).await.unwrap();
         assert!(
             summary.decode_string().unwrap().contains("Edge V2"),
             "Current edge should be V2"
@@ -4439,7 +4440,7 @@ mod versioning_tests {
 
         // Current weight should be 5.0
         let query = EdgeSummaryBySrcDstName::new(src_id, dst_id, edge_name.clone(), None);
-        let (_, weight) = query.execute_on(&storage).await.unwrap();
+        let (_, weight, _version) = query.execute_on(&storage).await.unwrap();
         assert!((weight.unwrap() - 5.0).abs() < 0.001, "Current weight should be 5.0");
 
         // Time-travel query should show old weight of 1.0
@@ -4790,7 +4791,7 @@ mod versioning_tests {
         let result = query.execute_on(&storage).await;
         assert!(result.is_ok(), "Node should be queryable after replay");
 
-        let (name, summary) = result.unwrap();
+        let (name, summary, _version) = result.unwrap();
         assert_eq!(name, "idempotent_test", "Name should be consistent");
         assert!(
             summary.decode_string().unwrap().contains("Original content"),
@@ -4918,7 +4919,7 @@ mod versioning_tests {
             let result = query.run(&reader, Duration::from_secs(5)).await;
             assert!(result.is_ok(), "Query should succeed");
 
-            let (returned_name, _) = result.unwrap();
+            let (returned_name, _, _version) = result.unwrap();
             assert_eq!(returned_name, node_name, "Name should match");
         }
 
@@ -4935,7 +4936,6 @@ mod versioning_tests {
     /// Validates: Processor implements writer::Processor trait correctly.
     #[tokio::test]
     async fn test_processor_implements_writer_processor() {
-        use crate::graph::writer::Processor as WriterProcessor;
         use std::sync::Arc;
 
         let temp_dir = TempDir::new().unwrap();
@@ -5000,7 +5000,7 @@ mod versioning_tests {
 
         assert!(result.is_ok(), "Should be able to read uncommitted write in transaction");
 
-        let (name, _) = result.unwrap();
+        let (name, _, _version) = result.unwrap();
         assert_eq!(name, "txn_test", "Should see uncommitted write");
 
         // Commit
@@ -5012,4 +5012,3 @@ mod versioning_tests {
         assert!(result.is_ok(), "Committed data should be visible");
     }
 }
-

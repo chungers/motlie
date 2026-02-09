@@ -76,7 +76,7 @@ async fn test_secondary_instance_basic() {
         &reader, Duration::from_secs(1)).await;
 
     assert!(result.is_ok(), "Should be able to read from secondary");
-    let (returned_name, _summary) = result.unwrap();
+    let (returned_name, _summary, _version) = result.unwrap();
     assert_eq!(returned_name, node_name);
 
     drop(reader);

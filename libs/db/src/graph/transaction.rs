@@ -26,7 +26,7 @@
 //! txn.write(AddNode { id: node_id, ... })?;
 //!
 //! // Read sees uncommitted writes!
-//! let (name, summary) = txn.read(NodeById::new(node_id, None))?;
+//! let (name, summary, version) = txn.read(NodeById::new(node_id, None))?;
 //!
 //! // Write more based on read results
 //! txn.write(AddEdge { src: node_id, dst: other, ... })?;
@@ -203,7 +203,7 @@ impl<'a> Transaction<'a> {
     /// txn.write(AddNode { id, ... })?;
     ///
     /// // Sees the uncommitted AddNode!
-    /// let (name, summary) = txn.read(NodeById::new(id, None))?;
+    /// let (name, summary, version) = txn.read(NodeById::new(id, None))?;
     ///
     /// // Get edges (sees uncommitted edges too)
     /// let edges = txn.read(OutgoingEdges::new(id, Some("hnsw")))?;
@@ -365,8 +365,6 @@ impl<'a> Drop for Transaction<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     // Note: Full integration tests require a RocksDB instance.
     // These are basic unit tests for the Transaction struct.
 

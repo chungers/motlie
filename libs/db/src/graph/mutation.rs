@@ -252,7 +252,7 @@ pub struct AddEdge {
     pub summary: schema::EdgeSummary,
 
     /// Optional weight for weighted graph algorithms
-    pub weight: Option<f64>,
+    pub weight: Option<schema::EdgeWeight>,
 }
 
 impl RequestMeta for AddEdge {
@@ -1297,7 +1297,7 @@ macro_rules! mutations {
 mod tests {
     use super::*;
     use super::super::writer::{
-        create_mutation_writer, spawn_consumer, Consumer, Processor, WriterConfig,
+        spawn_consumer, Consumer, Processor, WriterConfig,
     };
     use crate::Id;
     use std::sync::atomic::{AtomicUsize, Ordering};

@@ -23,7 +23,6 @@ use motlie_db::writer::Runnable as MutationRunnable;
 use motlie_db::graph::query::{EdgeSummaryBySrcDstName, NodeById};
 // Only import graph::query::Runnable - fulltext queries use .run() on types
 // that only implement fulltext::query::Runnable so there's no ambiguity
-use motlie_db::reader::Runnable as GraphQueryRunnable;
 use motlie_db::graph::reader::{
     create_query_reader, Reader as GraphReader,
     spawn_query_consumer_pool_shared, ReaderConfig,
@@ -241,7 +240,7 @@ async fn test_fulltext_node_search_resolves_to_rocksdb() {
             .await;
 
         match node_result {
-            Ok((name, summary)) => {
+            Ok((name, summary, _version)) => {
                 println!("      -> Resolved to node: name='{}', summary='{}'", name, summary.decode_string().unwrap_or_default());
                 resolved_ids.insert(hit.id);
 
@@ -275,7 +274,7 @@ async fn test_fulltext_node_search_resolves_to_rocksdb() {
     assert!(rust_hit.is_some(), "Should find the Rust node");
 
     // Verify hit resolves to correct node
-    let (name, _) = NodeById::new(rust_id, None)
+    let (name, _, _version) = NodeById::new(rust_id, None)
         .run(&graph_reader, timeout)
         .await
         .unwrap();
@@ -520,7 +519,7 @@ async fn test_fulltext_edge_search_resolves_to_rocksdb() {
         .await;
 
         match edge_result {
-            Ok((summary, weight)) => {
+            Ok((summary, weight, _version)) => {
                 println!("      -> Resolved to edge: summary='{}', weight={:?}",
                     summary.decode_string().unwrap_or_default(), weight);
                 resolved_edges.insert((hit.src_id, hit.dst_id, hit.edge_name.clone()));
@@ -561,7 +560,7 @@ async fn test_fulltext_edge_search_resolves_to_rocksdb() {
     assert!(js_edge_hit.is_some(), "Should find JavaScript -> WebDev edge");
 
     // Verify it resolves correctly
-    let (summary, _) = EdgeSummaryBySrcDstName::new(
+    let (summary, _, _version) = EdgeSummaryBySrcDstName::new(
         javascript_id,
         webdev_id,
         "powers".to_string(),
@@ -878,7 +877,7 @@ async fn test_fulltext_fragment_deduplication_behavior() {
     );
 
     // Verify hit resolves to correct node
-    let (name, _) = NodeById::new(hit.id, None)
+    let (name, _, _version) = NodeById::new(hit.id, None)
         .run(&graph_reader, timeout)
         .await
         .unwrap();

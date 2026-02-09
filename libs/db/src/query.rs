@@ -25,11 +25,11 @@
 //!
 //! | Query | Output | Description |
 //! |-------|--------|-------------|
-//! | [`NodeById`] | `(NodeName, NodeSummary)` | Lookup node by ID |
-//! | [`NodesByIdsMulti`] | `Vec<(Id, NodeName, NodeSummary)>` | Batch lookup nodes by IDs |
-//! | [`OutgoingEdges`] | `Vec<(Option<f64>, SrcId, DstId, EdgeName)>` | Get edges from a node |
-//! | [`IncomingEdges`] | `Vec<(Option<f64>, DstId, SrcId, EdgeName)>` | Get edges to a node |
-//! | [`EdgeDetails`] | `(Option<f64>, SrcId, DstId, EdgeName, EdgeSummary)` | Lookup edge by topology |
+//! | [`NodeById`] | `(NodeName, NodeSummary, Version)` | Lookup node by ID |
+//! | [`NodesByIdsMulti`] | `Vec<(Id, NodeName, NodeSummary, Version)>` | Batch lookup nodes by IDs |
+//! | [`OutgoingEdges`] | `Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>` | Get edges from a node |
+//! | [`IncomingEdges`] | `Vec<(Option<EdgeWeight>, DstId, SrcId, EdgeName, Version)>` | Get edges to a node |
+//! | [`EdgeDetails`] | `(Option<EdgeWeight>, SrcId, DstId, EdgeName, EdgeSummary, Version)` | Lookup edge by topology |
 //! | [`NodeFragments`] | `Vec<(TimestampMilli, FragmentContent)>` | Get node fragment history |
 //! | [`EdgeFragments`] | `Vec<(TimestampMilli, FragmentContent)>` | Get edge fragment history |
 //!
@@ -37,8 +37,8 @@
 //!
 //! | Query | Output | Description |
 //! |-------|--------|-------------|
-//! | [`AllNodes`] | `Vec<(Id, NodeName, NodeSummary)>` | Enumerate all nodes |
-//! | [`AllEdges`] | `Vec<(Option<f64>, SrcId, DstId, EdgeName)>` | Enumerate all edges |
+//! | [`AllNodes`] | `Vec<(Id, NodeName, NodeSummary, Version)>` | Enumerate all nodes |
+//! | [`AllEdges`] | `Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>` | Enumerate all edges |
 //!
 //! # Usage
 //!
@@ -68,7 +68,7 @@
 //!     .await?;
 //!
 //! // Direct graph lookup by ID
-//! let (name, summary) = NodeById::new(node_id, None)
+//! let (name, summary, version) = NodeById::new(node_id, None)
 //!     .run(handles.reader(), timeout)
 //!     .await?;
 //!
@@ -135,7 +135,8 @@ use crate::request::{new_request_id, RequestEnvelope, RequestMeta};
 // Re-export Runnable trait from reader module
 pub use crate::reader::Runnable;
 use crate::graph::schema::{
-    DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId,
+    DstId, EdgeName, EdgeSummary, EdgeWeight, FragmentContent, NodeName, NodeSummary, SrcId,
+    Version,
 };
 use crate::{Id, TimestampMilli};
 
@@ -183,7 +184,7 @@ pub type NodeById = graph::query::NodeById;
 /// for efficient batch reads. Missing nodes and temporally invalid nodes
 /// are silently omitted from results.
 ///
-/// - With `graph::Reader`: returns `Vec<(Id, NodeName, NodeSummary)>`
+/// - With `graph::Reader`: returns `Vec<(Id, NodeName, NodeSummary, Version)>`
 /// - With `reader::Reader`: same result, forwarded to graph storage
 pub type NodesByIdsMulti = graph::query::NodesByIdsMulti;
 
@@ -206,9 +207,9 @@ pub type IncomingEdges = graph::query::IncomingEdges;
 /// Type alias to graph::query::EdgeSummaryBySrcDstName.
 ///
 /// Look up an edge's details by source ID, destination ID, and edge name.
-/// Returns `EdgeDetailsResult` (Option<f64>, SrcId, DstId, EdgeName, EdgeSummary).
+/// Returns `EdgeDetailsResult` (Option<EdgeWeight>, SrcId, DstId, EdgeName, EdgeSummary, Version).
 ///
-/// - With `graph::Reader`: use `.run()` method (returns `(EdgeSummary, Option<f64>)`)
+/// - With `graph::Reader`: use `.run()` method (returns `(EdgeSummary, Option<EdgeWeight>, Version)`)
 /// - With `reader::Reader`: use `.run()` method (returns `EdgeDetailsResult`)
 pub type EdgeDetails = graph::query::EdgeSummaryBySrcDstName;
 
@@ -241,7 +242,7 @@ pub type EdgeFragments = graph::query::EdgeFragmentsByIdTimeRange;
 ///     .await?;
 ///
 /// // Get next page using cursor
-/// if let Some((last_id, _, _)) = nodes.last() {
+/// if let Some((last_id, _, _, _)) = nodes.last() {
 ///     let next_page = AllNodes::new(1000)
 ///         .with_cursor(*last_id)
 ///         .run(handles.reader(), timeout)
@@ -282,8 +283,8 @@ pub type NodeResult = (Id, NodeName, NodeSummary);
 /// Result type for hydrated edge searches: (SrcId, DstId, EdgeName, EdgeSummary)
 pub type EdgeResult = (SrcId, DstId, EdgeName, EdgeSummary);
 
-/// Result type for EdgeDetails query: (weight, src_id, dst_id, edge_name, edge_summary)
-pub type EdgeDetailsResult = (Option<f64>, SrcId, DstId, EdgeName, EdgeSummary);
+/// Result type for EdgeDetails query: (weight, src_id, dst_id, edge_name, edge_summary, version)
+pub type EdgeDetailsResult = (Option<EdgeWeight>, SrcId, DstId, EdgeName, EdgeSummary, Version);
 
 // ============================================================================
 // Unified Query Types and Execution
@@ -364,15 +365,15 @@ impl std::fmt::Display for Query {
 pub enum QueryResult {
     Nodes(Vec<NodeResult>),
     Edges(Vec<EdgeResult>),
-    NodeById((NodeName, NodeSummary)),
-    NodesByIdsMulti(Vec<(Id, NodeName, NodeSummary)>),
-    OutgoingEdges(Vec<(Option<f64>, SrcId, DstId, EdgeName)>),
-    IncomingEdges(Vec<(Option<f64>, DstId, SrcId, EdgeName)>),
+    NodeById((NodeName, NodeSummary, Version)),
+    NodesByIdsMulti(Vec<(Id, NodeName, NodeSummary, Version)>),
+    OutgoingEdges(Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>),
+    IncomingEdges(Vec<(Option<EdgeWeight>, DstId, SrcId, EdgeName, Version)>),
     EdgeDetails(EdgeDetailsResult),
     NodeFragments(Vec<(TimestampMilli, FragmentContent)>),
     EdgeFragments(Vec<(TimestampMilli, FragmentContent)>),
-    AllNodes(Vec<(Id, NodeName, NodeSummary)>),
-    AllEdges(Vec<(Option<f64>, SrcId, DstId, EdgeName)>),
+    AllNodes(Vec<(Id, NodeName, NodeSummary, Version)>),
+    AllEdges(Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>),
 }
 
 impl RequestMeta for Query {
@@ -414,13 +415,15 @@ impl Query {
                 q.execute(storage.graph.storage().as_ref()).await.map(QueryResult::IncomingEdges)
             }
             Query::EdgeDetails(q) => {
-                let (summary, weight) = q.execute(storage.graph.storage().as_ref()).await?;
+                let (summary, weight, version) =
+                    q.execute(storage.graph.storage().as_ref()).await?;
                 Ok(QueryResult::EdgeDetails((
                     weight,
                     q.source_id,
                     q.dest_id,
                     q.name.clone(),
                     summary,
+                    version,
                 )))
             }
             Query::NodeFragments(q) => {
@@ -451,7 +454,7 @@ async fn execute_nodes_query(
     for hit in hits.into_iter().skip(query.offset) {
         let query = graph::query::NodeById::new(hit.id, None);
         match query.execute(graph_storage).await {
-            Ok((name, summary)) => results.push((hit.id, name, summary)),
+            Ok((name, summary, _version)) => results.push((hit.id, name, summary)),
             Err(_) => {
                 tracing::debug!(id = %hit.id, "Node in fulltext but not in graph, skipping");
             }
@@ -482,7 +485,9 @@ async fn execute_edges_query(
             None,
         );
         match query.execute(graph_storage).await {
-            Ok((summary, _weight)) => results.push((hit.src_id, hit.dst_id, hit.edge_name, summary)),
+            Ok((summary, _weight, _version)) => {
+                results.push((hit.src_id, hit.dst_id, hit.edge_name, summary))
+            }
             Err(_) => {
                 tracing::debug!(
                     src_id = %hit.src_id,
@@ -557,20 +562,20 @@ where
     }
 }
 
-/// Result type for NodesByIdsMulti query: (id, node_name, node_summary)
-pub type NodesByIdsMultiResult = Vec<(Id, NodeName, NodeSummary)>;
+/// Result type for NodesByIdsMulti query: (id, node_name, node_summary, version)
+pub type NodesByIdsMultiResult = Vec<(Id, NodeName, NodeSummary, Version)>;
 
-/// Result type for OutgoingEdges query: (weight, src_id, dst_id, edge_name)
-pub type OutgoingEdgesResult = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
+/// Result type for OutgoingEdges query: (weight, src_id, dst_id, edge_name, version)
+pub type OutgoingEdgesResult = Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>;
 
-/// Result type for IncomingEdges query: (weight, dst_id, src_id, edge_name)
-pub type IncomingEdgesResult = Vec<(Option<f64>, DstId, SrcId, EdgeName)>;
+/// Result type for IncomingEdges query: (weight, dst_id, src_id, edge_name, version)
+pub type IncomingEdgesResult = Vec<(Option<EdgeWeight>, DstId, SrcId, EdgeName, Version)>;
 
-/// Result type for AllNodes query: (id, node_name, node_summary)
-pub type AllNodesResult = Vec<(Id, NodeName, NodeSummary)>;
+/// Result type for AllNodes query: (id, node_name, node_summary, version)
+pub type AllNodesResult = Vec<(Id, NodeName, NodeSummary, Version)>;
 
-/// Result type for AllEdges query: (weight, src_id, dst_id, edge_name)
-pub type AllEdgesResult = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
+/// Result type for AllEdges query: (weight, src_id, dst_id, edge_name, version)
+pub type AllEdgesResult = Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>;
 
 impl QueryReply for Nodes {
     type Reply = Vec<NodeResult>;
@@ -690,7 +695,7 @@ impl QueryReply for EdgeFragments {
 }
 
 impl QueryReply for NodeById {
-    type Reply = (NodeName, NodeSummary);
+    type Reply = (NodeName, NodeSummary, Version);
 
     fn into_query(self) -> Query {
         Query::NodeById(self)

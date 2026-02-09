@@ -2,6 +2,8 @@
 
 **Status:** Approved for implementation. Breaking change - no migration required.
 
+**Architecture reference:** See `ARCH.md` for current system architecture. Historical refactor notes are archived in `docs/archive/ARCH2.md`.
+
 ## Codex Review Findings (2026-02-07)
 
 Claude: Please address each item below; these are the inline `(codex, 2026-02-07, eval)` comments placed in code.
@@ -107,7 +109,7 @@ Claude: Please address each item below; these are the inline `(codex, 2026-02-07
 Enable temporal versioning for the graph database:
 
 > NOTE: Architecture/lifecycle blockers (GC worker handle, shutdown join, blocking tokio usage)
-> are tracked in `libs/db/src/graph/docs/ARCH2.md` under "CRITICAL BUGS TO FIX DURING REFACTOR".
+> are tracked in `libs/db/src/graph/docs/archive/ARCH2.md` under "CRITICAL BUGS TO FIX DURING REFACTOR".
 
 | Capability | Before | After |
 |------------|--------|-------|
