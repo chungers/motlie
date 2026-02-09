@@ -1,9 +1,9 @@
 //! Vector query reader module providing query infrastructure.
 //!
 //! This module follows the same pattern as graph::reader:
-//! - Reader - handle for sending queries (with Processor for SearchKNN)
+//! - Reader - handle for sending queries
 //! - ReaderConfig - configuration
-//! - Consumer - processes queries from channel
+//! - Consumer/ProcessorConsumer - processes queries from channel
 //! - Spawn functions for creating consumers
 //!
 //! Uses flume for MPMC (multi-producer, multi-consumer) channels,
@@ -12,18 +12,19 @@
 //! # Architecture
 //!
 //! ```text
-//! ┌─────────┐     MPMC (flume)     ┌──────────┐
-//! │ Reader  │──────────────────────│ Consumer │ (N workers)
-//! └─────────┘       Query          └──────────┘
-//!      │                                │
-//!      ▼                                ▼
-//! ┌───────────┐                    ┌──────────┐
-//! │ Processor │                    │ Storage  │
-//! └───────────┘                    └──────────┘
+//! ┌─────────┐     MPMC (flume)     ┌──────────────────────┐
+//! │ Reader  │──────────────────────│ Consumer (N workers) │
+//! └─────────┘       Query          └──────────────────────┘
+//!                                           │
+//!                                           ▼
+//!                                  ┌────────────────────┐
+//!                                  │ Storage/Processor  │
+//!                                  └────────────────────┘
 //! ```
 //!
-//! The Reader holds a Processor reference enabling SearchKNN queries to
-//! perform HNSW index operations directly through the reader.
+//! The Reader sends queries through an MPMC channel. Consumer workers
+//! process queries using Storage (for simple lookups) or ProcessorConsumer
+//! uses Processor (for SearchKNN with HNSW index operations).
 
 use std::sync::Arc;
 
@@ -59,8 +60,7 @@ impl Default for ReaderConfig {
 /// Handle for sending vector queries to be processed.
 ///
 /// The Reader sends queries through an MPMC (flume) channel, allowing
-/// multiple consumer workers to process queries in parallel. It also holds
-/// a Processor reference for SearchKNN operations.
+/// multiple consumer workers to process queries in parallel.
 ///
 /// # Example
 ///
@@ -87,13 +87,12 @@ impl Default for ReaderConfig {
 #[derive(Clone)]
 pub struct Reader {
     sender: flume::Sender<QueryRequest>,
-    processor: Arc<Processor>,
 }
 
 impl Reader {
-    /// Create a new Reader with the given sender and processor.
-    pub(crate) fn new(sender: flume::Sender<QueryRequest>, processor: Arc<Processor>) -> Self {
-        Self { sender, processor }
+    /// Create a new Reader with the given sender.
+    pub(crate) fn new(sender: flume::Sender<QueryRequest>) -> Self {
+        Self { sender }
     }
 
     /// Send a query to the reader queue.
@@ -110,42 +109,29 @@ impl Reader {
     pub fn is_closed(&self) -> bool {
         self.sender.is_disconnected()
     }
-
-    /// Get the processor reference.
-    ///
-    /// Used internally by `Runnable` implementations (e.g., `SearchKNN`) to access
-    /// the processor for query dispatch.
-    pub(crate) fn processor(&self) -> &Arc<Processor> {
-        &self.processor
-    }
 }
 
 impl std::fmt::Debug for Reader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Reader")
             .field("sender", &self.sender)
-            .field("processor", &"<Arc<Processor>>")
             .finish()
     }
 }
 
-/// Create a Reader from Storage (auto-creates Processor internally).
+/// Create a Reader.
 ///
-/// This is the recommended way to create a Reader - it constructs
-/// the internal Processor automatically.
+/// This is the recommended way to create a Reader.
 ///
 /// # Returns
 ///
-/// Tuple of (Reader, flume::Receiver<Query>) - spawn consumers with the receiver.
+/// Tuple of (Reader, flume::Receiver<QueryRequest>) - spawn consumers with the receiver.
 ///
 /// # Example
 ///
 /// ```rust,ignore
 /// let storage = Arc::new(Storage::readwrite(path));
-/// let (reader, receiver) = create_reader_with_storage(
-///     ReaderConfig::default(),
-///     storage.clone(),
-/// );
+/// let (reader, receiver) = create_reader(ReaderConfig::default());
 /// spawn_query_consumers_with_storage_autoreg(receiver, config, storage, 2);
 ///
 /// // Use SearchKNN::run() for searches
@@ -153,28 +139,15 @@ impl std::fmt::Debug for Reader {
 ///     .run(&reader, timeout)
 ///     .await?;
 /// ```
-pub fn create_reader_with_storage(
-    config: ReaderConfig,
-    storage: Arc<super::Storage>,
-) -> (Reader, flume::Receiver<QueryRequest>) {
-    let registry = storage.cache().clone();
-    let processor = Arc::new(Processor::new(storage, registry));
+pub fn create_reader_with_storage(config: ReaderConfig) -> (Reader, flume::Receiver<QueryRequest>) {
     let (sender, receiver) = flume::bounded(config.channel_buffer_size);
-    let reader = Reader::new(sender, processor);
+    let reader = Reader::new(sender);
     (reader, receiver)
 }
 
-/// Create a Reader with an explicit Processor.
-///
-/// Use this when you need to share a Processor across multiple Readers
-/// or have custom Processor configuration.
-pub(crate) fn create_reader(
-    config: ReaderConfig,
-    processor: Arc<Processor>,
-) -> (Reader, flume::Receiver<QueryRequest>) {
-    let (sender, receiver) = flume::bounded(config.channel_buffer_size);
-    let reader = Reader::new(sender, processor);
-    (reader, receiver)
+/// Create a Reader (internal alias for create_reader_with_storage).
+pub(crate) fn create_reader(config: ReaderConfig) -> (Reader, flume::Receiver<QueryRequest>) {
+    create_reader_with_storage(config)
 }
 
 // ============================================================================
@@ -344,11 +317,6 @@ impl ProcessorConsumer {
         };
         request.respond(result);
     }
-
-    /// Get the processor reference (for SearchKNN dispatch setup).
-    pub(crate) fn processor(&self) -> &Arc<Processor> {
-        &self.processor
-    }
 }
 
 /// Spawn a Processor-backed query consumer as a tokio task.
@@ -453,15 +421,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_reader_creation() {
-        let storage = create_test_storage();
-        let (reader, _receiver) = create_reader_with_storage(ReaderConfig::default(), storage);
+        let _storage = create_test_storage();
+        let (reader, _receiver) = create_reader_with_storage(ReaderConfig::default());
         assert!(!reader.is_closed());
     }
 
     #[tokio::test]
     async fn test_reader_channel_closed() {
-        let storage = create_test_storage();
-        let (reader, receiver) = create_reader_with_storage(ReaderConfig::default(), storage);
+        let _storage = create_test_storage();
+        let (reader, receiver) = create_reader_with_storage(ReaderConfig::default());
         drop(receiver);
         assert!(reader.is_closed());
     }
@@ -479,8 +447,8 @@ mod tests {
 
     #[test]
     fn test_reader_is_clone() {
-        let storage = create_test_storage();
-        let (reader, _receiver) = create_reader_with_storage(ReaderConfig::default(), storage);
+        let _storage = create_test_storage();
+        let (reader, _receiver) = create_reader_with_storage(ReaderConfig::default());
         let _reader2 = reader.clone();
     }
 }

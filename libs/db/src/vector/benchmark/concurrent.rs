@@ -808,8 +808,7 @@ impl ConcurrentBenchmark {
         );
 
         // Create Reader (MPMC) - query workers share this
-        let (search_reader, reader_rx) =
-            create_reader_with_storage(ReaderConfig::default(), storage.clone());
+        let (search_reader, reader_rx) = create_reader_with_storage(ReaderConfig::default());
         let query_handles = spawn_query_consumers_with_storage_autoreg(
             reader_rx,
             ReaderConfig::default(),
