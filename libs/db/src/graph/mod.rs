@@ -115,14 +115,5 @@ pub use processor::Processor;
 
 
 
-/// Trait implemented by column families that supports patching of ActivePeriod.
-pub(crate) trait ActivePeriodPatchable {
-    fn patch_valid_range(
-        &self,
-        old_value: &[u8],
-        new_range: schema::ActivePeriod,
-    ) -> Result<Vec<u8>, anyhow::Error>;
-}
-
 // Note: SystemInfo functionality is now in Subsystem which implements SubsystemInfo
 // Graph struct removed - use processor::Processor instead (claude, 2026-02-07)
