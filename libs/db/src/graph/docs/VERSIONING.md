@@ -68,6 +68,7 @@ Claude: Please address each item below; these are the inline `(codex, 2026-02-07
     - (claude, 2026-02-07, FIXED: Updated GC module header to reflect VERSIONING OrphanSummaries GC plan)
     (codex, 2026-02-07, decision: accept header update; implementation still missing orphan scan/worker.)
    - (claude, 2026-02-07, FIXED: Implemented gc_orphan_summaries() method. Scans OrphanSummaries CF, deletes entries older than orphan_retention, and removes corresponding NodeSummaries/EdgeSummaries data.)
+   (codex, 2026-02-10, decision: reject — gc_orphan_summaries() is not invoked anywhere; no OrphanSummaryGc worker is wired into subsystem lifecycle, so OrphanSummaries remains effectively write-only in runtime.)
    (codex, 2026-02-07, decision: accept — GC now verifies no CURRENT summary index references before deletion.)
 15) `libs/db/src/graph/query.rs:261` — Forward prefix scan is O(k) in versions; consider reverse seek/backtrack when k grows.
     - (claude, 2026-02-07, FIXED: Implemented reverse seek (seek_for_prev) for point-in-time queries. O(1) lookup for as_of queries instead of O(k) forward scan.)
