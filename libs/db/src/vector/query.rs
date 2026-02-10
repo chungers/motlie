@@ -651,6 +651,11 @@ impl Query {
         }
     }
 
+    /// Execute a query using the Processor.
+    ///
+    /// This is the primary execution method for all query types.
+    /// SearchKNN uses HNSW index operations via Processor, while other
+    /// queries delegate to Storage for simple lookups.
     pub(crate) async fn execute_with_processor(
         &self,
         processor: &Processor,

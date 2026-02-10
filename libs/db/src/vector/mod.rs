@@ -118,12 +118,12 @@ pub use query::{
 };
 pub use reader::{
     create_reader_with_storage,
-    spawn_consumer as spawn_query_consumer,
-    spawn_consumers as spawn_query_consumers,
     spawn_query_consumers_with_storage,
     spawn_query_consumers_with_storage_autoreg,
-    Consumer as QueryConsumer, Reader, ReaderConfig,
+    Reader, ReaderConfig,
 };
+// Note: Consumer and spawn_consumers are pub(crate) since they take Processor.
+// Use spawn_query_consumers_with_storage_autoreg for the simplest public setup.
 
 // Subsystem exports for use with rocksdb::Storage<S> and StorageBuilder
 pub use subsystem::{EmbeddingRegistryConfig, Subsystem, VectorBlockCacheConfig};
