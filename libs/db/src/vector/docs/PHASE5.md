@@ -2098,22 +2098,21 @@ All 520 tests pass after implementing Tasks 5.6 and 5.7.
 
 ## Task 5.7: CODEX Review - Query Dispatch Assessment
 
-**Overall:** SearchKNN now executes via Processor-backed consumers; other queries run via Storage-backed consumers. The async dispatch uses RequestEnvelope + QueryReply.
+**Overall:** All queries execute via Processor-backed consumers. The async dispatch uses RequestEnvelope + QueryReply.
 
 **Findings**
 
-1) **SearchKNN requires Processor-backed consumers.**  
-   Other queries work with Storage-only consumers; SearchKNN requires a Processor.  
-   Ensure subsystem spawn helpers use Processor-backed consumers when KNN is needed. ✅ **Done**
+1) **All queries require Processor-backed consumers.**  
+   Ensure subsystem spawn helpers use Processor-backed consumers for a single, consistent execution path. ✅ **Done**
 
 **Recommendation**
 
-Document how callers should obtain/hold a `Processor` for SearchKNN (or add a dedicated `SearchReader` that bundles Storage + Processor). ✅ **Done**
+Document how callers should obtain/hold a `Processor` for queries. ✅ **Done**
 
 ---
 
 **Update (post ops/ refactor):**  
-Processor-backed reader/consumer is now supported; SearchKNN uses the same `Runnable` entry point as other queries.
+Processor-backed reader/consumer is now supported; all queries use the same `Runnable` entry point.
 
 ---
 
@@ -2133,8 +2132,8 @@ Processor-backed reader/consumer is now supported; SearchKNN uses the same `Runn
 
 **Update (Processor-backed consumers added):**
 
-- `ProcessorConsumer` and `spawn_*_with_processor` were added to support SearchKNN ergonomics.  
-- **Note:** SearchKNN now runs through processor-backed consumers using the same RequestEnvelope + QueryReply pattern; no ad-hoc dispatch wrappers are required at call sites.  
+- `ProcessorConsumer` and `spawn_*_with_processor` were added to support query ergonomics.  
+- **Note:** All queries now run through processor-backed consumers using the same RequestEnvelope + QueryReply pattern; no ad-hoc dispatch wrappers are required at call sites.  
   - If the goal is to further simplify, consider a `SearchReader` helper or a `Reader::search_knn(...)` convenience API.
 
 ---

@@ -31,7 +31,6 @@ use super::schema::{
     Vectors,
 };
 use super::search::SearchConfig;
-use super::Storage;
 use crate::request::{new_request_id, RequestEnvelope, RequestMeta};
 use crate::rocksdb::ColumnFamily;
 use crate::Id;
@@ -161,8 +160,8 @@ pub trait QueryExecutor: Send + Sync {
     /// The type of result this query produces
     type Output: Send;
 
-    /// Execute this query against the storage layer
-    async fn execute(&self, storage: &Storage) -> Result<Self::Output>;
+    /// Execute this query against the processor
+    async fn execute(&self, processor: &Processor) -> Result<Self::Output>;
 }
 
 // ============================================================================
@@ -205,12 +204,12 @@ impl From<GetVector> for Query {
 impl QueryExecutor for GetVector {
     type Output = Option<Vec<f32>>;
 
-    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+    async fn execute(&self, processor: &Processor) -> Result<Self::Output> {
         // 1. Look up the internal vec_id from the external ID
         let forward_key = IdForwardCfKey(self.embedding, ExternalKey::NodeId(self.id));
         let forward_key_bytes = IdForward::key_to_bytes(&forward_key);
 
-        let txn_db = storage.transaction_db()?;
+        let txn_db = processor.storage().transaction_db()?;
         let forward_cf = txn_db
             .cf_handle(IdForward::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("IdForward CF not found"))?;
@@ -267,11 +266,11 @@ impl GetInternalId {
 impl QueryExecutor for GetInternalId {
     type Output = Option<VecId>;
 
-    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+    async fn execute(&self, processor: &Processor) -> Result<Self::Output> {
         let forward_key = IdForwardCfKey(self.embedding, self.external_key.clone());
         let forward_key_bytes = IdForward::key_to_bytes(&forward_key);
 
-        let txn_db = storage.transaction_db()?;
+        let txn_db = processor.storage().transaction_db()?;
         let forward_cf = txn_db
             .cf_handle(IdForward::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("IdForward CF not found"))?;
@@ -312,11 +311,11 @@ impl GetExternalId {
 impl QueryExecutor for GetExternalId {
     type Output = Option<ExternalKey>;
 
-    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+    async fn execute(&self, processor: &Processor) -> Result<Self::Output> {
         let reverse_key = IdReverseCfKey(self.embedding, self.vec_id);
         let reverse_key_bytes = IdReverse::key_to_bytes(&reverse_key);
 
-        let txn_db = storage.transaction_db()?;
+        let txn_db = processor.storage().transaction_db()?;
         let reverse_cf = txn_db
             .cf_handle(IdReverse::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("IdReverse CF not found"))?;
@@ -359,12 +358,12 @@ impl ResolveIds {
 impl QueryExecutor for ResolveIds {
     type Output = Vec<Option<ExternalKey>>;
 
-    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+    async fn execute(&self, processor: &Processor) -> Result<Self::Output> {
         if self.vec_ids.is_empty() {
             return Ok(Vec::new());
         }
 
-        let txn_db = storage.transaction_db()?;
+        let txn_db = processor.storage().transaction_db()?;
         let reverse_cf = txn_db
             .cf_handle(IdReverse::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("IdReverse CF not found"))?;
@@ -431,8 +430,8 @@ impl ListEmbeddings {
 impl QueryExecutor for ListEmbeddings {
     type Output = Vec<Embedding>;
 
-    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        Ok(storage.cache().list_all())
+    async fn execute(&self, processor: &Processor) -> Result<Self::Output> {
+        Ok(processor.registry().list_all())
     }
 }
 
@@ -485,8 +484,8 @@ impl FindEmbeddings {
 impl QueryExecutor for FindEmbeddings {
     type Output = Vec<Embedding>;
 
-    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        Ok(storage.cache().find(&self.filter))
+    async fn execute(&self, processor: &Processor) -> Result<Self::Output> {
+        Ok(processor.registry().find(&self.filter))
     }
 }
 
@@ -637,34 +636,24 @@ where
 }
 
 impl Query {
-    pub async fn execute_with_storage(&self, storage: &Storage) -> Result<QueryResult> {
-        match self {
-            Query::GetVector(q) => q.execute(storage).await.map(QueryResult::GetVector),
-            Query::GetInternalId(q) => q.execute(storage).await.map(QueryResult::GetInternalId),
-            Query::GetExternalId(q) => q.execute(storage).await.map(QueryResult::GetExternalId),
-            Query::ResolveIds(q) => q.execute(storage).await.map(QueryResult::ResolveIds),
-            Query::ListEmbeddings(q) => q.execute(storage).await.map(QueryResult::ListEmbeddings),
-            Query::FindEmbeddings(q) => q.execute(storage).await.map(QueryResult::FindEmbeddings),
-            Query::SearchKNN(_) => Err(anyhow::anyhow!(
-                "SearchKNN requires a Processor-backed reader"
-            )),
-        }
-    }
-
     /// Execute a query using the Processor.
     ///
     /// This is the primary execution method for all query types.
-    /// SearchKNN uses HNSW index operations via Processor, while other
-    /// queries delegate to Storage for simple lookups.
+    /// All queries route through Processor for a unified execution path.
     pub(crate) async fn execute_with_processor(
         &self,
         processor: &Processor,
     ) -> Result<QueryResult> {
         match self {
+            Query::GetVector(q) => q.execute(processor).await.map(QueryResult::GetVector),
+            Query::GetInternalId(q) => q.execute(processor).await.map(QueryResult::GetInternalId),
+            Query::GetExternalId(q) => q.execute(processor).await.map(QueryResult::GetExternalId),
+            Query::ResolveIds(q) => q.execute(processor).await.map(QueryResult::ResolveIds),
+            Query::ListEmbeddings(q) => q.execute(processor).await.map(QueryResult::ListEmbeddings),
+            Query::FindEmbeddings(q) => q.execute(processor).await.map(QueryResult::FindEmbeddings),
             Query::SearchKNN(q) => q
                 .execute_with_processor(processor)
                 .map(QueryResult::SearchKNN),
-            _ => self.execute_with_storage(processor.storage()).await,
         }
     }
 }
