@@ -231,7 +231,7 @@ impl Query {
         }
     }
 
-    pub async fn execute_with_processor(&self, processor: &GraphProcessor) -> Result<QueryResult> {
+    pub(crate) async fn execute_with_processor(&self, processor: &GraphProcessor) -> Result<QueryResult> {
         self.execute_with_storage(processor.storage()).await
     }
 }

@@ -55,7 +55,7 @@ use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
 use motlie_db::graph::writer::{
     create_mutation_writer, spawn_mutation_consumer_with_next, WriterConfig,
 };
-use motlie_db::graph::{Processor, Storage as GraphStorage};
+use motlie_db::graph::Storage as GraphStorage;
 use motlie_db::mutation::Runnable as MutationRunnable;
 use motlie_db::query::{
     AllEdges, AllNodes, EdgeDetails, Edges, FuzzyLevel, IncomingEdges, NodeById, NodeFragments,
@@ -162,7 +162,7 @@ async fn setup_test_env(
     // Manual initialization (lower-level API)
     let mut graph_storage = GraphStorage::readonly(&db_path);
     graph_storage.ready().unwrap();
-    let graph = Arc::new(Processor::new(Arc::new(graph_storage)));
+    let graph_storage = Arc::new(graph_storage);
 
     let mut fulltext_storage = FulltextStorage::readonly(&index_path);
     fulltext_storage.ready().unwrap();
@@ -171,7 +171,7 @@ async fn setup_test_env(
     // Create unified reader with both graph and fulltext subsystems
     let reader_config = ReaderConfig::with_channel_buffer_size(100);
     let (reader, unified_handles, graph_handles, fulltext_handles) =
-        motlie_db::reader::ReaderBuilder::new(graph, fulltext_index)
+        motlie_db::reader::ReaderBuilder::new(graph_storage, fulltext_index)
             .with_config(reader_config)
             .with_num_workers(2)
             .build();
@@ -557,7 +557,7 @@ async fn setup_tagged_test_env(
     // Open storage for reading
     let mut graph_storage = GraphStorage::readonly(&db_path);
     graph_storage.ready().unwrap();
-    let graph = Arc::new(Processor::new(Arc::new(graph_storage)));
+    let graph_storage = Arc::new(graph_storage);
 
     let mut fulltext_storage = FulltextStorage::readonly(&index_path);
     fulltext_storage.ready().unwrap();
@@ -566,7 +566,7 @@ async fn setup_tagged_test_env(
     // Create unified reader with both graph and fulltext subsystems
     let reader_config = ReaderConfig::with_channel_buffer_size(100);
     let (reader, unified_handles, graph_handles, fulltext_handles) =
-        motlie_db::reader::ReaderBuilder::new(graph, fulltext_index)
+        motlie_db::reader::ReaderBuilder::new(graph_storage, fulltext_index)
             .with_config(reader_config)
             .with_num_workers(2)
             .build();

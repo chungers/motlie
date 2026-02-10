@@ -141,7 +141,7 @@ impl Reader {
 
 /// Generic consumer that processes queries using a Processor
 #[doc(hidden)]
-pub struct Consumer {
+pub(crate) struct Consumer {
     receiver: flume::Receiver<QueryRequest>,
     config: ReaderConfig,
     processor: Arc<GraphProcessor>,
@@ -150,7 +150,7 @@ pub struct Consumer {
 impl Consumer {
     /// Create a new Consumer
     #[doc(hidden)]
-    pub fn new(
+    pub(crate) fn new(
         receiver: flume::Receiver<QueryRequest>,
         config: ReaderConfig,
         processor: Arc<GraphProcessor>,
@@ -165,7 +165,7 @@ impl Consumer {
     /// Process queries continuously until the channel is closed
     #[tracing::instrument(skip(self), name = "query_consumer")]
     #[doc(hidden)]
-    pub async fn run(self) -> Result<()> {
+    pub(crate) async fn run(self) -> Result<()> {
         tracing::info!(config = ?self.config, "Starting query consumer");
 
         loop {
@@ -206,7 +206,7 @@ impl Consumer {
 
 /// Spawn a query consumer as a background task
 #[doc(hidden)]
-pub fn spawn_consumer(consumer: Consumer) -> tokio::task::JoinHandle<Result<()>> {
+pub(crate) fn spawn_consumer(consumer: Consumer) -> tokio::task::JoinHandle<Result<()>> {
     tokio::spawn(async move { consumer.run().await })
 }
 
@@ -258,7 +258,7 @@ pub fn spawn_query_consumer(
 ///
 /// # Returns
 /// Vec of JoinHandles for spawned workers
-pub fn spawn_query_consumer_pool_shared(
+pub(crate) fn spawn_query_consumer_pool_shared(
     receiver: flume::Receiver<QueryRequest>,
     processor: Arc<GraphProcessor>,
     num_workers: usize,
@@ -335,7 +335,7 @@ pub fn spawn_query_consumer_pool_readonly(
 ///
 /// # Returns
 /// JoinHandle for the spawned consumer task
-pub fn spawn_query_consumer_with_processor(
+pub(crate) fn spawn_query_consumer_with_processor(
     receiver: flume::Receiver<QueryRequest>,
     config: ReaderConfig,
     processor: Arc<GraphProcessor>,
@@ -461,7 +461,7 @@ pub(crate) fn spawn_query_consumers_with_processor(
 ///
 /// # Returns
 /// Vec of JoinHandles for spawned workers
-pub fn spawn_consumer_pool_with_processor(
+pub(crate) fn spawn_consumer_pool_with_processor(
     receiver: flume::Receiver<QueryRequest>,
     processor: Arc<GraphProcessor>,
     num_workers: usize,

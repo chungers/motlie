@@ -76,7 +76,7 @@ use super::Storage;
 /// // Use in query consumer
 /// let storage = processor.storage();
 /// ```
-pub struct Processor {
+pub(crate) struct Processor {
     /// RocksDB storage (read-write mode required for mutations)
     storage: Arc<Storage>,
 
@@ -215,44 +215,6 @@ impl Processor {
     // ========================================================================
     // Query API
     // ========================================================================
-}
-
-// Implement the writer::MutationProcessor trait for mutation consumer compatibility
-// This allows Consumer<P: MutationProcessor> to work with processor::Processor
-// Note: The trait is named "Processor" in writer.rs but we use the full path to avoid confusion
-#[async_trait::async_trait]
-impl super::writer::Processor for Processor {
-    async fn process_mutations(&self, mutations: &[Mutation]) -> Result<()> {
-        // (codex, 2026-02-07, eval: keeping the async Processor trait preserves async overhead and generic Consumer; vector pattern uses a sync Processor without async trait.)
-        // (claude, 2026-02-07, FIXED: Async trait retained for Consumer<P: writer::Processor> compatibility. The sync process_mutations() does actual work; this wrapper adds minimal overhead. Full sync migration requires Consumer refactor - tracked separately.)
-        // Delegate to sync implementation - no actual async work needed
-        Self::process_mutations(self, mutations)
-    }
-
-    async fn process_mutations_with_options(
-        &self,
-        mutations: &[Mutation],
-        options: ExecOptions,
-    ) -> Result<Vec<MutationResult>> {
-        Self::process_mutations_with_options(self, mutations, options)
-    }
-}
-
-// Also implement for Arc<Processor> so consumers can hold Arc references
-#[async_trait::async_trait]
-impl super::writer::Processor for Arc<Processor> {
-    async fn process_mutations(&self, mutations: &[Mutation]) -> Result<()> {
-        // Delegate to inner processor
-        Processor::process_mutations(self.as_ref(), mutations)
-    }
-
-    async fn process_mutations_with_options(
-        &self,
-        mutations: &[Mutation],
-        options: ExecOptions,
-    ) -> Result<Vec<MutationResult>> {
-        Processor::process_mutations_with_options(self.as_ref(), mutations, options)
-    }
 }
 
 // ============================================================================

@@ -25,8 +25,7 @@ fn setup_test_storage(db_path: &std::path::Path) -> (Arc<Storage>, motlie_db::gr
     let (mut writer, _receiver) = create_mutation_writer(config);
 
     // Configure writer with storage for transaction support
-    let processor = Arc::new(motlie_db::graph::Processor::new(storage.clone()));
-    writer.set_processor(processor);
+    writer.enable_transactions(storage.clone());
 
     (storage, writer)
 }

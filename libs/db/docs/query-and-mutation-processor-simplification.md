@@ -6,6 +6,10 @@
 
 > **Note**: Some types mentioned in this document (`NodesByName`, `EdgesByName`, `NodeNames`, `EdgeNames`)
 > have been removed. Name-based lookups are now handled by the fulltext search module.
+>
+> **Note**: The async `writer::Processor` trait described in this document has been removed.
+> Both `graph::writer::Consumer` and `fulltext::writer::Consumer` are now concrete types
+> (following the vector module pattern) that hold their processor directly without trait indirection.
 
 ## Current Status
 
