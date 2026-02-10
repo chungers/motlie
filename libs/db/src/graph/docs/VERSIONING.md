@@ -70,6 +70,7 @@ Claude: Please address each item below; these are the inline `(codex, 2026-02-07
    - (claude, 2026-02-07, FIXED: Implemented gc_orphan_summaries() method. Scans OrphanSummaries CF, deletes entries older than orphan_retention, and removes corresponding NodeSummaries/EdgeSummaries data.)
    (codex, 2026-02-10, decision: reject — gc_orphan_summaries() is not invoked anywhere; no OrphanSummaryGc worker is wired into subsystem lifecycle, so OrphanSummaries remains effectively write-only in runtime.)
    - (claude, 2026-02-09, FIXED: Codex reject confirmed — gc_orphan_summaries(&self) wrapper was dead code. Removed it. However, gc_orphan_summaries_inner() IS called from run_cycle_inner() at gc.rs:545, which runs each GC cycle via the worker thread started by subsystem.rs:242. OrphanSummaries is NOT write-only in runtime. The separate OrphanSummaryGc worker from the design doc was never needed — orphan GC is integrated into GraphGarbageCollector. Updated GC Subsystem Integration section below to match actual implementation.)
+   (codex, 2026-02-10, decision: accept — confirmed gc_orphan_summaries_inner runs via GraphGarbageCollector cycle; no separate worker needed. Prior rejection superseded.)
    (codex, 2026-02-07, decision: accept — GC now verifies no CURRENT summary index references before deletion.)
 15) `libs/db/src/graph/query.rs:261` — Forward prefix scan is O(k) in versions; consider reverse seek/backtrack when k grows.
     - (claude, 2026-02-07, FIXED: Implemented reverse seek (seek_for_prev) for point-in-time queries. O(1) lookup for as_of queries instead of O(k) forward scan.)
@@ -1993,25 +1994,59 @@ Q3: "Show all schedule changes" (audit)
 ## Open Questions
 
 1. **EdgeSummaryIndex schema and time semantics**
-   - Define key/value layout and how "current" vs historical entries map to time-travel queries
-   - Decision: Define schema explicitly before implementation
+   - Leave open; continue with current “current vs stale” index semantics for summary lookups.
+   - Assess current API support for time-travel across **system time** (ValidSince/VersionHistory) and **business time** (ActivePeriod) before changing schema.
+   - Decision: Defer schema change; document time-travel API coverage first.
 
 2. **Time-to-version lookup for `EdgeAtTime` / `NodeByIdAt`**
-   - O(k) scan per edge where k=versions; acceptable if k stays small
-   - Decision: Start with scan-by-version using `UpdatedAt`; add time-ordered index only if needed
+   - Keep current reverse-seek scan over VersionHistory (no new index).
+   - Decision: Defer time-ordered index; revisit only if k grows.
 
 3. **Summary/fragment index maintenance on updates and restores**
-   - Enumerate index maintenance steps per mutation (Add/Update/Delete/Restore)
-   - Decision: Document before implementation
+   - General rule is sufficient (current→stale, add new current, orphan-index on summary change).
+   - Must explicitly support **undelete** and **unrestore** flows using the same rule.
+   - Decision: Keep general rule; avoid per-mutation step tables.
 
 4. **History retention/GC policy**
-   - Decision: Unbounded history for MVP; add retention policies later based on workload
+   - Build support for both unbounded and bounded retention.
+   - Default to **unbounded** history.
 
 5. **Concurrency semantics and conflict resolution**
-   - Decision: Version mismatch aborts; topology changes always close prior row
+   - Optimistic locking; version mismatch aborts.
+   - Failed writes must re-read before retry.
+   - Decision: Keep “close prior row” behavior for topology changes.
 
 6. **Restore interval behavior**
-   - Decision: Restores create new `valid_since` intervals (never reopen old intervals)
+   - Entity mutations are append-only; restores create new `valid_since` intervals.
+   - No exceptions.
+
+---
+
+## Version Queries
+
+**Assessment of current API support (system time + business time):**
+
+- **Point-in-time (system time)**: ✅ Supported via `as_of_system_time` on query types like `NodeById`, `NodesByIdsMulti`, `EdgeSummaryBySrcDstName`, `OutgoingEdges`, and `IncomingEdges`.  
+  - **Current version** is the default (`as_of_system_time: None`).
+  - `as_of(...)` constructors provide a convenient wrapper for historical lookup.
+
+- **Business time (ActivePeriod)**: ✅ Supported via `reference_ts_millis` on the same query types.  
+  - Records with `ActivePeriod = None` are treated as always valid.
+
+**Gaps (not currently supported by public API):**
+
+1) **List all versions for an entity**  
+   - No query surface to scan `NodeVersionHistory` / `EdgeVersionHistory` per entity.  
+   - Required for “show all changes” without custom storage access.
+
+2) **Relative version navigation (git-style)**  
+   - No “current‑1 / current‑2” traversal for nodes or edges.  
+   - Would require a history scan or explicit index by version for each entity.
+
+3) **Business‑time history listing**  
+   - Queries support business‑time filtering but not enumerating historical ActivePeriod values over system time.
+
+**Decision:** Keep current API surface for MVP; defer version-history list and relative version traversal until a use case demands it.
 
 ---
 

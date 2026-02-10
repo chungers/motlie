@@ -613,23 +613,23 @@ let t1 = TimestampMilli::now();
 
 // Update node
 std::thread::sleep(std::time::Duration::from_millis(10));
-let node = NodeById::new(node_id, None).run(&reader, timeout).await?;
+let (_, _, v_current) = NodeById::new(node_id, None).run(&reader, timeout).await?;
 UpdateNode {
     id: node_id,
-    expected_version: node.version,
+    expected_version: v_current,
     new_summary: Some(NodeSummary::from_text("Updated")),
     new_active_period: None,
 }.run(&writer).await?;
 let t2 = TimestampMilli::now();
 
 // Query different points in time
-let v1 = NodeById::new(node_id, Some(t1)).run(&reader, timeout).await?;
-let v2 = NodeById::new(node_id, Some(t2)).run(&reader, timeout).await?;
-let current = NodeById::new(node_id, None).run(&reader, timeout).await?;
+let (_, _, v1) = NodeById::as_of(node_id, t1, None).run(&reader, timeout).await?;
+let (_, _, v2) = NodeById::as_of(node_id, t2, None).run(&reader, timeout).await?;
+let (_, _, current) = NodeById::new(node_id, None).run(&reader, timeout).await?;
 
-assert_eq!(v1.version, 1);
-assert_eq!(v2.version, 2);
-assert_eq!(current.version, 2);
+assert_eq!(v1, 1);
+assert_eq!(v2, 2);
+assert_eq!(current, 2);
 ```
 
 #### Promotion ActivePeriod Update + Point-in-Time + Rollback
@@ -674,7 +674,8 @@ AddEdge {
 let t1 = TimestampMilli::now();
 
 // Update ActivePeriod to week2 (new business-time window)
-let current = EdgeSummaryBySrcDstName::new(store_id, user_id, edge_name.clone(), None)
+let (current_summary, current_weight, current_version) =
+    EdgeSummaryBySrcDstName::new(store_id, user_id, edge_name.clone(), None)
     .run(&reader, timeout)
     .await?;
 
@@ -682,7 +683,7 @@ UpdateEdge {
     source_node_id: store_id,
     target_node_id: user_id,
     name: edge_name.clone(),
-    expected_version: current.version,
+    expected_version: current_version,
     new_active_period: Some(Some(ActivePeriod::new(week2_start, Some(week2_end)))),
     new_summary: Some(EdgeSummary::from_text("Promo v2")),
     new_weight: None,
@@ -692,33 +693,63 @@ UpdateEdge {
 let t2 = TimestampMilli::now();
 
 // Point-in-time query (system time): as-of t1 should reflect week1
-let v1 = EdgeSummaryBySrcDstName::as_of(store_id, user_id, edge_name.clone(), t1, None)
+let (v1_summary, _v1_weight, _v1_version) =
+    EdgeSummaryBySrcDstName::as_of(store_id, user_id, edge_name.clone(), t1, None)
     .run(&reader, timeout)
     .await?;
 
 // Current query (system time): reflects week2
-let v2 = EdgeSummaryBySrcDstName::new(store_id, user_id, edge_name.clone(), None)
+let (v2_summary, _v2_weight, _v2_version) =
+    EdgeSummaryBySrcDstName::new(store_id, user_id, edge_name.clone(), None)
     .run(&reader, timeout)
     .await?;
 
-assert!(v1.summary.decode_string().unwrap().contains("Promo v1"));
-assert!(v2.summary.decode_string().unwrap().contains("Promo v2"));
+assert!(v1_summary.decode_string().unwrap().contains("Promo v1"));
+assert!(v2_summary.decode_string().unwrap().contains("Promo v2"));
 
-// Rollback: restore to the earlier version (version from v1)
+// Rollback: restore to the earlier version (system time = t1)
 // This creates a new current version that matches v1's content/ActivePeriod.
 RestoreEdge {
     source_node_id: store_id,
     target_node_id: user_id,
     name: edge_name.clone(),
-    version: v1.version,
+    as_of: t1,
+    expected_version: None,
 }.run(&writer).await?;
 
 // Current query should now reflect the rollback (week1)
-let rolled_back = EdgeSummaryBySrcDstName::new(store_id, user_id, edge_name, None)
+let (rolled_back, _rb_weight, _rb_version) =
+    EdgeSummaryBySrcDstName::new(store_id, user_id, edge_name, None)
+        .run(&reader, timeout)
+        .await?;
+assert!(rolled_back.decode_string().unwrap().contains("Promo v1"));
+```
+
+### Version Queries (Current vs. Point-in-Time)
+
+```rust
+// Current version (system time = now; business time optional)
+let (_name, _summary, current_version) = NodeById::new(node_id, None)
     .run(&reader, timeout)
     .await?;
-assert!(rolled_back.summary.decode_string().unwrap().contains("Promo v1"));
+
+let business_time = TimestampMilli::now();
+
+// Point-in-time (system time) lookup
+let (_name, _summary, v_at_t1) = NodeById::as_of(node_id, t1, None)
+    .run(&reader, timeout)
+    .await?;
+
+// Business-time filter (ActivePeriod) combined with system-time as_of
+let (_name, _summary, v_at_t1_with_business_time) =
+    NodeById::as_of(node_id, t1, Some(business_time))
+        .run(&reader, timeout)
+        .await?;
 ```
+
+**Not currently supported by public API:**
+- List all versions for a node/edge (no VersionHistory query surface).
+- Git-style relative traversal (current‑1, current‑2).
 
 ---
 
