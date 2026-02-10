@@ -25,7 +25,6 @@ use super::processor::Processor as GraphProcessor;
 use super::reader::{QueryExecutor, QueryRequest};
 use super::summary_hash::SummaryHash;
 use super::HotColumnFamilyRecord;
-use super::Storage;
 use super::{ColumnFamily, ColumnFamilySerde};
 use crate::reader::Runnable;
 use crate::request::{new_request_id, RequestMeta};
@@ -42,7 +41,7 @@ use tokio::sync::oneshot;
 
 /// Trait for queries that can execute within a transaction scope.
 ///
-/// Unlike [`QueryExecutor`] (which takes `&Storage` and routes through
+/// Unlike [`QueryExecutor`] (which takes `&Processor` and routes through
 /// MPSC channels), this trait executes directly against an active
 /// RocksDB transaction, enabling read-your-writes semantics.
 ///
@@ -199,40 +198,36 @@ pub enum QueryResult {
 }
 
 impl Query {
-    pub async fn execute_with_storage(&self, storage: &Storage) -> Result<QueryResult> {
+    pub(crate) async fn execute_with_processor(&self, processor: &GraphProcessor) -> Result<QueryResult> {
         match self {
-            Query::NodeById(q) => q.execute(storage).await.map(QueryResult::NodeById),
+            Query::NodeById(q) => q.execute(processor).await.map(QueryResult::NodeById),
             Query::NodesByIdsMulti(q) => q
-                .execute(storage)
+                .execute(processor)
                 .await
                 .map(QueryResult::NodesByIdsMulti),
             Query::EdgeSummaryBySrcDstName(q) => q
-                .execute(storage)
+                .execute(processor)
                 .await
                 .map(QueryResult::EdgeSummaryBySrcDstName),
             Query::NodeFragmentsByIdTimeRange(q) => q
-                .execute(storage)
+                .execute(processor)
                 .await
                 .map(QueryResult::NodeFragmentsByIdTimeRange),
             Query::EdgeFragmentsByIdTimeRange(q) => q
-                .execute(storage)
+                .execute(processor)
                 .await
                 .map(QueryResult::EdgeFragmentsByIdTimeRange),
-            Query::OutgoingEdges(q) => q.execute(storage).await.map(QueryResult::OutgoingEdges),
-            Query::IncomingEdges(q) => q.execute(storage).await.map(QueryResult::IncomingEdges),
-            Query::AllNodes(q) => q.execute(storage).await.map(QueryResult::AllNodes),
-            Query::AllEdges(q) => q.execute(storage).await.map(QueryResult::AllEdges),
+            Query::OutgoingEdges(q) => q.execute(processor).await.map(QueryResult::OutgoingEdges),
+            Query::IncomingEdges(q) => q.execute(processor).await.map(QueryResult::IncomingEdges),
+            Query::AllNodes(q) => q.execute(processor).await.map(QueryResult::AllNodes),
+            Query::AllEdges(q) => q.execute(processor).await.map(QueryResult::AllEdges),
             Query::NodesBySummaryHash(q) => {
-                q.execute(storage).await.map(QueryResult::NodesBySummaryHash)
+                q.execute(processor).await.map(QueryResult::NodesBySummaryHash)
             }
             Query::EdgesBySummaryHash(q) => {
-                q.execute(storage).await.map(QueryResult::EdgesBySummaryHash)
+                q.execute(processor).await.map(QueryResult::EdgesBySummaryHash)
             }
         }
-    }
-
-    pub(crate) async fn execute_with_processor(&self, processor: &GraphProcessor) -> Result<QueryResult> {
-        self.execute_with_storage(processor.storage()).await
     }
 }
 
@@ -559,9 +554,9 @@ impl NodeById {
 }
 
 impl NodeById {
-    /// Execute this query directly on storage (for testing and simple use cases).
-    pub async fn execute_on(&self, storage: &Storage) -> Result<(NodeName, NodeSummary, Version)> {
-        self.execute(storage).await
+    /// Execute this query directly on a processor (for testing and simple use cases).
+    pub(crate) async fn execute_on(&self, processor: &GraphProcessor) -> Result<(NodeName, NodeSummary, Version)> {
+        self.execute(processor).await
     }
 }
 
@@ -604,9 +599,9 @@ impl NodeFragmentsByIdTimeRange {
         timestamp_in_range(ts, &self.time_range)
     }
 
-    /// Execute this query directly on storage (for testing and simple use cases).
-    pub async fn execute_on(&self, storage: &Storage) -> Result<Vec<(TimestampMilli, FragmentContent)>> {
-        self.execute(storage).await
+    /// Execute this query directly on a processor (for testing and simple use cases).
+    pub(crate) async fn execute_on(&self, processor: &GraphProcessor) -> Result<Vec<(TimestampMilli, FragmentContent)>> {
+        self.execute(processor).await
     }
 }
 
@@ -670,9 +665,9 @@ impl EdgeSummaryBySrcDstName {
 }
 
 impl EdgeSummaryBySrcDstName {
-    /// Execute this query directly on storage (for testing and simple use cases).
-    pub async fn execute_on(&self, storage: &Storage) -> Result<(EdgeSummary, Option<EdgeWeight>, Version)> {
-        self.execute(storage).await
+    /// Execute this query directly on a processor (for testing and simple use cases).
+    pub(crate) async fn execute_on(&self, processor: &GraphProcessor) -> Result<(EdgeSummary, Option<EdgeWeight>, Version)> {
+        self.execute(processor).await
     }
 }
 
@@ -695,9 +690,9 @@ impl OutgoingEdges {
         }
     }
 
-    /// Execute this query directly on storage (for testing and simple use cases).
-    pub async fn execute_on(&self, storage: &Storage) -> Result<Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>> {
-        self.execute(storage).await
+    /// Execute this query directly on a processor (for testing and simple use cases).
+    pub(crate) async fn execute_on(&self, processor: &GraphProcessor) -> Result<Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>> {
+        self.execute(processor).await
     }
 }
 
@@ -720,9 +715,9 @@ impl IncomingEdges {
         }
     }
 
-    /// Execute this query directly on storage (for testing and simple use cases).
-    pub async fn execute_on(&self, storage: &Storage) -> Result<Vec<(Option<EdgeWeight>, DstId, SrcId, EdgeName, Version)>> {
-        self.execute(storage).await
+    /// Execute this query directly on a processor (for testing and simple use cases).
+    pub(crate) async fn execute_on(&self, processor: &GraphProcessor) -> Result<Vec<(Option<EdgeWeight>, DstId, SrcId, EdgeName, Version)>> {
+        self.execute(processor).await
     }
 }
 
@@ -946,8 +941,8 @@ impl QueryReply for AllEdges {
 impl QueryExecutor for NodeById {
     type Output = (NodeName, NodeSummary, Version);
 
-    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        super::ops::read::node_by_id(storage, self)
+    async fn execute(&self, processor: &GraphProcessor) -> Result<Self::Output> {
+        super::ops::read::node_by_id(processor.storage(), self)
     }
 }
 
@@ -959,8 +954,8 @@ impl QueryExecutor for NodeById {
 impl QueryExecutor for NodesByIdsMulti {
     type Output = Vec<(Id, NodeName, NodeSummary, Version)>;
 
-    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        super::ops::read::nodes_by_ids_multi(storage, self)
+    async fn execute(&self, processor: &GraphProcessor) -> Result<Self::Output> {
+        super::ops::read::nodes_by_ids_multi(processor.storage(), self)
     }
 }
 
@@ -969,8 +964,8 @@ impl QueryExecutor for NodesByIdsMulti {
 impl QueryExecutor for NodeFragmentsByIdTimeRange {
     type Output = Vec<(TimestampMilli, FragmentContent)>;
 
-    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        super::ops::read::node_fragments_by_id_time_range(storage, self)
+    async fn execute(&self, processor: &GraphProcessor) -> Result<Self::Output> {
+        super::ops::read::node_fragments_by_id_time_range(processor.storage(), self)
     }
 }
 
@@ -979,8 +974,8 @@ impl QueryExecutor for NodeFragmentsByIdTimeRange {
 impl QueryExecutor for EdgeFragmentsByIdTimeRange {
     type Output = Vec<(TimestampMilli, FragmentContent)>;
 
-    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        super::ops::read::edge_fragments_by_id_time_range(storage, self)
+    async fn execute(&self, processor: &GraphProcessor) -> Result<Self::Output> {
+        super::ops::read::edge_fragments_by_id_time_range(processor.storage(), self)
     }
 }
 
@@ -990,8 +985,8 @@ impl QueryExecutor for EdgeFragmentsByIdTimeRange {
 impl QueryExecutor for EdgeSummaryBySrcDstName {
     type Output = (EdgeSummary, Option<EdgeWeight>, Version);
 
-    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        super::ops::read::edge_summary_by_src_dst_name(storage, self)
+    async fn execute(&self, processor: &GraphProcessor) -> Result<Self::Output> {
+        super::ops::read::edge_summary_by_src_dst_name(processor.storage(), self)
     }
 }
 
@@ -1001,8 +996,8 @@ impl QueryExecutor for EdgeSummaryBySrcDstName {
 impl QueryExecutor for OutgoingEdges {
     type Output = Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>;
 
-    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        super::ops::read::outgoing_edges(storage, self)
+    async fn execute(&self, processor: &GraphProcessor) -> Result<Self::Output> {
+        super::ops::read::outgoing_edges(processor.storage(), self)
     }
 }
 
@@ -1012,10 +1007,9 @@ impl QueryExecutor for OutgoingEdges {
 impl QueryExecutor for IncomingEdges {
     type Output = Vec<(Option<EdgeWeight>, DstId, SrcId, EdgeName, Version)>;
 
-    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        super::ops::read::incoming_edges(storage, self)
+    async fn execute(&self, processor: &GraphProcessor) -> Result<Self::Output> {
+        super::ops::read::incoming_edges(processor.storage(), self)
     }
-
 }
 
 /// Implement QueryExecutor for AllNodes
@@ -1024,8 +1018,8 @@ impl QueryExecutor for IncomingEdges {
 impl QueryExecutor for AllNodes {
     type Output = Vec<(Id, NodeName, NodeSummary, Version)>;
 
-    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        super::ops::read::all_nodes(storage, self)
+    async fn execute(&self, processor: &GraphProcessor) -> Result<Self::Output> {
+        super::ops::read::all_nodes(processor.storage(), self)
     }
 }
 
@@ -1035,8 +1029,8 @@ impl QueryExecutor for AllNodes {
 impl QueryExecutor for AllEdges {
     type Output = Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>;
 
-    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        super::ops::read::all_edges(storage, self)
+    async fn execute(&self, processor: &GraphProcessor) -> Result<Self::Output> {
+        super::ops::read::all_edges(processor.storage(), self)
     }
 }
 
@@ -1784,9 +1778,9 @@ impl NodesBySummaryHash {
         }
     }
 
-    /// Execute this query directly on storage (for testing and simple use cases).
-    pub async fn execute_on(&self, storage: &Storage) -> Result<Vec<NodeSummaryLookupResult>> {
-        self.execute(storage).await
+    /// Execute this query directly on a processor (for testing and simple use cases).
+    pub(crate) async fn execute_on(&self, processor: &GraphProcessor) -> Result<Vec<NodeSummaryLookupResult>> {
+        self.execute(processor).await
     }
 }
 
@@ -1878,8 +1872,8 @@ impl QueryReply for EdgesBySummaryHash {
 impl QueryExecutor for NodesBySummaryHash {
     type Output = Vec<NodeSummaryLookupResult>;
 
-    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        super::ops::read::nodes_by_summary_hash(storage, self)
+    async fn execute(&self, processor: &GraphProcessor) -> Result<Self::Output> {
+        super::ops::read::nodes_by_summary_hash(processor.storage(), self)
     }
 }
 
@@ -1887,8 +1881,8 @@ impl QueryExecutor for NodesBySummaryHash {
 impl QueryExecutor for EdgesBySummaryHash {
     type Output = Vec<EdgeSummaryLookupResult>;
 
-    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        super::ops::read::edges_by_summary_hash(storage, self)
+    async fn execute(&self, processor: &GraphProcessor) -> Result<Self::Output> {
+        super::ops::read::edges_by_summary_hash(processor.storage(), self)
     }
 }
 

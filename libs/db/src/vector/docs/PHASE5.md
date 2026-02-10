@@ -1882,7 +1882,7 @@ fn execute_single(
 
 | File | Changes |
 |------|---------|
-| `writer.rs` | Added `MutationExecutor` and `MutationProcessor` traits |
+| `writer.rs` | Added `MutationExecutor` trait |
 | `mutation.rs` | Added `Mutation::execute()` dispatch, `MutationExecutor` impls for all types |
 | `mod.rs` | Added mutation type exports following graph pattern |
 
@@ -2069,7 +2069,7 @@ pub use mutation::{
 };
 pub use writer::{
     create_writer, spawn_consumer as spawn_mutation_consumer, Consumer as MutationConsumer,
-    MutationExecutor, MutationProcessor, Writer, WriterConfig,
+    MutationExecutor, Writer, WriterConfig,
 };
 
 // Query types and infrastructure (following graph::query pattern)

@@ -103,8 +103,8 @@ processor.process_mutations(&mutations)?;
 
 **Query execution (direct):**
 
-- `query.execute_with_storage(&storage).await?`
-- `query.execute_with_processor(&processor).await?`
+- `query.execute_on(&processor).await?`
+- `query.execute_with_processor(&processor).await?` (for `Query` enum dispatch)
 
 ### Style 2: Async Writer/Reader API
 

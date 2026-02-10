@@ -69,7 +69,6 @@ pub use reader::{
     spawn_query_consumers_with_storage,
     spawn_query_consumer,
     spawn_query_consumer_pool_readonly,
-    QueryExecutor,
     Reader,
     ReaderConfig,
 };

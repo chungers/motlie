@@ -23,7 +23,7 @@ use crate::request::RequestEnvelope;
 
 /// Trait that all query types implement to execute themselves.
 ///
-/// This trait defines HOW to fetch the result from storage.
+/// This trait defines HOW to fetch the result from the processor.
 /// Each query type knows how to execute its own data fetching logic.
 ///
 /// # Design Philosophy
@@ -35,16 +35,16 @@ use crate::request::RequestEnvelope;
 /// Benefits:
 /// - Logic lives with types, not in central implementation
 /// - Easier to extend (add query = impl QueryExecutor, not modify Processor trait)
-/// - Better testability (can test query.execute(storage) in isolation)
+/// - Better testability (can test query.execute(processor) in isolation)
 /// - Consistent with mutation pattern
 #[async_trait::async_trait]
-pub trait QueryExecutor: Send + Sync {
+pub(crate) trait QueryExecutor: Send + Sync {
     /// The type of result this query produces
     type Output: Send;
 
-    /// Execute this query against the storage layer
+    /// Execute this query against the processor
     /// Each query type knows how to fetch its own data
-    async fn execute(&self, storage: &Storage) -> Result<Self::Output>;
+    async fn execute(&self, processor: &GraphProcessor) -> Result<Self::Output>;
 }
 
 // ============================================================================
