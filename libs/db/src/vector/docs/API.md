@@ -96,8 +96,8 @@ let vector = GetVector::new(embedding.code(), id)
     .await?;
 ```
 
-`SearchKNN` requires a Processor-backed reader (same as before), but uses the
-same `Runnable` entry point:
+`SearchKNN` uses the same Processor-backed reader path as all other queries and
+the same `Runnable` entry point:
 
 ```rust
 use motlie_db::vector::query::SearchKNN;
