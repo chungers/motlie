@@ -10,6 +10,19 @@ A temporal graph database with integrated fulltext search, combining RocksDB (gr
 
 2. **Subsystem APIs (Plumbing)** - Direct access to `motlie_db::graph` and `motlie_db::fulltext` modules for advanced usage, extension, and testing.
 
+## Processor Architecture Alignment
+
+Both graph and vector follow the same internal architecture pattern: a synchronous `Processor` owns core resources and implements the single execution path used by async channel consumers.
+
+| Concern | Graph | Vector |
+|---|---|---|
+| **Processor role** | Internal sync API for mutations + queries | Internal sync API for mutations + queries |
+| **Resource ownership** | `Arc<Storage>`, `Arc<NameCache>` | `Arc<Storage>`, `Arc<EmbeddingRegistry>`, HNSW indices, allocators, caches |
+| **Business logic source of truth** | `graph::ops` (Processor delegates) | `vector::Processor` methods (search + index coordination) |
+| **Public async API** | `graph::Reader` / `graph::Writer` | `vector::Reader` / `vector::Writer` |
+| **Channel consumers** | `graph::reader::Consumer`, `graph::writer::Consumer` hold `Arc<Processor>` | `vector::reader::Consumer`, `vector::writer::Consumer` hold `Arc<Processor>` |
+| **Query dispatch** | `Query::execute_with_processor(&Processor)` | `Query::execute_with_processor(&Processor)` |
+
 ## Vector Design Docs
 
 Vector design docs live alongside the implementation under `src/vector/docs/`:
