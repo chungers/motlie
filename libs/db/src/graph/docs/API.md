@@ -53,15 +53,15 @@ See `ARCH.md` for current architecture and `VERSIONING.md` for temporal/rollback
 
 The graph module provides two complementary API styles:
 
-### Style 1: Synchronous Processor API
+### Style 1: Synchronous Processor API (crate-internal)
 
-Direct, blocking operations on RocksDB. Use when:
-- You need synchronous execution
-- You're already in a sync context
-- You want fine-grained control over transactions
+Direct, blocking operations on RocksDB. `Processor` is `pub(crate)` and not
+accessible from external crates — use the async Writer/Reader API (Style 2)
+for public usage. Shown here for internal reference.
 
 ```rust
-use motlie_db::graph::{Processor, Storage};
+use motlie_db::graph::processor::Processor;
+use motlie_db::graph::Storage;
 use motlie_db::graph::mutation::{AddNode, Mutation};
 use motlie_db::{Id, TimestampMilli};
 use std::sync::Arc;
@@ -147,7 +147,7 @@ AddNode {
 
 // Queries use reader::Runnable trait
 let timeout = Duration::from_secs(5);
-let node = NodeById::new(node_id, None)
+let (name, summary, version) = NodeById::new(node_id, None)
     .run(&reader, timeout)
     .await?;
 ```
@@ -215,10 +215,10 @@ let (id, version) = reply.payload;
 
 | Mutation | Purpose | Key Fields |
 |----------|---------|------------|
-| `AddNode` | Create a new node | `id`, `name`, `summary`, `valid_range?` |
-| `AddEdge` | Create edge between nodes | `source_node_id`, `target_node_id`, `name`, `summary`, `weight?`, `valid_range?` |
-| `AddNodeFragment` | Append timestamped content to node | `id`, `content`, `valid_range?` |
-| `AddEdgeFragment` | Append timestamped content to edge | `src_id`, `dst_id`, `edge_name`, `content`, `valid_range?` |
+| `AddNode` | Create a new node | `id`, `ts_millis`, `name`, `summary`, `valid_range?` |
+| `AddEdge` | Create edge between nodes | `source_node_id`, `target_node_id`, `ts_millis`, `name`, `summary`, `weight?`, `valid_range?` |
+| `AddNodeFragment` | Append timestamped content to node | `id`, `ts_millis`, `content`, `valid_range?` |
+| `AddEdgeFragment` | Append timestamped content to edge | `src_id`, `dst_id`, `edge_name`, `ts_millis`, `content`, `valid_range?` |
 | `UpdateNode` | Update node (active_period and/or summary) | `id`, `expected_version`, `new_active_period?`, `new_summary?` |
 | `UpdateEdge` | Update edge (weight, active_period, and/or summary) | `src_id`, `dst_id`, `name`, `expected_version`, `new_weight?`, `new_active_period?`, `new_summary?` |
 | `DeleteNode` | Tombstone a node | `id`, `expected_version` |
@@ -314,11 +314,11 @@ use std::time::Duration;
 let timeout = Duration::from_secs(5);
 
 // Get current version
-let node = NodeById::new(alice_id, None)
+let (name, _summary, version) = NodeById::new(alice_id, None)
     .run(&reader, timeout)
     .await?;
 
-println!("Name: {}, Version: {}", node.name, node.version);
+println!("Name: {}, Version: {}", name, version);
 ```
 
 ### Read Edges
@@ -331,8 +331,8 @@ let outgoing = OutgoingEdges::new(alice_id, None)
     .run(&reader, timeout)
     .await?;
 
-for edge in outgoing {
-    println!("{} --{}-> {}", edge.src_id, edge.name, edge.dst_id);
+for (_weight, src_id, dst_id, name, _version) in &outgoing {
+    println!("{} --{}-> {}", src_id, name, dst_id);
 }
 
 // Get all incoming edges to Bob
@@ -341,7 +341,7 @@ let incoming = IncomingEdges::new(bob_id, None)
     .await?;
 
 // Get specific edge by topology
-let edge = EdgeSummaryBySrcDstName::new(alice_id, bob_id, "knows".to_string(), None)
+let (summary, weight, version) = EdgeSummaryBySrcDstName::new(alice_id, bob_id, "knows".to_string(), None)
     .run(&reader, timeout)
     .await?;
 ```
@@ -352,11 +352,11 @@ let edge = EdgeSummaryBySrcDstName::new(alice_id, bob_id, "knows".to_string(), N
 use motlie_db::graph::mutation::DeleteNode;
 
 // First, get current version for optimistic locking
-let node = NodeById::new(alice_id, None).run(&reader, timeout).await?;
+let (_name, _summary, version) = NodeById::new(alice_id, None).run(&reader, timeout).await?;
 
 DeleteNode {
     id: alice_id,
-    expected_version: node.version,
+    expected_version: version,
 }
 .run(&writer)
 .await?;
@@ -368,7 +368,7 @@ DeleteNode {
 use motlie_db::graph::mutation::DeleteEdge;
 
 // Get current edge version
-let edge = EdgeSummaryBySrcDstName::new(alice_id, bob_id, "knows".to_string(), None)
+let (_summary, _weight, version) = EdgeSummaryBySrcDstName::new(alice_id, bob_id, "knows".to_string(), None)
     .run(&reader, timeout)
     .await?;
 
@@ -376,7 +376,7 @@ DeleteEdge {
     src_id: alice_id,
     dst_id: bob_id,
     name: "knows".to_string(),
-    expected_version: edge.version,
+    expected_version: version,
 }
 .run(&writer)
 .await?;
@@ -397,11 +397,11 @@ Updates use the `Option<Option<T>>` pattern to distinguish:
 use motlie_db::graph::mutation::UpdateNode;
 use motlie_db::graph::schema::NodeSummary;
 
-let node = NodeById::new(alice_id, None).run(&reader, timeout).await?;
+let (_name, _summary, version) = NodeById::new(alice_id, None).run(&reader, timeout).await?;
 
 UpdateNode {
     id: alice_id,
-    expected_version: node.version,
+    expected_version: version,
     new_active_period: None,  // No change
     new_summary: Some(NodeSummary::from_text("Senior engineer at Acme Corp")),
 }
@@ -416,11 +416,11 @@ use motlie_db::graph::schema::ActivePeriod;
 
 UpdateNode {
     id: alice_id,
-    expected_version: node.version,
-    new_active_period: Some(Some(ActivePeriod {
-        valid_from: Some(TimestampMilli::now()),
-        valid_to: Some(TimestampMilli(1_800_000_000_000)),  // Future date
-    })),
+    expected_version: version,
+    new_active_period: Some(ActivePeriod::active_between(
+        TimestampMilli::now(),
+        TimestampMilli(1_800_000_000_000),  // Future date
+    )),
     new_summary: None,  // No change
 }
 .run(&writer)
@@ -432,7 +432,7 @@ UpdateNode {
 ```rust
 UpdateNode {
     id: alice_id,
-    expected_version: node.version,
+    expected_version: version,
     new_active_period: Some(None),  // Clear the active period
     new_summary: None,
 }
@@ -445,7 +445,7 @@ UpdateNode {
 ```rust
 use motlie_db::graph::mutation::UpdateEdge;
 
-let edge = EdgeSummaryBySrcDstName::new(alice_id, bob_id, "knows".to_string(), None)
+let (_summary, _weight, version) = EdgeSummaryBySrcDstName::new(alice_id, bob_id, "knows".to_string(), None)
     .run(&reader, timeout)
     .await?;
 
@@ -453,7 +453,7 @@ UpdateEdge {
     src_id: alice_id,
     dst_id: bob_id,
     name: "knows".to_string(),
-    expected_version: edge.version,
+    expected_version: version,
     new_weight: Some(Some(0.95)),  // Increase relationship strength
     new_active_period: None,
     new_summary: None,
@@ -469,12 +469,11 @@ UpdateEdge {
     src_id: alice_id,
     dst_id: bob_id,
     name: "knows".to_string(),
-    expected_version: edge.version,
+    expected_version: version,
     new_weight: Some(Some(1.0)),
-    new_active_period: Some(Some(ActivePeriod {
-        valid_from: Some(TimestampMilli::now()),
-        valid_to: None,
-    })),
+    new_active_period: Some(ActivePeriod::active_from(
+        TimestampMilli::now(),
+    )),
     new_summary: Some(EdgeSummary::from_text("Close friends since 2024")),
 }
 .run(&writer)
@@ -491,43 +490,44 @@ Every mutation creates a new version with `ValidSince` timestamp. Time-travel qu
 
 ```rust
 // as_of = None means "current version"
-let node = NodeById::new(alice_id, None)
+let (_name, _summary, version) = NodeById::new(alice_id, None)
     .run(&reader, timeout)
     .await?;
 
-println!("Current version: {}", node.version);
+println!("Current version: {}", version);
 ```
 
 ### Query at Specific Point in Time
 
 ```rust
-// Query state as it was at a specific timestamp
+// Query state as it was at a specific system timestamp
 let historical_timestamp = TimestampMilli(1_700_000_000_000);  // Nov 2023
 
-let node_then = NodeById::new(alice_id, Some(historical_timestamp))
+let (name, _summary, version) = NodeById::as_of(alice_id, historical_timestamp, None)
     .run(&reader, timeout)
     .await?;
 
-println!("Version at {}: {}", historical_timestamp.0, node_then.version);
-println!("Name was: {}", node_then.name);
+println!("Version at {}: {}", historical_timestamp.0, version);
+println!("Name was: {}", name);
 ```
 
 ### Query Historical Edges
 
 ```rust
-let past = Some(TimestampMilli(1_700_000_000_000));
+let past = TimestampMilli(1_700_000_000_000);
 
-// Get edges as they existed at that time
-let outgoing_then = OutgoingEdges::new(alice_id, past)
+// Get edges as they existed at that system time
+let outgoing_then = OutgoingEdges::as_of(alice_id, past, None)
     .run(&reader, timeout)
     .await?;
 
-// Get specific edge at that time
-let edge_then = EdgeSummaryBySrcDstName::new(
+// Get specific edge at that system time
+let (summary_then, weight_then, version_then) = EdgeSummaryBySrcDstName::as_of(
     alice_id,
     bob_id,
     "knows".to_string(),
-    past
+    past,
+    None,
 )
 .run(&reader, timeout)
 .await?;
@@ -539,7 +539,8 @@ Example: A promotion edge is **written now** (system time), but becomes
 **active next week** (business time / ActivePeriod).
 
 ```rust
-use motlie_db::graph::mutation::{AddNode, AddEdge, Runnable};
+use motlie_db::graph::mutation::{AddNode, AddEdge};
+use motlie_db::graph::Runnable;
 use motlie_db::graph::query::{OutgoingEdges, IncomingEdges};
 use motlie_db::graph::schema::{ActivePeriod, EdgeSummary, NodeSummary};
 use motlie_db::{TimestampMilli, Id};
@@ -573,7 +574,7 @@ AddEdge {
     target_node_id: user_id,
     ts_millis: now, // system time of insertion
     name: "promotion".into(),
-    valid_range: Some(ActivePeriod::new(next_week, Some(next_week_end))),
+    valid_range: ActivePeriod::active_between(next_week, next_week_end),
     summary: EdgeSummary::from_text("Promo active next week"),
     weight: None,
 }.run(&writer).await?;
@@ -638,7 +639,8 @@ Example: Update a promotion’s ActivePeriod, query old vs. new periods,
 then roll back by restoring the prior ActivePeriod.
 
 ```rust
-use motlie_db::graph::mutation::{AddEdge, UpdateEdge, RestoreEdge, Runnable};
+use motlie_db::graph::mutation::{AddEdge, UpdateEdge, RestoreEdge};
+use motlie_db::graph::Runnable;
 use motlie_db::graph::query::EdgeSummaryBySrcDstName;
 use motlie_db::graph::schema::{ActivePeriod, EdgeSummary};
 use motlie_db::{TimestampMilli, Id};
@@ -665,7 +667,7 @@ AddEdge {
     target_node_id: user_id,
     ts_millis: now,
     name: edge_name.clone(),
-    valid_range: Some(ActivePeriod::new(week1_start, Some(week1_end))),
+    valid_range: ActivePeriod::active_between(week1_start, week1_end),
     summary: EdgeSummary::from_text("Promo v1"),
     weight: None,
 }.run(&writer).await?;
@@ -680,11 +682,11 @@ let (current_summary, current_weight, current_version) =
     .await?;
 
 UpdateEdge {
-    source_node_id: store_id,
-    target_node_id: user_id,
+    src_id: store_id,
+    dst_id: user_id,
     name: edge_name.clone(),
     expected_version: current_version,
-    new_active_period: Some(Some(ActivePeriod::new(week2_start, Some(week2_end)))),
+    new_active_period: Some(ActivePeriod::active_between(week2_start, week2_end)),
     new_summary: Some(EdgeSummary::from_text("Promo v2")),
     new_weight: None,
 }.run(&writer).await?;
@@ -710,8 +712,8 @@ assert!(v2_summary.decode_string().unwrap().contains("Promo v2"));
 // Rollback: restore to the earlier version (system time = t1)
 // This creates a new current version that matches v1's content/ActivePeriod.
 RestoreEdge {
-    source_node_id: store_id,
-    target_node_id: user_id,
+    src_id: store_id,
+    dst_id: user_id,
     name: edge_name.clone(),
     as_of: t1,
     expected_version: None,
@@ -765,7 +767,7 @@ use motlie_db::graph::mutation::{DeleteEdge, AddEdge};
 // Alice "knows" Bob, but we want to change it to Alice "knows" Charlie
 
 // Step 1: Get current edge version
-let old_edge = EdgeSummaryBySrcDstName::new(
+let (old_summary, old_weight, old_version) = EdgeSummaryBySrcDstName::new(
     alice_id,
     bob_id,
     "knows".to_string(),
@@ -777,7 +779,7 @@ DeleteEdge {
     src_id: alice_id,
     dst_id: bob_id,
     name: "knows".to_string(),
-    expected_version: old_edge.version,
+    expected_version: old_version,
 }
 .run(&writer)
 .await?;
@@ -788,8 +790,8 @@ AddEdge {
     target_node_id: charlie_id,  // New destination
     ts_millis: TimestampMilli::now(),
     name: "knows".to_string(),
-    summary: old_edge.summary.clone(),  // Preserve summary
-    weight: old_edge.weight,            // Preserve weight
+    summary: old_summary.clone(),  // Preserve summary
+    weight: old_weight,            // Preserve weight
     valid_range: None,
 }
 .run(&writer)
@@ -803,7 +805,7 @@ AddEdge {
 let mut txn = writer.transaction()?;
 
 // Read current edge
-let old_edge = txn.read(EdgeSummaryBySrcDstName::new(
+let (old_summary, old_weight, old_version) = txn.read(EdgeSummaryBySrcDstName::new(
     alice_id, bob_id, "knows".to_string(), None
 ))?;
 
@@ -812,7 +814,7 @@ txn.write(DeleteEdge {
     src_id: alice_id,
     dst_id: bob_id,
     name: "knows".to_string(),
-    expected_version: old_edge.version,
+    expected_version: old_version,
 })?;
 
 // Create new
@@ -821,8 +823,8 @@ txn.write(AddEdge {
     target_node_id: charlie_id,
     ts_millis: TimestampMilli::now(),
     name: "knows".to_string(),
-    summary: old_edge.summary,
-    weight: old_edge.weight,
+    summary: old_summary,
+    weight: old_weight,
     valid_range: None,
 })?;
 
@@ -834,7 +836,7 @@ txn.commit()?;
 
 ```rust
 // Similar pattern: delete old name, create new name
-let old_edge = EdgeSummaryBySrcDstName::new(
+let (old_summary, old_weight, old_version) = EdgeSummaryBySrcDstName::new(
     alice_id, bob_id, "knows".to_string(), None
 ).run(&reader, timeout).await?;
 
@@ -843,7 +845,7 @@ DeleteEdge {
     src_id: alice_id,
     dst_id: bob_id,
     name: "knows".to_string(),
-    expected_version: old_edge.version,
+    expected_version: old_version,
 }.run(&writer).await?;
 
 // Create "friends_with"
@@ -852,8 +854,8 @@ AddEdge {
     target_node_id: bob_id,
     ts_millis: TimestampMilli::now(),
     name: "friends_with".to_string(),  // New name
-    summary: old_edge.summary,
-    weight: old_edge.weight,
+    summary: old_summary,
+    weight: old_weight,
     valid_range: None,
 }.run(&writer).await?;
 ```
@@ -879,8 +881,8 @@ RestoreNode {
 .await?;
 
 // The node now has a new (incremented) version with old data
-let restored = NodeById::new(alice_id, None).run(&reader, timeout).await?;
-// restored reflects the latest version (incremented)
+let (_name, _summary, restored_version) = NodeById::new(alice_id, None).run(&reader, timeout).await?;
+// restored_version reflects the latest version (incremented)
 // but data matches what it was at as_of time
 ```
 
@@ -1000,8 +1002,8 @@ txn.write(AddNode {
 })?;
 
 // Read it back (sees uncommitted write)
-let alice = txn.read(NodeById::new(alice_id, None))?;
-assert_eq!(alice.name, "Alice");
+let (name, _summary, _version) = txn.read(NodeById::new(alice_id, None))?;
+assert_eq!(name, "Alice");
 
 // Write an edge
 let bob_id = Id::new();
@@ -1089,12 +1091,12 @@ subsystem.shutdown().await?;
 
 ```rust
 // Two concurrent updates to same node
-let node = NodeById::new(alice_id, None).run(&reader, timeout).await?;
+let (_name, _summary, version) = NodeById::new(alice_id, None).run(&reader, timeout).await?;
 
 // Update 1 succeeds
 UpdateNode {
     id: alice_id,
-    expected_version: node.version,  // version = 1
+    expected_version: version,  // version = 1
     new_summary: Some(NodeSummary::from_text("Update 1")),
     new_active_period: None,
 }.run(&writer).await?;
@@ -1102,7 +1104,7 @@ UpdateNode {
 // Update 2 fails (version mismatch)
 let result = UpdateNode {
     id: alice_id,
-    expected_version: node.version,  // still 1, but current is now 2
+    expected_version: version,  // still 1, but current is now 2
     new_summary: Some(NodeSummary::from_text("Update 2")),
     new_active_period: None,
 }.run(&writer).await;
