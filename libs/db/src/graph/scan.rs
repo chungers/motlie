@@ -31,7 +31,7 @@ use super::schema::{
     SrcId, ActivePeriod, Version,
 };
 use super::Storage;
-use crate::{Id, TimestampMilli};
+use crate::{ActiveTimeMillis, Id, TimestampMilli};
 
 // ============================================================================
 // Name Resolution Helpers
@@ -259,7 +259,7 @@ pub struct AllNodes {
     /// Reference timestamp for temporal validity check.
     /// If Some, only records valid at this time are returned.
     /// If None, all records are returned regardless of temporal validity.
-    pub reference_ts_millis: Option<TimestampMilli>,
+    pub reference_ts_millis: Option<ActiveTimeMillis>,
 }
 
 /// Scan all forward edges with pagination.
@@ -274,7 +274,7 @@ pub struct AllEdges {
     /// Reference timestamp for temporal validity check.
     /// If Some, only records valid at this time are returned.
     /// If None, all records are returned regardless of temporal validity.
-    pub reference_ts_millis: Option<TimestampMilli>,
+    pub reference_ts_millis: Option<ActiveTimeMillis>,
 }
 
 /// Scan all reverse edges with pagination.
@@ -289,7 +289,7 @@ pub struct AllReverseEdges {
     /// Reference timestamp for temporal validity check.
     /// If Some, only records valid at this time are returned.
     /// If None, all records are returned regardless of temporal validity.
-    pub reference_ts_millis: Option<TimestampMilli>,
+    pub reference_ts_millis: Option<ActiveTimeMillis>,
 }
 
 /// Scan all node fragments with pagination.
@@ -304,7 +304,7 @@ pub struct AllNodeFragments {
     /// Reference timestamp for temporal validity check.
     /// If Some, only records valid at this time are returned.
     /// If None, all records are returned regardless of temporal validity.
-    pub reference_ts_millis: Option<TimestampMilli>,
+    pub reference_ts_millis: Option<ActiveTimeMillis>,
 }
 
 /// Scan all edge fragments with pagination.
@@ -319,7 +319,7 @@ pub struct AllEdgeFragments {
     /// Reference timestamp for temporal validity check.
     /// If Some, only records valid at this time are returned.
     /// If None, all records are returned regardless of temporal validity.
-    pub reference_ts_millis: Option<TimestampMilli>,
+    pub reference_ts_millis: Option<ActiveTimeMillis>,
 }
 
 
@@ -335,7 +335,7 @@ fn iterate_and_visit<CF, R, V, F, G>(
     limit: usize,
     skip_cursor: bool,
     reverse: bool,
-    reference_ts_millis: Option<TimestampMilli>,
+    reference_ts_millis: Option<ActiveTimeMillis>,
     cursor_matches: impl Fn(&[u8]) -> bool,
     transform: F,
     get_valid_range: G,
@@ -465,7 +465,7 @@ fn iterate_and_visit_hot<CF, R, V, F, G>(
     limit: usize,
     skip_cursor: bool,
     reverse: bool,
-    reference_ts_millis: Option<TimestampMilli>,
+    reference_ts_millis: Option<ActiveTimeMillis>,
     cursor_matches: impl Fn(&[u8]) -> bool,
     transform: F,
     get_valid_range: G,

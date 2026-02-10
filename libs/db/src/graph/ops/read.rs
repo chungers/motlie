@@ -24,7 +24,7 @@ use super::super::schema::{
     NodeSummary, Version,
 };
 use super::super::summary_hash::SummaryHash;
-use crate::{Id, TimestampMilli};
+use crate::{Id, SystemTimeMillis, TimestampMilli};
 
 // ============================================================================
 // Storage Access Abstraction
@@ -120,7 +120,7 @@ macro_rules! iterate_cf {
 pub(crate) fn find_node_version(
     storage: StorageAccess<'_>,
     node_id: Id,
-    as_of: Option<TimestampMilli>,
+    as_of: Option<SystemTimeMillis>,
 ) -> Result<Option<(Vec<u8>, schema::NodeCfValue)>> {
     let prefix = node_id.into_bytes().to_vec();
 
@@ -359,7 +359,7 @@ pub(crate) fn find_edge_version(
     src_id: Id,
     dst_id: Id,
     name_hash: NameHash,
-    as_of: Option<TimestampMilli>,
+    as_of: Option<SystemTimeMillis>,
 ) -> Result<Option<(Vec<u8>, schema::ForwardEdgeCfValue)>> {
     // Build 40-byte prefix: src_id (16) + dst_id (16) + name_hash (8)
     let mut prefix = Vec::with_capacity(40);
@@ -585,7 +585,7 @@ pub(crate) fn node_by_id(storage: &super::super::Storage, query: &NodeById) -> R
     let params = query;
     tracing::debug!(
         id = %params.id,
-        as_of = ?params.as_of_system_time,
+        as_of = ?params.as_of,
         "Executing NodeById query"
     );
 
@@ -593,20 +593,20 @@ pub(crate) fn node_by_id(storage: &super::super::Storage, query: &NodeById) -> R
     let id = params.id;
 
     let (_key_bytes, value) = if let Ok(db) = storage.db() {
-        find_node_version(StorageAccess::Readonly(db), id, params.as_of_system_time)?
+        find_node_version(StorageAccess::Readonly(db), id, params.as_of)?
     } else {
         let txn_db = storage.transaction_db()?;
-        find_node_version(StorageAccess::Readwrite(txn_db), id, params.as_of_system_time)?
+        find_node_version(StorageAccess::Readwrite(txn_db), id, params.as_of)?
     }
     .ok_or_else(|| {
-        if params.as_of_system_time.is_some() {
-            anyhow::anyhow!("Node {} not found at system time {:?}", id, params.as_of_system_time)
+        if params.as_of.is_some() {
+            anyhow::anyhow!("Node {} not found at system time {:?}", id, params.as_of)
         } else {
             anyhow::anyhow!("Node not found: {}", id)
         }
     })?;
 
-    if params.as_of_system_time.is_none() && value.5 {
+    if params.as_of.is_none() && value.5 {
         return Err(anyhow::anyhow!("Node {} has been deleted", id));
     }
 
@@ -627,7 +627,7 @@ pub(crate) fn nodes_by_ids_multi(
     let params = query;
     tracing::debug!(
         count = params.ids.len(),
-        as_of = ?params.as_of_system_time,
+        as_of = ?params.as_of,
         "Executing NodesByIdsMulti query"
     );
 
@@ -642,10 +642,10 @@ pub(crate) fn nodes_by_ids_multi(
 
     for id in &params.ids {
         let result = if let Ok(db) = storage.db() {
-            find_node_version(StorageAccess::Readonly(db), *id, params.as_of_system_time)
+            find_node_version(StorageAccess::Readonly(db), *id, params.as_of)
         } else {
             let txn_db = storage.transaction_db()?;
-            find_node_version(StorageAccess::Readwrite(txn_db), *id, params.as_of_system_time)
+            find_node_version(StorageAccess::Readwrite(txn_db), *id, params.as_of)
         };
 
         match result {
@@ -838,7 +838,7 @@ pub(crate) fn edge_summary_by_src_dst_name(
         source_id = %params.source_id,
         dest_id = %params.dest_id,
         edge_name = %params.name,
-        as_of = ?params.as_of_system_time,
+        as_of = ?params.as_of,
         "Executing EdgeSummaryBySrcDstName query"
     );
 
@@ -855,7 +855,7 @@ pub(crate) fn edge_summary_by_src_dst_name(
             source_id,
             dest_id,
             name_hash,
-            params.as_of_system_time,
+            params.as_of,
         )?
         .map(|(_, v)| v)
     } else {
@@ -865,16 +865,16 @@ pub(crate) fn edge_summary_by_src_dst_name(
             source_id,
             dest_id,
             name_hash,
-            params.as_of_system_time,
+            params.as_of,
         )?
         .map(|(_, v)| v)
     };
 
     let value = value.ok_or_else(|| {
-        if params.as_of_system_time.is_some() {
+        if params.as_of.is_some() {
             anyhow::anyhow!(
                 "Edge not found at system time {:?}: source={}, dest={}, name={}",
-                params.as_of_system_time,
+                params.as_of,
                 source_id,
                 dest_id,
                 name
@@ -889,7 +889,7 @@ pub(crate) fn edge_summary_by_src_dst_name(
         }
     })?;
 
-    if params.as_of_system_time.is_none() && value.5 {
+    if params.as_of.is_none() && value.5 {
         return Err(anyhow::anyhow!(
             "Edge deleted: source={}, dest={}, name={}",
             source_id,
