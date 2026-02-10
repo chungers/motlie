@@ -17,6 +17,7 @@
 // (claude, 2026-02-07, FIXED: Updated header to reflect VERSIONING OrphanSummaries GC plan - Codex Item 14)
 // (codex, 2026-02-07, decision: header reflects intended design, but OrphanSummaries tracking/worker is not implemented in this module yet.)
 // (claude, 2026-02-09, FIXED: OrphanSummaries GC IS implemented via gc_orphan_summaries_inner(), called from run_cycle_inner() each GC cycle. No separate worker needed — integrated into GraphGarbageCollector.)
+// (codex, 2026-02-10, decision: accept — gc_orphan_summaries_inner is wired via run_cycle_inner() and GC is started by subsystem; remove earlier “not implemented” concern.)
 //!
 //! # What GC Still Handles
 //!
