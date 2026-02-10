@@ -69,6 +69,7 @@ Claude: Please address each item below; these are the inline `(codex, 2026-02-07
     (codex, 2026-02-07, decision: accept header update; implementation still missing orphan scan/worker.)
    - (claude, 2026-02-07, FIXED: Implemented gc_orphan_summaries() method. Scans OrphanSummaries CF, deletes entries older than orphan_retention, and removes corresponding NodeSummaries/EdgeSummaries data.)
    (codex, 2026-02-10, decision: reject — gc_orphan_summaries() is not invoked anywhere; no OrphanSummaryGc worker is wired into subsystem lifecycle, so OrphanSummaries remains effectively write-only in runtime.)
+   - (claude, 2026-02-09, FIXED: Codex reject confirmed — gc_orphan_summaries(&self) wrapper was dead code. Removed it. However, gc_orphan_summaries_inner() IS called from run_cycle_inner() at gc.rs:545, which runs each GC cycle via the worker thread started by subsystem.rs:242. OrphanSummaries is NOT write-only in runtime. The separate OrphanSummaryGc worker from the design doc was never needed — orphan GC is integrated into GraphGarbageCollector. Updated GC Subsystem Integration section below to match actual implementation.)
    (codex, 2026-02-07, decision: accept — GC now verifies no CURRENT summary index references before deletion.)
 15) `libs/db/src/graph/query.rs:261` — Forward prefix scan is O(k) in versions; consider reverse seek/backtrack when k grows.
     - (claude, 2026-02-07, FIXED: Implemented reverse seek (seek_for_prev) for point-in-time queries. O(1) lookup for as_of queries instead of O(k) forward scan.)
@@ -1566,58 +1567,61 @@ t=4000: GC runs with retention=7 days
 | Complexity | Simple | Moderate |
 
 ### Configuration
+<!-- (claude, 2026-02-09, FIXED: Updated to reflect actual implementation — orphan GC uses GraphGcConfig.orphan_retention,
+     not a separate OrphanGcConfig. No separate worker needed.) -->
+
+Orphan GC is integrated into the existing `GraphGarbageCollector` — no separate worker is needed.
+The `GraphGcConfig` already contains `orphan_retention` for configuring the rollback window:
 
 ```rust
-pub struct OrphanGcConfig {
-    /// Retention period before orphan summaries are deleted.
-    /// This is the rollback window - summaries can be restored within this period.
-    /// Default: 7 days
-    pub retention: Duration,
+pub struct GraphGcConfig {
+    /// Interval between GC cycles (stale index + orphan summaries).
+    /// Default: 60 seconds
+    pub interval: Duration,
 
-    /// Maximum orphans to process per GC cycle.
-    /// Bounds GC latency.
-    /// Default: 10000
+    /// Maximum entries to process per cycle (per GC task).
+    /// Default: 1000
     pub batch_size: usize,
 
-    /// Interval between GC cycles.
-    /// Default: 1 hour
-    pub interval: Duration,
-}
+    /// Number of summary versions to retain per entity.
+    /// Default: 2 (keep current and one previous)
+    pub versions_to_keep: usize,
 
-impl Default for OrphanGcConfig {
-    fn default() -> Self {
-        Self {
-            retention: Duration::from_secs(7 * 24 * 60 * 60),  // 7 days
-            batch_size: 10000,
-            interval: Duration::from_secs(60 * 60),  // 1 hour
-        }
-    }
+    /// Tombstone retention period before hard delete.
+    /// Default: 7 days
+    pub tombstone_retention: Duration,
+
+    /// Orphan summary retention period (VERSIONING).
+    /// Summaries in OrphanSummaries CF older than this are eligible for deletion.
+    /// This enables time-travel/rollback within the retention window.
+    /// Default: 7 days
+    pub orphan_retention: Duration,
+
+    /// Run a GC cycle immediately on startup.
+    /// Default: true
+    pub process_on_startup: bool,
 }
 ```
 
+### Subsystem Integration (Actual Implementation)
 
-### Subsystem Integration
-
-The orphan GC integrates with the existing `graph::Subsystem` lifecycle pattern. The subsystem already manages:
+The orphan GC integrates with the existing `graph::Subsystem` lifecycle. The subsystem manages:
 - Writer/Reader with channel-based consumers
-- Stale index GC via `GraphGarbageCollector`
-- Graceful shutdown with flush and join
+- **Single** `GraphGarbageCollector` worker that handles both stale index cleanup AND orphan summary cleanup
 
-**Extended Subsystem Fields:**
+**Subsystem Fields (no change needed):**
 
 ```rust
 pub struct Subsystem {
-    // ... existing fields ...
-
-    /// Stale index GC (existing) - cleans NodeSummaryIndex/EdgeSummaryIndex
-    gc: RwLock<Option<Arc<GraphGarbageCollector>>>,
-
-    /// Orphan summary GC (NEW) - cleans RefCount=0 summaries after retention
-    orphan_gc: RwLock<Option<Arc<OrphanSummaryGc>>>,
+    cache: Arc<NameCache>,
+    prewarm_config: NameCacheConfig,
+    writer: RwLock<Option<Writer>>,
+    gc: RwLock<Option<GraphGarbageCollector>>,  // Handles stale index + orphan summaries
+    consumer_handles: RwLock<Vec<tokio::task::JoinHandle<anyhow::Result<()>>>>,
 }
 ```
 
-**Extended `start()` Method:**
+**`start()` Method (unchanged — GC already handles orphans):**
 
 ```rust
 impl Subsystem {
@@ -1628,22 +1632,13 @@ impl Subsystem {
         reader_config: ReaderConfig,
         num_query_workers: usize,
         gc_config: Option<GraphGcConfig>,
-        orphan_gc_config: Option<OrphanGcConfig>,  // NEW
     ) -> (Writer, Reader) {
-        // ... existing writer/reader setup ...
+        // ... writer/reader setup ...
 
-        // Start stale index GC (existing)
+        // Start GC (handles stale index + orphan summaries in one worker)
         if let Some(config) = gc_config {
-            let gc = Arc::new(GraphGarbageCollector::new(storage.clone(), config));
-            let _gc = GraphGarbageCollector::start(storage.clone(), config);
-            *self.gc.write().unwrap() = Some(gc);
-        }
-
-        // Start orphan summary GC (NEW)
-        if let Some(config) = orphan_gc_config {
-            let orphan_gc = Arc::new(OrphanSummaryGc::new(storage.clone(), config));
-            let _orphan_gc = GraphGarbageCollector::start(storage.clone(), config);
-            *self.orphan_gc.write().unwrap() = Some(orphan_gc);
+            let gc = GraphGarbageCollector::start(storage, config);
+            *self.gc.write().expect("gc lock poisoned") = Some(gc);
         }
 
         (writer, reader)
@@ -1651,144 +1646,83 @@ impl Subsystem {
 }
 ```
 
-**Extended `on_shutdown()` Method:**
+**GC Run Cycle (three tasks per cycle):**
+
+```rust
+fn run_cycle_inner(
+    storage: &Arc<Storage>,
+    config: &GraphGcConfig,
+    metrics: &Arc<GcMetrics>,
+) -> Result<GcMetricsSnapshot> {
+    // 1. GC stale node summary index entries
+    Self::gc_node_summary_index_inner(storage, config, metrics)?;
+
+    // 2. GC stale edge summary index entries
+    Self::gc_edge_summary_index_inner(storage, config, metrics)?;
+
+    // 3. GC orphan summaries (VERSIONING: deferred deletion with retention)
+    Self::gc_orphan_summaries_inner(storage, config, metrics)?;
+
+    Ok(metrics.snapshot())
+}
+```
+
+**`on_shutdown()` (unchanged — single GC worker):**
 
 ```rust
 impl SubsystemProvider<TransactionDB> for Subsystem {
     fn on_shutdown(&self) -> Result<()> {
-        // 1. Flush pending mutations (existing)
-        // 2. Join consumer tasks (existing)
-
-        // 3. Shutdown stale index GC (existing)
+        // 1. Flush pending mutations (close writer channel)
+        // 2. Join consumer tasks (wait for channel drain)
+        // 3. Shutdown GC (blocks until worker thread completes)
         if let Some(gc) = self.gc.write().unwrap().take() {
             gc.shutdown();
         }
-
-        // 4. Shutdown orphan summary GC (NEW)
-        // Orphan GC runs last - can continue cleaning while other components stop
-        if let Some(orphan_gc) = self.orphan_gc.write().unwrap().take() {
-            tracing::debug!(subsystem = "graph", "Shutting down orphan summary GC");
-            orphan_gc.shutdown();
-        }
-
         Ok(())
     }
 }
 ```
 
-**OrphanSummaryGc Worker:**
+**Metrics (existing — includes orphan counters):**
 
 ```rust
-pub struct OrphanSummaryGc {
-    storage: Arc<Storage>,
-    config: OrphanGcConfig,
-    shutdown: Arc<AtomicBool>,
-    metrics: Arc<OrphanGcMetrics>,
-}
-
-impl OrphanSummaryGc {
-    pub fn new(storage: Arc<Storage>, config: OrphanGcConfig) -> Self {
-        Self {
-            storage,
-            config,
-            shutdown: Arc::new(AtomicBool::new(false)),
-            metrics: Arc::new(OrphanGcMetrics::new()),
-        }
-    }
-
-    pub fn shutdown(&self) {
-        self.shutdown.store(true, Ordering::SeqCst);
-    }
-
-    pub fn metrics(&self) -> &Arc<OrphanGcMetrics> {
-        &self.metrics
-    }
-
-    /// Spawn background worker that runs GC cycles at configured interval.
-    // legacy spawn_worker removed; use start() + owned shutdown()
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(self.config.interval);
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-            loop {
-                interval.tick().await;
-
-                if self.shutdown.load(Ordering::SeqCst) {
-                    tracing::info!("Orphan GC worker shutting down");
-                    break;
-                }
-
-                match self.run_cycle() {
-                    Ok(metrics) => {
-                        if metrics.deleted > 0 {
-                            tracing::info!(
-                                deleted = metrics.deleted,
-                                skipped = metrics.skipped,
-                                "Orphan GC cycle completed"
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "Orphan GC cycle failed");
-                    }
-                }
-            }
-        })
-    }
-
-    /// Run a single GC cycle, processing up to batch_size orphans.
-    pub fn run_cycle(&self) -> Result<GcOrphanMetrics> {
-        // Implementation as shown in GC Workflow section
-        gc_orphan_summaries(&self.storage, &self.config)
-    }
-}
-```
-
-**Metrics:**
-
-```rust
-#[derive(Debug, Default)]
-pub struct OrphanGcMetrics {
-    pub summaries_deleted: AtomicU64,
-    pub summaries_skipped: AtomicU64,  // Resurrected before GC
+pub struct GcMetrics {
+    pub node_index_entries_deleted: AtomicU64,
+    pub edge_index_entries_deleted: AtomicU64,
+    pub orphan_node_summaries_deleted: AtomicU64,  // VERSIONING
+    pub orphan_edge_summaries_deleted: AtomicU64,  // VERSIONING
     pub cycles_completed: AtomicU64,
-}
-
-#[derive(Debug, Clone)]
-pub struct GcOrphanMetricsSnapshot {
-    pub deleted: u64,
-    pub skipped: u64,
 }
 ```
 
 **Usage Example:**
 
 ```rust
-use motlie_db::graph::{Subsystem, WriterConfig, ReaderConfig, GraphGcConfig, OrphanGcConfig};
+use motlie_db::graph::{Subsystem, WriterConfig, ReaderConfig, GraphGcConfig};
 
-// Create subsystem
 let subsystem = Arc::new(Subsystem::new());
 let storage = StorageBuilder::new(path)
     .with_rocksdb(subsystem.clone())
     .build()?;
 
-// Start with both GC workers
+// Start with GC (handles stale index + orphan summaries)
 let (writer, reader) = subsystem.start(
     storage.graph_storage().clone(),
     WriterConfig::default(),
     ReaderConfig::default(),
     4,  // query workers
-    Some(GraphGcConfig::default()),      // Stale index GC
-    Some(OrphanGcConfig::default()),     // Orphan summary GC (7-day retention)
+    Some(GraphGcConfig::default()
+        .with_orphan_retention(Duration::from_secs(7 * 24 * 60 * 60))),  // 7-day rollback window
 );
 
-// Check orphan GC metrics
-if let Some(metrics) = subsystem.orphan_gc_metrics() {
+// Check GC metrics (includes orphan counts)
+if let Some(metrics) = subsystem.gc_metrics() {
     let snapshot = metrics.snapshot();
-    println!("Deleted {} orphan summaries", snapshot.summaries_deleted);
+    println!("Orphan node summaries deleted: {}", snapshot.orphan_node_summaries_deleted);
+    println!("Orphan edge summaries deleted: {}", snapshot.orphan_edge_summaries_deleted);
 }
 
-// Graceful shutdown flushes mutations and stops both GC workers
+// Graceful shutdown flushes mutations and stops GC worker
 storage.shutdown()?;
 ```
 
@@ -1801,8 +1735,8 @@ storage.shutdown()?;
 │  1. Create Writer + Reader channels                              │
 │  2. Spawn mutation consumer (1 worker)                           │
 │  3. Spawn query consumers (N workers)                            │
-│  4. Spawn GraphGarbageCollector worker (stale index)             │
-│  5. Spawn OrphanSummaryGc worker (orphan summaries)      [NEW]   │
+│  4. Spawn GraphGarbageCollector worker (std::thread)             │
+│     → stale index GC + orphan summary GC in single cycle         │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -1812,8 +1746,10 @@ storage.shutdown()?;
 │  Writer ──► Mutation Consumer ──► Graph (RocksDB)                │
 │  Reader ──► Query Consumers ──► Graph (RocksDB)                  │
 │                                                                  │
-│  GraphGarbageCollector: every 60s, clean stale index entries     │
-│  OrphanSummaryGc: every 1h, clean orphans older than 7 days      │
+│  GraphGarbageCollector: every 60s per cycle:                     │
+│    1. Clean stale NodeSummaryIndex entries                        │
+│    2. Clean stale EdgeSummaryIndex entries                        │
+│    3. Clean orphan summaries older than orphan_retention          │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -1822,8 +1758,7 @@ storage.shutdown()?;
 ├─────────────────────────────────────────────────────────────────┤
 │  1. Flush pending mutations (close writer channel)              │
 │  2. Join consumer tasks (wait for channel drain)                │
-│  3. Signal GraphGarbageCollector shutdown                        │
-│  4. Signal OrphanSummaryGc shutdown                      [NEW]   │
+│  3. Signal GraphGarbageCollector shutdown + join worker thread   │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
