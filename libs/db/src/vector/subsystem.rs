@@ -15,7 +15,7 @@ use super::async_updater::{AsyncGraphUpdater, AsyncUpdaterConfig};
 use super::cache::NavigationCache;
 use super::gc::{GarbageCollector, GcConfig};
 use super::processor::Processor;
-use super::reader::{create_reader, ReaderConfig, Reader, spawn_consumers_with_processor};
+use super::reader::{create_reader, ReaderConfig, Reader, spawn_consumers};
 use super::registry::EmbeddingRegistry;
 use super::schema::{self, ALL_COLUMN_FAMILIES, EmbeddingSpecs};
 use super::writer::{create_writer, spawn_consumer, Consumer, Writer, WriterConfig};
@@ -304,7 +304,7 @@ impl Subsystem {
 
         // Create and spawn query consumers
         let (reader, query_receiver) = create_reader(reader_config.clone());
-        let query_handles = spawn_consumers_with_processor(
+        let query_handles = spawn_consumers(
             query_receiver,
             reader_config,
             processor,

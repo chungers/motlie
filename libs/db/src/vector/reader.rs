@@ -3,7 +3,7 @@
 //! This module follows the same pattern as graph::reader:
 //! - Reader - handle for sending queries
 //! - ReaderConfig - configuration
-//! - Consumer/ProcessorConsumer - processes queries from channel
+//! - Consumer - processes queries from channel (Processor-backed)
 //! - Spawn functions for creating consumers
 //!
 //! Uses flume for MPMC (multi-producer, multi-consumer) channels,
@@ -18,13 +18,14 @@
 //!                                           │
 //!                                           ▼
 //!                                  ┌────────────────────┐
-//!                                  │ Storage/Processor  │
+//!                                  │     Processor      │
+//!                                  │  (Storage + HNSW)  │
 //!                                  └────────────────────┘
 //! ```
 //!
 //! The Reader sends queries through an MPMC channel. Consumer workers
-//! process queries using Storage (for simple lookups) or ProcessorConsumer
-//! uses Processor (for SearchKNN with HNSW index operations).
+//! process queries using Processor, which provides both Storage access
+//! for simple lookups and HNSW index operations for SearchKNN.
 
 use std::sync::Arc;
 
@@ -32,7 +33,6 @@ use anyhow::{Context, Result};
 
 use super::processor::Processor;
 use super::query::QueryRequest;
-use super::Storage;
 
 // ============================================================================
 // ReaderConfig
@@ -151,123 +151,24 @@ pub(crate) fn create_reader(config: ReaderConfig) -> (Reader, flume::Receiver<Qu
 }
 
 // ============================================================================
-// Consumer
+// Consumer (Processor-backed)
 // ============================================================================
 
 /// Consumer that processes vector queries from a channel.
 ///
 /// Multiple consumers can be spawned to process queries in parallel
 /// thanks to flume's MPMC semantics.
-pub struct Consumer {
-    receiver: flume::Receiver<QueryRequest>,
-    config: ReaderConfig,
-    storage: Arc<Storage>,
-}
-
-impl Consumer {
-    /// Create a new Consumer.
-    pub fn new(
-        receiver: flume::Receiver<QueryRequest>,
-        config: ReaderConfig,
-        storage: Arc<Storage>,
-    ) -> Self {
-        Self {
-            receiver,
-            config,
-            storage,
-        }
-    }
-
-    /// Process queries continuously until the channel is closed.
-    #[tracing::instrument(skip(self), name = "vector_query_consumer")]
-    pub async fn run(self) -> Result<()> {
-        tracing::info!(config = ?self.config, "Starting vector query consumer");
-
-        loop {
-            match self.receiver.recv_async().await {
-                Ok(mut request) => {
-                    self.process_query(&mut request).await;
-                }
-                Err(_) => {
-                    // Channel closed
-                    tracing::info!("Vector query consumer shutting down - channel closed");
-                    return Ok(());
-                }
-            }
-        }
-    }
-
-    /// Process a single query.
-    #[tracing::instrument(skip(self, request), fields(query_type = %request.payload))]
-    async fn process_query(&self, request: &mut QueryRequest) {
-        tracing::debug!(query = %request.payload, "Processing vector query");
-        let result = if let Some(timeout) = request.timeout {
-            match tokio::time::timeout(timeout, request.payload.execute_with_storage(&self.storage)).await
-            {
-                Ok(result) => result,
-                Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", timeout)),
-            }
-        } else {
-            request.payload.execute_with_storage(&self.storage).await
-        };
-        request.respond(result);
-    }
-}
-
-/// Spawn a query consumer as a tokio task.
 ///
-/// Returns a JoinHandle that resolves when the consumer completes.
-pub fn spawn_consumer(consumer: Consumer) -> tokio::task::JoinHandle<Result<()>> {
-    tokio::spawn(async move { consumer.run().await })
-}
-
-/// Spawn multiple query consumers for parallel processing.
-///
-/// This is the recommended way to set up vector query handling,
-/// as it leverages flume's MPMC semantics for work-stealing.
-///
-/// # Arguments
-///
-/// * `receiver` - The flume receiver to clone for each consumer
-/// * `config` - Configuration for each consumer
-/// * `storage` - Shared storage reference
-/// * `count` - Number of consumers to spawn
-///
-/// # Returns
-///
-/// Vector of JoinHandles for all spawned consumers
-pub fn spawn_consumers(
-    receiver: flume::Receiver<QueryRequest>,
-    config: ReaderConfig,
-    storage: Arc<Storage>,
-    count: usize,
-) -> Vec<tokio::task::JoinHandle<Result<()>>> {
-    (0..count)
-        .map(|_| {
-            let consumer = Consumer::new(receiver.clone(), config.clone(), storage.clone());
-            spawn_consumer(consumer)
-        })
-        .collect()
-}
-
-// ============================================================================
-// ProcessorConsumer - Consumer with Processor for SearchKNN support
-// ============================================================================
-
-/// Consumer that processes vector queries with Processor access.
-///
-/// Unlike the basic `Consumer`, this variant holds a `Processor` reference
-/// enabling SearchKNN queries to perform HNSW index operations.
-///
-/// Use this when your query workload includes SearchKNN.
-pub(crate) struct ProcessorConsumer {
+/// The Consumer holds a Processor reference, enabling both simple lookups
+/// (via Storage) and SearchKNN queries (via HNSW index operations).
+pub(crate) struct Consumer {
     receiver: flume::Receiver<QueryRequest>,
     config: ReaderConfig,
     processor: Arc<Processor>,
 }
 
-impl ProcessorConsumer {
-    /// Create a new ProcessorConsumer.
+impl Consumer {
+    /// Create a new Consumer with Processor.
     pub(crate) fn new(
         receiver: flume::Receiver<QueryRequest>,
         config: ReaderConfig,
@@ -281,9 +182,9 @@ impl ProcessorConsumer {
     }
 
     /// Process queries continuously until the channel is closed.
-    #[tracing::instrument(skip(self), name = "vector_query_consumer_with_processor")]
+    #[tracing::instrument(skip(self), name = "vector_query_consumer")]
     pub async fn run(self) -> Result<()> {
-        tracing::info!(config = ?self.config, "Starting vector query consumer (with Processor)");
+        tracing::info!(config = ?self.config, "Starting vector query consumer");
 
         loop {
             match self.receiver.recv_async().await {
@@ -319,29 +220,29 @@ impl ProcessorConsumer {
     }
 }
 
-/// Spawn a Processor-backed query consumer as a tokio task.
-pub(crate) fn spawn_consumer_with_processor(
-    consumer: ProcessorConsumer,
-) -> tokio::task::JoinHandle<Result<()>> {
+/// Spawn a query consumer as a tokio task.
+///
+/// Returns a JoinHandle that resolves when the consumer completes.
+pub(crate) fn spawn_consumer(consumer: Consumer) -> tokio::task::JoinHandle<Result<()>> {
     tokio::spawn(async move { consumer.run().await })
 }
 
-/// Spawn multiple Processor-backed query consumers for parallel processing.
+/// Spawn multiple query consumers for parallel processing.
 ///
-/// This is the recommended way to set up vector query handling when
-/// your workload includes SearchKNN queries.
+/// This is the internal way to set up vector query handling.
+/// For public API, use `spawn_query_consumers_with_storage_autoreg`.
 ///
 /// # Arguments
 ///
 /// * `receiver` - The flume receiver to clone for each consumer
 /// * `config` - Configuration for each consumer
-/// * `processor` - Shared processor reference (includes Storage access)
+/// * `processor` - Shared processor reference (includes Storage + HNSW)
 /// * `count` - Number of consumers to spawn
 ///
 /// # Returns
 ///
 /// Vector of JoinHandles for all spawned consumers
-pub(crate) fn spawn_consumers_with_processor(
+pub(crate) fn spawn_consumers(
     receiver: flume::Receiver<QueryRequest>,
     config: ReaderConfig,
     processor: Arc<Processor>,
@@ -349,14 +250,13 @@ pub(crate) fn spawn_consumers_with_processor(
 ) -> Vec<tokio::task::JoinHandle<Result<()>>> {
     (0..count)
         .map(|_| {
-            let consumer =
-                ProcessorConsumer::new(receiver.clone(), config.clone(), processor.clone());
-            spawn_consumer_with_processor(consumer)
+            let consumer = Consumer::new(receiver.clone(), config.clone(), processor.clone());
+            spawn_consumer(consumer)
         })
         .collect()
 }
 
-/// Spawn multiple Processor-backed query consumers with storage and registry.
+/// Spawn multiple query consumers with storage and registry.
 ///
 /// This is the recommended way to set up query handling - it constructs
 /// the internal Processor automatically, hiding the implementation detail.
@@ -380,7 +280,7 @@ pub fn spawn_query_consumers_with_storage(
     count: usize,
 ) -> Vec<tokio::task::JoinHandle<Result<()>>> {
     let processor = Arc::new(Processor::new(storage, registry));
-    spawn_consumers_with_processor(receiver, config, processor, count)
+    spawn_consumers(receiver, config, processor, count)
 }
 
 /// Spawn multiple query consumers with storage and auto-created registry.
@@ -398,18 +298,13 @@ pub fn spawn_query_consumers_with_storage_autoreg(
 }
 
 // ============================================================================
-// Deprecated Aliases (for backwards compatibility)
-// ============================================================================
-
-// SearchReader alias removed (breaking change): use Reader directly.
-
-// ============================================================================
 // Tests
 // ============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::Storage;
     use tempfile::tempdir;
 
     fn create_test_storage() -> Arc<Storage> {

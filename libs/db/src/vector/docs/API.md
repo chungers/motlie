@@ -2158,31 +2158,28 @@ impl Reader {
 }
 
 pub struct ReaderConfig { pub channel_buffer_size: usize }
-pub struct QueryConsumer { /* receiver, config, storage */ }
-// Recommended: create with storage (auto-creates internal processor)
+
+// Create reader (returns channel receiver for spawning consumers)
 pub fn create_reader_with_storage(config: ReaderConfig) -> (Reader, flume::Receiver<QueryRequest>);
-pub fn spawn_query_consumer(consumer: QueryConsumer) -> tokio::task::JoinHandle<Result<()>>;
-pub fn spawn_query_consumers(
-    receiver: flume::Receiver<Query>,
-    config: ReaderConfig,
-    storage: Arc<Storage>,
-    count: usize,
-) -> Vec<tokio::task::JoinHandle<Result<()>>>;
+
+// Recommended: spawn consumers with storage (auto-creates internal Processor)
 pub fn spawn_query_consumers_with_storage(
-    receiver: flume::Receiver<Query>,
+    receiver: flume::Receiver<QueryRequest>,
     config: ReaderConfig,
     storage: Arc<Storage>,
     registry: Arc<EmbeddingRegistry>,
     count: usize,
 ) -> Vec<tokio::task::JoinHandle<Result<()>>>;
+
+// Convenience: auto-creates registry from storage.cache()
 pub fn spawn_query_consumers_with_storage_autoreg(
-    receiver: flume::Receiver<Query>,
+    receiver: flume::Receiver<QueryRequest>,
     config: ReaderConfig,
     storage: Arc<Storage>,
     count: usize,
 ) -> Vec<tokio::task::JoinHandle<Result<()>>>;
 
-// SearchReader alias removed (breaking change): use Reader directly.
+// Note: Consumer and spawn_consumers are pub(crate) - use the above functions.
 ```
 
 **Runnable helpers:**
