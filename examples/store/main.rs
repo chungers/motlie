@@ -579,6 +579,7 @@ struct ExpectedData {
     edge_fragments: HashMap<(String, String, String), String>, // (source, target, name) -> fragment
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 struct EdgeData {
     source: String,
@@ -895,9 +896,11 @@ fn deserialize_node_id(bytes: &[u8]) -> Result<IdBytes> {
 type NameHashBytes = [u8; 8];
 
 fn deserialize_node_value(bytes: &[u8]) -> Result<(NameHashBytes, String)> {
+    #[allow(dead_code)]
     #[derive(serde::Deserialize)]
     struct ActivePeriod(Option<u64>, Option<u64>);
 
+    #[allow(dead_code)]
     #[derive(serde::Deserialize)]
     struct NodeCfValue(Option<ActivePeriod>, NameHashBytes, NodeSummary);
 
@@ -962,10 +965,13 @@ fn deserialize_forward_edge_key(bytes: &[u8]) -> Result<(IdBytes, IdBytes, NameH
     Ok((src_id_bytes, dst_id_bytes, name_hash))
 }
 
+#[allow(dead_code)]
 fn deserialize_edge_value(bytes: &[u8]) -> Result<String> {
+    #[allow(dead_code)]
     #[derive(serde::Deserialize)]
     struct ActivePeriod(Option<u64>, Option<u64>);
 
+    #[allow(dead_code)]
     #[derive(serde::Deserialize)]
     struct EdgeCfValue(Option<ActivePeriod>, IdBytes, IdBytes, String, EdgeSummary);
 
@@ -994,9 +1000,11 @@ fn deserialize_edge_value(bytes: &[u8]) -> Result<String> {
 }
 
 fn deserialize_fragment_value(bytes: &[u8]) -> Result<String> {
+    #[allow(dead_code)]
     #[derive(serde::Deserialize)]
     struct ActivePeriod(Option<u64>, Option<u64>);
 
+    #[allow(dead_code)]
     #[derive(serde::Deserialize)]
     struct FragmentCfValue(Option<ActivePeriod>, FragmentContent);
 

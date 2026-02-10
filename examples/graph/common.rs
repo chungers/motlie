@@ -25,6 +25,7 @@ pub fn parse_scale_factor(s: &str) -> Result<usize> {
 }
 
 /// Compute hash of a result for correctness comparison
+#[allow(dead_code)]
 pub fn compute_hash<T: Hash>(data: &T) -> String {
     let mut hasher = DefaultHasher::new();
     data.hash(&mut hasher);
@@ -32,6 +33,7 @@ pub fn compute_hash<T: Hash>(data: &T) -> String {
 }
 
 /// Compute hash of f64 result for Dijkstra reference (path, cost_u32) -> consistent f64 hash
+#[allow(dead_code)]
 pub fn compute_hash_f64(data: &Option<(Vec<String>, u32)>) -> String {
     match data {
         Some((path, cost)) => {
@@ -47,6 +49,7 @@ pub fn compute_hash_f64(data: &Option<(Vec<String>, u32)>) -> String {
 }
 
 /// Compute hash of f64 result for Dijkstra motlie (cost, path) -> consistent f64 hash
+#[allow(dead_code)]
 pub fn compute_hash_f64_motlie(data: &Option<(f64, Vec<String>)>) -> String {
     match data {
         Some((cost, path)) => {
@@ -61,6 +64,7 @@ pub fn compute_hash_f64_motlie(data: &Option<(f64, Vec<String>)>) -> String {
 }
 
 /// Compute hash of PageRank results (HashMap<String, f64>)
+#[allow(dead_code)]
 pub fn compute_hash_pagerank(data: &HashMap<String, f64>) -> String {
     // Sort by key for deterministic hashing
     let mut sorted: Vec<_> = data.iter().collect();
@@ -98,6 +102,7 @@ impl Implementation {
     }
 }
 
+#[allow(dead_code)]
 pub struct GraphMetrics {
     pub algorithm_name: String,
     pub implementation: Implementation,
@@ -112,6 +117,7 @@ pub struct GraphMetrics {
 }
 
 impl GraphMetrics {
+    #[allow(dead_code)]
     pub fn print_comparison(motlie: &GraphMetrics, reference: &GraphMetrics) {
         println!("\n{:=<80}", "");
         println!("📊 Performance Comparison: {}", motlie.algorithm_name);
@@ -195,6 +201,7 @@ impl GraphMetrics {
     }
 
     /// Print CSV header
+    #[allow(dead_code)]
     pub fn print_csv_header() {
         println!("algorithm,implementation,scale,nodes,edges,time_ms,memory_kb,result_hash,disk_files,disk_kb");
     }
@@ -287,6 +294,7 @@ pub async fn build_graph(
 }
 
 /// Measure execution time of a closure
+#[allow(dead_code)]
 pub fn measure_time<F, R>(f: F) -> (R, f64)
 where
     F: FnOnce() -> R,
@@ -298,6 +306,7 @@ where
 }
 
 /// Measure execution time of an async closure
+#[allow(dead_code)]
 pub async fn measure_time_async<F, Fut, R>(f: F) -> (R, f64)
 where
     F: FnOnce() -> Fut,
@@ -351,6 +360,7 @@ pub fn get_memory_usage() -> Option<usize> {
 }
 
 /// Measure execution time and memory usage of a closure
+#[allow(dead_code)]
 pub fn measure_time_and_memory<F, R>(f: F) -> (R, f64, Option<usize>)
 where
     F: FnOnce() -> R,
@@ -373,6 +383,7 @@ where
 }
 
 /// Measure execution time and memory usage of an async closure
+#[allow(dead_code)]
 pub async fn measure_time_and_memory_async<F, Fut, R>(f: F) -> (R, f64, Option<usize>)
 where
     F: FnOnce() -> Fut,

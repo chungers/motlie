@@ -407,6 +407,7 @@ fn generate_vectors(rng: &mut ChaCha8Rng, count: usize, dim: usize) -> Vec<Vec<f
 }
 
 /// Benchmark result for a single implementation
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct BenchResult {
     name: String,

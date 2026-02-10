@@ -626,8 +626,8 @@ async fn main() -> Result<()> {
     let num_nodes = nodes.len();
     let num_edges = edges.len();
 
-    let node_ids: Vec<Id> = nodes.iter().map(|n| n.id).collect();
-    let id_to_name: HashMap<Id, String> = nodes.iter().map(|n| (n.id, n.name.clone())).collect();
+    let _node_ids: Vec<Id> = nodes.iter().map(|n| n.id).collect();
+    let _id_to_name: HashMap<Id, String> = nodes.iter().map(|n| (n.id, n.name.clone())).collect();
 
     match implementation {
         Implementation::Reference => {

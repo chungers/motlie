@@ -106,7 +106,7 @@ pub use writer::{
     create_writer,
     spawn_mutation_consumer_with_storage,
     spawn_mutation_consumer_with_storage_autoreg,
-    MutationCacheUpdate, MutationProcessor, Writer, WriterConfig,
+    MutationCacheUpdate, Writer, WriterConfig,
 };
 
 // Query types and infrastructure (following graph::query pattern)
@@ -114,16 +114,16 @@ pub use writer::{
 pub use crate::reader::Runnable;
 pub use query::{
     FindEmbeddings, GetExternalId, GetInternalId, GetVector, ListEmbeddings, Query,
-    QueryExecutor, ResolveIds, SearchKNN,
+    ResolveIds, SearchKNN,
 };
 pub use reader::{
     create_reader_with_storage,
-    spawn_consumer as spawn_query_consumer,
-    spawn_consumers as spawn_query_consumers,
     spawn_query_consumers_with_storage,
     spawn_query_consumers_with_storage_autoreg,
-    Consumer as QueryConsumer, Reader, ReaderConfig,
+    Reader, ReaderConfig,
 };
+// Note: Consumer and spawn_consumers are pub(crate) since they take Processor.
+// Use spawn_query_consumers_with_storage_autoreg for the simplest public setup.
 
 // Subsystem exports for use with rocksdb::Storage<S> and StorageBuilder
 pub use subsystem::{EmbeddingRegistryConfig, Subsystem, VectorBlockCacheConfig};

@@ -15,13 +15,13 @@ use motlie_db::graph::mutation::{AddEdge, AddNode, AddNodeFragment};
 use motlie_db::writer::Runnable as MutationRunnable;
 use motlie_db::graph::query::{NodeById, OutgoingEdges};
 use motlie_db::graph::reader::{
-    create_query_reader, spawn_query_consumer_pool_shared, ReaderConfig,
+    spawn_query_consumers_with_storage, ReaderConfig,
 };
 use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
 use motlie_db::graph::writer::{
     create_mutation_writer, spawn_mutation_consumer_with_next, WriterConfig,
 };
-use motlie_db::graph::{Processor, Storage};
+use motlie_db::graph::Storage;
 use motlie_db::{DataUrl, Id, TimestampMilli};
 use std::sync::Arc;
 use std::time::Duration;
@@ -233,16 +233,11 @@ async fn test_multi_consumer_query_channels() {
     let mut storage = Storage::readwrite(&db_path);
     storage.ready().unwrap();
     let storage = Arc::new(storage);
-    let graph = Arc::new(Processor::new(storage));
-
     let reader_config = ReaderConfig {
         channel_buffer_size: 100,
     };
-    let (graph_reader, graph_query_receiver) = create_query_reader(reader_config.clone());
-
-    // Spawn 2 graph query consumers sharing the same channel
-    let graph_consumer_handles =
-        spawn_query_consumer_pool_shared(graph_query_receiver, graph.clone(), 2);
+    let (graph_reader, graph_consumer_handles) =
+        spawn_query_consumers_with_storage(storage.clone(), reader_config.clone(), 2);
     println!("  Spawned 2 graph query consumers");
 
     // FullText: Create 2 query consumers sharing the same channel
@@ -353,7 +348,7 @@ async fn test_concurrent_mixed_queries() {
     let categories = ["engineering", "science", "business", "design"];
     let mut all_node_ids = Vec::new();
 
-    for (cat_idx, category) in categories.iter().enumerate() {
+    for (_cat_idx, category) in categories.iter().enumerate() {
         for i in 0..5 {
             let node_id = Id::new();
             all_node_ids.push((node_id, category.to_string()));
@@ -403,14 +398,11 @@ async fn test_concurrent_mixed_queries() {
     let mut storage = Storage::readwrite(&db_path);
     storage.ready().unwrap();
     let storage = Arc::new(storage);
-    let graph = Arc::new(Processor::new(storage));
-
     let reader_config = ReaderConfig {
         channel_buffer_size: 100,
     };
-    let (graph_reader, graph_query_receiver) = create_query_reader(reader_config.clone());
-    let graph_consumer_handles =
-        spawn_query_consumer_pool_shared(graph_query_receiver, graph.clone(), 2);
+    let (graph_reader, graph_consumer_handles) =
+        spawn_query_consumers_with_storage(storage.clone(), reader_config.clone(), 2);
 
     let fulltext_reader_config = FulltextReaderConfig {
         channel_buffer_size: 100,
@@ -597,12 +589,14 @@ async fn test_complete_pipeline_architecture() {
     // Graph query consumers (2)
     let mut storage = Storage::readwrite(&db_path);
     storage.ready().unwrap();
-    let graph = Arc::new(Processor::new(Arc::new(storage)));
-
-    let (graph_reader, graph_query_receiver) = create_query_reader(ReaderConfig {
-        channel_buffer_size: 100,
-    });
-    let graph_query_handles = spawn_query_consumer_pool_shared(graph_query_receiver, graph, 2);
+    let storage = Arc::new(storage);
+    let (graph_reader, graph_query_handles) = spawn_query_consumers_with_storage(
+        storage.clone(),
+        ReaderConfig {
+            channel_buffer_size: 100,
+        },
+        2,
+    );
 
     // FullText query consumers (2 - using readonly Index)
     let (fulltext_reader, fulltext_query_receiver) =

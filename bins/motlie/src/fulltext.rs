@@ -5,7 +5,6 @@ use motlie_db::fulltext::{
     Storage as FulltextStorage,
 };
 use motlie_db::graph::mutation::{AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation};
-use motlie_db::graph::writer::Processor;
 use motlie_db::graph::scan::{
     AllEdgeFragments, AllEdges, AllNodeFragments, AllNodes, EdgeFragmentRecord, EdgeRecord,
     NodeFragmentRecord, NodeRecord, Visitable,

@@ -12,6 +12,7 @@ use crate::rocksdb::MutationCodec;
 
 use super::name_hash::NameHash;
 use super::ops;
+use super::processor::Processor;
 use super::schema::{
     self, EdgeFragmentCfKey, EdgeFragmentCfValue, EdgeFragments, NodeFragmentCfKey,
     NodeFragmentCfValue, NodeFragments, Version,
@@ -102,6 +103,29 @@ impl MutationResult {
             MutationResult::DeleteEdge { version } => Ok(version),
             other => Err(anyhow::anyhow!("Unexpected mutation result: {:?}", other)),
         }
+    }
+}
+
+// ============================================================================
+// MutationOutcome (aligned with vector pattern)
+// ============================================================================
+
+/// Outcome of a mutation execution.
+///
+/// This struct aligns with vector's `MutationOutcome` pattern, combining
+/// the result with any deferred cache updates to be applied after commit.
+#[derive(Debug, Clone)]
+pub struct MutationOutcome {
+    /// The mutation result (ID, version, etc.)
+    pub result: MutationResult,
+    // Note: Graph mutations update NameCache inline during execution,
+    // so no deferred cache_update field is needed (unlike vector).
+}
+
+impl MutationOutcome {
+    /// Create an outcome with just a result (no cache update needed).
+    pub fn new(result: MutationResult) -> Self {
+        Self { result }
     }
 }
 
@@ -666,7 +690,7 @@ impl MutationCodec for AddEdgeFragment {
 }
 
 // ============================================================================
-// MutationExecutor Implementations
+// MutationExecutor Implementations (processor-centric, aligned with vector)
 // ============================================================================
 
 impl MutationExecutor for AddNode {
@@ -674,31 +698,14 @@ impl MutationExecutor for AddNode {
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
-    ) -> Result<()> {
-        ops::node::add_node(txn, txn_db, self, None).map(|_| ())
-    }
-
-    fn execute_with_cache(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        cache: &super::name_hash::NameCache,
-    ) -> Result<()> {
-        ops::node::add_node(txn, txn_db, self, Some(cache)).map(|_| ())
-    }
-
-    fn execute_with_cache_and_options(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        cache: &super::name_hash::NameCache,
-        _options: ExecOptions,
-    ) -> Result<MutationResult> {
-        let (node_id, version) = ops::node::add_node(txn, txn_db, self, Some(cache))?;
-        Ok(MutationResult::AddNode {
+        processor: &Processor,
+    ) -> Result<MutationOutcome> {
+        let cache = processor.name_cache();
+        let (node_id, version) = ops::node::add_node(txn, txn_db, self, Some(cache.as_ref()))?;
+        Ok(MutationOutcome::new(MutationResult::AddNode {
             id: node_id,
             version,
-        })
+        }))
     }
 }
 
@@ -707,28 +714,11 @@ impl MutationExecutor for AddEdge {
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
-    ) -> Result<()> {
-        ops::edge::add_edge(txn, txn_db, self, None).map(|_| ())
-    }
-
-    fn execute_with_cache(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        cache: &super::name_hash::NameCache,
-    ) -> Result<()> {
-        ops::edge::add_edge(txn, txn_db, self, Some(cache)).map(|_| ())
-    }
-
-    fn execute_with_cache_and_options(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        cache: &super::name_hash::NameCache,
-        _options: ExecOptions,
-    ) -> Result<MutationResult> {
-        let version = ops::edge::add_edge(txn, txn_db, self, Some(cache))?;
-        Ok(MutationResult::AddEdge { version })
+        processor: &Processor,
+    ) -> Result<MutationOutcome> {
+        let cache = processor.name_cache();
+        let version = ops::edge::add_edge(txn, txn_db, self, Some(cache.as_ref()))?;
+        Ok(MutationOutcome::new(MutationResult::AddEdge { version }))
     }
 }
 
@@ -737,18 +727,10 @@ impl MutationExecutor for AddNodeFragment {
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
-    ) -> Result<()> {
-        ops::fragment::add_node_fragment(txn, txn_db, self)
-    }
-
-    fn execute_with_options(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        _options: ExecOptions,
-    ) -> Result<MutationResult> {
-        self.execute(txn, txn_db)?;
-        Ok(MutationResult::AddNodeFragment)
+        _processor: &Processor,
+    ) -> Result<MutationOutcome> {
+        ops::fragment::add_node_fragment(txn, txn_db, self)?;
+        Ok(MutationOutcome::new(MutationResult::AddNodeFragment))
     }
 }
 
@@ -757,148 +739,82 @@ impl MutationExecutor for AddEdgeFragment {
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
-    ) -> Result<()> {
-        ops::fragment::add_edge_fragment(txn, txn_db, self, None)
-    }
-
-    fn execute_with_cache(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        cache: &super::name_hash::NameCache,
-    ) -> Result<()> {
-        ops::fragment::add_edge_fragment(txn, txn_db, self, Some(cache))
-    }
-
-    fn execute_with_options(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        _options: ExecOptions,
-    ) -> Result<MutationResult> {
-        self.execute(txn, txn_db)?;
-        Ok(MutationResult::AddEdgeFragment)
+        processor: &Processor,
+    ) -> Result<MutationOutcome> {
+        let cache = processor.name_cache();
+        ops::fragment::add_edge_fragment(txn, txn_db, self, Some(cache.as_ref()))?;
+        Ok(MutationOutcome::new(MutationResult::AddEdgeFragment))
     }
 }
 
 impl MutationExecutor for UpdateNode {
-    /// Consolidated node update with optimistic locking.
-    /// Updates any combination of active_period and summary.
     fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
-    ) -> Result<()> {
-        ops::node::update_node(txn, txn_db, self).map(|_| ())
-    }
-
-    fn execute_with_options(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        _options: ExecOptions,
-    ) -> Result<MutationResult> {
+        _processor: &Processor,
+    ) -> Result<MutationOutcome> {
         let (node_id, version) = ops::node::update_node(txn, txn_db, self)?;
-        Ok(MutationResult::UpdateNode {
+        Ok(MutationOutcome::new(MutationResult::UpdateNode {
             id: node_id,
             version,
-        })
+        }))
     }
 }
 
 impl MutationExecutor for UpdateEdge {
-    /// Consolidated edge update with optimistic locking.
-    /// Updates any combination of weight, active_period, and summary.
     fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
-    ) -> Result<()> {
-        ops::edge::update_edge(txn, txn_db, self).map(|_| ())
-    }
-
-    fn execute_with_options(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        _options: ExecOptions,
-    ) -> Result<MutationResult> {
+        _processor: &Processor,
+    ) -> Result<MutationOutcome> {
         let version = ops::edge::update_edge(txn, txn_db, self)?;
-        Ok(MutationResult::UpdateEdge { version })
+        Ok(MutationOutcome::new(MutationResult::UpdateEdge { version }))
     }
 }
 
-
-
 impl MutationExecutor for DeleteNode {
-    /// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
     fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
-    ) -> Result<()> {
-        ops::node::delete_node(txn, txn_db, self)
-    }
-
-    fn execute_with_options(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        _options: ExecOptions,
-    ) -> Result<MutationResult> {
+        _processor: &Processor,
+    ) -> Result<MutationOutcome> {
         ops::node::delete_node(txn, txn_db, self)?;
-        Ok(MutationResult::DeleteNode {
+        Ok(MutationOutcome::new(MutationResult::DeleteNode {
             id: self.id,
             version: self.expected_version + 1,
-        })
+        }))
     }
 }
 
 impl MutationExecutor for DeleteEdge {
-    /// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
     fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
-    ) -> Result<()> {
-        ops::edge::delete_edge(txn, txn_db, self)
-    }
-
-    fn execute_with_options(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        _options: ExecOptions,
-    ) -> Result<MutationResult> {
+        _processor: &Processor,
+    ) -> Result<MutationOutcome> {
         ops::edge::delete_edge(txn, txn_db, self)?;
-        Ok(MutationResult::DeleteEdge {
+        Ok(MutationOutcome::new(MutationResult::DeleteEdge {
             version: self.expected_version + 1,
-        })
+        }))
     }
 }
 
-// (claude, 2026-02-07, FIXED: Added MutationExecutor for RestoreNode/RestoreEdge - Codex Item 1)
-// (claude, 2026-02-07, FIXED: Changed to as_of timestamp lookup per Codex review)
 impl MutationExecutor for RestoreNode {
     fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
-    ) -> Result<()> {
-        ops::node::restore_node(txn, txn_db, self).map(|_| ())
-    }
-
-    fn execute_with_options(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        _options: ExecOptions,
-    ) -> Result<MutationResult> {
+        _processor: &Processor,
+    ) -> Result<MutationOutcome> {
         let (node_id, version) = ops::node::restore_node(txn, txn_db, self)?;
-        Ok(MutationResult::RestoreNode {
+        Ok(MutationOutcome::new(MutationResult::RestoreNode {
             id: node_id,
             version,
-        })
+        }))
     }
 }
 
@@ -907,18 +823,10 @@ impl MutationExecutor for RestoreEdge {
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
-    ) -> Result<()> {
-        ops::edge::restore_edge(txn, txn_db, self).map(|_| ())
-    }
-
-    fn execute_with_options(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        _options: ExecOptions,
-    ) -> Result<MutationResult> {
+        _processor: &Processor,
+    ) -> Result<MutationOutcome> {
         let version = ops::edge::restore_edge(txn, txn_db, self)?;
-        Ok(MutationResult::RestoreEdge { version })
+        Ok(MutationOutcome::new(MutationResult::RestoreEdge { version }))
     }
 }
 
@@ -926,79 +834,27 @@ impl MutationExecutor for RestoreEdge {
 
 impl Mutation {
     /// Execute this mutation directly against storage.
-    /// Delegates to the specific mutation type's executor.
-    pub fn execute(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-    ) -> Result<()> {
-        match self {
-            Mutation::AddNode(m) => m.execute(txn, txn_db),
-            Mutation::AddEdge(m) => m.execute(txn, txn_db),
-            Mutation::AddNodeFragment(m) => m.execute(txn, txn_db),
-            Mutation::AddEdgeFragment(m) => m.execute(txn, txn_db),
-            // CONTENT-ADDRESS: Update/Delete with optimistic locking
-            Mutation::UpdateNode(m) => m.execute(txn, txn_db),
-            Mutation::UpdateEdge(m) => m.execute(txn, txn_db),
-            Mutation::DeleteNode(m) => m.execute(txn, txn_db),
-            Mutation::DeleteEdge(m) => m.execute(txn, txn_db),
-            // (claude, 2026-02-07, FIXED: Added RestoreNode/RestoreEdge dispatch)
-            Mutation::RestoreNode(m) => m.execute(txn, txn_db),
-            Mutation::RestoreEdge(m) => m.execute(txn, txn_db),
-            // Flush is not a storage operation - it's handled by the consumer
-            // for synchronization purposes only
-            Mutation::Flush(_) => Ok(()),
-        }
-    }
-
-    /// Execute this mutation with access to the name cache.
     ///
-    /// Uses the cache to:
-    /// 1. Skip redundant Names CF writes for already-interned names
-    /// 2. Intern new names for future lookups
-    pub fn execute_with_cache(
+    /// Delegates to the specific mutation type's executor, passing the processor
+    /// for access to caches and storage context.
+    pub(crate) fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
-        cache: &super::name_hash::NameCache,
-    ) -> Result<()> {
+        processor: &Processor,
+    ) -> Result<MutationOutcome> {
         match self {
-            Mutation::AddNode(m) => m.execute_with_cache(txn, txn_db, cache),
-            Mutation::AddEdge(m) => m.execute_with_cache(txn, txn_db, cache),
-            Mutation::AddNodeFragment(m) => m.execute(txn, txn_db), // No names
-            Mutation::AddEdgeFragment(m) => m.execute_with_cache(txn, txn_db, cache),
-            // CONTENT-ADDRESS: Update/Delete with optimistic locking (no new names)
-            Mutation::UpdateNode(m) => m.execute(txn, txn_db), // No new names
-            Mutation::UpdateEdge(m) => m.execute(txn, txn_db), // No new names
-            Mutation::DeleteNode(m) => m.execute(txn, txn_db),
-            Mutation::DeleteEdge(m) => m.execute(txn, txn_db),
-            // (claude, 2026-02-07, FIXED: Added RestoreNode/RestoreEdge dispatch)
-            Mutation::RestoreNode(m) => m.execute(txn, txn_db),
-            Mutation::RestoreEdge(m) => m.execute(txn, txn_db),
-            Mutation::Flush(_) => Ok(()),
-        }
-    }
-
-    /// Execute this mutation with access to the name cache and runtime options.
-    pub fn execute_with_cache_and_options(
-        &self,
-        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        txn_db: &rocksdb::TransactionDB,
-        cache: &super::name_hash::NameCache,
-        options: ExecOptions,
-    ) -> Result<MutationResult> {
-        match self {
-            Mutation::AddNode(m) => m.execute_with_cache_and_options(txn, txn_db, cache, options),
-            Mutation::AddEdge(m) => m.execute_with_cache_and_options(txn, txn_db, cache, options),
-            Mutation::AddNodeFragment(m) => m.execute_with_options(txn, txn_db, options),
-            Mutation::AddEdgeFragment(m) => m.execute_with_cache_and_options(txn, txn_db, cache, options),
-            Mutation::UpdateNode(m) => m.execute_with_options(txn, txn_db, options),
-            Mutation::UpdateEdge(m) => m.execute_with_options(txn, txn_db, options),
-            Mutation::DeleteNode(m) => m.execute_with_options(txn, txn_db, options),
-            Mutation::DeleteEdge(m) => m.execute_with_options(txn, txn_db, options),
-            Mutation::RestoreNode(m) => m.execute_with_options(txn, txn_db, options),
-            Mutation::RestoreEdge(m) => m.execute_with_options(txn, txn_db, options),
-            Mutation::Flush(_) => Ok(MutationResult::Flush),
+            Mutation::AddNode(m) => m.execute(txn, txn_db, processor),
+            Mutation::AddEdge(m) => m.execute(txn, txn_db, processor),
+            Mutation::AddNodeFragment(m) => m.execute(txn, txn_db, processor),
+            Mutation::AddEdgeFragment(m) => m.execute(txn, txn_db, processor),
+            Mutation::UpdateNode(m) => m.execute(txn, txn_db, processor),
+            Mutation::UpdateEdge(m) => m.execute(txn, txn_db, processor),
+            Mutation::DeleteNode(m) => m.execute(txn, txn_db, processor),
+            Mutation::DeleteEdge(m) => m.execute(txn, txn_db, processor),
+            Mutation::RestoreNode(m) => m.execute(txn, txn_db, processor),
+            Mutation::RestoreEdge(m) => m.execute(txn, txn_db, processor),
+            Mutation::Flush(_) => Ok(MutationOutcome::new(MutationResult::Flush)),
         }
     }
 
@@ -1297,54 +1153,25 @@ macro_rules! mutations {
 mod tests {
     use super::*;
     use super::super::writer::{
-        spawn_consumer, Consumer, Processor, WriterConfig,
+        spawn_consumer, Consumer, WriterConfig,
     };
+    use super::super::processor::Processor as GraphProcessor;
+    use super::super::Storage;
     use crate::Id;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use tokio::sync::mpsc;
     use tokio::time::Duration;
 
-    // Mock processor for testing
-    struct TestProcessor {
-        delay_ms: u64,
-        processed_count: Arc<AtomicUsize>,
-    }
-
-    impl TestProcessor {
-        fn new(delay_ms: u64) -> Self {
-            Self {
-                delay_ms,
-                processed_count: Arc::new(AtomicUsize::new(0)),
-            }
-        }
-
-        fn with_counter(delay_ms: u64, counter: Arc<AtomicUsize>) -> Self {
-            Self {
-                delay_ms,
-                processed_count: counter,
-            }
-        }
-
-        fn count(&self) -> usize {
-            self.processed_count.load(Ordering::SeqCst)
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl Processor for TestProcessor {
-        async fn process_mutations(&self, mutations: &[Mutation]) -> Result<()> {
-            if self.delay_ms > 0 {
-                tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
-            }
-            self.processed_count
-                .fetch_add(mutations.len(), Ordering::SeqCst);
-            Ok(())
-        }
-    }
-
     #[tokio::test]
-    async fn test_generic_consumer_basic() {
+    async fn test_consumer_basic() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+        let storage = Arc::new(storage);
+        let processor = Arc::new(GraphProcessor::new(storage));
+
         let config = WriterConfig {
             channel_buffer_size: 10,
         };
@@ -1355,10 +1182,7 @@ mod tests {
             (writer, receiver)
         };
 
-        let processor = TestProcessor::new(1);
         let consumer = Consumer::new(receiver, config, processor);
-
-        // Spawn consumer
         let consumer_handle = spawn_consumer(consumer);
 
         // Send a mutation
@@ -1382,49 +1206,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_graph_processor_continues_when_fulltext_slow() {
-        // This test verifies that the graph processor can continue processing mutations
-        // even when the fulltext consumer isn't keeping up and the MPSC buffer is full.
+    async fn test_graph_consumer_continues_when_next_slow() {
+        // This test verifies that the graph consumer can continue processing mutations
+        // even when the next consumer's buffer is full (try_send drops overflows).
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+        let storage = Arc::new(storage);
+        let processor = Arc::new(GraphProcessor::new(storage));
 
         let graph_config = WriterConfig {
             channel_buffer_size: 100,
         };
 
-        let fulltext_config = WriterConfig {
-            channel_buffer_size: 2, // Very small buffer to force overflow
-        };
-
         // Create channels
         let (graph_sender, graph_receiver) = mpsc::channel(graph_config.channel_buffer_size);
-        let (fulltext_sender, fulltext_receiver) =
-            mpsc::channel(fulltext_config.channel_buffer_size);
+        // Very small buffer for next consumer to force overflow
+        let (next_sender, mut next_receiver) = mpsc::channel::<super::super::writer::MutationRequest>(2);
 
         // Create writer
         let writer = super::super::writer::Writer::new(graph_sender);
 
-        // Create graph processor (fast, no delay)
-        let graph_counter = Arc::new(AtomicUsize::new(0));
-        let graph_processor = TestProcessor::with_counter(0, graph_counter.clone());
-
-        // Create fulltext processor (slow, 50ms delay per mutation)
-        let fulltext_counter = Arc::new(AtomicUsize::new(0));
-        let fulltext_processor = TestProcessor::with_counter(50, fulltext_counter.clone());
-
-        // Create consumers
+        // Create graph consumer with chaining
         let graph_consumer = Consumer::with_next(
             graph_receiver,
             graph_config,
-            graph_processor,
-            fulltext_sender,
+            processor,
+            next_sender,
         );
-        let fulltext_consumer =
-            Consumer::new(fulltext_receiver, fulltext_config, fulltext_processor);
 
-        // Spawn consumers
         let graph_handle = spawn_consumer(graph_consumer);
-        let fulltext_handle = spawn_consumer(fulltext_consumer);
 
-        // Send many mutations quickly (more than fulltext buffer can handle)
+        // Spawn a slow consumer on the next channel that sleeps before each recv
+        let next_handle = tokio::spawn(async move {
+            let mut count = 0usize;
+            while let Some(_request) = next_receiver.recv().await {
+                count += 1;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            count
+        });
+
+        // Send many mutations quickly (more than next buffer can handle)
         let num_mutations = 20;
         for i in 0..num_mutations {
             let node_args = AddNode {
@@ -1437,54 +1263,34 @@ mod tests {
             node_args.run(&writer).await.unwrap();
         }
 
-        // Give graph processor time to process all mutations
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Verify that graph processor processed all mutations
-        let graph_processed = graph_counter.load(Ordering::SeqCst);
-        assert_eq!(
-            graph_processed, num_mutations,
-            "Graph processor should have processed all {} mutations, but processed {}",
-            num_mutations, graph_processed
-        );
-
-        // Verify that fulltext processor received fewer mutations (due to buffer overflow)
-        let fulltext_processed = fulltext_counter.load(Ordering::SeqCst);
-        assert!(
-            fulltext_processed < num_mutations,
-            "Fulltext processor should have processed fewer than {} mutations due to buffer overflow, but processed {}",
-            num_mutations, fulltext_processed
-        );
-
-        println!(
-            "Graph processed: {}, Fulltext processed: {}, Dropped: {}",
-            graph_processed,
-            fulltext_processed,
-            graph_processed - fulltext_processed
-        );
+        // Wait for graph consumer to process all mutations
+        writer.flush().await.unwrap();
 
         // Drop writer to close channels
         drop(writer);
 
-        // Wait for graph consumer to finish (should finish quickly)
+        // Wait for graph consumer to finish
         let graph_result = tokio::time::timeout(Duration::from_secs(5), graph_handle).await;
-        assert!(
-            graph_result.is_ok(),
-            "Graph consumer should finish promptly"
-        );
+        assert!(graph_result.is_ok(), "Graph consumer should finish promptly");
         graph_result.unwrap().unwrap().unwrap();
 
-        // Give fulltext consumer some time to finish processing remaining items
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Wait for next consumer to finish
+        let next_result = tokio::time::timeout(Duration::from_secs(5), next_handle).await;
+        assert!(next_result.is_ok(), "Next consumer should finish after channel closed");
+        let next_processed = next_result.unwrap().unwrap();
 
-        // The fulltext consumer will continue running until its channel is closed
-        // Since we dropped the graph consumer's sender to fulltext, the fulltext receiver
-        // channel should now be closed, allowing fulltext consumer to exit
-        let fulltext_result = tokio::time::timeout(Duration::from_secs(5), fulltext_handle).await;
+        // The next consumer should have processed fewer mutations due to buffer overflow
         assert!(
-            fulltext_result.is_ok(),
-            "Fulltext consumer should finish after channel closed"
+            next_processed < num_mutations,
+            "Next consumer should have processed fewer than {} mutations due to buffer overflow, but processed {}",
+            num_mutations, next_processed
         );
-        fulltext_result.unwrap().unwrap().unwrap();
+
+        println!(
+            "Graph processed: {}, Next processed: {}, Dropped: {}",
+            num_mutations,
+            next_processed,
+            num_mutations - next_processed
+        );
     }
 }

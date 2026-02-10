@@ -101,6 +101,11 @@ processor.process_mutations(&mutations)?;
 | `name_cache()` | Access NameCache |
 | `transaction_db()` | Access RocksDB TransactionDB |
 
+**Query execution (direct):**
+
+- `query.execute_on(&processor).await?`
+- `query.execute_with_processor(&processor).await?` (for `Query` enum dispatch)
+
 ### Style 2: Async Writer/Reader API
 
 Channel-based async operations with backpressure. Use when:
@@ -1092,10 +1097,10 @@ assert!(result.is_err());  // VersionMismatch error
 
 | Helper | Purpose |
 |--------|---------|
-| `create_query_reader(config)` | Create reader + receiver channels |
+| `create_reader_with_storage(storage, config)` | Create reader + receiver with shared Processor |
 | `spawn_query_consumer(receiver, config, &db_path)` | Spawn consumer with new storage |
 | `spawn_query_consumers_with_storage(storage, config, count)` | Spawn pool with existing storage |
 | `spawn_query_consumer_with_processor(receiver, config, processor)` | Spawn with shared processor |
-| `spawn_query_consumer_pool_shared(reader, config, processor, count)` | Spawn pool with shared processor |
+| `spawn_query_consumer_pool_shared(receiver, processor, count)` | Spawn pool with shared processor |
 
 ---

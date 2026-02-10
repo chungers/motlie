@@ -54,6 +54,7 @@ struct JaegerTrace {
     spans: Vec<JaegerSpan>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, serde::Deserialize)]
 struct JaegerSpan {
     #[serde(alias = "spanID", alias = "spanId")]
@@ -66,6 +67,7 @@ struct JaegerSpan {
     tags: Vec<JaegerTag>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, serde::Deserialize)]
 struct JaegerTag {
     key: String,

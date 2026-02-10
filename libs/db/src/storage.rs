@@ -281,7 +281,6 @@ impl Storage<ReadOnly> {
         let mut graph_storage = graph::Storage::readonly(&graph_path);
         graph_storage.ready()?;
         let graph_arc = Arc::new(graph_storage);
-        let graph = Arc::new(graph::Processor::new(graph_arc));
 
         // Initialize fulltext storage in read-only mode
         let mut fulltext_storage = fulltext::Storage::readonly(&fulltext_path);
@@ -291,7 +290,7 @@ impl Storage<ReadOnly> {
 
         // Build reader infrastructure
         let (reader, unified_handles, graph_handles, fulltext_handles) =
-            ReaderBuilder::new(graph, fulltext_index)
+            ReaderBuilder::new(graph_arc, fulltext_index)
                 .with_config(config.reader)
                 .with_num_workers(config.num_query_workers)
                 .build();
@@ -350,7 +349,6 @@ impl Storage<ReadWrite> {
         let mut graph_storage = graph::Storage::readwrite(&graph_path);
         graph_storage.ready()?;
         let graph_arc = Arc::new(graph_storage);
-        let graph = Arc::new(graph::Processor::new(graph_arc));
 
         // Initialize fulltext storage in read-write mode
         let mut fulltext_storage = fulltext::Storage::readwrite(&fulltext_path);
@@ -360,7 +358,7 @@ impl Storage<ReadWrite> {
 
         // Build reader infrastructure
         let (reader, unified_handles, graph_handles, fulltext_handles) =
-            ReaderBuilder::new(graph.clone(), fulltext_index.clone())
+            ReaderBuilder::new(graph_arc.clone(), fulltext_index.clone())
                 .with_config(config.reader)
                 .with_num_workers(config.num_query_workers)
                 .build();
@@ -370,7 +368,7 @@ impl Storage<ReadWrite> {
         reader_handles.extend(fulltext_handles);
 
         // Build writer infrastructure
-        let (writer, writer_handles) = WriterBuilder::new(graph, fulltext_index)
+        let (writer, writer_handles) = WriterBuilder::new(graph_arc, fulltext_index)
             .with_config(config.writer)
             .build();
 

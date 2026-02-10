@@ -238,7 +238,7 @@ impl Writer {
 **File:** `libs/db/src/graph/writer.rs` (Consumer section)
 
 ```rust
-impl<P: Processor> Consumer<P> {
+impl Consumer {
     /// Process mutations continuously until the channel is closed.
     #[tracing::instrument(skip(self), name = "mutation_consumer")]
     pub async fn run(mut self) -> Result<()> {
@@ -1515,7 +1515,7 @@ impl Writer {
     }
 }
 
-impl<P: Processor> Consumer<P> {
+impl Consumer {
     async fn process_batch(&self, items: Vec<...>) -> Result<()> {
         let mut regular_items = Vec::new();
         let mut flush_completions = Vec::new();

@@ -215,23 +215,6 @@ pub(crate) trait MutationExecutor: Send + Sync {
 }
 
 // ============================================================================
-// Processor Trait
-// ============================================================================
-
-/// Trait for processing batches of mutations atomically.
-///
-/// Consumers delegate to a MutationProcessor to handle the actual database operations.
-/// This separation allows:
-/// - Different storage backends
-/// - Multiple consumers to process the same mutations
-/// - Testing with mock processors
-#[async_trait::async_trait]
-pub trait MutationProcessor: Send + Sync {
-    /// Process a batch of mutations atomically.
-    async fn process_mutations(&self, mutations: &[Mutation]) -> Result<Vec<MutationResult>>;
-}
-
-// ============================================================================
 // WriterConfig
 // ============================================================================
 

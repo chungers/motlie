@@ -49,8 +49,8 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 
 use super::mutation::{ExecOptions, Mutation};
+use super::processor::Processor;
 use super::writer::MutationRequest;
-use super::name_hash::NameCache;
 use super::query::TransactionQueryExecutor;
 use crate::request::new_request_id;
 
@@ -106,8 +106,8 @@ pub struct Transaction<'a> {
     /// If None, mutations are not forwarded anywhere.
     forward_to: Option<mpsc::Sender<MutationRequest>>,
 
-    /// Name cache for efficient hash-to-name resolution.
-    name_cache: Arc<NameCache>,
+    /// Processor for mutation execution (provides name cache and storage context).
+    processor: Arc<Processor>,
 }
 
 impl<'a> Transaction<'a> {
@@ -118,14 +118,14 @@ impl<'a> Transaction<'a> {
         txn: rocksdb::Transaction<'a, rocksdb::TransactionDB>,
         txn_db: &'a rocksdb::TransactionDB,
         forward_to: Option<mpsc::Sender<MutationRequest>>,
-        name_cache: Arc<NameCache>,
+        processor: Arc<Processor>,
     ) -> Self {
         Self {
             txn: Some(txn),
             txn_db,
             mutations: Vec::new(),
             forward_to,
-            name_cache,
+            processor,
         }
     }
 
@@ -162,9 +162,9 @@ impl<'a> Transaction<'a> {
 
         let mutation = mutation.into();
 
-        // Execute the mutation against the transaction
+        // Execute the mutation against the transaction (processor-centric pattern)
         mutation
-            .execute(txn, self.txn_db)
+            .execute(txn, self.txn_db, &self.processor)
             .with_context(|| format!("Failed to execute mutation in transaction: {:?}", mutation))?;
 
         // Track for forwarding on commit
@@ -213,7 +213,7 @@ impl<'a> Transaction<'a> {
             anyhow::anyhow!("Transaction already finished (committed or rolled back)")
         })?;
 
-        query.execute_in_transaction(txn, self.txn_db, &self.name_cache)
+        query.execute_in_transaction(txn, self.txn_db, self.processor.name_cache().as_ref())
     }
 
     /// Commit all changes atomically (sync).
