@@ -79,6 +79,12 @@ pub type ActiveFrom = TimestampMilli;
 /// Part of the **application time** dimension in the bitemporal model.
 pub type ActiveUntil = TimestampMilli;
 
+/// System time in milliseconds since Unix epoch (ValidSince/ValidUntil).
+pub type SystemTimeMillis = TimestampMilli;
+
+/// Application/business time in milliseconds since Unix epoch (ActivePeriod).
+pub type ActiveTimeMillis = TimestampMilli;
+
 /// Application-time validity period for business entities.
 ///
 /// # Bitemporal Model

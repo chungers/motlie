@@ -28,7 +28,7 @@ use super::HotColumnFamilyRecord;
 use super::{ColumnFamily, ColumnFamilySerde};
 use crate::reader::Runnable;
 use crate::request::{new_request_id, RequestMeta};
-use crate::{Id, TimestampMilli};
+use crate::{ActiveTimeMillis, Id, SystemTimeMillis, TimestampMilli};
 use super::schema::{
     self, DstId, EdgeName, EdgeSummary, EdgeWeight, FragmentContent, NodeName, NodeSummary, SrcId,
     Version,
@@ -286,7 +286,7 @@ impl_request_meta!(EdgesBySummaryHash, Vec<EdgeSummaryLookupResult>, "edges_by_s
 /// # Time Dimensions
 ///
 /// The graph supports two orthogonal time dimensions:
-/// - **System time** (`as_of_system_time`): When versions were created/superseded (ValidSince/ValidUntil)
+/// - **System time** (`as_of`): When versions were created/superseded (ValidSince/ValidUntil)
 /// - **Application time** (`reference_ts_millis`): Business validity (ActivePeriod)
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodeById {
@@ -296,12 +296,12 @@ pub struct NodeById {
     /// Reference timestamp for ActivePeriod (application/business time) validity checks.
     /// If None, defaults to current time in the query executor.
     /// Records without an ActivePeriod (None) are considered always valid.
-    pub reference_ts_millis: Option<TimestampMilli>,
+    pub reference_ts_millis: Option<ActiveTimeMillis>,
 
     /// Point-in-time query for system time (ValidSince/ValidUntil).
     /// If None, returns the current version (ValidUntil = None).
     /// If Some(ts), returns the version that was valid at that system time.
-    pub as_of_system_time: Option<TimestampMilli>,
+    pub as_of: Option<SystemTimeMillis>,
 }
 
 
@@ -326,11 +326,11 @@ pub struct NodesByIdsMulti {
 
     /// Reference timestamp for ActivePeriod (application time) validity checks.
     /// If None, defaults to current time in the query executor.
-    pub reference_ts_millis: Option<TimestampMilli>,
+    pub reference_ts_millis: Option<ActiveTimeMillis>,
 
     /// Point-in-time query for system time (ValidSince/ValidUntil).
     /// If None, returns the current version. If Some(ts), returns versions valid at that time.
-    pub as_of_system_time: Option<TimestampMilli>,
+    pub as_of: Option<SystemTimeMillis>,
 }
 
 
@@ -350,7 +350,7 @@ pub struct NodeFragmentsByIdTimeRange {
 
     /// Reference timestamp for temporal validity checks
     /// If None, defaults to current time in the query executor
-    pub reference_ts_millis: Option<TimestampMilli>,
+    pub reference_ts_millis: Option<ActiveTimeMillis>,
 }
 
 
@@ -376,7 +376,7 @@ pub struct EdgeFragmentsByIdTimeRange {
 
     /// Reference timestamp for temporal validity checks
     /// If None, defaults to current time in the query executor
-    pub reference_ts_millis: Option<TimestampMilli>,
+    pub reference_ts_millis: Option<ActiveTimeMillis>,
 }
 
 
@@ -398,11 +398,11 @@ pub struct EdgeSummaryBySrcDstName {
 
     /// Reference timestamp for ActivePeriod (application time) validity checks.
     /// If None, defaults to current time in the query executor.
-    pub reference_ts_millis: Option<TimestampMilli>,
+    pub reference_ts_millis: Option<ActiveTimeMillis>,
 
     /// Point-in-time query for system time (ValidSince/ValidUntil).
     /// If None, returns current version. If Some(ts), returns version valid at that time.
-    pub as_of_system_time: Option<TimestampMilli>,
+    pub as_of: Option<SystemTimeMillis>,
 }
 
 
@@ -433,11 +433,11 @@ pub struct OutgoingEdges {
     /// Reference timestamp for ActivePeriod (application time) validity checks.
     /// If None, defaults to current time in the query executor.
     /// Records without an ActivePeriod (None) are considered always valid.
-    pub reference_ts_millis: Option<TimestampMilli>,
+    pub reference_ts_millis: Option<ActiveTimeMillis>,
 
     /// Point-in-time query for system time (ValidSince/ValidUntil).
     /// If None, returns current versions. If Some(ts), returns versions valid at that time.
-    pub as_of_system_time: Option<TimestampMilli>,
+    pub as_of: Option<SystemTimeMillis>,
 }
 
 
@@ -455,11 +455,11 @@ pub struct IncomingEdges {
     /// Reference timestamp for ActivePeriod (application time) validity checks.
     /// If None, defaults to current time in the query executor.
     /// Records without an ActivePeriod (None) are considered always valid.
-    pub reference_ts_millis: Option<TimestampMilli>,
+    pub reference_ts_millis: Option<ActiveTimeMillis>,
 
     /// Point-in-time query for system time (ValidSince/ValidUntil).
     /// If None, returns current versions. If Some(ts), returns versions valid at that time.
-    pub as_of_system_time: Option<TimestampMilli>,
+    pub as_of: Option<SystemTimeMillis>,
 }
 
 
@@ -494,7 +494,7 @@ pub struct AllNodes {
 
     /// Reference timestamp for temporal validity checks
     /// If None, defaults to current time in the query executor
-    pub reference_ts_millis: Option<TimestampMilli>,
+    pub reference_ts_millis: Option<ActiveTimeMillis>,
 }
 
 
@@ -529,26 +529,26 @@ pub struct AllEdges {
 
     /// Reference timestamp for temporal validity checks
     /// If None, defaults to current time in the query executor
-    pub reference_ts_millis: Option<TimestampMilli>,
+    pub reference_ts_millis: Option<ActiveTimeMillis>,
 }
 
 
 impl NodeById {
     /// Create a new query request for the current version.
-    pub fn new(id: Id, reference_ts_millis: Option<TimestampMilli>) -> Self {
+    pub fn new(id: Id, reference_ts_millis: Option<ActiveTimeMillis>) -> Self {
         Self {
             id,
             reference_ts_millis,
-            as_of_system_time: None,
+            as_of: None,
         }
     }
 
     /// Create a point-in-time query at a specific system time.
-    pub fn as_of(id: Id, system_time: TimestampMilli, reference_ts_millis: Option<TimestampMilli>) -> Self {
+    pub fn as_of(id: Id, system_time: SystemTimeMillis, reference_ts_millis: Option<ActiveTimeMillis>) -> Self {
         Self {
             id,
             reference_ts_millis,
-            as_of_system_time: Some(system_time),
+            as_of: Some(system_time),
         }
     }
 }
@@ -562,20 +562,20 @@ impl NodeById {
 
 impl NodesByIdsMulti {
     /// Create a new batch query request for current versions.
-    pub fn new(ids: Vec<Id>, reference_ts_millis: Option<TimestampMilli>) -> Self {
+    pub fn new(ids: Vec<Id>, reference_ts_millis: Option<ActiveTimeMillis>) -> Self {
         Self {
             ids,
             reference_ts_millis,
-            as_of_system_time: None,
+            as_of: None,
         }
     }
 
     /// Create a point-in-time batch query at a specific system time.
-    pub fn as_of(ids: Vec<Id>, system_time: TimestampMilli, reference_ts_millis: Option<TimestampMilli>) -> Self {
+    pub fn as_of(ids: Vec<Id>, system_time: SystemTimeMillis, reference_ts_millis: Option<ActiveTimeMillis>) -> Self {
         Self {
             ids,
             reference_ts_millis,
-            as_of_system_time: Some(system_time),
+            as_of: Some(system_time),
         }
     }
 }
@@ -585,7 +585,7 @@ impl NodeFragmentsByIdTimeRange {
     pub fn new(
         id: Id,
         time_range: (Bound<TimestampMilli>, Bound<TimestampMilli>),
-        reference_ts_millis: Option<TimestampMilli>,
+        reference_ts_millis: Option<ActiveTimeMillis>,
     ) -> Self {
         Self {
             id,
@@ -612,7 +612,7 @@ impl EdgeFragmentsByIdTimeRange {
         dest_id: DstId,
         edge_name: EdgeName,
         time_range: (Bound<TimestampMilli>, Bound<TimestampMilli>),
-        reference_ts_millis: Option<TimestampMilli>,
+        reference_ts_millis: Option<ActiveTimeMillis>,
     ) -> Self {
         Self {
             source_id,
@@ -635,14 +635,14 @@ impl EdgeSummaryBySrcDstName {
         source_id: SrcId,
         dest_id: DstId,
         name: String,
-        reference_ts_millis: Option<TimestampMilli>,
+        reference_ts_millis: Option<ActiveTimeMillis>,
     ) -> Self {
         Self {
             source_id,
             dest_id,
             name,
             reference_ts_millis,
-            as_of_system_time: None,
+            as_of: None,
         }
     }
 
@@ -651,15 +651,15 @@ impl EdgeSummaryBySrcDstName {
         source_id: SrcId,
         dest_id: DstId,
         name: String,
-        system_time: TimestampMilli,
-        reference_ts_millis: Option<TimestampMilli>,
+        system_time: SystemTimeMillis,
+        reference_ts_millis: Option<ActiveTimeMillis>,
     ) -> Self {
         Self {
             source_id,
             dest_id,
             name,
             reference_ts_millis,
-            as_of_system_time: Some(system_time),
+            as_of: Some(system_time),
         }
     }
 }
@@ -673,20 +673,20 @@ impl EdgeSummaryBySrcDstName {
 
 impl OutgoingEdges {
     /// Create a new query request for current versions.
-    pub fn new(id: Id, reference_ts_millis: Option<TimestampMilli>) -> Self {
+    pub fn new(id: Id, reference_ts_millis: Option<ActiveTimeMillis>) -> Self {
         Self {
             id,
             reference_ts_millis,
-            as_of_system_time: None,
+            as_of: None,
         }
     }
 
     /// Create a point-in-time query at a specific system time.
-    pub fn as_of(id: Id, system_time: TimestampMilli, reference_ts_millis: Option<TimestampMilli>) -> Self {
+    pub fn as_of(id: Id, system_time: SystemTimeMillis, reference_ts_millis: Option<ActiveTimeMillis>) -> Self {
         Self {
             id,
             reference_ts_millis,
-            as_of_system_time: Some(system_time),
+            as_of: Some(system_time),
         }
     }
 
@@ -698,20 +698,20 @@ impl OutgoingEdges {
 
 impl IncomingEdges {
     /// Create a new query request for current versions.
-    pub fn new(id: DstId, reference_ts_millis: Option<TimestampMilli>) -> Self {
+    pub fn new(id: DstId, reference_ts_millis: Option<ActiveTimeMillis>) -> Self {
         Self {
             id,
             reference_ts_millis,
-            as_of_system_time: None,
+            as_of: None,
         }
     }
 
     /// Create a point-in-time query at a specific system time.
-    pub fn as_of(id: DstId, system_time: TimestampMilli, reference_ts_millis: Option<TimestampMilli>) -> Self {
+    pub fn as_of(id: DstId, system_time: SystemTimeMillis, reference_ts_millis: Option<ActiveTimeMillis>) -> Self {
         Self {
             id,
             reference_ts_millis,
-            as_of_system_time: Some(system_time),
+            as_of: Some(system_time),
         }
     }
 

@@ -2026,12 +2026,14 @@ Q3: "Show all schedule changes" (audit)
 
 **Assessment of current API support (system time + business time):**
 
-- **Point-in-time (system time)**: ✅ Supported via `as_of_system_time` on query types like `NodeById`, `NodesByIdsMulti`, `EdgeSummaryBySrcDstName`, `OutgoingEdges`, and `IncomingEdges`.  
-  - **Current version** is the default (`as_of_system_time: None`).
+- **Point-in-time (system time)**: ✅ Supported via `as_of` on query types like `NodeById`, `NodesByIdsMulti`, `EdgeSummaryBySrcDstName`, `OutgoingEdges`, and `IncomingEdges`.  
+  - **Current version** is the default (`as_of: None`).
   - `as_of(...)` constructors provide a convenient wrapper for historical lookup.
+  - Uses `SystemTimeMillis` (type alias of `TimestampMilli`).
 
 - **Business time (ActivePeriod)**: ✅ Supported via `reference_ts_millis` on the same query types.  
   - Records with `ActivePeriod = None` are treated as always valid.
+  - Uses `ActiveTimeMillis` (type alias of `TimestampMilli`).
 
 **Gaps (not currently supported by public API):**
 
