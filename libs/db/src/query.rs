@@ -401,22 +401,23 @@ pub type QueryRequest = RequestEnvelope<Query>;
 
 impl Query {
     pub async fn execute(&self, storage: &super::reader::CompositeStorage) -> Result<QueryResult> {
+        let processor = storage.graph.as_ref();
         match self {
             Query::Nodes(q) => execute_nodes_query(q, storage).await.map(QueryResult::Nodes),
             Query::Edges(q) => execute_edges_query(q, storage).await.map(QueryResult::Edges),
-            Query::NodeById(q) => q.execute(storage.graph.storage().as_ref()).await.map(QueryResult::NodeById),
+            Query::NodeById(q) => q.execute(processor).await.map(QueryResult::NodeById),
             Query::NodesByIdsMulti(q) => {
-                q.execute(storage.graph.storage().as_ref()).await.map(QueryResult::NodesByIdsMulti)
+                q.execute(processor).await.map(QueryResult::NodesByIdsMulti)
             }
             Query::OutgoingEdges(q) => {
-                q.execute(storage.graph.storage().as_ref()).await.map(QueryResult::OutgoingEdges)
+                q.execute(processor).await.map(QueryResult::OutgoingEdges)
             }
             Query::IncomingEdges(q) => {
-                q.execute(storage.graph.storage().as_ref()).await.map(QueryResult::IncomingEdges)
+                q.execute(processor).await.map(QueryResult::IncomingEdges)
             }
             Query::EdgeDetails(q) => {
                 let (summary, weight, version) =
-                    q.execute(storage.graph.storage().as_ref()).await?;
+                    q.execute(processor).await?;
                 Ok(QueryResult::EdgeDetails((
                     weight,
                     q.source_id,
@@ -427,13 +428,13 @@ impl Query {
                 )))
             }
             Query::NodeFragments(q) => {
-                q.execute(storage.graph.storage().as_ref()).await.map(QueryResult::NodeFragments)
+                q.execute(processor).await.map(QueryResult::NodeFragments)
             }
             Query::EdgeFragments(q) => {
-                q.execute(storage.graph.storage().as_ref()).await.map(QueryResult::EdgeFragments)
+                q.execute(processor).await.map(QueryResult::EdgeFragments)
             }
-            Query::AllNodes(q) => q.execute(storage.graph.storage().as_ref()).await.map(QueryResult::AllNodes),
-            Query::AllEdges(q) => q.execute(storage.graph.storage().as_ref()).await.map(QueryResult::AllEdges),
+            Query::AllNodes(q) => q.execute(processor).await.map(QueryResult::AllNodes),
+            Query::AllEdges(q) => q.execute(processor).await.map(QueryResult::AllEdges),
         }
     }
 }

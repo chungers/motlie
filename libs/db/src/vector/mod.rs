@@ -106,7 +106,7 @@ pub use writer::{
     create_writer,
     spawn_mutation_consumer_with_storage,
     spawn_mutation_consumer_with_storage_autoreg,
-    MutationCacheUpdate, MutationProcessor, Writer, WriterConfig,
+    MutationCacheUpdate, Writer, WriterConfig,
 };
 
 // Query types and infrastructure (following graph::query pattern)
