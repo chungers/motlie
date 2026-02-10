@@ -10,6 +10,7 @@ use crate::graph::writer::{
 };
 use crate::{Id, ActivePeriod, TimestampMilli};
 use rocksdb::DB;
+use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
@@ -1370,14 +1371,18 @@ use tokio::time::Duration;
     #[test]
     fn test_add_node_with_no_summary_and_query() {
         use crate::graph::mutation::AddNode;
+        use crate::graph::processor::Processor;
         use crate::graph::query::{NodeById, TransactionQueryExecutor};
         use crate::graph::writer::MutationExecutor;
         use crate::graph::Storage;
         use crate::{DataUrl, Id, TimestampMilli};
+        use std::sync::Arc;
 
         let temp_dir = tempfile::tempdir().unwrap();
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().unwrap();
+        let storage = Arc::new(storage);
+        let processor = Processor::new(storage.clone());
 
         // Create a node with an empty summary
         let node_id = Id::new();
@@ -1395,7 +1400,7 @@ use tokio::time::Duration;
         let txn_db = storage.transaction_db().unwrap();
         let txn = txn_db.transaction();
 
-        add_node.execute(&txn, txn_db).unwrap();
+        add_node.execute(&txn, txn_db, &processor).unwrap();
 
         // Query the node back using transaction executor
         let query = NodeById::new(node_id, None);
@@ -1413,14 +1418,18 @@ use tokio::time::Duration;
     #[test]
     fn test_add_edge_with_no_summary_and_query() {
         use crate::graph::mutation::{AddEdge, AddNode};
+        use crate::graph::processor::Processor;
         use crate::graph::query::{EdgeSummaryBySrcDstName, TransactionQueryExecutor};
         use crate::graph::writer::MutationExecutor;
         use crate::graph::Storage;
         use crate::{DataUrl, Id, TimestampMilli};
+        use std::sync::Arc;
 
         let temp_dir = tempfile::tempdir().unwrap();
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().unwrap();
+        let storage = Arc::new(storage);
+        let processor = Processor::new(storage.clone());
 
         // Create source and destination nodes first
         let src_id = Id::new();
@@ -1458,9 +1467,9 @@ use tokio::time::Duration;
         let txn_db = storage.transaction_db().unwrap();
         let txn = txn_db.transaction();
 
-        add_src.execute(&txn, txn_db).unwrap();
-        add_dst.execute(&txn, txn_db).unwrap();
-        add_edge.execute(&txn, txn_db).unwrap();
+        add_src.execute(&txn, txn_db, &processor).unwrap();
+        add_dst.execute(&txn, txn_db, &processor).unwrap();
+        add_edge.execute(&txn, txn_db, &processor).unwrap();
 
         // Query the edge back using transaction executor
         let query = EdgeSummaryBySrcDstName::new(src_id, dst_id, "CONNECTS".to_string(), None);
@@ -1477,14 +1486,18 @@ use tokio::time::Duration;
     #[test]
     fn test_add_node_with_summary_and_query() {
         use crate::graph::mutation::AddNode;
+        use crate::graph::processor::Processor;
         use crate::graph::query::{NodeById, TransactionQueryExecutor};
         use crate::graph::writer::MutationExecutor;
         use crate::graph::Storage;
         use crate::{DataUrl, Id, TimestampMilli};
+        use std::sync::Arc;
 
         let temp_dir = tempfile::tempdir().unwrap();
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().unwrap();
+        let storage = Arc::new(storage);
+        let processor = Processor::new(storage.clone());
 
         // Create a node with a non-empty summary
         let node_id = Id::new();
@@ -1503,7 +1516,7 @@ use tokio::time::Duration;
         let txn_db = storage.transaction_db().unwrap();
         let txn = txn_db.transaction();
 
-        add_node.execute(&txn, txn_db).unwrap();
+        add_node.execute(&txn, txn_db, &processor).unwrap();
 
         // Query the node back using transaction executor
         let query = NodeById::new(node_id, None);
@@ -1522,14 +1535,18 @@ use tokio::time::Duration;
     #[test]
     fn test_add_edge_with_summary_and_query() {
         use crate::graph::mutation::{AddEdge, AddNode};
+        use crate::graph::processor::Processor;
         use crate::graph::query::{EdgeSummaryBySrcDstName, TransactionQueryExecutor};
         use crate::graph::writer::MutationExecutor;
         use crate::graph::Storage;
         use crate::{DataUrl, Id, TimestampMilli};
+        use std::sync::Arc;
 
         let temp_dir = tempfile::tempdir().unwrap();
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().unwrap();
+        let storage = Arc::new(storage);
+        let processor = Processor::new(storage.clone());
 
         // Create source and destination nodes first
         let src_id = Id::new();
@@ -1568,9 +1585,9 @@ use tokio::time::Duration;
         let txn_db = storage.transaction_db().unwrap();
         let txn = txn_db.transaction();
 
-        add_src.execute(&txn, txn_db).unwrap();
-        add_dst.execute(&txn, txn_db).unwrap();
-        add_edge.execute(&txn, txn_db).unwrap();
+        add_src.execute(&txn, txn_db, &processor).unwrap();
+        add_dst.execute(&txn, txn_db, &processor).unwrap();
+        add_edge.execute(&txn, txn_db, &processor).unwrap();
 
         // Query the edge back using transaction executor
         let query = EdgeSummaryBySrcDstName::new(src_id, dst_id, "STRONG_LINK".to_string(), None);
@@ -1589,15 +1606,19 @@ use tokio::time::Duration;
     #[test]
     fn test_summary_deduplication() {
         use crate::graph::mutation::AddNode;
+        use crate::graph::processor::Processor;
         use crate::graph::query::{NodeById, TransactionQueryExecutor};
         use crate::graph::writer::MutationExecutor;
         use crate::graph::Storage;
         use crate::graph::SummaryHash;
         use crate::{DataUrl, Id, TimestampMilli};
+        use std::sync::Arc;
 
         let temp_dir = tempfile::tempdir().unwrap();
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().unwrap();
+        let storage = Arc::new(storage);
+        let processor = Processor::new(storage.clone());
 
         // Create two nodes with the SAME summary content
         let shared_summary = DataUrl::from_markdown("This is a shared summary.");
@@ -1624,8 +1645,8 @@ use tokio::time::Duration;
         let txn_db = storage.transaction_db().unwrap();
         let txn = txn_db.transaction();
 
-        add_node1.execute(&txn, txn_db).unwrap();
-        add_node2.execute(&txn, txn_db).unwrap();
+        add_node1.execute(&txn, txn_db, &processor).unwrap();
+        add_node2.execute(&txn, txn_db, &processor).unwrap();
 
         // Both nodes should return the same summary content
         let query1 = NodeById::new(node1_id, None);
@@ -1660,6 +1681,7 @@ use tokio::time::Duration;
     #[test]
     fn test_summary_sharing_and_update() {
         use crate::graph::mutation::AddNode;
+        use crate::graph::processor::Processor;
         use crate::graph::schema::{
             NodeCfKey, NodeCfValue, NodeSummaries, NodeSummaryCfKey, NodeSummaryCfValue, Nodes,
         };
@@ -1668,10 +1690,13 @@ use tokio::time::Duration;
         use crate::graph::Storage;
         use crate::graph::SummaryHash;
         use crate::{DataUrl, Id, TimestampMilli};
+        use std::sync::Arc;
 
         let temp_dir = tempfile::tempdir().unwrap();
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().unwrap();
+        let storage = Arc::new(storage);
+        let processor = Processor::new(storage.clone());
 
         // Create two nodes with the SAME summary content
         let shared_summary = DataUrl::from_markdown("This is a shared summary for testing.");
@@ -1698,8 +1723,8 @@ use tokio::time::Duration;
         let txn_db = storage.transaction_db().unwrap();
         let txn = txn_db.transaction();
 
-        add_node1.execute(&txn, txn_db).unwrap();
-        add_node2.execute(&txn, txn_db).unwrap();
+        add_node1.execute(&txn, txn_db, &processor).unwrap();
+        add_node2.execute(&txn, txn_db, &processor).unwrap();
         txn.commit().unwrap();
 
         // ========================================================================
@@ -3243,10 +3268,11 @@ mod versioning_tests {
         // Now query at different points in time
         let mut storage = Storage::readwrite(&db_path);
         storage.ready().unwrap();
+        let processor = Processor::new(Arc::new(storage));
 
         // Query current version (should be v3)
         let current_query = NodeById::new(node_id, None);
-        let result = current_query.execute_on(&storage).await;
+        let result = current_query.execute_on(&processor).await;
         assert!(result.is_ok(), "Current query should succeed");
         let (_, summary, _version) = result.unwrap();
         assert!(
@@ -3256,7 +3282,7 @@ mod versioning_tests {
 
         // Query at time_after_v1 (should be v1)
         let v1_query = NodeById::as_of(node_id, time_after_v1, None);
-        let result = v1_query.execute_on(&storage).await;
+        let result = v1_query.execute_on(&processor).await;
         assert!(result.is_ok(), "Point-in-time query at v1 should succeed");
         let (_, summary, _version) = result.unwrap();
         assert!(
@@ -3266,7 +3292,7 @@ mod versioning_tests {
 
         // Query at time_after_v2 (should be v2)
         let v2_query = NodeById::as_of(node_id, time_after_v2, None);
-        let result = v2_query.execute_on(&storage).await;
+        let result = v2_query.execute_on(&processor).await;
         assert!(result.is_ok(), "Point-in-time query at v2 should succeed");
         let (_, summary, _version) = result.unwrap();
         assert!(
@@ -3276,7 +3302,7 @@ mod versioning_tests {
 
         // Query before node existed (should fail)
         let before_query = NodeById::as_of(node_id, time_before_create, None);
-        let result = before_query.execute_on(&storage).await;
+        let result = before_query.execute_on(&processor).await;
         assert!(result.is_err(), "Query before node existed should fail");
     }
 
@@ -3317,6 +3343,7 @@ mod versioning_tests {
 
         let mut storage = Storage::readwrite(&db_path);
         storage.ready().unwrap();
+        let processor = Processor::new(Arc::new(storage));
 
         // Query at time within the active period (should succeed)
         let within_period = NodeById {
@@ -3324,7 +3351,7 @@ mod versioning_tests {
             reference_ts_millis: Some(TimestampMilli(1500)),
             as_of_system_time: None,
         };
-        let result = within_period.execute_on(&storage).await;
+        let result = within_period.execute_on(&processor).await;
         assert!(result.is_ok(), "Query within active period should succeed");
 
         // Query at time before the active period (should fail)
@@ -3333,7 +3360,7 @@ mod versioning_tests {
             reference_ts_millis: Some(TimestampMilli(500)),
             as_of_system_time: None,
         };
-        let result = before_period.execute_on(&storage).await;
+        let result = before_period.execute_on(&processor).await;
         assert!(result.is_err(), "Query before active period should fail");
 
         // Query at time after the active period (should fail)
@@ -3342,7 +3369,7 @@ mod versioning_tests {
             reference_ts_millis: Some(TimestampMilli(2500)),
             as_of_system_time: None,
         };
-        let result = after_period.execute_on(&storage).await;
+        let result = after_period.execute_on(&processor).await;
         assert!(result.is_err(), "Query after active period should fail");
 
         // Query at exact start boundary (should succeed)
@@ -3351,7 +3378,7 @@ mod versioning_tests {
             reference_ts_millis: Some(TimestampMilli(1000)),
             as_of_system_time: None,
         };
-        let result = at_start.execute_on(&storage).await;
+        let result = at_start.execute_on(&processor).await;
         assert!(result.is_ok(), "Query at start of active period should succeed");
 
         // Query at exact end boundary (should fail - exclusive)
@@ -3360,7 +3387,7 @@ mod versioning_tests {
             reference_ts_millis: Some(TimestampMilli(2000)),
             as_of_system_time: None,
         };
-        let result = at_end.execute_on(&storage).await;
+        let result = at_end.execute_on(&processor).await;
         assert!(result.is_err(), "Query at end of active period should fail (exclusive)");
     }
 
@@ -3409,6 +3436,7 @@ mod versioning_tests {
 
         let mut storage = Storage::readwrite(&db_path);
         storage.ready().unwrap();
+        let processor = Processor::new(Arc::new(storage));
 
         // Query v1 at system time time_after_v1, with application time 1500 (within period)
         let bitemporal_v1_valid = NodeById {
@@ -3416,7 +3444,7 @@ mod versioning_tests {
             reference_ts_millis: Some(TimestampMilli(1500)),
             as_of_system_time: Some(time_after_v1),
         };
-        let result = bitemporal_v1_valid.execute_on(&storage).await;
+        let result = bitemporal_v1_valid.execute_on(&processor).await;
         assert!(result.is_ok(), "Bitemporal query (v1, within period) should succeed");
         let (_, summary, _version) = result.unwrap();
         assert!(
@@ -3430,7 +3458,7 @@ mod versioning_tests {
             reference_ts_millis: Some(TimestampMilli(500)),
             as_of_system_time: Some(time_after_v1),
         };
-        let result = bitemporal_v1_invalid.execute_on(&storage).await;
+        let result = bitemporal_v1_invalid.execute_on(&processor).await;
         assert!(result.is_err(), "Bitemporal query (v1, before period) should fail");
     }
 
@@ -3493,10 +3521,11 @@ mod versioning_tests {
 
         let mut storage = Storage::readwrite(&db_path);
         storage.ready().unwrap();
+        let processor = Processor::new(Arc::new(storage));
 
         // Query edge at current time
         let current_query = EdgeSummaryBySrcDstName::new(src_id, dst_id, edge_name.clone(), None);
-        let result = current_query.execute_on(&storage).await;
+        let result = current_query.execute_on(&processor).await;
         assert!(result.is_ok(), "Current edge query should succeed");
         let (summary, weight, _version) = result.unwrap();
         assert!(summary.decode_string().unwrap().contains("Edge V1"));
@@ -3507,7 +3536,7 @@ mod versioning_tests {
             src_id, dst_id, edge_name.clone(),
             time_after_edge, None
         );
-        let result = after_query.execute_on(&storage).await;
+        let result = after_query.execute_on(&processor).await;
         assert!(result.is_ok(), "Edge query after creation should succeed");
 
         // Query edge before it existed
@@ -3515,7 +3544,7 @@ mod versioning_tests {
             src_id, dst_id, edge_name.clone(),
             time_before_edge, None
         );
-        let result = before_query.execute_on(&storage).await;
+        let result = before_query.execute_on(&processor).await;
         assert!(result.is_err(), "Edge query before creation should fail");
     }
 
@@ -3561,10 +3590,11 @@ mod versioning_tests {
 
         let mut storage = Storage::readwrite(&db_path);
         storage.ready().unwrap();
+        let processor = Processor::new(Arc::new(storage));
 
         // Current query should fail (node is deleted)
         let current_query = NodeById::new(node_id, None);
-        let result = current_query.execute_on(&storage).await;
+        let result = current_query.execute_on(&processor).await;
         assert!(result.is_err(), "Current query for deleted node should fail");
         assert!(
             result.unwrap_err().to_string().contains("deleted"),
@@ -3573,7 +3603,7 @@ mod versioning_tests {
 
         // Query at time when node existed should succeed
         let past_query = NodeById::as_of(node_id, time_when_existed, None);
-        let result = past_query.execute_on(&storage).await;
+        let result = past_query.execute_on(&processor).await;
         assert!(result.is_ok(), "Time-travel query to when node existed should succeed");
         let (name, summary, _version) = result.unwrap();
         assert_eq!(name, "deletable_node");
@@ -3638,25 +3668,26 @@ mod versioning_tests {
 
         let mut storage = Storage::readwrite(&db_path);
         storage.ready().unwrap();
+        let processor = Processor::new(Arc::new(storage));
 
         // Current query should return V3
         let current_query = NodeById::new(node_id, None);
-        let result = current_query.execute_on(&storage).await.unwrap();
+        let result = current_query.execute_on(&processor).await.unwrap();
         assert!(result.1.decode_string().unwrap().contains("Version 3"));
 
         // Query at time_v1 should return V1
         let v1_query = NodeById::as_of(node_id, time_v1, None);
-        let result = v1_query.execute_on(&storage).await.unwrap();
+        let result = v1_query.execute_on(&processor).await.unwrap();
         assert!(result.1.decode_string().unwrap().contains("Version 1"));
 
         // Query at time_v2 should return V2
         let v2_query = NodeById::as_of(node_id, time_v2, None);
-        let result = v2_query.execute_on(&storage).await.unwrap();
+        let result = v2_query.execute_on(&processor).await.unwrap();
         assert!(result.1.decode_string().unwrap().contains("Version 2"));
 
         // Query at time_v3 should return V3
         let v3_query = NodeById::as_of(node_id, time_v3, None);
-        let result = v3_query.execute_on(&storage).await.unwrap();
+        let result = v3_query.execute_on(&processor).await.unwrap();
         assert!(result.1.decode_string().unwrap().contains("Version 3"));
     }
 
@@ -3700,18 +3731,19 @@ mod versioning_tests {
 
         let mut storage = Storage::readwrite(&db_path);
         storage.ready().unwrap();
+        let processor = Processor::new(Arc::new(storage));
 
         // Current shows unwanted change
         let current_query = NodeById::new(node_id, None);
-        let result = current_query.execute_on(&storage).await.unwrap();
+        let result = current_query.execute_on(&processor).await.unwrap();
         assert!(result.1.decode_string().unwrap().contains("Unwanted change"));
 
         // Rollback: Read old version and write it as new version
         let old_query = NodeById::as_of(node_id, time_original, None);
-        let (_name, old_summary, _version) = old_query.execute_on(&storage).await.unwrap();
+        let (_name, old_summary, _version) = old_query.execute_on(&processor).await.unwrap();
 
-        // Close storage before creating new writer (to release lock)
-        storage.close().unwrap();
+        // Drop processor and storage to release lock
+        drop(processor);
 
         // Create new writer for rollback
         let config = WriterConfig::default();
@@ -3733,10 +3765,11 @@ mod versioning_tests {
         // Re-open storage (consumer closed it after processing)
         let mut storage = Storage::readwrite(&db_path);
         storage.ready().unwrap();
+        let processor = Processor::new(Arc::new(storage));
 
         // Current should now show original content (rolled back)
         let current_query = NodeById::new(node_id, None);
-        let result = current_query.execute_on(&storage).await.unwrap();
+        let result = current_query.execute_on(&processor).await.unwrap();
         assert!(result.1.decode_string().unwrap().contains("Original content"));
     }
 
@@ -3805,15 +3838,16 @@ mod versioning_tests {
 
         let mut storage = Storage::readwrite(&db_path);
         storage.ready().unwrap();
+        let processor = Processor::new(Arc::new(storage));
 
         // Current query should return V2
         let current_query = EdgeSummaryBySrcDstName::new(src_id, dst_id, edge_name.clone(), None);
-        let result = current_query.execute_on(&storage).await.unwrap();
+        let result = current_query.execute_on(&processor).await.unwrap();
         assert!(result.0.decode_string().unwrap().contains("Edge V2"));
 
         // Query at time_v1 should return V1
         let v1_query = EdgeSummaryBySrcDstName::as_of(src_id, dst_id, edge_name.clone(), time_v1, None);
-        let result = v1_query.execute_on(&storage).await.unwrap();
+        let result = v1_query.execute_on(&processor).await.unwrap();
         assert!(result.0.decode_string().unwrap().contains("Edge V1"));
     }
 
@@ -3877,10 +3911,11 @@ mod versioning_tests {
 
         let mut storage = Storage::readwrite(&db_path);
         storage.ready().unwrap();
+        let processor = Processor::new(Arc::new(storage));
 
         // Current query should fail (edge is deleted)
         let current_query = EdgeSummaryBySrcDstName::new(src_id, dst_id, edge_name.clone(), None);
-        let result = current_query.execute_on(&storage).await;
+        let result = current_query.execute_on(&processor).await;
         assert!(result.is_err(), "Current query for deleted edge should fail");
 
         // Query at time when edge existed should succeed
@@ -3888,7 +3923,7 @@ mod versioning_tests {
             src_id, dst_id, edge_name.clone(),
             time_when_existed, None
         );
-        let result = past_query.execute_on(&storage).await;
+        let result = past_query.execute_on(&processor).await;
         assert!(result.is_ok(), "Time-travel query to when edge existed should succeed");
         let (summary, _weight, _version) = result.unwrap();
         assert!(summary.decode_string().unwrap().contains("Edge content"));
@@ -3951,9 +3986,10 @@ mod versioning_tests {
         // IncomingEdges needs readwrite storage for transaction_db
         let mut storage = Storage::readwrite(&db_path);
         storage.ready().unwrap();
+        let processor = Processor::new(Arc::new(storage));
 
         let incoming = IncomingEdges::new(dst_id, None);
-        let result = incoming.execute_on(&storage).await.unwrap();
+        let result = incoming.execute_on(&processor).await.unwrap();
 
         // Should have exactly one incoming edge from src_id
         // IncomingEdges returns Vec<(Option<EdgeWeight>, DstId, SrcId, EdgeName, Version)> = (weight, dst_id, src_id, name, version)
@@ -4016,18 +4052,19 @@ mod versioning_tests {
         // Verify both directions are present
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
+        let processor = Processor::new(Arc::new(storage));
 
         // Check forward direction (OutgoingEdges)
         // OutgoingEdges returns Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)> = (weight, src_id, dst_id, name, version)
         let outgoing = OutgoingEdges::new(src_id, None);
-        let out_result = outgoing.execute_on(&storage).await.unwrap();
+        let out_result = outgoing.execute_on(&processor).await.unwrap();
         assert_eq!(out_result.len(), 1, "Should have 1 outgoing edge");
         assert_eq!(out_result[0].2, dst_id, "Outgoing edge target should match");
 
         // Check reverse direction (IncomingEdges)
         // IncomingEdges returns Vec<(Option<EdgeWeight>, DstId, SrcId, EdgeName, Version)> = (weight, dst_id, src_id, name, version)
         let incoming = IncomingEdges::new(dst_id, None);
-        let in_result = incoming.execute_on(&storage).await.unwrap();
+        let in_result = incoming.execute_on(&processor).await.unwrap();
         assert_eq!(in_result.len(), 1, "Should have 1 incoming edge");
         assert_eq!(in_result[0].2, src_id, "Incoming edge source should match");
 
@@ -4046,10 +4083,11 @@ mod versioning_tests {
         // Create empty storage
         let mut storage = Storage::readwrite(&db_path);
         storage.ready().unwrap();
+        let processor = Processor::new(Arc::new(storage));
 
         let missing_id = Id::new();
         let query = NodeById::new(missing_id, None);
-        let result = query.execute_on(&storage).await;
+        let result = query.execute_on(&processor).await;
 
         // Should return an error for missing node
         assert!(result.is_err(), "Query for missing node should return error");
@@ -4099,10 +4137,11 @@ mod versioning_tests {
 
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
+        let processor = Processor::new(Arc::new(storage));
 
         // Query for edge that doesn't exist
         let query = EdgeSummaryBySrcDstName::new(src_id, dst_id, "nonexistent".to_string(), None);
-        let result = query.execute_on(&storage).await;
+        let result = query.execute_on(&processor).await;
 
         assert!(result.is_err(), "Query for missing edge should return error");
     }
@@ -4174,6 +4213,7 @@ mod versioning_tests {
         // NodeFragmentsByIdTimeRange needs readwrite storage
         let mut storage = Storage::readwrite(&db_path);
         storage.ready().unwrap();
+        let processor = Processor::new(Arc::new(storage));
 
         // Query all fragments
         let query = NodeFragmentsByIdTimeRange::new(
@@ -4181,7 +4221,7 @@ mod versioning_tests {
             (Bound::Unbounded, Bound::Unbounded),
             None,
         );
-        let result = query.execute_on(&storage).await.unwrap();
+        let result = query.execute_on(&processor).await.unwrap();
 
         // Should have at least 3 fragments (original fragments preserved)
         assert!(result.len() >= 3, "Should have at least 3 fragments, got {}", result.len());
@@ -4202,7 +4242,6 @@ mod versioning_tests {
     /// Validates: UpdateNode creates a new version history entry.
     #[tokio::test]
     async fn test_node_update_creates_version_history() {
-        use crate::graph::mutation::UpdateNode;
         use crate::graph::query::NodeById;
         use crate::graph::schema::Nodes;
         use crate::graph::ColumnFamily;
@@ -4243,10 +4282,12 @@ mod versioning_tests {
         // Verify the update created a new version
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
+        let storage = Arc::new(storage);
+        let processor = Processor::new(storage.clone());
 
         // Query current version
         let query = NodeById::new(node_id, None);
-        let (_, current_summary, _version) = query.execute_on(&storage).await.unwrap();
+        let (_, current_summary, _version) = query.execute_on(&processor).await.unwrap();
         assert!(
             current_summary.decode_string().unwrap().contains("Version 2"),
             "Current version should be Version 2"
@@ -4340,9 +4381,11 @@ mod versioning_tests {
         // Verify update
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
+        let storage = Arc::new(storage);
+        let processor = Processor::new(storage.clone());
 
         let query = EdgeSummaryBySrcDstName::new(src_id, dst_id, edge_name.clone(), None);
-        let (summary, _, _version) = query.execute_on(&storage).await.unwrap();
+        let (summary, _, _version) = query.execute_on(&processor).await.unwrap();
         assert!(
             summary.decode_string().unwrap().contains("Edge V2"),
             "Current edge should be V2"
@@ -4437,10 +4480,11 @@ mod versioning_tests {
 
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
+        let processor = Processor::new(Arc::new(storage));
 
         // Current weight should be 5.0
         let query = EdgeSummaryBySrcDstName::new(src_id, dst_id, edge_name.clone(), None);
-        let (_, weight, _version) = query.execute_on(&storage).await.unwrap();
+        let (_, weight, _version) = query.execute_on(&processor).await.unwrap();
         assert!((weight.unwrap() - 5.0).abs() < 0.001, "Current weight should be 5.0");
 
         // Time-travel query should show old weight of 1.0
@@ -4448,7 +4492,7 @@ mod versioning_tests {
             src_id, dst_id, edge_name.clone(),
             time_with_weight_1, None
         );
-        let result = past_query.execute_on(&storage).await;
+        let result = past_query.execute_on(&processor).await;
 
         // Note: Weight history may not be directly queryable via time-travel in current design
         // This test validates that weight updates don't corrupt the edge
@@ -4495,15 +4539,16 @@ mod versioning_tests {
 
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
+        let processor = Processor::new(Arc::new(storage));
 
         // Current query should fail (node deleted)
         let query = NodeById::new(node_id, None);
-        let result = query.execute_on(&storage).await;
+        let result = query.execute_on(&processor).await;
         assert!(result.is_err(), "Deleted node should not be found in current view");
 
         // Time-travel query should succeed
         let past_query = NodeById::as_of(node_id, time_before_delete, None);
-        let result = past_query.execute_on(&storage).await;
+        let result = past_query.execute_on(&processor).await;
         assert!(result.is_ok(), "Time-travel to before delete should succeed");
     }
 
@@ -4547,13 +4592,14 @@ mod versioning_tests {
         // NodesBySummaryHash query needs readwrite storage for transaction_db access
         let mut storage = Storage::readwrite(&db_path);
         storage.ready().unwrap();
+        let processor = Processor::new(Arc::new(storage));
 
         // Compute the summary hash
         let hash = SummaryHash::from_summary(&shared_summary).unwrap();
 
         // Query all nodes with this hash
         let query = NodesBySummaryHash::current(hash);
-        let result = query.execute_on(&storage).await.unwrap();
+        let result = query.execute_on(&processor).await.unwrap();
 
         assert_eq!(result.len(), 3, "Should find all 3 nodes with same summary hash");
 
@@ -4660,7 +4706,6 @@ mod versioning_tests {
     /// Validates: Concurrent writers to same node maintain consistent history.
     #[tokio::test]
     async fn test_concurrent_writers_same_node() {
-        use crate::graph::mutation::UpdateNode;
         use crate::graph::query::NodeById;
 
         let temp_dir = TempDir::new().unwrap();
@@ -4724,9 +4769,10 @@ mod versioning_tests {
         // NodeById and NodeFragmentsByIdTimeRange need readwrite storage
         let mut storage = Storage::readwrite(&db_path);
         storage.ready().unwrap();
+        let processor = Processor::new(Arc::new(storage));
 
         let query = NodeById::new(node_id, None);
-        let result = query.execute_on(&storage).await;
+        let result = query.execute_on(&processor).await;
         assert!(result.is_ok(), "Node should still be queryable after concurrent writes");
 
         // Verify fragments were all written
@@ -4738,7 +4784,7 @@ mod versioning_tests {
             (Bound::Unbounded, Bound::Unbounded),
             None,
         );
-        let fragments = frag_query.execute_on(&storage).await.unwrap();
+        let fragments = frag_query.execute_on(&processor).await.unwrap();
 
         // Should have at least some fragments from concurrent writers
         // The exact number may vary due to timing, but we expect most to succeed
@@ -4775,7 +4821,7 @@ mod versioning_tests {
 
         // Replay the SAME mutation (same ID, same timestamp)
         // This simulates a retry scenario
-        let replay_result = mutation.run(&writer).await;
+        let _replay_result = mutation.run(&writer).await;
 
         // Replay might succeed or fail depending on idempotency design
         // What matters is the data remains consistent
@@ -4786,9 +4832,10 @@ mod versioning_tests {
         // Verify node is still queryable and consistent
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
+        let processor = Processor::new(Arc::new(storage));
 
         let query = NodeById::new(node_id, None);
-        let result = query.execute_on(&storage).await;
+        let result = query.execute_on(&processor).await;
         assert!(result.is_ok(), "Node should be queryable after replay");
 
         let (name, summary, _version) = result.unwrap();
@@ -4802,7 +4849,7 @@ mod versioning_tests {
     /// Validates: Shutdown during writes doesn't corrupt column families.
     #[tokio::test]
     async fn test_shutdown_during_writes_no_corruption() {
-        use crate::graph::query::NodeById;
+        // use crate::graph::query::NodeById;
         use crate::graph::schema::Nodes;
         use crate::graph::ColumnFamily;
 
@@ -4933,9 +4980,9 @@ mod versioning_tests {
         }
     }
 
-    /// Validates: Processor implements writer::Processor trait correctly.
+    /// Validates: Processor.process_mutations() works correctly.
     #[tokio::test]
-    async fn test_processor_implements_writer_processor() {
+    async fn test_processor_process_mutations() {
         use std::sync::Arc;
 
         let temp_dir = TempDir::new().unwrap();
@@ -5008,7 +5055,7 @@ mod versioning_tests {
 
         // Verify committed data is visible outside transaction
         let query = NodeById::new(node_id, None);
-        let result = query.execute_on(&storage).await;
+        let result = query.execute_on(&processor).await;
         assert!(result.is_ok(), "Committed data should be visible");
     }
 }

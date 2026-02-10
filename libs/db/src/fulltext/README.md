@@ -12,7 +12,7 @@ Both modules follow the same architectural pattern:
 | **Processor** | `graph::Processor` | `fulltext::Index` |
 | **Modes** | ReadOnly, ReadWrite, Secondary | ReadOnly, ReadWrite |
 | **QueryExecutor** | `execute(&self, storage: &Storage)` | `execute(&self, storage: &Storage)` |
-| **Processor trait** | `fn storage(&self) -> &Storage` | `fn storage(&self) -> &Storage` |
+| **Processor** | `fn storage(&self) -> &Storage` | `fn storage(&self) -> &Storage` |
 
 ### Storage Layer
 
@@ -101,7 +101,7 @@ impl QueryExecutor for Nodes {
 
 ```rust
 use motlie_db::graph::{
-    create_query_reader, spawn_query_consumer_pool_shared,
+    create_reader_with_processor, spawn_query_consumer_pool_shared,
     Processor, Storage, WriterConfig, ReaderConfig,
 };
 use motlie_db::fulltext::{
@@ -158,12 +158,14 @@ let graph_mutation_handle = spawn_mutation_consumer(
 // === Graph Query Consumers (2 workers) ===
 
 let graph_config = ReaderConfig { channel_buffer_size: 100 };
-let (graph_reader, graph_query_receiver) = create_query_reader(graph_config);
 
 // Create shared readonly Processor
 let mut storage = Storage::readonly(&db_path);
 storage.ready()?;
 let processor = Arc::new(graph::Processor::new(Arc::new(storage)));
+
+let (graph_reader, graph_query_receiver) =
+    create_reader_with_processor(processor.clone(), graph_config);
 
 // Spawn 2 graph query consumers sharing the same Processor
 let graph_handles = spawn_query_consumer_pool_shared(

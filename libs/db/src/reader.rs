@@ -176,17 +176,17 @@ pub trait Runnable<R> {
 ///
 /// This is used by the consumer pools to execute queries. It holds Arc references
 /// to the initialized storage backends.
-pub struct CompositeStorage {
+pub(crate) struct CompositeStorage {
     /// Graph processor (RocksDB) - source of truth for node/edge data
-    pub graph: Arc<graph::Processor>,
+    pub(crate) graph: Arc<graph::Processor>,
 
     /// Fulltext storage (Tantivy) - for search and ranking
-    pub fulltext: Arc<fulltext::Index>,
+    pub(crate) fulltext: Arc<fulltext::Index>,
 }
 
 impl CompositeStorage {
     /// Create a new CompositeStorage from graph and fulltext components.
-    pub fn new(graph: Arc<graph::Processor>, fulltext: Arc<fulltext::Index>) -> Self {
+    pub(crate) fn new(graph: Arc<graph::Processor>, fulltext: Arc<fulltext::Index>) -> Self {
         Self { graph, fulltext }
     }
 }
@@ -281,7 +281,7 @@ impl Reader {
 ///         .build();
 /// ```
 pub struct ReaderBuilder {
-    graph: Arc<graph::Processor>,
+    graph_storage: Arc<graph::Storage>,
     fulltext: Arc<fulltext::Index>,
     config: ReaderConfig,
     num_workers: usize,
@@ -291,11 +291,11 @@ impl ReaderBuilder {
     /// Create a new ReaderBuilder.
     ///
     /// # Arguments
-    /// * `graph` - The graph processor (RocksDB)
+    /// * `graph_storage` - The graph storage (RocksDB)
     /// * `fulltext` - The fulltext index (Tantivy)
-    pub fn new(graph: Arc<graph::Processor>, fulltext: Arc<fulltext::Index>) -> Self {
+    pub fn new(graph_storage: Arc<graph::Storage>, fulltext: Arc<fulltext::Index>) -> Self {
         Self {
-            graph,
+            graph_storage,
             fulltext,
             config: ReaderConfig::default(),
             num_workers: 4,
@@ -326,18 +326,21 @@ impl ReaderBuilder {
         Vec<JoinHandle<()>>,
         Vec<JoinHandle<()>>,
     ) {
+        // Create graph processor from storage
+        let graph_processor = Arc::new(graph::Processor::new(self.graph_storage));
+
         // Create shared composite storage
         let composite_storage = Arc::new(CompositeStorage::new(
-            self.graph.clone(),
+            graph_processor.clone(),
             self.fulltext.clone(),
         ));
 
         // Create graph reader and consumer pool
         let (graph_reader, graph_receiver) =
-            graph::reader::create_query_reader(self.config.graph.clone());
+            graph::reader::create_reader_with_processor(graph_processor.clone(), self.config.graph.clone());
         let graph_handles = graph::reader::spawn_consumer_pool_with_processor(
             graph_receiver,
-            self.graph.clone(),
+            graph_processor,
             self.num_workers,
         );
 
@@ -417,7 +420,7 @@ pub fn spawn_consumer_pool(
 /// # Returns
 /// A tuple of (Reader, unified_handles, graph_handles, fulltext_handles)
 pub fn create_reader(
-    graph: Arc<graph::Processor>,
+    graph_storage: Arc<graph::Storage>,
     fulltext: Arc<fulltext::Index>,
 ) -> (
     Reader,
@@ -425,13 +428,13 @@ pub fn create_reader(
     Vec<JoinHandle<()>>,
     Vec<JoinHandle<()>>,
 ) {
-    ReaderBuilder::new(graph, fulltext).build()
+    ReaderBuilder::new(graph_storage, fulltext).build()
 }
 
 /// Create a unified Reader with custom configuration.
 ///
 /// # Arguments
-/// * `graph` - The graph processor (RocksDB)
+/// * `graph_storage` - The graph storage (RocksDB)
 /// * `fulltext` - The fulltext index (Tantivy)
 /// * `config` - Reader configuration
 /// * `num_workers` - Number of worker tasks per subsystem
@@ -439,7 +442,7 @@ pub fn create_reader(
 /// # Returns
 /// A tuple of (Reader, unified_handles, graph_handles, fulltext_handles)
 pub fn create_reader_with_config(
-    graph: Arc<graph::Processor>,
+    graph_storage: Arc<graph::Storage>,
     fulltext: Arc<fulltext::Index>,
     config: ReaderConfig,
     num_workers: usize,
@@ -449,7 +452,7 @@ pub fn create_reader_with_config(
     Vec<JoinHandle<()>>,
     Vec<JoinHandle<()>>,
 ) {
-    ReaderBuilder::new(graph, fulltext)
+    ReaderBuilder::new(graph_storage, fulltext)
         .with_config(config)
         .with_num_workers(num_workers)
         .build()

@@ -1584,10 +1584,11 @@ fn bench_allocation_throughput(b: &mut Bencher) {
 - `GetExternalId` - VecId → ExternalKey lookup
 - `ResolveIds` - Batch VecId → ExternalKey resolution
 
-**QueryExecutor Trait:**
-- `execute(&self, storage: &Storage) -> Result<Self::Output>` - Execute query against storage
-- Implemented for `GetVector`, `GetInternalId`, `GetExternalId`, `ResolveIds`
-- Search queries (Phase 2) will add HNSW search implementation
+**QueryExecutor Trait (`pub(crate)`):**
+- `execute(&self, processor: &Processor) -> Result<Self::Output>` - Execute query against Processor
+- Implemented for `GetVector`, `GetInternalId`, `GetExternalId`, `ResolveIds`, `ListEmbeddings`, `FindEmbeddings`
+- Each impl delegates to `ops::read::*` functions (single source of truth)
+- `SearchKNN` dispatches via `Processor::search()` / `Processor::search_with_config()`
 
 #### Writer Infrastructure (`vector/writer.rs`)
 
@@ -1667,16 +1668,24 @@ libs/db/src/vector/
 ├── error.rs            # Error types
 ├── id.rs               # IdAllocator (Phase 1)
 ├── mutation.rs         # Mutation enum + MutationExecutor impls
-├── processor.rs        # Processor (central state management)
-├── query.rs            # Query enum + QueryExecutor impls
+├── processor.rs        # Processor (orchestrator: resolves caches/indices, delegates to ops)
+├── query.rs            # Query enum + QueryExecutor impls (delegates to ops)
 ├── reader.rs           # Reader, Consumer, MPMC infrastructure
 ├── registry.rs         # EmbeddingRegistry
 ├── schema.rs           # Column family definitions
 ├── subsystem.rs        # StorageSubsystem impl
 ├── writer.rs           # Writer, Consumer, MPSC infrastructure
-├── hnsw.rs             # HNSW algorithm (Phase 2)
-├── rabitq.rs           # RaBitQ quantization (Phase 4)
-└── async_updater.rs    # Background graph maintenance (Phase 7)
+├── hnsw/               # HNSW algorithm (Phase 2)
+├── quantization/       # RaBitQ quantization (Phase 4)
+├── search/             # SearchConfig, SearchStrategy
+├── async_updater.rs    # Background graph maintenance (Phase 7)
+└── ops/                # Business logic (single source of truth)
+    ├── mod.rs          # Module exports and re-exports
+    ├── insert.rs       # Vector insertion operations
+    ├── delete.rs       # Vector deletion operations
+    ├── embedding.rs    # Embedding spec operations
+    ├── read.rs         # Point lookup operations (used by QueryExecutor impls)
+    └── search.rs       # Search algorithms (used by Processor search methods)
 ```
 
 #### Primary API (`Processor`)

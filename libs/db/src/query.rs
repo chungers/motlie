@@ -401,22 +401,23 @@ pub type QueryRequest = RequestEnvelope<Query>;
 
 impl Query {
     pub async fn execute(&self, storage: &super::reader::CompositeStorage) -> Result<QueryResult> {
+        let processor = storage.graph.as_ref();
         match self {
             Query::Nodes(q) => execute_nodes_query(q, storage).await.map(QueryResult::Nodes),
             Query::Edges(q) => execute_edges_query(q, storage).await.map(QueryResult::Edges),
-            Query::NodeById(q) => q.execute(storage.graph.storage().as_ref()).await.map(QueryResult::NodeById),
+            Query::NodeById(q) => q.execute(processor).await.map(QueryResult::NodeById),
             Query::NodesByIdsMulti(q) => {
-                q.execute(storage.graph.storage().as_ref()).await.map(QueryResult::NodesByIdsMulti)
+                q.execute(processor).await.map(QueryResult::NodesByIdsMulti)
             }
             Query::OutgoingEdges(q) => {
-                q.execute(storage.graph.storage().as_ref()).await.map(QueryResult::OutgoingEdges)
+                q.execute(processor).await.map(QueryResult::OutgoingEdges)
             }
             Query::IncomingEdges(q) => {
-                q.execute(storage.graph.storage().as_ref()).await.map(QueryResult::IncomingEdges)
+                q.execute(processor).await.map(QueryResult::IncomingEdges)
             }
             Query::EdgeDetails(q) => {
                 let (summary, weight, version) =
-                    q.execute(storage.graph.storage().as_ref()).await?;
+                    q.execute(processor).await?;
                 Ok(QueryResult::EdgeDetails((
                     weight,
                     q.source_id,
@@ -427,13 +428,13 @@ impl Query {
                 )))
             }
             Query::NodeFragments(q) => {
-                q.execute(storage.graph.storage().as_ref()).await.map(QueryResult::NodeFragments)
+                q.execute(processor).await.map(QueryResult::NodeFragments)
             }
             Query::EdgeFragments(q) => {
-                q.execute(storage.graph.storage().as_ref()).await.map(QueryResult::EdgeFragments)
+                q.execute(processor).await.map(QueryResult::EdgeFragments)
             }
-            Query::AllNodes(q) => q.execute(storage.graph.storage().as_ref()).await.map(QueryResult::AllNodes),
-            Query::AllEdges(q) => q.execute(storage.graph.storage().as_ref()).await.map(QueryResult::AllEdges),
+            Query::AllNodes(q) => q.execute(processor).await.map(QueryResult::AllNodes),
+            Query::AllEdges(q) => q.execute(processor).await.map(QueryResult::AllEdges),
         }
     }
 }
@@ -443,22 +444,25 @@ async fn execute_nodes_query(
     storage: &super::reader::CompositeStorage,
 ) -> Result<Vec<NodeResult>> {
     use crate::fulltext::reader::Processor as FulltextProcessor;
-    use crate::graph::reader::Processor as GraphProcessor;
+    use crate::graph::Processor as GraphProcessor;
 
     let fulltext_storage = FulltextProcessor::storage(storage.fulltext.as_ref());
     let hits: Vec<NodeHit> = fulltext::query::Nodes::execute_params(&query.params, fulltext_storage).await?;
 
-    let graph_storage = GraphProcessor::storage(storage.graph.as_ref());
+    let graph_processor: &GraphProcessor = storage.graph.as_ref();
     let mut results = Vec::with_capacity(hits.len());
 
     for hit in hits.into_iter().skip(query.offset) {
         let query = graph::query::NodeById::new(hit.id, None);
-        match query.execute(graph_storage).await {
-            Ok((name, summary, _version)) => results.push((hit.id, name, summary)),
-            Err(_) => {
+        let query = graph::query::Query::NodeById(query);
+        match query.execute_with_processor(graph_processor).await {
+            Ok(graph::query::QueryResult::NodeById((name, summary, _version))) => {
+                results.push((hit.id, name, summary))
+            }
+            Ok(_) | Err(_) => {
                 tracing::debug!(id = %hit.id, "Node in fulltext but not in graph, skipping");
             }
-        }
+        };
     }
 
     Ok(results)
@@ -469,12 +473,12 @@ async fn execute_edges_query(
     storage: &super::reader::CompositeStorage,
 ) -> Result<Vec<EdgeResult>> {
     use crate::fulltext::reader::Processor as FulltextProcessor;
-    use crate::graph::reader::Processor as GraphProcessor;
+    use crate::graph::Processor as GraphProcessor;
 
     let fulltext_storage = FulltextProcessor::storage(storage.fulltext.as_ref());
     let hits: Vec<EdgeHit> = fulltext::query::Edges::execute_params(&query.params, fulltext_storage).await?;
 
-    let graph_storage = GraphProcessor::storage(storage.graph.as_ref());
+    let graph_processor: &GraphProcessor = storage.graph.as_ref();
     let mut results = Vec::with_capacity(hits.len());
 
     for hit in hits.into_iter().skip(query.offset) {
@@ -484,11 +488,14 @@ async fn execute_edges_query(
             hit.edge_name.clone(),
             None,
         );
-        match query.execute(graph_storage).await {
-            Ok((summary, _weight, _version)) => {
-                results.push((hit.src_id, hit.dst_id, hit.edge_name, summary))
-            }
-            Err(_) => {
+        let query = graph::query::Query::EdgeSummaryBySrcDstName(query);
+        match query.execute_with_processor(graph_processor).await {
+            Ok(graph::query::QueryResult::EdgeSummaryBySrcDstName((
+                summary,
+                _weight,
+                _version,
+            ))) => results.push((hit.src_id, hit.dst_id, hit.edge_name, summary)),
+            Ok(_) | Err(_) => {
                 tracing::debug!(
                     src_id = %hit.src_id,
                     dst_id = %hit.dst_id,
@@ -496,7 +503,7 @@ async fn execute_edges_query(
                     "Edge in fulltext but not in graph, skipping"
                 );
             }
-        }
+        };
     }
 
     Ok(results)
