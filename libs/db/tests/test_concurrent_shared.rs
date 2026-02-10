@@ -21,20 +21,20 @@ use motlie_db::graph::mutation::{AddEdge, AddNode};
 use motlie_db::writer::Runnable as MutationRunnable;
 use motlie_db::graph::query::NodeById;
 use motlie_db::reader::Runnable as QueryRunnable;
-use motlie_db::graph::reader::{create_reader_with_storage, ReaderConfig, spawn_query_consumer_with_processor};
+use motlie_db::graph::reader::{spawn_query_consumers_with_storage, ReaderConfig};
 use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
 use motlie_db::graph::writer::{
     create_mutation_writer, spawn_mutation_consumer_with_receiver, WriterConfig,
 };
-use motlie_db::graph::{Processor, Storage};
+use motlie_db::graph::Storage;
 use motlie_db::{Id, TimestampMilli};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
-/// Writer task using shared Graph (instead of opening its own storage)
-async fn writer_task_shared_graph(
-    graph: Arc<Processor>,
+/// Writer task using shared storage (instead of opening its own storage)
+async fn writer_task_shared_storage(
+    storage: Arc<Storage>,
     context: Arc<TestContext>,
     num_nodes: usize,
     num_edges_per_node: usize,
@@ -44,9 +44,9 @@ async fn writer_task_shared_graph(
     // Create writer
     let (writer, writer_rx) = create_mutation_writer(Default::default());
 
-    // Spawn write consumer with SHARED graph
+    // Spawn write consumer with SHARED storage
     let consumer_handle =
-        spawn_mutation_consumer_with_receiver(writer_rx, WriterConfig::default(), graph);
+        spawn_mutation_consumer_with_receiver(writer_rx, WriterConfig::default(), storage);
 
     // Insert nodes
     for i in 0..num_nodes {
@@ -118,9 +118,9 @@ async fn writer_task_shared_graph(
     metrics
 }
 
-/// Reader task: continuously queries nodes and edges using shared Graph
-async fn reader_task_shared_graph(
-    graph: Arc<Processor>,
+/// Reader task: continuously queries nodes and edges using shared storage
+async fn reader_task_shared_storage(
+    storage: Arc<Storage>,
     context: Arc<TestContext>,
     _reader_id: usize,
 ) -> Metrics {
@@ -134,22 +134,13 @@ async fn reader_task_shared_graph(
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    // Create reader
-    let (reader, reader_rx) = create_reader_with_storage(
-        graph.storage().clone(),
+    // Create reader and spawn query consumer with shared storage
+    let (reader, consumer_handles) = spawn_query_consumers_with_storage(
+        storage,
         ReaderConfig {
             channel_buffer_size: 10,
         },
-    );
-
-    // Spawn query consumer with SHARED graph
-    // All readers share the same Arc<Processor> which wraps the single TransactionDB
-    let consumer_handle = spawn_query_consumer_with_processor(
-        reader_rx,
-        ReaderConfig {
-            channel_buffer_size: 10,
-        },
-        graph,
+        1,
     );
 
     // Continuously query random nodes and edges
@@ -180,7 +171,9 @@ async fn reader_task_shared_graph(
 
     // Cleanup
     drop(reader);
-    let _ = consumer_handle.await;
+    for handle in consumer_handles {
+        let _ = handle.await;
+    }
 
     metrics
 }
@@ -206,23 +199,21 @@ async fn test_concurrent_read_write_with_readwrite_readers() {
     let mut storage = Storage::readwrite(&db_path);
     storage.ready().expect("Failed to ready storage");
     let storage = Arc::new(storage);
-    let graph = Arc::new(Processor::new(storage.clone()));
-
-    // Spawn writer task using shared graph
+    // Spawn writer task using shared storage
     let writer_context = context.clone();
-    let writer_graph = graph.clone();
+    let writer_storage = storage.clone();
     let writer_handle = tokio::spawn(async move {
-        writer_task_shared_graph(writer_graph, writer_context, num_nodes, num_edges_per_node).await
+        writer_task_shared_storage(writer_storage, writer_context, num_nodes, num_edges_per_node).await
     });
 
-    // Spawn reader tasks - all sharing the same Arc<Processor> (and underlying TransactionDB)
+    // Spawn reader tasks - all sharing the same Arc<Storage> (and underlying TransactionDB)
     // This tests RocksDB TransactionDB thread-safety with concurrent access
     let mut reader_handles = Vec::new();
     for reader_id in 0..num_readers {
         let reader_context = context.clone();
-        let reader_graph = graph.clone();
+        let reader_storage = storage.clone();
         let handle = tokio::spawn(async move {
-            reader_task_shared_graph(reader_graph, reader_context, reader_id).await
+            reader_task_shared_storage(reader_storage, reader_context, reader_id).await
         });
         reader_handles.push(handle);
     }

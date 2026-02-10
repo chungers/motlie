@@ -12,7 +12,7 @@ Both modules follow the same architectural pattern:
 | **Processor** | `graph::Processor` | `fulltext::Index` |
 | **Modes** | ReadOnly, ReadWrite, Secondary | ReadOnly, ReadWrite |
 | **QueryExecutor** | `execute(&self, storage: &Storage)` | `execute(&self, storage: &Storage)` |
-| **Processor trait** | `fn storage(&self) -> &Storage` | `fn storage(&self) -> &Storage` |
+| **Processor** | `fn storage(&self) -> &Storage` | `fn storage(&self) -> &Storage` |
 
 ### Storage Layer
 

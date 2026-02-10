@@ -325,7 +325,7 @@ impl Deref for Writer {
 ///     .build();
 /// ```
 pub struct WriterBuilder {
-    graph: Arc<graph::Processor>,
+    graph_storage: Arc<graph::Storage>,
     fulltext: Arc<fulltext::Index>,
     config: WriterConfig,
 }
@@ -334,11 +334,11 @@ impl WriterBuilder {
     /// Create a new WriterBuilder.
     ///
     /// # Arguments
-    /// * `graph` - The graph processor (RocksDB)
+    /// * `graph_storage` - The graph storage (RocksDB)
     /// * `fulltext` - The fulltext processor (Tantivy)
-    pub fn new(graph: Arc<graph::Processor>, fulltext: Arc<fulltext::Index>) -> Self {
+    pub fn new(graph_storage: Arc<graph::Storage>, fulltext: Arc<fulltext::Index>) -> Self {
         Self {
-            graph,
+            graph_storage,
             fulltext,
             config: WriterConfig::default(),
         }
@@ -369,14 +369,17 @@ impl WriterBuilder {
         let (mut graph_writer, graph_rx) =
             graph::writer::create_mutation_writer(self.config.graph.clone());
 
+        // Create graph processor from storage
+        let graph_processor = Arc::new(graph::Processor::new(self.graph_storage));
+
         // Configure the writer with processor for transaction support
         // and forward transaction mutations to fulltext
-        graph_writer.set_processor(self.graph.clone());
+        graph_writer.set_processor(graph_processor.clone());
         graph_writer.set_transaction_forward_to(fulltext_tx.clone());
 
         // Spawn graph consumer with chaining to fulltext
         let graph_handle =
-            spawn_graph_consumer_with_next(graph_rx, self.config.graph, self.graph, fulltext_tx);
+            spawn_graph_consumer_with_next(graph_rx, self.config.graph, graph_processor, fulltext_tx);
 
         let writer = Writer { inner: graph_writer };
         let handles = vec![graph_handle, fulltext_handle];
@@ -396,7 +399,6 @@ fn spawn_graph_consumer_with_next(
     processor: Arc<graph::Processor>,
     next: mpsc::Sender<graph::writer::MutationRequest>,
 ) -> JoinHandle<Result<()>> {
-    // Arc<Processor> implements Processor trait
     let consumer = graph::writer::Consumer::with_next(receiver, config, processor, next);
     graph::writer::spawn_consumer(consumer)
 }
@@ -407,8 +409,8 @@ fn spawn_fulltext_consumer(
     index: Arc<fulltext::Index>,
 ) -> JoinHandle<Result<()>> {
     let config = graph::writer::WriterConfig::default();
-    let consumer = graph::writer::Consumer::new(receiver, config, (*index).clone());
-    graph::writer::spawn_consumer(consumer)
+    let consumer = fulltext::writer::Consumer::new(receiver, config, (*index).clone());
+    fulltext::writer::spawn_consumer(consumer)
 }
 
 // ============================================================================
@@ -427,27 +429,27 @@ fn spawn_fulltext_consumer(
 /// # Returns
 /// A tuple of (Writer, handles)
 pub fn create_writer(
-    graph: Arc<graph::Processor>,
+    graph_storage: Arc<graph::Storage>,
     fulltext: Arc<fulltext::Index>,
 ) -> (Writer, Vec<JoinHandle<Result<()>>>) {
-    WriterBuilder::new(graph, fulltext).build()
+    WriterBuilder::new(graph_storage, fulltext).build()
 }
 
 /// Create a [`Writer`] with custom configuration.
 ///
 /// # Arguments
-/// * `graph` - The graph processor (RocksDB)
+/// * `graph_storage` - The graph storage (RocksDB)
 /// * `fulltext` - The fulltext processor (Tantivy)
 /// * `config` - Writer configuration
 ///
 /// # Returns
 /// A tuple of (Writer, handles)
 pub fn create_writer_with_config(
-    graph: Arc<graph::Processor>,
+    graph_storage: Arc<graph::Storage>,
     fulltext: Arc<fulltext::Index>,
     config: WriterConfig,
 ) -> (Writer, Vec<JoinHandle<Result<()>>>) {
-    WriterBuilder::new(graph, fulltext)
+    WriterBuilder::new(graph_storage, fulltext)
         .with_config(config)
         .build()
 }

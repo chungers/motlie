@@ -40,6 +40,8 @@ pub use writer::{
     create_mutation_consumer_with_params, create_mutation_consumer_with_params_and_next,
     spawn_mutation_consumer, spawn_mutation_consumer_with_next,
     spawn_mutation_consumer_with_params, spawn_mutation_consumer_with_params_and_next,
+    spawn_consumer as spawn_mutation_consumer_task,
+    Consumer as MutationConsumer,
     MutationExecutor,
 };
 
@@ -212,7 +214,6 @@ mod tests {
     use crate::graph::mutation::{
         AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation, UpdateNode,
     };
-    use crate::graph::writer::Processor;
     use crate::{DataUrl, Id, TimestampMilli};
     use tantivy::collector::TopDocs;
     use tantivy::query::QueryParser;

@@ -24,14 +24,14 @@ use motlie_db::graph::query::{EdgeSummaryBySrcDstName, NodeById};
 // Only import graph::query::Runnable - fulltext queries use .run() on types
 // that only implement fulltext::query::Runnable so there's no ambiguity
 use motlie_db::graph::reader::{
-    create_reader_with_storage, Reader as GraphReader,
-    spawn_query_consumer_pool_shared, ReaderConfig,
+    Reader as GraphReader,
+    spawn_query_consumers_with_storage, ReaderConfig,
 };
 use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
 use motlie_db::graph::writer::{
     create_mutation_writer, spawn_mutation_consumer_with_next, Writer as GraphWriter, WriterConfig,
 };
-use motlie_db::graph::{Processor, Storage};
+use motlie_db::graph::Storage;
 use motlie_db::{DataUrl, Id, TimestampMilli};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -86,14 +86,11 @@ fn setup_query_infrastructure(
     let mut storage = Storage::readwrite(db_path);
     storage.ready().unwrap();
     let storage = Arc::new(storage);
-    let graph = Arc::new(Processor::new(storage.clone()));
-
     let reader_config = ReaderConfig {
         channel_buffer_size: 100,
     };
-    let (graph_reader, graph_query_receiver) = create_reader_with_storage(storage, reader_config);
-    let graph_consumer_handles =
-        spawn_query_consumer_pool_shared(graph_query_receiver, graph, 2);
+    let (graph_reader, graph_consumer_handles) =
+        spawn_query_consumers_with_storage(storage, reader_config, 2);
 
     // Fulltext query consumers
     let fulltext_reader_config = FulltextReaderConfig {

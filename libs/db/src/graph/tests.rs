@@ -4955,9 +4955,9 @@ mod versioning_tests {
         }
     }
 
-    /// Validates: Processor implements writer::Processor trait correctly.
+    /// Validates: Processor.process_mutations() works correctly.
     #[tokio::test]
-    async fn test_processor_implements_writer_processor() {
+    async fn test_processor_process_mutations() {
         use std::sync::Arc;
 
         let temp_dir = TempDir::new().unwrap();

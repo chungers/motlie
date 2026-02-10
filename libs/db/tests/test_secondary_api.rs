@@ -59,7 +59,6 @@ async fn test_secondary_instance_basic() {
 
     // Create reader on secondary
     let secondary_storage = std::sync::Arc::new(secondary_storage);
-    let _processor = motlie_db::graph::Processor::new(secondary_storage.clone());
     let (reader, reader_rx) = motlie_db::graph::reader::create_reader_with_storage(
         secondary_storage.clone(),
         motlie_db::graph::reader::ReaderConfig {

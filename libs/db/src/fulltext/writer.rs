@@ -2,8 +2,8 @@
 //!
 //! This module contains:
 //! - `MutationExecutor` trait - defines how mutations index into Tantivy
+//! - `Consumer` - concrete consumer that processes mutations from a channel
 //! - Consumer creation and spawn functions for mutation processing
-//! - `Processor` implementation for `Index`
 //!
 //! The actual `MutationExecutor` implementations for each mutation type
 //! are in the `mutation` module (business logic).
@@ -19,7 +19,8 @@ use tantivy::IndexWriter;
 use super::schema::DocumentFields;
 use super::{Index, Storage};
 use crate::graph::mutation::Mutation;
-use crate::graph::writer::{Consumer, MutationRequest, Processor, WriterConfig};
+use crate::graph::writer::{MutationRequest, WriterConfig};
+use crate::request::new_request_id;
 
 // ============================================================================
 // MutationExecutor Trait
@@ -38,16 +39,15 @@ pub trait MutationExecutor: Send + Sync {
 }
 
 // ============================================================================
-// Processor Implementation for Index
+// Index::process_mutations - inherent async method
 // ============================================================================
 
-#[async_trait::async_trait]
-impl Processor for Index {
+impl Index {
     /// Process a batch of mutations - index content for full-text search.
     ///
     /// Requires the Index to be in readwrite mode.
     #[tracing::instrument(skip(self, mutations), fields(mutation_count = mutations.len()))]
-    async fn process_mutations(&self, mutations: &[Mutation]) -> Result<()> {
+    pub async fn process_mutations(&self, mutations: &[Mutation]) -> Result<()> {
         if mutations.is_empty() {
             return Ok(());
         }
@@ -78,13 +78,11 @@ impl Processor for Index {
                 Mutation::UpdateEdge(m) => m.index(&mut writer, fields)?,
                 Mutation::DeleteNode(m) => m.index(&mut writer, fields)?,
                 Mutation::DeleteEdge(m) => m.index(&mut writer, fields)?,
-                // (claude, 2026-02-07, FIXED: RestoreNode/RestoreEdge no-op for fulltext)
                 // Restore mutations don't need fulltext indexing - they restore from existing summaries
                 // which are already indexed. The restored summary hash points to existing content.
                 Mutation::RestoreNode(_) => {}
                 Mutation::RestoreEdge(_) => {}
                 // Flush is graph-only - no-op for fulltext
-                // (fulltext flush would require a separate mechanism in future phases)
                 Mutation::Flush(_) => {}
             }
         }
@@ -126,6 +124,130 @@ pub(super) fn create_readonly_index(index_path: &Path) -> Index {
 }
 
 // ============================================================================
+// Consumer
+// ============================================================================
+
+/// Concrete consumer that processes fulltext mutations from a channel.
+///
+/// The consumer receives mutation batches and delegates to an Index
+/// for Tantivy indexing operations.
+pub struct Consumer {
+    receiver: mpsc::Receiver<MutationRequest>,
+    config: WriterConfig,
+    index: Index,
+    /// Optional sender to forward mutations to the next consumer in the chain
+    next: Option<mpsc::Sender<MutationRequest>>,
+}
+
+impl Consumer {
+    /// Create a new Consumer.
+    pub fn new(
+        receiver: mpsc::Receiver<MutationRequest>,
+        config: WriterConfig,
+        index: Index,
+    ) -> Self {
+        Self {
+            receiver,
+            config,
+            index,
+            next: None,
+        }
+    }
+
+    /// Create a new Consumer that forwards mutations to the next consumer in the chain.
+    pub fn with_next(
+        receiver: mpsc::Receiver<MutationRequest>,
+        config: WriterConfig,
+        index: Index,
+        next: mpsc::Sender<MutationRequest>,
+    ) -> Self {
+        Self {
+            receiver,
+            config,
+            index,
+            next: Some(next),
+        }
+    }
+
+    /// Process mutations continuously until the channel is closed.
+    #[tracing::instrument(skip(self), name = "fulltext_mutation_consumer")]
+    pub async fn run(mut self) -> Result<()> {
+        tracing::info!(config = ?self.config, "Starting fulltext mutation consumer");
+
+        loop {
+            match self.receiver.recv().await {
+                Some(request) => {
+                    self.process_request(request).await?;
+                }
+                None => {
+                    tracing::info!("Fulltext mutation consumer shutting down - channel closed");
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    /// Process a batch of mutations.
+    #[tracing::instrument(skip(self, request), fields(batch_size = request.payload.len()))]
+    async fn process_request(&self, request: MutationRequest) -> Result<()> {
+        let MutationRequest {
+            payload: mutations,
+            options: _,
+            reply: _,
+            ..
+        } = request;
+
+        // Process all mutations
+        self.index
+            .process_mutations(&mutations)
+            .await
+            .with_context(|| format!("Failed to index {} mutations", mutations.len()))?;
+
+        // Signal completion for any flush markers
+        for mutation in &mutations {
+            if let Mutation::Flush(marker) = mutation {
+                if let Some(completion) = marker.take_completion() {
+                    let _ = completion.send(());
+                }
+            }
+        }
+
+        // Forward to next consumer if configured
+        if let Some(sender) = &self.next {
+            let non_flush_mutations: Vec<_> = mutations
+                .iter()
+                .filter(|m: &&Mutation| !m.is_flush())
+                .cloned()
+                .collect();
+
+            if !non_flush_mutations.is_empty() {
+                if let Err(e) = sender.try_send(MutationRequest {
+                    payload: non_flush_mutations,
+                    options: Default::default(),
+                    reply: None,
+                    timeout: None,
+                    request_id: new_request_id(),
+                    created_at: std::time::Instant::now(),
+                }) {
+                    tracing::warn!(
+                        err = %e,
+                        count = mutations.len(),
+                        "[BUFFER FULL] Next consumer busy, dropping mutations"
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Spawn a fulltext mutation consumer as a background task.
+pub fn spawn_consumer(consumer: Consumer) -> JoinHandle<Result<()>> {
+    tokio::spawn(async move { consumer.run().await })
+}
+
+// ============================================================================
 // Consumer Creation Functions
 // ============================================================================
 
@@ -134,9 +256,9 @@ pub fn create_mutation_consumer(
     receiver: mpsc::Receiver<MutationRequest>,
     config: WriterConfig,
     index_path: &Path,
-) -> Consumer<Index> {
-    let processor = create_readwrite_index(index_path);
-    Consumer::new(receiver, config, processor)
+) -> Consumer {
+    let index = create_readwrite_index(index_path);
+    Consumer::new(receiver, config, index)
 }
 
 /// Create a new full-text mutation consumer with default parameters that chains to another processor
@@ -145,9 +267,9 @@ pub fn create_mutation_consumer_with_next(
     config: WriterConfig,
     index_path: &Path,
     next: mpsc::Sender<MutationRequest>,
-) -> Consumer<Index> {
-    let processor = create_readwrite_index(index_path);
-    Consumer::with_next(receiver, config, processor, next)
+) -> Consumer {
+    let index = create_readwrite_index(index_path);
+    Consumer::with_next(receiver, config, index, next)
 }
 
 /// Create a new full-text mutation consumer with custom BM25 parameters
@@ -157,10 +279,10 @@ pub fn create_mutation_consumer_with_params(
     index_path: &Path,
     _k1: f32,
     _b: f32,
-) -> Consumer<Index> {
+) -> Consumer {
     // Note: BM25 params not currently used - Tantivy uses defaults
-    let processor = create_readwrite_index(index_path);
-    Consumer::new(receiver, config, processor)
+    let index = create_readwrite_index(index_path);
+    Consumer::new(receiver, config, index)
 }
 
 /// Create a new full-text mutation consumer with custom BM25 parameters that chains to another processor
@@ -171,10 +293,10 @@ pub fn create_mutation_consumer_with_params_and_next(
     _k1: f32,
     _b: f32,
     next: mpsc::Sender<MutationRequest>,
-) -> Consumer<Index> {
+) -> Consumer {
     // Note: BM25 params not currently used - Tantivy uses defaults
-    let processor = create_readwrite_index(index_path);
-    Consumer::with_next(receiver, config, processor, next)
+    let index = create_readwrite_index(index_path);
+    Consumer::with_next(receiver, config, index, next)
 }
 
 // ============================================================================
@@ -188,7 +310,7 @@ pub fn spawn_mutation_consumer(
     index_path: &Path,
 ) -> JoinHandle<Result<()>> {
     let consumer = create_mutation_consumer(receiver, config, index_path);
-    crate::graph::writer::spawn_consumer(consumer)
+    spawn_consumer(consumer)
 }
 
 /// Spawn the full-text mutation consumer as a background task with default parameters and chaining.
@@ -226,7 +348,7 @@ pub fn spawn_mutation_consumer_with_next(
     next: mpsc::Sender<MutationRequest>,
 ) -> JoinHandle<Result<()>> {
     let consumer = create_mutation_consumer_with_next(receiver, config, index_path, next);
-    crate::graph::writer::spawn_consumer(consumer)
+    spawn_consumer(consumer)
 }
 
 /// Spawn the full-text mutation consumer as a background task with custom BM25 parameters
@@ -238,7 +360,7 @@ pub fn spawn_mutation_consumer_with_params(
     b: f32,
 ) -> JoinHandle<Result<()>> {
     let consumer = create_mutation_consumer_with_params(receiver, config, index_path, k1, b);
-    crate::graph::writer::spawn_consumer(consumer)
+    spawn_consumer(consumer)
 }
 
 /// Spawn the full-text mutation consumer as a background task with custom BM25 parameters and chaining
@@ -252,7 +374,7 @@ pub fn spawn_mutation_consumer_with_params_and_next(
 ) -> JoinHandle<Result<()>> {
     let consumer =
         create_mutation_consumer_with_params_and_next(receiver, config, index_path, k1, b, next);
-    crate::graph::writer::spawn_consumer(consumer)
+    spawn_consumer(consumer)
 }
 
 // ============================================================================

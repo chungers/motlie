@@ -67,12 +67,8 @@ pub use reader::{
     // Query consumer functions
     create_reader_with_storage,
     spawn_query_consumers_with_storage,
-    spawn_consumer_pool_with_processor,
     spawn_query_consumer,
-    spawn_query_consumer_pool_shared,
     spawn_query_consumer_pool_readonly,
-    spawn_query_consumer_with_processor,
-    Consumer as QueryConsumer,
     QueryExecutor,
     Reader,
     ReaderConfig,
@@ -101,14 +97,11 @@ pub use writer::{
     spawn_mutation_consumer_with_next,
     spawn_mutation_consumer_with_receiver,
     Consumer as MutationConsumer,
-    MutationExecutor,
-    Processor as MutationProcessor,
     Writer,
     WriterConfig,
 };
-
 // Processor struct - the central graph processing hub
-pub use processor::Processor;
+pub(crate) use processor::Processor;
 
 // Note: SystemInfo functionality is now in Subsystem which implements SubsystemInfo
 // Graph struct removed - use processor::Processor instead (claude, 2026-02-07)
