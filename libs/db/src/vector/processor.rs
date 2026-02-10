@@ -33,16 +33,15 @@ use super::id::IdAllocator;
 use super::quantization::RaBitQ;
 use super::registry::EmbeddingRegistry;
 use super::schema::{
-    EmbeddingCode, EmbeddingSpec, EmbeddingSpecCfKey, EmbeddingSpecs, ExternalKey, GraphMeta,
-    GraphMetaCfKey, GraphMetaField, IdForward, IdForwardCfKey, IdReverse, IdReverseCfKey, Pending,
-    VecId, VecMeta, VecMetaCfKey, VectorCfKey, Vectors,
+    EmbeddingCode, EmbeddingSpec, EmbeddingSpecCfKey, EmbeddingSpecs, ExternalKey, Pending, VecId,
 };
-// These types are only used in tests
 #[cfg(test)]
-use super::schema::GraphMetaCfValue;
+use super::schema::{
+    GraphMeta, GraphMetaCfKey, GraphMetaCfValue, GraphMetaField, IdForward, IdForwardCfKey,
+};
 use super::search::{SearchConfig, SearchStrategy};
 use super::Storage;
-use crate::rocksdb::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord};
+use crate::rocksdb::{ColumnFamily, ColumnFamilySerde};
 use crate::Id;
 
 // ============================================================================
@@ -682,19 +681,7 @@ impl Processor {
         embedding: &Embedding,
         external_key: &ExternalKey,
     ) -> Result<Option<VecId>> {
-        let embedding_code = embedding.code();
-        let txn_db = self.storage.transaction_db()?;
-        let forward_cf = txn_db
-            .cf_handle(IdForward::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("IdForward CF not found"))?;
-
-        let forward_key = IdForwardCfKey(embedding_code, external_key.clone());
-        let key_bytes = IdForward::key_to_bytes(&forward_key);
-
-        match txn_db.get_cf(&forward_cf, &key_bytes)? {
-            Some(bytes) => Ok(Some(IdForward::value_from_bytes(&bytes)?.0)),
-            None => Ok(None),
-        }
+        super::ops::read::get_internal_id(&self.storage, embedding.code(), external_key)
     }
 
     /// Look up external key for an internal vec_id.
@@ -711,19 +698,7 @@ impl Processor {
         embedding: &Embedding,
         vec_id: VecId,
     ) -> Result<Option<ExternalKey>> {
-        let embedding_code = embedding.code();
-        let txn_db = self.storage.transaction_db()?;
-        let reverse_cf = txn_db
-            .cf_handle(IdReverse::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("IdReverse CF not found"))?;
-
-        let reverse_key = IdReverseCfKey(embedding_code, vec_id);
-        let key_bytes = IdReverse::key_to_bytes(&reverse_key);
-
-        match txn_db.get_cf(&reverse_cf, &key_bytes)? {
-            Some(bytes) => Ok(Some(IdReverse::value_from_bytes(&bytes)?.0)),
-            None => Ok(None),
-        }
+        super::ops::read::get_external_id(&self.storage, embedding.code(), vec_id)
     }
 
     /// Search for nearest neighbors in an embedding space.
@@ -765,7 +740,7 @@ impl Processor {
     ) -> Result<Vec<SearchResult>> {
         let embedding_code = embedding.code();
 
-        // 1. Validate dimension (Embedding already validated via registry)
+        // 1. Validate dimension
         if query.len() != embedding.dim() as usize {
             return Err(anyhow::anyhow!(
                 "Dimension mismatch: expected {}, got {}",
@@ -774,109 +749,22 @@ impl Processor {
             ));
         }
 
-        // 2. Check HNSW is enabled (test-only: can be disabled for testing)
+        // 2. Check HNSW is enabled (test-only)
         #[cfg(test)]
         if self.skip_hnsw_for_testing {
             return Err(anyhow::anyhow!("HNSW disabled for testing"));
         }
 
         // 3. Validate SpecHash (drift detection)
-        // This ensures the index was built with the current EmbeddingSpec configuration
-        {
-            let txn_db = self.storage.transaction_db()?;
-
-            // Get current EmbeddingSpec from storage
-            let specs_cf = txn_db
-                .cf_handle(EmbeddingSpecs::CF_NAME)
-                .ok_or_else(|| anyhow::anyhow!("EmbeddingSpecs CF not found"))?;
-            let spec_key = EmbeddingSpecCfKey(embedding_code);
-            let spec_bytes = txn_db
-                .get_cf(&specs_cf, EmbeddingSpecs::key_to_bytes(&spec_key))?
-                .ok_or_else(|| anyhow::anyhow!("EmbeddingSpec not found for {}", embedding_code))?;
-            let embedding_spec = EmbeddingSpecs::value_from_bytes(&spec_bytes)?.0;
-
-            // Compute current hash
-            let current_hash = embedding_spec.compute_spec_hash();
-
-            // Check stored hash
-            let graph_meta_cf = txn_db
-                .cf_handle(GraphMeta::CF_NAME)
-                .ok_or_else(|| anyhow::anyhow!("GraphMeta CF not found"))?;
-            let hash_key = GraphMetaCfKey::spec_hash(embedding_code);
-            let hash_key_bytes = GraphMeta::key_to_bytes(&hash_key);
-
-            if let Some(stored_bytes) = txn_db.get_cf(&graph_meta_cf, &hash_key_bytes)? {
-                let stored_value = GraphMeta::value_from_bytes(&hash_key, &stored_bytes)?;
-                if let GraphMetaField::SpecHash(stored_hash) = stored_value.0 {
-                    if stored_hash != current_hash {
-                        return Err(anyhow::anyhow!(
-                            "EmbeddingSpec changed since index build (hash {} != {}). Rebuild required.",
-                            current_hash,
-                            stored_hash
-                        ));
-                    }
-                }
-            } else {
-                // Legacy index without SpecHash - drift check skipped
-                // This is expected for indexes built before Phase 5.6
-                tracing::warn!(
-                    embedding = embedding_code,
-                    "Legacy index without SpecHash - drift check skipped"
-                );
-            }
-        }
+        super::ops::search::validate_spec_hash(&self.storage, embedding_code)?;
 
         // 4. Get or create HNSW index
         let index = self
             .get_or_create_index(embedding_code)
             .ok_or_else(|| anyhow::anyhow!("Failed to get HNSW index for embedding {}", embedding_code))?;
 
-        // 5. Perform HNSW search with overfetch to handle tombstones
-        // Overfetch by 2x to ensure we get enough live results after filtering
-        // Ensure ef_search >= overfetch_k so HNSW can return enough candidates
-        let overfetch_k = k * 2;
-        let effective_ef = ef_search.max(overfetch_k);
-        let raw_results = index.search(&self.storage, query, overfetch_k, effective_ef)?;
-
-        // 6. Filter deleted vectors using batched IdReverse lookup
-        let txn_db = self.storage.transaction_db()?;
-        let reverse_cf = txn_db
-            .cf_handle(IdReverse::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("IdReverse CF not found"))?;
-
-        // Build batch of keys for multi_get
-        let keys: Vec<_> = raw_results
-            .iter()
-            .map(|(_, vec_id)| {
-                let key = IdReverseCfKey(embedding_code, *vec_id);
-                IdReverse::key_to_bytes(&key)
-            })
-            .collect();
-
-        // Batch lookup all IdReverse keys at once
-        let key_refs: Vec<_> = keys.iter().map(|k: &Vec<u8>| (&reverse_cf, k.as_slice())).collect();
-        let values = txn_db.multi_get_cf(key_refs);
-
-        // Filter and resolve external IDs, truncate to k
-        let mut results = Vec::with_capacity(k);
-        for (i, value_result) in values.into_iter().enumerate() {
-            if results.len() >= k {
-                break;
-            }
-            if let Ok(Some(bytes)) = value_result {
-                let external_key = IdReverse::value_from_bytes(&bytes)?.0;
-                let (distance, vec_id) = raw_results[i];
-                results.push(SearchResult {
-                    embedding_code,
-                    external_key,
-                    vec_id,
-                    distance,
-                });
-            }
-            // Skip deleted vectors (IdReverse missing or error)
-        }
-
-        Ok(results)
+        // 5. Search + filter + resolve via ops
+        super::ops::search::search_exact(&self.storage, &index, embedding_code, query, k, ef_search)
     }
 
     /// Search using a SearchConfig for strategy-based dispatch.
@@ -914,7 +802,6 @@ impl Processor {
             .ok_or_else(|| anyhow::anyhow!("Unknown embedding code: {}", embedding_code))?;
 
         // 2. Validate SearchConfig embedding matches registry spec
-        // This prevents stale or forged configs from being used
         let config_embedding = config.embedding();
         if config_embedding.dim() != spec.dim() {
             return Err(anyhow::anyhow!(
@@ -930,7 +817,6 @@ impl Processor {
                 spec.distance()
             ));
         }
-        // 2a. Validate storage_type (redundant with SpecHash, but explicit for clarity)
         if config_embedding.storage_type() != spec.storage_type() {
             return Err(anyhow::anyhow!(
                 "SearchConfig embedding storage_type mismatch: config has {:?}, registry has {:?}",
@@ -939,56 +825,10 @@ impl Processor {
             ));
         }
 
-        // 2b. Validate registry spec hash vs stored GraphMeta::SpecHash (drift detection)
-        // This ensures the index was built with the current EmbeddingSpec configuration
-        {
-            use super::schema::{EmbeddingSpecCfKey, EmbeddingSpecs};
-            use crate::rocksdb::ColumnFamilySerde;
+        // 3. Validate SpecHash (drift detection)
+        super::ops::search::validate_spec_hash(&self.storage, embedding_code)?;
 
-            let txn_db = self.storage.transaction_db()?;
-
-            // Get current EmbeddingSpec from storage
-            let specs_cf = txn_db
-                .cf_handle(EmbeddingSpecs::CF_NAME)
-                .ok_or_else(|| anyhow::anyhow!("EmbeddingSpecs CF not found"))?;
-            let spec_key = EmbeddingSpecCfKey(embedding_code);
-            let spec_bytes = txn_db
-                .get_cf(&specs_cf, EmbeddingSpecs::key_to_bytes(&spec_key))?
-                .ok_or_else(|| anyhow::anyhow!("EmbeddingSpec not found for {}", embedding_code))?;
-            let embedding_spec = EmbeddingSpecs::value_from_bytes(&spec_bytes)?.0;
-
-            // Compute current hash
-            let current_hash = embedding_spec.compute_spec_hash();
-
-            // Check stored hash
-            let graph_meta_cf = txn_db
-                .cf_handle(GraphMeta::CF_NAME)
-                .ok_or_else(|| anyhow::anyhow!("GraphMeta CF not found"))?;
-            let hash_key = GraphMetaCfKey::spec_hash(embedding_code);
-            let hash_key_bytes = GraphMeta::key_to_bytes(&hash_key);
-
-            if let Some(stored_bytes) = txn_db.get_cf(&graph_meta_cf, &hash_key_bytes)? {
-                let stored_value = GraphMeta::value_from_bytes(&hash_key, &stored_bytes)?;
-                if let GraphMetaField::SpecHash(stored_hash) = stored_value.0 {
-                    if stored_hash != current_hash {
-                        return Err(anyhow::anyhow!(
-                            "EmbeddingSpec changed since index build (hash {} != {}). Rebuild required.",
-                            current_hash,
-                            stored_hash
-                        ));
-                    }
-                }
-            } else {
-                // Legacy index without SpecHash - drift check skipped
-                // This is expected for indexes built before Phase 5.6
-                tracing::warn!(
-                    embedding = embedding_code,
-                    "Legacy index without SpecHash - drift check skipped"
-                );
-            }
-        }
-
-        // 3. Validate query dimension
+        // 4. Validate query dimension
         if query.len() != spec.dim() as usize {
             return Err(anyhow::anyhow!(
                 "Query dimension mismatch: expected {}, got {}",
@@ -997,264 +837,59 @@ impl Processor {
             ));
         }
 
-        // 4. Check HNSW is enabled (test-only: can be disabled for testing)
+        // 5. Check HNSW is enabled (test-only)
         #[cfg(test)]
         if self.skip_hnsw_for_testing {
             return Err(anyhow::anyhow!("HNSW disabled for testing"));
         }
 
-        // 5. Get HNSW index
+        // 6. Resolve resources from DashMaps
         let index = self
             .get_or_create_index(embedding_code)
             .ok_or_else(|| anyhow::anyhow!("Failed to get HNSW index"))?;
 
-        // 6. Dispatch based on strategy
-        let k = config.k();
-        let ef = config.ef();
-        let overfetch_k = k * 2;
-        let effective_ef = ef.max(overfetch_k);
-
-        let raw_results = match config.strategy() {
-            SearchStrategy::Exact => {
-                // Standard HNSW search with exact distance
-                index.search(&self.storage, query, overfetch_k, effective_ef)?
+        let encoder = match config.strategy() {
+            SearchStrategy::RaBitQ { use_cache: true } => {
+                self.get_or_create_encoder(embedding_code)
             }
-            SearchStrategy::RaBitQ { use_cache } => {
-                if use_cache {
-                    // Two-phase search with cached binary codes
-                    let encoder = self
-                        .get_or_create_encoder(embedding_code)
-                        .ok_or_else(|| anyhow::anyhow!("RaBitQ encoder not available"))?;
-                    index.search_with_rabitq_cached(
-                        &self.storage,
-                        query,
-                        &encoder,
-                        &self.code_cache,
-                        overfetch_k,
-                        effective_ef,
-                        config.rerank_factor(),
-                    )?
-                } else {
-                    // RaBitQ without cache - fall back to exact for now
-                    // (uncached RaBitQ would need to read from RocksDB, defeating the purpose)
-                    index.search(&self.storage, query, overfetch_k, effective_ef)?
-                }
-            }
+            _ => None,
         };
 
-        // 7. Filter deleted vectors using batched IdReverse + VecMeta lookup
-        // Primary filter: IdReverse (deleted vectors have no reverse mapping)
-        // Defense-in-depth: VecMeta lifecycle check (Task 8.1.5)
-        let txn_db = self.storage.transaction_db()?;
-        let reverse_cf = txn_db
-            .cf_handle(IdReverse::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("IdReverse CF not found"))?;
-        let meta_cf = txn_db
-            .cf_handle(VecMeta::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("VecMeta CF not found"))?;
-
-        // Batch fetch IdReverse
-        let reverse_keys: Vec<_> = raw_results
-            .iter()
-            .map(|(_, vec_id)| {
-                let key = IdReverseCfKey(embedding_code, *vec_id);
-                IdReverse::key_to_bytes(&key)
-            })
-            .collect();
-
-        let reverse_refs: Vec<_> = reverse_keys
-            .iter()
-            .map(|k: &Vec<u8>| (&reverse_cf, k.as_slice()))
-            .collect();
-        let reverse_values = txn_db.multi_get_cf(reverse_refs);
-
-        // Batch fetch VecMeta for defense-in-depth deleted check
-        let meta_keys: Vec<_> = raw_results
-            .iter()
-            .map(|(_, vec_id)| {
-                let key = VecMetaCfKey(embedding_code, *vec_id);
-                VecMeta::key_to_bytes(&key)
-            })
-            .collect();
-
-        let meta_refs: Vec<_> = meta_keys
-            .iter()
-            .map(|k: &Vec<u8>| (&meta_cf, k.as_slice()))
-            .collect();
-        let meta_values = txn_db.multi_get_cf(meta_refs);
-
-        // Collect HNSW results (may contain fewer than k due to deleted vectors)
-        let mut hnsw_results = Vec::with_capacity(k * 2);
-        for (i, value_result) in reverse_values.into_iter().enumerate() {
-            if let Ok(Some(bytes)) = value_result {
-                // Primary filter passed: IdReverse exists
-                // Defense-in-depth: Check VecMeta lifecycle (Task 8.1.5)
-                if let Ok(Some(meta_bytes)) = &meta_values[i] {
-                    if let Ok(meta) = VecMeta::value_from_bytes(meta_bytes) {
-                        if meta.0.is_deleted() {
-                            // VecMeta indicates deleted - skip (defense-in-depth)
-                            // This catches edge cases where IdReverse wasn't cleaned up
-                            continue;
-                        }
-                    }
-                }
-
-                let external_key = IdReverse::value_from_bytes(&bytes)?.0;
-                let (distance, vec_id) = raw_results[i];
-                hnsw_results.push(SearchResult {
-                    embedding_code,
-                    external_key,
-                    vec_id,
-                    distance,
-                });
-            }
-        }
+        // 7. Dispatch search + filter via ops
+        let mut results = super::ops::search::search_with_strategy(
+            &self.storage,
+            &index,
+            encoder.as_deref(),
+            &self.code_cache,
+            embedding_code,
+            &config.strategy(),
+            query,
+            config.k(),
+            config.ef(),
+            config.rerank_factor(),
+        )?;
 
         // 8. Scan pending vectors if fallback is enabled
         if config.has_pending_fallback() {
-            let pending_results = self.scan_pending_vectors(
+            let pending_results = super::ops::search::scan_pending_vectors(
+                &self.storage,
                 config.embedding(),
                 query,
                 config.pending_scan_limit(),
             )?;
 
-            if !pending_results.is_empty() {
-                // Track vec_ids already in HNSW results to avoid duplicates
-                // (a vector could theoretically be in both if there's a race condition)
-                let hnsw_vec_ids: std::collections::HashSet<VecId> =
-                    hnsw_results.iter().map(|r| r.vec_id).collect();
-
-                // Add pending results that aren't duplicates
-                for (distance, vec_id, external_key) in pending_results {
-                    if !hnsw_vec_ids.contains(&vec_id) {
-                        hnsw_results.push(SearchResult {
-                            embedding_code,
-                            external_key,
-                            vec_id,
-                            distance,
-                        });
-                    }
-                }
-
-                // Re-sort merged results by distance
-                hnsw_results.sort_by(|a, b| {
-                    a.distance
-                        .partial_cmp(&b.distance)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-            }
+            super::ops::search::merge_results(
+                &mut results,
+                pending_results,
+                embedding_code,
+                config.k(),
+            );
         }
 
-        // Truncate to requested k
-        hnsw_results.truncate(k);
-        Ok(hnsw_results)
-    }
-
-    /// Scan pending vectors and compute brute-force distances.
-    ///
-    /// This function iterates the Pending CF for the given embedding and computes
-    /// exact distances for up to `limit` pending vectors. These results can then
-    /// be merged with HNSW search results to ensure immediate searchability of
-    /// newly inserted vectors.
-    ///
-    /// # Arguments
-    /// * `embedding` - The embedding specification (for distance computation)
-    /// * `query` - Query vector
-    /// * `limit` - Maximum number of pending vectors to scan
-    ///
-    /// # Returns
-    /// Vector of (distance, vec_id, external_key) tuples, sorted by distance ascending.
-    fn scan_pending_vectors(
-        &self,
-        embedding: &Embedding,
-        query: &[f32],
-        limit: usize,
-    ) -> Result<Vec<(f32, VecId, ExternalKey)>> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-
-        let embedding_code = embedding.code();
-        let txn_db = self.storage.transaction_db()?;
-
-        // Get CF handles
-        let pending_cf = txn_db
-            .cf_handle(Pending::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("Pending CF not found"))?;
-        let vectors_cf = txn_db
-            .cf_handle(Vectors::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
-        let meta_cf = txn_db
-            .cf_handle(VecMeta::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("VecMeta CF not found"))?;
-        let reverse_cf = txn_db
-            .cf_handle(IdReverse::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("IdReverse CF not found"))?;
-
-        // Get storage type for proper vector deserialization (f32 vs f16)
-        let storage_type = embedding.storage_type();
-
-        // Iterate pending entries for this embedding
-        let prefix = Pending::prefix_for_embedding(embedding_code);
-        let iter = txn_db.iterator_cf(
-            &pending_cf,
-            rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
-        );
-
-        let mut results = Vec::with_capacity(limit.min(1024));
-
-        for item in iter {
-            if results.len() >= limit {
-                break;
-            }
-
-            let (key, _value) = item?;
-
-            // Check prefix match (stop when we leave this embedding's range)
-            if key.len() < 8 || key[0..8] != prefix {
-                break;
-            }
-
-            // Parse the pending key to get vec_id
-            let parsed = Pending::key_from_bytes(&key)?;
-            let vec_id = parsed.2;
-
-            // Check VecMeta lifecycle - skip if deleted (PendingDeleted state)
-            // This handles the case where a vector was deleted before async indexing completed
-            let meta_key = VecMetaCfKey(embedding_code, vec_id);
-            if let Some(meta_bytes) = txn_db.get_cf(&meta_cf, VecMeta::key_to_bytes(&meta_key))? {
-                let meta = VecMeta::value_from_bytes(&meta_bytes)?.0;
-                if meta.is_deleted() {
-                    continue; // Skip deleted vectors (PendingDeleted state)
-                }
-            }
-
-            // Load vector data from Vectors CF using proper storage_type
-            let vec_key = VectorCfKey(embedding_code, vec_id);
-            let vec_bytes = match txn_db.get_cf(&vectors_cf, Vectors::key_to_bytes(&vec_key))? {
-                Some(bytes) => bytes,
-                None => continue, // Vector not found, skip
-            };
-            let vector_data = Vectors::value_from_bytes_typed(&vec_bytes, storage_type)?;
-
-            // Compute exact distance
-            let distance = embedding.compute_distance(query, &vector_data);
-
-            // Look up external key via IdReverse
-            let reverse_key = IdReverseCfKey(embedding_code, vec_id);
-            let external_key = match txn_db.get_cf(&reverse_cf, IdReverse::key_to_bytes(&reverse_key))? {
-                Some(bytes) => IdReverse::value_from_bytes(&bytes)?.0,
-                None => continue, // No external key mapping (deleted?), skip
-            };
-
-            results.push((distance, vec_id, external_key));
-        }
-
-        // Sort by distance ascending
-        results.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-
+        results.truncate(config.k());
         Ok(results)
     }
+
 }
 
 // ============================================================================

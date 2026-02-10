@@ -2073,8 +2073,9 @@ pub use writer::{
 };
 
 // Query types and infrastructure (following graph::query pattern)
+// Note: QueryExecutor is now pub(crate), not re-exported
 pub use query::{
-    GetExternalId, GetInternalId, GetVector, Query, QueryExecutor,
+    GetExternalId, GetInternalId, GetVector, Query,
     ResolveIds, SearchKNN,
 };
 pub use reader::{

@@ -114,7 +114,7 @@ pub use writer::{
 pub use crate::reader::Runnable;
 pub use query::{
     FindEmbeddings, GetExternalId, GetInternalId, GetVector, ListEmbeddings, Query,
-    QueryExecutor, ResolveIds, SearchKNN,
+    ResolveIds, SearchKNN,
 };
 pub use reader::{
     create_reader_with_storage,
