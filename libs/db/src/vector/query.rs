@@ -26,13 +26,9 @@ use anyhow::Result;
 
 use super::embedding::Embedding;
 use super::processor::{Processor, SearchResult};
-use super::schema::{
-    EmbeddingCode, ExternalKey, IdForward, IdForwardCfKey, IdReverse, IdReverseCfKey, VecId, VectorCfKey,
-    Vectors,
-};
+use super::schema::{EmbeddingCode, ExternalKey, VecId};
 use super::search::SearchConfig;
 use crate::request::{new_request_id, RequestEnvelope, RequestMeta};
-use crate::rocksdb::ColumnFamily;
 use crate::Id;
 
 // ============================================================================
@@ -156,7 +152,7 @@ impl RequestMeta for Query {
 /// Each query type implements this to define its execution logic.
 /// This follows the same pattern as `graph::reader::QueryExecutor`.
 #[async_trait::async_trait]
-pub trait QueryExecutor: Send + Sync {
+pub(crate) trait QueryExecutor: Send + Sync {
     /// The type of result this query produces
     type Output: Send;
 
@@ -205,37 +201,8 @@ impl QueryExecutor for GetVector {
     type Output = Option<Vec<f32>>;
 
     async fn execute(&self, processor: &Processor) -> Result<Self::Output> {
-        // 1. Look up the internal vec_id from the external ID
-        let forward_key = IdForwardCfKey(self.embedding, ExternalKey::NodeId(self.id));
-        let forward_key_bytes = IdForward::key_to_bytes(&forward_key);
-
-        let txn_db = processor.storage().transaction_db()?;
-        let forward_cf = txn_db
-            .cf_handle(IdForward::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("IdForward CF not found"))?;
-
-        let vec_id = match txn_db.get_cf(&forward_cf, &forward_key_bytes)? {
-            Some(bytes) => IdForward::value_from_bytes(&bytes)?.0,
-            None => return Ok(None), // External ID not found
-        };
-
-        // 2. Look up the vector data
-        let vec_key = VectorCfKey(self.embedding, vec_id);
-        let vec_key_bytes = Vectors::key_to_bytes(&vec_key);
-
-        let vectors_cf = txn_db
-            .cf_handle(Vectors::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
-
-        match txn_db.get_cf(&vectors_cf, &vec_key_bytes)? {
-            Some(bytes) => {
-                let value = Vectors::value_from_bytes(&bytes)?;
-                Ok(Some(value.0))
-            }
-            None => Ok(None), // Vector data not found (inconsistent state)
-        }
+        super::ops::read::get_vector(processor.storage(), self.embedding, self.id)
     }
-
 }
 
 // ============================================================================
@@ -267,20 +234,8 @@ impl QueryExecutor for GetInternalId {
     type Output = Option<VecId>;
 
     async fn execute(&self, processor: &Processor) -> Result<Self::Output> {
-        let forward_key = IdForwardCfKey(self.embedding, self.external_key.clone());
-        let forward_key_bytes = IdForward::key_to_bytes(&forward_key);
-
-        let txn_db = processor.storage().transaction_db()?;
-        let forward_cf = txn_db
-            .cf_handle(IdForward::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("IdForward CF not found"))?;
-
-        match txn_db.get_cf(&forward_cf, &forward_key_bytes)? {
-            Some(bytes) => Ok(Some(IdForward::value_from_bytes(&bytes)?.0)),
-            None => Ok(None),
-        }
+        super::ops::read::get_internal_id(processor.storage(), self.embedding, &self.external_key)
     }
-
 }
 
 // ============================================================================
@@ -312,23 +267,8 @@ impl QueryExecutor for GetExternalId {
     type Output = Option<ExternalKey>;
 
     async fn execute(&self, processor: &Processor) -> Result<Self::Output> {
-        let reverse_key = IdReverseCfKey(self.embedding, self.vec_id);
-        let reverse_key_bytes = IdReverse::key_to_bytes(&reverse_key);
-
-        let txn_db = processor.storage().transaction_db()?;
-        let reverse_cf = txn_db
-            .cf_handle(IdReverse::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("IdReverse CF not found"))?;
-
-        match txn_db.get_cf(&reverse_cf, &reverse_key_bytes)? {
-            Some(bytes) => {
-                let external_key = IdReverse::value_from_bytes(&bytes)?.0;
-                Ok(Some(external_key))
-            }
-            None => Ok(None),
-        }
+        super::ops::read::get_external_id(processor.storage(), self.embedding, self.vec_id)
     }
-
 }
 
 // ============================================================================
@@ -359,41 +299,7 @@ impl QueryExecutor for ResolveIds {
     type Output = Vec<Option<ExternalKey>>;
 
     async fn execute(&self, processor: &Processor) -> Result<Self::Output> {
-        if self.vec_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let txn_db = processor.storage().transaction_db()?;
-        let reverse_cf = txn_db
-            .cf_handle(IdReverse::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("IdReverse CF not found"))?;
-
-        // Build keys for multi_get
-        let keys: Vec<Vec<u8>> = self
-            .vec_ids
-            .iter()
-            .map(|&vec_id| {
-                let key = IdReverseCfKey(self.embedding, vec_id);
-                IdReverse::key_to_bytes(&key)
-            })
-            .collect();
-
-        // Perform batch lookup using multi_get_cf (Phase 3 optimization)
-        let results: Vec<std::result::Result<Option<Vec<u8>>, rocksdb::Error>> =
-            txn_db.multi_get_cf(keys.iter().map(|k| (&reverse_cf, k.as_slice())));
-
-        // Parse results, converting RocksDB errors to None
-        let resolved: Vec<Option<ExternalKey>> = results
-            .into_iter()
-            .map(|result| {
-                result
-                    .ok()
-                    .flatten()
-                    .and_then(|bytes| IdReverse::value_from_bytes(&bytes).ok().map(|v| v.0))
-            })
-            .collect();
-
-        Ok(resolved)
+        super::ops::read::resolve_ids(processor.storage(), self.embedding, &self.vec_ids)
     }
 }
 
@@ -431,7 +337,7 @@ impl QueryExecutor for ListEmbeddings {
     type Output = Vec<Embedding>;
 
     async fn execute(&self, processor: &Processor) -> Result<Self::Output> {
-        Ok(processor.registry().list_all())
+        Ok(super::ops::read::list_embeddings(processor.registry()))
     }
 }
 
@@ -485,7 +391,7 @@ impl QueryExecutor for FindEmbeddings {
     type Output = Vec<Embedding>;
 
     async fn execute(&self, processor: &Processor) -> Result<Self::Output> {
-        Ok(processor.registry().find(&self.filter))
+        Ok(super::ops::read::find_embeddings(processor.registry(), &self.filter))
     }
 }
 
