@@ -33,6 +33,7 @@ The graph module provides a content-addressed, versioned graph database on top o
 - **Two API styles**: Sync (Processor) and Async (Writer/Reader)
 
 See `ARCH.md` for current architecture and `VERSIONING.md` for temporal/rollback semantics.
+(codex, 2026-02-10, decision: validated examples against current API; updated for `as_of`, `SystemTimeMillis`, and `ActiveTimeMillis` usage.)
 
 ### Key Concepts
 
@@ -62,12 +63,13 @@ for public usage. Shown here for internal reference.
 ```rust
 use motlie_db::graph::processor::Processor;
 use motlie_db::graph::Storage;
-use motlie_db::graph::mutation::{AddNode, Mutation};
+use motlie_db::graph::mutation::{AddEdge, AddNode, Mutation};
+use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
 use motlie_db::{Id, TimestampMilli};
 use std::sync::Arc;
 
 // Setup
-let mut storage = Storage::readwrite(&db_path)?;
+let mut storage = Storage::readwrite(&db_path);
 storage.ready()?;
 let processor = Processor::new(Arc::new(storage));
 
@@ -83,8 +85,22 @@ processor.execute_mutation(&mutation)?;
 
 // Batch mutations (atomic)
 let mutations: Vec<Mutation> = vec![
-    AddNode { /* ... */ }.into(),
-    AddEdge { /* ... */ }.into(),
+    AddNode {
+        id: Id::new(),
+        ts_millis: TimestampMilli::now(),
+        name: "Bob".to_string(),
+        summary: NodeSummary::from_text("A person"),
+        valid_range: None,
+    }.into(),
+    AddEdge {
+        source_node_id: Id::new(),
+        target_node_id: Id::new(),
+        ts_millis: TimestampMilli::now(),
+        name: "knows".to_string(),
+        summary: EdgeSummary::from_text("Met recently"),
+        weight: None,
+        valid_range: None,
+    }.into(),
 ];
 processor.process_mutations(&mutations)?;
 ```
@@ -120,9 +136,14 @@ use motlie_db::graph::writer::spawn_mutation_consumer_with_storage;
 use motlie_db::graph::reader::spawn_query_consumers_with_storage;
 use motlie_db::writer::Runnable as MutationRunnable;
 use motlie_db::reader::Runnable as QueryRunnable;
+use std::sync::Arc;
 use std::time::Duration;
 
-// Setup writer and reader
+// Setup storage, writer, and reader
+let mut storage = motlie_db::graph::Storage::readwrite(&db_path);
+storage.ready()?;
+let storage = Arc::new(storage);
+
 let (writer, _w_handle) = spawn_mutation_consumer_with_storage(
     storage.clone(),
     WriterConfig::default()
@@ -251,15 +272,15 @@ let (id, version) = reply.payload;
 
 | Query | Purpose | Key Fields |
 |-------|---------|------------|
-| `NodeById` | Get node by ID | `id`, `as_of?` |
-| `NodesByIdsMulti` | Get multiple nodes by IDs | `ids`, `as_of?` |
-| `OutgoingEdges` | Get edges from a node | `src_id`, `as_of?` |
-| `IncomingEdges` | Get edges to a node | `dst_id`, `as_of?` |
-| `EdgeSummaryBySrcDstName` | Get edge by topology | `src_id`, `dst_id`, `name`, `as_of?` |
-| `NodeFragmentsByIdTimeRange` | Get node fragments in time range | `id`, `start`, `end` |
-| `EdgeFragmentsByIdTimeRange` | Get edge fragments in time range | `src_id`, `dst_id`, `name`, `start`, `end` |
-| `AllNodes` | Scan all nodes | `limit?`, `cursor?` |
-| `AllEdges` | Scan all edges | `limit?`, `cursor?` |
+| `NodeById` | Get node by ID | `id`, `reference_ts_millis?`, `as_of?` |
+| `NodesByIdsMulti` | Get multiple nodes by IDs | `ids`, `reference_ts_millis?`, `as_of?` |
+| `OutgoingEdges` | Get edges from a node | `src_id`, `reference_ts_millis?`, `as_of?` |
+| `IncomingEdges` | Get edges to a node | `dst_id`, `reference_ts_millis?`, `as_of?` |
+| `EdgeSummaryBySrcDstName` | Get edge by topology | `src_id`, `dst_id`, `name`, `reference_ts_millis?`, `as_of?` |
+| `NodeFragmentsByIdTimeRange` | Get node fragments in time range | `id`, `start`, `end`, `reference_ts_millis?` |
+| `EdgeFragmentsByIdTimeRange` | Get edge fragments in time range | `src_id`, `dst_id`, `name`, `start`, `end`, `reference_ts_millis?` |
+| `AllNodes` | Scan all nodes | `limit?`, `cursor?`, `reference_ts_millis?` |
+| `AllEdges` | Scan all edges | `limit?`, `cursor?`, `reference_ts_millis?` |
 | `NodesBySummaryHash` | Reverse lookup by summary hash | `hash` |
 | `EdgesBySummaryHash` | Reverse lookup by summary hash | `hash` |
 
@@ -413,13 +434,14 @@ UpdateNode {
 
 ```rust
 use motlie_db::graph::schema::ActivePeriod;
+use motlie_db::ActiveTimeMillis;
 
 UpdateNode {
     id: alice_id,
     expected_version: version,
     new_active_period: Some(ActivePeriod::active_between(
-        TimestampMilli::now(),
-        TimestampMilli(1_800_000_000_000),  // Future date
+        ActiveTimeMillis(1_771_286_400_000),  // 2026-02-17T00:00:00Z
+        ActiveTimeMillis(1_771_459_200_000),  // 2026-02-19T00:00:00Z
     )),
     new_summary: None,  // No change
 }
@@ -465,6 +487,8 @@ UpdateEdge {
 ### Update Multiple Edge Fields
 
 ```rust
+use motlie_db::ActiveTimeMillis;
+
 UpdateEdge {
     src_id: alice_id,
     dst_id: bob_id,
@@ -472,7 +496,7 @@ UpdateEdge {
     expected_version: version,
     new_weight: Some(Some(1.0)),
     new_active_period: Some(ActivePeriod::active_from(
-        TimestampMilli::now(),
+        ActiveTimeMillis(1_771_286_400_000),  // 2026-02-17T00:00:00Z
     )),
     new_summary: Some(EdgeSummary::from_text("Close friends since 2024")),
 }
@@ -485,6 +509,7 @@ UpdateEdge {
 ## Version Queries & Time-Travel
 
 Every mutation creates a new version with `ValidSince` timestamp. Time-travel queries use `as_of` to retrieve historical state.
+(codex, 2026-02-10, decision: `as_of` uses `SystemTimeMillis`; `reference_ts_millis` uses `ActiveTimeMillis`.)
 
 ### Query Current Version
 
@@ -500,8 +525,12 @@ println!("Current version: {}", version);
 ### Query at Specific Point in Time
 
 ```rust
+use motlie_db::{SystemTimeMillis, TimestampMilli};
+
 // Query state as it was at a specific system timestamp
-let historical_timestamp = TimestampMilli(1_700_000_000_000);  // Nov 2023
+// Convert a wall-clock datetime to a system timestamp (ms since epoch).
+// Example: 2023-11-15T00:00:00Z
+let historical_timestamp = SystemTimeMillis(1_700_000_000_000);
 
 let (name, _summary, version) = NodeById::as_of(alice_id, historical_timestamp, None)
     .run(&reader, timeout)
@@ -514,7 +543,10 @@ println!("Name was: {}", name);
 ### Query Historical Edges
 
 ```rust
-let past = TimestampMilli(1_700_000_000_000);
+use motlie_db::{SystemTimeMillis, TimestampMilli};
+
+// Example: 2023-11-15T00:00:00Z
+let past = SystemTimeMillis(1_700_000_000_000);
 
 // Get edges as they existed at that system time
 let outgoing_then = OutgoingEdges::as_of(alice_id, past, None)
@@ -543,11 +575,16 @@ use motlie_db::graph::mutation::{AddNode, AddEdge};
 use motlie_db::graph::Runnable;
 use motlie_db::graph::query::{OutgoingEdges, IncomingEdges};
 use motlie_db::graph::schema::{ActivePeriod, EdgeSummary, NodeSummary};
-use motlie_db::{TimestampMilli, Id};
+use motlie_db::{ActiveTimeMillis, Id, SystemTimeMillis};
 
-let now = TimestampMilli::now();
-let next_week = TimestampMilli(now.0 + 7 * 24 * 60 * 60 * 1000);
-let next_week_end = TimestampMilli(next_week.0 + 2 * 24 * 60 * 60 * 1000);
+// System time for write (explicit date → ms since epoch).
+// Example: 2026-02-10T00:00:00Z
+let now = SystemTimeMillis(1_770_681_600_000);
+// Business-time window (explicit dates in ms since epoch).
+// 2026-02-17T00:00:00Z .. 2026-02-19T00:00:00Z
+let next_week = ActiveTimeMillis(1_771_286_400_000);
+let next_week_end = ActiveTimeMillis(1_771_459_200_000);
+let now_business = ActiveTimeMillis(now.0);
 
 let store_id = Id::new();
 let user_id = Id::new();
@@ -580,7 +617,7 @@ AddEdge {
 }.run(&writer).await?;
 
 // 1) Current system time + current business time -> NOT visible yet.
-let outgoing_now = OutgoingEdges::new(store_id, Some(now))
+let outgoing_now = OutgoingEdges::new(store_id, Some(now_business))
     .run(&reader, timeout)
     .await?;
 assert!(outgoing_now.is_empty());
@@ -592,7 +629,7 @@ let outgoing_future = OutgoingEdges::new(store_id, Some(next_week))
 assert!(!outgoing_future.is_empty());
 
 // 3) System time as-of insertion + business time outside window -> not visible.
-let outgoing_as_of_insert = OutgoingEdges::as_of(store_id, now, Some(now))
+let outgoing_as_of_insert = OutgoingEdges::as_of(store_id, now, Some(now_business))
     .run(&reader, timeout)
     .await?;
 assert!(outgoing_as_of_insert.is_empty());
@@ -607,10 +644,21 @@ assert!(!incoming_future.is_empty());
 ### Version History Example
 
 ```rust
+use motlie_db::SystemTimeMillis;
+use motlie_db::graph::mutation::AddNode;
+use motlie_db::graph::schema::NodeSummary;
+
 // Create node
 let node_id = Id::new();
-AddNode { id: node_id, name: "V1".into(), /* ... */ }.run(&writer).await?;
-let t1 = TimestampMilli::now();
+AddNode {
+    id: node_id,
+    ts_millis: TimestampMilli::now(),
+    name: "V1".into(),
+    summary: NodeSummary::from_text("Initial"),
+    valid_range: None,
+}.run(&writer).await?;
+// Example system timestamps (ms since epoch)
+let t1 = SystemTimeMillis(1_771_228_900_000);
 
 // Update node
 std::thread::sleep(std::time::Duration::from_millis(10));
@@ -621,7 +669,7 @@ UpdateNode {
     new_summary: Some(NodeSummary::from_text("Updated")),
     new_active_period: None,
 }.run(&writer).await?;
-let t2 = TimestampMilli::now();
+let t2 = SystemTimeMillis(1_771_229_000_000);
 
 // Query different points in time
 let (_, _, v1) = NodeById::as_of(node_id, t1, None).run(&reader, timeout).await?;
@@ -643,7 +691,7 @@ use motlie_db::graph::mutation::{AddEdge, UpdateEdge, RestoreEdge};
 use motlie_db::graph::Runnable;
 use motlie_db::graph::query::EdgeSummaryBySrcDstName;
 use motlie_db::graph::schema::{ActivePeriod, EdgeSummary};
-use motlie_db::{TimestampMilli, Id};
+use motlie_db::{ActiveTimeMillis, Id, SystemTimeMillis};
 
 // Use case setup:
 // - A store offers a promotion to a user.
@@ -653,11 +701,16 @@ let store_id = Id::new();
 let user_id = Id::new();
 let edge_name = "promotion".to_string();
 
-let now = TimestampMilli::now();
-let week1_start = TimestampMilli(now.0 + 7 * 24 * 60 * 60 * 1000);
-let week1_end = TimestampMilli(week1_start.0 + 2 * 24 * 60 * 60 * 1000);
-let week2_start = TimestampMilli(now.0 + 14 * 24 * 60 * 60 * 1000);
-let week2_end = TimestampMilli(week2_start.0 + 2 * 24 * 60 * 60 * 1000);
+// System time for write (explicit date → ms since epoch).
+// Example: 2026-02-10T00:00:00Z
+let now = SystemTimeMillis(1_770_681_600_000);
+// Business-time windows (explicit dates in ms since epoch).
+// Week1: 2026-02-17T00:00:00Z .. 2026-02-19T00:00:00Z
+let week1_start = ActiveTimeMillis(1_771_286_400_000);
+let week1_end = ActiveTimeMillis(1_771_459_200_000);
+// Week2: 2026-02-24T00:00:00Z .. 2026-02-26T00:00:00Z
+let week2_start = ActiveTimeMillis(1_771_891_200_000);
+let week2_end = ActiveTimeMillis(1_772_064_000_000);
 
 // Create promotion edge with week1 ActivePeriod (business time)
 // - system time: now (when we write)
@@ -673,7 +726,8 @@ AddEdge {
 }.run(&writer).await?;
 
 // Capture system time after v1 write (for point-in-time query)
-let t1 = TimestampMilli::now();
+// Point-in-time capture (explicit system times)
+let t1 = SystemTimeMillis(1_770_681_660_000); // 2026-02-10T00:01:00Z
 
 // Update ActivePeriod to week2 (new business-time window)
 let (current_summary, current_weight, current_version) =
@@ -692,7 +746,7 @@ UpdateEdge {
 }.run(&writer).await?;
 
 // Capture system time after v2 write (for point-in-time query)
-let t2 = TimestampMilli::now();
+let t2 = SystemTimeMillis(1_770_681_720_000); // 2026-02-10T00:02:00Z
 
 // Point-in-time query (system time): as-of t1 should reflect week1
 let (v1_summary, _v1_weight, _v1_version) =
@@ -730,12 +784,15 @@ assert!(rolled_back.decode_string().unwrap().contains("Promo v1"));
 ### Version Queries (Current vs. Point-in-Time)
 
 ```rust
+use motlie_db::{ActiveTimeMillis, SystemTimeMillis};
+
 // Current version (system time = now; business time optional)
 let (_name, _summary, current_version) = NodeById::new(node_id, None)
     .run(&reader, timeout)
     .await?;
 
-let business_time = TimestampMilli::now();
+// Example business-time instant: 2026-02-18T00:00:00Z
+let business_time = ActiveTimeMillis(1_771_372_800_000);
 
 // Point-in-time (system time) lookup
 let (_name, _summary, v_at_t1) = NodeById::as_of(node_id, t1, None)
@@ -870,11 +927,12 @@ Rollback restores entities to their state at a previous point in time by creatin
 
 ```rust
 use motlie_db::graph::mutation::RestoreNode;
+use motlie_db::SystemTimeMillis;
 
 // Restore Alice to state as of November 2023
 RestoreNode {
     id: alice_id,
-    as_of: TimestampMilli(1_700_000_000_000),
+    as_of: SystemTimeMillis(1_700_000_000_000),
     expected_version: None,
 }
 .run(&writer)
@@ -890,12 +948,13 @@ let (_name, _summary, restored_version) = NodeById::new(alice_id, None).run(&rea
 
 ```rust
 use motlie_db::graph::mutation::RestoreEdge;
+use motlie_db::SystemTimeMillis;
 
 RestoreEdge {
     src_id: alice_id,
     dst_id: bob_id,
     name: "knows".to_string(),
-    as_of: TimestampMilli(1_700_000_000_000),
+    as_of: SystemTimeMillis(1_700_000_000_000),
     expected_version: None,
 }
 .run(&writer)
@@ -906,6 +965,7 @@ RestoreEdge {
 
 ```rust
 use motlie_db::graph::mutation::RestoreEdge;
+use motlie_db::SystemTimeMillis;
 
 // Restore multiple edges in a single transaction
 vec![
@@ -913,14 +973,14 @@ vec![
         src_id: alice_id,
         dst_id: bob_id,
         name: "knows".to_string(),
-        as_of: TimestampMilli(1_700_000_000_000),
+        as_of: SystemTimeMillis(1_700_000_000_000),
         expected_version: None,
     }.into(),
     RestoreEdge {
         src_id: alice_id,
         dst_id: carol_id,
         name: "knows".to_string(),
-        as_of: TimestampMilli(1_700_000_000_000),
+        as_of: SystemTimeMillis(1_700_000_000_000),
         expected_version: None,
     }.into(),
 ].run(&writer).await?;
@@ -930,6 +990,7 @@ vec![
 
 ```rust
 use motlie_db::graph::mutation::{ExecOptions, MutationBatchExt, MutationResult};
+use motlie_db::SystemTimeMillis;
 
 // Dry run to validate (no writes, still checks summaries + versions)
 let reply = vec![
@@ -937,7 +998,7 @@ let reply = vec![
         src_id: alice_id,
         dst_id: bob_id,
         name: "knows".to_string(),
-        as_of: TimestampMilli(1_700_000_000_000),
+        as_of: SystemTimeMillis(1_700_000_000_000),
         expected_version: None,
     }.into(),
 ].run_with_result(&writer, ExecOptions { dry_run: true }).await?;
@@ -953,7 +1014,7 @@ RestoreEdge {
     src_id: alice_id,
     dst_id: bob_id,
     name: "knows".to_string(),
-    as_of: TimestampMilli(1_700_000_000_000),
+    as_of: SystemTimeMillis(1_700_000_000_000),
     expected_version: None,
 }
 .run(&writer)
@@ -1020,7 +1081,7 @@ txn.commit()?;
 ```
 
 **Transaction Requirements:**
-- Writer must be configured with a Processor (via `set_processor` or spawn helpers)
+- Writer must be created via spawn helpers or `Subsystem` (ensures Processor is attached)
 - Storage must be read-write mode
 
 ---
@@ -1031,15 +1092,15 @@ txn.commit()?;
 use motlie_db::graph::Storage;
 
 // ReadWrite mode (exclusive writer, required for mutations)
-let mut storage = Storage::readwrite(&db_path)?;
+let mut storage = Storage::readwrite(&db_path);
 storage.ready()?;
 
 // ReadOnly mode (multiple readers, no mutations)
-let mut storage = Storage::readonly(&db_path)?;
+let mut storage = Storage::readonly(&db_path);
 storage.ready()?;
 
 // Secondary mode (replica/follower, catches up with primary)
-let mut storage = Storage::secondary(&db_path, &secondary_path)?;
+let mut storage = Storage::secondary(&db_path, &secondary_path);
 storage.ready()?;
 storage.try_catch_up_with_primary()?;
 ```
@@ -1133,7 +1194,7 @@ assert!(result.is_err());  // VersionMismatch error
 | `create_reader_with_storage(storage, config)` | Create reader + receiver with shared Processor |
 | `spawn_query_consumer(receiver, config, &db_path)` | Spawn consumer with new storage |
 | `spawn_query_consumers_with_storage(storage, config, count)` | Spawn pool with existing storage |
-| `spawn_query_consumer_with_processor(receiver, config, processor)` | Spawn with shared processor |
-| `spawn_query_consumer_pool_shared(receiver, processor, count)` | Spawn pool with shared processor |
+
+(codex, 2026-02-10, decision: processor-backed reader helpers are internal-only and intentionally omitted from public API surface.)
 
 ---
