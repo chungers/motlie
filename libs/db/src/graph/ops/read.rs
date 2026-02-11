@@ -13,9 +13,10 @@ use super::name::resolve_name;
 use super::summary::{resolve_edge_summary, resolve_node_summary};
 use super::super::name_hash::NameHash;
 use super::super::query::{
-    AllEdges, AllNodes, EdgeFragmentsByIdTimeRange, EdgeSummaryBySrcDstName, EdgesBySummaryHash,
-    IncomingEdges, NodeById, NodeFragmentsByIdTimeRange, NodesByIdsMulti, NodesBySummaryHash,
-    OutgoingEdges,
+    AllEdges, AllNodes, EdgeAtVersion, EdgeFragmentsByIdTimeRange, EdgeSummaryBySrcDstName,
+    EdgeVersions, EdgesBySummaryHash, IncomingEdges, NodeAtVersion, NodeById,
+    NodeFragmentsByIdTimeRange, NodeVersions, NodesByIdsMulti, NodesBySummaryHash, OutgoingEdges,
+    VersionMeta, VersionSnapshot,
 };
 use super::super::scan;
 use super::super::scan::Visitable;
@@ -1286,6 +1287,314 @@ pub(crate) fn edges_by_summary_hash(
             is_current,
         });
     });
+
+    Ok(results)
+}
+
+// ============================================================================
+// Version Playback Ops (VersionHistory CFs)
+// ============================================================================
+
+/// Helper: reverse iterate NodeVersionHistory, skipping `offset` entries, returning the next one.
+fn reverse_seek_node_version_history(
+    storage: &super::super::Storage,
+    prefix: &[u8],
+    seek_key: &[u8],
+    offset: u32,
+) -> Result<Option<(schema::NodeVersionHistoryCfKey, schema::NodeVersionHistoryCfValue)>> {
+    let cf_name = schema::NodeVersionHistory::CF_NAME;
+
+    macro_rules! reverse_iterate {
+        ($db:expr) => {{
+            let cf = $db.cf_handle(cf_name).ok_or_else(|| {
+                anyhow::anyhow!("Column family '{}' not found", cf_name)
+            })?;
+            let mut iter = $db.raw_iterator_cf(cf);
+            iter.seek_for_prev(seek_key);
+
+            let mut skipped = 0u32;
+            while iter.valid() {
+                let Some(key_bytes) = iter.key() else { break };
+                // Check we're still within the entity prefix (16 bytes = Id)
+                if key_bytes.len() < 16 || &key_bytes[..16] != prefix {
+                    break;
+                }
+
+                if skipped < offset {
+                    skipped += 1;
+                    iter.prev();
+                    continue;
+                }
+
+                let Some(value_bytes) = iter.value() else { break };
+                let key = schema::NodeVersionHistory::key_from_bytes(key_bytes)?;
+                let value = schema::NodeVersionHistory::value_from_bytes(value_bytes)?;
+                return Ok(Some((key, value)));
+            }
+            Ok(None)
+        }};
+    }
+
+    if let Ok(db) = storage.db() {
+        reverse_iterate!(db)
+    } else {
+        let txn_db = storage.transaction_db()?;
+        reverse_iterate!(txn_db)
+    }
+}
+
+/// Helper: reverse iterate EdgeVersionHistory, skipping `offset` entries, returning the next one.
+fn reverse_seek_edge_version_history(
+    storage: &super::super::Storage,
+    prefix: &[u8],
+    seek_key: &[u8],
+    offset: u32,
+) -> Result<Option<(schema::EdgeVersionHistoryCfKey, schema::EdgeVersionHistoryCfValue)>> {
+    let cf_name = schema::EdgeVersionHistory::CF_NAME;
+
+    macro_rules! reverse_iterate {
+        ($db:expr) => {{
+            let cf = $db.cf_handle(cf_name).ok_or_else(|| {
+                anyhow::anyhow!("Column family '{}' not found", cf_name)
+            })?;
+            let mut iter = $db.raw_iterator_cf(cf);
+            iter.seek_for_prev(seek_key);
+
+            let mut skipped = 0u32;
+            while iter.valid() {
+                let Some(key_bytes) = iter.key() else { break };
+                // Check we're still within the entity prefix (40 bytes = SrcId+DstId+NameHash)
+                if key_bytes.len() < 40 || &key_bytes[..40] != prefix {
+                    break;
+                }
+
+                if skipped < offset {
+                    skipped += 1;
+                    iter.prev();
+                    continue;
+                }
+
+                let Some(value_bytes) = iter.value() else { break };
+                let key = schema::EdgeVersionHistory::key_from_bytes(key_bytes)?;
+                let value = schema::EdgeVersionHistory::value_from_bytes(value_bytes)?;
+                return Ok(Some((key, value)));
+            }
+            Ok(None)
+        }};
+    }
+
+    if let Ok(db) = storage.db() {
+        reverse_iterate!(db)
+    } else {
+        let txn_db = storage.transaction_db()?;
+        reverse_iterate!(txn_db)
+    }
+}
+
+/// Retrieve a node at a relative version offset (HEAD~N).
+///
+/// Uses NodeVersionHistory CF with reverse iteration from the end of the
+/// entity's prefix range. `versions_back = 0` returns HEAD (newest).
+pub(crate) fn node_at_version(
+    storage: &super::super::Storage,
+    query: &NodeAtVersion,
+) -> Result<VersionSnapshot<(NodeName, NodeSummary)>> {
+    let id = query.id;
+    let prefix = id.into_bytes().to_vec();
+
+    // Seek past end of this entity's range
+    let mut seek_key = Vec::with_capacity(28);
+    seek_key.extend_from_slice(&prefix);
+    seek_key.extend_from_slice(&[0xFF; 12]); // max ValidSince (8) + max Version (4)
+
+    let (key, value) = reverse_seek_node_version_history(storage, &prefix, &seek_key, query.versions_back)?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Node {} has no version at offset HEAD~{}",
+                id, query.versions_back
+            )
+        })?;
+
+    // key: NodeVersionHistoryCfKey(Id, ValidSince, Version)
+    // value: NodeVersionHistoryCfValue(UpdatedAt, Option<SummaryHash>, NameHash, Option<ActivePeriod>)
+    let node_name = resolve_name(storage, value.2)?;
+    let summary = resolve_node_summary(storage, value.1)?;
+
+    Ok(VersionSnapshot {
+        payload: (node_name, summary),
+        version: key.2,
+        valid_since: key.1,
+        active_period: value.3,
+    })
+}
+
+/// Retrieve an edge at a relative version offset (HEAD~N).
+pub(crate) fn edge_at_version(
+    storage: &super::super::Storage,
+    query: &EdgeAtVersion,
+) -> Result<VersionSnapshot<(EdgeSummary, Option<EdgeWeight>)>> {
+    let name_hash = NameHash::from_name(&query.name);
+
+    // Build 40-byte prefix: src_id (16) + dst_id (16) + name_hash (8)
+    let mut prefix = Vec::with_capacity(40);
+    prefix.extend_from_slice(query.source_id.as_bytes());
+    prefix.extend_from_slice(query.dest_id.as_bytes());
+    prefix.extend_from_slice(name_hash.as_bytes());
+
+    // Seek past end of this entity's range
+    let mut seek_key = Vec::with_capacity(52);
+    seek_key.extend_from_slice(&prefix);
+    seek_key.extend_from_slice(&[0xFF; 12]); // max ValidSince (8) + max Version (4)
+
+    let (key, value) = reverse_seek_edge_version_history(storage, &prefix, &seek_key, query.versions_back)?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Edge {} -> {} ({}) has no version at offset HEAD~{}",
+                query.source_id, query.dest_id, query.name, query.versions_back
+            )
+        })?;
+
+    // key: EdgeVersionHistoryCfKey(SrcId, DstId, NameHash, ValidSince, Version)
+    // value: EdgeVersionHistoryCfValue(UpdatedAt, Option<SummaryHash>, Option<EdgeWeight>, Option<ActivePeriod>)
+    let summary = resolve_edge_summary(storage, value.1)?;
+
+    Ok(VersionSnapshot {
+        payload: (summary, value.2),
+        version: key.4,
+        valid_since: key.3,
+        active_period: value.3,
+    })
+}
+
+/// List version metadata for a node (newest first).
+pub(crate) fn list_node_versions(
+    storage: &super::super::Storage,
+    query: &NodeVersions,
+) -> Result<Vec<VersionMeta>> {
+    let id = query.id;
+    let prefix = id.into_bytes().to_vec();
+
+    // Seek past end of this entity's range
+    let mut seek_key = Vec::with_capacity(28);
+    seek_key.extend_from_slice(&prefix);
+    seek_key.extend_from_slice(&[0xFF; 12]);
+
+    let cf_name = schema::NodeVersionHistory::CF_NAME;
+    let mut results = Vec::with_capacity(query.limit);
+
+    macro_rules! collect_versions {
+        ($db:expr) => {{
+            let cf = $db.cf_handle(cf_name).ok_or_else(|| {
+                anyhow::anyhow!("Column family '{}' not found", cf_name)
+            })?;
+            let mut iter = $db.raw_iterator_cf(cf);
+            iter.seek_for_prev(&seek_key);
+
+            let mut skipped = 0u32;
+            while iter.valid() && results.len() < query.limit {
+                let Some(key_bytes) = iter.key() else { break };
+                if key_bytes.len() < 16 || &key_bytes[..16] != prefix.as_slice() {
+                    break;
+                }
+
+                if skipped < query.offset {
+                    skipped += 1;
+                    iter.prev();
+                    continue;
+                }
+
+                let Some(value_bytes) = iter.value() else { break };
+                let key = schema::NodeVersionHistory::key_from_bytes(key_bytes)?;
+                let value = schema::NodeVersionHistory::value_from_bytes(value_bytes)?;
+
+                results.push(VersionMeta {
+                    version: key.2,
+                    valid_since: key.1,
+                    updated_at: value.0,
+                    active_period: value.3,
+                    summary_available: value.1.is_some(),
+                });
+
+                iter.prev();
+            }
+        }};
+    }
+
+    if let Ok(db) = storage.db() {
+        collect_versions!(db);
+    } else {
+        let txn_db = storage.transaction_db()?;
+        collect_versions!(txn_db);
+    }
+
+    Ok(results)
+}
+
+/// List version metadata for an edge (newest first).
+pub(crate) fn list_edge_versions(
+    storage: &super::super::Storage,
+    query: &EdgeVersions,
+) -> Result<Vec<VersionMeta>> {
+    let name_hash = NameHash::from_name(&query.name);
+
+    // Build 40-byte prefix: src_id (16) + dst_id (16) + name_hash (8)
+    let mut prefix = Vec::with_capacity(40);
+    prefix.extend_from_slice(query.source_id.as_bytes());
+    prefix.extend_from_slice(query.dest_id.as_bytes());
+    prefix.extend_from_slice(name_hash.as_bytes());
+
+    // Seek past end of this entity's range
+    let mut seek_key = Vec::with_capacity(52);
+    seek_key.extend_from_slice(&prefix);
+    seek_key.extend_from_slice(&[0xFF; 12]);
+
+    let cf_name = schema::EdgeVersionHistory::CF_NAME;
+    let mut results = Vec::with_capacity(query.limit);
+
+    macro_rules! collect_versions {
+        ($db:expr) => {{
+            let cf = $db.cf_handle(cf_name).ok_or_else(|| {
+                anyhow::anyhow!("Column family '{}' not found", cf_name)
+            })?;
+            let mut iter = $db.raw_iterator_cf(cf);
+            iter.seek_for_prev(&seek_key);
+
+            let mut skipped = 0u32;
+            while iter.valid() && results.len() < query.limit {
+                let Some(key_bytes) = iter.key() else { break };
+                if key_bytes.len() < 40 || &key_bytes[..40] != prefix.as_slice() {
+                    break;
+                }
+
+                if skipped < query.offset {
+                    skipped += 1;
+                    iter.prev();
+                    continue;
+                }
+
+                let Some(value_bytes) = iter.value() else { break };
+                let key = schema::EdgeVersionHistory::key_from_bytes(key_bytes)?;
+                let value = schema::EdgeVersionHistory::value_from_bytes(value_bytes)?;
+
+                results.push(VersionMeta {
+                    version: key.4,
+                    valid_since: key.3,
+                    updated_at: value.0,
+                    active_period: value.3,
+                    summary_available: value.1.is_some(),
+                });
+
+                iter.prev();
+            }
+        }};
+    }
+
+    if let Ok(db) = storage.db() {
+        collect_versions!(db);
+    } else {
+        let txn_db = storage.transaction_db()?;
+        collect_versions!(txn_db);
+    }
 
     Ok(results)
 }
