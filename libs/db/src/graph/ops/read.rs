@@ -10,7 +10,10 @@ use crate::graph::ColumnFamilySerde;
 use crate::rocksdb::{ColumnFamily, HotColumnFamilyRecord};
 
 use super::name::resolve_name;
-use super::summary::{resolve_edge_summary, resolve_node_summary};
+use super::summary::{
+    edge_summary_exists, node_summary_exists, resolve_edge_summary, resolve_edge_summary_strict,
+    resolve_node_summary, resolve_node_summary_strict,
+};
 use super::super::name_hash::NameHash;
 use super::super::query::{
     AllEdges, AllNodes, EdgeAtVersion, EdgeFragmentsByIdTimeRange, EdgeSummaryBySrcDstName,
@@ -1418,7 +1421,7 @@ pub(crate) fn node_at_version(
     // key: NodeVersionHistoryCfKey(Id, ValidSince, Version)
     // value: NodeVersionHistoryCfValue(UpdatedAt, Option<SummaryHash>, NameHash, Option<ActivePeriod>)
     let node_name = resolve_name(storage, value.2)?;
-    let summary = resolve_node_summary(storage, value.1)?;
+    let summary = resolve_node_summary_strict(storage, value.1)?;
 
     Ok(VersionSnapshot {
         payload: (node_name, summary),
@@ -1456,7 +1459,7 @@ pub(crate) fn edge_at_version(
 
     // key: EdgeVersionHistoryCfKey(SrcId, DstId, NameHash, ValidSince, Version)
     // value: EdgeVersionHistoryCfValue(UpdatedAt, Option<SummaryHash>, Option<EdgeWeight>, Option<ActivePeriod>)
-    let summary = resolve_edge_summary(storage, value.1)?;
+    let summary = resolve_edge_summary_strict(storage, value.1)?;
 
     Ok(VersionSnapshot {
         payload: (summary, value.2),
@@ -1512,7 +1515,10 @@ pub(crate) fn list_node_versions(
                     valid_since: key.1,
                     updated_at: value.0,
                     active_period: value.3,
-                    summary_available: value.1.is_some(),
+                summary_available: match value.1 {
+                    Some(hash) => node_summary_exists(storage, hash)?,
+                    None => false,
+                },
                 });
 
                 iter.prev();
@@ -1581,7 +1587,10 @@ pub(crate) fn list_edge_versions(
                     valid_since: key.3,
                     updated_at: value.0,
                     active_period: value.3,
-                    summary_available: value.1.is_some(),
+                summary_available: match value.1 {
+                    Some(hash) => edge_summary_exists(storage, hash)?,
+                    None => false,
+                },
                 });
 
                 iter.prev();
