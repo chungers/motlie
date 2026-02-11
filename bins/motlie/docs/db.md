@@ -1,13 +1,13 @@
 # Database Commands
 
-The `motlie db` command provides tools for inspecting and scanning Motlie graph database contents stored in RocksDB.
+The `motlie db` command provides tools for inspecting and scanning Motlie database contents stored in RocksDB, covering both graph and vector subsystems.
 
 ## Overview
 
 The database commands allow you to:
 - List available column families in the database schema
-- Scan and dump contents of any column family
-- Filter records by active period
+- Scan and dump contents of any column family (graph or vector)
+- Filter graph records by active period
 - Paginate through large datasets
 - Output in TSV or formatted table format
 
@@ -29,11 +29,31 @@ motlie db -p /data/graph-db list
 **Output:**
 ```
 Column families:
-  nodes
-  node-fragments
-  edge-fragments
-  outgoing-edges
-  incoming-edges
+  graph/names
+  graph/nodes
+  graph/node_fragments
+  graph/node_summaries
+  graph/node_summary_index
+  graph/node_version_history
+  graph/edge_fragments
+  graph/edge_summaries
+  graph/edge_summary_index
+  graph/edge_version_history
+  graph/forward_edges
+  graph/reverse_edges
+  graph/orphan_summaries
+  graph/meta
+  vector/embedding_specs
+  vector/vectors
+  vector/edges
+  vector/binary_codes
+  vector/vec_meta
+  vector/graph_meta
+  vector/id_forward
+  vector/id_reverse
+  vector/id_alloc
+  vector/pending
+  vector/lifecycle_counts
 ```
 
 ### Scan Column Family
@@ -45,8 +65,8 @@ motlie db -p <db_dir> scan <column_family> [datetime] [OPTIONS]
 ```
 
 **Arguments:**
-- `<column_family>` - Column family to scan (see table below)
-- `[datetime]` - Optional reference time for active period filtering
+- `<column_family>` - Column family to scan (see tables below)
+- `[datetime]` - Optional reference time for active period filtering (graph CFs only)
 
 **Options:**
 - `-p, --db-dir <path>` - Path to the RocksDB database directory (required)
@@ -55,43 +75,157 @@ motlie db -p <db_dir> scan <column_family> [datetime] [OPTIONS]
 - `-f, --format <format>` - Output format: `tsv` or `table` (default: table)
 - `-r, --reverse` - Scan in reverse direction (from end to start)
 
-## Column Families
+## Graph Column Families
 
 | Column Family | CLI Value | Description |
 |--------------|-----------|-------------|
-| Nodes | `nodes` | Node metadata (ID, name, active period) |
-| Node Fragments | `node-fragments` | Node content fragments with timestamps |
-| Edge Fragments | `edge-fragments` | Edge content fragments with timestamps |
-| Outgoing Edges | `outgoing-edges` | Forward edges (source → destination) |
-| Incoming Edges | `incoming-edges` | Reverse edge index (destination ← source) |
+| Nodes | `graph/nodes` | Node metadata (ID, name, active period) |
+| Node Fragments | `graph/node_fragments` | Node content fragments with timestamps |
+| Edge Fragments | `graph/edge_fragments` | Edge content fragments with timestamps |
+| Outgoing Edges | `graph/forward_edges` | Forward edges (source → destination) |
+| Incoming Edges | `graph/reverse_edges` | Reverse edge index (destination ← source) |
+| Names | `graph/names` | Name hash → name string mapping |
+| Node Summaries | `graph/node_summaries` | Content-addressed node summary blobs |
+| Edge Summaries | `graph/edge_summaries` | Content-addressed edge summary blobs |
+| Node Summary Index | `graph/node_summary_index` | Summary hash → node version index |
+| Edge Summary Index | `graph/edge_summary_index` | Summary hash → edge version index |
+| Node Version History | `graph/node_version_history` | Node version timeline |
+| Edge Version History | `graph/edge_version_history` | Edge version timeline |
+| Orphan Summaries | `graph/orphan_summaries` | Unreferenced summary cleanup tracking |
+| Graph Meta | `graph/meta` | Database-level metadata |
+
+## Vector Column Families
+
+| Column Family | CLI Value | Description |
+|--------------|-----------|-------------|
+| Embedding Specs | `vector/embedding_specs` | Embedding space definitions (model, dim, distance) |
+| Vectors | `vector/vectors` | Raw vector data (f32 arrays) |
+| HNSW Edges | `vector/edges` | HNSW graph neighbor lists per layer |
+| Binary Codes | `vector/binary_codes` | RaBitQ quantized codes with ADC corrections |
+| Vec Metadata | `vector/vec_meta` | Per-vector metadata (layer, lifecycle, timestamps) |
+| Graph Metadata | `vector/graph_meta` | Per-embedding HNSW graph metadata (entry point, levels) |
+| ID Forward | `vector/id_forward` | External key → internal vec_id mapping |
+| ID Reverse | `vector/id_reverse` | Internal vec_id → external key mapping |
+| ID Alloc | `vector/id_alloc` | ID allocator state (next ID, free bitmap) |
+| Pending | `vector/pending` | Pending async graph update queue |
+| Lifecycle Counts | `vector/lifecycle_counts` | Per-embedding lifecycle statistics |
 
 ## Output Columns
 
-Each column family outputs different columns. All include `SINCE` and `UNTIL` columns for active period.
+### Graph CFs
 
-### Nodes
+Graph CFs with temporal records include `SINCE` and `UNTIL` columns for active period.
+
+#### Nodes
 ```
 SINCE    UNTIL    ID    NAME
 ```
 
-### Node Fragments
+#### Node Fragments
 ```
 SINCE    UNTIL    NODE_ID    TIMESTAMP    MIME    CONTENT
 ```
 
-### Edge Fragments
+#### Edge Fragments
 ```
 SINCE    UNTIL    SRC_ID    DST_ID    TIMESTAMP    EDGE_NAME    MIME    CONTENT
 ```
 
-### Outgoing Edges
+#### Outgoing Edges
 ```
 SINCE    UNTIL    SRC_ID    DST_ID    EDGE_NAME    WEIGHT
 ```
 
-### Incoming Edges
+#### Incoming Edges
 ```
 SINCE    UNTIL    DST_ID    SRC_ID    EDGE_NAME
+```
+
+#### Names
+```
+HASH    NAME
+```
+
+#### Node/Edge Summaries
+```
+HASH    MIME    CONTENT
+```
+
+#### Node/Edge Summary Index
+```
+HASH    NODE_ID/EDGE_KEY    VERSION    STATUS
+```
+
+#### Node/Edge Version History
+```
+NODE_ID/EDGE_KEY    VERSION    SUMMARY_HASH    CREATED_AT
+```
+
+#### Orphan Summaries
+```
+ORPHANED_AT    HASH    KIND
+```
+
+#### Graph Meta
+```
+FIELD    CURSOR_BYTES
+```
+
+### Vector CFs
+
+#### Embedding Specs
+```
+CODE    MODEL    DIM    DISTANCE    STORAGE    M    EF    RABITQ_BITS
+```
+
+#### Vectors
+```
+EMBEDDING    VEC_ID    DIM    BYTES
+```
+
+#### HNSW Edges
+```
+EMBEDDING    VEC_ID    LAYER    NEIGHBOR_BYTES
+```
+
+#### Binary Codes
+```
+EMBEDDING    VEC_ID    CODE_LEN    NORM    QERR
+```
+
+#### Vec Metadata
+```
+EMBEDDING    VEC_ID    MAX_LAYER    LIFECYCLE    CREATED_AT
+```
+
+#### Graph Metadata
+```
+EMBEDDING    FIELD    VALUE
+```
+
+#### ID Forward
+```
+EMBEDDING    EXT_KEY_TYPE    EXT_KEY    VEC_ID
+```
+
+#### ID Reverse
+```
+EMBEDDING    VEC_ID    EXT_KEY_TYPE    EXT_KEY
+```
+
+#### ID Alloc
+```
+EMBEDDING    FIELD    VALUE
+```
+
+#### Pending
+```
+EMBEDDING    TIMESTAMP    VEC_ID
+```
+
+#### Lifecycle Counts
+```
+EMBEDDING    INDEXED    PENDING    DELETED    PENDING_DELETED
 ```
 
 ## Output Formats
@@ -101,7 +235,7 @@ SINCE    UNTIL    DST_ID    SRC_ID    EDGE_NAME
 Default format, suitable for piping to other tools:
 
 ```bash
-motlie db -p /data/graph-db scan nodes
+motlie db -p /data/graph-db scan graph/nodes
 ```
 
 ```
@@ -114,7 +248,7 @@ motlie db -p /data/graph-db scan nodes
 Human-readable format with aligned columns and headers:
 
 ```bash
-motlie db -p /data/graph-db scan nodes -f table
+motlie db -p /data/graph-db scan graph/nodes -f table
 ```
 
 ```
@@ -126,7 +260,7 @@ SINCE                 UNTIL                 ID                          NAME
 
 ## Temporal Filtering
 
-Filter records by active period. Only records valid at the specified time are returned.
+Filter graph records by active period. Only records valid at the specified time are returned. This applies to graph CFs only (nodes, fragments, edges).
 
 ### Datetime Formats
 
@@ -139,10 +273,10 @@ Filter records by active period. Only records valid at the specified time are re
 
 ```bash
 # Records valid on January 1, 2024 (midnight)
-motlie db -p /data/graph-db scan nodes 2024-01-01
+motlie db -p /data/graph-db scan graph/nodes 2024-01-01
 
 # Records valid at a specific time
-motlie db -p /data/graph-db scan nodes 2024-06-15-14:30:00
+motlie db -p /data/graph-db scan graph/nodes 2024-06-15-14:30:00
 ```
 
 ### Active period Display
@@ -163,21 +297,47 @@ For large datasets, use cursor-based pagination with the `--last` option.
 
 ```bash
 # First page
-motlie db -p /data/graph-db scan nodes --limit 10
+motlie db -p /data/graph-db scan graph/nodes --limit 10
 
 # Note the last ID from the output, then fetch the next page
-motlie db -p /data/graph-db scan nodes --limit 10 --last 01JGXYZ123456789ABCDEF
+motlie db -p /data/graph-db scan graph/nodes --limit 10 --last 01JGXYZ123456789ABCDEF
 ```
 
-### Cursor Formats by Column Family
+### Cursor Formats
+
+#### Graph CFs
 
 | Column Family | Cursor Format | Example |
 |--------------|---------------|---------|
-| `nodes` | `<id>` | `01JGXYZ...` |
-| `node-fragments` | `<node_id>:<timestamp>` | `01JGXYZ...:1704067200000` |
-| `edge-fragments` | `<src_id>:<dst_id>:<edge_name>:<timestamp>` | `01JGX...:01JGY...:follows:1704067200000` |
-| `outgoing-edges` | `<src_id>:<dst_id>:<edge_name>` | `01JGX...:01JGY...:follows` |
-| `incoming-edges` | `<dst_id>:<src_id>:<edge_name>` | `01JGY...:01JGX...:follows` |
+| `graph/nodes` | `<id>` | `01JGXYZ...` |
+| `graph/node_fragments` | `<node_id>:<timestamp>` | `01JGXYZ...:1704067200000` |
+| `graph/edge_fragments` | `<src_id>:<dst_id>:<edge_name>:<timestamp>` | `01JGX...:01JGY...:follows:1704067200000` |
+| `graph/forward_edges` | `<src_id>:<dst_id>:<edge_name>` | `01JGX...:01JGY...:follows` |
+| `graph/reverse_edges` | `<dst_id>:<src_id>:<edge_name>` | `01JGY...:01JGX...:follows` |
+| `graph/names` | `<hash_hex>` | `a1b2c3d4e5f60708` |
+| `graph/node_summaries` | `<hash_hex>` | `a1b2c3d4e5f60708` |
+| `graph/edge_summaries` | `<hash_hex>` | `a1b2c3d4e5f60708` |
+| `graph/node_summary_index` | `<hash_hex>:<node_id>:<version>` | `a1b2c3d4e5f60708:01JGXYZ...:1` |
+| `graph/edge_summary_index` | `<hash_hex>:<src_id>:<dst_id>:<name_hash>:<version>` | `a1b2....:01JGX...:01JGY...:a1b2...:1` |
+| `graph/node_version_history` | `<node_id>:<version>` | `01JGXYZ...:1` |
+| `graph/edge_version_history` | `<src_id>:<dst_id>:<name_hash>:<version>` | `01JGX...:01JGY...:a1b2...:1` |
+| `graph/orphan_summaries` | `<timestamp>:<hash_hex>` | `1704067200000:a1b2c3d4e5f60708` |
+
+#### Vector CFs
+
+| Column Family | Cursor Format | Example |
+|--------------|---------------|---------|
+| `vector/embedding_specs` | `<embedding_code>` | `42` |
+| `vector/vectors` | `<embedding_code>:<vec_id>` | `42:100` |
+| `vector/edges` | `<embedding_code>:<vec_id>:<layer>` | `42:100:0` |
+| `vector/binary_codes` | `<embedding_code>:<vec_id>` | `42:100` |
+| `vector/vec_meta` | `<embedding_code>:<vec_id>` | `42:100` |
+| `vector/graph_meta` | `<embedding_code>` | `42` |
+| `vector/id_forward` | N/A (no cursor support) | — |
+| `vector/id_reverse` | `<embedding_code>:<vec_id>` | `42:100` |
+| `vector/id_alloc` | `<embedding_code>` | `42` |
+| `vector/pending` | `<embedding_code>:<timestamp>:<vec_id>` | `42:1704067200000:100` |
+| `vector/lifecycle_counts` | `<embedding_code>` | `42` |
 
 ## Reverse Scanning
 
@@ -185,10 +345,10 @@ Scan from end to start instead of start to end:
 
 ```bash
 # Get the last 10 nodes added
-motlie db -p /data/graph-db scan nodes --limit 10 --reverse
+motlie db -p /data/graph-db scan graph/nodes --limit 10 --reverse
 
 # Short flag
-motlie db -p /data/graph-db scan nodes --limit 10 -r
+motlie db -p /data/graph-db scan graph/nodes --limit 10 -r
 ```
 
 ## Examples
@@ -197,30 +357,46 @@ motlie db -p /data/graph-db scan nodes --limit 10 -r
 
 ```bash
 # Scan first 100 nodes (default)
-motlie db -p /data/graph-db scan nodes
+motlie db -p /data/graph-db scan graph/nodes
 
 # Scan with custom limit
-motlie db -p /data/graph-db scan nodes --limit 10
+motlie db -p /data/graph-db scan graph/nodes --limit 10
 
 # Scan in table format
-motlie db -p /data/graph-db scan nodes -f table
+motlie db -p /data/graph-db scan graph/nodes -f table
 ```
 
-### Scanning Fragments
+### Scanning Graph Fragments
 
 Fragments contain the actual content attached to nodes and edges:
 
 ```bash
 # Node content fragments
-motlie db -p /data/graph-db scan node-fragments -f table
+motlie db -p /data/graph-db scan graph/node_fragments -f table
 
 # Edge content fragments
-motlie db -p /data/graph-db scan edge-fragments -f table
+motlie db -p /data/graph-db scan graph/edge_fragments -f table
 ```
 
 Fragment output includes:
 - `MIME` - Content type (e.g., `text/plain`, `application/json`, `text/markdown`)
 - `CONTENT` - Preview of text content (truncated to 60 chars for printable types)
+
+### Scanning Vector Data
+
+```bash
+# List embedding spaces
+motlie db -p /data/db scan vector/embedding_specs -f table
+
+# Scan vector metadata
+motlie db -p /data/db scan vector/vec_meta -f table --limit 20
+
+# Check lifecycle counts per embedding
+motlie db -p /data/db scan vector/lifecycle_counts -f table
+
+# Scan ID mappings
+motlie db -p /data/db scan vector/id_forward -f table --limit 50
+```
 
 ### Combined Options
 
@@ -228,10 +404,10 @@ Options can be combined for complex queries:
 
 ```bash
 # Last 20 nodes valid on 2024-06-15, formatted as table
-motlie db -p /data/graph-db scan nodes 2024-06-15 --limit 20 --reverse -f table
+motlie db -p /data/graph-db scan graph/nodes 2024-06-15 --limit 20 --reverse -f table
 
 # Page through edges with temporal filtering
-motlie db -p /data/graph-db scan outgoing-edges 2024-01-01 --limit 50 --last "01JGX...:01JGY...:follows"
+motlie db -p /data/graph-db scan graph/forward_edges 2024-01-01 --limit 50 --last "01JGX...:01JGY...:follows"
 ```
 
 ## Piping and Scripting
@@ -240,17 +416,19 @@ TSV output is designed for integration with Unix tools:
 
 ```bash
 # Count total nodes
-motlie db -p /data/graph-db scan nodes --limit 1000000 | wc -l
+motlie db -p /data/graph-db scan graph/nodes --limit 1000000 | wc -l
 
 # Extract just node IDs (3rd column)
-motlie db -p /data/graph-db scan nodes | cut -f3
+motlie db -p /data/graph-db scan graph/nodes | cut -f3
 
 # Find nodes with specific name pattern
-motlie db -p /data/graph-db scan nodes | grep -i "pattern"
+motlie db -p /data/graph-db scan graph/nodes | grep -i "pattern"
 
 # Export to CSV
-motlie db -p /data/graph-db scan nodes | tr '\t' ',' > nodes.csv
+motlie db -p /data/graph-db scan graph/nodes | tr '\t' ',' > nodes.csv
 
+# Count vectors per embedding space
+motlie db -p /data/db scan vector/lifecycle_counts | cut -f1,2
 ```
 
 ## Error Handling
@@ -276,43 +454,5 @@ motlie db -p /data/graph-db scan nodes | tr '\t' ',' > nodes.csv
 | `RUST_LOG` | Control log verbosity (e.g., `debug`, `info`, `warn`) |
 
 ```bash
-RUST_LOG=debug motlie db -p /data/graph-db scan nodes
+RUST_LOG=debug motlie db -p /data/graph-db scan graph/nodes
 ```
-
-## Tests
-
-Integration tests are available in `bins/motlie/tests/db_cli.rs`.
-
-### Running Tests
-
-```bash
-cargo test --test db_cli
-```
-
-### Test Coverage
-
-| Test | Description |
-|------|-------------|
-| `test_list_column_families` | Verifies `list` command shows all column families |
-| `test_scan_nodes_tsv` | Scans nodes, verifies IDs and names in TSV format |
-| `test_scan_nodes_table_format` | Verifies table format with headers and separators |
-| `test_scan_nodes_with_limit` | Tests `--limit` option restricts result count |
-| `test_scan_nodes_reverse` | Tests `--reverse` returns opposite order |
-| `test_scan_nodes_pagination` | Tests cursor-based pagination with `--last` |
-| `test_scan_node_fragments` | Scans node fragments, verifies content and MIME type |
-| `test_scan_edge_fragments` | Scans edge fragments, verifies src/dst/edge_name |
-| `test_scan_outgoing_edges` | Scans outgoing edges with weights |
-| `test_scan_incoming_edges` | Scans reverse edge index |
-| `test_invalid_database_path` | Error handling for non-existent database |
-| `test_invalid_cursor_format` | Error handling for malformed cursor |
-| `test_output_format_table_default` | Verifies table is default output format |
-| `test_output_format_table` | Verifies table format structure |
-| `test_node_fragment_pagination_cursor` | Tests fragment pagination cursor format |
-| `test_outgoing_edge_pagination_cursor` | Tests edge pagination cursor format |
-
-### Test Approach
-
-The tests:
-1. Insert test data (nodes, edges, fragments) directly into RocksDB
-2. Run the CLI commands via `cargo run --bin motlie`
-3. Parse the output and verify it matches the inserted data by ID
