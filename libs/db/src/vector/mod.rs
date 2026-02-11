@@ -27,6 +27,7 @@
 //! - `reader.rs` - Reader implementation (channel-based query dispatch)
 //! - `writer.rs` - Writer implementation (channel-based mutation dispatch)
 //! - `processor.rs` - Core operations (insert, delete, search with transactions)
+//! - `scan.rs` - Visitor-based CF iteration with pagination (mirrors `graph::scan`)
 //!
 //! ### Nested Modules
 //! - `hnsw/` - HNSW index implementation
@@ -59,6 +60,9 @@ pub mod registry;
 pub mod schema;
 pub mod subsystem;
 pub mod writer;
+
+/// Scan API for iterating over vector column families with pagination support.
+pub mod scan;
 
 // Nested modules
 #[cfg(feature = "benchmark")]

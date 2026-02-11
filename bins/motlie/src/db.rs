@@ -5,9 +5,12 @@ use motlie_db::graph::scan::{
     AllNodeVersionHistory, AllNodes, AllOrphanSummaries, AllReverseEdges, EdgeFragmentRecord,
     EdgeRecord, EdgeSummaryIndexRecord, EdgeSummaryRecord, EdgeVersionHistoryRecord,
     GraphMetaRecord, NameRecord, NodeFragmentRecord, NodeRecord, NodeSummaryIndexRecord,
-    NodeSummaryRecord, NodeVersionHistoryRecord, OrphanSummaryRecord, ReverseEdgeRecord, Visitable,
+    NodeSummaryRecord, NodeVersionHistoryRecord, OrphanSummaryRecord, ReverseEdgeRecord,
+    Visitable,
 };
 use motlie_db::graph::{NameHash, Storage, SummaryHash};
+use motlie_db::vector::scan::{self as vec_scan, Visitable as VecVisitable};
+use motlie_db::vector::Storage as VectorStorage;
 use motlie_db::{DataUrl, Id, TimestampMilli};
 use std::path::PathBuf;
 
@@ -63,6 +66,29 @@ pub enum ColumnFamily {
     OrphanSummaries,
     #[value(name = "graph/meta")]
     GraphMeta,
+    // Vector column families
+    #[value(name = "vector/embedding_specs")]
+    VectorEmbeddingSpecs,
+    #[value(name = "vector/vectors")]
+    VectorVectors,
+    #[value(name = "vector/edges")]
+    VectorEdges,
+    #[value(name = "vector/binary_codes")]
+    VectorBinaryCodes,
+    #[value(name = "vector/vec_meta")]
+    VectorVecMeta,
+    #[value(name = "vector/graph_meta")]
+    VectorGraphMeta,
+    #[value(name = "vector/id_forward")]
+    VectorIdForward,
+    #[value(name = "vector/id_reverse")]
+    VectorIdReverse,
+    #[value(name = "vector/id_alloc")]
+    VectorIdAlloc,
+    #[value(name = "vector/pending")]
+    VectorPending,
+    #[value(name = "vector/lifecycle_counts")]
+    VectorLifecycleCounts,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug, Default)]
@@ -139,9 +165,43 @@ fn run_list() {
     println!("  graph/reverse_edges");
     println!("  graph/orphan_summaries");
     println!("  graph/meta");
+    println!("  vector/embedding_specs");
+    println!("  vector/vectors");
+    println!("  vector/edges");
+    println!("  vector/binary_codes");
+    println!("  vector/vec_meta");
+    println!("  vector/graph_meta");
+    println!("  vector/id_forward");
+    println!("  vector/id_reverse");
+    println!("  vector/id_alloc");
+    println!("  vector/pending");
+    println!("  vector/lifecycle_counts");
+}
+
+fn is_vector_cf(cf: ColumnFamily) -> bool {
+    matches!(
+        cf,
+        ColumnFamily::VectorEmbeddingSpecs
+            | ColumnFamily::VectorVectors
+            | ColumnFamily::VectorEdges
+            | ColumnFamily::VectorBinaryCodes
+            | ColumnFamily::VectorVecMeta
+            | ColumnFamily::VectorGraphMeta
+            | ColumnFamily::VectorIdForward
+            | ColumnFamily::VectorIdReverse
+            | ColumnFamily::VectorIdAlloc
+            | ColumnFamily::VectorPending
+            | ColumnFamily::VectorLifecycleCounts
+    )
 }
 
 fn run_scan(db_dir: &PathBuf, args: &Scan) -> anyhow::Result<()> {
+    if is_vector_cf(args.cf) {
+        let mut storage = VectorStorage::readonly(db_dir);
+        storage.ready()?;
+        return run_scan_vector(&storage, args);
+    }
+
     let mut storage = Storage::readonly(db_dir);
     storage.ready()?;
 
@@ -166,6 +226,24 @@ fn run_scan(db_dir: &PathBuf, args: &Scan) -> anyhow::Result<()> {
         ColumnFamily::EdgeVersionHistory => scan_edge_version_history(&storage, args),
         ColumnFamily::OrphanSummaries => scan_orphan_summaries(&storage, args),
         ColumnFamily::GraphMeta => scan_graph_meta(&storage, args),
+        _ => unreachable!("vector CFs handled above"),
+    }
+}
+
+fn run_scan_vector(storage: &VectorStorage, args: &Scan) -> anyhow::Result<()> {
+    match args.cf {
+        ColumnFamily::VectorEmbeddingSpecs => scan_vec_embedding_specs(storage, args),
+        ColumnFamily::VectorVectors => scan_vec_vectors(storage, args),
+        ColumnFamily::VectorEdges => scan_vec_edges(storage, args),
+        ColumnFamily::VectorBinaryCodes => scan_vec_binary_codes(storage, args),
+        ColumnFamily::VectorVecMeta => scan_vec_meta(storage, args),
+        ColumnFamily::VectorGraphMeta => scan_vec_graph_meta(storage, args),
+        ColumnFamily::VectorIdForward => scan_vec_id_forward(storage, args),
+        ColumnFamily::VectorIdReverse => scan_vec_id_reverse(storage, args),
+        ColumnFamily::VectorIdAlloc => scan_vec_id_alloc(storage, args),
+        ColumnFamily::VectorPending => scan_vec_pending(storage, args),
+        ColumnFamily::VectorLifecycleCounts => scan_vec_lifecycle_counts(storage, args),
+        _ => unreachable!("graph CFs handled in run_scan"),
     }
 }
 
@@ -1175,6 +1253,443 @@ fn scan_graph_meta(storage: &Storage, args: &Scan) -> anyhow::Result<()> {
         ]);
         true
     })?;
+
+    printer.print();
+    Ok(())
+}
+
+// ============================================================================
+// Vector Scan Functions
+// ============================================================================
+
+fn scan_vec_embedding_specs(storage: &VectorStorage, args: &Scan) -> anyhow::Result<()> {
+    let last = args
+        .last
+        .as_ref()
+        .map(|s| {
+            s.parse::<u64>()
+                .map_err(|e| anyhow::anyhow!("Invalid embedding code '{}': {}", s, e))
+        })
+        .transpose()?;
+
+    let scan = vec_scan::AllEmbeddingSpecs {
+        last,
+        limit: args.limit,
+        reverse: args.reverse,
+    };
+
+    let mut printer = TablePrinter::new(
+        vec!["CODE", "MODEL", "DIM", "DISTANCE", "STORAGE", "M", "EF", "RABITQ_BITS"],
+        args.format,
+    );
+
+    scan.accept(storage, &mut |record: &vec_scan::EmbeddingSpecRecord| {
+        printer.add_row(vec![
+            record.code.to_string(),
+            record.model.clone(),
+            record.dim.to_string(),
+            record.distance.clone(),
+            record.storage_type.clone(),
+            record.hnsw_m.to_string(),
+            record.hnsw_ef_construction.to_string(),
+            record.rabitq_bits.to_string(),
+        ]);
+        true
+    })?;
+
+    printer.print();
+    Ok(())
+}
+
+fn scan_vec_vectors(storage: &VectorStorage, args: &Scan) -> anyhow::Result<()> {
+    let last = if let Some(s) = &args.last {
+        let parts: Vec<&str> = s.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            anyhow::bail!("Invalid cursor format. Expected 'embedding_code:vec_id', got '{}'", s);
+        }
+        let ec: u64 = parts[0]
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid embedding code '{}': {}", parts[0], e))?;
+        let vid: u32 = parts[1]
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid vec_id '{}': {}", parts[1], e))?;
+        Some((ec, vid))
+    } else {
+        None
+    };
+
+    let scan = vec_scan::AllVectors {
+        last,
+        limit: args.limit,
+        reverse: args.reverse,
+    };
+
+    let mut printer = TablePrinter::new(vec!["EMBEDDING", "VEC_ID", "DIM", "BYTES"], args.format);
+
+    scan.accept(storage, &mut |record: &vec_scan::VectorRecord| {
+        printer.add_row(vec![
+            record.embedding_code.to_string(),
+            record.vec_id.to_string(),
+            record.dim.to_string(),
+            record.byte_size.to_string(),
+        ]);
+        true
+    })?;
+
+    printer.print();
+    Ok(())
+}
+
+fn scan_vec_edges(storage: &VectorStorage, args: &Scan) -> anyhow::Result<()> {
+    let last = if let Some(s) = &args.last {
+        let parts: Vec<&str> = s.splitn(3, ':').collect();
+        if parts.len() != 3 {
+            anyhow::bail!(
+                "Invalid cursor format. Expected 'embedding_code:vec_id:layer', got '{}'",
+                s
+            );
+        }
+        let ec: u64 = parts[0]
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid embedding code '{}': {}", parts[0], e))?;
+        let vid: u32 = parts[1]
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid vec_id '{}': {}", parts[1], e))?;
+        let layer: u8 = parts[2]
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid layer '{}': {}", parts[2], e))?;
+        Some((ec, vid, layer))
+    } else {
+        None
+    };
+
+    let scan = vec_scan::AllHnswEdges {
+        last,
+        limit: args.limit,
+        reverse: args.reverse,
+    };
+
+    let mut printer = TablePrinter::new(
+        vec!["EMBEDDING", "VEC_ID", "LAYER", "NEIGHBOR_BYTES"],
+        args.format,
+    );
+
+    scan.accept(storage, &mut |record: &vec_scan::HnswEdgeRecord| {
+        printer.add_row(vec![
+            record.embedding_code.to_string(),
+            record.vec_id.to_string(),
+            record.layer.to_string(),
+            record.neighbor_bytes.to_string(),
+        ]);
+        true
+    })?;
+
+    printer.print();
+    Ok(())
+}
+
+fn scan_vec_binary_codes(storage: &VectorStorage, args: &Scan) -> anyhow::Result<()> {
+    let last = if let Some(s) = &args.last {
+        let parts: Vec<&str> = s.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            anyhow::bail!(
+                "Invalid cursor format. Expected 'embedding_code:vec_id', got '{}'",
+                s
+            );
+        }
+        let ec: u64 = parts[0]
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid embedding code '{}': {}", parts[0], e))?;
+        let vid: u32 = parts[1]
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid vec_id '{}': {}", parts[1], e))?;
+        Some((ec, vid))
+    } else {
+        None
+    };
+
+    let scan = vec_scan::AllBinaryCodes {
+        last,
+        limit: args.limit,
+        reverse: args.reverse,
+    };
+
+    let mut printer = TablePrinter::new(
+        vec!["EMBEDDING", "VEC_ID", "CODE_LEN", "NORM", "QERR"],
+        args.format,
+    );
+
+    scan.accept(storage, &mut |record: &vec_scan::BinaryCodeRecord| {
+        printer.add_row(vec![
+            record.embedding_code.to_string(),
+            record.vec_id.to_string(),
+            record.code_len.to_string(),
+            format!("{:.6}", record.vector_norm),
+            format!("{:.6}", record.quantization_error),
+        ]);
+        true
+    })?;
+
+    printer.print();
+    Ok(())
+}
+
+fn scan_vec_meta(storage: &VectorStorage, args: &Scan) -> anyhow::Result<()> {
+    let last = if let Some(s) = &args.last {
+        let parts: Vec<&str> = s.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            anyhow::bail!(
+                "Invalid cursor format. Expected 'embedding_code:vec_id', got '{}'",
+                s
+            );
+        }
+        let ec: u64 = parts[0]
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid embedding code '{}': {}", parts[0], e))?;
+        let vid: u32 = parts[1]
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid vec_id '{}': {}", parts[1], e))?;
+        Some((ec, vid))
+    } else {
+        None
+    };
+
+    let scan = vec_scan::AllVecMeta {
+        last,
+        limit: args.limit,
+        reverse: args.reverse,
+    };
+
+    let mut printer = TablePrinter::new(
+        vec!["EMBEDDING", "VEC_ID", "MAX_LAYER", "LIFECYCLE", "CREATED_AT"],
+        args.format,
+    );
+
+    scan.accept(storage, &mut |record: &vec_scan::VecMetaRecord| {
+        printer.add_row(vec![
+            record.embedding_code.to_string(),
+            record.vec_id.to_string(),
+            record.max_layer.to_string(),
+            record.lifecycle.clone(),
+            record.created_at.to_string(),
+        ]);
+        true
+    })?;
+
+    printer.print();
+    Ok(())
+}
+
+fn scan_vec_graph_meta(storage: &VectorStorage, args: &Scan) -> anyhow::Result<()> {
+    let last = args
+        .last
+        .as_ref()
+        .map(|s| {
+            s.parse::<u64>()
+                .map_err(|e| anyhow::anyhow!("Invalid embedding code '{}': {}", s, e))
+        })
+        .transpose()?;
+
+    let scan = vec_scan::AllVecGraphMeta {
+        last,
+        limit: args.limit,
+        reverse: args.reverse,
+    };
+
+    let mut printer = TablePrinter::new(vec!["EMBEDDING", "FIELD", "VALUE"], args.format);
+
+    scan.accept(storage, &mut |record: &vec_scan::VecGraphMetaRecord| {
+        printer.add_row(vec![
+            record.embedding_code.to_string(),
+            record.field.clone(),
+            record.value.clone(),
+        ]);
+        true
+    })?;
+
+    printer.print();
+    Ok(())
+}
+
+fn scan_vec_id_forward(storage: &VectorStorage, args: &Scan) -> anyhow::Result<()> {
+    let scan = vec_scan::AllIdForward {
+        limit: args.limit,
+        reverse: args.reverse,
+    };
+
+    let mut printer = TablePrinter::new(
+        vec!["EMBEDDING", "EXT_KEY_TYPE", "EXT_KEY", "VEC_ID"],
+        args.format,
+    );
+
+    scan.accept(storage, &mut |record: &vec_scan::IdForwardRecord| {
+        printer.add_row(vec![
+            record.embedding_code.to_string(),
+            record.external_key_type.clone(),
+            record.external_key.clone(),
+            record.vec_id.to_string(),
+        ]);
+        true
+    })?;
+
+    printer.print();
+    Ok(())
+}
+
+fn scan_vec_id_reverse(storage: &VectorStorage, args: &Scan) -> anyhow::Result<()> {
+    let last = if let Some(s) = &args.last {
+        let parts: Vec<&str> = s.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            anyhow::bail!(
+                "Invalid cursor format. Expected 'embedding_code:vec_id', got '{}'",
+                s
+            );
+        }
+        let ec: u64 = parts[0]
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid embedding code '{}': {}", parts[0], e))?;
+        let vid: u32 = parts[1]
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid vec_id '{}': {}", parts[1], e))?;
+        Some((ec, vid))
+    } else {
+        None
+    };
+
+    let scan = vec_scan::AllIdReverse {
+        last,
+        limit: args.limit,
+        reverse: args.reverse,
+    };
+
+    let mut printer = TablePrinter::new(
+        vec!["EMBEDDING", "VEC_ID", "EXT_KEY_TYPE", "EXT_KEY"],
+        args.format,
+    );
+
+    scan.accept(storage, &mut |record: &vec_scan::IdReverseRecord| {
+        printer.add_row(vec![
+            record.embedding_code.to_string(),
+            record.vec_id.to_string(),
+            record.external_key_type.clone(),
+            record.external_key.clone(),
+        ]);
+        true
+    })?;
+
+    printer.print();
+    Ok(())
+}
+
+fn scan_vec_id_alloc(storage: &VectorStorage, args: &Scan) -> anyhow::Result<()> {
+    let last = args
+        .last
+        .as_ref()
+        .map(|s| {
+            s.parse::<u64>()
+                .map_err(|e| anyhow::anyhow!("Invalid embedding code '{}': {}", s, e))
+        })
+        .transpose()?;
+
+    let scan = vec_scan::AllIdAlloc {
+        last,
+        limit: args.limit,
+        reverse: args.reverse,
+    };
+
+    let mut printer = TablePrinter::new(vec!["EMBEDDING", "FIELD", "VALUE"], args.format);
+
+    scan.accept(storage, &mut |record: &vec_scan::IdAllocRecord| {
+        printer.add_row(vec![
+            record.embedding_code.to_string(),
+            record.field.clone(),
+            record.value.clone(),
+        ]);
+        true
+    })?;
+
+    printer.print();
+    Ok(())
+}
+
+fn scan_vec_pending(storage: &VectorStorage, args: &Scan) -> anyhow::Result<()> {
+    let last = if let Some(s) = &args.last {
+        let parts: Vec<&str> = s.splitn(3, ':').collect();
+        if parts.len() != 3 {
+            anyhow::bail!(
+                "Invalid cursor format. Expected 'embedding_code:timestamp:vec_id', got '{}'",
+                s
+            );
+        }
+        let ec: u64 = parts[0]
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid embedding code '{}': {}", parts[0], e))?;
+        let ts: u64 = parts[1]
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid timestamp '{}': {}", parts[1], e))?;
+        let vid: u32 = parts[2]
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid vec_id '{}': {}", parts[2], e))?;
+        Some((ec, ts, vid))
+    } else {
+        None
+    };
+
+    let scan = vec_scan::AllPending {
+        last,
+        limit: args.limit,
+        reverse: args.reverse,
+    };
+
+    let mut printer = TablePrinter::new(vec!["EMBEDDING", "TIMESTAMP", "VEC_ID"], args.format);
+
+    scan.accept(storage, &mut |record: &vec_scan::PendingRecord| {
+        printer.add_row(vec![
+            record.embedding_code.to_string(),
+            record.timestamp.to_string(),
+            record.vec_id.to_string(),
+        ]);
+        true
+    })?;
+
+    printer.print();
+    Ok(())
+}
+
+fn scan_vec_lifecycle_counts(storage: &VectorStorage, args: &Scan) -> anyhow::Result<()> {
+    let last = args
+        .last
+        .as_ref()
+        .map(|s| {
+            s.parse::<u64>()
+                .map_err(|e| anyhow::anyhow!("Invalid embedding code '{}': {}", s, e))
+        })
+        .transpose()?;
+
+    let scan = vec_scan::AllLifecycleCounts {
+        last,
+        limit: args.limit,
+        reverse: args.reverse,
+    };
+
+    let mut printer = TablePrinter::new(
+        vec!["EMBEDDING", "INDEXED", "PENDING", "DELETED", "PENDING_DELETED"],
+        args.format,
+    );
+
+    scan.accept(
+        storage,
+        &mut |record: &vec_scan::LifecycleCountsRecord| {
+            printer.add_row(vec![
+                record.embedding_code.to_string(),
+                record.indexed.to_string(),
+                record.pending.to_string(),
+                record.deleted.to_string(),
+                record.pending_deleted.to_string(),
+            ]);
+            true
+        },
+    )?;
 
     printer.print();
     Ok(())

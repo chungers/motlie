@@ -293,7 +293,7 @@ pub async fn index(args: IndexArgs) -> Result<()> {
                 .with_hnsw_m(args.m as u16)
                 .with_hnsw_ef_construction(args.ef_construction as u16),
         )?;
-        print_embedding_summary(&args.db_path, embedding.code())?;
+        print_embedding_summary_from_db(storage.transaction_db()?, &args.db_path, embedding.code())?;
 
         if args.async_workers > 0 {
             println!("Insert mode: ASYNC ({} workers)", args.async_workers);
@@ -458,7 +458,7 @@ pub async fn index(args: IndexArgs) -> Result<()> {
 
         if let Some(output_path) = args.output {
             let (embedding_code, embedding_spec) =
-                resolve_embedding_spec(&args.db_path, Some(embedding.code()), None, None, None)?;
+                resolve_embedding_spec_from_db(storage.transaction_db()?, Some(embedding.code()), None, None, None)?;
             let json = serde_json::json!({
                 "command": "index",
                 "config": {
@@ -506,7 +506,7 @@ pub async fn index(args: IndexArgs) -> Result<()> {
             .with_hnsw_m(args.m as u16)
             .with_hnsw_ef_construction(args.ef_construction as u16),
     )?;
-    print_embedding_summary(&args.db_path, embedding.code())?;
+    print_embedding_summary_from_db(storage.transaction_db()?, &args.db_path, embedding.code())?;
 
     if existing_count > 0 {
         let txn_db = storage.transaction_db()?;
@@ -620,7 +620,7 @@ pub async fn index(args: IndexArgs) -> Result<()> {
 
         if let Some(output_path) = args.output {
             let (embedding_code, embedding_spec) =
-                resolve_embedding_spec(&args.db_path, Some(embedding.code()), None, None, None)?;
+                resolve_embedding_spec_from_db(storage.transaction_db()?, Some(embedding.code()), None, None, None)?;
             let json = serde_json::json!({
                 "command": "index",
                 "config": {
@@ -780,11 +780,12 @@ pub async fn query(args: QueryArgs) -> Result<()> {
     let registry = storage.cache().clone();
     registry.set_storage(storage.clone())?;
     let model = format!("bench-{}", args.dataset.to_lowercase());
+    let txn_db = storage.transaction_db()?;
     let (embedding_code, embedding_spec) = if let Some(code) = args.embedding_code {
-        resolve_embedding_spec(&args.db_path, Some(code), None, None, None)?
+        resolve_embedding_spec_from_db(txn_db, Some(code), None, None, None)?
     } else {
-        resolve_embedding_spec(
-            &args.db_path,
+        resolve_embedding_spec_from_db(
+            txn_db,
             None,
             Some(&model),
             Some(dim as u32),
@@ -819,7 +820,7 @@ pub async fn query(args: QueryArgs) -> Result<()> {
             .context("Expected stdin as JSON array of floats")?;
 
         let (search_reader, query_rx) =
-            create_reader_with_storage(ReaderConfig::default(), storage.clone());
+            create_reader_with_storage(ReaderConfig::default());
         let query_handles = spawn_query_consumers_with_storage_autoreg(
             query_rx,
             ReaderConfig::default(),
@@ -877,7 +878,7 @@ pub async fn query(args: QueryArgs) -> Result<()> {
 
     // Setup query reader/consumers
     let (search_reader, query_rx) =
-        create_reader_with_storage(ReaderConfig::default(), storage.clone());
+        create_reader_with_storage(ReaderConfig::default());
     let query_handles = spawn_query_consumers_with_storage_autoreg(
         query_rx,
         ReaderConfig::default(),
@@ -1424,10 +1425,10 @@ fn parse_distance(value: &str) -> Result<Distance> {
     }
 }
 
-fn load_embedding_specs(db_path: &PathBuf) -> Result<Vec<(u64, EmbeddingSpec)>> {
-    let mut storage = Storage::readwrite(db_path);
-    storage.ready()?;
-    let db = storage.transaction_db()?;
+/// Load embedding specs from an already-open TransactionDB.
+///
+/// Use this when storage is already open to avoid double-locking RocksDB.
+fn load_embedding_specs_from_db(db: &rocksdb::TransactionDB) -> Result<Vec<(u64, EmbeddingSpec)>> {
     let cf = db
         .cf_handle(EmbeddingSpecs::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("EmbeddingSpecs CF not found"))?;
@@ -1444,6 +1445,27 @@ fn load_embedding_specs(db_path: &PathBuf) -> Result<Vec<(u64, EmbeddingSpec)>> 
     Ok(specs)
 }
 
+/// Load embedding specs by opening storage (standalone entry point only).
+fn load_embedding_specs(db_path: &PathBuf) -> Result<Vec<(u64, EmbeddingSpec)>> {
+    let mut storage = Storage::readwrite(db_path);
+    storage.ready()?;
+    let db = storage.transaction_db()?;
+    load_embedding_specs_from_db(db)
+}
+
+/// Resolve an embedding spec from an already-open TransactionDB.
+fn resolve_embedding_spec_from_db(
+    db: &rocksdb::TransactionDB,
+    code: Option<u64>,
+    model: Option<&str>,
+    dim: Option<u32>,
+    distance: Option<&str>,
+) -> Result<(u64, EmbeddingSpec)> {
+    let specs = load_embedding_specs_from_db(db)?;
+    find_embedding_spec(specs, code, model, dim, distance)
+}
+
+/// Resolve an embedding spec by opening storage (standalone entry point only).
 fn resolve_embedding_spec(
     db_path: &PathBuf,
     code: Option<u64>,
@@ -1452,7 +1474,16 @@ fn resolve_embedding_spec(
     distance: Option<&str>,
 ) -> Result<(u64, EmbeddingSpec)> {
     let specs = load_embedding_specs(db_path)?;
+    find_embedding_spec(specs, code, model, dim, distance)
+}
 
+fn find_embedding_spec(
+    specs: Vec<(u64, EmbeddingSpec)>,
+    code: Option<u64>,
+    model: Option<&str>,
+    dim: Option<u32>,
+    distance: Option<&str>,
+) -> Result<(u64, EmbeddingSpec)> {
     if let Some(code) = code {
         return specs
             .into_iter()
@@ -1493,8 +1524,9 @@ fn embedding_spec_json(code: u64, spec: &EmbeddingSpec) -> serde_json::Value {
     })
 }
 
-fn print_embedding_summary(db_path: &PathBuf, code: u64) -> Result<()> {
-    let (code, spec) = resolve_embedding_spec(db_path, Some(code), None, None, None)?;
+/// Print embedding summary from an already-open TransactionDB.
+fn print_embedding_summary_from_db(db: &rocksdb::TransactionDB, db_path: &PathBuf, code: u64) -> Result<()> {
+    let (code, spec) = resolve_embedding_spec_from_db(db, Some(code), None, None, None)?;
     println!("\nEmbedding registered:");
     println!("  Code: {}", code);
     println!("  Model: {}", spec.model);
@@ -1524,12 +1556,23 @@ fn load_vectors_for_embedding(
     limit: usize,
     seed: u64,
 ) -> Result<Vec<(VecId, Vec<f32>)>> {
-    use rand::{Rng, SeedableRng};
-    use rand_chacha::ChaCha8Rng;
-
     let mut storage = Storage::readwrite(db_path);
     storage.ready()?;
     let db = storage.transaction_db()?;
+    load_vectors_for_embedding_from_db(db, embedding, storage_type, limit, seed)
+}
+
+/// Load vectors from an already-open TransactionDB using reservoir sampling.
+fn load_vectors_for_embedding_from_db(
+    db: &rocksdb::TransactionDB,
+    embedding: u64,
+    storage_type: VectorElementType,
+    limit: usize,
+    seed: u64,
+) -> Result<Vec<(VecId, Vec<f32>)>> {
+    use rand::{Rng, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
+
     let cf = db
         .cf_handle(Vectors::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;

@@ -1,0 +1,16 @@
+[package]
+name = "build_graph"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "build_graph"
+path = "main.rs"
+
+[dependencies]
+motlie-db = { path = "../../../../libs/db" }
+tokio = { version = "1.0", features = ["full"] }
+anyhow = "1.0"
