@@ -1198,3 +1198,134 @@ assert!(result.is_err());  // VersionMismatch error
 (codex, 2026-02-10, decision: processor-backed reader helpers are internal-only and intentionally omitted from public API surface.)
 
 ---
+
+## Version Playback (Relative Version Queries)
+
+Git-style `HEAD~N` queries for browsing entity history by version offset.
+Every mutation (add, update, delete, restore) increments the version counter
+and writes a snapshot to `NodeVersionHistory` / `EdgeVersionHistory`.
+These queries reverse-iterate the history to resolve past states.
+
+### Query Types
+
+| Query | Purpose | Reply |
+|-------|---------|-------|
+| `NodeAtVersion` | Node state at HEAD~N | `VersionSnapshot<(NodeName, NodeSummary)>` |
+| `EdgeAtVersion` | Edge state at HEAD~N | `VersionSnapshot<(EdgeSummary, Option<EdgeWeight>)>` |
+| `NodeVersions` | List node version metadata (newest first) | `Vec<VersionMeta>` |
+| `EdgeVersions` | List edge version metadata (newest first) | `Vec<VersionMeta>` |
+
+### Reply Types
+
+```rust
+/// Full entity state at a specific version.
+pub struct VersionSnapshot<T> {
+    pub payload: T,
+    pub version: Version,
+    pub valid_since: SystemTimeMillis,
+    pub active_period: Option<ActivePeriod>,
+}
+
+/// Lightweight version metadata (no summary resolution).
+pub struct VersionMeta {
+    pub version: Version,
+    pub valid_since: SystemTimeMillis,
+    pub updated_at: SystemTimeMillis,
+    pub active_period: Option<ActivePeriod>,
+    pub summary_available: bool,
+}
+```
+
+### Playback: Get Previous Node Version
+
+```rust
+use motlie_db::graph::query::NodeAtVersion;
+
+// HEAD~0 = current, HEAD~1 = previous, HEAD~2 = two versions ago
+let snap = NodeAtVersion::new(node_id, 1)
+    .run(&reader, timeout)
+    .await?;
+
+let (name, summary) = snap.payload;
+println!("v{} (created at {}): {}", snap.version, snap.valid_since.0, name);
+```
+
+### Playback: Get Previous Edge Version
+
+```rust
+use motlie_db::graph::query::EdgeAtVersion;
+
+let snap = EdgeAtVersion::new(alice_id, bob_id, "knows".into(), 1)
+    .run(&reader, timeout)
+    .await?;
+
+let (summary, weight) = snap.payload;
+println!("v{}: weight={:?}", snap.version, weight);
+```
+
+### Diff Current vs Previous
+
+```rust
+let (current_name, current_summary, current_version) =
+    NodeById::new(node_id, None).run(&reader, timeout).await?;
+
+let prev = NodeAtVersion::new(node_id, 1).run(&reader, timeout).await?;
+let (prev_name, prev_summary) = prev.payload;
+
+println!("Current v{}: {}", current_version, current_name);
+println!("Previous v{}: {}", prev.version, prev_name);
+```
+
+### List Version History (Scrubber)
+
+```rust
+use motlie_db::graph::query::NodeVersions;
+
+// List last 10 versions (newest first)
+let versions = NodeVersions::new(node_id, 10)
+    .run(&reader, timeout)
+    .await?;
+
+for v in &versions {
+    println!(
+        "v{} created={} active_period={:?} summary_available={}",
+        v.version, v.valid_since.0, v.active_period, v.summary_available
+    );
+}
+
+// Paginate: skip first 10, get next 10
+let page2 = NodeVersions::new(node_id, 10)
+    .with_offset(10)
+    .run(&reader, timeout)
+    .await?;
+```
+
+### List Edge Version History
+
+```rust
+use motlie_db::graph::query::EdgeVersions;
+
+let versions = EdgeVersions::new(alice_id, bob_id, "knows".into(), 10)
+    .run(&reader, timeout)
+    .await?;
+```
+
+### GC Safety
+
+Playback queries fail if the historical summary was garbage-collected.
+Use `NodeVersions` / `EdgeVersions` to check `summary_available` before
+attempting playback on old versions.
+
+```rust
+let versions = NodeVersions::new(node_id, 100).run(&reader, timeout).await?;
+
+// Find oldest resolvable version
+let oldest_playable = versions.iter().rev().find(|v| v.summary_available);
+if let Some(v) = oldest_playable {
+    let snap = NodeAtVersion::new(node_id, versions[0].version - v.version)
+        .run(&reader, timeout)
+        .await?;
+}
+```
+
+---

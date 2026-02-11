@@ -28,7 +28,7 @@ use super::HotColumnFamilyRecord;
 use super::{ColumnFamily, ColumnFamilySerde};
 use crate::reader::Runnable;
 use crate::request::{new_request_id, RequestMeta};
-use crate::{ActiveTimeMillis, Id, SystemTimeMillis, TimestampMilli};
+use crate::{ActivePeriod, ActiveTimeMillis, Id, SystemTimeMillis, TimestampMilli};
 use super::schema::{
     self, DstId, EdgeName, EdgeSummary, EdgeWeight, FragmentContent, NodeName, NodeSummary, SrcId,
     Version,
@@ -136,6 +136,11 @@ pub enum Query {
     // CONTENT-ADDRESS reverse lookup queries
     NodesBySummaryHash(NodesBySummaryHash),
     EdgesBySummaryHash(EdgesBySummaryHash),
+    // Version playback queries (HEAD~N)
+    NodeAtVersion(NodeAtVersion),
+    EdgeAtVersion(EdgeAtVersion),
+    NodeVersions(NodeVersions),
+    EdgeVersions(EdgeVersions),
 }
 
 impl std::fmt::Display for Query {
@@ -178,6 +183,10 @@ impl std::fmt::Display for Query {
                 "EdgesBySummaryHash: hash={:?}, current_only={}",
                 q.hash, q.current_only
             ),
+            Query::NodeAtVersion(q) => write!(f, "NodeAtVersion: id={}, back={}", q.id, q.versions_back),
+            Query::EdgeAtVersion(q) => write!(f, "EdgeAtVersion: src={}, dst={}, name={}, back={}", q.source_id, q.dest_id, q.name, q.versions_back),
+            Query::NodeVersions(q) => write!(f, "NodeVersions: id={}, limit={}", q.id, q.limit),
+            Query::EdgeVersions(q) => write!(f, "EdgeVersions: src={}, dst={}, name={}, limit={}", q.source_id, q.dest_id, q.name, q.limit),
         }
     }
 }
@@ -195,6 +204,10 @@ pub enum QueryResult {
     AllEdges(Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>),
     NodesBySummaryHash(Vec<NodeSummaryLookupResult>),
     EdgesBySummaryHash(Vec<EdgeSummaryLookupResult>),
+    NodeAtVersion(VersionSnapshot<(NodeName, NodeSummary)>),
+    EdgeAtVersion(VersionSnapshot<(EdgeSummary, Option<EdgeWeight>)>),
+    NodeVersions(Vec<VersionMeta>),
+    EdgeVersions(Vec<VersionMeta>),
 }
 
 impl Query {
@@ -227,6 +240,10 @@ impl Query {
             Query::EdgesBySummaryHash(q) => {
                 q.execute(processor).await.map(QueryResult::EdgesBySummaryHash)
             }
+            Query::NodeAtVersion(q) => q.execute(processor).await.map(QueryResult::NodeAtVersion),
+            Query::EdgeAtVersion(q) => q.execute(processor).await.map(QueryResult::EdgeAtVersion),
+            Query::NodeVersions(q) => q.execute(processor).await.map(QueryResult::NodeVersions),
+            Query::EdgeVersions(q) => q.execute(processor).await.map(QueryResult::EdgeVersions),
         }
     }
 }
@@ -248,6 +265,10 @@ impl RequestMeta for Query {
             Query::AllEdges(q) => q.request_kind(),
             Query::NodesBySummaryHash(q) => q.request_kind(),
             Query::EdgesBySummaryHash(q) => q.request_kind(),
+            Query::NodeAtVersion(q) => q.request_kind(),
+            Query::EdgeAtVersion(q) => q.request_kind(),
+            Query::NodeVersions(q) => q.request_kind(),
+            Query::EdgeVersions(q) => q.request_kind(),
         }
     }
 }
@@ -276,6 +297,10 @@ impl_request_meta!(AllNodes, Vec<(Id, NodeName, NodeSummary, Version)>, "all_nod
 impl_request_meta!(AllEdges, Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>, "all_edges");
 impl_request_meta!(NodesBySummaryHash, Vec<NodeSummaryLookupResult>, "nodes_by_summary_hash");
 impl_request_meta!(EdgesBySummaryHash, Vec<EdgeSummaryLookupResult>, "edges_by_summary_hash");
+impl_request_meta!(NodeAtVersion, VersionSnapshot<(NodeName, NodeSummary)>, "node_at_version");
+impl_request_meta!(EdgeAtVersion, VersionSnapshot<(EdgeSummary, Option<EdgeWeight>)>, "edge_at_version");
+impl_request_meta!(NodeVersions, Vec<VersionMeta>, "node_versions");
+impl_request_meta!(EdgeVersions, Vec<VersionMeta>, "edge_versions");
 
 /// Query parameters for finding a node by its ID.
 ///
@@ -763,6 +788,109 @@ impl AllEdges {
     /// Set the reference timestamp for temporal validity checks.
     pub fn with_reference_time(mut self, ts: TimestampMilli) -> Self {
         self.reference_ts_millis = Some(ts);
+        self
+    }
+}
+
+// ============================================================================
+// Version Playback Types (HEAD~N)
+// ============================================================================
+
+/// Full entity state at a specific version in its history.
+#[derive(Debug, Clone)]
+pub struct VersionSnapshot<T> {
+    /// The resolved entity payload.
+    pub payload: T,
+    /// Monotonic version number (1-based).
+    pub version: Version,
+    /// System time when this version was created.
+    pub valid_since: SystemTimeMillis,
+    /// Business-time validity window at this version.
+    pub active_period: Option<ActivePeriod>,
+}
+
+/// Lightweight version metadata (no summary resolution).
+#[derive(Debug, Clone)]
+pub struct VersionMeta {
+    pub version: Version,
+    pub valid_since: SystemTimeMillis,
+    pub updated_at: SystemTimeMillis,
+    pub active_period: Option<ActivePeriod>,
+    /// True if summary hash is present (resolvable for playback).
+    pub summary_available: bool,
+}
+
+/// Query a node at a relative version offset from current.
+///
+/// Like git's `HEAD~N`: `versions_back = 0` is current,
+/// `1` is the version before current, etc.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodeAtVersion {
+    pub id: Id,
+    /// Versions back from current. 0 = HEAD, 1 = HEAD~1, ...
+    pub versions_back: u32,
+}
+
+impl NodeAtVersion {
+    pub fn new(id: Id, versions_back: u32) -> Self {
+        Self { id, versions_back }
+    }
+}
+
+/// Query an edge at a relative version offset from current.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EdgeAtVersion {
+    pub source_id: Id,
+    pub dest_id: Id,
+    pub name: String,
+    /// Versions back from current. 0 = HEAD, 1 = HEAD~1, ...
+    pub versions_back: u32,
+}
+
+impl EdgeAtVersion {
+    pub fn new(source_id: Id, dest_id: Id, name: String, versions_back: u32) -> Self {
+        Self { source_id, dest_id, name, versions_back }
+    }
+}
+
+/// List version metadata for a node (newest first).
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodeVersions {
+    pub id: Id,
+    pub limit: usize,
+    /// Skip this many versions from newest. 0 = start at HEAD.
+    pub offset: u32,
+}
+
+impl NodeVersions {
+    pub fn new(id: Id, limit: usize) -> Self {
+        Self { id, limit, offset: 0 }
+    }
+
+    pub fn with_offset(mut self, offset: u32) -> Self {
+        self.offset = offset;
+        self
+    }
+}
+
+/// List version metadata for an edge (newest first).
+#[derive(Debug, Clone, PartialEq)]
+pub struct EdgeVersions {
+    pub source_id: Id,
+    pub dest_id: Id,
+    pub name: String,
+    pub limit: usize,
+    /// Skip this many versions from newest. 0 = start at HEAD.
+    pub offset: u32,
+}
+
+impl EdgeVersions {
+    pub fn new(source_id: Id, dest_id: Id, name: String, limit: usize) -> Self {
+        Self { source_id, dest_id, name, limit, offset: 0 }
+    }
+
+    pub fn with_offset(mut self, offset: u32) -> Self {
+        self.offset = offset;
         self
     }
 }
@@ -1864,6 +1992,66 @@ impl QueryReply for EdgesBySummaryHash {
     }
 }
 
+impl QueryReply for NodeAtVersion {
+    type Reply = VersionSnapshot<(NodeName, NodeSummary)>;
+
+    fn into_query(self) -> Query {
+        Query::NodeAtVersion(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::NodeAtVersion(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
+    }
+}
+
+impl QueryReply for EdgeAtVersion {
+    type Reply = VersionSnapshot<(EdgeSummary, Option<EdgeWeight>)>;
+
+    fn into_query(self) -> Query {
+        Query::EdgeAtVersion(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::EdgeAtVersion(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
+    }
+}
+
+impl QueryReply for NodeVersions {
+    type Reply = Vec<VersionMeta>;
+
+    fn into_query(self) -> Query {
+        Query::NodeVersions(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::NodeVersions(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
+    }
+}
+
+impl QueryReply for EdgeVersions {
+    type Reply = Vec<VersionMeta>;
+
+    fn into_query(self) -> Query {
+        Query::EdgeVersions(self)
+    }
+
+    fn from_result(result: QueryResult) -> Result<Self::Reply> {
+        match result {
+            QueryResult::EdgeVersions(result) => Ok(result),
+            other => Err(anyhow::anyhow!("Unexpected query result: {:?}", other)),
+        }
+    }
+}
+
 // ============================================================================
 // QueryExecutor Implementations for Reverse Lookup Queries
 // ============================================================================
@@ -1883,6 +2071,46 @@ impl QueryExecutor for EdgesBySummaryHash {
 
     async fn execute(&self, processor: &GraphProcessor) -> Result<Self::Output> {
         super::ops::read::edges_by_summary_hash(processor.storage(), self)
+    }
+}
+
+// ============================================================================
+// QueryExecutor Implementations for Version Playback Queries
+// ============================================================================
+
+#[async_trait::async_trait]
+impl QueryExecutor for NodeAtVersion {
+    type Output = VersionSnapshot<(NodeName, NodeSummary)>;
+
+    async fn execute(&self, processor: &GraphProcessor) -> Result<Self::Output> {
+        super::ops::read::node_at_version(processor.storage(), self)
+    }
+}
+
+#[async_trait::async_trait]
+impl QueryExecutor for EdgeAtVersion {
+    type Output = VersionSnapshot<(EdgeSummary, Option<EdgeWeight>)>;
+
+    async fn execute(&self, processor: &GraphProcessor) -> Result<Self::Output> {
+        super::ops::read::edge_at_version(processor.storage(), self)
+    }
+}
+
+#[async_trait::async_trait]
+impl QueryExecutor for NodeVersions {
+    type Output = Vec<VersionMeta>;
+
+    async fn execute(&self, processor: &GraphProcessor) -> Result<Self::Output> {
+        super::ops::read::list_node_versions(processor.storage(), self)
+    }
+}
+
+#[async_trait::async_trait]
+impl QueryExecutor for EdgeVersions {
+    type Output = Vec<VersionMeta>;
+
+    async fn execute(&self, processor: &GraphProcessor) -> Result<Self::Output> {
+        super::ops::read::list_edge_versions(processor.storage(), self)
     }
 }
 

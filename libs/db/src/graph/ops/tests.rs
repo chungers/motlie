@@ -5,7 +5,7 @@
 
 use tempfile::TempDir;
 
-use super::{edge, fragment, node};
+use super::{edge, fragment, node, read};
 use crate::graph::schema::{
     EdgeSummaries, EdgeSummaryCfKey, EdgeVersionHistory, EdgeVersionHistoryCfKey,
     EdgeVersionHistoryCfValue, ForwardEdgeCfKey, ForwardEdgeCfValue, ForwardEdges, NodeCfKey,
@@ -14,6 +14,9 @@ use crate::graph::schema::{
 };
 use crate::graph::{AddEdge, AddNode, DeleteEdge, DeleteNode, UpdateNode, UpdateEdge};
 use crate::graph::mutation::{AddNodeFragment, RestoreEdge};
+use crate::graph::query::{
+    EdgeAtVersion, EdgeVersions, NodeAtVersion, NodeVersions,
+};
 use crate::graph::ops::summary::verify_edge_summary_exists;
 use crate::graph::name_hash::NameHash;
 use crate::graph::SummaryHash;
@@ -1092,4 +1095,292 @@ fn ops_update_deleted_node_rejected() {
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("deleted"), "Error should mention deleted");
     }
+}
+
+// ============================================================================
+// Version Playback Tests (HEAD~N)
+// ============================================================================
+
+#[test]
+fn ops_node_at_version_head() {
+    let (_temp_dir, storage) = setup_storage();
+    let txn_db = storage.transaction_db().unwrap();
+
+    let node_id = Id::new();
+    let ts = TimestampMilli::now();
+
+    // Create v1
+    {
+        let txn = txn_db.transaction();
+        node::add_node(&txn, txn_db, &AddNode {
+            id: node_id,
+            ts_millis: ts,
+            name: "versioned".to_string(),
+            valid_range: None,
+            summary: DataUrl::from_text("V1 summary"),
+        }, None).unwrap();
+        txn.commit().unwrap();
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(5));
+
+    // Create v2
+    {
+        let txn = txn_db.transaction();
+        node::update_node(&txn, txn_db, &UpdateNode {
+            id: node_id,
+            expected_version: 1,
+            new_active_period: None,
+            new_summary: Some(DataUrl::from_text("V2 summary")),
+        }).unwrap();
+        txn.commit().unwrap();
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(5));
+
+    // Create v3
+    {
+        let txn = txn_db.transaction();
+        node::update_node(&txn, txn_db, &UpdateNode {
+            id: node_id,
+            expected_version: 2,
+            new_active_period: None,
+            new_summary: Some(DataUrl::from_text("V3 summary")),
+        }).unwrap();
+        txn.commit().unwrap();
+    }
+
+    // HEAD (versions_back=0) → v3
+    let snap = read::node_at_version(&storage, &NodeAtVersion::new(node_id, 0)).unwrap();
+    assert_eq!(snap.version, 3);
+    assert_eq!(snap.payload.1, DataUrl::from_text("V3 summary"));
+
+    // HEAD~1 (versions_back=1) → v2
+    let snap = read::node_at_version(&storage, &NodeAtVersion::new(node_id, 1)).unwrap();
+    assert_eq!(snap.version, 2);
+    assert_eq!(snap.payload.1, DataUrl::from_text("V2 summary"));
+
+    // HEAD~2 (versions_back=2) → v1
+    let snap = read::node_at_version(&storage, &NodeAtVersion::new(node_id, 2)).unwrap();
+    assert_eq!(snap.version, 1);
+    assert_eq!(snap.payload.1, DataUrl::from_text("V1 summary"));
+
+    // HEAD~3 → error (no such version)
+    let result = read::node_at_version(&storage, &NodeAtVersion::new(node_id, 3));
+    assert!(result.is_err(), "HEAD~3 should fail for 3-version node");
+}
+
+#[test]
+fn ops_edge_at_version_head() {
+    let (_temp_dir, storage) = setup_storage();
+    let txn_db = storage.transaction_db().unwrap();
+
+    let src_id = Id::new();
+    let dst_id = Id::new();
+    let edge_name = "knows".to_string();
+    let ts = TimestampMilli::now();
+
+    // Create v1
+    {
+        let txn = txn_db.transaction();
+        edge::add_edge(&txn, txn_db, &AddEdge {
+            source_node_id: src_id,
+            target_node_id: dst_id,
+            ts_millis: ts,
+            name: edge_name.clone(),
+            summary: DataUrl::from_text("Edge V1"),
+            weight: Some(1.0),
+            valid_range: None,
+        }, None).unwrap();
+        txn.commit().unwrap();
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(5));
+
+    // Create v2
+    {
+        let txn = txn_db.transaction();
+        edge::update_edge(&txn, txn_db, &UpdateEdge {
+            src_id,
+            dst_id,
+            name: edge_name.clone(),
+            expected_version: 1,
+            new_weight: Some(Some(5.0)),
+            new_active_period: None,
+            new_summary: Some(DataUrl::from_text("Edge V2")),
+        }).unwrap();
+        txn.commit().unwrap();
+    }
+
+    // HEAD (versions_back=0) → v2
+    let snap = read::edge_at_version(&storage, &EdgeAtVersion::new(src_id, dst_id, edge_name.clone(), 0)).unwrap();
+    assert_eq!(snap.version, 2);
+    assert_eq!(snap.payload.0, DataUrl::from_text("Edge V2"));
+    assert_eq!(snap.payload.1, Some(5.0));
+
+    // HEAD~1 (versions_back=1) → v1
+    let snap = read::edge_at_version(&storage, &EdgeAtVersion::new(src_id, dst_id, edge_name.clone(), 1)).unwrap();
+    assert_eq!(snap.version, 1);
+    assert_eq!(snap.payload.0, DataUrl::from_text("Edge V1"));
+    assert_eq!(snap.payload.1, Some(1.0));
+
+    // HEAD~2 → error
+    let result = read::edge_at_version(&storage, &EdgeAtVersion::new(src_id, dst_id, edge_name, 2));
+    assert!(result.is_err(), "HEAD~2 should fail for 2-version edge");
+}
+
+#[test]
+fn ops_list_node_versions() {
+    let (_temp_dir, storage) = setup_storage();
+    let txn_db = storage.transaction_db().unwrap();
+
+    let node_id = Id::new();
+    let ts = TimestampMilli::now();
+
+    // Create 3 versions
+    {
+        let txn = txn_db.transaction();
+        node::add_node(&txn, txn_db, &AddNode {
+            id: node_id,
+            ts_millis: ts,
+            name: "listed".to_string(),
+            valid_range: None,
+            summary: DataUrl::from_text("V1"),
+        }, None).unwrap();
+        txn.commit().unwrap();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    {
+        let txn = txn_db.transaction();
+        node::update_node(&txn, txn_db, &UpdateNode {
+            id: node_id,
+            expected_version: 1,
+            new_active_period: None,
+            new_summary: Some(DataUrl::from_text("V2")),
+        }).unwrap();
+        txn.commit().unwrap();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    {
+        let txn = txn_db.transaction();
+        node::update_node(&txn, txn_db, &UpdateNode {
+            id: node_id,
+            expected_version: 2,
+            new_active_period: None,
+            new_summary: Some(DataUrl::from_text("V3")),
+        }).unwrap();
+        txn.commit().unwrap();
+    }
+
+    // List all versions (newest first)
+    let versions = read::list_node_versions(&storage, &NodeVersions::new(node_id, 10)).unwrap();
+    assert_eq!(versions.len(), 3, "Should have 3 versions");
+    assert_eq!(versions[0].version, 3, "First entry should be newest (v3)");
+    assert_eq!(versions[1].version, 2);
+    assert_eq!(versions[2].version, 1, "Last entry should be oldest (v1)");
+
+    // valid_since should be descending (newest first)
+    assert!(versions[0].valid_since.0 >= versions[1].valid_since.0);
+    assert!(versions[1].valid_since.0 >= versions[2].valid_since.0);
+
+    // summary_available should be true for all
+    for v in &versions {
+        assert!(v.summary_available, "Summary should be available for version {}", v.version);
+    }
+
+    // Test pagination: limit=2
+    let page = read::list_node_versions(&storage, &NodeVersions::new(node_id, 2)).unwrap();
+    assert_eq!(page.len(), 2, "Limit=2 should return 2 entries");
+    assert_eq!(page[0].version, 3);
+    assert_eq!(page[1].version, 2);
+
+    // Test offset: skip 1, get remaining
+    let offset_page = read::list_node_versions(
+        &storage,
+        &NodeVersions::new(node_id, 10).with_offset(1),
+    ).unwrap();
+    assert_eq!(offset_page.len(), 2, "Offset=1 should skip HEAD, return 2");
+    assert_eq!(offset_page[0].version, 2);
+    assert_eq!(offset_page[1].version, 1);
+}
+
+#[test]
+fn ops_list_edge_versions() {
+    let (_temp_dir, storage) = setup_storage();
+    let txn_db = storage.transaction_db().unwrap();
+
+    let src_id = Id::new();
+    let dst_id = Id::new();
+    let edge_name = "edge_listed".to_string();
+    let ts = TimestampMilli::now();
+
+    // Create v1
+    {
+        let txn = txn_db.transaction();
+        edge::add_edge(&txn, txn_db, &AddEdge {
+            source_node_id: src_id,
+            target_node_id: dst_id,
+            ts_millis: ts,
+            name: edge_name.clone(),
+            summary: DataUrl::from_text("EV1"),
+            weight: Some(1.0),
+            valid_range: None,
+        }, None).unwrap();
+        txn.commit().unwrap();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(5));
+
+    // Create v2
+    {
+        let txn = txn_db.transaction();
+        edge::update_edge(&txn, txn_db, &UpdateEdge {
+            src_id,
+            dst_id,
+            name: edge_name.clone(),
+            expected_version: 1,
+            new_weight: Some(Some(2.0)),
+            new_active_period: None,
+            new_summary: Some(DataUrl::from_text("EV2")),
+        }).unwrap();
+        txn.commit().unwrap();
+    }
+
+    // List all versions (newest first)
+    let versions = read::list_edge_versions(
+        &storage,
+        &EdgeVersions::new(src_id, dst_id, edge_name.clone(), 10),
+    ).unwrap();
+    assert_eq!(versions.len(), 2, "Should have 2 versions");
+    assert_eq!(versions[0].version, 2, "First should be newest (v2)");
+    assert_eq!(versions[1].version, 1, "Second should be oldest (v1)");
+    assert!(versions[0].valid_since.0 >= versions[1].valid_since.0);
+}
+
+#[test]
+fn ops_version_playback_nonexistent_entity() {
+    let (_temp_dir, storage) = setup_storage();
+
+    let fake_id = Id::new();
+
+    // node_at_version on non-existent node → error
+    let result = read::node_at_version(&storage, &NodeAtVersion::new(fake_id, 0));
+    assert!(result.is_err(), "Non-existent node should return error");
+
+    // edge_at_version on non-existent edge → error
+    let result = read::edge_at_version(
+        &storage,
+        &EdgeAtVersion::new(fake_id, Id::new(), "nope".to_string(), 0),
+    );
+    assert!(result.is_err(), "Non-existent edge should return error");
+
+    // list_node_versions on non-existent node → empty vec
+    let versions = read::list_node_versions(&storage, &NodeVersions::new(fake_id, 10)).unwrap();
+    assert!(versions.is_empty(), "Non-existent node should have no versions");
+
+    // list_edge_versions on non-existent edge → empty vec
+    let versions = read::list_edge_versions(
+        &storage,
+        &EdgeVersions::new(fake_id, Id::new(), "nope".to_string(), 10),
+    ).unwrap();
+    assert!(versions.is_empty(), "Non-existent edge should have no versions");
 }
