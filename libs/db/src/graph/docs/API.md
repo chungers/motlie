@@ -1312,9 +1312,10 @@ let versions = EdgeVersions::new(alice_id, bob_id, "knows".into(), 10)
 
 ### GC Safety
 
-Playback queries fail if the historical summary was garbage-collected.
-Use `NodeVersions` / `EdgeVersions` to check `summary_available` before
-attempting playback on old versions.
+Playback queries return an **error** if the historical summary was
+garbage-collected. Use `NodeVersions` / `EdgeVersions` and `summary_available`
+to detect this before playback.
+(codex, 2026-02-11, decision: playback should return error if summary is missing; strict by default.)
 
 ```rust
 let versions = NodeVersions::new(node_id, 100).run(&reader, timeout).await?;

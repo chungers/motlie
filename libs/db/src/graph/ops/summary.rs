@@ -206,6 +206,39 @@ pub(crate) fn resolve_node_summary(
     }
 }
 
+/// Resolve a node summary from the NodeSummaries cold CF (strict).
+///
+/// Returns an error if the summary hash is missing or not found.
+pub(crate) fn resolve_node_summary_strict(
+    storage: &Storage,
+    summary_hash: Option<SummaryHash>,
+) -> Result<NodeSummary> {
+    let hash = summary_hash.ok_or_else(|| anyhow::anyhow!("Missing node summary hash"))?;
+
+    let key_bytes = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(hash));
+
+    let value_bytes = if let Ok(db) = storage.db() {
+        let summaries_cf = db
+            .cf_handle(NodeSummaries::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("NodeSummaries CF not found"))?;
+        db.get_cf(summaries_cf, &key_bytes)?
+    } else {
+        let txn_db = storage.transaction_db()?;
+        let summaries_cf = txn_db
+            .cf_handle(NodeSummaries::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("NodeSummaries CF not found"))?;
+        txn_db.get_cf(summaries_cf, &key_bytes)?
+    };
+
+    match value_bytes {
+        Some(bytes) => {
+            let value = NodeSummaries::value_from_bytes(&bytes)?;
+            Ok(value.0)
+        }
+        None => Err(anyhow::anyhow!("Missing node summary for hash {:?}", hash)),
+    }
+}
+
 /// Resolve a node summary from a transaction context (for read-your-writes).
 pub(crate) fn resolve_node_summary_from_txn(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
@@ -228,6 +261,31 @@ pub(crate) fn resolve_node_summary_from_txn(
             Ok(value.0)
         }
         None => Ok(NodeSummary::from_text("")),
+    }
+}
+
+/// Resolve a node summary from a transaction context (strict).
+///
+/// Returns an error if the summary hash is missing or not found.
+pub(crate) fn resolve_node_summary_from_txn_strict(
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    summary_hash: Option<SummaryHash>,
+) -> Result<NodeSummary> {
+    let hash = summary_hash.ok_or_else(|| anyhow::anyhow!("Missing node summary hash"))?;
+
+    let summaries_cf = txn_db
+        .cf_handle(NodeSummaries::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("NodeSummaries CF not found"))?;
+
+    let key_bytes = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(hash));
+
+    match txn.get_cf(summaries_cf, &key_bytes)? {
+        Some(bytes) => {
+            let value = NodeSummaries::value_from_bytes(&bytes)?;
+            Ok(value.0)
+        }
+        None => Err(anyhow::anyhow!("Missing node summary for hash {:?}", hash)),
     }
 }
 
@@ -266,6 +324,39 @@ pub(crate) fn resolve_edge_summary(
     }
 }
 
+/// Resolve an edge summary from the EdgeSummaries cold CF (strict).
+///
+/// Returns an error if the summary hash is missing or not found.
+pub(crate) fn resolve_edge_summary_strict(
+    storage: &Storage,
+    summary_hash: Option<SummaryHash>,
+) -> Result<EdgeSummary> {
+    let hash = summary_hash.ok_or_else(|| anyhow::anyhow!("Missing edge summary hash"))?;
+
+    let key_bytes = EdgeSummaries::key_to_bytes(&EdgeSummaryCfKey(hash));
+
+    let value_bytes = if let Ok(db) = storage.db() {
+        let summaries_cf = db
+            .cf_handle(EdgeSummaries::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("EdgeSummaries CF not found"))?;
+        db.get_cf(summaries_cf, &key_bytes)?
+    } else {
+        let txn_db = storage.transaction_db()?;
+        let summaries_cf = txn_db
+            .cf_handle(EdgeSummaries::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("EdgeSummaries CF not found"))?;
+        txn_db.get_cf(summaries_cf, &key_bytes)?
+    };
+
+    match value_bytes {
+        Some(bytes) => {
+            let value = EdgeSummaries::value_from_bytes(&bytes)?;
+            Ok(value.0)
+        }
+        None => Err(anyhow::anyhow!("Missing edge summary for hash {:?}", hash)),
+    }
+}
+
 /// Resolve an edge summary from a transaction context (for read-your-writes).
 pub(crate) fn resolve_edge_summary_from_txn(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
@@ -289,4 +380,65 @@ pub(crate) fn resolve_edge_summary_from_txn(
         }
         None => Ok(EdgeSummary::from_text("")),
     }
+}
+
+/// Resolve an edge summary from a transaction context (strict).
+///
+/// Returns an error if the summary hash is missing or not found.
+pub(crate) fn resolve_edge_summary_from_txn_strict(
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    summary_hash: Option<SummaryHash>,
+) -> Result<EdgeSummary> {
+    let hash = summary_hash.ok_or_else(|| anyhow::anyhow!("Missing edge summary hash"))?;
+
+    let summaries_cf = txn_db
+        .cf_handle(EdgeSummaries::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("EdgeSummaries CF not found"))?;
+
+    let key_bytes = EdgeSummaries::key_to_bytes(&EdgeSummaryCfKey(hash));
+
+    match txn.get_cf(summaries_cf, &key_bytes)? {
+        Some(bytes) => {
+            let value = EdgeSummaries::value_from_bytes(&bytes)?;
+            Ok(value.0)
+        }
+        None => Err(anyhow::anyhow!("Missing edge summary for hash {:?}", hash)),
+    }
+}
+
+/// Check whether a node summary exists in storage.
+pub(crate) fn node_summary_exists(storage: &Storage, hash: SummaryHash) -> Result<bool> {
+    let key_bytes = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(hash));
+    let value_bytes = if let Ok(db) = storage.db() {
+        let summaries_cf = db
+            .cf_handle(NodeSummaries::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("NodeSummaries CF not found"))?;
+        db.get_cf(summaries_cf, &key_bytes)?
+    } else {
+        let txn_db = storage.transaction_db()?;
+        let summaries_cf = txn_db
+            .cf_handle(NodeSummaries::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("NodeSummaries CF not found"))?;
+        txn_db.get_cf(summaries_cf, &key_bytes)?
+    };
+    Ok(value_bytes.is_some())
+}
+
+/// Check whether an edge summary exists in storage.
+pub(crate) fn edge_summary_exists(storage: &Storage, hash: SummaryHash) -> Result<bool> {
+    let key_bytes = EdgeSummaries::key_to_bytes(&EdgeSummaryCfKey(hash));
+    let value_bytes = if let Ok(db) = storage.db() {
+        let summaries_cf = db
+            .cf_handle(EdgeSummaries::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("EdgeSummaries CF not found"))?;
+        db.get_cf(summaries_cf, &key_bytes)?
+    } else {
+        let txn_db = storage.transaction_db()?;
+        let summaries_cf = txn_db
+            .cf_handle(EdgeSummaries::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("EdgeSummaries CF not found"))?;
+        txn_db.get_cf(summaries_cf, &key_bytes)?
+    };
+    Ok(value_bytes.is_some())
 }

@@ -9,8 +9,9 @@ use super::{edge, fragment, node, read};
 use crate::graph::schema::{
     EdgeSummaries, EdgeSummaryCfKey, EdgeVersionHistory, EdgeVersionHistoryCfKey,
     EdgeVersionHistoryCfValue, ForwardEdgeCfKey, ForwardEdgeCfValue, ForwardEdges, NodeCfKey,
-    NodeCfValue, NodeFragments, NodeSummaryIndex, NodeSummaryIndexCfKey, NodeVersionHistory,
-    NodeVersionHistoryCfKey, Nodes, ReverseEdgeCfKey, ReverseEdges,
+    NodeCfValue, NodeFragments, NodeSummaries, NodeSummaryCfKey, NodeSummaryIndex,
+    NodeSummaryIndexCfKey, NodeVersionHistory, NodeVersionHistoryCfKey, Nodes, ReverseEdgeCfKey,
+    ReverseEdges,
 };
 use crate::graph::{AddEdge, AddNode, DeleteEdge, DeleteNode, UpdateNode, UpdateEdge};
 use crate::graph::mutation::{AddNodeFragment, RestoreEdge};
@@ -1171,6 +1172,52 @@ fn ops_node_at_version_head() {
 }
 
 #[test]
+fn ops_node_at_version_missing_summary_errors() {
+    let (_temp_dir, storage) = setup_storage();
+    let txn_db = storage.transaction_db().unwrap();
+
+    let node_id = Id::new();
+    let ts = TimestampMilli::now();
+
+    {
+        let txn = txn_db.transaction();
+        node::add_node(&txn, txn_db, &AddNode {
+            id: node_id,
+            ts_millis: ts,
+            name: "node".to_string(),
+            valid_range: None,
+            summary: DataUrl::from_text("V1 summary"),
+        }, None).unwrap();
+        txn.commit().unwrap();
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(5));
+
+    {
+        let txn = txn_db.transaction();
+        node::update_node(&txn, txn_db, &UpdateNode {
+            id: node_id,
+            expected_version: 1,
+            new_active_period: None,
+            new_summary: Some(DataUrl::from_text("V2 summary")),
+        }).unwrap();
+        txn.commit().unwrap();
+    }
+
+    let missing_hash = SummaryHash::from_summary(&DataUrl::from_text("V1 summary")).unwrap();
+    let summaries_cf = txn_db.cf_handle(NodeSummaries::CF_NAME).unwrap();
+    let key_bytes = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(missing_hash));
+    txn_db.delete_cf(summaries_cf, key_bytes).unwrap();
+
+    let result = read::node_at_version(&storage, &NodeAtVersion::new(node_id, 1));
+    assert!(result.is_err(), "Playback should error if summary is missing");
+
+    let versions = read::list_node_versions(&storage, &NodeVersions::new(node_id, 10)).unwrap();
+    let v1 = versions.iter().find(|v| v.version == 1).unwrap();
+    assert!(!v1.summary_available, "summary_available should be false for missing summary");
+}
+
+#[test]
 fn ops_edge_at_version_head() {
     let (_temp_dir, storage) = setup_storage();
     let txn_db = storage.transaction_db().unwrap();
@@ -1227,6 +1274,59 @@ fn ops_edge_at_version_head() {
     // HEAD~2 → error
     let result = read::edge_at_version(&storage, &EdgeAtVersion::new(src_id, dst_id, edge_name, 2));
     assert!(result.is_err(), "HEAD~2 should fail for 2-version edge");
+}
+
+#[test]
+fn ops_edge_at_version_missing_summary_errors() {
+    let (_temp_dir, storage) = setup_storage();
+    let txn_db = storage.transaction_db().unwrap();
+
+    let src_id = Id::new();
+    let dst_id = Id::new();
+    let edge_name = "knows".to_string();
+    let ts = TimestampMilli::now();
+
+    {
+        let txn = txn_db.transaction();
+        edge::add_edge(&txn, txn_db, &AddEdge {
+            source_node_id: src_id,
+            target_node_id: dst_id,
+            ts_millis: ts,
+            name: edge_name.clone(),
+            summary: DataUrl::from_text("Edge V1"),
+            weight: Some(1.0),
+            valid_range: None,
+        }, None).unwrap();
+        txn.commit().unwrap();
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(5));
+
+    {
+        let txn = txn_db.transaction();
+        edge::update_edge(&txn, txn_db, &UpdateEdge {
+            src_id,
+            dst_id,
+            name: edge_name.clone(),
+            expected_version: 1,
+            new_weight: Some(Some(5.0)),
+            new_active_period: None,
+            new_summary: Some(DataUrl::from_text("Edge V2")),
+        }).unwrap();
+        txn.commit().unwrap();
+    }
+
+    let missing_hash = SummaryHash::from_summary(&DataUrl::from_text("Edge V1")).unwrap();
+    let summaries_cf = txn_db.cf_handle(EdgeSummaries::CF_NAME).unwrap();
+    let key_bytes = EdgeSummaries::key_to_bytes(&EdgeSummaryCfKey(missing_hash));
+    txn_db.delete_cf(summaries_cf, key_bytes).unwrap();
+
+    let result = read::edge_at_version(&storage, &EdgeAtVersion::new(src_id, dst_id, edge_name.clone(), 1));
+    assert!(result.is_err(), "Playback should error if summary is missing");
+
+    let versions = read::list_edge_versions(&storage, &EdgeVersions::new(src_id, dst_id, edge_name, 10)).unwrap();
+    let v1 = versions.iter().find(|v| v.version == 1).unwrap();
+    assert!(!v1.summary_available, "summary_available should be false for missing summary");
 }
 
 #[test]

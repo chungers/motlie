@@ -2049,6 +2049,7 @@ Q3: "Show all schedule changes" (audit)
    - Queries support business‑time filtering but not enumerating historical ActivePeriod values over system time.
 
 **Decision:** Keep current API surface for MVP; defer version-history list and relative version traversal until a use case demands it.
+(codex, 2026-02-11, decision: playback must return error if historical summary is missing (strict by default); do not return empty summaries.)
 
 ---
 
