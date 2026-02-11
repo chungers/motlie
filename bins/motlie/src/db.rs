@@ -1,9 +1,13 @@
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
 use motlie_db::graph::scan::{
-    AllEdgeFragments, AllEdges, AllNodeFragments, AllNodes, AllReverseEdges, EdgeFragmentRecord,
-    EdgeRecord, NodeFragmentRecord, NodeRecord, ReverseEdgeRecord, Visitable,
+    AllEdgeFragments, AllEdgeSummaries, AllEdgeSummaryIndex, AllEdgeVersionHistory, AllEdges,
+    AllGraphMeta, AllNames, AllNodeFragments, AllNodeSummaries, AllNodeSummaryIndex,
+    AllNodeVersionHistory, AllNodes, AllOrphanSummaries, AllReverseEdges, EdgeFragmentRecord,
+    EdgeRecord, EdgeSummaryIndexRecord, EdgeSummaryRecord, EdgeVersionHistoryRecord,
+    GraphMetaRecord, NameRecord, NodeFragmentRecord, NodeRecord, NodeSummaryIndexRecord,
+    NodeSummaryRecord, NodeVersionHistoryRecord, OrphanSummaryRecord, ReverseEdgeRecord, Visitable,
 };
-use motlie_db::graph::Storage;
+use motlie_db::graph::{NameHash, Storage, SummaryHash};
 use motlie_db::{DataUrl, Id, TimestampMilli};
 use std::path::PathBuf;
 
@@ -31,11 +35,34 @@ pub enum Verb {
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
 pub enum ColumnFamily {
+    #[value(name = "graph/nodes")]
     Nodes,
+    #[value(name = "graph/node_fragments")]
     NodeFragments,
+    #[value(name = "graph/edge_fragments")]
     EdgeFragments,
+    #[value(name = "graph/forward_edges")]
     OutgoingEdges,
+    #[value(name = "graph/reverse_edges")]
     IncomingEdges,
+    #[value(name = "graph/names")]
+    Names,
+    #[value(name = "graph/node_summaries")]
+    NodeSummaries,
+    #[value(name = "graph/edge_summaries")]
+    EdgeSummaries,
+    #[value(name = "graph/node_summary_index")]
+    NodeSummaryIndex,
+    #[value(name = "graph/edge_summary_index")]
+    EdgeSummaryIndex,
+    #[value(name = "graph/node_version_history")]
+    NodeVersionHistory,
+    #[value(name = "graph/edge_version_history")]
+    EdgeVersionHistory,
+    #[value(name = "graph/orphan_summaries")]
+    OrphanSummaries,
+    #[value(name = "graph/meta")]
+    GraphMeta,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug, Default)]
@@ -98,11 +125,20 @@ pub fn run(cmd: &Command) {
 
 fn run_list() {
     println!("Column families:");
-    println!("  nodes");
-    println!("  node-fragments");
-    println!("  edge-fragments");
-    println!("  outgoing-edges");
-    println!("  incoming-edges");
+    println!("  graph/names");
+    println!("  graph/nodes");
+    println!("  graph/node_fragments");
+    println!("  graph/node_summaries");
+    println!("  graph/node_summary_index");
+    println!("  graph/node_version_history");
+    println!("  graph/edge_fragments");
+    println!("  graph/edge_summaries");
+    println!("  graph/edge_summary_index");
+    println!("  graph/edge_version_history");
+    println!("  graph/forward_edges");
+    println!("  graph/reverse_edges");
+    println!("  graph/orphan_summaries");
+    println!("  graph/meta");
 }
 
 fn run_scan(db_dir: &PathBuf, args: &Scan) -> anyhow::Result<()> {
@@ -121,6 +157,15 @@ fn run_scan(db_dir: &PathBuf, args: &Scan) -> anyhow::Result<()> {
         ColumnFamily::EdgeFragments => scan_edge_fragments(&storage, args, reference_ts),
         ColumnFamily::OutgoingEdges => scan_outgoing_edges(&storage, args, reference_ts),
         ColumnFamily::IncomingEdges => scan_incoming_edges(&storage, args, reference_ts),
+        ColumnFamily::Names => scan_names(&storage, args),
+        ColumnFamily::NodeSummaries => scan_node_summaries(&storage, args),
+        ColumnFamily::EdgeSummaries => scan_edge_summaries(&storage, args),
+        ColumnFamily::NodeSummaryIndex => scan_node_summary_index(&storage, args),
+        ColumnFamily::EdgeSummaryIndex => scan_edge_summary_index(&storage, args),
+        ColumnFamily::NodeVersionHistory => scan_node_version_history(&storage, args),
+        ColumnFamily::EdgeVersionHistory => scan_edge_version_history(&storage, args),
+        ColumnFamily::OrphanSummaries => scan_orphan_summaries(&storage, args),
+        ColumnFamily::GraphMeta => scan_graph_meta(&storage, args),
     }
 }
 
@@ -724,6 +769,409 @@ fn scan_incoming_edges(
             record.dst_id.to_string(),
             record.src_id.to_string(),
             record.name.clone(),
+        ]);
+        true
+    })?;
+
+    printer.print();
+    Ok(())
+}
+
+// ============================================================================
+// Hex Helpers
+// ============================================================================
+
+/// Parse a 16-char hex string to an 8-byte array (for NameHash / SummaryHash).
+fn parse_hex_8(s: &str) -> anyhow::Result<[u8; 8]> {
+    if s.len() != 16 {
+        anyhow::bail!("Expected 16-char hex string, got '{}'", s);
+    }
+    let mut bytes = [0u8; 8];
+    for i in 0..8 {
+        bytes[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16)
+            .map_err(|e| anyhow::anyhow!("Invalid hex '{}': {}", s, e))?;
+    }
+    Ok(bytes)
+}
+
+// ============================================================================
+// New Scan Functions
+// ============================================================================
+
+fn scan_names(storage: &Storage, args: &Scan) -> anyhow::Result<()> {
+    let last = args
+        .last
+        .as_ref()
+        .map(|s| {
+            let bytes = parse_hex_8(s)?;
+            Ok::<_, anyhow::Error>(NameHash::from_bytes(bytes))
+        })
+        .transpose()?;
+
+    let scan = AllNames {
+        last,
+        limit: args.limit,
+        reverse: args.reverse,
+    };
+
+    let mut printer = TablePrinter::new(vec!["HASH", "NAME"], args.format);
+
+    scan.accept(storage, &mut |record: &NameRecord| {
+        printer.add_row(vec![record.hash.clone(), record.name.clone()]);
+        true
+    })?;
+
+    printer.print();
+    Ok(())
+}
+
+fn scan_node_summaries(storage: &Storage, args: &Scan) -> anyhow::Result<()> {
+    let last = args
+        .last
+        .as_ref()
+        .map(|s| {
+            let bytes = parse_hex_8(s)?;
+            Ok::<_, anyhow::Error>(SummaryHash::from_bytes(bytes))
+        })
+        .transpose()?;
+
+    let scan = AllNodeSummaries {
+        last,
+        limit: args.limit,
+        reverse: args.reverse,
+    };
+
+    let mut printer = TablePrinter::new(vec!["HASH", "MIME", "CONTENT"], args.format);
+
+    scan.accept(storage, &mut |record: &NodeSummaryRecord| {
+        let mime = record
+            .content
+            .mime_type()
+            .unwrap_or_else(|_| "unknown".to_string());
+        let content_preview = extract_printable_content(&record.content, 60);
+        printer.add_row(vec![record.hash.clone(), mime, content_preview]);
+        true
+    })?;
+
+    printer.print();
+    Ok(())
+}
+
+fn scan_edge_summaries(storage: &Storage, args: &Scan) -> anyhow::Result<()> {
+    let last = args
+        .last
+        .as_ref()
+        .map(|s| {
+            let bytes = parse_hex_8(s)?;
+            Ok::<_, anyhow::Error>(SummaryHash::from_bytes(bytes))
+        })
+        .transpose()?;
+
+    let scan = AllEdgeSummaries {
+        last,
+        limit: args.limit,
+        reverse: args.reverse,
+    };
+
+    let mut printer = TablePrinter::new(vec!["HASH", "MIME", "CONTENT"], args.format);
+
+    scan.accept(storage, &mut |record: &EdgeSummaryRecord| {
+        let mime = record
+            .content
+            .mime_type()
+            .unwrap_or_else(|_| "unknown".to_string());
+        let content_preview = extract_printable_content(&record.content, 60);
+        printer.add_row(vec![record.hash.clone(), mime, content_preview]);
+        true
+    })?;
+
+    printer.print();
+    Ok(())
+}
+
+fn scan_node_summary_index(storage: &Storage, args: &Scan) -> anyhow::Result<()> {
+    let last = if let Some(s) = &args.last {
+        let parts: Vec<&str> = s.splitn(3, ':').collect();
+        if parts.len() != 3 {
+            anyhow::bail!(
+                "Invalid cursor format. Expected 'hash_hex:node_id:version', got '{}'",
+                s
+            );
+        }
+        let hash_bytes = parse_hex_8(parts[0])?;
+        let node_id = Id::from_str(parts[1])
+            .map_err(|e| anyhow::anyhow!("Invalid node ID '{}': {}", parts[1], e))?;
+        let version: u32 = parts[2]
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid version '{}': {}", parts[2], e))?;
+        Some((SummaryHash::from_bytes(hash_bytes), node_id, version))
+    } else {
+        None
+    };
+
+    let scan = AllNodeSummaryIndex {
+        last,
+        limit: args.limit,
+        reverse: args.reverse,
+    };
+
+    let mut printer = TablePrinter::new(
+        vec!["HASH", "NODE_ID", "VERSION", "STATUS"],
+        args.format,
+    );
+
+    scan.accept(storage, &mut |record: &NodeSummaryIndexRecord| {
+        printer.add_row(vec![
+            record.hash.clone(),
+            record.node_id.to_string(),
+            record.version.to_string(),
+            record.status.clone(),
+        ]);
+        true
+    })?;
+
+    printer.print();
+    Ok(())
+}
+
+fn scan_edge_summary_index(storage: &Storage, args: &Scan) -> anyhow::Result<()> {
+    let last = if let Some(s) = &args.last {
+        let parts: Vec<&str> = s.splitn(5, ':').collect();
+        if parts.len() != 5 {
+            anyhow::bail!(
+                "Invalid cursor format. Expected 'hash_hex:src_id:dst_id:name_hash_hex:version', got '{}'",
+                s
+            );
+        }
+        let hash_bytes = parse_hex_8(parts[0])?;
+        let src_id = Id::from_str(parts[1])
+            .map_err(|e| anyhow::anyhow!("Invalid src ID '{}': {}", parts[1], e))?;
+        let dst_id = Id::from_str(parts[2])
+            .map_err(|e| anyhow::anyhow!("Invalid dst ID '{}': {}", parts[2], e))?;
+        let name_hash_bytes = parse_hex_8(parts[3])?;
+        let version: u32 = parts[4]
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid version '{}': {}", parts[4], e))?;
+        Some((
+            SummaryHash::from_bytes(hash_bytes),
+            src_id,
+            dst_id,
+            NameHash::from_bytes(name_hash_bytes),
+            version,
+        ))
+    } else {
+        None
+    };
+
+    let scan = AllEdgeSummaryIndex {
+        last,
+        limit: args.limit,
+        reverse: args.reverse,
+    };
+
+    let mut printer = TablePrinter::new(
+        vec!["HASH", "SRC_ID", "DST_ID", "EDGE_NAME", "VERSION", "STATUS"],
+        args.format,
+    );
+
+    scan.accept(storage, &mut |record: &EdgeSummaryIndexRecord| {
+        printer.add_row(vec![
+            record.hash.clone(),
+            record.src_id.to_string(),
+            record.dst_id.to_string(),
+            record.edge_name.clone(),
+            record.version.to_string(),
+            record.status.clone(),
+        ]);
+        true
+    })?;
+
+    printer.print();
+    Ok(())
+}
+
+fn scan_node_version_history(storage: &Storage, args: &Scan) -> anyhow::Result<()> {
+    let last = if let Some(s) = &args.last {
+        let parts: Vec<&str> = s.splitn(3, ':').collect();
+        if parts.len() != 3 {
+            anyhow::bail!(
+                "Invalid cursor format. Expected 'node_id:valid_since:version', got '{}'",
+                s
+            );
+        }
+        let node_id = Id::from_str(parts[0])
+            .map_err(|e| anyhow::anyhow!("Invalid node ID '{}': {}", parts[0], e))?;
+        let valid_since: u64 = parts[1]
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid timestamp '{}': {}", parts[1], e))?;
+        let version: u32 = parts[2]
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid version '{}': {}", parts[2], e))?;
+        Some((node_id, TimestampMilli(valid_since), version))
+    } else {
+        None
+    };
+
+    let scan = AllNodeVersionHistory {
+        last,
+        limit: args.limit,
+        reverse: args.reverse,
+    };
+
+    let mut printer = TablePrinter::new(
+        vec![
+            "NODE_ID", "VALID_SINCE", "VERSION", "UPDATED_AT", "SUMMARY_HASH", "NAME", "SINCE",
+            "UNTIL",
+        ],
+        args.format,
+    );
+
+    scan.accept(storage, &mut |record: &NodeVersionHistoryRecord| {
+        printer.add_row(vec![
+            record.node_id.to_string(),
+            format_timestamp(record.valid_since.0, args.format),
+            record.version.to_string(),
+            format_timestamp(record.updated_at.0, args.format),
+            record.summary_hash.clone().unwrap_or_else(|| "-".to_string()),
+            record.name.clone(),
+            format_since(&record.active_period, args.format),
+            format_until(&record.active_period, args.format),
+        ]);
+        true
+    })?;
+
+    printer.print();
+    Ok(())
+}
+
+fn scan_edge_version_history(storage: &Storage, args: &Scan) -> anyhow::Result<()> {
+    let last = if let Some(s) = &args.last {
+        let parts: Vec<&str> = s.splitn(5, ':').collect();
+        if parts.len() != 5 {
+            anyhow::bail!(
+                "Invalid cursor format. Expected 'src_id:dst_id:name_hash_hex:valid_since:version', got '{}'",
+                s
+            );
+        }
+        let src_id = Id::from_str(parts[0])
+            .map_err(|e| anyhow::anyhow!("Invalid src ID '{}': {}", parts[0], e))?;
+        let dst_id = Id::from_str(parts[1])
+            .map_err(|e| anyhow::anyhow!("Invalid dst ID '{}': {}", parts[1], e))?;
+        let name_hash_bytes = parse_hex_8(parts[2])?;
+        let valid_since: u64 = parts[3]
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid timestamp '{}': {}", parts[3], e))?;
+        let version: u32 = parts[4]
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid version '{}': {}", parts[4], e))?;
+        Some((
+            src_id,
+            dst_id,
+            NameHash::from_bytes(name_hash_bytes),
+            TimestampMilli(valid_since),
+            version,
+        ))
+    } else {
+        None
+    };
+
+    let scan = AllEdgeVersionHistory {
+        last,
+        limit: args.limit,
+        reverse: args.reverse,
+    };
+
+    let mut printer = TablePrinter::new(
+        vec![
+            "SRC_ID",
+            "DST_ID",
+            "EDGE_NAME",
+            "VALID_SINCE",
+            "VERSION",
+            "UPDATED_AT",
+            "SUMMARY_HASH",
+            "WEIGHT",
+            "SINCE",
+            "UNTIL",
+        ],
+        args.format,
+    );
+
+    scan.accept(storage, &mut |record: &EdgeVersionHistoryRecord| {
+        let weight_str = record
+            .weight
+            .map(|w| format!("{:.4}", w))
+            .unwrap_or_else(|| "-".to_string());
+        printer.add_row(vec![
+            record.src_id.to_string(),
+            record.dst_id.to_string(),
+            record.edge_name.clone(),
+            format_timestamp(record.valid_since.0, args.format),
+            record.version.to_string(),
+            format_timestamp(record.updated_at.0, args.format),
+            record.summary_hash.clone().unwrap_or_else(|| "-".to_string()),
+            weight_str,
+            format_since(&record.active_period, args.format),
+            format_until(&record.active_period, args.format),
+        ]);
+        true
+    })?;
+
+    printer.print();
+    Ok(())
+}
+
+fn scan_orphan_summaries(storage: &Storage, args: &Scan) -> anyhow::Result<()> {
+    let last = if let Some(s) = &args.last {
+        let parts: Vec<&str> = s.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            anyhow::bail!(
+                "Invalid cursor format. Expected 'timestamp:hash_hex', got '{}'",
+                s
+            );
+        }
+        let timestamp: u64 = parts[0]
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid timestamp '{}': {}", parts[0], e))?;
+        let hash_bytes = parse_hex_8(parts[1])?;
+        Some((TimestampMilli(timestamp), SummaryHash::from_bytes(hash_bytes)))
+    } else {
+        None
+    };
+
+    let scan = AllOrphanSummaries {
+        last,
+        limit: args.limit,
+        reverse: args.reverse,
+    };
+
+    let mut printer = TablePrinter::new(vec!["ORPHANED_AT", "HASH", "KIND"], args.format);
+
+    scan.accept(storage, &mut |record: &OrphanSummaryRecord| {
+        printer.add_row(vec![
+            format_timestamp(record.orphaned_at.0, args.format),
+            record.hash.clone(),
+            record.kind.clone(),
+        ]);
+        true
+    })?;
+
+    printer.print();
+    Ok(())
+}
+
+fn scan_graph_meta(storage: &Storage, args: &Scan) -> anyhow::Result<()> {
+    let scan = AllGraphMeta {
+        limit: args.limit,
+        reverse: args.reverse,
+    };
+
+    let mut printer = TablePrinter::new(vec!["FIELD", "CURSOR_BYTES"], args.format);
+
+    scan.accept(storage, &mut |record: &GraphMetaRecord| {
+        printer.add_row(vec![
+            record.field.clone(),
+            record.cursor_bytes_hex.clone(),
         ]);
         true
     })?;
