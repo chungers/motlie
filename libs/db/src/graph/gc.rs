@@ -16,6 +16,8 @@
 //! See `libs/db/src/graph/docs/VERSIONING.md` for full design details.
 // (claude, 2026-02-07, FIXED: Updated header to reflect VERSIONING OrphanSummaries GC plan - Codex Item 14)
 // (codex, 2026-02-07, decision: header reflects intended design, but OrphanSummaries tracking/worker is not implemented in this module yet.)
+// (claude, 2026-02-09, FIXED: OrphanSummaries GC IS implemented via gc_orphan_summaries_inner(), called from run_cycle_inner() each GC cycle. No separate worker needed — integrated into GraphGarbageCollector.)
+// (codex, 2026-02-10, decision: accept — gc_orphan_summaries_inner is wired via run_cycle_inner() and GC is started by subsystem; remove earlier “not implemented” concern.)
 //!
 //! # What GC Still Handles
 //!
@@ -560,14 +562,12 @@ impl GraphGarbageCollector {
         Ok(after)
     }
 
+    // (claude, 2026-02-09, FIXED: Removed dead gc_node_summary_index(&self) wrapper — only _inner is called from run_cycle_inner.)
+
     /// GC stale entries from NodeSummaryIndex CF.
     ///
     /// Scans from cursor position, deletes STALE entries for old versions.
-    fn gc_node_summary_index(&self) -> Result<u64> {
-        Self::gc_node_summary_index_inner(&self.storage, &self.config, &self.metrics)
-    }
-
-    /// Internal implementation of node summary index GC.
+    /// Called from [`run_cycle_inner`].
     /// (claude, 2026-02-07, FIXED: P1.3 - Extracted for use by std::thread worker)
     fn gc_node_summary_index_inner(
         storage: &Arc<Storage>,
@@ -666,12 +666,10 @@ impl GraphGarbageCollector {
         Ok(deleted)
     }
 
-    /// GC stale entries from EdgeSummaryIndex CF.
-    fn gc_edge_summary_index(&self) -> Result<u64> {
-        Self::gc_edge_summary_index_inner(&self.storage, &self.config, &self.metrics)
-    }
+    // (claude, 2026-02-09, FIXED: Removed dead gc_edge_summary_index(&self) wrapper — only _inner is called from run_cycle_inner.)
 
-    /// Internal implementation of edge summary index GC.
+    /// GC stale entries from EdgeSummaryIndex CF.
+    /// Called from [`run_cycle_inner`].
     /// (claude, 2026-02-07, FIXED: P1.3 - Extracted for use by std::thread worker)
     fn gc_edge_summary_index_inner(
         storage: &Arc<Storage>,
@@ -772,6 +770,9 @@ impl GraphGarbageCollector {
         Ok(deleted)
     }
 
+    // (claude, 2026-02-09, FIXED: Removed dead gc_orphan_summaries(&self) wrapper — was never called.
+    //  Only gc_orphan_summaries_inner is needed; it's invoked from run_cycle_inner() each GC cycle.)
+
     /// GC orphan summaries from OrphanSummaries CF (VERSIONING).
     /// (claude, 2026-02-07, FIXED: Implemented orphan summary GC per VERSIONING)
     /// (claude, 2026-02-07, FIXED: Added reference check before deletion per Codex review)
@@ -779,11 +780,8 @@ impl GraphGarbageCollector {
     /// Scans OrphanSummaries CF and deletes summaries older than `orphan_retention`.
     /// Before deleting, verifies no CURRENT entries in the summary index reference this hash.
     /// Also deletes the summary data from NodeSummaries/EdgeSummaries CFs.
-    fn gc_orphan_summaries(&self) -> Result<(u64, u64)> {
-        Self::gc_orphan_summaries_inner(&self.storage, &self.config, &self.metrics)
-    }
-
-    /// Internal implementation of orphan summary GC.
+    ///
+    /// Called from [`run_cycle_inner`] — no separate worker needed.
     /// (claude, 2026-02-07, FIXED: P1.3 - Extracted for use by std::thread worker)
     fn gc_orphan_summaries_inner(
         storage: &Arc<Storage>,
