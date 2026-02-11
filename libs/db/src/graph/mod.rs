@@ -60,6 +60,9 @@ pub use query::{
     // CONTENT-ADDRESS reverse lookup query types
     NodesBySummaryHash, NodeSummaryLookupResult,
     EdgesBySummaryHash, EdgeSummaryLookupResult,
+    // Version playback query types
+    NodeAtVersion, EdgeAtVersion, NodeVersions, EdgeVersions,
+    VersionSnapshot, VersionMeta,
 };
 pub use transaction::Transaction;
 pub use crate::reader::Runnable as QueryRunnable;

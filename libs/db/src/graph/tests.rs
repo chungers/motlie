@@ -3349,7 +3349,7 @@ mod versioning_tests {
         let within_period = NodeById {
             id: node_id,
             reference_ts_millis: Some(TimestampMilli(1500)),
-            as_of_system_time: None,
+            as_of: None,
         };
         let result = within_period.execute_on(&processor).await;
         assert!(result.is_ok(), "Query within active period should succeed");
@@ -3358,7 +3358,7 @@ mod versioning_tests {
         let before_period = NodeById {
             id: node_id,
             reference_ts_millis: Some(TimestampMilli(500)),
-            as_of_system_time: None,
+            as_of: None,
         };
         let result = before_period.execute_on(&processor).await;
         assert!(result.is_err(), "Query before active period should fail");
@@ -3367,7 +3367,7 @@ mod versioning_tests {
         let after_period = NodeById {
             id: node_id,
             reference_ts_millis: Some(TimestampMilli(2500)),
-            as_of_system_time: None,
+            as_of: None,
         };
         let result = after_period.execute_on(&processor).await;
         assert!(result.is_err(), "Query after active period should fail");
@@ -3376,7 +3376,7 @@ mod versioning_tests {
         let at_start = NodeById {
             id: node_id,
             reference_ts_millis: Some(TimestampMilli(1000)),
-            as_of_system_time: None,
+            as_of: None,
         };
         let result = at_start.execute_on(&processor).await;
         assert!(result.is_ok(), "Query at start of active period should succeed");
@@ -3385,7 +3385,7 @@ mod versioning_tests {
         let at_end = NodeById {
             id: node_id,
             reference_ts_millis: Some(TimestampMilli(2000)),
-            as_of_system_time: None,
+            as_of: None,
         };
         let result = at_end.execute_on(&processor).await;
         assert!(result.is_err(), "Query at end of active period should fail (exclusive)");
@@ -3442,7 +3442,7 @@ mod versioning_tests {
         let bitemporal_v1_valid = NodeById {
             id: node_id,
             reference_ts_millis: Some(TimestampMilli(1500)),
-            as_of_system_time: Some(time_after_v1),
+            as_of: Some(time_after_v1),
         };
         let result = bitemporal_v1_valid.execute_on(&processor).await;
         assert!(result.is_ok(), "Bitemporal query (v1, within period) should succeed");
@@ -3456,7 +3456,7 @@ mod versioning_tests {
         let bitemporal_v1_invalid = NodeById {
             id: node_id,
             reference_ts_millis: Some(TimestampMilli(500)),
-            as_of_system_time: Some(time_after_v1),
+            as_of: Some(time_after_v1),
         };
         let result = bitemporal_v1_invalid.execute_on(&processor).await;
         assert!(result.is_err(), "Bitemporal query (v1, before period) should fail");

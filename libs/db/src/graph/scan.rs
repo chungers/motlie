@@ -27,11 +27,20 @@ use super::summary_hash::SummaryHash;
 use super::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord};
 use super::schema::{
     self, is_active_at_time, DstId, EdgeName, EdgeSummary, EdgeSummaries, EdgeSummaryCfKey,
-    FragmentContent, Names, NameCfKey, NodeName, NodeSummary, NodeSummaries, NodeSummaryCfKey,
-    SrcId, ActivePeriod, Version,
+    EdgeWeight, FragmentContent, Names, NameCfKey, NodeName, NodeSummary, NodeSummaries,
+    NodeSummaryCfKey, SrcId, ActivePeriod, Version,
+    // Scan: summary index CFs
+    NodeSummaryIndex, NodeSummaryIndexCfKey, NodeSummaryIndexCfValue,
+    EdgeSummaryIndex, EdgeSummaryIndexCfKey, EdgeSummaryIndexCfValue,
+    // Scan: version history CFs
+    NodeVersionHistory, NodeVersionHistoryCfKey,
+    EdgeVersionHistory, EdgeVersionHistoryCfKey,
+    // Scan: orphan + meta CFs
+    OrphanSummaries, OrphanSummaryCfKey, SummaryKind,
+    GraphMeta,
 };
 use super::Storage;
-use crate::{Id, TimestampMilli};
+use crate::{ActiveTimeMillis, Id, TimestampMilli};
 
 // ============================================================================
 // Name Resolution Helpers
@@ -242,6 +251,88 @@ pub struct EdgeFragmentRecord {
     pub valid_range: Option<ActivePeriod>,
 }
 
+/// A name mapping record (NameHash → String).
+#[derive(Debug, Clone)]
+pub struct NameRecord {
+    pub hash: String,
+    pub name: String,
+}
+
+/// A node summary record from the cold content store.
+#[derive(Debug, Clone)]
+pub struct NodeSummaryRecord {
+    pub hash: String,
+    pub content: NodeSummary,
+}
+
+/// An edge summary record from the cold content store.
+#[derive(Debug, Clone)]
+pub struct EdgeSummaryRecord {
+    pub hash: String,
+    pub content: EdgeSummary,
+}
+
+/// A node summary index record (reverse lookup: hash → node).
+#[derive(Debug, Clone)]
+pub struct NodeSummaryIndexRecord {
+    pub hash: String,
+    pub node_id: Id,
+    pub version: Version,
+    pub status: String,
+}
+
+/// An edge summary index record (reverse lookup: hash → edge).
+#[derive(Debug, Clone)]
+pub struct EdgeSummaryIndexRecord {
+    pub hash: String,
+    pub src_id: SrcId,
+    pub dst_id: DstId,
+    pub edge_name: String,
+    pub version: Version,
+    pub status: String,
+}
+
+/// A node version history record (version snapshot for rollback).
+#[derive(Debug, Clone)]
+pub struct NodeVersionHistoryRecord {
+    pub node_id: Id,
+    pub valid_since: TimestampMilli,
+    pub version: Version,
+    pub updated_at: TimestampMilli,
+    pub summary_hash: Option<String>,
+    pub name: String,
+    pub active_period: Option<ActivePeriod>,
+}
+
+/// An edge version history record (version snapshot for rollback).
+#[derive(Debug, Clone)]
+pub struct EdgeVersionHistoryRecord {
+    pub src_id: SrcId,
+    pub dst_id: DstId,
+    pub edge_name: String,
+    pub valid_since: TimestampMilli,
+    pub version: Version,
+    pub updated_at: TimestampMilli,
+    pub summary_hash: Option<String>,
+    pub weight: Option<EdgeWeight>,
+    pub active_period: Option<ActivePeriod>,
+}
+
+/// An orphan summary record (GC tracking).
+#[derive(Debug, Clone)]
+pub struct OrphanSummaryRecord {
+    pub orphaned_at: TimestampMilli,
+    pub hash: String,
+    pub kind: String,
+}
+
+/// A graph metadata record (GC cursors).
+#[derive(Debug, Clone)]
+pub struct GraphMetaRecord {
+    pub field: String,
+    pub cursor_bytes_hex: String,
+}
+
 
 // ============================================================================
 // Scan Types
@@ -259,7 +350,7 @@ pub struct AllNodes {
     /// Reference timestamp for temporal validity check.
     /// If Some, only records valid at this time are returned.
     /// If None, all records are returned regardless of temporal validity.
-    pub reference_ts_millis: Option<TimestampMilli>,
+    pub reference_ts_millis: Option<ActiveTimeMillis>,
 }
 
 /// Scan all forward edges with pagination.
@@ -274,7 +365,7 @@ pub struct AllEdges {
     /// Reference timestamp for temporal validity check.
     /// If Some, only records valid at this time are returned.
     /// If None, all records are returned regardless of temporal validity.
-    pub reference_ts_millis: Option<TimestampMilli>,
+    pub reference_ts_millis: Option<ActiveTimeMillis>,
 }
 
 /// Scan all reverse edges with pagination.
@@ -289,7 +380,7 @@ pub struct AllReverseEdges {
     /// Reference timestamp for temporal validity check.
     /// If Some, only records valid at this time are returned.
     /// If None, all records are returned regardless of temporal validity.
-    pub reference_ts_millis: Option<TimestampMilli>,
+    pub reference_ts_millis: Option<ActiveTimeMillis>,
 }
 
 /// Scan all node fragments with pagination.
@@ -304,7 +395,7 @@ pub struct AllNodeFragments {
     /// Reference timestamp for temporal validity check.
     /// If Some, only records valid at this time are returned.
     /// If None, all records are returned regardless of temporal validity.
-    pub reference_ts_millis: Option<TimestampMilli>,
+    pub reference_ts_millis: Option<ActiveTimeMillis>,
 }
 
 /// Scan all edge fragments with pagination.
@@ -319,7 +410,81 @@ pub struct AllEdgeFragments {
     /// Reference timestamp for temporal validity check.
     /// If Some, only records valid at this time are returned.
     /// If None, all records are returned regardless of temporal validity.
-    pub reference_ts_millis: Option<TimestampMilli>,
+    pub reference_ts_millis: Option<ActiveTimeMillis>,
+}
+
+/// Scan all name mappings.
+#[derive(Debug, Clone, Default)]
+pub struct AllNames {
+    /// Last NameHash hex from previous page (exclusive start for pagination).
+    pub last: Option<NameHash>,
+    pub limit: usize,
+    pub reverse: bool,
+}
+
+/// Scan all node summaries (cold content store).
+#[derive(Debug, Clone, Default)]
+pub struct AllNodeSummaries {
+    /// Last SummaryHash hex from previous page.
+    pub last: Option<SummaryHash>,
+    pub limit: usize,
+    pub reverse: bool,
+}
+
+/// Scan all edge summaries (cold content store).
+#[derive(Debug, Clone, Default)]
+pub struct AllEdgeSummaries {
+    /// Last SummaryHash hex from previous page.
+    pub last: Option<SummaryHash>,
+    pub limit: usize,
+    pub reverse: bool,
+}
+
+/// Scan all node summary index entries (reverse lookup).
+#[derive(Debug, Clone, Default)]
+pub struct AllNodeSummaryIndex {
+    pub last: Option<(SummaryHash, Id, Version)>,
+    pub limit: usize,
+    pub reverse: bool,
+}
+
+/// Scan all edge summary index entries (reverse lookup).
+#[derive(Debug, Clone, Default)]
+pub struct AllEdgeSummaryIndex {
+    pub last: Option<(SummaryHash, SrcId, DstId, NameHash, Version)>,
+    pub limit: usize,
+    pub reverse: bool,
+}
+
+/// Scan all node version history entries.
+#[derive(Debug, Clone, Default)]
+pub struct AllNodeVersionHistory {
+    pub last: Option<(Id, TimestampMilli, Version)>,
+    pub limit: usize,
+    pub reverse: bool,
+}
+
+/// Scan all edge version history entries.
+#[derive(Debug, Clone, Default)]
+pub struct AllEdgeVersionHistory {
+    pub last: Option<(SrcId, DstId, NameHash, TimestampMilli, Version)>,
+    pub limit: usize,
+    pub reverse: bool,
+}
+
+/// Scan all orphan summary entries (GC tracking).
+#[derive(Debug, Clone, Default)]
+pub struct AllOrphanSummaries {
+    pub last: Option<(TimestampMilli, SummaryHash)>,
+    pub limit: usize,
+    pub reverse: bool,
+}
+
+/// Scan all graph metadata entries.
+#[derive(Debug, Clone, Default)]
+pub struct AllGraphMeta {
+    pub limit: usize,
+    pub reverse: bool,
 }
 
 
@@ -335,7 +500,7 @@ fn iterate_and_visit<CF, R, V, F, G>(
     limit: usize,
     skip_cursor: bool,
     reverse: bool,
-    reference_ts_millis: Option<TimestampMilli>,
+    reference_ts_millis: Option<ActiveTimeMillis>,
     cursor_matches: impl Fn(&[u8]) -> bool,
     transform: F,
     get_valid_range: G,
@@ -465,7 +630,7 @@ fn iterate_and_visit_hot<CF, R, V, F, G>(
     limit: usize,
     skip_cursor: bool,
     reverse: bool,
-    reference_ts_millis: Option<TimestampMilli>,
+    reference_ts_millis: Option<ActiveTimeMillis>,
     cursor_matches: impl Fn(&[u8]) -> bool,
     transform: F,
     get_valid_range: G,
@@ -960,6 +1125,429 @@ impl Visitable for AllEdgeFragments {
                 })
             },
             |record| &record.valid_range,
+            visitor,
+        )
+    }
+}
+
+// ============================================================================
+// Hex helpers
+// ============================================================================
+
+fn hash_to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+// ============================================================================
+// Visitable Implementations — Cold CFs
+// ============================================================================
+
+impl Visitable for AllNames {
+    type Record = NameRecord;
+
+    fn accept<V: Visitor<Self::Record>>(
+        &self,
+        storage: &Storage,
+        visitor: &mut V,
+    ) -> Result<usize> {
+        let seek_key = self
+            .last
+            .map(|h| Names::key_to_bytes(&NameCfKey(h)))
+            .unwrap_or_default();
+
+        let cursor_key = self.last.map(|h| Names::key_to_bytes(&NameCfKey(h)));
+
+        iterate_and_visit::<Names, _, _, _, _>(
+            storage,
+            seek_key,
+            self.limit,
+            self.last.is_some(),
+            self.reverse,
+            None,
+            |key_bytes| {
+                cursor_key.as_ref().map_or(false, |ck| key_bytes == ck.as_slice())
+            },
+            |key_bytes, value_bytes| {
+                let key = Names::key_from_bytes(key_bytes)?;
+                let value = Names::value_from_bytes(value_bytes)?;
+                Ok(NameRecord {
+                    hash: hash_to_hex(key.0.as_bytes()),
+                    name: value.0,
+                })
+            },
+            |_record| &None,
+            visitor,
+        )
+    }
+}
+
+impl Visitable for AllNodeSummaries {
+    type Record = NodeSummaryRecord;
+
+    fn accept<V: Visitor<Self::Record>>(
+        &self,
+        storage: &Storage,
+        visitor: &mut V,
+    ) -> Result<usize> {
+        let seek_key = self
+            .last
+            .map(|h| NodeSummaries::key_to_bytes(&NodeSummaryCfKey(h)))
+            .unwrap_or_default();
+
+        let cursor_key = self.last.map(|h| NodeSummaries::key_to_bytes(&NodeSummaryCfKey(h)));
+
+        iterate_and_visit::<NodeSummaries, _, _, _, _>(
+            storage,
+            seek_key,
+            self.limit,
+            self.last.is_some(),
+            self.reverse,
+            None,
+            |key_bytes| {
+                cursor_key.as_ref().map_or(false, |ck| key_bytes == ck.as_slice())
+            },
+            |key_bytes, value_bytes| {
+                let key = NodeSummaries::key_from_bytes(key_bytes)?;
+                let value = NodeSummaries::value_from_bytes(value_bytes)?;
+                Ok(NodeSummaryRecord {
+                    hash: hash_to_hex(key.0.as_bytes()),
+                    content: value.0,
+                })
+            },
+            |_record| &None,
+            visitor,
+        )
+    }
+}
+
+impl Visitable for AllEdgeSummaries {
+    type Record = EdgeSummaryRecord;
+
+    fn accept<V: Visitor<Self::Record>>(
+        &self,
+        storage: &Storage,
+        visitor: &mut V,
+    ) -> Result<usize> {
+        let seek_key = self
+            .last
+            .map(|h| EdgeSummaries::key_to_bytes(&EdgeSummaryCfKey(h)))
+            .unwrap_or_default();
+
+        let cursor_key = self.last.map(|h| EdgeSummaries::key_to_bytes(&EdgeSummaryCfKey(h)));
+
+        iterate_and_visit::<EdgeSummaries, _, _, _, _>(
+            storage,
+            seek_key,
+            self.limit,
+            self.last.is_some(),
+            self.reverse,
+            None,
+            |key_bytes| {
+                cursor_key.as_ref().map_or(false, |ck| key_bytes == ck.as_slice())
+            },
+            |key_bytes, value_bytes| {
+                let key = EdgeSummaries::key_from_bytes(key_bytes)?;
+                let value = EdgeSummaries::value_from_bytes(value_bytes)?;
+                Ok(EdgeSummaryRecord {
+                    hash: hash_to_hex(key.0.as_bytes()),
+                    content: value.0,
+                })
+            },
+            |_record| &None,
+            visitor,
+        )
+    }
+}
+
+impl Visitable for AllNodeSummaryIndex {
+    type Record = NodeSummaryIndexRecord;
+
+    fn accept<V: Visitor<Self::Record>>(
+        &self,
+        storage: &Storage,
+        visitor: &mut V,
+    ) -> Result<usize> {
+        let seek_key = self
+            .last
+            .map(|(h, id, v)| {
+                NodeSummaryIndex::key_to_bytes(&NodeSummaryIndexCfKey(h, id, v))
+            })
+            .unwrap_or_default();
+
+        let cursor_key = self.last.map(|(h, id, v)| {
+            NodeSummaryIndex::key_to_bytes(&NodeSummaryIndexCfKey(h, id, v))
+        });
+
+        iterate_and_visit::<NodeSummaryIndex, _, _, _, _>(
+            storage,
+            seek_key,
+            self.limit,
+            self.last.is_some(),
+            self.reverse,
+            None,
+            |key_bytes| {
+                cursor_key.as_ref().map_or(false, |ck| key_bytes == ck.as_slice())
+            },
+            |key_bytes, value_bytes| {
+                let key = NodeSummaryIndex::key_from_bytes(key_bytes)?;
+                let value = NodeSummaryIndex::value_from_bytes(value_bytes)?;
+                let status = if value.0 == NodeSummaryIndexCfValue::CURRENT {
+                    "current".to_string()
+                } else {
+                    "stale".to_string()
+                };
+                Ok(NodeSummaryIndexRecord {
+                    hash: hash_to_hex(key.0.as_bytes()),
+                    node_id: key.1,
+                    version: key.2,
+                    status,
+                })
+            },
+            |_record| &None,
+            visitor,
+        )
+    }
+}
+
+impl Visitable for AllEdgeSummaryIndex {
+    type Record = EdgeSummaryIndexRecord;
+
+    fn accept<V: Visitor<Self::Record>>(
+        &self,
+        storage: &Storage,
+        visitor: &mut V,
+    ) -> Result<usize> {
+        let seek_key = self
+            .last
+            .map(|(h, src, dst, name_hash, v)| {
+                EdgeSummaryIndex::key_to_bytes(&EdgeSummaryIndexCfKey(h, src, dst, name_hash, v))
+            })
+            .unwrap_or_default();
+
+        let cursor_key = self.last.map(|(h, src, dst, name_hash, v)| {
+            EdgeSummaryIndex::key_to_bytes(&EdgeSummaryIndexCfKey(h, src, dst, name_hash, v))
+        });
+
+        iterate_and_visit::<EdgeSummaryIndex, _, _, _, _>(
+            storage,
+            seek_key,
+            self.limit,
+            self.last.is_some(),
+            self.reverse,
+            None,
+            |key_bytes| {
+                cursor_key.as_ref().map_or(false, |ck| key_bytes == ck.as_slice())
+            },
+            |key_bytes, value_bytes| {
+                let key = EdgeSummaryIndex::key_from_bytes(key_bytes)?;
+                let value = EdgeSummaryIndex::value_from_bytes(value_bytes)?;
+                let status = if value.0 == EdgeSummaryIndexCfValue::CURRENT {
+                    "current".to_string()
+                } else {
+                    "stale".to_string()
+                };
+                let edge_name = resolve_name(storage, key.3)
+                    .unwrap_or_else(|_| hash_to_hex(key.3.as_bytes()));
+                Ok(EdgeSummaryIndexRecord {
+                    hash: hash_to_hex(key.0.as_bytes()),
+                    src_id: key.1,
+                    dst_id: key.2,
+                    edge_name,
+                    version: key.4,
+                    status,
+                })
+            },
+            |_record| &None,
+            visitor,
+        )
+    }
+}
+
+impl Visitable for AllNodeVersionHistory {
+    type Record = NodeVersionHistoryRecord;
+
+    fn accept<V: Visitor<Self::Record>>(
+        &self,
+        storage: &Storage,
+        visitor: &mut V,
+    ) -> Result<usize> {
+        let seek_key = self
+            .last
+            .map(|(id, ts, v)| {
+                NodeVersionHistory::key_to_bytes(&NodeVersionHistoryCfKey(id, ts, v))
+            })
+            .unwrap_or_default();
+
+        let cursor_key = self.last.map(|(id, ts, v)| {
+            NodeVersionHistory::key_to_bytes(&NodeVersionHistoryCfKey(id, ts, v))
+        });
+
+        iterate_and_visit::<NodeVersionHistory, _, _, _, _>(
+            storage,
+            seek_key,
+            self.limit,
+            self.last.is_some(),
+            self.reverse,
+            None,
+            |key_bytes| {
+                cursor_key.as_ref().map_or(false, |ck| key_bytes == ck.as_slice())
+            },
+            |key_bytes, value_bytes| {
+                let key = NodeVersionHistory::key_from_bytes(key_bytes)?;
+                let value = NodeVersionHistory::value_from_bytes(value_bytes)?;
+                let name = resolve_name(storage, value.2)
+                    .unwrap_or_else(|_| hash_to_hex(value.2.as_bytes()));
+                Ok(NodeVersionHistoryRecord {
+                    node_id: key.0,
+                    valid_since: key.1,
+                    version: key.2,
+                    updated_at: value.0,
+                    summary_hash: value.1.map(|h| hash_to_hex(h.as_bytes())),
+                    name,
+                    active_period: value.3,
+                })
+            },
+            |_record| &None,
+            visitor,
+        )
+    }
+}
+
+impl Visitable for AllEdgeVersionHistory {
+    type Record = EdgeVersionHistoryRecord;
+
+    fn accept<V: Visitor<Self::Record>>(
+        &self,
+        storage: &Storage,
+        visitor: &mut V,
+    ) -> Result<usize> {
+        let seek_key = self
+            .last
+            .map(|(src, dst, name_hash, ts, v)| {
+                EdgeVersionHistory::key_to_bytes(&EdgeVersionHistoryCfKey(src, dst, name_hash, ts, v))
+            })
+            .unwrap_or_default();
+
+        let cursor_key = self.last.map(|(src, dst, name_hash, ts, v)| {
+            EdgeVersionHistory::key_to_bytes(&EdgeVersionHistoryCfKey(src, dst, name_hash, ts, v))
+        });
+
+        iterate_and_visit::<EdgeVersionHistory, _, _, _, _>(
+            storage,
+            seek_key,
+            self.limit,
+            self.last.is_some(),
+            self.reverse,
+            None,
+            |key_bytes| {
+                cursor_key.as_ref().map_or(false, |ck| key_bytes == ck.as_slice())
+            },
+            |key_bytes, value_bytes| {
+                let key = EdgeVersionHistory::key_from_bytes(key_bytes)?;
+                let value = EdgeVersionHistory::value_from_bytes(value_bytes)?;
+                let edge_name = resolve_name(storage, key.2)
+                    .unwrap_or_else(|_| hash_to_hex(key.2.as_bytes()));
+                Ok(EdgeVersionHistoryRecord {
+                    src_id: key.0,
+                    dst_id: key.1,
+                    edge_name,
+                    valid_since: key.3,
+                    version: key.4,
+                    updated_at: value.0,
+                    summary_hash: value.1.map(|h| hash_to_hex(h.as_bytes())),
+                    weight: value.2,
+                    active_period: value.3,
+                })
+            },
+            |_record| &None,
+            visitor,
+        )
+    }
+}
+
+impl Visitable for AllOrphanSummaries {
+    type Record = OrphanSummaryRecord;
+
+    fn accept<V: Visitor<Self::Record>>(
+        &self,
+        storage: &Storage,
+        visitor: &mut V,
+    ) -> Result<usize> {
+        let seek_key = self
+            .last
+            .map(|(ts, h)| {
+                OrphanSummaries::key_to_bytes(&OrphanSummaryCfKey(ts, h))
+            })
+            .unwrap_or_default();
+
+        let cursor_key = self.last.map(|(ts, h)| {
+            OrphanSummaries::key_to_bytes(&OrphanSummaryCfKey(ts, h))
+        });
+
+        iterate_and_visit::<OrphanSummaries, _, _, _, _>(
+            storage,
+            seek_key,
+            self.limit,
+            self.last.is_some(),
+            self.reverse,
+            None,
+            |key_bytes| {
+                cursor_key.as_ref().map_or(false, |ck| key_bytes == ck.as_slice())
+            },
+            |key_bytes, value_bytes| {
+                let key = OrphanSummaries::key_from_bytes(key_bytes)?;
+                let value = OrphanSummaries::value_from_bytes(value_bytes)?;
+                let kind = match value.0 {
+                    SummaryKind::Node => "node".to_string(),
+                    SummaryKind::Edge => "edge".to_string(),
+                };
+                Ok(OrphanSummaryRecord {
+                    orphaned_at: key.0,
+                    hash: hash_to_hex(key.1.as_bytes()),
+                    kind,
+                })
+            },
+            |_record| &None,
+            visitor,
+        )
+    }
+}
+
+impl Visitable for AllGraphMeta {
+    type Record = GraphMetaRecord;
+
+    fn accept<V: Visitor<Self::Record>>(
+        &self,
+        storage: &Storage,
+        visitor: &mut V,
+    ) -> Result<usize> {
+        // GraphMeta keys are 1 byte each (discriminant), max 4 entries.
+        // No pagination cursor needed; iterate from start.
+
+        iterate_and_visit::<GraphMeta, _, _, _, _>(
+            storage,
+            vec![],
+            self.limit,
+            false,
+            self.reverse,
+            None,
+            |_key_bytes| false,
+            |key_bytes, value_bytes| {
+                let key = GraphMeta::key_from_bytes(key_bytes)?;
+                let value = GraphMeta::value_from_bytes(&key, value_bytes)?;
+                let field = match key.0.discriminant() {
+                    0x00 => "gc_cursor_node_summary_index".to_string(),
+                    0x01 => "gc_cursor_edge_summary_index".to_string(),
+                    0x02 => "gc_cursor_node_tombstones".to_string(),
+                    0x03 => "gc_cursor_edge_tombstones".to_string(),
+                    d => format!("unknown(0x{:02x})", d),
+                };
+                Ok(GraphMetaRecord {
+                    field,
+                    cursor_bytes_hex: hash_to_hex(value.0.cursor_bytes()),
+                })
+            },
+            |_record| &None,
             visitor,
         )
     }

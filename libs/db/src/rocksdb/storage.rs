@@ -225,12 +225,68 @@ impl<S: StorageSubsystem> Storage<S> {
         // Open database based on mode
         match &self.mode {
             StorageMode::ReadOnly => {
-                let db = DB::open_cf_descriptors_read_only(
+                // Try opening with subsystem's CFs first. If the database has
+                // CFs from other subsystems (e.g., a combined graph+vector DB),
+                // RocksDB requires ALL CFs to be specified. Fall back to
+                // discovering all CFs and including unknown ones with defaults.
+                let db = match DB::open_cf_descriptors_read_only(
                     &self.db_options,
                     &self.db_path,
                     cf_descriptors,
                     false,
-                )?;
+                ) {
+                    Ok(db) => db,
+                    Err(e) => {
+                        let err_msg = e.to_string();
+                        if !err_msg.contains("column families") || !self.db_path.exists() {
+                            return Err(e.into());
+                        }
+
+                        tracing::debug!(
+                            subsystem = S::NAME,
+                            "[{}] Initial readonly open failed (likely extra CFs), retrying with full CF list",
+                            S::NAME
+                        );
+
+                        // Discover all CFs in the database
+                        let all_cf_names = DB::list_cf(&Options::default(), &self.db_path)
+                            .map_err(|e| anyhow::anyhow!("Failed to list CFs: {}", e))?;
+
+                        let known: std::collections::HashSet<&str> =
+                            S::COLUMN_FAMILIES.iter().copied().collect();
+
+                        // Rebuild descriptors: subsystem's for known CFs, defaults for unknown
+                        let cache_ref = self.block_cache.as_ref().unwrap();
+                        let mut full_descriptors = S::cf_descriptors(cache_ref, &self.block_cache_config);
+
+                        for cf_name in &all_cf_names {
+                            if cf_name == "default" || known.contains(cf_name.as_str()) {
+                                continue;
+                            }
+                            full_descriptors.push(rocksdb::ColumnFamilyDescriptor::new(
+                                cf_name,
+                                Options::default(),
+                            ));
+                        }
+
+                        tracing::info!(
+                            subsystem = S::NAME,
+                            total_cfs = full_descriptors.len(),
+                            extra_cfs = full_descriptors.len() - S::COLUMN_FAMILIES.len(),
+                            "[{}] Retrying readonly open with {} CFs ({} extra)",
+                            S::NAME,
+                            full_descriptors.len(),
+                            full_descriptors.len() - S::COLUMN_FAMILIES.len(),
+                        );
+
+                        DB::open_cf_descriptors_read_only(
+                            &self.db_options,
+                            &self.db_path,
+                            full_descriptors,
+                            false,
+                        )?
+                    }
+                };
                 self.db = Some(DatabaseHandle::ReadOnly(db));
             }
             StorageMode::ReadWrite => {
