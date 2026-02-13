@@ -21,11 +21,11 @@ This module (`libs/db/src/vector/benchmark`) provides benchmarking infrastructur
 
 | Dataset | Dimensions | Distance | Format | Feature | Status |
 |---------|------------|----------|--------|---------|--------|
-| LAION-CLIP | 512 | Cosine | NPY (f16) | default | ✅ Supported |
-| SIFT-1M | 128 | L2 | fvecs | default | ✅ Supported |
-| GIST-960 | 960 | L2 | fvecs | default | ✅ Supported |
-| Cohere Wikipedia | 768 | Cosine | Parquet | `parquet` | ✅ Supported |
-| GloVe-100 | 100 | Angular | HDF5 | `hdf5` | ✅ Supported |
+| LAION-CLIP | 512 | Cosine | NPY (f16) | `benchmark` | ✅ Supported |
+| SIFT-1M | 128 | L2 | fvecs | `benchmark` | ✅ Supported |
+| GIST-960 | 960 | L2 | fvecs | `benchmark` | ✅ Supported |
+| Cohere Wikipedia | 768 | Cosine | Parquet | `benchmark` | ✅ Supported |
+| GloVe-100 | 100 | Angular | HDF5 | `benchmark` | ✅ Supported |
 
 ### Implementation Status
 
@@ -38,26 +38,20 @@ This module (`libs/db/src/vector/benchmark`) provides benchmarking infrastructur
 | A.5 | Rotated variance metric | ✅ Complete |
 | B.1 | GistDataset loader | ✅ Complete |
 | B.2 | Shared fvecs/ivecs loaders | ✅ Complete (in sift.rs) |
-| C.1 | Parquet loader | ✅ Complete (`--features parquet`) |
+| C.1 | Parquet loader | ✅ Complete (`--features benchmark`) |
 | C.2 | CohereWikipediaDataset | ✅ Complete (768D, Cosine) |
-| D.1 | HDF5 loader | ✅ Complete (`--features hdf5`*) |
+| D.1 | HDF5 loader | ✅ Complete (`--features benchmark`) |
 | D.2 | GloveDataset | ✅ Complete (100D, angular) |
 | E | CLI tool (bins/bench_vector) | ✅ Complete (all commands: download, index, query, sweep, datasets) |
 | F | Example migration | ✅ Complete (deprecation notices added) |
 
-*Note: HDF5 feature requires system library installation (`libhdf5-dev` on Ubuntu).
+### Feature Flag
 
-### Optional Features
+All benchmark code (including Parquet and HDF5 dataset loaders) is gated behind
+a single `benchmark` feature flag. Requires `libhdf5-dev` system package.
 
-```toml
-# Enable Parquet support (Cohere Wikipedia dataset)
-cargo build --features parquet
-
-# Enable HDF5 support (requires system libhdf5)
-cargo build --features hdf5
-
-# Enable all benchmark formats
-cargo build --features benchmark-all
+```bash
+cargo build --features benchmark
 ```
 
 ---
@@ -419,14 +413,14 @@ pub fn load_ivecs(path: &Path, max_vectors: usize) -> Result<Vec<Vec<usize>>> {
 
 **GEMINI-BENCHMARK Reference:** Section 2.3 (Cohere/OpenAI datasets)
 
-#### C.1: Add Parquet Dependency
+#### C.1: Parquet Dependency (included in `benchmark` feature)
 
 **File:** `libs/db/Cargo.toml`
 
 ```toml
 [features]
 default = []
-parquet = ["dep:parquet", "dep:arrow"]
+benchmark = ["dep:parquet", "dep:arrow", "dep:hdf5", "dep:byteorder"]
 
 [dependencies]
 parquet = { version = "53", optional = true }
@@ -438,13 +432,11 @@ arrow = { version = "53", optional = true }
 **File:** `dataset.rs`
 
 ```rust
-#[cfg(feature = "parquet")]
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 /// Load embeddings from Parquet file.
 ///
 /// Expects a column containing fixed-size float arrays.
-#[cfg(feature = "parquet")]
 pub fn load_parquet_embeddings(
     path: &Path,
     embedding_column: &str,
@@ -509,7 +501,6 @@ const COHERE_WIKI_URL: &str =
 /// Cohere Wikipedia embeddings (768D, embed-english-v3.0).
 ///
 /// Real production embeddings with natural clustering from semantic similarity.
-#[cfg(feature = "parquet")]
 #[derive(Debug, Clone)]
 pub struct CohereWikipediaDataset {
     pub embeddings: Vec<Vec<f32>>,
@@ -518,7 +509,6 @@ pub struct CohereWikipediaDataset {
     pub dim: usize,
 }
 
-#[cfg(feature = "parquet")]
 impl CohereWikipediaDataset {
     /// Load Cohere Wikipedia dataset.
     ///
@@ -557,7 +547,6 @@ impl CohereWikipediaDataset {
     }
 }
 
-#[cfg(feature = "parquet")]
 impl BenchmarkDataset for CohereWikipediaDataset {
     fn vectors(&self) -> &[Vec<f32>] { &self.embeddings }
     fn queries(&self) -> &[Vec<f32>] { &self.queries }
@@ -573,15 +562,14 @@ impl BenchmarkDataset for CohereWikipediaDataset {
 
 **GEMINI-BENCHMARK Reference:** Section 2.3, Step 2
 
-#### D.1: Add HDF5 Dependency
+#### D.1: HDF5 Dependency (included in `benchmark` feature)
 
 **File:** `libs/db/Cargo.toml`
 
 ```toml
 [features]
 default = []
-parquet = ["dep:parquet", "dep:arrow"]
-hdf5 = ["dep:hdf5"]
+benchmark = ["dep:parquet", "dep:arrow", "dep:hdf5", "dep:byteorder"]
 
 [dependencies]
 hdf5 = { version = "0.8", optional = true }
@@ -596,7 +584,6 @@ hdf5 = { version = "0.8", optional = true }
 ///
 /// Standard format used by https://ann-benchmarks.com/
 /// Contains: train, test, neighbors, distances datasets.
-#[cfg(feature = "hdf5")]
 #[derive(Debug, Clone)]
 pub struct AnnBenchmarkDataset {
     pub train: Vec<Vec<f32>>,      // Database vectors
@@ -607,7 +594,6 @@ pub struct AnnBenchmarkDataset {
     pub distance: Distance,
 }
 
-#[cfg(feature = "hdf5")]
 impl AnnBenchmarkDataset {
     /// Load ann-benchmarks HDF5 file.
     pub fn load(path: &Path, distance: Distance) -> Result<Self> {
@@ -633,7 +619,6 @@ impl AnnBenchmarkDataset {
     }
 }
 
-#[cfg(feature = "hdf5")]
 impl BenchmarkDataset for AnnBenchmarkDataset {
     fn vectors(&self) -> &[Vec<f32>] { &self.train }
     fn queries(&self) -> &[Vec<f32>] { &self.test }
@@ -653,7 +638,6 @@ pub const OPENAI_DBPEDIA_DIM: usize = 1536;
 const OPENAI_DBPEDIA_URL: &str =
     "https://ann-benchmarks.com/dbpedia-entities-openai-1M-1536-angular.hdf5";
 
-#[cfg(feature = "hdf5")]
 pub fn load_openai_dbpedia(data_dir: &Path, max_vectors: usize) -> Result<AnnBenchmarkDataset> {
     let path = data_dir.join("dbpedia-openai-1536.hdf5");
     if !path.exists() {
@@ -672,7 +656,6 @@ pub const GLOVE_100_DIM: usize = 100;
 const GLOVE_100_URL: &str =
     "https://ann-benchmarks.com/glove-100-angular.hdf5";
 
-#[cfg(feature = "hdf5")]
 pub fn load_glove_100(data_dir: &Path) -> Result<AnnBenchmarkDataset> {
     let path = data_dir.join("glove-100-angular.hdf5");
     if !path.exists() {
@@ -918,13 +901,13 @@ bench_vector sweep --dataset laion --bits 4 --mode adc --rerank 10 --ef 100
 
 | Dataset | Dim | Distance | Format | Feature Flag | Phase |
 |---------|-----|----------|--------|--------------|-------|
-| LAION-CLIP | 512 | Cosine | NPY | - | Exists |
-| SIFT-1M | 128 | L2 | fvecs | - | Exists |
-| **GIST-960** | 960 | L2 | fvecs | - | B |
-| **Cohere Wikipedia** | 768 | Cosine | Parquet | `parquet` | C |
-| **OpenAI DBpedia** | 1536 | Cosine | HDF5 | `hdf5` | D |
-| **GloVe-100** | 100 | Angular | HDF5 | `hdf5` | D |
-| **Random** | Any | Any | Generate | - | E |
+| LAION-CLIP | 512 | Cosine | NPY | `benchmark` | Exists |
+| SIFT-1M | 128 | L2 | fvecs | `benchmark` | Exists |
+| GIST-960 | 960 | L2 | fvecs | `benchmark` | B |
+| Cohere Wikipedia | 768 | Cosine | Parquet | `benchmark` | C |
+| OpenAI DBpedia | 1536 | Cosine | HDF5 | `benchmark` | D |
+| GloVe-100 | 100 | Angular | HDF5 | `benchmark` | D |
+| Random | Any | Any | Generate | `benchmark` | E |
 
 ---
 

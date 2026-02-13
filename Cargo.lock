@@ -2500,6 +2500,7 @@ dependencies = [
  "hdf5",
  "lz4",
  "motlie-core",
+ "ndarray 0.15.6",
  "ordered-float 4.6.0",
  "parquet",
  "rand 0.8.5",

@@ -11,12 +11,12 @@ captures the current API surface, format readers, overlap with the
 
 | Dataset | Dim | Distance | Format | Source | Feature | Max Size | Pre-computed GT |
 |---------|-----|----------|--------|--------|---------|----------|-----------------|
-| LAION-CLIP | 512 | Cosine | NPY (f16) | deploy.laion.ai | default | 400M | No |
-| SIFT-1M | 128 | L2 | fvecs/ivecs | HuggingFace `qbo-odp/sift1m` | default | 1M + 10K queries | Yes |
-| GIST-960 | 960 | L2 | fvecs/ivecs | corpus-texmex.irisa.fr | default | 1M + 1K queries | Yes |
-| Cohere Wiki | 768 | Cosine | Parquet | HuggingFace `Cohere/wikipedia-22-12` | `parquet` | 485K | Yes |
-| GloVe-100 | 100 | Cosine | HDF5 | ann-benchmarks.com | `hdf5` | 1.18M + 10K queries | Yes |
-| Random | configurable | Cosine/L2 | in-memory | ChaCha8Rng (seeded) | default | unlimited (streaming) | No |
+| LAION-CLIP | 512 | Cosine | NPY (f16) | deploy.laion.ai | `benchmark` | 400M | No |
+| SIFT-1M | 128 | L2 | fvecs/ivecs | HuggingFace `qbo-odp/sift1m` | `benchmark` | 1M + 10K queries | Yes |
+| GIST-960 | 960 | L2 | fvecs/ivecs | corpus-texmex.irisa.fr | `benchmark` | 1M + 1K queries | Yes |
+| Cohere Wiki | 768 | Cosine | Parquet | HuggingFace `Cohere/wikipedia-22-12` | `benchmark` | 485K | Yes |
+| GloVe-100 | 100 | Cosine | HDF5 | ann-benchmarks.com | `benchmark` | 1.18M + 10K queries | Yes |
+| Random | configurable | Cosine/L2 | in-memory | ChaCha8Rng (seeded) | `benchmark` | unlimited (streaming) | No |
 
 ### Dimension constants
 
@@ -26,11 +26,11 @@ pub const SIFT_EMBEDDING_DIM: usize = 128;
 pub const GIST_EMBEDDING_DIM: usize = 960;
 pub const GIST_BASE_VECTORS: usize = 1_000_000;
 pub const GIST_QUERIES: usize = 1_000;
-pub const COHERE_WIKI_DIM: usize = 768;       // #[cfg(feature = "parquet")]
-pub const COHERE_WIKI_VECTORS: usize = 485_000; // #[cfg(feature = "parquet")]
-pub const GLOVE_DIM: usize = 100;              // #[cfg(feature = "hdf5")]
-pub const GLOVE_VECTORS: usize = 1_183_514;   // #[cfg(feature = "hdf5")]
-pub const GLOVE_QUERIES: usize = 10_000;       // #[cfg(feature = "hdf5")]
+pub const COHERE_WIKI_DIM: usize = 768;
+pub const COHERE_WIKI_VECTORS: usize = 485_000;
+pub const GLOVE_DIM: usize = 100;
+pub const GLOVE_VECTORS: usize = 1_183_514;
+pub const GLOVE_QUERIES: usize = 10_000;
 ```
 
 ---
@@ -70,7 +70,6 @@ ground-truth files).
 ### `load_parquet_embeddings`
 
 ```rust
-// #[cfg(feature = "parquet")]
 pub fn load_parquet_embeddings(
     path: &Path, embedding_column: &str, max_vectors: usize,
 ) -> Result<Vec<Vec<f32>>>;
@@ -82,7 +81,6 @@ Reads a `FixedSizeListArray<Float32>` column from an Apache Parquet file. Used b
 ### `load_hdf5_embeddings` / `load_hdf5_ground_truth`
 
 ```rust
-// #[cfg(feature = "hdf5")]
 pub fn load_hdf5_embeddings(path: &Path, dataset_name: &str, max_vectors: usize)
     -> Result<Vec<Vec<f32>>>;
 pub fn load_hdf5_ground_truth(path: &Path, max_queries: usize)
@@ -391,3 +389,24 @@ existing concrete methods on subset structs remain.
 - `cargo check -p motlie-db` — clean
 - `cargo check --bin bench_vector --features benchmark` — CLI builds
 - `cargo test -p motlie-db --features benchmark --lib` — 658 tests pass
+
+### 2026-02-12 — Consolidate feature flags into single `benchmark` flag
+
+**Author:** Claude (Opus 4.6)
+**Branch:** `feature/vector-dataset`
+**Status:** Complete
+
+Consolidated `parquet`, `hdf5`, and `benchmark-full` feature flags into a single
+`benchmark` flag. All dataset formats (NPY, fvecs, Parquet, HDF5) are now available
+whenever the `benchmark` feature is enabled. Requires `libhdf5-dev` system package.
+
+**What was done:**
+
+- `libs/db/Cargo.toml`: `benchmark` now includes `dep:parquet`, `dep:arrow`, `dep:hdf5`,
+  `dep:byteorder`; removed `parquet`, `hdf5`, `benchmark-full` feature definitions
+- Workspace `Cargo.toml`: removed `parquet` and `hdf5` workspace features
+- `dataset.rs`: removed all 21 `#[cfg(feature = "parquet")]` and `#[cfg(feature = "hdf5")]`
+  annotations (code is already inside the benchmark-gated module)
+- `mod.rs`: removed feature gates from Cohere and GloVe re-exports
+- `commands.rs`: removed feature gates from download and list_datasets commands
+- `README.md`, `DATASET.md`: updated feature references from `parquet`/`hdf5` to `benchmark`

@@ -9,16 +9,10 @@ description = "Database library for motlie"
 
 [features]
 default = []
-# Benchmark infrastructure - gates vector::benchmark module and parquet format
+# Benchmark infrastructure - gates vector::benchmark module with all dataset formats
 # Production builds should NOT enable this feature
-benchmark = ["parquet", "dep:byteorder"]
-# Parquet format support for Cohere Wikipedia and other HuggingFace datasets
-parquet = ["dep:parquet", "dep:arrow"]
-# HDF5 format support for ann-benchmarks datasets (GloVe, etc.)
-# Requires libhdf5-dev system package
-hdf5 = ["dep:hdf5"]
-# All benchmark formats including HDF5 (requires system libhdf5-dev)
-benchmark-full = ["benchmark", "hdf5"]
+# Requires libhdf5-dev system package for HDF5/GloVe support
+benchmark = ["dep:parquet", "dep:arrow", "dep:hdf5", "dep:ndarray", "dep:byteorder"]
 # Test hooks for integration tests (shutdown ordering, etc.)
 test-hooks = []
 
@@ -63,6 +57,8 @@ parquet = { version = "54", optional = true, default-features = false, features 
 arrow = { version = "54", optional = true, default-features = false, features = ["ffi"] }
 # Optional: HDF5 for ann-benchmarks datasets (GloVe, NYTimes, etc.)
 hdf5 = { version = "0.8", optional = true }
+# ndarray for HDF5 dataset slicing (transitive dep of hdf5, but used directly)
+ndarray = { version = "0.15", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
