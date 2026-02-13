@@ -14,11 +14,12 @@ use anyhow::Result;
 use super::dataset::{compute_ground_truth_parallel, LAION_EMBEDDING_DIM};
 use super::metrics::{compute_recall, percentile, LatencyStats};
 use super::Dataset;
-use crate::rocksdb::ColumnFamily;
 use crate::vector::{
-    hnsw, schema::EmbeddingSpec, BinaryCodeCache, Distance, EmbeddingCode, NavigationCache, RaBitQ,
-    Storage, VecId, VectorCfKey, VectorElementType, Vectors,
+    hnsw, processor::Processor, query::SearchKNN, BinaryCodeCache, Distance, Embedding,
+    EmbeddingBuilder, EmbeddingCode, RaBitQ, Storage, VecId, VectorElementType,
 };
+use crate::Id;
+use crate::vector::schema::ExternalKey;
 
 /// Experiment configuration.
 #[derive(Debug, Clone)]
@@ -382,13 +383,14 @@ pub fn run_all_experiments(
         // Initialize storage
         let mut storage = Storage::readwrite(&db_path);
         storage.ready()?;
+        let storage = Arc::new(storage);
 
         // Build HNSW index
         println!(
             "\nBuilding HNSW index (M={}, ef_construction={})...",
             config.m, config.ef_construction
         );
-        let (index, build_time) = build_hnsw_index(
+        let (_index, embedding, build_time) = build_hnsw_index(
             &storage,
             view.vectors(),
             view.dim(),
@@ -408,7 +410,7 @@ pub fn run_all_experiments(
             println!("\n--- ef_search = {} ---", ef_search);
 
             let result = run_single_experiment(
-                &index,
+                &embedding,
                 &storage,
                 &view,
                 &ground_truth,
@@ -443,73 +445,62 @@ pub fn run_all_experiments(
 
 /// Build HNSW index from vectors.
 pub fn build_hnsw_index(
-    storage: &Storage,
+    storage: &Arc<Storage>,
     vectors: &[Vec<f32>],
     dim: usize,
     m: usize,
     ef_construction: usize,
     distance: Distance,
     storage_type: VectorElementType,
-) -> Result<(hnsw::Index, f64)> {
-    let nav_cache = Arc::new(NavigationCache::new());
-    let embedding_code: EmbeddingCode = 1;
+) -> Result<(hnsw::Index, Embedding, f64)> {
+    if storage_type != VectorElementType::F16 {
+        anyhow::bail!(
+            "build_hnsw_index currently requires {:?} storage_type (got {:?})",
+            VectorElementType::F16,
+            storage_type
+        );
+    }
 
-    // Create EmbeddingSpec with HNSW parameters
-    let spec = EmbeddingSpec {
-        code: embedding_code,
-        model: "benchmark".to_string(),
-        dim: dim as u32,
-        distance,
-        storage_type,
-        hnsw_m: m as u16,
-        hnsw_ef_construction: ef_construction as u16,
-        rabitq_bits: 1,
-        rabitq_seed: 42,
-    };
-
-    let index = hnsw::Index::from_spec(embedding_code, &spec, 64, nav_cache);
-
-    // Store vectors in RocksDB using transaction
-    let txn_db = storage.transaction_db()?;
-    let vectors_cf = txn_db
-        .cf_handle(Vectors::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
+    let registry = storage.cache().clone();
+    registry.set_storage(storage.clone())?;
+    let embedding = registry.register(
+        EmbeddingBuilder::new("benchmark", dim as u32, distance)
+            .with_hnsw_m(m as u16)
+            .with_hnsw_ef_construction(ef_construction as u16),
+    )?;
+    let processor = Processor::new(storage.clone(), registry);
 
     let start = Instant::now();
 
-    // Batch store all vectors first (in a single transaction for atomicity)
-    {
-        let txn = txn_db.transaction();
-        for (i, vector) in vectors.iter().enumerate() {
-            let vec_id = i as VecId;
-            let key = VectorCfKey(embedding_code, vec_id);
-            let value_bytes = Vectors::value_to_bytes_typed(vector, storage_type);
-            txn.put_cf(&vectors_cf, Vectors::key_to_bytes(&key), value_bytes)?;
-        }
-        txn.commit()?;
-    }
-
-    // Build HNSW index (each insert in its own transaction)
-    for (i, vector) in vectors.iter().enumerate() {
-        let vec_id = i as VecId;
-        let txn = txn_db.transaction();
-        let cache_update = hnsw::insert(&index, &txn, &txn_db, storage, vec_id, vector)?;
-        txn.commit()?;
-        cache_update.apply(index.nav_cache());
-
-        if (i + 1) % 10000 == 0 {
-            println!("  Inserted {}/{} vectors", i + 1, vectors.len());
+    for (batch_idx, batch) in vectors.chunks(1000).enumerate() {
+        let base = batch_idx * 1000;
+        let payload: Vec<(ExternalKey, Vec<f32>)> = batch
+            .iter()
+            .enumerate()
+            .map(|(offset, vector)| {
+                let id = Id::from_bytes(((base + offset) as u128).to_be_bytes());
+                (ExternalKey::NodeId(id), vector.clone())
+            })
+            .collect();
+        let _ = processor.insert_batch(&embedding, &payload, true)?;
+        let inserted = (base + batch.len()).min(vectors.len());
+        if inserted % 10000 == 0 || inserted == vectors.len() {
+            println!("  Inserted {}/{} vectors", inserted, vectors.len());
         }
     }
+
+    let index = processor
+        .get_or_create_index(embedding.code())
+        .ok_or_else(|| anyhow::anyhow!("Failed to acquire HNSW index after benchmark insert"))?;
 
     let build_time = start.elapsed().as_secs_f64();
-    Ok((index, build_time))
+    Ok((index, embedding, build_time))
 }
 
 /// Run a single experiment configuration.
 pub fn run_single_experiment(
-    index: &hnsw::Index,
-    storage: &Storage,
+    embedding: &Embedding,
+    storage: &Arc<Storage>,
     dataset: &dyn Dataset,
     ground_truth: &[Vec<usize>],
     k_values: &[usize],
@@ -519,6 +510,10 @@ pub fn run_single_experiment(
     strategy: &str,
     verbose: bool,
 ) -> Result<ExperimentResult> {
+    let registry = storage.cache().clone();
+    registry.set_storage(storage.clone())?;
+    let processor = Processor::new(storage.clone(), registry);
+
     let mut latencies = Vec::with_capacity(dataset.queries().len());
     let mut search_results = Vec::with_capacity(dataset.queries().len());
 
@@ -527,11 +522,14 @@ pub fn run_single_experiment(
     // Run queries
     for (qi, query) in dataset.queries().iter().enumerate() {
         let start = Instant::now();
-        let results = index.search(storage, query, ef_search, max_k)?;
+        let results = SearchKNN::new(embedding, query.clone(), max_k)
+            .with_ef(ef_search)
+            .exact()
+            .execute_with_processor(&processor)?;
         let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
 
         latencies.push(latency_ms);
-        let result_ids: Vec<usize> = results.iter().map(|(_, id)| *id as usize).collect();
+        let result_ids: Vec<usize> = results.iter().map(|r| r.vec_id as usize).collect();
         search_results.push(result_ids);
 
         if verbose && (qi + 1) % 100 == 0 {
@@ -672,6 +670,7 @@ pub fn run_flat_baseline(
 /// * `dataset` - Dataset with queries and db vectors (via Dataset trait)
 /// * `ground_truth` - Ground truth results for recall computation
 /// * `build_time` - Time taken to build the HNSW index
+/// * `embedding_code` - Embedding code used for binary code cache keys
 ///
 /// # Returns
 ///
@@ -683,16 +682,20 @@ pub fn run_rabitq_experiments(
     dataset: &dyn Dataset,
     ground_truth: &[Vec<usize>],
     build_time: f64,
+    embedding_code: EmbeddingCode,
+    use_simd_dot: bool,
 ) -> Result<Vec<RabitqExperimentResult>> {
     let mut results = Vec::new();
-    let embedding_code: EmbeddingCode = 1;
 
     for &bits in &config.rabitq_bits {
         println!("\n  --- RaBitQ {} bits ---", bits);
 
         // Create encoder for this bit configuration
-        let encoder = RaBitQ::new(dataset.dim(), bits, 42);
-        println!("  Encoder created: {} bits/dim", bits);
+        let encoder = RaBitQ::with_options(dataset.dim(), bits, 42, use_simd_dot);
+        println!(
+            "  Encoder created: {} bits/dim (simd_dot={})",
+            bits, use_simd_dot
+        );
 
         // Create and populate binary code cache
         let cache = BinaryCodeCache::new();

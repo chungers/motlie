@@ -421,3 +421,65 @@ codex, 2026-02-12T21:56:15-08:00, eval=VALIDATED: `cargo check -p motlie-db --fe
 codex, 2026-02-12T22:31:22-08:00, eval=REBASED: Synced to origin/feature/vector-dataset at Claude commit `cdba827` and reapplied local fixes for findings #1 and #2.
 codex, 2026-02-12T22:31:22-08:00, eval=PASS: Post-rebase verification succeeded: `cargo check -p motlie-db --features benchmark`, `cargo check --bin bench_vector --features benchmark`, and `cargo test -p motlie-db --features benchmark --lib vector::benchmark::runner::tests`.
 codex, 2026-02-12T22:31:22-08:00, eval=UPDATE: Earlier HDF5 validation block is superseded by feature consolidation; HDF5 now builds under `--features benchmark` with `libhdf5-dev` installed.
+
+## bench_vector api compliance
+
+Date: 2026-02-13
+Author: codex
+
+### Scope
+
+Updated `bench_vector` and benchmark runner paths so sweeps and benchmarks prefer
+public async API behavior where practical, and otherwise delegate to internal
+source-of-truth APIs instead of duplicating benchmark logic in the CLI layer.
+
+### Changes made
+
+1. `bench_vector query` now uses `SearchKNN` without forcing `.exact()`:
+   - `bins/bench_vector/src/commands.rs`
+   - This exercises normal strategy selection through `SearchConfig`/Processor path.
+
+2. `bench_vector sweep` now delegates dataset and ground-truth responsibilities to
+   benchmark crate abstractions:
+   - Uses `Box<dyn benchmark::Dataset>` via `load_benchmark_dataset_for_sweep(...)`
+   - Uses `dataset.ground_truth(k)` with fallback to `compute_ground_truth_parallel(...)`
+   - Removes CLI-local sweep reimplementation loops.
+
+3. `bench_vector sweep` now delegates index build to benchmark crate:
+   - Uses `benchmark::build_hnsw_index(...)` from CLI.
+   - No direct HNSW + CF write loop in CLI sweep path.
+
+4. Benchmark runner `build_hnsw_index(...)` now uses internal source-of-truth insertion
+   path through `Processor::insert_batch(...)`:
+   - `libs/db/src/vector/benchmark/runner.rs`
+   - Avoids duplicate benchmark-side write/indexing logic.
+
+5. Benchmark runner exact HNSW experiment path now executes through `SearchKNN`
+   (query API + Processor path) rather than direct `index.search(...)` calls:
+   - `run_single_experiment(...)` uses
+     `SearchKNN::new(...).with_ef(...).exact().execute_with_processor(...)`.
+
+6. `--compare-simd` is supported in standardized sweep path through benchmark crate
+   delegation (no CLI-local reimplementation):
+   - `run_rabitq_experiments(...)` accepts `use_simd_dot`
+   - CLI runs two delegated passes for compare mode (`simd`, `scalar`) and writes
+     separate CSV artifacts.
+
+7. Fixed embedding-code source-of-truth gap in RaBitQ benchmark path:
+   - `run_rabitq_experiments(...)` now accepts `embedding_code: EmbeddingCode`
+   - Removed hardcoded `embedding_code = 1`
+   - Caller passes `embedding.code()` from built embedding.
+
+### API gap status
+
+- Gap 1 (public async API lacks full RaBitQ sweep controls): accepted as-is.
+- Gap 2 (benchmark runner is sync; public async benchmark harness not required): accepted as-is.
+- Gap 3 (hardcoded embedding code in runner): fixed as described above.
+
+### Verification
+
+Post-change checks passed:
+
+- `cargo check -p motlie-db --features benchmark`
+- `cargo check --bin bench_vector --features benchmark`
+- `cargo test -p motlie-db --features benchmark --lib vector::benchmark::runner::tests`
