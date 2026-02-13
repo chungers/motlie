@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use anyhow::Result;
 
-use super::dataset::{compute_ground_truth_parallel, LaionDataset, LAION_EMBEDDING_DIM};
+use super::dataset::{compute_ground_truth_parallel, LAION_EMBEDDING_DIM};
 use super::metrics::{compute_recall, percentile, LatencyStats};
 use super::Dataset;
 use crate::rocksdb::ColumnFamily;
@@ -284,41 +284,93 @@ impl RabitqExperimentResult {
 }
 
 /// Run all experiments according to configuration.
-pub fn run_all_experiments(config: &ExperimentConfig) -> Result<Vec<ExperimentResult>> {
-    // Load full dataset
-    let max_vectors = *config.scales.iter().max().unwrap_or(&200_000);
-    println!("Loading LAION dataset (up to {} vectors)...", max_vectors);
-    let dataset = LaionDataset::load(&config.data_dir, max_vectors)?;
+pub fn run_all_experiments(
+    dataset: &dyn Dataset,
+    config: &ExperimentConfig,
+) -> Result<Vec<ExperimentResult>> {
+    struct DatasetView<'a> {
+        name: &'a str,
+        dim: usize,
+        distance: Distance,
+        vectors: &'a [Vec<f32>],
+        queries: &'a [Vec<f32>],
+        ground_truth: Option<Vec<Vec<usize>>>,
+    }
+
+    impl Dataset for DatasetView<'_> {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn dim(&self) -> usize {
+            self.dim
+        }
+        fn distance(&self) -> Distance {
+            self.distance
+        }
+        fn vectors(&self) -> &[Vec<f32>] {
+            self.vectors
+        }
+        fn queries(&self) -> &[Vec<f32>] {
+            self.queries
+        }
+        fn ground_truth(&self, _k: usize) -> Option<Vec<Vec<usize>>> {
+            self.ground_truth.clone()
+        }
+    }
+
     println!(
-        "Dataset loaded: {} image embeddings, {} text embeddings\n",
-        dataset.image_embeddings.len(),
-        dataset.text_embeddings.len()
+        "Dataset loaded: {} ({} vectors, {} queries, {}D, {:?})\n",
+        dataset.name(),
+        dataset.vectors().len(),
+        dataset.queries().len(),
+        dataset.dim(),
+        dataset.distance(),
     );
 
     let mut all_results = Vec::new();
+    let max_k = *config.k_values.iter().max().unwrap_or(&20);
+    let full_gt = dataset.ground_truth(max_k);
+    let full_vectors = dataset.vectors().len();
+    let full_queries = dataset.queries().len();
 
     for &scale in &config.scales {
+        let scale = scale.min(full_vectors);
+        let query_count = config.num_queries.min(full_queries);
+
         println!("\n{}", "=".repeat(60));
         println!("Scale: {} vectors", scale);
         println!("{}\n", "=".repeat(60));
 
-        // Get subset for this scale
-        let subset = dataset.subset(scale, config.num_queries);
+        let view = DatasetView {
+            name: dataset.name(),
+            dim: dataset.dim(),
+            distance: dataset.distance(),
+            vectors: &dataset.vectors()[..scale],
+            queries: &dataset.queries()[..query_count],
+            // Only trust precomputed GT at full vector scale.
+            ground_truth: if scale == full_vectors {
+                full_gt
+                    .as_ref()
+                    .map(|gt| gt.iter().take(query_count).cloned().collect())
+            } else {
+                None
+            },
+        };
         println!(
-            "Subset: {} db vectors, {} queries",
-            subset.vectors().len(),
-            subset.queries().len()
+            "Subset: {} db vectors, {} queries ({})",
+            view.vectors().len(),
+            view.queries().len(),
+            view.name()
         );
 
         // Compute ground truth (use pre-computed if available, else brute-force)
-        let max_k = *config.k_values.iter().max().unwrap_or(&20);
-        let ground_truth = match Dataset::ground_truth(&subset, max_k) {
+        let ground_truth = match view.ground_truth(max_k) {
             Some(gt) => gt,
             None => compute_ground_truth_parallel(
-                subset.vectors(),
-                subset.queries(),
+                view.vectors(),
+                view.queries(),
                 max_k,
-                subset.distance(),
+                view.distance(),
             ),
         };
 
@@ -338,11 +390,11 @@ pub fn run_all_experiments(config: &ExperimentConfig) -> Result<Vec<ExperimentRe
         );
         let (index, build_time) = build_hnsw_index(
             &storage,
-            subset.vectors(),
-            config.dim,
+            view.vectors(),
+            view.dim(),
             config.m,
             config.ef_construction,
-            config.distance,
+            view.distance(),
             config.storage_type,
         )?;
         println!(
@@ -358,13 +410,13 @@ pub fn run_all_experiments(config: &ExperimentConfig) -> Result<Vec<ExperimentRe
             let result = run_single_experiment(
                 &index,
                 &storage,
-                &subset,
+                &view,
                 &ground_truth,
                 &config.k_values,
                 ef_search,
                 scale,
                 build_time,
-                &format!("HNSW-{}", config.distance),
+                &format!("HNSW-{}", view.distance()),
                 config.verbose,
             )?;
             all_results.push(result);
@@ -373,11 +425,10 @@ pub fn run_all_experiments(config: &ExperimentConfig) -> Result<Vec<ExperimentRe
         // Run flat baseline
         println!("\n--- Flat (brute-force) baseline ---");
         let flat_result = run_flat_baseline(
-            &subset,
+            &view,
             &ground_truth,
             &config.k_values,
             scale,
-            config.distance,
             config.verbose,
         )?;
         all_results.push(flat_result);
@@ -535,7 +586,6 @@ pub fn run_flat_baseline(
     ground_truth: &[Vec<usize>],
     k_values: &[usize],
     scale: usize,
-    distance: Distance,
     verbose: bool,
 ) -> Result<ExperimentResult> {
     let mut latencies = Vec::with_capacity(dataset.queries().len());
@@ -552,7 +602,7 @@ pub fn run_flat_baseline(
             .vectors()
             .iter()
             .enumerate()
-            .map(|(i, v)| (i, distance.compute(query, v)))
+            .map(|(i, v)| (i, dataset.distance().compute(query, v)))
             .collect();
 
         // Sort and take top-k
@@ -641,7 +691,7 @@ pub fn run_rabitq_experiments(
         println!("\n  --- RaBitQ {} bits ---", bits);
 
         // Create encoder for this bit configuration
-        let encoder = RaBitQ::new(config.dim, bits, 42);
+        let encoder = RaBitQ::new(dataset.dim(), bits, 42);
         println!("  Encoder created: {} bits/dim", bits);
 
         // Create and populate binary code cache
@@ -750,10 +800,7 @@ pub fn run_rabitq_experiments(
 }
 
 /// Save RaBitQ results to CSV file.
-pub fn save_rabitq_results_csv(
-    results: &[RabitqExperimentResult],
-    csv_path: &Path,
-) -> Result<()> {
+pub fn save_rabitq_results_csv(results: &[RabitqExperimentResult], csv_path: &Path) -> Result<()> {
     let mut file = File::create(csv_path)?;
 
     // Header
