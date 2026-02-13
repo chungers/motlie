@@ -15,15 +15,15 @@ use std::time::Instant;
 
 use motlie_db::vector::benchmark::{
     self, compute_recall, compute_rotated_variance, print_pareto_frontier, print_rotation_stats,
-    BenchmarkMetadata, GistDataset, LaionDataset, LatencyStats, ParetoInput, RabitqExperimentResult,
-    RandomDataset, SiftDataset, save_rabitq_results_csv, GIST_QUERIES,
+    BenchmarkMetadata, GistDataset, LaionDataset, LatencyStats, ParetoInput, RandomDataset,
+    SiftDataset, save_rabitq_results_csv, GIST_QUERIES,
 };
 use motlie_db::vector::{
-    create_reader_with_storage, create_writer, hnsw, spawn_mutation_consumer_with_storage_autoreg,
+    create_reader_with_storage, create_writer, spawn_mutation_consumer_with_storage_autoreg,
     spawn_query_consumers_with_storage_autoreg, AsyncGraphUpdater, AsyncUpdaterConfig,
-    BinaryCodeCache, Distance, EmbeddingBuilder, EmbeddingCode, EmbeddingRegistry, IdAllocator,
-    InsertVectorBatch, NavigationCache, RaBitQ, ReaderConfig, Runnable, SearchKNN, Storage, VecId,
-    VectorCfKey, VectorElementType, Vectors, WriterConfig,
+    Distance, EmbeddingBuilder, EmbeddingRegistry, IdAllocator, InsertVectorBatch,
+    NavigationCache, RaBitQ, ReaderConfig, Runnable, SearchKNN, Storage, VecId, VectorElementType,
+    Vectors, WriterConfig,
 };
 use motlie_db::rocksdb::{ColumnFamily, ColumnFamilySerde};
 use motlie_db::Id;
@@ -829,7 +829,6 @@ pub async fn query(args: QueryArgs) -> Result<()> {
         let timeout = std::time::Duration::from_secs(30);
         let results = SearchKNN::new(&embedding, query, args.k)
             .with_ef(args.ef_search)
-            .exact()
             .run(&search_reader, timeout)
             .await?;
 
@@ -912,7 +911,6 @@ pub async fn query(args: QueryArgs) -> Result<()> {
             let start = Instant::now();
             let _results = SearchKNN::new(&embedding, query, args.k)
                 .with_ef(args.ef_search)
-                .exact()
                 .run(&search_reader, timeout)
                 .await?;
             let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -928,7 +926,6 @@ pub async fn query(args: QueryArgs) -> Result<()> {
             let start = Instant::now();
             let results = SearchKNN::new(&embedding, query.clone(), args.k)
                 .with_ef(args.ef_search)
-                .exact()
                 .run(&search_reader, timeout)
                 .await?;
             let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -1018,7 +1015,6 @@ pub async fn query(args: QueryArgs) -> Result<()> {
 
             let results = SearchKNN::new(&embedding, query, args.k)
                 .with_ef(args.ef_search)
-                .exact()
                 .run(&search_reader, timeout)
                 .await?;
             let result_indices: Vec<usize> =
@@ -1199,33 +1195,34 @@ pub async fn sweep(args: SweepArgs) -> Result<()> {
         println!("Rerank factors: {:?}", rerank_values);
     }
 
-    // Determine distance and dimension from dataset
-    let (distance, dim) = match args.dataset.to_lowercase().as_str() {
-        "laion" => (Distance::Cosine, benchmark::LAION_EMBEDDING_DIM),
-        "sift" => (Distance::L2, benchmark::SIFT_EMBEDDING_DIM),
-        "gist" => (Distance::L2, benchmark::GIST_EMBEDDING_DIM),
-        "random" => (Distance::Cosine, args.dim),
-        _ => anyhow::bail!("Unknown dataset: {}. Use: laion, sift, gist, random", args.dataset),
-    };
+    let dataset = load_benchmark_dataset_for_sweep(
+        &args.dataset,
+        &args.data_dir,
+        args.num_vectors,
+        args.num_queries,
+        args.dim,
+        args.seed,
+    )?;
+    let dim = dataset.dim();
+    let distance = dataset.distance();
+    println!(
+        "Loaded dataset: {} db vectors, {} queries, dim={}, distance={:?}",
+        dataset.vectors().len(),
+        dataset.queries().len(),
+        dim,
+        distance
+    );
 
-    // Load dataset
-    let (db_vectors, queries, _dim) = if args.dataset.to_lowercase() == "random" {
-        let ds = RandomDataset::generate(args.num_vectors, args.num_queries, args.dim, args.seed);
-        (ds.vectors, ds.queries, ds.dim)
-    } else {
-        load_dataset_for_query(
-            &args.dataset,
-            &args.data_dir,
-            args.num_vectors,
-            args.num_queries,
-        )?
-    };
-    println!("Loaded {} db vectors, {} queries, dim={}", db_vectors.len(), queries.len(), dim);
-
-    // Compute ground truth
     let max_k = *k_values.iter().max().unwrap_or(&10);
-    println!("Computing ground truth (k={})...", max_k);
-    let ground_truth = compute_ground_truth(&db_vectors, &queries, max_k, distance);
+    let ground_truth = match dataset.ground_truth(max_k) {
+        Some(gt) => gt,
+        None => benchmark::compute_ground_truth_parallel(
+            dataset.vectors(),
+            dataset.queries(),
+            max_k,
+            distance,
+        ),
+    };
 
     // Create temp database
     let temp_path = std::env::temp_dir().join(format!("bench_vector_{}", std::process::id()));
@@ -1236,62 +1233,24 @@ pub async fn sweep(args: SweepArgs) -> Result<()> {
     let db_path = &temp_path;
     println!("Database: {:?}", db_path);
 
-    // Initialize storage
+    // Initialize storage + build index through benchmark crate
     let mut storage = Storage::readwrite(db_path);
     storage.ready()?;
-
-    // Build index
-    let nav_cache = Arc::new(NavigationCache::new());
-    let embedding_code: EmbeddingCode = 1;
-    let storage_type = VectorElementType::F16;
-
-    let spec = EmbeddingSpec {
-        code: embedding_code,
-        model: "bench".to_string(),
-        dim: dim as u32,
+    let storage = Arc::new(storage);
+    let (index, embedding, build_time) = benchmark::build_hnsw_index(
+        &storage,
+        dataset.vectors(),
+        dim,
+        args.m,
+        args.ef_construction,
         distance,
-        storage_type,
-        hnsw_m: args.m as u16,
-        hnsw_ef_construction: args.ef_construction as u16,
-        rabitq_bits: 1,
-        rabitq_seed: 42,
-    };
-
-    let index = hnsw::Index::from_spec(
-        embedding_code,
-        &spec,
-        1000, // batch_threshold
-        nav_cache.clone(),
+        VectorElementType::F16,
+    )?;
+    println!(
+        "Index built in {:.2}s ({:.1} vec/s)",
+        build_time,
+        dataset.vectors().len() as f64 / build_time.max(0.0001)
     );
-
-    // Store vectors and build index
-    let txn_db = storage.transaction_db()?;
-    let vectors_cf = txn_db
-        .cf_handle(Vectors::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
-
-    println!("\nBuilding HNSW index (M={}, ef_construction={})...", args.m, args.ef_construction);
-    let start = Instant::now();
-
-    for (i, vector) in db_vectors.iter().enumerate() {
-        let vec_id = i as VecId;
-        let key = VectorCfKey(embedding_code, vec_id);
-        let value_bytes = Vectors::value_to_bytes_typed(vector, storage_type);
-
-        // Use transaction for atomic vector storage + HNSW insert
-        let txn = txn_db.transaction();
-        txn.put_cf(&vectors_cf, Vectors::key_to_bytes(&key), value_bytes)?;
-        let cache_update = hnsw::insert(&index, &txn, &txn_db, &storage, vec_id, vector)?;
-        txn.commit()?;
-        cache_update.apply(index.nav_cache());
-
-        if (i + 1) % 10000 == 0 {
-            println!("  {}/{} vectors", i + 1, db_vectors.len());
-        }
-    }
-
-    let build_time = start.elapsed().as_secs_f64();
-    println!("Index built in {:.2}s ({:.1} vec/s)", build_time, db_vectors.len() as f64 / build_time);
 
     // Create results directory
     std::fs::create_dir_all(&args.results_dir)?;
@@ -1300,83 +1259,123 @@ pub async fn sweep(args: SweepArgs) -> Result<()> {
     let mut overall_min_recall: f64 = 1.0;
 
     if args.rabitq {
-        if args.compare_simd {
-            // Run both SIMD and scalar modes for comparison
-            println!("\n=== SIMD vs Scalar Comparison ===\n");
+        let mut config = benchmark::ExperimentConfig::default()
+            .with_ef_search(ef_values.clone())
+            .with_k_values(k_values.clone())
+            .with_rabitq_bits(bits_values.clone())
+            .with_rerank_factors(rerank_values.clone());
+        config.dim = dim;
+        config.distance = distance;
 
-            println!("--- SIMD Mode ---");
-            let min_recall = run_rabitq_sweep(
-                &index,
-                &storage,
-                &db_vectors,
-                &queries,
-                &ground_truth,
-                &ef_values,
-                &k_values,
-                &bits_values,
-                &rerank_values,
-                dim,
-                build_time,
-                &args.results_dir,
-                true, // use_simd_dot
-                args.show_pareto,
-            )?;
-            if min_recall < overall_min_recall {
-                overall_min_recall = min_recall;
-            }
-
-            println!("\n--- Scalar Mode ---");
-            let min_recall = run_rabitq_sweep(
-                &index,
-                &storage,
-                &db_vectors,
-                &queries,
-                &ground_truth,
-                &ef_values,
-                &k_values,
-                &bits_values,
-                &rerank_values,
-                dim,
-                build_time,
-                &args.results_dir,
-                false, // use_simd_dot
-                args.show_pareto,
-            )?;
-            if min_recall < overall_min_recall {
-                overall_min_recall = min_recall;
-            }
+        let sweep_modes: Vec<(&str, bool)> = if args.compare_simd {
+            vec![("simd", true), ("scalar", false)]
         } else {
-            // Single mode sweep
-            let min_recall = run_rabitq_sweep(
+            vec![("single", args.simd_dot)]
+        };
+
+        for (mode_name, use_simd_dot) in sweep_modes {
+            if args.compare_simd {
+                println!("\n=== RaBitQ mode: {} ===", mode_name);
+            } else {
+                println!("\n=== RaBitQ mode: simd_dot={} ===", use_simd_dot);
+            }
+
+            let rabitq_results = benchmark::run_rabitq_experiments(
+                &config,
                 &index,
-                &storage,
-                &db_vectors,
-                &queries,
+                storage.as_ref(),
+                dataset.as_ref(),
                 &ground_truth,
-                &ef_values,
-                &k_values,
-                &bits_values,
-                &rerank_values,
-                dim,
                 build_time,
-                &args.results_dir,
-                args.simd_dot,
-                args.show_pareto,
+                embedding.code(),
+                use_simd_dot,
             )?;
-            overall_min_recall = min_recall;
+
+            let csv_path = if args.compare_simd {
+                args.results_dir
+                    .join(format!("rabitq_sweep_{}.csv", mode_name))
+            } else {
+                args.results_dir.join("rabitq_sweep.csv")
+            };
+            save_rabitq_results_csv(&rabitq_results, &csv_path)?;
+            println!("RaBitQ sweep saved to {:?}", csv_path);
+
+            if let Some(min) = rabitq_results
+                .iter()
+                .map(|r| r.recall_mean)
+                .min_by(|a, b| a.partial_cmp(b).unwrap())
+            {
+                overall_min_recall = overall_min_recall.min(min);
+            }
+
+            if args.show_pareto {
+                let pareto_inputs: Vec<ParetoInput> = rabitq_results
+                    .iter()
+                    .map(|r| ParetoInput {
+                        bits_per_dim: r.bits_per_dim,
+                        ef_search: r.ef_search,
+                        rerank_factor: r.rerank_factor,
+                        k: r.k,
+                        recall: r.recall_mean,
+                        qps: r.qps,
+                    })
+                    .collect();
+                for &k in &k_values {
+                    let frontier = benchmark::compute_pareto_frontier_for_k(&pareto_inputs, k);
+                    if !frontier.is_empty() {
+                        let title = if args.compare_simd {
+                            format!(
+                                "Pareto Frontier ({} mode, Recall@{} vs QPS)",
+                                mode_name, k
+                            )
+                        } else {
+                            format!("Pareto Frontier (Recall@{} vs QPS)", k)
+                        };
+                        print_pareto_frontier(&frontier, &title);
+                    }
+                }
+            }
         }
     } else {
-        // Standard HNSW sweep
-        let min_recall = run_hnsw_sweep(
-            &index,
-            &storage,
-            &queries,
+        println!("\n=== HNSW Parameter Sweep ===");
+        for &ef_search in &ef_values {
+            let result = benchmark::run_single_experiment(
+                &embedding,
+                &storage,
+                dataset.as_ref(),
+                &ground_truth,
+                &k_values,
+                ef_search,
+                dataset.vectors().len(),
+                build_time,
+                &format!("HNSW-{}", distance),
+                false,
+            )?;
+            if let Some(min) = result
+                .recall_at_k
+                .values()
+                .cloned()
+                .min_by(|a, b| a.partial_cmp(b).unwrap())
+            {
+                overall_min_recall = overall_min_recall.min(min);
+            }
+        }
+
+        let flat = benchmark::run_flat_baseline(
+            dataset.as_ref(),
             &ground_truth,
-            &ef_values,
             &k_values,
-            build_time,
+            dataset.vectors().len(),
+            false,
         )?;
-        overall_min_recall = min_recall;
+        if let Some(min) = flat
+            .recall_at_k
+            .values()
+            .cloned()
+            .min_by(|a, b| a.partial_cmp(b).unwrap())
+        {
+            overall_min_recall = overall_min_recall.min(min);
+        }
     }
 
     // Check recall assertion if threshold provided
@@ -1682,221 +1681,55 @@ fn load_dataset_for_query(
     }
 }
 
+fn load_benchmark_dataset_for_sweep(
+    dataset: &str,
+    data_dir: &PathBuf,
+    num_vectors: usize,
+    num_queries: usize,
+    dim: usize,
+    seed: u64,
+) -> Result<Box<dyn benchmark::Dataset>> {
+    match dataset.to_lowercase().as_str() {
+        "laion" => {
+            let ds = LaionDataset::load(data_dir, num_vectors)?;
+            Ok(Box::new(ds.subset(num_vectors, num_queries)))
+        }
+        "sift" => {
+            let ds = SiftDataset::load(data_dir, num_vectors, num_queries)?;
+            Ok(Box::new(ds.subset(num_vectors, num_queries)))
+        }
+        "gist" => {
+            let ds = GistDataset::load(data_dir, num_vectors, num_queries)?;
+            Ok(Box::new(ds.subset(num_vectors, num_queries)))
+        }
+        "cohere" | "cohere-wiki" => {
+            let ds = benchmark::CohereWikipediaDataset::load(data_dir, num_vectors, num_queries)?;
+            Ok(Box::new(ds.subset(num_vectors, num_queries)))
+        }
+        "glove" | "glove-100" => {
+            let ds = benchmark::GloveDataset::load(data_dir, num_vectors, num_queries)?;
+            Ok(Box::new(ds.subset(num_vectors, num_queries)))
+        }
+        "random" => Ok(Box::new(RandomDataset::generate(
+            num_vectors,
+            num_queries,
+            dim,
+            seed,
+        ))),
+        _ => anyhow::bail!(
+            "Unknown dataset: {}. Use: laion, sift, gist, cohere, glove, random",
+            dataset
+        ),
+    }
+}
+
 fn compute_ground_truth(
     db_vectors: &[Vec<f32>],
     queries: &[Vec<f32>],
     k: usize,
     distance: Distance,
 ) -> Vec<Vec<usize>> {
-    queries.iter().map(|query| {
-        let mut distances: Vec<(usize, f32)> = db_vectors.iter()
-            .enumerate()
-            .map(|(i, v)| (i, distance.compute(query, v)))
-            .collect();
-        distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-        distances.iter().take(k).map(|(i, _)| *i).collect()
-    }).collect()
-}
-
-/// Run HNSW parameter sweep.
-/// Returns the minimum recall observed across all configurations.
-fn run_hnsw_sweep(
-    index: &hnsw::Index,
-    storage: &Storage,
-    queries: &[Vec<f32>],
-    ground_truth: &[Vec<usize>],
-    ef_values: &[usize],
-    k_values: &[usize],
-    build_time: f64,
-) -> Result<f64> {
-    println!("\n=== HNSW Parameter Sweep ===");
-    println!("{:<10} {:<10} {:<12} {:<10} {:<10} {:<10}", "ef_search", "k", "Recall", "QPS", "P50(ms)", "P99(ms)");
-    println!("{}", "-".repeat(62));
-
-    let max_k = *k_values.iter().max().unwrap_or(&10);
-    let mut min_recall: f64 = 1.0;
-
-    for &ef_search in ef_values {
-        // Run all queries
-        let mut latencies = Vec::with_capacity(queries.len());
-        let mut search_results = Vec::with_capacity(queries.len());
-
-        for query in queries {
-            let start = Instant::now();
-            let results = index.search(storage, query, ef_search, max_k)?;
-            latencies.push(start.elapsed().as_secs_f64() * 1000.0);
-            search_results.push(results.iter().map(|(_, id)| *id as usize).collect());
-        }
-
-        latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let stats = LatencyStats::from_latencies(&latencies);
-
-        for &k in k_values {
-            let recall = compute_recall(&search_results, ground_truth, k);
-            if recall < min_recall {
-                min_recall = recall;
-            }
-            println!(
-                "{:<10} {:<10} {:<12.1}% {:<10.1} {:<10.2} {:<10.2}",
-                ef_search, k, recall * 100.0, stats.qps, stats.p50_ms, stats.p99_ms
-            );
-        }
-    }
-
-    println!("\nBuild time: {:.2}s", build_time);
-    Ok(min_recall)
-}
-
-/// Run RaBitQ parameter sweep.
-/// Returns the minimum recall observed across all configurations.
-fn run_rabitq_sweep(
-    index: &hnsw::Index,
-    storage: &Storage,
-    db_vectors: &[Vec<f32>],
-    queries: &[Vec<f32>],
-    ground_truth: &[Vec<usize>],
-    ef_values: &[usize],
-    k_values: &[usize],
-    bits_values: &[u8],
-    rerank_values: &[usize],
-    dim: usize,
-    build_time: f64,
-    results_dir: &PathBuf,
-    use_simd_dot: bool,
-    show_pareto: bool,
-) -> Result<f64> {
-    let simd_mode = if use_simd_dot { "SIMD" } else { "scalar" };
-    println!("\n=== RaBitQ Parameter Sweep ({}) ===", simd_mode);
-
-    let embedding_code: EmbeddingCode = 1;
-    let mut all_results: Vec<RabitqExperimentResult> = Vec::new();
-    let mut min_recall: f64 = 1.0;
-
-    for &bits in bits_values {
-        println!("\n--- {} bits/dim ({}) ---", bits, simd_mode);
-
-        // Create encoder with SIMD option
-        let encoder = RaBitQ::with_options(dim, bits, 42, use_simd_dot);
-
-        // Build binary code cache
-        let cache = BinaryCodeCache::new();
-        let encode_start = Instant::now();
-
-        for (i, vector) in db_vectors.iter().enumerate() {
-            let (code, correction) = encoder.encode_with_correction(vector);
-            cache.put(embedding_code, i as VecId, code, correction);
-        }
-
-        let encode_time = encode_start.elapsed().as_secs_f64();
-        let (cache_count, cache_bytes) = cache.stats();
-        println!(
-            "Encoded {} vectors in {:.2}s ({:.2} MB)",
-            cache_count, encode_time, cache_bytes as f64 / 1_000_000.0
-        );
-
-        println!("{:<8} {:<8} {:<8} {:<10} {:<10} {:<10} {:<10}",
-            "ef", "rerank", "k", "Recall", "QPS", "P50(ms)", "P99(ms)");
-        println!("{}", "-".repeat(64));
-
-        for &ef_search in ef_values {
-            for &rerank_factor in rerank_values {
-                for &k in k_values {
-                    let candidates = k * rerank_factor;
-                    let mut latencies = Vec::with_capacity(queries.len());
-                    let mut search_results = Vec::with_capacity(queries.len());
-
-                    for query in queries {
-                        let start = Instant::now();
-                        let results = index.search_with_rabitq_cached(
-                            storage, query, &encoder, &cache,
-                            k, ef_search, candidates,
-                        )?;
-                        latencies.push(start.elapsed().as_secs_f64() * 1000.0);
-                        search_results.push(results.iter().map(|(_, id)| *id as usize).collect());
-                    }
-
-                    let recall = compute_recall(&search_results, ground_truth, k);
-                    if recall < min_recall {
-                        min_recall = recall;
-                    }
-                    latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                    let stats = LatencyStats::from_latencies(&latencies);
-
-                    println!(
-                        "{:<8} {:<8} {:<8} {:<10.1}% {:<10.1} {:<10.2} {:<10.2}",
-                        ef_search, rerank_factor, k, recall * 100.0, stats.qps, stats.p50_ms, stats.p99_ms
-                    );
-
-                    // Compute recall std (approximate)
-                    let recalls: Vec<f64> = search_results.iter()
-                        .zip(ground_truth.iter())
-                        .map(|(res, gt)| {
-                            let hits = res.iter().take(k).filter(|id| gt.contains(id)).count();
-                            hits as f64 / k as f64
-                        })
-                        .collect();
-                    let recall_std = std_dev(&recalls);
-
-                    all_results.push(RabitqExperimentResult {
-                        scale: db_vectors.len(),
-                        bits_per_dim: bits,
-                        ef_search,
-                        rerank_factor,
-                        k,
-                        recall_mean: recall,
-                        recall_std,
-                        latency_avg_ms: stats.avg_ms,
-                        latency_p50_ms: stats.p50_ms,
-                        latency_p95_ms: stats.p95_ms,
-                        latency_p99_ms: stats.p99_ms,
-                        qps: stats.qps,
-                        encode_time_s: encode_time,
-                        build_time_s: build_time,
-                    });
-                }
-            }
-        }
-    }
-
-    // Save results
-    let csv_path = results_dir.join("rabitq_sweep.csv");
-    save_rabitq_results_csv(&all_results, &csv_path)?;
-    println!("\nResults saved to {:?}", csv_path);
-
-    // Show Pareto frontier if requested
-    if show_pareto {
-        // Convert to ParetoInput format
-        let pareto_inputs: Vec<ParetoInput> = all_results
-            .iter()
-            .map(|r| ParetoInput {
-                bits_per_dim: r.bits_per_dim,
-                ef_search: r.ef_search,
-                rerank_factor: r.rerank_factor,
-                k: r.k,
-                recall: r.recall_mean,
-                qps: r.qps,
-            })
-            .collect();
-
-        // Compute and display Pareto frontier for each k
-        for &k in k_values {
-            let frontier = benchmark::compute_pareto_frontier_for_k(&pareto_inputs, k);
-            if !frontier.is_empty() {
-                print_pareto_frontier(&frontier, &format!("Pareto Frontier (Recall@{} vs QPS)", k));
-            }
-        }
-    }
-
-    Ok(min_recall)
-}
-
-fn std_dev(values: &[f64]) -> f64 {
-    if values.is_empty() {
-        return 0.0;
-    }
-    let mean = values.iter().sum::<f64>() / values.len() as f64;
-    let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
-    variance.sqrt()
+    benchmark::compute_ground_truth_parallel(db_vectors, queries, k, distance)
 }
 
 // ============================================================================
