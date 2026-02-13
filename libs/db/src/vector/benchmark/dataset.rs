@@ -683,15 +683,12 @@ impl super::Dataset for GistSubset {
 // ============================================================================
 
 /// Cohere Wikipedia dataset configuration.
-#[cfg(feature = "parquet")]
 pub const COHERE_WIKI_DIM: usize = 768;
 
 /// Cohere Wikipedia dataset size.
-#[cfg(feature = "parquet")]
 pub const COHERE_WIKI_VECTORS: usize = 485_000;
 
 /// HuggingFace URL for Cohere Wikipedia embeddings.
-#[cfg(feature = "parquet")]
 const COHERE_WIKI_URL: &str =
     "https://huggingface.co/datasets/Cohere/wikipedia-22-12-simple-embeddings/resolve/main/data/train-00000-of-00001.parquet";
 
@@ -710,7 +707,6 @@ const COHERE_WIKI_URL: &str =
 /// ```ignore
 /// let vectors = load_parquet_embeddings(&path, "emb", 100_000)?;
 /// ```
-#[cfg(feature = "parquet")]
 pub fn load_parquet_embeddings(
     path: &Path,
     embedding_column: &str,
@@ -782,7 +778,6 @@ pub fn load_parquet_embeddings(
 /// - 768 dimensions
 /// - ~485K vectors
 /// - Cosine distance (embeddings are normalized)
-#[cfg(feature = "parquet")]
 #[derive(Debug, Clone)]
 pub struct CohereWikipediaDataset {
     /// Database embeddings.
@@ -795,7 +790,6 @@ pub struct CohereWikipediaDataset {
     pub dim: usize,
 }
 
-#[cfg(feature = "parquet")]
 impl CohereWikipediaDataset {
     /// Download Cohere Wikipedia dataset from HuggingFace.
     pub fn download(data_dir: &Path) -> Result<()> {
@@ -892,7 +886,6 @@ impl CohereWikipediaDataset {
 }
 
 /// Subset of Cohere Wikipedia data for benchmarking.
-#[cfg(feature = "parquet")]
 #[derive(Debug, Clone)]
 pub struct CohereWikipediaSubset {
     /// Database vectors.
@@ -905,7 +898,6 @@ pub struct CohereWikipediaSubset {
     pub dim: usize,
 }
 
-#[cfg(feature = "parquet")]
 impl CohereWikipediaSubset {
     /// Compute ground truth using cosine distance.
     pub fn compute_ground_truth_topk(&self, k: usize) -> Vec<Vec<usize>> {
@@ -930,7 +922,6 @@ impl CohereWikipediaSubset {
     }
 }
 
-#[cfg(feature = "parquet")]
 impl super::Dataset for CohereWikipediaSubset {
     fn name(&self) -> &str {
         "Cohere-Wikipedia"
@@ -962,19 +953,15 @@ impl super::Dataset for CohereWikipediaSubset {
 // ============================================================================
 
 /// GloVe dataset configuration (from ann-benchmarks).
-#[cfg(feature = "hdf5")]
 pub const GLOVE_DIM: usize = 100;
 
 /// GloVe dataset size.
-#[cfg(feature = "hdf5")]
 pub const GLOVE_VECTORS: usize = 1_183_514;
 
 /// GloVe queries count.
-#[cfg(feature = "hdf5")]
 pub const GLOVE_QUERIES: usize = 10_000;
 
 /// ANN-benchmarks URL for GloVe-100 angular.
-#[cfg(feature = "hdf5")]
 const GLOVE_100_URL: &str = "http://ann-benchmarks.com/glove-100-angular.hdf5";
 
 /// Load embeddings from an HDF5 file (ann-benchmarks format).
@@ -986,7 +973,6 @@ const GLOVE_100_URL: &str = "http://ann-benchmarks.com/glove-100-angular.hdf5";
 /// * `path` - Path to the HDF5 file
 /// * `dataset_name` - Name of the dataset to load ("train" or "test")
 /// * `max_vectors` - Maximum number of vectors to load
-#[cfg(feature = "hdf5")]
 pub fn load_hdf5_embeddings(
     path: &Path,
     dataset_name: &str,
@@ -1032,7 +1018,6 @@ pub fn load_hdf5_embeddings(
 /// Load ground truth from HDF5 file (ann-benchmarks format).
 ///
 /// The "neighbors" dataset contains pre-computed nearest neighbor indices.
-#[cfg(feature = "hdf5")]
 pub fn load_hdf5_ground_truth(path: &Path, max_queries: usize) -> Result<Vec<Vec<usize>>> {
     let file = hdf5::File::open(path)
         .with_context(|| format!("Failed to open HDF5 file: {}", path.display()))?;
@@ -1078,7 +1063,6 @@ pub fn load_hdf5_ground_truth(path: &Path, max_queries: usize) -> Result<Vec<Vec
 /// - ~1.18M vectors
 /// - 10K queries with pre-computed ground truth
 /// - Angular/Cosine distance
-#[cfg(feature = "hdf5")]
 #[derive(Debug, Clone)]
 pub struct GloveDataset {
     /// Database vectors (train set).
@@ -1091,7 +1075,6 @@ pub struct GloveDataset {
     pub dim: usize,
 }
 
-#[cfg(feature = "hdf5")]
 impl GloveDataset {
     /// Download GloVe dataset from ann-benchmarks.
     pub fn download(data_dir: &Path) -> Result<()> {
@@ -1170,7 +1153,6 @@ impl GloveDataset {
 }
 
 /// Subset of GloVe data for benchmarking.
-#[cfg(feature = "hdf5")]
 #[derive(Debug, Clone)]
 pub struct GloveSubset {
     /// Database vectors.
@@ -1183,7 +1165,6 @@ pub struct GloveSubset {
     pub dim: usize,
 }
 
-#[cfg(feature = "hdf5")]
 impl GloveSubset {
     /// Compute ground truth using angular/cosine distance.
     pub fn compute_ground_truth_topk(&self, k: usize) -> Vec<Vec<usize>> {
@@ -1208,7 +1189,6 @@ impl GloveSubset {
     }
 }
 
-#[cfg(feature = "hdf5")]
 impl super::Dataset for GloveSubset {
     fn name(&self) -> &str {
         "GloVe-100"

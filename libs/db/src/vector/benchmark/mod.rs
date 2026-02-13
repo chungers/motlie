@@ -106,15 +106,13 @@ pub use dataset::{
 // Re-exports for public API - Random (synthetic)
 pub use dataset::{compute_ground_truth_parallel, RandomDataset};
 
-// Re-exports for public API - Parquet datasets (optional)
-#[cfg(feature = "parquet")]
+// Re-exports for public API - Parquet datasets (Cohere Wikipedia)
 pub use dataset::{
     load_parquet_embeddings, CohereWikipediaDataset, CohereWikipediaSubset,
     COHERE_WIKI_DIM, COHERE_WIKI_VECTORS,
 };
 
-// Re-exports for public API - HDF5 datasets (optional)
-#[cfg(feature = "hdf5")]
+// Re-exports for public API - HDF5 datasets (GloVe)
 pub use dataset::{
     load_hdf5_embeddings, load_hdf5_ground_truth, GloveDataset, GloveSubset,
     GLOVE_DIM, GLOVE_QUERIES, GLOVE_VECTORS,

@@ -67,12 +67,10 @@ pub async fn download(args: DownloadArgs) -> Result<()> {
             println!("  - gist_groundtruth.ivecs");
             return Ok(());
         }
-        #[cfg(feature = "parquet")]
         "cohere" | "cohere-wiki" => {
             println!("Downloading Cohere Wikipedia embeddings...");
             benchmark::CohereWikipediaDataset::download(&args.data_dir)?;
         }
-        #[cfg(feature = "hdf5")]
         "glove" | "glove-100" => {
             println!("Downloading GloVe-100 angular dataset...");
             benchmark::GloveDataset::download(&args.data_dir)?;
@@ -2310,33 +2308,13 @@ fn embeddings_groundtruth(args: EmbeddingsGroundtruthArgs) -> Result<()> {
 pub fn list_datasets() -> Result<()> {
     println!("Available datasets:\n");
 
-    println!("Core datasets (always available):");
+    println!("Available datasets:");
     println!("  laion       - LAION-CLIP 512D (NPY, Cosine)");
     println!("  sift        - SIFT-1M 128D (fvecs, L2)");
     println!("  gist        - GIST-960 960D (fvecs, L2)");
     println!("  random      - Synthetic unit-normalized (configurable dim, Cosine)");
-
-    #[cfg(feature = "parquet")]
-    {
-        println!("\nParquet datasets (--features parquet):");
-        println!("  cohere      - Cohere Wikipedia 768D (Parquet, Cosine)");
-    }
-
-    #[cfg(not(feature = "parquet"))]
-    {
-        println!("\nParquet datasets: Enable with --features parquet");
-    }
-
-    #[cfg(feature = "hdf5")]
-    {
-        println!("\nHDF5 datasets (--features hdf5):");
-        println!("  glove       - GloVe-100 100D (HDF5, Angular)");
-    }
-
-    #[cfg(not(feature = "hdf5"))]
-    {
-        println!("\nHDF5 datasets: Enable with --features hdf5 (requires libhdf5)");
-    }
+    println!("  cohere      - Cohere Wikipedia 768D (Parquet, Cosine)");
+    println!("  glove       - GloVe-100 100D (HDF5, Angular)");
 
     // ADMIN.md Issue #2 (chungers, 2025-01-27, FIXED):
     // Updated examples to show --embedding-code for query command.

@@ -37,12 +37,10 @@ description = "Motlie workspace with examples"
 default = []
 dtrace-otel = ["motlie-core/dtrace-otel"]
 
-# Benchmark infrastructure - enables vector::benchmark module and dataset formats
+# Benchmark infrastructure - enables vector::benchmark module and all dataset formats
 # Production builds should NOT enable this feature
+# Requires libhdf5-dev system package
 benchmark = ["motlie-db/benchmark"]
-# Individual dataset format features (for fine-grained control)
-parquet = ["motlie-db/parquet"]
-hdf5 = ["motlie-db/hdf5"]
 
 # SIMD dispatch strategy for vector distance computation
 # See libs/core/docs/SIMD.md for details
