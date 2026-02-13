@@ -11,8 +11,9 @@ use std::time::Instant;
 
 use anyhow::Result;
 
-use super::dataset::{LaionDataset, LaionSubset, LAION_EMBEDDING_DIM};
+use super::dataset::{compute_ground_truth_parallel, LaionDataset, LAION_EMBEDDING_DIM};
 use super::metrics::{compute_recall, percentile, LatencyStats};
+use super::Dataset;
 use crate::rocksdb::ColumnFamily;
 use crate::vector::{
     hnsw, schema::EmbeddingSpec, BinaryCodeCache, Distance, EmbeddingCode, NavigationCache, RaBitQ,
@@ -305,13 +306,21 @@ pub fn run_all_experiments(config: &ExperimentConfig) -> Result<Vec<ExperimentRe
         let subset = dataset.subset(scale, config.num_queries);
         println!(
             "Subset: {} db vectors, {} queries",
-            subset.db_vectors.len(),
-            subset.queries.len()
+            subset.vectors().len(),
+            subset.queries().len()
         );
 
-        // Compute brute-force ground truth
+        // Compute ground truth (use pre-computed if available, else brute-force)
         let max_k = *config.k_values.iter().max().unwrap_or(&20);
-        let ground_truth = subset.compute_ground_truth_topk(max_k);
+        let ground_truth = match Dataset::ground_truth(&subset, max_k) {
+            Some(gt) => gt,
+            None => compute_ground_truth_parallel(
+                subset.vectors(),
+                subset.queries(),
+                max_k,
+                subset.distance(),
+            ),
+        };
 
         // Create temp directory for this scale's database
         let temp_dir = tempfile::tempdir()?;
@@ -329,7 +338,7 @@ pub fn run_all_experiments(config: &ExperimentConfig) -> Result<Vec<ExperimentRe
         );
         let (index, build_time) = build_hnsw_index(
             &storage,
-            &subset.db_vectors,
+            subset.vectors(),
             config.dim,
             config.m,
             config.ef_construction,
@@ -450,7 +459,7 @@ pub fn build_hnsw_index(
 pub fn run_single_experiment(
     index: &hnsw::Index,
     storage: &Storage,
-    subset: &LaionSubset,
+    dataset: &dyn Dataset,
     ground_truth: &[Vec<usize>],
     k_values: &[usize],
     ef_search: usize,
@@ -459,13 +468,13 @@ pub fn run_single_experiment(
     strategy: &str,
     verbose: bool,
 ) -> Result<ExperimentResult> {
-    let mut latencies = Vec::with_capacity(subset.queries.len());
-    let mut search_results = Vec::with_capacity(subset.queries.len());
+    let mut latencies = Vec::with_capacity(dataset.queries().len());
+    let mut search_results = Vec::with_capacity(dataset.queries().len());
 
     let max_k = *k_values.iter().max().unwrap_or(&20);
 
     // Run queries
-    for (qi, query) in subset.queries.iter().enumerate() {
+    for (qi, query) in dataset.queries().iter().enumerate() {
         let start = Instant::now();
         let results = index.search(storage, query, ef_search, max_k)?;
         let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -478,7 +487,7 @@ pub fn run_single_experiment(
             println!(
                 "  Query {}/{}: {:.2}ms",
                 qi + 1,
-                subset.queries.len(),
+                dataset.queries().len(),
                 latency_ms
             );
         }
@@ -522,25 +531,25 @@ pub fn run_single_experiment(
 
 /// Run flat (brute-force) baseline for comparison.
 pub fn run_flat_baseline(
-    subset: &LaionSubset,
+    dataset: &dyn Dataset,
     ground_truth: &[Vec<usize>],
     k_values: &[usize],
     scale: usize,
     distance: Distance,
     verbose: bool,
 ) -> Result<ExperimentResult> {
-    let mut latencies = Vec::with_capacity(subset.queries.len());
-    let mut search_results = Vec::with_capacity(subset.queries.len());
+    let mut latencies = Vec::with_capacity(dataset.queries().len());
+    let mut search_results = Vec::with_capacity(dataset.queries().len());
 
     let max_k = *k_values.iter().max().unwrap_or(&20);
 
     // Run brute-force queries
-    for (qi, query) in subset.queries.iter().enumerate() {
+    for (qi, query) in dataset.queries().iter().enumerate() {
         let start = Instant::now();
 
         // Compute distances to all vectors
-        let mut distances: Vec<(usize, f32)> = subset
-            .db_vectors
+        let mut distances: Vec<(usize, f32)> = dataset
+            .vectors()
             .iter()
             .enumerate()
             .map(|(i, v)| (i, distance.compute(query, v)))
@@ -558,7 +567,7 @@ pub fn run_flat_baseline(
             println!(
                 "  Query {}/{}: {:.2}ms",
                 qi + 1,
-                subset.queries.len(),
+                dataset.queries().len(),
                 latency_ms
             );
         }
@@ -610,7 +619,7 @@ pub fn run_flat_baseline(
 /// * `config` - Experiment configuration including RaBitQ parameters
 /// * `index` - Built HNSW index
 /// * `storage` - Vector storage
-/// * `subset` - Dataset subset with queries and db vectors
+/// * `dataset` - Dataset with queries and db vectors (via Dataset trait)
 /// * `ground_truth` - Ground truth results for recall computation
 /// * `build_time` - Time taken to build the HNSW index
 ///
@@ -621,7 +630,7 @@ pub fn run_rabitq_experiments(
     config: &ExperimentConfig,
     index: &hnsw::Index,
     storage: &Storage,
-    subset: &LaionSubset,
+    dataset: &dyn Dataset,
     ground_truth: &[Vec<usize>],
     build_time: f64,
 ) -> Result<Vec<RabitqExperimentResult>> {
@@ -639,7 +648,7 @@ pub fn run_rabitq_experiments(
         let cache = BinaryCodeCache::new();
         let encode_start = Instant::now();
 
-        for (i, vector) in subset.db_vectors.iter().enumerate() {
+        for (i, vector) in dataset.vectors().iter().enumerate() {
             let vec_id = i as VecId;
             let (code, correction) = encoder.encode_with_correction(vector);
             cache.put(embedding_code, vec_id, code, correction);
@@ -658,11 +667,11 @@ pub fn run_rabitq_experiments(
         for &ef_search in &config.ef_search_values {
             for &rerank_factor in &config.rerank_factors {
                 for &k in &config.k_values {
-                    let mut latencies = Vec::with_capacity(subset.queries.len());
-                    let mut recalls = Vec::with_capacity(subset.queries.len());
+                    let mut latencies = Vec::with_capacity(dataset.queries().len());
+                    let mut recalls = Vec::with_capacity(dataset.queries().len());
 
                     // Run all queries
-                    for (qi, query) in subset.queries.iter().enumerate() {
+                    for (qi, query) in dataset.queries().iter().enumerate() {
                         let start = Instant::now();
                         let search_results = index.search_with_rabitq_cached(
                             storage,
@@ -717,7 +726,7 @@ pub fn run_rabitq_experiments(
                     );
 
                     results.push(RabitqExperimentResult {
-                        scale: subset.db_vectors.len(),
+                        scale: dataset.vectors().len(),
                         bits_per_dim: bits,
                         ef_search,
                         rerank_factor,

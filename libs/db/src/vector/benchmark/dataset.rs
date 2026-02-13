@@ -235,6 +235,29 @@ impl LaionSubset {
     }
 }
 
+impl super::Dataset for LaionSubset {
+    fn name(&self) -> &str {
+        "LAION-CLIP"
+    }
+    fn dim(&self) -> usize {
+        self.dim
+    }
+    fn distance(&self) -> Distance {
+        Distance::Cosine
+    }
+    fn vectors(&self) -> &[Vec<f32>] {
+        &self.db_vectors
+    }
+    fn queries(&self) -> &[Vec<f32>] {
+        &self.queries
+    }
+    fn ground_truth(&self, _k: usize) -> Option<Vec<Vec<usize>>> {
+        // LAION has no pre-computed ranked ground truth.
+        // The `ground_truth: Vec<usize>` field is a text→image pairing, not top-k.
+        None
+    }
+}
+
 /// NPY file loader supporting float16 and float32 formats.
 #[derive(Debug, Clone, Default)]
 pub struct NpyLoader {
@@ -629,6 +652,32 @@ impl GistSubset {
     }
 }
 
+impl super::Dataset for GistSubset {
+    fn name(&self) -> &str {
+        "GIST-960"
+    }
+    fn dim(&self) -> usize {
+        self.dim
+    }
+    fn distance(&self) -> Distance {
+        Distance::L2
+    }
+    fn vectors(&self) -> &[Vec<f32>] {
+        &self.db_vectors
+    }
+    fn queries(&self) -> &[Vec<f32>] {
+        &self.queries
+    }
+    fn ground_truth(&self, k: usize) -> Option<Vec<Vec<usize>>> {
+        if let Some(ref gt) = self.precomputed_ground_truth {
+            if gt.first().map(|v| v.len()).unwrap_or(0) >= k {
+                return Some(gt.iter().map(|v| v[..k].to_vec()).collect());
+            }
+        }
+        None
+    }
+}
+
 // ============================================================================
 // Parquet Format Support (optional feature)
 // ============================================================================
@@ -878,6 +927,33 @@ impl CohereWikipediaSubset {
     /// Number of queries.
     pub fn num_queries(&self) -> usize {
         self.queries.len()
+    }
+}
+
+#[cfg(feature = "parquet")]
+impl super::Dataset for CohereWikipediaSubset {
+    fn name(&self) -> &str {
+        "Cohere-Wikipedia"
+    }
+    fn dim(&self) -> usize {
+        self.dim
+    }
+    fn distance(&self) -> Distance {
+        Distance::Cosine
+    }
+    fn vectors(&self) -> &[Vec<f32>] {
+        &self.db_vectors
+    }
+    fn queries(&self) -> &[Vec<f32>] {
+        &self.queries
+    }
+    fn ground_truth(&self, k: usize) -> Option<Vec<Vec<usize>>> {
+        if let Some(ref gt) = self.precomputed_ground_truth {
+            if gt.first().map(|v| v.len()).unwrap_or(0) >= k {
+                return Some(gt.iter().map(|v| v[..k].to_vec()).collect());
+            }
+        }
+        None
     }
 }
 
@@ -1132,6 +1208,33 @@ impl GloveSubset {
     }
 }
 
+#[cfg(feature = "hdf5")]
+impl super::Dataset for GloveSubset {
+    fn name(&self) -> &str {
+        "GloVe-100"
+    }
+    fn dim(&self) -> usize {
+        self.dim
+    }
+    fn distance(&self) -> Distance {
+        Distance::Cosine
+    }
+    fn vectors(&self) -> &[Vec<f32>] {
+        &self.db_vectors
+    }
+    fn queries(&self) -> &[Vec<f32>] {
+        &self.queries
+    }
+    fn ground_truth(&self, k: usize) -> Option<Vec<Vec<usize>>> {
+        if let Some(ref gt) = self.precomputed_ground_truth {
+            if gt.first().map(|v| v.len()).unwrap_or(0) >= k {
+                return Some(gt.iter().map(|v| v[..k.min(v.len())].to_vec()).collect());
+            }
+        }
+        None
+    }
+}
+
 // ============================================================================
 // Random Dataset (Synthetic)
 // ============================================================================
@@ -1237,6 +1340,27 @@ impl RandomDataset {
     /// Number of queries.
     pub fn num_queries(&self) -> usize {
         self.queries.len()
+    }
+}
+
+impl super::Dataset for RandomDataset {
+    fn name(&self) -> &str {
+        "Random"
+    }
+    fn dim(&self) -> usize {
+        self.dim
+    }
+    fn distance(&self) -> Distance {
+        Distance::Cosine
+    }
+    fn vectors(&self) -> &[Vec<f32>] {
+        &self.vectors
+    }
+    fn queries(&self) -> &[Vec<f32>] {
+        &self.queries
+    }
+    fn ground_truth(&self, _k: usize) -> Option<Vec<Vec<usize>>> {
+        None
     }
 }
 
@@ -1404,5 +1528,17 @@ mod tests {
         assert_eq!(config.dim, 768);
         assert_eq!(config.max_vectors, 1000);
         assert!(!config.verbose);
+    }
+
+    #[test]
+    fn test_random_dataset_trait() {
+        use super::super::Dataset;
+        let ds = RandomDataset::generate(100, 10, 128, 42);
+        assert_eq!(ds.name(), "Random");
+        assert_eq!(Dataset::dim(&ds), 128);
+        assert_eq!(ds.distance(), Distance::Cosine);
+        assert_eq!(ds.vectors().len(), 100);
+        assert_eq!(Dataset::queries(&ds), ds.queries);
+        assert!(ds.ground_truth(10).is_none());
     }
 }

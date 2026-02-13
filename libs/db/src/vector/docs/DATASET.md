@@ -114,7 +114,7 @@ Cosine, vectors are L2-normalized. Used by **Random**.
 
 ## 3. Per-Dataset API Pattern
 
-Every dataset follows the same convention (concrete structs, no shared trait today):
+Every dataset follows the same convention (concrete structs with a shared `Dataset` trait):
 
 1. **Dataset struct** (`LaionDataset`, `SiftDataset`, `GistDataset`,
    `CohereWikipediaDataset`, `GloveDataset`, `RandomDataset`):
@@ -196,11 +196,11 @@ genuinely different (different embedding models / dimensions).
 
 ---
 
-## 5. Proposed Integration — `Dataset` Trait + Pluggable Sources
+## 5. Integration — `Dataset` Trait + Pluggable Sources
 
 ### Problem
 
-- Each dataset is a bespoke struct with convention-based method names but no shared contract
+- Each dataset was a bespoke struct with convention-based method names but no shared contract
 - `bench_vector` has per-dataset branching everywhere
 - Adding a new dataset requires touching many files
 - No way to test the HNSW/RaBitQ pipeline generically over "any dataset"
@@ -293,15 +293,15 @@ uses this for `--dataset` parsing.
 
 ### Files changed
 
-| File | Change |
-|---|---|
-| `benchmark/mod.rs` | Add `pub mod source;`, `pub trait Dataset`, re-export |
-| `benchmark/source.rs` | **New.** `VdbBenchSource` S3 Parquet downloader (anonymous `reqwest` GET) |
-| `benchmark/dataset.rs` | `impl Dataset for LaionSubset/GistSubset/CohereSubset/GloveSubset/RandomDataset` |
-| `benchmark/sift.rs` | `impl Dataset for SiftSubset` |
-| `benchmark/runner.rs` | `run_single_experiment` et al. accept `&dyn Dataset` instead of concrete types |
-| `benchmark/metrics.rs` | No change (already generic over `&[Vec<f32>]`) |
-| `bins/bench_vector/commands.rs` | Replace per-dataset match arms with `DatasetId::load() -> Box<dyn Dataset>` |
+| File | Change | Status |
+|---|---|---|
+| `benchmark/mod.rs` | `pub trait Dataset` definition + `use Distance` | **Done** |
+| `benchmark/dataset.rs` | `impl Dataset for LaionSubset/GistSubset/CohereSubset/GloveSubset/RandomDataset` | **Done** |
+| `benchmark/sift.rs` | `impl Dataset for SiftSubset` | **Done** |
+| `benchmark/runner.rs` | `run_single_experiment` et al. accept `&dyn Dataset` instead of concrete types | **Done** |
+| `benchmark/metrics.rs` | No change (already generic over `&[Vec<f32>]`) | N/A |
+| `benchmark/source.rs` | **New.** `VdbBenchSource` S3 Parquet downloader (anonymous `reqwest` GET) | Pending |
+| `bins/bench_vector/commands.rs` | Replace per-dataset match arms with `DatasetId::load() -> Box<dyn Dataset>` | Pending |
 
 ### What NOT to do
 
@@ -318,13 +318,13 @@ uses this for `--dataset` parsing.
 
 ### Migration path
 
-1. Add the `Dataset` trait and `impl` it on existing subset types (non-breaking, additive)
-2. Add `VdbBenchSource` behind `parquet` feature (it's just a Parquet downloader)
-3. Refactor `runner.rs` to be generic over `&dyn Dataset` (internal change, no public API break)
-4. Add Bioasq and OpenAI dataset types that load exclusively from `VdbBenchSource`
-5. Update `bench_vector` CLI to use `DatasetId` catalog
-
-Steps 1-3 in one PR; steps 4-5 in a follow-up.
+| Step | Description | Status |
+|------|-------------|--------|
+| 1 | Add the `Dataset` trait and `impl` it on existing subset types (non-breaking, additive) | **Done** |
+| 2 | Add `VdbBenchSource` behind `parquet` feature (S3 Parquet downloader) | Pending |
+| 3 | Refactor `runner.rs` to be generic over `&dyn Dataset` (internal, no public API break) | **Done** |
+| 4 | Add Bioasq and OpenAI dataset types that load exclusively from `VdbBenchSource` | Pending |
+| 5 | Update `bench_vector` CLI to use `DatasetId` catalog | Pending |
 
 ---
 
@@ -354,3 +354,40 @@ datasets  (list available datasets with dimensions and distances)
 | StreamingVectorGenerator, ScaleBenchmark | `libs/db/src/vector/benchmark/scale.rs` |
 | Metrics (recall, Pareto, latency) | `libs/db/src/vector/benchmark/metrics.rs` |
 | CLI dispatch | `bins/bench_vector/src/commands.rs` |
+
+---
+
+## Changelog
+
+### 2026-02-12 — Dataset trait unification (steps 1 & 3)
+
+**Author:** Claude (Opus 4.6)
+**Branch:** `feature/vector-dataset`
+**Status:** Complete
+
+Implemented the `Dataset` trait and refactored `runner.rs` to accept `&dyn Dataset`
+instead of hardcoded `&LaionSubset`. This is an additive, non-breaking change — all
+existing concrete methods on subset structs remain.
+
+**What was done:**
+
+- Defined `pub trait Dataset` in `benchmark/mod.rs` with 6 methods: `name()`, `dim()`,
+  `distance()`, `vectors()`, `queries()`, `ground_truth(k)`
+- Implemented the trait on all 6 subset/dataset types:
+  - `LaionSubset` — Cosine, no pre-computed GT
+  - `SiftSubset` — L2, no pre-computed GT (subset indices may not match full-dataset GT)
+  - `GistSubset` — L2, returns pre-computed GT when depth >= k
+  - `CohereWikipediaSubset` — Cosine, returns pre-computed GT when depth >= k (`#[cfg(feature = "parquet")]`)
+  - `GloveSubset` — Cosine, returns pre-computed GT when depth >= k (`#[cfg(feature = "hdf5")]`)
+  - `RandomDataset` — Cosine, no pre-computed GT
+- Refactored `runner.rs`: `run_single_experiment`, `run_flat_baseline`, and
+  `run_rabitq_experiments` now accept `&dyn Dataset`; `run_all_experiments` uses
+  `Dataset::ground_truth()` with `compute_ground_truth_parallel` fallback
+- Added `test_random_dataset_trait` unit test
+- Trait is object-safe (`&dyn Dataset` and `Box<dyn Dataset>` work)
+
+**Verification:**
+
+- `cargo check -p motlie-db` — clean
+- `cargo check --bin bench_vector --features benchmark` — CLI builds
+- `cargo test -p motlie-db --features benchmark --lib` — 658 tests pass
