@@ -214,6 +214,29 @@ impl SiftSubset {
     }
 }
 
+impl super::Dataset for SiftSubset {
+    fn name(&self) -> &str {
+        "SIFT-1M"
+    }
+    fn dim(&self) -> usize {
+        self.dim
+    }
+    fn distance(&self) -> Distance {
+        Distance::L2
+    }
+    fn vectors(&self) -> &[Vec<f32>] {
+        &self.db_vectors
+    }
+    fn queries(&self) -> &[Vec<f32>] {
+        &self.queries
+    }
+    fn ground_truth(&self, _k: usize) -> Option<Vec<Vec<usize>>> {
+        // SiftSubset does not carry pre-computed ground truth because the
+        // full-dataset GT indices may reference vectors outside the subset.
+        None
+    }
+}
+
 // ============================================================================
 // fvecs/ivecs File Format Readers
 // ============================================================================
