@@ -52,11 +52,17 @@ Scan and inspect the graph database contents:
 # List column families
 motlie db -p /path/to/graph-db list
 
-# Scan nodes
-motlie db -p /path/to/graph-db scan nodes --limit 10
+# Scan nodes (latest versions)
+motlie db -p /path/to/graph-db scan graph/nodes --limit 10
 
-# Scan with table formatting
-motlie db -p /path/to/graph-db scan nodes -f table
+# Scan nodes active at a specific date (active period filtering)
+motlie db -p /path/to/graph-db scan graph/nodes 2025-03-15 -f table
+
+# Scan forward edges (outbound)
+motlie db -p /path/to/graph-db scan graph/forward_edges --limit 10 -f table
+
+# Reverse scan (latest first)
+motlie db -p /path/to/graph-db scan graph/forward_edges --limit 10 --reverse -f table
 ```
 
 See [docs/db.md](docs/db.md) for full documentation.
@@ -160,3 +166,50 @@ cargo test --test fulltext_cli
 ```
 
 See [docs/fulltext.md](docs/fulltext.md#tests) for test coverage details.
+
+## Examples
+
+Runnable demos are available under `bins/motlie/examples`:
+
+### Vector DB Scan Demo
+
+Creates a temporary vector database and scans all vector column families.
+
+```bash
+./bins/motlie/examples/demo_db_scan.sh
+```
+
+### Graph DB Scan Demo (Versioned + Active Periods)
+
+Builds a small versioned graph with active periods, then scans all graph CFs.
+
+```bash
+./bins/motlie/examples/demo_db_scan_graph.sh
+```
+
+### Build Graph Tool
+
+The graph scan demo uses a standalone builder:
+
+```bash
+cargo build --manifest-path bins/motlie/examples/build_graph/Cargo.toml
+./bins/motlie/examples/build_graph/target/debug/build_graph /tmp/graphdb
+```
+
+## DB Scan Highlights
+
+Common patterns when scanning large CFs:
+
+```bash
+# List column families
+motlie db -p /path/to/db list
+
+# Scan with pagination (vector/vectors)
+motlie db -p /path/to/db scan vector/vectors --limit 5 -f tsv
+motlie db -p /path/to/db scan vector/vectors --limit 5 --last "<EMBEDDING:VEC_ID>" -f tsv
+
+# Reverse scan for newest entries
+motlie db -p /path/to/db scan vector/vec_meta --limit 5 --reverse -f table
+```
+
+See [docs/db.md](docs/db.md) for full CLI usage, column families, and output columns.
