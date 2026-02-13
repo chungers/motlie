@@ -29,7 +29,7 @@ use motlie_db::vector::{
     create_reader_with_storage, create_writer,
     spawn_mutation_consumer_with_storage_autoreg, spawn_query_consumers_with_storage_autoreg,
     Distance, EmbeddingBuilder, ExternalKey, InsertVector, MutationRunnable, ReaderConfig, Runnable,
-    SearchKNN, Storage, VecId, WriterConfig,
+    SearchKNN, Storage, VecId, VectorElementType, WriterConfig,
 };
 use motlie_db::Id;
 
@@ -166,7 +166,7 @@ async fn test_sift_l2_hnsw_with_runnable() -> anyhow::Result<()> {
 
     // Create search reader and spawn query consumers
     let (search_reader, reader_rx) =
-        create_reader_with_storage(ReaderConfig::default(), storage.clone());
+        create_reader_with_storage(ReaderConfig::default());
     let _reader_handles = spawn_query_consumers_with_storage_autoreg(
         reader_rx,
         ReaderConfig::default(),
@@ -280,7 +280,7 @@ async fn test_laion_clip_cosine_exact_hnsw_with_runnable() -> anyhow::Result<()>
 
     // Create search reader and spawn query consumers
     let (search_reader, reader_rx) =
-        create_reader_with_storage(ReaderConfig::default(), storage.clone());
+        create_reader_with_storage(ReaderConfig::default());
     let _reader_handles = spawn_query_consumers_with_storage_autoreg(
         reader_rx,
         ReaderConfig::default(),
@@ -401,7 +401,7 @@ async fn test_laion_clip_cosine_rabitq_with_runnable() -> anyhow::Result<()> {
 
     // Create search reader and spawn query consumers
     let (search_reader, reader_rx) =
-        create_reader_with_storage(ReaderConfig::default(), storage.clone());
+        create_reader_with_storage(ReaderConfig::default());
     let _reader_handles = spawn_query_consumers_with_storage_autoreg(
         reader_rx,
         ReaderConfig::default(),
@@ -544,4 +544,303 @@ fn test_adaptive_parallel_rerank_threshold() {
 
     assert_eq!(results.len(), 10);
     assert_eq!(results[0].1, 0);
+}
+
+// ============================================================================
+// VectorElementType end-to-end tests
+// ============================================================================
+
+/// Helper: run the full insert→search pipeline with a given storage type.
+/// Returns (recall, embedding_storage_type_observed).
+async fn run_storage_type_pipeline(
+    storage_type: VectorElementType,
+    distance: Distance,
+    dim: usize,
+    num_vectors: usize,
+    num_queries: usize,
+) -> anyhow::Result<(f64, VectorElementType)> {
+    use rand::prelude::*;
+    use rand_chacha::ChaCha8Rng;
+
+    let mut rng = ChaCha8Rng::seed_from_u64(99);
+
+    let normalize = |v: &mut Vec<f32>| {
+        let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm > 0.0 {
+            for x in v.iter_mut() {
+                *x /= norm;
+            }
+        }
+    };
+
+    // Generate synthetic data
+    let db_vectors: Vec<Vec<f32>> = (0..num_vectors)
+        .map(|_| {
+            let mut v: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0..1.0)).collect();
+            if distance == Distance::Cosine {
+                normalize(&mut v);
+            }
+            v
+        })
+        .collect();
+    let queries: Vec<Vec<f32>> = (0..num_queries)
+        .map(|_| {
+            let mut v: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0..1.0)).collect();
+            if distance == Distance::Cosine {
+                normalize(&mut v);
+            }
+            v
+        })
+        .collect();
+
+    // Brute-force ground truth
+    let k = 10;
+    let ground_truth: Vec<Vec<usize>> = queries
+        .iter()
+        .map(|q| {
+            let mut dists: Vec<(usize, f32)> = db_vectors
+                .iter()
+                .enumerate()
+                .map(|(i, v)| (i, distance.compute(q, v)))
+                .collect();
+            dists.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+            dists.iter().take(k).map(|(i, _)| *i).collect()
+        })
+        .collect();
+
+    let temp_dir = TempDir::new()?;
+    let db_path = temp_dir.path().join("storage_type_test");
+
+    // Initialize storage
+    let mut storage = Storage::readwrite(&db_path);
+    storage.ready()?;
+    let storage = Arc::new(storage);
+
+    // Register embedding with explicit storage type
+    let registry = storage.cache().clone();
+    registry.set_storage(storage.clone())?;
+    let embedding = registry.register(
+        EmbeddingBuilder::new("storage-type-test", dim as u32, distance)
+            .with_hnsw_m(16)
+            .with_hnsw_ef_construction(100)
+            .with_storage_type(storage_type),
+    )?;
+
+    // Verify storage type propagated to embedding
+    let observed_type = embedding.storage_type();
+    assert_eq!(
+        observed_type, storage_type,
+        "Embedding storage_type mismatch: expected {:?}, got {:?}",
+        storage_type, observed_type
+    );
+
+    // Create writer/reader
+    let (writer, writer_rx) = create_writer(WriterConfig::default());
+    let _writer_handle = spawn_mutation_consumer_with_storage_autoreg(
+        writer_rx,
+        WriterConfig::default(),
+        storage.clone(),
+    );
+    let (search_reader, reader_rx) =
+        create_reader_with_storage(ReaderConfig::default());
+    let _reader_handles = spawn_query_consumers_with_storage_autoreg(
+        reader_rx,
+        ReaderConfig::default(),
+        storage.clone(),
+        2,
+    );
+
+    // Insert vectors
+    let mut external_ids: Vec<Id> = Vec::with_capacity(num_vectors);
+    for vector in &db_vectors {
+        let id = Id::new();
+        external_ids.push(id);
+        InsertVector::new(&embedding, ExternalKey::NodeId(id), vector.clone())
+            .immediate()
+            .run(&writer)
+            .await?;
+    }
+    writer.flush().await?;
+
+    // Search
+    let timeout = Duration::from_secs(10);
+    let mut search_results: Vec<Vec<usize>> = Vec::new();
+    for query in &queries {
+        let results = SearchKNN::new(&embedding, query.clone(), k)
+            .with_ef(50)
+            .exact()
+            .run(&search_reader, timeout)
+            .await?;
+        let result_indices: Vec<usize> = results
+            .iter()
+            .filter_map(|r| {
+                external_ids
+                    .iter()
+                    .position(|&id| id == r.node_id().expect("expected NodeId"))
+            })
+            .collect();
+        search_results.push(result_indices);
+    }
+
+    let recall = compute_recall(&search_results, &ground_truth, k);
+    Ok((recall, observed_type))
+}
+
+/// End-to-end test: F16 storage type flows from EmbeddingBuilder through
+/// insert and search with correct recall.
+#[tokio::test]
+async fn test_storage_type_f16_end_to_end() -> anyhow::Result<()> {
+    let (recall, observed_type) = run_storage_type_pipeline(
+        VectorElementType::F16,
+        Distance::Cosine,
+        128,
+        500,
+        50,
+    )
+    .await?;
+
+    assert_eq!(observed_type, VectorElementType::F16);
+    assert!(
+        recall >= 0.80,
+        "F16 recall@10 = {:.1}%, expected >= 80%",
+        recall * 100.0
+    );
+    println!("F16 end-to-end: recall@10 = {:.1}%", recall * 100.0);
+    Ok(())
+}
+
+/// End-to-end test: F32 storage type flows from EmbeddingBuilder through
+/// insert and search with correct recall.
+#[tokio::test]
+async fn test_storage_type_f32_end_to_end() -> anyhow::Result<()> {
+    let (recall, observed_type) = run_storage_type_pipeline(
+        VectorElementType::F32,
+        Distance::Cosine,
+        128,
+        500,
+        50,
+    )
+    .await?;
+
+    assert_eq!(observed_type, VectorElementType::F32);
+    assert!(
+        recall >= 0.80,
+        "F32 recall@10 = {:.1}%, expected >= 80%",
+        recall * 100.0
+    );
+    println!("F32 end-to-end: recall@10 = {:.1}%", recall * 100.0);
+    Ok(())
+}
+
+/// End-to-end test: F16 storage type metadata round-trips through RocksDB.
+///
+/// Verifies that `storage_type` survives serialization/deserialization in the
+/// EmbeddingSpecs column family by creating a fresh EmbeddingRegistry (empty
+/// in-memory cache) and loading the spec back from RocksDB via `get_by_code`.
+#[tokio::test]
+async fn test_storage_type_metadata_persists() -> anyhow::Result<()> {
+    use motlie_db::vector::EmbeddingRegistry;
+    use rand::prelude::*;
+    use rand_chacha::ChaCha8Rng;
+
+    let mut rng = ChaCha8Rng::seed_from_u64(77);
+    let dim = 64;
+    let num_vectors = 200;
+
+    let normalize = |v: &mut Vec<f32>| {
+        let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm > 0.0 {
+            for x in v.iter_mut() {
+                *x /= norm;
+            }
+        }
+    };
+
+    let db_vectors: Vec<Vec<f32>> = (0..num_vectors)
+        .map(|_| {
+            let mut v: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0..1.0)).collect();
+            normalize(&mut v);
+            v
+        })
+        .collect();
+    let query: Vec<f32> = {
+        let mut v: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0..1.0)).collect();
+        normalize(&mut v);
+        v
+    };
+
+    let temp_dir = TempDir::new()?;
+    let db_path = temp_dir.path().join("persist_test");
+
+    let mut storage = Storage::readwrite(&db_path);
+    storage.ready()?;
+    let storage = Arc::new(storage);
+
+    // Register F16 embedding and insert vectors
+    let registry = storage.cache().clone();
+    registry.set_storage(storage.clone())?;
+    let embedding = registry.register(
+        EmbeddingBuilder::new("persist-test", dim as u32, Distance::Cosine)
+            .with_hnsw_m(16)
+            .with_hnsw_ef_construction(100)
+            .with_storage_type(VectorElementType::F16),
+    )?;
+    assert_eq!(embedding.storage_type(), VectorElementType::F16);
+
+    let (writer, writer_rx) = create_writer(WriterConfig::default());
+    let _writer_handle = spawn_mutation_consumer_with_storage_autoreg(
+        writer_rx,
+        WriterConfig::default(),
+        storage.clone(),
+    );
+
+    for vector in &db_vectors {
+        let id = Id::new();
+        InsertVector::new(&embedding, ExternalKey::NodeId(id), vector.clone())
+            .immediate()
+            .run(&writer)
+            .await?;
+    }
+    writer.flush().await?;
+
+    // Verify RocksDB round-trip: create a fresh registry with empty cache
+    // and load the spec from storage. This simulates cold-start recovery.
+    let fresh_registry = EmbeddingRegistry::new_without_storage();
+    fresh_registry.set_storage(storage.clone())?;
+
+    let recovered = fresh_registry
+        .get_by_code(1)
+        .expect("Embedding code 1 should exist in RocksDB");
+    assert_eq!(
+        recovered.storage_type(),
+        VectorElementType::F16,
+        "Storage type should round-trip as F16 through RocksDB"
+    );
+    assert_eq!(recovered.dim(), dim as u32);
+    assert_eq!(recovered.distance(), Distance::Cosine);
+
+    // Verify search still works with the recovered embedding
+    let (search_reader, reader_rx) = create_reader_with_storage(ReaderConfig::default());
+    let _reader_handles = spawn_query_consumers_with_storage_autoreg(
+        reader_rx,
+        ReaderConfig::default(),
+        storage.clone(),
+        2,
+    );
+    let timeout = Duration::from_secs(10);
+    let results = SearchKNN::new(&recovered, query.clone(), 5)
+        .with_ef(50)
+        .exact()
+        .run(&search_reader, timeout)
+        .await?;
+    assert!(
+        !results.is_empty(),
+        "Search should return results with recovered F16 embedding"
+    );
+    println!(
+        "Persistence test: recovered F16 embedding from RocksDB, search returned {} results",
+        results.len()
+    );
+
+    Ok(())
 }

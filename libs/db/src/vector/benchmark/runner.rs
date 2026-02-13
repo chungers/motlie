@@ -453,20 +453,13 @@ pub fn build_hnsw_index(
     distance: Distance,
     storage_type: VectorElementType,
 ) -> Result<(hnsw::Index, Embedding, f64)> {
-    if storage_type != VectorElementType::F16 {
-        anyhow::bail!(
-            "build_hnsw_index currently requires {:?} storage_type (got {:?})",
-            VectorElementType::F16,
-            storage_type
-        );
-    }
-
     let registry = storage.cache().clone();
     registry.set_storage(storage.clone())?;
     let embedding = registry.register(
         EmbeddingBuilder::new("benchmark", dim as u32, distance)
             .with_hnsw_m(m as u16)
-            .with_hnsw_ef_construction(ef_construction as u16),
+            .with_hnsw_ef_construction(ef_construction as u16)
+            .with_storage_type(storage_type),
     )?;
     let processor = Processor::new(storage.clone(), registry);
 
