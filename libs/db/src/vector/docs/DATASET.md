@@ -483,3 +483,49 @@ Post-change checks passed:
 - `cargo check -p motlie-db --features benchmark`
 - `cargo check --bin bench_vector --features benchmark`
 - `cargo test -p motlie-db --features benchmark --lib vector::benchmark::runner::tests`
+
+## Thread VectorElementType through EmbeddingBuilder
+
+Date: 2026-02-13
+Author: Claude (Opus 4.6)
+Branch: `feature/vector-dataset`
+
+### Problem
+
+After codex's `dfbe126` commit, `build_hnsw_index` used `Processor::insert_batch`
+which correctly respects `spec.storage_type()`, but `EmbeddingBuilder` had no
+`with_storage_type()` method. The registry hardcoded `VectorElementType::default()`
+(F32) at registration, creating a silent mismatch: the benchmark runner accepted a
+`storage_type` parameter and validated for F16, but the registered spec always said F32.
+A bail guard in `build_hnsw_index` rejected non-F16 storage types, masking the bug and
+blocking all F32 datasets (SIFT, GIST).
+
+### Changes made
+
+1. `libs/db/src/vector/embedding.rs`: Added `storage_type` field and
+   `with_storage_type()` builder method to `EmbeddingBuilder`.
+
+2. `libs/db/src/vector/registry.rs`: Replaced two `VectorElementType::default()`
+   occurrences in `register_in_txn()` with `builder.storage_type`, threading the
+   builder's storage type into both the `AddEmbeddingSpec` RocksDB write and the
+   in-memory `Arc<EmbeddingSpec>` cache entry.
+
+3. `libs/db/src/vector/benchmark/runner.rs`: Removed the F16-only bail guard from
+   `build_hnsw_index`. Added `.with_storage_type(storage_type)` to the
+   `EmbeddingBuilder` call.
+
+4. `libs/db/tests/test_vector_benchmark_integration.rs`:
+   - Added 3 end-to-end tests: `test_storage_type_f16_end_to_end`,
+     `test_storage_type_f32_end_to_end`, `test_storage_type_metadata_persists`
+   - Tests verify the full pipeline: EmbeddingBuilder → registry → insert → search →
+     recall assertion, plus RocksDB serialization round-trip for F16 metadata
+   - Fixed pre-existing `create_reader_with_storage` API mismatch in 3 existing tests
+     (function takes 1 arg, tests were passing 2)
+
+### Verification
+
+- `cargo check -p motlie-db --features benchmark` — builds
+- `cargo check --bin bench_vector --features benchmark` — CLI builds
+- `cargo test -p motlie-db --features benchmark --lib` — 658 tests pass
+- `cargo test --features benchmark --test test_vector_benchmark_integration` — 9 tests pass
+  (6 existing + 3 new storage type tests)

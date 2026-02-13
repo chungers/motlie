@@ -281,6 +281,10 @@ pub struct EmbeddingBuilder {
     pub(crate) distance: Distance,
     pub(crate) embedder: Option<Arc<dyn Embedder>>,
 
+    // Storage
+    /// Vector element storage type (F32 or F16). Default: F32.
+    pub(crate) storage_type: super::schema::VectorElementType,
+
     // Build Parameters (Phase 5.7c)
     /// HNSW M parameter: number of bidirectional links per node.
     /// Default: 16
@@ -310,6 +314,7 @@ impl EmbeddingBuilder {
             dim,
             distance,
             embedder: None,
+            storage_type: super::schema::VectorElementType::default(),
             // Default build params matching schema.rs defaults
             hnsw_m: 16,
             hnsw_ef_construction: 200,
@@ -368,6 +373,15 @@ impl EmbeddingBuilder {
     /// Default: 42
     pub fn with_rabitq_seed(mut self, seed: u64) -> Self {
         self.rabitq_seed = seed;
+        self
+    }
+
+    /// Set vector storage type (F32 full precision or F16 half precision).
+    ///
+    /// F16 provides 50% storage savings with ~0.1% precision loss for
+    /// normalized vectors. Default: F32.
+    pub fn with_storage_type(mut self, storage_type: super::schema::VectorElementType) -> Self {
+        self.storage_type = storage_type;
         self
     }
 
