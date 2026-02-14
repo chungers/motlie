@@ -60,7 +60,7 @@ arrow = { version = "54", optional = true, default-features = false, features = 
 # See: https://github.com/metno/hdf5-rust
 hdf5 = { package = "hdf5-metno", version = "0.12", optional = true }
 # ndarray for HDF5 dataset slicing (transitive dep of hdf5, but used directly)
-ndarray = { version = "0.17", optional = true }
+ndarray = { version = "0.17.2", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
