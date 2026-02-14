@@ -12,5 +12,5 @@ path = "main.rs"
 
 [dependencies]
 motlie-db = { path = "../../../../libs/db" }
-tokio = { version = "1.0", features = ["full"] }
-anyhow = "1.0"
+tokio = { version = "1.49.0", features = ["full"] }
+anyhow = "1.0.101"

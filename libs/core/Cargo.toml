@@ -27,7 +27,7 @@ chrono = "0.4"
 [dev-dependencies]
 rand = "0.8"
 rand_chacha = "0.3"
-clap = { version = "4.0", features = ["derive"] }
+clap = { version = "4.5.58", features = ["derive"] }
 
 [features]
 default = []
