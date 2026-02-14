@@ -41,7 +41,8 @@
    - [Shutdown Order](#shutdown-order)
    - [Best Practices](#best-practices-for-lifecycle)
 8. [Complete Usage Flow](#complete-usage-flow)
-9. [Public API Reference](#public-api-reference)
+9. [CLI Workflow: bench_vector + motlie db](#cli-workflow-bench_vector--motlie-db)
+10. [Public API Reference](#public-api-reference)
 
 ---
 
@@ -1466,6 +1467,185 @@ println!("Strategy: {:?}", config.strategy());
 println!("k: {}", config.k());
 println!("ef: {}", config.ef());
 println!("Parallel threshold: {}", config.parallel_rerank_threshold());
+```
+
+---
+
+## CLI Workflow: bench_vector + motlie db
+
+This workflow is useful when you want to:
+- quickly populate a vector DB for testing with `bench_vector`
+- optionally pre-register an embedding with a specific storage type (`F16` or `F32`)
+- inspect raw vector column families with `motlie db scan`
+
+`bench_vector` does not take an `EmbeddingSpec` object directly from CLI.
+Instead, it resolves or registers an embedding space by `(model, dim, distance)`.
+The practical way to define that spec is `EmbeddingBuilder` in code, which persists
+an `EmbeddingSpec` internally via `EmbeddingRegistry::register(...)`.
+
+### Step 0: Build tools
+
+```bash
+cargo build --release --bin bench_vector --bin motlie
+```
+
+### Dataset-to-Embedding Config (bench_vector index/query)
+
+Use this table when deciding what to register before `bench_vector index`:
+
+| Dataset (`--dataset`) | Model used by bench_vector | Dimension | Default Distance | Storage guidance |
+|---|---|---:|---|---|
+| `laion` | `bench-laion` | 512 | Cosine | `F16` recommended for size; `F32` for strict precision checks |
+| `sift` | `bench-sift` | 128 | L2 | `F16` or `F32` |
+| `gist` | `bench-gist` | 960 | L2 | `F16` usually preferred to reduce footprint |
+| `random` | `bench-random` | from `--dim` | Cosine (default), or override via `--l2`/`--cosine` | choose based on test goal |
+
+Notes:
+- This table is for `bench_vector index` / `bench_vector query` command paths.
+- `bench_vector index` auto-detects default distance by dataset unless overridden (`--l2` / `--cosine`).
+- Registration matching is by `(model, dim, distance)`. If you pre-register with a specific
+  storage type and then run `bench_vector index` with the same tuple, that spec is reused.
+
+### Search + Optimization Matrix by Dataset
+
+Use this table to decide which search mode and tuning knobs apply for each dataset.
+
+| Dataset | Exact HNSW | RaBitQ (ADC + rerank) | Bit depths | Rerank factor | Typical `ef-search` range | Notes |
+|---|---|---|---|---|---|---|
+| `laion` (Cosine) | Yes | Yes | `1`, `2`, `4` | `4`, `10`, `20` (start at `10`) | `50`-`200` | Best candidate for full RaBitQ sweeps |
+| `cohere` (Cosine) | Yes | Yes | `1`, `2`, `4` | `4`, `10`, `20` | `50`-`200` | Similar to LAION behavior for cosine embeddings |
+| `glove` (Cosine) | Yes | Yes | `1`, `2`, `4` | `4`, `10`, `20` | `50`-`200` | Lower dim; often cheaper exact rerank |
+| `random` (Cosine default) | Yes | Yes | `1`, `2`, `4` | `4`, `10`, `20` | `50`-`200` | Good for synthetic stress tests |
+| `sift` (L2) | Yes | No (not applicable) | N/A | N/A | `50`-`200` | Use exact HNSW only |
+| `gist` (L2) | Yes | No (not applicable) | N/A | N/A | `50`-`200` | Use exact HNSW only |
+
+Rules:
+- Applicability by command:
+  - `bench_vector query`: currently `laion`, `sift`, `gist`, `random`
+  - `bench_vector sweep`: `laion`, `sift`, `gist`, `cohere`, `glove`, `random`
+- RaBitQ is only applicable to cosine-distance embeddings in the current implementation.
+- Exact HNSW is available for all distance metrics (`Cosine`, `L2`, `DotProduct`).
+- `bits=4` usually gives better recall and larger code size; `bits=1` is smallest/fastest but needs more rerank for quality.
+- Increasing `rerank_factor` improves recall at cost of latency and extra vector reads.
+- Increasing `ef-search` improves recall for both exact and RaBitQ pipelines, with diminishing returns.
+
+### Practical Tuning Profiles
+
+| Goal | Suggested settings | Command sketch |
+|---|---|---|
+| Max quality baseline | exact search, higher `ef-search` | `bench_vector query --ef-search 200` |
+| Balanced cosine production | RaBitQ `bits=4`, `rerank=10`, `ef=100` | `bench_vector sweep --rabitq --bits 4 --rerank 10 --ef 100` |
+| Throughput-first cosine | RaBitQ `bits=1` or `2`, lower rerank, moderate ef | `bench_vector sweep --rabitq --bits 1,2 --rerank 4 --ef 50,100` |
+| L2 datasets (SIFT/GIST) | exact HNSW only; tune ef | `bench_vector sweep --dataset sift --ef 50,100,200` |
+
+### Step 1: Download a dataset (example: SIFT)
+
+```bash
+./target/release/bench_vector download \
+  --dataset sift \
+  --data-dir ./data
+```
+
+### Step 2: Register embedding with explicit storage type (F16 example)
+
+`bench_vector index` registers embeddings automatically, but defaults to the builder default
+storage type unless an existing embedding spec already matches model+dim+distance.
+
+If you want explicit storage (for example, `F16`) before indexing, register it once via API.
+This is effectively how you "construct and register an EmbeddingSpec" for a dataset:
+
+```rust
+use motlie_db::vector::{Distance, EmbeddingBuilder, EmbeddingRegistry, VectorElementType};
+use motlie_db::Storage;
+use std::path::Path;
+use std::sync::Arc;
+
+fn main() -> anyhow::Result<()> {
+    let mut storage = Storage::readwrite(Path::new("./tmp/vecdb"));
+    storage.ready()?;
+    let storage = Arc::new(storage);
+
+    let registry = EmbeddingRegistry::new(storage.clone());
+    registry.prewarm()?;
+
+    // bench_vector index uses model "bench-<dataset>".
+    // For SIFT: model=bench-sift, dim=128, distance=L2.
+    let embedding = registry.register(
+        EmbeddingBuilder::new("bench-sift", 128, Distance::L2)
+            .with_storage_type(VectorElementType::F16)
+            .with_hnsw_m(16)
+            .with_hnsw_ef_construction(200),
+    )?;
+
+    println!("Registered code={} storage={:?}", embedding.code(), embedding.storage_type());
+    Ok(())
+}
+```
+
+For a different dataset, change only these fields:
+- model: `bench-<dataset>`
+- dim: dataset dimension (or `--dim` for random)
+- distance: dataset distance (or your explicit override)
+- storage: `VectorElementType::F16` or `VectorElementType::F32`
+
+### Step 3: Populate DB with bench_vector
+
+```bash
+./target/release/bench_vector index \
+  --dataset sift \
+  --num-vectors 10000 \
+  --db-path ./tmp/vecdb \
+  --data-dir ./data \
+  --l2
+```
+
+Verify embedding specs and storage type:
+
+```bash
+./target/release/bench_vector embeddings list --db-path ./tmp/vecdb
+./target/release/bench_vector embeddings inspect --db-path ./tmp/vecdb --code 1
+```
+
+### Step 4: Query with bench_vector
+
+Use the embedding code printed by index/list:
+
+```bash
+./target/release/bench_vector query \
+  --db-path ./tmp/vecdb \
+  --dataset sift \
+  --embedding-code 1 \
+  --k 10 \
+  --ef-search 100
+```
+
+### Step 5: Inspect vector column families with motlie
+
+List available CFs:
+
+```bash
+./target/release/motlie db -p ./tmp/vecdb list
+```
+
+Scan key vector CFs (table output):
+
+```bash
+./target/release/motlie db -p ./tmp/vecdb scan vector/embedding_specs -f table
+./target/release/motlie db -p ./tmp/vecdb scan vector/graph_meta -f table
+./target/release/motlie db -p ./tmp/vecdb scan vector/vec_meta --limit 20 -f table
+./target/release/motlie db -p ./tmp/vecdb scan vector/vectors --limit 10 -f table
+./target/release/motlie db -p ./tmp/vecdb scan vector/id_forward --limit 20 -f table
+./target/release/motlie db -p ./tmp/vecdb scan vector/id_reverse --limit 20 -f table
+```
+
+For pagination/cursor-based dump:
+
+```bash
+# Page 1 (tsv)
+./target/release/motlie db -p ./tmp/vecdb scan vector/vectors --limit 5 -f tsv
+
+# Page 2: pass last key from page 1 to --last
+./target/release/motlie db -p ./tmp/vecdb scan vector/vectors --limit 5 --last "<last_key>" -f table
 ```
 
 ---
