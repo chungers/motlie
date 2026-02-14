@@ -529,3 +529,42 @@ blocking all F32 datasets (SIFT, GIST).
 - `cargo test -p motlie-db --features benchmark --lib` — 658 tests pass
 - `cargo test --features benchmark --test test_vector_benchmark_integration` — 9 tests pass
   (6 existing + 3 new storage type tests)
+
+## Add --storage-type CLI flag to bench_vector index and sweep
+
+Date: 2026-02-13
+Author: Claude (Opus 4.6)
+Branch: `feature/vector-dataset`
+
+### Problem
+
+After threading VectorElementType through EmbeddingBuilder, the bench_vector CLI
+still hardcoded `VectorElementType::F16` in sweep and omitted `with_storage_type()`
+in index (defaulting to F32). Users had no way to choose storage type from CLI,
+and index vs sweep silently used different storage types for the same dataset.
+
+### Changes made
+
+1. `bins/bench_vector/src/commands.rs`:
+   - Added `--storage-type f32|f16` flag to `IndexArgs` and `SweepArgs`
+     (both default to f32 for consistency)
+   - Added `parse_storage_type()` helper
+   - Wired `with_storage_type()` into both `EmbeddingBuilder::new` call sites in
+     the index command (streaming and non-streaming paths)
+   - Replaced hardcoded `VectorElementType::F16` in sweep's `build_hnsw_index` call
+   - Added `"random"` arm to `download` command with helpful "no download needed" message
+   - Removed trivial `compute_ground_truth` wrapper (inlined direct call)
+   - Fixed duplicate "Available datasets:" header in `list_datasets`
+
+2. `libs/db/src/vector/docs/API.md`:
+   - Updated CLI workflow section to document `--storage-type` flag
+   - Removed obsolete "Step 2: Register embedding with explicit storage type" Rust code block
+   - Renumbered steps (now 0-4 instead of 0-5)
+   - Updated dataset table notes with storage-type defaults
+
+### Verification
+
+- `cargo check --bin bench_vector --features benchmark` — CLI builds
+- `cargo check -p motlie-db --features benchmark` — builds
+- `cargo test -p motlie-db --features benchmark --lib` — 658 tests pass
+- `cargo test -p motlie-db --features benchmark --test test_vector_benchmark_integration` — 9 tests pass
