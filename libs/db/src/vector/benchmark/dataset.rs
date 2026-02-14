@@ -235,6 +235,29 @@ impl LaionSubset {
     }
 }
 
+impl super::Dataset for LaionSubset {
+    fn name(&self) -> &str {
+        "LAION-CLIP"
+    }
+    fn dim(&self) -> usize {
+        self.dim
+    }
+    fn distance(&self) -> Distance {
+        Distance::Cosine
+    }
+    fn vectors(&self) -> &[Vec<f32>] {
+        &self.db_vectors
+    }
+    fn queries(&self) -> &[Vec<f32>] {
+        &self.queries
+    }
+    fn ground_truth(&self, _k: usize) -> Option<Vec<Vec<usize>>> {
+        // LAION has no pre-computed ranked ground truth.
+        // The `ground_truth: Vec<usize>` field is a text→image pairing, not top-k.
+        None
+    }
+}
+
 /// NPY file loader supporting float16 and float32 formats.
 #[derive(Debug, Clone, Default)]
 pub struct NpyLoader {
@@ -629,20 +652,43 @@ impl GistSubset {
     }
 }
 
+impl super::Dataset for GistSubset {
+    fn name(&self) -> &str {
+        "GIST-960"
+    }
+    fn dim(&self) -> usize {
+        self.dim
+    }
+    fn distance(&self) -> Distance {
+        Distance::L2
+    }
+    fn vectors(&self) -> &[Vec<f32>] {
+        &self.db_vectors
+    }
+    fn queries(&self) -> &[Vec<f32>] {
+        &self.queries
+    }
+    fn ground_truth(&self, k: usize) -> Option<Vec<Vec<usize>>> {
+        if let Some(ref gt) = self.precomputed_ground_truth {
+            if gt.first().map(|v| v.len()).unwrap_or(0) >= k {
+                return Some(gt.iter().map(|v| v[..k].to_vec()).collect());
+            }
+        }
+        None
+    }
+}
+
 // ============================================================================
 // Parquet Format Support (optional feature)
 // ============================================================================
 
 /// Cohere Wikipedia dataset configuration.
-#[cfg(feature = "parquet")]
 pub const COHERE_WIKI_DIM: usize = 768;
 
 /// Cohere Wikipedia dataset size.
-#[cfg(feature = "parquet")]
 pub const COHERE_WIKI_VECTORS: usize = 485_000;
 
 /// HuggingFace URL for Cohere Wikipedia embeddings.
-#[cfg(feature = "parquet")]
 const COHERE_WIKI_URL: &str =
     "https://huggingface.co/datasets/Cohere/wikipedia-22-12-simple-embeddings/resolve/main/data/train-00000-of-00001.parquet";
 
@@ -661,7 +707,6 @@ const COHERE_WIKI_URL: &str =
 /// ```ignore
 /// let vectors = load_parquet_embeddings(&path, "emb", 100_000)?;
 /// ```
-#[cfg(feature = "parquet")]
 pub fn load_parquet_embeddings(
     path: &Path,
     embedding_column: &str,
@@ -733,7 +778,6 @@ pub fn load_parquet_embeddings(
 /// - 768 dimensions
 /// - ~485K vectors
 /// - Cosine distance (embeddings are normalized)
-#[cfg(feature = "parquet")]
 #[derive(Debug, Clone)]
 pub struct CohereWikipediaDataset {
     /// Database embeddings.
@@ -746,7 +790,6 @@ pub struct CohereWikipediaDataset {
     pub dim: usize,
 }
 
-#[cfg(feature = "parquet")]
 impl CohereWikipediaDataset {
     /// Download Cohere Wikipedia dataset from HuggingFace.
     pub fn download(data_dir: &Path) -> Result<()> {
@@ -843,7 +886,6 @@ impl CohereWikipediaDataset {
 }
 
 /// Subset of Cohere Wikipedia data for benchmarking.
-#[cfg(feature = "parquet")]
 #[derive(Debug, Clone)]
 pub struct CohereWikipediaSubset {
     /// Database vectors.
@@ -856,7 +898,6 @@ pub struct CohereWikipediaSubset {
     pub dim: usize,
 }
 
-#[cfg(feature = "parquet")]
 impl CohereWikipediaSubset {
     /// Compute ground truth using cosine distance.
     pub fn compute_ground_truth_topk(&self, k: usize) -> Vec<Vec<usize>> {
@@ -881,24 +922,46 @@ impl CohereWikipediaSubset {
     }
 }
 
+impl super::Dataset for CohereWikipediaSubset {
+    fn name(&self) -> &str {
+        "Cohere-Wikipedia"
+    }
+    fn dim(&self) -> usize {
+        self.dim
+    }
+    fn distance(&self) -> Distance {
+        Distance::Cosine
+    }
+    fn vectors(&self) -> &[Vec<f32>] {
+        &self.db_vectors
+    }
+    fn queries(&self) -> &[Vec<f32>] {
+        &self.queries
+    }
+    fn ground_truth(&self, k: usize) -> Option<Vec<Vec<usize>>> {
+        if let Some(ref gt) = self.precomputed_ground_truth {
+            if gt.first().map(|v| v.len()).unwrap_or(0) >= k {
+                return Some(gt.iter().map(|v| v[..k].to_vec()).collect());
+            }
+        }
+        None
+    }
+}
+
 // ============================================================================
 // HDF5 Format Support (optional feature)
 // ============================================================================
 
 /// GloVe dataset configuration (from ann-benchmarks).
-#[cfg(feature = "hdf5")]
 pub const GLOVE_DIM: usize = 100;
 
 /// GloVe dataset size.
-#[cfg(feature = "hdf5")]
 pub const GLOVE_VECTORS: usize = 1_183_514;
 
 /// GloVe queries count.
-#[cfg(feature = "hdf5")]
 pub const GLOVE_QUERIES: usize = 10_000;
 
 /// ANN-benchmarks URL for GloVe-100 angular.
-#[cfg(feature = "hdf5")]
 const GLOVE_100_URL: &str = "http://ann-benchmarks.com/glove-100-angular.hdf5";
 
 /// Load embeddings from an HDF5 file (ann-benchmarks format).
@@ -910,7 +973,6 @@ const GLOVE_100_URL: &str = "http://ann-benchmarks.com/glove-100-angular.hdf5";
 /// * `path` - Path to the HDF5 file
 /// * `dataset_name` - Name of the dataset to load ("train" or "test")
 /// * `max_vectors` - Maximum number of vectors to load
-#[cfg(feature = "hdf5")]
 pub fn load_hdf5_embeddings(
     path: &Path,
     dataset_name: &str,
@@ -956,7 +1018,6 @@ pub fn load_hdf5_embeddings(
 /// Load ground truth from HDF5 file (ann-benchmarks format).
 ///
 /// The "neighbors" dataset contains pre-computed nearest neighbor indices.
-#[cfg(feature = "hdf5")]
 pub fn load_hdf5_ground_truth(path: &Path, max_queries: usize) -> Result<Vec<Vec<usize>>> {
     let file = hdf5::File::open(path)
         .with_context(|| format!("Failed to open HDF5 file: {}", path.display()))?;
@@ -1002,7 +1063,6 @@ pub fn load_hdf5_ground_truth(path: &Path, max_queries: usize) -> Result<Vec<Vec
 /// - ~1.18M vectors
 /// - 10K queries with pre-computed ground truth
 /// - Angular/Cosine distance
-#[cfg(feature = "hdf5")]
 #[derive(Debug, Clone)]
 pub struct GloveDataset {
     /// Database vectors (train set).
@@ -1015,7 +1075,6 @@ pub struct GloveDataset {
     pub dim: usize,
 }
 
-#[cfg(feature = "hdf5")]
 impl GloveDataset {
     /// Download GloVe dataset from ann-benchmarks.
     pub fn download(data_dir: &Path) -> Result<()> {
@@ -1094,7 +1153,6 @@ impl GloveDataset {
 }
 
 /// Subset of GloVe data for benchmarking.
-#[cfg(feature = "hdf5")]
 #[derive(Debug, Clone)]
 pub struct GloveSubset {
     /// Database vectors.
@@ -1107,7 +1165,6 @@ pub struct GloveSubset {
     pub dim: usize,
 }
 
-#[cfg(feature = "hdf5")]
 impl GloveSubset {
     /// Compute ground truth using angular/cosine distance.
     pub fn compute_ground_truth_topk(&self, k: usize) -> Vec<Vec<usize>> {
@@ -1129,6 +1186,32 @@ impl GloveSubset {
     /// Number of queries.
     pub fn num_queries(&self) -> usize {
         self.queries.len()
+    }
+}
+
+impl super::Dataset for GloveSubset {
+    fn name(&self) -> &str {
+        "GloVe-100"
+    }
+    fn dim(&self) -> usize {
+        self.dim
+    }
+    fn distance(&self) -> Distance {
+        Distance::Cosine
+    }
+    fn vectors(&self) -> &[Vec<f32>] {
+        &self.db_vectors
+    }
+    fn queries(&self) -> &[Vec<f32>] {
+        &self.queries
+    }
+    fn ground_truth(&self, k: usize) -> Option<Vec<Vec<usize>>> {
+        if let Some(ref gt) = self.precomputed_ground_truth {
+            if gt.first().map(|v| v.len()).unwrap_or(0) >= k {
+                return Some(gt.iter().map(|v| v[..k.min(v.len())].to_vec()).collect());
+            }
+        }
+        None
     }
 }
 
@@ -1237,6 +1320,27 @@ impl RandomDataset {
     /// Number of queries.
     pub fn num_queries(&self) -> usize {
         self.queries.len()
+    }
+}
+
+impl super::Dataset for RandomDataset {
+    fn name(&self) -> &str {
+        "Random"
+    }
+    fn dim(&self) -> usize {
+        self.dim
+    }
+    fn distance(&self) -> Distance {
+        Distance::Cosine
+    }
+    fn vectors(&self) -> &[Vec<f32>] {
+        &self.vectors
+    }
+    fn queries(&self) -> &[Vec<f32>] {
+        &self.queries
+    }
+    fn ground_truth(&self, _k: usize) -> Option<Vec<Vec<usize>>> {
+        None
     }
 }
 
@@ -1404,5 +1508,17 @@ mod tests {
         assert_eq!(config.dim, 768);
         assert_eq!(config.max_vectors, 1000);
         assert!(!config.verbose);
+    }
+
+    #[test]
+    fn test_random_dataset_trait() {
+        use super::super::Dataset;
+        let ds = RandomDataset::generate(100, 10, 128, 42);
+        assert_eq!(ds.name(), "Random");
+        assert_eq!(Dataset::dim(&ds), 128);
+        assert_eq!(ds.distance(), Distance::Cosine);
+        assert_eq!(ds.vectors().len(), 100);
+        assert_eq!(Dataset::queries(&ds), ds.queries);
+        assert!(ds.ground_truth(10).is_none());
     }
 }

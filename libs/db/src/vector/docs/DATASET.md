@@ -2,8 +2,8 @@
 
 The vector benchmark module supports 6 datasets across 4 file formats. This document
 captures the current API surface, format readers, overlap with the
-[VectorDBBench](https://github.com/zilliztech/VectorDBBench) suite, and a proposed
-`Dataset` trait unification.
+[VectorDBBench](https://github.com/zilliztech/VectorDBBench) suite, and the
+implemented `Dataset` trait unification.
 
 ---
 
@@ -11,12 +11,12 @@ captures the current API surface, format readers, overlap with the
 
 | Dataset | Dim | Distance | Format | Source | Feature | Max Size | Pre-computed GT |
 |---------|-----|----------|--------|--------|---------|----------|-----------------|
-| LAION-CLIP | 512 | Cosine | NPY (f16) | deploy.laion.ai | default | 400M | No |
-| SIFT-1M | 128 | L2 | fvecs/ivecs | HuggingFace `qbo-odp/sift1m` | default | 1M + 10K queries | Yes |
-| GIST-960 | 960 | L2 | fvecs/ivecs | corpus-texmex.irisa.fr | default | 1M + 1K queries | Yes |
-| Cohere Wiki | 768 | Cosine | Parquet | HuggingFace `Cohere/wikipedia-22-12` | `parquet` | 485K | Yes |
-| GloVe-100 | 100 | Cosine | HDF5 | ann-benchmarks.com | `hdf5` | 1.18M + 10K queries | Yes |
-| Random | configurable | Cosine/L2 | in-memory | ChaCha8Rng (seeded) | default | unlimited (streaming) | No |
+| LAION-CLIP | 512 | Cosine | NPY (f16) | deploy.laion.ai | `benchmark` | 400M | No |
+| SIFT-1M | 128 | L2 | fvecs/ivecs | HuggingFace `qbo-odp/sift1m` | `benchmark` | 1M + 10K queries | Yes |
+| GIST-960 | 960 | L2 | fvecs/ivecs | corpus-texmex.irisa.fr | `benchmark` | 1M + 1K queries | Yes |
+| Cohere Wiki | 768 | Cosine | Parquet | HuggingFace `Cohere/wikipedia-22-12` | `benchmark` | 485K | Yes |
+| GloVe-100 | 100 | Cosine | HDF5 | ann-benchmarks.com | `benchmark` | 1.18M + 10K queries | Yes |
+| Random | configurable | Cosine/L2 | in-memory | ChaCha8Rng (seeded) | `benchmark` | unlimited (streaming) | No |
 
 ### Dimension constants
 
@@ -26,11 +26,11 @@ pub const SIFT_EMBEDDING_DIM: usize = 128;
 pub const GIST_EMBEDDING_DIM: usize = 960;
 pub const GIST_BASE_VECTORS: usize = 1_000_000;
 pub const GIST_QUERIES: usize = 1_000;
-pub const COHERE_WIKI_DIM: usize = 768;       // #[cfg(feature = "parquet")]
-pub const COHERE_WIKI_VECTORS: usize = 485_000; // #[cfg(feature = "parquet")]
-pub const GLOVE_DIM: usize = 100;              // #[cfg(feature = "hdf5")]
-pub const GLOVE_VECTORS: usize = 1_183_514;   // #[cfg(feature = "hdf5")]
-pub const GLOVE_QUERIES: usize = 10_000;       // #[cfg(feature = "hdf5")]
+pub const COHERE_WIKI_DIM: usize = 768;
+pub const COHERE_WIKI_VECTORS: usize = 485_000;
+pub const GLOVE_DIM: usize = 100;
+pub const GLOVE_VECTORS: usize = 1_183_514;
+pub const GLOVE_QUERIES: usize = 10_000;
 ```
 
 ---
@@ -70,7 +70,6 @@ ground-truth files).
 ### `load_parquet_embeddings`
 
 ```rust
-// #[cfg(feature = "parquet")]
 pub fn load_parquet_embeddings(
     path: &Path, embedding_column: &str, max_vectors: usize,
 ) -> Result<Vec<Vec<f32>>>;
@@ -82,7 +81,6 @@ Reads a `FixedSizeListArray<Float32>` column from an Apache Parquet file. Used b
 ### `load_hdf5_embeddings` / `load_hdf5_ground_truth`
 
 ```rust
-// #[cfg(feature = "hdf5")]
 pub fn load_hdf5_embeddings(path: &Path, dataset_name: &str, max_vectors: usize)
     -> Result<Vec<Vec<f32>>>;
 pub fn load_hdf5_ground_truth(path: &Path, max_queries: usize)
@@ -114,7 +112,7 @@ Cosine, vectors are L2-normalized. Used by **Random**.
 
 ## 3. Per-Dataset API Pattern
 
-Every dataset follows the same convention (concrete structs, no shared trait today):
+Every dataset follows the same convention (concrete structs with a shared `Dataset` trait):
 
 1. **Dataset struct** (`LaionDataset`, `SiftDataset`, `GistDataset`,
    `CohereWikipediaDataset`, `GloveDataset`, `RandomDataset`):
@@ -196,11 +194,11 @@ genuinely different (different embedding models / dimensions).
 
 ---
 
-## 5. Proposed Integration — `Dataset` Trait + Pluggable Sources
+## 5. Integration — `Dataset` Trait + Pluggable Sources
 
 ### Problem
 
-- Each dataset is a bespoke struct with convention-based method names but no shared contract
+- Each dataset was a bespoke struct with convention-based method names but no shared contract
 - `bench_vector` has per-dataset branching everywhere
 - Adding a new dataset requires touching many files
 - No way to test the HNSW/RaBitQ pipeline generically over "any dataset"
@@ -293,20 +291,20 @@ uses this for `--dataset` parsing.
 
 ### Files changed
 
-| File | Change |
-|---|---|
-| `benchmark/mod.rs` | Add `pub mod source;`, `pub trait Dataset`, re-export |
-| `benchmark/source.rs` | **New.** `VdbBenchSource` S3 Parquet downloader (anonymous `reqwest` GET) |
-| `benchmark/dataset.rs` | `impl Dataset for LaionSubset/GistSubset/CohereSubset/GloveSubset/RandomDataset` |
-| `benchmark/sift.rs` | `impl Dataset for SiftSubset` |
-| `benchmark/runner.rs` | `run_single_experiment` et al. accept `&dyn Dataset` instead of concrete types |
-| `benchmark/metrics.rs` | No change (already generic over `&[Vec<f32>]`) |
-| `bins/bench_vector/commands.rs` | Replace per-dataset match arms with `DatasetId::load() -> Box<dyn Dataset>` |
+| File | Change | Status |
+|---|---|---|
+| `benchmark/mod.rs` | `pub trait Dataset` definition + `use Distance` | **Done** |
+| `benchmark/dataset.rs` | `impl Dataset for LaionSubset/GistSubset/CohereSubset/GloveSubset/RandomDataset` | **Done** |
+| `benchmark/sift.rs` | `impl Dataset for SiftSubset` | **Done** |
+| `benchmark/runner.rs` | `run_single_experiment` et al. accept `&dyn Dataset` instead of concrete types | **Done** |
+| `benchmark/metrics.rs` | No change (already generic over `&[Vec<f32>]`) | N/A |
+| `benchmark/source.rs` | **New.** `VdbBenchSource` S3 Parquet downloader (anonymous `reqwest` GET) | Pending |
+| `bins/bench_vector/commands.rs` | Replace per-dataset match arms with `DatasetId::load() -> Box<dyn Dataset>` | Pending |
 
 ### What NOT to do
 
 1. **Don't rehost VectorDBBench data.** Download from `assets.zilliz.com` at runtime.
-   Parquet reader already exists behind the `parquet` feature flag.
+   Parquet reader already exists behind the `benchmark` feature flag.
 2. **Don't drop native format loaders.** fvecs is ~10x faster to parse than Parquet for
    SIFT/GIST. Keep native loaders as the preferred source when available; VectorDBBench
    Parquet as fallback or for sizes not available natively (SIFT-5M, Cohere-10M).
@@ -318,13 +316,13 @@ uses this for `--dataset` parsing.
 
 ### Migration path
 
-1. Add the `Dataset` trait and `impl` it on existing subset types (non-breaking, additive)
-2. Add `VdbBenchSource` behind `parquet` feature (it's just a Parquet downloader)
-3. Refactor `runner.rs` to be generic over `&dyn Dataset` (internal change, no public API break)
-4. Add Bioasq and OpenAI dataset types that load exclusively from `VdbBenchSource`
-5. Update `bench_vector` CLI to use `DatasetId` catalog
-
-Steps 1-3 in one PR; steps 4-5 in a follow-up.
+| Step | Description | Status |
+|------|-------------|--------|
+| 1 | Add the `Dataset` trait and `impl` it on existing subset types (non-breaking, additive) | **Done** |
+| 2 | Add `VdbBenchSource` behind `benchmark` feature (S3 Parquet downloader) | Pending |
+| 3 | Refactor `runner.rs` to be generic over `&dyn Dataset` (internal, no public API break) | **Done** |
+| 4 | Add Bioasq and OpenAI dataset types that load exclusively from `VdbBenchSource` | Pending |
+| 5 | Update `bench_vector` CLI to use `DatasetId` catalog | Pending |
 
 ---
 
@@ -354,3 +352,229 @@ datasets  (list available datasets with dimensions and distances)
 | StreamingVectorGenerator, ScaleBenchmark | `libs/db/src/vector/benchmark/scale.rs` |
 | Metrics (recall, Pareto, latency) | `libs/db/src/vector/benchmark/metrics.rs` |
 | CLI dispatch | `bins/bench_vector/src/commands.rs` |
+
+---
+
+## Changelog
+
+### 2026-02-12 — Dataset trait unification (steps 1 & 3)
+
+**Author:** Claude (Opus 4.6)
+**Branch:** `feature/vector-dataset`
+**Status:** Complete
+
+Implemented the `Dataset` trait and refactored `runner.rs` to accept `&dyn Dataset`
+instead of hardcoded `&LaionSubset`. This is an additive, non-breaking change — all
+existing concrete methods on subset structs remain.
+
+**What was done:**
+
+- Defined `pub trait Dataset` in `benchmark/mod.rs` with 6 methods: `name()`, `dim()`,
+  `distance()`, `vectors()`, `queries()`, `ground_truth(k)`
+- Implemented the trait on all 6 subset/dataset types:
+  - `LaionSubset` — Cosine, no pre-computed GT
+  - `SiftSubset` — L2, no pre-computed GT (subset indices may not match full-dataset GT)
+  - `GistSubset` — L2, returns pre-computed GT when depth >= k
+  - `CohereWikipediaSubset` — Cosine, returns pre-computed GT when depth >= k
+  - `GloveSubset` — Cosine, returns pre-computed GT when depth >= k
+  - `RandomDataset` — Cosine, no pre-computed GT
+- Refactored `runner.rs`: `run_single_experiment`, `run_flat_baseline`, and
+  `run_rabitq_experiments` now accept `&dyn Dataset`; `run_all_experiments` uses
+  `Dataset::ground_truth()` with `compute_ground_truth_parallel` fallback
+- Added `test_random_dataset_trait` unit test
+- Trait is object-safe (`&dyn Dataset` and `Box<dyn Dataset>` work)
+
+**Verification:**
+
+- `cargo check -p motlie-db` — clean
+- `cargo check --bin bench_vector --features benchmark` — CLI builds
+- `cargo test -p motlie-db --features benchmark --lib` — 658 tests pass
+
+### 2026-02-12 — Consolidate feature flags into single `benchmark` flag
+
+**Author:** Claude (Opus 4.6)
+**Branch:** `feature/vector-dataset`
+**Status:** Complete
+
+Consolidated `parquet`, `hdf5`, and `benchmark-full` feature flags into a single
+`benchmark` flag. All dataset formats (NPY, fvecs, Parquet, HDF5) are now available
+whenever the `benchmark` feature is enabled. Requires `libhdf5-dev` system package.
+
+**What was done:**
+
+- `libs/db/Cargo.toml`: `benchmark` now includes `dep:parquet`, `dep:arrow`, `dep:hdf5`,
+  `dep:ndarray`, `dep:byteorder`; removed `parquet`, `hdf5`, `benchmark-full` feature definitions
+- Workspace `Cargo.toml`: removed `parquet` and `hdf5` workspace features
+- `dataset.rs`: removed all 21 `#[cfg(feature = "parquet")]` and `#[cfg(feature = "hdf5")]`
+  annotations (code is already inside the benchmark-gated module)
+- `mod.rs`: removed feature gates from Cohere and GloVe re-exports
+- `commands.rs`: removed feature gates from download and list_datasets commands
+- `README.md`, `DATASET.md`: updated feature references from `parquet`/`hdf5` to `benchmark`
+codex, 2026-02-12T21:51:38-08:00, eval=PASS: Re-ran all 3 verification commands above; results match (658/658 passing).
+codex, 2026-02-12T21:51:38-08:00, eval=PASS: `Dataset` trait exists and is implemented for `LaionSubset`, `SiftSubset`, `GistSubset`, `CohereWikipediaSubset`, `GloveSubset`, and `RandomDataset`.
+codex, 2026-02-12T21:51:38-08:00, eval=PARTIAL: Runner is only partially generalized; `run_single_experiment`, `run_flat_baseline`, and `run_rabitq_experiments` are trait-based, but `run_all_experiments` still hardcodes `LaionDataset::load(...)`.
+codex, 2026-02-12T21:51:38-08:00, eval=RISK: `runner.rs` still derives core execution parameters from `ExperimentConfig` (`dim`, `distance`) in generic paths; strict trait-driven behavior should use `Dataset::dim()` and `Dataset::distance()` to prevent config/dataset mismatch.
+codex, 2026-02-12T21:51:38-08:00, eval=PASS: Migration status is accurate (step 5 pending) because `bins/bench_vector/src/commands.rs` still uses dataset-specific match arms instead of `DatasetId` + `Box<dyn Dataset>` dispatch.
+codex, 2026-02-12T21:56:15-08:00, eval=FIXED: Finding #1 resolved; `run_all_experiments` now accepts `&dyn Dataset` and no longer hardcodes `LaionDataset::load(...)`.
+codex, 2026-02-12T21:56:15-08:00, eval=FIXED: Finding #2 resolved; generic runner paths now use dataset-native parameters (`Dataset::dim()`, `Dataset::distance()`) for index build, flat baseline distance, and RaBitQ encoder setup.
+codex, 2026-02-12T21:56:15-08:00, eval=VALIDATED: `cargo check -p motlie-db --features benchmark`, `cargo check --bin bench_vector --features benchmark`, and `cargo test -p motlie-db --features benchmark --lib vector::benchmark::runner::tests` all pass after fixes.
+codex, 2026-02-12T22:31:22-08:00, eval=REBASED: Synced to origin/feature/vector-dataset at Claude commit `cdba827` and reapplied local fixes for findings #1 and #2.
+codex, 2026-02-12T22:31:22-08:00, eval=PASS: Post-rebase verification succeeded: `cargo check -p motlie-db --features benchmark`, `cargo check --bin bench_vector --features benchmark`, and `cargo test -p motlie-db --features benchmark --lib vector::benchmark::runner::tests`.
+codex, 2026-02-12T22:31:22-08:00, eval=UPDATE: Earlier HDF5 validation block is superseded by feature consolidation; HDF5 now builds under `--features benchmark` with `libhdf5-dev` installed.
+
+## bench_vector api compliance
+
+Date: 2026-02-13
+Author: codex
+
+### Scope
+
+Updated `bench_vector` and benchmark runner paths so sweeps and benchmarks prefer
+public async API behavior where practical, and otherwise delegate to internal
+source-of-truth APIs instead of duplicating benchmark logic in the CLI layer.
+
+### Changes made
+
+1. `bench_vector query` now uses `SearchKNN` without forcing `.exact()`:
+   - `bins/bench_vector/src/commands.rs`
+   - This exercises normal strategy selection through `SearchConfig`/Processor path.
+
+2. `bench_vector sweep` now delegates dataset and ground-truth responsibilities to
+   benchmark crate abstractions:
+   - Uses `Box<dyn benchmark::Dataset>` via `load_benchmark_dataset_for_sweep(...)`
+   - Uses `dataset.ground_truth(k)` with fallback to `compute_ground_truth_parallel(...)`
+   - Removes CLI-local sweep reimplementation loops.
+
+3. `bench_vector sweep` now delegates index build to benchmark crate:
+   - Uses `benchmark::build_hnsw_index(...)` from CLI.
+   - No direct HNSW + CF write loop in CLI sweep path.
+
+4. Benchmark runner `build_hnsw_index(...)` now uses internal source-of-truth insertion
+   path through `Processor::insert_batch(...)`:
+   - `libs/db/src/vector/benchmark/runner.rs`
+   - Avoids duplicate benchmark-side write/indexing logic.
+
+5. Benchmark runner exact HNSW experiment path now executes through `SearchKNN`
+   (query API + Processor path) rather than direct `index.search(...)` calls:
+   - `run_single_experiment(...)` uses
+     `SearchKNN::new(...).with_ef(...).exact().execute_with_processor(...)`.
+
+6. `--compare-simd` is supported in standardized sweep path through benchmark crate
+   delegation (no CLI-local reimplementation):
+   - `run_rabitq_experiments(...)` accepts `use_simd_dot`
+   - CLI runs two delegated passes for compare mode (`simd`, `scalar`) and writes
+     separate CSV artifacts.
+
+7. Fixed embedding-code source-of-truth gap in RaBitQ benchmark path:
+   - `run_rabitq_experiments(...)` now accepts `embedding_code: EmbeddingCode`
+   - Removed hardcoded `embedding_code = 1`
+   - Caller passes `embedding.code()` from built embedding.
+
+### API gap status
+
+- Gap 1 (public async API lacks full RaBitQ sweep controls): accepted as-is.
+- Gap 2 (benchmark runner is sync; public async benchmark harness not required): accepted as-is.
+- Gap 3 (hardcoded embedding code in runner): fixed as described above.
+
+### Verification
+
+Post-change checks passed:
+
+- `cargo check -p motlie-db --features benchmark`
+- `cargo check --bin bench_vector --features benchmark`
+- `cargo test -p motlie-db --features benchmark --lib vector::benchmark::runner::tests`
+
+## Thread VectorElementType through EmbeddingBuilder
+
+Date: 2026-02-13
+Author: Claude (Opus 4.6)
+Branch: `feature/vector-dataset`
+
+### Problem
+
+After codex's `dfbe126` commit, `build_hnsw_index` used `Processor::insert_batch`
+which correctly respects `spec.storage_type()`, but `EmbeddingBuilder` had no
+`with_storage_type()` method. The registry hardcoded `VectorElementType::default()`
+(F32) at registration, creating a silent mismatch: the benchmark runner accepted a
+`storage_type` parameter and validated for F16, but the registered spec always said F32.
+A bail guard in `build_hnsw_index` rejected non-F16 storage types, masking the bug and
+blocking all F32 datasets (SIFT, GIST).
+
+### Changes made
+
+1. `libs/db/src/vector/embedding.rs`: Added `storage_type` field and
+   `with_storage_type()` builder method to `EmbeddingBuilder`.
+
+2. `libs/db/src/vector/registry.rs`: Replaced two `VectorElementType::default()`
+   occurrences in `register_in_txn()` with `builder.storage_type`, threading the
+   builder's storage type into both the `AddEmbeddingSpec` RocksDB write and the
+   in-memory `Arc<EmbeddingSpec>` cache entry.
+
+3. `libs/db/src/vector/benchmark/runner.rs`: Removed the F16-only bail guard from
+   `build_hnsw_index`. Added `.with_storage_type(storage_type)` to the
+   `EmbeddingBuilder` call.
+
+4. `libs/db/tests/test_vector_benchmark_integration.rs`:
+   - Added 3 end-to-end tests: `test_storage_type_f16_end_to_end`,
+     `test_storage_type_f32_end_to_end`, `test_storage_type_metadata_persists`
+   - Tests verify the full pipeline: EmbeddingBuilder → registry → insert → search →
+     recall assertion, plus RocksDB serialization round-trip for F16 metadata
+   - Fixed pre-existing `create_reader_with_storage` API mismatch in 3 existing tests
+     (function takes 1 arg, tests were passing 2)
+
+### Verification
+
+- `cargo check -p motlie-db --features benchmark` — builds
+- `cargo check --bin bench_vector --features benchmark` — CLI builds
+- `cargo test -p motlie-db --features benchmark --lib` — 658 tests pass
+- `cargo test --features benchmark --test test_vector_benchmark_integration` — 9 tests pass
+  (6 existing + 3 new storage type tests)
+
+## Add --storage-type CLI flag to bench_vector index and sweep
+
+Date: 2026-02-13
+Author: Claude (Opus 4.6)
+Branch: `feature/vector-dataset`
+
+### Problem
+
+After threading VectorElementType through EmbeddingBuilder, the bench_vector CLI
+still hardcoded `VectorElementType::F16` in sweep and omitted `with_storage_type()`
+in index (defaulting to F32). Users had no way to choose storage type from CLI,
+and index vs sweep silently used different storage types for the same dataset.
+
+### Changes made
+
+1. `bins/bench_vector/src/commands.rs`:
+   - Added `--storage-type f32|f16` flag to `IndexArgs` and `SweepArgs`
+     (both default to f32 for consistency)
+   - Added `parse_storage_type()` helper
+   - Wired `with_storage_type()` into both `EmbeddingBuilder::new` call sites in
+     the index command (streaming and non-streaming paths)
+   - Replaced hardcoded `VectorElementType::F16` in sweep's `build_hnsw_index` call
+   - Added `"random"` arm to `download` command with helpful "no download needed" message
+   - Removed trivial `compute_ground_truth` wrapper (inlined direct call)
+   - Fixed duplicate "Available datasets:" header in `list_datasets`
+
+2. `libs/db/src/vector/docs/API.md`:
+   - Updated CLI workflow section to document `--storage-type` flag
+   - Removed obsolete "Step 2: Register embedding with explicit storage type" Rust code block
+   - Renumbered steps (now 0-4 instead of 0-5)
+   - Updated dataset table notes with storage-type defaults
+
+### Verification
+
+- `cargo check --bin bench_vector --features benchmark` — CLI builds
+- `cargo check -p motlie-db --features benchmark` — builds
+- `cargo test -p motlie-db --features benchmark --lib` — 658 tests pass
+- `cargo test -p motlie-db --features benchmark --test test_vector_benchmark_integration` — 9 tests pass
+
+## API and storage-resolution sync (2026-02-13)
+
+- Updated `libs/db/src/vector/docs/API.md` bench workflow notes to match current `bench_vector` behavior.
+- Documented that both `index` and `sweep` now default to `--storage-type f32`.
+- Documented deterministic query embedding resolution order: `--embedding-code` -> metadata `embedding_code` -> `(model, dim, distance[, storage_type])` fallback with ambiguity failure.
+
+codex, 2026-02-13T20:22:48-08:00, eval=PASS: API storage-type defaults corrected to match current CLI behavior.
+codex, 2026-02-13T20:22:48-08:00, eval=PASS: API query embedding-resolution rules updated for metadata/code-first deterministic behavior.
+codex, 2026-02-13T20:22:48-08:00, eval=PASS: DATASET append-only update added to track this documentation sync.
