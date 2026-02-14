@@ -568,3 +568,13 @@ and index vs sweep silently used different storage types for the same dataset.
 - `cargo check -p motlie-db --features benchmark` — builds
 - `cargo test -p motlie-db --features benchmark --lib` — 658 tests pass
 - `cargo test -p motlie-db --features benchmark --test test_vector_benchmark_integration` — 9 tests pass
+
+## API and storage-resolution sync (2026-02-13)
+
+- Updated `libs/db/src/vector/docs/API.md` bench workflow notes to match current `bench_vector` behavior.
+- Documented that both `index` and `sweep` now default to `--storage-type f32`.
+- Documented deterministic query embedding resolution order: `--embedding-code` -> metadata `embedding_code` -> `(model, dim, distance[, storage_type])` fallback with ambiguity failure.
+
+codex, 2026-02-13T20:22:48-08:00, eval=PASS: API storage-type defaults corrected to match current CLI behavior.
+codex, 2026-02-13T20:22:48-08:00, eval=PASS: API query embedding-resolution rules updated for metadata/code-first deterministic behavior.
+codex, 2026-02-13T20:22:48-08:00, eval=PASS: DATASET append-only update added to track this documentation sync.
