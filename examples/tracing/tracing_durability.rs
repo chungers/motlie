@@ -157,25 +157,37 @@ fn chrono_lite_timestamp() -> u64 {
 
 /// Starts the HTTP server
 async fn run_server(addr: SocketAddr, shutdown_rx: oneshot::Receiver<()>) {
-    let health = warp::path("health").and(warp::get()).and_then(health_handler);
-
-    let work = warp::path!("api" / "work")
-        .and(warp::post())
-        .and_then(work_handler);
-
-    let error = warp::path!("api" / "error")
+    let health = warp::path("health")
         .and(warp::get())
-        .and_then(error_handler);
+        .and_then(health_handler)
+        .boxed();
 
-    let routes = health.or(work).or(error).with(warp::trace::request());
+    let work = warp::path("api")
+        .and(warp::path("work"))
+        .and(warp::path::end())
+        .and(warp::post())
+        .and_then(work_handler)
+        .boxed();
 
-    let (_, server) = warp::serve(routes).bind_with_graceful_shutdown(addr, async {
-        shutdown_rx.await.ok();
-        info!("Server shutdown signal received");
-    });
+    let error = warp::path("api")
+        .and(warp::path("error"))
+        .and(warp::path::end())
+        .and(warp::get())
+        .and_then(error_handler)
+        .boxed();
+
+    let routes = health.or(work).or(error).with(warp::log("tracing_durability"));
 
     info!(%addr, "Server starting");
-    server.await;
+    warp::serve(routes)
+        .bind(addr)
+        .await
+        .graceful(async {
+            shutdown_rx.await.ok();
+            info!("Server shutdown signal received");
+        })
+        .run()
+        .await;
     info!("Server stopped");
 }
 
