@@ -188,27 +188,27 @@ async fn test_list_column_families() {
 
     // Verify all column families are listed
     assert!(
-        stdout.contains("nodes"),
+        stdout.contains("graph/nodes"),
         "Expected 'nodes' in output: {}",
         stdout
     );
     assert!(
-        stdout.contains("node-fragments"),
+        stdout.contains("graph/node_fragments"),
         "Expected 'node-fragments' in output: {}",
         stdout
     );
     assert!(
-        stdout.contains("edge-fragments"),
+        stdout.contains("graph/edge_fragments"),
         "Expected 'edge-fragments' in output: {}",
         stdout
     );
     assert!(
-        stdout.contains("outgoing-edges"),
+        stdout.contains("graph/forward_edges"),
         "Expected 'outgoing-edges' in output: {}",
         stdout
     );
     assert!(
-        stdout.contains("incoming-edges"),
+        stdout.contains("graph/reverse_edges"),
         "Expected 'incoming-edges' in output: {}",
         stdout
     );
@@ -230,7 +230,7 @@ async fn test_scan_nodes_tsv() {
         "-p",
         db_path.to_str().unwrap(),
         "scan",
-        "nodes",
+        "graph/nodes",
         "--limit",
         "10",
         "--format",
@@ -303,7 +303,7 @@ async fn test_scan_nodes_table_format() {
         "-p",
         db_path.to_str().unwrap(),
         "scan",
-        "nodes",
+        "graph/nodes",
         "-f",
         "table",
     ]);
@@ -349,7 +349,7 @@ async fn test_scan_nodes_with_limit() {
         "-p",
         db_path.to_str().unwrap(),
         "scan",
-        "nodes",
+        "graph/nodes",
         "--limit",
         "1",
         "--format",
@@ -375,7 +375,7 @@ async fn test_scan_nodes_reverse() {
         "-p",
         db_path.to_str().unwrap(),
         "scan",
-        "nodes",
+        "graph/nodes",
         "--limit",
         "10",
     ]);
@@ -387,7 +387,7 @@ async fn test_scan_nodes_reverse() {
         "-p",
         db_path.to_str().unwrap(),
         "scan",
-        "nodes",
+        "graph/nodes",
         "--limit",
         "10",
         "--reverse",
@@ -441,7 +441,7 @@ async fn test_scan_nodes_pagination() {
         "-p",
         db_path.to_str().unwrap(),
         "scan",
-        "nodes",
+        "graph/nodes",
         "--limit",
         "1",
         "--format",
@@ -463,7 +463,7 @@ async fn test_scan_nodes_pagination() {
         "-p",
         db_path.to_str().unwrap(),
         "scan",
-        "nodes",
+        "graph/nodes",
         "--limit",
         "1",
         "--last",
@@ -513,7 +513,7 @@ async fn test_scan_node_fragments() {
         "-p",
         db_path.to_str().unwrap(),
         "scan",
-        "node-fragments",
+        "graph/node_fragments",
         "--limit",
         "10",
         "--format",
@@ -580,7 +580,7 @@ async fn test_scan_edge_fragments() {
         "-p",
         db_path.to_str().unwrap(),
         "scan",
-        "edge-fragments",
+        "graph/edge_fragments",
         "--limit",
         "10",
         "--format",
@@ -632,7 +632,7 @@ async fn test_scan_outgoing_edges() {
         "-p",
         db_path.to_str().unwrap(),
         "scan",
-        "outgoing-edges",
+        "graph/forward_edges",
         "--limit",
         "10",
         "--format",
@@ -701,7 +701,7 @@ async fn test_scan_incoming_edges() {
         "-p",
         db_path.to_str().unwrap(),
         "scan",
-        "incoming-edges",
+        "graph/reverse_edges",
         "--limit",
         "10",
         "--format",
@@ -747,7 +747,7 @@ async fn test_invalid_database_path() {
         "-p",
         "/nonexistent/path/to/db",
         "scan",
-        "nodes",
+        "graph/nodes",
     ]);
 
     assert!(!success, "Should fail with invalid database path");
@@ -766,7 +766,7 @@ async fn test_invalid_cursor_format() {
         "-p",
         db_path.to_str().unwrap(),
         "scan",
-        "node-fragments",
+        "graph/node_fragments",
         "--last",
         "invalid-cursor",
     ]);
@@ -792,7 +792,7 @@ async fn test_output_format_table_default() {
         "-p",
         db_path.to_str().unwrap(),
         "scan",
-        "nodes",
+        "graph/nodes",
     ]);
     assert!(success);
 
@@ -820,7 +820,7 @@ async fn test_output_format_table() {
         "-p",
         db_path.to_str().unwrap(),
         "scan",
-        "nodes",
+        "graph/nodes",
         "-f",
         "table",
     ]);
@@ -862,7 +862,7 @@ async fn test_node_fragment_pagination_cursor() {
         "-p",
         db_path.to_str().unwrap(),
         "scan",
-        "node-fragments",
+        "graph/node_fragments",
         "--limit",
         "1",
         "--format",
@@ -882,7 +882,7 @@ async fn test_node_fragment_pagination_cursor() {
         "-p",
         db_path.to_str().unwrap(),
         "scan",
-        "node-fragments",
+        "graph/node_fragments",
         "--limit",
         "1",
         "--last",
@@ -920,7 +920,7 @@ async fn test_outgoing_edge_pagination_cursor() {
         "-p",
         db_path.to_str().unwrap(),
         "scan",
-        "outgoing-edges",
+        "graph/forward_edges",
         "--limit",
         "1",
         "--format",
@@ -941,7 +941,7 @@ async fn test_outgoing_edge_pagination_cursor() {
         "-p",
         db_path.to_str().unwrap(),
         "scan",
-        "outgoing-edges",
+        "graph/forward_edges",
         "--limit",
         "1",
         "--last",
