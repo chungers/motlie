@@ -25,11 +25,9 @@ The benchmark tool requires the HDF5 library for loading standard benchmark data
 
 #### 1. Install HDF5 Dependency
 
-The Rust HDF5 bindings require HDF5 1.x (the hdf5-sys crate does not yet support HDF5 2.0):
-
 ```bash
-# Install HDF5 1.10 via Homebrew
-brew install hdf5@1.10
+# Install HDF5 via Homebrew (supports HDF5 1.8.4 through 2.0.0)
+brew install hdf5
 ```
 
 #### 2. Build with Benchmark and SIMD Features
@@ -38,25 +36,12 @@ The `benchmark` feature enables dataset loading (HDF5, NPY formats). The `simd-n
 
 ```bash
 # Build with auto-detected SIMD (recommended)
-HDF5_DIR=/opt/homebrew/opt/hdf5@1.10 cargo build --release --bin bench_vector --features benchmark,simd-native
+cargo build --release --bin bench_vector --features benchmark,simd-native
 ```
 
 **Apple Silicon (M1/M2/M3/M4)**: Uses NEON SIMD instructions automatically.
 
 **Intel Mac**: Uses AVX2 or SSE4.2 depending on CPU capabilities.
-
-#### 3. Running the Binary
-
-If you encounter library loading errors at runtime, set the library path:
-
-```bash
-# Option A: Set environment variable before running
-export DYLD_FALLBACK_LIBRARY_PATH="/opt/homebrew/opt/hdf5@1.10/lib"
-./target/release/bench_vector --help
-
-# Option B: Or set it inline
-DYLD_FALLBACK_LIBRARY_PATH="/opt/homebrew/opt/hdf5@1.10/lib" ./target/release/bench_vector --help
-```
 
 #### Alternative SIMD Feature Flags
 
