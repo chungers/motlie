@@ -19,12 +19,76 @@ This tool provides reproducible benchmarks to:
 
 ## Installation
 
-```bash
-# Build from the workspace root
-cargo build --release --bin bench_vector
+### macOS (Apple Silicon / Intel)
 
-# Or run directly
-cargo run --release --bin bench_vector -- <command>
+The benchmark tool requires the HDF5 library for loading standard benchmark datasets (LAION, SIFT, GIST).
+
+#### 1. Install HDF5 Dependency
+
+The Rust HDF5 bindings require HDF5 1.x (the hdf5-sys crate does not yet support HDF5 2.0):
+
+```bash
+# Install HDF5 1.10 via Homebrew
+brew install hdf5@1.10
+```
+
+#### 2. Build with Benchmark and SIMD Features
+
+The `benchmark` feature enables dataset loading (HDF5, NPY formats). The `simd-native` feature auto-detects the best SIMD instruction set for your CPU:
+
+```bash
+# Build with auto-detected SIMD (recommended)
+HDF5_DIR=/opt/homebrew/opt/hdf5@1.10 cargo build --release --bin bench_vector --features benchmark,simd-native
+```
+
+**Apple Silicon (M1/M2/M3/M4)**: Uses NEON SIMD instructions automatically.
+
+**Intel Mac**: Uses AVX2 or SSE4.2 depending on CPU capabilities.
+
+#### 3. Running the Binary
+
+If you encounter library loading errors at runtime, set the library path:
+
+```bash
+# Option A: Set environment variable before running
+export DYLD_FALLBACK_LIBRARY_PATH="/opt/homebrew/opt/hdf5@1.10/lib"
+./target/release/bench_vector --help
+
+# Option B: Or set it inline
+DYLD_FALLBACK_LIBRARY_PATH="/opt/homebrew/opt/hdf5@1.10/lib" ./target/release/bench_vector --help
+```
+
+#### Alternative SIMD Feature Flags
+
+For explicit SIMD control, use one of these instead of `simd-native`:
+
+| Feature | Description | Use Case |
+|---------|-------------|----------|
+| `simd-native` | Auto-detect best SIMD at compile time (recommended) | Production builds |
+| `simd-runtime` | Runtime SIMD dispatch | Portable binaries |
+| `simd-neon` | Force NEON instructions | Apple Silicon |
+| `simd-avx2` | Force AVX2 instructions | Intel/AMD (2013+) |
+| `simd-avx512` | Force AVX-512 instructions | Intel Xeon/Ice Lake+ |
+| `simd-none` | Scalar fallback | Debugging, compatibility |
+
+### Linux
+
+```bash
+# Ubuntu/Debian
+sudo apt-get install libhdf5-dev
+
+# Build with SIMD auto-detection
+cargo build --release --bin bench_vector --features benchmark,simd-native
+```
+
+### Verify Installation
+
+```bash
+# Check the binary runs
+./target/release/bench_vector --help
+
+# Test with synthetic data (no HDF5 files needed)
+./target/release/bench_vector sweep --dataset random --dim 128 --num-vectors 10000 --rabitq
 ```
 
 ## Quick Start
