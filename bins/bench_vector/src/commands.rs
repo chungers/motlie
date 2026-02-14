@@ -689,27 +689,27 @@ pub async fn index(args: IndexArgs) -> Result<()> {
             None,
         )?;
         let json = serde_json::json!({
-                "command": "index",
-                "config": {
-                    "dataset": args.dataset,
-                    "num_vectors": args.num_vectors,
+            "command": "index",
+            "config": {
+                "dataset": args.dataset,
+                "num_vectors": args.num_vectors,
                 "dim": dim,
                 "hnsw_m": args.m,
                 "hnsw_ef_construction": args.ef_construction,
                 "batch_size": args.batch_size,
                 "seed": args.seed,
-                    "distance": format!("{:?}", distance).to_lowercase(),
-                    "storage_type": format!("{:?}", storage_type).to_lowercase(),
-                    "async_workers": args.async_workers,
-                    "stream": args.stream,
-                },
-                "embedding": embedding_spec_json(embedding_code, &embedding_spec),
-                "results": {
-                    "vectors_inserted": inserted,
-                    "errors": errors,
-                    "duration_secs": build_time,
-                    "throughput_vec_per_sec": inserted as f64 / build_time.max(0.0001),
-                    "peak_rss_bytes": peak_rss,
+                "distance": format!("{:?}", distance).to_lowercase(),
+                "storage_type": format!("{:?}", storage_type).to_lowercase(),
+                "async_workers": args.async_workers,
+                "stream": args.stream,
+            },
+            "embedding": embedding_spec_json(embedding_code, &embedding_spec),
+            "results": {
+                "vectors_inserted": inserted,
+                "errors": errors,
+                "duration_secs": build_time,
+                "throughput_vec_per_sec": inserted as f64 / build_time.max(0.0001),
+                "peak_rss_bytes": peak_rss,
             }
         });
 
