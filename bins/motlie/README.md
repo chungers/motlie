@@ -4,14 +4,58 @@ Command-line utility for working with Motlie graph databases.
 
 ## Installation
 
+### macOS (Apple Silicon / Intel)
+
+#### 1. Install HDF5 Dependency (for benchmark features)
+
+If you want to build with the `benchmark` feature (for vector search benchmarking with standard datasets):
+
 ```bash
-cargo install --path bins/motlie
+# Install HDF5 via Homebrew (supports HDF5 1.8.4 through 2.0.0)
+brew install hdf5
 ```
 
-Or build from source:
+#### 2. Build Options
+
+**Standard build (no benchmark features):**
 
 ```bash
 cargo build --release --bin motlie
+```
+
+**Build with SIMD-optimized vector operations:**
+
+```bash
+cargo build --release --bin motlie --features simd-native
+```
+
+**Build with benchmark and SIMD features (requires HDF5):**
+
+```bash
+cargo build --release --bin motlie --features benchmark,simd-native
+```
+
+**Apple Silicon (M1/M2/M3/M4)**: Uses NEON SIMD instructions automatically.
+
+**Intel Mac**: Uses AVX2 or SSE4.2 depending on CPU capabilities.
+
+### Linux
+
+```bash
+# Ubuntu/Debian (for benchmark feature)
+sudo apt-get install libhdf5-dev
+
+# Build with SIMD auto-detection
+cargo build --release --bin motlie --features simd-native
+
+# Or with benchmark features
+cargo build --release --bin motlie --features benchmark,simd-native
+```
+
+### Install from Source
+
+```bash
+cargo install --path bins/motlie
 ```
 
 ## Build Features
@@ -20,6 +64,13 @@ cargo build --release --bin motlie
 |---------|-------------|
 | (default) | Standard build with stderr tracing |
 | `dtrace-otel` | Enables OpenTelemetry distributed tracing support |
+| `benchmark` | Enables vector benchmark infrastructure (requires HDF5) |
+| `simd-native` | Auto-detect best SIMD at compile time (recommended) |
+| `simd-runtime` | Runtime SIMD dispatch for portable binaries |
+| `simd-neon` | Force NEON instructions (Apple Silicon) |
+| `simd-avx2` | Force AVX2 instructions (Intel/AMD 2013+) |
+| `simd-avx512` | Force AVX-512 instructions (Intel Xeon/Ice Lake+) |
+| `simd-none` | Scalar fallback (debugging, compatibility) |
 
 ### Building with OpenTelemetry Support
 
@@ -33,6 +84,18 @@ Or install with the feature:
 
 ```bash
 cargo install --path bins/motlie --features dtrace-otel
+```
+
+### Building with Multiple Features
+
+Combine features as needed:
+
+```bash
+# SIMD + OpenTelemetry
+cargo build --release --bin motlie --features simd-native,dtrace-otel
+
+# All features (requires HDF5)
+HDF5_DIR=/opt/homebrew/opt/hdf5@1.10 cargo build --release --bin motlie --features benchmark,simd-native,dtrace-otel
 ```
 
 ## Commands
