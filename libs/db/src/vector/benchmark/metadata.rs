@@ -69,6 +69,14 @@ pub struct BenchmarkMetadata {
     /// Dataset name (random, sift10k, laion, etc.)
     pub dataset: String,
 
+    /// Embedding code used for index/query resolution.
+    #[serde(default)]
+    pub embedding_code: Option<u64>,
+
+    /// Embedding storage type ("f32" or "f16").
+    #[serde(default)]
+    pub storage_type: Option<String>,
+
     /// Timestamp of last update (ISO 8601)
     pub last_updated: String,
 
@@ -101,11 +109,13 @@ impl BenchmarkMetadata {
             rabitq_enabled,
             rabitq_bits,
             adc_enabled,
-            vector_seed: 42,      // Fixed seed for reproducibility
-            query_seed: 12345,    // Different seed for queries
+            vector_seed: 42,   // Fixed seed for reproducibility
+            query_seed: 12345, // Different seed for queries
             hnsw_m,
             hnsw_ef_construction,
             dataset: dataset.to_string(),
+            embedding_code: None,
+            storage_type: None,
             last_updated: chrono_now(),
             version: Self::CURRENT_VERSION,
         }
@@ -126,16 +136,16 @@ impl BenchmarkMetadata {
         let path = Self::path(db_path);
         let content = fs::read_to_string(&path)
             .with_context(|| format!("Failed to read metadata from {}", path.display()))?;
-        let metadata: Self = serde_json::from_str(&content)
-            .with_context(|| "Failed to parse metadata JSON")?;
+        let metadata: Self =
+            serde_json::from_str(&content).with_context(|| "Failed to parse metadata JSON")?;
         Ok(metadata)
     }
 
     /// Save metadata to database directory
     pub fn save(&self, db_path: &Path) -> Result<()> {
         let path = Self::path(db_path);
-        let content = serde_json::to_string_pretty(self)
-            .with_context(|| "Failed to serialize metadata")?;
+        let content =
+            serde_json::to_string_pretty(self).with_context(|| "Failed to serialize metadata")?;
         fs::write(&path, content)
             .with_context(|| format!("Failed to write metadata to {}", path.display()))?;
         Ok(())
@@ -165,7 +175,10 @@ impl BenchmarkMetadata {
             errors.push(format!("dim mismatch: {} vs {}", self.dim, dim));
         }
         if self.distance != distance {
-            errors.push(format!("distance mismatch: {} vs {}", self.distance, distance));
+            errors.push(format!(
+                "distance mismatch: {} vs {}",
+                self.distance, distance
+            ));
         }
         if self.rabitq_enabled != rabitq_enabled {
             errors.push(format!(
@@ -244,20 +257,39 @@ impl GroundTruthCache {
     }
 
     /// Get cache file path
-    pub fn path(db_path: &Path, num_vectors: usize, num_queries: usize, k: usize, distance: &str) -> PathBuf {
+    pub fn path(
+        db_path: &Path,
+        num_vectors: usize,
+        num_queries: usize,
+        k: usize,
+        distance: &str,
+    ) -> PathBuf {
         db_path.join(Self::filename(num_vectors, num_queries, k, distance))
     }
 
     /// Check if cache exists
-    pub fn exists(db_path: &Path, num_vectors: usize, num_queries: usize, k: usize, distance: &str) -> bool {
+    pub fn exists(
+        db_path: &Path,
+        num_vectors: usize,
+        num_queries: usize,
+        k: usize,
+        distance: &str,
+    ) -> bool {
         Self::path(db_path, num_vectors, num_queries, k, distance).exists()
     }
 
     /// Load from cache
-    pub fn load(db_path: &Path, num_vectors: usize, num_queries: usize, k: usize, distance: &str) -> Result<Self> {
+    pub fn load(
+        db_path: &Path,
+        num_vectors: usize,
+        num_queries: usize,
+        k: usize,
+        distance: &str,
+    ) -> Result<Self> {
         let path = Self::path(db_path, num_vectors, num_queries, k, distance);
-        let content = fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read ground truth cache from {}", path.display()))?;
+        let content = fs::read_to_string(&path).with_context(|| {
+            format!("Failed to read ground truth cache from {}", path.display())
+        })?;
         let cache: Self = serde_json::from_str(&content)
             .with_context(|| "Failed to parse ground truth cache JSON")?;
 
@@ -271,7 +303,13 @@ impl GroundTruthCache {
 
     /// Save to cache
     pub fn save(&self, db_path: &Path) -> Result<()> {
-        let path = Self::path(db_path, self.num_vectors, self.num_queries, self.k, &self.distance);
+        let path = Self::path(
+            db_path,
+            self.num_vectors,
+            self.num_queries,
+            self.k,
+            &self.distance,
+        );
         let content = serde_json::to_string(self)
             .with_context(|| "Failed to serialize ground truth cache")?;
         fs::write(&path, content)
@@ -365,16 +403,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let db_path = temp.path();
 
-        let mut metadata = BenchmarkMetadata::new(
-            128,
-            "cosine",
-            true,
-            4,
-            true,
-            16,
-            200,
-            "random",
-        );
+        let mut metadata = BenchmarkMetadata::new(128, "cosine", true, 4, true, 16, 200, "random");
         metadata.num_vectors = 10000;
 
         // Save and load

@@ -1504,8 +1504,8 @@ Use this table when deciding what to register before `bench_vector index`:
 Notes:
 - This table applies to `bench_vector index`, `bench_vector query`, and `bench_vector sweep`.
 - `bench_vector index` auto-detects default distance by dataset unless overridden (`--l2` / `--cosine`).
-- Both `bench_vector index` and `bench_vector sweep` default to `--storage-type f32`.
-- Registration matching is by `(model, dim, distance)`. If an existing spec matches, it is reused.
+- `bench_vector index` defaults to `--storage-type f32`; `bench_vector sweep` defaults to `--storage-type f32`.
+- Query-time embedding selection prefers explicit `--embedding-code`, then metadata `embedding_code`; if no code is available, lookup is by `(model, dim, distance[, storage_type])` and ambiguous matches fail fast.
 
 ### Search + Optimization Matrix by Dataset
 
@@ -1546,8 +1546,7 @@ Rules:
 
 ### Step 2: Populate DB with bench_vector
 
-Both `index` and `sweep` accept `--storage-type f16|f32` (index defaults to f32,
-sweep defaults to f16):
+Both `index` and `sweep` accept `--storage-type f16|f32` (both default to f32):
 
 ```bash
 ./target/release/bench_vector index \
