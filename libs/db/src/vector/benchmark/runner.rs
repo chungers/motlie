@@ -11,13 +11,15 @@ use std::time::Instant;
 
 use anyhow::Result;
 
-use super::dataset::{LaionDataset, LaionSubset, LAION_EMBEDDING_DIM};
+use super::dataset::{compute_ground_truth_parallel, LAION_EMBEDDING_DIM};
 use super::metrics::{compute_recall, percentile, LatencyStats};
-use crate::rocksdb::ColumnFamily;
+use super::Dataset;
 use crate::vector::{
-    hnsw, schema::EmbeddingSpec, BinaryCodeCache, Distance, EmbeddingCode, NavigationCache, RaBitQ,
-    Storage, VecId, VectorCfKey, VectorElementType, Vectors,
+    hnsw, processor::Processor, query::SearchKNN, BinaryCodeCache, Distance, Embedding,
+    EmbeddingBuilder, EmbeddingCode, RaBitQ, Storage, VecId, VectorElementType,
 };
+use crate::Id;
+use crate::vector::schema::ExternalKey;
 
 /// Experiment configuration.
 #[derive(Debug, Clone)]
@@ -283,35 +285,95 @@ impl RabitqExperimentResult {
 }
 
 /// Run all experiments according to configuration.
-pub fn run_all_experiments(config: &ExperimentConfig) -> Result<Vec<ExperimentResult>> {
-    // Load full dataset
-    let max_vectors = *config.scales.iter().max().unwrap_or(&200_000);
-    println!("Loading LAION dataset (up to {} vectors)...", max_vectors);
-    let dataset = LaionDataset::load(&config.data_dir, max_vectors)?;
+pub fn run_all_experiments(
+    dataset: &dyn Dataset,
+    config: &ExperimentConfig,
+) -> Result<Vec<ExperimentResult>> {
+    struct DatasetView<'a> {
+        name: &'a str,
+        dim: usize,
+        distance: Distance,
+        vectors: &'a [Vec<f32>],
+        queries: &'a [Vec<f32>],
+        ground_truth: Option<Vec<Vec<usize>>>,
+    }
+
+    impl Dataset for DatasetView<'_> {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn dim(&self) -> usize {
+            self.dim
+        }
+        fn distance(&self) -> Distance {
+            self.distance
+        }
+        fn vectors(&self) -> &[Vec<f32>] {
+            self.vectors
+        }
+        fn queries(&self) -> &[Vec<f32>] {
+            self.queries
+        }
+        fn ground_truth(&self, _k: usize) -> Option<Vec<Vec<usize>>> {
+            self.ground_truth.clone()
+        }
+    }
+
     println!(
-        "Dataset loaded: {} image embeddings, {} text embeddings\n",
-        dataset.image_embeddings.len(),
-        dataset.text_embeddings.len()
+        "Dataset loaded: {} ({} vectors, {} queries, {}D, {:?})\n",
+        dataset.name(),
+        dataset.vectors().len(),
+        dataset.queries().len(),
+        dataset.dim(),
+        dataset.distance(),
     );
 
     let mut all_results = Vec::new();
+    let max_k = *config.k_values.iter().max().unwrap_or(&20);
+    let full_gt = dataset.ground_truth(max_k);
+    let full_vectors = dataset.vectors().len();
+    let full_queries = dataset.queries().len();
 
     for &scale in &config.scales {
+        let scale = scale.min(full_vectors);
+        let query_count = config.num_queries.min(full_queries);
+
         println!("\n{}", "=".repeat(60));
         println!("Scale: {} vectors", scale);
         println!("{}\n", "=".repeat(60));
 
-        // Get subset for this scale
-        let subset = dataset.subset(scale, config.num_queries);
+        let view = DatasetView {
+            name: dataset.name(),
+            dim: dataset.dim(),
+            distance: dataset.distance(),
+            vectors: &dataset.vectors()[..scale],
+            queries: &dataset.queries()[..query_count],
+            // Only trust precomputed GT at full vector scale.
+            ground_truth: if scale == full_vectors {
+                full_gt
+                    .as_ref()
+                    .map(|gt| gt.iter().take(query_count).cloned().collect())
+            } else {
+                None
+            },
+        };
         println!(
-            "Subset: {} db vectors, {} queries",
-            subset.db_vectors.len(),
-            subset.queries.len()
+            "Subset: {} db vectors, {} queries ({})",
+            view.vectors().len(),
+            view.queries().len(),
+            view.name()
         );
 
-        // Compute brute-force ground truth
-        let max_k = *config.k_values.iter().max().unwrap_or(&20);
-        let ground_truth = subset.compute_ground_truth_topk(max_k);
+        // Compute ground truth (use pre-computed if available, else brute-force)
+        let ground_truth = match view.ground_truth(max_k) {
+            Some(gt) => gt,
+            None => compute_ground_truth_parallel(
+                view.vectors(),
+                view.queries(),
+                max_k,
+                view.distance(),
+            ),
+        };
 
         // Create temp directory for this scale's database
         let temp_dir = tempfile::tempdir()?;
@@ -321,19 +383,20 @@ pub fn run_all_experiments(config: &ExperimentConfig) -> Result<Vec<ExperimentRe
         // Initialize storage
         let mut storage = Storage::readwrite(&db_path);
         storage.ready()?;
+        let storage = Arc::new(storage);
 
         // Build HNSW index
         println!(
             "\nBuilding HNSW index (M={}, ef_construction={})...",
             config.m, config.ef_construction
         );
-        let (index, build_time) = build_hnsw_index(
+        let (_index, embedding, build_time) = build_hnsw_index(
             &storage,
-            &subset.db_vectors,
-            config.dim,
+            view.vectors(),
+            view.dim(),
             config.m,
             config.ef_construction,
-            config.distance,
+            view.distance(),
             config.storage_type,
         )?;
         println!(
@@ -347,15 +410,15 @@ pub fn run_all_experiments(config: &ExperimentConfig) -> Result<Vec<ExperimentRe
             println!("\n--- ef_search = {} ---", ef_search);
 
             let result = run_single_experiment(
-                &index,
+                &embedding,
                 &storage,
-                &subset,
+                &view,
                 &ground_truth,
                 &config.k_values,
                 ef_search,
                 scale,
                 build_time,
-                &format!("HNSW-{}", config.distance),
+                &format!("HNSW-{}", view.distance()),
                 config.verbose,
             )?;
             all_results.push(result);
@@ -364,11 +427,10 @@ pub fn run_all_experiments(config: &ExperimentConfig) -> Result<Vec<ExperimentRe
         // Run flat baseline
         println!("\n--- Flat (brute-force) baseline ---");
         let flat_result = run_flat_baseline(
-            &subset,
+            &view,
             &ground_truth,
             &config.k_values,
             scale,
-            config.distance,
             config.verbose,
         )?;
         all_results.push(flat_result);
@@ -383,74 +445,56 @@ pub fn run_all_experiments(config: &ExperimentConfig) -> Result<Vec<ExperimentRe
 
 /// Build HNSW index from vectors.
 pub fn build_hnsw_index(
-    storage: &Storage,
+    storage: &Arc<Storage>,
     vectors: &[Vec<f32>],
     dim: usize,
     m: usize,
     ef_construction: usize,
     distance: Distance,
     storage_type: VectorElementType,
-) -> Result<(hnsw::Index, f64)> {
-    let nav_cache = Arc::new(NavigationCache::new());
-    let embedding_code: EmbeddingCode = 1;
-
-    // Create EmbeddingSpec with HNSW parameters
-    let spec = EmbeddingSpec {
-        code: embedding_code,
-        model: "benchmark".to_string(),
-        dim: dim as u32,
-        distance,
-        storage_type,
-        hnsw_m: m as u16,
-        hnsw_ef_construction: ef_construction as u16,
-        rabitq_bits: 1,
-        rabitq_seed: 42,
-    };
-
-    let index = hnsw::Index::from_spec(embedding_code, &spec, 64, nav_cache);
-
-    // Store vectors in RocksDB using transaction
-    let txn_db = storage.transaction_db()?;
-    let vectors_cf = txn_db
-        .cf_handle(Vectors::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
+) -> Result<(hnsw::Index, Embedding, f64)> {
+    let registry = storage.cache().clone();
+    registry.set_storage(storage.clone())?;
+    let embedding = registry.register(
+        EmbeddingBuilder::new("benchmark", dim as u32, distance)
+            .with_hnsw_m(m as u16)
+            .with_hnsw_ef_construction(ef_construction as u16)
+            .with_storage_type(storage_type),
+    )?;
+    let processor = Processor::new(storage.clone(), registry);
 
     let start = Instant::now();
 
-    // Batch store all vectors first (in a single transaction for atomicity)
-    {
-        let txn = txn_db.transaction();
-        for (i, vector) in vectors.iter().enumerate() {
-            let vec_id = i as VecId;
-            let key = VectorCfKey(embedding_code, vec_id);
-            let value_bytes = Vectors::value_to_bytes_typed(vector, storage_type);
-            txn.put_cf(&vectors_cf, Vectors::key_to_bytes(&key), value_bytes)?;
-        }
-        txn.commit()?;
-    }
-
-    // Build HNSW index (each insert in its own transaction)
-    for (i, vector) in vectors.iter().enumerate() {
-        let vec_id = i as VecId;
-        let txn = txn_db.transaction();
-        let cache_update = hnsw::insert(&index, &txn, &txn_db, storage, vec_id, vector)?;
-        txn.commit()?;
-        cache_update.apply(index.nav_cache());
-
-        if (i + 1) % 10000 == 0 {
-            println!("  Inserted {}/{} vectors", i + 1, vectors.len());
+    for (batch_idx, batch) in vectors.chunks(1000).enumerate() {
+        let base = batch_idx * 1000;
+        let payload: Vec<(ExternalKey, Vec<f32>)> = batch
+            .iter()
+            .enumerate()
+            .map(|(offset, vector)| {
+                let id = Id::from_bytes(((base + offset) as u128).to_be_bytes());
+                (ExternalKey::NodeId(id), vector.clone())
+            })
+            .collect();
+        let _ = processor.insert_batch(&embedding, &payload, true)?;
+        let inserted = (base + batch.len()).min(vectors.len());
+        if inserted % 10000 == 0 || inserted == vectors.len() {
+            println!("  Inserted {}/{} vectors", inserted, vectors.len());
         }
     }
+
+    let index = processor
+        .get_or_create_index(embedding.code())
+        .ok_or_else(|| anyhow::anyhow!("Failed to acquire HNSW index after benchmark insert"))?;
 
     let build_time = start.elapsed().as_secs_f64();
-    Ok((index, build_time))
+    Ok((index, embedding, build_time))
 }
 
 /// Run a single experiment configuration.
 pub fn run_single_experiment(
-    index: &hnsw::Index,
-    storage: &Storage,
-    subset: &LaionSubset,
+    embedding: &Embedding,
+    storage: &Arc<Storage>,
+    dataset: &dyn Dataset,
     ground_truth: &[Vec<usize>],
     k_values: &[usize],
     ef_search: usize,
@@ -459,26 +503,33 @@ pub fn run_single_experiment(
     strategy: &str,
     verbose: bool,
 ) -> Result<ExperimentResult> {
-    let mut latencies = Vec::with_capacity(subset.queries.len());
-    let mut search_results = Vec::with_capacity(subset.queries.len());
+    let registry = storage.cache().clone();
+    registry.set_storage(storage.clone())?;
+    let processor = Processor::new(storage.clone(), registry);
+
+    let mut latencies = Vec::with_capacity(dataset.queries().len());
+    let mut search_results = Vec::with_capacity(dataset.queries().len());
 
     let max_k = *k_values.iter().max().unwrap_or(&20);
 
     // Run queries
-    for (qi, query) in subset.queries.iter().enumerate() {
+    for (qi, query) in dataset.queries().iter().enumerate() {
         let start = Instant::now();
-        let results = index.search(storage, query, ef_search, max_k)?;
+        let results = SearchKNN::new(embedding, query.clone(), max_k)
+            .with_ef(ef_search)
+            .exact()
+            .execute_with_processor(&processor)?;
         let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
 
         latencies.push(latency_ms);
-        let result_ids: Vec<usize> = results.iter().map(|(_, id)| *id as usize).collect();
+        let result_ids: Vec<usize> = results.iter().map(|r| r.vec_id as usize).collect();
         search_results.push(result_ids);
 
         if verbose && (qi + 1) % 100 == 0 {
             println!(
                 "  Query {}/{}: {:.2}ms",
                 qi + 1,
-                subset.queries.len(),
+                dataset.queries().len(),
                 latency_ms
             );
         }
@@ -522,28 +573,27 @@ pub fn run_single_experiment(
 
 /// Run flat (brute-force) baseline for comparison.
 pub fn run_flat_baseline(
-    subset: &LaionSubset,
+    dataset: &dyn Dataset,
     ground_truth: &[Vec<usize>],
     k_values: &[usize],
     scale: usize,
-    distance: Distance,
     verbose: bool,
 ) -> Result<ExperimentResult> {
-    let mut latencies = Vec::with_capacity(subset.queries.len());
-    let mut search_results = Vec::with_capacity(subset.queries.len());
+    let mut latencies = Vec::with_capacity(dataset.queries().len());
+    let mut search_results = Vec::with_capacity(dataset.queries().len());
 
     let max_k = *k_values.iter().max().unwrap_or(&20);
 
     // Run brute-force queries
-    for (qi, query) in subset.queries.iter().enumerate() {
+    for (qi, query) in dataset.queries().iter().enumerate() {
         let start = Instant::now();
 
         // Compute distances to all vectors
-        let mut distances: Vec<(usize, f32)> = subset
-            .db_vectors
+        let mut distances: Vec<(usize, f32)> = dataset
+            .vectors()
             .iter()
             .enumerate()
-            .map(|(i, v)| (i, distance.compute(query, v)))
+            .map(|(i, v)| (i, dataset.distance().compute(query, v)))
             .collect();
 
         // Sort and take top-k
@@ -558,7 +608,7 @@ pub fn run_flat_baseline(
             println!(
                 "  Query {}/{}: {:.2}ms",
                 qi + 1,
-                subset.queries.len(),
+                dataset.queries().len(),
                 latency_ms
             );
         }
@@ -610,9 +660,10 @@ pub fn run_flat_baseline(
 /// * `config` - Experiment configuration including RaBitQ parameters
 /// * `index` - Built HNSW index
 /// * `storage` - Vector storage
-/// * `subset` - Dataset subset with queries and db vectors
+/// * `dataset` - Dataset with queries and db vectors (via Dataset trait)
 /// * `ground_truth` - Ground truth results for recall computation
 /// * `build_time` - Time taken to build the HNSW index
+/// * `embedding_code` - Embedding code used for binary code cache keys
 ///
 /// # Returns
 ///
@@ -621,25 +672,29 @@ pub fn run_rabitq_experiments(
     config: &ExperimentConfig,
     index: &hnsw::Index,
     storage: &Storage,
-    subset: &LaionSubset,
+    dataset: &dyn Dataset,
     ground_truth: &[Vec<usize>],
     build_time: f64,
+    embedding_code: EmbeddingCode,
+    use_simd_dot: bool,
 ) -> Result<Vec<RabitqExperimentResult>> {
     let mut results = Vec::new();
-    let embedding_code: EmbeddingCode = 1;
 
     for &bits in &config.rabitq_bits {
         println!("\n  --- RaBitQ {} bits ---", bits);
 
         // Create encoder for this bit configuration
-        let encoder = RaBitQ::new(config.dim, bits, 42);
-        println!("  Encoder created: {} bits/dim", bits);
+        let encoder = RaBitQ::with_options(dataset.dim(), bits, 42, use_simd_dot);
+        println!(
+            "  Encoder created: {} bits/dim (simd_dot={})",
+            bits, use_simd_dot
+        );
 
         // Create and populate binary code cache
         let cache = BinaryCodeCache::new();
         let encode_start = Instant::now();
 
-        for (i, vector) in subset.db_vectors.iter().enumerate() {
+        for (i, vector) in dataset.vectors().iter().enumerate() {
             let vec_id = i as VecId;
             let (code, correction) = encoder.encode_with_correction(vector);
             cache.put(embedding_code, vec_id, code, correction);
@@ -658,11 +713,11 @@ pub fn run_rabitq_experiments(
         for &ef_search in &config.ef_search_values {
             for &rerank_factor in &config.rerank_factors {
                 for &k in &config.k_values {
-                    let mut latencies = Vec::with_capacity(subset.queries.len());
-                    let mut recalls = Vec::with_capacity(subset.queries.len());
+                    let mut latencies = Vec::with_capacity(dataset.queries().len());
+                    let mut recalls = Vec::with_capacity(dataset.queries().len());
 
                     // Run all queries
-                    for (qi, query) in subset.queries.iter().enumerate() {
+                    for (qi, query) in dataset.queries().iter().enumerate() {
                         let start = Instant::now();
                         let search_results = index.search_with_rabitq_cached(
                             storage,
@@ -717,7 +772,7 @@ pub fn run_rabitq_experiments(
                     );
 
                     results.push(RabitqExperimentResult {
-                        scale: subset.db_vectors.len(),
+                        scale: dataset.vectors().len(),
                         bits_per_dim: bits,
                         ef_search,
                         rerank_factor,
@@ -741,10 +796,7 @@ pub fn run_rabitq_experiments(
 }
 
 /// Save RaBitQ results to CSV file.
-pub fn save_rabitq_results_csv(
-    results: &[RabitqExperimentResult],
-    csv_path: &Path,
-) -> Result<()> {
+pub fn save_rabitq_results_csv(results: &[RabitqExperimentResult], csv_path: &Path) -> Result<()> {
     let mut file = File::create(csv_path)?;
 
     // Header

@@ -13,21 +13,20 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use motlie_db::rocksdb::{ColumnFamily, ColumnFamilySerde};
 use motlie_db::vector::benchmark::{
     self, compute_recall, compute_rotated_variance, print_pareto_frontier, print_rotation_stats,
-    BenchmarkMetadata, GistDataset, LaionDataset, LatencyStats, ParetoInput, RabitqExperimentResult,
-    RandomDataset, SiftDataset, save_rabitq_results_csv, GIST_QUERIES,
+    save_rabitq_results_csv, BenchmarkMetadata, GistDataset, LaionDataset, LatencyStats,
+    ParetoInput, RandomDataset, SiftDataset,
 };
-use motlie_db::vector::{
-    create_reader_with_storage, create_writer, hnsw, spawn_mutation_consumer_with_storage_autoreg,
-    spawn_query_consumers_with_storage_autoreg, AsyncGraphUpdater, AsyncUpdaterConfig,
-    BinaryCodeCache, Distance, EmbeddingBuilder, EmbeddingCode, EmbeddingRegistry, IdAllocator,
-    InsertVectorBatch, NavigationCache, RaBitQ, ReaderConfig, Runnable, SearchKNN, Storage, VecId,
-    VectorCfKey, VectorElementType, Vectors, WriterConfig,
-};
-use motlie_db::rocksdb::{ColumnFamily, ColumnFamilySerde};
-use motlie_db::Id;
 use motlie_db::vector::schema::{EmbeddingSpec, EmbeddingSpecs, ExternalKey};
+use motlie_db::vector::{
+    create_reader_with_storage, create_writer, spawn_mutation_consumer_with_storage_autoreg,
+    spawn_query_consumers_with_storage_autoreg, AsyncGraphUpdater, AsyncUpdaterConfig, Distance,
+    EmbeddingBuilder, IdAllocator, InsertVectorBatch, NavigationCache, RaBitQ, ReaderConfig,
+    Runnable, SearchKNN, Storage, VecId, VectorElementType, Vectors, WriterConfig,
+};
+use motlie_db::Id;
 
 // ============================================================================
 // Download Command
@@ -45,8 +44,7 @@ pub struct DownloadArgs {
 }
 
 pub async fn download(args: DownloadArgs) -> Result<()> {
-    std::fs::create_dir_all(&args.data_dir)
-        .context("Failed to create data directory")?;
+    std::fs::create_dir_all(&args.data_dir).context("Failed to create data directory")?;
 
     match args.dataset.to_lowercase().as_str() {
         "laion" => {
@@ -67,15 +65,18 @@ pub async fn download(args: DownloadArgs) -> Result<()> {
             println!("  - gist_groundtruth.ivecs");
             return Ok(());
         }
-        #[cfg(feature = "parquet")]
         "cohere" | "cohere-wiki" => {
             println!("Downloading Cohere Wikipedia embeddings...");
             benchmark::CohereWikipediaDataset::download(&args.data_dir)?;
         }
-        #[cfg(feature = "hdf5")]
         "glove" | "glove-100" => {
             println!("Downloading GloVe-100 angular dataset...");
             benchmark::GloveDataset::download(&args.data_dir)?;
+        }
+        "random" => {
+            println!("Random dataset is generated at runtime, no download needed.");
+            println!("Use: bench_vector index --dataset random --dim 1024 --num-vectors 100000");
+            return Ok(());
         }
         _ => {
             anyhow::bail!(
@@ -95,7 +96,7 @@ pub async fn download(args: DownloadArgs) -> Result<()> {
 
 #[derive(Parser)]
 pub struct IndexArgs {
-    /// Dataset: laion, sift, gist, random
+    /// Dataset: laion, sift, gist, cohere, glove, random
     #[arg(long)]
     pub dataset: String,
 
@@ -159,20 +160,38 @@ pub struct IndexArgs {
     #[arg(long, default_value = "false")]
     pub drain_pending: bool,
 
+    /// Vector storage type: f32 (full precision) or f16 (half precision, 50% smaller)
+    #[arg(long, default_value = "f32")]
+    pub storage_type: String,
+
     /// Output results to JSON file
     #[arg(long)]
     pub output: Option<PathBuf>,
+}
+
+fn parse_storage_type(value: &str) -> Result<VectorElementType> {
+    match value.to_lowercase().as_str() {
+        "f32" => Ok(VectorElementType::F32),
+        "f16" => Ok(VectorElementType::F16),
+        other => anyhow::bail!("Invalid storage type: {} (use f32 or f16)", other),
+    }
 }
 
 pub async fn index(args: IndexArgs) -> Result<()> {
     use motlie_db::vector::benchmark::scale::get_rss_bytes;
     use std::time::Duration;
 
+    let storage_type = parse_storage_type(&args.storage_type)?;
+
     println!("=== Vector Index Build ===");
     println!("Dataset: {}", args.dataset);
     println!("Vectors: {}", args.num_vectors);
     println!("Database: {:?}", args.db_path);
-    println!("HNSW: M={}, ef_construction={}", args.m, args.ef_construction);
+    println!(
+        "HNSW: M={}, ef_construction={}",
+        args.m, args.ef_construction
+    );
+    println!("Storage type: {:?}", storage_type);
     println!("Batch size: {}", args.batch_size);
     if args.async_workers > 0 {
         println!("Insert mode: ASYNC ({} workers)", args.async_workers);
@@ -188,7 +207,7 @@ pub async fn index(args: IndexArgs) -> Result<()> {
     } else {
         // Auto-detect from dataset
         match args.dataset.to_lowercase().as_str() {
-            "laion" | "cohere" | "random" => Distance::Cosine,
+            "laion" | "cohere" | "glove" | "random" => Distance::Cosine,
             "sift" | "gist" => Distance::L2,
             _ => Distance::Cosine,
         }
@@ -211,7 +230,10 @@ pub async fn index(args: IndexArgs) -> Result<()> {
     };
 
     if existing_count >= args.num_vectors && !args.drain_pending {
-        println!("Index already has {} vectors, nothing to do.", existing_count);
+        println!(
+            "Index already has {} vectors, nothing to do.",
+            existing_count
+        );
         return Ok(());
     }
 
@@ -252,12 +274,7 @@ pub async fn index(args: IndexArgs) -> Result<()> {
             .with_process_on_startup(true);
         let registry = storage.cache().clone();
         let nav_cache = Arc::new(NavigationCache::new());
-        let updater = AsyncGraphUpdater::start(
-            storage.clone(),
-            registry,
-            nav_cache,
-            async_config,
-        );
+        let updater = AsyncGraphUpdater::start(storage.clone(), registry, nav_cache, async_config);
 
         loop {
             let pending = updater.pending_queue_size();
@@ -284,16 +301,23 @@ pub async fn index(args: IndexArgs) -> Result<()> {
         // Previously, registration happened before the existing_count check,
         // leaving orphan EmbeddingSpecs on abort.
         if existing_count > 0 {
-            anyhow::bail!("Streaming random index requires a fresh database. Use --fresh to rebuild.");
+            anyhow::bail!(
+                "Streaming random index requires a fresh database. Use --fresh to rebuild."
+            );
         }
 
         let dim = args.dim;
         let embedding = registry.register(
             EmbeddingBuilder::new(&model, dim as u32, distance)
                 .with_hnsw_m(args.m as u16)
-                .with_hnsw_ef_construction(args.ef_construction as u16),
+                .with_hnsw_ef_construction(args.ef_construction as u16)
+                .with_storage_type(storage_type),
         )?;
-        print_embedding_summary_from_db(storage.transaction_db()?, &args.db_path, embedding.code())?;
+        print_embedding_summary_from_db(
+            storage.transaction_db()?,
+            &args.db_path,
+            embedding.code(),
+        )?;
 
         if args.async_workers > 0 {
             println!("Insert mode: ASYNC ({} workers)", args.async_workers);
@@ -324,15 +348,16 @@ pub async fn index(args: IndexArgs) -> Result<()> {
         );
 
         let start = Instant::now();
-        let mut generator = motlie_db::vector::benchmark::StreamingVectorGenerator::new_with_distance(
-            args.dim,
-            args.num_vectors,
-            args.seed,
-            distance,
-        );
+        let mut generator =
+            motlie_db::vector::benchmark::StreamingVectorGenerator::new_with_distance(
+                args.dim,
+                args.num_vectors,
+                args.seed,
+                distance,
+            );
         let total = args.num_vectors;
         let mut inserted = 0usize;
-        let mut errors = 0usize;
+        let errors = 0usize;
         let mut peak_rss: u64 = 0;
         let mut last_progress = Instant::now();
         let progress_interval = Duration::from_secs(args.progress_interval);
@@ -353,7 +378,11 @@ pub async fn index(args: IndexArgs) -> Result<()> {
             }
 
             let mutation = InsertVectorBatch::new(&embedding, payload);
-            let mutation = if immediate { mutation.immediate() } else { mutation };
+            let mutation = if immediate {
+                mutation.immediate()
+            } else {
+                mutation
+            };
             writer.send(vec![mutation.into()]).await?;
             inserted += batch_len;
 
@@ -363,7 +392,11 @@ pub async fn index(args: IndexArgs) -> Result<()> {
                 let elapsed = start.elapsed().as_secs_f64();
                 let rate = inserted as f64 / elapsed.max(0.0001);
                 let remaining = total.saturating_sub(inserted);
-                let eta_secs = if rate > 0.0 { remaining as f64 / rate } else { 0.0 };
+                let eta_secs = if rate > 0.0 {
+                    remaining as f64 / rate
+                } else {
+                    0.0
+                };
                 let eta_str = format_eta(eta_secs);
 
                 if let Some(ref updater) = async_updater {
@@ -449,16 +482,27 @@ pub async fn index(args: IndexArgs) -> Result<()> {
             &args.dataset,
         );
         meta.num_vectors = inserted;
+        meta.embedding_code = Some(embedding.code());
+        meta.storage_type = Some(format!("{:?}", storage_type).to_lowercase());
         if is_random {
             meta.vector_seed = args.seed;
             meta.query_seed = args.seed.saturating_add(1_000_000);
         }
         meta.checkpoint(&args.db_path)?;
-        println!("Metadata saved: {:?}", BenchmarkMetadata::path(&args.db_path));
+        println!(
+            "Metadata saved: {:?}",
+            BenchmarkMetadata::path(&args.db_path)
+        );
 
         if let Some(output_path) = args.output {
-            let (embedding_code, embedding_spec) =
-                resolve_embedding_spec_from_db(storage.transaction_db()?, Some(embedding.code()), None, None, None)?;
+            let (embedding_code, embedding_spec) = resolve_embedding_spec_from_db(
+                storage.transaction_db()?,
+                Some(embedding.code()),
+                None,
+                None,
+                None,
+                None,
+            )?;
             let json = serde_json::json!({
                 "command": "index",
                 "config": {
@@ -470,6 +514,7 @@ pub async fn index(args: IndexArgs) -> Result<()> {
                     "batch_size": args.batch_size,
                     "seed": args.seed,
                     "distance": format!("{:?}", distance).to_lowercase(),
+                    "storage_type": format!("{:?}", storage_type).to_lowercase(),
                     "async_workers": args.async_workers,
                     "stream": args.stream,
                 },
@@ -492,19 +537,23 @@ pub async fn index(args: IndexArgs) -> Result<()> {
     }
 
     // Load dataset
-    let (vectors, dim) = load_dataset_vectors_with_random(
+    let dataset = load_benchmark_dataset_for_sweep(
         &args.dataset,
         &args.data_dir,
         args.num_vectors,
+        0, // index path only needs base vectors
         args.dim,
         args.seed,
     )?;
+    let vectors = dataset.vectors().to_vec();
+    let dim = dataset.dim();
     println!("Loaded {} vectors, dim={}", vectors.len(), dim);
 
     let embedding = registry.register(
         EmbeddingBuilder::new(&model, dim as u32, distance)
             .with_hnsw_m(args.m as u16)
-            .with_hnsw_ef_construction(args.ef_construction as u16),
+            .with_hnsw_ef_construction(args.ef_construction as u16)
+            .with_storage_type(storage_type),
     )?;
     print_embedding_summary_from_db(storage.transaction_db()?, &args.db_path, embedding.code())?;
 
@@ -534,10 +583,13 @@ pub async fn index(args: IndexArgs) -> Result<()> {
     let vectors_to_add = &vectors[existing_count..];
     let total = vectors_to_add.len();
 
-    println!("\nInserting {} vectors (starting from {})...", total, existing_count);
+    println!(
+        "\nInserting {} vectors (starting from {})...",
+        total, existing_count
+    );
 
     let mut inserted = 0usize;
-    let mut errors = 0usize;
+    let errors = 0usize;
     let mut peak_rss: u64 = 0;
     let mut last_progress = Instant::now();
     let progress_interval = Duration::from_secs(args.progress_interval);
@@ -562,7 +614,11 @@ pub async fn index(args: IndexArgs) -> Result<()> {
             let elapsed = start.elapsed().as_secs_f64();
             let rate = inserted as f64 / elapsed.max(0.0001);
             let remaining = total.saturating_sub(inserted);
-            let eta_secs = if rate > 0.0 { remaining as f64 / rate } else { 0.0 };
+            let eta_secs = if rate > 0.0 {
+                remaining as f64 / rate
+            } else {
+                0.0
+            };
             let eta_str = format_eta(eta_secs);
             print!(
                 "\r[{:>6.2}%] {}/{} vectors | {:.1} vec/s | Errors: {} | ETA: {}    ",
@@ -611,37 +667,49 @@ pub async fn index(args: IndexArgs) -> Result<()> {
         &args.dataset,
     );
     meta.num_vectors = existing_count + inserted;
+    meta.embedding_code = Some(embedding.code());
+    meta.storage_type = Some(format!("{:?}", storage_type).to_lowercase());
     if is_random {
         meta.vector_seed = args.seed;
         meta.query_seed = args.seed.saturating_add(1_000_000);
     }
     meta.checkpoint(&args.db_path)?;
-    println!("Metadata saved: {:?}", BenchmarkMetadata::path(&args.db_path));
+    println!(
+        "Metadata saved: {:?}",
+        BenchmarkMetadata::path(&args.db_path)
+    );
 
-        if let Some(output_path) = args.output {
-            let (embedding_code, embedding_spec) =
-                resolve_embedding_spec_from_db(storage.transaction_db()?, Some(embedding.code()), None, None, None)?;
-            let json = serde_json::json!({
-                "command": "index",
-                "config": {
-                    "dataset": args.dataset,
-                    "num_vectors": args.num_vectors,
+    if let Some(output_path) = args.output {
+        let (embedding_code, embedding_spec) = resolve_embedding_spec_from_db(
+            storage.transaction_db()?,
+            Some(embedding.code()),
+            None,
+            None,
+            None,
+            None,
+        )?;
+        let json = serde_json::json!({
+            "command": "index",
+            "config": {
+                "dataset": args.dataset,
+                "num_vectors": args.num_vectors,
                 "dim": dim,
                 "hnsw_m": args.m,
                 "hnsw_ef_construction": args.ef_construction,
                 "batch_size": args.batch_size,
                 "seed": args.seed,
-                    "distance": format!("{:?}", distance).to_lowercase(),
-                    "async_workers": args.async_workers,
-                    "stream": args.stream,
-                },
-                "embedding": embedding_spec_json(embedding_code, &embedding_spec),
-                "results": {
-                    "vectors_inserted": inserted,
-                    "errors": errors,
-                    "duration_secs": build_time,
-                    "throughput_vec_per_sec": inserted as f64 / build_time.max(0.0001),
-                    "peak_rss_bytes": peak_rss,
+                "distance": format!("{:?}", distance).to_lowercase(),
+                "storage_type": format!("{:?}", storage_type).to_lowercase(),
+                "async_workers": args.async_workers,
+                "stream": args.stream,
+            },
+            "embedding": embedding_spec_json(embedding_code, &embedding_spec),
+            "results": {
+                "vectors_inserted": inserted,
+                "errors": errors,
+                "duration_secs": build_time,
+                "throughput_vec_per_sec": inserted as f64 / build_time.max(0.0001),
+                "peak_rss_bytes": peak_rss,
             }
         });
 
@@ -667,7 +735,11 @@ pub struct QueryArgs {
     #[arg(long)]
     pub embedding_code: Option<u64>,
 
-    /// Dataset for queries (to load test vectors)
+    /// Expected storage type for embedding resolution: f32 or f16
+    #[arg(long)]
+    pub storage_type: Option<String>,
+
+    /// Dataset for queries: laion, sift, gist, cohere, glove, random
     #[arg(long)]
     pub dataset: String,
 
@@ -728,13 +800,28 @@ pub async fn query(args: QueryArgs) -> Result<()> {
         anyhow::bail!("No index found at {:?}. Run 'index' first.", args.db_path);
     }
     let meta = BenchmarkMetadata::load(&args.db_path)?;
-    println!("Index: {} vectors, dim={}, distance={}", meta.num_vectors, meta.dim, meta.distance);
+    println!(
+        "Index: {} vectors, dim={}, distance={}",
+        meta.num_vectors, meta.dim, meta.distance
+    );
 
     // Parse distance
     let distance = match meta.distance.as_str() {
         "cosine" => Distance::Cosine,
         "l2" => Distance::L2,
         _ => Distance::Cosine,
+    };
+
+    let meta_storage_type = match meta.storage_type.as_deref() {
+        Some(value) => Some(
+            parse_storage_type(value)
+                .with_context(|| format!("Invalid storage_type in metadata: {}", value))?,
+        ),
+        None => None,
+    };
+    let expected_storage_type = match args.storage_type.as_deref() {
+        Some(value) => Some(parse_storage_type(value)?),
+        None => meta_storage_type,
     };
 
     let is_random = args.dataset.to_lowercase() == "random";
@@ -754,19 +841,23 @@ pub async fn query(args: QueryArgs) -> Result<()> {
         (Vec::new(), Vec::new(), skip_recall, vector_seed, query_seed)
     } else {
         // Load queries and ground truth
-        let (db_vectors, queries, _dim) = load_dataset_for_query(
+        let dataset = load_benchmark_dataset_for_sweep(
             &args.dataset,
             &args.data_dir,
             meta.num_vectors,
             args.num_queries,
+            dim,
+            args.seed.unwrap_or(42),
         )?;
+        let db_vectors = dataset.vectors().to_vec();
+        let queries = dataset.queries().to_vec();
         println!("Loaded {} queries, dim={}", queries.len(), dim);
 
         let ground_truth = if args.skip_recall {
             Vec::new()
         } else {
             println!("Computing ground truth...");
-            compute_ground_truth(&db_vectors, &queries, args.k, distance)
+            benchmark::compute_ground_truth_parallel(&db_vectors, &queries, args.k, distance)
         };
         (queries, ground_truth, args.skip_recall, 0, 0)
     };
@@ -781,8 +872,9 @@ pub async fn query(args: QueryArgs) -> Result<()> {
     registry.set_storage(storage.clone())?;
     let model = format!("bench-{}", args.dataset.to_lowercase());
     let txn_db = storage.transaction_db()?;
-    let (embedding_code, embedding_spec) = if let Some(code) = args.embedding_code {
-        resolve_embedding_spec_from_db(txn_db, Some(code), None, None, None)?
+    let selected_embedding_code = args.embedding_code.or(meta.embedding_code);
+    let (embedding_code, embedding_spec) = if let Some(code) = selected_embedding_code {
+        resolve_embedding_spec_from_db(txn_db, Some(code), None, None, None, None)?
     } else {
         resolve_embedding_spec_from_db(
             txn_db,
@@ -790,6 +882,7 @@ pub async fn query(args: QueryArgs) -> Result<()> {
             Some(&model),
             Some(dim as u32),
             Some(meta.distance.as_str()),
+            expected_storage_type,
         )?
     };
 
@@ -802,6 +895,16 @@ pub async fn query(args: QueryArgs) -> Result<()> {
             dim,
             distance
         );
+    }
+    if let Some(storage_type) = expected_storage_type {
+        if embedding_spec.storage_type != storage_type {
+            anyhow::bail!(
+                "Embedding storage_type mismatch for code {}: spec {:?}, expected {:?}",
+                embedding_code,
+                embedding_spec.storage_type,
+                storage_type
+            );
+        }
     }
 
     if registry.get_by_code(embedding_code).is_none() {
@@ -816,11 +919,10 @@ pub async fn query(args: QueryArgs) -> Result<()> {
         std::io::stdin()
             .read_to_string(&mut input)
             .context("Failed to read stdin")?;
-        let query: Vec<f32> = serde_json::from_str(&input)
-            .context("Expected stdin as JSON array of floats")?;
+        let query: Vec<f32> =
+            serde_json::from_str(&input).context("Expected stdin as JSON array of floats")?;
 
-        let (search_reader, query_rx) =
-            create_reader_with_storage(ReaderConfig::default());
+        let (search_reader, query_rx) = create_reader_with_storage(ReaderConfig::default());
         let query_handles = spawn_query_consumers_with_storage_autoreg(
             query_rx,
             ReaderConfig::default(),
@@ -831,7 +933,6 @@ pub async fn query(args: QueryArgs) -> Result<()> {
         let timeout = std::time::Duration::from_secs(30);
         let results = SearchKNN::new(&embedding, query, args.k)
             .with_ef(args.ef_search)
-            .exact()
             .run(&search_reader, timeout)
             .await?;
 
@@ -843,6 +944,7 @@ pub async fn query(args: QueryArgs) -> Result<()> {
                     "k": args.k,
                     "ef_search": args.ef_search,
                     "stdin": true,
+                    "storage_type": format!("{:?}", embedding_spec.storage_type).to_lowercase(),
                 },
                 // T7.2: JSON output with typed external keys
                 "results": results.iter().map(|r| serde_json::json!({
@@ -861,9 +963,7 @@ pub async fn query(args: QueryArgs) -> Result<()> {
                 // T7.1: Use external_key with Debug formatting (supports all ExternalKey variants)
                 println!(
                     "  vec_id={} external_key={:?} distance={:.6}",
-                    result.vec_id,
-                    result.external_key,
-                    result.distance
+                    result.vec_id, result.external_key, result.distance
                 );
             }
         }
@@ -877,8 +977,7 @@ pub async fn query(args: QueryArgs) -> Result<()> {
     }
 
     // Setup query reader/consumers
-    let (search_reader, query_rx) =
-        create_reader_with_storage(ReaderConfig::default());
+    let (search_reader, query_rx) = create_reader_with_storage(ReaderConfig::default());
     let query_handles = spawn_query_consumers_with_storage_autoreg(
         query_rx,
         ReaderConfig::default(),
@@ -887,7 +986,11 @@ pub async fn query(args: QueryArgs) -> Result<()> {
     );
 
     // Run queries
-    let query_count = if is_random { args.num_queries } else { queries.len() };
+    let query_count = if is_random {
+        args.num_queries
+    } else {
+        queries.len()
+    };
     let peak_rss_before = get_rss_bytes();
 
     println!(
@@ -914,7 +1017,6 @@ pub async fn query(args: QueryArgs) -> Result<()> {
             let start = Instant::now();
             let _results = SearchKNN::new(&embedding, query, args.k)
                 .with_ef(args.ef_search)
-                .exact()
                 .run(&search_reader, timeout)
                 .await?;
             let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -930,15 +1032,16 @@ pub async fn query(args: QueryArgs) -> Result<()> {
             let start = Instant::now();
             let results = SearchKNN::new(&embedding, query.clone(), args.k)
                 .with_ef(args.ef_search)
-                .exact()
                 .run(&search_reader, timeout)
                 .await?;
             let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
 
             latencies.push(latency_ms);
             if !skip_recall {
-                let result_ids: Vec<usize> =
-                    results.iter().map(|result| result.vec_id as usize).collect();
+                let result_ids: Vec<usize> = results
+                    .iter()
+                    .map(|result| result.vec_id as usize)
+                    .collect();
                 search_results.push(result_ids);
             }
 
@@ -964,13 +1067,12 @@ pub async fn query(args: QueryArgs) -> Result<()> {
             args.recall_sample_size
         );
 
-        let mut db_gen =
-            motlie_db::vector::benchmark::StreamingVectorGenerator::new_with_distance(
-                dim,
-                meta.num_vectors,
-                vector_seed,
-                distance,
-            );
+        let mut db_gen = motlie_db::vector::benchmark::StreamingVectorGenerator::new_with_distance(
+            dim,
+            meta.num_vectors,
+            vector_seed,
+            distance,
+        );
         let mut db_vectors: Vec<Vec<f32>> = Vec::with_capacity(meta.num_vectors);
         while let Some(batch) = db_gen.next_batch(10_000) {
             db_vectors.extend(batch);
@@ -997,10 +1099,8 @@ pub async fn query(args: QueryArgs) -> Result<()> {
                 distance,
             );
 
-        let mut all_search_results: Vec<Vec<usize>> =
-            Vec::with_capacity(args.recall_sample_size);
-        let mut all_ground_truth: Vec<Vec<usize>> =
-            Vec::with_capacity(args.recall_sample_size);
+        let mut all_search_results: Vec<Vec<usize>> = Vec::with_capacity(args.recall_sample_size);
+        let mut all_ground_truth: Vec<Vec<usize>> = Vec::with_capacity(args.recall_sample_size);
 
         for qi in 0..args.recall_sample_size {
             let query = recall_query_gen.generate_query();
@@ -1011,20 +1111,17 @@ pub async fn query(args: QueryArgs) -> Result<()> {
                 .map(|(i, v)| (i, distance.compute(&query, v)))
                 .collect();
             distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-            let ground_truth: Vec<usize> = distances
-                .iter()
-                .take(args.k)
-                .map(|(i, _)| *i)
-                .collect();
+            let ground_truth: Vec<usize> = distances.iter().take(args.k).map(|(i, _)| *i).collect();
             all_ground_truth.push(ground_truth);
 
             let results = SearchKNN::new(&embedding, query, args.k)
                 .with_ef(args.ef_search)
-                .exact()
                 .run(&search_reader, timeout)
                 .await?;
-            let result_indices: Vec<usize> =
-                results.iter().map(|result| result.vec_id as usize).collect();
+            let result_indices: Vec<usize> = results
+                .iter()
+                .map(|result| result.vec_id as usize)
+                .collect();
             all_search_results.push(result_indices);
 
             if (qi + 1) % 20 == 0 || qi + 1 == args.recall_sample_size {
@@ -1038,7 +1135,11 @@ pub async fn query(args: QueryArgs) -> Result<()> {
         }
         println!();
 
-        recall_at_k = Some(compute_recall(&all_search_results, &all_ground_truth, args.k));
+        recall_at_k = Some(compute_recall(
+            &all_search_results,
+            &all_ground_truth,
+            args.k,
+        ));
     }
     latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let stats = LatencyStats::from_latencies(&latencies);
@@ -1068,6 +1169,7 @@ pub async fn query(args: QueryArgs) -> Result<()> {
                 "ef_search": args.ef_search,
                 "skip_recall": skip_recall,
                 "embedding_code": embedding_code,
+                "storage_type": format!("{:?}", embedding_spec.storage_type).to_lowercase(),
             },
             "embedding": embedding_spec_json(embedding_code, &embedding_spec),
             "results": {
@@ -1101,7 +1203,7 @@ pub async fn query(args: QueryArgs) -> Result<()> {
 
 #[derive(Parser)]
 pub struct SweepArgs {
-    /// Dataset: laion, sift, gist, random
+    /// Dataset: laion, sift, gist, cohere, glove, random
     #[arg(long)]
     pub dataset: String,
 
@@ -1173,24 +1275,42 @@ pub struct SweepArgs {
     /// Example: --assert-recall 0.80 requires all recall values >= 80%
     #[arg(long)]
     pub assert_recall: Option<f64>,
+
+    /// Vector storage type: f32 (full precision) or f16 (half precision, 50% smaller)
+    #[arg(long, default_value = "f32")]
+    pub storage_type: String,
 }
 
 pub async fn sweep(args: SweepArgs) -> Result<()> {
+    let storage_type = parse_storage_type(&args.storage_type)?;
+
     println!("=== Parameter Sweep ===");
     println!("Dataset: {}", args.dataset);
-    println!("Vectors: {}, Queries: {}", args.num_vectors, args.num_queries);
+    println!(
+        "Vectors: {}, Queries: {}",
+        args.num_vectors, args.num_queries
+    );
+    println!("Storage type: {:?}", storage_type);
 
     // Parse parameters
-    let ef_values: Vec<usize> = args.ef.split(',')
+    let ef_values: Vec<usize> = args
+        .ef
+        .split(',')
         .map(|s| s.trim().parse().expect("Invalid ef value"))
         .collect();
-    let k_values: Vec<usize> = args.k.split(',')
+    let k_values: Vec<usize> = args
+        .k
+        .split(',')
         .map(|s| s.trim().parse().expect("Invalid k value"))
         .collect();
-    let bits_values: Vec<u8> = args.bits.split(',')
+    let bits_values: Vec<u8> = args
+        .bits
+        .split(',')
         .map(|s| s.trim().parse().expect("Invalid bits value"))
         .collect();
-    let rerank_values: Vec<usize> = args.rerank.split(',')
+    let rerank_values: Vec<usize> = args
+        .rerank
+        .split(',')
         .map(|s| s.trim().parse().expect("Invalid rerank value"))
         .collect();
 
@@ -1201,33 +1321,34 @@ pub async fn sweep(args: SweepArgs) -> Result<()> {
         println!("Rerank factors: {:?}", rerank_values);
     }
 
-    // Determine distance and dimension from dataset
-    let (distance, dim) = match args.dataset.to_lowercase().as_str() {
-        "laion" => (Distance::Cosine, benchmark::LAION_EMBEDDING_DIM),
-        "sift" => (Distance::L2, benchmark::SIFT_EMBEDDING_DIM),
-        "gist" => (Distance::L2, benchmark::GIST_EMBEDDING_DIM),
-        "random" => (Distance::Cosine, args.dim),
-        _ => anyhow::bail!("Unknown dataset: {}. Use: laion, sift, gist, random", args.dataset),
-    };
+    let dataset = load_benchmark_dataset_for_sweep(
+        &args.dataset,
+        &args.data_dir,
+        args.num_vectors,
+        args.num_queries,
+        args.dim,
+        args.seed,
+    )?;
+    let dim = dataset.dim();
+    let distance = dataset.distance();
+    println!(
+        "Loaded dataset: {} db vectors, {} queries, dim={}, distance={:?}",
+        dataset.vectors().len(),
+        dataset.queries().len(),
+        dim,
+        distance
+    );
 
-    // Load dataset
-    let (db_vectors, queries, _dim) = if args.dataset.to_lowercase() == "random" {
-        let ds = RandomDataset::generate(args.num_vectors, args.num_queries, args.dim, args.seed);
-        (ds.vectors, ds.queries, ds.dim)
-    } else {
-        load_dataset_for_query(
-            &args.dataset,
-            &args.data_dir,
-            args.num_vectors,
-            args.num_queries,
-        )?
-    };
-    println!("Loaded {} db vectors, {} queries, dim={}", db_vectors.len(), queries.len(), dim);
-
-    // Compute ground truth
     let max_k = *k_values.iter().max().unwrap_or(&10);
-    println!("Computing ground truth (k={})...", max_k);
-    let ground_truth = compute_ground_truth(&db_vectors, &queries, max_k, distance);
+    let ground_truth = match dataset.ground_truth(max_k) {
+        Some(gt) => gt,
+        None => benchmark::compute_ground_truth_parallel(
+            dataset.vectors(),
+            dataset.queries(),
+            max_k,
+            distance,
+        ),
+    };
 
     // Create temp database
     let temp_path = std::env::temp_dir().join(format!("bench_vector_{}", std::process::id()));
@@ -1238,62 +1359,24 @@ pub async fn sweep(args: SweepArgs) -> Result<()> {
     let db_path = &temp_path;
     println!("Database: {:?}", db_path);
 
-    // Initialize storage
+    // Initialize storage + build index through benchmark crate
     let mut storage = Storage::readwrite(db_path);
     storage.ready()?;
-
-    // Build index
-    let nav_cache = Arc::new(NavigationCache::new());
-    let embedding_code: EmbeddingCode = 1;
-    let storage_type = VectorElementType::F16;
-
-    let spec = EmbeddingSpec {
-        code: embedding_code,
-        model: "bench".to_string(),
-        dim: dim as u32,
+    let storage = Arc::new(storage);
+    let (index, embedding, build_time) = benchmark::build_hnsw_index(
+        &storage,
+        dataset.vectors(),
+        dim,
+        args.m,
+        args.ef_construction,
         distance,
         storage_type,
-        hnsw_m: args.m as u16,
-        hnsw_ef_construction: args.ef_construction as u16,
-        rabitq_bits: 1,
-        rabitq_seed: 42,
-    };
-
-    let index = hnsw::Index::from_spec(
-        embedding_code,
-        &spec,
-        1000, // batch_threshold
-        nav_cache.clone(),
+    )?;
+    println!(
+        "Index built in {:.2}s ({:.1} vec/s)",
+        build_time,
+        dataset.vectors().len() as f64 / build_time.max(0.0001)
     );
-
-    // Store vectors and build index
-    let txn_db = storage.transaction_db()?;
-    let vectors_cf = txn_db
-        .cf_handle(Vectors::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
-
-    println!("\nBuilding HNSW index (M={}, ef_construction={})...", args.m, args.ef_construction);
-    let start = Instant::now();
-
-    for (i, vector) in db_vectors.iter().enumerate() {
-        let vec_id = i as VecId;
-        let key = VectorCfKey(embedding_code, vec_id);
-        let value_bytes = Vectors::value_to_bytes_typed(vector, storage_type);
-
-        // Use transaction for atomic vector storage + HNSW insert
-        let txn = txn_db.transaction();
-        txn.put_cf(&vectors_cf, Vectors::key_to_bytes(&key), value_bytes)?;
-        let cache_update = hnsw::insert(&index, &txn, &txn_db, &storage, vec_id, vector)?;
-        txn.commit()?;
-        cache_update.apply(index.nav_cache());
-
-        if (i + 1) % 10000 == 0 {
-            println!("  {}/{} vectors", i + 1, db_vectors.len());
-        }
-    }
-
-    let build_time = start.elapsed().as_secs_f64();
-    println!("Index built in {:.2}s ({:.1} vec/s)", build_time, db_vectors.len() as f64 / build_time);
 
     // Create results directory
     std::fs::create_dir_all(&args.results_dir)?;
@@ -1302,89 +1385,129 @@ pub async fn sweep(args: SweepArgs) -> Result<()> {
     let mut overall_min_recall: f64 = 1.0;
 
     if args.rabitq {
-        if args.compare_simd {
-            // Run both SIMD and scalar modes for comparison
-            println!("\n=== SIMD vs Scalar Comparison ===\n");
+        let mut config = benchmark::ExperimentConfig::default()
+            .with_ef_search(ef_values.clone())
+            .with_k_values(k_values.clone())
+            .with_rabitq_bits(bits_values.clone())
+            .with_rerank_factors(rerank_values.clone());
+        config.dim = dim;
+        config.distance = distance;
 
-            println!("--- SIMD Mode ---");
-            let min_recall = run_rabitq_sweep(
-                &index,
-                &storage,
-                &db_vectors,
-                &queries,
-                &ground_truth,
-                &ef_values,
-                &k_values,
-                &bits_values,
-                &rerank_values,
-                dim,
-                build_time,
-                &args.results_dir,
-                true, // use_simd_dot
-                args.show_pareto,
-            )?;
-            if min_recall < overall_min_recall {
-                overall_min_recall = min_recall;
-            }
-
-            println!("\n--- Scalar Mode ---");
-            let min_recall = run_rabitq_sweep(
-                &index,
-                &storage,
-                &db_vectors,
-                &queries,
-                &ground_truth,
-                &ef_values,
-                &k_values,
-                &bits_values,
-                &rerank_values,
-                dim,
-                build_time,
-                &args.results_dir,
-                false, // use_simd_dot
-                args.show_pareto,
-            )?;
-            if min_recall < overall_min_recall {
-                overall_min_recall = min_recall;
-            }
+        let sweep_modes: Vec<(&str, bool)> = if args.compare_simd {
+            vec![("simd", true), ("scalar", false)]
         } else {
-            // Single mode sweep
-            let min_recall = run_rabitq_sweep(
+            vec![("single", args.simd_dot)]
+        };
+
+        for (mode_name, use_simd_dot) in sweep_modes {
+            if args.compare_simd {
+                println!("\n=== RaBitQ mode: {} ===", mode_name);
+            } else {
+                println!("\n=== RaBitQ mode: simd_dot={} ===", use_simd_dot);
+            }
+
+            let rabitq_results = benchmark::run_rabitq_experiments(
+                &config,
                 &index,
-                &storage,
-                &db_vectors,
-                &queries,
+                storage.as_ref(),
+                dataset.as_ref(),
                 &ground_truth,
-                &ef_values,
-                &k_values,
-                &bits_values,
-                &rerank_values,
-                dim,
                 build_time,
-                &args.results_dir,
-                args.simd_dot,
-                args.show_pareto,
+                embedding.code(),
+                use_simd_dot,
             )?;
-            overall_min_recall = min_recall;
+
+            let csv_path = if args.compare_simd {
+                args.results_dir
+                    .join(format!("rabitq_sweep_{}.csv", mode_name))
+            } else {
+                args.results_dir.join("rabitq_sweep.csv")
+            };
+            save_rabitq_results_csv(&rabitq_results, &csv_path)?;
+            println!("RaBitQ sweep saved to {:?}", csv_path);
+
+            if let Some(min) = rabitq_results
+                .iter()
+                .map(|r| r.recall_mean)
+                .min_by(|a, b| a.partial_cmp(b).unwrap())
+            {
+                overall_min_recall = overall_min_recall.min(min);
+            }
+
+            if args.show_pareto {
+                let pareto_inputs: Vec<ParetoInput> = rabitq_results
+                    .iter()
+                    .map(|r| ParetoInput {
+                        bits_per_dim: r.bits_per_dim,
+                        ef_search: r.ef_search,
+                        rerank_factor: r.rerank_factor,
+                        k: r.k,
+                        recall: r.recall_mean,
+                        qps: r.qps,
+                    })
+                    .collect();
+                for &k in &k_values {
+                    let frontier = benchmark::compute_pareto_frontier_for_k(&pareto_inputs, k);
+                    if !frontier.is_empty() {
+                        let title = if args.compare_simd {
+                            format!("Pareto Frontier ({} mode, Recall@{} vs QPS)", mode_name, k)
+                        } else {
+                            format!("Pareto Frontier (Recall@{} vs QPS)", k)
+                        };
+                        print_pareto_frontier(&frontier, &title);
+                    }
+                }
+            }
         }
     } else {
-        // Standard HNSW sweep
-        let min_recall = run_hnsw_sweep(
-            &index,
-            &storage,
-            &queries,
+        println!("\n=== HNSW Parameter Sweep ===");
+        for &ef_search in &ef_values {
+            let result = benchmark::run_single_experiment(
+                &embedding,
+                &storage,
+                dataset.as_ref(),
+                &ground_truth,
+                &k_values,
+                ef_search,
+                dataset.vectors().len(),
+                build_time,
+                &format!("HNSW-{}", distance),
+                false,
+            )?;
+            if let Some(min) = result
+                .recall_at_k
+                .values()
+                .cloned()
+                .min_by(|a, b| a.partial_cmp(b).unwrap())
+            {
+                overall_min_recall = overall_min_recall.min(min);
+            }
+        }
+
+        let flat = benchmark::run_flat_baseline(
+            dataset.as_ref(),
             &ground_truth,
-            &ef_values,
             &k_values,
-            build_time,
+            dataset.vectors().len(),
+            false,
         )?;
-        overall_min_recall = min_recall;
+        if let Some(min) = flat
+            .recall_at_k
+            .values()
+            .cloned()
+            .min_by(|a, b| a.partial_cmp(b).unwrap())
+        {
+            overall_min_recall = overall_min_recall.min(min);
+        }
     }
 
     // Check recall assertion if threshold provided
     if let Some(threshold) = args.assert_recall {
         println!("\n=== Recall Assertion ===");
-        println!("Minimum recall observed: {:.1}%", overall_min_recall * 100.0);
+        println!(
+            "Minimum recall observed: {:.1}%",
+            overall_min_recall * 100.0
+        );
         println!("Required threshold: {:.1}%", threshold * 100.0);
 
         if overall_min_recall < threshold {
@@ -1408,7 +1531,11 @@ fn format_eta(secs: f64) -> String {
     if secs > 86400.0 * 365.0 {
         "N/A".to_string()
     } else if secs > 3600.0 {
-        format!("{}h{}m", (secs / 3600.0) as u64, ((secs % 3600.0) / 60.0) as u64)
+        format!(
+            "{}h{}m",
+            (secs / 3600.0) as u64,
+            ((secs % 3600.0) / 60.0) as u64
+        )
     } else if secs > 60.0 {
         format!("{}m{}s", (secs / 60.0) as u64, (secs % 60.0) as u64)
     } else {
@@ -1445,14 +1572,6 @@ fn load_embedding_specs_from_db(db: &rocksdb::TransactionDB) -> Result<Vec<(u64,
     Ok(specs)
 }
 
-/// Load embedding specs by opening storage (standalone entry point only).
-fn load_embedding_specs(db_path: &PathBuf) -> Result<Vec<(u64, EmbeddingSpec)>> {
-    let mut storage = Storage::readwrite(db_path);
-    storage.ready()?;
-    let db = storage.transaction_db()?;
-    load_embedding_specs_from_db(db)
-}
-
 /// Resolve an embedding spec from an already-open TransactionDB.
 fn resolve_embedding_spec_from_db(
     db: &rocksdb::TransactionDB,
@@ -1460,21 +1579,10 @@ fn resolve_embedding_spec_from_db(
     model: Option<&str>,
     dim: Option<u32>,
     distance: Option<&str>,
+    storage_type: Option<VectorElementType>,
 ) -> Result<(u64, EmbeddingSpec)> {
     let specs = load_embedding_specs_from_db(db)?;
-    find_embedding_spec(specs, code, model, dim, distance)
-}
-
-/// Resolve an embedding spec by opening storage (standalone entry point only).
-fn resolve_embedding_spec(
-    db_path: &PathBuf,
-    code: Option<u64>,
-    model: Option<&str>,
-    dim: Option<u32>,
-    distance: Option<&str>,
-) -> Result<(u64, EmbeddingSpec)> {
-    let specs = load_embedding_specs(db_path)?;
-    find_embedding_spec(specs, code, model, dim, distance)
+    find_embedding_spec(specs, code, model, dim, distance, storage_type)
 }
 
 fn find_embedding_spec(
@@ -1483,6 +1591,7 @@ fn find_embedding_spec(
     model: Option<&str>,
     dim: Option<u32>,
     distance: Option<&str>,
+    storage_type: Option<VectorElementType>,
 ) -> Result<(u64, EmbeddingSpec)> {
     if let Some(code) = code {
         return specs
@@ -1497,17 +1606,50 @@ fn find_embedding_spec(
         distance.ok_or_else(|| anyhow::anyhow!("--distance is required without --code"))?;
     let distance = parse_distance(distance_str)?;
 
-    specs
+    let matches: Vec<(u64, EmbeddingSpec)> = specs
         .into_iter()
-        .find(|(_, spec)| spec.model == model && spec.dim == dim && spec.distance == distance)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
+        .filter(|(_, spec)| {
+            spec.model == model
+                && spec.dim == dim
+                && spec.distance == distance
+                && storage_type.map_or(true, |st| spec.storage_type == st)
+        })
+        .collect();
+
+    if matches.is_empty() {
+        return match storage_type {
+            Some(st) => Err(anyhow::anyhow!(
+                "No embedding found for model={}, dim={}, distance={}, storage_type={:?}",
+                model,
+                dim,
+                distance_str,
+                st
+            )),
+            None => Err(anyhow::anyhow!(
                 "No embedding found for model={}, dim={}, distance={}",
                 model,
                 dim,
                 distance_str
-            )
-        })
+            )),
+        };
+    }
+
+    if matches.len() > 1 && storage_type.is_none() {
+        let choices = matches
+            .iter()
+            .map(|(code, spec)| format!("code={} storage={:?}", code, spec.storage_type))
+            .collect::<Vec<_>>()
+            .join(", ");
+        anyhow::bail!(
+            "Multiple embeddings match model={}, dim={}, distance={}. Specify --embedding-code or --storage-type. Matches: {}",
+            model,
+            dim,
+            distance_str,
+            choices
+        );
+    }
+
+    Ok(matches.into_iter().next().expect("non-empty matches"))
 }
 
 fn embedding_spec_json(code: u64, spec: &EmbeddingSpec) -> serde_json::Value {
@@ -1525,8 +1667,12 @@ fn embedding_spec_json(code: u64, spec: &EmbeddingSpec) -> serde_json::Value {
 }
 
 /// Print embedding summary from an already-open TransactionDB.
-fn print_embedding_summary_from_db(db: &rocksdb::TransactionDB, db_path: &PathBuf, code: u64) -> Result<()> {
-    let (code, spec) = resolve_embedding_spec_from_db(db, Some(code), None, None, None)?;
+fn print_embedding_summary_from_db(
+    db: &rocksdb::TransactionDB,
+    db_path: &PathBuf,
+    code: u64,
+) -> Result<()> {
+    let (code, spec) = resolve_embedding_spec_from_db(db, Some(code), None, None, None, None)?;
     println!("\nEmbedding registered:");
     println!("  Code: {}", code);
     println!("  Model: {}", spec.model);
@@ -1545,23 +1691,6 @@ fn print_embedding_summary_from_db(db: &rocksdb::TransactionDB, db_path: &PathBu
     Ok(())
 }
 
-/// Load vectors for an embedding using reservoir sampling.
-///
-/// Uses Algorithm R to uniformly sample `limit` vectors from all vectors
-/// in the embedding, avoiding bias from insertion order.
-fn load_vectors_for_embedding(
-    db_path: &PathBuf,
-    embedding: u64,
-    storage_type: VectorElementType,
-    limit: usize,
-    seed: u64,
-) -> Result<Vec<(VecId, Vec<f32>)>> {
-    let mut storage = Storage::readwrite(db_path);
-    storage.ready()?;
-    let db = storage.transaction_db()?;
-    load_vectors_for_embedding_from_db(db, embedding, storage_type, limit, seed)
-}
-
 /// Load vectors from an already-open TransactionDB using reservoir sampling.
 fn load_vectors_for_embedding_from_db(
     db: &rocksdb::TransactionDB,
@@ -1578,7 +1707,10 @@ fn load_vectors_for_embedding_from_db(
         .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
 
     let prefix = embedding.to_be_bytes();
-    let iter = db.iterator_cf(&cf, rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward));
+    let iter = db.iterator_cf(
+        &cf,
+        rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+    );
 
     // Reservoir sampling (Algorithm R) for unbiased random sample
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
@@ -1609,296 +1741,54 @@ fn load_vectors_for_embedding_from_db(
         count += 1;
     }
 
-    println!("Reservoir sampled {} vectors from {} total", reservoir.len(), count);
+    println!(
+        "Reservoir sampled {} vectors from {} total",
+        reservoir.len(),
+        count
+    );
     Ok(reservoir)
 }
 
-fn load_dataset_vectors(
+fn load_benchmark_dataset_for_sweep(
     dataset: &str,
     data_dir: &PathBuf,
-    max_vectors: usize,
-) -> Result<(Vec<Vec<f32>>, usize)> {
-    match dataset.to_lowercase().as_str() {
-        "laion" => {
-            let ds = LaionDataset::load(data_dir, max_vectors)?;
-            let dim = ds.dim;
-            Ok((ds.image_embeddings, dim))
-        }
-        "sift" => {
-            let ds = SiftDataset::load(data_dir, max_vectors, 0)?;
-            let dim = benchmark::SIFT_EMBEDDING_DIM;
-            Ok((ds.base_vectors, dim))
-        }
-        "gist" => {
-            let ds = GistDataset::load(data_dir, max_vectors, GIST_QUERIES)?;
-            let dim = benchmark::GIST_EMBEDDING_DIM;
-            Ok((ds.base_vectors, dim))
-        }
-        _ => anyhow::bail!("Unknown dataset: {}. Use: laion, sift, gist", dataset),
-    }
-}
-
-/// Load dataset vectors with support for random dataset generation.
-fn load_dataset_vectors_with_random(
-    dataset: &str,
-    data_dir: &PathBuf,
-    max_vectors: usize,
+    num_vectors: usize,
+    num_queries: usize,
     dim: usize,
     seed: u64,
-) -> Result<(Vec<Vec<f32>>, usize)> {
-    match dataset.to_lowercase().as_str() {
-        "random" => {
-            println!("Generating {} random vectors (dim={}, seed={})...", max_vectors, dim, seed);
-            let ds = RandomDataset::generate(max_vectors, 0, dim, seed);
-            Ok((ds.vectors, ds.dim))
-        }
-        _ => load_dataset_vectors(dataset, data_dir, max_vectors),
-    }
-}
-
-fn load_dataset_for_query(
-    dataset: &str,
-    data_dir: &PathBuf,
-    num_db: usize,
-    num_queries: usize,
-) -> Result<(Vec<Vec<f32>>, Vec<Vec<f32>>, usize)> {
+) -> Result<Box<dyn benchmark::Dataset>> {
     match dataset.to_lowercase().as_str() {
         "laion" => {
-            let ds = LaionDataset::load(data_dir, num_db)?;
-            let dim = ds.dim;
-            let queries: Vec<Vec<f32>> = ds.text_embeddings.into_iter().take(num_queries).collect();
-            Ok((ds.image_embeddings, queries, dim))
+            let ds = LaionDataset::load(data_dir, num_vectors)?;
+            Ok(Box::new(ds.subset(num_vectors, num_queries)))
         }
         "sift" => {
-            let ds = SiftDataset::load(data_dir, num_db, num_queries)?;
-            let dim = benchmark::SIFT_EMBEDDING_DIM;
-            Ok((ds.base_vectors, ds.query_vectors, dim))
+            let ds = SiftDataset::load(data_dir, num_vectors, num_queries)?;
+            Ok(Box::new(ds.subset(num_vectors, num_queries)))
         }
         "gist" => {
-            let ds = GistDataset::load(data_dir, num_db, num_queries)?;
-            let dim = benchmark::GIST_EMBEDDING_DIM;
-            let queries: Vec<Vec<f32>> = ds.query_vectors.into_iter().take(num_queries).collect();
-            Ok((ds.base_vectors, queries, dim))
+            let ds = GistDataset::load(data_dir, num_vectors, num_queries)?;
+            Ok(Box::new(ds.subset(num_vectors, num_queries)))
         }
-        _ => anyhow::bail!("Unknown dataset: {}", dataset),
+        "cohere" | "cohere-wiki" => {
+            let ds = benchmark::CohereWikipediaDataset::load(data_dir, num_vectors, num_queries)?;
+            Ok(Box::new(ds.subset(num_vectors, num_queries)))
+        }
+        "glove" | "glove-100" => {
+            let ds = benchmark::GloveDataset::load(data_dir, num_vectors, num_queries)?;
+            Ok(Box::new(ds.subset(num_vectors, num_queries)))
+        }
+        "random" => Ok(Box::new(RandomDataset::generate(
+            num_vectors,
+            num_queries,
+            dim,
+            seed,
+        ))),
+        _ => anyhow::bail!(
+            "Unknown dataset: {}. Use: laion, sift, gist, cohere, glove, random",
+            dataset
+        ),
     }
-}
-
-fn compute_ground_truth(
-    db_vectors: &[Vec<f32>],
-    queries: &[Vec<f32>],
-    k: usize,
-    distance: Distance,
-) -> Vec<Vec<usize>> {
-    queries.iter().map(|query| {
-        let mut distances: Vec<(usize, f32)> = db_vectors.iter()
-            .enumerate()
-            .map(|(i, v)| (i, distance.compute(query, v)))
-            .collect();
-        distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-        distances.iter().take(k).map(|(i, _)| *i).collect()
-    }).collect()
-}
-
-/// Run HNSW parameter sweep.
-/// Returns the minimum recall observed across all configurations.
-fn run_hnsw_sweep(
-    index: &hnsw::Index,
-    storage: &Storage,
-    queries: &[Vec<f32>],
-    ground_truth: &[Vec<usize>],
-    ef_values: &[usize],
-    k_values: &[usize],
-    build_time: f64,
-) -> Result<f64> {
-    println!("\n=== HNSW Parameter Sweep ===");
-    println!("{:<10} {:<10} {:<12} {:<10} {:<10} {:<10}", "ef_search", "k", "Recall", "QPS", "P50(ms)", "P99(ms)");
-    println!("{}", "-".repeat(62));
-
-    let max_k = *k_values.iter().max().unwrap_or(&10);
-    let mut min_recall: f64 = 1.0;
-
-    for &ef_search in ef_values {
-        // Run all queries
-        let mut latencies = Vec::with_capacity(queries.len());
-        let mut search_results = Vec::with_capacity(queries.len());
-
-        for query in queries {
-            let start = Instant::now();
-            let results = index.search(storage, query, ef_search, max_k)?;
-            latencies.push(start.elapsed().as_secs_f64() * 1000.0);
-            search_results.push(results.iter().map(|(_, id)| *id as usize).collect());
-        }
-
-        latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let stats = LatencyStats::from_latencies(&latencies);
-
-        for &k in k_values {
-            let recall = compute_recall(&search_results, ground_truth, k);
-            if recall < min_recall {
-                min_recall = recall;
-            }
-            println!(
-                "{:<10} {:<10} {:<12.1}% {:<10.1} {:<10.2} {:<10.2}",
-                ef_search, k, recall * 100.0, stats.qps, stats.p50_ms, stats.p99_ms
-            );
-        }
-    }
-
-    println!("\nBuild time: {:.2}s", build_time);
-    Ok(min_recall)
-}
-
-/// Run RaBitQ parameter sweep.
-/// Returns the minimum recall observed across all configurations.
-fn run_rabitq_sweep(
-    index: &hnsw::Index,
-    storage: &Storage,
-    db_vectors: &[Vec<f32>],
-    queries: &[Vec<f32>],
-    ground_truth: &[Vec<usize>],
-    ef_values: &[usize],
-    k_values: &[usize],
-    bits_values: &[u8],
-    rerank_values: &[usize],
-    dim: usize,
-    build_time: f64,
-    results_dir: &PathBuf,
-    use_simd_dot: bool,
-    show_pareto: bool,
-) -> Result<f64> {
-    let simd_mode = if use_simd_dot { "SIMD" } else { "scalar" };
-    println!("\n=== RaBitQ Parameter Sweep ({}) ===", simd_mode);
-
-    let embedding_code: EmbeddingCode = 1;
-    let mut all_results: Vec<RabitqExperimentResult> = Vec::new();
-    let mut min_recall: f64 = 1.0;
-
-    for &bits in bits_values {
-        println!("\n--- {} bits/dim ({}) ---", bits, simd_mode);
-
-        // Create encoder with SIMD option
-        let encoder = RaBitQ::with_options(dim, bits, 42, use_simd_dot);
-
-        // Build binary code cache
-        let cache = BinaryCodeCache::new();
-        let encode_start = Instant::now();
-
-        for (i, vector) in db_vectors.iter().enumerate() {
-            let (code, correction) = encoder.encode_with_correction(vector);
-            cache.put(embedding_code, i as VecId, code, correction);
-        }
-
-        let encode_time = encode_start.elapsed().as_secs_f64();
-        let (cache_count, cache_bytes) = cache.stats();
-        println!(
-            "Encoded {} vectors in {:.2}s ({:.2} MB)",
-            cache_count, encode_time, cache_bytes as f64 / 1_000_000.0
-        );
-
-        println!("{:<8} {:<8} {:<8} {:<10} {:<10} {:<10} {:<10}",
-            "ef", "rerank", "k", "Recall", "QPS", "P50(ms)", "P99(ms)");
-        println!("{}", "-".repeat(64));
-
-        for &ef_search in ef_values {
-            for &rerank_factor in rerank_values {
-                for &k in k_values {
-                    let candidates = k * rerank_factor;
-                    let mut latencies = Vec::with_capacity(queries.len());
-                    let mut search_results = Vec::with_capacity(queries.len());
-
-                    for query in queries {
-                        let start = Instant::now();
-                        let results = index.search_with_rabitq_cached(
-                            storage, query, &encoder, &cache,
-                            k, ef_search, candidates,
-                        )?;
-                        latencies.push(start.elapsed().as_secs_f64() * 1000.0);
-                        search_results.push(results.iter().map(|(_, id)| *id as usize).collect());
-                    }
-
-                    let recall = compute_recall(&search_results, ground_truth, k);
-                    if recall < min_recall {
-                        min_recall = recall;
-                    }
-                    latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                    let stats = LatencyStats::from_latencies(&latencies);
-
-                    println!(
-                        "{:<8} {:<8} {:<8} {:<10.1}% {:<10.1} {:<10.2} {:<10.2}",
-                        ef_search, rerank_factor, k, recall * 100.0, stats.qps, stats.p50_ms, stats.p99_ms
-                    );
-
-                    // Compute recall std (approximate)
-                    let recalls: Vec<f64> = search_results.iter()
-                        .zip(ground_truth.iter())
-                        .map(|(res, gt)| {
-                            let hits = res.iter().take(k).filter(|id| gt.contains(id)).count();
-                            hits as f64 / k as f64
-                        })
-                        .collect();
-                    let recall_std = std_dev(&recalls);
-
-                    all_results.push(RabitqExperimentResult {
-                        scale: db_vectors.len(),
-                        bits_per_dim: bits,
-                        ef_search,
-                        rerank_factor,
-                        k,
-                        recall_mean: recall,
-                        recall_std,
-                        latency_avg_ms: stats.avg_ms,
-                        latency_p50_ms: stats.p50_ms,
-                        latency_p95_ms: stats.p95_ms,
-                        latency_p99_ms: stats.p99_ms,
-                        qps: stats.qps,
-                        encode_time_s: encode_time,
-                        build_time_s: build_time,
-                    });
-                }
-            }
-        }
-    }
-
-    // Save results
-    let csv_path = results_dir.join("rabitq_sweep.csv");
-    save_rabitq_results_csv(&all_results, &csv_path)?;
-    println!("\nResults saved to {:?}", csv_path);
-
-    // Show Pareto frontier if requested
-    if show_pareto {
-        // Convert to ParetoInput format
-        let pareto_inputs: Vec<ParetoInput> = all_results
-            .iter()
-            .map(|r| ParetoInput {
-                bits_per_dim: r.bits_per_dim,
-                ef_search: r.ef_search,
-                rerank_factor: r.rerank_factor,
-                k: r.k,
-                recall: r.recall_mean,
-                qps: r.qps,
-            })
-            .collect();
-
-        // Compute and display Pareto frontier for each k
-        for &k in k_values {
-            let frontier = benchmark::compute_pareto_frontier_for_k(&pareto_inputs, k);
-            if !frontier.is_empty() {
-                print_pareto_frontier(&frontier, &format!("Pareto Frontier (Recall@{} vs QPS)", k));
-            }
-        }
-    }
-
-    Ok(min_recall)
-}
-
-fn std_dev(values: &[f64]) -> f64 {
-    if values.is_empty() {
-        return 0.0;
-    }
-    let mean = values.iter().sum::<f64>() / values.len() as f64;
-    let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
-    variance.sqrt()
 }
 
 // ============================================================================
@@ -1907,7 +1797,7 @@ fn std_dev(values: &[f64]) -> f64 {
 
 #[derive(Parser)]
 pub struct CheckDistributionArgs {
-    /// Dataset: laion, sift, gist, random
+    /// Dataset: laion, sift, gist, cohere, glove, random
     #[arg(long)]
     pub dataset: String,
 
@@ -1946,29 +1836,17 @@ pub fn check_distribution(args: CheckDistributionArgs) -> Result<()> {
     println!("Sample size: {}", args.sample_size);
     println!("Bits per dim: {}", args.bits);
 
-    // Load vectors
-    let (vectors, dim) = match args.dataset.to_lowercase().as_str() {
-        "laion" => {
-            let ds = LaionDataset::load(&args.data_dir, args.sample_size)?;
-            (ds.image_embeddings, ds.dim)
-        }
-        "sift" => {
-            let ds = SiftDataset::load(&args.data_dir, args.sample_size, 0)?;
-            (ds.base_vectors, benchmark::SIFT_EMBEDDING_DIM)
-        }
-        "gist" => {
-            let ds = GistDataset::load(&args.data_dir, args.sample_size, 0)?;
-            (ds.base_vectors, benchmark::GIST_EMBEDDING_DIM)
-        }
-        "random" => {
-            let ds = RandomDataset::generate(args.sample_size, 0, args.dim, args.seed);
-            (ds.vectors, ds.dim)
-        }
-        _ => anyhow::bail!(
-            "Unknown dataset: {}. Use: laion, sift, gist, random",
-            args.dataset
-        ),
-    };
+    // Load vectors through shared benchmark dataset loader
+    let dataset = load_benchmark_dataset_for_sweep(
+        &args.dataset,
+        &args.data_dir,
+        args.sample_size,
+        0, // no query vectors needed for distribution check
+        args.dim,
+        args.seed,
+    )?;
+    let vectors = dataset.vectors().to_vec();
+    let dim = dataset.dim();
 
     println!("Loaded {} vectors, dim={}", vectors.len(), dim);
 
@@ -1976,14 +1854,13 @@ pub fn check_distribution(args: CheckDistributionArgs) -> Result<()> {
     let encoder = RaBitQ::new(dim, args.bits, args.seed);
 
     // Compute rotation statistics
-    let stats = compute_rotated_variance(
-        |v| encoder.rotate_query(v),
-        &vectors,
-        args.sample_size,
-    );
+    let stats = compute_rotated_variance(|v| encoder.rotate_query(v), &vectors, args.sample_size);
 
     // Print results
-    print_rotation_stats(&stats, &format!("RaBitQ Rotation Stats ({}-bit)", args.bits));
+    print_rotation_stats(
+        &stats,
+        &format!("RaBitQ Rotation Stats ({}-bit)", args.bits),
+    );
 
     // Provide interpretation
     println!("\nInterpretation:");
@@ -1991,13 +1868,22 @@ pub fn check_distribution(args: CheckDistributionArgs) -> Result<()> {
         println!("  ✓ Rotation matrix has correct √D scaling");
         println!("  ✓ RaBitQ should work well on this dataset");
     } else if stats.component_variance < 0.1 {
-        println!("  ✗ Variance too low ({:.4}) - rotation matrix may lack √D scaling", stats.component_variance);
+        println!(
+            "  ✗ Variance too low ({:.4}) - rotation matrix may lack √D scaling",
+            stats.component_variance
+        );
         println!("  ✗ This will cause poor quantization quality");
     } else if stats.component_variance > 2.0 {
-        println!("  ✗ Variance too high ({:.4}) - vectors may not be normalized", stats.component_variance);
+        println!(
+            "  ✗ Variance too high ({:.4}) - vectors may not be normalized",
+            stats.component_variance
+        );
         println!("  ✗ Consider normalizing vectors before indexing");
     } else {
-        println!("  ⚠ Variance ({:.4}) outside expected range [0.8, 1.2]", stats.component_variance);
+        println!(
+            "  ⚠ Variance ({:.4}) outside expected range [0.8, 1.2]",
+            stats.component_variance
+        );
         println!("  ⚠ RaBitQ may have suboptimal recall on this dataset");
     }
 
@@ -2118,7 +2004,10 @@ pub fn embeddings(args: EmbeddingsArgs) -> Result<()> {
 }
 
 fn embeddings_list(args: EmbeddingsListArgs) -> Result<()> {
-    let specs = load_embedding_specs(&args.db_path)?;
+    let mut storage = Storage::readwrite(&args.db_path);
+    storage.ready()?;
+    let db = storage.transaction_db()?;
+    let specs = load_embedding_specs_from_db(db)?;
     let distance = match args.distance.as_deref() {
         Some(value) => Some(parse_distance(value)?),
         None => None,
@@ -2173,25 +2062,17 @@ fn embeddings_list(args: EmbeddingsListArgs) -> Result<()> {
 }
 
 fn embeddings_inspect(args: EmbeddingsInspectArgs) -> Result<()> {
-    // Use registry point lookup when --code is provided for efficiency
-    let (code, spec) = if let Some(code) = args.code {
-        let mut storage = Storage::readwrite(&args.db_path);
-        storage.ready()?;
-        let registry = EmbeddingRegistry::new(Arc::new(storage));
-        let embedding = registry
-            .get_by_code(code)
-            .ok_or_else(|| anyhow::anyhow!("No embedding found for code {}", code))?;
-        (code, embedding.spec().clone())
-    } else {
-        // Fall back to resolve_embedding_spec for model/dim/distance lookups
-        resolve_embedding_spec(
-            &args.db_path,
-            None,
-            args.model.as_deref(),
-            args.dim,
-            args.distance.as_deref(),
-        )?
-    };
+    let mut storage = Storage::readwrite(&args.db_path);
+    storage.ready()?;
+    let db = storage.transaction_db()?;
+    let (code, spec) = resolve_embedding_spec_from_db(
+        db,
+        args.code,
+        args.model.as_deref(),
+        args.dim,
+        args.distance.as_deref(),
+        None,
+    )?;
 
     println!("Code: {}", code);
     println!("Model: {}", spec.model);
@@ -2207,15 +2088,20 @@ fn embeddings_inspect(args: EmbeddingsInspectArgs) -> Result<()> {
 }
 
 fn embeddings_groundtruth(args: EmbeddingsGroundtruthArgs) -> Result<()> {
-    let (code, spec) = resolve_embedding_spec(
-        &args.db_path,
+    let mut storage = Storage::readwrite(&args.db_path);
+    storage.ready()?;
+    let db = storage.transaction_db()?;
+    let (code, spec) = resolve_embedding_spec_from_db(
+        db,
         args.code,
         args.model.as_deref(),
         args.dim,
         args.distance.as_deref(),
+        None,
     )?;
 
-    let vectors = load_vectors_for_embedding(&args.db_path, code, spec.storage_type, args.count, args.seed)?;
+    let vectors =
+        load_vectors_for_embedding_from_db(db, code, spec.storage_type, args.count, args.seed)?;
     if vectors.is_empty() {
         anyhow::bail!("No vectors found for embedding {}", code);
     }
@@ -2308,35 +2194,13 @@ fn embeddings_groundtruth(args: EmbeddingsGroundtruthArgs) -> Result<()> {
 // ============================================================================
 
 pub fn list_datasets() -> Result<()> {
-    println!("Available datasets:\n");
-
-    println!("Core datasets (always available):");
+    println!("Available datasets:");
     println!("  laion       - LAION-CLIP 512D (NPY, Cosine)");
     println!("  sift        - SIFT-1M 128D (fvecs, L2)");
     println!("  gist        - GIST-960 960D (fvecs, L2)");
     println!("  random      - Synthetic unit-normalized (configurable dim, Cosine)");
-
-    #[cfg(feature = "parquet")]
-    {
-        println!("\nParquet datasets (--features parquet):");
-        println!("  cohere      - Cohere Wikipedia 768D (Parquet, Cosine)");
-    }
-
-    #[cfg(not(feature = "parquet"))]
-    {
-        println!("\nParquet datasets: Enable with --features parquet");
-    }
-
-    #[cfg(feature = "hdf5")]
-    {
-        println!("\nHDF5 datasets (--features hdf5):");
-        println!("  glove       - GloVe-100 100D (HDF5, Angular)");
-    }
-
-    #[cfg(not(feature = "hdf5"))]
-    {
-        println!("\nHDF5 datasets: Enable with --features hdf5 (requires libhdf5)");
-    }
+    println!("  cohere      - Cohere Wikipedia 768D (Parquet, Cosine)");
+    println!("  glove       - GloVe-100 100D (HDF5, Angular)");
 
     // ADMIN.md Issue #2 (chungers, 2025-01-27, FIXED):
     // Updated examples to show --embedding-code for query command.
@@ -2622,22 +2486,57 @@ fn print_stats(stats: &[motlie_db::vector::admin::EmbeddingStats]) {
 
     for stat in stats {
         println!("Embedding {} ({}):", stat.code, stat.model);
-        println!("  Dimension: {}  Distance: {}  Storage: {}", stat.dim, stat.distance, stat.storage_type);
+        println!(
+            "  Dimension: {}  Distance: {}  Storage: {}",
+            stat.dim, stat.distance, stat.storage_type
+        );
         println!("  Vectors: {} total", stat.total_vectors);
-        println!("    Indexed:        {:>8} ({:.1}%)", stat.indexed_count,
-            if stat.total_vectors > 0 { stat.indexed_count as f64 / stat.total_vectors as f64 * 100.0 } else { 0.0 });
-        println!("    Pending:        {:>8} ({:.1}%)", stat.pending_count,
-            if stat.total_vectors > 0 { stat.pending_count as f64 / stat.total_vectors as f64 * 100.0 } else { 0.0 });
+        println!(
+            "    Indexed:        {:>8} ({:.1}%)",
+            stat.indexed_count,
+            if stat.total_vectors > 0 {
+                stat.indexed_count as f64 / stat.total_vectors as f64 * 100.0
+            } else {
+                0.0
+            }
+        );
+        println!(
+            "    Pending:        {:>8} ({:.1}%)",
+            stat.pending_count,
+            if stat.total_vectors > 0 {
+                stat.pending_count as f64 / stat.total_vectors as f64 * 100.0
+            } else {
+                0.0
+            }
+        );
         // ADMIN.md Lifecycle Accounting (chungers, 2025-01-27, FIXED):
         // Show PendingDeleted separately instead of folding into Deleted.
-        println!("    Deleted:        {:>8} ({:.1}%)", stat.deleted_count,
-            if stat.total_vectors > 0 { stat.deleted_count as f64 / stat.total_vectors as f64 * 100.0 } else { 0.0 });
-        println!("    PendingDeleted: {:>8} ({:.1}%)", stat.pending_deleted_count,
-            if stat.total_vectors > 0 { stat.pending_deleted_count as f64 / stat.total_vectors as f64 * 100.0 } else { 0.0 });
+        println!(
+            "    Deleted:        {:>8} ({:.1}%)",
+            stat.deleted_count,
+            if stat.total_vectors > 0 {
+                stat.deleted_count as f64 / stat.total_vectors as f64 * 100.0
+            } else {
+                0.0
+            }
+        );
+        println!(
+            "    PendingDeleted: {:>8} ({:.1}%)",
+            stat.pending_deleted_count,
+            if stat.total_vectors > 0 {
+                stat.pending_deleted_count as f64 / stat.total_vectors as f64 * 100.0
+            } else {
+                0.0
+            }
+        );
         println!("  HNSW Graph:");
         println!("    Entry point: {:?}", stat.entry_point);
         println!("    Max level: {}", stat.max_level);
-        println!("  Spec hash: {:?} (valid: {})", stat.spec_hash.map(|h| format!("0x{:016x}", h)), stat.spec_hash_valid);
+        println!(
+            "  Spec hash: {:?} (valid: {})",
+            stat.spec_hash.map(|h| format!("0x{:016x}", h)),
+            stat.spec_hash_valid
+        );
         println!("  ID Allocator:");
         println!("    Next ID: {}", stat.next_id);
         println!("    Free IDs: {}", stat.free_id_count);
@@ -2704,9 +2603,11 @@ fn print_inspection(inspection: &motlie_db::vector::admin::EmbeddingInspection) 
     println!("  Entry point: {:?}", stat.entry_point);
     println!("  Max level: {}", stat.max_level);
     println!("  Count: {}", stat.total_vectors);
-    println!("  Spec hash: {:?} (valid: {})",
+    println!(
+        "  Spec hash: {:?} (valid: {})",
         stat.spec_hash.map(|h| format!("0x{:016x}", h)),
-        if stat.spec_hash_valid { "✓" } else { "✗" });
+        if stat.spec_hash_valid { "✓" } else { "✗" }
+    );
 
     println!("\nID Allocator:");
     println!("  Next ID: {}", stat.next_id);
@@ -2768,7 +2669,10 @@ fn admin_vectors(args: AdminVectorsArgs) -> Result<()> {
                     "pending" => VecLifecycle::Pending,
                     "deleted" => VecLifecycle::Deleted,
                     "pending_deleted" | "pendingdeleted" => VecLifecycle::PendingDeleted,
-                    _ => anyhow::bail!("Unknown state: {}. Use: indexed, pending, deleted, pending_deleted", state_str),
+                    _ => anyhow::bail!(
+                        "Unknown state: {}. Use: indexed, pending, deleted, pending_deleted",
+                        state_str
+                    ),
                 };
                 admin::list_vectors_by_state_secondary(&storage, args.code, state, args.limit)?
             } else {
@@ -2797,7 +2701,10 @@ fn admin_vectors(args: AdminVectorsArgs) -> Result<()> {
                 "pending" => VecLifecycle::Pending,
                 "deleted" => VecLifecycle::Deleted,
                 "pending_deleted" | "pendingdeleted" => VecLifecycle::PendingDeleted,
-                _ => anyhow::bail!("Unknown state: {}. Use: indexed, pending, deleted, pending_deleted", state_str),
+                _ => anyhow::bail!(
+                    "Unknown state: {}. Use: indexed, pending, deleted, pending_deleted",
+                    state_str
+                ),
             };
             admin::list_vectors_by_state(&storage, args.code, state, args.limit)?
         } else {
@@ -2821,21 +2728,25 @@ fn print_vectors(vectors: &[motlie_db::vector::admin::VectorInfo]) {
     }
 
     println!("=== Vector Information ===\n");
-    println!("{:>8}  {:>10}  {:>8}  {:>5}  {:>10}  {:>8}",
-        "vec_id", "lifecycle", "layer", "edges", "binary", "external_id");
+    println!(
+        "{:>8}  {:>10}  {:>8}  {:>5}  {:>10}  {:>8}",
+        "vec_id", "lifecycle", "layer", "edges", "binary", "external_id"
+    );
     println!("{}", "-".repeat(70));
 
     for v in vectors {
         let total_edges: usize = v.edge_counts.iter().sum();
         // T6.1: VectorInfo now uses external_key_type: Option<String> for display
         let key_display = v.external_key_type.as_deref().unwrap_or("-");
-        println!("{:>8}  {:>10}  {:>8}  {:>5}  {:>10}  {}",
+        println!(
+            "{:>8}  {:>10}  {:>8}  {:>5}  {:>10}  {}",
             v.vec_id,
             format!("{:?}", v.lifecycle).to_lowercase(),
             v.max_layer,
             total_edges,
             if v.has_binary_code { "yes" } else { "no" },
-            key_display);
+            key_display
+        );
     }
 
     println!("\nShowing {} vector(s).", vectors.len());
@@ -2870,7 +2781,9 @@ fn admin_validate(args: AdminValidateArgs) -> Result<()> {
             storage.ready()?;
 
             if let Some(code) = args.code {
-                vec![admin::validate_embedding_secondary_with_opts(&storage, code, opts)?]
+                vec![admin::validate_embedding_secondary_with_opts(
+                    &storage, code, opts,
+                )?]
             } else {
                 admin::validate_all_secondary_with_opts(&storage, opts)?
             }
@@ -2902,7 +2815,8 @@ fn admin_validate(args: AdminValidateArgs) -> Result<()> {
     }
 
     // Exit with error code if any check failed
-    let has_errors = results.iter()
+    let has_errors = results
+        .iter()
         .flat_map(|r| &r.checks)
         .any(|c| c.status == ValidationStatus::Error);
 
@@ -2932,15 +2846,26 @@ fn print_validation_results(results: &[motlie_db::vector::admin::ValidationResul
 
         for check in &result.checks {
             let symbol = match check.status {
-                ValidationStatus::Pass => { pass_count += 1; "✓" }
-                ValidationStatus::Warning => { warn_count += 1; "⚠" }
-                ValidationStatus::Error => { error_count += 1; "✗" }
+                ValidationStatus::Pass => {
+                    pass_count += 1;
+                    "✓"
+                }
+                ValidationStatus::Warning => {
+                    warn_count += 1;
+                    "⚠"
+                }
+                ValidationStatus::Error => {
+                    error_count += 1;
+                    "✗"
+                }
             };
             println!("  {} {}: {}", symbol, check.name, check.message);
         }
 
-        println!("\n  Summary: {} passed, {} warnings, {} errors\n",
-            pass_count, warn_count, error_count);
+        println!(
+            "\n  Summary: {} passed, {} warnings, {} errors\n",
+            pass_count, warn_count, error_count
+        );
     }
 }
 
@@ -3021,14 +2946,23 @@ fn print_rocksdb_stats(stats: &motlie_db::vector::admin::RocksDbStats) {
     // Shows estimated_num_keys from RocksDB property when available (secondary mode).
 
     // Check if any CF has estimated_num_keys
-    let has_estimates = stats.column_families.iter().any(|cf| cf.estimated_num_keys.is_some());
+    let has_estimates = stats
+        .column_families
+        .iter()
+        .any(|cf| cf.estimated_num_keys.is_some());
 
     println!("=== RocksDB Statistics ===\n");
     if has_estimates {
-        println!("{:<30}  {:>14}  {:>14}  {:>14}", "Column Family", "Entries", "Est. Keys", "Bytes (sampled)");
+        println!(
+            "{:<30}  {:>14}  {:>14}  {:>14}",
+            "Column Family", "Entries", "Est. Keys", "Bytes (sampled)"
+        );
         println!("{}", "-".repeat(78));
     } else {
-        println!("{:<30}  {:>14}  {:>14}", "Column Family", "Entries", "Bytes (sampled)");
+        println!(
+            "{:<30}  {:>14}  {:>14}",
+            "Column Family", "Entries", "Bytes (sampled)"
+        );
         println!("{}", "-".repeat(62));
     }
 
@@ -3042,10 +2976,14 @@ fn print_rocksdb_stats(stats: &motlie_db::vector::admin::RocksDbStats) {
         };
 
         if has_estimates {
-            let est_str = cf.estimated_num_keys
+            let est_str = cf
+                .estimated_num_keys
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| "-".to_string());
-            println!("{:<30}  {:>14}  {:>14}  {:>14}", cf.name, entry_str, est_str, size_str);
+            println!(
+                "{:<30}  {:>14}  {:>14}  {:>14}",
+                cf.name, entry_str, est_str, size_str
+            );
         } else {
             println!("{:<30}  {:>14}  {:>14}", cf.name, entry_str, size_str);
         }
@@ -3053,10 +2991,21 @@ fn print_rocksdb_stats(stats: &motlie_db::vector::admin::RocksDbStats) {
 
     if has_estimates {
         println!("{}", "-".repeat(78));
-        println!("{:<30}  {:>14}  {:>14}  {:>14}", "Total (sampled)", "", "", format_size(stats.total_size_bytes));
+        println!(
+            "{:<30}  {:>14}  {:>14}  {:>14}",
+            "Total (sampled)",
+            "",
+            "",
+            format_size(stats.total_size_bytes)
+        );
     } else {
         println!("{}", "-".repeat(62));
-        println!("{:<30}  {:>14}  {:>14}", "Total (sampled)", "", format_size(stats.total_size_bytes));
+        println!(
+            "{:<30}  {:>14}  {:>14}",
+            "Total (sampled)",
+            "",
+            format_size(stats.total_size_bytes)
+        );
     }
 }
 

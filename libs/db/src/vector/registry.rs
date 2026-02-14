@@ -318,7 +318,7 @@ impl EmbeddingRegistry {
             model: builder.model.clone(),
             dim: builder.dim,
             distance: builder.distance,
-            storage_type: VectorElementType::default(), // F32 for backward compat
+            storage_type: builder.storage_type,
             // Build parameters from EmbeddingBuilder (Phase 5.7c)
             hnsw_m: builder.hnsw_m,
             hnsw_ef_construction: builder.hnsw_ef_construction,
@@ -336,7 +336,7 @@ impl EmbeddingRegistry {
             model: builder.model,
             dim: builder.dim,
             distance: builder.distance,
-            storage_type: VectorElementType::default(),
+            storage_type: builder.storage_type,
             hnsw_m: builder.hnsw_m,
             hnsw_ef_construction: builder.hnsw_ef_construction,
             rabitq_bits: builder.rabitq_bits,

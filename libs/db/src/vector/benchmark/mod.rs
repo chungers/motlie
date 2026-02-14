@@ -9,13 +9,31 @@
 //! |---------|------------|----------|--------|----------|
 //! | LAION-CLIP | 512D | Cosine | NPY (float16) | RaBitQ, semantic search |
 //! | SIFT1M | 128D | L2/Euclidean | fvecs/ivecs | Standard HNSW, ANN benchmarks |
+//! | GIST-960 | 960D | L2/Euclidean | fvecs/ivecs | High-dim ANN benchmarks |
+//! | Cohere Wiki | 768D | Cosine | Parquet | Semantic search (parquet feature) |
+//! | GloVe-100 | 100D | Cosine | HDF5 | Word embeddings (hdf5 feature) |
+//! | Random | configurable | Cosine | in-memory | Synthetic worst-case |
 //!
 //! ## Components
 //!
-//! - [`dataset`] - LAION-CLIP dataset (NPY format)
+//! - [`Dataset`] - Unified trait for all benchmark datasets
+//! - [`dataset`] - LAION-CLIP, GIST, Cohere, GloVe, Random dataset loaders
 //! - [`sift`] - SIFT dataset (fvecs/ivecs format)
 //! - [`runner`] - Experiment runner with configurable parameters
 //! - [`metrics`] - Recall, latency, and QPS computation
+//!
+//! ## Example: Generic Dataset Usage
+//!
+//! ```ignore
+//! use motlie_db::vector::benchmark::{Dataset, SiftDataset};
+//!
+//! let sift = SiftDataset::load(&data_dir, 10_000, 1000)?;
+//! let subset = sift.subset(1000, 100);
+//!
+//! // Use via the Dataset trait
+//! println!("{}: {}D, {:?}", subset.name(), subset.dim(), subset.distance());
+//! let gt = subset.ground_truth(10); // None for subsets, Some for full datasets with GT
+//! ```
 //!
 //! ## Example: LAION-CLIP with RaBitQ
 //!
@@ -33,19 +51,41 @@
 //!
 //! let results = run_experiment(&dataset, &config)?;
 //! ```
-//!
-//! ## Example: SIFT with L2 Distance
-//!
-//! ```ignore
-//! use motlie_db::vector::benchmark::{SiftDataset, SiftSubset};
-//!
-//! // Load SIFT dataset (L2/Euclidean distance)
-//! let dataset = SiftDataset::load(&data_dir, 10_000, 1000)?;
-//! let subset = dataset.subset(1000, 100);
-//!
-//! // Compute ground truth with L2
-//! let ground_truth = subset.compute_ground_truth_topk(10);
-//! ```
+
+use crate::vector::Distance;
+
+/// Unified interface for benchmark datasets.
+///
+/// Every subset struct (`LaionSubset`, `SiftSubset`, `GistSubset`, etc.)
+/// implements this trait, enabling `runner.rs` and the `bench_vector` CLI
+/// to work generically over any dataset.
+///
+/// Existing concrete methods on each struct remain unchanged — the trait
+/// is additive and non-breaking.
+pub trait Dataset {
+    /// Human-readable name (e.g. "SIFT-1M", "LAION-CLIP").
+    fn name(&self) -> &str;
+
+    /// Vector dimensionality.
+    fn dim(&self) -> usize;
+
+    /// Distance metric for this dataset.
+    fn distance(&self) -> Distance;
+
+    /// Database vectors (the corpus to index).
+    fn vectors(&self) -> &[Vec<f32>];
+
+    /// Query vectors.
+    fn queries(&self) -> &[Vec<f32>];
+
+    /// Pre-computed ground truth for the given k, if available.
+    ///
+    /// Returns `Some(top_k_indices_per_query)` when the dataset ships with
+    /// pre-computed neighbors and the stored depth is >= k.
+    /// Returns `None` when ground truth must be computed at runtime
+    /// (e.g. LAION, Random, or subsets smaller than the full dataset).
+    fn ground_truth(&self, k: usize) -> Option<Vec<Vec<usize>>>;
+}
 
 pub mod concurrent;
 pub mod dataset;
@@ -66,15 +106,13 @@ pub use dataset::{
 // Re-exports for public API - Random (synthetic)
 pub use dataset::{compute_ground_truth_parallel, RandomDataset};
 
-// Re-exports for public API - Parquet datasets (optional)
-#[cfg(feature = "parquet")]
+// Re-exports for public API - Parquet datasets (Cohere Wikipedia)
 pub use dataset::{
     load_parquet_embeddings, CohereWikipediaDataset, CohereWikipediaSubset,
     COHERE_WIKI_DIM, COHERE_WIKI_VECTORS,
 };
 
-// Re-exports for public API - HDF5 datasets (optional)
-#[cfg(feature = "hdf5")]
+// Re-exports for public API - HDF5 datasets (GloVe)
 pub use dataset::{
     load_hdf5_embeddings, load_hdf5_ground_truth, GloveDataset, GloveSubset,
     GLOVE_DIM, GLOVE_QUERIES, GLOVE_VECTORS,
