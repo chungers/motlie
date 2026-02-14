@@ -75,6 +75,11 @@ pub async fn download(args: DownloadArgs) -> Result<()> {
             println!("Downloading GloVe-100 angular dataset...");
             benchmark::GloveDataset::download(&args.data_dir)?;
         }
+        "random" => {
+            println!("Random dataset is generated at runtime, no download needed.");
+            println!("Use: bench_vector index --dataset random --dim 1024 --num-vectors 100000");
+            return Ok(());
+        }
         _ => {
             anyhow::bail!(
                 "Unknown dataset: {}. Run 'bench_vector datasets' for available options.",
@@ -157,20 +162,35 @@ pub struct IndexArgs {
     #[arg(long, default_value = "false")]
     pub drain_pending: bool,
 
+    /// Vector storage type: f32 (full precision) or f16 (half precision, 50% smaller)
+    #[arg(long, default_value = "f32")]
+    pub storage_type: String,
+
     /// Output results to JSON file
     #[arg(long)]
     pub output: Option<PathBuf>,
+}
+
+fn parse_storage_type(value: &str) -> Result<VectorElementType> {
+    match value.to_lowercase().as_str() {
+        "f32" => Ok(VectorElementType::F32),
+        "f16" => Ok(VectorElementType::F16),
+        other => anyhow::bail!("Invalid storage type: {} (use f32 or f16)", other),
+    }
 }
 
 pub async fn index(args: IndexArgs) -> Result<()> {
     use motlie_db::vector::benchmark::scale::get_rss_bytes;
     use std::time::Duration;
 
+    let storage_type = parse_storage_type(&args.storage_type)?;
+
     println!("=== Vector Index Build ===");
     println!("Dataset: {}", args.dataset);
     println!("Vectors: {}", args.num_vectors);
     println!("Database: {:?}", args.db_path);
     println!("HNSW: M={}, ef_construction={}", args.m, args.ef_construction);
+    println!("Storage type: {:?}", storage_type);
     println!("Batch size: {}", args.batch_size);
     if args.async_workers > 0 {
         println!("Insert mode: ASYNC ({} workers)", args.async_workers);
@@ -289,7 +309,8 @@ pub async fn index(args: IndexArgs) -> Result<()> {
         let embedding = registry.register(
             EmbeddingBuilder::new(&model, dim as u32, distance)
                 .with_hnsw_m(args.m as u16)
-                .with_hnsw_ef_construction(args.ef_construction as u16),
+                .with_hnsw_ef_construction(args.ef_construction as u16)
+                .with_storage_type(storage_type),
         )?;
         print_embedding_summary_from_db(storage.transaction_db()?, &args.db_path, embedding.code())?;
 
@@ -505,7 +526,8 @@ pub async fn index(args: IndexArgs) -> Result<()> {
     let embedding = registry.register(
         EmbeddingBuilder::new(&model, dim as u32, distance)
             .with_hnsw_m(args.m as u16)
-            .with_hnsw_ef_construction(args.ef_construction as u16),
+            .with_hnsw_ef_construction(args.ef_construction as u16)
+            .with_storage_type(storage_type),
     )?;
     print_embedding_summary_from_db(storage.transaction_db()?, &args.db_path, embedding.code())?;
 
@@ -771,7 +793,7 @@ pub async fn query(args: QueryArgs) -> Result<()> {
             Vec::new()
         } else {
             println!("Computing ground truth...");
-            compute_ground_truth(&db_vectors, &queries, args.k, distance)
+            benchmark::compute_ground_truth_parallel(&db_vectors, &queries, args.k, distance)
         };
         (queries, ground_truth, args.skip_recall, 0, 0)
     };
@@ -1174,12 +1196,19 @@ pub struct SweepArgs {
     /// Example: --assert-recall 0.80 requires all recall values >= 80%
     #[arg(long)]
     pub assert_recall: Option<f64>,
+
+    /// Vector storage type: f32 (full precision) or f16 (half precision, 50% smaller)
+    #[arg(long, default_value = "f32")]
+    pub storage_type: String,
 }
 
 pub async fn sweep(args: SweepArgs) -> Result<()> {
+    let storage_type = parse_storage_type(&args.storage_type)?;
+
     println!("=== Parameter Sweep ===");
     println!("Dataset: {}", args.dataset);
     println!("Vectors: {}, Queries: {}", args.num_vectors, args.num_queries);
+    println!("Storage type: {:?}", storage_type);
 
     // Parse parameters
     let ef_values: Vec<usize> = args.ef.split(',')
@@ -1251,7 +1280,7 @@ pub async fn sweep(args: SweepArgs) -> Result<()> {
         args.m,
         args.ef_construction,
         distance,
-        VectorElementType::F16,
+        storage_type,
     )?;
     println!(
         "Index built in {:.2}s ({:.1} vec/s)",
@@ -1659,14 +1688,6 @@ fn load_benchmark_dataset_for_sweep(
     }
 }
 
-fn compute_ground_truth(
-    db_vectors: &[Vec<f32>],
-    queries: &[Vec<f32>],
-    k: usize,
-    distance: Distance,
-) -> Vec<Vec<usize>> {
-    benchmark::compute_ground_truth_parallel(db_vectors, queries, k, distance)
-}
 
 // ============================================================================
 // Check Distribution Command
@@ -2063,8 +2084,6 @@ fn embeddings_groundtruth(args: EmbeddingsGroundtruthArgs) -> Result<()> {
 // ============================================================================
 
 pub fn list_datasets() -> Result<()> {
-    println!("Available datasets:\n");
-
     println!("Available datasets:");
     println!("  laion       - LAION-CLIP 512D (NPY, Cosine)");
     println!("  sift        - SIFT-1M 128D (fvecs, L2)");

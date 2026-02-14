@@ -1475,13 +1475,12 @@ println!("Parallel threshold: {}", config.parallel_rerank_threshold());
 
 This workflow is useful when you want to:
 - quickly populate a vector DB for testing with `bench_vector`
-- optionally pre-register an embedding with a specific storage type (`F16` or `F32`)
+- choose storage type (`--storage-type f16|f32`) for precision/size tradeoff
 - inspect raw vector column families with `motlie db scan`
 
-`bench_vector` does not take an `EmbeddingSpec` object directly from CLI.
-Instead, it resolves or registers an embedding space by `(model, dim, distance)`.
-The practical way to define that spec is `EmbeddingBuilder` in code, which persists
-an `EmbeddingSpec` internally via `EmbeddingRegistry::register(...)`.
+`bench_vector index` and `sweep` accept `--storage-type` to control vector
+encoding. Both commands register embeddings automatically via `EmbeddingBuilder`
+with the specified storage type.
 
 ### Step 0: Build tools
 
@@ -1505,8 +1504,8 @@ Use this table when deciding what to register before `bench_vector index`:
 Notes:
 - This table applies to `bench_vector index`, `bench_vector query`, and `bench_vector sweep`.
 - `bench_vector index` auto-detects default distance by dataset unless overridden (`--l2` / `--cosine`).
-- Registration matching is by `(model, dim, distance)`. If you pre-register with a specific
-  storage type and then run `bench_vector index` with the same tuple, that spec is reused.
+- Both `bench_vector index` and `bench_vector sweep` default to `--storage-type f32`.
+- Registration matching is by `(model, dim, distance)`. If an existing spec matches, it is reused.
 
 ### Search + Optimization Matrix by Dataset
 
@@ -1545,49 +1544,10 @@ Rules:
   --data-dir ./data
 ```
 
-### Step 2: Register embedding with explicit storage type (F16 example)
+### Step 2: Populate DB with bench_vector
 
-`bench_vector index` registers embeddings automatically, but defaults to the builder default
-storage type unless an existing embedding spec already matches model+dim+distance.
-
-If you want explicit storage (for example, `F16`) before indexing, register it once via API.
-This is effectively how you "construct and register an EmbeddingSpec" for a dataset:
-
-```rust
-use motlie_db::vector::{Distance, EmbeddingBuilder, EmbeddingRegistry, VectorElementType};
-use motlie_db::Storage;
-use std::path::Path;
-use std::sync::Arc;
-
-fn main() -> anyhow::Result<()> {
-    let mut storage = Storage::readwrite(Path::new("./tmp/vecdb"));
-    storage.ready()?;
-    let storage = Arc::new(storage);
-
-    let registry = EmbeddingRegistry::new(storage.clone());
-    registry.prewarm()?;
-
-    // bench_vector index uses model "bench-<dataset>".
-    // For SIFT: model=bench-sift, dim=128, distance=L2.
-    let embedding = registry.register(
-        EmbeddingBuilder::new("bench-sift", 128, Distance::L2)
-            .with_storage_type(VectorElementType::F16)
-            .with_hnsw_m(16)
-            .with_hnsw_ef_construction(200),
-    )?;
-
-    println!("Registered code={} storage={:?}", embedding.code(), embedding.storage_type());
-    Ok(())
-}
-```
-
-For a different dataset, change only these fields:
-- model: `bench-<dataset>`
-- dim: dataset dimension (or `--dim` for random)
-- distance: dataset distance (or your explicit override)
-- storage: `VectorElementType::F16` or `VectorElementType::F32`
-
-### Step 3: Populate DB with bench_vector
+Both `index` and `sweep` accept `--storage-type f16|f32` (index defaults to f32,
+sweep defaults to f16):
 
 ```bash
 ./target/release/bench_vector index \
@@ -1595,6 +1555,7 @@ For a different dataset, change only these fields:
   --num-vectors 10000 \
   --db-path ./tmp/vecdb \
   --data-dir ./data \
+  --storage-type f16 \
   --l2
 ```
 
@@ -1605,7 +1566,7 @@ Verify embedding specs and storage type:
 ./target/release/bench_vector embeddings inspect --db-path ./tmp/vecdb --code 1
 ```
 
-### Step 4: Query with bench_vector
+### Step 3: Query with bench_vector
 
 Use the embedding code printed by index/list:
 
@@ -1618,7 +1579,7 @@ Use the embedding code printed by index/list:
   --ef-search 100
 ```
 
-### Step 5: Inspect vector column families with motlie
+### Step 4: Inspect vector column families with motlie
 
 List available CFs:
 
