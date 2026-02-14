@@ -51,7 +51,7 @@ fn generate_cosine_vectors(dim: usize, count: usize, seed: u64) -> Vec<Vec<f32>>
 
     (0..count)
         .map(|_| {
-            let mut v: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0..1.0)).collect();
+            let mut v: Vec<f32> = (0..dim).map(|_| rng.random_range(-1.0..1.0)).collect();
             let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
             if norm > 0.0 {
                 for x in v.iter_mut() {
@@ -68,7 +68,7 @@ fn generate_l2_vectors(dim: usize, count: usize, seed: u64) -> Vec<Vec<f32>> {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
 
     (0..count)
-        .map(|_| (0..dim).map(|_| rng.gen_range(0.0..128.0)).collect())
+        .map(|_| (0..dim).map(|_| rng.random_range(0.0..128.0)).collect())
         .collect()
 }
 

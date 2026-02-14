@@ -107,8 +107,8 @@ fn create_test_storage() -> (TempDir, Storage) {
 
 /// Helper: Generate random vector
 fn random_vector(dim: usize) -> Vec<f32> {
-    let mut rng = rand::thread_rng();
-    (0..dim).map(|_| rng.gen::<f32>()).collect()
+    let mut rng = rand::rng();
+    (0..dim).map(|_| rng.random::<f32>()).collect()
 }
 
 /// Atomic insert result - indicates whether insert succeeded or failed with reason.

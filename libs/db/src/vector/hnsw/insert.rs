@@ -115,7 +115,7 @@ pub fn insert(
     let nav_info = get_or_init_navigation(index, storage)?;
 
     // 2. Assign random layer using proper exponential distribution
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let node_layer = nav_info.random_layer(&mut rng);
 
     // 3. Store node metadata (using transaction)
@@ -234,7 +234,7 @@ pub fn insert_for_batch(
     let nav_info = get_or_init_navigation(index, storage)?;
 
     // 2. Assign random layer using proper exponential distribution
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let node_layer = nav_info.random_layer(&mut rng);
 
     // 3. Store node metadata (using transaction)

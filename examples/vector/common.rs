@@ -20,7 +20,7 @@ use motlie_db::query::{NodeFragments, OutgoingEdges, Runnable as QueryRunnable};
 use motlie_db::reader::Reader;
 use motlie_db::writer::Writer;
 use motlie_db::{ActivePeriod, DataUrl, Id, ReadWriteHandles, Storage, StorageConfig, TimestampMilli};
-use rand::Rng;
+use rand::{Rng, RngExt};
 use serde_json;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::ops::Bound;
@@ -99,7 +99,7 @@ pub fn get_distance_fn(name: &str) -> Result<DistanceFn> {
 /// Returns values in [0.0, 0.999] with step 0.001
 #[inline]
 pub fn generate_dimension_value(rng: &mut impl Rng) -> f32 {
-    let interval = rng.gen_range(0..QUANTIZATION_INTERVALS);
+    let interval = rng.random_range(0..QUANTIZATION_INTERVALS);
     interval as f32 / QUANTIZATION_INTERVALS as f32
 }
 

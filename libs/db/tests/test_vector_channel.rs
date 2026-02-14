@@ -41,7 +41,7 @@ fn generate_vectors(dim: usize, count: usize, seed: u64) -> Vec<Vec<f32>> {
 
     (0..count)
         .map(|_| {
-            let mut v: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0..1.0)).collect();
+            let mut v: Vec<f32> = (0..dim).map(|_| rng.random_range(-1.0..1.0)).collect();
             let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
             if norm > 0.0 {
                 for x in v.iter_mut() {
