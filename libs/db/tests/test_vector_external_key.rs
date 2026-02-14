@@ -28,7 +28,7 @@ const SEARCH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Generate a random vector for testing.
 fn generate_vector(dim: u32, rng: &mut impl Rng) -> Vec<f32> {
-    (0..dim).map(|_| rng.gen::<f32>()).collect()
+    (0..dim).map(|_| rng.random::<f32>()).collect()
 }
 
 #[tokio::test]

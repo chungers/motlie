@@ -487,7 +487,7 @@ impl StreamingVectorGenerator {
         for _ in 0..count {
             let mut vector: Vec<f32> = (0..self.dim)
                 .map(|_| {
-                    let r: f32 = self.rng.gen();
+                    let r: f32 = self.rng.random();
                     r * 2.0 - 1.0
                 })
                 .collect();
@@ -513,7 +513,7 @@ impl StreamingVectorGenerator {
     pub fn generate_query(&mut self) -> Vec<f32> {
         let mut vector: Vec<f32> = (0..self.dim)
             .map(|_| {
-                let r: f32 = self.rng.gen();
+                let r: f32 = self.rng.random();
                 r * 2.0 - 1.0
             })
             .collect();

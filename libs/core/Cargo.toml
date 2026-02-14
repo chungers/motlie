@@ -25,8 +25,8 @@ simsimd = { version = "6", optional = true }
 chrono = "0.4"
 
 [dev-dependencies]
-rand = "0.8"
-rand_chacha = "0.3"
+rand = "0.10.0"
+rand_chacha = "0.10.0"
 clap = { version = "4.5.58", features = ["derive"] }
 
 [features]

@@ -309,14 +309,14 @@ mod tests {
     #[test]
     fn test_neon_matches_scalar() {
         use super::super::scalar;
-        use rand::{Rng, SeedableRng};
+        use rand::{RngExt, SeedableRng};
 
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
 
         // Test 1-bit
         for dim in [8, 16, 64, 128, 512] {
-            let query: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0..1.0)).collect();
-            let code: Vec<u8> = (0..(dim + 7) / 8).map(|_| rng.gen()).collect();
+            let query: Vec<f32> = (0..dim).map(|_| rng.random_range(-1.0..1.0)).collect();
+            let code: Vec<u8> = (0..(dim + 7) / 8).map(|_| rng.random()).collect();
 
             let scalar_result = scalar::dot_1bit(&query, &code);
             let neon_result = unsafe { dot_1bit(&query, &code) };
@@ -333,8 +333,8 @@ mod tests {
         // Test 2-bit
         const LEVELS: [f32; 4] = [-1.5, -0.5, 0.5, 1.5];
         for dim in [4, 8, 16, 64, 128, 512] {
-            let query: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0..1.0)).collect();
-            let code: Vec<u8> = (0..(dim * 2 + 7) / 8).map(|_| rng.gen()).collect();
+            let query: Vec<f32> = (0..dim).map(|_| rng.random_range(-1.0..1.0)).collect();
+            let code: Vec<u8> = (0..(dim * 2 + 7) / 8).map(|_| rng.random()).collect();
 
             let scalar_result = scalar::dot_2bit_lookup(&query, &code, &LEVELS);
             let neon_result = unsafe { dot_2bit_lookup(&query, &code, &LEVELS) };
@@ -352,8 +352,8 @@ mod tests {
         const SCALE: f32 = 1.0 / 3.75;
         const OFFSET: f32 = -2.0;
         for dim in [4, 8, 16, 64, 128, 512] {
-            let query: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0..1.0)).collect();
-            let code: Vec<u8> = (0..(dim + 1) / 2).map(|_| rng.gen()).collect();
+            let query: Vec<f32> = (0..dim).map(|_| rng.random_range(-1.0..1.0)).collect();
+            let code: Vec<u8> = (0..(dim + 1) / 2).map(|_| rng.random()).collect();
 
             let scalar_result = scalar::dot_4bit_linear(&query, &code, SCALE, OFFSET);
             let neon_result = unsafe { dot_4bit_linear(&query, &code, SCALE, OFFSET) };

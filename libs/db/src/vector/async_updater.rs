@@ -966,10 +966,10 @@ mod tests {
 
     /// Generate a deterministic test vector
     fn test_vector(dim: usize, seed: u64) -> Vec<f32> {
-        use rand::{Rng, SeedableRng};
+        use rand::{RngExt, SeedableRng};
         use rand_chacha::ChaCha20Rng;
         let mut rng = ChaCha20Rng::seed_from_u64(seed);
-        (0..dim).map(|_| rng.gen::<f32>()).collect()
+        (0..dim).map(|_| rng.random::<f32>()).collect()
     }
 
     // =========================================================================

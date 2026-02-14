@@ -617,12 +617,12 @@ fn generate_random_dataset(config: &DatasetConfig) -> Result<BenchmarkDataset> {
 
     // Generate base vectors
     let base_vectors: Vec<Vec<f32>> = (0..num_base)
-        .map(|_| (0..dimensions).map(|_| rng.gen::<f32>()).collect())
+        .map(|_| (0..dimensions).map(|_| rng.random::<f32>()).collect())
         .collect();
 
     // Generate query vectors
     let query_vectors: Vec<Vec<f32>> = (0..num_queries)
-        .map(|_| (0..dimensions).map(|_| rng.gen::<f32>()).collect())
+        .map(|_| (0..dimensions).map(|_| rng.random::<f32>()).collect())
         .collect();
 
     // Compute ground truth via brute force

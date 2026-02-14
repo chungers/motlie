@@ -51,7 +51,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use tokio::task::JoinHandle;
 
 use crate::reader::Runnable as QueryRunnable;
@@ -962,7 +962,7 @@ async fn insert_producer_workload(
         }
 
         // Generate random vector
-        let vector: Vec<f32> = (0..dim).map(|_| rng.gen::<f32>()).collect();
+        let vector: Vec<f32> = (0..dim).map(|_| rng.random::<f32>()).collect();
         let id = Id::new();
 
         if batch_size == 1 {
@@ -1056,7 +1056,7 @@ async fn search_producer_workload(
 
     while !stop.load(Ordering::Relaxed) && Instant::now() < deadline {
         // Generate random query
-        let query: Vec<f32> = (0..dim).map(|_| rng.gen::<f32>()).collect();
+        let query: Vec<f32> = (0..dim).map(|_| rng.random::<f32>()).collect();
 
         let op_start = Instant::now();
 
@@ -1176,7 +1176,7 @@ pub async fn compare_sync_async_latency(
     // Phase 1: Sync inserts (immediate graph build)
     tracing::info!(num_vectors, "Starting sync insert phase (immediate graph build)");
     for _ in 0..num_vectors {
-        let vector: Vec<f32> = (0..dim).map(|_| rng.gen::<f32>()).collect();
+        let vector: Vec<f32> = (0..dim).map(|_| rng.random::<f32>()).collect();
         let id = Id::new();
 
         let op_start = Instant::now();
@@ -1196,7 +1196,7 @@ pub async fn compare_sync_async_latency(
     // Phase 2: Async inserts (deferred graph build)
     tracing::info!(num_vectors, "Starting async insert phase (deferred graph build)");
     for _ in 0..num_vectors {
-        let vector: Vec<f32> = (0..dim).map(|_| rng.gen::<f32>()).collect();
+        let vector: Vec<f32> = (0..dim).map(|_| rng.random::<f32>()).collect();
         let id = Id::new();
 
         let op_start = Instant::now();
@@ -1396,7 +1396,7 @@ pub async fn measure_backpressure_impact(
                         break;
                     }
 
-                    let vector: Vec<f32> = (0..dim).map(|_| rng.gen::<f32>()).collect();
+                    let vector: Vec<f32> = (0..dim).map(|_| rng.random::<f32>()).collect();
                     let id = Id::new();
 
                     let op_start = Instant::now();

@@ -402,7 +402,7 @@ fn dot_product_simsimd(a: &[f32], b: &[f32]) -> f32 {
 /// Generate random vectors for benchmarking
 fn generate_vectors(rng: &mut ChaCha8Rng, count: usize, dim: usize) -> Vec<Vec<f32>> {
     (0..count)
-        .map(|_| (0..dim).map(|_| rng.gen::<f32>()).collect())
+        .map(|_| (0..dim).map(|_| rng.random::<f32>()).collect())
         .collect()
 }
 
@@ -810,8 +810,8 @@ mod tests {
     #[test]
     fn test_euclidean_implementations_match() {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let a: Vec<f32> = (0..128).map(|_| rng.gen()).collect();
-        let b: Vec<f32> = (0..128).map(|_| rng.gen()).collect();
+        let a: Vec<f32> = (0..128).map(|_| rng.random()).collect();
+        let b: Vec<f32> = (0..128).map(|_| rng.random()).collect();
 
         let baseline = euclidean_squared_baseline(&a, &b);
         let loop_ver = euclidean_squared_loop(&a, &b);
@@ -839,8 +839,8 @@ mod tests {
     #[test]
     fn test_cosine_implementations_match() {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let a: Vec<f32> = (0..128).map(|_| rng.gen()).collect();
-        let b: Vec<f32> = (0..128).map(|_| rng.gen()).collect();
+        let a: Vec<f32> = (0..128).map(|_| rng.random()).collect();
+        let b: Vec<f32> = (0..128).map(|_| rng.random()).collect();
 
         let baseline = cosine_distance_baseline(&a, &b);
 

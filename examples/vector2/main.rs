@@ -420,7 +420,7 @@ mod app {
             for _ in 0..starting_vectors {
                 // Generate and discard vector to advance RNG state
                 for _ in 0..bench_metadata.dim {
-                    let _: f32 = rng.gen();
+                    let _: f32 = rng.random();
                 }
             }
         }
@@ -813,7 +813,7 @@ mod app {
 
     /// Generate a random vector
     fn generate_random_vector(dim: usize, rng: &mut impl Rng) -> Vec<f32> {
-        (0..dim).map(|_| rng.gen::<f32>()).collect()
+        (0..dim).map(|_| rng.random::<f32>()).collect()
     }
 
     /// Brute-force k-NN search
