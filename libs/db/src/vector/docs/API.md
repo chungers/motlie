@@ -1489,7 +1489,7 @@ an `EmbeddingSpec` internally via `EmbeddingRegistry::register(...)`.
 cargo build --release --bin bench_vector --bin motlie
 ```
 
-### Dataset-to-Embedding Config (bench_vector index/query)
+### Dataset-to-Embedding Config (bench_vector)
 
 Use this table when deciding what to register before `bench_vector index`:
 
@@ -1498,10 +1498,12 @@ Use this table when deciding what to register before `bench_vector index`:
 | `laion` | `bench-laion` | 512 | Cosine | `F16` recommended for size; `F32` for strict precision checks |
 | `sift` | `bench-sift` | 128 | L2 | `F16` or `F32` |
 | `gist` | `bench-gist` | 960 | L2 | `F16` usually preferred to reduce footprint |
+| `cohere` | `bench-cohere` | 768 | Cosine | `F16` recommended for large-scale runs |
+| `glove` | `bench-glove` | 100 | Cosine | `F16` or `F32` |
 | `random` | `bench-random` | from `--dim` | Cosine (default), or override via `--l2`/`--cosine` | choose based on test goal |
 
 Notes:
-- This table is for `bench_vector index` / `bench_vector query` command paths.
+- This table applies to `bench_vector index`, `bench_vector query`, and `bench_vector sweep`.
 - `bench_vector index` auto-detects default distance by dataset unless overridden (`--l2` / `--cosine`).
 - Registration matching is by `(model, dim, distance)`. If you pre-register with a specific
   storage type and then run `bench_vector index` with the same tuple, that spec is reused.
@@ -1520,9 +1522,6 @@ Use this table to decide which search mode and tuning knobs apply for each datas
 | `gist` (L2) | Yes | No (not applicable) | N/A | N/A | `50`-`200` | Use exact HNSW only |
 
 Rules:
-- Applicability by command:
-  - `bench_vector query`: currently `laion`, `sift`, `gist`, `random`
-  - `bench_vector sweep`: `laion`, `sift`, `gist`, `cohere`, `glove`, `random`
 - RaBitQ is only applicable to cosine-distance embeddings in the current implementation.
 - Exact HNSW is available for all distance metrics (`Cosine`, `L2`, `DotProduct`).
 - `bits=4` usually gives better recall and larger code size; `bits=1` is smallest/fastest but needs more rerank for quality.

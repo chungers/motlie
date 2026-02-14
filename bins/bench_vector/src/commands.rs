@@ -16,7 +16,7 @@ use std::time::Instant;
 use motlie_db::vector::benchmark::{
     self, compute_recall, compute_rotated_variance, print_pareto_frontier, print_rotation_stats,
     BenchmarkMetadata, GistDataset, LaionDataset, LatencyStats, ParetoInput, RandomDataset,
-    SiftDataset, save_rabitq_results_csv, GIST_QUERIES,
+    SiftDataset, save_rabitq_results_csv,
 };
 use motlie_db::vector::{
     create_reader_with_storage, create_writer, spawn_mutation_consumer_with_storage_autoreg,
@@ -93,7 +93,7 @@ pub async fn download(args: DownloadArgs) -> Result<()> {
 
 #[derive(Parser)]
 pub struct IndexArgs {
-    /// Dataset: laion, sift, gist, random
+    /// Dataset: laion, sift, gist, cohere, glove, random
     #[arg(long)]
     pub dataset: String,
 
@@ -186,7 +186,7 @@ pub async fn index(args: IndexArgs) -> Result<()> {
     } else {
         // Auto-detect from dataset
         match args.dataset.to_lowercase().as_str() {
-            "laion" | "cohere" | "random" => Distance::Cosine,
+            "laion" | "cohere" | "glove" | "random" => Distance::Cosine,
             "sift" | "gist" => Distance::L2,
             _ => Distance::Cosine,
         }
@@ -490,13 +490,16 @@ pub async fn index(args: IndexArgs) -> Result<()> {
     }
 
     // Load dataset
-    let (vectors, dim) = load_dataset_vectors_with_random(
+    let dataset = load_benchmark_dataset_for_sweep(
         &args.dataset,
         &args.data_dir,
         args.num_vectors,
+        0, // index path only needs base vectors
         args.dim,
         args.seed,
     )?;
+    let vectors = dataset.vectors().to_vec();
+    let dim = dataset.dim();
     println!("Loaded {} vectors, dim={}", vectors.len(), dim);
 
     let embedding = registry.register(
@@ -665,7 +668,7 @@ pub struct QueryArgs {
     #[arg(long)]
     pub embedding_code: Option<u64>,
 
-    /// Dataset for queries (to load test vectors)
+    /// Dataset for queries: laion, sift, gist, cohere, glove, random
     #[arg(long)]
     pub dataset: String,
 
@@ -752,12 +755,16 @@ pub async fn query(args: QueryArgs) -> Result<()> {
         (Vec::new(), Vec::new(), skip_recall, vector_seed, query_seed)
     } else {
         // Load queries and ground truth
-        let (db_vectors, queries, _dim) = load_dataset_for_query(
+        let dataset = load_benchmark_dataset_for_sweep(
             &args.dataset,
             &args.data_dir,
             meta.num_vectors,
             args.num_queries,
+            dim,
+            args.seed.unwrap_or(42),
         )?;
+        let db_vectors = dataset.vectors().to_vec();
+        let queries = dataset.queries().to_vec();
         println!("Loaded {} queries, dim={}", queries.len(), dim);
 
         let ground_truth = if args.skip_recall {
@@ -1095,7 +1102,7 @@ pub async fn query(args: QueryArgs) -> Result<()> {
 
 #[derive(Parser)]
 pub struct SweepArgs {
-    /// Dataset: laion, sift, gist, random
+    /// Dataset: laion, sift, gist, cohere, glove, random
     #[arg(long)]
     pub dataset: String,
 
@@ -1608,77 +1615,6 @@ fn load_vectors_for_embedding_from_db(
 
     println!("Reservoir sampled {} vectors from {} total", reservoir.len(), count);
     Ok(reservoir)
-}
-
-fn load_dataset_vectors(
-    dataset: &str,
-    data_dir: &PathBuf,
-    max_vectors: usize,
-) -> Result<(Vec<Vec<f32>>, usize)> {
-    match dataset.to_lowercase().as_str() {
-        "laion" => {
-            let ds = LaionDataset::load(data_dir, max_vectors)?;
-            let dim = ds.dim;
-            Ok((ds.image_embeddings, dim))
-        }
-        "sift" => {
-            let ds = SiftDataset::load(data_dir, max_vectors, 0)?;
-            let dim = benchmark::SIFT_EMBEDDING_DIM;
-            Ok((ds.base_vectors, dim))
-        }
-        "gist" => {
-            let ds = GistDataset::load(data_dir, max_vectors, GIST_QUERIES)?;
-            let dim = benchmark::GIST_EMBEDDING_DIM;
-            Ok((ds.base_vectors, dim))
-        }
-        _ => anyhow::bail!("Unknown dataset: {}. Use: laion, sift, gist", dataset),
-    }
-}
-
-/// Load dataset vectors with support for random dataset generation.
-fn load_dataset_vectors_with_random(
-    dataset: &str,
-    data_dir: &PathBuf,
-    max_vectors: usize,
-    dim: usize,
-    seed: u64,
-) -> Result<(Vec<Vec<f32>>, usize)> {
-    match dataset.to_lowercase().as_str() {
-        "random" => {
-            println!("Generating {} random vectors (dim={}, seed={})...", max_vectors, dim, seed);
-            let ds = RandomDataset::generate(max_vectors, 0, dim, seed);
-            Ok((ds.vectors, ds.dim))
-        }
-        _ => load_dataset_vectors(dataset, data_dir, max_vectors),
-    }
-}
-
-fn load_dataset_for_query(
-    dataset: &str,
-    data_dir: &PathBuf,
-    num_db: usize,
-    num_queries: usize,
-) -> Result<(Vec<Vec<f32>>, Vec<Vec<f32>>, usize)> {
-    match dataset.to_lowercase().as_str() {
-        "laion" => {
-            let ds = LaionDataset::load(data_dir, num_db)?;
-            let dim = ds.dim;
-            let queries: Vec<Vec<f32>> = ds.text_embeddings.into_iter().take(num_queries).collect();
-            Ok((ds.image_embeddings, queries, dim))
-        }
-        "sift" => {
-            let ds = SiftDataset::load(data_dir, num_db, num_queries)?;
-            let dim = benchmark::SIFT_EMBEDDING_DIM;
-            Ok((ds.base_vectors, ds.query_vectors, dim))
-        }
-        "gist" => {
-            let ds = GistDataset::load(data_dir, num_db, num_queries)?;
-            let dim = benchmark::GIST_EMBEDDING_DIM;
-            let queries: Vec<Vec<f32>> = ds.query_vectors.into_iter().take(num_queries).collect();
-            Ok((ds.base_vectors, queries, dim))
-        }
-        _ => anyhow::bail!("Unknown dataset: {}", dataset),
-    }
 }
 
 fn load_benchmark_dataset_for_sweep(
