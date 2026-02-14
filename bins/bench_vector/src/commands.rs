@@ -1674,7 +1674,7 @@ fn compute_ground_truth(
 
 #[derive(Parser)]
 pub struct CheckDistributionArgs {
-    /// Dataset: laion, sift, gist, random
+    /// Dataset: laion, sift, gist, cohere, glove, random
     #[arg(long)]
     pub dataset: String,
 
@@ -1713,29 +1713,17 @@ pub fn check_distribution(args: CheckDistributionArgs) -> Result<()> {
     println!("Sample size: {}", args.sample_size);
     println!("Bits per dim: {}", args.bits);
 
-    // Load vectors
-    let (vectors, dim) = match args.dataset.to_lowercase().as_str() {
-        "laion" => {
-            let ds = LaionDataset::load(&args.data_dir, args.sample_size)?;
-            (ds.image_embeddings, ds.dim)
-        }
-        "sift" => {
-            let ds = SiftDataset::load(&args.data_dir, args.sample_size, 0)?;
-            (ds.base_vectors, benchmark::SIFT_EMBEDDING_DIM)
-        }
-        "gist" => {
-            let ds = GistDataset::load(&args.data_dir, args.sample_size, 0)?;
-            (ds.base_vectors, benchmark::GIST_EMBEDDING_DIM)
-        }
-        "random" => {
-            let ds = RandomDataset::generate(args.sample_size, 0, args.dim, args.seed);
-            (ds.vectors, ds.dim)
-        }
-        _ => anyhow::bail!(
-            "Unknown dataset: {}. Use: laion, sift, gist, random",
-            args.dataset
-        ),
-    };
+    // Load vectors through shared benchmark dataset loader
+    let dataset = load_benchmark_dataset_for_sweep(
+        &args.dataset,
+        &args.data_dir,
+        args.sample_size,
+        0, // no query vectors needed for distribution check
+        args.dim,
+        args.seed,
+    )?;
+    let vectors = dataset.vectors().to_vec();
+    let dim = dataset.dim();
 
     println!("Loaded {} vectors, dim={}", vectors.len(), dim);
 
