@@ -126,12 +126,16 @@ async fn test_http_server_returns_sse_format() {
     assert!(content_type.contains("text/event-stream"), "Expected SSE content-type, got: {}", content_type);
 
     let body = response.text().await.unwrap();
-    // SSE format should have "data:" prefix
-    assert!(body.starts_with("data:"), "Expected SSE data: prefix, got: {}", body);
-
-    // Parse the JSON from SSE format
-    let json_str = body.trim_start_matches("data:").trim();
-    let json: serde_json::Value = serde_json::from_str(json_str).expect("Should be valid JSON");
+    // SSE format has multiple data: lines. The first is empty (connection open),
+    // the second contains the actual JSON response.
+    // Find the data line with actual JSON content (starts with '{')
+    let json_str = body
+        .lines()
+        .filter(|line| line.starts_with("data:"))
+        .map(|line| line.trim_start_matches("data:").trim())
+        .find(|content| content.starts_with('{'))
+        .expect(&format!("Expected SSE data: line with JSON, got: {}", body));
+    let json: serde_json::Value = serde_json::from_str(json_str).expect(&format!("Should be valid JSON, got: {}", json_str));
 
     // Verify JSON-RPC structure
     assert_eq!(json["jsonrpc"], "2.0");
