@@ -315,7 +315,7 @@ mod tests {
     use crate::rocksdb::ColumnFamily;
     use crate::vector::schema::{EmbeddingSpec, VectorElementType};
     use crate::vector::{Distance, Embedding, SearchConfig, VectorCfKey, VectorCfValue, Vectors};
-    use rand::{Rng, SeedableRng};
+    use rand::{RngExt, SeedableRng};
     use rand_chacha::ChaCha20Rng;
     use std::collections::HashSet;
     use tempfile::TempDir;
@@ -387,7 +387,7 @@ mod tests {
     fn generate_random_vectors(count: usize, dim: usize, seed: u64) -> Vec<Vec<f32>> {
         let mut rng = ChaCha20Rng::seed_from_u64(seed);
         (0..count)
-            .map(|_| (0..dim).map(|_| rng.gen::<f32>()).collect())
+            .map(|_| (0..dim).map(|_| rng.random::<f32>()).collect())
             .collect()
     }
 
@@ -684,13 +684,13 @@ mod tests {
 
         for _ in 0..n_clusters {
             // Random cluster center
-            let center: Vec<f32> = (0..dim).map(|_| rng.gen::<f32>() * 10.0).collect();
+            let center: Vec<f32> = (0..dim).map(|_| rng.random::<f32>() * 10.0).collect();
 
             // Points around the center
             for _ in 0..points_per_cluster {
                 let point: Vec<f32> = center
                     .iter()
-                    .map(|&c| c + (rng.gen::<f32>() - 0.5) * 0.5)
+                    .map(|&c| c + (rng.random::<f32>() - 0.5) * 0.5)
                     .collect();
                 vectors.push(point);
             }
@@ -917,7 +917,7 @@ mod tests {
         let mut rng = ChaCha20Rng::seed_from_u64(seed);
         (0..count)
             .map(|_| {
-                let mut vec: Vec<f32> = (0..128).map(|_| rng.gen::<f32>() - 0.5).collect();
+                let mut vec: Vec<f32> = (0..128).map(|_| rng.random::<f32>() - 0.5).collect();
                 // Normalize to unit length for cosine distance
                 let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
                 if norm > 0.0 {

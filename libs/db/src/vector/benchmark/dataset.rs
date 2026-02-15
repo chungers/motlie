@@ -1278,7 +1278,7 @@ impl RandomDataset {
 
         let vectors: Vec<Vec<f32>> = (0..num_vectors)
             .map(|_| {
-                let mut v: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0..1.0)).collect();
+                let mut v: Vec<f32> = (0..dim).map(|_| rng.random_range(-1.0..1.0)).collect();
                 normalize(&mut v);
                 v
             })
@@ -1286,7 +1286,7 @@ impl RandomDataset {
 
         let queries: Vec<Vec<f32>> = (0..num_queries)
             .map(|_| {
-                let mut v: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0..1.0)).collect();
+                let mut v: Vec<f32> = (0..dim).map(|_| rng.random_range(-1.0..1.0)).collect();
                 normalize(&mut v);
                 v
             })

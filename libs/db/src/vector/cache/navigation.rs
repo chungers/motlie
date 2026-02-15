@@ -16,7 +16,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::RwLock;
 
-use rand::Rng;
+use rand::{Rng, RngExt};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use roaring::RoaringBitmap;
 use serde::{Deserialize, Serialize};
@@ -70,7 +70,7 @@ impl NavigationLayerInfo {
     /// Uses the HNSW probability distribution: P(layer=l) ∝ exp(-l / m_L).
     /// Returns layer in range [0, current_max + 1].
     pub fn random_layer<R: Rng>(&self, rng: &mut R) -> HnswLayer {
-        let r: f32 = rng.gen();
+        let r: f32 = rng.random();
         // -ln(r) * m_L gives exponential distribution
         let level = (-r.ln() * self.m_l).floor() as u8;
         // Cap at one above current max (graph grows one layer at a time)
@@ -445,7 +445,7 @@ mod tests {
     #[test]
     fn test_random_layer_distribution() {
         let info = NavigationLayerInfo::new(16);
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         // Generate many layers and check distribution
         let mut counts = [0u32; 10];
