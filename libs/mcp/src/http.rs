@@ -118,6 +118,7 @@ where
     let http_config = StreamableHttpServerConfig {
         sse_keep_alive: config.sse_keep_alive,
         stateful_mode: config.stateful_mode,
+        ..Default::default()
     };
 
     // Create the StreamableHttpService with a factory that clones our server
