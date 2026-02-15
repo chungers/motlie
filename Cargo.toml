@@ -73,7 +73,7 @@ petgraph = "0.8.3"
 pathfinding = "4.0"
 clap = { version = "4.5.58", features = ["derive"] }
 async-trait = "0.1"
-rmcp = { version = "0.9", features = ["server", "transport-io", "transport-streamable-http-server"] }
+rmcp = { version = "0.15.0", features = ["server", "transport-io", "transport-streamable-http-server"] }
 pmcp = { version = "1.10.2", features = ["schema-generation", "validation", "streamable-http"] }
 log = "0.4"
 tracing = "0.1"
