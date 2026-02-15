@@ -1699,7 +1699,7 @@ fn load_vectors_for_embedding_from_db(
     limit: usize,
     seed: u64,
 ) -> Result<Vec<(VecId, Vec<f32>)>> {
-    use rand::{Rng, SeedableRng};
+    use rand::{RngExt, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
     let cf = db
@@ -1733,7 +1733,7 @@ fn load_vectors_for_embedding_from_db(
             reservoir.push((key.1, vector));
         } else {
             // Replace with probability limit / (count + 1)
-            let j = rng.gen_range(0..=count);
+            let j = rng.random_range(0..=count);
             if j < limit {
                 reservoir[j] = (key.1, vector);
             }

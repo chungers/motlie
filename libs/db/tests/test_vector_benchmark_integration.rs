@@ -44,7 +44,7 @@ fn generate_sift_subset(num_vectors: usize, num_queries: usize) -> SiftSubset {
     let db_vectors: Vec<Vec<f32>> = (0..num_vectors)
         .map(|_| {
             (0..SIFT_EMBEDDING_DIM)
-                .map(|_| rng.gen_range(0..128) as f32)
+                .map(|_| rng.random_range(0..128) as f32)
                 .collect()
         })
         .collect();
@@ -53,7 +53,7 @@ fn generate_sift_subset(num_vectors: usize, num_queries: usize) -> SiftSubset {
     let queries: Vec<Vec<f32>> = (0..num_queries)
         .map(|_| {
             (0..SIFT_EMBEDDING_DIM)
-                .map(|_| rng.gen_range(0..128) as f32)
+                .map(|_| rng.random_range(0..128) as f32)
                 .collect()
         })
         .collect();
@@ -86,7 +86,7 @@ fn generate_laion_subset(num_vectors: usize, num_queries: usize) -> LaionSubset 
     let db_vectors: Vec<Vec<f32>> = (0..num_vectors)
         .map(|_| {
             let mut v: Vec<f32> = (0..LAION_EMBEDDING_DIM)
-                .map(|_| rng.gen_range(-1.0..1.0))
+                .map(|_| rng.random_range(-1.0..1.0))
                 .collect();
             normalize(&mut v);
             v
@@ -97,7 +97,7 @@ fn generate_laion_subset(num_vectors: usize, num_queries: usize) -> LaionSubset 
     let queries: Vec<Vec<f32>> = (0..num_queries)
         .map(|_| {
             let mut v: Vec<f32> = (0..LAION_EMBEDDING_DIM)
-                .map(|_| rng.gen_range(-1.0..1.0))
+                .map(|_| rng.random_range(-1.0..1.0))
                 .collect();
             normalize(&mut v);
             v
@@ -576,7 +576,7 @@ async fn run_storage_type_pipeline(
     // Generate synthetic data
     let db_vectors: Vec<Vec<f32>> = (0..num_vectors)
         .map(|_| {
-            let mut v: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0..1.0)).collect();
+            let mut v: Vec<f32> = (0..dim).map(|_| rng.random_range(-1.0..1.0)).collect();
             if distance == Distance::Cosine {
                 normalize(&mut v);
             }
@@ -585,7 +585,7 @@ async fn run_storage_type_pipeline(
         .collect();
     let queries: Vec<Vec<f32>> = (0..num_queries)
         .map(|_| {
-            let mut v: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0..1.0)).collect();
+            let mut v: Vec<f32> = (0..dim).map(|_| rng.random_range(-1.0..1.0)).collect();
             if distance == Distance::Cosine {
                 normalize(&mut v);
             }
@@ -758,13 +758,13 @@ async fn test_storage_type_metadata_persists() -> anyhow::Result<()> {
 
     let db_vectors: Vec<Vec<f32>> = (0..num_vectors)
         .map(|_| {
-            let mut v: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0..1.0)).collect();
+            let mut v: Vec<f32> = (0..dim).map(|_| rng.random_range(-1.0..1.0)).collect();
             normalize(&mut v);
             v
         })
         .collect();
     let query: Vec<f32> = {
-        let mut v: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0..1.0)).collect();
+        let mut v: Vec<f32> = (0..dim).map(|_| rng.random_range(-1.0..1.0)).collect();
         normalize(&mut v);
         v
     };

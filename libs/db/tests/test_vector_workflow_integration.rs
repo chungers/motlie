@@ -46,7 +46,7 @@ fn generate_laion_vectors(num_vectors: usize, seed: u64) -> Vec<Vec<f32>> {
     (0..num_vectors)
         .map(|_| {
             let mut v: Vec<f32> = (0..LAION_EMBEDDING_DIM)
-                .map(|_| rng.gen_range(-1.0..1.0))
+                .map(|_| rng.random_range(-1.0..1.0))
                 .collect();
             // Normalize for Cosine distance
             let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();

@@ -28,7 +28,7 @@
 //!
 //! - RaBitQ paper: <https://arxiv.org/abs/2405.12497>
 
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 
 use crate::vector::config::RaBitQConfig;
@@ -148,7 +148,7 @@ impl RaBitQ {
         let mut rng = ChaCha20Rng::seed_from_u64(seed);
 
         // Generate random matrix with normally distributed values
-        let mut matrix: Vec<f32> = (0..dim * dim).map(|_| rng.gen::<f32>() - 0.5).collect();
+        let mut matrix: Vec<f32> = (0..dim * dim).map(|_| rng.random::<f32>() - 0.5).collect();
 
         // Gram-Schmidt orthogonalization (column-wise)
         for i in 0..dim {
@@ -700,14 +700,14 @@ impl RaBitQ {
     /// have variance ≈ 1 (not 1/D as with unscaled orthonormal rotation).
     #[cfg(test)]
     fn rotated_component_variance(&self, num_samples: usize, seed: u64) -> f32 {
-        use rand::Rng;
+        use rand::RngExt;
         let mut rng = ChaCha20Rng::seed_from_u64(seed);
 
         let mut all_components = Vec::with_capacity(num_samples * self.dim);
 
         for _ in 0..num_samples {
             // Generate random unit vector
-            let mut v: Vec<f32> = (0..self.dim).map(|_| rng.gen::<f32>() - 0.5).collect();
+            let mut v: Vec<f32> = (0..self.dim).map(|_| rng.random::<f32>() - 0.5).collect();
             let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
             for x in &mut v {
                 *x /= norm;
@@ -766,7 +766,7 @@ mod tests {
     /// After fix, all 4 levels should be populated.
     #[test]
     fn test_2bit_uses_all_levels() {
-        use rand::Rng;
+        use rand::RngExt;
         let encoder = RaBitQ::new(128, 2, 42);
         let mut rng = ChaCha20Rng::seed_from_u64(999);
 
@@ -774,7 +774,7 @@ mod tests {
 
         // Encode many random unit vectors
         for _ in 0..500 {
-            let mut v: Vec<f32> = (0..128).map(|_| rng.gen::<f32>() - 0.5).collect();
+            let mut v: Vec<f32> = (0..128).map(|_| rng.random::<f32>() - 0.5).collect();
             let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
             for x in &mut v {
                 *x /= norm;
@@ -815,7 +815,7 @@ mod tests {
     /// After fix, values should spread across many levels.
     #[test]
     fn test_4bit_uses_many_levels() {
-        use rand::Rng;
+        use rand::RngExt;
         let encoder = RaBitQ::new(128, 4, 42);
         let mut rng = ChaCha20Rng::seed_from_u64(888);
 
@@ -823,7 +823,7 @@ mod tests {
 
         // Encode many random unit vectors
         for _ in 0..500 {
-            let mut v: Vec<f32> = (0..128).map(|_| rng.gen::<f32>() - 0.5).collect();
+            let mut v: Vec<f32> = (0..128).map(|_| rng.random::<f32>() - 0.5).collect();
             let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
             for x in &mut v {
                 *x /= norm;

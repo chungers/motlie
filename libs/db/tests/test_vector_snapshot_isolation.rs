@@ -71,7 +71,7 @@ fn create_test_storage() -> (TempDir, Storage) {
 /// Helper: Generate deterministic vector from seed
 fn seeded_vector(dim: usize, seed: u64) -> Vec<f32> {
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
-    (0..dim).map(|_| rng.gen::<f32>()).collect()
+    (0..dim).map(|_| rng.random::<f32>()).collect()
 }
 
 /// Atomic insert result
@@ -626,14 +626,14 @@ fn test_transaction_conflict_stress() {
         handles.push(thread::spawn(move || {
             let txn_db = storage.transaction_db().expect("txn_db");
             let vectors_cf = txn_db.cf_handle(Vectors::CF_NAME).expect("cf");
-            let mut rng = rand::thread_rng();
+            let mut rng = rand::rng();
 
             let mut successes = 0u32;
             let mut errors = 0u32;
 
             for op_idx in 0..ops_per_thread {
                 // Pick a random key from the small key space
-                let vec_id = rng.gen_range(0..key_space);
+                let vec_id = rng.random_range(0..key_space);
                 let key = VectorCfKey(TEST_EMBEDDING, vec_id);
                 let key_bytes = Vectors::key_to_bytes(&key);
 

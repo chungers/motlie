@@ -36,7 +36,7 @@ use motlie_db::query::{AllNodes, Runnable as QueryRunnable};
 use motlie_db::reader::Reader;
 use motlie_db::writer::Writer;
 use motlie_db::Id;
-use rand::Rng;
+use rand::{Rng, RngExt};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -76,7 +76,7 @@ impl Default for HnswParams {
 impl HnswParams {
     /// Generate random level for a new node
     pub fn random_level(&self, rng: &mut impl Rng) -> usize {
-        let r: f64 = rng.gen();
+        let r: f64 = rng.random();
         (-r.ln() * self.ml).floor() as usize
     }
 

@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 /// Generate random vectors for benchmarking
 fn generate_vectors(rng: &mut ChaCha8Rng, count: usize, dim: usize) -> Vec<Vec<f32>> {
     (0..count)
-        .map(|_| (0..dim).map(|_| rng.gen::<f32>()).collect())
+        .map(|_| (0..dim).map(|_| rng.random::<f32>()).collect())
         .collect()
 }
 

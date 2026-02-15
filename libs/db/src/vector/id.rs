@@ -421,13 +421,13 @@ mod tests {
 
     #[test]
     fn test_allocate_free_uniqueness_property() {
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
+        use rand::RngExt;
+        let mut rng = rand::rng();
         let allocator = IdAllocator::new();
         let mut live_ids: HashSet<VecId> = HashSet::new();
 
         for _ in 0..10000 {
-            if live_ids.is_empty() || rng.gen_bool(0.7) {
+            if live_ids.is_empty() || rng.random_bool(0.7) {
                 // Allocate
                 let id = allocator.allocate_local();
                 assert!(

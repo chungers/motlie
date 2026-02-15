@@ -46,7 +46,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use rand::Rng;
+use rand::RngExt;
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, info_span, instrument, warn, Instrument};
 use warp::Filter;
@@ -57,7 +57,7 @@ static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Simulates some async work with variable latency
 #[instrument(skip_all, fields(work_id = %work_id, duration_ms))]
 async fn do_async_work(work_id: u64) -> String {
-    let duration_ms = rand::thread_rng().gen_range(10..100);
+    let duration_ms = rand::rng().random_range(10..100);
     tracing::Span::current().record("duration_ms", duration_ms);
 
     debug!(duration_ms, "Starting async work");
@@ -70,10 +70,10 @@ async fn do_async_work(work_id: u64) -> String {
 /// Simulates a database query
 #[instrument(skip_all, fields(query_type = %query_type, rows_returned))]
 async fn simulate_db_query(query_type: &str) -> Vec<String> {
-    let latency = rand::thread_rng().gen_range(5..50);
+    let latency = rand::rng().random_range(5..50);
     tokio::time::sleep(Duration::from_millis(latency)).await;
 
-    let rows: Vec<String> = (0..rand::thread_rng().gen_range(1..10))
+    let rows: Vec<String> = (0..rand::rng().random_range(1..10))
         .map(|i| format!("row_{}", i))
         .collect();
 
@@ -124,7 +124,7 @@ async fn work_handler() -> Result<impl warp::Reply, warp::Rejection> {
 /// Handler for the /api/error endpoint (demonstrates error tracing)
 #[instrument(name = "api_error")]
 async fn error_handler() -> Result<impl warp::Reply, warp::Rejection> {
-    let should_fail = rand::thread_rng().gen_bool(0.5);
+    let should_fail = rand::rng().random_bool(0.5);
 
     if should_fail {
         warn!("Simulated error condition triggered");
@@ -157,25 +157,37 @@ fn chrono_lite_timestamp() -> u64 {
 
 /// Starts the HTTP server
 async fn run_server(addr: SocketAddr, shutdown_rx: oneshot::Receiver<()>) {
-    let health = warp::path("health").and(warp::get()).and_then(health_handler);
-
-    let work = warp::path!("api" / "work")
-        .and(warp::post())
-        .and_then(work_handler);
-
-    let error = warp::path!("api" / "error")
+    let health = warp::path("health")
         .and(warp::get())
-        .and_then(error_handler);
+        .and_then(health_handler)
+        .boxed();
 
-    let routes = health.or(work).or(error).with(warp::trace::request());
+    let work = warp::path("api")
+        .and(warp::path("work"))
+        .and(warp::path::end())
+        .and(warp::post())
+        .and_then(work_handler)
+        .boxed();
 
-    let (_, server) = warp::serve(routes).bind_with_graceful_shutdown(addr, async {
-        shutdown_rx.await.ok();
-        info!("Server shutdown signal received");
-    });
+    let error = warp::path("api")
+        .and(warp::path("error"))
+        .and(warp::path::end())
+        .and(warp::get())
+        .and_then(error_handler)
+        .boxed();
+
+    let routes = health.or(work).or(error).with(warp::log("tracing_durability"));
 
     info!(%addr, "Server starting");
-    server.await;
+    warp::serve(routes)
+        .bind(addr)
+        .await
+        .graceful(async {
+            shutdown_rx.await.ok();
+            info!("Server shutdown signal received");
+        })
+        .run()
+        .await;
     info!("Server stopped");
 }
 

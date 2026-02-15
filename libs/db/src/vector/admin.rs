@@ -738,7 +738,7 @@ fn sample_vectors_impl(
     count: usize,
     seed: u64,
 ) -> Result<Vec<VectorInfo>> {
-    use rand::{Rng, SeedableRng};
+    use rand::{RngExt, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
     let meta_cf = db
@@ -775,7 +775,7 @@ fn sample_vectors_impl(
         if total < count {
             reservoir.push(entry);
         } else {
-            let j = rng.gen_range(0..=total);
+            let j = rng.random_range(0..=total);
             if j < count {
                 reservoir[j] = entry;
             }
