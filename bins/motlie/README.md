@@ -1,225 +1,139 @@
 # motlie CLI
 
-Command-line utility for working with Motlie graph databases.
+Command-line tools for inspecting Motlie graph/vector RocksDB data and building/querying a fulltext index.
 
-## Installation
+## What This CLI Covers
 
-### macOS (Apple Silicon / Intel)
+- `motlie db`: inspect graph + vector column families from a RocksDB database
+- `motlie fulltext`: build/search a Tantivy index over graph content
+- `motlie info`: print build/subsystem configuration
 
-#### 1. Install HDF5 Dependency (for benchmark features)
+For high-throughput vector benchmarking and ANN experiments, use `bench_vector` (see `bins/bench_vector/README.md`).
 
-If you want to build with the `benchmark` feature (for vector search benchmarking with standard datasets):
+## Build and Install
 
-```bash
-# Install HDF5 via Homebrew (supports HDF5 1.8.4 through 2.0.0)
-brew install hdf5
-```
-
-#### 2. Build Options
-
-**Standard build (no benchmark features):**
+### Build
 
 ```bash
+# Standard build
 cargo build --release --bin motlie
-```
 
-**Build with SIMD-optimized vector operations:**
-
-```bash
-cargo build --release --bin motlie --features simd-native
-```
-
-**Build with benchmark and SIMD features (requires HDF5):**
-
-```bash
-cargo build --release --bin motlie --features benchmark,simd-native
-```
-
-**Apple Silicon (M1/M2/M3/M4)**: Uses NEON SIMD instructions automatically.
-
-**Intel Mac**: Uses AVX2 or SSE4.2 depending on CPU capabilities.
-
-### Linux
-
-```bash
-# Ubuntu/Debian (for benchmark feature)
-sudo apt-get install libhdf5-dev
-
-# Build with SIMD auto-detection
-cargo build --release --bin motlie --features simd-native
-
-# Or with benchmark features
-cargo build --release --bin motlie --features benchmark,simd-native
-```
-
-### Install from Source
-
-```bash
-cargo install --path bins/motlie
-```
-
-## Build Features
-
-| Feature | Description |
-|---------|-------------|
-| (default) | Standard build with stderr tracing |
-| `dtrace-otel` | Enables OpenTelemetry distributed tracing support |
-| `benchmark` | Enables vector benchmark infrastructure (requires HDF5) |
-| `simd-native` | Auto-detect best SIMD at compile time (recommended) |
-| `simd-runtime` | Runtime SIMD dispatch for portable binaries |
-| `simd-neon` | Force NEON instructions (Apple Silicon) |
-| `simd-avx2` | Force AVX2 instructions (Intel/AMD 2013+) |
-| `simd-avx512` | Force AVX-512 instructions (Intel Xeon/Ice Lake+) |
-| `simd-none` | Scalar fallback (debugging, compatibility) |
-
-### Building with OpenTelemetry Support
-
-To enable distributed tracing via OpenTelemetry:
-
-```bash
+# Build with OpenTelemetry support
 cargo build --release --bin motlie --features dtrace-otel
 ```
 
-Or install with the feature:
+### Install from source
 
 ```bash
-cargo install --path bins/motlie --features dtrace-otel
+cargo install --path . --bin motlie
 ```
-
-### Building with Multiple Features
-
-Combine features as needed:
-
-```bash
-# SIMD + OpenTelemetry
-cargo build --release --bin motlie --features simd-native,dtrace-otel
-
-# All features (requires HDF5)
-HDF5_DIR=/opt/homebrew/opt/hdf5@1.10 cargo build --release --bin motlie --features benchmark,simd-native,dtrace-otel
-```
-
-## Commands
-
-| Command | Description | Documentation |
-|---------|-------------|---------------|
-| `db` | Database inspection and scanning | [docs/db.md](docs/db.md) |
-| `fulltext` | Fulltext search indexing and querying | [docs/fulltext.md](docs/fulltext.md) |
 
 ## Quick Start
 
-### Database Inspection
-
-Scan and inspect the graph database contents:
+### 1) Check build/runtime capabilities
 
 ```bash
-# List column families
-motlie db -p /path/to/graph-db list
-
-# Scan nodes
-motlie db -p /path/to/graph-db scan nodes --limit 10
-
-# Scan with table formatting
-motlie db -p /path/to/graph-db scan nodes -f table
+motlie info
 ```
 
-See [docs/db.md](docs/db.md) for full documentation.
-
-### Fulltext Search
-
-Build a fulltext index and search:
+### 2) Inspect graph and vector data in RocksDB
 
 ```bash
-# Build fulltext index from graph database
-motlie fulltext -p /path/to/index index /path/to/graph-db
+# List available column families
+motlie db -p /path/to/db list
 
-# Search for nodes
-motlie fulltext -p /path/to/index search nodes "search query"
+# Scan graph nodes
+motlie db -p /path/to/db scan graph/nodes --limit 10
 
-# Search for edges
-motlie fulltext -p /path/to/index search edges "relationship"
+# Scan forward edges
+motlie db -p /path/to/db scan graph/forward_edges --limit 10
 
-# Get facet counts
+# Scan vector embedding specs
+motlie db -p /path/to/db scan vector/embedding_specs --limit 10
+
+# Time-filter graph records (YYYY-MM-DD or YYYY-MM-DD-HH:mm:ss)
+motlie db -p /path/to/db scan graph/nodes 2026-02-14 --limit 50
+```
+
+### 3) Build and query fulltext index
+
+```bash
+# Build fulltext index from graph DB
+motlie fulltext -p /path/to/index index /path/to/db
+
+# Search nodes
+motlie fulltext -p /path/to/index search nodes "query text"
+
+# Search edges with fuzzy matching
+motlie fulltext -p /path/to/index search edges "influenc" -f low
+
+# Show facets
 motlie fulltext -p /path/to/index search facets
 ```
 
-See [docs/fulltext.md](docs/fulltext.md) for full documentation.
+## Graph, Fulltext, and Vector Workflow
+
+1. Graph data lives in RocksDB (`graph/*` CFs).
+2. Fulltext index is built from graph records into a separate directory.
+3. Vector ANN data lives in RocksDB (`vector/*` CFs), and can be inspected with `motlie db scan`.
+4. For vector index/query benchmarking and parameter sweeps, use `bench_vector`.
+
+## Commands
+
+| Command | Purpose | Docs |
+|---|---|---|
+| `motlie info` | Print build + subsystem info | - |
+| `motlie db ...` | List/scan graph + vector column families | [docs/db.md](docs/db.md) |
+| `motlie fulltext ...` | Build and query fulltext index | [docs/fulltext.md](docs/fulltext.md) |
 
 ## Output Formats
 
-Both commands support two output formats:
+- `motlie db` uses `-f, --format` with values `table` (default) or `tsv`.
+- `motlie fulltext search` and `motlie fulltext index` use `-o, --format` with values `table` (default) or `tsv`.
 
-| Format | Flag | Description |
-|--------|------|-------------|
-| TSV | `-f tsv` (default) | Tab-separated values for piping to other tools |
-| Table | `-f table` | Aligned columns with headers for human reading |
+Examples:
+
+```bash
+motlie db -p /path/to/db scan graph/nodes -f tsv
+motlie fulltext -p /path/to/index search -o table nodes "rust"
+```
 
 ## Environment Variables
-
-The CLI uses `tracing` for structured logging and distributed tracing.
 
 ### Logging
 
 | Variable | Description | Default |
-|----------|-------------|---------|
-| `RUST_LOG` | Log level filter | `debug` |
+|---|---|---|
+| `RUST_LOG` | Tracing filter | `debug` |
 
 ```bash
-# Show debug logs
-RUST_LOG=debug motlie db -p /path/to/db scan nodes
-
-# Show info and above
-RUST_LOG=info motlie fulltext -p /path/to/index search nodes "query"
-
-# Show only warnings and errors
-RUST_LOG=warn motlie db -p /path/to/db list
+RUST_LOG=info motlie db -p /path/to/db scan graph/nodes --limit 5
 ```
 
-### Distributed Tracing (requires dtrace-otel feature)
-
-When built with `--features dtrace-otel`, the CLI can export traces to an OpenTelemetry collector:
+### OpenTelemetry (`dtrace-otel` builds)
 
 | Variable | Description | Default |
-|----------|-------------|---------|
-| `DTRACE_ENDPOINT` | OTLP collector endpoint URL (e.g., `http://localhost:4317`) | None |
-| `DTRACE_SERVICE_NAME` | Service name for traces | `motlie` |
+|---|---|---|
+| `DTRACE_ENDPOINT` | OTLP collector endpoint URL | unset |
+| `DTRACE_SERVICE_NAME` | Service name | `motlie` |
 
 ```bash
-# Export traces to local Jaeger/Tempo/OTEL collector
 DTRACE_ENDPOINT=http://localhost:4317 \
-DTRACE_SERVICE_NAME=motlie-prod \
+DTRACE_SERVICE_NAME=motlie \
 RUST_LOG=info \
-motlie db -p /path/to/db scan nodes
+motlie db -p /path/to/db scan graph/nodes
 ```
 
-When `DTRACE_ENDPOINT` is not set, the CLI falls back to stderr logging regardless of whether the feature is enabled.
+If `DTRACE_ENDPOINT` is not set, the CLI falls back to stderr logging.
 
-### Example Trace Output
+## Exit Behavior
 
-```bash
-$ RUST_LOG=debug motlie db -p /tmp/test-db scan nodes --limit 2
-2024-01-15T10:30:00.123Z DEBUG motlie_db::graph::mod path="/tmp/test-db" [Storage] Ready
-2024-01-15T10:30:00.125Z  INFO motlie_db::graph::reader config=ReaderConfig { ... } Starting query consumer
-2024-01-15T10:30:00.130Z DEBUG motlie_db::graph::reader query=ScanNodes Processing query
-2024-01-15T10:30:00.135Z  INFO motlie starting
-01HQXYZ123  Alice   data:text/plain;base64,...
-01HQXYZ456  Bob     data:text/plain;base64,...
-```
-
-See [libs/db/README.md](../../libs/db/README.md#telemetry) for instrumentation details or [libs/core/src/telemetry.rs](../../libs/core/src/telemetry.rs) for telemetry initialization functions.
-
-## Exit Codes
-
-| Code | Meaning |
-|------|---------|
-| `0` | Success |
-| `1` | Error |
+- `motlie db` returns non-zero on scan/list failures.
+- `motlie fulltext` surfaces runtime failures in logs; if you are scripting around it, check stderr/log output in addition to process exit status.
 
 ## Tests
 
-Integration tests are available for the fulltext commands:
-
 ```bash
+cargo test --test db_cli
 cargo test --test fulltext_cli
 ```
-
-See [docs/fulltext.md](docs/fulltext.md#tests) for test coverage details.
