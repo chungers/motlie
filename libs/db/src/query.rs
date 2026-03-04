@@ -1,7 +1,8 @@
 //! Unified query module exposing both fulltext search and graph lookups.
 //!
-//! This module provides the **unified query interface** for `motlie-db`, allowing
-//! all query types to be executed through a single [`reader::Reader`](crate::reader::Reader).
+//! This module provides the **root unified query interface** for `motlie-db`,
+//! allowing graph + fulltext query types to be executed through a single
+//! [`reader::Reader`](crate::reader::Reader).
 //!
 //! # Overview
 //!
@@ -11,6 +12,9 @@
 //!
 //! Fulltext search results are automatically **hydrated** with full graph data,
 //! returning complete node/edge information instead of just search hits.
+//!
+//! Note: Vector queries are exposed under [`crate::vector`] and are not part of
+//! this root query facade.
 //!
 //! # Query Types
 //!
@@ -174,7 +178,7 @@ pub use crate::fulltext::search::{EdgeHit, MatchSource, NodeHit};
 ///
 /// Lookup a node by its ID.
 ///
-/// - With `graph::Reader`: returns `(NodeName, NodeSummary)`
+/// - With `graph::Reader`: returns `(NodeName, NodeSummary, Version)`
 /// - With `reader::Reader`: same result, forwarded to graph storage
 pub type NodeById = graph::query::NodeById;
 
@@ -192,7 +196,7 @@ pub type NodesByIdsMulti = graph::query::NodesByIdsMulti;
 ///
 /// Get all outgoing edges from a node.
 ///
-/// - With `graph::Reader`: returns `Vec<(EdgeName, DstId)>`
+/// - With `graph::Reader`: returns `Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>`
 /// - With `reader::Reader`: same result, forwarded to graph storage
 pub type OutgoingEdges = graph::query::OutgoingEdges;
 
@@ -200,7 +204,7 @@ pub type OutgoingEdges = graph::query::OutgoingEdges;
 ///
 /// Get all incoming edges to a node.
 ///
-/// - With `graph::Reader`: returns `Vec<(EdgeName, SrcId)>`
+/// - With `graph::Reader`: returns `Vec<(Option<EdgeWeight>, DstId, SrcId, EdgeName, Version)>`
 /// - With `reader::Reader`: same result, forwarded to graph storage
 pub type IncomingEdges = graph::query::IncomingEdges;
 

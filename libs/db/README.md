@@ -1,14 +1,20 @@
 # motlie-db
 
-A temporal graph database with integrated fulltext search, combining RocksDB (graph storage) and Tantivy (fulltext indexing).
+A database backend with graph, fulltext, and vector subsystems.
+
+- Graph storage/query: RocksDB (`motlie_db::graph`)
+- Fulltext indexing/search: Tantivy (`motlie_db::fulltext`)
+- Vector ANN search: RocksDB + HNSW (`motlie_db::vector`)
 
 ## Overview
 
 `motlie-db` provides two API layers:
 
-1. **Unified API (Porcelain)** - High-level interface via `motlie_db::Storage`, `motlie_db::query`, and `motlie_db::mutation` modules. Recommended for most use cases.
+1. **Unified API (Porcelain)** - High-level interface via `motlie_db::Storage`, `motlie_db::query`, and `motlie_db::mutation` modules for **graph + fulltext** workflows.
 
-2. **Subsystem APIs (Plumbing)** - Direct access to `motlie_db::graph` and `motlie_db::fulltext` modules for advanced usage, extension, and testing.
+2. **Subsystem APIs (Plumbing)** - Direct access to `motlie_db::graph`, `motlie_db::fulltext`, and `motlie_db::vector` for advanced usage, extension, and testing.
+
+For a concise onboarding path, see [`docs/getting-started.md`](docs/getting-started.md).
 
 ## Processor Architecture Alignment
 
@@ -103,7 +109,7 @@ let results = Nodes::new("rust programming".to_string(), 10)
     .await?;
 
 // 4. Direct graph lookups
-let (name, summary) = NodeById::new(node_id, None)
+let (name, summary, version) = NodeById::new(node_id, None)
     .run(handles.reader(), timeout)
     .await?;
 
@@ -112,6 +118,12 @@ handles.shutdown().await?;
 
 // Note: handles.writer() is not available on ReadOnlyHandles - compile error if you try!
 ```
+
+### Runnable Examples
+
+- Root unified graph + fulltext: [`examples/unified_graph_fulltext.rs`](examples/unified_graph_fulltext.rs)
+- Vector subsystem basics: [`examples/vector_basic.rs`](examples/vector_basic.rs)
+- Multi-subsystem builder: [`examples/storage_builder_multi_subsystem.rs`](examples/storage_builder_multi_subsystem.rs)
 
 ## API Lifecycle
 
@@ -308,8 +320,8 @@ The project is standardizing a **RequestEnvelope** pattern to carry:
 - **Reply channel** (optional; enables run-with-result)
 - **Tracing/metrics metadata** (request_id, request kind, etc.)
 
-This is being piloted in the graph crate and will become the common pattern across
-graph/fulltext/vector for both queries and mutations.
+This pattern is already used in the root unified graph/fulltext query+mutation
+pipeline and vector query/mutation channel paths.
 
 ### Why an envelope?
 - Unifies **fire-and-forget** and **request/response** flows.
@@ -433,7 +445,7 @@ handles.writer().flush().await?;
 | `UpdateNode` | Update node (active_period and/or summary) |
 | `UpdateEdge` | Update edge (weight, active_period, and/or summary) |
 | `Vec<Mutation>` | Batch multiple mutations atomically |
-| `Mutation` | Enum wrapping all mutation types |
+| `Mutation` | Enum wrapping the root mutation facade (add/update + fragments) |
 | `NodeSummary` | Node summary content wrapper |
 | `EdgeSummary` | Edge summary content wrapper |
 | `NodeName` | Node name wrapper |
@@ -465,11 +477,11 @@ handles.writer().flush().await?;
 |------|-------|
 | `NodeResult` | `(Id, NodeName, NodeSummary)` |
 | `EdgeResult` | `(SrcId, DstId, EdgeName, EdgeSummary)` |
-| `EdgeDetailsResult` | `(Option<f64>, SrcId, DstId, EdgeName, EdgeSummary)` |
-| `OutgoingEdgesResult` | `Vec<(Option<f64>, SrcId, DstId, EdgeName)>` |
-| `IncomingEdgesResult` | `Vec<(Option<f64>, DstId, SrcId, EdgeName)>` |
-| `AllNodesResult` | `Vec<(Id, NodeName, NodeSummary)>` |
-| `AllEdgesResult` | `Vec<(Option<f64>, SrcId, DstId, EdgeName)>` |
+| `EdgeDetailsResult` | `(Option<EdgeWeight>, SrcId, DstId, EdgeName, EdgeSummary, Version)` |
+| `OutgoingEdgesResult` | `Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>` |
+| `IncomingEdgesResult` | `Vec<(Option<EdgeWeight>, DstId, SrcId, EdgeName, Version)>` |
+| `AllNodesResult` | `Vec<(Id, NodeName, NodeSummary, Version)>` |
+| `AllEdgesResult` | `Vec<(Option<EdgeWeight>, SrcId, DstId, EdgeName, Version)>` |
 
 ## Subsystem APIs (Advanced Usage)
 
@@ -478,7 +490,7 @@ For advanced use cases, testing, or extension, access subsystems directly via qu
 ### Graph Module (`motlie_db::graph`)
 
 ```rust
-use motlie_db::graph::{Storage, Graph, Reader, Writer, WriterConfig, ReaderConfig};
+use motlie_db::graph::{Storage, Reader, Writer, WriterConfig, ReaderConfig};
 use motlie_db::graph::mutation::{AddNode, Mutation};
 use motlie_db::graph::query::{NodeById, OutgoingEdges, AllNodes, AllEdges};
 use motlie_db::graph::schema::{NodeSummary, EdgeSummary};
@@ -487,7 +499,6 @@ use motlie_db::graph::scan;  // Low-level visitor-based scan API
 
 Key types:
 - `graph::Storage` - RocksDB storage (readonly, readwrite, secondary modes)
-- `graph::Graph` - Mutation and query processor
 - `graph::Writer` / `graph::Reader` - Channel-based async infrastructure
 - `graph::query::AllNodes` / `graph::query::AllEdges` - Graph enumeration (also in unified API)
 - `graph::scan::*` - Low-level visitor-based pagination (advanced use)
@@ -506,16 +517,32 @@ Key types:
 - `fulltext::query::Nodes/Edges` - Return raw hits (scores, match sources)
 - `fulltext::search::NodeHit/EdgeHit` - Raw search results with BM25 scores
 
+### Vector Module (`motlie_db::vector`)
+
+```rust
+use motlie_db::vector::{
+    Storage, Writer, Reader, WriterConfig, ReaderConfig,
+    EmbeddingBuilder, Distance, ExternalKey,
+    InsertVector, SearchKNN, MutationRunnable, Runnable,
+};
+```
+
+Key types:
+- `vector::Storage` - RocksDB vector storage (readwrite/readonly/secondary modes)
+- `vector::EmbeddingBuilder` + registry APIs - define embedding spaces
+- `vector::InsertVector` / `vector::DeleteVector` - mutation builders
+- `vector::SearchKNN` - ANN query builder
+
 ### Consumer Functions
 
-Both subsystems expose spawn functions for building custom pipelines:
+Subsystem modules expose spawn functions for building custom pipelines:
 
 ```rust
 // Graph consumers
 use motlie_db::graph::{
     spawn_mutation_consumer,
     spawn_mutation_consumer_with_next,  // Chain to fulltext
-    spawn_query_consumer_pool_shared,
+    spawn_query_consumers_with_storage,
     spawn_query_consumer_pool_readonly,
 };
 
@@ -570,7 +597,7 @@ use motlie_db::fulltext::{
 │             │                          │                         │
 │             ▼                          ▼                         │
 │   ┌─────────────────────┐    ┌─────────────────────┐            │
-│   │   graph::Graph      │    │   fulltext::Index   │            │
+│   │ graph::Processor    │    │   fulltext::Index   │            │
 │   │   (RocksDB)         │    │   (Tantivy)         │            │
 │   └─────────────────────┘    └─────────────────────┘            │
 └─────────────────────────────────────────────────────────────────┘
@@ -666,7 +693,7 @@ src/
 ├── query.rs            # Unified query types with Runnable implementations
 ├── mutation.rs         # Unified mutation re-exports
 ├── graph/              # RocksDB graph storage subsystem
-│   ├── mod.rs          # Storage, Graph, re-exports
+│   ├── mod.rs          # Storage, subsystem exports
 │   ├── schema.rs       # Column family definitions
 │   ├── mutation.rs     # Mutation types and execution
 │   ├── writer.rs       # Writer infrastructure
@@ -680,8 +707,7 @@ src/
     ├── writer.rs       # Writer infrastructure
     ├── query.rs        # Query types (Nodes, Edges, Facets)
     ├── reader.rs       # Reader infrastructure
-    ├── search.rs       # Low-level search utilities
-    └── fuzzy.rs        # Fuzzy search implementation
+    └── search.rs       # Low-level search utilities
 ```
 
 ## See Also

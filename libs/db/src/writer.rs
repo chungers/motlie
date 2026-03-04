@@ -190,7 +190,7 @@ impl WriterConfig {
 /// let handles = storage.ready(config)?;
 ///
 /// // Use the Runnable trait for ergonomic mutation execution
-/// AddNode { /* ... */ }.run(handles.writer().unwrap()).await?;
+/// AddNode { /* ... */ }.run(handles.writer()).await?;
 /// ```
 #[derive(Clone)]
 pub struct Writer {
