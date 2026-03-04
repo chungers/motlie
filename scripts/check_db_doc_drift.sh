@@ -16,19 +16,40 @@ FILES=(
 PATTERNS=(
   "handles\\.writer\\(\\)\\.unwrap\\("
   "graph::Graph"
-  "create_reader_with_storage\\([^\\)]*,\\s*storage\\.clone\\("
+  "create_reader_with_storage\\([^\\)]*,[[:space:]]*storage\\.clone\\("
   "search_reader\\.search_knn\\("
   "InsertVector::new\\(embedding_code"
 )
 
 echo "Checking motlie-db docs/examples for stale API snippets..."
 
+if command -v rg >/dev/null 2>&1; then
+  SEARCH_TOOL="rg"
+elif command -v grep >/dev/null 2>&1; then
+  SEARCH_TOOL="grep"
+else
+  echo "ERROR: neither 'rg' nor 'grep' is available on PATH." >&2
+  exit 1
+fi
+
+echo "Using search tool: ${SEARCH_TOOL}"
+
 failed=0
 for pattern in "${PATTERNS[@]}"; do
-  if rg -n --no-heading "${pattern}" "${FILES[@]}"; then
-    echo "ERROR: stale documentation pattern found: ${pattern}"
-    failed=1
-  fi
+  case "${SEARCH_TOOL}" in
+    rg)
+      if rg -n --no-heading "${pattern}" "${FILES[@]}"; then
+        echo "ERROR: stale documentation pattern found: ${pattern}"
+        failed=1
+      fi
+      ;;
+    grep)
+      if grep -nE "${pattern}" "${FILES[@]}"; then
+        echo "ERROR: stale documentation pattern found: ${pattern}"
+        failed=1
+      fi
+      ;;
+  esac
 done
 
 if [[ "${failed}" -ne 0 ]]; then
