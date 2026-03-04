@@ -30,6 +30,9 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Clean motlie-db artifacts
+        run: cargo clean -p motlie-db
+
       - name: Rustdoc tests (motlie-db)
         run: cargo test -p motlie-db --doc
 
