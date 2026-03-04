@@ -10,6 +10,9 @@
 //! - `<base_path>/graph` - RocksDB graph database
 //! - `<base_path>/fulltext` - Tantivy fulltext index
 //!
+//! Note: vector storage is available via [`crate::vector::Storage`] and
+//! [`crate::storage_builder::StorageBuilder`].
+//!
 //! # Type-Safe Access Modes
 //!
 //! Storage uses Rust's type system to distinguish between read-only and read-write

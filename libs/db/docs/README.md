@@ -6,6 +6,20 @@ This directory contains design documentation, analysis, and implementation notes
 
 ### Essential Reading
 
+#### [getting-started.md](getting-started.md) ⭐
+**ESSENTIAL**: Fast path for using graph, fulltext, and vector APIs.
+
+**Contents**:
+- API surface selection (root unified vs subsystem APIs)
+- Root graph+fulltext quick start
+- Vector quick start
+- StorageBuilder composition pattern
+- Runnable examples and commands
+
+**Status**: ✅ Current - **Start here if you are new to motlie-db**
+
+---
+
 #### [concurrency-and-storage-modes.md](concurrency-and-storage-modes.md) ⭐
 **ESSENTIAL**: Complete guide to concurrent access patterns, storage modes, and threading.
 

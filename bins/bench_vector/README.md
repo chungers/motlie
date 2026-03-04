@@ -193,7 +193,9 @@ cargo run --release --features benchmark --bin bench_vector -- sweep \
 
 ## See Also
 
-- `libs/db/src/vector/docs/REQUIREMENTS.md`
-- `libs/db/src/vector/docs/BENCHMARK.md`
-- `libs/db/src/vector/docs/ADMIN.md`
-- `examples/vector2/main.rs`
+- [`libs/db/docs/getting-started.md`](../../libs/db/docs/getting-started.md) (API surface overview)
+- [`libs/db/examples/vector_basic.rs`](../../libs/db/examples/vector_basic.rs) (minimal vector insert/search example)
+- [`libs/db/src/vector/docs/REQUIREMENTS.md`](../../libs/db/src/vector/docs/REQUIREMENTS.md)
+- [`libs/db/src/vector/docs/BENCHMARK.md`](../../libs/db/src/vector/docs/BENCHMARK.md)
+- [`libs/db/src/vector/docs/ADMIN.md`](../../libs/db/src/vector/docs/ADMIN.md)
+- [`examples/vector2/main.rs`](../../examples/vector2/main.rs)

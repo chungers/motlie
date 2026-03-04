@@ -124,7 +124,7 @@ impl Index {
 
 impl Clone for Index {
     fn clone(&self) -> Self {
-        // Clone the Arc - preserves full capability (same as graph::Graph)
+        // Clone the Arc - preserves full capability (same Arc-sharing model as graph::Processor)
         Self {
             storage: self.storage.clone(),
         }

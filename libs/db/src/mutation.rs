@@ -1,15 +1,19 @@
-//! Unified mutation module exposing all mutation types.
+//! Unified mutation module exposing the root mutation facade.
 //!
-//! This module provides convenient access to all mutation types through a single
+//! This module provides convenient access to root mutation types through a single
 //! import path, following the same pattern as the unified query module.
 //!
 //! # Overview
 //!
-//! The unified mutation API provides:
-//! - All mutation types (`AddNode`, `AddEdge`, etc.)
+//! The root unified mutation API currently provides:
+//! - Graph add/update mutations (`AddNode`, `AddEdge`, fragments, updates)
 //! - The `Runnable` trait for executing mutations
 //! - The `Mutation` enum for batch operations
 //! - Common schema types used with mutations
+//!
+//! Note:
+//! - Vector mutations are exposed under [`crate::vector::mutation`]
+//! - Graph delete/restore mutations are exposed under [`crate::graph::mutation`]
 //!
 //! # Mutation Types
 //!
@@ -99,7 +103,7 @@
 // Re-export Runnable trait from writer module
 pub use crate::writer::Runnable;
 
-// Re-export all mutation types from graph::mutation
+// Re-export root mutation facade types from graph::mutation
 pub use crate::graph::mutation::{
     AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation,
     UpdateNode, UpdateEdge,

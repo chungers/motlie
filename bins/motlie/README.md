@@ -10,6 +10,12 @@ Command-line tools for inspecting Motlie graph/vector RocksDB data and building/
 
 For high-throughput vector benchmarking and ANN experiments, use `bench_vector` (see `bins/bench_vector/README.md`).
 
+If you are onboarding to the library APIs (not just CLI usage), start with:
+
+- [`libs/db/docs/getting-started.md`](../../libs/db/docs/getting-started.md)
+- [`libs/db/examples/unified_graph_fulltext.rs`](../../libs/db/examples/unified_graph_fulltext.rs)
+- [`libs/db/examples/storage_builder_multi_subsystem.rs`](../../libs/db/examples/storage_builder_multi_subsystem.rs)
+
 ## Build and Install
 
 ### Build
