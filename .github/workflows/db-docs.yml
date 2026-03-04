@@ -1,0 +1,40 @@
+name: motlie-db docs
+
+on:
+  pull_request:
+    paths:
+      - "libs/db/**"
+      - "bins/motlie/**"
+      - "bins/bench_vector/**"
+      - "scripts/check_db_doc_drift.sh"
+      - ".github/workflows/db-docs.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "libs/db/**"
+      - "bins/motlie/**"
+      - "bins/bench_vector/**"
+      - "scripts/check_db_doc_drift.sh"
+      - ".github/workflows/db-docs.yml"
+
+jobs:
+  docs-and-examples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Rustdoc tests (motlie-db)
+        run: cargo test -p motlie-db --doc
+
+      - name: Check examples compile (motlie-db)
+        run: cargo check -p motlie-db --examples
+
+      - name: Check documentation drift patterns
+        run: ./scripts/check_db_doc_drift.sh

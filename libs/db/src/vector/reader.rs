@@ -69,10 +69,7 @@ impl Default for ReaderConfig {
 /// use std::time::Duration;
 ///
 /// // Create reader with storage
-/// let (reader, receiver) = create_reader_with_storage(
-///     ReaderConfig::default(),
-///     storage.clone(),
-/// );
+/// let (reader, receiver) = create_reader_with_storage(ReaderConfig::default());
 ///
 /// // Point lookup query
 /// let query = GetVector::new(embedding_code, id);

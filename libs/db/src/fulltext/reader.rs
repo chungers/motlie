@@ -236,7 +236,7 @@ pub fn spawn_query_consumer(
 /// # async fn example() -> anyhow::Result<()> {
 /// let index_path = Path::new("/path/to/fulltext_index");
 ///
-/// // Create a shared readonly Index (follows graph::Graph pattern)
+/// // Create a shared readonly Index (follows graph::Processor Arc-sharing pattern)
 /// let mut storage = Storage::readonly(index_path);
 /// storage.ready()?;
 /// let index = Index::new(Arc::new(storage));

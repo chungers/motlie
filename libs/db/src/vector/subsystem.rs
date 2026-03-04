@@ -146,31 +146,30 @@ impl Subsystem {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use motlie_db::vector::{Subsystem, WriterConfig, ReaderConfig};
-    /// use motlie_db::storage_builder::StorageBuilder;
+    /// use motlie_db::vector::{Subsystem, Storage, WriterConfig, ReaderConfig};
     ///
-    /// // Create subsystem and build storage
-    /// let subsystem = Arc::new(Subsystem::new());
-    /// let registry = subsystem.cache().clone();
-    ///
-    /// let storage = StorageBuilder::new(path)
-    ///     .with_rocksdb(subsystem.clone())
-    ///     .build()?;
+    /// // Create subsystem and standalone vector storage
+    /// let subsystem = Subsystem::new();
+    /// let mut storage = Storage::readwrite(path);
+    /// storage.ready()?;
+    /// let storage = Arc::new(storage);
     ///
     /// // Start with managed lifecycle
     /// let (writer, search_reader) = subsystem.start(
-    ///     storage.vector_storage().clone(),
+    ///     storage.clone(),
     ///     WriterConfig::default(),
     ///     ReaderConfig::default(),
     ///     4,  // 4 query workers
     /// );
     ///
     /// // Use writer and search_reader...
-    /// InsertVector::new(&embedding, id, vec).run(&writer).await?;
-    /// let results = search_reader.search_knn(&embedding, query, 10, 100, timeout).await?;
+    /// InsertVector::new(&embedding, ExternalKey::NodeId(id), vec).run(&writer).await?;
+    /// let results = SearchKNN::new(&embedding, query, 10)
+    ///     .with_ef(100)
+    ///     .run(&search_reader, timeout)
+    ///     .await?;
     ///
-    /// // Shutdown automatically flushes pending mutations
-    /// storage.shutdown()?;
+    /// // On shutdown, flush writer then await spawned handles.
     /// ```
     ///
     /// # Lifecycle
@@ -259,8 +258,7 @@ impl Subsystem {
     /// );
     ///
     /// // Inserts now use two-phase pattern (fast sync + async graph build)
-    /// InsertVector::new(&embedding, id, vec)
-    ///     .build_index(false)  // Use async path
+    /// InsertVector::new(&embedding, ExternalKey::NodeId(id), vec)
     ///     .run(&writer).await?;
     /// ```
     ///
@@ -370,7 +368,7 @@ impl Subsystem {
     ///     tokio::time::sleep(Duration::from_millis(100)).await;
     ///
     ///     // Option 2: Switch to sync mode
-    ///     InsertVector::new(&embedding, id, vec)
+    ///     InsertVector::new(&embedding, ExternalKey::NodeId(id), vec)
     ///         .immediate()  // Use sync path instead
     ///         .run(&writer).await?;
     /// }

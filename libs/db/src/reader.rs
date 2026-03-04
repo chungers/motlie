@@ -3,6 +3,9 @@
 //! This module provides the [`Reader`], [`ReaderConfig`], and [`ReaderBuilder`] types
 //! for executing queries across both graph (RocksDB) and fulltext (Tantivy) backends.
 //!
+//! Note: vector queries use [`crate::vector::Reader`] and are not part of this
+//! root unified reader.
+//!
 //! # Usage
 //!
 //! The recommended entry point is [`Storage`](crate::Storage) at the crate root.
