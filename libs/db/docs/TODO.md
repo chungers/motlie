@@ -151,10 +151,106 @@ impl StorageHandle {
 
 ## Future Improvements
 
-- [ ] Implement unified `writer::Storage` and `StorageHandle`
-- [ ] Add `motlie_db::mutation` module with re-exports
-- [ ] Update documentation and examples
-- [ ] Add integration tests for read-after-write scenarios
+- [x] Implement unified `writer::Storage` and `StorageHandle` (delivered as typed root `Storage<ReadWrite>` + `ReadWriteHandles` in `libs/db/src/storage.rs`)
+- [x] Add `motlie_db::mutation` module with re-exports
+- [x] Update documentation and examples (root rustdocs + new `libs/db/docs/getting-started.md` + runnable examples in `libs/db/examples/`)
+- [x] Add integration tests for read-after-write scenarios (e.g., `libs/db/tests/test_transaction_api.rs`)
+
+---
+
+## API Consistency Audit (2026-02-26)
+
+This section captures findings from a cross-subsystem API review focused on:
+
+- root crate (`motlie_db`) unified API shape
+- subsystem API consistency (`graph`, `vector`, `fulltext`)
+- integration path from graph writes -> fulltext/vector queryability
+
+### Key Findings
+
+#### Critical
+
+1. Root "unified" API is graph+fulltext only, not graph+fulltext+vector.
+   - Root unified storage initializes only graph/fulltext paths:
+     - `libs/db/src/storage.rs` (`<base>/graph`, `<base>/fulltext`)
+   - Root unified query/mutation enums only cover graph/fulltext:
+     - `libs/db/src/query.rs`
+     - `libs/db/src/mutation.rs`
+
+2. Root mutation facade is incomplete vs graph module capabilities.
+   - `motlie_db::mutation` re-exports add/update mutations but not delete/restore:
+     - `libs/db/src/mutation.rs`
+   - graph root exports delete/restore:
+     - `libs/db/src/graph/mod.rs`
+
+3. Graph -> fulltext propagation is best-effort (drop on backpressure), and there is no equivalent graph -> vector ingestion path in unified root API.
+   - forwarding uses `try_send` and can drop:
+     - `libs/db/src/graph/writer.rs`
+     - `libs/db/src/graph/transaction.rs`
+
+#### High
+
+4. Read-write standalone subsystem opening is not symmetric with read-only for mixed CF databases.
+   - read-only has extra-CF fallback:
+     - `libs/db/src/rocksdb/storage.rs` (readonly path)
+   - read-write does not:
+     - `libs/db/src/rocksdb/storage.rs` (readwrite path)
+
+5. Two different "root" storage topologies exist:
+   - unified `Storage`: `<base>/graph`, `<base>/fulltext`
+   - `StorageBuilder`: `<base>/rocksdb`, `<base>/tantivy`
+   - See:
+     - `libs/db/src/storage.rs`
+     - `libs/db/src/storage_builder.rs`
+
+#### Medium
+
+6. Unified hydrated fulltext queries drop ranking provenance (`score`, `match_source`) from fulltext hits.
+   - raw hit structs include score/source:
+     - `libs/db/src/fulltext/search.rs`
+   - hydrated outputs are tuples without score/source:
+     - `libs/db/src/query.rs`
+
+7. Visibility mismatch in unified query internals.
+   - `Query::execute(&CompositeStorage)` and `Reader::storage()` are public-facing while `CompositeStorage` is `pub(crate)`:
+     - `libs/db/src/query.rs`
+     - `libs/db/src/reader.rs`
+
+8. Graph/vector request options and typed result ergonomics are close but not fully aligned.
+   - graph mutation run-with-result supports `ExecOptions`:
+     - `libs/db/src/graph/mutation.rs`
+   - vector mutation run-with-result has no options parameter:
+     - `libs/db/src/vector/mutation.rs`
+
+#### Low
+
+9. Root writer docs contain stale `unwrap()` usage despite non-optional writer handles.
+   - stale example:
+     - `libs/db/src/writer.rs`
+   - actual API:
+     - `libs/db/src/storage.rs` (`ReadWriteHandles::writer() -> &Writer`)
+
+### TODO: Recommended API Unification Work
+
+- [ ] Define `RootStorageV2` contract that includes graph, vector, and fulltext as first-class components.
+- [ ] Expand root `mutation` facade to include full graph mutation set (including delete/restore) and vector mutation facade.
+- [ ] Add root `query` facade for vector operations (`SearchKNN`, embedding lookup/list/resolve) with consistent `Runnable` ergonomics.
+- [ ] Introduce deterministic indexing contract from graph writes:
+  - graph -> fulltext: selectable consistency mode (`best_effort` vs `acknowledged`)
+  - graph -> vector: explicit ingestion API and lifecycle hooks
+- [ ] Unify storage directory model across `Storage` and `StorageBuilder` (or clearly split into "simple" vs "composable" modes with shared terminology).
+- [ ] Align read-only/read-write multi-CF behavior in generic RocksDB storage.
+- [ ] Preserve ranking metadata in hydrated fulltext query outputs (or provide alternate typed result including score/match_source).
+- [ ] Clean up public/private visibility boundaries in unified query plumbing.
+- [ ] Standardize mutation `run_with_result` options across graph/vector modules.
+- [ ] Fix stale root API docs/examples to match current signatures.
+
+### Suggested Integration Tests to Add
+
+- [ ] Root-level end-to-end test: graph write -> fulltext searchable with strict acknowledgment mode.
+- [ ] Root-level end-to-end test: graph write -> vector searchable path for node/edge content embeddings.
+- [ ] Mixed root query test combining graph traversal + fulltext rank + vector semantic rank under one `Storage` handle.
+- [ ] Backpressure behavior test validating no silent data loss in strict indexing mode.
 
 ---
 

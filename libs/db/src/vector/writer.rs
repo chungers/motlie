@@ -247,13 +247,13 @@ pub type MutationRequest = RequestEnvelope<Vec<Mutation>>;
 /// # Example
 ///
 /// ```rust,ignore
-/// use motlie_db::vector::{Writer, InsertVector, Mutation};
+/// use motlie_db::vector::{Writer, InsertVector, Mutation, ExternalKey};
 ///
 /// // Create writer and consumer
 /// let (writer, receiver) = create_writer(WriterConfig::default());
 ///
 /// // Send a vector mutation
-/// let mutation = InsertVector::new(embedding_code, id, vec![1.0, 2.0, 3.0]);
+/// let mutation = InsertVector::new(&embedding, ExternalKey::NodeId(id), vec![1.0, 2.0, 3.0]);
 /// writer.send(vec![mutation.into()]).await?;
 ///
 /// // Flush to ensure commit
