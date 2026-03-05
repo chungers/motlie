@@ -38,14 +38,18 @@ Vector design docs live alongside the implementation under `src/vector/docs/`:
 - `src/vector/docs/CONCURRENT.md` - Concurrency tests, metrics, and stress coverage.
 - `src/vector/docs/BASELINE.md` - Baseline benchmark protocol and recorded results.
 - `src/vector/docs/BENCHMARK.md` - Large-scale benchmark results and tuning guidance.
-- `src/vector/docs/BENCHMARK2.md` - Secondary benchmark runs (historical comparisons).
 - `src/vector/docs/API.md` - Vector public API reference and usage patterns.
 - `src/vector/docs/RABITQ.md` - RaBitQ design rationale and ADC details.
 - `src/vector/docs/REQUIREMENTS.md` - Design constraints and invariants (DATA-1, etc).
-- `src/vector/docs/CODEX-CODE-REVIEW.md` - CODEX review findings and fixes (audit trail).
-- `src/vector/docs/GEMINI-CODE-REVIEW.md` - Gemini review notes and follow-ups.
-- `src/vector/docs/GEMINI-BENCHMARK.md` - Benchmark tooling proposal and status.
-- `src/vector/docs/GEMINI-REVIEW.md` - Additional Gemini design review notes.
+- `src/vector/docs/CONFIG.md` - Runtime tuning knobs and defaults.
+- `src/vector/docs/DATASET.md` - Dataset formats and loading behavior.
+- `src/vector/docs/ADMIN.md` - Admin/diagnostics APIs.
+- Archived historical reviews/benchmark notes:
+  - `src/vector/docs/archive/BENCHMARK2.md`
+  - `src/vector/docs/archive/CODEX-CODE-REVIEW.md`
+  - `src/vector/docs/archive/GEMINI-CODE-REVIEW.md`
+  - `src/vector/docs/archive/GEMINI-BENCHMARK.md`
+  - `src/vector/docs/archive/GEMINI-REVIEW.md`
 
 ## Quick Start
 
@@ -668,7 +672,7 @@ let outgoing = OutgoingEdges::new(node_id, None)
     .run(handles.reader(), timeout)
     .await?;
 
-for (weight, _src, dst, edge_name) in outgoing {
+for (weight, _src, dst, edge_name, _version) in outgoing {
     // Process neighbor: dst with edge weight
 }
 ```
@@ -693,7 +697,7 @@ src/
 ├── query.rs            # Unified query types with Runnable implementations
 ├── mutation.rs         # Unified mutation re-exports
 ├── graph/              # RocksDB graph storage subsystem
-│   ├── mod.rs          # Storage, subsystem exports
+│   ├── mod.rs          # Storage, processor, and re-exports
 │   ├── schema.rs       # Column family definitions
 │   ├── mutation.rs     # Mutation types and execution
 │   ├── writer.rs       # Writer infrastructure
