@@ -1,164 +1,54 @@
-# TODO - Unified Writer API
+# TODO - DB API Consistency
 
-This document tracks open design questions and future improvements for the unified writer API.
+This document tracks open API consistency and integration work across the root crate (`motlie_db`) and subsystem crates (`graph`, `fulltext`, `vector`).
 
-## Open Questions
+## Current Behavior Snapshot (Verified 2026-03-05)
 
-### 1. Mutation Confirmation
+### 1. Mutation Confirmation and Durability Semantics (Resolved + Clarified)
 
-**Status**: Open
+- `Runnable::run()` is enqueue-only for graph/root and vector mutation APIs. `Result<()>` means "accepted by writer channel", not "persisted."
+- Confirmation paths are already implemented:
+  - `Writer::flush()` waits until prior graph mutations are committed.
+  - `Writer::send_sync()` performs send + flush.
+  - `graph::mutation::RunnableWithResult::run_with_result(..., ExecOptions)` waits for execution and returns typed replies.
+  - `vector::mutation::RunnableWithResult::run_with_result(...)` waits for execution and returns typed replies (no options parameter).
+- Graph mutation replies now include version data for versioned operations:
+  - node mutations return `(Id, Version)` for add/update/delete/restore.
+  - edge mutations return `Version` for add/update/delete/restore.
 
-**Question**: Should mutations return confirmation that they were persisted?
+### 2. Batch vs Transaction Semantics (Resolved + Clarified)
 
-Currently `writer::Runnable::run()` returns `Result<()>` which only indicates the mutation was sent to the channel, not that it was persisted to storage.
+- Batch execution via `Vec<Mutation>` exists and is atomic at the graph layer (single RocksDB transaction in `graph::Processor::process_mutations_with_options`).
+- Transaction API is already available at root writer level via `writer.transaction()`.
+- Remaining caveat: atomicity is graph-scoped; fulltext indexing is still asynchronous/best-effort after graph commit.
 
-**Options**:
+### 3. Pipeline Error Behavior (Clarified)
 
-A. **Fire-and-forget (current)**: `run()` returns when mutation is queued
-   - Pros: Simple, fast, non-blocking
-   - Cons: No confirmation of persistence
+- Graph commit is source-of-truth and is not rolled back if downstream indexing fails.
+- Graph -> fulltext forwarding is non-blocking `try_send` and can drop on backpressure/closed channel.
+- Fulltext consumer returns an error on indexing failure; that task exits unless externally restarted.
+- Effective contract today is best-effort derived indexing, not strict acknowledged indexing.
 
-B. **Confirmation channel**: Add optional oneshot channel for completion notification
-   ```rust
-   // Option B: With confirmation
-   AddNode { ... }.run_confirmed(&writer).await?;  // Waits for persistence
-   ```
-   - Pros: Guarantees durability before returning
-   - Cons: Higher latency, more complex
+### 4. Read-After-Write Handle Model (Resolved)
 
-C. **Flush method**: Keep fire-and-forget but add `writer.flush().await?`
-   ```rust
-   AddNode { ... }.run(&writer).await?;
-   writer.flush().await?;  // Wait for all pending mutations to complete
-   ```
-   - Pros: Batching-friendly, explicit sync points
-   - Cons: Doesn't confirm specific mutations
-
-**Use Cases to Consider**:
-- Testing: Need to read-after-write
-- Critical mutations: Need durability guarantee before proceeding
-- Bulk imports: Fire-and-forget is preferred for throughput
+- Legacy `StorageHandle` naming is obsolete.
+- Current root API:
+  - `Storage<ReadWrite>::ready(...) -> ReadWriteHandles` (`writer()` + `reader()`).
+  - `Storage<ReadOnly>::ready(...) -> ReadOnlyHandles` (`reader()` only).
+- Read-after-write visibility is achieved by calling `writer.flush()` or `writer.send_sync()` before querying.
 
 ---
 
-### 2. Batch vs Streaming Mutations
+## Completed Improvements
 
-**Status**: Open
-
-**Question**: Should the unified writer support both batch and streaming patterns?
-
-**Current State**:
-- `Vec<Mutation>` allows sending multiple mutations atomically
-- Individual mutations use `run(&writer)` pattern
-
-**Options**:
-
-A. **Keep current approach**: Batch via `Vec<Mutation>`, individual via `run()`
-   ```rust
-   // Individual
-   AddNode { ... }.run(&writer).await?;
-
-   // Batch
-   Vec<Mutation>::new()
-       .add_node(...)
-       .add_edge(...)
-       .run(&writer)
-       .await?;
-   ```
-
-B. **Add streaming API**: Writer accepts stream of mutations
-   ```rust
-   let stream = async_stream::stream! {
-       for item in items {
-           yield AddNode { ... };
-       }
-   };
-   writer.send_stream(stream).await?;
-   ```
-
-C. **Add transaction API**: Explicit transaction boundaries
-   ```rust
-   let txn = writer.begin().await?;
-   txn.add_node(...)?;
-   txn.add_edge(...)?;
-   txn.commit().await?;
-   ```
-
-**Considerations**:
-- Atomicity: Should batched mutations be atomic (all-or-nothing)?
-- Backpressure: How to handle slow consumers?
-- Error recovery: What happens if one mutation in a batch fails?
-
----
-
-## Resolved Questions
-
-### 3. Error Handling in Pipeline (RESOLVED)
-
-**Decision**: Log error and continue
-
-If fulltext indexing fails after graph write succeeds:
-- Log the error at WARN level
-- Continue processing subsequent mutations
-- Do NOT rollback the graph write (would require complex distributed transaction)
-
-**Rationale**:
-- Graph is source of truth; fulltext is a derived index
-- Fulltext can be rebuilt from graph if needed
-- Simpler architecture, more predictable behavior
-
-### 4. Read-After-Write in StorageHandle (RESOLVED)
-
-**Decision**: Yes, provide both `writer()` and `reader()` on `StorageHandle`
-
-**Implementation**:
-- Both writer and reader share the same `Arc<graph::Graph>` (and thus same RocksDB `TransactionDB`)
-- RocksDB `TransactionDB` supports concurrent reads and writes
-- Tests should wait for writes to flush before reading
-
-**Design**:
-```rust
-pub struct StorageHandle {
-    writer: Writer,
-    reader: Reader,
-    handles: Vec<JoinHandle<()>>,
-}
-
-impl StorageHandle {
-    pub fn writer(&self) -> &Writer { &self.writer }
-    pub fn reader(&self) -> &Reader { &self.reader }
-    pub async fn shutdown(self) -> Result<()> { ... }
-}
-```
-
-**Shared Storage Pattern**:
-```
-                    ┌─────────────────────────┐
-                    │   Arc<graph::Graph>     │
-                    │   (TransactionDB)       │
-                    └───────────┬─────────────┘
-                                │
-              ┌─────────────────┼─────────────────┐
-              │                 │                 │
-              ▼                 ▼                 ▼
-    ┌─────────────────┐ ┌─────────────┐ ┌─────────────────┐
-    │ MutationConsumer│ │QueryConsumer│ │ QueryConsumer   │
-    │   (writes)      │ │  (reads)    │ │   (reads)       │
-    └─────────────────┘ └─────────────┘ └─────────────────┘
-```
-
----
-
-## Future Improvements
-
-- [x] Implement unified `writer::Storage` and `StorageHandle` (delivered as typed root `Storage<ReadWrite>` + `ReadWriteHandles` in `libs/db/src/storage.rs`)
-- [x] Add `motlie_db::mutation` module with re-exports
-- [x] Update documentation and examples (root rustdocs + new `libs/db/docs/getting-started.md` + runnable examples in `libs/db/examples/`)
+- [x] Implement typed root storage handles (`Storage<ReadWrite>` + `ReadWriteHandles`, plus read-only mode)
+- [x] Add `motlie_db::mutation` module with root re-exports
+- [x] Update documentation and examples (root rustdocs + `libs/db/docs/getting-started.md` + runnable examples in `libs/db/examples/`)
 - [x] Add integration tests for read-after-write scenarios (e.g., `libs/db/tests/test_transaction_api.rs`)
 
 ---
 
-## API Consistency Audit (2026-02-26)
+## API Consistency Audit (Re-validated 2026-03-05)
 
 This section captures findings from a cross-subsystem API review focused on:
 
@@ -222,13 +112,11 @@ This section captures findings from a cross-subsystem API review focused on:
    - vector mutation run-with-result has no options parameter:
      - `libs/db/src/vector/mutation.rs`
 
-#### Low
+#### Low (Resolved Since Prior Audit)
 
-9. Root writer docs contain stale `unwrap()` usage despite non-optional writer handles.
-   - stale example:
-     - `libs/db/src/writer.rs`
-   - actual API:
-     - `libs/db/src/storage.rs` (`ReadWriteHandles::writer() -> &Writer`)
+9. Root writer stale-doc issue is fixed.
+   - `libs/db/src/writer.rs` now uses non-optional `handles.writer()`.
+   - `scripts/check_db_doc_drift.sh` now guards this regression pattern.
 
 ### TODO: Recommended API Unification Work
 
@@ -243,7 +131,7 @@ This section captures findings from a cross-subsystem API review focused on:
 - [ ] Preserve ranking metadata in hydrated fulltext query outputs (or provide alternate typed result including score/match_source).
 - [ ] Clean up public/private visibility boundaries in unified query plumbing.
 - [ ] Standardize mutation `run_with_result` options across graph/vector modules.
-- [ ] Fix stale root API docs/examples to match current signatures.
+- [x] Fix stale root API docs/examples to match current signatures.
 
 ### Suggested Integration Tests to Add
 
@@ -304,10 +192,10 @@ RestoreEdges {
 // User must query edges, build Vec<RestoreEdge>, then run
 let edges = OutgoingEdges::new(alice_id, None).run(&reader, timeout).await?;
 let restores: Vec<Mutation> = edges.iter()
-    .map(|e| RestoreEdge {
+    .map(|(_, _src_id, dst_id, edge_name, _version)| RestoreEdge {
         src_id: alice_id,
-        dst_id: e.dst_id,
-        name: e.name.clone(),
+        dst_id: *dst_id,
+        name: edge_name.clone(),
         as_of: timestamp,
         expected_version: None,
     }.into())
