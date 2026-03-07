@@ -35,16 +35,21 @@ Vector design docs live alongside the implementation under `src/vector/docs/`:
 
 - `src/vector/docs/ROADMAP.md` - Primary roadmap and phase history (source of truth for status).
 - `src/vector/docs/PHASE5.md` - Phase 5 execution notes and certification trail.
+- `src/vector/docs/PHASE7.md` - Phase 7 execution notes.
+- `src/vector/docs/PHASE8.md` - Phase 8 execution notes.
 - `src/vector/docs/CONCURRENT.md` - Concurrency tests, metrics, and stress coverage.
 - `src/vector/docs/BASELINE.md` - Baseline benchmark protocol and recorded results.
 - `src/vector/docs/BENCHMARK.md` - Large-scale benchmark results and tuning guidance.
 - `src/vector/docs/API.md` - Vector public API reference and usage patterns.
 - `src/vector/docs/RABITQ.md` - RaBitQ design rationale and ADC details.
 - `src/vector/docs/REQUIREMENTS.md` - Design constraints and invariants (DATA-1, etc).
+- `src/vector/docs/IDMAP.md` - ID mapping and external key resolution.
+- `src/vector/docs/SUBSYSTEM.md` - Subsystem lifecycle and architecture.
 - `src/vector/docs/CONFIG.md` - Runtime tuning knobs and defaults.
 - `src/vector/docs/DATASET.md` - Dataset formats and loading behavior.
 - `src/vector/docs/ADMIN.md` - Admin/diagnostics APIs.
 - Archived historical reviews/benchmark notes:
+  - `src/vector/docs/archive/README.md`
   - `src/vector/docs/archive/BENCHMARK2.md`
   - `src/vector/docs/archive/CODEX-CODE-REVIEW.md`
   - `src/vector/docs/archive/GEMINI-CODE-REVIEW.md`
