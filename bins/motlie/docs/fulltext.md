@@ -230,20 +230,20 @@ The fulltext index includes:
 
 ## Output Formats
 
-### TSV (Tab-Separated Values)
-
-Default format, suitable for piping to other tools:
-
-```bash
-motlie fulltext -p /data/index search nodes "rust" | cut -f2  # Extract IDs only
-```
-
-### Table
+### Table (Default)
 
 Human-readable format with aligned columns:
 
 ```bash
-motlie fulltext -p /data/index search nodes "rust" -o table
+motlie fulltext -p /data/index search nodes "rust"
+```
+
+### TSV (Tab-Separated Values)
+
+Useful for piping to other tools:
+
+```bash
+motlie fulltext -p /data/index search nodes "rust" -o tsv | cut -f2  # Extract IDs only
 ```
 
 ## Error Handling

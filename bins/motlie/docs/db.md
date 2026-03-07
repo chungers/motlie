@@ -230,25 +230,12 @@ EMBEDDING    INDEXED    PENDING    DELETED    PENDING_DELETED
 
 ## Output Formats
 
-### TSV (Tab-Separated Values)
-
-Default format, suitable for piping to other tools:
-
-```bash
-motlie db -p /data/graph-db scan graph/nodes
-```
-
-```
--       -       01JGXYZ123456789ABCDEF       Alice
--       -       01JGXYZ123456789ABCDEG       Bob
-```
-
-### Table
+### Table (Default)
 
 Human-readable format with aligned columns and headers:
 
 ```bash
-motlie db -p /data/graph-db scan graph/nodes -f table
+motlie db -p /data/graph-db scan graph/nodes
 ```
 
 ```
@@ -256,6 +243,19 @@ SINCE                 UNTIL                 ID                          NAME
 --------------------  --------------------  --------------------------  -----
 -                     -                     01JGXYZ123456789ABCDEF      Alice
 -                     -                     01JGXYZ123456789ABCDEG      Bob
+```
+
+### TSV (Tab-Separated Values)
+
+Useful for piping into other tools:
+
+```bash
+motlie db -p /data/graph-db scan graph/nodes -f tsv
+```
+
+```
+-       -       01JGXYZ123456789ABCDEF       Alice
+-       -       01JGXYZ123456789ABCDEG       Bob
 ```
 
 ## Temporal Filtering

@@ -194,18 +194,17 @@ See `examples/mcp/all.rs` for a complete example.
 
 ### Database Tools (`db`)
 
-15 tools for interacting with the Motlie graph database:
+14 tools for interacting with the Motlie graph database:
 
-**Mutations (7)**
+**Mutations (6)**
 | Tool | Description |
 |------|-------------|
 | `add_node` | Create a new node with name and optional active period |
 | `add_edge` | Create an edge between two nodes |
 | `add_node_fragment` | Add a text fragment to a node |
 | `add_edge_fragment` | Add a text fragment to an edge |
-| `update_node_valid_range` | Update node active period |
-| `update_edge_valid_range` | Update edge active period |
-| `update_edge_weight` | Update edge weight |
+| `update_node` | Update a node (active period and/or summary) |
+| `update_edge` | Update an edge (weight, active period, and/or summary) |
 
 **Queries (8)**
 | Tool | Description |
