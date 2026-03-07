@@ -2,7 +2,7 @@
 
 This document tracks open API consistency and integration work across the root crate (`motlie_db`) and subsystem crates (`graph`, `fulltext`, `vector`).
 
-## Current Behavior Snapshot (Verified 2026-03-05)
+## Current Behavior Snapshot (Verified 2026-03-07)
 
 ### 1. Mutation Confirmation and Durability Semantics (Resolved + Clarified)
 
@@ -19,7 +19,7 @@ This document tracks open API consistency and integration work across the root c
 ### 2. Batch vs Transaction Semantics (Resolved + Clarified)
 
 - Batch execution via `Vec<Mutation>` exists and is atomic at the graph layer (single RocksDB transaction in `graph::Processor::process_mutations_with_options`).
-- Transaction API is already available at root writer level via `writer.transaction()`.
+- Transaction API is available via `writer.transaction()` (graph transaction scope).
 - Remaining caveat: atomicity is graph-scoped; fulltext indexing is still asynchronous/best-effort after graph commit.
 
 ### 3. Pipeline Error Behavior (Clarified)
@@ -35,7 +35,8 @@ This document tracks open API consistency and integration work across the root c
 - Current root API:
   - `Storage<ReadWrite>::ready(...) -> ReadWriteHandles` (`writer()` + `reader()`).
   - `Storage<ReadOnly>::ready(...) -> ReadOnlyHandles` (`reader()` only).
-- Read-after-write visibility is achieved by calling `writer.flush()` or `writer.send_sync()` before querying.
+- Read-after-write visibility for graph queries is achieved by calling `writer.flush()` or `writer.send_sync()` before querying.
+- Fulltext visibility is eventual; `flush()`/`send_sync()` do not guarantee fulltext indexing completion.
 
 ---
 
@@ -48,7 +49,7 @@ This document tracks open API consistency and integration work across the root c
 
 ---
 
-## API Consistency Audit (Re-validated 2026-03-05)
+## API Consistency Audit (Re-validated 2026-03-07)
 
 This section captures findings from a cross-subsystem API review focused on:
 
@@ -63,7 +64,7 @@ This section captures findings from a cross-subsystem API review focused on:
 1. Root "unified" API is graph+fulltext only, not graph+fulltext+vector.
    - Root unified storage initializes only graph/fulltext paths:
      - `libs/db/src/storage.rs` (`<base>/graph`, `<base>/fulltext`)
-   - Root unified query/mutation enums only cover graph/fulltext:
+   - Root unified query facade covers graph+fulltext; root mutation facade is graph-only:
      - `libs/db/src/query.rs`
      - `libs/db/src/mutation.rs`
 
