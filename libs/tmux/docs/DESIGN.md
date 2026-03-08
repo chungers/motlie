@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-08 | `MonitorHandle` lookup API uses `&Target`/`&TargetSpec` instead of raw strings; `start/stop_monitoring_session` accept `&Target`. Rationale for keeping `SessionMonitorHandle` name (DC10 session-scoped constraint). | Core Abstractions, DC13 |
 | 2026-03-08 | Added `TargetSpec` type with builder for `HostHandle::target()` — replaces raw string parameter | Core Abstractions, DC17 |
 | 2026-03-08 | Unified `Target` type replacing `SessionHandle`/`PaneHandle`/`WindowHandle` hierarchy (DC16, DC17). `HostHandle` slimmed to host-level only. Fixed stale references throughout. | Core Abstractions, Architecture, DC16, DC17, DC13, Module Specs, Phase 1 |
 | 2026-03-08 | Added session-scoped operations on `SessionMonitorHandle` via `Deref<Target=Target>` (DC16) | Core Abstractions, DC16 |
@@ -525,17 +526,17 @@ impl HostHandle {
     /// Stop all monitoring on this host.
     pub async fn stop_monitoring(&self) -> Result<()>;
 
-    /// Start monitoring a single session by name (DC13 session-level).
-    /// Opens one control-mode connection for this session.
+    /// Start monitoring a single session (DC13 session-level).
+    /// Accepts a session-level Target. Opens one control-mode connection.
     pub async fn start_monitoring_session(
         &self,
-        session: &str,
+        target: &Target,
         rules: &[TriggerRule],
     ) -> Result<SessionMonitorHandle>;
 
-    /// Stop monitoring a single session by name.
+    /// Stop monitoring a single session.
     /// Tears down its control-mode connection without affecting other sessions.
-    pub async fn stop_monitoring_session(&self, session: &str) -> Result<()>;
+    pub async fn stop_monitoring_session(&self, target: &Target) -> Result<()>;
 
     /// List sessions currently being monitored.
     pub fn monitored_sessions(&self) -> Vec<SessionInfo>;
@@ -756,7 +757,7 @@ connections and DC13's granular lifecycle requirement.
 /// Handle to all monitoring on a single host.
 /// Returned by HostHandle::start_monitoring().
 pub struct MonitorHandle {
-    /// Per-session handles, keyed by session name.
+    /// Per-session handles, keyed by session-level Target.
     sessions: HashMap<String, SessionMonitorHandle>,
 }
 
@@ -764,14 +765,19 @@ impl MonitorHandle {
     /// Stop monitoring on all sessions for this host.
     pub async fn shutdown(&self) -> Result<()>;
 
-    /// Stop monitoring on a single session by name.
-    pub async fn stop_session(&self, session: &str) -> Result<()>;
+    /// Stop monitoring a specific session. Accepts a session-level Target
+    /// or a TargetSpec (must resolve to session level).
+    pub async fn stop_session(&self, target: &Target) -> Result<()>;
 
-    /// Get the handle for a specific monitored session.
-    pub fn session(&self, name: &str) -> Option<&SessionMonitorHandle>;
+    /// Get the handle for a specific monitored session by Target.
+    pub fn get(&self, target: &Target) -> Option<&SessionMonitorHandle>;
 
-    /// List actively monitored session names.
-    pub fn active_sessions(&self) -> Vec<String>;
+    /// Get the handle for a specific monitored session by TargetSpec.
+    /// Convenience for callers with a spec but no Target in hand.
+    pub fn get_by_spec(&self, spec: &TargetSpec) -> Option<&SessionMonitorHandle>;
+
+    /// List actively monitored sessions as Targets.
+    pub fn active_sessions(&self) -> Vec<&Target>;
 }
 
 /// Handle to monitoring on a single session.
@@ -803,6 +809,16 @@ impl SessionMonitorHandle {
     pub fn is_active(&self) -> bool;
 }
 ```
+
+**Why `SessionMonitorHandle` keeps the `Session` name**: Monitoring is fundamentally
+session-scoped — DC10's control mode (`tmux -C attach -t <session>`) operates at the
+session level, and `%output` events are per-session. There is no `tmux -C attach` at
+window or pane granularity. Naming the type `SessionMonitorHandle` (rather than a
+generic `TargetMonitorHandle`) makes this constraint visible in the type system. The
+lookup API on `MonitorHandle`, however, accepts `&Target` and `&TargetSpec` for
+consistency with the rest of the library — callers use the same vocabulary everywhere,
+while the `Session` prefix on the handle communicates what level of entity is actually
+being monitored.
 
 **Usage**: `SessionMonitorHandle` derefs to `Target`, so all operations work directly:
 
@@ -2237,7 +2253,7 @@ other active monitors at the same or higher level.
 |-------|-------|------|
 | Fleet | `fleet.start_monitoring(rules)` | `fleet.shutdown()` |
 | Host | `fleet.start_monitoring_host(host, rules)` | `fleet.stop_monitoring_host(host)` |
-| Session | `host.start_monitoring_session(session, rules)` | `host.stop_monitoring_session(session)` |
+| Session | `host.start_monitoring_session(&target, rules)` | `host.stop_monitoring_session(&target)` |
 
 **Rationale**: DC10 establishes that each monitored session has its own control-mode
 connection (`tmux -C attach -t <session>`). These connections are independent — tearing
