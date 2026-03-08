@@ -832,10 +832,11 @@ impl OutputBus {
     /// Register a sink. Spawns a dedicated tokio task that drives the sink.
     /// Returns a SinkId for later unsubscribe.
     /// `channel_capacity` controls the bounded channel size to this sink.
+    /// Sinks that need to initiate actions should capture an `ActionHandle`
+    /// at construction time — the bus does not inject one.
     pub fn subscribe(
         &mut self,
         sink: Box<dyn OutputSink>,
-        action_handle: ActionHandle,
         channel_capacity: usize,
     ) -> SinkId;
 
@@ -1465,21 +1466,23 @@ abstraction lets all downstream modules (`discovery`, `capture`, `control`, `pip
 data from `open_shell()`. Built into the library, not behind a feature flag, so downstream
 consumers can also test their integrations.
 
-### DC7: Capture-Pane vs Pipe-Pane for Content Access
+### DC7: Capture-Pane vs Stream Monitoring
 
-**Decision**: Use `capture-pane -p` for on-demand content access, `pipe-pane` for continuous
-monitoring. These are complementary, not alternatives.
+**Decision**: Use `capture-pane -p` for on-demand snapshots. For continuous monitoring,
+use tmux control mode as primary (DC10) and `pipe-pane` as fallback only.
 
 **Rationale**:
 - `capture-pane -p` returns the current visible content (and scrollback with `-S`/`-E`)
   as a single snapshot. It is stateless, idempotent, and requires no setup. Ideal for
   "what is this pane showing right now?" queries.
-- `pipe-pane` streams ongoing output to a pipe. It captures content as it arrives, which
-  `capture-pane` would miss between polling intervals. Required for trigger/response automation.
+- Continuous monitoring uses control mode (`tmux -C attach`, DC10) which provides
+  structured `%output %<pane_id>` framing without file lifecycle management.
+- `pipe-pane` is retained as a fallback for environments where control mode is
+  unavailable (see DC10 fallback section).
 
 **Callers choose the mode**:
 - `capture_pane()` / `capture_session()` → snapshot via `capture-pane`
-- `start_monitoring()` → continuous via `pipe-pane`
+- `start_monitoring()` → continuous via control mode (primary) or pipe-pane (fallback)
 
 ### DC8: Key Escaping Strategy
 
@@ -1524,8 +1527,14 @@ mode is unavailable or insufficient.
 | Interleaving (OC2) | Not possible — framed protocol | Possible with `tail -qf` on multiple files |
 | Backpressure (OC1) | Buffered by tmux control mode | FIFO blocks writer; file grows unbounded |
 | Tmux version req | tmux >= 1.8 (control mode) | pipe-pane `-o`: needs version testing (OC4) |
-| Multi-pane | Single connection monitors all panes | One FIFO + pipe-pane per pane |
+| Multi-pane | One connection per session (see below) | One FIFO + pipe-pane per pane |
 | Complexity | Lower — no file lifecycle | Higher — FIFO/file creation, rotation, cleanup |
+
+**Session scope**: Control mode `%output` notifications are scoped to the attached session,
+not host-wide. A single `tmux -C attach -t <session>` only receives output from panes in
+that session. To monitor multiple sessions, `HostHandle` opens one control-mode connection
+per target session and aggregates their streams internally. This is still simpler than
+per-pane pipe-pane setup, and the number of sessions is typically small (single digits).
 
 **Rationale**: Control mode eliminates OC1 (FIFO blocking), OC2 (interleaving), and most
 of the pipe lifecycle complexity. It provides structured output with native `#{pane_id}`
@@ -1682,8 +1691,9 @@ Structured for incremental delivery. Each phase produces a working, testable art
 
 **Tasks**:
 1. Create `libs/tmux/` workspace member with `Cargo.toml`
-2. Implement `types.rs`: `PaneAddress` with safe filename encoding (fixes P2),
-   `SessionInfo`, `WindowInfo`, `PaneInfo`
+2. Implement `types.rs`: `PaneAddress` with `pane_id` (`%<id>`) as authoritative key
+   and `session:window.pane` as display metadata (per DC1), `SessionInfo`, `WindowInfo`,
+   `PaneInfo`
 3. Implement `keys.rs`: `KeySequence`, `SpecialKey`, `{...}` parser, tmux command rendering
 4. Implement `transport.rs`: `Transport` trait, `LocalTransport` (subprocess-based),
    `MockTransport` (canned responses for testing)
@@ -1693,15 +1703,16 @@ Structured for incremental delivery. Each phase produces a working, testable art
 7. Implement `control.rs`: `create_session()`, `kill_session()`, `send_keys()`,
    `send_text()`, `rename_session()`, `rename_window()` with shell escaping (addresses OC5)
 8. Implement `host.rs`: `HostHandle` wiring all of the above
-9. Unit tests: `PaneAddress` roundtrip, `KeySequence` parsing + rendering, shell escaping
-   with adversarial inputs, `MockTransport`-based tests for all operations
+9. Unit tests: `PaneAddress` identity (pane_id as key, display target as metadata),
+   `KeySequence` parsing + rendering, shell escaping with adversarial inputs,
+   `MockTransport`-based tests for all operations
 
 **Deliverable**: Library that operates on localhost tmux and supports all on-demand
 operations. A caller can create/kill sessions, list sessions, capture pane content, send
 input, and rename sessions — all without SSH.
 
 **Acceptance criteria**:
-- `PaneAddress::to_safe_filename()` roundtrips losslessly for names containing `_.:;`
+- `PaneAddress` uses `pane_id` as key; `session:window.pane` roundtrips as display metadata
 - `KeySequence::parse("hello{Enter}{C-c}")` produces correct tmux commands
 - `send_text()` with input `"; rm -rf /; echo "` does not execute injected commands
 - `create_session("test")` + `list_sessions()` shows the new session
