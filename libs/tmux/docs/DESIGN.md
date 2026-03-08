@@ -312,6 +312,7 @@ libs/tmux/
 │   ├── control.rs          # Session lifecycle, send-keys with escaping, rename
 │   ├── pipe.rs             # PipeManager: FIFO lifecycle, pipe-pane attach/detach
 │   ├── monitor.rs          # OutputMonitor: stream parsing, rule evaluation, dispatch
+│   ├── matcher.rs          # ContentMatcher trait + built-in matchers (Regex, Substring, etc.)
 │   ├── sink.rs             # OutputSink trait, SinkFilter, PaneOutput, OutputBus
 │   ├── sinks/
 │   │   ├── mod.rs          # Re-exports built-in sinks
@@ -808,11 +809,72 @@ pub struct PaneOutput {
 The `host`, `session`, `window`, and `pane_id` fields enable sinks to filter at
 any level of the hierarchy and to route actions back to the originating entity.
 
+### `ContentMatcher` — Trait-Based Text Matching
+
+Content matching is abstracted behind a trait so that regex is one implementation, not
+the only one. Matchers can be stateless (regex, substring) or stateful (line counters,
+vocabulary detectors that accumulate across calls).
+
+```rust
+/// A matcher that tests text content. Implementations range from simple regex
+/// to stateful stream analyzers.
+pub trait ContentMatcher: Send + Sync + 'static {
+    /// Human-readable name for logging (e.g., "regex:/error/i", "bad-words").
+    fn name(&self) -> &str;
+
+    /// Test whether `text` matches. For stateful matchers, this may update
+    /// internal state and return true when a threshold is reached.
+    fn matches(&mut self, text: &str) -> bool;
+
+    /// Reset internal state. Called when the matcher is reused across
+    /// monitoring restarts. No-op for stateless matchers.
+    fn reset(&mut self) {}
+}
+```
+
+**Built-in implementations**:
+
+```rust
+/// Matches when text contains a regex pattern. Stateless.
+pub struct RegexMatcher { pattern: Regex }
+
+/// Matches when text contains any of the given substrings. Stateless.
+/// Faster than regex for simple keyword lists.
+pub struct SubstringMatcher { needles: Vec<String>, case_insensitive: bool }
+
+/// Matches after accumulating N newlines across calls. Stateful.
+/// Useful for "trigger after N lines of output" patterns.
+pub struct LineCountMatcher { threshold: usize, count: usize }
+
+/// Matches when text contains any word from a blocklist. Stateless.
+/// Words are matched at word boundaries (not as substrings of larger words).
+pub struct WordListMatcher { words: HashSet<String>, case_insensitive: bool }
+```
+
+**Composability**: Matchers can be combined with standard boolean logic:
+
+```rust
+/// Matches when ALL inner matchers match (AND).
+pub struct AllOf(Vec<Box<dyn ContentMatcher>>);
+
+/// Matches when ANY inner matcher matches (OR).
+pub struct AnyOf(Vec<Box<dyn ContentMatcher>>);
+
+/// Inverts a matcher (NOT).
+pub struct Not(Box<dyn ContentMatcher>);
+```
+
+**Statefulness contract**: The bus calls `matches()` on the filter's matcher for each
+`PaneOutput`. Stateful matchers (like `LineCountMatcher`) accumulate across calls for
+the same sink — each sink gets its own cloned matcher instances, so state is not shared
+across sinks. `reset()` is called when monitoring restarts to clear accumulated state.
+
 ### `SinkFilter` — Composable Output Targeting
 
-A `SinkFilter` selects which output reaches a given sink. Filters target any
-combination of host, session, window, or pane. Multiple filters are combined with
-OR semantics — output matching **any** filter in the set is delivered to the sink.
+A `SinkFilter` selects which output reaches a given sink. Routing fields target the
+source (host, session, window, pane). An optional `content` matcher filters on the
+text itself. Multiple filters are combined with OR semantics — output matching **any**
+filter in the set is delivered to the sink.
 
 ```rust
 pub struct SinkFilter {
@@ -820,26 +882,33 @@ pub struct SinkFilter {
     pub session: Option<String>,   // regex against session name
     pub window: Option<String>,    // regex against "session:window_index"
     pub pane: Option<String>,      // regex against pane_id or "session:window.pane"
+    pub content: Option<Box<dyn ContentMatcher>>,  // optional content matching
 }
 
-/// Compiled form — regexes compiled once at registration time.
+/// Compiled form — routing regexes compiled once at registration time.
+/// Content matcher is moved in as-is (already runtime-ready).
 pub struct CompiledSinkFilter {
     pub host: Option<Regex>,
     pub session: Option<Regex>,
     pub window: Option<Regex>,
     pub pane: Option<Regex>,
+    pub content: Option<Box<dyn ContentMatcher>>,
 }
 
 impl CompiledSinkFilter {
     /// Returns true if the output matches ALL non-None fields in this filter.
     /// Fields that are None are wildcards (match everything).
-    pub fn matches(&self, output: &PaneOutput) -> bool;
+    /// Routing fields (host/session/window/pane) are checked first (cheap).
+    /// Content matcher is checked last (potentially stateful/expensive).
+    pub fn matches(&mut self, output: &PaneOutput) -> bool;
 }
 ```
 
+**Note**: `matches()` takes `&mut self` because content matchers may be stateful.
+
 **Combining filters**: A sink registers with `Vec<SinkFilter>`. Output is delivered
-if it matches **any** filter in the vec (OR across filters, AND within each filter).
-An empty vec means "match all output" (the default).
+if it matches **any** filter in the vec (OR across filters, AND within each filter's
+routing + content fields). An empty vec means "match all output" (the default).
 
 **Examples**:
 
@@ -855,6 +924,29 @@ vec![
 
 // Sink receives output from a specific pane
 vec![SinkFilter { pane: Some("%42".into()), ..Default::default() }]
+
+// Sink receives output containing "error" or "fatal" from any source
+vec![SinkFilter {
+    content: Some(Box::new(SubstringMatcher::new(
+        vec!["error", "fatal"], true,
+    ))),
+    ..Default::default()
+}]
+
+// Sink triggers after 100 lines of output from "build" session
+vec![SinkFilter {
+    session: Some("build".into()),
+    content: Some(Box::new(LineCountMatcher::new(100))),
+    ..Default::default()
+}]
+
+// Bad-word detector on all output
+vec![SinkFilter {
+    content: Some(Box::new(WordListMatcher::new(
+        vec!["password", "secret", "token"], true,
+    ))),
+    ..Default::default()
+}]
 ```
 
 ### `OutputSink` — The Sink Trait
@@ -1068,6 +1160,32 @@ existing per-host dispatch queue (DC4). The sink does not need to know which
 
 ## Module Specifications
 
+### `matcher.rs`
+
+The `ContentMatcher` trait and built-in implementations. See
+[Core Abstractions — ContentMatcher](#contentmatcher--trait-based-text-matching) for
+the full trait definition.
+
+```rust
+// Built-in matchers:
+
+pub struct RegexMatcher { pattern: Regex }
+pub struct SubstringMatcher { needles: Vec<String>, case_insensitive: bool }
+pub struct LineCountMatcher { threshold: usize, count: usize }
+pub struct WordListMatcher { words: HashSet<String>, case_insensitive: bool }
+
+// Combinators:
+
+pub struct AllOf(Vec<Box<dyn ContentMatcher>>);
+pub struct AnyOf(Vec<Box<dyn ContentMatcher>>);
+pub struct Not(Box<dyn ContentMatcher>);
+```
+
+All matchers implement `ContentMatcher`. `RegexMatcher` and `SubstringMatcher` are
+stateless (`reset()` is a no-op). `LineCountMatcher` is stateful and resets its counter
+on `reset()`. `WordListMatcher` uses `regex::Regex` internally with `\b` word boundaries
+for accurate matching. The combinators delegate to their children and propagate `reset()`.
+
 ### `config.rs`
 
 Defines all user-facing configuration. This is the primary integration point.
@@ -1106,6 +1224,8 @@ pub enum TmuxSocket {
 }
 
 /// Config DTO — deserialized from TOML/YAML. Patterns are strings.
+/// This is the serde-clean layer; `pattern` is a regex string by default.
+/// For non-regex matchers, use `CompiledRule::with_matcher()` directly.
 pub struct TriggerRule {
     pub name: String,                  // human-readable rule name for logging
     pub pane_filter: Option<String>,   // regex string (None = all panes)
@@ -1115,18 +1235,30 @@ pub struct TriggerRule {
 }
 
 /// Runtime form — compiled from TriggerRule during startup validation.
-/// Compile errors include rule name and pattern for user-facing diagnostics.
+/// The `matcher` field is a `ContentMatcher` trait object — config-driven
+/// rules compile to `RegexMatcher`, but programmatic callers can use any
+/// `ContentMatcher` implementation (WordListMatcher, LineCountMatcher, etc.).
 pub struct CompiledRule {
     pub name: String,
     pub pane_filter: Option<Regex>,
-    pub pattern: Regex,
+    pub matcher: Box<dyn ContentMatcher>,
     pub action: Action,
     pub cooldown: Option<Duration>,
 }
 
 impl TriggerRule {
-    /// Compile string patterns into Regex. Returns error with rule name context.
+    /// Compile string patterns into RegexMatcher. Returns error with rule name context.
     pub fn compile(&self) -> Result<CompiledRule>;
+}
+
+impl CompiledRule {
+    /// Construct a rule with a custom ContentMatcher (bypasses config deserialization).
+    /// Used by programmatic callers who want non-regex matching.
+    pub fn with_matcher(
+        name: impl Into<String>,
+        matcher: Box<dyn ContentMatcher>,
+        action: Action,
+    ) -> Self;
 }
 
 pub enum Action {
@@ -1813,6 +1945,38 @@ the session's handle, which signals the stop channel, flushes pending output to 
 **Invariant**: On-demand operations (`capture_pane`, `send_keys`, `list_sessions`, etc.)
 are unaffected by monitoring state. A host with stopped monitoring is still fully
 operational for on-demand use.
+
+### DC14: Trait-Based Content Matching
+
+**Decision**: Text matching is abstracted behind the `ContentMatcher` trait. Regex is
+one implementation, not a privileged special case. Both `SinkFilter` (content field) and
+`CompiledRule` (matcher field) use `Box<dyn ContentMatcher>`.
+
+**Rationale**: Different use cases need different matching strategies:
+- **Regex**: General-purpose pattern matching (the default for config-driven rules)
+- **Substring/keyword lists**: Faster than regex for simple "does output contain X?"
+- **Word-boundary blocklists**: Bad-word/secret detectors that don't false-positive on
+  substrings (e.g., "token" matches "token" but not "tokenize")
+- **Stateful stream matchers**: Line counters, byte accumulators, rate detectors —
+  these need to track state across multiple `PaneOutput` events
+
+Making regex the only matching mechanism would force all of these into regex patterns,
+which is unnatural for stateful matchers and inefficient for simple keyword checks.
+
+**Statefulness**: Matchers may be stateful (`matches(&mut self, ...)`). Each sink and
+each compiled rule gets its own matcher instance — state is never shared. `reset()` is
+called on monitoring restart. The bus evaluates routing fields (host/session/window/pane)
+before calling the content matcher, so expensive matchers are only invoked on
+pre-filtered output.
+
+**Config boundary**: `TriggerRule` (serde DTO) stores `pattern: String` which compiles
+to `RegexMatcher`. Programmatic callers bypass the config layer and construct
+`CompiledRule::with_matcher()` or `SinkFilter { content: Some(...) }` directly with
+any `ContentMatcher` implementation.
+
+**Built-in matchers**: `RegexMatcher`, `SubstringMatcher`, `LineCountMatcher`,
+`WordListMatcher`, plus `AllOf`/`AnyOf`/`Not` combinators. Consumers can implement
+the trait for domain-specific matchers.
 
 ---
 
