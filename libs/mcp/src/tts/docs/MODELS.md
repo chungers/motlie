@@ -2,9 +2,17 @@
 
 This document captures research findings for local Text-to-Speech (TTS) models suitable for running on MacOS (Apple Silicon) and NVIDIA DGX Spark.
 
-## Primary Engine: Fish Speech (fish-speech.rs)
+## Primary Engine: Fish Speech / OpenAudio
 
-**Fish Speech is the recommended cross-platform TTS engine for motlie.**
+**Fish Speech (OpenAudio) is the recommended cross-platform TTS engine for motlie.**
+
+> **Status note (March 2026):** The Rust implementation
+> ([fish-speech.rs](https://github.com/EndlessReform/fish-speech.rs)) has been
+> dormant since February 2025. It supports up to Fish Speech 1.5 and uses
+> candle 0.8.3 (current candle is 0.9.x). It does **not** yet support
+> OpenAudio S1/S1-mini. The upstream Python project remains very active.
+> If fish-speech.rs is not updated, consider the official Python server as an
+> HTTP sidecar or evaluate forking/updating the Rust implementation.
 
 ### Why Fish Speech?
 
@@ -45,14 +53,15 @@ cargo build --release --bin server --features cuda
 
 | Model | Rust Native | Voice Cloning | Emotion Control | Best For |
 |-------|-------------|---------------|-----------------|----------|
-| **Fish Speech / OpenAudio** | ✅ Yes (Candle) | ✅ Yes (10-30s) | ❌ No | **Primary choice** |
-| **Chatterbox** | ⚠️ ONNX only | ✅ Yes (5-20s) | ✅ Yes | Emotion control only |
+| **Fish Speech / OpenAudio S1** | ⚠️ Rust impl dormant (candle 0.8) | ✅ Yes (10-30s) | ✅ Yes (50+ markers, S1/S1-mini) | **Primary choice** |
+| **Chatterbox** | ⚠️ ONNX only | ✅ Yes (5-20s) | ✅ Yes (exaggeration control) | Fine-grained emotion tuning |
 | **Kokoro** | ⚠️ ONNX | ❌ No | ❌ No | Lightweight/edge |
 | **Piper** | ⚠️ C++ (ONNX) | ❌ No | ❌ No | Embedded, RPi |
 
 **Decision:**
-- **Default**: Fish Speech (cross-platform, native Rust, high quality)
-- **If emotion control required**: Chatterbox via ONNX (future consideration)
+- **Default**: Fish Speech / OpenAudio (cross-platform, high quality, emotion + voice cloning)
+- **Fine-grained emotion tuning**: Chatterbox via ONNX (continuous exaggeration parameter)
+- **Rust implementation risk**: fish-speech.rs is dormant; plan for Python sidecar or fork if not revived
 
 ---
 
@@ -66,12 +75,14 @@ Fish Speech has rebranded to **OpenAudio**, introducing advanced TTS models with
 |-------|------------|-------------|
 | OpenAudio S1 | 4B | Flagship, highest quality (0.008 WER, 0.004 CER) |
 | OpenAudio S1-mini | 0.5B | Distilled, faster inference |
+| Fish Speech 1.6 | - | Added emotion/tone support |
 | Fish Speech 1.5 | - | Previous generation, still excellent |
 
 ### Key Features
 
 - **Zero-shot voice cloning**: 10-30 second reference audio sample
-- **Multilingual**: English, Japanese, Korean, Chinese, French, German, Arabic, Spanish
+- **Emotion/tone control** (S1/S1-mini): 50+ markers including `(angry)`, `(happy)`, `(whisper)`, `(laughing)`, `(sad)`, `(fearful)`, etc.
+- **Multilingual**: 13+ languages — English, Chinese, Japanese, German, French, Spanish, Korean, Arabic, Russian, Dutch, Italian, Polish, Portuguese
 - **No phoneme dependency**: Handles any language script directly
 - **RLHF trained**: Both S1 and S1-mini use online Reinforcement Learning from Human Feedback
 
@@ -79,7 +90,7 @@ Fish Speech has rebranded to **OpenAudio**, introducing advanced TTS models with
 
 - Real-time factor: ~1:7 on NVIDIA RTX 4090
 - WER: 0.008 (English), CER: 0.004 (English)
-- Trained on 1M+ hours of audio data
+- Trained on 2M+ hours of audio data
 
 ### Architecture
 
@@ -95,10 +106,13 @@ Fish Speech has rebranded to **OpenAudio**, introducing advanced TTS models with
 GitHub: https://github.com/EndlessReform/fish-speech.rs
 ```
 
+> **Dormant since February 2025.** Pinned to candle 0.8.3 (current: 0.9.x).
+> Does not support OpenAudio S1/S1-mini or Fish Speech 1.6.
+
 **Features:**
 - Single ~15MB static binary
 - No Python environment required
-- Supports Fish Speech 1.2, 1.4, 1.5
+- Supports Fish Speech 1.2, 1.4, 1.5 (not S1/S1-mini)
 
 **Hardware Support:**
 | Platform | Build Command |
@@ -153,8 +167,9 @@ cargo run --release --features metal --bin vocoder -- -i tokens.npy -o output.wa
 
 - GitHub: https://github.com/fishaudio/fish-speech
 - Documentation: https://speech.fish.audio/
-- Hugging Face: https://huggingface.co/fishaudio/fish-speech-1.5
-- Rust Implementation: https://github.com/EndlessReform/fish-speech.rs
+- Hugging Face (S1-mini): https://huggingface.co/fishaudio/openaudio-s1-mini
+- Hugging Face (1.5): https://huggingface.co/fishaudio/fish-speech-1.5
+- Rust Implementation: https://github.com/EndlessReform/fish-speech.rs (dormant)
 - Paper: https://arxiv.org/abs/2411.01156
 
 ---
@@ -275,7 +290,7 @@ Extremely lightweight TTS model ideal for edge devices and browser deployment.
 
 - **Browser-first**: Runs 100% client-side via WebGPU/WebAssembly (Transformers.js)
 - **Privacy**: Text never leaves device
-- **Multi-language**: English, French, Korean, Japanese, Mandarin Chinese
+- **Multi-language**: English, French, Korean, Japanese, Mandarin Chinese, Spanish, Hindi, Italian, Brazilian Portuguese
 - **Quality**: Rivals models 10-100x its size
 
 ### Limitations
@@ -353,7 +368,9 @@ Fish Speech can be integrated in two ways:
 
 #### Option 1: HTTP Client (Recommended for Initial Implementation)
 
-Run fish-speech.rs as a sidecar server and call its OpenAI-compatible API:
+Run Fish Speech as a sidecar server and call its OpenAI-compatible API.
+Use the official Python server (`python -m fish_speech.webui`) or fish-speech.rs
+(if updated) as the backend:
 
 ```rust
 use reqwest::Client;
@@ -398,6 +415,7 @@ impl FishSpeechClient {
 #### Option 2: Embedded (Future)
 
 Vendor fish-speech.rs as a library dependency for single-binary deployment.
+Requires fish-speech.rs to be updated to candle 0.9.x and support OpenAudio S1.
 
 ### Module Structure
 
@@ -439,8 +457,8 @@ pub enum TtsBackendType {
 
 | Platform | Backend | Deployment |
 |----------|---------|------------|
-| **DGX Spark** | Fish Speech | `fish-speech.rs --features cuda` as sidecar |
-| **MacOS** | Fish Speech | `fish-speech.rs --features metal` as sidecar |
+| **DGX Spark** | Fish Speech | Official Python server or `fish-speech.rs --features cuda` as sidecar |
+| **MacOS** | Fish Speech | Official Python server or `fish-speech.rs --features metal` as sidecar |
 | **MacOS (fallback)** | MacOS Say | Built-in, no external dependencies |
 
 ---
@@ -458,22 +476,23 @@ pub enum TtsBackendType {
 
 ## Decision Matrix
 
-### Use Fish Speech (Default Choice)
+### Use Fish Speech / OpenAudio (Default Choice)
 
 Fish Speech is the **primary TTS engine** for motlie because:
 
 - ✅ **Cross-platform**: Same codebase for MacOS (Metal) and DGX Spark (CUDA)
-- ✅ **Native Rust**: No Python dependencies, single binary deployment
 - ✅ **High quality**: State-of-the-art WER/CER scores
 - ✅ **Voice cloning**: Zero-shot cloning with 10-30s reference audio
+- ✅ **Emotion control**: 50+ emotion/tone markers (S1/S1-mini)
 - ✅ **OpenAI-compatible**: Drop-in API compatibility
-- ✅ **Multilingual**: 8 languages supported
+- ✅ **Multilingual**: 13+ languages supported
+- ⚠️ **Rust impl risk**: fish-speech.rs is dormant (Feb 2025), only supports up to 1.5. Plan for Python sidecar (`python -m fish_speech.webui`) or evaluate forking the Rust implementation.
 
 ### Consider Chatterbox (Future)
 
-Only if emotion control is a hard requirement:
+For fine-grained emotion tuning beyond Fish Speech's tag-based approach:
 
-- Unique emotion exaggeration control
+- Continuous emotion exaggeration parameter (0.0-1.0)
 - Paralinguistic tags ([laugh], [cough], [chuckle])
 - 23 languages
 - **Trade-off**: Requires ONNX runtime or Python sidecar (no native Rust)
