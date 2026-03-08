@@ -895,9 +895,9 @@ impl OutputSink for StdioSink {
     │
     ├── OutputBus (owned by Fleet)
     │     │
-    │     ├── subscribe(StdioSink, action_handle, 1024)
-    │     ├── subscribe(TuiSink, action_handle, 16)    // binary-provided
-    │     └── subscribe(LlmSink, action_handle, 256)   // consumer-provided
+    │     ├── subscribe(StdioSink::new(), 1024)
+    │     ├── subscribe(TuiSink::new(), 16)             // binary-provided
+    │     └── subscribe(LlmSink::new(action_handle), 256) // captures ActionHandle
     │
     ├── HostHandle (localhost)
     │     └── Monitor ──publish()──► OutputBus
@@ -1526,7 +1526,7 @@ mode is unavailable or insufficient.
 | Cleanup on crash | Nothing to clean up | Orphaned FIFOs/files, dangling pipe-pane |
 | Interleaving (OC2) | Not possible — framed protocol | Possible with `tail -qf` on multiple files |
 | Backpressure (OC1) | Buffered by tmux control mode | FIFO blocks writer; file grows unbounded |
-| Tmux version req | tmux >= 1.8 (control mode) | pipe-pane `-o`: needs version testing (OC4) |
+| Tmux version req | Requires control mode (validated at runtime; minimum determined by CI matrix, see OC4) | pipe-pane `-o`: needs version testing (OC4) |
 | Multi-pane | One connection per session (see below) | One FIFO + pipe-pane per pane |
 | Complexity | Lower — no file lifecycle | Higher — FIFO/file creation, rotation, cleanup |
 
