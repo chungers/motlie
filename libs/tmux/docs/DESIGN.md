@@ -282,7 +282,7 @@ main() loop with reconnect
 | ID | Gap | Severity | Notes |
 |----|-----|----------|-------|
 | P1 | Host key verification disabled (`check_server_key` always `true`) | **High** | MITM vulnerability; must verify against known_hosts |
-| P2 | Pane ID encoding is lossy | **High** | `_` in session names breaks roundtrip through FIFO naming; e.g. session `my_app` pane `0.0` → FIFO `tmux_pipe_my_app_0_0` → reconstructed as `my:app:0.0` (wrong) |
+| P2 | Pane ID encoding is lossy | **High** | `_` in session names breaks roundtrip through FIFO naming; resolved by using `#{pane_id}` as authoritative key (DC1) |
 | P3 | Hardcoded trigger (`contains('>')`) and response (`send-keys 'continue'`) | **High** | False-positives on shell prompts, `>` in log output; not configurable |
 | P4 | No FIFO cleanup or pipe-pane detach on exit | **Medium** | Leaks `/tmp/tmux_pipe_*` files; leaves `pipe-pane` attached after crash |
 | P5 | No signal handling (SIGINT/SIGTERM) | **Medium** | Cannot gracefully shut down |
@@ -657,12 +657,28 @@ pub enum HostTarget {
     },
 }
 
+/// Config DTO — deserialized from TOML/YAML. Patterns are strings.
 pub struct TriggerRule {
-    pub name: String,              // human-readable rule name for logging
-    pub pane_filter: Option<Regex>,// which panes this rule applies to (None = all)
-    pub pattern: Regex,            // match against pane output lines
+    pub name: String,                  // human-readable rule name for logging
+    pub pane_filter: Option<String>,   // regex string (None = all panes)
+    pub pattern: String,               // regex string to match against pane output
     pub action: Action,
-    pub cooldown: Option<Duration>,// debounce repeated triggers per pane
+    pub cooldown: Option<Duration>,    // debounce repeated triggers per pane
+}
+
+/// Runtime form — compiled from TriggerRule during startup validation.
+/// Compile errors include rule name and pattern for user-facing diagnostics.
+pub struct CompiledRule {
+    pub name: String,
+    pub pane_filter: Option<Regex>,
+    pub pattern: Regex,
+    pub action: Action,
+    pub cooldown: Option<Duration>,
+}
+
+impl TriggerRule {
+    /// Compile string patterns into Regex. Returns error with rule name context.
+    pub fn compile(&self) -> Result<CompiledRule>;
 }
 
 pub enum Action {
@@ -741,26 +757,27 @@ centralize version-dependent coupling.
 
 ```rust
 pub struct PaneAddress {
-    pub session: String,
-    pub window: u32,
-    pub pane: u32,
+    pub pane_id: String,       // authoritative: "%12" — from #{pane_id}
+    pub session: String,       // display: session name
+    pub window: u32,           // display: window index
+    pub pane: u32,             // display: pane index
 }
 
 impl PaneAddress {
-    /// Canonical string form: "session:window.pane"
+    /// Canonical string form for tmux targeting: "session:window.pane"
     pub fn to_tmux_target(&self) -> String;
 
-    /// Safe encoding for use in file paths (must roundtrip losslessly)
-    pub fn to_safe_filename(&self) -> String;
+    /// The stable pane_id for FIFO naming and stream keying (e.g., "%12")
+    pub fn id(&self) -> &str;
 
-    /// Parse from tmux list-panes output
+    /// Parse from tmux list-panes output (expects pane_id in format string)
     pub fn parse(s: &str) -> Result<Self>;
 }
 ```
 
-**Must address P2**: The safe filename encoding. Proposal: hex-encode the session name, use
-literal `-` delimiters: `{hex(session)}-{window}-{pane}`. This avoids any ambiguity regardless
-of session name content.
+**Addresses P2**: Using `#{pane_id}` as the authoritative key (see DC1) eliminates the
+need for filename encoding of session names entirely. FIFO paths (if used) are simply
+`/tmp/motlie_pipe_%<id>`.
 
 ```rust
 /// List all sessions on the host.
@@ -784,7 +801,7 @@ pub async fn list_panes(
 const LIST_SESSIONS_FMT: &str =
     "#{session_name}\t#{session_id}\t#{session_created}\t#{session_attached}\t#{session_windows}\t#{session_group}";
 const LIST_PANES_FMT: &str =
-    "#{session_name}:#{window_index}.#{pane_index}\t#{pane_title}\t#{pane_current_command}\t#{pane_pid}\t#{pane_width}\t#{pane_height}\t#{pane_active}";
+    "#{pane_id}\t#{session_name}:#{window_index}.#{pane_index}\t#{pane_title}\t#{pane_current_command}\t#{pane_pid}\t#{pane_width}\t#{pane_height}\t#{pane_active}";
 ```
 
 ### `capture.rs`
@@ -972,12 +989,13 @@ impl Drop for PipeManager {
 }
 ```
 
-**Must address P4 and P5**: `cleanup()` must be called from the signal handler and from the
-normal shutdown path.
+**Must address P4**: `cleanup()` must be called on shutdown. The library exposes cleanup
+as an explicit async method; it does NOT install signal handlers itself (see DC10 — signal
+handling is the binary's responsibility, keeping the library embeddable in MCP/service contexts).
 
-**Cleanup sequence** (on graceful or signal-triggered shutdown):
+**Cleanup sequence** (triggered by caller via `shutdown()` or `PipeManager::cleanup()`):
 1. `tmux pipe-pane -t <pane>` (no `-o`) for each pane — detaches the pipe
-2. `rm -f /tmp/tmux_pipe_<encoded>` for each FIFO (local) or via transport exec (remote)
+2. `rm -f /tmp/motlie_pipe_%<id>` for each FIFO (local) or via transport exec (remote)
 3. Close transport channels
 
 ### `monitor.rs`
@@ -1007,26 +1025,41 @@ Action dispatch (send-keys) uses separate exec channels or a dedicated control c
 **Must address P9**: Failed send-keys or malformed lines must be logged at `warn` level,
 not silently dropped.
 
-**Stream parsing**: The `tail -qf` + `awk` approach from the prototype works but couples
-filename-based pane identification to shell text parsing. The monitor must use the safe
-filename encoding from `PaneAddress::to_safe_filename()` and a regex that accounts for it.
+**Stream parsing**: With control mode (DC10), the monitor parses `%output %<pane_id> <data>`
+frames — structured, unambiguous, and keyed on `#{pane_id}` per DC1. For the pipe-pane
+fallback, `pipe-pane` output is prefixed with `%<pane_id>` (set at attach time), and the
+monitor parses on that prefix directly — no filename decoding required.
 
 ---
 
 ## Key Design Decisions
 
-### DC1: Pane Address Encoding
+### DC1: Pane Identity and Addressing
 
-**Decision**: Hex-encode the tmux session name in FIFO filenames.
+**Decision**: Use tmux `#{pane_id}` (e.g., `%12`) as the authoritative identifier for
+FIFO naming, stream attribution, and internal keying. Retain `session:window.pane` in
+`PaneAddress` as display metadata and user-facing targeting only.
 
-**Rationale**: Tmux session names can contain underscores, dots, colons, and other characters
-that conflict with naive delimiter-based encoding. Hex encoding the session name guarantees
-lossless roundtrip. Window and pane indices are numeric and safe as-is.
+**Rationale**: `#{pane_id}` is a stable, unique, tmux-assigned identifier that does not
+change when sessions or windows are renamed or moved. Using it as the internal key
+eliminates the need for lossy filename encoding of session names (the original P2 bug)
+and simplifies stream parsing — the monitor keys on `%<id>` directly rather than
+decoding hex-encoded filenames.
 
-**Format**: `/tmp/motlie_pipe_{hex(session)}_{window}_{pane}`
+**FIFO format** (if FIFO strategy is used): `/tmp/motlie_pipe_%<id>` (e.g., `/tmp/motlie_pipe_%12`)
 
-**Alternative rejected**: Base64 — contains `/` and `+` which are unsafe in filenames without
-further escaping.
+**PaneAddress** retains human-readable fields for display and `tmux send-keys -t` targeting:
+```rust
+pub struct PaneAddress {
+    pub pane_id: String,       // authoritative: "%12" — used for FIFO names, stream keys
+    pub session: String,       // display/targeting: session name
+    pub window: u32,           // display/targeting: window index
+    pub pane: u32,             // display/targeting: pane index
+}
+```
+
+**Alternative rejected**: Hex-encoding session names in filenames — adds complexity and
+is still fragile under rename. `#{pane_id}` is simpler and correct by construction.
 
 ### DC2: Host Key Verification
 
@@ -1055,21 +1088,25 @@ rapid-fire send-keys when a prompt re-renders. Default cooldown: 1 second.
 
 ### DC4: Action Dispatch Channel Strategy
 
-**Decision**: TBD — needs prototyping.
+**Decision**: Option A (separate exec per action) with a per-host bounded dispatch queue.
 
-**Option A**: Open a new transport exec call per action (`tmux send-keys -t ...`).
-- Pro: Simple, isolated, no shared state
-- Con: For SSH, channel open latency (~50ms per action), may hit channel limits under load.
-  For localhost, subprocess spawn overhead is minimal.
+**Option A** (selected): Open a new transport exec call per action (`tmux send-keys -t ...`),
+routed through a per-host bounded `tokio::sync::mpsc` channel with a configurable
+concurrency semaphore.
+- Pro: Simple, isolated, no shared state, ordering guaranteed by queue, backpressure
+  via bounded channel capacity
+- Con: For SSH, channel open latency (~50ms per action) — acceptable for typical
+  automation rates. For localhost, subprocess spawn overhead is minimal.
 
-**Option B**: Maintain a persistent control shell channel, write commands to it.
-- Pro: Lower latency, no per-action channel overhead
+**Option B** (rejected for v1): Persistent control shell channel.
+- Pro: Lower latency
 - Con: Shared channel parsing complexity (same issue as prototype P6)
 
-**Recommendation**: Start with Option A. For localhost this is already fast (subprocess
-spawn). For SSH targets, measure latency. If channel open overhead is problematic
-(>100ms p99 or >10 actions/sec sustained), switch to Option B with a dedicated channel
-that does not share with the monitor.
+**Implementation**: Each `HostHandle` owns a `tokio::sync::mpsc::Sender<ActionRequest>`
+with bounded capacity (default: 64). A background task drains the queue and executes
+actions via `transport.exec()`, with a `tokio::sync::Semaphore` limiting concurrent
+in-flight dispatches (default: 4 for SSH, 8 for localhost). This gives ordering,
+backpressure, and isolation without persistent-shell parsing.
 
 ### DC5: Multi-Host Concurrency
 
@@ -1150,7 +1187,36 @@ cases just use the host string directly.
 
 **Conflict resolution**: If two hosts share an alias, config validation fails at load time.
 
-### DC10: Separation of Library and Binary
+### DC10: Monitoring Strategy — Control Mode vs Pipe-Pane
+
+**Decision**: Use tmux control mode (`tmux -C attach`) as the primary monitoring strategy
+for v1. Pipe-pane with file sinks is a documented fallback for environments where control
+mode is unavailable or insufficient.
+
+**Decision matrix**:
+
+| Criterion | Control Mode (`tmux -C`) | Pipe-Pane + FIFO/File |
+|-----------|--------------------------|----------------------|
+| Output framing | Structured: `%output %<pane_id> <data>` | Unstructured: filename prefix via awk |
+| Pane identity | Native `%<pane_id>` in protocol | Requires filename encoding (DC1) |
+| `/tmp` artifacts | None | FIFOs or log files per pane |
+| Cleanup on crash | Nothing to clean up | Orphaned FIFOs/files, dangling pipe-pane |
+| Interleaving (OC2) | Not possible — framed protocol | Possible with `tail -qf` on multiple files |
+| Backpressure (OC1) | Buffered by tmux control mode | FIFO blocks writer; file grows unbounded |
+| Tmux version req | tmux >= 1.8 (control mode) | pipe-pane `-o`: needs version testing (OC4) |
+| Multi-pane | Single connection monitors all panes | One FIFO + pipe-pane per pane |
+| Complexity | Lower — no file lifecycle | Higher — FIFO/file creation, rotation, cleanup |
+
+**Rationale**: Control mode eliminates OC1 (FIFO blocking), OC2 (interleaving), and most
+of the pipe lifecycle complexity. It provides structured output with native `#{pane_id}`
+attribution, aligning with DC1. The `%output` notifications include pane ID, eliminating
+the need for filename-based identity.
+
+**Fallback**: Pipe-pane with append-file sink (`pipe-pane -o 'cat >> file'` + `tail -f`)
+is retained as an option for scenarios where control mode is insufficient (e.g., very old
+tmux, or when monitoring panes across multiple tmux servers on the same host).
+
+### DC11: Separation of Library and Binary
 
 **Decision**: `libs/tmux` is a pure library. CLI binary lives in `bins/tmux-automator/`.
 
@@ -1168,23 +1234,26 @@ but must be addressed before the library is used in production.
 
 ### OC1: FIFO Reliability Under Load
 
-`tmux pipe-pane` writes to a FIFO. If the reader (`tail -qf`) falls behind, the writing
-pane blocks until the FIFO is drained. Under high output volume, this could stall the
-monitored tmux pane.
+**Largely mitigated by DC10** — if control mode is adopted as the primary monitoring
+strategy, FIFOs are not used and this concern does not apply.
 
-**Mitigation options**:
-- Use `tmux pipe-pane -o 'cat >> /tmp/file'` (regular file, not FIFO) and `tail -f` the file.
-  Avoids blocking but requires periodic truncation/rotation.
-- Accept the FIFO behavior and document it as a known limitation.
-- Investigate `tmux capture-pane -p -t <pane>` polling as an alternative to pipe-pane.
+For the pipe-pane fallback path: `tmux pipe-pane` writing to a FIFO can block the
+monitored pane if the reader falls behind. Under high output volume, this stalls the
+tmux pane.
+
+**Resolution for fallback**: Default to append-file sink (`pipe-pane -o 'cat >> file'`
++ `tail -f`) rather than FIFOs. This avoids writer blocking. File rotation (truncate
+when exceeding configurable size, default 10MB) prevents unbounded growth. FIFO mode
+available as opt-in for latency-sensitive use cases where backpressure is acceptable.
 
 ### OC2: Output Interleaving
 
-`tail -qf` on multiple files can interleave partial lines from different panes.
-The `awk` prefix helps, but a long line split across reads could produce garbled attribution.
+**Eliminated by DC10** — control mode provides framed `%output` messages with pane ID
+attribution. No interleaving possible.
 
-**Mitigation**: Use line-buffered output (`stdbuf -oL`) if available on the remote host.
-Document as a known limitation if not.
+For the pipe-pane fallback path: `tail -qf` on multiple files can interleave partial
+lines from different panes. Mitigation: use line-buffered output (`stdbuf -oL`) if
+available on the remote host. Document as a known limitation of the fallback path.
 
 ### OC3: SSH Agent Availability
 
@@ -1196,11 +1265,14 @@ or has no matching keys, the error message should be actionable.
 
 ### OC4: Tmux Version Compatibility
 
-`tmux pipe-pane` and `list-panes -F` format strings vary across tmux versions.
-The minimum supported tmux version should be documented and tested.
+`tmux pipe-pane`, `list-panes -F` format strings, and control mode behavior vary across
+tmux versions. The minimum supported version must be determined empirically, not asserted.
 
-**Proposal**: Require tmux >= 2.6 (pipe-pane `-o` flag). Detect version via
-`tmux -V` during discovery phase and return a clear error if unsupported.
+**Proposal**: Runtime detection via `tmux -V` during the discovery phase. The library
+validates that required features are available (control mode `%output` framing,
+`capture-pane -p`, `pipe-pane -o`, `#{pane_id}` format variable) and returns a clear
+error if the detected version lacks them. Phase 4 CI will build a compatibility test
+matrix against tmux 2.x, 3.x, and latest to determine the actual minimum version.
 
 ### OC5: Shell Injection in Remote Commands
 
@@ -1285,34 +1357,55 @@ input, and rename sessions — all without SSH.
 - `list_sessions()` returns `Vec<SessionInfo>` with all fields populated
 - All operations work via `MockTransport` in unit tests
 
-### Phase 2: SSH Transport + Monitoring + Pipe Management
+### Phase 2a: SSH Transport + Minimal Monitoring (Vertical Slice)
 
-**Goal**: Add `SshTransport` for remote hosts and continuous monitoring on top of Phase 1.
+**Goal**: Add `SshTransport` for remote hosts. Implement a thin monitoring vertical slice:
+single-target monitor with one `SendKeys` action type and explicit shutdown API. No full
+rule engine, no reconnection, no config deserialization yet.
 
 **Tasks**:
 1. Implement `SshTransport` in `transport.rs`: russh-based `exec()` and `open_shell()`,
    host key verification (fixes P1), configurable timeout (fixes P10)
-2. Implement `config.rs`: `TriggerRule`, `Action`, `ReconnectPolicy`, `TmuxAutomatorConfig`
-   with serde deserialization, `HostTarget::Local` and `HostTarget::Ssh` variants
-3. Implement `pipe.rs`: `PipeManager` with setup + cleanup (fixes P4), using safe filenames
-4. Implement `monitor.rs`: event loop with configurable rules (fixes P3), warn on
-   errors (fixes P9), `MonitorHandle` for stop signaling
-5. Wire monitoring into `HostHandle::start_monitoring()`
-6. Signal handling via `tokio::signal` for SIGINT/SIGTERM (fixes P5), wired to
-   `PipeManager::cleanup()`
-7. Reconnection logic with exponential backoff in `HostHandle` (SSH targets only)
-8. Unit tests: rule evaluation, cooldown behavior, config deserialization
+2. Implement `monitor.rs`: control mode parser (`%output %<pane_id> <data>`), single
+   hardcoded-pattern detection, `SendKeys` action dispatch via bounded queue (DC4),
+   `MonitorHandle` with explicit `shutdown()` API
+3. Implement `pipe.rs`: fallback `PipeManager` with file-sink default (fixes P4)
+4. Wire monitoring into `HostHandle::start_monitoring()` for localhost and SSH
+5. Unit tests: `SshTransport` via mock SSH server or `MockTransport`, monitor loop with
+   canned control-mode output, action dispatch ordering
 
-**Deliverable**: Library with both localhost and SSH support, on-demand operations, and
-continuous monitoring.
+**Deliverable**: Library that monitors panes on localhost or one SSH host, detects a
+pattern, and sends a response. Shutdown is explicit (caller-initiated, no signal handling
+in library).
 
 **Acceptance criteria**:
 - All Phase 1 operations work identically over `SshTransport`
-- Monitoring starts, detects a pattern, and sends the configured response
-- SIGINT triggers pipe-pane detach and FIFO removal
-- Reconnection resumes monitoring after a simulated SSH disconnect
-- Rules with cooldown do not fire more than once per cooldown period
+- Monitoring starts on localhost, detects a pattern, sends configured response
+- `monitor_handle.shutdown()` cleanly stops monitoring and cleans up
 - Localhost monitoring works without any SSH configuration
+
+### Phase 2b: Full Rule Engine + Reconnection + Config
+
+**Goal**: Layer the full configurable rule engine, cooldown, reconnection, and config
+deserialization on top of the stable 2a monitoring loop.
+
+**Tasks**:
+1. Implement `config.rs`: `TriggerRule` (string patterns), `CompiledRule`, `Action`,
+   `ReconnectPolicy`, `TmuxAutomatorConfig` with serde deserialization,
+   `HostTarget::Local` and `HostTarget::Ssh` variants
+2. Implement rule compilation: `TriggerRule::compile() -> Result<CompiledRule>` with
+   user-facing error messages including rule name and pattern context
+3. Expand `monitor.rs`: multi-rule evaluation, per-pane cooldown timers, `Log` action type
+4. Reconnection logic with exponential backoff in `HostHandle` (SSH targets only)
+5. Unit tests: rule evaluation, cooldown behavior, config deserialization, compile errors
+
+**Deliverable**: Full monitoring with configurable rules, cooldown, and SSH reconnection.
+
+**Acceptance criteria**:
+- Config file (TOML) deserializes into `TmuxAutomatorConfig` with compiled rules
+- Invalid regex in config produces error with rule name context
+- Rules with cooldown do not fire more than once per cooldown period
+- Reconnection resumes monitoring after a simulated SSH disconnect
 
 ### Phase 3: Multi-Target Fleet + CLI
 
@@ -1321,7 +1414,9 @@ continuous monitoring.
 **Tasks**:
 1. Implement `fleet.rs`: `Fleet` with concurrent connect, target lookup by alias (DC9),
    per-target status tracking, aggregate `start_monitoring()` and `shutdown()`
-2. Create `bins/tmux-automator/` with `clap` CLI supporting subcommands:
+2. Signal handling in the CLI binary via `tokio::signal` for SIGINT/SIGTERM (fixes P5),
+   wired to `fleet.shutdown()`. The library does NOT install signal handlers (DC11).
+3. Create `bins/tmux-automator/` with `clap` CLI supporting subcommands:
    - `create-session <name> [--host <alias>] [--window-name <name>] [--command <cmd>]`
    - `kill-session <name> [--host <alias>]`
    - `list-sessions [--host <alias>]` — list sessions on one or all targets
@@ -1330,9 +1425,9 @@ continuous monitoring.
    - `send <session:window.pane> <input> [--host <alias>]` — send keys
    - `rename-session <old> <new> [--host <alias>]` — rename
    - `monitor [--config <path>]` — start continuous monitoring
-3. Config file support (TOML) with CLI flag overrides
-4. JSON and text log output modes
-5. Per-target tracing spans with alias labels
+4. Config file support (TOML) with CLI flag overrides
+5. JSON and text log output modes
+6. Per-target tracing spans with alias labels
 
 **Deliverable**: Multi-target CLI tool and library. Single process operating across
 localhost and N remote hosts.
