@@ -2,6 +2,23 @@
 
 ## Status: Draft
 
+## Change Log
+
+| Date | Change | Sections |
+|------|--------|----------|
+| 2026-03-08 | Unified `Target` type replacing `SessionHandle`/`PaneHandle`/`WindowHandle` hierarchy (DC16, DC17). `HostHandle` slimmed to host-level only. Fixed stale references throughout. | Core Abstractions, Architecture, DC16, DC17, DC13, Module Specs, Phase 1 |
+| 2026-03-08 | Added session-scoped operations on `SessionMonitorHandle` via `Deref<Target=Target>` (DC16) | Core Abstractions, DC16 |
+| 2026-03-08 | Added `JoinedStream` for multi-source consolidated views (DC15) | Output Sink Pipeline, DC15 |
+| 2026-03-08 | Added `ContentMatcher` trait for pluggable text matching (DC14) | Core Abstractions, Output Sink Pipeline, DC14 |
+| 2026-03-08 | Added `sample_text()` API with `ScrollbackQuery` for on-demand scrollback sampling | Core Abstractions |
+| 2026-03-08 | Added granular monitoring lifecycle — fleet/host/session levels (DC13) | DC13 |
+| 2026-03-08 | Added output sink pipeline — `OutputBus`, `SinkFilter`, `OutputSink` trait (DC12) | Output Sink Pipeline, DC12 |
+| 2026-03-08 | Addressed codex review rounds 1–4: DC10 control mode fixes, ActionHandle ownership, integration diagram, version pinning | DC10, Output Sink Pipeline, DC1 |
+| 2026-03-07 | Added `TmuxSocket` selector for non-default tmux servers | Core Abstractions |
+| 2026-03-07 | Added localhost transport, session lifecycle, TUI roadmap (Phase 5) | Core Abstractions, Module Specs, Implementation Phases |
+| 2026-03-07 | Added prototype source and Gemini link for traceability | Prototype Reference |
+| 2026-03-07 | Initial design document | All |
+
 This document describes the design for `libs/tmux`, an asynchronous, structured, multi-target
 automator that monitors tmux panes over SSH or on localhost and executes configurable actions
 in response to output patterns. Beyond monitoring, the library provides a general-purpose tmux
