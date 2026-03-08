@@ -17,6 +17,7 @@ production library.
 - [Prototype Reference](#prototype-reference)
 - [Architecture](#architecture)
 - [Core Abstractions](#core-abstractions)
+- [Output Sink Pipeline](#output-sink-pipeline)
 - [Module Specifications](#module-specifications)
 - [Key Design Decisions](#key-design-decisions)
 - [Open Concerns](#open-concerns)
@@ -311,6 +312,10 @@ libs/tmux/
 │   ├── control.rs          # Session lifecycle, send-keys with escaping, rename
 │   ├── pipe.rs             # PipeManager: FIFO lifecycle, pipe-pane attach/detach
 │   ├── monitor.rs          # OutputMonitor: stream parsing, rule evaluation, dispatch
+│   ├── sink.rs             # OutputSink trait, SinkFilter, PaneOutput, OutputBus
+│   ├── sinks/
+│   │   ├── mod.rs          # Re-exports built-in sinks
+│   │   └── stdio.rs        # StdioSink (default reference implementation)
 │   ├── keys.rs             # Key literal and escape helpers (Enter, C-c, Tab, etc.)
 │   └── types.rs            # PaneAddress, SessionInfo, WindowInfo, PaneInfo, shared types
 ├── docs/
@@ -628,6 +633,290 @@ pub struct PaneInfo {
 These are populated by `tmux list-sessions -F`, `list-windows -F`, and `list-panes -F`
 with appropriate format strings. The format strings are centralized in `discovery.rs` to
 keep tmux version coupling in one place.
+
+---
+
+## Output Sink Pipeline
+
+Captured pane output must flow to multiple consumers with vastly different latency
+profiles — stdio (µs), TUI (ms per frame), LLM analysis (seconds). A synchronous
+pipeline would block at the speed of the slowest consumer. This section defines the
+async fan-out architecture that decouples output capture from rendering/processing.
+
+### `PaneOutput` — The Unit of Output
+
+Every piece of captured output flows through the pipeline as a `PaneOutput`. It carries
+enough context for any sink to identify the source and route actions back to it.
+
+```rust
+pub struct PaneOutput {
+    pub pane_id: String,       // authoritative: "%12"
+    pub pane_target: String,   // display: "session:window.pane"
+    pub host: String,          // host alias (or "localhost")
+    pub session: String,       // session name
+    pub window: u32,           // window index
+    pub content: String,       // the captured text
+    pub timestamp: Instant,
+}
+```
+
+`PaneOutput` is the bridge between the monitor/capture side and the sink side.
+The `host`, `session`, `window`, and `pane_id` fields enable sinks to filter at
+any level of the hierarchy and to route actions back to the originating entity.
+
+### `SinkFilter` — Composable Output Targeting
+
+A `SinkFilter` selects which output reaches a given sink. Filters target any
+combination of host, session, window, or pane. Multiple filters are combined with
+OR semantics — output matching **any** filter in the set is delivered to the sink.
+
+```rust
+pub struct SinkFilter {
+    pub host: Option<String>,      // regex against host alias
+    pub session: Option<String>,   // regex against session name
+    pub window: Option<String>,    // regex against "session:window_index"
+    pub pane: Option<String>,      // regex against pane_id or "session:window.pane"
+}
+
+/// Compiled form — regexes compiled once at registration time.
+pub struct CompiledSinkFilter {
+    pub host: Option<Regex>,
+    pub session: Option<Regex>,
+    pub window: Option<Regex>,
+    pub pane: Option<Regex>,
+}
+
+impl CompiledSinkFilter {
+    /// Returns true if the output matches ALL non-None fields in this filter.
+    /// Fields that are None are wildcards (match everything).
+    pub fn matches(&self, output: &PaneOutput) -> bool;
+}
+```
+
+**Combining filters**: A sink registers with `Vec<SinkFilter>`. Output is delivered
+if it matches **any** filter in the vec (OR across filters, AND within each filter).
+An empty vec means "match all output" (the default).
+
+**Examples**:
+
+```rust
+// Sink receives output from all panes on "db-server"
+vec![SinkFilter { host: Some("db-server".into()), ..Default::default() }]
+
+// Sink receives output from session "build" on any host, OR any session on "web-1"
+vec![
+    SinkFilter { session: Some("build".into()), ..Default::default() },
+    SinkFilter { host: Some("web-1".into()), ..Default::default() },
+]
+
+// Sink receives output from a specific pane
+vec![SinkFilter { pane: Some("%42".into()), ..Default::default() }]
+```
+
+### `OutputSink` — The Sink Trait
+
+Every output consumer implements `OutputSink`. Each sink runs as an independent async
+task with its own batching/accumulation behavior. The library provides `StdioSink` as
+the default reference implementation.
+
+```rust
+#[async_trait]
+pub trait OutputSink: Send + Sync + 'static {
+    /// Human-readable name for logging and diagnostics.
+    fn name(&self) -> &str;
+
+    /// Filters determining which output reaches this sink.
+    /// Empty vec = all output (default).
+    fn filters(&self) -> Vec<SinkFilter> { vec![] }
+
+    /// Process one output event. Called from the sink's own task —
+    /// never from the monitor/bus hot path.
+    ///
+    /// Sinks are responsible for their own batching and accumulation.
+    /// A stdio sink writes immediately; an LLM sink accumulates and
+    /// flushes on its own schedule. The bus does not batch on behalf
+    /// of sinks.
+    async fn write(&self, output: PaneOutput) -> Result<()>;
+
+    /// Called on bus shutdown. Flush internal buffers, close resources.
+    async fn flush(&self) -> Result<()> { Ok(()) }
+}
+```
+
+**Key design principle**: Each sink owns its batching/accumulation strategy internally.
+The bus delivers individual `PaneOutput` events; the sink decides whether to process
+them immediately (stdio), buffer and render at frame rate (TUI), or accumulate and
+flush on a timer/threshold (LLM). This keeps the bus simple and the sink in full
+control of its own latency/throughput tradeoffs.
+
+### `ActionHandle` — Sink-Initiated Actions
+
+Sinks that analyze output may need to act on the source entity — send keys to the
+pane, kill a session, etc. Rather than giving sinks direct access to `HostHandle`
+(which would create circular dependencies), sinks receive an `ActionHandle` that
+provides a scoped, async API for actions against the tmux entities they observe.
+
+```rust
+pub struct ActionHandle { /* mpsc::Sender<ActionRequest> */ }
+
+pub struct ActionRequest {
+    pub target: ActionTarget,
+    pub action: SinkAction,
+}
+
+pub enum ActionTarget {
+    Pane { host: String, pane_id: String },
+    Session { host: String, session: String },
+    Host { host: String },
+}
+
+pub enum SinkAction {
+    SendKeys { keys: KeySequence },
+    SendText { text: String },
+    KillSession,
+    RenameSession { new_name: String },
+    // Extensible for future actions
+}
+
+impl ActionHandle {
+    /// Send an action to the target entity. Non-blocking (queued).
+    pub async fn send(&self, request: ActionRequest) -> Result<()>;
+
+    /// Convenience: send keys to a specific pane.
+    pub async fn send_keys_to_pane(
+        &self,
+        host: &str,
+        pane_id: &str,
+        keys: KeySequence,
+    ) -> Result<()>;
+
+    /// Convenience: send text to a specific pane.
+    pub async fn send_text_to_pane(
+        &self,
+        host: &str,
+        pane_id: &str,
+        text: &str,
+    ) -> Result<()>;
+}
+```
+
+The `ActionHandle` is provided to sinks at registration time. Action requests are
+routed through the existing per-host bounded dispatch queue (DC4) — the same path
+used by the monitor's trigger rules. This ensures consistent ordering, backpressure,
+and concurrency limits regardless of whether an action originates from a rule or a sink.
+
+**LLM feedback loop**: An LLM sink can call `action_handle.send_keys_to_pane()` after
+analyzing output. The design of the LLM sink itself (prompt engineering, approval gates,
+autonomous vs supervised mode) is **out of scope** for this library. The library provides
+the `OutputSink` trait and `ActionHandle` API; LLM integration is a consumer concern.
+
+### `OutputBus` — Fan-Out Dispatcher
+
+The `OutputBus` is the central distributor. It receives `PaneOutput` from the monitor
+(or from `capture_pane()` callers) and fans out to all registered sinks.
+
+```rust
+pub struct OutputBus { /* subscribers: Vec<SinkEntry> */ }
+
+struct SinkEntry {
+    id: SinkId,
+    name: String,
+    tx: mpsc::Sender<PaneOutput>,
+    filters: Vec<CompiledSinkFilter>,
+    task: JoinHandle<()>,
+}
+
+impl OutputBus {
+    pub fn new() -> Self;
+
+    /// Register a sink. Spawns a dedicated tokio task that drives the sink.
+    /// Returns a SinkId for later unsubscribe.
+    /// `channel_capacity` controls the bounded channel size to this sink.
+    pub fn subscribe(
+        &mut self,
+        sink: Box<dyn OutputSink>,
+        action_handle: ActionHandle,
+        channel_capacity: usize,
+    ) -> SinkId;
+
+    /// Remove a sink. Signals stop, awaits flush(), joins the task.
+    pub async fn unsubscribe(&mut self, id: SinkId) -> Result<()>;
+
+    /// Fan out an event to all matching sinks. Non-blocking.
+    /// Uses try_send — if a sink's channel is full, the event is dropped
+    /// for that sink only (logged at debug level). Sinks that cannot
+    /// tolerate drops should use larger channel capacities.
+    pub fn publish(&self, output: PaneOutput);
+
+    /// Shutdown all sinks gracefully.
+    pub async fn shutdown(&mut self) -> Result<()>;
+}
+```
+
+**Backpressure**: The bus uses `try_send()` for all sinks. A full channel means the
+sink is processing slower than output arrives — the bus drops for that sink only and
+logs at debug level. This guarantees the bus (and therefore the monitor) never blocks.
+Sinks that need lossless delivery should set a large `channel_capacity`. Sinks that
+only care about recent state (TUI) should set a small capacity and accept drops.
+
+### `StdioSink` — Default Reference Implementation
+
+The library ships with `StdioSink` as the default, always-available sink. It serves
+as the reference implementation for the `OutputSink` trait.
+
+```rust
+pub struct StdioSink {
+    format: StdioFormat,
+    writer: tokio::io::Stdout,
+}
+
+pub enum StdioFormat {
+    /// Raw content only, no metadata prefix
+    Raw,
+    /// "[host] session:window.pane | content"
+    Prefixed,
+    /// JSON lines: {"host": "...", "pane": "...", "content": "...", "ts": ...}
+    Json,
+}
+
+impl OutputSink for StdioSink {
+    fn name(&self) -> &str { "stdio" }
+    // filters(): default (all output)
+    // write(): format and write to stdout immediately (no batching)
+    // flush(): flush stdout
+}
+```
+
+### Integration with Fleet and Monitor
+
+```
+  Fleet
+    │
+    ├── OutputBus (owned by Fleet)
+    │     │
+    │     ├── subscribe(StdioSink, action_handle, 1024)
+    │     ├── subscribe(TuiSink, action_handle, 16)    // binary-provided
+    │     └── subscribe(LlmSink, action_handle, 256)   // consumer-provided
+    │
+    ├── HostHandle (localhost)
+    │     └── Monitor ──publish()──► OutputBus
+    │
+    └── HostHandle (remote)
+          └── Monitor ──publish()──► OutputBus
+```
+
+**Monitor → Bus**: The monitor publishes `PaneOutput` to the bus after each output
+event. This happens *in addition to* rule evaluation — rules and sinks operate
+independently on the same stream.
+
+**capture_pane() → Bus**: On-demand captures can optionally be published to the bus
+via a `bus.publish()` call. This is opt-in at the call site, not automatic.
+
+**Sink → ActionHandle → HostHandle**: A sink that decides to act (e.g., an LLM sink
+that detects an error and wants to send a recovery command) submits an `ActionRequest`
+through its `ActionHandle`. The request is routed to the correct `HostHandle` via the
+existing per-host dispatch queue (DC4). The sink does not need to know which
+`HostHandle` to use — routing is by the `host` and `pane_id` fields in `ActionTarget`.
 
 ---
 
@@ -1256,6 +1545,38 @@ The library exposes `Fleet`, `HostHandle`, `TmuxAutomatorConfig`, and all operat
 The binary handles CLI parsing, config file loading, signal handling, and tracing
 initialization. The library is also consumable by MCP tools or other programmatic callers.
 
+### DC12: Output Sink Pipeline Architecture
+
+**Decision**: Captured pane output is distributed to consumers via an async fan-out bus
+(`OutputBus`) that delivers `PaneOutput` to independently-running sink tasks. Each sink
+receives its own bounded channel and manages its own batching, buffering, and timing
+internally. Sinks are filtered via composable `SinkFilter` structs (OR across filters,
+AND within fields). Sinks may initiate actions on tmux entities via an `ActionHandle`
+that routes requests through the existing per-host action dispatch queue (DC4).
+
+**Rationale**:
+- **Decoupled latency**: A slow LLM sink must never block a fast stdio sink. Per-sink
+  channels with independent tasks ensure this.
+- **Sink-owned batching**: The bus delivers individual `PaneOutput` events; sinks decide
+  when/how to batch. A stdio sink flushes immediately. An LLM sink accumulates until a
+  token budget or timeout. This keeps the bus simple and avoids a "one size fits all"
+  batching policy.
+- **Composable filtering**: `SinkFilter` fields (host, session, window, pane) are regex
+  patterns ANDed together. Multiple filters per sink are ORed. This allows targeting
+  "all panes on host-a" OR "session:build on any host" with a single sink registration.
+- **Action loop**: `ActionHandle` gives sinks a way to respond to output (e.g., LLM
+  decides to send keys). Actions flow through the existing bounded queue and semaphore,
+  preserving ordering and backpressure guarantees from DC4.
+- **LLM feedback loop out of scope**: The `ActionHandle` API is in scope; the logic that
+  decides *what* action to take (LLM inference, prompt construction) is out of scope for
+  `libs/tmux`. Consumers build that on top.
+
+**Alternatives considered**:
+- Bus-level batching with configurable window: Rejected — forces all sinks to the same
+  cadence and complicates the bus with timer logic.
+- Callback-based sinks (no channels): Rejected — a slow callback blocks the bus loop.
+- Shared `Arc<Mutex<Vec<PaneOutput>>>` polling: Rejected — wastes CPU, no backpressure.
+
 ---
 
 ## Open Concerns
@@ -1438,6 +1759,43 @@ deserialization on top of the stable 2a monitoring loop.
 - Rules with cooldown do not fire more than once per cooldown period
 - Reconnection resumes monitoring after a simulated SSH disconnect
 
+### Phase 2c: Output Sink Pipeline
+
+**Goal**: Implement the async output distribution pipeline so captured pane output can be
+routed to multiple consumers (sinks) with independent latency characteristics.
+
+**Tasks**:
+1. Implement `sink.rs`: `PaneOutput` struct, `OutputSink` trait, `SinkFilter` /
+   `CompiledSinkFilter`, `ActionHandle` / `ActionRequest` / `ActionTarget` / `SinkAction`
+2. Implement `OutputBus`: registration API (`register(sink, filters, channel_capacity)`),
+   fan-out loop that matches `PaneOutput` against compiled filters and dispatches to
+   per-sink channels, graceful shutdown with `flush()` on all sinks
+3. Implement `StdioSink`: default reference implementation that writes `PaneOutput` to
+   stdout with `[host:pane_target]` prefix, immediate flush, no batching
+4. Wire `OutputBus` into `monitor.rs`: control mode parser feeds `PaneOutput` into the
+   bus alongside rule evaluation
+5. Wire `ActionHandle` into `HostHandle`: sink-initiated actions route through the
+   existing per-host action dispatch queue (DC4)
+6. Integrate into `Fleet`: `Fleet::output_bus()` accessor, sink registration before
+   `start_monitoring()`
+7. Unit tests: `SinkFilter` matching logic (AND within fields, OR across filters),
+   `OutputBus` fan-out to multiple mock sinks, backpressure behavior when sink channel
+   is full, `ActionHandle` delivery
+
+**Deliverable**: Library routes captured output to registered sinks asynchronously. A
+`StdioSink` prints output in real-time. Custom sinks (TUI, LLM) can be registered by
+consumers.
+
+**Acceptance criteria**:
+- `OutputBus` delivers `PaneOutput` to 3 registered sinks concurrently
+- A slow sink (simulated 500ms delay) does not block other sinks
+- `SinkFilter { host: Some("web.*"), session: None, window: None, pane: None }` matches
+  all panes on hosts matching `web.*`
+- Two filters ORed together match the union of their targets
+- `StdioSink` produces readable output with host and pane context
+- `ActionHandle::send_keys()` delivers the action through the host dispatch queue
+- `OutputBus::shutdown()` calls `flush()` on all sinks before returning
+
 ### Phase 3: Multi-Target Fleet + CLI
 
 **Goal**: Multi-target support via `Fleet` and a usable CLI binary.
@@ -1495,13 +1853,17 @@ user interfaces.
 
 **Not in current scope**. Listed here for planning continuity. The TUI will consume
 the `Fleet` API from `libs/tmux` and provide:
-- Live pane content display (via `capture_pane` polling or `pipe-pane` streaming)
+- Live pane content display via `TuiSink` registered with `OutputBus` (Phase 2c)
 - Session/window/pane tree navigation across targets
-- Interactive send-keys input
+- Interactive send-keys input via `ActionHandle`
 - Monitoring rule status and trigger history
 - Host connection status dashboard
 
-This phase depends on Phases 1-3 being complete and stable.
+The `TuiSink` implementation lives in the binary (`bins/tmux-automator/`), not in
+`libs/tmux`, consistent with DC11. It registers with the library's `OutputBus` and
+manages its own rendering cadence (e.g., 60fps batching).
+
+This phase depends on Phases 1-3 and 2c being complete and stable.
 
 ---
 
