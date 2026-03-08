@@ -373,7 +373,8 @@ the transport spawns `tokio::process::Command` subprocesses.
 
 **Continuous monitoring** (when started):
 - **Pipe setup**: Dedicated transport exec (not the monitor channel)
-- **Monitoring**: Dedicated shell/PTY channel running `tail -qf`
+- **Monitoring**: Dedicated channel — control mode session (`tmux -C attach`, DC10)
+  as primary; `tail -qf` on pipe files as fallback only
 - **Action dispatch**: Separate exec calls per triggered action
   (see [DC4](#dc4-action-dispatch-channel-strategy))
 - Runs as a `tokio::spawn` task; does not block on-demand operations
@@ -722,7 +723,8 @@ pub trait Transport: Send + Sync {
     async fn exec(&self, command: &str) -> Result<String>;
 
     /// Open a persistent shell for streaming output.
-    /// Used by the monitor for long-running `tail -qf` processes.
+    /// Used by the monitor for long-running processes (control mode session
+    /// or `tail -qf` in fallback pipe mode).
     async fn open_shell(&self) -> Result<Box<dyn ShellChannel>>;
 }
 
@@ -1046,9 +1048,10 @@ impl OutputMonitor {
 
 **Must address P3**: Rule evaluation replaces the hardcoded `contains('>')` check.
 
-**Must address P6**: Monitoring uses a dedicated PTY channel that only runs `tail -qf`.
-Action dispatch (send-keys) uses separate exec channels or a dedicated control channel
-(see [DC4](#dc4-action-dispatch-channel-strategy)).
+**Must address P6**: Monitoring uses a dedicated channel — a control mode session
+(`tmux -C attach`, see DC10) as the primary strategy, or `tail -qf` on pipe files as
+fallback. Action dispatch (send-keys) uses separate exec channels routed through a
+bounded queue (see [DC4](#dc4-action-dispatch-channel-strategy)).
 
 **Must address P9**: Failed send-keys or malformed lines must be logged at `warn` level,
 not silently dropped.
