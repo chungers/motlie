@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-08 | Added `TargetSpec` type with builder for `HostHandle::target()` — replaces raw string parameter | Core Abstractions, DC17 |
 | 2026-03-08 | Unified `Target` type replacing `SessionHandle`/`PaneHandle`/`WindowHandle` hierarchy (DC16, DC17). `HostHandle` slimmed to host-level only. Fixed stale references throughout. | Core Abstractions, Architecture, DC16, DC17, DC13, Module Specs, Phase 1 |
 | 2026-03-08 | Added session-scoped operations on `SessionMonitorHandle` via `Deref<Target=Target>` (DC16) | Core Abstractions, DC16 |
 | 2026-03-08 | Added `JoinedStream` for multi-source consolidated views (DC15) | Output Sink Pipeline, DC15 |
@@ -505,10 +506,10 @@ impl HostHandle {
     /// the session exists. Returns None if not found.
     pub async fn session(&self, name: &str) -> Result<Option<Target>>;
 
-    /// Get a Target at any specificity from a tmux target string.
-    /// Accepts "session", "session:window", or "session:window.pane".
-    /// Verifies the entity exists.
-    pub async fn target(&self, target_str: &str) -> Result<Option<Target>>;
+    /// Get a Target at any specificity from a `TargetSpec`.
+    /// Verifies the entity exists. This is the escape hatch from
+    /// raw strings (CLI args, config) to typed `Target` handles.
+    pub async fn target(&self, spec: &TargetSpec) -> Result<Option<Target>>;
 
     // --- Host-Wide Monitoring ---
 
@@ -568,6 +569,48 @@ pub enum TargetAddress {
     Session(SessionInfo),
     Window(WindowInfo),
     Pane(PaneAddress),
+}
+
+/// A tmux target specifier following tmux's `session:window.pane` convention.
+///
+/// Tmux addresses entities at three levels of specificity:
+/// - Session only: `"build"` — resolves to the active window and pane
+/// - Session + window: `"build:0"` or `"build:make"` — by index or name
+/// - Session + window + pane: `"build:0.1"` — fully qualified
+///
+/// Use `TargetSpec::session("build")` and the builder methods `.window()` / `.pane()`
+/// to construct a spec, or `TargetSpec::parse("build:0.1")` from a raw string.
+pub struct TargetSpec {
+    session: String,
+    window: Option<String>,  // index or name
+    pane: Option<u32>,
+}
+
+impl TargetSpec {
+    /// Start building a spec targeting a session by name.
+    pub fn session(name: &str) -> Self;
+
+    /// Narrow to a window by index.
+    pub fn window(self, index: u32) -> Self;
+
+    /// Narrow to a window by name.
+    pub fn window_name(self, name: &str) -> Self;
+
+    /// Narrow to a pane by index (requires window to be set).
+    pub fn pane(self, index: u32) -> Self;
+
+    /// Parse a raw tmux target string ("session", "session:window", "session:window.pane").
+    /// Returns an error if the format is invalid.
+    pub fn parse(target_str: &str) -> Result<Self>;
+
+    /// Render as a tmux target string.
+    pub fn to_target_string(&self) -> String;
+}
+
+impl fmt::Display for TargetSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_target_string())
+    }
 }
 
 impl Target {
@@ -689,9 +732,14 @@ panes[1].send_text("tail -f log.txt").await?;  // target a specific pane
 let pane = build.pane(2).await?;               // session → active_window.pane_2
 pane.sample_text(&ScrollbackQuery::LastLines(100)).await?;
 
-// Works for any depth — no special handling
-let target = host.target("build:0.1").await?.unwrap();
+// TargetSpec builder — type-safe targeting at any depth
+let spec = TargetSpec::session("build").window(0).pane(1);
+let target = host.target(&spec).await?.unwrap();
 target.send_text("ls").await?;
+
+// Or parse from a raw string (CLI args, config files)
+let spec = TargetSpec::parse("build:0.1")?;
+let target = host.target(&spec).await?.unwrap();
 
 // Lifecycle
 build.rename("build-v2").await?;
@@ -2326,8 +2374,8 @@ without any explicit delegation code.
 **Decision**: Type safety comes from the `TargetAddress` enum (`Session(SessionInfo)`,
 `Window(WindowInfo)`, `Pane(PaneAddress)`) embedded in each `Target`. Discovery
 methods produce `Target` values with appropriate addresses; subsequent operations
-carry that typed context. Raw strings enter via `host.target("build:0.1")` as
-the escape hatch.
+carry that typed context. Raw strings enter via `TargetSpec::parse()` +
+`host.target(&spec)` as the escape hatch.
 
 **Rationale**: Raw string parameters for session names and window indices are
 error-prone — a typo silently targets the wrong entity or returns empty results.
@@ -2355,9 +2403,11 @@ The `Target` approach provides:
 | `host.sample_text(&pane_addr, query)` | `target.sample_text(query)` |
 | `host.create_session(...) -> Result<()>` | `host.create_session(...) -> Result<Target>` |
 
-**Escape hatch**: `host.target("build:0.1")` parses a tmux target string, queries
-tmux to verify the entity exists, and returns `Option<Target>`. This is the bridge
-from raw strings (CLI args, config files) to typed handles.
+**Escape hatch**: `TargetSpec::parse("build:0.1")` constructs a spec from a raw
+string, and `host.target(&spec)` queries tmux to verify the entity exists and returns
+`Option<Target>`. The builder alternative — `TargetSpec::session("build").window(0).pane(1)` —
+is preferred when components are known at compile time. This is the bridge from raw
+strings (CLI args, config files) to typed handles.
 
 
 ---
