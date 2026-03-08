@@ -1125,6 +1125,123 @@ impl OutputSink for StdioSink {
 }
 ```
 
+### `JoinedStream` — Multi-Source Consolidated View
+
+Individual sinks see output from their filtered sources, but each `PaneOutput` arrives
+independently. A `JoinedStream` merges multiple source streams into a single
+time-ordered sequence where each chunk is attributed to its source — like a multi-party
+conversation transcript. This is the natural representation for an LLM analyzing
+cross-pane interactions, a log aggregator, or a TUI showing interleaved output.
+
+```rust
+/// A chunk in the joined stream. Wraps PaneOutput with a source label
+/// for human-readable attribution in the consolidated view.
+pub struct StreamChunk {
+    pub source: SourceLabel,
+    pub output: PaneOutput,
+}
+
+/// Identifies the source of a chunk in a joined stream.
+/// Constructed automatically from PaneOutput metadata.
+pub struct SourceLabel {
+    pub host: String,           // "localhost", "web-1"
+    pub session: String,        // "build"
+    pub pane_target: String,    // "build:0.1"
+    pub pane_id: String,        // "%12"
+}
+
+impl SourceLabel {
+    /// Short form for display: "web-1:build:0.1"
+    pub fn short(&self) -> String;
+
+    /// Minimal form when host is unambiguous: "build:0.1"
+    pub fn minimal(&self) -> String;
+}
+```
+
+**`JoinedSink`** — a sink combinator that wraps an inner `OutputSink` and presents
+incoming output as a consolidated multi-source stream:
+
+```rust
+/// Wraps an inner sink, transforming the output stream into a
+/// source-attributed conversation-style view.
+pub struct JoinedSink<S: OutputSink> {
+    inner: S,
+    /// Controls how source labels are formatted in the stream.
+    label_format: LabelFormat,
+    /// Tracks the last source to emit, so consecutive chunks from the
+    /// same source can be coalesced without repeating the label.
+    last_source: Option<SourceLabel>,
+}
+
+pub enum LabelFormat {
+    /// "[web-1:build:0.1] output text here"
+    Bracketed,
+    /// "web-1:build:0.1> output text here"
+    Prompt,
+    /// Caller provides a format function
+    Custom(Box<dyn Fn(&SourceLabel, &str) -> String + Send + Sync>),
+}
+
+impl<S: OutputSink> JoinedSink<S> {
+    pub fn new(inner: S, label_format: LabelFormat) -> Self;
+}
+```
+
+When `JoinedSink::write()` receives a `PaneOutput`, it:
+1. Extracts the `SourceLabel` from the output's metadata
+2. If the source differs from `last_source`, emits a source header/prefix
+3. Delegates to the inner sink's `write()` with the attributed content
+4. Updates `last_source` for coalescing
+
+**Coalescing**: Consecutive chunks from the same source are grouped without repeating
+the source label — like a chat UI where the sender name only appears on the first
+message in a burst. When a different source emits, the label appears again.
+
+**Use cases**:
+
+```rust
+// LLM sees a consolidated conversation across 3 build panes
+let llm_sink = JoinedSink::new(
+    LlmSink::new(action_handle),
+    LabelFormat::Bracketed,
+);
+// Output looks like:
+//   [web-1:build:0.0] compiling crate foo...
+//   [web-1:build:0.0] warning: unused variable
+//   [db-1:migrate:0.0] Running migration 042...
+//   [db-1:migrate:0.0] OK
+//   [web-1:build:0.0] Finished dev target
+
+// Stdio log with prompt-style labels
+let log_sink = JoinedSink::new(
+    StdioSink::new(StdioFormat::Raw),
+    LabelFormat::Prompt,
+);
+// Output looks like:
+//   web-1:build:0.0> compiling crate foo...
+//   db-1:migrate:0.0> Running migration 042...
+```
+
+**Extracting a joined view programmatically**: For callers that want to consume
+the stream as structured data (not formatted text), the `OutputBus` supports
+registering a channel-based subscriber that receives `StreamChunk` directly:
+
+```rust
+impl OutputBus {
+    /// Subscribe a raw channel that receives StreamChunks (PaneOutput + SourceLabel).
+    /// The caller reads from the receiver directly. No OutputSink trait needed.
+    pub fn subscribe_joined(
+        &mut self,
+        filters: Vec<SinkFilter>,
+        channel_capacity: usize,
+    ) -> (SinkId, mpsc::Receiver<StreamChunk>);
+}
+```
+
+This is the lowest-level API for consumers that want to build their own rendering
+on top of the joined stream (e.g., a TUI panel, a web socket feed, or test harness).
+
 ### Integration with Fleet and Monitor
 
 ```
@@ -1977,6 +2094,37 @@ any `ContentMatcher` implementation.
 **Built-in matchers**: `RegexMatcher`, `SubstringMatcher`, `LineCountMatcher`,
 `WordListMatcher`, plus `AllOf`/`AnyOf`/`Not` combinators. Consumers can implement
 the trait for domain-specific matchers.
+
+### DC15: Joined Stream — Multi-Source Consolidated View
+
+**Decision**: Multiple filtered output streams can be joined into a single time-ordered
+sequence where each chunk is attributed to its source. This is implemented as a sink
+combinator (`JoinedSink`) and a raw channel API (`subscribe_joined()`), not as a
+separate pipeline stage.
+
+**Rationale**: When monitoring multiple panes across hosts, consumers often need a
+unified view — an LLM analyzing cross-pane interactions, a log aggregator correlating
+events, or a TUI showing interleaved output. Without joining, each sink sees isolated
+streams and must implement its own source-tracking and interleaving logic.
+
+**Design choices**:
+- **Combinator, not infrastructure**: `JoinedSink<S>` wraps any `OutputSink` and adds
+  source attribution. The bus itself remains simple (fan-out only). This avoids adding
+  joining logic to the bus hot path.
+- **Source coalescing**: Consecutive chunks from the same source are grouped without
+  repeating the label. This mirrors chat UIs where the sender appears once per burst,
+  reducing visual noise in high-throughput streams.
+- **Two levels of API**: `JoinedSink` for formatted text output (wraps any sink),
+  `subscribe_joined()` for structured `StreamChunk` data (channel-based, no sink trait).
+  The structured API enables custom rendering without forcing text formatting.
+- **Label customization**: `LabelFormat` supports bracketed, prompt-style, and custom
+  formatters. The `SourceLabel` type provides `short()` and `minimal()` for common cases.
+
+**Alternatives considered**:
+- Bus-level stream merging: Rejected — adds complexity to the bus and forces all sinks
+  into a joined view. Not all sinks want interleaved output.
+- Post-hoc log parsing: Rejected — requires sinks to independently reconstruct
+  source attribution from `PaneOutput` fields, duplicating logic across sinks.
 
 ---
 
