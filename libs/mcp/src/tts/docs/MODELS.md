@@ -68,6 +68,31 @@ Models are evaluated against these requirements for motlie integration:
 
 ---
 
+## Recommendation & Strategy
+
+### Primary backend: Sesame CSM via csm.rs (candle)
+
+Sesame CSM is the recommended first integration target. It has the most mature pure-Rust implementation (`csm.rs`), ships GGUF-quantized weights for CPU deployment, supports Metal + CUDA + CPU via candle feature flags, and provides voice cloning + emotion control out of the box. The main limitation is English only.
+
+### Lightweight fallback: Kitten TTS Nano via ONNX (ort)
+
+At 25MB and sub-2s synthesis on a dual-core CPU, Kitten Nano serves as the default fallback when no GPU is available or when minimum footprint matters. It produces audio directly from the ONNX model — no codec decoding step. Trade-off: no voice cloning, no emotion control, English only.
+
+### Next candidate: Qwen3 TTS via candle
+
+Once Qwen3 TTS GGUF tooling matures, it becomes the natural upgrade path for multilingual support (10 languages), 3-second voice cloning, and instruction-driven emotion control. Multiple active Rust implementations exist today. The 0.6B model is not CPU-real-time, so GPU or batch mode is required.
+
+### Implementation order
+
+1. **TtsBackend trait + macOS Say + HTTP sidecar** — Define the abstraction, preserve existing behavior, validate against csm.rs or Fish Speech HTTP servers.
+2. **Embedded ONNX (Kitten Nano)** — Add `ort` dependency, ship 25MB model as built-in fallback.
+3. **Embedded candle (Sesame CSM)** — Add `candle-core` with Metal/CUDA features, GGUF loading, voice cloning.
+4. **Model selection + voice management** — Runtime hardware detection, persisted voice registry, streaming.
+
+This strategy covers the quality-vs-size spectrum while keeping motlie a single binary with no sidecar requirement. The multi-backend trait design means models can be swapped without changing calling code.
+
+---
+
 ## Detailed Model Profiles
 
 ### Sesame CSM (Conversational Speech Model)
