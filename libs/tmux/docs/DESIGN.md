@@ -602,8 +602,14 @@ impl MonitorHandle {
 /// Handle to monitoring on a single session.
 /// Returned by HostHandle::start_monitoring_session().
 /// Each handle owns one control-mode connection (DC10).
+///
+/// In addition to monitoring lifecycle, this handle provides session-scoped
+/// convenience methods for the common "observe → react" workflow. These
+/// delegate to HostHandle internally — the session context is already bound,
+/// so callers don't re-specify it. See DC16.
 pub struct SessionMonitorHandle {
     session_name: String,
+    host: Arc<HostHandle>,          // shared ref for delegating operations
     /// Signals this session's monitor task to stop.
     stop_tx: watch::Sender<bool>,
     /// The monitor task's join handle.
@@ -611,6 +617,8 @@ pub struct SessionMonitorHandle {
 }
 
 impl SessionMonitorHandle {
+    // --- Monitoring lifecycle ---
+
     /// Stop monitoring this session. Tears down the control-mode connection,
     /// flushes pending output to the OutputBus, and joins the monitor task.
     pub async fn shutdown(&self) -> Result<()>;
@@ -620,6 +628,33 @@ impl SessionMonitorHandle {
 
     /// The session name being monitored.
     pub fn session_name(&self) -> &str;
+
+    // --- Session-scoped operations (DC16) ---
+    // These mirror HostHandle methods but are scoped to this session.
+    // The caller interacts with panes by PaneAddress only — the session
+    // context is implicit.
+
+    /// Send literal text to a pane in this session.
+    pub async fn send_text(&self, target: &PaneAddress, text: &str) -> Result<()>;
+
+    /// Send a key sequence to a pane in this session.
+    pub async fn send_keys(&self, target: &PaneAddress, keys: &KeySequence) -> Result<()>;
+
+    /// Capture the visible content of a pane in this session.
+    pub async fn capture_pane(&self, target: &PaneAddress) -> Result<String>;
+
+    /// Sample recent scrollback from a pane in this session.
+    pub async fn sample_text(
+        &self,
+        target: &PaneAddress,
+        query: &ScrollbackQuery,
+    ) -> Result<String>;
+
+    /// List all windows in this session.
+    pub async fn list_windows(&self) -> Result<Vec<WindowInfo>>;
+
+    /// List all panes in this session, optionally filtered.
+    pub async fn list_panes(&self, filter: Option<&Regex>) -> Result<Vec<PaneInfo>>;
 }
 ```
 
@@ -2125,6 +2160,54 @@ streams and must implement its own source-tracking and interleaving logic.
   into a joined view. Not all sinks want interleaved output.
 - Post-hoc log parsing: Rejected — requires sinks to independently reconstruct
   source attribution from `PaneOutput` fields, duplicating logic across sinks.
+
+### DC16: Session-Scoped Operations on SessionMonitorHandle
+
+**Decision**: `SessionMonitorHandle` provides session-scoped convenience methods for
+`send_text`, `send_keys`, `capture_pane`, `sample_text`, `list_windows`, and
+`list_panes`. These delegate to `HostHandle` internally — the session context is
+already bound. `HostHandle` retains all methods unchanged.
+
+**Rationale**: The primary monitoring workflow is "observe output → react":
+
+1. A monitor (or sink) detects a pattern in session output
+2. The caller decides to respond — send input, sample context, inspect panes
+3. The caller already holds a `SessionMonitorHandle` from the monitoring setup
+
+Without session-scoped methods, step 3 requires the caller to hold a separate
+`HostHandle` reference and re-specify the session name on every call. This is
+error-prone (wrong session name) and verbose. `SessionMonitorHandle` binds the
+session context once, and the caller works with panes directly.
+
+**What moves to `SessionMonitorHandle`** (session-scoped, reactive):
+
+| Method | Why |
+|--------|-----|
+| `send_text()` | "I saw something, respond to it" |
+| `send_keys()` | Reactive input to a monitored pane |
+| `capture_pane()` | Snapshot a pane being monitored |
+| `sample_text()` | Read back recent output for context |
+| `list_windows()` | "What windows are in this session?" |
+| `list_panes()` | "What panes are in this session?" |
+
+**What stays on `HostHandle` only** (host-wide, lifecycle):
+
+| Method | Why |
+|--------|-----|
+| `create_session()` / `kill_session()` | Session lifecycle, not monitoring-scoped |
+| `list_sessions()` | Host-wide discovery |
+| `rename_session()` | Session-level metadata |
+| `capture_session()` | Cross-pane snapshot (host-scoped) |
+| `rename_window()` | Could be on either; kept on HostHandle for simplicity |
+
+**Invariant preserved**: DC13 states on-demand operations work regardless of monitoring
+state. `HostHandle` methods are always available. `SessionMonitorHandle` methods are
+a convenience layer for the monitoring context — they do not gate functionality behind
+an active monitor.
+
+**Implementation**: `SessionMonitorHandle` holds `Arc<HostHandle>`. Each convenience
+method delegates to the corresponding `HostHandle` method, filling in the session name
+from `self.session_name`. No new transport calls or state — pure delegation.
 
 ---
 
