@@ -356,15 +356,17 @@ bins/tmux-automator/         # (optional) CLI binary wrapping the library
          └── Monitor ────── stream + rule evaluation → action dispatch
 ```
 
-**Two usage modes coexist on the same `HostHandle`**:
+**Two usage modes coexist across `HostHandle` and `Target`**:
 
-1. **On-demand operations**: Create/kill sessions, list sessions, capture pane, send input,
-   rename — called directly by the consumer (CLI command, MCP tool, API call). These execute
-   via the transport (local subprocess or SSH exec channel) and return immediately.
+1. **On-demand operations**: Host-level discovery and session creation via `HostHandle`;
+   entity-level I/O (capture, send-keys, rename, kill) via `Target`. Called directly by
+   the consumer (CLI command, MCP tool, API call). These execute via the transport
+   (local subprocess or SSH exec channel) and return immediately.
 
 2. **Continuous monitoring**: Pipe setup + event loop — long-running, spawned as a
-   background task. Uses dedicated shell/PTY channel. Rule-triggered actions dispatch through
-   the same `Control` module as on-demand operations.
+   background task. Started via `HostHandle::start_monitoring()` (host-wide) or
+   `Target::start_monitoring()` (single session). Uses dedicated shell/PTY channel.
+   Rule-triggered actions dispatch through the same `Control` module as on-demand operations.
 
 ### Concurrency Model
 
@@ -504,6 +506,18 @@ impl HostHandle {
 
     /// Stop all monitoring on this host.
     pub async fn stop_monitoring(&self) -> Result<()>;
+
+    /// Start monitoring a single session by name (DC13 session-level).
+    /// Opens one control-mode connection for this session.
+    pub async fn start_monitoring_session(
+        &self,
+        session: &str,
+        rules: &[TriggerRule],
+    ) -> Result<SessionMonitorHandle>;
+
+    /// Stop monitoring a single session by name.
+    /// Tears down its control-mode connection without affecting other sessions.
+    pub async fn stop_monitoring_session(&self, session: &str) -> Result<()>;
 
     /// List sessions currently being monitored.
     pub fn monitored_sessions(&self) -> Vec<SessionInfo>;
@@ -2180,9 +2194,9 @@ a view over the session handles, not a separate entity. `stop_monitoring_session
 the session's handle, which signals the stop channel, flushes pending output to the
 `OutputBus`, and joins the monitor task. `stop_monitoring()` iterates all sessions.
 
-**Invariant**: On-demand operations (`capture_pane`, `send_keys`, `list_sessions`, etc.)
-are unaffected by monitoring state. A host with stopped monitoring is still fully
-operational for on-demand use.
+**Invariant**: On-demand operations (`target.capture()`, `target.send_keys()`,
+`host.list_sessions()`, etc.) are unaffected by monitoring state. A host with stopped
+monitoring is still fully operational for on-demand use via `HostHandle` and `Target`.
 
 ### DC14: Trait-Based Content Matching
 
@@ -2274,7 +2288,7 @@ mirrors this uniformity avoids three problems:
 
 | Component | Responsibility |
 |-----------|---------------|
-| `HostHandle` | Host-level: `list_sessions`, `create_session`, `session`, `target`, `start_monitoring`, `stop_monitoring` |
+| `HostHandle` | Host-level: `list_sessions`, `create_session`, `session`, `target`, `start_monitoring`, `stop_monitoring`, `start_monitoring_session`, `stop_monitoring_session` |
 | `Target` | Entity-level: I/O (`send_text`, `send_keys`, `capture`, `sample_text`), navigation (`children`, `window`, `pane`), lifecycle (`kill`, `rename`), monitoring (`start_monitoring`) |
 | `SessionMonitorHandle` | Monitoring lifecycle + `Deref<Target=Target>` — adds `shutdown`, `is_active` |
 
