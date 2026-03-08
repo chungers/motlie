@@ -3,12 +3,13 @@
 ## Status: Draft
 
 This document describes the design for `libs/tmux`, an asynchronous, structured, multi-target
-automator that monitors tmux panes over SSH and executes configurable actions in response to
-output patterns. Beyond monitoring, the library provides a general-purpose remote tmux control
-plane: listing sessions, capturing pane content, sending arbitrary input with proper escaping,
-and managing session metadata — all across multiple hosts concurrently. The design is derived
-from a working single-host prototype and specifies the decomposition, safety fixes, and
-extensions required for a production library.
+automator that monitors tmux panes over SSH or on localhost and executes configurable actions
+in response to output patterns. Beyond monitoring, the library provides a general-purpose tmux
+control plane: creating and terminating sessions, listing sessions, capturing pane content,
+sending arbitrary input with proper escaping, and managing session metadata — across localhost
+and multiple remote hosts concurrently. The design is derived from a working single-host
+prototype and specifies the decomposition, safety fixes, and extensions required for a
+production library.
 
 ## Table of Contents
 
@@ -28,31 +29,33 @@ extensions required for a production library.
 
 ### Problem Statement
 
-Interactive tmux sessions on remote hosts often reach states that require human intervention
-(confirmation prompts, error recovery, continuation signals). When operating across multiple
-hosts and sessions, manual monitoring does not scale.
+Interactive tmux sessions — whether on the local machine or remote hosts — often reach states
+that require human intervention (confirmation prompts, error recovery, continuation signals).
+When operating across multiple hosts and sessions, manual monitoring does not scale.
 
 ### Solution
 
 A library that:
 
-1. Connects to one or more remote hosts via SSH
-2. Lists and inspects tmux sessions, windows, and panes on each host
-3. Captures pane content (scrollback + visible) as text on demand
-4. Sends arbitrary input to panes with proper key escaping (Enter, C-c, etc.)
-5. Manages session metadata (rename sessions/windows)
-6. Attaches output pipes for continuous monitoring
-7. Evaluates configurable trigger rules against pane output
-8. Executes actions (send-keys, notify, log) when rules match
-9. Reconnects automatically on failure
+1. Operates on localhost tmux directly, or connects to remote hosts via SSH
+2. Creates and terminates tmux sessions
+3. Lists and inspects tmux sessions, windows, and panes on each target
+4. Captures pane content (scrollback + visible) as text on demand
+5. Sends arbitrary input to panes with proper key escaping (Enter, C-c, etc.)
+6. Manages session metadata (rename sessions/windows)
+7. Attaches output pipes for continuous monitoring
+8. Evaluates configurable trigger rules against pane output
+9. Executes actions (send-keys, notify, log) when rules match
+10. Reconnects automatically on failure (SSH targets)
 
 ### Scope
 
-- **In scope**: SSH transport, multi-host connection pool, tmux session/window/pane listing,
-  pane content capture, remote input with escaping, session metadata management, pipe-based
-  output monitoring, rule-based automation, structured logging, CLI binary
-- **Out of scope**: Local (non-SSH) tmux, GUI, web interface, tmux session/window creation
-  (may be added later as a controlled extension)
+- **In scope**: Localhost tmux (direct execution), SSH transport for remote hosts,
+  multi-host connection pool, tmux session creation and termination, session/window/pane
+  listing, pane content capture, remote input with escaping, session metadata management,
+  pipe-based output monitoring, rule-based automation, structured logging, CLI binary
+- **Out of scope**: Web UI, SSH server setup/configuration, tmux installation
+- **Future**: TUI interface based on [ratatui](https://ratatui.rs/) (not in current phases)
 
 ---
 
@@ -300,12 +303,12 @@ libs/tmux/
 ├── src/
 │   ├── lib.rs              # Public API re-exports
 │   ├── config.rs           # TmuxAutomatorConfig, TriggerRule, Action
-│   ├── connection.rs       # SshConnection: connect, auth, reconnect logic
+│   ├── transport.rs        # Transport trait + LocalTransport + SshTransport
 │   ├── host.rs             # HostHandle: per-host facade for all tmux operations
 │   ├── fleet.rs            # Fleet: multi-host pool, dispatch, aggregate status
 │   ├── discovery.rs        # Session/window/pane listing, filter, PaneAddress type
 │   ├── capture.rs          # Pane content capture (capture-pane) and scrollback dump
-│   ├── control.rs          # Remote input: send-keys with escaping, session rename
+│   ├── control.rs          # Session lifecycle, send-keys with escaping, rename
 │   ├── pipe.rs             # PipeManager: FIFO lifecycle, pipe-pane attach/detach
 │   ├── monitor.rs          # OutputMonitor: stream parsing, rule evaluation, dispatch
 │   ├── keys.rs             # Key literal and escape helpers (Enter, C-c, Tab, etc.)
@@ -324,22 +327,23 @@ bins/tmux-automator/         # (optional) CLI binary wrapping the library
 ```
   ┌───────────────────────────────────────────────────────────────┐
   │                          Fleet                                │
-  │  Manages N hosts, routes commands, aggregates status          │
+  │  Manages N targets, routes commands, aggregates status        │
   └──────┬──────────────────┬──────────────────┬──────────────────┘
          │                  │                  │
          ▼                  ▼                  ▼
   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
-  │ HostHandle  │   │ HostHandle  │   │ HostHandle  │  × N hosts
-  │ (host A)    │   │ (host B)    │   │ (host C)    │
+  │ HostHandle  │   │ HostHandle  │   │ HostHandle  │  × N targets
+  │ (localhost)  │   │ (host B)    │   │ (host C)    │
+  │ Local       │   │ SSH         │   │ SSH         │
   └──────┬──────┘   └─────────────┘   └─────────────┘
          │
-         │  One SSH connection, multiple capabilities:
+         │  Transport-agnostic (LocalTransport or SshTransport):
          │
          ├── Discovery ──── list sessions, windows, panes
          │
          ├── Capture ────── dump pane content as text
          │
-         ├── Control ────── send-keys, rename session/window
+         ├── Control ────── create/kill session, send-keys, rename
          │
          ├── PipeManager ── attach/detach output pipes
          │
@@ -348,34 +352,35 @@ bins/tmux-automator/         # (optional) CLI binary wrapping the library
 
 **Two usage modes coexist on the same `HostHandle`**:
 
-1. **On-demand operations**: List sessions, capture pane, send input, rename — called
-   directly by the consumer (CLI command, MCP tool, API call). These open short-lived
-   SSH exec channels and return immediately.
+1. **On-demand operations**: Create/kill sessions, list sessions, capture pane, send input,
+   rename — called directly by the consumer (CLI command, MCP tool, API call). These execute
+   via the transport (local subprocess or SSH exec channel) and return immediately.
 
 2. **Continuous monitoring**: Pipe setup + event loop — long-running, spawned as a
-   background task. Uses dedicated PTY channel. Rule-triggered actions dispatch through
+   background task. Uses dedicated shell/PTY channel. Rule-triggered actions dispatch through
    the same `Control` module as on-demand operations.
 
 ### Concurrency Model
 
-Each host is represented by a `HostHandle` with a single `SshConnection`. SSH multiplexes
-channels over one TCP connection, so multiple operations can be in-flight concurrently.
+Each target is represented by a `HostHandle` backed by a `Transport` implementation.
+For SSH targets, the transport multiplexes channels over one TCP connection. For localhost,
+the transport spawns `tokio::process::Command` subprocesses.
 
-**On-demand operations** (list, capture, send-keys, rename):
-- Each call opens a short-lived SSH exec channel
-- Multiple on-demand calls can run concurrently on the same host
+**On-demand operations** (create, kill, list, capture, send-keys, rename):
+- Each call executes via the transport (SSH exec channel or local subprocess)
+- Multiple on-demand calls can run concurrently on the same target
 - No long-lived state required
 
 **Continuous monitoring** (when started):
-- **Pipe setup**: Dedicated SSH exec channel (not the monitor channel)
-- **Monitoring**: Dedicated PTY channel running `tail -qf`
-- **Action dispatch**: Separate SSH exec channels per triggered action
+- **Pipe setup**: Dedicated transport exec (not the monitor channel)
+- **Monitoring**: Dedicated shell/PTY channel running `tail -qf`
+- **Action dispatch**: Separate exec calls per triggered action
   (see [DC4](#dc4-action-dispatch-channel-strategy))
 - Runs as a `tokio::spawn` task; does not block on-demand operations
 
-**Multi-host**: `Fleet` spawns per-host monitoring tasks independently. A connection failure
-on host A does not affect host B. On-demand operations are dispatched to the named host's
-`HostHandle` directly.
+**Multi-target**: `Fleet` spawns per-target monitoring tasks independently. A connection
+failure on host A does not affect host B or localhost. On-demand operations are dispatched
+to the named target's `HostHandle` directly.
 
 ---
 
@@ -384,10 +389,10 @@ on host A does not affect host B. On-demand operations are dispatched to the nam
 This section defines the primary abstractions that structure the library. These are the
 types a consumer interacts with. Module specifications (next section) describe internals.
 
-### `Fleet` — Multi-Host Pool
+### `Fleet` — Multi-Target Pool
 
-The top-level entry point. Manages connections to multiple hosts and provides a uniform
-interface for dispatching operations to any host by name or alias.
+The top-level entry point. Manages connections to localhost and/or multiple remote hosts,
+providing a uniform interface for dispatching operations to any target by name or alias.
 
 ```rust
 pub struct Fleet { /* HashMap<String, HostHandle>, shutdown_tx, config */ }
@@ -396,14 +401,16 @@ impl Fleet {
     /// Create a fleet from config. Does not connect yet.
     pub fn new(config: TmuxAutomatorConfig) -> Self;
 
-    /// Connect to all configured hosts. Failures are per-host, not fatal.
-    /// Returns a summary of which hosts connected and which failed.
+    /// Connect to all configured targets (localhost is always available).
+    /// Failures are per-target, not fatal.
+    /// Returns a summary of which targets connected and which failed.
     pub async fn connect_all(&mut self) -> Vec<HostStatus>;
 
-    /// Get a handle to a specific host by name/alias.
+    /// Get a handle to a specific target by name/alias.
+    /// The localhost target is always addressable as "localhost" or "local".
     pub fn host(&self, name: &str) -> Option<&HostHandle>;
 
-    /// Iterate over all connected hosts.
+    /// Iterate over all connected targets.
     pub fn hosts(&self) -> impl Iterator<Item = (&str, &HostHandle)>;
 
     /// Start monitoring on all connected hosts (spawns background tasks).
@@ -414,23 +421,42 @@ impl Fleet {
 }
 ```
 
-**Design rationale**: Callers should not need to manage individual host connections or
-reason about which host a session lives on. `Fleet` provides the "I have N machines,
-operate on them" abstraction. For single-host use, `Fleet` with one target works
-identically — there is no separate single-host API.
+**Design rationale**: Callers should not need to manage individual connections or reason
+about which target a session lives on. `Fleet` provides the "I have N targets, operate
+on them" abstraction. For localhost-only use, `Fleet` with one local target works
+identically — there is no separate single-target API. Localhost is always available
+without SSH configuration.
 
 ### `HostHandle` — Per-Host Facade
 
-All tmux operations on a single host go through `HostHandle`. This is the core
+All tmux operations on a single target go through `HostHandle`. This is the core
 abstraction that unifies discovery, capture, control, and monitoring behind one type.
+It is transport-agnostic — the same API works for localhost and SSH targets.
 
 ```rust
-pub struct HostHandle { /* SshConnection, host config, pipe state */ }
+pub struct HostHandle { /* Transport, host config, pipe state */ }
 
 impl HostHandle {
+    // --- Session Lifecycle ---
+
+    /// Create a new tmux session.
+    /// `window_name` and `command` are optional; if `command` is provided, it runs
+    /// in the initial window instead of a default shell.
+    /// Runs: tmux new-session -d -s <name> [-n <window_name>] [<command>]
+    pub async fn create_session(
+        &self,
+        name: &str,
+        window_name: Option<&str>,
+        command: Option<&str>,
+    ) -> Result<()>;
+
+    /// Terminate (kill) a tmux session and all its windows/panes.
+    /// Runs: tmux kill-session -t <name>
+    pub async fn kill_session(&self, name: &str) -> Result<()>;
+
     // --- Discovery ---
 
-    /// List all tmux sessions on this host.
+    /// List all tmux sessions on this target.
     pub async fn list_sessions(&self) -> Result<Vec<SessionInfo>>;
 
     /// List all windows in a session (by name or ID).
@@ -618,11 +644,17 @@ pub struct TmuxAutomatorConfig {
     pub log_json: bool,
 }
 
-pub struct HostTarget {
-    pub host: String,              // "host:port"
-    pub user: String,
-    pub alias: Option<String>,     // short name for Fleet lookups (default: host)
-    pub pane_filter: Option<String>, // regex for monitoring (None = all panes)
+pub enum HostTarget {
+    Local {
+        alias: Option<String>,         // default: "localhost"
+        pane_filter: Option<String>,   // regex for monitoring (None = all panes)
+    },
+    Ssh {
+        host: String,                  // "host:port"
+        user: String,
+        alias: Option<String>,         // short name for Fleet lookups (default: host)
+        pane_filter: Option<String>,   // regex for monitoring (None = all panes)
+    },
 }
 
 pub struct TriggerRule {
@@ -649,33 +681,58 @@ pub struct ReconnectPolicy {
 **Requirement**: Config must be constructable programmatically (library use) and deserializable
 from TOML/YAML (CLI use).
 
-### `connection.rs`
+### `transport.rs`
 
-Wraps `russh` SSH client lifecycle.
+The transport layer abstracts command execution, allowing the same tmux operations to
+work on localhost (via `tokio::process::Command`) or remote hosts (via `russh` SSH channels).
 
 ```rust
-pub struct SshConnection { /* russh Handle<SshHandler> */ }
+#[async_trait]
+pub trait Transport: Send + Sync {
+    /// Execute a command and return its stdout as a String.
+    /// Must respect the configured timeout.
+    async fn exec(&self, command: &str) -> Result<String>;
 
-impl SshConnection {
-    /// Connect and authenticate. Returns error if auth fails.
-    pub async fn connect(target: &HostTarget, config: &SshConfig) -> Result<Self>;
+    /// Open a persistent shell for streaming output.
+    /// Used by the monitor for long-running `tail -qf` processes.
+    async fn open_shell(&self) -> Result<Box<dyn ShellChannel>>;
+}
 
-    /// Open a new exec channel, run a command, return stdout as String.
-    pub async fn exec(&self, command: &str) -> Result<String>;
+#[async_trait]
+pub trait ShellChannel: Send {
+    /// Write data to the shell's stdin.
+    async fn write(&mut self, data: &[u8]) -> Result<()>;
 
-    /// Open a PTY channel with a shell. Returns the channel for streaming.
-    pub async fn open_shell(&self) -> Result<ShellChannel>;
+    /// Wait for the next message from the shell.
+    async fn read(&mut self) -> Option<ShellEvent>;
+}
+
+pub enum ShellEvent {
+    Data(Vec<u8>),
+    Eof,
 }
 ```
 
-**Must address P1**: Host key verification.
+**`LocalTransport`**: Executes commands via `tokio::process::Command`. No connection
+setup required. `exec()` spawns a subprocess, waits for completion, returns stdout.
+`open_shell()` spawns a persistent `bash` (or `sh`) process with piped stdin/stdout.
 
-- Default: verify against `~/.ssh/known_hosts`
-- Option: TOFU (trust-on-first-use) with persistent known_hosts update
-- Option: `--insecure` flag to skip (prototype behavior), with a logged warning
+**`SshTransport`**: Wraps `russh` SSH client. `exec()` opens a short-lived SSH exec
+channel. `open_shell()` opens a PTY channel with a shell.
 
-**Must address**: SSH config should set `connection_timeout` (10s) and `heartbeat_interval` (30s)
-as the prototype does, but make them configurable.
+**`MockTransport`**: For testing. Returns canned responses for `exec()` and canned
+streaming data for `open_shell()`. Implements `Transport` trait directly — no separate
+test infrastructure needed.
+
+**SSH-specific concerns (SshTransport only)**:
+
+- **Host key verification (P1)**:
+  - Default: verify against `~/.ssh/known_hosts`
+  - Option: TOFU (trust-on-first-use) with persistent known_hosts update
+  - Option: `--insecure` / config flag to skip (prototype behavior), with a logged warning
+- **Connection config**: `connection_timeout` (10s) and `heartbeat_interval` (30s)
+  as the prototype does, but configurable
+- **Reconnection**: Handled by `HostHandle`, not the transport itself
 
 ### `discovery.rs`
 
@@ -707,14 +764,14 @@ of session name content.
 
 ```rust
 /// List all sessions on the host.
-pub async fn list_sessions(conn: &SshConnection) -> Result<Vec<SessionInfo>>;
+pub async fn list_sessions(transport: &dyn Transport) -> Result<Vec<SessionInfo>>;
 
 /// List all windows in a session.
-pub async fn list_windows(conn: &SshConnection, session: &str) -> Result<Vec<WindowInfo>>;
+pub async fn list_windows(transport: &dyn Transport, session: &str) -> Result<Vec<WindowInfo>>;
 
 /// List all panes, optionally filtered by regex against "session:window.pane".
 pub async fn list_panes(
-    conn: &SshConnection,
+    transport: &dyn Transport,
     filter: Option<&Regex>,
 ) -> Result<Vec<PaneInfo>>;
 ```
@@ -737,14 +794,14 @@ Pane content capture via `tmux capture-pane`.
 ```rust
 /// Capture the visible content of a single pane.
 /// Runs: tmux capture-pane -p -t <target>
-pub async fn capture_pane(conn: &SshConnection, target: &PaneAddress) -> Result<String>;
+pub async fn capture_pane(transport: &dyn Transport, target: &PaneAddress) -> Result<String>;
 
 /// Capture with scrollback history.
 /// Runs: tmux capture-pane -p -t <target> -S <start> -E <end>
 /// start/end are line numbers; negative values reach into scrollback buffer.
 /// Example: start=-1000, end=-1 captures last 1000 lines of scrollback.
 pub async fn capture_pane_history(
-    conn: &SshConnection,
+    transport: &dyn Transport,
     target: &PaneAddress,
     start: i32,
     end: i32,
@@ -753,7 +810,7 @@ pub async fn capture_pane_history(
 /// Capture all panes in a session. Calls capture_pane for each pane found via list_panes.
 /// Returns a map of pane address → visible content.
 pub async fn capture_session(
-    conn: &SshConnection,
+    transport: &dyn Transport,
     session: &str,
 ) -> Result<HashMap<PaneAddress, String>>;
 ```
@@ -769,13 +826,30 @@ want plain text, not ANSI-encoded output.
 
 ### `control.rs`
 
-Remote tmux control: sending input and managing session/window metadata.
+Tmux control: session lifecycle, sending input, and managing session/window metadata.
 
 ```rust
+// --- Session Lifecycle ---
+
+/// Create a new detached tmux session.
+/// Runs: tmux new-session -d -s <name> [-n <window_name>] [<command>]
+pub async fn create_session(
+    transport: &dyn Transport,
+    name: &str,
+    window_name: Option<&str>,
+    command: Option<&str>,
+) -> Result<()>;
+
+/// Kill a tmux session and all its windows/panes.
+/// Runs: tmux kill-session -t <name>
+pub async fn kill_session(transport: &dyn Transport, name: &str) -> Result<()>;
+
+// --- Input ---
+
 /// Send a KeySequence to a pane. Handles the split between literal text (-l)
 /// and special keys (no -l) automatically.
 pub async fn send_keys(
-    conn: &SshConnection,
+    transport: &dyn Transport,
     target: &PaneAddress,
     keys: &KeySequence,
 ) -> Result<()>;
@@ -783,7 +857,7 @@ pub async fn send_keys(
 /// Convenience: send literal text (no special keys, no Enter appended).
 /// Equivalent to: tmux send-keys -l -t <target> '<escaped_text>'
 pub async fn send_text(
-    conn: &SshConnection,
+    transport: &dyn Transport,
     target: &PaneAddress,
     text: &str,
 ) -> Result<()>;
@@ -791,7 +865,7 @@ pub async fn send_text(
 /// Rename a tmux session.
 /// Runs: tmux rename-session -t <current> <new>
 pub async fn rename_session(
-    conn: &SshConnection,
+    transport: &dyn Transport,
     current_name: &str,
     new_name: &str,
 ) -> Result<()>;
@@ -799,7 +873,7 @@ pub async fn rename_session(
 /// Rename a window.
 /// Runs: tmux rename-window -t <session>:<index> <new_name>
 pub async fn rename_window(
-    conn: &SshConnection,
+    transport: &dyn Transport,
     session: &str,
     window_index: u32,
     new_name: &str,
@@ -838,15 +912,16 @@ This module owns:
 
 ### `fleet.rs`
 
-Multi-host management. See the `Fleet` type in [Core Abstractions](#fleet--multi-host-pool)
+Multi-target management. See the `Fleet` type in [Core Abstractions](#fleet--multi-target-pool)
 for the full API.
 
 Internal responsibilities:
-- Holds a `HashMap<String, HostHandle>` keyed by host alias (or `host:port` if no alias)
-- Connects hosts concurrently via `tokio::JoinSet`
-- Tracks per-host status: `Disconnected`, `Connecting`, `Connected`, `Monitoring`, `Error(String)`
-- Routes on-demand operations (capture, send-keys, list) to the correct host
-- Owns the `shutdown` watch channel; `shutdown()` signals all hosts
+- Holds a `HashMap<String, HostHandle>` keyed by target alias (or `host:port` / `"localhost"`)
+- Localhost targets are created with `LocalTransport` (no connection step)
+- SSH targets are connected concurrently via `tokio::JoinSet`
+- Tracks per-target status: `Disconnected`, `Connecting`, `Connected`, `Monitoring`, `Error(String)`
+- Routes on-demand operations (create, kill, capture, send-keys, list) to the correct target
+- Owns the `shutdown` watch channel; `shutdown()` signals all targets
 
 ```rust
 pub enum HostStatus {
@@ -862,13 +937,13 @@ pub enum HostStatus {
 
 The `HostHandle` implementation. See [Core Abstractions](#hosthandle--per-host-facade).
 
-Internally, `HostHandle` holds an `SshConnection` and delegates to the function-level
+Internally, `HostHandle` holds a `Box<dyn Transport>` and delegates to the function-level
 APIs in `discovery`, `capture`, `control`, `pipe`, and `monitor`. It is the composition
-root for per-host operations.
+root for per-target operations.
 
 ```rust
 pub struct HostHandle {
-    conn: SshConnection,
+    transport: Box<dyn Transport>,
     config: HostTarget,
     pipe_state: Option<PipeManager>,   // None if monitoring not started
     monitor_handle: Option<MonitorHandle>,
@@ -884,11 +959,11 @@ pub struct PipeManager { /* tracks active pipes for cleanup */ }
 
 impl PipeManager {
     /// Create FIFOs and attach pipe-pane for each target pane.
-    /// Uses a dedicated SSH channel (not the monitor channel).
-    pub async fn setup(conn: &SshConnection, panes: &[PaneAddress]) -> Result<Self>;
+    /// Uses a dedicated transport exec call (not the monitor channel).
+    pub async fn setup(transport: &dyn Transport, panes: &[PaneAddress]) -> Result<Self>;
 
     /// Detach all pipe-panes and remove FIFO files.
-    pub async fn cleanup(&self, conn: &SshConnection) -> Result<()>;
+    pub async fn cleanup(&self, transport: &dyn Transport) -> Result<()>;
 }
 
 impl Drop for PipeManager {
@@ -902,8 +977,8 @@ normal shutdown path.
 
 **Cleanup sequence** (on graceful or signal-triggered shutdown):
 1. `tmux pipe-pane -t <pane>` (no `-o`) for each pane — detaches the pipe
-2. `rm -f /tmp/tmux_pipe_<encoded>` for each FIFO
-3. Close SSH channels
+2. `rm -f /tmp/tmux_pipe_<encoded>` for each FIFO (local) or via transport exec (remote)
+3. Close transport channels
 
 ### `monitor.rs`
 
@@ -915,7 +990,7 @@ pub struct OutputMonitor { /* rules, cooldown state, shell channel */ }
 impl OutputMonitor {
     pub async fn run(
         &mut self,
-        conn: &SshConnection,
+        transport: &dyn Transport,
         panes: &[PaneAddress],
         rules: &[TriggerRule],
         shutdown: tokio::sync::watch::Receiver<bool>,
@@ -982,17 +1057,19 @@ rapid-fire send-keys when a prompt re-renders. Default cooldown: 1 second.
 
 **Decision**: TBD — needs prototyping.
 
-**Option A**: Open a new SSH exec channel per action (`tmux send-keys -t ...`).
+**Option A**: Open a new transport exec call per action (`tmux send-keys -t ...`).
 - Pro: Simple, isolated, no shared state
-- Con: Channel open latency (~50ms per action), may hit SSH channel limits under load
+- Con: For SSH, channel open latency (~50ms per action), may hit channel limits under load.
+  For localhost, subprocess spawn overhead is minimal.
 
 **Option B**: Maintain a persistent control shell channel, write commands to it.
 - Pro: Lower latency, no per-action channel overhead
 - Con: Shared channel parsing complexity (same issue as prototype P6)
 
-**Recommendation**: Start with Option A. Measure latency. If channel open overhead is
-problematic (>100ms p99 or >10 actions/sec sustained), switch to Option B with a dedicated
-channel that does not share with the monitor.
+**Recommendation**: Start with Option A. For localhost this is already fast (subprocess
+spawn). For SSH targets, measure latency. If channel open overhead is problematic
+(>100ms p99 or >10 actions/sec sustained), switch to Option B with a dedicated channel
+that does not share with the monitor.
 
 ### DC5: Multi-Host Concurrency
 
@@ -1004,7 +1081,34 @@ Each task runs the full lifecycle: connect → discover → pipe → monitor →
 **Shared state**: Only the rule set and shutdown signal are shared across hosts. Per-host
 state (connection, panes, pipes, cooldown timers) is task-local.
 
-### DC6: Capture-Pane vs Pipe-Pane for Content Access
+### DC6: Local vs SSH Transport
+
+**Decision**: A `Transport` trait abstracts command execution. Two implementations:
+`LocalTransport` (localhost, subprocess-based) and `SshTransport` (remote, russh-based).
+
+**Rationale**: The prototype assumes SSH for everything, but localhost tmux is a primary
+use case (local development, CI, single-machine automation). Forcing SSH to localhost
+adds unnecessary complexity (SSH server requirement, key management, latency). A trait
+abstraction lets all downstream modules (`discovery`, `capture`, `control`, `pipe`,
+`monitor`) be transport-agnostic.
+
+**LocalTransport specifics**:
+- `exec()`: spawns `tokio::process::Command`, captures stdout, respects timeout
+- `open_shell()`: spawns a persistent shell process with piped stdin/stdout
+- No connection step; always available
+- FIFO paths are local filesystem paths (no remote cleanup needed)
+
+**SshTransport specifics**:
+- `exec()`: opens SSH exec channel, captures stdout
+- `open_shell()`: opens PTY channel with shell
+- Requires connection + auth before use
+- Host key verification per DC2
+
+**MockTransport** (for testing): Returns canned `exec()` responses and canned streaming
+data from `open_shell()`. Built into the library, not behind a feature flag, so downstream
+consumers can also test their integrations.
+
+### DC7: Capture-Pane vs Pipe-Pane for Content Access
 
 **Decision**: Use `capture-pane -p` for on-demand content access, `pipe-pane` for continuous
 monitoring. These are complementary, not alternatives.
@@ -1020,7 +1124,7 @@ monitoring. These are complementary, not alternatives.
 - `capture_pane()` / `capture_session()` → snapshot via `capture-pane`
 - `start_monitoring()` → continuous via `pipe-pane`
 
-### DC7: Key Escaping Strategy
+### DC8: Key Escaping Strategy
 
 **Decision**: Split `KeySequence` into literal segments (sent with `send-keys -l`) and
 special key segments (sent without `-l`).
@@ -1035,7 +1139,7 @@ handles both correctly. The library must split input into segments and issue mul
 passing to the remote shell. The `control` module is the only code path that constructs
 remote shell commands from user input, making it the single point of audit for injection.
 
-### DC8: Fleet-Level Host Addressing
+### DC9: Fleet-Level Host Addressing
 
 **Decision**: Hosts are addressed by alias (if configured) or by `host:port` string.
 All `Fleet` methods that target a specific host accept `&str` and resolve internally.
@@ -1046,7 +1150,7 @@ cases just use the host string directly.
 
 **Conflict resolution**: If two hosts share an alias, config validation fails at load time.
 
-### DC9: Separation of Library and Binary
+### DC10: Separation of Library and Binary
 
 **Decision**: `libs/tmux` is a pure library. CLI binary lives in `bins/tmux-automator/`.
 
@@ -1120,8 +1224,9 @@ The prototype is untestable because SSH and tmux are tightly coupled. The librar
 - **Integration tests**: Require a mock SSH server or trait-based transport abstraction
 - **End-to-end tests**: Require a real SSH + tmux environment (CI with Docker?)
 
-**Proposal**: Define a `Transport` trait in `connection.rs` that `SshConnection` implements.
-Tests use a `MockTransport` that returns canned responses for `exec()` and `open_shell()`.
+**Proposal**: The `Transport` trait in `transport.rs` already supports this (see DC6).
+`MockTransport` returns canned responses for `exec()` and `open_shell()`. It is included
+in the library (not behind a feature flag) so downstream consumers can also use it.
 
 ---
 
@@ -1146,69 +1251,80 @@ Tests use a `MockTransport` that returns canned responses for `exec()` and `open
 
 Structured for incremental delivery. Each phase produces a working, testable artifact.
 
-### Phase 1: Types, Connection, and On-Demand Operations
+### Phase 1: Types, Transport, and On-Demand Operations (Localhost)
 
-**Goal**: Establish the core types and single-host on-demand capabilities (list, capture,
-send-keys, rename). No monitoring yet.
+**Goal**: Establish the core types, `LocalTransport`, and localhost on-demand capabilities
+(create, kill, list, capture, send-keys, rename). No SSH or monitoring yet.
 
 **Tasks**:
 1. Create `libs/tmux/` workspace member with `Cargo.toml`
 2. Implement `types.rs`: `PaneAddress` with safe filename encoding (fixes P2),
    `SessionInfo`, `WindowInfo`, `PaneInfo`
 3. Implement `keys.rs`: `KeySequence`, `SpecialKey`, `{...}` parser, tmux command rendering
-4. Implement `connection.rs`: `SshConnection` with known_hosts verification (fixes P1),
-   `exec()` with configurable timeout (fixes P10), `open_shell()`
+4. Implement `transport.rs`: `Transport` trait, `LocalTransport` (subprocess-based),
+   `MockTransport` (canned responses for testing)
 5. Implement `discovery.rs`: `list_sessions()`, `list_windows()`, `list_panes()` with
    format string constants and regex filtering
 6. Implement `capture.rs`: `capture_pane()`, `capture_pane_history()`, `capture_session()`
-7. Implement `control.rs`: `send_keys()`, `send_text()`, `rename_session()`, `rename_window()`
-   with shell escaping (addresses OC5)
+7. Implement `control.rs`: `create_session()`, `kill_session()`, `send_keys()`,
+   `send_text()`, `rename_session()`, `rename_window()` with shell escaping (addresses OC5)
 8. Implement `host.rs`: `HostHandle` wiring all of the above
 9. Unit tests: `PaneAddress` roundtrip, `KeySequence` parsing + rendering, shell escaping
-   with adversarial inputs
+   with adversarial inputs, `MockTransport`-based tests for all operations
 
-**Deliverable**: Library that connects to one host and supports all on-demand tmux operations.
-A caller can list sessions, capture pane content, send input, and rename sessions.
+**Deliverable**: Library that operates on localhost tmux and supports all on-demand
+operations. A caller can create/kill sessions, list sessions, capture pane content, send
+input, and rename sessions — all without SSH.
 
 **Acceptance criteria**:
 - `PaneAddress::to_safe_filename()` roundtrips losslessly for names containing `_.:;`
 - `KeySequence::parse("hello{Enter}{C-c}")` produces correct tmux commands
 - `send_text()` with input `"; rm -rf /; echo "` does not execute injected commands
+- `create_session("test")` + `list_sessions()` shows the new session
+- `kill_session("test")` + `list_sessions()` no longer shows it
 - `list_sessions()` returns `Vec<SessionInfo>` with all fields populated
+- All operations work via `MockTransport` in unit tests
 
-### Phase 2: Monitoring + Pipe Management
+### Phase 2: SSH Transport + Monitoring + Pipe Management
 
-**Goal**: Add continuous monitoring (the prototype's core loop) on top of Phase 1.
+**Goal**: Add `SshTransport` for remote hosts and continuous monitoring on top of Phase 1.
 
 **Tasks**:
-1. Implement `config.rs`: `TriggerRule`, `Action`, `ReconnectPolicy`, `TmuxAutomatorConfig`
-   with serde deserialization
-2. Implement `pipe.rs`: `PipeManager` with setup + cleanup (fixes P4), using safe filenames
-3. Implement `monitor.rs`: event loop with configurable rules (fixes P3), warn on
+1. Implement `SshTransport` in `transport.rs`: russh-based `exec()` and `open_shell()`,
+   host key verification (fixes P1), configurable timeout (fixes P10)
+2. Implement `config.rs`: `TriggerRule`, `Action`, `ReconnectPolicy`, `TmuxAutomatorConfig`
+   with serde deserialization, `HostTarget::Local` and `HostTarget::Ssh` variants
+3. Implement `pipe.rs`: `PipeManager` with setup + cleanup (fixes P4), using safe filenames
+4. Implement `monitor.rs`: event loop with configurable rules (fixes P3), warn on
    errors (fixes P9), `MonitorHandle` for stop signaling
-4. Wire monitoring into `HostHandle::start_monitoring()`
-5. Signal handling via `tokio::signal` for SIGINT/SIGTERM (fixes P5), wired to
+5. Wire monitoring into `HostHandle::start_monitoring()`
+6. Signal handling via `tokio::signal` for SIGINT/SIGTERM (fixes P5), wired to
    `PipeManager::cleanup()`
-6. Reconnection logic with exponential backoff in `HostHandle`
-7. Unit tests: rule evaluation, cooldown behavior, config deserialization
+7. Reconnection logic with exponential backoff in `HostHandle` (SSH targets only)
+8. Unit tests: rule evaluation, cooldown behavior, config deserialization
 
-**Deliverable**: Single-host library with both on-demand operations and continuous monitoring.
+**Deliverable**: Library with both localhost and SSH support, on-demand operations, and
+continuous monitoring.
 
 **Acceptance criteria**:
+- All Phase 1 operations work identically over `SshTransport`
 - Monitoring starts, detects a pattern, and sends the configured response
-- SIGINT triggers pipe-pane detach and FIFO removal on the remote host
+- SIGINT triggers pipe-pane detach and FIFO removal
 - Reconnection resumes monitoring after a simulated SSH disconnect
 - Rules with cooldown do not fire more than once per cooldown period
+- Localhost monitoring works without any SSH configuration
 
-### Phase 3: Multi-Host Fleet + CLI
+### Phase 3: Multi-Target Fleet + CLI
 
-**Goal**: Multi-host support via `Fleet` and a usable CLI binary.
+**Goal**: Multi-target support via `Fleet` and a usable CLI binary.
 
 **Tasks**:
-1. Implement `fleet.rs`: `Fleet` with concurrent connect, host lookup by alias (DC8),
-   per-host status tracking, aggregate `start_monitoring()` and `shutdown()`
+1. Implement `fleet.rs`: `Fleet` with concurrent connect, target lookup by alias (DC9),
+   per-target status tracking, aggregate `start_monitoring()` and `shutdown()`
 2. Create `bins/tmux-automator/` with `clap` CLI supporting subcommands:
-   - `list-sessions [--host <alias>]` — list sessions on one or all hosts
+   - `create-session <name> [--host <alias>] [--window-name <name>] [--command <cmd>]`
+   - `kill-session <name> [--host <alias>]`
+   - `list-sessions [--host <alias>]` — list sessions on one or all targets
    - `list-panes [--host <alias>] [--filter <regex>]` — list panes
    - `capture <session:window.pane> [--host <alias>] [--history <lines>]` — dump pane
    - `send <session:window.pane> <input> [--host <alias>]` — send keys
@@ -1216,22 +1332,25 @@ A caller can list sessions, capture pane content, send input, and rename session
    - `monitor [--config <path>]` — start continuous monitoring
 3. Config file support (TOML) with CLI flag overrides
 4. JSON and text log output modes
-5. Per-host tracing spans with host alias labels
+5. Per-target tracing spans with alias labels
 
-**Deliverable**: Multi-host CLI tool and library. Single process operating across N hosts.
+**Deliverable**: Multi-target CLI tool and library. Single process operating across
+localhost and N remote hosts.
 
 **Acceptance criteria**:
-- `fleet.connect_all()` connects to 3 hosts concurrently; one failure does not block others
+- `fleet.connect_all()` connects to 3 targets concurrently; one failure does not block others
 - CLI `list-sessions --host web-server` returns sessions from the aliased host
+- CLI `create-session build --host localhost` creates a local session
 - CLI `capture myapp:0.0 --host db-server --history 500` returns scrollback content
-- `monitor --config rules.toml` starts monitoring on all configured hosts
+- CLI `kill-session build` terminates the session
+- `monitor --config rules.toml` starts monitoring on all configured targets
 
 ### Phase 4: Hardening + Testing
 
 **Goal**: Production readiness.
 
 **Tasks**:
-1. `Transport` trait + `MockTransport` for unit/integration tests (OC6)
+1. Expand `MockTransport` coverage for integration tests (OC6)
 2. Tmux version detection and compatibility check (OC4)
 3. Actionable SSH agent error messages (OC3)
 4. FIFO-vs-file investigation and decision (OC1)
@@ -1240,6 +1359,23 @@ A caller can list sessions, capture pane content, send input, and rename session
 7. Document minimum tmux version, known limitations, and performance characteristics
 
 **Deliverable**: Library with test coverage, documented limitations, and CI integration.
+
+### Phase 5 (Future): TUI Interface
+
+**Goal**: Terminal UI for interactive multi-target management.
+
+**Technology**: [ratatui](https://ratatui.rs/) — a Rust library for building terminal
+user interfaces.
+
+**Not in current scope**. Listed here for planning continuity. The TUI will consume
+the `Fleet` API from `libs/tmux` and provide:
+- Live pane content display (via `capture_pane` polling or `pipe-pane` streaming)
+- Session/window/pane tree navigation across targets
+- Interactive send-keys input
+- Monitoring rule status and trigger history
+- Host connection status dashboard
+
+This phase depends on Phases 1-3 being complete and stable.
 
 ---
 
