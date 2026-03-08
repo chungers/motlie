@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-08 | `PaneOutput` → `TargetOutput`: source identified by `TargetAddress` instead of flat pane fields. Generalizes to session-only hosts. `SourceLabel` uses `TargetAddress`. | Output Sink Pipeline, DC12 |
 | 2026-03-08 | `MonitorHandle` lookup API uses `&Target`/`&TargetSpec` instead of raw strings; `start/stop_monitoring_session` accept `&Target`. Rationale for keeping `SessionMonitorHandle` name (DC10 session-scoped constraint). | Core Abstractions, DC13 |
 | 2026-03-08 | Added `TargetSpec` type with builder for `HostHandle::target()` — replaces raw string parameter | Core Abstractions, DC17 |
 | 2026-03-08 | Unified `Target` type replacing `SessionHandle`/`PaneHandle`/`WindowHandle` hierarchy (DC16, DC17). `HostHandle` slimmed to host-level only. Fixed stale references throughout. | Core Abstractions, Architecture, DC16, DC17, DC13, Module Specs, Phase 1 |
@@ -332,7 +333,7 @@ libs/tmux/
 │   ├── pipe.rs             # PipeManager: FIFO lifecycle, pipe-pane attach/detach
 │   ├── monitor.rs          # OutputMonitor: stream parsing, rule evaluation, dispatch
 │   ├── matcher.rs          # ContentMatcher trait + built-in matchers (Regex, Substring, etc.)
-│   ├── sink.rs             # OutputSink trait, SinkFilter, PaneOutput, OutputBus
+│   ├── sink.rs             # OutputSink trait, SinkFilter, TargetOutput, OutputBus
 │   ├── sinks/
 │   │   ├── mod.rs          # Re-exports built-in sinks
 │   │   └── stdio.rs        # StdioSink (default reference implementation)
@@ -1003,26 +1004,43 @@ profiles — stdio (µs), TUI (ms per frame), LLM analysis (seconds). A synchron
 pipeline would block at the speed of the slowest consumer. This section defines the
 async fan-out architecture that decouples output capture from rendering/processing.
 
-### `PaneOutput` — The Unit of Output
+### `TargetOutput` — The Unit of Output
 
-Every piece of captured output flows through the pipeline as a `PaneOutput`. It carries
-enough context for any sink to identify the source and route actions back to it.
+Every piece of captured output flows through the pipeline as a `TargetOutput`. It
+carries enough context for any sink to identify the source at any hierarchy level
+and route actions back to it.
 
 ```rust
-pub struct PaneOutput {
-    pub pane_id: String,       // authoritative: "%12"
-    pub pane_target: String,   // display: "session:window.pane"
+pub struct TargetOutput {
+    /// The source entity. Carries the full TargetAddress so sinks can
+    /// identify the source at session, window, or pane granularity.
+    /// For control-mode output (DC10), this is always pane-level since
+    /// `%output` includes a pane ID. For session-only hosts (single
+    /// default window/pane), callers can match at session level and
+    /// ignore the window/pane detail.
+    pub source: TargetAddress,
     pub host: String,          // host alias (or "localhost")
-    pub session: String,       // session name
-    pub window: u32,           // window index
     pub content: String,       // the captured text
     pub timestamp: Instant,
 }
+
+impl TargetOutput {
+    /// Session name — available at any source level.
+    pub fn session_name(&self) -> &str;
+
+    /// Pane ID — available when source is pane-level, None otherwise.
+    pub fn pane_id(&self) -> Option<&str>;
+
+    /// Tmux target string for the source (e.g., "build", "build:0", "build:0.1").
+    pub fn target_string(&self) -> String;
+}
 ```
 
-`PaneOutput` is the bridge between the monitor/capture side and the sink side.
-The `host`, `session`, `window`, and `pane_id` fields enable sinks to filter at
-any level of the hierarchy and to route actions back to the originating entity.
+`TargetOutput` is the bridge between the monitor/capture side and the sink side.
+The `source` field (a `TargetAddress`) enables sinks to filter and match at any
+level of the hierarchy — session, window, or pane — and to route actions back to the
+originating entity. Hosts with a single session/window/pane can be addressed at
+session level without requiring callers to know the pane ID.
 
 ### `ContentMatcher` — Trait-Based Text Matching
 
@@ -1080,7 +1098,7 @@ pub struct Not(Box<dyn ContentMatcher>);
 ```
 
 **Statefulness contract**: The bus calls `matches()` on the filter's matcher for each
-`PaneOutput`. Stateful matchers (like `LineCountMatcher`) accumulate across calls for
+`TargetOutput`. Stateful matchers (like `LineCountMatcher`) accumulate across calls for
 the same sink — each sink gets its own cloned matcher instances, so state is not shared
 across sinks. `reset()` is called when monitoring restarts to clear accumulated state.
 
@@ -1115,7 +1133,7 @@ impl CompiledSinkFilter {
     /// Fields that are None are wildcards (match everything).
     /// Routing fields (host/session/window/pane) are checked first (cheap).
     /// Content matcher is checked last (potentially stateful/expensive).
-    pub fn matches(&mut self, output: &PaneOutput) -> bool;
+    pub fn matches(&mut self, output: &TargetOutput) -> bool;
 }
 ```
 
@@ -1187,7 +1205,7 @@ pub trait OutputSink: Send + Sync + 'static {
     /// A stdio sink writes immediately; an LLM sink accumulates and
     /// flushes on its own schedule. The bus does not batch on behalf
     /// of sinks.
-    async fn write(&self, output: PaneOutput) -> Result<()>;
+    async fn write(&self, output: TargetOutput) -> Result<()>;
 
     /// Called on bus shutdown. Flush internal buffers, close resources.
     async fn flush(&self) -> Result<()> { Ok(()) }
@@ -1195,7 +1213,7 @@ pub trait OutputSink: Send + Sync + 'static {
 ```
 
 **Key design principle**: Each sink owns its batching/accumulation strategy internally.
-The bus delivers individual `PaneOutput` events; the sink decides whether to process
+The bus delivers individual `TargetOutput` events; the sink decides whether to process
 them immediately (stdio), buffer and render at frame rate (TUI), or accumulate and
 flush on a timer/threshold (LLM). This keeps the bus simple and the sink in full
 control of its own latency/throughput tradeoffs.
@@ -1264,7 +1282,7 @@ the `OutputSink` trait and `ActionHandle` API; LLM integration is a consumer con
 
 ### `OutputBus` — Fan-Out Dispatcher
 
-The `OutputBus` is the central distributor. It receives `PaneOutput` from the monitor
+The `OutputBus` is the central distributor. It receives `TargetOutput` from the monitor
 (or from `capture_pane()` callers) and fans out to all registered sinks.
 
 ```rust
@@ -1273,7 +1291,7 @@ pub struct OutputBus { /* subscribers: Vec<SinkEntry> */ }
 struct SinkEntry {
     id: SinkId,
     name: String,
-    tx: mpsc::Sender<PaneOutput>,
+    tx: mpsc::Sender<TargetOutput>,
     filters: Vec<CompiledSinkFilter>,
     task: JoinHandle<()>,
 }
@@ -1299,7 +1317,7 @@ impl OutputBus {
     /// Uses try_send — if a sink's channel is full, the event is dropped
     /// for that sink only (logged at debug level). Sinks that cannot
     /// tolerate drops should use larger channel capacities.
-    pub fn publish(&self, output: PaneOutput);
+    pub fn publish(&self, output: TargetOutput);
 
     /// Shutdown all sinks gracefully.
     pub async fn shutdown(&mut self) -> Result<()>;
@@ -1342,34 +1360,34 @@ impl OutputSink for StdioSink {
 
 ### `JoinedStream` — Multi-Source Consolidated View
 
-Individual sinks see output from their filtered sources, but each `PaneOutput` arrives
+Individual sinks see output from their filtered sources, but each `TargetOutput` arrives
 independently. A `JoinedStream` merges multiple source streams into a single
 time-ordered sequence where each chunk is attributed to its source — like a multi-party
 conversation transcript. This is the natural representation for an LLM analyzing
 cross-pane interactions, a log aggregator, or a TUI showing interleaved output.
 
 ```rust
-/// A chunk in the joined stream. Wraps PaneOutput with a source label
+/// A chunk in the joined stream. Wraps TargetOutput with a source label
 /// for human-readable attribution in the consolidated view.
 pub struct StreamChunk {
     pub source: SourceLabel,
-    pub output: PaneOutput,
+    pub output: TargetOutput,
 }
 
 /// Identifies the source of a chunk in a joined stream.
-/// Constructed automatically from PaneOutput metadata.
+/// Constructed automatically from TargetOutput metadata.
+/// Works at any hierarchy level — session-only hosts produce
+/// session-level labels; pane-level output gets full specificity.
 pub struct SourceLabel {
     pub host: String,           // "localhost", "web-1"
-    pub session: String,        // "build"
-    pub pane_target: String,    // "build:0.1"
-    pub pane_id: String,        // "%12"
+    pub target: TargetAddress,  // source at whatever level is available
 }
 
 impl SourceLabel {
-    /// Short form for display: "web-1:build:0.1"
+    /// Short form for display: "web-1:build:0.1" (pane) or "web-1:build" (session)
     pub fn short(&self) -> String;
 
-    /// Minimal form when host is unambiguous: "build:0.1"
+    /// Minimal form when host is unambiguous: "build:0.1" or "build"
     pub fn minimal(&self) -> String;
 }
 ```
@@ -1403,7 +1421,7 @@ impl<S: OutputSink> JoinedSink<S> {
 }
 ```
 
-When `JoinedSink::write()` receives a `PaneOutput`, it:
+When `JoinedSink::write()` receives a `TargetOutput`, it:
 1. Extracts the `SourceLabel` from the output's metadata
 2. If the source differs from `last_source`, emits a source header/prefix
 3. Delegates to the inner sink's `write()` with the attributed content
@@ -1444,7 +1462,7 @@ registering a channel-based subscriber that receives `StreamChunk` directly:
 
 ```rust
 impl OutputBus {
-    /// Subscribe a raw channel that receives StreamChunks (PaneOutput + SourceLabel).
+    /// Subscribe a raw channel that receives StreamChunks (TargetOutput + SourceLabel).
     /// The caller reads from the receiver directly. No OutputSink trait needed.
     pub fn subscribe_joined(
         &mut self,
@@ -1475,7 +1493,7 @@ on top of the joined stream (e.g., a TUI panel, a web socket feed, or test harne
           └── Monitor ──publish()──► OutputBus
 ```
 
-**Monitor → Bus**: The monitor publishes `PaneOutput` to the bus after each output
+**Monitor → Bus**: The monitor publishes `TargetOutput` to the bus after each output
 event. This happens *in addition to* rule evaluation — rules and sinks operate
 independently on the same stream.
 
@@ -1974,7 +1992,7 @@ impl SessionMonitor {
     /// Run the monitor loop for one session.
     /// Opens `tmux -C attach -t <session>` via the transport, parses
     /// `%output %<pane_id> <data>` frames, evaluates rules, and publishes
-    /// PaneOutput to the OutputBus.
+    /// TargetOutput to the OutputBus.
     /// Returns when `stop` signal is received or the connection drops.
     pub async fn run(
         &mut self,
@@ -2212,7 +2230,7 @@ initialization. The library is also consumable by MCP tools or other programmati
 ### DC12: Output Sink Pipeline Architecture
 
 **Decision**: Captured pane output is distributed to consumers via an async fan-out bus
-(`OutputBus`) that delivers `PaneOutput` to independently-running sink tasks. Each sink
+(`OutputBus`) that delivers `TargetOutput` to independently-running sink tasks. Each sink
 receives its own bounded channel and manages its own batching, buffering, and timing
 internally. Sinks are filtered via composable `SinkFilter` structs (OR across filters,
 AND within fields). Sinks may initiate actions on tmux entities via an `ActionHandle`
@@ -2221,7 +2239,7 @@ that routes requests through the existing per-host action dispatch queue (DC4).
 **Rationale**:
 - **Decoupled latency**: A slow LLM sink must never block a fast stdio sink. Per-sink
   channels with independent tasks ensure this.
-- **Sink-owned batching**: The bus delivers individual `PaneOutput` events; sinks decide
+- **Sink-owned batching**: The bus delivers individual `TargetOutput` events; sinks decide
   when/how to batch. A stdio sink flushes immediately. An LLM sink accumulates until a
   token budget or timeout. This keeps the bus simple and avoids a "one size fits all"
   batching policy.
@@ -2239,7 +2257,7 @@ that routes requests through the existing per-host action dispatch queue (DC4).
 - Bus-level batching with configurable window: Rejected — forces all sinks to the same
   cadence and complicates the bus with timer logic.
 - Callback-based sinks (no channels): Rejected — a slow callback blocks the bus loop.
-- Shared `Arc<Mutex<Vec<PaneOutput>>>` polling: Rejected — wastes CPU, no backpressure.
+- Shared `Arc<Mutex<Vec<TargetOutput>>>` polling: Rejected — wastes CPU, no backpressure.
 
 ### DC13: Granular Monitoring Lifecycle
 
@@ -2291,7 +2309,7 @@ one implementation, not a privileged special case. Both `SinkFilter` (content fi
 - **Word-boundary blocklists**: Bad-word/secret detectors that don't false-positive on
   substrings (e.g., "token" matches "token" but not "tokenize")
 - **Stateful stream matchers**: Line counters, byte accumulators, rate detectors —
-  these need to track state across multiple `PaneOutput` events
+  these need to track state across multiple `TargetOutput` events
 
 Making regex the only matching mechanism would force all of these into regex patterns,
 which is unnatural for stateful matchers and inefficient for simple keyword checks.
@@ -2340,7 +2358,7 @@ streams and must implement its own source-tracking and interleaving logic.
 - Bus-level stream merging: Rejected — adds complexity to the bus and forces all sinks
   into a joined view. Not all sinks want interleaved output.
 - Post-hoc log parsing: Rejected — requires sinks to independently reconstruct
-  source attribution from `PaneOutput` fields, duplicating logic across sinks.
+  source attribution from `TargetOutput` fields, duplicating logic across sinks.
 
 ### DC16: Unified Target Type
 
@@ -2617,14 +2635,14 @@ deserialization on top of the stable 2a monitoring loop.
 routed to multiple consumers (sinks) with independent latency characteristics.
 
 **Tasks**:
-1. Implement `sink.rs`: `PaneOutput` struct, `OutputSink` trait, `SinkFilter` /
+1. Implement `sink.rs`: `TargetOutput` struct, `OutputSink` trait, `SinkFilter` /
    `CompiledSinkFilter`, `ActionHandle` / `ActionRequest` / `ActionTarget` / `SinkAction`
 2. Implement `OutputBus`: registration API (`register(sink, filters, channel_capacity)`),
-   fan-out loop that matches `PaneOutput` against compiled filters and dispatches to
+   fan-out loop that matches `TargetOutput` against compiled filters and dispatches to
    per-sink channels, graceful shutdown with `flush()` on all sinks
-3. Implement `StdioSink`: default reference implementation that writes `PaneOutput` to
+3. Implement `StdioSink`: default reference implementation that writes `TargetOutput` to
    stdout with `[host:pane_target]` prefix, immediate flush, no batching
-4. Wire `OutputBus` into `monitor.rs`: control mode parser feeds `PaneOutput` into the
+4. Wire `OutputBus` into `monitor.rs`: control mode parser feeds `TargetOutput` into the
    bus alongside rule evaluation
 5. Wire `ActionHandle` into `HostHandle`: sink-initiated actions route through the
    existing per-host action dispatch queue (DC4)
@@ -2639,7 +2657,7 @@ routed to multiple consumers (sinks) with independent latency characteristics.
 consumers.
 
 **Acceptance criteria**:
-- `OutputBus` delivers `PaneOutput` to 3 registered sinks concurrently
+- `OutputBus` delivers `TargetOutput` to 3 registered sinks concurrently
 - A slow sink (simulated 500ms delay) does not block other sinks
 - `SinkFilter { host: Some("web.*"), session: None, window: None, pane: None }` matches
   all panes on hosts matching `web.*`
