@@ -58,8 +58,211 @@ A library that:
 
 ## Prototype Reference
 
-The prototype is a single-file ~150-line Rust program that demonstrates the core mechanic.
-It is the starting point for this design but has significant gaps documented below.
+The prototype is a single-file ~150-line Rust program generated via a Gemini conversation.
+It demonstrates the core mechanic and is the starting point for this design. The full
+prototype source, dependencies, and origin are preserved below for traceability.
+
+**Origin**: [Gemini conversation — Rust SSH Tmux Session Interaction](https://g.co/gemini/share/e7eb11c45954)
+
+### Prototype Cargo.toml
+
+```toml
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+russh = "0.40"
+russh-keys = "0.40"
+anyhow = "1.0"
+regex = "1.10"
+clap = { version = "4.4", features = ["derive"] }
+chrono = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+```
+
+### Prototype Source (`main.rs`)
+
+```rust
+use anyhow::{Context, Result};
+use clap::Parser;
+use regex::Regex;
+use russh::client::{self, Handler, Msg};
+use russh_keys::agent::client::AgentClient;
+use std::sync::Arc;
+use tokio::time::Duration;
+use tracing::{info, warn, error, instrument, span, Level};
+
+#[derive(Parser, Debug)]
+struct Args {
+    #[arg(short, long, default_value = "127.0.0.1:22")]
+    host: String,
+    #[arg(short, long)]
+    user: String,
+    #[arg(short, long)]
+    filter: Option<String>,
+    /// Output logs in JSON format for production monitoring
+    #[arg(long)]
+    json: bool,
+}
+
+struct Client;
+impl Handler for Client {
+    type Error = anyhow::Error;
+    async fn check_server_key(self, _key: &russh_keys::key::PublicKey) -> Result<(Self, bool)> {
+        Ok((self, true))
+    }
+}
+
+struct TmuxAutomator {
+    session: client::Handle<Client>,
+    filter: Option<String>,
+}
+
+impl TmuxAutomator {
+    #[instrument(skip(self), fields(host = %self.filter.as_deref().unwrap_or("all")))]
+    async fn run(&mut self) -> Result<()> {
+        info!("Starting introspection phase...");
+
+        let mut channel = self.session.channel_open_session().await?;
+        channel.exec(true, "tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index}'").await?;
+
+        let mut raw_list = String::new();
+        while let Some(msg) = channel.wait().await {
+            if let Msg::Data { ref data } = msg {
+                raw_list.push_str(&String::from_utf8_lossy(data));
+            }
+        }
+
+        let filter_re = self.filter.as_ref().map(|f| Regex::new(f)).transpose()?;
+        let target_panes: Vec<String> = raw_list.lines()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .filter(|s| filter_re.as_ref().map_or(true, |re| re.is_match(s)))
+            .collect();
+
+        if target_panes.is_empty() {
+            warn!("Introspection complete: No matching panes found.");
+            return Ok(());
+        }
+
+        info!(pane_count = target_panes.len(), "Setting up multiplexed pipes");
+
+        let mut shell = self.session.channel_open_session().await?;
+        shell.request_pty(true, "xterm", 80, 24, 0, 0, &[]).await?;
+        shell.request_shell(true).await?;
+
+        let mut setup = String::from("set -m; ");
+        for pane in &target_panes {
+            let fifo = format!("/tmp/tmux_pipe_{}", pane.replace([':', '.'], "_"));
+            setup.push_str(&format!(
+                "[ -p {0} ] || mkfifo {0}; tmux pipe-pane -t {1} -o 'cat > {0}' & ",
+                fifo, pane
+            ));
+        }
+        setup.push_str("tail -qf /tmp/tmux_pipe_* | awk '{ print FILENAME \": \" $0 }'\n");
+        shell.data(setup.as_bytes()).await?;
+
+        let re_line = Regex::new(r"tmux_pipe_(?P<pane>[^:]+): (?P<content>.*)")?;
+
+        // Main Processing Loop
+        while let Some(msg) = shell.wait().await {
+            match msg {
+                Msg::Data { ref data } => {
+                    let chunk = String::from_utf8_lossy(data);
+                    for line in chunk.lines() {
+                        if let Some(cap) = re_line.captures(line) {
+                            let pane_id = &cap["pane"];
+                            let content = &cap["content"];
+
+                            if content.contains('>') {
+                                info!(pane = %pane_id, "Trigger detected, sending 'continue'");
+                                let tmux_id = pane_id.replace('_', ":").replace("::", ":");
+                                let cmd = format!(
+                                    "tmux send-keys -t {} 'continue' Enter\n", tmux_id
+                                );
+                                shell.data(cmd.as_bytes()).await?;
+                            }
+                        }
+                    }
+                }
+                Msg::Eof => {
+                    warn!("Remote end sent EOF");
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args = Args::parse();
+
+    // Initialize Tracing Subscriber
+    if args.json {
+        tracing_subscriber::fmt().json().init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_max_level(Level::INFO)
+            .init();
+    }
+
+    let mut retry_delay = Duration::from_secs(2);
+
+    loop {
+        let span = span!(Level::INFO, "connection_attempt", host = %args.host);
+        let _enter = span.enter();
+
+        let result = async {
+            let config = Arc::new(client::Config {
+                connection_timeout: Some(Duration::from_secs(10)),
+                heartbeat_interval: Some(Duration::from_secs(30)),
+                ..Default::default()
+            });
+
+            info!("Connecting to host...");
+            let mut session = client::connect(config, args.host.clone(), Client {}).await
+                .context("Failed to establish TCP/SSH transport")?;
+
+            let mut agent = AgentClient::connect_env().await
+                .context("Could not find local SSH agent")?;
+            let keys = agent.request_identities().await?;
+
+            let mut auth = false;
+            for key in keys {
+                if session.authenticate_pubkey(&args.user, key).await? {
+                    auth = true;
+                    break;
+                }
+            }
+
+            if !auth {
+                return Err(anyhow::anyhow!("Authentication rejected by server"));
+            }
+            info!("Authentication successful");
+
+            let mut automator = TmuxAutomator {
+                session,
+                filter: args.filter.clone(),
+            };
+            automator.run().await
+        }
+        .await;
+
+        if let Err(e) = result {
+            error!(error = %e, "Session failure");
+            tokio::time::sleep(retry_delay).await;
+            retry_delay = std::cmp::min(retry_delay * 2, Duration::from_secs(60));
+        } else {
+            info!("Session closed gracefully.");
+            break;
+        }
+    }
+
+    Ok(())
+}
+```
 
 ### What the Prototype Does
 
@@ -1042,7 +1245,17 @@ A caller can list sessions, capture pane content, send input, and rename session
 
 ## References
 
+### Prototype Origin
+
+- [Gemini conversation — Rust SSH Tmux Session Interaction](https://g.co/gemini/share/e7eb11c45954)
+
+### External Documentation
+
 - [russh documentation](https://docs.rs/russh/latest/russh/)
 - [tmux pipe-pane man page](https://man.openbsd.org/tmux#pipe-pane)
+- [tmux capture-pane man page](https://man.openbsd.org/tmux#capture-pane)
+- [tmux send-keys man page](https://man.openbsd.org/tmux#send-keys)
+
+### Internal Documentation
+
 - [motlie MCP DESIGN.md](../../../libs/mcp/docs/DESIGN.md) — reference for doc conventions
-- Prototype source: Gemini shared conversation "Rust SSH Tmux Session Interaction"
