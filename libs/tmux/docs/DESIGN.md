@@ -800,10 +800,11 @@ impl ActionHandle {
 }
 ```
 
-The `ActionHandle` is provided to sinks at registration time. Action requests are
-routed through the existing per-host bounded dispatch queue (DC4) — the same path
-used by the monitor's trigger rules. This ensures consistent ordering, backpressure,
-and concurrency limits regardless of whether an action originates from a rule or a sink.
+Sinks that need to initiate actions capture an `ActionHandle` at their own construction
+time (not injected by `OutputBus`). Action requests are routed through the existing
+per-host bounded dispatch queue (DC4) — the same path used by the monitor's trigger
+rules. This ensures consistent ordering, backpressure, and concurrency limits regardless
+of whether an action originates from a rule or a sink.
 
 **LLM feedback loop**: An LLM sink can call `action_handle.send_keys_to_pane()` after
 analyzing output. The design of the LLM sink itself (prompt engineering, approval gates,
