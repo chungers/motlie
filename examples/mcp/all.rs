@@ -4,6 +4,11 @@
 //! - Database tools (15): Graph operations on Motlie database
 //! - TTS tools (2): Text-to-speech using macOS speech synthesis
 //!
+//! # Platform Support
+//!
+//! This example requires macOS for the TTS tools. On other platforms,
+//! use the `motlie_db` example for database-only functionality.
+//!
 //! # Usage
 //!
 //! ```bash
@@ -24,25 +29,42 @@
 //! This server properly handles Ctrl+C to gracefully shut down all resources,
 //! ensuring database writes are flushed and no data corruption occurs.
 
+#[cfg(not(target_os = "macos"))]
+fn main() {
+    eprintln!("This example requires macOS (TTS uses /usr/bin/say).");
+    eprintln!("Use the motlie_db example for database-only functionality on this platform.");
+}
+
+#[cfg(target_os = "macos")]
 use anyhow::Result;
+#[cfg(target_os = "macos")]
 use clap::{Parser, ValueEnum};
+#[cfg(target_os = "macos")]
 use motlie_db::{Storage, StorageConfig};
+#[cfg(target_os = "macos")]
 use motlie_mcp::db::{self, DbResource};
+#[cfg(target_os = "macos")]
 use motlie_mcp::tts::{self, TtsEngine, TtsResource};
+#[cfg(target_os = "macos")]
 use motlie_mcp::{stdio, ManagedResource, ServiceExt, ToolCall};
+#[cfg(target_os = "macos")]
 use rmcp::{
     handler::server::{tool::ToolRouter, wrapper::Parameters},
     model::*,
     tool, tool_handler, tool_router,
     ErrorData as McpError, ServerHandler,
 };
-
+#[cfg(target_os = "macos")]
 use std::net::SocketAddr;
+#[cfg(target_os = "macos")]
 use std::path::PathBuf;
+#[cfg(target_os = "macos")]
 use std::sync::Arc;
+#[cfg(target_os = "macos")]
 use std::time::Duration;
 
 /// Transport protocol for MCP server
+#[cfg(target_os = "macos")]
 #[derive(Debug, Clone, ValueEnum)]
 enum Transport {
     /// Standard input/output (for local process communication)
@@ -51,6 +73,7 @@ enum Transport {
     Http,
 }
 
+#[cfg(target_os = "macos")]
 impl std::fmt::Display for Transport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -60,6 +83,7 @@ impl std::fmt::Display for Transport {
     }
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Parser, Debug)]
 #[command(name = "motlie-all-mcp")]
 #[command(about = "Combined MCP server with database and TTS tools", long_about = None)]
@@ -96,6 +120,7 @@ struct Args {
 ///
 /// This server demonstrates how to compose tools from multiple domains
 /// using the `ToolCall` trait for uniform dispatch.
+#[cfg(target_os = "macos")]
 #[derive(Clone)]
 struct CombinedServer {
     db_resource: Arc<DbResource>,
@@ -103,6 +128,7 @@ struct CombinedServer {
     tool_router: ToolRouter<Self>,
 }
 
+#[cfg(target_os = "macos")]
 impl CombinedServer {
     fn new(db: Arc<db::LazyDb>, tts: Arc<tts::LazyTts>, query_timeout: Duration) -> Self {
         Self {
@@ -113,6 +139,7 @@ impl CombinedServer {
     }
 }
 
+#[cfg(target_os = "macos")]
 #[tool_router]
 impl CombinedServer {
     // ==================== Database Mutation Tools ====================
@@ -254,6 +281,7 @@ impl CombinedServer {
     }
 }
 
+#[cfg(target_os = "macos")]
 #[tool_handler]
 impl ServerHandler for CombinedServer {
     fn get_info(&self) -> ServerInfo {
@@ -275,6 +303,7 @@ impl ServerHandler for CombinedServer {
     }
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging with tracing

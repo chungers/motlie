@@ -1,0 +1,13 @@
+[package]
+name = "motlie-tts"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Text-to-speech synthesis library for motlie"
+
+[dependencies]
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = "0.1"

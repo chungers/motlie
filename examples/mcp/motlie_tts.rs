@@ -16,8 +16,8 @@
 //!
 //! # Platform Support
 //!
-//! This server is only supported on macOS. On other platforms, tool calls
-//! will return an error indicating the platform is not supported.
+//! This server is only supported on macOS. On other platforms, the example
+//! prints a message and exits.
 //!
 //! # Why HTTP is Default
 //!
@@ -30,15 +30,26 @@
 //!
 //! This server properly handles Ctrl+C for graceful shutdown.
 
-use anyhow::Result;
-use clap::{Parser, ValueEnum};
-use motlie_mcp::tts::{TtsEngine, TtsMcpServer};
-use motlie_mcp::{stdio, ManagedResource, ServiceExt};
+#[cfg(not(target_os = "macos"))]
+fn main() {
+    eprintln!("This example requires macOS (TTS uses /usr/bin/say)");
+}
 
+#[cfg(target_os = "macos")]
+use anyhow::Result;
+#[cfg(target_os = "macos")]
+use clap::{Parser, ValueEnum};
+#[cfg(target_os = "macos")]
+use motlie_mcp::tts::{TtsEngine, TtsMcpServer};
+#[cfg(target_os = "macos")]
+use motlie_mcp::{stdio, ManagedResource, ServiceExt};
+#[cfg(target_os = "macos")]
 use std::net::SocketAddr;
+#[cfg(target_os = "macos")]
 use std::time::Duration;
 
 /// Transport protocol for MCP server
+#[cfg(target_os = "macos")]
 #[derive(Debug, Clone, ValueEnum)]
 enum Transport {
     /// Standard input/output (for local process communication)
@@ -47,6 +58,7 @@ enum Transport {
     Http,
 }
 
+#[cfg(target_os = "macos")]
 impl std::fmt::Display for Transport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -56,6 +68,7 @@ impl std::fmt::Display for Transport {
     }
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Parser, Debug)]
 #[command(name = "motlie-tts-mcp")]
 #[command(about = "Text-to-speech MCP server (macOS only)", long_about = None)]
@@ -80,6 +93,7 @@ struct Args {
     mcp_path: String,
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging with tracing

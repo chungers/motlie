@@ -3,6 +3,7 @@ members = [
     "libs/core",
     "libs/db",
     "libs/mcp",
+    "libs/tts",
 ]
 resolver = "2"
 
@@ -59,6 +60,7 @@ simd-simsimd = ["motlie-core/simd-simsimd"]
 motlie-core = { path = "libs/core" }
 motlie-db = { path = "libs/db" }
 motlie-mcp = { path = "libs/mcp" }
+motlie-tts = { path = "libs/tts" }
 csv.workspace = true
 tokio.workspace = true
 anyhow.workspace = true

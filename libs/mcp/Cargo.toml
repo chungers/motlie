@@ -9,6 +9,7 @@ description = "MCP server library for motlie graph database"
 
 [dependencies]
 motlie-db = { path = "../db" }
+motlie-tts = { path = "../tts" }
 rmcp = { version = "0.15.0", features = ["server", "transport-io", "transport-streamable-http-server"] }
 schemars = { version = "1", features = ["derive"] }
 tokio = { workspace = true }
