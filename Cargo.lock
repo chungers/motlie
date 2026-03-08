@@ -2465,6 +2465,7 @@ dependencies = [
  "motlie-core",
  "motlie-db",
  "motlie-mcp",
+ "motlie-tts",
  "ndarray",
  "ndarray-npy",
  "num_cpus",
@@ -2554,6 +2555,7 @@ dependencies = [
  "env_logger",
  "log",
  "motlie-db",
+ "motlie-tts",
  "reqwest 0.13.2",
  "rmcp",
  "schemars",
@@ -2565,6 +2567,15 @@ dependencies = [
  "tower 0.5.3",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "motlie-tts"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

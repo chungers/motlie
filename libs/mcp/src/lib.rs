@@ -5,13 +5,18 @@
 //!
 //! - **Generic infrastructure**: `LazyResource`, `ManagedResource`, `ToolCall` trait, HTTP transport
 //! - **db**: Motlie graph database tools
-//! - **tts**: Text-to-speech tools (macOS)
+//! - **tts**: MCP integration for the `motlie-tts` engine (macOS only, `#[cfg(target_os = "macos")]`)
 //!
 //! # Architecture
 //!
 //! The crate uses a trait-based architecture where each tool's parameter type
 //! implements the `ToolCall` trait. This ensures compile-time verification that
 //! every parameter type has a corresponding tool implementation.
+//!
+//! The TTS engine itself lives in the `motlie-tts` crate. This crate provides
+//! the MCP scaffolding: `ResourceLifecycle` impl, `ToolCall` impls for
+//! parameter types, and the `TtsMcpServer`. The `tts` module is only compiled
+//! on macOS.
 //!
 //! ## Key Components
 //!
@@ -20,7 +25,7 @@
 //! - [`ResourceLifecycle`]: Trait for resources that require graceful shutdown
 //! - [`ToolCall`]: Trait binding parameter types to their execution logic
 //! - [`db::MotlieMcpServer`]: Ready-to-use server for database tools
-//! - [`tts::TtsMcpServer`]: Ready-to-use server for TTS tools
+//! - `tts::TtsMcpServer`: Ready-to-use server for TTS tools (macOS only)
 //! - [`serve_http`]: HTTP transport for any `ServerHandler`
 //!
 //! # Resource Lifecycle
@@ -49,29 +54,8 @@
 //!
 //! # Composing Tools from Multiple Domains
 //!
-//! ```ignore
-//! use motlie_mcp::{db, tts, ToolCall};
-//!
-//! #[derive(Clone)]
-//! struct CombinedServer {
-//!     db_resource: Arc<db::DbResource>,
-//!     tts_resource: Arc<tts::TtsResource>,
-//!     tool_router: ToolRouter<Self>,
-//! }
-//!
-//! #[tool_router]
-//! impl CombinedServer {
-//!     #[tool(description = "Add a node")]
-//!     async fn add_node(&self, Parameters(p): Parameters<db::AddNodeParams>) -> Result<CallToolResult, McpError> {
-//!         p.call(&self.db_resource).await
-//!     }
-//!
-//!     #[tool(description = "Speak text")]
-//!     async fn say(&self, Parameters(p): Parameters<tts::SayParams>) -> Result<CallToolResult, McpError> {
-//!         p.call(&self.tts_resource).await
-//!     }
-//! }
-//! ```
+//! See `examples/mcp/all.rs` for a complete example combining database and TTS
+//! tools into a single server (macOS only due to TTS dependency).
 //!
 //! # Transports
 //!
@@ -81,6 +65,7 @@
 
 pub mod db;
 pub mod http;
+#[cfg(target_os = "macos")]
 pub mod tts;
 
 use async_trait::async_trait;

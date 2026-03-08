@@ -1,23 +1,14 @@
-# TTS Module (`mcp::tts`)
+# TTS Library (`motlie-tts`)
 
-Text-to-speech MCP tools using macOS speech synthesis.
+Text-to-speech synthesis library for motlie, using macOS speech synthesis.
 
 ## Overview
 
-This module provides MCP tools for text-to-speech on macOS using the system `say` command. It includes:
-
-- **`say`**: Speak text aloud with support for multiple phrases, voice selection, and rate control
-- **`list_voices`**: List available system voices
+This crate provides the core TTS engine (`TtsEngine`) for macOS. The engine manages a persistent shell worker process that speaks text using `/usr/bin/say`. MCP server integration is provided separately in `motlie-mcp::tts`.
 
 ## Platform Support
 
-**macOS only.** On other platforms, tool calls return an error:
-
-```
-TTS tools are only supported on macOS
-```
-
-Platform validation happens lazily on first tool invocation, allowing the MCP handshake to complete quickly.
+**macOS only.** The `TtsEngine` type is only compiled on macOS via `#[cfg(target_os = "macos")]`. On other platforms, the crate compiles but the engine type is not available. Cross-platform utilities (`INSTRUCTIONS`, `truncate_for_log`) remain available for future backends.
 
 ## Usage
 

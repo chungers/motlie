@@ -24,12 +24,20 @@ libs/mcp/
 │   │   ├── mod.rs      # LazyDb, DbResource, ResourceLifecycle impl, INSTRUCTIONS
 │   │   ├── types.rs    # Parameter types with ToolCall implementations
 │   │   └── server.rs   # MotlieMcpServer (ready-to-use server)
-│   └── tts/            # Text-to-speech tools (macOS)
-│       ├── mod.rs      # LazyTts, TtsResource, TtsEngine, ResourceLifecycle impl
+│   └── tts/            # MCP integration for motlie-tts engine
+│       ├── mod.rs      # Re-exports from motlie-tts, ResourceLifecycle impl,
+│       │               # LazyTts, TtsResource, create_lazy_tts
 │       ├── types.rs    # Parameter types with ToolCall implementations
 │       └── server.rs   # TtsMcpServer (ready-to-use server)
 └── examples/
     └── combined_server.rs  # Example: combining db + tts tools
+
+libs/tts/                   # Core TTS engine (standalone, no MCP dependency)
+├── src/
+│   └── lib.rs          # TtsEngine, worker process management, INSTRUCTIONS
+└── docs/
+    ├── LINUX.md        # Linux/SSH remote audio streaming guide
+    └── MODELS.md       # TTS model research and recommendations
 ```
 
 ### Key Components
@@ -41,7 +49,7 @@ libs/mcp/
 | `ResourceLifecycle` | Trait for resources that require graceful shutdown |
 | `ToolCall` trait | Binds parameter types to their execution logic |
 | `db::MotlieMcpServer` | Ready-to-use server for database tools |
-| `tts::TtsMcpServer` | Ready-to-use server for TTS tools (macOS) |
+| `tts::TtsMcpServer` | Ready-to-use server for TTS tools (wraps `motlie-tts` engine) |
 | `serve_http()` | Generic HTTP transport for any `ServerHandler` |
 
 ### The `ToolCall` Trait
@@ -145,50 +153,13 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-### Composing Tools from Multiple Domains
+### Composing Tools from Multiple Domains (macOS)
 
-```rust
-use motlie_mcp::{db, tts, ToolCall, ManagedResource};
-use rmcp::{tool, tool_router, tool_handler, ServerHandler, model::*};
+See `examples/mcp/all.rs` for a complete example combining database and TTS
+tools into a single server. The TTS module is only available on macOS
+(`#[cfg(target_os = "macos")]`), so the combined example is macOS-only.
 
-#[derive(Clone)]
-struct CombinedServer {
-    db_resource: Arc<db::DbResource>,
-    tts_resource: Arc<tts::TtsResource>,
-    tool_router: ToolRouter<Self>,
-}
-
-#[tool_router]
-impl CombinedServer {
-    #[tool(description = "Add a node to the graph")]
-    async fn add_node(&self, Parameters(p): Parameters<db::AddNodeParams>) -> Result<CallToolResult, McpError> {
-        p.call(&self.db_resource).await  // Delegate to ToolCall impl
-    }
-
-    #[tool(description = "Speak text aloud")]
-    async fn say(&self, Parameters(p): Parameters<tts::SayParams>) -> Result<CallToolResult, McpError> {
-        p.call(&self.tts_resource).await  // Delegate to ToolCall impl
-    }
-}
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Create managed resources
-    let managed_db = ManagedResource::new(Box::new(|| { /* ... */ }));
-    let managed_tts = ManagedResource::new(Box::new(|| TtsEngine::new()));
-
-    let server = CombinedServer::new(managed_db.lazy(), managed_tts.lazy());
-
-    // Run server...
-
-    // Shutdown all resources (order matters for dependencies)
-    managed_tts.shutdown().await?;  // TTS first (no dependencies)
-    managed_db.shutdown().await?;   // DB last (may have pending writes)
-    Ok(())
-}
-```
-
-See `examples/mcp/all.rs` for a complete example.
+On other platforms, use the `motlie_db` example for database-only functionality.
 
 ## Tool Modules
 
@@ -220,7 +191,9 @@ See `examples/mcp/all.rs` for a complete example.
 
 **Resource Lifecycle**: `ReadWriteHandles` implements `ResourceLifecycle`, calling the internal `shutdown()` method which flushes pending writes and closes the RocksDB database cleanly.
 
-### TTS Tools (`tts`)
+### TTS Tools (`tts`) — macOS only
+
+The `tts` module is only compiled on macOS (`#[cfg(target_os = "macos")]`).
 
 Text-to-speech tools using macOS speech synthesis:
 
@@ -229,9 +202,9 @@ Text-to-speech tools using macOS speech synthesis:
 | `say` | Speak text aloud (supports multiple phrases, voice selection, rate control) |
 | `list_voices` | List available system voices |
 
-**Platform Support**: macOS only. On other platforms, tools return an error.
+**Engine**: The TTS engine (`TtsEngine`) lives in the `motlie-tts` crate. This module provides the MCP integration layer.
 
-**Resource Lifecycle**: `TtsEngine` implements `ResourceLifecycle` as a no-op since it only holds a path string with no cleanup needed.
+**Resource Lifecycle**: `TtsEngine` implements `ResourceLifecycle` (defined in this crate), delegating to `TtsEngine::close()` for graceful worker shutdown.
 
 ## Extending the Library
 
@@ -446,7 +419,7 @@ cargo run --example motlie_all -- --db-path /path/to/db
 
 ## Documentation
 
-- [TTS Module README](src/tts/README.md) - TTS-specific documentation including stdio limitations
+- [TTS Engine README](../tts/README.md) - TTS engine documentation including stdio limitations
 - [motlie-db README](../db/README.md) - Core database documentation
 - [MCP Specification](https://spec.modelcontextprotocol.io/) - Official MCP protocol specification
 - [rmcp SDK](https://docs.rs/rmcp/latest/rmcp/) - Rust MCP SDK documentation
