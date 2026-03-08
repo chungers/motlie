@@ -451,96 +451,50 @@ on them" abstraction. For localhost-only use, `Fleet` with one local target work
 identically — there is no separate single-target API. Localhost is always available
 without SSH configuration.
 
-### `HostHandle` — Per-Host Facade
+### `HostHandle` — Per-Host Entry Point
 
-All tmux operations on a single target go through `HostHandle`. This is the core
-abstraction that unifies discovery, capture, control, and monitoring behind one type.
-It is transport-agnostic — the same API works for localhost and SSH targets.
+The connection to a single tmux target (localhost or remote). `HostHandle` provides
+host-level operations: session discovery, creation, and host-wide monitoring. It also
+serves as a factory for `Target` handles (DC16).
 
 ```rust
-pub struct HostHandle { /* Transport, host config, pipe state */ }
+pub struct HostHandle { /* Arc<HostHandleInner> */ }
+
+/// Shared internals — Target holds an Arc ref to this.
+struct HostHandleInner {
+    transport: Box<dyn Transport>,
+    config: HostTarget,
+    session_monitors: HashMap<String, SessionMonitorHandle>,
+}
 
 impl HostHandle {
-    // --- Session Lifecycle ---
+    // --- Discovery ---
 
-    /// Create a new tmux session.
-    /// `window_name` and `command` are optional; if `command` is provided, it runs
-    /// in the initial window instead of a default shell.
+    /// List all tmux sessions on this target.
+    pub async fn list_sessions(&self) -> Result<Vec<SessionInfo>>;
+
+    /// Create a new tmux session. Returns a Target at session level.
     /// Runs: tmux new-session -d -s <name> [-n <window_name>] [<command>]
     pub async fn create_session(
         &self,
         name: &str,
         window_name: Option<&str>,
         command: Option<&str>,
-    ) -> Result<()>;
+    ) -> Result<Target>;
 
-    /// Terminate (kill) a tmux session and all its windows/panes.
-    /// Runs: tmux kill-session -t <name>
-    pub async fn kill_session(&self, name: &str) -> Result<()>;
+    /// Get a Target for an existing session by name. Queries tmux to verify
+    /// the session exists. Returns None if not found.
+    pub async fn session(&self, name: &str) -> Result<Option<Target>>;
 
-    // --- Discovery ---
+    /// Get a Target at any specificity from a tmux target string.
+    /// Accepts "session", "session:window", or "session:window.pane".
+    /// Verifies the entity exists.
+    pub async fn target(&self, target_str: &str) -> Result<Option<Target>>;
 
-    /// List all tmux sessions on this target.
-    pub async fn list_sessions(&self) -> Result<Vec<SessionInfo>>;
+    // --- Host-Wide Monitoring ---
 
-    /// List all windows in a session (by name or ID).
-    pub async fn list_windows(&self, session: &str) -> Result<Vec<WindowInfo>>;
-
-    /// List all panes, optionally filtered by regex.
-    pub async fn list_panes(&self, filter: Option<&Regex>) -> Result<Vec<PaneInfo>>;
-
-    // --- Capture ---
-
-    /// Capture the visible content of a pane as text.
-    /// Returns the current screen content (what a human would see).
-    pub async fn capture_pane(&self, target: &PaneAddress) -> Result<String>;
-
-    /// Capture pane content including scrollback history.
-    /// `start` and `end` are line offsets (negative = scrollback).
-    pub async fn capture_pane_with_history(
-        &self,
-        target: &PaneAddress,
-        start: i32,
-        end: i32,
-    ) -> Result<String>;
-
-    /// Capture all panes in a session, returned as a map of pane address → content.
-    pub async fn capture_session(&self, session: &str) -> Result<HashMap<PaneAddress, String>>;
-
-    /// Sample recent text from a pane's scrollback, returned in chronological order
-    /// (oldest line first). The query controls how much to capture: last N lines,
-    /// or scan backwards until a condition matches.
-    pub async fn sample_text(
-        &self,
-        target: &PaneAddress,
-        query: &ScrollbackQuery,
-    ) -> Result<String>;
-
-    // --- Control ---
-
-    /// Send literal text to a pane. The text is escaped for tmux send-keys.
-    /// Does NOT append Enter — caller must include it via KeySequence if desired.
-    pub async fn send_text(&self, target: &PaneAddress, text: &str) -> Result<()>;
-
-    /// Send a key sequence to a pane (supports special keys: Enter, C-c, Tab, etc.)
-    pub async fn send_keys(&self, target: &PaneAddress, keys: &KeySequence) -> Result<()>;
-
-    /// Rename a tmux session.
-    pub async fn rename_session(&self, current_name: &str, new_name: &str) -> Result<()>;
-
-    /// Rename a window within a session.
-    pub async fn rename_window(
-        &self,
-        session: &str,
-        window_index: u32,
-        new_name: &str,
-    ) -> Result<()>;
-
-    // --- Monitoring (long-running) ---
-
-    /// Start continuous output monitoring on all matching sessions.
+    /// Start monitoring all matching sessions on this host.
     /// Opens one control-mode connection per discovered session (DC10).
-    /// Returns a handle to stop all monitoring on this host.
     pub async fn start_monitoring(
         &self,
         filter: Option<&Regex>,
@@ -548,27 +502,169 @@ impl HostHandle {
         shutdown: watch::Receiver<bool>,
     ) -> Result<MonitorHandle>;
 
-    /// Start monitoring a single session by name.
-    /// Opens one control-mode connection for this session.
-    /// Returns a session-scoped handle that can stop this session's
-    /// monitoring independently without affecting other sessions.
-    pub async fn start_monitoring_session(
+    /// Stop all monitoring on this host.
+    pub async fn stop_monitoring(&self) -> Result<()>;
+
+    /// List sessions currently being monitored.
+    pub fn monitored_sessions(&self) -> Vec<SessionInfo>;
+}
+```
+
+### `Target` — Unified Handle for Any Tmux Entity (DC16)
+
+**Key insight**: tmux sessions, windows, and panes are all nodes in the same
+hierarchy, and at the bottom every node resolves to a PTY with input and output.
+Tmux itself supports targeting at any level — `send-keys -t session` resolves to
+the active pane automatically. Different hosts may have different hierarchy depths:
+some have just sessions with a single window/pane, others have complex multi-window
+layouts.
+
+Rather than separate `SessionHandle`, `WindowHandle`, and `PaneHandle` types — each
+with duplicated I/O methods — a single `Target` type represents any node in the
+hierarchy. I/O operations work at any level (tmux resolves to the active pane).
+Navigation methods (`children()`, `window()`, `pane()`) narrow the target.
+
+```rust
+/// A handle to any tmux entity: session, window, or pane.
+/// Lightweight — holds Arc<HostHandleInner> + address. Cheap to clone.
+pub struct Target {
+    inner: Arc<HostHandleInner>,
+    address: TargetAddress,
+}
+
+/// The specificity of a Target in the tmux hierarchy.
+pub enum TargetAddress {
+    Session(SessionInfo),
+    Window(WindowInfo),
+    Pane(PaneAddress),
+}
+
+impl Target {
+    // --- Identity ---
+
+    /// What level of the hierarchy this target represents.
+    pub fn level(&self) -> TargetLevel;
+
+    /// The tmux target string for commands (e.g., "build", "build:0", "build:0.1").
+    pub fn target_string(&self) -> String;
+
+    /// Session info (available at any level — windows and panes know their session).
+    pub fn session_info(&self) -> &SessionInfo;
+
+    /// Window info (available at window and pane level, None at session level).
+    pub fn window_info(&self) -> Option<&WindowInfo>;
+
+    /// Pane address (available at pane level only).
+    pub fn pane_address(&self) -> Option<&PaneAddress>;
+
+    // --- Navigation (narrowing) ---
+
+    /// List children one level down.
+    /// Session → windows. Window → panes. Pane → empty.
+    pub async fn children(&self) -> Result<Vec<Target>>;
+
+    /// Navigate to a specific window by index (from session level).
+    /// Queries tmux to verify the window exists.
+    pub async fn window(&self, index: u32) -> Result<Option<Target>>;
+
+    /// Navigate to a specific pane by index (from session or window level).
+    /// From session: resolves to session:active_window.pane.
+    /// From window: resolves to window.pane.
+    pub async fn pane(&self, index: u32) -> Result<Option<Target>>;
+
+    /// Navigate to a pane by PaneAddress (from any level).
+    pub fn pane_by_address(&self, address: &PaneAddress) -> Target;
+
+    // --- I/O (works at any level — tmux resolves to active pane) ---
+
+    /// Send literal text. Escaped for tmux send-keys.
+    /// At session/window level, sends to the active pane.
+    pub async fn send_text(&self, text: &str) -> Result<()>;
+
+    /// Send a key sequence (Enter, C-c, Tab, etc.)
+    pub async fn send_keys(&self, keys: &KeySequence) -> Result<()>;
+
+    /// Capture the visible content of the target pane.
+    /// At session/window level, captures the active pane.
+    pub async fn capture(&self) -> Result<String>;
+
+    /// Capture with scrollback history.
+    pub async fn capture_with_history(&self, start: i32, end: i32) -> Result<String>;
+
+    /// Sample recent scrollback, returned in chronological order.
+    pub async fn sample_text(&self, query: &ScrollbackQuery) -> Result<String>;
+
+    // --- Lifecycle ---
+
+    /// Kill this entity. Session: kills session. Window: closes window.
+    /// Pane: closes pane.
+    pub async fn kill(&self) -> Result<()>;
+
+    /// Rename this entity. Session: rename session. Window: rename window.
+    /// Pane: not supported (returns error).
+    pub async fn rename(&self, new_name: &str) -> Result<()>;
+
+    /// Capture all panes under this target as a map.
+    /// Session: all panes in all windows. Window: all panes in window.
+    /// Pane: single-entry map.
+    pub async fn capture_all(&self) -> Result<HashMap<PaneAddress, String>>;
+
+    // --- Monitoring ---
+
+    /// Start monitoring this target (session level only — DC10).
+    /// Returns an error if called on a window or pane target.
+    pub async fn start_monitoring(
         &self,
-        session: &str,
         rules: &[TriggerRule],
     ) -> Result<SessionMonitorHandle>;
 
-    /// Stop monitoring a single session. Tears down the control-mode
-    /// connection for this session only. Other sessions continue unaffected.
-    pub async fn stop_monitoring_session(&self, session: &str) -> Result<()>;
-
-    /// Stop all monitoring on this host. Equivalent to calling
-    /// stop_monitoring_session() on every active session.
+    /// Stop monitoring this target (session level only).
     pub async fn stop_monitoring(&self) -> Result<()>;
-
-    /// List sessions currently being monitored on this host.
-    pub fn monitored_sessions(&self) -> Vec<String>;
 }
+
+pub enum TargetLevel { Session, Window, Pane }
+```
+
+**Why one type instead of three**:
+
+1. **Tmux addressing is uniform**: `send-keys -t X` works whether X is a session,
+   window, or pane. The library should mirror this.
+2. **Hosts are heterogeneous**: Some hosts have sessions with a single default
+   window and pane. Others have complex layouts. A single type handles both without
+   forcing callers to navigate through layers that may not matter.
+3. **One implementation**: `send_text()`, `send_keys()`, `capture()`, etc. are
+   implemented once on `Target`. They construct `tmux ... -t <target_string>` and
+   execute via the transport. No delegation chains.
+4. **Navigation is optional**: `target.children()` lets you drill down when needed.
+   But `host.session("build")?.send_text("ls{Enter}")` works without ever listing
+   windows or panes.
+
+**Usage examples**:
+
+```rust
+let host = fleet.host("web-1")?;
+
+// Simple: operate at session level (tmux resolves to active pane)
+let build = host.create_session("build", None, Some("cargo build")).await?;
+let output = build.capture().await?;           // captures active pane
+build.send_keys(&KeySequence::parse("{C-c}")?).await?;  // sends to active pane
+
+// Drill down when you need specificity
+let windows = build.children().await?;         // list windows
+let panes = windows[0].children().await?;      // list panes in first window
+panes[1].send_text("tail -f log.txt").await?;  // target a specific pane
+
+// Navigate directly
+let pane = build.pane(2).await?;               // session → active_window.pane_2
+pane.sample_text(&ScrollbackQuery::LastLines(100)).await?;
+
+// Works for any depth — no special handling
+let target = host.target("build:0.1").await?.unwrap();
+target.send_text("ls").await?;
+
+// Lifecycle
+build.rename("build-v2").await?;
+build.kill().await?;
 ```
 
 ### Monitor Handles — Granular Monitoring Control
@@ -592,7 +688,7 @@ impl MonitorHandle {
     /// Stop monitoring on a single session by name.
     pub async fn stop_session(&self, session: &str) -> Result<()>;
 
-    /// Get the handle for a specific session.
+    /// Get the handle for a specific monitored session.
     pub fn session(&self, name: &str) -> Option<&SessionMonitorHandle>;
 
     /// List actively monitored session names.
@@ -600,62 +696,49 @@ impl MonitorHandle {
 }
 
 /// Handle to monitoring on a single session.
-/// Returned by HostHandle::start_monitoring_session().
+/// Returned by Target::start_monitoring() (session-level targets only).
 /// Each handle owns one control-mode connection (DC10).
 ///
-/// In addition to monitoring lifecycle, this handle provides session-scoped
-/// convenience methods for the common "observe → react" workflow. These
-/// delegate to HostHandle internally — the session context is already bound,
-/// so callers don't re-specify it. See DC16.
+/// Wraps a Target — all I/O, navigation, and lifecycle operations are
+/// available via Deref<Target=Target>. This means monitoring adds
+/// lifecycle methods without duplicating the unified Target API (DC16).
 pub struct SessionMonitorHandle {
-    session_name: String,
-    host: Arc<HostHandle>,          // shared ref for delegating operations
+    target: Target,    // session-level target
     /// Signals this session's monitor task to stop.
     stop_tx: watch::Sender<bool>,
     /// The monitor task's join handle.
     task: JoinHandle<()>,
 }
 
-impl SessionMonitorHandle {
-    // --- Monitoring lifecycle ---
+impl Deref for SessionMonitorHandle {
+    type Target = Target;
+    fn deref(&self) -> &Target { &self.target }
+}
 
+impl SessionMonitorHandle {
     /// Stop monitoring this session. Tears down the control-mode connection,
     /// flushes pending output to the OutputBus, and joins the monitor task.
     pub async fn shutdown(&self) -> Result<()>;
 
     /// Check if this session's monitor is still running.
     pub fn is_active(&self) -> bool;
-
-    /// The session name being monitored.
-    pub fn session_name(&self) -> &str;
-
-    // --- Session-scoped operations (DC16) ---
-    // These mirror HostHandle methods but are scoped to this session.
-    // The caller interacts with panes by PaneAddress only — the session
-    // context is implicit.
-
-    /// Send literal text to a pane in this session.
-    pub async fn send_text(&self, target: &PaneAddress, text: &str) -> Result<()>;
-
-    /// Send a key sequence to a pane in this session.
-    pub async fn send_keys(&self, target: &PaneAddress, keys: &KeySequence) -> Result<()>;
-
-    /// Capture the visible content of a pane in this session.
-    pub async fn capture_pane(&self, target: &PaneAddress) -> Result<String>;
-
-    /// Sample recent scrollback from a pane in this session.
-    pub async fn sample_text(
-        &self,
-        target: &PaneAddress,
-        query: &ScrollbackQuery,
-    ) -> Result<String>;
-
-    /// List all windows in this session.
-    pub async fn list_windows(&self) -> Result<Vec<WindowInfo>>;
-
-    /// List all panes in this session, optionally filtered.
-    pub async fn list_panes(&self, filter: Option<&Regex>) -> Result<Vec<PaneInfo>>;
 }
+```
+
+**Usage**: `SessionMonitorHandle` derefs to `Target`, so all operations work directly:
+
+```rust
+let build = host.session("build").await?.unwrap();
+let monitor = build.start_monitoring(&rules).await?;
+
+// Navigate and operate — all via Deref to Target
+let panes = monitor.children().await?;         // windows in monitored session
+let pane = monitor.pane(0).await?.unwrap();     // specific pane
+let output = pane.sample_text(&ScrollbackQuery::LastLines(50)).await?;
+pane.send_keys(&KeySequence::parse("{C-c}")?).await?;
+
+// Monitoring lifecycle
+monitor.shutdown().await?;
 ```
 
 ### `ScrollbackQuery` — On-Demand Text Sampling
@@ -760,13 +843,13 @@ impl KeySequence {
 
 ```rust
 // Send "continue" followed by Enter
-handle.send_keys(&pane, &KeySequence::literal("continue").then_enter()).await?;
+pane.send_keys(&KeySequence::literal("continue").then_enter()).await?;
 
 // Send Ctrl-C to interrupt, then a new command
-handle.send_keys(&pane, &KeySequence::parse("{C-c}ls -la{Enter}")?).await?;
+pane.send_keys(&KeySequence::parse("{C-c}ls -la{Enter}")?).await?;
 
 // Send text that contains special characters (properly escaped via -l)
-handle.send_text(&pane, "echo 'hello > world'").await?;
+pane.send_text("echo 'hello > world'").await?;
 ```
 
 **Why this matters**: The prototype sends `send-keys 'continue' Enter` as a raw shell
@@ -791,7 +874,8 @@ pub struct SessionInfo {
 }
 
 pub struct WindowInfo {
-    pub session: String,
+    pub session_id: String,     // tmux session $N id — ties back to SessionInfo
+    pub session_name: String,   // session name (display)
     pub index: u32,
     pub name: String,
     pub active: bool,           // is the active window in its session
@@ -808,6 +892,7 @@ pub struct PaneInfo {
     pub height: u32,
     pub active: bool,           // is the active pane in its window
 }
+
 ```
 
 These are populated by `tmux list-sessions -F`, `list-windows -F`, and `list-panes -F`
@@ -1600,6 +1685,10 @@ want plain text, not ANSI-encoded output.
 
 Tmux control: session lifecycle, sending input, and managing session/window metadata.
 
+**Note**: These are internal functions that accept raw strings extracted from typed
+`TargetAddress` variants by `Target`. The public API uses `Target` methods (DC16, DC17).
+Callers should use `HostHandle` and `Target` methods, not these functions directly.
+
 ```rust
 // --- Session Lifecycle ---
 
@@ -1726,14 +1815,15 @@ pub enum HostStatus {
 
 ### `host.rs`
 
-The `HostHandle` implementation. See [Core Abstractions](#hosthandle--per-host-facade).
+The `HostHandle` and `Target` implementations. See Core Abstractions for the full APIs.
 
-Internally, `HostHandle` holds a `Box<dyn Transport>` and delegates to the function-level
-APIs in `discovery`, `capture`, `control`, `pipe`, and `monitor`. It is the composition
-root for per-target operations.
+`HostHandle` wraps `Arc<HostHandleInner>` which holds the transport and config.
+`Target` is lightweight — holds an `Arc<HostHandleInner>` plus a `TargetAddress` enum.
+Both delegate to the function-level APIs in `discovery`, `capture`, `control`, `pipe`,
+and `monitor`.
 
 ```rust
-pub struct HostHandle {
+struct HostHandleInner {
     transport: Box<dyn Transport>,
     config: HostTarget,
     pipe_state: Option<PipeManager>,   // None if monitoring not started (fallback path)
@@ -1743,10 +1833,6 @@ pub struct HostHandle {
 }
 ```
 
-`session_monitors` replaces the previous `Option<MonitorHandle>`. The host-level
-`MonitorHandle` returned by `start_monitoring()` is a view over the per-session handles,
-not a separate object. This enables `stop_monitoring_session("build")` to tear down one
-control-mode connection while others continue running.
 
 ### `pipe.rs`
 
@@ -2161,53 +2247,87 @@ streams and must implement its own source-tracking and interleaving logic.
 - Post-hoc log parsing: Rejected — requires sinks to independently reconstruct
   source attribution from `PaneOutput` fields, duplicating logic across sinks.
 
-### DC16: Session-Scoped Operations on SessionMonitorHandle
+### DC16: Unified Target Type
 
-**Decision**: `SessionMonitorHandle` provides session-scoped convenience methods for
-`send_text`, `send_keys`, `capture_pane`, `sample_text`, `list_windows`, and
-`list_panes`. These delegate to `HostHandle` internally — the session context is
-already bound. `HostHandle` retains all methods unchanged.
+**Decision**: A single `Target` type represents any tmux entity (session, window, or
+pane). `HostHandle` is slimmed to host-level concerns only — session discovery,
+creation, and host-wide monitoring. All entity-level operations live on `Target`.
+`SessionMonitorHandle` wraps `Target` via `Deref`.
 
-**Rationale**: The primary monitoring workflow is "observe output → react":
+**Rationale**: Tmux itself uses uniform addressing — `send-keys -t X` works whether
+X is a session, window, or pane (tmux resolves to the active pane). A library that
+mirrors this uniformity avoids three problems:
 
-1. A monitor (or sink) detects a pattern in session output
-2. The caller decides to respond — send input, sample context, inspect panes
-3. The caller already holds a `SessionMonitorHandle` from the monitoring setup
+1. **God object**: A flat `HostHandle` with 20+ methods mixing host, session, and
+   pane concerns is unwieldy. But decomposing into separate `SessionHandle`,
+   `WindowHandle`, and `PaneHandle` types leads to duplicated I/O methods — every
+   level needs `send_text()`, `capture()`, etc. because tmux supports them at every level.
+2. **Heterogeneous hosts**: Not all hosts have the same hierarchy depth. Some have
+   sessions with a single default window/pane; others have complex multi-window
+   layouts. A single `Target` type handles both without forcing callers through
+   intermediate layers that may be irrelevant.
+3. **One implementation**: `send_text()`, `send_keys()`, `capture()` etc. are
+   implemented once on `Target`. They construct `tmux ... -t <target_string>` and
+   execute via the transport. No delegation chains, no method duplication.
 
-Without session-scoped methods, step 3 requires the caller to hold a separate
-`HostHandle` reference and re-specify the session name on every call. This is
-error-prone (wrong session name) and verbose. `SessionMonitorHandle` binds the
-session context once, and the caller works with panes directly.
+**Key properties**:
 
-**What moves to `SessionMonitorHandle`** (session-scoped, reactive):
+| Component | Responsibility |
+|-----------|---------------|
+| `HostHandle` | Host-level: `list_sessions`, `create_session`, `session`, `target`, `start_monitoring`, `stop_monitoring` |
+| `Target` | Entity-level: I/O (`send_text`, `send_keys`, `capture`, `sample_text`), navigation (`children`, `window`, `pane`), lifecycle (`kill`, `rename`), monitoring (`start_monitoring`) |
+| `SessionMonitorHandle` | Monitoring lifecycle + `Deref<Target=Target>` — adds `shutdown`, `is_active` |
 
-| Method | Why |
-|--------|-----|
-| `send_text()` | "I saw something, respond to it" |
-| `send_keys()` | Reactive input to a monitored pane |
-| `capture_pane()` | Snapshot a pane being monitored |
-| `sample_text()` | Read back recent output for context |
-| `list_windows()` | "What windows are in this session?" |
-| `list_panes()` | "What panes are in this session?" |
+- **Cheap handles**: `Target` holds `Arc<HostHandleInner>` + `TargetAddress` enum.
+  Clone is cheap and safe to pass across tasks.
+- **Navigation is optional**: `host.session("build")?.send_text("ls")` works without
+  ever listing windows or panes. `target.children()` drills down when needed.
+- **DC13 preserved**: On-demand operations work regardless of monitoring state.
+  A `Target` works the same whether monitoring is active or not.
 
-**What stays on `HostHandle` only** (host-wide, lifecycle):
+**`Deref` for monitoring**: `SessionMonitorHandle` only adds `shutdown()` and
+`is_active()`. Everything else comes from `Target` via `Deref`. This means
+`monitor.capture()`, `monitor.children()`, `monitor.send_text("x")` etc. all work
+without any explicit delegation code.
 
-| Method | Why |
-|--------|-----|
-| `create_session()` / `kill_session()` | Session lifecycle, not monitoring-scoped |
-| `list_sessions()` | Host-wide discovery |
-| `rename_session()` | Session-level metadata |
-| `capture_session()` | Cross-pane snapshot (host-scoped) |
-| `rename_window()` | Could be on either; kept on HostHandle for simplicity |
+### DC17: Type Safety via Target + TargetAddress
 
-**Invariant preserved**: DC13 states on-demand operations work regardless of monitoring
-state. `HostHandle` methods are always available. `SessionMonitorHandle` methods are
-a convenience layer for the monitoring context — they do not gate functionality behind
-an active monitor.
+**Decision**: Type safety comes from the `TargetAddress` enum (`Session(SessionInfo)`,
+`Window(WindowInfo)`, `Pane(PaneAddress)`) embedded in each `Target`. Discovery
+methods produce `Target` values with appropriate addresses; subsequent operations
+carry that typed context. Raw strings enter via `host.target("build:0.1")` as
+the escape hatch.
 
-**Implementation**: `SessionMonitorHandle` holds `Arc<HostHandle>`. Each convenience
-method delegates to the corresponding `HostHandle` method, filling in the session name
-from `self.session_name`. No new transport calls or state — pure delegation.
+**Rationale**: Raw string parameters for session names and window indices are
+error-prone — a typo silently targets the wrong entity or returns empty results.
+The `Target` approach provides:
+- **Provenance**: A `Target` was produced by the system (via `list_sessions()`,
+  `create_session()`, `children()`, etc.), so it refers to a real entity
+- **Structural scoping**: `target.children()` returns child-level `Target` values —
+  no `PaneScope` enum or string-based filtering needed
+- **Self-contained context**: Each `Target` carries enough info to construct tmux
+  commands without external lookups. `WindowInfo` includes `session_name`; `PaneAddress`
+  includes session and window indices.
+
+**API changes from flat HostHandle baseline**:
+
+| Before (flat HostHandle) | After (unified Target) |
+|---------------------------|------------------------|
+| `host.kill_session(name: &str)` | `target.kill()` |
+| `host.list_windows(session: &str)` | `target.children()` (at session level) |
+| `host.list_panes(filter: Option<&Regex>)` | `target.children()` (at window level) |
+| `host.capture_session(session: &str)` | `target.capture_all()` |
+| `host.rename_session(name, new_name)` | `target.rename(new_name)` |
+| `host.send_text(&pane_addr, text)` | `target.send_text(text)` |
+| `host.send_keys(&pane_addr, keys)` | `target.send_keys(keys)` |
+| `host.capture_pane(&pane_addr)` | `target.capture()` |
+| `host.sample_text(&pane_addr, query)` | `target.sample_text(query)` |
+| `host.create_session(...) -> Result<()>` | `host.create_session(...) -> Result<Target>` |
+
+**Escape hatch**: `host.target("build:0.1")` parses a tmux target string, queries
+tmux to verify the entity exists, and returns `Option<Target>`. This is the bridge
+from raw strings (CLI args, config files) to typed handles.
+
 
 ---
 
@@ -2325,7 +2445,7 @@ Structured for incremental delivery. Each phase produces a working, testable art
 6. Implement `capture.rs`: `capture_pane()`, `capture_pane_history()`, `capture_session()`
 7. Implement `control.rs`: `create_session()`, `kill_session()`, `send_keys()`,
    `send_text()`, `rename_session()`, `rename_window()` with shell escaping (addresses OC5)
-8. Implement `host.rs`: `HostHandle` wiring all of the above
+8. Implement `host.rs`: `HostHandle` and `Target` wiring all of the above (DC16)
 9. Unit tests: `PaneAddress` identity (pane_id as key, display target as metadata),
    `KeySequence` parsing + rendering, shell escaping with adversarial inputs,
    `MockTransport`-based tests for all operations
@@ -2338,8 +2458,9 @@ input, and rename sessions — all without SSH.
 - `PaneAddress` uses `pane_id` as key; `session:window.pane` roundtrips as display metadata
 - `KeySequence::parse("hello{Enter}{C-c}")` produces correct tmux commands
 - `send_text()` with input `"; rm -rf /; echo "` does not execute injected commands
-- `create_session("test")` + `list_sessions()` shows the new session
-- `kill_session("test")` + `list_sessions()` no longer shows it
+- `create_session("test", ...)` returns `Target` at session level with correct name and id
+- `target.kill()` + `list_sessions()` no longer shows it
+- `host.session("nonexistent")` returns `Ok(None)`
 - `list_sessions()` returns `Vec<SessionInfo>` with all fields populated
 - All operations work via `MockTransport` in unit tests
 
