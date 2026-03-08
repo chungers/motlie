@@ -419,11 +419,28 @@ impl Fleet {
     /// Iterate over all connected targets.
     pub fn hosts(&self) -> impl Iterator<Item = (&str, &HostHandle)>;
 
+    // --- Monitoring (fleet-wide) ---
+
     /// Start monitoring on all connected hosts (spawns background tasks).
     pub async fn start_monitoring(&self, rules: &[TriggerRule]) -> Result<()>;
 
-    /// Shutdown: stop monitoring, cleanup pipes, close connections.
+    /// Shutdown: stop monitoring on all hosts, cleanup pipes, close connections.
     pub async fn shutdown(&self) -> Result<()>;
+
+    // --- Monitoring (per-host) ---
+
+    /// Start monitoring on a single host by name/alias.
+    /// The host must be connected. Monitoring sessions are discovered
+    /// automatically (or filtered by the host's pane_filter config).
+    pub async fn start_monitoring_host(
+        &self,
+        host: &str,
+        rules: &[TriggerRule],
+    ) -> Result<()>;
+
+    /// Stop monitoring on a single host. Cleans up control-mode connections
+    /// and pipe-pane state for this host only. Other hosts continue unaffected.
+    pub async fn stop_monitoring_host(&self, host: &str) -> Result<()>;
 }
 ```
 
@@ -511,14 +528,88 @@ impl HostHandle {
 
     // --- Monitoring (long-running) ---
 
-    /// Start continuous output monitoring on matching panes.
-    /// Returns a handle to stop monitoring later.
+    /// Start continuous output monitoring on all matching sessions.
+    /// Opens one control-mode connection per discovered session (DC10).
+    /// Returns a handle to stop all monitoring on this host.
     pub async fn start_monitoring(
         &self,
         filter: Option<&Regex>,
         rules: &[TriggerRule],
         shutdown: watch::Receiver<bool>,
     ) -> Result<MonitorHandle>;
+
+    /// Start monitoring a single session by name.
+    /// Opens one control-mode connection for this session.
+    /// Returns a session-scoped handle that can stop this session's
+    /// monitoring independently without affecting other sessions.
+    pub async fn start_monitoring_session(
+        &self,
+        session: &str,
+        rules: &[TriggerRule],
+    ) -> Result<SessionMonitorHandle>;
+
+    /// Stop monitoring a single session. Tears down the control-mode
+    /// connection for this session only. Other sessions continue unaffected.
+    pub async fn stop_monitoring_session(&self, session: &str) -> Result<()>;
+
+    /// Stop all monitoring on this host. Equivalent to calling
+    /// stop_monitoring_session() on every active session.
+    pub async fn stop_monitoring(&self) -> Result<()>;
+
+    /// List sessions currently being monitored on this host.
+    pub fn monitored_sessions(&self) -> Vec<String>;
+}
+```
+
+### Monitor Handles — Granular Monitoring Control
+
+Monitoring returns handles at two granularities: per-host (`MonitorHandle`) and
+per-session (`SessionMonitorHandle`). This aligns with DC10's per-session control-mode
+connections and DC13's granular lifecycle requirement.
+
+```rust
+/// Handle to all monitoring on a single host.
+/// Returned by HostHandle::start_monitoring().
+pub struct MonitorHandle {
+    /// Per-session handles, keyed by session name.
+    sessions: HashMap<String, SessionMonitorHandle>,
+}
+
+impl MonitorHandle {
+    /// Stop monitoring on all sessions for this host.
+    pub async fn shutdown(&self) -> Result<()>;
+
+    /// Stop monitoring on a single session by name.
+    pub async fn stop_session(&self, session: &str) -> Result<()>;
+
+    /// Get the handle for a specific session.
+    pub fn session(&self, name: &str) -> Option<&SessionMonitorHandle>;
+
+    /// List actively monitored session names.
+    pub fn active_sessions(&self) -> Vec<String>;
+}
+
+/// Handle to monitoring on a single session.
+/// Returned by HostHandle::start_monitoring_session().
+/// Each handle owns one control-mode connection (DC10).
+pub struct SessionMonitorHandle {
+    session_name: String,
+    /// Signals this session's monitor task to stop.
+    stop_tx: watch::Sender<bool>,
+    /// The monitor task's join handle.
+    task: JoinHandle<()>,
+}
+
+impl SessionMonitorHandle {
+    /// Stop monitoring this session. Tears down the control-mode connection,
+    /// flushes pending output to the OutputBus, and joins the monitor task.
+    pub async fn shutdown(&self) -> Result<()>;
+
+    /// Check if this session's monitor is still running.
+    pub fn is_active(&self) -> bool;
+
+    /// The session name being monitored.
+    pub fn session_name(&self) -> &str;
 }
 ```
 
@@ -1259,6 +1350,8 @@ Internal responsibilities:
 - SSH targets are connected concurrently via `tokio::JoinSet`
 - Tracks per-target status: `Disconnected`, `Connecting`, `Connected`, `Monitoring`, `Error(String)`
 - Routes on-demand operations (create, kill, capture, send-keys, list) to the correct target
+- Supports per-host monitoring start/stop (`start_monitoring_host()`, `stop_monitoring_host()`)
+- Per-host stop delegates to `HostHandle::stop_monitoring()`, which tears down all session monitors for that host
 - Owns the `shutdown` watch channel; `shutdown()` signals all targets
 
 ```rust
@@ -1266,7 +1359,8 @@ pub enum HostStatus {
     Disconnected,
     Connecting,
     Connected,
-    Monitoring,
+    /// Monitoring N sessions. Includes count for observability.
+    Monitoring { sessions: usize },
     Error(String),
 }
 ```
@@ -1283,10 +1377,17 @@ root for per-target operations.
 pub struct HostHandle {
     transport: Box<dyn Transport>,
     config: HostTarget,
-    pipe_state: Option<PipeManager>,   // None if monitoring not started
-    monitor_handle: Option<MonitorHandle>,
+    pipe_state: Option<PipeManager>,   // None if monitoring not started (fallback path)
+    /// Per-session monitor handles, keyed by session name.
+    /// Each entry represents one control-mode connection (DC10).
+    session_monitors: HashMap<String, SessionMonitorHandle>,
 }
 ```
+
+`session_monitors` replaces the previous `Option<MonitorHandle>`. The host-level
+`MonitorHandle` returned by `start_monitoring()` is a view over the per-session handles,
+not a separate object. This enables `stop_monitoring_session("build")` to tear down one
+control-mode connection while others continue running.
 
 ### `pipe.rs`
 
@@ -1321,28 +1422,37 @@ handling is the binary's responsibility, keeping the library embeddable in MCP/s
 
 ### `monitor.rs`
 
-The core event loop. Reads the multiplexed output stream and evaluates rules.
+The core event loop. Each `SessionMonitor` owns one control-mode connection to a single
+tmux session and evaluates rules against its output. `HostHandle` creates one
+`SessionMonitor` per monitored session (DC10, DC13).
 
 ```rust
-pub struct OutputMonitor { /* rules, cooldown state, shell channel */ }
+/// Monitors a single tmux session via control mode.
+pub struct SessionMonitor { /* session name, rules, cooldown state */ }
 
-impl OutputMonitor {
+impl SessionMonitor {
+    /// Run the monitor loop for one session.
+    /// Opens `tmux -C attach -t <session>` via the transport, parses
+    /// `%output %<pane_id> <data>` frames, evaluates rules, and publishes
+    /// PaneOutput to the OutputBus.
+    /// Returns when `stop` signal is received or the connection drops.
     pub async fn run(
         &mut self,
         transport: &dyn Transport,
-        panes: &[PaneAddress],
+        session: &str,
         rules: &[TriggerRule],
-        shutdown: tokio::sync::watch::Receiver<bool>,
+        bus: &OutputBus,
+        stop: watch::Receiver<bool>,
     ) -> Result<()>;
 }
 ```
 
 **Must address P3**: Rule evaluation replaces the hardcoded `contains('>')` check.
 
-**Must address P6**: Monitoring uses a dedicated channel — a control mode session
-(`tmux -C attach`, see DC10) as the primary strategy, or `tail -qf` on pipe files as
-fallback. Action dispatch (send-keys) uses separate exec channels routed through a
-bounded queue (see [DC4](#dc4-action-dispatch-channel-strategy)).
+**Must address P6**: Each `SessionMonitor` uses a dedicated control-mode connection
+(`tmux -C attach -t <session>`, see DC10) as the primary strategy, or per-pane pipe
+files as fallback. Action dispatch (send-keys) uses separate exec channels routed
+through a bounded queue (see [DC4](#dc4-action-dispatch-channel-strategy)).
 
 **Must address P9**: Failed send-keys or malformed lines must be logged at `warn` level,
 not silently dropped.
@@ -1351,6 +1461,10 @@ not silently dropped.
 frames — structured, unambiguous, and keyed on `#{pane_id}` per DC1. For the pipe-pane
 fallback, `pipe-pane` output is prefixed with `%<pane_id>` (set at attach time), and the
 monitor parses on that prefix directly — no filename decoding required.
+
+**Lifecycle**: Each `SessionMonitor::run()` is spawned as a tokio task by `HostHandle`.
+The `SessionMonitorHandle` returned to the caller holds the task's `JoinHandle` and stop
+channel. Stopping a session monitor is non-disruptive to other sessions (DC13).
 
 ---
 
@@ -1586,6 +1700,44 @@ that routes requests through the existing per-host action dispatch queue (DC4).
   cadence and complicates the bus with timer logic.
 - Callback-based sinks (no channels): Rejected — a slow callback blocks the bus loop.
 - Shared `Arc<Mutex<Vec<PaneOutput>>>` polling: Rejected — wastes CPU, no backpressure.
+
+### DC13: Granular Monitoring Lifecycle
+
+**Decision**: Monitoring is controllable at three levels: fleet-wide, per-host, and
+per-session. Each level can be started and stopped independently without affecting
+other active monitors at the same or higher level.
+
+**API surface**:
+
+| Level | Start | Stop |
+|-------|-------|------|
+| Fleet | `fleet.start_monitoring(rules)` | `fleet.shutdown()` |
+| Host | `fleet.start_monitoring_host(host, rules)` | `fleet.stop_monitoring_host(host)` |
+| Session | `host.start_monitoring_session(session, rules)` | `host.stop_monitoring_session(session)` |
+
+**Rationale**: DC10 establishes that each monitored session has its own control-mode
+connection (`tmux -C attach -t <session>`). These connections are independent — tearing
+one down has no effect on others. The API should expose this natural granularity rather
+than forcing all-or-nothing lifecycle. Use cases:
+
+- **Dynamic session management**: A consumer creates a tmux session, monitors it for a
+  task, then stops monitoring when the task completes — without disrupting monitoring
+  on other sessions.
+- **Selective host disconnect**: An SSH target becomes unreachable. The caller stops
+  monitoring on that host while others continue.
+- **Incremental rollout**: Start monitoring one session at a time for debugging before
+  enabling fleet-wide monitoring.
+
+**Implementation**: `HostHandle` tracks per-session `SessionMonitorHandle` in a
+`HashMap<String, SessionMonitorHandle>`. Each handle owns its control-mode connection's
+stop channel and task join handle. `MonitorHandle` (returned by `start_monitoring()`) is
+a view over the session handles, not a separate entity. `stop_monitoring_session()` drops
+the session's handle, which signals the stop channel, flushes pending output to the
+`OutputBus`, and joins the monitor task. `stop_monitoring()` iterates all sessions.
+
+**Invariant**: On-demand operations (`capture_pane`, `send_keys`, `list_sessions`, etc.)
+are unaffected by monitoring state. A host with stopped monitoring is still fully
+operational for on-demand use.
 
 ---
 
