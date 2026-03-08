@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-08 | Added `Target::exec()` for structured command execution with sentinel-based capture (DC19). `ExecOutput` type with stdout and exit code. | Core Abstractions, DC19 |
 | 2026-03-08 | Added workstreams to `Fleet`: `bind()`, `find()`, `workstreams()` for named (host, target) bindings. Future DC18 outlines composite workstreams composing with sinks/streams. | Core Abstractions |
 | 2026-03-08 | `PaneOutput` → `TargetOutput`: source identified by `TargetAddress` instead of flat pane fields. Generalizes to session-only hosts. `SourceLabel` uses `TargetAddress`. | Output Sink Pipeline, DC12 |
 | 2026-03-08 | `MonitorHandle` lookup API uses `&Target`/`&TargetSpec` instead of raw strings; `start/stop_monitoring_session` accept `&Target`. Rationale for keeping `SessionMonitorHandle` name (DC10 session-scoped constraint). | Core Abstractions, DC13 |
@@ -733,6 +734,18 @@ impl Target {
     /// Send a key sequence (Enter, C-c, Tab, etc.)
     pub async fn send_keys(&self, keys: &KeySequence) -> Result<()>;
 
+    /// Execute a shell command in the target's pane and capture structured
+    /// output. Sends the command with a sentinel suffix, polls scrollback
+    /// until the sentinel appears (or timeout), and extracts stdout and
+    /// exit code. See DC19 for mechanism and trade-offs.
+    ///
+    /// At session/window level, executes in the active pane.
+    pub async fn exec(
+        &self,
+        command: &str,
+        timeout: Duration,
+    ) -> Result<ExecOutput>;
+
     /// Capture the visible content of the target pane.
     /// At session/window level, captures the active pane.
     pub async fn capture(&self) -> Result<String>;
@@ -772,6 +785,20 @@ impl Target {
 }
 
 pub enum TargetLevel { Session, Window, Pane }
+
+/// Structured output from a command executed via Target::exec().
+pub struct ExecOutput {
+    /// Command stdout captured from scrollback between the command echo
+    /// and the sentinel line. Chronological order, trailing newline stripped.
+    pub stdout: String,
+    /// Exit code of the command, extracted from the sentinel.
+    pub exit_code: i32,
+}
+
+impl ExecOutput {
+    /// True if the command exited with code 0.
+    pub fn success(&self) -> bool { self.exit_code == 0 }
+}
 ```
 
 **Why one type instead of three**:
@@ -2516,6 +2543,105 @@ string, and `host.target(&spec)` queries tmux to verify the entity exists and re
 is preferred when components are known at compile time. This is the bridge from raw
 strings (CLI args, config files) to typed handles.
 
+### DC19: Structured Command Execution via Target::exec()
+
+**Decision**: `Target::exec(command, timeout)` provides structured command execution
+within a tmux pane, complementing the existing fire-and-forget `send_text()`/`send_keys()`.
+It returns `ExecOutput { stdout, exit_code }` by using a sentinel-based capture mechanism.
+No host-level bypass (`HostHandle::exec()`) is added — the library's abstraction boundary
+is tmux, and all command execution stays within the tmux framework.
+
+**Three modes of pane interaction**:
+
+| Method | Semantics | Output | Use case |
+|--------|-----------|--------|----------|
+| `send_text(text)` | Fire-and-forget PTY input | None | Interactive use: typing into vim, top, a REPL |
+| `send_keys(keys)` | Fire-and-forget special keys | None | Control sequences: Enter, C-c, Tab |
+| `exec(cmd, timeout)` | Command-and-capture | `ExecOutput` | Automation: build, test, deploy, diagnostics |
+
+**Rationale**: Automation workflows need structured results — "run `make test`, did it
+pass?" Today this requires `send_text("make test\n")` + manual `capture()` + hoping
+the command finished + parsing output for success/failure. `exec()` encapsulates this
+into a single call with clear completion semantics and an exit code.
+
+**Sentinel mechanism**:
+
+1. Generate a unique marker: `__MOTLIE_<uuid>__`
+2. Send via `send_keys`: `<command> ; echo "__MOTLIE_<uuid>__ $?" {Enter}`
+3. Poll `capture_with_history()` at intervals until the sentinel line appears (or timeout)
+4. Extract everything between the command echo and the sentinel as stdout
+5. Parse the exit code from `__MOTLIE_<uuid>__ <exit_code>`
+6. Return `ExecOutput { stdout, exit_code }`
+
+**Why sentinel-based**:
+
+- **Works with any shell**: The sentinel is just `echo` — works in bash, zsh, sh, fish
+  (with minor syntax adaptation). No special shell features or tmux extensions required.
+- **Reuses existing primitives**: `send_keys()` for input, `capture_with_history()` for
+  output. No new transport capabilities or tmux features needed.
+- **Non-invasive**: The sentinel echo is appended after the command via `;`. It does not
+  modify the command itself. The pane's shell state is unchanged after execution.
+- **Concurrent-safe**: The UUID in the sentinel ensures that concurrent `exec()` calls
+  on different panes (or even the same pane, sequentially) never confuse each other's output.
+
+**Alternatives considered**:
+
+- **Host-level `HostHandle::exec()`** (transport bypass): Rejected — runs outside tmux,
+  so the command doesn't execute in the pane's environment (virtualenvs, working directory,
+  shell aliases, env vars set by prior commands). The pane's shell is the ground truth for
+  the workstream's state; bypassing it loses that context.
+- **`tmux run-shell`**: Runs a command in tmux's server context, not in the pane's shell.
+  Output appears in the pane but isn't easily captured programmatically. Doesn't inherit
+  the pane's shell environment.
+- **Control-mode `%output` parsing**: Control mode streams output but has no concept of
+  command boundaries. There's no signal for "the command finished." Sentinel-based capture
+  adds explicit boundaries.
+- **Expect-style prompt detection**: Fragile — depends on knowing the exact prompt format,
+  which varies across shells, hosts, and user configurations. The sentinel is universal.
+
+**Limitations and trade-offs**:
+
+- **Assumes a shell prompt**: `exec()` assumes the pane has an active shell waiting for
+  input. Calling `exec()` on a pane running `vim` or `top` will inject the command into
+  that program — not a shell. Callers should check pane state (via `capture()`) if unsure.
+- **Timeout is required**: There is no reliable way to detect a hung command without a
+  timeout. A command that never completes will block until timeout, then return an error.
+- **No stderr separation**: Tmux scrollback captures the merged terminal output (stdout +
+  stderr interleaved as they appear on the PTY). `ExecOutput.stdout` is really "terminal
+  output" — true stderr separation would require shell-level redirection that `exec()` does
+  not impose. The field is named `stdout` for the common case; callers needing separation
+  can use `exec("cmd 2>/tmp/err", ...)` and capture stderr separately.
+- **Scrollback pollution**: The sentinel line appears in the pane's scrollback. This is
+  generally harmless but visible to humans viewing the pane. A future refinement could
+  clear the sentinel line after capture.
+- **Polling latency**: `capture_with_history()` is polled at intervals (e.g., 100ms).
+  This adds up to one poll interval of latency after command completion. For automation
+  use cases this is acceptable; for latency-sensitive scenarios, monitoring-based
+  approaches (which stream output in real time) are more appropriate.
+
+**Usage examples**:
+
+```rust
+let build = host.session("build").await?.unwrap();
+
+// Run a command and check the result
+let result = build.exec("cargo test", Duration::from_secs(300)).await?;
+if result.success() {
+    println!("Tests passed");
+} else {
+    println!("Tests failed (exit {}): {}", result.exit_code, result.stdout);
+}
+
+// Chain structured commands
+let result = build.exec("git pull", Duration::from_secs(30)).await?;
+if result.success() {
+    build.exec("cargo build --release", Duration::from_secs(600)).await?;
+}
+
+// Still use send_text for interactive/fire-and-forget
+build.send_text("top").await?;                    // interactive — no output needed
+build.send_keys(&KeySequence::parse("{C-c}")?).await?;  // interrupt it
+```
 
 ---
 
