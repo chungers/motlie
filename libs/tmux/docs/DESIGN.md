@@ -1520,8 +1520,8 @@ mode is unavailable or insufficient.
 
 | Criterion | Control Mode (`tmux -C`) | Pipe-Pane + FIFO/File |
 |-----------|--------------------------|----------------------|
-| Output framing | Structured: `%output %<pane_id> <data>` | Unstructured: filename prefix via awk |
-| Pane identity | Native `%<pane_id>` in protocol | Requires filename encoding (DC1) |
+| Output framing | Structured: `%output %<pane_id> <data>` | Per-pane file/FIFO, keyed by `pane_id` |
+| Pane identity | Native `%<pane_id>` in protocol | `pane_id` prefix at attach time (DC1) |
 | `/tmp` artifacts | None | FIFOs or log files per pane |
 | Cleanup on crash | Nothing to clean up | Orphaned FIFOs/files, dangling pipe-pane |
 | Interleaving (OC2) | Not possible — framed protocol | Possible with `tail -qf` on multiple files |
