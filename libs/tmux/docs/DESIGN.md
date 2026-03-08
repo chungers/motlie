@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-08 | Added workstreams to `Fleet`: `bind()`, `find()`, `workstreams()` for named (host, target) bindings. Future DC18 outlines composite workstreams composing with sinks/streams. | Core Abstractions |
 | 2026-03-08 | `PaneOutput` → `TargetOutput`: source identified by `TargetAddress` instead of flat pane fields. Generalizes to session-only hosts. `SourceLabel` uses `TargetAddress`. | Output Sink Pipeline, DC12 |
 | 2026-03-08 | `MonitorHandle` lookup API uses `&Target`/`&TargetSpec` instead of raw strings; `start/stop_monitoring_session` accept `&Target`. Rationale for keeping `SessionMonitorHandle` name (DC10 session-scoped constraint). | Core Abstractions, DC13 |
 | 2026-03-08 | Added `TargetSpec` type with builder for `HostHandle::target()` — replaces raw string parameter | Core Abstractions, DC17 |
@@ -464,6 +465,37 @@ impl Fleet {
     /// Stop monitoring on a single host. Cleans up control-mode connections
     /// and pipe-pane state for this host only. Other hosts continue unaffected.
     pub async fn stop_monitoring_host(&self, host: &str) -> Result<()>;
+
+    // --- Workstreams (named bindings) ---
+
+    /// Bind a user-defined name to a (host, target) pair. The name must be
+    /// unique within the fleet. Returns an error if the name is already bound.
+    ///
+    /// Workstreams give callers a stable, domain-meaningful name for a
+    /// specific entity across the fleet — e.g., "build-pipeline" for
+    /// the build session on web-1, or "db-migration" for a pane on db-1.
+    pub fn bind(
+        &mut self,
+        name: &str,
+        host: &HostHandle,
+        target: Target,
+    ) -> Result<()>;
+
+    /// Remove a workstream binding by name.
+    pub fn unbind(&mut self, name: &str) -> Result<()>;
+
+    /// Look up a workstream by name. Returns the host alias and Target.
+    pub fn find(&self, name: &str) -> Option<(&str, &HostHandle, &Target)>;
+
+    /// List all workstream bindings.
+    pub fn workstreams(&self) -> Vec<WorkstreamEntry>;
+}
+
+/// A named binding of a user-defined name to a (host, target) pair.
+pub struct WorkstreamEntry {
+    pub name: String,
+    pub host_alias: String,
+    pub target: Target,
 }
 ```
 
@@ -472,6 +504,47 @@ about which target a session lives on. `Fleet` provides the "I have N targets, o
 on them" abstraction. For localhost-only use, `Fleet` with one local target works
 identically — there is no separate single-target API. Localhost is always available
 without SSH configuration.
+
+**Workstreams** give callers a domain-meaningful vocabulary that decouples intent from
+infrastructure. Instead of `fleet.host("web-1")?.session("build")`, a caller says
+`fleet.find("build-pipeline")` — the mapping from name to (host, target) is established
+once and referenced everywhere. This is especially useful when the same logical
+workstream spans config, monitoring rules, sink filters, and CLI commands.
+
+**Usage**:
+
+```rust
+let host = fleet.host("web-1").unwrap();
+let build = host.create_session("build", None, Some("cargo build")).await?;
+fleet.bind("build-pipeline", host, build.clone())?;
+
+// Later — anywhere in the codebase
+let (_, _, target) = fleet.find("build-pipeline").unwrap();
+target.send_text("cargo test").await?;
+
+// List all workstreams
+for ws in fleet.workstreams() {
+    println!("{}: {} on {}", ws.name, ws.target.target_string(), ws.host_alias);
+}
+```
+
+**Future: workstreams as sink/stream groups** (DC18). A workstream today binds a single
+name to a single (host, target). A natural extension is *composite workstreams* that
+group multiple targets under one name — e.g., "deploy" spans `web-1:build`, `db-1:migrate`,
+and `web-1:test`. This would compose with the existing sink pipeline:
+
+- **`SinkFilter` by workstream**: Filter output by workstream name instead of
+  individual host/session/pane fields. The bus resolves the workstream to its member
+  targets at filter-match time.
+- **`JoinedStream` over a workstream**: `subscribe_joined()` could accept a workstream
+  name, automatically creating filters for all member targets. The joined view then
+  shows the multi-party conversation for that logical workflow.
+- **Workstream-scoped monitoring**: Start/stop monitoring for all targets in a
+  workstream with a single call.
+
+This extension is deferred — single-target workstreams cover the immediate need.
+Composite workstreams require decisions about membership lifecycle (what happens when
+a target is killed?) that should be informed by real usage patterns.
 
 ### `HostHandle` — Per-Host Entry Point
 
