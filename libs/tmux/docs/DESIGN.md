@@ -506,6 +506,15 @@ impl HostHandle {
     /// Capture all panes in a session, returned as a map of pane address → content.
     pub async fn capture_session(&self, session: &str) -> Result<HashMap<PaneAddress, String>>;
 
+    /// Sample recent text from a pane's scrollback, returned in chronological order
+    /// (oldest line first). The query controls how much to capture: last N lines,
+    /// or scan backwards until a condition matches.
+    pub async fn sample_text(
+        &self,
+        target: &PaneAddress,
+        query: &ScrollbackQuery,
+    ) -> Result<String>;
+
     // --- Control ---
 
     /// Send literal text to a pane. The text is escaped for tmux send-keys.
@@ -612,6 +621,50 @@ impl SessionMonitorHandle {
     pub fn session_name(&self) -> &str;
 }
 ```
+
+### `ScrollbackQuery` — On-Demand Text Sampling
+
+Defines how much scrollback to capture from a pane. The result is always returned in
+chronological order (oldest line first), regardless of the query direction. This is the
+complement to `send_text()` — send commands in, sample output back.
+
+```rust
+pub enum ScrollbackQuery {
+    /// Capture the last N lines from the pane (visible + scrollback).
+    /// Equivalent to `capture-pane -p -S -N`.
+    LastLines(usize),
+
+    /// Scan backwards from the current cursor position until a line matches
+    /// the regex, then return everything from that match to the present.
+    /// `max_lines` caps the backward scan to prevent unbounded reads.
+    Until {
+        pattern: Regex,
+        max_lines: usize,
+    },
+
+    /// Capture the last N lines, but stop early if a line matches the regex.
+    /// Returns from the match (inclusive) to the present.
+    /// Useful for "give me output since the last prompt" patterns.
+    LastLinesUntil {
+        lines: usize,
+        stop_pattern: Regex,
+    },
+}
+```
+
+**Implementation**: All variants use `tmux capture-pane -p -S <start> -E <end>` under
+the hood. `LastLines(n)` maps directly to `-S -n`. The `Until` and `LastLinesUntil`
+variants capture `max_lines` (or `lines`) of scrollback in one call, then scan the
+result in reverse for the pattern match, truncating at the match point. The final
+output is returned in chronological order — no reversal needed since `capture-pane`
+already outputs top-to-bottom.
+
+**Use cases**:
+- `LastLines(50)` — "show me the last 50 lines" for a quick status check
+- `Until { pattern: r"^\$\s*$", max_lines: 5000 }` — "everything since the last
+  shell prompt" for capturing a command's full output
+- `LastLinesUntil { lines: 200, stop_pattern: r"^error:" }` — "last 200 lines, but
+  stop if we hit an error marker" for focused error context
 
 ### `KeySequence` — Safe Input Construction
 
@@ -1226,7 +1279,29 @@ pub async fn capture_session(
     transport: &dyn Transport,
     session: &str,
 ) -> Result<HashMap<PaneAddress, String>>;
+
+/// Sample recent text from a pane's scrollback, returned in chronological order.
+/// Delegates to capture_pane_history() internally, then applies the query's
+/// pattern matching and truncation logic.
+pub async fn sample_text(
+    transport: &dyn Transport,
+    target: &PaneAddress,
+    query: &ScrollbackQuery,
+) -> Result<String>;
 ```
+
+**`sample_text` implementation**:
+1. `LastLines(n)` → calls `capture_pane_history(transport, target, -(n as i32), -1)`.
+   Result is already chronological.
+2. `Until { pattern, max_lines }` → calls `capture_pane_history` with
+   `start = -(max_lines as i32)`, `end = -1`. Scans the result from the bottom up for
+   the first line matching `pattern`. Returns from that line (inclusive) to the end.
+   If no match, returns the full captured range.
+3. `LastLinesUntil { lines, stop_pattern }` → same as `LastLines(lines)`, then scans
+   bottom-up for `stop_pattern`. Truncates at the match point (inclusive).
+
+In all cases the output preserves `capture-pane`'s top-to-bottom ordering — no reversal
+step is needed. The pattern scan is the only post-processing.
 
 **Escaping**: The `-p` flag outputs to stdout (not to a buffer), which is what we need
 over SSH exec channels. The `-e` flag (escape sequences) is intentionally NOT used — we
