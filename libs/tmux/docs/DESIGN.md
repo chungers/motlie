@@ -1175,8 +1175,9 @@ session level without requiring callers to know the pane ID.
 ### `MatcherKind` — Static-Dispatch Content Matching
 
 Content matching uses a closed enum (`MatcherKind`) rather than trait objects. All
-matching variants are known at compile time — no heap allocation or vtable dispatch
-on the hot path. Matchers can be stateless (regex, substring) or stateful (line
+matching variants are known at compile time — no vtable dispatch on the hot path.
+Combinators use `Vec` and `Box` (heap-backed) for tree structure.
+Matchers can be stateless (regex, substring) or stateful (line
 counters, vocabulary detectors that accumulate across calls).
 
 ```rust
