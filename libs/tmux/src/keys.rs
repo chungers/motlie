@@ -74,13 +74,18 @@ impl SpecialKey {
 }
 
 /// Validate that a raw tmux key name contains only safe characters.
-/// Tmux key names are alphanumeric with optional C-/M-/S- prefixes
-/// (e.g., "F1", "C-a", "M-S-Left", "KP0"). Reject shell metacharacters.
+/// Tmux key names include alphanumeric chars, C-/M-/S- modifier prefixes,
+/// and punctuation forms (e.g., "F1", "C-a", "M-S-Left", "C-\\", "IC").
+/// We reject characters that are dangerous in shell contexts:
+/// spaces, semicolons, backticks, $, |, &, >, <, newlines, null bytes.
+/// Since `control::send_keys` also shell-escapes all key names, this
+/// validation is defense-in-depth.
 fn is_valid_tmux_key_name(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    const SHELL_DANGEROUS: &[char] = &[
+        ' ', '\t', '\n', '\r', '\0', ';', '`', '$', '|', '&', '>', '<', '(', ')', '{',
+        '}', '[', ']', '!', '#', '~', '"', '\'',
+    ];
+    !name.is_empty() && !name.contains(SHELL_DANGEROUS)
 }
 
 /// Internal segment: literal text or special key.
