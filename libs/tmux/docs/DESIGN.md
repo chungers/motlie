@@ -1450,7 +1450,7 @@ per-host bounded dispatch queue (DC4) — the same path used by the monitor's tr
 rules. This ensures consistent ordering, backpressure, and concurrency limits regardless
 of whether an action originates from a rule or a sink.
 
-**LLM feedback loop**: An LLM sink can call `action_handle.send_keys_to_pane()` after
+**LLM feedback loop**: An LLM sink can call `action_handle.send_keys()` after
 analyzing output. The design of the LLM sink itself (prompt engineering, approval gates,
 autonomous vs supervised mode) is **out of scope** for this library. The library provides
 the `SinkKind` enum and `ActionHandle` API; LLM integration is a consumer concern.
