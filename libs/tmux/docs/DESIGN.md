@@ -1421,21 +1421,26 @@ impl ActionHandle {
     /// Send an action to the target entity. Non-blocking (queued).
     pub async fn send(&self, request: ActionRequest) -> Result<()>;
 
-    /// Convenience: send keys to a specific pane.
-    pub async fn send_keys_to_pane(
+    /// Convenience: send keys to a target.
+    pub async fn send_keys(
         &self,
         host: &str,
-        pane_id: &str,
+        target: &TargetAddress,
         keys: KeySequence,
     ) -> Result<()>;
 
-    /// Convenience: send text to a specific pane.
-    pub async fn send_text_to_pane(
+    /// Convenience: send text to a target.
+    pub async fn send_text(
         &self,
         host: &str,
-        pane_id: &str,
+        target: &TargetAddress,
         text: &str,
     ) -> Result<()>;
+
+    /// Convenience: construct an ActionRequest from a TargetOutput's metadata.
+    /// Extracts host and target from the output source — sinks don't need to
+    /// manually decompose TargetOutput fields.
+    pub fn request_from_output(output: &TargetOutput, action: SinkAction) -> ActionRequest;
 }
 ```
 
@@ -2693,9 +2698,10 @@ into a single call with clear completion semantics and an exit code.
 **Why sentinel-based**:
 
 - **Works with POSIX shells**: The sentinel uses `echo` + `$?` — works in bash, zsh,
-  sh, dash. Fish requires `$status` instead of `$?`; the implementation detects the
-  shell (via `$SHELL` or pane inspection) and adapts the exit-code variable accordingly.
-  No special shell features or tmux extensions required beyond `echo`.
+  sh, dash. Fish requires `$status` instead of `$?`. Shell detection precedence:
+  (1) `tmux display -p '#{pane_current_command}'` to inspect the running shell,
+  (2) fall back to `$SHELL` environment variable. Default is POSIX `$?` if detection
+  fails. No special shell features or tmux extensions required beyond `echo`.
 - **Reuses existing primitives**: `send_keys()` for input, `capture_with_history()` for
   output. No new transport capabilities or tmux features needed.
 - **Non-invasive**: The sentinel echo is appended after the command via `;`. It does not
