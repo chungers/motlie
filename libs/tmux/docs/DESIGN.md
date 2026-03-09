@@ -6,10 +6,11 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-08 | Address codex review round 8: clarify remaining dynamic types (`Arc<dyn Any>`, `Pin<Box<dyn Future>>`) in SinkKind docs and changelog; fix integration diagram to use `SinkKind` wrappers. | Core Abstractions, Output Sink Pipeline |
 | 2026-03-08 | Address codex review round 7: `CallbackSink` uses explicit `Arc<dyn Any>` state instead of closure capture, `on_output` is synchronous; fix stale examples (`SubstringMatcher` → `MatcherKind::Substring`, `JoinedSink` uses `SinkKind`); align DC6/OC6/Phase 1 to `TransportKind` enum; fix `host.rs` module spec `session_monitors` to `RwLock`; fix "SinkKind trait" → enum; fix DC14 matcher names. | Core Abstractions, Output Sink Pipeline, Module Specs, DC6, DC14, OC6, Phase 1, Phase 2c |
 | 2026-03-08 | Phase 3 CLI: noun-verb subcommand pattern (`session list`, `target capture`, `monitor start`) replacing flat hyphenated commands. `target` noun reflects unified Target type (DC16). | Phase 3 |
 | 2026-03-08 | Explicit FIFO cleanup on monitoring stop: `SessionMonitorHandle::shutdown()` and `stop_monitoring_session()` call `PipeManager::cleanup()` when pipe-pane fallback is active (P4). | Core Abstractions, Module Specs, DC13 |
-| 2026-03-08 | Eliminate all `Box<dyn>` dynamic dispatch: `Transport` → `TransportKind` enum, `ContentMatcher` → `MatcherKind` enum, `OutputSink` → `SinkKind` enum, `LabelFormat::Custom` → `fn` pointer. Static dispatch throughout hot paths. | Core Abstractions, Output Sink Pipeline, Module Specs, DC14 |
+| 2026-03-08 | Static dispatch on hot paths: `Transport` → `TransportKind` enum, `ContentMatcher` → `MatcherKind` enum, `OutputSink` → `SinkKind` enum, `LabelFormat::Custom` → `fn` pointer. Remaining dynamic types: `CallbackSink.state` (`Arc<dyn Any>`), `on_flush` (`Pin<Box<dyn Future>>` — Rust async limitation). | Core Abstractions, Output Sink Pipeline, Module Specs, DC14 |
 | 2026-03-08 | Added `Target::exec()` for structured command execution with sentinel-based capture (DC19). `ExecOutput` type with stdout and exit code. | Core Abstractions, DC19 |
 | 2026-03-08 | Added workstreams to `Fleet`: `bind()`, `find()`, `workstreams()` for named (host, target) bindings. Future DC18 outlines composite workstreams composing with sinks/streams. | Core Abstractions |
 | 2026-03-08 | `PaneOutput` → `TargetOutput`: source identified by `TargetAddress` instead of flat pane fields. Generalizes to session-only hosts. `SourceLabel` uses `TargetAddress`. | Output Sink Pipeline, DC12 |
@@ -1318,13 +1319,18 @@ vec![SinkFilter {
 
 ### `SinkKind` — Static-Dispatch Output Sinks
 
-Every output consumer is a variant of the `SinkKind` enum. No trait objects — the bus
-dispatches via `match` with zero indirection. Each sink runs as an independent async
-task with its own batching/accumulation behavior.
+Every output consumer is a variant of the `SinkKind` enum. The bus dispatches via
+`match` with zero vtable indirection on the hot path. Each sink runs as an independent
+async task with its own batching/accumulation behavior.
+
+**Remaining dynamic types**: `CallbackSink.state` uses `Arc<dyn Any + Send + Sync>` for
+type-erased consumer state (downcast at use site). `on_flush` returns `Pin<Box<dyn Future>>`
+— unavoidable until Rust stabilizes async fn pointers. Both are outside the per-event
+hot path (`on_output` is synchronous, `on_flush` runs once at shutdown).
 
 ```rust
-/// Closed enum of all sink types. Static dispatch — no heap allocation
-/// or vtable indirection on the hot path.
+/// Closed enum of all sink types. Static dispatch on the hot path —
+/// no vtable indirection for per-event processing.
 pub enum SinkKind {
     /// Writes to stdout with configurable formatting. Reference implementation.
     Stdio(StdioSink),
@@ -1644,9 +1650,9 @@ on top of the joined stream (e.g., a TUI panel, a web socket feed, or test harne
     │
     ├── OutputBus (owned by Fleet)
     │     │
-    │     ├── subscribe(StdioSink::new(), 1024)
-    │     ├── subscribe(TuiSink::new(), 16)             // binary-provided
-    │     └── subscribe(LlmSink::new(action_handle), 256) // captures ActionHandle
+    │     ├── subscribe(SinkKind::Stdio(StdioSink::new()), 1024)
+    │     ├── subscribe(SinkKind::Callback(tui_sink), 16)        // binary-provided
+    │     └── subscribe(SinkKind::Callback(llm_sink), 256)       // LLM callback sink
     │
     ├── HostHandle (localhost)
     │     └── Monitor ──publish()──► OutputBus
