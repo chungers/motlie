@@ -6,6 +6,8 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-08 | Phase 3 CLI: noun-verb subcommand pattern (`session list`, `target capture`, `monitor start`) replacing flat hyphenated commands. `target` noun reflects unified Target type (DC16). | Phase 3 |
+| 2026-03-08 | Explicit FIFO cleanup on monitoring stop: `SessionMonitorHandle::shutdown()` and `stop_monitoring_session()` call `PipeManager::cleanup()` when pipe-pane fallback is active (P4). | Core Abstractions, Module Specs, DC13 |
 | 2026-03-08 | Eliminate all `Box<dyn>` dynamic dispatch: `Transport` → `TransportKind` enum, `ContentMatcher` → `MatcherKind` enum, `OutputSink` → `SinkKind` enum, `LabelFormat::Custom` → `fn` pointer. Static dispatch throughout hot paths. | Core Abstractions, Output Sink Pipeline, Module Specs, DC14 |
 | 2026-03-08 | Added `Target::exec()` for structured command execution with sentinel-based capture (DC19). `ExecOutput` type with stdout and exit code. | Core Abstractions, DC19 |
 | 2026-03-08 | Added workstreams to `Fleet`: `bind()`, `find()`, `workstreams()` for named (host, target) bindings. Future DC18 outlines composite workstreams composing with sinks/streams. | Core Abstractions |
@@ -627,7 +629,9 @@ impl HostHandle {
     ) -> Result<SessionMonitorHandle>;
 
     /// Stop monitoring a single session.
-    /// Tears down its control-mode connection without affecting other sessions.
+    /// Calls SessionMonitorHandle::shutdown() — tears down the control-mode
+    /// connection and, if pipe-pane fallback was active, runs PipeManager::cleanup()
+    /// to detach pipes and remove FIFO files. Does not affect other sessions.
     pub async fn stop_monitoring_session(&self, target: &Target) -> Result<()>;
 
     /// List sessions currently being monitored.
@@ -923,6 +927,8 @@ impl Deref for SessionMonitorHandle {
 impl SessionMonitorHandle {
     /// Stop monitoring this session. Tears down the control-mode connection,
     /// flushes pending output to the OutputBus, and joins the monitor task.
+    /// If the pipe-pane fallback path was active, also calls
+    /// PipeManager::cleanup() to detach pipes and remove FIFO files (P4).
     /// Takes the JoinHandle from the internal Mutex<Option<...>> — safe to
     /// call multiple times (subsequent calls are no-ops).
     pub async fn shutdown(&self) -> Result<()>;
@@ -2453,7 +2459,9 @@ than forcing all-or-nothing lifecycle. Use cases:
 stop channel and task join handle. `MonitorHandle` (returned by `start_monitoring()`) is
 a view over the session handles, not a separate entity. `stop_monitoring_session()` drops
 the session's handle, which signals the stop channel, flushes pending output to the
-`OutputBus`, and joins the monitor task. `stop_monitoring()` iterates all sessions.
+`OutputBus`, joins the monitor task, and — if the pipe-pane fallback path was active —
+calls `PipeManager::cleanup()` to detach pipes and remove FIFO files from `/tmp` (P4).
+`stop_monitoring()` iterates all sessions.
 
 **Invariant**: On-demand operations (`target.capture()`, `target.send_keys()`,
 `host.list_sessions()`, etc.) are unaffected by monitoring state. A host with stopped
@@ -2966,15 +2974,27 @@ consumers.
    per-target status tracking, aggregate `start_monitoring()` and `shutdown()`
 2. Signal handling in the CLI binary via `tokio::signal` for SIGINT/SIGTERM (fixes P5),
    wired to `fleet.shutdown()`. The library does NOT install signal handlers (DC11).
-3. Create `bins/tmux-automator/` with `clap` CLI supporting subcommands:
-   - `create-session <name> [--host <alias>] [--window-name <name>] [--command <cmd>]`
-   - `kill-session <name> [--host <alias>]`
-   - `list-sessions [--host <alias>]` — list sessions on one or all targets
-   - `list-panes [--host <alias>] [--filter <regex>]` — list panes
-   - `capture <session:window.pane> [--host <alias>] [--history <lines>]` — dump pane
-   - `send <session:window.pane> <input> [--host <alias>]` — send keys
-   - `rename-session <old> <new> [--host <alias>]` — rename
-   - `monitor [--config <path>]` — start continuous monitoring
+3. Create `bins/tmux-automator/` with `clap` CLI using noun-verb subcommand grouping:
+
+   **`session` — session lifecycle**:
+   - `session list [--host <alias>]` — list sessions on one or all hosts
+   - `session create <name> [--host <alias>] [--window-name <name>] [--command <cmd>]`
+   - `session kill <name> [--host <alias>]`
+   - `session rename <old> <new> [--host <alias>]`
+
+   **`target` — operations on any tmux entity (session, window, pane)**:
+   - `target list [--host <alias>] [--filter <regex>]` — list panes/windows
+   - `target capture <spec> [--host <alias>] [--history <lines>]` — dump content
+   - `target send <spec> <input> [--host <alias>]` — send keys
+   - `target exec <spec> <command> [--host <alias>]` — run command, return stdout + exit code
+
+   **`monitor` — continuous monitoring lifecycle**:
+   - `monitor start [--config <path>]` — start monitoring on all configured targets
+   - `monitor status` — show active monitoring sessions
+
+   `<spec>` follows `TargetSpec` syntax: `session`, `session:window`, or
+   `session:window.pane`. The `target` noun reflects the unified `Target` type
+   (DC16) — capture, send, and exec work at any tmux addressing level.
 4. Config file support (TOML) with CLI flag overrides
 5. JSON and text log output modes
 6. Per-target tracing spans with alias labels
@@ -2984,11 +3004,13 @@ localhost and N remote hosts.
 
 **Acceptance criteria**:
 - `fleet.connect_all()` connects to 3 targets concurrently; one failure does not block others
-- CLI `list-sessions --host web-server` returns sessions from the aliased host
-- CLI `create-session build --host localhost` creates a local session
-- CLI `capture myapp:0.0 --host db-server --history 500` returns scrollback content
-- CLI `kill-session build` terminates the session
-- `monitor --config rules.toml` starts monitoring on all configured targets
+- CLI `session list --host web-server` returns sessions from the aliased host
+- CLI `session create build --host localhost` creates a local session
+- CLI `target capture myapp:0.0 --host db-server --history 500` returns scrollback content
+- CLI `target exec myapp:0.0 "make test" --host db-server` returns stdout and exit code
+- CLI `session kill build` terminates the session
+- `monitor start --config rules.toml` starts monitoring on all configured targets
+- `monitor status` shows active sessions being monitored
 
 ### Phase 4: Hardening + Testing
 
