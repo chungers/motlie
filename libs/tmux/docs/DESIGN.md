@@ -2,6 +2,34 @@
 
 ## Status: Draft
 
+## Change Log
+
+| Date | Change | Sections |
+|------|--------|----------|
+| 2026-03-08 | `Target::exec()` shell compatibility: document `$?` (POSIX) vs `$status` (fish) with shell detection. Replace `ActionTarget` enum with `TargetAddress` in `ActionRequest` for unified type consistency (DC16). | DC19, Core Abstractions, Output Sink Pipeline |
+| 2026-03-08 | Address codex review round 8: clarify remaining dynamic types (`Arc<dyn Any>`, `Pin<Box<dyn Future>>`) in SinkKind docs and changelog; fix integration diagram to use `SinkKind` wrappers. | Core Abstractions, Output Sink Pipeline |
+| 2026-03-08 | Address codex review round 7: `CallbackSink` uses explicit `Arc<dyn Any>` state instead of closure capture, `on_output` is synchronous; fix stale examples (`SubstringMatcher` → `MatcherKind::Substring`, `JoinedSink` uses `SinkKind`); align DC6/OC6/Phase 1 to `TransportKind` enum; fix `host.rs` module spec `session_monitors` to `RwLock`; fix "SinkKind trait" → enum; fix DC14 matcher names. | Core Abstractions, Output Sink Pipeline, Module Specs, DC6, DC14, OC6, Phase 1, Phase 2c |
+| 2026-03-08 | Phase 3 CLI: noun-verb subcommand pattern (`session list`, `target capture`, `monitor start`) replacing flat hyphenated commands. `target` noun reflects unified Target type (DC16). | Phase 3 |
+| 2026-03-08 | Explicit FIFO cleanup on monitoring stop: `SessionMonitorHandle::shutdown()` and `stop_monitoring_session()` call `PipeManager::cleanup()` when pipe-pane fallback is active (P4). | Core Abstractions, Module Specs, DC13 |
+| 2026-03-08 | Static dispatch on hot paths: `Transport` → `TransportKind` enum, `ContentMatcher` → `MatcherKind` enum, `OutputSink` → `SinkKind` enum, `LabelFormat::Custom` → `fn` pointer. Remaining dynamic types: `CallbackSink.state` (`Arc<dyn Any>`), `on_flush` (`Pin<Box<dyn Future>>` — Rust async limitation). | Core Abstractions, Output Sink Pipeline, Module Specs, DC14 |
+| 2026-03-08 | Added `Target::exec()` for structured command execution with sentinel-based capture (DC19). `ExecOutput` type with stdout and exit code. | Core Abstractions, DC19 |
+| 2026-03-08 | Added workstreams to `Fleet`: `bind()`, `find()`, `workstreams()` for named (host, target) bindings. Future DC18 outlines composite workstreams composing with sinks/streams. | Core Abstractions |
+| 2026-03-08 | `PaneOutput` → `TargetOutput`: source identified by `TargetAddress` instead of flat pane fields. Generalizes to session-only hosts. `SourceLabel` uses `TargetAddress`. | Output Sink Pipeline, DC12 |
+| 2026-03-08 | `MonitorHandle` lookup API uses `&Target`/`&TargetSpec` instead of raw strings; `start/stop_monitoring_session` accept `&Target`. Rationale for keeping `SessionMonitorHandle` name (DC10 session-scoped constraint). | Core Abstractions, DC13 |
+| 2026-03-08 | Added `TargetSpec` type with builder for `HostHandle::target()` — replaces raw string parameter | Core Abstractions, DC17 |
+| 2026-03-08 | Unified `Target` type replacing `SessionHandle`/`PaneHandle`/`WindowHandle` hierarchy (DC16, DC17). `HostHandle` slimmed to host-level only. Fixed stale references throughout. | Core Abstractions, Architecture, DC16, DC17, DC13, Module Specs, Phase 1 |
+| 2026-03-08 | Added session-scoped operations on `SessionMonitorHandle` via `Deref<Target=Target>` (DC16) | Core Abstractions, DC16 |
+| 2026-03-08 | Added `JoinedStream` for multi-source consolidated views (DC15) | Output Sink Pipeline, DC15 |
+| 2026-03-08 | Added `ContentMatcher` trait for pluggable text matching (DC14) | Core Abstractions, Output Sink Pipeline, DC14 |
+| 2026-03-08 | Added `sample_text()` API with `ScrollbackQuery` for on-demand scrollback sampling | Core Abstractions |
+| 2026-03-08 | Added granular monitoring lifecycle — fleet/host/session levels (DC13) | DC13 |
+| 2026-03-08 | Added output sink pipeline — `OutputBus`, `SinkFilter`, `SinkKind` trait (DC12) | Output Sink Pipeline, DC12 |
+| 2026-03-08 | Addressed codex review rounds 1–4: DC10 control mode fixes, ActionHandle ownership, integration diagram, version pinning | DC10, Output Sink Pipeline, DC1 |
+| 2026-03-07 | Added `TmuxSocket` selector for non-default tmux servers | Core Abstractions |
+| 2026-03-07 | Added localhost transport, session lifecycle, TUI roadmap (Phase 5) | Core Abstractions, Module Specs, Implementation Phases |
+| 2026-03-07 | Added prototype source and Gemini link for traceability | Prototype Reference |
+| 2026-03-07 | Initial design document | All |
+
 This document describes the design for `libs/tmux`, an asynchronous, structured, multi-target
 automator that monitors tmux panes over SSH or on localhost and executes configurable actions
 in response to output patterns. Beyond monitoring, the library provides a general-purpose tmux
@@ -43,18 +71,22 @@ A library that:
 3. Lists and inspects tmux sessions, windows, and panes on each target
 4. Captures pane content (scrollback + visible) as text on demand
 5. Sends arbitrary input to panes with proper key escaping (Enter, C-c, etc.)
-6. Manages session metadata (rename sessions/windows)
-7. Attaches output pipes for continuous monitoring
-8. Evaluates configurable trigger rules against pane output
-9. Executes actions (send-keys, notify, log) when rules match
-10. Reconnects automatically on failure (SSH targets)
+6. Executes shell commands in panes and captures structured output (exit code, stdout)
+7. Manages session metadata (rename sessions/windows)
+8. Names logical workstreams across hosts and targets for domain-meaningful addressing
+9. Attaches output pipes for continuous monitoring
+10. Evaluates configurable trigger rules against pane output
+11. Executes actions (send-keys, notify, log) when rules match
+12. Reconnects automatically on failure (SSH targets)
 
 ### Scope
 
 - **In scope**: Localhost tmux (direct execution), SSH transport for remote hosts,
   multi-host connection pool, tmux session creation and termination, session/window/pane
-  listing, pane content capture, remote input with escaping, session metadata management,
-  pipe-based output monitoring, rule-based automation, structured logging, CLI binary
+  listing, pane content capture, structured command execution (exec with exit code),
+  remote input with escaping, session metadata management, named workstreams,
+  output sink pipeline with pluggable content matching, pipe-based output monitoring,
+  rule-based automation, structured logging, CLI binary
 - **Out of scope**: Web UI, SSH server setup/configuration, tmux installation
 - **Future**: TUI interface based on [ratatui](https://ratatui.rs/) (not in current phases)
 
@@ -304,7 +336,7 @@ libs/tmux/
 ├── src/
 │   ├── lib.rs              # Public API re-exports
 │   ├── config.rs           # TmuxAutomatorConfig, TriggerRule, Action
-│   ├── transport.rs        # Transport trait + LocalTransport + SshTransport
+│   ├── transport.rs        # TransportKind enum + LocalTransport + SshTransport
 │   ├── host.rs             # HostHandle: per-host facade for all tmux operations
 │   ├── fleet.rs            # Fleet: multi-host pool, dispatch, aggregate status
 │   ├── discovery.rs        # Session/window/pane listing, filter, PaneAddress type
@@ -312,7 +344,8 @@ libs/tmux/
 │   ├── control.rs          # Session lifecycle, send-keys with escaping, rename
 │   ├── pipe.rs             # PipeManager: FIFO lifecycle, pipe-pane attach/detach
 │   ├── monitor.rs          # OutputMonitor: stream parsing, rule evaluation, dispatch
-│   ├── sink.rs             # OutputSink trait, SinkFilter, PaneOutput, OutputBus
+│   ├── matcher.rs          # MatcherKind enum + built-in matchers (Regex, Substring, etc.)
+│   ├── sink.rs             # SinkKind enum, SinkFilter, TargetOutput, OutputBus
 │   ├── sinks/
 │   │   ├── mod.rs          # Re-exports built-in sinks
 │   │   └── stdio.rs        # StdioSink (default reference implementation)
@@ -355,15 +388,17 @@ bins/tmux-automator/         # (optional) CLI binary wrapping the library
          └── Monitor ────── stream + rule evaluation → action dispatch
 ```
 
-**Two usage modes coexist on the same `HostHandle`**:
+**Two usage modes coexist across `HostHandle` and `Target`**:
 
-1. **On-demand operations**: Create/kill sessions, list sessions, capture pane, send input,
-   rename — called directly by the consumer (CLI command, MCP tool, API call). These execute
-   via the transport (local subprocess or SSH exec channel) and return immediately.
+1. **On-demand operations**: Host-level discovery and session creation via `HostHandle`;
+   entity-level I/O (capture, send-keys, rename, kill) via `Target`. Called directly by
+   the consumer (CLI command, MCP tool, API call). These execute via the transport
+   (local subprocess or SSH exec channel) and return immediately.
 
 2. **Continuous monitoring**: Pipe setup + event loop — long-running, spawned as a
-   background task. Uses dedicated shell/PTY channel. Rule-triggered actions dispatch through
-   the same `Control` module as on-demand operations.
+   background task. Started via `HostHandle::start_monitoring()` (host-wide) or
+   `Target::start_monitoring()` (single session). Uses dedicated shell/PTY channel.
+   Rule-triggered actions dispatch through the same `Control` module as on-demand operations.
 
 ### Concurrency Model
 
@@ -419,11 +454,66 @@ impl Fleet {
     /// Iterate over all connected targets.
     pub fn hosts(&self) -> impl Iterator<Item = (&str, &HostHandle)>;
 
+    // --- Output Bus ---
+
+    /// Access the fleet's OutputBus for sink registration.
+    /// Sinks should be registered before start_monitoring() so they
+    /// receive output from the start.
+    pub fn output_bus(&mut self) -> &mut OutputBus;
+
+    // --- Monitoring (fleet-wide) ---
+
     /// Start monitoring on all connected hosts (spawns background tasks).
     pub async fn start_monitoring(&self, rules: &[TriggerRule]) -> Result<()>;
 
-    /// Shutdown: stop monitoring, cleanup pipes, close connections.
+    /// Shutdown: stop monitoring on all hosts, cleanup pipes, close connections.
     pub async fn shutdown(&self) -> Result<()>;
+
+    // --- Monitoring (per-host) ---
+
+    /// Start monitoring on a single host by name/alias.
+    /// The host must be connected. Monitoring sessions are discovered
+    /// automatically (or filtered by the host's pane_filter config).
+    pub async fn start_monitoring_host(
+        &self,
+        host: &str,
+        rules: &[TriggerRule],
+    ) -> Result<()>;
+
+    /// Stop monitoring on a single host. Cleans up control-mode connections
+    /// and pipe-pane state for this host only. Other hosts continue unaffected.
+    pub async fn stop_monitoring_host(&self, host: &str) -> Result<()>;
+
+    // --- Workstreams (named bindings) ---
+
+    /// Bind a user-defined name to a (host, target) pair. The name must be
+    /// unique within the fleet. Returns an error if the name is already bound.
+    ///
+    /// Workstreams give callers a stable, domain-meaningful name for a
+    /// specific entity across the fleet — e.g., "build-pipeline" for
+    /// the build session on web-1, or "db-migration" for a pane on db-1.
+    pub fn bind(
+        &mut self,
+        name: &str,
+        host: &HostHandle,
+        target: Target,
+    ) -> Result<()>;
+
+    /// Remove a workstream binding by name.
+    pub fn unbind(&mut self, name: &str) -> Result<()>;
+
+    /// Look up a workstream by name. Returns the host alias and Target.
+    pub fn find(&self, name: &str) -> Option<(&str, &HostHandle, &Target)>;
+
+    /// List all workstream bindings.
+    pub fn workstreams(&self) -> Vec<WorkstreamEntry>;
+}
+
+/// A named binding of a user-defined name to a (host, target) pair.
+pub struct WorkstreamEntry {
+    pub name: String,
+    pub host_alias: String,
+    pub target: Target,
 }
 ```
 
@@ -433,94 +523,494 @@ on them" abstraction. For localhost-only use, `Fleet` with one local target work
 identically — there is no separate single-target API. Localhost is always available
 without SSH configuration.
 
-### `HostHandle` — Per-Host Facade
+**Workstreams** give callers a domain-meaningful vocabulary that decouples intent from
+infrastructure. Instead of `fleet.host("web-1")?.session("build")`, a caller says
+`fleet.find("build-pipeline")` — the mapping from name to (host, target) is established
+once and referenced everywhere. This is especially useful when the same logical
+workstream spans config, monitoring rules, sink filters, and CLI commands.
 
-All tmux operations on a single target go through `HostHandle`. This is the core
-abstraction that unifies discovery, capture, control, and monitoring behind one type.
-It is transport-agnostic — the same API works for localhost and SSH targets.
+**Usage**:
 
 ```rust
-pub struct HostHandle { /* Transport, host config, pipe state */ }
+let host = fleet.host("web-1").unwrap();
+let build = host.create_session("build", None, Some("cargo build")).await?;
+fleet.bind("build-pipeline", host, build.clone())?;
+
+// Later — anywhere in the codebase
+let (_, _, target) = fleet.find("build-pipeline").unwrap();
+target.send_text("cargo test").await?;
+
+// List all workstreams
+for ws in fleet.workstreams() {
+    println!("{}: {} on {}", ws.name, ws.target.target_string(), ws.host_alias);
+}
+```
+
+**Future: workstreams as sink/stream groups** (DC18). A workstream today binds a single
+name to a single (host, target). A natural extension is *composite workstreams* that
+group multiple targets under one name — e.g., "deploy" spans `web-1:build`, `db-1:migrate`,
+and `web-1:test`. This would compose with the existing sink pipeline:
+
+- **`SinkFilter` by workstream**: Filter output by workstream name instead of
+  individual host/session/pane fields. The bus resolves the workstream to its member
+  targets at filter-match time.
+- **`JoinedStream` over a workstream**: `subscribe_joined()` could accept a workstream
+  name, automatically creating filters for all member targets. The joined view then
+  shows the multi-party conversation for that logical workflow.
+- **Workstream-scoped monitoring**: Start/stop monitoring for all targets in a
+  workstream with a single call.
+
+This extension is deferred — single-target workstreams cover the immediate need.
+Composite workstreams require decisions about membership lifecycle (what happens when
+a target is killed?) that should be informed by real usage patterns.
+
+### `HostHandle` — Per-Host Entry Point
+
+The connection to a single tmux target (localhost or remote). `HostHandle` provides
+host-level operations: session discovery, creation, and host-wide monitoring. It also
+serves as a factory for `Target` handles (DC16).
+
+```rust
+pub struct HostHandle { /* Arc<HostHandleInner> */ }
+
+/// Shared internals — Target holds an Arc ref to this.
+/// Uses interior mutability so &self methods on HostHandle and Target
+/// can mutate monitoring state under concurrent access.
+struct HostHandleInner {
+    transport: TransportKind,
+    config: HostTarget,
+    /// RwLock for concurrent read access (monitored_sessions, find) with
+    /// exclusive write access (start/stop monitoring). The lock is never
+    /// held across await points — lock, mutate, release, then await.
+    session_monitors: RwLock<HashMap<String, SessionMonitorHandle>>,
+}
 
 impl HostHandle {
-    // --- Session Lifecycle ---
+    // --- Discovery ---
 
-    /// Create a new tmux session.
-    /// `window_name` and `command` are optional; if `command` is provided, it runs
-    /// in the initial window instead of a default shell.
+    /// List all tmux sessions on this target.
+    pub async fn list_sessions(&self) -> Result<Vec<SessionInfo>>;
+
+    /// Create a new tmux session. Returns a Target at session level.
     /// Runs: tmux new-session -d -s <name> [-n <window_name>] [<command>]
     pub async fn create_session(
         &self,
         name: &str,
         window_name: Option<&str>,
         command: Option<&str>,
-    ) -> Result<()>;
+    ) -> Result<Target>;
 
-    /// Terminate (kill) a tmux session and all its windows/panes.
-    /// Runs: tmux kill-session -t <name>
-    pub async fn kill_session(&self, name: &str) -> Result<()>;
+    /// Get a Target for an existing session by name. Queries tmux to verify
+    /// the session exists. Returns None if not found.
+    pub async fn session(&self, name: &str) -> Result<Option<Target>>;
 
-    // --- Discovery ---
+    /// Get a Target at any specificity from a `TargetSpec`.
+    /// Verifies the entity exists. This is the escape hatch from
+    /// raw strings (CLI args, config) to typed `Target` handles.
+    pub async fn target(&self, spec: &TargetSpec) -> Result<Option<Target>>;
 
-    /// List all tmux sessions on this target.
-    pub async fn list_sessions(&self) -> Result<Vec<SessionInfo>>;
+    // --- Host-Wide Monitoring ---
 
-    /// List all windows in a session (by name or ID).
-    pub async fn list_windows(&self, session: &str) -> Result<Vec<WindowInfo>>;
-
-    /// List all panes, optionally filtered by regex.
-    pub async fn list_panes(&self, filter: Option<&Regex>) -> Result<Vec<PaneInfo>>;
-
-    // --- Capture ---
-
-    /// Capture the visible content of a pane as text.
-    /// Returns the current screen content (what a human would see).
-    pub async fn capture_pane(&self, target: &PaneAddress) -> Result<String>;
-
-    /// Capture pane content including scrollback history.
-    /// `start` and `end` are line offsets (negative = scrollback).
-    pub async fn capture_pane_with_history(
-        &self,
-        target: &PaneAddress,
-        start: i32,
-        end: i32,
-    ) -> Result<String>;
-
-    /// Capture all panes in a session, returned as a map of pane address → content.
-    pub async fn capture_session(&self, session: &str) -> Result<HashMap<PaneAddress, String>>;
-
-    // --- Control ---
-
-    /// Send literal text to a pane. The text is escaped for tmux send-keys.
-    /// Does NOT append Enter — caller must include it via KeySequence if desired.
-    pub async fn send_text(&self, target: &PaneAddress, text: &str) -> Result<()>;
-
-    /// Send a key sequence to a pane (supports special keys: Enter, C-c, Tab, etc.)
-    pub async fn send_keys(&self, target: &PaneAddress, keys: &KeySequence) -> Result<()>;
-
-    /// Rename a tmux session.
-    pub async fn rename_session(&self, current_name: &str, new_name: &str) -> Result<()>;
-
-    /// Rename a window within a session.
-    pub async fn rename_window(
-        &self,
-        session: &str,
-        window_index: u32,
-        new_name: &str,
-    ) -> Result<()>;
-
-    // --- Monitoring (long-running) ---
-
-    /// Start continuous output monitoring on matching panes.
-    /// Returns a handle to stop monitoring later.
+    /// Start monitoring all matching sessions on this host.
+    /// Opens one control-mode connection per discovered session (DC10).
+    /// Shutdown is managed internally by the HostHandle (DC13).
     pub async fn start_monitoring(
         &self,
         filter: Option<&Regex>,
         rules: &[TriggerRule],
-        shutdown: watch::Receiver<bool>,
     ) -> Result<MonitorHandle>;
+
+    /// Stop all monitoring on this host.
+    pub async fn stop_monitoring(&self) -> Result<()>;
+
+    /// Start monitoring a single session (DC13 session-level).
+    /// Accepts a session-level Target. Opens one control-mode connection.
+    pub async fn start_monitoring_session(
+        &self,
+        target: &Target,
+        rules: &[TriggerRule],
+    ) -> Result<SessionMonitorHandle>;
+
+    /// Stop monitoring a single session.
+    /// Calls SessionMonitorHandle::shutdown() — tears down the control-mode
+    /// connection and, if pipe-pane fallback was active, runs PipeManager::cleanup()
+    /// to detach pipes and remove FIFO files. Does not affect other sessions.
+    pub async fn stop_monitoring_session(&self, target: &Target) -> Result<()>;
+
+    /// List sessions currently being monitored.
+    pub fn monitored_sessions(&self) -> Vec<SessionInfo>;
 }
 ```
+
+### `Target` — Unified Handle for Any Tmux Entity (DC16)
+
+**Key insight**: tmux sessions, windows, and panes are all nodes in the same
+hierarchy, and at the bottom every node resolves to a PTY with input and output.
+Tmux itself supports targeting at any level — `send-keys -t session` resolves to
+the active pane automatically. Different hosts may have different hierarchy depths:
+some have just sessions with a single window/pane, others have complex multi-window
+layouts.
+
+Rather than separate `SessionHandle`, `WindowHandle`, and `PaneHandle` types — each
+with duplicated I/O methods — a single `Target` type represents any node in the
+hierarchy. I/O operations work at any level (tmux resolves to the active pane).
+Navigation methods (`children()`, `window()`, `pane()`) narrow the target.
+
+```rust
+/// A handle to any tmux entity: session, window, or pane.
+/// Lightweight — holds Arc<HostHandleInner> + address. Cheap to clone.
+pub struct Target {
+    inner: Arc<HostHandleInner>,
+    address: TargetAddress,
+}
+
+/// The specificity of a Target in the tmux hierarchy.
+pub enum TargetAddress {
+    Session(SessionInfo),
+    Window(WindowInfo),
+    Pane(PaneAddress),
+}
+
+/// A tmux target specifier following tmux's `session:window.pane` convention.
+///
+/// Tmux addresses entities at three levels of specificity:
+/// - Session only: `"build"` — resolves to the active window and pane
+/// - Session + window: `"build:0"` or `"build:make"` — by index or name
+/// - Session + window + pane: `"build:0.1"` — fully qualified
+///
+/// Use `TargetSpec::session("build")` and the builder methods `.window()` / `.pane()`
+/// to construct a spec, or `TargetSpec::parse("build:0.1")` from a raw string.
+pub struct TargetSpec {
+    session: String,
+    window: Option<String>,  // index or name
+    pane: Option<u32>,
+}
+
+impl TargetSpec {
+    /// Start building a spec targeting a session by name.
+    pub fn session(name: &str) -> Self;
+
+    /// Narrow to a window by index.
+    pub fn window(self, index: u32) -> Self;
+
+    /// Narrow to a window by name.
+    pub fn window_name(self, name: &str) -> Self;
+
+    /// Narrow to a pane by index (requires window to be set).
+    pub fn pane(self, index: u32) -> Self;
+
+    /// Parse a raw tmux target string ("session", "session:window", "session:window.pane").
+    /// Returns an error if the format is invalid.
+    pub fn parse(target_str: &str) -> Result<Self>;
+
+    /// Render as a tmux target string.
+    pub fn to_target_string(&self) -> String;
+}
+
+impl fmt::Display for TargetSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_target_string())
+    }
+}
+
+impl Target {
+    // --- Identity ---
+
+    /// What level of the hierarchy this target represents.
+    pub fn level(&self) -> TargetLevel;
+
+    /// The tmux target string for commands (e.g., "build", "build:0", "build:0.1").
+    pub fn target_string(&self) -> String;
+
+    /// Session info (available at any level — windows and panes know their session).
+    pub fn session_info(&self) -> &SessionInfo;
+
+    /// Window info (available at window and pane level, None at session level).
+    pub fn window_info(&self) -> Option<&WindowInfo>;
+
+    /// Pane address (available at pane level only).
+    pub fn pane_address(&self) -> Option<&PaneAddress>;
+
+    // --- Navigation (narrowing) ---
+
+    /// List children one level down.
+    /// Session → windows. Window → panes. Pane → empty.
+    pub async fn children(&self) -> Result<Vec<Target>>;
+
+    /// Navigate to a specific window by index (from session level).
+    /// Queries tmux to verify the window exists.
+    pub async fn window(&self, index: u32) -> Result<Option<Target>>;
+
+    /// Navigate to a specific pane by index (from session or window level).
+    /// From session: resolves to session:active_window.pane.
+    /// From window: resolves to window.pane.
+    pub async fn pane(&self, index: u32) -> Result<Option<Target>>;
+
+    /// Navigate to a pane by PaneAddress (from any level).
+    pub fn pane_by_address(&self, address: &PaneAddress) -> Target;
+
+    // --- I/O (works at any level — tmux resolves to active pane) ---
+
+    /// Send literal text. Escaped for tmux send-keys.
+    /// At session/window level, sends to the active pane.
+    pub async fn send_text(&self, text: &str) -> Result<()>;
+
+    /// Send a key sequence (Enter, C-c, Tab, etc.)
+    pub async fn send_keys(&self, keys: &KeySequence) -> Result<()>;
+
+    /// Execute a shell command in the target's pane and capture structured
+    /// output. Sends the command with a sentinel suffix, polls scrollback
+    /// until the sentinel appears (or timeout), and extracts stdout and
+    /// exit code. See DC19 for mechanism and trade-offs.
+    ///
+    /// At session/window level, executes in the active pane.
+    pub async fn exec(
+        &self,
+        command: &str,
+        timeout: Duration,
+    ) -> Result<ExecOutput>;
+
+    /// Capture the visible content of the target pane.
+    /// At session/window level, captures the active pane.
+    pub async fn capture(&self) -> Result<String>;
+
+    /// Capture with scrollback history.
+    pub async fn capture_with_history(&self, start: i32, end: i32) -> Result<String>;
+
+    /// Sample recent scrollback, returned in chronological order.
+    pub async fn sample_text(&self, query: &ScrollbackQuery) -> Result<String>;
+
+    // --- Lifecycle ---
+
+    /// Kill this entity. Session: kills session. Window: closes window.
+    /// Pane: closes pane.
+    pub async fn kill(&self) -> Result<()>;
+
+    /// Rename this entity. Session: rename session. Window: rename window.
+    /// Pane: not supported (returns error).
+    pub async fn rename(&self, new_name: &str) -> Result<()>;
+
+    /// Capture all panes under this target as a map.
+    /// Session: all panes in all windows. Window: all panes in window.
+    /// Pane: single-entry map.
+    pub async fn capture_all(&self) -> Result<HashMap<PaneAddress, String>>;
+
+    // --- Monitoring ---
+
+    /// Start monitoring this target (session level only — DC10).
+    /// Returns an error if called on a window or pane target.
+    pub async fn start_monitoring(
+        &self,
+        rules: &[TriggerRule],
+    ) -> Result<SessionMonitorHandle>;
+
+    /// Stop monitoring this target (session level only).
+    pub async fn stop_monitoring(&self) -> Result<()>;
+}
+
+pub enum TargetLevel { Session, Window, Pane }
+
+/// Structured output from a command executed via Target::exec().
+pub struct ExecOutput {
+    /// Command stdout captured from scrollback between the command echo
+    /// and the sentinel line. Chronological order, trailing newline stripped.
+    pub stdout: String,
+    /// Exit code of the command, extracted from the sentinel.
+    pub exit_code: i32,
+}
+
+impl ExecOutput {
+    /// True if the command exited with code 0.
+    pub fn success(&self) -> bool { self.exit_code == 0 }
+}
+```
+
+**Why one type instead of three**:
+
+1. **Tmux addressing is uniform**: `send-keys -t X` works whether X is a session,
+   window, or pane. The library should mirror this.
+2. **Hosts are heterogeneous**: Some hosts have sessions with a single default
+   window and pane. Others have complex layouts. A single type handles both without
+   forcing callers to navigate through layers that may not matter.
+3. **One implementation**: `send_text()`, `send_keys()`, `capture()`, etc. are
+   implemented once on `Target`. They construct `tmux ... -t <target_string>` and
+   execute via the transport. No delegation chains.
+4. **Navigation is optional**: `target.children()` lets you drill down when needed.
+   But `host.session("build")?.send_text("ls{Enter}")` works without ever listing
+   windows or panes.
+
+**Usage examples**:
+
+```rust
+let host = fleet.host("web-1")?;
+
+// Simple: operate at session level (tmux resolves to active pane)
+let build = host.create_session("build", None, Some("cargo build")).await?;
+let output = build.capture().await?;           // captures active pane
+build.send_keys(&KeySequence::parse("{C-c}")?).await?;  // sends to active pane
+
+// Drill down when you need specificity
+let windows = build.children().await?;         // list windows
+let panes = windows[0].children().await?;      // list panes in first window
+panes[1].send_text("tail -f log.txt").await?;  // target a specific pane
+
+// Navigate directly
+let pane = build.pane(2).await?;               // session → active_window.pane_2
+pane.sample_text(&ScrollbackQuery::LastLines(100)).await?;
+
+// TargetSpec builder — type-safe targeting at any depth
+let spec = TargetSpec::session("build").window(0).pane(1);
+let target = host.target(&spec).await?.unwrap();
+target.send_text("ls").await?;
+
+// Or parse from a raw string (CLI args, config files)
+let spec = TargetSpec::parse("build:0.1")?;
+let target = host.target(&spec).await?.unwrap();
+
+// Lifecycle
+build.rename("build-v2").await?;
+build.kill().await?;
+```
+
+### Monitor Handles — Granular Monitoring Control
+
+Monitoring returns handles at two granularities: per-host (`MonitorHandle`) and
+per-session (`SessionMonitorHandle`). This aligns with DC10's per-session control-mode
+connections and DC13's granular lifecycle requirement.
+
+```rust
+/// Handle to all monitoring on a single host.
+/// Returned by HostHandle::start_monitoring().
+pub struct MonitorHandle {
+    /// Per-session handles, keyed by session name (String).
+    /// Lookups by &Target or &TargetSpec extract the session name internally.
+    sessions: HashMap<String, SessionMonitorHandle>,
+}
+
+impl MonitorHandle {
+    /// Stop monitoring on all sessions for this host.
+    pub async fn shutdown(&self) -> Result<()>;
+
+    /// Stop monitoring a specific session. Accepts a session-level Target
+    /// or a TargetSpec (must resolve to session level).
+    pub async fn stop_session(&self, target: &Target) -> Result<()>;
+
+    /// Get the handle for a specific monitored session by Target.
+    pub fn get(&self, target: &Target) -> Option<&SessionMonitorHandle>;
+
+    /// Get the handle for a specific monitored session by TargetSpec.
+    /// Convenience for callers with a spec but no Target in hand.
+    pub fn get_by_spec(&self, spec: &TargetSpec) -> Option<&SessionMonitorHandle>;
+
+    /// List actively monitored sessions as Targets.
+    pub fn active_sessions(&self) -> Vec<&Target>;
+}
+
+/// Handle to monitoring on a single session.
+/// Returned by Target::start_monitoring() (session-level targets only).
+/// Each handle owns one control-mode connection (DC10).
+///
+/// Wraps a Target — all I/O, navigation, and lifecycle operations are
+/// available via Deref<Target=Target>. This means monitoring adds
+/// lifecycle methods without duplicating the unified Target API (DC16).
+pub struct SessionMonitorHandle {
+    target: Target,    // session-level target
+    /// Signals this session's monitor task to stop.
+    stop_tx: watch::Sender<bool>,
+    /// The monitor task's join handle. Wrapped in Option so shutdown()
+    /// can take it once. None after shutdown has been called.
+    task: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl Deref for SessionMonitorHandle {
+    type Target = Target;
+    fn deref(&self) -> &Target { &self.target }
+}
+
+impl SessionMonitorHandle {
+    /// Stop monitoring this session. Tears down the control-mode connection,
+    /// flushes pending output to the OutputBus, and joins the monitor task.
+    /// If the pipe-pane fallback path was active, also calls
+    /// PipeManager::cleanup() to detach pipes and remove FIFO files (P4).
+    /// Takes the JoinHandle from the internal Mutex<Option<...>> — safe to
+    /// call multiple times (subsequent calls are no-ops).
+    pub async fn shutdown(&self) -> Result<()>;
+
+    /// Check if this session's monitor is still running.
+    /// Returns false after shutdown() has been called.
+    pub fn is_active(&self) -> bool;
+}
+```
+
+**Why `SessionMonitorHandle` keeps the `Session` name**: Monitoring is fundamentally
+session-scoped — DC10's control mode (`tmux -C attach -t <session>`) operates at the
+session level, and `%output` events are per-session. There is no `tmux -C attach` at
+window or pane granularity. Naming the type `SessionMonitorHandle` (rather than a
+generic `TargetMonitorHandle`) makes this constraint visible in the type system. The
+lookup API on `MonitorHandle`, however, accepts `&Target` and `&TargetSpec` for
+consistency with the rest of the library — callers use the same vocabulary everywhere,
+while the `Session` prefix on the handle communicates what level of entity is actually
+being monitored.
+
+**Usage**: `SessionMonitorHandle` derefs to `Target`, so all operations work directly:
+
+```rust
+let build = host.session("build").await?.unwrap();
+let monitor = build.start_monitoring(&rules).await?;
+
+// Navigate and operate — all via Deref to Target
+let panes = monitor.children().await?;         // windows in monitored session
+let pane = monitor.pane(0).await?.unwrap();     // specific pane
+let output = pane.sample_text(&ScrollbackQuery::LastLines(50)).await?;
+pane.send_keys(&KeySequence::parse("{C-c}")?).await?;
+
+// Monitoring lifecycle
+monitor.shutdown().await?;
+```
+
+### `ScrollbackQuery` — On-Demand Text Sampling
+
+Defines how much scrollback to capture from a pane. The result is always returned in
+chronological order (oldest line first), regardless of the query direction. This is the
+complement to `send_text()` — send commands in, sample output back.
+
+```rust
+pub enum ScrollbackQuery {
+    /// Capture the last N lines from the pane (visible + scrollback).
+    /// Equivalent to `capture-pane -p -S -N`.
+    LastLines(usize),
+
+    /// Scan backwards from the current cursor position until a line matches
+    /// the regex, then return everything from that match to the present.
+    /// `max_lines` caps the backward scan to prevent unbounded reads.
+    Until {
+        pattern: Regex,
+        max_lines: usize,
+    },
+
+    /// Capture the last N lines, but stop early if a line matches the regex.
+    /// Returns from the match (inclusive) to the present.
+    /// Useful for "give me output since the last prompt" patterns.
+    LastLinesUntil {
+        lines: usize,
+        stop_pattern: Regex,
+    },
+}
+```
+
+**Implementation**: All variants use `tmux capture-pane -p -S <start> -E <end>` under
+the hood. `LastLines(n)` maps directly to `-S -n`. The `Until` and `LastLinesUntil`
+variants capture `max_lines` (or `lines`) of scrollback in one call, then scan the
+result in reverse for the pattern match, truncating at the match point. The final
+output is returned in chronological order — no reversal needed since `capture-pane`
+already outputs top-to-bottom.
+
+**Use cases**:
+- `LastLines(50)` — "show me the last 50 lines" for a quick status check
+- `Until { pattern: r"^\$\s*$", max_lines: 5000 }` — "everything since the last
+  shell prompt" for capturing a command's full output
+- `LastLinesUntil { lines: 200, stop_pattern: r"^error:" }` — "last 200 lines, but
+  stop if we hit an error marker" for focused error context
 
 ### `KeySequence` — Safe Input Construction
 
@@ -580,13 +1070,13 @@ impl KeySequence {
 
 ```rust
 // Send "continue" followed by Enter
-handle.send_keys(&pane, &KeySequence::literal("continue").then_enter()).await?;
+pane.send_keys(&KeySequence::literal("continue").then_enter()).await?;
 
 // Send Ctrl-C to interrupt, then a new command
-handle.send_keys(&pane, &KeySequence::parse("{C-c}ls -la{Enter}")?).await?;
+pane.send_keys(&KeySequence::parse("{C-c}ls -la{Enter}")?).await?;
 
 // Send text that contains special characters (properly escaped via -l)
-handle.send_text(&pane, "echo 'hello > world'").await?;
+pane.send_text("echo 'hello > world'").await?;
 ```
 
 **Why this matters**: The prototype sends `send-keys 'continue' Enter` as a raw shell
@@ -611,7 +1101,8 @@ pub struct SessionInfo {
 }
 
 pub struct WindowInfo {
-    pub session: String,
+    pub session_id: String,     // tmux session $N id — ties back to SessionInfo
+    pub session_name: String,   // session name (display)
     pub index: u32,
     pub name: String,
     pub active: bool,           // is the active window in its session
@@ -628,6 +1119,7 @@ pub struct PaneInfo {
     pub height: u32,
     pub active: bool,           // is the active pane in its window
 }
+
 ```
 
 These are populated by `tmux list-sessions -F`, `list-windows -F`, and `list-panes -F`
@@ -643,32 +1135,114 @@ profiles — stdio (µs), TUI (ms per frame), LLM analysis (seconds). A synchron
 pipeline would block at the speed of the slowest consumer. This section defines the
 async fan-out architecture that decouples output capture from rendering/processing.
 
-### `PaneOutput` — The Unit of Output
+### `TargetOutput` — The Unit of Output
 
-Every piece of captured output flows through the pipeline as a `PaneOutput`. It carries
-enough context for any sink to identify the source and route actions back to it.
+Every piece of captured output flows through the pipeline as a `TargetOutput`. It
+carries enough context for any sink to identify the source at any hierarchy level
+and route actions back to it.
 
 ```rust
-pub struct PaneOutput {
-    pub pane_id: String,       // authoritative: "%12"
-    pub pane_target: String,   // display: "session:window.pane"
+pub struct TargetOutput {
+    /// The source entity. Carries the full TargetAddress so sinks can
+    /// identify the source at session, window, or pane granularity.
+    /// For control-mode output (DC10), this is always pane-level since
+    /// `%output` includes a pane ID. For session-only hosts (single
+    /// default window/pane), callers can match at session level and
+    /// ignore the window/pane detail.
+    pub source: TargetAddress,
     pub host: String,          // host alias (or "localhost")
-    pub session: String,       // session name
-    pub window: u32,           // window index
     pub content: String,       // the captured text
     pub timestamp: Instant,
 }
+
+impl TargetOutput {
+    /// Session name — available at any source level.
+    pub fn session_name(&self) -> &str;
+
+    /// Pane ID — available when source is pane-level, None otherwise.
+    pub fn pane_id(&self) -> Option<&str>;
+
+    /// Tmux target string for the source (e.g., "build", "build:0", "build:0.1").
+    pub fn target_string(&self) -> String;
+}
 ```
 
-`PaneOutput` is the bridge between the monitor/capture side and the sink side.
-The `host`, `session`, `window`, and `pane_id` fields enable sinks to filter at
-any level of the hierarchy and to route actions back to the originating entity.
+`TargetOutput` is the bridge between the monitor/capture side and the sink side.
+The `source` field (a `TargetAddress`) enables sinks to filter and match at any
+level of the hierarchy — session, window, or pane — and to route actions back to the
+originating entity. Hosts with a single session/window/pane can be addressed at
+session level without requiring callers to know the pane ID.
+
+### `MatcherKind` — Static-Dispatch Content Matching
+
+Content matching uses a closed enum (`MatcherKind`) rather than trait objects. All
+matching variants are known at compile time — no vtable dispatch on the hot path.
+Combinators use `Vec` and `Box` (heap-backed) for tree structure.
+Matchers can be stateless (regex, substring) or stateful (line
+counters, vocabulary detectors that accumulate across calls).
+
+```rust
+/// A content matcher. Closed enum — all variants known at compile time.
+/// No vtable dispatch; combinators use Vec<MatcherKind> (heap-backed)
+/// and Not uses Box<MatcherKind> (for recursive enum sizing).
+#[derive(Clone)]
+pub enum MatcherKind {
+    /// Matches when text contains a regex pattern. Stateless.
+    Regex { pattern: Regex },
+
+    /// Matches when text contains any of the given substrings. Stateless.
+    /// Faster than regex for simple keyword lists.
+    Substring { needles: Vec<String>, case_insensitive: bool },
+
+    /// Matches after accumulating N newlines across calls. Stateful.
+    /// Useful for "trigger after N lines of output" patterns.
+    LineCount { threshold: usize, count: usize },
+
+    /// Matches when text contains any word from a blocklist. Stateless.
+    /// Words are matched at word boundaries (not as substrings of larger words).
+    WordList { words: HashSet<String>, case_insensitive: bool },
+
+    /// Matches when ALL inner matchers match (AND).
+    AllOf(Vec<MatcherKind>),
+
+    /// Matches when ANY inner matcher matches (OR).
+    AnyOf(Vec<MatcherKind>),
+
+    /// Inverts a matcher (NOT).
+    Not(Box<MatcherKind>),   // Box only for recursive enum sizing, not for dyn dispatch
+}
+
+impl MatcherKind {
+    /// Human-readable name for logging (e.g., "regex:/error/i", "all-of(3)").
+    pub fn name(&self) -> String;
+
+    /// Test whether `text` matches. For stateful variants, this may update
+    /// internal state and return true when a threshold is reached.
+    pub fn matches(&mut self, text: &str) -> bool;
+
+    /// Reset internal state. Called when the matcher is reused across
+    /// monitoring restarts. No-op for stateless variants.
+    pub fn reset(&mut self);
+}
+```
+
+**Why a closed enum**: The set of matching strategies is finite and known at design
+time. A `match` arm handles each variant with zero indirection. `AllOf`/`AnyOf` store
+children as `Vec<MatcherKind>` (heap-backed); `Not` uses `Box<MatcherKind>` for
+recursive enum sizing only (not dynamic dispatch). No vtable allocation per node.
+The entire matcher tree is `Clone` — each sink gets its own copy via `clone()`.
+
+**Statefulness contract**: The bus calls `matches()` on the filter's matcher for each
+`TargetOutput`. Stateful variants (like `LineCount`) accumulate across calls for
+the same sink — each sink gets its own cloned matcher instance, so state is not shared
+across sinks. `reset()` is called when monitoring restarts to clear accumulated state.
 
 ### `SinkFilter` — Composable Output Targeting
 
-A `SinkFilter` selects which output reaches a given sink. Filters target any
-combination of host, session, window, or pane. Multiple filters are combined with
-OR semantics — output matching **any** filter in the set is delivered to the sink.
+A `SinkFilter` selects which output reaches a given sink. Routing fields target the
+source (host, session, window, pane). An optional `content` matcher filters on the
+text itself. Multiple filters are combined with OR semantics — output matching **any**
+filter in the set is delivered to the sink.
 
 ```rust
 pub struct SinkFilter {
@@ -676,26 +1250,33 @@ pub struct SinkFilter {
     pub session: Option<String>,   // regex against session name
     pub window: Option<String>,    // regex against "session:window_index"
     pub pane: Option<String>,      // regex against pane_id or "session:window.pane"
+    pub content: Option<MatcherKind>,  // optional content matching
 }
 
-/// Compiled form — regexes compiled once at registration time.
+/// Compiled form — routing regexes compiled once at registration time.
+/// Content matcher is moved in as-is (already runtime-ready).
 pub struct CompiledSinkFilter {
     pub host: Option<Regex>,
     pub session: Option<Regex>,
     pub window: Option<Regex>,
     pub pane: Option<Regex>,
+    pub content: Option<MatcherKind>,
 }
 
 impl CompiledSinkFilter {
     /// Returns true if the output matches ALL non-None fields in this filter.
     /// Fields that are None are wildcards (match everything).
-    pub fn matches(&self, output: &PaneOutput) -> bool;
+    /// Routing fields (host/session/window/pane) are checked first (cheap).
+    /// Content matcher is checked last (potentially stateful/expensive).
+    pub fn matches(&mut self, output: &TargetOutput) -> bool;
 }
 ```
 
+**Note**: `matches()` takes `&mut self` because content matchers may be stateful.
+
 **Combining filters**: A sink registers with `Vec<SinkFilter>`. Output is delivered
-if it matches **any** filter in the vec (OR across filters, AND within each filter).
-An empty vec means "match all output" (the default).
+if it matches **any** filter in the vec (OR across filters, AND within each filter's
+routing + content fields). An empty vec means "match all output" (the default).
 
 **Examples**:
 
@@ -711,43 +1292,106 @@ vec![
 
 // Sink receives output from a specific pane
 vec![SinkFilter { pane: Some("%42".into()), ..Default::default() }]
+
+// Sink receives output containing "error" or "fatal" from any source
+vec![SinkFilter {
+    content: Some(MatcherKind::Substring {
+        needles: vec!["error".into(), "fatal".into()],
+        case_insensitive: true,
+    }),
+    ..Default::default()
+}]
+
+// Sink triggers after 100 lines of output from "build" session
+vec![SinkFilter {
+    session: Some("build".into()),
+    content: Some(MatcherKind::LineCount { threshold: 100, count: 0 }),
+    ..Default::default()
+}]
+
+// Bad-word detector on all output
+vec![SinkFilter {
+    content: Some(MatcherKind::WordList {
+        words: ["password", "secret", "token"].into_iter().map(Into::into).collect(),
+        case_insensitive: true,
+    }),
+    ..Default::default()
+}]
 ```
 
-### `OutputSink` — The Sink Trait
+### `SinkKind` — Static-Dispatch Output Sinks
 
-Every output consumer implements `OutputSink`. Each sink runs as an independent async
-task with its own batching/accumulation behavior. The library provides `StdioSink` as
-the default reference implementation.
+Every output consumer is a variant of the `SinkKind` enum. The bus dispatches via
+`match` with zero vtable indirection on the hot path. Each sink runs as an independent
+async task with its own batching/accumulation behavior.
+
+**Remaining dynamic types**: `CallbackSink.state` uses `Arc<dyn Any + Send + Sync>` for
+type-erased consumer state. It is passed by reference to the per-event `on_output`
+callback, but incurs no per-event allocation — the `Arc` is shared and `downcast_ref`
+is a type-id comparison. `on_flush` returns `Pin<Box<dyn Future>>` — unavoidable until
+Rust stabilizes async fn pointers; it runs once at shutdown, off the hot path.
 
 ```rust
-#[async_trait]
-pub trait OutputSink: Send + Sync + 'static {
+/// Closed enum of all sink types. Static dispatch on the hot path —
+/// no vtable indirection for per-event processing.
+pub enum SinkKind {
+    /// Writes to stdout with configurable formatting. Reference implementation.
+    Stdio(StdioSink),
+
+    /// Forwards output to a user-provided async callback function.
+    /// This is the extension point for consumers (LLM, TUI, custom logging)
+    /// without requiring trait objects.
+    Callback(CallbackSink),
+}
+
+/// User-provided sink via callback with explicit state. Avoids trait objects
+/// while allowing consumer-defined behavior with captured state.
+pub struct CallbackSink {
+    pub name: String,
+    pub filters: Vec<SinkFilter>,
+    /// Shared state passed to callbacks. Consumers put their accumulated
+    /// buffers, connections, or other mutable state here.
+    pub state: Arc<dyn Any + Send + Sync>,
+    /// Synchronous callback for each output event. Receives shared state
+    /// and the output. For I/O-heavy sinks, queue work internally and
+    /// flush asynchronously via on_flush.
+    pub on_output: fn(state: &Arc<dyn Any + Send + Sync>, output: TargetOutput) -> Result<()>,
+    /// Called on bus shutdown. Flush internal buffers, close resources.
+    /// Returns a boxed future — the only remaining async indirection,
+    /// unavoidable without async fn in fn pointers (not yet stable in Rust).
+    pub on_flush: Option<fn(state: &Arc<dyn Any + Send + Sync>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>>,
+}
+
+impl SinkKind {
     /// Human-readable name for logging and diagnostics.
-    fn name(&self) -> &str;
+    pub fn name(&self) -> &str;
 
     /// Filters determining which output reaches this sink.
-    /// Empty vec = all output (default).
-    fn filters(&self) -> Vec<SinkFilter> { vec![] }
+    pub fn filters(&self) -> &[SinkFilter];
 
     /// Process one output event. Called from the sink's own task —
     /// never from the monitor/bus hot path.
-    ///
-    /// Sinks are responsible for their own batching and accumulation.
-    /// A stdio sink writes immediately; an LLM sink accumulates and
-    /// flushes on its own schedule. The bus does not batch on behalf
-    /// of sinks.
-    async fn write(&self, output: PaneOutput) -> Result<()>;
+    pub async fn write(&mut self, output: TargetOutput) -> Result<()>;
 
     /// Called on bus shutdown. Flush internal buffers, close resources.
-    async fn flush(&self) -> Result<()> { Ok(()) }
+    pub async fn flush(&mut self) -> Result<()>;
 }
 ```
 
 **Key design principle**: Each sink owns its batching/accumulation strategy internally.
-The bus delivers individual `PaneOutput` events; the sink decides whether to process
+The bus delivers individual `TargetOutput` events; the sink decides whether to process
 them immediately (stdio), buffer and render at frame rate (TUI), or accumulate and
 flush on a timer/threshold (LLM). This keeps the bus simple and the sink in full
 control of its own latency/throughput tradeoffs.
+
+**Extension via `CallbackSink`**: Consumers that need custom sink behavior (LLM
+inference, webhook delivery, custom TUI) provide function pointers plus an explicit
+`Arc<dyn Any + Send + Sync>` state field. The `on_output` callback receives `&Arc`
+to access state — no closure captures needed. This keeps the bus monomorphic.
+`on_flush` returns `Pin<Box<dyn Future>>` — the only remaining async indirection,
+unavoidable until Rust stabilizes async fn pointers. The framework's `on_output` dispatch path is
+fully synchronous with no framework-side allocation (user callbacks may allocate
+internally as needed).
 
 ### `ActionHandle` — Sink-Initiated Actions
 
@@ -760,14 +1404,9 @@ provides a scoped, async API for actions against the tmux entities they observe.
 pub struct ActionHandle { /* mpsc::Sender<ActionRequest> */ }
 
 pub struct ActionRequest {
-    pub target: ActionTarget,
+    pub host: String,
+    pub target: TargetAddress,
     pub action: SinkAction,
-}
-
-pub enum ActionTarget {
-    Pane { host: String, pane_id: String },
-    Session { host: String, session: String },
-    Host { host: String },
 }
 
 pub enum SinkAction {
@@ -782,20 +1421,40 @@ impl ActionHandle {
     /// Send an action to the target entity. Non-blocking (queued).
     pub async fn send(&self, request: ActionRequest) -> Result<()>;
 
-    /// Convenience: send keys to a specific pane.
-    pub async fn send_keys_to_pane(
+    /// Convenience: send keys to a target (any level — session, window, or pane).
+    pub async fn send_keys(
         &self,
         host: &str,
-        pane_id: &str,
+        target: &TargetAddress,
         keys: KeySequence,
     ) -> Result<()>;
 
-    /// Convenience: send text to a specific pane.
-    pub async fn send_text_to_pane(
+    /// Convenience: send text to a target (any level).
+    pub async fn send_text(
         &self,
         host: &str,
-        pane_id: &str,
+        target: &TargetAddress,
         text: &str,
+    ) -> Result<()>;
+
+    /// Convenience: kill a session by name.
+    pub async fn kill_session(&self, host: &str, session: &str) -> Result<()>;
+
+    /// Convenience: rename a session.
+    pub async fn rename_session(
+        &self,
+        host: &str,
+        session: &str,
+        new_name: &str,
+    ) -> Result<()>;
+
+    /// Respond to a specific output event. Extracts host and target from the
+    /// TargetOutput's metadata — sinks don't need to decompose fields manually.
+    /// This is the primary ergonomic entry point for reactive sinks.
+    pub async fn respond(
+        &self,
+        output: &TargetOutput,
+        action: SinkAction,
     ) -> Result<()>;
 }
 ```
@@ -806,14 +1465,14 @@ per-host bounded dispatch queue (DC4) — the same path used by the monitor's tr
 rules. This ensures consistent ordering, backpressure, and concurrency limits regardless
 of whether an action originates from a rule or a sink.
 
-**LLM feedback loop**: An LLM sink can call `action_handle.send_keys_to_pane()` after
-analyzing output. The design of the LLM sink itself (prompt engineering, approval gates,
+**LLM feedback loop**: An LLM sink can call `action_handle.respond(&output, action)` after
+analyzing output — the host and target are extracted from the `TargetOutput` automatically. The design of the LLM sink itself (prompt engineering, approval gates,
 autonomous vs supervised mode) is **out of scope** for this library. The library provides
-the `OutputSink` trait and `ActionHandle` API; LLM integration is a consumer concern.
+the `SinkKind` enum and `ActionHandle` API; LLM integration is a consumer concern.
 
 ### `OutputBus` — Fan-Out Dispatcher
 
-The `OutputBus` is the central distributor. It receives `PaneOutput` from the monitor
+The `OutputBus` is the central distributor. It receives `TargetOutput` from the monitor
 (or from `capture_pane()` callers) and fans out to all registered sinks.
 
 ```rust
@@ -822,7 +1481,7 @@ pub struct OutputBus { /* subscribers: Vec<SinkEntry> */ }
 struct SinkEntry {
     id: SinkId,
     name: String,
-    tx: mpsc::Sender<PaneOutput>,
+    tx: mpsc::Sender<TargetOutput>,
     filters: Vec<CompiledSinkFilter>,
     task: JoinHandle<()>,
 }
@@ -837,7 +1496,7 @@ impl OutputBus {
     /// at construction time — the bus does not inject one.
     pub fn subscribe(
         &mut self,
-        sink: Box<dyn OutputSink>,
+        sink: SinkKind,
         channel_capacity: usize,
     ) -> SinkId;
 
@@ -848,7 +1507,7 @@ impl OutputBus {
     /// Uses try_send — if a sink's channel is full, the event is dropped
     /// for that sink only (logged at debug level). Sinks that cannot
     /// tolerate drops should use larger channel capacities.
-    pub fn publish(&self, output: PaneOutput);
+    pub fn publish(&self, output: TargetOutput);
 
     /// Shutdown all sinks gracefully.
     pub async fn shutdown(&mut self) -> Result<()>;
@@ -863,8 +1522,8 @@ only care about recent state (TUI) should set a small capacity and accept drops.
 
 ### `StdioSink` — Default Reference Implementation
 
-The library ships with `StdioSink` as the default, always-available sink. It serves
-as the reference implementation for the `OutputSink` trait.
+The library ships with `StdioSink` as the default, always-available sink. It is a
+variant of `SinkKind` and serves as the reference implementation.
 
 ```rust
 pub struct StdioSink {
@@ -881,13 +1540,127 @@ pub enum StdioFormat {
     Json,
 }
 
-impl OutputSink for StdioSink {
-    fn name(&self) -> &str { "stdio" }
-    // filters(): default (all output)
-    // write(): format and write to stdout immediately (no batching)
-    // flush(): flush stdout
+// StdioSink is handled by SinkKind::Stdio variant.
+// write(): format and write to stdout immediately (no batching)
+// flush(): flush stdout
+```
+
+### `JoinedStream` — Multi-Source Consolidated View
+
+Individual sinks see output from their filtered sources, but each `TargetOutput` arrives
+independently. A `JoinedStream` merges multiple source streams into a single
+time-ordered sequence where each chunk is attributed to its source — like a multi-party
+conversation transcript. This is the natural representation for an LLM analyzing
+cross-pane interactions, a log aggregator, or a TUI showing interleaved output.
+
+```rust
+/// A chunk in the joined stream. Wraps TargetOutput with a source label
+/// for human-readable attribution in the consolidated view.
+pub struct StreamChunk {
+    pub source: SourceLabel,
+    pub output: TargetOutput,
+}
+
+/// Identifies the source of a chunk in a joined stream.
+/// Constructed automatically from TargetOutput metadata.
+/// Works at any hierarchy level — session-only hosts produce
+/// session-level labels; pane-level output gets full specificity.
+pub struct SourceLabel {
+    pub host: String,           // "localhost", "web-1"
+    pub target: TargetAddress,  // source at whatever level is available
+}
+
+impl SourceLabel {
+    /// Short form for display: "web-1:build:0.1" (pane) or "web-1:build" (session)
+    pub fn short(&self) -> String;
+
+    /// Minimal form when host is unambiguous: "build:0.1" or "build"
+    pub fn minimal(&self) -> String;
 }
 ```
+
+**`JoinedSink`** — a sink combinator that wraps an inner `SinkKind` and presents
+incoming output as a consolidated multi-source stream:
+
+```rust
+/// Wraps an inner sink, transforming the output stream into a
+/// source-attributed conversation-style view.
+pub struct JoinedSink {
+    inner: SinkKind,
+    /// Controls how source labels are formatted in the stream.
+    label_format: LabelFormat,
+    /// Tracks the last source to emit, so consecutive chunks from the
+    /// same source can be coalesced without repeating the label.
+    last_source: Option<SourceLabel>,
+}
+
+pub enum LabelFormat {
+    /// "[web-1:build:0.1] output text here"
+    Bracketed,
+    /// "web-1:build:0.1> output text here"
+    Prompt,
+    /// Caller provides a format function (plain fn pointer — no heap allocation).
+    Custom(fn(&SourceLabel, &str) -> String),
+}
+
+impl JoinedSink {
+    pub fn new(inner: SinkKind, label_format: LabelFormat) -> Self;
+}
+```
+
+When `JoinedSink::write()` receives a `TargetOutput`, it:
+1. Extracts the `SourceLabel` from the output's metadata
+2. If the source differs from `last_source`, emits a source header/prefix
+3. Delegates to the inner sink's `write()` with the attributed content
+4. Updates `last_source` for coalescing
+
+**Coalescing**: Consecutive chunks from the same source are grouped without repeating
+the source label — like a chat UI where the sender name only appears on the first
+message in a burst. When a different source emits, the label appears again.
+
+**Use cases**:
+
+```rust
+// LLM sees a consolidated conversation across 3 build panes
+let llm_sink = JoinedSink::new(
+    SinkKind::Callback(CallbackSink { /* LLM sink config */ }),
+    LabelFormat::Bracketed,
+);
+// Output looks like:
+//   [web-1:build:0.0] compiling crate foo...
+//   [web-1:build:0.0] warning: unused variable
+//   [db-1:migrate:0.0] Running migration 042...
+//   [db-1:migrate:0.0] OK
+//   [web-1:build:0.0] Finished dev target
+
+// Stdio log with prompt-style labels
+let log_sink = JoinedSink::new(
+    SinkKind::Stdio(StdioSink::new(StdioFormat::Raw)),
+    LabelFormat::Prompt,
+);
+// Output looks like:
+//   web-1:build:0.0> compiling crate foo...
+//   db-1:migrate:0.0> Running migration 042...
+```
+
+**Extracting a joined view programmatically**: For callers that want to consume
+the stream as structured data (not formatted text), the `OutputBus` supports
+registering a channel-based subscriber that receives `StreamChunk` directly:
+
+```rust
+impl OutputBus {
+    /// Subscribe a raw channel that receives StreamChunks (TargetOutput + SourceLabel).
+    /// The caller reads from the receiver directly. No SinkKind wrapper needed.
+    pub fn subscribe_joined(
+        &mut self,
+        filters: Vec<SinkFilter>,
+        channel_capacity: usize,
+    ) -> (SinkId, mpsc::Receiver<StreamChunk>);
+}
+```
+
+This is the lowest-level API for consumers that want to build their own rendering
+on top of the joined stream (e.g., a TUI panel, a web socket feed, or test harness).
 
 ### Integration with Fleet and Monitor
 
@@ -896,9 +1669,9 @@ impl OutputSink for StdioSink {
     │
     ├── OutputBus (owned by Fleet)
     │     │
-    │     ├── subscribe(StdioSink::new(), 1024)
-    │     ├── subscribe(TuiSink::new(), 16)             // binary-provided
-    │     └── subscribe(LlmSink::new(action_handle), 256) // captures ActionHandle
+    │     ├── subscribe(SinkKind::Stdio(StdioSink::new(StdioFormat::Raw)), 1024)
+    │     ├── subscribe(SinkKind::Callback(tui_sink), 16)        // binary-provided
+    │     └── subscribe(SinkKind::Callback(llm_sink), 256)       // LLM callback sink
     │
     ├── HostHandle (localhost)
     │     └── Monitor ──publish()──► OutputBus
@@ -907,7 +1680,7 @@ impl OutputSink for StdioSink {
           └── Monitor ──publish()──► OutputBus
 ```
 
-**Monitor → Bus**: The monitor publishes `PaneOutput` to the bus after each output
+**Monitor → Bus**: The monitor publishes `TargetOutput` to the bus after each output
 event. This happens *in addition to* rule evaluation — rules and sinks operate
 independently on the same stream.
 
@@ -918,11 +1691,23 @@ via a `bus.publish()` call. This is opt-in at the call site, not automatic.
 that detects an error and wants to send a recovery command) submits an `ActionRequest`
 through its `ActionHandle`. The request is routed to the correct `HostHandle` via the
 existing per-host dispatch queue (DC4). The sink does not need to know which
-`HostHandle` to use — routing is by the `host` and `pane_id` fields in `ActionTarget`.
+`HostHandle` to use — routing is by the `host` field and `TargetAddress` in `ActionRequest`.
 
 ---
 
 ## Module Specifications
+
+### `matcher.rs`
+
+The `MatcherKind` enum and its variants. See
+[Core Abstractions — MatcherKind](#matcherkind--static-dispatch-content-matching) for
+the full enum definition.
+
+All variants are defined in the `MatcherKind` enum. `Regex` and `Substring` are
+stateless (`reset()` is a no-op). `LineCount` is stateful and resets its counter
+on `reset()`. `WordList` uses `regex::Regex` internally with `\b` word boundaries
+for accurate matching. The combinators (`AllOf`, `AnyOf`, `Not`) delegate to their
+children and propagate `reset()`.
 
 ### `config.rs`
 
@@ -962,6 +1747,8 @@ pub enum TmuxSocket {
 }
 
 /// Config DTO — deserialized from TOML/YAML. Patterns are strings.
+/// This is the serde-clean layer; `pattern` is a regex string by default.
+/// For non-regex matchers, use `CompiledRule::with_matcher()` directly.
 pub struct TriggerRule {
     pub name: String,                  // human-readable rule name for logging
     pub pane_filter: Option<String>,   // regex string (None = all panes)
@@ -971,18 +1758,30 @@ pub struct TriggerRule {
 }
 
 /// Runtime form — compiled from TriggerRule during startup validation.
-/// Compile errors include rule name and pattern for user-facing diagnostics.
+/// The `matcher` field is a `MatcherKind` enum — config-driven rules compile
+/// to `MatcherKind::Regex`, but programmatic callers can use any variant
+/// (WordList, LineCount, AllOf, etc.).
 pub struct CompiledRule {
     pub name: String,
     pub pane_filter: Option<Regex>,
-    pub pattern: Regex,
+    pub matcher: MatcherKind,
     pub action: Action,
     pub cooldown: Option<Duration>,
 }
 
 impl TriggerRule {
-    /// Compile string patterns into Regex. Returns error with rule name context.
+    /// Compile string patterns into MatcherKind::Regex. Returns error with rule name context.
     pub fn compile(&self) -> Result<CompiledRule>;
+}
+
+impl CompiledRule {
+    /// Construct a rule with a custom MatcherKind (bypasses config deserialization).
+    /// Used by programmatic callers who want non-regex matching.
+    pub fn with_matcher(
+        name: impl Into<String>,
+        matcher: MatcherKind,
+        action: Action,
+    ) -> Self;
 }
 
 pub enum Action {
@@ -1007,25 +1806,38 @@ The transport layer abstracts command execution, allowing the same tmux operatio
 work on localhost (via `tokio::process::Command`) or remote hosts (via `russh` SSH channels).
 
 ```rust
-#[async_trait]
-pub trait Transport: Send + Sync {
+/// Closed enum of transport implementations. Static dispatch — the same
+/// tmux operations work on localhost or SSH with zero vtable overhead.
+pub enum TransportKind {
+    Local(LocalTransport),
+    Ssh(SshTransport),
+    Mock(MockTransport),
+}
+
+impl TransportKind {
     /// Execute a command and return its stdout as a String.
     /// Must respect the configured timeout.
-    async fn exec(&self, command: &str) -> Result<String>;
+    pub async fn exec(&self, command: &str) -> Result<String>;
 
     /// Open a persistent shell for streaming output.
     /// Used by the monitor for long-running processes (control mode session
     /// or `tail -qf` in fallback pipe mode).
-    async fn open_shell(&self) -> Result<Box<dyn ShellChannel>>;
+    pub async fn open_shell(&self) -> Result<ShellChannelKind>;
 }
 
-#[async_trait]
-pub trait ShellChannel: Send {
+/// Closed enum of shell channel implementations.
+pub enum ShellChannelKind {
+    Local(LocalShellChannel),
+    Ssh(SshShellChannel),
+    Mock(MockShellChannel),
+}
+
+impl ShellChannelKind {
     /// Write data to the shell's stdin.
-    async fn write(&mut self, data: &[u8]) -> Result<()>;
+    pub async fn write(&mut self, data: &[u8]) -> Result<()>;
 
     /// Wait for the next message from the shell.
-    async fn read(&mut self) -> Option<ShellEvent>;
+    pub async fn read(&mut self) -> Option<ShellEvent>;
 }
 
 pub enum ShellEvent {
@@ -1042,8 +1854,7 @@ setup required. `exec()` spawns a subprocess, waits for completion, returns stdo
 channel. `open_shell()` opens a PTY channel with a shell.
 
 **`MockTransport`**: For testing. Returns canned responses for `exec()` and canned
-streaming data for `open_shell()`. Implements `Transport` trait directly — no separate
-test infrastructure needed.
+streaming data for `open_shell()`. No separate test infrastructure needed.
 
 **SSH-specific concerns (SshTransport only)**:
 
@@ -1086,14 +1897,14 @@ need for filename encoding of session names entirely. FIFO paths (if used) are s
 
 ```rust
 /// List all sessions on the host.
-pub async fn list_sessions(transport: &dyn Transport) -> Result<Vec<SessionInfo>>;
+pub async fn list_sessions(transport: &TransportKind) -> Result<Vec<SessionInfo>>;
 
 /// List all windows in a session.
-pub async fn list_windows(transport: &dyn Transport, session: &str) -> Result<Vec<WindowInfo>>;
+pub async fn list_windows(transport: &TransportKind, session: &str) -> Result<Vec<WindowInfo>>;
 
 /// List all panes, optionally filtered by regex against "session:window.pane".
 pub async fn list_panes(
-    transport: &dyn Transport,
+    transport: &TransportKind,
     filter: Option<&Regex>,
 ) -> Result<Vec<PaneInfo>>;
 ```
@@ -1116,14 +1927,14 @@ Pane content capture via `tmux capture-pane`.
 ```rust
 /// Capture the visible content of a single pane.
 /// Runs: tmux capture-pane -p -t <target>
-pub async fn capture_pane(transport: &dyn Transport, target: &PaneAddress) -> Result<String>;
+pub async fn capture_pane(transport: &TransportKind, target: &PaneAddress) -> Result<String>;
 
 /// Capture with scrollback history.
 /// Runs: tmux capture-pane -p -t <target> -S <start> -E <end>
 /// start/end are line numbers; negative values reach into scrollback buffer.
 /// Example: start=-1000, end=-1 captures last 1000 lines of scrollback.
 pub async fn capture_pane_history(
-    transport: &dyn Transport,
+    transport: &TransportKind,
     target: &PaneAddress,
     start: i32,
     end: i32,
@@ -1132,10 +1943,32 @@ pub async fn capture_pane_history(
 /// Capture all panes in a session. Calls capture_pane for each pane found via list_panes.
 /// Returns a map of pane address → visible content.
 pub async fn capture_session(
-    transport: &dyn Transport,
+    transport: &TransportKind,
     session: &str,
 ) -> Result<HashMap<PaneAddress, String>>;
+
+/// Sample recent text from a pane's scrollback, returned in chronological order.
+/// Delegates to capture_pane_history() internally, then applies the query's
+/// pattern matching and truncation logic.
+pub async fn sample_text(
+    transport: &TransportKind,
+    target: &PaneAddress,
+    query: &ScrollbackQuery,
+) -> Result<String>;
 ```
+
+**`sample_text` implementation**:
+1. `LastLines(n)` → calls `capture_pane_history(transport, target, -(n as i32), -1)`.
+   Result is already chronological.
+2. `Until { pattern, max_lines }` → calls `capture_pane_history` with
+   `start = -(max_lines as i32)`, `end = -1`. Scans the result from the bottom up for
+   the first line matching `pattern`. Returns from that line (inclusive) to the end.
+   If no match, returns the full captured range.
+3. `LastLinesUntil { lines, stop_pattern }` → same as `LastLines(lines)`, then scans
+   bottom-up for `stop_pattern`. Truncates at the match point (inclusive).
+
+In all cases the output preserves `capture-pane`'s top-to-bottom ordering — no reversal
+step is needed. The pattern scan is the only post-processing.
 
 **Escaping**: The `-p` flag outputs to stdout (not to a buffer), which is what we need
 over SSH exec channels. The `-e` flag (escape sequences) is intentionally NOT used — we
@@ -1150,13 +1983,17 @@ want plain text, not ANSI-encoded output.
 
 Tmux control: session lifecycle, sending input, and managing session/window metadata.
 
+**Note**: These are internal functions that accept raw strings extracted from typed
+`TargetAddress` variants by `Target`. The public API uses `Target` methods (DC16, DC17).
+Callers should use `HostHandle` and `Target` methods, not these functions directly.
+
 ```rust
 // --- Session Lifecycle ---
 
 /// Create a new detached tmux session.
 /// Runs: tmux new-session -d -s <name> [-n <window_name>] [<command>]
 pub async fn create_session(
-    transport: &dyn Transport,
+    transport: &TransportKind,
     name: &str,
     window_name: Option<&str>,
     command: Option<&str>,
@@ -1164,14 +2001,14 @@ pub async fn create_session(
 
 /// Kill a tmux session and all its windows/panes.
 /// Runs: tmux kill-session -t <name>
-pub async fn kill_session(transport: &dyn Transport, name: &str) -> Result<()>;
+pub async fn kill_session(transport: &TransportKind, name: &str) -> Result<()>;
 
 // --- Input ---
 
 /// Send a KeySequence to a pane. Handles the split between literal text (-l)
 /// and special keys (no -l) automatically.
 pub async fn send_keys(
-    transport: &dyn Transport,
+    transport: &TransportKind,
     target: &PaneAddress,
     keys: &KeySequence,
 ) -> Result<()>;
@@ -1179,7 +2016,7 @@ pub async fn send_keys(
 /// Convenience: send literal text (no special keys, no Enter appended).
 /// Equivalent to: tmux send-keys -l -t <target> '<escaped_text>'
 pub async fn send_text(
-    transport: &dyn Transport,
+    transport: &TransportKind,
     target: &PaneAddress,
     text: &str,
 ) -> Result<()>;
@@ -1187,7 +2024,7 @@ pub async fn send_text(
 /// Rename a tmux session.
 /// Runs: tmux rename-session -t <current> <new>
 pub async fn rename_session(
-    transport: &dyn Transport,
+    transport: &TransportKind,
     current_name: &str,
     new_name: &str,
 ) -> Result<()>;
@@ -1195,7 +2032,7 @@ pub async fn rename_session(
 /// Rename a window.
 /// Runs: tmux rename-window -t <session>:<index> <new_name>
 pub async fn rename_window(
-    transport: &dyn Transport,
+    transport: &TransportKind,
     session: &str,
     window_index: u32,
     new_name: &str,
@@ -1259,34 +2096,44 @@ Internal responsibilities:
 - SSH targets are connected concurrently via `tokio::JoinSet`
 - Tracks per-target status: `Disconnected`, `Connecting`, `Connected`, `Monitoring`, `Error(String)`
 - Routes on-demand operations (create, kill, capture, send-keys, list) to the correct target
+- Supports per-host monitoring start/stop (`start_monitoring_host()`, `stop_monitoring_host()`)
+- Per-host stop delegates to `HostHandle::stop_monitoring()`, which tears down all session monitors for that host
 - Owns the `shutdown` watch channel; `shutdown()` signals all targets
+- Owns the `OutputBus` (shared with HostHandles via `Arc`); exposes `output_bus()` accessor
+- Maintains workstream registry: `HashMap<String, WorkstreamEntry>` for named (host, target) bindings
 
 ```rust
 pub enum HostStatus {
     Disconnected,
     Connecting,
     Connected,
-    Monitoring,
+    /// Monitoring N sessions. Includes count for observability.
+    Monitoring { sessions: usize },
     Error(String),
 }
 ```
 
 ### `host.rs`
 
-The `HostHandle` implementation. See [Core Abstractions](#hosthandle--per-host-facade).
+The `HostHandle` and `Target` implementations. See Core Abstractions for the full APIs.
 
-Internally, `HostHandle` holds a `Box<dyn Transport>` and delegates to the function-level
-APIs in `discovery`, `capture`, `control`, `pipe`, and `monitor`. It is the composition
-root for per-target operations.
+`HostHandle` wraps `Arc<HostHandleInner>` which holds the transport and config.
+`Target` is lightweight — holds an `Arc<HostHandleInner>` plus a `TargetAddress` enum.
+Both delegate to the function-level APIs in `discovery`, `capture`, `control`, `pipe`,
+and `monitor`.
 
 ```rust
-pub struct HostHandle {
-    transport: Box<dyn Transport>,
+struct HostHandleInner {
+    transport: TransportKind,
     config: HostTarget,
-    pipe_state: Option<PipeManager>,   // None if monitoring not started
-    monitor_handle: Option<MonitorHandle>,
+    pipe_state: Option<PipeManager>,   // None if monitoring not started (fallback path)
+    /// Per-session monitor handles, keyed by session name.
+    /// Each entry represents one control-mode connection (DC10).
+    /// RwLock allows &self methods to mutate monitoring state safely.
+    session_monitors: RwLock<HashMap<String, SessionMonitorHandle>>,
 }
 ```
+
 
 ### `pipe.rs`
 
@@ -1298,10 +2145,10 @@ pub struct PipeManager { /* tracks active pipes for cleanup */ }
 impl PipeManager {
     /// Create FIFOs and attach pipe-pane for each target pane.
     /// Uses a dedicated transport exec call (not the monitor channel).
-    pub async fn setup(transport: &dyn Transport, panes: &[PaneAddress]) -> Result<Self>;
+    pub async fn setup(transport: &TransportKind, panes: &[PaneAddress]) -> Result<Self>;
 
     /// Detach all pipe-panes and remove FIFO files.
-    pub async fn cleanup(&self, transport: &dyn Transport) -> Result<()>;
+    pub async fn cleanup(&self, transport: &TransportKind) -> Result<()>;
 }
 
 impl Drop for PipeManager {
@@ -1321,28 +2168,37 @@ handling is the binary's responsibility, keeping the library embeddable in MCP/s
 
 ### `monitor.rs`
 
-The core event loop. Reads the multiplexed output stream and evaluates rules.
+The core event loop. Each `SessionMonitor` owns one control-mode connection to a single
+tmux session and evaluates rules against its output. `HostHandle` creates one
+`SessionMonitor` per monitored session (DC10, DC13).
 
 ```rust
-pub struct OutputMonitor { /* rules, cooldown state, shell channel */ }
+/// Monitors a single tmux session via control mode.
+pub struct SessionMonitor { /* session name, rules, cooldown state */ }
 
-impl OutputMonitor {
+impl SessionMonitor {
+    /// Run the monitor loop for one session.
+    /// Opens `tmux -C attach -t <session>` via the transport, parses
+    /// `%output %<pane_id> <data>` frames, evaluates rules, and publishes
+    /// TargetOutput to the OutputBus.
+    /// Returns when `stop` signal is received or the connection drops.
     pub async fn run(
         &mut self,
-        transport: &dyn Transport,
-        panes: &[PaneAddress],
+        transport: &TransportKind,
+        session: &str,
         rules: &[TriggerRule],
-        shutdown: tokio::sync::watch::Receiver<bool>,
+        bus: &OutputBus,
+        stop: watch::Receiver<bool>,
     ) -> Result<()>;
 }
 ```
 
 **Must address P3**: Rule evaluation replaces the hardcoded `contains('>')` check.
 
-**Must address P6**: Monitoring uses a dedicated channel — a control mode session
-(`tmux -C attach`, see DC10) as the primary strategy, or `tail -qf` on pipe files as
-fallback. Action dispatch (send-keys) uses separate exec channels routed through a
-bounded queue (see [DC4](#dc4-action-dispatch-channel-strategy)).
+**Must address P6**: Each `SessionMonitor` uses a dedicated control-mode connection
+(`tmux -C attach -t <session>`, see DC10) as the primary strategy, or per-pane pipe
+files as fallback. Action dispatch (send-keys) uses separate exec channels routed
+through a bounded queue (see [DC4](#dc4-action-dispatch-channel-strategy)).
 
 **Must address P9**: Failed send-keys or malformed lines must be logged at `warn` level,
 not silently dropped.
@@ -1351,6 +2207,28 @@ not silently dropped.
 frames — structured, unambiguous, and keyed on `#{pane_id}` per DC1. For the pipe-pane
 fallback, `pipe-pane` output is prefixed with `%<pane_id>` (set at attach time), and the
 monitor parses on that prefix directly — no filename decoding required.
+
+**Lifecycle**: Each `SessionMonitor::run()` is spawned as a tokio task by `HostHandle`.
+The `SessionMonitorHandle` returned to the caller holds the task's `JoinHandle` and stop
+channel. Stopping a session monitor is non-disruptive to other sessions (DC13).
+
+### `sink.rs`
+
+The output sink pipeline types. See [Output Sink Pipeline](#output-sink-pipeline) for
+the full API and design rationale.
+
+This module contains:
+- `TargetOutput`: the unit of output flowing through the pipeline
+- `SinkKind` enum: closed set of sink types (static dispatch, no trait objects)
+- `SinkFilter` / `CompiledSinkFilter`: composable output targeting
+- `MatcherKind` (re-exported from `matcher.rs`): content matching variants
+- `ActionHandle` / `ActionRequest` / `SinkAction`: sink-initiated actions
+- `OutputBus`: central fan-out dispatcher with per-sink bounded channels
+- `SinkId`: opaque handle for unsubscribe
+
+`OutputBus` is owned by `Fleet` and shared with all `HostHandle` instances via `Arc`.
+Monitors publish `TargetOutput` to the bus; the bus fans out to per-sink tokio tasks.
+Each sink task drives its own `SinkKind::write()` loop independently.
 
 ---
 
@@ -1442,14 +2320,15 @@ state (connection, panes, pipes, cooldown timers) is task-local.
 
 ### DC6: Local vs SSH Transport
 
-**Decision**: A `Transport` trait abstracts command execution. Two implementations:
-`LocalTransport` (localhost, subprocess-based) and `SshTransport` (remote, russh-based).
+**Decision**: A `TransportKind` enum abstracts command execution via static dispatch.
+Three variants: `Local(LocalTransport)` (localhost, subprocess-based),
+`Ssh(SshTransport)` (remote, russh-based), and `Mock(MockTransport)` (testing).
 
 **Rationale**: The prototype assumes SSH for everything, but localhost tmux is a primary
 use case (local development, CI, single-machine automation). Forcing SSH to localhost
-adds unnecessary complexity (SSH server requirement, key management, latency). A trait
+adds unnecessary complexity (SSH server requirement, key management, latency). The enum
 abstraction lets all downstream modules (`discovery`, `capture`, `control`, `pipe`,
-`monitor`) be transport-agnostic.
+`monitor`) be transport-agnostic with zero vtable overhead.
 
 **LocalTransport specifics**:
 - `exec()`: spawns `tokio::process::Command`, captures stdout, respects timeout
@@ -1558,7 +2437,7 @@ initialization. The library is also consumable by MCP tools or other programmati
 ### DC12: Output Sink Pipeline Architecture
 
 **Decision**: Captured pane output is distributed to consumers via an async fan-out bus
-(`OutputBus`) that delivers `PaneOutput` to independently-running sink tasks. Each sink
+(`OutputBus`) that delivers `TargetOutput` to independently-running sink tasks. Each sink
 receives its own bounded channel and manages its own batching, buffering, and timing
 internally. Sinks are filtered via composable `SinkFilter` structs (OR across filters,
 AND within fields). Sinks may initiate actions on tmux entities via an `ActionHandle`
@@ -1567,7 +2446,7 @@ that routes requests through the existing per-host action dispatch queue (DC4).
 **Rationale**:
 - **Decoupled latency**: A slow LLM sink must never block a fast stdio sink. Per-sink
   channels with independent tasks ensure this.
-- **Sink-owned batching**: The bus delivers individual `PaneOutput` events; sinks decide
+- **Sink-owned batching**: The bus delivers individual `TargetOutput` events; sinks decide
   when/how to batch. A stdio sink flushes immediately. An LLM sink accumulates until a
   token budget or timeout. This keeps the bus simple and avoids a "one size fits all"
   batching policy.
@@ -1585,7 +2464,328 @@ that routes requests through the existing per-host action dispatch queue (DC4).
 - Bus-level batching with configurable window: Rejected — forces all sinks to the same
   cadence and complicates the bus with timer logic.
 - Callback-based sinks (no channels): Rejected — a slow callback blocks the bus loop.
-- Shared `Arc<Mutex<Vec<PaneOutput>>>` polling: Rejected — wastes CPU, no backpressure.
+- Shared `Arc<Mutex<Vec<TargetOutput>>>` polling: Rejected — wastes CPU, no backpressure.
+
+### DC13: Granular Monitoring Lifecycle
+
+**Decision**: Monitoring is controllable at three levels: fleet-wide, per-host, and
+per-session. Each level can be started and stopped independently without affecting
+other active monitors at the same or higher level.
+
+**API surface**:
+
+| Level | Start | Stop |
+|-------|-------|------|
+| Fleet | `fleet.start_monitoring(rules)` | `fleet.shutdown()` |
+| Host | `fleet.start_monitoring_host(host, rules)` | `fleet.stop_monitoring_host(host)` |
+| Session | `host.start_monitoring_session(&target, rules)` | `host.stop_monitoring_session(&target)` |
+
+**Rationale**: DC10 establishes that each monitored session has its own control-mode
+connection (`tmux -C attach -t <session>`). These connections are independent — tearing
+one down has no effect on others. The API should expose this natural granularity rather
+than forcing all-or-nothing lifecycle. Use cases:
+
+- **Dynamic session management**: A consumer creates a tmux session, monitors it for a
+  task, then stops monitoring when the task completes — without disrupting monitoring
+  on other sessions.
+- **Selective host disconnect**: An SSH target becomes unreachable. The caller stops
+  monitoring on that host while others continue.
+- **Incremental rollout**: Start monitoring one session at a time for debugging before
+  enabling fleet-wide monitoring.
+
+**Implementation**: `HostHandle` tracks per-session `SessionMonitorHandle` in a
+`HashMap<String, SessionMonitorHandle>`. Each handle owns its control-mode connection's
+stop channel and task join handle. `MonitorHandle` (returned by `start_monitoring()`) is
+a view over the session handles, not a separate entity. `stop_monitoring_session()` drops
+the session's handle, which signals the stop channel, flushes pending output to the
+`OutputBus`, joins the monitor task, and — if the pipe-pane fallback path was active —
+calls `PipeManager::cleanup()` to detach pipes and remove FIFO files from `/tmp` (P4).
+`stop_monitoring()` iterates all sessions.
+
+**Invariant**: On-demand operations (`target.capture()`, `target.send_keys()`,
+`host.list_sessions()`, etc.) are unaffected by monitoring state. A host with stopped
+monitoring is still fully operational for on-demand use via `HostHandle` and `Target`.
+
+### DC14: Trait-Based Content Matching
+
+**Decision**: Text matching is abstracted behind the `MatcherKind` enum. Regex is
+one implementation, not a privileged special case. Both `SinkFilter` (content field) and
+`CompiledRule` (matcher field) use `MatcherKind`.
+
+**Rationale**: Different use cases need different matching strategies:
+- **Regex**: General-purpose pattern matching (the default for config-driven rules)
+- **Substring/keyword lists**: Faster than regex for simple "does output contain X?"
+- **Word-boundary blocklists**: Bad-word/secret detectors that don't false-positive on
+  substrings (e.g., "token" matches "token" but not "tokenize")
+- **Stateful stream matchers**: Line counters, byte accumulators, rate detectors —
+  these need to track state across multiple `TargetOutput` events
+
+Making regex the only matching mechanism would force all of these into regex patterns,
+which is unnatural for stateful matchers and inefficient for simple keyword checks.
+
+**Statefulness**: Matchers may be stateful (`matches(&mut self, ...)`). Each sink and
+each compiled rule gets its own cloned `MatcherKind` instance — state is never shared.
+`reset()` is called on monitoring restart. The bus evaluates routing fields
+(host/session/window/pane) before calling the content matcher, so expensive matchers
+are only invoked on pre-filtered output.
+
+**Static dispatch**: All matcher variants are defined in the `MatcherKind` enum (DC14).
+No vtable dispatch on the hot path. `AllOf`/`AnyOf` store children as `Vec<MatcherKind>`
+(heap-backed); `Not` uses `Box<MatcherKind>` for recursive enum sizing. The entire
+matcher tree is `Clone`.
+
+**Config boundary**: `TriggerRule` (serde DTO) stores `pattern: String` which compiles
+to `MatcherKind::Regex`. Programmatic callers bypass the config layer and construct
+`CompiledRule::with_matcher()` or `SinkFilter { content: Some(...) }` directly with
+any `MatcherKind` variant.
+
+**Built-in matchers** (all `MatcherKind` enum variants): `Regex`, `Substring`,
+`LineCount`, `WordList`, plus `AllOf`/`AnyOf`/`Not` combinators. The enum is closed —
+new matcher types require adding a variant (keeping the hot path static-dispatch).
+
+### DC15: Joined Stream — Multi-Source Consolidated View
+
+**Decision**: Multiple filtered output streams can be joined into a single time-ordered
+sequence where each chunk is attributed to its source. This is implemented as a sink
+combinator (`JoinedSink`) and a raw channel API (`subscribe_joined()`), not as a
+separate pipeline stage.
+
+**Rationale**: When monitoring multiple panes across hosts, consumers often need a
+unified view — an LLM analyzing cross-pane interactions, a log aggregator correlating
+events, or a TUI showing interleaved output. Without joining, each sink sees isolated
+streams and must implement its own source-tracking and interleaving logic.
+
+**Design choices**:
+- **Combinator, not infrastructure**: `JoinedSink<S>` wraps any `SinkKind` and adds
+  source attribution. The bus itself remains simple (fan-out only). This avoids adding
+  joining logic to the bus hot path.
+- **Source coalescing**: Consecutive chunks from the same source are grouped without
+  repeating the label. This mirrors chat UIs where the sender appears once per burst,
+  reducing visual noise in high-throughput streams.
+- **Two levels of API**: `JoinedSink` for formatted text output (wraps any sink),
+  `subscribe_joined()` for structured `StreamChunk` data (channel-based, no sink trait).
+  The structured API enables custom rendering without forcing text formatting.
+- **Label customization**: `LabelFormat` supports bracketed, prompt-style, and custom
+  formatters. The `SourceLabel` type provides `short()` and `minimal()` for common cases.
+
+**Alternatives considered**:
+- Bus-level stream merging: Rejected — adds complexity to the bus and forces all sinks
+  into a joined view. Not all sinks want interleaved output.
+- Post-hoc log parsing: Rejected — requires sinks to independently reconstruct
+  source attribution from `TargetOutput` fields, duplicating logic across sinks.
+
+### DC16: Unified Target Type
+
+**Decision**: A single `Target` type represents any tmux entity (session, window, or
+pane). `HostHandle` is slimmed to host-level concerns only — session discovery,
+creation, and host-wide monitoring. All entity-level operations live on `Target`.
+`SessionMonitorHandle` wraps `Target` via `Deref`.
+
+**Rationale**: Tmux itself uses uniform addressing — `send-keys -t X` works whether
+X is a session, window, or pane (tmux resolves to the active pane). A library that
+mirrors this uniformity avoids three problems:
+
+1. **God object**: A flat `HostHandle` with 20+ methods mixing host, session, and
+   pane concerns is unwieldy. But decomposing into separate `SessionHandle`,
+   `WindowHandle`, and `PaneHandle` types leads to duplicated I/O methods — every
+   level needs `send_text()`, `capture()`, etc. because tmux supports them at every level.
+2. **Heterogeneous hosts**: Not all hosts have the same hierarchy depth. Some have
+   sessions with a single default window/pane; others have complex multi-window
+   layouts. A single `Target` type handles both without forcing callers through
+   intermediate layers that may be irrelevant.
+3. **One implementation**: `send_text()`, `send_keys()`, `capture()` etc. are
+   implemented once on `Target`. They construct `tmux ... -t <target_string>` and
+   execute via the transport. No delegation chains, no method duplication.
+
+**Key properties**:
+
+| Component | Responsibility |
+|-----------|---------------|
+| `HostHandle` | Host-level: `list_sessions`, `create_session`, `session`, `target`, `start_monitoring`, `stop_monitoring`, `start_monitoring_session`, `stop_monitoring_session` |
+| `Target` | Entity-level: I/O (`send_text`, `send_keys`, `capture`, `sample_text`), navigation (`children`, `window`, `pane`), lifecycle (`kill`, `rename`), monitoring (`start_monitoring`) |
+| `SessionMonitorHandle` | Monitoring lifecycle + `Deref<Target=Target>` — adds `shutdown`, `is_active` |
+
+- **Cheap handles**: `Target` holds `Arc<HostHandleInner>` + `TargetAddress` enum.
+  Clone is cheap and safe to pass across tasks.
+- **Navigation is optional**: `host.session("build")?.send_text("ls")` works without
+  ever listing windows or panes. `target.children()` drills down when needed.
+- **DC13 preserved**: On-demand operations work regardless of monitoring state.
+  A `Target` works the same whether monitoring is active or not.
+
+**`Deref` for monitoring**: `SessionMonitorHandle` only adds `shutdown()` and
+`is_active()`. Everything else comes from `Target` via `Deref`. This means
+`monitor.capture()`, `monitor.children()`, `monitor.send_text("x")` etc. all work
+without any explicit delegation code.
+
+### DC17: Type Safety via Target + TargetAddress
+
+**Decision**: Type safety comes from the `TargetAddress` enum (`Session(SessionInfo)`,
+`Window(WindowInfo)`, `Pane(PaneAddress)`) embedded in each `Target`. Discovery
+methods produce `Target` values with appropriate addresses; subsequent operations
+carry that typed context. Raw strings enter via `TargetSpec::parse()` +
+`host.target(&spec)` as the escape hatch.
+
+**Rationale**: Raw string parameters for session names and window indices are
+error-prone — a typo silently targets the wrong entity or returns empty results.
+The `Target` approach provides:
+- **Provenance**: A `Target` was produced by the system (via `list_sessions()`,
+  `create_session()`, `children()`, etc.), so it refers to a real entity
+- **Structural scoping**: `target.children()` returns child-level `Target` values —
+  no `PaneScope` enum or string-based filtering needed
+- **Self-contained context**: Each `Target` carries enough info to construct tmux
+  commands without external lookups. `WindowInfo` includes `session_name`; `PaneAddress`
+  includes session and window indices.
+
+**API changes from flat HostHandle baseline**:
+
+| Before (flat HostHandle) | After (unified Target) |
+|---------------------------|------------------------|
+| `host.kill_session(name: &str)` | `target.kill()` |
+| `host.list_windows(session: &str)` | `target.children()` (at session level) |
+| `host.list_panes(filter: Option<&Regex>)` | `target.children()` (at window level) |
+| `host.capture_session(session: &str)` | `target.capture_all()` |
+| `host.rename_session(name, new_name)` | `target.rename(new_name)` |
+| `host.send_text(&pane_addr, text)` | `target.send_text(text)` |
+| `host.send_keys(&pane_addr, keys)` | `target.send_keys(keys)` |
+| `host.capture_pane(&pane_addr)` | `target.capture()` |
+| `host.sample_text(&pane_addr, query)` | `target.sample_text(query)` |
+| `host.create_session(...) -> Result<()>` | `host.create_session(...) -> Result<Target>` |
+
+**Escape hatch**: `TargetSpec::parse("build:0.1")` constructs a spec from a raw
+string, and `host.target(&spec)` queries tmux to verify the entity exists and returns
+`Option<Target>`. The builder alternative — `TargetSpec::session("build").window(0).pane(1)` —
+is preferred when components are known at compile time. This is the bridge from raw
+strings (CLI args, config files) to typed handles.
+
+### DC18: Composite Workstreams (Future)
+
+**Status**: Deferred — documented for future reference. Single-target workstreams
+(`Fleet::bind()`) are in scope; composite workstreams require real usage patterns to
+inform membership lifecycle decisions.
+
+**Concept**: Extend workstreams to group multiple (host, target) pairs under one name —
+e.g., "deploy" spans `web-1:build`, `db-1:migrate`, and `web-1:test`. This would
+compose with existing abstractions:
+
+- **`SinkFilter` by workstream**: Filter output by workstream name. The bus resolves
+  the workstream to its member targets at filter-match time.
+- **`JoinedStream` over a workstream**: `subscribe_joined()` accepts a workstream name,
+  automatically creating filters for all member targets.
+- **Workstream-scoped monitoring**: Start/stop monitoring for all targets in a
+  workstream with a single call.
+
+**Open questions** (to be resolved by usage):
+- What happens when a member target is killed or disconnected?
+- Can targets belong to multiple workstreams?
+- Should workstreams be defined in config or only programmatically?
+
+### DC19: Structured Command Execution via Target::exec()
+
+**Decision**: `Target::exec(command, timeout)` provides structured command execution
+within a tmux pane, complementing the existing fire-and-forget `send_text()`/`send_keys()`.
+It returns `ExecOutput { stdout, exit_code }` by using a sentinel-based capture mechanism.
+No host-level bypass (`HostHandle::exec()`) is added — the library's abstraction boundary
+is tmux, and all command execution stays within the tmux framework.
+
+**Three modes of pane interaction**:
+
+| Method | Semantics | Output | Use case |
+|--------|-----------|--------|----------|
+| `send_text(text)` | Fire-and-forget PTY input | None | Interactive use: typing into vim, top, a REPL |
+| `send_keys(keys)` | Fire-and-forget special keys | None | Control sequences: Enter, C-c, Tab |
+| `exec(cmd, timeout)` | Command-and-capture | `ExecOutput` | Automation: build, test, deploy, diagnostics |
+
+**Rationale**: Automation workflows need structured results — "run `make test`, did it
+pass?" Today this requires `send_text("make test\n")` + manual `capture()` + hoping
+the command finished + parsing output for success/failure. `exec()` encapsulates this
+into a single call with clear completion semantics and an exit code.
+
+**Sentinel mechanism**:
+
+1. Generate a unique marker: `__MOTLIE_<uuid>__`
+2. Send via `send_keys`: `<command> ; echo "__MOTLIE_<uuid>__ $?" {Enter}`
+   (POSIX shells: bash, zsh, sh, dash. For fish: `; echo "__MOTLIE_<uuid>__ $status"`)
+3. Poll `capture_with_history()` at intervals until the sentinel line appears (or timeout)
+4. Extract everything between the command echo and the sentinel as stdout
+5. Parse the exit code from `__MOTLIE_<uuid>__ <exit_code>`
+6. Return `ExecOutput { stdout, exit_code }`
+
+**Why sentinel-based**:
+
+- **Works with POSIX shells**: The sentinel uses `echo` + `$?` — works in bash, zsh,
+  sh, dash. Fish requires `$status` instead of `$?`. Shell detection precedence:
+  (1) `tmux display -p '#{pane_current_command}'` to inspect the running shell,
+  (2) fall back to `$SHELL` environment variable. Default is POSIX `$?` if detection
+  fails. No special shell features or tmux extensions required beyond `echo`.
+- **Reuses existing primitives**: `send_keys()` for input, `capture_with_history()` for
+  output. No new transport capabilities or tmux features needed.
+- **Non-invasive**: The sentinel echo is appended after the command via `;`. It does not
+  modify the command itself. The pane's shell state is unchanged after execution.
+- **Cross-pane safe**: The UUID in the sentinel ensures that concurrent `exec()` calls
+  on different panes never confuse each other's output. **Same-pane concurrent `exec()`
+  is not supported** — overlapping commands on one pane interleave terminal output,
+  making boundary extraction ambiguous regardless of unique sentinels. `Target` holds a
+  per-target `Mutex` that serializes `exec()` calls to the same pane. Callers needing
+  parallel execution should use separate panes.
+
+**Alternatives considered**:
+
+- **Host-level `HostHandle::exec()`** (transport bypass): Rejected — runs outside tmux,
+  so the command doesn't execute in the pane's environment (virtualenvs, working directory,
+  shell aliases, env vars set by prior commands). The pane's shell is the ground truth for
+  the workstream's state; bypassing it loses that context.
+- **`tmux run-shell`**: Runs a command in tmux's server context, not in the pane's shell.
+  Output appears in the pane but isn't easily captured programmatically. Doesn't inherit
+  the pane's shell environment.
+- **Control-mode `%output` parsing**: Control mode streams output but has no concept of
+  command boundaries. There's no signal for "the command finished." Sentinel-based capture
+  adds explicit boundaries.
+- **Expect-style prompt detection**: Fragile — depends on knowing the exact prompt format,
+  which varies across shells, hosts, and user configurations. The sentinel is universal.
+
+**Limitations and trade-offs**:
+
+- **Assumes a shell prompt**: `exec()` assumes the pane has an active shell waiting for
+  input. Calling `exec()` on a pane running `vim` or `top` will inject the command into
+  that program — not a shell. Callers should check pane state (via `capture()`) if unsure.
+- **Timeout is required**: There is no reliable way to detect a hung command without a
+  timeout. A command that never completes will block until timeout, then return an error.
+- **No stderr separation**: Tmux scrollback captures the merged terminal output (stdout +
+  stderr interleaved as they appear on the PTY). `ExecOutput.stdout` is really "terminal
+  output" — true stderr separation would require shell-level redirection that `exec()` does
+  not impose. The field is named `stdout` for the common case; callers needing separation
+  can use `exec("cmd 2>/tmp/err", ...)` and capture stderr separately.
+- **Scrollback pollution**: The sentinel line appears in the pane's scrollback. This is
+  generally harmless but visible to humans viewing the pane. A future refinement could
+  clear the sentinel line after capture.
+- **Polling latency**: `capture_with_history()` is polled at intervals (e.g., 100ms).
+  This adds up to one poll interval of latency after command completion. For automation
+  use cases this is acceptable; for latency-sensitive scenarios, monitoring-based
+  approaches (which stream output in real time) are more appropriate.
+
+**Usage examples**:
+
+```rust
+let build = host.session("build").await?.unwrap();
+
+// Run a command and check the result
+let result = build.exec("cargo test", Duration::from_secs(300)).await?;
+if result.success() {
+    println!("Tests passed");
+} else {
+    println!("Tests failed (exit {}): {}", result.exit_code, result.stdout);
+}
+
+// Chain structured commands
+let result = build.exec("git pull", Duration::from_secs(30)).await?;
+if result.success() {
+    build.exec("cargo build --release", Duration::from_secs(600)).await?;
+}
+
+// Still use send_text for interactive/fire-and-forget
+build.send_text("top").await?;                    // interactive — no output needed
+build.send_keys(&KeySequence::parse("{C-c}")?).await?;  // interrupt it
+```
 
 ---
 
@@ -1658,9 +2858,10 @@ The prototype is untestable because SSH and tmux are tightly coupled. The librar
 - **Integration tests**: Require a mock SSH server or trait-based transport abstraction
 - **End-to-end tests**: Require a real SSH + tmux environment (CI with Docker?)
 
-**Proposal**: The `Transport` trait in `transport.rs` already supports this (see DC6).
-`MockTransport` returns canned responses for `exec()` and `open_shell()`. It is included
-in the library (not behind a feature flag) so downstream consumers can also use it.
+**Proposal**: The `TransportKind` enum in `transport.rs` already supports this (see DC6).
+`TransportKind::Mock(MockTransport)` returns canned responses for `exec()` and
+`open_shell()`. It is included in the library (not behind a feature flag) so downstream
+consumers can also use it.
 
 ---
 
@@ -1696,14 +2897,14 @@ Structured for incremental delivery. Each phase produces a working, testable art
    and `session:window.pane` as display metadata (per DC1), `SessionInfo`, `WindowInfo`,
    `PaneInfo`
 3. Implement `keys.rs`: `KeySequence`, `SpecialKey`, `{...}` parser, tmux command rendering
-4. Implement `transport.rs`: `Transport` trait, `LocalTransport` (subprocess-based),
+4. Implement `transport.rs`: `TransportKind` enum, `LocalTransport` (subprocess-based),
    `MockTransport` (canned responses for testing)
 5. Implement `discovery.rs`: `list_sessions()`, `list_windows()`, `list_panes()` with
    format string constants and regex filtering
 6. Implement `capture.rs`: `capture_pane()`, `capture_pane_history()`, `capture_session()`
 7. Implement `control.rs`: `create_session()`, `kill_session()`, `send_keys()`,
    `send_text()`, `rename_session()`, `rename_window()` with shell escaping (addresses OC5)
-8. Implement `host.rs`: `HostHandle` wiring all of the above
+8. Implement `host.rs`: `HostHandle` and `Target` wiring all of the above (DC16)
 9. Unit tests: `PaneAddress` identity (pane_id as key, display target as metadata),
    `KeySequence` parsing + rendering, shell escaping with adversarial inputs,
    `MockTransport`-based tests for all operations
@@ -1716,8 +2917,9 @@ input, and rename sessions — all without SSH.
 - `PaneAddress` uses `pane_id` as key; `session:window.pane` roundtrips as display metadata
 - `KeySequence::parse("hello{Enter}{C-c}")` produces correct tmux commands
 - `send_text()` with input `"; rm -rf /; echo "` does not execute injected commands
-- `create_session("test")` + `list_sessions()` shows the new session
-- `kill_session("test")` + `list_sessions()` no longer shows it
+- `create_session("test", ...)` returns `Target` at session level with correct name and id
+- `target.kill()` + `list_sessions()` no longer shows it
+- `host.session("nonexistent")` returns `Ok(None)`
 - `list_sessions()` returns `Vec<SessionInfo>` with all fields populated
 - All operations work via `MockTransport` in unit tests
 
@@ -1777,14 +2979,14 @@ deserialization on top of the stable 2a monitoring loop.
 routed to multiple consumers (sinks) with independent latency characteristics.
 
 **Tasks**:
-1. Implement `sink.rs`: `PaneOutput` struct, `OutputSink` trait, `SinkFilter` /
-   `CompiledSinkFilter`, `ActionHandle` / `ActionRequest` / `ActionTarget` / `SinkAction`
-2. Implement `OutputBus`: registration API (`register(sink, filters, channel_capacity)`),
-   fan-out loop that matches `PaneOutput` against compiled filters and dispatches to
+1. Implement `sink.rs`: `TargetOutput` struct, `SinkKind` enum, `SinkFilter` /
+   `CompiledSinkFilter`, `ActionHandle` / `ActionRequest` / `SinkAction`
+2. Implement `OutputBus`: `subscribe(sink, channel_capacity)` API,
+   fan-out loop that matches `TargetOutput` against compiled filters and dispatches to
    per-sink channels, graceful shutdown with `flush()` on all sinks
-3. Implement `StdioSink`: default reference implementation that writes `PaneOutput` to
+3. Implement `StdioSink`: default reference implementation that writes `TargetOutput` to
    stdout with `[host:pane_target]` prefix, immediate flush, no batching
-4. Wire `OutputBus` into `monitor.rs`: control mode parser feeds `PaneOutput` into the
+4. Wire `OutputBus` into `monitor.rs`: control mode parser feeds `TargetOutput` into the
    bus alongside rule evaluation
 5. Wire `ActionHandle` into `HostHandle`: sink-initiated actions route through the
    existing per-host action dispatch queue (DC4)
@@ -1799,7 +3001,7 @@ routed to multiple consumers (sinks) with independent latency characteristics.
 consumers.
 
 **Acceptance criteria**:
-- `OutputBus` delivers `PaneOutput` to 3 registered sinks concurrently
+- `OutputBus` delivers `TargetOutput` to 3 registered sinks concurrently
 - A slow sink (simulated 500ms delay) does not block other sinks
 - `SinkFilter { host: Some("web.*"), session: None, window: None, pane: None }` matches
   all panes on hosts matching `web.*`
@@ -1817,15 +3019,27 @@ consumers.
    per-target status tracking, aggregate `start_monitoring()` and `shutdown()`
 2. Signal handling in the CLI binary via `tokio::signal` for SIGINT/SIGTERM (fixes P5),
    wired to `fleet.shutdown()`. The library does NOT install signal handlers (DC11).
-3. Create `bins/tmux-automator/` with `clap` CLI supporting subcommands:
-   - `create-session <name> [--host <alias>] [--window-name <name>] [--command <cmd>]`
-   - `kill-session <name> [--host <alias>]`
-   - `list-sessions [--host <alias>]` — list sessions on one or all targets
-   - `list-panes [--host <alias>] [--filter <regex>]` — list panes
-   - `capture <session:window.pane> [--host <alias>] [--history <lines>]` — dump pane
-   - `send <session:window.pane> <input> [--host <alias>]` — send keys
-   - `rename-session <old> <new> [--host <alias>]` — rename
-   - `monitor [--config <path>]` — start continuous monitoring
+3. Create `bins/tmux-automator/` with `clap` CLI using noun-verb subcommand grouping:
+
+   **`session` — session lifecycle**:
+   - `session list [--host <alias>]` — list sessions on one or all hosts
+   - `session create <name> [--host <alias>] [--window-name <name>] [--command <cmd>]`
+   - `session kill <name> [--host <alias>]`
+   - `session rename <old> <new> [--host <alias>]`
+
+   **`target` — operations on any tmux entity (session, window, pane)**:
+   - `target list [--host <alias>] [--filter <regex>]` — list panes/windows
+   - `target capture <spec> [--host <alias>] [--history <lines>]` — dump content
+   - `target send <spec> <input> [--host <alias>]` — send keys
+   - `target exec <spec> <command> [--host <alias>]` — run command, return stdout + exit code
+
+   **`monitor` — continuous monitoring lifecycle**:
+   - `monitor start [--config <path>]` — start monitoring on all configured targets
+   - `monitor status` — show active monitoring sessions
+
+   `<spec>` follows `TargetSpec` syntax: `session`, `session:window`, or
+   `session:window.pane`. The `target` noun reflects the unified `Target` type
+   (DC16) — capture, send, and exec work at any tmux addressing level.
 4. Config file support (TOML) with CLI flag overrides
 5. JSON and text log output modes
 6. Per-target tracing spans with alias labels
@@ -1835,11 +3049,13 @@ localhost and N remote hosts.
 
 **Acceptance criteria**:
 - `fleet.connect_all()` connects to 3 targets concurrently; one failure does not block others
-- CLI `list-sessions --host web-server` returns sessions from the aliased host
-- CLI `create-session build --host localhost` creates a local session
-- CLI `capture myapp:0.0 --host db-server --history 500` returns scrollback content
-- CLI `kill-session build` terminates the session
-- `monitor --config rules.toml` starts monitoring on all configured targets
+- CLI `session list --host web-server` returns sessions from the aliased host
+- CLI `session create build --host localhost` creates a local session
+- CLI `target capture myapp:0.0 --host db-server --history 500` returns scrollback content
+- CLI `target exec myapp:0.0 "make test" --host db-server` returns stdout and exit code
+- CLI `session kill build` terminates the session
+- `monitor start --config rules.toml` starts monitoring on all configured targets
+- `monitor status` shows active sessions being monitored
 
 ### Phase 4: Hardening + Testing
 
