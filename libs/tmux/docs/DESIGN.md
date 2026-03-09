@@ -568,10 +568,15 @@ serves as a factory for `Target` handles (DC16).
 pub struct HostHandle { /* Arc<HostHandleInner> */ }
 
 /// Shared internals — Target holds an Arc ref to this.
+/// Uses interior mutability so &self methods on HostHandle and Target
+/// can mutate monitoring state under concurrent access.
 struct HostHandleInner {
     transport: Box<dyn Transport>,
     config: HostTarget,
-    session_monitors: HashMap<String, SessionMonitorHandle>,
+    /// RwLock for concurrent read access (monitored_sessions, find) with
+    /// exclusive write access (start/stop monitoring). The lock is never
+    /// held across await points — lock, mutate, release, then await.
+    session_monitors: RwLock<HashMap<String, SessionMonitorHandle>>,
 }
 
 impl HostHandle {
@@ -869,7 +874,8 @@ connections and DC13's granular lifecycle requirement.
 /// Handle to all monitoring on a single host.
 /// Returned by HostHandle::start_monitoring().
 pub struct MonitorHandle {
-    /// Per-session handles, keyed by session-level Target.
+    /// Per-session handles, keyed by session name (String).
+    /// Lookups by &Target or &TargetSpec extract the session name internally.
     sessions: HashMap<String, SessionMonitorHandle>,
 }
 
@@ -903,8 +909,9 @@ pub struct SessionMonitorHandle {
     target: Target,    // session-level target
     /// Signals this session's monitor task to stop.
     stop_tx: watch::Sender<bool>,
-    /// The monitor task's join handle.
-    task: JoinHandle<()>,
+    /// The monitor task's join handle. Wrapped in Option so shutdown()
+    /// can take it once. None after shutdown has been called.
+    task: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Deref for SessionMonitorHandle {
@@ -915,9 +922,12 @@ impl Deref for SessionMonitorHandle {
 impl SessionMonitorHandle {
     /// Stop monitoring this session. Tears down the control-mode connection,
     /// flushes pending output to the OutputBus, and joins the monitor task.
+    /// Takes the JoinHandle from the internal Mutex<Option<...>> — safe to
+    /// call multiple times (subsequent calls are no-ops).
     pub async fn shutdown(&self) -> Result<()>;
 
     /// Check if this session's monitor is still running.
+    /// Returns false after shutdown() has been called.
     pub fn is_active(&self) -> bool;
 }
 ```
@@ -1210,8 +1220,24 @@ pub struct Not(Box<dyn ContentMatcher>);
 
 **Statefulness contract**: The bus calls `matches()` on the filter's matcher for each
 `TargetOutput`. Stateful matchers (like `LineCountMatcher`) accumulate across calls for
-the same sink — each sink gets its own cloned matcher instances, so state is not shared
-across sinks. `reset()` is called when monitoring restarts to clear accumulated state.
+the same sink — each sink gets its own matcher instance, so state is not shared across
+sinks. `reset()` is called when monitoring restarts to clear accumulated state.
+
+**Cloning contract**: Since each sink needs its own matcher instance, `ContentMatcher`
+requires a `clone_box(&self) -> Box<dyn ContentMatcher>` method for trait-object-safe
+cloning. The `dyn-clone` crate provides a blanket implementation via `DynClone`.
+Matchers that wrap non-cloneable resources (e.g., compiled ML models) should use
+`Arc` internally so `clone_box` is cheap.
+
+```rust
+pub trait ContentMatcher: Send + Sync + 'static {
+    fn name(&self) -> &str;
+    fn matches(&mut self, text: &str) -> bool;
+    fn reset(&mut self) {}
+    /// Trait-object-safe clone. Each sink gets its own instance.
+    fn clone_box(&self) -> Box<dyn ContentMatcher>;
+}
+```
 
 ### `SinkFilter` — Composable Output Targeting
 
@@ -2633,8 +2659,12 @@ into a single call with clear completion semantics and an exit code.
   output. No new transport capabilities or tmux features needed.
 - **Non-invasive**: The sentinel echo is appended after the command via `;`. It does not
   modify the command itself. The pane's shell state is unchanged after execution.
-- **Concurrent-safe**: The UUID in the sentinel ensures that concurrent `exec()` calls
-  on different panes (or even the same pane, sequentially) never confuse each other's output.
+- **Cross-pane safe**: The UUID in the sentinel ensures that concurrent `exec()` calls
+  on different panes never confuse each other's output. **Same-pane concurrent `exec()`
+  is not supported** — overlapping commands on one pane interleave terminal output,
+  making boundary extraction ambiguous regardless of unique sentinels. `Target` holds a
+  per-target `Mutex` that serializes `exec()` calls to the same pane. Callers needing
+  parallel execution should use separate panes.
 
 **Alternatives considered**:
 
