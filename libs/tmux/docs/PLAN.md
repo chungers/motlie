@@ -151,7 +151,9 @@ Add `SshTransport` and a thin monitoring vertical slice with control mode parsin
 - [ ] Add `russh` + `russh-keys` dependencies to `Cargo.toml`
 - [ ] `SshTransport` struct: russh `Handle`, configurable timeouts
 - [ ] `SshTransport::connect(host, user, config) -> Result<Self>` — SSH connect + auth via ssh-agent
-- [ ] Host key verification (DC2): `~/.ssh/known_hosts` parsing, TOFU option, insecure flag
+- [ ] Host key verification (DC2): implement `HostKeyPolicy` from config —
+  `Verify` (parse `~/.ssh/known_hosts`, reject unknown), `TrustFirstUse`
+  (accept + persist on first connect), `Insecure` (accept all, log warning)
 - [ ] `SshTransport::exec()` — open exec channel, capture stdout, close channel
 - [ ] `SshTransport::open_shell()` — PTY channel with shell, piped I/O
 - [ ] Add `Ssh(SshTransport)` variant to `TransportKind` and `ShellChannelKind`
@@ -212,8 +214,11 @@ Add `SshTransport` and a thin monitoring vertical slice with control mode parsin
 ### 2b.1 — Configuration (`src/config.rs`)
 
 - [ ] `TmuxAutomatorConfig`: `targets`, `rules`, `reconnect`, `log_json`
+- [ ] `HostKeyPolicy` enum: `Verify` (default, `~/.ssh/known_hosts`),
+  `TrustFirstUse` (accept + persist on first connect, reject on mismatch),
+  `Insecure` (accept all, log warning) — per DC2
 - [ ] `HostTarget` enum: `Local { alias, pane_filter, tmux_socket }`,
-  `Ssh { host, user, alias, pane_filter, tmux_socket }`
+  `Ssh { host, user, alias, pane_filter, tmux_socket, host_key_policy }`
 - [ ] `TriggerRule`: `name`, `pane_filter`, `pattern`, `action`, `cooldown` — serde-deserializable
 - [ ] `Action` enum: `SendKeys { keys }`, `Log { level, message }`
 - [ ] `ReconnectPolicy`: `initial_delay`, `max_delay`, `multiplier` with defaults
@@ -310,7 +315,13 @@ Add `SshTransport` and a thin monitoring vertical slice with control mode parsin
 - [ ] Integration test: monitor publishes output → `StdioSink` receives and formats,
   `CallbackSink` receives and accumulates, `ActionHandle` routes action back to target
 
-**Depends on**: 2c.3, 2a.4
+**Depends on**: 2c.3, 2a.4, **2b.3**
+
+> **Why serial with 2b.3**: Both 2b.3 and 2c.4 modify `monitor.rs` (rule
+> evaluation / output publishing) and `host.rs` (reconnection wiring / action
+> handle wiring). Running them in parallel creates merge contention on the
+> same hot-path code. 2b.3 lands first (rule engine + reconnection), then
+> 2c.4 layers the sink pipeline on top of the stabilized monitor.
 
 ---
 
@@ -332,7 +343,7 @@ Add `SshTransport` and a thin monitoring vertical slice with control mode parsin
 - [ ] Unit tests: multi-host connect with one failure, alias conflict detection,
   workstream bind/find/unbind
 
-**Depends on**: 2c.4, 2b.3
+**Depends on**: 2c.4 (which transitively requires 2b.3)
 
 ### 3.2 — `lib.rs` public API surface
 
@@ -367,6 +378,8 @@ Add `SshTransport` and a thin monitoring vertical slice with control mode parsin
   - `monitor start [--config]`
   - `monitor status`
 - [ ] Config file loading: TOML → `TmuxAutomatorConfig`, CLI flag overrides
+- [ ] `--host-key-policy <verify|tofu|insecure>` global CLI flag (DC2),
+  overrides per-host config `host_key_policy` field
 - [ ] Signal handling: `tokio::signal` for SIGINT/SIGTERM → `fleet.shutdown()` (P5)
 - [ ] Tracing init: text or JSON output modes, per-target tracing spans
 - [ ] Default `StdioSink` registered on `OutputBus` for monitor output
@@ -453,17 +466,17 @@ Out of current scope. Listed for continuity.
  │               │
  │    2b.2 Matcher ──── 2b.1 Config
  │     │                 │
- │     │    2b.3 Full rules + reconnect ◄─┘
- │     │     │
- │     └── 2c.1 Sink types
- │          │
+ │     │                 └── 2b.3 Full rules + reconnect
+ │     │                      │  (modifies monitor.rs + host.rs)
+ │     └── 2c.1 Sink types   │
+ │          │                 │
  │          └── 2c.2 Sink kinds
- │               │
+ │               │            │
  │               └── 2c.3 Output bus
- │                    │
- │                    └── 2c.4 Pipeline integration
- │                         │
- │                         └── 3.1 Fleet
+ │                    │       │
+ │                    └───────┴── 2c.4 Pipeline integration
+ │                                │  (needs 2b.3 + 2c.3, serial)
+ │                                └── 3.1 Fleet
  │                              │
  │                              └── 3.2 Public API
  │                                   │
@@ -516,19 +529,20 @@ Time  Track A (data path)      Track B (input/monitor)    Track C (matching/sink
       │  [needs 2a.2 + 2a.3]                               │
       │                                                     │
 ───── ── SYNC POINT 3 ──────────────────────────────────── ─┘
- T9   2c.4 Pipeline integration [needs 2a.4 + 2c.3]
+ T9   2b.3 Full rules + reconnect [needs 2a.4 + 2b.1 + 2b.2]
+      │    (modifies monitor.rs + host.rs — must land before 2c.4)
       │
-      │   2b.3 Full rules + reconnect [needs 2a.4 + 2b.1 + 2b.2]
-      │    │    (can run parallel with 2c.4 — different files)
-      │    │
+ T10  2c.4 Pipeline integration [needs 2c.3 + 2b.3]
+      │    (layers sink wiring onto stabilized monitor.rs + host.rs)
+      │
 ───── ── SYNC POINT 4 ─────────────────────────────────────
- T10  3.1 Fleet (fleet.rs) [needs 2c.4 + 2b.3]
+ T11  3.1 Fleet (fleet.rs) [needs 2c.4]
       │
- T11  3.2 Public API (lib.rs)
+ T12  3.2 Public API (lib.rs)
       │
- T12  3.3 CLI binary (bins/tmux-automator/)
+ T13  3.3 CLI binary (bins/tmux-automator/)
       │
- T13  3.4 Smoke test
+ T14  3.4 Smoke test
 ```
 
 ### Dev Assignments by Team Size
@@ -537,24 +551,24 @@ Time  Track A (data path)      Track B (input/monitor)    Track C (matching/sink
 
 | Dev | Track | Tasks (in order) |
 |-----|-------|-----------------|
-| **A** | Data path + wiring | 1.0 → 1.1 → 1.3 → 1.4 → 1.5 → **1.7** → 1.8 → 2a.2 → **2a.4** → **2c.4** → **3.1** → 3.2 → 3.3 |
-| **B** | Input + matching + sinks | 1.2 → 2b.2 → 1.6 → 2b.1 → 2a.1 → 2a.3 → 2c.1 → 2c.2 → 2c.3 → **2b.3** → 3.4 |
+| **A** | Data path + wiring | 1.0 → 1.1 → 1.3 → 1.4 → 1.5 → **1.7** → 1.8 → 2a.2 → **2a.4** → **2b.3** → **2c.4** → **3.1** → 3.2 → 3.3 |
+| **B** | Input + matching + sinks | 1.2 → 2b.2 → 1.6 → 2b.1 → 2a.1 → 2a.3 → 2c.1 → 2c.2 → 2c.3 → 3.4 |
 
-Sync points: **1.7** (B's 1.6 merges with A's 1.4+1.5), **2a.4** (B's 2a.3 merges with A's 2a.2), **2c.4** (B's 2c.3 merges with A's 2a.4), **3.1** (B's 2b.3 merges with A's 2c.4).
+Sync points: **1.7** (B's 1.6 merges with A's 1.4+1.5), **2a.4** (B's 2a.3 merges with A's 2a.2), **2b.3** (B's 2b.1 ready for A), **2c.4** (B's 2c.3 ready; A's 2b.3 done — serial on `monitor.rs`/`host.rs`).
 
-Dev B starts `2b.2 Matcher` immediately after `1.2 Keys` — it depends only on 1.0 and touches an isolated file. This lets B build out the entire matching/config/sink stack while A drives the core data path.
+Dev B starts `2b.2 Matcher` immediately after `1.2 Keys` — it depends only on 1.0 and touches an isolated file. This lets B build out the entire matching/config/sink stack while A drives the core data path. 2b.3 and 2c.4 are serialized on A because both modify `monitor.rs` and `host.rs`.
 
 #### 3 developers
 
 | Dev | Focus area | Tasks (in order) |
 |-----|-----------|-----------------|
 | **A** | Data path (types → transport → discovery → capture → host wiring) | 1.0 → 1.1 → 1.3 → 1.4 → 1.5 → **1.7** → 1.8 → **2a.4** → **3.1** → 3.2 |
-| **B** | Input + monitoring (keys → control → SSH → monitor → CLI) | 1.2 → 1.6 → 2a.1 → 2a.3 → 2a.2 → **2b.3** → 3.3 → 3.4 |
-| **C** | Matching + sink pipeline (matcher → config → sinks → bus) | 2b.2 → 2b.1 → 2c.1 → 2c.2 → 2c.3 → **2c.4** |
+| **B** | Input + monitoring (keys → control → SSH → monitor → rules) | 1.2 → 1.6 → 2a.1 → 2a.3 → 2a.2 → **2b.3** → **2c.4** → 3.3 → 3.4 |
+| **C** | Matching + sink pipeline (matcher → config → sinks → bus) | 2b.2 → 2b.1 → 2c.1 → 2c.2 → 2c.3 |
 
-Sync points: **1.7** (B's 1.6 ready), **2a.4** (B's 2a.3 + A picks up 2a.2 after 1.8), **2b.3** (C's 2b.1 ready for B), **2c.4** (A's 2a.4 ready for C), **3.1** (all three tracks converge).
+Sync points: **1.7** (B's 1.6 ready), **2a.4** (B's 2a.3 + A picks up 2a.2 after 1.8), **2b.3** (C's 2b.1 ready for B), **2c.4** (B takes this after 2b.3 — serial on `monitor.rs`/`host.rs`; needs C's 2c.3), **3.1** (all tracks converge).
 
-Dev C is fully independent through T1–T7 — they only touch `matcher.rs`, `config.rs`, `sink.rs`, and `sinks/`. First sync with the other tracks is at 2c.4.
+Dev C is fully independent through T1–T7 — they only touch `matcher.rs`, `config.rs`, `sink.rs`, and `sinks/`. Dev B owns the `monitor.rs`/`host.rs` serialization: 2b.3 (rules + reconnection) then 2c.4 (sink wiring).
 
 #### 4 developers
 
@@ -563,11 +577,11 @@ Split Track B into input/control (B1) and SSH/monitoring (B2):
 | Dev | Focus area | Tasks |
 |-----|-----------|-------|
 | **A** | Data path | 1.0 → 1.1 → 1.3 → 1.4 → 1.5 → **1.7** → 1.8 |
-| **B1** | Input + control | 1.2 → 1.6 → (pick up 4.2 test hardening while waiting) |
-| **B2** | SSH + monitoring | 2a.1 → 2a.3 → 2a.2 → **2a.4** → **2b.3** → 3.3 → 3.4 |
-| **C** | Matching + sinks | 2b.2 → 2b.1 → 2c.1 → 2c.2 → 2c.3 → **2c.4** → **3.1** → 3.2 |
+| **B1** | Input + control | 1.2 → 1.6 → (pick up 4.1, 4.2 hardening while waiting) |
+| **B2** | SSH + monitoring + sink wiring | 2a.1 → 2a.3 → 2a.2 → **2a.4** → **2b.3** → **2c.4** → 3.3 → 3.4 |
+| **C** | Matching + sinks | 2b.2 → 2b.1 → 2c.1 → 2c.2 → 2c.3 → **3.1** → 3.2 |
 
-B1 finishes early (1.2 + 1.6 are small) and can pivot to Phase 4 hardening tasks (4.1 tmux version compat, 4.2 test expansion, 4.3 Docker E2E) which are independent of the main feature tracks.
+B2 owns the `monitor.rs`/`host.rs` serialization: 2b.3 (rules) then 2c.4 (sink wiring) land sequentially by the same dev, eliminating merge contention. B1 finishes early (1.2 + 1.6 are small) and pivots to Phase 4 hardening tasks (4.1 tmux version compat, 4.2 test expansion, 4.3 Docker E2E).
 
 ### File Ownership (Conflict Avoidance)
 
@@ -582,8 +596,8 @@ same file, that's a sync point — one merges first, the other rebases.
 | `discovery.rs` | Track A | — |
 | `capture.rs` | Track A | — |
 | `control.rs` | Track B | — |
-| `host.rs` | Track A | Track B contributes monitoring methods (2a.4) |
-| `monitor.rs` | Track B | Track C wires OutputBus in (2c.4) |
+| `host.rs` | Track A | Track B adds monitoring (2a.4) + reconnection (2b.3), Track C adds ActionHandle (2c.4). Serialized: 2a.4 → 2b.3 → 2c.4. |
+| `monitor.rs` | Track B | Track B adds rules (2b.3), Track C wires OutputBus (2c.4). Serialized: 2a.2 → 2b.3 → 2c.4. |
 | `pipe.rs` | Track B | — |
 | `matcher.rs` | Track C | — |
 | `config.rs` | Track C | — |
