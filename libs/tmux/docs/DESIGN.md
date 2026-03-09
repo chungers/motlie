@@ -1226,9 +1226,9 @@ impl MatcherKind {
 ```
 
 **Why a closed enum**: The set of matching strategies is finite and known at design
-time. A `match` arm handles each variant with zero indirection. Combinators (`AllOf`,
-`AnyOf`, `Not`) store children as `Vec<MatcherKind>` — no trait-object allocation per
-node. `Not` uses `Box<MatcherKind>` for recursive enum sizing only (not dynamic dispatch).
+time. A `match` arm handles each variant with zero indirection. `AllOf`/`AnyOf` store
+children as `Vec<MatcherKind>` (heap-backed); `Not` uses `Box<MatcherKind>` for
+recursive enum sizing only (not dynamic dispatch). No vtable allocation per node.
 The entire matcher tree is `Clone` — each sink gets its own copy via `clone()`.
 
 **Statefulness contract**: The bus calls `matches()` on the filter's matcher for each
