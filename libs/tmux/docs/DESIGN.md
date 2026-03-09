@@ -1068,7 +1068,7 @@ impl KeySequence {
 
     /// Render to one or more tmux send-keys invocations.
     /// Returns the shell commands to execute.
-    fn to_tmux_commands(&self, target: &str) -> Vec<String>;
+    fn to_tmux_args(&self, target: &str) -> Vec<Vec<String>>;
 }
 ```
 
@@ -1892,8 +1892,10 @@ impl PaneAddress {
     /// The stable pane_id for FIFO naming and stream keying (e.g., "%12")
     pub fn id(&self) -> &str;
 
-    /// Parse from tmux list-panes output (expects pane_id in format string)
-    pub fn parse(s: &str) -> Result<Self>;
+    /// Parse from tmux list-panes output fields.
+    /// `pane_id` is the `#{pane_id}` field (e.g., "%12").
+    /// `address_str` is the composite "session:window.pane" field.
+    pub fn parse(pane_id: &str, address_str: &str) -> Result<Self>;
 }
 ```
 
@@ -1903,14 +1905,22 @@ need for filename encoding of session names entirely. FIFO paths (if used) are s
 
 ```rust
 /// List all sessions on the host.
-pub async fn list_sessions(transport: &TransportKind) -> Result<Vec<SessionInfo>>;
+pub async fn list_sessions(
+    transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
+) -> Result<Vec<SessionInfo>>;
 
 /// List all windows in a session.
-pub async fn list_windows(transport: &TransportKind, session: &str) -> Result<Vec<WindowInfo>>;
+pub async fn list_windows(
+    transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
+    session: &str,
+) -> Result<Vec<WindowInfo>>;
 
 /// List all panes, optionally filtered by regex against "session:window.pane".
 pub async fn list_panes(
     transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
     filter: Option<&Regex>,
 ) -> Result<Vec<PaneInfo>>;
 ```
