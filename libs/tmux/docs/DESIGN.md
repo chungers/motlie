@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-08 | `Target::exec()` shell compatibility: document `$?` (POSIX) vs `$status` (fish) with shell detection. Replace `ActionTarget` enum with `TargetAddress` in `ActionRequest` for unified type consistency (DC16). | DC19, Core Abstractions, Output Sink Pipeline |
 | 2026-03-08 | Address codex review round 8: clarify remaining dynamic types (`Arc<dyn Any>`, `Pin<Box<dyn Future>>`) in SinkKind docs and changelog; fix integration diagram to use `SinkKind` wrappers. | Core Abstractions, Output Sink Pipeline |
 | 2026-03-08 | Address codex review round 7: `CallbackSink` uses explicit `Arc<dyn Any>` state instead of closure capture, `on_output` is synchronous; fix stale examples (`SubstringMatcher` → `MatcherKind::Substring`, `JoinedSink` uses `SinkKind`); align DC6/OC6/Phase 1 to `TransportKind` enum; fix `host.rs` module spec `session_monitors` to `RwLock`; fix "SinkKind trait" → enum; fix DC14 matcher names. | Core Abstractions, Output Sink Pipeline, Module Specs, DC6, DC14, OC6, Phase 1, Phase 2c |
 | 2026-03-08 | Phase 3 CLI: noun-verb subcommand pattern (`session list`, `target capture`, `monitor start`) replacing flat hyphenated commands. `target` noun reflects unified Target type (DC16). | Phase 3 |
@@ -1403,14 +1404,9 @@ provides a scoped, async API for actions against the tmux entities they observe.
 pub struct ActionHandle { /* mpsc::Sender<ActionRequest> */ }
 
 pub struct ActionRequest {
-    pub target: ActionTarget,
+    pub host: String,
+    pub target: TargetAddress,
     pub action: SinkAction,
-}
-
-pub enum ActionTarget {
-    Pane { host: String, pane_id: String },
-    Session { host: String, session: String },
-    Host { host: String },
 }
 
 pub enum SinkAction {
@@ -1675,7 +1671,7 @@ via a `bus.publish()` call. This is opt-in at the call site, not automatic.
 that detects an error and wants to send a recovery command) submits an `ActionRequest`
 through its `ActionHandle`. The request is routed to the correct `HostHandle` via the
 existing per-host dispatch queue (DC4). The sink does not need to know which
-`HostHandle` to use — routing is by the `host` and `pane_id` fields in `ActionTarget`.
+`HostHandle` to use — routing is by the `host` field and `TargetAddress` in `ActionRequest`.
 
 ---
 
@@ -2206,7 +2202,7 @@ This module contains:
 - `SinkKind` enum: closed set of sink types (static dispatch, no trait objects)
 - `SinkFilter` / `CompiledSinkFilter`: composable output targeting
 - `MatcherKind` (re-exported from `matcher.rs`): content matching variants
-- `ActionHandle` / `ActionRequest` / `ActionTarget` / `SinkAction`: sink-initiated actions
+- `ActionHandle` / `ActionRequest` / `SinkAction`: sink-initiated actions
 - `OutputBus`: central fan-out dispatcher with per-sink bounded channels
 - `SinkId`: opaque handle for unsubscribe
 
@@ -2688,6 +2684,7 @@ into a single call with clear completion semantics and an exit code.
 
 1. Generate a unique marker: `__MOTLIE_<uuid>__`
 2. Send via `send_keys`: `<command> ; echo "__MOTLIE_<uuid>__ $?" {Enter}`
+   (POSIX shells: bash, zsh, sh, dash. For fish: `; echo "__MOTLIE_<uuid>__ $status"`)
 3. Poll `capture_with_history()` at intervals until the sentinel line appears (or timeout)
 4. Extract everything between the command echo and the sentinel as stdout
 5. Parse the exit code from `__MOTLIE_<uuid>__ <exit_code>`
@@ -2695,8 +2692,10 @@ into a single call with clear completion semantics and an exit code.
 
 **Why sentinel-based**:
 
-- **Works with any shell**: The sentinel is just `echo` — works in bash, zsh, sh, fish
-  (with minor syntax adaptation). No special shell features or tmux extensions required.
+- **Works with POSIX shells**: The sentinel uses `echo` + `$?` — works in bash, zsh,
+  sh, dash. Fish requires `$status` instead of `$?`; the implementation detects the
+  shell (via `$SHELL` or pane inspection) and adapts the exit-code variable accordingly.
+  No special shell features or tmux extensions required beyond `echo`.
 - **Reuses existing primitives**: `send_keys()` for input, `capture_with_history()` for
   output. No new transport capabilities or tmux features needed.
 - **Non-invasive**: The sentinel echo is appended after the command via `;`. It does not
@@ -2960,7 +2959,7 @@ routed to multiple consumers (sinks) with independent latency characteristics.
 
 **Tasks**:
 1. Implement `sink.rs`: `TargetOutput` struct, `SinkKind` enum, `SinkFilter` /
-   `CompiledSinkFilter`, `ActionHandle` / `ActionRequest` / `ActionTarget` / `SinkAction`
+   `CompiledSinkFilter`, `ActionHandle` / `ActionRequest` / `SinkAction`
 2. Implement `OutputBus`: `subscribe(sink, channel_capacity)` API,
    fan-out loop that matches `TargetOutput` against compiled filters and dispatches to
    per-sink channels, graceful shutdown with `flush()` on all sinks
