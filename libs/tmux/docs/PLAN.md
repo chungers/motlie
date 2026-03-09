@@ -29,6 +29,10 @@ No SSH, no monitoring.
 - [ ] `TargetLevel` enum: `Session`, `Window`, `Pane`
 - [ ] `TargetSpec`: builder (`session()`, `.window()`, `.window_name()`, `.pane()`) + `parse()` + `Display`
 - [ ] `TmuxSocket` enum: `Name(String)`, `Path(String)`
+- [ ] `HostKeyPolicy` enum: `Verify` (default, `~/.ssh/known_hosts`),
+  `TrustFirstUse` (accept + persist on first connect, reject on mismatch),
+  `Insecure` (accept all, log warning) — per DC2. Defined here (not in config)
+  so `2a.1 SshTransport` can use it without depending on `2b.1 Config`.
 - [ ] `ExecOutput { stdout: String, exit_code: i32 }` + `success()` helper
 - [ ] `ScrollbackQuery` enum: `LastLines`, `Until`, `LastLinesUntil`
 - [ ] Unit tests: `PaneAddress` roundtrip, `TargetSpec` parse/display for all depth levels
@@ -218,11 +222,9 @@ Add `SshTransport` and a thin monitoring vertical slice with control mode parsin
 ### 2b.1 — Configuration (`src/config.rs`)
 
 - [ ] `TmuxAutomatorConfig`: `targets`, `rules`, `reconnect`, `log_json`
-- [ ] `HostKeyPolicy` enum: `Verify` (default, `~/.ssh/known_hosts`),
-  `TrustFirstUse` (accept + persist on first connect, reject on mismatch),
-  `Insecure` (accept all, log warning) — per DC2
 - [ ] `HostTarget` enum: `Local { alias, pane_filter, tmux_socket }`,
   `Ssh { host, user, alias, pane_filter, tmux_socket, host_key_policy }`
+  — `host_key_policy` uses `HostKeyPolicy` from `types.rs` (defined in 1.1)
 - [ ] `TriggerRule`: `name`, `pane_filter`, `pattern`, `action`, `cooldown` — serde-deserializable
 - [ ] `Action` enum: `SendKeys { keys }`, `Log { level, message }`
 - [ ] `ReconnectPolicy`: `initial_delay`, `max_delay`, `multiplier` with defaults
