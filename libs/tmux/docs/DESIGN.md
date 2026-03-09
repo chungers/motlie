@@ -1421,7 +1421,7 @@ impl ActionHandle {
     /// Send an action to the target entity. Non-blocking (queued).
     pub async fn send(&self, request: ActionRequest) -> Result<()>;
 
-    /// Convenience: send keys to a target.
+    /// Convenience: send keys to a target (any level — session, window, or pane).
     pub async fn send_keys(
         &self,
         host: &str,
@@ -1429,7 +1429,7 @@ impl ActionHandle {
         keys: KeySequence,
     ) -> Result<()>;
 
-    /// Convenience: send text to a target.
+    /// Convenience: send text to a target (any level).
     pub async fn send_text(
         &self,
         host: &str,
@@ -1437,10 +1437,25 @@ impl ActionHandle {
         text: &str,
     ) -> Result<()>;
 
-    /// Convenience: construct an ActionRequest from a TargetOutput's metadata.
-    /// Extracts host and target from the output source — sinks don't need to
-    /// manually decompose TargetOutput fields.
-    pub fn request_from_output(output: &TargetOutput, action: SinkAction) -> ActionRequest;
+    /// Convenience: kill a session by name.
+    pub async fn kill_session(&self, host: &str, session: &str) -> Result<()>;
+
+    /// Convenience: rename a session.
+    pub async fn rename_session(
+        &self,
+        host: &str,
+        session: &str,
+        new_name: &str,
+    ) -> Result<()>;
+
+    /// Respond to a specific output event. Extracts host and target from the
+    /// TargetOutput's metadata — sinks don't need to decompose fields manually.
+    /// This is the primary ergonomic entry point for reactive sinks.
+    pub async fn respond(
+        &self,
+        output: &TargetOutput,
+        action: SinkAction,
+    ) -> Result<()>;
 }
 ```
 
@@ -1450,8 +1465,8 @@ per-host bounded dispatch queue (DC4) — the same path used by the monitor's tr
 rules. This ensures consistent ordering, backpressure, and concurrency limits regardless
 of whether an action originates from a rule or a sink.
 
-**LLM feedback loop**: An LLM sink can call `action_handle.send_keys()` after
-analyzing output. The design of the LLM sink itself (prompt engineering, approval gates,
+**LLM feedback loop**: An LLM sink can call `action_handle.respond(&output, action)` after
+analyzing output — the host and target are extracted from the `TargetOutput` automatically. The design of the LLM sink itself (prompt engineering, approval gates,
 autonomous vs supervised mode) is **out of scope** for this library. The library provides
 the `SinkKind` enum and `ActionHandle` API; LLM integration is a consumer concern.
 
