@@ -202,8 +202,12 @@ Add `SshTransport` and a thin monitoring vertical slice with control mode parsin
 - [ ] `HostHandle::start_monitoring_session()`, `stop_monitoring_session()`,
   `stop_monitoring()`, `monitored_sessions()` (DC13)
 - [ ] `Target::start_monitoring()` — session-level only, returns `SessionMonitorHandle`
+- [ ] `Target::stop_monitoring()` — session-level only, delegates to
+  `HostHandle::stop_monitoring_session(&self)`; returns error if called on
+  window/pane target
 - [ ] Integration test (localhost): start monitor, send output that triggers rule,
-  verify action dispatched, shutdown cleanly
+  verify action dispatched, `target.stop_monitoring()` cleanly stops,
+  verify on-demand operations still work after stop (DC13)
 
 **Depends on**: 2a.2, 2a.3
 
