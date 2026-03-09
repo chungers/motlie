@@ -62,7 +62,7 @@ impl SpecialKey {
                     Err(anyhow!("empty key name in braces"))
                 } else if !is_valid_tmux_key_name(other) {
                     Err(anyhow!(
-                        "invalid tmux key name '{}': must be alphanumeric, hyphens, or C-/M-/S- prefixes",
+                        "invalid tmux key name '{}': contains shell-dangerous character (spaces, semicolons, backticks, $, |, &, etc. are rejected)",
                         other
                     ))
                 } else {

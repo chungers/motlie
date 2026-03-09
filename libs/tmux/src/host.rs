@@ -288,19 +288,50 @@ impl Target {
     }
 
     /// Navigate to a pane by index.
+    ///
+    /// At session level: resolves via the active window (the window with
+    /// `window_active==1`), then filters panes by that window + pane index.
+    /// At window level: filters panes within this window.
+    /// At pane level: only matches if the current pane has the given index.
     pub async fn pane(&self, index: u32) -> Result<Option<Target>> {
         let session_name = self.session_name().to_string();
+
+        let window_filter = match &self.address {
+            TargetAddress::Session(_) => {
+                // Resolve active window for session-level targets
+                let windows = discovery::list_windows(
+                    &self.inner.transport,
+                    self.inner.socket.as_ref(),
+                    &session_name,
+                )
+                .await?;
+                let active_window = windows.into_iter().find(|w| w.active);
+                match active_window {
+                    Some(w) => Some(w.index),
+                    None => return Ok(None),
+                }
+            }
+            TargetAddress::Window(w) => Some(w.index),
+            TargetAddress::Pane(p) => {
+                // At pane level, just check if this pane has the requested index
+                if p.pane == index {
+                    return Ok(Some(Target {
+                        inner: self.inner.clone(),
+                        address: TargetAddress::Pane(p.clone()),
+                        exec_mutex: Arc::new(Mutex::new(())),
+                    }));
+                } else {
+                    return Ok(None);
+                }
+            }
+        };
+
         let panes = discovery::list_panes_in_session(
             &self.inner.transport,
             self.inner.socket.as_ref(),
             &session_name,
         )
         .await?;
-
-        let window_filter = match &self.address {
-            TargetAddress::Window(w) => Some(w.index),
-            _ => None,
-        };
 
         let pane = panes.into_iter().find(|p| {
             p.address.pane == index
@@ -525,8 +556,10 @@ impl Target {
                 ));
             }
 
+            // Poll with scrollback history (-500 lines) to prevent sentinel
+            // scrolling out of the visible area on verbose command output.
             let content =
-                capture::capture_pane(transport, socket, &target).await?;
+                capture::capture_pane_history(transport, socket, &target, -500).await?;
 
             if let Some(result) = parse_sentinel_output(&content, &marker) {
                 return Ok(result);
@@ -726,5 +759,29 @@ mod tests {
         let result = parse_sentinel_output(&content, marker).unwrap();
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.stdout, "file1\nfile2\nfile3");
+    }
+
+    #[tokio::test]
+    async fn pane_session_level_resolves_active_window() {
+        // Session with 2 windows: window 0 (inactive) and window 1 (active).
+        // Both have pane 0. Session-level pane(0) should return window 1's pane.
+        let mock = MockTransport::new()
+            .with_response("list-sessions", "build\t$0\t0\t0\t2\t\n")
+            .with_response(
+                "list-windows",
+                "$0\tbuild\t0\tmain\t0\t1\tlayout\n$0\tbuild\t1\teditor\t1\t1\tlayout\n",
+            )
+            .with_response(
+                "list-panes",
+                "%0\tbuild:0.0\t\tbash\t100\t80\t24\t1\n%1\tbuild:1.0\t\tvim\t101\t80\t24\t1\n",
+            );
+        let host = mock_host(mock);
+        let session = host.session("build").await.unwrap().unwrap();
+        let pane = session.pane(0).await.unwrap();
+        assert!(pane.is_some());
+        let p = pane.unwrap();
+        // Should resolve to window 1 (active), pane 0 → pane_id %1
+        assert_eq!(p.pane_address().unwrap().pane_id, "%1");
+        assert_eq!(p.pane_address().unwrap().window, 1);
     }
 }
