@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-08 | Address codex review round 7: `CallbackSink` uses explicit `Arc<dyn Any>` state instead of closure capture, `on_output` is synchronous; fix stale examples (`SubstringMatcher` → `MatcherKind::Substring`, `JoinedSink` uses `SinkKind`); align DC6/OC6/Phase 1 to `TransportKind` enum; fix `host.rs` module spec `session_monitors` to `RwLock`; fix "SinkKind trait" → enum; fix DC14 matcher names. | Core Abstractions, Output Sink Pipeline, Module Specs, DC6, DC14, OC6, Phase 1, Phase 2c |
 | 2026-03-08 | Phase 3 CLI: noun-verb subcommand pattern (`session list`, `target capture`, `monitor start`) replacing flat hyphenated commands. `target` noun reflects unified Target type (DC16). | Phase 3 |
 | 2026-03-08 | Explicit FIFO cleanup on monitoring stop: `SessionMonitorHandle::shutdown()` and `stop_monitoring_session()` call `PipeManager::cleanup()` when pipe-pane fallback is active (P4). | Core Abstractions, Module Specs, DC13 |
 | 2026-03-08 | Eliminate all `Box<dyn>` dynamic dispatch: `Transport` → `TransportKind` enum, `ContentMatcher` → `MatcherKind` enum, `OutputSink` → `SinkKind` enum, `LabelFormat::Custom` → `fn` pointer. Static dispatch throughout hot paths. | Core Abstractions, Output Sink Pipeline, Module Specs, DC14 |
@@ -333,7 +334,7 @@ libs/tmux/
 ├── src/
 │   ├── lib.rs              # Public API re-exports
 │   ├── config.rs           # TmuxAutomatorConfig, TriggerRule, Action
-│   ├── transport.rs        # Transport trait + LocalTransport + SshTransport
+│   ├── transport.rs        # TransportKind enum + LocalTransport + SshTransport
 │   ├── host.rs             # HostHandle: per-host facade for all tmux operations
 │   ├── fleet.rs            # Fleet: multi-host pool, dispatch, aggregate status
 │   ├── discovery.rs        # Session/window/pane listing, filter, PaneAddress type
@@ -1291,9 +1292,10 @@ vec![SinkFilter { pane: Some("%42".into()), ..Default::default() }]
 
 // Sink receives output containing "error" or "fatal" from any source
 vec![SinkFilter {
-    content: Some(Box::new(SubstringMatcher::new(
-        vec!["error", "fatal"], true,
-    ))),
+    content: Some(MatcherKind::Substring {
+        needles: vec!["error".into(), "fatal".into()],
+        case_insensitive: true,
+    }),
     ..Default::default()
 }]
 
@@ -1333,15 +1335,22 @@ pub enum SinkKind {
     Callback(CallbackSink),
 }
 
-/// User-provided sink via async callback. Avoids trait objects while
-/// allowing consumer-defined behavior.
+/// User-provided sink via callback with explicit state. Avoids trait objects
+/// while allowing consumer-defined behavior with captured state.
 pub struct CallbackSink {
     pub name: String,
     pub filters: Vec<SinkFilter>,
-    /// Async function called for each output event.
-    pub on_output: fn(TargetOutput) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>,
+    /// Shared state passed to callbacks. Consumers put their accumulated
+    /// buffers, connections, or other mutable state here.
+    pub state: Arc<dyn Any + Send + Sync>,
+    /// Synchronous callback for each output event. Receives shared state
+    /// and the output. For I/O-heavy sinks, queue work internally and
+    /// flush asynchronously via on_flush.
+    pub on_output: fn(state: &Arc<dyn Any + Send + Sync>, output: TargetOutput) -> Result<()>,
     /// Called on bus shutdown. Flush internal buffers, close resources.
-    pub on_flush: Option<fn() -> Pin<Box<dyn Future<Output = Result<()>> + Send>>>,
+    /// Returns a boxed future — the only remaining async indirection,
+    /// unavoidable without async fn in fn pointers (not yet stable in Rust).
+    pub on_flush: Option<fn(state: &Arc<dyn Any + Send + Sync>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>>,
 }
 
 impl SinkKind {
@@ -1367,9 +1376,12 @@ flush on a timer/threshold (LLM). This keeps the bus simple and the sink in full
 control of its own latency/throughput tradeoffs.
 
 **Extension via `CallbackSink`**: Consumers that need custom sink behavior (LLM
-inference, webhook delivery, custom TUI) provide async function pointers. This avoids
-trait objects while keeping the bus monomorphic. For complex sinks that need captured
-state, the callback can close over an `Arc<SinkState>` or similar.
+inference, webhook delivery, custom TUI) provide function pointers plus an explicit
+`Arc<dyn Any + Send + Sync>` state field. The `on_output` callback receives `&Arc`
+to access state — no closure captures needed. This keeps the bus monomorphic.
+`on_flush` returns `Pin<Box<dyn Future>>` — the only remaining async indirection,
+unavoidable until Rust stabilizes async fn pointers. The `on_output` hot path is
+fully synchronous and allocation-free.
 
 ### `ActionHandle` — Sink-Initiated Actions
 
@@ -1586,7 +1598,7 @@ message in a burst. When a different source emits, the label appears again.
 ```rust
 // LLM sees a consolidated conversation across 3 build panes
 let llm_sink = JoinedSink::new(
-    LlmSink::new(action_handle),
+    SinkKind::Callback(CallbackSink { /* LLM sink config */ }),
     LabelFormat::Bracketed,
 );
 // Output looks like:
@@ -1598,7 +1610,7 @@ let llm_sink = JoinedSink::new(
 
 // Stdio log with prompt-style labels
 let log_sink = JoinedSink::new(
-    StdioSink::new(StdioFormat::Raw),
+    SinkKind::Stdio(StdioSink::new(StdioFormat::Raw)),
     LabelFormat::Prompt,
 );
 // Output looks like:
@@ -1613,7 +1625,7 @@ registering a channel-based subscriber that receives `StreamChunk` directly:
 ```rust
 impl OutputBus {
     /// Subscribe a raw channel that receives StreamChunks (TargetOutput + SourceLabel).
-    /// The caller reads from the receiver directly. No SinkKind trait needed.
+    /// The caller reads from the receiver directly. No SinkKind wrapper needed.
     pub fn subscribe_joined(
         &mut self,
         filters: Vec<SinkFilter>,
@@ -2092,7 +2104,8 @@ struct HostHandleInner {
     pipe_state: Option<PipeManager>,   // None if monitoring not started (fallback path)
     /// Per-session monitor handles, keyed by session name.
     /// Each entry represents one control-mode connection (DC10).
-    session_monitors: HashMap<String, SessionMonitorHandle>,
+    /// RwLock allows &self methods to mutate monitoring state safely.
+    session_monitors: RwLock<HashMap<String, SessionMonitorHandle>>,
 }
 ```
 
@@ -2282,14 +2295,15 @@ state (connection, panes, pipes, cooldown timers) is task-local.
 
 ### DC6: Local vs SSH Transport
 
-**Decision**: A `Transport` trait abstracts command execution. Two implementations:
-`LocalTransport` (localhost, subprocess-based) and `SshTransport` (remote, russh-based).
+**Decision**: A `TransportKind` enum abstracts command execution via static dispatch.
+Three variants: `Local(LocalTransport)` (localhost, subprocess-based),
+`Ssh(SshTransport)` (remote, russh-based), and `Mock(MockTransport)` (testing).
 
 **Rationale**: The prototype assumes SSH for everything, but localhost tmux is a primary
 use case (local development, CI, single-machine automation). Forcing SSH to localhost
-adds unnecessary complexity (SSH server requirement, key management, latency). A trait
+adds unnecessary complexity (SSH server requirement, key management, latency). The enum
 abstraction lets all downstream modules (`discovery`, `capture`, `control`, `pipe`,
-`monitor`) be transport-agnostic.
+`monitor`) be transport-agnostic with zero vtable overhead.
 
 **LocalTransport specifics**:
 - `exec()`: spawns `tokio::process::Command`, captures stdout, respects timeout
@@ -2499,9 +2513,9 @@ to `MatcherKind::Regex`. Programmatic callers bypass the config layer and constr
 `CompiledRule::with_matcher()` or `SinkFilter { content: Some(...) }` directly with
 any `MatcherKind` variant.
 
-**Built-in matchers**: `RegexMatcher`, `SubstringMatcher`, `LineCountMatcher`,
-`WordListMatcher`, plus `AllOf`/`AnyOf`/`Not` combinators. Consumers can implement
-the trait for domain-specific matchers.
+**Built-in matchers** (all `MatcherKind` enum variants): `Regex`, `Substring`,
+`LineCount`, `WordList`, plus `AllOf`/`AnyOf`/`Not` combinators. The enum is closed —
+new matcher types require adding a variant (keeping the hot path static-dispatch).
 
 ### DC15: Joined Stream — Multi-Source Consolidated View
 
@@ -2814,9 +2828,10 @@ The prototype is untestable because SSH and tmux are tightly coupled. The librar
 - **Integration tests**: Require a mock SSH server or trait-based transport abstraction
 - **End-to-end tests**: Require a real SSH + tmux environment (CI with Docker?)
 
-**Proposal**: The `Transport` trait in `transport.rs` already supports this (see DC6).
-`MockTransport` returns canned responses for `exec()` and `open_shell()`. It is included
-in the library (not behind a feature flag) so downstream consumers can also use it.
+**Proposal**: The `TransportKind` enum in `transport.rs` already supports this (see DC6).
+`TransportKind::Mock(MockTransport)` returns canned responses for `exec()` and
+`open_shell()`. It is included in the library (not behind a feature flag) so downstream
+consumers can also use it.
 
 ---
 
@@ -2852,7 +2867,7 @@ Structured for incremental delivery. Each phase produces a working, testable art
    and `session:window.pane` as display metadata (per DC1), `SessionInfo`, `WindowInfo`,
    `PaneInfo`
 3. Implement `keys.rs`: `KeySequence`, `SpecialKey`, `{...}` parser, tmux command rendering
-4. Implement `transport.rs`: `Transport` trait, `LocalTransport` (subprocess-based),
+4. Implement `transport.rs`: `TransportKind` enum, `LocalTransport` (subprocess-based),
    `MockTransport` (canned responses for testing)
 5. Implement `discovery.rs`: `list_sessions()`, `list_windows()`, `list_panes()` with
    format string constants and regex filtering
@@ -2934,7 +2949,7 @@ deserialization on top of the stable 2a monitoring loop.
 routed to multiple consumers (sinks) with independent latency characteristics.
 
 **Tasks**:
-1. Implement `sink.rs`: `TargetOutput` struct, `SinkKind` trait, `SinkFilter` /
+1. Implement `sink.rs`: `TargetOutput` struct, `SinkKind` enum, `SinkFilter` /
    `CompiledSinkFilter`, `ActionHandle` / `ActionRequest` / `ActionTarget` / `SinkAction`
 2. Implement `OutputBus`: `subscribe(sink, channel_capacity)` API,
    fan-out loop that matches `TargetOutput` against compiled filters and dispatches to
