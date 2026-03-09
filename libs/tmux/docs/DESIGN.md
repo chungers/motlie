@@ -1653,7 +1653,7 @@ on top of the joined stream (e.g., a TUI panel, a web socket feed, or test harne
     │
     ├── OutputBus (owned by Fleet)
     │     │
-    │     ├── subscribe(SinkKind::Stdio(StdioSink::new()), 1024)
+    │     ├── subscribe(SinkKind::Stdio(StdioSink::new(StdioFormat::Raw)), 1024)
     │     ├── subscribe(SinkKind::Callback(tui_sink), 16)        // binary-provided
     │     └── subscribe(SinkKind::Callback(llm_sink), 256)       // LLM callback sink
     │
