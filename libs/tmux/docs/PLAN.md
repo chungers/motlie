@@ -83,7 +83,7 @@ No SSH, no monitoring.
 ### 1.5 — Capture (`src/capture.rs`)
 
 - [x] `capture_pane(transport, socket, target) -> Result<String>` — `capture-pane -p -t`
-- [x] `capture_pane_history(transport, socket, target, start, end) -> Result<String>` — `-S`/`-E`
+- [x] `capture_pane_history(transport, socket, target, start) -> Result<String>` — `-S` (captures through visible area end)
 - [x] `capture_session(transport, socket, session) -> Result<HashMap<PaneAddress, String>>`
   — calls `list_panes` + `capture_pane` per pane
 - [x] `sample_text(transport, socket, target, query) -> Result<String>` — implements

@@ -81,30 +81,19 @@ pub async fn send_keys(
 
     for args in keys.to_tmux_args(target) {
         // Build the full command: tmux [socket] send-keys [-l] -t target [text|key]
+        // All arguments are shell-escaped to prevent injection via Raw key names.
+        let has_literal = args.contains(&"-l".to_string());
         let mut cmd = prefix.clone();
-        for (i, arg) in args.iter().enumerate() {
-            if i == 0 {
-                // "send-keys"
-                cmd.push_str(&format!(" {}", arg));
-            } else if arg == "-l" || arg == "-t" {
-                cmd.push_str(&format!(" {}", arg));
-            } else if i == args.len() - 1 {
-                // The value (text or key name)
-                // For -l (literal), escape the text; for key names, pass directly
-                let has_literal = args.contains(&"-l".to_string());
-                if has_literal {
-                    cmd.push_str(&format!(" {}", shell_escape(arg)));
-                } else {
-                    cmd.push_str(&format!(" {}", arg));
-                }
-            } else {
-                // target value after -t
-                cmd.push_str(&format!(" {}", shell_escape(arg)));
-            }
+        cmd.push_str(" send-keys");
+        if has_literal {
+            cmd.push_str(" -l");
         }
+        cmd.push_str(&format!(" -t {}", tmux_target));
+        // Last element is the value (text or key name)
+        let value = &args[args.len() - 1];
+        cmd.push_str(&format!(" {}", shell_escape(value)));
         transport.exec(&cmd).await?;
     }
-    let _ = tmux_target; // suppress warning, used conceptually
     Ok(())
 }
 

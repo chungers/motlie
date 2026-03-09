@@ -128,19 +128,29 @@ impl HostHandle {
                 }))
             }
             (Some(window_str), Some(pane_idx)) => {
+                // Resolve window by index or name → actual window index
+                let windows = discovery::list_windows(
+                    &self.inner.transport,
+                    self.inner.socket.as_ref(),
+                    &spec.session,
+                )
+                .await?;
+                let resolved_window = windows.into_iter().find(|w| {
+                    w.index.to_string() == *window_str || w.name == *window_str
+                });
+                let window_index = match resolved_window {
+                    Some(w) => w.index,
+                    None => return Ok(None),
+                };
+
                 let panes = discovery::list_panes_in_session(
                     &self.inner.transport,
                     self.inner.socket.as_ref(),
                     &spec.session,
                 )
                 .await?;
-                let window_index: Option<u32> = window_str.parse().ok();
                 let pane = panes.into_iter().find(|p| {
-                    let win_match = match window_index {
-                        Some(idx) => p.address.window == idx,
-                        None => false, // window by name not matched to pane directly
-                    };
-                    win_match && p.address.pane == pane_idx
+                    p.address.window == window_index && p.address.pane == pane_idx
                 });
                 Ok(pane.map(|p| Target {
                     inner: self.inner.clone(),
@@ -370,13 +380,50 @@ impl Target {
     }
 
     /// Capture all panes under this target.
+    /// Session: all panes in all windows. Window: all panes in that window.
+    /// Pane: single-entry map.
     pub async fn capture_all(&self) -> Result<HashMap<PaneAddress, String>> {
-        capture::capture_session(
-            &self.inner.transport,
-            self.inner.socket.as_ref(),
-            self.session_name(),
-        )
-        .await
+        match &self.address {
+            TargetAddress::Session(_) => {
+                capture::capture_session(
+                    &self.inner.transport,
+                    self.inner.socket.as_ref(),
+                    self.session_name(),
+                )
+                .await
+            }
+            TargetAddress::Window(w) => {
+                let panes = discovery::list_panes_in_session(
+                    &self.inner.transport,
+                    self.inner.socket.as_ref(),
+                    &w.session_name,
+                )
+                .await?;
+                let mut result = HashMap::new();
+                for pane in panes.into_iter().filter(|p| p.address.window == w.index) {
+                    let target = pane.address.to_tmux_target();
+                    let content = capture::capture_pane(
+                        &self.inner.transport,
+                        self.inner.socket.as_ref(),
+                        &target,
+                    )
+                    .await?;
+                    result.insert(pane.address, content);
+                }
+                Ok(result)
+            }
+            TargetAddress::Pane(p) => {
+                let content = capture::capture_pane(
+                    &self.inner.transport,
+                    self.inner.socket.as_ref(),
+                    &p.to_tmux_target(),
+                )
+                .await?;
+                let mut result = HashMap::new();
+                result.insert(p.clone(), content);
+                Ok(result)
+            }
+        }
     }
 
     // --- Lifecycle ---
