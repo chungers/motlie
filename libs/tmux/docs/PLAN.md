@@ -46,7 +46,7 @@ No SSH, no monitoring.
 - [x] `KeySequence { segments: Vec<KeySegment> }`
 - [x] `KeySequence::parse(input: &str) -> Result<Self>` — `{Enter}`, `{C-c}` inline escapes
 - [x] `KeySequence::literal()`, `then_literal()`, `then_key()`, `then_enter()` builder API
-- [x] `KeySequence::to_tmux_commands(target: &str) -> Vec<String>` — split into `-l` and non-`-l` invocations
+- [x] `KeySequence::to_tmux_args(target: &str) -> Vec<Vec<String>>` — split into `-l` and non-`-l` invocations (each inner Vec is one send-keys argument list)
 - [x] Unit tests: parse round trips, mixed literal+special sequences, edge cases
   (empty input, consecutive specials, `{` in literal text)
 
@@ -110,7 +110,7 @@ No SSH, no monitoring.
 
 ### 1.7 — Host handle + Target wiring (`src/host.rs`)
 
-- [x] `HostHandleInner` struct with `transport`, `config`, `session_monitors: RwLock<HashMap>`
+- [x] `HostHandleInner` struct with `transport`, `socket` (Phase 1 scope; `config` and `session_monitors: RwLock<HashMap>` added in Phase 2a.4)
 - [x] `HostHandle` wrapping `Arc<HostHandleInner>`
 - [x] `HostHandle` discovery methods: `list_sessions()`, `create_session() -> Result<Target>`,
   `session(name) -> Result<Option<Target>>`, `target(spec) -> Result<Option<Target>>`

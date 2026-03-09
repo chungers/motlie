@@ -774,8 +774,11 @@ impl Target {
     /// At session/window level, captures the active pane.
     pub async fn capture(&self) -> Result<String>;
 
-    /// Capture with scrollback history.
-    pub async fn capture_with_history(&self, start: i32, end: i32) -> Result<String>;
+    /// Capture with scrollback history. `start` is negative for scrollback lines
+    /// (e.g., -100 = 100 lines above visible area). Captures through end of visible area.
+    /// Note: tmux `-E` with negative values counts from scrollback buffer start, not
+    /// visible area end, making `-S -N -E -1` semantics unreliable. Using `-S` only.
+    pub async fn capture_with_history(&self, start: i32) -> Result<String>;
 
     /// Sample recent scrollback, returned in chronological order.
     pub async fn sample_text(&self, query: &ScrollbackQuery) -> Result<String>;
@@ -1042,7 +1045,10 @@ pub enum SpecialKey {
     CtrlL,      // C-l (clear)
     Space,
     BSpace,     // Backspace
-    /// Arbitrary tmux key name for keys not in this enum.
+    /// Tmux key name not in this enum (e.g., "F12", "IC", "C-\\").
+    /// Validated at parse time: rejects shell-dangerous characters
+    /// (spaces, semicolons, backticks, $, etc.). Shell-escaped at
+    /// command construction as defense-in-depth.
     Raw(String),
 }
 
