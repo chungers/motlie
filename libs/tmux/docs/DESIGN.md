@@ -1325,9 +1325,10 @@ Every output consumer is a variant of the `SinkKind` enum. The bus dispatches vi
 async task with its own batching/accumulation behavior.
 
 **Remaining dynamic types**: `CallbackSink.state` uses `Arc<dyn Any + Send + Sync>` for
-type-erased consumer state (downcast at use site). `on_flush` returns `Pin<Box<dyn Future>>`
-— unavoidable until Rust stabilizes async fn pointers. Both are outside the per-event
-hot path (`on_output` is synchronous, `on_flush` runs once at shutdown).
+type-erased consumer state. It is passed by reference to the per-event `on_output`
+callback, but incurs no per-event allocation — the `Arc` is shared and `downcast_ref`
+is a type-id comparison. `on_flush` returns `Pin<Box<dyn Future>>` — unavoidable until
+Rust stabilizes async fn pointers; it runs once at shutdown, off the hot path.
 
 ```rust
 /// Closed enum of all sink types. Static dispatch on the hot path —
