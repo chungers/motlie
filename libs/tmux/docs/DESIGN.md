@@ -1181,8 +1181,8 @@ counters, vocabulary detectors that accumulate across calls).
 
 ```rust
 /// A content matcher. Closed enum — all variants known at compile time.
-/// No heap allocation for individual matchers; combinators store children
-/// inline via Vec<MatcherKind>.
+/// No vtable dispatch; combinators use Vec<MatcherKind> (heap-backed)
+/// and Not uses Box<MatcherKind> (for recursive enum sizing).
 #[derive(Clone)]
 pub enum MatcherKind {
     /// Matches when text contains a regex pattern. Stateless.
@@ -1386,8 +1386,9 @@ inference, webhook delivery, custom TUI) provide function pointers plus an expli
 `Arc<dyn Any + Send + Sync>` state field. The `on_output` callback receives `&Arc`
 to access state — no closure captures needed. This keeps the bus monomorphic.
 `on_flush` returns `Pin<Box<dyn Future>>` — the only remaining async indirection,
-unavoidable until Rust stabilizes async fn pointers. The `on_output` hot path is
-fully synchronous and allocation-free.
+unavoidable until Rust stabilizes async fn pointers. The framework's `on_output` dispatch path is
+fully synchronous with no framework-side allocation (user callbacks may allocate
+internally as needed).
 
 ### `ActionHandle` — Sink-Initiated Actions
 
@@ -2511,8 +2512,9 @@ each compiled rule gets its own cloned `MatcherKind` instance — state is never
 are only invoked on pre-filtered output.
 
 **Static dispatch**: All matcher variants are defined in the `MatcherKind` enum (DC14).
-No trait objects or heap-allocated vtables on the hot path. Combinators store children
-as `Vec<MatcherKind>`. The entire matcher tree is `Clone`.
+No vtable dispatch on the hot path. `AllOf`/`AnyOf` store children as `Vec<MatcherKind>`
+(heap-backed); `Not` uses `Box<MatcherKind>` for recursive enum sizing. The entire
+matcher tree is `Clone`.
 
 **Config boundary**: `TriggerRule` (serde DTO) stores `pattern: String` which compiles
 to `MatcherKind::Regex`. Programmatic callers bypass the config layer and construct
