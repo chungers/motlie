@@ -1943,23 +1943,29 @@ Pane content capture via `tmux capture-pane`.
 ```rust
 /// Capture the visible content of a single pane.
 /// Runs: tmux capture-pane -p -t <target>
-pub async fn capture_pane(transport: &TransportKind, target: &PaneAddress) -> Result<String>;
+pub async fn capture_pane(
+    transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
+    target: &str,
+) -> Result<String>;
 
-/// Capture with scrollback history.
-/// Runs: tmux capture-pane -p -t <target> -S <start> -E <end>
-/// start/end are line numbers; negative values reach into scrollback buffer.
-/// Example: start=-1000, end=-1 captures last 1000 lines of scrollback.
+/// Capture with scrollback history. `start` is negative for scrollback lines
+/// (e.g., -100 = 100 lines above visible area). Captures through end of visible area.
+/// Runs: tmux capture-pane -p -t <target> -S <start>
+/// Note: tmux `-E` with negative values counts from scrollback buffer start, not
+/// visible area end, making `-S -N -E -1` semantics unreliable. Using `-S` only.
 pub async fn capture_pane_history(
     transport: &TransportKind,
-    target: &PaneAddress,
+    socket: Option<&TmuxSocket>,
+    target: &str,
     start: i32,
-    end: i32,
 ) -> Result<String>;
 
 /// Capture all panes in a session. Calls capture_pane for each pane found via list_panes.
 /// Returns a map of pane address → visible content.
 pub async fn capture_session(
     transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
     session: &str,
 ) -> Result<HashMap<PaneAddress, String>>;
 
@@ -1968,20 +1974,21 @@ pub async fn capture_session(
 /// pattern matching and truncation logic.
 pub async fn sample_text(
     transport: &TransportKind,
-    target: &PaneAddress,
+    socket: Option<&TmuxSocket>,
+    target: &str,
     query: &ScrollbackQuery,
 ) -> Result<String>;
 ```
 
 **`sample_text` implementation**:
-1. `LastLines(n)` → calls `capture_pane_history(transport, target, -(n as i32), -1)`.
-   Result is already chronological.
+1. `LastLines(n)` → calls `capture_pane_history(transport, socket, target, -(n as i32))`.
+   Captures from scrollback through visible area end. Result is trimmed of trailing blank lines.
 2. `Until { pattern, max_lines }` → calls `capture_pane_history` with
-   `start = -(max_lines as i32)`, `end = -1`. Scans the result from the bottom up for
+   `start = -(max_lines as i32)`. Scans the result from the bottom up for
    the first line matching `pattern`. Returns from that line (inclusive) to the end.
    If no match, returns the full captured range.
 3. `LastLinesUntil { lines, stop_pattern }` → same as `LastLines(lines)`, then scans
-   bottom-up for `stop_pattern`. Truncates at the match point (inclusive).
+   bottom-up for `stop_pattern`. Returns from match point (inclusive) to the end.
 
 In all cases the output preserves `capture-pane`'s top-to-bottom ordering — no reversal
 step is needed. The pattern scan is the only post-processing.
@@ -2133,21 +2140,25 @@ pub enum HostStatus {
 
 The `HostHandle` and `Target` implementations. See Core Abstractions for the full APIs.
 
-`HostHandle` wraps `Arc<HostHandleInner>` which holds the transport and config.
+`HostHandle` wraps `Arc<HostHandleInner>` which holds the transport and socket.
 `Target` is lightweight — holds an `Arc<HostHandleInner>` plus a `TargetAddress` enum.
-Both delegate to the function-level APIs in `discovery`, `capture`, `control`, `pipe`,
-and `monitor`.
+Both delegate to the function-level APIs in `discovery`, `capture`, and `control`.
 
 ```rust
+// Phase 1 — on-demand operations only (no monitoring, no config)
 struct HostHandleInner {
     transport: TransportKind,
-    config: HostTarget,
-    pipe_state: Option<PipeManager>,   // None if monitoring not started (fallback path)
-    /// Per-session monitor handles, keyed by session name.
-    /// Each entry represents one control-mode connection (DC10).
-    /// RwLock allows &self methods to mutate monitoring state safely.
-    session_monitors: RwLock<HashMap<String, SessionMonitorHandle>>,
+    socket: Option<TmuxSocket>,
 }
+
+// Phase 2+ additions (pipe.rs, monitor.rs):
+// struct HostHandleInner {
+//     transport: TransportKind,
+//     socket: Option<TmuxSocket>,
+//     config: HostTarget,
+//     pipe_state: Option<PipeManager>,
+//     session_monitors: RwLock<HashMap<String, SessionMonitorHandle>>,
+// }
 ```
 
 
