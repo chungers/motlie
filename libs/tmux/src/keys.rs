@@ -60,12 +60,27 @@ impl SpecialKey {
             other => {
                 if other.is_empty() {
                     Err(anyhow!("empty key name in braces"))
+                } else if !is_valid_tmux_key_name(other) {
+                    Err(anyhow!(
+                        "invalid tmux key name '{}': must be alphanumeric, hyphens, or C-/M-/S- prefixes",
+                        other
+                    ))
                 } else {
                     Ok(SpecialKey::Raw(other.to_string()))
                 }
             }
         }
     }
+}
+
+/// Validate that a raw tmux key name contains only safe characters.
+/// Tmux key names are alphanumeric with optional C-/M-/S- prefixes
+/// (e.g., "F1", "C-a", "M-S-Left", "KP0"). Reject shell metacharacters.
+fn is_valid_tmux_key_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
 }
 
 /// Internal segment: literal text or special key.
@@ -258,6 +273,22 @@ mod tests {
     fn parse_raw_key() {
         let ks = KeySequence::parse("{F1}").unwrap();
         assert_eq!(ks.segments[0], KeySegment::Special(SpecialKey::Raw("F1".to_string())));
+    }
+
+    #[test]
+    fn parse_raw_key_rejects_shell_metacharacters() {
+        assert!(KeySequence::parse("{; rm -rf /}").is_err());
+        assert!(KeySequence::parse("{$(whoami)}").is_err());
+        assert!(KeySequence::parse("{`id`}").is_err());
+        assert!(KeySequence::parse("{key name}").is_err()); // space not allowed
+    }
+
+    #[test]
+    fn parse_raw_key_allows_valid_names() {
+        assert!(KeySequence::parse("{F12}").is_ok());
+        assert!(KeySequence::parse("{KP0}").is_ok());
+        assert!(KeySequence::parse("{M-a}").is_ok());
+        assert!(KeySequence::parse("{C-M-Left}").is_ok());
     }
 
     #[test]
