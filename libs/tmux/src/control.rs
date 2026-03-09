@@ -255,4 +255,12 @@ mod tests {
             .await
             .unwrap();
     }
+
+    #[test]
+    fn shell_escape_null_byte() {
+        let input = "before\0after";
+        let escaped = shell_escape(input);
+        // Null byte is inside single quotes — shell will not interpret it as terminator
+        assert_eq!(escaped, "'before\0after'");
+    }
 }
