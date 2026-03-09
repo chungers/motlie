@@ -65,18 +65,22 @@ A library that:
 3. Lists and inspects tmux sessions, windows, and panes on each target
 4. Captures pane content (scrollback + visible) as text on demand
 5. Sends arbitrary input to panes with proper key escaping (Enter, C-c, etc.)
-6. Manages session metadata (rename sessions/windows)
-7. Attaches output pipes for continuous monitoring
-8. Evaluates configurable trigger rules against pane output
-9. Executes actions (send-keys, notify, log) when rules match
-10. Reconnects automatically on failure (SSH targets)
+6. Executes shell commands in panes and captures structured output (exit code, stdout)
+7. Manages session metadata (rename sessions/windows)
+8. Names logical workstreams across hosts and targets for domain-meaningful addressing
+9. Attaches output pipes for continuous monitoring
+10. Evaluates configurable trigger rules against pane output
+11. Executes actions (send-keys, notify, log) when rules match
+12. Reconnects automatically on failure (SSH targets)
 
 ### Scope
 
 - **In scope**: Localhost tmux (direct execution), SSH transport for remote hosts,
   multi-host connection pool, tmux session creation and termination, session/window/pane
-  listing, pane content capture, remote input with escaping, session metadata management,
-  pipe-based output monitoring, rule-based automation, structured logging, CLI binary
+  listing, pane content capture, structured command execution (exec with exit code),
+  remote input with escaping, session metadata management, named workstreams,
+  output sink pipeline with pluggable content matching, pipe-based output monitoring,
+  rule-based automation, structured logging, CLI binary
 - **Out of scope**: Web UI, SSH server setup/configuration, tmux installation
 - **Future**: TUI interface based on [ratatui](https://ratatui.rs/) (not in current phases)
 
@@ -444,6 +448,13 @@ impl Fleet {
     /// Iterate over all connected targets.
     pub fn hosts(&self) -> impl Iterator<Item = (&str, &HostHandle)>;
 
+    // --- Output Bus ---
+
+    /// Access the fleet's OutputBus for sink registration.
+    /// Sinks should be registered before start_monitoring() so they
+    /// receive output from the start.
+    pub fn output_bus(&mut self) -> &mut OutputBus;
+
     // --- Monitoring (fleet-wide) ---
 
     /// Start monitoring on all connected hosts (spawns background tasks).
@@ -591,11 +602,11 @@ impl HostHandle {
 
     /// Start monitoring all matching sessions on this host.
     /// Opens one control-mode connection per discovered session (DC10).
+    /// Shutdown is managed internally by the HostHandle (DC13).
     pub async fn start_monitoring(
         &self,
         filter: Option<&Regex>,
         rules: &[TriggerRule],
-        shutdown: watch::Receiver<bool>,
     ) -> Result<MonitorHandle>;
 
     /// Stop all monitoring on this host.
@@ -2014,6 +2025,8 @@ Internal responsibilities:
 - Supports per-host monitoring start/stop (`start_monitoring_host()`, `stop_monitoring_host()`)
 - Per-host stop delegates to `HostHandle::stop_monitoring()`, which tears down all session monitors for that host
 - Owns the `shutdown` watch channel; `shutdown()` signals all targets
+- Owns the `OutputBus` (shared with HostHandles via `Arc`); exposes `output_bus()` accessor
+- Maintains workstream registry: `HashMap<String, WorkstreamEntry>` for named (host, target) bindings
 
 ```rust
 pub enum HostStatus {
@@ -2123,6 +2136,23 @@ monitor parses on that prefix directly — no filename decoding required.
 **Lifecycle**: Each `SessionMonitor::run()` is spawned as a tokio task by `HostHandle`.
 The `SessionMonitorHandle` returned to the caller holds the task's `JoinHandle` and stop
 channel. Stopping a session monitor is non-disruptive to other sessions (DC13).
+
+### `sink.rs`
+
+The output sink pipeline types. See [Output Sink Pipeline](#output-sink-pipeline) for
+the full API and design rationale.
+
+This module contains:
+- `TargetOutput`: the unit of output flowing through the pipeline
+- `OutputSink` trait: async sink interface with filtering and batching
+- `SinkFilter` / `CompiledSinkFilter`: composable output targeting
+- `ActionHandle` / `ActionRequest` / `ActionTarget` / `SinkAction`: sink-initiated actions
+- `OutputBus`: central fan-out dispatcher with per-sink bounded channels
+- `SinkId`: opaque handle for unsubscribe
+
+`OutputBus` is owned by `Fleet` and shared with all `HostHandle` instances via `Arc`.
+Monitors publish `TargetOutput` to the bus; the bus fans out to per-sink tokio tasks.
+Each sink task drives its own `OutputSink::write()` loop independently.
 
 ---
 
@@ -2543,6 +2573,28 @@ string, and `host.target(&spec)` queries tmux to verify the entity exists and re
 is preferred when components are known at compile time. This is the bridge from raw
 strings (CLI args, config files) to typed handles.
 
+### DC18: Composite Workstreams (Future)
+
+**Status**: Deferred — documented for future reference. Single-target workstreams
+(`Fleet::bind()`) are in scope; composite workstreams require real usage patterns to
+inform membership lifecycle decisions.
+
+**Concept**: Extend workstreams to group multiple (host, target) pairs under one name —
+e.g., "deploy" spans `web-1:build`, `db-1:migrate`, and `web-1:test`. This would
+compose with existing abstractions:
+
+- **`SinkFilter` by workstream**: Filter output by workstream name. The bus resolves
+  the workstream to its member targets at filter-match time.
+- **`JoinedStream` over a workstream**: `subscribe_joined()` accepts a workstream name,
+  automatically creating filters for all member targets.
+- **Workstream-scoped monitoring**: Start/stop monitoring for all targets in a
+  workstream with a single call.
+
+**Open questions** (to be resolved by usage):
+- What happens when a member target is killed or disconnected?
+- Can targets belong to multiple workstreams?
+- Should workstreams be defined in config or only programmatically?
+
 ### DC19: Structured Command Execution via Target::exec()
 
 **Decision**: `Target::exec(command, timeout)` provides structured command execution
@@ -2836,7 +2888,7 @@ routed to multiple consumers (sinks) with independent latency characteristics.
 **Tasks**:
 1. Implement `sink.rs`: `TargetOutput` struct, `OutputSink` trait, `SinkFilter` /
    `CompiledSinkFilter`, `ActionHandle` / `ActionRequest` / `ActionTarget` / `SinkAction`
-2. Implement `OutputBus`: registration API (`register(sink, filters, channel_capacity)`),
+2. Implement `OutputBus`: `subscribe(sink, channel_capacity)` API,
    fan-out loop that matches `TargetOutput` against compiled filters and dispatches to
    per-sink channels, graceful shutdown with `flush()` on all sinks
 3. Implement `StdioSink`: default reference implementation that writes `TargetOutput` to
