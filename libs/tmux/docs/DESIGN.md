@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-08 | Eliminate all `Box<dyn>` dynamic dispatch: `Transport` → `TransportKind` enum, `ContentMatcher` → `MatcherKind` enum, `OutputSink` → `SinkKind` enum, `LabelFormat::Custom` → `fn` pointer. Static dispatch throughout hot paths. | Core Abstractions, Output Sink Pipeline, Module Specs, DC14 |
 | 2026-03-08 | Added `Target::exec()` for structured command execution with sentinel-based capture (DC19). `ExecOutput` type with stdout and exit code. | Core Abstractions, DC19 |
 | 2026-03-08 | Added workstreams to `Fleet`: `bind()`, `find()`, `workstreams()` for named (host, target) bindings. Future DC18 outlines composite workstreams composing with sinks/streams. | Core Abstractions |
 | 2026-03-08 | `PaneOutput` → `TargetOutput`: source identified by `TargetAddress` instead of flat pane fields. Generalizes to session-only hosts. `SourceLabel` uses `TargetAddress`. | Output Sink Pipeline, DC12 |
@@ -17,7 +18,7 @@
 | 2026-03-08 | Added `ContentMatcher` trait for pluggable text matching (DC14) | Core Abstractions, Output Sink Pipeline, DC14 |
 | 2026-03-08 | Added `sample_text()` API with `ScrollbackQuery` for on-demand scrollback sampling | Core Abstractions |
 | 2026-03-08 | Added granular monitoring lifecycle — fleet/host/session levels (DC13) | DC13 |
-| 2026-03-08 | Added output sink pipeline — `OutputBus`, `SinkFilter`, `OutputSink` trait (DC12) | Output Sink Pipeline, DC12 |
+| 2026-03-08 | Added output sink pipeline — `OutputBus`, `SinkFilter`, `SinkKind` trait (DC12) | Output Sink Pipeline, DC12 |
 | 2026-03-08 | Addressed codex review rounds 1–4: DC10 control mode fixes, ActionHandle ownership, integration diagram, version pinning | DC10, Output Sink Pipeline, DC1 |
 | 2026-03-07 | Added `TmuxSocket` selector for non-default tmux servers | Core Abstractions |
 | 2026-03-07 | Added localhost transport, session lifecycle, TUI roadmap (Phase 5) | Core Abstractions, Module Specs, Implementation Phases |
@@ -338,8 +339,8 @@ libs/tmux/
 │   ├── control.rs          # Session lifecycle, send-keys with escaping, rename
 │   ├── pipe.rs             # PipeManager: FIFO lifecycle, pipe-pane attach/detach
 │   ├── monitor.rs          # OutputMonitor: stream parsing, rule evaluation, dispatch
-│   ├── matcher.rs          # ContentMatcher trait + built-in matchers (Regex, Substring, etc.)
-│   ├── sink.rs             # OutputSink trait, SinkFilter, TargetOutput, OutputBus
+│   ├── matcher.rs          # MatcherKind enum + built-in matchers (Regex, Substring, etc.)
+│   ├── sink.rs             # SinkKind enum, SinkFilter, TargetOutput, OutputBus
 │   ├── sinks/
 │   │   ├── mod.rs          # Re-exports built-in sinks
 │   │   └── stdio.rs        # StdioSink (default reference implementation)
@@ -571,7 +572,7 @@ pub struct HostHandle { /* Arc<HostHandleInner> */ }
 /// Uses interior mutability so &self methods on HostHandle and Target
 /// can mutate monitoring state under concurrent access.
 struct HostHandleInner {
-    transport: Box<dyn Transport>,
+    transport: TransportKind,
     config: HostTarget,
     /// RwLock for concurrent read access (monitored_sessions, find) with
     /// exclusive write access (start/stop monitoring). The lock is never
@@ -1163,81 +1164,68 @@ level of the hierarchy — session, window, or pane — and to route actions bac
 originating entity. Hosts with a single session/window/pane can be addressed at
 session level without requiring callers to know the pane ID.
 
-### `ContentMatcher` — Trait-Based Text Matching
+### `MatcherKind` — Static-Dispatch Content Matching
 
-Content matching is abstracted behind a trait so that regex is one implementation, not
-the only one. Matchers can be stateless (regex, substring) or stateful (line counters,
-vocabulary detectors that accumulate across calls).
+Content matching uses a closed enum (`MatcherKind`) rather than trait objects. All
+matching variants are known at compile time — no heap allocation or vtable dispatch
+on the hot path. Matchers can be stateless (regex, substring) or stateful (line
+counters, vocabulary detectors that accumulate across calls).
 
 ```rust
-/// A matcher that tests text content. Implementations range from simple regex
-/// to stateful stream analyzers.
-pub trait ContentMatcher: Send + Sync + 'static {
-    /// Human-readable name for logging (e.g., "regex:/error/i", "bad-words").
-    fn name(&self) -> &str;
+/// A content matcher. Closed enum — all variants known at compile time.
+/// No heap allocation for individual matchers; combinators store children
+/// inline via Vec<MatcherKind>.
+#[derive(Clone)]
+pub enum MatcherKind {
+    /// Matches when text contains a regex pattern. Stateless.
+    Regex { pattern: Regex },
 
-    /// Test whether `text` matches. For stateful matchers, this may update
+    /// Matches when text contains any of the given substrings. Stateless.
+    /// Faster than regex for simple keyword lists.
+    Substring { needles: Vec<String>, case_insensitive: bool },
+
+    /// Matches after accumulating N newlines across calls. Stateful.
+    /// Useful for "trigger after N lines of output" patterns.
+    LineCount { threshold: usize, count: usize },
+
+    /// Matches when text contains any word from a blocklist. Stateless.
+    /// Words are matched at word boundaries (not as substrings of larger words).
+    WordList { words: HashSet<String>, case_insensitive: bool },
+
+    /// Matches when ALL inner matchers match (AND).
+    AllOf(Vec<MatcherKind>),
+
+    /// Matches when ANY inner matcher matches (OR).
+    AnyOf(Vec<MatcherKind>),
+
+    /// Inverts a matcher (NOT).
+    Not(Box<MatcherKind>),   // Box only for recursive enum sizing, not for dyn dispatch
+}
+
+impl MatcherKind {
+    /// Human-readable name for logging (e.g., "regex:/error/i", "all-of(3)").
+    pub fn name(&self) -> String;
+
+    /// Test whether `text` matches. For stateful variants, this may update
     /// internal state and return true when a threshold is reached.
-    fn matches(&mut self, text: &str) -> bool;
+    pub fn matches(&mut self, text: &str) -> bool;
 
     /// Reset internal state. Called when the matcher is reused across
-    /// monitoring restarts. No-op for stateless matchers.
-    fn reset(&mut self) {}
+    /// monitoring restarts. No-op for stateless variants.
+    pub fn reset(&mut self);
 }
 ```
 
-**Built-in implementations**:
-
-```rust
-/// Matches when text contains a regex pattern. Stateless.
-pub struct RegexMatcher { pattern: Regex }
-
-/// Matches when text contains any of the given substrings. Stateless.
-/// Faster than regex for simple keyword lists.
-pub struct SubstringMatcher { needles: Vec<String>, case_insensitive: bool }
-
-/// Matches after accumulating N newlines across calls. Stateful.
-/// Useful for "trigger after N lines of output" patterns.
-pub struct LineCountMatcher { threshold: usize, count: usize }
-
-/// Matches when text contains any word from a blocklist. Stateless.
-/// Words are matched at word boundaries (not as substrings of larger words).
-pub struct WordListMatcher { words: HashSet<String>, case_insensitive: bool }
-```
-
-**Composability**: Matchers can be combined with standard boolean logic:
-
-```rust
-/// Matches when ALL inner matchers match (AND).
-pub struct AllOf(Vec<Box<dyn ContentMatcher>>);
-
-/// Matches when ANY inner matcher matches (OR).
-pub struct AnyOf(Vec<Box<dyn ContentMatcher>>);
-
-/// Inverts a matcher (NOT).
-pub struct Not(Box<dyn ContentMatcher>);
-```
+**Why a closed enum**: The set of matching strategies is finite and known at design
+time. A `match` arm handles each variant with zero indirection. Combinators (`AllOf`,
+`AnyOf`, `Not`) store children as `Vec<MatcherKind>` — no trait-object allocation per
+node. `Not` uses `Box<MatcherKind>` for recursive enum sizing only (not dynamic dispatch).
+The entire matcher tree is `Clone` — each sink gets its own copy via `clone()`.
 
 **Statefulness contract**: The bus calls `matches()` on the filter's matcher for each
-`TargetOutput`. Stateful matchers (like `LineCountMatcher`) accumulate across calls for
-the same sink — each sink gets its own matcher instance, so state is not shared across
-sinks. `reset()` is called when monitoring restarts to clear accumulated state.
-
-**Cloning contract**: Since each sink needs its own matcher instance, `ContentMatcher`
-requires a `clone_box(&self) -> Box<dyn ContentMatcher>` method for trait-object-safe
-cloning. The `dyn-clone` crate provides a blanket implementation via `DynClone`.
-Matchers that wrap non-cloneable resources (e.g., compiled ML models) should use
-`Arc` internally so `clone_box` is cheap.
-
-```rust
-pub trait ContentMatcher: Send + Sync + 'static {
-    fn name(&self) -> &str;
-    fn matches(&mut self, text: &str) -> bool;
-    fn reset(&mut self) {}
-    /// Trait-object-safe clone. Each sink gets its own instance.
-    fn clone_box(&self) -> Box<dyn ContentMatcher>;
-}
-```
+`TargetOutput`. Stateful variants (like `LineCount`) accumulate across calls for
+the same sink — each sink gets its own cloned matcher instance, so state is not shared
+across sinks. `reset()` is called when monitoring restarts to clear accumulated state.
 
 ### `SinkFilter` — Composable Output Targeting
 
@@ -1252,7 +1240,7 @@ pub struct SinkFilter {
     pub session: Option<String>,   // regex against session name
     pub window: Option<String>,    // regex against "session:window_index"
     pub pane: Option<String>,      // regex against pane_id or "session:window.pane"
-    pub content: Option<Box<dyn ContentMatcher>>,  // optional content matching
+    pub content: Option<MatcherKind>,  // optional content matching
 }
 
 /// Compiled form — routing regexes compiled once at registration time.
@@ -1262,7 +1250,7 @@ pub struct CompiledSinkFilter {
     pub session: Option<Regex>,
     pub window: Option<Regex>,
     pub pane: Option<Regex>,
-    pub content: Option<Box<dyn ContentMatcher>>,
+    pub content: Option<MatcherKind>,
 }
 
 impl CompiledSinkFilter {
@@ -1306,46 +1294,63 @@ vec![SinkFilter {
 // Sink triggers after 100 lines of output from "build" session
 vec![SinkFilter {
     session: Some("build".into()),
-    content: Some(Box::new(LineCountMatcher::new(100))),
+    content: Some(MatcherKind::LineCount { threshold: 100, count: 0 }),
     ..Default::default()
 }]
 
 // Bad-word detector on all output
 vec![SinkFilter {
-    content: Some(Box::new(WordListMatcher::new(
-        vec!["password", "secret", "token"], true,
-    ))),
+    content: Some(MatcherKind::WordList {
+        words: ["password", "secret", "token"].into_iter().map(Into::into).collect(),
+        case_insensitive: true,
+    }),
     ..Default::default()
 }]
 ```
 
-### `OutputSink` — The Sink Trait
+### `SinkKind` — Static-Dispatch Output Sinks
 
-Every output consumer implements `OutputSink`. Each sink runs as an independent async
-task with its own batching/accumulation behavior. The library provides `StdioSink` as
-the default reference implementation.
+Every output consumer is a variant of the `SinkKind` enum. No trait objects — the bus
+dispatches via `match` with zero indirection. Each sink runs as an independent async
+task with its own batching/accumulation behavior.
 
 ```rust
-#[async_trait]
-pub trait OutputSink: Send + Sync + 'static {
+/// Closed enum of all sink types. Static dispatch — no heap allocation
+/// or vtable indirection on the hot path.
+pub enum SinkKind {
+    /// Writes to stdout with configurable formatting. Reference implementation.
+    Stdio(StdioSink),
+
+    /// Forwards output to a user-provided async callback function.
+    /// This is the extension point for consumers (LLM, TUI, custom logging)
+    /// without requiring trait objects.
+    Callback(CallbackSink),
+}
+
+/// User-provided sink via async callback. Avoids trait objects while
+/// allowing consumer-defined behavior.
+pub struct CallbackSink {
+    pub name: String,
+    pub filters: Vec<SinkFilter>,
+    /// Async function called for each output event.
+    pub on_output: fn(TargetOutput) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>,
+    /// Called on bus shutdown. Flush internal buffers, close resources.
+    pub on_flush: Option<fn() -> Pin<Box<dyn Future<Output = Result<()>> + Send>>>,
+}
+
+impl SinkKind {
     /// Human-readable name for logging and diagnostics.
-    fn name(&self) -> &str;
+    pub fn name(&self) -> &str;
 
     /// Filters determining which output reaches this sink.
-    /// Empty vec = all output (default).
-    fn filters(&self) -> Vec<SinkFilter> { vec![] }
+    pub fn filters(&self) -> &[SinkFilter];
 
     /// Process one output event. Called from the sink's own task —
     /// never from the monitor/bus hot path.
-    ///
-    /// Sinks are responsible for their own batching and accumulation.
-    /// A stdio sink writes immediately; an LLM sink accumulates and
-    /// flushes on its own schedule. The bus does not batch on behalf
-    /// of sinks.
-    async fn write(&self, output: TargetOutput) -> Result<()>;
+    pub async fn write(&mut self, output: TargetOutput) -> Result<()>;
 
     /// Called on bus shutdown. Flush internal buffers, close resources.
-    async fn flush(&self) -> Result<()> { Ok(()) }
+    pub async fn flush(&mut self) -> Result<()>;
 }
 ```
 
@@ -1354,6 +1359,11 @@ The bus delivers individual `TargetOutput` events; the sink decides whether to p
 them immediately (stdio), buffer and render at frame rate (TUI), or accumulate and
 flush on a timer/threshold (LLM). This keeps the bus simple and the sink in full
 control of its own latency/throughput tradeoffs.
+
+**Extension via `CallbackSink`**: Consumers that need custom sink behavior (LLM
+inference, webhook delivery, custom TUI) provide async function pointers. This avoids
+trait objects while keeping the bus monomorphic. For complex sinks that need captured
+state, the callback can close over an `Arc<SinkState>` or similar.
 
 ### `ActionHandle` — Sink-Initiated Actions
 
@@ -1415,7 +1425,7 @@ of whether an action originates from a rule or a sink.
 **LLM feedback loop**: An LLM sink can call `action_handle.send_keys_to_pane()` after
 analyzing output. The design of the LLM sink itself (prompt engineering, approval gates,
 autonomous vs supervised mode) is **out of scope** for this library. The library provides
-the `OutputSink` trait and `ActionHandle` API; LLM integration is a consumer concern.
+the `SinkKind` enum and `ActionHandle` API; LLM integration is a consumer concern.
 
 ### `OutputBus` — Fan-Out Dispatcher
 
@@ -1443,7 +1453,7 @@ impl OutputBus {
     /// at construction time — the bus does not inject one.
     pub fn subscribe(
         &mut self,
-        sink: Box<dyn OutputSink>,
+        sink: SinkKind,
         channel_capacity: usize,
     ) -> SinkId;
 
@@ -1469,8 +1479,8 @@ only care about recent state (TUI) should set a small capacity and accept drops.
 
 ### `StdioSink` — Default Reference Implementation
 
-The library ships with `StdioSink` as the default, always-available sink. It serves
-as the reference implementation for the `OutputSink` trait.
+The library ships with `StdioSink` as the default, always-available sink. It is a
+variant of `SinkKind` and serves as the reference implementation.
 
 ```rust
 pub struct StdioSink {
@@ -1487,12 +1497,9 @@ pub enum StdioFormat {
     Json,
 }
 
-impl OutputSink for StdioSink {
-    fn name(&self) -> &str { "stdio" }
-    // filters(): default (all output)
-    // write(): format and write to stdout immediately (no batching)
-    // flush(): flush stdout
-}
+// StdioSink is handled by SinkKind::Stdio variant.
+// write(): format and write to stdout immediately (no batching)
+// flush(): flush stdout
 ```
 
 ### `JoinedStream` — Multi-Source Consolidated View
@@ -1529,14 +1536,14 @@ impl SourceLabel {
 }
 ```
 
-**`JoinedSink`** — a sink combinator that wraps an inner `OutputSink` and presents
+**`JoinedSink`** — a sink combinator that wraps an inner `SinkKind` and presents
 incoming output as a consolidated multi-source stream:
 
 ```rust
 /// Wraps an inner sink, transforming the output stream into a
 /// source-attributed conversation-style view.
-pub struct JoinedSink<S: OutputSink> {
-    inner: S,
+pub struct JoinedSink {
+    inner: SinkKind,
     /// Controls how source labels are formatted in the stream.
     label_format: LabelFormat,
     /// Tracks the last source to emit, so consecutive chunks from the
@@ -1549,12 +1556,12 @@ pub enum LabelFormat {
     Bracketed,
     /// "web-1:build:0.1> output text here"
     Prompt,
-    /// Caller provides a format function
-    Custom(Box<dyn Fn(&SourceLabel, &str) -> String + Send + Sync>),
+    /// Caller provides a format function (plain fn pointer — no heap allocation).
+    Custom(fn(&SourceLabel, &str) -> String),
 }
 
-impl<S: OutputSink> JoinedSink<S> {
-    pub fn new(inner: S, label_format: LabelFormat) -> Self;
+impl JoinedSink {
+    pub fn new(inner: SinkKind, label_format: LabelFormat) -> Self;
 }
 ```
 
@@ -1600,7 +1607,7 @@ registering a channel-based subscriber that receives `StreamChunk` directly:
 ```rust
 impl OutputBus {
     /// Subscribe a raw channel that receives StreamChunks (TargetOutput + SourceLabel).
-    /// The caller reads from the receiver directly. No OutputSink trait needed.
+    /// The caller reads from the receiver directly. No SinkKind trait needed.
     pub fn subscribe_joined(
         &mut self,
         filters: Vec<SinkFilter>,
@@ -1649,29 +1656,15 @@ existing per-host dispatch queue (DC4). The sink does not need to know which
 
 ### `matcher.rs`
 
-The `ContentMatcher` trait and built-in implementations. See
-[Core Abstractions — ContentMatcher](#contentmatcher--trait-based-text-matching) for
-the full trait definition.
+The `MatcherKind` enum and its variants. See
+[Core Abstractions — MatcherKind](#matcherkind--static-dispatch-content-matching) for
+the full enum definition.
 
-```rust
-// Built-in matchers:
-
-pub struct RegexMatcher { pattern: Regex }
-pub struct SubstringMatcher { needles: Vec<String>, case_insensitive: bool }
-pub struct LineCountMatcher { threshold: usize, count: usize }
-pub struct WordListMatcher { words: HashSet<String>, case_insensitive: bool }
-
-// Combinators:
-
-pub struct AllOf(Vec<Box<dyn ContentMatcher>>);
-pub struct AnyOf(Vec<Box<dyn ContentMatcher>>);
-pub struct Not(Box<dyn ContentMatcher>);
-```
-
-All matchers implement `ContentMatcher`. `RegexMatcher` and `SubstringMatcher` are
-stateless (`reset()` is a no-op). `LineCountMatcher` is stateful and resets its counter
-on `reset()`. `WordListMatcher` uses `regex::Regex` internally with `\b` word boundaries
-for accurate matching. The combinators delegate to their children and propagate `reset()`.
+All variants are defined in the `MatcherKind` enum. `Regex` and `Substring` are
+stateless (`reset()` is a no-op). `LineCount` is stateful and resets its counter
+on `reset()`. `WordList` uses `regex::Regex` internally with `\b` word boundaries
+for accurate matching. The combinators (`AllOf`, `AnyOf`, `Not`) delegate to their
+children and propagate `reset()`.
 
 ### `config.rs`
 
@@ -1722,28 +1715,28 @@ pub struct TriggerRule {
 }
 
 /// Runtime form — compiled from TriggerRule during startup validation.
-/// The `matcher` field is a `ContentMatcher` trait object — config-driven
-/// rules compile to `RegexMatcher`, but programmatic callers can use any
-/// `ContentMatcher` implementation (WordListMatcher, LineCountMatcher, etc.).
+/// The `matcher` field is a `MatcherKind` enum — config-driven rules compile
+/// to `MatcherKind::Regex`, but programmatic callers can use any variant
+/// (WordList, LineCount, AllOf, etc.).
 pub struct CompiledRule {
     pub name: String,
     pub pane_filter: Option<Regex>,
-    pub matcher: Box<dyn ContentMatcher>,
+    pub matcher: MatcherKind,
     pub action: Action,
     pub cooldown: Option<Duration>,
 }
 
 impl TriggerRule {
-    /// Compile string patterns into RegexMatcher. Returns error with rule name context.
+    /// Compile string patterns into MatcherKind::Regex. Returns error with rule name context.
     pub fn compile(&self) -> Result<CompiledRule>;
 }
 
 impl CompiledRule {
-    /// Construct a rule with a custom ContentMatcher (bypasses config deserialization).
+    /// Construct a rule with a custom MatcherKind (bypasses config deserialization).
     /// Used by programmatic callers who want non-regex matching.
     pub fn with_matcher(
         name: impl Into<String>,
-        matcher: Box<dyn ContentMatcher>,
+        matcher: MatcherKind,
         action: Action,
     ) -> Self;
 }
@@ -1770,25 +1763,38 @@ The transport layer abstracts command execution, allowing the same tmux operatio
 work on localhost (via `tokio::process::Command`) or remote hosts (via `russh` SSH channels).
 
 ```rust
-#[async_trait]
-pub trait Transport: Send + Sync {
+/// Closed enum of transport implementations. Static dispatch — the same
+/// tmux operations work on localhost or SSH with zero vtable overhead.
+pub enum TransportKind {
+    Local(LocalTransport),
+    Ssh(SshTransport),
+    Mock(MockTransport),
+}
+
+impl TransportKind {
     /// Execute a command and return its stdout as a String.
     /// Must respect the configured timeout.
-    async fn exec(&self, command: &str) -> Result<String>;
+    pub async fn exec(&self, command: &str) -> Result<String>;
 
     /// Open a persistent shell for streaming output.
     /// Used by the monitor for long-running processes (control mode session
     /// or `tail -qf` in fallback pipe mode).
-    async fn open_shell(&self) -> Result<Box<dyn ShellChannel>>;
+    pub async fn open_shell(&self) -> Result<ShellChannelKind>;
 }
 
-#[async_trait]
-pub trait ShellChannel: Send {
+/// Closed enum of shell channel implementations.
+pub enum ShellChannelKind {
+    Local(LocalShellChannel),
+    Ssh(SshShellChannel),
+    Mock(MockShellChannel),
+}
+
+impl ShellChannelKind {
     /// Write data to the shell's stdin.
-    async fn write(&mut self, data: &[u8]) -> Result<()>;
+    pub async fn write(&mut self, data: &[u8]) -> Result<()>;
 
     /// Wait for the next message from the shell.
-    async fn read(&mut self) -> Option<ShellEvent>;
+    pub async fn read(&mut self) -> Option<ShellEvent>;
 }
 
 pub enum ShellEvent {
@@ -1805,8 +1811,7 @@ setup required. `exec()` spawns a subprocess, waits for completion, returns stdo
 channel. `open_shell()` opens a PTY channel with a shell.
 
 **`MockTransport`**: For testing. Returns canned responses for `exec()` and canned
-streaming data for `open_shell()`. Implements `Transport` trait directly — no separate
-test infrastructure needed.
+streaming data for `open_shell()`. No separate test infrastructure needed.
 
 **SSH-specific concerns (SshTransport only)**:
 
@@ -1849,14 +1854,14 @@ need for filename encoding of session names entirely. FIFO paths (if used) are s
 
 ```rust
 /// List all sessions on the host.
-pub async fn list_sessions(transport: &dyn Transport) -> Result<Vec<SessionInfo>>;
+pub async fn list_sessions(transport: &TransportKind) -> Result<Vec<SessionInfo>>;
 
 /// List all windows in a session.
-pub async fn list_windows(transport: &dyn Transport, session: &str) -> Result<Vec<WindowInfo>>;
+pub async fn list_windows(transport: &TransportKind, session: &str) -> Result<Vec<WindowInfo>>;
 
 /// List all panes, optionally filtered by regex against "session:window.pane".
 pub async fn list_panes(
-    transport: &dyn Transport,
+    transport: &TransportKind,
     filter: Option<&Regex>,
 ) -> Result<Vec<PaneInfo>>;
 ```
@@ -1879,14 +1884,14 @@ Pane content capture via `tmux capture-pane`.
 ```rust
 /// Capture the visible content of a single pane.
 /// Runs: tmux capture-pane -p -t <target>
-pub async fn capture_pane(transport: &dyn Transport, target: &PaneAddress) -> Result<String>;
+pub async fn capture_pane(transport: &TransportKind, target: &PaneAddress) -> Result<String>;
 
 /// Capture with scrollback history.
 /// Runs: tmux capture-pane -p -t <target> -S <start> -E <end>
 /// start/end are line numbers; negative values reach into scrollback buffer.
 /// Example: start=-1000, end=-1 captures last 1000 lines of scrollback.
 pub async fn capture_pane_history(
-    transport: &dyn Transport,
+    transport: &TransportKind,
     target: &PaneAddress,
     start: i32,
     end: i32,
@@ -1895,7 +1900,7 @@ pub async fn capture_pane_history(
 /// Capture all panes in a session. Calls capture_pane for each pane found via list_panes.
 /// Returns a map of pane address → visible content.
 pub async fn capture_session(
-    transport: &dyn Transport,
+    transport: &TransportKind,
     session: &str,
 ) -> Result<HashMap<PaneAddress, String>>;
 
@@ -1903,7 +1908,7 @@ pub async fn capture_session(
 /// Delegates to capture_pane_history() internally, then applies the query's
 /// pattern matching and truncation logic.
 pub async fn sample_text(
-    transport: &dyn Transport,
+    transport: &TransportKind,
     target: &PaneAddress,
     query: &ScrollbackQuery,
 ) -> Result<String>;
@@ -1945,7 +1950,7 @@ Callers should use `HostHandle` and `Target` methods, not these functions direct
 /// Create a new detached tmux session.
 /// Runs: tmux new-session -d -s <name> [-n <window_name>] [<command>]
 pub async fn create_session(
-    transport: &dyn Transport,
+    transport: &TransportKind,
     name: &str,
     window_name: Option<&str>,
     command: Option<&str>,
@@ -1953,14 +1958,14 @@ pub async fn create_session(
 
 /// Kill a tmux session and all its windows/panes.
 /// Runs: tmux kill-session -t <name>
-pub async fn kill_session(transport: &dyn Transport, name: &str) -> Result<()>;
+pub async fn kill_session(transport: &TransportKind, name: &str) -> Result<()>;
 
 // --- Input ---
 
 /// Send a KeySequence to a pane. Handles the split between literal text (-l)
 /// and special keys (no -l) automatically.
 pub async fn send_keys(
-    transport: &dyn Transport,
+    transport: &TransportKind,
     target: &PaneAddress,
     keys: &KeySequence,
 ) -> Result<()>;
@@ -1968,7 +1973,7 @@ pub async fn send_keys(
 /// Convenience: send literal text (no special keys, no Enter appended).
 /// Equivalent to: tmux send-keys -l -t <target> '<escaped_text>'
 pub async fn send_text(
-    transport: &dyn Transport,
+    transport: &TransportKind,
     target: &PaneAddress,
     text: &str,
 ) -> Result<()>;
@@ -1976,7 +1981,7 @@ pub async fn send_text(
 /// Rename a tmux session.
 /// Runs: tmux rename-session -t <current> <new>
 pub async fn rename_session(
-    transport: &dyn Transport,
+    transport: &TransportKind,
     current_name: &str,
     new_name: &str,
 ) -> Result<()>;
@@ -1984,7 +1989,7 @@ pub async fn rename_session(
 /// Rename a window.
 /// Runs: tmux rename-window -t <session>:<index> <new_name>
 pub async fn rename_window(
-    transport: &dyn Transport,
+    transport: &TransportKind,
     session: &str,
     window_index: u32,
     new_name: &str,
@@ -2076,7 +2081,7 @@ and `monitor`.
 
 ```rust
 struct HostHandleInner {
-    transport: Box<dyn Transport>,
+    transport: TransportKind,
     config: HostTarget,
     pipe_state: Option<PipeManager>,   // None if monitoring not started (fallback path)
     /// Per-session monitor handles, keyed by session name.
@@ -2096,10 +2101,10 @@ pub struct PipeManager { /* tracks active pipes for cleanup */ }
 impl PipeManager {
     /// Create FIFOs and attach pipe-pane for each target pane.
     /// Uses a dedicated transport exec call (not the monitor channel).
-    pub async fn setup(transport: &dyn Transport, panes: &[PaneAddress]) -> Result<Self>;
+    pub async fn setup(transport: &TransportKind, panes: &[PaneAddress]) -> Result<Self>;
 
     /// Detach all pipe-panes and remove FIFO files.
-    pub async fn cleanup(&self, transport: &dyn Transport) -> Result<()>;
+    pub async fn cleanup(&self, transport: &TransportKind) -> Result<()>;
 }
 
 impl Drop for PipeManager {
@@ -2135,7 +2140,7 @@ impl SessionMonitor {
     /// Returns when `stop` signal is received or the connection drops.
     pub async fn run(
         &mut self,
-        transport: &dyn Transport,
+        transport: &TransportKind,
         session: &str,
         rules: &[TriggerRule],
         bus: &OutputBus,
@@ -2170,15 +2175,16 @@ the full API and design rationale.
 
 This module contains:
 - `TargetOutput`: the unit of output flowing through the pipeline
-- `OutputSink` trait: async sink interface with filtering and batching
+- `SinkKind` enum: closed set of sink types (static dispatch, no trait objects)
 - `SinkFilter` / `CompiledSinkFilter`: composable output targeting
+- `MatcherKind` (re-exported from `matcher.rs`): content matching variants
 - `ActionHandle` / `ActionRequest` / `ActionTarget` / `SinkAction`: sink-initiated actions
 - `OutputBus`: central fan-out dispatcher with per-sink bounded channels
 - `SinkId`: opaque handle for unsubscribe
 
 `OutputBus` is owned by `Fleet` and shared with all `HostHandle` instances via `Arc`.
 Monitors publish `TargetOutput` to the bus; the bus fans out to per-sink tokio tasks.
-Each sink task drives its own `OutputSink::write()` loop independently.
+Each sink task drives its own `SinkKind::write()` loop independently.
 
 ---
 
@@ -2455,9 +2461,9 @@ monitoring is still fully operational for on-demand use via `HostHandle` and `Ta
 
 ### DC14: Trait-Based Content Matching
 
-**Decision**: Text matching is abstracted behind the `ContentMatcher` trait. Regex is
+**Decision**: Text matching is abstracted behind the `MatcherKind` enum. Regex is
 one implementation, not a privileged special case. Both `SinkFilter` (content field) and
-`CompiledRule` (matcher field) use `Box<dyn ContentMatcher>`.
+`CompiledRule` (matcher field) use `MatcherKind`.
 
 **Rationale**: Different use cases need different matching strategies:
 - **Regex**: General-purpose pattern matching (the default for config-driven rules)
@@ -2471,15 +2477,19 @@ Making regex the only matching mechanism would force all of these into regex pat
 which is unnatural for stateful matchers and inefficient for simple keyword checks.
 
 **Statefulness**: Matchers may be stateful (`matches(&mut self, ...)`). Each sink and
-each compiled rule gets its own matcher instance — state is never shared. `reset()` is
-called on monitoring restart. The bus evaluates routing fields (host/session/window/pane)
-before calling the content matcher, so expensive matchers are only invoked on
-pre-filtered output.
+each compiled rule gets its own cloned `MatcherKind` instance — state is never shared.
+`reset()` is called on monitoring restart. The bus evaluates routing fields
+(host/session/window/pane) before calling the content matcher, so expensive matchers
+are only invoked on pre-filtered output.
+
+**Static dispatch**: All matcher variants are defined in the `MatcherKind` enum (DC14).
+No trait objects or heap-allocated vtables on the hot path. Combinators store children
+as `Vec<MatcherKind>`. The entire matcher tree is `Clone`.
 
 **Config boundary**: `TriggerRule` (serde DTO) stores `pattern: String` which compiles
-to `RegexMatcher`. Programmatic callers bypass the config layer and construct
+to `MatcherKind::Regex`. Programmatic callers bypass the config layer and construct
 `CompiledRule::with_matcher()` or `SinkFilter { content: Some(...) }` directly with
-any `ContentMatcher` implementation.
+any `MatcherKind` variant.
 
 **Built-in matchers**: `RegexMatcher`, `SubstringMatcher`, `LineCountMatcher`,
 `WordListMatcher`, plus `AllOf`/`AnyOf`/`Not` combinators. Consumers can implement
@@ -2498,7 +2508,7 @@ events, or a TUI showing interleaved output. Without joining, each sink sees iso
 streams and must implement its own source-tracking and interleaving logic.
 
 **Design choices**:
-- **Combinator, not infrastructure**: `JoinedSink<S>` wraps any `OutputSink` and adds
+- **Combinator, not infrastructure**: `JoinedSink<S>` wraps any `SinkKind` and adds
   source attribution. The bus itself remains simple (fan-out only). This avoids adding
   joining logic to the bus hot path.
 - **Source coalescing**: Consecutive chunks from the same source are grouped without
@@ -2916,7 +2926,7 @@ deserialization on top of the stable 2a monitoring loop.
 routed to multiple consumers (sinks) with independent latency characteristics.
 
 **Tasks**:
-1. Implement `sink.rs`: `TargetOutput` struct, `OutputSink` trait, `SinkFilter` /
+1. Implement `sink.rs`: `TargetOutput` struct, `SinkKind` trait, `SinkFilter` /
    `CompiledSinkFilter`, `ActionHandle` / `ActionRequest` / `ActionTarget` / `SinkAction`
 2. Implement `OutputBus`: `subscribe(sink, channel_capacity)` API,
    fan-out loop that matches `TargetOutput` against compiled filters and dispatches to
