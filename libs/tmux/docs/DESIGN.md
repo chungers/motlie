@@ -2785,9 +2785,10 @@ into a single call with clear completion semantics and an exit code.
   on different panes never confuse each other's output. **Same-pane concurrent `exec()`
   is not supported** — overlapping commands on one pane interleave terminal output,
   making boundary extraction ambiguous regardless of unique sentinels. `HostHandleInner`
-  holds a per-pane exec lock map keyed by stable pane identity (`pane_id` for pane-level
-  targets, `target_string()` for session/window-level). This ensures `exec()` is
-  serialized for the same pane even across independently obtained `Target` handles.
+  holds a per-pane exec lock map keyed by resolved `pane_id`. All target levels
+  (session, window, pane) resolve their effective pane via
+  `display-message -p '#{pane_id}'` before lock acquisition, so a session-level handle
+  and a pane-level handle targeting the same active pane share the same lock.
   Callers needing parallel execution should use separate panes.
 
 **Alternatives considered**:
