@@ -12,125 +12,126 @@ No SSH, no monitoring.
 
 ### 1.0 — Workspace scaffolding
 
-- [ ] Add `libs/tmux` to workspace `Cargo.toml` members list
-- [ ] Create `libs/tmux/Cargo.toml` with initial dependencies:
+- [x] Add `libs/tmux` to workspace `Cargo.toml` members list
+- [x] Create `libs/tmux/Cargo.toml` with initial dependencies:
   `tokio`, `anyhow`, `regex`, `tracing`, `serde`, `uuid`
-- [ ] Create `src/lib.rs` with module declarations and public re-exports
-- [ ] Verify `cargo check -p motlie-tmux` passes (empty lib)
+- [x] Create `src/lib.rs` with module declarations and public re-exports
+- [x] Verify `cargo check -p motlie-tmux` passes (empty lib)
 
 ### 1.1 — Shared types (`src/types.rs`)
 
-- [ ] `PaneAddress`: `pane_id` (authoritative `%<id>`), `session`, `window`, `pane` display fields (DC1)
-- [ ] `PaneAddress::to_tmux_target() -> String` (`session:window.pane`)
-- [ ] `PaneAddress::id() -> &str` (returns `pane_id`)
-- [ ] `PaneAddress::parse(s: &str) -> Result<Self>` from tmux format output
-- [ ] `SessionInfo`, `WindowInfo`, `PaneInfo` structs with all fields from DESIGN
-- [ ] `TargetAddress` enum: `Session(SessionInfo)`, `Window(WindowInfo)`, `Pane(PaneAddress)`
-- [ ] `TargetLevel` enum: `Session`, `Window`, `Pane`
-- [ ] `TargetSpec`: builder (`session()`, `.window()`, `.window_name()`, `.pane()`) + `parse()` + `Display`
-- [ ] `TmuxSocket` enum: `Name(String)`, `Path(String)`
-- [ ] `HostKeyPolicy` enum: `Verify` (default, `~/.ssh/known_hosts`),
+- [x] `PaneAddress`: `pane_id` (authoritative `%<id>`), `session`, `window`, `pane` display fields (DC1)
+- [x] `PaneAddress::to_tmux_target() -> String` (`session:window.pane`)
+- [x] `PaneAddress::id() -> &str` (returns `pane_id`)
+- [x] `PaneAddress::parse(pane_id: &str, address_str: &str) -> Result<Self>` from tmux format output
+- [x] `SessionInfo`, `WindowInfo`, `PaneInfo` structs with all fields from DESIGN
+- [x] `TargetAddress` enum: `Session(SessionInfo)`, `Window(WindowInfo)`, `Pane(PaneAddress)`
+- [x] `TargetLevel` enum: `Session`, `Window`, `Pane`
+- [x] `TargetSpec`: builder (`session()`, `.window()`, `.window_name()`, `.pane()`) + `parse()` + `Display`
+- [x] `TmuxSocket` enum: `Name(String)`, `Path(String)`
+- [x] `HostKeyPolicy` enum: `Verify` (default, `~/.ssh/known_hosts`),
   `TrustFirstUse` (accept + persist on first connect, reject on mismatch),
   `Insecure` (accept all, log warning) — per DC2. Defined here (not in config)
   so `2a.1 SshTransport` can use it without depending on `2b.1 Config`.
-- [ ] `ExecOutput { stdout: String, exit_code: i32 }` + `success()` helper
-- [ ] `ScrollbackQuery` enum: `LastLines`, `Until`, `LastLinesUntil`
-- [ ] Unit tests: `PaneAddress` roundtrip, `TargetSpec` parse/display for all depth levels
+- [x] `ExecOutput { stdout: String, exit_code: i32 }` + `success()` helper
+- [x] `ScrollbackQuery` enum: `LastLines`, `Until`, `LastLinesUntil`
+- [x] Unit tests: `PaneAddress` roundtrip, `TargetSpec` parse/display for all depth levels
 
 **Depends on**: 1.0
 
 ### 1.2 — Key escaping (`src/keys.rs`)
 
-- [ ] `SpecialKey` enum with all defined keys (Enter, Tab, CtrlC, etc.) + `Raw(String)`
-- [ ] `KeySegment` enum: `Literal(String)`, `Special(SpecialKey)`
-- [ ] `KeySequence { segments: Vec<KeySegment> }`
-- [ ] `KeySequence::parse(input: &str) -> Result<Self>` — `{Enter}`, `{C-c}` inline escapes
-- [ ] `KeySequence::literal()`, `then_literal()`, `then_key()`, `then_enter()` builder API
-- [ ] `KeySequence::to_tmux_commands(target: &str) -> Vec<String>` — split into `-l` and non-`-l` invocations
-- [ ] Unit tests: parse round trips, mixed literal+special sequences, edge cases
+- [x] `SpecialKey` enum with all defined keys (Enter, Tab, CtrlC, etc.) + `Raw(String)`
+- [x] `KeySegment` enum: `Literal(String)`, `Special(SpecialKey)`
+- [x] `KeySequence { segments: Vec<KeySegment> }`
+- [x] `KeySequence::parse(input: &str) -> Result<Self>` — `{Enter}`, `{C-c}` inline escapes
+- [x] `KeySequence::literal()`, `then_literal()`, `then_key()`, `then_enter()` builder API
+- [x] `KeySequence::to_tmux_args(target: &str) -> Vec<Vec<String>>` — split into `-l` and non-`-l` invocations (each inner Vec is one send-keys argument list)
+- [x] Unit tests: parse round trips, mixed literal+special sequences, edge cases
   (empty input, consecutive specials, `{` in literal text)
 
 **Depends on**: 1.0
 
 ### 1.3 — Transport layer (`src/transport.rs`)
 
-- [ ] `TransportKind` enum: `Local(LocalTransport)`, `Mock(MockTransport)` (SSH added in Phase 2a)
-- [ ] `TransportKind::exec(&self, command: &str) -> Result<String>` — dispatch to variant
-- [ ] `TransportKind::open_shell(&self) -> Result<ShellChannelKind>` — dispatch to variant
-- [ ] `ShellChannelKind` enum: `Local(LocalShellChannel)`, `Mock(MockShellChannel)`
-- [ ] `ShellChannelKind::write()`, `::read()` methods
-- [ ] `ShellEvent` enum: `Data(Vec<u8>)`, `Eof`
-- [ ] `LocalTransport`: `exec()` via `tokio::process::Command` with configurable timeout;
+- [x] `TransportKind` enum: `Local(LocalTransport)`, `Mock(MockTransport)` (SSH added in Phase 2a)
+- [x] `TransportKind::exec(&self, command: &str) -> Result<String>` — dispatch to variant
+- [x] `TransportKind::open_shell(&self) -> Result<ShellChannelKind>` — dispatch to variant
+- [x] `ShellChannelKind` enum: `Local(LocalShellChannel)`, `Mock(MockShellChannel)`
+- [x] `ShellChannelKind::write()`, `::read()` methods
+- [x] `ShellEvent` enum: `Data(Vec<u8>)`, `Eof`
+- [x] `LocalTransport`: `exec()` via `tokio::process::Command` with configurable timeout;
   `open_shell()` spawns persistent `bash`/`sh` with piped stdin/stdout
-- [ ] `MockTransport`: canned `exec()` responses (map of command→output),
+- [x] `MockTransport`: canned `exec()` responses (map of command→output),
   canned `open_shell()` streaming data
-- [ ] `tmux_prefix(socket: Option<&TmuxSocket>) -> String` — shared helper for `-L`/`-S` flags
-- [ ] Unit tests: `MockTransport` returns canned data, `LocalTransport` runs `echo hello`
+- [x] `tmux_prefix(socket: Option<&TmuxSocket>) -> String` — shared helper for `-L`/`-S` flags
+- [x] Unit tests: `MockTransport` returns canned data, `LocalTransport` runs `echo hello`
 
 **Depends on**: 1.1
 
 ### 1.4 — Discovery (`src/discovery.rs`)
 
-- [ ] Format string constants: `LIST_SESSIONS_FMT`, `LIST_WINDOWS_FMT`, `LIST_PANES_FMT`
-- [ ] `list_sessions(transport, socket) -> Result<Vec<SessionInfo>>` — parse tab-delimited output
-- [ ] `list_windows(transport, socket, session) -> Result<Vec<WindowInfo>>`
-- [ ] `list_panes(transport, socket, filter) -> Result<Vec<PaneInfo>>` — optional regex filter
-- [ ] Parsing logic: split on `\t`, map to struct fields, handle empty/unexpected fields
-- [ ] Unit tests via `MockTransport`: valid output, empty sessions, malformed lines
+- [x] Format string constants: `LIST_SESSIONS_FMT`, `LIST_WINDOWS_FMT`, `LIST_PANES_FMT`
+- [x] `list_sessions(transport, socket) -> Result<Vec<SessionInfo>>` — parse tab-delimited output
+- [x] `list_windows(transport, socket, session) -> Result<Vec<WindowInfo>>`
+- [x] `list_panes(transport, socket, filter) -> Result<Vec<PaneInfo>>` — optional regex filter
+- [x] Parsing logic: split on `\t`, map to struct fields, handle empty/unexpected fields
+- [x] Unit tests via `MockTransport`: valid output, empty sessions, malformed lines
 
 **Depends on**: 1.3
 
 ### 1.5 — Capture (`src/capture.rs`)
 
-- [ ] `capture_pane(transport, socket, target) -> Result<String>` — `capture-pane -p -t`
-- [ ] `capture_pane_history(transport, socket, target, start, end) -> Result<String>` — `-S`/`-E`
-- [ ] `capture_session(transport, socket, session) -> Result<HashMap<PaneAddress, String>>`
+- [x] `capture_pane(transport, socket, target) -> Result<String>` — `capture-pane -p -t`
+- [x] `capture_pane_history(transport, socket, target, start) -> Result<String>` — `-S` (captures through visible area end)
+- [x] `capture_session(transport, socket, session) -> Result<HashMap<PaneAddress, String>>`
   — calls `list_panes` + `capture_pane` per pane
-- [ ] `sample_text(transport, socket, target, query) -> Result<String>` — implements
+- [x] `sample_text(transport, socket, target, query) -> Result<String>` — implements
   `LastLines`, `Until`, `LastLinesUntil` scan logic on captured output
-- [ ] Unit tests: `sample_text` with each `ScrollbackQuery` variant against mock data
+- [x] Unit tests: `sample_text` with each `ScrollbackQuery` variant against mock data
 
 **Depends on**: 1.4
 
 ### 1.6 — Control (`src/control.rs`)
 
-- [ ] Shell escape helper: single-quote wrapping with `'\''` for interior quotes (OC5)
-- [ ] `create_session(transport, socket, name, window_name, command) -> Result<()>`
-- [ ] `kill_session(transport, socket, name) -> Result<()>`
-- [ ] `send_keys(transport, socket, target, keys) -> Result<()>` — renders `KeySequence`
+- [x] Shell escape helper: single-quote wrapping with `'\''` for interior quotes (OC5)
+- [x] `create_session(transport, socket, name, window_name, command) -> Result<()>`
+- [x] `kill_session(transport, socket, name) -> Result<()>`
+- [x] `send_keys(transport, socket, target, keys) -> Result<()>` — renders `KeySequence`
   to tmux commands, executes each
-- [ ] `send_text(transport, socket, target, text) -> Result<()>` — `send-keys -l`
-- [ ] `rename_session(transport, socket, current, new) -> Result<()>`
-- [ ] `rename_window(transport, socket, session, index, new_name) -> Result<()>`
-- [ ] All functions prepend `tmux_prefix(socket)` to commands
-- [ ] Unit tests: shell escaping adversarial inputs (`;`, `` ` ``, `$(...)`, newlines,
+- [x] `send_text(transport, socket, target, text) -> Result<()>` — `send-keys -l`
+- [x] `rename_session(transport, socket, current, new) -> Result<()>`
+- [x] `rename_window(transport, socket, session, index, new_name) -> Result<()>`
+- [x] All functions prepend `tmux_prefix(socket)` to commands
+- [x] Unit tests: shell escaping adversarial inputs (`;`, `` ` ``, `$(...)`, newlines,
   null bytes, quotes in session names), mock-based command verification
 
 **Depends on**: 1.3, 1.2
 
 ### 1.7 — Host handle + Target wiring (`src/host.rs`)
 
-- [ ] `HostHandleInner` struct with `transport`, `config`, `session_monitors: RwLock<HashMap>`
-- [ ] `HostHandle` wrapping `Arc<HostHandleInner>`
-- [ ] `HostHandle` discovery methods: `list_sessions()`, `create_session() -> Result<Target>`,
+- [x] `HostHandleInner` struct with `transport`, `socket`, `exec_locks` (Phase 1 scope; `config` and `session_monitors: RwLock<HashMap>` added in Phase 2a.4)
+- [x] `HostHandle` wrapping `Arc<HostHandleInner>`
+- [x] `HostHandle` discovery methods: `list_sessions()`, `create_session() -> Result<Target>`,
   `session(name) -> Result<Option<Target>>`, `target(spec) -> Result<Option<Target>>`
-- [ ] `Target` struct: `Arc<HostHandleInner>` + `TargetAddress`
-- [ ] `Target` identity: `level()`, `target_string()`, `session_info()`, `window_info()`, `pane_address()`
-- [ ] `Target` navigation: `children()`, `window(index)`, `pane(index)`, `pane_by_address()`
-- [ ] `Target` I/O: `send_text()`, `send_keys()`, `capture()`, `capture_with_history()`,
+- [x] `Target` struct: `Arc<HostHandleInner>` + `TargetAddress`
+- [x] `Target` identity: `level()`, `target_string()`, `session_info()`, `window_info()`, `pane_address()`
+- [x] `Target` navigation: `children()`, `window(index)`, `pane(index)`, `pane_by_address()`
+- [x] `Target` I/O: `send_text()`, `send_keys()`, `capture()`, `capture_with_history()`,
   `sample_text()`, `capture_all()`
-- [ ] `Target` lifecycle: `kill()`, `rename()`
-- [ ] `Target::exec()` — sentinel mechanism (DC19): uuid marker, send command with sentinel,
-  poll `capture_with_history()`, extract stdout + exit code, per-target `Mutex` for serialization,
+- [x] `Target` lifecycle: `kill()`, `rename()`
+- [x] `Target::exec()` — sentinel mechanism (DC19): uuid marker, send command with sentinel,
+  poll `capture_with_history()`, extract stdout + exit code, per-pane exec lock map on
+  `HostHandleInner` keyed by resolved `pane_id` (all target levels resolve via `display-message`),
   shell detection for `$?` vs `$status` (fish)
-- [ ] Unit tests: `create_session` → `Target` at session level, navigation produces
+- [x] Unit tests: `create_session` → `Target` at session level, navigation produces
   correct `TargetAddress` variants, `exec()` parses sentinel output
 
 **Depends on**: 1.4, 1.5, 1.6
 
 ### 1.8 — Integration test (localhost)
 
-- [ ] Integration test (behind `#[cfg(test)]` or a feature flag) that:
+- [x] Integration test (behind `#[cfg(test)]` or a feature flag) that:
   - Creates a tmux session on localhost
   - Lists sessions and confirms it appears
   - Captures pane content
@@ -140,7 +141,7 @@ No SSH, no monitoring.
   - Renames session
   - Kills session
   - Lists sessions and confirms it is gone
-- [ ] Skip if tmux not available (`which tmux` check)
+- [x] Skip if tmux not available (`which tmux` check)
 
 **Depends on**: 1.7
 
