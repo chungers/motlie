@@ -52,8 +52,19 @@ in PLAN.md, update it with the check if there's a checkbox, or insert an inline 
 Commit is ready only after: all tests pass, examples/, bins/, benchmarks/ all build, docs updated.
 
 Never commit and push without explicit approval.
- 
-### Reviewing Code / PR
+
+### Working with Reviews & Feedback (Design, Docs, and Code) 
+
+Determine your role clearly -- are you reviewing or addressing?  Check the user prompt to see if you're
+reviewing or addressing.  Only reviewers can resolve open comments in a PR.  Addressers are to address feedback
+via code change or refute by providing clear rationale / counter-point / examples in reply comments or nearby
+locations with clear reference pointers to the feedback for context.
+
+In general, avoid wholesale / massive rewrites.  Pinpoint where the best changes are and add comments inline
+either in doc - with md comment beginning with your id - @codex | @claude if no PR, or PR inline comments.
+Broader, more general concerns can go into either a separate section (with changelog) or PR issue comments.
+
+#### Reviewing Code / PR
 
 Always check implementation against DESIGN and PLAN, if they are available.  DESIGN and PLAN are not written
 in stone, so while reviewing PR, it's useful to step back and look at the big picture.
@@ -69,7 +80,7 @@ If any specific inline concerns are addressed to your satisfaction, resolve them
 
 Always identify yourself (e.g. '@codex' | '@claude') when commenting.
 
-### Addressing Feedback in PR
+#### Addressing Feedback in PR
 
 You must address ALL concerns (inline comments or issue comments). If you disagree with the feedback, be
 very specific about why and provide counteroffer / rationale and leave the comment open / unresolved.
@@ -82,110 +93,4 @@ Comment inline, and use issue comment to summarize your work in this round.
 Do not unilaterally resolve comments using gh api and leave the comments for the reviewer to close/ resolve.
 
 Always identify yourself (e.g. '@codex' | '@claude') when commenting.
-
-
-## Build & Test Commands
-
-```bash
-# Build workspace
-cargo build
-
-# Build specific binaries
-cargo build --bin motlie
-cargo build --bin bench_vector --features benchmark  # Requires libhdf5-dev
-
-# Run all tests
-cargo test
-
-# Run specific test suites
-cargo test --test db_cli
-cargo test --test fulltext_cli
-
-# Run documentation tests (motlie-db only)
-cargo test -p motlie-db --doc
-
-# Run a single example
-cargo run --example hnsw
-cargo run --example pagerank
-
-# Build with OpenTelemetry support
-cargo build --features dtrace-otel
-
-# Build with native SIMD optimization
-cargo build --release --features simd-native
-```
-
-## Workspace Structure
-
-Three libraries + two binaries:
-
-- `libs/core` (motlie-core): SIMD-optimized distance functions + tracing/telemetry
-- `libs/db` (motlie-db): Graph (RocksDB), fulltext (Tantivy), and vector (HNSW) subsystems
-- `libs/mcp` (motlie-mcp): MCP server framework with tool composition
-- `bins/motlie`: CLI for database inspection and fulltext indexing
-- `bins/bench_vector`: Vector search benchmarking (requires `--features benchmark`)
-
-## Architecture
-
-### Processor Pattern
-
-Both graph and vector subsystems follow the same architecture:
-- **Processor**: Synchronous internal API that owns resources (RocksDB, indices, caches)
-- **Reader/Writer**: Async channel-based interfaces with MPMC consumer pools
-- **Consumer**: Holds `Arc<Processor>`, executes queries/mutations
-
-### Type-Safe Access Modes
-
-```
-Storage::readonly(path)   → Storage<ReadOnly>  → ReadOnlyHandles  (reader() only)
-Storage::readwrite(path)  → Storage<ReadWrite> → ReadWriteHandles (reader() + writer())
-```
-
-Storage derives paths automatically: `<db_path>/graph` and `<db_path>/fulltext`.
-
-### Mutation Pipeline
-
-```
-mutation.run(writer)
-    → graph::MutationConsumer (RocksDB persists)
-    → fulltext::MutationConsumer (Tantivy indexes)
-```
-
-### Trait Dispatch
-
-- `Runnable` trait: `query.run(&reader, timeout)` / `mutation.run(&writer)`
-- `ToolCall` trait (MCP): Parameter types implement execution logic
-- `ResourceLifecycle` trait (MCP): Graceful shutdown hooks
-
-## Key Patterns
-
-### Flush API
-
-Writer uses async MPSC channel; `mutation.run(&writer)` returns after enqueue, not commit:
-- `send(Vec<Mutation>)` - Fire-and-forget (high throughput)
-- `flush()` - Wait for pending commits (read-after-write consistency)
-- `send_sync(Vec<Mutation>)` - Combined send + flush
-
-### Graph Enumeration
-
-Use `AllNodes` and `AllEdges` with cursor-based pagination for graph algorithms:
-```rust
-let mut query = AllNodes::new(1000);
-if let Some(last_id) = cursor {
-    query = query.with_cursor(last_id);
-}
-let page = query.run(handles.reader(), timeout).await?;
-```
-
-## Feature Flags
-
-- `dtrace-otel`: OpenTelemetry support (OTLP export)
-- `benchmark`: Vector benchmark datasets (parquet, arrow, hdf5) - requires libhdf5-dev
-- `simd-native` / `simd-avx2` / `simd-avx512` / `simd-neon`: SIMD dispatch strategies
-
-## Documentation Locations
-
-- Vector design docs: `libs/db/src/vector/docs/` (ROADMAP.md is source of truth for status)
-- General docs: `libs/db/docs/` (getting-started.md, query-api-guide.md, TODO.md)
-- CLI docs: `bins/motlie/docs/`, `bins/bench_vector/README.md`
 
