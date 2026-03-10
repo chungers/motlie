@@ -15,9 +15,11 @@ use crate::types::*;
 struct HostHandleInner {
     transport: TransportKind,
     socket: Option<TmuxSocket>,
-    /// Per-pane exec locks keyed by stable identity (DC19).
-    /// Key is `pane_id` for pane-level targets (e.g. "%12"),
-    /// or `target_string()` for session/window-level targets.
+    /// Per-pane exec locks keyed by resolved `pane_id` (DC19).
+    /// All target levels resolve their effective pane via
+    /// `display-message -p '#{pane_id}'` before lock acquisition,
+    /// ensuring session/window/pane handles to the same active pane
+    /// share one lock.
     /// Uses `std::sync::Mutex` for the map (held briefly, no await),
     /// inner `tokio::sync::Mutex` for the per-pane exec serialization.
     exec_locks: std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>,
@@ -197,12 +199,34 @@ pub struct Target {
 }
 
 impl Target {
-    /// Key for the per-pane exec lock in HostHandleInner.
-    /// Uses stable pane_id for pane targets, target_string for session/window.
-    fn exec_lock_key(&self) -> String {
+    /// Resolve the effective pane_id for exec lock keying (DC19).
+    ///
+    /// For pane targets, returns the known `pane_id` directly.
+    /// For session/window targets, queries tmux to resolve the active pane
+    /// via `display-message -p '#{pane_id}'`. Falls back to `target_string()`
+    /// if resolution fails.
+    async fn resolve_pane_id(&self) -> String {
         match &self.address {
             TargetAddress::Pane(p) => p.pane_id.clone(),
-            _ => self.target_string(),
+            _ => {
+                let prefix = crate::transport::tmux_prefix(self.inner.socket.as_ref());
+                let cmd = format!(
+                    "{} display-message -p -t {} '#{{pane_id}}'",
+                    prefix,
+                    crate::control::shell_escape(&self.target_string())
+                );
+                match self.inner.transport.exec(&cmd).await {
+                    Ok(output) => {
+                        let id = output.trim().to_string();
+                        if id.starts_with('%') {
+                            id
+                        } else {
+                            self.target_string()
+                        }
+                    }
+                    Err(_) => self.target_string(),
+                }
+            }
         }
     }
 }
@@ -562,7 +586,8 @@ impl Target {
     /// Sends command with a UUID sentinel suffix, polls scrollback until
     /// the sentinel appears (or timeout), and extracts stdout + exit code.
     pub async fn exec(&self, command: &str, timeout: Duration) -> Result<ExecOutput> {
-        let lock = self.inner.exec_lock(&self.exec_lock_key());
+        let pane_id = self.resolve_pane_id().await;
+        let lock = self.inner.exec_lock(&pane_id);
         let _guard = lock.lock().await;
 
         // Use a short hex ID to avoid line wrapping in narrow panes
@@ -826,8 +851,8 @@ mod tests {
         assert_eq!(p.pane_address().unwrap().window, 1);
     }
 
-    #[test]
-    fn exec_lock_shared_across_handles() {
+    #[tokio::test]
+    async fn exec_lock_shared_across_pane_handles() {
         // Two independently obtained Target handles for the same pane
         // should share the same exec lock via HostHandleInner.
         let addr = PaneAddress {
@@ -847,18 +872,20 @@ mod tests {
             address: TargetAddress::Pane(addr),
         };
 
-        // Both should produce the same lock key
-        assert_eq!(t1.exec_lock_key(), "%5");
-        assert_eq!(t2.exec_lock_key(), "%5");
+        // Pane targets resolve directly to pane_id
+        let key1 = t1.resolve_pane_id().await;
+        let key2 = t2.resolve_pane_id().await;
+        assert_eq!(key1, "%5");
+        assert_eq!(key2, "%5");
 
         // Both should get the same lock from HostHandleInner
-        let lock1 = t1.inner.exec_lock(&t1.exec_lock_key());
-        let lock2 = t2.inner.exec_lock(&t2.exec_lock_key());
+        let lock1 = t1.inner.exec_lock(&key1);
+        let lock2 = t2.inner.exec_lock(&key2);
         assert!(Arc::ptr_eq(&lock1, &lock2));
     }
 
-    #[test]
-    fn exec_lock_different_panes_are_independent() {
+    #[tokio::test]
+    async fn exec_lock_different_panes_are_independent() {
         let mock = MockTransport::new().with_default("");
         let host = mock_host(mock);
         let t1 = Target {
@@ -880,8 +907,53 @@ mod tests {
             }),
         };
 
-        let lock1 = t1.inner.exec_lock(&t1.exec_lock_key());
-        let lock2 = t2.inner.exec_lock(&t2.exec_lock_key());
+        let key1 = t1.resolve_pane_id().await;
+        let key2 = t2.resolve_pane_id().await;
+        let lock1 = t1.inner.exec_lock(&key1);
+        let lock2 = t2.inner.exec_lock(&key2);
         assert!(!Arc::ptr_eq(&lock1, &lock2));
+    }
+
+    #[tokio::test]
+    async fn exec_lock_session_resolves_pane_id() {
+        // A session-level target should resolve its active pane_id via
+        // display-message, so it shares a lock with a pane-level target
+        // pointing to the same pane.
+        let mock = MockTransport::new()
+            .with_default("")
+            .with_response("display-message", "%5\n");
+        let host = mock_host(mock);
+        let session_target = Target {
+            inner: host.inner.clone(),
+            address: TargetAddress::Session(SessionInfo {
+                name: "build".to_string(),
+                id: "$0".to_string(),
+                created: 0,
+                attached: false,
+                window_count: 1,
+                group: None,
+            }),
+        };
+        let pane_target = Target {
+            inner: host.inner.clone(),
+            address: TargetAddress::Pane(PaneAddress {
+                pane_id: "%5".to_string(),
+                session: "build".to_string(),
+                window: 0,
+                pane: 0,
+            }),
+        };
+
+        let session_key = session_target.resolve_pane_id().await;
+        let pane_key = pane_target.resolve_pane_id().await;
+
+        // Session target should resolve to the same pane_id
+        assert_eq!(session_key, "%5");
+        assert_eq!(pane_key, "%5");
+
+        // Same lock
+        let lock1 = host.inner.exec_lock(&session_key);
+        let lock2 = host.inner.exec_lock(&pane_key);
+        assert!(Arc::ptr_eq(&lock1, &lock2));
     }
 }

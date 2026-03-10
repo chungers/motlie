@@ -110,7 +110,7 @@ No SSH, no monitoring.
 
 ### 1.7 — Host handle + Target wiring (`src/host.rs`)
 
-- [x] `HostHandleInner` struct with `transport`, `socket` (Phase 1 scope; `config` and `session_monitors: RwLock<HashMap>` added in Phase 2a.4)
+- [x] `HostHandleInner` struct with `transport`, `socket`, `exec_locks` (Phase 1 scope; `config` and `session_monitors: RwLock<HashMap>` added in Phase 2a.4)
 - [x] `HostHandle` wrapping `Arc<HostHandleInner>`
 - [x] `HostHandle` discovery methods: `list_sessions()`, `create_session() -> Result<Target>`,
   `session(name) -> Result<Option<Target>>`, `target(spec) -> Result<Option<Target>>`
@@ -121,7 +121,8 @@ No SSH, no monitoring.
   `sample_text()`, `capture_all()`
 - [x] `Target` lifecycle: `kill()`, `rename()`
 - [x] `Target::exec()` — sentinel mechanism (DC19): uuid marker, send command with sentinel,
-  poll `capture_with_history()`, extract stdout + exit code, per-target `Mutex` for serialization,
+  poll `capture_with_history()`, extract stdout + exit code, per-pane exec lock map on
+  `HostHandleInner` keyed by resolved `pane_id` (all target levels resolve via `display-message`),
   shell detection for `$?` vs `$status` (fish)
 - [x] Unit tests: `create_session` → `Target` at session level, navigation produces
   correct `TargetAddress` variants, `exec()` parses sentinel output
