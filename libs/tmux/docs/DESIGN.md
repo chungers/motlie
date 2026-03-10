@@ -2019,6 +2019,7 @@ Callers should use `HostHandle` and `Target` methods, not these functions direct
 /// Runs: tmux new-session -d -s <name> [-n <window_name>] [<command>]
 pub async fn create_session(
     transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
     name: &str,
     window_name: Option<&str>,
     command: Option<&str>,
@@ -2026,15 +2027,34 @@ pub async fn create_session(
 
 /// Kill a tmux session and all its windows/panes.
 /// Runs: tmux kill-session -t <name>
-pub async fn kill_session(transport: &TransportKind, name: &str) -> Result<()>;
+pub async fn kill_session(
+    transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
+    name: &str,
+) -> Result<()>;
+
+/// Kill a tmux window.
+pub async fn kill_window(
+    transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
+    target: &str,
+) -> Result<()>;
+
+/// Kill a tmux pane.
+pub async fn kill_pane(
+    transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
+    target: &str,
+) -> Result<()>;
 
 // --- Input ---
 
-/// Send a KeySequence to a pane. Handles the split between literal text (-l)
-/// and special keys (no -l) automatically.
+/// Send a KeySequence to a target. Handles the split between literal text (-l)
+/// and special keys (no -l) automatically. All values are shell-escaped.
 pub async fn send_keys(
     transport: &TransportKind,
-    target: &PaneAddress,
+    socket: Option<&TmuxSocket>,
+    target: &str,
     keys: &KeySequence,
 ) -> Result<()>;
 
@@ -2042,7 +2062,8 @@ pub async fn send_keys(
 /// Equivalent to: tmux send-keys -l -t <target> '<escaped_text>'
 pub async fn send_text(
     transport: &TransportKind,
-    target: &PaneAddress,
+    socket: Option<&TmuxSocket>,
+    target: &str,
     text: &str,
 ) -> Result<()>;
 
@@ -2050,6 +2071,7 @@ pub async fn send_text(
 /// Runs: tmux rename-session -t <current> <new>
 pub async fn rename_session(
     transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
     current_name: &str,
     new_name: &str,
 ) -> Result<()>;
@@ -2058,6 +2080,7 @@ pub async fn rename_session(
 /// Runs: tmux rename-window -t <session>:<index> <new_name>
 pub async fn rename_window(
     transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
     session: &str,
     window_index: u32,
     new_name: &str,
