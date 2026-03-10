@@ -145,6 +145,26 @@ No SSH, no monitoring.
 
 **Depends on**: 1.7
 
+### 1.9 — Capture Normalization + Mixed-Client Resize Resilience
+
+- [ ] Define normalization types in `types.rs`:
+  `CaptureNormalizeMode` (`Raw`, `Basic`, `ExecStable`) and `CaptureOptions`
+- [ ] Add `capture::normalize_text(input, mode) -> String` helper:
+  line-ending canonicalization, ANSI/control stripping, trailing-space trim
+- [ ] Add optional APIs (or overload equivalents) to apply normalization explicitly:
+  `capture_with_options`, `sample_text_with_options`
+- [ ] Keep existing API behavior backward-compatible:
+  default `capture()`/`sample_text()` use `Basic`; explicit opt-out via `Raw`
+- [ ] Update `Target::exec()` sentinel polling/parser to use normalized history buffer
+  (`ExecStable`) and tolerate line-wrap boundary differences
+- [ ] Add unit tests with wrapped-output fixtures and split sentinel markers
+- [ ] Add docs/tests clarifying hard limits:
+  normalization is best-effort; cannot recover history-limit truncation
+- [ ] Add operational guidance and optional helper task for fixed automation geometry
+  (`tmux resize-window -x <cols> -y <rows>`) on dedicated automation sessions
+
+**Depends on**: 1.5, 1.7
+
 ---
 
 ## Phase 2a: SSH Transport + Minimal Monitoring

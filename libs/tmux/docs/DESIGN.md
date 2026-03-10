@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-10 | Add mixed-client screen-size resilience proposal: capture/output normalization and fixed-size automation guidance for `capture()`, `sample_text()`, and `exec()` reliability under client resize/reflow. | DC20, DC19, Open Concerns, Implementation Phases |
 | 2026-03-08 | `Target::exec()` shell compatibility: document `$?` (POSIX) vs `$status` (fish) with shell detection. Replace `ActionTarget` enum with `TargetAddress` in `ActionRequest` for unified type consistency (DC16). | DC19, Core Abstractions, Output Sink Pipeline |
 | 2026-03-08 | Address codex review round 8: clarify remaining dynamic types (`Arc<dyn Any>`, `Pin<Box<dyn Future>>`) in SinkKind docs and changelog; fix integration diagram to use `SinkKind` wrappers. | Core Abstractions, Output Sink Pipeline |
 | 2026-03-08 | Address codex review round 7: `CallbackSink` uses explicit `Arc<dyn Any>` state instead of closure capture, `on_output` is synchronous; fix stale examples (`SubstringMatcher` → `MatcherKind::Substring`, `JoinedSink` uses `SinkKind`); align DC6/OC6/Phase 1 to `TransportKind` enum; fix `host.rs` module spec `session_monitors` to `RwLock`; fix "SinkKind trait" → enum; fix DC14 matcher names. | Core Abstractions, Output Sink Pipeline, Module Specs, DC6, DC14, OC6, Phase 1, Phase 2c |
@@ -2849,6 +2850,57 @@ if result.success() {
 build.send_text("top").await?;                    // interactive — no output needed
 build.send_keys(&KeySequence::parse("{C-c}")?).await?;  // interrupt it
 ```
+
+### DC20: Capture Normalization for Mixed-Client Screen Sizes
+
+**Decision**: Add a normalization layer for captured pane text used by `capture()`,
+`sample_text()`, and `exec()` parsing so behavior is less sensitive when multiple
+clients with different terminal sizes attach to the same tmux session.
+
+**Why this is needed**: tmux pane content is width-dependent. When clients with
+different screen sizes attach/detach, wrapping and visual layout can change. This
+can make line-oriented matching and sentinel parsing brittle even when the underlying
+command behavior is correct.
+
+**Important limits**:
+- Normalization is best-effort. It cannot perfectly reconstruct pre-wrap output after
+  tmux reflow.
+- Normalization cannot recover content evicted by tmux history limits.
+- For strict determinism, automation should run in a dedicated session/pane with a
+  fixed size, not a human-shared pane.
+
+**Proposed normalization contract**:
+- Canonicalize line endings to `\n`.
+- Strip ANSI/control escape sequences by default for matching-oriented paths.
+- Trim trailing padding whitespace that varies with pane width.
+- Keep ordering unchanged (top-to-bottom).
+- Provide a wrap-tolerant scan path for `exec()` sentinel detection so marker parsing
+  remains reliable if line wrapping changes.
+
+**Proposed API surface** (additive):
+
+```rust
+pub enum CaptureNormalizeMode {
+    Raw,        // no transformation
+    Basic,      // newline + ansi/control + trailing-space normalization
+    ExecStable, // Basic + sentinel-oriented normalization heuristics
+}
+
+pub struct CaptureOptions {
+    pub history_start: Option<i32>,
+    pub normalize: CaptureNormalizeMode,
+}
+```
+
+**Execution model**:
+- `capture()` defaults to `Basic` for human/LLM readability.
+- `sample_text()` defaults to `Basic` for stable pattern matching.
+- `exec()` uses `ExecStable` internally for sentinel parsing robustness.
+
+**Operational guidance**:
+- Add explicit recommendation to run automation in a dedicated tmux session/socket.
+- Optionally fix window geometry (`tmux resize-window -x <cols> -y <rows>`) for the
+  automation session when cross-device human attach is expected.
 
 ---
 
