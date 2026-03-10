@@ -150,9 +150,10 @@ No SSH, no monitoring.
 - [ ] Define fidelity/normalization types in `types.rs`:
   `CaptureNormalizeMode` (`Raw`, `ScreenStable`, `ExecStable`, `PlainText`) and
   `CaptureOptions` (`history_start`, `overlap_lines`, `min_history_limit`,
-  `detect_reflow`)
-- [ ] Add `capture_with_options` and `sample_text_with_options` APIs. Keep existing
-  `capture()`/`sample_text()` as wrappers with defaults (`ScreenStable`)
+  `detect_reflow`), plus `OutputFidelity` and `CaptureResult`
+- [ ] Add `capture_with_options` and `sample_text_with_options` APIs returning
+  `CaptureResult`. Keep existing `capture()`/`sample_text()` as wrappers over
+  `CaptureResult.text` with defaults (`ScreenStable`)
 - [ ] Implement screen-stability normalization that preserves ANSI/control sequences:
   canonical line endings, width-artifact trimming, no ANSI stripping in multi-client
   stability modes
@@ -181,6 +182,11 @@ No SSH, no monitoring.
 - [ ] Add docs/tests clarifying hard limits:
   no recovery after history eviction; `history-limit` is window/global (not per-client);
   deterministic mode still requires dedicated/fixed-geometry sessions
+- [ ] Add API docs contract for downstream consumers:
+  `text` is canonical clean stream, `raw_text` is optional fidelity view, and degraded
+  conditions are explicit in metadata (never implicit)
+- [ ] Treat 1.9 as a hard usability gate before monitor/sink work:
+  2a.2 and 2c.* consume 1.9 metadata/types rather than inventing parallel contracts
 
 **Depends on**: 1.5, 1.7
 
@@ -211,15 +217,21 @@ Add `SshTransport` and a thin monitoring vertical slice with control mode parsin
 - [ ] `SessionMonitor` struct: session name, rules, cooldown state
 - [ ] Control mode stream parser: parse `%output %<pane_id> <data>` frames from
   `tmux -C attach -t <session>` output
+- [ ] Per-pane stream assembly state keyed by `pane_id`:
+  partial-frame buffering, newline canonicalization, monotonic per-pane `sequence`
+- [ ] Reuse 1.9 normalization/fidelity path for monitor events:
+  dedupe overlap at chunk boundaries, preserve ANSI in fidelity modes,
+  annotate degraded/reflow/history conditions in emitted metadata
 - [ ] Handle other control mode messages gracefully (`%begin`, `%end`, `%error`, etc.)
 - [ ] Rule evaluation against parsed output (initially: single compiled rule)
 - [ ] Action dispatch: `SendKeys` via bounded `mpsc` channel + semaphore (DC4)
 - [ ] `SessionMonitor::run()` — main loop: read from shell, parse, evaluate, dispatch
 - [ ] Stop signal via `watch::Receiver<bool>`, clean shutdown on signal or connection drop
 - [ ] Warn-level logging for malformed lines and failed actions (P9)
-- [ ] Unit tests: control mode frame parsing, rule matching, dispatch ordering
+- [ ] Unit tests: control mode frame parsing, chunk split/reassembly, sequence monotonicity,
+  rule matching, dispatch ordering
 
-**Depends on**: 1.7
+**Depends on**: 1.7, 1.9
 
 ### 2a.3 — Pipe-pane fallback (`src/pipe.rs`)
 
@@ -308,10 +320,14 @@ Add `SshTransport` and a thin monitoring vertical slice with control mode parsin
 
 ### 2c.1 — Sink types (`src/sink.rs`)
 
-- [ ] `TargetOutput` struct: `source: TargetAddress`, `host`, `content`, `timestamp`
+- [ ] `TargetOutput` struct: `source: TargetAddress`, `host`, clean `content`,
+  optional `raw_content`, `sequence`, `kind` (`Data`/`Gap`), `fidelity`, `timestamp`
 - [ ] `TargetOutput` accessors: `session_name()`, `pane_id()`, `target_string()`
+- [ ] `OutputFidelity` / `FidelityIssue` enums shared with capture/monitor paths
 - [ ] `SinkFilter`: `host`, `session`, `window`, `pane` (all optional regex strings),
   `content: Option<MatcherKind>`
+- [ ] Define content-matching contract: `SinkFilter.content` always matches clean
+  `TargetOutput.content` (never `raw_content`)
 - [ ] `CompiledSinkFilter`: compiled regexes + `MatcherKind`,
   `matches(&mut self, output: &TargetOutput) -> bool`
 - [ ] `SinkAction` enum: `SendKeys`, `SendText`, `KillSession`, `RenameSession`
@@ -321,7 +337,7 @@ Add `SshTransport` and a thin monitoring vertical slice with control mode parsin
   `rename_session()`, `respond(output, action)`
 - [ ] `SinkId` opaque type
 
-**Depends on**: 2b.2
+**Depends on**: 2b.2, 1.9
 
 ### 2c.2 — Sink kinds (`src/sink.rs`, `src/sinks/`)
 
@@ -344,22 +360,26 @@ Add `SshTransport` and a thin monitoring vertical slice with control mode parsin
 - [ ] `subscribe(sink: SinkKind, channel_capacity) -> SinkId` — spawn per-sink tokio task
 - [ ] `subscribe_joined(filters, capacity) -> (SinkId, mpsc::Receiver<StreamChunk>)`
 - [ ] `unsubscribe(id) -> Result<()>` — signal stop, flush, join task
-- [ ] `publish(output: TargetOutput)` — fan out to all matching sinks via `try_send`,
-  log drops at debug level
+- [ ] `publish(output: TargetOutput)` — fan out to all matching sinks via `try_send`
+  while tracking per-sink dropped counts
+- [ ] No-silent-drop contract: if drops occurred, emit synthetic `TargetOutput`
+  `kind=Gap` with `FidelityIssue::SinkBackpressureDrop { dropped }` before next data event
 - [ ] `shutdown() -> Result<()>` — signal all sinks, flush, join all tasks
 - [ ] `SinkEntry` internal: id, name, tx, compiled filters, task handle
 - [ ] Unit tests: fan-out to 3 sinks, slow sink doesn't block others,
-  filter matching (AND within / OR across), shutdown flushes
+  filter matching (AND within / OR across), gap-event emission after drops, shutdown flushes
 
 **Depends on**: 2c.2
 
 ### 2c.4 — Pipeline integration
 
-- [ ] Wire `OutputBus` into `monitor.rs`: publish `TargetOutput` alongside rule evaluation
+- [ ] Wire `OutputBus` into `monitor.rs`: publish fidelity-aware `TargetOutput`
+  alongside rule evaluation
 - [ ] Wire `ActionHandle` into `HostHandle`: sink-initiated actions route through DC4 queue
 - [ ] `Fleet::output_bus()` accessor; sinks registered before `start_monitoring()`
 - [ ] Integration test: monitor publishes output → `StdioSink` receives and formats,
-  `CallbackSink` receives and accumulates, `ActionHandle` routes action back to target
+  `CallbackSink` receives and accumulates, `ActionHandle` routes action back to target,
+  and gap/degraded metadata is preserved end-to-end
 
 **Depends on**: 2c.3, 2a.4, **2b.3**
 
