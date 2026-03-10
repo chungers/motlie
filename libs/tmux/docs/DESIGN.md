@@ -579,6 +579,8 @@ pub struct HostHandle { /* Arc<HostHandleInner> */ }
 struct HostHandleInner {
     transport: TransportKind,
     config: HostTarget,
+    /// Per-pane exec locks keyed by stable identity (DC19).
+    exec_locks: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// RwLock for concurrent read access (monitored_sessions, find) with
     /// exclusive write access (start/stop monitoring). The lock is never
     /// held across await points — lock, mutate, release, then await.
@@ -722,10 +724,13 @@ impl Target {
     /// The tmux target string for commands (e.g., "build", "build:0", "build:0.1").
     pub fn target_string(&self) -> String;
 
-    /// Session info (available at any level — windows and panes know their session).
-    pub fn session_info(&self) -> &SessionInfo;
+    /// Full session info (only available at session level).
+    /// For cross-level session name access, use `session_name()`.
+    pub fn session_info(&self) -> Option<&SessionInfo>;
 
-    /// Window info (available at window and pane level, None at session level).
+    /// Full window info (only available at window level).
+    /// Pane targets carry window index via `pane_address().window` but not
+    /// full `WindowInfo`.
     pub fn window_info(&self) -> Option<&WindowInfo>;
 
     /// Pane address (available at pane level only).
@@ -774,8 +779,11 @@ impl Target {
     /// At session/window level, captures the active pane.
     pub async fn capture(&self) -> Result<String>;
 
-    /// Capture with scrollback history.
-    pub async fn capture_with_history(&self, start: i32, end: i32) -> Result<String>;
+    /// Capture with scrollback history. `start` is negative for scrollback lines
+    /// (e.g., -100 = 100 lines above visible area). Captures through end of visible area.
+    /// Note: tmux `-E` with negative values counts from scrollback buffer start, not
+    /// visible area end, making `-S -N -E -1` semantics unreliable. Using `-S` only.
+    pub async fn capture_with_history(&self, start: i32) -> Result<String>;
 
     /// Sample recent scrollback, returned in chronological order.
     pub async fn sample_text(&self, query: &ScrollbackQuery) -> Result<String>;
@@ -1042,7 +1050,10 @@ pub enum SpecialKey {
     CtrlL,      // C-l (clear)
     Space,
     BSpace,     // Backspace
-    /// Arbitrary tmux key name for keys not in this enum.
+    /// Tmux key name not in this enum (e.g., "F12", "IC", "C-\\").
+    /// Validated at parse time: rejects shell-dangerous characters
+    /// (spaces, semicolons, backticks, $, etc.). Shell-escaped at
+    /// command construction as defense-in-depth.
     Raw(String),
 }
 
@@ -1061,8 +1072,10 @@ impl KeySequence {
     pub fn then_enter(self) -> Self;
 
     /// Render to one or more tmux send-keys invocations.
-    /// Returns the shell commands to execute.
-    fn to_tmux_commands(&self, target: &str) -> Vec<String>;
+    /// Returns argument vectors — each inner `Vec<String>` is one send-keys
+    /// argument list (e.g. `["send-keys", "-l", "-t", target, text]`).
+    /// `control::send_keys` assembles these into full shell command strings.
+    fn to_tmux_args(&self, target: &str) -> Vec<Vec<String>>;
 }
 ```
 
@@ -1886,8 +1899,10 @@ impl PaneAddress {
     /// The stable pane_id for FIFO naming and stream keying (e.g., "%12")
     pub fn id(&self) -> &str;
 
-    /// Parse from tmux list-panes output (expects pane_id in format string)
-    pub fn parse(s: &str) -> Result<Self>;
+    /// Parse from tmux list-panes output fields.
+    /// `pane_id` is the `#{pane_id}` field (e.g., "%12").
+    /// `address_str` is the composite "session:window.pane" field.
+    pub fn parse(pane_id: &str, address_str: &str) -> Result<Self>;
 }
 ```
 
@@ -1897,14 +1912,22 @@ need for filename encoding of session names entirely. FIFO paths (if used) are s
 
 ```rust
 /// List all sessions on the host.
-pub async fn list_sessions(transport: &TransportKind) -> Result<Vec<SessionInfo>>;
+pub async fn list_sessions(
+    transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
+) -> Result<Vec<SessionInfo>>;
 
 /// List all windows in a session.
-pub async fn list_windows(transport: &TransportKind, session: &str) -> Result<Vec<WindowInfo>>;
+pub async fn list_windows(
+    transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
+    session: &str,
+) -> Result<Vec<WindowInfo>>;
 
 /// List all panes, optionally filtered by regex against "session:window.pane".
 pub async fn list_panes(
     transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
     filter: Option<&Regex>,
 ) -> Result<Vec<PaneInfo>>;
 ```
@@ -1927,23 +1950,29 @@ Pane content capture via `tmux capture-pane`.
 ```rust
 /// Capture the visible content of a single pane.
 /// Runs: tmux capture-pane -p -t <target>
-pub async fn capture_pane(transport: &TransportKind, target: &PaneAddress) -> Result<String>;
+pub async fn capture_pane(
+    transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
+    target: &str,
+) -> Result<String>;
 
-/// Capture with scrollback history.
-/// Runs: tmux capture-pane -p -t <target> -S <start> -E <end>
-/// start/end are line numbers; negative values reach into scrollback buffer.
-/// Example: start=-1000, end=-1 captures last 1000 lines of scrollback.
+/// Capture with scrollback history. `start` is negative for scrollback lines
+/// (e.g., -100 = 100 lines above visible area). Captures through end of visible area.
+/// Runs: tmux capture-pane -p -t <target> -S <start>
+/// Note: tmux `-E` with negative values counts from scrollback buffer start, not
+/// visible area end, making `-S -N -E -1` semantics unreliable. Using `-S` only.
 pub async fn capture_pane_history(
     transport: &TransportKind,
-    target: &PaneAddress,
+    socket: Option<&TmuxSocket>,
+    target: &str,
     start: i32,
-    end: i32,
 ) -> Result<String>;
 
 /// Capture all panes in a session. Calls capture_pane for each pane found via list_panes.
 /// Returns a map of pane address → visible content.
 pub async fn capture_session(
     transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
     session: &str,
 ) -> Result<HashMap<PaneAddress, String>>;
 
@@ -1952,20 +1981,21 @@ pub async fn capture_session(
 /// pattern matching and truncation logic.
 pub async fn sample_text(
     transport: &TransportKind,
-    target: &PaneAddress,
+    socket: Option<&TmuxSocket>,
+    target: &str,
     query: &ScrollbackQuery,
 ) -> Result<String>;
 ```
 
 **`sample_text` implementation**:
-1. `LastLines(n)` → calls `capture_pane_history(transport, target, -(n as i32), -1)`.
-   Result is already chronological.
+1. `LastLines(n)` → calls `capture_pane_history(transport, socket, target, -(n as i32))`.
+   Captures from scrollback through visible area end. Result is trimmed of trailing blank lines.
 2. `Until { pattern, max_lines }` → calls `capture_pane_history` with
-   `start = -(max_lines as i32)`, `end = -1`. Scans the result from the bottom up for
+   `start = -(max_lines as i32)`. Scans the result from the bottom up for
    the first line matching `pattern`. Returns from that line (inclusive) to the end.
    If no match, returns the full captured range.
 3. `LastLinesUntil { lines, stop_pattern }` → same as `LastLines(lines)`, then scans
-   bottom-up for `stop_pattern`. Truncates at the match point (inclusive).
+   bottom-up for `stop_pattern`. Returns from match point (inclusive) to the end.
 
 In all cases the output preserves `capture-pane`'s top-to-bottom ordering — no reversal
 step is needed. The pattern scan is the only post-processing.
@@ -1994,6 +2024,7 @@ Callers should use `HostHandle` and `Target` methods, not these functions direct
 /// Runs: tmux new-session -d -s <name> [-n <window_name>] [<command>]
 pub async fn create_session(
     transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
     name: &str,
     window_name: Option<&str>,
     command: Option<&str>,
@@ -2001,15 +2032,34 @@ pub async fn create_session(
 
 /// Kill a tmux session and all its windows/panes.
 /// Runs: tmux kill-session -t <name>
-pub async fn kill_session(transport: &TransportKind, name: &str) -> Result<()>;
+pub async fn kill_session(
+    transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
+    name: &str,
+) -> Result<()>;
+
+/// Kill a tmux window.
+pub async fn kill_window(
+    transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
+    target: &str,
+) -> Result<()>;
+
+/// Kill a tmux pane.
+pub async fn kill_pane(
+    transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
+    target: &str,
+) -> Result<()>;
 
 // --- Input ---
 
-/// Send a KeySequence to a pane. Handles the split between literal text (-l)
-/// and special keys (no -l) automatically.
+/// Send a KeySequence to a target. Handles the split between literal text (-l)
+/// and special keys (no -l) automatically. All values are shell-escaped.
 pub async fn send_keys(
     transport: &TransportKind,
-    target: &PaneAddress,
+    socket: Option<&TmuxSocket>,
+    target: &str,
     keys: &KeySequence,
 ) -> Result<()>;
 
@@ -2017,7 +2067,8 @@ pub async fn send_keys(
 /// Equivalent to: tmux send-keys -l -t <target> '<escaped_text>'
 pub async fn send_text(
     transport: &TransportKind,
-    target: &PaneAddress,
+    socket: Option<&TmuxSocket>,
+    target: &str,
     text: &str,
 ) -> Result<()>;
 
@@ -2025,6 +2076,7 @@ pub async fn send_text(
 /// Runs: tmux rename-session -t <current> <new>
 pub async fn rename_session(
     transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
     current_name: &str,
     new_name: &str,
 ) -> Result<()>;
@@ -2033,6 +2085,7 @@ pub async fn rename_session(
 /// Runs: tmux rename-window -t <session>:<index> <new_name>
 pub async fn rename_window(
     transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
     session: &str,
     window_index: u32,
     new_name: &str,
@@ -2117,21 +2170,28 @@ pub enum HostStatus {
 
 The `HostHandle` and `Target` implementations. See Core Abstractions for the full APIs.
 
-`HostHandle` wraps `Arc<HostHandleInner>` which holds the transport and config.
+`HostHandle` wraps `Arc<HostHandleInner>` which holds the transport and socket.
 `Target` is lightweight — holds an `Arc<HostHandleInner>` plus a `TargetAddress` enum.
-Both delegate to the function-level APIs in `discovery`, `capture`, `control`, `pipe`,
-and `monitor`.
+Both delegate to the function-level APIs in `discovery`, `capture`, and `control`.
 
 ```rust
+// Phase 1 — on-demand operations only (no monitoring, no config)
 struct HostHandleInner {
     transport: TransportKind,
-    config: HostTarget,
-    pipe_state: Option<PipeManager>,   // None if monitoring not started (fallback path)
-    /// Per-session monitor handles, keyed by session name.
-    /// Each entry represents one control-mode connection (DC10).
-    /// RwLock allows &self methods to mutate monitoring state safely.
-    session_monitors: RwLock<HashMap<String, SessionMonitorHandle>>,
+    socket: Option<TmuxSocket>,
+    /// Per-pane exec locks keyed by stable identity (DC19).
+    exec_locks: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
+
+// Phase 2+ additions (pipe.rs, monitor.rs):
+// struct HostHandleInner {
+//     transport: TransportKind,
+//     socket: Option<TmuxSocket>,
+//     exec_locks: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+//     config: HostTarget,
+//     pipe_state: Option<PipeManager>,
+//     session_monitors: RwLock<HashMap<String, SessionMonitorHandle>>,
+// }
 ```
 
 
@@ -2724,9 +2784,12 @@ into a single call with clear completion semantics and an exit code.
 - **Cross-pane safe**: The UUID in the sentinel ensures that concurrent `exec()` calls
   on different panes never confuse each other's output. **Same-pane concurrent `exec()`
   is not supported** — overlapping commands on one pane interleave terminal output,
-  making boundary extraction ambiguous regardless of unique sentinels. `Target` holds a
-  per-target `Mutex` that serializes `exec()` calls to the same pane. Callers needing
-  parallel execution should use separate panes.
+  making boundary extraction ambiguous regardless of unique sentinels. `HostHandleInner`
+  holds a per-pane exec lock map keyed by resolved `pane_id`. All target levels
+  (session, window, pane) resolve their effective pane via
+  `display-message -p '#{pane_id}'` before lock acquisition, so a session-level handle
+  and a pane-level handle targeting the same active pane share the same lock.
+  Callers needing parallel execution should use separate panes.
 
 **Alternatives considered**:
 
