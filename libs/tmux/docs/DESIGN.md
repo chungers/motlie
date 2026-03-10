@@ -1067,7 +1067,9 @@ impl KeySequence {
     pub fn then_enter(self) -> Self;
 
     /// Render to one or more tmux send-keys invocations.
-    /// Returns the shell commands to execute.
+    /// Returns argument vectors — each inner `Vec<String>` is one send-keys
+    /// argument list (e.g. `["send-keys", "-l", "-t", target, text]`).
+    /// `control::send_keys` assembles these into full shell command strings.
     fn to_tmux_args(&self, target: &str) -> Vec<Vec<String>>;
 }
 ```

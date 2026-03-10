@@ -135,7 +135,13 @@ impl TargetSpec {
         self
     }
 
+    /// Set pane index. Panics if `window` has not been set — pane requires
+    /// a window context (tmux target hierarchy: session:window.pane).
     pub fn pane(mut self, index: u32) -> Self {
+        assert!(
+            self.window.is_some(),
+            "TargetSpec::pane() requires window to be set first (use .window() or .window_name() before .pane())"
+        );
         self.pane = Some(index);
         self
     }
@@ -334,5 +340,11 @@ mod tests {
     #[test]
     fn host_key_policy_default() {
         assert_eq!(HostKeyPolicy::default(), HostKeyPolicy::Verify);
+    }
+
+    #[test]
+    #[should_panic(expected = "TargetSpec::pane() requires window")]
+    fn target_spec_pane_without_window_panics() {
+        let _ = TargetSpec::session("s").pane(0);
     }
 }

@@ -175,11 +175,11 @@ impl KeySequence {
         self.then_key(SpecialKey::Enter)
     }
 
-    /// Render to tmux send-keys commands. Each command is a complete
-    /// shell command string (without the tmux prefix — caller adds that).
+    /// Render to tmux send-keys argument vectors. Each inner `Vec<String>`
+    /// is the argument list for one `send-keys` invocation.
     ///
-    /// Adjacent literal segments are merged. Each transition between
-    /// literal and special produces a separate command.
+    /// Each segment produces a separate command. `control::send_keys`
+    /// assembles these into full shell command strings.
     pub fn to_tmux_args(&self, target: &str) -> Vec<Vec<String>> {
         let mut commands: Vec<Vec<String>> = Vec::new();
 

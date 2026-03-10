@@ -23,7 +23,7 @@ No SSH, no monitoring.
 - [x] `PaneAddress`: `pane_id` (authoritative `%<id>`), `session`, `window`, `pane` display fields (DC1)
 - [x] `PaneAddress::to_tmux_target() -> String` (`session:window.pane`)
 - [x] `PaneAddress::id() -> &str` (returns `pane_id`)
-- [x] `PaneAddress::parse(s: &str) -> Result<Self>` from tmux format output
+- [x] `PaneAddress::parse(pane_id: &str, address_str: &str) -> Result<Self>` from tmux format output
 - [x] `SessionInfo`, `WindowInfo`, `PaneInfo` structs with all fields from DESIGN
 - [x] `TargetAddress` enum: `Session(SessionInfo)`, `Window(WindowInfo)`, `Pane(PaneAddress)`
 - [x] `TargetLevel` enum: `Session`, `Window`, `Pane`
