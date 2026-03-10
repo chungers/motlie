@@ -593,7 +593,14 @@ impl Target {
         // Use a short hex ID to avoid line wrapping in narrow panes
         let id = &uuid::Uuid::new_v4().to_string()[..8];
         let marker = format!("__ML{}__", id);
-        let target = self.target_string();
+        // Use resolved pane_id as tmux target when available (starts with %).
+        // This ensures lock key and execution target are the same pane,
+        // preventing divergence if the active pane changes after lock acquisition.
+        let target = if pane_id.starts_with('%') {
+            pane_id.clone()
+        } else {
+            self.target_string()
+        };
         let socket = self.inner.socket.as_ref();
         let transport = &self.inner.transport;
 
