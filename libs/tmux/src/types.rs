@@ -109,29 +109,32 @@ pub enum TargetLevel {
 }
 
 /// Builder for tmux target strings (DC17).
+///
+/// Fields are private to enforce the hierarchy invariant: pane requires window.
+/// Use `session()`, `.window()/.window_name()`, `.pane()` builders or `parse()`.
 #[derive(Debug, Clone)]
 pub struct TargetSpec {
-    pub session: String,
-    pub window: Option<String>,
-    pub pane: Option<u32>,
+    session_name: String,
+    window_sel: Option<String>,
+    pane_idx: Option<u32>,
 }
 
 impl TargetSpec {
     pub fn session(name: &str) -> Self {
         TargetSpec {
-            session: name.to_string(),
-            window: None,
-            pane: None,
+            session_name: name.to_string(),
+            window_sel: None,
+            pane_idx: None,
         }
     }
 
     pub fn window(mut self, index: u32) -> Self {
-        self.window = Some(index.to_string());
+        self.window_sel = Some(index.to_string());
         self
     }
 
     pub fn window_name(mut self, name: &str) -> Self {
-        self.window = Some(name.to_string());
+        self.window_sel = Some(name.to_string());
         self
     }
 
@@ -139,11 +142,25 @@ impl TargetSpec {
     /// a window context (tmux target hierarchy: session:window.pane).
     pub fn pane(mut self, index: u32) -> Self {
         assert!(
-            self.window.is_some(),
+            self.window_sel.is_some(),
             "TargetSpec::pane() requires window to be set first (use .window() or .window_name() before .pane())"
         );
-        self.pane = Some(index);
+        self.pane_idx = Some(index);
         self
+    }
+
+    // --- Accessors ---
+
+    pub fn session_name(&self) -> &str {
+        &self.session_name
+    }
+
+    pub fn window_selector(&self) -> Option<&str> {
+        self.window_sel.as_deref()
+    }
+
+    pub fn pane_index(&self) -> Option<u32> {
+        self.pane_idx
     }
 
     /// Parse a tmux target string: "session", "session:window", "session:window.pane"
@@ -171,17 +188,17 @@ impl TargetSpec {
         };
 
         Ok(TargetSpec {
-            session: session_part.to_string(),
-            window: window_part.map(|w| w.to_string()),
-            pane,
+            session_name: session_part.to_string(),
+            window_sel: window_part.map(|w| w.to_string()),
+            pane_idx: pane,
         })
     }
 
     pub fn to_target_string(&self) -> String {
-        match (&self.window, self.pane) {
-            (None, _) => self.session.clone(),
-            (Some(w), None) => format!("{}:{}", self.session, w),
-            (Some(w), Some(p)) => format!("{}:{}.{}", self.session, w, p),
+        match (&self.window_sel, self.pane_idx) {
+            (None, _) => self.session_name.clone(),
+            (Some(w), None) => format!("{}:{}", self.session_name, w),
+            (Some(w), Some(p)) => format!("{}:{}.{}", self.session_name, w, p),
         }
     }
 }
@@ -296,25 +313,25 @@ mod tests {
     #[test]
     fn target_spec_parse_session() {
         let spec = TargetSpec::parse("mysession").unwrap();
-        assert_eq!(spec.session, "mysession");
-        assert!(spec.window.is_none());
-        assert!(spec.pane.is_none());
+        assert_eq!(spec.session_name(), "mysession");
+        assert!(spec.window_selector().is_none());
+        assert!(spec.pane_index().is_none());
     }
 
     #[test]
     fn target_spec_parse_session_window() {
         let spec = TargetSpec::parse("mysession:2").unwrap();
-        assert_eq!(spec.session, "mysession");
-        assert_eq!(spec.window.as_deref(), Some("2"));
-        assert!(spec.pane.is_none());
+        assert_eq!(spec.session_name(), "mysession");
+        assert_eq!(spec.window_selector(), Some("2"));
+        assert!(spec.pane_index().is_none());
     }
 
     #[test]
     fn target_spec_parse_full() {
         let spec = TargetSpec::parse("mysession:1.3").unwrap();
-        assert_eq!(spec.session, "mysession");
-        assert_eq!(spec.window.as_deref(), Some("1"));
-        assert_eq!(spec.pane, Some(3));
+        assert_eq!(spec.session_name(), "mysession");
+        assert_eq!(spec.window_selector(), Some("1"));
+        assert_eq!(spec.pane_index(), Some(3));
     }
 
     #[test]

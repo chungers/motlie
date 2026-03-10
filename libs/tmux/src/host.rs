@@ -100,13 +100,19 @@ impl HostHandle {
         let sessions =
             discovery::list_sessions(&self.inner.transport, self.inner.socket.as_ref())
                 .await?;
-        let session_info = match sessions.into_iter().find(|s| s.name == spec.session) {
+        let session_info = match sessions.into_iter().find(|s| s.name == spec.session_name()) {
             Some(s) => s,
             None => return Ok(None),
         };
 
-        match (&spec.window, spec.pane) {
-            (None, _) => Ok(Some(Target {
+        match (spec.window_selector(), spec.pane_index()) {
+            (None, Some(_)) => {
+                return Err(anyhow!(
+                    "invalid TargetSpec: pane requires window (got session='{}', window=None, pane=Some)",
+                    spec.session_name()
+                ));
+            }
+            (None, None) => Ok(Some(Target {
                 inner: self.inner.clone(),
                 address: TargetAddress::Session(session_info),
                 exec_mutex: Arc::new(Mutex::new(())),
@@ -115,7 +121,7 @@ impl HostHandle {
                 let windows = discovery::list_windows(
                     &self.inner.transport,
                     self.inner.socket.as_ref(),
-                    &spec.session,
+                    spec.session_name(),
                 )
                 .await?;
                 let win = windows.into_iter().find(|w| {
@@ -132,7 +138,7 @@ impl HostHandle {
                 let windows = discovery::list_windows(
                     &self.inner.transport,
                     self.inner.socket.as_ref(),
-                    &spec.session,
+                    spec.session_name(),
                 )
                 .await?;
                 let resolved_window = windows.into_iter().find(|w| {
@@ -146,7 +152,7 @@ impl HostHandle {
                 let panes = discovery::list_panes_in_session(
                     &self.inner.transport,
                     self.inner.socket.as_ref(),
-                    &spec.session,
+                    spec.session_name(),
                 )
                 .await?;
                 let pane = panes.into_iter().find(|p| {
