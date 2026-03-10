@@ -15,6 +15,23 @@ use crate::types::*;
 struct HostHandleInner {
     transport: TransportKind,
     socket: Option<TmuxSocket>,
+    /// Per-pane exec locks keyed by stable identity (DC19).
+    /// Key is `pane_id` for pane-level targets (e.g. "%12"),
+    /// or `target_string()` for session/window-level targets.
+    /// Uses `std::sync::Mutex` for the map (held briefly, no await),
+    /// inner `tokio::sync::Mutex` for the per-pane exec serialization.
+    exec_locks: std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>,
+}
+
+impl HostHandleInner {
+    /// Get or create an exec lock for a given pane identity key.
+    fn exec_lock(&self, key: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.exec_locks.lock().expect("exec_locks poisoned");
+        locks
+            .entry(key.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
 }
 
 /// Handle to a tmux host (local or remote).
@@ -32,6 +49,7 @@ impl HostHandle {
                     crate::transport::LocalTransport::new(),
                 ),
                 socket: None,
+                exec_locks: std::sync::Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -39,7 +57,11 @@ impl HostHandle {
     /// Create a HostHandle with a specific transport and socket.
     pub fn new(transport: TransportKind, socket: Option<TmuxSocket>) -> Self {
         HostHandle {
-            inner: Arc::new(HostHandleInner { transport, socket }),
+            inner: Arc::new(HostHandleInner {
+                transport,
+                socket,
+                exec_locks: std::sync::Mutex::new(HashMap::new()),
+            }),
         }
     }
 
@@ -76,7 +98,7 @@ impl HostHandle {
         Ok(Target {
             inner: self.inner.clone(),
             address: TargetAddress::Session(info),
-            exec_mutex: Arc::new(Mutex::new(())),
+
         })
     }
 
@@ -89,7 +111,7 @@ impl HostHandle {
             Target {
                 inner: self.inner.clone(),
                 address: TargetAddress::Session(info),
-                exec_mutex: Arc::new(Mutex::new(())),
+    
             }
         }))
     }
@@ -115,7 +137,7 @@ impl HostHandle {
             (None, None) => Ok(Some(Target {
                 inner: self.inner.clone(),
                 address: TargetAddress::Session(session_info),
-                exec_mutex: Arc::new(Mutex::new(())),
+    
             })),
             (Some(window_str), None) => {
                 let windows = discovery::list_windows(
@@ -130,7 +152,7 @@ impl HostHandle {
                 Ok(win.map(|w| Target {
                     inner: self.inner.clone(),
                     address: TargetAddress::Window(w),
-                    exec_mutex: Arc::new(Mutex::new(())),
+        
                 }))
             }
             (Some(window_str), Some(pane_idx)) => {
@@ -161,7 +183,7 @@ impl HostHandle {
                 Ok(pane.map(|p| Target {
                     inner: self.inner.clone(),
                     address: TargetAddress::Pane(p.address),
-                    exec_mutex: Arc::new(Mutex::new(())),
+        
                 }))
             }
         }
@@ -172,8 +194,17 @@ impl HostHandle {
 pub struct Target {
     inner: Arc<HostHandleInner>,
     address: TargetAddress,
-    /// Per-target mutex for serializing exec() calls to the same pane (DC19).
-    exec_mutex: Arc<Mutex<()>>,
+}
+
+impl Target {
+    /// Key for the per-pane exec lock in HostHandleInner.
+    /// Uses stable pane_id for pane targets, target_string for session/window.
+    fn exec_lock_key(&self) -> String {
+        match &self.address {
+            TargetAddress::Pane(p) => p.pane_id.clone(),
+            _ => self.target_string(),
+        }
+    }
 }
 
 impl Target {
@@ -195,7 +226,8 @@ impl Target {
         }
     }
 
-    /// Session info (available at any level).
+    /// Full session info (only available at session level).
+    /// For cross-level session name access, use `session_name()`.
     pub fn session_info(&self) -> Option<&SessionInfo> {
         match &self.address {
             TargetAddress::Session(s) => Some(s),
@@ -212,7 +244,9 @@ impl Target {
         }
     }
 
-    /// Window info (available at window and pane level).
+    /// Full window info (only available at window level).
+    /// Pane targets carry window index via `pane_address().window` but not
+    /// full `WindowInfo`. Use `children()` or `window()` to get window info.
     pub fn window_info(&self) -> Option<&WindowInfo> {
         match &self.address {
             TargetAddress::Window(w) => Some(w),
@@ -250,7 +284,7 @@ impl Target {
                     .map(|w| Target {
                         inner: self.inner.clone(),
                         address: TargetAddress::Window(w),
-                        exec_mutex: Arc::new(Mutex::new(())),
+            
                     })
                     .collect())
             }
@@ -267,7 +301,7 @@ impl Target {
                     .map(|p| Target {
                         inner: self.inner.clone(),
                         address: TargetAddress::Pane(p.address),
-                        exec_mutex: Arc::new(Mutex::new(())),
+            
                     })
                     .collect())
             }
@@ -288,7 +322,7 @@ impl Target {
             Target {
                 inner: self.inner.clone(),
                 address: TargetAddress::Window(w),
-                exec_mutex: Arc::new(Mutex::new(())),
+    
             }
         }))
     }
@@ -324,7 +358,7 @@ impl Target {
                     return Ok(Some(Target {
                         inner: self.inner.clone(),
                         address: TargetAddress::Pane(p.clone()),
-                        exec_mutex: Arc::new(Mutex::new(())),
+            
                     }));
                 } else {
                     return Ok(None);
@@ -347,7 +381,7 @@ impl Target {
         Ok(pane.map(|p| Target {
             inner: self.inner.clone(),
             address: TargetAddress::Pane(p.address),
-            exec_mutex: Arc::new(Mutex::new(())),
+
         }))
     }
 
@@ -356,7 +390,7 @@ impl Target {
         Target {
             inner: self.inner.clone(),
             address: TargetAddress::Pane(address.clone()),
-            exec_mutex: Arc::new(Mutex::new(())),
+
         }
     }
 
@@ -528,7 +562,8 @@ impl Target {
     /// Sends command with a UUID sentinel suffix, polls scrollback until
     /// the sentinel appears (or timeout), and extracts stdout + exit code.
     pub async fn exec(&self, command: &str, timeout: Duration) -> Result<ExecOutput> {
-        let _guard = self.exec_mutex.lock().await;
+        let lock = self.inner.exec_lock(&self.exec_lock_key());
+        let _guard = lock.lock().await;
 
         // Use a short hex ID to avoid line wrapping in narrow panes
         let id = &uuid::Uuid::new_v4().to_string()[..8];
@@ -718,7 +753,7 @@ mod tests {
         let target = Target {
             inner: host.inner.clone(),
             address: TargetAddress::Pane(addr),
-            exec_mutex: Arc::new(Mutex::new(())),
+
         };
         assert!(target.rename("new_name").await.is_err());
     }
@@ -789,5 +824,64 @@ mod tests {
         // Should resolve to window 1 (active), pane 0 → pane_id %1
         assert_eq!(p.pane_address().unwrap().pane_id, "%1");
         assert_eq!(p.pane_address().unwrap().window, 1);
+    }
+
+    #[test]
+    fn exec_lock_shared_across_handles() {
+        // Two independently obtained Target handles for the same pane
+        // should share the same exec lock via HostHandleInner.
+        let addr = PaneAddress {
+            pane_id: "%5".to_string(),
+            session: "test".to_string(),
+            window: 0,
+            pane: 0,
+        };
+        let mock = MockTransport::new().with_default("");
+        let host = mock_host(mock);
+        let t1 = Target {
+            inner: host.inner.clone(),
+            address: TargetAddress::Pane(addr.clone()),
+        };
+        let t2 = Target {
+            inner: host.inner.clone(),
+            address: TargetAddress::Pane(addr),
+        };
+
+        // Both should produce the same lock key
+        assert_eq!(t1.exec_lock_key(), "%5");
+        assert_eq!(t2.exec_lock_key(), "%5");
+
+        // Both should get the same lock from HostHandleInner
+        let lock1 = t1.inner.exec_lock(&t1.exec_lock_key());
+        let lock2 = t2.inner.exec_lock(&t2.exec_lock_key());
+        assert!(Arc::ptr_eq(&lock1, &lock2));
+    }
+
+    #[test]
+    fn exec_lock_different_panes_are_independent() {
+        let mock = MockTransport::new().with_default("");
+        let host = mock_host(mock);
+        let t1 = Target {
+            inner: host.inner.clone(),
+            address: TargetAddress::Pane(PaneAddress {
+                pane_id: "%5".to_string(),
+                session: "test".to_string(),
+                window: 0,
+                pane: 0,
+            }),
+        };
+        let t2 = Target {
+            inner: host.inner.clone(),
+            address: TargetAddress::Pane(PaneAddress {
+                pane_id: "%6".to_string(),
+                session: "test".to_string(),
+                window: 0,
+                pane: 1,
+            }),
+        };
+
+        let lock1 = t1.inner.exec_lock(&t1.exec_lock_key());
+        let lock2 = t2.inner.exec_lock(&t2.exec_lock_key());
+        assert!(!Arc::ptr_eq(&lock1, &lock2));
     }
 }

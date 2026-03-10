@@ -579,6 +579,8 @@ pub struct HostHandle { /* Arc<HostHandleInner> */ }
 struct HostHandleInner {
     transport: TransportKind,
     config: HostTarget,
+    /// Per-pane exec locks keyed by stable identity (DC19).
+    exec_locks: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// RwLock for concurrent read access (monitored_sessions, find) with
     /// exclusive write access (start/stop monitoring). The lock is never
     /// held across await points — lock, mutate, release, then await.
@@ -722,10 +724,13 @@ impl Target {
     /// The tmux target string for commands (e.g., "build", "build:0", "build:0.1").
     pub fn target_string(&self) -> String;
 
-    /// Session info (available at any level — windows and panes know their session).
-    pub fn session_info(&self) -> &SessionInfo;
+    /// Full session info (only available at session level).
+    /// For cross-level session name access, use `session_name()`.
+    pub fn session_info(&self) -> Option<&SessionInfo>;
 
-    /// Window info (available at window and pane level, None at session level).
+    /// Full window info (only available at window level).
+    /// Pane targets carry window index via `pane_address().window` but not
+    /// full `WindowInfo`.
     pub fn window_info(&self) -> Option<&WindowInfo>;
 
     /// Pane address (available at pane level only).
@@ -2174,12 +2179,15 @@ Both delegate to the function-level APIs in `discovery`, `capture`, and `control
 struct HostHandleInner {
     transport: TransportKind,
     socket: Option<TmuxSocket>,
+    /// Per-pane exec locks keyed by stable identity (DC19).
+    exec_locks: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 // Phase 2+ additions (pipe.rs, monitor.rs):
 // struct HostHandleInner {
 //     transport: TransportKind,
 //     socket: Option<TmuxSocket>,
+//     exec_locks: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 //     config: HostTarget,
 //     pipe_state: Option<PipeManager>,
 //     session_monitors: RwLock<HashMap<String, SessionMonitorHandle>>,
@@ -2776,9 +2784,11 @@ into a single call with clear completion semantics and an exit code.
 - **Cross-pane safe**: The UUID in the sentinel ensures that concurrent `exec()` calls
   on different panes never confuse each other's output. **Same-pane concurrent `exec()`
   is not supported** — overlapping commands on one pane interleave terminal output,
-  making boundary extraction ambiguous regardless of unique sentinels. `Target` holds a
-  per-target `Mutex` that serializes `exec()` calls to the same pane. Callers needing
-  parallel execution should use separate panes.
+  making boundary extraction ambiguous regardless of unique sentinels. `HostHandleInner`
+  holds a per-pane exec lock map keyed by stable pane identity (`pane_id` for pane-level
+  targets, `target_string()` for session/window-level). This ensures `exec()` is
+  serialized for the same pane even across independently obtained `Target` handles.
+  Callers needing parallel execution should use separate panes.
 
 **Alternatives considered**:
 
