@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-10 | Add explicit reference to companion `TUI.md` for TUI-specific reliability/fidelity policy. Keep implementation planning in `PLAN.md` unchanged to avoid blocking core delivery. | Overview, DC20, Phase 5, References |
 | 2026-03-10 | Add mixed-client screen-size resilience proposal: capture/output normalization and fixed-size automation guidance for `capture()`, `sample_text()`, and `exec()` reliability under client resize/reflow. | DC20, DC19, Open Concerns, Implementation Phases |
 | 2026-03-08 | `Target::exec()` shell compatibility: document `$?` (POSIX) vs `$status` (fish) with shell detection. Replace `ActionTarget` enum with `TargetAddress` in `ActionRequest` for unified type consistency (DC16). | DC19, Core Abstractions, Output Sink Pipeline |
 | 2026-03-08 | Address codex review round 8: clarify remaining dynamic types (`Arc<dyn Any>`, `Pin<Box<dyn Future>>`) in SinkKind docs and changelog; fix integration diagram to use `SinkKind` wrappers. | Core Abstractions, Output Sink Pipeline |
@@ -90,6 +91,7 @@ A library that:
   rule-based automation, structured logging, CLI binary
 - **Out of scope**: Web UI, SSH server setup/configuration, tmux installation
 - **Future**: TUI interface based on [ratatui](https://ratatui.rs/) (not in current phases)
+  with reliability and capture-fidelity guidance in [`TUI.md`](./TUI.md)
 
 ---
 
@@ -2857,6 +2859,11 @@ build.send_keys(&KeySequence::parse("{C-c}")?).await?;  // interrupt it
 `sample_text()`, and `exec()` parsing so behavior is less sensitive when multiple
 clients with different terminal sizes attach to the same tmux session.
 
+**Design boundary**: This section defines the API/behavioral contract impact on core
+capture and exec paths. TUI-specific robustness policy, operational tiers, and
+mitigations are documented in the companion [`TUI.md`](./TUI.md). The phased
+implementation plan remains in `PLAN.md` and is intentionally not expanded here.
+
 **Why this is needed**: tmux pane content is width-dependent. When clients with
 different screen sizes attach/detach, wrapping and visual layout can change. This
 can make line-oriented matching and sentinel parsing brittle even when the underlying
@@ -3207,6 +3214,8 @@ The `TuiSink` implementation lives in the binary (`bins/tmux-automator/`), not i
 manages its own rendering cadence (e.g., 60fps batching).
 
 This phase depends on Phases 1-3 and 2c being complete and stable.
+For TUI fidelity/reliability constraints under mixed-client attachment and resizing,
+see [`TUI.md`](./TUI.md).
 
 ---
 
@@ -3226,3 +3235,4 @@ This phase depends on Phases 1-3 and 2c being complete and stable.
 ### Internal Documentation
 
 - [motlie MCP DESIGN.md](../../../libs/mcp/docs/DESIGN.md) — reference for doc conventions
+- [tmux TUI.md](./TUI.md) — TUI-specific reliability and capture-fidelity policy
