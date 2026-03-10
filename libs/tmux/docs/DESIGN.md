@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-10 | Revise mixed-client capture design for TUI fidelity: no ANSI stripping in screen-stability paths, geometry/reflow detection via tmux client/pane metadata, dynamic history-limit floor management, and overlap-aware sampling. | ScrollbackQuery, capture.rs, DC20 |
 | 2026-03-10 | Add explicit reference to companion `TUI.md` for TUI-specific reliability/fidelity policy. Keep implementation planning in `PLAN.md` unchanged to avoid blocking core delivery. | Overview, DC20, Phase 5, References |
 | 2026-03-10 | Add mixed-client screen-size resilience proposal: capture/output normalization and fixed-size automation guidance for `capture()`, `sample_text()`, and `exec()` reliability under client resize/reflow. | DC20, DC19, Open Concerns, Implementation Phases |
 | 2026-03-08 | `Target::exec()` shell compatibility: document `$?` (POSIX) vs `$status` (fish) with shell detection. Replace `ActionTarget` enum with `TargetAddress` in `ActionRequest` for unified type consistency (DC16). | DC19, Core Abstractions, Output Sink Pipeline |
@@ -1010,11 +1011,12 @@ pub enum ScrollbackQuery {
 ```
 
 **Implementation**: All variants use `tmux capture-pane -p -S <start> -E <end>` under
-the hood. `LastLines(n)` maps directly to `-S -n`. The `Until` and `LastLinesUntil`
-variants capture `max_lines` (or `lines`) of scrollback in one call, then scan the
-result in reverse for the pattern match, truncating at the match point. The final
-output is returned in chronological order — no reversal needed since `capture-pane`
-already outputs top-to-bottom.
+the hood, with optional `-e` in fidelity-preserving modes. `LastLines(n)` maps
+directly to `-S -n`. The `Until` and `LastLinesUntil` variants capture `max_lines`
+(or `lines`) of scrollback in one call, then scan the result in reverse for the
+pattern match, truncating at the match point. The final output is returned in
+chronological order — no reversal needed since `capture-pane` already outputs
+top-to-bottom.
 
 **Use cases**:
 - `LastLines(50)` — "show me the last 50 lines" for a quick status check
@@ -1022,6 +1024,16 @@ already outputs top-to-bottom.
   shell prompt" for capturing a command's full output
 - `LastLinesUntil { lines: 200, stop_pattern: r"^error:" }` — "last 200 lines, but
   stop if we hit an error marker" for focused error context
+
+**Overlap-aware incremental sampling**: For long-running panes, `sample_text()` should
+support incremental polling with overlap to avoid gaps at chunk boundaries.
+
+1. Track `history_size` and pane geometry per target between polls.
+2. Compute `delta_lines = max(0, current_history_size - previous_history_size)`.
+3. Capture `delta_lines + overlap_lines` from tail (bounded by configured maximum).
+4. De-duplicate overlap by longest suffix/prefix match before returning new content.
+5. If history shrinks or pane geometry changed, mark result degraded and fall back to
+   a wider recapture window.
 
 ### `KeySequence` — Safe Input Construction
 
@@ -2003,9 +2015,11 @@ pub async fn sample_text(
 In all cases the output preserves `capture-pane`'s top-to-bottom ordering — no reversal
 step is needed. The pattern scan is the only post-processing.
 
-**Escaping**: The `-p` flag outputs to stdout (not to a buffer), which is what we need
-over SSH exec channels. The `-e` flag (escape sequences) is intentionally NOT used — we
-want plain text, not ANSI-encoded output.
+**Escaping/format mode**: The `-p` flag outputs to stdout (not to a buffer), which is
+what we need over SSH exec channels. The `-e` flag is mode-dependent:
+- Screen/TUI stability paths use `capture-pane -ep` (preserve escape sequences).
+- Plain-text paths are explicit opt-in (`PlainText` mode), not the default for
+  mixed-client normalization.
 
 **Use cases**:
 - Dump a pane to see what state it's in before deciding to send input
@@ -2411,13 +2425,15 @@ consumers can also test their integrations.
 
 ### DC7: Capture-Pane vs Stream Monitoring
 
-**Decision**: Use `capture-pane -p` for on-demand snapshots. For continuous monitoring,
-use tmux control mode as primary (DC10) and `pipe-pane` as fallback only.
+**Decision**: Use `capture-pane -p` for on-demand snapshots, with optional `-e` when
+fidelity mode requires escape-sequence preservation. For continuous monitoring, use
+tmux control mode as primary (DC10) and `pipe-pane` as fallback only.
 
 **Rationale**:
 - `capture-pane -p` returns the current visible content (and scrollback with `-S`/`-E`)
-  as a single snapshot. It is stateless, idempotent, and requires no setup. Ideal for
-  "what is this pane showing right now?" queries.
+  as a single snapshot. `-e` may be added for ANSI-preserving capture. This is
+  stateless, idempotent, and requires no setup. Ideal for "what is this pane showing
+  right now?" queries.
 - Continuous monitoring uses control mode (`tmux -C attach`, DC10) which provides
   structured `%output %<pane_id>` framing without file lifecycle management.
 - `pipe-pane` is retained as a fallback for environments where control mode is
@@ -2855,9 +2871,8 @@ build.send_keys(&KeySequence::parse("{C-c}")?).await?;  // interrupt it
 
 ### DC20: Capture Normalization for Mixed-Client Screen Sizes
 
-**Decision**: Add a normalization layer for captured pane text used by `capture()`,
-`sample_text()`, and `exec()` parsing so behavior is less sensitive when multiple
-clients with different terminal sizes attach to the same tmux session.
+**Decision**: Add a mixed-client fidelity layer for `capture()`, `sample_text()`, and
+`exec()` that is TUI-safe by default for screen-stability paths.
 
 **Design boundary**: This section defines the API/behavioral contract impact on core
 capture and exec paths. TUI-specific robustness policy, operational tiers, and
@@ -2870,39 +2885,61 @@ can make line-oriented matching and sentinel parsing brittle even when the under
 command behavior is correct.
 
 **Important limits**:
-- Normalization is best-effort. It cannot perfectly reconstruct pre-wrap output after
-  tmux reflow.
-- Normalization cannot recover content evicted by tmux history limits.
+- Reflow/normalization is best-effort. It cannot perfectly reconstruct pre-wrap output
+  after tmux has already reflowed or overwritten display state.
+- No algorithm can recover content already evicted by tmux history limits.
 - For strict determinism, automation should run in a dedicated session/pane with a
   fixed size, not a human-shared pane.
 
-**Proposed normalization contract**:
+**Normalization and fidelity contract**:
 - Canonicalize line endings to `\n`.
-- Strip ANSI/control escape sequences by default for matching-oriented paths.
-- Trim trailing padding whitespace that varies with pane width.
+- Preserve ANSI/control escape sequences in screen-stability modes.
+- Do not use ANSI stripping as part of mixed-client screen normalization.
+- Trim trailing padding whitespace only where it is width-artifact-safe.
 - Keep ordering unchanged (top-to-bottom).
-- Provide a wrap-tolerant scan path for `exec()` sentinel detection so marker parsing
-  remains reliable if line wrapping changes.
+- Provide wrap-tolerant sentinel detection for `exec()` using a derived parser view,
+  without mutating the returned capture fidelity mode.
+
+**Geometry/reflow detection contract**:
+- Query attached client geometries with `tmux list-clients -F` (`client_width`,
+  `client_height`, `client_session`).
+- Query pane/window geometry and scrollback counters with `display-message -p` and
+  format vars (`pane_width`, `pane_height`, `history_size`, `history_limit`).
+- Compare pre/post snapshots around `capture()` / `sample_text()` / `exec()` polling.
+- If client set, pane geometry, or history counters indicate instability, mark result
+  as degraded (`reflow_detected`) and optionally retry.
+
+**History-limit management contract**:
+- `history-limit` is a tmux window/global option, not a per-client setting.
+- Before high-fidelity sampling/exec, compute a desired limit:
+  `max(current_limit, configured_floor, requested_lines + overlap_lines + safety_margin)`.
+- Apply with `tmux set-option -w -t <session:window> history-limit <desired_limit>`.
+- Never lower an existing limit automatically.
 
 **Proposed API surface** (additive):
 
 ```rust
 pub enum CaptureNormalizeMode {
-    Raw,        // no transformation
-    Basic,      // newline + ansi/control + trailing-space normalization
-    ExecStable, // Basic + sentinel-oriented normalization heuristics
+    Raw,         // no transformation
+    ScreenStable,// newline + width-artifact trimming, ANSI/control preserved
+    ExecStable,  // ScreenStable + sentinel parser view for wrap tolerance
+    PlainText,   // explicit opt-in ANSI/control stripping for human/LLM text workflows
 }
 
 pub struct CaptureOptions {
     pub history_start: Option<i32>,
     pub normalize: CaptureNormalizeMode,
+    pub overlap_lines: usize,
+    pub min_history_limit: Option<usize>,
+    pub detect_reflow: bool,
 }
 ```
 
 **Execution model**:
-- `capture()` defaults to `Basic` for human/LLM readability.
-- `sample_text()` defaults to `Basic` for stable pattern matching.
+- `capture()` defaults to `ScreenStable`.
+- `sample_text()` defaults to `ScreenStable` plus overlap-aware de-duplication.
 - `exec()` uses `ExecStable` internally for sentinel parsing robustness.
+- ANSI/control stripping only occurs in explicit `PlainText` mode.
 
 **Operational guidance**:
 - Add explicit recommendation to run automation in a dedicated tmux session/socket.
