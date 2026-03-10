@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-10 | Prioritize consumer usability for mixed-client fidelity: slot implementation as `1.9` (capture/result fidelity) → `2a.2` (monitor stream assembly) → `2c.1/2c.3/2c.4` (sink metadata + no-silent-drop delivery). | DC20, TargetOutput, OutputBus, monitor.rs, Implementation Phases |
 | 2026-03-10 | Revise mixed-client capture design for TUI fidelity: no ANSI stripping in screen-stability paths, geometry/reflow detection via tmux client/pane metadata, dynamic history-limit floor management, and overlap-aware sampling. | ScrollbackQuery, capture.rs, DC20 |
 | 2026-03-10 | Add explicit reference to companion `TUI.md` for TUI-specific reliability/fidelity policy. Keep implementation planning in `PLAN.md` unchanged to avoid blocking core delivery. | Overview, DC20, Phase 5, References |
 | 2026-03-10 | Add mixed-client screen-size resilience proposal: capture/output normalization and fixed-size automation guidance for `capture()`, `sample_text()`, and `exec()` reliability under client resize/reflow. | DC20, DC19, Open Concerns, Implementation Phases |
@@ -783,6 +784,13 @@ impl Target {
     /// At session/window level, captures the active pane.
     pub async fn capture(&self) -> Result<String>;
 
+    /// Capture with explicit fidelity options and metadata.
+    /// Preferred for automation that needs to detect degraded output.
+    pub async fn capture_result(
+        &self,
+        options: &CaptureOptions,
+    ) -> Result<CaptureResult>;
+
     /// Capture with scrollback history. `start` is negative for scrollback lines
     /// (e.g., -100 = 100 lines above visible area). Captures through end of visible area.
     /// Note: tmux `-E` with negative values counts from scrollback buffer start, not
@@ -791,6 +799,13 @@ impl Target {
 
     /// Sample recent scrollback, returned in chronological order.
     pub async fn sample_text(&self, query: &ScrollbackQuery) -> Result<String>;
+
+    /// Sample recent scrollback with explicit fidelity options and metadata.
+    pub async fn sample_text_result(
+        &self,
+        query: &ScrollbackQuery,
+        options: &CaptureOptions,
+    ) -> Result<CaptureResult>;
 
     // --- Lifecycle ---
 
@@ -1170,6 +1185,26 @@ carries enough context for any sink to identify the source at any hierarchy leve
 and route actions back to it.
 
 ```rust
+pub enum OutputKind {
+    Data,
+    /// Synthetic marker emitted when sink/backpressure drops occurred before
+    /// the next delivered chunk for the same source/sink route.
+    Gap,
+}
+
+pub enum FidelityIssue {
+    ClientResize,
+    PaneResize,
+    HistoryTruncated,
+    OverlapResync,
+    SinkBackpressureDrop { dropped: usize },
+}
+
+pub struct OutputFidelity {
+    pub degraded: bool,
+    pub issues: Vec<FidelityIssue>,
+}
+
 pub struct TargetOutput {
     /// The source entity. Carries the full TargetAddress so sinks can
     /// identify the source at session, window, or pane granularity.
@@ -1179,7 +1214,14 @@ pub struct TargetOutput {
     /// ignore the window/pane detail.
     pub source: TargetAddress,
     pub host: String,          // host alias (or "localhost")
-    pub content: String,       // the captured text
+    /// Clean, deduplicated text view used by matchers and most sinks.
+    pub content: String,
+    /// Optional ANSI-preserving view for TUI/high-fidelity consumers.
+    pub raw_content: Option<String>,
+    /// Monotonic per-source sequence for gap detection and ordering checks.
+    pub sequence: u64,
+    pub kind: OutputKind,
+    pub fidelity: OutputFidelity,
     pub timestamp: Instant,
 }
 
@@ -1192,6 +1234,9 @@ impl TargetOutput {
 
     /// Tmux target string for the source (e.g., "build", "build:0", "build:0.1").
     pub fn target_string(&self) -> String;
+
+    /// True when fidelity was degraded (reflow/history/drop/resync events).
+    pub fn degraded(&self) -> bool;
 }
 ```
 
@@ -1200,6 +1245,11 @@ The `source` field (a `TargetAddress`) enables sinks to filter and match at any
 level of the hierarchy — session, window, or pane — and to route actions back to the
 originating entity. Hosts with a single session/window/pane can be addressed at
 session level without requiring callers to know the pane ID.
+
+Usability contract for downstream consumers (stdio, LLM, classifier, triggers):
+1. `content` is the canonical clean stream (deduplicated and normalized per mode).
+2. `raw_content` is preserved when fidelity mode requires ANSI/control retention.
+3. Gap/degraded conditions are explicit in `kind`/`fidelity` — never silent.
 
 ### `MatcherKind` — Static-Dispatch Content Matching
 
@@ -1271,6 +1321,9 @@ A `SinkFilter` selects which output reaches a given sink. Routing fields target 
 source (host, session, window, pane). An optional `content` matcher filters on the
 text itself. Multiple filters are combined with OR semantics — output matching **any**
 filter in the set is delivered to the sink.
+
+Content matching is evaluated against `TargetOutput.content` (clean text view), not
+`raw_content`.
 
 ```rust
 pub struct SinkFilter {
@@ -1511,6 +1564,7 @@ struct SinkEntry {
     name: String,
     tx: mpsc::Sender<TargetOutput>,
     filters: Vec<CompiledSinkFilter>,
+    dropped_since_last_send: usize,
     task: JoinHandle<()>,
 }
 
@@ -1532,9 +1586,11 @@ impl OutputBus {
     pub async fn unsubscribe(&mut self, id: SinkId) -> Result<()>;
 
     /// Fan out an event to all matching sinks. Non-blocking.
-    /// Uses try_send — if a sink's channel is full, the event is dropped
-    /// for that sink only (logged at debug level). Sinks that cannot
-    /// tolerate drops should use larger channel capacities.
+    /// Uses try_send for the hot path. If a sink channel is full, the bus
+    /// increments `dropped_since_last_send` for that sink and does NOT silently
+    /// lose observability: on the next successful send, a synthetic
+    /// `TargetOutput { kind: Gap, fidelity.issues += SinkBackpressureDrop }`
+    /// is emitted before the next data chunk.
     pub fn publish(&self, output: TargetOutput);
 
     /// Shutdown all sinks gracefully.
@@ -1542,11 +1598,10 @@ impl OutputBus {
 }
 ```
 
-**Backpressure**: The bus uses `try_send()` for all sinks. A full channel means the
-sink is processing slower than output arrives — the bus drops for that sink only and
-logs at debug level. This guarantees the bus (and therefore the monitor) never blocks.
-Sinks that need lossless delivery should set a large `channel_capacity`. Sinks that
-only care about recent state (TUI) should set a small capacity and accept drops.
+**Backpressure**: The bus remains non-blocking via `try_send()`, but with loss visibility.
+When a sink falls behind, dropped events are counted and surfaced via explicit `Gap`
+events and fidelity issues (`SinkBackpressureDrop`). This preserves monitor liveness
+while giving consumers a machine-readable signal that stream completeness was degraded.
 
 ### `StdioSink` — Default Reference Implementation
 
@@ -1971,6 +2026,14 @@ pub async fn capture_pane(
     target: &str,
 ) -> Result<String>;
 
+/// Capture with explicit fidelity options and metadata.
+pub async fn capture_pane_with_options(
+    transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
+    target: &str,
+    options: &CaptureOptions,
+) -> Result<CaptureResult>;
+
 /// Capture with scrollback history. `start` is negative for scrollback lines
 /// (e.g., -100 = 100 lines above visible area). Captures through end of visible area.
 /// Runs: tmux capture-pane -p -t <target> -S <start>
@@ -2000,6 +2063,21 @@ pub async fn sample_text(
     target: &str,
     query: &ScrollbackQuery,
 ) -> Result<String>;
+
+/// Sample with explicit fidelity options and metadata.
+pub async fn sample_text_with_options(
+    transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
+    target: &str,
+    query: &ScrollbackQuery,
+    options: &CaptureOptions,
+) -> Result<CaptureResult>;
+
+pub struct CaptureResult {
+    pub text: String,               // clean text view for matching/classifiers
+    pub raw_text: Option<String>,   // ANSI-preserving view when requested
+    pub fidelity: OutputFidelity,   // degraded/reflow/history annotations
+}
 ```
 
 **`sample_text` implementation**:
@@ -2284,6 +2362,13 @@ not silently dropped.
 frames — structured, unambiguous, and keyed on `#{pane_id}` per DC1. For the pipe-pane
 fallback, `pipe-pane` output is prefixed with `%<pane_id>` (set at attach time), and the
 monitor parses on that prefix directly — no filename decoding required.
+
+The parser maintains per-pane assembly state to make the stream consumer-friendly:
+1. Canonicalize line endings and accumulate partial frame fragments.
+2. Apply overlap-aware boundary de-duplication before emission.
+3. Track per-pane `sequence` counters in emitted `TargetOutput`.
+4. Attach fidelity metadata (`OutputFidelity`) for reflow/resize/history instability.
+5. Emit explicit `OutputKind::Gap` events when backpressure caused drops for a sink route.
 
 **Lifecycle**: Each `SessionMonitor::run()` is spawned as a tokio task by `HostHandle`.
 The `SessionMonitorHandle` returned to the caller holds the task's `JoinHandle` and stop
@@ -2879,6 +2964,12 @@ capture and exec paths. TUI-specific robustness policy, operational tiers, and
 mitigations are documented in the companion [`TUI.md`](./TUI.md). The phased
 implementation plan remains in `PLAN.md` and is intentionally not expanded here.
 
+**Implementation slotting (usability-first)**:
+1. Phase `1.9`: capture/sample fidelity and metadata on localhost.
+2. Phase `2a.2`: monitor stream assembly and normalization parity with capture paths.
+3. Phase `2c.1` + `2c.3`: fidelity metadata in sink payloads and no-silent-drop gap signaling.
+4. Phase `2c.4`: integrate monitor + sink contracts end-to-end.
+
 **Why this is needed**: tmux pane content is width-dependent. When clients with
 different screen sizes attach/detach, wrapping and visual layout can change. This
 can make line-oriented matching and sentinel parsing brittle even when the underlying
@@ -2933,6 +3024,12 @@ pub struct CaptureOptions {
     pub min_history_limit: Option<usize>,
     pub detect_reflow: bool,
 }
+
+pub struct CaptureResult {
+    pub text: String,
+    pub raw_text: Option<String>,
+    pub fidelity: OutputFidelity,
+}
 ```
 
 **Execution model**:
@@ -2940,6 +3037,8 @@ pub struct CaptureOptions {
 - `sample_text()` defaults to `ScreenStable` plus overlap-aware de-duplication.
 - `exec()` uses `ExecStable` internally for sentinel parsing robustness.
 - ANSI/control stripping only occurs in explicit `PlainText` mode.
+- `capture_result()` / `sample_text_result()` are the metadata-bearing APIs.
+- `capture()` / `sample_text()` remain convenience wrappers that return only `.text`.
 
 **Operational guidance**:
 - Add explicit recommendation to run automation in a dedicated tmux session/socket.
@@ -3082,6 +3181,27 @@ input, and rename sessions — all without SSH.
 - `list_sessions()` returns `Vec<SessionInfo>` with all fields populated
 - All operations work via `MockTransport` in unit tests
 
+### Phase 1.9: Capture Fidelity + Metadata (Usability Gate)
+
+**Goal**: Make capture/sampling output reliably usable for downstream consumers before
+monitoring/sink work layers on top.
+
+**Tasks**:
+1. Implement `CaptureNormalizeMode`, `CaptureOptions`, and `CaptureResult`
+2. Add `capture_*_with_options` / `sample_*_with_options` APIs with fidelity metadata
+3. Implement overlap-aware de-duplication and geometry/history instability detection
+4. Implement dynamic `history-limit` floor management for capture-heavy workflows
+5. Keep `capture()` / `sample_text()` as compatibility wrappers over `CaptureResult.text`
+
+**Deliverable**: On-demand capture APIs return clean text plus machine-readable fidelity
+signals (`OutputFidelity`) for degraded/reflow cases.
+
+**Acceptance criteria**:
+- Mixed-client resize churn is detectable and surfaced in metadata
+- Overlap-aware sampling avoids duplicate/gapped boundaries in steady-state polling
+- `history-limit` management never lowers existing limits
+- Wrapper APIs preserve current ergonomics while metadata APIs are available for strict callers
+
 ### Phase 2a: SSH Transport + Minimal Monitoring (Vertical Slice)
 
 **Goal**: Add `SshTransport` for remote hosts. Implement a thin monitoring vertical slice:
@@ -3091,9 +3211,10 @@ rule engine, no reconnection, no config deserialization yet.
 **Tasks**:
 1. Implement `SshTransport` in `transport.rs`: russh-based `exec()` and `open_shell()`,
    host key verification (fixes P1), configurable timeout (fixes P10)
-2. Implement `monitor.rs`: control mode parser (`%output %<pane_id> <data>`), single
-   hardcoded-pattern detection, `SendKeys` action dispatch via bounded queue (DC4),
-   `MonitorHandle` with explicit `shutdown()` API
+2. Implement `monitor.rs`: control mode parser (`%output %<pane_id> <data>`), per-pane
+   chunk assembly with overlap-aware de-duplication, fidelity metadata propagation into
+   `TargetOutput`, single hardcoded-pattern detection, `SendKeys` action dispatch via
+   bounded queue (DC4), `MonitorHandle` with explicit `shutdown()` API
 3. Implement `pipe.rs`: fallback `PipeManager` with file-sink default (fixes P4)
 4. Wire monitoring into `HostHandle::start_monitoring()` for localhost and SSH
 5. Unit tests: `SshTransport` via mock SSH server or `MockTransport`, monitor loop with
@@ -3108,6 +3229,7 @@ in library).
 - Monitoring starts on localhost, detects a pattern, sends configured response
 - `monitor_handle.shutdown()` cleanly stops monitoring and cleans up
 - Localhost monitoring works without any SSH configuration
+- Monitor output includes deterministic source sequencing and fidelity annotations
 
 ### Phase 2b: Full Rule Engine + Reconnection + Config
 
@@ -3139,10 +3261,12 @@ routed to multiple consumers (sinks) with independent latency characteristics.
 
 **Tasks**:
 1. Implement `sink.rs`: `TargetOutput` struct, `SinkKind` enum, `SinkFilter` /
-   `CompiledSinkFilter`, `ActionHandle` / `ActionRequest` / `SinkAction`
+   `CompiledSinkFilter`, `ActionHandle` / `ActionRequest` / `SinkAction`. `TargetOutput`
+   includes `content` (clean), optional `raw_content`, `sequence`, `kind`, and fidelity metadata
 2. Implement `OutputBus`: `subscribe(sink, channel_capacity)` API,
    fan-out loop that matches `TargetOutput` against compiled filters and dispatches to
-   per-sink channels, graceful shutdown with `flush()` on all sinks
+   per-sink channels, no-silent-drop backpressure handling (explicit `Gap` output),
+   graceful shutdown with `flush()` on all sinks
 3. Implement `StdioSink`: default reference implementation that writes `TargetOutput` to
    stdout with `[host:pane_target]` prefix, immediate flush, no batching
 4. Wire `OutputBus` into `monitor.rs`: control mode parser feeds `TargetOutput` into the
@@ -3168,6 +3292,8 @@ consumers.
 - `StdioSink` produces readable output with host and pane context
 - `ActionHandle::send_keys()` delivers the action through the host dispatch queue
 - `OutputBus::shutdown()` calls `flush()` on all sinks before returning
+- Backpressure/drop conditions are observable to consumers via `TargetOutput.kind=Gap`
+  and fidelity issue metadata (no silent data loss)
 
 ### Phase 3: Multi-Target Fleet + CLI
 
