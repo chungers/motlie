@@ -4,6 +4,9 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-10 | @claude | Address PR #66 review round 2: scope 1.9b checkboxes to match implementation — reflow detection covers capture/sample_text only (exec handled by wrap-tolerant parser), overlap provides stateless primitives (history_size tracking and wider recapture deferred to 2a.2 monitor). |
+| 2026-03-10 | @claude | Phase 1.9b implemented: geometry snapshots (list_clients, query_pane_geometry), reflow detection around captures, overlap-aware incremental sampling with OverlapResync fallback, history-limit setup helpers, comprehensive tests. |
+| 2026-03-10 | @claude | Phase 1.9a implemented: fidelity types, capture normalization modes (Raw/ScreenStable/PlainText), options-based capture APIs, ANSI stripping, exec() wrap-tolerant sentinel via `-ep` capture. |
 | 2026-03-10 | @codex | Address PR #65 review feedback: split Phase `1.9` into `1.9a`/`1.9b`, keep default capture wrappers `Raw`, make `ExecStable` internal-only, scope history-limit work to setup-time/new panes, and move sink backpressure signaling to `SinkEvent::Gap`. |
 
 Derived from [DESIGN.md](./DESIGN.md). Each task is scoped to produce a compilable,
@@ -153,54 +156,66 @@ No SSH, no monitoring.
 
 ### 1.9a — Capture Fidelity Types + Explicit Modes
 
-- [ ] Define fidelity/normalization types in `types.rs`:
+- [x] Define fidelity/normalization types in `types.rs`:
   `CaptureNormalizeMode` (`Raw`, `ScreenStable`, `PlainText`) and
   `CaptureOptions` (`history_start`, `overlap_lines`, `detect_reflow`), plus
   `OutputFidelity` and `CaptureResult`
-- [ ] Make the hot-path clean case zero-allocation in docs/code shape:
+- [x] Make the hot-path clean case zero-allocation in docs/code shape:
   `OutputFidelity.issues: Option<Vec<FidelityIssue>>`
-- [ ] Add `capture_with_options`, `sample_text_with_options`, and bulk-capture
+- [x] Add `capture_with_options`, `sample_text_with_options`, and bulk-capture
   result APIs returning `CaptureResult`
-- [ ] Keep existing `capture()` / `sample_text()` / `capture_all()` wrappers as
+- [x] Keep existing `capture()` / `sample_text()` / `capture_all()` wrappers as
   explicit `Raw` convenience APIs
-- [ ] Implement `ScreenStable` normalization with ANSI/control preservation in the
+- [x] Implement `ScreenStable` normalization with ANSI/control preservation in the
   public payload: canonical line endings, width-artifact trimming only
-- [ ] Keep ANSI/control stripping as explicit opt-in only (`PlainText` mode) for
+- [x] Keep ANSI/control stripping as explicit opt-in only (`PlainText` mode) for
   human/LLM and matcher-oriented workflows
-- [ ] Document and implement the mode-to-field contract:
+- [x] Document and implement the mode-to-field contract:
   `text` / `content` are mode-specific public payloads, `raw_text` /
   `raw_content` are exact-capture sidecars when requested
-- [ ] Update `Target::exec()` polling/parser to use an internal derived parser view
+- [x] Update `Target::exec()` polling/parser to use an internal derived parser view
   for wrap-tolerant sentinel detection without exposing a public `ExecStable` mode
-- [ ] Add unit tests for:
+- [x] Add unit tests for:
   raw-vs-screen-stable-vs-plain-text mapping, wrapped sentinel splits, bulk capture
   options, and hot-path clean fidelity metadata
-- [ ] Treat `1.9a` as the hard usability gate before monitor/sink work:
+- [x] Treat `1.9a` as the hard usability gate before monitor/sink work:
   `2a.2` and `2c.*` consume `1.9a` metadata/types rather than inventing parallel contracts
 
 **Depends on**: 1.5, 1.7
 
 ### 1.9b — Mixed-Client Stabilization
 
-- [ ] Add geometry snapshot helpers using tmux metadata:
+- [x] Add geometry snapshot helpers using tmux metadata:
   - `list-clients -F` for attached client sizes (`client_width`, `client_height`,
     `client_session`)
   - `display-message -p` / format vars for pane state (`pane_width`, `pane_height`,
     `history_size`, `history_limit`)
-- [ ] Add reflow detection around capture/sampling/exec polling windows:
-  compare pre/post geometry snapshots; return degraded status (or retry) when client
-  mix/geometry changes during operation
-- [ ] Add overlap-aware incremental sampling with explicit resync behavior:
-  track `history_size` per target, capture tail with overlap, require a unique
-  byte-exact overlap match after newline canonicalization, and fall back to wider
-  recapture with `OverlapResync` on ambiguity
-- [ ] Add setup-time history-limit helpers/docs for automation windows:
+- [x] Add reflow detection around capture/sampling windows:
+  compare pre/post geometry snapshots via `detect_fidelity()`/`finalize_fidelity()`;
+  return degraded `OutputFidelity` when client mix/geometry changes during
+  `capture_pane_with_options()` or `sample_text_with_options()`.
+  <!-- @claude 2026-03-10: exec() reflow detection deferred to Phase 2a. exec() already
+       handles wrapping via the two-tier parse_sentinel_output() parser (fast single-line
+       path + joined-text fallback) with -ep capture + ANSI strip. Surfacing geometry
+       fidelity on ExecOutput requires API changes and persistent state better suited to
+       the monitor layer. See PR #66 review round 2. -->
+- [x] Add overlap-aware incremental sampling primitives:
+  `overlap_deduplicate()` performs byte-exact overlap suffix matching with `OverlapResync`
+  fallback; `sample_text_with_options()` accepts caller-supplied `previous_text` for
+  dedup when `overlap_lines >= 2`.
+  <!-- @claude 2026-03-10: Per-target history_size tracking and automatic wider recapture
+       on overlap ambiguity deferred to Phase 2a.2 (monitor stream assembly) where
+       persistent per-pane state is available. Phase 1 provides stateless library
+       primitives; callers that need stateful incremental sampling (monitors, sink
+       pipelines) build on these primitives with their own state. See PR #66 review
+       round 2. -->
+- [x] Add setup-time history-limit helpers/docs for automation windows:
   `history-limit` must be set before pane creation to affect new panes; existing
   panes keep their creation-time limit
-- [ ] Add unit tests for:
+- [x] Add unit tests for:
   mixed-client resize events, history growth/shrink behavior, large history windows,
   overlap ambiguity/resync, and non-retroactive `history-limit` behavior
-- [ ] Add docs/tests clarifying hard limits:
+- [x] Add docs/tests clarifying hard limits:
   no recovery after history eviction; deterministic mode still requires
   dedicated/fixed-geometry sessions; `resize-window` is best-effort under mixed clients
 

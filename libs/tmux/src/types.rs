@@ -248,6 +248,200 @@ impl ExecOutput {
     }
 }
 
+/// Capture normalization mode (DC20).
+///
+/// Controls how captured pane content is processed before delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureNormalizeMode {
+    /// No transformation. Uses `capture-pane -p` (tmux-rendered text, no ANSI).
+    Raw,
+    /// Canonical line endings, trim width-artifact trailing spaces.
+    /// Uses `capture-pane -ep` to preserve ANSI/control sequences.
+    ScreenStable,
+    /// Explicit ANSI/control stripping for human/LLM text workflows.
+    /// Uses `capture-pane -p`, then normalizes line endings.
+    PlainText,
+}
+
+impl Default for CaptureNormalizeMode {
+    fn default() -> Self {
+        CaptureNormalizeMode::Raw
+    }
+}
+
+/// Options for capture operations with fidelity metadata.
+#[derive(Debug, Clone)]
+pub struct CaptureOptions {
+    /// Negative line offset for scrollback history (e.g. -100).
+    /// `None` captures only the visible area.
+    pub history_start: Option<i32>,
+    /// Normalization mode for the captured content.
+    pub normalize: CaptureNormalizeMode,
+    /// Number of overlap lines for incremental sampling (Phase 1.9b).
+    pub overlap_lines: usize,
+    /// Whether to detect geometry reflow around capture (Phase 1.9b).
+    pub detect_reflow: bool,
+}
+
+impl Default for CaptureOptions {
+    fn default() -> Self {
+        CaptureOptions {
+            history_start: None,
+            normalize: CaptureNormalizeMode::Raw,
+            overlap_lines: 0,
+            detect_reflow: false,
+        }
+    }
+}
+
+impl CaptureOptions {
+    /// Create options for a specific mode with no history.
+    pub fn with_mode(mode: CaptureNormalizeMode) -> Self {
+        CaptureOptions {
+            normalize: mode,
+            ..Default::default()
+        }
+    }
+
+    /// Create options with history scrollback.
+    pub fn with_history(start: i32) -> Self {
+        CaptureOptions {
+            history_start: Some(start),
+            ..Default::default()
+        }
+    }
+}
+
+/// Fidelity issue detected during capture (DC20).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FidelityIssue {
+    /// Client set changed during capture window.
+    ClientResize,
+    /// Pane geometry changed during capture window.
+    PaneResize,
+    /// Scrollback history was truncated by tmux history limit.
+    HistoryTruncated,
+    /// Overlap region was ambiguous and required wider recapture.
+    OverlapResync,
+}
+
+/// Fidelity metadata for captured content (DC20).
+///
+/// The hot-path clean case uses `issues: None` for zero heap allocation.
+#[derive(Debug, Clone)]
+pub struct OutputFidelity {
+    /// True when any fidelity degradation was detected.
+    pub degraded: bool,
+    /// `None` is the hot-path clean case: no heap allocation for issue storage.
+    pub issues: Option<Vec<FidelityIssue>>,
+}
+
+impl OutputFidelity {
+    /// Clean fidelity — no degradation, zero allocation.
+    pub fn clean() -> Self {
+        OutputFidelity {
+            degraded: false,
+            issues: None,
+        }
+    }
+
+    /// Degraded fidelity with one or more issues.
+    pub fn degraded(issues: Vec<FidelityIssue>) -> Self {
+        OutputFidelity {
+            degraded: true,
+            issues: Some(issues),
+        }
+    }
+}
+
+impl Default for OutputFidelity {
+    fn default() -> Self {
+        OutputFidelity::clean()
+    }
+}
+
+/// Result of a capture operation with normalization and fidelity metadata (DC20).
+#[derive(Debug, Clone)]
+pub struct CaptureResult {
+    /// Mode-specific public payload.
+    /// - `Raw`: tmux-rendered text, no normalization
+    /// - `ScreenStable`: ANSI-preserving normalized stream
+    /// - `PlainText`: ANSI/control-stripped normalized text
+    pub text: String,
+    /// Exact tmux capture before mode-specific normalization.
+    /// Present for `ScreenStable` (the raw `-ep` output); `None` for `Raw`/`PlainText`.
+    pub raw_text: Option<String>,
+    /// Fidelity metadata for this capture.
+    pub fidelity: OutputFidelity,
+}
+
+/// Attached tmux client information for geometry detection (DC20, Phase 1.9b).
+#[derive(Debug, Clone)]
+pub struct ClientInfo {
+    pub width: u32,
+    pub height: u32,
+    pub session: String,
+}
+
+/// Pane geometry and scrollback state for reflow detection (DC20, Phase 1.9b).
+#[derive(Debug, Clone)]
+pub struct PaneGeometry {
+    pub pane_width: u32,
+    pub pane_height: u32,
+    pub history_size: u32,
+    pub history_limit: u32,
+}
+
+/// Pre/post geometry snapshot for detecting instability during capture (DC20).
+#[derive(Debug, Clone)]
+pub struct GeometrySnapshot {
+    pub clients: Vec<ClientInfo>,
+    pub pane: PaneGeometry,
+    /// Session name for target-scoped client filtering.
+    pub session: String,
+}
+
+impl GeometrySnapshot {
+    /// Compare two snapshots and return detected fidelity issues.
+    ///
+    /// Only compares clients attached to the same session as this snapshot's
+    /// target, avoiding false-positive `ClientResize` from unrelated sessions.
+    pub fn compare(&self, after: &GeometrySnapshot) -> Vec<FidelityIssue> {
+        let mut issues = Vec::new();
+
+        // Filter clients to only those attached to the target session
+        let before_clients: Vec<(u32, u32)> = self
+            .clients
+            .iter()
+            .filter(|c| c.session == self.session)
+            .map(|c| (c.width, c.height))
+            .collect();
+        let after_clients: Vec<(u32, u32)> = after
+            .clients
+            .iter()
+            .filter(|c| c.session == after.session)
+            .map(|c| (c.width, c.height))
+            .collect();
+        if before_clients != after_clients {
+            issues.push(FidelityIssue::ClientResize);
+        }
+
+        // Pane geometry changed
+        if self.pane.pane_width != after.pane.pane_width
+            || self.pane.pane_height != after.pane.pane_height
+        {
+            issues.push(FidelityIssue::PaneResize);
+        }
+
+        // History was truncated (history_size hit limit and wrapped)
+        if after.pane.history_size < self.pane.history_size {
+            issues.push(FidelityIssue::HistoryTruncated);
+        }
+
+        issues
+    }
+}
+
 /// On-demand scrollback sampling query.
 pub enum ScrollbackQuery {
     /// Capture the last N lines.
@@ -363,5 +557,200 @@ mod tests {
     #[should_panic(expected = "TargetSpec::pane() requires window")]
     fn target_spec_pane_without_window_panics() {
         let _ = TargetSpec::session("s").pane(0);
+    }
+
+    #[test]
+    fn capture_normalize_mode_default_is_raw() {
+        assert_eq!(CaptureNormalizeMode::default(), CaptureNormalizeMode::Raw);
+    }
+
+    #[test]
+    fn capture_options_default() {
+        let opts = CaptureOptions::default();
+        assert!(opts.history_start.is_none());
+        assert_eq!(opts.normalize, CaptureNormalizeMode::Raw);
+        assert_eq!(opts.overlap_lines, 0);
+        assert!(!opts.detect_reflow);
+    }
+
+    #[test]
+    fn capture_options_with_mode() {
+        let opts = CaptureOptions::with_mode(CaptureNormalizeMode::ScreenStable);
+        assert_eq!(opts.normalize, CaptureNormalizeMode::ScreenStable);
+        assert!(opts.history_start.is_none());
+    }
+
+    #[test]
+    fn capture_options_with_history() {
+        let opts = CaptureOptions::with_history(-200);
+        assert_eq!(opts.history_start, Some(-200));
+        assert_eq!(opts.normalize, CaptureNormalizeMode::Raw);
+    }
+
+    #[test]
+    fn output_fidelity_clean_zero_alloc() {
+        let f = OutputFidelity::clean();
+        assert!(!f.degraded);
+        assert!(f.issues.is_none());
+    }
+
+    #[test]
+    fn output_fidelity_degraded() {
+        let f = OutputFidelity::degraded(vec![
+            FidelityIssue::ClientResize,
+            FidelityIssue::HistoryTruncated,
+        ]);
+        assert!(f.degraded);
+        let issues = f.issues.as_ref().unwrap();
+        assert_eq!(issues.len(), 2);
+        assert_eq!(issues[0], FidelityIssue::ClientResize);
+        assert_eq!(issues[1], FidelityIssue::HistoryTruncated);
+    }
+
+    #[test]
+    fn output_fidelity_default_is_clean() {
+        let f = OutputFidelity::default();
+        assert!(!f.degraded);
+        assert!(f.issues.is_none());
+    }
+
+    // --- Geometry snapshot tests (Phase 1.9b) ---
+
+    fn make_snapshot(
+        client_sizes: &[(u32, u32)],
+        pane_w: u32,
+        pane_h: u32,
+        hist_size: u32,
+        hist_limit: u32,
+    ) -> GeometrySnapshot {
+        make_snapshot_for_session(client_sizes, pane_w, pane_h, hist_size, hist_limit, "test")
+    }
+
+    fn make_snapshot_for_session(
+        client_sizes: &[(u32, u32)],
+        pane_w: u32,
+        pane_h: u32,
+        hist_size: u32,
+        hist_limit: u32,
+        session: &str,
+    ) -> GeometrySnapshot {
+        GeometrySnapshot {
+            clients: client_sizes
+                .iter()
+                .map(|&(w, h)| ClientInfo {
+                    width: w,
+                    height: h,
+                    session: session.to_string(),
+                })
+                .collect(),
+            pane: PaneGeometry {
+                pane_width: pane_w,
+                pane_height: pane_h,
+                history_size: hist_size,
+                history_limit: hist_limit,
+            },
+            session: session.to_string(),
+        }
+    }
+
+    #[test]
+    fn geometry_snapshot_no_change() {
+        let before = make_snapshot(&[(200, 50)], 80, 24, 100, 2000);
+        let after = make_snapshot(&[(200, 50)], 80, 24, 110, 2000);
+        let issues = before.compare(&after);
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn geometry_snapshot_client_resize() {
+        let before = make_snapshot(&[(200, 50)], 80, 24, 100, 2000);
+        let after = make_snapshot(&[(180, 40)], 80, 24, 100, 2000);
+        let issues = before.compare(&after);
+        assert_eq!(issues, vec![FidelityIssue::ClientResize]);
+    }
+
+    #[test]
+    fn geometry_snapshot_client_attach_detach() {
+        let before = make_snapshot(&[(200, 50)], 80, 24, 100, 2000);
+        let after = make_snapshot(&[(200, 50), (180, 40)], 80, 24, 100, 2000);
+        let issues = before.compare(&after);
+        assert_eq!(issues, vec![FidelityIssue::ClientResize]);
+    }
+
+    #[test]
+    fn geometry_snapshot_pane_resize() {
+        let before = make_snapshot(&[(200, 50)], 80, 24, 100, 2000);
+        let after = make_snapshot(&[(200, 50)], 100, 30, 100, 2000);
+        let issues = before.compare(&after);
+        assert_eq!(issues, vec![FidelityIssue::PaneResize]);
+    }
+
+    #[test]
+    fn geometry_snapshot_history_truncated() {
+        // history_size decreased → history was evicted
+        let before = make_snapshot(&[(200, 50)], 80, 24, 2000, 2000);
+        let after = make_snapshot(&[(200, 50)], 80, 24, 1500, 2000);
+        let issues = before.compare(&after);
+        assert_eq!(issues, vec![FidelityIssue::HistoryTruncated]);
+    }
+
+    #[test]
+    fn geometry_snapshot_multiple_issues() {
+        let before = make_snapshot(&[(200, 50)], 80, 24, 2000, 2000);
+        let after = make_snapshot(&[(180, 40)], 100, 30, 1500, 2000);
+        let issues = before.compare(&after);
+        assert_eq!(issues.len(), 3);
+        assert!(issues.contains(&FidelityIssue::ClientResize));
+        assert!(issues.contains(&FidelityIssue::PaneResize));
+        assert!(issues.contains(&FidelityIssue::HistoryTruncated));
+    }
+
+    #[test]
+    fn geometry_snapshot_no_clients_stable() {
+        let before = make_snapshot(&[], 80, 24, 100, 2000);
+        let after = make_snapshot(&[], 80, 24, 110, 2000);
+        assert!(before.compare(&after).is_empty());
+    }
+
+    #[test]
+    fn geometry_snapshot_unrelated_session_client_ignored() {
+        // Clients attached to a different session should not trigger ClientResize
+        let before = GeometrySnapshot {
+            clients: vec![
+                ClientInfo { width: 200, height: 50, session: "build".to_string() },
+                ClientInfo { width: 180, height: 40, session: "other".to_string() },
+            ],
+            pane: PaneGeometry { pane_width: 80, pane_height: 24, history_size: 100, history_limit: 2000 },
+            session: "build".to_string(),
+        };
+        let after = GeometrySnapshot {
+            clients: vec![
+                ClientInfo { width: 200, height: 50, session: "build".to_string() },
+                // "other" session client resized — should not matter
+                ClientInfo { width: 100, height: 20, session: "other".to_string() },
+            ],
+            pane: PaneGeometry { pane_width: 80, pane_height: 24, history_size: 100, history_limit: 2000 },
+            session: "build".to_string(),
+        };
+        assert!(before.compare(&after).is_empty());
+    }
+
+    #[test]
+    fn geometry_snapshot_same_session_client_resize_detected() {
+        let before = GeometrySnapshot {
+            clients: vec![
+                ClientInfo { width: 200, height: 50, session: "build".to_string() },
+            ],
+            pane: PaneGeometry { pane_width: 80, pane_height: 24, history_size: 100, history_limit: 2000 },
+            session: "build".to_string(),
+        };
+        let after = GeometrySnapshot {
+            clients: vec![
+                ClientInfo { width: 180, height: 40, session: "build".to_string() },
+            ],
+            pane: PaneGeometry { pane_width: 80, pane_height: 24, history_size: 100, history_limit: 2000 },
+            session: "build".to_string(),
+        };
+        assert_eq!(before.compare(&after), vec![FidelityIssue::ClientResize]);
     }
 }

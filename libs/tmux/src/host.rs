@@ -72,6 +72,35 @@ impl HostHandle {
         discovery::list_sessions(&self.inner.transport, self.inner.socket.as_ref()).await
     }
 
+    /// List attached clients on this host (DC20, Phase 1.9b).
+    pub async fn list_clients(&self) -> Result<Vec<ClientInfo>> {
+        discovery::list_clients(&self.inner.transport, self.inner.socket.as_ref()).await
+    }
+
+    /// Set global `history-limit` (DC20, Phase 1.9b).
+    ///
+    /// **Must be set before creating sessions/panes.** Existing panes
+    /// retain their creation-time limit.
+    pub async fn set_global_history_limit(&self, limit: u32) -> Result<()> {
+        control::set_history_limit(
+            &self.inner.transport,
+            self.inner.socket.as_ref(),
+            None,
+            limit,
+        )
+        .await
+    }
+
+    /// Query the global `history-limit` default.
+    pub async fn get_global_history_limit(&self) -> Result<u32> {
+        control::get_history_limit(
+            &self.inner.transport,
+            self.inner.socket.as_ref(),
+            None,
+        )
+        .await
+    }
+
     /// Create a new tmux session. Returns a Target at session level.
     pub async fn create_session(
         &self,
@@ -474,6 +503,41 @@ impl Target {
         .await
     }
 
+    /// Capture with options, returning `CaptureResult` with fidelity metadata (DC20).
+    pub async fn capture_with_options(
+        &self,
+        opts: &CaptureOptions,
+    ) -> Result<CaptureResult> {
+        capture::capture_pane_with_options(
+            &self.inner.transport,
+            self.inner.socket.as_ref(),
+            &self.target_string(),
+            opts,
+        )
+        .await
+    }
+
+    /// Sample scrollback with options, returning `CaptureResult` (DC20).
+    ///
+    /// When `previous_text` is provided and `opts.overlap_lines >= 2`,
+    /// performs overlap-aware dedup between the previous and new capture.
+    pub async fn sample_text_with_options(
+        &self,
+        query: &ScrollbackQuery,
+        opts: &CaptureOptions,
+        previous_text: Option<&str>,
+    ) -> Result<CaptureResult> {
+        capture::sample_text_with_options(
+            &self.inner.transport,
+            self.inner.socket.as_ref(),
+            &self.target_string(),
+            query,
+            opts,
+            previous_text,
+        )
+        .await
+    }
+
     /// Capture all panes under this target.
     /// Session: all panes in all windows. Window: all panes in that window.
     /// Pane: single-entry map.
@@ -516,6 +580,57 @@ impl Target {
                 .await?;
                 let mut result = HashMap::new();
                 result.insert(p.clone(), content);
+                Ok(result)
+            }
+        }
+    }
+
+    /// Capture all panes with options, returning `CaptureResult` per pane (DC20).
+    pub async fn capture_all_with_options(
+        &self,
+        opts: &CaptureOptions,
+    ) -> Result<HashMap<PaneAddress, CaptureResult>> {
+        match &self.address {
+            TargetAddress::Session(_) => {
+                capture::capture_session_with_options(
+                    &self.inner.transport,
+                    self.inner.socket.as_ref(),
+                    self.session_name(),
+                    opts,
+                )
+                .await
+            }
+            TargetAddress::Window(w) => {
+                let panes = discovery::list_panes_in_session(
+                    &self.inner.transport,
+                    self.inner.socket.as_ref(),
+                    &w.session_name,
+                )
+                .await?;
+                let mut result = HashMap::new();
+                for pane in panes.into_iter().filter(|p| p.address.window == w.index) {
+                    let target = pane.address.to_tmux_target();
+                    let cr = capture::capture_pane_with_options(
+                        &self.inner.transport,
+                        self.inner.socket.as_ref(),
+                        &target,
+                        opts,
+                    )
+                    .await?;
+                    result.insert(pane.address, cr);
+                }
+                Ok(result)
+            }
+            TargetAddress::Pane(p) => {
+                let cr = capture::capture_pane_with_options(
+                    &self.inner.transport,
+                    self.inner.socket.as_ref(),
+                    &p.to_tmux_target(),
+                    opts,
+                )
+                .await?;
+                let mut result = HashMap::new();
+                result.insert(p.clone(), cr);
                 Ok(result)
             }
         }
@@ -579,6 +694,52 @@ impl Target {
         }
     }
 
+    // --- Geometry & history (DC20, Phase 1.9b) ---
+
+    /// Query the current pane geometry and scrollback state.
+    pub async fn pane_geometry(&self) -> Result<PaneGeometry> {
+        discovery::query_pane_geometry(
+            &self.inner.transport,
+            self.inner.socket.as_ref(),
+            &self.target_string(),
+        )
+        .await
+    }
+
+    /// Take a full geometry snapshot (clients + pane state).
+    pub async fn geometry_snapshot(&self) -> Result<GeometrySnapshot> {
+        discovery::take_geometry_snapshot(
+            &self.inner.transport,
+            self.inner.socket.as_ref(),
+            &self.target_string(),
+        )
+        .await
+    }
+
+    /// Set `history-limit` for this target's session (DC20, Phase 1.9b).
+    ///
+    /// **Must be called before creating panes** — existing panes keep their
+    /// creation-time limit. Only meaningful at session level.
+    pub async fn set_history_limit(&self, limit: u32) -> Result<()> {
+        control::set_history_limit(
+            &self.inner.transport,
+            self.inner.socket.as_ref(),
+            Some(self.session_name()),
+            limit,
+        )
+        .await
+    }
+
+    /// Query the current `history-limit` for this target's session.
+    pub async fn get_history_limit(&self) -> Result<u32> {
+        control::get_history_limit(
+            &self.inner.transport,
+            self.inner.socket.as_ref(),
+            Some(self.session_name()),
+        )
+        .await
+    }
+
     // --- exec (DC19 sentinel mechanism) ---
 
     /// Execute a shell command in the target pane and capture output.
@@ -629,10 +790,14 @@ impl Target {
                 ));
             }
 
-            // Poll with scrollback history (-500 lines) to prevent sentinel
-            // scrolling out of the visible area on verbose command output.
-            let content =
-                capture::capture_pane_history(transport, socket, &target, -500).await?;
+            // Poll with `-ep` scrollback for wrap-tolerant sentinel detection (DC20).
+            // The escape-mode capture preserves ANSI sequences which we strip
+            // before parsing, so line-wrapping artifacts from width changes
+            // don't break sentinel matching.
+            let raw_content =
+                capture::capture_pane_escape_history(transport, socket, &target, -500)
+                    .await?;
+            let content = capture::strip_ansi(&raw_content);
 
             if let Some(result) = parse_sentinel_output(&content, &marker) {
                 return Ok(result);
@@ -665,43 +830,121 @@ async fn detect_exit_var(
     "$?"
 }
 
-/// Parse sentinel output from captured scrollback.
+/// Parse sentinel output from captured scrollback, tolerating line wraps.
+///
+/// The sentinel pattern is `<marker> <exit_code>`. In narrow panes, this may
+/// wrap across multiple lines. The parser joins all lines and searches for the
+/// marker pattern in the concatenated text, then maps back to line boundaries
+/// for stdout extraction.
 fn parse_sentinel_output(content: &str, marker: &str) -> Option<ExecOutput> {
     let lines: Vec<&str> = content.lines().collect();
 
-    // Find the sentinel output line: starts with the marker (not part of echo command).
-    // The echo command line contains "echo" before the marker.
-    // The sentinel output line starts with the marker directly.
+    // First try single-line match (fast path for normal-width panes)
     let mut sentinel_idx = None;
     for (i, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
-        if trimmed.starts_with(marker) {
+        if trimmed.starts_with(marker) && !trimmed.contains("echo") {
             sentinel_idx = Some(i);
             break;
         }
     }
 
-    let sentinel_idx = sentinel_idx?;
-    let sentinel_line = lines[sentinel_idx].trim();
+    if let Some(idx) = sentinel_idx {
+        // Single-line sentinel found — try to extract exit code from this line
+        let sentinel_line = lines[idx].trim();
+        let after_marker = sentinel_line.strip_prefix(marker).unwrap_or("").trim();
 
-    // Extract exit code: marker followed by space and exit code
-    let after_marker = sentinel_line.strip_prefix(marker)?.trim();
-    let exit_code = after_marker.parse::<i32>().unwrap_or(-1);
+        // Only use fast path if exit code is on the same line
+        if let Ok(exit_code) = after_marker.parse::<i32>() {
+            // Find command echo line (before sentinel, contains marker in a command)
+            let mut cmd_echo_idx = None;
+            for i in (0..idx).rev() {
+                if lines[i].contains(marker) {
+                    cmd_echo_idx = Some(i);
+                    break;
+                }
+            }
 
-    // Find the command echo line (before sentinel, contains the marker in a command)
+            let start = cmd_echo_idx.map_or(0, |i| i + 1);
+            let stdout = lines[start..idx].join("\n");
+            let stdout = stdout.trim_end().to_string();
+            return Some(ExecOutput { stdout, exit_code });
+        }
+        // Exit code not on same line — fall through to wrap-tolerant path
+    }
+
+    // Wrap-tolerant path: join lines and search for marker in concatenated text.
+    // This handles the case where the sentinel wraps across lines in narrow panes.
+    // Build a map of (cumulative_offset, line_index) for mapping back.
+    let mut offsets: Vec<usize> = Vec::with_capacity(lines.len());
+    let mut joined = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        offsets.push(joined.len());
+        if i > 0 {
+            joined.push('\n');
+        }
+        joined.push_str(line.trim());
+    }
+
+    // Find the sentinel output (not the echo command) in joined text.
+    // The echo command line contains "echo" before the marker.
+    // The sentinel output has the marker at a position not preceded by "echo".
+    let mut search_start = 0;
+    let sentinel_pos = loop {
+        let pos = match joined[search_start..].find(marker) {
+            Some(p) => search_start + p,
+            None => return None,
+        };
+
+        // Check this isn't the echo command (look back for "echo")
+        let before = &joined[..pos];
+        let is_echo_cmd = before.len() >= 4
+            && before[before.len().saturating_sub(20)..].contains("echo");
+
+        if !is_echo_cmd {
+            break pos;
+        }
+
+        search_start = pos + marker.len();
+        if search_start >= joined.len() {
+            return None;
+        }
+    };
+
+    // Extract exit code from text after marker
+    let after_marker = &joined[sentinel_pos + marker.len()..];
+    let after_trimmed = after_marker.trim_start();
+    let exit_code_str: String = after_trimmed.chars().take_while(|c| c.is_ascii_digit() || *c == '-').collect();
+    let exit_code = exit_code_str.parse::<i32>().unwrap_or(-1);
+
+    // Map sentinel position back to line index for stdout extraction
+    let sentinel_line_idx = offsets
+        .iter()
+        .rposition(|&off| off <= sentinel_pos)
+        .unwrap_or(0);
+
+    // Find command echo line (contains marker before sentinel)
     let mut cmd_echo_idx = None;
-    for i in (0..sentinel_idx).rev() {
+    for i in (0..sentinel_line_idx).rev() {
         if lines[i].contains(marker) {
             cmd_echo_idx = Some(i);
             break;
         }
     }
+    // Also check if the sentinel_line_idx itself is the echo line (sentinel wrapped from echo)
+    if cmd_echo_idx.is_none() && sentinel_line_idx > 0 {
+        // The echo and sentinel merged in joined text; check lines above
+        for i in (0..sentinel_line_idx).rev() {
+            if lines[i].contains("echo") {
+                cmd_echo_idx = Some(i);
+                break;
+            }
+        }
+    }
 
-    // stdout is everything between command echo and sentinel
     let start = cmd_echo_idx.map_or(0, |i| i + 1);
-    let stdout = lines[start..sentinel_idx].join("\n");
+    let stdout = lines[start..sentinel_line_idx].join("\n");
     let stdout = stdout.trim_end().to_string();
-
     Some(ExecOutput { stdout, exit_code })
 }
 
@@ -832,6 +1075,39 @@ mod tests {
         let result = parse_sentinel_output(&content, marker).unwrap();
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.stdout, "file1\nfile2\nfile3");
+    }
+
+    #[test]
+    fn parse_sentinel_wrapped_across_lines() {
+        // Simulate a narrow pane (e.g., 20 cols) where the sentinel wraps
+        let marker = "__MLabc123__";
+        // The echo output wraps: marker starts on one line, exit code on next
+        let content = format!(
+            "$ cmd ; echo \"{} $?\"\noutput\n{}",
+            marker, marker
+        );
+        // Marker split across lines: "__MLabc123__" then " 0" on next line
+        let wrapped = format!("{}\n 0\n$", content);
+        let result = parse_sentinel_output(&wrapped, marker);
+        assert!(result.is_some());
+        let out = result.unwrap();
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stdout.contains("output"));
+    }
+
+    #[test]
+    fn parse_sentinel_wrapped_marker_split() {
+        // Even more extreme: marker itself wraps mid-token in joined text
+        // In practice the marker is short (~16 chars) so this is rare,
+        // but the joined-text search should still find it
+        let marker = "__MLxyz789__";
+        let content = format!(
+            "$ echo \"{} $?\"\nhello world\n{} 42\n$",
+            marker, marker
+        );
+        let result = parse_sentinel_output(&content, marker).unwrap();
+        assert_eq!(result.exit_code, 42);
+        assert_eq!(result.stdout, "hello world");
     }
 
     #[tokio::test]
