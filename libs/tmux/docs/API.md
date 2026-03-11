@@ -362,13 +362,21 @@ target.rename("new_name").await?;
 ```
 
 > **`@claude NOTE`**: `rename()` mutates tmux state but does **not** update
-> the `Target`'s internal address. After renaming, the `Target` holds a stale
-> name. Subsequent operations using that `Target` will fail because tmux
-> can't find the old name. You must obtain a fresh `Target`:
-> ```rust
-> target.rename("new_name").await?;
-> let target = host.session("new_name").await?.unwrap(); // fresh handle
-> ```
+> the `Target`'s internal address. The impact depends on target level:
+>
+> - **Session rename** — correctness-significant. `target_string()` uses the
+>   session name (`s.name`), so after rename the old name is stale and
+>   subsequent operations **fail** because tmux can't find it. You must
+>   obtain a fresh `Target`:
+>   ```rust
+>   target.rename("new_name").await?;
+>   let target = host.session("new_name").await?.unwrap(); // fresh handle
+>   ```
+> - **Window rename** — metadata drift only. `target_string()` uses
+>   `session:index` (not the window name), so commands continue to work.
+>   However, the cached `WindowInfo.name` becomes stale — callers displaying
+>   window names should re-query.
+>
 > Consider having `rename()` return a new `Target` with the updated address,
 > or making `Target` internally mutable.
 
