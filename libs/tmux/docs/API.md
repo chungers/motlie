@@ -20,28 +20,27 @@ All examples assume an async context (`#[tokio::main]` or `#[tokio::test]`).
 ## Table of Contents
 
 **Part I — Transport Layer**
-1. [Transport Overview](#1-transport-overview)
-2. [LocalTransport](#2-localtransport)
-3. [SshTransport](#3-sshtransport)
-4. [MockTransport](#4-mocktransport)
-5. [Transport Comparison](#5-transport-comparison)
+1. [LocalTransport](#1-localtransport)
+2. [SshTransport](#2-sshtransport)
+3. [MockTransport](#3-mocktransport)
+4. [Transport Comparison](#4-transport-comparison)
 
 **Part II — Common API (transport-agnostic)**
-6. [HostHandle](#6-hosthandle)
-7. [Session Lifecycle](#7-session-lifecycle)
-8. [Discovery](#8-discovery)
-9. [Target and Navigation](#9-target-and-navigation)
-10. [Sending Input](#10-sending-input)
-11. [Capturing Output](#11-capturing-output)
-12. [Structured Command Execution](#12-structured-command-execution)
-13. [Advanced Capture — Modes and Fidelity](#13-advanced-capture--modes-and-fidelity)
-14. [Scrollback Sampling](#14-scrollback-sampling)
-15. [Geometry and Reflow Detection](#15-geometry-and-reflow-detection)
-16. [History Limit Management](#16-history-limit-management)
+5. [HostHandle](#5-hosthandle)
+6. [Session Lifecycle](#6-session-lifecycle)
+7. [Discovery](#7-discovery)
+8. [Target and Navigation](#8-target-and-navigation)
+9. [Sending Input](#9-sending-input)
+10. [Capturing Output](#10-capturing-output)
+11. [Structured Command Execution](#11-structured-command-execution)
+12. [Advanced Capture — Modes and Fidelity](#12-advanced-capture--modes-and-fidelity)
+13. [Scrollback Sampling](#13-scrollback-sampling)
+14. [Geometry and Reflow Detection](#14-geometry-and-reflow-detection)
+15. [History Limit Management](#15-history-limit-management)
 
 **Part III — Reference**
-17. [Normalization Utilities](#17-normalization-utilities)
-18. [Type Quick Reference](#18-type-quick-reference)
+16. [Normalization Utilities](#16-normalization-utilities)
+17. [Type Quick Reference](#17-type-quick-reference)
 
 ---
 
@@ -61,13 +60,14 @@ pub enum TransportKind {
 }
 ```
 
-Once a `HostHandle` is constructed with a transport, the entire API above
-it is identical regardless of which variant is used. The sections below
-cover each transport's setup and characteristics.
+Once a `HostHandle` is constructed with a transport, the same top-level
+API calls are available regardless of which variant is used. Behavioral
+differences exist (e.g. Mock never errors, SSH has keepalives) and are
+called out per-transport below and in the comparison table.
 
 ---
 
-## 2. LocalTransport
+## 1. LocalTransport
 
 Executes commands via `sh -c` subprocesses on the local machine. This is
 the default and simplest path.
@@ -124,7 +124,7 @@ let host = HostHandle::new(
 
 ---
 
-## 3. SshTransport
+## 2. SshTransport
 
 Executes commands on a remote host over SSH using `russh` 0.46.
 Authentication is via ssh-agent only.
@@ -208,7 +208,7 @@ if ssh.is_closed() {
 
 ---
 
-## 4. MockTransport
+## 3. MockTransport
 
 Canned responses for unit testing. No real commands are executed.
 
@@ -282,7 +282,7 @@ async fn test_session_lifecycle() {
 
 ---
 
-## 5. Transport Comparison
+## 4. Transport Comparison
 
 | Aspect | Local | SSH | Mock |
 |--------|-------|-----|------|
@@ -301,13 +301,14 @@ async fn test_session_lifecycle() {
 
 # Part II — Common API (transport-agnostic)
 
-Everything below works identically across Local, SSH, and Mock transports.
-The transport is selected once at `HostHandle` construction and is invisible
-from that point forward.
+Everything below uses the same call patterns across Local, SSH, and Mock
+transports. The transport is selected once at `HostHandle` construction.
+Behavioral differences (e.g. Mock never errors, SSH shell channels use PTY)
+are noted in the transport sections above.
 
 ---
 
-## 6. HostHandle
+## 5. HostHandle
 
 `HostHandle` is the entry point for all tmux operations on a host.
 It wraps `Arc<...>` and is cheaply `Clone`able — multiple handles share
@@ -334,7 +335,7 @@ let host2 = host.clone();
 
 ---
 
-## 7. Session Lifecycle
+## 6. Session Lifecycle
 
 ### Create
 
@@ -378,7 +379,7 @@ target.rename("new_name").await?;
 
 ---
 
-## 8. Discovery
+## 7. Discovery
 
 All discovery methods return empty `Vec`s (not errors) when there is no
 tmux server running or no entities exist.
@@ -445,7 +446,7 @@ for c in &clients {
 
 ---
 
-## 9. Target and Navigation
+## 8. Target and Navigation
 
 `Target` is a unified handle at any hierarchy level — session, window, or pane.
 It is **not `Clone`**; to share, use `HostHandle::session()` or
@@ -496,7 +497,7 @@ let pane = target.pane_by_address(&addr);
 
 ---
 
-## 10. Sending Input
+## 9. Sending Input
 
 ### Literal text
 
@@ -539,7 +540,7 @@ also shell-escaped before execution).
 
 ---
 
-## 11. Capturing Output
+## 10. Capturing Output
 
 ### Visible pane content
 
@@ -579,7 +580,7 @@ for (addr, content) in &all {
 
 ---
 
-## 12. Structured Command Execution
+## 11. Structured Command Execution
 
 `Target::exec()` runs a shell command **inside the target's tmux pane** and
 returns structured output. This is different from the transport-level `exec()`
@@ -641,7 +642,7 @@ let pane_target = session_target.pane(0).await?.unwrap();
 
 ---
 
-## 13. Advanced Capture — Modes and Fidelity
+## 12. Advanced Capture — Modes and Fidelity
 
 ### Capture normalization modes
 
@@ -710,7 +711,7 @@ let all: HashMap<PaneAddress, CaptureResult> =
 
 ---
 
-## 14. Scrollback Sampling
+## 13. Scrollback Sampling
 
 Query-based extraction of scrollback history.
 
@@ -781,7 +782,7 @@ let second = target.sample_text_with_options(
 
 ---
 
-## 15. Geometry and Reflow Detection
+## 14. Geometry and Reflow Detection
 
 Query pane geometry and detect capture-time instability from client or
 pane size changes.
@@ -810,7 +811,7 @@ let issues = before.compare(&after);
 
 ---
 
-## 16. History Limit Management
+## 15. History Limit Management
 
 Tmux's `history-limit` controls max scrollback lines per pane.
 
@@ -844,7 +845,7 @@ let limit = target.get_history_limit().await?;
 
 # Part III — Reference
 
-## 17. Normalization Utilities
+## 16. Normalization Utilities
 
 Standalone functions re-exported from the crate root, usable independently
 of any transport or target:
@@ -878,7 +879,7 @@ assert!(issues.is_empty());
 
 ---
 
-## 18. Type Quick Reference
+## 17. Type Quick Reference
 
 ### Core handles
 
