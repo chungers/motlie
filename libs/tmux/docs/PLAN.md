@@ -341,6 +341,8 @@ Add `SshTransport` and a thin monitoring vertical slice with control mode parsin
 - [ ] `SinkEvent` enum: `Data(TargetOutput)` and `Gap { dropped, timestamp }`
 - [ ] `TargetOutput` accessors: `session_name()`, `pane_id()`, `target_string()`
 - [ ] `OutputFidelity` / `FidelityIssue` enums shared with capture/monitor paths
+- [ ] `MatcherInput` enum: `Preserve` (match delivered `content`),
+  `PlainTextDerived` (derive sink-local plain-text view from `content`)
 - [ ] `SinkFilter`: `host`, `session`, `window`, `pane` (all optional regex strings),
   `content: Option<MatcherKind>`, `matcher_input: MatcherInput`
 - [ ] Define content-matching contract: `SinkFilter.content` matches either
@@ -544,7 +546,11 @@ Out of current scope. Listed for continuity.
  │     │
  │     ├── 1.8 Localhost integration test
  │     │
- │     └── 2a.2 Monitor parser
+ │     ├── 1.9a Capture fidelity types [needs 1.5 + 1.7]
+ │     │
+ │     ├── 1.9b Mixed-client stabilization [needs 1.9a]
+ │     │
+ │     └── 2a.2 Monitor parser [needs 1.7 + 1.9a]
  │          │
  │          └── 2a.4 Monitor handles
  │               │
@@ -660,7 +666,7 @@ Dev B starts `2b.2 Matcher` immediately after `1.2 Keys` — it depends only on 
 | **B** | Input + monitoring (keys → control → SSH → monitor → rules) | 1.2 → 1.6 → 2a.1 → 2a.3 → 2a.2 → **2b.3** → **2c.4** → 3.3 → 3.4 |
 | **C** | Matching + sink pipeline (matcher → config → sinks → bus) | 2b.2 → 2b.1 → 2c.1 → 2c.2 → 2c.3 |
 
-Sync points: **1.7** (B's 1.6 ready), **2a.4** (B's 2a.3 + A picks up 2a.2 after 1.9a), **2b.3** (C's 2b.1 ready for B), **2c.4** (B takes this after 2b.3 — serial on `monitor.rs`/`host.rs`; needs C's 2c.3), **3.1** (all tracks converge).
+Sync points: **1.7** (B's 1.6 ready), **2a.2** (B waits for A's 1.9a before starting monitor parser), **2a.4** (B's 2a.3 merges with B's 2a.2), **2b.3** (C's 2b.1 ready for B), **2c.4** (B takes this after 2b.3 — serial on `monitor.rs`/`host.rs`; needs C's 2c.3), **3.1** (all tracks converge).
 
 Dev C is fully independent through T1–T7 — they only touch `matcher.rs`, `config.rs`, `sink.rs`, and `sinks/`. Dev B owns the `monitor.rs`/`host.rs` serialization: 2b.3 (rules + reconnection) then 2c.4 (sink wiring).
 
