@@ -240,7 +240,12 @@ Add `SshTransport` and a thin monitoring vertical slice with control mode parsin
 - [x] `SshTransport::open_shell()` — PTY channel with shell, piped I/O
 - [x] Add `Ssh(SshTransport)` variant to `TransportKind` and `ShellChannelKind`
 - [x] Actionable error messages for SSH agent failures (OC3)
-- [x] Unit tests: mock-based (no real SSH server needed at this stage)
+- [x] Unit tests: `SshConfig` builder/defaults
+  <!-- @claude 2026-03-10: Mock-based tests for TransportKind::Ssh dispatch, host-key
+       policy behavior, and agent failure paths deferred — russh Handler/Handle types
+       are not easily mockable without a real SSH handshake. Integration testing against
+       a real SSH server (or Docker-based in 4.3) will cover these paths. See PR #67
+       review. -->
 
 **Depends on**: 1.3
 

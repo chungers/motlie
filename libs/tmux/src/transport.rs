@@ -289,11 +289,13 @@ impl russh::client::Handler for SshHandler {
                             self.port,
                             server_public_key,
                         ) {
-                            tracing::warn!(
+                            tracing::error!(
                                 host = %self.host,
                                 error = %e,
-                                "Failed to persist host key to known_hosts"
+                                "TOFU: failed to persist host key — rejecting connection. \
+                                 Check that ~/.ssh/known_hosts is writable."
                             );
+                            return Ok(false);
                         }
                         Ok(true)
                     }
@@ -312,14 +314,18 @@ impl russh::client::Handler for SshHandler {
                         tracing::warn!(
                             host = %self.host,
                             error = %e,
-                            "Failed to check known_hosts, accepting key (TOFU)"
+                            "Failed to check known_hosts, attempting to learn key (TOFU)"
                         );
                         if let Err(e) = russh_keys::known_hosts::learn_known_hosts(
                             &self.host,
                             self.port,
                             server_public_key,
                         ) {
-                            tracing::warn!(error = %e, "Failed to persist host key");
+                            tracing::error!(
+                                error = %e,
+                                "TOFU: failed to persist host key — rejecting connection"
+                            );
+                            return Ok(false);
                         }
                         Ok(true)
                     }
@@ -460,40 +466,59 @@ impl SshTransport {
     }
 
     /// Execute a command on the remote host and return stdout.
+    ///
+    /// The SSH handle lock is held only during channel open, not for the full
+    /// command lifetime, allowing multiple concurrent execs on the same connection.
     async fn exec(&self, command: &str) -> Result<String> {
-        let handle = self.handle.lock().await;
-
-        let mut channel = handle.channel_open_session().await.map_err(|e| {
-            anyhow!("SSH: failed to open session channel: {}", e)
-        })?;
+        // Lock only to open the channel, then release. The Channel is
+        // self-contained — its read/write operations don't need the Handle.
+        let mut channel = {
+            let handle = self.handle.lock().await;
+            handle.channel_open_session().await.map_err(|e| {
+                anyhow!("SSH: failed to open session channel: {}", e)
+            })?
+        };
 
         channel.exec(true, command).await.map_err(|e| {
             anyhow!("SSH: failed to exec command: {}", e)
         })?;
 
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let mut exit_code: Option<u32> = None;
+        // Collect output with timeout
+        let result = tokio::time::timeout(self.config.timeout, async {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let mut exit_code: Option<u32> = None;
 
-        while let Some(msg) = channel.wait().await {
-            match msg {
-                russh::ChannelMsg::Data { ref data } => {
-                    stdout.extend_from_slice(data);
-                }
-                russh::ChannelMsg::ExtendedData { ref data, ext } => {
-                    if ext == 1 {
-                        // stderr
-                        stderr.extend_from_slice(data);
+            while let Some(msg) = channel.wait().await {
+                match msg {
+                    russh::ChannelMsg::Data { ref data } => {
+                        stdout.extend_from_slice(data);
                     }
+                    russh::ChannelMsg::ExtendedData { ref data, ext } => {
+                        if ext == 1 {
+                            stderr.extend_from_slice(data);
+                        }
+                    }
+                    russh::ChannelMsg::ExitStatus { exit_status } => {
+                        exit_code = Some(exit_status);
+                    }
+                    russh::ChannelMsg::Eof | russh::ChannelMsg::Close => break,
+                    _ => {}
                 }
-                russh::ChannelMsg::ExitStatus { exit_status } => {
-                    exit_code = Some(exit_status);
-                }
-                russh::ChannelMsg::Eof | russh::ChannelMsg::Close => break,
-                _ => {}
             }
-        }
 
+            (stdout, stderr, exit_code)
+        })
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "SSH command timed out after {:?}: {}",
+                self.config.timeout,
+                command
+            )
+        })?;
+
+        let (stdout, stderr, exit_code) = result;
         let code = exit_code.unwrap_or(0);
         if code != 0 {
             let stderr_str = String::from_utf8_lossy(&stderr);
@@ -510,11 +535,12 @@ impl SshTransport {
 
     /// Open a persistent shell channel on the remote host with a PTY.
     async fn open_shell(&self) -> Result<SshShellChannel> {
-        let handle = self.handle.lock().await;
-
-        let channel = handle.channel_open_session().await.map_err(|e| {
-            anyhow!("SSH: failed to open session channel for shell: {}", e)
-        })?;
+        let channel = {
+            let handle = self.handle.lock().await;
+            handle.channel_open_session().await.map_err(|e| {
+                anyhow!("SSH: failed to open session channel for shell: {}", e)
+            })?
+        };
 
         // Request a PTY for interactive shell use
         channel
