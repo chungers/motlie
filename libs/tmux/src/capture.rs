@@ -356,12 +356,17 @@ pub async fn capture_pane_with_options(
 }
 
 /// Sample scrollback text with options, returning a `CaptureResult`.
+///
+/// When `previous_text` is provided and `opts.overlap_lines >= 2`, performs
+/// overlap-aware dedup between the previous capture and the new one.
+/// If overlap matching fails, the result includes `OverlapResync` in fidelity.
 pub async fn sample_text_with_options(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
     target: &str,
     query: &ScrollbackQuery,
     opts: &CaptureOptions,
+    previous_text: Option<&str>,
 ) -> Result<CaptureResult> {
     let (pre_snapshot, _) =
         detect_fidelity(transport, socket, target, opts.detect_reflow).await;
@@ -390,7 +395,7 @@ pub async fn sample_text_with_options(
 
     let raw = raw_capture(transport, socket, target, &effective_opts).await?;
 
-    let fidelity =
+    let mut fidelity =
         finalize_fidelity(transport, socket, target, pre_snapshot).await;
 
     // Apply query-specific filtering on normalized text
@@ -428,8 +433,29 @@ pub async fn sample_text_with_options(
         }
     };
 
+    // Apply overlap dedup if previous text and sufficient overlap lines provided
+    let final_text = if let Some(prev) = previous_text {
+        if opts.overlap_lines >= 2 {
+            let (merged, overlap_issues) =
+                overlap_deduplicate(prev, &filtered, opts.overlap_lines);
+            if !overlap_issues.is_empty() {
+                // Merge overlap issues into fidelity
+                let mut all_issues = fidelity
+                    .issues
+                    .unwrap_or_default();
+                all_issues.extend(overlap_issues);
+                fidelity = OutputFidelity::degraded(all_issues);
+            }
+            merged
+        } else {
+            filtered
+        }
+    } else {
+        filtered
+    };
+
     Ok(CaptureResult {
-        text: filtered,
+        text: final_text,
         raw_text,
         fidelity,
     })
@@ -753,7 +779,7 @@ mod tests {
         };
         let opts = CaptureOptions::with_mode(CaptureNormalizeMode::PlainText);
         let result =
-            sample_text_with_options(&transport, None, "test:0.0", &query, &opts)
+            sample_text_with_options(&transport, None, "test:0.0", &query, &opts, None)
                 .await
                 .unwrap();
         // ANSI stripped, pattern matching works on plain text
@@ -840,6 +866,53 @@ mod tests {
         let (merged, issues) = overlap_deduplicate(previous, current, 3);
         assert!(issues.is_empty());
         assert_eq!(merged, "a\nb\nc\nd\ne\nf\ng");
+    }
+
+    #[tokio::test]
+    async fn sample_text_with_options_overlap_dedup() {
+        let mock = MockTransport::new().with_response(
+            "capture-pane",
+            "line3\nline4\nline5\nline6\n",
+        );
+        let transport = TransportKind::Mock(mock);
+        let query = ScrollbackQuery::LastLines(4);
+        let opts = CaptureOptions {
+            overlap_lines: 2,
+            ..Default::default()
+        };
+        let previous = "line1\nline2\nline3\nline4";
+        let result =
+            sample_text_with_options(&transport, None, "t:0.0", &query, &opts, Some(previous))
+                .await
+                .unwrap();
+        // overlap_deduplicate should merge: previous + new unique lines
+        assert!(result.text.contains("line1"));
+        assert!(result.text.contains("line5"));
+        assert!(result.text.contains("line6"));
+        assert!(!result.fidelity.degraded);
+    }
+
+    #[tokio::test]
+    async fn sample_text_with_options_overlap_resync() {
+        let mock = MockTransport::new().with_response(
+            "capture-pane",
+            "completely\ndifferent\ncontent\n",
+        );
+        let transport = TransportKind::Mock(mock);
+        let query = ScrollbackQuery::LastLines(3);
+        let opts = CaptureOptions {
+            overlap_lines: 2,
+            ..Default::default()
+        };
+        let previous = "line1\nline2\nline3";
+        let result =
+            sample_text_with_options(&transport, None, "t:0.0", &query, &opts, Some(previous))
+                .await
+                .unwrap();
+        // No overlap match → OverlapResync, falls back to current content
+        assert!(result.fidelity.degraded);
+        let issues = result.fidelity.issues.unwrap();
+        assert!(issues.contains(&FidelityIssue::OverlapResync));
     }
 
     // --- Reflow-aware capture tests (Phase 1.9b) ---

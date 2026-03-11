@@ -133,6 +133,9 @@ pub async fn query_pane_geometry(
 }
 
 /// Take a full geometry snapshot: clients + pane state (DC20, Phase 1.9b).
+///
+/// `target` is a tmux target string (e.g. "build:0.0"). The session name
+/// is extracted from the target to scope client filtering.
 pub async fn take_geometry_snapshot(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
@@ -140,7 +143,36 @@ pub async fn take_geometry_snapshot(
 ) -> Result<GeometrySnapshot> {
     let clients = list_clients(transport, socket).await?;
     let pane = query_pane_geometry(transport, socket, target).await?;
-    Ok(GeometrySnapshot { clients, pane })
+
+    // Extract session name from target string for session-scoped client filtering.
+    // Target formats: "session", "session:window", "session:window.pane", "%pane_id"
+    let session = if target.starts_with('%') {
+        // Pane ID target — query tmux for session name
+        let prefix = tmux_prefix(socket);
+        let cmd = format!(
+            "{} display-message -p -t '{}' '#{{session_name}}'",
+            prefix,
+            shell_escape_arg(target)
+        );
+        transport
+            .exec(&cmd)
+            .await
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    } else {
+        // Parse session from target string (everything before first ':')
+        target
+            .split(':')
+            .next()
+            .unwrap_or(target)
+            .to_string()
+    };
+
+    Ok(GeometrySnapshot {
+        clients,
+        pane,
+        session,
+    })
 }
 
 fn parse_clients(output: &str) -> Result<Vec<ClientInfo>> {
@@ -414,5 +446,6 @@ mod tests {
         assert_eq!(snap.clients.len(), 1);
         assert_eq!(snap.pane.pane_width, 80);
         assert_eq!(snap.pane.history_size, 100);
+        assert_eq!(snap.session, "build");
     }
 }

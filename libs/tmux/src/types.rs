@@ -397,18 +397,31 @@ pub struct PaneGeometry {
 pub struct GeometrySnapshot {
     pub clients: Vec<ClientInfo>,
     pub pane: PaneGeometry,
+    /// Session name for target-scoped client filtering.
+    pub session: String,
 }
 
 impl GeometrySnapshot {
     /// Compare two snapshots and return detected fidelity issues.
+    ///
+    /// Only compares clients attached to the same session as this snapshot's
+    /// target, avoiding false-positive `ClientResize` from unrelated sessions.
     pub fn compare(&self, after: &GeometrySnapshot) -> Vec<FidelityIssue> {
         let mut issues = Vec::new();
 
-        // Client set changed (attach/detach or resize)
-        let before_clients: Vec<(u32, u32)> =
-            self.clients.iter().map(|c| (c.width, c.height)).collect();
-        let after_clients: Vec<(u32, u32)> =
-            after.clients.iter().map(|c| (c.width, c.height)).collect();
+        // Filter clients to only those attached to the target session
+        let before_clients: Vec<(u32, u32)> = self
+            .clients
+            .iter()
+            .filter(|c| c.session == self.session)
+            .map(|c| (c.width, c.height))
+            .collect();
+        let after_clients: Vec<(u32, u32)> = after
+            .clients
+            .iter()
+            .filter(|c| c.session == after.session)
+            .map(|c| (c.width, c.height))
+            .collect();
         if before_clients != after_clients {
             issues.push(FidelityIssue::ClientResize);
         }
@@ -610,13 +623,24 @@ mod tests {
         hist_size: u32,
         hist_limit: u32,
     ) -> GeometrySnapshot {
+        make_snapshot_for_session(client_sizes, pane_w, pane_h, hist_size, hist_limit, "test")
+    }
+
+    fn make_snapshot_for_session(
+        client_sizes: &[(u32, u32)],
+        pane_w: u32,
+        pane_h: u32,
+        hist_size: u32,
+        hist_limit: u32,
+        session: &str,
+    ) -> GeometrySnapshot {
         GeometrySnapshot {
             clients: client_sizes
                 .iter()
                 .map(|&(w, h)| ClientInfo {
                     width: w,
                     height: h,
-                    session: "test".to_string(),
+                    session: session.to_string(),
                 })
                 .collect(),
             pane: PaneGeometry {
@@ -625,6 +649,7 @@ mod tests {
                 history_size: hist_size,
                 history_limit: hist_limit,
             },
+            session: session.to_string(),
         }
     }
 
@@ -685,5 +710,47 @@ mod tests {
         let before = make_snapshot(&[], 80, 24, 100, 2000);
         let after = make_snapshot(&[], 80, 24, 110, 2000);
         assert!(before.compare(&after).is_empty());
+    }
+
+    #[test]
+    fn geometry_snapshot_unrelated_session_client_ignored() {
+        // Clients attached to a different session should not trigger ClientResize
+        let before = GeometrySnapshot {
+            clients: vec![
+                ClientInfo { width: 200, height: 50, session: "build".to_string() },
+                ClientInfo { width: 180, height: 40, session: "other".to_string() },
+            ],
+            pane: PaneGeometry { pane_width: 80, pane_height: 24, history_size: 100, history_limit: 2000 },
+            session: "build".to_string(),
+        };
+        let after = GeometrySnapshot {
+            clients: vec![
+                ClientInfo { width: 200, height: 50, session: "build".to_string() },
+                // "other" session client resized — should not matter
+                ClientInfo { width: 100, height: 20, session: "other".to_string() },
+            ],
+            pane: PaneGeometry { pane_width: 80, pane_height: 24, history_size: 100, history_limit: 2000 },
+            session: "build".to_string(),
+        };
+        assert!(before.compare(&after).is_empty());
+    }
+
+    #[test]
+    fn geometry_snapshot_same_session_client_resize_detected() {
+        let before = GeometrySnapshot {
+            clients: vec![
+                ClientInfo { width: 200, height: 50, session: "build".to_string() },
+            ],
+            pane: PaneGeometry { pane_width: 80, pane_height: 24, history_size: 100, history_limit: 2000 },
+            session: "build".to_string(),
+        };
+        let after = GeometrySnapshot {
+            clients: vec![
+                ClientInfo { width: 180, height: 40, session: "build".to_string() },
+            ],
+            pane: PaneGeometry { pane_width: 80, pane_height: 24, history_size: 100, history_limit: 2000 },
+            session: "build".to_string(),
+        };
+        assert_eq!(before.compare(&after), vec![FidelityIssue::ClientResize]);
     }
 }
