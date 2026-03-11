@@ -1,5 +1,11 @@
 # Tmux Multi-Target Automator — Implementation Plan
 
+## Change Log
+
+| Date | Who | Summary |
+|------|-----|---------|
+| 2026-03-10 | @codex | Address PR #65 review feedback: split Phase `1.9` into `1.9a`/`1.9b`, keep default capture wrappers `Raw`, make `ExecStable` internal-only, scope history-limit work to setup-time/new panes, and move sink backpressure signaling to `SinkEvent::Gap`. |
+
 Derived from [DESIGN.md](./DESIGN.md). Each task is scoped to produce a compilable,
 testable increment. Dependencies are explicit. File paths are relative to `libs/tmux/`.
 
@@ -145,20 +151,37 @@ No SSH, no monitoring.
 
 **Depends on**: 1.7
 
-### 1.9 — Capture Normalization + Mixed-Client Resize Resilience
+### 1.9a — Capture Fidelity Types + Explicit Modes
 
 - [ ] Define fidelity/normalization types in `types.rs`:
-  `CaptureNormalizeMode` (`Raw`, `ScreenStable`, `ExecStable`, `PlainText`) and
-  `CaptureOptions` (`history_start`, `overlap_lines`, `min_history_limit`,
-  `detect_reflow`), plus `OutputFidelity` and `CaptureResult`
-- [ ] Add `capture_with_options` and `sample_text_with_options` APIs returning
-  `CaptureResult`. Keep existing `capture()`/`sample_text()` as wrappers over
-  `CaptureResult.text` with defaults (`ScreenStable`)
-- [ ] Implement screen-stability normalization that preserves ANSI/control sequences:
-  canonical line endings, width-artifact trimming, no ANSI stripping in multi-client
-  stability modes
+  `CaptureNormalizeMode` (`Raw`, `ScreenStable`, `PlainText`) and
+  `CaptureOptions` (`history_start`, `overlap_lines`, `detect_reflow`), plus
+  `OutputFidelity` and `CaptureResult`
+- [ ] Make the hot-path clean case zero-allocation in docs/code shape:
+  `OutputFidelity.issues: Option<Vec<FidelityIssue>>`
+- [ ] Add `capture_with_options`, `sample_text_with_options`, and bulk-capture
+  result APIs returning `CaptureResult`
+- [ ] Keep existing `capture()` / `sample_text()` / `capture_all()` wrappers as
+  explicit `Raw` convenience APIs
+- [ ] Implement `ScreenStable` normalization with ANSI/control preservation in the
+  public payload: canonical line endings, width-artifact trimming only
 - [ ] Keep ANSI/control stripping as explicit opt-in only (`PlainText` mode) for
-  human/LLM text workflows
+  human/LLM and matcher-oriented workflows
+- [ ] Document and implement the mode-to-field contract:
+  `text` / `content` are mode-specific public payloads, `raw_text` /
+  `raw_content` are exact-capture sidecars when requested
+- [ ] Update `Target::exec()` polling/parser to use an internal derived parser view
+  for wrap-tolerant sentinel detection without exposing a public `ExecStable` mode
+- [ ] Add unit tests for:
+  raw-vs-screen-stable-vs-plain-text mapping, wrapped sentinel splits, bulk capture
+  options, and hot-path clean fidelity metadata
+- [ ] Treat `1.9a` as the hard usability gate before monitor/sink work:
+  `2a.2` and `2c.*` consume `1.9a` metadata/types rather than inventing parallel contracts
+
+**Depends on**: 1.5, 1.7
+
+### 1.9b — Mixed-Client Stabilization
+
 - [ ] Add geometry snapshot helpers using tmux metadata:
   - `list-clients -F` for attached client sizes (`client_width`, `client_height`,
     `client_session`)
@@ -167,28 +190,21 @@ No SSH, no monitoring.
 - [ ] Add reflow detection around capture/sampling/exec polling windows:
   compare pre/post geometry snapshots; return degraded status (or retry) when client
   mix/geometry changes during operation
-- [ ] Add dynamic history-limit floor management per target window:
-  compute `desired = max(current_limit, configured_floor, requested_lines +
-  overlap_lines + safety_margin)`, apply via `set-option -w`, never lower existing limit
-- [ ] Update `Target::exec()` polling/parser to use `ExecStable` semantics:
-  wrap-tolerant sentinel detection on derived parser view while preserving captured
-  fidelity mode
-- [ ] Add overlap-aware incremental sampling:
-  track `history_size` per target, capture tail with overlap, dedupe by suffix/prefix
-  match to avoid missing/duplicated lines at chunk boundaries
+- [ ] Add overlap-aware incremental sampling with explicit resync behavior:
+  track `history_size` per target, capture tail with overlap, require a unique
+  byte-exact overlap match after newline canonicalization, and fall back to wider
+  recapture with `OverlapResync` on ambiguity
+- [ ] Add setup-time history-limit helpers/docs for automation windows:
+  `history-limit` must be set before pane creation to affect new panes; existing
+  panes keep their creation-time limit
 - [ ] Add unit tests for:
-  wrapped sentinel splits, mixed-client resize events, history growth/shrink behavior,
-  large history windows, overlap dedupe with repeated lines
+  mixed-client resize events, history growth/shrink behavior, large history windows,
+  overlap ambiguity/resync, and non-retroactive `history-limit` behavior
 - [ ] Add docs/tests clarifying hard limits:
-  no recovery after history eviction; `history-limit` is window/global (not per-client);
-  deterministic mode still requires dedicated/fixed-geometry sessions
-- [ ] Add API docs contract for downstream consumers:
-  `text` is canonical clean stream, `raw_text` is optional fidelity view, and degraded
-  conditions are explicit in metadata (never implicit)
-- [ ] Treat 1.9 as a hard usability gate before monitor/sink work:
-  2a.2 and 2c.* consume 1.9 metadata/types rather than inventing parallel contracts
+  no recovery after history eviction; deterministic mode still requires
+  dedicated/fixed-geometry sessions; `resize-window` is best-effort under mixed clients
 
-**Depends on**: 1.5, 1.7
+**Depends on**: 1.9a
 
 ---
 
@@ -219,8 +235,8 @@ Add `SshTransport` and a thin monitoring vertical slice with control mode parsin
   `tmux -C attach -t <session>` output
 - [ ] Per-pane stream assembly state keyed by `pane_id`:
   partial-frame buffering, newline canonicalization, monotonic per-pane `sequence`
-- [ ] Reuse 1.9 normalization/fidelity path for monitor events:
-  dedupe overlap at chunk boundaries, preserve ANSI in fidelity modes,
+- [ ] Reuse `1.9a` normalization/fidelity path for monitor events:
+  preserve ANSI in fidelity modes, apply the same mode-to-field contract,
   annotate degraded/reflow/history conditions in emitted metadata
 - [ ] Handle other control mode messages gracefully (`%begin`, `%end`, `%error`, etc.)
 - [ ] Rule evaluation against parsed output (initially: single compiled rule)
@@ -231,7 +247,7 @@ Add `SshTransport` and a thin monitoring vertical slice with control mode parsin
 - [ ] Unit tests: control mode frame parsing, chunk split/reassembly, sequence monotonicity,
   rule matching, dispatch ordering
 
-**Depends on**: 1.7, 1.9
+**Depends on**: 1.7, 1.9a
 
 ### 2a.3 — Pipe-pane fallback (`src/pipe.rs`)
 
@@ -320,14 +336,16 @@ Add `SshTransport` and a thin monitoring vertical slice with control mode parsin
 
 ### 2c.1 — Sink types (`src/sink.rs`)
 
-- [ ] `TargetOutput` struct: `source: TargetAddress`, `host`, clean `content`,
-  optional `raw_content`, `sequence`, `kind` (`Data`/`Gap`), `fidelity`, `timestamp`
+- [ ] `TargetOutput` struct: `source: TargetAddress`, `host`, canonical `content`,
+  optional `raw_content`, `sequence`, `fidelity`, `timestamp`
+- [ ] `SinkEvent` enum: `Data(TargetOutput)` and `Gap { dropped, timestamp }`
 - [ ] `TargetOutput` accessors: `session_name()`, `pane_id()`, `target_string()`
 - [ ] `OutputFidelity` / `FidelityIssue` enums shared with capture/monitor paths
 - [ ] `SinkFilter`: `host`, `session`, `window`, `pane` (all optional regex strings),
-  `content: Option<MatcherKind>`
-- [ ] Define content-matching contract: `SinkFilter.content` always matches clean
-  `TargetOutput.content` (never `raw_content`)
+  `content: Option<MatcherKind>`, `matcher_input: MatcherInput`
+- [ ] Define content-matching contract: `SinkFilter.content` matches either
+  delivered `TargetOutput.content` or a sink-local plain-text derived view,
+  selected by `matcher_input`
 - [ ] `CompiledSinkFilter`: compiled regexes + `MatcherKind`,
   `matches(&mut self, output: &TargetOutput) -> bool`
 - [ ] `SinkAction` enum: `SendKeys`, `SendText`, `KillSession`, `RenameSession`
@@ -337,7 +355,7 @@ Add `SshTransport` and a thin monitoring vertical slice with control mode parsin
   `rename_session()`, `respond(output, action)`
 - [ ] `SinkId` opaque type
 
-**Depends on**: 2b.2, 1.9
+**Depends on**: 2b.2, 1.9a
 
 ### 2c.2 — Sink kinds (`src/sink.rs`, `src/sinks/`)
 
@@ -362,8 +380,8 @@ Add `SshTransport` and a thin monitoring vertical slice with control mode parsin
 - [ ] `unsubscribe(id) -> Result<()>` — signal stop, flush, join task
 - [ ] `publish(output: TargetOutput)` — fan out to all matching sinks via `try_send`
   while tracking per-sink dropped counts
-- [ ] No-silent-drop contract: if drops occurred, emit synthetic `TargetOutput`
-  `kind=Gap` with `FidelityIssue::SinkBackpressureDrop { dropped }` before next data event
+- [ ] No-silent-drop contract: if drops occurred, emit `SinkEvent::Gap { dropped }`
+  before the next `SinkEvent::Data(output)` on that sink route
 - [ ] `shutdown() -> Result<()>` — signal all sinks, flush, join all tasks
 - [ ] `SinkEntry` internal: id, name, tx, compiled filters, task handle
 - [ ] Unit tests: fan-out to 3 sinks, slow sink doesn't block others,
@@ -586,33 +604,40 @@ Time  Track A (data path)      Track B (input/monitor)    Track C (matching/sink
  T6   1.8 Integration test      2a.1 SSH (transport.rs)     │
       │                         2a.3 Pipes (pipe.rs)        │
       │                         │                           │
- T7   2a.2 Monitor parser       │                           │
+ T7   1.9a Capture fidelity     │                           │
+      │  (types/capture/host)   │                           │
+      │                         │                           │
+ T8   1.9b Stabilization        │                           │
+      │  (capture helpers)      │                           │
+      │                         │                           │
+ T9   2a.2 Monitor parser       │                           │
       │  (monitor.rs)           │                           │
-      │  [needs 1.7]            │                           │
+      │  [needs 1.7 + 1.9a]     │                           │
       │                         │                           │
 ───── ── SYNC POINT 2 ──────── ─┘                           │
- T8   2a.4 Monitor handles                                  │
+ T10  2a.4 Monitor handles                                  │
       │  [needs 2a.2 + 2a.3]                               │
       │                                                     │
 ───── ── SYNC POINT 3 ──────────────────────────────────── ─┘
- T9   2b.3 Full rules + reconnect [needs 2a.4 + 2b.1 + 2b.2]
+ T11  2b.3 Full rules + reconnect [needs 2a.4 + 2b.1 + 2b.2]
       │    (modifies monitor.rs + host.rs — must land before 2c.4)
       │
- T10  2c.4 Pipeline integration [needs 2c.3 + 2b.3]
+ T12  2c.4 Pipeline integration [needs 2c.3 + 2b.3]
       │    (layers sink wiring onto stabilized monitor.rs + host.rs)
       │
 ───── ── SYNC POINT 4 ─────────────────────────────────────
- T11  3.1 Fleet (fleet.rs) [needs 2c.4]
+ T13  3.1 Fleet (fleet.rs) [needs 2c.4]
       │
- T12  3.2 Public API (lib.rs)
+ T14  3.2 Public API (lib.rs)
       │
- T13  3.3 CLI binary (bins/tmux-automator/)
+ T15  3.3 CLI binary (bins/tmux-automator/)
       │
-T14  3.4 Smoke test
+T16  3.4 Smoke test
 ```
 
-Track A includes an additional stabilization step `1.9` after `1.8` and before
-`2a.2` for mixed-client capture fidelity, reflow detection, and history management.
+Track A includes two additional stabilization steps after `1.8`: `1.9a` is the
+type/API gate required before `2a.2` and `2c.*`; `1.9b` is a follow-on best-effort
+stabilization pass for overlap resync, geometry detection, and history setup guidance.
 
 ### Dev Assignments by Team Size
 
@@ -620,7 +645,7 @@ Track A includes an additional stabilization step `1.9` after `1.8` and before
 
 | Dev | Track | Tasks (in order) |
 |-----|-------|-----------------|
-| **A** | Data path + wiring | 1.0 → 1.1 → 1.3 → 1.4 → 1.5 → **1.7** → 1.8 → 1.9 → 2a.2 → **2a.4** → **2b.3** → **2c.4** → **3.1** → 3.2 → 3.3 |
+| **A** | Data path + wiring | 1.0 → 1.1 → 1.3 → 1.4 → 1.5 → **1.7** → 1.8 → 1.9a → 1.9b → 2a.2 → **2a.4** → **2b.3** → **2c.4** → **3.1** → 3.2 → 3.3 |
 | **B** | Input + matching + sinks | 1.2 → 2b.2 → 1.6 → 2b.1 → 2a.1 → 2a.3 → 2c.1 → 2c.2 → 2c.3 → 3.4 |
 
 Sync points: **1.7** (B's 1.6 merges with A's 1.4+1.5), **2a.4** (B's 2a.3 merges with A's 2a.2), **2b.3** (B's 2b.1 ready for A), **2c.4** (B's 2c.3 ready; A's 2b.3 done — serial on `monitor.rs`/`host.rs`).
@@ -631,11 +656,11 @@ Dev B starts `2b.2 Matcher` immediately after `1.2 Keys` — it depends only on 
 
 | Dev | Focus area | Tasks (in order) |
 |-----|-----------|-----------------|
-| **A** | Data path (types → transport → discovery → capture → host wiring) | 1.0 → 1.1 → 1.3 → 1.4 → 1.5 → **1.7** → 1.8 → 1.9 → **2a.4** → **3.1** → 3.2 |
+| **A** | Data path (types → transport → discovery → capture → host wiring) | 1.0 → 1.1 → 1.3 → 1.4 → 1.5 → **1.7** → 1.8 → 1.9a → 1.9b → **2a.4** → **3.1** → 3.2 |
 | **B** | Input + monitoring (keys → control → SSH → monitor → rules) | 1.2 → 1.6 → 2a.1 → 2a.3 → 2a.2 → **2b.3** → **2c.4** → 3.3 → 3.4 |
 | **C** | Matching + sink pipeline (matcher → config → sinks → bus) | 2b.2 → 2b.1 → 2c.1 → 2c.2 → 2c.3 |
 
-Sync points: **1.7** (B's 1.6 ready), **2a.4** (B's 2a.3 + A picks up 2a.2 after 1.9), **2b.3** (C's 2b.1 ready for B), **2c.4** (B takes this after 2b.3 — serial on `monitor.rs`/`host.rs`; needs C's 2c.3), **3.1** (all tracks converge).
+Sync points: **1.7** (B's 1.6 ready), **2a.4** (B's 2a.3 + A picks up 2a.2 after 1.9a), **2b.3** (C's 2b.1 ready for B), **2c.4** (B takes this after 2b.3 — serial on `monitor.rs`/`host.rs`; needs C's 2c.3), **3.1** (all tracks converge).
 
 Dev C is fully independent through T1–T7 — they only touch `matcher.rs`, `config.rs`, `sink.rs`, and `sinks/`. Dev B owns the `monitor.rs`/`host.rs` serialization: 2b.3 (rules + reconnection) then 2c.4 (sink wiring).
 
@@ -645,7 +670,7 @@ Split Track B into input/control (B1) and SSH/monitoring (B2):
 
 | Dev | Focus area | Tasks |
 |-----|-----------|-------|
-| **A** | Data path | 1.0 → 1.1 → 1.3 → 1.4 → 1.5 → **1.7** → 1.8 → 1.9 |
+| **A** | Data path | 1.0 → 1.1 → 1.3 → 1.4 → 1.5 → **1.7** → 1.8 → 1.9a → 1.9b |
 | **B1** | Input + control | 1.2 → 1.6 → (pick up 4.1, 4.2 hardening while waiting) |
 | **B2** | SSH + monitoring + sink wiring | 2a.1 → 2a.3 → 2a.2 → **2a.4** → **2b.3** → **2c.4** → 3.3 → 3.4 |
 | **C** | Matching + sinks | 2b.2 → 2b.1 → 2c.1 → 2c.2 → 2c.3 → **3.1** → 3.2 |

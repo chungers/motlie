@@ -1,5 +1,11 @@
 # TUI Reliability and Capture Fidelity
 
+## Change Log
+
+| Date | Who | Summary |
+|------|-----|---------|
+| 2026-03-10 | @codex | Address PR #65 review feedback: clarify that normalized matching is shell-oriented, full-screen TUI workflows default to `Raw`, screen-buffer reconstruction is a Phase `5+` idea, and fixed geometry is best-effort unless automation is isolated. |
+
 This document defines how to support full-screen TUIs in tmux while reducing
 sensitivity to mixed client sizes, reflow, and history overflow.
 
@@ -33,7 +39,9 @@ Use distinct modes:
 1. `Line` mode: shell/log-like panes, normalization allowed.
 2. `Tui` mode: preserve terminal semantics, avoid destructive normalization.
 
-For `Tui` mode, default to raw/control-preserving capture paths.
+For `Tui` mode, default to raw/control-preserving capture paths. Normalized matching
+paths are shell-oriented and should be treated as unsupported for full-screen TUIs
+unless a dedicated terminal-state consumer is introduced later.
 
 ### 2) Reconstruct Screen State for TUI
 
@@ -41,6 +49,10 @@ For TUI fidelity, process output as a terminal stream and reconstruct a virtual
 screen buffer (cells, cursor, attributes) instead of doing line-only parsing.
 
 This keeps fidelity high even when display updates are cursor-based.
+
+This is not part of the initial delivery plan. It requires a terminal emulation
+layer (for example `vte` parsing plus a grid buffer) and is a Phase `5+`
+consideration only.
 
 ### 3) Stabilize Geometry
 
@@ -52,7 +64,9 @@ tmux resize-window -t <session:window> -x 160 -y 48
 ```
 
 This reduces reflow churn but does not guarantee determinism if mixed clients
-keep attaching with different sizes.
+keep attaching with different sizes. Reliable determinism still requires
+automation isolation (dedicated session/socket or no mixed interactive clients
+during the capture/exec window).
 
 ### 4) Detect and Gate During Resize Churn
 
@@ -120,4 +134,3 @@ Use only when occasional fidelity loss is acceptable.
 2. Default to line-oriented normalization only for line-oriented workflows.
 3. Default TUI-oriented workflows to `Raw`/terminal-state paths.
 4. Always document when output is deterministic vs best-effort.
-
