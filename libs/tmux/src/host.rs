@@ -72,6 +72,35 @@ impl HostHandle {
         discovery::list_sessions(&self.inner.transport, self.inner.socket.as_ref()).await
     }
 
+    /// List attached clients on this host (DC20, Phase 1.9b).
+    pub async fn list_clients(&self) -> Result<Vec<ClientInfo>> {
+        discovery::list_clients(&self.inner.transport, self.inner.socket.as_ref()).await
+    }
+
+    /// Set global `history-limit` (DC20, Phase 1.9b).
+    ///
+    /// **Must be set before creating sessions/panes.** Existing panes
+    /// retain their creation-time limit.
+    pub async fn set_global_history_limit(&self, limit: u32) -> Result<()> {
+        control::set_history_limit(
+            &self.inner.transport,
+            self.inner.socket.as_ref(),
+            None,
+            limit,
+        )
+        .await
+    }
+
+    /// Query the global `history-limit` default.
+    pub async fn get_global_history_limit(&self) -> Result<u32> {
+        control::get_history_limit(
+            &self.inner.transport,
+            self.inner.socket.as_ref(),
+            None,
+        )
+        .await
+    }
+
     /// Create a new tmux session. Returns a Target at session level.
     pub async fn create_session(
         &self,
@@ -474,6 +503,36 @@ impl Target {
         .await
     }
 
+    /// Capture with options, returning `CaptureResult` with fidelity metadata (DC20).
+    pub async fn capture_with_options(
+        &self,
+        opts: &CaptureOptions,
+    ) -> Result<CaptureResult> {
+        capture::capture_pane_with_options(
+            &self.inner.transport,
+            self.inner.socket.as_ref(),
+            &self.target_string(),
+            opts,
+        )
+        .await
+    }
+
+    /// Sample scrollback with options, returning `CaptureResult` (DC20).
+    pub async fn sample_text_with_options(
+        &self,
+        query: &ScrollbackQuery,
+        opts: &CaptureOptions,
+    ) -> Result<CaptureResult> {
+        capture::sample_text_with_options(
+            &self.inner.transport,
+            self.inner.socket.as_ref(),
+            &self.target_string(),
+            query,
+            opts,
+        )
+        .await
+    }
+
     /// Capture all panes under this target.
     /// Session: all panes in all windows. Window: all panes in that window.
     /// Pane: single-entry map.
@@ -516,6 +575,57 @@ impl Target {
                 .await?;
                 let mut result = HashMap::new();
                 result.insert(p.clone(), content);
+                Ok(result)
+            }
+        }
+    }
+
+    /// Capture all panes with options, returning `CaptureResult` per pane (DC20).
+    pub async fn capture_all_with_options(
+        &self,
+        opts: &CaptureOptions,
+    ) -> Result<HashMap<PaneAddress, CaptureResult>> {
+        match &self.address {
+            TargetAddress::Session(_) => {
+                capture::capture_session_with_options(
+                    &self.inner.transport,
+                    self.inner.socket.as_ref(),
+                    self.session_name(),
+                    opts,
+                )
+                .await
+            }
+            TargetAddress::Window(w) => {
+                let panes = discovery::list_panes_in_session(
+                    &self.inner.transport,
+                    self.inner.socket.as_ref(),
+                    &w.session_name,
+                )
+                .await?;
+                let mut result = HashMap::new();
+                for pane in panes.into_iter().filter(|p| p.address.window == w.index) {
+                    let target = pane.address.to_tmux_target();
+                    let cr = capture::capture_pane_with_options(
+                        &self.inner.transport,
+                        self.inner.socket.as_ref(),
+                        &target,
+                        opts,
+                    )
+                    .await?;
+                    result.insert(pane.address, cr);
+                }
+                Ok(result)
+            }
+            TargetAddress::Pane(p) => {
+                let cr = capture::capture_pane_with_options(
+                    &self.inner.transport,
+                    self.inner.socket.as_ref(),
+                    &p.to_tmux_target(),
+                    opts,
+                )
+                .await?;
+                let mut result = HashMap::new();
+                result.insert(p.clone(), cr);
                 Ok(result)
             }
         }
@@ -579,6 +689,52 @@ impl Target {
         }
     }
 
+    // --- Geometry & history (DC20, Phase 1.9b) ---
+
+    /// Query the current pane geometry and scrollback state.
+    pub async fn pane_geometry(&self) -> Result<PaneGeometry> {
+        discovery::query_pane_geometry(
+            &self.inner.transport,
+            self.inner.socket.as_ref(),
+            &self.target_string(),
+        )
+        .await
+    }
+
+    /// Take a full geometry snapshot (clients + pane state).
+    pub async fn geometry_snapshot(&self) -> Result<GeometrySnapshot> {
+        discovery::take_geometry_snapshot(
+            &self.inner.transport,
+            self.inner.socket.as_ref(),
+            &self.target_string(),
+        )
+        .await
+    }
+
+    /// Set `history-limit` for this target's session (DC20, Phase 1.9b).
+    ///
+    /// **Must be called before creating panes** — existing panes keep their
+    /// creation-time limit. Only meaningful at session level.
+    pub async fn set_history_limit(&self, limit: u32) -> Result<()> {
+        control::set_history_limit(
+            &self.inner.transport,
+            self.inner.socket.as_ref(),
+            Some(self.session_name()),
+            limit,
+        )
+        .await
+    }
+
+    /// Query the current `history-limit` for this target's session.
+    pub async fn get_history_limit(&self) -> Result<u32> {
+        control::get_history_limit(
+            &self.inner.transport,
+            self.inner.socket.as_ref(),
+            Some(self.session_name()),
+        )
+        .await
+    }
+
     // --- exec (DC19 sentinel mechanism) ---
 
     /// Execute a shell command in the target pane and capture output.
@@ -629,10 +785,14 @@ impl Target {
                 ));
             }
 
-            // Poll with scrollback history (-500 lines) to prevent sentinel
-            // scrolling out of the visible area on verbose command output.
-            let content =
-                capture::capture_pane_history(transport, socket, &target, -500).await?;
+            // Poll with `-ep` scrollback for wrap-tolerant sentinel detection (DC20).
+            // The escape-mode capture preserves ANSI sequences which we strip
+            // before parsing, so line-wrapping artifacts from width changes
+            // don't break sentinel matching.
+            let raw_content =
+                capture::capture_pane_escape_history(transport, socket, &target, -500)
+                    .await?;
+            let content = capture::strip_ansi(&raw_content);
 
             if let Some(result) = parse_sentinel_output(&content, &marker) {
                 return Ok(result);
