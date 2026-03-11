@@ -1229,8 +1229,9 @@ pub struct TargetOutput {
     /// ignore the window/pane detail.
     pub source: TargetAddress,
     pub host: String,          // host alias (or "localhost")
-    /// Canonical delivery view for the selected mode. `Raw` and `ScreenStable`
-    /// preserve ANSI/control sequences; `PlainText` strips them.
+    /// Canonical delivery view for the selected mode. `ScreenStable` preserves
+    /// ANSI/control sequences (via `-ep`); `Raw` returns tmux-rendered text
+    /// (no escape sequences, via `-p`); `PlainText` returns normalized text.
     pub content: String,
     /// Exact tmux capture before mode-specific normalization, when requested.
     pub raw_content: Option<String>,
