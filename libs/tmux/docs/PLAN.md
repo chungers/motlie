@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-10 | @claude | Phase 2a.1 implemented: SshTransport with russh 0.46, ssh-agent auth, DC2 host key verification (Verify/TrustFirstUse/Insecure), SshConfig builder, exec/open_shell over SSH, SshShellChannel with PTY, actionable error messages (OC3). |
 | 2026-03-10 | @claude | Address PR #66 review round 2: scope 1.9b checkboxes to match implementation — reflow detection covers capture/sample_text only (exec handled by wrap-tolerant parser), overlap provides stateless primitives (history_size tracking and wider recapture deferred to 2a.2 monitor). |
 | 2026-03-10 | @claude | Phase 1.9b implemented: geometry snapshots (list_clients, query_pane_geometry), reflow detection around captures, overlap-aware incremental sampling with OverlapResync fallback, history-limit setup helpers, comprehensive tests. |
 | 2026-03-10 | @claude | Phase 1.9a implemented: fidelity types, capture normalization modes (Raw/ScreenStable/PlainText), options-based capture APIs, ANSI stripping, exec() wrap-tolerant sentinel via `-ep` capture. |
@@ -229,17 +230,17 @@ Add `SshTransport` and a thin monitoring vertical slice with control mode parsin
 
 ### 2a.1 — SSH transport (`src/transport.rs` extension)
 
-- [ ] Add `russh` + `russh-keys` dependencies to `Cargo.toml`
-- [ ] `SshTransport` struct: russh `Handle`, configurable timeouts
-- [ ] `SshTransport::connect(host, user, config) -> Result<Self>` — SSH connect + auth via ssh-agent
-- [ ] Host key verification (DC2): implement `HostKeyPolicy` from config —
+- [x] Add `russh` + `russh-keys` dependencies to `Cargo.toml`
+- [x] `SshTransport` struct: russh `Handle`, configurable timeouts
+- [x] `SshTransport::connect(host, user, config) -> Result<Self>` — SSH connect + auth via ssh-agent
+- [x] Host key verification (DC2): implement `HostKeyPolicy` from config —
   `Verify` (parse `~/.ssh/known_hosts`, reject unknown), `TrustFirstUse`
   (accept + persist on first connect), `Insecure` (accept all, log warning)
-- [ ] `SshTransport::exec()` — open exec channel, capture stdout, close channel
-- [ ] `SshTransport::open_shell()` — PTY channel with shell, piped I/O
-- [ ] Add `Ssh(SshTransport)` variant to `TransportKind` and `ShellChannelKind`
-- [ ] Actionable error messages for SSH agent failures (OC3)
-- [ ] Unit tests: mock-based (no real SSH server needed at this stage)
+- [x] `SshTransport::exec()` — open exec channel, capture stdout, close channel
+- [x] `SshTransport::open_shell()` — PTY channel with shell, piped I/O
+- [x] Add `Ssh(SshTransport)` variant to `TransportKind` and `ShellChannelKind`
+- [x] Actionable error messages for SSH agent failures (OC3)
+- [x] Unit tests: mock-based (no real SSH server needed at this stage)
 
 **Depends on**: 1.3
 
