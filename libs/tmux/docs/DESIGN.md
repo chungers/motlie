@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-10 | @claude: Add inline note in DC20 geometry/reflow contract clarifying that Phase 1.9b implements snapshot comparison for capture/sample_text only; exec() deferred to Phase 2a. See PR #66 review round 2. | DC20 |
 | 2026-03-10 | @codex: address PR #65 review feedback by tightening the capture/sink contract: preserve-fidelity payloads by default, make TUI workflows explicitly `Raw`, move exec stability to an internal parser view, replace synthetic `TargetOutput.kind=Gap` with `SinkEvent::Gap`, scope history-limit handling to setup-time/new panes, and split Phase `1.9` into `1.9a`/`1.9b`. | ScrollbackQuery, Output Sink Pipeline, capture.rs, DC20, Implementation Phases |
 | 2026-03-10 | Prioritize consumer usability for mixed-client fidelity: slot implementation as `1.9` (capture/result fidelity) → `2a.2` (monitor stream assembly) → `2c.1/2c.3/2c.4` (sink metadata + no-silent-drop delivery). | DC20, TargetOutput, OutputBus, monitor.rs, Implementation Phases |
 | 2026-03-10 | Revise mixed-client capture design for TUI fidelity: no ANSI stripping in screen-stability paths, geometry/reflow detection via tmux client/pane metadata, dynamic history-limit floor management, and overlap-aware sampling. | ScrollbackQuery, capture.rs, DC20 |
@@ -3049,6 +3050,11 @@ command behavior is correct.
 - Query pane/window geometry and scrollback counters with `display-message -p` and
   format vars (`pane_width`, `pane_height`, `history_size`, `history_limit`).
 - Compare pre/post snapshots around `capture()` / `sample_text()` / `exec()` polling.
+  <!-- @claude 2026-03-10: Phase 1.9b implements snapshot comparison for capture/sample_text
+       only. exec() uses a two-tier wrap-tolerant parser (parse_sentinel_output) with -ep
+       capture + ANSI strip, which handles sentinel detection under reflow without geometry
+       snapshots. Geometry-based fidelity for exec() is deferred to Phase 2a where persistent
+       monitor state can surface it on ExecOutput. See PR #66. -->
 - If client set, pane geometry, or history counters indicate instability, mark the
   result degraded and optionally retry. `resize-window` remains best-effort only when
   mixed interactive clients attach to the same session.
