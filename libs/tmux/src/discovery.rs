@@ -1,8 +1,17 @@
 use anyhow::{anyhow, Result};
 use regex::Regex;
 
-use crate::transport::{tmux_prefix, TransportKind};
-use crate::types::{PaneAddress, PaneInfo, SessionInfo, TmuxSocket, WindowInfo};
+use crate::transport::{shell_escape_arg, tmux_prefix, TransportKind};
+use crate::types::{
+    ClientInfo, GeometrySnapshot, PaneAddress, PaneGeometry, PaneInfo, SessionInfo, TmuxSocket,
+    WindowInfo,
+};
+
+pub const LIST_CLIENTS_FMT: &str =
+    "#{client_width}\t#{client_height}\t#{client_session}";
+
+pub const PANE_GEOMETRY_FMT: &str =
+    "#{pane_width}\t#{pane_height}\t#{history_size}\t#{history_limit}";
 
 pub const LIST_SESSIONS_FMT: &str =
     "#{session_name}\t#{session_id}\t#{session_created}\t#{session_attached}\t#{session_windows}\t#{session_group}";
@@ -81,6 +90,127 @@ pub async fn list_panes_in_session(
     );
     let output = transport.exec(&cmd).await?;
     parse_panes(&output, None)
+}
+
+/// List attached tmux clients with their screen dimensions (DC20, Phase 1.9b).
+pub async fn list_clients(
+    transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
+) -> Result<Vec<ClientInfo>> {
+    let prefix = tmux_prefix(socket);
+    let cmd = format!("{} list-clients -F '{}'", prefix, LIST_CLIENTS_FMT);
+
+    let output = match transport.exec(&cmd).await {
+        Ok(o) => o,
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("no server running") || msg.contains("no clients") {
+                return Ok(Vec::new());
+            }
+            return Err(e);
+        }
+    };
+
+    parse_clients(&output)
+}
+
+/// Query pane geometry and scrollback state via `display-message` (DC20, Phase 1.9b).
+pub async fn query_pane_geometry(
+    transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
+    target: &str,
+) -> Result<PaneGeometry> {
+    let prefix = tmux_prefix(socket);
+    let cmd = format!(
+        "{} display-message -p -t '{}' '{}'",
+        prefix,
+        shell_escape_arg(target),
+        PANE_GEOMETRY_FMT
+    );
+
+    let output = transport.exec(&cmd).await?;
+    parse_pane_geometry(&output)
+}
+
+/// Take a full geometry snapshot: clients + pane state (DC20, Phase 1.9b).
+///
+/// `target` is a tmux target string (e.g. "build:0.0"). The session name
+/// is extracted from the target to scope client filtering.
+pub async fn take_geometry_snapshot(
+    transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
+    target: &str,
+) -> Result<GeometrySnapshot> {
+    let clients = list_clients(transport, socket).await?;
+    let pane = query_pane_geometry(transport, socket, target).await?;
+
+    // Extract session name from target string for session-scoped client filtering.
+    // Target formats: "session", "session:window", "session:window.pane", "%pane_id"
+    let session = if target.starts_with('%') {
+        // Pane ID target — query tmux for session name
+        let prefix = tmux_prefix(socket);
+        let cmd = format!(
+            "{} display-message -p -t '{}' '#{{session_name}}'",
+            prefix,
+            shell_escape_arg(target)
+        );
+        transport
+            .exec(&cmd)
+            .await
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    } else {
+        // Parse session from target string (everything before first ':')
+        target
+            .split(':')
+            .next()
+            .unwrap_or(target)
+            .to_string()
+    };
+
+    Ok(GeometrySnapshot {
+        clients,
+        pane,
+        session,
+    })
+}
+
+fn parse_clients(output: &str) -> Result<Vec<ClientInfo>> {
+    let mut clients = Vec::new();
+    for line in output.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() < 3 {
+            tracing::warn!("skipping malformed client line: {}", line);
+            continue;
+        }
+        clients.push(ClientInfo {
+            width: fields[0].parse().unwrap_or(0),
+            height: fields[1].parse().unwrap_or(0),
+            session: fields[2].to_string(),
+        });
+    }
+    Ok(clients)
+}
+
+fn parse_pane_geometry(output: &str) -> Result<PaneGeometry> {
+    let line = output.trim();
+    let fields: Vec<&str> = line.split('\t').collect();
+    if fields.len() < 4 {
+        return Err(anyhow!(
+            "malformed pane geometry output (expected 4 fields): {}",
+            line
+        ));
+    }
+    Ok(PaneGeometry {
+        pane_width: fields[0].parse().unwrap_or(0),
+        pane_height: fields[1].parse().unwrap_or(0),
+        history_size: fields[2].parse().unwrap_or(0),
+        history_limit: fields[3].parse().unwrap_or(0),
+    })
 }
 
 fn parse_sessions(output: &str) -> Result<Vec<SessionInfo>> {
@@ -264,5 +394,58 @@ mod tests {
         let panes = list_panes(&transport, None, Some(&filter)).await.unwrap();
         assert_eq!(panes.len(), 1);
         assert_eq!(panes[0].address.session, "build");
+    }
+
+    #[tokio::test]
+    async fn list_clients_parses() {
+        let mock = MockTransport::new().with_response(
+            "list-clients",
+            "200\t50\tbuild\n180\t40\ttest\n",
+        );
+        let transport = TransportKind::Mock(mock);
+        let clients = list_clients(&transport, None).await.unwrap();
+        assert_eq!(clients.len(), 2);
+        assert_eq!(clients[0].width, 200);
+        assert_eq!(clients[0].height, 50);
+        assert_eq!(clients[0].session, "build");
+        assert_eq!(clients[1].width, 180);
+        assert_eq!(clients[1].height, 40);
+    }
+
+    #[tokio::test]
+    async fn list_clients_empty() {
+        let mock = MockTransport::new().with_response("list-clients", "");
+        let transport = TransportKind::Mock(mock);
+        let clients = list_clients(&transport, None).await.unwrap();
+        assert!(clients.is_empty());
+    }
+
+    #[tokio::test]
+    async fn query_pane_geometry_parses() {
+        let mock = MockTransport::new()
+            .with_response("display-message", "80\t24\t150\t2000\n");
+        let transport = TransportKind::Mock(mock);
+        let geo = query_pane_geometry(&transport, None, "build:0.0")
+            .await
+            .unwrap();
+        assert_eq!(geo.pane_width, 80);
+        assert_eq!(geo.pane_height, 24);
+        assert_eq!(geo.history_size, 150);
+        assert_eq!(geo.history_limit, 2000);
+    }
+
+    #[tokio::test]
+    async fn take_snapshot_combines_clients_and_pane() {
+        let mock = MockTransport::new()
+            .with_response("list-clients", "200\t50\tbuild\n")
+            .with_response("display-message", "80\t24\t100\t2000\n");
+        let transport = TransportKind::Mock(mock);
+        let snap = take_geometry_snapshot(&transport, None, "build:0.0")
+            .await
+            .unwrap();
+        assert_eq!(snap.clients.len(), 1);
+        assert_eq!(snap.pane.pane_width, 80);
+        assert_eq!(snap.pane.history_size, 100);
+        assert_eq!(snap.session, "build");
     }
 }

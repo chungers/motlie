@@ -153,6 +153,55 @@ pub async fn rename_window(
     Ok(())
 }
 
+/// Set `history-limit` for a tmux session or globally (DC20, Phase 1.9b).
+///
+/// **Important**: `history-limit` only applies to panes created *after* this
+/// call. Existing panes retain their creation-time limit. For automation,
+/// call this before creating the session/window.
+///
+/// - `target`: session name for session-level, or `None` for global server-level.
+pub async fn set_history_limit(
+    transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
+    target: Option<&str>,
+    limit: u32,
+) -> Result<()> {
+    let prefix = tmux_prefix(socket);
+    let cmd = match target {
+        Some(t) => format!(
+            "{} set-option -t {} history-limit {}",
+            prefix,
+            shell_escape(t),
+            limit
+        ),
+        None => format!("{} set-option -g history-limit {}", prefix, limit),
+    };
+    transport.exec(&cmd).await?;
+    Ok(())
+}
+
+/// Query the current `history-limit` for a session (or global default).
+pub async fn get_history_limit(
+    transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
+    target: Option<&str>,
+) -> Result<u32> {
+    let prefix = tmux_prefix(socket);
+    let cmd = match target {
+        Some(t) => format!(
+            "{} show-option -v -t {} history-limit",
+            prefix,
+            shell_escape(t)
+        ),
+        None => format!("{} show-option -gv history-limit", prefix),
+    };
+    let output = transport.exec(&cmd).await?;
+    output
+        .trim()
+        .parse::<u32>()
+        .map_err(|e| anyhow::anyhow!("failed to parse history-limit '{}': {}", output.trim(), e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,5 +311,32 @@ mod tests {
         let escaped = shell_escape(input);
         // Null byte is inside single quotes — shell will not interpret it as terminator
         assert_eq!(escaped, "'before\0after'");
+    }
+
+    #[tokio::test]
+    async fn set_history_limit_session() {
+        let mock = MockTransport::new().with_default("");
+        let transport = TransportKind::Mock(mock);
+        set_history_limit(&transport, None, Some("build"), 50000)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn set_history_limit_global() {
+        let mock = MockTransport::new().with_default("");
+        let transport = TransportKind::Mock(mock);
+        set_history_limit(&transport, None, None, 10000)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_history_limit_parses() {
+        let mock = MockTransport::new()
+            .with_response("show-option", "2000\n");
+        let transport = TransportKind::Mock(mock);
+        let limit = get_history_limit(&transport, None, None).await.unwrap();
+        assert_eq!(limit, 2000);
     }
 }
