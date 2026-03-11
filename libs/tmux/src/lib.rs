@@ -10,3 +10,4 @@ pub use types::*;
 pub use keys::{KeySequence, SpecialKey};
 pub use transport::{TransportKind, ShellChannelKind, ShellEvent};
 pub use host::{HostHandle, Target};
+pub use capture::{normalize_screen_stable, normalize_plain_text, strip_ansi, overlap_deduplicate};
