@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-10 | @claude | Address PR #66 review round 2: scope 1.9b checkboxes to match implementation — reflow detection covers capture/sample_text only (exec handled by wrap-tolerant parser), overlap provides stateless primitives (history_size tracking and wider recapture deferred to 2a.2 monitor). |
 | 2026-03-10 | @claude | Phase 1.9b implemented: geometry snapshots (list_clients, query_pane_geometry), reflow detection around captures, overlap-aware incremental sampling with OverlapResync fallback, history-limit setup helpers, comprehensive tests. |
 | 2026-03-10 | @claude | Phase 1.9a implemented: fidelity types, capture normalization modes (Raw/ScreenStable/PlainText), options-based capture APIs, ANSI stripping, exec() wrap-tolerant sentinel via `-ep` capture. |
 | 2026-03-10 | @codex | Address PR #65 review feedback: split Phase `1.9` into `1.9a`/`1.9b`, keep default capture wrappers `Raw`, make `ExecStable` internal-only, scope history-limit work to setup-time/new panes, and move sink backpressure signaling to `SinkEvent::Gap`. |
@@ -189,13 +190,25 @@ No SSH, no monitoring.
     `client_session`)
   - `display-message -p` / format vars for pane state (`pane_width`, `pane_height`,
     `history_size`, `history_limit`)
-- [x] Add reflow detection around capture/sampling/exec polling windows:
-  compare pre/post geometry snapshots; return degraded status (or retry) when client
-  mix/geometry changes during operation
-- [x] Add overlap-aware incremental sampling with explicit resync behavior:
-  track `history_size` per target, capture tail with overlap, require a unique
-  byte-exact overlap match after newline canonicalization, and fall back to wider
-  recapture with `OverlapResync` on ambiguity
+- [x] Add reflow detection around capture/sampling windows:
+  compare pre/post geometry snapshots via `detect_fidelity()`/`finalize_fidelity()`;
+  return degraded `OutputFidelity` when client mix/geometry changes during
+  `capture_pane_with_options()` or `sample_text_with_options()`.
+  <!-- @claude 2026-03-10: exec() reflow detection deferred to Phase 2a. exec() already
+       handles wrapping via the two-tier parse_sentinel_output() parser (fast single-line
+       path + joined-text fallback) with -ep capture + ANSI strip. Surfacing geometry
+       fidelity on ExecOutput requires API changes and persistent state better suited to
+       the monitor layer. See PR #66 review round 2. -->
+- [x] Add overlap-aware incremental sampling primitives:
+  `overlap_deduplicate()` performs byte-exact overlap suffix matching with `OverlapResync`
+  fallback; `sample_text_with_options()` accepts caller-supplied `previous_text` for
+  dedup when `overlap_lines >= 2`.
+  <!-- @claude 2026-03-10: Per-target history_size tracking and automatic wider recapture
+       on overlap ambiguity deferred to Phase 2a.2 (monitor stream assembly) where
+       persistent per-pane state is available. Phase 1 provides stateless library
+       primitives; callers that need stateful incremental sampling (monitors, sink
+       pipelines) build on these primitives with their own state. See PR #66 review
+       round 2. -->
 - [x] Add setup-time history-limit helpers/docs for automation windows:
   `history-limit` must be set before pane creation to affect new panes; existing
   panes keep their creation-time limit
