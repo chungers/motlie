@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-12 | @claude | Phase 1.11 R2: address feedback — consolidate `SshUri` into `SshConfig` (no new type), support both nassh `;` and query `?` param syntax, no canonical-component duplication. 14 tasks (1.11a–n). |
 | 2026-03-11 | @claude | Phase 1.10 implemented: all 14 tasks (1.10a–n) completed. Code changes: MockTransport with_error + Vec ordering, open_shell PTY params, TransportKind::is_healthy(), TargetSpec::pane() returns Result, HostHandle::local_with_timeout(), Target::rename() returns new Target. Doc comments: TrustFirstUse fail-closed, pane rename asymmetry, active-window drift, capture scope, overlap_deduplicate warn, dual timeouts, history-limit semantics. |
 | 2026-03-12 | @claude | Phase 1.10 — address PR #68 R6: restore 1.10 as hard gate before 2a.2, consistent with user intent ("slotted for fixes now before the next phase"). Fixed dependency note, task ordering diagram, and notes section. |
 | 2026-03-12 | @claude | Simplify PLAN: remove Multi-Developer Parallelism section (dev assignments, staffing tables, file ownership, time chart). Keep task ordering dependency graph and conventions. PLAN tracks work to do, not assignments. Per user request. |
@@ -345,6 +346,88 @@ the task ID to locate the note (line numbers drift across edits).
 starting the next phase. Tasks within 1.10 can be worked in any order based
 on the per-task availability above (e.g. 1.10a/b can start immediately after
 1.3; 1.10c/d/e must wait for 2a.1).
+
+### 1.11 — Unified SSH URI for `SshConfig` (`src/uri.rs`) — DC21
+
+Extends the existing `SshConfig` type with URI parsing, rendering, and `connect()`.
+No new type — `SshConfig` becomes the single entry point for host configuration.
+URI logic lives in `src/uri.rs` as an `impl SshConfig` extension block.
+See DESIGN.md DC21 for full specification.
+
+#### `SshConfig` field changes (`src/transport.rs`)
+
+- [ ] **1.11a** — Add `socket: Option<TmuxSocket>` field to `SshConfig` with
+  `with_socket()` builder method. Default `None`.
+
+- [ ] **1.11b** — Make `SshConfig` fields private, add accessor methods:
+  `host()`, `user()`, `port()`, `is_localhost()`, `socket()`. Update all internal
+  field access in `SshTransport`, `SshHandler` to use accessors.
+
+#### URI parsing (`src/uri.rs` — `impl SshConfig` extension)
+
+- [ ] **1.11c** — Create `src/uri.rs` with `SshConfig::parse(uri: &str) -> Result<Self>`:
+  parse `ssh://` scheme, extract host/port from authority, user from userinfo.
+  Support **both** nassh-style (`;` params in userinfo) and query-param (`?key=value&...`)
+  syntax. Handle IPv6 bracket notation `[::1]`.
+
+- [ ] **1.11d** — Canonical-component duplication rejection: `user`, `host`, `port`
+  parsed exclusively from their URI positions. Reject these as `;` or `?` parameter
+  names. Reject duplicate keys across userinfo and query string.
+
+- [ ] **1.11e** — Parameter parsing and validation: `host-key-policy` → `HostKeyPolicy`,
+  `timeout` → seconds → `Duration`, `keepalive` → seconds (0=off) → `Option<Duration>`,
+  `socket-name` → `TmuxSocket::Name(...)`. Reject unknown parameter names (fail-fast).
+  Validate ranges (timeout > 0).
+
+- [ ] **1.11f** — `SshConfig::to_uri_string(&self) -> String`: render to canonical
+  `ssh://` form (nassh-style params in userinfo). `Display` impl delegates to this.
+  `FromStr` impl delegates to `parse()`. Round-trip: `parse(cfg.to_string()) == cfg`.
+
+#### Transport selection and connect (`src/uri.rs`)
+
+- [ ] **1.11g** — `SshConfig::connect(&self) -> Result<HostHandle>`: localhost
+  (`localhost` / `127.0.0.1` / `::1`) → `LocalTransport::with_timeout()`;
+  all others → `SshTransport::connect(self)`. Wire `socket` to `HostHandle::new()`.
+  Require non-empty `user` for SSH hosts.
+
+- [ ] **1.11h** — `SshConfig::is_localhost(&self) -> bool` helper used by `connect()`.
+
+#### Integration
+
+- [ ] **1.11i** — `src/lib.rs`: add `mod uri;` (private module — extends `SshConfig`
+  which is already re-exported via `pub use transport::SshConfig`).
+
+#### Tests
+
+- [ ] **1.11j** — Unit tests for `parse()`: valid URIs with nassh params, query params,
+  mixed params, socket-path. Invalid URIs: bad scheme, unknown params, malformed
+  userinfo, missing host, canonical-component duplication (`?port=22`), duplicate
+  keys across locations. Edge cases: IPv6, no user, port-only, empty params.
+
+- [ ] **1.11k** — Unit tests for `to_uri_string()` and round-trip: builder-constructed
+  configs render to valid URIs; parse ∘ to_string is identity for canonical forms.
+
+- [ ] **1.11l** — Unit tests for `connect()` transport selection: localhost variants
+  produce `LocalTransport`, other hosts produce `SshTransport` (mock or check
+  `TransportKind` variant). Verify config fields propagate correctly. Verify empty
+  user rejected for SSH hosts.
+
+- [ ] **1.11m** — Integration test: `SshConfig::parse("ssh://localhost")?.connect()`
+  produces a working `HostHandle` that can `list_sessions()`.
+
+#### Documentation
+
+- [ ] **1.11n** — Update `docs/API.md` with `SshConfig` URI section: parse/builder
+  examples, both param syntaxes, canonical-component rules, parameter table,
+  transport selection, usage patterns.
+
+**Depends on**: Phase 2a.1 (SshTransport must exist for non-localhost connect).
+Tasks 1.11a–b (field changes) can start immediately. Tasks 1.11c–f and 1.11j–k
+(parse/render/tests) can proceed after 1.11a–b since they only depend on types.
+Tasks 1.11g (connect) and 1.11l (connect tests) require SshTransport from 2a.1.
+
+**Gates**: None — this phase is additive. Can run parallel with other work after
+2a.1 is complete.
 
 ---
 
@@ -697,6 +780,8 @@ Out of current scope. Listed for continuity.
  │     │
  │     ├── 1.10 API gaps + hardening [gates 2a.2; per-task deps within]
  │     │
+ │     ├── 1.11 SshConfig URI ext (src/uri.rs) [1.11a-f after 1.1; 1.11g after 2a.1]
+ │     │
  │     └── 2a.2 Monitor parser [needs 1.7 + 1.9a]
  │          │
  │          └── 2a.4 Monitor handles
@@ -730,6 +815,8 @@ Notes:
   and history setup guidance.
 - `1.10` gates Phase 2a.2 — all tasks must complete before next phase. Per-task
   dependencies (listed in section above) allow internal parallelism within 1.10.
+- `1.11` (SshConfig URI) — field changes (1.11a–b) start immediately; parse/render
+  (1.11c–f, 1.11j–k) after 1.11a–b; connect (1.11g, 1.11l) requires 2a.1. No gates.
 - `2b.3` and `2c.4` both modify `monitor.rs` and `host.rs` — must land serially.
 - Phase 4 tasks are independent and can start as soon as their prerequisites are met.
 

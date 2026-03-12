@@ -6,6 +6,8 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-12 | @claude: DC21 R2 — address feedback: consolidate `SshUri` into `SshConfig` (no new type), support both nassh `;` and query `?` param syntax, no canonical-component duplication (port/user/host only from URI structure). `SshConfig` gains `parse()`, `connect()`, `Display`/`FromStr`. URI parsing in `src/uri.rs` as `impl SshConfig` extension. | DC21 |
+| 2026-03-12 | @claude: DC21 — Unified SSH URI for Host Addressing. Single `ssh://` URI scheme for all hosts (localhost and remote), transport auto-selection (localhost→Local, else→SSH). | DC21 |
 | 2026-03-11 | @claude: Sync DESIGN.md signatures with Phase 1.10 implementation — `TargetSpec::pane()` returns `Result<Self>`, `Target::rename()` returns `Result<Target>`, `TransportKind::open_shell()` takes `cols, rows` params. Per PR #69 review. | TargetSpec, Target, TransportKind |
 | 2026-03-10 | @claude: Add inline note in DC20 geometry/reflow contract clarifying that Phase 1.9b implements snapshot comparison for capture/sample_text only; exec() deferred to Phase 2a. See PR #66 review round 2. | DC20 |
 | 2026-03-10 | @codex: address PR #65 review feedback by tightening the capture/sink contract: preserve-fidelity payloads by default, make TUI workflows explicitly `Raw`, move exec stability to an internal parser view, replace synthetic `TargetOutput.kind=Gap` with `SinkEvent::Gap`, scope history-limit handling to setup-time/new panes, and split Phase `1.9` into `1.9a`/`1.9b`. | ScrollbackQuery, Output Sink Pipeline, capture.rs, DC20, Implementation Phases |
@@ -2552,6 +2554,294 @@ abstraction lets all downstream modules (`discovery`, `capture`, `control`, `pip
 **MockTransport** (for testing): Returns canned `exec()` responses and canned streaming
 data from `open_shell()`. Built into the library, not behind a feature flag, so downstream
 consumers can also test their integrations.
+
+### DC21: Unified SSH URI for Host Addressing
+
+**Decision**: All hosts — including localhost — are addressed through a single SSH URI
+scheme. The existing `SshConfig` type is extended with URI parsing, rendering, and a
+`connect()` method that auto-selects the transport. No new wrapper type — `SshConfig`
+becomes the single entry point for both programmatic and string-based host configuration.
+
+**Requirement**: External consumers use `SshConfig` to specify a host and obtain a
+`HostHandle`. The URI supports both nassh-style (`;`-delimited userinfo params) and
+standard query-param (`?key=value&...`) syntax. `LocalTransport` and `SshTransport`
+remain internal implementation details — `connect()` selects automatically.
+
+**Non-goal**: Migration of existing `HostHandle::local()` / `HostHandle::new()` callers.
+Those remain available as crate-internal API for testing and advanced use cases.
+
+#### URI Format
+
+```
+ssh://[user[;param=value...]@]host[:port][/socket-path][?param=value&...]
+```
+
+Two parameter locations are supported:
+
+- **Userinfo params** (nassh style): `ssh://user;timeout=30@host`
+- **Query params** (standard style): `ssh://user@host?timeout=30`
+- **Mixed**: `ssh://user;timeout=30@host?host-key-policy=tofu` (allowed)
+
+**Examples**:
+```
+ssh://deploy@prod-server                              # defaults: port 22, verify
+ssh://deploy;host-key-policy=tofu@prod-server         # nassh style
+ssh://deploy@prod-server?host-key-policy=tofu         # query param style
+ssh://root@10.0.0.5:2222?timeout=30                   # port in authority, timeout in query
+ssh://user@localhost                                   # local transport (no SSH)
+ssh://localhost                                        # local, no user (user ignored)
+ssh://user@localhost/tmp/tmux-custom.sock              # local + socket path
+ssh://deploy;host-key-policy=insecure@dev-box          # insecure policy
+ssh://deploy@long-running?keepalive=0                  # disable keepalives
+ssh://user;socket-name=myserver@host                   # named tmux socket
+```
+
+The `/socket-path` component maps to `TmuxSocket::Path(...)`. If omitted, the default
+tmux socket is used. To use a named socket instead of a path, use the `socket-name`
+parameter: `ssh://user;socket-name=myserver@host`.
+
+#### No Canonical-Component Duplication
+
+Components with a dedicated position in the URI syntax — `user`, `host`, `port` — are
+parsed exclusively from their canonical location. They **cannot** appear as `;` or `?`
+parameters. This eliminates ambiguity and conflicting values:
+
+```
+ssh://root@10.0.0.5:2222            # OK — port in authority
+ssh://root@10.0.0.5?port=2222       # ERROR — port is a canonical component
+ssh://root;port=2222@10.0.0.5       # ERROR — port is a canonical component
+ssh://root;user=other@10.0.0.5      # ERROR — user is a canonical component
+```
+
+If the same non-canonical parameter appears in **both** userinfo and query string,
+parsing fails:
+
+```
+ssh://user;timeout=30@host?timeout=30   # ERROR — duplicate parameter
+```
+
+#### Parameters
+
+Parameter names align with OpenSSH `ssh_config(5)` where an equivalent exists:
+
+| Parameter | ssh_config Equivalent | Maps to | Default |
+|---|---|---|---|
+| `host-key-policy` | `StrictHostKeyChecking` | `HostKeyPolicy` | `verify` |
+| `timeout` | `ConnectTimeout` | `SshConfig::timeout` (seconds) | `10` |
+| `keepalive` | `ServerAliveInterval` | `SshConfig::keepalive_interval` (seconds, 0=off) | `30` |
+| `socket-name` | — (tmux-specific) | `TmuxSocket::Name(...)` | none |
+
+**`host-key-policy` values**: `verify` (default, maps to `HostKeyPolicy::Verify`),
+`tofu` (maps to `TrustFirstUse`), `insecure` (maps to `Insecure`).
+
+Unknown parameters are rejected at parse time (fail-fast, not silently ignored).
+
+**Canonical-only components** (never valid as parameters):
+
+| Component | Parsed from | Notes |
+|---|---|---|
+| `user` | Userinfo (before `;` or `@`) | Optional for localhost (ignored); required for SSH |
+| `host` | Authority | Required |
+| `port` | Authority (`:port`) | Default 22 |
+
+#### Consolidated `SshConfig` Type
+
+Instead of a separate `SshUri` wrapper, `SshConfig` itself gains URI parsing,
+rendering, and `connect()`. This eliminates type duplication — one type, one builder,
+one set of fields:
+
+```rust
+/// SSH/host connection configuration.
+///
+/// Constructed via builder (`SshConfig::new()`) or parsed from an SSH URI
+/// string (`SshConfig::parse()`). Supports both nassh-style (`;` in userinfo)
+/// and query-param (`?key=value`) syntax.
+#[derive(Debug, Clone)]
+pub struct SshConfig {
+    host: String,
+    port: u16,
+    user: String,
+    host_key_policy: HostKeyPolicy,
+    timeout: Duration,
+    keepalive_interval: Option<Duration>,
+    socket: Option<TmuxSocket>,
+}
+
+impl SshConfig {
+    // --- Builder (existing, extended) ---
+
+    pub fn new(host: impl Into<String>, user: impl Into<String>) -> Self;
+    pub fn with_port(self, port: u16) -> Self;
+    pub fn with_host_key_policy(self, policy: HostKeyPolicy) -> Self;
+    pub fn with_timeout(self, timeout: Duration) -> Self;
+    pub fn with_keepalive(self, interval: Option<Duration>) -> Self;
+    pub fn with_socket(self, socket: TmuxSocket) -> Self;  // NEW
+
+    // --- URI parsing (NEW) ---
+
+    /// Parse from an `ssh://` URI string.
+    ///
+    /// Accepts nassh-style params (`;` in userinfo), query params (`?`),
+    /// or both. Rejects unknown params and canonical-component duplication.
+    /// For localhost URIs, `user` defaults to empty (ignored by LocalTransport).
+    pub fn parse(uri: &str) -> Result<Self>;
+
+    /// Render to canonical URI form (nassh-style params in userinfo).
+    pub fn to_uri_string(&self) -> String;
+
+    // --- Connect (NEW) ---
+
+    /// Connect and return a HostHandle.
+    ///
+    /// Transport selection:
+    /// - `localhost`, `127.0.0.1`, `::1` → LocalTransport (no SSH)
+    /// - All other hosts → SshTransport via SSH
+    ///
+    /// `user` is ignored for localhost connections (LocalTransport runs as
+    /// the current OS user). For SSH hosts, `user` is required — `connect()`
+    /// returns an error if empty.
+    pub async fn connect(&self) -> Result<HostHandle>;
+
+    // --- Accessors ---
+
+    pub fn host(&self) -> &str;
+    pub fn user(&self) -> &str;
+    pub fn port(&self) -> u16;
+    pub fn is_localhost(&self) -> bool;
+    pub fn socket(&self) -> Option<&TmuxSocket>;
+}
+
+impl fmt::Display for SshConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_uri_string())
+    }
+}
+
+impl FromStr for SshConfig {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self> { Self::parse(s) }
+}
+```
+
+**Usage — basic parse and connect**:
+```rust
+use motlie_tmux::{SshConfig, HostKeyPolicy, TmuxSocket};
+use std::time::Duration;
+
+// Parse from string (config files, CLI args)
+let host = SshConfig::parse("ssh://deploy@prod:2222?host-key-policy=tofu")?
+    .connect().await?;
+let sessions = host.list_sessions().await?;
+
+// nassh-style params — same result, different syntax
+let host = SshConfig::parse("ssh://deploy;host-key-policy=tofu@prod:2222")?
+    .connect().await?;
+
+// Build programmatically (unchanged from current API)
+let host = SshConfig::new("10.0.0.5", "deploy")
+    .with_port(2222)
+    .with_host_key_policy(HostKeyPolicy::TrustFirstUse)
+    .connect()
+    .await?;
+
+// Localhost — no SSH overhead, user optional
+let host = SshConfig::parse("ssh://localhost")?.connect().await?;
+let host = SshConfig::parse("ssh://user@localhost")?.connect().await?;
+```
+
+**Usage — config-file driven fleet**:
+```rust
+// Read URIs from a TOML config, connect in parallel.
+let uris = vec![
+    "ssh://deploy@web-1",
+    "ssh://deploy@web-2",
+    "ssh://deploy;host-key-policy=tofu@db-1:2222",
+];
+let hosts: Vec<HostHandle> = futures::future::try_join_all(
+    uris.iter().map(|u| async { SshConfig::parse(u)?.connect().await })
+).await?;
+for host in &hosts {
+    let sessions = host.list_sessions().await?;
+    println!("{}: {} sessions", host, sessions.len());
+}
+```
+
+**Usage — `FromStr` integration**:
+```rust
+// FromStr works with clap, config parsers, or plain .parse()
+let uri = "ssh://deploy@prod:2222";
+let config: SshConfig = uri.parse()?;  // FromStr delegates to SshConfig::parse()
+let host = config.connect().await?;
+```
+
+**Usage — builder with socket selection**:
+```rust
+// Target a non-default tmux server on the remote host.
+let host = SshConfig::new("10.0.0.5", "deploy")
+    .with_port(2222)
+    .with_host_key_policy(HostKeyPolicy::TrustFirstUse)
+    .with_socket(TmuxSocket::Name("deploy-server".into()))
+    .connect()
+    .await?;
+```
+
+**Usage — round-trip serialization**:
+```rust
+// Parse, modify, serialize back for storage.
+let config = SshConfig::parse("ssh://deploy@prod:2222")?
+    .with_host_key_policy(HostKeyPolicy::TrustFirstUse);
+let uri_string = config.to_string(); // "ssh://deploy;host-key-policy=tofu@prod:2222"
+save_to_config_file(&uri_string);
+```
+
+**Usage — localhost development**:
+```rust
+// Identical to HostHandle::local() but with the uniform URI API.
+let host = SshConfig::parse("ssh://localhost")?.connect().await?;
+host.create_session("dev", Some("main"), None).await?;
+```
+
+#### Transport Selection Logic
+
+`SshConfig::connect()` selects the transport:
+
+```
+fn is_localhost(&self) -> bool:
+    host == "localhost" || host == "127.0.0.1" || host == "::1"
+
+async fn connect(&self) -> Result<HostHandle>:
+    if self.is_localhost():
+        transport = LocalTransport::with_timeout(self.timeout)
+    else:
+        if self.user.is_empty():
+            return Err("user is required for SSH connections")
+        transport = SshTransport::connect(self).await?
+    return HostHandle::new(transport, self.socket.clone())
+```
+
+Note: `SshTransport::connect()` already takes `SshConfig` — no adapter needed.
+For localhost, `user` is silently ignored (no SSH handshake occurs).
+
+#### Refactor Plan
+
+The change extends the existing `SshConfig` rather than adding a new type:
+
+1. **`src/transport.rs`**: Add `socket: Option<TmuxSocket>` field to `SshConfig`,
+   add `with_socket()` builder method, make fields private with accessor methods.
+   Internal usage in `SshTransport` and `SshHandler` switches from `config.host` to
+   `config.host()`. All changes are within the same file.
+
+2. **New file `src/uri.rs`**: Contains `impl SshConfig` extension block with `parse()`,
+   `to_uri_string()`, `connect()`, `Display`, `FromStr` impls, and all URI-related
+   tests. Rust allows `impl` blocks for a type in any module within the same crate —
+   this keeps URI logic separated from transport logic while consolidating on one type.
+
+3. **`src/lib.rs`**: Add `mod uri;` (private — no public types to export, just extends
+   `SshConfig` which is already re-exported).
+
+4. **`src/host.rs`**: No changes. `HostHandle::local()`, `HostHandle::new()`,
+   `HostHandle::local_with_timeout()` remain as crate-internal convenience constructors
+   for testing and advanced use cases.
 
 ### DC7: Capture-Pane vs Stream Monitoring
 
