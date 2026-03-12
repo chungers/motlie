@@ -91,10 +91,10 @@ let transport = LocalTransport::with_timeout(std::time::Duration::from_secs(30))
 let host = HostHandle::new(TransportKind::Local(transport), None);
 ```
 
-> **`@claude NOTE`** *(PLAN 1.10g)*: `HostHandle::local()` hardcodes a 10s
+> **`@claude NOTE — RESOLVED`** *(PLAN 1.10g)*: `HostHandle::local()` hardcodes a 10s
 > transport timeout. There is no builder or setter to change it — you must
 > drop to `HostHandle::new()` + `LocalTransport::with_timeout()`. Consider
-> adding `HostHandle::local_with_timeout()` or a builder on `HostHandle`.
+> adding `HostHandle::local_with_timeout()` or a builder on `HostHandle`. **Fixed**: Added `HostHandle::local_with_timeout(Duration)` constructor.
 
 ### Custom tmux socket
 
@@ -170,12 +170,12 @@ SshConfig::new("host", "user")
     .with_host_key_policy(HostKeyPolicy::Insecure);
 ```
 
-> **`@claude NOTE`** *(PLAN 1.10e)*: `TrustFirstUse` is fail-closed — if
+> **`@claude NOTE — RESOLVED`** *(PLAN 1.10e)*: `TrustFirstUse` is fail-closed — if
 > persisting the learned key to `~/.ssh/known_hosts` fails (e.g. file not
 > writable), the connection is **rejected**. This is intentional but may
 > surprise users who expect TOFU to "just work". The error is logged at
 > `error` level with an actionable message ("check that ~/.ssh/known_hosts
-> is writable").
+> is writable"). **Fixed**: Added doc comment on `TrustFirstUse` explaining fail-closed behavior.
 
 ### Connection status
 
@@ -187,11 +187,11 @@ if ssh.is_closed() {
 }
 ```
 
-> **`@claude NOTE`** *(PLAN 1.10d)*: `is_closed()` is only accessible on
+> **`@claude NOTE — RESOLVED`** *(PLAN 1.10d)*: `is_closed()` is only accessible on
 > `SshTransport`, not through `HostHandle` or `TransportKind`. There is no
 > transport-agnostic way to check connection health. `LocalTransport` has no
 > equivalent (always "connected"). Consider adding
-> `TransportKind::is_closed()` that returns `false` for Local/Mock.
+> `TransportKind::is_closed()` that returns `false` for Local/Mock. **Fixed**: Added `TransportKind::is_healthy() -> bool` (Local/Mock=true, SSH=!is_closed()).
 
 ### Characteristics
 
@@ -244,11 +244,11 @@ let mock = MockTransport::new()
     .with_default("");
 ```
 
-> **`@claude NOTE`** *(PLAN 1.10b)*: Pattern matching iterates the internal
+> **`@claude NOTE — RESOLVED`** *(PLAN 1.10b)*: Pattern matching iterates the internal
 > HashMap, so if a command matches multiple registered patterns, which one
 > wins is **non-deterministic** (HashMap iteration order). Use
 > specific-enough patterns to avoid ambiguity. For example, prefer
-> `"list-sessions"` over `"list"` if you also have `"list-panes"` registered.
+> `"list-sessions"` over `"list"` if you also have `"list-panes"` registered. **Fixed**: Switched from HashMap to Vec for deterministic insertion-order matching.
 
 ### Convenience helper for tests
 
@@ -276,10 +276,10 @@ async fn test_session_lifecycle() {
 - **Shell channel**: `open_shell()` returns a `MockShellChannel` with empty
   data that immediately yields `Eof` on read.
 
-> **`@claude NOTE`** *(PLAN 1.10a)*: There is no way to make
+> **`@claude NOTE — RESOLVED`** *(PLAN 1.10a)*: There is no way to make
 > `MockTransport::exec()` return an `Err`. This means error handling paths
 > in discovery, capture, and control code cannot be unit-tested with mocks
-> alone. Consider adding `with_error(pattern, message)` to `MockTransport`.
+> alone. Consider adding `with_error(pattern, message)` to `MockTransport`. **Fixed**: Added `MockTransport::with_error(pattern, message)` method.
 
 ---
 
@@ -294,9 +294,9 @@ async fn test_session_lifecycle() {
 | `open_shell()` | Spawns `sh` | PTY `xterm` 80x24 + shell | Empty data, immediate Eof |
 | Auth | N/A | ssh-agent only | N/A |
 
-> **`@claude NOTE`** *(PLAN 1.10c)*: `SshTransport::open_shell()` requests a
+> **`@claude NOTE — RESOLVED`** *(PLAN 1.10c)*: `SshTransport::open_shell()` requests a
 > PTY at fixed 80x24. There is no API to specify dimensions. This may matter
-> for applications that need a specific terminal size for the remote shell.
+> for applications that need a specific terminal size for the remote shell. **Fixed**: `open_shell()` now takes `cols: u32, rows: u32` parameters.
 
 ---
 
@@ -362,7 +362,7 @@ target.kill().await?;
 target.rename("new_name").await?;
 ```
 
-> **`@claude NOTE`** *(PLAN 1.10h)*: `rename()` mutates tmux state but does
+> **`@claude NOTE — RESOLVED`** *(PLAN 1.10h)*: `rename()` mutates tmux state but does
 > **not** update the `Target`'s internal address. The impact depends on
 > target level:
 >
@@ -380,13 +380,13 @@ target.rename("new_name").await?;
 >   window names should re-query.
 >
 > Consider having `rename()` return a new `Target` with the updated address,
-> or making `Target` internally mutable.
+> or making `Target` internally mutable. **Fixed**: `Target::rename()` now returns `Result<Target>` with updated address.
 
-> **`@claude NOTE`** *(PLAN 1.10i)*: `rename()` at pane level returns
+> **`@claude NOTE — RESOLVED`** *(PLAN 1.10i)*: `rename()` at pane level returns
 > `Err("cannot rename a pane")`. This is a tmux limitation — tmux has no
 > `rename-pane` command. The error is clear, but it would be better to make
 > this a compile-time restriction or at least document the asymmetry in the
-> `Target::rename()` doc comment.
+> `Target::rename()` doc comment. **Fixed**: Doc comment on `rename()` documents pane-level Err and the asymmetry.
 
 ---
 
@@ -434,7 +434,7 @@ let t = host.target(&TargetSpec::parse("build:0.1")?).await?;
 // Returns Option<Target> — None if the entity doesn't exist.
 ```
 
-> **`@claude NOTE`** *(PLAN 1.10f)*: `TargetSpec::pane()` **panics** (not
+> **`@claude NOTE — RESOLVED`** *(PLAN 1.10f)*: `TargetSpec::pane()` **panics** (not
 > `Result`) if `.window()` was not called first. This enforces the tmux
 > hierarchy (pane requires window context), but a panic is a surprising
 > contract for a builder API. Consider returning `Result` instead.
@@ -444,6 +444,7 @@ let t = host.target(&TargetSpec::parse("build:0.1")?).await?;
 > // Must do:
 > let _ = TargetSpec::session("s").window(0).pane(0);
 > ```
+> **Fixed**: `TargetSpec::pane()` now returns `Result<Self>` instead of panicking.
 
 ### List attached clients
 
@@ -490,11 +491,11 @@ let pane = target.pane(0).await?;  // Option<Target>
 // Pane level: children() returns empty Vec
 ```
 
-> **`@claude NOTE`** *(PLAN 1.10j)*: `target.pane(index)` from **session
+> **`@claude NOTE — RESOLVED`** *(PLAN 1.10j)*: `target.pane(index)` from **session
 > level** resolves via the **active window** at call time. If the active
 > window changes between calls (e.g. another client switches windows), the
 > same `target.pane(0)` call returns a different pane. For deterministic
-> targeting, navigate explicitly: `target.window(0).pane(0)`.
+> targeting, navigate explicitly: `target.window(0).pane(0)`. **Fixed**: Doc comment on `Target::pane(index)` documents active-window drift.
 
 ### Direct pane targeting
 
@@ -560,11 +561,11 @@ let content = target.capture().await?;
 println!("{}", content);
 ```
 
-> **`@claude NOTE`** *(PLAN 1.10k)*: At session or window level, `capture()`
+> **`@claude NOTE — RESOLVED`** *(PLAN 1.10k)*: At session or window level, `capture()`
 > captures the **active pane** only — not all panes. Use `capture_all()` to
 > capture every pane under the target. This is consistent with tmux behavior
 > (`capture-pane -t session` targets the active pane) but may surprise
-> callers who expect session-level capture to be exhaustive.
+> callers who expect session-level capture to be exhaustive. **Fixed**: Doc comment on `Target::capture()` clarifies active-pane-only scope.
 
 ### With scrollback history
 
@@ -632,14 +633,14 @@ let pane_target = session_target.pane(0).await?.unwrap();
 
 ### Two kinds of timeout
 
-> **`@claude NOTE`** *(PLAN 1.10m)*: `Target::exec()` has **its own timeout
+> **`@claude NOTE — RESOLVED`** *(PLAN 1.10m)*: `Target::exec()` has **its own timeout
 > parameter** that governs sentinel polling. This is separate from the
 > transport timeout (`LocalTransport::timeout` / `SshConfig::timeout`) which
 > governs each individual tmux command. A 30s exec timeout with a 10s
 > transport timeout means: each `capture-pane` poll can take up to 10s, and
 > the overall sentinel wait can take up to 30s. These are independent knobs
 > with no documentation linking them. Consider documenting the interaction or
-> adding a note to `SshConfig::with_timeout()`.
+> adding a note to `SshConfig::with_timeout()`. **Fixed**: Doc comments on `Target::exec()` and `SshConfig::with_timeout()` explaining dual timeouts.
 
 ### Limitations
 
@@ -786,11 +787,11 @@ let second = target.sample_text_with_options(
 // On dedup failure: second.fidelity includes OverlapResync
 ```
 
-> **`@claude NOTE`** *(PLAN 1.10l)*: `overlap_lines` must be **>= 2** for
+> **`@claude NOTE — RESOLVED`** *(PLAN 1.10l)*: `overlap_lines` must be **>= 2** for
 > dedup to activate. With 0 or 1, `overlap_deduplicate()` returns the
 > current capture unchanged with no fidelity issues — it silently does
 > nothing rather than warning. This threshold is undocumented in the
-> function signature.
+> function signature. **Fixed**: Added `tracing::warn!` when overlap_lines < 2, plus doc comment.
 
 ---
 
@@ -827,11 +828,11 @@ let issues = before.compare(&after);
 
 Tmux's `history-limit` controls max scrollback lines per pane.
 
-> **`@claude NOTE`** *(PLAN 1.10n)*: `history-limit` only affects panes
+> **`@claude NOTE — RESOLVED`** *(PLAN 1.10n)*: `history-limit` only affects panes
 > created **after** the setting is applied. Existing panes retain their
 > creation-time limit. This is a tmux limitation, not a library limitation,
 > but it means `set_history_limit()` has no effect on already-running
-> sessions unless you create new windows/panes afterward.
+> sessions unless you create new windows/panes afterward. **Fixed**: Doc comments on `get_history_limit()` explaining creation-time semantics.
 
 ### Global default
 
