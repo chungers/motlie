@@ -73,7 +73,7 @@ No SSH, no monitoring.
 
 - [x] `TransportKind` enum: `Local(LocalTransport)`, `Mock(MockTransport)` (SSH added in Phase 2a)
 - [x] `TransportKind::exec(&self, command: &str) -> Result<String>` — dispatch to variant
-- [x] `TransportKind::open_shell(&self) -> Result<ShellChannelKind>` — dispatch to variant
+- [x] `TransportKind::open_shell(&self, cols, rows) -> Result<ShellChannelKind>` — dispatch to variant
 - [x] `ShellChannelKind` enum: `Local(LocalShellChannel)`, `Mock(MockShellChannel)`
 - [x] `ShellChannelKind::write()`, `::read()` methods
 - [x] `ShellEvent` enum: `Data(Vec<u8>)`, `Eof`

@@ -289,9 +289,9 @@ async fn test_session_lifecycle() {
 |--------|-------|-----|------|
 | Timeout | 10s default, configurable | 10s default, configurable | None |
 | Error includes stderr | Yes | Yes | N/A (never errors) |
-| `is_closed()` | Not available | Available on `SshTransport` | Not available |
+| `is_closed()` / `is_healthy()` | `is_healthy()` always `true` | `is_healthy()` delegates to `!is_closed()` | `is_healthy()` always `true` |
 | Keepalive | N/A | Configurable, default 30s | N/A |
-| `open_shell()` | Spawns `sh` | PTY `xterm` 80x24 + shell | Empty data, immediate Eof |
+| `open_shell(cols, rows)` | Spawns `sh` (ignores cols/rows) | PTY `xterm` at caller-specified cols×rows | Empty data, immediate Eof (ignores cols/rows) |
 | Auth | N/A | ssh-agent only | N/A |
 
 > **`@claude NOTE — RESOLVED`** *(PLAN 1.10c)*: `SshTransport::open_shell()` requests a
@@ -359,21 +359,16 @@ target.kill().await?;
 ### Rename
 
 ```rust
-target.rename("new_name").await?;
+// rename() returns a new Target with the updated address.
+// For session rename this is critical — the old handle has a stale name.
+let target = target.rename("new_name").await?;
 ```
 
-> **`@claude NOTE — RESOLVED`** *(PLAN 1.10h)*: `rename()` mutates tmux state but does
-> **not** update the `Target`'s internal address. The impact depends on
-> target level:
+> **`@claude NOTE — RESOLVED`** *(PLAN 1.10h)*: `rename()` now returns
+> `Result<Target>` with the updated address. The impact by level:
 >
 > - **Session rename** — correctness-significant. `target_string()` uses the
->   session name (`s.name`), so after rename the old name is stale and
->   subsequent operations **fail** because tmux can't find it. You must
->   obtain a fresh `Target`:
->   ```rust
->   target.rename("new_name").await?;
->   let target = host.session("new_name").await?.unwrap(); // fresh handle
->   ```
+>   session name, so callers **must** use the returned handle.
 > - **Window rename** — metadata drift only. `target_string()` uses
 >   `session:index` (not the window name), so commands continue to work.
 >   However, the cached `WindowInfo.name` becomes stale — callers displaying
@@ -426,25 +421,22 @@ let t = host.target(&TargetSpec::session("build")).await?;
 let t = host.target(&TargetSpec::session("build").window(0)).await?;
 let t = host.target(&TargetSpec::session("build").window_name("editor")).await?;
 
-// Session + window + pane
-let t = host.target(&TargetSpec::session("build").window(0).pane(1)).await?;
+// Session + window + pane (pane() returns Result)
+let t = host.target(&TargetSpec::session("build").window(0).pane(1)?).await?;
 
 // Parse from string
 let t = host.target(&TargetSpec::parse("build:0.1")?).await?;
 // Returns Option<Target> — None if the entity doesn't exist.
 ```
 
-> **`@claude NOTE — RESOLVED`** *(PLAN 1.10f)*: `TargetSpec::pane()` **panics** (not
-> `Result`) if `.window()` was not called first. This enforces the tmux
-> hierarchy (pane requires window context), but a panic is a surprising
-> contract for a builder API. Consider returning `Result` instead.
+> **`@claude NOTE — RESOLVED`** *(PLAN 1.10f)*: `TargetSpec::pane()` now returns
+> `Result<Self>` instead of panicking. Missing `.window()` returns an error:
 > ```rust
-> // This panics at runtime:
-> let _ = TargetSpec::session("s").pane(0);
-> // Must do:
-> let _ = TargetSpec::session("s").window(0).pane(0);
+> // Returns Err — pane requires window context:
+> let _ = TargetSpec::session("s").pane(0); // Err(...)
+> // Correct usage:
+> let _ = TargetSpec::session("s").window(0).pane(0)?; // Ok(spec)
 > ```
-> **Fixed**: `TargetSpec::pane()` now returns `Result<Self>` instead of panicking.
 
 ### List attached clients
 

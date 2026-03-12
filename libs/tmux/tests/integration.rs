@@ -80,19 +80,18 @@ async fn localhost_session_lifecycle() {
         exec_out.stdout
     );
 
-    // 7. Rename session
+    // 7. Rename session — rename() now returns a new Target with updated address
     let new_name = "motlie_test_renamed";
-    target
+    let renamed_target = target
         .rename(new_name)
         .await
         .expect("rename session failed");
+    assert_eq!(renamed_target.session_name(), new_name);
     let sessions = host.list_sessions().await.unwrap();
     assert!(sessions.iter().any(|s| s.name == new_name));
     assert!(!sessions.iter().any(|s| s.name == session_name));
 
-    // 8. Kill session
-    // Need to get a fresh target with the new name
-    let renamed_target = host.session(new_name).await.unwrap().unwrap();
+    // 8. Kill session — use the returned handle directly (no re-query needed)
     renamed_target.kill().await.expect("kill session failed");
 
     // 9. Confirm gone
