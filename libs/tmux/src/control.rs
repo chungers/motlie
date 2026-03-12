@@ -181,6 +181,12 @@ pub async fn set_history_limit(
 }
 
 /// Query the current `history-limit` for a session (or global default).
+///
+/// **Note**: the returned value is the *configured* limit, which only applies
+/// to panes created after it was set. Existing panes retain their
+/// creation-time limit regardless of subsequent changes. To verify a
+/// specific pane's effective limit, use `display-message -p '#{history_limit}'`
+/// targeted at that pane.
 pub async fn get_history_limit(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
