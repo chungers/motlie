@@ -4,7 +4,8 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-03-11 | @claude | Added Phase 1.10 — API Gaps and Hardening: 14 `@claude NOTE` items from API.md, all validated by @codex in PR #68 round 2. Slotted before Phase 2a to clean up ergonomic and correctness gaps before next feature work. |
+| 2026-03-11 | @claude | Phase 1.10 — address PR #68 R3: fix changelog timeline (round 2 had open rename issue, full validation after round 3), replace stale line-number refs with grep-stable `@claude NOTE (PLAN 1.10x)` anchors, relax dependency from hard gate to parallel-with-2a.2. |
+| 2026-03-11 | @claude | Added Phase 1.10 — API Gaps and Hardening: 14 `@claude NOTE` items from API.md, validated by @codex across PR #68 rounds 2–3. Runs parallel with Phase 2a (not a hard gate) to clean up ergonomic and correctness gaps. |
 | 2026-03-10 | @claude | Phase 2a.1 implemented: SshTransport with russh 0.46, ssh-agent auth, DC2 host key verification (Verify/TrustFirstUse/Insecure), SshConfig builder, exec/open_shell over SSH, SshShellChannel with PTY, actionable error messages (OC3). |
 | 2026-03-10 | @claude | Address PR #66 review round 2: scope 1.9b checkboxes to match implementation — reflow detection covers capture/sample_text only (exec handled by wrap-tolerant parser), overlap provides stateless primitives (history_size tracking and wider recapture deferred to 2a.2 monitor). |
 | 2026-03-10 | @claude | Phase 1.9b implemented: geometry snapshots (list_clients, query_pane_geometry), reflow detection around captures, overlap-aware incremental sampling with OverlapResync fallback, history-limit setup helpers, comprehensive tests. |
@@ -226,38 +227,39 @@ No SSH, no monitoring.
 ### 1.10 — API Gaps and Hardening
 
 Addresses 14 inconsistencies and ergonomic gaps identified during API documentation
-(PR #68) and validated by @codex in review round 2. Each item references the
-`@claude NOTE` marker in `docs/API.md` for traceability.
+(PR #68) and validated by @codex across PR #68 rounds 2–3. Each item references
+the corresponding `@claude NOTE (PLAN 1.10x)` marker in `docs/API.md` — grep for
+the task ID to locate the note (line numbers drift across edits).
 
 #### Transport layer (`src/transport.rs`)
 
 - [ ] **1.10a** — `MockTransport`: add `with_error(pattern, message)` to allow `exec()`
   to return `Err` for specified patterns. Currently `exec()` always returns `Ok(...)`,
   preventing unit-test coverage of error handling paths in discovery, capture, and control.
-  *(API.md line 278, impact: medium)*
+  *(grep: `PLAN 1.10a` in API.md, impact: medium)*
 
 - [ ] **1.10b** — `MockTransport`: document or mitigate nondeterministic pattern matching.
   Internal HashMap iteration means overlapping substring patterns (e.g. `"list"` vs
   `"list-sessions"`) match nondeterministically. Options: switch to `Vec` for ordered
   matching, or add a doc warning on `with_response()`.
-  *(API.md line 246, impact: medium for tests)*
+  *(grep: `PLAN 1.10b` in API.md, impact: medium for tests)*
 
 - [ ] **1.10c** — `SshTransport::open_shell()`: add PTY size parameters. Currently
   hardcodes `request_pty("xterm", 80, 24, ...)` with no API to specify dimensions.
   Add optional width/height to `open_shell()` or an `SshShellOptions` builder.
-  *(API.md line 296, impact: medium for TUIs, low for non-interactive)*
+  *(grep: `PLAN 1.10c` in API.md, impact: medium for TUIs, low for non-interactive)*
 
 - [ ] **1.10d** — `SshTransport::is_closed()`: expose transport-agnostic health probe.
   `is_closed()` exists only on `SshTransport`; neither `HostHandle` nor `TransportKind`
   exposes it. Add `TransportKind::is_healthy() -> bool` (returns `true` for Local/Mock,
   delegates to `!is_closed()` for SSH).
-  *(API.md line 189, impact: low-to-medium)*
+  *(grep: `PLAN 1.10d` in API.md, impact: low-to-medium)*
 
 - [ ] **1.10e** — `TrustFirstUse` host key policy: improve discoverability of fail-closed
   behavior. Connection is rejected if `~/.ssh/known_hosts` is not writable. Add a doc
   comment on `HostKeyPolicy::TrustFirstUse` explaining the precondition and the error
   message users will see.
-  *(API.md line 173, impact: medium, mostly ergonomic)*
+  *(grep: `PLAN 1.10e` in API.md, impact: medium, mostly ergonomic)*
 
 #### Types (`src/types.rs`)
 
@@ -265,39 +267,39 @@ Addresses 14 inconsistencies and ergonomic gaps identified during API documentat
   uses `assert!` to enforce that `.window()` was called first — builder misuse is
   process-fatal for library consumers. Change to return `Result<TargetSpec>` or a
   typed error.
-  *(API.md line 426, impact: low-to-medium ergonomically)*
+  *(grep: `PLAN 1.10f` in API.md, impact: low-to-medium ergonomically)*
 
 #### Host handle and Target (`src/host.rs`)
 
 - [ ] **1.10g** — `HostHandle::local()`: add `local_with_timeout(Duration)` convenience
   constructor. Currently hardcodes 10s transport timeout with no builder/setter — callers
   must drop to `HostHandle::new()` + `LocalTransport::with_timeout()`.
-  *(API.md line 94, impact: ergonomic)*
+  *(grep: `PLAN 1.10g` in API.md, impact: ergonomic)*
 
 - [ ] **1.10h** — `Target::rename()`: address session-level staleness. After session
   rename, `target_string()` returns the old name and subsequent operations fail. Options:
   (a) return a new `Target` with updated address, (b) make `Target` internally mutable
   via `RwLock`, or (c) document prominently and accept. Window rename is metadata drift
   only (`target_string()` uses `session:index`).
-  *(API.md line 364, impact: correctness-significant for session, metadata for window)*
+  *(grep: `PLAN 1.10h` in API.md, impact: correctness-significant for session, metadata for window)*
 
 - [ ] **1.10i** — `Target::rename()` at pane level: improve error ergonomics. Currently
   returns runtime `Err("cannot rename a pane")` — tmux has no `rename-pane` command.
   Options: (a) compile-time restriction via a `Renamable` marker on Target, (b) return
   a typed error variant, or (c) add doc comment noting the asymmetry.
-  *(API.md line 375, impact: low)*
+  *(grep: `PLAN 1.10i` in API.md, impact: low)*
 
 - [ ] **1.10j** — `Target::pane(index)` from session level: document active-window drift.
   Resolves via the **active window** at call time, so the same call can return different
   panes if focus changes. Add a doc comment recommending explicit navigation
   (`target.window(0).pane(0)`) for deterministic targeting.
-  *(API.md line 482, impact: medium for automation)*
+  *(grep: `PLAN 1.10j` in API.md, impact: medium for automation)*
 
 - [ ] **1.10k** — `Target::capture()` at session/window level: clarify scope in doc
   comment. Captures the **active pane** only (consistent with tmux `capture-pane -t`),
   but the method name sounds exhaustive. Add doc comment noting this and pointing to
   `capture_all()` for all panes.
-  *(API.md line 552, impact: medium)*
+  *(grep: `PLAN 1.10k` in API.md, impact: medium)*
 
 #### Capture (`src/capture.rs`)
 
@@ -305,7 +307,7 @@ Addresses 14 inconsistencies and ergonomic gaps identified during API documentat
   Currently silently no-ops (returns current capture unchanged with no fidelity issues).
   Options: (a) return a fidelity warning, (b) log at `warn` level, or (c) document the
   threshold in the function signature.
-  *(API.md line 778, impact: low-to-medium)*
+  *(grep: `PLAN 1.10l` in API.md, impact: low-to-medium)*
 
 #### Cross-cutting documentation
 
@@ -314,15 +316,22 @@ Addresses 14 inconsistencies and ergonomic gaps identified during API documentat
   (`LocalTransport::timeout` / `SshConfig::timeout`) that governs each individual tmux
   command. Add doc comments on both `Target::exec()` and `SshConfig::with_timeout()`
   explaining the interaction and failure modes.
-  *(API.md line 624, impact: medium)*
+  *(grep: `PLAN 1.10m` in API.md, impact: medium)*
 
 - [ ] **1.10n** — Document `history-limit` creation-time semantics. `set_history_limit()`
   only affects panes created after the call; existing panes retain their creation-time
   limit. Add doc comments on `set_history_limit()` and `set_global_history_limit()`
   noting this tmux behavior.
-  *(API.md line 818, impact: medium ergonomically)*
+  *(grep: `PLAN 1.10n` in API.md, impact: medium ergonomically)*
 
-**Depends on**: 1.9b (all Phase 1 complete)
+**Depends on**: Per-task — each 1.10x depends only on the module it modifies:
+- 1.10a–e: `transport.rs` (available after 1.3 / 2a.1)
+- 1.10f: `types.rs` (available after 1.1)
+- 1.10g–k: `host.rs` (available after 1.7)
+- 1.10l: `capture.rs` (available after 1.5)
+- 1.10m–n: docs-only (no code dependency)
+
+**Does NOT gate**: 2a.2 or later phases. Runs in parallel with Phase 2a work.
 
 ---
 
@@ -673,7 +682,7 @@ Out of current scope. Listed for continuity.
  │     │
  │     ├── 1.9b Mixed-client stabilization [needs 1.9a]
  │     │
- │     ├── 1.10 API gaps + hardening [needs 1.9b]
+ │     ├── 1.10 API gaps + hardening [parallel with 2a — per-task deps]
  │     │
  │     └── 2a.2 Monitor parser [needs 1.7 + 1.9a]
  │          │
@@ -741,11 +750,8 @@ Time  Track A (data path)      Track B (input/monitor)    Track C (matching/sink
  T8   1.9b Stabilization        │                           │
       │  (capture helpers)      │                           │
       │                         │                           │
- T8.5 1.10 API gaps+hardening   │                           │
-      │  (types/transport/host) │                           │
-      │                         │                           │
- T9   2a.2 Monitor parser       │                           │
-      │  (monitor.rs)           │                           │
+ T9   2a.2 Monitor parser       1.10 API gaps+hardening     │
+      │  (monitor.rs)           (parallel — per-task deps)  │
       │  [needs 1.7 + 1.9a]     │                           │
       │                         │                           │
 ───── ── SYNC POINT 2 ──────── ─┘                           │
@@ -769,11 +775,11 @@ Time  Track A (data path)      Track B (input/monitor)    Track C (matching/sink
 T16  3.4 Smoke test
 ```
 
-Track A includes three additional stabilization steps after `1.8`: `1.9a` is the
+Track A includes two additional stabilization steps after `1.8`: `1.9a` is the
 type/API gate required before `2a.2` and `2c.*`; `1.9b` is a follow-on best-effort
-stabilization pass for overlap resync, geometry detection, and history setup guidance;
-`1.10` addresses 14 API gaps and ergonomic issues identified during API documentation
-and validated by review (PR #68).
+stabilization pass for overlap resync, geometry detection, and history setup guidance.
+`1.10` (API gaps/hardening) runs in parallel — individual tasks can be picked up by
+any dev with spare cycles since each touches an isolated module.
 
 ### Dev Assignments by Team Size
 
@@ -781,7 +787,7 @@ and validated by review (PR #68).
 
 | Dev | Track | Tasks (in order) |
 |-----|-------|-----------------|
-| **A** | Data path + wiring | 1.0 → 1.1 → 1.3 → 1.4 → 1.5 → **1.7** → 1.8 → 1.9a → 1.9b → 1.10 → 2a.2 → **2a.4** → **2b.3** → **2c.4** → **3.1** → 3.2 → 3.3 |
+| **A** | Data path + wiring | 1.0 → 1.1 → 1.3 → 1.4 → 1.5 → **1.7** → 1.8 → 1.9a → 1.9b → 2a.2 → **2a.4** → **2b.3** → **2c.4** → **3.1** → 3.2 → 3.3 |
 | **B** | Input + matching + sinks | 1.2 → 2b.2 → 1.6 → 2b.1 → 2a.1 → 2a.3 → 2c.1 → 2c.2 → 2c.3 → 3.4 |
 
 Sync points: **1.7** (B's 1.6 merges with A's 1.4+1.5), **2a.4** (B's 2a.3 merges with A's 2a.2), **2b.3** (B's 2b.1 ready for A), **2c.4** (B's 2c.3 ready; A's 2b.3 done — serial on `monitor.rs`/`host.rs`).
@@ -792,7 +798,7 @@ Dev B starts `2b.2 Matcher` immediately after `1.2 Keys` — it depends only on 
 
 | Dev | Focus area | Tasks (in order) |
 |-----|-----------|-----------------|
-| **A** | Data path (types → transport → discovery → capture → host wiring) | 1.0 → 1.1 → 1.3 → 1.4 → 1.5 → **1.7** → 1.8 → 1.9a → 1.9b → 1.10 → **2a.4** → **3.1** → 3.2 |
+| **A** | Data path (types → transport → discovery → capture → host wiring) | 1.0 → 1.1 → 1.3 → 1.4 → 1.5 → **1.7** → 1.8 → 1.9a → 1.9b → **2a.4** → **3.1** → 3.2 |
 | **B** | Input + monitoring (keys → control → SSH → monitor → rules) | 1.2 → 1.6 → 2a.1 → 2a.3 → 2a.2 → **2b.3** → **2c.4** → 3.3 → 3.4 |
 | **C** | Matching + sink pipeline (matcher → config → sinks → bus) | 2b.2 → 2b.1 → 2c.1 → 2c.2 → 2c.3 |
 
@@ -806,7 +812,7 @@ Split Track B into input/control (B1) and SSH/monitoring (B2):
 
 | Dev | Focus area | Tasks |
 |-----|-----------|-------|
-| **A** | Data path | 1.0 → 1.1 → 1.3 → 1.4 → 1.5 → **1.7** → 1.8 → 1.9a → 1.9b → 1.10 |
+| **A** | Data path | 1.0 → 1.1 → 1.3 → 1.4 → 1.5 → **1.7** → 1.8 → 1.9a → 1.9b |
 | **B1** | Input + control | 1.2 → 1.6 → (pick up 4.1, 4.2 hardening while waiting) |
 | **B2** | SSH + monitoring + sink wiring | 2a.1 → 2a.3 → 2a.2 → **2a.4** → **2b.3** → **2c.4** → 3.3 → 3.4 |
 | **C** | Matching + sinks | 2b.2 → 2b.1 → 2c.1 → 2c.2 → 2c.3 → **3.1** → 3.2 |
