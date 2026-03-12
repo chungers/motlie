@@ -290,7 +290,7 @@ async fn test_session_lifecycle() {
   data that immediately yields `Eof` on read.
 
 ```rust
-use motlie_tmux::{HostHandle, transport::TransportKind};
+use motlie_tmux::{HostHandle, transport::{MockTransport, TransportKind}};
 
 let mock = MockTransport::new()
     .with_error("kill-session", "session not found")
