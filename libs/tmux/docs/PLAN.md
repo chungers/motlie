@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-12 | @claude | Phase 1.10 — address PR #68 R4: pick implementation direction for multi-option tasks (1.10b/h/i/l), split per-task deps to exact phase granularity (1.10a/b→1.3, 1.10c/d/e→2a.1, etc.), add 1.10 staffing to all dev assignment tables. |
 | 2026-03-11 | @claude | Phase 1.10 — address PR #68 R3: fix changelog timeline (round 2 had open rename issue, full validation after round 3), replace stale line-number refs with grep-stable `@claude NOTE (PLAN 1.10x)` anchors, relax dependency from hard gate to parallel-with-2a.2. |
 | 2026-03-11 | @claude | Added Phase 1.10 — API Gaps and Hardening: 14 `@claude NOTE` items from API.md, validated by @codex across PR #68 rounds 2–3. Runs parallel with Phase 2a (not a hard gate) to clean up ergonomic and correctness gaps. |
 | 2026-03-10 | @claude | Phase 2a.1 implemented: SshTransport with russh 0.46, ssh-agent auth, DC2 host key verification (Verify/TrustFirstUse/Insecure), SshConfig builder, exec/open_shell over SSH, SshShellChannel with PTY, actionable error messages (OC3). |
@@ -238,10 +239,10 @@ the task ID to locate the note (line numbers drift across edits).
   preventing unit-test coverage of error handling paths in discovery, capture, and control.
   *(grep: `PLAN 1.10a` in API.md, impact: medium)*
 
-- [ ] **1.10b** — `MockTransport`: document or mitigate nondeterministic pattern matching.
-  Internal HashMap iteration means overlapping substring patterns (e.g. `"list"` vs
-  `"list-sessions"`) match nondeterministically. Options: switch to `Vec` for ordered
-  matching, or add a doc warning on `with_response()`.
+- [ ] **1.10b** — `MockTransport`: switch pattern storage from `HashMap` to `Vec` for
+  deterministic ordered matching. Currently overlapping substring patterns (e.g. `"list"`
+  vs `"list-sessions"`) match nondeterministically due to HashMap iteration order. With
+  `Vec`, patterns are checked in registration order — first match wins.
   *(grep: `PLAN 1.10b` in API.md, impact: medium for tests)*
 
 - [ ] **1.10c** — `SshTransport::open_shell()`: add PTY size parameters. Currently
@@ -276,17 +277,17 @@ the task ID to locate the note (line numbers drift across edits).
   must drop to `HostHandle::new()` + `LocalTransport::with_timeout()`.
   *(grep: `PLAN 1.10g` in API.md, impact: ergonomic)*
 
-- [ ] **1.10h** — `Target::rename()`: address session-level staleness. After session
-  rename, `target_string()` returns the old name and subsequent operations fail. Options:
-  (a) return a new `Target` with updated address, (b) make `Target` internally mutable
-  via `RwLock`, or (c) document prominently and accept. Window rename is metadata drift
-  only (`target_string()` uses `session:index`).
+- [ ] **1.10h** — `Target::rename()`: return a new `Target` with updated address.
+  After session rename, `target_string()` returns the old name and subsequent operations
+  fail. Change signature to `rename(&self, new_name) -> Result<Target>` so callers get a
+  fresh handle. Window rename is metadata drift only (`target_string()` uses
+  `session:index`) but should also return an updated `Target` for consistency.
   *(grep: `PLAN 1.10h` in API.md, impact: correctness-significant for session, metadata for window)*
 
-- [ ] **1.10i** — `Target::rename()` at pane level: improve error ergonomics. Currently
-  returns runtime `Err("cannot rename a pane")` — tmux has no `rename-pane` command.
-  Options: (a) compile-time restriction via a `Renamable` marker on Target, (b) return
-  a typed error variant, or (c) add doc comment noting the asymmetry.
+- [ ] **1.10i** — `Target::rename()` at pane level: add doc comment documenting that
+  pane rename returns `Err("cannot rename a pane")` because tmux has no `rename-pane`
+  command. A compile-time restriction would require breaking the unified `Target` API,
+  so document the asymmetry instead.
   *(grep: `PLAN 1.10i` in API.md, impact: low)*
 
 - [ ] **1.10j** — `Target::pane(index)` from session level: document active-window drift.
@@ -303,10 +304,10 @@ the task ID to locate the note (line numbers drift across edits).
 
 #### Capture (`src/capture.rs`)
 
-- [ ] **1.10l** — `overlap_deduplicate()`: warn or error when `overlap_lines < 2`.
+- [ ] **1.10l** — `overlap_deduplicate()`: log at `warn` level when `overlap_lines < 2`.
   Currently silently no-ops (returns current capture unchanged with no fidelity issues).
-  Options: (a) return a fidelity warning, (b) log at `warn` level, or (c) document the
-  threshold in the function signature.
+  A `tracing::warn!` is non-breaking and makes the threshold visible without changing
+  the return type. Also add the `>= 2` requirement to the function's doc comment.
   *(grep: `PLAN 1.10l` in API.md, impact: low-to-medium)*
 
 #### Cross-cutting documentation
@@ -324,12 +325,17 @@ the task ID to locate the note (line numbers drift across edits).
   noting this tmux behavior.
   *(grep: `PLAN 1.10n` in API.md, impact: medium ergonomically)*
 
-**Depends on**: Per-task — each 1.10x depends only on the module it modifies:
-- 1.10a–e: `transport.rs` (available after 1.3 / 2a.1)
-- 1.10f: `types.rs` (available after 1.1)
-- 1.10g–k: `host.rs` (available after 1.7)
-- 1.10l: `capture.rs` (available after 1.5)
-- 1.10m–n: docs-only (no code dependency)
+**Depends on**: Per-task, by earliest availability:
+- 1.10a, 1.10b: `MockTransport` in `transport.rs` → available after **1.3**
+- 1.10c: `SshTransport::open_shell()` in `transport.rs` → available after **2a.1**
+- 1.10d: `TransportKind` in `transport.rs` + `SshTransport` → available after **2a.1**
+- 1.10e: `HostKeyPolicy` doc comment in `types.rs` → available after **2a.1** (needs SSH context)
+- 1.10f: `TargetSpec` in `types.rs` → available after **1.1**
+- 1.10g: `HostHandle` in `host.rs` → available after **1.7**
+- 1.10h: `Target::rename()` in `host.rs` + `control.rs` → available after **1.7**
+- 1.10i, 1.10j, 1.10k: doc comments in `host.rs` → available after **1.7**
+- 1.10l: `overlap_deduplicate()` in `capture.rs` → available after **1.5**
+- 1.10m, 1.10n: doc comments only → no code dependency
 
 **Does NOT gate**: 2a.2 or later phases. Runs in parallel with Phase 2a work.
 
@@ -794,6 +800,8 @@ Sync points: **1.7** (B's 1.6 merges with A's 1.4+1.5), **2a.4** (B's 2a.3 merge
 
 Dev B starts `2b.2 Matcher` immediately after `1.2 Keys` — it depends only on 1.0 and touches an isolated file. This lets B build out the entire matching/config/sink stack while A drives the core data path. 2b.3 and 2c.4 are serialized on A because both modify `monitor.rs` and `host.rs`.
 
+**1.10 staffing (2-dev)**: B picks up 1.10a/b (MockTransport, available early) and 1.10m/n (docs-only) during gaps between track work. A picks up 1.10f–k (types/host, after 1.9b) interleaved with 2a.2. 1.10c/d/e land with B after 2a.1.
+
 #### 3 developers
 
 | Dev | Focus area | Tasks (in order) |
@@ -805,6 +813,8 @@ Dev B starts `2b.2 Matcher` immediately after `1.2 Keys` — it depends only on 
 Sync points: **1.7** (B's 1.6 ready), **2a.2** (B waits for A's 1.9a before starting monitor parser), **2a.4** (B's 2a.3 merges with B's 2a.2), **2b.3** (C's 2b.1 ready for B), **2c.4** (B takes this after 2b.3 — serial on `monitor.rs`/`host.rs`; needs C's 2c.3), **3.1** (all tracks converge).
 
 Dev C is fully independent through T1–T7 — they only touch `matcher.rs`, `config.rs`, `sink.rs`, and `sinks/`. Dev B owns the `monitor.rs`/`host.rs` serialization: 2b.3 (rules + reconnection) then 2c.4 (sink wiring).
+
+**1.10 staffing (3-dev)**: A picks up 1.10f–l (types/host/capture) interleaved with 2a.4. B picks up 1.10c/d/e (SSH transport) after 2a.1. C picks up 1.10a/b (MockTransport) and 1.10m/n (docs) during gaps.
 
 #### 4 developers
 
@@ -818,6 +828,8 @@ Split Track B into input/control (B1) and SSH/monitoring (B2):
 | **C** | Matching + sinks | 2b.2 → 2b.1 → 2c.1 → 2c.2 → 2c.3 → **3.1** → 3.2 |
 
 B2 owns the `monitor.rs`/`host.rs` serialization: 2b.3 (rules) then 2c.4 (sink wiring) land sequentially by the same dev, eliminating merge contention. B1 finishes early (1.2 + 1.6 are small) and pivots to Phase 4 hardening tasks (4.1 tmux version compat, 4.2 test expansion, 4.3 Docker E2E).
+
+**1.10 staffing (4-dev)**: B1 picks up all of 1.10 after finishing 1.6 — the tasks are isolated and B1 would otherwise be idle. 1.10c/d/e wait until B2 lands 2a.1 (SSH transport exists).
 
 ### File Ownership (Conflict Avoidance)
 
