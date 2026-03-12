@@ -4,6 +4,12 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-12 | @claude | Phase 1.10 — address PR #68 R6: restore 1.10 as hard gate before 2a.2, consistent with user intent ("slotted for fixes now before the next phase"). Fixed dependency note, task ordering diagram, and notes section. |
+| 2026-03-12 | @claude | Simplify PLAN: remove Multi-Developer Parallelism section (dev assignments, staffing tables, file ownership, time chart). Keep task ordering dependency graph and conventions. PLAN tracks work to do, not assignments. Per user request. |
+| 2026-03-12 | @claude | Phase 1.10 — address PR #68 R5: narrow 4-dev B1 scope to non-Track-A files only, update file ownership table with 1.10 task assignments per track. |
+| 2026-03-12 | @claude | Phase 1.10 — address PR #68 R4: pick implementation direction for multi-option tasks (1.10b/h/i/l), split per-task deps to exact phase granularity (1.10a/b→1.3, 1.10c/d/e→2a.1, etc.), add 1.10 staffing to all dev assignment tables. |
+| 2026-03-11 | @claude | Phase 1.10 — address PR #68 R3: fix changelog timeline (round 2 had open rename issue, full validation after round 3), replace stale line-number refs with grep-stable `@claude NOTE (PLAN 1.10x)` anchors, relax dependency from hard gate to parallel-with-2a.2. |
+| 2026-03-11 | @claude | Added Phase 1.10 — API Gaps and Hardening: 14 `@claude NOTE` items from API.md, validated by @codex across PR #68 rounds 2–3. Runs parallel with Phase 2a (not a hard gate) to clean up ergonomic and correctness gaps. |
 | 2026-03-10 | @claude | Phase 2a.1 implemented: SshTransport with russh 0.46, ssh-agent auth, DC2 host key verification (Verify/TrustFirstUse/Insecure), SshConfig builder, exec/open_shell over SSH, SshShellChannel with PTY, actionable error messages (OC3). |
 | 2026-03-10 | @claude | Address PR #66 review round 2: scope 1.9b checkboxes to match implementation — reflow detection covers capture/sample_text only (exec handled by wrap-tolerant parser), overlap provides stateless primitives (history_size tracking and wider recapture deferred to 2a.2 monitor). |
 | 2026-03-10 | @claude | Phase 1.9b implemented: geometry snapshots (list_clients, query_pane_geometry), reflow detection around captures, overlap-aware incremental sampling with OverlapResync fallback, history-limit setup helpers, comprehensive tests. |
@@ -221,6 +227,123 @@ No SSH, no monitoring.
   dedicated/fixed-geometry sessions; `resize-window` is best-effort under mixed clients
 
 **Depends on**: 1.9a
+
+### 1.10 — API Gaps and Hardening
+
+Addresses 14 inconsistencies and ergonomic gaps identified during API documentation
+(PR #68) and validated by @codex across PR #68 rounds 2–3. Each item references
+the corresponding `@claude NOTE (PLAN 1.10x)` marker in `docs/API.md` — grep for
+the task ID to locate the note (line numbers drift across edits).
+
+#### Transport layer (`src/transport.rs`)
+
+- [ ] **1.10a** — `MockTransport`: add `with_error(pattern, message)` to allow `exec()`
+  to return `Err` for specified patterns. Currently `exec()` always returns `Ok(...)`,
+  preventing unit-test coverage of error handling paths in discovery, capture, and control.
+  *(grep: `PLAN 1.10a` in API.md, impact: medium)*
+
+- [ ] **1.10b** — `MockTransport`: switch pattern storage from `HashMap` to `Vec` for
+  deterministic ordered matching. Currently overlapping substring patterns (e.g. `"list"`
+  vs `"list-sessions"`) match nondeterministically due to HashMap iteration order. With
+  `Vec`, patterns are checked in registration order — first match wins.
+  *(grep: `PLAN 1.10b` in API.md, impact: medium for tests)*
+
+- [ ] **1.10c** — `SshTransport::open_shell()`: add PTY size parameters. Currently
+  hardcodes `request_pty("xterm", 80, 24, ...)` with no API to specify dimensions.
+  Add optional width/height to `open_shell()` or an `SshShellOptions` builder.
+  *(grep: `PLAN 1.10c` in API.md, impact: medium for TUIs, low for non-interactive)*
+
+- [ ] **1.10d** — `SshTransport::is_closed()`: expose transport-agnostic health probe.
+  `is_closed()` exists only on `SshTransport`; neither `HostHandle` nor `TransportKind`
+  exposes it. Add `TransportKind::is_healthy() -> bool` (returns `true` for Local/Mock,
+  delegates to `!is_closed()` for SSH).
+  *(grep: `PLAN 1.10d` in API.md, impact: low-to-medium)*
+
+- [ ] **1.10e** — `TrustFirstUse` host key policy: improve discoverability of fail-closed
+  behavior. Connection is rejected if `~/.ssh/known_hosts` is not writable. Add a doc
+  comment on `HostKeyPolicy::TrustFirstUse` explaining the precondition and the error
+  message users will see.
+  *(grep: `PLAN 1.10e` in API.md, impact: medium, mostly ergonomic)*
+
+#### Types (`src/types.rs`)
+
+- [ ] **1.10f** — `TargetSpec::pane()`: return `Result` instead of panicking. Currently
+  uses `assert!` to enforce that `.window()` was called first — builder misuse is
+  process-fatal for library consumers. Change to return `Result<TargetSpec>` or a
+  typed error.
+  *(grep: `PLAN 1.10f` in API.md, impact: low-to-medium ergonomically)*
+
+#### Host handle and Target (`src/host.rs`)
+
+- [ ] **1.10g** — `HostHandle::local()`: add `local_with_timeout(Duration)` convenience
+  constructor. Currently hardcodes 10s transport timeout with no builder/setter — callers
+  must drop to `HostHandle::new()` + `LocalTransport::with_timeout()`.
+  *(grep: `PLAN 1.10g` in API.md, impact: ergonomic)*
+
+- [ ] **1.10h** — `Target::rename()`: return a new `Target` with updated address.
+  After session rename, `target_string()` returns the old name and subsequent operations
+  fail. Change signature to `rename(&self, new_name) -> Result<Target>` so callers get a
+  fresh handle. Window rename is metadata drift only (`target_string()` uses
+  `session:index`) but should also return an updated `Target` for consistency.
+  *(grep: `PLAN 1.10h` in API.md, impact: correctness-significant for session, metadata for window)*
+
+- [ ] **1.10i** — `Target::rename()` at pane level: add doc comment documenting that
+  pane rename returns `Err("cannot rename a pane")` because tmux has no `rename-pane`
+  command. A compile-time restriction would require breaking the unified `Target` API,
+  so document the asymmetry instead.
+  *(grep: `PLAN 1.10i` in API.md, impact: low)*
+
+- [ ] **1.10j** — `Target::pane(index)` from session level: document active-window drift.
+  Resolves via the **active window** at call time, so the same call can return different
+  panes if focus changes. Add a doc comment recommending explicit navigation
+  (`target.window(0).pane(0)`) for deterministic targeting.
+  *(grep: `PLAN 1.10j` in API.md, impact: medium for automation)*
+
+- [ ] **1.10k** — `Target::capture()` at session/window level: clarify scope in doc
+  comment. Captures the **active pane** only (consistent with tmux `capture-pane -t`),
+  but the method name sounds exhaustive. Add doc comment noting this and pointing to
+  `capture_all()` for all panes.
+  *(grep: `PLAN 1.10k` in API.md, impact: medium)*
+
+#### Capture (`src/capture.rs`)
+
+- [ ] **1.10l** — `overlap_deduplicate()`: log at `warn` level when `overlap_lines < 2`.
+  Currently silently no-ops (returns current capture unchanged with no fidelity issues).
+  A `tracing::warn!` is non-breaking and makes the threshold visible without changing
+  the return type. Also add the `>= 2` requirement to the function's doc comment.
+  *(grep: `PLAN 1.10l` in API.md, impact: low-to-medium)*
+
+#### Cross-cutting documentation
+
+- [ ] **1.10m** — Document two independent timeout knobs. `Target::exec()` has its own
+  sentinel polling timeout, separate from the transport timeout
+  (`LocalTransport::timeout` / `SshConfig::timeout`) that governs each individual tmux
+  command. Add doc comments on both `Target::exec()` and `SshConfig::with_timeout()`
+  explaining the interaction and failure modes.
+  *(grep: `PLAN 1.10m` in API.md, impact: medium)*
+
+- [ ] **1.10n** — Document `history-limit` creation-time semantics. `set_history_limit()`
+  only affects panes created after the call; existing panes retain their creation-time
+  limit. Add doc comments on `set_history_limit()` and `set_global_history_limit()`
+  noting this tmux behavior.
+  *(grep: `PLAN 1.10n` in API.md, impact: medium ergonomically)*
+
+**Depends on**: Per-task, by earliest availability:
+- 1.10a, 1.10b: `MockTransport` in `transport.rs` → available after **1.3**
+- 1.10c: `SshTransport::open_shell()` in `transport.rs` → available after **2a.1**
+- 1.10d: `TransportKind` in `transport.rs` + `SshTransport` → available after **2a.1**
+- 1.10e: `HostKeyPolicy` doc comment in `types.rs` → available after **2a.1** (needs SSH context)
+- 1.10f: `TargetSpec` in `types.rs` → available after **1.1**
+- 1.10g: `HostHandle` in `host.rs` → available after **1.7**
+- 1.10h: `Target::rename()` in `host.rs` + `control.rs` → available after **1.7**
+- 1.10i, 1.10j, 1.10k: doc comments in `host.rs` → available after **1.7**
+- 1.10l: `overlap_deduplicate()` in `capture.rs` → available after **1.5**
+- 1.10m, 1.10n: doc comments only → no code dependency
+
+**Gates**: Phase 2a.2 and later. All 1.10 tasks should be completed before
+starting the next phase. Tasks within 1.10 can be worked in any order based
+on the per-task availability above (e.g. 1.10a/b can start immediately after
+1.3; 1.10c/d/e must wait for 2a.1).
 
 ---
 
@@ -571,6 +694,8 @@ Out of current scope. Listed for continuity.
  │     │
  │     ├── 1.9b Mixed-client stabilization [needs 1.9a]
  │     │
+ │     ├── 1.10 API gaps + hardening [gates 2a.2; per-task deps within]
+ │     │
  │     └── 2a.2 Monitor parser [needs 1.7 + 1.9a]
  │          │
  │          └── 2a.4 Monitor handles
@@ -598,149 +723,14 @@ Out of current scope. Listed for continuity.
  └── 4.x Hardening (parallel with Phase 3)
 ```
 
----
-
-## Multi-Developer Parallelism
-
-The dependency graph has three largely independent module tracks after the
-shared scaffolding (1.0). Each track touches different source files, minimizing
-merge conflicts. The sync points where tracks must converge are called out
-explicitly.
-
-### Parallelism Map (by time)
-
-```
-Time  Track A (data path)      Track B (input/monitor)    Track C (matching/sinks)
-───── ─────────────────────── ──────────────────────────── ────────────────────────
- T0   1.0 Scaffolding ◄──────── shared gate ──────────────► 1.0 Scaffolding
-      │                         │                           │
- T1   1.1 Types (types.rs)      1.2 Keys (keys.rs)          2b.2 Matcher (matcher.rs)
-      │                         │                           │
- T2   1.3 Transport             │ (waits for 1.3)           2b.1 Config (config.rs)
-      │  (transport.rs)         │                           │
- T3   1.4 Discovery             1.6 Control (control.rs)    2c.1 Sink types (sink.rs)
-      │  (discovery.rs)         │  [needs 1.2 + 1.3]       │
- T4   1.5 Capture               │                           2c.2 Sink kinds (sinks/)
-      │  (capture.rs)           │                           │
-      │                         │                           2c.3 Output bus (sink.rs)
-      │                         │                           │
-───── ── SYNC POINT 1 ──────── ─┘                           │ (waits for 2a.4)
- T5   1.7 Host+Target (host.rs)                             │
-      │  [needs 1.4 + 1.5 + 1.6]                           │
-      │                                                     │
- T6   1.8 Integration test      2a.1 SSH (transport.rs)     │
-      │                         2a.3 Pipes (pipe.rs)        │
-      │                         │                           │
- T7   1.9a Capture fidelity     │                           │
-      │  (types/capture/host)   │                           │
-      │                         │                           │
- T8   1.9b Stabilization        │                           │
-      │  (capture helpers)      │                           │
-      │                         │                           │
- T9   2a.2 Monitor parser       │                           │
-      │  (monitor.rs)           │                           │
-      │  [needs 1.7 + 1.9a]     │                           │
-      │                         │                           │
-───── ── SYNC POINT 2 ──────── ─┘                           │
- T10  2a.4 Monitor handles                                  │
-      │  [needs 2a.2 + 2a.3]                               │
-      │                                                     │
-───── ── SYNC POINT 3 ──────────────────────────────────── ─┘
- T11  2b.3 Full rules + reconnect [needs 2a.4 + 2b.1 + 2b.2]
-      │    (modifies monitor.rs + host.rs — must land before 2c.4)
-      │
- T12  2c.4 Pipeline integration [needs 2c.3 + 2b.3]
-      │    (layers sink wiring onto stabilized monitor.rs + host.rs)
-      │
-───── ── SYNC POINT 4 ─────────────────────────────────────
- T13  3.1 Fleet (fleet.rs) [needs 2c.4]
-      │
- T14  3.2 Public API (lib.rs)
-      │
- T15  3.3 CLI binary (bins/tmux-automator/)
-      │
-T16  3.4 Smoke test
-```
-
-Track A includes two additional stabilization steps after `1.8`: `1.9a` is the
-type/API gate required before `2a.2` and `2c.*`; `1.9b` is a follow-on best-effort
-stabilization pass for overlap resync, geometry detection, and history setup guidance.
-
-### Dev Assignments by Team Size
-
-#### 2 developers
-
-| Dev | Track | Tasks (in order) |
-|-----|-------|-----------------|
-| **A** | Data path + wiring | 1.0 → 1.1 → 1.3 → 1.4 → 1.5 → **1.7** → 1.8 → 1.9a → 1.9b → 2a.2 → **2a.4** → **2b.3** → **2c.4** → **3.1** → 3.2 → 3.3 |
-| **B** | Input + matching + sinks | 1.2 → 2b.2 → 1.6 → 2b.1 → 2a.1 → 2a.3 → 2c.1 → 2c.2 → 2c.3 → 3.4 |
-
-Sync points: **1.7** (B's 1.6 merges with A's 1.4+1.5), **2a.4** (B's 2a.3 merges with A's 2a.2), **2b.3** (B's 2b.1 ready for A), **2c.4** (B's 2c.3 ready; A's 2b.3 done — serial on `monitor.rs`/`host.rs`).
-
-Dev B starts `2b.2 Matcher` immediately after `1.2 Keys` — it depends only on 1.0 and touches an isolated file. This lets B build out the entire matching/config/sink stack while A drives the core data path. 2b.3 and 2c.4 are serialized on A because both modify `monitor.rs` and `host.rs`.
-
-#### 3 developers
-
-| Dev | Focus area | Tasks (in order) |
-|-----|-----------|-----------------|
-| **A** | Data path (types → transport → discovery → capture → host wiring) | 1.0 → 1.1 → 1.3 → 1.4 → 1.5 → **1.7** → 1.8 → 1.9a → 1.9b → **2a.4** → **3.1** → 3.2 |
-| **B** | Input + monitoring (keys → control → SSH → monitor → rules) | 1.2 → 1.6 → 2a.1 → 2a.3 → 2a.2 → **2b.3** → **2c.4** → 3.3 → 3.4 |
-| **C** | Matching + sink pipeline (matcher → config → sinks → bus) | 2b.2 → 2b.1 → 2c.1 → 2c.2 → 2c.3 |
-
-Sync points: **1.7** (B's 1.6 ready), **2a.2** (B waits for A's 1.9a before starting monitor parser), **2a.4** (B's 2a.3 merges with B's 2a.2), **2b.3** (C's 2b.1 ready for B), **2c.4** (B takes this after 2b.3 — serial on `monitor.rs`/`host.rs`; needs C's 2c.3), **3.1** (all tracks converge).
-
-Dev C is fully independent through T1–T7 — they only touch `matcher.rs`, `config.rs`, `sink.rs`, and `sinks/`. Dev B owns the `monitor.rs`/`host.rs` serialization: 2b.3 (rules + reconnection) then 2c.4 (sink wiring).
-
-#### 4 developers
-
-Split Track B into input/control (B1) and SSH/monitoring (B2):
-
-| Dev | Focus area | Tasks |
-|-----|-----------|-------|
-| **A** | Data path | 1.0 → 1.1 → 1.3 → 1.4 → 1.5 → **1.7** → 1.8 → 1.9a → 1.9b |
-| **B1** | Input + control | 1.2 → 1.6 → (pick up 4.1, 4.2 hardening while waiting) |
-| **B2** | SSH + monitoring + sink wiring | 2a.1 → 2a.3 → 2a.2 → **2a.4** → **2b.3** → **2c.4** → 3.3 → 3.4 |
-| **C** | Matching + sinks | 2b.2 → 2b.1 → 2c.1 → 2c.2 → 2c.3 → **3.1** → 3.2 |
-
-B2 owns the `monitor.rs`/`host.rs` serialization: 2b.3 (rules) then 2c.4 (sink wiring) land sequentially by the same dev, eliminating merge contention. B1 finishes early (1.2 + 1.6 are small) and pivots to Phase 4 hardening tasks (4.1 tmux version compat, 4.2 test expansion, 4.3 Docker E2E).
-
-### File Ownership (Conflict Avoidance)
-
-Each track primarily touches distinct files. When two tracks must modify the
-same file, that's a sync point — one merges first, the other rebases.
-
-| File | Primary owner | Touched by others at |
-|------|--------------|---------------------|
-| `types.rs` | Track A | — (stable after 1.1) |
-| `keys.rs` | Track B | — |
-| `transport.rs` | Track A (1.3), then Track B (2a.1) | Sync after 1.3 |
-| `discovery.rs` | Track A | — |
-| `capture.rs` | Track A | — |
-| `control.rs` | Track B | — |
-| `host.rs` | Track A | Track B adds monitoring (2a.4) + reconnection (2b.3), Track C adds ActionHandle (2c.4). Serialized: 2a.4 → 2b.3 → 2c.4. |
-| `monitor.rs` | Track B | Track B adds rules (2b.3), Track C wires OutputBus (2c.4). Serialized: 2a.2 → 2b.3 → 2c.4. |
-| `pipe.rs` | Track B | — |
-| `matcher.rs` | Track C | — |
-| `config.rs` | Track C | — |
-| `sink.rs` | Track C | — |
-| `sinks/` | Track C | — |
-| `fleet.rs` | Converge point | Needs all tracks done |
-| `lib.rs` | Track A (initial), final at 3.2 | All tracks add re-exports |
-
-### Phase 4 Parallelism
-
-All Phase 4 tasks (4.1–4.4) are independent of each other and can be split
-across developers. They can also begin as soon as their prerequisites are met:
-
-| Task | Can start after | Parallelizable with |
-|------|----------------|-------------------|
-| 4.1 Tmux version compat | 1.3 (transport exists) | Everything after 1.3 |
-| 4.2 Expanded test coverage | Each module's initial impl | Phase 3 work |
-| 4.3 Docker E2E | 2a.1 (SSH transport exists) | Phase 3 work |
-| 4.4 Documentation | 3.2 (public API finalized) | 3.3 CLI, 3.4 smoke test |
-
-A dev who finishes their track early (e.g., B1 in the 4-dev scenario) can
-immediately start Phase 4 work without blocking or being blocked.
+Notes:
+- `1.9a` is the type/API gate required before `2a.2` and `2c.*`.
+- `1.9b` is a follow-on stabilization pass for overlap resync, geometry detection,
+  and history setup guidance.
+- `1.10` gates Phase 2a.2 — all tasks must complete before next phase. Per-task
+  dependencies (listed in section above) allow internal parallelism within 1.10.
+- `2b.3` and `2c.4` both modify `monitor.rs` and `host.rs` — must land serially.
+- Phase 4 tasks are independent and can start as soon as their prerequisites are met.
 
 ## Conventions
 
