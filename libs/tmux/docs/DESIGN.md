@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-11 | @claude: Sync DESIGN.md signatures with Phase 1.10 implementation — `TargetSpec::pane()` returns `Result<Self>`, `Target::rename()` returns `Result<Target>`, `TransportKind::open_shell()` takes `cols, rows` params. Per PR #69 review. | TargetSpec, Target, TransportKind |
 | 2026-03-10 | @claude: Add inline note in DC20 geometry/reflow contract clarifying that Phase 1.9b implements snapshot comparison for capture/sample_text only; exec() deferred to Phase 2a. See PR #66 review round 2. | DC20 |
 | 2026-03-10 | @codex: address PR #65 review feedback by tightening the capture/sink contract: preserve-fidelity payloads by default, make TUI workflows explicitly `Raw`, move exec stability to an internal parser view, replace synthetic `TargetOutput.kind=Gap` with `SinkEvent::Gap`, scope history-limit handling to setup-time/new panes, and split Phase `1.9` into `1.9a`/`1.9b`. | ScrollbackQuery, Output Sink Pipeline, capture.rs, DC20, Implementation Phases |
 | 2026-03-10 | Prioritize consumer usability for mixed-client fidelity: slot implementation as `1.9` (capture/result fidelity) → `2a.2` (monitor stream assembly) → `2c.1/2c.3/2c.4` (sink metadata + no-silent-drop delivery). | DC20, TargetOutput, OutputBus, monitor.rs, Implementation Phases |
@@ -706,7 +707,8 @@ impl TargetSpec {
     pub fn window_name(self, name: &str) -> Self;
 
     /// Narrow to a pane by index (requires window to be set).
-    pub fn pane(self, index: u32) -> Self;
+    /// Returns `Err` if `.window()` was not called first.
+    pub fn pane(self, index: u32) -> Result<Self>;
 
     /// Parse a raw tmux target string ("session", "session:window", "session:window.pane").
     /// Returns an error if the format is invalid.
@@ -815,9 +817,10 @@ impl Target {
     /// Pane: closes pane.
     pub async fn kill(&self) -> Result<()>;
 
-    /// Rename this entity. Session: rename session. Window: rename window.
+    /// Rename this entity and return a new `Target` with updated address.
+    /// Session: rename session (must use returned handle). Window: rename window.
     /// Pane: not supported (returns error).
-    pub async fn rename(&self, new_name: &str) -> Result<()>;
+    pub async fn rename(&self, new_name: &str) -> Result<Target>;
 
     /// Capture all panes under this target as a map.
     /// Session: all panes in all windows. Window: all panes in window.
@@ -894,7 +897,7 @@ let pane = build.pane(2).await?;               // session → active_window.pane
 pane.sample_text(&ScrollbackQuery::LastLines(100)).await?;
 
 // TargetSpec builder — type-safe targeting at any depth
-let spec = TargetSpec::session("build").window(0).pane(1);
+let spec = TargetSpec::session("build").window(0).pane(1)?;
 let target = host.target(&spec).await?.unwrap();
 target.send_text("ls").await?;
 
@@ -1932,9 +1935,10 @@ impl TransportKind {
     pub async fn exec(&self, command: &str) -> Result<String>;
 
     /// Open a persistent shell for streaming output.
+    /// `cols` and `rows` set PTY dimensions for SSH (ignored by Local/Mock).
     /// Used by the monitor for long-running processes (control mode session
     /// or `tail -qf` in fallback pipe mode).
-    pub async fn open_shell(&self) -> Result<ShellChannelKind>;
+    pub async fn open_shell(&self, cols: u32, rows: u32) -> Result<ShellChannelKind>;
 }
 
 /// Closed enum of shell channel implementations.
@@ -2858,7 +2862,7 @@ The `Target` approach provides:
 
 **Escape hatch**: `TargetSpec::parse("build:0.1")` constructs a spec from a raw
 string, and `host.target(&spec)` queries tmux to verify the entity exists and returns
-`Option<Target>`. The builder alternative — `TargetSpec::session("build").window(0).pane(1)` —
+`Option<Target>`. The builder alternative — `TargetSpec::session("build").window(0).pane(1)?` —
 is preferred when components are known at compile time. This is the bridge from raw
 strings (CLI args, config files) to typed handles.
 
