@@ -1,5 +1,4 @@
 use anyhow::{anyhow, Result};
-use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -28,12 +27,28 @@ impl TransportKind {
         }
     }
 
+    /// Transport-agnostic health probe.
+    ///
+    /// - `Local`: always returns `true` (subprocess transport has no persistent connection).
+    /// - `Mock`: always returns `true`.
+    /// - `Ssh`: checks if the underlying SSH connection is closed via `SshTransport::is_closed()`.
+    pub fn is_healthy(&self) -> bool {
+        match self {
+            TransportKind::Local(_) => true,
+            TransportKind::Mock(_) => true,
+            TransportKind::Ssh(t) => !t.is_closed(),
+        }
+    }
+
     /// Open a persistent shell channel.
-    pub async fn open_shell(&self) -> Result<ShellChannelKind> {
+    ///
+    /// `cols` and `rows` control PTY dimensions for SSH transports (used by
+    /// `SshTransport::open_shell()`). Local and Mock transports ignore them.
+    pub async fn open_shell(&self, cols: u32, rows: u32) -> Result<ShellChannelKind> {
         match self {
             TransportKind::Local(t) => t.open_shell().await.map(ShellChannelKind::Local),
             TransportKind::Mock(t) => t.open_shell().await.map(ShellChannelKind::Mock),
-            TransportKind::Ssh(t) => t.open_shell().await.map(ShellChannelKind::Ssh),
+            TransportKind::Ssh(t) => t.open_shell(cols, rows).await.map(ShellChannelKind::Ssh),
         }
     }
 }
@@ -108,15 +123,23 @@ impl Default for LocalTransport {
 // ---------------------------------------------------------------------------
 
 /// Mock transport for unit testing.
+///
+/// Patterns are matched in insertion order (first match wins), which makes
+/// test behavior deterministic regardless of hash seed. Use `with_response()`
+/// to add success responses and `with_error()` to add error responses.
 pub struct MockTransport {
-    responses: Mutex<HashMap<String, Vec<String>>>,
+    /// Ordered (pattern, response_queue) pairs. First-match wins.
+    responses: Mutex<Vec<(String, Vec<String>)>>,
+    /// Ordered (pattern, error_message) pairs. Checked before `responses`.
+    errors: Mutex<Vec<(String, String)>>,
     default_response: String,
 }
 
 impl MockTransport {
     pub fn new() -> Self {
         MockTransport {
-            responses: Mutex::new(HashMap::new()),
+            responses: Mutex::new(Vec::new()),
+            errors: Mutex::new(Vec::new()),
             default_response: String::new(),
         }
     }
@@ -124,13 +147,25 @@ impl MockTransport {
     /// Add a canned response for a command pattern.
     /// If multiple responses are added for the same pattern, they are
     /// returned in FIFO order. When exhausted, returns the last one.
+    /// Patterns are matched in insertion order (first match wins).
     pub fn with_response(self, command_contains: &str, response: &str) -> Self {
         let mut responses = self.responses.lock().unwrap();
-        responses
-            .entry(command_contains.to_string())
-            .or_default()
-            .push(response.to_string());
+        if let Some(entry) = responses.iter_mut().find(|(p, _)| p == command_contains) {
+            entry.1.push(response.to_string());
+        } else {
+            responses.push((command_contains.to_string(), vec![response.to_string()]));
+        }
         drop(responses);
+        self
+    }
+
+    /// Add a canned error for a command pattern.
+    /// When `exec()` matches this pattern, it returns `Err(anyhow!(...))`.
+    /// Error patterns are checked before response patterns.
+    pub fn with_error(self, command_contains: &str, message: &str) -> Self {
+        let mut errors = self.errors.lock().unwrap();
+        errors.push((command_contains.to_string(), message.to_string()));
+        drop(errors);
         self
     }
 
@@ -141,6 +176,17 @@ impl MockTransport {
     }
 
     async fn exec(&self, command: &str) -> Result<String> {
+        // Check error patterns first (insertion order)
+        {
+            let errors = self.errors.lock().unwrap();
+            for (pattern, message) in errors.iter() {
+                if command.contains(pattern.as_str()) {
+                    return Err(anyhow!("{}", message));
+                }
+            }
+        }
+
+        // Check response patterns (insertion order, first match wins)
         let mut responses = self.responses.lock().unwrap();
         for (pattern, queue) in responses.iter_mut() {
             if command.contains(pattern.as_str()) {
@@ -211,6 +257,14 @@ impl SshConfig {
         self
     }
 
+    /// Set the per-command execution timeout for the SSH transport.
+    ///
+    /// This bounds each individual `exec()` call (channel open + exec + output
+    /// collection). It is independent of `Target::exec()`'s sentinel-poll
+    /// timeout, which bounds how long to wait for a user command's output
+    /// to appear in scrollback. Keep this short (seconds) to catch hung
+    /// connections; use a larger `Target::exec()` timeout for long-running
+    /// user commands.
     pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.timeout = timeout;
         self
@@ -540,7 +594,10 @@ impl SshTransport {
     }
 
     /// Open a persistent shell channel on the remote host with a PTY.
-    async fn open_shell(&self) -> Result<SshShellChannel> {
+    ///
+    /// `cols` and `rows` set the initial PTY dimensions. Use the target pane's
+    /// geometry for accurate rendering, or pass `(80, 24)` as a safe default.
+    async fn open_shell(&self, cols: u32, rows: u32) -> Result<SshShellChannel> {
         let channel = {
             let handle = self.handle.lock().await;
             handle.channel_open_session().await.map_err(|e| {
@@ -553,8 +610,8 @@ impl SshTransport {
             .request_pty(
                 true,
                 "xterm",
-                80,   // cols
-                24,   // rows
+                cols,
+                rows,
                 0,    // pixel width
                 0,    // pixel height
                 &[],  // terminal modes
@@ -748,6 +805,40 @@ mod tests {
         let mock = MockTransport::new().with_default("ok");
         let result = mock.exec("anything").await.unwrap();
         assert_eq!(result, "ok");
+    }
+
+    #[tokio::test]
+    async fn mock_transport_error_response() {
+        let mock = MockTransport::new()
+            .with_error("kill-session", "session not found")
+            .with_response("list-sessions", "ok\n");
+        // Error pattern matches → Err
+        let result = mock.exec("tmux kill-session -t foo").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("session not found"));
+        // Non-error pattern still works
+        let result = mock.exec("tmux list-sessions").await.unwrap();
+        assert_eq!(result, "ok\n");
+    }
+
+    #[tokio::test]
+    async fn mock_transport_error_before_response() {
+        // Error patterns are checked before response patterns
+        let mock = MockTransport::new()
+            .with_response("cmd", "ok")
+            .with_error("cmd", "fail");
+        let result = mock.exec("cmd").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn mock_transport_insertion_order() {
+        // First-match wins: "list" matches before "list-sessions"
+        let mock = MockTransport::new()
+            .with_response("list", "first")
+            .with_response("list-sessions", "second");
+        let result = mock.exec("tmux list-sessions").await.unwrap();
+        assert_eq!(result, "first");
     }
 
     #[tokio::test]

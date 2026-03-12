@@ -56,6 +56,23 @@ impl HostHandle {
         }
     }
 
+    /// Create a HostHandle for localhost with a custom transport timeout.
+    ///
+    /// The default `local()` uses a 10-second timeout. Use this when
+    /// commands may take longer (e.g., slow CI machines) or when you
+    /// need a shorter timeout for responsiveness.
+    pub fn local_with_timeout(timeout: Duration) -> Self {
+        HostHandle {
+            inner: Arc::new(HostHandleInner {
+                transport: TransportKind::Local(
+                    crate::transport::LocalTransport::with_timeout(timeout),
+                ),
+                socket: None,
+                exec_locks: std::sync::Mutex::new(HashMap::new()),
+            }),
+        }
+    }
+
     /// Create a HostHandle with a specific transport and socket.
     pub fn new(transport: TransportKind, socket: Option<TmuxSocket>) -> Self {
         HostHandle {
@@ -384,6 +401,11 @@ impl Target {
     ///
     /// At session level: resolves via the active window (the window with
     /// `window_active==1`), then filters panes by that window + pane index.
+    /// **Active-window drift**: the active window is resolved at call time,
+    /// so successive calls may return different panes if `select-window`
+    /// changes the active window between calls. For stable pane addressing,
+    /// use `window(idx).pane(idx)` with an explicit window index.
+    ///
     /// At window level: filters panes within this window.
     /// At pane level: only matches if the current pane has the given index.
     pub async fn pane(&self, index: u32) -> Result<Option<Target>> {
@@ -472,6 +494,10 @@ impl Target {
     }
 
     /// Capture visible pane content.
+    ///
+    /// At **session or window level**, this captures the **active pane only**
+    /// (the pane tmux resolves for the target string). To capture all panes,
+    /// use [`capture_all()`](Self::capture_all).
     pub async fn capture(&self) -> Result<String> {
         capture::capture_pane(
             &self.inner.transport,
@@ -668,8 +694,18 @@ impl Target {
         }
     }
 
-    /// Rename this entity.
-    pub async fn rename(&self, new_name: &str) -> Result<()> {
+    /// Rename this entity and return a new `Target` with the updated address.
+    ///
+    /// **Session rename** is a correctness concern: the old `Target` holds a
+    /// stale session name, so all subsequent commands (which use `target_string()`)
+    /// would fail. Always use the returned `Target` after renaming a session.
+    ///
+    /// **Window rename** is metadata-only: tmux windows are addressed by index,
+    /// not name, so the old `Target` continues to work. The returned `Target`
+    /// carries the updated display name.
+    ///
+    /// Pane-level rename is not supported by tmux and returns `Err`.
+    pub async fn rename(&self, new_name: &str) -> Result<Target> {
         match &self.address {
             TargetAddress::Session(s) => {
                 control::rename_session(
@@ -678,7 +714,13 @@ impl Target {
                     &s.name,
                     new_name,
                 )
-                .await
+                .await?;
+                let mut new_info = s.clone();
+                new_info.name = new_name.to_string();
+                Ok(Target {
+                    inner: self.inner.clone(),
+                    address: TargetAddress::Session(new_info),
+                })
             }
             TargetAddress::Window(w) => {
                 control::rename_window(
@@ -688,7 +730,13 @@ impl Target {
                     w.index,
                     new_name,
                 )
-                .await
+                .await?;
+                let mut new_info = w.clone();
+                new_info.name = new_name.to_string();
+                Ok(Target {
+                    inner: self.inner.clone(),
+                    address: TargetAddress::Window(new_info),
+                })
             }
             TargetAddress::Pane(_) => Err(anyhow!("cannot rename a pane")),
         }
@@ -731,6 +779,10 @@ impl Target {
     }
 
     /// Query the current `history-limit` for this target's session.
+    ///
+    /// Returns the *configured* limit, not the effective limit of existing
+    /// panes. Existing panes retain their creation-time limit. See
+    /// [`set_history_limit`](Self::set_history_limit) for details.
     pub async fn get_history_limit(&self) -> Result<u32> {
         control::get_history_limit(
             &self.inner.transport,
@@ -746,6 +798,14 @@ impl Target {
     ///
     /// Sends command with a UUID sentinel suffix, polls scrollback until
     /// the sentinel appears (or timeout), and extracts stdout + exit code.
+    ///
+    /// **Two independent timeout knobs**: the `timeout` parameter here is
+    /// the sentinel-poll timeout — how long to wait for the command's output
+    /// to appear in scrollback. The *transport* timeout (`SshConfig::timeout`
+    /// or `LocalTransport::timeout`) bounds each individual `tmux` command
+    /// execution (e.g., `capture-pane`, `send-keys`). These are independent:
+    /// a long-running user command needs a large `exec` timeout, while the
+    /// transport timeout should remain short to catch hung connections.
     pub async fn exec(&self, command: &str, timeout: Duration) -> Result<ExecOutput> {
         let pane_id = self.resolve_pane_id().await;
         let lock = self.inner.exec_lock(&pane_id);
@@ -1028,9 +1088,28 @@ mod tests {
         let target = Target {
             inner: host.inner.clone(),
             address: TargetAddress::Pane(addr),
-
         };
         assert!(target.rename("new_name").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rename_session_returns_updated_target() {
+        let mock = MockTransport::new().with_default("");
+        let host = mock_host(mock);
+        let target = Target {
+            inner: host.inner.clone(),
+            address: TargetAddress::Session(SessionInfo {
+                name: "old".to_string(),
+                id: "$0".to_string(),
+                created: 0,
+                attached: false,
+                window_count: 1,
+                group: None,
+            }),
+        };
+        let new_target = target.rename("new").await.unwrap();
+        assert_eq!(new_target.session_name(), "new");
+        assert_eq!(new_target.target_string(), "new");
     }
 
     #[test]
