@@ -290,10 +290,12 @@ async fn test_session_lifecycle() {
   data that immediately yields `Eof` on read.
 
 ```rust
+use motlie_tmux::{HostHandle, transport::TransportKind};
+
 let mock = MockTransport::new()
     .with_error("kill-session", "session not found")
     .with_response("list-sessions", "build\t$0\t0\t0\t1\t\n");
-let host = mock_host(mock);
+let host = HostHandle::new(TransportKind::Mock(mock), None);
 let target = host.session("build").await?.unwrap();
 let err = target.kill().await.unwrap_err();
 assert!(err.to_string().contains("session not found"));
@@ -323,6 +325,7 @@ assert!(err.to_string().contains("session not found"));
 ```rust
 use motlie_tmux::transport::TransportKind;
 
+// Assume `ssh` is a connected SshTransport (see SSH transport section above).
 let transport = TransportKind::Ssh(ssh);
 if transport.is_healthy() {
     let shell = transport.open_shell(120, 40).await?;
@@ -394,7 +397,7 @@ target.kill().await?;
 // rename() returns a new Target with the updated address.
 // For session rename this is critical — the old handle has a stale name.
 let target = target.rename("new_name").await?;
-target.kill().await?;
+target.kill().await?; // uses the renamed handle
 ```
 
 > **`@claude NOTE — RESOLVED`** *(PLAN 1.10h)*: `rename()` now returns
