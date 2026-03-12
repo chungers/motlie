@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-12 | @claude | Simplify PLAN: remove Multi-Developer Parallelism section (dev assignments, staffing tables, file ownership, time chart). Keep task ordering dependency graph and conventions. PLAN tracks work to do, not assignments. Per user request. |
 | 2026-03-12 | @claude | Phase 1.10 — address PR #68 R5: narrow 4-dev B1 scope to non-Track-A files only, update file ownership table with 1.10 task assignments per track. |
 | 2026-03-12 | @claude | Phase 1.10 — address PR #68 R4: pick implementation direction for multi-option tasks (1.10b/h/i/l), split per-task deps to exact phase granularity (1.10a/b→1.3, 1.10c/d/e→2a.1, etc.), add 1.10 staffing to all dev assignment tables. |
 | 2026-03-11 | @claude | Phase 1.10 — address PR #68 R3: fix changelog timeline (round 2 had open rename issue, full validation after round 3), replace stale line-number refs with grep-stable `@claude NOTE (PLAN 1.10x)` anchors, relax dependency from hard gate to parallel-with-2a.2. |
@@ -718,157 +719,13 @@ Out of current scope. Listed for continuity.
  └── 4.x Hardening (parallel with Phase 3)
 ```
 
----
-
-## Multi-Developer Parallelism
-
-The dependency graph has three largely independent module tracks after the
-shared scaffolding (1.0). Each track touches different source files, minimizing
-merge conflicts. The sync points where tracks must converge are called out
-explicitly.
-
-### Parallelism Map (by time)
-
-```
-Time  Track A (data path)      Track B (input/monitor)    Track C (matching/sinks)
-───── ─────────────────────── ──────────────────────────── ────────────────────────
- T0   1.0 Scaffolding ◄──────── shared gate ──────────────► 1.0 Scaffolding
-      │                         │                           │
- T1   1.1 Types (types.rs)      1.2 Keys (keys.rs)          2b.2 Matcher (matcher.rs)
-      │                         │                           │
- T2   1.3 Transport             │ (waits for 1.3)           2b.1 Config (config.rs)
-      │  (transport.rs)         │                           │
- T3   1.4 Discovery             1.6 Control (control.rs)    2c.1 Sink types (sink.rs)
-      │  (discovery.rs)         │  [needs 1.2 + 1.3]       │
- T4   1.5 Capture               │                           2c.2 Sink kinds (sinks/)
-      │  (capture.rs)           │                           │
-      │                         │                           2c.3 Output bus (sink.rs)
-      │                         │                           │
-───── ── SYNC POINT 1 ──────── ─┘                           │ (waits for 2a.4)
- T5   1.7 Host+Target (host.rs)                             │
-      │  [needs 1.4 + 1.5 + 1.6]                           │
-      │                                                     │
- T6   1.8 Integration test      2a.1 SSH (transport.rs)     │
-      │                         2a.3 Pipes (pipe.rs)        │
-      │                         │                           │
- T7   1.9a Capture fidelity     │                           │
-      │  (types/capture/host)   │                           │
-      │                         │                           │
- T8   1.9b Stabilization        │                           │
-      │  (capture helpers)      │                           │
-      │                         │                           │
- T9   2a.2 Monitor parser       1.10 API gaps+hardening     │
-      │  (monitor.rs)           (parallel — per-task deps)  │
-      │  [needs 1.7 + 1.9a]     │                           │
-      │                         │                           │
-───── ── SYNC POINT 2 ──────── ─┘                           │
- T10  2a.4 Monitor handles                                  │
-      │  [needs 2a.2 + 2a.3]                               │
-      │                                                     │
-───── ── SYNC POINT 3 ──────────────────────────────────── ─┘
- T11  2b.3 Full rules + reconnect [needs 2a.4 + 2b.1 + 2b.2]
-      │    (modifies monitor.rs + host.rs — must land before 2c.4)
-      │
- T12  2c.4 Pipeline integration [needs 2c.3 + 2b.3]
-      │    (layers sink wiring onto stabilized monitor.rs + host.rs)
-      │
-───── ── SYNC POINT 4 ─────────────────────────────────────
- T13  3.1 Fleet (fleet.rs) [needs 2c.4]
-      │
- T14  3.2 Public API (lib.rs)
-      │
- T15  3.3 CLI binary (bins/tmux-automator/)
-      │
-T16  3.4 Smoke test
-```
-
-Track A includes two additional stabilization steps after `1.8`: `1.9a` is the
-type/API gate required before `2a.2` and `2c.*`; `1.9b` is a follow-on best-effort
-stabilization pass for overlap resync, geometry detection, and history setup guidance.
-`1.10` (API gaps/hardening) runs in parallel — individual tasks can be picked up by
-any dev with spare cycles since each touches an isolated module.
-
-### Dev Assignments by Team Size
-
-#### 2 developers
-
-| Dev | Track | Tasks (in order) |
-|-----|-------|-----------------|
-| **A** | Data path + wiring | 1.0 → 1.1 → 1.3 → 1.4 → 1.5 → **1.7** → 1.8 → 1.9a → 1.9b → 2a.2 → **2a.4** → **2b.3** → **2c.4** → **3.1** → 3.2 → 3.3 |
-| **B** | Input + matching + sinks | 1.2 → 2b.2 → 1.6 → 2b.1 → 2a.1 → 2a.3 → 2c.1 → 2c.2 → 2c.3 → 3.4 |
-
-Sync points: **1.7** (B's 1.6 merges with A's 1.4+1.5), **2a.4** (B's 2a.3 merges with A's 2a.2), **2b.3** (B's 2b.1 ready for A), **2c.4** (B's 2c.3 ready; A's 2b.3 done — serial on `monitor.rs`/`host.rs`).
-
-Dev B starts `2b.2 Matcher` immediately after `1.2 Keys` — it depends only on 1.0 and touches an isolated file. This lets B build out the entire matching/config/sink stack while A drives the core data path. 2b.3 and 2c.4 are serialized on A because both modify `monitor.rs` and `host.rs`.
-
-**1.10 staffing (2-dev)**: B picks up 1.10a/b (MockTransport, available early) and 1.10m/n (docs-only) during gaps between track work. A picks up 1.10f–k (types/host, after 1.9b) interleaved with 2a.2. 1.10c/d/e land with B after 2a.1.
-
-#### 3 developers
-
-| Dev | Focus area | Tasks (in order) |
-|-----|-----------|-----------------|
-| **A** | Data path (types → transport → discovery → capture → host wiring) | 1.0 → 1.1 → 1.3 → 1.4 → 1.5 → **1.7** → 1.8 → 1.9a → 1.9b → **2a.4** → **3.1** → 3.2 |
-| **B** | Input + monitoring (keys → control → SSH → monitor → rules) | 1.2 → 1.6 → 2a.1 → 2a.3 → 2a.2 → **2b.3** → **2c.4** → 3.3 → 3.4 |
-| **C** | Matching + sink pipeline (matcher → config → sinks → bus) | 2b.2 → 2b.1 → 2c.1 → 2c.2 → 2c.3 |
-
-Sync points: **1.7** (B's 1.6 ready), **2a.2** (B waits for A's 1.9a before starting monitor parser), **2a.4** (B's 2a.3 merges with B's 2a.2), **2b.3** (C's 2b.1 ready for B), **2c.4** (B takes this after 2b.3 — serial on `monitor.rs`/`host.rs`; needs C's 2c.3), **3.1** (all tracks converge).
-
-Dev C is fully independent through T1–T7 — they only touch `matcher.rs`, `config.rs`, `sink.rs`, and `sinks/`. Dev B owns the `monitor.rs`/`host.rs` serialization: 2b.3 (rules + reconnection) then 2c.4 (sink wiring).
-
-**1.10 staffing (3-dev)**: A picks up 1.10f–l (types/host/capture) interleaved with 2a.4. B picks up 1.10c/d/e (SSH transport) after 2a.1. C picks up 1.10a/b (MockTransport) and 1.10m/n (docs) during gaps.
-
-#### 4 developers
-
-Split Track B into input/control (B1) and SSH/monitoring (B2):
-
-| Dev | Focus area | Tasks |
-|-----|-----------|-------|
-| **A** | Data path | 1.0 → 1.1 → 1.3 → 1.4 → 1.5 → **1.7** → 1.8 → 1.9a → 1.9b |
-| **B1** | Input + control | 1.2 → 1.6 → (pick up 4.1, 4.2 hardening while waiting) |
-| **B2** | SSH + monitoring + sink wiring | 2a.1 → 2a.3 → 2a.2 → **2a.4** → **2b.3** → **2c.4** → 3.3 → 3.4 |
-| **C** | Matching + sinks | 2b.2 → 2b.1 → 2c.1 → 2c.2 → 2c.3 → **3.1** → 3.2 |
-
-B2 owns the `monitor.rs`/`host.rs` serialization: 2b.3 (rules) then 2c.4 (sink wiring) land sequentially by the same dev, eliminating merge contention. B1 finishes early (1.2 + 1.6 are small) and pivots to Phase 4 hardening tasks (4.1 tmux version compat, 4.2 test expansion, 4.3 Docker E2E).
-
-**1.10 staffing (4-dev)**: B1 picks up 1.10 tasks that do not conflict with Track A file ownership: 1.10a/b (MockTransport, `transport.rs` — ownership transfers to B after 1.3), 1.10e/m/n (doc comments only). A picks up 1.10f–l (`types.rs`, `host.rs`, `capture.rs` — Track A-owned files). B2 picks up 1.10c/d after landing 2a.1 (`SshTransport` in `transport.rs`).
-
-### File Ownership (Conflict Avoidance)
-
-Each track primarily touches distinct files. When two tracks must modify the
-same file, that's a sync point — one merges first, the other rebases.
-
-| File | Primary owner | Touched by others at |
-|------|--------------|---------------------|
-| `types.rs` | Track A | 1.10f (A takes, Track A-owned) |
-| `keys.rs` | Track B | — |
-| `transport.rs` | Track A (1.3), then Track B (2a.1) | Sync after 1.3; 1.10a/b (B1 takes after 1.3), 1.10c/d (B2 takes after 2a.1) |
-| `discovery.rs` | Track A | — |
-| `capture.rs` | Track A | 1.10l (A takes, Track A-owned) |
-| `control.rs` | Track B | — |
-| `host.rs` | Track A | 1.10g–k (A takes, Track A-owned); Track B adds monitoring (2a.4) + reconnection (2b.3), Track C adds ActionHandle (2c.4). Serialized: 2a.4 → 2b.3 → 2c.4. |
-| `monitor.rs` | Track B | Track B adds rules (2b.3), Track C wires OutputBus (2c.4). Serialized: 2a.2 → 2b.3 → 2c.4. |
-| `pipe.rs` | Track B | — |
-| `matcher.rs` | Track C | — |
-| `config.rs` | Track C | — |
-| `sink.rs` | Track C | — |
-| `sinks/` | Track C | — |
-| `fleet.rs` | Converge point | Needs all tracks done |
-| `lib.rs` | Track A (initial), final at 3.2 | All tracks add re-exports |
-
-### Phase 4 Parallelism
-
-All Phase 4 tasks (4.1–4.4) are independent of each other and can be split
-across developers. They can also begin as soon as their prerequisites are met:
-
-| Task | Can start after | Parallelizable with |
-|------|----------------|-------------------|
-| 4.1 Tmux version compat | 1.3 (transport exists) | Everything after 1.3 |
-| 4.2 Expanded test coverage | Each module's initial impl | Phase 3 work |
-| 4.3 Docker E2E | 2a.1 (SSH transport exists) | Phase 3 work |
-| 4.4 Documentation | 3.2 (public API finalized) | 3.3 CLI, 3.4 smoke test |
-
-A dev who finishes their track early (e.g., B1 in the 4-dev scenario) can
-immediately start Phase 4 work without blocking or being blocked.
+Notes:
+- `1.9a` is the type/API gate required before `2a.2` and `2c.*`.
+- `1.9b` is a follow-on stabilization pass for overlap resync, geometry detection,
+  and history setup guidance.
+- `1.10` runs in parallel with Phase 2a — per-task dependencies listed in section above.
+- `2b.3` and `2c.4` both modify `monitor.rs` and `host.rs` — must land serially.
+- Phase 4 tasks are independent and can start as soon as their prerequisites are met.
 
 ## Conventions
 
