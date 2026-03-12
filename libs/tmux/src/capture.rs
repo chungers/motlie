@@ -472,13 +472,27 @@ pub async fn sample_text_with_options(
 /// text contains the previous content followed by new-only lines. If matching
 /// fails (ambiguous or insufficient overlap), returns the new capture with
 /// an `OverlapResync` fidelity issue.
+///
+/// **Note**: `overlap_lines` must be `>= 2` for dedup to engage. Values of
+/// 0 or 1 silently return `current` unchanged (with a `tracing::warn`).
+/// This is intentional — single-line overlap is too ambiguous for reliable
+/// matching.
 pub fn overlap_deduplicate(
     previous: &str,
     current: &str,
     overlap_lines: usize,
 ) -> (String, Vec<FidelityIssue>) {
-    if overlap_lines < 2 || previous.is_empty() || current.is_empty() {
-        // Not enough overlap requested or empty inputs — no dedup
+    if overlap_lines < 2 {
+        if overlap_lines > 0 && !previous.is_empty() && !current.is_empty() {
+            tracing::warn!(
+                overlap_lines,
+                "overlap_deduplicate called with overlap_lines < 2; \
+                 dedup requires >= 2 lines for reliable matching, returning current unchanged"
+            );
+        }
+        return (current.to_string(), Vec::new());
+    }
+    if previous.is_empty() || current.is_empty() {
         return (current.to_string(), Vec::new());
     }
 

@@ -138,15 +138,17 @@ impl TargetSpec {
         self
     }
 
-    /// Set pane index. Panics if `window` has not been set — pane requires
-    /// a window context (tmux target hierarchy: session:window.pane).
-    pub fn pane(mut self, index: u32) -> Self {
-        assert!(
-            self.window_sel.is_some(),
-            "TargetSpec::pane() requires window to be set first (use .window() or .window_name() before .pane())"
-        );
+    /// Set pane index. Returns `Err` if `window` has not been set — pane
+    /// requires a window context (tmux target hierarchy: session:window.pane).
+    pub fn pane(mut self, index: u32) -> Result<Self> {
+        if self.window_sel.is_none() {
+            return Err(anyhow!(
+                "TargetSpec::pane() requires window to be set first \
+                 (use .window() or .window_name() before .pane())"
+            ));
+        }
         self.pane_idx = Some(index);
-        self
+        Ok(self)
     }
 
     // --- Accessors ---
@@ -223,7 +225,13 @@ pub enum TmuxSocket {
 pub enum HostKeyPolicy {
     /// Verify against ~/.ssh/known_hosts (default)
     Verify,
-    /// Accept and persist on first connect, reject on mismatch
+    /// Accept and persist on first connect, reject on mismatch.
+    ///
+    /// **Fail-closed behavior**: if persisting the key fails (e.g.,
+    /// `~/.ssh/known_hosts` is not writable), the connection is **rejected**
+    /// and an error is logged. This prevents silently downgrading to
+    /// accept-all semantics. Ensure `~/.ssh/known_hosts` is writable
+    /// before using this policy.
     TrustFirstUse,
     /// Accept all, log warning
     Insecure,
@@ -500,7 +508,7 @@ mod tests {
 
     #[test]
     fn target_spec_full() {
-        let spec = TargetSpec::session("build").window(0).pane(3);
+        let spec = TargetSpec::session("build").window(0).pane(3).unwrap();
         assert_eq!(spec.to_target_string(), "build:0.3");
     }
 
@@ -554,9 +562,11 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "TargetSpec::pane() requires window")]
-    fn target_spec_pane_without_window_panics() {
-        let _ = TargetSpec::session("s").pane(0);
+    fn target_spec_pane_without_window_errors() {
+        let result = TargetSpec::session("s").pane(0);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("requires window"));
     }
 
     #[test]

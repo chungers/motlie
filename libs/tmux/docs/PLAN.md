@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-11 | @claude | Phase 1.10 implemented: all 14 tasks (1.10a–n) completed. Code changes: MockTransport with_error + Vec ordering, open_shell PTY params, TransportKind::is_healthy(), TargetSpec::pane() returns Result, HostHandle::local_with_timeout(), Target::rename() returns new Target. Doc comments: TrustFirstUse fail-closed, pane rename asymmetry, active-window drift, capture scope, overlap_deduplicate warn, dual timeouts, history-limit semantics. |
 | 2026-03-12 | @claude | Phase 1.10 — address PR #68 R6: restore 1.10 as hard gate before 2a.2, consistent with user intent ("slotted for fixes now before the next phase"). Fixed dependency note, task ordering diagram, and notes section. |
 | 2026-03-12 | @claude | Simplify PLAN: remove Multi-Developer Parallelism section (dev assignments, staffing tables, file ownership, time chart). Keep task ordering dependency graph and conventions. PLAN tracks work to do, not assignments. Per user request. |
 | 2026-03-12 | @claude | Phase 1.10 — address PR #68 R5: narrow 4-dev B1 scope to non-Track-A files only, update file ownership table with 1.10 task assignments per track. |
@@ -72,7 +73,7 @@ No SSH, no monitoring.
 
 - [x] `TransportKind` enum: `Local(LocalTransport)`, `Mock(MockTransport)` (SSH added in Phase 2a)
 - [x] `TransportKind::exec(&self, command: &str) -> Result<String>` — dispatch to variant
-- [x] `TransportKind::open_shell(&self) -> Result<ShellChannelKind>` — dispatch to variant
+- [x] `TransportKind::open_shell(&self, cols, rows) -> Result<ShellChannelKind>` — dispatch to variant
 - [x] `ShellChannelKind` enum: `Local(LocalShellChannel)`, `Mock(MockShellChannel)`
 - [x] `ShellChannelKind::write()`, `::read()` methods
 - [x] `ShellEvent` enum: `Data(Vec<u8>)`, `Eof`
@@ -237,29 +238,29 @@ the task ID to locate the note (line numbers drift across edits).
 
 #### Transport layer (`src/transport.rs`)
 
-- [ ] **1.10a** — `MockTransport`: add `with_error(pattern, message)` to allow `exec()`
+- [x] **1.10a** — `MockTransport`: add `with_error(pattern, message)` to allow `exec()`
   to return `Err` for specified patterns. Currently `exec()` always returns `Ok(...)`,
   preventing unit-test coverage of error handling paths in discovery, capture, and control.
   *(grep: `PLAN 1.10a` in API.md, impact: medium)*
 
-- [ ] **1.10b** — `MockTransport`: switch pattern storage from `HashMap` to `Vec` for
+- [x] **1.10b** — `MockTransport`: switch pattern storage from `HashMap` to `Vec` for
   deterministic ordered matching. Currently overlapping substring patterns (e.g. `"list"`
   vs `"list-sessions"`) match nondeterministically due to HashMap iteration order. With
   `Vec`, patterns are checked in registration order — first match wins.
   *(grep: `PLAN 1.10b` in API.md, impact: medium for tests)*
 
-- [ ] **1.10c** — `SshTransport::open_shell()`: add PTY size parameters. Currently
+- [x] **1.10c** — `SshTransport::open_shell()`: add PTY size parameters. Currently
   hardcodes `request_pty("xterm", 80, 24, ...)` with no API to specify dimensions.
   Add optional width/height to `open_shell()` or an `SshShellOptions` builder.
   *(grep: `PLAN 1.10c` in API.md, impact: medium for TUIs, low for non-interactive)*
 
-- [ ] **1.10d** — `SshTransport::is_closed()`: expose transport-agnostic health probe.
+- [x] **1.10d** — `SshTransport::is_closed()`: expose transport-agnostic health probe.
   `is_closed()` exists only on `SshTransport`; neither `HostHandle` nor `TransportKind`
   exposes it. Add `TransportKind::is_healthy() -> bool` (returns `true` for Local/Mock,
   delegates to `!is_closed()` for SSH).
   *(grep: `PLAN 1.10d` in API.md, impact: low-to-medium)*
 
-- [ ] **1.10e** — `TrustFirstUse` host key policy: improve discoverability of fail-closed
+- [x] **1.10e** — `TrustFirstUse` host key policy: improve discoverability of fail-closed
   behavior. Connection is rejected if `~/.ssh/known_hosts` is not writable. Add a doc
   comment on `HostKeyPolicy::TrustFirstUse` explaining the precondition and the error
   message users will see.
@@ -267,7 +268,7 @@ the task ID to locate the note (line numbers drift across edits).
 
 #### Types (`src/types.rs`)
 
-- [ ] **1.10f** — `TargetSpec::pane()`: return `Result` instead of panicking. Currently
+- [x] **1.10f** — `TargetSpec::pane()`: return `Result` instead of panicking. Currently
   uses `assert!` to enforce that `.window()` was called first — builder misuse is
   process-fatal for library consumers. Change to return `Result<TargetSpec>` or a
   typed error.
@@ -275,31 +276,31 @@ the task ID to locate the note (line numbers drift across edits).
 
 #### Host handle and Target (`src/host.rs`)
 
-- [ ] **1.10g** — `HostHandle::local()`: add `local_with_timeout(Duration)` convenience
+- [x] **1.10g** — `HostHandle::local()`: add `local_with_timeout(Duration)` convenience
   constructor. Currently hardcodes 10s transport timeout with no builder/setter — callers
   must drop to `HostHandle::new()` + `LocalTransport::with_timeout()`.
   *(grep: `PLAN 1.10g` in API.md, impact: ergonomic)*
 
-- [ ] **1.10h** — `Target::rename()`: return a new `Target` with updated address.
+- [x] **1.10h** — `Target::rename()`: return a new `Target` with updated address.
   After session rename, `target_string()` returns the old name and subsequent operations
   fail. Change signature to `rename(&self, new_name) -> Result<Target>` so callers get a
   fresh handle. Window rename is metadata drift only (`target_string()` uses
   `session:index`) but should also return an updated `Target` for consistency.
   *(grep: `PLAN 1.10h` in API.md, impact: correctness-significant for session, metadata for window)*
 
-- [ ] **1.10i** — `Target::rename()` at pane level: add doc comment documenting that
+- [x] **1.10i** — `Target::rename()` at pane level: add doc comment documenting that
   pane rename returns `Err("cannot rename a pane")` because tmux has no `rename-pane`
   command. A compile-time restriction would require breaking the unified `Target` API,
   so document the asymmetry instead.
   *(grep: `PLAN 1.10i` in API.md, impact: low)*
 
-- [ ] **1.10j** — `Target::pane(index)` from session level: document active-window drift.
+- [x] **1.10j** — `Target::pane(index)` from session level: document active-window drift.
   Resolves via the **active window** at call time, so the same call can return different
   panes if focus changes. Add a doc comment recommending explicit navigation
   (`target.window(0).pane(0)`) for deterministic targeting.
   *(grep: `PLAN 1.10j` in API.md, impact: medium for automation)*
 
-- [ ] **1.10k** — `Target::capture()` at session/window level: clarify scope in doc
+- [x] **1.10k** — `Target::capture()` at session/window level: clarify scope in doc
   comment. Captures the **active pane** only (consistent with tmux `capture-pane -t`),
   but the method name sounds exhaustive. Add doc comment noting this and pointing to
   `capture_all()` for all panes.
@@ -307,7 +308,7 @@ the task ID to locate the note (line numbers drift across edits).
 
 #### Capture (`src/capture.rs`)
 
-- [ ] **1.10l** — `overlap_deduplicate()`: log at `warn` level when `overlap_lines < 2`.
+- [x] **1.10l** — `overlap_deduplicate()`: log at `warn` level when `overlap_lines < 2`.
   Currently silently no-ops (returns current capture unchanged with no fidelity issues).
   A `tracing::warn!` is non-breaking and makes the threshold visible without changing
   the return type. Also add the `>= 2` requirement to the function's doc comment.
@@ -315,14 +316,14 @@ the task ID to locate the note (line numbers drift across edits).
 
 #### Cross-cutting documentation
 
-- [ ] **1.10m** — Document two independent timeout knobs. `Target::exec()` has its own
+- [x] **1.10m** — Document two independent timeout knobs. `Target::exec()` has its own
   sentinel polling timeout, separate from the transport timeout
   (`LocalTransport::timeout` / `SshConfig::timeout`) that governs each individual tmux
   command. Add doc comments on both `Target::exec()` and `SshConfig::with_timeout()`
   explaining the interaction and failure modes.
   *(grep: `PLAN 1.10m` in API.md, impact: medium)*
 
-- [ ] **1.10n** — Document `history-limit` creation-time semantics. `set_history_limit()`
+- [x] **1.10n** — Document `history-limit` creation-time semantics. `set_history_limit()`
   only affects panes created after the call; existing panes retain their creation-time
   limit. Add doc comments on `set_history_limit()` and `set_global_history_limit()`
   noting this tmux behavior.
