@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-12 | @claude | Phase 1.10 — address PR #68 R5: narrow 4-dev B1 scope to non-Track-A files only, update file ownership table with 1.10 task assignments per track. |
 | 2026-03-12 | @claude | Phase 1.10 — address PR #68 R4: pick implementation direction for multi-option tasks (1.10b/h/i/l), split per-task deps to exact phase granularity (1.10a/b→1.3, 1.10c/d/e→2a.1, etc.), add 1.10 staffing to all dev assignment tables. |
 | 2026-03-11 | @claude | Phase 1.10 — address PR #68 R3: fix changelog timeline (round 2 had open rename issue, full validation after round 3), replace stale line-number refs with grep-stable `@claude NOTE (PLAN 1.10x)` anchors, relax dependency from hard gate to parallel-with-2a.2. |
 | 2026-03-11 | @claude | Added Phase 1.10 — API Gaps and Hardening: 14 `@claude NOTE` items from API.md, validated by @codex across PR #68 rounds 2–3. Runs parallel with Phase 2a (not a hard gate) to clean up ergonomic and correctness gaps. |
@@ -829,7 +830,7 @@ Split Track B into input/control (B1) and SSH/monitoring (B2):
 
 B2 owns the `monitor.rs`/`host.rs` serialization: 2b.3 (rules) then 2c.4 (sink wiring) land sequentially by the same dev, eliminating merge contention. B1 finishes early (1.2 + 1.6 are small) and pivots to Phase 4 hardening tasks (4.1 tmux version compat, 4.2 test expansion, 4.3 Docker E2E).
 
-**1.10 staffing (4-dev)**: B1 picks up all of 1.10 after finishing 1.6 — the tasks are isolated and B1 would otherwise be idle. 1.10c/d/e wait until B2 lands 2a.1 (SSH transport exists).
+**1.10 staffing (4-dev)**: B1 picks up 1.10 tasks that do not conflict with Track A file ownership: 1.10a/b (MockTransport, `transport.rs` — ownership transfers to B after 1.3), 1.10e/m/n (doc comments only). A picks up 1.10f–l (`types.rs`, `host.rs`, `capture.rs` — Track A-owned files). B2 picks up 1.10c/d after landing 2a.1 (`SshTransport` in `transport.rs`).
 
 ### File Ownership (Conflict Avoidance)
 
@@ -838,13 +839,13 @@ same file, that's a sync point — one merges first, the other rebases.
 
 | File | Primary owner | Touched by others at |
 |------|--------------|---------------------|
-| `types.rs` | Track A | — (stable after 1.1) |
+| `types.rs` | Track A | 1.10f (A takes, Track A-owned) |
 | `keys.rs` | Track B | — |
-| `transport.rs` | Track A (1.3), then Track B (2a.1) | Sync after 1.3 |
+| `transport.rs` | Track A (1.3), then Track B (2a.1) | Sync after 1.3; 1.10a/b (B1 takes after 1.3), 1.10c/d (B2 takes after 2a.1) |
 | `discovery.rs` | Track A | — |
-| `capture.rs` | Track A | — |
+| `capture.rs` | Track A | 1.10l (A takes, Track A-owned) |
 | `control.rs` | Track B | — |
-| `host.rs` | Track A | Track B adds monitoring (2a.4) + reconnection (2b.3), Track C adds ActionHandle (2c.4). Serialized: 2a.4 → 2b.3 → 2c.4. |
+| `host.rs` | Track A | 1.10g–k (A takes, Track A-owned); Track B adds monitoring (2a.4) + reconnection (2b.3), Track C adds ActionHandle (2c.4). Serialized: 2a.4 → 2b.3 → 2c.4. |
 | `monitor.rs` | Track B | Track B adds rules (2b.3), Track C wires OutputBus (2c.4). Serialized: 2a.2 → 2b.3 → 2c.4. |
 | `pipe.rs` | Track B | — |
 | `matcher.rs` | Track C | — |
