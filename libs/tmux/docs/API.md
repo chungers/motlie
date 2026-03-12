@@ -91,6 +91,15 @@ let transport = LocalTransport::with_timeout(std::time::Duration::from_secs(30))
 let host = HostHandle::new(TransportKind::Local(transport), None);
 ```
 
+For the common "localhost, but with a different timeout" case, use the
+convenience constructor:
+
+```rust
+use motlie_tmux::HostHandle;
+
+let host = HostHandle::local_with_timeout(std::time::Duration::from_secs(30));
+```
+
 > **`@claude NOTE — RESOLVED`** *(PLAN 1.10g)*: `HostHandle::local()` hardcodes a 10s
 > transport timeout. There is no builder or setter to change it — you must
 > drop to `HostHandle::new()` + `LocalTransport::with_timeout()`. Consider
@@ -280,6 +289,18 @@ async fn test_session_lifecycle() {
 - **Shell channel**: `open_shell()` returns a `MockShellChannel` with empty
   data that immediately yields `Eof` on read.
 
+```rust
+use motlie_tmux::{HostHandle, transport::{MockTransport, TransportKind}};
+
+let mock = MockTransport::new()
+    .with_error("kill-session", "session not found")
+    .with_response("list-sessions", "build\t$0\t0\t0\t1\t\n");
+let host = HostHandle::new(TransportKind::Mock(mock), None);
+let target = host.session("build").await?.unwrap();
+let err = target.kill().await.unwrap_err();
+assert!(err.to_string().contains("session not found"));
+```
+
 > **`@claude NOTE — RESOLVED`** *(PLAN 1.10a)*: Added
 > `MockTransport::with_error(pattern, message)` for unit-testing error
 > handling paths in discovery, capture, and control code.
@@ -300,6 +321,17 @@ async fn test_session_lifecycle() {
 > **`@claude NOTE — RESOLVED`** *(PLAN 1.10c)*: `SshTransport::open_shell()` requests a
 > PTY at fixed 80x24. There is no API to specify dimensions. This may matter
 > for applications that need a specific terminal size for the remote shell. **Fixed**: `open_shell()` now takes `cols: u32, rows: u32` parameters.
+
+```rust
+use motlie_tmux::transport::TransportKind;
+
+// Assume `ssh` is a connected SshTransport (see SSH transport section above).
+let transport = TransportKind::Ssh(ssh);
+if transport.is_healthy() {
+    let shell = transport.open_shell(120, 40).await?;
+    drop(shell);
+}
+```
 
 ---
 
@@ -365,6 +397,7 @@ target.kill().await?;
 // rename() returns a new Target with the updated address.
 // For session rename this is critical — the old handle has a stale name.
 let target = target.rename("new_name").await?;
+target.kill().await?; // uses the renamed handle
 ```
 
 > **`@claude NOTE — RESOLVED`** *(PLAN 1.10h)*: `rename()` now returns
@@ -426,6 +459,10 @@ let t = host.target(&TargetSpec::session("build").window_name("editor")).await?;
 
 // Session + window + pane (pane() returns Result)
 let t = host.target(&TargetSpec::session("build").window(0).pane(1)?).await?;
+
+// Reuse the spec when you want to log it or pass it around first.
+let spec = TargetSpec::session("build").window(0).pane(1)?;
+let t = host.target(&spec).await?;
 
 // Parse from string
 let t = host.target(&TargetSpec::parse("build:0.1")?).await?;
