@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-12 | @claude: DC21 R3 — address PR #71 R2: fix `connect(self)` in API signature block, add `/socket-path` vs `socket-name` mutual-exclusion rule, fix fleet example to use URI string instead of undeclared `HostHandle` `Display`. R1 fixes: `connect()` ownership (`&self`→`self`), `HostHandle::transport_kind()` inspection seam. | DC21 |
 | 2026-03-12 | @claude: DC21 R2 — address feedback: consolidate `SshUri` into `SshConfig` (no new type), support both nassh `;` and query `?` param syntax, no canonical-component duplication (port/user/host only from URI structure). `SshConfig` gains `parse()`, `connect()`, `Display`/`FromStr`. URI parsing in `src/uri.rs` as `impl SshConfig` extension. | DC21 |
 | 2026-03-12 | @claude: DC21 — Unified SSH URI for Host Addressing. Single `ssh://` URI scheme for all hosts (localhost and remote), transport auto-selection (localhost→Local, else→SSH). | DC21 |
 | 2026-03-11 | @claude: Sync DESIGN.md signatures with Phase 1.10 implementation — `TargetSpec::pane()` returns `Result<Self>`, `Target::rename()` returns `Result<Target>`, `TransportKind::open_shell()` takes `cols, rows` params. Per PR #69 review. | TargetSpec, Target, TransportKind |
@@ -2600,6 +2601,17 @@ The `/socket-path` component maps to `TmuxSocket::Path(...)`. If omitted, the de
 tmux socket is used. To use a named socket instead of a path, use the `socket-name`
 parameter: `ssh://user;socket-name=myserver@host`.
 
+**Mutual exclusion**: `/socket-path` and `socket-name` both map to the same
+`Option<TmuxSocket>` field. If both are present in a URI, parsing fails:
+
+```
+ssh://user@host/tmp/tmux.sock?socket-name=other   # ERROR — socket-path and socket-name
+                                                   #   are mutually exclusive
+```
+
+<!-- @claude 2026-03-12: added per PR #71 R2 — reviewer flagged undefined behavior
+     when both socket specifiers are present. Reject at parse time. -->
+
 #### No Canonical-Component Duplication
 
 Components with a dedicated position in the URI syntax — `user`, `host`, `port` — are
@@ -2700,7 +2712,7 @@ impl SshConfig {
     /// `user` is ignored for localhost connections (LocalTransport runs as
     /// the current OS user). For SSH hosts, `user` is required — `connect()`
     /// returns an error if empty.
-    pub async fn connect(&self) -> Result<HostHandle>;
+    pub async fn connect(self) -> Result<HostHandle>;
 
     // --- Accessors ---
 
@@ -2760,9 +2772,9 @@ let uris = vec![
 let hosts: Vec<HostHandle> = futures::future::try_join_all(
     uris.iter().map(|u| async { SshConfig::parse(u)?.connect().await })
 ).await?;
-for host in &hosts {
+for (uri, host) in uris.iter().zip(&hosts) {
     let sessions = host.list_sessions().await?;
-    println!("{}: {} sessions", host, sessions.len());
+    println!("{}: {} sessions", uri, sessions.len());
 }
 ```
 
@@ -2809,18 +2821,25 @@ host.create_session("dev", Some("main"), None).await?;
 fn is_localhost(&self) -> bool:
     host == "localhost" || host == "127.0.0.1" || host == "::1"
 
-async fn connect(&self) -> Result<HostHandle>:
+async fn connect(self) -> Result<HostHandle>:
     if self.is_localhost():
         transport = LocalTransport::with_timeout(self.timeout)
-    else:
-        if self.user.is_empty():
-            return Err("user is required for SSH connections")
-        transport = SshTransport::connect(self).await?
-    return HostHandle::new(transport, self.socket.clone())
+        return HostHandle::new(transport, self.socket)
+    if self.user.is_empty():
+        return Err("user is required for SSH connections")
+    let socket = self.socket.clone()
+    transport = SshTransport::connect(self).await?
+    return HostHandle::new(transport, socket)
 ```
 
-Note: `SshTransport::connect()` already takes `SshConfig` — no adapter needed.
-For localhost, `user` is silently ignored (no SSH handshake occurs).
+<!-- @claude 2026-03-12: PR #71 R1 fix — `connect(self)` takes ownership, consistent
+     with `SshTransport::connect(SshConfig)`. No hidden clone. Caller `.clone().connect()`
+     for fleet reuse. Socket extracted before self is moved into SshTransport. -->
+
+`connect(self)` takes ownership, consistent with `SshTransport::connect(SshConfig)`.
+For fleet patterns where the caller reuses a config, clone explicitly:
+`cfg.clone().connect().await?`. Socket is extracted before `self` moves into
+`SshTransport`. For localhost, `user` is silently ignored (no SSH handshake occurs).
 
 #### Refactor Plan
 
@@ -2839,7 +2858,9 @@ The change extends the existing `SshConfig` rather than adding a new type:
 3. **`src/lib.rs`**: Add `mod uri;` (private — no public types to export, just extends
    `SshConfig` which is already re-exported).
 
-4. **`src/host.rs`**: No changes. `HostHandle::local()`, `HostHandle::new()`,
+4. **`src/host.rs`**: Add `pub fn transport_kind(&self) -> &TransportKind` accessor
+   to `HostHandle`. Enables unit tests to assert transport selection without relying
+   on behavioral side effects. `HostHandle::local()`, `HostHandle::new()`,
    `HostHandle::local_with_timeout()` remain as crate-internal convenience constructors
    for testing and advanced use cases.
 

@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-12 | @claude | Phase 1.11 — address PR #71 R2: fix `connect(self)` in 1.11g, add socket mutual-exclusion to 1.11j test cases, fix fleet example. R1: 1.11l inspection seam. |
 | 2026-03-12 | @claude | Phase 1.11 R2: address feedback — consolidate `SshUri` into `SshConfig` (no new type), support both nassh `;` and query `?` param syntax, no canonical-component duplication. 14 tasks (1.11a–n). |
 | 2026-03-11 | @claude | Phase 1.10 implemented: all 14 tasks (1.10a–n) completed. Code changes: MockTransport with_error + Vec ordering, open_shell PTY params, TransportKind::is_healthy(), TargetSpec::pane() returns Result, HostHandle::local_with_timeout(), Target::rename() returns new Target. Doc comments: TrustFirstUse fail-closed, pane rename asymmetry, active-window drift, capture scope, overlap_deduplicate warn, dual timeouts, history-limit semantics. |
 | 2026-03-12 | @claude | Phase 1.10 — address PR #68 R6: restore 1.10 as hard gate before 2a.2, consistent with user intent ("slotted for fixes now before the next phase"). Fixed dependency note, task ordering diagram, and notes section. |
@@ -385,10 +386,10 @@ See DESIGN.md DC21 for full specification.
 
 #### Transport selection and connect (`src/uri.rs`)
 
-- [ ] **1.11g** — `SshConfig::connect(&self) -> Result<HostHandle>`: localhost
-  (`localhost` / `127.0.0.1` / `::1`) → `LocalTransport::with_timeout()`;
-  all others → `SshTransport::connect(self)`. Wire `socket` to `HostHandle::new()`.
-  Require non-empty `user` for SSH hosts.
+- [ ] **1.11g** — `SshConfig::connect(self) -> Result<HostHandle>`: takes ownership.
+  localhost (`localhost` / `127.0.0.1` / `::1`) → `LocalTransport::with_timeout()`;
+  all others → `SshTransport::connect(self)`. Extract `socket` before move, wire to
+  `HostHandle::new()`. Require non-empty `user` for SSH hosts.
 
 - [ ] **1.11h** — `SshConfig::is_localhost(&self) -> bool` helper used by `connect()`.
 
@@ -402,15 +403,19 @@ See DESIGN.md DC21 for full specification.
 - [ ] **1.11j** — Unit tests for `parse()`: valid URIs with nassh params, query params,
   mixed params, socket-path. Invalid URIs: bad scheme, unknown params, malformed
   userinfo, missing host, canonical-component duplication (`?port=22`), duplicate
-  keys across locations. Edge cases: IPv6, no user, port-only, empty params.
+  keys across locations, `/socket-path` + `socket-name` mutual exclusion.
+  Edge cases: IPv6, no user, port-only, empty params.
 
 - [ ] **1.11k** — Unit tests for `to_uri_string()` and round-trip: builder-constructed
   configs render to valid URIs; parse ∘ to_string is identity for canonical forms.
 
-- [ ] **1.11l** — Unit tests for `connect()` transport selection: localhost variants
-  produce `LocalTransport`, other hosts produce `SshTransport` (mock or check
-  `TransportKind` variant). Verify config fields propagate correctly. Verify empty
-  user rejected for SSH hosts.
+- [ ] **1.11l** — Unit tests for `connect()` transport selection via
+  `HostHandle::transport_kind()` accessor (added in DC21 implementation plan,
+  point 4): localhost variants (`localhost`, `127.0.0.1`, `::1`) produce
+  `TransportKind::Local`, other hosts produce `TransportKind::Ssh`. Verify
+  config fields propagate correctly. Verify empty user rejected for SSH hosts.
+  <!-- @claude 2026-03-12: rewritten per PR #71 review — original referenced
+       unobservable TransportKind variant; now uses transport_kind() seam. -->
 
 - [ ] **1.11m** — Integration test: `SshConfig::parse("ssh://localhost")?.connect()`
   produces a working `HostHandle` that can `list_sessions()`.
