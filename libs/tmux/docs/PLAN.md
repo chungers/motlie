@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-12 | @claude | Phase 1.10 — address PR #68 R6: restore 1.10 as hard gate before 2a.2, consistent with user intent ("slotted for fixes now before the next phase"). Fixed dependency note, task ordering diagram, and notes section. |
 | 2026-03-12 | @claude | Simplify PLAN: remove Multi-Developer Parallelism section (dev assignments, staffing tables, file ownership, time chart). Keep task ordering dependency graph and conventions. PLAN tracks work to do, not assignments. Per user request. |
 | 2026-03-12 | @claude | Phase 1.10 — address PR #68 R5: narrow 4-dev B1 scope to non-Track-A files only, update file ownership table with 1.10 task assignments per track. |
 | 2026-03-12 | @claude | Phase 1.10 — address PR #68 R4: pick implementation direction for multi-option tasks (1.10b/h/i/l), split per-task deps to exact phase granularity (1.10a/b→1.3, 1.10c/d/e→2a.1, etc.), add 1.10 staffing to all dev assignment tables. |
@@ -339,7 +340,10 @@ the task ID to locate the note (line numbers drift across edits).
 - 1.10l: `overlap_deduplicate()` in `capture.rs` → available after **1.5**
 - 1.10m, 1.10n: doc comments only → no code dependency
 
-**Does NOT gate**: 2a.2 or later phases. Runs in parallel with Phase 2a work.
+**Gates**: Phase 2a.2 and later. All 1.10 tasks should be completed before
+starting the next phase. Tasks within 1.10 can be worked in any order based
+on the per-task availability above (e.g. 1.10a/b can start immediately after
+1.3; 1.10c/d/e must wait for 2a.1).
 
 ---
 
@@ -690,7 +694,7 @@ Out of current scope. Listed for continuity.
  │     │
  │     ├── 1.9b Mixed-client stabilization [needs 1.9a]
  │     │
- │     ├── 1.10 API gaps + hardening [parallel with 2a — per-task deps]
+ │     ├── 1.10 API gaps + hardening [gates 2a.2; per-task deps within]
  │     │
  │     └── 2a.2 Monitor parser [needs 1.7 + 1.9a]
  │          │
@@ -723,7 +727,8 @@ Notes:
 - `1.9a` is the type/API gate required before `2a.2` and `2c.*`.
 - `1.9b` is a follow-on stabilization pass for overlap resync, geometry detection,
   and history setup guidance.
-- `1.10` runs in parallel with Phase 2a — per-task dependencies listed in section above.
+- `1.10` gates Phase 2a.2 — all tasks must complete before next phase. Per-task
+  dependencies (listed in section above) allow internal parallelism within 1.10.
 - `2b.3` and `2c.4` both modify `monitor.rs` and `host.rs` — must land serially.
 - Phase 4 tasks are independent and can start as soon as their prerequisites are met.
 
