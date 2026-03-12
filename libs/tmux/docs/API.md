@@ -271,15 +271,18 @@ async fn test_session_lifecycle() {
 ### Characteristics
 
 - **No timeout**: Responses are instant. No timeout configuration.
-- **Never errors on exec**: Always returns `Ok(response)`. To test error
-  paths, you must use `LocalTransport` or construct errors at a higher level.
+- **Error injection**: Use `with_error(pattern, message)` to make `exec()`
+  return `Err` for commands matching the pattern. Error patterns are checked
+  before response patterns. Without `with_error()`, `exec()` always returns
+  `Ok(response)`.
+- **Deterministic matching**: Patterns are matched in insertion order (first
+  match wins), not hash order.
 - **Shell channel**: `open_shell()` returns a `MockShellChannel` with empty
   data that immediately yields `Eof` on read.
 
-> **`@claude NOTE — RESOLVED`** *(PLAN 1.10a)*: There is no way to make
-> `MockTransport::exec()` return an `Err`. This means error handling paths
-> in discovery, capture, and control code cannot be unit-tested with mocks
-> alone. Consider adding `with_error(pattern, message)` to `MockTransport`. **Fixed**: Added `MockTransport::with_error(pattern, message)` method.
+> **`@claude NOTE — RESOLVED`** *(PLAN 1.10a)*: Added
+> `MockTransport::with_error(pattern, message)` for unit-testing error
+> handling paths in discovery, capture, and control code.
 
 ---
 
@@ -288,7 +291,7 @@ async fn test_session_lifecycle() {
 | Aspect | Local | SSH | Mock |
 |--------|-------|-----|------|
 | Timeout | 10s default, configurable | 10s default, configurable | None |
-| Error includes stderr | Yes | Yes | N/A (never errors) |
+| Error includes stderr | Yes | Yes | Via `with_error()` (message only, no stderr) |
 | `is_closed()` / `is_healthy()` | `is_healthy()` always `true` | `is_healthy()` delegates to `!is_closed()` | `is_healthy()` always `true` |
 | Keepalive | N/A | Configurable, default 30s | N/A |
 | `open_shell(cols, rows)` | Spawns `sh` (ignores cols/rows) | PTY `xterm` at caller-specified cols×rows | Empty data, immediate Eof (ignores cols/rows) |
