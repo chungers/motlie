@@ -62,7 +62,7 @@ pub enum TransportKind {
 
 Once a `HostHandle` is constructed with a transport, the same top-level
 API calls are available regardless of which variant is used. Behavioral
-differences exist (e.g. Mock never errors, SSH has keepalives) and are
+differences exist (e.g. Mock errors only via `with_error()`, SSH has keepalives) and are
 called out per-transport below and in the comparison table.
 
 ---
@@ -307,7 +307,7 @@ async fn test_session_lifecycle() {
 
 Everything below uses the same call patterns across Local, SSH, and Mock
 transports. The transport is selected once at `HostHandle` construction.
-Behavioral differences (e.g. Mock never errors, SSH shell channels use PTY)
+Behavioral differences (e.g. Mock errors only via `with_error()`, SSH shell channels use PTY)
 are noted in the transport sections above.
 
 ---
