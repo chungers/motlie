@@ -15,6 +15,9 @@ tokio = { version = "1", features = ["full"] }
 
 All examples assume an async context (`#[tokio::main]` or `#[tokio::test]`).
 
+**Runnable examples** are in [`examples/`](../examples/) with full instructions
+in [`examples/README.md`](../examples/README.md).
+
 ---
 
 ## Table of Contents
@@ -338,6 +341,8 @@ Transport selection is automatic:
 - `localhost`, `127.0.0.1`, `::1` → `LocalTransport` (no SSH handshake)
 - All other hosts → `SshTransport` via SSH (user required)
 
+> See [`examples/uri_connect.rs`](../examples/uri_connect.rs) for a runnable version.
+
 The `connect()` method consumes `self`. Socket configuration is propagated to
 the `HostHandle` for tmux commands (`-L` or `-S` flags).
 
@@ -516,6 +521,8 @@ target.kill().await?;
 // Works at any level: kills session, window, or pane depending on target level.
 ```
 
+> See [`examples/session_lifecycle.rs`](../examples/session_lifecycle.rs) for the full create → rename → kill flow.
+
 ### Rename
 
 ```rust
@@ -560,6 +567,8 @@ for s in &sessions {
         s.name, s.id, s.window_count, s.attached);
 }
 ```
+
+> See [`examples/list_sessions.rs`](../examples/list_sessions.rs) for a runnable version.
 
 ### Find a session by name
 
@@ -633,6 +642,9 @@ target.pane_address();   // Some(&PaneAddress) — pane level only
 target.address();        // &TargetAddress enum
 ```
 
+> See [`examples/target_navigate.rs`](../examples/target_navigate.rs) for a runnable hierarchy walk
+> and [`examples/target_spec.rs`](../examples/target_spec.rs) for TargetSpec resolution.
+
 ### Navigate down the hierarchy
 
 ```rust
@@ -674,6 +686,8 @@ let pane = target.pane_by_address(&addr);
 target.send_text("echo hello").await?;
 // Types the text into the pane. Does NOT append Enter.
 ```
+
+> See [`examples/send_and_capture.rs`](../examples/send_and_capture.rs) for a runnable version.
 
 ### Key sequences
 
@@ -767,6 +781,8 @@ if result.success() {
     eprintln!("failed (exit {}): {}", result.exit_code, result.stdout);
 }
 ```
+
+> See [`examples/exec_command.rs`](../examples/exec_command.rs) for a runnable version.
 
 ### How it works
 
