@@ -84,6 +84,15 @@ impl HostHandle {
         }
     }
 
+    /// Access the transport kind (crate-internal, not public API).
+    ///
+    /// Scoped to `pub(crate)` so the transport abstraction stays internal
+    /// per DC21. Enables unit tests within the crate to assert transport
+    /// selection without relying on behavioral side effects.
+    pub(crate) fn transport_kind(&self) -> &TransportKind {
+        &self.inner.transport
+    }
+
     /// List all tmux sessions on this host.
     pub async fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
         discovery::list_sessions(&self.inner.transport, self.inner.socket.as_ref()).await
