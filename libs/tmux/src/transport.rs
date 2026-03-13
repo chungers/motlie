@@ -218,24 +218,25 @@ impl Default for MockTransport {
 // SshTransport (Phase 2a.1, DC2, DC6)
 // ---------------------------------------------------------------------------
 
-/// SSH transport configuration.
-#[derive(Debug, Clone)]
+/// SSH/host connection configuration.
+///
+/// Constructed via builder (`SshConfig::new()`) or parsed from an SSH URI
+/// string (`SshConfig::parse()`). Supports both nassh-style (`;` in userinfo)
+/// and query-param (`?key=value`) syntax.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SshConfig {
-    /// Remote host (hostname or IP).
-    pub host: String,
-    /// SSH port (default 22).
-    pub port: u16,
-    /// SSH username.
-    pub user: String,
-    /// Host key verification policy (DC2).
-    pub host_key_policy: HostKeyPolicy,
-    /// Command execution timeout.
-    pub timeout: std::time::Duration,
-    /// Keepalive interval. `None` disables keepalives.
-    pub keepalive_interval: Option<std::time::Duration>,
+    host: String,
+    port: u16,
+    user: String,
+    host_key_policy: HostKeyPolicy,
+    timeout: std::time::Duration,
+    keepalive_interval: Option<std::time::Duration>,
+    socket: Option<TmuxSocket>,
 }
 
 impl SshConfig {
+    // --- Builder ---
+
     pub fn new(host: impl Into<String>, user: impl Into<String>) -> Self {
         SshConfig {
             host: host.into(),
@@ -244,6 +245,7 @@ impl SshConfig {
             host_key_policy: HostKeyPolicy::default(),
             timeout: std::time::Duration::from_secs(10),
             keepalive_interval: Some(std::time::Duration::from_secs(30)),
+            socket: None,
         }
     }
 
@@ -273,6 +275,59 @@ impl SshConfig {
     pub fn with_keepalive(mut self, interval: Option<std::time::Duration>) -> Self {
         self.keepalive_interval = interval;
         self
+    }
+
+    /// Set the tmux socket for this config.
+    ///
+    /// `TmuxSocket::Name` values are restricted to `[A-Za-z0-9._-]+` for
+    /// URI round-trip safety and tmux compatibility. Returns `Err` on
+    /// invalid names. `TmuxSocket::Path` values are not restricted
+    /// (filesystem paths).
+    pub fn with_socket(mut self, socket: TmuxSocket) -> anyhow::Result<Self> {
+        if let TmuxSocket::Name(ref name) = socket {
+            if !is_valid_socket_name(name) {
+                return Err(anyhow::anyhow!(
+                    "invalid socket name '{}': must match [A-Za-z0-9._-]+",
+                    name
+                ));
+            }
+        }
+        self.socket = Some(socket);
+        Ok(self)
+    }
+
+    // --- Accessors ---
+
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    pub fn user(&self) -> &str {
+        &self.user
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub fn host_key_policy(&self) -> &HostKeyPolicy {
+        &self.host_key_policy
+    }
+
+    pub fn timeout(&self) -> std::time::Duration {
+        self.timeout
+    }
+
+    pub fn keepalive_interval(&self) -> Option<std::time::Duration> {
+        self.keepalive_interval
+    }
+
+    pub fn socket(&self) -> Option<&TmuxSocket> {
+        self.socket.as_ref()
+    }
+
+    pub fn is_localhost(&self) -> bool {
+        self.host == "localhost" || self.host == "127.0.0.1" || self.host == "::1"
     }
 }
 
@@ -778,6 +833,18 @@ pub fn tmux_prefix(socket: Option<&TmuxSocket>) -> String {
     }
 }
 
+/// Validate a tmux socket name against the allowed character set.
+///
+/// Socket names must be non-empty and contain only `[A-Za-z0-9._-]`.
+/// This restriction ensures URI round-trip safety (no reserved chars)
+/// and tmux compatibility.
+pub fn is_valid_socket_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+}
+
 /// POSIX shell escape: single-quote wrapping with '\'' for interior quotes.
 pub fn shell_escape_arg(s: &str) -> String {
     s.replace('\'', "'\\''")
@@ -883,15 +950,16 @@ mod tests {
     #[test]
     fn ssh_config_defaults() {
         let cfg = SshConfig::new("example.com", "deploy");
-        assert_eq!(cfg.host, "example.com");
-        assert_eq!(cfg.port, 22);
-        assert_eq!(cfg.user, "deploy");
-        assert_eq!(cfg.host_key_policy, HostKeyPolicy::Verify);
-        assert_eq!(cfg.timeout, std::time::Duration::from_secs(10));
+        assert_eq!(cfg.host(), "example.com");
+        assert_eq!(cfg.port(), 22);
+        assert_eq!(cfg.user(), "deploy");
+        assert_eq!(*cfg.host_key_policy(), HostKeyPolicy::Verify);
+        assert_eq!(cfg.timeout(), std::time::Duration::from_secs(10));
         assert_eq!(
-            cfg.keepalive_interval,
+            cfg.keepalive_interval(),
             Some(std::time::Duration::from_secs(30))
         );
+        assert!(cfg.socket().is_none());
     }
 
     #[test]
@@ -900,10 +968,21 @@ mod tests {
             .with_port(2222)
             .with_host_key_policy(HostKeyPolicy::Insecure)
             .with_timeout(std::time::Duration::from_secs(30))
-            .with_keepalive(None);
-        assert_eq!(cfg.port, 2222);
-        assert_eq!(cfg.host_key_policy, HostKeyPolicy::Insecure);
-        assert_eq!(cfg.timeout, std::time::Duration::from_secs(30));
-        assert_eq!(cfg.keepalive_interval, None);
+            .with_keepalive(None)
+            .with_socket(TmuxSocket::Name("test".into()))
+            .unwrap();
+        assert_eq!(cfg.port(), 2222);
+        assert_eq!(*cfg.host_key_policy(), HostKeyPolicy::Insecure);
+        assert_eq!(cfg.timeout(), std::time::Duration::from_secs(30));
+        assert_eq!(cfg.keepalive_interval(), None);
+        assert_eq!(cfg.socket(), Some(&TmuxSocket::Name("test".into())));
+    }
+
+    #[test]
+    fn ssh_config_is_localhost() {
+        assert!(SshConfig::new("localhost", "u").is_localhost());
+        assert!(SshConfig::new("127.0.0.1", "u").is_localhost());
+        assert!(SshConfig::new("::1", "u").is_localhost());
+        assert!(!SshConfig::new("remote", "u").is_localhost());
     }
 }

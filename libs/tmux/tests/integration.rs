@@ -3,7 +3,7 @@
 //! These tests require tmux to be installed and available on PATH.
 //! They create/destroy real tmux sessions during testing.
 
-use motlie_tmux::{HostHandle, TargetLevel};
+use motlie_tmux::{HostHandle, SshConfig, TargetLevel};
 use std::time::Duration;
 
 fn tmux_available() -> bool {
@@ -101,4 +101,79 @@ async fn localhost_session_lifecycle() {
         !sessions.iter().any(|s| s.name == new_name),
         "session should be gone after kill"
     );
+}
+
+/// 1.11m — Integration test: SshConfig::parse("ssh://localhost")?.connect()
+/// produces a working HostHandle that can list_sessions().
+#[tokio::test]
+async fn uri_localhost_connect() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+
+    let session_name = "motlie_test_uri";
+
+    // Parse URI and connect
+    let host = SshConfig::parse("ssh://localhost")
+        .expect("parse failed")
+        .connect()
+        .await
+        .expect("connect failed");
+
+    // Clean up leftover from previous run
+    if let Ok(Some(t)) = host.session(session_name).await {
+        let _ = t.kill().await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // Create session via URI-connected handle
+    let target = host
+        .create_session(session_name, None, None)
+        .await
+        .expect("create_session failed");
+
+    // Verify list_sessions works
+    let sessions = host.list_sessions().await.expect("list_sessions failed");
+    assert!(
+        sessions.iter().any(|s| s.name == session_name),
+        "session not found via URI-connected handle"
+    );
+
+    // Verify with custom timeout propagation
+    let host2 = SshConfig::parse("ssh://localhost?timeout=30")
+        .expect("parse with timeout failed")
+        .connect()
+        .await
+        .expect("connect with timeout failed");
+    let sessions2 = host2.list_sessions().await.expect("list_sessions failed");
+    assert!(sessions2.iter().any(|s| s.name == session_name));
+
+    // Cleanup
+    target.kill().await.expect("kill failed");
+}
+
+/// 1.11o — SSH integration test (env-gated).
+/// Requires MOTLIE_SSH_TEST_HOST=user@host[:port].
+#[tokio::test]
+async fn uri_ssh_connect() {
+    let Some(test_host) = std::env::var("MOTLIE_SSH_TEST_HOST").ok() else {
+        eprintln!("skipping: MOTLIE_SSH_TEST_HOST not set");
+        return;
+    };
+
+    let uri = format!("ssh://{}", test_host);
+    let host = SshConfig::parse(&uri)
+        .unwrap_or_else(|e| panic!("failed to parse '{}': {}", uri, e))
+        .connect()
+        .await
+        .unwrap_or_else(|e| panic!("failed to connect to '{}': {}", uri, e));
+
+    // Verify basic operation
+    let sessions = host
+        .list_sessions()
+        .await
+        .expect("list_sessions failed on SSH host");
+    // Sessions may be empty — that's fine, we just verify the call succeeds
+    let _ = sessions;
 }
