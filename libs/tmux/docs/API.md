@@ -22,6 +22,7 @@ All examples assume an async context (`#[tokio::main]` or `#[tokio::test]`).
 **Part I — Transport Layer**
 1. [LocalTransport](#1-localtransport)
 2. [SshTransport](#2-sshtransport)
+   - 2a. [SshConfig URI Parsing and Connect](#2a-sshconfig-uri-parsing-and-connect)
 3. [MockTransport](#3-mocktransport)
 4. [Transport Comparison](#4-transport-comparison)
 
@@ -215,6 +216,124 @@ if ssh.is_closed() {
 - **Authentication**: ssh-agent only. Key file or password auth is not supported.
   Error messages are actionable (OC3): "is SSH_AUTH_SOCK set?",
   "Add a key with: ssh-add ~/.ssh/id_ed25519".
+
+---
+
+### 2a. SshConfig URI Parsing and Connect
+
+`SshConfig` can be constructed from an `ssh://` URI string, providing a single
+entry point for host configuration. This is the recommended way to configure
+connections in user-facing code.
+
+#### URI format
+
+```
+ssh://[user[;param=value;...]@]host[:port][/socket-path][?param=value&...]
+```
+
+Parameters can appear in two locations:
+- **Nassh-style** (userinfo): `ssh://deploy;timeout=30@prod`
+- **Query params**: `ssh://deploy@prod?timeout=30`
+- **Mixed**: `ssh://deploy;timeout=30@prod?host-key-policy=tofu`
+
+#### Parse from URI
+
+```rust
+use motlie_tmux::SshConfig;
+
+// Basic
+let cfg = SshConfig::parse("ssh://deploy@prod-server")?;
+
+// With port and parameters
+let cfg = SshConfig::parse("ssh://deploy@prod:2222?host-key-policy=tofu&timeout=30")?;
+
+// Nassh-style parameters in userinfo
+let cfg = SshConfig::parse("ssh://deploy;host-key-policy=tofu;timeout=30@prod")?;
+
+// Localhost (no user required)
+let cfg = SshConfig::parse("ssh://localhost")?;
+
+// IPv6
+let cfg = SshConfig::parse("ssh://deploy@[::1]:2222")?;
+
+// With tmux socket
+let cfg = SshConfig::parse("ssh://deploy@host/tmp/tmux-custom.sock")?;   // socket path
+let cfg = SshConfig::parse("ssh://deploy;socket-name=myserver@host")?;    // socket name
+
+// FromStr also works
+let cfg: SshConfig = "ssh://deploy@prod:2222".parse()?;
+```
+
+#### Available parameters
+
+| Parameter | Values | Default | Description |
+|-----------|--------|---------|-------------|
+| `host-key-policy` | `verify`, `tofu`, `insecure` | `verify` | SSH host key verification policy |
+| `timeout` | integer seconds (> 0) | `10` | Per-command execution timeout |
+| `keepalive` | integer seconds (0 = off) | `30` | SSH keepalive interval |
+| `socket-name` | string | none | Tmux socket name (`tmux -L`) |
+
+Socket path is specified as the URI path component (`/path/to/socket`), not as a
+parameter. Socket path and `socket-name` are mutually exclusive.
+
+#### Validation rules
+
+- `user`, `host`, `port` are canonical URI components — they cannot appear as parameters
+- Duplicate parameter keys are rejected (within the same location or across locations)
+- Unknown parameter names are rejected (fail-fast)
+- `timeout` must be > 0
+
+```rust
+// These all return Err:
+SshConfig::parse("ssh://user@host?port=22");           // canonical component
+SshConfig::parse("ssh://user;timeout=10@host?timeout=20"); // cross-location duplicate
+SshConfig::parse("ssh://user@host?unknown=value");     // unknown parameter
+```
+
+#### Render to URI
+
+```rust
+use motlie_tmux::SshConfig;
+
+let cfg = SshConfig::new("prod", "deploy")
+    .with_port(2222)
+    .with_host_key_policy(motlie_tmux::HostKeyPolicy::TrustFirstUse);
+
+// Display and to_uri_string() produce canonical form
+assert_eq!(cfg.to_string(), "ssh://deploy;host-key-policy=tofu@prod:2222");
+
+// Round-trip guarantee: parse(cfg.to_string()) == cfg
+let reparsed: SshConfig = cfg.to_string().parse()?;
+assert_eq!(cfg, reparsed);
+```
+
+When user is non-empty, non-default parameters render as nassh-style userinfo params.
+When user is empty (e.g. localhost), parameters render as query params.
+
+#### Connect from URI
+
+```rust
+use motlie_tmux::SshConfig;
+
+// Localhost — automatically uses LocalTransport (no SSH)
+let host = SshConfig::parse("ssh://localhost")?.connect().await?;
+let sessions = host.list_sessions().await?;
+
+// Remote — requires user, uses SshTransport
+let host = SshConfig::parse("ssh://deploy@prod-server")?.connect().await?;
+
+// With timeout and policy
+let host = SshConfig::parse("ssh://deploy;host-key-policy=tofu@prod?timeout=30")?
+    .connect()
+    .await?;
+```
+
+Transport selection is automatic:
+- `localhost`, `127.0.0.1`, `::1` → `LocalTransport` (no SSH handshake)
+- All other hosts → `SshTransport` via SSH (user required)
+
+The `connect()` method consumes `self`. Socket configuration is propagated to
+the `HostHandle` for tmux commands (`-L` or `-S` flags).
 
 ---
 
@@ -984,7 +1103,7 @@ assert!(issues.is_empty());
 | `TransportKind` | Enum: Local, Ssh, Mock — static dispatch |
 | `LocalTransport` | Subprocess exec, configurable timeout |
 | `SshTransport` | russh 0.46, ssh-agent auth; `connect()`, `is_closed()` |
-| `SshConfig` | host, port, user, host_key_policy, timeout, keepalive_interval |
+| `SshConfig` | host, port, user, host_key_policy, timeout, keepalive_interval, socket; `parse()`, `to_uri_string()`, `connect()`, `Display`/`FromStr` |
 | `MockTransport` | Canned responses; `with_response()`, `with_default()` |
 | `HostKeyPolicy` | Enum: Verify (default), TrustFirstUse, Insecure |
 | `TmuxSocket` | Enum: Name(String), Path(String) |
