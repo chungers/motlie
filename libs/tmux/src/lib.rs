@@ -5,6 +5,7 @@ pub mod discovery;
 pub mod capture;
 pub mod control;
 pub mod host;
+mod uri;
 
 pub use types::*;
 pub use keys::{KeySequence, SpecialKey};
