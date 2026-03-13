@@ -9,6 +9,9 @@ Communication and decisions are made mostly through PR (inline and issue comment
 comments in artficats such as code or markdown comments. Comments must have datetime and self-identifier.
 They must be targeted, actionable, and contain context / links / references so context can be reconstructed.
 
+In general, create a local working branch to track your work.  NEVER stage any commits on files like CLAUDE.md
+or anything unrelated to your current work.
+
 ## Design and Planning Stages
 
 ### DESIGN (docs/DESIGN.md)
@@ -74,15 +77,29 @@ in PLAN.md, update it with the check if there's a checkbox, or insert an inline 
 
 Commit is ready only after: all tests pass, examples/, bins/, benchmarks/ all build, docs updated.
 
-Never commit and push without explicit approval.
+Commit your changes locally as you progress.  NEVER push without explicit approval.  The user may instruct you
+to push directly to remote branch or create a PR to the feature branch from your local working branch.
 
 ## Behavior Verification Stage (docs/API.md)
+
+Output of the Behavior Verification Stage include an API.md in docs/ and/or binaries (mains) in examples/ directory.
 
 An API is a doc that shows the user experience through code snippets of the actual api implemented.
 API must be an accurate reflection of what it is in the codebase.
 API represents reality / outcome, while code snippets in DESIGN represents desires / aspirations.
 API often becomes input to DESIGN refinements: the code examples in DESIGN may be changed / improved to reflect
 desired outcome based on feedback in API.  PLAN will then be updated to reflect the changes in DESIGN.
+
+Examples (in examples/ directory or examples/{module_name}) are binaries that illustrate how to use the library
+or components under development.  They are small programs that illustrate a simple use case. An example program
+can be based on the code snippet example in the API as a way to verify behavior under real-world conditions.
+
+ALWAYS ask the user what to write.  Propose use cases (from API) that could be realized as example programs.
+Create the necessary build scaffolding in the examples/ directory to make building these programs into binaries.
+
+If example programs are created, be sure to reference them in API.  ALL examples must be referenced and described
+in API.  Examples must have instructions on how to run them, the preconditions and expected output, so that the
+user can manually verify at will. Instructions can be documented in the README.md in the examples/ directory.
 
 ## Working with Reviews & Feedback (Design, Docs, and Code) 
 
@@ -112,9 +129,13 @@ Include verdict (accept | ok to merge | needs work) in issue comment.
 
 If any specific inline concerns are addressed to your satisfaction, resolve them via gh api.
 
-Always identify yourself (e.g. '@codex' | '@claude') when commenting, add datetime.
+ALWAYS identify yourself (e.g. '@codex' | '@claude') when commenting, add datetime and ' -- '.
 
-At the end of a round, summarize what you did and get user approval before you post / commit / push.
+Be sure your work is tracked in a local working branch.  Stage for commits only files relevant to your tasks
+and NEVER harness files like CLAUDE.md, AGENTS.md, SKILL.md -- they are managed separately.  You can and should
+commit local changes as you go.  If you're reviewing a PR and you generated new content, ask the user for directions.
+
+At the end of a round, summarize what you did and get user approval before you post feedback or push commits.
 
 ### Addressing Feedback
 
@@ -129,9 +150,13 @@ one can reason about the correctness of your fix and can make informed decision 
 
 Comment inline, and use issue comment to summarize your work in this round.
 
-Never unilaterally resolve comments using gh api. Leave the comments for the reviewer to close / resolve.
+NEVER unilaterally resolve comments using gh api. ALWAYS leave the comments for the reviewer to close / resolve.
 
-Always identify yourself (e.g. '@codex' | '@claude') when commenting, add datetime.
+ALWAYS identify yourself (e.g. '@codex' | '@claude') when commenting, add datetime and ' -- '.
 
-At the end of a round, summarize what you did and get user approval before you post / commit / push.
+Be sure your work is tracked in a local working branch.  Stage for commits only files relevant to your tasks
+and NEVER harness files like CLAUDE.md, AGENTS.md, SKILL.md -- they are managed separately.  You can and should
+commit local changes as you go.  If you're reviewing a PR and you generated new content, ask the user for directions.
+
+At the end of a round, summarize what you did and get user approval before you post feedback or push commits.
 
