@@ -280,19 +280,20 @@ impl SshConfig {
     /// Set the tmux socket for this config.
     ///
     /// `TmuxSocket::Name` values are restricted to `[A-Za-z0-9._-]+` for
-    /// URI round-trip safety and tmux compatibility. Panics on invalid names.
-    /// `TmuxSocket::Path` values are not restricted (filesystem paths).
-    pub fn with_socket(mut self, socket: TmuxSocket) -> Self {
+    /// URI round-trip safety and tmux compatibility. Returns `Err` on
+    /// invalid names. `TmuxSocket::Path` values are not restricted
+    /// (filesystem paths).
+    pub fn with_socket(mut self, socket: TmuxSocket) -> anyhow::Result<Self> {
         if let TmuxSocket::Name(ref name) = socket {
-            assert!(
-                is_valid_socket_name(name),
-                "invalid socket name '{}': must match [A-Za-z0-9._-]+ (non-empty, \
-                 alphanumeric, dots, underscores, hyphens only)",
-                name
-            );
+            if !is_valid_socket_name(name) {
+                return Err(anyhow::anyhow!(
+                    "invalid socket name '{}': must match [A-Za-z0-9._-]+",
+                    name
+                ));
+            }
         }
         self.socket = Some(socket);
-        self
+        Ok(self)
     }
 
     // --- Accessors ---
@@ -968,7 +969,8 @@ mod tests {
             .with_host_key_policy(HostKeyPolicy::Insecure)
             .with_timeout(std::time::Duration::from_secs(30))
             .with_keepalive(None)
-            .with_socket(TmuxSocket::Name("test".into()));
+            .with_socket(TmuxSocket::Name("test".into()))
+            .unwrap();
         assert_eq!(cfg.port(), 2222);
         assert_eq!(*cfg.host_key_policy(), HostKeyPolicy::Insecure);
         assert_eq!(cfg.timeout(), std::time::Duration::from_secs(30));
