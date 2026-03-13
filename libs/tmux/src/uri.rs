@@ -19,12 +19,24 @@ const CANONICAL_COMPONENTS: &[&str] = &["user", "host", "port"];
 /// Known parameter names.
 const KNOWN_PARAMS: &[&str] = &["host-key-policy", "timeout", "keepalive", "socket-name"];
 
+/// Characters that are unsafe in URI user/host/parameter values because they
+/// collide with URI or nassh syntax delimiters. `to_uri_string()` validates
+/// against this set rather than percent-encoding, keeping the implementation
+/// simple and the output human-readable.
+const URI_RESERVED_CHARS: &[char] = &[';', '@', '?', '&', '=', '#', '[', ']'];
+
 impl SshConfig {
     /// Parse from an `ssh://` URI string.
     ///
     /// Accepts nassh-style params (`;` in userinfo), query params (`?`),
     /// or both. Rejects unknown params and canonical-component duplication.
     /// For localhost URIs, `user` defaults to empty (ignored by LocalTransport).
+    ///
+    /// Round-trip guarantee: `parse(cfg.to_uri_string()) == cfg` holds for
+    /// configs with URI-safe user/host values (no `;@?&=#[]` characters).
+    /// Builder-constructed configs with reserved characters in user or host
+    /// will panic in `to_uri_string()` — use DNS-safe hostnames and POSIX
+    /// usernames.
     pub fn parse(uri: &str) -> Result<Self> {
         let remainder = uri
             .strip_prefix("ssh://")
@@ -171,7 +183,21 @@ impl SshConfig {
     /// If user is non-empty, non-default parameters are placed as nassh-style
     /// userinfo params. If user is empty, non-default parameters are placed
     /// as query params. Socket paths render as the URI path component.
+    ///
+    /// # Panics
+    ///
+    /// Panics if user or host contain URI-reserved characters (`;@?&=#[]`).
+    /// Configs built from `parse()` are always safe. Configs built via the
+    /// builder should use only DNS-safe hostnames and POSIX usernames.
     pub fn to_uri_string(&self) -> String {
+        // Validate that user/host don't contain URI-reserved chars.
+        // parse() already rejects these implicitly (they'd break syntax),
+        // but builder-constructed configs could sneak them in.
+        validate_uri_safe(self.user(), "user")
+            .expect("SshConfig user contains URI-reserved characters");
+        validate_uri_safe(self.host(), "host")
+            .expect("SshConfig host contains URI-reserved characters");
+
         let mut result = String::from("ssh://");
 
         // Collect non-default params
@@ -301,8 +327,31 @@ impl FromStr for SshConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Internal parsing helpers
+// Internal helpers
 // ---------------------------------------------------------------------------
+
+/// Validate a parsed port is in the valid range 1-65535.
+fn validate_port(port: u16) -> Result<u16> {
+    if port == 0 {
+        return Err(anyhow!("invalid port '0' (expected integer 1-65535)"));
+    }
+    Ok(port)
+}
+
+/// Check that a string contains no URI-reserved characters.
+fn validate_uri_safe(value: &str, context: &str) -> Result<()> {
+    for ch in URI_RESERVED_CHARS {
+        if value.contains(*ch) {
+            return Err(anyhow!(
+                "{} contains URI-reserved character '{}' \
+                 (disallowed: ; @ ? & = # [ ])",
+                context,
+                ch
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// Parse userinfo: `user[;param=value;...]`
 fn parse_userinfo(userinfo: Option<&str>) -> Result<(String, Vec<(String, String)>)> {
@@ -371,7 +420,7 @@ fn parse_authority_and_path(s: &str) -> Result<(String, u16, Option<String>)> {
                 let port: u16 = port_str.parse().map_err(|_| {
                     anyhow!("invalid port '{}' (expected integer 1-65535)", port_str)
                 })?;
-                (authority[..pos].to_string(), port)
+                (authority[..pos].to_string(), validate_port(port)?)
             }
             None => (authority.to_string(), 22),
         };
@@ -403,6 +452,7 @@ fn parse_port_and_path(remainder: &str) -> Result<(u16, Option<String>)> {
                         &rest[..pos]
                     )
                 })?;
+                let port = validate_port(port)?;
                 let path = &rest[pos + 1..];
                 let socket_path = if path.is_empty() {
                     None
@@ -415,7 +465,7 @@ fn parse_port_and_path(remainder: &str) -> Result<(u16, Option<String>)> {
                 let port: u16 = rest.parse().map_err(|_| {
                     anyhow!("invalid port '{}' (expected integer 1-65535)", rest)
                 })?;
-                Ok((port, None))
+                Ok((validate_port(port)?, None))
             }
         }
     } else if let Some(rest) = remainder.strip_prefix('/') {
@@ -704,6 +754,18 @@ mod tests {
         assert!(err.to_string().contains("bracket"));
     }
 
+    #[test]
+    fn parse_port_zero() {
+        let err = SshConfig::parse("ssh://user@host:0").unwrap_err();
+        assert!(err.to_string().contains("invalid port"));
+    }
+
+    #[test]
+    fn parse_port_zero_ipv6() {
+        let err = SshConfig::parse("ssh://user@[::1]:0").unwrap_err();
+        assert!(err.to_string().contains("invalid port"));
+    }
+
     // === 1.11k — to_uri_string() and round-trip tests ===
 
     #[test]
@@ -834,6 +896,20 @@ mod tests {
         let cfg: SshConfig = "ssh://deploy@prod:2222".parse().unwrap();
         assert_eq!(cfg.host(), "prod");
         assert_eq!(cfg.port(), 2222);
+    }
+
+    #[test]
+    #[should_panic(expected = "URI-reserved")]
+    fn to_uri_string_reserved_in_user() {
+        let cfg = SshConfig::new("host", "user;semi");
+        let _ = cfg.to_uri_string();
+    }
+
+    #[test]
+    #[should_panic(expected = "URI-reserved")]
+    fn to_uri_string_reserved_in_host() {
+        let cfg = SshConfig::new("host@evil", "user");
+        let _ = cfg.to_uri_string();
     }
 
     // === 1.11l — connect() localhost selection tests ===

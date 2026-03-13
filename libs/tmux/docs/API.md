@@ -303,12 +303,17 @@ let cfg = SshConfig::new("prod", "deploy")
 assert_eq!(cfg.to_string(), "ssh://deploy;host-key-policy=tofu@prod:2222");
 
 // Round-trip guarantee: parse(cfg.to_string()) == cfg
+// (holds for URI-safe user/host — no ;@?&=#[] characters)
 let reparsed: SshConfig = cfg.to_string().parse()?;
 assert_eq!(cfg, reparsed);
 ```
 
 When user is non-empty, non-default parameters render as nassh-style userinfo params.
 When user is empty (e.g. localhost), parameters render as query params.
+
+`to_uri_string()` panics if user or host contain URI-reserved characters
+(`;@?&=#[]`). Configs from `parse()` are always safe. Builder-constructed
+configs should use DNS-safe hostnames and POSIX usernames.
 
 #### Connect from URI
 
