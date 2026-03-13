@@ -173,7 +173,7 @@ impl SshConfig {
                         ));
                     }
                     has_socket_name = true;
-                    config = config.with_socket(TmuxSocket::Name(value.to_string()));
+                    config = config.with_socket(TmuxSocket::Name(value.to_string()))?;
                 }
                 _ => unreachable!(),
             }
@@ -186,7 +186,7 @@ impl SshConfig {
                     "socket-path and socket-name are mutually exclusive"
                 ));
             }
-            config = config.with_socket(TmuxSocket::Path(path));
+            config = config.with_socket(TmuxSocket::Path(path))?;
         }
 
         Ok(config)
@@ -812,7 +812,8 @@ mod tests {
     #[test]
     fn to_uri_string_socket_name() {
         let cfg = SshConfig::new("host", "user")
-            .with_socket(TmuxSocket::Name("myserver".into()));
+            .with_socket(TmuxSocket::Name("myserver".into()))
+            .unwrap();
         assert_eq!(
             cfg.to_uri_string(),
             "ssh://user;socket-name=myserver@host"
@@ -822,7 +823,8 @@ mod tests {
     #[test]
     fn to_uri_string_socket_path() {
         let cfg = SshConfig::new("host", "user")
-            .with_socket(TmuxSocket::Path("/tmp/tmux.sock".into()));
+            .with_socket(TmuxSocket::Path("/tmp/tmux.sock".into()))
+            .unwrap();
         assert_eq!(cfg.to_uri_string(), "ssh://user@host/tmp/tmux.sock");
     }
 
@@ -861,7 +863,8 @@ mod tests {
             .with_host_key_policy(HostKeyPolicy::TrustFirstUse)
             .with_timeout(Duration::from_secs(30))
             .with_keepalive(None)
-            .with_socket(TmuxSocket::Name("myserver".into()));
+            .with_socket(TmuxSocket::Name("myserver".into()))
+            .unwrap();
         let reparsed = SshConfig::parse(&cfg.to_string()).unwrap();
         assert_eq!(cfg, reparsed);
     }
@@ -869,7 +872,8 @@ mod tests {
     #[test]
     fn roundtrip_socket_path() {
         let cfg = SshConfig::new("host", "user")
-            .with_socket(TmuxSocket::Path("/tmp/tmux.sock".into()));
+            .with_socket(TmuxSocket::Path("/tmp/tmux.sock".into()))
+            .unwrap();
         let reparsed = SshConfig::parse(&cfg.to_string()).unwrap();
         assert_eq!(cfg, reparsed);
     }
@@ -961,16 +965,18 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "invalid socket name")]
     fn builder_invalid_socket_name() {
-        SshConfig::new("host", "user")
+        let result = SshConfig::new("host", "user")
             .with_socket(TmuxSocket::Name("bad;name".into()));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid socket name"));
     }
 
     #[test]
     fn builder_valid_socket_name() {
         let cfg = SshConfig::new("host", "user")
-            .with_socket(TmuxSocket::Name("good-name_v2.0".into()));
+            .with_socket(TmuxSocket::Name("good-name_v2.0".into()))
+            .unwrap();
         assert_eq!(
             cfg.socket(),
             Some(&TmuxSocket::Name("good-name_v2.0".into()))
