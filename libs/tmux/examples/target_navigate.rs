@@ -6,7 +6,8 @@
 //! Usage:
 //!   cargo run -p motlie-tmux --example target_navigate -- ssh://localhost <session_name>
 //!
-//! If no session name is given, creates a temporary session with two windows.
+//! If no session name is given, creates a temporary session with two windows
+//! (using `exec()` to run `tmux new-window`).
 
 use motlie_tmux::{SshConfig, TargetLevel};
 
@@ -34,10 +35,19 @@ async fn main() -> anyhow::Result<()> {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
         let t = host.create_session(name, Some("win0"), None).await?;
-        // Create a second window by sending tmux new-window command
-        // (the library doesn't have a direct create_window API at session level,
-        //  so we use exec on the transport indirectly via send_text)
-        println!("Created temporary session '{}' for demo.", name);
+        // Create a second window via exec() on the session's pane
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        t.exec(
+            &format!("tmux new-window -t {} -n win1", name),
+            std::time::Duration::from_secs(5),
+        )
+        .await?;
+        // Re-query to pick up updated window count
+        let t = host
+            .session(name)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("session disappeared"))?;
+        println!("Created temporary session '{}' with 2 windows for demo.", name);
         (t, true)
     };
 
