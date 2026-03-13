@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-13 | @claude | Phase 1.11 — address PR #71 R4: scope `transport_kind()` to `pub(crate)` in 1.11l, add within-location duplicate rejection to 1.11d/1.11j, split 1.11m (localhost-only integration) from new 1.11o (SSH integration with env requirements). |
 | 2026-03-13 | @claude | Phase 1.11 — address PR #71 R3: scope 1.11l unit tests to localhost + error paths only, SSH transport verification in 1.11m integration. |
 | 2026-03-12 | @claude | Phase 1.11 — address PR #71 R2: fix `connect(self)` in 1.11g, add socket mutual-exclusion to 1.11j test cases, fix fleet example. R1: 1.11l inspection seam. |
 | 2026-03-12 | @claude | Phase 1.11 R2: address feedback — consolidate `SshUri` into `SshConfig` (no new type), support both nassh `;` and query `?` param syntax, no canonical-component duplication. 14 tasks (1.11a–n). |
@@ -374,7 +375,9 @@ See DESIGN.md DC21 for full specification.
 
 - [ ] **1.11d** — Canonical-component duplication rejection: `user`, `host`, `port`
   parsed exclusively from their URI positions. Reject these as `;` or `?` parameter
-  names. Reject duplicate keys across userinfo and query string.
+  names. Reject duplicate keys across userinfo and query string. Reject repeated
+  keys within a single location (e.g. `;timeout=10;timeout=20`).
+  <!-- @claude 2026-03-13: within-location duplicates added per PR #71 R4. -->
 
 - [ ] **1.11e** — Parameter parsing and validation: `host-key-policy` → `HostKeyPolicy`,
   `timeout` → seconds → `Duration`, `keepalive` → seconds (0=off) → `Option<Duration>`,
@@ -404,23 +407,40 @@ See DESIGN.md DC21 for full specification.
 - [ ] **1.11j** — Unit tests for `parse()`: valid URIs with nassh params, query params,
   mixed params, socket-path. Invalid URIs: bad scheme, unknown params, malformed
   userinfo, missing host, canonical-component duplication (`?port=22`), duplicate
-  keys across locations, `/socket-path` + `socket-name` mutual exclusion.
-  Edge cases: IPv6, no user, port-only, empty params.
+  keys across locations, duplicate keys within a single location
+  (`;timeout=10;timeout=20`, `?timeout=10&timeout=20`), `/socket-path` +
+  `socket-name` mutual exclusion. Edge cases: IPv6, no user, port-only, empty params.
+  <!-- @claude 2026-03-13: within-location duplicate tests added per PR #71 R4. -->
 
 - [ ] **1.11k** — Unit tests for `to_uri_string()` and round-trip: builder-constructed
   configs render to valid URIs; parse ∘ to_string is identity for canonical forms.
 
 - [ ] **1.11l** — Unit tests for `connect()` localhost selection via
-  `HostHandle::transport_kind()`: localhost variants (`localhost`, `127.0.0.1`,
-  `::1`) produce `TransportKind::Local`. Verify empty user rejected for SSH
-  hosts (error path — no handshake needed). Config field propagation for
-  localhost (timeout, socket).
+  `HostHandle::transport_kind()` (`pub(crate)` accessor — not public API).
+  Localhost variants (`localhost`, `127.0.0.1`, `::1`) produce
+  `TransportKind::Local`. Verify empty user rejected for SSH hosts (error
+  path — no handshake needed). Config field propagation for localhost
+  (timeout, socket).
   <!-- @claude 2026-03-13: scoped to localhost + error paths per PR #71 R3 —
-       SSH branch requires real handshake, not unit-testable. -->
+       SSH branch requires real handshake, not unit-testable.
+       @claude 2026-03-13: transport_kind() scoped to pub(crate) per PR #71 R4. -->
 
-- [ ] **1.11m** — Integration test: `SshConfig::parse("ssh://localhost")?.connect()`
-  produces a working `HostHandle` that can `list_sessions()`. SSH transport
-  selection (`TransportKind::Ssh`) verified here when a real server is available.
+- [ ] **1.11m** — Integration test (localhost only):
+  `SshConfig::parse("ssh://localhost")?.connect()` produces a working `HostHandle`
+  that can `list_sessions()`. Verify config field propagation (timeout, socket)
+  through to the connected handle. No network or SSH server required.
+  <!-- @claude 2026-03-13: scoped to localhost per PR #71 R4 — SSH split to 1.11o. -->
+
+#### SSH integration (environment-gated)
+
+- [ ] **1.11o** — Integration test (SSH transport selection): connect to a real SSH
+  host via `SshConfig::parse("ssh://user@host")?.connect()`, verify `list_sessions()`
+  succeeds. Gated by env var `MOTLIE_SSH_TEST_HOST` (format: `user@host[:port]`).
+  Skipped in CI when the var is unset. Prerequisites: reachable SSH server with
+  key-based auth via ssh-agent. Pass criteria: `connect()` returns a `HostHandle`,
+  `list_sessions()` returns `Ok(...)`.
+  <!-- @claude 2026-03-13: split from 1.11m per PR #71 R4 — reviewer flagged SSH
+       path needs explicit environment requirements and pass criteria. -->
 
 #### Documentation
 
@@ -432,6 +452,7 @@ See DESIGN.md DC21 for full specification.
 Tasks 1.11a–b (field changes) can start immediately. Tasks 1.11c–f and 1.11j–k
 (parse/render/tests) can proceed after 1.11a–b since they only depend on types.
 Tasks 1.11g (connect) and 1.11l (connect tests) require SshTransport from 2a.1.
+Task 1.11o (SSH integration) requires a real SSH server and is env-gated.
 
 **Gates**: None — this phase is additive. Can run parallel with other work after
 2a.1 is complete.

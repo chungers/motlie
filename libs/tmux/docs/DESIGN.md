@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-13 | @claude: DC21 R5 — address PR #71 R4: scope `transport_kind()` to `pub(crate)` (not public API), define reject semantics for duplicate params within same location. | DC21 |
 | 2026-03-13 | @claude: DC21 R4 — address PR #71 R3: wrap raw transports in `TransportKind::Local/Ssh` in pseudocode (match `HostHandle::new` constructor). | DC21 |
 | 2026-03-12 | @claude: DC21 R3 — address PR #71 R2: fix `connect(self)` in API signature block, add `/socket-path` vs `socket-name` mutual-exclusion rule, fix fleet example to use URI string instead of undeclared `HostHandle` `Display`. R1 fixes: `connect()` ownership (`&self`→`self`), `HostHandle::transport_kind()` inspection seam. | DC21 |
 | 2026-03-12 | @claude: DC21 R2 — address feedback: consolidate `SshUri` into `SshConfig` (no new type), support both nassh `;` and query `?` param syntax, no canonical-component duplication (port/user/host only from URI structure). `SshConfig` gains `parse()`, `connect()`, `Display`/`FromStr`. URI parsing in `src/uri.rs` as `impl SshConfig` extension. | DC21 |
@@ -2627,11 +2628,18 @@ ssh://root;user=other@10.0.0.5      # ERROR — user is a canonical component
 ```
 
 If the same non-canonical parameter appears in **both** userinfo and query string,
-parsing fails:
+parsing fails. Likewise, repeated keys **within** a single location are rejected —
+each non-canonical parameter name may appear at most once across the entire URI:
 
 ```
-ssh://user;timeout=30@host?timeout=30   # ERROR — duplicate parameter
+ssh://user;timeout=30@host?timeout=30   # ERROR — duplicate parameter (cross-location)
+ssh://user;timeout=10;timeout=20@host   # ERROR — duplicate parameter (within userinfo)
+ssh://user@host?timeout=10&timeout=20   # ERROR — duplicate parameter (within query)
 ```
+
+<!-- @claude 2026-03-13: added per PR #71 R4 — reviewer flagged that within-location
+     duplicate handling was unspecified. Reject at parse time for deterministic
+     behavior and round-trip guarantees. -->
 
 #### Parameters
 
@@ -2859,11 +2867,16 @@ The change extends the existing `SshConfig` rather than adding a new type:
 3. **`src/lib.rs`**: Add `mod uri;` (private — no public types to export, just extends
    `SshConfig` which is already re-exported).
 
-4. **`src/host.rs`**: Add `pub fn transport_kind(&self) -> &TransportKind` accessor
-   to `HostHandle`. Enables unit tests to assert transport selection without relying
-   on behavioral side effects. `HostHandle::local()`, `HostHandle::new()`,
+4. **`src/host.rs`**: Add `pub(crate) fn transport_kind(&self) -> &TransportKind`
+   accessor to `HostHandle`. Scoped to `pub(crate)` — not part of the public API —
+   so the transport split stays internal per DC21's requirement. Enables unit tests
+   within the crate to assert transport selection without relying on behavioral side
+   effects. `HostHandle::local()`, `HostHandle::new()`,
    `HostHandle::local_with_timeout()` remain as crate-internal convenience constructors
    for testing and advanced use cases.
+   <!-- @claude 2026-03-13: scoped to pub(crate) per PR #71 R4 — reviewer correctly
+        flagged that a pub accessor leaks the transport abstraction DC21 says should
+        stay internal. -->
 
 ### DC7: Capture-Pane vs Stream Monitoring
 
