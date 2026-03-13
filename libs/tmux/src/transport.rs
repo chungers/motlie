@@ -277,7 +277,20 @@ impl SshConfig {
         self
     }
 
+    /// Set the tmux socket for this config.
+    ///
+    /// `TmuxSocket::Name` values are restricted to `[A-Za-z0-9._-]+` for
+    /// URI round-trip safety and tmux compatibility. Panics on invalid names.
+    /// `TmuxSocket::Path` values are not restricted (filesystem paths).
     pub fn with_socket(mut self, socket: TmuxSocket) -> Self {
+        if let TmuxSocket::Name(ref name) = socket {
+            assert!(
+                is_valid_socket_name(name),
+                "invalid socket name '{}': must match [A-Za-z0-9._-]+ (non-empty, \
+                 alphanumeric, dots, underscores, hyphens only)",
+                name
+            );
+        }
         self.socket = Some(socket);
         self
     }
@@ -817,6 +830,18 @@ pub fn tmux_prefix(socket: Option<&TmuxSocket>) -> String {
         Some(TmuxSocket::Name(n)) => format!("tmux -L '{}'", shell_escape_arg(n)),
         Some(TmuxSocket::Path(p)) => format!("tmux -S '{}'", shell_escape_arg(p)),
     }
+}
+
+/// Validate a tmux socket name against the allowed character set.
+///
+/// Socket names must be non-empty and contain only `[A-Za-z0-9._-]`.
+/// This restriction ensures URI round-trip safety (no reserved chars)
+/// and tmux compatibility.
+pub fn is_valid_socket_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
 }
 
 /// POSIX shell escape: single-quote wrapping with '\'' for interior quotes.

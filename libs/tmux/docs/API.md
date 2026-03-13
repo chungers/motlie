@@ -271,7 +271,7 @@ let cfg: SshConfig = "ssh://deploy@prod:2222".parse()?;
 | `host-key-policy` | `verify`, `tofu`, `insecure` | `verify` | SSH host key verification policy |
 | `timeout` | integer seconds (> 0) | `10` | Per-command execution timeout |
 | `keepalive` | integer seconds (0 = off) | `30` | SSH keepalive interval |
-| `socket-name` | string | none | Tmux socket name (`tmux -L`) |
+| `socket-name` | `[A-Za-z0-9._-]+` | none | Tmux socket name (`tmux -L`) |
 
 Socket path is specified as the URI path component (`/path/to/socket`), not as a
 parameter. Socket path and `socket-name` are mutually exclusive.

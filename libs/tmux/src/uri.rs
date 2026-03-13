@@ -166,7 +166,12 @@ impl SshConfig {
                     config = config.with_keepalive(interval);
                 }
                 "socket-name" => {
-                    validate_uri_safe(value, "socket-name")?;
+                    if !crate::transport::is_valid_socket_name(value) {
+                        return Err(anyhow!(
+                            "invalid socket-name '{}': must match [A-Za-z0-9._-]+",
+                            value
+                        ));
+                    }
                     has_socket_name = true;
                     config = config.with_socket(TmuxSocket::Name(value.to_string()));
                 }
@@ -936,6 +941,40 @@ mod tests {
         // parses socket-name=my, then "server" as another param without '='
         let msg = err.to_string();
         assert!(msg.contains("key=value") || msg.contains("unknown"));
+    }
+
+    #[test]
+    fn parse_invalid_socket_name_chars() {
+        let err =
+            SshConfig::parse("ssh://user@host?socket-name=my%20server").unwrap_err();
+        assert!(err.to_string().contains("invalid socket-name"));
+    }
+
+    #[test]
+    fn parse_valid_socket_name() {
+        let cfg =
+            SshConfig::parse("ssh://user@host?socket-name=my-server_v2.0").unwrap();
+        assert_eq!(
+            cfg.socket(),
+            Some(&TmuxSocket::Name("my-server_v2.0".to_string()))
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid socket name")]
+    fn builder_invalid_socket_name() {
+        SshConfig::new("host", "user")
+            .with_socket(TmuxSocket::Name("bad;name".into()));
+    }
+
+    #[test]
+    fn builder_valid_socket_name() {
+        let cfg = SshConfig::new("host", "user")
+            .with_socket(TmuxSocket::Name("good-name_v2.0".into()));
+        assert_eq!(
+            cfg.socket(),
+            Some(&TmuxSocket::Name("good-name_v2.0".into()))
+        );
     }
 
     #[test]
