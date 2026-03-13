@@ -5,6 +5,7 @@ via an `ssh://` URI and exercises a specific part of the library.
 
 ## Prerequisites
 
+- **Working directory**: all commands assume you are in the workspace root (`motlie/`)
 - **tmux** installed and on PATH
 - For remote hosts: `ssh-agent` running with keys loaded (`ssh-add`)
 
