@@ -8,6 +8,24 @@ via an `ssh://` URI and exercises a specific part of the library.
 - **tmux** installed and on PATH
 - For remote hosts: `ssh-agent` running with keys loaded (`ssh-add`)
 
+## Building
+
+Build all examples once, then invoke the binaries directly — avoids
+`cargo run` recompilation checks on each invocation.
+
+```sh
+cargo build -p motlie-tmux --examples
+
+# Binaries are at target/debug/examples/<name>
+./target/debug/examples/uri_connect ssh://localhost
+./target/debug/examples/list_sessions ssh://localhost
+./target/debug/examples/session_lifecycle ssh://localhost
+./target/debug/examples/target_navigate ssh://localhost dev
+./target/debug/examples/send_and_capture ssh://localhost
+./target/debug/examples/exec_command ssh://localhost "uname -a"
+./target/debug/examples/target_spec ssh://localhost "dev:0.0"
+```
+
 ## Examples
 
 All examples accept an SSH URI as the first argument. Default: `ssh://localhost`.
