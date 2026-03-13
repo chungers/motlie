@@ -29,14 +29,16 @@ impl SshConfig {
     /// Parse from an `ssh://` URI string.
     ///
     /// Accepts nassh-style params (`;` in userinfo), query params (`?`),
-    /// or both. Rejects unknown params and canonical-component duplication.
+    /// or both. Rejects unknown params, canonical-component duplication,
+    /// and URI-reserved characters (`;@?&=#[]`) in user, host, and
+    /// parameter values.
+    ///
     /// For localhost URIs, `user` defaults to empty (ignored by LocalTransport).
     ///
-    /// Round-trip guarantee: `parse(cfg.to_uri_string()) == cfg` holds for
-    /// configs with URI-safe user/host values (no `;@?&=#[]` characters).
-    /// Builder-constructed configs with reserved characters in user or host
-    /// will panic in `to_uri_string()` — use DNS-safe hostnames and POSIX
-    /// usernames.
+    /// Round-trip guarantee: `parse(cfg.to_uri_string()) == cfg` for all
+    /// configs produced by `parse()`. Builder-constructed configs with
+    /// URI-reserved characters may not round-trip — use DNS-safe hostnames
+    /// and POSIX usernames.
     pub fn parse(uri: &str) -> Result<Self> {
         let remainder = uri
             .strip_prefix("ssh://")
@@ -67,6 +69,12 @@ impl SshConfig {
         if host.is_empty() {
             return Err(anyhow!("URI is missing host"));
         }
+
+        // Validate user and host contain no URI-reserved characters
+        if !user.is_empty() {
+            validate_uri_safe(&user, "user")?;
+        }
+        validate_uri_safe(&host, "host")?;
 
         // Parse query params
         let query_params = parse_query_params(query_string)?;
@@ -158,6 +166,7 @@ impl SshConfig {
                     config = config.with_keepalive(interval);
                 }
                 "socket-name" => {
+                    validate_uri_safe(value, "socket-name")?;
                     has_socket_name = true;
                     config = config.with_socket(TmuxSocket::Name(value.to_string()));
                 }
@@ -184,20 +193,12 @@ impl SshConfig {
     /// userinfo params. If user is empty, non-default parameters are placed
     /// as query params. Socket paths render as the URI path component.
     ///
-    /// # Panics
-    ///
-    /// Panics if user or host contain URI-reserved characters (`;@?&=#[]`).
-    /// Configs built from `parse()` are always safe. Configs built via the
-    /// builder should use only DNS-safe hostnames and POSIX usernames.
+    /// This method never panics. Configs built from `parse()` always produce
+    /// valid, round-trippable URIs. Builder-constructed configs with
+    /// URI-reserved characters in user or host (`;@?&=#[]`) will produce
+    /// URIs that may not re-parse correctly — use DNS-safe hostnames and
+    /// POSIX usernames for round-trip safety.
     pub fn to_uri_string(&self) -> String {
-        // Validate that user/host don't contain URI-reserved chars.
-        // parse() already rejects these implicitly (they'd break syntax),
-        // but builder-constructed configs could sneak them in.
-        validate_uri_safe(self.user(), "user")
-            .expect("SshConfig user contains URI-reserved characters");
-        validate_uri_safe(self.host(), "host")
-            .expect("SshConfig host contains URI-reserved characters");
-
         let mut result = String::from("ssh://");
 
         // Collect non-default params
@@ -899,17 +900,51 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "URI-reserved")]
-    fn to_uri_string_reserved_in_user() {
-        let cfg = SshConfig::new("host", "user;semi");
-        let _ = cfg.to_uri_string();
+    fn parse_reserved_char_in_user() {
+        let err = SshConfig::parse("ssh://user;semi@host").unwrap_err();
+        // "user;semi" splits on ';' — "semi" is parsed as a param without '='
+        assert!(err.to_string().contains("key=value"));
     }
 
     #[test]
-    #[should_panic(expected = "URI-reserved")]
-    fn to_uri_string_reserved_in_host() {
-        let cfg = SshConfig::new("host@evil", "user");
-        let _ = cfg.to_uri_string();
+    fn parse_reserved_char_at_in_user() {
+        // ssh://user@host@evil — rfind('@') splits at last '@':
+        // userinfo="user@host", host="evil". User "user@host" contains '@' → rejected.
+        let err = SshConfig::parse("ssh://user@host@evil").unwrap_err();
+        assert!(err.to_string().contains("URI-reserved"));
+    }
+
+    #[test]
+    fn parse_reserved_hash_in_host() {
+        let err = SshConfig::parse("ssh://user@host#frag").unwrap_err();
+        assert!(err.to_string().contains("URI-reserved"));
+    }
+
+    #[test]
+    fn parse_reserved_semicolon_in_host() {
+        let err = SshConfig::parse("ssh://host;semi").unwrap_err();
+        // No '@' so no userinfo split — entire "host;semi" is the authority
+        // ';' is reserved → rejected
+        assert!(err.to_string().contains("URI-reserved"));
+    }
+
+    #[test]
+    fn parse_reserved_in_socket_name() {
+        let err =
+            SshConfig::parse("ssh://user;socket-name=my;server@host").unwrap_err();
+        // ';' in socket-name value — ';' splits userinfo params so this
+        // parses socket-name=my, then "server" as another param without '='
+        let msg = err.to_string();
+        assert!(msg.contains("key=value") || msg.contains("unknown"));
+    }
+
+    #[test]
+    fn to_uri_string_no_panic_on_reserved() {
+        // Builder-constructed config with reserved chars — to_uri_string()
+        // must not panic (produces best-effort, non-round-trippable URI)
+        let cfg = SshConfig::new("host", "user;semi");
+        let uri = cfg.to_uri_string(); // must not panic
+        assert!(uri.contains("user;semi")); // emitted raw
     }
 
     // === 1.11l — connect() localhost selection tests ===

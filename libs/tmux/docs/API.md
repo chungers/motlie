@@ -311,9 +311,10 @@ assert_eq!(cfg, reparsed);
 When user is non-empty, non-default parameters render as nassh-style userinfo params.
 When user is empty (e.g. localhost), parameters render as query params.
 
-`to_uri_string()` panics if user or host contain URI-reserved characters
-(`;@?&=#[]`). Configs from `parse()` are always safe. Builder-constructed
-configs should use DNS-safe hostnames and POSIX usernames.
+`parse()` rejects URI-reserved characters (`;@?&=#[]`) in user, host, and
+parameter values. Configs from `parse()` always round-trip safely.
+Builder-constructed configs with reserved characters will produce URIs that
+may not re-parse — use DNS-safe hostnames and POSIX usernames.
 
 #### Connect from URI
 
