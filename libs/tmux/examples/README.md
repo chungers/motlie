@@ -93,11 +93,11 @@ Walk the session → window → pane tree, printing metadata at each level.
 # Use an existing session:
 cargo run -p motlie-tmux --example target_navigate -- ssh://localhost dev
 
-# Or let it create a temporary session:
+# Or let it create a temporary session with 2 windows:
 cargo run -p motlie-tmux --example target_navigate -- ssh://localhost
 ```
 
-Expected output (existing session with 2 windows):
+Expected output (temporary session with 2 windows):
 ```
 Session: dev (level=Session)
   id=$0, windows=2, attached=yes
