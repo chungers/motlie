@@ -99,22 +99,23 @@ cargo run -p motlie-tmux --example target_navigate -- ssh://localhost
 
 Expected output (temporary session with 2 windows):
 ```
-Session: dev (level=Session)
-  id=$0, windows=2, attached=yes
+Created temporary session 'motlie_example_nav' with 2 windows for demo.
+Session: motlie_example_nav (level=Session)
+  id=$5, windows=2, attached=false
 
   Windows (2):
-    dev:0 (level=Window)
-      name='editor', index=0, active=true, panes=2
-      Panes (2):
-        dev:0.0 (level=Pane)
-          pane_id=%0, index=0
-        dev:0.1 (level=Pane)
-          pane_id=%1, index=1
-    dev:1 (level=Window)
-      name='shell', index=1, active=false, panes=1
+    motlie_example_nav:0 (level=Window)
+      name='win0', index=0, active=false, panes=1
       Panes (1):
-        dev:1.0 (level=Pane)
-          pane_id=%2, index=0
+        motlie_example_nav:0.0 (level=Pane)
+          pane_id=%10, index=0
+    motlie_example_nav:1 (level=Window)
+      name='win1', index=1, active=true, panes=1
+      Panes (1):
+        motlie_example_nav:1.0 (level=Pane)
+          pane_id=%11, index=0
+
+Cleaning up temporary session...
 ```
 
 ### send_and_capture — Input and capture
