@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-13 | @claude: DC21 R4 — address PR #71 R3: wrap raw transports in `TransportKind::Local/Ssh` in pseudocode (match `HostHandle::new` constructor). | DC21 |
 | 2026-03-12 | @claude: DC21 R3 — address PR #71 R2: fix `connect(self)` in API signature block, add `/socket-path` vs `socket-name` mutual-exclusion rule, fix fleet example to use URI string instead of undeclared `HostHandle` `Display`. R1 fixes: `connect()` ownership (`&self`→`self`), `HostHandle::transport_kind()` inspection seam. | DC21 |
 | 2026-03-12 | @claude: DC21 R2 — address feedback: consolidate `SshUri` into `SshConfig` (no new type), support both nassh `;` and query `?` param syntax, no canonical-component duplication (port/user/host only from URI structure). `SshConfig` gains `parse()`, `connect()`, `Display`/`FromStr`. URI parsing in `src/uri.rs` as `impl SshConfig` extension. | DC21 |
 | 2026-03-12 | @claude: DC21 — Unified SSH URI for Host Addressing. Single `ssh://` URI scheme for all hosts (localhost and remote), transport auto-selection (localhost→Local, else→SSH). | DC21 |
@@ -2823,12 +2824,12 @@ fn is_localhost(&self) -> bool:
 
 async fn connect(self) -> Result<HostHandle>:
     if self.is_localhost():
-        transport = LocalTransport::with_timeout(self.timeout)
+        transport = TransportKind::Local(LocalTransport::with_timeout(self.timeout))
         return HostHandle::new(transport, self.socket)
     if self.user.is_empty():
         return Err("user is required for SSH connections")
     let socket = self.socket.clone()
-    transport = SshTransport::connect(self).await?
+    transport = TransportKind::Ssh(SshTransport::connect(self).await?)
     return HostHandle::new(transport, socket)
 ```
 

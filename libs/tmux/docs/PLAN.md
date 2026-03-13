@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-13 | @claude | Phase 1.11 — address PR #71 R3: scope 1.11l unit tests to localhost + error paths only, SSH transport verification in 1.11m integration. |
 | 2026-03-12 | @claude | Phase 1.11 — address PR #71 R2: fix `connect(self)` in 1.11g, add socket mutual-exclusion to 1.11j test cases, fix fleet example. R1: 1.11l inspection seam. |
 | 2026-03-12 | @claude | Phase 1.11 R2: address feedback — consolidate `SshUri` into `SshConfig` (no new type), support both nassh `;` and query `?` param syntax, no canonical-component duplication. 14 tasks (1.11a–n). |
 | 2026-03-11 | @claude | Phase 1.10 implemented: all 14 tasks (1.10a–n) completed. Code changes: MockTransport with_error + Vec ordering, open_shell PTY params, TransportKind::is_healthy(), TargetSpec::pane() returns Result, HostHandle::local_with_timeout(), Target::rename() returns new Target. Doc comments: TrustFirstUse fail-closed, pane rename asymmetry, active-window drift, capture scope, overlap_deduplicate warn, dual timeouts, history-limit semantics. |
@@ -409,16 +410,17 @@ See DESIGN.md DC21 for full specification.
 - [ ] **1.11k** — Unit tests for `to_uri_string()` and round-trip: builder-constructed
   configs render to valid URIs; parse ∘ to_string is identity for canonical forms.
 
-- [ ] **1.11l** — Unit tests for `connect()` transport selection via
-  `HostHandle::transport_kind()` accessor (added in DC21 implementation plan,
-  point 4): localhost variants (`localhost`, `127.0.0.1`, `::1`) produce
-  `TransportKind::Local`, other hosts produce `TransportKind::Ssh`. Verify
-  config fields propagate correctly. Verify empty user rejected for SSH hosts.
-  <!-- @claude 2026-03-12: rewritten per PR #71 review — original referenced
-       unobservable TransportKind variant; now uses transport_kind() seam. -->
+- [ ] **1.11l** — Unit tests for `connect()` localhost selection via
+  `HostHandle::transport_kind()`: localhost variants (`localhost`, `127.0.0.1`,
+  `::1`) produce `TransportKind::Local`. Verify empty user rejected for SSH
+  hosts (error path — no handshake needed). Config field propagation for
+  localhost (timeout, socket).
+  <!-- @claude 2026-03-13: scoped to localhost + error paths per PR #71 R3 —
+       SSH branch requires real handshake, not unit-testable. -->
 
 - [ ] **1.11m** — Integration test: `SshConfig::parse("ssh://localhost")?.connect()`
-  produces a working `HostHandle` that can `list_sessions()`.
+  produces a working `HostHandle` that can `list_sessions()`. SSH transport
+  selection (`TransportKind::Ssh`) verified here when a real server is available.
 
 #### Documentation
 
