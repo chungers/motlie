@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-14 | @codex | Address PR #78 review: localhost SFTP integration tests run unconditionally (no tmux gate), directory overwrite semantics are explicit merge semantics, and Phase 1.13 is split into smaller incremental tasks. |
 | 2026-03-14 | @codex | Refined Phase 1.13 per user decisions: greenfield/breaking changes accepted, API uses `upload` / `download`, overwrite semantics configurable, directory transfer included now, file-only/v1 phasing removed. |
 | 2026-03-14 | @codex | Added Phase 1.13 — host-level SFTP file transfer. Slots after 1.12 as an additive transport/host feature depending on 1.3, 1.7, and 2a.1. No hard gate for monitoring phases. |
 | 2026-03-14 | @claude | Phase 1.12 — `CreateSessionOptions` for window size and history limit (DC22). 7 tasks (1.12a–g). Migration/backwards compatibility explicitly out of scope per user direction. |
@@ -516,69 +517,81 @@ Add transport/host-level SFTP-backed upload/download to complement transport
 or compatibility layer is required. Scope includes files and directories; `Target`
 is not extended.
 
-### 1.13a — Transfer types and API surface (`src/types.rs`, `src/transport.rs`, `src/host.rs`)
+### 1.13a — Transfer options type (`src/types.rs`)
 
 - [ ] Add public `TransferOptions { overwrite: bool, recursive: bool }` with `Default`
+- [ ] Document in rustdoc that directory overwrite with `overwrite=true` uses merge semantics
+
+### 1.13b — Transport surface (`src/transport.rs`)
+
 - [ ] Add `TransportKind::upload(&self, local_path, remote_path, opts) -> Result<()>`
 - [ ] Add `TransportKind::download(&self, remote_path, local_path, opts) -> Result<()>`
-- [ ] Add `HostHandle::upload(...)` / `HostHandle::download(...)`
 - [ ] Keep failure modes non-panicking; validation and I/O errors return `Err`
 
-### 1.13b — Local transport implementation (`src/transport.rs`)
+### 1.13c — Local transport implementation (`src/transport.rs`)
 
 - [ ] Implement `LocalTransport::upload()` for regular files
 - [ ] Implement `LocalTransport::download()` symmetrically
 - [ ] Implement recursive directory copy when `opts.recursive == true`
 - [ ] Return error for directory sources when `opts.recursive == false`
 - [ ] Return error when destination exists and `opts.overwrite == false`
+- [ ] For directory destinations with `opts.overwrite == true`, merge into the existing
+  tree: overwrite conflicting files, create missing entries, preserve extras
 - [ ] Wrap each top-level transfer in the existing local transport timeout
 
-### 1.13c — Mock transport implementation (`src/transport.rs`)
+### 1.13d — Mock transport implementation (`src/transport.rs`)
 
 - [ ] Add an in-memory filesystem/tree model for `MockTransport`
 - [ ] Support file and directory upload/download semantics
+- [ ] Mirror the same directory merge semantics as the local implementation
 - [ ] Add deterministic transfer error injection for tests
 - [ ] Keep command mocking behavior unchanged for existing `exec()` tests
 
-### 1.13d — SSH SFTP implementation (`src/transport.rs`)
+### 1.13e — SSH SFTP implementation (`src/transport.rs`)
 
 - [ ] Add explicit `russh-sftp` dependency to `Cargo.toml`
 - [ ] Implement `SshTransport::upload()` using SFTP for regular files
 - [ ] Implement `SshTransport::download()` using SFTP for regular files
 - [ ] Implement recursive directory upload/download over SFTP
 - [ ] Enforce `overwrite=false` and `recursive=false` semantics consistently
+- [ ] For directory destinations with `opts.overwrite == true`, mirror the same merge
+  semantics as local/mock implementations
 - [ ] Bound each top-level SFTP transfer by `SshConfig::timeout`
 - [ ] Open a fresh SFTP channel per top-level transfer; no shared client cache initially
 
-### 1.13e — Public exports and call-site wiring (`src/lib.rs`, callers`)
+### 1.13f — HostHandle, public exports, and call-site wiring (`src/host.rs`, `src/lib.rs`, callers`)
 
+- [ ] Add `HostHandle::upload(...)` / `HostHandle::download(...)`
 - [ ] Re-export `TransferOptions` and any new public transfer types from `lib.rs`
 - [ ] Update callers/tests/examples to use `upload(...)` / `download(...)`
 - [ ] Do not add file transfer methods on `Target`
 
-### 1.13f — Unit tests
+### 1.13g — Unit tests
 
 - [ ] `MockTransport` file upload/download round-trip
 - [ ] `MockTransport` directory upload/download round-trip
+- [ ] `MockTransport` directory merge semantics with `overwrite=true`
 - [ ] `overwrite=false` conflict path
 - [ ] `recursive=false` directory rejection path
 - [ ] `TransportKind` dispatch tests for `upload()` / `download()`
 
-### 1.13g — Integration tests
+### 1.13h — Integration tests
 
 - [ ] Localhost file upload/download round-trip with exact byte verification.
-  Reuse the existing localhost integration-test pattern: run when `tmux` is on
-  `PATH`, otherwise skip via the same availability check used today.
+  Run unconditionally; no `tmux` availability gate is relevant for host-level file transfer.
 - [ ] Localhost directory upload/download round-trip for a nested tree
+- [ ] Localhost directory merge behavior with `overwrite=true`
 - [ ] Localhost overwrite=false and recursive=false error paths
 - [ ] SSH file upload/download round-trip using the existing `MOTLIE_SSH_TEST_HOST`
   env gate (no new env var)
 - [ ] SSH directory upload/download round-trip using the existing
   `MOTLIE_SSH_TEST_HOST` env gate
+- [ ] SSH directory merge behavior with `overwrite=true` using the existing
+  `MOTLIE_SSH_TEST_HOST` env gate
 - [ ] SSH overwrite=false and recursive=false error paths using the existing
   `MOTLIE_SSH_TEST_HOST` env gate
 
-### 1.13h — Documentation and behavior verification
+### 1.13i — Documentation and behavior verification
 
 - [ ] Update `docs/API.md` with host-level upload/download examples and boundary notes:
   transport `exec()` vs host upload/download vs pane `Target::exec()`

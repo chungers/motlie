@@ -6,6 +6,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-14 | @codex | Address PR #78 review: localhost SFTP integration tests run unconditionally (no tmux gate), directory overwrite semantics are explicit merge semantics, and implementation planning is split into smaller incremental tasks in `PLAN.md`. |
 | 2026-03-14 | @codex | Refined design per user decisions: greenfield/breaking changes accepted, API renamed to `upload` / `download`, overwrite semantics made configurable, directory support included now, and v1/file-only phasing removed. |
 | 2026-03-14 | @codex | Initial SFTP design note: add transport/host-level file transfer to complement transport `exec()`, use SFTP under the existing `russh` connection, and keep tmux pane `Target::exec()` separate. |
 
@@ -139,6 +140,14 @@ impl TransportKind {
 - The destination root may be created as part of the transfer, but missing parent
   directories above that root should still return `Err`.
 - If `opts.overwrite == false` and the destination exists, return `Err`.
+- If the source is a directory and the destination already exists as a directory,
+  `opts.overwrite == true` means **merge**, not replace:
+  - create missing entries from the source tree
+  - overwrite conflicting file contents from the source tree
+  - preserve destination-only extra entries that are not present in the source tree
+- Type-mismatch conflicts remain errors. For example, a directory source targeting an
+  existing file path returns `Err` rather than deleting the file and replacing it with
+  a directory tree.
 
 ## Proposed Internal Changes
 
@@ -212,6 +221,7 @@ Keep failure modes non-panicking:
 - missing source -> `Err(...)`
 - destination exists with `overwrite=false` -> `Err(...)`
 - directory source with `recursive=false` -> `Err(...)`
+- directory/file type mismatch at destination -> `Err(...)`
 - permission denied -> `Err(...)`
 - SSH/SFTP subsystem failure -> `Err(...)`
 - timeout -> `Err(...)`
@@ -224,6 +234,7 @@ Do not use `assert!` / `expect()` as guards for public transfer inputs.
 - File and directory transfers are both supported
 - Recursive directory transfer requires `opts.recursive=true`
 - Overwrite behavior is controlled by `opts.overwrite`
+- Directory overwrite with `opts.overwrite=true` uses merge semantics, not replace semantics
 - Timeout semantics match existing transports:
   - `LocalTransport::timeout` bounds each top-level transfer
   - `SshConfig::timeout` bounds each top-level SFTP transfer
@@ -257,12 +268,13 @@ This keeps transfer support orthogonal to:
 
 ### Local Integration Tests
 
-These should follow the existing localhost integration-test policy in
-`libs/tmux/tests/integration.rs`: run normally when `tmux` is available on `PATH`,
-otherwise skip with the same availability check used by the current localhost tests.
+These should run as normal integration tests with no `tmux` availability check and no
+environment-variable gate. Host-level SFTP transfer only depends on filesystem access
+to temp directories; it does not depend on tmux being installed.
 
 - file upload/download round-trip to temp paths
 - directory upload/download round-trip for a nested tree
+- directory merge behavior with `overwrite=true` against an existing destination tree
 - overwrite=false conflict path
 - recursive=false directory rejection
 - missing-path and permission-denied error paths
@@ -275,6 +287,7 @@ and skip when it is not set. Do not introduce a new env gate.
 
 - upload a file to a temp remote path, then download it back
 - upload a directory tree recursively, then download it back
+- verify directory merge behavior with `overwrite=true`
 - verify overwrite=false and recursive=false behavior
 
 These tests should require the same SSH prerequisites already documented for
