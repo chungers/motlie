@@ -34,7 +34,11 @@ async fn main() -> anyhow::Result<()> {
             let _ = t.kill().await;
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
-        let t = host.create_session(name, Some("win0"), None).await?;
+        let opts = motlie_tmux::CreateSessionOptions {
+            window_name: Some("win0".to_string()),
+            ..Default::default()
+        };
+        let t = host.create_session(name, &opts).await?;
         // Create a second window via exec() on the session's pane
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         t.exec(

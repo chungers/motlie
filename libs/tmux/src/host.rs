@@ -127,19 +127,20 @@ impl HostHandle {
         .await
     }
 
-    /// Create a new tmux session. Returns a Target at session level.
+    /// Create a new tmux session. Returns a Target at session level (DC22).
+    ///
+    /// Use `CreateSessionOptions` to set window size, history limit, etc.
+    /// `CreateSessionOptions::default()` preserves pre-DC22 behavior.
     pub async fn create_session(
         &self,
         name: &str,
-        window_name: Option<&str>,
-        command: Option<&str>,
+        opts: &CreateSessionOptions,
     ) -> Result<Target> {
         control::create_session(
             &self.inner.transport,
             self.inner.socket.as_ref(),
             name,
-            window_name,
-            command,
+            opts,
         )
         .await?;
 
@@ -1032,7 +1033,7 @@ mod tests {
             .with_default("")
             .with_response("list-sessions", "test\t$0\t1700000000\t0\t1\t\n");
         let host = mock_host(mock);
-        let target = host.create_session("test", None, None).await.unwrap();
+        let target = host.create_session("test", &Default::default()).await.unwrap();
         assert_eq!(target.level(), TargetLevel::Session);
         assert_eq!(target.target_string(), "test");
         assert_eq!(target.session_name(), "test");

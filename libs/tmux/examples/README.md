@@ -193,7 +193,7 @@ cargo run -p motlie-tmux --example repl -- ssh://localhost
 
 | Command | Description | API Used |
 |---------|-------------|----------|
-| `create <name>` | Create a new tmux session | `host.create_session()` |
+| `create <name> [--size WxH] [--history N]` | Create a session with optional size and history | `host.create_session()`, `CreateSessionOptions` |
 | `kill <target>` | Kill a session, window, or pane | `target.kill()` |
 | `targets` | List all sessions with target spec strings | `host.list_sessions()`, `target.children()` |
 | `send <target> <text...>` | Send text + Enter to a target | `target.send_text()`, `target.send_keys()` |
@@ -202,7 +202,9 @@ cargo run -p motlie-tmux --example repl -- ssh://localhost
 
 `create` only creates sessions — the library API (`host.create_session()`) operates
 at session level. Windows and panes are assumed to be created out-of-band (e.g. via
-`tmux new-window`, `tmux split-window`, or scripted setup).
+`tmux new-window`, `tmux split-window`, or scripted setup). Optional flags:
+- `--size WxH` — set initial window dimensions (e.g. `--size 200x50`)
+- `--history N` — set scrollback history limit (e.g. `--history 50000`)
 
 All other commands accept a target string at any granularity: `session`,
 `session:window`, or `session:window.pane`. The target resolves to the
@@ -228,6 +230,8 @@ repl> targets
       dev:2.0          (Pane, %3)
 repl> create test_session
 Created: test_session
+repl> create automation --size 200x50 --history 50000
+Created: automation (200x50) history=50000
 repl> send test_session echo hello from repl
 Sent to test_session
 repl> capture test_session 5

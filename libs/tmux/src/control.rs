@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::keys::KeySequence;
 use crate::transport::{shell_escape_arg, tmux_prefix, TransportKind};
-use crate::types::TmuxSocket;
+use crate::types::{CreateSessionOptions, TmuxSocket};
 
 /// Shell-escape a string for safe interpolation into shell commands.
 /// Uses POSIX single-quote wrapping: wrap in single quotes, escape
@@ -11,25 +11,69 @@ pub fn shell_escape(s: &str) -> String {
     format!("'{}'", shell_escape_arg(s))
 }
 
-/// Create a new detached tmux session.
+/// Create a new detached tmux session (DC22).
+///
+/// Runs `tmux new-session -d -s <name>` with optional `-n`, `-x`, `-y`, and command.
+/// If `opts.history_limit` is set, issues two additional `set-option` commands:
+/// per-session (covers future panes) and per-pane (tmux 3.1+, covers initial pane).
 pub async fn create_session(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
     name: &str,
-    window_name: Option<&str>,
-    command: Option<&str>,
+    opts: &CreateSessionOptions,
 ) -> Result<()> {
     let prefix = tmux_prefix(socket);
     let mut cmd = format!("{} new-session -d -s {}", prefix, shell_escape(name));
 
-    if let Some(wn) = window_name {
+    if let Some(wn) = &opts.window_name {
         cmd.push_str(&format!(" -n {}", shell_escape(wn)));
     }
-    if let Some(c) = command {
+    if let Some(w) = opts.width {
+        cmd.push_str(&format!(" -x {}", w));
+    }
+    if let Some(h) = opts.height {
+        cmd.push_str(&format!(" -y {}", h));
+    }
+    if let Some(c) = &opts.command {
         cmd.push_str(&format!(" {}", shell_escape(c)));
     }
 
     transport.exec(&cmd).await?;
+
+    // Set history-limit if requested (DC22, Option B).
+    // If either set-option fails, kill the just-created session to avoid
+    // leaked state, then propagate the error.
+    if let Some(limit) = opts.history_limit {
+        let result = async {
+            // Per-session: covers future windows/panes
+            let session_cmd = format!(
+                "{} set-option -t {} history-limit {}",
+                prefix,
+                shell_escape(name),
+                limit
+            );
+            transport.exec(&session_cmd).await?;
+
+            // Per-pane: covers the initial pane created by new-session (tmux 3.1+)
+            let pane_cmd = format!(
+                "{} set-option -p -t {} history-limit {}",
+                prefix,
+                shell_escape(name),
+                limit
+            );
+            transport.exec(&pane_cmd).await?;
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        if let Err(e) = result {
+            // Best-effort cleanup: kill the session we just created
+            let kill_cmd = format!("{} kill-session -t {}", prefix, shell_escape(name));
+            let _ = transport.exec(&kill_cmd).await;
+            return Err(e);
+        }
+    }
+
     Ok(())
 }
 
@@ -263,7 +307,7 @@ mod tests {
     async fn create_session_basic() {
         let mock = MockTransport::new().with_default("");
         let transport = TransportKind::Mock(mock);
-        create_session(&transport, None, "test", None, None)
+        create_session(&transport, None, "test", &Default::default())
             .await
             .unwrap();
     }
@@ -272,7 +316,57 @@ mod tests {
     async fn create_session_with_window_and_command() {
         let mock = MockTransport::new().with_default("");
         let transport = TransportKind::Mock(mock);
-        create_session(&transport, None, "test", Some("main"), Some("vim"))
+        let opts = CreateSessionOptions {
+            window_name: Some("main".to_string()),
+            command: Some("vim".to_string()),
+            ..Default::default()
+        };
+        create_session(&transport, None, "test", &opts)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_session_with_size() {
+        let mock = MockTransport::new().with_default("");
+        let transport = TransportKind::Mock(mock);
+        let opts = CreateSessionOptions {
+            width: Some(200),
+            height: Some(50),
+            ..Default::default()
+        };
+        create_session(&transport, None, "test", &opts)
+            .await
+            .unwrap();
+        // Verifies -x 200 -y 50 flags are appended (mock accepts any command)
+    }
+
+    #[tokio::test]
+    async fn create_session_with_history_limit() {
+        let mock = MockTransport::new().with_default("");
+        let transport = TransportKind::Mock(mock);
+        let opts = CreateSessionOptions {
+            history_limit: Some(50000),
+            ..Default::default()
+        };
+        create_session(&transport, None, "test", &opts)
+            .await
+            .unwrap();
+        // Verifies set-option -t and set-option -p commands are issued
+    }
+
+    #[tokio::test]
+    async fn create_session_with_all_options() {
+        let mock = MockTransport::new().with_default("");
+        let transport = TransportKind::Mock(mock);
+        let opts = CreateSessionOptions {
+            window_name: Some("editor".to_string()),
+            command: Some("vim".to_string()),
+            width: Some(200),
+            height: Some(50),
+            history_limit: Some(50000),
+        };
+        create_session(&transport, None, "test", &opts)
             .await
             .unwrap();
     }

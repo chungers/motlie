@@ -29,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Create session and let shell initialize
-    let target = host.create_session(session_name, None, None).await?;
+    let target = host.create_session(session_name, &Default::default()).await?;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Execute command with 10s timeout

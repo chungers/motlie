@@ -15,7 +15,7 @@
 //! Usage:
 //!   cargo run -p motlie-tmux --example repl -- ssh://localhost
 
-use motlie_tmux::{KeySequence, ScrollbackQuery, SshConfig, TargetSpec};
+use motlie_tmux::{CreateSessionOptions, KeySequence, ScrollbackQuery, SshConfig, TargetSpec};
 use std::io::{self, BufRead, Write};
 
 #[tokio::main]
@@ -45,17 +45,80 @@ async fn main() -> anyhow::Result<()> {
 
         match parts[0] {
             "create" => {
-                let name = match parts.get(1) {
-                    Some(n) => *n,
-                    None => {
-                        println!("usage: create <name>");
-                        write!(stdout, "repl> ")?;
-                        stdout.flush()?;
-                        continue;
+                let words: Vec<&str> = line.trim().split_whitespace().collect();
+                if words.len() < 2 {
+                    println!("usage: create <name> [--size WxH] [--history N]");
+                    write!(stdout, "repl> ")?;
+                    stdout.flush()?;
+                    continue;
+                }
+                let name = words[1];
+                let mut opts = CreateSessionOptions::default();
+                let mut i = 2;
+                let mut parse_err = false;
+                while i < words.len() {
+                    match words[i] {
+                        "--size" => {
+                            i += 1;
+                            if let Some(val) = words.get(i) {
+                                if let Some((w, h)) = val.split_once('x') {
+                                    match (w.parse::<u16>(), h.parse::<u16>()) {
+                                        (Ok(w), Ok(h)) if w > 0 && h > 0 => {
+                                            opts.width = Some(w);
+                                            opts.height = Some(h);
+                                        }
+                                        _ => {
+                                            println!("Error: --size must be WxH (e.g. 200x50)");
+                                            parse_err = true;
+                                            break;
+                                        }
+                                    }
+                                } else {
+                                    println!("Error: --size must be WxH (e.g. 200x50)");
+                                    parse_err = true;
+                                    break;
+                                }
+                            } else {
+                                println!("Error: --size requires a value");
+                                parse_err = true;
+                                break;
+                            }
+                        }
+                        "--history" => {
+                            i += 1;
+                            match words.get(i).and_then(|v| v.parse::<u32>().ok()) {
+                                Some(n) if n > 0 => opts.history_limit = Some(n),
+                                _ => {
+                                    println!("Error: --history must be a positive integer");
+                                    parse_err = true;
+                                    break;
+                                }
+                            }
+                        }
+                        other => {
+                            println!("Error: unknown flag '{}'", other);
+                            parse_err = true;
+                            break;
+                        }
                     }
-                };
-                match host.create_session(name, None, None).await {
-                    Ok(_) => println!("Created: {}", name),
+                    i += 1;
+                }
+                if parse_err {
+                    write!(stdout, "repl> ")?;
+                    stdout.flush()?;
+                    continue;
+                }
+                match host.create_session(name, &opts).await {
+                    Ok(_) => {
+                        let mut detail = String::new();
+                        if let (Some(w), Some(h)) = (opts.width, opts.height) {
+                            detail.push_str(&format!(" ({}x{})", w, h));
+                        }
+                        if let Some(n) = opts.history_limit {
+                            detail.push_str(&format!(" history={}", n));
+                        }
+                        println!("Created: {}{}", name, detail);
+                    }
                     Err(e) => println!("Error: {}", e),
                 }
             }

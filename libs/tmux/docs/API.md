@@ -402,7 +402,7 @@ async fn test_session_lifecycle() {
         .with_default("")
         .with_response("list-sessions", "test\t$0\t0\t0\t1\t\n");
     let host = mock_host(mock);
-    let target = host.create_session("test", None, None).await.unwrap();
+    let target = host.create_session("test", &Default::default()).await.unwrap();
     assert_eq!(target.session_name(), "test");
 }
 ```
@@ -507,11 +507,27 @@ let host2 = host.clone();
 
 ```rust
 // Minimal — detached session with default shell
-let target = host.create_session("build", None, None).await?;
+let target = host.create_session("build", &Default::default()).await?;
 // Returns a Target at session level
 
 // With named window and startup command
-let target = host.create_session("dev", Some("editor"), Some("vim")).await?;
+let opts = CreateSessionOptions {
+    window_name: Some("editor".to_string()),
+    command: Some("vim".to_string()),
+    ..Default::default()
+};
+let target = host.create_session("dev", &opts).await?;
+
+// With window size and history limit (DC22)
+let opts = CreateSessionOptions {
+    width: Some(200),
+    height: Some(50),
+    history_limit: Some(50000),
+    ..Default::default()
+};
+let target = host.create_session("automation", &opts).await?;
+// Sets -x 200 -y 50 on new-session, then set-option history-limit 50000
+// on both the session (future panes) and initial pane (tmux 3.1+)
 ```
 
 ### Kill
