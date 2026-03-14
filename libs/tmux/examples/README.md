@@ -181,6 +181,7 @@ Resolved target: dev:0.0
 
 Demonstrates the distinct capture and streaming techniques in the library.
 Use `--mode` to select a strategy. Ctrl-C exits cleanly in all modes.
+Run with `-h` for detailed help on all modes and options.
 
 | Mode | API Used | Behavior |
 |------|----------|----------|

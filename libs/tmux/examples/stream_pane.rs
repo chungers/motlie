@@ -64,12 +64,66 @@ struct Args {
     pattern: String,
 }
 
+const HELP: &str = "\
+stream_pane — continuously stream tmux pane content to stdout
+
+USAGE:
+    stream_pane <uri> <target> [OPTIONS]
+
+ARGS:
+    <uri>       SSH URI to connect (e.g. ssh://localhost, ssh://deploy@prod)
+    <target>    tmux target string (session, session:window, session:window.pane)
+
+OPTIONS:
+    --mode MODE       Capture strategy [default: tail]
+    --lines N         Scrollback line count for tail/until modes [default: 50]
+    --interval MS     Poll interval in milliseconds [default: 200]
+    --pattern REGEX   Regex for until mode [default: ^\\$ ]
+    -h, --help        Print this help
+
+MODES:
+    tail       Poll scrollback via sample_text(LastLines(n)) with overlap_deduplicate().
+               Prints only new lines as they appear. Like `tail -f`.
+               Uses: ScrollbackQuery::LastLines, overlap_deduplicate()
+
+    visible    Poll visible pane via capture(). Reprints full pane on change.
+               No scrollback — only the current screen. Best for TUI programs
+               (htop, vim, top) where the whole screen repaints.
+               Uses: Target::capture()
+
+    until      Poll scrollback via sample_text(Until { pattern, max_lines }).
+               Scans backwards until regex matches, shows from match to end.
+               Good for watching output since the last shell prompt.
+               Uses: ScrollbackQuery::Until { pattern, max_lines }
+
+    fidelity   Poll via capture_with_options() with detect_reflow enabled.
+               Prints content + fidelity status line (CLEAN or DEGRADED with
+               issue names). Resize the target terminal while running to see
+               ClientResize / PaneResize issues appear.
+               Uses: CaptureOptions { detect_reflow: true }, OutputFidelity
+
+EXAMPLES:
+    stream_pane ssh://localhost my_session
+    stream_pane ssh://localhost my_session --mode visible
+    stream_pane ssh://localhost my_session --mode tail --lines 100 --interval 500
+    stream_pane ssh://localhost my_session --mode until --pattern '^\\$ '
+    stream_pane ssh://localhost my_session --mode fidelity
+    stream_pane ssh://localhost \"my_session:0.1\" --lines 30";
+
 fn parse_args() -> Result<Args, String> {
     let args: Vec<String> = std::env::args().collect();
+
+    // Check for -h / --help anywhere in args
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        println!("{}", HELP);
+        std::process::exit(0);
+    }
+
     if args.len() < 3 {
         return Err(format!(
             "usage: {} <uri> <target> [--mode visible|tail|until|fidelity] \
-             [--lines N] [--interval MS] [--pattern REGEX]",
+             [--lines N] [--interval MS] [--pattern REGEX]\n\n\
+             Try -h for detailed help.",
             args[0]
         ));
     }
