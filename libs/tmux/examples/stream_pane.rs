@@ -153,6 +153,9 @@ fn parse_args() -> Result<Args, String> {
                     .ok_or("--lines requires a value")?
                     .parse()
                     .map_err(|_| "--lines must be a positive integer".to_string())?;
+                if lines == 0 {
+                    return Err("--lines must be > 0".to_string());
+                }
             }
             "--interval" => {
                 i += 1;
@@ -161,6 +164,9 @@ fn parse_args() -> Result<Args, String> {
                     .ok_or("--interval requires a value")?
                     .parse()
                     .map_err(|_| "--interval must be a positive integer".to_string())?;
+                if interval_ms == 0 {
+                    return Err("--interval must be > 0".to_string());
+                }
             }
             "--pattern" => {
                 i += 1;
@@ -378,6 +384,7 @@ async fn stream_fidelity(
         ..Default::default()
     };
     let mut previous_text = String::new();
+    let mut previous_degraded = false;
     let mut stdout = std::io::stdout().lock();
 
     loop {
@@ -385,7 +392,10 @@ async fn stream_fidelity(
             _ = tokio::signal::ctrl_c() => break,
             _ = tokio::time::sleep(interval) => {
                 let result = target.capture_with_options(&opts).await?;
-                if result.text != previous_text {
+                let text_changed = result.text != previous_text;
+                let fidelity_changed = result.fidelity.degraded != previous_degraded;
+
+                if text_changed || fidelity_changed {
                     write!(stdout, "\x1b[2J\x1b[H")?;
                     stdout.write_all(result.text.as_bytes())?;
 
@@ -407,6 +417,7 @@ async fn stream_fidelity(
                     stdout.flush()?;
 
                     previous_text = result.text;
+                    previous_degraded = result.fidelity.degraded;
                 }
             }
         }
