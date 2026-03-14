@@ -86,39 +86,65 @@ async fn main() -> anyhow::Result<()> {
                             println!("  (no sessions)");
                         }
                         for s in &sessions {
-                            let spec = TargetSpec::parse(&s.name)?;
-                            let target = host.target(&spec).await?;
-                            if let Some(t) = target {
-                                let windows = t.children().await?;
+                            let spec = match TargetSpec::parse(&s.name) {
+                                Ok(sp) => sp,
+                                Err(e) => {
+                                    println!("  {} (parse error: {})", s.name, e);
+                                    continue;
+                                }
+                            };
+                            let target = match host.target(&spec).await {
+                                Ok(Some(t)) => t,
+                                Ok(None) => {
+                                    println!("  {} (not found)", s.name);
+                                    continue;
+                                }
+                                Err(e) => {
+                                    println!("  {} (error: {})", s.name, e);
+                                    continue;
+                                }
+                            };
+                            let windows = match target.children().await {
+                                Ok(w) => w,
+                                Err(e) => {
+                                    println!("  {:<20} (error listing windows: {})", s.name, e);
+                                    continue;
+                                }
+                            };
+                            println!(
+                                "  {:<20} (Session, {} window{})",
+                                s.name,
+                                windows.len(),
+                                if windows.len() == 1 { "" } else { "s" }
+                            );
+                            for w in &windows {
+                                let panes = match w.children().await {
+                                    Ok(p) => p,
+                                    Err(e) => {
+                                        println!("    {:<18} (error listing panes: {})", w.target_string(), e);
+                                        continue;
+                                    }
+                                };
+                                let winfo = w.window_info();
+                                let wname = winfo
+                                    .map(|i| i.name.as_str())
+                                    .unwrap_or("?");
                                 println!(
-                                    "  {:<20} (Session, {} window{})",
-                                    s.name,
-                                    windows.len(),
-                                    if windows.len() == 1 { "" } else { "s" }
+                                    "    {:<18} (Window, '{}', {} pane{})",
+                                    w.target_string(),
+                                    wname,
+                                    panes.len(),
+                                    if panes.len() == 1 { "" } else { "s" }
                                 );
-                                for w in &windows {
-                                    let panes = w.children().await?;
-                                    let winfo = w.window_info();
-                                    let wname = winfo
-                                        .map(|i| i.name.as_str())
+                                for p in &panes {
+                                    let pid = p.pane_address()
+                                        .map(|a| a.pane_id.as_str())
                                         .unwrap_or("?");
                                     println!(
-                                        "    {:<18} (Window, '{}', {} pane{})",
-                                        w.target_string(),
-                                        wname,
-                                        panes.len(),
-                                        if panes.len() == 1 { "" } else { "s" }
+                                        "      {:<16} (Pane, {})",
+                                        p.target_string(),
+                                        pid
                                     );
-                                    for p in &panes {
-                                        let pid = p.pane_address()
-                                            .map(|a| a.pane_id.as_str())
-                                            .unwrap_or("?");
-                                        println!(
-                                            "      {:<16} (Pane, {})",
-                                            p.target_string(),
-                                            pid
-                                        );
-                                    }
                                 }
                             }
                         }
