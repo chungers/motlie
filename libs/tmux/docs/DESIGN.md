@@ -547,7 +547,8 @@ workstream spans config, monitoring rules, sink filters, and CLI commands.
 
 ```rust
 let host = fleet.host("web-1").unwrap();
-let build = host.create_session("build", None, Some("cargo build")).await?;
+let opts = CreateSessionOptions { command: Some("cargo build".to_string()), ..Default::default() };
+let build = host.create_session("build", &opts).await?;
 fleet.bind("build-pipeline", host, build.clone())?;
 
 // Later — anywhere in the codebase
@@ -889,7 +890,8 @@ impl ExecOutput {
 let host = fleet.host("web-1")?;
 
 // Simple: operate at session level (tmux resolves to active pane)
-let build = host.create_session("build", None, Some("cargo build")).await?;
+let opts = CreateSessionOptions { command: Some("cargo build".to_string()), ..Default::default() };
+let build = host.create_session("build", &opts).await?;
 let output = build.capture().await?;           // captures active pane
 build.send_keys(&KeySequence::parse("{C-c}")?).await?;  // sends to active pane
 
@@ -2165,14 +2167,15 @@ Callers should use `HostHandle` and `Target` methods, not these functions direct
 ```rust
 // --- Session Lifecycle ---
 
-/// Create a new detached tmux session.
-/// Runs: tmux new-session -d -s <name> [-n <window_name>] [<command>]
+/// Create a new detached tmux session (DC22).
+/// Runs: tmux new-session -d -s <name> [-n <window_name>] [-x W -y H] [<command>]
+/// If history_limit set, also runs set-option -t and set-option -p.
+/// Rolls back (kills session) if post-create set-option fails.
 pub async fn create_session(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
     name: &str,
-    window_name: Option<&str>,
-    command: Option<&str>,
+    opts: &CreateSessionOptions,
 ) -> Result<()>;
 
 /// Kill a tmux session and all its windows/panes.
@@ -2575,6 +2578,9 @@ apply window size + history limit atomically during session creation.
 2. `set-option -p -t <name> history-limit <N>` — per-pane (tmux 3.1+), covers the
    initial pane that `new-session` already created
 
+If either `set-option` fails (e.g. tmux < 3.1 lacks `-p`), the implementation
+rolls back by killing the just-created session to avoid leaked state.
+
 This avoids the race condition of mutating/restoring the global `history-limit`
 (Option A) and requires no minimum-version gate beyond tmux 3.1 (released 2020-06-25,
 widely available).
@@ -2878,7 +2884,8 @@ save_to_config_file(&uri_string);
 ```rust
 // Identical to HostHandle::local() but with the uniform URI API.
 let host = SshConfig::parse("ssh://localhost")?.connect().await?;
-host.create_session("dev", Some("main"), None).await?;
+let opts = CreateSessionOptions { window_name: Some("main".to_string()), ..Default::default() };
+host.create_session("dev", &opts).await?;
 ```
 
 #### Transport Selection Logic

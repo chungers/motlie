@@ -40,25 +40,38 @@ pub async fn create_session(
 
     transport.exec(&cmd).await?;
 
-    // Set history-limit if requested (DC22, Option B)
+    // Set history-limit if requested (DC22, Option B).
+    // If either set-option fails, kill the just-created session to avoid
+    // leaked state, then propagate the error.
     if let Some(limit) = opts.history_limit {
-        // Per-session: covers future windows/panes
-        let session_cmd = format!(
-            "{} set-option -t {} history-limit {}",
-            prefix,
-            shell_escape(name),
-            limit
-        );
-        transport.exec(&session_cmd).await?;
+        let result = async {
+            // Per-session: covers future windows/panes
+            let session_cmd = format!(
+                "{} set-option -t {} history-limit {}",
+                prefix,
+                shell_escape(name),
+                limit
+            );
+            transport.exec(&session_cmd).await?;
 
-        // Per-pane: covers the initial pane created by new-session (tmux 3.1+)
-        let pane_cmd = format!(
-            "{} set-option -p -t {} history-limit {}",
-            prefix,
-            shell_escape(name),
-            limit
-        );
-        transport.exec(&pane_cmd).await?;
+            // Per-pane: covers the initial pane created by new-session (tmux 3.1+)
+            let pane_cmd = format!(
+                "{} set-option -p -t {} history-limit {}",
+                prefix,
+                shell_escape(name),
+                limit
+            );
+            transport.exec(&pane_cmd).await?;
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        if let Err(e) = result {
+            // Best-effort cleanup: kill the session we just created
+            let kill_cmd = format!("{} kill-session -t {}", prefix, shell_escape(name));
+            let _ = transport.exec(&kill_cmd).await;
+            return Err(e);
+        }
     }
 
     Ok(())
