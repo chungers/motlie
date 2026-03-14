@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-14 | @codex | Refined Phase 1.13 per user decisions: greenfield/breaking changes accepted, API uses `upload` / `download`, overwrite semantics configurable, directory transfer included now, file-only/v1 phasing removed. |
 | 2026-03-14 | @codex | Added Phase 1.13 — host-level SFTP file transfer. Slots after 1.12 as an additive transport/host feature depending on 1.3, 1.7, and 2a.1. No hard gate for monitoring phases. |
 | 2026-03-14 | @claude | Phase 1.12 — `CreateSessionOptions` for window size and history limit (DC22). 7 tasks (1.12a–g). Migration/backwards compatibility explicitly out of scope per user direction. |
 | 2026-03-13 | @claude | Phase 1.11 — address PR #71 R4: scope `transport_kind()` to `pub(crate)` in 1.11l, add within-location duplicate rejection to 1.11d/1.11j, split 1.11m (localhost-only integration) from new 1.11o (SSH integration with env requirements). |
@@ -510,62 +511,72 @@ See DESIGN.md DC22.
 
 ## Phase 1.13: Host-Level SFTP File Transfer
 
-Add transport/host-level file transfer to complement transport `exec()`. Scope is
-whole-file binary-safe read/write only; `Target` is not extended.
+Add transport/host-level SFTP-backed upload/download to complement transport
+`exec()`. This is greenfield work: breaking changes are acceptable and no migration
+or compatibility layer is required. Scope includes files and directories; `Target`
+is not extended.
 
-### 1.13a — Transport surface (`src/transport.rs`)
+### 1.13a — Transfer types and API surface (`src/types.rs`, `src/transport.rs`, `src/host.rs`)
 
-- [ ] Add `TransportKind::read_file(&self, path: &str) -> Result<Vec<u8>>`
-- [ ] Add `TransportKind::write_file(&self, path: &str, data: &[u8]) -> Result<()>`
-- [ ] Add matching private methods on `LocalTransport`, `MockTransport`, and `SshTransport`
+- [ ] Add public `TransferOptions { overwrite: bool, recursive: bool }` with `Default`
+- [ ] Add `TransportKind::upload(&self, local_path, remote_path, opts) -> Result<()>`
+- [ ] Add `TransportKind::download(&self, remote_path, local_path, opts) -> Result<()>`
+- [ ] Add `HostHandle::upload(...)` / `HostHandle::download(...)`
 - [ ] Keep failure modes non-panicking; validation and I/O errors return `Err`
 
 ### 1.13b — Local transport implementation (`src/transport.rs`)
 
-- [ ] Implement `LocalTransport::read_file()` via `tokio::fs::read`
-- [ ] Implement `LocalTransport::write_file()` via `tokio::fs::write`
-- [ ] Wrap both operations in the existing local transport timeout
-- [ ] Preserve binary payloads exactly (no text conversion)
+- [ ] Implement `LocalTransport::upload()` for regular files
+- [ ] Implement `LocalTransport::download()` symmetrically
+- [ ] Implement recursive directory copy when `opts.recursive == true`
+- [ ] Return error for directory sources when `opts.recursive == false`
+- [ ] Return error when destination exists and `opts.overwrite == false`
+- [ ] Wrap each top-level transfer in the existing local transport timeout
 
 ### 1.13c — Mock transport implementation (`src/transport.rs`)
 
-- [ ] Add in-memory file storage keyed by path for `MockTransport`
-- [ ] Add deterministic transfer error injection for tests (read/write failure paths)
+- [ ] Add an in-memory filesystem/tree model for `MockTransport`
+- [ ] Support file and directory upload/download semantics
+- [ ] Add deterministic transfer error injection for tests
 - [ ] Keep command mocking behavior unchanged for existing `exec()` tests
 
 ### 1.13d — SSH SFTP implementation (`src/transport.rs`)
 
 - [ ] Add explicit `russh-sftp` dependency to `Cargo.toml`
-- [ ] Implement `SshTransport::read_file()` using an SFTP subsystem/channel on the
-  existing authenticated SSH connection
-- [ ] Implement `SshTransport::write_file()` using the same SFTP path
-- [ ] Bound each SFTP operation by `SshConfig::timeout`
-- [ ] Open a fresh SFTP channel per operation in v1; no shared client cache yet
+- [ ] Implement `SshTransport::upload()` using SFTP for regular files
+- [ ] Implement `SshTransport::download()` using SFTP for regular files
+- [ ] Implement recursive directory upload/download over SFTP
+- [ ] Enforce `overwrite=false` and `recursive=false` semantics consistently
+- [ ] Bound each top-level SFTP transfer by `SshConfig::timeout`
+- [ ] Open a fresh SFTP channel per top-level transfer; no shared client cache initially
 
-### 1.13e — Host API wiring (`src/host.rs`, `src/lib.rs`)
+### 1.13e — Public exports and call-site wiring (`src/lib.rs`, callers`)
 
-- [ ] Add `HostHandle::read_file(&self, path: &str) -> Result<Vec<u8>>`
-- [ ] Add `HostHandle::write_file(&self, path: &str, data: &[u8]) -> Result<()>`
-- [ ] Re-export any newly introduced public transfer types from `lib.rs` if needed
+- [ ] Re-export `TransferOptions` and any new public transfer types from `lib.rs`
+- [ ] Update callers/tests/examples to use `upload(...)` / `download(...)`
 - [ ] Do not add file transfer methods on `Target`
 
 ### 1.13f — Unit tests
 
-- [ ] `MockTransport` read/write round-trip
-- [ ] `MockTransport` read/write error injection paths
-- [ ] `TransportKind` dispatch tests for `read_file()` / `write_file()`
-- [ ] `LocalTransport` binary round-trip and missing-path error coverage
+- [ ] `MockTransport` file upload/download round-trip
+- [ ] `MockTransport` directory upload/download round-trip
+- [ ] `overwrite=false` conflict path
+- [ ] `recursive=false` directory rejection path
+- [ ] `TransportKind` dispatch tests for `upload()` / `download()`
 
 ### 1.13g — Integration tests
 
-- [ ] Localhost integration test: write bytes to a temp path, read them back, verify exact round-trip
-- [ ] Localhost error-path integration test: missing file and permission-denied cases
-- [ ] Env-gated SSH integration test: upload bytes to a temp remote path, read them back, clean up
+- [ ] Localhost file upload/download round-trip with exact byte verification
+- [ ] Localhost directory upload/download round-trip for a nested tree
+- [ ] Localhost overwrite=false and recursive=false error paths
+- [ ] Env-gated SSH file upload/download round-trip
+- [ ] Env-gated SSH directory upload/download round-trip
+- [ ] Env-gated SSH overwrite=false and recursive=false error paths
 
 ### 1.13h — Documentation and behavior verification
 
-- [ ] Update `docs/API.md` with host-level file transfer examples and boundary notes:
-  transport `exec()` vs host file transfer vs pane `Target::exec()`
+- [ ] Update `docs/API.md` with host-level upload/download examples and boundary notes:
+  transport `exec()` vs host upload/download vs pane `Target::exec()`
 - [ ] Add example-program task placeholder pending user direction on the preferred
   verification use case (per examples process)
 - [ ] Cross-link implementation docs to [`SFTP.md`](./SFTP.md)
