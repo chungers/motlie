@@ -4,7 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-03-13 | @claude | Add §TUI Mirror Sink — detailed design for replicating tmux pane content in a ratatui frame. Two approaches analyzed: polling `capture-pane -ep` vs tmux control mode. Crate evaluation, SGR mapping, architecture, and trade-off matrix. |
+| 2026-03-13 | @claude | Add §TUI Mirror Sink — detailed design for replicating tmux pane content in a ratatui frame. Two approaches analyzed: polling `capture-pane -ep` vs tmux control mode. Crate evaluation, SGR mapping, architecture, and trade-off matrix. R1: fix StyledCell to support grapheme clusters, wide chars, underline color; reframe recommendation as exploratory analysis (Phase 5 per DESIGN/PLAN is authoritative). |
 | 2026-03-10 | @codex | Address PR #65 review feedback: clarify that normalized matching is shell-oriented, full-screen TUI workflows default to `Raw`, screen-buffer reconstruction is a Phase `5+` idea, and fixed geometry is best-effort unless automation is isolated. |
 
 This document defines how to support full-screen TUIs in tmux while reducing
@@ -452,37 +452,53 @@ transport. Control mode is an **additional** data source, not a replacement.
 | **VTE required** | No | Yes |
 | **Risk** | Low | Moderate (protocol edge cases, VTE bugs) |
 
-### Recommendation
+### Analysis Summary
 
-**Start with Approach A (polling).** It delivers a working TUI mirror with
-minimal effort and zero refactoring, using the existing capture API. The
-50–200ms latency is acceptable for most monitoring and mirroring use cases.
-The visual fidelity is high — `capture-pane -ep` faithfully preserves colors
-and attributes for both shell output and full-screen TUI programs.
+> **Note**: This section is **exploratory design analysis** — it does not change
+> the implementation plan. The TUI mirror is a Phase 5 deliverable per
+> DESIGN.md and PLAN.md, built as a `TuiSink` on top of `OutputBus` (Phase 2c).
+> The analysis below informs the Phase 5 design by evaluating trade-offs early.
 
-**Evolve to Approach B (control mode) in Phase 2c or Phase 5**, when the
-`OutputBus` infrastructure is in place and real-time, frame-perfect mirroring
-becomes a requirement. Control mode also enables efficient multi-pane monitoring
-(one connection per session vs N captures per tick), which aligns with the
-Fleet/monitoring use case.
+Approach A (polling) is viable as a **prototype or standalone tool** to validate
+the SGR parser and rendering pipeline before Phase 5. It requires no
+infrastructure beyond the existing capture API.
 
-The two approaches are **not mutually exclusive**. Approach A can serve as the
-initial implementation and fallback, while Approach B adds a real-time path for
-sessions where low latency matters. The `TmuxMirror` widget and `StyledGrid`
-are shared between both — only the source layer changes.
+Approach B (control mode) is the **production path** for Phase 5, where the
+`TuiSink` registers with `OutputBus` and receives `TargetOutput` events.
+Control mode becomes a real-time source feeding the bus, replacing polling.
+This aligns with the existing DESIGN/PLAN: Phase 2c builds the sink pipeline,
+Phase 5 builds the TUI consumer on top.
+
+The two approaches share the `StyledGrid` data model and `TmuxMirror` widget —
+only the source layer differs. A polling prototype built now would carry forward
+into Phase 5 with the source swapped from `capture-pane` to `OutputBus`.
 
 ### Data Model (Shared)
 
 ```rust
 /// A single cell in the styled grid.
+///
+/// Uses `CompactString` (not `char`) because a single terminal cell can
+/// contain a multi-byte grapheme cluster (e.g. emoji, combining characters).
+/// Wide (double-width) cells occupy two columns: the first cell holds the
+/// grapheme with `wide: true`, the second is a continuation cell with
+/// `symbol` empty and `continuation: true`.
 struct StyledCell {
-    ch: char,
+    symbol: compact_str::CompactString, // grapheme cluster, not just char
     fg: ratatui::style::Color,
     bg: ratatui::style::Color,
+    underline_color: ratatui::style::Color, // SGR 58;5;N / 58;2;R;G;B
     modifiers: ratatui::style::Modifier,
+    wide: bool,                         // true = double-width cell (CJK, emoji)
+    continuation: bool,                 // true = second column of a wide cell
 }
 
 /// Rectangular grid of styled cells representing one pane's visible content.
+///
+/// Grid is row-major with exactly `width * height` cells. Wide characters
+/// occupy two consecutive cells in a row (the first with `wide: true`, the
+/// second with `continuation: true`). This matches ratatui's `Buffer` layout
+/// and tmux's internal grid representation.
 struct StyledGrid {
     width: u32,
     height: u32,
@@ -513,14 +529,18 @@ impl Widget for TmuxMirror<'_> {
         for y in 0..self.grid.height.min(area.height as u32) {
             for x in 0..self.grid.width.min(area.width as u32) {
                 let cell = &self.grid.cells[(y * self.grid.width + x) as usize];
+                // Skip continuation cells — ratatui handles wide char spillover
+                if cell.continuation { continue; }
                 if let Some(buf_cell) = buf.cell_mut(Position::new(
                     area.x + x as u16,
                     area.y + y as u16,
                 )) {
-                    buf_cell.set_char(cell.ch)
+                    buf_cell.set_symbol(&cell.symbol)
                         .set_fg(cell.fg)
                         .set_bg(cell.bg)
                         .set_style(Style::default().add_modifier(cell.modifiers));
+                    // underline_color requires ratatui "underline-color" feature
+                    // buf_cell.underline_color = cell.underline_color;
                 }
             }
         }
