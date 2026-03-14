@@ -54,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
                         continue;
                     }
                 };
-                match host.create_session(name, None, None).await {
+                match host.create_session(name, &Default::default()).await {
                     Ok(_) => println!("Created: {}", name),
                     Err(e) => println!("Error: {}", e),
                 }

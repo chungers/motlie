@@ -32,7 +32,10 @@ async fn localhost_session_lifecycle() {
 
     // 1. Create session
     let target = host
-        .create_session(session_name, Some("main"), None)
+        .create_session(session_name, &motlie_tmux::CreateSessionOptions {
+            window_name: Some("main".to_string()),
+            ..Default::default()
+        })
         .await
         .expect("create_session failed");
     assert_eq!(target.level(), TargetLevel::Session);
@@ -129,7 +132,7 @@ async fn uri_localhost_connect() {
 
     // Create session via URI-connected handle
     let target = host
-        .create_session(session_name, None, None)
+        .create_session(session_name, &Default::default())
         .await
         .expect("create_session failed");
 

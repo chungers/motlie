@@ -468,38 +468,38 @@ See DESIGN.md DC22.
 
 #### Types (`src/types.rs`)
 
-- [ ] **1.12a** — Add `CreateSessionOptions` struct with `window_name`, `command`,
+- [x] **1.12a** — Add `CreateSessionOptions` struct with `window_name`, `command`,
   `width`, `height`, `history_limit` fields (all `Option`). Derive `Default`.
 
 #### Control (`src/control.rs`)
 
-- [ ] **1.12b** — Update `control::create_session()` to accept `&CreateSessionOptions`.
+- [x] **1.12b** — Update `control::create_session()` to accept `&CreateSessionOptions`.
   Append `-x W -y H` to `new-session` command when `width`/`height` are set.
   Append `-n <name>` when `window_name` is set. Append `<command>` when set.
 
-- [ ] **1.12c** — When `history_limit` is set, issue two additional commands after
+- [x] **1.12c** — When `history_limit` is set, issue two additional commands after
   `new-session`:
   `set-option -t <name> history-limit <N>` (per-session, covers future panes) and
   `set-option -p -t <name> history-limit <N>` (per-pane, tmux 3.1+, covers initial pane).
 
 #### Host handle (`src/host.rs`)
 
-- [ ] **1.12d** — Update `HostHandle::create_session()` signature from
+- [x] **1.12d** — Update `HostHandle::create_session()` signature from
   `(name, window_name, command)` to `(name, &CreateSessionOptions)`. Wire through
   to `control::create_session()`.
 
 #### Tests
 
-- [ ] **1.12e** — Unit tests: `CreateSessionOptions::default()` produces same command
+- [x] **1.12e** — Unit tests: `CreateSessionOptions::default()` produces same command
   as current behavior (no `-x`, `-y`, no `set-option`). Options with `width`/`height`
   produce `-x W -y H`. Options with `history_limit` produce both `set-option` commands.
 
-- [ ] **1.12f** — Update existing callers (`session_lifecycle.rs`, `send_and_capture.rs`,
+- [x] **1.12f** — Update existing callers (`session_lifecycle.rs`, `send_and_capture.rs`,
   `repl.rs`, unit/integration tests) to use `CreateSessionOptions::default()`.
 
 #### Documentation
 
-- [ ] **1.12g** — Update `docs/API.md` with `CreateSessionOptions` usage examples.
+- [x] **1.12g** — Update `docs/API.md` with `CreateSessionOptions` usage examples.
 
 **Depends on**: 1.7 (HostHandle and Target must exist).
 
