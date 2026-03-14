@@ -179,26 +179,39 @@ Resolved target: dev:0.0
 
 ### stream_pane — Continuous pane streaming
 
-Like `tail -f` for a tmux pane. Polls scrollback at a defined interval and
-prints only new lines using overlap-aware deduplication. Ctrl-C exits cleanly.
+Demonstrates the distinct capture and streaming techniques in the library.
+Use `--mode` to select a strategy. Ctrl-C exits cleanly in all modes.
+
+| Mode | API Used | Behavior |
+|------|----------|----------|
+| `tail` (default) | `sample_text(LastLines(n))` + `overlap_deduplicate()` | Like `tail -f` — prints only new scrollback lines |
+| `visible` | `capture()` | Polls visible pane; reprints on change. Best for TUI programs |
+| `until` | `sample_text(Until { pattern, max_lines })` | Scans back to regex match, shows everything since (e.g. last prompt) |
+| `fidelity` | `capture_with_options(detect_reflow: true)` | Polls with geometry snapshots; shows content + fidelity status |
 
 ```sh
-# Stream an existing session (default: last 50 lines, 200ms poll)
-cargo run -p motlie-tmux --example stream_pane -- ssh://localhost my_session
+# Default: tail mode (incremental scrollback with overlap dedup)
+./target/debug/examples/stream_pane ssh://localhost my_session
 
-# Custom line count and interval
-cargo run -p motlie-tmux --example stream_pane -- ssh://localhost my_session --lines 100 --interval 500
+# Watch visible pane content (good for TUI programs like htop, vim)
+./target/debug/examples/stream_pane ssh://localhost my_session --mode visible
+
+# Tail with custom line count and poll interval
+./target/debug/examples/stream_pane ssh://localhost my_session --mode tail --lines 100 --interval 500
+
+# Show everything since last shell prompt (scan backwards until pattern)
+./target/debug/examples/stream_pane ssh://localhost my_session --mode until --pattern '^\$ '
+
+# Fidelity mode — try resizing the target terminal to see degradation
+./target/debug/examples/stream_pane ssh://localhost my_session --mode fidelity
 
 # Stream a specific pane
-cargo run -p motlie-tmux --example stream_pane -- ssh://localhost "my_session:0.1" --lines 30
-
-# Pre-built binary
-./target/debug/examples/stream_pane ssh://localhost my_session --lines 50 --interval 200
+./target/debug/examples/stream_pane ssh://localhost "my_session:0.1" --lines 30
 ```
 
-Expected output (streaming as commands run in the target pane):
+Expected output (`--mode tail`):
 ```
-Streaming my_session (last 50 lines, 200ms interval). Ctrl-C to stop.
+Streaming my_session [mode=tail, lines=50, interval=200ms]. Ctrl-C to stop.
 $ echo hello
 hello
 $ make test
@@ -206,4 +219,13 @@ running 42 tests...
 test result: ok. 42 passed; 0 failed
 ^C
 Stopped.
+```
+
+Expected output (`--mode fidelity`, after resizing the target terminal):
+```
+$ echo hello
+hello
+$
+
+ DEGRADED: ClientResize, PaneResize
 ```
