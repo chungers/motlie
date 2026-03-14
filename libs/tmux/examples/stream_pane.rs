@@ -384,7 +384,7 @@ async fn stream_fidelity(
         ..Default::default()
     };
     let mut previous_text = String::new();
-    let mut previous_degraded = false;
+    let mut previous_issues: Option<Vec<motlie_tmux::FidelityIssue>> = None;
     let mut stdout = std::io::stdout().lock();
 
     loop {
@@ -393,7 +393,7 @@ async fn stream_fidelity(
             _ = tokio::time::sleep(interval) => {
                 let result = target.capture_with_options(&opts).await?;
                 let text_changed = result.text != previous_text;
-                let fidelity_changed = result.fidelity.degraded != previous_degraded;
+                let fidelity_changed = result.fidelity.issues != previous_issues;
 
                 if text_changed || fidelity_changed {
                     write!(stdout, "\x1b[2J\x1b[H")?;
@@ -417,7 +417,7 @@ async fn stream_fidelity(
                     stdout.flush()?;
 
                     previous_text = result.text;
-                    previous_degraded = result.fidelity.degraded;
+                    previous_issues = result.fidelity.issues;
                 }
             }
         }
