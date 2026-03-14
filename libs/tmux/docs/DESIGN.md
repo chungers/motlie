@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-14 | @claude: DC22 — `CreateSessionOptions` for window size and history limit on session creation. Option (b): per-session + per-pane `set-option` after create (tmux 3.1+). Migration/backwards compatibility explicitly out of scope per user direction. | HostHandle, control.rs, DC22 |
 | 2026-03-13 | @claude: DC21 R5 — address PR #71 R4: scope `transport_kind()` to `pub(crate)` (not public API), define reject semantics for duplicate params within same location. | DC21 |
 | 2026-03-13 | @claude: DC21 R4 — address PR #71 R3: wrap raw transports in `TransportKind::Local/Ssh` in pseudocode (match `HostHandle::new` constructor). | DC21 |
 | 2026-03-12 | @claude: DC21 R3 — address PR #71 R2: fix `connect(self)` in API signature block, add `/socket-path` vs `socket-name` mutual-exclusion rule, fix fleet example to use URI string instead of undeclared `HostHandle` `Display`. R1 fixes: `connect()` ownership (`&self`→`self`), `HostHandle::transport_kind()` inspection seam. | DC21 |
@@ -546,7 +547,8 @@ workstream spans config, monitoring rules, sink filters, and CLI commands.
 
 ```rust
 let host = fleet.host("web-1").unwrap();
-let build = host.create_session("build", None, Some("cargo build")).await?;
+let opts = CreateSessionOptions { command: Some("cargo build".to_string()), ..Default::default() };
+let build = host.create_session("build", &opts).await?;
 fleet.bind("build-pipeline", host, build.clone())?;
 
 // Later — anywhere in the codebase
@@ -607,12 +609,12 @@ impl HostHandle {
     pub async fn list_sessions(&self) -> Result<Vec<SessionInfo>>;
 
     /// Create a new tmux session. Returns a Target at session level.
-    /// Runs: tmux new-session -d -s <name> [-n <window_name>] [<command>]
+    /// Runs: tmux new-session -d -s <name> [-n <window_name>] [-x W -y H] [<command>]
+    /// If `opts.history_limit` is set, also runs set-option -t and set-option -p (DC22).
     pub async fn create_session(
         &self,
         name: &str,
-        window_name: Option<&str>,
-        command: Option<&str>,
+        opts: &CreateSessionOptions,
     ) -> Result<Target>;
 
     /// Get a Target for an existing session by name. Queries tmux to verify
@@ -888,7 +890,8 @@ impl ExecOutput {
 let host = fleet.host("web-1")?;
 
 // Simple: operate at session level (tmux resolves to active pane)
-let build = host.create_session("build", None, Some("cargo build")).await?;
+let opts = CreateSessionOptions { command: Some("cargo build".to_string()), ..Default::default() };
+let build = host.create_session("build", &opts).await?;
 let output = build.capture().await?;           // captures active pane
 build.send_keys(&KeySequence::parse("{C-c}")?).await?;  // sends to active pane
 
@@ -2164,14 +2167,15 @@ Callers should use `HostHandle` and `Target` methods, not these functions direct
 ```rust
 // --- Session Lifecycle ---
 
-/// Create a new detached tmux session.
-/// Runs: tmux new-session -d -s <name> [-n <window_name>] [<command>]
+/// Create a new detached tmux session (DC22).
+/// Runs: tmux new-session -d -s <name> [-n <window_name>] [-x W -y H] [<command>]
+/// If history_limit set, also runs set-option -t and set-option -p.
+/// Rolls back (kills session) if post-create set-option fails.
 pub async fn create_session(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
     name: &str,
-    window_name: Option<&str>,
-    command: Option<&str>,
+    opts: &CreateSessionOptions,
 ) -> Result<()>;
 
 /// Kill a tmux session and all its windows/panes.
@@ -2558,6 +2562,67 @@ abstraction lets all downstream modules (`discovery`, `capture`, `control`, `pip
 data from `open_shell()`. Built into the library, not behind a feature flag, so downstream
 consumers can also test their integrations.
 
+### DC22: Session Creation Options — Window Size and History Limit
+
+**Problem**: `create_session()` runs `tmux new-session -d -s <name>` with no window
+size or history limit control. Detached sessions default to 80x24 (or the server
+default). History limit inherits the global `history-limit` option (tmux default:
+2000 lines). Callers that need larger scrollback or specific geometry must issue
+separate `set-option` calls manually and account for tmux's creation-time semantics.
+
+**Decision**: Introduce `CreateSessionOptions` to bundle optional parameters, and
+apply window size + history limit atomically during session creation.
+
+**Approach (Option B)**: After `new-session -d -s <name> -x W -y H`, issue:
+1. `set-option -t <name> history-limit <N>` — per-session, covers future windows/panes
+2. `set-option -p -t <name> history-limit <N>` — per-pane (tmux 3.1+), covers the
+   initial pane that `new-session` already created
+
+If either `set-option` fails (e.g. tmux < 3.1 lacks `-p`), the implementation
+rolls back by killing the just-created session to avoid leaked state.
+
+This avoids the race condition of mutating/restoring the global `history-limit`
+(Option A) and requires no minimum-version gate beyond tmux 3.1 (released 2020-06-25,
+widely available).
+
+**API changes**:
+
+```rust
+/// Options for session creation. All fields optional; defaults to tmux server defaults.
+#[derive(Debug, Clone, Default)]
+pub struct CreateSessionOptions {
+    pub window_name: Option<String>,
+    pub command: Option<String>,
+    pub width: Option<u16>,
+    pub height: Option<u16>,
+    pub history_limit: Option<u32>,
+}
+```
+
+`HostHandle::create_session` signature changes from:
+
+```rust
+pub async fn create_session(
+    &self, name: &str, window_name: Option<&str>, command: Option<&str>,
+) -> Result<Target>;
+```
+
+to:
+
+```rust
+pub async fn create_session(
+    &self, name: &str, opts: &CreateSessionOptions,
+) -> Result<Target>;
+```
+
+`control::create_session` (internal) changes similarly. The generated tmux commands:
+
+```
+tmux new-session -d -s <name> [-n <window_name>] [-x <W> -y <H>] [<command>]
+tmux set-option -t <name> history-limit <N>        # if history_limit set
+tmux set-option -p -t <name> history-limit <N>     # if history_limit set (tmux 3.1+)
+```
+
 ### DC21: Unified SSH URI for Host Addressing
 
 **Decision**: All hosts — including localhost — are addressed through a single SSH URI
@@ -2819,7 +2884,8 @@ save_to_config_file(&uri_string);
 ```rust
 // Identical to HostHandle::local() but with the uniform URI API.
 let host = SshConfig::parse("ssh://localhost")?.connect().await?;
-host.create_session("dev", Some("main"), None).await?;
+let opts = CreateSessionOptions { window_name: Some("main".to_string()), ..Default::default() };
+host.create_session("dev", &opts).await?;
 ```
 
 #### Transport Selection Logic

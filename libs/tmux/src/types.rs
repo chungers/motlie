@@ -320,6 +320,29 @@ impl CaptureOptions {
     }
 }
 
+/// Options for session creation (DC22).
+///
+/// All fields are optional. `Default` produces the same behavior as the
+/// pre-DC22 `create_session(name, None, None)` — no size override, no
+/// history limit, tmux server defaults apply.
+///
+/// If `history_limit` is set, two `set-option` commands are issued after
+/// `new-session`: per-session (covers future panes) and per-pane (tmux 3.1+,
+/// covers the initial pane created by `new-session`).
+#[derive(Debug, Clone, Default)]
+pub struct CreateSessionOptions {
+    /// Initial window name (`-n` flag).
+    pub window_name: Option<String>,
+    /// Command to run in the initial pane.
+    pub command: Option<String>,
+    /// Initial window width (`-x` flag).
+    pub width: Option<u16>,
+    /// Initial window height (`-y` flag).
+    pub height: Option<u16>,
+    /// Scrollback history limit for the session.
+    pub history_limit: Option<u32>,
+}
+
 /// Fidelity issue detected during capture (DC20).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FidelityIssue {

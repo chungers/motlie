@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-14 | @claude | Phase 1.12 — `CreateSessionOptions` for window size and history limit (DC22). 7 tasks (1.12a–g). Migration/backwards compatibility explicitly out of scope per user direction. |
 | 2026-03-13 | @claude | Phase 1.11 — address PR #71 R4: scope `transport_kind()` to `pub(crate)` in 1.11l, add within-location duplicate rejection to 1.11d/1.11j, split 1.11m (localhost-only integration) from new 1.11o (SSH integration with env requirements). |
 | 2026-03-13 | @claude | Phase 1.11 — address PR #71 R3: scope 1.11l unit tests to localhost + error paths only, SSH transport verification in 1.11m integration. |
 | 2026-03-12 | @claude | Phase 1.11 — address PR #71 R2: fix `connect(self)` in 1.11g, add socket mutual-exclusion to 1.11j test cases, fix fleet example. R1: 1.11l inspection seam. |
@@ -459,6 +460,50 @@ Task 1.11o (SSH integration) requires a real SSH server and is env-gated.
 
 **Gates**: None — this phase is additive. Can run parallel with other work after
 2a.1 is complete.
+
+### 1.12 — Session Creation Options — DC22
+
+Add `CreateSessionOptions` to `create_session()` for window size and history limit.
+See DESIGN.md DC22.
+
+#### Types (`src/types.rs`)
+
+- [x] **1.12a** — Add `CreateSessionOptions` struct with `window_name`, `command`,
+  `width`, `height`, `history_limit` fields (all `Option`). Derive `Default`.
+
+#### Control (`src/control.rs`)
+
+- [x] **1.12b** — Update `control::create_session()` to accept `&CreateSessionOptions`.
+  Append `-x W -y H` to `new-session` command when `width`/`height` are set.
+  Append `-n <name>` when `window_name` is set. Append `<command>` when set.
+
+- [x] **1.12c** — When `history_limit` is set, issue two additional commands after
+  `new-session`:
+  `set-option -t <name> history-limit <N>` (per-session, covers future panes) and
+  `set-option -p -t <name> history-limit <N>` (per-pane, tmux 3.1+, covers initial pane).
+
+#### Host handle (`src/host.rs`)
+
+- [x] **1.12d** — Update `HostHandle::create_session()` signature from
+  `(name, window_name, command)` to `(name, &CreateSessionOptions)`. Wire through
+  to `control::create_session()`.
+
+#### Tests
+
+- [x] **1.12e** — Unit tests: `CreateSessionOptions::default()` produces same command
+  as current behavior (no `-x`, `-y`, no `set-option`). Options with `width`/`height`
+  produce `-x W -y H`. Options with `history_limit` produce both `set-option` commands.
+
+- [x] **1.12f** — Update existing callers (`session_lifecycle.rs`, `send_and_capture.rs`,
+  `repl.rs`, unit/integration tests) to use `CreateSessionOptions::default()`.
+
+#### Documentation
+
+- [x] **1.12g** — Update `docs/API.md` with `CreateSessionOptions` usage examples.
+
+**Depends on**: 1.7 (HostHandle and Target must exist).
+
+**Gates**: None — additive change. Can run parallel with other work.
 
 ---
 
