@@ -144,6 +144,14 @@ This section designs a **Sink** that replicates a tmux pane's visual content —
 including full-screen TUI programs like `vim`, `htop`, or `top` — into a local
 ratatui frame. Two approaches are analyzed: polling-based and control-mode-based.
 
+### Mock-up
+
+![TUI Mirror Mock-up](tui-mirror-mock.png)
+
+Three-pane layout: two mirrored sessions (htop on prod-web, vim on prod-api)
+at top, with a summary/alerting pane spanning the bottom. Status bar shows
+connection state and poll mode.
+
 ### Problem Statement
 
 A consumer wants to display a live replica of a remote (or local) tmux pane
