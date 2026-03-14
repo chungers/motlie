@@ -257,6 +257,10 @@ This keeps transfer support orthogonal to:
 
 ### Local Integration Tests
 
+These should follow the existing localhost integration-test policy in
+`libs/tmux/tests/integration.rs`: run normally when `tmux` is available on `PATH`,
+otherwise skip with the same availability check used by the current localhost tests.
+
 - file upload/download round-trip to temp paths
 - directory upload/download round-trip for a nested tree
 - overwrite=false conflict path
@@ -265,7 +269,9 @@ This keeps transfer support orthogonal to:
 
 ### SSH Integration Tests
 
-Add env-gated integration tests similar to the existing SSH transport tests:
+These should follow the existing remote-SSH integration-test policy in
+`libs/tmux/tests/integration.rs`: reuse `MOTLIE_SSH_TEST_HOST=user@host[:port]`
+and skip when it is not set. Do not introduce a new env gate.
 
 - upload a file to a temp remote path, then download it back
 - upload a directory tree recursively, then download it back

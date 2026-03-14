@@ -566,12 +566,17 @@ is not extended.
 
 ### 1.13g — Integration tests
 
-- [ ] Localhost file upload/download round-trip with exact byte verification
+- [ ] Localhost file upload/download round-trip with exact byte verification.
+  Reuse the existing localhost integration-test pattern: run when `tmux` is on
+  `PATH`, otherwise skip via the same availability check used today.
 - [ ] Localhost directory upload/download round-trip for a nested tree
 - [ ] Localhost overwrite=false and recursive=false error paths
-- [ ] Env-gated SSH file upload/download round-trip
-- [ ] Env-gated SSH directory upload/download round-trip
-- [ ] Env-gated SSH overwrite=false and recursive=false error paths
+- [ ] SSH file upload/download round-trip using the existing `MOTLIE_SSH_TEST_HOST`
+  env gate (no new env var)
+- [ ] SSH directory upload/download round-trip using the existing
+  `MOTLIE_SSH_TEST_HOST` env gate
+- [ ] SSH overwrite=false and recursive=false error paths using the existing
+  `MOTLIE_SSH_TEST_HOST` env gate
 
 ### 1.13h — Documentation and behavior verification
 
