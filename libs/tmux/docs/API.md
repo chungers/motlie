@@ -900,6 +900,9 @@ let all: HashMap<PaneAddress, CaptureResult> =
 
 Query-based extraction of scrollback history.
 
+> See [`examples/stream_pane.rs`](../examples/stream_pane.rs) for continuous
+> streaming with overlap-aware deduplication (`tail -f` for tmux panes).
+
 ### Last N lines
 
 ```rust
