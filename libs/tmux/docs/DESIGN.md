@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-14 | @codex: Refine DC23 per user decisions — greenfield/breaking changes accepted, API uses `upload` / `download`, overwrite semantics configurable, directory transfer included now. | DC23 |
 | 2026-03-14 | @codex: Add DC23 summary for host-level SFTP file transfer, scoped as a transport/host capability (not a tmux-target capability), with companion deep-dive doc `SFTP.md`. | Overview, DC23, References |
 | 2026-03-14 | @claude: DC22 — `CreateSessionOptions` for window size and history limit on session creation. Option (b): per-session + per-pane `set-option` after create (tmux 3.1+). Migration/backwards compatibility explicitly out of scope per user direction. | HostHandle, control.rs, DC22 |
 | 2026-03-13 | @claude: DC21 R5 — address PR #71 R4: scope `transport_kind()` to `pub(crate)` (not public API), define reject semantics for duplicate params within same location. | DC21 |
@@ -2952,7 +2953,8 @@ The change extends the existing `SshConfig` rather than adding a new type:
 **Decision**: Add file transfer as a **transport/host capability**, not as a tmux-target
 capability. The public API should live on `HostHandle` and dispatch through
 `TransportKind`, with SSH-backed hosts using **SFTP** over the existing `russh`
-connection. `Target` is intentionally not extended for file transfer.
+connection. Use **`upload` / `download`** naming in the public API. Support files
+and directories now. `Target` is intentionally not extended for file transfer.
 
 **Rationale**:
 - File transfer addresses the host filesystem, not a tmux session/window/pane hierarchy.
@@ -2961,12 +2963,15 @@ connection. `Target` is intentionally not extended for file transfer.
 - SFTP is a better fit than the SCP protocol for the current architecture: binary-safe,
   structured, and implementable over the in-process SSH client without shelling out to
   external `scp`.
+- This is greenfield work, so breaking changes are acceptable and no migration layer is needed.
 
 **Initial scope**:
-- Whole-file binary-safe operations only (`read_file` / `write_file`)
+- Host-level `upload` / `download` operations
+- Support for regular files and directories
 - Transport-agnostic surface across `Local`, `Mock`, and `Ssh`
 - SSH implementation uses SFTP
-- No recursive directory copy, no streaming API, no permission-preservation semantics in v1
+- Configurable overwrite semantics (`overwrite=false` returns error on existing destination)
+- No required migration/backwards-compatibility layer
 
 **Deep dive**: See [`SFTP.md`](./SFTP.md) for the design and implementation outline.
 

@@ -6,12 +6,13 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-14 | @codex | Refined design per user decisions: greenfield/breaking changes accepted, API renamed to `upload` / `download`, overwrite semantics made configurable, directory support included now, and v1/file-only phasing removed. |
 | 2026-03-14 | @codex | Initial SFTP design note: add transport/host-level file transfer to complement transport `exec()`, use SFTP under the existing `russh` connection, and keep tmux pane `Target::exec()` separate. |
 
 ## Purpose
 
-This note outlines the changes needed to add remote file transfer to `libs/tmux`
-without conflating it with tmux-pane command execution.
+This note outlines the changes needed to add host-level file transfer to
+`libs/tmux` without conflating it with tmux-pane command execution.
 
 The current library has two distinct execution layers:
 
@@ -21,9 +22,19 @@ The current library has two distinct execution layers:
 
 File transfer belongs beside transport `exec()`, not beside pane `Target::exec()`.
 
+## Recorded Decisions
+
+- This is **greenfield** work. Breaking API changes are acceptable; there is no
+  migration or backwards-compatibility requirement for SFTP-related APIs.
+- Use **SFTP**, not the SCP protocol.
+- Use **`upload` / `download`** naming in the public API for clarity.
+- Support **files and directories now**, not as a later phase.
+- Overwrite behavior is **configurable**. If overwrite is disabled and the
+  destination already exists, return `Err`.
+
 ## Recommendation
 
-Use **SFTP**, not the SCP protocol.
+Use SFTP under the existing `russh` connection.
 
 Reasons:
 
@@ -35,32 +46,28 @@ Reasons:
 - SFTP fits the current in-process architecture and is easier to test across
   `Local`, `Mock`, and `Ssh` transports.
 
-If user-facing docs want to describe this as “scp-like remote copy”, keep the
-implementation note honest: it is SFTP-backed.
-
 ## Scope
 
 ### Goals
 
-- Add host-level file read/write support that complements transport `exec()`.
+- Add host-level upload and download support that complements transport `exec()`.
+- Support both regular files and directories.
 - Keep the API transport-agnostic across `Local`, `Mock`, and `Ssh`.
-- Keep v1 simple and robust: files only, binary-safe, no panics as validation.
+- Keep failure modes non-panicking and explicit.
 
 ### Non-goals
 
 - Literal SCP protocol compatibility
-- Recursive directory copy
-- Full directory sync / rsync semantics
+- Full rsync-style synchronization or delta transfer
 - Progress callbacks
-- Permission/ownership preservation in v1
-- Streaming APIs in v1
+- Automatic migration compatibility for earlier experimental transfer APIs
+- Permission/ownership preservation as a required contract
 
 ## Current Architecture Constraints
 
 Relevant current boundaries:
 
-- `TransportKind` exposes only `exec()`, `is_healthy()`, and `open_shell()` in
-  `src/transport.rs`.
+- `TransportKind` exposes the transport layer in `src/transport.rs`.
 - `SshTransport` already stores a persistent authenticated
   `russh::client::Handle<SshHandler>`.
 - `HostHandle` is the transport-agnostic public facade in `src/host.rs`.
@@ -71,12 +78,37 @@ forwarded through `HostHandle`.
 
 ## Proposed Public API
 
-Prefer transport-neutral naming over protocol naming:
+Use upload/download terminology at the host layer:
 
 ```rust
+pub struct TransferOptions {
+    pub overwrite: bool,
+    pub recursive: bool,
+}
+
+impl Default for TransferOptions {
+    fn default() -> Self {
+        Self {
+            overwrite: true,
+            recursive: false,
+        }
+    }
+}
+
 impl HostHandle {
-    pub async fn read_file(&self, path: &str) -> Result<Vec<u8>>;
-    pub async fn write_file(&self, path: &str, data: &[u8]) -> Result<()>;
+    pub async fn upload(
+        &self,
+        local_path: &std::path::Path,
+        remote_path: &str,
+        opts: &TransferOptions,
+    ) -> Result<()>;
+
+    pub async fn download(
+        &self,
+        remote_path: &str,
+        local_path: &std::path::Path,
+        opts: &TransferOptions,
+    ) -> Result<()>;
 }
 ```
 
@@ -84,36 +116,29 @@ And at the transport layer:
 
 ```rust
 impl TransportKind {
-    pub async fn read_file(&self, path: &str) -> Result<Vec<u8>>;
-    pub async fn write_file(&self, path: &str, data: &[u8]) -> Result<()>;
+    pub async fn upload(
+        &self,
+        local_path: &std::path::Path,
+        remote_path: &str,
+        opts: &TransferOptions,
+    ) -> Result<()>;
+
+    pub async fn download(
+        &self,
+        remote_path: &str,
+        local_path: &std::path::Path,
+        opts: &TransferOptions,
+    ) -> Result<()>;
 }
 ```
 
-Why `read_file` / `write_file` instead of `scp_to` / `scp_from`:
+### Directory semantics
 
-- They map naturally to `LocalTransport`, where “upload” and “download” are
-  awkward.
-- They describe semantics instead of protocol.
-- A higher-level copy helper can be added later without changing the transport
-  primitive.
-
-If overwrite behavior needs to be explicit in v1, add a small options type:
-
-```rust
-pub enum WriteMode {
-    Overwrite,
-    CreateNew,
-}
-```
-
-Then:
-
-```rust
-pub async fn write_file(&self, path: &str, data: &[u8], mode: WriteMode) -> Result<()>;
-```
-
-For maximum simplicity, `Overwrite` as the default is acceptable if documented
-clearly.
+- If the source is a directory, `opts.recursive` must be `true`, otherwise return `Err`.
+- A recursive transfer copies the directory tree rooted at the source.
+- The destination root may be created as part of the transfer, but missing parent
+  directories above that root should still return `Err`.
+- If `opts.overwrite == false` and the destination exists, return `Err`.
 
 ## Proposed Internal Changes
 
@@ -126,11 +151,21 @@ Update `libs/tmux/Cargo.toml`:
 Even though `Cargo.lock` already contains `russh-sftp` transitively, the crate
 should not rely on a transitive dependency for direct use.
 
-### 2. Transport Layer
+### 2. Types and API Surface
+
+Add `TransferOptions` as a public type. This captures the decisions that must be
+configurable at the API boundary today:
+
+- `overwrite`
+- `recursive`
+
+No migration layer is needed because this is greenfield work.
+
+### 3. Transport Layer
 
 Extend `src/transport.rs`:
 
-- Add `TransportKind::read_file()` and `TransportKind::write_file()`
+- Add `TransportKind::upload()` and `TransportKind::download()`
 - Add matching private implementations on:
   - `LocalTransport`
   - `MockTransport`
@@ -139,73 +174,70 @@ Extend `src/transport.rs`:
 Recommended behavior by transport:
 
 - `LocalTransport`
-  - Use `tokio::fs::read` / `tokio::fs::write`
-  - Wrap each operation in the existing transport timeout
+  - Implement upload/download as local filesystem copy operations
+  - Support both files and recursive directories
+  - Wrap each top-level transfer in the existing transport timeout
 - `MockTransport`
-  - Add in-memory file storage keyed by path
-  - Support deterministic success/error injection for tests
+  - Add an in-memory filesystem/tree model
+  - Support deterministic transfer error injection for tests
 - `SshTransport`
-  - Open a fresh SFTP subsystem/channel per operation
-  - Reuse the existing authenticated SSH handle only to open the channel
-  - Bound the full operation by `SshConfig::timeout`
+  - Use SFTP for file and directory operations
+  - Reuse the existing authenticated SSH handle to open SFTP channels
+  - Bound each top-level transfer by `SshConfig::timeout`
 
-Opening a fresh SFTP channel per operation is the simplest and most consistent
-starting point. Caching an SFTP client can be revisited later if performance
-actually matters.
+Opening a fresh SFTP channel per top-level transfer remains the simplest starting
+point. Shared-client optimization can be added later if needed.
 
-### 3. Host Layer
+### 4. Host Layer
 
 Extend `src/host.rs`:
 
-- Add public `HostHandle::read_file()` / `write_file()` wrappers
+- Add public `HostHandle::upload()` / `download()` wrappers
 - Forward directly to `self.inner.transport`
 
-Do **not** add file transfer methods on `Target`.
+Do **not** add transfer methods on `Target`.
 
-Reason: `Target` addresses tmux session/window/pane objects, while file transfer
-addresses the host filesystem. Mixing them would blur two different abstractions.
+Reason: `Target` addresses tmux session/window/pane objects, while upload/download
+address the host filesystem. Mixing them would blur two different abstractions.
 
-### 4. Public Exports
+### 5. Public Exports
 
-Update `src/lib.rs` if new transfer-related types are introduced, for example:
+Update `src/lib.rs` to export `TransferOptions` and any other public transfer types
+added during implementation.
 
-- `WriteMode`
-- future metadata types if added later
-
-### 5. Errors and Validation
+### 6. Errors and Validation
 
 Keep failure modes non-panicking:
 
-- missing file -> `Err(...)`
+- missing source -> `Err(...)`
+- destination exists with `overwrite=false` -> `Err(...)`
+- directory source with `recursive=false` -> `Err(...)`
 - permission denied -> `Err(...)`
 - SSH/SFTP subsystem failure -> `Err(...)`
 - timeout -> `Err(...)`
 
 Do not use `assert!` / `expect()` as guards for public transfer inputs.
 
-## Recommended Semantics for v1
+## Semantics
 
-- Binary-safe: file contents are raw bytes (`Vec<u8>`)
-- Files only: no recursive copy
-- No implicit parent-directory creation
-- No implicit chmod/chown preservation
+- Binary-safe: file contents are copied as raw bytes
+- File and directory transfers are both supported
+- Recursive directory transfer requires `opts.recursive=true`
+- Overwrite behavior is controlled by `opts.overwrite`
 - Timeout semantics match existing transports:
-  - `LocalTransport::timeout` bounds each file operation
-  - `SshConfig::timeout` bounds each SFTP operation
-
-The absence of implicit parent creation is intentional for robustness. If the
-destination directory does not exist, return an error instead of guessing.
+  - `LocalTransport::timeout` bounds each top-level transfer
+  - `SshConfig::timeout` bounds each top-level SFTP transfer
 
 ## Implementation Sketch
 
 At a high level:
 
-1. `HostHandle::write_file(path, data)` forwards to `TransportKind::write_file`.
-2. `TransportKind::write_file` dispatches to the concrete transport.
-3. `SshTransport::write_file` opens an SFTP channel on the existing SSH
-   connection, writes bytes, closes the handle, and returns `Result<()>`.
+1. `HostHandle::upload(local, remote, opts)` forwards to `TransportKind::upload`.
+2. `TransportKind::upload` dispatches to the concrete transport.
+3. `SshTransport::upload` opens an SFTP channel on the existing SSH connection and
+   recursively copies either a file or a directory tree according to `TransferOptions`.
 
-The read path is symmetric.
+The download path is symmetric.
 
 This keeps transfer support orthogonal to:
 
@@ -218,54 +250,58 @@ This keeps transfer support orthogonal to:
 
 ### Unit Tests
 
-- `MockTransport` read/write round-trip
-- `MockTransport` injected read/write failures
+- `MockTransport` file upload/download round-trip
+- `MockTransport` directory upload/download round-trip
+- `MockTransport` overwrite=false and recursive=false error paths
 - `TransportKind` dispatch tests for new methods
 
 ### Local Integration Tests
 
-- `HostHandle::write_file()` writes bytes to a temp file
-- `HostHandle::read_file()` reads the same bytes back
-- binary payload round-trip
+- file upload/download round-trip to temp paths
+- directory upload/download round-trip for a nested tree
+- overwrite=false conflict path
+- recursive=false directory rejection
 - missing-path and permission-denied error paths
 
 ### SSH Integration Tests
 
 Add env-gated integration tests similar to the existing SSH transport tests:
 
-- upload bytes to a temp path on the SSH target
-- read them back
-- verify timeout/error behavior on invalid paths
+- upload a file to a temp remote path, then download it back
+- upload a directory tree recursively, then download it back
+- verify overwrite=false and recursive=false behavior
 
 These tests should require the same SSH prerequisites already documented for
 `SshTransport`.
 
 ## Documentation Changes Needed When Implemented
 
-- Add a new section to `docs/API.md` for host-level file transfer
+- Add a new section to `docs/API.md` for host-level upload/download
 - Clarify the distinction between:
   - transport `exec()`
-  - host file transfer
+  - host upload/download
   - tmux-pane `Target::exec()`
 - Add at least one runnable example under `examples/` once implementation starts
 
-## Open Questions
+## Remaining Clarifications
 
-1. Should `write_file()` overwrite by default, or require explicit `WriteMode`?
-2. Do we want path-only primitives (`read_file` / `write_file`) first, or also
-   a convenience host-local copy helper?
-3. Should future directory-oriented operations live in the same API, or behind a
-   separate module once they exist?
+The major product decisions are now fixed. The remaining implementation-level
+clarifications are narrower:
+
+1. How much metadata, if any, should be preserved during directory transfers?
+2. Should symlinks be rejected initially or copied as links when encountered?
+3. Do we want a transfer result/report type later, or keep `Result<()>` initially?
 
 ## Summary
 
 The clean design is:
 
-- implement **SFTP-backed** file transfer
+- implement **SFTP-backed** host upload/download
 - place it on the **transport** boundary
 - expose it through **HostHandle**
 - keep it **out of `Target`**
-- start with **binary-safe whole-file read/write**
+- support **files and directories now**
+- make overwrite behavior **configurable**
 
 That complements the existing transport `exec()` API without weakening the tmux
 abstractions already in place.
