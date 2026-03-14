@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-14 | @codex | Added Phase 1.13 — host-level SFTP file transfer. Slots after 1.12 as an additive transport/host feature depending on 1.3, 1.7, and 2a.1. No hard gate for monitoring phases. |
 | 2026-03-14 | @claude | Phase 1.12 — `CreateSessionOptions` for window size and history limit (DC22). 7 tasks (1.12a–g). Migration/backwards compatibility explicitly out of scope per user direction. |
 | 2026-03-13 | @claude | Phase 1.11 — address PR #71 R4: scope `transport_kind()` to `pub(crate)` in 1.11l, add within-location duplicate rejection to 1.11d/1.11j, split 1.11m (localhost-only integration) from new 1.11o (SSH integration with env requirements). |
 | 2026-03-13 | @claude | Phase 1.11 — address PR #71 R3: scope 1.11l unit tests to localhost + error paths only, SSH transport verification in 1.11m integration. |
@@ -507,6 +508,75 @@ See DESIGN.md DC22.
 
 ---
 
+## Phase 1.13: Host-Level SFTP File Transfer
+
+Add transport/host-level file transfer to complement transport `exec()`. Scope is
+whole-file binary-safe read/write only; `Target` is not extended.
+
+### 1.13a — Transport surface (`src/transport.rs`)
+
+- [ ] Add `TransportKind::read_file(&self, path: &str) -> Result<Vec<u8>>`
+- [ ] Add `TransportKind::write_file(&self, path: &str, data: &[u8]) -> Result<()>`
+- [ ] Add matching private methods on `LocalTransport`, `MockTransport`, and `SshTransport`
+- [ ] Keep failure modes non-panicking; validation and I/O errors return `Err`
+
+### 1.13b — Local transport implementation (`src/transport.rs`)
+
+- [ ] Implement `LocalTransport::read_file()` via `tokio::fs::read`
+- [ ] Implement `LocalTransport::write_file()` via `tokio::fs::write`
+- [ ] Wrap both operations in the existing local transport timeout
+- [ ] Preserve binary payloads exactly (no text conversion)
+
+### 1.13c — Mock transport implementation (`src/transport.rs`)
+
+- [ ] Add in-memory file storage keyed by path for `MockTransport`
+- [ ] Add deterministic transfer error injection for tests (read/write failure paths)
+- [ ] Keep command mocking behavior unchanged for existing `exec()` tests
+
+### 1.13d — SSH SFTP implementation (`src/transport.rs`)
+
+- [ ] Add explicit `russh-sftp` dependency to `Cargo.toml`
+- [ ] Implement `SshTransport::read_file()` using an SFTP subsystem/channel on the
+  existing authenticated SSH connection
+- [ ] Implement `SshTransport::write_file()` using the same SFTP path
+- [ ] Bound each SFTP operation by `SshConfig::timeout`
+- [ ] Open a fresh SFTP channel per operation in v1; no shared client cache yet
+
+### 1.13e — Host API wiring (`src/host.rs`, `src/lib.rs`)
+
+- [ ] Add `HostHandle::read_file(&self, path: &str) -> Result<Vec<u8>>`
+- [ ] Add `HostHandle::write_file(&self, path: &str, data: &[u8]) -> Result<()>`
+- [ ] Re-export any newly introduced public transfer types from `lib.rs` if needed
+- [ ] Do not add file transfer methods on `Target`
+
+### 1.13f — Unit tests
+
+- [ ] `MockTransport` read/write round-trip
+- [ ] `MockTransport` read/write error injection paths
+- [ ] `TransportKind` dispatch tests for `read_file()` / `write_file()`
+- [ ] `LocalTransport` binary round-trip and missing-path error coverage
+
+### 1.13g — Integration tests
+
+- [ ] Localhost integration test: write bytes to a temp path, read them back, verify exact round-trip
+- [ ] Localhost error-path integration test: missing file and permission-denied cases
+- [ ] Env-gated SSH integration test: upload bytes to a temp remote path, read them back, clean up
+
+### 1.13h — Documentation and behavior verification
+
+- [ ] Update `docs/API.md` with host-level file transfer examples and boundary notes:
+  transport `exec()` vs host file transfer vs pane `Target::exec()`
+- [ ] Add example-program task placeholder pending user direction on the preferred
+  verification use case (per examples process)
+- [ ] Cross-link implementation docs to [`SFTP.md`](./SFTP.md)
+
+**Depends on**: 1.3, 1.7, 2a.1
+
+**Gates**: None — additive. Can run parallel with 2a.2 and 2a.3. If 2a.4 starts in
+parallel, serialize `host.rs` edits to avoid merge contention.
+
+---
+
 ## Phase 2a: SSH Transport + Minimal Monitoring
 
 Add `SshTransport` and a thin monitoring vertical slice with control mode parsing.
@@ -858,6 +928,8 @@ Out of current scope. Listed for continuity.
  │     │
  │     ├── 1.11 SshConfig URI ext (src/uri.rs) [1.11a-f after 1.1; 1.11g after 2a.1]
  │     │
+ │     ├── 1.13 SFTP file transfer [needs 1.3 + 1.7 + 2a.1]
+ │     │
  │     └── 2a.2 Monitor parser [needs 1.7 + 1.9a]
  │          │
  │          └── 2a.4 Monitor handles
@@ -893,6 +965,9 @@ Notes:
   dependencies (listed in section above) allow internal parallelism within 1.10.
 - `1.11` (SshConfig URI) — field changes (1.11a–b) start immediately; parse/render
   (1.11c–f, 1.11j–k) after 1.11a–b; connect (1.11g, 1.11l) requires 2a.1. No gates.
+- `1.13` (SFTP file transfer) depends on the completed SSH transport in 2a.1 and
+  the host/transport abstraction from 1.3 + 1.7. No gates; additive alongside
+  other post-1.12 work.
 - `2b.3` and `2c.4` both modify `monitor.rs` and `host.rs` — must land serially.
 - Phase 4 tasks are independent and can start as soon as their prerequisites are met.
 
