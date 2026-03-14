@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-14 | @codex: Address PR #78 review by clarifying DC23 test policy (localhost SFTP tests are not tmux-gated) and directory overwrite semantics (`overwrite=true` merges into an existing destination tree rather than replacing it). | DC23 |
 | 2026-03-14 | @codex: Refine DC23 per user decisions — greenfield/breaking changes accepted, API uses `upload` / `download`, overwrite semantics configurable, directory transfer included now. | DC23 |
 | 2026-03-14 | @codex: Add DC23 summary for host-level SFTP file transfer, scoped as a transport/host capability (not a tmux-target capability), with companion deep-dive doc `SFTP.md`. | Overview, DC23, References |
 | 2026-03-14 | @claude: DC22 — `CreateSessionOptions` for window size and history limit on session creation. Option (b): per-session + per-pane `set-option` after create (tmux 3.1+). Migration/backwards compatibility explicitly out of scope per user direction. | HostHandle, control.rs, DC22 |
@@ -2970,7 +2971,9 @@ and directories now. `Target` is intentionally not extended for file transfer.
 - Support for regular files and directories
 - Transport-agnostic surface across `Local`, `Mock`, and `Ssh`
 - SSH implementation uses SFTP
-- Configurable overwrite semantics (`overwrite=false` returns error on existing destination)
+- Configurable overwrite semantics (`overwrite=false` returns error on existing destination;
+  for directories, `overwrite=true` merges into an existing destination tree rather than
+  replacing it)
 - No required migration/backwards-compatibility layer
 
 **Deep dive**: See [`SFTP.md`](./SFTP.md) for the design and implementation outline.
