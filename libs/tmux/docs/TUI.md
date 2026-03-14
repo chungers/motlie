@@ -162,32 +162,35 @@ attributes at each cell position.
 
 ### Architecture Overview
 
-Both approaches share a common rendering pipeline:
+Both approaches converge at the **StyledGrid** and share the rendering
+widget. They differ in how that grid is produced:
 
 ```
-tmux pane (vim, htop, shell, etc.)
-    │
-    ▼
-[Source Layer]                ← Approach A or B (see below)
-    │
-    ▼
-ANSI SGR Frame               ← text + SGR escape sequences, one rendered frame
-    │
-    ▼
-[SGR Parser]                 ← extract (char, fg, bg, modifiers) per cell
-    │
-    ▼
-StyledGrid [W × H]           ← intermediate representation
-    │
-    ▼
-[TmuxMirror Widget]          ← maps StyledGrid → ratatui::buffer::Buffer
-    │
-    ▼
-ratatui Terminal::draw()     ← paint to local terminal
+Approach A (Polling)              Approach B (Control Mode)
+
+capture-pane -ep                  tmux -CC attach
+    │                                 │
+    ▼                                 ▼
+ANSI SGR Frame (text + SGR)       %output notifications (raw PTY bytes)
+    │                                 │
+    ▼                                 ▼
+[SGR Parser]                      [VTE / alacritty_terminal]
+    │                                 │
+    └───────────┬─────────────────────┘
+                ▼
+        StyledGrid [W × H]       ← shared intermediate representation
+                │
+                ▼
+        [TmuxMirror Widget]      ← shared: maps StyledGrid → ratatui Buffer
+                │
+                ▼
+        ratatui Terminal::draw() ← paint to local terminal
 ```
 
-The two approaches differ only in the **Source Layer** — how frames are
-obtained from tmux.
+Approach A parses a **pre-rendered frame** (only SGR sequences, no cursor
+movement) — a focused ~200-line parser. Approach B processes a **raw terminal
+byte stream** (cursor movement, scrolling, alternate screen, etc.) and requires
+a full VTE to maintain screen state. Both produce the same `StyledGrid`.
 
 ---
 
