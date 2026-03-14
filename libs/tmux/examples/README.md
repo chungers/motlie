@@ -25,6 +25,7 @@ cargo build -p motlie-tmux --examples
 ./target/debug/examples/send_and_capture ssh://localhost
 ./target/debug/examples/exec_command ssh://localhost "uname -a"
 ./target/debug/examples/target_spec ssh://localhost "dev:0.0"
+./target/debug/examples/stream_pane ssh://localhost my_session --lines 50
 ```
 
 ## Examples
@@ -174,4 +175,35 @@ Parsed TargetSpec: dev:0.0
 Resolved target: dev:0.0
   level: Pane
   Pane: pane_id=%0, address=dev:0.0
+```
+
+### stream_pane — Continuous pane streaming
+
+Like `tail -f` for a tmux pane. Polls scrollback at a defined interval and
+prints only new lines using overlap-aware deduplication. Ctrl-C exits cleanly.
+
+```sh
+# Stream an existing session (default: last 50 lines, 200ms poll)
+cargo run -p motlie-tmux --example stream_pane -- ssh://localhost my_session
+
+# Custom line count and interval
+cargo run -p motlie-tmux --example stream_pane -- ssh://localhost my_session --lines 100 --interval 500
+
+# Stream a specific pane
+cargo run -p motlie-tmux --example stream_pane -- ssh://localhost "my_session:0.1" --lines 30
+
+# Pre-built binary
+./target/debug/examples/stream_pane ssh://localhost my_session --lines 50 --interval 200
+```
+
+Expected output (streaming as commands run in the target pane):
+```
+Streaming my_session (last 50 lines, 200ms interval). Ctrl-C to stop.
+$ echo hello
+hello
+$ make test
+running 42 tests...
+test result: ok. 42 passed; 0 failed
+^C
+Stopped.
 ```
