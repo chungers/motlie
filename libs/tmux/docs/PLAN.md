@@ -4,6 +4,11 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-15 | @codex | Address PR #78 final doc follow-up: lock symlink rejection, metadata non-preservation, and `Result<()>` return shape into Phase 1.13 tasks and test coverage. |
+| 2026-03-14 | @codex | Address PR #78 re-review: make remote path parameters `&Path`, define `cp -r` style directory placement semantics, and add explicit copy-into vs copy-as test tasks. |
+| 2026-03-14 | @codex | Address PR #78 review: localhost SFTP integration tests run unconditionally (no tmux gate), directory overwrite semantics are explicit merge semantics, and Phase 1.13 is split into smaller incremental tasks. |
+| 2026-03-14 | @codex | Refined Phase 1.13 per user decisions: greenfield/breaking changes accepted, API uses `upload` / `download`, overwrite semantics configurable, directory transfer included now, file-only/v1 phasing removed. |
+| 2026-03-14 | @codex | Added Phase 1.13 — host-level SFTP file transfer. Slots after 1.12 as an additive transport/host feature depending on 1.3, 1.7, and 2a.1. No hard gate for monitoring phases. |
 | 2026-03-14 | @claude | Phase 1.12 — `CreateSessionOptions` for window size and history limit (DC22). 7 tasks (1.12a–g). Migration/backwards compatibility explicitly out of scope per user direction. |
 | 2026-03-13 | @claude | Phase 1.11 — address PR #71 R4: scope `transport_kind()` to `pub(crate)` in 1.11l, add within-location duplicate rejection to 1.11d/1.11j, split 1.11m (localhost-only integration) from new 1.11o (SSH integration with env requirements). |
 | 2026-03-13 | @claude | Phase 1.11 — address PR #71 R3: scope 1.11l unit tests to localhost + error paths only, SSH transport verification in 1.11m integration. |
@@ -507,6 +512,115 @@ See DESIGN.md DC22.
 
 ---
 
+## Phase 1.13: Host-Level SFTP File Transfer
+
+Add transport/host-level SFTP-backed upload/download to complement transport
+`exec()`. This is greenfield work: breaking changes are acceptable and no migration
+or compatibility layer is required. Scope includes files and directories; `Target`
+is not extended.
+
+### 1.13a — Transfer options type (`src/types.rs`)
+
+- [ ] Add public `TransferOptions { overwrite: bool, recursive: bool }` with `Default`
+- [ ] Document in rustdoc that directory overwrite with `overwrite=true` uses merge semantics
+
+### 1.13b — Transport surface (`src/transport.rs`)
+
+- [ ] Add `TransportKind::upload(&self, local_path: &Path, remote_path: &Path, opts) -> Result<()>`
+- [ ] Add `TransportKind::download(&self, remote_path: &Path, local_path: &Path, opts) -> Result<()>`
+- [ ] Document `cp -r` style directory placement semantics: existing destination directory
+  means copy into it; missing destination path means copy as that path
+- [ ] Lock the public return shape to `Result<()>` initially; no transfer summary type yet
+- [ ] Keep failure modes non-panicking; validation and I/O errors return `Err`
+
+### 1.13c — Local transport implementation (`src/transport.rs`)
+
+- [ ] Implement `LocalTransport::upload()` for regular files
+- [ ] Implement `LocalTransport::download()` symmetrically
+- [ ] Implement recursive directory copy when `opts.recursive == true`
+- [ ] Return error for directory sources when `opts.recursive == false`
+- [ ] Return error when destination exists and `opts.overwrite == false`
+- [ ] Reject symlinks encountered during upload/download rather than following them
+- [ ] For directory destinations with `opts.overwrite == true`, merge into the existing
+  tree: overwrite conflicting files, create missing entries, preserve extras
+- [ ] Wrap each top-level transfer in the existing local transport timeout
+
+### 1.13d — Mock transport implementation (`src/transport.rs`)
+
+- [ ] Add an in-memory filesystem/tree model for `MockTransport`
+- [ ] Support file and directory upload/download semantics
+- [ ] Mirror the same directory merge semantics as the local implementation
+- [ ] Mirror the same symlink rejection semantics as the local implementation
+- [ ] Add deterministic transfer error injection for tests
+- [ ] Keep command mocking behavior unchanged for existing `exec()` tests
+
+### 1.13e — SSH SFTP implementation (`src/transport.rs`)
+
+- [ ] Add explicit `russh-sftp` dependency to `Cargo.toml`
+- [ ] Implement `SshTransport::upload()` using SFTP for regular files
+- [ ] Implement `SshTransport::download()` using SFTP for regular files
+- [ ] Implement recursive directory upload/download over SFTP
+- [ ] Enforce `overwrite=false` and `recursive=false` semantics consistently
+- [ ] Reject symlinks encountered during SFTP traversal rather than following them
+- [ ] For directory destinations with `opts.overwrite == true`, mirror the same merge
+  semantics as local/mock implementations
+- [ ] Bound each top-level SFTP transfer by `SshConfig::timeout`
+- [ ] Open a fresh SFTP channel per top-level transfer; no shared client cache initially
+
+### 1.13f — HostHandle, public exports, and call-site wiring (`src/host.rs`, `src/lib.rs`, callers`)
+
+- [ ] Add `HostHandle::upload(&Path, &Path, ...)` / `HostHandle::download(&Path, &Path, ...)`
+- [ ] Re-export `TransferOptions` and any new public transfer types from `lib.rs`
+- [ ] Update callers/tests/examples to use `upload(...)` / `download(...)`
+- [ ] Do not add file transfer methods on `Target`
+
+### 1.13g — Unit tests
+
+- [ ] `MockTransport` file upload/download round-trip
+- [ ] `MockTransport` directory upload/download round-trip
+- [ ] `MockTransport` directory copy-into vs copy-as behavior for existing vs missing destination roots
+- [ ] `MockTransport` directory merge semantics with `overwrite=true`
+- [ ] `MockTransport` symlink rejection path
+- [ ] `overwrite=false` conflict path
+- [ ] `recursive=false` directory rejection path
+- [ ] `TransportKind` dispatch tests for `upload()` / `download()`
+
+### 1.13h — Integration tests
+
+- [ ] Localhost file upload/download round-trip with exact byte verification.
+  Run unconditionally; no `tmux` availability gate is relevant for host-level file transfer.
+- [ ] Localhost directory upload/download round-trip for a nested tree
+- [ ] Localhost directory copy-into vs copy-as behavior for existing vs missing destination roots
+- [ ] Localhost directory merge behavior with `overwrite=true`
+- [ ] Localhost overwrite=false and recursive=false error paths
+- [ ] Localhost symlink rejection path
+- [ ] SSH file upload/download round-trip using the existing `MOTLIE_SSH_TEST_HOST`
+  env gate (no new env var)
+- [ ] SSH directory upload/download round-trip using the existing
+  `MOTLIE_SSH_TEST_HOST` env gate
+- [ ] SSH directory copy-into vs copy-as behavior for existing vs missing destination
+  roots using the existing `MOTLIE_SSH_TEST_HOST` env gate
+- [ ] SSH directory merge behavior with `overwrite=true` using the existing
+  `MOTLIE_SSH_TEST_HOST` env gate
+- [ ] SSH overwrite=false and recursive=false error paths using the existing
+  `MOTLIE_SSH_TEST_HOST` env gate
+- [ ] SSH symlink rejection path using the existing `MOTLIE_SSH_TEST_HOST` env gate
+
+### 1.13i — Documentation and behavior verification
+
+- [ ] Update `docs/API.md` with host-level upload/download examples and boundary notes:
+  transport `exec()` vs host upload/download vs pane `Target::exec()`
+- [ ] Add example-program task placeholder pending user direction on the preferred
+  verification use case (per examples process)
+- [ ] Cross-link implementation docs to [`SFTP.md`](./SFTP.md)
+
+**Depends on**: 1.3, 1.7, 2a.1
+
+**Gates**: None — additive. Can run parallel with 2a.2 and 2a.3. If 2a.4 starts in
+parallel, serialize `host.rs` edits to avoid merge contention.
+
+---
+
 ## Phase 2a: SSH Transport + Minimal Monitoring
 
 Add `SshTransport` and a thin monitoring vertical slice with control mode parsing.
@@ -858,6 +972,8 @@ Out of current scope. Listed for continuity.
  │     │
  │     ├── 1.11 SshConfig URI ext (src/uri.rs) [1.11a-f after 1.1; 1.11g after 2a.1]
  │     │
+ │     ├── 1.13 SFTP file transfer [needs 1.3 + 1.7 + 2a.1]
+ │     │
  │     └── 2a.2 Monitor parser [needs 1.7 + 1.9a]
  │          │
  │          └── 2a.4 Monitor handles
@@ -893,6 +1009,9 @@ Notes:
   dependencies (listed in section above) allow internal parallelism within 1.10.
 - `1.11` (SshConfig URI) — field changes (1.11a–b) start immediately; parse/render
   (1.11c–f, 1.11j–k) after 1.11a–b; connect (1.11g, 1.11l) requires 2a.1. No gates.
+- `1.13` (SFTP file transfer) depends on the completed SSH transport in 2a.1 and
+  the host/transport abstraction from 1.3 + 1.7. No gates; additive alongside
+  other post-1.12 work.
 - `2b.3` and `2c.4` both modify `monitor.rs` and `host.rs` — must land serially.
 - Phase 4 tasks are independent and can start as soon as their prerequisites are met.
 

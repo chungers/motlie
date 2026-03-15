@@ -6,6 +6,11 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-15 | @codex: Address PR #78 final doc follow-up by locking DC23 follow-on decisions: reject symlinks initially, do not preserve metadata, and keep the first public API at `Result<()>`. | DC23 |
+| 2026-03-14 | @codex: Address PR #78 re-review by clarifying DC23 path typing (`&Path` for local and remote endpoints) and `cp -r` style directory placement semantics (existing directory => copy into; missing path => copy as). | DC23 |
+| 2026-03-14 | @codex: Address PR #78 review by clarifying DC23 test policy (localhost SFTP tests are not tmux-gated) and directory overwrite semantics (`overwrite=true` merges into an existing destination tree rather than replacing it). | DC23 |
+| 2026-03-14 | @codex: Refine DC23 per user decisions — greenfield/breaking changes accepted, API uses `upload` / `download`, overwrite semantics configurable, directory transfer included now. | DC23 |
+| 2026-03-14 | @codex: Add DC23 summary for host-level SFTP file transfer, scoped as a transport/host capability (not a tmux-target capability), with companion deep-dive doc `SFTP.md`. | Overview, DC23, References |
 | 2026-03-14 | @claude: DC22 — `CreateSessionOptions` for window size and history limit on session creation. Option (b): per-session + per-pane `set-option` after create (tmux 3.1+). Migration/backwards compatibility explicitly out of scope per user direction. | HostHandle, control.rs, DC22 |
 | 2026-03-13 | @claude: DC21 R5 — address PR #71 R4: scope `transport_kind()` to `pub(crate)` (not public API), define reject semantics for duplicate params within same location. | DC21 |
 | 2026-03-13 | @claude: DC21 R4 — address PR #71 R3: wrap raw transports in `TransportKind::Local/Ssh` in pseudocode (match `HostHandle::new` constructor). | DC21 |
@@ -97,12 +102,14 @@ A library that:
 - **In scope**: Localhost tmux (direct execution), SSH transport for remote hosts,
   multi-host connection pool, tmux session creation and termination, session/window/pane
   listing, pane content capture, structured command execution (exec with exit code),
-  remote input with escaping, session metadata management, named workstreams,
+  remote input with escaping, host-level file transfer (local filesystem / SSH SFTP),
+  session metadata management, named workstreams,
   output sink pipeline with pluggable content matching, pipe-based output monitoring,
   rule-based automation, structured logging, CLI binary
 - **Out of scope**: Web UI, SSH server setup/configuration, tmux installation
 - **Future**: TUI interface based on [ratatui](https://ratatui.rs/) (not in current phases)
-  with reliability and capture-fidelity guidance in [`TUI.md`](./TUI.md)
+  with reliability and capture-fidelity guidance in [`TUI.md`](./TUI.md). SFTP
+  design deep dive lives in [`SFTP.md`](./SFTP.md).
 
 ---
 
@@ -2944,6 +2951,41 @@ The change extends the existing `SshConfig` rather than adding a new type:
         flagged that a pub accessor leaks the transport abstraction DC21 says should
         stay internal. -->
 
+### DC23: Host-Level File Transfer via SFTP
+
+**Decision**: Add file transfer as a **transport/host capability**, not as a tmux-target
+capability. The public API should live on `HostHandle` and dispatch through
+`TransportKind`, with SSH-backed hosts using **SFTP** over the existing `russh`
+connection. Use **`upload` / `download`** naming in the public API. Support files
+and directories now. `Target` is intentionally not extended for file transfer.
+
+**Rationale**:
+- File transfer addresses the host filesystem, not a tmux session/window/pane hierarchy.
+- The existing split already distinguishes transport-level host execution from pane-level
+  `Target::exec()`. SFTP complements the former.
+- SFTP is a better fit than the SCP protocol for the current architecture: binary-safe,
+  structured, and implementable over the in-process SSH client without shelling out to
+  external `scp`.
+- This is greenfield work, so breaking changes are acceptable and no migration layer is needed.
+
+**Initial scope**:
+- Host-level `upload` / `download` operations
+- Strongly typed path parameters for both local and remote endpoints
+- Support for regular files and directories
+- Transport-agnostic surface across `Local`, `Mock`, and `Ssh`
+- SSH implementation uses SFTP
+- Directory placement follows `cp -r` semantics: existing destination directory means
+  copy into it; missing destination path means copy as that path
+- Configurable overwrite semantics (`overwrite=false` returns error on existing destination;
+  for directories, `overwrite=true` merges into an existing destination tree rather than
+  replacing it)
+- Reject symlinks initially rather than following them
+- Do not preserve file metadata as part of the transfer contract
+- Public transfer methods return `Result<()>` initially
+- No required migration/backwards-compatibility layer
+
+**Deep dive**: See [`SFTP.md`](./SFTP.md) for the design and implementation outline.
+
 ### DC7: Capture-Pane vs Stream Monitoring
 
 **Decision**: Use `capture-pane -p` for on-demand snapshots, with optional `-e` when
@@ -3885,3 +3927,4 @@ see [`TUI.md`](./TUI.md).
 
 - [motlie MCP DESIGN.md](../../../libs/mcp/docs/DESIGN.md) — reference for doc conventions
 - [tmux TUI.md](./TUI.md) — TUI-specific reliability and capture-fidelity policy
+- [tmux SFTP.md](./SFTP.md) — host-level file transfer design deep dive
