@@ -300,6 +300,294 @@ fn copy_dir_contents(src: &Path, dst: &Path, opts: &TransferOptions) -> Result<(
 }
 
 // ---------------------------------------------------------------------------
+// SFTP transfer helpers (DC23, Phase 1.13e)
+// ---------------------------------------------------------------------------
+
+/// Resolve SFTP destination path following `cp -r` semantics.
+///
+/// Checks via SFTP if `dst` exists as a directory; if so, appends the
+/// source basename. Returns the effective destination path as a String.
+async fn sftp_resolve_destination(
+    sftp: &russh_sftp::client::SftpSession,
+    src: &Path,
+    dst: &Path,
+) -> Result<String> {
+    let dst_str = dst.to_str()
+        .ok_or_else(|| anyhow!("destination path is not valid UTF-8: {}", dst.display()))?;
+
+    let dst_is_dir = match sftp.symlink_metadata(dst_str).await {
+        Ok(meta) => meta.is_dir(),
+        Err(_) => false, // path doesn't exist
+    };
+
+    if dst_is_dir {
+        let basename = src
+            .file_name()
+            .ok_or_else(|| anyhow!("source path has no filename: {}", src.display()))?;
+        Ok(format!("{}/{}", dst_str.trim_end_matches('/'), basename.to_string_lossy()))
+    } else {
+        Ok(dst_str.to_string())
+    }
+}
+
+/// Upload a single file via SFTP.
+async fn sftp_upload_file(
+    sftp: &russh_sftp::client::SftpSession,
+    local_path: &Path,
+    remote_path: &Path,
+    opts: &TransferOptions,
+) -> Result<()> {
+    let effective_dst = sftp_resolve_destination(sftp, local_path, remote_path).await?;
+
+    // Check if destination exists
+    if let Ok(meta) = sftp.symlink_metadata(&effective_dst).await {
+        if !opts.overwrite {
+            return Err(anyhow!(
+                "destination already exists and overwrite=false: {}",
+                effective_dst
+            ));
+        }
+        if meta.is_dir() {
+            return Err(anyhow!(
+                "type mismatch: source is a file but destination is a directory: {}",
+                effective_dst
+            ));
+        }
+    }
+
+    // Check parent exists
+    if let Some(parent) = Path::new(&effective_dst).parent() {
+        let parent_str = parent.to_str().unwrap_or("");
+        if !parent_str.is_empty() && parent_str != "/" {
+            if sftp.symlink_metadata(parent_str).await.is_err() {
+                return Err(anyhow!("parent directory does not exist: {}", parent_str));
+            }
+        }
+    }
+
+    let data = std::fs::read(local_path)
+        .map_err(|e| anyhow!("failed to read local file {}: {}", local_path.display(), e))?;
+    sftp.write(&effective_dst, &data).await
+        .map_err(|e| anyhow!("SFTP write failed: {} -> {}: {}", local_path.display(), effective_dst, e))?;
+    Ok(())
+}
+
+/// Upload a directory tree via SFTP.
+async fn sftp_upload_dir(
+    sftp: &russh_sftp::client::SftpSession,
+    local_path: &Path,
+    remote_path: &Path,
+    opts: &TransferOptions,
+) -> Result<()> {
+    let effective_dst = sftp_resolve_destination(sftp, local_path, remote_path).await?;
+
+    // Check if effective destination exists
+    match sftp.symlink_metadata(&effective_dst).await {
+        Ok(meta) => {
+            if !opts.overwrite {
+                return Err(anyhow!(
+                    "destination already exists and overwrite=false: {}",
+                    effective_dst
+                ));
+            }
+            if !meta.is_dir() {
+                return Err(anyhow!(
+                    "type mismatch: source is a directory but destination is a file: {}",
+                    effective_dst
+                ));
+            }
+            // Exists as dir → merge into it
+        }
+        Err(_) => {
+            // Check parent exists
+            if let Some(parent) = Path::new(&effective_dst).parent() {
+                let parent_str = parent.to_str().unwrap_or("");
+                if !parent_str.is_empty() && parent_str != "/" {
+                    if sftp.symlink_metadata(parent_str).await.is_err() {
+                        return Err(anyhow!("parent directory does not exist: {}", parent_str));
+                    }
+                }
+            }
+            sftp.create_dir(&effective_dst).await
+                .map_err(|e| anyhow!("SFTP mkdir failed: {}: {}", effective_dst, e))?;
+        }
+    }
+
+    sftp_upload_dir_contents(sftp, local_path, &effective_dst, opts).await
+}
+
+/// Recursively upload directory contents via SFTP.
+async fn sftp_upload_dir_contents(
+    sftp: &russh_sftp::client::SftpSession,
+    local_dir: &Path,
+    remote_dir: &str,
+    opts: &TransferOptions,
+) -> Result<()> {
+    for entry in std::fs::read_dir(local_dir)
+        .map_err(|e| anyhow!("failed to read local dir {}: {}", local_dir.display(), e))?
+    {
+        let entry = entry.map_err(|e| anyhow!("dir entry error: {}", e))?;
+        let entry_path = entry.path();
+        let meta = std::fs::symlink_metadata(&entry_path)
+            .map_err(|e| anyhow!("failed to stat {}: {}", entry_path.display(), e))?;
+
+        if meta.file_type().is_symlink() {
+            return Err(anyhow!("symlink encountered: {}", entry_path.display()));
+        }
+
+        let name = entry.file_name();
+        let remote_entry = format!("{}/{}", remote_dir.trim_end_matches('/'), name.to_string_lossy());
+
+        if meta.is_dir() {
+            // Create remote dir if it doesn't exist
+            match sftp.symlink_metadata(&remote_entry).await {
+                Ok(rmeta) => {
+                    if !rmeta.is_dir() {
+                        return Err(anyhow!(
+                            "type mismatch: source is a directory but destination is a file: {}",
+                            remote_entry
+                        ));
+                    }
+                }
+                Err(_) => {
+                    sftp.create_dir(&remote_entry).await
+                        .map_err(|e| anyhow!("SFTP mkdir failed: {}: {}", remote_entry, e))?;
+                }
+            }
+            Box::pin(sftp_upload_dir_contents(sftp, &entry_path, &remote_entry, opts)).await?;
+        } else {
+            let data = std::fs::read(&entry_path)
+                .map_err(|e| anyhow!("failed to read {}: {}", entry_path.display(), e))?;
+            sftp.write(&remote_entry, &data).await
+                .map_err(|e| anyhow!("SFTP write failed: {}: {}", remote_entry, e))?;
+        }
+    }
+    Ok(())
+}
+
+/// Download a single file via SFTP.
+async fn sftp_download_file(
+    sftp: &russh_sftp::client::SftpSession,
+    remote_path: &Path,
+    local_path: &Path,
+    opts: &TransferOptions,
+) -> Result<()> {
+    let remote_str = remote_path.to_str()
+        .ok_or_else(|| anyhow!("remote path is not valid UTF-8: {}", remote_path.display()))?;
+
+    // Resolve destination: if local_path is an existing dir, copy into it
+    let effective_dst = resolve_destination(remote_path, local_path)?;
+
+    if effective_dst.exists() {
+        if !opts.overwrite {
+            return Err(anyhow!(
+                "destination already exists and overwrite=false: {}",
+                effective_dst.display()
+            ));
+        }
+        if effective_dst.is_dir() {
+            return Err(anyhow!(
+                "type mismatch: source is a file but destination is a directory: {}",
+                effective_dst.display()
+            ));
+        }
+    }
+
+    if let Some(parent) = effective_dst.parent() {
+        if !parent.exists() {
+            return Err(anyhow!("parent directory does not exist: {}", parent.display()));
+        }
+    }
+
+    let data = sftp.read(remote_str).await
+        .map_err(|e| anyhow!("SFTP read failed: {}: {}", remote_str, e))?;
+    std::fs::write(&effective_dst, &data)
+        .map_err(|e| anyhow!("failed to write local file {}: {}", effective_dst.display(), e))?;
+    Ok(())
+}
+
+/// Download a directory tree via SFTP.
+async fn sftp_download_dir(
+    sftp: &russh_sftp::client::SftpSession,
+    remote_path: &Path,
+    local_path: &Path,
+    opts: &TransferOptions,
+) -> Result<()> {
+    let effective_dst = resolve_destination(remote_path, local_path)?;
+
+    if effective_dst.exists() {
+        if !opts.overwrite {
+            return Err(anyhow!(
+                "destination already exists and overwrite=false: {}",
+                effective_dst.display()
+            ));
+        }
+        if effective_dst.is_file() {
+            return Err(anyhow!(
+                "type mismatch: source is a directory but destination is a file: {}",
+                effective_dst.display()
+            ));
+        }
+    } else {
+        if let Some(parent) = effective_dst.parent() {
+            if !parent.exists() {
+                return Err(anyhow!("parent directory does not exist: {}", parent.display()));
+            }
+        }
+        std::fs::create_dir(&effective_dst)
+            .map_err(|e| anyhow!("failed to create dir {}: {}", effective_dst.display(), e))?;
+    }
+
+    let remote_str = remote_path.to_str()
+        .ok_or_else(|| anyhow!("remote path is not valid UTF-8: {}", remote_path.display()))?;
+    sftp_download_dir_contents(sftp, remote_str, &effective_dst, opts).await
+}
+
+/// Recursively download directory contents via SFTP.
+async fn sftp_download_dir_contents(
+    sftp: &russh_sftp::client::SftpSession,
+    remote_dir: &str,
+    local_dir: &Path,
+    opts: &TransferOptions,
+) -> Result<()> {
+    let entries = sftp.read_dir(remote_dir).await
+        .map_err(|e| anyhow!("SFTP readdir failed: {}: {}", remote_dir, e))?;
+
+    for entry in entries {
+        let name = entry.file_name();
+        if name == "." || name == ".." {
+            continue;
+        }
+
+        let remote_entry = format!("{}/{}", remote_dir.trim_end_matches('/'), name);
+
+        // Use lstat to detect symlinks
+        let meta = sftp.symlink_metadata(&remote_entry).await
+            .map_err(|e| anyhow!("SFTP lstat failed: {}: {}", remote_entry, e))?;
+
+        if meta.is_symlink() {
+            return Err(anyhow!("symlink encountered: {}", remote_entry));
+        }
+
+        let local_entry = local_dir.join(&name);
+
+        if meta.is_dir() {
+            if !local_entry.exists() {
+                std::fs::create_dir(&local_entry)
+                    .map_err(|e| anyhow!("failed to create dir {}: {}", local_entry.display(), e))?;
+            }
+            Box::pin(sftp_download_dir_contents(sftp, &remote_entry, &local_entry, opts)).await?;
+        } else {
+            let data = sftp.read(&remote_entry).await
+                .map_err(|e| anyhow!("SFTP read failed: {}: {}", remote_entry, e))?;
+            std::fs::write(&local_entry, &data)
+                .map_err(|e| anyhow!("failed to write {}: {}", local_entry.display(), e))?;
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // LocalTransport
 // ---------------------------------------------------------------------------
 
@@ -1389,30 +1677,116 @@ impl SshTransport {
         &self.config
     }
 
+    /// Open a fresh SFTP session on the existing SSH connection (DC23).
+    ///
+    /// Opens a new session channel, requests the SFTP subsystem, and returns
+    /// an initialized `SftpSession`. Each transfer gets its own channel.
+    async fn open_sftp(&self) -> Result<russh_sftp::client::SftpSession> {
+        let channel = {
+            let handle = self.handle.lock().await;
+            handle.channel_open_session().await.map_err(|e| {
+                anyhow!("SSH: failed to open session channel for SFTP: {}", e)
+            })?
+        };
+
+        channel
+            .request_subsystem(true, "sftp")
+            .await
+            .map_err(|e| anyhow!("SSH: failed to request SFTP subsystem: {}", e))?;
+
+        let sftp = russh_sftp::client::SftpSession::new(channel.into_stream()).await
+            .map_err(|e| anyhow!("SSH: failed to initialize SFTP session: {}", e))?;
+        Ok(sftp)
+    }
+
     /// Upload a file or directory to the remote host via SFTP (DC23).
     ///
-    /// TODO(1.13e): Implement using russh-sftp. Currently returns an error
-    /// indicating SFTP is not yet implemented.
+    /// Opens a fresh SFTP channel, copies the local source to the remote
+    /// destination following `cp -r` semantics. Bounded by `config.timeout`.
     async fn upload(
         &self,
-        _local_path: &Path,
-        _remote_path: &Path,
-        _opts: &TransferOptions,
+        local_path: &Path,
+        remote_path: &Path,
+        opts: &TransferOptions,
     ) -> Result<()> {
-        Err(anyhow!("SFTP upload not yet implemented for SSH transport"))
+        tokio::time::timeout(self.config.timeout, async {
+            let src_meta = std::fs::symlink_metadata(local_path)
+                .map_err(|e| anyhow!("source not found: {}: {}", local_path.display(), e))?;
+
+            if src_meta.file_type().is_symlink() {
+                return Err(anyhow!("symlink encountered at source: {}", local_path.display()));
+            }
+
+            let sftp = self.open_sftp().await?;
+
+            if src_meta.is_dir() {
+                if !opts.recursive {
+                    return Err(anyhow!(
+                        "source is a directory but recursive=false: {}",
+                        local_path.display()
+                    ));
+                }
+                sftp_upload_dir(&sftp, local_path, remote_path, opts).await
+            } else {
+                sftp_upload_file(&sftp, local_path, remote_path, opts).await
+            }
+        })
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "SFTP upload timed out after {:?}: {} -> {}",
+                self.config.timeout,
+                local_path.display(),
+                remote_path.display()
+            )
+        })?
     }
 
     /// Download a file or directory from the remote host via SFTP (DC23).
     ///
-    /// TODO(1.13e): Implement using russh-sftp. Currently returns an error
-    /// indicating SFTP is not yet implemented.
+    /// Opens a fresh SFTP channel, copies the remote source to the local
+    /// destination following `cp -r` semantics. Bounded by `config.timeout`.
     async fn download(
         &self,
-        _remote_path: &Path,
-        _local_path: &Path,
-        _opts: &TransferOptions,
+        remote_path: &Path,
+        local_path: &Path,
+        opts: &TransferOptions,
     ) -> Result<()> {
-        Err(anyhow!("SFTP download not yet implemented for SSH transport"))
+        tokio::time::timeout(self.config.timeout, async {
+            let sftp = self.open_sftp().await?;
+
+            let remote_str = remote_path.to_str()
+                .ok_or_else(|| anyhow!("remote path is not valid UTF-8: {}", remote_path.display()))?;
+
+            // Use lstat (symlink_metadata) to detect symlinks without following
+            let remote_meta = sftp.symlink_metadata(remote_str).await
+                .map_err(|e| anyhow!("source not found: {}: {}", remote_path.display(), e))?;
+
+            if remote_meta.is_symlink() {
+                return Err(anyhow!("symlink encountered at source: {}", remote_path.display()));
+            }
+
+            if remote_meta.is_dir() {
+                if !opts.recursive {
+                    return Err(anyhow!(
+                        "source is a directory but recursive=false: {}",
+                        remote_path.display()
+                    ));
+                }
+                sftp_download_dir(&sftp, remote_path, local_path, opts).await
+            } else {
+                sftp_download_file(&sftp, remote_path, local_path, opts).await
+            }
+        })
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "SFTP download timed out after {:?}: {} -> {}",
+                self.config.timeout,
+                remote_path.display(),
+                local_path.display()
+            )
+        })?
     }
 }
 
@@ -1963,6 +2337,24 @@ mod tests {
             .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("disk full"));
+    }
+
+    #[tokio::test]
+    async fn mock_symlink_rejected() {
+        let tmp = make_temp_dir();
+        let real = tmp.path().join("real.txt");
+        std::fs::write(&real, b"data").unwrap();
+        let link = tmp.path().join("link.txt");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let mock = MockTransport::new();
+        let transport = TransportKind::Mock(mock);
+
+        let result = transport
+            .upload(&link, Path::new("/remote/link.txt"), &TransferOptions::default())
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("symlink"));
     }
 
     #[tokio::test]
