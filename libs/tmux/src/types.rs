@@ -343,6 +343,40 @@ pub struct CreateSessionOptions {
     pub history_limit: Option<u32>,
 }
 
+/// Options for host-level file transfer (DC23).
+///
+/// Controls overwrite and recursive behavior for `HostHandle::upload()`
+/// and `HostHandle::download()`. Default: `overwrite=true`, `recursive=false`.
+///
+/// **Directory overwrite semantics**: when `overwrite=true` and the destination
+/// is an existing directory, the transfer uses **merge** semantics — conflicting
+/// files are overwritten from the source, missing entries are created, and
+/// destination-only extras are preserved. This matches `cp -r` behavior, not
+/// `rsync --delete`.
+///
+/// **Directory placement**: follows `cp -r` semantics — if the destination
+/// exists as a directory, the source is copied **into** it using the source
+/// basename; if the destination does not exist, the source is copied **as**
+/// that path.
+#[derive(Debug, Clone)]
+pub struct TransferOptions {
+    /// If `true`, overwrite existing destination files/directories (merge for dirs).
+    /// If `false`, return `Err` when the destination already exists.
+    pub overwrite: bool,
+    /// If `true`, recursively copy directory trees.
+    /// If `false`, return `Err` when the source is a directory.
+    pub recursive: bool,
+}
+
+impl Default for TransferOptions {
+    fn default() -> Self {
+        Self {
+            overwrite: true,
+            recursive: false,
+        }
+    }
+}
+
 /// Fidelity issue detected during capture (DC20).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FidelityIssue {
@@ -785,5 +819,12 @@ mod tests {
             session: "build".to_string(),
         };
         assert_eq!(before.compare(&after), vec![FidelityIssue::ClientResize]);
+    }
+
+    #[test]
+    fn transfer_options_default() {
+        let opts = TransferOptions::default();
+        assert!(opts.overwrite);
+        assert!(!opts.recursive);
     }
 }
