@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-15 | @claude | Phase 1.13 implementation: completed 1.13a–d, 1.13f–h (types, transport surface, local/mock impl, host wiring, unit + integration tests). SSH SFTP impl (1.13e) and SSH integration tests stubbed for follow-up. |
 | 2026-03-15 | @codex | Address PR #78 final doc follow-up: lock symlink rejection, metadata non-preservation, and `Result<()>` return shape into Phase 1.13 tasks and test coverage. |
 | 2026-03-14 | @codex | Address PR #78 re-review: make remote path parameters `&Path`, define `cp -r` style directory placement semantics, and add explicit copy-into vs copy-as test tasks. |
 | 2026-03-14 | @codex | Address PR #78 review: localhost SFTP integration tests run unconditionally (no tmux gate), directory overwrite semantics are explicit merge semantics, and Phase 1.13 is split into smaller incremental tasks. |
@@ -521,41 +522,43 @@ is not extended.
 
 ### 1.13a — Transfer options type (`src/types.rs`)
 
-- [ ] Add public `TransferOptions { overwrite: bool, recursive: bool }` with `Default`
-- [ ] Document in rustdoc that directory overwrite with `overwrite=true` uses merge semantics
+- [x] Add public `TransferOptions { overwrite: bool, recursive: bool }` with `Default`
+- [x] Document in rustdoc that directory overwrite with `overwrite=true` uses merge semantics
 
 ### 1.13b — Transport surface (`src/transport.rs`)
 
-- [ ] Add `TransportKind::upload(&self, local_path: &Path, remote_path: &Path, opts) -> Result<()>`
-- [ ] Add `TransportKind::download(&self, remote_path: &Path, local_path: &Path, opts) -> Result<()>`
-- [ ] Document `cp -r` style directory placement semantics: existing destination directory
+- [x] Add `TransportKind::upload(&self, local_path: &Path, remote_path: &Path, opts) -> Result<()>`
+- [x] Add `TransportKind::download(&self, remote_path: &Path, local_path: &Path, opts) -> Result<()>`
+- [x] Document `cp -r` style directory placement semantics: existing destination directory
   means copy into it; missing destination path means copy as that path
-- [ ] Lock the public return shape to `Result<()>` initially; no transfer summary type yet
-- [ ] Keep failure modes non-panicking; validation and I/O errors return `Err`
+- [x] Lock the public return shape to `Result<()>` initially; no transfer summary type yet
+- [x] Keep failure modes non-panicking; validation and I/O errors return `Err`
 
 ### 1.13c — Local transport implementation (`src/transport.rs`)
 
-- [ ] Implement `LocalTransport::upload()` for regular files
-- [ ] Implement `LocalTransport::download()` symmetrically
-- [ ] Implement recursive directory copy when `opts.recursive == true`
-- [ ] Return error for directory sources when `opts.recursive == false`
-- [ ] Return error when destination exists and `opts.overwrite == false`
-- [ ] Reject symlinks encountered during upload/download rather than following them
-- [ ] For directory destinations with `opts.overwrite == true`, merge into the existing
+- [x] Implement `LocalTransport::upload()` for regular files
+- [x] Implement `LocalTransport::download()` symmetrically
+- [x] Implement recursive directory copy when `opts.recursive == true`
+- [x] Return error for directory sources when `opts.recursive == false`
+- [x] Return error when destination exists and `opts.overwrite == false`
+- [x] Reject symlinks encountered during upload/download rather than following them
+- [x] For directory destinations with `opts.overwrite == true`, merge into the existing
   tree: overwrite conflicting files, create missing entries, preserve extras
-- [ ] Wrap each top-level transfer in the existing local transport timeout
+- [x] Wrap each top-level transfer in the existing local transport timeout
 
 ### 1.13d — Mock transport implementation (`src/transport.rs`)
 
-- [ ] Add an in-memory filesystem/tree model for `MockTransport`
-- [ ] Support file and directory upload/download semantics
-- [ ] Mirror the same directory merge semantics as the local implementation
-- [ ] Mirror the same symlink rejection semantics as the local implementation
-- [ ] Add deterministic transfer error injection for tests
-- [ ] Keep command mocking behavior unchanged for existing `exec()` tests
+- [x] Add an in-memory filesystem/tree model for `MockTransport`
+- [x] Support file and directory upload/download semantics
+- [x] Mirror the same directory merge semantics as the local implementation
+- [x] Mirror the same symlink rejection semantics as the local implementation
+- [x] Add deterministic transfer error injection for tests
+- [x] Keep command mocking behavior unchanged for existing `exec()` tests
 
 ### 1.13e — SSH SFTP implementation (`src/transport.rs`)
 
+<!-- @claude 2026-03-15: SshTransport::upload/download stubbed with TODO error.
+     Pending russh-sftp integration in a follow-up. -->
 - [ ] Add explicit `russh-sftp` dependency to `Cargo.toml`
 - [ ] Implement `SshTransport::upload()` using SFTP for regular files
 - [ ] Implement `SshTransport::download()` using SFTP for regular files
@@ -569,31 +572,31 @@ is not extended.
 
 ### 1.13f — HostHandle, public exports, and call-site wiring (`src/host.rs`, `src/lib.rs`, callers`)
 
-- [ ] Add `HostHandle::upload(&Path, &Path, ...)` / `HostHandle::download(&Path, &Path, ...)`
-- [ ] Re-export `TransferOptions` and any new public transfer types from `lib.rs`
-- [ ] Update callers/tests/examples to use `upload(...)` / `download(...)`
-- [ ] Do not add file transfer methods on `Target`
+- [x] Add `HostHandle::upload(&Path, &Path, ...)` / `HostHandle::download(&Path, &Path, ...)`
+- [x] Re-export `TransferOptions` and any new public transfer types from `lib.rs`
+- [x] Update callers/tests/examples to use `upload(...)` / `download(...)`
+- [x] Do not add file transfer methods on `Target`
 
 ### 1.13g — Unit tests
 
-- [ ] `MockTransport` file upload/download round-trip
-- [ ] `MockTransport` directory upload/download round-trip
-- [ ] `MockTransport` directory copy-into vs copy-as behavior for existing vs missing destination roots
-- [ ] `MockTransport` directory merge semantics with `overwrite=true`
+- [x] `MockTransport` file upload/download round-trip
+- [x] `MockTransport` directory upload/download round-trip
+- [x] `MockTransport` directory copy-into vs copy-as behavior for existing vs missing destination roots
+- [x] `MockTransport` directory merge semantics with `overwrite=true`
 - [ ] `MockTransport` symlink rejection path
-- [ ] `overwrite=false` conflict path
-- [ ] `recursive=false` directory rejection path
-- [ ] `TransportKind` dispatch tests for `upload()` / `download()`
+- [x] `overwrite=false` conflict path
+- [x] `recursive=false` directory rejection path
+- [x] `TransportKind` dispatch tests for `upload()` / `download()`
 
 ### 1.13h — Integration tests
 
-- [ ] Localhost file upload/download round-trip with exact byte verification.
+- [x] Localhost file upload/download round-trip with exact byte verification.
   Run unconditionally; no `tmux` availability gate is relevant for host-level file transfer.
-- [ ] Localhost directory upload/download round-trip for a nested tree
-- [ ] Localhost directory copy-into vs copy-as behavior for existing vs missing destination roots
-- [ ] Localhost directory merge behavior with `overwrite=true`
-- [ ] Localhost overwrite=false and recursive=false error paths
-- [ ] Localhost symlink rejection path
+- [x] Localhost directory upload/download round-trip for a nested tree
+- [x] Localhost directory copy-into vs copy-as behavior for existing vs missing destination roots
+- [x] Localhost directory merge behavior with `overwrite=true`
+- [x] Localhost overwrite=false and recursive=false error paths
+- [x] Localhost symlink rejection path
 - [ ] SSH file upload/download round-trip using the existing `MOTLIE_SSH_TEST_HOST`
   env gate (no new env var)
 - [ ] SSH directory upload/download round-trip using the existing
