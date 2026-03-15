@@ -145,10 +145,23 @@ fn copy_local(src: &Path, dst: &Path, opts: &TransferOptions) -> Result<()> {
     }
 }
 
+/// Reject a local path if it is a symlink.
+fn reject_local_symlink(path: &Path) -> Result<()> {
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            return Err(anyhow!("symlink encountered at destination: {}", path.display()));
+        }
+    }
+    Ok(())
+}
+
 /// Copy a single file with overwrite checking.
 fn copy_file_local(src: &Path, dst: &Path, opts: &TransferOptions) -> Result<()> {
     // For files, resolve destination: if dst is an existing dir, copy into it
     let effective_dst = resolve_destination(src, dst)?;
+
+    // Reject destination symlinks (check before exists/is_dir which follow symlinks)
+    reject_local_symlink(&effective_dst)?;
 
     if effective_dst.exists() {
         if !opts.overwrite {
@@ -191,6 +204,9 @@ fn copy_file_local(src: &Path, dst: &Path, opts: &TransferOptions) -> Result<()>
 fn copy_dir_local(src: &Path, dst: &Path, opts: &TransferOptions) -> Result<()> {
     // Resolve destination using cp -r semantics
     let effective_dst = resolve_destination(src, dst)?;
+
+    // Reject destination symlinks
+    reject_local_symlink(&effective_dst)?;
 
     if effective_dst.exists() {
         if !opts.overwrite {
@@ -255,6 +271,9 @@ fn copy_dir_contents(src: &Path, dst: &Path, opts: &TransferOptions) -> Result<(
 
         let name = entry.file_name();
         let dst_entry = dst.join(&name);
+
+        // Reject destination symlinks
+        reject_local_symlink(&dst_entry)?;
 
         if entry_meta.is_dir() {
             if dst_entry.exists() {
@@ -339,8 +358,11 @@ async fn sftp_upload_file(
 ) -> Result<()> {
     let effective_dst = sftp_resolve_destination(sftp, local_path, remote_path).await?;
 
-    // Check if destination exists
+    // Check if destination exists, reject symlinks
     if let Ok(meta) = sftp.symlink_metadata(&effective_dst).await {
+        if meta.is_symlink() {
+            return Err(anyhow!("symlink encountered at destination: {}", effective_dst));
+        }
         if !opts.overwrite {
             return Err(anyhow!(
                 "destination already exists and overwrite=false: {}",
@@ -381,9 +403,12 @@ async fn sftp_upload_dir(
 ) -> Result<()> {
     let effective_dst = sftp_resolve_destination(sftp, local_path, remote_path).await?;
 
-    // Check if effective destination exists
+    // Check if effective destination exists, reject symlinks
     match sftp.symlink_metadata(&effective_dst).await {
         Ok(meta) => {
+            if meta.is_symlink() {
+                return Err(anyhow!("symlink encountered at destination: {}", effective_dst));
+            }
             if !opts.overwrite {
                 return Err(anyhow!(
                     "destination already exists and overwrite=false: {}",
@@ -439,9 +464,12 @@ async fn sftp_upload_dir_contents(
         let remote_entry = format!("{}/{}", remote_dir.trim_end_matches('/'), name.to_string_lossy());
 
         if meta.is_dir() {
-            // Create remote dir if it doesn't exist
+            // Create remote dir if it doesn't exist, reject symlinks
             match sftp.symlink_metadata(&remote_entry).await {
                 Ok(rmeta) => {
+                    if rmeta.is_symlink() {
+                        return Err(anyhow!("symlink encountered at destination: {}", remote_entry));
+                    }
                     if !rmeta.is_dir() {
                         return Err(anyhow!(
                             "type mismatch: source is a directory but destination is a file: {}",
@@ -456,6 +484,12 @@ async fn sftp_upload_dir_contents(
             }
             Box::pin(sftp_upload_dir_contents(sftp, &entry_path, &remote_entry, opts)).await?;
         } else {
+            // Check if remote destination for this file is a symlink
+            if let Ok(rmeta) = sftp.symlink_metadata(&remote_entry).await {
+                if rmeta.is_symlink() {
+                    return Err(anyhow!("symlink encountered at destination: {}", remote_entry));
+                }
+            }
             let data = std::fs::read(&entry_path)
                 .map_err(|e| anyhow!("failed to read {}: {}", entry_path.display(), e))?;
             sftp.write(&remote_entry, &data).await
@@ -477,6 +511,9 @@ async fn sftp_download_file(
 
     // Resolve destination: if local_path is an existing dir, copy into it
     let effective_dst = resolve_destination(remote_path, local_path)?;
+
+    // Reject destination symlinks
+    reject_local_symlink(&effective_dst)?;
 
     if effective_dst.exists() {
         if !opts.overwrite {
@@ -514,6 +551,9 @@ async fn sftp_download_dir(
     opts: &TransferOptions,
 ) -> Result<()> {
     let effective_dst = resolve_destination(remote_path, local_path)?;
+
+    // Reject destination symlinks
+    reject_local_symlink(&effective_dst)?;
 
     if effective_dst.exists() {
         if !opts.overwrite {
@@ -570,6 +610,9 @@ async fn sftp_download_dir_contents(
         }
 
         let local_entry = local_dir.join(&name);
+
+        // Reject destination symlinks
+        reject_local_symlink(&local_entry)?;
 
         if meta.is_dir() {
             if !local_entry.exists() {
@@ -647,15 +690,20 @@ impl LocalTransport {
 
     /// Upload: local filesystem copy (local_path → remote_path).
     /// For LocalTransport, both paths are on the same machine.
+    /// Uses `spawn_blocking` so the synchronous `std::fs` work runs on
+    /// a blocking thread and can actually be interrupted by the timeout.
     async fn upload(
         &self,
         local_path: &Path,
         remote_path: &Path,
         opts: &TransferOptions,
     ) -> Result<()> {
-        tokio::time::timeout(self.timeout, async {
-            copy_local(local_path, remote_path, opts)
-        })
+        let src = local_path.to_path_buf();
+        let dst = remote_path.to_path_buf();
+        let o = opts.clone();
+        tokio::time::timeout(self.timeout, tokio::task::spawn_blocking(move || {
+            copy_local(&src, &dst, &o)
+        }))
         .await
         .map_err(|_| {
             anyhow!(
@@ -665,19 +713,25 @@ impl LocalTransport {
                 remote_path.display()
             )
         })?
+        .map_err(|e| anyhow!("upload task panicked: {}", e))?
     }
 
     /// Download: local filesystem copy (remote_path → local_path).
     /// For LocalTransport, both paths are on the same machine.
+    /// Uses `spawn_blocking` so the synchronous `std::fs` work runs on
+    /// a blocking thread and can actually be interrupted by the timeout.
     async fn download(
         &self,
         remote_path: &Path,
         local_path: &Path,
         opts: &TransferOptions,
     ) -> Result<()> {
-        tokio::time::timeout(self.timeout, async {
-            copy_local(remote_path, local_path, opts)
-        })
+        let src = remote_path.to_path_buf();
+        let dst = local_path.to_path_buf();
+        let o = opts.clone();
+        tokio::time::timeout(self.timeout, tokio::task::spawn_blocking(move || {
+            copy_local(&src, &dst, &o)
+        }))
         .await
         .map_err(|_| {
             anyhow!(
@@ -687,6 +741,7 @@ impl LocalTransport {
                 local_path.display()
             )
         })?
+        .map_err(|e| anyhow!("download task panicked: {}", e))?
     }
 }
 

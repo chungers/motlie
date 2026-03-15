@@ -1129,29 +1129,23 @@ host.upload(Path::new("./my_dir"), Path::new("/remote/dir"), &opts).await;
 Any symlink encountered in the source or destination tree causes the transfer
 to fail with an error. Symlinks are never followed.
 
-### Boundary: exec vs upload/download vs Target::exec
+### Boundary: upload/download vs Target::exec
 
 | Method | Scope | Mechanism | Use case |
 |--------|-------|-----------|----------|
-| `host.exec("cmd")` | Host shell | SSH channel / local subprocess | Ad-hoc setup, teardown, inspection |
 | `host.upload()` / `download()` | File transfer | SFTP / filesystem copy | Deploying artifacts, fetching logs |
 | `target.exec("cmd")` | Tmux pane | Send + sentinel capture | Commands that need tmux context |
 
-### Ad-hoc shell commands
-
-`HostHandle::exec()` runs a shell command on the host outside of any tmux
-session, returning stdout. For SSH hosts this opens a channel; for localhost it
-spawns a subprocess.
+Per DC19, there is no `HostHandle::exec()` bypass — all command execution stays
+within the tmux framework via `Target::exec()`. For setup/teardown around
+transfers, use a tmux session:
 
 ```rust
-// Run a command on the remote host
-let output = host.exec("uname -a").await?;
-println!("{}", output);
-
-// Useful for setup/teardown around file transfers
-host.exec("mkdir -p /opt/deploy").await?;
+let setup = host.create_session("deploy_setup", &Default::default()).await?;
+setup.exec("mkdir -p /opt/deploy", Duration::from_secs(10)).await?;
 host.upload(Path::new("./app"), Path::new("/opt/deploy"), &opts).await?;
-host.exec("systemctl restart myapp").await?;
+setup.exec("systemctl restart myapp", Duration::from_secs(30)).await?;
+setup.kill().await?;
 ```
 
 ---

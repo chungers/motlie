@@ -323,6 +323,27 @@ async fn localhost_symlink_rejected() {
     assert!(result.unwrap_err().to_string().contains("symlink"));
 }
 
+#[tokio::test]
+async fn localhost_destination_symlink_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src.txt");
+    std::fs::write(&src, b"data").unwrap();
+
+    // Create a symlink at the destination path
+    let real_dst = tmp.path().join("real_dst.txt");
+    std::fs::write(&real_dst, b"old").unwrap();
+    let link_dst = tmp.path().join("link_dst.txt");
+    std::os::unix::fs::symlink(&real_dst, &link_dst).unwrap();
+
+    let host = HostHandle::local();
+    let result = host
+        .upload(&src, &link_dst, &motlie_tmux::TransferOptions::default())
+        .await;
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("symlink"), "expected symlink error, got: {}", msg);
+}
+
 /// 1.11o — SSH integration test (env-gated).
 /// Requires MOTLIE_SSH_TEST_HOST=user@host[:port].
 #[tokio::test]
@@ -353,6 +374,22 @@ async fn uri_ssh_connect() {
 // Gated on MOTLIE_SSH_TEST_HOST — skip when not set.
 // ---------------------------------------------------------------------------
 
+/// Helper: run a shell command on the remote host via a tmux pane.
+///
+/// Creates a temporary session, runs the command via `Target::exec()`,
+/// and kills the session. This respects the DC19 boundary — all command
+/// execution goes through tmux, not a host-level bypass.
+async fn ssh_exec(host: &HostHandle, command: &str) -> anyhow::Result<motlie_tmux::ExecOutput> {
+    use tokio::time::Duration;
+    let session_name = format!("motlie_exec_{}", std::process::id());
+    let target = host
+        .create_session(&session_name, &Default::default())
+        .await?;
+    let result = target.exec(command, Duration::from_secs(10)).await;
+    let _ = target.kill().await;
+    result
+}
+
 /// Helper: connect to the SSH test host, returning (host, remote_tmp_dir).
 /// Creates a temporary directory on the remote host for test isolation.
 async fn ssh_test_host_with_tmp() -> Option<(HostHandle, String)> {
@@ -364,15 +401,14 @@ async fn ssh_test_host_with_tmp() -> Option<(HostHandle, String)> {
         .await
         .unwrap_or_else(|e| panic!("connect failed: {}", e));
 
-    // Create a remote temp directory
-    let output = host.list_sessions().await.ok(); // verify connection works
-    let _ = output;
+    // Verify connection works
+    let _ = host.list_sessions().await.ok();
 
-    // Create a remote temp directory via the public exec API.
+    // Create a remote temp directory via tmux pane (DC19 — no host-level exec bypass).
     let remote_tmp = format!("/tmp/motlie_test_{}", std::process::id());
     // Clean up from any previous failed run, then create
-    let _ = host.exec(&format!("rm -rf '{}'", remote_tmp)).await;
-    host.exec(&format!("mkdir -p '{}'", remote_tmp))
+    let _ = ssh_exec(&host, &format!("rm -rf '{}'", remote_tmp)).await;
+    ssh_exec(&host, &format!("mkdir -p '{}'", remote_tmp))
         .await
         .unwrap_or_else(|e| panic!("failed to create remote tmp dir: {}", e));
 
@@ -381,7 +417,7 @@ async fn ssh_test_host_with_tmp() -> Option<(HostHandle, String)> {
 
 /// Helper: cleanup remote temp directory.
 async fn ssh_cleanup(host: &HostHandle, remote_tmp: &str) {
-    let _ = host.exec(&format!("rm -rf '{}'", remote_tmp)).await;
+    let _ = ssh_exec(host, &format!("rm -rf '{}'", remote_tmp)).await;
 }
 
 #[tokio::test]
@@ -485,8 +521,11 @@ async fn ssh_copy_into_vs_copy_as() {
     assert!(dl1.join("f.txt").exists(), "copy-as: f.txt should exist at top level");
 
     // Copy-into: dest exists as dir → copied INTO it
+    // Create the remote dir by uploading an empty local dir (no host-level exec bypass)
     let dest2 = std::path::PathBuf::from(&format!("{}/existing", remote_tmp));
-    host.exec(&format!("mkdir -p '{}'", dest2.display()))
+    let empty = tmp.path().join("_empty");
+    std::fs::create_dir(&empty).unwrap();
+    host.upload(&empty, &dest2, &motlie_tmux::TransferOptions { overwrite: true, recursive: true })
         .await
         .unwrap();
     host.upload(&src, &dest2, &opts).await.expect("copy-into upload failed");
@@ -510,11 +549,23 @@ async fn ssh_dir_merge_overwrite() {
     let tmp = tempfile::tempdir().unwrap();
 
     // Create remote existing dir with a.txt (old) and c.txt (extra)
+    // Upload a pre-populated dir instead of using host-level exec (DC19)
     let remote_parent = format!("{}/parent", remote_tmp);
     let remote_target = format!("{}/target_dir", remote_parent);
-    host.exec(&format!("mkdir -p '{}'", remote_target)).await.unwrap();
-    host.exec(&format!("echo -n original > '{}/a.txt'", remote_target)).await.unwrap();
-    host.exec(&format!("echo -n extra > '{}/c.txt'", remote_target)).await.unwrap();
+    let seed = tmp.path().join("seed_target_dir");
+    std::fs::create_dir(&seed).unwrap();
+    std::fs::write(seed.join("a.txt"), b"original").unwrap();
+    std::fs::write(seed.join("c.txt"), b"extra").unwrap();
+    // Upload seed as parent/target_dir (copy-as since parent doesn't exist yet)
+    let seed_parent = tmp.path().join("seed_parent");
+    std::fs::create_dir(&seed_parent).unwrap();
+    // Rename seed into seed_parent/target_dir
+    std::fs::rename(&seed, seed_parent.join("target_dir")).unwrap();
+    host.upload(
+        &seed_parent,
+        &std::path::PathBuf::from(&remote_parent),
+        &motlie_tmux::TransferOptions { overwrite: true, recursive: true },
+    ).await.unwrap();
 
     // Source: has a.txt (updated) and b.txt (new)
     let src = tmp.path().join("target_dir");
