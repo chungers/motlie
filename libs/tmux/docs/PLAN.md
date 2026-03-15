@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-14 | @codex | Address PR #78 re-review: make remote path parameters `&Path`, define `cp -r` style directory placement semantics, and add explicit copy-into vs copy-as test tasks. |
 | 2026-03-14 | @codex | Address PR #78 review: localhost SFTP integration tests run unconditionally (no tmux gate), directory overwrite semantics are explicit merge semantics, and Phase 1.13 is split into smaller incremental tasks. |
 | 2026-03-14 | @codex | Refined Phase 1.13 per user decisions: greenfield/breaking changes accepted, API uses `upload` / `download`, overwrite semantics configurable, directory transfer included now, file-only/v1 phasing removed. |
 | 2026-03-14 | @codex | Added Phase 1.13 — host-level SFTP file transfer. Slots after 1.12 as an additive transport/host feature depending on 1.3, 1.7, and 2a.1. No hard gate for monitoring phases. |
@@ -524,8 +525,10 @@ is not extended.
 
 ### 1.13b — Transport surface (`src/transport.rs`)
 
-- [ ] Add `TransportKind::upload(&self, local_path, remote_path, opts) -> Result<()>`
-- [ ] Add `TransportKind::download(&self, remote_path, local_path, opts) -> Result<()>`
+- [ ] Add `TransportKind::upload(&self, local_path: &Path, remote_path: &Path, opts) -> Result<()>`
+- [ ] Add `TransportKind::download(&self, remote_path: &Path, local_path: &Path, opts) -> Result<()>`
+- [ ] Document `cp -r` style directory placement semantics: existing destination directory
+  means copy into it; missing destination path means copy as that path
 - [ ] Keep failure modes non-panicking; validation and I/O errors return `Err`
 
 ### 1.13c — Local transport implementation (`src/transport.rs`)
@@ -561,7 +564,7 @@ is not extended.
 
 ### 1.13f — HostHandle, public exports, and call-site wiring (`src/host.rs`, `src/lib.rs`, callers`)
 
-- [ ] Add `HostHandle::upload(...)` / `HostHandle::download(...)`
+- [ ] Add `HostHandle::upload(&Path, &Path, ...)` / `HostHandle::download(&Path, &Path, ...)`
 - [ ] Re-export `TransferOptions` and any new public transfer types from `lib.rs`
 - [ ] Update callers/tests/examples to use `upload(...)` / `download(...)`
 - [ ] Do not add file transfer methods on `Target`
@@ -570,6 +573,7 @@ is not extended.
 
 - [ ] `MockTransport` file upload/download round-trip
 - [ ] `MockTransport` directory upload/download round-trip
+- [ ] `MockTransport` directory copy-into vs copy-as behavior for existing vs missing destination roots
 - [ ] `MockTransport` directory merge semantics with `overwrite=true`
 - [ ] `overwrite=false` conflict path
 - [ ] `recursive=false` directory rejection path
@@ -580,12 +584,15 @@ is not extended.
 - [ ] Localhost file upload/download round-trip with exact byte verification.
   Run unconditionally; no `tmux` availability gate is relevant for host-level file transfer.
 - [ ] Localhost directory upload/download round-trip for a nested tree
+- [ ] Localhost directory copy-into vs copy-as behavior for existing vs missing destination roots
 - [ ] Localhost directory merge behavior with `overwrite=true`
 - [ ] Localhost overwrite=false and recursive=false error paths
 - [ ] SSH file upload/download round-trip using the existing `MOTLIE_SSH_TEST_HOST`
   env gate (no new env var)
 - [ ] SSH directory upload/download round-trip using the existing
   `MOTLIE_SSH_TEST_HOST` env gate
+- [ ] SSH directory copy-into vs copy-as behavior for existing vs missing destination
+  roots using the existing `MOTLIE_SSH_TEST_HOST` env gate
 - [ ] SSH directory merge behavior with `overwrite=true` using the existing
   `MOTLIE_SSH_TEST_HOST` env gate
 - [ ] SSH overwrite=false and recursive=false error paths using the existing

@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-14 | @codex: Address PR #78 re-review by clarifying DC23 path typing (`&Path` for local and remote endpoints) and `cp -r` style directory placement semantics (existing directory => copy into; missing path => copy as). | DC23 |
 | 2026-03-14 | @codex: Address PR #78 review by clarifying DC23 test policy (localhost SFTP tests are not tmux-gated) and directory overwrite semantics (`overwrite=true` merges into an existing destination tree rather than replacing it). | DC23 |
 | 2026-03-14 | @codex: Refine DC23 per user decisions — greenfield/breaking changes accepted, API uses `upload` / `download`, overwrite semantics configurable, directory transfer included now. | DC23 |
 | 2026-03-14 | @codex: Add DC23 summary for host-level SFTP file transfer, scoped as a transport/host capability (not a tmux-target capability), with companion deep-dive doc `SFTP.md`. | Overview, DC23, References |
@@ -2968,9 +2969,12 @@ and directories now. `Target` is intentionally not extended for file transfer.
 
 **Initial scope**:
 - Host-level `upload` / `download` operations
+- Strongly typed path parameters for both local and remote endpoints
 - Support for regular files and directories
 - Transport-agnostic surface across `Local`, `Mock`, and `Ssh`
 - SSH implementation uses SFTP
+- Directory placement follows `cp -r` semantics: existing destination directory means
+  copy into it; missing destination path means copy as that path
 - Configurable overwrite semantics (`overwrite=false` returns error on existing destination;
   for directories, `overwrite=true` merges into an existing destination tree rather than
   replacing it)
