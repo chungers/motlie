@@ -247,14 +247,6 @@ impl HostHandle {
         }
     }
 
-    /// Execute a shell command on the host and return its stdout.
-    ///
-    /// For SSH-backed hosts, runs via the SSH channel. For localhost,
-    /// runs via the local shell. Useful for ad-hoc setup/teardown tasks.
-    pub async fn exec(&self, command: &str) -> Result<String> {
-        self.inner.transport.exec(command).await
-    }
-
     /// Upload a file or directory to the host (DC23).
     ///
     /// For SSH-backed hosts, uses SFTP. For localhost, uses filesystem copy.
