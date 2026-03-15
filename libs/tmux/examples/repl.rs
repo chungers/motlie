@@ -5,17 +5,20 @@
 //! capturing scrollback.
 //!
 //! Commands:
+//!   help                     Show available commands
 //!   create <name>            Create a new tmux session
 //!   kill <target>            Kill a session/window/pane
 //!   targets                  List all sessions with full target spec tree
 //!   send <target> <text...>  Send text + Enter to a target
 //!   capture <target> <n>     Print last N scrollback lines
+//!   upload <local> <remote>  Upload a file or directory to the host
+//!   download <remote> <local> Download a file or directory from the host
 //!   quit                     Disconnect and exit
 //!
 //! Usage:
 //!   cargo run -p motlie-tmux --example repl -- ssh://localhost
 
-use motlie_tmux::{CreateSessionOptions, KeySequence, ScrollbackQuery, SshConfig, TargetSpec};
+use motlie_tmux::{CreateSessionOptions, KeySequence, ScrollbackQuery, SshConfig, TargetSpec, TransferOptions};
 use std::io::{self, BufRead, Write};
 
 #[tokio::main]
@@ -44,6 +47,22 @@ async fn main() -> anyhow::Result<()> {
         }
 
         match parts[0] {
+            "help" => {
+                println!("Commands:");
+                println!("  help                                    Show this help message");
+                println!("  create <name> [--size WxH] [--history N]  Create a tmux session");
+                println!("  kill <target>                           Kill a session/window/pane");
+                println!("  targets                                 List all sessions with target tree");
+                println!("  send <target> <text...>                 Send text + Enter to a target");
+                println!("  capture <target> <n>                    Print last N scrollback lines");
+                println!("  upload <local> <remote> [-r]            Upload file/dir to the host");
+                println!("  download <remote> <local> [-r]          Download file/dir from the host");
+                println!("  quit                                    Disconnect and exit");
+                println!();
+                println!("Targets: session, session:window, session:window.pane");
+                println!("Transfer: use -r or --recursive for directories");
+            }
+
             "create" => {
                 let words: Vec<&str> = line.trim().split_whitespace().collect();
                 if words.len() < 2 {
@@ -277,14 +296,50 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
+            "upload" => {
+                if parts.len() < 3 {
+                    println!("usage: upload <local_path> <remote_path> [--recursive]");
+                    write!(stdout, "repl> ")?;
+                    stdout.flush()?;
+                    continue;
+                }
+                let local_path = std::path::Path::new(parts[1]);
+                // parts[2] may contain "<remote_path> --recursive"
+                let rest: Vec<&str> = parts[2].split_whitespace().collect();
+                let remote_path = std::path::Path::new(rest[0]);
+                let recursive = rest.iter().any(|f| *f == "--recursive" || *f == "-r");
+                let opts = TransferOptions { overwrite: true, recursive };
+                match host.upload(local_path, remote_path, &opts).await {
+                    Ok(()) => println!("Uploaded {} → {}", local_path.display(), remote_path.display()),
+                    Err(e) => println!("Error: {}", e),
+                }
+            }
+
+            "download" => {
+                if parts.len() < 3 {
+                    println!("usage: download <remote_path> <local_path> [--recursive]");
+                    write!(stdout, "repl> ")?;
+                    stdout.flush()?;
+                    continue;
+                }
+                let remote_path = std::path::Path::new(parts[1]);
+                let rest: Vec<&str> = parts[2].split_whitespace().collect();
+                let local_path = std::path::Path::new(rest[0]);
+                let recursive = rest.iter().any(|f| *f == "--recursive" || *f == "-r");
+                let opts = TransferOptions { overwrite: true, recursive };
+                match host.download(remote_path, local_path, &opts).await {
+                    Ok(()) => println!("Downloaded {} → {}", remote_path.display(), local_path.display()),
+                    Err(e) => println!("Error: {}", e),
+                }
+            }
+
             "quit" => {
                 println!("Disconnected.");
                 return Ok(());
             }
 
             other => {
-                println!("Unknown command: {}", other);
-                println!("Commands: create, kill, targets, send, capture, quit");
+                println!("Unknown command: {}. Type 'help' for available commands.", other);
             }
         }
 
