@@ -5,6 +5,7 @@
 //! capturing scrollback.
 //!
 //! Commands:
+//!   help                     Show available commands
 //!   create <name>            Create a new tmux session
 //!   kill <target>            Kill a session/window/pane
 //!   targets                  List all sessions with full target spec tree
@@ -46,6 +47,22 @@ async fn main() -> anyhow::Result<()> {
         }
 
         match parts[0] {
+            "help" => {
+                println!("Commands:");
+                println!("  help                                    Show this help message");
+                println!("  create <name> [--size WxH] [--history N]  Create a tmux session");
+                println!("  kill <target>                           Kill a session/window/pane");
+                println!("  targets                                 List all sessions with target tree");
+                println!("  send <target> <text...>                 Send text + Enter to a target");
+                println!("  capture <target> <n>                    Print last N scrollback lines");
+                println!("  upload <local> <remote> [-r]            Upload file/dir to the host");
+                println!("  download <remote> <local> [-r]          Download file/dir from the host");
+                println!("  quit                                    Disconnect and exit");
+                println!();
+                println!("Targets: session, session:window, session:window.pane");
+                println!("Transfer: use -r or --recursive for directories");
+            }
+
             "create" => {
                 let words: Vec<&str> = line.trim().split_whitespace().collect();
                 if words.len() < 2 {
@@ -322,8 +339,7 @@ async fn main() -> anyhow::Result<()> {
             }
 
             other => {
-                println!("Unknown command: {}", other);
-                println!("Commands: create, kill, targets, send, capture, upload, download, quit");
+                println!("Unknown command: {}. Type 'help' for available commands.", other);
             }
         }
 

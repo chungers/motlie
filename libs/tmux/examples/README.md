@@ -193,6 +193,7 @@ cargo run -p motlie-tmux --example repl -- ssh://localhost
 
 | Command | Description | API Used |
 |---------|-------------|----------|
+| `help` | Show available commands and usage | — |
 | `create <name> [--size WxH] [--history N]` | Create a session with optional size and history | `host.create_session()`, `CreateSessionOptions` |
 | `kill <target>` | Kill a session, window, or pane | `target.kill()` |
 | `targets` | List all sessions with target spec strings | `host.list_sessions()`, `target.children()` |
