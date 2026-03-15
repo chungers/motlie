@@ -1,10 +1,12 @@
 use anyhow::{anyhow, Result};
+use std::collections::HashMap;
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 
-use crate::types::{HostKeyPolicy, TmuxSocket};
+use crate::types::{HostKeyPolicy, TransferOptions, TmuxSocket};
 
 // ---------------------------------------------------------------------------
 // Static-dispatch transport (DC6)
@@ -40,6 +42,42 @@ impl TransportKind {
         }
     }
 
+    /// Upload a file or directory from a local path to a remote path (DC23).
+    ///
+    /// Directory placement follows `cp -r` semantics: if the destination exists
+    /// as a directory, the source is copied **into** it; if it doesn't exist,
+    /// the source is copied **as** that path. Returns `Result<()>` initially.
+    pub async fn upload(
+        &self,
+        local_path: &Path,
+        remote_path: &Path,
+        opts: &TransferOptions,
+    ) -> Result<()> {
+        match self {
+            TransportKind::Local(t) => t.upload(local_path, remote_path, opts).await,
+            TransportKind::Mock(t) => t.upload(local_path, remote_path, opts).await,
+            TransportKind::Ssh(t) => t.upload(local_path, remote_path, opts).await,
+        }
+    }
+
+    /// Download a file or directory from a remote path to a local path (DC23).
+    ///
+    /// Directory placement follows `cp -r` semantics: if the destination exists
+    /// as a directory, the source is copied **into** it; if it doesn't exist,
+    /// the source is copied **as** that path. Returns `Result<()>` initially.
+    pub async fn download(
+        &self,
+        remote_path: &Path,
+        local_path: &Path,
+        opts: &TransferOptions,
+    ) -> Result<()> {
+        match self {
+            TransportKind::Local(t) => t.download(remote_path, local_path, opts).await,
+            TransportKind::Mock(t) => t.download(remote_path, local_path, opts).await,
+            TransportKind::Ssh(t) => t.download(remote_path, local_path, opts).await,
+        }
+    }
+
     /// Open a persistent shell channel.
     ///
     /// `cols` and `rows` control PTY dimensions for SSH transports (used by
@@ -51,6 +89,214 @@ impl TransportKind {
             TransportKind::Ssh(t) => t.open_shell(cols, rows).await.map(ShellChannelKind::Ssh),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Shared file-transfer helpers (DC23)
+// ---------------------------------------------------------------------------
+
+/// Resolve the effective destination path following `cp -r` semantics (DC23).
+///
+/// - If `dst` exists and is a directory, returns `dst / src.file_name()` (copy into).
+/// - If `dst` does not exist, returns `dst` as-is (copy as).
+/// - If `src` has no filename component (e.g. `/`), returns an error.
+fn resolve_destination(src: &Path, dst: &Path) -> Result<std::path::PathBuf> {
+    if dst.is_dir() {
+        let basename = src
+            .file_name()
+            .ok_or_else(|| anyhow!("source path has no filename: {}", src.display()))?;
+        Ok(dst.join(basename))
+    } else {
+        Ok(dst.to_path_buf())
+    }
+}
+
+/// Copy a file or directory tree on the local filesystem (DC23).
+///
+/// Implements the full `TransferOptions` contract:
+/// - `overwrite=false` + destination exists → `Err`
+/// - `recursive=false` + source is directory → `Err`
+/// - Symlinks encountered → `Err`
+/// - Directory merge semantics when `overwrite=true`
+/// - `cp -r` placement (copy into existing dir, copy as missing path)
+fn copy_local(src: &Path, dst: &Path, opts: &TransferOptions) -> Result<()> {
+    // Validate source exists
+    let src_meta = std::fs::symlink_metadata(src)
+        .map_err(|e| anyhow!("source not found: {}: {}", src.display(), e))?;
+
+    // Reject symlinks
+    if src_meta.file_type().is_symlink() {
+        return Err(anyhow!(
+            "symlink encountered at source: {}",
+            src.display()
+        ));
+    }
+
+    if src_meta.is_dir() {
+        if !opts.recursive {
+            return Err(anyhow!(
+                "source is a directory but recursive=false: {}",
+                src.display()
+            ));
+        }
+        copy_dir_local(src, dst, opts)
+    } else {
+        copy_file_local(src, dst, opts)
+    }
+}
+
+/// Copy a single file with overwrite checking.
+fn copy_file_local(src: &Path, dst: &Path, opts: &TransferOptions) -> Result<()> {
+    // For files, resolve destination: if dst is an existing dir, copy into it
+    let effective_dst = resolve_destination(src, dst)?;
+
+    if effective_dst.exists() {
+        if !opts.overwrite {
+            return Err(anyhow!(
+                "destination already exists and overwrite=false: {}",
+                effective_dst.display()
+            ));
+        }
+        // Type mismatch: destination is a directory but source is a file
+        if effective_dst.is_dir() {
+            return Err(anyhow!(
+                "type mismatch: source is a file but destination is a directory: {}",
+                effective_dst.display()
+            ));
+        }
+    }
+
+    // Ensure parent directory exists
+    if let Some(parent) = effective_dst.parent() {
+        if !parent.exists() {
+            return Err(anyhow!(
+                "parent directory does not exist: {}",
+                parent.display()
+            ));
+        }
+    }
+
+    std::fs::copy(src, &effective_dst).map_err(|e| {
+        anyhow!(
+            "failed to copy {} -> {}: {}",
+            src.display(),
+            effective_dst.display(),
+            e
+        )
+    })?;
+    Ok(())
+}
+
+/// Copy a directory tree with merge semantics.
+fn copy_dir_local(src: &Path, dst: &Path, opts: &TransferOptions) -> Result<()> {
+    // Resolve destination using cp -r semantics
+    let effective_dst = resolve_destination(src, dst)?;
+
+    if effective_dst.exists() {
+        if !opts.overwrite {
+            return Err(anyhow!(
+                "destination already exists and overwrite=false: {}",
+                effective_dst.display()
+            ));
+        }
+        // Type mismatch: destination is a file but source is a directory
+        if effective_dst.is_file() {
+            return Err(anyhow!(
+                "type mismatch: source is a directory but destination is a file: {}",
+                effective_dst.display()
+            ));
+        }
+    } else {
+        // Ensure parent of effective_dst exists
+        if let Some(parent) = effective_dst.parent() {
+            if !parent.exists() {
+                return Err(anyhow!(
+                    "parent directory does not exist: {}",
+                    parent.display()
+                ));
+            }
+        }
+        std::fs::create_dir(&effective_dst).map_err(|e| {
+            anyhow!(
+                "failed to create directory {}: {}",
+                effective_dst.display(),
+                e
+            )
+        })?;
+    }
+
+    // Recursively copy contents
+    copy_dir_contents(src, &effective_dst, opts)
+}
+
+/// Recursively copy directory contents with merge semantics.
+fn copy_dir_contents(src: &Path, dst: &Path, opts: &TransferOptions) -> Result<()> {
+    for entry in std::fs::read_dir(src)
+        .map_err(|e| anyhow!("failed to read directory {}: {}", src.display(), e))?
+    {
+        let entry =
+            entry.map_err(|e| anyhow!("failed to read dir entry in {}: {}", src.display(), e))?;
+        let entry_path = entry.path();
+        let entry_meta = std::fs::symlink_metadata(&entry_path).map_err(|e| {
+            anyhow!(
+                "failed to stat {}: {}",
+                entry_path.display(),
+                e
+            )
+        })?;
+
+        // Reject symlinks
+        if entry_meta.file_type().is_symlink() {
+            return Err(anyhow!(
+                "symlink encountered: {}",
+                entry_path.display()
+            ));
+        }
+
+        let name = entry.file_name();
+        let dst_entry = dst.join(&name);
+
+        if entry_meta.is_dir() {
+            if dst_entry.exists() {
+                if dst_entry.is_file() {
+                    return Err(anyhow!(
+                        "type mismatch: source is a directory but destination is a file: {}",
+                        dst_entry.display()
+                    ));
+                }
+                // Merge into existing directory
+            } else {
+                std::fs::create_dir(&dst_entry).map_err(|e| {
+                    anyhow!(
+                        "failed to create directory {}: {}",
+                        dst_entry.display(),
+                        e
+                    )
+                })?;
+            }
+            copy_dir_contents(&entry_path, &dst_entry, opts)?;
+        } else {
+            // Regular file
+            if dst_entry.exists() {
+                if dst_entry.is_dir() {
+                    return Err(anyhow!(
+                        "type mismatch: source is a file but destination is a directory: {}",
+                        dst_entry.display()
+                    ));
+                }
+                // overwrite=true is implied here since we passed the top-level check
+            }
+            std::fs::copy(&entry_path, &dst_entry).map_err(|e| {
+                anyhow!(
+                    "failed to copy {} -> {}: {}",
+                    entry_path.display(),
+                    dst_entry.display(),
+                    e
+                )
+            })?;
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +356,50 @@ impl LocalTransport {
 
         Ok(LocalShellChannel { child })
     }
+
+    /// Upload: local filesystem copy (local_path → remote_path).
+    /// For LocalTransport, both paths are on the same machine.
+    async fn upload(
+        &self,
+        local_path: &Path,
+        remote_path: &Path,
+        opts: &TransferOptions,
+    ) -> Result<()> {
+        tokio::time::timeout(self.timeout, async {
+            copy_local(local_path, remote_path, opts)
+        })
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "upload timed out after {:?}: {} -> {}",
+                self.timeout,
+                local_path.display(),
+                remote_path.display()
+            )
+        })?
+    }
+
+    /// Download: local filesystem copy (remote_path → local_path).
+    /// For LocalTransport, both paths are on the same machine.
+    async fn download(
+        &self,
+        remote_path: &Path,
+        local_path: &Path,
+        opts: &TransferOptions,
+    ) -> Result<()> {
+        tokio::time::timeout(self.timeout, async {
+            copy_local(remote_path, local_path, opts)
+        })
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "download timed out after {:?}: {} -> {}",
+                self.timeout,
+                remote_path.display(),
+                local_path.display()
+            )
+        })?
+    }
 }
 
 impl Default for LocalTransport {
@@ -122,17 +412,31 @@ impl Default for LocalTransport {
 // MockTransport
 // ---------------------------------------------------------------------------
 
+/// In-memory filesystem entry for MockTransport (DC23).
+#[derive(Debug, Clone)]
+pub enum MockFsEntry {
+    File(Vec<u8>),
+    Dir,
+}
+
 /// Mock transport for unit testing.
 ///
 /// Patterns are matched in insertion order (first match wins), which makes
 /// test behavior deterministic regardless of hash seed. Use `with_response()`
 /// to add success responses and `with_error()` to add error responses.
+///
+/// For file transfer testing (DC23), an in-memory filesystem is available
+/// via `with_file()`, `with_dir()`, and accessor methods.
 pub struct MockTransport {
     /// Ordered (pattern, response_queue) pairs. First-match wins.
     responses: Mutex<Vec<(String, Vec<String>)>>,
     /// Ordered (pattern, error_message) pairs. Checked before `responses`.
     errors: Mutex<Vec<(String, String)>>,
     default_response: String,
+    /// In-memory filesystem for upload/download testing (DC23).
+    fs: Mutex<HashMap<std::path::PathBuf, MockFsEntry>>,
+    /// Optional transfer error injection.
+    transfer_error: Mutex<Option<String>>,
 }
 
 impl MockTransport {
@@ -141,6 +445,8 @@ impl MockTransport {
             responses: Mutex::new(Vec::new()),
             errors: Mutex::new(Vec::new()),
             default_response: String::new(),
+            fs: Mutex::new(HashMap::new()),
+            transfer_error: Mutex::new(None),
         }
     }
 
@@ -205,6 +511,387 @@ impl MockTransport {
             data: Vec::new(),
             pos: 0,
         })
+    }
+
+    // --- In-memory filesystem for transfer testing (DC23) ---
+
+    /// Pre-populate the mock filesystem with a file.
+    pub fn with_file(self, path: impl Into<std::path::PathBuf>, contents: impl Into<Vec<u8>>) -> Self {
+        let path = path.into();
+        // Ensure parent dirs exist
+        let mut fs = self.fs.lock().unwrap();
+        for ancestor in path.ancestors().skip(1) {
+            if ancestor == Path::new("") || ancestor == Path::new("/") {
+                continue;
+            }
+            fs.entry(ancestor.to_path_buf())
+                .or_insert(MockFsEntry::Dir);
+        }
+        fs.insert(path, MockFsEntry::File(contents.into()));
+        drop(fs);
+        self
+    }
+
+    /// Pre-populate the mock filesystem with an empty directory.
+    pub fn with_dir(self, path: impl Into<std::path::PathBuf>) -> Self {
+        let path = path.into();
+        let mut fs = self.fs.lock().unwrap();
+        for ancestor in path.ancestors().skip(1) {
+            if ancestor == Path::new("") || ancestor == Path::new("/") {
+                continue;
+            }
+            fs.entry(ancestor.to_path_buf())
+                .or_insert(MockFsEntry::Dir);
+        }
+        fs.insert(path, MockFsEntry::Dir);
+        drop(fs);
+        self
+    }
+
+    /// Inject a transfer error that will be returned on the next upload/download.
+    pub fn with_transfer_error(self, message: &str) -> Self {
+        *self.transfer_error.lock().unwrap() = Some(message.to_string());
+        self
+    }
+
+    /// Read a file from the mock filesystem.
+    pub fn read_file(&self, path: &Path) -> Option<Vec<u8>> {
+        let fs = self.fs.lock().unwrap();
+        match fs.get(path) {
+            Some(MockFsEntry::File(data)) => Some(data.clone()),
+            _ => None,
+        }
+    }
+
+    /// Check if a path exists in the mock filesystem.
+    pub fn exists(&self, path: &Path) -> bool {
+        self.fs.lock().unwrap().contains_key(path)
+    }
+
+    /// List entries in a mock directory.
+    pub fn list_dir(&self, path: &Path) -> Vec<std::path::PathBuf> {
+        let fs = self.fs.lock().unwrap();
+        fs.keys()
+            .filter(|k| k.parent() == Some(path) && *k != path)
+            .cloned()
+            .collect()
+    }
+
+    /// Upload: copy from real filesystem into mock filesystem.
+    async fn upload(
+        &self,
+        local_path: &Path,
+        remote_path: &Path,
+        opts: &TransferOptions,
+    ) -> Result<()> {
+        // Check for injected error
+        if let Some(msg) = self.transfer_error.lock().unwrap().take() {
+            return Err(anyhow!("{}", msg));
+        }
+
+        let src_meta = std::fs::symlink_metadata(local_path)
+            .map_err(|e| anyhow!("source not found: {}: {}", local_path.display(), e))?;
+
+        if src_meta.file_type().is_symlink() {
+            return Err(anyhow!("symlink encountered at source: {}", local_path.display()));
+        }
+
+        if src_meta.is_dir() {
+            if !opts.recursive {
+                return Err(anyhow!(
+                    "source is a directory but recursive=false: {}",
+                    local_path.display()
+                ));
+            }
+            self.mock_upload_dir(local_path, remote_path, opts)
+        } else {
+            self.mock_upload_file(local_path, remote_path, opts)
+        }
+    }
+
+    fn mock_upload_file(
+        &self,
+        local_path: &Path,
+        remote_path: &Path,
+        opts: &TransferOptions,
+    ) -> Result<()> {
+        let mut fs = self.fs.lock().unwrap();
+        let effective_dst = if fs.get(remote_path).map_or(false, |e| matches!(e, MockFsEntry::Dir)) {
+            let name = local_path.file_name()
+                .ok_or_else(|| anyhow!("source has no filename: {}", local_path.display()))?;
+            remote_path.join(name)
+        } else {
+            remote_path.to_path_buf()
+        };
+
+        if let Some(existing) = fs.get(&effective_dst) {
+            if !opts.overwrite {
+                return Err(anyhow!(
+                    "destination already exists and overwrite=false: {}",
+                    effective_dst.display()
+                ));
+            }
+            if matches!(existing, MockFsEntry::Dir) {
+                return Err(anyhow!(
+                    "type mismatch: source is a file but destination is a directory: {}",
+                    effective_dst.display()
+                ));
+            }
+        }
+
+        // Check parent exists
+        if let Some(parent) = effective_dst.parent() {
+            if parent != Path::new("") && parent != Path::new("/") && !fs.contains_key(parent) {
+                return Err(anyhow!(
+                    "parent directory does not exist: {}",
+                    parent.display()
+                ));
+            }
+        }
+
+        let data = std::fs::read(local_path)
+            .map_err(|e| anyhow!("failed to read {}: {}", local_path.display(), e))?;
+        fs.insert(effective_dst, MockFsEntry::File(data));
+        Ok(())
+    }
+
+    fn mock_upload_dir(
+        &self,
+        local_path: &Path,
+        remote_path: &Path,
+        opts: &TransferOptions,
+    ) -> Result<()> {
+        let effective_dst = {
+            let fs = self.fs.lock().unwrap();
+            if fs.get(remote_path).map_or(false, |e| matches!(e, MockFsEntry::Dir)) {
+                let name = local_path.file_name()
+                    .ok_or_else(|| anyhow!("source has no filename: {}", local_path.display()))?;
+                remote_path.join(name)
+            } else {
+                remote_path.to_path_buf()
+            }
+        };
+
+        {
+            let mut fs = self.fs.lock().unwrap();
+            if let Some(existing) = fs.get(&effective_dst) {
+                if !opts.overwrite {
+                    return Err(anyhow!(
+                        "destination already exists and overwrite=false: {}",
+                        effective_dst.display()
+                    ));
+                }
+                if matches!(existing, MockFsEntry::File(_)) {
+                    return Err(anyhow!(
+                        "type mismatch: source is a directory but destination is a file: {}",
+                        effective_dst.display()
+                    ));
+                }
+            } else {
+                // Check parent exists
+                if let Some(parent) = effective_dst.parent() {
+                    if parent != Path::new("") && parent != Path::new("/") && !fs.contains_key(parent) {
+                        return Err(anyhow!(
+                            "parent directory does not exist: {}",
+                            parent.display()
+                        ));
+                    }
+                }
+                fs.insert(effective_dst.clone(), MockFsEntry::Dir);
+            }
+        }
+
+        self.mock_upload_dir_contents(local_path, &effective_dst, opts)
+    }
+
+    fn mock_upload_dir_contents(
+        &self,
+        local_path: &Path,
+        remote_path: &Path,
+        opts: &TransferOptions,
+    ) -> Result<()> {
+        for entry in std::fs::read_dir(local_path)
+            .map_err(|e| anyhow!("failed to read dir {}: {}", local_path.display(), e))?
+        {
+            let entry = entry.map_err(|e| anyhow!("dir entry error: {}", e))?;
+            let entry_path = entry.path();
+            let meta = std::fs::symlink_metadata(&entry_path)
+                .map_err(|e| anyhow!("failed to stat {}: {}", entry_path.display(), e))?;
+
+            if meta.file_type().is_symlink() {
+                return Err(anyhow!("symlink encountered: {}", entry_path.display()));
+            }
+
+            let name = entry.file_name();
+            let remote_entry = remote_path.join(&name);
+
+            if meta.is_dir() {
+                {
+                    let mut fs = self.fs.lock().unwrap();
+                    if !fs.contains_key(&remote_entry) {
+                        fs.insert(remote_entry.clone(), MockFsEntry::Dir);
+                    }
+                }
+                self.mock_upload_dir_contents(&entry_path, &remote_entry, opts)?;
+            } else {
+                let data = std::fs::read(&entry_path)
+                    .map_err(|e| anyhow!("failed to read {}: {}", entry_path.display(), e))?;
+                let mut fs = self.fs.lock().unwrap();
+                fs.insert(remote_entry, MockFsEntry::File(data));
+            }
+        }
+        Ok(())
+    }
+
+    /// Download: copy from mock filesystem to real filesystem.
+    async fn download(
+        &self,
+        remote_path: &Path,
+        local_path: &Path,
+        opts: &TransferOptions,
+    ) -> Result<()> {
+        // Check for injected error
+        if let Some(msg) = self.transfer_error.lock().unwrap().take() {
+            return Err(anyhow!("{}", msg));
+        }
+
+        let fs = self.fs.lock().unwrap();
+        let entry = fs.get(remote_path)
+            .ok_or_else(|| anyhow!("source not found: {}", remote_path.display()))?
+            .clone();
+        drop(fs);
+
+        match entry {
+            MockFsEntry::Dir => {
+                if !opts.recursive {
+                    return Err(anyhow!(
+                        "source is a directory but recursive=false: {}",
+                        remote_path.display()
+                    ));
+                }
+                self.mock_download_dir(remote_path, local_path, opts)
+            }
+            MockFsEntry::File(data) => {
+                self.mock_download_file(remote_path, &data, local_path, opts)
+            }
+        }
+    }
+
+    fn mock_download_file(
+        &self,
+        remote_path: &Path,
+        data: &[u8],
+        local_path: &Path,
+        opts: &TransferOptions,
+    ) -> Result<()> {
+        let effective_dst = if local_path.is_dir() {
+            let name = remote_path.file_name()
+                .ok_or_else(|| anyhow!("source has no filename: {}", remote_path.display()))?;
+            local_path.join(name)
+        } else {
+            local_path.to_path_buf()
+        };
+
+        if effective_dst.exists() {
+            if !opts.overwrite {
+                return Err(anyhow!(
+                    "destination already exists and overwrite=false: {}",
+                    effective_dst.display()
+                ));
+            }
+            if effective_dst.is_dir() {
+                return Err(anyhow!(
+                    "type mismatch: source is a file but destination is a directory: {}",
+                    effective_dst.display()
+                ));
+            }
+        }
+
+        if let Some(parent) = effective_dst.parent() {
+            if !parent.exists() {
+                return Err(anyhow!(
+                    "parent directory does not exist: {}",
+                    parent.display()
+                ));
+            }
+        }
+
+        std::fs::write(&effective_dst, data)
+            .map_err(|e| anyhow!("failed to write {}: {}", effective_dst.display(), e))?;
+        Ok(())
+    }
+
+    fn mock_download_dir(
+        &self,
+        remote_path: &Path,
+        local_path: &Path,
+        opts: &TransferOptions,
+    ) -> Result<()> {
+        let effective_dst = if local_path.is_dir() {
+            let name = remote_path.file_name()
+                .ok_or_else(|| anyhow!("source has no filename: {}", remote_path.display()))?;
+            local_path.join(name)
+        } else {
+            local_path.to_path_buf()
+        };
+
+        if effective_dst.exists() {
+            if !opts.overwrite {
+                return Err(anyhow!(
+                    "destination already exists and overwrite=false: {}",
+                    effective_dst.display()
+                ));
+            }
+            if effective_dst.is_file() {
+                return Err(anyhow!(
+                    "type mismatch: source is a directory but destination is a file: {}",
+                    effective_dst.display()
+                ));
+            }
+        } else {
+            if let Some(parent) = effective_dst.parent() {
+                if !parent.exists() {
+                    return Err(anyhow!(
+                        "parent directory does not exist: {}",
+                        parent.display()
+                    ));
+                }
+            }
+            std::fs::create_dir(&effective_dst)
+                .map_err(|e| anyhow!("failed to create dir {}: {}", effective_dst.display(), e))?;
+        }
+
+        // Download children from mock fs
+        let children: Vec<(std::path::PathBuf, MockFsEntry)> = {
+            let fs = self.fs.lock().unwrap();
+            fs.iter()
+                .filter(|(k, _)| k.parent() == Some(remote_path) && *k != remote_path)
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
+
+        for (child_path, entry) in children {
+            let name = child_path.file_name()
+                .ok_or_else(|| anyhow!("child has no filename: {}", child_path.display()))?;
+            let local_child = effective_dst.join(name);
+            match entry {
+                MockFsEntry::File(data) => {
+                    std::fs::write(&local_child, &data)
+                        .map_err(|e| anyhow!("failed to write {}: {}", local_child.display(), e))?;
+                }
+                MockFsEntry::Dir => {
+                    if !local_child.exists() {
+                        std::fs::create_dir(&local_child)
+                            .map_err(|e| anyhow!("failed to create dir {}: {}", local_child.display(), e))?;
+                    }
+                    self.mock_download_dir(&child_path, &local_child, &TransferOptions {
+                        overwrite: opts.overwrite,
+                        recursive: true,
+                    })?;
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -694,6 +1381,32 @@ impl SshTransport {
     /// Get a reference to the SSH configuration.
     pub fn config(&self) -> &SshConfig {
         &self.config
+    }
+
+    /// Upload a file or directory to the remote host via SFTP (DC23).
+    ///
+    /// TODO(1.13e): Implement using russh-sftp. Currently returns an error
+    /// indicating SFTP is not yet implemented.
+    async fn upload(
+        &self,
+        _local_path: &Path,
+        _remote_path: &Path,
+        _opts: &TransferOptions,
+    ) -> Result<()> {
+        Err(anyhow!("SFTP upload not yet implemented for SSH transport"))
+    }
+
+    /// Download a file or directory from the remote host via SFTP (DC23).
+    ///
+    /// TODO(1.13e): Implement using russh-sftp. Currently returns an error
+    /// indicating SFTP is not yet implemented.
+    async fn download(
+        &self,
+        _remote_path: &Path,
+        _local_path: &Path,
+        _opts: &TransferOptions,
+    ) -> Result<()> {
+        Err(anyhow!("SFTP download not yet implemented for SSH transport"))
     }
 }
 
