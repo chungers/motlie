@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-15 | @claude | Phase 1.13 complete (1.13a–i): API.md section 16 (file transfer + exec boundary table), `upload`/`download` REPL commands with `--recursive`, cross-link to SFTP.md. |
 | 2026-03-15 | @claude | Phase 1.13 implementation complete (1.13a–h): SSH SFTP via `russh-sftp`, all unit + integration tests passing (223 unit, 17 integration). Added `HostHandle::exec()` public API for ad-hoc shell commands. Remaining: 1.13i (docs/examples). |
 | 2026-03-15 | @claude | Phase 1.13 implementation: completed 1.13a–d, 1.13f–h (types, transport surface, local/mock impl, host wiring, unit + integration tests). SSH SFTP impl (1.13e) and SSH integration tests stubbed for follow-up. |
 | 2026-03-15 | @codex | Address PR #78 final doc follow-up: lock symlink rejection, metadata non-preservation, and `Result<()>` return shape into Phase 1.13 tasks and test coverage. |
@@ -610,11 +611,10 @@ is not extended.
 
 ### 1.13i — Documentation and behavior verification
 
-- [ ] Update `docs/API.md` with host-level upload/download examples and boundary notes:
+- [x] Update `docs/API.md` with host-level upload/download examples and boundary notes:
   transport `exec()` vs host upload/download vs pane `Target::exec()`
-- [ ] Add example-program task placeholder pending user direction on the preferred
-  verification use case (per examples process)
-- [ ] Cross-link implementation docs to [`SFTP.md`](./SFTP.md)
+- [x] Add `upload` and `download` commands to `examples/repl.rs` with `--recursive` flag
+- [x] Cross-link implementation docs to [`SFTP.md`](./SFTP.md)
 
 **Depends on**: 1.3, 1.7, 2a.1
 

@@ -1048,9 +1048,117 @@ let limit = target.get_history_limit().await?;
 
 ---
 
+## 16. Host-Level File Transfer (DC23)
+
+`HostHandle::upload()` and `download()` transfer files and directories between
+the local machine and the host. For SSH hosts this uses SFTP; for localhost it
+uses filesystem copy. See [`SFTP.md`](./SFTP.md) for the full design.
+
+### Single file
+
+```rust
+use std::path::Path;
+use motlie_tmux::TransferOptions;
+
+let opts = TransferOptions::default(); // overwrite=true, recursive=false
+
+// Upload a local file to the remote host
+host.upload(
+    Path::new("/tmp/app.tar.gz"),
+    Path::new("/opt/deploy/app.tar.gz"),
+    &opts,
+).await?;
+
+// Download it back
+host.download(
+    Path::new("/opt/deploy/app.tar.gz"),
+    Path::new("/tmp/restored.tar.gz"),
+    &opts,
+).await?;
+```
+
+### Directory (recursive)
+
+Directory transfer requires `recursive: true`. Placement follows `cp -r`
+semantics:
+
+- **Destination does not exist** → source is copied *as* that path
+- **Destination exists as a directory** → source is copied *into* it (using the
+  source basename)
+
+```rust
+let opts = TransferOptions { overwrite: true, recursive: true };
+
+// Upload ./myapp → /remote/deploy/
+// If /remote/deploy/ exists, result is /remote/deploy/myapp/...
+// If /remote/deploy/ does not exist, result is /remote/deploy/...
+host.upload(
+    Path::new("./myapp"),
+    Path::new("/remote/deploy"),
+    &opts,
+).await?;
+```
+
+### Directory merge
+
+When `overwrite=true` and the destination directory already exists, the transfer
+merges into the existing tree: overwrite conflicting files, create missing
+entries, and preserve extras. This is *not* a destructive replace.
+
+```rust
+// Remote /opt/app/ has: config.toml, old_module/
+// Local  ./app/ has:    config.toml (updated), new_module/
+// After upload: /opt/app/ has config.toml (updated), old_module/, new_module/
+```
+
+### Option enforcement
+
+```rust
+// overwrite=false → error if destination already exists
+let opts = TransferOptions { overwrite: false, recursive: false };
+// Returns Err if /remote/file.txt already exists
+host.upload(Path::new("file.txt"), Path::new("/remote/file.txt"), &opts).await;
+
+// recursive=false → error if source is a directory
+host.upload(Path::new("./my_dir"), Path::new("/remote/dir"), &opts).await;
+// → Err: "source is a directory but recursive is false"
+```
+
+### Symlink rejection
+
+Any symlink encountered in the source or destination tree causes the transfer
+to fail with an error. Symlinks are never followed.
+
+### Boundary: exec vs upload/download vs Target::exec
+
+| Method | Scope | Mechanism | Use case |
+|--------|-------|-----------|----------|
+| `host.exec("cmd")` | Host shell | SSH channel / local subprocess | Ad-hoc setup, teardown, inspection |
+| `host.upload()` / `download()` | File transfer | SFTP / filesystem copy | Deploying artifacts, fetching logs |
+| `target.exec("cmd")` | Tmux pane | Send + sentinel capture | Commands that need tmux context |
+
+### Ad-hoc shell commands
+
+`HostHandle::exec()` runs a shell command on the host outside of any tmux
+session, returning stdout. For SSH hosts this opens a channel; for localhost it
+spawns a subprocess.
+
+```rust
+// Run a command on the remote host
+let output = host.exec("uname -a").await?;
+println!("{}", output);
+
+// Useful for setup/teardown around file transfers
+host.exec("mkdir -p /opt/deploy").await?;
+host.upload(Path::new("./app"), Path::new("/opt/deploy"), &opts).await?;
+host.exec("systemctl restart myapp").await?;
+```
+
+---
+
 # Part III — Reference
 
-## 16. Normalization Utilities
+## 17. Normalization Utilities
 
 Standalone functions re-exported from the crate root, usable independently
 of any transport or target:
@@ -1084,7 +1192,7 @@ assert!(issues.is_empty());
 
 ---
 
-## 17. Type Quick Reference
+## 18. Type Quick Reference
 
 ### Core handles
 
@@ -1145,9 +1253,11 @@ assert!(issues.is_empty());
 | `LocalTransport` | Subprocess exec, configurable timeout |
 | `SshTransport` | russh 0.46, ssh-agent auth; `connect()`, `is_closed()` |
 | `SshConfig` | host, port, user, host_key_policy, timeout, keepalive_interval, socket; `parse()`, `to_uri_string()`, `connect()`, `Display`/`FromStr` |
-| `MockTransport` | Canned responses; `with_response()`, `with_default()` |
+| `MockTransport` | Canned responses; `with_response()`, `with_default()`, `with_file()`, `with_dir()` |
 | `HostKeyPolicy` | Enum: Verify (default), TrustFirstUse, Insecure |
 | `TmuxSocket` | Enum: Name(String), Path(String) |
+| `TransferOptions` | overwrite (bool, default true), recursive (bool, default false) |
+| `MockFsEntry` | Enum: File(Vec<u8>), Dir — in-memory mock filesystem entries |
 
 ### Shell channel (low-level, used by monitor layer — Phase 2a)
 

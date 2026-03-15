@@ -198,6 +198,8 @@ cargo run -p motlie-tmux --example repl -- ssh://localhost
 | `targets` | List all sessions with target spec strings | `host.list_sessions()`, `target.children()` |
 | `send <target> <text...>` | Send text + Enter to a target | `target.send_text()`, `target.send_keys()` |
 | `capture <target> <n>` | Print last N scrollback lines | `target.sample_text(LastLines(n))` |
+| `upload <local> <remote> [--recursive]` | Upload a file or directory to the host | `host.upload()`, `TransferOptions` |
+| `download <remote> <local> [--recursive]` | Download a file or directory from the host | `host.download()`, `TransferOptions` |
 | `quit` | Disconnect and exit | — |
 
 `create` only creates sessions — the library API (`host.create_session()`) operates
@@ -238,6 +240,12 @@ repl> capture test_session 5
 $ echo hello from repl
 hello from repl
 $
+repl> upload /tmp/config.toml /opt/myapp/config.toml
+Uploaded /tmp/config.toml → /opt/myapp/config.toml
+repl> upload ./deploy /opt/myapp --recursive
+Uploaded ./deploy → /opt/myapp
+repl> download /var/log/myapp.log /tmp/myapp.log
+Downloaded /var/log/myapp.log → /tmp/myapp.log
 repl> kill test_session
 Killed: test_session
 repl> quit
