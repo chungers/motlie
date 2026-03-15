@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-15 | @codex: Address PR #78 final doc follow-up by locking DC23 follow-on decisions: reject symlinks initially, do not preserve metadata, and keep the first public API at `Result<()>`. | DC23 |
 | 2026-03-14 | @codex: Address PR #78 re-review by clarifying DC23 path typing (`&Path` for local and remote endpoints) and `cp -r` style directory placement semantics (existing directory => copy into; missing path => copy as). | DC23 |
 | 2026-03-14 | @codex: Address PR #78 review by clarifying DC23 test policy (localhost SFTP tests are not tmux-gated) and directory overwrite semantics (`overwrite=true` merges into an existing destination tree rather than replacing it). | DC23 |
 | 2026-03-14 | @codex: Refine DC23 per user decisions — greenfield/breaking changes accepted, API uses `upload` / `download`, overwrite semantics configurable, directory transfer included now. | DC23 |
@@ -2978,6 +2979,9 @@ and directories now. `Target` is intentionally not extended for file transfer.
 - Configurable overwrite semantics (`overwrite=false` returns error on existing destination;
   for directories, `overwrite=true` merges into an existing destination tree rather than
   replacing it)
+- Reject symlinks initially rather than following them
+- Do not preserve file metadata as part of the transfer contract
+- Public transfer methods return `Result<()>` initially
 - No required migration/backwards-compatibility layer
 
 **Deep dive**: See [`SFTP.md`](./SFTP.md) for the design and implementation outline.

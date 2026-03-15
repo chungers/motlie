@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-15 | @codex | Address PR #78 final doc follow-up: lock symlink rejection, metadata non-preservation, and `Result<()>` return shape into Phase 1.13 tasks and test coverage. |
 | 2026-03-14 | @codex | Address PR #78 re-review: make remote path parameters `&Path`, define `cp -r` style directory placement semantics, and add explicit copy-into vs copy-as test tasks. |
 | 2026-03-14 | @codex | Address PR #78 review: localhost SFTP integration tests run unconditionally (no tmux gate), directory overwrite semantics are explicit merge semantics, and Phase 1.13 is split into smaller incremental tasks. |
 | 2026-03-14 | @codex | Refined Phase 1.13 per user decisions: greenfield/breaking changes accepted, API uses `upload` / `download`, overwrite semantics configurable, directory transfer included now, file-only/v1 phasing removed. |
@@ -529,6 +530,7 @@ is not extended.
 - [ ] Add `TransportKind::download(&self, remote_path: &Path, local_path: &Path, opts) -> Result<()>`
 - [ ] Document `cp -r` style directory placement semantics: existing destination directory
   means copy into it; missing destination path means copy as that path
+- [ ] Lock the public return shape to `Result<()>` initially; no transfer summary type yet
 - [ ] Keep failure modes non-panicking; validation and I/O errors return `Err`
 
 ### 1.13c — Local transport implementation (`src/transport.rs`)
@@ -538,6 +540,7 @@ is not extended.
 - [ ] Implement recursive directory copy when `opts.recursive == true`
 - [ ] Return error for directory sources when `opts.recursive == false`
 - [ ] Return error when destination exists and `opts.overwrite == false`
+- [ ] Reject symlinks encountered during upload/download rather than following them
 - [ ] For directory destinations with `opts.overwrite == true`, merge into the existing
   tree: overwrite conflicting files, create missing entries, preserve extras
 - [ ] Wrap each top-level transfer in the existing local transport timeout
@@ -547,6 +550,7 @@ is not extended.
 - [ ] Add an in-memory filesystem/tree model for `MockTransport`
 - [ ] Support file and directory upload/download semantics
 - [ ] Mirror the same directory merge semantics as the local implementation
+- [ ] Mirror the same symlink rejection semantics as the local implementation
 - [ ] Add deterministic transfer error injection for tests
 - [ ] Keep command mocking behavior unchanged for existing `exec()` tests
 
@@ -557,6 +561,7 @@ is not extended.
 - [ ] Implement `SshTransport::download()` using SFTP for regular files
 - [ ] Implement recursive directory upload/download over SFTP
 - [ ] Enforce `overwrite=false` and `recursive=false` semantics consistently
+- [ ] Reject symlinks encountered during SFTP traversal rather than following them
 - [ ] For directory destinations with `opts.overwrite == true`, mirror the same merge
   semantics as local/mock implementations
 - [ ] Bound each top-level SFTP transfer by `SshConfig::timeout`
@@ -575,6 +580,7 @@ is not extended.
 - [ ] `MockTransport` directory upload/download round-trip
 - [ ] `MockTransport` directory copy-into vs copy-as behavior for existing vs missing destination roots
 - [ ] `MockTransport` directory merge semantics with `overwrite=true`
+- [ ] `MockTransport` symlink rejection path
 - [ ] `overwrite=false` conflict path
 - [ ] `recursive=false` directory rejection path
 - [ ] `TransportKind` dispatch tests for `upload()` / `download()`
@@ -587,6 +593,7 @@ is not extended.
 - [ ] Localhost directory copy-into vs copy-as behavior for existing vs missing destination roots
 - [ ] Localhost directory merge behavior with `overwrite=true`
 - [ ] Localhost overwrite=false and recursive=false error paths
+- [ ] Localhost symlink rejection path
 - [ ] SSH file upload/download round-trip using the existing `MOTLIE_SSH_TEST_HOST`
   env gate (no new env var)
 - [ ] SSH directory upload/download round-trip using the existing
@@ -597,6 +604,7 @@ is not extended.
   `MOTLIE_SSH_TEST_HOST` env gate
 - [ ] SSH overwrite=false and recursive=false error paths using the existing
   `MOTLIE_SSH_TEST_HOST` env gate
+- [ ] SSH symlink rejection path using the existing `MOTLIE_SSH_TEST_HOST` env gate
 
 ### 1.13i — Documentation and behavior verification
 
