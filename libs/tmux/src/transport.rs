@@ -861,7 +861,16 @@ impl MockTransport {
                 .map_err(|e| anyhow!("failed to create dir {}: {}", effective_dst.display(), e))?;
         }
 
-        // Download children from mock fs
+        self.mock_download_dir_contents(remote_path, &effective_dst, opts)
+    }
+
+    /// Download directory contents from mock fs to local fs (no cp-r placement).
+    fn mock_download_dir_contents(
+        &self,
+        remote_path: &Path,
+        local_dir: &Path,
+        opts: &TransferOptions,
+    ) -> Result<()> {
         let children: Vec<(std::path::PathBuf, MockFsEntry)> = {
             let fs = self.fs.lock().unwrap();
             fs.iter()
@@ -873,7 +882,7 @@ impl MockTransport {
         for (child_path, entry) in children {
             let name = child_path.file_name()
                 .ok_or_else(|| anyhow!("child has no filename: {}", child_path.display()))?;
-            let local_child = effective_dst.join(name);
+            let local_child = local_dir.join(name);
             match entry {
                 MockFsEntry::File(data) => {
                     std::fs::write(&local_child, &data)
@@ -884,10 +893,7 @@ impl MockTransport {
                         std::fs::create_dir(&local_child)
                             .map_err(|e| anyhow!("failed to create dir {}: {}", local_child.display(), e))?;
                     }
-                    self.mock_download_dir(&child_path, &local_child, &TransferOptions {
-                        overwrite: opts.overwrite,
-                        recursive: true,
-                    })?;
+                    self.mock_download_dir_contents(&child_path, &local_child, opts)?;
                 }
             }
         }
@@ -1697,5 +1703,521 @@ mod tests {
         assert!(SshConfig::new("127.0.0.1", "u").is_localhost());
         assert!(SshConfig::new("::1", "u").is_localhost());
         assert!(!SshConfig::new("remote", "u").is_localhost());
+    }
+
+    // --- File transfer tests (DC23, Phase 1.13g) ---
+
+    fn make_temp_dir() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
+    }
+
+    #[tokio::test]
+    async fn mock_file_upload_download_roundtrip() {
+        let tmp = make_temp_dir();
+        let src = tmp.path().join("source.txt");
+        std::fs::write(&src, b"hello world").unwrap();
+
+        let mock = MockTransport::new()
+            .with_dir(std::path::PathBuf::from("/remote"));
+        let transport = TransportKind::Mock(mock);
+
+        // Upload
+        let opts = TransferOptions::default();
+        transport
+            .upload(&src, Path::new("/remote"), &opts)
+            .await
+            .unwrap();
+
+        // Verify in mock fs
+        match &transport {
+            TransportKind::Mock(m) => {
+                let data = m.read_file(Path::new("/remote/source.txt")).unwrap();
+                assert_eq!(data, b"hello world");
+            }
+            _ => unreachable!(),
+        }
+
+        // Download
+        let dst = tmp.path().join("downloaded.txt");
+        transport
+            .download(Path::new("/remote/source.txt"), &dst, &opts)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&dst).unwrap(), b"hello world");
+    }
+
+    #[tokio::test]
+    async fn mock_dir_upload_download_roundtrip() {
+        let tmp = make_temp_dir();
+        let src_dir = tmp.path().join("myapp");
+        std::fs::create_dir(&src_dir).unwrap();
+        std::fs::write(src_dir.join("main.rs"), b"fn main() {}").unwrap();
+        std::fs::create_dir(src_dir.join("sub")).unwrap();
+        std::fs::write(src_dir.join("sub").join("lib.rs"), b"pub fn f() {}").unwrap();
+
+        let mock = MockTransport::new();
+        let transport = TransportKind::Mock(mock);
+
+        // Upload directory
+        let opts = TransferOptions {
+            overwrite: true,
+            recursive: true,
+        };
+        transport
+            .upload(&src_dir, Path::new("/deploy"), &opts)
+            .await
+            .unwrap();
+
+        // Verify
+        match &transport {
+            TransportKind::Mock(m) => {
+                assert!(m.exists(Path::new("/deploy")));
+                assert_eq!(
+                    m.read_file(Path::new("/deploy/main.rs")).unwrap(),
+                    b"fn main() {}"
+                );
+                assert!(m.exists(Path::new("/deploy/sub")));
+                assert_eq!(
+                    m.read_file(Path::new("/deploy/sub/lib.rs")).unwrap(),
+                    b"pub fn f() {}"
+                );
+            }
+            _ => unreachable!(),
+        }
+
+        // Download back
+        let dst_dir = tmp.path().join("restored");
+        transport
+            .download(Path::new("/deploy"), &dst_dir, &opts)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read(dst_dir.join("main.rs")).unwrap(),
+            b"fn main() {}"
+        );
+        assert_eq!(
+            std::fs::read(dst_dir.join("sub").join("lib.rs")).unwrap(),
+            b"pub fn f() {}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_copy_into_vs_copy_as() {
+        let tmp = make_temp_dir();
+        let src_dir = tmp.path().join("app");
+        std::fs::create_dir(&src_dir).unwrap();
+        std::fs::write(src_dir.join("file.txt"), b"data").unwrap();
+
+        let opts = TransferOptions {
+            overwrite: true,
+            recursive: true,
+        };
+
+        // Copy-as: destination doesn't exist → src copied AS that path
+        let mock1 = MockTransport::new();
+        let t1 = TransportKind::Mock(mock1);
+        t1.upload(&src_dir, Path::new("/new_name"), &opts)
+            .await
+            .unwrap();
+        match &t1 {
+            TransportKind::Mock(m) => {
+                assert!(m.exists(Path::new("/new_name")));
+                assert_eq!(
+                    m.read_file(Path::new("/new_name/file.txt")).unwrap(),
+                    b"data"
+                );
+            }
+            _ => unreachable!(),
+        }
+
+        // Copy-into: destination exists as dir → src copied INTO it
+        let mock2 = MockTransport::new().with_dir(std::path::PathBuf::from("/existing"));
+        let t2 = TransportKind::Mock(mock2);
+        t2.upload(&src_dir, Path::new("/existing"), &opts)
+            .await
+            .unwrap();
+        match &t2 {
+            TransportKind::Mock(m) => {
+                // Should be /existing/app/file.txt, not /existing/file.txt
+                assert!(m.exists(Path::new("/existing/app")));
+                assert_eq!(
+                    m.read_file(Path::new("/existing/app/file.txt")).unwrap(),
+                    b"data"
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_dir_merge_overwrite() {
+        let tmp = make_temp_dir();
+
+        // Source dir "dst" has a.txt (updated) and b.txt (new)
+        let src = tmp.path().join("dst");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(src.join("a.txt"), b"updated").unwrap();
+        std::fs::write(src.join("b.txt"), b"new").unwrap();
+
+        // Pre-populate mock: /parent/dst/ has a.txt (old) and c.txt (extra)
+        let mock = MockTransport::new()
+            .with_dir(std::path::PathBuf::from("/parent"))
+            .with_dir(std::path::PathBuf::from("/parent/dst"))
+            .with_file(
+                std::path::PathBuf::from("/parent/dst/a.txt"),
+                b"original".to_vec(),
+            )
+            .with_file(
+                std::path::PathBuf::from("/parent/dst/c.txt"),
+                b"extra".to_vec(),
+            );
+        let transport = TransportKind::Mock(mock);
+
+        let opts = TransferOptions {
+            overwrite: true,
+            recursive: true,
+        };
+
+        // Upload dst → /parent (copy-into: /parent exists as dir → /parent/dst)
+        // /parent/dst already exists → merge semantics
+        transport
+            .upload(&src, Path::new("/parent"), &opts)
+            .await
+            .unwrap();
+
+        match &transport {
+            TransportKind::Mock(m) => {
+                // a.txt overwritten
+                assert_eq!(
+                    m.read_file(Path::new("/parent/dst/a.txt")).unwrap(),
+                    b"updated"
+                );
+                // b.txt created
+                assert_eq!(
+                    m.read_file(Path::new("/parent/dst/b.txt")).unwrap(),
+                    b"new"
+                );
+                // c.txt preserved (destination-only extra)
+                assert_eq!(
+                    m.read_file(Path::new("/parent/dst/c.txt")).unwrap(),
+                    b"extra"
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_overwrite_false_rejects() {
+        let tmp = make_temp_dir();
+        let src = tmp.path().join("file.txt");
+        std::fs::write(&src, b"data").unwrap();
+
+        let mock = MockTransport::new()
+            .with_file(std::path::PathBuf::from("/remote/file.txt"), b"old".to_vec());
+        let transport = TransportKind::Mock(mock);
+
+        let opts = TransferOptions {
+            overwrite: false,
+            recursive: false,
+        };
+        let result = transport
+            .upload(&src, Path::new("/remote/file.txt"), &opts)
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("overwrite=false"));
+    }
+
+    #[tokio::test]
+    async fn mock_recursive_false_rejects_dir() {
+        let tmp = make_temp_dir();
+        let src_dir = tmp.path().join("mydir");
+        std::fs::create_dir(&src_dir).unwrap();
+        std::fs::write(src_dir.join("f.txt"), b"x").unwrap();
+
+        let mock = MockTransport::new();
+        let transport = TransportKind::Mock(mock);
+
+        let opts = TransferOptions {
+            overwrite: true,
+            recursive: false,
+        };
+        let result = transport
+            .upload(&src_dir, Path::new("/remote"), &opts)
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("recursive=false"));
+    }
+
+    #[tokio::test]
+    async fn mock_transfer_error_injection() {
+        let tmp = make_temp_dir();
+        let src = tmp.path().join("f.txt");
+        std::fs::write(&src, b"data").unwrap();
+
+        let mock = MockTransport::new().with_transfer_error("disk full");
+        let transport = TransportKind::Mock(mock);
+
+        let result = transport
+            .upload(&src, Path::new("/remote/f.txt"), &TransferOptions::default())
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("disk full"));
+    }
+
+    #[tokio::test]
+    async fn local_file_upload_download_roundtrip() {
+        let tmp = make_temp_dir();
+        let src = tmp.path().join("original.bin");
+        let content: Vec<u8> = (0..=255).collect();
+        std::fs::write(&src, &content).unwrap();
+
+        let dst_dir = tmp.path().join("dest");
+        std::fs::create_dir(&dst_dir).unwrap();
+
+        let local = LocalTransport::new();
+        let transport = TransportKind::Local(local);
+        let opts = TransferOptions::default();
+
+        // Upload (copy into dest dir)
+        transport.upload(&src, &dst_dir, &opts).await.unwrap();
+        assert_eq!(
+            std::fs::read(dst_dir.join("original.bin")).unwrap(),
+            content
+        );
+
+        // Download back
+        let restored = tmp.path().join("restored.bin");
+        transport
+            .download(&dst_dir.join("original.bin"), &restored, &opts)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&restored).unwrap(), content);
+    }
+
+    #[tokio::test]
+    async fn local_dir_upload_download_roundtrip() {
+        let tmp = make_temp_dir();
+
+        // Create a nested source tree
+        let src = tmp.path().join("project");
+        std::fs::create_dir_all(src.join("src").join("inner")).unwrap();
+        std::fs::write(src.join("README.md"), b"# Project").unwrap();
+        std::fs::write(src.join("src").join("main.rs"), b"fn main() {}").unwrap();
+        std::fs::write(
+            src.join("src").join("inner").join("mod.rs"),
+            b"pub mod inner;",
+        )
+        .unwrap();
+
+        let opts = TransferOptions {
+            overwrite: true,
+            recursive: true,
+        };
+
+        // Upload (copy-as: /dest doesn't exist)
+        let dest = tmp.path().join("dest");
+        let transport = TransportKind::Local(LocalTransport::new());
+        transport.upload(&src, &dest, &opts).await.unwrap();
+
+        assert_eq!(
+            std::fs::read(dest.join("README.md")).unwrap(),
+            b"# Project"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("src").join("main.rs")).unwrap(),
+            b"fn main() {}"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("src").join("inner").join("mod.rs")).unwrap(),
+            b"pub mod inner;"
+        );
+
+        // Download back
+        let restored = tmp.path().join("restored");
+        transport.download(&dest, &restored, &opts).await.unwrap();
+        assert_eq!(
+            std::fs::read(restored.join("README.md")).unwrap(),
+            b"# Project"
+        );
+        assert_eq!(
+            std::fs::read(restored.join("src").join("inner").join("mod.rs")).unwrap(),
+            b"pub mod inner;"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_copy_into_vs_copy_as() {
+        let tmp = make_temp_dir();
+        let src = tmp.path().join("app");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(src.join("f.txt"), b"data").unwrap();
+
+        let opts = TransferOptions {
+            overwrite: true,
+            recursive: true,
+        };
+
+        // Copy-as: dest doesn't exist
+        let dest1 = tmp.path().join("new_name");
+        let transport = TransportKind::Local(LocalTransport::new());
+        transport.upload(&src, &dest1, &opts).await.unwrap();
+        assert!(dest1.join("f.txt").exists());
+
+        // Copy-into: dest exists as dir
+        let dest2 = tmp.path().join("existing");
+        std::fs::create_dir(&dest2).unwrap();
+        transport.upload(&src, &dest2, &opts).await.unwrap();
+        // Should be existing/app/f.txt
+        assert!(dest2.join("app").join("f.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn local_dir_merge_overwrite() {
+        let tmp = make_temp_dir();
+
+        // Source
+        let src = tmp.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(src.join("a.txt"), b"updated").unwrap();
+        std::fs::write(src.join("b.txt"), b"new").unwrap();
+
+        // Existing destination
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir(&dest).unwrap();
+        std::fs::write(dest.join("a.txt"), b"original").unwrap();
+        std::fs::write(dest.join("c.txt"), b"extra").unwrap();
+
+        let opts = TransferOptions {
+            overwrite: true,
+            recursive: true,
+        };
+
+        // Upload src as dest (copy-as since dest doesn't... wait, dest exists).
+        // To merge INTO dest with the same name, src basename must be "dest".
+        // Let me just use copy_local directly for merge test.
+        copy_local(&src, &dest, &opts).unwrap();
+        // cp -r semantics: dest exists as dir → copy src INTO dest → dest/src/
+        // That's not a merge of dest itself. To test merge we need the
+        // basename to match. Let me do it properly:
+        let src2 = tmp.path().join("target_dir");
+        std::fs::create_dir(&src2).unwrap();
+        std::fs::write(src2.join("a.txt"), b"updated").unwrap();
+        std::fs::write(src2.join("b.txt"), b"new").unwrap();
+
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir(&parent).unwrap();
+        let existing = parent.join("target_dir");
+        std::fs::create_dir(&existing).unwrap();
+        std::fs::write(existing.join("a.txt"), b"original").unwrap();
+        std::fs::write(existing.join("c.txt"), b"extra").unwrap();
+
+        // Upload target_dir → parent (copy-into → parent/target_dir, which exists → merge)
+        let transport = TransportKind::Local(LocalTransport::new());
+        transport.upload(&src2, &parent, &opts).await.unwrap();
+
+        assert_eq!(
+            std::fs::read(existing.join("a.txt")).unwrap(),
+            b"updated"
+        );
+        assert_eq!(std::fs::read(existing.join("b.txt")).unwrap(), b"new");
+        assert_eq!(std::fs::read(existing.join("c.txt")).unwrap(), b"extra");
+    }
+
+    #[tokio::test]
+    async fn local_overwrite_false_rejects() {
+        let tmp = make_temp_dir();
+        let src = tmp.path().join("src.txt");
+        std::fs::write(&src, b"data").unwrap();
+        let dst = tmp.path().join("dst.txt");
+        std::fs::write(&dst, b"existing").unwrap();
+
+        let transport = TransportKind::Local(LocalTransport::new());
+        let opts = TransferOptions {
+            overwrite: false,
+            recursive: false,
+        };
+        let result = transport.upload(&src, &dst, &opts).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("overwrite=false"));
+    }
+
+    #[tokio::test]
+    async fn local_recursive_false_rejects_dir() {
+        let tmp = make_temp_dir();
+        let src = tmp.path().join("dir");
+        std::fs::create_dir(&src).unwrap();
+
+        let transport = TransportKind::Local(LocalTransport::new());
+        let opts = TransferOptions {
+            overwrite: true,
+            recursive: false,
+        };
+        let result = transport
+            .upload(&src, tmp.path().join("dst").as_path(), &opts)
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("recursive=false"));
+    }
+
+    #[tokio::test]
+    async fn local_symlink_rejected() {
+        let tmp = make_temp_dir();
+        let real = tmp.path().join("real.txt");
+        std::fs::write(&real, b"data").unwrap();
+        let link = tmp.path().join("link.txt");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let transport = TransportKind::Local(LocalTransport::new());
+        let opts = TransferOptions::default();
+        let result = transport.upload(&link, tmp.path().join("dst.txt").as_path(), &opts).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("symlink"));
+    }
+
+    #[tokio::test]
+    async fn local_symlink_in_dir_rejected() {
+        let tmp = make_temp_dir();
+        let src = tmp.path().join("dir");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(src.join("ok.txt"), b"fine").unwrap();
+        let real = tmp.path().join("real.txt");
+        std::fs::write(&real, b"data").unwrap();
+        std::os::unix::fs::symlink(&real, src.join("bad_link")).unwrap();
+
+        let transport = TransportKind::Local(LocalTransport::new());
+        let opts = TransferOptions {
+            overwrite: true,
+            recursive: true,
+        };
+        let result = transport
+            .upload(&src, tmp.path().join("dst").as_path(), &opts)
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("symlink"));
+    }
+
+    #[tokio::test]
+    async fn transport_kind_dispatch_upload_download() {
+        let tmp = make_temp_dir();
+        let src = tmp.path().join("test.txt");
+        std::fs::write(&src, b"dispatch test").unwrap();
+
+        // Test with Local transport via TransportKind
+        let transport = TransportKind::Local(LocalTransport::new());
+        let dst = tmp.path().join("dst.txt");
+        transport
+            .upload(&src, &dst, &TransferOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&dst).unwrap(), b"dispatch test");
+
+        // Download back
+        let restored = tmp.path().join("restored.txt");
+        transport
+            .download(&dst, &restored, &TransferOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&restored).unwrap(), b"dispatch test");
     }
 }
