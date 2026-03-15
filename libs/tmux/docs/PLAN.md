@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-15 | @claude | Phase 1.13 implementation complete (1.13a–h): SSH SFTP via `russh-sftp`, all unit + integration tests passing (223 unit, 17 integration). Added `HostHandle::exec()` public API for ad-hoc shell commands. Remaining: 1.13i (docs/examples). |
 | 2026-03-15 | @claude | Phase 1.13 implementation: completed 1.13a–d, 1.13f–h (types, transport surface, local/mock impl, host wiring, unit + integration tests). SSH SFTP impl (1.13e) and SSH integration tests stubbed for follow-up. |
 | 2026-03-15 | @codex | Address PR #78 final doc follow-up: lock symlink rejection, metadata non-preservation, and `Result<()>` return shape into Phase 1.13 tasks and test coverage. |
 | 2026-03-14 | @codex | Address PR #78 re-review: make remote path parameters `&Path`, define `cp -r` style directory placement semantics, and add explicit copy-into vs copy-as test tasks. |
@@ -557,18 +558,16 @@ is not extended.
 
 ### 1.13e — SSH SFTP implementation (`src/transport.rs`)
 
-<!-- @claude 2026-03-15: SshTransport::upload/download stubbed with TODO error.
-     Pending russh-sftp integration in a follow-up. -->
-- [ ] Add explicit `russh-sftp` dependency to `Cargo.toml`
-- [ ] Implement `SshTransport::upload()` using SFTP for regular files
-- [ ] Implement `SshTransport::download()` using SFTP for regular files
-- [ ] Implement recursive directory upload/download over SFTP
-- [ ] Enforce `overwrite=false` and `recursive=false` semantics consistently
-- [ ] Reject symlinks encountered during SFTP traversal rather than following them
-- [ ] For directory destinations with `opts.overwrite == true`, mirror the same merge
+- [x] Add explicit `russh-sftp` dependency to `Cargo.toml`
+- [x] Implement `SshTransport::upload()` using SFTP for regular files
+- [x] Implement `SshTransport::download()` using SFTP for regular files
+- [x] Implement recursive directory upload/download over SFTP
+- [x] Enforce `overwrite=false` and `recursive=false` semantics consistently
+- [x] Reject symlinks encountered during SFTP traversal rather than following them
+- [x] For directory destinations with `opts.overwrite == true`, mirror the same merge
   semantics as local/mock implementations
-- [ ] Bound each top-level SFTP transfer by `SshConfig::timeout`
-- [ ] Open a fresh SFTP channel per top-level transfer; no shared client cache initially
+- [x] Bound each top-level SFTP transfer by `SshConfig::timeout`
+- [x] Open a fresh SFTP channel per top-level transfer; no shared client cache initially
 
 ### 1.13f — HostHandle, public exports, and call-site wiring (`src/host.rs`, `src/lib.rs`, callers`)
 
@@ -583,7 +582,7 @@ is not extended.
 - [x] `MockTransport` directory upload/download round-trip
 - [x] `MockTransport` directory copy-into vs copy-as behavior for existing vs missing destination roots
 - [x] `MockTransport` directory merge semantics with `overwrite=true`
-- [ ] `MockTransport` symlink rejection path
+- [x] `MockTransport` symlink rejection path
 - [x] `overwrite=false` conflict path
 - [x] `recursive=false` directory rejection path
 - [x] `TransportKind` dispatch tests for `upload()` / `download()`
@@ -597,17 +596,17 @@ is not extended.
 - [x] Localhost directory merge behavior with `overwrite=true`
 - [x] Localhost overwrite=false and recursive=false error paths
 - [x] Localhost symlink rejection path
-- [ ] SSH file upload/download round-trip using the existing `MOTLIE_SSH_TEST_HOST`
+- [x] SSH file upload/download round-trip using the existing `MOTLIE_SSH_TEST_HOST`
   env gate (no new env var)
-- [ ] SSH directory upload/download round-trip using the existing
+- [x] SSH directory upload/download round-trip using the existing
   `MOTLIE_SSH_TEST_HOST` env gate
-- [ ] SSH directory copy-into vs copy-as behavior for existing vs missing destination
+- [x] SSH directory copy-into vs copy-as behavior for existing vs missing destination
   roots using the existing `MOTLIE_SSH_TEST_HOST` env gate
-- [ ] SSH directory merge behavior with `overwrite=true` using the existing
+- [x] SSH directory merge behavior with `overwrite=true` using the existing
   `MOTLIE_SSH_TEST_HOST` env gate
-- [ ] SSH overwrite=false and recursive=false error paths using the existing
+- [x] SSH overwrite=false and recursive=false error paths using the existing
   `MOTLIE_SSH_TEST_HOST` env gate
-- [ ] SSH symlink rejection path using the existing `MOTLIE_SSH_TEST_HOST` env gate
+- [x] SSH symlink rejection path using the existing `MOTLIE_SSH_TEST_HOST` env gate
 
 ### 1.13i — Documentation and behavior verification
 

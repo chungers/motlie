@@ -347,3 +347,276 @@ async fn uri_ssh_connect() {
     // Sessions may be empty — that's fine, we just verify the call succeeds
     let _ = sessions;
 }
+
+// ---------------------------------------------------------------------------
+// SSH file transfer integration tests (DC23, Phase 1.13h)
+// Gated on MOTLIE_SSH_TEST_HOST — skip when not set.
+// ---------------------------------------------------------------------------
+
+/// Helper: connect to the SSH test host, returning (host, remote_tmp_dir).
+/// Creates a temporary directory on the remote host for test isolation.
+async fn ssh_test_host_with_tmp() -> Option<(HostHandle, String)> {
+    let test_host = std::env::var("MOTLIE_SSH_TEST_HOST").ok()?;
+    let uri = format!("ssh://{}", test_host);
+    let host = SshConfig::parse(&uri)
+        .unwrap_or_else(|e| panic!("parse failed: {}", e))
+        .connect()
+        .await
+        .unwrap_or_else(|e| panic!("connect failed: {}", e));
+
+    // Create a remote temp directory
+    let output = host.list_sessions().await.ok(); // verify connection works
+    let _ = output;
+
+    // Create a remote temp directory via the public exec API.
+    let remote_tmp = format!("/tmp/motlie_test_{}", std::process::id());
+    // Clean up from any previous failed run, then create
+    let _ = host.exec(&format!("rm -rf '{}'", remote_tmp)).await;
+    host.exec(&format!("mkdir -p '{}'", remote_tmp))
+        .await
+        .unwrap_or_else(|e| panic!("failed to create remote tmp dir: {}", e));
+
+    Some((host, remote_tmp))
+}
+
+/// Helper: cleanup remote temp directory.
+async fn ssh_cleanup(host: &HostHandle, remote_tmp: &str) {
+    let _ = host.exec(&format!("rm -rf '{}'", remote_tmp)).await;
+}
+
+#[tokio::test]
+async fn ssh_file_upload_download_roundtrip() {
+    let Some((host, remote_tmp)) = ssh_test_host_with_tmp().await else {
+        eprintln!("skipping: MOTLIE_SSH_TEST_HOST not set");
+        return;
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    let content: Vec<u8> = (0..=255).cycle().take(4096).collect();
+    let src = tmp.path().join("test.bin");
+    std::fs::write(&src, &content).unwrap();
+
+    let remote_file = std::path::PathBuf::from(&format!("{}/test.bin", remote_tmp));
+    let opts = motlie_tmux::TransferOptions::default();
+
+    // Upload
+    host.upload(&src, &remote_file, &opts)
+        .await
+        .expect("SSH upload failed");
+
+    // Download back
+    let restored = tmp.path().join("restored.bin");
+    host.download(&remote_file, &restored, &opts)
+        .await
+        .expect("SSH download failed");
+    assert_eq!(std::fs::read(&restored).unwrap(), content, "byte mismatch after SSH round-trip");
+
+    ssh_cleanup(&host, &remote_tmp).await;
+}
+
+#[tokio::test]
+async fn ssh_dir_upload_download_roundtrip() {
+    let Some((host, remote_tmp)) = ssh_test_host_with_tmp().await else {
+        eprintln!("skipping: MOTLIE_SSH_TEST_HOST not set");
+        return;
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("project");
+    std::fs::create_dir_all(src.join("src").join("inner")).unwrap();
+    std::fs::write(src.join("README.md"), b"# Hello").unwrap();
+    std::fs::write(src.join("src").join("main.rs"), b"fn main() {}").unwrap();
+    std::fs::write(src.join("src").join("inner").join("mod.rs"), b"// mod").unwrap();
+
+    let remote_dest = std::path::PathBuf::from(&format!("{}/deployed", remote_tmp));
+    let opts = motlie_tmux::TransferOptions {
+        overwrite: true,
+        recursive: true,
+    };
+
+    // Upload (copy-as: remote_dest doesn't exist)
+    host.upload(&src, &remote_dest, &opts)
+        .await
+        .expect("SSH dir upload failed");
+
+    // Download back
+    let restored = tmp.path().join("restored");
+    host.download(&remote_dest, &restored, &opts)
+        .await
+        .expect("SSH dir download failed");
+
+    assert_eq!(std::fs::read(restored.join("README.md")).unwrap(), b"# Hello");
+    assert_eq!(
+        std::fs::read(restored.join("src").join("main.rs")).unwrap(),
+        b"fn main() {}"
+    );
+    assert_eq!(
+        std::fs::read(restored.join("src").join("inner").join("mod.rs")).unwrap(),
+        b"// mod"
+    );
+
+    ssh_cleanup(&host, &remote_tmp).await;
+}
+
+#[tokio::test]
+async fn ssh_copy_into_vs_copy_as() {
+    let Some((host, remote_tmp)) = ssh_test_host_with_tmp().await else {
+        eprintln!("skipping: MOTLIE_SSH_TEST_HOST not set");
+        return;
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("app");
+    std::fs::create_dir(&src).unwrap();
+    std::fs::write(src.join("f.txt"), b"data").unwrap();
+
+    let opts = motlie_tmux::TransferOptions {
+        overwrite: true,
+        recursive: true,
+    };
+
+    // Copy-as: dest doesn't exist → copied AS that path
+    let dest1 = std::path::PathBuf::from(&format!("{}/new_app", remote_tmp));
+    host.upload(&src, &dest1, &opts).await.expect("copy-as upload failed");
+
+    // Verify by downloading
+    let dl1 = tmp.path().join("dl1");
+    host.download(&dest1, &dl1, &opts).await.expect("copy-as download failed");
+    assert!(dl1.join("f.txt").exists(), "copy-as: f.txt should exist at top level");
+
+    // Copy-into: dest exists as dir → copied INTO it
+    let dest2 = std::path::PathBuf::from(&format!("{}/existing", remote_tmp));
+    host.exec(&format!("mkdir -p '{}'", dest2.display()))
+        .await
+        .unwrap();
+    host.upload(&src, &dest2, &opts).await.expect("copy-into upload failed");
+
+    // Verify: should be existing/app/f.txt
+    let dl2 = tmp.path().join("dl2");
+    let app_in_existing = std::path::PathBuf::from(&format!("{}/existing/app", remote_tmp));
+    host.download(&app_in_existing, &dl2, &opts).await.expect("copy-into download failed");
+    assert!(dl2.join("f.txt").exists(), "copy-into: app/f.txt should exist");
+
+    ssh_cleanup(&host, &remote_tmp).await;
+}
+
+#[tokio::test]
+async fn ssh_dir_merge_overwrite() {
+    let Some((host, remote_tmp)) = ssh_test_host_with_tmp().await else {
+        eprintln!("skipping: MOTLIE_SSH_TEST_HOST not set");
+        return;
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+
+    // Create remote existing dir with a.txt (old) and c.txt (extra)
+    let remote_parent = format!("{}/parent", remote_tmp);
+    let remote_target = format!("{}/target_dir", remote_parent);
+    host.exec(&format!("mkdir -p '{}'", remote_target)).await.unwrap();
+    host.exec(&format!("echo -n original > '{}/a.txt'", remote_target)).await.unwrap();
+    host.exec(&format!("echo -n extra > '{}/c.txt'", remote_target)).await.unwrap();
+
+    // Source: has a.txt (updated) and b.txt (new)
+    let src = tmp.path().join("target_dir");
+    std::fs::create_dir(&src).unwrap();
+    std::fs::write(src.join("a.txt"), b"updated").unwrap();
+    std::fs::write(src.join("b.txt"), b"new").unwrap();
+
+    let opts = motlie_tmux::TransferOptions {
+        overwrite: true,
+        recursive: true,
+    };
+
+    // Upload target_dir → parent (copy-into → parent/target_dir, merge)
+    host.upload(&src, &std::path::PathBuf::from(&remote_parent), &opts)
+        .await
+        .expect("merge upload failed");
+
+    // Download merged result
+    let dl = tmp.path().join("merged");
+    host.download(&std::path::PathBuf::from(&remote_target), &dl, &opts)
+        .await
+        .expect("merge download failed");
+
+    assert_eq!(std::fs::read(dl.join("a.txt")).unwrap(), b"updated");
+    assert_eq!(std::fs::read(dl.join("b.txt")).unwrap(), b"new");
+    assert_eq!(std::fs::read(dl.join("c.txt")).unwrap(), b"extra");
+
+    ssh_cleanup(&host, &remote_tmp).await;
+}
+
+#[tokio::test]
+async fn ssh_overwrite_false_error() {
+    let Some((host, remote_tmp)) = ssh_test_host_with_tmp().await else {
+        eprintln!("skipping: MOTLIE_SSH_TEST_HOST not set");
+        return;
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src.txt");
+    std::fs::write(&src, b"data").unwrap();
+
+    // Create remote file first
+    let remote_file = std::path::PathBuf::from(&format!("{}/existing.txt", remote_tmp));
+    host.upload(&src, &remote_file, &motlie_tmux::TransferOptions::default())
+        .await
+        .unwrap();
+
+    // Try upload with overwrite=false
+    let opts = motlie_tmux::TransferOptions {
+        overwrite: false,
+        recursive: false,
+    };
+    let result = host.upload(&src, &remote_file, &opts).await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("overwrite=false"));
+
+    ssh_cleanup(&host, &remote_tmp).await;
+}
+
+#[tokio::test]
+async fn ssh_recursive_false_error() {
+    let Some((host, remote_tmp)) = ssh_test_host_with_tmp().await else {
+        eprintln!("skipping: MOTLIE_SSH_TEST_HOST not set");
+        return;
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("dir");
+    std::fs::create_dir(&src).unwrap();
+    std::fs::write(src.join("f.txt"), b"x").unwrap();
+
+    let remote_dest = std::path::PathBuf::from(&format!("{}/dest", remote_tmp));
+    let opts = motlie_tmux::TransferOptions {
+        overwrite: true,
+        recursive: false,
+    };
+    let result = host.upload(&src, &remote_dest, &opts).await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("recursive=false"));
+
+    ssh_cleanup(&host, &remote_tmp).await;
+}
+
+#[tokio::test]
+async fn ssh_symlink_rejected() {
+    let Some((host, remote_tmp)) = ssh_test_host_with_tmp().await else {
+        eprintln!("skipping: MOTLIE_SSH_TEST_HOST not set");
+        return;
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    let real = tmp.path().join("real.txt");
+    std::fs::write(&real, b"data").unwrap();
+    let link = tmp.path().join("link.txt");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    let remote_dest = std::path::PathBuf::from(&format!("{}/link.txt", remote_tmp));
+    let result = host
+        .upload(&link, &remote_dest, &motlie_tmux::TransferOptions::default())
+        .await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("symlink"));
+
+    ssh_cleanup(&host, &remote_tmp).await;
+}
