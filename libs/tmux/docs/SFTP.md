@@ -6,6 +6,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-15 | @codex | Address PR #78 final doc follow-up: replace open clarifications with locked decisions — reject symlinks, do not preserve metadata, and keep the API as `Result<()>` initially. |
 | 2026-03-14 | @codex | Address PR #78 re-review: remote path parameters use `&Path` (not `&str`), and directory placement semantics now explicitly follow `cp -r` copy-into vs copy-as behavior with matching test coverage called out in `PLAN.md`. |
 | 2026-03-14 | @codex | Address PR #78 review: localhost SFTP integration tests run unconditionally (no tmux gate), directory overwrite semantics are explicit merge semantics, and implementation planning is split into smaller incremental tasks in `PLAN.md`. |
 | 2026-03-14 | @codex | Refined design per user decisions: greenfield/breaking changes accepted, API renamed to `upload` / `download`, overwrite semantics made configurable, directory support included now, and v1/file-only phasing removed. |
@@ -63,7 +64,7 @@ Reasons:
 - Full rsync-style synchronization or delta transfer
 - Progress callbacks
 - Automatic migration compatibility for earlier experimental transfer APIs
-- Permission/ownership preservation as a required contract
+- Metadata preservation (permissions, ownership, mtimes) as a required contract
 
 ## Current Architecture Constraints
 
@@ -233,6 +234,7 @@ Keep failure modes non-panicking:
 - destination exists with `overwrite=false` -> `Err(...)`
 - directory source with `recursive=false` -> `Err(...)`
 - directory/file type mismatch at destination -> `Err(...)`
+- symlink encountered anywhere in the transfer tree -> `Err(...)`
 - permission denied -> `Err(...)`
 - SSH/SFTP subsystem failure -> `Err(...)`
 - timeout -> `Err(...)`
@@ -247,6 +249,9 @@ Do not use `assert!` / `expect()` as guards for public transfer inputs.
 - Directory destination placement follows `cp -r` copy-into vs copy-as behavior
 - Overwrite behavior is controlled by `opts.overwrite`
 - Directory overwrite with `opts.overwrite=true` uses merge semantics, not replace semantics
+- Symlinks are rejected initially rather than followed or copied as links
+- Metadata is not preserved as part of the transfer contract
+- Public methods return `Result<()>` initially; no transfer report/summary type yet
 - Timeout semantics match existing transports:
   - `LocalTransport::timeout` bounds each top-level transfer
   - `SshConfig::timeout` bounds each top-level SFTP transfer
@@ -276,6 +281,7 @@ This keeps transfer support orthogonal to:
 - `MockTransport` file upload/download round-trip
 - `MockTransport` directory upload/download round-trip
 - `MockTransport` overwrite=false and recursive=false error paths
+- `MockTransport` symlink rejection path
 - `TransportKind` dispatch tests for new methods
 
 ### Local Integration Tests
@@ -290,6 +296,7 @@ to temp directories; it does not depend on tmux being installed.
 - directory merge behavior with `overwrite=true` against an existing destination tree
 - overwrite=false conflict path
 - recursive=false directory rejection
+- symlink rejection path
 - missing-path and permission-denied error paths
 
 ### SSH Integration Tests
@@ -303,6 +310,7 @@ and skip when it is not set. Do not introduce a new env gate.
 - verify directory copy-into vs copy-as behavior for existing vs missing destination roots
 - verify directory merge behavior with `overwrite=true`
 - verify overwrite=false and recursive=false behavior
+- verify symlink rejection behavior
 
 These tests should require the same SSH prerequisites already documented for
 `SshTransport`.
@@ -316,14 +324,17 @@ These tests should require the same SSH prerequisites already documented for
   - tmux-pane `Target::exec()`
 - Add at least one runnable example under `examples/` once implementation starts
 
-## Remaining Clarifications
+## Locked Follow-On Decisions
 
-The major product decisions are now fixed. The remaining implementation-level
-clarifications are narrower:
+To keep implementation unambiguous, these follow-on decisions are fixed now:
 
-1. How much metadata, if any, should be preserved during directory transfers?
-2. Should symlinks be rejected initially or copied as links when encountered?
-3. Do we want a transfer result/report type later, or keep `Result<()>` initially?
+1. **Symlinks**: reject them initially. Encountering a symlink anywhere in the source
+   or destination tree returns `Err`. This avoids symlink-following security concerns
+   and keeps transport behavior consistent across `Local`, `Mock`, and `Ssh`.
+2. **Metadata**: do not preserve it. Permissions, ownership, mtimes, and similar
+   metadata are explicitly outside the transfer contract.
+3. **Result type**: keep the public API as `Result<()>` initially. Add a transfer
+   report/summary type later only if implementation or UX pressure justifies it.
 
 ## Summary
 
