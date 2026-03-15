@@ -6,6 +6,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-14 | @codex | Address PR #78 re-review: remote path parameters use `&Path` (not `&str`), and directory placement semantics now explicitly follow `cp -r` copy-into vs copy-as behavior with matching test coverage called out in `PLAN.md`. |
 | 2026-03-14 | @codex | Address PR #78 review: localhost SFTP integration tests run unconditionally (no tmux gate), directory overwrite semantics are explicit merge semantics, and implementation planning is split into smaller incremental tasks in `PLAN.md`. |
 | 2026-03-14 | @codex | Refined design per user decisions: greenfield/breaking changes accepted, API renamed to `upload` / `download`, overwrite semantics made configurable, directory support included now, and v1/file-only phasing removed. |
 | 2026-03-14 | @codex | Initial SFTP design note: add transport/host-level file transfer to complement transport `exec()`, use SFTP under the existing `russh` connection, and keep tmux pane `Target::exec()` separate. |
@@ -100,13 +101,13 @@ impl HostHandle {
     pub async fn upload(
         &self,
         local_path: &std::path::Path,
-        remote_path: &str,
+        remote_path: &std::path::Path,
         opts: &TransferOptions,
     ) -> Result<()>;
 
     pub async fn download(
         &self,
-        remote_path: &str,
+        remote_path: &std::path::Path,
         local_path: &std::path::Path,
         opts: &TransferOptions,
     ) -> Result<()>;
@@ -120,23 +121,33 @@ impl TransportKind {
     pub async fn upload(
         &self,
         local_path: &std::path::Path,
-        remote_path: &str,
+        remote_path: &std::path::Path,
         opts: &TransferOptions,
     ) -> Result<()>;
 
     pub async fn download(
         &self,
-        remote_path: &str,
+        remote_path: &std::path::Path,
         local_path: &std::path::Path,
         opts: &TransferOptions,
     ) -> Result<()>;
 }
 ```
 
+Both local and remote endpoints are represented as `&Path`. The path is interpreted by
+the selected transport on the target host. For SSH-backed transfers, callers should
+therefore supply the remote host's native path syntax.
+
 ### Directory semantics
 
 - If the source is a directory, `opts.recursive` must be `true`, otherwise return `Err`.
 - A recursive transfer copies the directory tree rooted at the source.
+- Directory destination placement follows `cp -r` semantics:
+  - if the destination path already exists as a directory, copy the source directory
+    **into** it using the source basename
+  - if the destination path does not exist, copy the source directory **as** that path
+- Overwrite and existence checks apply to the effective destination root chosen by the
+  rules above.
 - The destination root may be created as part of the transfer, but missing parent
   directories above that root should still return `Err`.
 - If `opts.overwrite == false` and the destination exists, return `Err`.
@@ -233,6 +244,7 @@ Do not use `assert!` / `expect()` as guards for public transfer inputs.
 - Binary-safe: file contents are copied as raw bytes
 - File and directory transfers are both supported
 - Recursive directory transfer requires `opts.recursive=true`
+- Directory destination placement follows `cp -r` copy-into vs copy-as behavior
 - Overwrite behavior is controlled by `opts.overwrite`
 - Directory overwrite with `opts.overwrite=true` uses merge semantics, not replace semantics
 - Timeout semantics match existing transports:
@@ -274,6 +286,7 @@ to temp directories; it does not depend on tmux being installed.
 
 - file upload/download round-trip to temp paths
 - directory upload/download round-trip for a nested tree
+- directory copy-into vs copy-as behavior for existing vs missing destination roots
 - directory merge behavior with `overwrite=true` against an existing destination tree
 - overwrite=false conflict path
 - recursive=false directory rejection
@@ -287,6 +300,7 @@ and skip when it is not set. Do not introduce a new env gate.
 
 - upload a file to a temp remote path, then download it back
 - upload a directory tree recursively, then download it back
+- verify directory copy-into vs copy-as behavior for existing vs missing destination roots
 - verify directory merge behavior with `overwrite=true`
 - verify overwrite=false and recursive=false behavior
 
