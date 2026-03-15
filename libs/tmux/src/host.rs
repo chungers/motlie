@@ -246,6 +246,34 @@ impl HostHandle {
             }
         }
     }
+
+    /// Upload a file or directory to the host (DC23).
+    ///
+    /// For SSH-backed hosts, uses SFTP. For localhost, uses filesystem copy.
+    /// Directory placement follows `cp -r` semantics. See `TransferOptions`
+    /// for overwrite and recursive behavior.
+    pub async fn upload(
+        &self,
+        local_path: &std::path::Path,
+        remote_path: &std::path::Path,
+        opts: &TransferOptions,
+    ) -> Result<()> {
+        self.inner.transport.upload(local_path, remote_path, opts).await
+    }
+
+    /// Download a file or directory from the host (DC23).
+    ///
+    /// For SSH-backed hosts, uses SFTP. For localhost, uses filesystem copy.
+    /// Directory placement follows `cp -r` semantics. See `TransferOptions`
+    /// for overwrite and recursive behavior.
+    pub async fn download(
+        &self,
+        remote_path: &std::path::Path,
+        local_path: &std::path::Path,
+        opts: &TransferOptions,
+    ) -> Result<()> {
+        self.inner.transport.download(remote_path, local_path, opts).await
+    }
 }
 
 /// Unified target at any hierarchy level (DC16).
