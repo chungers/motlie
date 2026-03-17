@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-16 | @claude: Mark pipe-pane fallback (DC10) as out of scope. tmux 3.1+ baseline (DC22) guarantees control mode; pipe-pane/PipeManager/FIFO machinery adds complexity with no benefit. Historical references retained as context. | DC10 |
 | 2026-03-15 | @codex: Address PR #78 final doc follow-up by locking DC23 follow-on decisions: reject symlinks initially, do not preserve metadata, and keep the first public API at `Result<()>`. | DC23 |
 | 2026-03-14 | @codex: Address PR #78 re-review by clarifying DC23 path typing (`&Path` for local and remote endpoints) and `cp -r` style directory placement semantics (existing directory => copy into; missing path => copy as). | DC23 |
 | 2026-03-14 | @codex: Address PR #78 review by clarifying DC23 test policy (localhost SFTP tests are not tmux-gated) and directory overwrite semantics (`overwrite=true` merges into an existing destination tree rather than replacing it). | DC23 |
@@ -363,7 +364,7 @@ libs/tmux/
 │   ├── discovery.rs        # Session/window/pane listing, filter, PaneAddress type
 │   ├── capture.rs          # Pane content capture (capture-pane) and scrollback dump
 │   ├── control.rs          # Session lifecycle, send-keys with escaping, rename
-│   ├── pipe.rs             # PipeManager: FIFO lifecycle, pipe-pane attach/detach
+│   ├── pipe.rs             # OUT OF SCOPE — pipe-pane fallback removed (tmux 3.1+ baseline)
 │   ├── monitor.rs          # OutputMonitor: stream parsing, rule evaluation, dispatch
 │   ├── matcher.rs          # MatcherKind enum + built-in matchers (Regex, Substring, etc.)
 │   ├── sink.rs             # SinkKind enum, SinkFilter, TargetOutput, OutputBus
@@ -2350,36 +2351,13 @@ struct HostHandleInner {
 ```
 
 
-### `pipe.rs`
+### ~~`pipe.rs`~~ — OUT OF SCOPE
 
-FIFO lifecycle and `tmux pipe-pane` management.
+<!-- @claude 2026-03-16: Entire pipe.rs module is out of scope. tmux 3.1+ baseline (DC22)
+     guarantees control mode. See DC10 out-of-scope note for rationale. Original spec retained
+     below as historical context only. -->
 
-```rust
-pub struct PipeManager { /* tracks active pipes for cleanup */ }
-
-impl PipeManager {
-    /// Create FIFOs and attach pipe-pane for each target pane.
-    /// Uses a dedicated transport exec call (not the monitor channel).
-    pub async fn setup(transport: &TransportKind, panes: &[PaneAddress]) -> Result<Self>;
-
-    /// Detach all pipe-panes and remove FIFO files.
-    pub async fn cleanup(&self, transport: &TransportKind) -> Result<()>;
-}
-
-impl Drop for PipeManager {
-    // Best-effort: log warning if cleanup was not called explicitly.
-    // Cannot do async cleanup in Drop, so this is advisory only.
-}
-```
-
-**Must address P4**: `cleanup()` must be called on shutdown. The library exposes cleanup
-as an explicit async method; it does NOT install signal handlers itself (see DC10 — signal
-handling is the binary's responsibility, keeping the library embeddable in MCP/service contexts).
-
-**Cleanup sequence** (triggered by caller via `shutdown()` or `PipeManager::cleanup()`):
-1. `tmux pipe-pane -t <pane>` (no `-o`) for each pane — detaches the pipe
-2. `rm -f /tmp/motlie_pipe_%<id>` for each FIFO (local) or via transport exec (remote)
-3. Close transport channels
+~~FIFO lifecycle and `tmux pipe-pane` management.~~
 
 ### `monitor.rs`
 
@@ -3063,9 +3041,18 @@ of the pipe lifecycle complexity. It provides structured output with native `#{p
 attribution, aligning with DC1. The `%output` notifications include pane ID, eliminating
 the need for filename-based identity.
 
-**Fallback**: Pipe-pane with append-file sink (`pipe-pane -o 'cat >> file'` + `tail -f`)
+**~~Fallback~~**: ~~Pipe-pane with append-file sink (`pipe-pane -o 'cat >> file'` + `tail -f`)
 is retained as an option for scenarios where control mode is insufficient (e.g., very old
-tmux, or when monitoring panes across multiple tmux servers on the same host).
+tmux, or when monitoring panes across multiple tmux servers on the same host).~~
+
+<!-- @claude 2026-03-16: PIPE-PANE FALLBACK IS OUT OF SCOPE.
+     DC22 established tmux 3.1+ as the minimum version (per user direction: "migration/backwards
+     compatibility explicitly out of scope"). tmux 3.1 (released 2020-06-25) fully supports
+     control mode. With 3.1+ as the floor, control mode is guaranteed available and the pipe-pane
+     fallback adds only complexity (FIFO lifecycle, P4 cleanup, OC1 backpressure, OC2
+     interleaving) with no benefit. All pipe-pane/PipeManager/FIFO references in this document
+     are historical context from early design iterations and should not be implemented.
+     Corresponding PLAN.md Phase 2a.3 has been removed. -->
 
 ### DC11: Separation of Library and Binary
 

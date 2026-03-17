@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-16 | @claude | Remove Phase 2a.3 (pipe-pane fallback) — out of scope. tmux 3.1+ baseline (established in DC22) guarantees control mode availability; pipe-pane fallback is dead weight. Removed fallback references from 2a.4, 4.1, 4.4. Updated DESIGN.md DC10 with out-of-scope note. |
 | 2026-03-15 | @claude | Phase 1.13 complete (1.13a–i): API.md section 16 (file transfer + exec boundary table), `upload`/`download` REPL commands with `--recursive`, cross-link to SFTP.md. |
 | 2026-03-15 | @claude | Phase 1.13 implementation complete (1.13a–h): SSH SFTP via `russh-sftp`, all unit + integration tests passing (223 unit, 17 integration). Added `HostHandle::exec()` public API for ad-hoc shell commands. Remaining: 1.13i (docs/examples). |
 | 2026-03-15 | @claude | Phase 1.13 implementation: completed 1.13a–d, 1.13f–h (types, transport surface, local/mock impl, host wiring, unit + integration tests). SSH SFTP impl (1.13e) and SSH integration tests stubbed for follow-up. |
@@ -669,22 +670,17 @@ Add `SshTransport` and a thin monitoring vertical slice with control mode parsin
 
 **Depends on**: 1.7, 1.9a
 
-### 2a.3 — Pipe-pane fallback (`src/pipe.rs`)
+### 2a.3 — ~~Pipe-pane fallback (`src/pipe.rs`)~~ — OUT OF SCOPE
 
-- [ ] `PipeManager` struct tracking active pipes
-- [ ] `PipeManager::setup(transport, socket, panes)` — create FIFOs/files, attach `pipe-pane`
-- [ ] `PipeManager::cleanup(transport, socket)` — detach pipes, remove files (P4)
-- [ ] `Drop` impl: log warning if cleanup not called
-- [ ] Default to append-file sink (`cat >> file` + `tail -f`), FIFO as opt-in
-- [ ] Unit tests via `MockTransport`
-
-**Depends on**: 1.3
+<!-- @claude 2026-03-16: Removed. tmux 3.1+ baseline (established in DC22, per user direction)
+     guarantees control mode availability. Pipe-pane fallback adds complexity (FIFO lifecycle,
+     P4 cleanup, OC1 backpressure, OC2 interleaving) with no benefit when 3.1+ is the floor.
+     Control mode is the only monitoring path. See DESIGN.md DC10 for matching note. -->
 
 ### 2a.4 — Monitor handle wiring
 
 - [ ] `SessionMonitorHandle`: `Target` + `stop_tx` + `task: Mutex<Option<JoinHandle>>`
-- [ ] `SessionMonitorHandle::shutdown()` — signal stop, flush, join task,
-  cleanup pipes if fallback active
+- [ ] `SessionMonitorHandle::shutdown()` — signal stop, flush, join task
 - [ ] `SessionMonitorHandle::is_active()`
 - [ ] `Deref<Target=Target>` for `SessionMonitorHandle`
 - [ ] `MonitorHandle`: `HashMap<String, SessionMonitorHandle>`, `shutdown()`,
@@ -910,9 +906,9 @@ Add `SshTransport` and a thin monitoring vertical slice with control mode parsin
 
 - [ ] Runtime `tmux -V` detection at startup
 - [ ] Feature matrix: validate required features against detected version
-  (control mode, `capture-pane -p`, `pipe-pane -o`, `#{pane_id}`)
-- [ ] Clear error messages for unsupported versions
-- [ ] CI matrix: test against tmux 2.x, 3.x, latest
+  (control mode, `capture-pane -p`, `set-option -p`, `#{pane_id}`)
+- [ ] Clear error messages for unsupported versions (minimum: tmux 3.1)
+- [ ] CI matrix: test against tmux 3.1, 3.x latest, latest
 
 ### 4.2 — Expanded test coverage
 
@@ -930,9 +926,8 @@ Add `SshTransport` and a thin monitoring vertical slice with control mode parsin
 
 ### 4.4 — Documentation
 
-- [ ] Document minimum tmux version and known limitations
+- [ ] Document minimum tmux version (3.1+) and known limitations
 - [ ] Document performance characteristics (latency, throughput)
-- [ ] Document pipe-pane fallback path and when to use it
 - [ ] Crate-level rustdoc with examples
 
 ---
