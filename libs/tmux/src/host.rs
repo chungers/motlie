@@ -8,6 +8,8 @@ use crate::capture;
 use crate::control;
 use crate::discovery;
 use crate::keys::KeySequence;
+use crate::monitor::{MonitorHandle, SessionMonitor, SessionMonitorHandle};
+use crate::sink::OutputBus;
 use crate::transport::TransportKind;
 use crate::types::*;
 
@@ -16,13 +18,11 @@ struct HostHandleInner {
     transport: TransportKind,
     socket: Option<TmuxSocket>,
     /// Per-pane exec locks keyed by resolved `pane_id` (DC19).
-    /// All target levels resolve their effective pane via
-    /// `display-message -p '#{pane_id}'` before lock acquisition,
-    /// ensuring session/window/pane handles to the same active pane
-    /// share one lock.
-    /// Uses `std::sync::Mutex` for the map (held briefly, no await),
-    /// inner `tokio::sync::Mutex` for the per-pane exec serialization.
     exec_locks: std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Host alias for TargetOutput.host field (e.g. "localhost", "web-1").
+    host_alias: String,
+    /// Shared output bus (DC24). Lazily created on first `start_monitoring`.
+    output_bus: std::sync::Mutex<Option<Arc<OutputBus>>>,
 }
 
 impl HostHandleInner {
@@ -52,6 +52,8 @@ impl HostHandle {
                 ),
                 socket: None,
                 exec_locks: std::sync::Mutex::new(HashMap::new()),
+                host_alias: "localhost".to_string(),
+                output_bus: std::sync::Mutex::new(None),
             }),
         }
     }
@@ -69,6 +71,8 @@ impl HostHandle {
                 ),
                 socket: None,
                 exec_locks: std::sync::Mutex::new(HashMap::new()),
+                host_alias: "localhost".to_string(),
+                output_bus: std::sync::Mutex::new(None),
             }),
         }
     }
@@ -80,6 +84,25 @@ impl HostHandle {
                 transport,
                 socket,
                 exec_locks: std::sync::Mutex::new(HashMap::new()),
+                host_alias: "localhost".to_string(),
+                output_bus: std::sync::Mutex::new(None),
+            }),
+        }
+    }
+
+    /// Create a HostHandle with a specific transport, socket, and host alias.
+    pub fn with_alias(
+        transport: TransportKind,
+        socket: Option<TmuxSocket>,
+        alias: &str,
+    ) -> Self {
+        HostHandle {
+            inner: Arc::new(HostHandleInner {
+                transport,
+                socket,
+                exec_locks: std::sync::Mutex::new(HashMap::new()),
+                host_alias: alias.to_string(),
+                output_bus: std::sync::Mutex::new(None),
             }),
         }
     }
@@ -273,6 +296,84 @@ impl HostHandle {
         opts: &TransferOptions,
     ) -> Result<()> {
         self.inner.transport.download(remote_path, local_path, opts).await
+    }
+
+    // --- Monitoring lifecycle (2a.4a, DC13, DC24) ---
+
+    /// Get or create the shared OutputBus for this host.
+    pub fn output_bus(&self) -> Arc<OutputBus> {
+        let mut bus_opt = self.inner.output_bus.lock().expect("output_bus lock poisoned");
+        if let Some(bus) = bus_opt.as_ref() {
+            return bus.clone();
+        }
+        let bus = Arc::new(OutputBus::new());
+        *bus_opt = Some(bus.clone());
+        bus
+    }
+
+    /// Start monitoring a single session. Opens a control mode connection,
+    /// parses `%output` frames, and publishes to the OutputBus.
+    /// Returns a `SessionMonitorHandle` for lifecycle control.
+    pub async fn start_monitoring_session(
+        &self,
+        session_name: &str,
+    ) -> Result<SessionMonitorHandle> {
+        let bus = self.output_bus();
+        let host_alias = self.inner.host_alias.clone();
+        let session = session_name.to_string();
+
+        // Open a shell channel for control mode
+        let mut shell = self.inner.transport.open_shell(80, 24).await?;
+
+        // Create stop signal
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+
+        // Get a Target for the session
+        let sessions = discovery::list_sessions(&self.inner.transport, self.inner.socket.as_ref()).await?;
+        let session_info = sessions
+            .into_iter()
+            .find(|s| s.name == session)
+            .ok_or_else(|| anyhow!("session '{}' not found", session))?;
+        let target = Target {
+            inner: self.inner.clone(),
+            address: TargetAddress::Session(session_info),
+        };
+
+        // Spawn the monitor task
+        let task = tokio::spawn(async move {
+            let mut monitor = SessionMonitor::new(session.clone(), host_alias);
+            monitor.run(&mut shell, &bus, stop_rx).await
+        });
+
+        Ok(SessionMonitorHandle::new(target, stop_tx, task))
+    }
+
+    /// Start monitoring all sessions (optionally filtered).
+    /// Returns a `MonitorHandle` for aggregate lifecycle control.
+    pub async fn start_monitoring(
+        &self,
+        filter: Option<&regex::Regex>,
+    ) -> Result<MonitorHandle> {
+        let sessions = self.list_sessions().await?;
+        let mut handles = HashMap::new();
+
+        for session in sessions {
+            if let Some(re) = filter {
+                if !re.is_match(&session.name) {
+                    continue;
+                }
+            }
+            let name = session.name.clone();
+            let handle = self.start_monitoring_session(&name).await?;
+            handles.insert(name, handle);
+        }
+
+        Ok(MonitorHandle::new(handles))
+    }
+
+    /// List currently monitored sessions (names).
+    pub fn host_alias(&self) -> &str {
+        &self.inner.host_alias
     }
 }
 
@@ -1044,6 +1145,24 @@ fn parse_sentinel_output(content: &str, marker: &str) -> Option<ExecOutput> {
     let stdout = lines[start..sentinel_line_idx].join("\n");
     let stdout = stdout.trim_end().to_string();
     Some(ExecOutput { stdout, exit_code })
+}
+
+#[cfg(test)]
+impl HostHandle {
+    /// Create a Target for testing without querying tmux.
+    pub fn create_target_for_test(&self, session_name: &str) -> Target {
+        Target {
+            inner: self.inner.clone(),
+            address: TargetAddress::Session(SessionInfo {
+                name: session_name.to_string(),
+                id: "$0".to_string(),
+                created: 0,
+                attached: false,
+                window_count: 1,
+                group: None,
+            }),
+        }
+    }
 }
 
 #[cfg(test)]
