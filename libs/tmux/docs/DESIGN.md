@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-17 | @claude: Address PR #80 R2 — fix DC10 decision sentence to say "sole" not "primary with fallback". | DC10 |
 | 2026-03-17 | @claude: Address PR #80 R1 — remove all live pipe-pane/FIFO/fallback references from active architecture sections (overview, API signatures, module specs, DC1, DC6, DC7, DC13, OC1–OC4, Phase 2a/4). Remaining references are in historical context only (prototype, problem table, DC10 comparison table, struck-out sections). | Overview, Core Abstractions, Module Specs, DC1, DC6, DC7, DC13, OC1, OC2, OC4, Phase 2a, Phase 4 |
 | 2026-03-16 | @claude: Mark pipe-pane fallback (DC10) as out of scope. tmux 3.1+ baseline (DC22) guarantees control mode; pipe-pane/PipeManager/FIFO machinery adds complexity with no benefit. Historical references retained as context. | DC10 |
 | 2026-03-15 | @codex: Address PR #78 final doc follow-up by locking DC23 follow-on decisions: reject symlinks initially, do not preserve metadata, and keep the first public API at `Result<()>`. | DC23 |
@@ -2997,9 +2998,8 @@ cases just use the host string directly.
 
 ### DC10: Monitoring Strategy — Control Mode vs Pipe-Pane
 
-**Decision**: Use tmux control mode (`tmux -C attach`) as the primary monitoring strategy
-for v1. Pipe-pane with file sinks is a documented fallback for environments where control
-mode is unavailable or insufficient.
+**Decision**: Use tmux control mode (`tmux -C attach`) as the sole monitoring strategy.
+The tmux 3.1+ baseline (DC22) guarantees control mode availability.
 
 **Decision matrix**:
 

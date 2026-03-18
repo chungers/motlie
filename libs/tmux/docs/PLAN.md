@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-17 | @claude | Address PR #80 R2 — remove `2a.3 Pipes` from task ordering diagram (already descoped in checklist). |
 | 2026-03-16 | @claude | Remove Phase 2a.3 (pipe-pane fallback) — out of scope. tmux 3.1+ baseline (established in DC22) guarantees control mode availability; pipe-pane fallback is dead weight. Removed fallback references from 2a.4, 4.1, 4.4. Updated DESIGN.md DC10 with out-of-scope note. |
 | 2026-03-15 | @claude | Phase 1.13 complete (1.13a–i): API.md section 16 (file transfer + exec boundary table), `upload`/`download` REPL commands with `--recursive`, cross-link to SFTP.md. |
 | 2026-03-15 | @claude | Phase 1.13 implementation complete (1.13a–h): SSH SFTP via `russh-sftp`, all unit + integration tests passing (223 unit, 17 integration). Added `HostHandle::exec()` public API for ad-hoc shell commands. Remaining: 1.13i (docs/examples). |
@@ -955,7 +956,6 @@ Out of current scope. Listed for continuity.
  │    ├── 1.4 Discovery
  │    ├── 1.5 Capture ──┐
  │    ├── 1.6 Control ──┤
- │    └── 2a.3 Pipes    │
  │                      │
  │    1.7 Host+Target ◄─┘
  │     │
