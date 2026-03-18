@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-17 | @claude | DC24 R1 — Address PR #82 review: unify subscription API (`subscribe() -> Subscription` with adapters). Rules/reactors as subscription consumers, not monitor-internal (removes 2a.2b). Replace 2c.1b with 2b.4 (subscription matching + reaction adapters) and 2c.4b with 2b.5 (action handle wiring). One matching system via `.filter()`/`.react()`. Track B now: 2b.2 → 2b.1 → 2b.4 → 2b.5 → 2b.3. |
 | 2026-03-17 | @claude | DC24 — Restructure Phase 2 into Track A (streaming + combining) and Track B (matching + reactors). Split 2a.2 → 2a.2a (parse only) + 2a.2b (rules + dispatch). Split 2a.4 → 2a.4a (streaming handles). Split 2c.1 → 2c.1a (routing only) + 2c.1b (content matching + actions). Split 2c.2 → 2c.2a (sinks + JoinedStream combinator, no JoinedSink). Split 2c.4 → 2c.4a (streaming) + 2c.4b (action wiring). Remove `subscribe_joined` from OutputBus. Update task ordering diagram and linear execution sequence. |
 | 2026-03-17 | @claude | Address PR #80 R2 — remove `2a.3 Pipes` from task ordering diagram (already descoped in checklist). |
 | 2026-03-16 | @claude | Remove Phase 2a.3 (pipe-pane fallback) — out of scope. tmux 3.1+ baseline (established in DC22) guarantees control mode availability; pipe-pane fallback is dead weight. Removed fallback references from 2a.4, 4.1, 4.4. Updated DESIGN.md DC10 with out-of-scope note. |
@@ -729,39 +730,41 @@ via JoinedStream — with no matcher or action dispatch dependency.
 
 **Depends on**: 1.9a ✓
 
-### 2c.2a — Sink kinds + JoinedStream combinator (`src/sink.rs`, `src/sinks/`)
+### 2c.2a — Sink kinds + Subscription + JoinedStream (`src/sink.rs`, `src/sinks/`)
 
 - [ ] `SinkKind` enum: `Stdio(StdioSink)`, `Callback(CallbackSink)` — no `JoinedSink` variant (DC24)
-- [ ] `SinkKind::name()`, `filters()`, `write()`, `flush()` dispatch methods
-- [ ] `CallbackSink`: `name`, `filters`, `state: Arc<dyn Any + Send + Sync>`,
+- [ ] `SinkKind::name()`, `write()`, `flush()` dispatch methods
+- [ ] `CallbackSink`: `name`, `state: Arc<dyn Any + Send + Sync>`,
   `on_output: fn(...)`, `on_flush: Option<fn(...)>`
 - [ ] `StdioSink` in `src/sinks/stdio.rs`: `StdioFormat` enum (Raw, Prefixed, Json),
   immediate write to stdout, no batching
-- [ ] `JoinedStream`: consumer-side stream combinator wrapping `mpsc::Receiver<SinkEvent>`,
-  produces `StreamChunk`s with `LabelFormat` + source coalescing (DC24, revised DC15)
+- [ ] `Subscription` type wrapping `(SinkId, mpsc::Receiver<SinkEvent>)` with
+  Track A adapters: `.id()`, `.into_receiver()`, `.joined(LabelFormat)`, `.pipe(SinkKind)` (DC24)
+- [ ] `JoinedStream`: returned by `subscription.joined()`, produces `StreamChunk`s
+  with `source_changed` flag + source coalescing (DC24, revised DC15)
+- [ ] `JoinedStream::next()` and `JoinedStream::format()` methods
 - [ ] `SourceLabel` struct: `host`, `target: TargetAddress`, `short()`, `minimal()` formatters
-- [ ] `StreamChunk` struct: `source: SourceLabel`, `output: TargetOutput`
+- [ ] `StreamChunk` struct: `source: SourceLabel`, `output: TargetOutput`, `source_changed: bool`
 - [ ] `LabelFormat` enum: `Bracketed`, `Prompt`, `Custom(fn)`
-- [ ] Unit tests: JoinedStream coalescing, label formatting, gap passthrough
+- [ ] Unit tests: JoinedStream coalescing + source_changed flag, label formatting,
+  gap passthrough, Subscription::pipe spawns task, Subscription::into_receiver works
 
 **Depends on**: 2c.1a
 
 ### 2c.3 — Output bus (`src/sink.rs`)
 
 - [ ] `OutputBus::new()`
-- [ ] `subscribe(sink: SinkKind, channel_capacity) -> SinkId` — spawn per-sink tokio task
-- [ ] `subscribe_channel(filters, capacity) -> (SinkId, mpsc::Receiver<SinkEvent>)` —
-  raw channel subscription for consumers that want structured data (e.g., JoinedStream,
-  TUI, test harness). No `subscribe_joined` — consumers compose `JoinedStream` themselves (DC24)
-- [ ] `unsubscribe(id) -> Result<()>` — signal stop, flush, join task
-- [ ] `publish(output: TargetOutput)` — fan out to all matching sinks via `try_send`
-  while tracking per-sink dropped counts
+- [ ] `subscribe(filters, capacity) -> Subscription` — single subscription primitive;
+  all consumer composition layered on `Subscription` adapters (DC24)
+- [ ] `unsubscribe(id) -> Result<()>` — signal stop, join task if pipe'd
+- [ ] `publish(output: TargetOutput)` — fan out to all matching subscribers via `try_send`
+  while tracking per-subscriber dropped counts
 - [ ] No-silent-drop contract: if drops occurred, emit `SinkEvent::Gap { dropped }`
-  before the next `SinkEvent::Data(output)` on that sink route
-- [ ] `shutdown() -> Result<()>` — signal all sinks, flush, join all tasks
-- [ ] `SinkEntry` internal: id, name, tx, compiled filters, task handle
-- [ ] Unit tests: fan-out to 3 sinks, slow sink doesn't block others,
-  filter matching (AND within / OR across), gap-event emission after drops, shutdown flushes
+  before the next `SinkEvent::Data(output)` on that subscriber route
+- [ ] `shutdown() -> Result<()>` — signal all subscribers, join all tasks
+- [ ] `SubEntry` internal: id, name, tx, compiled filters
+- [ ] Unit tests: fan-out to 3 subscribers, slow subscriber doesn't block others,
+  source-routing filter matching, gap-event emission after drops, shutdown flushes
 
 **Depends on**: 2c.2a
 
@@ -780,8 +783,13 @@ via JoinedStream — with no matcher or action dispatch dependency.
 
 ## Track B: Matching + Reactors
 
-Layer content matching, rule evaluation, action dispatch, and reconnection on top of
-the stable streaming foundation from Track A.
+<!-- @claude 2026-03-17: PR #82 R1 — rules/reactors are subscription consumers, not
+     monitor-internal. One matching system via Subscription adapters (.filter(), .react()).
+     Removes 2a.2b (monitor-side rule evaluation). See DC24 for rationale. -->
+
+Layer content matching, action dispatch, and reconnection on top of the stable
+streaming foundation from Track A. All matching and reaction is expressed as
+`Subscription` adapters — the monitor just parses and publishes (DC24).
 
 ### 2b.2 — Content matcher (`src/matcher.rs`)
 
@@ -806,58 +814,53 @@ the stable streaming foundation from Track A.
 - [ ] `TriggerRule`: `name`, `pane_filter`, `pattern`, `action`, `cooldown` — serde-deserializable
 - [ ] `Action` enum: `SendKeys { keys }`, `Log { level, message }`
 - [ ] `ReconnectPolicy`: `initial_delay`, `max_delay`, `multiplier` with defaults
-- [ ] `CompiledRule`: compiled from `TriggerRule`, holds `MatcherKind` + compiled pane filter
-- [ ] `TriggerRule::compile() -> Result<CompiledRule>` — error includes rule name context
-- [ ] `CompiledRule::with_matcher()` — programmatic construction with any `MatcherKind`
 - [ ] `serde` derive for all config types, TOML deserialization support
 - [ ] Unit tests: deserialize TOML config, compile rules, invalid regex error messages
 
 **Depends on**: 2b.2
 
-### 2a.2b — Rule evaluation + action dispatch (`src/monitor.rs` extension)
+### 2b.4 — Subscription adapters for matching + reaction (`src/sink.rs` extension)
 
-- [ ] Add rules parameter to `SessionMonitor` (compiled rules from 2b.1)
-- [ ] Rule evaluation against parsed output in `SessionMonitor::run()` loop
-- [ ] Action dispatch: `SendKeys` via bounded `mpsc` channel + semaphore (DC4)
-- [ ] Wire rules parameter into `start_monitoring()` / `start_monitoring_session()` APIs
-- [ ] Warn-level logging for failed actions (P9)
-- [ ] Unit tests: rule matching, dispatch ordering, action serialization
+<!-- @claude 2026-03-17: Replaces 2a.2b (monitor-side rule eval) and 2c.1b (SinkFilter
+     content matching). One matching system via Subscription adapters (DC24). -->
 
-**Depends on**: 2a.4a, 2b.1
-
-### 2c.1b — SinkFilter content matching + action types (`src/sink.rs` extension)
-
-- [ ] Add `content: Option<MatcherKind>` field to `SinkFilter`
-- [ ] Add `MatcherInput` enum: `Preserve`, `PlainTextDerived`
-- [ ] Add `matcher_input` field to `SinkFilter`
-- [ ] Extend `CompiledSinkFilter` with `MatcherKind` compilation
+- [ ] `Subscription::filter(matcher: MatcherKind) -> Subscription` — spawns forwarding
+  task that passes only events matching the matcher. Content matching applied to
+  `TargetOutput.content`. Returns new Subscription with filtered receiver.
 - [ ] `SinkAction` enum: `SendKeys`, `SendText`, `KillSession`, `RenameSession`
 - [ ] `ActionRequest` struct: `host`, `target: TargetAddress`, `action: SinkAction`
 - [ ] `ActionHandle`: wraps `mpsc::Sender<ActionRequest>`,
   provides `send()`, `send_keys()`, `send_text()`, `kill_session()`,
-  `rename_session()`, `respond(output, action)`
-- [ ] Unit tests: content filter matching, action request construction
+  `rename_session()`
+- [ ] `Subscription::react(matcher, action, cooldown, action_handle) -> JoinHandle<()>` —
+  terminal adapter: evaluates matcher, dispatches action via `ActionHandle`,
+  enforces per-pane cooldown timers. Spawns task, consumes Subscription.
+- [ ] Warn-level logging for failed action dispatch (P9)
+- [ ] Unit tests: `.filter()` passes/blocks correctly, `.react()` dispatches on match,
+  cooldown prevents rapid re-fire, chaining `.filter().react()` works
 
-**Depends on**: 2c.1a, 2b.2
+**Depends on**: 2c.2a (Subscription type), 2b.2 (MatcherKind), 2b.1 (Action types)
 
-### 2c.4b — Action handle wiring (`src/host.rs`, `src/monitor.rs` extension)
+### 2b.5 — Action handle wiring (`src/host.rs`)
 
-- [ ] Wire `ActionHandle` into `HostHandle`: sink-initiated actions route through DC4 queue
-- [ ] Integration test: sink receives output → `ActionHandle` routes `SendKeys` action
-  back to target pane, verifying the round-trip through the bus
+- [ ] Wire `ActionHandle` into `HostHandle`: consumer-dispatched actions route
+  through DC4 bounded queue to the target pane
+- [ ] `HostHandle::action_handle() -> ActionHandle` — creates a sender for this host
+- [ ] Integration test: `subscription.react()` detects pattern in pane output →
+  `ActionHandle` routes `SendKeys` back to target pane, verifying the full
+  round-trip: monitor → bus → subscription → react → ActionHandle → pane
 
-**Depends on**: 2c.4a, 2c.1b, 2a.2b
+**Depends on**: 2c.4a (pipeline wired), 2b.4
 
-### 2b.3 — Reconnection + cooldowns
+### 2b.3 — Reconnection
 
-- [ ] Per-pane cooldown timers: `HashMap<String, HashMap<String, Instant>>` (pane_id → rule_name → last_fired)
 - [ ] `Log` action type: emit structured log at configured level
 - [ ] Reconnection logic in `HostHandle` (SSH targets only):
   exponential backoff per `ReconnectPolicy`, re-discover sessions on reconnect,
-  resume monitoring with same rules
-- [ ] Unit tests: cooldown prevents rapid re-fire, reconnect resumes monitoring
+  resume monitoring
+- [ ] Unit tests: reconnect resumes monitoring
 
-**Depends on**: 2a.2b
+**Depends on**: 2b.5
 
 ---
 
@@ -879,7 +882,7 @@ the stable streaming foundation from Track A.
 - [ ] Unit tests: multi-host connect with one failure, alias conflict detection,
   workstream bind/find/unbind
 
-**Depends on**: 2c.4b, 2b.3
+**Depends on**: 2b.5, 2b.3
 
 ### 3.2 — `lib.rs` public API surface
 
@@ -887,8 +890,8 @@ the stable streaming foundation from Track A.
   `Fleet`, `HostHandle`, `Target`, `TargetSpec`, `SessionMonitorHandle`, `MonitorHandle`,
   `TmuxAutomatorConfig`, `HostTarget`, `TriggerRule`, `Action`, `ReconnectPolicy`,
   `KeySequence`, `SpecialKey`, `ScrollbackQuery`, `ExecOutput`,
-  `OutputBus`, `SinkKind`, `StdioSink`, `CallbackSink`, `SinkFilter`, `MatcherKind`,
-  `ActionHandle`, `TargetOutput`, `StreamChunk`, `JoinedStream`,
+  `OutputBus`, `Subscription`, `SinkKind`, `StdioSink`, `CallbackSink`, `SinkFilter`,
+  `MatcherKind`, `ActionHandle`, `TargetOutput`, `StreamChunk`, `JoinedStream`,
   `SessionInfo`, `WindowInfo`, `PaneInfo`, `PaneAddress`, `TargetAddress`, `TmuxSocket`
 - [ ] Doc comments on `lib.rs` with usage example
 
@@ -1013,14 +1016,13 @@ Out of current scope. Listed for continuity.
  │  TRACK B — Matching + Reactors (after Track A)
  │  ─────────────────────────────────────────────
  │     2b.2 Matcher
- │      ├── 2b.1 Config
- │      │    └── 2a.2b Rule eval + action dispatch [needs 2a.4a + 2b.1]
- │      │         └── 2b.3 Reconnection + cooldowns
- │      └── 2c.1b SinkFilter content matching + actions [needs 2c.1a + 2b.2]
- │               └── 2c.4b Action handle wiring [needs 2c.4a + 2c.1b + 2a.2b]
- │                    │
- │  ──────────────────┘
- │     3.1 Fleet [needs 2c.4b + 2b.3]
+ │      └── 2b.1 Config
+ │           └── 2b.4 Subscription adapters (.filter, .react) [needs 2c.2a + 2b.2 + 2b.1]
+ │                └── 2b.5 Action handle wiring [needs 2c.4a + 2b.4]
+ │                     └── 2b.3 Reconnection [needs 2b.5]
+ │                          │
+ │  ────────────────────────┘
+ │     3.1 Fleet [needs 2b.5 + 2b.3]
  │      └── 3.2 Public API
  │           └── 3.3 CLI binary
  │                └── 3.4 Smoke test
@@ -1030,18 +1032,20 @@ Out of current scope. Listed for continuity.
 
 **Linear execution order (single-threaded)**:
 ```
-2a.2a → 2a.4a → 2c.1a → 2c.2a → 2c.3 → 2c.4a → 2b.2 → 2b.1 → 2a.2b → 2c.1b → 2c.4b → 2b.3
+2a.2a → 2a.4a → 2c.1a → 2c.2a → 2c.3 → 2c.4a → 2b.2 → 2b.1 → 2b.4 → 2b.5 → 2b.3
 ```
 
 Notes:
 - After Track A (6 tasks ending at 2c.4a), the system has end-to-end streaming:
-  monitor → parse control mode → fan-out via OutputBus → JoinedStream combining.
-  No matcher or reactor dependency.
-- Track B layers matching, rule evaluation, action dispatch, and reconnection on
-  top of the stable streaming foundation.
+  monitor → parse control mode → fan-out via OutputBus → Subscription adapters →
+  JoinedStream combining. No matcher or reactor dependency.
+- Track B layers matching, reaction, and reconnection as `Subscription` adapters —
+  rules are consumers on the stream, not privileged inside `monitor.rs` (DC24).
+  One matching system via `.filter()` and `.react()`, no dual monitor-side/sink-side
+  matching.
 - `1.10` gates Track A start (2a.2a).
-- `JoinedStream` is a consumer-side combinator, not a `SinkKind` variant (DC24).
-  Consumers compose it from a `subscribe_channel()` receiver.
+- `OutputBus::subscribe()` returns `Subscription` — the single composable seam.
+  All consumer composition (joining, filtering, reacting) layered on adapters (DC24).
 - Phase 4 tasks are independent and can start as soon as their prerequisites are met.
 
 ## Conventions
