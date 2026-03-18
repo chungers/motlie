@@ -4,6 +4,9 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-17 | @claude | DC24 R2 — Address PR #82 review round 2: add Track B static-dispatch guardrail note (closed `MatcherKind` enum, no `Box<dyn Matcher>`). |
+| 2026-03-17 | @claude | DC24 R1 — Address PR #82 review: unify subscription API (`subscribe() -> Subscription` with adapters). Rules/reactors as subscription consumers, not monitor-internal (removes 2a.2b). Replace 2c.1b with 2b.4 (subscription matching + reaction adapters) and 2c.4b with 2b.5 (action handle wiring). One matching system via `.filter()`/`.react()`. Track B now: 2b.2 → 2b.1 → 2b.4 → 2b.5 → 2b.3. |
+| 2026-03-17 | @claude | DC24 — Restructure Phase 2 into Track A (streaming + combining) and Track B (matching + reactors). Split 2a.2 → 2a.2a (parse only) + 2a.2b (rules + dispatch). Split 2a.4 → 2a.4a (streaming handles). Split 2c.1 → 2c.1a (routing only) + 2c.1b (content matching + actions). Split 2c.2 → 2c.2a (sinks + JoinedStream combinator, no JoinedSink). Split 2c.4 → 2c.4a (streaming) + 2c.4b (action wiring). Remove `subscribe_joined` from OutputBus. Update task ordering diagram and linear execution sequence. |
 | 2026-03-17 | @claude | Address PR #80 R2 — remove `2a.3 Pipes` from task ordering diagram (already descoped in checklist). |
 | 2026-03-16 | @claude | Remove Phase 2a.3 (pipe-pane fallback) — out of scope. tmux 3.1+ baseline (established in DC22) guarantees control mode availability; pipe-pane fallback is dead weight. Removed fallback references from 2a.4, 4.1, 4.4. Updated DESIGN.md DC10 with out-of-scope note. |
 | 2026-03-15 | @claude | Phase 1.13 complete (1.13a–i): API.md section 16 (file transfer + exec boundary table), `upload`/`download` REPL commands with `--recursive`, cross-link to SFTP.md. |
@@ -650,9 +653,31 @@ Add `SshTransport` and a thin monitoring vertical slice with control mode parsin
 
 **Depends on**: 1.3
 
-### 2a.2 — Control mode parser (`src/monitor.rs`)
+### 2a.3 — ~~Pipe-pane fallback (`src/pipe.rs`)~~ — OUT OF SCOPE
 
-- [ ] `SessionMonitor` struct: session name, rules, cooldown state
+<!-- @claude 2026-03-16: Removed. tmux 3.1+ baseline (established in DC22, per user direction)
+     guarantees control mode availability. Pipe-pane fallback adds complexity (FIFO lifecycle,
+     P4 cleanup, OC1 backpressure, OC2 interleaving) with no benefit when 3.1+ is the floor.
+     Control mode is the only monitoring path. See DESIGN.md DC10 for matching note. -->
+
+---
+
+<!-- @claude 2026-03-17: Phase 2 restructured into Track A (streaming + combining) and
+     Track B (matching + reactors) per DC24 analysis. Prioritizes real-time monitoring and
+     stream combining over matching/filtering/reactors. Single-threaded execution order:
+     Track A delivers end-to-end streaming pipeline before Track B adds rule engine.
+     See DESIGN.md DC24 for the Unix-pipe evaluation that motivated this restructuring. -->
+
+## Track A: Streaming + Stream Combining
+
+Deliver end-to-end real-time monitoring and multi-source stream combining before the
+rule engine or reactor machinery. After Track A, the system can: monitor sessions via
+control mode, fan-out output to multiple consumers via OutputBus, and combine streams
+via JoinedStream — with no matcher or action dispatch dependency.
+
+### 2a.2a — Control mode stream parser (`src/monitor.rs`) — parse only
+
+- [ ] `SessionMonitor` struct: session name, stream assembly state (no rules, no cooldowns)
 - [ ] Control mode stream parser: parse `%output %<pane_id> <data>` frames from
   `tmux -C attach -t <session>` output
 - [ ] Per-pane stream assembly state keyed by `pane_id`:
@@ -661,24 +686,15 @@ Add `SshTransport` and a thin monitoring vertical slice with control mode parsin
   preserve ANSI in fidelity modes, apply the same mode-to-field contract,
   annotate degraded/reflow/history conditions in emitted metadata
 - [ ] Handle other control mode messages gracefully (`%begin`, `%end`, `%error`, etc.)
-- [ ] Rule evaluation against parsed output (initially: single compiled rule)
-- [ ] Action dispatch: `SendKeys` via bounded `mpsc` channel + semaphore (DC4)
-- [ ] `SessionMonitor::run()` — main loop: read from shell, parse, evaluate, dispatch
+- [ ] `SessionMonitor::run()` — main loop: read from shell, parse, emit `TargetOutput`
+  (no rule evaluation, no action dispatch — streaming only)
 - [ ] Stop signal via `watch::Receiver<bool>`, clean shutdown on signal or connection drop
-- [ ] Warn-level logging for malformed lines and failed actions (P9)
-- [ ] Unit tests: control mode frame parsing, chunk split/reassembly, sequence monotonicity,
-  rule matching, dispatch ordering
+- [ ] Warn-level logging for malformed lines (P9)
+- [ ] Unit tests: control mode frame parsing, chunk split/reassembly, sequence monotonicity
 
-**Depends on**: 1.7, 1.9a
+**Depends on**: 1.7 ✓, 1.9a ✓, 1.10 ✓
 
-### 2a.3 — ~~Pipe-pane fallback (`src/pipe.rs`)~~ — OUT OF SCOPE
-
-<!-- @claude 2026-03-16: Removed. tmux 3.1+ baseline (established in DC22, per user direction)
-     guarantees control mode availability. Pipe-pane fallback adds complexity (FIFO lifecycle,
-     P4 cleanup, OC1 backpressure, OC2 interleaving) with no benefit when 3.1+ is the floor.
-     Control mode is the only monitoring path. See DESIGN.md DC10 for matching note. -->
-
-### 2a.4 — Monitor handle wiring
+### 2a.4a — Monitor handle wiring (streaming only)
 
 - [ ] `SessionMonitorHandle`: `Target` + `stop_tx` + `task: Mutex<Option<JoinHandle>>`
 - [ ] `SessionMonitorHandle::shutdown()` — signal stop, flush, join task
@@ -687,39 +703,94 @@ Add `SshTransport` and a thin monitoring vertical slice with control mode parsin
 - [ ] `MonitorHandle`: `HashMap<String, SessionMonitorHandle>`, `shutdown()`,
   `stop_session()`, `get()`, `get_by_spec()`, `active_sessions()`
 - [ ] `HostHandle::start_monitoring()` — discovers sessions, spawns per-session monitors,
-  returns `MonitorHandle`
+  returns `MonitorHandle` (no rules parameter — monitors all output)
 - [ ] `HostHandle::start_monitoring_session()`, `stop_monitoring_session()`,
   `stop_monitoring()`, `monitored_sessions()` (DC13)
 - [ ] `Target::start_monitoring()` — session-level only, returns `SessionMonitorHandle`
 - [ ] `Target::stop_monitoring()` — session-level only, delegates to
   `HostHandle::stop_monitoring_session(&self)`; returns error if called on
   window/pane target
-- [ ] Integration test (localhost): start monitor, send output that triggers rule,
-  verify action dispatched, `target.stop_monitoring()` cleanly stops,
+- [ ] Integration test (localhost): start monitor, send text to pane, verify
+  `TargetOutput` emitted, `target.stop_monitoring()` cleanly stops,
   verify on-demand operations still work after stop (DC13)
 
-**Depends on**: 2a.2, 2a.3
+**Depends on**: 2a.2a
+
+### 2c.1a — Sink types (`src/sink.rs`) — no content matching
+
+- [ ] `TargetOutput` struct: `source: TargetAddress`, `host`, canonical `content`,
+  optional `raw_content`, `sequence`, `fidelity`, `timestamp`
+- [ ] `SinkEvent` enum: `Data(TargetOutput)` and `Gap { dropped, timestamp }`
+- [ ] `TargetOutput` accessors: `session_name()`, `pane_id()`, `target_string()`
+- [ ] `OutputFidelity` / `FidelityIssue` enums shared with capture/monitor paths
+- [ ] `SinkFilter`: `host`, `session`, `window`, `pane` (all optional regex strings)
+  — routing only, no `content` / `MatcherKind` / `MatcherInput` fields yet
+- [ ] `CompiledSinkFilter`: compiled regexes,
+  `matches(&self, output: &TargetOutput) -> bool`
+- [ ] `SinkId` opaque type
+
+**Depends on**: 1.9a ✓
+
+### 2c.2a — Sink kinds + Subscription + JoinedStream (`src/sink.rs`, `src/sinks/`)
+
+- [ ] `SinkKind` enum: `Stdio(StdioSink)`, `Callback(CallbackSink)` — no `JoinedSink` variant (DC24)
+- [ ] `SinkKind::name()`, `write()`, `flush()` dispatch methods
+- [ ] `CallbackSink`: `name`, `state: Arc<dyn Any + Send + Sync>`,
+  `on_output: fn(...)`, `on_flush: Option<fn(...)>`
+- [ ] `StdioSink` in `src/sinks/stdio.rs`: `StdioFormat` enum (Raw, Prefixed, Json),
+  immediate write to stdout, no batching
+- [ ] `Subscription` type wrapping `(SinkId, mpsc::Receiver<SinkEvent>)` with
+  Track A adapters: `.id()`, `.into_receiver()`, `.joined(LabelFormat)`, `.pipe(SinkKind)` (DC24)
+- [ ] `JoinedStream`: returned by `subscription.joined()`, produces `StreamChunk`s
+  with `source_changed` flag + source coalescing (DC24, revised DC15)
+- [ ] `JoinedStream::next()` and `JoinedStream::format()` methods
+- [ ] `SourceLabel` struct: `host`, `target: TargetAddress`, `short()`, `minimal()` formatters
+- [ ] `StreamChunk` struct: `source: SourceLabel`, `output: TargetOutput`, `source_changed: bool`
+- [ ] `LabelFormat` enum: `Bracketed`, `Prompt`, `Custom(fn)`
+- [ ] Unit tests: JoinedStream coalescing + source_changed flag, label formatting,
+  gap passthrough, Subscription::pipe spawns task, Subscription::into_receiver works
+
+**Depends on**: 2c.1a
+
+### 2c.3 — Output bus (`src/sink.rs`)
+
+- [ ] `OutputBus::new()`
+- [ ] `subscribe(filters, capacity) -> Subscription` — single subscription primitive;
+  all consumer composition layered on `Subscription` adapters (DC24)
+- [ ] `unsubscribe(id) -> Result<()>` — signal stop, join task if pipe'd
+- [ ] `publish(output: TargetOutput)` — fan out to all matching subscribers via `try_send`
+  while tracking per-subscriber dropped counts
+- [ ] No-silent-drop contract: if drops occurred, emit `SinkEvent::Gap { dropped }`
+  before the next `SinkEvent::Data(output)` on that subscriber route
+- [ ] `shutdown() -> Result<()>` — signal all subscribers, join all tasks
+- [ ] `SubEntry` internal: id, name, tx, compiled filters
+- [ ] Unit tests: fan-out to 3 subscribers, slow subscriber doesn't block others,
+  source-routing filter matching, gap-event emission after drops, shutdown flushes
+
+**Depends on**: 2c.2a
+
+### 2c.4a — Pipeline integration (streaming only)
+
+- [ ] Wire `OutputBus` into `monitor.rs`: `SessionMonitor` publishes `TargetOutput`
+  to the bus (no rule evaluation, no action dispatch)
+- [ ] `HostHandle` owns or shares `OutputBus`; monitoring tasks publish through it
+- [ ] Integration test: monitor publishes output → `StdioSink` receives and formats,
+  `CallbackSink` receives and accumulates, `JoinedStream` combines 2 session streams
+  with label coalescing, gap/degraded metadata is preserved end-to-end
+
+**Depends on**: 2c.3, 2a.4a
 
 ---
 
-## Phase 2b: Full Rule Engine + Reconnection + Config
+## Track B: Matching + Reactors
 
-### 2b.1 — Configuration (`src/config.rs`)
+<!-- @claude 2026-03-17: PR #82 R1 — rules/reactors are subscription consumers, not
+     monitor-internal. One matching system via Subscription adapters (.filter(), .react()).
+     Removes 2a.2b (monitor-side rule evaluation). See DC24 for rationale. -->
 
-- [ ] `TmuxAutomatorConfig`: `targets`, `rules`, `reconnect`, `log_json`
-- [ ] `HostTarget` enum: `Local { alias, pane_filter, tmux_socket }`,
-  `Ssh { host, user, alias, pane_filter, tmux_socket, host_key_policy }`
-  — `host_key_policy` uses `HostKeyPolicy` from `types.rs` (defined in 1.1)
-- [ ] `TriggerRule`: `name`, `pane_filter`, `pattern`, `action`, `cooldown` — serde-deserializable
-- [ ] `Action` enum: `SendKeys { keys }`, `Log { level, message }`
-- [ ] `ReconnectPolicy`: `initial_delay`, `max_delay`, `multiplier` with defaults
-- [ ] `CompiledRule`: compiled from `TriggerRule`, holds `MatcherKind` + compiled pane filter
-- [ ] `TriggerRule::compile() -> Result<CompiledRule>` — error includes rule name context
-- [ ] `CompiledRule::with_matcher()` — programmatic construction with any `MatcherKind`
-- [ ] `serde` derive for all config types, TOML deserialization support
-- [ ] Unit tests: deserialize TOML config, compile rules, invalid regex error messages
-
-**Depends on**: 2b.2 (for `MatcherKind`)
+Layer content matching, action dispatch, and reconnection on top of the stable
+streaming foundation from Track A. All matching and reaction is expressed as
+`Subscription` adapters — the monitor just parses and publishes (DC24).
 
 ### 2b.2 — Content matcher (`src/matcher.rs`)
 
@@ -733,98 +804,69 @@ Add `SshTransport` and a thin monitoring vertical slice with control mode parsin
 - [ ] Unit tests: each variant individually, combinator nesting, stateful `LineCount`
   accumulation and reset
 
-**Depends on**: 1.0
+**Depends on**: 1.0 ✓
 
-### 2b.3 — Expanded monitor + reconnection
+### 2b.1 — Configuration (`src/config.rs`)
 
-- [ ] Multi-rule evaluation in `SessionMonitor::run()` with compiled rules
-- [ ] Per-pane cooldown timers: `HashMap<String, HashMap<String, Instant>>` (pane_id → rule_name → last_fired)
-- [ ] `Log` action type: emit structured log at configured level
-- [ ] Reconnection logic in `HostHandle` (SSH targets only):
-  exponential backoff per `ReconnectPolicy`, re-discover sessions on reconnect,
-  resume monitoring with same rules
-- [ ] Unit tests: cooldown prevents rapid re-fire, reconnect resumes monitoring
+- [ ] `TmuxAutomatorConfig`: `targets`, `rules`, `reconnect`, `log_json`
+- [ ] `HostTarget` enum: `Local { alias, pane_filter, tmux_socket }`,
+  `Ssh { host, user, alias, pane_filter, tmux_socket, host_key_policy }`
+  — `host_key_policy` uses `HostKeyPolicy` from `types.rs` (defined in 1.1)
+- [ ] `TriggerRule`: `name`, `pane_filter`, `pattern`, `action`, `cooldown` — serde-deserializable
+- [ ] `Action` enum: `SendKeys { keys }`, `Log { level, message }`
+- [ ] `ReconnectPolicy`: `initial_delay`, `max_delay`, `multiplier` with defaults
+- [ ] `serde` derive for all config types, TOML deserialization support
+- [ ] Unit tests: deserialize TOML config, compile rules, invalid regex error messages
 
-**Depends on**: 2a.4, 2b.1, 2b.2
+**Depends on**: 2b.2
 
----
+### 2b.4 — Subscription adapters for matching + reaction (`src/sink.rs` extension)
 
-## Phase 2c: Output Sink Pipeline
+<!-- @claude 2026-03-17: Replaces 2a.2b (monitor-side rule eval) and 2c.1b (SinkFilter
+     content matching). One matching system via Subscription adapters (DC24). -->
 
-### 2c.1 — Sink types (`src/sink.rs`)
+**Design guardrail**: Track B must remain statically dispatched. `MatcherKind` is a closed
+enum — no `Box<dyn Matcher>` or type-erased pipeline stages. This keeps the matching layer
+debuggable and avoids vtable overhead in the hot path. If a new matcher variant is needed,
+add it to `MatcherKind`; do not introduce a trait-object escape hatch.
 
-- [ ] `TargetOutput` struct: `source: TargetAddress`, `host`, canonical `content`,
-  optional `raw_content`, `sequence`, `fidelity`, `timestamp`
-- [ ] `SinkEvent` enum: `Data(TargetOutput)` and `Gap { dropped, timestamp }`
-- [ ] `TargetOutput` accessors: `session_name()`, `pane_id()`, `target_string()`
-- [ ] `OutputFidelity` / `FidelityIssue` enums shared with capture/monitor paths
-- [ ] `MatcherInput` enum: `Preserve` (match delivered `content`),
-  `PlainTextDerived` (derive sink-local plain-text view from `content`)
-- [ ] `SinkFilter`: `host`, `session`, `window`, `pane` (all optional regex strings),
-  `content: Option<MatcherKind>`, `matcher_input: MatcherInput`
-- [ ] Define content-matching contract: `SinkFilter.content` matches either
-  delivered `TargetOutput.content` or a sink-local plain-text derived view,
-  selected by `matcher_input`
-- [ ] `CompiledSinkFilter`: compiled regexes + `MatcherKind`,
-  `matches(&mut self, output: &TargetOutput) -> bool`
+- [ ] `Subscription::filter(matcher: MatcherKind) -> Subscription` — spawns forwarding
+  task that passes only events matching the matcher. Content matching applied to
+  `TargetOutput.content`. Returns new Subscription with filtered receiver.
 - [ ] `SinkAction` enum: `SendKeys`, `SendText`, `KillSession`, `RenameSession`
 - [ ] `ActionRequest` struct: `host`, `target: TargetAddress`, `action: SinkAction`
 - [ ] `ActionHandle`: wraps `mpsc::Sender<ActionRequest>`,
   provides `send()`, `send_keys()`, `send_text()`, `kill_session()`,
-  `rename_session()`, `respond(output, action)`
-- [ ] `SinkId` opaque type
+  `rename_session()`
+- [ ] `Subscription::react(matcher, action, cooldown, action_handle) -> JoinHandle<()>` —
+  terminal adapter: evaluates matcher, dispatches action via `ActionHandle`,
+  enforces per-pane cooldown timers. Spawns task, consumes Subscription.
+- [ ] Warn-level logging for failed action dispatch (P9)
+- [ ] Unit tests: `.filter()` passes/blocks correctly, `.react()` dispatches on match,
+  cooldown prevents rapid re-fire, chaining `.filter().react()` works
 
-**Depends on**: 2b.2, 1.9a
+**Depends on**: 2c.2a (Subscription type), 2b.2 (MatcherKind), 2b.1 (Action types)
 
-### 2c.2 — Sink kinds (`src/sink.rs`, `src/sinks/`)
+### 2b.5 — Action handle wiring (`src/host.rs`)
 
-- [ ] `SinkKind` enum: `Stdio(StdioSink)`, `Callback(CallbackSink)`
-- [ ] `SinkKind::name()`, `filters()`, `write()`, `flush()` dispatch methods
-- [ ] `CallbackSink`: `name`, `filters`, `state: Arc<dyn Any + Send + Sync>`,
-  `on_output: fn(...)`, `on_flush: Option<fn(...)>`
-- [ ] `StdioSink` in `src/sinks/stdio.rs`: `StdioFormat` enum (Raw, Prefixed, Json),
-  immediate write to stdout, no batching
-- [ ] `JoinedSink`: wraps inner `SinkKind`, `LabelFormat` enum (Bracketed, Prompt, Custom fn),
-  source coalescing via `last_source`
-- [ ] `SourceLabel` struct: `host`, `target: TargetAddress`, `short()`, `minimal()` formatters
-- [ ] `StreamChunk` struct: `source: SourceLabel`, `output: TargetOutput`
+- [ ] Wire `ActionHandle` into `HostHandle`: consumer-dispatched actions route
+  through DC4 bounded queue to the target pane
+- [ ] `HostHandle::action_handle() -> ActionHandle` — creates a sender for this host
+- [ ] Integration test: `subscription.react()` detects pattern in pane output →
+  `ActionHandle` routes `SendKeys` back to target pane, verifying the full
+  round-trip: monitor → bus → subscription → react → ActionHandle → pane
 
-**Depends on**: 2c.1
+**Depends on**: 2c.4a (pipeline wired), 2b.4
 
-### 2c.3 — Output bus (`src/sink.rs`)
+### 2b.3 — Reconnection
 
-- [ ] `OutputBus::new()`
-- [ ] `subscribe(sink: SinkKind, channel_capacity) -> SinkId` — spawn per-sink tokio task
-- [ ] `subscribe_joined(filters, capacity) -> (SinkId, mpsc::Receiver<StreamChunk>)`
-- [ ] `unsubscribe(id) -> Result<()>` — signal stop, flush, join task
-- [ ] `publish(output: TargetOutput)` — fan out to all matching sinks via `try_send`
-  while tracking per-sink dropped counts
-- [ ] No-silent-drop contract: if drops occurred, emit `SinkEvent::Gap { dropped }`
-  before the next `SinkEvent::Data(output)` on that sink route
-- [ ] `shutdown() -> Result<()>` — signal all sinks, flush, join all tasks
-- [ ] `SinkEntry` internal: id, name, tx, compiled filters, task handle
-- [ ] Unit tests: fan-out to 3 sinks, slow sink doesn't block others,
-  filter matching (AND within / OR across), gap-event emission after drops, shutdown flushes
+- [ ] `Log` action type: emit structured log at configured level
+- [ ] Reconnection logic in `HostHandle` (SSH targets only):
+  exponential backoff per `ReconnectPolicy`, re-discover sessions on reconnect,
+  resume monitoring
+- [ ] Unit tests: reconnect resumes monitoring
 
-**Depends on**: 2c.2
-
-### 2c.4 — Pipeline integration
-
-- [ ] Wire `OutputBus` into `monitor.rs`: publish fidelity-aware `TargetOutput`
-  alongside rule evaluation
-- [ ] Wire `ActionHandle` into `HostHandle`: sink-initiated actions route through DC4 queue
-- [ ] `Fleet::output_bus()` accessor; sinks registered before `start_monitoring()`
-- [ ] Integration test: monitor publishes output → `StdioSink` receives and formats,
-  `CallbackSink` receives and accumulates, `ActionHandle` routes action back to target,
-  and gap/degraded metadata is preserved end-to-end
-
-**Depends on**: 2c.3, 2a.4, **2b.3**
-
-> **Why serial with 2b.3**: Both 2b.3 and 2c.4 modify `monitor.rs` (rule
-> evaluation / output publishing) and `host.rs` (reconnection wiring / action
-> handle wiring). Running them in parallel creates merge contention on the
-> same hot-path code. 2b.3 lands first (rule engine + reconnection), then
-> 2c.4 layers the sink pipeline on top of the stabilized monitor.
+**Depends on**: 2b.5
 
 ---
 
@@ -846,7 +888,7 @@ Add `SshTransport` and a thin monitoring vertical slice with control mode parsin
 - [ ] Unit tests: multi-host connect with one failure, alias conflict detection,
   workstream bind/find/unbind
 
-**Depends on**: 2c.4 (which transitively requires 2b.3)
+**Depends on**: 2b.5, 2b.3
 
 ### 3.2 — `lib.rs` public API surface
 
@@ -854,8 +896,8 @@ Add `SshTransport` and a thin monitoring vertical slice with control mode parsin
   `Fleet`, `HostHandle`, `Target`, `TargetSpec`, `SessionMonitorHandle`, `MonitorHandle`,
   `TmuxAutomatorConfig`, `HostTarget`, `TriggerRule`, `Action`, `ReconnectPolicy`,
   `KeySequence`, `SpecialKey`, `ScrollbackQuery`, `ExecOutput`,
-  `OutputBus`, `SinkKind`, `StdioSink`, `CallbackSink`, `SinkFilter`, `MatcherKind`,
-  `ActionHandle`, `TargetOutput`, `StreamChunk`, `JoinedSink`,
+  `OutputBus`, `Subscription`, `SinkKind`, `StdioSink`, `CallbackSink`, `SinkFilter`,
+  `MatcherKind`, `ActionHandle`, `TargetOutput`, `StreamChunk`, `JoinedStream`,
   `SessionInfo`, `WindowInfo`, `PaneInfo`, `PaneAddress`, `TargetAddress`, `TmuxSocket`
 - [ ] Doc comments on `lib.rs` with usage example
 
@@ -960,56 +1002,56 @@ Out of current scope. Listed for continuity.
  │    1.7 Host+Target ◄─┘
  │     │
  │     ├── 1.8 Localhost integration test
- │     │
  │     ├── 1.9a Capture fidelity types [needs 1.5 + 1.7]
- │     │
  │     ├── 1.9b Mixed-client stabilization [needs 1.9a]
- │     │
- │     ├── 1.10 API gaps + hardening [gates 2a.2; per-task deps within]
- │     │
- │     ├── 1.11 SshConfig URI ext (src/uri.rs) [1.11a-f after 1.1; 1.11g after 2a.1]
- │     │
+ │     ├── 1.10 API gaps + hardening [gates 2a.2a]
+ │     ├── 1.11 SshConfig URI ext (src/uri.rs)
  │     ├── 1.13 SFTP file transfer [needs 1.3 + 1.7 + 2a.1]
  │     │
- │     └── 2a.2 Monitor parser [needs 1.7 + 1.9a]
- │          │
- │          └── 2a.4 Monitor handles
+ │  TRACK A — Streaming + Combining (priority)
+ │  ──────────────────────────────────────────
+ │     └── 2a.2a Stream parser (parse only)
+ │          └── 2a.4a Monitor handles (streaming only)
  │               │
- │    2b.2 Matcher ──── 2b.1 Config
- │     │                 │
- │     │                 └── 2b.3 Full rules + reconnect
- │     │                      │  (modifies monitor.rs + host.rs)
- │     └── 2c.1 Sink types   │
- │          │                 │
- │          └── 2c.2 Sink kinds
- │               │            │
- │               └── 2c.3 Output bus
- │                    │       │
- │                    └───────┴── 2c.4 Pipeline integration
- │                                │  (needs 2b.3 + 2c.3, serial)
- │                                └── 3.1 Fleet
- │                              │
- │                              └── 3.2 Public API
- │                                   │
- │                                   └── 3.3 CLI binary
- │                                        │
- │                                        └── 3.4 Smoke test
+ │     2c.1a Sink types (routing only, no content matching)
+ │       └── 2c.2a Sink kinds + JoinedStream combinator (DC24)
+ │            └── 2c.3 Output bus
+ │                 └──── 2c.4a Pipeline integration (streaming only)
+ │                        │     [needs 2c.3 + 2a.4a]
+ │                        │
+ │  TRACK B — Matching + Reactors (after Track A)
+ │  ─────────────────────────────────────────────
+ │     2b.2 Matcher
+ │      └── 2b.1 Config
+ │           └── 2b.4 Subscription adapters (.filter, .react) [needs 2c.2a + 2b.2 + 2b.1]
+ │                └── 2b.5 Action handle wiring [needs 2c.4a + 2b.4]
+ │                     └── 2b.3 Reconnection [needs 2b.5]
+ │                          │
+ │  ────────────────────────┘
+ │     3.1 Fleet [needs 2b.5 + 2b.3]
+ │      └── 3.2 Public API
+ │           └── 3.3 CLI binary
+ │                └── 3.4 Smoke test
  │
  └── 4.x Hardening (parallel with Phase 3)
 ```
 
+**Linear execution order (single-threaded)**:
+```
+2a.2a → 2a.4a → 2c.1a → 2c.2a → 2c.3 → 2c.4a → 2b.2 → 2b.1 → 2b.4 → 2b.5 → 2b.3
+```
+
 Notes:
-- `1.9a` is the type/API gate required before `2a.2` and `2c.*`.
-- `1.9b` is a follow-on stabilization pass for overlap resync, geometry detection,
-  and history setup guidance.
-- `1.10` gates Phase 2a.2 — all tasks must complete before next phase. Per-task
-  dependencies (listed in section above) allow internal parallelism within 1.10.
-- `1.11` (SshConfig URI) — field changes (1.11a–b) start immediately; parse/render
-  (1.11c–f, 1.11j–k) after 1.11a–b; connect (1.11g, 1.11l) requires 2a.1. No gates.
-- `1.13` (SFTP file transfer) depends on the completed SSH transport in 2a.1 and
-  the host/transport abstraction from 1.3 + 1.7. No gates; additive alongside
-  other post-1.12 work.
-- `2b.3` and `2c.4` both modify `monitor.rs` and `host.rs` — must land serially.
+- After Track A (6 tasks ending at 2c.4a), the system has end-to-end streaming:
+  monitor → parse control mode → fan-out via OutputBus → Subscription adapters →
+  JoinedStream combining. No matcher or reactor dependency.
+- Track B layers matching, reaction, and reconnection as `Subscription` adapters —
+  rules are consumers on the stream, not privileged inside `monitor.rs` (DC24).
+  One matching system via `.filter()` and `.react()`, no dual monitor-side/sink-side
+  matching.
+- `1.10` gates Track A start (2a.2a).
+- `OutputBus::subscribe()` returns `Subscription` — the single composable seam.
+  All consumer composition (joining, filtering, reacting) layered on adapters (DC24).
 - Phase 4 tasks are independent and can start as soon as their prerequisites are met.
 
 ## Conventions

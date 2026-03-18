@@ -6,6 +6,10 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-17 | @claude: DC24 R3 — address PR #82 review round 3: remove `filters` from `CallbackSink` and `filters()` from `SinkKind` — routing is `subscribe(filters)` only, sinks are terminal consumers. Update DC12 rationale, ActionHandle section, JoinedStream intro. | SinkKind, CallbackSink, DC12, ActionHandle, JoinedStream |
+| 2026-03-17 | @claude: DC24 R2 — address PR #82 review round 2: fix stale sections still describing old monitor-side rule evaluation and direct sink registration. Simplify `SinkFilter` to routing-only (remove `content`/`MatcherKind`/`MatcherInput`). Rewrite integration diagram to show `subscribe(filters) -> Subscription` + adapters. Remove `rules` param from `SessionMonitor::run()`. Update Phase 2b/2c narratives. | SinkFilter, Integration, monitor.rs, Phase 2b/2c |
+| 2026-03-17 | @claude: DC24 R1 — address PR #82 review: unify subscription API into `subscribe() -> Subscription` with composable adapters (`.joined()`, `.pipe()`, `.filter()`, `.react()`). Rules/reactors are subscription consumers, not monitor-internal. `StreamChunk` gains `source_changed` flag. Eliminate dual-matching (DC14 updated). | DC24, DC15, DC14, OutputBus, Subscription, JoinedStream |
+| 2026-03-17 | @claude: DC24 — evaluate Unix-pipe pipeline model vs pub/sub OutputBus. Retain pub/sub for fan-out; extract `JoinedStream` from `SinkKind` into independent consumer-side stream combinator. Remove `subscribe_joined()` from OutputBus. Revise DC15 accordingly. Restructure Phase 2 PLAN into Track A (streaming + combining) / Track B (matching + reactors). | DC24, DC15, JoinedStream, OutputBus, Phase 2 |
 | 2026-03-17 | @claude: Address PR #80 R2 — fix DC10 decision sentence to say "sole" not "primary with fallback". | DC10 |
 | 2026-03-17 | @claude: Address PR #80 R1 — remove all live pipe-pane/FIFO/fallback references from active architecture sections (overview, API signatures, module specs, DC1, DC6, DC7, DC13, OC1–OC4, Phase 2a/4). Remaining references are in historical context only (prototype, problem table, DC10 comparison table, struck-out sections). | Overview, Core Abstractions, Module Specs, DC1, DC6, DC7, DC13, OC1, OC2, OC4, Phase 2a, Phase 4 |
 | 2026-03-16 | @claude: Mark pipe-pane fallback (DC10) as out of scope. tmux 3.1+ baseline (DC22) guarantees control mode; pipe-pane/PipeManager/FIFO machinery adds complexity with no benefit. Historical references retained as context. | DC10 |
@@ -367,7 +371,7 @@ libs/tmux/
 │   ├── capture.rs          # Pane content capture (capture-pane) and scrollback dump
 │   ├── control.rs          # Session lifecycle, send-keys with escaping, rename
 │   ├── pipe.rs             # OUT OF SCOPE — pipe-pane fallback removed (tmux 3.1+ baseline)
-│   ├── monitor.rs          # OutputMonitor: stream parsing, rule evaluation, dispatch
+│   ├── monitor.rs          # OutputMonitor: stream parsing, publish to OutputBus
 │   ├── matcher.rs          # MatcherKind enum + built-in matchers (Regex, Substring, etc.)
 │   ├── sink.rs             # SinkKind enum, SinkFilter, TargetOutput, OutputBus
 │   ├── sinks/
@@ -407,7 +411,7 @@ bins/tmux-automator/         # (optional) CLI binary wrapping the library
          │
          ├── Control ────── create/kill session, send-keys, rename
          │
-         └── Monitor ────── stream + rule evaluation → action dispatch
+         └── Monitor ────── stream parsing → publish to OutputBus
 ```
 
 **Two usage modes coexist across `HostHandle` and `Target`**:
@@ -575,9 +579,9 @@ and `web-1:test`. This would compose with the existing sink pipeline:
 - **`SinkFilter` by workstream**: Filter output by workstream name instead of
   individual host/session/pane fields. The bus resolves the workstream to its member
   targets at filter-match time.
-- **`JoinedStream` over a workstream**: `subscribe_joined()` could accept a workstream
-  name, automatically creating filters for all member targets. The joined view then
-  shows the multi-party conversation for that logical workflow.
+- **`JoinedStream` over a workstream**: `bus.subscribe()` with a workstream-derived
+  filter, wrapped by `JoinedStream`, gives a consolidated labeled view of all member
+  targets in that logical workflow.
 - **Workstream-scoped monitoring**: Start/stop monitoring for all targets in a
   workstream with a single call.
 
@@ -1348,16 +1352,18 @@ The entire matcher tree is `Clone` — each sink gets its own copy via `clone()`
 the same sink — each sink gets its own cloned matcher instance, so state is not shared
 across sinks. `reset()` is called when monitoring restarts to clear accumulated state.
 
-### `SinkFilter` — Composable Output Targeting
+### `SinkFilter` — Source Routing
 
-A `SinkFilter` selects which output reaches a given sink. Routing fields target the
-source (host, session, window, pane). An optional `content` matcher filters on the
-text itself. Multiple filters are combined with OR semantics — output matching **any**
-filter in the set is delivered to the sink.
+<!-- @claude 2026-03-17: Simplified to routing-only per DC24. Content matching
+     moved to Subscription adapters (.filter(), .react()). See DC24 section. -->
 
-Content matching is evaluated against a sink-selected matcher view. The default is
-`TargetOutput.content` as delivered; line-oriented sinks may request a sink-local
-plain-text derived view without mutating the shared payload.
+A `SinkFilter` selects which output reaches a given `Subscription` by source identity.
+Routing fields target host, session, window, and pane. Content matching is **not** part
+of `SinkFilter` — it lives in `Subscription` adapters (`.filter()`, `.react()`), keeping
+the bus layer fast and stateless.
+
+Multiple filters are combined with OR semantics — output matching **any** filter in the
+set is delivered.
 
 ```rust
 pub struct SinkFilter {
@@ -1365,89 +1371,58 @@ pub struct SinkFilter {
     pub session: Option<String>,   // regex against session name
     pub window: Option<String>,    // regex against "session:window_index"
     pub pane: Option<String>,      // regex against pane_id or "session:window.pane"
-    pub content: Option<MatcherKind>,  // optional content matching
-    pub matcher_input: MatcherInput,
 }
 
-/// Compiled form — routing regexes compiled once at registration time.
-/// Content matcher is moved in as-is (already runtime-ready).
+/// Compiled form — routing regexes compiled once at subscribe() time.
 pub struct CompiledSinkFilter {
     pub host: Option<Regex>,
     pub session: Option<Regex>,
     pub window: Option<Regex>,
     pub pane: Option<Regex>,
-    pub content: Option<MatcherKind>,
-    pub matcher_input: MatcherInput,
-}
-
-pub enum MatcherInput {
-    /// Match against `TargetOutput.content` exactly as delivered.
-    Preserve,
-    /// Derive a sink-local plain-text matcher view from `content`.
-    PlainTextDerived,
 }
 
 impl CompiledSinkFilter {
     /// Returns true if the output matches ALL non-None fields in this filter.
     /// Fields that are None are wildcards (match everything).
-    /// Routing fields (host/session/window/pane) are checked first (cheap).
-    /// Content matcher is checked last (potentially stateful/expensive).
-    pub fn matches(&mut self, output: &TargetOutput) -> bool;
+    pub fn matches(&self, output: &TargetOutput) -> bool;
 }
 ```
 
-**Note**: `matches()` takes `&mut self` because content matchers may be stateful.
+**Note**: `matches()` takes `&self` — routing is stateless.
 
-**Combining filters**: A sink registers with `Vec<SinkFilter>`. Output is delivered
+**Combining filters**: `subscribe()` accepts `Vec<SinkFilter>`. Output is delivered
 if it matches **any** filter in the vec (OR across filters, AND within each filter's
-routing + content fields). An empty vec means "match all output" (the default).
+routing fields). An empty vec means "match all output" (the default).
 
 **Examples**:
 
 ```rust
-// Sink receives output from all panes on "db-server"
+// Subscription receives output from all panes on "db-server"
 vec![SinkFilter { host: Some("db-server".into()), ..Default::default() }]
 
-// Sink receives output from session "build" on any host, OR any session on "web-1"
+// Subscription receives output from session "build" on any host, OR any session on "web-1"
 vec![
     SinkFilter { session: Some("build".into()), ..Default::default() },
     SinkFilter { host: Some("web-1".into()), ..Default::default() },
 ]
 
-// Sink receives output from a specific pane
+// Subscription receives output from a specific pane
 vec![SinkFilter { pane: Some("%42".into()), ..Default::default() }]
-
-// Sink receives output containing "error" or "fatal" from any source
-vec![SinkFilter {
-    content: Some(MatcherKind::Substring {
-        needles: vec!["error".into(), "fatal".into()],
-        case_insensitive: true,
-    }),
-    ..Default::default()
-}]
-
-// Sink triggers after 100 lines of output from "build" session
-vec![SinkFilter {
-    session: Some("build".into()),
-    content: Some(MatcherKind::LineCount { threshold: 100, count: 0 }),
-    ..Default::default()
-}]
-
-// Bad-word detector on all output
-vec![SinkFilter {
-    content: Some(MatcherKind::WordList {
-        words: ["password", "secret", "token"].into_iter().map(Into::into).collect(),
-        case_insensitive: true,
-    }),
-    ..Default::default()
-}]
 ```
 
-### `SinkKind` — Static-Dispatch Output Sinks
+Content-based filtering examples use `Subscription` adapters — see
+[DC24 Subscription composable seam](#dc24-subscription-composable-seam).
 
-Every output consumer is a variant of the `SinkKind` enum. The bus dispatches via
-`match` with zero vtable indirection on the hot path. Each sink runs as an independent
-async task with its own batching/accumulation behavior.
+### `SinkKind` — Static-Dispatch Terminal Consumers
+
+<!-- @claude 2026-03-17: Sinks are terminal consumers only — no routing. Routing is
+     owned by subscribe(filters) -> Subscription. Sinks are attached via .pipe(). -->
+
+Every output consumer is a variant of the `SinkKind` enum. Sinks are **terminal
+consumers** — they process events but do not own routing filters. Routing is the
+responsibility of `OutputBus::subscribe(filters, capacity) -> Subscription`; sinks
+are attached to a subscription via `.pipe(SinkKind)`. The bus dispatches via `match`
+with zero vtable indirection on the hot path.
 
 **Remaining dynamic types**: `CallbackSink.state` uses `Arc<dyn Any + Send + Sync>` for
 type-erased consumer state. It is passed by reference to the per-event `on_output`
@@ -1472,7 +1447,6 @@ pub enum SinkKind {
 /// while allowing consumer-defined behavior with captured state.
 pub struct CallbackSink {
     pub name: String,
-    pub filters: Vec<SinkFilter>,
     /// Shared state passed to callbacks. Consumers put their accumulated
     /// buffers, connections, or other mutable state here.
     pub state: Arc<dyn Any + Send + Sync>,
@@ -1490,9 +1464,6 @@ impl SinkKind {
     /// Human-readable name for logging and diagnostics.
     pub fn name(&self) -> &str;
 
-    /// Filters determining which output reaches this sink.
-    pub fn filters(&self) -> &[SinkFilter];
-
     /// Process one sink event. Called from the sink's own task —
     /// never from the monitor/bus hot path.
     pub async fn write(&mut self, event: SinkEvent) -> Result<()>;
@@ -1503,10 +1474,10 @@ impl SinkKind {
 ```
 
 **Key design principle**: Each sink owns its batching/accumulation strategy internally.
-The bus delivers individual `SinkEvent`s; the sink decides whether to process
-them immediately (stdio), buffer and render at frame rate (TUI), or accumulate and
-flush on a timer/threshold (LLM). This keeps the bus simple and the sink in full
-control of its own latency/throughput tradeoffs.
+The subscription's `.pipe()` adapter forwards `SinkEvent`s to the sink; the sink
+decides whether to process them immediately (stdio), buffer and render at frame rate
+(TUI), or accumulate and flush on a timer/threshold (LLM). Routing is upstream in
+`subscribe(filters)` — the sink sees only the events its subscription selected.
 
 **Extension via `CallbackSink`**: Consumers that need custom sink behavior (LLM
 inference, webhook delivery, custom TUI) provide function pointers plus an explicit
@@ -1517,12 +1488,13 @@ unavoidable until Rust stabilizes async fn pointers. The framework's `on_output`
 fully synchronous with no framework-side allocation (user callbacks may allocate
 internally as needed).
 
-### `ActionHandle` — Sink-Initiated Actions
+### `ActionHandle` — Consumer-Initiated Actions
 
-Sinks that analyze output may need to act on the source entity — send keys to the
-pane, kill a session, etc. Rather than giving sinks direct access to `HostHandle`
-(which would create circular dependencies), sinks receive an `ActionHandle` that
-provides a scoped, async API for actions against the tmux entities they observe.
+Subscription consumers (sinks, `.react()` adapters, custom code) that analyze output
+may need to act on the source entity — send keys to the pane, kill a session, etc.
+Rather than giving consumers direct access to `HostHandle` (which would create
+circular dependencies), they receive an `ActionHandle` that provides a scoped, async
+API for actions against the tmux entities they observe.
 
 ```rust
 pub struct ActionHandle { /* mpsc::Sender<ActionRequest> */ }
@@ -1597,54 +1569,114 @@ the `SinkKind` enum and `ActionHandle` API; LLM integration is a consumer concer
 ### `OutputBus` — Fan-Out Dispatcher
 
 The `OutputBus` is the central distributor. It receives `TargetOutput` from the monitor
-(or from `capture_pane()` callers) and fans out to all registered sinks.
+(or from `capture_pane()` callers) and fans out to all registered subscribers.
+
+<!-- @claude 2026-03-17: PR #82 R1 — unified subscription API. One primitive:
+     subscribe(filters, capacity) -> Subscription. Adapters layered above.
+     Replaces the prior inconsistency of subscribe(sink), subscribe_channel(filters),
+     and subscribe_joined(filters) as separate bus methods. -->
 
 ```rust
-pub struct OutputBus { /* subscribers: Vec<SinkEntry> */ }
+pub struct OutputBus { /* subscribers: Vec<SubEntry> */ }
 
-struct SinkEntry {
+struct SubEntry {
     id: SinkId,
     name: String,
     tx: mpsc::Sender<SinkEvent>,
     filters: Vec<CompiledSinkFilter>,
     dropped_since_last_send: usize,
-    task: JoinHandle<()>,
 }
 
 impl OutputBus {
     pub fn new() -> Self;
 
-    /// Register a sink. Spawns a dedicated tokio task that drives the sink.
-    /// Returns a SinkId for later unsubscribe.
-    /// `channel_capacity` controls the bounded channel size to this sink.
-    /// Sinks that need to initiate actions should capture an `ActionHandle`
-    /// at construction time — the bus does not inject one.
+    /// The single subscription primitive. Returns a `Subscription` that
+    /// receives source-routed `SinkEvent`s. All consumer composition
+    /// (joining, filtering, piping to sinks, reacting) is layered on
+    /// `Subscription` — the bus only handles fan-out and source routing.
     pub fn subscribe(
         &mut self,
-        sink: SinkKind,
+        filters: Vec<SinkFilter>,
         channel_capacity: usize,
-    ) -> SinkId;
+    ) -> Subscription;
 
-    /// Remove a sink. Signals stop, awaits flush(), joins the task.
+    /// Remove a subscription by id.
     pub async fn unsubscribe(&mut self, id: SinkId) -> Result<()>;
 
-    /// Fan out an event to all matching sinks. Non-blocking.
-    /// Uses try_send for the hot path. If a sink channel is full, the bus
-    /// increments `dropped_since_last_send` for that sink and does NOT silently
+    /// Fan out an event to all matching subscribers. Non-blocking.
+    /// Uses try_send for the hot path. If a subscriber channel is full,
+    /// the bus increments `dropped_since_last_send` and does NOT silently
     /// lose observability: on the next successful send, emit
     /// `SinkEvent::Gap { dropped }` before the next `SinkEvent::Data(output)`.
     pub fn publish(&self, output: TargetOutput);
 
-    /// Shutdown all sinks gracefully.
+    /// Shutdown all subscribers gracefully.
     pub async fn shutdown(&mut self) -> Result<()>;
 }
 ```
 
-**Backpressure**: The bus remains non-blocking via `try_send()`, but with loss visibility.
-When a sink falls behind, dropped events are counted and surfaced via explicit
-`SinkEvent::Gap` markers on that sink's channel before the next delivered `Data` event.
-This preserves monitor liveness while keeping sink-route loss separate from source-side
-fidelity metadata.
+### `Subscription` — Composable Consumer Seam
+
+A `Subscription` wraps the `mpsc::Receiver<SinkEvent>` from the bus and provides
+composable adapter methods. The bus handles source routing (host/session/pane
+filtering); everything above that — content matching, joining, transforming,
+reacting — is expressed as `Subscription` adapters. This is the composability
+borrowed from Unix-pipe thinking (DC24) applied at the consumer level, not the
+bus level.
+
+```rust
+pub struct Subscription {
+    id: SinkId,
+    rx: mpsc::Receiver<SinkEvent>,
+}
+
+impl Subscription {
+    /// Access the subscription id for later unsubscribe.
+    pub fn id(&self) -> SinkId;
+
+    /// Raw receiver access. Consumes the Subscription.
+    /// For consumers that want full control (TUI, test harness).
+    pub fn into_receiver(self) -> mpsc::Receiver<SinkEvent>;
+
+    // --- Track A adapters (available immediately) ---
+
+    /// Labeled, coalesced multi-source view. Consumes the Subscription.
+    /// Returns a JoinedStream that produces StreamChunks.
+    pub fn joined(self, label_format: LabelFormat) -> JoinedStream;
+
+    /// Fire-and-forget: spawn a tokio task that drives the given sink.
+    /// Consumes the Subscription. Returns JoinHandle for lifecycle.
+    pub fn pipe(self, sink: SinkKind) -> JoinHandle<()>;
+
+    // --- Track B adapters (added when matching/reactors land) ---
+
+    /// Content filter. Returns a new Subscription that only passes
+    /// events matching the given matcher. Spawns a forwarding task.
+    pub fn filter(self, matcher: MatcherKind) -> Subscription;
+
+    /// React to matching output by dispatching actions.
+    /// Terminal adapter — consumes the Subscription, spawns a task
+    /// that evaluates the matcher and dispatches via ActionHandle.
+    pub fn react(
+        self,
+        matcher: MatcherKind,
+        action: Action,
+        cooldown: Duration,
+        action_handle: ActionHandle,
+    ) -> JoinHandle<()>;
+}
+```
+
+**Design principle**: The bus gives you a stream of source-routed events. Everything
+else is layered above. This eliminates the need for multiple `subscribe_*` bus methods
+and makes new consumer patterns (content filtering, reaction, joining) orthogonal to
+the bus itself.
+
+**Backpressure**: The bus remains non-blocking via `try_send()`, with loss visibility.
+When a subscriber falls behind, dropped events are counted and surfaced via explicit
+`SinkEvent::Gap` markers before the next delivered `Data` event.
+This preserves monitor liveness while keeping per-subscriber loss separate from
+source-side fidelity metadata.
 
 ### `StdioSink` — Default Reference Implementation
 
@@ -1673,7 +1705,7 @@ pub enum StdioFormat {
 
 ### `JoinedStream` — Multi-Source Consolidated View
 
-Individual sinks see output from their filtered sources, but each `TargetOutput` arrives
+Individual subscriptions see output from their filtered sources, but each `TargetOutput` arrives
 independently. A `JoinedStream` merges multiple source streams into a single
 time-ordered sequence where each chunk is attributed to its source — like a multi-party
 conversation transcript. This is the natural representation for an LLM analyzing
@@ -1705,19 +1737,30 @@ impl SourceLabel {
 }
 ```
 
-**`JoinedSink`** — a sink combinator that wraps an inner `SinkKind` and presents
-incoming output as a consolidated multi-source stream:
+### `JoinedStream` — Multi-Source Consolidated View
+
+<!-- @claude 2026-03-17: Revised from JoinedSink (SinkKind wrapper) to JoinedStream
+     (Subscription adapter). See DC24 for the Unix-pipe analysis that motivated this. -->
+
+`JoinedStream` is returned by `Subscription::joined()`. It merges multiple source
+streams into a single time-ordered sequence where each chunk carries source
+attribution and a `source_changed` flag for coalescing.
 
 ```rust
-/// Wraps an inner sink, transforming the output stream into a
-/// source-attributed conversation-style view.
-pub struct JoinedSink {
-    inner: SinkKind,
-    /// Controls how source labels are formatted in the stream.
+/// Returned by Subscription::joined(). Produces StreamChunks
+/// with source attribution and coalescing state.
+pub struct JoinedStream {
+    rx: mpsc::Receiver<SinkEvent>,
     label_format: LabelFormat,
-    /// Tracks the last source to emit, so consecutive chunks from the
-    /// same source can be coalesced without repeating the label.
     last_source: Option<SourceLabel>,
+}
+
+pub struct StreamChunk {
+    pub source: SourceLabel,
+    pub output: TargetOutput,
+    /// True when the source differs from the previous chunk —
+    /// signals the consumer to emit a source header/separator.
+    pub source_changed: bool,
 }
 
 pub enum LabelFormat {
@@ -1729,76 +1772,75 @@ pub enum LabelFormat {
     Custom(fn(&SourceLabel, &str) -> String),
 }
 
-impl JoinedSink {
-    pub fn new(inner: SinkKind, label_format: LabelFormat) -> Self;
+impl JoinedStream {
+    /// Receive the next labeled chunk. Returns None when the
+    /// subscription closes. Coalescing is expressed via
+    /// `StreamChunk::source_changed`.
+    pub async fn next(&mut self) -> Option<StreamChunk>;
+
+    /// Format a StreamChunk as a string using this stream's LabelFormat.
+    /// Emits the label prefix only when `source_changed` is true.
+    pub fn format(&self, chunk: &StreamChunk) -> String;
 }
 ```
 
-When `JoinedSink::write()` receives a `SinkEvent`, it:
-1. Passes `SinkEvent::Gap` through unchanged so loss signals remain visible
-2. For `SinkEvent::Data(output)`, extracts the `SourceLabel` from the metadata
-3. If the source differs from `last_source`, emits a source header/prefix
-4. Delegates to the inner sink's `write()` with the attributed content
-5. Updates `last_source` for coalescing
+**Coalescing**: Consecutive chunks from the same source have `source_changed: false`.
+When a different source emits, the new chunk has `source_changed: true`. Consumers
+decide how to render transitions — `format()` provides a default implementation
+(label prefix on transitions, raw content otherwise).
 
-**Coalescing**: Consecutive chunks from the same source are grouped without repeating
-the source label — like a chat UI where the sender name only appears on the first
-message in a burst. When a different source emits, the label appears again.
-
-**Use cases**:
+**Use cases via Subscription adapter**:
 
 ```rust
-// LLM sees a consolidated conversation across 3 build panes
-let llm_sink = JoinedSink::new(
-    SinkKind::Callback(CallbackSink { /* LLM sink config */ }),
-    LabelFormat::Bracketed,
-);
-// Output looks like:
+// Labeled stdio output from build panes across hosts
+let sub = bus.subscribe(build_filters, 64);
+let mut joined = sub.joined(LabelFormat::Bracketed);
+tokio::spawn(async move {
+    while let Some(chunk) = joined.next().await {
+        print!("{}", joined.format(&chunk));
+    }
+});
+// Output:
 //   [web-1:build:0.0] compiling crate foo...
 //   [web-1:build:0.0] warning: unused variable
 //   [db-1:migrate:0.0] Running migration 042...
-//   [db-1:migrate:0.0] OK
 //   [web-1:build:0.0] Finished dev target
 
-// Stdio log with prompt-style labels
-let log_sink = JoinedSink::new(
-    SinkKind::Stdio(StdioSink::new(StdioFormat::Raw)),
-    LabelFormat::Prompt,
-);
-// Output looks like:
-//   web-1:build:0.0> compiling crate foo...
-//   db-1:migrate:0.0> Running migration 042...
+// Structured data for LLM consumption
+let sub2 = bus.subscribe(all_filters, 64);
+let mut joined2 = sub2.joined(LabelFormat::Bracketed);
+tokio::spawn(async move {
+    while let Some(chunk) = joined2.next().await {
+        llm_ingest(&chunk.source, &chunk.output);
+    }
+});
+
+// Raw receiver for custom consumption
+let sub3 = bus.subscribe(filters, 64);
+let rx = sub3.into_receiver();
+
+// Fire-and-forget sink
+let sub4 = bus.subscribe(log_filters, 64);
+sub4.pipe(SinkKind::Stdio(StdioSink::new(StdioFormat::Json)));
 ```
-
-**Extracting a joined view programmatically**: For callers that want to consume
-the stream as structured data (not formatted text), the `OutputBus` supports
-registering a channel-based subscriber that receives `StreamChunk` directly:
-
-```rust
-impl OutputBus {
-    /// Subscribe a raw channel that receives StreamChunks (TargetOutput + SourceLabel).
-    /// The caller reads from the receiver directly. No SinkKind wrapper needed.
-    pub fn subscribe_joined(
-        &mut self,
-        filters: Vec<SinkFilter>,
-        channel_capacity: usize,
-    ) -> (SinkId, mpsc::Receiver<StreamChunk>);
-}
-```
-
-This is the lowest-level API for consumers that want to build their own rendering
-on top of the joined stream (e.g., a TUI panel, a web socket feed, or test harness).
 
 ### Integration with Fleet and Monitor
+
+<!-- @claude 2026-03-17: Rewritten to reflect DC24 subscribe(filters) -> Subscription
+     model. Monitor is stream-only; rules are subscription consumers. -->
 
 ```
   Fleet
     │
     ├── OutputBus (owned by Fleet)
     │     │
-    │     ├── subscribe(SinkKind::Stdio(StdioSink::new(StdioFormat::Raw)), 1024)
-    │     ├── subscribe(SinkKind::Callback(tui_sink), 16)        // binary-provided
-    │     └── subscribe(SinkKind::Callback(llm_sink), 256)       // LLM callback sink
+    │     ├── subscribe(all_filters, 1024) -> Subscription
+    │     │     ├── .joined("…")              // combined multi-pane view
+    │     │     ├── .pipe(SinkKind::Stdio(…))  // pipe to stdio sink
+    │     │     └── .filter(matcher).react(…)  // matching + reaction
+    │     │
+    │     └── subscribe(db_filters, 256) -> Subscription
+    │           └── .pipe(SinkKind::Callback(llm_sink))
     │
     ├── HostHandle (localhost)
     │     └── Monitor ──publish()──► OutputBus
@@ -1807,18 +1849,17 @@ on top of the joined stream (e.g., a TUI panel, a web socket feed, or test harne
           └── Monitor ──publish()──► OutputBus
 ```
 
-**Monitor → Bus**: The monitor publishes `TargetOutput` to the bus after each output
-event. This happens *in addition to* rule evaluation — rules and sinks operate
-independently on the same stream.
+**Monitor → Bus**: The monitor parses control-mode `%output` frames and publishes
+`TargetOutput` to the bus. The monitor does **not** evaluate rules — it is purely a
+stream parser. Rule evaluation is a consumer concern via `Subscription` adapters.
 
 **capture_pane() → Bus**: On-demand captures can optionally be published to the bus
 via a `bus.publish()` call. This is opt-in at the call site, not automatic.
 
-**Sink → ActionHandle → HostHandle**: A sink that decides to act (e.g., an LLM sink
-that detects an error and wants to send a recovery command) submits an `ActionRequest`
-through its `ActionHandle`. The request is routed to the correct `HostHandle` via the
-existing per-host dispatch queue (DC4). The sink does not need to know which
-`HostHandle` to use — routing is by the `host` field and `TargetAddress` in `ActionRequest`.
+**Subscription → ActionHandle → HostHandle**: A subscription adapter (`.react()`)
+that detects a match submits an `ActionRequest` through its `ActionHandle`. The request
+is routed to the correct `HostHandle` via the existing per-host dispatch queue (DC4).
+Routing is by the `host` field and `TargetAddress` in `ActionRequest`.
 
 ---
 
@@ -1885,9 +1926,10 @@ pub struct TriggerRule {
 }
 
 /// Runtime form — compiled from TriggerRule during startup validation.
-/// The `matcher` field is a `MatcherKind` enum — config-driven rules compile
-/// to `MatcherKind::Regex`, but programmatic callers can use any variant
-/// (WordList, LineCount, AllOf, etc.).
+/// Used to construct `Subscription::react()` calls (DC24): the matcher,
+/// action, and cooldown fields feed directly into the subscription adapter.
+/// Config-driven rules compile to `MatcherKind::Regex`; programmatic callers
+/// can use any `MatcherKind` variant (WordList, LineCount, AllOf, etc.).
 pub struct CompiledRule {
     pub name: String,
     pub pane_filter: Option<Regex>,
@@ -2365,21 +2407,22 @@ pub struct SessionMonitor { /* session name, rules, cooldown state */ }
 impl SessionMonitor {
     /// Run the monitor loop for one session.
     /// Opens `tmux -C attach -t <session>` via the transport, parses
-    /// `%output %<pane_id> <data>` frames, evaluates rules, and publishes
-    /// TargetOutput to the OutputBus.
+    /// `%output %<pane_id> <data>` frames and publishes TargetOutput to the
+    /// OutputBus. The monitor does not evaluate rules — rule evaluation is a
+    /// consumer concern via Subscription adapters (DC24).
     /// Returns when `stop` signal is received or the connection drops.
     pub async fn run(
         &mut self,
         transport: &TransportKind,
         session: &str,
-        rules: &[TriggerRule],
         bus: &OutputBus,
         stop: watch::Receiver<bool>,
     ) -> Result<()>;
 }
 ```
 
-**Must address P3**: Rule evaluation replaces the hardcoded `contains('>')` check.
+<!-- @claude 2026-03-17: Removed rules parameter and P3 (rule evaluation). Rules are
+     subscription consumers, not monitor concerns. See DC24. -->
 
 **Must address P6**: Each `SessionMonitor` uses a dedicated control-mode connection
 (`tmux -C attach -t <session>`, see DC10). Action dispatch (send-keys) uses separate
@@ -2952,6 +2995,70 @@ and directories now. `Target` is intentionally not extended for file transfer.
 
 **Deep dive**: See [`SFTP.md`](./SFTP.md) for the design and implementation outline.
 
+### DC24: Stream Pipeline Architecture — Pub/Sub vs Unix Pipes
+
+**Decision**: Retain the pub/sub `OutputBus` architecture for fan-out, but extract
+`JoinedStream` from `SinkKind` into an independent consumer-side stream combinator.
+Reject a full Unix-pipe pipeline model.
+
+**Context**: During implementation planning for Phase 2 (monitoring + sink pipeline),
+we evaluated whether a Unix-pipe-style composable pipeline (`source | filter |
+transform | tee file.log | sink`) would better serve the streaming and stream-combining
+use cases than the existing pub/sub `OutputBus` design. The pipe model's appeal is
+composability — each stage has one input and one output, `tee` is the only branching
+primitive, and composition comes from a uniform stream contract.
+
+**Evaluation**:
+
+| Criterion | Pub/Sub (OutputBus) | Unix Pipe Model |
+|-----------|--------------------|--------------------|
+| Fan-out (primary use case) | Native — publish to N subscribers | Requires explicit `tee` at every branch |
+| Fan-in / joining | Combinator on subscriber side | Source-level `join()` combinator |
+| Runtime dynamism | `subscribe()`/`unsubscribe()` at any time | Pipeline topology is structural — adding consumers requires rebuilding |
+| Backpressure | Per-subscriber channels, independent | Propagates upstream through chain — slow stage blocks source |
+| Rust implementation | `SinkKind` enum, `mpsc` channels — idiomatic | `Stream` trait composition, `Pin`, type-erased chains — complex |
+| Transform chains | Not modeled (rarely needed in this domain) | First-class composable stages |
+| Complexity | One struct, publish/subscribe | Stage traits, chain builders, tee/join combinators, per-stage lifecycle |
+
+**Conclusion**: The pipe model optimizes for linear transform chains — not the primary
+pattern in tmux monitoring. The actual patterns (fan-out to multiple consumers, fan-in
+from multiple hosts, runtime subscribe/unsubscribe, per-consumer backpressure tolerance)
+are exactly what pub/sub handles well. Full pipe adoption would over-engineer the
+solution and fight Rust's async stream type system for marginal benefit.
+
+**What we borrowed**: The analysis revealed two composability improvements that adopt
+pipe-style thinking without abandoning pub/sub:
+
+1. **`Subscription` as the composable seam**: The bus exposes one primitive —
+   `subscribe(filters, capacity) -> Subscription`. All consumer-side composition
+   (joining, filtering, piping, reacting) is expressed as `Subscription` adapter
+   methods. This is the Unix-pipe ergonomic pattern applied at the consumer level:
+   the bus does fan-out and source routing; adapters chain above it. This replaces
+   the prior inconsistency of multiple `subscribe_*` bus methods.
+
+2. **`JoinedStream` as an adapter, not a sink variant**: Joining is a consumer
+   concern (like Unix `paste`), not a sink property. `subscription.joined(format)`
+   returns a `JoinedStream` that produces `StreamChunk`s with `source_changed` flags
+   for coalescing. Composes freely with any downstream consumer.
+
+3. **Rules/reactors as subscription consumers, not monitor internals**: Rather than
+   embedding rule evaluation inside `SessionMonitor::run()` (which creates a
+   privileged matching path separate from bus-side content matching), rules are
+   expressed as `subscription.filter(matcher).react(action, cooldown, handle)`.
+   The monitor parses and publishes; matching and reaction happen at the subscription
+   layer. This eliminates the dual-matching problem (monitor-side rules vs sink-side
+   `SinkFilter` content matching) and makes all consumers — logging sinks, LLM
+   consumers, TUI displays, and reactive rules — peers on the same stream substrate.
+
+**Layering**:
+- **Bus**: Source routing (host/session/pane), fan-out, backpressure/gap tracking
+- **Subscription adapters**: Content matching, joining, transforming, reacting
+- **Terminal consumers**: `SinkKind` (stdio, callback), custom code via `into_receiver()`
+
+**Impact**: DC15 revised (JoinedStream as adapter). OutputBus simplified to one
+`subscribe()` primitive. Phase 2 PLAN restructured into Track A (streaming + combining)
+and Track B (matching + reactors as subscription adapters).
+
 ### DC7: Capture-Pane vs Stream Monitoring
 
 **Decision**: Use `capture-pane -p` for on-demand snapshots, with optional `-e` when
@@ -3051,25 +3158,27 @@ initialization. The library is also consumable by MCP tools or other programmati
 ### DC12: Output Sink Pipeline Architecture
 
 **Decision**: Captured pane output is distributed to consumers via an async fan-out bus
-(`OutputBus`) that delivers `TargetOutput` to independently-running sink tasks. Each sink
-receives its own bounded channel and manages its own batching, buffering, and timing
-internally. Sinks are filtered via composable `SinkFilter` structs (OR across filters,
-AND within fields). Sinks may initiate actions on tmux entities via an `ActionHandle`
-that routes requests through the existing per-host action dispatch queue (DC4).
+(`OutputBus`) that delivers `TargetOutput` to subscriptions. Each subscription receives
+its own bounded channel; terminal consumers (sinks) are attached via `.pipe(SinkKind)`.
+Routing is owned by `subscribe(filters, capacity) -> Subscription` — sinks are terminal
+consumers with no routing logic. Content matching and reaction are `Subscription`
+adapters (`.filter()`, `.react()`). Consumers may initiate actions on tmux entities via
+an `ActionHandle` that routes requests through the existing per-host dispatch queue (DC4).
 
 **Rationale**:
-- **Decoupled latency**: A slow LLM sink must never block a fast stdio sink. Per-sink
-  channels with independent tasks ensure this.
-- **Sink-owned batching**: The bus delivers individual `SinkEvent`s; sinks decide
-  when/how to batch. A stdio sink flushes immediately. An LLM sink accumulates until a
-  token budget or timeout. This keeps the bus simple and avoids a "one size fits all"
-  batching policy.
-- **Composable filtering**: `SinkFilter` fields (host, session, window, pane) are regex
-  patterns ANDed together. Multiple filters per sink are ORed. This allows targeting
-  "all panes on host-a" OR "session:build on any host" with a single sink registration.
-- **Action loop**: `ActionHandle` gives sinks a way to respond to output (e.g., LLM
-  decides to send keys). Actions flow through the existing bounded queue and semaphore,
-  preserving ordering and backpressure guarantees from DC4.
+- **Decoupled latency**: A slow LLM consumer must never block a fast stdio sink. Per-
+  subscription channels with independent tasks ensure this.
+- **Sink-owned batching**: The subscription's `.pipe()` adapter forwards `SinkEvent`s;
+  sinks decide when/how to batch. A stdio sink flushes immediately. An LLM callback
+  accumulates until a token budget or timeout. This keeps the bus simple.
+- **Composable routing**: `SinkFilter` fields (host, session, window, pane) are regex
+  patterns ANDed together. Multiple filters per subscription are ORed. This allows
+  targeting "all panes on host-a" OR "session:build on any host" with a single subscribe.
+- **Single routing layer**: Routing lives in `subscribe(filters)` only — sinks do not
+  own filters. This eliminates ambiguity about where routing is configured.
+- **Action loop**: `ActionHandle` gives consumers a way to respond to output (e.g.,
+  `.react()` adapter dispatches actions). Actions flow through the existing bounded queue
+  and semaphore, preserving ordering and backpressure guarantees from DC4.
 - **LLM feedback loop out of scope**: The `ActionHandle` API is in scope; the logic that
   decides *what* action to take (LLM inference, prompt construction) is out of scope for
   `libs/tmux`. Consumers build that on top.
@@ -3121,8 +3230,9 @@ monitoring is still fully operational for on-demand use via `HostHandle` and `Ta
 ### DC14: Trait-Based Content Matching
 
 **Decision**: Text matching is abstracted behind the `MatcherKind` enum. Regex is
-one implementation, not a privileged special case. Both `SinkFilter` (content field) and
-`CompiledRule` (matcher field) use `MatcherKind`.
+one implementation, not a privileged special case. `MatcherKind` is used at the
+`Subscription` adapter layer (`.filter()`, `.react()`) — there is one matching system,
+not separate monitor-side and sink-side matchers (see DC24).
 
 **Rationale**: Different use cases need different matching strategies:
 - **Regex**: General-purpose pattern matching (the default for config-driven rules)
@@ -3135,11 +3245,11 @@ one implementation, not a privileged special case. Both `SinkFilter` (content fi
 Making regex the only matching mechanism would force all of these into regex patterns,
 which is unnatural for stateful matchers and inefficient for simple keyword checks.
 
-**Statefulness**: Matchers may be stateful (`matches(&mut self, ...)`). Each sink and
-each compiled rule gets its own cloned `MatcherKind` instance — state is never shared.
-`reset()` is called on monitoring restart. The bus evaluates routing fields
-(host/session/window/pane) before calling the content matcher, so expensive matchers
-are only invoked on pre-filtered output.
+**Statefulness**: Matchers may be stateful (`matches(&mut self, ...)`). Each
+`Subscription` adapter (`.filter()`, `.react()`) gets its own cloned `MatcherKind`
+instance — state is never shared. `reset()` is called on monitoring restart. Source
+routing (host/session/window/pane) is handled by the bus before events reach the
+subscription, so expensive content matchers are only invoked on pre-filtered output.
 
 **Static dispatch**: All matcher variants are defined in the `MatcherKind` enum (DC14).
 No vtable dispatch on the hot path. `AllOf`/`AnyOf` store children as `Vec<MatcherKind>`
@@ -3148,8 +3258,8 @@ matcher tree is `Clone`.
 
 **Config boundary**: `TriggerRule` (serde DTO) stores `pattern: String` which compiles
 to `MatcherKind::Regex`. Programmatic callers bypass the config layer and construct
-`CompiledRule::with_matcher()` or `SinkFilter { content: Some(...) }` directly with
-any `MatcherKind` variant.
+`Subscription::filter(matcher)` or `Subscription::react(matcher, action, ...)` directly
+with any `MatcherKind` variant.
 
 **Built-in matchers** (all `MatcherKind` enum variants): `Regex`, `Substring`,
 `LineCount`, `WordList`, plus `AllOf`/`AnyOf`/`Not` combinators. The enum is closed —
@@ -3157,10 +3267,14 @@ new matcher types require adding a variant (keeping the hot path static-dispatch
 
 ### DC15: Joined Stream — Multi-Source Consolidated View
 
+<!-- @claude 2026-03-17: DC24 revised DC15. JoinedSink was a SinkKind wrapper; now
+     JoinedStream is a Subscription adapter returned by subscription.joined().
+     See DC24 for the Unix-pipe analysis that motivated the change. -->
+
 **Decision**: Multiple filtered output streams can be joined into a single time-ordered
-sequence where each chunk is attributed to its source. This is implemented as a sink
-combinator (`JoinedSink`) and a raw channel API (`subscribe_joined()`), not as a
-separate pipeline stage.
+sequence where each chunk is attributed to its source. This is implemented as a
+`Subscription` adapter — `subscription.joined(label_format)` returns a `JoinedStream`
+that produces `StreamChunk`s with `source_changed` flags for coalescing.
 
 **Rationale**: When monitoring multiple panes across hosts, consumers often need a
 unified view — an LLM analyzing cross-pane interactions, a log aggregator correlating
@@ -3168,19 +3282,23 @@ events, or a TUI showing interleaved output. Without joining, each sink sees iso
 streams and must implement its own source-tracking and interleaving logic.
 
 **Design choices**:
-- **Combinator, not infrastructure**: `JoinedSink<S>` wraps any `SinkKind` and adds
-  source attribution. The bus itself remains simple (fan-out only). This avoids adding
-  joining logic to the bus hot path.
+- **Subscription adapter, not sink variant**: `subscription.joined(format)` returns a
+  `JoinedStream`. It composes freely with any downstream consumer — `StdioSink`,
+  `CallbackSink`, TUI channel, or custom rendering — without being a `SinkKind` variant.
+  The bus stays simple (fan-out + source routing); joining is opt-in at the consumer site.
+  (Revised from original `JoinedSink`-as-`SinkKind` design; see DC24 for rationale.)
 - **Source coalescing**: Consecutive chunks from the same source are grouped without
   repeating the label. This mirrors chat UIs where the sender appears once per burst,
   reducing visual noise in high-throughput streams.
-- **Two levels of API**: `JoinedSink` for formatted text output (wraps any sink),
-  `subscribe_joined()` for structured `StreamChunk` data (channel-based, no sink trait).
-  The structured API enables custom rendering without forcing text formatting.
 - **Label customization**: `LabelFormat` supports bracketed, prompt-style, and custom
   formatters. The `SourceLabel` type provides `short()` and `minimal()` for common cases.
 
 **Alternatives considered**:
+- ~~`JoinedSink` as `SinkKind` wrapper~~: Original design had joining as a sink
+  combinator wrapping an inner `SinkKind`. Rejected during DC24 analysis — coupling
+  joining to the sink enum limits composability and requires a special
+  `subscribe_joined()` bus API. The combinator pattern composes better as an
+  independent stream adapter.
 - Bus-level stream merging: Rejected — adds complexity to the bus and forces all sinks
   into a joined view. Not all sinks want interleaved output.
 - Post-hoc log parsing: Rejected — requires sinks to independently reconstruct
@@ -3281,8 +3399,8 @@ compose with existing abstractions:
 
 - **`SinkFilter` by workstream**: Filter output by workstream name. The bus resolves
   the workstream to its member targets at filter-match time.
-- **`JoinedStream` over a workstream**: `subscribe_joined()` accepts a workstream name,
-  automatically creating filters for all member targets.
+- **`JoinedStream` over a workstream**: `bus.subscribe()` with workstream-derived
+  filters, wrapped by `JoinedStream`, gives a consolidated labeled view.
 - **Workstream-scoped monitoring**: Start/stop monitoring for all targets in a
   workstream with a single call.
 
@@ -3724,8 +3842,11 @@ in library).
 
 ### Phase 2b: Full Rule Engine + Reconnection + Config
 
-**Goal**: Layer the full configurable rule engine, cooldown, reconnection, and config
-deserialization on top of the stable 2a monitoring loop.
+<!-- @claude 2026-03-17: Phase 2b/2c narratives updated per DC24. Rules are subscription
+     consumers; SinkFilter is routing-only; OutputBus uses subscribe() -> Subscription. -->
+
+**Goal**: Layer the configurable rule engine, cooldown, reconnection, and config
+deserialization as `Subscription` adapter consumers (DC24).
 
 **Tasks**:
 1. Implement `config.rs`: `TriggerRule` (string patterns), `CompiledRule`, `Action`,
@@ -3733,11 +3854,12 @@ deserialization on top of the stable 2a monitoring loop.
    `HostTarget::Local` and `HostTarget::Ssh` variants
 2. Implement rule compilation: `TriggerRule::compile() -> Result<CompiledRule>` with
    user-facing error messages including rule name and pattern context
-3. Expand `monitor.rs`: multi-rule evaluation, per-pane cooldown timers, `Log` action type
+3. Rules expressed as `subscription.filter(matcher).react(action, cooldown, handle)` —
+   no monitor-side evaluation. Per-pane cooldown in `.react()` adapter.
 4. Reconnection logic with exponential backoff in `HostHandle` (SSH targets only)
-5. Unit tests: rule evaluation, cooldown behavior, config deserialization, compile errors
+5. Unit tests: rule evaluation via `.react()`, cooldown behavior, config deserialization
 
-**Deliverable**: Full monitoring with configurable rules, cooldown, and SSH reconnection.
+**Deliverable**: Full monitoring with configurable rules via Subscription adapters.
 
 **Acceptance criteria**:
 - Config file (TOML) deserializes into `TmuxAutomatorConfig` with compiled rules
@@ -3747,28 +3869,31 @@ deserialization on top of the stable 2a monitoring loop.
 
 ### Phase 2c: Output Sink Pipeline
 
-**Goal**: Implement the async output distribution pipeline so captured pane output can be
-routed to multiple consumers (sinks) with independent latency characteristics.
+**Goal**: Implement the async output distribution pipeline with `OutputBus` and
+`Subscription` composable seam (DC24).
 
 **Tasks**:
-1. Implement `sink.rs`: `TargetOutput`, `SinkEvent`, `SinkKind`, `SinkFilter` /
+1. Implement `sink.rs`: `TargetOutput`, `SinkEvent`, `SinkKind`, routing-only `SinkFilter` /
    `CompiledSinkFilter`, `ActionHandle` / `ActionRequest` / `SinkAction`. `TargetOutput`
    includes canonical `content`, optional `raw_content`, `sequence`, and fidelity metadata
-2. Implement `OutputBus`: `subscribe(sink, channel_capacity)` API,
-   fan-out loop that matches `TargetOutput` against compiled filters and dispatches to
-   per-sink channels, no-silent-drop backpressure handling (explicit `SinkEvent::Gap`),
-   graceful shutdown with `flush()` on all sinks
-3. Implement `StdioSink`: default reference implementation that writes `TargetOutput` to
+2. Implement `OutputBus`: `subscribe(filters, capacity) -> Subscription` API,
+   fan-out loop that matches `TargetOutput` against compiled routing filters and dispatches
+   to per-subscription channels, no-silent-drop backpressure (explicit `SinkEvent::Gap`),
+   graceful shutdown
+3. Implement `Subscription` type with adapter methods: `.pipe(SinkKind)`, `.joined(fmt)`,
+   `.filter(MatcherKind)`, `.react(matcher, action, cooldown, handle)`,
+   `.into_receiver()`
+4. Implement `StdioSink`: default reference implementation that writes `TargetOutput` to
    stdout with `[host:pane_target]` prefix, immediate flush, no batching
-4. Wire `OutputBus` into `monitor.rs`: control mode parser feeds `TargetOutput` into the
-   bus alongside rule evaluation
-5. Wire `ActionHandle` into `HostHandle`: sink-initiated actions route through the
+5. Wire `OutputBus` into `monitor.rs`: control mode parser feeds `TargetOutput` into the
+   bus (monitor is stream-only, no rule evaluation)
+6. Wire `ActionHandle` into `HostHandle`: subscription-initiated actions route through the
    existing per-host action dispatch queue (DC4)
-6. Integrate into `Fleet`: `Fleet::output_bus()` accessor, sink registration before
+7. Integrate into `Fleet`: `Fleet::output_bus()` accessor, subscription setup before
    `start_monitoring()`
-7. Unit tests: `SinkFilter` matching logic (AND within fields, OR across filters),
-   `OutputBus` fan-out to multiple mock sinks, backpressure behavior when sink channel
-   is full, `ActionHandle` delivery
+8. Unit tests: `SinkFilter` routing logic (AND within fields, OR across filters),
+   `OutputBus` fan-out to multiple subscriptions, `Subscription` adapter chaining,
+   backpressure behavior, `ActionHandle` delivery
 
 **Deliverable**: Library routes captured output to registered sinks asynchronously. A
 `StdioSink` prints output in real-time. Custom sinks (TUI, LLM) can be registered by
