@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-17 | @claude: DC24 — evaluate Unix-pipe pipeline model vs pub/sub OutputBus. Retain pub/sub for fan-out; extract `JoinedStream` from `SinkKind` into independent consumer-side stream combinator. Remove `subscribe_joined()` from OutputBus. Revise DC15 accordingly. Restructure Phase 2 PLAN into Track A (streaming + combining) / Track B (matching + reactors). | DC24, DC15, JoinedStream, OutputBus, Phase 2 |
 | 2026-03-17 | @claude: Address PR #80 R2 — fix DC10 decision sentence to say "sole" not "primary with fallback". | DC10 |
 | 2026-03-17 | @claude: Address PR #80 R1 — remove all live pipe-pane/FIFO/fallback references from active architecture sections (overview, API signatures, module specs, DC1, DC6, DC7, DC13, OC1–OC4, Phase 2a/4). Remaining references are in historical context only (prototype, problem table, DC10 comparison table, struck-out sections). | Overview, Core Abstractions, Module Specs, DC1, DC6, DC7, DC13, OC1, OC2, OC4, Phase 2a, Phase 4 |
 | 2026-03-16 | @claude: Mark pipe-pane fallback (DC10) as out of scope. tmux 3.1+ baseline (DC22) guarantees control mode; pipe-pane/PipeManager/FIFO machinery adds complexity with no benefit. Historical references retained as context. | DC10 |
@@ -575,9 +576,9 @@ and `web-1:test`. This would compose with the existing sink pipeline:
 - **`SinkFilter` by workstream**: Filter output by workstream name instead of
   individual host/session/pane fields. The bus resolves the workstream to its member
   targets at filter-match time.
-- **`JoinedStream` over a workstream**: `subscribe_joined()` could accept a workstream
-  name, automatically creating filters for all member targets. The joined view then
-  shows the multi-party conversation for that logical workflow.
+- **`JoinedStream` over a workstream**: `bus.subscribe()` with a workstream-derived
+  filter, wrapped by `JoinedStream`, gives a consolidated labeled view of all member
+  targets in that logical workflow.
 - **Workstream-scoped monitoring**: Start/stop monitoring for all targets in a
   workstream with a single call.
 
@@ -1705,14 +1706,20 @@ impl SourceLabel {
 }
 ```
 
-**`JoinedSink`** — a sink combinator that wraps an inner `SinkKind` and presents
-incoming output as a consolidated multi-source stream:
+**`JoinedStream`** — a consumer-side stream combinator that wraps an `OutputBus`
+subscription receiver and produces labeled, coalesced `StreamChunk`s. It is **not** a
+`SinkKind` variant — it sits between the bus and whatever downstream consumer needs
+a consolidated multi-source view.
+
+<!-- @claude 2026-03-17: Revised from JoinedSink (SinkKind wrapper) to JoinedStream
+     (independent combinator). See DC24 for the Unix-pipe analysis that motivated this. -->
 
 ```rust
-/// Wraps an inner sink, transforming the output stream into a
-/// source-attributed conversation-style view.
-pub struct JoinedSink {
-    inner: SinkKind,
+/// Consumer-side stream combinator. Wraps a bus subscription receiver,
+/// adds source attribution and coalescing, produces StreamChunks.
+/// Independent of SinkKind — composes with any downstream consumer.
+pub struct JoinedStream {
+    rx: mpsc::Receiver<SinkEvent>,
     /// Controls how source labels are formatted in the stream.
     label_format: LabelFormat,
     /// Tracks the last source to emit, so consecutive chunks from the
@@ -1729,65 +1736,63 @@ pub enum LabelFormat {
     Custom(fn(&SourceLabel, &str) -> String),
 }
 
-impl JoinedSink {
-    pub fn new(inner: SinkKind, label_format: LabelFormat) -> Self;
+impl JoinedStream {
+    pub fn new(rx: mpsc::Receiver<SinkEvent>, label_format: LabelFormat) -> Self;
+
+    /// Receive the next labeled chunk. Returns None when the bus
+    /// subscription closes. Handles coalescing internally.
+    pub async fn next(&mut self) -> Option<StreamChunk>;
 }
 ```
 
-When `JoinedSink::write()` receives a `SinkEvent`, it:
-1. Passes `SinkEvent::Gap` through unchanged so loss signals remain visible
+When `JoinedStream::next()` receives a `SinkEvent`, it:
+1. Passes `SinkEvent::Gap` through as a gap-attributed `StreamChunk`
 2. For `SinkEvent::Data(output)`, extracts the `SourceLabel` from the metadata
-3. If the source differs from `last_source`, emits a source header/prefix
-4. Delegates to the inner sink's `write()` with the attributed content
-5. Updates `last_source` for coalescing
+3. If the source differs from `last_source`, marks the chunk as a source transition
+4. Updates `last_source` for coalescing
+5. Returns the labeled `StreamChunk`
 
 **Coalescing**: Consecutive chunks from the same source are grouped without repeating
 the source label — like a chat UI where the sender name only appears on the first
 message in a burst. When a different source emits, the label appears again.
 
-**Use cases**:
+**Composability**: `JoinedStream` composes with any downstream consumer because it
+produces `StreamChunk`s rather than wrapping a specific sink:
 
 ```rust
-// LLM sees a consolidated conversation across 3 build panes
-let llm_sink = JoinedSink::new(
-    SinkKind::Callback(CallbackSink { /* LLM sink config */ }),
-    LabelFormat::Bracketed,
-);
+// Subscribe to the bus, then wrap with JoinedStream
+let (id, rx) = bus.subscribe(filters, capacity);
+let mut joined = JoinedStream::new(rx, LabelFormat::Bracketed);
+
+// Pipe to any sink — JoinedStream doesn't know or care what consumes it
+let mut sink = StdioSink::new(StdioFormat::Raw);
+tokio::spawn(async move {
+    while let Some(chunk) = joined.next().await {
+        sink.write_chunk(&chunk).unwrap();
+    }
+});
+
+// Or pipe to a callback for LLM consumption
+let (id2, rx2) = bus.subscribe(llm_filters, capacity);
+let mut llm_joined = JoinedStream::new(rx2, LabelFormat::Bracketed);
+tokio::spawn(async move {
+    while let Some(chunk) = llm_joined.next().await {
+        llm_ingest(&chunk);
+    }
+});
+
 // Output looks like:
 //   [web-1:build:0.0] compiling crate foo...
 //   [web-1:build:0.0] warning: unused variable
 //   [db-1:migrate:0.0] Running migration 042...
 //   [db-1:migrate:0.0] OK
 //   [web-1:build:0.0] Finished dev target
-
-// Stdio log with prompt-style labels
-let log_sink = JoinedSink::new(
-    SinkKind::Stdio(StdioSink::new(StdioFormat::Raw)),
-    LabelFormat::Prompt,
-);
-// Output looks like:
-//   web-1:build:0.0> compiling crate foo...
-//   db-1:migrate:0.0> Running migration 042...
 ```
 
-**Extracting a joined view programmatically**: For callers that want to consume
-the stream as structured data (not formatted text), the `OutputBus` supports
-registering a channel-based subscriber that receives `StreamChunk` directly:
-
-```rust
-impl OutputBus {
-    /// Subscribe a raw channel that receives StreamChunks (TargetOutput + SourceLabel).
-    /// The caller reads from the receiver directly. No SinkKind wrapper needed.
-    pub fn subscribe_joined(
-        &mut self,
-        filters: Vec<SinkFilter>,
-        channel_capacity: usize,
-    ) -> (SinkId, mpsc::Receiver<StreamChunk>);
-}
-```
-
-This is the lowest-level API for consumers that want to build their own rendering
-on top of the joined stream (e.g., a TUI panel, a web socket feed, or test harness).
+**Extracting a joined view as structured data**: Since `JoinedStream` produces
+`StreamChunk` directly, consumers that want structured data (e.g., a TUI panel,
+a web socket feed, or test harness) use it without any formatting layer — they
+read `StreamChunk` fields directly. No special bus API needed.
 
 ### Integration with Fleet and Monitor
 
@@ -2952,6 +2957,53 @@ and directories now. `Target` is intentionally not extended for file transfer.
 
 **Deep dive**: See [`SFTP.md`](./SFTP.md) for the design and implementation outline.
 
+### DC24: Stream Pipeline Architecture — Pub/Sub vs Unix Pipes
+
+**Decision**: Retain the pub/sub `OutputBus` architecture for fan-out, but extract
+`JoinedStream` from `SinkKind` into an independent consumer-side stream combinator.
+Reject a full Unix-pipe pipeline model.
+
+**Context**: During implementation planning for Phase 2 (monitoring + sink pipeline),
+we evaluated whether a Unix-pipe-style composable pipeline (`source | filter |
+transform | tee file.log | sink`) would better serve the streaming and stream-combining
+use cases than the existing pub/sub `OutputBus` design. The pipe model's appeal is
+composability — each stage has one input and one output, `tee` is the only branching
+primitive, and composition comes from a uniform stream contract.
+
+**Evaluation**:
+
+| Criterion | Pub/Sub (OutputBus) | Unix Pipe Model |
+|-----------|--------------------|--------------------|
+| Fan-out (primary use case) | Native — publish to N subscribers | Requires explicit `tee` at every branch |
+| Fan-in / joining | Combinator on subscriber side | Source-level `join()` combinator |
+| Runtime dynamism | `subscribe()`/`unsubscribe()` at any time | Pipeline topology is structural — adding consumers requires rebuilding |
+| Backpressure | Per-subscriber channels, independent | Propagates upstream through chain — slow stage blocks source |
+| Rust implementation | `SinkKind` enum, `mpsc` channels — idiomatic | `Stream` trait composition, `Pin`, type-erased chains — complex |
+| Transform chains | Not modeled (rarely needed in this domain) | First-class composable stages |
+| Complexity | One struct, publish/subscribe | Stage traits, chain builders, tee/join combinators, per-stage lifecycle |
+
+**Conclusion**: The pipe model optimizes for linear transform chains — not the primary
+pattern in tmux monitoring. The actual patterns (fan-out to multiple consumers, fan-in
+from multiple hosts, runtime subscribe/unsubscribe, per-consumer backpressure tolerance)
+are exactly what pub/sub handles well. Full pipe adoption would over-engineer the
+solution and fight Rust's async stream type system for marginal benefit.
+
+**What we borrowed**: The analysis revealed that `JoinedSink` as a `SinkKind` variant
+was a composability bottleneck. In Unix terms, joining is a source combinator (like
+`paste` or stream multiplexing), not a sink property. Extracting it as `JoinedStream`
+— an independent combinator that wraps any bus subscription receiver — gives the
+composability benefit without the pipe model's costs:
+
+- `JoinedStream` composes freely with any downstream consumer (stdio, callback, TUI,
+  custom rendering) without being coupled to `SinkKind`
+- `OutputBus` simplifies: no `subscribe_joined()`, just `subscribe()`
+- `SinkKind` simplifies: no `JoinedSink` variant — just `Stdio` and `Callback`
+- The bus remains a simple fan-out; joining is opt-in at the consumer site
+
+**Impact**: DC15 revised (JoinedStream as combinator, not SinkKind variant). Phase 2
+PLAN restructured into Track A (streaming + combining) and Track B (matching + reactors)
+to deliver end-to-end monitoring before the rule engine.
+
 ### DC7: Capture-Pane vs Stream Monitoring
 
 **Decision**: Use `capture-pane -p` for on-demand snapshots, with optional `-e` when
@@ -3157,10 +3209,14 @@ new matcher types require adding a variant (keeping the hot path static-dispatch
 
 ### DC15: Joined Stream — Multi-Source Consolidated View
 
+<!-- @claude 2026-03-17: DC24 revised DC15. JoinedSink was a SinkKind wrapper; now
+     JoinedStream is a consumer-side stream combinator independent of SinkKind.
+     See DC24 for the Unix-pipe analysis that motivated the change. -->
+
 **Decision**: Multiple filtered output streams can be joined into a single time-ordered
-sequence where each chunk is attributed to its source. This is implemented as a sink
-combinator (`JoinedSink`) and a raw channel API (`subscribe_joined()`), not as a
-separate pipeline stage.
+sequence where each chunk is attributed to its source. This is implemented as a
+**consumer-side stream combinator** (`JoinedStream`) that wraps a bus subscription
+receiver and produces labeled `StreamChunk`s — independent of `SinkKind`.
 
 **Rationale**: When monitoring multiple panes across hosts, consumers often need a
 unified view — an LLM analyzing cross-pane interactions, a log aggregator correlating
@@ -3168,19 +3224,24 @@ events, or a TUI showing interleaved output. Without joining, each sink sees iso
 streams and must implement its own source-tracking and interleaving logic.
 
 **Design choices**:
-- **Combinator, not infrastructure**: `JoinedSink<S>` wraps any `SinkKind` and adds
-  source attribution. The bus itself remains simple (fan-out only). This avoids adding
-  joining logic to the bus hot path.
+- **Consumer combinator, not sink variant**: `JoinedStream` wraps an
+  `mpsc::Receiver<SinkEvent>` (from `OutputBus::subscribe()`) and produces
+  `StreamChunk`s. It composes freely with any downstream consumer — `StdioSink`,
+  `CallbackSink`, TUI channel, or custom rendering — without being a `SinkKind` variant
+  itself. The bus stays simple (fan-out only); joining is opt-in at the consumer site.
+  (Revised from original `JoinedSink`-as-`SinkKind` design; see DC24 for rationale.)
 - **Source coalescing**: Consecutive chunks from the same source are grouped without
   repeating the label. This mirrors chat UIs where the sender appears once per burst,
   reducing visual noise in high-throughput streams.
-- **Two levels of API**: `JoinedSink` for formatted text output (wraps any sink),
-  `subscribe_joined()` for structured `StreamChunk` data (channel-based, no sink trait).
-  The structured API enables custom rendering without forcing text formatting.
 - **Label customization**: `LabelFormat` supports bracketed, prompt-style, and custom
   formatters. The `SourceLabel` type provides `short()` and `minimal()` for common cases.
 
 **Alternatives considered**:
+- ~~`JoinedSink` as `SinkKind` wrapper~~: Original design had joining as a sink
+  combinator wrapping an inner `SinkKind`. Rejected during DC24 analysis — coupling
+  joining to the sink enum limits composability and requires a special
+  `subscribe_joined()` bus API. The combinator pattern composes better as an
+  independent stream adapter.
 - Bus-level stream merging: Rejected — adds complexity to the bus and forces all sinks
   into a joined view. Not all sinks want interleaved output.
 - Post-hoc log parsing: Rejected — requires sinks to independently reconstruct
@@ -3281,8 +3342,8 @@ compose with existing abstractions:
 
 - **`SinkFilter` by workstream**: Filter output by workstream name. The bus resolves
   the workstream to its member targets at filter-match time.
-- **`JoinedStream` over a workstream**: `subscribe_joined()` accepts a workstream name,
-  automatically creating filters for all member targets.
+- **`JoinedStream` over a workstream**: `bus.subscribe()` with workstream-derived
+  filters, wrapped by `JoinedStream`, gives a consolidated labeled view.
 - **Workstream-scoped monitoring**: Start/stop monitoring for all targets in a
   workstream with a single call.
 
