@@ -305,15 +305,17 @@ async fn stream_tail(
 
                 let (merged, _issues) = overlap_deduplicate(&previous, &current, overlap);
 
-                if merged.len() > previous.len() {
-                    let new_content = &merged[previous.len()..];
-                    stdout.write_all(new_content.as_bytes())?;
-                    stdout.flush()?;
-                } else if merged != previous {
-                    // Dedup resync — print full current
-                    stdout.write_all(current.as_bytes())?;
-                    if !current.ends_with('\n') {
-                        stdout.write_all(b"\n")?;
+                if merged != previous {
+                    if merged.starts_with(&previous) {
+                        // Overlap-dedup appended new content — print only the delta
+                        let new_content = &merged[previous.len()..];
+                        stdout.write_all(new_content.as_bytes())?;
+                    } else {
+                        // Resync — merged is not an extension of previous
+                        stdout.write_all(current.as_bytes())?;
+                        if !current.ends_with('\n') {
+                            stdout.write_all(b"\n")?;
+                        }
                     }
                     stdout.flush()?;
                 }
