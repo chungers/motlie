@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-17 | @claude: Address PR #80 R1 — remove all live pipe-pane/FIFO/fallback references from active architecture sections (overview, API signatures, module specs, DC1, DC6, DC7, DC13, OC1–OC4, Phase 2a/4). Remaining references are in historical context only (prototype, problem table, DC10 comparison table, struck-out sections). | Overview, Core Abstractions, Module Specs, DC1, DC6, DC7, DC13, OC1, OC2, OC4, Phase 2a, Phase 4 |
 | 2026-03-16 | @claude: Mark pipe-pane fallback (DC10) as out of scope. tmux 3.1+ baseline (DC22) guarantees control mode; pipe-pane/PipeManager/FIFO machinery adds complexity with no benefit. Historical references retained as context. | DC10 |
 | 2026-03-15 | @codex: Address PR #78 final doc follow-up by locking DC23 follow-on decisions: reject symlinks initially, do not preserve metadata, and keep the first public API at `Result<()>`. | DC23 |
 | 2026-03-14 | @codex: Address PR #78 re-review by clarifying DC23 path typing (`&Path` for local and remote endpoints) and `cp -r` style directory placement semantics (existing directory => copy into; missing path => copy as). | DC23 |
@@ -405,8 +406,6 @@ bins/tmux-automator/         # (optional) CLI binary wrapping the library
          │
          ├── Control ────── create/kill session, send-keys, rename
          │
-         ├── PipeManager ── attach/detach output pipes
-         │
          └── Monitor ────── stream + rule evaluation → action dispatch
 ```
 
@@ -434,9 +433,7 @@ the transport spawns `tokio::process::Command` subprocesses.
 - No long-lived state required
 
 **Continuous monitoring** (when started):
-- **Pipe setup**: Dedicated transport exec (not the monitor channel)
 - **Monitoring**: Dedicated channel — control mode session (`tmux -C attach`, DC10)
-  as primary; `tail -qf` on pipe files as fallback only
 - **Action dispatch**: Separate exec calls per triggered action
   (see [DC4](#dc4-action-dispatch-channel-strategy))
 - Runs as a `tokio::spawn` task; does not block on-demand operations
@@ -503,7 +500,7 @@ impl Fleet {
     ) -> Result<()>;
 
     /// Stop monitoring on a single host. Cleans up control-mode connections
-    /// and pipe-pane state for this host only. Other hosts continue unaffected.
+    /// for this host only. Other hosts continue unaffected.
     pub async fn stop_monitoring_host(&self, host: &str) -> Result<()>;
 
     // --- Workstreams (named bindings) ---
@@ -658,8 +655,8 @@ impl HostHandle {
 
     /// Stop monitoring a single session.
     /// Calls SessionMonitorHandle::shutdown() — tears down the control-mode
-    /// connection and, if pipe-pane fallback was active, runs PipeManager::cleanup()
-    /// to detach pipes and remove FIFO files. Does not affect other sessions.
+    /// connection, flushes pending output, and joins the monitor task.
+    /// Does not affect other sessions.
     pub async fn stop_monitoring_session(&self, target: &Target) -> Result<()>;
 
     /// List sessions currently being monitored.
@@ -984,8 +981,6 @@ impl Deref for SessionMonitorHandle {
 impl SessionMonitorHandle {
     /// Stop monitoring this session. Tears down the control-mode connection,
     /// flushes pending output to the OutputBus, and joins the monitor task.
-    /// If the pipe-pane fallback path was active, also calls
-    /// PipeManager::cleanup() to detach pipes and remove FIFO files (P4).
     /// Takes the JoinHandle from the internal Mutex<Option<...>> — safe to
     /// call multiple times (subsequent calls are no-ops).
     pub async fn shutdown(&self) -> Result<()>;
@@ -1952,8 +1947,7 @@ impl TransportKind {
 
     /// Open a persistent shell for streaming output.
     /// `cols` and `rows` set PTY dimensions for SSH (ignored by Local/Mock).
-    /// Used by the monitor for long-running processes (control mode session
-    /// or `tail -qf` in fallback pipe mode).
+    /// Used by the monitor for long-running processes (control mode session).
     pub async fn open_shell(&self, cols: u32, rows: u32) -> Result<ShellChannelKind>;
 }
 
@@ -2015,7 +2009,7 @@ impl PaneAddress {
     /// Canonical string form for tmux targeting: "session:window.pane"
     pub fn to_tmux_target(&self) -> String;
 
-    /// The stable pane_id for FIFO naming and stream keying (e.g., "%12")
+    /// The stable pane_id for stream keying (e.g., "%12")
     pub fn id(&self) -> &str;
 
     /// Parse from tmux list-panes output fields.
@@ -2026,8 +2020,7 @@ impl PaneAddress {
 ```
 
 **Addresses P2**: Using `#{pane_id}` as the authoritative key (see DC1) eliminates the
-need for filename encoding of session names entirely. FIFO paths (if used) are simply
-`/tmp/motlie_pipe_%<id>`.
+need for filename encoding of session names entirely.
 
 ```rust
 /// List all sessions on the host.
@@ -2345,7 +2338,6 @@ struct HostHandleInner {
 //     socket: Option<TmuxSocket>,
 //     exec_locks: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 //     config: HostTarget,
-//     pipe_state: Option<PipeManager>,
 //     session_monitors: RwLock<HashMap<String, SessionMonitorHandle>>,
 // }
 ```
@@ -2389,17 +2381,15 @@ impl SessionMonitor {
 **Must address P3**: Rule evaluation replaces the hardcoded `contains('>')` check.
 
 **Must address P6**: Each `SessionMonitor` uses a dedicated control-mode connection
-(`tmux -C attach -t <session>`, see DC10) as the primary strategy, or per-pane pipe
-files as fallback. Action dispatch (send-keys) uses separate exec channels routed
-through a bounded queue (see [DC4](#dc4-action-dispatch-channel-strategy)).
+(`tmux -C attach -t <session>`, see DC10). Action dispatch (send-keys) uses separate
+exec channels routed through a bounded queue
+(see [DC4](#dc4-action-dispatch-channel-strategy)).
 
 **Must address P9**: Failed send-keys or malformed lines must be logged at `warn` level,
 not silently dropped.
 
 **Stream parsing**: With control mode (DC10), the monitor parses `%output %<pane_id> <data>`
-frames — structured, unambiguous, and keyed on `#{pane_id}` per DC1. For the pipe-pane
-fallback, `pipe-pane` output is prefixed with `%<pane_id>` (set at attach time), and the
-monitor parses on that prefix directly — no filename decoding required.
+frames — structured, unambiguous, and keyed on `#{pane_id}` per DC1.
 
 The parser maintains per-pane assembly state to make the stream consumer-friendly:
 1. Canonicalize line endings and accumulate partial frame fragments.
@@ -2438,7 +2428,7 @@ Each sink task drives its own `SinkKind::write()` loop independently.
 ### DC1: Pane Identity and Addressing
 
 **Decision**: Use tmux `#{pane_id}` (e.g., `%12`) as the authoritative identifier for
-FIFO naming, stream attribution, and internal keying. Retain `session:window.pane` in
+stream attribution and internal keying. Retain `session:window.pane` in
 `PaneAddress` as display metadata and user-facing targeting only.
 
 **Rationale**: `#{pane_id}` is a stable, unique, tmux-assigned identifier that does not
@@ -2447,12 +2437,10 @@ eliminates the need for lossy filename encoding of session names (the original P
 and simplifies stream parsing — the monitor keys on `%<id>` directly rather than
 decoding hex-encoded filenames.
 
-**FIFO format** (if FIFO strategy is used): `/tmp/motlie_pipe_%<id>` (e.g., `/tmp/motlie_pipe_%12`)
-
 **PaneAddress** retains human-readable fields for display and `tmux send-keys -t` targeting:
 ```rust
 pub struct PaneAddress {
-    pub pane_id: String,       // authoritative: "%12" — used for FIFO names, stream keys
+    pub pane_id: String,       // authoritative: "%12" — used for stream keys
     pub session: String,       // display/targeting: session name
     pub window: u32,           // display/targeting: window index
     pub pane: u32,             // display/targeting: pane index
@@ -2528,14 +2516,13 @@ Three variants: `Local(LocalTransport)` (localhost, subprocess-based),
 **Rationale**: The prototype assumes SSH for everything, but localhost tmux is a primary
 use case (local development, CI, single-machine automation). Forcing SSH to localhost
 adds unnecessary complexity (SSH server requirement, key management, latency). The enum
-abstraction lets all downstream modules (`discovery`, `capture`, `control`, `pipe`,
+abstraction lets all downstream modules (`discovery`, `capture`, `control`,
 `monitor`) be transport-agnostic with zero vtable overhead.
 
 **LocalTransport specifics**:
 - `exec()`: spawns `tokio::process::Command`, captures stdout, respects timeout
 - `open_shell()`: spawns a persistent shell process with piped stdin/stdout
 - No connection step; always available
-- FIFO paths are local filesystem paths (no remote cleanup needed)
 
 **SshTransport specifics**:
 - `exec()`: opens SSH exec channel, captures stdout
@@ -2968,7 +2955,7 @@ and directories now. `Target` is intentionally not extended for file transfer.
 
 **Decision**: Use `capture-pane -p` for on-demand snapshots, with optional `-e` when
 fidelity mode requires escape-sequence preservation. For continuous monitoring, use
-tmux control mode as primary (DC10) and `pipe-pane` as fallback only.
+tmux control mode (DC10).
 
 **Rationale**:
 - `capture-pane -p` returns the current visible content (and scrollback with `-S`/`-E`)
@@ -2977,12 +2964,10 @@ tmux control mode as primary (DC10) and `pipe-pane` as fallback only.
   right now?" queries.
 - Continuous monitoring uses control mode (`tmux -C attach`, DC10) which provides
   structured `%output %<pane_id>` framing without file lifecycle management.
-- `pipe-pane` is retained as a fallback for environments where control mode is
-  unavailable (see DC10 fallback section).
 
 **Callers choose the mode**:
 - `capture_pane()` / `capture_session()` → snapshot via `capture-pane`
-- `start_monitoring()` → continuous via control mode (primary) or pipe-pane (fallback)
+- `start_monitoring()` → continuous via control mode
 
 ### DC8: Key Escaping Strategy
 
@@ -3127,9 +3112,7 @@ than forcing all-or-nothing lifecycle. Use cases:
 stop channel and task join handle. `MonitorHandle` (returned by `start_monitoring()`) is
 a view over the session handles, not a separate entity. `stop_monitoring_session()` drops
 the session's handle, which signals the stop channel, flushes pending output to the
-`OutputBus`, joins the monitor task, and — if the pipe-pane fallback path was active —
-calls `PipeManager::cleanup()` to detach pipes and remove FIFO files from `/tmp` (P4).
-`stop_monitoring()` iterates all sessions.
+`OutputBus`, and joins the monitor task. `stop_monitoring()` iterates all sessions.
 
 **Invariant**: On-demand operations (`target.capture()`, `target.send_keys()`,
 `host.list_sessions()`, etc.) are unaffected by monitoring state. A host with stopped
@@ -3553,28 +3536,19 @@ matching. That parser view is not a public `CaptureNormalizeMode`.
 These require resolution before or during implementation. They are not blockers for Phase 1
 but must be addressed before the library is used in production.
 
-### OC1: FIFO Reliability Under Load
+### OC1: ~~FIFO Reliability Under Load~~ (OUT OF SCOPE)
 
-**Largely mitigated by DC10** — if control mode is adopted as the primary monitoring
-strategy, FIFOs are not used and this concern does not apply.
+<!-- @claude 2026-03-17 — pipe-pane fallback removed from scope (DC10 + DC22 tmux 3.1+ baseline).
+     Control mode is the sole monitoring strategy; FIFOs are never used. -->
+**Resolved by DC10 + DC22** — control mode is the sole monitoring strategy (tmux 3.1+
+baseline guarantees availability). FIFOs are not used and this concern does not apply.
 
-For the pipe-pane fallback path: `tmux pipe-pane` writing to a FIFO can block the
-monitored pane if the reader falls behind. Under high output volume, this stalls the
-tmux pane.
+### OC2: ~~Output Interleaving~~ (OUT OF SCOPE)
 
-**Resolution for fallback**: Default to append-file sink (`pipe-pane -o 'cat >> file'`
-+ `tail -f`) rather than FIFOs. This avoids writer blocking. File rotation (truncate
-when exceeding configurable size, default 10MB) prevents unbounded growth. FIFO mode
-available as opt-in for latency-sensitive use cases where backpressure is acceptable.
-
-### OC2: Output Interleaving
-
+<!-- @claude 2026-03-17 — pipe-pane fallback removed from scope (DC10 + DC22 tmux 3.1+ baseline).
+     Control mode framing eliminates interleaving; no fallback path exists. -->
 **Eliminated by DC10** — control mode provides framed `%output` messages with pane ID
-attribution. No interleaving possible.
-
-For the pipe-pane fallback path: `tail -qf` on multiple files can interleave partial
-lines from different panes. Mitigation: use line-buffered output (`stdbuf -oL`) if
-available on the remote host. Document as a known limitation of the fallback path.
+attribution. No interleaving possible. No fallback path exists to reintroduce this risk.
 
 ### OC3: SSH Agent Availability
 
@@ -3586,14 +3560,17 @@ or has no matching keys, the error message should be actionable.
 
 ### OC4: Tmux Version Compatibility
 
-`tmux pipe-pane`, `list-panes -F` format strings, and control mode behavior vary across
-tmux versions. The minimum supported version must be determined empirically, not asserted.
+<!-- @claude 2026-03-17 — Updated to reflect tmux 3.1+ baseline (DC22). Removed pipe-pane
+     from feature list, committed to 3.1 minimum, aligned CI matrix with PLAN. -->
+`list-panes -F` format strings and control mode behavior vary across tmux versions.
+The minimum supported version is **tmux 3.1** (DC22), which guarantees control mode
+availability.
 
 **Proposal**: Runtime detection via `tmux -V` during the discovery phase. The library
 validates that required features are available (control mode `%output` framing,
-`capture-pane -p`, `pipe-pane -o`, `#{pane_id}` format variable) and returns a clear
-error if the detected version lacks them. Phase 4 CI will build a compatibility test
-matrix against tmux 2.x, 3.x, and latest to determine the actual minimum version.
+`capture-pane -p`, `#{pane_id}` format variable) and returns a clear error if the
+detected version is below 3.1. Phase 4 CI will test against tmux 3.1, 3.x latest,
+and latest to verify compatibility.
 
 ### OC5: Shell Injection in Remote Commands
 
@@ -3730,8 +3707,7 @@ rule engine, no reconnection, no config deserialization yet.
    chunk assembly, fidelity metadata propagation into `TargetOutput`, single
    hardcoded-pattern detection, `SendKeys` action dispatch via
    bounded queue (DC4), `MonitorHandle` with explicit `shutdown()` API
-3. Implement `pipe.rs`: fallback `PipeManager` with file-sink default (fixes P4)
-4. Wire monitoring into `HostHandle::start_monitoring()` for localhost and SSH
+3. Wire monitoring into `HostHandle::start_monitoring()` for localhost and SSH
 5. Unit tests: `SshTransport` via mock SSH server or `MockTransport`, monitor loop with
    canned control-mode output, action dispatch ordering
 
@@ -3865,8 +3841,8 @@ localhost and N remote hosts.
 1. Expand `MockTransport` coverage for integration tests (OC6)
 2. Tmux version detection and compatibility check (OC4)
 3. Actionable SSH agent error messages (OC3)
-4. FIFO-vs-file investigation and decision (OC1)
-5. Line interleaving mitigation (OC2)
+4. ~~FIFO-vs-file investigation and decision (OC1)~~ — OUT OF SCOPE (resolved by DC10 + DC22)
+5. ~~Line interleaving mitigation (OC2)~~ — OUT OF SCOPE (resolved by DC10 + DC22)
 6. End-to-end test with Docker (SSH + tmux)
 7. Document minimum tmux version, known limitations, and performance characteristics
 
