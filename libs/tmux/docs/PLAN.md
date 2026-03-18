@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-17 | @claude | DC24 R2 — Address PR #82 review round 2: add Track B static-dispatch guardrail note (closed `MatcherKind` enum, no `Box<dyn Matcher>`). |
 | 2026-03-17 | @claude | DC24 R1 — Address PR #82 review: unify subscription API (`subscribe() -> Subscription` with adapters). Rules/reactors as subscription consumers, not monitor-internal (removes 2a.2b). Replace 2c.1b with 2b.4 (subscription matching + reaction adapters) and 2c.4b with 2b.5 (action handle wiring). One matching system via `.filter()`/`.react()`. Track B now: 2b.2 → 2b.1 → 2b.4 → 2b.5 → 2b.3. |
 | 2026-03-17 | @claude | DC24 — Restructure Phase 2 into Track A (streaming + combining) and Track B (matching + reactors). Split 2a.2 → 2a.2a (parse only) + 2a.2b (rules + dispatch). Split 2a.4 → 2a.4a (streaming handles). Split 2c.1 → 2c.1a (routing only) + 2c.1b (content matching + actions). Split 2c.2 → 2c.2a (sinks + JoinedStream combinator, no JoinedSink). Split 2c.4 → 2c.4a (streaming) + 2c.4b (action wiring). Remove `subscribe_joined` from OutputBus. Update task ordering diagram and linear execution sequence. |
 | 2026-03-17 | @claude | Address PR #80 R2 — remove `2a.3 Pipes` from task ordering diagram (already descoped in checklist). |
@@ -823,6 +824,11 @@ streaming foundation from Track A. All matching and reaction is expressed as
 
 <!-- @claude 2026-03-17: Replaces 2a.2b (monitor-side rule eval) and 2c.1b (SinkFilter
      content matching). One matching system via Subscription adapters (DC24). -->
+
+**Design guardrail**: Track B must remain statically dispatched. `MatcherKind` is a closed
+enum — no `Box<dyn Matcher>` or type-erased pipeline stages. This keeps the matching layer
+debuggable and avoids vtable overhead in the hot path. If a new matcher variant is needed,
+add it to `MatcherKind`; do not introduce a trait-object escape hatch.
 
 - [ ] `Subscription::filter(matcher: MatcherKind) -> Subscription` — spawns forwarding
   task that passes only events matching the matcher. Content matching applied to
