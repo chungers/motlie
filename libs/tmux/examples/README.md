@@ -199,6 +199,7 @@ cargo run -p motlie-tmux --example repl -- ssh://localhost
 | `targets` | List all sessions with target spec strings | `host.list_sessions()`, `target.children()` |
 | `send <target> <text...>` | Send text + Enter to a target | `target.send_text()`, `target.send_keys()` |
 | `capture <target> <n>` | Print last N scrollback lines | `target.sample_text(LastLines(n))` |
+| `monitor <session> [secs]` | Stream live output for N seconds (default 3) | `host.start_monitoring_session()`, `OutputBus`, `JoinedStream` |
 | `upload <local> <remote> [--recursive]` | Upload a file or directory to the host | `host.upload()`, `TransferOptions` |
 | `download <remote> <local> [--recursive]` | Download a file or directory from the host | `host.download()`, `TransferOptions` |
 | `quit` | Disconnect and exit | — |

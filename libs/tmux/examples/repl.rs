@@ -11,6 +11,7 @@
 //!   targets                  List all sessions with full target spec tree
 //!   send <target> <text...>  Send text + Enter to a target
 //!   capture <target> <n>     Print last N scrollback lines
+//!   monitor <session> [secs] Stream live output for N seconds (default 3)
 //!   upload <local> <remote>  Upload a file or directory to the host
 //!   download <remote> <local> Download a file or directory from the host
 //!   quit                     Disconnect and exit
@@ -18,7 +19,10 @@
 //! Usage:
 //!   cargo run -p motlie-tmux --example repl -- ssh://localhost
 
-use motlie_tmux::{CreateSessionOptions, KeySequence, ScrollbackQuery, SshConfig, TargetSpec, TransferOptions};
+use motlie_tmux::{
+    CreateSessionOptions, KeySequence, LabelFormat, ScrollbackQuery, SinkFilter, SshConfig,
+    TargetSpec, TransferOptions,
+};
 use std::io::{self, BufRead, Write};
 
 #[tokio::main]
@@ -55,6 +59,7 @@ async fn main() -> anyhow::Result<()> {
                 println!("  targets                                 List all sessions with target tree");
                 println!("  send <target> <text...>                 Send text + Enter to a target");
                 println!("  capture <target> <n>                    Print last N scrollback lines");
+                println!("  monitor <session> [secs]                Stream live output (default 3s)");
                 println!("  upload <local> <remote> [-r]            Upload file/dir to the host");
                 println!("  download <remote> <local> [-r]          Download file/dir from the host");
                 println!("  quit                                    Disconnect and exit");
@@ -293,6 +298,70 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                     Err(e) => println!("{}", e),
+                }
+            }
+
+            "monitor" => {
+                if parts.len() < 2 {
+                    println!("usage: monitor <session> [seconds]");
+                    write!(stdout, "repl> ")?;
+                    stdout.flush()?;
+                    continue;
+                }
+                let session_name = parts[1];
+                let seconds: u64 = parts
+                    .get(2)
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(3);
+
+                match host.start_monitoring_session(session_name).await {
+                    Ok(monitor_handle) => {
+                        let bus = host.output_bus();
+                        let filter = SinkFilter {
+                            session: Some(format!("^{}$", regex::escape(session_name))),
+                            ..Default::default()
+                        };
+                        match bus.subscribe(vec![filter], 64) {
+                            Ok(sub) => {
+                                println!("Monitoring {} for {}s...", session_name, seconds);
+                                // Drop stdout lock so monitor output can print
+                                drop(stdout);
+
+                                let mut stream = sub.joined(LabelFormat::Bracketed);
+                                let deadline = tokio::time::Instant::now()
+                                    + std::time::Duration::from_secs(seconds);
+
+                                loop {
+                                    tokio::select! {
+                                        _ = tokio::time::sleep_until(deadline) => break,
+                                        chunk = stream.next() => {
+                                            match chunk {
+                                                Some(chunk) => {
+                                                    if chunk.source_changed {
+                                                        println!("\x1b[2m--- {} ---\x1b[0m",
+                                                            chunk.source.minimal());
+                                                    }
+                                                    print!("{}", chunk.output.content);
+                                                    if !chunk.output.content.ends_with('\n') {
+                                                        println!();
+                                                    }
+                                                }
+                                                None => break,
+                                            }
+                                        }
+                                    }
+                                }
+
+                                let _ = monitor_handle.shutdown().await;
+                                println!("Monitor stopped.");
+
+                                // Re-acquire stdout lock
+                                stdout = io::stdout().lock();
+                            }
+                            Err(e) => println!("Subscribe error: {}", e),
+                        }
+                    }
+                    Err(e) => println!("Error: {}", e),
                 }
             }
 
