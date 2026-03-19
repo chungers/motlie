@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-18 | @claude: PR #83 R1 — narrowed OutputBus shutdown/unsubscribe lifecycle docs to match fire-and-forget impl (piped tasks drain on their own; caller holds JoinHandle for join semantics). | OutputBus, SinkKind |
 | 2026-03-17 | @claude: DC24 R3 — address PR #82 review round 3: remove `filters` from `CallbackSink` and `filters()` from `SinkKind` — routing is `subscribe(filters)` only, sinks are terminal consumers. Update DC12 rationale, ActionHandle section, JoinedStream intro. | SinkKind, CallbackSink, DC12, ActionHandle, JoinedStream |
 | 2026-03-17 | @claude: DC24 R2 — address PR #82 review round 2: fix stale sections still describing old monitor-side rule evaluation and direct sink registration. Simplify `SinkFilter` to routing-only (remove `content`/`MatcherKind`/`MatcherInput`). Rewrite integration diagram to show `subscribe(filters) -> Subscription` + adapters. Remove `rules` param from `SessionMonitor::run()`. Update Phase 2b/2c narratives. | SinkFilter, Integration, monitor.rs, Phase 2b/2c |
 | 2026-03-17 | @claude: DC24 R1 — address PR #82 review: unify subscription API into `subscribe() -> Subscription` with composable adapters (`.joined()`, `.pipe()`, `.filter()`, `.react()`). Rules/reactors are subscription consumers, not monitor-internal. `StreamChunk` gains `source_changed` flag. Eliminate dual-matching (DC14 updated). | DC24, DC15, DC14, OutputBus, Subscription, JoinedStream |
@@ -3907,7 +3908,8 @@ consumers.
 - Two filters ORed together match the union of their targets
 - `StdioSink` produces readable output with host and pane context
 - `ActionHandle::send_keys()` delivers the action through the host dispatch queue
-- `OutputBus::shutdown()` calls `flush()` on all sinks before returning
+- `OutputBus::shutdown()` drops all senders, closing subscriber channels; piped tasks drain remaining events and exit on their own — callers hold `JoinHandle` from `pipe()` for flush-and-join semantics
+  <!-- @claude 2026-03-18 — narrowed from "calls flush() on all sinks before returning" to match fire-and-forget implementation (PR #83 R1) -->
 - Backpressure/drop conditions are observable to consumers via `SinkEvent::Gap`
   (no silent data loss, and no overloading of source-side fidelity metadata)
 

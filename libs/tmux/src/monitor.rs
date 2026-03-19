@@ -65,8 +65,13 @@ pub(crate) fn parse_control_line(line: &str) -> ControlModeMessage {
 }
 
 /// Decode tmux control mode octal escapes (`\ooo`) to actual bytes.
+///
+/// Tmux encodes non-printable and non-ASCII bytes as `\ooo` octal sequences.
+/// Multi-byte UTF-8 characters produce multiple consecutive escapes (e.g.,
+/// `é` → `\303\251`, bytes 0xC3 0xA9). This decoder collects raw bytes and
+/// converts to UTF-8 at the end, preserving multi-byte sequences correctly.
 pub(crate) fn decode_octal_escapes(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
+    let mut buf: Vec<u8> = Vec::with_capacity(input.len());
     let bytes = input.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -78,31 +83,22 @@ pub(crate) fn decode_octal_escapes(input: &str) -> String {
                 && (b'0'..=b'7').contains(&d2)
                 && (b'0'..=b'7').contains(&d3)
             {
-                let val =
-                    (d1 - b'0') as u32 * 64 + (d2 - b'0') as u32 * 8 + (d3 - b'0') as u32;
-                if let Some(ch) = char::from_u32(val) {
-                    result.push(ch);
-                } else {
-                    // Invalid char — keep escaped form
-                    result.push('\\');
-                    result.push(d1 as char);
-                    result.push(d2 as char);
-                    result.push(d3 as char);
-                }
+                let val = (d1 - b'0') * 64 + (d2 - b'0') * 8 + (d3 - b'0');
+                buf.push(val);
                 i += 4;
                 continue;
             }
         }
         // Also handle \\  -> backslash
         if bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
-            result.push('\\');
+            buf.push(b'\\');
             i += 2;
             continue;
         }
-        result.push(bytes[i] as char);
+        buf.push(bytes[i]);
         i += 1;
     }
-    result
+    String::from_utf8_lossy(&buf).into_owned()
 }
 
 /// Per-pane stream assembly state.
@@ -510,6 +506,27 @@ mod tests {
     fn decode_partial_escape_at_end() {
         // Not enough digits for a full octal escape
         assert_eq!(decode_octal_escapes("hello\\01"), "hello\\01");
+    }
+
+    #[test]
+    fn decode_utf8_multibyte() {
+        // é is U+00E9, encoded in UTF-8 as bytes 0xC3 0xA9 (octal 303 251)
+        assert_eq!(decode_octal_escapes("caf\\303\\251"), "café");
+    }
+
+    #[test]
+    fn decode_utf8_three_byte() {
+        // € is U+20AC, encoded in UTF-8 as bytes 0xE2 0x82 0xAC (octal 342 202 254)
+        assert_eq!(decode_octal_escapes("\\342\\202\\254100"), "€100");
+    }
+
+    #[test]
+    fn decode_utf8_four_byte() {
+        // 🎉 is U+1F389, encoded as 0xF0 0x9F 0x8E 0x89 (octal 360 237 216 211)
+        assert_eq!(
+            decode_octal_escapes("\\360\\237\\216\\211"),
+            "🎉"
+        );
     }
 
     // --- SessionMonitor.process_output tests ---

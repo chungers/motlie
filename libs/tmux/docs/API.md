@@ -1311,6 +1311,10 @@ All filter fields are optional regex strings. A filter matches when **all**
 non-None fields match (AND logic). Multiple filters in a subscription are
 OR'd — an event matches if **any** filter matches.
 
+The `pane` filter matches against both the `pane_id` (e.g. `%5`) and the
+tmux target string (e.g. `build:0.1`). Control mode only provides `pane_id`,
+so pane-level filtering by `pane_id` is the canonical approach.
+
 ```rust
 // Match any session on host "web-1", any pane
 let filter = SinkFilter {
@@ -1340,7 +1344,7 @@ output.timestamp         // std::time::Instant of emission
 // Accessors:
 output.session_name()    // Session name at any source level
 output.pane_id()         // Some("%5") for pane-level sources
-output.target_string()   // Full tmux target string
+output.target_string()   // pane_id for pane sources, session/window name otherwise
 output.degraded()        // Shorthand for fidelity.degraded
 ```
 
@@ -1409,8 +1413,8 @@ chunk.source_changed   // true when source differs from previous chunk
 ### SourceLabel formatting
 
 ```rust
-chunk.source.short()    // "localhost:build:0.1" (host + target)
-chunk.source.minimal()  // "build:0.1" (no host prefix)
+chunk.source.short()    // "localhost:build(%5)" (host + session + pane_id)
+chunk.source.minimal()  // "build(%5)" (no host prefix)
 ```
 
 ### Using format() for rendering
@@ -1591,7 +1595,7 @@ assert!(issues.is_empty());
 | `Subscription` | Bus subscription — `.into_receiver()`, `.joined()`, `.pipe()` |
 | `TargetOutput` | Output event — source, host, content, raw_content, sequence, fidelity, timestamp |
 | `SinkEvent` | Enum: `Data(TargetOutput)`, `Gap { dropped, timestamp }` |
-| `SinkFilter` | Source routing — host, session, window, pane (optional regex strings) |
+| `SinkFilter` | Source routing — host, session, window, pane (optional regex; pane matches both `pane_id` and target string) |
 | `SinkId` | Opaque subscription identifier |
 | `SinkKind` | Enum: `Stdio(StdioSink)`, `Callback(CallbackSink)` — static dispatch |
 | `CallbackSink` | User sink — name, state (`Arc<dyn Any>`), on_output, on_flush |

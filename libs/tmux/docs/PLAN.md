@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-18 | @claude | PR #83 R1 fixes: (1) UTF-8 octal decoder rewritten to collect bytes before decoding — multi-byte chars now correct, (2) pane identity uses pane_id as canonical identity for source comparison, display, and filter matching — distinct panes no longer merge, (3) OutputBus lifecycle docs narrowed to match fire-and-forget implementation. 274 tests (+6 new). |
 | 2026-03-18 | @claude | Track A deferred items completed: (1) fidelity normalization in monitor via CaptureNormalizeMode, (2) MonitorHandle.stop_session()/get_by_spec(), (3) HostHandle.stop_monitoring_session()/stop_monitoring()/monitored_sessions() with per-host signal tracking, (4) Target::start_monitoring()/stop_monitoring() session-level convenience, (5) live localhost integration test (localhost_monitor_pipeline). 268 lib + 19 integration tests. |
 | 2026-03-18 | @claude | Track A implemented (2a.2a, 2c.1a, 2c.2a, 2c.3, 2a.4a, 2c.4a): control mode parser, sink types, SinkKind/Subscription/JoinedStream, OutputBus, monitor handle wiring, pipeline integration. 262 tests. Deferred items noted inline: fidelity normalization in monitor, Target-level monitoring methods, live tmux integration test. |
 | 2026-03-17 | @claude | DC24 R2 — Address PR #82 review round 2: add Track B static-dispatch guardrail note (closed `MatcherKind` enum, no `Box<dyn Matcher>`). |
@@ -776,12 +777,12 @@ via JoinedStream — with no matcher or action dispatch dependency.
 - [x] `OutputBus::new()`
 - [x] `subscribe(filters, capacity) -> Subscription` — single subscription primitive;
   all consumer composition layered on `Subscription` adapters (DC24)
-- [x] `unsubscribe(id) -> Result<()>` — signal stop, join task if pipe'd
+- [x] `unsubscribe(id) -> Result<()>` — drops sender, closing channel; piped tasks drain and exit on their own (caller holds JoinHandle for join semantics)
 - [x] `publish(output: TargetOutput)` — fan out to all matching subscribers via `try_send`
   while tracking per-subscriber dropped counts
 - [x] No-silent-drop contract: if drops occurred, emit `SinkEvent::Gap { dropped }`
   before the next `SinkEvent::Data(output)` on that subscriber route
-- [x] `shutdown() -> Result<()>` — signal all subscribers, join all tasks
+- [x] `shutdown()` — drops all senders, closing channels; piped tasks drain and exit on their own (caller holds JoinHandles for join semantics)
 - [x] `SubEntry` internal: id, name, tx, compiled filters
 - [x] Unit tests: fan-out to 3 subscribers, slow subscriber doesn't block others,
   source-routing filter matching, gap-event emission after drops, shutdown flushes
