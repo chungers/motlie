@@ -23,6 +23,10 @@ struct HostHandleInner {
     host_alias: String,
     /// Shared output bus (DC24). Lazily created on first `start_monitoring`.
     output_bus: std::sync::Mutex<Option<Arc<OutputBus>>>,
+    /// Per-host tracking of active monitor stop signals (DC13).
+    /// Keyed by session name. The `watch::Sender<bool>` fires the stop signal;
+    /// the actual `JoinHandle` is owned by the returned `SessionMonitorHandle`.
+    monitor_signals: std::sync::Mutex<HashMap<String, tokio::sync::watch::Sender<bool>>>,
 }
 
 impl HostHandleInner {
@@ -54,6 +58,7 @@ impl HostHandle {
                 exec_locks: std::sync::Mutex::new(HashMap::new()),
                 host_alias: "localhost".to_string(),
                 output_bus: std::sync::Mutex::new(None),
+                monitor_signals: std::sync::Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -73,6 +78,7 @@ impl HostHandle {
                 exec_locks: std::sync::Mutex::new(HashMap::new()),
                 host_alias: "localhost".to_string(),
                 output_bus: std::sync::Mutex::new(None),
+                monitor_signals: std::sync::Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -86,6 +92,7 @@ impl HostHandle {
                 exec_locks: std::sync::Mutex::new(HashMap::new()),
                 host_alias: "localhost".to_string(),
                 output_bus: std::sync::Mutex::new(None),
+                monitor_signals: std::sync::Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -103,6 +110,7 @@ impl HostHandle {
                 exec_locks: std::sync::Mutex::new(HashMap::new()),
                 host_alias: alias.to_string(),
                 output_bus: std::sync::Mutex::new(None),
+                monitor_signals: std::sync::Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -328,6 +336,13 @@ impl HostHandle {
         // Create stop signal
         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
 
+        // Register stop signal for host-level tracking (DC13)
+        {
+            let mut signals = self.inner.monitor_signals.lock()
+                .expect("monitor_signals lock poisoned");
+            signals.insert(session_name.to_string(), stop_tx.clone());
+        }
+
         // Get a Target for the session
         let sessions = discovery::list_sessions(&self.inner.transport, self.inner.socket.as_ref()).await?;
         let session_info = sessions
@@ -339,10 +354,17 @@ impl HostHandle {
             address: TargetAddress::Session(session_info),
         };
 
-        // Spawn the monitor task
+        // Spawn the monitor task — clean up signal registration when done
+        let inner_ref = self.inner.clone();
+        let session_for_cleanup = session_name.to_string();
         let task = tokio::spawn(async move {
             let mut monitor = SessionMonitor::new(session.clone(), host_alias);
-            monitor.run(&mut shell, &bus, stop_rx).await
+            let result = monitor.run(&mut shell, &bus, stop_rx).await;
+            // Remove from tracking on task completion
+            if let Ok(mut signals) = inner_ref.monitor_signals.lock() {
+                signals.remove(&session_for_cleanup);
+            }
+            result
         });
 
         Ok(SessionMonitorHandle::new(target, stop_tx, task))
@@ -371,7 +393,34 @@ impl HostHandle {
         Ok(MonitorHandle::new(handles))
     }
 
-    /// List currently monitored sessions (names).
+    /// Stop monitoring a specific session by signaling its stop channel.
+    /// The monitor task will exit and clean up its registration.
+    pub fn stop_monitoring_session(&self, session_name: &str) -> Result<()> {
+        let signals = self.inner.monitor_signals.lock()
+            .expect("monitor_signals lock poisoned");
+        let tx = signals
+            .get(session_name)
+            .ok_or_else(|| anyhow!("session '{}' not being monitored", session_name))?;
+        let _ = tx.send(true);
+        Ok(())
+    }
+
+    /// Stop monitoring all sessions.
+    pub fn stop_monitoring(&self) {
+        let signals = self.inner.monitor_signals.lock()
+            .expect("monitor_signals lock poisoned");
+        for (_, tx) in signals.iter() {
+            let _ = tx.send(true);
+        }
+    }
+
+    /// List currently monitored session names.
+    pub fn monitored_sessions(&self) -> Vec<String> {
+        let signals = self.inner.monitor_signals.lock()
+            .expect("monitor_signals lock poisoned");
+        signals.keys().cloned().collect()
+    }
+
     pub fn host_alias(&self) -> &str {
         &self.inner.host_alias
     }
@@ -879,6 +928,41 @@ impl Target {
             }
             TargetAddress::Pane(_) => Err(anyhow!("cannot rename a pane")),
         }
+    }
+
+    // --- Monitoring (DC13, 2a.4a) ---
+
+    /// Start monitoring this session's output via control mode.
+    ///
+    /// Session-level only — returns error for window/pane targets.
+    /// Opens a control mode connection, parses `%output` frames, and
+    /// publishes `TargetOutput` to the host's `OutputBus`.
+    pub async fn start_monitoring(&self) -> Result<SessionMonitorHandle> {
+        if !matches!(self.address, TargetAddress::Session(_)) {
+            return Err(anyhow!(
+                "start_monitoring() is session-level only; target '{}' is {:?}",
+                self.target_string(),
+                self.level()
+            ));
+        }
+        let host = HostHandle { inner: self.inner.clone() };
+        host.start_monitoring_session(self.session_name()).await
+    }
+
+    /// Stop monitoring this session.
+    ///
+    /// Session-level only — returns error for window/pane targets.
+    /// Signals the monitor task to stop. The task will exit and clean up.
+    pub fn stop_monitoring(&self) -> Result<()> {
+        if !matches!(self.address, TargetAddress::Session(_)) {
+            return Err(anyhow!(
+                "stop_monitoring() is session-level only; target '{}' is {:?}",
+                self.target_string(),
+                self.level()
+            ));
+        }
+        let host = HostHandle { inner: self.inner.clone() };
+        host.stop_monitoring_session(self.session_name())
     }
 
     // --- Geometry & history (DC20, Phase 1.9b) ---
