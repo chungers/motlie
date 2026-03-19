@@ -6,6 +6,8 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-18 | @claude: PR #83 R3 — reconcile DESIGN/PLAN/API docs with current implementation: OutputBus sync `&self` signatures, `PipeHandle` replaces bare `JoinHandle`, `source_key()` + `target_string()` dual accessors, `SourceLabel` pane_id format (`build(%5)`), `format()` always labels (not only on transitions), `StdioSink` Prefixed uses `source_key`. | OutputBus, Subscription, TargetOutput, SourceLabel, JoinedStream, StdioSink |
+| 2026-03-18 | @claude: PR #83 R1 — narrowed OutputBus shutdown/unsubscribe lifecycle docs to match fire-and-forget impl (piped tasks drain on their own; caller holds PipeHandle for join semantics). | OutputBus, SinkKind |
 | 2026-03-17 | @claude: DC24 R3 — address PR #82 review round 3: remove `filters` from `CallbackSink` and `filters()` from `SinkKind` — routing is `subscribe(filters)` only, sinks are terminal consumers. Update DC12 rationale, ActionHandle section, JoinedStream intro. | SinkKind, CallbackSink, DC12, ActionHandle, JoinedStream |
 | 2026-03-17 | @claude: DC24 R2 — address PR #82 review round 2: fix stale sections still describing old monitor-side rule evaluation and direct sink registration. Simplify `SinkFilter` to routing-only (remove `content`/`MatcherKind`/`MatcherInput`). Rewrite integration diagram to show `subscribe(filters) -> Subscription` + adapters. Remove `rules` param from `SessionMonitor::run()`. Update Phase 2b/2c narratives. | SinkFilter, Integration, monitor.rs, Phase 2b/2c |
 | 2026-03-17 | @claude: DC24 R1 — address PR #82 review: unify subscription API into `subscribe() -> Subscription` with composable adapters (`.joined()`, `.pipe()`, `.filter()`, `.react()`). Rules/reactors are subscription consumers, not monitor-internal. `StreamChunk` gains `source_changed` flag. Eliminate dual-matching (DC14 updated). | DC24, DC15, DC14, OutputBus, Subscription, JoinedStream |
@@ -1268,7 +1270,12 @@ impl TargetOutput {
     /// Pane ID — available when source is pane-level, None otherwise.
     pub fn pane_id(&self) -> Option<&str>;
 
-    /// Tmux target string for the source (e.g., "build", "build:0", "build:0.1").
+    /// Canonical identity for bus routing, filter matching, and coalescing.
+    /// Returns pane_id for pane-level sources, session name for sessions.
+    pub fn source_key(&self) -> String;
+
+    /// Display format: tmux target string (e.g., "build", "build:0", "build:0.1").
+    /// May be synthetic for monitor-originated output (window/pane indices are 0).
     pub fn target_string(&self) -> String;
 
     /// True when fidelity was degraded (reflow/history/drop/resync events).
@@ -1595,13 +1602,15 @@ impl OutputBus {
     /// (joining, filtering, piping to sinks, reacting) is layered on
     /// `Subscription` — the bus only handles fan-out and source routing.
     pub fn subscribe(
-        &mut self,
+        &self,
         filters: Vec<SinkFilter>,
         channel_capacity: usize,
-    ) -> Subscription;
+    ) -> Result<Subscription>;
 
-    /// Remove a subscription by id.
-    pub async fn unsubscribe(&mut self, id: SinkId) -> Result<()>;
+    /// Remove a subscription by id. Drops the sender, closing the channel.
+    /// Piped tasks drain remaining events and exit on their own — this method
+    /// does **not** await the task. Callers hold `PipeHandle` for join semantics.
+    pub fn unsubscribe(&self, id: SinkId) -> Result<()>;
 
     /// Fan out an event to all matching subscribers. Non-blocking.
     /// Uses try_send for the hot path. If a subscriber channel is full,
@@ -1610,8 +1619,11 @@ impl OutputBus {
     /// `SinkEvent::Gap { dropped }` before the next `SinkEvent::Data(output)`.
     pub fn publish(&self, output: TargetOutput);
 
-    /// Shutdown all subscribers gracefully.
-    pub async fn shutdown(&mut self) -> Result<()>;
+    /// Drop all senders, closing all receiver channels.
+    /// Piped tasks drain remaining events and exit on their own — this method
+    /// does **not** track or await those tasks. Callers hold `PipeHandle`
+    /// from `pipe()` for flush-and-join semantics.
+    pub fn shutdown(&self);
 }
 ```
 
@@ -1645,8 +1657,9 @@ impl Subscription {
     pub fn joined(self, label_format: LabelFormat) -> JoinedStream;
 
     /// Fire-and-forget: spawn a tokio task that drives the given sink.
-    /// Consumes the Subscription. Returns JoinHandle for lifecycle.
-    pub fn pipe(self, sink: SinkKind) -> JoinHandle<()>;
+    /// Consumes the Subscription. Returns PipeHandle combining subscription
+    /// id (for bus control) and task JoinHandle (for awaited teardown).
+    pub fn pipe(self, sink: SinkKind) -> PipeHandle;
 
     // --- Track B adapters (added when matching/reactors land) ---
 
@@ -1692,9 +1705,9 @@ pub struct StdioSink {
 pub enum StdioFormat {
     /// Raw content only, no metadata prefix
     Raw,
-    /// "[host] session:window.pane | content"
+    /// "[host] source_key | content" — uses canonical source identity.
     Prefixed,
-    /// JSON lines: {"host": "...", "pane": "...", "content": "...", "ts": ...}
+    /// JSON lines with both canonical key and display target.
     Json,
 }
 
@@ -1729,10 +1742,11 @@ pub struct SourceLabel {
 }
 
 impl SourceLabel {
-    /// Short form for display: "web-1:build:0.1" (pane) or "web-1:build" (session)
+    /// Short form for display: "web-1:build(%5)" (pane) or "web-1:build" (session).
+    /// Pane-level sources use `pane_id` as canonical identity.
     pub fn short(&self) -> String;
 
-    /// Minimal form when host is unambiguous: "build:0.1" or "build"
+    /// Minimal form when host is unambiguous: "build(%5)" or "build"
     pub fn minimal(&self) -> String;
 }
 ```
@@ -1764,9 +1778,9 @@ pub struct StreamChunk {
 }
 
 pub enum LabelFormat {
-    /// "[web-1:build:0.1] output text here"
+    /// "[web-1:build(%5)] output text here"
     Bracketed,
-    /// "web-1:build:0.1> output text here"
+    /// "web-1:build(%5)> output text here"
     Prompt,
     /// Caller provides a format function (plain fn pointer — no heap allocation).
     Custom(fn(&SourceLabel, &str) -> String),
@@ -1779,15 +1793,17 @@ impl JoinedStream {
     pub async fn next(&mut self) -> Option<StreamChunk>;
 
     /// Format a StreamChunk as a string using this stream's LabelFormat.
-    /// Emits the label prefix only when `source_changed` is true.
+    /// Always applies the configured label prefix. Consumer-side convenience
+    /// for interactive multi-pane views — terminal sinks (StdioSink) own
+    /// their own presentation formatting at a different layer.
     pub fn format(&self, chunk: &StreamChunk) -> String;
 }
 ```
 
 **Coalescing**: Consecutive chunks from the same source have `source_changed: false`.
 When a different source emits, the new chunk has `source_changed: true`. Consumers
-decide how to render transitions — `format()` provides a default implementation
-(label prefix on transitions, raw content otherwise).
+decide how to render transitions — `format()` always applies the label prefix;
+consumers can use `source_changed` to add separators or headers between sources.
 
 **Use cases via Subscription adapter**:
 
@@ -1801,10 +1817,10 @@ tokio::spawn(async move {
     }
 });
 // Output:
-//   [web-1:build:0.0] compiling crate foo...
-//   [web-1:build:0.0] warning: unused variable
-//   [db-1:migrate:0.0] Running migration 042...
-//   [web-1:build:0.0] Finished dev target
+//   [web-1:build(%0)] compiling crate foo...
+//   [web-1:build(%0)] warning: unused variable
+//   [db-1:migrate(%3)] Running migration 042...
+//   [web-1:build(%0)] Finished dev target
 
 // Structured data for LLM consumption
 let sub2 = bus.subscribe(all_filters, 64);
@@ -3907,7 +3923,8 @@ consumers.
 - Two filters ORed together match the union of their targets
 - `StdioSink` produces readable output with host and pane context
 - `ActionHandle::send_keys()` delivers the action through the host dispatch queue
-- `OutputBus::shutdown()` calls `flush()` on all sinks before returning
+- `OutputBus::shutdown()` drops all senders, closing subscriber channels; piped tasks drain remaining events and exit on their own — callers hold `PipeHandle` from `pipe()` for flush-and-join semantics
+  <!-- @claude 2026-03-18 — narrowed from "calls flush() on all sinks before returning" to match fire-and-forget implementation (PR #83 R1). R3: JoinHandle → PipeHandle -->
 - Backpressure/drop conditions are observable to consumers via `SinkEvent::Gap`
   (no silent data loss, and no overloading of source-side fidelity metadata)
 

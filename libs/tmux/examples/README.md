@@ -26,7 +26,7 @@ cargo build -p motlie-tmux --examples
 ./target/debug/examples/exec_command ssh://localhost "uname -a"
 ./target/debug/examples/target_spec ssh://localhost "dev:0.0"
 ./target/debug/examples/repl ssh://localhost
-./target/debug/examples/stream_pane ssh://localhost my_session --lines 50
+./target/debug/examples/stream_pane ssh://localhost my_session --mode monitor
 ```
 
 ## Examples
@@ -199,6 +199,7 @@ cargo run -p motlie-tmux --example repl -- ssh://localhost
 | `targets` | List all sessions with target spec strings | `host.list_sessions()`, `target.children()` |
 | `send <target> <text...>` | Send text + Enter to a target | `target.send_text()`, `target.send_keys()` |
 | `capture <target> <n>` | Print last N scrollback lines | `target.sample_text(LastLines(n))` |
+| `monitor <session> [secs]` | Stream live output for N seconds (default 3) | `host.start_monitoring_session()`, `OutputBus`, `JoinedStream` |
 | `upload <local> <remote> [--recursive]` | Upload a file or directory to the host | `host.upload()`, `TransferOptions` |
 | `download <remote> <local> [--recursive]` | Download a file or directory from the host | `host.download()`, `TransferOptions` |
 | `quit` | Disconnect and exit | — |
@@ -270,12 +271,17 @@ Demonstrates the distinct capture and streaming techniques in the library.
 Use `--mode` to select a strategy. Ctrl-C exits cleanly in all modes.
 Run with `-h` for detailed help on all modes and options.
 
+The first four modes are **poll-based** — they sample pane content at intervals.
+The `monitor` mode is **event-driven** — it uses tmux control mode to receive
+output events in real-time with no polling.
+
 | Mode | API Used | Behavior |
 |------|----------|----------|
 | `tail` (default) | `sample_text(LastLines(n))` + `overlap_deduplicate()` | Like `tail -f` — prints only new scrollback lines |
 | `visible` | `capture()` | Polls visible pane; reprints on change. Best for TUI programs |
 | `until` | `sample_text(Until { pattern, max_lines })` | Scans back to regex match, shows everything since (e.g. last prompt) |
 | `fidelity` | `capture_with_options(detect_reflow: true)` | Polls with geometry snapshots; shows content + fidelity status |
+| `monitor` | `start_monitoring_session()` + `OutputBus` + `JoinedStream` | Event-driven via control mode — real-time, multi-pane, source-labeled |
 
 ```sh
 # Default: tail mode (incremental scrollback with overlap dedup)
@@ -293,6 +299,9 @@ Run with `-h` for detailed help on all modes and options.
 # Fidelity mode — try resizing the target terminal to see degradation
 ./target/debug/examples/stream_pane ssh://localhost my_session --mode fidelity
 
+# Event-driven monitoring — real-time output, no polling
+./target/debug/examples/stream_pane ssh://localhost my_session --mode monitor
+
 # Stream a specific pane
 ./target/debug/examples/stream_pane ssh://localhost "my_session:0.1" --lines 30
 ```
@@ -303,6 +312,20 @@ Streaming my_session [mode=tail, lines=50, interval=200ms]. Ctrl-C to stop.
 $ echo hello
 hello
 $ make test
+running 42 tests...
+test result: ok. 42 passed; 0 failed
+^C
+Stopped.
+```
+
+Expected output (`--mode monitor`):
+```
+Monitoring my_session [mode=monitor, event-driven]. Ctrl-C to stop.
+--- my_session:0.0 ---
+$ echo hello
+hello
+$
+--- my_session:0.1 ---
 running 42 tests...
 test result: ok. 42 passed; 0 failed
 ^C

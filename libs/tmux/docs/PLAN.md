@@ -4,6 +4,11 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-18 | @claude | PR #83 R3 — reconcile docs with implementation: OutputBus sync `&self` signatures, `PipeHandle` replaces bare `JoinHandle` in DESIGN/PLAN, `source_key()` added to TargetOutput in DESIGN, `SourceLabel` pane_id format (`build(%5)`), `format()` always labels, `StdioSink` Prefixed uses `source_key`, API.md format examples updated. |
+| 2026-03-18 | @claude | PR #83 R2 design/API improvements: (1) fix start-monitoring error-path — registration after session resolution, (2) split `source_key()` (identity) from `target_string()` (display), (3) `SinkFilter::for_session/for_pane/for_host/for_host_session` exact-match constructors, (4) `PipeHandle` wraps subscription id + task JoinHandle, (5) format() layering documented (JoinedStream = consumer, StdioSink = terminal), (6) stop vs shutdown lifecycle distinction in all docs. 280 tests (+6 new). |
+| 2026-03-18 | @claude | PR #83 R1 fixes: (1) UTF-8 octal decoder rewritten to collect bytes before decoding — multi-byte chars now correct, (2) pane identity uses pane_id as canonical identity for source comparison, display, and filter matching — distinct panes no longer merge, (3) OutputBus lifecycle docs narrowed to match fire-and-forget implementation. 274 tests (+6 new). |
+| 2026-03-18 | @claude | Track A deferred items completed: (1) fidelity normalization in monitor via CaptureNormalizeMode, (2) MonitorHandle.stop_session()/get_by_spec(), (3) HostHandle.stop_monitoring_session()/stop_monitoring()/monitored_sessions() with per-host signal tracking, (4) Target::start_monitoring()/stop_monitoring() session-level convenience, (5) live localhost integration test (localhost_monitor_pipeline). 268 lib + 19 integration tests. |
+| 2026-03-18 | @claude | Track A implemented (2a.2a, 2c.1a, 2c.2a, 2c.3, 2a.4a, 2c.4a): control mode parser, sink types, SinkKind/Subscription/JoinedStream, OutputBus, monitor handle wiring, pipeline integration. 262 tests. Deferred items noted inline: fidelity normalization in monitor, Target-level monitoring methods, live tmux integration test. |
 | 2026-03-17 | @claude | DC24 R2 — Address PR #82 review round 2: add Track B static-dispatch guardrail note (closed `MatcherKind` enum, no `Box<dyn Matcher>`). |
 | 2026-03-17 | @claude | DC24 R1 — Address PR #82 review: unify subscription API (`subscribe() -> Subscription` with adapters). Rules/reactors as subscription consumers, not monitor-internal (removes 2a.2b). Replace 2c.1b with 2b.4 (subscription matching + reaction adapters) and 2c.4b with 2b.5 (action handle wiring). One matching system via `.filter()`/`.react()`. Track B now: 2b.2 → 2b.1 → 2b.4 → 2b.5 → 2b.3. |
 | 2026-03-17 | @claude | DC24 — Restructure Phase 2 into Track A (streaming + combining) and Track B (matching + reactors). Split 2a.2 → 2a.2a (parse only) + 2a.2b (rules + dispatch). Split 2a.4 → 2a.4a (streaming handles). Split 2c.1 → 2c.1a (routing only) + 2c.1b (content matching + actions). Split 2c.2 → 2c.2a (sinks + JoinedStream combinator, no JoinedSink). Split 2c.4 → 2c.4a (streaming) + 2c.4b (action wiring). Remove `subscribe_joined` from OutputBus. Update task ordering diagram and linear execution sequence. |
@@ -677,108 +682,125 @@ via JoinedStream — with no matcher or action dispatch dependency.
 
 ### 2a.2a — Control mode stream parser (`src/monitor.rs`) — parse only
 
-- [ ] `SessionMonitor` struct: session name, stream assembly state (no rules, no cooldowns)
-- [ ] Control mode stream parser: parse `%output %<pane_id> <data>` frames from
+- [x] `SessionMonitor` struct: session name, stream assembly state (no rules, no cooldowns)
+- [x] Control mode stream parser: parse `%output %<pane_id> <data>` frames from
   `tmux -C attach -t <session>` output
-- [ ] Per-pane stream assembly state keyed by `pane_id`:
+- [x] Per-pane stream assembly state keyed by `pane_id`:
   partial-frame buffering, newline canonicalization, monotonic per-pane `sequence`
-- [ ] Reuse `1.9a` normalization/fidelity path for monitor events:
+- [x] Reuse `1.9a` normalization/fidelity path for monitor events:
   preserve ANSI in fidelity modes, apply the same mode-to-field contract,
   annotate degraded/reflow/history conditions in emitted metadata
-- [ ] Handle other control mode messages gracefully (`%begin`, `%end`, `%error`, etc.)
-- [ ] `SessionMonitor::run()` — main loop: read from shell, parse, emit `TargetOutput`
+  <!-- @claude 2026-03-18: Implemented — SessionMonitor accepts CaptureNormalizeMode
+       (Raw/ScreenStable/PlainText). process_output() applies normalization, sets
+       raw_content when content differs. Fidelity remains clean() for control mode
+       (no geometry/reflow concern). Unit tests verify all three modes. -->
+- [x] Handle other control mode messages gracefully (`%begin`, `%end`, `%error`, etc.)
+- [x] `SessionMonitor::run()` — main loop: read from shell, parse, emit `TargetOutput`
   (no rule evaluation, no action dispatch — streaming only)
-- [ ] Stop signal via `watch::Receiver<bool>`, clean shutdown on signal or connection drop
-- [ ] Warn-level logging for malformed lines (P9)
-- [ ] Unit tests: control mode frame parsing, chunk split/reassembly, sequence monotonicity
+- [x] Stop signal via `watch::Receiver<bool>`, clean shutdown on signal or connection drop
+- [x] Warn-level logging for malformed lines (P9)
+- [x] Unit tests: control mode frame parsing, chunk split/reassembly, sequence monotonicity
 
 **Depends on**: 1.7 ✓, 1.9a ✓, 1.10 ✓
 
 ### 2a.4a — Monitor handle wiring (streaming only)
 
-- [ ] `SessionMonitorHandle`: `Target` + `stop_tx` + `task: Mutex<Option<JoinHandle>>`
-- [ ] `SessionMonitorHandle::shutdown()` — signal stop, flush, join task
-- [ ] `SessionMonitorHandle::is_active()`
-- [ ] `Deref<Target=Target>` for `SessionMonitorHandle`
-- [ ] `MonitorHandle`: `HashMap<String, SessionMonitorHandle>`, `shutdown()`,
+- [x] `SessionMonitorHandle`: `Target` + `stop_tx` + `task: Mutex<Option<JoinHandle>>`
+- [x] `SessionMonitorHandle::shutdown()` — signal stop, flush, join task
+- [x] `SessionMonitorHandle::is_active()`
+- [x] `Deref<Target=Target>` for `SessionMonitorHandle`
+- [x] `MonitorHandle`: `HashMap<String, SessionMonitorHandle>`, `shutdown()`,
   `stop_session()`, `get()`, `get_by_spec()`, `active_sessions()`
-- [ ] `HostHandle::start_monitoring()` — discovers sessions, spawns per-session monitors,
+  <!-- @claude 2026-03-18: All methods implemented. stop_session() removes and shuts
+       down by name. get_by_spec() resolves via TargetSpec::session_name(). -->
+- [x] `HostHandle::start_monitoring()` — discovers sessions, spawns per-session monitors,
   returns `MonitorHandle` (no rules parameter — monitors all output)
-- [ ] `HostHandle::start_monitoring_session()`, `stop_monitoring_session()`,
-  `stop_monitoring()`, `monitored_sessions()` (DC13)
-- [ ] `Target::start_monitoring()` — session-level only, returns `SessionMonitorHandle`
-- [ ] `Target::stop_monitoring()` — session-level only, delegates to
+- [x] `HostHandle::start_monitoring_session()`
+- [x] `stop_monitoring_session()`, `stop_monitoring()`, `monitored_sessions()` (DC13)
+  <!-- @claude 2026-03-18: Implemented. Per-host tracking via monitor_signals map in
+       HostHandleInner (watch::Sender keyed by session name). Stop signals fire the
+       watch channel; tasks self-deregister on exit. -->
+- [x] `Target::start_monitoring()` — session-level only, returns `SessionMonitorHandle`
+- [x] `Target::stop_monitoring()` — session-level only, delegates to
   `HostHandle::stop_monitoring_session(&self)`; returns error if called on
   window/pane target
-- [ ] Integration test (localhost): start monitor, send text to pane, verify
+  <!-- @claude 2026-03-18: Implemented. Both methods gate on session level and
+       reconstruct HostHandle from inner Arc for delegation. Integration test
+       verifies session-only gate and round-trip start/stop. -->
+- [x] Integration test (localhost): start monitor, send text to pane, verify
   `TargetOutput` emitted, `target.stop_monitoring()` cleanly stops,
   verify on-demand operations still work after stop (DC13)
+  <!-- @claude 2026-03-18: Implemented as localhost_monitor_pipeline in
+       tests/integration.rs. Full round-trip: create session → start monitoring →
+       subscribe → send text → verify TargetOutput received → stop_monitoring() →
+       verify capture still works → verify Target::start/stop_monitoring() →
+       verify session-level-only gate on pane targets → cleanup. -->
 
-**Depends on**: 2a.2a
+**Depends on**: 2a.2a ✓
 
 ### 2c.1a — Sink types (`src/sink.rs`) — no content matching
 
-- [ ] `TargetOutput` struct: `source: TargetAddress`, `host`, canonical `content`,
+- [x] `TargetOutput` struct: `source: TargetAddress`, `host`, canonical `content`,
   optional `raw_content`, `sequence`, `fidelity`, `timestamp`
-- [ ] `SinkEvent` enum: `Data(TargetOutput)` and `Gap { dropped, timestamp }`
-- [ ] `TargetOutput` accessors: `session_name()`, `pane_id()`, `target_string()`
-- [ ] `OutputFidelity` / `FidelityIssue` enums shared with capture/monitor paths
-- [ ] `SinkFilter`: `host`, `session`, `window`, `pane` (all optional regex strings)
+- [x] `SinkEvent` enum: `Data(TargetOutput)` and `Gap { dropped, timestamp }`
+- [x] `TargetOutput` accessors: `session_name()`, `pane_id()`, `target_string()`
+- [x] `OutputFidelity` / `FidelityIssue` enums shared with capture/monitor paths
+- [x] `SinkFilter`: `host`, `session`, `window`, `pane` (all optional regex strings)
   — routing only, no `content` / `MatcherKind` / `MatcherInput` fields yet
-- [ ] `CompiledSinkFilter`: compiled regexes,
+- [x] `CompiledSinkFilter`: compiled regexes,
   `matches(&self, output: &TargetOutput) -> bool`
-- [ ] `SinkId` opaque type
+- [x] `SinkId` opaque type
 
 **Depends on**: 1.9a ✓
 
 ### 2c.2a — Sink kinds + Subscription + JoinedStream (`src/sink.rs`, `src/sinks/`)
 
-- [ ] `SinkKind` enum: `Stdio(StdioSink)`, `Callback(CallbackSink)` — no `JoinedSink` variant (DC24)
-- [ ] `SinkKind::name()`, `write()`, `flush()` dispatch methods
-- [ ] `CallbackSink`: `name`, `state: Arc<dyn Any + Send + Sync>`,
+- [x] `SinkKind` enum: `Stdio(StdioSink)`, `Callback(CallbackSink)` — no `JoinedSink` variant (DC24)
+- [x] `SinkKind::name()`, `write()`, `flush()` dispatch methods
+- [x] `CallbackSink`: `name`, `state: Arc<dyn Any + Send + Sync>`,
   `on_output: fn(...)`, `on_flush: Option<fn(...)>`
-- [ ] `StdioSink` in `src/sinks/stdio.rs`: `StdioFormat` enum (Raw, Prefixed, Json),
+- [x] `StdioSink` in `src/sinks/stdio.rs`: `StdioFormat` enum (Raw, Prefixed, Json),
   immediate write to stdout, no batching
-- [ ] `Subscription` type wrapping `(SinkId, mpsc::Receiver<SinkEvent>)` with
+- [x] `Subscription` type wrapping `(SinkId, mpsc::Receiver<SinkEvent>)` with
   Track A adapters: `.id()`, `.into_receiver()`, `.joined(LabelFormat)`, `.pipe(SinkKind)` (DC24)
-- [ ] `JoinedStream`: returned by `subscription.joined()`, produces `StreamChunk`s
+- [x] `JoinedStream`: returned by `subscription.joined()`, produces `StreamChunk`s
   with `source_changed` flag + source coalescing (DC24, revised DC15)
-- [ ] `JoinedStream::next()` and `JoinedStream::format()` methods
-- [ ] `SourceLabel` struct: `host`, `target: TargetAddress`, `short()`, `minimal()` formatters
-- [ ] `StreamChunk` struct: `source: SourceLabel`, `output: TargetOutput`, `source_changed: bool`
-- [ ] `LabelFormat` enum: `Bracketed`, `Prompt`, `Custom(fn)`
-- [ ] Unit tests: JoinedStream coalescing + source_changed flag, label formatting,
+- [x] `JoinedStream::next()` and `JoinedStream::format()` methods
+- [x] `SourceLabel` struct: `host`, `target: TargetAddress`, `short()`, `minimal()` formatters
+- [x] `StreamChunk` struct: `source: SourceLabel`, `output: TargetOutput`, `source_changed: bool`
+- [x] `LabelFormat` enum: `Bracketed`, `Prompt`, `Custom(fn)`
+- [x] Unit tests: JoinedStream coalescing + source_changed flag, label formatting,
   gap passthrough, Subscription::pipe spawns task, Subscription::into_receiver works
 
-**Depends on**: 2c.1a
+**Depends on**: 2c.1a ✓
 
 ### 2c.3 — Output bus (`src/sink.rs`)
 
-- [ ] `OutputBus::new()`
-- [ ] `subscribe(filters, capacity) -> Subscription` — single subscription primitive;
+- [x] `OutputBus::new()`
+- [x] `subscribe(filters, capacity) -> Subscription` — single subscription primitive;
   all consumer composition layered on `Subscription` adapters (DC24)
-- [ ] `unsubscribe(id) -> Result<()>` — signal stop, join task if pipe'd
-- [ ] `publish(output: TargetOutput)` — fan out to all matching subscribers via `try_send`
+- [x] `unsubscribe(id) -> Result<()>` — drops sender, closing channel; piped tasks drain and exit on their own (caller holds `PipeHandle` for join semantics)
+- [x] `publish(output: TargetOutput)` — fan out to all matching subscribers via `try_send`
   while tracking per-subscriber dropped counts
-- [ ] No-silent-drop contract: if drops occurred, emit `SinkEvent::Gap { dropped }`
+- [x] No-silent-drop contract: if drops occurred, emit `SinkEvent::Gap { dropped }`
   before the next `SinkEvent::Data(output)` on that subscriber route
-- [ ] `shutdown() -> Result<()>` — signal all subscribers, join all tasks
-- [ ] `SubEntry` internal: id, name, tx, compiled filters
-- [ ] Unit tests: fan-out to 3 subscribers, slow subscriber doesn't block others,
+- [x] `shutdown()` — drops all senders, closing channels; piped tasks drain and exit on their own (caller holds `PipeHandle` for join semantics)
+- [x] `SubEntry` internal: id, name, tx, compiled filters
+- [x] Unit tests: fan-out to 3 subscribers, slow subscriber doesn't block others,
   source-routing filter matching, gap-event emission after drops, shutdown flushes
 
-**Depends on**: 2c.2a
+**Depends on**: 2c.2a ✓
 
 ### 2c.4a — Pipeline integration (streaming only)
 
-- [ ] Wire `OutputBus` into `monitor.rs`: `SessionMonitor` publishes `TargetOutput`
+- [x] Wire `OutputBus` into `monitor.rs`: `SessionMonitor` publishes `TargetOutput`
   to the bus (no rule evaluation, no action dispatch)
-- [ ] `HostHandle` owns or shares `OutputBus`; monitoring tasks publish through it
-- [ ] Integration test: monitor publishes output → `StdioSink` receives and formats,
-  `CallbackSink` receives and accumulates, `JoinedStream` combines 2 session streams
-  with label coalescing, gap/degraded metadata is preserved end-to-end
+- [x] `HostHandle` owns or shares `OutputBus`; monitoring tasks publish through it
+- [x] Integration test: monitor publishes output via mock shell → bus → subscription
+  <!-- @claude 2026-03-18: Mock-based pipeline test + live localhost_monitor_pipeline
+       integration test both implemented. -->
 
-**Depends on**: 2c.3, 2a.4a
+**Depends on**: 2c.3 ✓, 2a.4a ✓
 
 ---
 

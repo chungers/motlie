@@ -8,6 +8,8 @@ use crate::capture;
 use crate::control;
 use crate::discovery;
 use crate::keys::KeySequence;
+use crate::monitor::{MonitorHandle, SessionMonitor, SessionMonitorHandle};
+use crate::sink::OutputBus;
 use crate::transport::TransportKind;
 use crate::types::*;
 
@@ -16,13 +18,15 @@ struct HostHandleInner {
     transport: TransportKind,
     socket: Option<TmuxSocket>,
     /// Per-pane exec locks keyed by resolved `pane_id` (DC19).
-    /// All target levels resolve their effective pane via
-    /// `display-message -p '#{pane_id}'` before lock acquisition,
-    /// ensuring session/window/pane handles to the same active pane
-    /// share one lock.
-    /// Uses `std::sync::Mutex` for the map (held briefly, no await),
-    /// inner `tokio::sync::Mutex` for the per-pane exec serialization.
     exec_locks: std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Host alias for TargetOutput.host field (e.g. "localhost", "web-1").
+    host_alias: String,
+    /// Shared output bus (DC24). Lazily created on first `start_monitoring`.
+    output_bus: std::sync::Mutex<Option<Arc<OutputBus>>>,
+    /// Per-host tracking of active monitor stop signals (DC13).
+    /// Keyed by session name. The `watch::Sender<bool>` fires the stop signal;
+    /// the actual `JoinHandle` is owned by the returned `SessionMonitorHandle`.
+    monitor_signals: std::sync::Mutex<HashMap<String, tokio::sync::watch::Sender<bool>>>,
 }
 
 impl HostHandleInner {
@@ -52,6 +56,9 @@ impl HostHandle {
                 ),
                 socket: None,
                 exec_locks: std::sync::Mutex::new(HashMap::new()),
+                host_alias: "localhost".to_string(),
+                output_bus: std::sync::Mutex::new(None),
+                monitor_signals: std::sync::Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -69,6 +76,9 @@ impl HostHandle {
                 ),
                 socket: None,
                 exec_locks: std::sync::Mutex::new(HashMap::new()),
+                host_alias: "localhost".to_string(),
+                output_bus: std::sync::Mutex::new(None),
+                monitor_signals: std::sync::Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -80,6 +90,27 @@ impl HostHandle {
                 transport,
                 socket,
                 exec_locks: std::sync::Mutex::new(HashMap::new()),
+                host_alias: "localhost".to_string(),
+                output_bus: std::sync::Mutex::new(None),
+                monitor_signals: std::sync::Mutex::new(HashMap::new()),
+            }),
+        }
+    }
+
+    /// Create a HostHandle with a specific transport, socket, and host alias.
+    pub fn with_alias(
+        transport: TransportKind,
+        socket: Option<TmuxSocket>,
+        alias: &str,
+    ) -> Self {
+        HostHandle {
+            inner: Arc::new(HostHandleInner {
+                transport,
+                socket,
+                exec_locks: std::sync::Mutex::new(HashMap::new()),
+                host_alias: alias.to_string(),
+                output_bus: std::sync::Mutex::new(None),
+                monitor_signals: std::sync::Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -273,6 +304,134 @@ impl HostHandle {
         opts: &TransferOptions,
     ) -> Result<()> {
         self.inner.transport.download(remote_path, local_path, opts).await
+    }
+
+    // --- Monitoring lifecycle (2a.4a, DC13, DC24) ---
+
+    /// Get or create the shared OutputBus for this host.
+    pub fn output_bus(&self) -> Arc<OutputBus> {
+        let mut bus_opt = self.inner.output_bus.lock().expect("output_bus lock poisoned");
+        if let Some(bus) = bus_opt.as_ref() {
+            return bus.clone();
+        }
+        let bus = Arc::new(OutputBus::new());
+        *bus_opt = Some(bus.clone());
+        bus
+    }
+
+    /// Start monitoring a single session. Opens a control mode connection,
+    /// parses `%output` frames, and publishes to the OutputBus.
+    /// Returns a `SessionMonitorHandle` for lifecycle control.
+    ///
+    /// For awaited teardown, call `SessionMonitorHandle::shutdown()`.
+    /// For fire-and-forget stop, use `HostHandle::stop_monitoring_session()`.
+    pub async fn start_monitoring_session(
+        &self,
+        session_name: &str,
+    ) -> Result<SessionMonitorHandle> {
+        let bus = self.output_bus();
+        let host_alias = self.inner.host_alias.clone();
+        let session = session_name.to_string();
+
+        // Resolve the session first — fail before any registration
+        let sessions = discovery::list_sessions(&self.inner.transport, self.inner.socket.as_ref()).await?;
+        let session_info = sessions
+            .into_iter()
+            .find(|s| s.name == session)
+            .ok_or_else(|| anyhow!("session '{}' not found", session))?;
+        let target = Target {
+            inner: self.inner.clone(),
+            address: TargetAddress::Session(session_info),
+        };
+
+        // Open a shell channel for control mode
+        let mut shell = self.inner.transport.open_shell(80, 24).await?;
+
+        // Create stop signal and register for host-level tracking (DC13).
+        // Registration happens only after session resolution + shell open succeed,
+        // so monitored_sessions() never reports sessions that failed to start.
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        {
+            let mut signals = self.inner.monitor_signals.lock()
+                .expect("monitor_signals lock poisoned");
+            signals.insert(session_name.to_string(), stop_tx.clone());
+        }
+
+        // Spawn the monitor task — clean up signal registration when done
+        let inner_ref = self.inner.clone();
+        let session_for_cleanup = session_name.to_string();
+        let task = tokio::spawn(async move {
+            let mut monitor = SessionMonitor::new(session.clone(), host_alias);
+            let result = monitor.run(&mut shell, &bus, stop_rx).await;
+            // Remove from tracking on task completion
+            if let Ok(mut signals) = inner_ref.monitor_signals.lock() {
+                signals.remove(&session_for_cleanup);
+            }
+            result
+        });
+
+        Ok(SessionMonitorHandle::new(target, stop_tx, task))
+    }
+
+    /// Start monitoring all sessions (optionally filtered).
+    /// Returns a `MonitorHandle` for aggregate lifecycle control.
+    pub async fn start_monitoring(
+        &self,
+        filter: Option<&regex::Regex>,
+    ) -> Result<MonitorHandle> {
+        let sessions = self.list_sessions().await?;
+        let mut handles = HashMap::new();
+
+        for session in sessions {
+            if let Some(re) = filter {
+                if !re.is_match(&session.name) {
+                    continue;
+                }
+            }
+            let name = session.name.clone();
+            let handle = self.start_monitoring_session(&name).await?;
+            handles.insert(name, handle);
+        }
+
+        Ok(MonitorHandle::new(handles))
+    }
+
+    /// Signal a specific session's monitor to stop (fire-and-forget).
+    ///
+    /// This only sends the stop signal — it does **not** await task completion.
+    /// The monitor task will exit asynchronously and clean up its registration.
+    /// For awaited teardown guarantees, use `SessionMonitorHandle::shutdown()`.
+    pub fn stop_monitoring_session(&self, session_name: &str) -> Result<()> {
+        let signals = self.inner.monitor_signals.lock()
+            .expect("monitor_signals lock poisoned");
+        let tx = signals
+            .get(session_name)
+            .ok_or_else(|| anyhow!("session '{}' not being monitored", session_name))?;
+        let _ = tx.send(true);
+        Ok(())
+    }
+
+    /// Signal all session monitors to stop (fire-and-forget).
+    ///
+    /// Sends the stop signal to every active monitor. Does **not** await task
+    /// completion. For awaited teardown, use `MonitorHandle::shutdown()`.
+    pub fn stop_monitoring(&self) {
+        let signals = self.inner.monitor_signals.lock()
+            .expect("monitor_signals lock poisoned");
+        for (_, tx) in signals.iter() {
+            let _ = tx.send(true);
+        }
+    }
+
+    /// List currently monitored session names.
+    pub fn monitored_sessions(&self) -> Vec<String> {
+        let signals = self.inner.monitor_signals.lock()
+            .expect("monitor_signals lock poisoned");
+        signals.keys().cloned().collect()
+    }
+
+    pub fn host_alias(&self) -> &str {
+        &self.inner.host_alias
     }
 }
 
@@ -780,6 +939,43 @@ impl Target {
         }
     }
 
+    // --- Monitoring (DC13, 2a.4a) ---
+
+    /// Start monitoring this session's output via control mode.
+    ///
+    /// Session-level only — returns error for window/pane targets.
+    /// Opens a control mode connection, parses `%output` frames, and
+    /// publishes `TargetOutput` to the host's `OutputBus`.
+    pub async fn start_monitoring(&self) -> Result<SessionMonitorHandle> {
+        if !matches!(self.address, TargetAddress::Session(_)) {
+            return Err(anyhow!(
+                "start_monitoring() is session-level only; target '{}' is {:?}",
+                self.target_string(),
+                self.level()
+            ));
+        }
+        let host = HostHandle { inner: self.inner.clone() };
+        host.start_monitoring_session(self.session_name()).await
+    }
+
+    /// Signal this session's monitor to stop (fire-and-forget).
+    ///
+    /// Session-level only — returns error for window/pane targets.
+    /// Sends the stop signal but does **not** await task completion.
+    /// For awaited teardown, use the `SessionMonitorHandle` returned by
+    /// `start_monitoring()` and call `shutdown()` on it.
+    pub fn stop_monitoring(&self) -> Result<()> {
+        if !matches!(self.address, TargetAddress::Session(_)) {
+            return Err(anyhow!(
+                "stop_monitoring() is session-level only; target '{}' is {:?}",
+                self.target_string(),
+                self.level()
+            ));
+        }
+        let host = HostHandle { inner: self.inner.clone() };
+        host.stop_monitoring_session(self.session_name())
+    }
+
     // --- Geometry & history (DC20, Phase 1.9b) ---
 
     /// Query the current pane geometry and scrollback state.
@@ -1044,6 +1240,24 @@ fn parse_sentinel_output(content: &str, marker: &str) -> Option<ExecOutput> {
     let stdout = lines[start..sentinel_line_idx].join("\n");
     let stdout = stdout.trim_end().to_string();
     Some(ExecOutput { stdout, exit_code })
+}
+
+#[cfg(test)]
+impl HostHandle {
+    /// Create a Target for testing without querying tmux.
+    pub fn create_target_for_test(&self, session_name: &str) -> Target {
+        Target {
+            inner: self.inner.clone(),
+            address: TargetAddress::Session(SessionInfo {
+                name: session_name.to_string(),
+                id: "$0".to_string(),
+                created: 0,
+                attached: false,
+                window_count: 1,
+                group: None,
+            }),
+        }
+    }
 }
 
 #[cfg(test)]

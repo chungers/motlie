@@ -106,6 +106,126 @@ async fn localhost_session_lifecycle() {
     );
 }
 
+/// 2a.4a — Integration test: start monitor, send text, verify TargetOutput,
+/// stop cleanly, verify on-demand operations still work after stop (DC13).
+#[tokio::test]
+async fn localhost_monitor_pipeline() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+
+    let session_name = "motlie_test_monitor";
+    let host = HostHandle::local();
+
+    // Clean up leftover
+    if let Ok(Some(t)) = host.session(session_name).await {
+        let _ = t.kill().await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // 1. Create session
+    let target = host
+        .create_session(session_name, &Default::default())
+        .await
+        .expect("create_session failed");
+    tokio::time::sleep(Duration::from_millis(500)).await; // let shell start
+
+    // 2. Start monitoring — verify it appears in monitored_sessions()
+    let monitor_handle = host
+        .start_monitoring_session(session_name)
+        .await
+        .expect("start_monitoring_session failed");
+    assert!(monitor_handle.is_active());
+
+    let monitored = host.monitored_sessions();
+    assert!(
+        monitored.contains(&session_name.to_string()),
+        "session not in monitored_sessions(): {:?}",
+        monitored
+    );
+
+    // 3. Subscribe to the output bus
+    let bus = host.output_bus();
+    let filter = motlie_tmux::SinkFilter::for_session(session_name);
+    let sub = bus
+        .subscribe(vec![filter], 64)
+        .expect("subscribe failed");
+    let mut rx = sub.into_receiver();
+
+    // 4. Send text + Enter to the pane — this generates control mode output
+    target
+        .send_text("echo MOTLIE_MONITOR_TEST")
+        .await
+        .expect("send_text failed");
+    let enter = motlie_tmux::KeySequence::parse("{Enter}").unwrap();
+    target.send_keys(&enter).await.expect("send_keys failed");
+
+    // 5. Wait for TargetOutput on the subscription (with timeout)
+    let mut found_content = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        tokio::select! {
+            event = rx.recv() => {
+                match event {
+                    Some(motlie_tmux::SinkEvent::Data(output)) => {
+                        assert_eq!(output.session_name(), session_name);
+                        assert_eq!(output.host, "localhost");
+                        assert!(output.sequence > 0);
+                        if output.content.contains("MOTLIE_MONITOR_TEST") {
+                            found_content = true;
+                            break;
+                        }
+                    }
+                    Some(motlie_tmux::SinkEvent::Gap { .. }) => continue,
+                    None => break,
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(100)) => continue,
+        }
+    }
+    assert!(found_content, "expected output not received from monitor");
+
+    // 6. Stop monitoring via Target::stop_monitoring()
+    target.stop_monitoring().expect("stop_monitoring failed");
+
+    // Give the monitor task time to exit and clean up its registration
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Verify removed from monitored_sessions
+    let monitored_after = host.monitored_sessions();
+    assert!(
+        !monitored_after.contains(&session_name.to_string()),
+        "session should be removed after stop: {:?}",
+        monitored_after
+    );
+
+    // 7. Verify on-demand operations still work after monitoring stops
+    let content = target.capture().await.expect("capture after stop failed");
+    assert!(
+        content.contains("MOTLIE_MONITOR_TEST"),
+        "capture should still work after monitoring stops"
+    );
+
+    // 8. Also verify Target::start_monitoring() convenience
+    let monitor_handle2 = target
+        .start_monitoring()
+        .await
+        .expect("target.start_monitoring() failed");
+    assert!(monitor_handle2.is_active());
+    monitor_handle2.shutdown().await.expect("shutdown failed");
+
+    // 9. Verify session-level-only gate
+    let pane = target.pane(0).await.unwrap().unwrap();
+    assert!(pane.start_monitoring().await.is_err());
+    assert!(pane.stop_monitoring().is_err());
+
+    // 10. Cleanup
+    let _ = monitor_handle.shutdown().await; // may already be stopped
+    target.kill().await.expect("kill failed");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+}
+
 /// 1.11m — Integration test: SshConfig::parse("ssh://localhost")?.connect()
 /// produces a working HostHandle that can list_sessions().
 #[tokio::test]

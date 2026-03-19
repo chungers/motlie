@@ -21,6 +21,11 @@
 //!             Prints content + fidelity metadata each tick. Demonstrates
 //!             resize/reflow detection.
 //!
+//!   monitor   Event-driven streaming via tmux control mode. Opens a control
+//!             mode connection and prints output events as they arrive — no
+//!             polling. Labels each line with its source pane. Demonstrates
+//!             the OutputBus/Subscription/JoinedStream pipeline.
+//!
 //! Usage:
 //!   stream_pane <uri> <target> [--mode MODE] [--lines N] [--interval MS] [--pattern REGEX]
 //!
@@ -39,10 +44,13 @@
 //!
 //!   # Watch with fidelity detection (try resizing the target terminal)
 //!   ./target/debug/examples/stream_pane ssh://localhost my_session --mode fidelity
+//!
+//!   # Event-driven monitoring (no polling, real-time output events)
+//!   ./target/debug/examples/stream_pane ssh://localhost my_session --mode monitor
 
 use motlie_tmux::{
-    overlap_deduplicate, CaptureNormalizeMode, CaptureOptions, ScrollbackQuery, SshConfig,
-    TargetSpec,
+    overlap_deduplicate, CaptureNormalizeMode, CaptureOptions, LabelFormat, ScrollbackQuery,
+    SinkFilter, SshConfig, TargetSpec,
 };
 use std::io::Write;
 use std::time::Duration;
@@ -53,6 +61,7 @@ enum Mode {
     Tail,
     Until,
     Fidelity,
+    Monitor,
 }
 
 struct Args {
@@ -102,12 +111,21 @@ MODES:
                ClientResize / PaneResize issues appear.
                Uses: CaptureOptions { detect_reflow: true }, OutputFidelity
 
+    monitor    Event-driven streaming via tmux control mode. No polling —
+               output events arrive in real-time as the pane produces them.
+               Each line is labeled with its source pane. Demonstrates the
+               OutputBus / Subscription / JoinedStream pipeline.
+               --interval and --lines are ignored in this mode.
+               Uses: HostHandle::start_monitoring_session(), OutputBus,
+                     Subscription::joined(), JoinedStream
+
 EXAMPLES:
     stream_pane ssh://localhost my_session
     stream_pane ssh://localhost my_session --mode visible
     stream_pane ssh://localhost my_session --mode tail --lines 100 --interval 500
     stream_pane ssh://localhost my_session --mode until --pattern '^\\$ '
     stream_pane ssh://localhost my_session --mode fidelity
+    stream_pane ssh://localhost my_session --mode monitor
     stream_pane ssh://localhost \"my_session:0.1\" --lines 30";
 
 fn parse_args() -> Result<Args, String> {
@@ -121,7 +139,7 @@ fn parse_args() -> Result<Args, String> {
 
     if args.len() < 3 {
         return Err(format!(
-            "usage: {} <uri> <target> [--mode visible|tail|until|fidelity] \
+            "usage: {} <uri> <target> [--mode visible|tail|until|fidelity|monitor] \
              [--lines N] [--interval MS] [--pattern REGEX]\n\n\
              Try -h for detailed help.",
             args[0]
@@ -143,7 +161,8 @@ fn parse_args() -> Result<Args, String> {
                     "tail" => Mode::Tail,
                     "until" => Mode::Until,
                     "fidelity" => Mode::Fidelity,
-                    other => return Err(format!("unknown mode: '{}' (visible|tail|until|fidelity)", other)),
+                    "monitor" => Mode::Monitor,
+                    other => return Err(format!("unknown mode: '{}' (visible|tail|until|fidelity|monitor)", other)),
                 };
             }
             "--lines" => {
@@ -213,14 +232,23 @@ async fn main() -> anyhow::Result<()> {
         Mode::Tail => "tail",
         Mode::Until => "until",
         Mode::Fidelity => "fidelity",
+        Mode::Monitor => "monitor",
     };
-    eprintln!(
-        "Streaming {} [mode={}, lines={}, interval={}ms]. Ctrl-C to stop.",
-        target.target_string(),
-        mode_name,
-        args.lines,
-        args.interval_ms
-    );
+
+    if matches!(args.mode, Mode::Monitor) {
+        eprintln!(
+            "Monitoring {} [mode=monitor, event-driven]. Ctrl-C to stop.",
+            target.target_string(),
+        );
+    } else {
+        eprintln!(
+            "Streaming {} [mode={}, lines={}, interval={}ms]. Ctrl-C to stop.",
+            target.target_string(),
+            mode_name,
+            args.lines,
+            args.interval_ms
+        );
+    }
 
     let interval = Duration::from_millis(args.interval_ms);
 
@@ -229,6 +257,7 @@ async fn main() -> anyhow::Result<()> {
         Mode::Tail => stream_tail(&target, interval, args.lines).await,
         Mode::Until => stream_until(&target, interval, args.lines, &args.pattern).await,
         Mode::Fidelity => stream_fidelity(&target, interval).await,
+        Mode::Monitor => stream_monitor(&host, &target).await,
     }
 }
 
@@ -425,6 +454,68 @@ async fn stream_fidelity(
         }
     }
 
+    eprintln!("\nStopped.");
+    Ok(())
+}
+
+/// Mode: monitor — event-driven streaming via tmux control mode.
+///
+/// Opens a control mode connection (`tmux -C attach -t <session>`) and
+/// subscribes to the OutputBus for real-time output events. No polling —
+/// events arrive as the pane produces them. Each line is labeled with its
+/// source pane via JoinedStream.
+///
+/// This is fundamentally different from the poll-based modes above:
+/// - **Push vs poll**: events are delivered as they happen, not sampled at intervals
+/// - **Multi-pane**: all panes in the session are streamed, with source labels
+/// - **Forward-only**: no scrollback window, just new output as it appears
+async fn stream_monitor(
+    host: &motlie_tmux::HostHandle,
+    target: &motlie_tmux::Target,
+) -> anyhow::Result<()> {
+    let session_name = target.session_name();
+
+    // Start monitoring the session — opens control mode via a shell channel
+    let monitor_handle = host.start_monitoring_session(&session_name).await?;
+
+    // Subscribe to the output bus, filtering to this session
+    let bus = host.output_bus();
+    let filter = SinkFilter::for_session(&session_name);
+    let subscription = bus.subscribe(vec![filter], 64)?;
+
+    // Convert to a JoinedStream — merges events with source labels
+    let mut stream = subscription.joined(LabelFormat::Bracketed);
+
+    let mut stdout = std::io::stdout().lock();
+
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => break,
+            chunk = stream.next() => {
+                match chunk {
+                    Some(chunk) => {
+                        // Print source label on source change
+                        if chunk.source_changed {
+                            let label = chunk.source.minimal();
+                            writeln!(stdout, "\x1b[2m--- {} ---\x1b[0m", label)?;
+                        }
+                        stdout.write_all(chunk.output.content.as_bytes())?;
+                        if !chunk.output.content.ends_with('\n') {
+                            stdout.write_all(b"\n")?;
+                        }
+                        stdout.flush()?;
+                    }
+                    None => {
+                        eprintln!("Monitor stream ended.");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Clean shutdown
+    monitor_handle.shutdown().await?;
     eprintln!("\nStopped.");
     Ok(())
 }
