@@ -42,9 +42,15 @@ in [`examples/README.md`](../examples/README.md).
 14. [Geometry and Reflow Detection](#14-geometry-and-reflow-detection)
 15. [History Limit Management](#15-history-limit-management)
 
+**Part II-b — Output Monitoring Pipeline (DC24, Track A)**
+17. [Monitoring Sessions](#17-monitoring-sessions)
+18. [OutputBus and Subscriptions](#18-outputbus-and-subscriptions)
+19. [JoinedStream — Multi-Pane View](#19-joinedstream--multi-pane-view)
+20. [Sink Pipeline](#20-sink-pipeline)
+
 **Part III — Reference**
-16. [Normalization Utilities](#16-normalization-utilities)
-17. [Type Quick Reference](#17-type-quick-reference)
+21. [Normalization Utilities](#21-normalization-utilities)
+22. [Type Quick Reference](#22-type-quick-reference)
 
 ---
 
@@ -918,6 +924,7 @@ Query-based extraction of scrollback history.
 
 > See [`examples/stream_pane.rs`](../examples/stream_pane.rs) for continuous
 > streaming with overlap-aware deduplication (`tail -f` for tmux panes).
+> For event-driven (push) streaming, see `--mode monitor` and [§17-20](#17-monitoring-sessions).
 
 ### Last N lines
 
@@ -1150,9 +1157,330 @@ setup.kill().await?;
 
 ---
 
+# Part II-b — Output Monitoring Pipeline (DC24, Track A)
+
+The monitoring pipeline provides **event-driven** (push) access to tmux pane
+output via control mode. This is fundamentally different from the poll-based
+capture/sample APIs above:
+
+| Approach | Mechanism | Latency | Multi-pane | API |
+|----------|-----------|---------|------------|-----|
+| **Capture/sample** (§10-13) | Poll `capture-pane` at intervals | Interval-bound | Per-target only | `target.capture()`, `target.sample_text()` |
+| **Monitor pipeline** (§17-20) | Push via `tmux -C attach` | Real-time | All panes in session | `host.start_monitoring_session()`, `OutputBus` |
+
+> See [`examples/stream_pane.rs --mode monitor`](../examples/stream_pane.rs) for
+> a runnable example comparing poll vs push streaming side by side.
+
+---
+
+## 17. Monitoring Sessions
+
+### Start monitoring a session
+
+```rust
+use motlie_tmux::{HostHandle, SshConfig};
+
+let host = SshConfig::parse("ssh://localhost")?.connect().await?;
+
+// Start monitoring — opens tmux control mode connection
+let monitor = host.start_monitoring_session("build").await?;
+
+// The monitor is now streaming all pane output to the OutputBus.
+// Deref gives access to the underlying Target:
+println!("Monitoring: {}", monitor.target_string());
+assert!(monitor.is_active());
+```
+
+### Monitor lifecycle
+
+```rust
+// Stop monitoring — signals the control mode connection to close
+monitor.shutdown().await?;
+assert!(!monitor.is_active());
+```
+
+### Monitor all sessions
+
+```rust
+// Monitor all sessions (optional regex filter)
+let mut monitors = host.start_monitoring(None).await?;
+println!("{} sessions monitored", monitors.session_count());
+
+// Or filter by pattern
+let re = regex::Regex::new("^build")?;
+let mut monitors = host.start_monitoring(Some(&re)).await?;
+
+// Access individual session handles
+if let Some(h) = monitors.get("build") {
+    println!("build is {}", if h.is_active() { "active" } else { "stopped" });
+}
+
+// Stop one session
+monitors.stop_session("build").await?;
+
+// Shutdown all
+monitors.shutdown().await?;
+```
+
+### Target-level convenience
+
+```rust
+// Session-level targets can start/stop monitoring directly
+let target = host.session("build").await?.unwrap();
+let monitor = target.start_monitoring().await?;
+
+// ... use monitor ...
+
+target.stop_monitoring()?;
+
+// Window/pane targets return an error — monitoring is session-scoped
+let pane = target.pane(0).await?.unwrap();
+assert!(pane.start_monitoring().await.is_err());
+```
+
+### Host-level query and control
+
+```rust
+// List all sessions being monitored on this host
+let names = host.monitored_sessions();  // Vec<String>
+
+// Stop a specific session's monitor
+host.stop_monitoring_session("build")?;
+
+// Stop all monitors on this host
+host.stop_monitoring();
+```
+
+---
+
+## 18. OutputBus and Subscriptions
+
+The `OutputBus` is a shared fan-out bus. Monitors publish `TargetOutput`
+events; subscribers receive them through filtered channels.
+
+### Subscribe with source routing
+
+```rust
+use motlie_tmux::{SinkFilter, SinkEvent};
+
+let bus = host.output_bus();
+
+// Subscribe to all output (no filters)
+let sub_all = bus.subscribe(vec![], 64)?;
+
+// Subscribe filtered to a specific session
+let filter = SinkFilter {
+    session: Some("^build$".to_string()),
+    ..Default::default()
+};
+let sub_build = bus.subscribe(vec![filter], 64)?;
+
+// Subscribe filtered to a specific pane
+let filter = SinkFilter {
+    session: Some("^build$".to_string()),
+    pane: Some("%5".to_string()),
+    ..Default::default()
+};
+let sub_pane = bus.subscribe(vec![filter], 64)?;
+```
+
+### Consume events via receiver
+
+```rust
+let mut rx = sub_all.into_receiver();
+
+// Poll for events
+while let Some(event) = rx.recv().await {
+    match event {
+        SinkEvent::Data(output) => {
+            println!("[{}:{}] {}",
+                output.host,
+                output.target_string(),
+                output.content);
+        }
+        SinkEvent::Gap { dropped, .. } => {
+            eprintln!("warning: {} events dropped (backpressure)", dropped);
+        }
+    }
+}
+```
+
+### SinkFilter routing
+
+All filter fields are optional regex strings. A filter matches when **all**
+non-None fields match (AND logic). Multiple filters in a subscription are
+OR'd — an event matches if **any** filter matches.
+
+```rust
+// Match any session on host "web-1", any pane
+let filter = SinkFilter {
+    host: Some("^web-1$".to_string()),
+    ..Default::default()
+};
+
+// Match session "build", window 0 only
+let filter = SinkFilter {
+    session: Some("^build$".to_string()),
+    window: Some("^build:0$".to_string()),
+    ..Default::default()
+};
+```
+
+### TargetOutput fields
+
+```rust
+// Fields available on every event:
+output.host              // "localhost", "web-1", etc.
+output.content           // Normalized content (per monitor mode)
+output.raw_content       // Some(...) when normalization changed content
+output.sequence          // Monotonic per-source sequence number
+output.fidelity          // OutputFidelity (clean for control mode)
+output.timestamp         // std::time::Instant of emission
+
+// Accessors:
+output.session_name()    // Session name at any source level
+output.pane_id()         // Some("%5") for pane-level sources
+output.target_string()   // Full tmux target string
+output.degraded()        // Shorthand for fidelity.degraded
+```
+
+### Backpressure and gap detection
+
+When a subscriber can't keep up, the bus drops events and tracks the count.
+Before the next `Data` delivery on that subscriber, a `Gap` event is emitted:
+
+```rust
+match event {
+    SinkEvent::Gap { dropped, timestamp } => {
+        // `dropped` events were lost since `timestamp`
+        // The subscriber is now caught up
+    }
+    SinkEvent::Data(output) => { /* normal delivery */ }
+}
+```
+
+---
+
+## 19. JoinedStream — Multi-Pane View
+
+`JoinedStream` consolidates output from multiple panes into a single stream
+with source attribution. It detects when the source changes between
+consecutive chunks.
+
+### Create from subscription
+
+```rust
+use motlie_tmux::LabelFormat;
+
+let sub = bus.subscribe(vec![], 64)?;
+
+// Bracketed labels: "[localhost:build:0.0] content"
+let mut stream = sub.joined(LabelFormat::Bracketed);
+
+// Or prompt-style: "localhost:build:0.0> content"
+let mut stream = sub.joined(LabelFormat::Prompt);
+
+// Or custom formatting
+let mut stream = sub.joined(LabelFormat::Custom(|source, content| {
+    format!("== {} == {}", source.minimal(), content)
+}));
+```
+
+### Read chunks
+
+```rust
+while let Some(chunk) = stream.next().await {
+    if chunk.source_changed {
+        // New source — print separator
+        println!("--- {} ---", chunk.source.minimal());
+    }
+    print!("{}", chunk.output.content);
+}
+```
+
+### StreamChunk fields
+
+```rust
+chunk.source           // SourceLabel { host, target }
+chunk.output           // TargetOutput (full event data)
+chunk.source_changed   // true when source differs from previous chunk
+```
+
+### SourceLabel formatting
+
+```rust
+chunk.source.short()    // "localhost:build:0.1" (host + target)
+chunk.source.minimal()  // "build:0.1" (no host prefix)
+```
+
+### Using format() for rendering
+
+```rust
+// JoinedStream::format() applies the configured LabelFormat
+let text = stream.format(&chunk);
+// With Bracketed: "[localhost:build:0.1] hello world"
+// With Prompt:    "localhost:build:0.1> hello world"
+```
+
+---
+
+## 20. Sink Pipeline
+
+Sinks are terminal consumers driven by subscriptions. The pipeline is:
+`OutputBus` → `Subscription` → adapter (`.pipe()`, `.joined()`, `.into_receiver()`) → consumer.
+
+### Pipe to stdio
+
+```rust
+use motlie_tmux::{SinkKind, StdioSink, StdioFormat};
+
+let sub = bus.subscribe(vec![], 64)?;
+
+// Pipe events to stdout with source prefix labels
+let sink = SinkKind::Stdio(StdioSink::new(StdioFormat::Prefixed));
+let task = sub.pipe(sink);  // Spawns async task, returns JoinHandle
+```
+
+### Pipe to callback
+
+```rust
+use motlie_tmux::{SinkKind, CallbackSink, SinkEvent};
+use std::sync::Arc;
+use std::any::Any;
+
+let events: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+let state: Arc<dyn Any + Send + Sync> = events.clone();
+
+let sink = SinkKind::Callback(CallbackSink {
+    name: "collector".into(),
+    state,
+    on_output: |state, event| {
+        if let SinkEvent::Data(output) = event {
+            let events = state.downcast_ref::<std::sync::Mutex<Vec<String>>>().unwrap();
+            events.lock().unwrap().push(output.content);
+        }
+        Ok(())
+    },
+    on_flush: None,
+});
+
+let sub = bus.subscribe(vec![], 64)?;
+let task = sub.pipe(sink);
+```
+
+### StdioFormat options
+
+| Format | Output |
+|--------|--------|
+| `Raw` | Content only, no labels |
+| `Prefixed` | `[host:session:window.pane] content` |
+| `Json` | JSON object per event |
+
+---
+
 # Part III — Reference
 
-## 17. Normalization Utilities
+## 21. Normalization Utilities
 
 Standalone functions re-exported from the crate root, usable independently
 of any transport or target:
@@ -1186,7 +1514,7 @@ assert!(issues.is_empty());
 
 ---
 
-## 18. Type Quick Reference
+## 22. Type Quick Reference
 
 ### Core handles
 
@@ -1252,6 +1580,27 @@ assert!(issues.is_empty());
 | `TmuxSocket` | Enum: Name(String), Path(String) |
 | `TransferOptions` | overwrite (bool, default true), recursive (bool, default false) |
 | `MockFsEntry` | Enum: File(Vec<u8>), Dir — in-memory mock filesystem entries |
+
+### Monitoring pipeline (DC24, Track A)
+
+| Type | Description |
+|------|-------------|
+| `SessionMonitorHandle` | Handle to one monitored session — `shutdown()`, `is_active()`, `Deref<Target>` |
+| `MonitorHandle` | Aggregate handle — `shutdown()`, `get()`, `get_by_spec()`, `stop_session()`, `active_sessions()` |
+| `OutputBus` | Fan-out bus — `subscribe()`, `publish()`, `unsubscribe()`, `shutdown()` |
+| `Subscription` | Bus subscription — `.into_receiver()`, `.joined()`, `.pipe()` |
+| `TargetOutput` | Output event — source, host, content, raw_content, sequence, fidelity, timestamp |
+| `SinkEvent` | Enum: `Data(TargetOutput)`, `Gap { dropped, timestamp }` |
+| `SinkFilter` | Source routing — host, session, window, pane (optional regex strings) |
+| `SinkId` | Opaque subscription identifier |
+| `SinkKind` | Enum: `Stdio(StdioSink)`, `Callback(CallbackSink)` — static dispatch |
+| `CallbackSink` | User sink — name, state (`Arc<dyn Any>`), on_output, on_flush |
+| `StdioSink` | Stdout writer with `StdioFormat` |
+| `StdioFormat` | Enum: Raw, Prefixed, Json |
+| `JoinedStream` | Multi-source view — `next()`, `format()` |
+| `StreamChunk` | source (`SourceLabel`), output (`TargetOutput`), source_changed |
+| `SourceLabel` | host + target — `short()`, `minimal()` |
+| `LabelFormat` | Enum: Bracketed, Prompt, Custom(fn) |
 
 ### Shell channel (low-level, used by monitor layer — Phase 2a)
 
