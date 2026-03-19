@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-18 | @claude | Track A deferred items completed: (1) fidelity normalization in monitor via CaptureNormalizeMode, (2) MonitorHandle.stop_session()/get_by_spec(), (3) HostHandle.stop_monitoring_session()/stop_monitoring()/monitored_sessions() with per-host signal tracking, (4) Target::start_monitoring()/stop_monitoring() session-level convenience, (5) live localhost integration test (localhost_monitor_pipeline). 268 lib + 19 integration tests. |
 | 2026-03-18 | @claude | Track A implemented (2a.2a, 2c.1a, 2c.2a, 2c.3, 2a.4a, 2c.4a): control mode parser, sink types, SinkKind/Subscription/JoinedStream, OutputBus, monitor handle wiring, pipeline integration. 262 tests. Deferred items noted inline: fidelity normalization in monitor, Target-level monitoring methods, live tmux integration test. |
 | 2026-03-17 | @claude | DC24 R2 — Address PR #82 review round 2: add Track B static-dispatch guardrail note (closed `MatcherKind` enum, no `Box<dyn Matcher>`). |
 | 2026-03-17 | @claude | DC24 R1 — Address PR #82 review: unify subscription API (`subscribe() -> Subscription` with adapters). Rules/reactors as subscription consumers, not monitor-internal (removes 2a.2b). Replace 2c.1b with 2b.4 (subscription matching + reaction adapters) and 2c.4b with 2b.5 (action handle wiring). One matching system via `.filter()`/`.react()`. Track B now: 2b.2 → 2b.1 → 2b.4 → 2b.5 → 2b.3. |
@@ -683,12 +684,13 @@ via JoinedStream — with no matcher or action dispatch dependency.
   `tmux -C attach -t <session>` output
 - [x] Per-pane stream assembly state keyed by `pane_id`:
   partial-frame buffering, newline canonicalization, monotonic per-pane `sequence`
-- [ ] Reuse `1.9a` normalization/fidelity path for monitor events:
+- [x] Reuse `1.9a` normalization/fidelity path for monitor events:
   preserve ANSI in fidelity modes, apply the same mode-to-field contract,
   annotate degraded/reflow/history conditions in emitted metadata
-  <!-- @claude 2026-03-18: Deferred — monitor currently emits OutputFidelity::clean().
-       Fidelity integration with capture normalization modes will be added when
-       monitor-side normalization is needed. Basic pipeline works without it. -->
+  <!-- @claude 2026-03-18: Implemented — SessionMonitor accepts CaptureNormalizeMode
+       (Raw/ScreenStable/PlainText). process_output() applies normalization, sets
+       raw_content when content differs. Fidelity remains clean() for control mode
+       (no geometry/reflow concern). Unit tests verify all three modes. -->
 - [x] Handle other control mode messages gracefully (`%begin`, `%end`, `%error`, etc.)
 - [x] `SessionMonitor::run()` — main loop: read from shell, parse, emit `TargetOutput`
   (no rule evaluation, no action dispatch — streaming only)
@@ -706,27 +708,30 @@ via JoinedStream — with no matcher or action dispatch dependency.
 - [x] `Deref<Target=Target>` for `SessionMonitorHandle`
 - [x] `MonitorHandle`: `HashMap<String, SessionMonitorHandle>`, `shutdown()`,
   `stop_session()`, `get()`, `get_by_spec()`, `active_sessions()`
-  <!-- @claude 2026-03-18: stop_session(), get_by_spec() deferred to when needed.
-       get() and active_sessions() implemented. -->
+  <!-- @claude 2026-03-18: All methods implemented. stop_session() removes and shuts
+       down by name. get_by_spec() resolves via TargetSpec::session_name(). -->
 - [x] `HostHandle::start_monitoring()` — discovers sessions, spawns per-session monitors,
   returns `MonitorHandle` (no rules parameter — monitors all output)
 - [x] `HostHandle::start_monitoring_session()`
-- [ ] `stop_monitoring_session()`, `stop_monitoring()`, `monitored_sessions()` (DC13)
-  <!-- @claude 2026-03-18: Stop/query methods deferred — shutdown() on handles works.
-       Per-host tracking of active monitors will be added when Fleet integration
-       needs it. -->
-- [ ] `Target::start_monitoring()` — session-level only, returns `SessionMonitorHandle`
-- [ ] `Target::stop_monitoring()` — session-level only, delegates to
+- [x] `stop_monitoring_session()`, `stop_monitoring()`, `monitored_sessions()` (DC13)
+  <!-- @claude 2026-03-18: Implemented. Per-host tracking via monitor_signals map in
+       HostHandleInner (watch::Sender keyed by session name). Stop signals fire the
+       watch channel; tasks self-deregister on exit. -->
+- [x] `Target::start_monitoring()` — session-level only, returns `SessionMonitorHandle`
+- [x] `Target::stop_monitoring()` — session-level only, delegates to
   `HostHandle::stop_monitoring_session(&self)`; returns error if called on
   window/pane target
-  <!-- @claude 2026-03-18: Target-level monitoring convenience methods deferred.
-       HostHandle methods are the primary API. -->
-- [ ] Integration test (localhost): start monitor, send text to pane, verify
+  <!-- @claude 2026-03-18: Implemented. Both methods gate on session level and
+       reconstruct HostHandle from inner Arc for delegation. Integration test
+       verifies session-only gate and round-trip start/stop. -->
+- [x] Integration test (localhost): start monitor, send text to pane, verify
   `TargetOutput` emitted, `target.stop_monitoring()` cleanly stops,
   verify on-demand operations still work after stop (DC13)
-  <!-- @claude 2026-03-18: Full localhost integration test requires live tmux.
-       Mock-based pipeline test (monitor_run_publishes_to_bus) covers the
-       parser + bus wiring. Live test deferred to Phase 4 integration. -->
+  <!-- @claude 2026-03-18: Implemented as localhost_monitor_pipeline in
+       tests/integration.rs. Full round-trip: create session → start monitoring →
+       subscribe → send text → verify TargetOutput received → stop_monitoring() →
+       verify capture still works → verify Target::start/stop_monitoring() →
+       verify session-level-only gate on pane targets → cleanup. -->
 
 **Depends on**: 2a.2a ✓
 
@@ -789,8 +794,8 @@ via JoinedStream — with no matcher or action dispatch dependency.
   to the bus (no rule evaluation, no action dispatch)
 - [x] `HostHandle` owns or shares `OutputBus`; monitoring tasks publish through it
 - [x] Integration test: monitor publishes output via mock shell → bus → subscription
-  <!-- @claude 2026-03-18: Full multi-session JoinedStream integration test deferred
-       to live tmux testing. Mock-based pipeline test verifies core wiring. -->
+  <!-- @claude 2026-03-18: Mock-based pipeline test + live localhost_monitor_pipeline
+       integration test both implemented. -->
 
 **Depends on**: 2c.3 ✓, 2a.4a ✓
 

@@ -12,6 +12,7 @@ use std::time::Instant;
 use anyhow::{anyhow, Result};
 use tokio::sync::watch;
 
+use crate::capture;
 use crate::host::Target;
 use crate::sink::{OutputBus, TargetOutput};
 use crate::transport::{ShellChannelKind, ShellEvent};
@@ -130,6 +131,7 @@ impl PaneAssemblyState {
 pub struct SessionMonitor {
     session_name: String,
     host_alias: String,
+    normalize: CaptureNormalizeMode,
     pane_states: HashMap<String, PaneAssemblyState>,
 }
 
@@ -138,11 +140,32 @@ impl SessionMonitor {
         SessionMonitor {
             session_name,
             host_alias,
+            normalize: CaptureNormalizeMode::Raw,
+            pane_states: HashMap::new(),
+        }
+    }
+
+    /// Create a monitor with a specific normalization mode.
+    pub fn with_normalize(
+        session_name: String,
+        host_alias: String,
+        normalize: CaptureNormalizeMode,
+    ) -> Self {
+        SessionMonitor {
+            session_name,
+            host_alias,
+            normalize,
             pane_states: HashMap::new(),
         }
     }
 
     /// Process a parsed %output frame: return a TargetOutput.
+    ///
+    /// Applies the configured normalization mode (1.9a):
+    /// - `Raw`: pass decoded data unchanged (ANSI preserved)
+    /// - `ScreenStable`: normalize line endings + trim, ANSI preserved;
+    ///   `raw_content` holds original decoded data
+    /// - `PlainText`: strip ANSI + normalize; `raw_content` holds original
     fn process_output(&mut self, pane_id: &str, data: &str) -> TargetOutput {
         let state = self
             .pane_states
@@ -151,11 +174,33 @@ impl SessionMonitor {
 
         state.sequence += 1;
 
+        let (content, raw_content) = match self.normalize {
+            CaptureNormalizeMode::Raw => (data.to_string(), None),
+            CaptureNormalizeMode::ScreenStable => {
+                let normalized = capture::normalize_screen_stable(data);
+                let raw = if normalized != data {
+                    Some(data.to_string())
+                } else {
+                    None
+                };
+                (normalized, raw)
+            }
+            CaptureNormalizeMode::PlainText => {
+                let normalized = capture::normalize_plain_text(data);
+                let raw = if normalized != data {
+                    Some(data.to_string())
+                } else {
+                    None
+                };
+                (normalized, raw)
+            }
+        };
+
         TargetOutput {
             source: TargetAddress::Pane(state.address.clone()),
             host: self.host_alias.clone(),
-            content: data.to_string(),
-            raw_content: None,
+            content,
+            raw_content,
             sequence: state.sequence,
             fidelity: OutputFidelity::clean(),
             timestamp: Instant::now(),
@@ -320,6 +365,21 @@ impl MonitorHandle {
         self.sessions.get(session)
     }
 
+    /// Stop and remove a specific session's monitor.
+    pub async fn stop_session(&mut self, name: &str) -> Result<()> {
+        let handle = self
+            .sessions
+            .remove(name)
+            .ok_or_else(|| anyhow!("session '{}' not being monitored", name))?;
+        handle.shutdown().await
+    }
+
+    /// Get a session monitor handle by TargetSpec.
+    /// Matches on the spec's session name.
+    pub fn get_by_spec(&self, spec: &crate::TargetSpec) -> Option<&SessionMonitorHandle> {
+        self.sessions.get(spec.session_name())
+    }
+
     /// List currently active session names.
     pub fn active_sessions(&self) -> Vec<&str> {
         self.sessions
@@ -481,6 +541,110 @@ mod tests {
 
         let out_a2 = monitor.process_output("%5", "a2");
         assert_eq!(out_a2.sequence, 2);
+    }
+
+    // --- process_output normalization tests ---
+
+    #[test]
+    fn process_output_raw_preserves_ansi() {
+        let mut monitor = SessionMonitor::new("build".into(), "localhost".into());
+        let data = "hello \x1b[31mred\x1b[0m world\r\n";
+        let out = monitor.process_output("%5", data);
+        assert_eq!(out.content, data);
+        assert!(out.raw_content.is_none());
+    }
+
+    #[test]
+    fn process_output_screen_stable_normalizes() {
+        let mut monitor = SessionMonitor::with_normalize(
+            "build".into(),
+            "localhost".into(),
+            CaptureNormalizeMode::ScreenStable,
+        );
+        let data = "hello world  \r\n";
+        let out = monitor.process_output("%5", data);
+        // ScreenStable trims trailing whitespace and normalizes \r\n → \n
+        assert_eq!(out.content, "hello world\n");
+        // raw_content holds original when normalization changed the content
+        assert_eq!(out.raw_content, Some(data.to_string()));
+    }
+
+    #[test]
+    fn process_output_plain_text_strips_ansi() {
+        let mut monitor = SessionMonitor::with_normalize(
+            "build".into(),
+            "localhost".into(),
+            CaptureNormalizeMode::PlainText,
+        );
+        let data = "\x1b[32mgreen\x1b[0m text";
+        let out = monitor.process_output("%5", data);
+        assert_eq!(out.content, "green text\n");
+        assert_eq!(out.raw_content, Some(data.to_string()));
+    }
+
+    #[test]
+    fn process_output_raw_content_none_when_unchanged() {
+        let mut monitor = SessionMonitor::with_normalize(
+            "build".into(),
+            "localhost".into(),
+            CaptureNormalizeMode::PlainText,
+        );
+        // Content that normalizes to itself (already plain, with trailing \n)
+        let data = "plain text\n";
+        let out = monitor.process_output("%5", data);
+        assert_eq!(out.content, "plain text\n");
+        assert!(out.raw_content.is_none());
+    }
+
+    // --- MonitorHandle.stop_session / get_by_spec tests ---
+
+    #[tokio::test]
+    async fn monitor_handle_stop_session() {
+        let target1 = crate::host::HostHandle::local().create_target_for_test("s1");
+        let target2 = crate::host::HostHandle::local().create_target_for_test("s2");
+        let (tx1, _) = watch::channel(false);
+        let (tx2, _) = watch::channel(false);
+        let task1 = tokio::spawn(async { Ok(()) });
+        let task2 = tokio::spawn(async { Ok(()) });
+
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            "s1".to_string(),
+            SessionMonitorHandle::new(target1, tx1, task1),
+        );
+        sessions.insert(
+            "s2".to_string(),
+            SessionMonitorHandle::new(target2, tx2, task2),
+        );
+        let mut handle = MonitorHandle::new(sessions);
+
+        assert_eq!(handle.session_count(), 2);
+        handle.stop_session("s1").await.unwrap();
+        assert_eq!(handle.session_count(), 1);
+        assert!(handle.get("s1").is_none());
+        assert!(handle.get("s2").is_some());
+
+        // Stopping non-existent session returns error
+        assert!(handle.stop_session("s1").await.is_err());
+    }
+
+    #[test]
+    fn monitor_handle_get_by_spec() {
+        let target = crate::host::HostHandle::local().create_target_for_test("build");
+        let (tx, _) = watch::channel(false);
+        let task = tokio::runtime::Runtime::new().unwrap().spawn(async { Ok(()) });
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            "build".to_string(),
+            SessionMonitorHandle::new(target, tx, task),
+        );
+        let handle = MonitorHandle::new(sessions);
+
+        let spec = crate::TargetSpec::session("build");
+        assert!(handle.get_by_spec(&spec).is_some());
+
+        let spec2 = crate::TargetSpec::session("nonexistent");
+        assert!(handle.get_by_spec(&spec2).is_none());
     }
 
     // --- SessionMonitorHandle tests ---
