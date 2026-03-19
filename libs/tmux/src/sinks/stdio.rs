@@ -2,6 +2,11 @@
 //!
 //! Writes TargetOutput to stdout with configurable formatting.
 //! Immediate flush, no batching.
+//!
+//! `StdioSink` owns terminal presentation formatting. For consumer-side
+//! source attribution (e.g. interactive multi-pane views), use
+//! `JoinedStream` which provides structural `StreamChunk` with
+//! `SourceLabel` — a different layer from terminal sink formatting.
 
 use anyhow::Result;
 use std::io::Write;
@@ -13,9 +18,9 @@ use crate::sink::SinkEvent;
 pub enum StdioFormat {
     /// Raw content only, no metadata prefix.
     Raw,
-    /// "[host] session:window.pane | content"
+    /// "[host] source_key | content" — uses canonical source identity.
     Prefixed,
-    /// JSON lines: {"host":"...","target":"...","content":"...","seq":N}
+    /// JSON lines with both canonical key and display target.
     Json,
 }
 
@@ -42,14 +47,15 @@ impl StdioSink {
                         format!(
                             "[{}] {} | {}",
                             output.host,
-                            output.target_string(),
+                            output.source_key(),
                             output.content
                         )
                     }
                     StdioFormat::Json => {
                         format!(
-                            r#"{{"host":"{}","target":"{}","content":"{}","seq":{}}}"#,
+                            r#"{{"host":"{}","source":"{}","target":"{}","content":"{}","seq":{}}}"#,
                             output.host,
+                            output.source_key(),
                             output.target_string(),
                             output.content.replace('\\', "\\\\").replace('"', "\\\""),
                             output.sequence

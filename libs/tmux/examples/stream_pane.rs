@@ -480,10 +480,7 @@ async fn stream_monitor(
 
     // Subscribe to the output bus, filtering to this session
     let bus = host.output_bus();
-    let filter = SinkFilter {
-        session: Some(format!("^{}$", regex::escape(&session_name))),
-        ..Default::default()
-    };
+    let filter = SinkFilter::for_session(&session_name);
     let subscription = bus.subscribe(vec![filter], 64)?;
 
     // Convert to a JoinedStream — merges events with source labels

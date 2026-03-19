@@ -64,15 +64,28 @@ impl TargetOutput {
         }
     }
 
-    /// Tmux target string for the source.
-    ///
-    /// For pane-level sources, returns `pane_id` (e.g. `%5`) — the canonical
-    /// identity. Window/pane indices may be synthetic for control-mode output.
-    pub fn target_string(&self) -> String {
+    /// Canonical source identity for bus routing, filter matching, and source
+    /// coalescing. Returns `pane_id` for pane sources (the authoritative
+    /// identity from tmux control mode), session name for sessions, and
+    /// `session:window_index` for windows.
+    pub fn source_key(&self) -> String {
         match &self.source {
             TargetAddress::Session(s) => s.name.clone(),
             TargetAddress::Window(w) => format!("{}:{}", w.session_name, w.index),
             TargetAddress::Pane(p) => p.pane_id.clone(),
+        }
+    }
+
+    /// Human-readable tmux target string for display/logging.
+    ///
+    /// Returns `session:window.pane` format using the display indices stored
+    /// in `PaneAddress`. For control-mode output where window/pane indices are
+    /// synthetic (0/0), prefer `source_key()` or `pane_id()` for identity.
+    pub fn target_string(&self) -> String {
+        match &self.source {
+            TargetAddress::Session(s) => s.name.clone(),
+            TargetAddress::Window(w) => format!("{}:{}", w.session_name, w.index),
+            TargetAddress::Pane(p) => p.to_tmux_target(),
         }
     }
 
@@ -102,6 +115,41 @@ pub struct SinkFilter {
     pub window: Option<String>,
     /// Regex pattern against pane_id or "session:window.pane".
     pub pane: Option<String>,
+}
+
+impl SinkFilter {
+    /// Filter matching a specific host (exact match).
+    pub fn for_host(host: &str) -> Self {
+        SinkFilter {
+            host: Some(format!("^{}$", regex::escape(host))),
+            ..Default::default()
+        }
+    }
+
+    /// Filter matching a specific session (exact match).
+    pub fn for_session(session: &str) -> Self {
+        SinkFilter {
+            session: Some(format!("^{}$", regex::escape(session))),
+            ..Default::default()
+        }
+    }
+
+    /// Filter matching a specific pane by pane_id (exact match, e.g. `%5`).
+    pub fn for_pane(pane_id: &str) -> Self {
+        SinkFilter {
+            pane: Some(format!("^{}$", regex::escape(pane_id))),
+            ..Default::default()
+        }
+    }
+
+    /// Filter matching a specific host and session (exact match on both).
+    pub fn for_host_session(host: &str, session: &str) -> Self {
+        SinkFilter {
+            host: Some(format!("^{}$", regex::escape(host))),
+            session: Some(format!("^{}$", regex::escape(session))),
+            ..Default::default()
+        }
+    }
 }
 
 /// Compiled form of SinkFilter — regexes compiled once at subscribe() time.
@@ -263,10 +311,13 @@ impl Subscription {
     }
 
     /// Pipe all events to a SinkKind. Spawns a task that drives the sink.
-    /// Consumes the subscription. Returns a JoinHandle for the sink task.
-    pub fn pipe(self, mut sink: SinkKind) -> JoinHandle<()> {
+    /// Consumes the subscription. Returns a `PipeHandle` that combines
+    /// the subscription id (for bus control) with the task handle (for
+    /// flush/join semantics) in a single ownership unit.
+    pub fn pipe(self, mut sink: SinkKind) -> PipeHandle {
+        let id = self.id;
         let mut rx = self.rx;
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
                 if let Err(e) = sink.write(event).await {
                     tracing::warn!(sink = sink.name(), "sink write error: {}", e);
@@ -275,7 +326,8 @@ impl Subscription {
             if let Err(e) = sink.flush().await {
                 tracing::warn!(sink = sink.name(), "sink flush error: {}", e);
             }
-        })
+        });
+        PipeHandle { id, task }
     }
 
     /// Create a JoinedStream that merges events with source attribution.
@@ -286,6 +338,31 @@ impl Subscription {
             label_format,
             last_source: None,
         }
+    }
+}
+
+/// Lifecycle handle for a piped subscription.
+///
+/// Combines the subscription id (for bus-level `unsubscribe()`) with the
+/// spawned task handle (for flush/join semantics) in a single unit.
+pub struct PipeHandle {
+    id: SinkId,
+    task: JoinHandle<()>,
+}
+
+impl PipeHandle {
+    /// The subscription id for bus control (e.g. `bus.unsubscribe(handle.id())`).
+    pub fn id(&self) -> SinkId {
+        self.id
+    }
+
+    /// Await the piped task to completion. The task finishes when the bus
+    /// drops the subscription's sender (via `unsubscribe()` or `shutdown()`),
+    /// draining remaining buffered events and flushing the sink.
+    pub async fn join(self) -> Result<()> {
+        self.task
+            .await
+            .map_err(|e| anyhow!("piped sink task panicked: {}", e))
     }
 }
 
@@ -398,6 +475,12 @@ impl JoinedStream {
     }
 
     /// Format a chunk with the configured label format.
+    ///
+    /// This is a consumer-side convenience for interactive multi-pane views.
+    /// Terminal sinks (`StdioSink`) own their own presentation formatting
+    /// at a different layer — they consume `TargetOutput` directly, not
+    /// `StreamChunk`. The two formatting paths serve different consumers
+    /// and should not be conflated.
     pub fn format(&self, chunk: &StreamChunk) -> String {
         let label = chunk.source.short();
         let content = &chunk.output.content;
@@ -603,8 +686,18 @@ mod tests {
         let out = make_output("web-1", "build", "%5", "hello", 1);
         assert_eq!(out.session_name(), "build");
         assert_eq!(out.pane_id(), Some("%5"));
-        assert_eq!(out.target_string(), "%5");
+        assert_eq!(out.source_key(), "%5");
+        assert_eq!(out.target_string(), "build:0.0");
         assert!(!out.degraded());
+    }
+
+    #[test]
+    fn target_output_source_key_vs_target_string() {
+        let out = make_output("web-1", "build", "%5", "hello", 1);
+        // source_key returns canonical identity (pane_id for panes)
+        assert_eq!(out.source_key(), "%5");
+        // target_string returns display format (session:window.pane)
+        assert_eq!(out.target_string(), "build:0.0");
     }
 
     #[test]
@@ -946,6 +1039,51 @@ mod tests {
         assert!(label_a.same_source(&label_a));
     }
 
+    // --- SinkFilter constructor tests ---
+
+    #[test]
+    fn sink_filter_for_session_exact() {
+        let filter = SinkFilter::for_session("build");
+        let compiled = CompiledSinkFilter::compile(&filter).unwrap();
+        assert!(compiled.matches(&make_output("h", "build", "%5", "y", 1)));
+        assert!(!compiled.matches(&make_output("h", "build2", "%5", "y", 1)));
+        assert!(!compiled.matches(&make_output("h", "rebuild", "%5", "y", 1)));
+    }
+
+    #[test]
+    fn sink_filter_for_host_exact() {
+        let filter = SinkFilter::for_host("web-1");
+        let compiled = CompiledSinkFilter::compile(&filter).unwrap();
+        assert!(compiled.matches(&make_output("web-1", "s", "%1", "y", 1)));
+        assert!(!compiled.matches(&make_output("web-10", "s", "%1", "y", 1)));
+    }
+
+    #[test]
+    fn sink_filter_for_pane_exact() {
+        let filter = SinkFilter::for_pane("%5");
+        let compiled = CompiledSinkFilter::compile(&filter).unwrap();
+        assert!(compiled.matches(&make_output("h", "s", "%5", "y", 1)));
+        assert!(!compiled.matches(&make_output("h", "s", "%50", "y", 1)));
+    }
+
+    #[test]
+    fn sink_filter_for_host_session_exact() {
+        let filter = SinkFilter::for_host_session("web-1", "build");
+        let compiled = CompiledSinkFilter::compile(&filter).unwrap();
+        assert!(compiled.matches(&make_output("web-1", "build", "%5", "y", 1)));
+        assert!(!compiled.matches(&make_output("web-1", "deploy", "%5", "y", 1)));
+        assert!(!compiled.matches(&make_output("web-2", "build", "%5", "y", 1)));
+    }
+
+    #[test]
+    fn sink_filter_for_session_escapes_regex_chars() {
+        // Session name with regex metacharacters should not be interpreted as regex
+        let filter = SinkFilter::for_session("my.session+1");
+        let compiled = CompiledSinkFilter::compile(&filter).unwrap();
+        assert!(compiled.matches(&make_output("h", "my.session+1", "%5", "y", 1)));
+        assert!(!compiled.matches(&make_output("h", "myXsessionX1", "%5", "y", 1)));
+    }
+
     #[test]
     fn compiled_filter_pane_id_match() {
         // Filter using pane_id pattern should match monitor-originated output
@@ -1008,7 +1146,7 @@ mod tests {
 
         // Shutdown bus to close the channel, causing pipe task to finish
         bus.shutdown();
-        handle.await.unwrap();
+        handle.join().await.unwrap();
 
         let collected = events.lock().unwrap();
         assert_eq!(*collected, vec!["msg1", "msg2"]);
