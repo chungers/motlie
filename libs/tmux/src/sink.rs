@@ -557,7 +557,7 @@ impl OutputBus {
     /// Drops the sender, closing the channel. If a piped task was spawned via
     /// `Subscription::pipe()`, it will drain remaining buffered events and exit
     /// on its own — this method does **not** await the task. Callers that need
-    /// join semantics should hold the `JoinHandle` returned by `pipe()`.
+    /// join semantics should hold the `PipeHandle` returned by `pipe()`.
     pub fn unsubscribe(&self, id: SinkId) -> Result<()> {
         let mut subs = self.subscribers.lock().expect("bus lock poisoned");
         let len_before = subs.len();
@@ -614,7 +614,7 @@ impl OutputBus {
     /// Piped tasks (spawned via `Subscription::pipe()`) will drain remaining
     /// buffered events and exit on their own — this method does **not** track
     /// or await those tasks. Callers that need flush-and-join semantics should
-    /// hold the `JoinHandle` returned by `pipe()` and await it after calling
+    /// hold the `PipeHandle` returned by `pipe()` and call `join()` after
     /// `shutdown()`.
     pub fn shutdown(&self) {
         let mut subs = self.subscribers.lock().expect("bus lock poisoned");
