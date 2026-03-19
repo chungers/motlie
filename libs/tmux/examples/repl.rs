@@ -317,10 +317,7 @@ async fn main() -> anyhow::Result<()> {
                 match host.start_monitoring_session(session_name).await {
                     Ok(monitor_handle) => {
                         let bus = host.output_bus();
-                        let filter = SinkFilter {
-                            session: Some(format!("^{}$", regex::escape(session_name))),
-                            ..Default::default()
-                        };
+                        let filter = SinkFilter::for_session(session_name);
                         match bus.subscribe(vec![filter], 64) {
                             Ok(sub) => {
                                 println!("Monitoring {} for {}s...", session_name, seconds);

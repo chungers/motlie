@@ -147,10 +147,7 @@ async fn localhost_monitor_pipeline() {
 
     // 3. Subscribe to the output bus
     let bus = host.output_bus();
-    let filter = motlie_tmux::SinkFilter {
-        session: Some(format!("^{}$", regex::escape(session_name))),
-        ..Default::default()
-    };
+    let filter = motlie_tmux::SinkFilter::for_session(session_name);
     let sub = bus
         .subscribe(vec![filter], 64)
         .expect("subscribe failed");

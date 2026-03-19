@@ -322,6 +322,9 @@ impl HostHandle {
     /// Start monitoring a single session. Opens a control mode connection,
     /// parses `%output` frames, and publishes to the OutputBus.
     /// Returns a `SessionMonitorHandle` for lifecycle control.
+    ///
+    /// For awaited teardown, call `SessionMonitorHandle::shutdown()`.
+    /// For fire-and-forget stop, use `HostHandle::stop_monitoring_session()`.
     pub async fn start_monitoring_session(
         &self,
         session_name: &str,
@@ -330,20 +333,7 @@ impl HostHandle {
         let host_alias = self.inner.host_alias.clone();
         let session = session_name.to_string();
 
-        // Open a shell channel for control mode
-        let mut shell = self.inner.transport.open_shell(80, 24).await?;
-
-        // Create stop signal
-        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-
-        // Register stop signal for host-level tracking (DC13)
-        {
-            let mut signals = self.inner.monitor_signals.lock()
-                .expect("monitor_signals lock poisoned");
-            signals.insert(session_name.to_string(), stop_tx.clone());
-        }
-
-        // Get a Target for the session
+        // Resolve the session first — fail before any registration
         let sessions = discovery::list_sessions(&self.inner.transport, self.inner.socket.as_ref()).await?;
         let session_info = sessions
             .into_iter()
@@ -353,6 +343,19 @@ impl HostHandle {
             inner: self.inner.clone(),
             address: TargetAddress::Session(session_info),
         };
+
+        // Open a shell channel for control mode
+        let mut shell = self.inner.transport.open_shell(80, 24).await?;
+
+        // Create stop signal and register for host-level tracking (DC13).
+        // Registration happens only after session resolution + shell open succeed,
+        // so monitored_sessions() never reports sessions that failed to start.
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        {
+            let mut signals = self.inner.monitor_signals.lock()
+                .expect("monitor_signals lock poisoned");
+            signals.insert(session_name.to_string(), stop_tx.clone());
+        }
 
         // Spawn the monitor task — clean up signal registration when done
         let inner_ref = self.inner.clone();
@@ -393,8 +396,11 @@ impl HostHandle {
         Ok(MonitorHandle::new(handles))
     }
 
-    /// Stop monitoring a specific session by signaling its stop channel.
-    /// The monitor task will exit and clean up its registration.
+    /// Signal a specific session's monitor to stop (fire-and-forget).
+    ///
+    /// This only sends the stop signal — it does **not** await task completion.
+    /// The monitor task will exit asynchronously and clean up its registration.
+    /// For awaited teardown guarantees, use `SessionMonitorHandle::shutdown()`.
     pub fn stop_monitoring_session(&self, session_name: &str) -> Result<()> {
         let signals = self.inner.monitor_signals.lock()
             .expect("monitor_signals lock poisoned");
@@ -405,7 +411,10 @@ impl HostHandle {
         Ok(())
     }
 
-    /// Stop monitoring all sessions.
+    /// Signal all session monitors to stop (fire-and-forget).
+    ///
+    /// Sends the stop signal to every active monitor. Does **not** await task
+    /// completion. For awaited teardown, use `MonitorHandle::shutdown()`.
     pub fn stop_monitoring(&self) {
         let signals = self.inner.monitor_signals.lock()
             .expect("monitor_signals lock poisoned");
@@ -949,10 +958,12 @@ impl Target {
         host.start_monitoring_session(self.session_name()).await
     }
 
-    /// Stop monitoring this session.
+    /// Signal this session's monitor to stop (fire-and-forget).
     ///
     /// Session-level only — returns error for window/pane targets.
-    /// Signals the monitor task to stop. The task will exit and clean up.
+    /// Sends the stop signal but does **not** await task completion.
+    /// For awaited teardown, use the `SessionMonitorHandle` returned by
+    /// `start_monitoring()` and call `shutdown()` on it.
     pub fn stop_monitoring(&self) -> Result<()> {
         if !matches!(self.address, TargetAddress::Session(_)) {
             return Err(anyhow!(

@@ -1244,12 +1244,20 @@ assert!(pane.start_monitoring().await.is_err());
 // List all sessions being monitored on this host
 let names = host.monitored_sessions();  // Vec<String>
 
-// Stop a specific session's monitor
+// Stop a specific session's monitor (fire-and-forget signal)
 host.stop_monitoring_session("build")?;
 
-// Stop all monitors on this host
+// Stop all monitors on this host (fire-and-forget signal)
 host.stop_monitoring();
 ```
+
+**Stop vs shutdown lifecycle**: the API provides two lifecycle modes:
+- **Fire-and-forget signal**: `host.stop_monitoring_session()`, `host.stop_monitoring()`,
+  `target.stop_monitoring()` — sends the stop signal but does not await task completion.
+  Use when you only need to initiate teardown.
+- **Awaited teardown**: `SessionMonitorHandle::shutdown()`, `MonitorHandle::shutdown()` —
+  signals stop and awaits task completion. Use when you need completion guarantees
+  (e.g. before asserting state in tests, or before dropping resources).
 
 ---
 
@@ -1268,20 +1276,23 @@ let bus = host.output_bus();
 // Subscribe to all output (no filters)
 let sub_all = bus.subscribe(vec![], 64)?;
 
-// Subscribe filtered to a specific session
-let filter = SinkFilter {
-    session: Some("^build$".to_string()),
-    ..Default::default()
-};
-let sub_build = bus.subscribe(vec![filter], 64)?;
+// Subscribe filtered to a specific session (exact match constructor)
+let sub_build = bus.subscribe(vec![SinkFilter::for_session("build")], 64)?;
 
-// Subscribe filtered to a specific pane
+// Subscribe filtered to a specific pane (exact match constructor)
+let sub_pane = bus.subscribe(vec![SinkFilter::for_pane("%5")], 64)?;
+
+// Subscribe with combined host + session
+let sub_combo = bus.subscribe(
+    vec![SinkFilter::for_host_session("web-1", "build")], 64
+)?;
+
+// Regex power is still available via raw fields
 let filter = SinkFilter {
-    session: Some("^build$".to_string()),
-    pane: Some("%5".to_string()),
+    session: Some("build|deploy".to_string()),
     ..Default::default()
 };
-let sub_pane = bus.subscribe(vec![filter], 64)?;
+let sub_regex = bus.subscribe(vec![filter], 64)?;
 ```
 
 ### Consume events via receiver
@@ -1316,15 +1327,15 @@ tmux target string (e.g. `build:0.1`). Control mode only provides `pane_id`,
 so pane-level filtering by `pane_id` is the canonical approach.
 
 ```rust
-// Match any session on host "web-1", any pane
-let filter = SinkFilter {
-    host: Some("^web-1$".to_string()),
-    ..Default::default()
-};
+// Exact-match constructors (preferred for common routing):
+let filter = SinkFilter::for_host("web-1");
+let filter = SinkFilter::for_session("build");
+let filter = SinkFilter::for_pane("%5");
+let filter = SinkFilter::for_host_session("web-1", "build");
 
-// Match session "build", window 0 only
+// Raw regex fields for advanced routing:
 let filter = SinkFilter {
-    session: Some("^build$".to_string()),
+    session: Some("build|deploy".to_string()),
     window: Some("^build:0$".to_string()),
     ..Default::default()
 };
@@ -1344,7 +1355,8 @@ output.timestamp         // std::time::Instant of emission
 // Accessors:
 output.session_name()    // Session name at any source level
 output.pane_id()         // Some("%5") for pane-level sources
-output.target_string()   // pane_id for pane sources, session/window name otherwise
+output.source_key()      // Canonical identity: pane_id for panes, session name for sessions
+output.target_string()   // Display format: "session:window.pane" (may be synthetic for monitor output)
 output.degraded()        // Shorthand for fidelity.degraded
 ```
 
@@ -1442,7 +1454,11 @@ let sub = bus.subscribe(vec![], 64)?;
 
 // Pipe events to stdout with source prefix labels
 let sink = SinkKind::Stdio(StdioSink::new(StdioFormat::Prefixed));
-let task = sub.pipe(sink);  // Spawns async task, returns JoinHandle
+let pipe = sub.pipe(sink);  // Spawns async task, returns PipeHandle
+
+// PipeHandle combines subscription id + task handle:
+pipe.id();            // SinkId — for bus.unsubscribe(id)
+pipe.join().await?;   // Await task completion (after bus shutdown/unsubscribe)
 ```
 
 ### Pipe to callback
@@ -1469,7 +1485,7 @@ let sink = SinkKind::Callback(CallbackSink {
 });
 
 let sub = bus.subscribe(vec![], 64)?;
-let task = sub.pipe(sink);
+let pipe = sub.pipe(sink);
 ```
 
 ### StdioFormat options
@@ -1593,9 +1609,10 @@ assert!(issues.is_empty());
 | `MonitorHandle` | Aggregate handle — `shutdown()`, `get()`, `get_by_spec()`, `stop_session()`, `active_sessions()` |
 | `OutputBus` | Fan-out bus — `subscribe()`, `publish()`, `unsubscribe()`, `shutdown()` |
 | `Subscription` | Bus subscription — `.into_receiver()`, `.joined()`, `.pipe()` |
-| `TargetOutput` | Output event — source, host, content, raw_content, sequence, fidelity, timestamp |
+| `PipeHandle` | Lifecycle handle from `pipe()` — `id()` for bus control, `join()` for awaited teardown |
+| `TargetOutput` | Output event — `source_key()` (canonical identity), `target_string()` (display), content, fidelity |
 | `SinkEvent` | Enum: `Data(TargetOutput)`, `Gap { dropped, timestamp }` |
-| `SinkFilter` | Source routing — host, session, window, pane (optional regex; pane matches both `pane_id` and target string) |
+| `SinkFilter` | Source routing — `for_session()`, `for_pane()`, `for_host()` exact constructors; raw regex fields for power |
 | `SinkId` | Opaque subscription identifier |
 | `SinkKind` | Enum: `Stdio(StdioSink)`, `Callback(CallbackSink)` — static dispatch |
 | `CallbackSink` | User sink — name, state (`Arc<dyn Any>`), on_output, on_flush |
