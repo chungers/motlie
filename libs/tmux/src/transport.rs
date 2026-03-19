@@ -780,6 +780,8 @@ pub struct MockTransport {
     fs: Mutex<HashMap<std::path::PathBuf, MockFsEntry>>,
     /// Optional transfer error injection.
     transfer_error: Mutex<Option<String>>,
+    /// Canned shell data chunks for open_shell() (Phase 2a.2a).
+    shell_data: Mutex<Vec<Vec<u8>>>,
 }
 
 impl MockTransport {
@@ -790,6 +792,7 @@ impl MockTransport {
             default_response: String::new(),
             fs: Mutex::new(HashMap::new()),
             transfer_error: Mutex::new(None),
+            shell_data: Mutex::new(Vec::new()),
         }
     }
 
@@ -849,11 +852,20 @@ impl MockTransport {
         Ok(self.default_response.clone())
     }
 
+    /// Pre-load shell data chunks for `open_shell()` (Phase 2a.2a testing).
+    pub fn with_shell_data(self, data: Vec<Vec<u8>>) -> Self {
+        *self.shell_data.lock().unwrap() = data;
+        self
+    }
+
+    /// Open a mock shell channel for testing. Returns `ShellChannelKind::Mock`.
+    pub async fn open_shell_for_test(&self) -> ShellChannelKind {
+        ShellChannelKind::Mock(self.open_shell().await.unwrap())
+    }
+
     async fn open_shell(&self) -> Result<MockShellChannel> {
-        Ok(MockShellChannel {
-            data: Vec::new(),
-            pos: 0,
-        })
+        let data = self.shell_data.lock().unwrap().clone();
+        Ok(MockShellChannel { data, pos: 0 })
     }
 
     // --- In-memory filesystem for transfer testing (DC23) ---

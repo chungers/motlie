@@ -304,10 +304,11 @@ impl SshConfig {
         let user_empty = self.user().is_empty();
         let timeout = self.timeout();
         let socket = self.socket().cloned();
+        let alias = self.host().to_string();
 
         if is_local {
             let transport = TransportKind::Local(LocalTransport::with_timeout(timeout));
-            return Ok(HostHandle::new(transport, socket));
+            return Ok(HostHandle::with_alias(transport, socket, &alias));
         }
 
         if user_empty {
@@ -315,7 +316,7 @@ impl SshConfig {
         }
 
         let transport = TransportKind::Ssh(SshTransport::connect(self).await?);
-        Ok(HostHandle::new(transport, socket))
+        Ok(HostHandle::with_alias(transport, socket, &alias))
     }
 }
 
