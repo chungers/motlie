@@ -1390,10 +1390,10 @@ use motlie_tmux::LabelFormat;
 
 let sub = bus.subscribe(vec![], 64)?;
 
-// Bracketed labels: "[localhost:build:0.0] content"
+// Bracketed labels: "[localhost:build(%0)] content"
 let mut stream = sub.joined(LabelFormat::Bracketed);
 
-// Or prompt-style: "localhost:build:0.0> content"
+// Or prompt-style: "localhost:build(%0)> content"
 let mut stream = sub.joined(LabelFormat::Prompt);
 
 // Or custom formatting
@@ -1432,10 +1432,10 @@ chunk.source.minimal()  // "build(%5)" (no host prefix)
 ### Using format() for rendering
 
 ```rust
-// JoinedStream::format() applies the configured LabelFormat
+// JoinedStream::format() always applies the configured LabelFormat
 let text = stream.format(&chunk);
-// With Bracketed: "[localhost:build:0.1] hello world"
-// With Prompt:    "localhost:build:0.1> hello world"
+// With Bracketed: "[localhost:build(%5)] hello world"
+// With Prompt:    "localhost:build(%5)> hello world"
 ```
 
 ---
@@ -1493,7 +1493,7 @@ let pipe = sub.pipe(sink);
 | Format | Output |
 |--------|--------|
 | `Raw` | Content only, no labels |
-| `Prefixed` | `[host:session:window.pane] content` |
+| `Prefixed` | `[host] source_key \| content` (uses canonical identity) |
 | `Json` | JSON object per event |
 
 ---
