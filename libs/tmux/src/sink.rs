@@ -65,11 +65,14 @@ impl TargetOutput {
     }
 
     /// Tmux target string for the source.
+    ///
+    /// For pane-level sources, returns `pane_id` (e.g. `%5`) — the canonical
+    /// identity. Window/pane indices may be synthetic for control-mode output.
     pub fn target_string(&self) -> String {
         match &self.source {
             TargetAddress::Session(s) => s.name.clone(),
             TargetAddress::Window(w) => format!("{}:{}", w.session_name, w.index),
-            TargetAddress::Pane(p) => p.to_tmux_target(),
+            TargetAddress::Pane(p) => p.pane_id.clone(),
         }
     }
 
@@ -153,12 +156,19 @@ impl CompiledSinkFilter {
             }
         }
         if let Some(ref re) = self.pane {
-            let pane_str = match &output.source {
-                TargetAddress::Pane(p) => p.to_tmux_target(),
-                TargetAddress::Window(w) => format!("{}:{}", w.session_name, w.index),
-                TargetAddress::Session(s) => s.name.clone(),
+            let matched = match &output.source {
+                TargetAddress::Pane(p) => {
+                    // Match against pane_id (e.g. "%5") OR tmux target string
+                    // (e.g. "build:0.1"). pane_id is the canonical identity from
+                    // control mode; target string is available when indices are known.
+                    re.is_match(&p.pane_id) || re.is_match(&p.to_tmux_target())
+                }
+                TargetAddress::Window(w) => {
+                    re.is_match(&format!("{}:{}", w.session_name, w.index))
+                }
+                TargetAddress::Session(s) => re.is_match(&s.name),
             };
-            if !re.is_match(&pane_str) {
+            if !matched {
                 return false;
             }
         }
@@ -298,27 +308,42 @@ impl SourceLabel {
         }
     }
 
-    /// "web-1:build:0.1" (pane) or "web-1:build" (session).
+    /// "web-1:build(%5)" (pane) or "web-1:build" (session).
+    ///
+    /// Pane-level sources use `pane_id` as the canonical identity — control
+    /// mode only provides `%<id>`, not window/pane indices. Using `pane_id`
+    /// ensures distinct panes in the same session are distinguishable.
     pub fn short(&self) -> String {
         match &self.target {
             TargetAddress::Session(s) => format!("{}:{}", self.host, s.name),
             TargetAddress::Window(w) => format!("{}:{}:{}", self.host, w.session_name, w.index),
-            TargetAddress::Pane(p) => format!("{}:{}", self.host, p.to_tmux_target()),
+            TargetAddress::Pane(p) => format!("{}:{}({})", self.host, p.session, p.pane_id),
         }
     }
 
-    /// "build:0.1" or "build" (no host prefix).
+    /// "build(%5)" or "build" (no host prefix).
     pub fn minimal(&self) -> String {
         match &self.target {
             TargetAddress::Session(s) => s.name.clone(),
             TargetAddress::Window(w) => format!("{}:{}", w.session_name, w.index),
-            TargetAddress::Pane(p) => p.to_tmux_target(),
+            TargetAddress::Pane(p) => format!("{}({})", p.session, p.pane_id),
         }
     }
 
     /// Compare labels for source coalescing.
+    ///
+    /// For pane-level targets, compares using `pane_id` (the authoritative
+    /// identity from tmux) rather than display indices which may be synthetic.
     fn same_source(&self, other: &SourceLabel) -> bool {
-        self.host == other.host && self.short() == other.short()
+        if self.host != other.host {
+            return false;
+        }
+        match (&self.target, &other.target) {
+            (TargetAddress::Pane(a), TargetAddress::Pane(b)) => {
+                a.session == b.session && a.pane_id == b.pane_id
+            }
+            _ => self.short() == other.short(),
+        }
     }
 }
 
@@ -445,6 +470,11 @@ impl OutputBus {
     }
 
     /// Remove a subscription by id.
+    ///
+    /// Drops the sender, closing the channel. If a piped task was spawned via
+    /// `Subscription::pipe()`, it will drain remaining buffered events and exit
+    /// on its own — this method does **not** await the task. Callers that need
+    /// join semantics should hold the `JoinHandle` returned by `pipe()`.
     pub fn unsubscribe(&self, id: SinkId) -> Result<()> {
         let mut subs = self.subscribers.lock().expect("bus lock poisoned");
         let len_before = subs.len();
@@ -496,7 +526,13 @@ impl OutputBus {
         }
     }
 
-    /// Shutdown: drop all senders, closing all receiver channels.
+    /// Drop all senders, closing all receiver channels.
+    ///
+    /// Piped tasks (spawned via `Subscription::pipe()`) will drain remaining
+    /// buffered events and exit on their own — this method does **not** track
+    /// or await those tasks. Callers that need flush-and-join semantics should
+    /// hold the `JoinHandle` returned by `pipe()` and await it after calling
+    /// `shutdown()`.
     pub fn shutdown(&self) {
         let mut subs = self.subscribers.lock().expect("bus lock poisoned");
         subs.clear();
@@ -567,7 +603,7 @@ mod tests {
         let out = make_output("web-1", "build", "%5", "hello", 1);
         assert_eq!(out.session_name(), "build");
         assert_eq!(out.pane_id(), Some("%5"));
-        assert_eq!(out.target_string(), "build:0.0");
+        assert_eq!(out.target_string(), "%5");
         assert!(!out.degraded());
     }
 
@@ -823,7 +859,7 @@ mod tests {
         bus.publish(make_output("web-1", "build", "%5", "hello", 1));
         let chunk = joined.next().await.unwrap();
         let formatted = joined.format(&chunk);
-        assert_eq!(formatted, "[web-1:build:0.0] hello");
+        assert_eq!(formatted, "[web-1:build(%5)] hello");
     }
 
     #[tokio::test]
@@ -835,7 +871,7 @@ mod tests {
         bus.publish(make_output("web-1", "build", "%5", "hello", 1));
         let chunk = joined.next().await.unwrap();
         let formatted = joined.format(&chunk);
-        assert_eq!(formatted, "web-1:build:0.0> hello");
+        assert_eq!(formatted, "web-1:build(%5)> hello");
     }
 
     #[tokio::test]
@@ -861,8 +897,8 @@ mod tests {
                 pane: 1,
             }),
         };
-        assert_eq!(label.short(), "web-1:build:0.1");
-        assert_eq!(label.minimal(), "build:0.1");
+        assert_eq!(label.short(), "web-1:build(%5)");
+        assert_eq!(label.minimal(), "build(%5)");
     }
 
     #[test]
@@ -880,6 +916,64 @@ mod tests {
         };
         assert_eq!(label.short(), "web-1:build");
         assert_eq!(label.minimal(), "build");
+    }
+
+    // --- Pane identity tests ---
+
+    #[test]
+    fn source_label_same_source_distinguishes_panes() {
+        // Two panes in the same session with different pane_ids but same
+        // synthetic indices (as control mode produces) must be distinct.
+        let label_a = SourceLabel {
+            host: "h".to_string(),
+            target: TargetAddress::Pane(PaneAddress {
+                pane_id: "%5".to_string(),
+                session: "build".to_string(),
+                window: 0,
+                pane: 0,
+            }),
+        };
+        let label_b = SourceLabel {
+            host: "h".to_string(),
+            target: TargetAddress::Pane(PaneAddress {
+                pane_id: "%6".to_string(),
+                session: "build".to_string(),
+                window: 0,
+                pane: 0,
+            }),
+        };
+        assert!(!label_a.same_source(&label_b));
+        assert!(label_a.same_source(&label_a));
+    }
+
+    #[test]
+    fn compiled_filter_pane_id_match() {
+        // Filter using pane_id pattern should match monitor-originated output
+        let filter = SinkFilter {
+            pane: Some("%5".to_string()),
+            ..Default::default()
+        };
+        let compiled = CompiledSinkFilter::compile(&filter).unwrap();
+        assert!(compiled.matches(&make_output("h", "build", "%5", "hello", 1)));
+        assert!(!compiled.matches(&make_output("h", "build", "%6", "hello", 1)));
+    }
+
+    #[tokio::test]
+    async fn joined_stream_source_changed_distinct_panes() {
+        // Two panes with same session but different pane_ids must trigger
+        // source_changed, even with identical synthetic window/pane indices.
+        let bus = OutputBus::new();
+        let sub = bus.subscribe(vec![], 16).unwrap();
+        let mut joined = sub.joined(LabelFormat::Bracketed);
+
+        bus.publish(make_output("h", "s", "%5", "a", 1));
+        bus.publish(make_output("h", "s", "%6", "b", 1));
+
+        let c1 = joined.next().await.unwrap();
+        assert!(c1.source_changed);
+
+        let c2 = joined.next().await.unwrap();
+        assert!(c2.source_changed); // different pane_id = different source
     }
 
     // --- Subscription::pipe test ---
