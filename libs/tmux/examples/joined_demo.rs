@@ -5,6 +5,7 @@
 //!
 //! Usage:
 //!   joined_demo [ssh://host] [--format bracketed|prompt|separator]
+//!   joined_demo 'ssh://host?identity-file=/path/to/key'
 
 use anyhow::{anyhow, Result};
 use motlie_tmux::{strip_ansi, KeySequence, LabelFormat, SinkFilter, SplitPaneOptions, SshConfig};
@@ -26,6 +27,7 @@ fn parse_args() -> Result<Args> {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "-h" || a == "--help") {
         eprintln!("joined_demo [ssh://host] [--format bracketed|prompt|separator]");
+        eprintln!("  URI supports ?identity-file=/path/to/key for explicit SSH key auth");
         std::process::exit(0);
     }
     let mut uri = "ssh://localhost".to_string();

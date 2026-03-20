@@ -14,6 +14,7 @@
 //!   ./target/debug/examples/monitor_pipe ssh://localhost build
 //!   ./target/debug/examples/monitor_pipe ssh://localhost build --sink json
 //!   ./target/debug/examples/monitor_pipe ssh://localhost build --sink callback --seconds 5
+//!   ./target/debug/examples/monitor_pipe 'ssh://deploy@prod?identity-file=/path/to/key' build
 
 use anyhow::{anyhow, Result};
 use motlie_tmux::{
@@ -33,7 +34,8 @@ USAGE:
     monitor_pipe <uri> <session> [OPTIONS]
 
 ARGS:
-    <uri>       SSH URI to connect (e.g. ssh://localhost, ssh://deploy@prod)
+    <uri>       SSH URI to connect (e.g. ssh://localhost, ssh://deploy@prod,
+                ssh://host?identity-file=/path/to/key)
     <session>   tmux session name to monitor
 
 OPTIONS:
@@ -50,7 +52,8 @@ SINKS:
 EXAMPLES:
     monitor_pipe ssh://localhost build
     monitor_pipe ssh://localhost build --sink json
-    monitor_pipe ssh://localhost build --sink callback --seconds 5";
+    monitor_pipe ssh://localhost build --sink callback --seconds 5
+    monitor_pipe 'ssh://deploy@prod?identity-file=/path/to/key' build";
 
 #[derive(Clone, Copy)]
 enum SinkMode {

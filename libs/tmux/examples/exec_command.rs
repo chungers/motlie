@@ -6,6 +6,7 @@
 //! Usage:
 //!   cargo run -p motlie-tmux --example exec_command -- ssh://localhost
 //!   cargo run -p motlie-tmux --example exec_command -- ssh://localhost "uname -a"
+//!   cargo run -p motlie-tmux --example exec_command -- 'ssh://host?identity-file=/path/to/key'
 
 use motlie_tmux::SshConfig;
 use std::time::Duration;
