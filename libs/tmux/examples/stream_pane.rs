@@ -47,6 +47,9 @@
 //!
 //!   # Event-driven monitoring (no polling, real-time output events)
 //!   ./target/debug/examples/stream_pane ssh://localhost my_session --mode monitor
+//!
+//!   # Connect with an explicit SSH key file
+//!   ./target/debug/examples/stream_pane 'ssh://deploy@prod?identity-file=/path/to/key' my_session
 
 use motlie_tmux::{
     overlap_deduplicate, CaptureNormalizeMode, CaptureOptions, LabelFormat, ScrollbackQuery,
@@ -80,7 +83,8 @@ USAGE:
     stream_pane <uri> <target> [OPTIONS]
 
 ARGS:
-    <uri>       SSH URI to connect (e.g. ssh://localhost, ssh://deploy@prod)
+    <uri>       SSH URI to connect (e.g. ssh://localhost, ssh://deploy@prod,
+                ssh://host?identity-file=/path/to/key)
     <target>    tmux target string (session, session:window, session:window.pane)
 
 OPTIONS:
@@ -126,7 +130,8 @@ EXAMPLES:
     stream_pane ssh://localhost my_session --mode until --pattern '^\\$ '
     stream_pane ssh://localhost my_session --mode fidelity
     stream_pane ssh://localhost my_session --mode monitor
-    stream_pane ssh://localhost \"my_session:0.1\" --lines 30";
+    stream_pane ssh://localhost \"my_session:0.1\" --lines 30
+    stream_pane 'ssh://deploy@prod?identity-file=/path/to/key' my_session";
 
 fn parse_args() -> Result<Args, String> {
     let args: Vec<String> = std::env::args().collect();

@@ -6,6 +6,7 @@
 //! Usage:
 //!   cargo run -p motlie-tmux --example list_sessions -- ssh://localhost
 //!   cargo run -p motlie-tmux --example list_sessions -- ssh://deploy@prod
+//!   cargo run -p motlie-tmux --example list_sessions -- 'ssh://deploy@prod?identity-file=/path/to/key'
 
 use motlie_tmux::SshConfig;
 

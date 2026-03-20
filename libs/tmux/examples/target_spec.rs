@@ -7,6 +7,7 @@
 //!   cargo run -p motlie-tmux --example target_spec -- ssh://localhost "session_name"
 //!   cargo run -p motlie-tmux --example target_spec -- ssh://localhost "session:0"
 //!   cargo run -p motlie-tmux --example target_spec -- ssh://localhost "session:0.0"
+//!   cargo run -p motlie-tmux --example target_spec -- 'ssh://host?identity-file=/path/to/key' "session"
 
 use motlie_tmux::{SshConfig, TargetLevel, TargetSpec};
 

@@ -6,6 +6,7 @@
 //! Usage:
 //!   cargo run -p motlie-tmux --example uri_connect -- ssh://localhost
 //!   cargo run -p motlie-tmux --example uri_connect -- ssh://deploy@prod:2222
+//!   cargo run -p motlie-tmux --example uri_connect -- 'ssh://deploy@prod?identity-file=/path/to/key'
 
 use motlie_tmux::SshConfig;
 

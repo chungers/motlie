@@ -1147,3 +1147,22 @@ async fn ssh_symlink_rejected() {
 
     ssh_cleanup(&host, &remote_tmp).await;
 }
+
+// --- DC26: identity-file localhost integration test (Phase 1.15e) ---
+
+#[tokio::test]
+async fn localhost_identity_file_ignored() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not found");
+        return;
+    }
+    // identity-file is silently ignored for localhost — LocalTransport is used
+    let host = SshConfig::parse("ssh://localhost?identity-file=/nonexistent/key")
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let sessions = host.list_sessions().await.unwrap();
+    // Verify we connected and can query — the identity-file was ignored
+    let _ = sessions.len();
+}

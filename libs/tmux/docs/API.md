@@ -146,12 +146,13 @@ let host = HostHandle::new(
 ## 2. SshTransport
 
 Executes commands on a remote host over SSH using `russh` 0.46.
-Authentication is via ssh-agent only.
+Authentication is via ssh-agent by default, or via an explicit key file
+(`identity-file` URI parameter or `with_identity_file()` builder).
 
 ### Prerequisites
 
-- `ssh-agent` running with `SSH_AUTH_SOCK` exported
-- Keys loaded: `ssh-add ~/.ssh/id_ed25519`
+- `ssh-agent` running with `SSH_AUTH_SOCK` exported (unless using `identity-file`)
+- Keys loaded: `ssh-add ~/.ssh/id_ed25519` (unless using `identity-file`)
 - Remote host in `~/.ssh/known_hosts` (for `Verify` policy)
 
 ### Connect
@@ -222,9 +223,11 @@ if ssh.is_closed() {
 - **Concurrency**: The SSH handle mutex is held only during
   `channel_open_session()`, not for the full command lifetime. Multiple
   concurrent `exec()` calls on the same connection are safe.
-- **Authentication**: ssh-agent only. Key file or password auth is not supported.
+- **Authentication**: ssh-agent (default) or explicit key file via `identity-file`
+  (DC26). Password auth is not supported.
   Error messages are actionable (OC3): "is SSH_AUTH_SOCK set?",
-  "Add a key with: ssh-add ~/.ssh/id_ed25519".
+  "Add a key with: ssh-add ~/.ssh/id_ed25519",
+  "If the key is passphrase-protected, load it into ssh-agent instead."
 
 ---
 
@@ -269,6 +272,12 @@ let cfg = SshConfig::parse("ssh://deploy@[::1]:2222")?;
 let cfg = SshConfig::parse("ssh://deploy@host/tmp/tmux-custom.sock")?;   // socket path
 let cfg = SshConfig::parse("ssh://deploy;socket-name=myserver@host")?;    // socket name
 
+// With identity file (query-only, DC26)
+let cfg = SshConfig::parse("ssh://deploy@prod?identity-file=/keys/deploy")?;
+
+// Identity file with other params (nassh params + query identity-file)
+let cfg = SshConfig::parse("ssh://deploy;timeout=30@prod?identity-file=/keys/deploy")?;
+
 // FromStr also works
 let cfg: SshConfig = "ssh://deploy@prod:2222".parse()?;
 ```
@@ -281,9 +290,13 @@ let cfg: SshConfig = "ssh://deploy@prod:2222".parse()?;
 | `timeout` | integer seconds (> 0) | `10` | Per-command execution timeout |
 | `keepalive` | integer seconds (0 = off) | `30` | SSH keepalive interval |
 | `socket-name` | `[A-Za-z0-9._-]+` | none | Tmux socket name (`tmux -L`) |
+| `identity-file` | absolute path | none | SSH private key file (query-only, DC26) |
 
 Socket path is specified as the URI path component (`/path/to/socket`), not as a
 parameter. Socket path and `socket-name` are mutually exclusive.
+
+`identity-file` is **query-only** — it cannot appear in nassh-style userinfo params.
+When set, authentication uses the specified key file instead of ssh-agent.
 
 #### Validation rules
 
@@ -291,12 +304,19 @@ parameter. Socket path and `socket-name` are mutually exclusive.
 - Duplicate parameter keys are rejected (within the same location or across locations)
 - Unknown parameter names are rejected (fail-fast)
 - `timeout` must be > 0
+- `identity-file` must be an absolute path and can only appear as a query param
+- `with_identity_file()` returns `Err` if an identity file is already set
 
 ```rust
 // These all return Err:
 SshConfig::parse("ssh://user@host?port=22");           // canonical component
 SshConfig::parse("ssh://user;timeout=10@host?timeout=20"); // cross-location duplicate
 SshConfig::parse("ssh://user@host?unknown=value");     // unknown parameter
+SshConfig::parse("ssh://user;identity-file=/key@host"); // identity-file in userinfo
+SshConfig::parse("ssh://user@host?identity-file=rel/path"); // relative path
+
+// Duplicate identity-file across parse + builder:
+SshConfig::parse("ssh://user@host?identity-file=/a")?.with_identity_file("/b")?; // Err
 ```
 
 #### Render to URI
@@ -339,6 +359,17 @@ let host = SshConfig::parse("ssh://deploy@prod-server")?.connect().await?;
 
 // With timeout and policy
 let host = SshConfig::parse("ssh://deploy;host-key-policy=tofu@prod?timeout=30")?
+    .connect()
+    .await?;
+
+// With identity file — key-file auth, no agent needed (DC26)
+let host = SshConfig::parse("ssh://deploy@prod?identity-file=/etc/deploy/id_ed25519")?
+    .connect()
+    .await?;
+
+// Builder API with identity file
+let host = SshConfig::new("prod", "deploy")
+    .with_identity_file("/etc/deploy/id_ed25519")?
     .connect()
     .await?;
 ```
@@ -452,7 +483,7 @@ assert!(err.to_string().contains("session not found"));
 | `is_closed()` / `is_healthy()` | `is_healthy()` always `true` | `is_healthy()` delegates to `!is_closed()` | `is_healthy()` always `true` |
 | Keepalive | N/A | Configurable, default 30s | N/A |
 | `open_shell(cols, rows)` | Spawns `sh` (ignores cols/rows) | PTY `xterm` at caller-specified cols×rows | Empty data, immediate Eof (ignores cols/rows) |
-| Auth | N/A | ssh-agent only | N/A |
+| Auth | N/A | ssh-agent or identity-file (DC26) | N/A |
 
 > **`@claude NOTE — RESOLVED`** *(PLAN 1.10c)*: `SshTransport::open_shell()` requests a
 > PTY at fixed 80x24. There is no API to specify dimensions. This may matter
@@ -1701,7 +1732,7 @@ assert!(issues.is_empty());
 |------|-------------|
 | `TransportKind` | Enum: Local, Ssh, Mock — static dispatch |
 | `LocalTransport` | Subprocess exec, configurable timeout |
-| `SshTransport` | russh 0.46, ssh-agent auth; `connect()`, `is_closed()` |
+| `SshTransport` | russh 0.46, ssh-agent or key-file auth (DC26); `connect()`, `is_closed()` |
 | `SshConfig` | host, port, user, host_key_policy, timeout, keepalive_interval, socket; `parse()`, `to_uri_string()`, `connect()`, `Display`/`FromStr` |
 | `MockTransport` | Canned responses; `with_response()`, `with_default()`, `with_file()`, `with_dir()` |
 | `HostKeyPolicy` | Enum: Verify (default), TrustFirstUse, Insecure |
