@@ -35,10 +35,14 @@ fn parse_created_window(output: &str) -> Result<WindowInfo> {
     Ok(WindowInfo {
         session_id: fields[0].to_string(),
         session_name: fields[1].to_string(),
-        index: fields[2].parse().unwrap_or(0),
+        index: fields[2]
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid window_index: {}", fields[2]))?,
         name: fields[3].to_string(),
         active: fields[4] == "1",
-        pane_count: fields[5].parse().unwrap_or(0),
+        pane_count: fields[5]
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid window_panes: {}", fields[5]))?,
         layout: fields[6].to_string(),
     })
 }
@@ -565,6 +569,21 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("malformed new-window output"));
+    }
+
+    #[tokio::test]
+    async fn new_window_rejects_invalid_numeric_fields() {
+        let mock = MockTransport::new().with_response(
+            "new-window -P",
+            "$0\tbuild\tnot-a-number\teditor\t1\talso-bad\tlayout",
+        );
+        let transport = TransportKind::Mock(mock);
+
+        let err = new_window(&transport, None, "build", &Default::default())
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("invalid window_index") || msg.contains("invalid window_panes"));
     }
 
     #[tokio::test]
