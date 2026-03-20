@@ -22,6 +22,7 @@
 //!
 //! Usage:
 //!   cargo run -p motlie-tmux --example repl -- ssh://localhost
+//!   cargo run -p motlie-tmux --example repl -- 'ssh://deploy@prod?identity-file=/path/to/key'
 
 use motlie_tmux::{
     CreateSessionOptions, CreateWindowOptions, KeySequence, LabelFormat, ScrollbackQuery,

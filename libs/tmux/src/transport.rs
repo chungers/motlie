@@ -1280,6 +1280,7 @@ pub struct SshConfig {
     timeout: std::time::Duration,
     keepalive_interval: Option<std::time::Duration>,
     socket: Option<TmuxSocket>,
+    identity_file: Option<std::path::PathBuf>,
 }
 
 impl SshConfig {
@@ -1294,6 +1295,7 @@ impl SshConfig {
             timeout: std::time::Duration::from_secs(10),
             keepalive_interval: Some(std::time::Duration::from_secs(30)),
             socket: None,
+            identity_file: None,
         }
     }
 
@@ -1344,6 +1346,26 @@ impl SshConfig {
         Ok(self)
     }
 
+    /// Set an explicit SSH identity (private key) file for authentication (DC26).
+    ///
+    /// When set, `SshTransport::connect()` authenticates with this key file
+    /// instead of ssh-agent. Returns `Err` if the config already has an
+    /// identity file set (e.g., from a parsed URI) to prevent silent overwrites.
+    pub fn with_identity_file(self, path: impl Into<std::path::PathBuf>) -> anyhow::Result<Self> {
+        let new_path = path.into();
+        if let Some(ref existing) = self.identity_file {
+            return Err(anyhow::anyhow!(
+                "identity-file already set to '{}'; cannot overwrite with '{}'",
+                existing.display(),
+                new_path.display()
+            ));
+        }
+        Ok(SshConfig {
+            identity_file: Some(new_path),
+            ..self
+        })
+    }
+
     // --- Accessors ---
 
     pub fn host(&self) -> &str {
@@ -1372,6 +1394,10 @@ impl SshConfig {
 
     pub fn socket(&self) -> Option<&TmuxSocket> {
         self.socket.as_ref()
+    }
+
+    pub fn identity_file(&self) -> Option<&std::path::Path> {
+        self.identity_file.as_deref()
     }
 
     pub fn is_localhost(&self) -> bool {
@@ -1547,8 +1573,12 @@ impl SshTransport {
             )
         })?;
 
-        // Authenticate via ssh-agent
-        Self::authenticate_agent(&mut handle, &config).await?;
+        // Authenticate: explicit key file (DC26) or ssh-agent (default)
+        if let Some(ref key_path) = config.identity_file {
+            Self::authenticate_key_file(&mut handle, &config, key_path).await?;
+        } else {
+            Self::authenticate_agent(&mut handle, &config).await?;
+        }
 
         Ok(SshTransport {
             handle: Arc::new(tokio::sync::Mutex::new(handle)),
@@ -1620,6 +1650,53 @@ impl SshTransport {
             config.port,
             identities.len()
         ))
+    }
+
+    /// Authenticate using an explicit private key file (DC26).
+    async fn authenticate_key_file(
+        handle: &mut russh::client::Handle<SshHandler>,
+        config: &SshConfig,
+        key_path: &std::path::Path,
+    ) -> Result<()> {
+        let key_pair = russh_keys::load_secret_key(key_path, None).map_err(|e| {
+            anyhow!(
+                "Failed to load SSH key '{}': {}. \
+                 If the key is passphrase-protected, load it into ssh-agent instead.",
+                key_path.display(),
+                e
+            )
+        })?;
+
+        let accepted = handle
+            .authenticate_publickey(&config.user, Arc::new(key_pair))
+            .await
+            .map_err(|e| {
+                anyhow!(
+                    "SSH public key authentication failed for '{}' on {}:{}: {}",
+                    key_path.display(),
+                    config.host,
+                    config.port,
+                    e
+                )
+            })?;
+
+        if !accepted {
+            return Err(anyhow!(
+                "SSH key '{}' was rejected by {}:{}. \
+                 Verify the key is authorized on the remote host.",
+                key_path.display(),
+                config.host,
+                config.port
+            ));
+        }
+
+        tracing::debug!(
+            host = %config.host,
+            user = %config.user,
+            key = %key_path.display(),
+            "SSH key-file authentication succeeded"
+        );
+        Ok(())
     }
 
     /// Execute a command on the remote host and return stdout.
@@ -2144,6 +2221,33 @@ mod tests {
         assert!(SshConfig::new("127.0.0.1", "u").is_localhost());
         assert!(SshConfig::new("::1", "u").is_localhost());
         assert!(!SshConfig::new("remote", "u").is_localhost());
+    }
+
+    #[test]
+    fn ssh_config_identity_file_builder() {
+        let cfg = SshConfig::new("host", "user")
+            .with_identity_file("/keys/deploy")
+            .unwrap();
+        assert_eq!(
+            cfg.identity_file(),
+            Some(std::path::Path::new("/keys/deploy"))
+        );
+    }
+
+    #[test]
+    fn ssh_config_identity_file_default_none() {
+        let cfg = SshConfig::new("host", "user");
+        assert_eq!(cfg.identity_file(), None);
+    }
+
+    #[test]
+    fn ssh_config_identity_file_duplicate_rejected() {
+        let err = SshConfig::new("host", "user")
+            .with_identity_file("/keys/a")
+            .unwrap()
+            .with_identity_file("/keys/b")
+            .unwrap_err();
+        assert!(err.to_string().contains("already set"));
     }
 
     // --- File transfer tests (DC23, Phase 1.13g) ---
