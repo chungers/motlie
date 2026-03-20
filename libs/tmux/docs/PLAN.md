@@ -650,6 +650,9 @@ workaround from examples and consumer code.
   `name`, `command`, `width`, `height`, `start_directory`
 - [ ] Add public `SplitDirection` enum: `Horizontal`, `Vertical`
 - [ ] Add public `SplitSize` enum: `Cells(u16)`, `Percent(u8)`
+- [ ] Add checked `SplitSize::percent(value: u8) -> Result<Self>` constructor so
+  invalid percentages are rejected at call-site time rather than first failing
+  in the control layer
 - [ ] Add public `SplitPaneOptions`:
   `direction`, `size`, `command`, `start_directory`
 - [ ] Rustdoc the level semantics and option-to-tmux flag mapping
@@ -663,7 +666,10 @@ workaround from examples and consumer code.
 - [ ] Use `tmux split-window -P -F ...` to capture the created pane identity in the
   same command that performs the mutation
 - [ ] Shell-escape all user-provided fields (`name`, `command`, `start_directory`)
-- [ ] Validate `SplitSize::Percent` bounds and reject invalid inputs with `Err`
+- [ ] Reject non-UTF-8 `start_directory` paths with `Err` when converting `PathBuf`
+  into tmux command arguments
+- [ ] Keep defensive execution-time validation for split percentages even though
+  `SplitSize::percent(...)` is the preferred construction path
 
 ### 1.14c — `Target` API wiring (`src/host.rs`, `src/lib.rs`)
 
@@ -701,8 +707,9 @@ workaround from examples and consumer code.
 - [ ] Update `docs/API.md` with first-class `new_window()` / `split_pane()` examples
 - [ ] Update `examples/target_navigate.rs` to stop using `exec("tmux new-window ...")`
   for demo setup
-- [ ] Update `examples/README.md` to remove the workaround note and document the new
-  hierarchy creation path
+- [ ] Rewrite the `examples/README.md` "Future" section that currently documents the
+  `exec("tmux new-window ...")` workaround; replace it with the new hierarchy
+  creation path and any remaining follow-up scope
 - [ ] Decide whether `examples/repl.rs` should grow explicit `new-window` /
   `split-pane` commands in the same round or as immediate follow-up; document the choice
 
