@@ -4,6 +4,10 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-19 | @codex | Phase 1.14 correction — `SplitSize::Percent` maps to `tmux split-window -l <n>%` in tmux 3.4, not `-p`. Keep `--percent` as the public API/example surface but emit `-l 40%` in the control layer. |
+| 2026-03-19 | @codex | Implement Phase 1.14 target-creation symmetry: add typed window/pane creation APIs, localhost coverage, and example/API updates including REPL commands. |
+| 2026-03-19 | @codex | Add Phase 1.14 — hierarchy creation symmetry on `Target`: first-class `new_window()` / `split_pane()` with typed option structs, deterministic typed returns, tests, and API/example updates. Slotted as the next API-generalization task after 1.13. |
+| 2026-03-19 | @codex | Make `HostHandle::transport_kind()` a test-only `#[cfg(test)]` seam. It is only used by DC21 localhost transport-selection unit tests; scoping it to tests removes the standing dead-code warning without changing behavior. |
 | 2026-03-18 | @claude | PR #83 R3 — reconcile docs with implementation: OutputBus sync `&self` signatures, `PipeHandle` replaces bare `JoinHandle` in DESIGN/PLAN, `source_key()` added to TargetOutput in DESIGN, `SourceLabel` pane_id format (`build(%5)`), `format()` always labels, `StdioSink` Prefixed uses `source_key`, API.md format examples updated. |
 | 2026-03-18 | @claude | PR #83 R2 design/API improvements: (1) fix start-monitoring error-path — registration after session resolution, (2) split `source_key()` (identity) from `target_string()` (display), (3) `SinkFilter::for_session/for_pane/for_host/for_host_session` exact-match constructors, (4) `PipeHandle` wraps subscription id + task JoinHandle, (5) format() layering documented (JoinedStream = consumer, StdioSink = terminal), (6) stop vs shutdown lifecycle distinction in all docs. 280 tests (+6 new). |
 | 2026-03-18 | @claude | PR #83 R1 fixes: (1) UTF-8 octal decoder rewritten to collect bytes before decoding — multi-byte chars now correct, (2) pane identity uses pane_id as canonical identity for source comparison, display, and filter matching — distinct panes no longer merge, (3) OutputBus lifecycle docs narrowed to match fire-and-forget implementation. 274 tests (+6 new). |
@@ -438,7 +442,8 @@ See DESIGN.md DC21 for full specification.
   configs render to valid URIs; parse ∘ to_string is identity for canonical forms.
 
 - [x] **1.11l** — Unit tests for `connect()` localhost selection via
-  `HostHandle::transport_kind()` (`pub(crate)` accessor — not public API).
+  test-only `HostHandle::transport_kind()` (`pub(crate)` + `#[cfg(test)]`;
+  not public API).
   Localhost variants (`localhost`, `127.0.0.1`, `::1`) produce
   `TransportKind::Local`. Verify empty user rejected for SSH hosts (error
   path — no handshake needed). Config field propagation for localhost
@@ -630,6 +635,96 @@ is not extended.
 
 **Gates**: None — additive. Can run parallel with 2a.2 and 2a.3. If 2a.4 starts in
 parallel, serialize `host.rs` edits to avoid merge contention.
+
+---
+
+## Phase 1.14: Target Hierarchy Creation Symmetry
+
+Add first-class window and pane creation to `Target` so the hierarchy API is
+structurally symmetric: session root creation on `HostHandle`, child creation on
+`Target`, and `kill()` as the inverse lifecycle operation at every level. This is
+the next planned API task to remove the current `target.exec("tmux ...")`
+workaround from examples and consumer code.
+
+### 1.14a — Creation option types (`src/types.rs`)
+
+- [x] Add public `CreateWindowOptions` with `Default`:
+  `name`, `command`, `width`, `height`, `start_directory`
+- [x] Add public `SplitDirection` enum: `Horizontal`, `Vertical`
+- [x] Add public `SplitSize` enum: `Cells(u16)`, `Percent(u8)`
+- [x] Add checked `SplitSize::percent(value: u8) -> Result<Self>` constructor so
+  invalid percentages are rejected at call-site time rather than first failing
+  in the control layer
+- [x] Add public `SplitPaneOptions`:
+  `direction`, `size`, `command`, `start_directory`
+- [x] Rustdoc the level semantics and option-to-tmux flag mapping
+
+### 1.14b — Control-layer tmux wrappers (`src/control.rs`)
+
+- [x] Add `new_window(transport, socket, session, opts) -> Result<WindowInfo>`
+- [x] Add `split_pane(transport, socket, target, opts) -> Result<PaneAddress>`
+- [x] Use `tmux new-window -P -F ...` to capture the created window identity in the
+  same command that performs the mutation
+- [x] Use `tmux split-window -P -F ...` to capture the created pane identity in the
+  same command that performs the mutation
+- [x] Shell-escape all user-provided fields (`name`, `command`, `start_directory`)
+- [x] Reject non-UTF-8 `start_directory` paths with `Err` when converting `PathBuf`
+  into tmux command arguments
+- [x] Keep defensive execution-time validation for split percentages even though
+  `SplitSize::percent(...)` is the preferred construction path
+  <!-- 2026-03-19 @codex -- tmux 3.4 uses `split-window -l <n>%` for percentage
+       splits; the public API stays `SplitSize::Percent` / `--percent`, but the
+       emitted control command must use `-l 40%`, not a nonexistent `-p`. -->
+
+### 1.14c — `Target` API wiring (`src/host.rs`, `src/lib.rs`)
+
+- [x] Add `Target::new_window(&CreateWindowOptions) -> Result<Target>`
+- [x] Add `Target::split_pane(&SplitPaneOptions) -> Result<Target>`
+- [x] `new_window()` is session-level only; window/pane calls return structured `Err`
+- [x] `split_pane()` is window/pane-only; session calls return structured `Err`
+- [x] Window target split semantics: split the active pane in that window
+- [x] Pane target split semantics: split the addressed pane explicitly
+- [x] Re-export `CreateWindowOptions`, `SplitDirection`, `SplitSize`,
+  `SplitPaneOptions` from `lib.rs`
+
+### 1.14d — Unit tests
+
+- [x] `control.rs` tests for `new-window` command generation and printed-result parsing
+- [x] `control.rs` tests for `split-window` command generation, direction, and size flags
+- [x] `Target` level-gating tests (`new_window` rejects window/pane, `split_pane`
+  rejects session)
+- [x] Returned `Target` tests: created window carries `WindowInfo`, created pane
+  carries `PaneAddress`
+- [x] Invalid option tests: out-of-range split percentages, malformed parsed output
+
+### 1.14e — Integration tests
+
+- [x] Localhost round-trip: create session → create window → split pane → verify
+  `children()` reflects the new hierarchy
+- [x] Verify returned window/pane targets are immediately usable for `send_text()`,
+  `capture()`, and `kill()`
+- [x] Verify window-level split uses the active pane in that window
+- [x] Verify pane-level split targets the explicit pane
+- [ ] Verify rename/kill symmetry on newly created window/pane targets
+  <!-- 2026-03-19 @codex -- Kill symmetry is covered in the localhost round-trip. Rename on
+       freshly created window/pane targets is still an open follow-up; pane rename is a tmux
+       non-feature, so only window rename remains worth adding if we want explicit coverage. -->
+
+### 1.14f — Documentation and behavior verification
+
+- [x] Update `docs/API.md` with first-class `new_window()` / `split_pane()` examples
+- [x] Update `examples/target_navigate.rs` to stop using `exec("tmux new-window ...")`
+  for demo setup
+- [x] Rewrite the `examples/README.md` "Future" section that currently documents the
+  `exec("tmux new-window ...")` workaround; replace it with the new hierarchy
+  creation path and any remaining follow-up scope
+- [x] Decide whether `examples/repl.rs` should grow explicit `new-window` /
+  `split-pane` commands in the same round or as immediate follow-up; document the choice
+
+**Depends on**: 1.6, 1.7, 1.12
+
+**Gates**: None — additive. Prioritize immediately before Track B to keep the typed
+Target hierarchy complete before layering more consumer APIs on top.
 
 ---
 
@@ -1029,6 +1124,7 @@ Out of current scope. Listed for continuity.
  │     ├── 1.10 API gaps + hardening [gates 2a.2a]
  │     ├── 1.11 SshConfig URI ext (src/uri.rs)
  │     ├── 1.13 SFTP file transfer [needs 1.3 + 1.7 + 2a.1]
+ │     ├── 1.14 Target hierarchy creation symmetry [needs 1.6 + 1.7 + 1.12]
  │     │
  │  TRACK A — Streaming + Combining (priority)
  │  ──────────────────────────────────────────
@@ -1064,6 +1160,8 @@ Out of current scope. Listed for continuity.
 ```
 
 Notes:
+- `1.14` is the next planned task. It restores hierarchy symmetry before Track B
+  adds more consumer-side API layers.
 - After Track A (6 tasks ending at 2c.4a), the system has end-to-end streaming:
   monitor → parse control mode → fan-out via OutputBus → Subscription adapters →
   JoinedStream combining. No matcher or reactor dependency.

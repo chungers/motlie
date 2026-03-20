@@ -1,14 +1,62 @@
 use anyhow::Result;
+use std::path::Path;
 
 use crate::keys::KeySequence;
 use crate::transport::{shell_escape_arg, tmux_prefix, TransportKind};
-use crate::types::{CreateSessionOptions, TmuxSocket};
+use crate::types::{
+    CreateSessionOptions, CreateWindowOptions, PaneAddress, SplitDirection, SplitPaneOptions,
+    SplitSize, TmuxSocket, WindowInfo,
+};
 
 /// Shell-escape a string for safe interpolation into shell commands.
 /// Uses POSIX single-quote wrapping: wrap in single quotes, escape
 /// interior single quotes with '\'' (OC5).
 pub fn shell_escape(s: &str) -> String {
     format!("'{}'", shell_escape_arg(s))
+}
+
+fn shell_escape_path(path: &Path) -> Result<String> {
+    let s = path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("non-UTF-8 paths are not supported: {}", path.display()))?;
+    Ok(shell_escape(s))
+}
+
+fn parse_created_window(output: &str) -> Result<WindowInfo> {
+    let line = output.trim();
+    let fields: Vec<&str> = line.split('\t').collect();
+    if fields.len() < 7 {
+        return Err(anyhow::anyhow!(
+            "malformed new-window output (expected 7 fields): {}",
+            line
+        ));
+    }
+
+    Ok(WindowInfo {
+        session_id: fields[0].to_string(),
+        session_name: fields[1].to_string(),
+        index: fields[2]
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid window_index: {}", fields[2]))?,
+        name: fields[3].to_string(),
+        active: fields[4] == "1",
+        pane_count: fields[5]
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid window_panes: {}", fields[5]))?,
+        layout: fields[6].to_string(),
+    })
+}
+
+fn parse_created_pane(output: &str) -> Result<PaneAddress> {
+    let line = output.trim();
+    let fields: Vec<&str> = line.split('\t').collect();
+    if fields.len() < 2 {
+        return Err(anyhow::anyhow!(
+            "malformed split-pane output (expected 2 fields): {}",
+            line
+        ));
+    }
+    PaneAddress::parse(fields[0], fields[1])
 }
 
 /// Create a new detached tmux session (DC22).
@@ -75,6 +123,87 @@ pub async fn create_session(
     }
 
     Ok(())
+}
+
+/// Create a new tmux window and return its typed address metadata (DC25).
+pub async fn new_window(
+    transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
+    session: &str,
+    opts: &CreateWindowOptions,
+) -> Result<WindowInfo> {
+    let prefix = tmux_prefix(socket);
+    let mut cmd = format!(
+        "{} new-window -P -F '#{{session_id}}\t#{{session_name}}\t#{{window_index}}\t#{{window_name}}\t#{{window_active}}\t#{{window_panes}}\t#{{window_layout}}'",
+        prefix
+    );
+
+    if let Some(name) = &opts.name {
+        cmd.push_str(&format!(" -n {}", shell_escape(name)));
+    }
+    if let Some(width) = opts.width {
+        cmd.push_str(&format!(" -x {}", width));
+    }
+    if let Some(height) = opts.height {
+        cmd.push_str(&format!(" -y {}", height));
+    }
+    if let Some(start_directory) = &opts.start_directory {
+        cmd.push_str(&format!(" -c {}", shell_escape_path(start_directory)?));
+    }
+    cmd.push_str(&format!(" -t {}", shell_escape(session)));
+    if let Some(command) = &opts.command {
+        cmd.push_str(&format!(" {}", shell_escape(command)));
+    }
+
+    let output = transport.exec(&cmd).await?;
+    parse_created_window(&output)
+}
+
+/// Split a tmux pane/window and return the created pane address (DC25).
+pub async fn split_pane(
+    transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
+    target: &str,
+    opts: &SplitPaneOptions,
+) -> Result<PaneAddress> {
+    let prefix = tmux_prefix(socket);
+    let mut cmd = format!(
+        "{} split-window -P -F '#{{pane_id}}\t#{{session_name}}:#{{window_index}}.#{{pane_index}}'",
+        prefix
+    );
+
+    match opts.direction {
+        SplitDirection::Horizontal => cmd.push_str(" -h"),
+        SplitDirection::Vertical => cmd.push_str(" -v"),
+    }
+
+    if let Some(size) = opts.size {
+        match size {
+            SplitSize::Cells(cells) => {
+                cmd.push_str(&format!(" -l {}", cells));
+            }
+            SplitSize::Percent(percent) => {
+                if percent == 0 || percent > 100 {
+                    return Err(anyhow::anyhow!(
+                        "split percentage must be in 1..=100, got {}",
+                        percent
+                    ));
+                }
+                cmd.push_str(&format!(" -l {}%", percent));
+            }
+        }
+    }
+
+    if let Some(start_directory) = &opts.start_directory {
+        cmd.push_str(&format!(" -c {}", shell_escape_path(start_directory)?));
+    }
+    cmd.push_str(&format!(" -t {}", shell_escape(target)));
+    if let Some(command) = &opts.command {
+        cmd.push_str(&format!(" {}", shell_escape(command)));
+    }
+
+    let output = transport.exec(&cmd).await?;
+    parse_created_pane(&output)
 }
 
 /// Kill a tmux session by name.
@@ -256,6 +385,10 @@ pub async fn get_history_limit(
 mod tests {
     use super::*;
     use crate::transport::MockTransport;
+    use std::path::PathBuf;
+
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt;
 
     #[test]
     fn shell_escape_simple_string() {
@@ -372,6 +505,116 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn new_window_with_all_options_builds_expected_command() {
+        let expected = "tmux new-window -P -F '#{session_id}\t#{session_name}\t#{window_index}\t#{window_name}\t#{window_active}\t#{window_panes}\t#{window_layout}' -n 'editor' -x 200 -y 50 -c '/tmp/project' -t 'build' 'vim'";
+        let mock =
+            MockTransport::new().with_response(expected, "$0\tbuild\t1\teditor\t1\t1\tlayout");
+        let transport = TransportKind::Mock(mock);
+        let opts = CreateWindowOptions {
+            name: Some("editor".to_string()),
+            command: Some("vim".to_string()),
+            width: Some(200),
+            height: Some(50),
+            start_directory: Some(PathBuf::from("/tmp/project")),
+        };
+
+        let window = new_window(&transport, None, "build", &opts).await.unwrap();
+        assert_eq!(window.session_name, "build");
+        assert_eq!(window.index, 1);
+        assert_eq!(window.name, "editor");
+    }
+
+    #[tokio::test]
+    async fn split_pane_with_all_options_builds_expected_command() {
+        let expected = "tmux split-window -P -F '#{pane_id}\t#{session_name}:#{window_index}.#{pane_index}' -h -l 40% -c '/tmp/project' -t 'build:1.0' 'htop'";
+        let mock = MockTransport::new().with_response(expected, "%9\tbuild:1.1");
+        let transport = TransportKind::Mock(mock);
+        let opts = SplitPaneOptions {
+            direction: SplitDirection::Horizontal,
+            size: Some(SplitSize::percent(40).unwrap()),
+            command: Some("htop".to_string()),
+            start_directory: Some(PathBuf::from("/tmp/project")),
+        };
+
+        let pane = split_pane(&transport, None, "build:1.0", &opts)
+            .await
+            .unwrap();
+        assert_eq!(pane.pane_id, "%9");
+        assert_eq!(pane.session, "build");
+        assert_eq!(pane.window, 1);
+        assert_eq!(pane.pane, 1);
+    }
+
+    #[tokio::test]
+    async fn split_pane_rejects_invalid_percent_defensively() {
+        let mock = MockTransport::new().with_default("");
+        let transport = TransportKind::Mock(mock);
+        let opts = SplitPaneOptions {
+            size: Some(SplitSize::Percent(101)),
+            ..Default::default()
+        };
+
+        let err = split_pane(&transport, None, "build:0.0", &opts)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("1..=100"));
+    }
+
+    #[tokio::test]
+    async fn new_window_rejects_malformed_printed_output() {
+        let mock = MockTransport::new().with_response("new-window -P", "too-few-fields");
+        let transport = TransportKind::Mock(mock);
+
+        let err = new_window(&transport, None, "build", &Default::default())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("malformed new-window output"));
+    }
+
+    #[tokio::test]
+    async fn new_window_rejects_invalid_numeric_fields() {
+        let mock = MockTransport::new().with_response(
+            "new-window -P",
+            "$0\tbuild\tnot-a-number\teditor\t1\talso-bad\tlayout",
+        );
+        let transport = TransportKind::Mock(mock);
+
+        let err = new_window(&transport, None, "build", &Default::default())
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("invalid window_index") || msg.contains("invalid window_panes"));
+    }
+
+    #[tokio::test]
+    async fn split_pane_rejects_malformed_printed_output() {
+        let mock = MockTransport::new().with_response("split-window -P", "bad-output");
+        let transport = TransportKind::Mock(mock);
+
+        let err = split_pane(&transport, None, "build:0.0", &Default::default())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("malformed split-pane output"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn new_window_rejects_non_utf8_start_directory() {
+        let mock = MockTransport::new().with_default("");
+        let transport = TransportKind::Mock(mock);
+        let non_utf8 = std::ffi::OsString::from_vec(vec![0x66, 0x6f, 0x80, 0x6f]);
+        let opts = CreateWindowOptions {
+            start_directory: Some(PathBuf::from(non_utf8)),
+            ..Default::default()
+        };
+
+        let err = new_window(&transport, None, "build", &opts)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("non-UTF-8"));
+    }
+
+    #[tokio::test]
     async fn kill_session_basic() {
         let mock = MockTransport::new().with_default("");
         let transport = TransportKind::Mock(mock);
@@ -433,8 +676,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_history_limit_parses() {
-        let mock = MockTransport::new()
-            .with_response("show-option", "2000\n");
+        let mock = MockTransport::new().with_response("show-option", "2000\n");
         let transport = TransportKind::Mock(mock);
         let limit = get_history_limit(&transport, None, None).await.unwrap();
         assert_eq!(limit, 2000);
