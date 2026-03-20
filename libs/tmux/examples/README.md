@@ -28,6 +28,8 @@ cargo build -p motlie-tmux --examples
 ./target/debug/examples/repl ssh://localhost
 ./target/debug/examples/stream_pane ssh://localhost my_session --mode monitor
 ./target/debug/examples/monitor_pipe ssh://localhost my_session
+./target/debug/examples/joined_demo ssh://localhost
+./target/debug/examples/joined_demo ssh://localhost --format separator
 ```
 
 ## Examples
@@ -390,4 +392,56 @@ Flow: start_monitoring_session -> output_bus.subscribe -> pipe -> unsubscribe ->
 [callback localhost %5] hello
 Callback summary: data_events=2, gap_events=0, dropped_events=0
 Stopped.
+```
+
+### joined_demo — Multi-pane JoinedStream
+
+Demonstrates `JoinedStream` merging output from two panes in a single session.
+Creates a 2-pane session using `Target::split_pane()`, sends different commands
+to each pane, and shows the interleaved output with source attribution.
+
+```sh
+# Default: bracketed labels on every line
+./target/debug/examples/joined_demo ssh://localhost
+
+# Separator mode: header only on source transitions
+./target/debug/examples/joined_demo ssh://localhost --format separator
+
+# Prompt-style labels
+./target/debug/examples/joined_demo ssh://localhost --format prompt
+```
+
+Expected output (`--format bracketed`):
+```text
+--- JoinedStream output ---
+[localhost:joined_demo_12345(%5)] ps aux | head -5
+[localhost:joined_demo_12345(%5)] USER         PID %CPU %MEM  ...
+[localhost:joined_demo_12345(%5)] root           1  0.0  0.0  ...
+[localhost:joined_demo_12345(%6)] ls -la /tmp | head -5
+[localhost:joined_demo_12345(%6)] total 218368
+[localhost:joined_demo_12345(%6)] drwxrwxrwt 35 root   root   ...
+--- end ---
+```
+
+Expected output (`--format prompt`):
+```text
+--- JoinedStream output ---
+localhost:joined_demo_12345(%5)> ps aux | head -5
+localhost:joined_demo_12345(%5)> USER         PID %CPU %MEM  ...
+localhost:joined_demo_12345(%6)> ls -la /tmp | head -5
+--- end ---
+```
+
+Expected output (`--format separator`):
+```text
+--- JoinedStream output ---
+--- localhost:joined_demo_12345(%5) ---
+ps aux | head -5
+USER         PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
+root           1  0.0  0.0  23580 14240 ?        Ss   Mar10   2:30 /sbin/init
+--- localhost:joined_demo_12345(%6) ---
+ls -la /tmp | head -5
+total 218368
+drwxrwxrwt 35 root   root     118784 Mar 19 21:42 .
+--- end ---
 ```
