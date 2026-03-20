@@ -115,11 +115,12 @@ impl HostHandle {
         }
     }
 
-    /// Access the transport kind (crate-internal, not public API).
+    /// Access the transport kind for crate tests.
     ///
-    /// Scoped to `pub(crate)` so the transport abstraction stays internal
-    /// per DC21. Enables unit tests within the crate to assert transport
+    /// Kept test-only so the transport abstraction stays internal per DC21
+    /// while still allowing URI/connect tests to assert localhost transport
     /// selection without relying on behavioral side effects.
+    #[cfg(test)]
     pub(crate) fn transport_kind(&self) -> &TransportKind {
         &self.inner.transport
     }

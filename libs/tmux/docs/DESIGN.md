@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-19 | @codex: Narrow `HostHandle::transport_kind()` to a test-only `#[cfg(test)]` seam. The accessor exists solely for DC21 localhost transport-selection tests and should not live in non-test builds. | DC21 |
 | 2026-03-18 | @claude: PR #83 R3 — reconcile DESIGN/PLAN/API docs with current implementation: OutputBus sync `&self` signatures, `PipeHandle` replaces bare `JoinHandle`, `source_key()` + `target_string()` dual accessors, `SourceLabel` pane_id format (`build(%5)`), `format()` always labels (not only on transitions), `StdioSink` Prefixed uses `source_key`. | OutputBus, Subscription, TargetOutput, SourceLabel, JoinedStream, StdioSink |
 | 2026-03-18 | @claude: PR #83 R1 — narrowed OutputBus shutdown/unsubscribe lifecycle docs to match fire-and-forget impl (piped tasks drain on their own; caller holds PipeHandle for join semantics). | OutputBus, SinkKind |
 | 2026-03-17 | @claude: DC24 R3 — address PR #82 review round 3: remove `filters` from `CallbackSink` and `filters()` from `SinkKind` — routing is `subscribe(filters)` only, sinks are terminal consumers. Update DC12 rationale, ActionHandle section, JoinedStream intro. | SinkKind, CallbackSink, DC12, ActionHandle, JoinedStream |
@@ -2965,11 +2966,12 @@ The change extends the existing `SshConfig` rather than adding a new type:
 3. **`src/lib.rs`**: Add `mod uri;` (private — no public types to export, just extends
    `SshConfig` which is already re-exported).
 
-4. **`src/host.rs`**: Add `pub(crate) fn transport_kind(&self) -> &TransportKind`
-   accessor to `HostHandle`. Scoped to `pub(crate)` — not part of the public API —
-   so the transport split stays internal per DC21's requirement. Enables unit tests
-   within the crate to assert transport selection without relying on behavioral side
-   effects. `HostHandle::local()`, `HostHandle::new()`,
+4. **`src/host.rs`**: Add test-only `#[cfg(test)] pub(crate) fn transport_kind(&self)
+   -> &TransportKind` accessor to `HostHandle`. Not part of the public API or
+   non-test build surface, so the transport split stays internal per DC21's
+   requirement while still enabling localhost transport-selection unit tests
+   within the crate to assert behavior without relying on side effects.
+   `HostHandle::local()`, `HostHandle::new()`,
    `HostHandle::local_with_timeout()` remain as crate-internal convenience constructors
    for testing and advanced use cases.
    <!-- @claude 2026-03-13: scoped to pub(crate) per PR #71 R4 — reviewer correctly
