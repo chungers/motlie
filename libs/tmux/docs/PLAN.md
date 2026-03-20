@@ -4,6 +4,8 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-19 | @codex | Phase 1.14 correction — `SplitSize::Percent` maps to `tmux split-window -l <n>%` in tmux 3.4, not `-p`. Keep `--percent` as the public API/example surface but emit `-l 40%` in the control layer. |
+| 2026-03-19 | @codex | Implement Phase 1.14 target-creation symmetry: add typed window/pane creation APIs, localhost coverage, and example/API updates including REPL commands. |
 | 2026-03-19 | @codex | Add Phase 1.14 — hierarchy creation symmetry on `Target`: first-class `new_window()` / `split_pane()` with typed option structs, deterministic typed returns, tests, and API/example updates. Slotted as the next API-generalization task after 1.13. |
 | 2026-03-19 | @codex | Make `HostHandle::transport_kind()` a test-only `#[cfg(test)]` seam. It is only used by DC21 localhost transport-selection unit tests; scoping it to tests removes the standing dead-code warning without changing behavior. |
 | 2026-03-18 | @claude | PR #83 R3 — reconcile docs with implementation: OutputBus sync `&self` signatures, `PipeHandle` replaces bare `JoinHandle` in DESIGN/PLAN, `source_key()` added to TargetOutput in DESIGN, `SourceLabel` pane_id format (`build(%5)`), `format()` always labels, `StdioSink` Prefixed uses `source_key`, API.md format examples updated. |
@@ -646,71 +648,77 @@ workaround from examples and consumer code.
 
 ### 1.14a — Creation option types (`src/types.rs`)
 
-- [ ] Add public `CreateWindowOptions` with `Default`:
+- [x] Add public `CreateWindowOptions` with `Default`:
   `name`, `command`, `width`, `height`, `start_directory`
-- [ ] Add public `SplitDirection` enum: `Horizontal`, `Vertical`
-- [ ] Add public `SplitSize` enum: `Cells(u16)`, `Percent(u8)`
-- [ ] Add checked `SplitSize::percent(value: u8) -> Result<Self>` constructor so
+- [x] Add public `SplitDirection` enum: `Horizontal`, `Vertical`
+- [x] Add public `SplitSize` enum: `Cells(u16)`, `Percent(u8)`
+- [x] Add checked `SplitSize::percent(value: u8) -> Result<Self>` constructor so
   invalid percentages are rejected at call-site time rather than first failing
   in the control layer
-- [ ] Add public `SplitPaneOptions`:
+- [x] Add public `SplitPaneOptions`:
   `direction`, `size`, `command`, `start_directory`
-- [ ] Rustdoc the level semantics and option-to-tmux flag mapping
+- [x] Rustdoc the level semantics and option-to-tmux flag mapping
 
 ### 1.14b — Control-layer tmux wrappers (`src/control.rs`)
 
-- [ ] Add `new_window(transport, socket, session, opts) -> Result<WindowInfo>`
-- [ ] Add `split_pane(transport, socket, target, opts) -> Result<PaneAddress>`
-- [ ] Use `tmux new-window -P -F ...` to capture the created window identity in the
+- [x] Add `new_window(transport, socket, session, opts) -> Result<WindowInfo>`
+- [x] Add `split_pane(transport, socket, target, opts) -> Result<PaneAddress>`
+- [x] Use `tmux new-window -P -F ...` to capture the created window identity in the
   same command that performs the mutation
-- [ ] Use `tmux split-window -P -F ...` to capture the created pane identity in the
+- [x] Use `tmux split-window -P -F ...` to capture the created pane identity in the
   same command that performs the mutation
-- [ ] Shell-escape all user-provided fields (`name`, `command`, `start_directory`)
-- [ ] Reject non-UTF-8 `start_directory` paths with `Err` when converting `PathBuf`
+- [x] Shell-escape all user-provided fields (`name`, `command`, `start_directory`)
+- [x] Reject non-UTF-8 `start_directory` paths with `Err` when converting `PathBuf`
   into tmux command arguments
-- [ ] Keep defensive execution-time validation for split percentages even though
+- [x] Keep defensive execution-time validation for split percentages even though
   `SplitSize::percent(...)` is the preferred construction path
+  <!-- 2026-03-19 @codex -- tmux 3.4 uses `split-window -l <n>%` for percentage
+       splits; the public API stays `SplitSize::Percent` / `--percent`, but the
+       emitted control command must use `-l 40%`, not a nonexistent `-p`. -->
 
 ### 1.14c — `Target` API wiring (`src/host.rs`, `src/lib.rs`)
 
-- [ ] Add `Target::new_window(&CreateWindowOptions) -> Result<Target>`
-- [ ] Add `Target::split_pane(&SplitPaneOptions) -> Result<Target>`
-- [ ] `new_window()` is session-level only; window/pane calls return structured `Err`
-- [ ] `split_pane()` is window/pane-only; session calls return structured `Err`
-- [ ] Window target split semantics: split the active pane in that window
-- [ ] Pane target split semantics: split the addressed pane explicitly
-- [ ] Re-export `CreateWindowOptions`, `SplitDirection`, `SplitSize`,
+- [x] Add `Target::new_window(&CreateWindowOptions) -> Result<Target>`
+- [x] Add `Target::split_pane(&SplitPaneOptions) -> Result<Target>`
+- [x] `new_window()` is session-level only; window/pane calls return structured `Err`
+- [x] `split_pane()` is window/pane-only; session calls return structured `Err`
+- [x] Window target split semantics: split the active pane in that window
+- [x] Pane target split semantics: split the addressed pane explicitly
+- [x] Re-export `CreateWindowOptions`, `SplitDirection`, `SplitSize`,
   `SplitPaneOptions` from `lib.rs`
 
 ### 1.14d — Unit tests
 
-- [ ] `control.rs` tests for `new-window` command generation and printed-result parsing
-- [ ] `control.rs` tests for `split-window` command generation, direction, and size flags
-- [ ] `Target` level-gating tests (`new_window` rejects window/pane, `split_pane`
+- [x] `control.rs` tests for `new-window` command generation and printed-result parsing
+- [x] `control.rs` tests for `split-window` command generation, direction, and size flags
+- [x] `Target` level-gating tests (`new_window` rejects window/pane, `split_pane`
   rejects session)
-- [ ] Returned `Target` tests: created window carries `WindowInfo`, created pane
+- [x] Returned `Target` tests: created window carries `WindowInfo`, created pane
   carries `PaneAddress`
-- [ ] Invalid option tests: out-of-range split percentages, malformed parsed output
+- [x] Invalid option tests: out-of-range split percentages, malformed parsed output
 
 ### 1.14e — Integration tests
 
-- [ ] Localhost round-trip: create session → create window → split pane → verify
+- [x] Localhost round-trip: create session → create window → split pane → verify
   `children()` reflects the new hierarchy
-- [ ] Verify returned window/pane targets are immediately usable for `send_text()`,
+- [x] Verify returned window/pane targets are immediately usable for `send_text()`,
   `capture()`, and `kill()`
-- [ ] Verify window-level split uses the active pane in that window
-- [ ] Verify pane-level split targets the explicit pane
+- [x] Verify window-level split uses the active pane in that window
+- [x] Verify pane-level split targets the explicit pane
 - [ ] Verify rename/kill symmetry on newly created window/pane targets
+  <!-- 2026-03-19 @codex -- Kill symmetry is covered in the localhost round-trip. Rename on
+       freshly created window/pane targets is still an open follow-up; pane rename is a tmux
+       non-feature, so only window rename remains worth adding if we want explicit coverage. -->
 
 ### 1.14f — Documentation and behavior verification
 
-- [ ] Update `docs/API.md` with first-class `new_window()` / `split_pane()` examples
-- [ ] Update `examples/target_navigate.rs` to stop using `exec("tmux new-window ...")`
+- [x] Update `docs/API.md` with first-class `new_window()` / `split_pane()` examples
+- [x] Update `examples/target_navigate.rs` to stop using `exec("tmux new-window ...")`
   for demo setup
-- [ ] Rewrite the `examples/README.md` "Future" section that currently documents the
+- [x] Rewrite the `examples/README.md` "Future" section that currently documents the
   `exec("tmux new-window ...")` workaround; replace it with the new hierarchy
   creation path and any remaining follow-up scope
-- [ ] Decide whether `examples/repl.rs` should grow explicit `new-window` /
+- [x] Decide whether `examples/repl.rs` should grow explicit `new-window` /
   `split-pane` commands in the same round or as immediate follow-up; document the choice
 
 **Depends on**: 1.6, 1.7, 1.12
