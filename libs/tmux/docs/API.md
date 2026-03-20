@@ -146,12 +146,13 @@ let host = HostHandle::new(
 ## 2. SshTransport
 
 Executes commands on a remote host over SSH using `russh` 0.46.
-Authentication is via ssh-agent only.
+Authentication is via ssh-agent by default, or via an explicit key file
+(`identity-file` URI parameter or `with_identity_file()` builder).
 
 ### Prerequisites
 
-- `ssh-agent` running with `SSH_AUTH_SOCK` exported
-- Keys loaded: `ssh-add ~/.ssh/id_ed25519`
+- `ssh-agent` running with `SSH_AUTH_SOCK` exported (unless using `identity-file`)
+- Keys loaded: `ssh-add ~/.ssh/id_ed25519` (unless using `identity-file`)
 - Remote host in `~/.ssh/known_hosts` (for `Verify` policy)
 
 ### Connect
@@ -222,9 +223,11 @@ if ssh.is_closed() {
 - **Concurrency**: The SSH handle mutex is held only during
   `channel_open_session()`, not for the full command lifetime. Multiple
   concurrent `exec()` calls on the same connection are safe.
-- **Authentication**: ssh-agent only. Key file or password auth is not supported.
+- **Authentication**: ssh-agent (default) or explicit key file via `identity-file`
+  (DC26). Password auth is not supported.
   Error messages are actionable (OC3): "is SSH_AUTH_SOCK set?",
-  "Add a key with: ssh-add ~/.ssh/id_ed25519".
+  "Add a key with: ssh-add ~/.ssh/id_ed25519",
+  "If the key is passphrase-protected, load it into ssh-agent instead."
 
 ---
 
@@ -480,7 +483,7 @@ assert!(err.to_string().contains("session not found"));
 | `is_closed()` / `is_healthy()` | `is_healthy()` always `true` | `is_healthy()` delegates to `!is_closed()` | `is_healthy()` always `true` |
 | Keepalive | N/A | Configurable, default 30s | N/A |
 | `open_shell(cols, rows)` | Spawns `sh` (ignores cols/rows) | PTY `xterm` at caller-specified cols×rows | Empty data, immediate Eof (ignores cols/rows) |
-| Auth | N/A | ssh-agent only | N/A |
+| Auth | N/A | ssh-agent or identity-file (DC26) | N/A |
 
 > **`@claude NOTE — RESOLVED`** *(PLAN 1.10c)*: `SshTransport::open_shell()` requests a
 > PTY at fixed 80x24. There is no API to specify dimensions. This may matter
@@ -1729,7 +1732,7 @@ assert!(issues.is_empty());
 |------|-------------|
 | `TransportKind` | Enum: Local, Ssh, Mock — static dispatch |
 | `LocalTransport` | Subprocess exec, configurable timeout |
-| `SshTransport` | russh 0.46, ssh-agent auth; `connect()`, `is_closed()` |
+| `SshTransport` | russh 0.46, ssh-agent or key-file auth (DC26); `connect()`, `is_closed()` |
 | `SshConfig` | host, port, user, host_key_policy, timeout, keepalive_interval, socket; `parse()`, `to_uri_string()`, `connect()`, `Display`/`FromStr` |
 | `MockTransport` | Canned responses; `with_response()`, `with_default()`, `with_file()`, `with_dir()` |
 | `HostKeyPolicy` | Enum: Verify (default), TrustFirstUse, Insecure |
