@@ -1438,6 +1438,53 @@ let text = stream.format(&chunk);
 // With Prompt:    "localhost:build(%5)> hello world"
 ```
 
+### Multi-pane joined output (real example)
+
+Runnable example: [`examples/joined_demo.rs`](../examples/joined_demo.rs) — creates a
+2-pane session, sends `ps aux | head -5` to pane 0 and `ls -la /tmp | head -5` to pane 1,
+then prints the interleaved JoinedStream.
+
+**Bracketed format** (`--format bracketed`, default) — every line labeled:
+
+```text
+[localhost:demo(%5)] ps aux | head -5
+[localhost:demo(%5)] USER         PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
+[localhost:demo(%5)] root           1  0.0  0.0  23580 14240 ?        Ss   Mar10   2:30 /sbin/init
+[localhost:demo(%5)] root           2  0.0  0.0      0     0 ?        S    Mar10   0:02 [kthreadd]
+[localhost:demo(%6)] ls -la /tmp | head -5
+[localhost:demo(%6)] total 218368
+[localhost:demo(%6)] drwxrwxrwt 35 root   root     118784 Mar 19 21:42 .
+[localhost:demo(%6)] drwxr-xr-x 24 root   root       4096 Dec 31  1969 ..
+```
+
+**Separator format** (`--format separator`) — header only on source transitions,
+using `source_changed` to insert `--- pane ---` dividers:
+
+```text
+--- localhost:demo(%5) ---
+ps aux | head -5
+USER         PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
+root           1  0.0  0.0  23580 14240 ?        Ss   Mar10   2:30 /sbin/init
+root           2  0.0  0.0      0     0 ?        S    Mar10   0:02 [kthreadd]
+--- localhost:demo(%6) ---
+ls -la /tmp | head -5
+total 218368
+drwxrwxrwt 35 root   root     118784 Mar 19 21:42 .
+drwxr-xr-x 24 root   root       4096 Dec 31  1969 ..
+```
+
+The key API pattern for source-transition rendering:
+
+```rust
+while let Some(chunk) = stream.next().await {
+    let clean = strip_ansi(&chunk.output.content);
+    if chunk.source_changed {
+        println!("--- {} ---", chunk.source.short());
+    }
+    print!("{}", clean);
+}
+```
+
 ---
 
 ## 20. Sink Pipeline
