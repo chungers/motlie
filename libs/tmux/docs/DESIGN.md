@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-19 | @codex: DC25 implementation note — correct split-percentage mapping for tmux 3.4: `SplitSize::Percent` maps to `split-window -l <n>%`, not a nonexistent `-p` flag. | DC25 |
 | 2026-03-19 | @codex: Add DC25 — first-class window/pane creation on `Target` to restore hierarchy symmetry. Document `new_window()` / `split_pane()` requirements, typed option structs, tmux `-P -F` return strategy, and why `exec(\"tmux ...\")` is not sufficient. | Target, DC25 |
 | 2026-03-19 | @codex: Narrow `HostHandle::transport_kind()` to a test-only `#[cfg(test)]` seam. The accessor exists solely for DC21 localhost transport-selection tests and should not live in non-test builds. | DC21 |
 | 2026-03-18 | @claude: PR #83 R3 — reconcile DESIGN/PLAN/API docs with current implementation: OutputBus sync `&self` signatures, `PipeHandle` replaces bare `JoinHandle`, `source_key()` + `target_string()` dual accessors, `SourceLabel` pane_id format (`build(%5)`), `format()` always labels (not only on transitions), `StdioSink` Prefixed uses `source_key`. | OutputBus, Subscription, TargetOutput, SourceLabel, JoinedStream, StdioSink |
@@ -3530,6 +3531,10 @@ surface while staying typed and shell-safe.
 should use a checked constructor such as `SplitSize::percent(50)?` so invalid
 percentages are rejected at the API boundary rather than deep in the control layer.
 Execution should still validate defensively.
+
+At the tmux CLI layer, percentage splits map to `split-window -l <n>%`. tmux 3.4
+does not provide a dedicated `split-window -p` percentage flag, so the control
+wrapper should append `%` to the `-l` size value when `SplitSize::Percent` is used.
 
 `start_directory` uses `PathBuf` for type safety. When the control layer builds the
 tmux command, non-UTF-8 paths are rejected with `Err` rather than lossy conversion.

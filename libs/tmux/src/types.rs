@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use regex::Regex;
 use std::fmt;
+use std::path::PathBuf;
 
 /// Authoritative pane identifier using tmux's `#{pane_id}` (%<id>).
 /// Display fields (session, window, pane) are metadata for human readability.
@@ -185,7 +186,10 @@ impl TargetSpec {
         };
 
         let pane = match pane_part {
-            Some(p) => Some(p.parse().map_err(|_| anyhow!("invalid pane index: {}", p))?),
+            Some(p) => Some(
+                p.parse()
+                    .map_err(|_| anyhow!("invalid pane index: {}", p))?,
+            ),
             None => None,
         };
 
@@ -341,6 +345,71 @@ pub struct CreateSessionOptions {
     pub height: Option<u16>,
     /// Scrollback history limit for the session.
     pub history_limit: Option<u32>,
+}
+
+/// Options for creating a new tmux window as a child of a session (DC25).
+#[derive(Debug, Clone, Default)]
+pub struct CreateWindowOptions {
+    /// Window name (`-n` flag).
+    pub name: Option<String>,
+    /// Command to run in the initial pane.
+    pub command: Option<String>,
+    /// Initial window width (`-x` flag).
+    pub width: Option<u16>,
+    /// Initial window height (`-y` flag).
+    pub height: Option<u16>,
+    /// Start directory for the new window (`-c` flag).
+    pub start_directory: Option<PathBuf>,
+}
+
+/// Direction for `split-window` (DC25).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitDirection {
+    /// Create panes side-by-side (`split-window -h`).
+    Horizontal,
+    /// Create panes stacked top/bottom (`split-window -v`).
+    Vertical,
+}
+
+impl Default for SplitDirection {
+    fn default() -> Self {
+        SplitDirection::Vertical
+    }
+}
+
+/// Size override for `split-window` (DC25).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitSize {
+    /// Fixed size in cells (`-l` flag).
+    Cells(u16),
+    /// Percentage of the target pane (`-p` flag).
+    Percent(u8),
+}
+
+impl SplitSize {
+    /// Create a checked percentage value for `split-window -p`.
+    pub fn percent(value: u8) -> Result<Self> {
+        if value == 0 || value > 100 {
+            return Err(anyhow!(
+                "split percentage must be in 1..=100, got {}",
+                value
+            ));
+        }
+        Ok(SplitSize::Percent(value))
+    }
+}
+
+/// Options for splitting a tmux pane from a window/pane target (DC25).
+#[derive(Debug, Clone, Default)]
+pub struct SplitPaneOptions {
+    /// Horizontal (`-h`) or vertical (`-v`) split. Default: vertical.
+    pub direction: SplitDirection,
+    /// Optional size override (`-l` or `-p`).
+    pub size: Option<SplitSize>,
+    /// Command to run in the new pane.
+    pub command: Option<String>,
+    /// Start directory for the new pane (`-c` flag).
+    pub start_directory: Option<PathBuf>,
 }
 
 /// Options for host-level file transfer (DC23).
@@ -655,6 +724,31 @@ mod tests {
     }
 
     #[test]
+    fn split_direction_default_is_vertical() {
+        assert_eq!(SplitDirection::default(), SplitDirection::Vertical);
+    }
+
+    #[test]
+    fn split_size_percent_accepts_valid_range() {
+        assert_eq!(SplitSize::percent(1).unwrap(), SplitSize::Percent(1));
+        assert_eq!(SplitSize::percent(100).unwrap(), SplitSize::Percent(100));
+    }
+
+    #[test]
+    fn split_size_percent_rejects_zero() {
+        assert!(SplitSize::percent(0).is_err());
+    }
+
+    #[test]
+    fn split_pane_options_default_is_vertical_without_size() {
+        let opts = SplitPaneOptions::default();
+        assert_eq!(opts.direction, SplitDirection::Vertical);
+        assert!(opts.size.is_none());
+        assert!(opts.command.is_none());
+        assert!(opts.start_directory.is_none());
+    }
+
+    #[test]
     fn output_fidelity_clean_zero_alloc() {
         let f = OutputFidelity::clean();
         assert!(!f.degraded);
@@ -784,19 +878,45 @@ mod tests {
         // Clients attached to a different session should not trigger ClientResize
         let before = GeometrySnapshot {
             clients: vec![
-                ClientInfo { width: 200, height: 50, session: "build".to_string() },
-                ClientInfo { width: 180, height: 40, session: "other".to_string() },
+                ClientInfo {
+                    width: 200,
+                    height: 50,
+                    session: "build".to_string(),
+                },
+                ClientInfo {
+                    width: 180,
+                    height: 40,
+                    session: "other".to_string(),
+                },
             ],
-            pane: PaneGeometry { pane_width: 80, pane_height: 24, history_size: 100, history_limit: 2000 },
+            pane: PaneGeometry {
+                pane_width: 80,
+                pane_height: 24,
+                history_size: 100,
+                history_limit: 2000,
+            },
             session: "build".to_string(),
         };
         let after = GeometrySnapshot {
             clients: vec![
-                ClientInfo { width: 200, height: 50, session: "build".to_string() },
+                ClientInfo {
+                    width: 200,
+                    height: 50,
+                    session: "build".to_string(),
+                },
                 // "other" session client resized — should not matter
-                ClientInfo { width: 100, height: 20, session: "other".to_string() },
+                ClientInfo {
+                    width: 100,
+                    height: 20,
+                    session: "other".to_string(),
+                },
             ],
-            pane: PaneGeometry { pane_width: 80, pane_height: 24, history_size: 100, history_limit: 2000 },
+            pane: PaneGeometry {
+                pane_width: 80,
+                pane_height: 24,
+                history_size: 100,
+                history_limit: 2000,
+            },
             session: "build".to_string(),
         };
         assert!(before.compare(&after).is_empty());
@@ -805,17 +925,31 @@ mod tests {
     #[test]
     fn geometry_snapshot_same_session_client_resize_detected() {
         let before = GeometrySnapshot {
-            clients: vec![
-                ClientInfo { width: 200, height: 50, session: "build".to_string() },
-            ],
-            pane: PaneGeometry { pane_width: 80, pane_height: 24, history_size: 100, history_limit: 2000 },
+            clients: vec![ClientInfo {
+                width: 200,
+                height: 50,
+                session: "build".to_string(),
+            }],
+            pane: PaneGeometry {
+                pane_width: 80,
+                pane_height: 24,
+                history_size: 100,
+                history_limit: 2000,
+            },
             session: "build".to_string(),
         };
         let after = GeometrySnapshot {
-            clients: vec![
-                ClientInfo { width: 180, height: 40, session: "build".to_string() },
-            ],
-            pane: PaneGeometry { pane_width: 80, pane_height: 24, history_size: 100, history_limit: 2000 },
+            clients: vec![ClientInfo {
+                width: 180,
+                height: 40,
+                session: "build".to_string(),
+            }],
+            pane: PaneGeometry {
+                pane_width: 80,
+                pane_height: 24,
+                history_size: 100,
+                history_limit: 2000,
+            },
             session: "build".to_string(),
         };
         assert_eq!(before.compare(&after), vec![FidelityIssue::ClientResize]);

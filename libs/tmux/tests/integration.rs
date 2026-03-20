@@ -3,7 +3,10 @@
 //! These tests require tmux to be installed and available on PATH.
 //! They create/destroy real tmux sessions during testing.
 
-use motlie_tmux::{CallbackSink, HostHandle, KeySequence, SinkEvent, SinkFilter, SinkKind, SshConfig, TargetLevel};
+use motlie_tmux::{
+    CallbackSink, CreateWindowOptions, HostHandle, KeySequence, SinkEvent, SinkFilter, SinkKind,
+    SplitDirection, SplitPaneOptions, SplitSize, SshConfig, TargetLevel,
+};
 use std::any::Any;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -78,10 +81,13 @@ async fn localhost_session_lifecycle() {
 
     // 1. Create session
     let target = host
-        .create_session(&session_name, &motlie_tmux::CreateSessionOptions {
-            window_name: Some("main".to_string()),
-            ..Default::default()
-        })
+        .create_session(
+            &session_name,
+            &motlie_tmux::CreateSessionOptions {
+                window_name: Some("main".to_string()),
+                ..Default::default()
+            },
+        )
         .await
         .expect("create_session failed");
     assert_eq!(target.level(), TargetLevel::Session);
@@ -194,9 +200,7 @@ async fn localhost_monitor_pipeline() {
     // 3. Subscribe to the output bus
     let bus = host.output_bus();
     let filter = motlie_tmux::SinkFilter::for_session(&session_name);
-    let sub = bus
-        .subscribe(vec![filter], 64)
-        .expect("subscribe failed");
+    let sub = bus.subscribe(vec![filter], 64).expect("subscribe failed");
     let mut rx = sub.into_receiver();
 
     // 4. Send text + Enter to the pane — this generates control mode output
@@ -273,6 +277,113 @@ async fn localhost_monitor_pipeline() {
 }
 
 #[tokio::test]
+async fn localhost_target_hierarchy_creation_symmetry() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+
+    let session_name = unique_name("motlie_test_create_symmetry");
+    let host = HostHandle::local();
+
+    if let Ok(Some(t)) = host.session(&session_name).await {
+        let _ = t.kill().await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    let session = host
+        .create_session(
+            &session_name,
+            &motlie_tmux::CreateSessionOptions {
+                window_name: Some("main".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create_session failed");
+
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let window = session
+        .new_window(&CreateWindowOptions {
+            name: Some("editor".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("new_window failed");
+    assert_eq!(window.level(), TargetLevel::Window);
+    assert_eq!(window.window_info().unwrap().name, "editor");
+
+    let windows = session
+        .children()
+        .await
+        .expect("children after new_window failed");
+    assert_eq!(windows.len(), 2, "expected two windows after new_window");
+
+    let pane = window
+        .split_pane(&SplitPaneOptions {
+            direction: SplitDirection::Horizontal,
+            size: Some(SplitSize::percent(40).unwrap()),
+            ..Default::default()
+        })
+        .await
+        .expect("split_pane from window failed");
+    assert_eq!(pane.level(), TargetLevel::Pane);
+
+    let panes = window
+        .children()
+        .await
+        .expect("window children after split failed");
+    assert_eq!(panes.len(), 2, "expected two panes after split");
+
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    pane.send_text("echo MOTLIE_HIERARCHY_TEST")
+        .await
+        .expect("send_text on split pane failed");
+    pane.send_keys(&KeySequence::parse("{Enter}").unwrap())
+        .await
+        .expect("send_keys on split pane failed");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let content = pane.capture().await.expect("capture on split pane failed");
+    assert!(
+        content.contains("MOTLIE_HIERARCHY_TEST"),
+        "expected split-pane output in capture: {}",
+        content
+    );
+
+    let nested = pane
+        .split_pane(&SplitPaneOptions::default())
+        .await
+        .expect("split_pane from pane failed");
+    assert_eq!(nested.level(), TargetLevel::Pane);
+    assert_eq!(
+        nested.pane_address().unwrap().window,
+        pane.pane_address().unwrap().window
+    );
+
+    let panes_after_nested = window
+        .children()
+        .await
+        .expect("window children after nested split failed");
+    assert_eq!(
+        panes_after_nested.len(),
+        3,
+        "expected three panes after nested split"
+    );
+
+    nested.kill().await.expect("kill nested pane failed");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let panes_after_kill = window
+        .children()
+        .await
+        .expect("window children after kill failed");
+    assert_eq!(panes_after_kill.len(), 2, "expected two panes after kill");
+
+    session.kill().await.expect("session cleanup failed");
+}
+
+#[tokio::test]
 async fn localhost_monitor_pipeline_named_socket() {
     if !tmux_available() {
         eprintln!("skipping: tmux not available");
@@ -333,7 +444,10 @@ async fn localhost_monitor_pipeline_named_socket() {
             _ = tokio::time::sleep(Duration::from_millis(100)) => continue,
         }
     }
-    assert!(found_content, "expected output not received from named-socket monitor");
+    assert!(
+        found_content,
+        "expected output not received from named-socket monitor"
+    );
 
     monitor_handle.shutdown().await.expect("shutdown failed");
     target.kill().await.expect("kill failed");
@@ -407,7 +521,10 @@ async fn localhost_monitor_pipe_callback_named_socket() {
         .expect("callback output lock poisoned")
         .iter()
         .any(|s| s.contains("MOTLIE_PIPE_CALLBACK"));
-    assert!(saw_output, "expected callback sink to collect monitor output");
+    assert!(
+        saw_output,
+        "expected callback sink to collect monitor output"
+    );
 
     monitor_handle.shutdown().await.expect("shutdown failed");
     bus.unsubscribe(pipe.id()).expect("unsubscribe failed");
@@ -511,7 +628,10 @@ async fn localhost_dir_upload_download_roundtrip() {
     // Upload (copy-as: dest doesn't exist)
     let remote = tmp.path().join("deployed");
     host.upload(&src, &remote, &opts).await.unwrap();
-    assert_eq!(std::fs::read(remote.join("Cargo.toml")).unwrap(), b"[package]");
+    assert_eq!(
+        std::fs::read(remote.join("Cargo.toml")).unwrap(),
+        b"[package]"
+    );
     assert_eq!(
         std::fs::read(remote.join("src").join("nested").join("mod.rs")).unwrap(),
         b"// mod"
@@ -611,7 +731,9 @@ async fn localhost_recursive_false_error() {
         overwrite: true,
         recursive: false,
     };
-    let result = host.upload(&src, tmp.path().join("dst").as_path(), &opts).await;
+    let result = host
+        .upload(&src, tmp.path().join("dst").as_path(), &opts)
+        .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("recursive=false"));
 }
@@ -626,7 +748,11 @@ async fn localhost_symlink_rejected() {
 
     let host = HostHandle::local();
     let result = host
-        .upload(&link, tmp.path().join("dst.txt").as_path(), &motlie_tmux::TransferOptions::default())
+        .upload(
+            &link,
+            tmp.path().join("dst.txt").as_path(),
+            &motlie_tmux::TransferOptions::default(),
+        )
         .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("symlink"));
@@ -650,7 +776,11 @@ async fn localhost_destination_symlink_rejected() {
         .await;
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
-    assert!(msg.contains("symlink"), "expected symlink error, got: {}", msg);
+    assert!(
+        msg.contains("symlink"),
+        "expected symlink error, got: {}",
+        msg
+    );
 }
 
 /// 1.11o — SSH integration test (env-gated).
@@ -754,7 +884,11 @@ async fn ssh_file_upload_download_roundtrip() {
     host.download(&remote_file, &restored, &opts)
         .await
         .expect("SSH download failed");
-    assert_eq!(std::fs::read(&restored).unwrap(), content, "byte mismatch after SSH round-trip");
+    assert_eq!(
+        std::fs::read(&restored).unwrap(),
+        content,
+        "byte mismatch after SSH round-trip"
+    );
 
     ssh_cleanup(&host, &remote_tmp).await;
 }
@@ -790,7 +924,10 @@ async fn ssh_dir_upload_download_roundtrip() {
         .await
         .expect("SSH dir download failed");
 
-    assert_eq!(std::fs::read(restored.join("README.md")).unwrap(), b"# Hello");
+    assert_eq!(
+        std::fs::read(restored.join("README.md")).unwrap(),
+        b"# Hello"
+    );
     assert_eq!(
         std::fs::read(restored.join("src").join("main.rs")).unwrap(),
         b"fn main() {}"
@@ -822,28 +959,49 @@ async fn ssh_copy_into_vs_copy_as() {
 
     // Copy-as: dest doesn't exist → copied AS that path
     let dest1 = std::path::PathBuf::from(&format!("{}/new_app", remote_tmp));
-    host.upload(&src, &dest1, &opts).await.expect("copy-as upload failed");
+    host.upload(&src, &dest1, &opts)
+        .await
+        .expect("copy-as upload failed");
 
     // Verify by downloading
     let dl1 = tmp.path().join("dl1");
-    host.download(&dest1, &dl1, &opts).await.expect("copy-as download failed");
-    assert!(dl1.join("f.txt").exists(), "copy-as: f.txt should exist at top level");
+    host.download(&dest1, &dl1, &opts)
+        .await
+        .expect("copy-as download failed");
+    assert!(
+        dl1.join("f.txt").exists(),
+        "copy-as: f.txt should exist at top level"
+    );
 
     // Copy-into: dest exists as dir → copied INTO it
     // Create the remote dir by uploading an empty local dir (no host-level exec bypass)
     let dest2 = std::path::PathBuf::from(&format!("{}/existing", remote_tmp));
     let empty = tmp.path().join("_empty");
     std::fs::create_dir(&empty).unwrap();
-    host.upload(&empty, &dest2, &motlie_tmux::TransferOptions { overwrite: true, recursive: true })
+    host.upload(
+        &empty,
+        &dest2,
+        &motlie_tmux::TransferOptions {
+            overwrite: true,
+            recursive: true,
+        },
+    )
+    .await
+    .unwrap();
+    host.upload(&src, &dest2, &opts)
         .await
-        .unwrap();
-    host.upload(&src, &dest2, &opts).await.expect("copy-into upload failed");
+        .expect("copy-into upload failed");
 
     // Verify: should be existing/app/f.txt
     let dl2 = tmp.path().join("dl2");
     let app_in_existing = std::path::PathBuf::from(&format!("{}/existing/app", remote_tmp));
-    host.download(&app_in_existing, &dl2, &opts).await.expect("copy-into download failed");
-    assert!(dl2.join("f.txt").exists(), "copy-into: app/f.txt should exist");
+    host.download(&app_in_existing, &dl2, &opts)
+        .await
+        .expect("copy-into download failed");
+    assert!(
+        dl2.join("f.txt").exists(),
+        "copy-into: app/f.txt should exist"
+    );
 
     ssh_cleanup(&host, &remote_tmp).await;
 }
@@ -873,8 +1031,13 @@ async fn ssh_dir_merge_overwrite() {
     host.upload(
         &seed_parent,
         &std::path::PathBuf::from(&remote_parent),
-        &motlie_tmux::TransferOptions { overwrite: true, recursive: true },
-    ).await.unwrap();
+        &motlie_tmux::TransferOptions {
+            overwrite: true,
+            recursive: true,
+        },
+    )
+    .await
+    .unwrap();
 
     // Source: has a.txt (updated) and b.txt (new)
     let src = tmp.path().join("target_dir");
@@ -973,7 +1136,11 @@ async fn ssh_symlink_rejected() {
 
     let remote_dest = std::path::PathBuf::from(&format!("{}/link.txt", remote_tmp));
     let result = host
-        .upload(&link, &remote_dest, &motlie_tmux::TransferOptions::default())
+        .upload(
+            &link,
+            &remote_dest,
+            &motlie_tmux::TransferOptions::default(),
+        )
         .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("symlink"));
