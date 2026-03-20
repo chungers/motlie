@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-19 | @codex | Make `HostHandle::transport_kind()` a test-only `#[cfg(test)]` seam. It is only used by DC21 localhost transport-selection unit tests; scoping it to tests removes the standing dead-code warning without changing behavior. |
 | 2026-03-18 | @claude | PR #83 R3 — reconcile docs with implementation: OutputBus sync `&self` signatures, `PipeHandle` replaces bare `JoinHandle` in DESIGN/PLAN, `source_key()` added to TargetOutput in DESIGN, `SourceLabel` pane_id format (`build(%5)`), `format()` always labels, `StdioSink` Prefixed uses `source_key`, API.md format examples updated. |
 | 2026-03-18 | @claude | PR #83 R2 design/API improvements: (1) fix start-monitoring error-path — registration after session resolution, (2) split `source_key()` (identity) from `target_string()` (display), (3) `SinkFilter::for_session/for_pane/for_host/for_host_session` exact-match constructors, (4) `PipeHandle` wraps subscription id + task JoinHandle, (5) format() layering documented (JoinedStream = consumer, StdioSink = terminal), (6) stop vs shutdown lifecycle distinction in all docs. 280 tests (+6 new). |
 | 2026-03-18 | @claude | PR #83 R1 fixes: (1) UTF-8 octal decoder rewritten to collect bytes before decoding — multi-byte chars now correct, (2) pane identity uses pane_id as canonical identity for source comparison, display, and filter matching — distinct panes no longer merge, (3) OutputBus lifecycle docs narrowed to match fire-and-forget implementation. 274 tests (+6 new). |
@@ -438,7 +439,8 @@ See DESIGN.md DC21 for full specification.
   configs render to valid URIs; parse ∘ to_string is identity for canonical forms.
 
 - [x] **1.11l** — Unit tests for `connect()` localhost selection via
-  `HostHandle::transport_kind()` (`pub(crate)` accessor — not public API).
+  test-only `HostHandle::transport_kind()` (`pub(crate)` + `#[cfg(test)]`;
+  not public API).
   Localhost variants (`localhost`, `127.0.0.1`, `::1`) produce
   `TransportKind::Local`. Verify empty user rejected for SSH hosts (error
   path — no handshake needed). Config field propagation for localhost
