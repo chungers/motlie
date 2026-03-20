@@ -6,6 +6,9 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-19 | @codex: DC25 implementation note — correct split-percentage mapping for tmux 3.4: `SplitSize::Percent` maps to `split-window -l <n>%`, not a nonexistent `-p` flag. | DC25 |
+| 2026-03-19 | @codex: Add DC25 — first-class window/pane creation on `Target` to restore hierarchy symmetry. Document `new_window()` / `split_pane()` requirements, typed option structs, tmux `-P -F` return strategy, and why `exec(\"tmux ...\")` is not sufficient. | Target, DC25 |
+| 2026-03-19 | @codex: Narrow `HostHandle::transport_kind()` to a test-only `#[cfg(test)]` seam. The accessor exists solely for DC21 localhost transport-selection tests and should not live in non-test builds. | DC21 |
 | 2026-03-18 | @claude: PR #83 R3 — reconcile DESIGN/PLAN/API docs with current implementation: OutputBus sync `&self` signatures, `PipeHandle` replaces bare `JoinHandle`, `source_key()` + `target_string()` dual accessors, `SourceLabel` pane_id format (`build(%5)`), `format()` always labels (not only on transitions), `StdioSink` Prefixed uses `source_key`. | OutputBus, Subscription, TargetOutput, SourceLabel, JoinedStream, StdioSink |
 | 2026-03-18 | @claude: PR #83 R1 — narrowed OutputBus shutdown/unsubscribe lifecycle docs to match fire-and-forget impl (piped tasks drain on their own; caller holds PipeHandle for join semantics). | OutputBus, SinkKind |
 | 2026-03-17 | @claude: DC24 R3 — address PR #82 review round 3: remove `filters` from `CallbackSink` and `filters()` from `SinkKind` — routing is `subscribe(filters)` only, sinks are terminal consumers. Update DC12 rationale, ActionHandle section, JoinedStream intro. | SinkKind, CallbackSink, DC12, ActionHandle, JoinedStream |
@@ -781,6 +784,24 @@ impl Target {
 
     /// Navigate to a pane by PaneAddress (from any level).
     pub fn pane_by_address(&self, address: &PaneAddress) -> Target;
+
+    // --- Creation (hierarchy growth) ---
+
+    /// Create a new window in this session and return it as a Target.
+    /// Session-level only — returns an error for window/pane targets.
+    pub async fn new_window(
+        &self,
+        opts: &CreateWindowOptions,
+    ) -> Result<Target>;
+
+    /// Split a pane and return the newly created pane Target.
+    /// Window-level: splits the active pane in that window.
+    /// Pane-level: splits this pane explicitly.
+    /// Session-level: returns an error instead of implicitly targeting the active pane.
+    pub async fn split_pane(
+        &self,
+        opts: &SplitPaneOptions,
+    ) -> Result<Target>;
 
     // --- I/O (works at any level — tmux resolves to active pane) ---
 
@@ -2965,11 +2986,12 @@ The change extends the existing `SshConfig` rather than adding a new type:
 3. **`src/lib.rs`**: Add `mod uri;` (private — no public types to export, just extends
    `SshConfig` which is already re-exported).
 
-4. **`src/host.rs`**: Add `pub(crate) fn transport_kind(&self) -> &TransportKind`
-   accessor to `HostHandle`. Scoped to `pub(crate)` — not part of the public API —
-   so the transport split stays internal per DC21's requirement. Enables unit tests
-   within the crate to assert transport selection without relying on behavioral side
-   effects. `HostHandle::local()`, `HostHandle::new()`,
+4. **`src/host.rs`**: Add test-only `#[cfg(test)] pub(crate) fn transport_kind(&self)
+   -> &TransportKind` accessor to `HostHandle`. Not part of the public API or
+   non-test build surface, so the transport split stays internal per DC21's
+   requirement while still enabling localhost transport-selection unit tests
+   within the crate to assert behavior without relying on side effects.
+   `HostHandle::local()`, `HostHandle::new()`,
    `HostHandle::local_with_timeout()` remain as crate-internal convenience constructors
    for testing and advanced use cases.
    <!-- @claude 2026-03-13: scoped to pub(crate) per PR #71 R4 — reviewer correctly
@@ -3348,7 +3370,7 @@ mirrors this uniformity avoids three problems:
 | Component | Responsibility |
 |-----------|---------------|
 | `HostHandle` | Host-level: `list_sessions`, `create_session`, `session`, `target`, `start_monitoring`, `stop_monitoring`, `start_monitoring_session`, `stop_monitoring_session` |
-| `Target` | Entity-level: I/O (`send_text`, `send_keys`, `capture`, `sample_text`), navigation (`children`, `window`, `pane`), lifecycle (`kill`, `rename`), monitoring (`start_monitoring`) |
+| `Target` | Entity-level: creation (`new_window`, `split_pane`), I/O (`send_text`, `send_keys`, `capture`, `sample_text`), navigation (`children`, `window`, `pane`), lifecycle (`kill`, `rename`), monitoring (`start_monitoring`) |
 | `SessionMonitorHandle` | Monitoring lifecycle + `Deref<Target=Target>` — adds `shutdown`, `is_active` |
 
 - **Cheap handles**: `Target` holds `Arc<HostHandleInner>` + `TargetAddress` enum.
@@ -3424,6 +3446,166 @@ compose with existing abstractions:
 - What happens when a member target is killed or disconnected?
 - Can targets belong to multiple workstreams?
 - Should workstreams be defined in config or only programmatically?
+
+### DC25: Hierarchy Creation Symmetry on `Target`
+
+**Problem**: The current API is asymmetric. `Target` already supports navigation,
+I/O, lifecycle, and monitoring across session/window/pane levels, but only sessions
+can be created through the typed API. Windows and panes still require callers to
+shell out through `Target::exec("tmux new-window ...")` or external setup scripts.
+That weakens the abstraction in three ways:
+
+1. It leaks raw tmux command syntax into consumer code.
+2. It returns untyped shell output instead of a typed `Target` for the new entity.
+3. It breaks the symmetry of the hierarchy API: `kill()` works at every level, but
+   the inverse creation path is only first-class at the root.
+
+**Decision**: Add first-class window and pane creation to `Target`:
+
+- `Target::new_window(&CreateWindowOptions) -> Result<Target>`
+- `Target::split_pane(&SplitPaneOptions) -> Result<Target>`
+
+`HostHandle::create_session()` remains the root-level creation API because sessions
+have no tmux parent target. Child creation moves onto `Target`, where the hierarchy
+context already exists.
+
+**Level semantics**:
+
+- `new_window()` is **session-level only**. Creating a window is a child-of-session
+  operation; calling it on a window/pane target returns `Err`.
+- `split_pane()` is allowed on **window** and **pane** targets.
+  - Window target: split the active pane in that window.
+  - Pane target: split that explicit pane.
+- `split_pane()` on a session target returns `Err` rather than silently using the
+  active window/pane. This keeps hierarchy growth explicit and avoids “active target”
+  ambiguity in automation.
+
+**API shape**:
+
+```rust
+#[derive(Debug, Clone, Default)]
+pub struct CreateWindowOptions {
+    pub name: Option<String>,
+    pub command: Option<String>,
+    pub width: Option<u16>,
+    pub height: Option<u16>,
+    pub start_directory: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum SplitDirection {
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum SplitSize {
+    Cells(u16),
+    Percent(u8),
+}
+
+impl SplitSize {
+    /// Preferred constructor for percentage sizing. Rejects values above 100
+    /// at construction time rather than deferring failure to command execution.
+    pub fn percent(value: u8) -> Result<Self>;
+}
+
+#[derive(Debug, Clone)]
+pub struct SplitPaneOptions {
+    pub direction: SplitDirection,
+    pub size: Option<SplitSize>,
+    pub command: Option<String>,
+    pub start_directory: Option<PathBuf>,
+}
+
+impl Target {
+    pub async fn new_window(&self, opts: &CreateWindowOptions) -> Result<Target>;
+    pub async fn split_pane(&self, opts: &SplitPaneOptions) -> Result<Target>;
+}
+```
+
+The option structs intentionally mirror tmux’s `new-window` / `split-window`
+surface while staying typed and shell-safe.
+
+`SplitSize::Percent(u8)` remains the compact stored representation, but callers
+should use a checked constructor such as `SplitSize::percent(50)?` so invalid
+percentages are rejected at the API boundary rather than deep in the control layer.
+Execution should still validate defensively.
+
+At the tmux CLI layer, percentage splits map to `split-window -l <n>%`. tmux 3.4
+does not provide a dedicated `split-window -p` percentage flag, so the control
+wrapper should append `%` to the `-l` size value when `SplitSize::Percent` is used.
+
+`start_directory` uses `PathBuf` for type safety. When the control layer builds the
+tmux command, non-UTF-8 paths are rejected with `Err` rather than lossy conversion.
+
+**Return strategy**: Creation APIs must return the created entity directly, not a
+best-effort re-query of “whatever looks newest.” The implementation should use tmux’s
+printing mode:
+
+- `new-window -P -F ...`
+- `split-window -P -F ...`
+
+This lets the control layer capture the exact created window/pane identity in the
+same command that performs the mutation, then construct the returned `Target`
+deterministically.
+
+**Why not keep using `exec("tmux ...")`?**
+
+- `exec()` is a pane command runner governed by DC19, not a control-plane API.
+- It forces callers to manually compose tmux command strings and parse success
+  indirectly from shell output.
+- It cannot return typed `WindowInfo` / `PaneAddress` without layering more parsing
+  logic into consumers.
+- It makes examples and higher-level tools tutorialize the workaround instead of the
+  actual library abstraction.
+
+**Why not add one generic `create(target_spec)` API?**
+
+Rejected for now. A single “create hierarchy from spec” entry point conflates three
+different operations with different parents and return shapes:
+
+- root creation (`create_session`)
+- child window creation (`new_window`)
+- pane split (`split_pane`)
+
+The direct primitives are clearer, compose naturally, and still leave room for a
+higher-level convenience API later if real usage patterns justify it.
+
+**Desired usage**:
+
+```rust
+let session = host.create_session("build", &Default::default()).await?;
+
+let logs = session
+    .new_window(&CreateWindowOptions {
+        name: Some("logs".into()),
+        command: Some("tail -f /var/log/app.log".into()),
+        ..Default::default()
+    })
+    .await?;
+
+let editor = logs
+    .split_pane(&SplitPaneOptions {
+        direction: SplitDirection::Vertical,
+        size: Some(SplitSize::percent(50)?),
+        command: Some("vim".into()),
+        start_directory: None,
+    })
+    .await?;
+
+editor.send_text(":w").await?;
+```
+
+**Rationale**: This restores symmetry to the hierarchy API:
+
+- `HostHandle::create_session()` creates the root node
+- `Target::new_window()` creates a window child
+- `Target::split_pane()` creates a pane child
+- `Target::kill()` remains the inverse lifecycle operation at every level
+
+That makes `Target` a complete hierarchy abstraction rather than “operations on
+preexisting entities plus a session-only root constructor.”
 
 ### DC19: Structured Command Execution via Target::exec()
 

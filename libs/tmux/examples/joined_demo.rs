@@ -7,7 +7,7 @@
 //!   joined_demo [--format bracketed|prompt|separator]
 
 use anyhow::{anyhow, Result};
-use motlie_tmux::{strip_ansi, LabelFormat, SinkFilter, SshConfig};
+use motlie_tmux::{strip_ansi, KeySequence, LabelFormat, SinkFilter, SplitPaneOptions, SshConfig};
 use std::time::Duration;
 
 #[derive(Clone, Copy)]
@@ -53,21 +53,18 @@ async fn main() -> Result<()> {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
-    // Create a session (gives us pane 0)
-    let _target = host
+    // Create a session (gives us pane 0), then split to create pane 1
+    let target = host
         .create_session(&session, &Default::default())
         .await?;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Split the window to create a second pane.
-    // TODO: Replace with HostHandle::split_window() API when available.
-    // This shells out to local tmux, so this example only works for localhost.
-    let status = std::process::Command::new("tmux")
-        .args(["split-window", "-t", &session, "-v"])
-        .status()?;
-    if !status.success() {
-        return Err(anyhow!("tmux split-window failed"));
-    }
+    // Get the initial window and split it to create a second pane
+    let windows = target.children().await?;
+    let window = &windows[0];
+    let _pane1 = window
+        .split_pane(&SplitPaneOptions::default())
+        .await?;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Start monitoring the session
@@ -85,23 +82,31 @@ async fn main() -> Result<()> {
     };
     let mut stream = sub.joined(label_format);
 
-    // Pane targets after create_session + split-window
-    let pane0 = format!("{}:0.0", session);
-    let pane1 = format!("{}:0.1", session);
+    // Resolve pane targets via the API
+    let panes = window.children().await?;
+    let pane0 = &panes[0];
+    let pane1 = &panes[1];
 
-    eprintln!("Session '{}' — panes: {}, {}", session, pane0, pane1);
-    eprintln!("Monitor active: {}, subscribers: {}", monitor.is_active(), bus.subscriber_count());
+    eprintln!(
+        "Session '{}' — panes: {}, {}",
+        session,
+        pane0.target_string(),
+        pane1.target_string()
+    );
+    eprintln!(
+        "Monitor active: {}, subscribers: {}",
+        monitor.is_active(),
+        bus.subscriber_count()
+    );
 
     // Send commands to both panes with a stagger
-    let tmux_send = |target: &str, cmd: &str| {
-        std::process::Command::new("tmux")
-            .args(["send-keys", "-t", target, cmd, "Enter"])
-            .output()
-    };
+    let enter = KeySequence::parse("{Enter}").unwrap();
 
-    tmux_send(&pane0, "ps aux | head -5")?;
+    pane0.send_text("ps aux | head -5").await?;
+    pane0.send_keys(&enter).await?;
     tokio::time::sleep(Duration::from_millis(500)).await;
-    tmux_send(&pane1, "ls -la /tmp | head -5")?;
+    pane1.send_text("ls -la /tmp | head -5").await?;
+    pane1.send_keys(&enter).await?;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Collect output

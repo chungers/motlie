@@ -27,6 +27,7 @@ cargo build -p motlie-tmux --examples
 ./target/debug/examples/target_spec ssh://localhost "dev:0.0"
 ./target/debug/examples/repl ssh://localhost
 ./target/debug/examples/stream_pane ssh://localhost my_session --mode monitor
+./target/debug/examples/monitor_pipe ssh://localhost my_session
 ./target/debug/examples/joined_demo
 ./target/debug/examples/joined_demo --format separator
 ```
@@ -197,6 +198,8 @@ cargo run -p motlie-tmux --example repl -- ssh://localhost
 |---------|-------------|----------|
 | `help` | Show available commands and usage | — |
 | `create <name> [--size WxH] [--history N]` | Create a session with optional size and history | `host.create_session()`, `CreateSessionOptions` |
+| `new-window <session> <name> [--size WxH]` | Create a child window under a session | `target.new_window()`, `CreateWindowOptions` |
+| `split-pane <target> [--horizontal\|--vertical] [--percent N\|--cells N]` | Split a child pane from a window or pane target | `target.split_pane()`, `SplitPaneOptions` |
 | `kill <target>` | Kill a session, window, or pane | `target.kill()` |
 | `targets` | List all sessions with target spec strings | `host.list_sessions()`, `target.children()` |
 | `send <target> <text...>` | Send text + Enter to a target | `target.send_text()`, `target.send_keys()` |
@@ -206,11 +209,16 @@ cargo run -p motlie-tmux --example repl -- ssh://localhost
 | `download <remote> <local> [--recursive]` | Download a file or directory from the host | `host.download()`, `TransferOptions` |
 | `quit` | Disconnect and exit | — |
 
-`create` only creates sessions — the library API (`host.create_session()`) operates
-at session level. Windows and panes are assumed to be created out-of-band (e.g. via
-`tmux new-window`, `tmux split-window`, or scripted setup). Optional flags:
+`create` creates sessions only; hierarchical child creation uses the new first-class
+`new-window` and `split-pane` commands, which map to `Target::new_window()` and
+`Target::split_pane()`. Optional flags:
 - `--size WxH` — set initial window dimensions (e.g. `--size 200x50`)
 - `--history N` — set scrollback history limit (e.g. `--history 50000`)
+
+`split-pane` defaults to a vertical split. Use:
+- `--horizontal` or `--vertical` to choose direction
+- `--percent N` for percentage sizing
+- `--cells N` for fixed-size splits
 
 All other commands accept a target string at any granularity: `session`,
 `session:window`, or `session:window.pane`. The target resolves to the
@@ -238,6 +246,10 @@ repl> create test_session
 Created: test_session
 repl> create automation --size 200x50 --history 50000
 Created: automation (200x50) history=50000
+repl> new-window automation logs --size 160x40
+Created window: automation:1
+repl> split-pane automation:1 --horizontal --percent 40
+Created pane: automation:1.1
 repl> send test_session echo hello from repl
 Sent to test_session
 repl> capture test_session 5
@@ -255,17 +267,6 @@ Killed: test_session
 repl> quit
 Disconnected.
 ```
-
-#### Future
-
-The `create` command currently only creates sessions. A full `create <target>`
-that builds the entire hierarchy from a target string (e.g. `create myapp:build.1`
-would create session `myapp`, window `build`, and split pane `.1`) would require
-first-class `new_window()` and `split_pane()` methods on `Target`. The library
-does not expose these today — the workaround is `target.exec("tmux new-window ...")`
-which shells out rather than using a direct API. Adding `Target::new_window()` and
-`Target::split_pane()` to the library would make hierarchical create viable as a
-proper inverse of `kill`.
 
 ### stream_pane — Continuous pane streaming
 
@@ -343,11 +344,61 @@ $
  DEGRADED: ClientResize, PaneResize
 ```
 
+### monitor_pipe — Sink pipeline monitoring
+
+Demonstrates the terminal-consumer side of Track A: start a session monitor,
+subscribe to the `OutputBus`, route events through `Subscription::pipe()`, and
+teardown cleanly with `PipeHandle`.
+
+This example also works against non-default tmux sockets. If the URI includes
+`socket-name` or a socket path, the control-mode monitor attaches to that same
+server instead of the default tmux socket.
+
+Supported sinks:
+- `prefixed` — `StdioSink::Prefixed`
+- `raw` — `StdioSink::Raw`
+- `json` — `StdioSink::Json`
+- `callback` — `CallbackSink` with custom formatting and flush summary
+
+```sh
+# Default prefixed stdio sink
+./target/debug/examples/monitor_pipe ssh://localhost my_session
+
+# JSON sink output
+./target/debug/examples/monitor_pipe ssh://localhost my_session --sink json
+
+# Custom callback sink with summary on flush
+./target/debug/examples/monitor_pipe ssh://localhost my_session --sink callback --seconds 5
+
+# Monitor a named tmux socket
+./target/debug/examples/monitor_pipe 'ssh://localhost?socket-name=myserver' my_session
+```
+
+Expected output (`--sink prefixed`):
+```text
+Monitoring my_session for 3s using prefixed sink. Ctrl-C to stop early.
+Flow: start_monitoring_session -> output_bus.subscribe -> pipe -> unsubscribe -> join
+[localhost] %5 | $ echo hello
+[localhost] %5 | hello
+[localhost] %6 | running tests...
+Stopped.
+```
+
+Expected output (`--sink callback`):
+```text
+Monitoring my_session for 5s using callback sink. Ctrl-C to stop early.
+Flow: start_monitoring_session -> output_bus.subscribe -> pipe -> unsubscribe -> join
+[callback localhost %5] $ echo hello
+[callback localhost %5] hello
+Callback summary: data_events=2, gap_events=0, dropped_events=0
+Stopped.
+```
+
 ### joined_demo — Multi-pane JoinedStream
 
 Demonstrates `JoinedStream` merging output from two panes in a single session.
-Creates a 2-pane session, sends different commands to each pane, and shows
-the interleaved output with source attribution.
+Creates a 2-pane session using `Target::split_pane()`, sends different commands
+to each pane, and shows the interleaved output with source attribution.
 
 ```sh
 # Default: bracketed labels on every line
