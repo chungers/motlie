@@ -1533,7 +1533,8 @@ pub struct SshTransport {
 }
 
 impl SshTransport {
-    /// Connect to a remote host via SSH and authenticate using ssh-agent.
+    /// Connect to a remote host via SSH and authenticate using an explicit
+    /// key file (`identity-file`) or ssh-agent (default).
     ///
     /// Returns an error with actionable message if SSH_AUTH_SOCK is not set
     /// or the agent has no identities (OC3).
