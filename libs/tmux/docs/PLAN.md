@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-20 | @claude | Add Phase 1.15 — SSH identity-file authentication (DC26). Extends SshConfig/URI with `identity-file` parameter, adds `authenticate_key_file()` auth path. 7 tasks (1.15a–g). Slotted after 1.14, depends on 1.11 (URI infra) and 2a.1 (SSH transport). |
 | 2026-03-19 | @codex | Phase 1.14 correction — `SplitSize::Percent` maps to `tmux split-window -l <n>%` in tmux 3.4, not `-p`. Keep `--percent` as the public API/example surface but emit `-l 40%` in the control layer. |
 | 2026-03-19 | @codex | Implement Phase 1.14 target-creation symmetry: add typed window/pane creation APIs, localhost coverage, and example/API updates including REPL commands. |
 | 2026-03-19 | @codex | Add Phase 1.14 — hierarchy creation symmetry on `Target`: first-class `new_window()` / `split_pane()` with typed option structs, deterministic typed returns, tests, and API/example updates. Slotted as the next API-generalization task after 1.13. |
@@ -725,6 +726,88 @@ workaround from examples and consumer code.
 
 **Gates**: None — additive. Prioritize immediately before Track B to keep the typed
 Target hierarchy complete before layering more consumer APIs on top.
+
+---
+
+## Phase 1.15: SSH Identity File Authentication
+
+Extends the SSH URI and `SshConfig` with an `identity-file` parameter for explicit
+private-key authentication (DC26). No new dependencies — uses `russh_keys::load_secret_key()`
+and `handle.authenticate_publickey()` already in the crate's dependency tree.
+
+**Depends on**: 1.11 (URI parsing infrastructure), 2a.1 (SSH transport / `authenticate_agent`)
+
+### 1.15a — `SshConfig` field and builder (`src/transport.rs`)
+
+- [ ] Add `identity_file: Option<PathBuf>` field to `SshConfig` struct
+- [ ] Add `with_identity_file(self, path: impl Into<PathBuf>) -> Self` builder method
+- [ ] Add `identity_file(&self) -> Option<&Path>` accessor
+- [ ] Update `PartialEq`/`Debug` derives to include the new field
+- [ ] Default: `None` (existing agent auth behavior unchanged)
+
+### 1.15b — Key file authentication (`src/transport.rs`)
+
+- [ ] Add `authenticate_key_file(handle, config, key_path) -> Result<()>` private method
+  on `SshTransport`
+- [ ] Use `russh_keys::load_secret_key(path, None)` to load the key — no passphrase in v1
+- [ ] Use `handle.authenticate_publickey(user, Arc::new(key_pair))` for auth
+- [ ] Actionable error messages:
+  - Key file not found / unreadable → suggest checking path and permissions
+  - Encrypted key (passphrase required) → suggest loading into ssh-agent instead
+  - Key rejected by server → include path, host, port in error
+- [ ] Update `SshTransport::connect()` to dispatch:
+  `if identity_file.is_some() → authenticate_key_file() else → authenticate_agent()`
+
+### 1.15c — URI parsing and rendering (`src/uri.rs`)
+
+- [ ] Add `"identity-file"` to `KNOWN_PARAMS`
+- [ ] Add parse match arm in `parse()`:
+  - Validate path is absolute (reject relative paths with clear error)
+  - Set `config.identity_file` via builder
+- [ ] Add render logic in `to_uri_string()`:
+  - Emit `identity-file=<path>` in nassh params (user present) or query params (no user)
+- [ ] Round-trip: absolute POSIX paths should round-trip safely (no URI-reserved chars)
+
+### 1.15d — Unit tests (`src/uri.rs`, `src/transport.rs`)
+
+- [ ] Parse tests:
+  - `ssh://deploy;identity-file=/path/to/key@host` — nassh style
+  - `ssh://deploy@host?identity-file=/path/to/key` — query style
+  - Round-trip for identity-file URIs
+  - Reject relative path: `ssh://deploy@host?identity-file=relative/key` → error
+  - Reject empty path: `ssh://deploy@host?identity-file=` → error
+- [ ] Builder tests:
+  - `SshConfig::new(...).with_identity_file("/path")` — accessor returns `Some`
+  - Default config — `identity_file()` returns `None`
+- [ ] `to_uri_string()` with identity-file set (with and without user)
+- [ ] Localhost with identity-file: parses OK, connect ignores it (LocalTransport)
+
+### 1.15e — Integration tests (`tests/integration.rs`)
+
+- [ ] Localhost with `identity-file` set: connects via LocalTransport (identity-file
+  silently ignored), can list sessions — verifies no regression
+- [ ] SSH key-file auth test (env-gated, requires test SSH server with known key):
+  - Connect with valid key file → auth succeeds
+  - Connect with wrong key file → auth fails with actionable error
+  - Connect with nonexistent key file → load fails with actionable error
+
+### 1.15f — Documentation updates
+
+- [ ] Update `docs/API.md` — add identity-file examples to the URI / SshConfig section
+- [ ] Update `examples/README.md` — mention `identity-file` param in Prerequisites
+  for key-file workflows
+- [ ] Update `examples/repl.rs` help text — note that URIs accept `identity-file`
+
+### 1.15g — Example program (`examples/uri_connect.rs`)
+
+- [ ] Ensure `uri_connect` example works with identity-file URIs (it already accepts
+  any URI — just verify and document in README expected output)
+- [ ] Add identity-file usage example to `examples/README.md` uri_connect section:
+  ```sh
+  ./target/debug/examples/uri_connect 'ssh://deploy;identity-file=/path/to/key@prod'
+  ```
+
+**Gates**: None — additive. Does not change behavior for any existing URI or code path.
 
 ---
 
