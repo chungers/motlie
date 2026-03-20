@@ -17,7 +17,17 @@ use crate::types::{HostKeyPolicy, TmuxSocket};
 const CANONICAL_COMPONENTS: &[&str] = &["user", "host", "port"];
 
 /// Known parameter names.
-const KNOWN_PARAMS: &[&str] = &["host-key-policy", "timeout", "keepalive", "socket-name"];
+const KNOWN_PARAMS: &[&str] = &[
+    "host-key-policy",
+    "timeout",
+    "keepalive",
+    "socket-name",
+    "identity-file",
+];
+
+/// Parameters restricted to query-string only (DC26).
+/// These are rejected if they appear in nassh-style userinfo params.
+const QUERY_ONLY_PARAMS: &[&str] = &["identity-file"];
 
 /// Characters that are unsafe in URI user/host/parameter values because they
 /// collide with URI or nassh syntax delimiters. `to_uri_string()` validates
@@ -118,6 +128,16 @@ impl SshConfig {
             }
         }
 
+        // Reject query-only params that appear in userinfo (DC26)
+        for (key, _) in &userinfo_params {
+            if QUERY_ONLY_PARAMS.contains(&key.as_str()) {
+                return Err(anyhow!(
+                    "'{}' is a query-only parameter and cannot appear in userinfo",
+                    key
+                ));
+            }
+        }
+
         // Build SshConfig
         let mut config = SshConfig::new(host, user).with_port(port);
         let mut has_socket_name = false;
@@ -175,6 +195,19 @@ impl SshConfig {
                     has_socket_name = true;
                     config = config.with_socket(TmuxSocket::Name(value.to_string()))?;
                 }
+                "identity-file" => {
+                    if value.is_empty() {
+                        return Err(anyhow!("identity-file value cannot be empty"));
+                    }
+                    let path = std::path::PathBuf::from(value);
+                    if !path.is_absolute() {
+                        return Err(anyhow!(
+                            "identity-file must be an absolute path, got '{}'",
+                            value
+                        ));
+                    }
+                    config = config.with_identity_file(path)?;
+                }
                 _ => unreachable!(),
             }
         }
@@ -206,34 +239,41 @@ impl SshConfig {
     pub fn to_uri_string(&self) -> String {
         let mut result = String::from("ssh://");
 
-        // Collect non-default params
-        let mut params: Vec<(&str, String)> = Vec::new();
+        // Collect non-default params, split into nassh-eligible and query-only
+        let mut nassh_params: Vec<(&str, String)> = Vec::new();
+        let mut query_only_params: Vec<(&str, String)> = Vec::new();
+
         if *self.host_key_policy() != HostKeyPolicy::Verify {
             let value = match self.host_key_policy() {
                 HostKeyPolicy::Verify => "verify",
                 HostKeyPolicy::TrustFirstUse => "tofu",
                 HostKeyPolicy::Insecure => "insecure",
             };
-            params.push(("host-key-policy", value.to_string()));
+            nassh_params.push(("host-key-policy", value.to_string()));
         }
         if self.timeout() != std::time::Duration::from_secs(10) {
-            params.push(("timeout", self.timeout().as_secs().to_string()));
+            nassh_params.push(("timeout", self.timeout().as_secs().to_string()));
         }
         if self.keepalive_interval() != Some(std::time::Duration::from_secs(30)) {
             let val = match self.keepalive_interval() {
                 Some(d) => d.as_secs().to_string(),
                 None => "0".to_string(),
             };
-            params.push(("keepalive", val));
+            nassh_params.push(("keepalive", val));
         }
 
-        // socket-name goes as param; socket-path goes as URI path
+        // socket-name goes as nassh-eligible param; socket-path goes as URI path
         let mut socket_path: Option<&str> = None;
         if let Some(socket) = self.socket() {
             match socket {
-                TmuxSocket::Name(n) => params.push(("socket-name", n.clone())),
+                TmuxSocket::Name(n) => nassh_params.push(("socket-name", n.clone())),
                 TmuxSocket::Path(p) => socket_path = Some(p.as_str()),
             }
+        }
+
+        // identity-file is always query-only (DC26)
+        if let Some(path) = self.identity_file() {
+            query_only_params.push(("identity-file", path.display().to_string()));
         }
 
         let user = self.user();
@@ -241,7 +281,7 @@ impl SshConfig {
         if !user.is_empty() {
             // Nassh-style: user[;param=value...]@host
             result.push_str(user);
-            for (key, value) in &params {
+            for (key, value) in &nassh_params {
                 result.push(';');
                 result.push_str(key);
                 result.push('=');
@@ -274,10 +314,23 @@ impl SshConfig {
             result.push_str(path);
         }
 
-        // Query params (only used when user is empty)
-        if user.is_empty() && !params.is_empty() {
+        // Query params: query-only params always, nassh params when user is empty
+        let all_query: Vec<(&str, &str)> = if user.is_empty() {
+            nassh_params
+                .iter()
+                .chain(query_only_params.iter())
+                .map(|(k, v)| (*k, v.as_str()))
+                .collect()
+        } else {
+            query_only_params
+                .iter()
+                .map(|(k, v)| (*k, v.as_str()))
+                .collect()
+        };
+
+        if !all_query.is_empty() {
             result.push('?');
-            for (i, (key, value)) in params.iter().enumerate() {
+            for (i, (key, value)) in all_query.iter().enumerate() {
                 if i > 0 {
                     result.push('&');
                 }
@@ -1059,5 +1112,176 @@ mod tests {
             .unwrap();
         assert!(matches!(host.transport_kind(), TransportKind::Local(_)));
         // Socket is wired through HostHandle::new, verified by successful construction
+    }
+
+    // === 1.15d — identity-file (DC26) tests ===
+
+    #[test]
+    fn parse_identity_file_query() {
+        let cfg =
+            SshConfig::parse("ssh://deploy@host?identity-file=/home/deploy/.ssh/id_ed25519")
+                .unwrap();
+        assert_eq!(
+            cfg.identity_file(),
+            Some(std::path::Path::new("/home/deploy/.ssh/id_ed25519"))
+        );
+    }
+
+    #[test]
+    fn parse_identity_file_nassh_rejected() {
+        let err =
+            SshConfig::parse("ssh://deploy;identity-file=/path/to/key@host").unwrap_err();
+        assert!(err.to_string().contains("query-only"));
+    }
+
+    #[test]
+    fn parse_identity_file_relative_path_rejected() {
+        let err =
+            SshConfig::parse("ssh://deploy@host?identity-file=relative/key").unwrap_err();
+        assert!(err.to_string().contains("absolute path"));
+    }
+
+    #[test]
+    fn parse_identity_file_empty_rejected() {
+        let err = SshConfig::parse("ssh://deploy@host?identity-file=").unwrap_err();
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn parse_identity_file_mixed_params() {
+        // nassh timeout + query identity-file
+        let cfg =
+            SshConfig::parse("ssh://deploy;timeout=30@host?identity-file=/keys/deploy")
+                .unwrap();
+        assert_eq!(cfg.timeout(), Duration::from_secs(30));
+        assert_eq!(
+            cfg.identity_file(),
+            Some(std::path::Path::new("/keys/deploy"))
+        );
+    }
+
+    #[test]
+    fn roundtrip_identity_file_with_user() {
+        let cfg =
+            SshConfig::parse("ssh://deploy@host?identity-file=/keys/deploy").unwrap();
+        let reparsed = SshConfig::parse(&cfg.to_string()).unwrap();
+        assert_eq!(cfg, reparsed);
+    }
+
+    #[test]
+    fn roundtrip_identity_file_no_user() {
+        let cfg =
+            SshConfig::parse("ssh://localhost?identity-file=/keys/deploy").unwrap();
+        let reparsed = SshConfig::parse(&cfg.to_string()).unwrap();
+        assert_eq!(cfg, reparsed);
+    }
+
+    #[test]
+    fn roundtrip_identity_file_with_other_params() {
+        let cfg = SshConfig::parse(
+            "ssh://deploy;timeout=30@host?identity-file=/keys/deploy",
+        )
+        .unwrap();
+        let reparsed = SshConfig::parse(&cfg.to_string()).unwrap();
+        assert_eq!(cfg, reparsed);
+    }
+
+    #[test]
+    fn to_uri_string_identity_file_with_user() {
+        // With user: nassh params in userinfo, identity-file in query
+        let cfg = SshConfig::new("host", "deploy")
+            .with_identity_file("/keys/deploy")
+            .unwrap();
+        let uri = cfg.to_uri_string();
+        assert_eq!(uri, "ssh://deploy@host?identity-file=/keys/deploy");
+    }
+
+    #[test]
+    fn to_uri_string_identity_file_no_user() {
+        let cfg = SshConfig::new("localhost", "")
+            .with_identity_file("/keys/deploy")
+            .unwrap();
+        let uri = cfg.to_uri_string();
+        assert_eq!(uri, "ssh://localhost?identity-file=/keys/deploy");
+    }
+
+    #[test]
+    fn to_uri_string_identity_file_with_nassh_params() {
+        // Other params go to nassh, identity-file goes to query
+        let cfg = SshConfig::new("host", "deploy")
+            .with_timeout(Duration::from_secs(30))
+            .with_identity_file("/keys/deploy")
+            .unwrap();
+        let uri = cfg.to_uri_string();
+        assert_eq!(
+            uri,
+            "ssh://deploy;timeout=30@host?identity-file=/keys/deploy"
+        );
+    }
+
+    #[test]
+    fn to_uri_string_identity_file_no_user_with_other_params() {
+        let cfg = SshConfig::new("localhost", "")
+            .with_timeout(Duration::from_secs(30))
+            .with_identity_file("/keys/deploy")
+            .unwrap();
+        let uri = cfg.to_uri_string();
+        assert_eq!(
+            uri,
+            "ssh://localhost?timeout=30&identity-file=/keys/deploy"
+        );
+    }
+
+    #[test]
+    fn builder_identity_file() {
+        let cfg = SshConfig::new("host", "deploy")
+            .with_identity_file("/keys/deploy")
+            .unwrap();
+        assert_eq!(
+            cfg.identity_file(),
+            Some(std::path::Path::new("/keys/deploy"))
+        );
+    }
+
+    #[test]
+    fn builder_identity_file_default_none() {
+        let cfg = SshConfig::new("host", "deploy");
+        assert_eq!(cfg.identity_file(), None);
+    }
+
+    #[test]
+    fn builder_identity_file_duplicate_errors() {
+        let err = SshConfig::new("host", "deploy")
+            .with_identity_file("/keys/a")
+            .unwrap()
+            .with_identity_file("/keys/b")
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("/keys/a"));
+        assert!(msg.contains("/keys/b"));
+    }
+
+    #[test]
+    fn parse_then_builder_identity_file_duplicate_errors() {
+        let err =
+            SshConfig::parse("ssh://deploy@host?identity-file=/keys/a")
+                .unwrap()
+                .with_identity_file("/keys/b")
+                .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("/keys/a"));
+        assert!(msg.contains("/keys/b"));
+    }
+
+    #[tokio::test]
+    async fn connect_localhost_with_identity_file() {
+        // identity-file is silently ignored for localhost (LocalTransport)
+        let host =
+            SshConfig::parse("ssh://localhost?identity-file=/nonexistent/key")
+                .unwrap()
+                .connect()
+                .await
+                .unwrap();
+        assert!(matches!(host.transport_kind(), TransportKind::Local(_)));
     }
 }
