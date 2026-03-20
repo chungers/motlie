@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-20 | @claude: DC26 R1 — address PR #89 review: constrain `identity-file` to query-only (not nassh userinfo), make `with_identity_file()` fallible to prevent URI+builder silent overwrite, update DC21 `SshConfig` contract block with new field/methods and query-only exception note. | DC26, DC21, OC3 |
 | 2026-03-20 | @claude: DC26 — SSH identity-file URI parameter for explicit key-file authentication. Extends DC21 URI/SshConfig with `identity-file` param; adds `authenticate_key_file()` alongside existing agent auth. Addresses OC3 limitation for CI/agentless workflows. | DC26, DC21, OC3 |
 | 2026-03-19 | @codex: DC25 implementation note — correct split-percentage mapping for tmux 3.4: `SplitSize::Percent` maps to `split-window -l <n>%`, not a nonexistent `-p` flag. | DC25 |
 | 2026-03-19 | @codex: Add DC25 — first-class window/pane creation on `Target` to restore hierarchy symmetry. Document `new_window()` / `split_pane()` requirements, typed option structs, tmux `-P -F` return strategy, and why `exec(\"tmux ...\")` is not sufficient. | Target, DC25 |
@@ -2772,7 +2773,12 @@ Parameter names align with OpenSSH `ssh_config(5)` where an equivalent exists:
 | `socket-name` | — (tmux-specific) | `TmuxSocket::Name(...)` | none |
 | `identity-file` | `IdentityFile` | `SshConfig::identity_file` (absolute path) | none (agent auth) |
 
-<!-- @claude 2026-03-20: identity-file added by DC26. See DC26 for full design. -->
+<!-- @claude 2026-03-20: identity-file added by DC26. See DC26 for full design.
+     @claude 2026-03-20: PR #89 R1 — identity-file is query-only per reviewer feedback.
+     Absolute paths are a poor fit for userinfo/authority/path split. While the older
+     transport params (host-key-policy, timeout, keepalive, socket-name) support both
+     nassh `;` and query `?` placement, identity-file is restricted to query params only.
+     Parsing rejects identity-file in userinfo; rendering always emits it as a query param. -->
 
 **`host-key-policy` values**: `verify` (default, maps to `HostKeyPolicy::Verify`),
 `tofu` (maps to `TrustFirstUse`), `insecure` (maps to `Insecure`).
@@ -2808,6 +2814,7 @@ pub struct SshConfig {
     timeout: Duration,
     keepalive_interval: Option<Duration>,
     socket: Option<TmuxSocket>,
+    identity_file: Option<PathBuf>,     // DC26
 }
 
 impl SshConfig {
@@ -2820,6 +2827,13 @@ impl SshConfig {
     pub fn with_keepalive(self, interval: Option<Duration>) -> Self;
     pub fn with_socket(self, socket: TmuxSocket) -> Self;  // NEW
 
+    /// Set an explicit SSH identity (private key) file for authentication (DC26).
+    ///
+    /// Returns `Err` if the config already has an identity file set (e.g., from
+    /// a parsed URI). This prevents silent overwrites when combining URI parsing
+    /// with programmatic configuration.
+    pub fn with_identity_file(self, path: impl Into<PathBuf>) -> Result<Self>;  // DC26
+
     // --- URI parsing (NEW) ---
 
     /// Parse from an `ssh://` URI string.
@@ -2827,9 +2841,15 @@ impl SshConfig {
     /// Accepts nassh-style params (`;` in userinfo), query params (`?`),
     /// or both. Rejects unknown params and canonical-component duplication.
     /// For localhost URIs, `user` defaults to empty (ignored by LocalTransport).
+    ///
+    /// Note: `identity-file` is accepted as a **query param only** — it is
+    /// rejected in nassh-style userinfo (see DC26 for rationale).
     pub fn parse(uri: &str) -> Result<Self>;
 
     /// Render to canonical URI form (nassh-style params in userinfo).
+    ///
+    /// `identity-file` is always rendered as a query param, even when other
+    /// params use nassh-style userinfo placement (DC26: query-only constraint).
     pub fn to_uri_string(&self) -> String;
 
     // --- Connect (NEW) ---
@@ -2852,6 +2872,7 @@ impl SshConfig {
     pub fn port(&self) -> u16;
     pub fn is_localhost(&self) -> bool;
     pub fn socket(&self) -> Option<&TmuxSocket>;
+    pub fn identity_file(&self) -> Option<&Path>;           // DC26
 }
 
 impl fmt::Display for SshConfig {
@@ -3016,10 +3037,11 @@ explicit private key file. This is a usability gap for:
 4. **Agentless workflows** — environments where `ssh-agent` is unavailable or
    undesirable.
 
-**Decision**: Add `identity-file` as a URI parameter and `SshConfig` field. When set,
-authentication uses the specified key file directly via `russh_keys::load_secret_key()`
-and `handle.authenticate_publickey()` — both already in the dependency tree (`russh`
-0.46, `russh-keys` 0.46) but unused. No new dependencies. No OpenSSH binaries or C FFI.
+**Decision**: Add `identity-file` as a **query-only** URI parameter and `SshConfig`
+field. When set, authentication uses the specified key file directly via
+`russh_keys::load_secret_key()` and `handle.authenticate_publickey()` — both already
+in the dependency tree (`russh` 0.46, `russh-keys` 0.46) but unused. No new
+dependencies. No OpenSSH binaries or C FFI.
 
 **Auth strategy dispatch** in `SshTransport::connect()`:
 
@@ -3034,31 +3056,70 @@ When `identity-file` is specified, the agent is not consulted. This is intention
 if a user specifies an explicit key, they want deterministic selection, not a silent
 fallback to agent keys that may or may not work.
 
-**URI parameter**: `identity-file`
+**URI parameter**: `identity-file` (**query-only**)
+
+Unlike the older transport params (`host-key-policy`, `timeout`, `keepalive`,
+`socket-name`) which accept both nassh-style `;` userinfo and `?` query placement,
+`identity-file` is restricted to query params only. Rationale: it is a client-side
+auth input rather than part of the remote authority shape, and absolute file paths
+are a poor fit for the userinfo/authority/path URI split. Parsing rejects
+`identity-file` in userinfo; rendering always emits it as a query param.
 
 ```
-ssh://deploy;identity-file=/home/deploy/.ssh/id_ed25519@prod-server
 ssh://deploy@prod?identity-file=/home/deploy/.ssh/id_ed25519
+ssh://deploy@prod:2222?host-key-policy=tofu&identity-file=/etc/deploy/key
+```
+
+The following is **rejected** at parse time:
+```
+ssh://deploy;identity-file=/path/to/key@prod   # ERROR — identity-file is query-only
 ```
 
 **Parameter table update** (extends DC21 §Parameters):
 
-| Parameter | ssh_config Equivalent | Maps to | Default |
-|---|---|---|---|
-| `identity-file` | `IdentityFile` | `SshConfig::identity_file` (absolute path) | none (use agent) |
+| Parameter | ssh_config Equivalent | Maps to | Default | Placement |
+|---|---|---|---|---|
+| `identity-file` | `IdentityFile` | `SshConfig::identity_file` (absolute path) | none (use agent) | query only |
 
 **SshConfig struct change**:
 
 ```rust
 pub struct SshConfig {
     // ... existing fields ...
-    identity_file: Option<PathBuf>,   // NEW
+    identity_file: Option<PathBuf>,   // NEW (DC26)
 }
 
 impl SshConfig {
-    pub fn with_identity_file(self, path: impl Into<PathBuf>) -> Self;
+    /// Set an explicit SSH identity file for key-file authentication.
+    ///
+    /// Returns `Err` if the config already has an identity file set (e.g.,
+    /// from a parsed URI). This prevents silent overwrites when combining
+    /// URI parsing with programmatic configuration.
+    pub fn with_identity_file(self, path: impl Into<PathBuf>) -> Result<Self>;
     pub fn identity_file(&self) -> Option<&Path>;
 }
+```
+
+**Duplicate-source error**: If a config is parsed from a URI containing
+`?identity-file=...` and the caller then also calls `.with_identity_file(...)`,
+`with_identity_file()` returns `Err` rather than silently overwriting the
+parsed value. This mirrors the fail-fast principle used elsewhere in DC21
+(canonical-component duplication, cross-location duplicate params). The error
+message identifies both the existing and attempted paths so the caller can
+diagnose the conflict:
+
+```rust
+// OK — builder-only
+SshConfig::new("prod", "deploy")
+    .with_identity_file("/keys/prod")?;
+
+// OK — URI-only
+SshConfig::parse("ssh://deploy@prod?identity-file=/keys/prod")?;
+
+// ERROR — duplicate identity-file specification
+SshConfig::parse("ssh://deploy@prod?identity-file=/keys/prod")?
+    .with_identity_file("/keys/other")?;
+// => Err("identity-file already set to '/keys/prod'; cannot overwrite with '/keys/other'")
 ```
 
 **New auth method** (`transport.rs`):
@@ -3094,8 +3155,11 @@ async fn authenticate_key_file(
 **URI parse/render**:
 
 - `KNOWN_PARAMS` adds `"identity-file"`.
-- `parse()` match arm: validates absolute path, sets `config.identity_file`.
-- `to_uri_string()` emits the param if set.
+- `parse()`: if `identity-file` appears in userinfo params, reject with error
+  ("identity-file is query-only"). If in query params, validate absolute path,
+  set `config.identity_file`.
+- `to_uri_string()`: always emits `identity-file` as a query param, even when
+  user is non-empty (other params go to nassh userinfo in that case).
 - Round-trip: absolute POSIX paths contain no URI-reserved characters (`; @ ? & = # [ ]`)
   under normal conditions, so round-trip is safe without percent-encoding.
 
@@ -3103,29 +3167,31 @@ async fn authenticate_key_file(
 
 | Decision | Rationale |
 |----------|-----------|
+| Query-only in URI | Client-side auth input, not part of remote authority. Absolute paths are a poor fit for userinfo/authority/path split. |
 | Absolute paths only | Relative paths are ambiguous (relative to what CWD?). Mirrors how `IdentityFile` works in practice when fully qualified. |
 | Single key file, not a list | Keeps URI clean. Multi-key → use agent. YAGNI for v1. |
 | No passphrase support in v1 | `load_secret_key(path, None)` — encrypted keys fail with clear error suggesting agent. Avoids blocking I/O / TTY interaction in async context. Passphrases never appear in URIs (security: URIs in logs, env vars, process lists). |
 | No `~` expansion | `~` is a shell construct, not a path literal. Users pass expanded paths. Avoids footgun. |
 | No agent fallback when identity-file is set | Explicit key = deterministic. Silent fallback defeats the purpose. |
 | Localhost ignores identity-file | `LocalTransport` does not SSH. If `identity-file` is set on a localhost URI, it is silently ignored (same as `user`). |
+| Fallible `with_identity_file()` | Prevents silent overwrite when combining URI parse with builder. URI-specified + programmatic = error, not last-write-wins. |
 
 **Desired usage**:
 
 ```rust
-// CI deploy key — no agent needed
-let host = SshConfig::parse("ssh://deploy;identity-file=/etc/deploy/id_ed25519@prod")?
+// CI deploy key — query-param URI, no agent needed
+let host = SshConfig::parse("ssh://deploy@prod?identity-file=/etc/deploy/id_ed25519")?
     .connect().await?;
 
-// Builder API
+// Builder API — programmatic
 let host = SshConfig::new("prod", "deploy")
-    .with_identity_file("/etc/deploy/id_ed25519")
+    .with_identity_file("/etc/deploy/id_ed25519")?
     .connect().await?;
 
-// Fleet with per-host keys
+// Fleet with per-host keys (query-param style)
 let hosts = vec![
-    "ssh://deploy;identity-file=/keys/prod@prod-1",
-    "ssh://deploy;identity-file=/keys/staging@staging-1",
+    "ssh://deploy@prod-1?identity-file=/keys/prod",
+    "ssh://deploy@staging-1?identity-file=/keys/staging",
     "ssh://deploy@dev-box",  // agent auth (default)
 ];
 ```
