@@ -15,7 +15,7 @@ use tokio::sync::watch;
 use crate::capture;
 use crate::host::Target;
 use crate::sink::{OutputBus, TargetOutput};
-use crate::transport::{ShellChannelKind, ShellEvent};
+use crate::transport::{tmux_prefix, ShellChannelKind, ShellEvent};
 use crate::types::*;
 
 // ---------------------------------------------------------------------------
@@ -127,6 +127,7 @@ impl PaneAssemblyState {
 pub struct SessionMonitor {
     session_name: String,
     host_alias: String,
+    socket: Option<TmuxSocket>,
     normalize: CaptureNormalizeMode,
     pane_states: HashMap<String, PaneAssemblyState>,
 }
@@ -136,6 +137,7 @@ impl SessionMonitor {
         SessionMonitor {
             session_name,
             host_alias,
+            socket: None,
             normalize: CaptureNormalizeMode::Raw,
             pane_states: HashMap::new(),
         }
@@ -150,9 +152,20 @@ impl SessionMonitor {
         SessionMonitor {
             session_name,
             host_alias,
+            socket: None,
             normalize,
             pane_states: HashMap::new(),
         }
+    }
+
+    /// Attach a tmux socket context for control-mode monitoring.
+    pub fn with_socket(mut self, socket: Option<TmuxSocket>) -> Self {
+        self.socket = socket;
+        self
+    }
+
+    fn attach_command(&self) -> String {
+        build_attach_command(&self.session_name, self.socket.as_ref())
     }
 
     /// Process a parsed %output frame: return a TargetOutput.
@@ -205,7 +218,8 @@ impl SessionMonitor {
 
     /// Main monitor loop.
     ///
-    /// Opens `tmux -C attach-session -t <session>`, reads control mode output,
+    /// Opens `tmux -C attach-session -t <session>` on the configured socket,
+    /// reads control mode output,
     /// parses `%output` frames, publishes `TargetOutput` to the bus.
     /// Returns when the stop signal fires or the connection drops.
     pub async fn run(
@@ -215,10 +229,7 @@ impl SessionMonitor {
         mut stop: watch::Receiver<bool>,
     ) -> Result<()> {
         // Send the tmux control mode attach command
-        let attach_cmd = format!(
-            "tmux -C attach-session -t {}\n",
-            crate::control::shell_escape(&self.session_name)
-        );
+        let attach_cmd = self.attach_command();
         shell.write(attach_cmd.as_bytes()).await?;
 
         // Line-buffered reader over raw shell bytes
@@ -278,6 +289,14 @@ impl SessionMonitor {
 
         Ok(())
     }
+}
+
+fn build_attach_command(session_name: &str, socket: Option<&TmuxSocket>) -> String {
+    format!(
+        "{} -C attach-session -t {}\n",
+        tmux_prefix(socket),
+        crate::control::shell_escape(session_name)
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -526,6 +545,30 @@ mod tests {
         assert_eq!(
             decode_octal_escapes("\\360\\237\\216\\211"),
             "🎉"
+        );
+    }
+
+    #[test]
+    fn attach_command_default_socket() {
+        assert_eq!(
+            build_attach_command("build", None),
+            "tmux -C attach-session -t 'build'\n"
+        );
+    }
+
+    #[test]
+    fn attach_command_named_socket() {
+        assert_eq!(
+            build_attach_command("build", Some(&TmuxSocket::Name("sock".into()))),
+            "tmux -L 'sock' -C attach-session -t 'build'\n"
+        );
+    }
+
+    #[test]
+    fn attach_command_path_socket() {
+        assert_eq!(
+            build_attach_command("build", Some(&TmuxSocket::Path("/tmp/tmux.sock".into()))),
+            "tmux -S '/tmp/tmux.sock' -C attach-session -t 'build'\n"
         );
     }
 

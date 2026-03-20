@@ -332,6 +332,7 @@ impl HostHandle {
         let bus = self.output_bus();
         let host_alias = self.inner.host_alias.clone();
         let session = session_name.to_string();
+        let socket = self.inner.socket.clone();
 
         // Resolve the session first — fail before any registration
         let sessions = discovery::list_sessions(&self.inner.transport, self.inner.socket.as_ref()).await?;
@@ -361,7 +362,7 @@ impl HostHandle {
         let inner_ref = self.inner.clone();
         let session_for_cleanup = session_name.to_string();
         let task = tokio::spawn(async move {
-            let mut monitor = SessionMonitor::new(session.clone(), host_alias);
+            let mut monitor = SessionMonitor::new(session.clone(), host_alias).with_socket(socket);
             let result = monitor.run(&mut shell, &bus, stop_rx).await;
             // Remove from tracking on task completion
             if let Ok(mut signals) = inner_ref.monitor_signals.lock() {

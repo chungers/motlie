@@ -3,8 +3,10 @@
 //! These tests require tmux to be installed and available on PATH.
 //! They create/destroy real tmux sessions during testing.
 
-use motlie_tmux::{HostHandle, SshConfig, TargetLevel};
-use std::time::Duration;
+use motlie_tmux::{CallbackSink, HostHandle, KeySequence, SinkEvent, SinkFilter, SinkKind, SshConfig, TargetLevel};
+use std::any::Any;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn tmux_available() -> bool {
     std::process::Command::new("tmux")
@@ -12,6 +14,30 @@ fn tmux_available() -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+fn unique_name(prefix: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!("{}_{}_{}", prefix, std::process::id(), nanos)
+}
+
+fn callback_collect_output(
+    state: &Arc<dyn Any + Send + Sync>,
+    event: SinkEvent,
+) -> anyhow::Result<()> {
+    let outputs = state
+        .downcast_ref::<Mutex<Vec<String>>>()
+        .ok_or_else(|| anyhow::anyhow!("callback state type mismatch"))?;
+    if let SinkEvent::Data(output) = event {
+        outputs
+            .lock()
+            .expect("callback output lock poisoned")
+            .push(output.content);
+    }
+    Ok(())
 }
 
 #[tokio::test]
@@ -224,6 +250,147 @@ async fn localhost_monitor_pipeline() {
     let _ = monitor_handle.shutdown().await; // may already be stopped
     target.kill().await.expect("kill failed");
     tokio::time::sleep(Duration::from_millis(200)).await;
+}
+
+#[tokio::test]
+async fn localhost_monitor_pipeline_named_socket() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+
+    let socket_name = unique_name("motlie_monitor_sock");
+    let session_name = unique_name("motlie_monitor_named");
+    let uri = format!("ssh://localhost?socket-name={}", socket_name);
+    let host = SshConfig::parse(&uri)
+        .expect("parse named-socket uri failed")
+        .connect()
+        .await
+        .expect("connect named-socket uri failed");
+
+    let target = host
+        .create_session(&session_name, &Default::default())
+        .await
+        .expect("create_session failed");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let monitor_handle = host
+        .start_monitoring_session(&session_name)
+        .await
+        .expect("start_monitoring_session failed");
+    assert!(monitor_handle.is_active());
+
+    let bus = host.output_bus();
+    let sub = bus
+        .subscribe(vec![SinkFilter::for_session(&session_name)], 64)
+        .expect("subscribe failed");
+    let mut rx = sub.into_receiver();
+
+    target
+        .send_text("echo MOTLIE_NAMED_SOCKET_MONITOR")
+        .await
+        .expect("send_text failed");
+    let enter = KeySequence::parse("{Enter}").unwrap();
+    target.send_keys(&enter).await.expect("send_keys failed");
+
+    let mut found_content = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        tokio::select! {
+            event = rx.recv() => {
+                match event {
+                    Some(SinkEvent::Data(output)) => {
+                        if output.content.contains("MOTLIE_NAMED_SOCKET_MONITOR") {
+                            found_content = true;
+                            break;
+                        }
+                    }
+                    Some(SinkEvent::Gap { .. }) => continue,
+                    None => break,
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(100)) => continue,
+        }
+    }
+    assert!(found_content, "expected output not received from named-socket monitor");
+
+    monitor_handle.shutdown().await.expect("shutdown failed");
+    target.kill().await.expect("kill failed");
+}
+
+#[tokio::test]
+async fn localhost_monitor_pipe_callback_named_socket() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+
+    let socket_name = unique_name("motlie_pipe_sock");
+    let session_name = unique_name("motlie_pipe_named");
+    let uri = format!("ssh://localhost?socket-name={}", socket_name);
+    let host = SshConfig::parse(&uri)
+        .expect("parse named-socket uri failed")
+        .connect()
+        .await
+        .expect("connect named-socket uri failed");
+
+    let target = host
+        .create_session(&session_name, &Default::default())
+        .await
+        .expect("create_session failed");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let monitor_handle = host
+        .start_monitoring_session(&session_name)
+        .await
+        .expect("start_monitoring_session failed");
+
+    let outputs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let state: Arc<dyn Any + Send + Sync> = outputs.clone();
+    let sink = SinkKind::Callback(CallbackSink {
+        name: "integ-callback".into(),
+        state,
+        on_output: callback_collect_output,
+        on_flush: None,
+    });
+
+    let bus = host.output_bus();
+    let sub = bus
+        .subscribe(vec![SinkFilter::for_session(&session_name)], 64)
+        .expect("subscribe failed");
+    let pipe = sub.pipe(sink);
+
+    target
+        .send_text("echo MOTLIE_PIPE_CALLBACK")
+        .await
+        .expect("send_text failed");
+    let enter = KeySequence::parse("{Enter}").unwrap();
+    target.send_keys(&enter).await.expect("send_keys failed");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        if outputs
+            .lock()
+            .expect("callback output lock poisoned")
+            .iter()
+            .any(|s| s.contains("MOTLIE_PIPE_CALLBACK"))
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let saw_output = outputs
+        .lock()
+        .expect("callback output lock poisoned")
+        .iter()
+        .any(|s| s.contains("MOTLIE_PIPE_CALLBACK"));
+    assert!(saw_output, "expected callback sink to collect monitor output");
+
+    monitor_handle.shutdown().await.expect("shutdown failed");
+    bus.unsubscribe(pipe.id()).expect("unsubscribe failed");
+    pipe.join().await.expect("pipe join failed");
+    target.kill().await.expect("kill failed");
 }
 
 /// 1.11m — Integration test: SshConfig::parse("ssh://localhost")?.connect()

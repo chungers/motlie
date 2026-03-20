@@ -1170,6 +1170,13 @@ capture/sample APIs above:
 
 > See [`examples/stream_pane.rs --mode monitor`](../examples/stream_pane.rs) for
 > a runnable example comparing poll vs push streaming side by side.
+>
+> See [`examples/monitor_pipe.rs`](../examples/monitor_pipe.rs) for the sink-consumer
+> side of Track A: `Subscription::pipe()`, `StdioSink` / `CallbackSink`, and `PipeHandle`.
+>
+> Socket note: monitoring uses the host's configured tmux socket too. If you connect
+> with `ssh://localhost?socket-name=myserver` or a socket-path URI, control-mode
+> monitoring attaches to that same server rather than the default tmux socket.
 
 ---
 
@@ -1189,6 +1196,15 @@ let monitor = host.start_monitoring_session("build").await?;
 // Deref gives access to the underlying Target:
 println!("Monitoring: {}", monitor.target_string());
 assert!(monitor.is_active());
+```
+
+```rust
+// Monitoring also respects named sockets / socket paths from the URI.
+let host = SshConfig::parse("ssh://localhost?socket-name=myserver")?
+    .connect()
+    .await?;
+let monitor = host.start_monitoring_session("build").await?;
+monitor.shutdown().await?;
 ```
 
 ### Monitor lifecycle
@@ -1444,6 +1460,8 @@ let text = stream.format(&chunk);
 
 Sinks are terminal consumers driven by subscriptions. The pipeline is:
 `OutputBus` → `Subscription` → adapter (`.pipe()`, `.joined()`, `.into_receiver()`) → consumer.
+
+Runnable example: [`examples/monitor_pipe.rs`](../examples/monitor_pipe.rs)
 
 ### Pipe to stdio
 
