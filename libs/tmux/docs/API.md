@@ -667,6 +667,43 @@ target.address();        // &TargetAddress enum
 > See [`examples/target_navigate.rs`](../examples/target_navigate.rs) for a runnable hierarchy walk
 > and [`examples/target_spec.rs`](../examples/target_spec.rs) for TargetSpec resolution.
 
+### Create child windows and panes
+
+```rust
+use motlie_tmux::{CreateWindowOptions, SplitDirection, SplitPaneOptions, SplitSize};
+
+let session = host.create_session("build", &Default::default()).await?;
+
+let logs = session
+    .new_window(&CreateWindowOptions {
+        name: Some("logs".into()),
+        width: Some(160),
+        height: Some(40),
+        ..Default::default()
+    })
+    .await?;
+assert_eq!(logs.target_string(), "build:1");
+
+let tail = logs
+    .split_pane(&SplitPaneOptions {
+        direction: SplitDirection::Horizontal,
+        size: Some(SplitSize::percent(40)?),
+        ..Default::default()
+    })
+    .await?;
+assert_eq!(tail.level(), motlie_tmux::TargetLevel::Pane);
+```
+
+Level semantics:
+- `new_window()` is session-only; calling it on a window/pane returns `Err`
+- `split_pane()` is window/pane-only; calling it on a session returns `Err`
+- splitting a window target uses that window's active pane
+- splitting a pane target uses that explicit pane
+
+> See [`examples/target_navigate.rs`](../examples/target_navigate.rs) for session-created window
+> setup via `Target::new_window()`, and [`examples/repl.rs`](../examples/repl.rs) for interactive
+> `new-window` / `split-pane` commands.
+
 ### Navigate down the hierarchy
 
 ```rust

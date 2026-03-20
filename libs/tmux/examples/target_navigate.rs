@@ -7,9 +7,9 @@
 //!   cargo run -p motlie-tmux --example target_navigate -- ssh://localhost <session_name>
 //!
 //! If no session name is given, creates a temporary session with two windows
-//! (using `exec()` to run `tmux new-window`).
+//! using `Target::new_window()`.
 
-use motlie_tmux::{SshConfig, TargetLevel};
+use motlie_tmux::{CreateWindowOptions, SshConfig, TargetLevel};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -39,19 +39,22 @@ async fn main() -> anyhow::Result<()> {
             ..Default::default()
         };
         let t = host.create_session(name, &opts).await?;
-        // Create a second window via exec() on the session's pane
+        // Create a second window via the first-class Target API
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        t.exec(
-            &format!("tmux new-window -t {} -n win1", name),
-            std::time::Duration::from_secs(5),
-        )
+        t.new_window(&CreateWindowOptions {
+            name: Some("win1".to_string()),
+            ..Default::default()
+        })
         .await?;
         // Re-query to pick up updated window count
         let t = host
             .session(name)
             .await?
             .ok_or_else(|| anyhow::anyhow!("session disappeared"))?;
-        println!("Created temporary session '{}' with 2 windows for demo.", name);
+        println!(
+            "Created temporary session '{}' with 2 windows for demo.",
+            name
+        );
         (t, true)
     };
 
@@ -72,11 +75,7 @@ async fn main() -> anyhow::Result<()> {
     let windows = session_target.children().await?;
     println!("\n  Windows ({}):", windows.len());
     for win in &windows {
-        println!(
-            "    {} (level={:?})",
-            win.target_string(),
-            win.level()
-        );
+        println!("    {} (level={:?})", win.target_string(), win.level());
         if let Some(info) = win.window_info() {
             println!(
                 "      name='{}', index={}, active={}, panes={}",
@@ -94,10 +93,7 @@ async fn main() -> anyhow::Result<()> {
                 pane.level()
             );
             if let Some(addr) = pane.pane_address() {
-                println!(
-                    "          pane_id={}, index={}",
-                    addr.pane_id, addr.pane
-                );
+                println!("          pane_id={}, index={}", addr.pane_id, addr.pane);
             }
             // Pane level: children() returns empty
             assert_eq!(pane.level(), TargetLevel::Pane);
