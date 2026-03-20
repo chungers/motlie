@@ -4,7 +4,7 @@
 //! and shows the interleaved JoinedStream output with source labels.
 //!
 //! Usage:
-//!   joined_demo [--format bracketed|prompt|separator]
+//!   joined_demo [ssh://host] [--format bracketed|prompt|separator]
 
 use anyhow::{anyhow, Result};
 use motlie_tmux::{strip_ansi, KeySequence, LabelFormat, SinkFilter, SplitPaneOptions, SshConfig};
@@ -17,12 +17,18 @@ enum Mode {
     Separator,
 }
 
-fn parse_args() -> Result<Mode> {
+struct Args {
+    uri: String,
+    mode: Mode,
+}
+
+fn parse_args() -> Result<Args> {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "-h" || a == "--help") {
-        eprintln!("joined_demo [--format bracketed|prompt|separator]");
+        eprintln!("joined_demo [ssh://host] [--format bracketed|prompt|separator]");
         std::process::exit(0);
     }
+    let mut uri = "ssh://localhost".to_string();
     let mut mode = Mode::Bracketed;
     let mut i = 1;
     while i < args.len() {
@@ -34,18 +40,21 @@ fn parse_args() -> Result<Mode> {
                 Some("separator") => Mode::Separator,
                 other => return Err(anyhow!("unknown format: {:?}", other)),
             };
+        } else if args[i].starts_with("ssh://") {
+            uri = args[i].clone();
         }
         i += 1;
     }
-    Ok(mode)
+    Ok(Args { uri, mode })
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mode = parse_args()?;
+    let args = parse_args()?;
+    let mode = args.mode;
     let session = format!("joined_demo_{}", std::process::id());
 
-    let host = SshConfig::parse("ssh://localhost")?.connect().await?;
+    let host = SshConfig::parse(&args.uri)?.connect().await?;
 
     // Clean up any leftover from a previous failed run
     if let Ok(Some(t)) = host.session(&session).await {
@@ -125,17 +134,32 @@ async fn main() -> Result<()> {
                             continue;
                         }
                         if use_separator {
+                            // Separator mode: print a header on source transitions,
+                            // then raw content lines without per-line labels.
                             let src = c.source.short();
-                            if c.source_changed && !last_source.is_empty() {
-                                println!("--- {} ---", src);
-                            } else if last_source.is_empty() {
+                            if c.source_changed || last_source.is_empty() {
                                 println!("--- {} ---", src);
                             }
                             last_source = src;
-                            print!("{}", clean);
+                            for line in clean.lines() {
+                                if !line.trim().is_empty() {
+                                    println!("{}", line);
+                                }
+                            }
                         } else {
+                            // Bracketed/Prompt mode: apply per-line labels using
+                            // the configured LabelFormat via stream.format().
                             let label = c.source.short();
-                            print!("[{}] {}", label, clean);
+                            for line in clean.lines() {
+                                if !line.trim().is_empty() {
+                                    let formatted = match mode {
+                                        Mode::Bracketed => format!("[{}] {}", label, line),
+                                        Mode::Prompt => format!("{}> {}", label, line),
+                                        Mode::Separator => unreachable!(),
+                                    };
+                                    println!("{}", formatted);
+                                }
+                            }
                         }
                     }
                     None => break,
