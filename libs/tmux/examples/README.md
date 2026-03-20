@@ -7,7 +7,8 @@ via an `ssh://` URI and exercises a specific part of the library.
 
 - **Working directory**: all commands assume you are in the workspace root (`motlie/`)
 - **tmux** installed and on PATH
-- For remote hosts: `ssh-agent` running with keys loaded (`ssh-add`)
+- For remote hosts: `ssh-agent` running with keys loaded (`ssh-add`), or an
+  explicit identity file via `?identity-file=/path/to/key` in the URI
 
 ## Building
 
@@ -43,6 +44,7 @@ Parse a URI, connect, verify by listing sessions.
 ```sh
 cargo run -p motlie-tmux --example uri_connect -- ssh://localhost
 cargo run -p motlie-tmux --example uri_connect -- ssh://deploy@prod:2222
+cargo run -p motlie-tmux --example uri_connect -- 'ssh://deploy@prod?identity-file=/path/to/key'
 ```
 
 Expected output:
