@@ -51,9 +51,7 @@ impl HostHandle {
     pub fn local() -> Self {
         HostHandle {
             inner: Arc::new(HostHandleInner {
-                transport: TransportKind::Local(
-                    crate::transport::LocalTransport::new(),
-                ),
+                transport: TransportKind::Local(crate::transport::LocalTransport::new()),
                 socket: None,
                 exec_locks: std::sync::Mutex::new(HashMap::new()),
                 host_alias: "localhost".to_string(),
@@ -71,9 +69,9 @@ impl HostHandle {
     pub fn local_with_timeout(timeout: Duration) -> Self {
         HostHandle {
             inner: Arc::new(HostHandleInner {
-                transport: TransportKind::Local(
-                    crate::transport::LocalTransport::with_timeout(timeout),
-                ),
+                transport: TransportKind::Local(crate::transport::LocalTransport::with_timeout(
+                    timeout,
+                )),
                 socket: None,
                 exec_locks: std::sync::Mutex::new(HashMap::new()),
                 host_alias: "localhost".to_string(),
@@ -98,11 +96,7 @@ impl HostHandle {
     }
 
     /// Create a HostHandle with a specific transport, socket, and host alias.
-    pub fn with_alias(
-        transport: TransportKind,
-        socket: Option<TmuxSocket>,
-        alias: &str,
-    ) -> Self {
+    pub fn with_alias(transport: TransportKind, socket: Option<TmuxSocket>, alias: &str) -> Self {
         HostHandle {
             inner: Arc::new(HostHandleInner {
                 transport,
@@ -151,23 +145,14 @@ impl HostHandle {
 
     /// Query the global `history-limit` default.
     pub async fn get_global_history_limit(&self) -> Result<u32> {
-        control::get_history_limit(
-            &self.inner.transport,
-            self.inner.socket.as_ref(),
-            None,
-        )
-        .await
+        control::get_history_limit(&self.inner.transport, self.inner.socket.as_ref(), None).await
     }
 
     /// Create a new tmux session. Returns a Target at session level (DC22).
     ///
     /// Use `CreateSessionOptions` to set window size, history limit, etc.
     /// `CreateSessionOptions::default()` preserves pre-DC22 behavior.
-    pub async fn create_session(
-        &self,
-        name: &str,
-        opts: &CreateSessionOptions,
-    ) -> Result<Target> {
+    pub async fn create_session(&self, name: &str, opts: &CreateSessionOptions) -> Result<Target> {
         control::create_session(
             &self.inner.transport,
             self.inner.socket.as_ref(),
@@ -178,8 +163,7 @@ impl HostHandle {
 
         // Query the created session to get full info
         let sessions =
-            discovery::list_sessions(&self.inner.transport, self.inner.socket.as_ref())
-                .await?;
+            discovery::list_sessions(&self.inner.transport, self.inner.socket.as_ref()).await?;
         let info = sessions
             .into_iter()
             .find(|s| s.name == name)
@@ -188,30 +172,27 @@ impl HostHandle {
         Ok(Target {
             inner: self.inner.clone(),
             address: TargetAddress::Session(info),
-
         })
     }
 
     /// Get a Target for an existing session by name.
     pub async fn session(&self, name: &str) -> Result<Option<Target>> {
         let sessions =
-            discovery::list_sessions(&self.inner.transport, self.inner.socket.as_ref())
-                .await?;
-        Ok(sessions.into_iter().find(|s| s.name == name).map(|info| {
-            Target {
+            discovery::list_sessions(&self.inner.transport, self.inner.socket.as_ref()).await?;
+        Ok(sessions
+            .into_iter()
+            .find(|s| s.name == name)
+            .map(|info| Target {
                 inner: self.inner.clone(),
                 address: TargetAddress::Session(info),
-    
-            }
-        }))
+            }))
     }
 
     /// Get a Target from a TargetSpec. Verifies the entity exists.
     pub async fn target(&self, spec: &TargetSpec) -> Result<Option<Target>> {
         // Check session exists
         let sessions =
-            discovery::list_sessions(&self.inner.transport, self.inner.socket.as_ref())
-                .await?;
+            discovery::list_sessions(&self.inner.transport, self.inner.socket.as_ref()).await?;
         let session_info = match sessions.into_iter().find(|s| s.name == spec.session_name()) {
             Some(s) => s,
             None => return Ok(None),
@@ -227,7 +208,6 @@ impl HostHandle {
             (None, None) => Ok(Some(Target {
                 inner: self.inner.clone(),
                 address: TargetAddress::Session(session_info),
-    
             })),
             (Some(window_str), None) => {
                 let windows = discovery::list_windows(
@@ -236,13 +216,12 @@ impl HostHandle {
                     spec.session_name(),
                 )
                 .await?;
-                let win = windows.into_iter().find(|w| {
-                    w.index.to_string() == *window_str || w.name == *window_str
-                });
+                let win = windows
+                    .into_iter()
+                    .find(|w| w.index.to_string() == *window_str || w.name == *window_str);
                 Ok(win.map(|w| Target {
                     inner: self.inner.clone(),
                     address: TargetAddress::Window(w),
-        
                 }))
             }
             (Some(window_str), Some(pane_idx)) => {
@@ -253,9 +232,9 @@ impl HostHandle {
                     spec.session_name(),
                 )
                 .await?;
-                let resolved_window = windows.into_iter().find(|w| {
-                    w.index.to_string() == *window_str || w.name == *window_str
-                });
+                let resolved_window = windows
+                    .into_iter()
+                    .find(|w| w.index.to_string() == *window_str || w.name == *window_str);
                 let window_index = match resolved_window {
                     Some(w) => w.index,
                     None => return Ok(None),
@@ -267,13 +246,12 @@ impl HostHandle {
                     spec.session_name(),
                 )
                 .await?;
-                let pane = panes.into_iter().find(|p| {
-                    p.address.window == window_index && p.address.pane == pane_idx
-                });
+                let pane = panes
+                    .into_iter()
+                    .find(|p| p.address.window == window_index && p.address.pane == pane_idx);
                 Ok(pane.map(|p| Target {
                     inner: self.inner.clone(),
                     address: TargetAddress::Pane(p.address),
-        
                 }))
             }
         }
@@ -290,7 +268,10 @@ impl HostHandle {
         remote_path: &std::path::Path,
         opts: &TransferOptions,
     ) -> Result<()> {
-        self.inner.transport.upload(local_path, remote_path, opts).await
+        self.inner
+            .transport
+            .upload(local_path, remote_path, opts)
+            .await
     }
 
     /// Download a file or directory from the host (DC23).
@@ -304,14 +285,21 @@ impl HostHandle {
         local_path: &std::path::Path,
         opts: &TransferOptions,
     ) -> Result<()> {
-        self.inner.transport.download(remote_path, local_path, opts).await
+        self.inner
+            .transport
+            .download(remote_path, local_path, opts)
+            .await
     }
 
     // --- Monitoring lifecycle (2a.4a, DC13, DC24) ---
 
     /// Get or create the shared OutputBus for this host.
     pub fn output_bus(&self) -> Arc<OutputBus> {
-        let mut bus_opt = self.inner.output_bus.lock().expect("output_bus lock poisoned");
+        let mut bus_opt = self
+            .inner
+            .output_bus
+            .lock()
+            .expect("output_bus lock poisoned");
         if let Some(bus) = bus_opt.as_ref() {
             return bus.clone();
         }
@@ -336,7 +324,8 @@ impl HostHandle {
         let socket = self.inner.socket.clone();
 
         // Resolve the session first — fail before any registration
-        let sessions = discovery::list_sessions(&self.inner.transport, self.inner.socket.as_ref()).await?;
+        let sessions =
+            discovery::list_sessions(&self.inner.transport, self.inner.socket.as_ref()).await?;
         let session_info = sessions
             .into_iter()
             .find(|s| s.name == session)
@@ -354,7 +343,10 @@ impl HostHandle {
         // so monitored_sessions() never reports sessions that failed to start.
         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
         {
-            let mut signals = self.inner.monitor_signals.lock()
+            let mut signals = self
+                .inner
+                .monitor_signals
+                .lock()
                 .expect("monitor_signals lock poisoned");
             signals.insert(session_name.to_string(), stop_tx.clone());
         }
@@ -377,10 +369,7 @@ impl HostHandle {
 
     /// Start monitoring all sessions (optionally filtered).
     /// Returns a `MonitorHandle` for aggregate lifecycle control.
-    pub async fn start_monitoring(
-        &self,
-        filter: Option<&regex::Regex>,
-    ) -> Result<MonitorHandle> {
+    pub async fn start_monitoring(&self, filter: Option<&regex::Regex>) -> Result<MonitorHandle> {
         let sessions = self.list_sessions().await?;
         let mut handles = HashMap::new();
 
@@ -404,7 +393,10 @@ impl HostHandle {
     /// The monitor task will exit asynchronously and clean up its registration.
     /// For awaited teardown guarantees, use `SessionMonitorHandle::shutdown()`.
     pub fn stop_monitoring_session(&self, session_name: &str) -> Result<()> {
-        let signals = self.inner.monitor_signals.lock()
+        let signals = self
+            .inner
+            .monitor_signals
+            .lock()
             .expect("monitor_signals lock poisoned");
         let tx = signals
             .get(session_name)
@@ -418,7 +410,10 @@ impl HostHandle {
     /// Sends the stop signal to every active monitor. Does **not** await task
     /// completion. For awaited teardown, use `MonitorHandle::shutdown()`.
     pub fn stop_monitoring(&self) {
-        let signals = self.inner.monitor_signals.lock()
+        let signals = self
+            .inner
+            .monitor_signals
+            .lock()
             .expect("monitor_signals lock poisoned");
         for (_, tx) in signals.iter() {
             let _ = tx.send(true);
@@ -427,7 +422,10 @@ impl HostHandle {
 
     /// List currently monitored session names.
     pub fn monitored_sessions(&self) -> Vec<String> {
-        let signals = self.inner.monitor_signals.lock()
+        let signals = self
+            .inner
+            .monitor_signals
+            .lock()
             .expect("monitor_signals lock poisoned");
         signals.keys().cloned().collect()
     }
@@ -553,7 +551,6 @@ impl Target {
                     .map(|w| Target {
                         inner: self.inner.clone(),
                         address: TargetAddress::Window(w),
-            
                     })
                     .collect())
             }
@@ -570,7 +567,6 @@ impl Target {
                     .map(|p| Target {
                         inner: self.inner.clone(),
                         address: TargetAddress::Pane(p.address),
-            
                     })
                     .collect())
             }
@@ -587,13 +583,13 @@ impl Target {
             &session_name,
         )
         .await?;
-        Ok(windows.into_iter().find(|w| w.index == index).map(|w| {
-            Target {
+        Ok(windows
+            .into_iter()
+            .find(|w| w.index == index)
+            .map(|w| Target {
                 inner: self.inner.clone(),
                 address: TargetAddress::Window(w),
-    
-            }
-        }))
+            }))
     }
 
     /// Navigate to a pane by index.
@@ -632,7 +628,6 @@ impl Target {
                     return Ok(Some(Target {
                         inner: self.inner.clone(),
                         address: TargetAddress::Pane(p.clone()),
-            
                     }));
                 } else {
                     return Ok(None);
@@ -648,14 +643,12 @@ impl Target {
         .await?;
 
         let pane = panes.into_iter().find(|p| {
-            p.address.pane == index
-                && window_filter.map_or(true, |wi| p.address.window == wi)
+            p.address.pane == index && window_filter.map_or(true, |wi| p.address.window == wi)
         });
 
         Ok(pane.map(|p| Target {
             inner: self.inner.clone(),
             address: TargetAddress::Pane(p.address),
-
         }))
     }
 
@@ -664,7 +657,53 @@ impl Target {
         Target {
             inner: self.inner.clone(),
             address: TargetAddress::Pane(address.clone()),
+        }
+    }
 
+    /// Create a new child window from a session target (DC25).
+    pub async fn new_window(&self, opts: &CreateWindowOptions) -> Result<Target> {
+        match &self.address {
+            TargetAddress::Session(s) => {
+                let window = control::new_window(
+                    &self.inner.transport,
+                    self.inner.socket.as_ref(),
+                    &s.name,
+                    opts,
+                )
+                .await?;
+                Ok(Target {
+                    inner: self.inner.clone(),
+                    address: TargetAddress::Window(window),
+                })
+            }
+            TargetAddress::Window(_) => Err(anyhow!(
+                "new_window() requires a session target, got window"
+            )),
+            TargetAddress::Pane(_) => {
+                Err(anyhow!("new_window() requires a session target, got pane"))
+            }
+        }
+    }
+
+    /// Split a new child pane from a window or pane target (DC25).
+    pub async fn split_pane(&self, opts: &SplitPaneOptions) -> Result<Target> {
+        match &self.address {
+            TargetAddress::Session(_) => Err(anyhow!(
+                "split_pane() requires a window or pane target, got session"
+            )),
+            TargetAddress::Window(_) | TargetAddress::Pane(_) => {
+                let pane = control::split_pane(
+                    &self.inner.transport,
+                    self.inner.socket.as_ref(),
+                    &self.target_string(),
+                    opts,
+                )
+                .await?;
+                Ok(Target {
+                    inner: self.inner.clone(),
+                    address: TargetAddress::Pane(pane),
+                })
+            }
         }
     }
 
@@ -729,10 +768,7 @@ impl Target {
     }
 
     /// Capture with options, returning `CaptureResult` with fidelity metadata (DC20).
-    pub async fn capture_with_options(
-        &self,
-        opts: &CaptureOptions,
-    ) -> Result<CaptureResult> {
+    pub async fn capture_with_options(&self, opts: &CaptureOptions) -> Result<CaptureResult> {
         capture::capture_pane_with_options(
             &self.inner.transport,
             self.inner.socket.as_ref(),
@@ -867,12 +903,8 @@ impl Target {
     pub async fn kill(&self) -> Result<()> {
         match &self.address {
             TargetAddress::Session(s) => {
-                control::kill_session(
-                    &self.inner.transport,
-                    self.inner.socket.as_ref(),
-                    &s.name,
-                )
-                .await
+                control::kill_session(&self.inner.transport, self.inner.socket.as_ref(), &s.name)
+                    .await
             }
             TargetAddress::Window(_) => {
                 control::kill_window(
@@ -956,7 +988,9 @@ impl Target {
                 self.level()
             ));
         }
-        let host = HostHandle { inner: self.inner.clone() };
+        let host = HostHandle {
+            inner: self.inner.clone(),
+        };
         host.start_monitoring_session(self.session_name()).await
     }
 
@@ -974,7 +1008,9 @@ impl Target {
                 self.level()
             ));
         }
-        let host = HostHandle { inner: self.inner.clone() };
+        let host = HostHandle {
+            inner: self.inner.clone(),
+        };
         host.stop_monitoring_session(self.session_name())
     }
 
@@ -1067,10 +1103,7 @@ impl Target {
         // Send command with sentinel.
         // The sentinel echo must NOT be inside single quotes so $? expands.
         // Format: <command> ; echo "<marker> $?"
-        let sentinel_cmd = format!(
-            "{} ; echo \"{} {}\"",
-            command, marker, exit_var
-        );
+        let sentinel_cmd = format!("{} ; echo \"{} {}\"", command, marker, exit_var);
         let keys = KeySequence::literal(&sentinel_cmd).then_enter();
         control::send_keys(transport, socket, &target, &keys).await?;
 
@@ -1091,8 +1124,7 @@ impl Target {
             // before parsing, so line-wrapping artifacts from width changes
             // don't break sentinel matching.
             let raw_content =
-                capture::capture_pane_escape_history(transport, socket, &target, -500)
-                    .await?;
+                capture::capture_pane_escape_history(transport, socket, &target, -500).await?;
             let content = capture::strip_ansi(&raw_content);
 
             if let Some(result) = parse_sentinel_output(&content, &marker) {
@@ -1194,8 +1226,8 @@ fn parse_sentinel_output(content: &str, marker: &str) -> Option<ExecOutput> {
 
         // Check this isn't the echo command (look back for "echo")
         let before = &joined[..pos];
-        let is_echo_cmd = before.len() >= 4
-            && before[before.len().saturating_sub(20)..].contains("echo");
+        let is_echo_cmd =
+            before.len() >= 4 && before[before.len().saturating_sub(20)..].contains("echo");
 
         if !is_echo_cmd {
             break pos;
@@ -1210,7 +1242,10 @@ fn parse_sentinel_output(content: &str, marker: &str) -> Option<ExecOutput> {
     // Extract exit code from text after marker
     let after_marker = &joined[sentinel_pos + marker.len()..];
     let after_trimmed = after_marker.trim_start();
-    let exit_code_str: String = after_trimmed.chars().take_while(|c| c.is_ascii_digit() || *c == '-').collect();
+    let exit_code_str: String = after_trimmed
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '-')
+        .collect();
     let exit_code = exit_code_str.parse::<i32>().unwrap_or(-1);
 
     // Map sentinel position back to line index for stdout extraction
@@ -1277,7 +1312,10 @@ mod tests {
             .with_default("")
             .with_response("list-sessions", "test\t$0\t1700000000\t0\t1\t\n");
         let host = mock_host(mock);
-        let target = host.create_session("test", &Default::default()).await.unwrap();
+        let target = host
+            .create_session("test", &Default::default())
+            .await
+            .unwrap();
         assert_eq!(target.level(), TargetLevel::Session);
         assert_eq!(target.target_string(), "test");
         assert_eq!(target.session_name(), "test");
@@ -1285,8 +1323,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_not_found() {
-        let mock = MockTransport::new()
-            .with_response("list-sessions", "other\t$0\t0\t0\t1\t\n");
+        let mock = MockTransport::new().with_response("list-sessions", "other\t$0\t0\t0\t1\t\n");
         let host = mock_host(mock);
         let result = host.session("nonexistent").await.unwrap();
         assert!(result.is_none());
@@ -1294,8 +1331,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_found() {
-        let mock = MockTransport::new()
-            .with_response("list-sessions", "build\t$0\t0\t1\t2\t\n");
+        let mock = MockTransport::new().with_response("list-sessions", "build\t$0\t0\t1\t2\t\n");
         let host = mock_host(mock);
         let target = host.session("build").await.unwrap();
         assert!(target.is_some());
@@ -1306,8 +1342,7 @@ mod tests {
 
     #[tokio::test]
     async fn target_spec_session_level() {
-        let mock = MockTransport::new()
-            .with_response("list-sessions", "build\t$0\t0\t0\t1\t\n");
+        let mock = MockTransport::new().with_response("list-sessions", "build\t$0\t0\t0\t1\t\n");
         let host = mock_host(mock);
         let spec = TargetSpec::session("build");
         let t = host.target(&spec).await.unwrap();
@@ -1319,7 +1354,10 @@ mod tests {
     async fn children_session_lists_windows() {
         let mock = MockTransport::new()
             .with_response("list-sessions", "build\t$0\t0\t0\t2\t\n")
-            .with_response("list-windows", "$0\tbuild\t0\tmain\t1\t1\tlayout\n$0\tbuild\t1\teditor\t0\t1\tlayout\n");
+            .with_response(
+                "list-windows",
+                "$0\tbuild\t0\tmain\t1\t1\tlayout\n$0\tbuild\t1\teditor\t0\t1\tlayout\n",
+            );
         let host = mock_host(mock);
         let target = host.session("build").await.unwrap().unwrap();
         let children = target.children().await.unwrap();
@@ -1327,6 +1365,96 @@ mod tests {
         assert_eq!(children[0].level(), TargetLevel::Window);
         assert_eq!(children[0].target_string(), "build:0");
         assert_eq!(children[1].target_string(), "build:1");
+    }
+
+    #[tokio::test]
+    async fn new_window_returns_window_target() {
+        let expected = "new-window -P";
+        let mock =
+            MockTransport::new().with_response(expected, "$0\tbuild\t1\teditor\t1\t1\tlayout");
+        let host = mock_host(mock);
+        let target = host.create_target_for_test("build");
+
+        let window = target
+            .new_window(&CreateWindowOptions {
+                name: Some("editor".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(window.level(), TargetLevel::Window);
+        let addr = window.window_info().unwrap();
+        assert_eq!(addr.session_name, "build");
+        assert_eq!(addr.index, 1);
+        assert_eq!(addr.name, "editor");
+    }
+
+    #[tokio::test]
+    async fn new_window_rejects_non_session_targets() {
+        let host = mock_host(MockTransport::new().with_default(""));
+        let window_target = Target {
+            inner: host.inner.clone(),
+            address: TargetAddress::Window(WindowInfo {
+                session_id: "$0".to_string(),
+                session_name: "build".to_string(),
+                index: 0,
+                name: "main".to_string(),
+                active: true,
+                pane_count: 1,
+                layout: "layout".to_string(),
+            }),
+        };
+        let pane_target = Target {
+            inner: host.inner.clone(),
+            address: TargetAddress::Pane(PaneAddress {
+                pane_id: "%1".to_string(),
+                session: "build".to_string(),
+                window: 0,
+                pane: 0,
+            }),
+        };
+
+        assert!(window_target.new_window(&Default::default()).await.is_err());
+        assert!(pane_target.new_window(&Default::default()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn split_pane_returns_pane_target_from_window() {
+        let mock = MockTransport::new().with_response("split-window -P", "%9\tbuild:0.1");
+        let host = mock_host(mock);
+        let window_target = Target {
+            inner: host.inner.clone(),
+            address: TargetAddress::Window(WindowInfo {
+                session_id: "$0".to_string(),
+                session_name: "build".to_string(),
+                index: 0,
+                name: "main".to_string(),
+                active: true,
+                pane_count: 1,
+                layout: "layout".to_string(),
+            }),
+        };
+
+        let pane = window_target.split_pane(&Default::default()).await.unwrap();
+        assert_eq!(pane.level(), TargetLevel::Pane);
+        let addr = pane.pane_address().unwrap();
+        assert_eq!(addr.pane_id, "%9");
+        assert_eq!(addr.session, "build");
+        assert_eq!(addr.window, 0);
+        assert_eq!(addr.pane, 1);
+    }
+
+    #[tokio::test]
+    async fn split_pane_rejects_session_targets() {
+        let host = mock_host(MockTransport::new().with_default(""));
+        let session_target = host.create_target_for_test("build");
+        let err = session_target
+            .split_pane(&Default::default())
+            .await
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("requires a window or pane"));
     }
 
     #[tokio::test]
@@ -1383,10 +1511,7 @@ mod tests {
     #[test]
     fn parse_sentinel_nonzero_exit() {
         let marker = "__MLxyz789__";
-        let content = format!(
-            "$ false ; echo \"{} $?\"\n{} 1\n$",
-            marker, marker
-        );
+        let content = format!("$ false ; echo \"{} $?\"\n{} 1\n$", marker, marker);
         let result = parse_sentinel_output(&content, marker);
         assert!(result.is_some());
         assert_eq!(result.unwrap().exit_code, 1);
@@ -1415,10 +1540,7 @@ mod tests {
         // Simulate a narrow pane (e.g., 20 cols) where the sentinel wraps
         let marker = "__MLabc123__";
         // The echo output wraps: marker starts on one line, exit code on next
-        let content = format!(
-            "$ cmd ; echo \"{} $?\"\noutput\n{}",
-            marker, marker
-        );
+        let content = format!("$ cmd ; echo \"{} $?\"\noutput\n{}", marker, marker);
         // Marker split across lines: "__MLabc123__" then " 0" on next line
         let wrapped = format!("{}\n 0\n$", content);
         let result = parse_sentinel_output(&wrapped, marker);
@@ -1434,10 +1556,7 @@ mod tests {
         // In practice the marker is short (~16 chars) so this is rare,
         // but the joined-text search should still find it
         let marker = "__MLxyz789__";
-        let content = format!(
-            "$ echo \"{} $?\"\nhello world\n{} 42\n$",
-            marker, marker
-        );
+        let content = format!("$ echo \"{} $?\"\nhello world\n{} 42\n$", marker, marker);
         let result = parse_sentinel_output(&content, marker).unwrap();
         assert_eq!(result.exit_code, 42);
         assert_eq!(result.stdout, "hello world");

@@ -7,6 +7,10 @@
 //! Commands:
 //!   help                     Show available commands
 //!   create <name>            Create a new tmux session
+//!   new-window <session> <name> [--size WxH]
+//!                            Create a child window under a session
+//!   split-pane <target> [--horizontal|--vertical] [--percent N|--cells N]
+//!                            Split a pane from a window or pane target
 //!   kill <target>            Kill a session/window/pane
 //!   targets                  List all sessions with full target spec tree
 //!   send <target> <text...>  Send text + Enter to a target
@@ -20,8 +24,9 @@
 //!   cargo run -p motlie-tmux --example repl -- ssh://localhost
 
 use motlie_tmux::{
-    CreateSessionOptions, KeySequence, LabelFormat, ScrollbackQuery, SinkFilter, SshConfig,
-    TargetSpec, TransferOptions,
+    CreateSessionOptions, CreateWindowOptions, KeySequence, LabelFormat, ScrollbackQuery,
+    SinkFilter, SplitDirection, SplitPaneOptions, SplitSize, SshConfig, TargetSpec,
+    TransferOptions,
 };
 use std::io::{self, BufRead, Write};
 
@@ -55,13 +60,24 @@ async fn main() -> anyhow::Result<()> {
                 println!("Commands:");
                 println!("  help                                    Show this help message");
                 println!("  create <name> [--size WxH] [--history N]  Create a tmux session");
+                println!(
+                    "  new-window <session> <name> [--size WxH]   Create a window under a session"
+                );
+                println!("  split-pane <target> [--horizontal|--vertical] [--percent N|--cells N]");
+                println!("                                          Split a pane from a window or pane target");
                 println!("  kill <target>                           Kill a session/window/pane");
-                println!("  targets                                 List all sessions with target tree");
+                println!(
+                    "  targets                                 List all sessions with target tree"
+                );
                 println!("  send <target> <text...>                 Send text + Enter to a target");
                 println!("  capture <target> <n>                    Print last N scrollback lines");
-                println!("  monitor <session> [secs]                Stream live output (default 3s)");
+                println!(
+                    "  monitor <session> [secs]                Stream live output (default 3s)"
+                );
                 println!("  upload <local> <remote> [-r]            Upload file/dir to the host");
-                println!("  download <remote> <local> [-r]          Download file/dir from the host");
+                println!(
+                    "  download <remote> <local> [-r]          Download file/dir from the host"
+                );
                 println!("  quit                                    Disconnect and exit");
                 println!();
                 println!("Targets: session, session:window, session:window.pane");
@@ -147,6 +163,127 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
+            "new-window" => {
+                let words: Vec<&str> = line.trim().split_whitespace().collect();
+                if words.len() < 3 {
+                    println!("usage: new-window <session> <name> [--size WxH]");
+                    write!(stdout, "repl> ")?;
+                    stdout.flush()?;
+                    continue;
+                }
+                let session_name = words[1];
+                let window_name = words[2];
+                let mut opts = CreateWindowOptions {
+                    name: Some(window_name.to_string()),
+                    ..Default::default()
+                };
+                let mut i = 3;
+                let mut parse_err = false;
+                while i < words.len() {
+                    match words[i] {
+                        "--size" => {
+                            i += 1;
+                            match words.get(i).and_then(|val| parse_size_arg(val)) {
+                                Some((w, h)) => {
+                                    opts.width = Some(w);
+                                    opts.height = Some(h);
+                                }
+                                None => {
+                                    println!("Error: --size must be WxH (e.g. 200x50)");
+                                    parse_err = true;
+                                    break;
+                                }
+                            }
+                        }
+                        other => {
+                            println!("Error: unknown flag '{}'", other);
+                            parse_err = true;
+                            break;
+                        }
+                    }
+                    i += 1;
+                }
+                if parse_err {
+                    write!(stdout, "repl> ")?;
+                    stdout.flush()?;
+                    continue;
+                }
+                match resolve_target(&host, session_name).await {
+                    Ok(target) => match target.new_window(&opts).await {
+                        Ok(window) => println!("Created window: {}", window.target_string()),
+                        Err(e) => println!("Error: {}", e),
+                    },
+                    Err(e) => println!("{}", e),
+                }
+            }
+
+            "split-pane" => {
+                let words: Vec<&str> = line.trim().split_whitespace().collect();
+                if words.len() < 2 {
+                    println!("usage: split-pane <target> [--horizontal|--vertical] [--percent N|--cells N]");
+                    write!(stdout, "repl> ")?;
+                    stdout.flush()?;
+                    continue;
+                }
+                let target_str = words[1];
+                let mut opts = SplitPaneOptions::default();
+                let mut i = 2;
+                let mut parse_err = false;
+                while i < words.len() {
+                    match words[i] {
+                        "--horizontal" => opts.direction = SplitDirection::Horizontal,
+                        "--vertical" => opts.direction = SplitDirection::Vertical,
+                        "--percent" => {
+                            i += 1;
+                            match words.get(i).and_then(|v| v.parse::<u8>().ok()) {
+                                Some(v) => match SplitSize::percent(v) {
+                                    Ok(size) => opts.size = Some(size),
+                                    Err(e) => {
+                                        println!("Error: {}", e);
+                                        parse_err = true;
+                                        break;
+                                    }
+                                },
+                                None => {
+                                    println!("Error: --percent must be an integer in 1..=100");
+                                    parse_err = true;
+                                    break;
+                                }
+                            }
+                        }
+                        "--cells" => {
+                            i += 1;
+                            match words.get(i).and_then(|v| v.parse::<u16>().ok()) {
+                                Some(v) if v > 0 => opts.size = Some(SplitSize::Cells(v)),
+                                _ => {
+                                    println!("Error: --cells must be a positive integer");
+                                    parse_err = true;
+                                    break;
+                                }
+                            }
+                        }
+                        other => {
+                            println!("Error: unknown flag '{}'", other);
+                            parse_err = true;
+                            break;
+                        }
+                    }
+                    i += 1;
+                }
+                if parse_err {
+                    write!(stdout, "repl> ")?;
+                    stdout.flush()?;
+                    continue;
+                }
+                match resolve_target(&host, target_str).await {
+                    Ok(target) => match target.split_pane(&opts).await {
+                        Ok(pane) => println!("Created pane: {}", pane.target_string()),
+                        Err(e) => println!("Error: {}", e),
+                    },
+                    Err(e) => println!("{}", e),
+                }
+            }
+
             "kill" => {
                 let target_str = match parts.get(1) {
                     Some(t) => *t,
@@ -166,79 +303,74 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
-            "targets" => {
-                match host.list_sessions().await {
-                    Ok(sessions) => {
-                        if sessions.is_empty() {
-                            println!("  (no sessions)");
-                        }
-                        for s in &sessions {
-                            let spec = match TargetSpec::parse(&s.name) {
-                                Ok(sp) => sp,
+            "targets" => match host.list_sessions().await {
+                Ok(sessions) => {
+                    if sessions.is_empty() {
+                        println!("  (no sessions)");
+                    }
+                    for s in &sessions {
+                        let spec = match TargetSpec::parse(&s.name) {
+                            Ok(sp) => sp,
+                            Err(e) => {
+                                println!("  {} (parse error: {})", s.name, e);
+                                continue;
+                            }
+                        };
+                        let target = match host.target(&spec).await {
+                            Ok(Some(t)) => t,
+                            Ok(None) => {
+                                println!("  {} (not found)", s.name);
+                                continue;
+                            }
+                            Err(e) => {
+                                println!("  {} (error: {})", s.name, e);
+                                continue;
+                            }
+                        };
+                        let windows = match target.children().await {
+                            Ok(w) => w,
+                            Err(e) => {
+                                println!("  {:<20} (error listing windows: {})", s.name, e);
+                                continue;
+                            }
+                        };
+                        println!(
+                            "  {:<20} (Session, {} window{})",
+                            s.name,
+                            windows.len(),
+                            if windows.len() == 1 { "" } else { "s" }
+                        );
+                        for w in &windows {
+                            let panes = match w.children().await {
+                                Ok(p) => p,
                                 Err(e) => {
-                                    println!("  {} (parse error: {})", s.name, e);
-                                    continue;
-                                }
-                            };
-                            let target = match host.target(&spec).await {
-                                Ok(Some(t)) => t,
-                                Ok(None) => {
-                                    println!("  {} (not found)", s.name);
-                                    continue;
-                                }
-                                Err(e) => {
-                                    println!("  {} (error: {})", s.name, e);
-                                    continue;
-                                }
-                            };
-                            let windows = match target.children().await {
-                                Ok(w) => w,
-                                Err(e) => {
-                                    println!("  {:<20} (error listing windows: {})", s.name, e);
-                                    continue;
-                                }
-                            };
-                            println!(
-                                "  {:<20} (Session, {} window{})",
-                                s.name,
-                                windows.len(),
-                                if windows.len() == 1 { "" } else { "s" }
-                            );
-                            for w in &windows {
-                                let panes = match w.children().await {
-                                    Ok(p) => p,
-                                    Err(e) => {
-                                        println!("    {:<18} (error listing panes: {})", w.target_string(), e);
-                                        continue;
-                                    }
-                                };
-                                let winfo = w.window_info();
-                                let wname = winfo
-                                    .map(|i| i.name.as_str())
-                                    .unwrap_or("?");
-                                println!(
-                                    "    {:<18} (Window, '{}', {} pane{})",
-                                    w.target_string(),
-                                    wname,
-                                    panes.len(),
-                                    if panes.len() == 1 { "" } else { "s" }
-                                );
-                                for p in &panes {
-                                    let pid = p.pane_address()
-                                        .map(|a| a.pane_id.as_str())
-                                        .unwrap_or("?");
                                     println!(
-                                        "      {:<16} (Pane, {})",
-                                        p.target_string(),
-                                        pid
+                                        "    {:<18} (error listing panes: {})",
+                                        w.target_string(),
+                                        e
                                     );
+                                    continue;
                                 }
+                            };
+                            let winfo = w.window_info();
+                            let wname = winfo.map(|i| i.name.as_str()).unwrap_or("?");
+                            println!(
+                                "    {:<18} (Window, '{}', {} pane{})",
+                                w.target_string(),
+                                wname,
+                                panes.len(),
+                                if panes.len() == 1 { "" } else { "s" }
+                            );
+                            for p in &panes {
+                                let pid =
+                                    p.pane_address().map(|a| a.pane_id.as_str()).unwrap_or("?");
+                                println!("      {:<16} (Pane, {})", p.target_string(), pid);
                             }
                         }
                     }
-                    Err(e) => println!("Error: {}", e),
                 }
-            }
+                Err(e) => println!("Error: {}", e),
+            },
 
             "send" => {
                 if parts.len() < 3 {
@@ -309,10 +441,7 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
                 let session_name = parts[1];
-                let seconds: u64 = parts
-                    .get(2)
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(3);
+                let seconds: u64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(3);
 
                 match host.start_monitoring_session(session_name).await {
                     Ok(monitor_handle) => {
@@ -374,9 +503,16 @@ async fn main() -> anyhow::Result<()> {
                 let rest: Vec<&str> = parts[2].split_whitespace().collect();
                 let remote_path = std::path::Path::new(rest[0]);
                 let recursive = rest.iter().any(|f| *f == "--recursive" || *f == "-r");
-                let opts = TransferOptions { overwrite: true, recursive };
+                let opts = TransferOptions {
+                    overwrite: true,
+                    recursive,
+                };
                 match host.upload(local_path, remote_path, &opts).await {
-                    Ok(()) => println!("Uploaded {} → {}", local_path.display(), remote_path.display()),
+                    Ok(()) => println!(
+                        "Uploaded {} → {}",
+                        local_path.display(),
+                        remote_path.display()
+                    ),
                     Err(e) => println!("Error: {}", e),
                 }
             }
@@ -392,9 +528,16 @@ async fn main() -> anyhow::Result<()> {
                 let rest: Vec<&str> = parts[2].split_whitespace().collect();
                 let local_path = std::path::Path::new(rest[0]);
                 let recursive = rest.iter().any(|f| *f == "--recursive" || *f == "-r");
-                let opts = TransferOptions { overwrite: true, recursive };
+                let opts = TransferOptions {
+                    overwrite: true,
+                    recursive,
+                };
                 match host.download(remote_path, local_path, &opts).await {
-                    Ok(()) => println!("Downloaded {} → {}", remote_path.display(), local_path.display()),
+                    Ok(()) => println!(
+                        "Downloaded {} → {}",
+                        remote_path.display(),
+                        local_path.display()
+                    ),
                     Err(e) => println!("Error: {}", e),
                 }
             }
@@ -405,7 +548,10 @@ async fn main() -> anyhow::Result<()> {
             }
 
             other => {
-                println!("Unknown command: {}. Type 'help' for available commands.", other);
+                println!(
+                    "Unknown command: {}. Type 'help' for available commands.",
+                    other
+                );
             }
         }
 
@@ -420,9 +566,18 @@ async fn resolve_target(
     host: &motlie_tmux::HostHandle,
     target_str: &str,
 ) -> Result<motlie_tmux::Target, String> {
-    let spec = TargetSpec::parse(target_str).map_err(|e| format!("Invalid target '{}': {}", target_str, e))?;
+    let spec = TargetSpec::parse(target_str)
+        .map_err(|e| format!("Invalid target '{}': {}", target_str, e))?;
     host.target(&spec)
         .await
         .map_err(|e| format!("Error resolving '{}': {}", target_str, e))?
         .ok_or_else(|| format!("Target '{}' not found", target_str))
+}
+
+fn parse_size_arg(value: &str) -> Option<(u16, u16)> {
+    let (w, h) = value.split_once('x')?;
+    match (w.parse::<u16>(), h.parse::<u16>()) {
+        (Ok(w), Ok(h)) if w > 0 && h > 0 => Some((w, h)),
+        _ => None,
+    }
 }
