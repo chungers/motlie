@@ -27,6 +27,7 @@ cargo build -p motlie-tmux --examples
 ./target/debug/examples/target_spec ssh://localhost "dev:0.0"
 ./target/debug/examples/repl ssh://localhost
 ./target/debug/examples/stream_pane ssh://localhost my_session --mode monitor
+./target/debug/examples/monitor_pipe ssh://localhost my_session
 ```
 
 ## Examples
@@ -339,4 +340,54 @@ hello
 $
 
  DEGRADED: ClientResize, PaneResize
+```
+
+### monitor_pipe — Sink pipeline monitoring
+
+Demonstrates the terminal-consumer side of Track A: start a session monitor,
+subscribe to the `OutputBus`, route events through `Subscription::pipe()`, and
+teardown cleanly with `PipeHandle`.
+
+This example also works against non-default tmux sockets. If the URI includes
+`socket-name` or a socket path, the control-mode monitor attaches to that same
+server instead of the default tmux socket.
+
+Supported sinks:
+- `prefixed` — `StdioSink::Prefixed`
+- `raw` — `StdioSink::Raw`
+- `json` — `StdioSink::Json`
+- `callback` — `CallbackSink` with custom formatting and flush summary
+
+```sh
+# Default prefixed stdio sink
+./target/debug/examples/monitor_pipe ssh://localhost my_session
+
+# JSON sink output
+./target/debug/examples/monitor_pipe ssh://localhost my_session --sink json
+
+# Custom callback sink with summary on flush
+./target/debug/examples/monitor_pipe ssh://localhost my_session --sink callback --seconds 5
+
+# Monitor a named tmux socket
+./target/debug/examples/monitor_pipe 'ssh://localhost?socket-name=myserver' my_session
+```
+
+Expected output (`--sink prefixed`):
+```text
+Monitoring my_session for 3s using prefixed sink. Ctrl-C to stop early.
+Flow: start_monitoring_session -> output_bus.subscribe -> pipe -> unsubscribe -> join
+[localhost] %5 | $ echo hello
+[localhost] %5 | hello
+[localhost] %6 | running tests...
+Stopped.
+```
+
+Expected output (`--sink callback`):
+```text
+Monitoring my_session for 5s using callback sink. Ctrl-C to stop early.
+Flow: start_monitoring_session -> output_bus.subscribe -> pipe -> unsubscribe -> join
+[callback localhost %5] $ echo hello
+[callback localhost %5] hello
+Callback summary: data_events=2, gap_events=0, dropped_events=0
+Stopped.
 ```
