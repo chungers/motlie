@@ -3,8 +3,10 @@
 //! These tests require tmux to be installed and available on PATH.
 //! They create/destroy real tmux sessions during testing.
 
-use motlie_tmux::{HostHandle, SshConfig, TargetLevel};
-use std::time::Duration;
+use motlie_tmux::{CallbackSink, HostHandle, KeySequence, SinkEvent, SinkFilter, SinkKind, SshConfig, TargetLevel};
+use std::any::Any;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn tmux_available() -> bool {
     std::process::Command::new("tmux")
@@ -14,6 +16,50 @@ fn tmux_available() -> bool {
         .unwrap_or(false)
 }
 
+fn unique_name(prefix: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!("{}_{}_{}", prefix, std::process::id(), nanos)
+}
+
+struct NamedSocketCleanup {
+    socket_name: String,
+}
+
+impl NamedSocketCleanup {
+    fn new(socket_name: impl Into<String>) -> Self {
+        Self {
+            socket_name: socket_name.into(),
+        }
+    }
+}
+
+impl Drop for NamedSocketCleanup {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("tmux")
+            .args(["-L", &self.socket_name, "kill-server"])
+            .output();
+    }
+}
+
+fn callback_collect_output(
+    state: &Arc<dyn Any + Send + Sync>,
+    event: SinkEvent,
+) -> anyhow::Result<()> {
+    let outputs = state
+        .downcast_ref::<Mutex<Vec<String>>>()
+        .ok_or_else(|| anyhow::anyhow!("callback state type mismatch"))?;
+    if let SinkEvent::Data(output) = event {
+        outputs
+            .lock()
+            .expect("callback output lock poisoned")
+            .push(output.content);
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn localhost_session_lifecycle() {
     if !tmux_available() {
@@ -21,18 +67,18 @@ async fn localhost_session_lifecycle() {
         return;
     }
 
-    let session_name = "motlie_test_integ";
+    let session_name = unique_name("motlie_test_integ");
     let host = HostHandle::local();
 
     // Clean up any leftover session from a previous failed run
-    if let Ok(Some(t)) = host.session(session_name).await {
+    if let Ok(Some(t)) = host.session(&session_name).await {
         let _ = t.kill().await;
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
     // 1. Create session
     let target = host
-        .create_session(session_name, &motlie_tmux::CreateSessionOptions {
+        .create_session(&session_name, &motlie_tmux::CreateSessionOptions {
             window_name: Some("main".to_string()),
             ..Default::default()
         })
@@ -84,9 +130,9 @@ async fn localhost_session_lifecycle() {
     );
 
     // 7. Rename session — rename() now returns a new Target with updated address
-    let new_name = "motlie_test_renamed";
+    let new_name = unique_name("motlie_test_renamed");
     let renamed_target = target
-        .rename(new_name)
+        .rename(&new_name)
         .await
         .expect("rename session failed");
     assert_eq!(renamed_target.session_name(), new_name);
@@ -115,25 +161,25 @@ async fn localhost_monitor_pipeline() {
         return;
     }
 
-    let session_name = "motlie_test_monitor";
+    let session_name = unique_name("motlie_test_monitor");
     let host = HostHandle::local();
 
     // Clean up leftover
-    if let Ok(Some(t)) = host.session(session_name).await {
+    if let Ok(Some(t)) = host.session(&session_name).await {
         let _ = t.kill().await;
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
     // 1. Create session
     let target = host
-        .create_session(session_name, &Default::default())
+        .create_session(&session_name, &Default::default())
         .await
         .expect("create_session failed");
     tokio::time::sleep(Duration::from_millis(500)).await; // let shell start
 
     // 2. Start monitoring — verify it appears in monitored_sessions()
     let monitor_handle = host
-        .start_monitoring_session(session_name)
+        .start_monitoring_session(&session_name)
         .await
         .expect("start_monitoring_session failed");
     assert!(monitor_handle.is_active());
@@ -147,7 +193,7 @@ async fn localhost_monitor_pipeline() {
 
     // 3. Subscribe to the output bus
     let bus = host.output_bus();
-    let filter = motlie_tmux::SinkFilter::for_session(session_name);
+    let filter = motlie_tmux::SinkFilter::for_session(&session_name);
     let sub = bus
         .subscribe(vec![filter], 64)
         .expect("subscribe failed");
@@ -226,6 +272,149 @@ async fn localhost_monitor_pipeline() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
+#[tokio::test]
+async fn localhost_monitor_pipeline_named_socket() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+
+    let socket_name = unique_name("motlie_monitor_sock");
+    let _socket_cleanup = NamedSocketCleanup::new(socket_name.clone());
+    let session_name = unique_name("motlie_monitor_named");
+    let uri = format!("ssh://localhost?socket-name={}", socket_name);
+    let host = SshConfig::parse(&uri)
+        .expect("parse named-socket uri failed")
+        .connect()
+        .await
+        .expect("connect named-socket uri failed");
+
+    let target = host
+        .create_session(&session_name, &Default::default())
+        .await
+        .expect("create_session failed");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let monitor_handle = host
+        .start_monitoring_session(&session_name)
+        .await
+        .expect("start_monitoring_session failed");
+    assert!(monitor_handle.is_active());
+
+    let bus = host.output_bus();
+    let sub = bus
+        .subscribe(vec![SinkFilter::for_session(&session_name)], 64)
+        .expect("subscribe failed");
+    let mut rx = sub.into_receiver();
+
+    target
+        .send_text("echo MOTLIE_NAMED_SOCKET_MONITOR")
+        .await
+        .expect("send_text failed");
+    let enter = KeySequence::parse("{Enter}").unwrap();
+    target.send_keys(&enter).await.expect("send_keys failed");
+
+    let mut found_content = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        tokio::select! {
+            event = rx.recv() => {
+                match event {
+                    Some(SinkEvent::Data(output)) => {
+                        if output.content.contains("MOTLIE_NAMED_SOCKET_MONITOR") {
+                            found_content = true;
+                            break;
+                        }
+                    }
+                    Some(SinkEvent::Gap { .. }) => continue,
+                    None => break,
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(100)) => continue,
+        }
+    }
+    assert!(found_content, "expected output not received from named-socket monitor");
+
+    monitor_handle.shutdown().await.expect("shutdown failed");
+    target.kill().await.expect("kill failed");
+}
+
+#[tokio::test]
+async fn localhost_monitor_pipe_callback_named_socket() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+
+    let socket_name = unique_name("motlie_pipe_sock");
+    let _socket_cleanup = NamedSocketCleanup::new(socket_name.clone());
+    let session_name = unique_name("motlie_pipe_named");
+    let uri = format!("ssh://localhost?socket-name={}", socket_name);
+    let host = SshConfig::parse(&uri)
+        .expect("parse named-socket uri failed")
+        .connect()
+        .await
+        .expect("connect named-socket uri failed");
+
+    let target = host
+        .create_session(&session_name, &Default::default())
+        .await
+        .expect("create_session failed");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let monitor_handle = host
+        .start_monitoring_session(&session_name)
+        .await
+        .expect("start_monitoring_session failed");
+
+    let outputs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let state: Arc<dyn Any + Send + Sync> = outputs.clone();
+    let sink = SinkKind::Callback(CallbackSink {
+        name: "integ-callback".into(),
+        state,
+        on_output: callback_collect_output,
+        on_flush: None,
+    });
+
+    let bus = host.output_bus();
+    let sub = bus
+        .subscribe(vec![SinkFilter::for_session(&session_name)], 64)
+        .expect("subscribe failed");
+    let pipe = sub.pipe(sink);
+
+    target
+        .send_text("echo MOTLIE_PIPE_CALLBACK")
+        .await
+        .expect("send_text failed");
+    let enter = KeySequence::parse("{Enter}").unwrap();
+    target.send_keys(&enter).await.expect("send_keys failed");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        if outputs
+            .lock()
+            .expect("callback output lock poisoned")
+            .iter()
+            .any(|s| s.contains("MOTLIE_PIPE_CALLBACK"))
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let saw_output = outputs
+        .lock()
+        .expect("callback output lock poisoned")
+        .iter()
+        .any(|s| s.contains("MOTLIE_PIPE_CALLBACK"));
+    assert!(saw_output, "expected callback sink to collect monitor output");
+
+    monitor_handle.shutdown().await.expect("shutdown failed");
+    bus.unsubscribe(pipe.id()).expect("unsubscribe failed");
+    pipe.join().await.expect("pipe join failed");
+    target.kill().await.expect("kill failed");
+}
+
 /// 1.11m — Integration test: SshConfig::parse("ssh://localhost")?.connect()
 /// produces a working HostHandle that can list_sessions().
 #[tokio::test]
@@ -235,7 +424,7 @@ async fn uri_localhost_connect() {
         return;
     }
 
-    let session_name = "motlie_test_uri";
+    let session_name = unique_name("motlie_test_uri");
 
     // Parse URI and connect
     let host = SshConfig::parse("ssh://localhost")
@@ -245,14 +434,14 @@ async fn uri_localhost_connect() {
         .expect("connect failed");
 
     // Clean up leftover from previous run
-    if let Ok(Some(t)) = host.session(session_name).await {
+    if let Ok(Some(t)) = host.session(&session_name).await {
         let _ = t.kill().await;
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
     // Create session via URI-connected handle
     let target = host
-        .create_session(session_name, &Default::default())
+        .create_session(&session_name, &Default::default())
         .await
         .expect("create_session failed");
 
@@ -501,7 +690,7 @@ async fn uri_ssh_connect() {
 /// execution goes through tmux, not a host-level bypass.
 async fn ssh_exec(host: &HostHandle, command: &str) -> anyhow::Result<motlie_tmux::ExecOutput> {
     use tokio::time::Duration;
-    let session_name = format!("motlie_exec_{}", std::process::id());
+    let session_name = unique_name("motlie_exec");
     let target = host
         .create_session(&session_name, &Default::default())
         .await?;
@@ -525,7 +714,7 @@ async fn ssh_test_host_with_tmp() -> Option<(HostHandle, String)> {
     let _ = host.list_sessions().await.ok();
 
     // Create a remote temp directory via tmux pane (DC19 — no host-level exec bypass).
-    let remote_tmp = format!("/tmp/motlie_test_{}", std::process::id());
+    let remote_tmp = format!("/tmp/{}", unique_name("motlie_test"));
     // Clean up from any previous failed run, then create
     let _ = ssh_exec(&host, &format!("rm -rf '{}'", remote_tmp)).await;
     ssh_exec(&host, &format!("mkdir -p '{}'", remote_tmp))
