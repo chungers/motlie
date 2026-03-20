@@ -5,6 +5,7 @@
 //!
 //! Usage:
 //!   cargo run -p motlie-tmux --example send_and_capture -- ssh://localhost
+//!   cargo run -p motlie-tmux --example send_and_capture -- 'ssh://host?identity-file=/path/to/key'
 
 use motlie_tmux::{KeySequence, SshConfig};
 use std::time::Duration;

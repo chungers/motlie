@@ -5,6 +5,7 @@
 //!
 //! Usage:
 //!   cargo run -p motlie-tmux --example session_lifecycle -- ssh://localhost
+//!   cargo run -p motlie-tmux --example session_lifecycle -- 'ssh://host?identity-file=/path/to/key'
 
 use motlie_tmux::SshConfig;
 

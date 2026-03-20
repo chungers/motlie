@@ -5,6 +5,7 @@
 //!
 //! Usage:
 //!   cargo run -p motlie-tmux --example target_navigate -- ssh://localhost <session_name>
+//!   cargo run -p motlie-tmux --example target_navigate -- 'ssh://host?identity-file=/path/to/key'
 //!
 //! If no session name is given, creates a temporary session with two windows
 //! using `Target::new_window()`.
