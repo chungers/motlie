@@ -3503,6 +3503,12 @@ pub enum SplitSize {
     Percent(u8),
 }
 
+impl SplitSize {
+    /// Preferred constructor for percentage sizing. Rejects values above 100
+    /// at construction time rather than deferring failure to command execution.
+    pub fn percent(value: u8) -> Result<Self>;
+}
+
 #[derive(Debug, Clone)]
 pub struct SplitPaneOptions {
     pub direction: SplitDirection,
@@ -3519,6 +3525,14 @@ impl Target {
 
 The option structs intentionally mirror tmux’s `new-window` / `split-window`
 surface while staying typed and shell-safe.
+
+`SplitSize::Percent(u8)` remains the compact stored representation, but callers
+should use a checked constructor such as `SplitSize::percent(50)?` so invalid
+percentages are rejected at the API boundary rather than deep in the control layer.
+Execution should still validate defensively.
+
+`start_directory` uses `PathBuf` for type safety. When the control layer builds the
+tmux command, non-UTF-8 paths are rejected with `Err` rather than lossy conversion.
 
 **Return strategy**: Creation APIs must return the created entity directly, not a
 best-effort re-query of “whatever looks newest.” The implementation should use tmux’s
