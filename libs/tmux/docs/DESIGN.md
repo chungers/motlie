@@ -3588,7 +3588,7 @@ let logs = session
 let editor = logs
     .split_pane(&SplitPaneOptions {
         direction: SplitDirection::Vertical,
-        size: Some(SplitSize::Percent(50)),
+        size: Some(SplitSize::percent(50)?),
         command: Some("vim".into()),
         start_directory: None,
     })

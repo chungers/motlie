@@ -382,12 +382,12 @@ impl Default for SplitDirection {
 pub enum SplitSize {
     /// Fixed size in cells (`-l` flag).
     Cells(u16),
-    /// Percentage of the target pane (`-p` flag).
+    /// Percentage of the target pane (`-l <n>%` flag form).
     Percent(u8),
 }
 
 impl SplitSize {
-    /// Create a checked percentage value for `split-window -p`.
+    /// Create a checked percentage value for `split-window -l <n>%`.
     pub fn percent(value: u8) -> Result<Self> {
         if value == 0 || value > 100 {
             return Err(anyhow!(
@@ -404,7 +404,7 @@ impl SplitSize {
 pub struct SplitPaneOptions {
     /// Horizontal (`-h`) or vertical (`-v`) split. Default: vertical.
     pub direction: SplitDirection,
-    /// Optional size override (`-l` or `-p`).
+    /// Optional size override (`-l <n>` or `-l <n>%`).
     pub size: Option<SplitSize>,
     /// Command to run in the new pane.
     pub command: Option<String>,
