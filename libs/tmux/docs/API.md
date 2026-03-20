@@ -1491,6 +1491,59 @@ let text = stream.format(&chunk);
 // With Prompt:    "localhost:build(%5)> hello world"
 ```
 
+### Multi-pane joined output (real example)
+
+Runnable example: [`examples/joined_demo.rs`](../examples/joined_demo.rs) — creates a
+2-pane session, sends `ps aux | head -5` to pane 0 and `ls -la /tmp | head -5` to pane 1,
+then prints the interleaved JoinedStream.
+
+**Bracketed format** (`--format bracketed`, default) — every line labeled:
+
+```text
+[localhost:joined_demo_12345(%5)] ps aux | head -5
+[localhost:joined_demo_12345(%5)] USER         PID %CPU %MEM  ...
+[localhost:joined_demo_12345(%5)] root           1  0.0  0.0  ...
+[localhost:joined_demo_12345(%6)] ls -la /tmp | head -5
+[localhost:joined_demo_12345(%6)] total 218368
+[localhost:joined_demo_12345(%6)] drwxrwxrwt 35 root   root   ...
+```
+
+**Prompt format** (`--format prompt`) — prompt-style labels:
+
+```text
+localhost:joined_demo_12345(%5)> ps aux | head -5
+localhost:joined_demo_12345(%5)> USER         PID %CPU %MEM  ...
+localhost:joined_demo_12345(%6)> ls -la /tmp | head -5
+localhost:joined_demo_12345(%6)> total 218368
+```
+
+**Separator format** (`--format separator`) — header only on source transitions,
+using `source_changed` to insert `--- pane ---` dividers:
+
+```text
+--- localhost:joined_demo_12345(%5) ---
+ps aux | head -5
+USER         PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
+root           1  0.0  0.0  23580 14240 ?        Ss   Mar10   2:30 /sbin/init
+--- localhost:joined_demo_12345(%6) ---
+ls -la /tmp | head -5
+total 218368
+drwxrwxrwt 35 root   root     118784 Mar 19 21:42 .
+```
+
+The key API pattern for per-line labeled rendering:
+
+```rust
+while let Some(chunk) = stream.next().await {
+    let clean = strip_ansi(&chunk.output.content);
+    for line in clean.lines() {
+        if !line.trim().is_empty() {
+            println!("[{}] {}", chunk.source.short(), line);
+        }
+    }
+}
+```
+
 ---
 
 ## 20. Sink Pipeline
