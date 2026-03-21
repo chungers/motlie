@@ -27,6 +27,9 @@ struct HostHandleInner {
     /// Keyed by session name. The `watch::Sender<bool>` fires the stop signal;
     /// the actual `JoinHandle` is owned by the returned `SessionMonitorHandle`.
     monitor_signals: std::sync::Mutex<HashMap<String, tokio::sync::watch::Sender<bool>>>,
+    /// Per-pane active exec state tracking (DC31).
+    /// Keyed by pane_id. Each entry holds Arc refs to ExecState for running execs.
+    active_execs: std::sync::Mutex<HashMap<String, Vec<Arc<std::sync::Mutex<ExecState>>>>>,
 }
 
 impl HostHandleInner {
@@ -37,6 +40,24 @@ impl HostHandleInner {
             .entry(key.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
+    }
+
+    /// Transition all Running exec states to Unknown (DC31).
+    ///
+    /// Called on connection loss / discontinuity. Leaves Completed and
+    /// already-Unknown states unchanged.
+    fn notify_exec_discontinuity(&self, reason: &str) {
+        let active = self.active_execs.lock().expect("active_execs poisoned");
+        for states in active.values() {
+            for state_arc in states {
+                let mut state = state_arc.lock().expect("exec state poisoned");
+                if matches!(*state, ExecState::Running) {
+                    *state = ExecState::Unknown {
+                        reason: reason.to_string(),
+                    };
+                }
+            }
+        }
     }
 }
 
@@ -57,6 +78,7 @@ impl HostHandle {
                 host_alias: "localhost".to_string(),
                 output_bus: std::sync::Mutex::new(None),
                 monitor_signals: std::sync::Mutex::new(HashMap::new()),
+                active_execs: std::sync::Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -77,6 +99,7 @@ impl HostHandle {
                 host_alias: "localhost".to_string(),
                 output_bus: std::sync::Mutex::new(None),
                 monitor_signals: std::sync::Mutex::new(HashMap::new()),
+                active_execs: std::sync::Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -91,6 +114,7 @@ impl HostHandle {
                 host_alias: "localhost".to_string(),
                 output_bus: std::sync::Mutex::new(None),
                 monitor_signals: std::sync::Mutex::new(HashMap::new()),
+                active_execs: std::sync::Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -105,6 +129,7 @@ impl HostHandle {
                 host_alias: alias.to_string(),
                 output_bus: std::sync::Mutex::new(None),
                 monitor_signals: std::sync::Mutex::new(HashMap::new()),
+                active_execs: std::sync::Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -117,6 +142,18 @@ impl HostHandle {
     #[cfg(test)]
     pub(crate) fn transport_kind(&self) -> &TransportKind {
         &self.inner.transport
+    }
+
+    /// Ensure the tmux server is running for this host's configured socket (DC30).
+    ///
+    /// Runs `tmux start-server` (with socket args if configured). Idempotent —
+    /// no-op if the server is already running. Call this before creating sessions
+    /// on a dedicated automation socket to ensure the server exists.
+    pub async fn ensure_socket_server(&self) -> Result<()> {
+        let prefix = crate::transport::tmux_prefix(self.inner.socket.as_ref());
+        let cmd = format!("{} start-server", prefix);
+        self.inner.transport.exec(&cmd).await?;
+        Ok(())
     }
 
     /// List all tmux sessions on this host.
@@ -404,6 +441,11 @@ impl HostHandle {
                         return Ok(MonitorExitReason::Stopped);
                     }
                     MonitorExitReason::ConnectionLost => {
+                        // Transition any Running execs to Unknown (DC31)
+                        inner_ref.notify_exec_discontinuity(&format!(
+                            "connection lost for {}:{}", host_alias, session
+                        ));
+
                         // Unexpected EOF — emit discontinuity and attempt reconnect
                         bus.publish_discontinuity(&format!(
                             "stream interrupted: control channel lost for {}:{}",
@@ -621,6 +663,33 @@ impl HostHandle {
 
     pub fn host_alias(&self) -> &str {
         &self.inner.host_alias
+    }
+}
+
+/// Handle to a tracked command execution (DC31).
+///
+/// Returned by `Target::start_exec()`. Provides non-blocking status inspection
+/// via `status()` and async completion via `wait()`.
+pub struct ExecHandle {
+    id: ExecId,
+    state: Arc<std::sync::Mutex<ExecState>>,
+    task: tokio::task::JoinHandle<Result<ExecState>>,
+}
+
+impl ExecHandle {
+    /// The execution identity.
+    pub fn id(&self) -> ExecId {
+        self.id
+    }
+
+    /// Non-blocking snapshot of current execution state.
+    pub fn status(&self) -> ExecState {
+        self.state.lock().expect("exec state lock poisoned").clone()
+    }
+
+    /// Await completion, consuming the handle. Returns the final `ExecState`.
+    pub async fn wait(self) -> Result<ExecState> {
+        self.task.await.map_err(|e| anyhow!("exec task panicked: {}", e))?
     }
 }
 
@@ -1255,6 +1324,108 @@ impl Target {
 
     // --- exec (DC19 sentinel mechanism) ---
 
+    /// Launch a tracked command execution in the target pane (DC31).
+    ///
+    /// Returns an `ExecHandle` immediately. The command runs in a background
+    /// tokio task that acquires the per-pane exec lock (DC19 serialization),
+    /// sends the command with a sentinel, and polls scrollback.
+    ///
+    /// Use `ExecHandle::status()` for non-blocking inspection and
+    /// `ExecHandle::wait()` for async completion.
+    pub async fn start_exec(&self, command: &str, timeout: Duration) -> Result<ExecHandle> {
+        let exec_id = ExecId::new();
+        let state = Arc::new(std::sync::Mutex::new(ExecState::Running));
+        let state_task = state.clone();
+
+        let pane_id = self.resolve_pane_id().await;
+        let lock = self.inner.exec_lock(&pane_id);
+
+        let target_str = if pane_id.starts_with('%') {
+            pane_id.clone()
+        } else {
+            self.target_string()
+        };
+        let marker = format!("__ML{}__", exec_id.short_hex());
+        let command = command.to_string();
+
+        // Register in active_execs before spawning
+        {
+            let mut active = self.inner.active_execs.lock().expect("active_execs poisoned");
+            let pane_states = active.entry(pane_id.clone()).or_default();
+            pane_states.push(state.clone());
+        }
+
+        let inner_ref = self.inner.clone();
+        let pane_id_cleanup = pane_id.clone();
+        let state_cleanup = state.clone();
+
+        let task = tokio::spawn(async move {
+            // Acquire pane lock inside the task — start_exec returns immediately
+            let _guard = lock.lock().await;
+
+            let socket_ref = inner_ref.socket.as_ref();
+            let transport = &inner_ref.transport;
+
+            // Detect shell for exit code variable
+            let exit_var = detect_exit_var(transport, socket_ref, &target_str).await;
+
+            // Send command with sentinel
+            let sentinel_cmd = format!("{} ; echo \"{} {}\"", command, marker, exit_var);
+            let keys = KeySequence::literal(&sentinel_cmd).then_enter();
+            control::send_keys(transport, socket_ref, &target_str, &keys).await?;
+
+            // Poll scrollback for sentinel
+            let start_time = tokio::time::Instant::now();
+            let poll_interval = Duration::from_millis(100);
+
+            let final_state = loop {
+                if start_time.elapsed() > timeout {
+                    let unknown = ExecState::Unknown {
+                        reason: format!("timed out after {:?} waiting for sentinel", timeout),
+                    };
+                    break unknown;
+                }
+
+                let raw_content = capture::capture_pane_escape_history(
+                    transport,
+                    socket_ref,
+                    &target_str,
+                    -500,
+                )
+                .await?;
+                let content = capture::strip_ansi(&raw_content);
+
+                if let Some(result) = parse_sentinel_output(&content, &marker) {
+                    break ExecState::Completed(result);
+                }
+
+                tokio::time::sleep(poll_interval).await;
+            };
+
+            // Update shared state
+            *state_task.lock().expect("exec state poisoned") = final_state.clone();
+
+            // Deregister from active_execs
+            {
+                let mut active = inner_ref.active_execs.lock().expect("active_execs poisoned");
+                if let Some(pane_states) = active.get_mut(&pane_id_cleanup) {
+                    pane_states.retain(|s| !Arc::ptr_eq(s, &state_cleanup));
+                    if pane_states.is_empty() {
+                        active.remove(&pane_id_cleanup);
+                    }
+                }
+            }
+
+            Ok(final_state)
+        });
+
+        Ok(ExecHandle {
+            id: exec_id,
+            state,
+            task,
+        })
+    }
+
     /// Execute a shell command in the target pane and capture output.
     ///
     /// Sends command with a UUID sentinel suffix, polls scrollback until
@@ -1268,59 +1439,11 @@ impl Target {
     /// a long-running user command needs a large `exec` timeout, while the
     /// transport timeout should remain short to catch hung connections.
     pub async fn exec(&self, command: &str, timeout: Duration) -> Result<ExecOutput> {
-        let pane_id = self.resolve_pane_id().await;
-        let lock = self.inner.exec_lock(&pane_id);
-        let _guard = lock.lock().await;
-
-        // Use a short hex ID to avoid line wrapping in narrow panes
-        let id = &uuid::Uuid::new_v4().to_string()[..8];
-        let marker = format!("__ML{}__", id);
-        // Use resolved pane_id as tmux target when available (starts with %).
-        // This ensures lock key and execution target are the same pane,
-        // preventing divergence if the active pane changes after lock acquisition.
-        let target = if pane_id.starts_with('%') {
-            pane_id.clone()
-        } else {
-            self.target_string()
-        };
-        let socket = self.inner.socket.as_ref();
-        let transport = &self.inner.transport;
-
-        // Detect shell for exit code variable
-        let exit_var = detect_exit_var(transport, socket, &target).await;
-
-        // Send command with sentinel.
-        // The sentinel echo must NOT be inside single quotes so $? expands.
-        // Format: <command> ; echo "<marker> $?"
-        let sentinel_cmd = format!("{} ; echo \"{} {}\"", command, marker, exit_var);
-        let keys = KeySequence::literal(&sentinel_cmd).then_enter();
-        control::send_keys(transport, socket, &target, &keys).await?;
-
-        // Poll scrollback for sentinel
-        let start_time = tokio::time::Instant::now();
-        let poll_interval = Duration::from_millis(100);
-
-        loop {
-            if start_time.elapsed() > timeout {
-                return Err(anyhow!(
-                    "exec timed out after {:?} waiting for sentinel",
-                    timeout
-                ));
-            }
-
-            // Poll with `-ep` scrollback for wrap-tolerant sentinel detection (DC20).
-            // The escape-mode capture preserves ANSI sequences which we strip
-            // before parsing, so line-wrapping artifacts from width changes
-            // don't break sentinel matching.
-            let raw_content =
-                capture::capture_pane_escape_history(transport, socket, &target, -500).await?;
-            let content = capture::strip_ansi(&raw_content);
-
-            if let Some(result) = parse_sentinel_output(&content, &marker) {
-                return Ok(result);
-            }
-
-            tokio::time::sleep(poll_interval).await;
+        let handle = self.start_exec(command, timeout).await?;
+        match handle.wait().await? {
+            ExecState::Completed(output) => Ok(output),
+            ExecState::Unknown { reason } => Err(anyhow!("exec result unknown: {}", reason)),
+            ExecState::Running => Err(anyhow!("internal error: Running after wait")),
         }
     }
 }
@@ -1493,6 +1616,25 @@ mod tests {
 
     fn mock_host(mock: MockTransport) -> HostHandle {
         HostHandle::new(TransportKind::Mock(mock), None)
+    }
+
+    #[tokio::test]
+    async fn ensure_socket_server_sends_start_server() {
+        // Mock verifies the correct command is sent
+        let mock = MockTransport::new()
+            .with_response("start-server", "");
+        let host = mock_host(mock);
+        host.ensure_socket_server().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ensure_socket_server_with_named_socket() {
+        let mock = MockTransport::new()
+            .with_response("start-server", "");
+        let socket = TmuxSocket::automation("ci").unwrap();
+        let host = HostHandle::new(TransportKind::Mock(mock), Some(socket));
+        // Should succeed — the mock matches "start-server" in the command
+        host.ensure_socket_server().await.unwrap();
     }
 
     #[tokio::test]
@@ -1836,6 +1978,121 @@ mod tests {
         let lock1 = t1.inner.exec_lock(&key1);
         let lock2 = t2.inner.exec_lock(&key2);
         assert!(!Arc::ptr_eq(&lock1, &lock2));
+    }
+
+    // --- start_exec / ExecHandle tests (DC31) ---
+
+    #[tokio::test]
+    async fn start_exec_returns_running_immediately() {
+        let marker_re = "__ML";
+        let mock = MockTransport::new()
+            .with_default("")
+            .with_response("display-message", "%5\n")
+            // send-keys always succeeds
+            .with_response("send-keys", "")
+            // capture returns sentinel on second call
+            .with_response("capture-pane", "")
+            .with_response("capture-pane", format!("$ cmd ; echo \"{}test1234__ $?\"\nhello\n{}test1234__ 0\n$", marker_re, marker_re).as_str());
+        let host = mock_host(mock);
+        let target = host.create_target_for_test("build");
+        let handle = target.start_exec("echo hello", Duration::from_secs(5)).await.unwrap();
+
+        // Handle should be immediately available with Running state
+        assert_eq!(handle.id().short_hex().len(), 8);
+        // Wait for completion
+        let state = handle.wait().await.unwrap();
+        assert!(state.is_terminal());
+    }
+
+    #[tokio::test]
+    async fn start_exec_timeout_produces_unknown() {
+        let mock = MockTransport::new()
+            .with_default("")
+            .with_response("display-message", "%5\n")
+            .with_response("send-keys", "")
+            // capture-pane never returns sentinel
+            .with_response("capture-pane", "just some output\n");
+        let host = mock_host(mock);
+        let target = host.create_target_for_test("test");
+        let handle = target
+            .start_exec("sleep 100", Duration::from_millis(200))
+            .await
+            .unwrap();
+
+        let state = handle.wait().await.unwrap();
+        match state {
+            ExecState::Unknown { reason } => {
+                assert!(reason.contains("timed out"));
+            }
+            _ => panic!("expected Unknown state, got {:?}", state),
+        }
+    }
+
+    #[tokio::test]
+    async fn start_exec_deregisters_from_active_execs() {
+        let mock = MockTransport::new()
+            .with_default("")
+            .with_response("display-message", "%5\n")
+            .with_response("send-keys", "")
+            .with_response("capture-pane", "just some output\n");
+        let host = mock_host(mock);
+        let target = host.create_target_for_test("test");
+        let handle = target
+            .start_exec("cmd", Duration::from_millis(200))
+            .await
+            .unwrap();
+
+        // Wait for completion (will timeout → Unknown)
+        let _ = handle.wait().await;
+
+        // active_execs should be empty after completion
+        let active = host.inner.active_execs.lock().unwrap();
+        assert!(active.is_empty(), "active_execs should be empty after completion");
+    }
+
+    // --- Discontinuity notification tests (DC31) ---
+
+    #[tokio::test]
+    async fn notify_exec_discontinuity_transitions_running_to_unknown() {
+        let state = Arc::new(std::sync::Mutex::new(ExecState::Running));
+        let mock = MockTransport::new().with_default("");
+        let host = mock_host(mock);
+        {
+            let mut active = host.inner.active_execs.lock().unwrap();
+            active
+                .entry("test-pane".to_string())
+                .or_default()
+                .push(state.clone());
+        }
+        host.inner.notify_exec_discontinuity("connection lost");
+        let guard = state.lock().unwrap();
+        match &*guard {
+            ExecState::Unknown { reason } => assert!(reason.contains("connection lost")),
+            other => panic!("expected Unknown, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn notify_exec_discontinuity_leaves_completed_unchanged() {
+        let state = Arc::new(std::sync::Mutex::new(ExecState::Completed(ExecOutput {
+            stdout: "ok".to_string(),
+            exit_code: 0,
+        })));
+        let mock = MockTransport::new().with_default("");
+        let host = mock_host(mock);
+        {
+            let mut active = host.inner.active_execs.lock().unwrap();
+            active
+                .entry("test-pane".to_string())
+                .or_default()
+                .push(state.clone());
+        }
+        host.inner.notify_exec_discontinuity("connection lost");
+        let guard = state.lock().unwrap();
+        match &*guard {
+            ExecState::Completed(out) => assert_eq!(out.stdout, "ok"),
+            other => panic!("expected Completed, got {:?}", other),
+        }
     }
 
     #[tokio::test]

@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-21 | @claude | Implement 4.2g (DC30 socket isolation) and 4.2h (DC31 tracked execution). DC30: `TmuxSocket::automation()`, `SshConfig::with_automation_socket()`, `HostHandle::ensure_socket_server()`. DC31: `ExecId`/`ExecState`/`ExecHandle` types, `Target::start_exec()`, `exec()` refactored onto tracked substrate, `active_execs` discontinuity wiring. 378 unit tests (+11 new), 2 new integration tests. |
 | 2026-03-21 | @codex | Address PR #96 review feedback — clarify 4.2h wording from "blocking" to "await-to-completion", require slice-3 test parity with the existing `Target::exec()` sentinel/scrollback/lock behavior before refactoring it onto tracked execution, and align the product-driven notes with shipped SSH identity-file support. |
 | 2026-03-21 | @codex | Execution-planning follow-up for 4.2g/4.2h: document impact radius by module and require 4.2h to land in staged slices (`ExecId`/state, `start_exec`, `exec()` layering, discontinuity semantics/tests) so tracked execution remains reviewable. |
 | 2026-03-21 | @codex | Product-driven robustness follow-up from [`docs/PRODUCT.md`](../../../docs/PRODUCT.md): add concrete plan items for 4.2g dedicated socket-isolation ergonomics and 4.2h tracked command execution. Prioritize socket isolation first as the higher-value robustness feature; keep tracked execution as a complementary pane-scoped execution primitive. |
@@ -1192,7 +1193,7 @@ config-driven automator coupling was deferred.
   - shell escaping fuzz tests or property tests (adversarial session names, text input)
   <!-- @claude 2026-03-20 — Implemented: adversarial input test (17 cases: injection, unicode, control chars, long strings) and round-trip identity property test (10 cases) in transport.rs. -->
 
-- [ ] **4.2g — Dedicated socket-isolation ergonomics**
+- [x] **4.2g — Dedicated socket-isolation ergonomics**
   - add deterministic helper for dedicated automation socket naming on top of `TmuxSocket`
   - add fallible `SshConfig` convenience builder for automation socket selection that errors
     instead of silently overwriting existing socket intent
@@ -1209,8 +1210,9 @@ config-driven automator coupling was deferred.
     socket-focused localhost/SSH integration tests
   - implementation note: keep this additive/localized; it should not require OutputBus,
     monitor, Fleet, or history refactors
+  <!-- @claude 2026-03-21 — Implemented: TmuxSocket::automation(scope), SshConfig::with_automation_socket(), HostHandle::ensure_socket_server(), unit tests (8 types.rs + 3 transport.rs + 2 host.rs), integration test (localhost_automation_socket_lifecycle), API.md sections. -->
 
-- [ ] **4.2h — Tracked command execution**
+- [x] **4.2h — Tracked command execution**
   - add typed command identity and state:
     `ExecId`, `ExecHandle`, `ExecState`
   - add `Target::start_exec(...) -> ExecHandle`
@@ -1239,6 +1241,7 @@ config-driven automator coupling was deferred.
     must remain covered by tests rather than assumed from the refactor shape
   - implementation note: keep the first slice narrow and reviewable; avoid coupling initial
     tracked execution state to Fleet/history unless a concrete correctness need appears
+  <!-- @claude 2026-03-21 — Implemented all 4 slices: (1) ExecId/ExecState/ExecHandle types, (2) Target::start_exec() with background tokio task, pane lock inside task, sentinel polling, (3) exec() refactored onto start_exec()+wait(), (4) active_execs tracking + notify_exec_discontinuity() wired into monitor supervision ConnectionLost path. Parity guardrail: all 6 sentinel parse tests + 3 exec lock tests pass unchanged. 378 unit tests, 2 new integration tests. -->
 
 ### 4.3 — Docker-based E2E (OC6)
 

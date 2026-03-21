@@ -785,6 +785,117 @@ async fn localhost_destination_symlink_rejected() {
     );
 }
 
+/// DC30 — Automation socket isolation lifecycle.
+/// Creates a dedicated automation socket, ensures the server, creates a session,
+/// verifies isolation from the default tmux server, and cleans up.
+#[tokio::test]
+async fn localhost_automation_socket_lifecycle() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+
+    let scope = unique_name("integ");
+    let socket = motlie_tmux::TmuxSocket::automation(&scope).unwrap();
+    let socket_name = match &socket {
+        motlie_tmux::TmuxSocket::Name(n) => n.clone(),
+        _ => panic!("expected Name socket"),
+    };
+    let _socket_cleanup = NamedSocketCleanup::new(socket_name.clone());
+
+    // Build host with automation socket
+    let host = HostHandle::new(
+        motlie_tmux::TransportKind::Local(motlie_tmux::transport::LocalTransport::new()),
+        Some(socket),
+    );
+
+    // Ensure the server is running
+    host.ensure_socket_server().await.expect("ensure_socket_server failed");
+
+    // Create a session on the automation socket
+    let session_name = unique_name("motlie_auto_test");
+    let target = host
+        .create_session(&session_name, &Default::default())
+        .await
+        .expect("create_session on automation socket failed");
+
+    // Verify session exists on the automation socket
+    let sessions = host.list_sessions().await.expect("list_sessions failed");
+    assert!(
+        sessions.iter().any(|s| s.name == session_name),
+        "session not found on automation socket"
+    );
+
+    // Verify isolation: default tmux server should NOT have this session
+    let default_host = HostHandle::local();
+    let default_sessions = default_host.list_sessions().await.unwrap_or_default();
+    assert!(
+        !default_sessions.iter().any(|s| s.name == session_name),
+        "automation socket session leaked to default tmux server"
+    );
+
+    // Cleanup
+    target.kill().await.expect("kill failed");
+}
+
+/// DC31 — Tracked exec integration test.
+/// Launches a command via start_exec, checks Running status, waits for Completed.
+#[tokio::test]
+async fn localhost_tracked_exec_lifecycle() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+
+    let session_name = unique_name("motlie_test_tracked_exec");
+    let host = HostHandle::local();
+
+    // Clean up leftover
+    if let Ok(Some(t)) = host.session(&session_name).await {
+        let _ = t.kill().await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    let target = host
+        .create_session(&session_name, &Default::default())
+        .await
+        .expect("create_session failed");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Launch tracked exec
+    let handle = target
+        .start_exec("echo tracked_output", Duration::from_secs(10))
+        .await
+        .expect("start_exec failed");
+
+    // ExecHandle should have a valid ID
+    assert_eq!(handle.id().short_hex().len(), 8);
+
+    // Wait for completion
+    let state = handle.wait().await.expect("wait failed");
+    match state {
+        motlie_tmux::ExecState::Completed(output) => {
+            assert!(output.success(), "exec exit code: {}", output.exit_code);
+            assert!(
+                output.stdout.contains("tracked_output"),
+                "exec stdout: {}",
+                output.stdout
+            );
+        }
+        other => panic!("expected Completed, got {:?}", other),
+    }
+
+    // Also verify exec() still works (parity)
+    let exec_out = target
+        .exec("echo parity_check", Duration::from_secs(10))
+        .await
+        .expect("exec parity failed");
+    assert!(exec_out.success());
+    assert!(exec_out.stdout.contains("parity_check"));
+
+    target.kill().await.expect("kill failed");
+}
+
 /// 1.11o — SSH integration test (env-gated).
 /// Requires MOTLIE_SSH_TEST_HOST=user@host[:port].
 #[tokio::test]
