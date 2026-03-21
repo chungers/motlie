@@ -6,6 +6,8 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-20 | @codex: Refine DC29 per PR #94 review — resync is a fresh snapshot after reconnect, not replay. Specify missing-session/topology-change behavior, adapter propagation (`SinkEvent::Discontinuity`, `HistoryEntry::Discontinuity`, `filter_fn` forwarding, `JoinedStream` source reset), and per-session monitor health as the ground truth for Fleet aggregation. | DC29, Phase 4 |
+| 2026-03-20 | @codex: Add DC29 — long-lived streaming resilience. Separate upstream stream discontinuity from subscriber backpressure gaps, require reconnect supervision + fresh snapshot anchoring after reconnect, and make the hardening direction explicit for external-agent/Fleet workflows. | DC29, DC28, Phase 4 |
 | 2026-03-20 | @claude: Update Fleet and HistoryHandle API blocks to match shipped implementation (PR #92 R2). Fleet: `register()` with alias enforcement + bus injection, `TargetSpec`-based `bind()`, async `find()`, sync `shutdown()`. HistoryHandle: async `snapshot()` / `render_text()` / `join()`, `id()` accessor. Fix `rendered_chars()` to measure actual rendered string for Custom label format. | Fleet, Subscription, DC27, DC28 |
 | 2026-03-20 | @codex: DC28 — specify transcript/history adapter as a bounded rolling snapshot layer for LLM/classifier context windows. Define artifact, bounds, relationship to `JoinedStream`, and consumer interaction model. | Subscription, DC28, Phase 2b |
 | 2026-03-20 | @codex: Directional simplification — active design now treats `libs/tmux` as tmux stream/history/control substrate for an external LLM/classifier or other policy engine. Simplify Fleet toward coordination/aggregation/routing. Move matcher/rule/reactor/config automation direction to appendix as historical context. | Overview, Fleet, DC24, DC12, DC13, DC14, Phase 2b/2c, Phase 3, Appendix |
@@ -3204,6 +3206,114 @@ consumer surfaces:
   pretending the transcript is complete.
 - External policy stays simple: “get latest context, infer, act.”
 
+### DC29: Streaming Resilience, Discontinuity, and Resync
+
+**Decision**: Long-lived monitor reliability is now an explicit design goal, not just a
+generic hardening follow-on. The streaming substrate must distinguish:
+- **subscriber-local loss**: backpressure on one `Subscription` route (`Gap`)
+- **upstream monitor discontinuity**: control-mode shell drop, SSH reconnect, tmux server
+  restart, or resync after monitor recovery
+
+The active design requires reconnect supervision and explicit discontinuity artifacts so
+external-agent workflows can reason about uncertainty instead of silently treating the
+transcript as complete.
+
+**Why this matters now**:
+- The dominant consumer is a long-lived LLM/classifier loop over rolling history.
+- That consumer can tolerate bounded incompleteness if it is made explicit.
+- It cannot safely reason from a transcript that silently skipped output because a
+  control-mode monitor died and later restarted.
+- `Gap` already models subscriber-local drop; overloading it for transport or monitor
+  outages would blur two different failure classes.
+
+**Required semantics**:
+1. **Reconnect supervision**
+   - A monitored session should not permanently die on the first unexpected EOF from the
+     control-mode shell.
+   - SSH-backed monitoring must attempt bounded reconnect with backoff.
+   - Localhost monitoring should also support reattach/restart semantics when the tmux
+     server or the control-mode client dies unexpectedly.
+2. **Explicit discontinuity signaling**
+   - Upstream monitor interruptions must surface as an explicit stream/history artifact,
+     distinct from `Gap`.
+   - The artifact must be consumable by:
+     - raw subscription receivers
+     - transcript/history rendering
+     - future TUI status surfaces
+3. **Fresh snapshot after reconnect**
+   - After a successful reconnect, the monitor must capture a bounded **current-state
+     snapshot** to re-anchor the transcript rather than silently resuming from “now”.
+   - This is **not** a replay or recovery of missed output. Any output produced during
+     the outage and no longer present in tmux history is permanently lost.
+   - The snapshot result should be reflected in history/output as a synthetic system
+     entry so consumers know continuity was broken and the transcript is now anchored
+     to a fresh visible-state snapshot.
+4. **Health visibility**
+   - `Fleet` / host-level coordination must be able to observe that a host or monitor is
+     degraded, reconnecting, resumed, or permanently failed.
+   - Long-lived consumers should not need to infer health only from absence of output.
+
+**Artifact direction**:
+- Keep `SinkEvent::Gap` for subscriber backpressure only.
+- Introduce `SinkEvent::Discontinuity` (or an equivalent dedicated system event) in the
+  streaming path.
+- `HistoryEntry` gains a corresponding `Discontinuity` variant.
+- `HistoryHandle::render_text()` should include prompt-visible lines such as:
+  - `[stream interrupted: ssh control channel lost for web-1:build]`
+  - `[stream resumed: reattached after reconnect]`
+  - `[stream snapshot: captured current screen state after reconnect; intermediate output may be missing]`
+
+**Adapter propagation contract**:
+- **Raw subscription receivers**: receive `SinkEvent::Discontinuity` directly.
+- **`filter_fn()`**: always forwards discontinuity events, same as `Gap`. Predicates apply
+  only to `TargetOutput`, not to system continuity signals.
+- **`pipe()`**: forwards discontinuity transparently to the terminal sink/callback.
+- **`HistoryHandle`**: records discontinuity as `HistoryEntry::Discontinuity`; it counts
+  against normal `max_entries` / `max_render_chars` budgets because it is part of the
+  truthfulness contract of the transcript.
+- **`JoinedStream`**: does not synthesize a fake data chunk for discontinuity. Instead it
+  resets source-coalescing state so the next real output chunk is treated as
+  `source_changed = true`. Consumers that need explicit discontinuity markers should use
+  raw subscriptions or `HistoryHandle`.
+
+**Session identity and topology semantics**:
+- **tmux server restart / session killed externally**:
+  - if reconnect succeeds but the monitored session no longer exists, emit a terminal
+    discontinuity/failure marker and transition that session monitor to permanent
+    failed/stopped state
+  - Fleet bindings remain as names, but subsequent `find()` / routed actions may fail
+    until the caller recreates or rebinds the target
+- **Pane topology change during outage**:
+  - if the session still exists but pane IDs changed, the monitor resumes at the session
+    level and emits a discontinuity + fresh snapshot marker
+  - subscriptions filtered to old pane IDs naturally stop matching removed panes; callers
+    must resubscribe if they require the new pane identities
+
+**Health model**:
+- Per-session monitor health is the ground truth:
+  - `streaming`
+  - `reconnecting`
+  - `failed`
+  - `stopped`
+- Host/Fleet health is derived from per-session state rather than flattened into one
+  coarse status. An aggregate such as counts or worst-of severity is acceptable, but the
+  per-session view must remain inspectable for targeted recovery decisions.
+
+**Relationship to external-agent workflows**:
+- This design keeps Motlie responsible for transport truthfulness and bounded recovery.
+- The external agent stays simple:
+  1. read rolling context
+  2. see explicit interruption/resume/resync markers
+  3. decide whether to continue, recapture more context, or take corrective action
+- That is cleaner than pushing reconnect detection and transcript repair into every
+  LLM/classifier consumer.
+
+**Relationship to TUI**:
+- TUI remains fully supported.
+- The same discontinuity/resync artifacts that feed `HistoryHandle` can drive TUI status
+  badges, transcript banners, or degraded-connection indicators without requiring a
+  separate monitoring model.
+
 ### DC27: Fleet Routing Convenience vs Direct Target Use
 
 **Decision**: Keep both levels. `Target` remains the canonical direct-control handle,
@@ -4223,7 +4333,8 @@ external-agent workflow instead of a built-in automator.
 
 ### Phase 4: Hardening + Testing
 
-**Goal**: Production readiness.
+**Goal**: Production readiness for long-lived streaming, external-agent loops, and
+multi-host/Fleet operation.
 
 **Tasks**:
 1. Expand `MockTransport` coverage for integration tests (OC6)
@@ -4231,8 +4342,12 @@ external-agent workflow instead of a built-in automator.
 3. Actionable SSH agent error messages (OC3)
 4. ~~FIFO-vs-file investigation and decision (OC1)~~ — OUT OF SCOPE (resolved by DC10 + DC22)
 5. ~~Line interleaving mitigation (OC2)~~ — OUT OF SCOPE (resolved by DC10 + DC22)
-6. End-to-end test with Docker (SSH + tmux)
-7. Document minimum tmux version, known limitations, and performance characteristics
+6. Reconnecting monitor supervision with bounded retry/backoff
+7. Explicit stream discontinuity artifacts distinct from subscriber `Gap`
+8. Fresh snapshot anchoring after reconnect, reflected in transcript/history
+9. Fleet/host health visibility for reconnecting/degraded/failed streaming state
+10. End-to-end test with Docker (SSH + tmux)
+11. Document minimum tmux version, known limitations, and performance characteristics
 
 **Deliverable**: Library with test coverage, documented limitations, and CI integration.
 
