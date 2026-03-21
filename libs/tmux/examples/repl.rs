@@ -14,6 +14,7 @@
 //!   kill <target>            Kill a session/window/pane
 //!   targets                  List all sessions with full target spec tree
 //!   send <target> <text...>  Send text + Enter to a target
+//!   keys <target> <keys...>  Send key sequence ({Escape}, {C-c}, etc.)
 //!   capture <target> <n>     Print last N scrollback lines
 //!   monitor <session> [secs] Stream live output for N seconds (default 3)
 //!   upload <local> <remote>  Upload a file or directory to the host
@@ -71,6 +72,7 @@ async fn main() -> anyhow::Result<()> {
                     "  targets                                 List all sessions with target tree"
                 );
                 println!("  send <target> <text...>                 Send text + Enter to a target");
+                println!("  keys <target> <keys...>                 Send key sequence (e.g. {{Escape}}, {{C-c}})");
                 println!("  capture <target> <n>                    Print last N scrollback lines");
                 println!(
                     "  monitor <session> [secs]                Stream live output (default 3s)"
@@ -393,6 +395,30 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                     Err(e) => println!("{}", e),
+                }
+            }
+
+            "keys" => {
+                if parts.len() < 3 {
+                    println!("usage: keys <target> <keys...>");
+                    println!("  e.g. keys mysession {{Escape}}");
+                    println!("  e.g. keys mysession {{C-c}}");
+                    println!("  e.g. keys mysession echo hello{{Enter}}");
+                    write!(stdout, "repl> ")?;
+                    stdout.flush()?;
+                    continue;
+                }
+                let target_str = parts[1];
+                let keys_str = parts[2];
+                match KeySequence::parse(keys_str) {
+                    Ok(keys) => match resolve_target(&host, target_str).await {
+                        Ok(target) => match target.send_keys(&keys).await {
+                            Ok(()) => println!("Sent keys to {}", target_str),
+                            Err(e) => println!("Error: {}", e),
+                        },
+                        Err(e) => println!("{}", e),
+                    },
+                    Err(e) => println!("Parse error: {}", e),
                 }
             }
 
