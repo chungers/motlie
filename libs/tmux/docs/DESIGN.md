@@ -6,6 +6,8 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-20 | @codex: DC28 — specify transcript/history adapter as a bounded rolling snapshot layer for LLM/classifier context windows. Define artifact, bounds, relationship to `JoinedStream`, and consumer interaction model. | Subscription, DC28, Phase 2b |
+| 2026-03-20 | @codex: Directional simplification — active design now treats `libs/tmux` as tmux stream/history/control substrate for an external LLM/classifier or other policy engine. Simplify Fleet toward coordination/aggregation/routing. Move matcher/rule/reactor/config automation direction to appendix as historical context. | Overview, Fleet, DC24, DC12, DC13, DC14, Phase 2b/2c, Phase 3, Appendix |
 | 2026-03-20 | @claude: DC26 R1 — address PR #89 review: constrain `identity-file` to query-only (not nassh userinfo), make `with_identity_file()` fallible to prevent URI+builder silent overwrite, update DC21 `SshConfig` contract block with new field/methods and query-only exception note. | DC26, DC21, OC3 |
 | 2026-03-20 | @claude: DC26 — SSH identity-file URI parameter for explicit key-file authentication. Extends DC21 URI/SshConfig with `identity-file` param; adds `authenticate_key_file()` alongside existing agent auth. Addresses OC3 limitation for CI/agentless workflows. | DC26, DC21, OC3 |
 | 2026-03-19 | @codex: DC25 implementation note — correct split-percentage mapping for tmux 3.4: `SplitSize::Percent` maps to `split-window -l <n>%`, not a nonexistent `-p` flag. | DC25 |
@@ -107,9 +109,9 @@ A library that:
 7. Manages session metadata (rename sessions/windows)
 8. Names logical workstreams across hosts and targets for domain-meaningful addressing
 9. Attaches output pipes for continuous monitoring
-10. Evaluates configurable trigger rules against pane output
-11. Executes actions (send-keys, notify, log) when rules match
-12. Reconnects automatically on failure (SSH targets)
+10. Combines multi-source output into conversation/transcript-friendly history
+11. Exposes composable stream/history adapters for external analysis
+12. Routes control actions back to the correct host/target when an external agent decides to act
 
 ### Scope
 
@@ -117,10 +119,16 @@ A library that:
   multi-host connection pool, tmux session creation and termination, session/window/pane
   listing, pane content capture, structured command execution (exec with exit code),
   remote input with escaping, host-level file transfer (local filesystem / SSH SFTP),
-  session metadata management, named workstreams,
-  output sink pipeline with pluggable content matching, pipe-based output monitoring,
-  rule-based automation, structured logging, CLI binary
+  session metadata management, named workstreams, stream/history-oriented output
+  sink pipeline, control-mode monitoring, external-agent-friendly stream composition,
+  structured logging, CLI binary
 - **Out of scope**: Web UI, SSH server setup/configuration, tmux installation
+- **Out of active design path**: Built-in matcher DSL, declarative trigger-rule engine,
+  internal reactor/action pipeline, and reconnecting rule processors. These are preserved
+  in the appendix as historical context, not deleted from project memory.
+- **Deferred but still active infrastructure concern**: SSH reconnection / long-lived
+  host reliability remains in scope as transport/Fleet hardening. It is no longer
+  coupled to a built-in rule engine or config-driven automator design.
 - **Future**: TUI interface based on [ratatui](https://ratatui.rs/) (not in current phases)
   with reliability and capture-fidelity guidance in [`TUI.md`](./TUI.md). SFTP
   design deep dive lives in [`SFTP.md`](./SFTP.md).
@@ -370,16 +378,16 @@ main() loop with reconnect
 libs/tmux/
 ├── src/
 │   ├── lib.rs              # Public API re-exports
-│   ├── config.rs           # TmuxAutomatorConfig, TriggerRule, Action
+│   ├── config.rs           # Historical appendix direction only — built-in automation config is deferred
 │   ├── transport.rs        # TransportKind enum + LocalTransport + SshTransport
 │   ├── host.rs             # HostHandle: per-host facade for all tmux operations
-│   ├── fleet.rs            # Fleet: multi-host pool, dispatch, aggregate status
+│   ├── fleet.rs            # Fleet: multi-host registry, aggregation, routing, workstreams
 │   ├── discovery.rs        # Session/window/pane listing, filter, PaneAddress type
 │   ├── capture.rs          # Pane content capture (capture-pane) and scrollback dump
 │   ├── control.rs          # Session lifecycle, send-keys with escaping, rename
 │   ├── pipe.rs             # OUT OF SCOPE — pipe-pane fallback removed (tmux 3.1+ baseline)
 │   ├── monitor.rs          # OutputMonitor: stream parsing, publish to OutputBus
-│   ├── matcher.rs          # MatcherKind enum + built-in matchers (Regex, Substring, etc.)
+│   ├── matcher.rs          # Historical appendix direction only — matcher DSL is deferred
 │   ├── sink.rs             # SinkKind enum, SinkFilter, TargetOutput, OutputBus
 │   ├── sinks/
 │   │   ├── mod.rs          # Re-exports built-in sinks
@@ -463,57 +471,34 @@ types a consumer interacts with. Module specifications (next section) describe i
 
 ### `Fleet` — Multi-Target Pool
 
-The top-level entry point. Manages connections to localhost and/or multiple remote hosts,
-providing a uniform interface for dispatching operations to any target by name or alias.
+The top-level coordination layer. Manages connections to localhost and/or multiple remote
+hosts, provides stable names for targets, aggregates monitoring streams, and routes
+control actions back to the right host/target when an external agent decides to act.
 
 ```rust
-pub struct Fleet { /* HashMap<String, HostHandle>, shutdown_tx, config */ }
+pub struct Fleet { /* host registry, output bus, bindings */ }
 
 impl Fleet {
-    /// Create a fleet from config. Does not connect yet.
-    pub fn new(config: TmuxAutomatorConfig) -> Self;
+    /// Create an empty fleet. Hosts are registered programmatically.
+    pub fn new() -> Self;
 
-    /// Connect to all configured targets (localhost is always available).
-    /// Failures are per-target, not fatal.
-    /// Returns a summary of which targets connected and which failed.
-    pub async fn connect_all(&mut self) -> Vec<HostStatus>;
+    /// Register and connect a host by alias.
+    pub async fn connect(&mut self, alias: &str, config: SshConfig) -> Result<HostStatus>;
 
     /// Get a handle to a specific target by name/alias.
-    /// The localhost target is always addressable as "localhost" or "local".
     pub fn host(&self, name: &str) -> Option<&HostHandle>;
 
     /// Iterate over all connected targets.
     pub fn hosts(&self) -> impl Iterator<Item = (&str, &HostHandle)>;
 
-    // --- Output Bus ---
+    /// Access the fleet's OutputBus for cross-host subscriptions.
+    pub fn output_bus(&self) -> &OutputBus;
 
-    /// Access the fleet's OutputBus for sink registration.
-    /// Sinks should be registered before start_monitoring() so they
-    /// receive output from the start.
-    pub fn output_bus(&mut self) -> &mut OutputBus;
+    /// Start monitoring on all connected hosts/sessions of interest.
+    pub async fn start_monitoring(&self) -> Result<()>;
 
-    // --- Monitoring (fleet-wide) ---
-
-    /// Start monitoring on all connected hosts (spawns background tasks).
-    pub async fn start_monitoring(&self, rules: &[TriggerRule]) -> Result<()>;
-
-    /// Shutdown: stop monitoring on all hosts, cleanup pipes, close connections.
+    /// Shutdown monitoring and close connections.
     pub async fn shutdown(&self) -> Result<()>;
-
-    // --- Monitoring (per-host) ---
-
-    /// Start monitoring on a single host by name/alias.
-    /// The host must be connected. Monitoring sessions are discovered
-    /// automatically (or filtered by the host's pane_filter config).
-    pub async fn start_monitoring_host(
-        &self,
-        host: &str,
-        rules: &[TriggerRule],
-    ) -> Result<()>;
-
-    /// Stop monitoring on a single host. Cleans up control-mode connections
-    /// for this host only. Other hosts continue unaffected.
-    pub async fn stop_monitoring_host(&self, host: &str) -> Result<()>;
 
     // --- Workstreams (named bindings) ---
 
@@ -538,6 +523,11 @@ impl Fleet {
 
     /// List all workstream bindings.
     pub fn workstreams(&self) -> Vec<WorkstreamEntry>;
+
+    /// Convenience routing helpers for external agents.
+    pub async fn send_text(&self, name: &str, text: &str) -> Result<()>;
+    pub async fn send_keys(&self, name: &str, keys: &KeySequence) -> Result<()>;
+    pub async fn capture(&self, name: &str) -> Result<String>;
 }
 
 /// A named binding of a user-defined name to a (host, target) pair.
@@ -548,17 +538,21 @@ pub struct WorkstreamEntry {
 }
 ```
 
-**Design rationale**: Callers should not need to manage individual connections or reason
-about which target a session lives on. `Fleet` provides the "I have N targets, operate
-on them" abstraction. For localhost-only use, `Fleet` with one local target works
-identically — there is no separate single-target API. Localhost is always available
-without SSH configuration.
+**Design rationale**: The active design assumes policy lives outside Motlie. An external
+LLM/classifier or other controller consumes monitoring output, decides what to do, and
+then uses Motlie to act. `Fleet` therefore focuses on three coordination jobs:
+
+1. **Connection registry**: keep `HostHandle`s by stable alias.
+2. **Stream aggregation**: expose one cross-host `OutputBus` / subscription seam.
+3. **Action routing**: resolve a domain name or binding back to the correct `HostHandle`
+   and `Target`.
 
 **Workstreams** give callers a domain-meaningful vocabulary that decouples intent from
 infrastructure. Instead of `fleet.host("web-1")?.session("build")`, a caller says
 `fleet.find("build-pipeline")` — the mapping from name to (host, target) is established
-once and referenced everywhere. This is especially useful when the same logical
-workstream spans config, monitoring rules, sink filters, and CLI commands.
+once and referenced everywhere. This is especially useful when an external agent builds
+conversation history from many sources and later needs to route a tool call back to the
+same source session or pane.
 
 **Usage**:
 
@@ -651,7 +645,6 @@ impl HostHandle {
     pub async fn start_monitoring(
         &self,
         filter: Option<&Regex>,
-        rules: &[TriggerRule],
     ) -> Result<MonitorHandle>;
 
     /// Stop all monitoring on this host.
@@ -662,7 +655,6 @@ impl HostHandle {
     pub async fn start_monitoring_session(
         &self,
         target: &Target,
-        rules: &[TriggerRule],
     ) -> Result<SessionMonitorHandle>;
 
     /// Stop monitoring a single session.
@@ -879,10 +871,7 @@ impl Target {
 
     /// Start monitoring this target (session level only — DC10).
     /// Returns an error if called on a window or pane target.
-    pub async fn start_monitoring(
-        &self,
-        rules: &[TriggerRule],
-    ) -> Result<SessionMonitorHandle>;
+    pub async fn start_monitoring(&self) -> Result<SessionMonitorHandle>;
 
     /// Stop monitoring this target (session level only).
     pub async fn stop_monitoring(&self) -> Result<()>;
@@ -1318,79 +1307,28 @@ Usability contract for downstream consumers (stdio, LLM, classifier, triggers):
 3. Source-side degradation is explicit in `fidelity`; sink-route drops are explicit in
    `SinkEvent::Gap` and are never folded into source metadata.
 
-### `MatcherKind` — Static-Dispatch Content Matching
+### Historical Note — `MatcherKind` / Built-In Matching
 
-Content matching uses a closed enum (`MatcherKind`) rather than trait objects. All
-matching variants are known at compile time — no vtable dispatch on the hot path.
-Combinators use `Vec` and `Box` (heap-backed) for tree structure.
-Matchers can be stateless (regex, substring) or stateful (line
-counters, vocabulary detectors that accumulate across calls).
+The earlier Track B direction introduced a first-class `MatcherKind` DSL plus
+subscription-side `.filter()` / `.react()` adapters for in-library automation.
+That design is no longer on the active path. The active direction treats
+`libs/tmux` as a tmux stream/history/control substrate for external policy engines,
+so matching and action selection are expected to live in the external consumer.
 
-```rust
-/// A content matcher. Closed enum — all variants known at compile time.
-/// No vtable dispatch; combinators use Vec<MatcherKind> (heap-backed)
-/// and Not uses Box<MatcherKind> (for recursive enum sizing).
-#[derive(Clone)]
-pub enum MatcherKind {
-    /// Matches when text contains a regex pattern. Stateless.
-    Regex { pattern: Regex },
-
-    /// Matches when text contains any of the given substrings. Stateless.
-    /// Faster than regex for simple keyword lists.
-    Substring { needles: Vec<String>, case_insensitive: bool },
-
-    /// Matches after accumulating N newlines across calls. Stateful.
-    /// Useful for "trigger after N lines of output" patterns.
-    LineCount { threshold: usize, count: usize },
-
-    /// Matches when text contains any word from a blocklist. Stateless.
-    /// Words are matched at word boundaries (not as substrings of larger words).
-    WordList { words: HashSet<String>, case_insensitive: bool },
-
-    /// Matches when ALL inner matchers match (AND).
-    AllOf(Vec<MatcherKind>),
-
-    /// Matches when ANY inner matcher matches (OR).
-    AnyOf(Vec<MatcherKind>),
-
-    /// Inverts a matcher (NOT).
-    Not(Box<MatcherKind>),   // Box only for recursive enum sizing, not for dyn dispatch
-}
-
-impl MatcherKind {
-    /// Human-readable name for logging (e.g., "regex:/error/i", "all-of(3)").
-    pub fn name(&self) -> String;
-
-    /// Test whether `text` matches. For stateful variants, this may update
-    /// internal state and return true when a threshold is reached.
-    pub fn matches(&mut self, text: &str) -> bool;
-
-    /// Reset internal state. Called when the matcher is reused across
-    /// monitoring restarts. No-op for stateless variants.
-    pub fn reset(&mut self);
-}
-```
-
-**Why a closed enum**: The set of matching strategies is finite and known at design
-time. A `match` arm handles each variant with zero indirection. `AllOf`/`AnyOf` store
-children as `Vec<MatcherKind>` (heap-backed); `Not` uses `Box<MatcherKind>` for
-recursive enum sizing only (not dynamic dispatch). No vtable allocation per node.
-The entire matcher tree is `Clone` — each sink gets its own copy via `clone()`.
-
-**Statefulness contract**: The bus calls `matches()` on the filter's matcher for each
-`TargetOutput`. Stateful variants (like `LineCount`) accumulate across calls for
-the same sink — each sink gets its own cloned matcher instance, so state is not shared
-across sinks. `reset()` is called when monitoring restarts to clear accumulated state.
+The matcher/rule/reactor design is preserved in [Appendix A](#appendix-a--historical-automation-direction)
+for historical context and possible future revival, but it should not drive the
+active API or implementation plan.
 
 ### `SinkFilter` — Source Routing
 
 <!-- @claude 2026-03-17: Simplified to routing-only per DC24. Content matching
-     moved to Subscription adapters (.filter(), .react()). See DC24 section. -->
+     moved out of the bus layer. 2026-03-20 @codex: active path now favors
+     transcript/history adapters and consumer-owned predicates over a built-in matcher DSL. -->
 
 A `SinkFilter` selects which output reaches a given `Subscription` by source identity.
 Routing fields target host, session, window, and pane. Content matching is **not** part
-of `SinkFilter` — it lives in `Subscription` adapters (`.filter()`, `.react()`), keeping
-the bus layer fast and stateless.
+of `SinkFilter` — the active path keeps the bus layer fast and stateless, and leaves
+transcript construction, consumer predicates, and policy evaluation above the bus.
 
 Multiple filters are combined with OR semantics — output matching **any** filter in the
 set is delivered.
@@ -1518,83 +1456,18 @@ unavoidable until Rust stabilizes async fn pointers. The framework's `on_output`
 fully synchronous with no framework-side allocation (user callbacks may allocate
 internally as needed).
 
-### `ActionHandle` — Consumer-Initiated Actions
+### Historical Note — In-Library Reaction Handles
 
-Subscription consumers (sinks, `.react()` adapters, custom code) that analyze output
-may need to act on the source entity — send keys to the pane, kill a session, etc.
-Rather than giving consumers direct access to `HostHandle` (which would create
-circular dependencies), they receive an `ActionHandle` that provides a scoped, async
-API for actions against the tmux entities they observe.
+The earlier automation direction introduced `ActionHandle`, `ActionRequest`, and
+subscription-side `.react()` so library-managed consumers could dispatch actions back
+into tmux directly. That is now deferred. The active design assumes an external
+LLM/classifier or other policy engine consumes stream/history output, decides what to
+do, and then calls Motlie’s normal control APIs (`Fleet`, `HostHandle`, `Target`) to
+route actions back to the correct host/session/pane.
 
-```rust
-pub struct ActionHandle { /* mpsc::Sender<ActionRequest> */ }
-
-pub struct ActionRequest {
-    pub host: String,
-    pub target: TargetAddress,
-    pub action: SinkAction,
-}
-
-pub enum SinkAction {
-    SendKeys { keys: KeySequence },
-    SendText { text: String },
-    KillSession,
-    RenameSession { new_name: String },
-    // Extensible for future actions
-}
-
-impl ActionHandle {
-    /// Send an action to the target entity. Non-blocking (queued).
-    pub async fn send(&self, request: ActionRequest) -> Result<()>;
-
-    /// Convenience: send keys to a target (any level — session, window, or pane).
-    pub async fn send_keys(
-        &self,
-        host: &str,
-        target: &TargetAddress,
-        keys: KeySequence,
-    ) -> Result<()>;
-
-    /// Convenience: send text to a target (any level).
-    pub async fn send_text(
-        &self,
-        host: &str,
-        target: &TargetAddress,
-        text: &str,
-    ) -> Result<()>;
-
-    /// Convenience: kill a session by name.
-    pub async fn kill_session(&self, host: &str, session: &str) -> Result<()>;
-
-    /// Convenience: rename a session.
-    pub async fn rename_session(
-        &self,
-        host: &str,
-        session: &str,
-        new_name: &str,
-    ) -> Result<()>;
-
-    /// Respond to a specific output event. Extracts host and target from the
-    /// TargetOutput's metadata — sinks don't need to decompose fields manually.
-    /// This is the primary ergonomic entry point for reactive sinks.
-    pub async fn respond(
-        &self,
-        output: &TargetOutput,
-        action: SinkAction,
-    ) -> Result<()>;
-}
-```
-
-Sinks that need to initiate actions capture an `ActionHandle` at their own construction
-time (not injected by `OutputBus`). Action requests are routed through the existing
-per-host bounded dispatch queue (DC4) — the same path used by the monitor's trigger
-rules. This ensures consistent ordering, backpressure, and concurrency limits regardless
-of whether an action originates from a rule or a sink.
-
-**LLM feedback loop**: An LLM sink can call `action_handle.respond(&output, action)` after
-analyzing output — the host and target are extracted from the `TargetOutput` automatically. The design of the LLM sink itself (prompt engineering, approval gates,
-autonomous vs supervised mode) is **out of scope** for this library. The library provides
-the `SinkKind` enum and `ActionHandle` API; LLM integration is a consumer concern.
+The historical reaction-handle design is preserved in
+[Appendix A](#appendix-a--historical-automation-direction) for context, but it should
+not drive the active API or implementation plan.
 
 ### `OutputBus` — Fan-Out Dispatcher
 
@@ -1684,29 +1557,84 @@ impl Subscription {
     /// id (for bus control) and task JoinHandle (for awaited teardown).
     pub fn pipe(self, sink: SinkKind) -> PipeHandle;
 
-    // --- Track B adapters (added when matching/reactors land) ---
+    // --- Active next-wave adapters ---
 
-    /// Content filter. Returns a new Subscription that only passes
-    /// events matching the given matcher. Spawns a forwarding task.
-    pub fn filter(self, matcher: MatcherKind) -> Subscription;
+    /// Build a bounded rolling transcript/history view optimized for
+    /// external-agent context windows. Consumes the Subscription and
+    /// spawns an internal accumulation task.
+    pub fn history(self, opts: HistoryOptions) -> HistoryHandle;
 
-    /// React to matching output by dispatching actions.
-    /// Terminal adapter — consumes the Subscription, spawns a task
-    /// that evaluates the matcher and dispatches via ActionHandle.
-    pub fn react(
-        self,
-        matcher: MatcherKind,
-        action: Action,
-        cooldown: Duration,
-        action_handle: ActionHandle,
-    ) -> JoinHandle<()>;
+    /// Consumer-owned predicate filtering for lightweight selection without
+    /// introducing a built-in matcher DSL.
+    pub fn filter_fn(self, predicate: fn(&TargetOutput) -> bool) -> Subscription;
 }
 ```
 
 **Design principle**: The bus gives you a stream of source-routed events. Everything
 else is layered above. This eliminates the need for multiple `subscribe_*` bus methods
-and makes new consumer patterns (content filtering, reaction, joining) orthogonal to
-the bus itself.
+and makes new consumer patterns (joining, transcript/history construction, lightweight
+predicate filtering, piping) orthogonal to the bus itself.
+
+**Transcript/history note**: The active direction needs a first-class transcript layer
+because the most common consumer is a rolling LLM/classifier loop with a bounded context
+window. The library should therefore own accumulation, source labeling, trimming, and
+gap markers — and let the external agent own policy.
+
+```rust
+/// Controls how a rolling transcript/history buffer is bounded and rendered.
+pub struct HistoryOptions {
+    /// Keep at most this many logical entries (source bursts or gap markers).
+    pub max_entries: usize,
+    /// Keep rendered text under this many characters by trimming oldest entries first.
+    /// Character count is used rather than token count because tokenizer choice is model-specific.
+    pub max_render_chars: usize,
+    /// Label style reused from JoinedStream formatting.
+    pub label_format: LabelFormat,
+    /// Include an omission marker when older history has been trimmed.
+    pub include_omission_marker: bool,
+}
+
+/// Rolling, bounded transcript accumulator built from a Subscription.
+/// Internally consumes JoinedStream-style source coalescing.
+pub struct HistoryHandle { /* shared state + background task */ }
+
+pub struct HistorySnapshot {
+    pub entries: Vec<HistoryEntry>,
+    pub rendered_chars: usize,
+    pub omitted_entries: usize,
+}
+
+pub enum HistoryEntry {
+    /// One coalesced burst from a single source, ready for transcript rendering.
+    Output {
+        source: SourceLabel,
+        text: String,
+        source_changed: bool,
+    },
+    /// Explicit loss marker derived from SinkEvent::Gap.
+    Gap {
+        dropped_events: usize,
+    },
+}
+
+impl HistoryHandle {
+    /// Return the current bounded transcript state for custom formatting.
+    pub fn snapshot(&self) -> HistorySnapshot;
+
+    /// Render a prompt-ready transcript string for external LLM/classifier context.
+    /// This is the primary ergonomic API for rolling-context consumers.
+    pub fn render_text(&self) -> String;
+}
+```
+
+The active intended use is:
+1. monitor and subscribe once
+2. build a `HistoryHandle`
+3. periodically call `render_text()` to obtain the latest bounded context window
+4. send that text to the external LLM/classifier
+5. route any resulting action back through `Fleet`, `HostHandle`, or `Target`
+
+This keeps the common agent loop simple while avoiding any built-in decision engine.
 
 **Backpressure**: The bus remains non-blocking via `try_send()`, with loss visibility.
 When a subscriber falls behind, dropped events are counted and surfaced via explicit
@@ -1876,7 +1804,7 @@ sub4.pipe(SinkKind::Stdio(StdioSink::new(StdioFormat::Json)));
     │     ├── subscribe(all_filters, 1024) -> Subscription
     │     │     ├── .joined("…")              // combined multi-pane view
     │     │     ├── .pipe(SinkKind::Stdio(…))  // pipe to stdio sink
-    │     │     └── .filter(matcher).react(…)  // matching + reaction
+    │     │     └── .history(…)                // transcript / conversation view
     │     │
     │     └── subscribe(db_filters, 256) -> Subscription
     │           └── .pipe(SinkKind::Callback(llm_sink))
@@ -1889,16 +1817,17 @@ sub4.pipe(SinkKind::Stdio(StdioSink::new(StdioFormat::Json)));
 ```
 
 **Monitor → Bus**: The monitor parses control-mode `%output` frames and publishes
-`TargetOutput` to the bus. The monitor does **not** evaluate rules — it is purely a
-stream parser. Rule evaluation is a consumer concern via `Subscription` adapters.
+`TargetOutput` to the bus. The monitor does **not** evaluate policy — it is purely a
+stream parser.
 
 **capture_pane() → Bus**: On-demand captures can optionally be published to the bus
 via a `bus.publish()` call. This is opt-in at the call site, not automatic.
 
-**Subscription → ActionHandle → HostHandle**: A subscription adapter (`.react()`)
-that detects a match submits an `ActionRequest` through its `ActionHandle`. The request
-is routed to the correct `HostHandle` via the existing per-host dispatch queue (DC4).
-Routing is by the `host` field and `TargetAddress` in `ActionRequest`.
+**Subscription → External policy → Fleet / HostHandle / Target**: Consumers turn
+subscription output into transcript/history, analyze it externally (LLM/classifier or
+other code), and then call Motlie’s normal control APIs back through `Fleet`,
+`HostHandle`, or `Target`. Routing remains explicit and uses the same host/target
+identities already present in `TargetOutput`.
 
 ---
 
@@ -1906,107 +1835,16 @@ Routing is by the `host` field and `TargetAddress` in `ActionRequest`.
 
 ### `matcher.rs`
 
-The `MatcherKind` enum and its variants. See
-[Core Abstractions — MatcherKind](#matcherkind--static-dispatch-content-matching) for
-the full enum definition.
-
-All variants are defined in the `MatcherKind` enum. `Regex` and `Substring` are
-stateless (`reset()` is a no-op). `LineCount` is stateful and resets its counter
-on `reset()`. `WordList` uses `regex::Regex` internally with `\b` word boundaries
-for accurate matching. The combinators (`AllOf`, `AnyOf`, `Not`) delegate to their
-children and propagate `reset()`.
+Historical appendix direction only. The built-in matcher DSL is not on the active
+implementation path. If revived later, `matcher.rs` will house that logic; see
+[Appendix A](#appendix-a--historical-automation-direction).
 
 ### `config.rs`
 
-Defines all user-facing configuration. This is the primary integration point.
-
-```rust
-pub struct TmuxAutomatorConfig {
-    pub targets: Vec<HostTarget>,
-    pub rules: Vec<TriggerRule>,
-    pub reconnect: ReconnectPolicy,
-    pub log_json: bool,
-}
-
-pub enum HostTarget {
-    Local {
-        alias: Option<String>,         // default: "localhost"
-        pane_filter: Option<String>,   // regex for monitoring (None = all panes)
-        tmux_socket: Option<TmuxSocket>, // target a non-default tmux server
-    },
-    Ssh {
-        host: String,                  // "host:port"
-        user: String,
-        alias: Option<String>,         // short name for Fleet lookups (default: host)
-        pane_filter: Option<String>,   // regex for monitoring (None = all panes)
-        tmux_socket: Option<TmuxSocket>, // target a non-default tmux server on remote
-    },
-}
-
-/// Selects which tmux server to target on a given host.
-/// Maps to tmux's `-L` (socket name) and `-S` (socket path) flags.
-/// When None, the default tmux server is used.
-pub enum TmuxSocket {
-    /// Named socket: `tmux -L <name>` (looks in default socket dir)
-    Name(String),
-    /// Explicit socket path: `tmux -S <path>`
-    Path(String),
-}
-
-/// Config DTO — deserialized from TOML/YAML. Patterns are strings.
-/// This is the serde-clean layer; `pattern` is a regex string by default.
-/// For non-regex matchers, use `CompiledRule::with_matcher()` directly.
-pub struct TriggerRule {
-    pub name: String,                  // human-readable rule name for logging
-    pub pane_filter: Option<String>,   // regex string (None = all panes)
-    pub pattern: String,               // regex string to match against pane output
-    pub action: Action,
-    pub cooldown: Option<Duration>,    // debounce repeated triggers per pane
-}
-
-/// Runtime form — compiled from TriggerRule during startup validation.
-/// Used to construct `Subscription::react()` calls (DC24): the matcher,
-/// action, and cooldown fields feed directly into the subscription adapter.
-/// Config-driven rules compile to `MatcherKind::Regex`; programmatic callers
-/// can use any `MatcherKind` variant (WordList, LineCount, AllOf, etc.).
-pub struct CompiledRule {
-    pub name: String,
-    pub pane_filter: Option<Regex>,
-    pub matcher: MatcherKind,
-    pub action: Action,
-    pub cooldown: Option<Duration>,
-}
-
-impl TriggerRule {
-    /// Compile string patterns into MatcherKind::Regex. Returns error with rule name context.
-    pub fn compile(&self) -> Result<CompiledRule>;
-}
-
-impl CompiledRule {
-    /// Construct a rule with a custom MatcherKind (bypasses config deserialization).
-    /// Used by programmatic callers who want non-regex matching.
-    pub fn with_matcher(
-        name: impl Into<String>,
-        matcher: MatcherKind,
-        action: Action,
-    ) -> Self;
-}
-
-pub enum Action {
-    SendKeys { keys: String },
-    Log { level: Level, message: String },
-    // Future: Notify { channel: String }, Webhook { url: String }
-}
-
-pub struct ReconnectPolicy {
-    pub initial_delay: Duration,   // default: 2s
-    pub max_delay: Duration,       // default: 60s
-    pub multiplier: u32,           // default: 2
-}
-```
-
-**Requirement**: Config must be constructable programmatically (library use) and deserializable
-from TOML/YAML (CLI use).
+Historical appendix direction only. The earlier built-in automation configuration
+(`TmuxAutomatorConfig`, `TriggerRule`, `ReconnectPolicy`, etc.) is deferred in favor
+of a programmatic `Fleet`/`HostHandle`/`Target` workflow plus external policy engines.
+See [Appendix A](#appendix-a--historical-automation-direction) for the preserved shape.
 
 ### `transport.rs`
 
@@ -2436,12 +2274,12 @@ struct HostHandleInner {
 ### `monitor.rs`
 
 The core event loop. Each `SessionMonitor` owns one control-mode connection to a single
-tmux session and evaluates rules against its output. `HostHandle` creates one
+tmux session and publishes parsed output into `OutputBus`. `HostHandle` creates one
 `SessionMonitor` per monitored session (DC10, DC13).
 
 ```rust
 /// Monitors a single tmux session via control mode.
-pub struct SessionMonitor { /* session name, rules, cooldown state */ }
+pub struct SessionMonitor { /* session name, stream assembly state */ }
 
 impl SessionMonitor {
     /// Run the monitor loop for one session.
@@ -2494,10 +2332,13 @@ This module contains:
 - `TargetOutput`: the unit of output flowing through the pipeline
 - `SinkKind` enum: closed set of sink types (static dispatch, no trait objects)
 - `SinkFilter` / `CompiledSinkFilter`: composable output targeting
-- `MatcherKind` (re-exported from `matcher.rs`): content matching variants
-- `ActionHandle` / `ActionRequest` / `SinkAction`: sink-initiated actions
 - `OutputBus`: central fan-out dispatcher with per-sink bounded channels
 - `SinkId`: opaque handle for unsubscribe
+- transcript/history-oriented adapters layered above `Subscription`
+
+Historical appendix only:
+- `MatcherKind`: built-in matcher DSL (deferred)
+- `ActionHandle` / `ActionRequest` / `SinkAction`: in-library reaction path (deferred)
 
 `OutputBus` is owned by `Fleet` and shared with all `HostHandle` instances via `Arc`.
 Monitors publish `TargetOutput` to the bus; the bus wraps them in `SinkEvent::Data`
@@ -2545,18 +2386,14 @@ intended for automated remote execution must not silently accept unknown hosts.
 - `--trust-first-use` / config flag: accept and persist on first connect, reject on mismatch
 - `--insecure` / config flag: accept all (prototype behavior), log warning on every connection
 
-### DC3: Trigger/Action Model
+### DC3: Trigger/Action Model (Historical)
 
-**Decision**: Configurable rules with per-pane cooldown.
+**Status**: Deferred. Preserved for historical context in
+[Appendix A](#appendix-a--historical-automation-direction).
 
-**Rationale**: The prototype's hardcoded `contains('>')` → `send-keys 'continue'` is a
-demonstration, not a design. Real use cases include:
-- Responding to `[y/N]` prompts with `y`
-- Detecting error patterns and logging/alerting
-- Sending different commands to different session types
-
-**Cooldown**: Rules fire at most once per `cooldown` duration per pane. This prevents
-rapid-fire send-keys when a prompt re-renders. Default cooldown: 1 second.
+The earlier direction introduced configurable rules with per-pane cooldown. That is
+no longer an active design goal. Policy now lives outside the library; Motlie focuses
+on stream/history delivery plus routed control primitives.
 
 ### DC4: Action Dispatch Channel Strategy
 
@@ -2587,8 +2424,9 @@ backpressure, and isolation without persistent-shell parsing.
 **Rationale**: Hosts are independent. A connection failure on host A must not affect host B.
 Each task runs the full lifecycle: connect → discover → pipe → monitor → cleanup.
 
-**Shared state**: Only the rule set and shutdown signal are shared across hosts. Per-host
-state (connection, panes, pipes, cooldown timers) is task-local.
+**Shared state**: Only registry/binding metadata and shutdown signals are shared across
+hosts. Per-host state (connection, panes, monitoring tasks, routed control queues) is
+task-local.
 
 ### DC6: Local vs SSH Transport
 
@@ -3241,14 +3079,15 @@ and directories now. `Target` is intentionally not extended for file transfer.
 
 **Decision**: Retain the pub/sub `OutputBus` architecture for fan-out, but extract
 `JoinedStream` from `SinkKind` into an independent consumer-side stream combinator.
-Reject a full Unix-pipe pipeline model.
+Adopt Unix-pipe-style composition at the subscription layer for transforms/history,
+while keeping policy and action selection outside the library.
 
-**Context**: During implementation planning for Phase 2 (monitoring + sink pipeline),
-we evaluated whether a Unix-pipe-style composable pipeline (`source | filter |
-transform | tee file.log | sink`) would better serve the streaming and stream-combining
-use cases than the existing pub/sub `OutputBus` design. The pipe model's appeal is
-composability — each stage has one input and one output, `tee` is the only branching
-primitive, and composition comes from a uniform stream contract.
+**Context**: The original Track B direction leaned toward a built-in matcher/rule/reactor
+engine. After Track A landed and the dominant use case became clearer, the design shifted:
+the common consumer is an external LLM/classifier that combines output into conversation
+history, makes a decision out of process, and then uses Motlie again to route control
+actions (`send_text`, `send_keys`, `capture`, etc.) back to the same session or pane.
+That makes Motlie primarily a **stream/history/control substrate**, not a policy engine.
 
 **Evaluation**:
 
@@ -3259,47 +3098,126 @@ primitive, and composition comes from a uniform stream contract.
 | Runtime dynamism | `subscribe()`/`unsubscribe()` at any time | Pipeline topology is structural — adding consumers requires rebuilding |
 | Backpressure | Per-subscriber channels, independent | Propagates upstream through chain — slow stage blocks source |
 | Rust implementation | `SinkKind` enum, `mpsc` channels — idiomatic | `Stream` trait composition, `Pin`, type-erased chains — complex |
-| Transform chains | Not modeled (rarely needed in this domain) | First-class composable stages |
+| Transform/history chains | Consumer-side adapters | First-class composable stages |
 | Complexity | One struct, publish/subscribe | Stage traits, chain builders, tee/join combinators, per-stage lifecycle |
 
-**Conclusion**: The pipe model optimizes for linear transform chains — not the primary
-pattern in tmux monitoring. The actual patterns (fan-out to multiple consumers, fan-in
-from multiple hosts, runtime subscribe/unsubscribe, per-consumer backpressure tolerance)
-are exactly what pub/sub handles well. Full pipe adoption would over-engineer the
-solution and fight Rust's async stream type system for marginal benefit.
+**Conclusion**: Full pipe adoption is still unnecessary — the actual patterns (fan-out to
+multiple consumers, fan-in from multiple hosts, runtime subscribe/unsubscribe, per-consumer
+backpressure tolerance) are exactly what pub/sub handles well. But linear transforms and
+history construction *are* important at the consumer boundary. The right split is:
+pub/sub for routing/fan-out, subscription adapters for transforms/history, and an
+external policy engine for decisions.
 
 **What we borrowed**: The analysis revealed two composability improvements that adopt
 pipe-style thinking without abandoning pub/sub:
 
 1. **`Subscription` as the composable seam**: The bus exposes one primitive —
    `subscribe(filters, capacity) -> Subscription`. All consumer-side composition
-   (joining, filtering, piping, reacting) is expressed as `Subscription` adapter
-   methods. This is the Unix-pipe ergonomic pattern applied at the consumer level:
-   the bus does fan-out and source routing; adapters chain above it. This replaces
-   the prior inconsistency of multiple `subscribe_*` bus methods.
+   (joining, mapping, predicate filtering, history building, piping) is expressed as
+   `Subscription` adapter methods. This is the Unix-pipe ergonomic pattern applied at
+   the consumer boundary: the bus does fan-out and source routing; adapters chain above it.
 
 2. **`JoinedStream` as an adapter, not a sink variant**: Joining is a consumer
    concern (like Unix `paste`), not a sink property. `subscription.joined(format)`
    returns a `JoinedStream` that produces `StreamChunk`s with `source_changed` flags
    for coalescing. Composes freely with any downstream consumer.
 
-3. **Rules/reactors as subscription consumers, not monitor internals**: Rather than
-   embedding rule evaluation inside `SessionMonitor::run()` (which creates a
-   privileged matching path separate from bus-side content matching), rules are
-   expressed as `subscription.filter(matcher).react(action, cooldown, handle)`.
-   The monitor parses and publishes; matching and reaction happen at the subscription
-   layer. This eliminates the dual-matching problem (monitor-side rules vs sink-side
-   `SinkFilter` content matching) and makes all consumers — logging sinks, LLM
-   consumers, TUI displays, and reactive rules — peers on the same stream substrate.
+3. **History-oriented adapters over rule engines**: The primary downstream artifact is
+   no longer “rule matched” but “conversation/history is ready for analysis.” The active
+   path therefore prioritizes transcript-friendly adapters and bounded history windows over
+   a built-in matcher DSL. Matcher/rule/reactor designs are preserved in the appendix as
+   historical context rather than deleted.
 
 **Layering**:
 - **Bus**: Source routing (host/session/pane), fan-out, backpressure/gap tracking
-- **Subscription adapters**: Content matching, joining, transforming, reacting
+- **Subscription adapters**: Joining, plain-text/history transforms, consumer-side predicates
 - **Terminal consumers**: `SinkKind` (stdio, callback), custom code via `into_receiver()`
+- **External policy**: LLM/classifier or other consumer decides whether and how to act,
+  then uses Motlie’s normal control APIs to route actions back through `HostHandle`,
+  `Target`, or `Fleet`
 
-**Impact**: DC15 revised (JoinedStream as adapter). OutputBus simplified to one
-`subscribe()` primitive. Phase 2 PLAN restructured into Track A (streaming + combining)
-and Track B (matching + reactors as subscription adapters).
+**Impact**: DC15 remains the active multi-source view. OutputBus stays simplified to one
+`subscribe()` primitive. The active next work shifts from matcher/reactor machinery to
+history/transcript composition and Fleet coordination for external agents.
+
+### DC28: Rolling Transcript / History for External LLM Context
+
+**Decision**: The transcript/history layer is a bounded in-memory rolling snapshot built
+on top of `JoinedStream`. `subscription.history(opts)` returns a `HistoryHandle` that
+accumulates source-labeled output bursts and explicit gap markers, and exposes two
+consumer surfaces:
+- `snapshot()` for structured access
+- `render_text()` for prompt-ready rolling context
+
+**Why this artifact**:
+- The dominant consumer is an external LLM/classifier loop with a finite context window.
+- That loop usually wants the **latest bounded transcript now**, not a second async
+  stream that it must separately buffer and trim.
+- A bounded snapshot handle keeps Motlie responsible for the tmux-specific mechanics
+  (source labels, coalescing, gap markers, omission markers) while leaving model choice,
+  prompt framing, and decision-making outside the library.
+
+**Relationship to `JoinedStream`**:
+- History is built **on top of** `JoinedStream`, not in parallel with it.
+- `JoinedStream` already solves source attribution and `source_changed` coalescing.
+- `HistoryHandle` adds accumulation, trimming, omission markers, and prompt-oriented
+  rendering on top of those semantics.
+
+**Bounding strategy**:
+- The primary window is **global merged history**, not per-source history, because LLM
+  context windows are global.
+- History is bounded by:
+  1. logical entry count (`max_entries`)
+  2. rendered character budget (`max_render_chars`)
+- When over budget, trim the **oldest entries first**.
+- If trimming occurred and `include_omission_marker` is true, prepend a single omission
+  marker like `[... 37 earlier entries omitted ...]` in `render_text()`.
+- Character budget is used in-library because token budgets are model-specific and belong
+  to the external consumer.
+
+**Consumer interaction model**:
+- Primary path: polling/snapshot.
+- External agent loop:
+  1. `let history = sub.history(opts);`
+  2. periodically `let prompt_context = history.render_text();`
+  3. pass `prompt_context` to the model/classifier
+  4. route actions back with `Fleet`, `HostHandle`, or `Target`
+- Structured consumers can call `snapshot()` and format entries themselves.
+
+**Why not an async `HistoryStream` as the primary artifact**:
+- It would force every external consumer to reimplement rolling buffering and trimming.
+- That duplicates the exact prompt-window management problem this layer should solve.
+- Snapshot access composes well with periodic model inference and agent turns.
+
+**Why this supports the rolling-context use case cleanly**:
+- The same `HistoryHandle` can live for the lifetime of an agent session.
+- `render_text()` always returns the most recent bounded, source-labeled context.
+- Gap markers and omission markers make uncertainty explicit instead of silently
+  pretending the transcript is complete.
+- External policy stays simple: “get latest context, infer, act.”
+
+### DC27: Fleet Routing Convenience vs Direct Target Use
+
+**Decision**: Keep both levels. `Target` remains the canonical direct-control handle,
+while `Fleet` offers convenience routing for workflows that reason in aliases and
+workstream names rather than holding a resolved `Target` the whole time.
+
+**Rationale**:
+- External agents often consume output first, then decide later what to do. In that
+  delay, the most convenient stable handle is often a workstream or host alias rather
+  than a previously retained `Target`.
+- `Fleet` already owns the registry/binding layer, so convenience methods like
+  `send_text(name, ...)`, `send_keys(name, ...)`, and `capture(name)` are natural
+  wrappers around `find(name)` plus normal `Target` operations.
+- This does not replace direct `Target` usage. Callers that already hold a `Target`
+  should keep using it directly.
+
+**Contract**:
+- `Fleet`-level routing helpers are conveniences, not privileged APIs.
+- They resolve a binding or alias, then delegate to the same underlying
+  `HostHandle` / `Target` control path used by direct callers.
+- Workstream name resolution remains explicit and inspectable through `bind()`,
+  `find()`, and `workstreams()`.
 
 ### DC7: Capture-Pane vs Stream Monitoring
 
@@ -3393,9 +3311,10 @@ tmux, or when monitoring panes across multiple tmux servers on the same host).~~
 **Decision**: `libs/tmux` is a pure library. CLI binary lives in `bins/tmux-automator/`.
 
 **Rationale**: Follows the existing workspace convention (`libs/mcp` + `examples/mcp/`).
-The library exposes `Fleet`, `HostHandle`, `TmuxAutomatorConfig`, and all operation APIs.
-The binary handles CLI parsing, config file loading, signal handling, and tracing
-initialization. The library is also consumable by MCP tools or other programmatic callers.
+The library exposes `Fleet`, `HostHandle`, `Target`, `OutputBus`, `Subscription`, and
+all operation APIs. The binary handles CLI parsing, signal handling, and tracing
+initialization. The library is also consumable by MCP tools, LLM agents, or other
+programmatic callers.
 
 ### DC12: Output Sink Pipeline Architecture
 
@@ -3403,9 +3322,9 @@ initialization. The library is also consumable by MCP tools or other programmati
 (`OutputBus`) that delivers `TargetOutput` to subscriptions. Each subscription receives
 its own bounded channel; terminal consumers (sinks) are attached via `.pipe(SinkKind)`.
 Routing is owned by `subscribe(filters, capacity) -> Subscription` — sinks are terminal
-consumers with no routing logic. Content matching and reaction are `Subscription`
-adapters (`.filter()`, `.react()`). Consumers may initiate actions on tmux entities via
-an `ActionHandle` that routes requests through the existing per-host dispatch queue (DC4).
+consumers with no routing logic. Consumer-side composition is layered as adapters above
+`Subscription`; the active path prioritizes joining, transcript/history construction,
+and custom consumer predicates rather than a built-in matcher/reactor DSL.
 
 **Rationale**:
 - **Decoupled latency**: A slow LLM consumer must never block a fast stdio sink. Per-
@@ -3418,12 +3337,11 @@ an `ActionHandle` that routes requests through the existing per-host dispatch qu
   targeting "all panes on host-a" OR "session:build on any host" with a single subscribe.
 - **Single routing layer**: Routing lives in `subscribe(filters)` only — sinks do not
   own filters. This eliminates ambiguity about where routing is configured.
-- **Action loop**: `ActionHandle` gives consumers a way to respond to output (e.g.,
-  `.react()` adapter dispatches actions). Actions flow through the existing bounded queue
-  and semaphore, preserving ordering and backpressure guarantees from DC4.
-- **LLM feedback loop out of scope**: The `ActionHandle` API is in scope; the logic that
-  decides *what* action to take (LLM inference, prompt construction) is out of scope for
-  `libs/tmux`. Consumers build that on top.
+- **External-agent-first**: The primary consumer is expected to be an external
+  LLM/classifier or other policy engine. It consumes stream/history output, decides
+  what to do, and then calls Motlie’s normal control APIs directly.
+- **No privileged reaction path**: The library should not force all consumers through
+  an internal rule engine when the common case is external analysis.
 
 **Alternatives considered**:
 - Bus-level batching with configurable window: Rejected — forces all sinks to the same
@@ -3441,9 +3359,9 @@ other active monitors at the same or higher level.
 
 | Level | Start | Stop |
 |-------|-------|------|
-| Fleet | `fleet.start_monitoring(rules)` | `fleet.shutdown()` |
-| Host | `fleet.start_monitoring_host(host, rules)` | `fleet.stop_monitoring_host(host)` |
-| Session | `host.start_monitoring_session(&target, rules)` | `host.stop_monitoring_session(&target)` |
+| Fleet | `fleet.start_monitoring()` | `fleet.shutdown()` |
+| Host | `fleet.start_monitoring_host(host)` | `fleet.stop_monitoring_host(host)` |
+| Session | `host.start_monitoring_session(&target)` | `host.stop_monitoring_session(&target)` |
 
 **Rationale**: DC10 establishes that each monitored session has its own control-mode
 connection (`tmux -C attach -t <session>`). These connections are independent — tearing
@@ -3469,43 +3387,17 @@ the session's handle, which signals the stop channel, flushes pending output to 
 `host.list_sessions()`, etc.) are unaffected by monitoring state. A host with stopped
 monitoring is still fully operational for on-demand use via `HostHandle` and `Target`.
 
-### DC14: Trait-Based Content Matching
+### DC14: Historical Matcher DSL Direction
 
-**Decision**: Text matching is abstracted behind the `MatcherKind` enum. Regex is
-one implementation, not a privileged special case. `MatcherKind` is used at the
-`Subscription` adapter layer (`.filter()`, `.react()`) — there is one matching system,
-not separate monitor-side and sink-side matchers (see DC24).
+**Status**: Deferred. Preserved for historical context in
+[Appendix A](#appendix-a--historical-automation-direction).
 
-**Rationale**: Different use cases need different matching strategies:
-- **Regex**: General-purpose pattern matching (the default for config-driven rules)
-- **Substring/keyword lists**: Faster than regex for simple "does output contain X?"
-- **Word-boundary blocklists**: Bad-word/secret detectors that don't false-positive on
-  substrings (e.g., "token" matches "token" but not "tokenize")
-- **Stateful stream matchers**: Line counters, byte accumulators, rate detectors —
-  these need to track state across multiple `TargetOutput` events
-
-Making regex the only matching mechanism would force all of these into regex patterns,
-which is unnatural for stateful matchers and inefficient for simple keyword checks.
-
-**Statefulness**: Matchers may be stateful (`matches(&mut self, ...)`). Each
-`Subscription` adapter (`.filter()`, `.react()`) gets its own cloned `MatcherKind`
-instance — state is never shared. `reset()` is called on monitoring restart. Source
-routing (host/session/window/pane) is handled by the bus before events reach the
-subscription, so expensive content matchers are only invoked on pre-filtered output.
-
-**Static dispatch**: All matcher variants are defined in the `MatcherKind` enum (DC14).
-No vtable dispatch on the hot path. `AllOf`/`AnyOf` store children as `Vec<MatcherKind>`
-(heap-backed); `Not` uses `Box<MatcherKind>` for recursive enum sizing. The entire
-matcher tree is `Clone`.
-
-**Config boundary**: `TriggerRule` (serde DTO) stores `pattern: String` which compiles
-to `MatcherKind::Regex`. Programmatic callers bypass the config layer and construct
-`Subscription::filter(matcher)` or `Subscription::react(matcher, action, ...)` directly
-with any `MatcherKind` variant.
-
-**Built-in matchers** (all `MatcherKind` enum variants): `Regex`, `Substring`,
-`LineCount`, `WordList`, plus `AllOf`/`AnyOf`/`Not` combinators. The enum is closed —
-new matcher types require adding a variant (keeping the hot path static-dispatch).
+The previous direction introduced a built-in `MatcherKind` enum and subscription-side
+`.filter()` / `.react()` adapters so Motlie could host its own automation logic. That
+is no longer the active design goal. The common case is now external analysis over
+conversation/transcript history, followed by ordinary Motlie control calls back into
+tmux. As a result, matching remains an optional future layer rather than an active
+centerpiece of the library.
 
 ### DC15: Joined Stream — Multi-Source Consolidated View
 
@@ -4235,135 +4127,91 @@ rule engine, no reconnection, no config deserialization yet.
 5. Unit tests: `SshTransport` via mock SSH server or `MockTransport`, monitor loop with
    canned control-mode output, action dispatch ordering
 
-**Deliverable**: Library that monitors panes on localhost or one SSH host, detects a
-pattern, and sends a response. Shutdown is explicit (caller-initiated, no signal handling
-in library).
+**Deliverable**: Library that monitors panes on localhost or one SSH host, publishes
+deterministic `TargetOutput` into the bus, and supports explicit shutdown. Library policy
+logic remains out of scope.
 
 **Acceptance criteria**:
 - All Phase 1 operations work identically over `SshTransport`
-- Monitoring starts on localhost, detects a pattern, sends configured response
+- Monitoring starts on localhost and publishes deterministic output into `OutputBus`
 - `monitor_handle.shutdown()` cleanly stops monitoring and cleans up
 - Localhost monitoring works without any SSH configuration
 - Monitor output includes deterministic source sequencing and fidelity annotations
 
-### Phase 2b: Full Rule Engine + Reconnection + Config
+### Phase 2b: Transcript / History Adapters
 
-<!-- @claude 2026-03-17: Phase 2b/2c narratives updated per DC24. Rules are subscription
-     consumers; SinkFilter is routing-only; OutputBus uses subscribe() -> Subscription. -->
-
-**Goal**: Layer the configurable rule engine, cooldown, reconnection, and config
-deserialization as `Subscription` adapter consumers (DC24).
+**Goal**: Build the consumer-side adapters that turn source-routed stream output into
+conversation/transcript-friendly artifacts for external LLM/classifier analysis.
 
 **Tasks**:
-1. Implement `config.rs`: `TriggerRule` (string patterns), `CompiledRule`, `Action`,
-   `ReconnectPolicy`, `TmuxAutomatorConfig` with serde deserialization,
-   `HostTarget::Local` and `HostTarget::Ssh` variants
-2. Implement rule compilation: `TriggerRule::compile() -> Result<CompiledRule>` with
-   user-facing error messages including rule name and pattern context
-3. Rules expressed as `subscription.filter(matcher).react(action, cooldown, handle)` —
-   no monitor-side evaluation. Per-pane cooldown in `.react()` adapter.
-4. Reconnection logic with exponential backoff in `HostHandle` (SSH targets only)
-5. Unit tests: rule evaluation via `.react()`, cooldown behavior, config deserialization
+1. Extend `Subscription` with transcript/history-oriented adapters (`joined()`,
+   plain-text helpers, bounded history windows)
+2. Add lightweight consumer-owned predicate helpers where useful, without introducing
+   a built-in matcher DSL as an active dependency
+3. Define transcript/history data structures with stable source labels and clear
+   chunk/turn boundaries for downstream analysis
+4. Add focused examples and API snippets showing external-agent consumption patterns
+5. Unit/integration tests: source labeling, coalescing, bounded history behavior,
+   gap visibility, transcript determinism
 
-**Deliverable**: Full monitoring with configurable rules via Subscription adapters.
+**Deliverable**: Library produces transcript-friendly history views from live tmux output
+without embedding policy or decision logic.
 
 **Acceptance criteria**:
-- Config file (TOML) deserializes into `TmuxAutomatorConfig` with compiled rules
-- Invalid regex in config produces error with rule name context
-- Rules with cooldown do not fire more than once per cooldown period
-- Reconnection resumes monitoring after a simulated SSH disconnect
+- A subscription can be turned into a bounded multi-source transcript/history stream
+- Source attribution remains stable and explicit across hosts/sessions/panes
+- Gap/backpressure markers remain visible to downstream consumers
+- Examples demonstrate an external consumer building history and acting separately
 
-### Phase 2c: Output Sink Pipeline
+### Phase 2c: Fleet Coordination + Routed Control
 
-**Goal**: Implement the async output distribution pipeline with `OutputBus` and
-`Subscription` composable seam (DC24).
+**Goal**: Make `Fleet` the coordination layer for multi-host monitoring, aggregation,
+binding/workstream lookup, and routed control actions.
 
 **Tasks**:
-1. Implement `sink.rs`: `TargetOutput`, `SinkEvent`, `SinkKind`, routing-only `SinkFilter` /
-   `CompiledSinkFilter`, `ActionHandle` / `ActionRequest` / `SinkAction`. `TargetOutput`
-   includes canonical `content`, optional `raw_content`, `sequence`, and fidelity metadata
-2. Implement `OutputBus`: `subscribe(filters, capacity) -> Subscription` API,
-   fan-out loop that matches `TargetOutput` against compiled routing filters and dispatches
-   to per-subscription channels, no-silent-drop backpressure (explicit `SinkEvent::Gap`),
-   graceful shutdown
-3. Implement `Subscription` type with adapter methods: `.pipe(SinkKind)`, `.joined(fmt)`,
-   `.filter(MatcherKind)`, `.react(matcher, action, cooldown, handle)`,
-   `.into_receiver()`
-4. Implement `StdioSink`: default reference implementation that writes `TargetOutput` to
-   stdout with `[host:pane_target]` prefix, immediate flush, no batching
-5. Wire `OutputBus` into `monitor.rs`: control mode parser feeds `TargetOutput` into the
-   bus (monitor is stream-only, no rule evaluation)
-6. Wire `ActionHandle` into `HostHandle`: subscription-initiated actions route through the
-   existing per-host action dispatch queue (DC4)
-7. Integrate into `Fleet`: `Fleet::output_bus()` accessor, subscription setup before
-   `start_monitoring()`
-8. Unit tests: `SinkFilter` routing logic (AND within fields, OR across filters),
-   `OutputBus` fan-out to multiple subscriptions, `Subscription` adapter chaining,
-   backpressure behavior, `ActionHandle` delivery
+1. Implement `fleet.rs` as a programmatic registry: connect hosts, assign aliases,
+   expose `host()`, `hosts()`, `output_bus()`, and workstream bindings
+2. Aggregate monitoring lifecycle across hosts with `start_monitoring()`,
+   `start_monitoring_host()`, `stop_monitoring_host()`, and `shutdown()`
+3. Add convenience routing helpers (`send_text`, `send_keys`, `capture`, `target`)
+   so external agents can act through Fleet without reimplementing lookup logic
+4. Preserve explicit per-host status tracking and per-target error isolation
+5. Unit/integration tests: multi-host connect with one failure, alias conflict
+   detection, workstream bind/find/unbind, routed action correctness
 
-**Deliverable**: Library routes captured output to registered sinks asynchronously. A
-`StdioSink` prints output in real-time. Custom sinks (TUI, LLM) can be registered by
-consumers.
+**Deliverable**: Multi-host registry and routing layer that pairs naturally with
+external policy engines.
 
 **Acceptance criteria**:
-- `OutputBus` delivers `TargetOutput` to 3 registered sinks concurrently
-- A slow sink (simulated 500ms delay) does not block other sinks
-- `SinkFilter { host: Some("web.*"), session: None, window: None, pane: None }` matches
-  all panes on hosts matching `web.*`
-- Two filters ORed together match the union of their targets
-- `StdioSink` produces readable output with host and pane context
-- `ActionHandle::send_keys()` delivers the action through the host dispatch queue
-- `OutputBus::shutdown()` drops all senders, closing subscriber channels; piped tasks drain remaining events and exit on their own — callers hold `PipeHandle` from `pipe()` for flush-and-join semantics
-  <!-- @claude 2026-03-18 — narrowed from "calls flush() on all sinks before returning" to match fire-and-forget implementation (PR #83 R1). R3: JoinHandle → PipeHandle -->
-- Backpressure/drop conditions are observable to consumers via `SinkEvent::Gap`
-  (no silent data loss, and no overloading of source-side fidelity metadata)
+- `Fleet` can connect to multiple hosts concurrently with per-host isolation
+- `Fleet::output_bus()` exposes unified stream aggregation for all monitored hosts
+- `Fleet` can route control actions back to the correct bound host/target
+- Workstream bindings make stable target lookup possible without config DSLs
 
-### Phase 3: Multi-Target Fleet + CLI
+### Phase 3: Agent-Facing API + CLI / Examples
 
-**Goal**: Multi-target support via `Fleet` and a usable CLI binary.
+**Goal**: Expose the simplified registry/stream/history/control model cleanly in the
+public API and supporting tools.
 
 **Tasks**:
-1. Implement `fleet.rs`: `Fleet` with concurrent connect, target lookup by alias (DC9),
-   per-target status tracking, aggregate `start_monitoring()` and `shutdown()`
-2. Signal handling in the CLI binary via `tokio::signal` for SIGINT/SIGTERM (fixes P5),
-   wired to `fleet.shutdown()`. The library does NOT install signal handlers (DC11).
-3. Create `bins/tmux-automator/` with `clap` CLI using noun-verb subcommand grouping:
+1. Re-export the active consumer-facing surface from `lib.rs`:
+   `Fleet`, `HostHandle`, `Target`, `OutputBus`, `Subscription`, `SinkKind`,
+   `JoinedStream`, transcript/history types, and existing control/capture APIs
+2. Keep the CLI/examples focused on connection, monitoring, capture, send/exec, and
+   transcript inspection rather than built-in rule execution
+3. Provide agent-oriented examples that show:
+   - connect/register hosts
+   - monitor and build transcript/history
+   - route follow-up actions back through `Fleet` / `Target`
+4. Add smoke tests and docs that verify the external-agent workflow end to end
 
-   **`session` — session lifecycle**:
-   - `session list [--host <alias>]` — list sessions on one or all hosts
-   - `session create <name> [--host <alias>] [--window-name <name>] [--command <cmd>]`
-   - `session kill <name> [--host <alias>]`
-   - `session rename <old> <new> [--host <alias>]`
-
-   **`target` — operations on any tmux entity (session, window, pane)**:
-   - `target list [--host <alias>] [--filter <regex>]` — list panes/windows
-   - `target capture <spec> [--host <alias>] [--history <lines>]` — dump content
-   - `target send <spec> <input> [--host <alias>]` — send keys
-   - `target exec <spec> <command> [--host <alias>]` — run command, return stdout + exit code
-
-   **`monitor` — continuous monitoring lifecycle**:
-   - `monitor start [--config <path>]` — start monitoring on all configured targets
-   - `monitor status` — show active monitoring sessions
-
-   `<spec>` follows `TargetSpec` syntax: `session`, `session:window`, or
-   `session:window.pane`. The `target` noun reflects the unified `Target` type
-   (DC16) — capture, send, and exec work at any tmux addressing level.
-4. Config file support (TOML) with CLI flag overrides
-5. JSON and text log output modes
-6. Per-target tracing spans with alias labels
-
-**Deliverable**: Multi-target CLI tool and library. Single process operating across
-localhost and N remote hosts.
+**Deliverable**: Public API, examples, and optional CLI surfaces that tutorialize the
+external-agent workflow instead of a built-in automator.
 
 **Acceptance criteria**:
-- `fleet.connect_all()` connects to 3 targets concurrently; one failure does not block others
-- CLI `session list --host web-server` returns sessions from the aliased host
-- CLI `session create build --host localhost` creates a local session
-- CLI `target capture myapp:0.0 --host db-server --history 500` returns scrollback content
-- CLI `target exec myapp:0.0 "make test" --host db-server` returns stdout and exit code
-- CLI `session kill build` terminates the session
-- `monitor start --config rules.toml` starts monitoring on all configured targets
-- `monitor status` shows active sessions being monitored
+- Public docs present `Fleet` as registry/aggregation/routing rather than rule runner
+- Examples cover monitor → transcript/history → external decision → routed control
+- CLI/examples remain useful without a config-driven rule engine
 
 ### Phase 4: Hardening + Testing
 
@@ -4391,8 +4239,8 @@ user interfaces.
 the `Fleet` API from `libs/tmux` and provide:
 - Live pane content display via `TuiSink` registered with `OutputBus` (Phase 2c)
 - Session/window/pane tree navigation across targets
-- Interactive send-keys input via `ActionHandle`
-- Monitoring rule status and trigger history
+- Interactive send-keys input via `Fleet`, `HostHandle`, or `Target`
+- Transcript/history views and host connection status
 - Host connection status dashboard
 
 The `TuiSink` implementation lives in the binary (`bins/tmux-automator/`), not in
@@ -4402,6 +4250,65 @@ manages its own rendering cadence (e.g., 60fps batching).
 This phase depends on Phases 1-3 and 2c being complete and stable.
 For TUI fidelity/reliability constraints under mixed-client attachment and resizing,
 see [`TUI.md`](./TUI.md).
+
+---
+
+## Appendix A — Historical Automation Direction
+
+The following material is preserved for historical context. It represents the
+pre-2026-03-20 direction where Motlie hosted more of the automation/policy loop
+internally. That direction is not the active plan, but it may still inform future
+reconsideration if built-in automation becomes a primary product goal.
+
+### A.1 Matcher DSL (`MatcherKind`)
+
+The historical design introduced a closed, statically dispatched `MatcherKind` enum
+with variants such as `Regex`, `Substring`, `LineCount`, `WordList`, `AllOf`,
+`AnyOf`, and `Not`. The intent was to let Motlie host content matching directly in the
+stream pipeline via subscription adapters like `.filter()` and `.react()`.
+
+Why it was deferred:
+- the dominant use case shifted to external LLM/classifier analysis over transcript/history
+- introducing a built-in matcher DSL pushed the library toward owning policy decisions
+- transcript/history ergonomics became more valuable than in-library trigger semantics
+
+### A.2 In-Library Reaction Path (`ActionHandle`)
+
+The historical design introduced `ActionHandle`, `ActionRequest`, and `SinkAction` so
+consumers could detect output and enqueue actions back into tmux without leaving the
+library. This paired naturally with `.react()` and cooldown logic.
+
+Why it was deferred:
+- external agents can already use `Fleet`, `HostHandle`, and `Target` directly
+- an internal reaction path makes Motlie look like a rule engine rather than a substrate
+- the same control primitives remain available without a separate reaction API
+
+### A.3 Built-In Automation Config
+
+The historical direction also introduced `TmuxAutomatorConfig`, `HostTarget`,
+`TriggerRule`, `CompiledRule`, `Action`, and `ReconnectPolicy` as a declarative config
+surface for built-in automation and config-driven CLI workflows.
+
+Why it was deferred:
+- the simplified active path is programmatic and agent-oriented, not config-first
+- external policy engines want streaming/history plus routed control, not Motlie-owned
+  declarative rule evaluation
+- config/reconnect complexity is easier to justify once a concrete built-in automation
+  product direction exists
+
+### A.4 Historical Fleet / CLI Shape
+
+The older Phase 3 direction treated `Fleet` as the core of a config-driven automator:
+`Fleet::new(config)`, `connect_all()`, `start_monitoring(rules)`, plus a CLI centered on
+config files and built-in rule execution.
+
+Why it was deferred:
+- the active direction instead treats `Fleet` as a registry, aggregator, and routing layer
+- examples and CLI value are clearer when focused on connect/monitor/history/control
+- external agents can supply policy without requiring Motlie to own the automation loop
+
+If this historical path is revived later, it should be re-evaluated against the then-current
+stream/history/Fleet APIs rather than reinstated wholesale.
 
 ---
 
