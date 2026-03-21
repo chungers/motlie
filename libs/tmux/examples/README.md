@@ -31,6 +31,7 @@ cargo build -p motlie-tmux --examples
 ./target/debug/examples/monitor_pipe ssh://localhost my_session
 ./target/debug/examples/joined_demo ssh://localhost
 ./target/debug/examples/joined_demo ssh://localhost --format separator
+./target/debug/examples/history_demo ssh://localhost
 ```
 
 ## Examples
@@ -447,3 +448,55 @@ total 218368
 drwxrwxrwt 35 root   root     118784 Mar 19 21:42 .
 --- end ---
 ```
+
+### history_demo — Rolling LLM context from two chat traces
+
+Demonstrates the new history API for external-agent workflows. The example
+creates a 2-pane session where each pane simulates another agent's chat trace,
+subscribes to the session output, builds a `HistoryHandle`, and prints the
+rolling `render_text()` context after each turn.
+
+This is the clearest tutorial for the intended Track B shape:
+- `OutputBus::subscribe()`
+- `Subscription::history()`
+- `HistoryHandle::render_text()`
+- a bounded, source-labeled context window ready for an external LLM/classifier
+
+```sh
+# Default rolling window (large enough to show both traces, small enough to trim later)
+./target/debug/examples/history_demo ssh://localhost
+
+# Larger rolling context window
+./target/debug/examples/history_demo ssh://localhost --chars 520 --entries 10
+
+# Remote host with explicit SSH key
+./target/debug/examples/history_demo 'ssh://deploy@prod?identity-file=/path/to/key'
+```
+
+Expected output shape:
+```text
+Session: history_demo_12345
+Simulating two chat traces: history_demo_12345:0.0 and history_demo_12345:0.1
+History window: max_entries=8, max_render_chars=420
+
+=== rolling context after turn 1 ===
+localhost:history_demo_12345(%5)> agent-a> I found the failing assertion in monitor.rs.
+
+=== rolling context after turn 2 ===
+localhost:history_demo_12345(%5)> agent-a> I found the failing assertion in monitor.rs.
+
+localhost:history_demo_12345(%6)> agent-b> Verify the shared OutputBus is injected before monitoring starts.
+
+=== rolling context after turn 6 ===
+[... 3 earlier entries omitted ...]
+localhost:history_demo_12345(%6)> agent-b> Good. Check custom label budgeting in HistoryHandle.
+localhost:history_demo_12345(%5)> agent-a> rendered_chars now measures the fully rendered line.
+localhost:history_demo_12345(%6)> agent-b> Great. Update DESIGN and API to match the shipped contract.
+
+Final snapshot: entries=3, omitted_entries=3, rendered_chars=...
+```
+
+Why this matters:
+- it shows the exact rolling prompt context an external reasoning agent would consume
+- the source labels identify which agent trace produced each line
+- trimming and omission markers are explicit instead of silently dropping earlier context
