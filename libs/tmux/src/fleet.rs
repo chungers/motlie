@@ -75,11 +75,28 @@ impl Fleet {
         }
     }
 
-    /// Register a host by alias. Returns an error if the alias is already taken.
+    /// Register a host by alias.
+    ///
+    /// The fleet alias must match the host's own alias (`host.host_alias()`)
+    /// so that output labels and routing names stay consistent in external-agent
+    /// workflows. Returns an error if the alias is already taken, the aliases
+    /// mismatch, or the host's output bus was already initialized.
+    ///
+    /// Injects the fleet's shared `OutputBus` into the host so all monitors
+    /// publish to a single aggregation bus (DC27).
     pub fn register(&mut self, alias: &str, host: HostHandle) -> Result<()> {
         if self.hosts.contains_key(alias) {
             return Err(anyhow!("alias '{}' already registered", alias));
         }
+        if host.host_alias() != alias {
+            return Err(anyhow!(
+                "fleet alias '{}' does not match host alias '{}'; \
+                 create the host with HostHandle::with_alias() using the fleet alias",
+                alias,
+                host.host_alias()
+            ));
+        }
+        host.inject_output_bus(self.bus.clone())?;
         self.hosts.insert(alias.to_string(), host);
         Ok(())
     }
@@ -316,9 +333,16 @@ mod tests {
     #[test]
     fn fleet_alias_conflict_detection() {
         let mut fleet = Fleet::new();
-        fleet.register("web-1", local_host()).unwrap();
-        let err = fleet.register("web-1", local_host()).unwrap_err();
+        fleet.register("web-1", local_host_aliased("web-1")).unwrap();
+        let err = fleet.register("web-1", local_host_aliased("web-1")).unwrap_err();
         assert!(err.to_string().contains("already registered"));
+    }
+
+    #[test]
+    fn fleet_alias_mismatch_rejected() {
+        let mut fleet = Fleet::new();
+        let err = fleet.register("web-1", local_host()).unwrap_err();
+        assert!(err.to_string().contains("does not match"));
     }
 
     #[test]
@@ -367,7 +391,7 @@ mod tests {
     #[test]
     fn fleet_host_status_connected() {
         let mut fleet = Fleet::new();
-        fleet.register("web-1", local_host()).unwrap();
+        fleet.register("web-1", local_host_aliased("web-1")).unwrap();
         match fleet.host_status("web-1") {
             Some(HostStatus::Connected) => {}
             other => panic!("expected Connected, got {:?}", other),
@@ -391,7 +415,7 @@ mod tests {
     #[test]
     fn fleet_shutdown_clears_state() {
         let mut fleet = Fleet::new();
-        fleet.register("web-1", local_host()).unwrap();
+        fleet.register("web-1", local_host_aliased("web-1")).unwrap();
         fleet
             .bind("ci", "web-1", TargetSpec::session("build"))
             .unwrap();
@@ -399,5 +423,16 @@ mod tests {
         fleet.shutdown();
         // Bus should be shutdown
         assert_eq!(fleet.output_bus().subscriber_count(), 0);
+    }
+
+    #[test]
+    fn fleet_bus_injected_into_hosts() {
+        let mut fleet = Fleet::new();
+        fleet.register("web-1", local_host_aliased("web-1")).unwrap();
+
+        // The host's output_bus() should return the fleet's shared bus
+        let fleet_bus = fleet.output_bus();
+        let host_bus = fleet.host("web-1").unwrap().output_bus();
+        assert!(Arc::ptr_eq(&fleet_bus, &host_bus));
     }
 }

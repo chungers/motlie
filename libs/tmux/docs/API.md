@@ -48,9 +48,14 @@ in [`examples/README.md`](../examples/README.md).
 19. [JoinedStream — Multi-Pane View](#19-joinedstream--multi-pane-view)
 20. [Sink Pipeline](#20-sink-pipeline)
 
+**Part II-c — External-Agent Substrate (Track B)**
+21. [Predicate Filtering — filter_fn](#21-predicate-filtering--filter_fn)
+22. [Rolling Transcript / History (DC28)](#22-rolling-transcript--history-dc28)
+23. [Fleet — Multi-Host Coordination (DC27)](#23-fleet--multi-host-coordination-dc27)
+
 **Part III — Reference**
-21. [Normalization Utilities](#21-normalization-utilities)
-22. [Type Quick Reference](#22-type-quick-reference)
+24. [Normalization Utilities](#24-normalization-utilities)
+25. [Type Quick Reference](#25-type-quick-reference)
 
 ---
 
@@ -1637,9 +1642,204 @@ let pipe = sub.pipe(sink);
 
 ---
 
+# Part II-c — External-Agent Substrate (Track B)
+
+Track B provides the building blocks for external LLM/classifier loops: predicate
+filtering, rolling transcript/history, and multi-host fleet coordination. These
+compose on top of Track A's monitoring pipeline (OutputBus, Subscription, JoinedStream).
+
+## 21. Predicate Filtering — filter_fn
+
+`Subscription::filter_fn()` wraps a subscription with a consumer-owned predicate.
+Only `Data` events matching the predicate are forwarded; `Gap` events always pass
+through. The result is a new `Subscription` that composes with all other adapters.
+
+```rust
+let bus = host.output_bus();
+let sub = bus.subscribe(vec![SinkFilter::for_session("build")], 64)?;
+
+// Only forward events containing "ERROR"
+let filtered = sub.filter_fn(|output| output.content.contains("ERROR"));
+
+// Compose with pipe, joined, or history
+let pipe = filtered.pipe(SinkKind::Stdio(StdioSink::new(StdioFormat::Prefixed)));
+```
+
+The predicate signature is `fn(&TargetOutput) -> bool` — a plain function pointer,
+not a closure. This keeps the API simple and avoids lifetime complications. For
+stateful filtering, use `into_receiver()` and implement the loop yourself.
+
+## 22. Rolling Transcript / History (DC28)
+
+`Subscription::history(opts)` creates a bounded, source-labeled rolling transcript
+optimized for external LLM/classifier context windows.
+
+### Create a history handle
+
+```rust
+use motlie_tmux::{HistoryOptions, LabelFormat};
+
+let sub = bus.subscribe(vec![], 64)?;
+let history = sub.history(HistoryOptions {
+    max_entries: 500,
+    max_render_chars: 50_000,  // ~12k tokens
+    label_format: LabelFormat::Bracketed,
+    include_omission_marker: true,
+});
+```
+
+### HistoryOptions
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_entries` | `usize` | 500 | Maximum logical entries to retain |
+| `max_render_chars` | `usize` | 0 (unlimited) | Character budget; oldest entries trimmed first |
+| `label_format` | `LabelFormat` | `Bracketed` | Source label format for rendering |
+| `include_omission_marker` | `bool` | true | Prepend `[... N earlier entries omitted ...]` on trimming |
+
+### Snapshot for structured access
+
+```rust
+let snap = history.snapshot().await;
+for entry in &snap.entries {
+    match entry {
+        HistoryEntry::Output { source, text, source_changed } => {
+            if *source_changed {
+                println!("[{}] {}", source.short(), text);
+            } else {
+                println!("{}", text);
+            }
+        }
+        HistoryEntry::Gap { dropped_events } => {
+            println!("[gap: {} events dropped]", dropped_events);
+        }
+    }
+}
+println!("omitted: {}, rendered_chars: {}", snap.omitted_entries, snap.rendered_chars);
+```
+
+### Prompt-ready text for LLM context
+
+```rust
+// External agent loop
+loop {
+    let context = history.render_text().await;
+    // Pass `context` to LLM/classifier for inference
+    // Route actions back via Fleet, HostHandle, or Target
+    tokio::time::sleep(Duration::from_secs(5)).await;
+}
+```
+
+Sample `render_text()` output:
+```
+[... 37 earlier entries omitted ...]
+[web-1:build(%5)] cargo build --release
+Compiling motlie v0.1.0
+[web-1:deploy(%8)] deploying to staging...
+[gap: 3 event(s) dropped]
+deploy complete
+```
+
+### Lifecycle
+
+```rust
+// Stop monitoring → close bus → history task drains and exits
+monitor.shutdown().await?;
+bus.unsubscribe(history.id())?;
+history.join().await?;
+```
+
+## 23. Fleet — Multi-Host Coordination (DC27)
+
+`Fleet` is a programmatic registry of `HostHandle`s with a shared `OutputBus`,
+workstream bindings, and convenience routing. Fleet-level actions are wrappers
+over `HostHandle` / `Target` operations, not a separate action system.
+
+### Create and register hosts
+
+```rust
+use motlie_tmux::{Fleet, SshConfig};
+
+let mut fleet = Fleet::new();
+
+// Hosts must be created with the fleet alias via with_alias()
+let web = SshConfig::parse("ssh://deploy@web-1")?.connect().await?;
+// ^ SshConfig::connect() returns HostHandle with host_alias matching the URI host
+fleet.register("web-1", web)?;
+
+let db = SshConfig::parse("ssh://admin@db-1")?.connect().await?;
+fleet.register("db-1", db)?;
+```
+
+Fleet enforces that the registration alias matches `host.host_alias()`, so output
+labels and routing names stay consistent in external-agent workflows.
+
+### Shared OutputBus
+
+Fleet injects its shared `OutputBus` into each registered host. All monitors
+publish to this single bus, enabling cross-host subscriptions:
+
+```rust
+let bus = fleet.output_bus();
+let sub = bus.subscribe(vec![], 64)?;  // all hosts, all sessions
+let history = sub.history(HistoryOptions::default());
+```
+
+### Monitoring lifecycle
+
+```rust
+// Monitor specific sessions
+fleet.start_monitoring_session("web-1", "build").await?;
+fleet.start_monitoring_session("db-1", "migration").await?;
+
+// Or monitor all sessions on a host
+fleet.start_monitoring_host("web-1").await?;
+
+// Stop one host
+fleet.stop_monitoring_host("web-1")?;
+
+// Shutdown everything
+fleet.shutdown();
+```
+
+### Workstream bindings
+
+Workstreams map stable names to host + target combinations for alias-based routing:
+
+```rust
+use motlie_tmux::TargetSpec;
+
+fleet.bind("ci", "web-1", TargetSpec::session("build").window(0).pane(0))?;
+fleet.bind("db", "db-1", TargetSpec::session("migration"))?;
+
+// Route actions by workstream name
+fleet.send_text("ci", "cargo test\n").await?;
+let output = fleet.capture("db").await?;
+
+// Resolve to a Target for direct control
+let target = fleet.target("ci").await?;
+target.send_keys(&KeySequence::from_str("C-c")).await?;
+
+// Unbind when done
+fleet.unbind("ci")?;
+```
+
+### Host status
+
+```rust
+match fleet.host_status("web-1") {
+    Some(HostStatus::Connected) => println!("connected, not monitoring"),
+    Some(HostStatus::Monitoring { sessions }) => println!("monitoring: {:?}", sessions),
+    Some(HostStatus::Error(msg)) => println!("error: {}", msg),
+    None => println!("not registered"),
+}
+```
+
+---
+
 # Part III — Reference
 
-## 21. Normalization Utilities
+## 24. Normalization Utilities
 
 Standalone functions re-exported from the crate root, usable independently
 of any transport or target:
@@ -1673,7 +1873,7 @@ assert!(issues.is_empty());
 
 ---
 
-## 22. Type Quick Reference
+## 25. Type Quick Reference
 
 ### Core handles
 
@@ -1747,7 +1947,7 @@ assert!(issues.is_empty());
 | `SessionMonitorHandle` | Handle to one monitored session — `shutdown()`, `is_active()`, `Deref<Target>` |
 | `MonitorHandle` | Aggregate handle — `shutdown()`, `get()`, `get_by_spec()`, `stop_session()`, `active_sessions()` |
 | `OutputBus` | Fan-out bus — `subscribe()`, `publish()`, `unsubscribe()`, `shutdown()` |
-| `Subscription` | Bus subscription — `.into_receiver()`, `.joined()`, `.pipe()` |
+| `Subscription` | Bus subscription — `.into_receiver()`, `.joined()`, `.pipe()`, `.filter_fn()`, `.history()` |
 | `PipeHandle` | Lifecycle handle from `pipe()` — `id()` for bus control, `join()` for awaited teardown |
 | `TargetOutput` | Output event — `source_key()` (canonical identity), `target_string()` (display), content, fidelity |
 | `SinkEvent` | Enum: `Data(TargetOutput)`, `Gap { dropped, timestamp }` |
@@ -1761,6 +1961,17 @@ assert!(issues.is_empty());
 | `StreamChunk` | source (`SourceLabel`), output (`TargetOutput`), source_changed |
 | `SourceLabel` | host + target — `short()`, `minimal()` |
 | `LabelFormat` | Enum: Bracketed, Prompt, Custom(fn) |
+
+### External-agent substrate (Track B)
+
+| Type | Description |
+|------|-------------|
+| `HistoryHandle` | Rolling transcript handle — `snapshot()`, `render_text()`, `join()`, `id()` |
+| `HistoryOptions` | Config: `max_entries`, `max_render_chars`, `label_format`, `include_omission_marker` |
+| `HistorySnapshot` | Point-in-time snapshot — `entries`, `rendered_chars`, `omitted_entries` |
+| `HistoryEntry` | Enum: `Output { source, text, source_changed }`, `Gap { dropped_events }` |
+| `Fleet` | Multi-host registry — `register()`, `host()`, `hosts()`, `output_bus()`, monitoring, workstreams, routing |
+| `HostStatus` | Enum: `Connected`, `Monitoring { sessions }`, `Error(String)` |
 
 ### Shell channel (low-level, used by monitor layer — Phase 2a)
 
