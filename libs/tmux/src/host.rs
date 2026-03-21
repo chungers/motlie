@@ -8,8 +8,8 @@ use crate::capture;
 use crate::control;
 use crate::discovery;
 use crate::keys::KeySequence;
-use crate::monitor::{MonitorHandle, SessionMonitor, SessionMonitorHandle};
-use crate::sink::OutputBus;
+use crate::monitor::{MonitorExitReason, MonitorHandle, MonitorHealth, SessionMonitor, SessionMonitorHandle};
+use crate::sink::{OutputBus, TargetOutput};
 use crate::transport::TransportKind;
 use crate::types::*;
 
@@ -329,12 +329,14 @@ impl HostHandle {
         Ok(())
     }
 
-    /// Start monitoring a single session. Opens a control mode connection,
-    /// parses `%output` frames, and publishes to the OutputBus.
-    /// Returns a `SessionMonitorHandle` for lifecycle control.
+    /// Start monitoring a single session with reconnect supervision (DC29, 4.2a).
     ///
-    /// For awaited teardown, call `SessionMonitorHandle::shutdown()`.
-    /// For fire-and-forget stop, use `HostHandle::stop_monitoring_session()`.
+    /// Opens a control mode connection, parses `%output` frames, and publishes
+    /// to the OutputBus. On unexpected EOF, the monitor attempts bounded
+    /// reconnect with exponential backoff. Intentional stop (via shutdown) does
+    /// not trigger reconnect.
+    ///
+    /// Returns a `SessionMonitorHandle` for lifecycle control and health inspection.
     pub async fn start_monitoring_session(
         &self,
         session_name: &str,
@@ -342,7 +344,6 @@ impl HostHandle {
         let bus = self.output_bus();
         let host_alias = self.inner.host_alias.clone();
         let session = session_name.to_string();
-        let socket = self.inner.socket.clone();
 
         // Resolve the session first — fail before any registration
         let sessions =
@@ -356,12 +357,10 @@ impl HostHandle {
             address: TargetAddress::Session(session_info),
         };
 
-        // Open a shell channel for control mode
-        let mut shell = self.inner.transport.open_shell(80, 24).await?;
+        // Open the initial shell channel for control mode
+        let shell = self.inner.transport.open_shell(80, 24).await?;
 
         // Create stop signal and register for host-level tracking (DC13).
-        // Registration happens only after session resolution + shell open succeed,
-        // so monitored_sessions() never reports sessions that failed to start.
         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
         {
             let mut signals = self
@@ -372,20 +371,189 @@ impl HostHandle {
             signals.insert(session_name.to_string(), stop_tx.clone());
         }
 
-        // Spawn the monitor task — clean up signal registration when done
+        // Shared health state (DC29, 4.2d)
+        let health = Arc::new(std::sync::Mutex::new(MonitorHealth::Streaming));
+        let health_task = health.clone();
+
+        // Spawn the supervised monitor task (4.2a)
         let inner_ref = self.inner.clone();
         let session_for_cleanup = session_name.to_string();
         let task = tokio::spawn(async move {
-            let mut monitor = SessionMonitor::new(session.clone(), host_alias).with_socket(socket);
-            let result = monitor.run(&mut shell, &bus, stop_rx).await;
-            // Remove from tracking on task completion
-            if let Ok(mut signals) = inner_ref.monitor_signals.lock() {
-                signals.remove(&session_for_cleanup);
+            let max_retries = 5u32;
+            let mut attempt = 0u32;
+            let mut shell = shell;
+
+            let set_health = |h: MonitorHealth| {
+                *health_task.lock().expect("health lock poisoned") = h;
+            };
+
+            loop {
+                let mut monitor = SessionMonitor::new(
+                    session.clone(),
+                    host_alias.clone(),
+                ).with_socket(inner_ref.socket.clone());
+
+                let exit = monitor.run(&mut shell, &bus, stop_rx.clone()).await?;
+
+                match exit {
+                    MonitorExitReason::Stopped => {
+                        set_health(MonitorHealth::Stopped);
+                        if let Ok(mut signals) = inner_ref.monitor_signals.lock() {
+                            signals.remove(&session_for_cleanup);
+                        }
+                        return Ok(MonitorExitReason::Stopped);
+                    }
+                    MonitorExitReason::ConnectionLost => {
+                        // Unexpected EOF — emit discontinuity and attempt reconnect
+                        bus.publish_discontinuity(&format!(
+                            "stream interrupted: control channel lost for {}:{}",
+                            host_alias, session
+                        ));
+                        set_health(MonitorHealth::Reconnecting);
+
+                        attempt += 1;
+                        if attempt > max_retries {
+                            set_health(MonitorHealth::Failed);
+                            if let Ok(mut signals) = inner_ref.monitor_signals.lock() {
+                                signals.remove(&session_for_cleanup);
+                            }
+                            return Err(anyhow!(
+                                "monitor for '{}' exhausted {} reconnect attempts",
+                                session, max_retries
+                            ));
+                        }
+
+                        // Exponential backoff: 1s, 2s, 4s, 8s, 16s (capped at 30s)
+                        let delay_ms = std::cmp::min(
+                            1000u64.saturating_mul(2u64.saturating_pow(attempt - 1)),
+                            30_000,
+                        );
+                        let mut stop_clone = stop_rx.clone();
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_millis(delay_ms)) => {}
+                            _ = stop_clone.changed() => {
+                                if *stop_rx.borrow() {
+                                    set_health(MonitorHealth::Stopped);
+                                    if let Ok(mut signals) = inner_ref.monitor_signals.lock() {
+                                        signals.remove(&session_for_cleanup);
+                                    }
+                                    return Ok(MonitorExitReason::Stopped);
+                                }
+                            }
+                        }
+
+                        // Check session still exists before reconnecting
+                        let sessions = match discovery::list_sessions(
+                            &inner_ref.transport,
+                            inner_ref.socket.as_ref(),
+                        ).await {
+                            Ok(s) => s,
+                            Err(_) => continue, // Can't reach host, retry after next backoff
+                        };
+
+                        if !sessions.iter().any(|s| s.name == session) {
+                            // Session gone — permanent failure (DC29 session identity)
+                            bus.publish_discontinuity(&format!(
+                                "stream failed: session '{}' no longer exists on {}",
+                                session, host_alias
+                            ));
+                            set_health(MonitorHealth::Failed);
+                            if let Ok(mut signals) = inner_ref.monitor_signals.lock() {
+                                signals.remove(&session_for_cleanup);
+                            }
+                            return Err(anyhow!(
+                                "session '{}' no longer exists after reconnect", session
+                            ));
+                        }
+
+                        // Reopen shell channel
+                        match inner_ref.transport.open_shell(80, 24).await {
+                            Ok(new_shell) => {
+                                shell = new_shell;
+
+                                // Fresh snapshot anchoring (4.2c): capture each pane's
+                                // visible content and publish as TargetOutput so
+                                // downstream consumers (history, subscribers) get
+                                // re-anchored with current screen state.
+                                bus.publish_discontinuity(&format!(
+                                    "stream resumed: reattached after reconnect for {}:{}",
+                                    host_alias, session
+                                ));
+
+                                let mut snapshot_panes = 0usize;
+                                let mut snapshot_failed = false;
+                                match discovery::list_panes_in_session(
+                                    &inner_ref.transport,
+                                    inner_ref.socket.as_ref(),
+                                    &session,
+                                ).await {
+                                    Ok(panes) => {
+                                        for pane in &panes {
+                                            let target = pane.address.to_string();
+                                            if let Ok(content) = capture::capture_pane(
+                                                &inner_ref.transport,
+                                                inner_ref.socket.as_ref(),
+                                                &target,
+                                            ).await {
+                                                if !content.is_empty() {
+                                                    bus.publish(TargetOutput {
+                                                        source: TargetAddress::Pane(pane.address.clone()),
+                                                        host: host_alias.clone(),
+                                                        content,
+                                                        raw_content: None,
+                                                        sequence: 0,
+                                                        fidelity: OutputFidelity::clean(),
+                                                        timestamp: std::time::Instant::now(),
+                                                    });
+                                                    snapshot_panes += 1;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(_) => {
+                                        snapshot_failed = true;
+                                    }
+                                }
+
+                                // Explicit snapshot-outcome marker (DC29 4.2c):
+                                // report what actually happened so transcript is
+                                // truthful about recovery state.
+                                let snapshot_msg = if snapshot_failed {
+                                    format!(
+                                        "stream snapshot failed: could not discover panes \
+                                         after reconnect for {}:{}; \
+                                         intermediate output may be missing",
+                                        host_alias, session
+                                    )
+                                } else if snapshot_panes == 0 {
+                                    format!(
+                                        "stream snapshot empty: no pane content captured \
+                                         after reconnect for {}:{}; \
+                                         intermediate output may be missing",
+                                        host_alias, session
+                                    )
+                                } else {
+                                    format!(
+                                        "stream snapshot: captured current screen state \
+                                         after reconnect for {}:{} ({} pane{}); \
+                                         intermediate output may be missing",
+                                        host_alias, session, snapshot_panes,
+                                        if snapshot_panes == 1 { "" } else { "s" }
+                                    )
+                                };
+                                bus.publish_discontinuity(&snapshot_msg);
+
+                                set_health(MonitorHealth::Streaming);
+                                attempt = 0; // Reset on successful reconnect
+                            }
+                            Err(_) => continue, // Shell open failed, retry
+                        }
+                    }
+                }
             }
-            result
         });
 
-        Ok(SessionMonitorHandle::new(target, stop_tx, task))
+        Ok(SessionMonitorHandle::new(target, stop_tx, task, health))
     }
 
     /// Start monitoring all sessions (optionally filtered).

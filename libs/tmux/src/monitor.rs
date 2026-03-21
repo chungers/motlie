@@ -7,10 +7,41 @@
 //! Subscription adapters (DC24).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{anyhow, Result};
 use tokio::sync::watch;
+
+// ---------------------------------------------------------------------------
+// Per-session monitor health (DC29, 4.2a/4.2d)
+// ---------------------------------------------------------------------------
+
+/// Exit reason from `SessionMonitor::run()`, used by the supervision loop
+/// to decide whether to reconnect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MonitorExitReason {
+    /// Intentional stop via shutdown signal.
+    Stopped,
+    /// Connection closed unexpectedly (EOF or None from shell).
+    ConnectionLost,
+}
+
+/// Per-session monitor health state (DC29).
+///
+/// This is the ground truth for streaming health. Host/Fleet health is derived
+/// from per-session states rather than flattened into a single coarse status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MonitorHealth {
+    /// Actively streaming control-mode output.
+    Streaming,
+    /// Connection lost, attempting reconnect with backoff.
+    Reconnecting,
+    /// Permanently failed (session gone or retries exhausted).
+    Failed,
+    /// Intentionally stopped by caller.
+    Stopped,
+}
 
 use crate::capture;
 use crate::host::Target;
@@ -221,13 +252,13 @@ impl SessionMonitor {
     /// Opens `tmux -C attach-session -t <session>` on the configured socket,
     /// reads control mode output,
     /// parses `%output` frames, publishes `TargetOutput` to the bus.
-    /// Returns when the stop signal fires or the connection drops.
+    /// Returns `Stopped` when the stop signal fires, `ConnectionLost` on EOF.
     pub async fn run(
         &mut self,
         shell: &mut ShellChannelKind,
         bus: &OutputBus,
         mut stop: watch::Receiver<bool>,
-    ) -> Result<()> {
+    ) -> Result<MonitorExitReason> {
         // Send the tmux control mode attach command
         let attach_cmd = self.attach_command();
         shell.write(attach_cmd.as_bytes()).await?;
@@ -239,7 +270,7 @@ impl SessionMonitor {
             tokio::select! {
                 _ = stop.changed() => {
                     if *stop.borrow() {
-                        break;
+                        return Ok(MonitorExitReason::Stopped);
                     }
                 }
                 event = shell.read() => {
@@ -280,14 +311,12 @@ impl SessionMonitor {
                         }
                         Some(ShellEvent::Eof) | None => {
                             tracing::info!(session = %self.session_name, "control mode connection closed");
-                            break;
+                            return Ok(MonitorExitReason::ConnectionLost);
                         }
                     }
                 }
             }
         }
-
-        Ok(())
     }
 }
 
@@ -303,12 +332,14 @@ fn build_attach_command(session_name: &str, socket: Option<&TmuxSocket>) -> Stri
 // 2a.4a — Monitor handle wiring
 // ---------------------------------------------------------------------------
 
-/// Handle to a single monitored session (DC16).
-/// Provides lifecycle control and `Deref` to the underlying `Target`.
+/// Handle to a single monitored session (DC16, DC29).
+/// Provides lifecycle control, health inspection, and `Deref` to the
+/// underlying `Target`.
 pub struct SessionMonitorHandle {
     target: Target,
     stop_tx: watch::Sender<bool>,
-    task: std::sync::Mutex<Option<tokio::task::JoinHandle<Result<()>>>>,
+    task: std::sync::Mutex<Option<tokio::task::JoinHandle<Result<MonitorExitReason>>>>,
+    health: Arc<std::sync::Mutex<MonitorHealth>>,
 }
 
 impl SessionMonitorHandle {
@@ -316,13 +347,20 @@ impl SessionMonitorHandle {
     pub(crate) fn new(
         target: Target,
         stop_tx: watch::Sender<bool>,
-        task: tokio::task::JoinHandle<Result<()>>,
+        task: tokio::task::JoinHandle<Result<MonitorExitReason>>,
+        health: Arc<std::sync::Mutex<MonitorHealth>>,
     ) -> Self {
         SessionMonitorHandle {
             target,
             stop_tx,
             task: std::sync::Mutex::new(Some(task)),
+            health,
         }
+    }
+
+    /// Current health state of this session monitor (DC29).
+    pub fn health(&self) -> MonitorHealth {
+        *self.health.lock().expect("health lock poisoned")
     }
 
     /// Signal stop and wait for the monitor task to finish.
@@ -330,7 +368,9 @@ impl SessionMonitorHandle {
         let _ = self.stop_tx.send(true);
         let task = self.task.lock().expect("task lock poisoned").take();
         if let Some(task) = task {
-            task.await.map_err(|e| anyhow!("monitor task panicked: {}", e))??;
+            task.await
+                .map_err(|e| anyhow!("monitor task panicked: {}", e))?
+                .map(|_| ())?;
         }
         Ok(())
     }
@@ -402,6 +442,16 @@ impl MonitorHandle {
             .filter(|(_, h)| h.is_active())
             .map(|(name, _)| name.as_str())
             .collect()
+    }
+
+    /// List all tracked session names, including stopped/failed ones.
+    ///
+    /// Unlike `active_sessions()`, this includes sessions whose monitor task
+    /// has exited (failed, stopped). Use this when reporting health status —
+    /// per-session health is the ground truth (DC29), so terminal states must
+    /// remain visible.
+    pub fn all_sessions(&self) -> Vec<&str> {
+        self.sessions.keys().map(|k| k.as_str()).collect()
     }
 
     /// Number of monitored sessions.
@@ -658,23 +708,27 @@ mod tests {
 
     // --- MonitorHandle.stop_session / get_by_spec tests ---
 
+    fn default_health() -> Arc<std::sync::Mutex<MonitorHealth>> {
+        Arc::new(std::sync::Mutex::new(MonitorHealth::Streaming))
+    }
+
     #[tokio::test]
     async fn monitor_handle_stop_session() {
         let target1 = crate::host::HostHandle::local().create_target_for_test("s1");
         let target2 = crate::host::HostHandle::local().create_target_for_test("s2");
         let (tx1, _) = watch::channel(false);
         let (tx2, _) = watch::channel(false);
-        let task1 = tokio::spawn(async { Ok(()) });
-        let task2 = tokio::spawn(async { Ok(()) });
+        let task1 = tokio::spawn(async { Ok::<_, anyhow::Error>(MonitorExitReason::Stopped) });
+        let task2 = tokio::spawn(async { Ok::<_, anyhow::Error>(MonitorExitReason::Stopped) });
 
         let mut sessions = HashMap::new();
         sessions.insert(
             "s1".to_string(),
-            SessionMonitorHandle::new(target1, tx1, task1),
+            SessionMonitorHandle::new(target1, tx1, task1, default_health()),
         );
         sessions.insert(
             "s2".to_string(),
-            SessionMonitorHandle::new(target2, tx2, task2),
+            SessionMonitorHandle::new(target2, tx2, task2, default_health()),
         );
         let mut handle = MonitorHandle::new(sessions);
 
@@ -692,11 +746,11 @@ mod tests {
     fn monitor_handle_get_by_spec() {
         let target = crate::host::HostHandle::local().create_target_for_test("build");
         let (tx, _) = watch::channel(false);
-        let task = tokio::runtime::Runtime::new().unwrap().spawn(async { Ok(()) });
+        let task = tokio::runtime::Runtime::new().unwrap().spawn(async { Ok(MonitorExitReason::Stopped) });
         let mut sessions = HashMap::new();
         sessions.insert(
             "build".to_string(),
-            SessionMonitorHandle::new(target, tx, task),
+            SessionMonitorHandle::new(target, tx, task, default_health()),
         );
         let handle = MonitorHandle::new(sessions);
 
@@ -715,9 +769,9 @@ mod tests {
             "test_session",
         );
         let (stop_tx, _stop_rx) = watch::channel(false);
-        let task = tokio::spawn(async { Ok(()) });
+        let task = tokio::spawn(async { Ok::<_, anyhow::Error>(MonitorExitReason::Stopped) });
 
-        let handle = SessionMonitorHandle::new(target, stop_tx, task);
+        let handle = SessionMonitorHandle::new(target, stop_tx, task, default_health());
         // Shutdown waits for the task to finish
         handle.shutdown().await.unwrap();
         assert!(!handle.is_active());
@@ -767,5 +821,78 @@ mod tests {
         }
         // No more events
         assert!(rx.try_recv().is_err());
+    }
+
+    // --- MonitorHealth tests (DC29, 4.2a) ---
+
+    #[tokio::test]
+    async fn session_monitor_health_tracking() {
+        let health = Arc::new(std::sync::Mutex::new(MonitorHealth::Streaming));
+        let target = crate::host::HostHandle::local().create_target_for_test("test");
+        let (stop_tx, _) = watch::channel(false);
+        let task = tokio::spawn(async { Ok::<_, anyhow::Error>(MonitorExitReason::Stopped) });
+
+        let handle = SessionMonitorHandle::new(target, stop_tx, task, health.clone());
+        assert_eq!(handle.health(), MonitorHealth::Streaming);
+
+        // Simulate health transition
+        *health.lock().unwrap() = MonitorHealth::Reconnecting;
+        assert_eq!(handle.health(), MonitorHealth::Reconnecting);
+
+        *health.lock().unwrap() = MonitorHealth::Failed;
+        assert_eq!(handle.health(), MonitorHealth::Failed);
+    }
+
+    #[tokio::test]
+    async fn monitor_returns_connection_lost_on_eof() {
+        use crate::sink::{OutputBus, SinkEvent};
+        use crate::transport::MockTransport;
+
+        let control_output = b"%output %5 hello\n";
+        let mock = MockTransport::new()
+            .with_shell_data(vec![control_output.to_vec()]);
+        let mut shell = mock.open_shell_for_test().await;
+
+        let bus = OutputBus::new();
+        let sub = bus.subscribe(vec![], 16).unwrap();
+        let mut rx = sub.into_receiver();
+
+        let (_stop_tx, stop_rx) = watch::channel(false);
+        let mut monitor = SessionMonitor::new("test".into(), "localhost".into());
+
+        let result = monitor.run(&mut shell, &bus, stop_rx).await.unwrap();
+        assert_eq!(result, MonitorExitReason::ConnectionLost);
+
+        // Verify data was still published before EOF
+        match rx.try_recv().unwrap() {
+            SinkEvent::Data(out) => assert_eq!(out.content, "hello"),
+            other => panic!("expected Data, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn monitor_returns_stopped_on_signal() {
+        use crate::sink::OutputBus;
+        use crate::transport::MockTransport;
+
+        // Shell that never EOFs (large data keeps flowing)
+        let mut data = Vec::new();
+        for i in 0..100 {
+            data.push(format!("%output %5 line{}\n", i).into_bytes());
+        }
+        let mock = MockTransport::new().with_shell_data(data);
+        let mut shell = mock.open_shell_for_test().await;
+
+        let bus = OutputBus::new();
+        let _sub = bus.subscribe(vec![], 64).unwrap();
+
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let mut monitor = SessionMonitor::new("test".into(), "localhost".into());
+
+        // Stop immediately
+        stop_tx.send(true).unwrap();
+
+        let result = monitor.run(&mut shell, &bus, stop_rx).await.unwrap();
+        assert_eq!(result, MonitorExitReason::Stopped);
     }
 }

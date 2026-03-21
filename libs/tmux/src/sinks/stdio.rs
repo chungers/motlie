@@ -75,6 +75,13 @@ impl StdioSink {
                 handle.flush()?;
                 Ok(())
             }
+            SinkEvent::Discontinuity { reason } => {
+                let stdout = std::io::stdout();
+                let mut handle = stdout.lock();
+                writeln!(handle, "[{}]", reason)?;
+                handle.flush()?;
+                Ok(())
+            }
         }
     }
 
