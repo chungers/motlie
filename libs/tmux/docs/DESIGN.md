@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-20 | @codex: DC28 — specify transcript/history adapter as a bounded rolling snapshot layer for LLM/classifier context windows. Define artifact, bounds, relationship to `JoinedStream`, and consumer interaction model. | Subscription, DC28, Phase 2b |
 | 2026-03-20 | @codex: Directional simplification — active design now treats `libs/tmux` as tmux stream/history/control substrate for an external LLM/classifier or other policy engine. Simplify Fleet toward coordination/aggregation/routing. Move matcher/rule/reactor/config automation direction to appendix as historical context. | Overview, Fleet, DC24, DC12, DC13, DC14, Phase 2b/2c, Phase 3, Appendix |
 | 2026-03-20 | @claude: DC26 R1 — address PR #89 review: constrain `identity-file` to query-only (not nassh userinfo), make `with_identity_file()` fallible to prevent URI+builder silent overwrite, update DC21 `SshConfig` contract block with new field/methods and query-only exception note. | DC26, DC21, OC3 |
 | 2026-03-20 | @claude: DC26 — SSH identity-file URI parameter for explicit key-file authentication. Extends DC21 URI/SshConfig with `identity-file` param; adds `authenticate_key_file()` alongside existing agent auth. Addresses OC3 limitation for CI/agentless workflows. | DC26, DC21, OC3 |
@@ -1558,9 +1559,10 @@ impl Subscription {
 
     // --- Active next-wave adapters ---
 
-    // Transcript/history-oriented transformation is intentionally left
-    // as a design target rather than a committed signature. See the
-    // narrative below and Phase 2b.1 in PLAN.md.
+    /// Build a bounded rolling transcript/history view optimized for
+    /// external-agent context windows. Consumes the Subscription and
+    /// spawns an internal accumulation task.
+    pub fn history(self, opts: HistoryOptions) -> HistoryHandle;
 
     /// Consumer-owned predicate filtering for lightweight selection without
     /// introducing a built-in matcher DSL.
@@ -1573,11 +1575,66 @@ else is layered above. This eliminates the need for multiple `subscribe_*` bus m
 and makes new consumer patterns (joining, transcript/history construction, lightweight
 predicate filtering, piping) orthogonal to the bus itself.
 
-**Transcript/history note**: The active direction does include a transcript/history
-adapter layer, but the exact surface is intentionally still open. The likely shape is
-something like `subscription.history(...)` or a similarly named adapter that produces
-a bounded, source-labeled conversation/transcript view. That API should be designed
-deliberately when Track B starts, rather than implicitly committed in this contract block.
+**Transcript/history note**: The active direction needs a first-class transcript layer
+because the most common consumer is a rolling LLM/classifier loop with a bounded context
+window. The library should therefore own accumulation, source labeling, trimming, and
+gap markers — and let the external agent own policy.
+
+```rust
+/// Controls how a rolling transcript/history buffer is bounded and rendered.
+pub struct HistoryOptions {
+    /// Keep at most this many logical entries (source bursts or gap markers).
+    pub max_entries: usize,
+    /// Keep rendered text under this many characters by trimming oldest entries first.
+    /// Character count is used rather than token count because tokenizer choice is model-specific.
+    pub max_render_chars: usize,
+    /// Label style reused from JoinedStream formatting.
+    pub label_format: LabelFormat,
+    /// Include an omission marker when older history has been trimmed.
+    pub include_omission_marker: bool,
+}
+
+/// Rolling, bounded transcript accumulator built from a Subscription.
+/// Internally consumes JoinedStream-style source coalescing.
+pub struct HistoryHandle { /* shared state + background task */ }
+
+pub struct HistorySnapshot {
+    pub entries: Vec<HistoryEntry>,
+    pub rendered_chars: usize,
+    pub omitted_entries: usize,
+}
+
+pub enum HistoryEntry {
+    /// One coalesced burst from a single source, ready for transcript rendering.
+    Output {
+        source: SourceLabel,
+        text: String,
+        source_changed: bool,
+    },
+    /// Explicit loss marker derived from SinkEvent::Gap.
+    Gap {
+        dropped_events: usize,
+    },
+}
+
+impl HistoryHandle {
+    /// Return the current bounded transcript state for custom formatting.
+    pub fn snapshot(&self) -> HistorySnapshot;
+
+    /// Render a prompt-ready transcript string for external LLM/classifier context.
+    /// This is the primary ergonomic API for rolling-context consumers.
+    pub fn render_text(&self) -> String;
+}
+```
+
+The active intended use is:
+1. monitor and subscribe once
+2. build a `HistoryHandle`
+3. periodically call `render_text()` to obtain the latest bounded context window
+4. send that text to the external LLM/classifier
+5. route any resulting action back through `Fleet`, `HostHandle`, or `Target`
+
+This keeps the common agent loop simple while avoiding any built-in decision engine.
 
 **Backpressure**: The bus remains non-blocking via `try_send()`, with loss visibility.
 When a subscriber falls behind, dropped events are counted and surfaced via explicit
@@ -3082,6 +3139,62 @@ pipe-style thinking without abandoning pub/sub:
 **Impact**: DC15 remains the active multi-source view. OutputBus stays simplified to one
 `subscribe()` primitive. The active next work shifts from matcher/reactor machinery to
 history/transcript composition and Fleet coordination for external agents.
+
+### DC28: Rolling Transcript / History for External LLM Context
+
+**Decision**: The transcript/history layer is a bounded in-memory rolling snapshot built
+on top of `JoinedStream`. `subscription.history(opts)` returns a `HistoryHandle` that
+accumulates source-labeled output bursts and explicit gap markers, and exposes two
+consumer surfaces:
+- `snapshot()` for structured access
+- `render_text()` for prompt-ready rolling context
+
+**Why this artifact**:
+- The dominant consumer is an external LLM/classifier loop with a finite context window.
+- That loop usually wants the **latest bounded transcript now**, not a second async
+  stream that it must separately buffer and trim.
+- A bounded snapshot handle keeps Motlie responsible for the tmux-specific mechanics
+  (source labels, coalescing, gap markers, omission markers) while leaving model choice,
+  prompt framing, and decision-making outside the library.
+
+**Relationship to `JoinedStream`**:
+- History is built **on top of** `JoinedStream`, not in parallel with it.
+- `JoinedStream` already solves source attribution and `source_changed` coalescing.
+- `HistoryHandle` adds accumulation, trimming, omission markers, and prompt-oriented
+  rendering on top of those semantics.
+
+**Bounding strategy**:
+- The primary window is **global merged history**, not per-source history, because LLM
+  context windows are global.
+- History is bounded by:
+  1. logical entry count (`max_entries`)
+  2. rendered character budget (`max_render_chars`)
+- When over budget, trim the **oldest entries first**.
+- If trimming occurred and `include_omission_marker` is true, prepend a single omission
+  marker like `[... 37 earlier entries omitted ...]` in `render_text()`.
+- Character budget is used in-library because token budgets are model-specific and belong
+  to the external consumer.
+
+**Consumer interaction model**:
+- Primary path: polling/snapshot.
+- External agent loop:
+  1. `let history = sub.history(opts);`
+  2. periodically `let prompt_context = history.render_text();`
+  3. pass `prompt_context` to the model/classifier
+  4. route actions back with `Fleet`, `HostHandle`, or `Target`
+- Structured consumers can call `snapshot()` and format entries themselves.
+
+**Why not an async `HistoryStream` as the primary artifact**:
+- It would force every external consumer to reimplement rolling buffering and trimming.
+- That duplicates the exact prompt-window management problem this layer should solve.
+- Snapshot access composes well with periodic model inference and agent turns.
+
+**Why this supports the rolling-context use case cleanly**:
+- The same `HistoryHandle` can live for the lifetime of an agent session.
+- `render_text()` always returns the most recent bounded, source-labeled context.
+- Gap markers and omission markers make uncertainty explicit instead of silently
+  pretending the transcript is complete.
+- External policy stays simple: “get latest context, infer, act.”
 
 ### DC27: Fleet Routing Convenience vs Direct Target Use
 

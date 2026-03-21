@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-20 | @codex | DC28 follow-up — specify 2b.1 transcript/history as a bounded rolling snapshot layer built on `JoinedStream`, optimized for external LLM/classifier context windows. Add concrete `HistoryHandle`/`HistorySnapshot`/`HistoryEntry` direction and explicit trimming semantics. |
 | 2026-03-20 | @codex | Directional simplification — active post-Track-A plan now prioritizes transcript/history adapters, simplified Fleet coordination, and external-agent workflows. Built-in matcher/rule/reactor/config direction moved to historical context section. |
 | 2026-03-20 | @claude | Phase 1.15 implemented (1.15a–g): SshConfig `identity_file` field + fallible builder, `authenticate_key_file()` auth dispatch, query-only URI parse/render with `QUERY_ONLY_PARAMS`, 20 new unit tests (318 total), 1 integration test (23 total), API.md/README.md/repl.rs docs updated. SSH key-file integration tests deferred to Phase 4.3 CI infra. |
 | 2026-03-20 | @claude | Phase 1.15 R1 — address PR #89 review: `identity-file` is query-only (not nassh userinfo), `with_identity_file()` is fallible (returns `Err` on duplicate), add query-only parse rejection tests, duplicate-source builder tests, mixed-param rendering tests. |
@@ -1011,11 +1012,25 @@ consumption and routed control pleasant for external LLM/classifier workflows.
 
 ### 2b.1 — Transcript/history adapters (`src/sink.rs` extension)
 
-- [ ] Add transcript/history-oriented adapters above `Subscription`
-- [ ] Define bounded history window options (size, source labeling, gap handling)
-- [ ] Provide plain-text transcript rendering helpers for external consumers
-- [ ] Unit tests: source attribution, coalescing, bounded history trimming,
-  explicit gap propagation
+- [ ] Add `Subscription::history(opts) -> HistoryHandle`
+- [ ] Implement `HistoryOptions` with:
+  - `max_entries`
+  - `max_render_chars`
+  - `label_format`
+  - `include_omission_marker`
+- [ ] Build history **on top of** `JoinedStream` so source coalescing and labels are reused
+- [ ] Define `HistorySnapshot` and `HistoryEntry` (`Output`, `Gap`)
+- [ ] `HistoryHandle::snapshot()` — structured access for custom formatters
+- [ ] `HistoryHandle::render_text()` — prompt-ready rolling transcript for LLM/classifier context
+- [ ] Oldest-first trimming across the **global merged transcript**, not per-source windows
+- [ ] Omission marker support when older entries are trimmed
+- [ ] Unit tests:
+  - source attribution and coalescing
+  - oldest-first trimming by entry count
+  - rendered-char budget trimming
+  - explicit gap propagation into history
+  - omission marker rendering
+  - rolling `render_text()` behavior under sustained multi-source output
 
 **Depends on**: 2c.2a ✓, 2c.4a ✓
 
