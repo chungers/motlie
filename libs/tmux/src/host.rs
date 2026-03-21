@@ -308,6 +308,27 @@ impl HostHandle {
         bus
     }
 
+    /// Inject a shared OutputBus before monitoring starts.
+    ///
+    /// Used by `Fleet` to wire all hosts to a single aggregation bus (DC27).
+    /// Must be called before `output_bus()` or any `start_monitoring*` method;
+    /// returns an error if a bus has already been created.
+    pub fn inject_output_bus(&self, bus: Arc<OutputBus>) -> Result<()> {
+        let mut bus_opt = self
+            .inner
+            .output_bus
+            .lock()
+            .expect("output_bus lock poisoned");
+        if bus_opt.is_some() {
+            return Err(anyhow!(
+                "output bus already initialized for host '{}'; inject before first use",
+                self.inner.host_alias
+            ));
+        }
+        *bus_opt = Some(bus);
+        Ok(())
+    }
+
     /// Start monitoring a single session. Opens a control mode connection,
     /// parses `%output` frames, and publishes to the OutputBus.
     /// Returns a `SessionMonitorHandle` for lifecycle control.

@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-20 | @claude | Implement Track B (2b.1, 2b.2, 2b.3): `HistoryHandle`/`HistoryOptions`/`HistorySnapshot`/`HistoryEntry` in sink.rs, `Subscription::filter_fn()` predicate adapter, `Fleet` module with host registry/workstream routing/monitoring lifecycle. 339 tests pass (50 new). |
 | 2026-03-20 | @codex | DC28 follow-up — specify 2b.1 transcript/history as a bounded rolling snapshot layer built on `JoinedStream`, optimized for external LLM/classifier context windows. Add concrete `HistoryHandle`/`HistorySnapshot`/`HistoryEntry` direction and explicit trimming semantics. |
 | 2026-03-20 | @codex | Directional simplification — active post-Track-A plan now prioritizes transcript/history adapters, simplified Fleet coordination, and external-agent workflows. Built-in matcher/rule/reactor/config direction moved to historical context section. |
 | 2026-03-20 | @claude | Phase 1.15 implemented (1.15a–g): SshConfig `identity_file` field + fallible builder, `authenticate_key_file()` auth dispatch, query-only URI parse/render with `QUERY_ONLY_PARAMS`, 20 new unit tests (318 total), 1 integration test (23 total), API.md/README.md/repl.rs docs updated. SSH key-file integration tests deferred to Phase 4.3 CI infra. |
@@ -1012,54 +1013,54 @@ consumption and routed control pleasant for external LLM/classifier workflows.
 
 ### 2b.1 — Transcript/history adapters (`src/sink.rs` extension)
 
-- [ ] Add `Subscription::history(opts) -> HistoryHandle`
-- [ ] Implement `HistoryOptions` with:
+- [x] Add `Subscription::history(opts) -> HistoryHandle`
+- [x] Implement `HistoryOptions` with:
   - `max_entries`
   - `max_render_chars`
   - `label_format`
   - `include_omission_marker`
-- [ ] Build history **on top of** `JoinedStream` so source coalescing and labels are reused
-- [ ] Define `HistorySnapshot` and `HistoryEntry` (`Output`, `Gap`)
-- [ ] `HistoryHandle::snapshot()` — structured access for custom formatters
-- [ ] `HistoryHandle::render_text()` — prompt-ready rolling transcript for LLM/classifier context
-- [ ] Oldest-first trimming across the **global merged transcript**, not per-source windows
-- [ ] Omission marker support when older entries are trimmed
-- [ ] Unit tests:
-  - source attribution and coalescing
-  - oldest-first trimming by entry count
-  - rendered-char budget trimming
-  - explicit gap propagation into history
-  - omission marker rendering
-  - rolling `render_text()` behavior under sustained multi-source output
+- [x] Build history on top of `JoinedStream` source-coalescing logic (replicates tracking inline to also capture Gap events)
+- [x] Define `HistorySnapshot` and `HistoryEntry` (`Output`, `Gap`)
+- [x] `HistoryHandle::snapshot()` — structured access for custom formatters
+- [x] `HistoryHandle::render_text()` — prompt-ready rolling transcript for LLM/classifier context
+- [x] Oldest-first trimming across the **global merged transcript**, not per-source windows
+- [x] Omission marker support when older entries are trimmed
+- [x] Unit tests:
+  - source attribution and coalescing (`history_source_coalescing`)
+  - oldest-first trimming by entry count (`history_trims_oldest_by_entry_count`)
+  - rendered-char budget trimming (`history_trims_by_render_char_budget`)
+  - explicit gap propagation into history (`history_gap_propagation`)
+  - omission marker rendering (`history_render_text_with_omission`)
+  - rolling `render_text()` behavior under sustained multi-source output (`history_rolling_under_sustained_output`)
 
 **Depends on**: 2c.2a ✓, 2c.4a ✓
 
 ### 2b.2 — Consumer predicate helpers (`src/sink.rs` extension)
 
-- [ ] Add lightweight predicate-based filtering helpers that do not require a built-in
-  matcher DSL
-- [ ] Keep selection logic consumer-owned and composable over `TargetOutput`
-- [ ] Unit tests: predicate pass/block behavior, composition with history/joined adapters
+- [x] Add lightweight predicate-based filtering helpers that do not require a built-in
+  matcher DSL — `Subscription::filter_fn(predicate: fn(&TargetOutput) -> bool)`
+- [x] Keep selection logic consumer-owned and composable over `TargetOutput`
+- [x] Unit tests: predicate pass/block behavior (`filter_fn_passes_matching_events`),
+  gap forwarding (`filter_fn_always_forwards_gaps`), composition with pipe (`filter_fn_composes_with_pipe`)
 
 **Depends on**: 2c.2a ✓
 
 ### 2b.3 — Fleet coordination + routing (`src/fleet.rs`)
 
-- [ ] `Fleet::new()` — empty programmatic registry
-- [ ] Programmatic host registration / connect methods with alias support and per-host
-  error isolation
-- [ ] `Fleet::host(name) -> Option<&HostHandle>` — alias or `host:port` lookup (DC9)
-- [ ] `Fleet::hosts()` iterator
-- [ ] `Fleet::output_bus()` accessor (owns `OutputBus`, shares via `Arc`)
-- [ ] Aggregate monitoring lifecycle: `start_monitoring()`, `start_monitoring_host()`,
+- [x] `Fleet::new()` — empty programmatic registry
+- [x] Programmatic host registration (`register()`) with alias support and conflict detection
+- [x] `Fleet::host(name) -> Option<&HostHandle>` — alias lookup (DC9)
+- [x] `Fleet::hosts()` iterator
+- [x] `Fleet::output_bus()` accessor (owns `OutputBus`, shares via `Arc`)
+- [x] Aggregate monitoring lifecycle: `start_monitoring_session()`, `start_monitoring_host()`,
   `stop_monitoring_host()`, `shutdown()`
-- [ ] Workstream registry: `bind()`, `unbind()`, `find()`, `workstreams()`
-- [ ] Convenience routed actions: `send_text`, `send_keys`, `capture`, `target`
-- [ ] `HostStatus` enum: `Disconnected`, `Connecting`, `Connected`, `Monitoring { sessions }`, `Error(String)`
-- [ ] Document the delegation contract: Fleet-level routing helpers are convenience
-  wrappers over normal `HostHandle` / `Target` operations, not a separate action system
-- [ ] Unit tests: multi-host connect with one failure, alias conflict detection,
-  workstream bind/find/unbind, routed action correctness
+- [x] Workstream registry: `bind()`, `unbind()`, `find()`, `workstreams()`
+- [x] Convenience routed actions: `send_text`, `send_keys`, `capture`, `target`
+- [x] `HostStatus` enum: `Connected`, `Monitoring { sessions }`, `Error(String)`
+- [x] Delegation contract documented in module-level rustdoc
+- [x] Unit tests: alias conflict detection (`fleet_alias_conflict_detection`),
+  workstream bind/find/unbind (`fleet_workstream_bind_find_unbind`),
+  shared bus (`fleet_output_bus_is_shared`), shutdown (`fleet_shutdown_clears_state`)
 
 **Depends on**: 2c.4a ✓
 

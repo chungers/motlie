@@ -8,6 +8,7 @@ pub mod host;
 pub mod sink;
 pub mod sinks;
 pub mod monitor;
+pub mod fleet;
 mod uri;
 
 pub use types::*;
@@ -18,6 +19,8 @@ pub use capture::{normalize_screen_stable, normalize_plain_text, strip_ansi, ove
 pub use sink::{
     TargetOutput, SinkEvent, SinkFilter, SinkId, SinkKind, CallbackSink,
     Subscription, PipeHandle, JoinedStream, StreamChunk, SourceLabel, LabelFormat, OutputBus,
+    HistoryHandle, HistoryOptions, HistorySnapshot, HistoryEntry,
 };
 pub use sinks::stdio::{StdioSink, StdioFormat};
 pub use monitor::{SessionMonitorHandle, MonitorHandle};
+pub use fleet::{Fleet, HostStatus};
