@@ -16,7 +16,7 @@ use motlie_tmux::{
 };
 use std::time::Duration;
 
-const CHAT_CMD: &str = "sh -c 'stty -echo -onlcr; cat'";
+const CHAT_CMD: &str = "sh -c 'stty -echo 2>/dev/null || true; cat'";
 const HELP: &str = "\
 history_demo — rolling transcript for an external LLM/classifier loop
 
@@ -197,7 +197,9 @@ async fn main() -> Result<()> {
         tokio::time::sleep(Duration::from_millis(250)).await;
 
         println!("=== rolling context after turn {} ===", idx + 1);
-        println!("{}", history.render_text().await);
+        // Normalize CRLF-ish terminal echo artifacts so the tutorial output stays
+        // readable across platforms while still using the real HistoryHandle API.
+        println!("{}", history.render_text().await.replace('\r', ""));
     }
 
     let snapshot = history.snapshot().await;
