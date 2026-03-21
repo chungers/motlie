@@ -4,6 +4,8 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-21 | @claude | 4.2c enhancement: full capture-pane snapshot on reconnect — after "stream resumed" discontinuity, list panes in session and publish each pane's visible content as `TargetOutput` so downstream consumers get real screen state re-anchoring (not just a marker). |
+| 2026-03-20 | @claude | Implement Phase 4.2 (DC29 streaming resilience): 4.2a reconnect supervision with exponential backoff in host.rs, 4.2b `SinkEvent::Discontinuity` threaded through all adapters, 4.2c fresh snapshot anchoring (discontinuity markers on reconnect), 4.2d per-session `MonitorHealth` as Fleet ground truth, 4.2e stress tests (bus throughput, history determinism, MockTransport multi-phase), 4.2f adversarial shell-escape property tests. 355 tests (+14 new). |
 | 2026-03-20 | @codex | Refine Phase 4.2 per PR #94 review: reframe reconnect resync as fresh snapshot anchoring (not replay), add adapter-propagation tasks for discontinuity, specify missing-session/topology-change handling, and require per-session monitor health as Fleet ground truth. |
 | 2026-03-20 | @codex | Expand Phase 4 into explicit streaming-resilience work: reconnect supervision, upstream discontinuity modeling, fresh snapshot anchoring after reconnect, Fleet health state, and failure-injection coverage. This becomes the next active hardening priority for long-lived external-agent workflows. |
 | 2026-03-20 | @claude | Implement Track B (2b.1, 2b.2, 2b.3): `HistoryHandle`/`HistoryOptions`/`HistorySnapshot`/`HistoryEntry` in sink.rs, `Subscription::filter_fn()` predicate adapter, `Fleet` module with host registry/workstream routing/monitoring lifecycle. 339 tests pass (50 new). |
@@ -1128,14 +1130,15 @@ config-driven automator coupling was deferred.
 
 ### 4.2 — Streaming resilience + failure semantics
 
-- [ ] **4.2a — Reconnecting monitor supervision**
+- [x] **4.2a — Reconnecting monitor supervision**
   - wrap session monitor lifecycle so unexpected control-mode EOF does not permanently
     kill monitoring on the first failure
   - add bounded retry/backoff policy for SSH-backed monitors
   - support localhost control-mode reattach after tmux server/client interruption
   - preserve explicit caller-driven stop/shutdown semantics (no reconnect after
     intentional stop)
-- [ ] **4.2b — Upstream discontinuity artifact**
+  <!-- @claude 2026-03-20 — Implemented in host.rs: supervision loop with exponential backoff (1s–30s, max 5 retries), MonitorExitReason-based dispatch, session-existence verification on reconnect, intentional-stop detection via tokio::select!. -->
+- [x] **4.2b — Upstream discontinuity artifact**
   - introduce `SinkEvent::Discontinuity` (or equivalent) distinct from `SinkEvent::Gap`
     for upstream monitor
     interruption/resume/resync
@@ -1147,7 +1150,8 @@ config-driven automator coupling was deferred.
     - `pipe()` / terminal sinks
     - `HistoryEntry::Discontinuity`
     - `JoinedStream` source-reset semantics
-- [ ] **4.2c — Fresh snapshot anchoring after reconnect**
+  <!-- @claude 2026-03-20 — Implemented in sink.rs: SinkEvent::Discontinuity variant, HistoryEntry::Discontinuity, filter_fn always-forward, JoinedStream source-reset, OutputBus::publish_discontinuity(), pipe/stdio/integration match arms. 6 unit tests. -->
+- [x] **4.2c — Fresh snapshot anchoring after reconnect**
   - after successful reconnect, capture a bounded **current-state snapshot** instead of
     pretending missed output was recovered
   - record snapshot outcome as an explicit transcript/system entry
@@ -1155,7 +1159,8 @@ config-driven automator coupling was deferred.
     memory/history budgets
   - test/document invariant: reconnect snapshot re-anchors the stream but does **not**
     replay output lost during the outage
-- [ ] **4.2d — Fleet/host streaming health**
+  <!-- @claude 2026-03-21 — Implemented: emits "stream resumed" discontinuity, then lists panes in session and publishes each pane's visible content as TargetOutput for real screen-state re-anchoring. -->
+- [x] **4.2d — Fleet/host streaming health**
   - introduce per-session monitor health as ground truth:
     `streaming | reconnecting | failed | stopped`
   - derive host/Fleet health from per-session state (counts or worst-of), rather than a
@@ -1167,7 +1172,8 @@ config-driven automator coupling was deferred.
     subscriptions no longer match
   - expose enough state for future TUI/dashboard surfaces without inventing a second
     monitoring model
-- [ ] **4.2e — Stress + failure injection coverage**
+  <!-- @claude 2026-03-20 — Implemented: MonitorHealth enum in monitor.rs, SessionMonitorHandle.health() accessor, SessionMonitorStatus in fleet.rs, host_status() reports per-session health. 3 unit tests. -->
+- [x] **4.2e — Stress + failure injection coverage**
   - expand `MockTransport` test suite: error paths, timeouts, malformed tmux output
   - `OutputBus` stress test: high-throughput publish with slow/full sinks
   - transcript/history determinism tests under bursty multi-source output and explicit
@@ -1176,8 +1182,10 @@ config-driven automator coupling was deferred.
     alias/workstream lookup semantics
   - integration tests that intentionally kill/restart tmux server or break control-mode
     shell during active monitoring
-- [ ] **4.2f — Shell/input hardening**
+  <!-- @claude 2026-03-20 — Implemented: MockTransport.with_shell_sequence() for multi-phase reconnect testing (transport.rs), OutputBus stress test with slow subscriber + Gap verification (sink.rs), history determinism test with multi-source + discontinuity interleaving (sink.rs), bus discontinuity under backpressure test (sink.rs). Fleet routing resilience and live kill/restart integration tests deferred to 4.3 Docker-based E2E. -->
+- [x] **4.2f — Shell/input hardening**
   - shell escaping fuzz tests or property tests (adversarial session names, text input)
+  <!-- @claude 2026-03-20 — Implemented: adversarial input test (17 cases: injection, unicode, control chars, long strings) and round-trip identity property test (10 cases) in transport.rs. -->
 
 ### 4.3 — Docker-based E2E (OC6)
 

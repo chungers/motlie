@@ -782,6 +782,10 @@ pub struct MockTransport {
     transfer_error: Mutex<Option<String>>,
     /// Canned shell data chunks for open_shell() (Phase 2a.2a).
     shell_data: Mutex<Vec<Vec<u8>>>,
+    /// Multi-phase shell sequences for reconnect testing (DC29, 4.2e).
+    /// Each `open_shell()` call pops the next sequence from this queue.
+    /// Falls back to `shell_data` when empty.
+    shell_sequences: Mutex<Vec<Vec<Vec<u8>>>>,
 }
 
 impl MockTransport {
@@ -793,6 +797,7 @@ impl MockTransport {
             fs: Mutex::new(HashMap::new()),
             transfer_error: Mutex::new(None),
             shell_data: Mutex::new(Vec::new()),
+            shell_sequences: Mutex::new(Vec::new()),
         }
     }
 
@@ -858,13 +863,29 @@ impl MockTransport {
         self
     }
 
+    /// Add a shell data sequence for multi-phase testing (DC29, 4.2e).
+    ///
+    /// Each call to `open_shell()` pops the next queued sequence. When the
+    /// queue is exhausted, falls back to `shell_data`. This enables testing
+    /// reconnect behavior: first shell yields data then EOF, second shell
+    /// yields post-reconnect data.
+    pub fn with_shell_sequence(self, data: Vec<Vec<u8>>) -> Self {
+        self.shell_sequences.lock().unwrap().push(data);
+        self
+    }
+
     /// Open a mock shell channel for testing. Returns `ShellChannelKind::Mock`.
     pub async fn open_shell_for_test(&self) -> ShellChannelKind {
         ShellChannelKind::Mock(self.open_shell().await.unwrap())
     }
 
     async fn open_shell(&self) -> Result<MockShellChannel> {
-        let data = self.shell_data.lock().unwrap().clone();
+        let mut seqs = self.shell_sequences.lock().unwrap();
+        let data = if !seqs.is_empty() {
+            seqs.remove(0)
+        } else {
+            self.shell_data.lock().unwrap().clone()
+        };
         Ok(MockShellChannel { data, pos: 0 })
     }
 
@@ -2183,6 +2204,89 @@ mod tests {
     #[test]
     fn shell_escape_multiple_quotes() {
         assert_eq!(shell_escape_arg("a'b'c"), "a'\\''b'\\''c");
+    }
+
+    // --- 4.2f: Shell escaping adversarial/property tests ---
+
+    #[test]
+    fn shell_escape_adversarial_inputs() {
+        // Adversarial session names and text inputs that could cause injection
+        let long_string = "A".repeat(10_000);
+        let adversarial = vec![
+            // Basic injection attempts
+            ("'; rm -rf /; '", "injection via quote-break"),
+            ("$(whoami)", "command substitution"),
+            ("`id`", "backtick expansion"),
+            ("${HOME}", "variable expansion"),
+            // Multi-line injection
+            ("foo\n'; rm -rf /; echo '", "newline-based injection"),
+            // Null bytes and control chars
+            ("test\0null", "null byte"),
+            ("\x01\x02\x03", "control characters"),
+            // Unicode edge cases
+            ("日本語'テスト", "CJK with embedded quote"),
+            ("\u{200B}zero-width", "zero-width space"),
+            ("\u{FEFF}BOM", "byte order mark"),
+            // Deeply nested quotes
+            ("'''''''''''", "many single quotes"),
+            ("'\"'\"'\"'\"", "alternating quote types"),
+            // Empty and whitespace
+            ("", "empty string"),
+            (" ", "single space"),
+            ("   ", "multiple spaces"),
+            ("\t\n\r", "whitespace chars"),
+            // Long string
+            (long_string.as_str(), "very long string"),
+        ];
+
+        for (input, desc) in &adversarial {
+            let escaped = shell_escape_arg(input);
+            // Invariant: no unescaped single quotes should appear in the result
+            // (all ' should be replaced with '\'' sequence)
+            let quote_count_in = input.matches('\'').count();
+            let escape_seq_count = escaped.matches("'\\''").count();
+            assert_eq!(
+                quote_count_in, escape_seq_count,
+                "for {}: every single quote must be escaped. input quotes: {}, escaped sequences: {}",
+                desc, quote_count_in, escape_seq_count
+            );
+
+            // Round-trip: replacing the escape sequence back should yield original
+            let reconstructed = escaped.replace("'\\''", "'");
+            assert_eq!(
+                &reconstructed, *input,
+                "for {}: round-trip failed", desc
+            );
+        }
+    }
+
+    #[test]
+    fn shell_escape_preserves_content_identity() {
+        // Property: for any input, the escaped output when eval'd by shell should
+        // produce the original string. We can't run actual shell here, but we can
+        // verify the round-trip structure.
+        let inputs = vec![
+            "simple",
+            "with spaces",
+            "with\nnewlines",
+            "with\ttabs",
+            "'single quoted'",
+            "mixed 'quotes\" and $vars",
+            "emoji 🎉 test",
+            "path/to/file.txt",
+            "--flag=value",
+            "key=val; echo injected",
+        ];
+
+        for input in inputs {
+            let escaped = shell_escape_arg(input);
+            // Reconstruct: replace all '\'' back to '
+            let reconstructed = escaped.replace("'\\''", "'");
+            assert_eq!(
+                &reconstructed, input,
+                "round-trip failed for: {:?}", input
+            );
+        }
     }
 
     #[test]

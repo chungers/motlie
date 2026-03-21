@@ -14,7 +14,7 @@ use anyhow::{anyhow, Result};
 
 use crate::host::{HostHandle, Target};
 use crate::keys::KeySequence;
-use crate::monitor::{MonitorHandle, SessionMonitorHandle};
+use crate::monitor::{MonitorHandle, MonitorHealth, SessionMonitorHandle};
 use crate::sink::OutputBus;
 use crate::types::TargetSpec;
 
@@ -22,13 +22,25 @@ use crate::types::TargetSpec;
 // HostStatus
 // ---------------------------------------------------------------------------
 
+/// Per-session monitor status within a Fleet host (DC29, 4.2d).
+#[derive(Debug, Clone)]
+pub struct SessionMonitorStatus {
+    /// Session name.
+    pub name: String,
+    /// Per-session monitor health (ground truth).
+    pub health: MonitorHealth,
+}
+
 /// Status of a host within the fleet.
+///
+/// Per-session monitor health is the ground truth (DC29). Host-level status
+/// is derived from per-session states.
 #[derive(Debug, Clone)]
 pub enum HostStatus {
-    /// Registered but not connected.
+    /// Registered but not monitoring any sessions.
     Connected,
-    /// Actively monitoring one or more sessions.
-    Monitoring { sessions: Vec<String> },
+    /// Monitoring one or more sessions with per-session health.
+    Monitoring { sessions: Vec<SessionMonitorStatus> },
     /// Host encountered an error.
     Error(String),
 }
@@ -121,26 +133,43 @@ impl Fleet {
         self.bus.clone()
     }
 
-    /// Status of a registered host.
+    /// Status of a registered host with per-session health (DC29, 4.2d).
+    ///
+    /// Per-session monitor health is the ground truth. Host status is derived
+    /// from per-session states.
     pub fn host_status(&self, alias: &str) -> Option<HostStatus> {
         if !self.hosts.contains_key(alias) {
             return None;
         }
+        let mut statuses = Vec::new();
+
+        // Per-session monitors
         if let Some(monitors) = self.session_monitors.get(alias) {
-            if !monitors.is_empty() {
-                let sessions: Vec<String> = monitors
-                    .iter()
-                    .map(|(name, _)| name.clone())
-                    .collect();
-                return Some(HostStatus::Monitoring { sessions });
+            for (name, handle) in monitors {
+                statuses.push(SessionMonitorStatus {
+                    name: name.clone(),
+                    health: handle.health(),
+                });
             }
         }
-        if self.full_monitors.contains_key(alias) {
-            let host = &self.hosts[alias];
-            let sessions = host.monitored_sessions();
-            return Some(HostStatus::Monitoring { sessions });
+        // Full monitors (aggregate handle) — use all_sessions() so that
+        // failed/stopped sessions remain visible in health status (DC29).
+        if let Some(monitor) = self.full_monitors.get(alias) {
+            for session_name in monitor.all_sessions() {
+                if let Some(handle) = monitor.get(session_name) {
+                    statuses.push(SessionMonitorStatus {
+                        name: session_name.to_string(),
+                        health: handle.health(),
+                    });
+                }
+            }
         }
-        Some(HostStatus::Connected)
+
+        if statuses.is_empty() {
+            Some(HostStatus::Connected)
+        } else {
+            Some(HostStatus::Monitoring { sessions: statuses })
+        }
     }
 
     // --- Monitoring lifecycle ---
