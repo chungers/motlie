@@ -1740,6 +1740,33 @@ Compiling motlie v0.1.0
 deploy complete
 ```
 
+Runnable example: [`examples/history_demo.rs`](../examples/history_demo.rs) — creates
+two panes that simulate two other agent chat traces, wraps their combined stream in a
+`HistoryHandle`, and prints the rolling `render_text()` context after each turn the way
+an external LLM/classifier loop would consume it.
+
+Example flow:
+
+```rust
+let monitor = host.start_monitoring_session("history_demo").await?;
+let bus = host.output_bus();
+let sub = bus.subscribe(vec![SinkFilter::for_session("history_demo")], 64)?;
+let history = sub.history(HistoryOptions {
+    max_entries: 8,
+    max_render_chars: 420,
+    label_format: LabelFormat::Prompt,
+    include_omission_marker: true,
+});
+
+loop {
+    let context = history.render_text().await;
+    // Send `context` to the external model/classifier.
+    // When it decides to act, route back through Fleet / HostHandle / Target.
+    println!("{}", context);
+    break;
+}
+```
+
 ### Lifecycle
 
 ```rust
