@@ -1,20 +1,22 @@
 //! Output sink pipeline: TargetOutput, SinkEvent, SinkFilter, OutputBus,
-//! Subscription, JoinedStream, SinkKind (DC12, DC24).
+//! Subscription, JoinedStream, HistoryHandle, SinkKind (DC12, DC24, DC28).
 //!
 //! The pipeline has three layers:
 //! - **Bus**: source routing (host/session/pane), fan-out, backpressure/gap tracking
-//! - **Subscription adapters**: joining, piping to sinks (Track A); content matching,
-//!   reacting (Track B, future)
+//! - **Subscription adapters**: joining, piping to sinks (Track A); `filter_fn` predicate
+//!   filtering, `history()` rolling transcript/history (Track B, DC28)
 //! - **Terminal consumers**: SinkKind (stdio, callback), custom code via into_receiver()
 
 use std::any::Any;
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{anyhow, Result};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 
 use crate::types::{OutputFidelity, TargetAddress};
@@ -339,6 +341,29 @@ impl Subscription {
             last_source: None,
         }
     }
+
+    /// Consumer-owned predicate filtering. Spawns a forwarding task that
+    /// passes only events whose `TargetOutput` satisfies `predicate`.
+    /// Gap events are always forwarded. Consumes the subscription.
+    pub fn filter_fn(self, predicate: fn(&TargetOutput) -> bool) -> Subscription {
+        let id = self.id;
+        let mut rx = self.rx;
+        let (tx, new_rx) = mpsc::channel(256);
+        tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                let should_forward = match &event {
+                    SinkEvent::Data(output) => predicate(output),
+                    SinkEvent::Gap { .. } => true,
+                };
+                if should_forward {
+                    if tx.send(event).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        Subscription { id, rx: new_rx }
+    }
 }
 
 /// Lifecycle handle for a piped subscription.
@@ -432,7 +457,8 @@ pub struct StreamChunk {
     pub source_changed: bool,
 }
 
-/// Label format for JoinedStream rendering.
+/// Label format for JoinedStream and history rendering.
+#[derive(Clone, Copy)]
 pub enum LabelFormat {
     /// "[web-1:build:0.1] content"
     Bracketed,
@@ -440,6 +466,16 @@ pub enum LabelFormat {
     Prompt,
     /// Custom formatting function.
     Custom(fn(&SourceLabel, &str) -> String),
+}
+
+impl std::fmt::Debug for LabelFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LabelFormat::Bracketed => write!(f, "Bracketed"),
+            LabelFormat::Prompt => write!(f, "Prompt"),
+            LabelFormat::Custom(_) => write!(f, "Custom(fn)"),
+        }
+    }
 }
 
 /// Multi-source consolidated view returned by `Subscription::joined()`.
@@ -489,6 +525,268 @@ impl JoinedStream {
             LabelFormat::Prompt => format!("{}> {}", label, content),
             LabelFormat::Custom(f) => f(&chunk.source, content),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 2b.1 — Transcript/History for external LLM context (DC28)
+// ---------------------------------------------------------------------------
+
+/// Options for configuring a rolling transcript/history handle.
+#[derive(Debug, Clone)]
+pub struct HistoryOptions {
+    /// Maximum number of logical entries to retain.
+    pub max_entries: usize,
+    /// Maximum rendered characters. Oldest entries are trimmed first to stay
+    /// within budget. `0` means no character limit.
+    pub max_render_chars: usize,
+    /// Label format used for the underlying `JoinedStream` source attribution.
+    pub label_format: LabelFormat,
+    /// When true, `render_text()` prepends an omission marker if entries were
+    /// trimmed (e.g. `[... 37 earlier entries omitted ...]`).
+    pub include_omission_marker: bool,
+}
+
+impl Default for HistoryOptions {
+    fn default() -> Self {
+        HistoryOptions {
+            max_entries: 500,
+            max_render_chars: 0,
+            label_format: LabelFormat::Bracketed,
+            include_omission_marker: true,
+        }
+    }
+}
+
+/// A single entry in the transcript history.
+#[derive(Debug, Clone)]
+pub enum HistoryEntry {
+    /// Source-labeled output burst.
+    Output {
+        /// Source label from `JoinedStream` coalescing.
+        source: SourceLabel,
+        /// Content text.
+        text: String,
+        /// True when the source changed from the previous entry.
+        source_changed: bool,
+    },
+    /// Explicit gap marker from bus backpressure.
+    Gap {
+        /// Number of events that were dropped.
+        dropped_events: usize,
+    },
+}
+
+impl HistoryEntry {
+    /// Rendered character count for budget trimming.
+    ///
+    /// Measures the actual rendered string length to ensure accurate budget
+    /// enforcement for all label formats including `LabelFormat::Custom`.
+    fn rendered_chars(&self, label_format: &LabelFormat) -> usize {
+        let source_changed = match self {
+            HistoryEntry::Output { source_changed, .. } => *source_changed,
+            HistoryEntry::Gap { .. } => true,
+        };
+        self.render(label_format, source_changed).len()
+    }
+
+    /// Render this entry as text.
+    fn render(&self, label_format: &LabelFormat, source_changed: bool) -> String {
+        match self {
+            HistoryEntry::Output { source, text, .. } => {
+                if source_changed {
+                    match label_format {
+                        LabelFormat::Bracketed => format!("[{}] {}\n", source.short(), text),
+                        LabelFormat::Prompt => format!("{}> {}\n", source.short(), text),
+                        LabelFormat::Custom(f) => format!("{}\n", f(source, text)),
+                    }
+                } else {
+                    format!("{}\n", text)
+                }
+            }
+            HistoryEntry::Gap { dropped_events } => {
+                format!("[gap: {} event(s) dropped]\n", dropped_events)
+            }
+        }
+    }
+}
+
+/// Snapshot of the rolling transcript at a point in time.
+#[derive(Debug, Clone)]
+pub struct HistorySnapshot {
+    /// Entries in chronological order (oldest first).
+    pub entries: Vec<HistoryEntry>,
+    /// Total rendered characters in this snapshot.
+    pub rendered_chars: usize,
+    /// Number of older entries that were trimmed.
+    pub omitted_entries: usize,
+}
+
+/// Shared state for the history accumulator.
+struct HistoryState {
+    entries: VecDeque<HistoryEntry>,
+    max_entries: usize,
+    max_render_chars: usize,
+    rendered_chars: usize,
+    omitted_entries: usize,
+    label_format: LabelFormat,
+    include_omission_marker: bool,
+}
+
+impl HistoryState {
+    fn push(&mut self, entry: HistoryEntry) {
+        let entry_chars = entry.rendered_chars(&self.label_format);
+        self.entries.push_back(entry);
+        self.rendered_chars += entry_chars;
+        self.trim();
+    }
+
+    fn trim(&mut self) {
+        // Trim by entry count
+        while self.entries.len() > self.max_entries {
+            if let Some(removed) = self.entries.pop_front() {
+                let chars = removed.rendered_chars(&self.label_format);
+                self.rendered_chars = self.rendered_chars.saturating_sub(chars);
+                self.omitted_entries += 1;
+            }
+        }
+        // Trim by character budget
+        if self.max_render_chars > 0 {
+            while self.rendered_chars > self.max_render_chars && !self.entries.is_empty() {
+                if let Some(removed) = self.entries.pop_front() {
+                    let chars = removed.rendered_chars(&self.label_format);
+                    self.rendered_chars = self.rendered_chars.saturating_sub(chars);
+                    self.omitted_entries += 1;
+                }
+            }
+        }
+    }
+
+    fn snapshot(&self) -> HistorySnapshot {
+        HistorySnapshot {
+            entries: self.entries.iter().cloned().collect(),
+            rendered_chars: self.rendered_chars,
+            omitted_entries: self.omitted_entries,
+        }
+    }
+
+    fn render_text(&self) -> String {
+        let mut result = String::with_capacity(self.rendered_chars + 64);
+
+        if self.include_omission_marker && self.omitted_entries > 0 {
+            result.push_str(&format!(
+                "[... {} earlier entries omitted ...]\n",
+                self.omitted_entries
+            ));
+        }
+
+        for entry in &self.entries {
+            let source_changed = match entry {
+                HistoryEntry::Output { source_changed, .. } => *source_changed,
+                HistoryEntry::Gap { .. } => true,
+            };
+            result.push_str(&entry.render(&self.label_format, source_changed));
+        }
+
+        result
+    }
+}
+
+/// Handle to a rolling transcript/history accumulator (DC28).
+///
+/// Created by `Subscription::history(opts)`. Spawns a background task that
+/// consumes `JoinedStream` chunks and accumulates them into a bounded,
+/// source-labeled transcript. Consumers poll via `snapshot()` for structured
+/// access or `render_text()` for prompt-ready rolling context.
+pub struct HistoryHandle {
+    id: SinkId,
+    state: Arc<Mutex<HistoryState>>,
+    task: JoinHandle<()>,
+}
+
+impl HistoryHandle {
+    /// The subscription id for bus control.
+    pub fn id(&self) -> SinkId {
+        self.id
+    }
+
+    /// Take a snapshot of the current transcript state.
+    pub async fn snapshot(&self) -> HistorySnapshot {
+        self.state.lock().await.snapshot()
+    }
+
+    /// Render the current transcript as prompt-ready text.
+    pub async fn render_text(&self) -> String {
+        self.state.lock().await.render_text()
+    }
+
+    /// Await the background accumulator task to completion.
+    /// The task finishes when the subscription channel closes
+    /// (via `unsubscribe()` or bus `shutdown()`).
+    pub async fn join(self) -> Result<()> {
+        self.task
+            .await
+            .map_err(|e| anyhow!("history accumulator task panicked: {}", e))
+    }
+}
+
+impl Subscription {
+    /// Create a rolling transcript/history handle (DC28).
+    ///
+    /// Spawns a background task that consumes events, applies source coalescing
+    /// (same logic as `JoinedStream`), and accumulates entries into a bounded
+    /// in-memory transcript. Unlike `joined()`, Gap events are preserved as
+    /// explicit history entries instead of being skipped.
+    ///
+    /// Consumes the subscription.
+    pub fn history(self, opts: HistoryOptions) -> HistoryHandle {
+        let id = self.id;
+        let mut rx = self.rx;
+
+        let state = Arc::new(Mutex::new(HistoryState {
+            entries: VecDeque::new(),
+            max_entries: opts.max_entries,
+            max_render_chars: opts.max_render_chars,
+            rendered_chars: 0,
+            omitted_entries: 0,
+            label_format: opts.label_format,
+            include_omission_marker: opts.include_omission_marker,
+        }));
+
+        let state_clone = state.clone();
+        let task = tokio::spawn(async move {
+            // Source tracking replicates JoinedStream logic so we can also
+            // capture Gap events (which JoinedStream::next() skips).
+            let mut last_source: Option<SourceLabel> = None;
+
+            while let Some(event) = rx.recv().await {
+                match event {
+                    SinkEvent::Data(output) => {
+                        let source = SourceLabel::from_output(&output);
+                        let source_changed = match &last_source {
+                            Some(prev) => !prev.same_source(&source),
+                            None => true,
+                        };
+                        last_source = Some(source.clone());
+
+                        let entry = HistoryEntry::Output {
+                            source,
+                            text: output.content.clone(),
+                            source_changed,
+                        };
+                        state_clone.lock().await.push(entry);
+                    }
+                    SinkEvent::Gap { dropped, .. } => {
+                        let entry = HistoryEntry::Gap {
+                            dropped_events: dropped,
+                        };
+                        state_clone.lock().await.push(entry);
+                    }
+                }
+            }
+        });
+
+        HistoryHandle { id, state, task }
     }
 }
 
@@ -1150,5 +1448,389 @@ mod tests {
 
         let collected = events.lock().unwrap();
         assert_eq!(*collected, vec!["msg1", "msg2"]);
+    }
+
+    // --- Subscription::filter_fn tests ---
+
+    #[tokio::test]
+    async fn filter_fn_passes_matching_events() {
+        let bus = OutputBus::new();
+        let sub = bus.subscribe(vec![], 16).unwrap();
+
+        // Filter: only events from session "build"
+        let filtered = sub.filter_fn(|out| out.session_name() == "build");
+        let mut rx = filtered.into_receiver();
+
+        bus.publish(make_output("h", "build", "%1", "yes", 1));
+        bus.publish(make_output("h", "deploy", "%2", "no", 2));
+        bus.publish(make_output("h", "build", "%3", "also-yes", 3));
+
+        // Allow forwarding task to process
+        tokio::task::yield_now().await;
+
+        match rx.recv().await.unwrap() {
+            SinkEvent::Data(out) => assert_eq!(out.content, "yes"),
+            _ => panic!("expected Data"),
+        }
+        match rx.recv().await.unwrap() {
+            SinkEvent::Data(out) => assert_eq!(out.content, "also-yes"),
+            _ => panic!("expected Data"),
+        }
+    }
+
+    #[tokio::test]
+    async fn filter_fn_always_forwards_gaps() {
+        let bus = OutputBus::new();
+        // Small capacity to trigger backpressure
+        let sub = bus.subscribe(vec![], 2).unwrap();
+
+        let filtered = sub.filter_fn(|_| false); // block all data
+        let mut rx = filtered.into_receiver();
+
+        // Fill channel to create drops
+        bus.publish(make_output("h", "s", "%1", "a", 1));
+        bus.publish(make_output("h", "s", "%1", "b", 2));
+        bus.publish(make_output("h", "s", "%1", "c", 3));
+        bus.publish(make_output("h", "s", "%1", "d", 4));
+
+        // Drain the original sub's channel — the filter_fn reads from
+        // the subscription's channel (which is capacity 2), so let's
+        // yield to let the forwarder process
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        // Publish more to trigger gap
+        bus.publish(make_output("h", "s", "%1", "e", 5));
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        // We expect gaps to be forwarded even though predicate blocks Data
+        // The gap should arrive since gaps are always forwarded
+        bus.shutdown();
+        // Drain all events and check that any Gap events made it through
+        let mut found_gap = false;
+        while let Some(event) = rx.recv().await {
+            if matches!(event, SinkEvent::Gap { .. }) {
+                found_gap = true;
+            }
+        }
+        assert!(found_gap, "Gap events should be forwarded by filter_fn");
+    }
+
+    #[tokio::test]
+    async fn filter_fn_composes_with_pipe() {
+        let bus = OutputBus::new();
+        let sub = bus.subscribe(vec![], 16).unwrap();
+
+        let filtered = sub.filter_fn(|out| out.content.contains("important"));
+
+        let events: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events_clone: Arc<dyn Any + Send + Sync> = events.clone();
+
+        let sink = SinkKind::Callback(CallbackSink {
+            name: "test".to_string(),
+            state: events_clone,
+            on_output: |state, event| {
+                let events = state
+                    .downcast_ref::<std::sync::Mutex<Vec<String>>>()
+                    .unwrap();
+                if let SinkEvent::Data(out) = event {
+                    events.lock().unwrap().push(out.content.clone());
+                }
+                Ok(())
+            },
+            on_flush: None,
+        });
+
+        let handle = filtered.pipe(sink);
+
+        bus.publish(make_output("h", "s", "%1", "noise", 1));
+        bus.publish(make_output("h", "s", "%1", "important data", 2));
+        bus.publish(make_output("h", "s", "%1", "more noise", 3));
+        bus.publish(make_output("h", "s", "%1", "also important!", 4));
+
+        bus.shutdown();
+        handle.join().await.unwrap();
+
+        let collected = events.lock().unwrap();
+        assert_eq!(*collected, vec!["important data", "also important!"]);
+    }
+
+    // --- HistoryHandle tests (DC28) ---
+
+    #[tokio::test]
+    async fn history_accumulates_entries() {
+        let bus = OutputBus::new();
+        let sub = bus.subscribe(vec![], 16).unwrap();
+
+        let history = sub.history(HistoryOptions {
+            max_entries: 100,
+            max_render_chars: 0,
+            label_format: LabelFormat::Bracketed,
+            include_omission_marker: true,
+        });
+
+        bus.publish(make_output("h", "s", "%1", "hello", 1));
+        bus.publish(make_output("h", "s", "%1", "world", 2));
+
+        // Let accumulator process
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let snap = history.snapshot().await;
+        assert_eq!(snap.entries.len(), 2);
+        assert_eq!(snap.omitted_entries, 0);
+        match &snap.entries[0] {
+            HistoryEntry::Output { text, source_changed, .. } => {
+                assert_eq!(text, "hello");
+                assert!(*source_changed); // first entry
+            }
+            _ => panic!("expected Output"),
+        }
+        match &snap.entries[1] {
+            HistoryEntry::Output { text, source_changed, .. } => {
+                assert_eq!(text, "world");
+                assert!(!*source_changed); // same source
+            }
+            _ => panic!("expected Output"),
+        }
+
+        bus.shutdown();
+        history.join().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn history_source_coalescing() {
+        let bus = OutputBus::new();
+        let sub = bus.subscribe(vec![], 16).unwrap();
+        let history = sub.history(HistoryOptions::default());
+
+        bus.publish(make_output("h", "s", "%1", "a", 1));
+        bus.publish(make_output("h", "s", "%2", "b", 2)); // different pane
+        bus.publish(make_output("h", "s", "%2", "c", 3)); // same pane
+
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let snap = history.snapshot().await;
+        assert_eq!(snap.entries.len(), 3);
+
+        // First: source_changed = true (initial)
+        match &snap.entries[0] {
+            HistoryEntry::Output { source_changed, .. } => assert!(*source_changed),
+            _ => panic!("expected Output"),
+        }
+        // Second: source_changed = true (different pane)
+        match &snap.entries[1] {
+            HistoryEntry::Output { source_changed, .. } => assert!(*source_changed),
+            _ => panic!("expected Output"),
+        }
+        // Third: source_changed = false (same pane as previous)
+        match &snap.entries[2] {
+            HistoryEntry::Output { source_changed, .. } => assert!(!*source_changed),
+            _ => panic!("expected Output"),
+        }
+
+        bus.shutdown();
+        history.join().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn history_trims_oldest_by_entry_count() {
+        let bus = OutputBus::new();
+        let sub = bus.subscribe(vec![], 16).unwrap();
+        let history = sub.history(HistoryOptions {
+            max_entries: 3,
+            max_render_chars: 0,
+            label_format: LabelFormat::Bracketed,
+            include_omission_marker: true,
+        });
+
+        for i in 0..5 {
+            bus.publish(make_output("h", "s", "%1", &format!("msg{}", i), i as u64));
+        }
+
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let snap = history.snapshot().await;
+        assert_eq!(snap.entries.len(), 3);
+        assert_eq!(snap.omitted_entries, 2);
+
+        // Oldest remaining should be msg2
+        match &snap.entries[0] {
+            HistoryEntry::Output { text, .. } => assert_eq!(text, "msg2"),
+            _ => panic!("expected Output"),
+        }
+
+        bus.shutdown();
+        history.join().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn history_trims_by_render_char_budget() {
+        let bus = OutputBus::new();
+        let sub = bus.subscribe(vec![], 16).unwrap();
+        let history = sub.history(HistoryOptions {
+            max_entries: 1000,
+            max_render_chars: 50,
+            label_format: LabelFormat::Bracketed,
+            include_omission_marker: false,
+        });
+
+        // Each entry: "[h:s(%1)] <text>\n" — label is about 11 chars + text + newline
+        for i in 0..10 {
+            bus.publish(make_output("h", "s", "%1", &format!("line-{:03}", i), i as u64));
+        }
+
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let snap = history.snapshot().await;
+        assert!(snap.rendered_chars <= 50, "rendered_chars {} > 50", snap.rendered_chars);
+        assert!(snap.omitted_entries > 0, "should have trimmed some entries");
+
+        bus.shutdown();
+        history.join().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn history_gap_propagation() {
+        // Test that gap events from the bus are recorded as HistoryEntry::Gap.
+        // We inject a gap directly via the channel rather than relying on
+        // timing-sensitive backpressure.
+        let (tx, rx) = mpsc::channel(16);
+        let sub = Subscription {
+            id: SinkId(999),
+            rx,
+        };
+        let history = sub.history(HistoryOptions::default());
+
+        tx.send(SinkEvent::Data(make_output("h", "s", "%1", "before", 1)))
+            .await
+            .unwrap();
+        tx.send(SinkEvent::Gap {
+            dropped: 5,
+            timestamp: Instant::now(),
+        })
+        .await
+        .unwrap();
+        tx.send(SinkEvent::Data(make_output("h", "s", "%1", "after", 2)))
+            .await
+            .unwrap();
+
+        // Close sender to let task finish
+        drop(tx);
+        history.task.await.unwrap();
+
+        // Re-acquire state for assertion (task is done, lock is uncontested)
+        let snap = history.state.lock().await.snapshot();
+        assert_eq!(snap.entries.len(), 3);
+        match &snap.entries[1] {
+            HistoryEntry::Gap { dropped_events } => assert_eq!(*dropped_events, 5),
+            other => panic!("expected Gap, got {:?}", other),
+        }
+
+        let text = history.state.lock().await.render_text();
+        assert!(text.contains("[gap: 5 event(s) dropped]"), "got: {}", text);
+    }
+
+    #[tokio::test]
+    async fn history_render_text_with_omission() {
+        let bus = OutputBus::new();
+        let sub = bus.subscribe(vec![], 16).unwrap();
+        let history = sub.history(HistoryOptions {
+            max_entries: 2,
+            max_render_chars: 0,
+            label_format: LabelFormat::Bracketed,
+            include_omission_marker: true,
+        });
+
+        bus.publish(make_output("h", "build", "%1", "old", 1));
+        bus.publish(make_output("h", "build", "%1", "mid", 2));
+        bus.publish(make_output("h", "build", "%1", "new", 3));
+
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let text = history.render_text().await;
+        assert!(text.contains("[... 1 earlier entries omitted ...]"),
+            "expected omission marker, got: {}", text);
+        assert!(text.contains("mid"));
+        assert!(text.contains("new"));
+        assert!(!text.contains("old")); // trimmed
+
+        bus.shutdown();
+        history.join().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn history_render_text_labels_on_source_change() {
+        let bus = OutputBus::new();
+        let sub = bus.subscribe(vec![], 16).unwrap();
+        let history = sub.history(HistoryOptions {
+            max_entries: 100,
+            max_render_chars: 0,
+            label_format: LabelFormat::Bracketed,
+            include_omission_marker: false,
+        });
+
+        bus.publish(make_output("web", "build", "%1", "compiling", 1));
+        bus.publish(make_output("web", "build", "%1", "done", 2));
+        bus.publish(make_output("web", "deploy", "%2", "deploying", 3));
+
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let text = history.render_text().await;
+        // First entry gets label (source_changed = true)
+        assert!(text.contains("[web:build(%1)] compiling"), "got: {}", text);
+        // Same source = no label
+        assert!(text.contains("done\n"), "got: {}", text);
+        // Source change = new label
+        assert!(text.contains("[web:deploy(%2)] deploying"), "got: {}", text);
+
+        bus.shutdown();
+        history.join().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn history_rolling_under_sustained_output() {
+        let bus = OutputBus::new();
+        let sub = bus.subscribe(vec![], 64).unwrap();
+        let history = sub.history(HistoryOptions {
+            max_entries: 5,
+            max_render_chars: 0,
+            label_format: LabelFormat::Bracketed,
+            include_omission_marker: true,
+        });
+
+        // Publish 20 events from alternating sources
+        for i in 0..20u64 {
+            let pane = if i % 2 == 0 { "%1" } else { "%2" };
+            bus.publish(make_output("h", "s", pane, &format!("msg{}", i), i));
+        }
+
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let snap = history.snapshot().await;
+        assert_eq!(snap.entries.len(), 5);
+        assert_eq!(snap.omitted_entries, 15);
+
+        // Should contain only msg15-msg19
+        for (idx, entry) in snap.entries.iter().enumerate() {
+            match entry {
+                HistoryEntry::Output { text, .. } => {
+                    assert_eq!(text, &format!("msg{}", 15 + idx));
+                }
+                _ => panic!("unexpected entry type"),
+            }
+        }
+
+        let text = history.render_text().await;
+        assert!(text.starts_with("[... 15 earlier entries omitted ...]"));
+
+        bus.shutdown();
+        history.join().await.unwrap();
     }
 }
