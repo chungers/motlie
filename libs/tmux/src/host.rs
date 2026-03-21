@@ -480,6 +480,7 @@ impl HostHandle {
                                     host_alias, session
                                 ));
 
+                                let mut snapshot_panes = 0usize;
                                 if let Ok(panes) = discovery::list_panes_in_session(
                                     &inner_ref.transport,
                                     inner_ref.socket.as_ref(),
@@ -502,10 +503,21 @@ impl HostHandle {
                                                     fidelity: OutputFidelity::clean(),
                                                     timestamp: std::time::Instant::now(),
                                                 });
+                                                snapshot_panes += 1;
                                             }
                                         }
                                     }
                                 }
+
+                                // Explicit snapshot-complete marker (DC29 4.2c):
+                                // distinguishes "reattached" from "snapshot anchoring
+                                // completed" in transcript/history.
+                                bus.publish_discontinuity(&format!(
+                                    "stream snapshot: captured current screen state \
+                                     after reconnect for {}:{} ({} panes); \
+                                     intermediate output may be missing",
+                                    host_alias, session, snapshot_panes
+                                ));
 
                                 set_health(MonitorHealth::Streaming);
                                 attempt = 0; // Reset on successful reconnect
