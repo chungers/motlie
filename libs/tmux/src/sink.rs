@@ -40,7 +40,10 @@ pub struct TargetOutput {
     pub content: String,
     /// Exact tmux capture before normalization, when requested.
     pub raw_content: Option<String>,
-    /// Monotonic per-source sequence for gap detection.
+    /// Per-source sequence for gap detection. Monotonically increasing within
+    /// a continuous stream segment. A `SinkEvent::Discontinuity` resets the
+    /// sequence epoch — consumers must not assume monotonicity across
+    /// discontinuity boundaries.
     pub sequence: u64,
     /// Fidelity metadata.
     pub fidelity: OutputFidelity,

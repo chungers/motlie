@@ -152,9 +152,10 @@ impl Fleet {
                 });
             }
         }
-        // Full monitors (aggregate handle)
+        // Full monitors (aggregate handle) — use all_sessions() so that
+        // failed/stopped sessions remain visible in health status (DC29).
         if let Some(monitor) = self.full_monitors.get(alias) {
-            for session_name in monitor.active_sessions() {
+            for session_name in monitor.all_sessions() {
                 if let Some(handle) = monitor.get(session_name) {
                     statuses.push(SessionMonitorStatus {
                         name: session_name.to_string(),

@@ -444,6 +444,16 @@ impl MonitorHandle {
             .collect()
     }
 
+    /// List all tracked session names, including stopped/failed ones.
+    ///
+    /// Unlike `active_sessions()`, this includes sessions whose monitor task
+    /// has exited (failed, stopped). Use this when reporting health status —
+    /// per-session health is the ground truth (DC29), so terminal states must
+    /// remain visible.
+    pub fn all_sessions(&self) -> Vec<&str> {
+        self.sessions.keys().map(|k| k.as_str()).collect()
+    }
+
     /// Number of monitored sessions.
     pub fn session_count(&self) -> usize {
         self.sessions.len()
