@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-20 | @codex | Refine Phase 4.2 per PR #94 review: reframe reconnect resync as fresh snapshot anchoring (not replay), add adapter-propagation tasks for discontinuity, specify missing-session/topology-change handling, and require per-session monitor health as Fleet ground truth. |
 | 2026-03-20 | @codex | Expand Phase 4 into explicit streaming-resilience work: reconnect supervision, upstream discontinuity modeling, bounded resync, Fleet health state, and failure-injection coverage. This becomes the next active hardening priority for long-lived external-agent workflows. |
 | 2026-03-20 | @claude | Implement Track B (2b.1, 2b.2, 2b.3): `HistoryHandle`/`HistoryOptions`/`HistorySnapshot`/`HistoryEntry` in sink.rs, `Subscription::filter_fn()` predicate adapter, `Fleet` module with host registry/workstream routing/monitoring lifecycle. 339 tests pass (50 new). |
 | 2026-03-20 | @codex | DC28 follow-up — specify 2b.1 transcript/history as a bounded rolling snapshot layer built on `JoinedStream`, optimized for external LLM/classifier context windows. Add concrete `HistoryHandle`/`HistorySnapshot`/`HistoryEntry` direction and explicit trimming semantics. |
@@ -1135,22 +1136,35 @@ config-driven automator coupling was deferred.
   - preserve explicit caller-driven stop/shutdown semantics (no reconnect after
     intentional stop)
 - [ ] **4.2b — Upstream discontinuity artifact**
-  - introduce a stream artifact distinct from `SinkEvent::Gap` for upstream monitor
+  - introduce `SinkEvent::Discontinuity` (or equivalent) distinct from `SinkEvent::Gap`
+    for upstream monitor
     interruption/resume/resync
   - document invariant: `Gap` means subscriber backpressure only; discontinuity means
     monitor/transport continuity was broken
-  - thread the new artifact through raw subscriptions, transcript/history, and Fleet
-    health/status surfaces
-- [ ] **4.2c — Bounded reconnect resync**
-  - after successful reconnect, perform bounded recapture/resync instead of silently
-    resuming from “now”
-  - record resync outcome as an explicit transcript/system entry
-  - define limits for resync scope so recovery is predictable and does not explode
+  - thread the new artifact through:
+    - raw subscriptions
+    - `filter_fn()` (always forwarded)
+    - `pipe()` / terminal sinks
+    - `HistoryEntry::Discontinuity`
+    - `JoinedStream` source-reset semantics
+- [ ] **4.2c — Fresh snapshot anchoring after reconnect**
+  - after successful reconnect, capture a bounded **current-state snapshot** instead of
+    pretending missed output was recovered
+  - record snapshot outcome as an explicit transcript/system entry
+  - define limits for snapshot scope so recovery is predictable and does not explode
     memory/history budgets
+  - test/document invariant: reconnect snapshot re-anchors the stream but does **not**
+    replay output lost during the outage
 - [ ] **4.2d — Fleet/host streaming health**
-  - expand Fleet/host state to reflect connected / monitoring / reconnecting /
-    degraded / failed streaming conditions
+  - introduce per-session monitor health as ground truth:
+    `streaming | reconnecting | failed | stopped`
+  - derive host/Fleet health from per-session state (counts or worst-of), rather than a
+    single flattened host status
   - ensure alias/workstream routing remains stable across reconnect attempts
+  - specify behavior when reconnect succeeds but the monitored session no longer exists
+    (tmux restart / external kill)
+  - specify behavior when pane topology changes across outage and pane-id-filtered
+    subscriptions no longer match
   - expose enough state for future TUI/dashboard surfaces without inventing a second
     monitoring model
 - [ ] **4.2e — Stress + failure injection coverage**
