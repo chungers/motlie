@@ -21,6 +21,11 @@ Primary external references:
 - `tmux-mcp-rs` docs.rs crate page: <https://docs.rs/tmux-mcp-rs/latest/tmux_mcp_rs/>
 - `tmux-mcp` project page / docs: <https://mcpservers.org/servers/bnomei/tmux-mcp>
 
+The competitive claims below are based on those public docs/API pages as reviewed on
+2026-03-21. This note is directional product input, not a behavior contract for
+`tmux-mcp-rs`; if Motlie priorities hinge on a specific competitive gap, that gap should
+be revalidated against the current upstream docs/code before implementation.
+
 Primary Motlie references:
 
 - [libs/tmux/docs/API.md](../libs/tmux/docs/API.md)
@@ -129,12 +134,16 @@ tracking handle/result model.
 `tmux-mcp-rs` appears to lean more directly on system `ssh` behavior, which can
 make common operator workflows easier:
 
-- `-i`-style identity choice
-- likely easier use of existing `~/.ssh/config`
+- easier use of existing `~/.ssh/config`
+- likely broader parity with common OpenSSH conveniences such as host aliases,
+  config inheritance, and jump/proxy flows
 - lower friction for operators already thinking in shell/CLI terms
 
-Motlie's explicit typed SSH model is better for library discipline, but it is not
-yet as convenient as broad OpenSSH config parity.
+Motlie already supports explicit key-file selection via `SshConfig::with_identity_file()`
+and the `identity-file` URI parameter, so the remaining gap is no longer "can I choose
+a key file?" but "how much of normal OpenSSH operator ergonomics and config reuse come
+along for free?" Motlie's explicit typed SSH model is better for library discipline, but
+it is not yet as convenient as broad OpenSSH config parity.
 
 ### 4. Socket-isolation ergonomics
 

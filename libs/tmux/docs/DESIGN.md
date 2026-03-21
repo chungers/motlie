@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-21 | @codex: Address PR #96 review feedback — clarify DC31 exit-code semantics, narrow `exec()` wording from "blocking" to "await-to-completion", and tighten product/design wording around competitive evidence and SSH ergonomics. | DC31, DC19, PRODUCT cross-reference |
 | 2026-03-21 | @codex: Product-driven follow-up from [`docs/PRODUCT.md`](../../../docs/PRODUCT.md): add DC30 (socket-isolation ergonomics) and DC31 (tracked command execution) as concrete robustness features. Prioritize dedicated automation sockets first, tracked command execution second. | DC30, DC31, DC19, Phase 4 |
 | 2026-03-20 | @codex: Refine DC29 per PR #94 review — resync is a fresh snapshot after reconnect, not replay. Specify missing-session/topology-change behavior, adapter propagation (`SinkEvent::Discontinuity`, `HistoryEntry::Discontinuity`, `filter_fn` forwarding, `JoinedStream` source reset), and per-session monitor health as the ground truth for Fleet aggregation. | DC29, Phase 4 |
 | 2026-03-20 | @codex: Add DC29 — long-lived streaming resilience. Separate upstream stream discontinuity from subscriber backpressure gaps, require reconnect supervision + fresh snapshot anchoring after reconnect, and make the hardening direction explicit for external-agent/Fleet workflows. | DC29, DC28, Phase 4 |
@@ -82,7 +83,7 @@ product comparison against `tmux-mcp-rs` does not change the tmux-only scope, bu
 clarify two robustness-oriented follow-ons for the foundation:
 
 - dedicated socket-isolation ergonomics
-- tracked command execution as a complement to blocking `Target::exec()`
+- tracked command execution as a complement to await-to-completion `Target::exec()`
 
 ## Table of Contents
 
@@ -3405,7 +3406,7 @@ This is a robustness feature, not a workflow engine. It exists to make long-runn
 command observation more truthful in the face of reconnects, slow commands, and polling loops.
 
 **Why this matters**:
-- `Target::exec()` is a good blocking convenience API, but it collapses launch + wait + parse
+- `Target::exec()` is a good await-to-completion convenience API, but it collapses launch + wait + parse
   into one operation.
 - Long-lived automation and external-agent loops benefit from separating "start command" from
   "observe command outcome later".
@@ -3424,7 +3425,7 @@ command observation more truthful in the face of reconnects, slow commands, and 
      sentinel/result boundary was observed, the tracked command must transition to an explicit
      unknown state rather than pretending success, timeout, or clean completion.
 4. **Blocking `exec()` remains**
-   - `Target::exec()` stays as the simple blocking convenience wrapper, layered on the tracked
+   - `Target::exec()` stays as the simple await-to-completion convenience wrapper, layered on the tracked
      execution substrate where appropriate.
 
 **Proposed API direction**:
@@ -3460,6 +3461,9 @@ impl ExecHandle {
 **Behavioral contract**:
 - The tracked execution state is process-local and in-memory. It is not intended as a
   cross-process or persistent job store.
+- `Completed(ExecOutput)` covers all exit codes, including non-zero exits. A command that
+  exits with `1` is still `Completed(...)`; `ExecOutput.exit_code` carries the result.
+  Non-zero exit codes are not `Unknown`.
 - Same-pane concurrency restrictions from DC19 still apply.
 - On monitor/transport discontinuity before completion is proven, the tracked command transitions
   to `Unknown { reason }`.
@@ -3467,7 +3471,7 @@ impl ExecHandle {
   preserve the existing simple API.
 
 **Why this is not redundant with DC19**
-- DC19 is about blocking command-and-capture convenience.
+- DC19 is about await-to-completion command-and-capture convenience.
 - DC31 is about explicit execution state and truthfulness over time.
 - Both belong on `Target`, and both preserve the tmux-pane abstraction boundary.
 
@@ -3986,7 +3990,7 @@ It returns `ExecOutput { stdout, exit_code }` by using a sentinel-based capture 
 No host-level bypass (`HostHandle::exec()`) is added — the library's abstraction boundary
 is tmux, and all command execution stays within the tmux framework.
 
-**Relationship to DC31**: `exec()` remains the blocking convenience form. A future tracked
+**Relationship to DC31**: `exec()` remains the await-to-completion convenience form. A future tracked
 execution API may layer underneath it, but it does not change this decision's core boundary:
 execution stays pane-scoped and tmux-contextual.
 

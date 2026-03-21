@@ -4,7 +4,8 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-03-21 | @codex | Execution-planning follow-up for 4.2g/4.2h: document impact radius by module and require 4.2h to land in staged slices (`ExecId`/state, `start_exec`, blocking `exec()` layering, discontinuity semantics/tests) so tracked execution remains reviewable. |
+| 2026-03-21 | @codex | Address PR #96 review feedback — clarify 4.2h wording from "blocking" to "await-to-completion", require slice-3 test parity with the existing `Target::exec()` sentinel/scrollback/lock behavior before refactoring it onto tracked execution, and align the product-driven notes with shipped SSH identity-file support. |
+| 2026-03-21 | @codex | Execution-planning follow-up for 4.2g/4.2h: document impact radius by module and require 4.2h to land in staged slices (`ExecId`/state, `start_exec`, `exec()` layering, discontinuity semantics/tests) so tracked execution remains reviewable. |
 | 2026-03-21 | @codex | Product-driven robustness follow-up from [`docs/PRODUCT.md`](../../../docs/PRODUCT.md): add concrete plan items for 4.2g dedicated socket-isolation ergonomics and 4.2h tracked command execution. Prioritize socket isolation first as the higher-value robustness feature; keep tracked execution as a complementary pane-scoped execution primitive. |
 | 2026-03-21 | @claude | 4.2c enhancement: full capture-pane snapshot on reconnect — after "stream resumed" discontinuity, list panes in session and publish each pane's visible content as `TargetOutput` so downstream consumers get real screen state re-anchoring (not just a marker). |
 | 2026-03-20 | @claude | Implement Phase 4.2 (DC29 streaming resilience): 4.2a reconnect supervision with exponential backoff in host.rs, 4.2b `SinkEvent::Discontinuity` threaded through all adapters, 4.2c fresh snapshot anchoring (discontinuity markers on reconnect), 4.2d per-session `MonitorHealth` as Fleet ground truth, 4.2e stress tests (bus throughput, history determinism, MockTransport multi-phase), 4.2f adversarial shell-escape property tests. 355 tests (+14 new). |
@@ -1215,7 +1216,7 @@ config-driven automator coupling was deferred.
   - add `Target::start_exec(...) -> ExecHandle`
   - add `ExecHandle::status()` / `wait()` with explicit `Unknown { reason }` outcome when
     continuity breaks before completion can be proven
-  - keep `Target::exec()` as the blocking convenience wrapper; layer it on the tracked
+  - keep `Target::exec()` as the await-to-completion convenience wrapper; layer it on the tracked
     execution substrate where practical
   - store execution state in-process on the host/target side only; no persistent job store
   - preserve same-pane concurrency restrictions from DC19
@@ -1230,8 +1231,12 @@ config-driven automator coupling was deferred.
   - implementation staging:
     1. add `ExecId` / `ExecHandle` / `ExecState` plus in-memory state model
     2. add `Target::start_exec(...)` and polling/status/wait behavior
-    3. refactor blocking `Target::exec()` to layer on the tracked substrate
+    3. refactor `Target::exec()` to layer on the tracked substrate
     4. finalize discontinuity/unknown semantics and integration coverage
+  - slice-3 guardrail: before shipping the `Target::exec()` refactor, prove parity with the
+    current sentinel mechanism:
+    marker injection, scrollback polling/retry behavior, and same-pane exec lock semantics
+    must remain covered by tests rather than assumed from the refactor shape
   - implementation note: keep the first slice narrow and reviewable; avoid coupling initial
     tracked execution state to Fleet/history unless a concrete correctness need appears
 
