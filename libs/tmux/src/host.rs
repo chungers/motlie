@@ -481,43 +481,67 @@ impl HostHandle {
                                 ));
 
                                 let mut snapshot_panes = 0usize;
-                                if let Ok(panes) = discovery::list_panes_in_session(
+                                let mut snapshot_failed = false;
+                                match discovery::list_panes_in_session(
                                     &inner_ref.transport,
                                     inner_ref.socket.as_ref(),
                                     &session,
                                 ).await {
-                                    for pane in &panes {
-                                        let target = pane.address.to_string();
-                                        if let Ok(content) = capture::capture_pane(
-                                            &inner_ref.transport,
-                                            inner_ref.socket.as_ref(),
-                                            &target,
-                                        ).await {
-                                            if !content.is_empty() {
-                                                bus.publish(TargetOutput {
-                                                    source: TargetAddress::Pane(pane.address.clone()),
-                                                    host: host_alias.clone(),
-                                                    content,
-                                                    raw_content: None,
-                                                    sequence: 0,
-                                                    fidelity: OutputFidelity::clean(),
-                                                    timestamp: std::time::Instant::now(),
-                                                });
-                                                snapshot_panes += 1;
+                                    Ok(panes) => {
+                                        for pane in &panes {
+                                            let target = pane.address.to_string();
+                                            if let Ok(content) = capture::capture_pane(
+                                                &inner_ref.transport,
+                                                inner_ref.socket.as_ref(),
+                                                &target,
+                                            ).await {
+                                                if !content.is_empty() {
+                                                    bus.publish(TargetOutput {
+                                                        source: TargetAddress::Pane(pane.address.clone()),
+                                                        host: host_alias.clone(),
+                                                        content,
+                                                        raw_content: None,
+                                                        sequence: 0,
+                                                        fidelity: OutputFidelity::clean(),
+                                                        timestamp: std::time::Instant::now(),
+                                                    });
+                                                    snapshot_panes += 1;
+                                                }
                                             }
                                         }
                                     }
+                                    Err(_) => {
+                                        snapshot_failed = true;
+                                    }
                                 }
 
-                                // Explicit snapshot-complete marker (DC29 4.2c):
-                                // distinguishes "reattached" from "snapshot anchoring
-                                // completed" in transcript/history.
-                                bus.publish_discontinuity(&format!(
-                                    "stream snapshot: captured current screen state \
-                                     after reconnect for {}:{} ({} panes); \
-                                     intermediate output may be missing",
-                                    host_alias, session, snapshot_panes
-                                ));
+                                // Explicit snapshot-outcome marker (DC29 4.2c):
+                                // report what actually happened so transcript is
+                                // truthful about recovery state.
+                                let snapshot_msg = if snapshot_failed {
+                                    format!(
+                                        "stream snapshot failed: could not discover panes \
+                                         after reconnect for {}:{}; \
+                                         intermediate output may be missing",
+                                        host_alias, session
+                                    )
+                                } else if snapshot_panes == 0 {
+                                    format!(
+                                        "stream snapshot empty: no pane content captured \
+                                         after reconnect for {}:{}; \
+                                         intermediate output may be missing",
+                                        host_alias, session
+                                    )
+                                } else {
+                                    format!(
+                                        "stream snapshot: captured current screen state \
+                                         after reconnect for {}:{} ({} pane{}); \
+                                         intermediate output may be missing",
+                                        host_alias, session, snapshot_panes,
+                                        if snapshot_panes == 1 { "" } else { "s" }
+                                    )
+                                };
+                                bus.publish_discontinuity(&snapshot_msg);
 
                                 set_health(MonitorHealth::Streaming);
                                 attempt = 0; // Reset on successful reconnect
