@@ -832,6 +832,11 @@ struct SubEntry {
     filters: Vec<CompiledSinkFilter>,
     /// Events dropped due to channel backpressure since last successful send.
     dropped: usize,
+    /// Number of `Discontinuity` events lost due to backpressure. When > 0,
+    /// the next successful delivery will synthesize a discontinuity-missed
+    /// event so consumers know continuity was broken even if they missed the
+    /// original signal.
+    missed_discontinuities: usize,
 }
 
 /// Central fan-out dispatcher (DC12, DC24).
@@ -873,6 +878,7 @@ impl OutputBus {
             tx,
             filters: compiled,
             dropped: 0,
+            missed_discontinuities: 0,
         };
 
         self.subscribers.lock().expect("bus lock poisoned").push(entry);
@@ -925,6 +931,28 @@ impl OutputBus {
                 }
             }
 
+            // If discontinuity events were missed, synthesize one so the
+            // consumer always learns continuity was broken (DC29).
+            if sub.missed_discontinuities > 0 {
+                let missed = sub.missed_discontinuities;
+                let event = SinkEvent::Discontinuity {
+                    reason: format!(
+                        "missed {} discontinuity event(s) due to backpressure",
+                        missed
+                    ),
+                };
+                match sub.tx.try_send(event) {
+                    Ok(()) => {
+                        sub.missed_discontinuities = 0;
+                    }
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        sub.dropped += 1;
+                        continue;
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => continue,
+                }
+            }
+
             // Send the data event
             match sub.tx.try_send(SinkEvent::Data(output.clone())) {
                 Ok(()) => {}
@@ -940,15 +968,24 @@ impl OutputBus {
     ///
     /// Unlike `publish()`, discontinuity events bypass source-routing filters
     /// because they are system-level signals, not content. Uses `try_send` to
-    /// avoid blocking; if a subscriber's channel is full, the event is dropped
-    /// for that subscriber (the subsequent Gap will still indicate loss).
+    /// avoid blocking; if a subscriber's channel is full, the miss is tracked
+    /// via `missed_discontinuities`. The next successful `publish()` delivery
+    /// will synthesize a `Discontinuity` event so that consumers always learn
+    /// continuity was broken, even under severe backpressure.
     pub fn publish_discontinuity(&self, reason: &str) {
-        let subs = self.subscribers.lock().expect("bus lock poisoned");
-        for sub in subs.iter() {
+        let mut subs = self.subscribers.lock().expect("bus lock poisoned");
+        for sub in subs.iter_mut() {
             let event = SinkEvent::Discontinuity {
                 reason: reason.to_string(),
             };
-            let _ = sub.tx.try_send(event);
+            match sub.tx.try_send(event) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    sub.missed_discontinuities += 1;
+                    sub.dropped += 1;
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {}
+            }
         }
     }
 
@@ -2171,31 +2208,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bus_discontinuity_not_dropped_for_full_slow_subscriber() {
-        // Even if a subscriber's channel is nearly full, discontinuity should be
-        // delivered (or at least attempted) independently of data drops.
+    async fn bus_missed_discontinuity_synthesized_on_next_publish() {
+        // When a discontinuity can't be delivered due to backpressure, the
+        // next successful publish() must synthesize a Discontinuity event
+        // so the consumer always learns continuity was broken (DC29).
         let bus = OutputBus::new();
-        // Capacity 3: fill with 3 data events, then discontinuity competes
+        // Capacity 3: fill with data, then discontinuity will fail
         let sub = bus.subscribe(vec![], 3).unwrap();
+        let mut rx = sub.into_receiver();
 
         // Fill the channel
         for i in 0..3u64 {
             bus.publish(make_output("h", "s", "%0", &format!("fill-{}", i), i));
         }
 
-        // Now send discontinuity — channel is full, try_send may fail
+        // Discontinuity will be missed (channel full)
         bus.publish_discontinuity("ssh drop");
 
-        let mut rx = sub.into_receiver();
+        // Drain the channel to make room
+        let mut drained = 0;
+        while let Ok(_) = rx.try_recv() {
+            drained += 1;
+        }
+        assert_eq!(drained, 3, "should have drained 3 data events");
+
+        // Next publish should deliver: Gap (for the missed events) +
+        // synthesized Discontinuity + Data
+        bus.publish(make_output("h", "s", "%0", "after-reconnect", 10));
+
         let mut events = Vec::new();
         while let Ok(ev) = rx.try_recv() {
             events.push(ev);
         }
 
-        // We should have exactly 3 Data events (channel was full when discontinuity arrived)
-        let data_count = events.iter().filter(|e| matches!(e, SinkEvent::Data(_))).count();
-        assert_eq!(data_count, 3);
-        // Discontinuity may or may not have been delivered depending on channel state
-        // — the important thing is no panic and the system remains consistent
+        // Should see Gap, then Discontinuity, then Data
+        let has_gap = events.iter().any(|e| matches!(e, SinkEvent::Gap { .. }));
+        let has_discontinuity = events.iter().any(|e| matches!(e, SinkEvent::Discontinuity { .. }));
+        let has_data = events.iter().any(|e| matches!(e, SinkEvent::Data(_)));
+
+        assert!(has_gap, "should have a Gap event for dropped events");
+        assert!(has_discontinuity,
+            "should have a synthesized Discontinuity event for missed signal, events: {:?}", events);
+        assert!(has_data, "should have the new Data event");
+
+        // Verify the discontinuity mentions it was missed
+        for ev in &events {
+            if let SinkEvent::Discontinuity { reason } = ev {
+                assert!(reason.contains("missed"), "reason should mention missed: {}", reason);
+            }
+        }
     }
 }
