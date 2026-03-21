@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-20 | @codex | Align TUI deep dive with simplified post-Track-A direction: TUI remains fully supported because it consumes `OutputBus`/`Subscription`/`JoinedStream` and routes interactive actions through `Fleet` / `HostHandle` / `Target`. No dependency on deferred matcher/rule/reactor/config abstractions. |
 | 2026-03-13 | @claude | Add §TUI Mirror Sink — detailed design for replicating tmux pane content in a ratatui frame. Two approaches analyzed: polling `capture-pane -ep` vs tmux control mode. Crate evaluation, SGR mapping, architecture, and trade-off matrix. R1: fix StyledCell to support grapheme clusters, wide chars, underline color; reframe recommendation as exploratory analysis (Phase 5 per DESIGN/PLAN is authoritative). |
 | 2026-03-10 | @codex | Address PR #65 review feedback: clarify that normalized matching is shell-oriented, full-screen TUI workflows default to `Raw`, screen-buffer reconstruction is a Phase `5+` idea, and fixed geometry is best-effort unless automation is isolated. |
 
@@ -14,9 +15,28 @@ sensitivity to mixed client sizes, reflow, and history overflow.
 
 - Isolation is **not** the only way to run TUI automation.
 - Isolation is the only way to get strong, repeatable determinism.
+- The simplified stream/history/control direction still fully supports TUI.
 
 You can still support mixed-client environments, but the system must treat
 captures as best-effort and expose degraded-confidence states.
+
+## Compatibility with the Simplified Direction
+
+The newer direction in `DESIGN.md` and `PLAN.md` simplifies Motlie around:
+- stream capture and fan-out (`OutputBus`, `Subscription`, `JoinedStream`)
+- transcript/history construction for external consumers
+- routed control through `Fleet`, `HostHandle`, and `Target`
+
+That does **not** reduce TUI support. In fact, it makes the TUI story cleaner:
+- A TUI is simply another consumer of the shared output pipeline.
+- Pane/session routing still comes from `TargetOutput` source identity.
+- Interactive actions from the UI route through `Fleet`, `HostHandle`, or `Target`
+  directly; they do not require the deferred matcher/rule/reactor path.
+- The deferred automation abstractions (`MatcherKind`, `TriggerRule`, `ActionHandle`,
+  config-driven automator flow) are not prerequisites for a `TuiSink`.
+
+So the active TUI dependency remains: **stable Track A output pipeline plus Fleet-style
+coordination/routing**, not a built-in rule engine.
 
 ## Why TUI Is Harder Than Line-Oriented Shell Output
 
@@ -451,15 +471,17 @@ transport. Control mode is an **additional** data source, not a replacement.
 | **New dependencies** | `vte` or `ansi-to-tui` (small) | `alacritty_terminal` (heavy) |
 | **New code** | ~400 lines, no refactoring | ~1500+ lines, new module |
 | **Level of effort** | 1–2 days | 1–2 weeks |
-| **Phase dependency** | None — works with current API | Fits naturally with 2c (OutputBus) |
+| **Phase dependency** | None — works with current API | Fits naturally with Track A / 2c (`OutputBus`) and the simplified `Fleet` routing layer |
 | **VTE required** | No | Yes |
 | **Risk** | Low | Moderate (protocol edge cases, VTE bugs) |
 
 ### Analysis Summary
 
 > **Note**: This section is **exploratory design analysis** — it does not change
-> the implementation plan. The TUI mirror is a Phase 5 deliverable per
-> DESIGN.md and PLAN.md, built as a `TuiSink` on top of `OutputBus` (Phase 2c).
+> the implementation plan. The TUI mirror remains a Phase 5 deliverable per
+> DESIGN.md and PLAN.md, built as a `TuiSink` on top of `OutputBus` (Track A / Phase 2c)
+> and using `Fleet` / `HostHandle` / `Target` for any interactive control actions.
+> The deferred matcher/rule/reactor/config direction is not required for TUI support.
 > The analysis below informs the Phase 5 design by evaluating trade-offs early.
 
 Approach A (polling) is viable as a **prototype or standalone tool** to validate

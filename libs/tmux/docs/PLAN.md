@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-20 | @codex | Directional simplification — active post-Track-A plan now prioritizes transcript/history adapters, simplified Fleet coordination, and external-agent workflows. Built-in matcher/rule/reactor/config direction moved to historical context section. |
 | 2026-03-20 | @claude | Phase 1.15 implemented (1.15a–g): SshConfig `identity_file` field + fallible builder, `authenticate_key_file()` auth dispatch, query-only URI parse/render with `QUERY_ONLY_PARAMS`, 20 new unit tests (318 total), 1 integration test (23 total), API.md/README.md/repl.rs docs updated. SSH key-file integration tests deferred to Phase 4.3 CI infra. |
 | 2026-03-20 | @claude | Phase 1.15 R1 — address PR #89 review: `identity-file` is query-only (not nassh userinfo), `with_identity_file()` is fallible (returns `Err` on duplicate), add query-only parse rejection tests, duplicate-source builder tests, mixed-param rendering tests. |
 | 2026-03-20 | @claude | Add Phase 1.15 — SSH identity-file authentication (DC26). Extends SshConfig/URI with `identity-file` parameter, adds `authenticate_key_file()` auth path. 7 tasks (1.15a–g). Slotted after 1.14, depends on 1.11 (URI infra) and 2a.1 (SSH transport). |
@@ -867,10 +868,10 @@ Add `SshTransport` and a thin monitoring vertical slice with control mode parsin
 ---
 
 <!-- @claude 2026-03-17: Phase 2 restructured into Track A (streaming + combining) and
-     Track B (matching + reactors) per DC24 analysis. Prioritizes real-time monitoring and
-     stream combining over matching/filtering/reactors. Single-threaded execution order:
-     Track A delivers end-to-end streaming pipeline before Track B adds rule engine.
-     See DESIGN.md DC24 for the Unix-pipe evaluation that motivated this restructuring. -->
+     Track B (matching + reactors) per DC24 analysis. 2026-03-20 @codex: active post-Track-A
+     path now shifts again toward transcript/history adapters and simplified Fleet
+     coordination for external agents. The older matcher/reactor track is preserved below
+     as historical context rather than active execution order. -->
 
 ## Track A: Streaming + Stream Combining
 
@@ -1003,164 +1004,91 @@ via JoinedStream — with no matcher or action dispatch dependency.
 
 ---
 
-## Track B: Matching + Reactors
+## Track B: History + External-Agent Ergonomics
 
-<!-- @claude 2026-03-17: PR #82 R1 — rules/reactors are subscription consumers, not
-     monitor-internal. One matching system via Subscription adapters (.filter(), .react()).
-     Removes 2a.2b (monitor-side rule evaluation). See DC24 for rationale. -->
+Build on the completed streaming substrate from Track A by making transcript/history
+consumption and routed control pleasant for external LLM/classifier workflows.
 
-Layer content matching, action dispatch, and reconnection on top of the stable
-streaming foundation from Track A. All matching and reaction is expressed as
-`Subscription` adapters — the monitor just parses and publishes (DC24).
+### 2b.1 — Transcript/history adapters (`src/sink.rs` extension)
 
-### 2b.2 — Content matcher (`src/matcher.rs`)
+- [ ] Add transcript/history-oriented adapters above `Subscription`
+- [ ] Define bounded history window options (size, source labeling, gap handling)
+- [ ] Provide plain-text transcript rendering helpers for external consumers
+- [ ] Unit tests: source attribution, coalescing, bounded history trimming,
+  explicit gap propagation
 
-- [ ] `MatcherKind` enum: `Regex`, `Substring`, `LineCount`, `WordList`,
-  `AllOf(Vec)`, `AnyOf(Vec)`, `Not(Box)`
-- [ ] `MatcherKind::matches(&mut self, text: &str) -> bool` for each variant
-- [ ] `MatcherKind::reset(&mut self)` — clear state for restarts
-- [ ] `MatcherKind::name(&self) -> String` — human-readable for logging
-- [ ] `Clone` derive for full tree cloning
-- [ ] `WordList` uses `\b` regex boundaries internally
-- [ ] Unit tests: each variant individually, combinator nesting, stateful `LineCount`
-  accumulation and reset
+**Depends on**: 2c.2a ✓, 2c.4a ✓
 
-**Depends on**: 1.0 ✓
+### 2b.2 — Consumer predicate helpers (`src/sink.rs` extension)
 
-### 2b.1 — Configuration (`src/config.rs`)
+- [ ] Add lightweight predicate-based filtering helpers that do not require a built-in
+  matcher DSL
+- [ ] Keep selection logic consumer-owned and composable over `TargetOutput`
+- [ ] Unit tests: predicate pass/block behavior, composition with history/joined adapters
 
-- [ ] `TmuxAutomatorConfig`: `targets`, `rules`, `reconnect`, `log_json`
-- [ ] `HostTarget` enum: `Local { alias, pane_filter, tmux_socket }`,
-  `Ssh { host, user, alias, pane_filter, tmux_socket, host_key_policy }`
-  — `host_key_policy` uses `HostKeyPolicy` from `types.rs` (defined in 1.1)
-- [ ] `TriggerRule`: `name`, `pane_filter`, `pattern`, `action`, `cooldown` — serde-deserializable
-- [ ] `Action` enum: `SendKeys { keys }`, `Log { level, message }`
-- [ ] `ReconnectPolicy`: `initial_delay`, `max_delay`, `multiplier` with defaults
-- [ ] `serde` derive for all config types, TOML deserialization support
-- [ ] Unit tests: deserialize TOML config, compile rules, invalid regex error messages
+**Depends on**: 2c.2a ✓
 
-**Depends on**: 2b.2
+### 2b.3 — Fleet coordination + routing (`src/fleet.rs`)
 
-### 2b.4 — Subscription adapters for matching + reaction (`src/sink.rs` extension)
+- [ ] `Fleet::new()` — empty programmatic registry
+- [ ] Programmatic host registration / connect methods with alias support and per-host
+  error isolation
+- [ ] `Fleet::host(name) -> Option<&HostHandle>` — alias or `host:port` lookup (DC9)
+- [ ] `Fleet::hosts()` iterator
+- [ ] `Fleet::output_bus()` accessor (owns `OutputBus`, shares via `Arc`)
+- [ ] Aggregate monitoring lifecycle: `start_monitoring()`, `start_monitoring_host()`,
+  `stop_monitoring_host()`, `shutdown()`
+- [ ] Workstream registry: `bind()`, `unbind()`, `find()`, `workstreams()`
+- [ ] Convenience routed actions: `send_text`, `send_keys`, `capture`, `target`
+- [ ] `HostStatus` enum: `Disconnected`, `Connecting`, `Connected`, `Monitoring { sessions }`, `Error(String)`
+- [ ] Unit tests: multi-host connect with one failure, alias conflict detection,
+  workstream bind/find/unbind, routed action correctness
 
-<!-- @claude 2026-03-17: Replaces 2a.2b (monitor-side rule eval) and 2c.1b (SinkFilter
-     content matching). One matching system via Subscription adapters (DC24). -->
+**Depends on**: 2c.4a ✓
 
-**Design guardrail**: Track B must remain statically dispatched. `MatcherKind` is a closed
-enum — no `Box<dyn Matcher>` or type-erased pipeline stages. This keeps the matching layer
-debuggable and avoids vtable overhead in the hot path. If a new matcher variant is needed,
-add it to `MatcherKind`; do not introduce a trait-object escape hatch.
+### 2b.4 — Public API + examples for external-agent workflows
 
-- [ ] `Subscription::filter(matcher: MatcherKind) -> Subscription` — spawns forwarding
-  task that passes only events matching the matcher. Content matching applied to
-  `TargetOutput.content`. Returns new Subscription with filtered receiver.
-- [ ] `SinkAction` enum: `SendKeys`, `SendText`, `KillSession`, `RenameSession`
-- [ ] `ActionRequest` struct: `host`, `target: TargetAddress`, `action: SinkAction`
-- [ ] `ActionHandle`: wraps `mpsc::Sender<ActionRequest>`,
-  provides `send()`, `send_keys()`, `send_text()`, `kill_session()`,
-  `rename_session()`
-- [ ] `Subscription::react(matcher, action, cooldown, action_handle) -> JoinHandle<()>` —
-  terminal adapter: evaluates matcher, dispatches action via `ActionHandle`,
-  enforces per-pane cooldown timers. Spawns task, consumes Subscription.
-- [ ] Warn-level logging for failed action dispatch (P9)
-- [ ] Unit tests: `.filter()` passes/blocks correctly, `.react()` dispatches on match,
-  cooldown prevents rapid re-fire, chaining `.filter().react()` works
+- [ ] Re-export the active consumer-facing types from `lib.rs`:
+  `Fleet`, `HostHandle`, `Target`, `TargetSpec`, `SessionMonitorHandle`, `MonitorHandle`,
+  `KeySequence`, `SpecialKey`, `ScrollbackQuery`, `ExecOutput`,
+  `OutputBus`, `Subscription`, `SinkKind`, `StdioSink`, `CallbackSink`, `SinkFilter`,
+  `TargetOutput`, `StreamChunk`, `JoinedStream`,
+  transcript/history types, `SessionInfo`, `WindowInfo`, `PaneInfo`, `PaneAddress`,
+  `TargetAddress`, `TmuxSocket`
+- [ ] Doc comments on `lib.rs` with external-agent-oriented usage example
+- [ ] API/examples sweep: monitor → transcript/history → routed control
 
-**Depends on**: 2c.2a (Subscription type), 2b.2 (MatcherKind), 2b.1 (Action types)
+**Depends on**: 2b.1, 2b.2, 2b.3
 
-### 2b.5 — Action handle wiring (`src/host.rs`)
+### 2b.5 — CLI / smoke coverage for the simplified direction
 
-- [ ] Wire `ActionHandle` into `HostHandle`: consumer-dispatched actions route
-  through DC4 bounded queue to the target pane
-- [ ] `HostHandle::action_handle() -> ActionHandle` — creates a sender for this host
-- [ ] Integration test: `subscription.react()` detects pattern in pane output →
-  `ActionHandle` routes `SendKeys` back to target pane, verifying the full
-  round-trip: monitor → bus → subscription → react → ActionHandle → pane
+- [ ] Keep CLI/examples focused on connect, monitor, transcript inspection, capture,
+  send, exec, and routing rather than built-in rule execution
+- [ ] Signal handling: `tokio::signal` for SIGINT/SIGTERM → `fleet.shutdown()` (P5)
+- [ ] Tracing init: text or JSON output modes, per-target tracing spans
+- [ ] End-to-end smoke test:
+  - Start CLI/examples with localhost
+  - Create session, list, capture, send, exec, rename, kill
+  - Start monitor, build transcript/history, verify routed follow-up action
+  - Ctrl-C gracefully shuts down
 
-**Depends on**: 2c.4a (pipeline wired), 2b.4
-
-### 2b.3 — Reconnection
-
-- [ ] `Log` action type: emit structured log at configured level
-- [ ] Reconnection logic in `HostHandle` (SSH targets only):
-  exponential backoff per `ReconnectPolicy`, re-discover sessions on reconnect,
-  resume monitoring
-- [ ] Unit tests: reconnect resumes monitoring
-
-**Depends on**: 2b.5
+**Depends on**: 2b.4
 
 ---
 
-## Phase 3: Multi-Target Fleet + CLI
+## Historical Context: Deferred Built-In Automation Track
 
-### 3.1 — Fleet (`src/fleet.rs`)
+Preserved for continuity, but **not** on the active execution path after 2026-03-20:
 
-- [ ] `Fleet::new(config: TmuxAutomatorConfig)`
-- [ ] `Fleet::connect_all() -> Vec<HostStatus>` — concurrent connect via `JoinSet`,
-  per-target error isolation
-- [ ] `Fleet::host(name) -> Option<&HostHandle>` — alias or `host:port` lookup (DC9)
-- [ ] `Fleet::hosts()` iterator
-- [ ] `Fleet::start_monitoring(rules)`, `shutdown()`
-- [ ] `Fleet::start_monitoring_host()`, `stop_monitoring_host()` — per-host granularity
-- [ ] `Fleet::output_bus()` accessor (owns `OutputBus`, shares via `Arc`)
-- [ ] `HostStatus` enum: `Disconnected`, `Connecting`, `Connected`, `Monitoring { sessions }`, `Error(String)`
-- [ ] Workstream registry: `bind()`, `unbind()`, `find()`, `workstreams()`
-- [ ] Shutdown watch channel: `shutdown()` signals all hosts
-- [ ] Unit tests: multi-host connect with one failure, alias conflict detection,
-  workstream bind/find/unbind
+- Built-in matcher DSL (`MatcherKind`)
+- Config DTOs (`TmuxAutomatorConfig`, `TriggerRule`, `ReconnectPolicy`)
+- Subscription-side `.react()` action dispatch and `ActionHandle`
+- Reconnecting internal rule processors
+- Config-driven `Fleet::new(config)` / `monitor start --config` automator flow
 
-**Depends on**: 2b.5, 2b.3
-
-### 3.2 — `lib.rs` public API surface
-
-- [ ] Re-export all consumer-facing types from `lib.rs`:
-  `Fleet`, `HostHandle`, `Target`, `TargetSpec`, `SessionMonitorHandle`, `MonitorHandle`,
-  `TmuxAutomatorConfig`, `HostTarget`, `TriggerRule`, `Action`, `ReconnectPolicy`,
-  `KeySequence`, `SpecialKey`, `ScrollbackQuery`, `ExecOutput`,
-  `OutputBus`, `Subscription`, `SinkKind`, `StdioSink`, `CallbackSink`, `SinkFilter`,
-  `MatcherKind`, `ActionHandle`, `TargetOutput`, `StreamChunk`, `JoinedStream`,
-  `SessionInfo`, `WindowInfo`, `PaneInfo`, `PaneAddress`, `TargetAddress`, `TmuxSocket`
-- [ ] Doc comments on `lib.rs` with usage example
-
-**Depends on**: 3.1
-
-### 3.3 — CLI binary (`bins/tmux-automator/`)
-
-- [ ] Create `bins/tmux-automator/Cargo.toml` — depends on `motlie-tmux`, `clap`, `tokio`,
-  `tracing-subscriber`, `toml`
-- [ ] Add to workspace members
-- [ ] `main.rs`: CLI skeleton with `clap` noun-verb subcommands
-- [ ] **`session` noun**:
-  - `session list [--host]`
-  - `session create <name> [--host] [--window-name] [--command]`
-  - `session kill <name> [--host]`
-  - `session rename <old> <new> [--host]`
-- [ ] **`target` noun**:
-  - `target list [--host] [--filter]`
-  - `target capture <spec> [--host] [--history]`
-  - `target send <spec> <input> [--host]`
-  - `target exec <spec> <command> [--host] [--timeout]`
-- [ ] **`monitor` noun**:
-  - `monitor start [--config]`
-  - `monitor status`
-- [ ] Config file loading: TOML → `TmuxAutomatorConfig`, CLI flag overrides
-- [ ] `--host-key-policy <verify|tofu|insecure>` global CLI flag (DC2),
-  overrides per-host config `host_key_policy` field
-- [ ] Signal handling: `tokio::signal` for SIGINT/SIGTERM → `fleet.shutdown()` (P5)
-- [ ] Tracing init: text or JSON output modes, per-target tracing spans
-- [ ] Default `StdioSink` registered on `OutputBus` for monitor output
-
-**Depends on**: 3.2
-
-### 3.4 — End-to-end smoke test
-
-- [ ] Manual test script or integration test:
-  - Start CLI with localhost config
-  - Create session, list, capture, send, exec, rename, kill
-  - Start monitor with a rule, trigger it, verify action logged
-  - Ctrl-C gracefully shuts down
-
-**Depends on**: 3.3
+If Motlie later grows a first-class built-in automation product direction, re-evaluate
+those ideas against the then-current stream/history/Fleet APIs instead of reinstating
+this older track wholesale.
 
 ---
 
@@ -1179,13 +1107,15 @@ add it to `MatcherKind`; do not introduce a trait-object escape hatch.
 - [ ] Expand `MockTransport` test suite: error paths, timeouts, malformed tmux output
 - [ ] Shell escaping fuzz tests or property tests (adversarial session names, text input)
 - [ ] `OutputBus` stress test: high-throughput publish with slow/full sinks
-- [ ] Cooldown timer accuracy tests
-- [ ] Reconnection resilience test: simulated SSH drop + recover
+- [ ] Transcript/history determinism tests under bursty multi-source output
+- [ ] Fleet routing resilience test: simulated SSH drop + recover while preserving
+  alias/workstream lookup semantics
 
 ### 4.3 — Docker-based E2E (OC6)
 
 - [ ] Dockerfile: SSH server + tmux + test sessions
-- [ ] E2E test: connect via SSH, full lifecycle (create, monitor, trigger, capture, kill)
+- [ ] E2E test: connect via SSH, full lifecycle (create, monitor, build transcript/history,
+  route follow-up control action, capture, kill)
 - [ ] CI integration: run E2E tests in Docker on PR
 
 ### 4.4 — Documentation
@@ -1202,10 +1132,10 @@ Out of current scope. Listed for continuity.
 
 - [ ] `TuiSink` registered with `OutputBus` (lives in `bins/tmux-automator/`)
 - [ ] Ratatui-based terminal UI: live pane display, tree navigation, interactive input
-- [ ] Monitoring dashboard: rule status, trigger history, host connection status
+- [ ] Monitoring dashboard: transcript/history panes and host connection status
 - [ ] Rendering cadence managed by sink (60fps batching)
 
-**Depends on**: Phases 1–3, 2c stable
+**Depends on**: Track A / 2c stable plus Fleet coordination work from Track B
 
 ---
 
@@ -1241,41 +1171,36 @@ Out of current scope. Listed for continuity.
  │                 └──── 2c.4a Pipeline integration (streaming only)
  │                        │     [needs 2c.3 + 2a.4a]
  │                        │
- │  TRACK B — Matching + Reactors (after Track A)
+ │  TRACK B — History + External-Agent Ergonomics
  │  ─────────────────────────────────────────────
- │     2b.2 Matcher
- │      └── 2b.1 Config
- │           └── 2b.4 Subscription adapters (.filter, .react) [needs 2c.2a + 2b.2 + 2b.1]
- │                └── 2b.5 Action handle wiring [needs 2c.4a + 2b.4]
- │                     └── 2b.3 Reconnection [needs 2b.5]
- │                          │
- │  ────────────────────────┘
- │     3.1 Fleet [needs 2b.5 + 2b.3]
- │      └── 3.2 Public API
- │           └── 3.3 CLI binary
- │                └── 3.4 Smoke test
+ │     2b.1 Transcript/history adapters [needs 2c.2a + 2c.4a]
+ │      ├── 2b.2 Consumer predicate helpers [needs 2c.2a]
+ │      └── 2b.3 Fleet coordination + routing [needs 2c.4a]
+ │             └── 2b.4 Public API + examples [needs 2b.1 + 2b.2 + 2b.3]
+ │                  └── 2b.5 CLI / smoke coverage [needs 2b.4]
  │
- └── 4.x Hardening (parallel with Phase 3)
+ └── 4.x Hardening (parallel with Track B)
 ```
 
 **Linear execution order (single-threaded)**:
 ```
-2a.2a → 2a.4a → 2c.1a → 2c.2a → 2c.3 → 2c.4a → 2b.2 → 2b.1 → 2b.4 → 2b.5 → 2b.3
+2a.2a → 2a.4a → 2c.1a → 2c.2a → 2c.3 → 2c.4a → 2b.1 → 2b.2 → 2b.3 → 2b.4 → 2b.5
 ```
 
 Notes:
-- `1.14` is the next planned task. It restores hierarchy symmetry before Track B
-  adds more consumer-side API layers.
+- `1.14` and `1.15` are complete. The next active work starts from Track B on top of
+  the finished Track A substrate.
 - After Track A (6 tasks ending at 2c.4a), the system has end-to-end streaming:
   monitor → parse control mode → fan-out via OutputBus → Subscription adapters →
   JoinedStream combining. No matcher or reactor dependency.
-- Track B layers matching, reaction, and reconnection as `Subscription` adapters —
-  rules are consumers on the stream, not privileged inside `monitor.rs` (DC24).
-  One matching system via `.filter()` and `.react()`, no dual monitor-side/sink-side
-  matching.
+- The active post-Track-A direction prioritizes transcript/history construction,
+  simplified Fleet coordination, and external-agent workflows.
+- The older matcher/rule/reactor/config direction is preserved in the historical
+  context section, not in the active dependency chain.
 - `1.10` gates Track A start (2a.2a).
 - `OutputBus::subscribe()` returns `Subscription` — the single composable seam.
-  All consumer composition (joining, filtering, reacting) layered on adapters (DC24).
+  All consumer composition (joining, history construction, piping, lightweight
+  predicates) is layered on adapters (DC24).
 - Phase 4 tasks are independent and can start as soon as their prerequisites are met.
 
 ## Conventions
