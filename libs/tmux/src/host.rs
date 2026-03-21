@@ -28,7 +28,8 @@ struct HostHandleInner {
     /// the actual `JoinHandle` is owned by the returned `SessionMonitorHandle`.
     monitor_signals: std::sync::Mutex<HashMap<String, tokio::sync::watch::Sender<bool>>>,
     /// Per-pane active exec state tracking (DC31).
-    /// Keyed by pane_id. Each entry holds Arc refs to ExecState for running execs.
+    /// Keyed by `session_name:pane_id` for session-scoped discontinuity invalidation.
+    /// Each entry holds Arc refs to ExecState for running execs.
     active_execs: std::sync::Mutex<HashMap<String, Vec<Arc<std::sync::Mutex<ExecState>>>>>,
 }
 
@@ -42,13 +43,18 @@ impl HostHandleInner {
             .clone()
     }
 
-    /// Transition all Running exec states to Unknown (DC31).
+    /// Transition Running exec states to Unknown for a specific session (DC31).
     ///
-    /// Called on connection loss / discontinuity. Leaves Completed and
-    /// already-Unknown states unchanged.
-    fn notify_exec_discontinuity(&self, reason: &str) {
+    /// Called on connection loss / discontinuity. Only affects execs whose
+    /// `active_execs` key starts with `session_name:`, preserving execs in
+    /// unrelated sessions. Leaves Completed and already-Unknown states unchanged.
+    fn notify_exec_discontinuity(&self, session_name: &str, reason: &str) {
+        let prefix = format!("{}:", session_name);
         let active = self.active_execs.lock().expect("active_execs poisoned");
-        for states in active.values() {
+        for (key, states) in active.iter() {
+            if !key.starts_with(&prefix) {
+                continue;
+            }
             for state_arc in states {
                 let mut state = state_arc.lock().expect("exec state poisoned");
                 if matches!(*state, ExecState::Running) {
@@ -441,8 +447,8 @@ impl HostHandle {
                         return Ok(MonitorExitReason::Stopped);
                     }
                     MonitorExitReason::ConnectionLost => {
-                        // Transition any Running execs to Unknown (DC31)
-                        inner_ref.notify_exec_discontinuity(&format!(
+                        // Transition Running execs in this session to Unknown (DC31)
+                        inner_ref.notify_exec_discontinuity(&session, &format!(
                             "connection lost for {}:{}", host_alias, session
                         ));
 
@@ -1347,21 +1353,55 @@ impl Target {
         };
         let marker = format!("__ML{}__", exec_id.short_hex());
         let command = command.to_string();
+        let session_name = self.session_name().to_string();
+
+        // Key includes session for session-scoped discontinuity invalidation
+        let active_key = format!("{}:{}", session_name, pane_id);
 
         // Register in active_execs before spawning
         {
             let mut active = self.inner.active_execs.lock().expect("active_execs poisoned");
-            let pane_states = active.entry(pane_id.clone()).or_default();
+            let pane_states = active.entry(active_key.clone()).or_default();
             pane_states.push(state.clone());
         }
 
         let inner_ref = self.inner.clone();
-        let pane_id_cleanup = pane_id.clone();
+        let active_key_cleanup = active_key;
         let state_cleanup = state.clone();
 
         let task = tokio::spawn(async move {
             // Acquire pane lock inside the task — start_exec returns immediately
             let _guard = lock.lock().await;
+
+            // Helper: finalize state and deregister from active_execs.
+            // Called on all exit paths (success, error, timeout).
+            let finalize = |inner: &HostHandleInner,
+                            state_arc: &Arc<std::sync::Mutex<ExecState>>,
+                            cleanup_arc: &Arc<std::sync::Mutex<ExecState>>,
+                            key: &str,
+                            new_state: ExecState| {
+                // Only update if still Running — do not overwrite a discontinuity-set
+                // Unknown (DC31 truthfulness: once continuity is broken, the task
+                // must not restore certainty).
+                {
+                    let mut guard = state_arc.lock().expect("exec state poisoned");
+                    if matches!(*guard, ExecState::Running) {
+                        *guard = new_state.clone();
+                    }
+                }
+
+                // Deregister from active_execs
+                let mut active = inner.active_execs.lock().expect("active_execs poisoned");
+                if let Some(pane_states) = active.get_mut(key) {
+                    pane_states.retain(|s| !Arc::ptr_eq(s, cleanup_arc));
+                    if pane_states.is_empty() {
+                        active.remove(key);
+                    }
+                }
+
+                // Return the actual state (may differ from new_state if discontinuity fired)
+                state_arc.lock().expect("exec state poisoned").clone()
+            };
 
             let socket_ref = inner_ref.socket.as_ref();
             let transport = &inner_ref.transport;
@@ -1372,50 +1412,65 @@ impl Target {
             // Send command with sentinel
             let sentinel_cmd = format!("{} ; echo \"{} {}\"", command, marker, exit_var);
             let keys = KeySequence::literal(&sentinel_cmd).then_enter();
-            control::send_keys(transport, socket_ref, &target_str, &keys).await?;
+            if let Err(e) = control::send_keys(transport, socket_ref, &target_str, &keys).await {
+                let err_state = ExecState::Unknown {
+                    reason: format!("send_keys failed: {}", e),
+                };
+                let final_state = finalize(
+                    &inner_ref, &state_task, &state_cleanup,
+                    &active_key_cleanup, err_state,
+                );
+                return Ok(final_state);
+            }
 
             // Poll scrollback for sentinel
             let start_time = tokio::time::Instant::now();
             let poll_interval = Duration::from_millis(100);
 
-            let final_state = loop {
-                if start_time.elapsed() > timeout {
-                    let unknown = ExecState::Unknown {
-                        reason: format!("timed out after {:?} waiting for sentinel", timeout),
-                    };
-                    break unknown;
+            let poll_result = loop {
+                // Check if discontinuity already set state to Unknown
+                {
+                    let guard = state_task.lock().expect("exec state poisoned");
+                    if !matches!(*guard, ExecState::Running) {
+                        // Discontinuity or external transition — stop polling
+                        break guard.clone();
+                    }
                 }
 
-                let raw_content = capture::capture_pane_escape_history(
+                if start_time.elapsed() > timeout {
+                    break ExecState::Unknown {
+                        reason: format!("timed out after {:?} waiting for sentinel", timeout),
+                    };
+                }
+
+                match capture::capture_pane_escape_history(
                     transport,
                     socket_ref,
                     &target_str,
                     -500,
                 )
-                .await?;
-                let content = capture::strip_ansi(&raw_content);
-
-                if let Some(result) = parse_sentinel_output(&content, &marker) {
-                    break ExecState::Completed(result);
+                .await
+                {
+                    Ok(raw_content) => {
+                        let content = capture::strip_ansi(&raw_content);
+                        if let Some(result) = parse_sentinel_output(&content, &marker) {
+                            break ExecState::Completed(result);
+                        }
+                    }
+                    Err(e) => {
+                        break ExecState::Unknown {
+                            reason: format!("capture failed: {}", e),
+                        };
+                    }
                 }
 
                 tokio::time::sleep(poll_interval).await;
             };
 
-            // Update shared state
-            *state_task.lock().expect("exec state poisoned") = final_state.clone();
-
-            // Deregister from active_execs
-            {
-                let mut active = inner_ref.active_execs.lock().expect("active_execs poisoned");
-                if let Some(pane_states) = active.get_mut(&pane_id_cleanup) {
-                    pane_states.retain(|s| !Arc::ptr_eq(s, &state_cleanup));
-                    if pane_states.is_empty() {
-                        active.remove(&pane_id_cleanup);
-                    }
-                }
-            }
-
+            let final_state = finalize(
+                &inner_ref, &state_task, &state_cleanup,
+                &active_key_cleanup, poll_result,
+            );
             Ok(final_state)
         });
 
@@ -2060,11 +2115,11 @@ mod tests {
         {
             let mut active = host.inner.active_execs.lock().unwrap();
             active
-                .entry("test-pane".to_string())
+                .entry("test-session:test-pane".to_string())
                 .or_default()
                 .push(state.clone());
         }
-        host.inner.notify_exec_discontinuity("connection lost");
+        host.inner.notify_exec_discontinuity("test-session", "connection lost");
         let guard = state.lock().unwrap();
         match &*guard {
             ExecState::Unknown { reason } => assert!(reason.contains("connection lost")),
@@ -2083,16 +2138,45 @@ mod tests {
         {
             let mut active = host.inner.active_execs.lock().unwrap();
             active
-                .entry("test-pane".to_string())
+                .entry("test-session:test-pane".to_string())
                 .or_default()
                 .push(state.clone());
         }
-        host.inner.notify_exec_discontinuity("connection lost");
+        host.inner.notify_exec_discontinuity("test-session", "connection lost");
         let guard = state.lock().unwrap();
         match &*guard {
             ExecState::Completed(out) => assert_eq!(out.stdout, "ok"),
             other => panic!("expected Completed, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn notify_exec_discontinuity_session_scoped() {
+        // Session A loss should not affect session B execs
+        let state_a = Arc::new(std::sync::Mutex::new(ExecState::Running));
+        let state_b = Arc::new(std::sync::Mutex::new(ExecState::Running));
+        let mock = MockTransport::new().with_default("");
+        let host = mock_host(mock);
+        {
+            let mut active = host.inner.active_execs.lock().unwrap();
+            active
+                .entry("session-a:pane1".to_string())
+                .or_default()
+                .push(state_a.clone());
+            active
+                .entry("session-b:pane2".to_string())
+                .or_default()
+                .push(state_b.clone());
+        }
+        // Only session-a loses connection
+        host.inner.notify_exec_discontinuity("session-a", "connection lost");
+
+        let guard_a = state_a.lock().unwrap();
+        assert!(matches!(&*guard_a, ExecState::Unknown { .. }), "session-a exec should be Unknown");
+        drop(guard_a);
+
+        let guard_b = state_b.lock().unwrap();
+        assert!(matches!(&*guard_b, ExecState::Running), "session-b exec should still be Running");
     }
 
     #[tokio::test]
