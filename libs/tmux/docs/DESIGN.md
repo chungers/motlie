@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-20 | @claude: Update Fleet and HistoryHandle API blocks to match shipped implementation (PR #92 R2). Fleet: `register()` with alias enforcement + bus injection, `TargetSpec`-based `bind()`, async `find()`, sync `shutdown()`. HistoryHandle: async `snapshot()` / `render_text()` / `join()`, `id()` accessor. Fix `rendered_chars()` to measure actual rendered string for Custom label format. | Fleet, Subscription, DC27, DC28 |
 | 2026-03-20 | @codex: DC28 — specify transcript/history adapter as a bounded rolling snapshot layer for LLM/classifier context windows. Define artifact, bounds, relationship to `JoinedStream`, and consumer interaction model. | Subscription, DC28, Phase 2b |
 | 2026-03-20 | @codex: Directional simplification — active design now treats `libs/tmux` as tmux stream/history/control substrate for an external LLM/classifier or other policy engine. Simplify Fleet toward coordination/aggregation/routing. Move matcher/rule/reactor/config automation direction to appendix as historical context. | Overview, Fleet, DC24, DC12, DC13, DC14, Phase 2b/2c, Phase 3, Appendix |
 | 2026-03-20 | @claude: DC26 R1 — address PR #89 review: constrain `identity-file` to query-only (not nassh userinfo), make `with_identity_file()` fallible to prevent URI+builder silent overwrite, update DC21 `SshConfig` contract block with new field/methods and query-only exception note. | DC26, DC21, OC3 |
@@ -475,66 +476,66 @@ The top-level coordination layer. Manages connections to localhost and/or multip
 hosts, provides stable names for targets, aggregates monitoring streams, and routes
 control actions back to the right host/target when an external agent decides to act.
 
+<!-- @claude 2026-03-20 — updated to match shipped API (PR #92 R2). -->
+
 ```rust
-pub struct Fleet { /* host registry, output bus, bindings */ }
+pub struct Fleet { /* host registry, shared output bus, workstream bindings */ }
 
 impl Fleet {
-    /// Create an empty fleet. Hosts are registered programmatically.
+    /// Create an empty fleet with a fresh shared OutputBus.
     pub fn new() -> Self;
 
-    /// Register and connect a host by alias.
-    pub async fn connect(&mut self, alias: &str, config: SshConfig) -> Result<HostStatus>;
+    /// Register a host by alias. The fleet alias must match host.host_alias()
+    /// so output labels and routing names stay consistent. Injects the fleet's
+    /// shared OutputBus into the host (via inject_output_bus) so all monitors
+    /// publish to a single aggregation bus.
+    pub fn register(&mut self, alias: &str, host: HostHandle) -> Result<()>;
 
-    /// Get a handle to a specific target by name/alias.
+    /// Look up a host by alias.
     pub fn host(&self, name: &str) -> Option<&HostHandle>;
 
-    /// Iterate over all connected targets.
+    /// Iterate over all registered (alias, HostHandle) pairs.
     pub fn hosts(&self) -> impl Iterator<Item = (&str, &HostHandle)>;
 
-    /// Access the fleet's OutputBus for cross-host subscriptions.
-    pub fn output_bus(&self) -> &OutputBus;
+    /// The shared OutputBus aggregating output from all registered hosts.
+    pub fn output_bus(&self) -> Arc<OutputBus>;
 
-    /// Start monitoring on all connected hosts/sessions of interest.
-    pub async fn start_monitoring(&self) -> Result<()>;
+    /// Host status: Connected, Monitoring { sessions }, Error(String).
+    pub fn host_status(&self, alias: &str) -> Option<HostStatus>;
 
-    /// Shutdown monitoring and close connections.
-    pub async fn shutdown(&self) -> Result<()>;
+    // --- Monitoring lifecycle ---
+
+    /// Start monitoring a specific session on a host.
+    pub async fn start_monitoring_session(&mut self, alias: &str, session: &str) -> Result<()>;
+
+    /// Start monitoring all sessions on a host.
+    pub async fn start_monitoring_host(&mut self, alias: &str) -> Result<()>;
+
+    /// Stop all monitoring on a host.
+    pub fn stop_monitoring_host(&mut self, alias: &str) -> Result<()>;
+
+    /// Shutdown: stop all monitoring, close the bus.
+    pub fn shutdown(&mut self);
 
     // --- Workstreams (named bindings) ---
 
-    /// Bind a user-defined name to a (host, target) pair. The name must be
-    /// unique within the fleet. Returns an error if the name is already bound.
-    ///
-    /// Workstreams give callers a stable, domain-meaningful name for a
-    /// specific entity across the fleet — e.g., "build-pipeline" for
-    /// the build session on web-1, or "db-migration" for a pane on db-1.
-    pub fn bind(
-        &mut self,
-        name: &str,
-        host: &HostHandle,
-        target: Target,
-    ) -> Result<()>;
+    /// Bind a workstream name to a host alias + TargetSpec.
+    pub fn bind(&mut self, name: &str, host_alias: &str, target: TargetSpec) -> Result<()>;
 
-    /// Remove a workstream binding by name.
+    /// Remove a workstream binding.
     pub fn unbind(&mut self, name: &str) -> Result<()>;
 
-    /// Look up a workstream by name. Returns the host alias and Target.
-    pub fn find(&self, name: &str) -> Option<(&str, &HostHandle, &Target)>;
+    /// Resolve a workstream to a Target (async — resolves TargetSpec).
+    pub async fn find(&self, name: &str) -> Result<Option<Target>>;
 
-    /// List all workstream bindings.
-    pub fn workstreams(&self) -> Vec<WorkstreamEntry>;
+    /// List all workstream names.
+    pub fn workstreams(&self) -> impl Iterator<Item = &str>;
 
     /// Convenience routing helpers for external agents.
     pub async fn send_text(&self, name: &str, text: &str) -> Result<()>;
     pub async fn send_keys(&self, name: &str, keys: &KeySequence) -> Result<()>;
     pub async fn capture(&self, name: &str) -> Result<String>;
-}
-
-/// A named binding of a user-defined name to a (host, target) pair.
-pub struct WorkstreamEntry {
-    pub name: String,
-    pub host_alias: String,
-    pub target: Target,
+    pub async fn target(&self, name: &str) -> Result<Target>;
 }
 ```
 
@@ -1617,13 +1618,20 @@ pub enum HistoryEntry {
     },
 }
 
+// @claude 2026-03-20 — updated to match shipped async API (PR #92 R2).
 impl HistoryHandle {
+    /// The subscription id for bus control.
+    pub fn id(&self) -> SinkId;
+
     /// Return the current bounded transcript state for custom formatting.
-    pub fn snapshot(&self) -> HistorySnapshot;
+    pub async fn snapshot(&self) -> HistorySnapshot;
 
     /// Render a prompt-ready transcript string for external LLM/classifier context.
     /// This is the primary ergonomic API for rolling-context consumers.
-    pub fn render_text(&self) -> String;
+    pub async fn render_text(&self) -> String;
+
+    /// Await the background accumulator task to completion.
+    pub async fn join(self) -> Result<()>;
 }
 ```
 
