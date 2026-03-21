@@ -206,6 +206,7 @@ cargo run -p motlie-tmux --example repl -- ssh://localhost
 | `kill <target>` | Kill a session, window, or pane | `target.kill()` |
 | `targets` | List all sessions with target spec strings | `host.list_sessions()`, `target.children()` |
 | `send <target> <text...>` | Send text + Enter to a target | `target.send_text()`, `target.send_keys()` |
+| `keys <target> <keys...>` | Send raw key sequence (`{Escape}`, `{C-c}`, etc.) | `KeySequence::parse()`, `target.send_keys()` |
 | `capture <target> <n>` | Print last N scrollback lines | `target.sample_text(LastLines(n))` |
 | `monitor <session> [secs]` | Stream live output for N seconds (default 3) | `host.start_monitoring_session()`, `OutputBus`, `JoinedStream` |
 | `upload <local> <remote> [--recursive]` | Upload a file or directory to the host | `host.upload()`, `TransferOptions` |
@@ -255,6 +256,10 @@ repl> split-pane automation:1 --horizontal --percent 40
 Created pane: automation:1.1
 repl> send test_session echo hello from repl
 Sent to test_session
+repl> keys test_session {Escape}
+Sent keys to test_session
+repl> keys test_session {C-c}
+Sent keys to test_session
 repl> capture test_session 5
 $ echo hello from repl
 hello from repl
