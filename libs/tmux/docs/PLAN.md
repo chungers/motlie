@@ -5,7 +5,7 @@
 | Date | Who | Summary |
 |------|-----|---------|
 | 2026-03-20 | @codex | Refine Phase 4.2 per PR #94 review: reframe reconnect resync as fresh snapshot anchoring (not replay), add adapter-propagation tasks for discontinuity, specify missing-session/topology-change handling, and require per-session monitor health as Fleet ground truth. |
-| 2026-03-20 | @codex | Expand Phase 4 into explicit streaming-resilience work: reconnect supervision, upstream discontinuity modeling, bounded resync, Fleet health state, and failure-injection coverage. This becomes the next active hardening priority for long-lived external-agent workflows. |
+| 2026-03-20 | @codex | Expand Phase 4 into explicit streaming-resilience work: reconnect supervision, upstream discontinuity modeling, fresh snapshot anchoring after reconnect, Fleet health state, and failure-injection coverage. This becomes the next active hardening priority for long-lived external-agent workflows. |
 | 2026-03-20 | @claude | Implement Track B (2b.1, 2b.2, 2b.3): `HistoryHandle`/`HistoryOptions`/`HistorySnapshot`/`HistoryEntry` in sink.rs, `Subscription::filter_fn()` predicate adapter, `Fleet` module with host registry/workstream routing/monitoring lifecycle. 339 tests pass (50 new). |
 | 2026-03-20 | @codex | DC28 follow-up — specify 2b.1 transcript/history as a bounded rolling snapshot layer built on `JoinedStream`, optimized for external LLM/classifier context windows. Add concrete `HistoryHandle`/`HistorySnapshot`/`HistoryEntry` direction and explicit trimming semantics. |
 | 2026-03-20 | @codex | Directional simplification — active post-Track-A plan now prioritizes transcript/history adapters, simplified Fleet coordination, and external-agent workflows. Built-in matcher/rule/reactor/config direction moved to historical context section. |
@@ -1265,7 +1265,7 @@ Notes:
 - The active post-Track-A direction prioritizes transcript/history construction,
   simplified Fleet coordination, and external-agent workflows.
 - The next active hardening priority is **4.2 streaming resilience**:
-  reconnect supervision, explicit discontinuity semantics, bounded resync, and
+  reconnect supervision, explicit discontinuity semantics, fresh snapshot anchoring, and
   Fleet health visibility for long-lived agent loops.
 - The older matcher/rule/reactor/config direction is preserved in the historical
   context section, not in the active dependency chain.

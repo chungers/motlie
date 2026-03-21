@@ -7,7 +7,7 @@
 | Date | Change | Sections |
 |------|--------|----------|
 | 2026-03-20 | @codex: Refine DC29 per PR #94 review — resync is a fresh snapshot after reconnect, not replay. Specify missing-session/topology-change behavior, adapter propagation (`SinkEvent::Discontinuity`, `HistoryEntry::Discontinuity`, `filter_fn` forwarding, `JoinedStream` source reset), and per-session monitor health as the ground truth for Fleet aggregation. | DC29, Phase 4 |
-| 2026-03-20 | @codex: Add DC29 — long-lived streaming resilience. Separate upstream stream discontinuity from subscriber backpressure gaps, require reconnect supervision + bounded resync, and make the hardening direction explicit for external-agent/Fleet workflows. | DC29, DC28, Phase 4 |
+| 2026-03-20 | @codex: Add DC29 — long-lived streaming resilience. Separate upstream stream discontinuity from subscriber backpressure gaps, require reconnect supervision + fresh snapshot anchoring after reconnect, and make the hardening direction explicit for external-agent/Fleet workflows. | DC29, DC28, Phase 4 |
 | 2026-03-20 | @claude: Update Fleet and HistoryHandle API blocks to match shipped implementation (PR #92 R2). Fleet: `register()` with alias enforcement + bus injection, `TargetSpec`-based `bind()`, async `find()`, sync `shutdown()`. HistoryHandle: async `snapshot()` / `render_text()` / `join()`, `id()` accessor. Fix `rendered_chars()` to measure actual rendered string for Custom label format. | Fleet, Subscription, DC27, DC28 |
 | 2026-03-20 | @codex: DC28 — specify transcript/history adapter as a bounded rolling snapshot layer for LLM/classifier context windows. Define artifact, bounds, relationship to `JoinedStream`, and consumer interaction model. | Subscription, DC28, Phase 2b |
 | 2026-03-20 | @codex: Directional simplification — active design now treats `libs/tmux` as tmux stream/history/control substrate for an external LLM/classifier or other policy engine. Simplify Fleet toward coordination/aggregation/routing. Move matcher/rule/reactor/config automation direction to appendix as historical context. | Overview, Fleet, DC24, DC12, DC13, DC14, Phase 2b/2c, Phase 3, Appendix |
@@ -4344,7 +4344,7 @@ multi-host/Fleet operation.
 5. ~~Line interleaving mitigation (OC2)~~ — OUT OF SCOPE (resolved by DC10 + DC22)
 6. Reconnecting monitor supervision with bounded retry/backoff
 7. Explicit stream discontinuity artifacts distinct from subscriber `Gap`
-8. Bounded recapture/resync after reconnect, reflected in transcript/history
+8. Fresh snapshot anchoring after reconnect, reflected in transcript/history
 9. Fleet/host health visibility for reconnecting/degraded/failed streaming state
 10. End-to-end test with Docker (SSH + tmux)
 11. Document minimum tmux version, known limitations, and performance characteristics
