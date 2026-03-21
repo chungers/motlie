@@ -1041,6 +1041,8 @@ consumption and routed control pleasant for external LLM/classifier workflows.
 - [ ] Workstream registry: `bind()`, `unbind()`, `find()`, `workstreams()`
 - [ ] Convenience routed actions: `send_text`, `send_keys`, `capture`, `target`
 - [ ] `HostStatus` enum: `Disconnected`, `Connecting`, `Connected`, `Monitoring { sessions }`, `Error(String)`
+- [ ] Document the delegation contract: Fleet-level routing helpers are convenience
+  wrappers over normal `HostHandle` / `Target` operations, not a separate action system
 - [ ] Unit tests: multi-host connect with one failure, alias conflict detection,
   workstream bind/find/unbind, routed action correctness
 
@@ -1089,6 +1091,10 @@ Preserved for continuity, but **not** on the active execution path after 2026-03
 If Motlie later grows a first-class built-in automation product direction, re-evaluate
 those ideas against the then-current stream/history/Fleet APIs instead of reinstating
 this older track wholesale.
+
+Note: SSH reconnect / long-lived host reliability is still an active infrastructure concern.
+It remains in Phase 4 hardening and any Fleet reliability follow-on work; only the
+config-driven automator coupling was deferred.
 
 ---
 
