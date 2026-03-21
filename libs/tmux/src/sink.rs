@@ -579,24 +579,15 @@ pub enum HistoryEntry {
 
 impl HistoryEntry {
     /// Rendered character count for budget trimming.
+    ///
+    /// Measures the actual rendered string length to ensure accurate budget
+    /// enforcement for all label formats including `LabelFormat::Custom`.
     fn rendered_chars(&self, label_format: &LabelFormat) -> usize {
-        match self {
-            HistoryEntry::Output { source, text, source_changed } => {
-                if *source_changed {
-                    let label = match label_format {
-                        LabelFormat::Bracketed => format!("[{}] ", source.short()),
-                        LabelFormat::Prompt => format!("{}> ", source.short()),
-                        LabelFormat::Custom(f) => f(source, ""),
-                    };
-                    label.len() + text.len() + 1 // +1 for newline
-                } else {
-                    text.len() + 1
-                }
-            }
-            HistoryEntry::Gap { dropped_events } => {
-                format!("[gap: {} event(s) dropped]\n", dropped_events).len()
-            }
-        }
+        let source_changed = match self {
+            HistoryEntry::Output { source_changed, .. } => *source_changed,
+            HistoryEntry::Gap { .. } => true,
+        };
+        self.render(label_format, source_changed).len()
     }
 
     /// Render this entry as text.
