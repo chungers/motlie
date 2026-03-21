@@ -9,7 +9,7 @@ use crate::control;
 use crate::discovery;
 use crate::keys::KeySequence;
 use crate::monitor::{MonitorExitReason, MonitorHandle, MonitorHealth, SessionMonitor, SessionMonitorHandle};
-use crate::sink::OutputBus;
+use crate::sink::{OutputBus, TargetOutput};
 use crate::transport::TransportKind;
 use crate::types::*;
 
@@ -470,14 +470,43 @@ impl HostHandle {
                         match inner_ref.transport.open_shell(80, 24).await {
                             Ok(new_shell) => {
                                 shell = new_shell;
-                                // Fresh snapshot anchoring (4.2c): the monitor will
-                                // resume streaming from "now". Any output between
-                                // disconnect and reconnect is permanently lost if it
-                                // has scrolled past tmux's history buffer.
+
+                                // Fresh snapshot anchoring (4.2c): capture each pane's
+                                // visible content and publish as TargetOutput so
+                                // downstream consumers (history, subscribers) get
+                                // re-anchored with current screen state.
                                 bus.publish_discontinuity(&format!(
                                     "stream resumed: reattached after reconnect for {}:{}",
                                     host_alias, session
                                 ));
+
+                                if let Ok(panes) = discovery::list_panes_in_session(
+                                    &inner_ref.transport,
+                                    inner_ref.socket.as_ref(),
+                                    &session,
+                                ).await {
+                                    for pane in &panes {
+                                        let target = pane.address.to_string();
+                                        if let Ok(content) = capture::capture_pane(
+                                            &inner_ref.transport,
+                                            inner_ref.socket.as_ref(),
+                                            &target,
+                                        ).await {
+                                            if !content.is_empty() {
+                                                bus.publish(TargetOutput {
+                                                    source: TargetAddress::Pane(pane.address.clone()),
+                                                    host: host_alias.clone(),
+                                                    content,
+                                                    raw_content: None,
+                                                    sequence: 0,
+                                                    fidelity: OutputFidelity::clean(),
+                                                    timestamp: std::time::Instant::now(),
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+
                                 set_health(MonitorHealth::Streaming);
                                 attempt = 0; // Reset on successful reconnect
                             }

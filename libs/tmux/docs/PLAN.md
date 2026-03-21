@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-21 | @claude | 4.2c enhancement: full capture-pane snapshot on reconnect — after "stream resumed" discontinuity, list panes in session and publish each pane's visible content as `TargetOutput` so downstream consumers get real screen state re-anchoring (not just a marker). |
 | 2026-03-20 | @claude | Implement Phase 4.2 (DC29 streaming resilience): 4.2a reconnect supervision with exponential backoff in host.rs, 4.2b `SinkEvent::Discontinuity` threaded through all adapters, 4.2c fresh snapshot anchoring (discontinuity markers on reconnect), 4.2d per-session `MonitorHealth` as Fleet ground truth, 4.2e stress tests (bus throughput, history determinism, MockTransport multi-phase), 4.2f adversarial shell-escape property tests. 355 tests (+14 new). |
 | 2026-03-20 | @codex | Refine Phase 4.2 per PR #94 review: reframe reconnect resync as fresh snapshot anchoring (not replay), add adapter-propagation tasks for discontinuity, specify missing-session/topology-change handling, and require per-session monitor health as Fleet ground truth. |
 | 2026-03-20 | @codex | Expand Phase 4 into explicit streaming-resilience work: reconnect supervision, upstream discontinuity modeling, fresh snapshot anchoring after reconnect, Fleet health state, and failure-injection coverage. This becomes the next active hardening priority for long-lived external-agent workflows. |
@@ -1158,7 +1159,7 @@ config-driven automator coupling was deferred.
     memory/history budgets
   - test/document invariant: reconnect snapshot re-anchors the stream but does **not**
     replay output lost during the outage
-  <!-- @claude 2026-03-20 — Implemented as part of 4.2a supervision loop: emits "stream resumed" discontinuity after reconnect. Full capture-pane snapshot noted as future enhancement (code comment in host.rs). -->
+  <!-- @claude 2026-03-21 — Implemented: emits "stream resumed" discontinuity, then lists panes in session and publishes each pane's visible content as TargetOutput for real screen-state re-anchoring. -->
 - [x] **4.2d — Fleet/host streaming health**
   - introduce per-session monitor health as ground truth:
     `streaming | reconnecting | failed | stopped`
