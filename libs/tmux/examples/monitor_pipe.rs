@@ -162,6 +162,11 @@ fn callback_on_output(state: &Arc<dyn Any + Send + Sync>, event: SinkEvent) -> R
             )?;
             stdout.flush()?;
         }
+        SinkEvent::Discontinuity { reason } => {
+            let mut stdout = std::io::stdout().lock();
+            writeln!(stdout, "[discontinuity] {}", reason)?;
+            stdout.flush()?;
+        }
         SinkEvent::Gap { dropped, .. } => {
             {
                 let mut stats = stats.lock().expect("callback stats lock poisoned");
