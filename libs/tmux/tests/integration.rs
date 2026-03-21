@@ -228,6 +228,7 @@ async fn localhost_monitor_pipeline() {
                         }
                     }
                     Some(motlie_tmux::SinkEvent::Gap { .. }) => continue,
+                    Some(motlie_tmux::SinkEvent::Discontinuity { .. }) => continue,
                     None => break,
                 }
             }
@@ -438,6 +439,7 @@ async fn localhost_monitor_pipeline_named_socket() {
                         }
                     }
                     Some(SinkEvent::Gap { .. }) => continue,
+                    Some(SinkEvent::Discontinuity { .. }) => continue,
                     None => break,
                 }
             }

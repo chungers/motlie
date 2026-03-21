@@ -22,5 +22,5 @@ pub use sink::{
     HistoryHandle, HistoryOptions, HistorySnapshot, HistoryEntry,
 };
 pub use sinks::stdio::{StdioSink, StdioFormat};
-pub use monitor::{SessionMonitorHandle, MonitorHandle};
-pub use fleet::{Fleet, HostStatus};
+pub use monitor::{SessionMonitorHandle, MonitorHandle, MonitorHealth, MonitorExitReason};
+pub use fleet::{Fleet, HostStatus, SessionMonitorStatus};
