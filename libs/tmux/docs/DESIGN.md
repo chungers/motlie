@@ -6,6 +6,8 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-21 | @codex: Address PR #96 review feedback — clarify DC31 exit-code semantics, narrow `exec()` wording from "blocking" to "await-to-completion", and tighten product/design wording around competitive evidence and SSH ergonomics. | DC31, DC19, PRODUCT cross-reference |
+| 2026-03-21 | @codex: Product-driven follow-up from [`docs/PRODUCT.md`](../../../docs/PRODUCT.md): add DC30 (socket-isolation ergonomics) and DC31 (tracked command execution) as concrete robustness features. Prioritize dedicated automation sockets first, tracked command execution second. | DC30, DC31, DC19, Phase 4 |
 | 2026-03-20 | @codex: Refine DC29 per PR #94 review — resync is a fresh snapshot after reconnect, not replay. Specify missing-session/topology-change behavior, adapter propagation (`SinkEvent::Discontinuity`, `HistoryEntry::Discontinuity`, `filter_fn` forwarding, `JoinedStream` source reset), and per-session monitor health as the ground truth for Fleet aggregation. | DC29, Phase 4 |
 | 2026-03-20 | @codex: Add DC29 — long-lived streaming resilience. Separate upstream stream discontinuity from subscriber backpressure gaps, require reconnect supervision + fresh snapshot anchoring after reconnect, and make the hardening direction explicit for external-agent/Fleet workflows. | DC29, DC28, Phase 4 |
 | 2026-03-20 | @claude: Update Fleet and HistoryHandle API blocks to match shipped implementation (PR #92 R2). Fleet: `register()` with alias enforcement + bus injection, `TargetSpec`-based `bind()`, async `find()`, sync `shutdown()`. HistoryHandle: async `snapshot()` / `render_text()` / `join()`, `id()` accessor. Fix `rendered_chars()` to measure actual rendered string for Custom label format. | Fleet, Subscription, DC27, DC28 |
@@ -75,6 +77,13 @@ sending arbitrary input with proper escaping, and managing session metadata — 
 and multiple remote hosts concurrently. The design is derived from a working single-host
 prototype and specifies the decomposition, safety fixes, and extensions required for a
 production library.
+
+Product prioritization notes live in [`docs/PRODUCT.md`](../../../docs/PRODUCT.md). The current
+product comparison against `tmux-mcp-rs` does not change the tmux-only scope, but it does
+clarify two robustness-oriented follow-ons for the foundation:
+
+- dedicated socket-isolation ergonomics
+- tracked command execution as a complement to await-to-completion `Target::exec()`
 
 ## Table of Contents
 
@@ -3314,6 +3323,158 @@ transcript as complete.
   badges, transcript banners, or degraded-connection indicators without requiring a
   separate monitoring model.
 
+### DC30: Dedicated Socket Isolation Ergonomics
+
+**Decision**: Motlie should treat dedicated tmux sockets as a first-class robustness tool for
+automation, not merely as an advanced optional parameter. The existing `TmuxSocket` selector
+remains the core transport primitive, but the library should add higher-level helpers that make
+isolated automation sockets easy to construct, validate, and operate.
+
+This decision is driven by the product comparison captured in
+[`docs/PRODUCT.md`](../../../docs/PRODUCT.md): for a tmux-over-SSH foundation, socket isolation
+improves correctness and determinism more directly than many broader tmux command-surface
+expansions.
+
+**Why this matters**:
+- Dedicated sockets reduce interference from unrelated human tmux activity.
+- They make monitor/capture/exec behavior more deterministic by narrowing the operational scope.
+- They provide a clean boundary for long-lived external-agent or automation workflows without
+  requiring complex runtime coordination.
+- They improve debuggability: "this automation socket" becomes a concrete operational unit.
+
+**Required semantics**:
+1. **Stable, explicit isolation**
+   - Socket selection must remain explicit and inspectable.
+   - Motlie must not silently fall back from a dedicated automation socket to the default tmux
+     socket when the isolated socket is missing or not running.
+2. **Ergonomic construction**
+   - Callers should not have to hand-roll every socket name string.
+   - Provide a safe, deterministic helper for creating automation-oriented socket names from a
+     human scope string.
+3. **Bootstrap / readiness**
+   - A socket-scoped host should be able to ensure the tmux server for that socket exists before
+     higher-level operations start.
+   - This should be available for localhost and SSH-backed hosts through the same `HostHandle`
+     abstraction.
+4. **No ambiguity with existing explicit socket configuration**
+   - If the caller already specified a concrete socket, convenience helpers must return an error
+     rather than silently overwrite or merge socket intent.
+
+**Proposed API direction**:
+
+```rust
+impl TmuxSocket {
+    pub fn automation(scope: &str) -> Result<Self>;
+}
+
+impl SshConfig {
+    pub fn with_automation_socket(self, scope: &str) -> Result<Self>;
+}
+
+impl HostHandle {
+    pub async fn ensure_socket_server(&self) -> Result<()>;
+}
+```
+
+**Behavioral contract**:
+- `TmuxSocket::automation(scope)` creates a deterministic, validated named socket intended for
+  dedicated automation use (for example `motlie-<scope>`). The exact normalization algorithm is
+  library-defined, ASCII-safe, and documented.
+- `with_automation_socket(scope)` is a convenience wrapper over `with_socket(...)`, but it is
+  fallible if a socket is already configured.
+- `ensure_socket_server()` explicitly runs `tmux start-server` against the configured socket.
+- None of these APIs manage session lifecycle automatically; they only improve socket-scoped
+  operational isolation.
+
+**Why not stop at raw `TmuxSocket`?**
+- Raw socket selectors are necessary but not sufficient. The product gap is operational
+  ergonomics: callers should be guided toward isolation by default for robust automation flows.
+- "Pass `socket-name` manually everywhere" is too low-level to function as a product answer.
+
+### DC31: Tracked Command Execution
+
+**Decision**: Add tracked command execution as a first-class `Target` capability that
+complements, but does not replace, `Target::exec()`. The tracked form should expose an explicit
+execution handle and execution state so callers can distinguish:
+
+- command launched
+- command still running
+- command completed with structured result
+- command outcome became unknown because continuity was broken
+
+This is a robustness feature, not a workflow engine. It exists to make long-running or delayed
+command observation more truthful in the face of reconnects, slow commands, and polling loops.
+
+**Why this matters**:
+- `Target::exec()` is a good await-to-completion convenience API, but it collapses launch + wait + parse
+  into one operation.
+- Long-lived automation and external-agent loops benefit from separating "start command" from
+  "observe command outcome later".
+- If a monitor/transport discontinuity happens while a command is in flight, the right answer is
+  often not "timeout" but "result unknown".
+
+**Required semantics**:
+1. **Pane-scoped execution remains the boundary**
+   - No host-level bypass (`HostHandle::exec()`) is added.
+   - All command execution still happens inside the target pane's shell context.
+2. **Tracked lifecycle**
+   - Starting an execution returns a typed handle / ID.
+   - Callers can inspect status or await completion later.
+3. **Unknown outcome on broken continuity**
+   - If command completion can no longer be proven because continuity was broken before the
+     sentinel/result boundary was observed, the tracked command must transition to an explicit
+     unknown state rather than pretending success, timeout, or clean completion.
+4. **Blocking `exec()` remains**
+   - `Target::exec()` stays as the simple await-to-completion convenience wrapper, layered on the tracked
+     execution substrate where appropriate.
+
+**Proposed API direction**:
+
+```rust
+pub struct ExecId(uuid::Uuid);
+
+pub enum ExecState {
+    Running,
+    Completed(ExecOutput),
+    Unknown { reason: String },
+}
+
+pub struct ExecHandle {
+    // opaque
+}
+
+impl Target {
+    pub async fn start_exec(
+        &self,
+        command: &str,
+        timeout: std::time::Duration,
+    ) -> Result<ExecHandle>;
+}
+
+impl ExecHandle {
+    pub fn id(&self) -> ExecId;
+    pub async fn status(&self) -> Result<ExecState>;
+    pub async fn wait(&self) -> Result<ExecState>;
+}
+```
+
+**Behavioral contract**:
+- The tracked execution state is process-local and in-memory. It is not intended as a
+  cross-process or persistent job store.
+- `Completed(ExecOutput)` covers all exit codes, including non-zero exits. A command that
+  exits with `1` is still `Completed(...)`; `ExecOutput.exit_code` carries the result.
+  Non-zero exit codes are not `Unknown`.
+- Same-pane concurrency restrictions from DC19 still apply.
+- On monitor/transport discontinuity before completion is proven, the tracked command transitions
+  to `Unknown { reason }`.
+- `Target::exec()` may internally call `start_exec(...).wait()` and require `Completed(...)` to
+  preserve the existing simple API.
+
+**Why this is not redundant with DC19**
+- DC19 is about await-to-completion command-and-capture convenience.
+- DC31 is about explicit execution state and truthfulness over time.
+- Both belong on `Target`, and both preserve the tmux-pane abstraction boundary.
+
 ### DC27: Fleet Routing Convenience vs Direct Target Use
 
 **Decision**: Keep both levels. `Target` remains the canonical direct-control handle,
@@ -3828,6 +3989,10 @@ within a tmux pane, complementing the existing fire-and-forget `send_text()`/`se
 It returns `ExecOutput { stdout, exit_code }` by using a sentinel-based capture mechanism.
 No host-level bypass (`HostHandle::exec()`) is added — the library's abstraction boundary
 is tmux, and all command execution stays within the tmux framework.
+
+**Relationship to DC31**: `exec()` remains the await-to-completion convenience form. A future tracked
+execution API may layer underneath it, but it does not change this decision's core boundary:
+execution stays pane-scoped and tmux-contextual.
 
 **Three modes of pane interaction**:
 

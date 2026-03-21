@@ -4,6 +4,9 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-21 | @codex | Address PR #96 review feedback — clarify 4.2h wording from "blocking" to "await-to-completion", require slice-3 test parity with the existing `Target::exec()` sentinel/scrollback/lock behavior before refactoring it onto tracked execution, and align the product-driven notes with shipped SSH identity-file support. |
+| 2026-03-21 | @codex | Execution-planning follow-up for 4.2g/4.2h: document impact radius by module and require 4.2h to land in staged slices (`ExecId`/state, `start_exec`, `exec()` layering, discontinuity semantics/tests) so tracked execution remains reviewable. |
+| 2026-03-21 | @codex | Product-driven robustness follow-up from [`docs/PRODUCT.md`](../../../docs/PRODUCT.md): add concrete plan items for 4.2g dedicated socket-isolation ergonomics and 4.2h tracked command execution. Prioritize socket isolation first as the higher-value robustness feature; keep tracked execution as a complementary pane-scoped execution primitive. |
 | 2026-03-21 | @claude | 4.2c enhancement: full capture-pane snapshot on reconnect — after "stream resumed" discontinuity, list panes in session and publish each pane's visible content as `TargetOutput` so downstream consumers get real screen state re-anchoring (not just a marker). |
 | 2026-03-20 | @claude | Implement Phase 4.2 (DC29 streaming resilience): 4.2a reconnect supervision with exponential backoff in host.rs, 4.2b `SinkEvent::Discontinuity` threaded through all adapters, 4.2c fresh snapshot anchoring (discontinuity markers on reconnect), 4.2d per-session `MonitorHealth` as Fleet ground truth, 4.2e stress tests (bus throughput, history determinism, MockTransport multi-phase), 4.2f adversarial shell-escape property tests. 355 tests (+14 new). |
 | 2026-03-20 | @codex | Refine Phase 4.2 per PR #94 review: reframe reconnect resync as fresh snapshot anchoring (not replay), add adapter-propagation tasks for discontinuity, specify missing-session/topology-change handling, and require per-session monitor health as Fleet ground truth. |
@@ -55,8 +58,10 @@
 | 2026-03-10 | @claude | Phase 1.9a implemented: fidelity types, capture normalization modes (Raw/ScreenStable/PlainText), options-based capture APIs, ANSI stripping, exec() wrap-tolerant sentinel via `-ep` capture. |
 | 2026-03-10 | @codex | Address PR #65 review feedback: split Phase `1.9` into `1.9a`/`1.9b`, keep default capture wrappers `Raw`, make `ExecStable` internal-only, scope history-limit work to setup-time/new panes, and move sink backpressure signaling to `SinkEvent::Gap`. |
 
-Derived from [DESIGN.md](./DESIGN.md). Each task is scoped to produce a compilable,
-testable increment. Dependencies are explicit. File paths are relative to `libs/tmux/`.
+Derived from [DESIGN.md](./DESIGN.md). Product prioritization context for competitive
+positioning and robustness tradeoffs lives in [`docs/PRODUCT.md`](../../../docs/PRODUCT.md).
+Each task is scoped to produce a compilable, testable increment. Dependencies are explicit.
+File paths are relative to `libs/tmux/`.
 
 ---
 
@@ -1187,6 +1192,54 @@ config-driven automator coupling was deferred.
   - shell escaping fuzz tests or property tests (adversarial session names, text input)
   <!-- @claude 2026-03-20 — Implemented: adversarial input test (17 cases: injection, unicode, control chars, long strings) and round-trip identity property test (10 cases) in transport.rs. -->
 
+- [ ] **4.2g — Dedicated socket-isolation ergonomics**
+  - add deterministic helper for dedicated automation socket naming on top of `TmuxSocket`
+  - add fallible `SshConfig` convenience builder for automation socket selection that errors
+    instead of silently overwriting existing socket intent
+  - add `HostHandle::ensure_socket_server()` / equivalent bootstrap helper that explicitly
+    runs `tmux start-server` against the configured socket
+  - document dedicated socket usage as the preferred operational isolation path for robust
+    automation / external-agent workflows
+  - add localhost integration coverage showing dedicated socket isolation from the default
+    tmux server
+  - add env-gated SSH integration coverage for socket-scoped startup if practical; otherwise
+    defer the SSH-specific operational path to 4.3 Docker E2E
+  - expected impact radius:
+    `src/types.rs`, `src/transport.rs`, `src/uri.rs`, `src/host.rs`, examples/docs, and
+    socket-focused localhost/SSH integration tests
+  - implementation note: keep this additive/localized; it should not require OutputBus,
+    monitor, Fleet, or history refactors
+
+- [ ] **4.2h — Tracked command execution**
+  - add typed command identity and state:
+    `ExecId`, `ExecHandle`, `ExecState`
+  - add `Target::start_exec(...) -> ExecHandle`
+  - add `ExecHandle::status()` / `wait()` with explicit `Unknown { reason }` outcome when
+    continuity breaks before completion can be proven
+  - keep `Target::exec()` as the await-to-completion convenience wrapper; layer it on the tracked
+    execution substrate where practical
+  - store execution state in-process on the host/target side only; no persistent job store
+  - preserve same-pane concurrency restrictions from DC19
+  - add unit tests for:
+    - running → completed transitions
+    - discontinuity → unknown transitions
+    - same-pane lock sharing across target levels
+  - add localhost integration coverage for long-running execution + later status retrieval
+  - expected impact radius:
+    primarily `src/types.rs`, `src/host.rs`, docs/examples/tests, with possible targeted
+    monitor/discontinuity integration if execution truthfulness needs explicit stream-state hooks
+  - implementation staging:
+    1. add `ExecId` / `ExecHandle` / `ExecState` plus in-memory state model
+    2. add `Target::start_exec(...)` and polling/status/wait behavior
+    3. refactor `Target::exec()` to layer on the tracked substrate
+    4. finalize discontinuity/unknown semantics and integration coverage
+  - slice-3 guardrail: before shipping the `Target::exec()` refactor, prove parity with the
+    current sentinel mechanism:
+    marker injection, scrollback polling/retry behavior, and same-pane exec lock semantics
+    must remain covered by tests rather than assumed from the refactor shape
+  - implementation note: keep the first slice narrow and reviewable; avoid coupling initial
+    tracked execution state to Fleet/history unless a concrete correctness need appears
+
 ### 4.3 — Docker-based E2E (OC6)
 
 - [ ] Dockerfile: SSH server + tmux + test sessions
@@ -1256,6 +1309,9 @@ Out of current scope. Listed for continuity.
  │                  └── 2b.5 CLI / smoke coverage [needs 2b.4]
  │
  └── 4.x Hardening (parallel with Track B)
+      ├── 4.2 Streaming resilience [complete]
+      ├── 4.2g Socket-isolation ergonomics
+      └── 4.2h Tracked command execution
 ```
 
 **Linear execution order (single-threaded)**:
@@ -1265,16 +1321,20 @@ Out of current scope. Listed for continuity.
 
 Notes:
 - `1.14` and `1.15` are complete. Track B established the transcript/history/Fleet
-  substrate; the next active implementation priority is Phase `4.2` streaming
-  resilience on top of that finished base.
+  substrate; the next active implementation priorities are the product-driven robustness
+  follow-ons after completed Phase `4.2`: **4.2g dedicated socket isolation ergonomics**
+  first, then **4.2h tracked command execution**.
 - After Track A (6 tasks ending at 2c.4a), the system has end-to-end streaming:
   monitor → parse control mode → fan-out via OutputBus → Subscription adapters →
   JoinedStream combining. No matcher or reactor dependency.
 - The active post-Track-A direction prioritizes transcript/history construction,
   simplified Fleet coordination, and external-agent workflows.
-- The next active hardening priority is **4.2 streaming resilience**:
-  reconnect supervision, explicit discontinuity semantics, fresh snapshot anchoring, and
-  Fleet health visibility for long-lived agent loops.
+- [`docs/PRODUCT.md`](../../../docs/PRODUCT.md) now informs the next robustness work:
+  socket isolation is the higher-priority operational reliability feature; tracked
+  command execution follows as a pane-scoped execution-state improvement.
+- Completed **4.2 streaming resilience** established reconnect supervision, explicit
+  discontinuity semantics, fresh snapshot anchoring, and Fleet health visibility for
+  long-lived agent loops.
 - The older matcher/rule/reactor/config direction is preserved in the historical
   context section, not in the active dependency chain.
 - `1.10` gates Track A start (2a.2a).
