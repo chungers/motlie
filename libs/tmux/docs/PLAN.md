@@ -4,6 +4,8 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-20 | @codex | Refine Phase 4.2 per PR #94 review: reframe reconnect resync as fresh snapshot anchoring (not replay), add adapter-propagation tasks for discontinuity, specify missing-session/topology-change handling, and require per-session monitor health as Fleet ground truth. |
+| 2026-03-20 | @codex | Expand Phase 4 into explicit streaming-resilience work: reconnect supervision, upstream discontinuity modeling, fresh snapshot anchoring after reconnect, Fleet health state, and failure-injection coverage. This becomes the next active hardening priority for long-lived external-agent workflows. |
 | 2026-03-20 | @claude | Implement Track B (2b.1, 2b.2, 2b.3): `HistoryHandle`/`HistoryOptions`/`HistorySnapshot`/`HistoryEntry` in sink.rs, `Subscription::filter_fn()` predicate adapter, `Fleet` module with host registry/workstream routing/monitoring lifecycle. 339 tests pass (50 new). |
 | 2026-03-20 | @codex | DC28 follow-up — specify 2b.1 transcript/history as a bounded rolling snapshot layer built on `JoinedStream`, optimized for external LLM/classifier context windows. Add concrete `HistoryHandle`/`HistorySnapshot`/`HistoryEntry` direction and explicit trimming semantics. |
 | 2026-03-20 | @codex | Directional simplification — active post-Track-A plan now prioritizes transcript/history adapters, simplified Fleet coordination, and external-agent workflows. Built-in matcher/rule/reactor/config direction moved to historical context section. |
@@ -1124,14 +1126,58 @@ config-driven automator coupling was deferred.
 - [ ] Clear error messages for unsupported versions (minimum: tmux 3.1)
 - [ ] CI matrix: test against tmux 3.1, 3.x latest, latest
 
-### 4.2 — Expanded test coverage
+### 4.2 — Streaming resilience + failure semantics
 
-- [ ] Expand `MockTransport` test suite: error paths, timeouts, malformed tmux output
-- [ ] Shell escaping fuzz tests or property tests (adversarial session names, text input)
-- [ ] `OutputBus` stress test: high-throughput publish with slow/full sinks
-- [ ] Transcript/history determinism tests under bursty multi-source output
-- [ ] Fleet routing resilience test: simulated SSH drop + recover while preserving
-  alias/workstream lookup semantics
+- [ ] **4.2a — Reconnecting monitor supervision**
+  - wrap session monitor lifecycle so unexpected control-mode EOF does not permanently
+    kill monitoring on the first failure
+  - add bounded retry/backoff policy for SSH-backed monitors
+  - support localhost control-mode reattach after tmux server/client interruption
+  - preserve explicit caller-driven stop/shutdown semantics (no reconnect after
+    intentional stop)
+- [ ] **4.2b — Upstream discontinuity artifact**
+  - introduce `SinkEvent::Discontinuity` (or equivalent) distinct from `SinkEvent::Gap`
+    for upstream monitor
+    interruption/resume/resync
+  - document invariant: `Gap` means subscriber backpressure only; discontinuity means
+    monitor/transport continuity was broken
+  - thread the new artifact through:
+    - raw subscriptions
+    - `filter_fn()` (always forwarded)
+    - `pipe()` / terminal sinks
+    - `HistoryEntry::Discontinuity`
+    - `JoinedStream` source-reset semantics
+- [ ] **4.2c — Fresh snapshot anchoring after reconnect**
+  - after successful reconnect, capture a bounded **current-state snapshot** instead of
+    pretending missed output was recovered
+  - record snapshot outcome as an explicit transcript/system entry
+  - define limits for snapshot scope so recovery is predictable and does not explode
+    memory/history budgets
+  - test/document invariant: reconnect snapshot re-anchors the stream but does **not**
+    replay output lost during the outage
+- [ ] **4.2d — Fleet/host streaming health**
+  - introduce per-session monitor health as ground truth:
+    `streaming | reconnecting | failed | stopped`
+  - derive host/Fleet health from per-session state (counts or worst-of), rather than a
+    single flattened host status
+  - ensure alias/workstream routing remains stable across reconnect attempts
+  - specify behavior when reconnect succeeds but the monitored session no longer exists
+    (tmux restart / external kill)
+  - specify behavior when pane topology changes across outage and pane-id-filtered
+    subscriptions no longer match
+  - expose enough state for future TUI/dashboard surfaces without inventing a second
+    monitoring model
+- [ ] **4.2e — Stress + failure injection coverage**
+  - expand `MockTransport` test suite: error paths, timeouts, malformed tmux output
+  - `OutputBus` stress test: high-throughput publish with slow/full sinks
+  - transcript/history determinism tests under bursty multi-source output and explicit
+    discontinuity/resync markers
+  - Fleet routing resilience test: simulated SSH drop + recover while preserving
+    alias/workstream lookup semantics
+  - integration tests that intentionally kill/restart tmux server or break control-mode
+    shell during active monitoring
+- [ ] **4.2f — Shell/input hardening**
+  - shell escaping fuzz tests or property tests (adversarial session names, text input)
 
 ### 4.3 — Docker-based E2E (OC6)
 
@@ -1210,13 +1256,17 @@ Out of current scope. Listed for continuity.
 ```
 
 Notes:
-- `1.14` and `1.15` are complete. The next active work starts from Track B on top of
-  the finished Track A substrate.
+- `1.14` and `1.15` are complete. Track B established the transcript/history/Fleet
+  substrate; the next active implementation priority is Phase `4.2` streaming
+  resilience on top of that finished base.
 - After Track A (6 tasks ending at 2c.4a), the system has end-to-end streaming:
   monitor → parse control mode → fan-out via OutputBus → Subscription adapters →
   JoinedStream combining. No matcher or reactor dependency.
 - The active post-Track-A direction prioritizes transcript/history construction,
   simplified Fleet coordination, and external-agent workflows.
+- The next active hardening priority is **4.2 streaming resilience**:
+  reconnect supervision, explicit discontinuity semantics, fresh snapshot anchoring, and
+  Fleet health visibility for long-lived agent loops.
 - The older matcher/rule/reactor/config direction is preserved in the historical
   context section, not in the active dependency chain.
 - `1.10` gates Track A start (2a.2a).
