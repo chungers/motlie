@@ -125,6 +125,9 @@ A library that:
 - **Out of active design path**: Built-in matcher DSL, declarative trigger-rule engine,
   internal reactor/action pipeline, and reconnecting rule processors. These are preserved
   in the appendix as historical context, not deleted from project memory.
+- **Deferred but still active infrastructure concern**: SSH reconnection / long-lived
+  host reliability remains in scope as transport/Fleet hardening. It is no longer
+  coupled to a built-in rule engine or config-driven automator design.
 - **Future**: TUI interface based on [ratatui](https://ratatui.rs/) (not in current phases)
   with reliability and capture-fidelity guidance in [`TUI.md`](./TUI.md). SFTP
   design deep dive lives in [`SFTP.md`](./SFTP.md).
@@ -1555,9 +1558,9 @@ impl Subscription {
 
     // --- Active next-wave adapters ---
 
-    /// Plain-text / transcript-oriented transformation.
-    /// Exact shape intentionally left open while history ergonomics are refined.
-    pub fn history(self, opts: &HistoryOptions) -> HistoryStream;
+    // Transcript/history-oriented transformation is intentionally left
+    // as a design target rather than a committed signature. See the
+    // narrative below and Phase 2b.1 in PLAN.md.
 
     /// Consumer-owned predicate filtering for lightweight selection without
     /// introducing a built-in matcher DSL.
@@ -1569,6 +1572,12 @@ impl Subscription {
 else is layered above. This eliminates the need for multiple `subscribe_*` bus methods
 and makes new consumer patterns (joining, transcript/history construction, lightweight
 predicate filtering, piping) orthogonal to the bus itself.
+
+**Transcript/history note**: The active direction does include a transcript/history
+adapter layer, but the exact surface is intentionally still open. The likely shape is
+something like `subscription.history(...)` or a similarly named adapter that produces
+a bounded, source-labeled conversation/transcript view. That API should be designed
+deliberately when Track B starts, rather than implicitly committed in this contract block.
 
 **Backpressure**: The bus remains non-blocking via `try_send()`, with loss visibility.
 When a subscriber falls behind, dropped events are counted and surfaced via explicit
@@ -2320,7 +2329,7 @@ intended for automated remote execution must not silently accept unknown hosts.
 - `--trust-first-use` / config flag: accept and persist on first connect, reject on mismatch
 - `--insecure` / config flag: accept all (prototype behavior), log warning on every connection
 
-### DC3: Historical Trigger/Action Model
+### DC3: Trigger/Action Model (Historical)
 
 **Status**: Deferred. Preserved for historical context in
 [Appendix A](#appendix-a--historical-automation-direction).
@@ -3073,6 +3082,29 @@ pipe-style thinking without abandoning pub/sub:
 **Impact**: DC15 remains the active multi-source view. OutputBus stays simplified to one
 `subscribe()` primitive. The active next work shifts from matcher/reactor machinery to
 history/transcript composition and Fleet coordination for external agents.
+
+### DC27: Fleet Routing Convenience vs Direct Target Use
+
+**Decision**: Keep both levels. `Target` remains the canonical direct-control handle,
+while `Fleet` offers convenience routing for workflows that reason in aliases and
+workstream names rather than holding a resolved `Target` the whole time.
+
+**Rationale**:
+- External agents often consume output first, then decide later what to do. In that
+  delay, the most convenient stable handle is often a workstream or host alias rather
+  than a previously retained `Target`.
+- `Fleet` already owns the registry/binding layer, so convenience methods like
+  `send_text(name, ...)`, `send_keys(name, ...)`, and `capture(name)` are natural
+  wrappers around `find(name)` plus normal `Target` operations.
+- This does not replace direct `Target` usage. Callers that already hold a `Target`
+  should keep using it directly.
+
+**Contract**:
+- `Fleet`-level routing helpers are conveniences, not privileged APIs.
+- They resolve a binding or alias, then delegate to the same underlying
+  `HostHandle` / `Target` control path used by direct callers.
+- Workstream name resolution remains explicit and inspectable through `bind()`,
+  `find()`, and `workstreams()`.
 
 ### DC7: Capture-Pane vs Stream Monitoring
 
