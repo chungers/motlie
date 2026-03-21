@@ -1437,7 +1437,8 @@ let filter = SinkFilter {
 output.host              // "localhost", "web-1", etc.
 output.content           // Normalized content (per monitor mode)
 output.raw_content       // Some(...) when normalization changed content
-output.sequence          // Monotonic per-source sequence number
+output.sequence          // Per-source sequence number (monotonic within a
+                         // continuous stream segment; resets on Discontinuity)
 output.fidelity          // OutputFidelity (clean for control mode)
 output.timestamp         // std::time::Instant of emission
 
@@ -1449,7 +1450,7 @@ output.target_string()   // Display format: "session:window.pane" (may be synthe
 output.degraded()        // Shorthand for fidelity.degraded
 ```
 
-### Backpressure and gap detection
+### Backpressure, gaps, and discontinuity
 
 When a subscriber can't keep up, the bus drops events and tracks the count.
 Before the next `Data` delivery on that subscriber, a `Gap` event is emitted:
@@ -1461,7 +1462,21 @@ match event {
         // The subscriber is now caught up
     }
     SinkEvent::Data(output) => { /* normal delivery */ }
+    SinkEvent::Discontinuity { reason } => {
+        // Upstream monitor/transport continuity was broken (DC29).
+        // Distinct from Gap (subscriber backpressure).
+        // Sequence numbers reset after this boundary.
+        // Adapters: filter_fn always forwards, JoinedStream resets
+        // source tracking, HistoryHandle records as HistoryEntry::Discontinuity.
+    }
 }
+```
+
+The `OutputBus` broadcasts discontinuity to all subscribers regardless of
+source-routing filters (system-level signal, not content):
+
+```rust
+bus.publish_discontinuity("stream interrupted: control channel lost");
 ```
 
 ---
@@ -1961,7 +1976,7 @@ assert!(issues.is_empty());
 | `LocalTransport` | Subprocess exec, configurable timeout |
 | `SshTransport` | russh 0.46, ssh-agent or key-file auth (DC26); `connect()`, `is_closed()` |
 | `SshConfig` | host, port, user, host_key_policy, timeout, keepalive_interval, socket; `parse()`, `to_uri_string()`, `connect()`, `Display`/`FromStr` |
-| `MockTransport` | Canned responses; `with_response()`, `with_default()`, `with_file()`, `with_dir()` |
+| `MockTransport` | Canned responses; `with_response()`, `with_default()`, `with_file()`, `with_dir()`, `with_shell_sequence()` |
 | `HostKeyPolicy` | Enum: Verify (default), TrustFirstUse, Insecure |
 | `TmuxSocket` | Enum: Name(String), Path(String) |
 | `TransferOptions` | overwrite (bool, default true), recursive (bool, default false) |
@@ -1971,13 +1986,15 @@ assert!(issues.is_empty());
 
 | Type | Description |
 |------|-------------|
-| `SessionMonitorHandle` | Handle to one monitored session — `shutdown()`, `is_active()`, `Deref<Target>` |
-| `MonitorHandle` | Aggregate handle — `shutdown()`, `get()`, `get_by_spec()`, `stop_session()`, `active_sessions()` |
-| `OutputBus` | Fan-out bus — `subscribe()`, `publish()`, `unsubscribe()`, `shutdown()` |
+| `SessionMonitorHandle` | Handle to one monitored session — `shutdown()`, `is_active()`, `health()`, `Deref<Target>` |
+| `MonitorHandle` | Aggregate handle — `shutdown()`, `get()`, `get_by_spec()`, `stop_session()`, `active_sessions()`, `all_sessions()` |
+| `MonitorHealth` | Enum: `Streaming`, `Reconnecting`, `Failed`, `Stopped` — per-session ground truth (DC29) |
+| `MonitorExitReason` | Enum: `Stopped`, `ConnectionLost` — returned by `SessionMonitor::run()` |
+| `OutputBus` | Fan-out bus — `subscribe()`, `publish()`, `publish_discontinuity()`, `unsubscribe()`, `shutdown()` |
 | `Subscription` | Bus subscription — `.into_receiver()`, `.joined()`, `.pipe()`, `.filter_fn()`, `.history()` |
 | `PipeHandle` | Lifecycle handle from `pipe()` — `id()` for bus control, `join()` for awaited teardown |
 | `TargetOutput` | Output event — `source_key()` (canonical identity), `target_string()` (display), content, fidelity |
-| `SinkEvent` | Enum: `Data(TargetOutput)`, `Gap { dropped, timestamp }` |
+| `SinkEvent` | Enum: `Data(TargetOutput)`, `Gap { dropped, timestamp }`, `Discontinuity { reason }` |
 | `SinkFilter` | Source routing — `for_session()`, `for_pane()`, `for_host()` exact constructors; raw regex fields for power |
 | `SinkId` | Opaque subscription identifier |
 | `SinkKind` | Enum: `Stdio(StdioSink)`, `Callback(CallbackSink)` — static dispatch |
@@ -1996,9 +2013,10 @@ assert!(issues.is_empty());
 | `HistoryHandle` | Rolling transcript handle — `snapshot()`, `render_text()`, `join()`, `id()` |
 | `HistoryOptions` | Config: `max_entries`, `max_render_chars`, `label_format`, `include_omission_marker` |
 | `HistorySnapshot` | Point-in-time snapshot — `entries`, `rendered_chars`, `omitted_entries` |
-| `HistoryEntry` | Enum: `Output { source, text, source_changed }`, `Gap { dropped_events }` |
+| `HistoryEntry` | Enum: `Output { source, text, source_changed }`, `Gap { dropped_events }`, `Discontinuity { reason }` |
 | `Fleet` | Multi-host registry — `register()`, `host()`, `hosts()`, `output_bus()`, monitoring, workstreams, routing |
-| `HostStatus` | Enum: `Connected`, `Monitoring { sessions }`, `Error(String)` |
+| `HostStatus` | Enum: `Connected`, `Monitoring { sessions: Vec<SessionMonitorStatus> }`, `Error(String)` |
+| `SessionMonitorStatus` | Per-session status: `name`, `health: MonitorHealth` |
 
 ### Shell channel (low-level, used by monitor layer — Phase 2a)
 
