@@ -92,32 +92,39 @@ squashfs image (built once, generic):
 ## Process tree
 
 ```
-Host sshd (port 22)                ← untouched
+Host sshd (port 22)                ← untouched, host netns
 
 motlie-vmm.service                    ← systemd, KillMode=control-group
-  └── motlie-vmm daemon
-        │
-        ├── russh SSH server        ← in-process, port 2222
-        │
-        │   ┌── network namespace (alice) ──────────────┐
-        ├── │ passt (from memfd)    userspace net stack  │
-        ├── │ firecracker (memfd)   KVM VM               │
-        │   └───────────────────────────────────────────┘
-        │
-        │   ┌── network namespace (bob) ────────────────┐
-        ├── │ passt (from memfd)                         │
-        ├── │ firecracker (from memfd)                   │
-        │   └───────────────────────────────────────────┘
-        │
-        ├── vsock FS (alice)        ← tokio task
-        │     workspace, scratch, credentials
-        │     vsock port 5000 (single listener, multiplexed)
-        │       binary transfer, control, FS mounts
-        │     dynamic mount add/remove
-        ├── vsock FS (bob)          ← tokio task
-        ├── event bus               ← broadcast + motlie-db (RocksDB graph)
-        ├── idle reaper             ← tokio task
-        └── CA keys                 ← in memory
+┌─────────────────── cgroup boundary (all children) ──────────────┐
+│ motlie-vmm daemon                   ← host netns (binds :2222)  │
+│       │                                                          │
+│       ├── russh SSH server        ← in-process, port 2222       │
+│       │                                                          │
+│       │   ┌── netns-alice (created by unshare) ──────────────┐  │
+│       ├── │ passt (from memfd)    userspace net stack         │  │
+│       ├── │ firecracker (memfd)   KVM VM (joined via setns)  │  │
+│       │   └──────────────────────────────────────────────────┘  │
+│       │                                                          │
+│       │   ┌── netns-bob (created by unshare) ────────────────┐  │
+│       ├── │ passt (from memfd)                                │  │
+│       ├── │ firecracker (from memfd)                          │  │
+│       │   └──────────────────────────────────────────────────┘  │
+│       │                                                          │
+│       ├── vsock listener (alice)  ← tokio task                  │
+│       │     vsock port 5000 (multiplexed)                       │
+│       │       binary transfer, control, FS mounts               │
+│       ├── vsock listener (bob)    ← tokio task                  │
+│       ├── event bus               ← broadcast + motlie-db       │
+│       ├── idle reaper             ← tokio task                  │
+│       └── CA keys                 ← in memory                   │
+└──────────────────────────────────────────────────────────────────┘
+
+Cgroup: all children (every firecracker, every passt) are in the
+  daemon's cgroup. systemd kills the entire tree on stop.
+
+Netns: daemon stays in host netns. Each VM pair (passt + firecracker)
+  lives in its own isolated netns. The daemon never touches the host's
+  networking. When both processes in a netns die, kernel destroys it.
 ```
 
 ## Host impact: none
@@ -229,7 +236,156 @@ Nothing in `/usr/bin`, `/usr/local/bin`, `/etc`, or any system directory.
 
 ## Components
 
-### 1. Embedded Binary Launcher
+### 1. Platform Check (phase 1)
+
+`motlie-vmm check` — verifies KVM, vsock, architecture, and kernel
+version before anything else runs. Build this first so every subsequent
+phase can use it for validation.
+
+`motlie-vmm check` probes the host to verify all prerequisites before
+running. It doesn’t just check file existence — it actually tries each
+capability (opens `/dev/kvm`, issues `KVM_CREATE_VM` ioctl, verifies
+vsock module is loaded).
+
+**Example output:**
+
+```
+$ motlie-vmm check
+
+Platform
+  arch:        aarch64                         ✓
+  kernel:      6.8.0-49-generic (≥ 5.10)       ✓
+
+KVM
+  /dev/kvm:    exists                          ✓
+  accessible:  read/write (uid 1000)           ✓
+  create VM:   ioctl(KVM_CREATE_VM) ok         ✓
+
+vsock
+  module:      vhost_vsock loaded              ✓
+  /dev/vhost-vsock: exists                     ✓
+  accessible:  read/write (uid 1000)           ✓
+
+Image tools (for `motlie-vmm build` only)
+  debootstrap: /usr/sbin/debootstrap           ✓
+  mksquashfs:  /usr/bin/mksquashfs             ✓
+
+Memory
+  available:   121 GB                          ✓ (≥ 4 GB)
+
+Ready to run.
+```
+
+**Implementation:**
+
+```rust
+pub fn check() -> Result<Report> {
+    let mut report = Report::new();
+
+    // Architecture
+    let arch = std::env::consts::ARCH;
+    report.check("arch", arch, arch == "aarch64");
+
+    // Kernel version
+    let uname = nix::sys::utsname::uname()?;
+    let release = uname.release().to_str().unwrap_or("");
+    let major_minor = parse_kernel_version(release);
+    report.check("kernel", release, major_minor >= (5, 10));
+
+    // KVM — don't just check existence, try to use it
+    let kvm_exists = Path::new("/dev/kvm").exists();
+    report.check("/dev/kvm exists", kvm_exists, kvm_exists);
+
+    if kvm_exists {
+        match std::fs::OpenOptions::new().read(true).write(true)
+            .open("/dev/kvm")
+        {
+            Ok(fd) => {
+                report.check("/dev/kvm accessible", "read/write", true);
+                // Actually try creating a VM
+                let ret = unsafe {
+                    libc::ioctl(fd.as_raw_fd(), KVM_CREATE_VM, 0)
+                };
+                if ret >= 0 {
+                    unsafe { libc::close(ret); }
+                    report.check("KVM_CREATE_VM", "ok", true);
+                } else {
+                    report.check("KVM_CREATE_VM", "failed", false);
+                }
+            }
+            Err(e) => {
+                report.check("/dev/kvm accessible", e.to_string(), false);
+            }
+        }
+    }
+
+    // vsock — module must be loaded, not just available
+    let vsock_mod = module_loaded("vhost_vsock");
+    report.check("vhost_vsock module", vsock_mod, vsock_mod);
+
+    let vhost_vsock = Path::new("/dev/vhost-vsock").exists();
+    report.check("/dev/vhost-vsock", vhost_vsock, vhost_vsock);
+
+    if !vsock_mod {
+        report.hint("try: sudo modprobe vhost_vsock");
+    }
+
+    // Image build tools (optional — only needed for `build`)
+    report.check_optional("debootstrap", which("debootstrap"));
+    report.check_optional("mksquashfs", which("mksquashfs"));
+
+    // Memory
+    let mem_gb = available_memory_gb();
+    report.check("available memory", format!("{} GB", mem_gb), mem_gb >= 4);
+
+    report.print();
+    Ok(report)
+}
+
+fn module_loaded(name: &str) -> bool {
+    std::fs::read_to_string("/proc/modules")
+        .map(|s| s.lines().any(|l| l.starts_with(name)))
+        .unwrap_or(false)
+}
+
+fn available_memory_gb() -> u64 {
+    let meminfo = std::fs::read_to_string("/proc/meminfo")
+        .unwrap_or_default();
+    meminfo.lines()
+        .find(|l| l.starts_with("MemAvailable:"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0) / 1_048_576
+}
+```
+
+`motlie-vmm daemon` runs this automatically at startup (via
+`preflight_checks`) and refuses to start if any required check
+fails. `motlie-vmm check` lets you diagnose issues before running.
+
+**Common failure modes:**
+
+|Symptom                             |Cause                                         |Fix                                               |
+|------------------------------------|----------------------------------------------|--------------------------------------------------|
+|`/dev/kvm` missing                  |KVM not enabled in kernel                     |Check BIOS virtualization settings                |
+|`/dev/kvm` permission denied        |User not in `kvm` group                       |`sudo usermod -aG kvm $USER`                      |
+|`KVM_CREATE_VM` fails               |Nested virt disabled or another VMM holds lock|Check `/sys/module/kvm/parameters/nested`         |
+|`vhost_vsock` not loaded            |Module not auto-loaded                        |`sudo modprobe vhost_vsock`, add to `/etc/modules`|
+|`/dev/vhost-vsock` permission denied|User not in `kvm` group                       |`sudo usermod -aG kvm $USER`                      |
+|arch not `aarch64`                  |Wrong platform                                |motlie-vmm targets DGX Spark (aarch64)            |
+
+**Prerequisites summary:**
+
+```
+/dev/kvm           (aarch64, kernel ≥ 5.10)
+vhost_vsock        (kernel module, loaded)
+
+Image building (one-time): debootstrap, mksquashfs
+
+Run `motlie-vmm check` to verify all of the above.
+```
+
+### 2. Embedded Binary Launcher (phase 1)
 
 Writes an embedded binary to memfd, spawns it via `/proc/self/fd/{N}`.
 Binary never touches disk.
@@ -285,7 +441,7 @@ pub static BOOTSTRAP: EmbeddedBinary = EmbeddedBinary::new(
     "motlie-vmm-bootstrap", include_bytes!(concat!(env!("OUT_DIR"), "/motlie-vmm-bootstrap")));
 ```
 
-### 2. Image Builder
+### 3. Image Builder (phase 1)
 
 Builds from the running host without Docker. The image contains NO
 motlie-vmm binaries — only a tiny vsock bootstrap (~100KB, ~50 lines)
@@ -535,147 +691,7 @@ Firecracker boots kernel with init=/sbin/overlay-init overlay_root=vdb
   └─ VM ready (host receives "ready" signal, completes ensure_vm)
 ```
 
-### 3. Daemon
-
-```rust
-pub struct DaemonConfig {
-    pub image: PathBuf,
-    pub workspace_base: PathBuf,
-    pub scratch_base: PathBuf,
-    pub listen: SocketAddr,           // default 127.0.0.1:2222
-    pub vcpus_per_vm: u32,            // default 2
-    pub mem_per_vm_mib: u32,          // default 2048
-    pub idle_timeout_secs: u64,       // default 1800
-    pub credential_env: HashMap<String, String>,
-    pub credential_mounts: Vec<CredentialMount>,
-}
-
-#[derive(Clone)]
-pub struct CredentialMount {
-    pub host_subpath: String,          // relative to ~/.motlie-vmm/creds/{user}/
-    pub guest_path: String,            // absolute path inside VM
-    pub is_file: bool,                 // single file vs directory
-}
-
-impl Default for DaemonConfig {
-    fn default() -> Self {
-        Self {
-            // ...
-            credential_mounts: vec![
-                CredentialMount {
-                    host_subpath: ".config/gh".into(),
-                    guest_path: "/root/.config/gh".into(),
-                    is_file: false,
-                },
-                CredentialMount {
-                    host_subpath: ".claude".into(),
-                    guest_path: "/root/.claude".into(),
-                    is_file: false,
-                },
-                CredentialMount {
-                    host_subpath: ".codex".into(),
-                    guest_path: "/root/.codex".into(),
-                    is_file: false,
-                },
-                CredentialMount {
-                    host_subpath: ".npmrc".into(),
-                    guest_path: "/root/.npmrc".into(),
-                    is_file: true,
-                },
-            ],
-            credential_env: HashMap::new(),
-        }
-    }
-}
-
-impl Daemon {
-    pub async fn run(config: DaemonConfig) -> Result<()> {
-        preflight_checks(&config)?;
-        cleanup_previous_run()?;
-
-        let manifest = ImageManifest::load(&config.image.join("manifest.json"))?;
-        let ca = SshCa::new(&dirs::home_dir().unwrap().join(".motlie-vmm/ca"))?;
-
-        std::fs::create_dir_all(&config.workspace_base)?;
-        std::fs::create_dir_all(&config.scratch_base)?;
-        std::fs::create_dir_all("/var/lib/motlie-vmm/vms")?;
-
-        let daemon = Arc::new(Daemon { config, manifest, ca, ... });
-
-        setup_signal_handlers(daemon.vms.clone());
-        tokio::spawn(daemon.clone().idle_reaper_loop());
-
-        let server_key = generate_ed25519_key()?;
-        let russh_config = Arc::new(russh::server::Config {
-            keys: vec![server_key], ..Default::default()
-        });
-
-        println!("motlie-vmm listening on {}", daemon.config.listen);
-        println!("  ssh -p {} <username>@localhost", daemon.config.listen.port());
-
-        russh::server::run(russh_config, daemon.config.listen, daemon).await
-    }
-}
-
-fn preflight_checks(config: &DaemonConfig) -> Result<()> {
-    ensure!(config.listen.port() != 22, "refusing to bind to port 22");
-    ensure!(Path::new("/dev/kvm").exists(),
-        "/dev/kvm not found — run `motlie-vmm check` for details");
-    ensure!(Path::new("/dev/vhost-vsock").exists(),
-        "vsock not available — try `sudo modprobe vhost_vsock`");
-    ensure!(config.image.join("manifest.json").exists(), "image not found");
-    // No check for firecracker or passt — they're embedded
-    Ok(())
-}
-```
-
-### 4. SSH Server (russh, in-process)
-
-```rust
-impl russh::server::Server for Daemon {
-    type Handler = SshSession;
-    fn new_client(&mut self, _: Option<SocketAddr>) -> SshSession {
-        SshSession { daemon: self.clone(), username: None, vm_client: None }
-    }
-}
-
-struct SshSession {
-    daemon: Arc<Daemon>,
-    username: Option<String>,
-    vm_client: Option<russh::client::Handle<VmSshHandler>>,
-}
-
-impl russh::server::Handler for SshSession {
-    type Error = anyhow::Error;
-
-    async fn auth_none(&mut self, user: &str) -> Result<Auth, Self::Error> {
-        self.username = Some(user.to_string());
-        Ok(Auth::Accept)
-    }
-
-    async fn auth_publickey(&mut self, user: &str, _: &PublicKey) -> Result<Auth, Self::Error> {
-        self.username = Some(user.to_string());
-        Ok(Auth::Accept)
-    }
-
-    async fn channel_open_session(&mut self, ..) -> Result<bool, Self::Error> {
-        let username = self.username.as_ref().unwrap().clone();
-        let vm_ip = self.daemon.ensure_vm(&username).await?;
-        let (key, cert) = self.daemon.ca.sign_ephemeral_for_vm(&username)?;
-        let client = russh::client::connect(
-            Arc::new(russh::client::Config::default()),
-            (vm_ip, 22), VmSshHandler { cert, key },
-        ).await?;
-        self.vm_client = Some(client);
-        Ok(true)
-    }
-
-    // data, pty_request, shell_request, exec_request, window_change_request
-    // all forward to self.vm_client and touch idle timer
-}
-```
-
-### 5. VM Manager + Networking + Credentials
+### 4. VM Manager + Networking (phase 2)
 
 Each VM gets: passt (memfd) in its own netns, firecracker (memfd)
 joining the same netns, vsock mounts for workspace + scratch + credentials.
@@ -978,7 +994,9 @@ impl Daemon {
             vm.firecracker.kill().ok(); vm.firecracker.wait().ok();
             vm.passt.kill().ok();       vm.passt.wait().ok();
             // _fc_fd, _passt_fd drop → memfds freed
-            // netns destroyed by kernel
+            // passt + firecracker were the only processes in their netns
+            // → kernel destroys netns, all networking state vanishes
+            // → no bridges, taps, iptables, or routes to clean up
             std::fs::remove_dir_all(format!("/var/lib/motlie-vmm/vms/{}", username)).ok();
             // Credentials in ~/.motlie-vmm/creds/{user}/ persist
             // Workspace in ~/projects/{user}/ persists
@@ -989,7 +1007,7 @@ impl Daemon {
 }
 ```
 
-### 6. SSH CA
+### 5. SSH CA (phase 3)
 
 ```rust
 pub struct SshCa { user_ca: PrivateKey, host_ca: PrivateKey }
@@ -1028,7 +1046,7 @@ impl SshCa {
 }
 ```
 
-### 7. SSH Configuration Inside the VM
+### 6. SSH Configuration Inside the VM (phase 3)
 
 The VM runs stock OpenSSH with CA-based authentication. No custom
 sshd patches — only standard `sshd_config` directives (stable since
@@ -1094,7 +1112,147 @@ the SSH client — it signs a throwaway cert and immediately uses it
 to connect, all inside the same process. The 60-second TTL means the
 cert is useless by the time anyone could intercept it.
 
-### 8. vsock Multiplexed Listener + Guest Agent
+### 7. Daemon (phase 4)
+
+```rust
+pub struct DaemonConfig {
+    pub image: PathBuf,
+    pub workspace_base: PathBuf,
+    pub scratch_base: PathBuf,
+    pub listen: SocketAddr,           // default 127.0.0.1:2222
+    pub vcpus_per_vm: u32,            // default 2
+    pub mem_per_vm_mib: u32,          // default 2048
+    pub idle_timeout_secs: u64,       // default 1800
+    pub credential_env: HashMap<String, String>,
+    pub credential_mounts: Vec<CredentialMount>,
+}
+
+#[derive(Clone)]
+pub struct CredentialMount {
+    pub host_subpath: String,          // relative to ~/.motlie-vmm/creds/{user}/
+    pub guest_path: String,            // absolute path inside VM
+    pub is_file: bool,                 // single file vs directory
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            // ...
+            credential_mounts: vec![
+                CredentialMount {
+                    host_subpath: ".config/gh".into(),
+                    guest_path: "/root/.config/gh".into(),
+                    is_file: false,
+                },
+                CredentialMount {
+                    host_subpath: ".claude".into(),
+                    guest_path: "/root/.claude".into(),
+                    is_file: false,
+                },
+                CredentialMount {
+                    host_subpath: ".codex".into(),
+                    guest_path: "/root/.codex".into(),
+                    is_file: false,
+                },
+                CredentialMount {
+                    host_subpath: ".npmrc".into(),
+                    guest_path: "/root/.npmrc".into(),
+                    is_file: true,
+                },
+            ],
+            credential_env: HashMap::new(),
+        }
+    }
+}
+
+impl Daemon {
+    pub async fn run(config: DaemonConfig) -> Result<()> {
+        preflight_checks(&config)?;
+        cleanup_previous_run()?;
+
+        let manifest = ImageManifest::load(&config.image.join("manifest.json"))?;
+        let ca = SshCa::new(&dirs::home_dir().unwrap().join(".motlie-vmm/ca"))?;
+
+        std::fs::create_dir_all(&config.workspace_base)?;
+        std::fs::create_dir_all(&config.scratch_base)?;
+        std::fs::create_dir_all("/var/lib/motlie-vmm/vms")?;
+
+        let daemon = Arc::new(Daemon { config, manifest, ca, ... });
+
+        setup_signal_handlers(daemon.vms.clone());
+        tokio::spawn(daemon.clone().idle_reaper_loop());
+
+        let server_key = generate_ed25519_key()?;
+        let russh_config = Arc::new(russh::server::Config {
+            keys: vec![server_key], ..Default::default()
+        });
+
+        println!("motlie-vmm listening on {}", daemon.config.listen);
+        println!("  ssh -p {} <username>@localhost", daemon.config.listen.port());
+
+        russh::server::run(russh_config, daemon.config.listen, daemon).await
+    }
+}
+
+fn preflight_checks(config: &DaemonConfig) -> Result<()> {
+    ensure!(config.listen.port() != 22, "refusing to bind to port 22");
+    ensure!(Path::new("/dev/kvm").exists(),
+        "/dev/kvm not found — run `motlie-vmm check` for details");
+    ensure!(Path::new("/dev/vhost-vsock").exists(),
+        "vsock not available — try `sudo modprobe vhost_vsock`");
+    ensure!(config.image.join("manifest.json").exists(), "image not found");
+    // No check for firecracker or passt — they're embedded
+    Ok(())
+}
+```
+
+### 8. SSH Server — russh, in-process (phase 4)
+
+```rust
+impl russh::server::Server for Daemon {
+    type Handler = SshSession;
+    fn new_client(&mut self, _: Option<SocketAddr>) -> SshSession {
+        SshSession { daemon: self.clone(), username: None, vm_client: None }
+    }
+}
+
+struct SshSession {
+    daemon: Arc<Daemon>,
+    username: Option<String>,
+    vm_client: Option<russh::client::Handle<VmSshHandler>>,
+}
+
+impl russh::server::Handler for SshSession {
+    type Error = anyhow::Error;
+
+    async fn auth_none(&mut self, user: &str) -> Result<Auth, Self::Error> {
+        self.username = Some(user.to_string());
+        Ok(Auth::Accept)
+    }
+
+    async fn auth_publickey(&mut self, user: &str, _: &PublicKey) -> Result<Auth, Self::Error> {
+        self.username = Some(user.to_string());
+        Ok(Auth::Accept)
+    }
+
+    async fn channel_open_session(&mut self, ..) -> Result<bool, Self::Error> {
+        let username = self.username.as_ref().unwrap().clone();
+        let vm_ip = self.daemon.ensure_vm(&username).await?;
+        let (key, cert) = self.daemon.ca.sign_ephemeral_for_vm(&username)?;
+        let client = russh::client::connect(
+            Arc::new(russh::client::Config::default()),
+            (vm_ip, 22), VmSshHandler { cert, key },
+        ).await?;
+        self.vm_client = Some(client);
+        Ok(true)
+    }
+
+    // data, pty_request, shell_request, exec_request, window_change_request
+    // all forward to self.vm_client and touch idle timer
+}
+```
+
+### 9. vsock Multiplexed Listener + Guest Agent (phases 5–6)
 
 All VM↔host communication flows through a single vsock port (5000).
 Each incoming connection sends a handshake message identifying its type:
@@ -1135,7 +1293,7 @@ guest agent opens one connection per mount at the tool-expected paths.
 The tools read/write tokens normally, unaware they’re on a vsock-backed
 FUSE mount.
 
-### 9. Control Protocol + Dynamic Mounts
+### 10. Control Protocol + Dynamic Mounts (phase 7)
 
 Mounts are not limited to VM creation time. Because the filesystem
 is vsock-backed FUSE (not block devices), new mounts can be added
@@ -1338,7 +1496,7 @@ motlie-vmm mount alice /home/shared:/shared
 motlie-vmm unmount alice /data
 ```
 
-### 10. Event Bus + Audit
+### 11. Event Bus + Audit (phase 8)
 
 Every filesystem operation flows through the vsock FS server’s
 `handle_request()` — motlie-vmm *is* the filesystem. Events are emitted
@@ -1518,9 +1676,38 @@ if is_cred && matches!(req, FsRequest::Write { .. }) {
 }
 ```
 
-### 11. Lifecycle: three layers of cleanup
+### 12. Lifecycle: process isolation and cleanup (phase 9)
 
-**Layer 1: Signal handler**
+**Why cleanup is guaranteed:**
+
+Two kernel mechanisms make orphan processes and leaked networking
+impossible, regardless of how the daemon exits:
+
+1. **cgroup** — every child process (firecracker, passt, across all VMs)
+   inherits the daemon’s cgroup. systemd’s `KillMode=control-group`
+   kills the entire tree. There is no way for a child to escape this.
+1. **per-VM network namespaces** — each passt creates its own netns via
+   `unshare(CLONE_NEWNET)`. The daemon stays in the host netns (it needs
+   to bind port 2222). When both processes in a netns die (passt +
+   firecracker), the kernel destroys the namespace automatically. No
+   bridges, taps, iptables rules, or routes to clean up.
+
+These are kernel guarantees, not application logic. Even if motlie-vmm
+has a bug, even if it’s SIGKILL’d, the kernel cleans up both process
+and network state.
+
+**Three layers of defense:**
+
+|Layer            |What it cleans up   |Trigger                    |Mechanism                                 |
+|-----------------|--------------------|---------------------------|------------------------------------------|
+|1. Signal handler|Processes (graceful)|SIGTERM/SIGINT             |Kill each child, wait, remove temp dirs   |
+|2. systemd cgroup|Processes (force)   |Daemon doesn’t exit in 10s |`KillMode=control-group` kills entire tree|
+|3. Kernel netns  |Networking          |Last process in netns exits|Namespace + all its state destroyed       |
+
+Plus a startup sweep for any state that survived a hard crash (PID files,
+overlay.ext4 files):
+
+**Layer 1: Signal handler** — graceful shutdown
 
 ```rust
 fn setup_signal_handlers(vms: Arc<Mutex<HashMap<String, Vm>>>) {
@@ -1534,6 +1721,7 @@ fn setup_signal_handlers(vms: Arc<Mutex<HashMap<String, Vm>>>) {
             eprintln!("  stopping: {}", name);
             vm.firecracker.kill().ok(); vm.firecracker.wait().ok();
             vm.passt.kill().ok();       vm.passt.wait().ok();
+            // passt + firecracker dead → kernel destroys their netns
         }
         std::fs::remove_dir_all("/var/lib/motlie-vmm/vms").ok();
         std::process::exit(0);
@@ -1541,7 +1729,7 @@ fn setup_signal_handlers(vms: Arc<Mutex<HashMap<String, Vm>>>) {
 }
 ```
 
-**Layer 2: systemd cgroup**
+**Layer 2: systemd cgroup** — force kill if Layer 1 hangs
 
 ```ini
 [Service]
@@ -1553,7 +1741,11 @@ KillMode=control-group
 TimeoutStopSec=10
 ```
 
-**Layer 3: Startup sweep**
+After 10 seconds, systemd sends SIGKILL to every process in the
+cgroup. Every firecracker, every passt, the daemon itself — all dead.
+Their netns instances are destroyed by the kernel immediately after.
+
+**Layer 3: Startup sweep** — clean up leaked files from hard crashes
 
 ```rust
 fn cleanup_previous_run() -> Result<()> {
@@ -1567,6 +1759,35 @@ fn cleanup_previous_run() -> Result<()> {
     }
     Ok(())
 }
+```
+
+Note: Layer 3 only cleans up *files* (PID files, overlay.ext4). Process
+and network cleanup is already guaranteed by Layers 1+2 and the kernel.
+The sweep handles the case where the daemon was SIGKILL’d before it
+could delete `/var/lib/motlie-vmm/vms/alice/`.
+
+**Exit scenario walkthrough:**
+
+```
+Clean shutdown (SIGTERM):
+  Layer 1 kills children → netns destroyed → files removed → exit 0
+
+Daemon crash (panic, segfault):
+  Daemon dies → systemd detects → Layer 2 kills cgroup
+  → all children die → all netns destroyed
+  → next startup: Layer 3 sweeps leftover files
+
+Daemon SIGKILL:
+  Same as crash. cgroup kill is immediate.
+
+Daemon OOM:
+  OOM killer targets daemon → same as SIGKILL path.
+  If OOM kills a child instead, daemon detects and cleans up.
+
+Host reboot:
+  Everything dies. Kernel cleans up all namespaces.
+  Temp files in /var/lib/motlie-vmm/vms/ may persist on disk.
+  Next startup: Layer 3 sweeps them.
 ```
 
 ## Credential auth scenarios
@@ -1694,7 +1915,7 @@ Processes:
 In squashfs (built once, same for all VMs, no motlie binaries except bootstrap):
   /usr/local/bin/motlie-vmm-bootstrap            ← ~100KB, fetches guest agent over vsock
   /etc/systemd/system/motlie-vmm-guest.service   ← starts bootstrap → exec's guest agent
-  /etc/ssh/sshd_config                           ← CA trust config (see §7)
+  /etc/ssh/sshd_config                           ← CA trust config (see §6)
   /etc/ssh/ssh_host_ed25519_key                  ← host keypair (generated at build)
   /etc/ssh/ssh_host_ed25519_key.pub
   /etc/profile.d/motlie-vmm-credentials.sh       ← sources /etc/motlie-vmm/env
@@ -1729,14 +1950,19 @@ and vsock. All intelligence is host-side.
 
 ## Every exit scenario
 
-|Event             |Networking|memfds |Host sshd|Workspaces|Credentials|
-|------------------|----------|-------|---------|----------|-----------|
-|Clean shutdown    |pristine  |freed  |untouched|persist   |persist    |
-|motlie-vmm crash  |pristine  |freed  |untouched|persist   |persist    |
-|motlie-vmm SIGKILL|pristine  |freed  |untouched|persist   |persist    |
-|motlie-vmm OOM    |pristine  |freed  |untouched|persist   |persist    |
-|single VM stop    |pristine  |freed  |untouched|persist   |persist    |
-|host reboot       |pristine  |nothing|starts   |persist   |persist    |
+Networking is always pristine because the daemon never touches the host
+netns. Each VM’s networking exists in an isolated kernel namespace that
+the kernel destroys automatically when its processes die. Processes are
+always cleaned up because they’re all in one cgroup that systemd owns.
+
+|Event             |Processes             |Networking               |Host sshd   |Workspaces|Credentials|
+|------------------|----------------------|-------------------------|------------|----------|-----------|
+|Clean shutdown    |Layer 1 kills         |netns destroyed          |untouched   |persist   |persist    |
+|motlie-vmm crash  |Layer 2 (cgroup) kills|netns destroyed          |untouched   |persist   |persist    |
+|motlie-vmm SIGKILL|Layer 2 (cgroup) kills|netns destroyed          |untouched   |persist   |persist    |
+|motlie-vmm OOM    |Layer 2 (cgroup) kills|netns destroyed          |untouched   |persist   |persist    |
+|single VM stop    |daemon kills pair     |that VM’s netns destroyed|untouched   |persist   |persist    |
+|host reboot       |everything dies       |kernel cleans all        |starts fresh|persist   |persist    |
 
 ## SSH connection flow
 
@@ -1824,173 +2050,194 @@ Guest agent: `fuser`, `vsock`, `rmp-serde`, `serde`, `serde_json`
 
 ## Security
 
-|Property                   |Mechanism                                                                   |
-|---------------------------|----------------------------------------------------------------------------|
-|Single distributable       |motlie-vmm contains everything                                              |
-|No system modifications    |Nothing in /usr, /etc, etc.                                                 |
-|User isolation             |Separate KVM VM + netns per user                                            |
-|Network isolation          |passt in per-VM netns, no host changes                                      |
-|No custom binaries on disk |Guest agent delivered over vsock to tmpfs; never touches persistent storage |
-|No credentials in overlay  |Only config files (CA, principals, env); overlay.ext4 is small and ephemeral|
-|Guest agent version pinning|Always matches running VMM binary; no stale images                          |
-|Ephemeral internal certs   |Throwaway keypair, 60s TTL                                                  |
-|CA-based SSH auth          |Stock sshd_config, TrustedUserCAKeys + AuthorizedPrincipals                 |
-|Per-user SSH principal     |VM sshd accepts only that username                                          |
-|Per-user credentials       |Credential dirs scoped per user                                             |
-|Mount isolation            |vsock FS scoped to that user’s directories                                  |
-|Dynamic mounts             |Added at runtime via vsock control protocol                                 |
-|Credential writeback       |OAuth tokens persist across VM lifecycle                                    |
-|Credential audit trail     |Every read/write logged via event bus                                       |
-|Policy enforcement         |Rate limiting, read-only overrides at FS interception point                 |
-|No external VM access      |russh on 127.0.0.1 only                                                     |
-|Host sshd untouched        |Port 22 always works                                                        |
-|Zero host network impact   |passt + netns, kernel-collected                                             |
-|memfd execution            |Binaries never written to disk                                              |
-|Clean process lifecycle    |Signal handler + cgroup + sweep                                             |
+|Property                    |Mechanism                                                                      |
+|----------------------------|-------------------------------------------------------------------------------|
+|Single distributable        |motlie-vmm contains everything                                                 |
+|No system modifications     |Nothing in /usr, /etc, etc.                                                    |
+|User isolation              |Separate KVM VM + netns per user                                               |
+|Network isolation           |passt in per-VM netns, no host changes                                         |
+|No custom binaries on disk  |Guest agent delivered over vsock to tmpfs; never touches persistent storage    |
+|No credentials in overlay   |Only config files (CA, principals, env); overlay.ext4 is small and ephemeral   |
+|Guest agent version pinning |Always matches running VMM binary; no stale images                             |
+|Ephemeral internal certs    |Throwaway keypair, 60s TTL                                                     |
+|CA-based SSH auth           |Stock sshd_config, TrustedUserCAKeys + AuthorizedPrincipals                    |
+|Per-user SSH principal      |VM sshd accepts only that username                                             |
+|Per-user credentials        |Credential dirs scoped per user                                                |
+|Mount isolation             |vsock FS scoped to that user’s directories                                     |
+|Dynamic mounts              |Added at runtime via vsock control protocol                                    |
+|Credential writeback        |OAuth tokens persist across VM lifecycle                                       |
+|Credential audit trail      |Every read/write logged via event bus                                          |
+|Policy enforcement          |Rate limiting, read-only overrides at FS interception point                    |
+|No external VM access       |russh on 127.0.0.1 only                                                        |
+|Host sshd untouched         |Port 22 always works                                                           |
+|Zero host network impact    |Per-VM netns; daemon stays in host netns; kernel destroys netns on process exit|
+|No orphan processes possible|All children in daemon’s cgroup; systemd `KillMode=control-group` kills tree   |
+|memfd execution             |Binaries never written to disk                                                 |
+|Clean process lifecycle     |Signal handler (graceful) + cgroup (force) + startup sweep (files)             |
 
-## Platform Check
+## Project Planning: Incremental Build Phases
 
-`motlie-vmm check` probes the host to verify all prerequisites before
-running. It doesn’t just check file existence — it actually tries each
-capability (opens `/dev/kvm`, issues `KVM_CREATE_VM` ioctl, verifies
-vsock module is loaded).
+Each phase produces a testable milestone. No phase requires the next
+one to be useful. Phases 1–4 produce a working SSH-into-VM system
+with zero custom guest binaries.
 
-**Example output:**
+### Phase 1: Image builder + Firecracker boot
 
-```
-$ motlie-vmm check
+**Build:** `motlie-vmm check`, `motlie-vmm build`, embedded binary
+launcher (firecracker only), overlay-init.
 
-Platform
-  arch:        aarch64                         ✓
-  kernel:      6.8.0-49-generic (≥ 5.10)       ✓
+**Test:** Build an image, spawn firecracker manually, verify overlay-init
+works (squashfs + ext4 stacking), VM boots to systemd prompt on serial
+console.
 
-KVM
-  /dev/kvm:    exists                          ✓
-  accessible:  read/write (uid 1000)           ✓
-  create VM:   ioctl(KVM_CREATE_VM) ok         ✓
+**Dependencies:** debootstrap, mksquashfs, a firecracker binary, a kernel.
+No custom guest binaries. No passt. No networking. No SSH.
 
-vsock
-  module:      vhost_vsock loaded              ✓
-  /dev/vhost-vsock: exists                     ✓
-  accessible:  read/write (uid 1000)           ✓
+**Components:** §1 Platform Check, §2 Embedded Binary Launcher, §3 Image Builder.
 
-Image tools (for `motlie-vmm build` only)
-  debootstrap: /usr/sbin/debootstrap           ✓
-  mksquashfs:  /usr/bin/mksquashfs             ✓
-
-Memory
-  available:   121 GB                          ✓ (≥ 4 GB)
-
-Ready to run.
+```bash
+motlie-vmm build --include "openssh-server" --output ./images/devbox
+motlie-vmm check
+# manually spawn firecracker with serial console to verify boot
 ```
 
-**Implementation:**
+### Phase 2: Networking
 
-```rust
-pub fn check() -> Result<Report> {
-    let mut report = Report::new();
+**Build:** Embed passt, `unshare(CLONE_NEWNET)` + `setns()` logic,
+IP allocation.
 
-    // Architecture
-    let arch = std::env::consts::ARCH;
-    report.check("arch", arch, arch == "aarch64");
+**Test:** Boot a VM with passt, verify internet access from serial
+console (ping, curl).
 
-    // Kernel version
-    let uname = nix::sys::utsname::uname()?;
-    let release = uname.release().to_str().unwrap_or("");
-    let major_minor = parse_kernel_version(release);
-    report.check("kernel", release, major_minor >= (5, 10));
+**Dependencies:** Phase 1 + passt binary. Still no SSH, no vsock, no
+custom guest binaries.
 
-    // KVM — don't just check existence, try to use it
-    let kvm_exists = Path::new("/dev/kvm").exists();
-    report.check("/dev/kvm exists", kvm_exists, kvm_exists);
+**Components:** §4 VM Manager (networking portions).
 
-    if kvm_exists {
-        match std::fs::OpenOptions::new().read(true).write(true)
-            .open("/dev/kvm")
-        {
-            Ok(fd) => {
-                report.check("/dev/kvm accessible", "read/write", true);
-                // Actually try creating a VM
-                let ret = unsafe {
-                    libc::ioctl(fd.as_raw_fd(), KVM_CREATE_VM, 0)
-                };
-                if ret >= 0 {
-                    unsafe { libc::close(ret); }
-                    report.check("KVM_CREATE_VM", "ok", true);
-                } else {
-                    report.check("KVM_CREATE_VM", "failed", false);
-                }
-            }
-            Err(e) => {
-                report.check("/dev/kvm accessible", e.to_string(), false);
-            }
-        }
-    }
+### Phase 3: SSH CA + overlay injection
 
-    // vsock — module must be loaded, not just available
-    let vsock_mod = module_loaded("vhost_vsock");
-    report.check("vhost_vsock module", vsock_mod, vsock_mod);
+**Build:** SSH CA (key generation, cert signing), `inject_into_overlay`
+(loop mount ext4, write files, unmount), manual SSH connection from host.
 
-    let vhost_vsock = Path::new("/dev/vhost-vsock").exists();
-    report.check("/dev/vhost-vsock", vhost_vsock, vhost_vsock);
+**Test:** Inject CA pubkey + host cert + principals into overlay, boot VM,
+SSH in from the host using a manually signed cert.
 
-    if !vsock_mod {
-        report.hint("try: sudo modprobe vhost_vsock");
-    }
+**Dependencies:** Phase 2 + ssh-key crate. Still no russh, no vsock, no
+guest binaries.
 
-    // Image build tools (optional — only needed for `build`)
-    report.check_optional("debootstrap", which("debootstrap"));
-    report.check_optional("mksquashfs", which("mksquashfs"));
+**Components:** §5 SSH CA, §6 SSH Configuration Inside the VM.
 
-    // Memory
-    let mem_gb = available_memory_gb();
-    report.check("available memory", format!("{} GB", mem_gb), mem_gb >= 4);
-
-    report.print();
-    Ok(report)
-}
-
-fn module_loaded(name: &str) -> bool {
-    std::fs::read_to_string("/proc/modules")
-        .map(|s| s.lines().any(|l| l.starts_with(name)))
-        .unwrap_or(false)
-}
-
-fn available_memory_gb() -> u64 {
-    let meminfo = std::fs::read_to_string("/proc/meminfo")
-        .unwrap_or_default();
-    meminfo.lines()
-        .find(|l| l.starts_with("MemAvailable:"))
-        .and_then(|l| l.split_whitespace().nth(1))
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0) / 1_048_576
-}
+```bash
+# manually: ssh -i /tmp/ephemeral root@172.16.0.2
 ```
 
-`motlie-vmm daemon` runs this automatically at startup (via
-`preflight_checks`) and refuses to start if any required check
-fails. `motlie-vmm check` lets you diagnose issues before running.
+### Phase 4: russh proxy
 
-**Common failure modes:**
+**Build:** russh SSH server (in-process, port 2222), `ensure_vm`
+orchestration (ties phases 1–3 together), ephemeral cert signing on connect.
 
-|Symptom                             |Cause                                         |Fix                                               |
-|------------------------------------|----------------------------------------------|--------------------------------------------------|
-|`/dev/kvm` missing                  |KVM not enabled in kernel                     |Check BIOS virtualization settings                |
-|`/dev/kvm` permission denied        |User not in `kvm` group                       |`sudo usermod -aG kvm $USER`                      |
-|`KVM_CREATE_VM` fails               |Nested virt disabled or another VMM holds lock|Check `/sys/module/kvm/parameters/nested`         |
-|`vhost_vsock` not loaded            |Module not auto-loaded                        |`sudo modprobe vhost_vsock`, add to `/etc/modules`|
-|`/dev/vhost-vsock` permission denied|User not in `kvm` group                       |`sudo usermod -aG kvm $USER`                      |
-|arch not `aarch64`                  |Wrong platform                                |motlie-vmm targets DGX Spark (aarch64)            |
+**Test:** `ssh -p 2222 alice@localhost` lands in a VM. Full SSH flow
+works. No FUSE mounts — `/workspace` is empty. But you have isolated,
+internet-connected VMs per user.
 
-## Prerequisites
+**Dependencies:** Phase 3 + russh crate.
+
+**Components:** §7 Daemon, §8 SSH Server.
+
+**This is already a useful product** — isolated VMs with SSH access,
+internet, per-user workspaces (via overlay). You can install tools,
+run code, do everything except share host directories.
+
+### Phase 5: Bootstrap binary + vsock listener
+
+**Build:** `motlie-vmm-bootstrap` crate (~50 lines, separate cargo target),
+bake it into squashfs during `motlie-vmm build`, vsock multiplexed listener
+(just the `BinaryRequest` handler initially).
+
+**Test:** Boot VM, bootstrap connects to vsock, host sends a test binary,
+bootstrap writes to tmpfs and exec’s it. The test binary can be a
+hello-world that prints and exits — doesn’t need to be the real guest agent.
+
+**Dependencies:** Phase 4 + vsock crate. First time a custom binary is
+baked into the image.
+
+**Components:** §9 vsock Multiplexed Listener (BinaryRequest handler only).
+
+### Phase 6: Guest agent + FUSE mounts
+
+**Build:** `motlie-vmm-guest` crate (FUSE + vsock, ~700 lines), vsock FS
+server (host side, ~800 lines), `Fs { tag }` handler in multiplexed
+listener.
+
+**Test:** Boot VM, bootstrap fetches real guest agent, agent mounts
+`/workspace` via FUSE, files appear from host directory.
+
+**Dependencies:** Phase 5 + fuser crate.
+
+**Components:** §9 vsock Multiplexed Listener (Fs handler), Guest Agent.
+
+### Phase 7: Control protocol + dynamic mounts
+
+**Build:** `Control` handler in multiplexed listener, `AddMount` /
+`RemoveMount` in guest agent, `motlie-vmm mount` / `unmount` CLI.
+
+**Test:** `motlie-vmm mount alice /data:/data:ro` while VM is running.
+
+**Dependencies:** Phase 6.
+
+**Components:** §10 Control Protocol + Dynamic Mounts.
+
+### Phase 8: Credentials + events + graph
+
+**Build:** Credential mount setup (per-user cred dirs), env var injection,
+event bus (broadcast + motlie-db), `motlie-vmm events` CLI.
+
+**Test:** OAuth device flow inside VM, token persists across VM restart.
+Event log records credential access.
+
+**Dependencies:** Phase 7 + motlie-db.
+
+**Components:** §11 Event Bus + Audit, credential portions of §4 VM Manager.
+
+### Phase 9: Lifecycle hardening
+
+**Build:** Signal handlers, idle reaper, startup sweep, systemd unit file.
+
+**Test:** SIGKILL the daemon, verify no orphan processes or leaked netns.
+Verify next startup cleans up leftover files.
+
+**Dependencies:** Phase 8.
+
+**Components:** §12 Lifecycle.
+
+### Dependency graph
 
 ```
-/dev/kvm           (aarch64, kernel ≥ 5.10)
-vhost_vsock        (kernel module, loaded)
-
-Image building (one-time): debootstrap, mksquashfs
-
-Run `motlie-vmm check` to verify.
+Phase 1: check + build + firecracker boot
+    │
+Phase 2: + passt networking
+    │
+Phase 3: + SSH CA + overlay injection
+    │
+Phase 4: + russh proxy ←── usable product here
+    │
+Phase 5: + bootstrap + vsock listener
+    │
+Phase 6: + guest agent + FUSE mounts ←── host dir sharing
+    │
+Phase 7: + dynamic mounts
+    │
+Phase 8: + credentials + events ←── full feature set
+    │
+Phase 9: + lifecycle hardening ←── production ready
 ```
 
-That’s it. One binary, zero install.
+### Binary build targets
+
+|Binary                |Crate         |When needed|Where it runs            |
+|----------------------|--------------|-----------|-------------------------|
+|`motlie-vmm`          |main          |Phase 1    |Host (memfd for children)|
+|`firecracker`         |downloaded    |Phase 1    |Host (memfd)             |
+|`passt`               |downloaded    |Phase 2    |Host (memfd)             |
+|`motlie-vmm-bootstrap`|separate crate|Phase 5    |Guest (in squashfs)      |
+|`motlie-vmm-guest`    |separate crate|Phase 6    |Guest (tmpfs via vsock)  |
