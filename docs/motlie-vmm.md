@@ -108,7 +108,8 @@ motlie-vmm.service                    ← systemd, KillMode=control-group
         │
         ├── vsock FS (alice)        ← tokio task
         │     workspace, scratch, credentials
-        │     control channel (vsock:5001, bidirectional)
+        │     vsock port 5000 (single listener, multiplexed)
+        │       binary transfer, control, FS mounts
         │     dynamic mount add/remove
         ├── vsock FS (bob)          ← tokio task
         ├── event bus               ← broadcast + motlie-db (RocksDB graph)
@@ -361,24 +362,27 @@ port number changes.
 // motlie-vmm-bootstrap — entire source
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixStream; // vsock via AF_VSOCK
 
 const HOST_CID: u32 = 2;
-const BINARY_PORT: u32 = 5002;      // dedicated port for binary transfer
+const VMM_PORT: u32 = 5000;         // single port for all vsock traffic
 const GUEST_PATH: &str = "/tmp/motlie-vmm-guest";
 const MAX_RETRIES: u32 = 30;
 
 fn main() {
     // Retry loop — host vsock listener may not be ready yet
     let mut stream = None;
-    for attempt in 0..MAX_RETRIES {
-        match vsock_connect(HOST_CID, BINARY_PORT) {
+    for _ in 0..MAX_RETRIES {
+        match vsock_connect(HOST_CID, VMM_PORT) {
             Ok(s) => { stream = Some(s); break; }
             Err(_) => std::thread::sleep(
                 std::time::Duration::from_millis(100)),
         }
     }
     let mut stream = stream.expect("failed to connect to host vsock");
+
+    // Handshake: identify this connection as a binary request
+    let handshake = b"{\"type\":\"binary_request\"}\n";
+    stream.write_all(handshake).expect("send handshake");
 
     // Read length-prefixed binary: [u64 len][bytes...]
     let mut len_buf = [0u8; 8];
@@ -507,13 +511,17 @@ Firecracker boots kernel with init=/sbin/overlay-init overlay_root=vdb
   ├─ systemd (PID 1, takes over)
   │    ├─ motlie-vmm-guest.service
   │    │    ExecStart=/usr/local/bin/motlie-vmm-bootstrap
-  │    │      → connects to host vsock port 5002
+  │    │      → connects to host vsock port 5000
+  │    │      → sends handshake: { type: "binary_request" }
   │    │      → host sends guest agent binary (~3MB)
   │    │      → bootstrap writes to /tmp/motlie-vmm-guest (tmpfs)
   │    │      → bootstrap exec's into guest agent (same PID)
-  │    │      → guest agent reads /etc/motlie-vmm/mounts.json
-  │    │      → creates FUSE mounts (/workspace, /tmp, credentials)
-  │    │      → sends "ready" to host via vsock control port
+  │    │      → guest agent connects vsock:5000 { type: "control" }
+  │    │      → guest agent connects vsock:5000 { type: "fs", tag: "workspace" }
+  │    │      → guest agent connects vsock:5000 { type: "fs", tag: "scratch" }
+  │    │      → ... (one connection per mount)
+  │    │      → creates FUSE mounts
+  │    │      → sends Ready on control connection
   │    │      → listens for dynamic mount commands
   │    │
   │    └─ sshd.service               ← stock OpenSSH, CA-based auth
@@ -780,30 +788,43 @@ impl Daemon {
         inject_into_overlay(&overlay, "/etc/motlie-vmm/mounts.json",
             serde_json::to_string_pretty(&serde_json::json!({"mounts": mount_cfg}))?.as_bytes())?;
 
-        // ── 6. Start vsock FS server ──
+        // ── 6. Start vsock listener (single port, multiplexed) ──
+        //
+        // One listener on vsock port 5000. Each incoming connection
+        // sends a handshake identifying its type. The handler routes:
+        //   BinaryRequest → send guest agent binary, close
+        //   Control       → bidirectional control loop
+        //   Fs { tag }    → FS request/response loop for that mount
 
         let vsock_uds = vm_dir.join("vsock.sock");
         let uds = vsock_uds.clone();
-        tokio::spawn(async move { vsock_file_server(&uds, mounts).await; });
-
-        // ── 7. Start vsock binary server (one-shot) ──
-        //
-        // Listens on vsock port 5002. When the bootstrap inside the VM
-        // connects, sends the guest agent binary (length-prefixed), then
-        // closes. The bootstrap writes it to tmpfs and exec's it.
-
-        let uds_for_binary = vsock_uds.clone();
         tokio::spawn(async move {
-            let listener = vsock_listen(&uds_for_binary, BINARY_PORT).await.unwrap();
-            let mut stream = listener.accept().await.unwrap();
-            let binary = GUEST_AGENT.data;
-            let len = (binary.len() as u64).to_le_bytes();
-            stream.write_all(&len).await.unwrap();
-            stream.write_all(binary).await.unwrap();
-            // One-shot: task exits after sending. Bootstrap has the binary.
+            let listener = vsock_listen(&uds, 5000).await.unwrap();
+            loop {
+                let stream = listener.accept().await.unwrap();
+                let vm_ctx = vm_context.clone();
+                tokio::spawn(async move {
+                    let handshake: HandshakeMsg = recv_msg(&mut stream).await;
+                    match handshake {
+                        HandshakeMsg::BinaryRequest => {
+                            let binary = GUEST_AGENT.data;
+                            let len = (binary.len() as u64).to_le_bytes();
+                            stream.write_all(&len).await.ok();
+                            stream.write_all(binary).await.ok();
+                            // Connection closes. Bootstrap has the binary.
+                        }
+                        HandshakeMsg::Control => {
+                            control_loop(stream, &vm_ctx).await;
+                        }
+                        HandshakeMsg::Fs { tag } => {
+                            fs_loop(stream, &vm_ctx, &tag).await;
+                        }
+                    }
+                });
+            }
         });
 
-        // ── 8. Firecracker config ──
+        // ── 7. Firecracker config ──
 
         let image_dir = &self.config.image;
         let boot_args = format!(
@@ -834,7 +855,7 @@ impl Daemon {
         let config_path = vm_dir.join("vmconfig.json");
         std::fs::write(&config_path, serde_json::to_string_pretty(&fc_config)?)?;
 
-        // ── 9. Firecracker from memfd, join passt's netns ──
+        // ── 8. Firecracker from memfd, join passt's netns ──
 
         let api_sock = vm_dir.join("firecracker.sock").to_str().unwrap().to_string();
         let cfg = config_path.to_str().unwrap().to_string();
@@ -854,12 +875,14 @@ impl Daemon {
         };
         std::fs::write(vm_dir.join("firecracker.pid"), fc_child.id().to_string())?;
 
-        // ── 10. Wait for guest readiness ──
+        // ── 9. Wait for guest readiness ──
         //
         // Boot sequence inside VM:
-        //   overlay-init → systemd → bootstrap connects vsock:5002
-        //   → receives guest binary → writes to /tmp → exec's it
-        //   → guest agent mounts FUSE, signals "ready" on vsock:5001
+        //   overlay-init → systemd → bootstrap connects vsock:5000
+        //   → handshake: BinaryRequest → receives guest binary
+        //   → writes to tmpfs → exec's into guest agent
+        //   → guest agent connects vsock:5000 (Control + Fs)
+        //   → mounts FUSE, sends Ready on control connection
 
         wait_for_guest_ready(&vsock_uds, Duration::from_secs(30)).await?;
         println!("  vm created: {} → {}", username, guest_ip);
@@ -1065,22 +1088,54 @@ the SSH client — it signs a throwaway cert and immediately uses it
 to connect, all inside the same process. The 60-second TTL means the
 cert is useless by the time anyone could intercept it.
 
-### 8. vsock FS Server + Guest Agent
+### 8. vsock Multiplexed Listener + Guest Agent
 
-Per-VM tokio task serves filesystem ops over vsock.
-Guest agent runs FUSE mounts inside the VM. Msgpack wire protocol.
+All VM↔host communication flows through a single vsock port (5000).
+Each incoming connection sends a handshake message identifying its type:
 
-The credential directories are just additional vsock mounts — the
-guest agent mounts them at the tool-expected paths. The tools
-read/write tokens normally, unaware they’re on a vsock-backed FUSE mount.
+```rust
+#[derive(Serialize, Deserialize)]
+pub enum HandshakeMsg {
+    BinaryRequest,            // bootstrap: send me the guest agent binary
+    Control,                  // guest agent: bidirectional control channel
+    Fs { tag: String },       // guest agent: FS request/response for this mount
+}
+```
 
-### 9. vsock Control Protocol + Dynamic Mounts
+The host listener routes each connection:
+
+```rust
+async fn handle_connection(stream: VsockStream, vm: &VmContext) {
+    let handshake: HandshakeMsg = recv_msg(&mut stream).await;
+    match handshake {
+        HandshakeMsg::BinaryRequest => {
+            // Send guest agent binary, then close
+            send_length_prefixed(&mut stream, GUEST_AGENT.data).await;
+        }
+        HandshakeMsg::Control => {
+            // Bidirectional: Ready, AddMount, RemoveMount, Shutdown
+            control_loop(stream, vm).await;
+        }
+        HandshakeMsg::Fs { tag } => {
+            // FS request/response loop for one mount
+            fs_loop(stream, vm, &tag).await;
+        }
+    }
+}
+```
+
+The credential directories are just additional FS connections — the
+guest agent opens one connection per mount at the tool-expected paths.
+The tools read/write tokens normally, unaware they’re on a vsock-backed
+FUSE mount.
+
+### 9. Control Protocol + Dynamic Mounts
 
 Mounts are not limited to VM creation time. Because the filesystem
 is vsock-backed FUSE (not block devices), new mounts can be added
-or removed while the VM is running. The vsock control port (5001)
-that handles the initial “ready” signal becomes a bidirectional
-control channel.
+or removed while the VM is running. The guest agent’s control
+connection (opened at startup with `{ type: "control" }` handshake)
+is a bidirectional channel for lifecycle and dynamic mount commands.
 
 **Control protocol:**
 
@@ -1109,33 +1164,40 @@ Host (motlie-vmm)                          Guest (motlie-vmm-guest)
      │    guest_path: "/data",               │
      │    read_only: true                    │
      │  }                                    │
-     │──────────── vsock:5001 ──────────────►│
+     │──── control connection (vsock:5000) ─►│
      │                                       │  mkdir /data
+     │                                       │  new vsock:5000 connection
+     │                                       │    handshake: Fs { tag: "data" }
      │                                       │  fuser::mount2(...)
-     │                                       │  connects to vsock:5000
      │                                       │
      │             ControlMsg::MountReady {   │
      │               tag: "data"             │
-     │◄──────────── vsock:5001 ──────────────│
+     │◄── control connection (vsock:5000) ───│
      │                                       │
 ```
 
-**Guest agent control loop:**
+**Guest agent main loop:**
 
-The guest agent no longer parks after initial mounts. It listens
-on the control channel for commands from the host:
+The guest agent opens multiple connections to the same vsock port,
+each identified by its handshake:
 
 ```rust
+const HOST_CID: u32 = 2;
+const VMM_PORT: u32 = 5000;
+
 fn main() {
     let config = read_json("/etc/motlie-vmm/mounts.json");
 
-    // Initial mounts from config
+    // Open FS connections for initial mounts (one per mount)
     for mount in &config.mounts {
-        spawn_fuse_mount(mount);
+        spawn_fuse_mount(mount); // each opens vsock:5000 with Fs { tag } handshake
     }
 
+    // Open control connection
+    let mut control = vsock_connect(HOST_CID, VMM_PORT).unwrap();
+    send_msg(&mut control, &HandshakeMsg::Control);
+
     // Signal ready
-    let mut control = VsockStream::connect(HOST_CID, CONTROL_PORT).unwrap();
     send_msg(&mut control, &ControlMsg::Ready);
 
     // Listen for commands from host
@@ -1147,7 +1209,7 @@ fn main() {
                     .name(format!("fuse-{}", tag))
                     .spawn(move || {
                         std::fs::create_dir_all(&guest_path).ok();
-                        let fs = VsockFuse::new(HOST_CID, FS_PORT, &tag_clone, read_only);
+                        let fs = VsockFuse::new(HOST_CID, VMM_PORT, &tag_clone, read_only);
                         let mut opts = vec![
                             fuser::MountOption::AutoUnmount,
                             fuser::MountOption::AllowRoot,
@@ -1686,7 +1748,7 @@ and vsock. All intelligence is host-side.
           PASST.spawn_with_pre_exec(unshare CLONE_NEWNET) → memfd
           create sparse overlay
           inject into overlay: CA pub, host cert, principals, env credentials
-          start vsock binary server (port 5002, serves guest agent)
+          start vsock listener (port 5000, multiplexed)
           build mount list: workspace + scratch + 4 credential dirs
           inject mount config into overlay
           start vsock FS server (6 mounts)
@@ -1734,24 +1796,24 @@ Guest agent: `fuser`, `vsock`, `rmp-serde`, `serde`, `serde_json`
 
 ## Size
 
-|Component                                |Lines    |
-|-----------------------------------------|---------|
-|CLI + main                               |200      |
-|Embedded binary launcher                 |100      |
-|Build script (build.rs)                  |150      |
-|Image builder                            |400      |
-|Daemon core                              |150      |
-|SSH server (russh)                       |350      |
-|VM manager + creds + memfd + netns       |550      |
-|SSH CA                                   |200      |
-|vsock FS server                          |800      |
-|vsock binary server (one-shot)           |50       |
-|vsock control protocol (host side)       |150      |
-|Event bus + audit                        |200      |
-|Lifecycle (signals, cleanup)             |100      |
-|Guest agent (FUSE + vsock + control loop)|700      |
-|Bootstrap (separate crate, in squashfs)  |50       |
-|**Total**                                |**~4150**|
+|Component                                 |Lines    |
+|------------------------------------------|---------|
+|CLI + main                                |200      |
+|Embedded binary launcher                  |100      |
+|Build script (build.rs)                   |150      |
+|Image builder                             |400      |
+|Daemon core                               |150      |
+|SSH server (russh)                        |350      |
+|VM manager + creds + memfd + netns        |550      |
+|SSH CA                                    |200      |
+|vsock FS server                           |800      |
+|vsock multiplexed listener + binary server|100      |
+|vsock control protocol (host side)        |150      |
+|Event bus + audit                         |200      |
+|Lifecycle (signals, cleanup)              |100      |
+|Guest agent (FUSE + vsock + control loop) |700      |
+|Bootstrap (separate crate, in squashfs)   |50       |
+|**Total**                                 |**~4150**|
 
 ## Security
 
