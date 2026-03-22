@@ -12,6 +12,9 @@ Single binary to distribute. No dependencies to install.
 ## Usage
 
 ```bash
+# Check platform support before anything else
+motlie-vmm check
+
 # Build an image (one-time)
 motlie-vmm build \
     --include "openssh-server tmux git curl gh nodejs npm" \
@@ -616,7 +619,10 @@ impl Daemon {
 
 fn preflight_checks(config: &DaemonConfig) -> Result<()> {
     ensure!(config.listen.port() != 22, "refusing to bind to port 22");
-    ensure!(Path::new("/dev/kvm").exists(), "/dev/kvm not found");
+    ensure!(Path::new("/dev/kvm").exists(),
+        "/dev/kvm not found — run `motlie-vmm check` for details");
+    ensure!(Path::new("/dev/vhost-vsock").exists(),
+        "vsock not available — try `sudo modprobe vhost_vsock`");
     ensure!(config.image.join("manifest.json").exists(), "image not found");
     // No check for firecracker or passt — they're embedded
     Ok(())
@@ -1799,6 +1805,7 @@ Guest agent: `fuser`, `vsock`, `rmp-serde`, `serde`, `serde_json`
 |Component                                 |Lines    |
 |------------------------------------------|---------|
 |CLI + main                                |200      |
+|Platform check (`motlie-vmm check`)       |100      |
 |Embedded binary launcher                  |100      |
 |Build script (build.rs)                   |150      |
 |Image builder                             |400      |
@@ -1813,7 +1820,7 @@ Guest agent: `fuser`, `vsock`, `rmp-serde`, `serde`, `serde_json`
 |Lifecycle (signals, cleanup)              |100      |
 |Guest agent (FUSE + vsock + control loop) |700      |
 |Bootstrap (separate crate, in squashfs)   |50       |
-|**Total**                                 |**~4150**|
+|**Total**                                 |**~4250**|
 
 ## Security
 
@@ -1841,13 +1848,149 @@ Guest agent: `fuser`, `vsock`, `rmp-serde`, `serde`, `serde_json`
 |memfd execution            |Binaries never written to disk                                              |
 |Clean process lifecycle    |Signal handler + cgroup + sweep                                             |
 
+## Platform Check
+
+`motlie-vmm check` probes the host to verify all prerequisites before
+running. It doesn’t just check file existence — it actually tries each
+capability (opens `/dev/kvm`, issues `KVM_CREATE_VM` ioctl, verifies
+vsock module is loaded).
+
+**Example output:**
+
+```
+$ motlie-vmm check
+
+Platform
+  arch:        aarch64                         ✓
+  kernel:      6.8.0-49-generic (≥ 5.10)       ✓
+
+KVM
+  /dev/kvm:    exists                          ✓
+  accessible:  read/write (uid 1000)           ✓
+  create VM:   ioctl(KVM_CREATE_VM) ok         ✓
+
+vsock
+  module:      vhost_vsock loaded              ✓
+  /dev/vhost-vsock: exists                     ✓
+  accessible:  read/write (uid 1000)           ✓
+
+Image tools (for `motlie-vmm build` only)
+  debootstrap: /usr/sbin/debootstrap           ✓
+  mksquashfs:  /usr/bin/mksquashfs             ✓
+
+Memory
+  available:   121 GB                          ✓ (≥ 4 GB)
+
+Ready to run.
+```
+
+**Implementation:**
+
+```rust
+pub fn check() -> Result<Report> {
+    let mut report = Report::new();
+
+    // Architecture
+    let arch = std::env::consts::ARCH;
+    report.check("arch", arch, arch == "aarch64");
+
+    // Kernel version
+    let uname = nix::sys::utsname::uname()?;
+    let release = uname.release().to_str().unwrap_or("");
+    let major_minor = parse_kernel_version(release);
+    report.check("kernel", release, major_minor >= (5, 10));
+
+    // KVM — don't just check existence, try to use it
+    let kvm_exists = Path::new("/dev/kvm").exists();
+    report.check("/dev/kvm exists", kvm_exists, kvm_exists);
+
+    if kvm_exists {
+        match std::fs::OpenOptions::new().read(true).write(true)
+            .open("/dev/kvm")
+        {
+            Ok(fd) => {
+                report.check("/dev/kvm accessible", "read/write", true);
+                // Actually try creating a VM
+                let ret = unsafe {
+                    libc::ioctl(fd.as_raw_fd(), KVM_CREATE_VM, 0)
+                };
+                if ret >= 0 {
+                    unsafe { libc::close(ret); }
+                    report.check("KVM_CREATE_VM", "ok", true);
+                } else {
+                    report.check("KVM_CREATE_VM", "failed", false);
+                }
+            }
+            Err(e) => {
+                report.check("/dev/kvm accessible", e.to_string(), false);
+            }
+        }
+    }
+
+    // vsock — module must be loaded, not just available
+    let vsock_mod = module_loaded("vhost_vsock");
+    report.check("vhost_vsock module", vsock_mod, vsock_mod);
+
+    let vhost_vsock = Path::new("/dev/vhost-vsock").exists();
+    report.check("/dev/vhost-vsock", vhost_vsock, vhost_vsock);
+
+    if !vsock_mod {
+        report.hint("try: sudo modprobe vhost_vsock");
+    }
+
+    // Image build tools (optional — only needed for `build`)
+    report.check_optional("debootstrap", which("debootstrap"));
+    report.check_optional("mksquashfs", which("mksquashfs"));
+
+    // Memory
+    let mem_gb = available_memory_gb();
+    report.check("available memory", format!("{} GB", mem_gb), mem_gb >= 4);
+
+    report.print();
+    Ok(report)
+}
+
+fn module_loaded(name: &str) -> bool {
+    std::fs::read_to_string("/proc/modules")
+        .map(|s| s.lines().any(|l| l.starts_with(name)))
+        .unwrap_or(false)
+}
+
+fn available_memory_gb() -> u64 {
+    let meminfo = std::fs::read_to_string("/proc/meminfo")
+        .unwrap_or_default();
+    meminfo.lines()
+        .find(|l| l.starts_with("MemAvailable:"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0) / 1_048_576
+}
+```
+
+`motlie-vmm daemon` runs this automatically at startup (via
+`preflight_checks`) and refuses to start if any required check
+fails. `motlie-vmm check` lets you diagnose issues before running.
+
+**Common failure modes:**
+
+|Symptom                             |Cause                                         |Fix                                               |
+|------------------------------------|----------------------------------------------|--------------------------------------------------|
+|`/dev/kvm` missing                  |KVM not enabled in kernel                     |Check BIOS virtualization settings                |
+|`/dev/kvm` permission denied        |User not in `kvm` group                       |`sudo usermod -aG kvm $USER`                      |
+|`KVM_CREATE_VM` fails               |Nested virt disabled or another VMM holds lock|Check `/sys/module/kvm/parameters/nested`         |
+|`vhost_vsock` not loaded            |Module not auto-loaded                        |`sudo modprobe vhost_vsock`, add to `/etc/modules`|
+|`/dev/vhost-vsock` permission denied|User not in `kvm` group                       |`sudo usermod -aG kvm $USER`                      |
+|arch not `aarch64`                  |Wrong platform                                |motlie-vmm targets DGX Spark (aarch64)            |
+
 ## Prerequisites
 
 ```
-/dev/kvm
-kernel ≥ 5.10
+/dev/kvm           (aarch64, kernel ≥ 5.10)
+vhost_vsock        (kernel module, loaded)
 
 Image building (one-time): debootstrap, mksquashfs
+
+Run `motlie-vmm check` to verify.
 ```
 
 That’s it. One binary, zero install.
