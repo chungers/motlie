@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-21 | @claude: Update DC31 `ExecHandle` contract to match shipped API — `status()` is sync/infallible, `wait()` consumes self. | DC31 |
 | 2026-03-21 | @codex: Address PR #96 review feedback — clarify DC31 exit-code semantics, narrow `exec()` wording from "blocking" to "await-to-completion", and tighten product/design wording around competitive evidence and SSH ergonomics. | DC31, DC19, PRODUCT cross-reference |
 | 2026-03-21 | @codex: Product-driven follow-up from [`docs/PRODUCT.md`](../../../docs/PRODUCT.md): add DC30 (socket-isolation ergonomics) and DC31 (tracked command execution) as concrete robustness features. Prioritize dedicated automation sockets first, tracked command execution second. | DC30, DC31, DC19, Phase 4 |
 | 2026-03-20 | @codex: Refine DC29 per PR #94 review — resync is a fresh snapshot after reconnect, not replay. Specify missing-session/topology-change behavior, adapter propagation (`SinkEvent::Discontinuity`, `HistoryEntry::Discontinuity`, `filter_fn` forwarding, `JoinedStream` source reset), and per-session monitor health as the ground truth for Fleet aggregation. | DC29, Phase 4 |
@@ -3453,8 +3454,8 @@ impl Target {
 
 impl ExecHandle {
     pub fn id(&self) -> ExecId;
-    pub async fn status(&self) -> Result<ExecState>;
-    pub async fn wait(&self) -> Result<ExecState>;
+    pub fn status(&self) -> ExecState;        // sync, infallible snapshot
+    pub async fn wait(self) -> Result<ExecState>;  // consumes handle
 }
 ```
 
