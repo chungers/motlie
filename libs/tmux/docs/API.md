@@ -37,6 +37,8 @@ in [`examples/README.md`](../examples/README.md).
 9. [Sending Input](#9-sending-input)
 10. [Capturing Output](#10-capturing-output)
 11. [Structured Command Execution](#11-structured-command-execution)
+   - 11a. [Tracked Execution (DC31)](#tracked-execution-dc31)
+   - 11b. [Socket Isolation (DC30)](#11b-socket-isolation-dc30)
 12. [Advanced Capture — Modes and Fidelity](#12-advanced-capture--modes-and-fidelity)
 13. [Scrollback Sampling](#13-scrollback-sampling)
 14. [Geometry and Reflow Detection](#14-geometry-and-reflow-detection)
@@ -919,6 +921,74 @@ let pane_target = session_target.pane(0).await?.unwrap();
   via `pane_current_command`. Other exotic shells are not detected.
 - **Wrap tolerance**: Works in narrow panes — the sentinel parser joins
   lines and searches in concatenated text.
+
+### Tracked Execution (DC31)
+
+`Target::start_exec()` separates launch from observation. Returns an `ExecHandle`
+immediately while the command runs in a background task.
+
+```rust
+use std::time::Duration;
+use motlie_tmux::ExecState;
+
+// Launch — returns immediately
+let handle = target.start_exec("make build", Duration::from_secs(120)).await?;
+
+// Non-blocking status check
+match handle.status() {
+    ExecState::Running => println!("still running..."),
+    ExecState::Completed(out) => println!("done: exit {}", out.exit_code),
+    ExecState::Unknown { reason } => eprintln!("lost track: {}", reason),
+}
+
+// Or await completion
+let state = handle.wait().await?;
+```
+
+`exec()` is now implemented as `start_exec()` + `wait()` — same semantics,
+same sentinel mechanism, same per-pane lock serialization.
+
+The `Unknown` state is reached when:
+- The sentinel poll times out
+- A connection discontinuity occurs while the command is running
+
+---
+
+## 11b. Socket Isolation (DC30)
+
+`TmuxSocket::automation(scope)` creates a dedicated automation socket with a
+`motlie-` prefix, isolating automation workloads from the user's default tmux
+server.
+
+```rust
+use motlie_tmux::{TmuxSocket, HostHandle, TransportKind};
+
+// Create an isolated automation socket
+let socket = TmuxSocket::automation("ci-build")?;
+// => TmuxSocket::Name("motlie-ci-build")
+
+// Build host with the automation socket
+let host = HostHandle::new(
+    TransportKind::Local(motlie_tmux::transport::LocalTransport::new()),
+    Some(socket),
+);
+
+// Ensure the server is running (idempotent)
+host.ensure_socket_server().await?;
+
+// Sessions are isolated from the default tmux server
+let session = host.create_session("build", &Default::default()).await?;
+```
+
+For SSH hosts, `SshConfig::with_automation_socket(scope)` is a convenience
+builder:
+
+```rust
+let host = SshConfig::new("build-host", "deploy")
+    .with_automation_socket("ci")?  // errors if socket already set
+    .connect()
+    .await?;
+```
 
 ---
 

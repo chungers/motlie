@@ -224,6 +224,36 @@ pub enum TmuxSocket {
     Path(String),
 }
 
+impl TmuxSocket {
+    /// Create a dedicated automation socket with a `motlie-` prefix (DC30).
+    ///
+    /// Produces `TmuxSocket::Name(format!("motlie-{}", scope))`. The scope
+    /// is validated: non-empty, max 64 chars, `[A-Za-z0-9._-]` charset.
+    /// This isolates automation workloads from the user's default tmux server.
+    pub fn automation(scope: &str) -> Result<Self> {
+        if scope.is_empty() {
+            return Err(anyhow!("automation scope must not be empty"));
+        }
+        if scope.len() > 64 {
+            return Err(anyhow!(
+                "automation scope too long ({} chars, max 64): {}",
+                scope.len(),
+                scope
+            ));
+        }
+        if !scope
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+        {
+            return Err(anyhow!(
+                "automation scope contains invalid characters: '{}' (allowed: [A-Za-z0-9._-])",
+                scope
+            ));
+        }
+        Ok(TmuxSocket::Name(format!("motlie-{}", scope)))
+    }
+}
+
 /// SSH host key verification policy (DC2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostKeyPolicy {
@@ -257,6 +287,56 @@ pub struct ExecOutput {
 impl ExecOutput {
     pub fn success(&self) -> bool {
         self.exit_code == 0
+    }
+}
+
+/// Typed command identity for tracked execution (DC31).
+///
+/// Wraps `uuid::Uuid` to provide a unique per-execution identity. The
+/// `short_hex()` method produces an 8-char hex string matching the existing
+/// exec sentinel format (`__ML<hex>__`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ExecId(uuid::Uuid);
+
+impl ExecId {
+    /// Create a new random execution ID.
+    pub fn new() -> Self {
+        ExecId(uuid::Uuid::new_v4())
+    }
+
+    /// 8-character hex marker for sentinel matching.
+    pub fn short_hex(&self) -> String {
+        self.0.to_string()[..8].to_string()
+    }
+}
+
+impl fmt::Display for ExecId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Default for ExecId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Execution state for tracked commands (DC31).
+#[derive(Debug, Clone)]
+pub enum ExecState {
+    /// Command is still running (sentinel not yet observed).
+    Running,
+    /// Sentinel observed — command completed with structured output.
+    Completed(ExecOutput),
+    /// Cannot determine completion status (e.g., connection lost, timeout).
+    Unknown { reason: String },
+}
+
+impl ExecState {
+    /// Whether this state is terminal (will not change again).
+    pub fn is_terminal(&self) -> bool {
+        !matches!(self, ExecState::Running)
     }
 }
 
@@ -960,5 +1040,98 @@ mod tests {
         let opts = TransferOptions::default();
         assert!(opts.overwrite);
         assert!(!opts.recursive);
+    }
+
+    // --- TmuxSocket::automation tests (DC30) ---
+
+    #[test]
+    fn automation_socket_valid_scope() {
+        let socket = TmuxSocket::automation("ci-build").unwrap();
+        assert_eq!(socket, TmuxSocket::Name("motlie-ci-build".to_string()));
+    }
+
+    #[test]
+    fn automation_socket_prefix_check() {
+        let socket = TmuxSocket::automation("agent_1").unwrap();
+        match socket {
+            TmuxSocket::Name(name) => assert!(name.starts_with("motlie-")),
+            _ => panic!("expected Name variant"),
+        }
+    }
+
+    #[test]
+    fn automation_socket_empty_scope_errors() {
+        assert!(TmuxSocket::automation("").is_err());
+    }
+
+    #[test]
+    fn automation_socket_invalid_chars_errors() {
+        assert!(TmuxSocket::automation("bad/scope").is_err());
+        assert!(TmuxSocket::automation("bad scope").is_err());
+        assert!(TmuxSocket::automation("bad@scope").is_err());
+    }
+
+    #[test]
+    fn automation_socket_too_long_errors() {
+        let long_scope = "a".repeat(65);
+        assert!(TmuxSocket::automation(&long_scope).is_err());
+    }
+
+    #[test]
+    fn automation_socket_max_length_ok() {
+        let scope = "a".repeat(64);
+        assert!(TmuxSocket::automation(&scope).is_ok());
+    }
+
+    #[test]
+    fn automation_socket_all_valid_chars() {
+        assert!(TmuxSocket::automation("ABCxyz.012_3-4").is_ok());
+    }
+
+    // --- ExecId tests (DC31) ---
+
+    #[test]
+    fn exec_id_uniqueness() {
+        let a = ExecId::new();
+        let b = ExecId::new();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn exec_id_short_hex_length() {
+        let id = ExecId::new();
+        assert_eq!(id.short_hex().len(), 8);
+    }
+
+    #[test]
+    fn exec_id_display() {
+        let id = ExecId::new();
+        let display = format!("{}", id);
+        // UUID v4 format: 8-4-4-4-12
+        assert_eq!(display.len(), 36);
+    }
+
+    // --- ExecState tests (DC31) ---
+
+    #[test]
+    fn exec_state_running_not_terminal() {
+        assert!(!ExecState::Running.is_terminal());
+    }
+
+    #[test]
+    fn exec_state_completed_is_terminal() {
+        let state = ExecState::Completed(ExecOutput {
+            stdout: "ok".to_string(),
+            exit_code: 0,
+        });
+        assert!(state.is_terminal());
+    }
+
+    #[test]
+    fn exec_state_unknown_is_terminal() {
+        let state = ExecState::Unknown {
+            reason: "timed out".to_string(),
+        };
+        assert!(state.is_terminal());
     }
 }

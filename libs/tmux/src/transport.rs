@@ -1367,6 +1367,22 @@ impl SshConfig {
         Ok(self)
     }
 
+    /// Set a dedicated automation socket for this config (DC30).
+    ///
+    /// Convenience builder that calls `TmuxSocket::automation(scope)` and
+    /// wires the result into `with_socket()`. Errors if a socket is already
+    /// set (no silent overwrite) or if the scope is invalid.
+    pub fn with_automation_socket(self, scope: &str) -> anyhow::Result<Self> {
+        if self.socket.is_some() {
+            return Err(anyhow::anyhow!(
+                "socket already set; cannot overwrite with automation socket for scope '{}'",
+                scope
+            ));
+        }
+        let socket = TmuxSocket::automation(scope)?;
+        self.with_socket(socket)
+    }
+
     /// Set an explicit SSH identity (private key) file for authentication (DC26).
     ///
     /// When set, `SshTransport::connect()` authenticates with this key file
@@ -2353,6 +2369,37 @@ mod tests {
             .with_identity_file("/keys/b")
             .unwrap_err();
         assert!(err.to_string().contains("already set"));
+    }
+
+    // --- Automation socket tests (DC30) ---
+
+    #[test]
+    fn ssh_config_automation_socket_basic() {
+        let cfg = SshConfig::new("host", "user")
+            .with_automation_socket("ci-build")
+            .unwrap();
+        assert_eq!(
+            cfg.socket(),
+            Some(&TmuxSocket::Name("motlie-ci-build".to_string()))
+        );
+    }
+
+    #[test]
+    fn ssh_config_automation_socket_already_set_errors() {
+        let err = SshConfig::new("host", "user")
+            .with_socket(TmuxSocket::Name("existing".to_string()))
+            .unwrap()
+            .with_automation_socket("test")
+            .unwrap_err();
+        assert!(err.to_string().contains("already set"));
+    }
+
+    #[test]
+    fn ssh_config_automation_socket_invalid_scope_propagates() {
+        let err = SshConfig::new("host", "user")
+            .with_automation_socket("")
+            .unwrap_err();
+        assert!(err.to_string().contains("empty"));
     }
 
     // --- File transfer tests (DC23, Phase 1.13g) ---
