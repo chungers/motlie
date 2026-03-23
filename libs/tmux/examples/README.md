@@ -195,6 +195,15 @@ cargo run -p motlie-tmux --example repl -- ssh://localhost
 ./target/debug/examples/repl ssh://localhost
 ```
 
+Planned split-screen TUI follow-on for the REPL:
+
+![Planned REPL TUI mock](tui-repl-mock.png)
+
+The intended future UX is:
+- top frame mirrors a watched remote session or agent/chat trace
+- bottom frame keeps the interactive REPL prompt
+- `tui on` enters the split-screen mode and `tui off` returns to the current plain REPL
+
 #### Commands
 
 | Command | Description | API Used |
