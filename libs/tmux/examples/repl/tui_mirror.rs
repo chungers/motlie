@@ -30,6 +30,11 @@ use std::collections::VecDeque;
 use std::io;
 use std::time::Duration;
 
+const BG: Color = Color::Black;
+const FG: Color = Color::White;
+const ACCENT: Color = Color::Yellow;
+const DIM: Color = Color::Gray;
+
 /// Action returned when the TUI event loop exits.
 pub enum TuiAction {
     /// User typed `tui off` — return to plain REPL mode.
@@ -507,11 +512,13 @@ fn draw_mirror(f: &mut Frame, area: ratatui::layout::Rect, state: &TuiState) {
     let visible_text: String = lines[visible_start..].join("\n");
 
     let paragraph = Paragraph::new(visible_text)
+        .style(Style::default().fg(FG).bg(BG))
         .block(
             Block::default()
                 .title(title)
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Blue)),
+                .border_style(Style::default().fg(ACCENT).bg(BG))
+                .title_style(Style::default().fg(ACCENT).bg(BG)),
         )
         .wrap(Wrap { trim: false });
     f.render_widget(paragraph, area);
@@ -521,36 +528,39 @@ fn draw_status(f: &mut Frame, area: ratatui::layout::Rect, state: &TuiState) {
     let stream_label = match &state.watch {
         Some(w) => match w.monitor_handle.health() {
             MonitorHealth::Streaming => {
-                Span::styled(" stream: active ", Style::default().fg(Color::Green))
+                Span::styled(" stream: active ", Style::default().fg(ACCENT).bg(BG))
             }
             MonitorHealth::Reconnecting => {
-                Span::styled(" stream: reconnecting ", Style::default().fg(Color::Yellow))
+                Span::styled(
+                    " stream: reconnecting ",
+                    Style::default().fg(ACCENT).bg(BG),
+                )
             }
             MonitorHealth::Failed => {
-                Span::styled(" stream: failed ", Style::default().fg(Color::Red))
+                Span::styled(" stream: failed ", Style::default().fg(ACCENT).bg(BG))
             }
             MonitorHealth::Stopped => {
-                Span::styled(" stream: stopped ", Style::default().fg(Color::DarkGray))
+                Span::styled(" stream: stopped ", Style::default().fg(DIM).bg(BG))
             }
         },
-        None => Span::styled(" stream: idle ", Style::default().fg(Color::DarkGray)),
+        None => Span::styled(" stream: idle ", Style::default().fg(DIM).bg(BG)),
     };
 
     let status = Line::from(vec![
         Span::styled(
             format!(" host: {} ", state.host_uri),
-            Style::default().fg(Color::Cyan),
+            Style::default().fg(FG).bg(BG),
         ),
-        Span::raw("|"),
+        Span::styled("|", Style::default().fg(DIM).bg(BG)),
         stream_label,
-        Span::raw("|"),
+        Span::styled("|", Style::default().fg(DIM).bg(BG)),
         Span::styled(
             " render: history mirror ",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(FG).bg(BG),
         ),
     ]);
 
-    let bar = Paragraph::new(status).style(Style::default().bg(Color::DarkGray).fg(Color::White));
+    let bar = Paragraph::new(status).style(Style::default().bg(BG).fg(FG));
     f.render_widget(bar, area);
 }
 
@@ -566,24 +576,34 @@ fn draw_repl(f: &mut Frame, area: ratatui::layout::Rect, state: &TuiState) {
 
     // Input line with blinking cursor.
     visible.push(Line::from(vec![
-        Span::styled("repl> ", Style::default().fg(Color::Green)),
-        Span::raw(&state.input),
-        Span::styled("_", Style::default().add_modifier(Modifier::SLOW_BLINK)),
+        Span::styled("repl> ", Style::default().fg(ACCENT).bg(BG)),
+        Span::styled(&state.input, Style::default().fg(FG).bg(BG)),
+        Span::styled(
+            "_",
+            Style::default()
+                .fg(ACCENT)
+                .bg(BG)
+                .add_modifier(Modifier::SLOW_BLINK),
+        ),
     ]));
 
     let mode_hint = Span::styled(
         " mode: tui on ",
         Style::default()
-            .fg(Color::DarkGray)
+            .fg(ACCENT)
+            .bg(BG)
             .add_modifier(Modifier::ITALIC),
     );
 
-    let paragraph = Paragraph::new(visible).block(
-        Block::default()
-            .title(" REPL ")
-            .title_bottom(mode_hint)
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Blue)),
-    );
+    let paragraph = Paragraph::new(visible)
+        .style(Style::default().fg(FG).bg(BG))
+        .block(
+            Block::default()
+                .title(" REPL ")
+                .title_style(Style::default().fg(ACCENT).bg(BG))
+                .title_bottom(mode_hint)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(ACCENT).bg(BG)),
+        );
     f.render_widget(paragraph, area);
 }
