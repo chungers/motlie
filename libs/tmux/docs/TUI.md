@@ -171,15 +171,6 @@ This keeps the feature tightly scoped to an existing example, makes the UX easy
 to validate, and avoids forcing a full navigation/dashboard design before the
 underlying mirror path is proven.
 
-### Mock-up
-
-![TUI Mirror Mock-up](tui-mirror-mock.png)
-
-The mock shows the intended first delivery:
-- a large top mirror frame rendering the watched remote session
-- a compact bottom REPL frame with prompt, command history, and a mode line
-- explicit status text for host, session, stream health, and whether TUI mode is on
-
 ### Recommended Product Cut
 
 The first implementation should prioritize **shell/chat/agent traces** rather
