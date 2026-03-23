@@ -55,6 +55,9 @@ in [`examples/README.md`](../examples/README.md).
 22. [Rolling Transcript / History (DC28)](#22-rolling-transcript--history-dc28)
 23. [Fleet — Multi-Host Coordination (DC27)](#23-fleet--multi-host-coordination-dc27)
 
+**Part II-d — TUI (DC32)**
+23b. [Split-Screen REPL TUI Mirror](#23b-split-screen-repl-tui-mirror-dc32)
+
 **Part III — Reference**
 24. [Normalization Utilities](#24-normalization-utilities)
 25. [Type Quick Reference](#25-type-quick-reference)
@@ -1945,6 +1948,74 @@ match fleet.host_status("web-1") {
     Some(HostStatus::Error(msg)) => println!("error: {}", msg),
     None => println!("not registered"),
 }
+```
+
+---
+
+## 23b. Split-Screen REPL TUI Mirror (DC32)
+
+The first TUI delivery is a split-screen mode inside the REPL example, not a
+standalone dashboard or a new `SinkKind` variant.
+
+**Architecture**: The TUI consumer lives in `examples/repl/tui_mirror.rs` — a
+binary-local module that subscribes to the existing `OutputBus` via
+`Subscription::history()` and drives a `ratatui` draw loop. No terminal
+dependencies are added to `libs/tmux`.
+
+**REPL commands** (all core REPL commands work in TUI mode):
+
+```
+repl> tui on
+  → enters alternate-screen split mode
+  → top mirror frame (empty until a session is watched)
+  → bottom REPL frame with prompt + command history
+  → status bar shows MonitorHealth (active/reconnecting/failed/stopped)
+
+# session management
+monitor agents       → bind session to mirror frame
+create myapp         → create a session
+kill myapp           → kill a target
+targets              → list sessions with target tree
+
+# interaction
+send myapp:0 ls      → send text + Enter
+keys myapp {C-c}     → send raw key sequence
+capture myapp 20     → show last 20 scrollback lines
+
+tui off              → leave alternate screen, restore plain REPL
+```
+
+**Consumer data flow**:
+
+```
+HostHandle::output_bus()
+    │
+    ▼
+OutputBus::subscribe(filters, 64)
+    │
+    ▼
+Subscription::history(HistoryOptions { ... })
+    │
+    ▼
+HistoryHandle::render_text()  →  top mirror frame
+```
+
+The TUI path uses a separate `Subscription` from any existing stdout monitor.
+`HistoryHandle::render_text()` returns a point-in-time snapshot on each call,
+so the draw loop simply polls it periodically (~150ms).
+
+**Running the example**:
+
+```sh
+cargo run -p motlie-tmux --example repl -- ssh://localhost
+# then inside the REPL:
+repl> create agents
+repl> tui on
+# in TUI mode:
+monitor agents
+# type in another terminal: tmux send-keys -t agents "hello" Enter
+# watch the mirror frame update
+tui off
 ```
 
 ---

@@ -218,6 +218,8 @@ The intended future UX is:
 | `keys <target> <keys...>` | Send raw key sequence (`{Escape}`, `{C-c}`, etc.) | `KeySequence::parse()`, `target.send_keys()` |
 | `capture <target> <n>` | Print last N scrollback lines | `target.sample_text(LastLines(n))` |
 | `monitor <session> [secs]` | Stream live output for N seconds (default 3) | `host.start_monitoring_session()`, `OutputBus`, `JoinedStream` |
+| `tui on` | Enter split-screen TUI mirror mode (DC32) | `OutputBus`, `Subscription`, `HistoryHandle`, `ratatui` |
+| `tui off` | Return to plain REPL mode (inside TUI only) | — |
 | `upload <local> <remote> [--recursive]` | Upload a file or directory to the host | `host.upload()`, `TransferOptions` |
 | `download <remote> <local> [--recursive]` | Download a file or directory from the host | `host.download()`, `TransferOptions` |
 | `quit` | Disconnect and exit | — |
@@ -284,6 +286,23 @@ Killed: test_session
 repl> quit
 Disconnected.
 ```
+
+#### Split-screen TUI mode (DC32)
+
+`tui on` enters a split-screen mode powered by `ratatui`:
+
+- **Top frame**: live mirror of a watched remote session transcript
+- **Bottom frame**: REPL prompt and command history
+- **Status bar**: host, stream health, render mode
+
+TUI mode preserves the core REPL command surface — `monitor`, `create`, `kill`,
+`targets`, `send`, `keys`, `capture`, `help`, `tui off`, and `quit` all work
+in the bottom frame. The status bar surfaces actual `MonitorHealth` state
+(`active`, `reconnecting`, `failed`, `stopped`) rather than just watch presence.
+Use `tui off` to return to plain REPL mode, or `quit` / Ctrl-C to exit.
+
+The TUI mirror consumer lives entirely in the example binary — it does not
+add any terminal dependencies to `libs/tmux` (consistent with DC11 and DC32).
 
 ### stream_pane — Continuous pane streaming
 
