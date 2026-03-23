@@ -199,7 +199,7 @@ cargo run -p motlie-tmux --example repl -- ssh://localhost
 
 | Mock (design target) | Actual (`tui on`, live capture) |
 |---|---|
-| ![Mock](tui-repl-mock.png) | ![Actual](tui-repl-actual.png) |
+| ![Mock](tui-repl-mock.png) | ![Actual](tui-repl-actual-contrast.png) |
 
 The mock shows the aspirational multi-agent scenario with colored source labels,
 discontinuity markers, and a richer status bar. The actual screenshot is a live
