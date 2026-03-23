@@ -8,7 +8,8 @@
 //! with DC11 and DC32.
 
 use motlie_tmux::{
-    HistoryHandle, HistoryOptions, HostHandle, LabelFormat, SessionMonitorHandle, SinkFilter,
+    HistoryHandle, HistoryOptions, HostHandle, KeySequence, LabelFormat, MonitorHealth,
+    ScrollbackQuery, SessionMonitorHandle, SinkFilter, TargetSpec,
 };
 
 use crossterm::{
@@ -220,6 +221,12 @@ async fn process_command(
         "help" => {
             state.push_output("TUI mode commands:");
             state.push_output("  monitor <session>   Watch a session in the mirror frame");
+            state.push_output("  create <name>       Create a tmux session");
+            state.push_output("  kill <target>       Kill a session/window/pane");
+            state.push_output("  targets             List all sessions with target tree");
+            state.push_output("  send <target> <text>  Send text + Enter to a target");
+            state.push_output("  keys <target> <k>   Send key sequence ({Escape}, {C-c})");
+            state.push_output("  capture <target> <n>  Print last N scrollback lines");
             state.push_output("  tui off             Return to plain REPL mode");
             state.push_output("  quit                Exit the program");
             state.push_output("  help                Show this help");
@@ -276,14 +283,184 @@ async fn process_command(
                 Err(e) => state.push_output(&format!("monitor error: {}", e)),
             }
         }
+        "create" => {
+            if parts.len() < 2 {
+                state.push_output("usage: create <name>");
+                return Ok(None);
+            }
+            match host
+                .create_session(parts[1], &Default::default())
+                .await
+            {
+                Ok(_) => state.push_output(&format!("created: {}", parts[1])),
+                Err(e) => state.push_output(&format!("error: {}", e)),
+            }
+        }
+        "kill" => {
+            if parts.len() < 2 {
+                state.push_output("usage: kill <target>");
+                return Ok(None);
+            }
+            match resolve_target(host, parts[1]).await {
+                Ok(target) => match target.kill().await {
+                    Ok(()) => state.push_output(&format!("killed: {}", parts[1])),
+                    Err(e) => state.push_output(&format!("error: {}", e)),
+                },
+                Err(e) => state.push_output(&e),
+            }
+        }
+        "targets" => match host.list_sessions().await {
+            Ok(sessions) => {
+                if sessions.is_empty() {
+                    state.push_output("  (no sessions)");
+                }
+                for s in &sessions {
+                    let spec = match TargetSpec::parse(&s.name) {
+                        Ok(sp) => sp,
+                        Err(e) => {
+                            state.push_output(&format!("  {} (parse error: {})", s.name, e));
+                            continue;
+                        }
+                    };
+                    let target = match host.target(&spec).await {
+                        Ok(Some(t)) => t,
+                        Ok(None) => {
+                            state.push_output(&format!("  {} (not found)", s.name));
+                            continue;
+                        }
+                        Err(e) => {
+                            state.push_output(&format!("  {} (error: {})", s.name, e));
+                            continue;
+                        }
+                    };
+                    let windows = match target.children().await {
+                        Ok(w) => w,
+                        Err(e) => {
+                            state.push_output(&format!("  {} (error: {})", s.name, e));
+                            continue;
+                        }
+                    };
+                    state.push_output(&format!(
+                        "  {:<20} ({} window{})",
+                        s.name,
+                        windows.len(),
+                        if windows.len() == 1 { "" } else { "s" }
+                    ));
+                    for w in &windows {
+                        let panes = match w.children().await {
+                            Ok(p) => p,
+                            Err(_) => continue,
+                        };
+                        let winfo = w.window_info();
+                        let wname = winfo.map(|i| i.name.as_str()).unwrap_or("?");
+                        state.push_output(&format!(
+                            "    {:<18} ('{}', {} pane{})",
+                            w.target_string(),
+                            wname,
+                            panes.len(),
+                            if panes.len() == 1 { "" } else { "s" }
+                        ));
+                        for p in &panes {
+                            let pid =
+                                p.pane_address().map(|a| a.pane_id.as_str()).unwrap_or("?");
+                            state.push_output(&format!(
+                                "      {:<16} ({})",
+                                p.target_string(),
+                                pid
+                            ));
+                        }
+                    }
+                }
+            }
+            Err(e) => state.push_output(&format!("error: {}", e)),
+        },
+        "send" => {
+            if parts.len() < 3 {
+                state.push_output("usage: send <target> <text...>");
+                return Ok(None);
+            }
+            match resolve_target(host, parts[1]).await {
+                Ok(target) => {
+                    let enter = KeySequence::parse("{Enter}").expect("static parse");
+                    if let Err(e) = target.send_text(parts[2]).await {
+                        state.push_output(&format!("error sending text: {}", e));
+                    } else if let Err(e) = target.send_keys(&enter).await {
+                        state.push_output(&format!("error sending Enter: {}", e));
+                    } else {
+                        state.push_output(&format!("sent to {}", parts[1]));
+                    }
+                }
+                Err(e) => state.push_output(&e),
+            }
+        }
+        "keys" => {
+            if parts.len() < 3 {
+                state.push_output("usage: keys <target> <keys...>");
+                return Ok(None);
+            }
+            match KeySequence::parse(parts[2]) {
+                Ok(keys) => match resolve_target(host, parts[1]).await {
+                    Ok(target) => match target.send_keys(&keys).await {
+                        Ok(()) => state.push_output(&format!("sent keys to {}", parts[1])),
+                        Err(e) => state.push_output(&format!("error: {}", e)),
+                    },
+                    Err(e) => state.push_output(&e),
+                },
+                Err(e) => state.push_output(&format!("parse error: {}", e)),
+            }
+        }
+        "capture" => {
+            if parts.len() < 3 {
+                state.push_output("usage: capture <target> <n>");
+                return Ok(None);
+            }
+            let n: usize = match parts[2].parse() {
+                Ok(n) if n > 0 => n,
+                _ => {
+                    state.push_output("error: <n> must be a positive integer");
+                    return Ok(None);
+                }
+            };
+            match resolve_target(host, parts[1]).await {
+                Ok(target) => {
+                    let query = ScrollbackQuery::LastLines(n);
+                    match target.sample_text(&query).await {
+                        Ok(text) => {
+                            if text.is_empty() {
+                                state.push_output("(empty)");
+                            } else {
+                                for line in text.lines() {
+                                    state.push_output(line);
+                                }
+                            }
+                        }
+                        Err(e) => state.push_output(&format!("error: {}", e)),
+                    }
+                }
+                Err(e) => state.push_output(&e),
+            }
+        }
         other => {
             state.push_output(&format!(
-                "'{}' not available in TUI mode; use 'tui off' first",
+                "unknown command: '{}'; type 'help' for available commands",
                 other
             ));
         }
     }
     Ok(None)
+}
+
+/// Resolve a target spec string into a `Target`.
+async fn resolve_target(
+    host: &HostHandle,
+    target_str: &str,
+) -> Result<motlie_tmux::Target, String> {
+    let spec = TargetSpec::parse(target_str)
+        .map_err(|e| format!("invalid target '{}': {}", target_str, e))?;
+    host.target(&spec)
+        .await
+        .map_err(|e| format!("error resolving '{}': {}", target_str, e))?
+        .ok_or_else(|| format!("target '{}' not found", target_str))
 }
 
 // ---------------------------------------------------------------------------
@@ -342,7 +519,20 @@ fn draw_mirror(f: &mut Frame, area: ratatui::layout::Rect, state: &TuiState) {
 
 fn draw_status(f: &mut Frame, area: ratatui::layout::Rect, state: &TuiState) {
     let stream_label = match &state.watch {
-        Some(_) => Span::styled(" stream: active ", Style::default().fg(Color::Green)),
+        Some(w) => match w.monitor_handle.health() {
+            MonitorHealth::Streaming => {
+                Span::styled(" stream: active ", Style::default().fg(Color::Green))
+            }
+            MonitorHealth::Reconnecting => {
+                Span::styled(" stream: reconnecting ", Style::default().fg(Color::Yellow))
+            }
+            MonitorHealth::Failed => {
+                Span::styled(" stream: failed ", Style::default().fg(Color::Red))
+            }
+            MonitorHealth::Stopped => {
+                Span::styled(" stream: stopped ", Style::default().fg(Color::DarkGray))
+            }
+        },
         None => Span::styled(" stream: idle ", Style::default().fg(Color::DarkGray)),
     };
 

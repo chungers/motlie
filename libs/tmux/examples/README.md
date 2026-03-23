@@ -286,9 +286,11 @@ Disconnected.
 - **Bottom frame**: REPL prompt and command history
 - **Status bar**: host, stream health, render mode
 
-In TUI mode, use `monitor <session>` to bind a session to the mirror frame.
-The mirror shows rolling transcript output via `HistoryHandle`. Use `tui off`
-to return to plain REPL mode, or `quit` / Ctrl-C to exit.
+TUI mode preserves the core REPL command surface — `monitor`, `create`, `kill`,
+`targets`, `send`, `keys`, `capture`, `help`, `tui off`, and `quit` all work
+in the bottom frame. The status bar surfaces actual `MonitorHealth` state
+(`active`, `reconnecting`, `failed`, `stopped`) rather than just watch presence.
+Use `tui off` to return to plain REPL mode, or `quit` / Ctrl-C to exit.
 
 The TUI mirror consumer lives entirely in the example binary — it does not
 add any terminal dependencies to `libs/tmux` (consistent with DC11 and DC32).
