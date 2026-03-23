@@ -177,6 +177,11 @@ Host state while running:               After exit (any reason):
 
 /var/lib/motlie-vmm/db/                  # persistent (motlie-db / RocksDB)
                                          # event log, VM graph, resource edges
+
+/var/lib/motlie-vmm/snapshots/           # persistent (snapshot/restore)
+  alice/                                 # latest snapshot
+    vmstate.bin, mem.bin
+    overlay.ext4, meta.json
 ```
 
 Nothing in `/usr/bin`, `/usr/local/bin`, `/etc`, or any system directory.
@@ -2075,6 +2080,249 @@ Guest agent: `fuser`, `vsock`, `rmp-serde`, `serde`, `serde_json`
 |memfd execution             |Binaries never written to disk                                                 |
 |Clean process lifecycle     |Signal handler (graceful) + cgroup (force) + startup sweep (files)             |
 
+## Advanced: Snapshot and Restore
+
+Firecracker supports full VM snapshots (memory + vCPU + device state)
+with ~28ms restore time. The challenge is not the VM itself — it’s
+everything motlie-vmm manages around it: vsock connections, FUSE mounts,
+passt networking, and network namespaces.
+
+**Core principle:** snapshot preserves guest state (expensive). Host
+state (netns, passt, vsock listener, FS server) is cheap to recreate.
+The guest agent is made reconnection-aware so it survives the restore
+gap.
+
+### What gets snapshotted
+
+```
+Saved to disk:
+  /var/lib/motlie-vmm/snapshots/alice/
+    vmstate.bin          ← Firecracker VM memory + device state
+    mem.bin              ← VM memory file (~size of VM RAM, compressed)
+    overlay.ext4         ← copy of writable overlay layer
+    meta.json            ← username, guest_ip, cid, timestamp
+
+NOT saved (reconstructed on restore):
+    network namespace    ← new one created
+    passt process        ← new one spawned
+    vsock listener       ← new one started
+    FS server inode maps ← rebuilt from host directories
+    control connection   ← guest agent reconnects
+
+NOT in snapshot (always on host, always available):
+    ~/projects/alice/    ← workspace, re-mounted via FUSE
+    ~/.motlie-vmm/creds/ ← credentials, re-mounted via FUSE
+```
+
+### Snapshot flow
+
+```rust
+impl Daemon {
+    pub async fn snapshot(&self, username: &str) -> Result<PathBuf> {
+        let vms = self.vms.lock().await;
+        let vm = vms.get(username).ok_or(anyhow!("VM not found"))?;
+
+        let snap_dir = PathBuf::from(format!(
+            "/var/lib/motlie-vmm/snapshots/{}", username));
+        std::fs::create_dir_all(&snap_dir)?;
+
+        // 1. Pause the VM
+        firecracker_api(&vm.api_sock, "PATCH", "/vm",
+            json!({"state": "Paused"}))?;
+
+        // 2. Create snapshot
+        firecracker_api(&vm.api_sock, "PUT", "/snapshot/create",
+            json!({
+                "snapshot_type": "Full",
+                "snapshot_path": snap_dir.join("vmstate.bin").to_str(),
+                "mem_file_path": snap_dir.join("mem.bin").to_str(),
+            }))?;
+
+        // 3. Copy overlay (VM's writable filesystem state)
+        std::fs::copy(
+            format!("/var/lib/motlie-vmm/vms/{}/overlay.ext4", username),
+            snap_dir.join("overlay.ext4"),
+        )?;
+
+        // 4. Save metadata
+        let meta = SnapshotMeta {
+            username: username.to_string(),
+            guest_ip: vm.guest_ip,
+            cid: vm.cid,
+            timestamp: Utc::now(),
+        };
+        std::fs::write(
+            snap_dir.join("meta.json"),
+            serde_json::to_string_pretty(&meta)?,
+        )?;
+
+        // 5. Stop the VM (releases netns, passt, vsock listener)
+        drop(vms);
+        self.stop_vm(username).await?;
+
+        Ok(snap_dir)
+    }
+}
+```
+
+### Restore flow
+
+```rust
+impl Daemon {
+    pub async fn restore(&self, username: &str) -> Result<Ipv4Addr> {
+        let snap_dir = PathBuf::from(format!(
+            "/var/lib/motlie-vmm/snapshots/{}", username));
+        let meta: SnapshotMeta = serde_json::from_str(
+            &std::fs::read_to_string(snap_dir.join("meta.json"))?)?;
+
+        let vm_dir = PathBuf::from(format!(
+            "/var/lib/motlie-vmm/vms/{}", username));
+        std::fs::create_dir_all(&vm_dir)?;
+
+        // 1. Restore overlay
+        std::fs::copy(
+            snap_dir.join("overlay.ext4"),
+            vm_dir.join("overlay.ext4"),
+        )?;
+
+        // 2. Fresh netns + passt (same IP as before)
+        let (passt_child, passt_fd) = spawn_passt(meta.guest_ip)?;
+        let netns_path = format!("/proc/{}/ns/net", passt_child.id());
+
+        // 3. Start vsock listener (guest agent will reconnect)
+        let vsock_uds = vm_dir.join("vsock.sock");
+        start_vsock_listener(&vsock_uds, username, &self.mounts_for(username));
+
+        // 4. Firecracker restore (joins new netns)
+        let (fc_child, fc_fd) = spawn_firecracker_restore(
+            &snap_dir, &vm_dir, &vsock_uds, &netns_path, meta.cid,
+        )?;
+
+        // 5. Resume — VM wakes up, guest agent reconnects
+        firecracker_api(&vm_dir.join("firecracker.sock"),
+            "PATCH", "/vm", json!({"state": "Resumed"}))?;
+
+        // 6. Wait for guest agent to reconnect and signal ready
+        wait_for_guest_ready(&vsock_uds, Duration::from_secs(30)).await?;
+
+        // ... register VM in self.vms
+        Ok(meta.guest_ip)
+    }
+}
+```
+
+### Guest agent reconnection
+
+When the VM is restored, the guest agent wakes up mid-execution with
+dead vsock connections. Every vsock connection is wrapped in a
+reconnect loop:
+
+```rust
+struct ResilientVsockConnection {
+    tag: String,
+    stream: Option<VsockStream>,
+}
+
+impl ResilientVsockConnection {
+    fn send(&mut self, msg: &[u8]) -> io::Result<()> {
+        loop {
+            match &mut self.stream {
+                Some(s) => match s.write_all(msg) {
+                    Ok(()) => return Ok(()),
+                    Err(_) => { self.stream = None; }
+                },
+                None => { self.reconnect()?; }
+            }
+        }
+    }
+
+    fn reconnect(&mut self) -> io::Result<()> {
+        loop {
+            match vsock_connect(HOST_CID, VMM_PORT) {
+                Ok(mut s) => {
+                    send_msg(&mut s, &HandshakeMsg::Fs {
+                        tag: self.tag.clone()
+                    })?;
+                    self.stream = Some(s);
+                    return Ok(());
+                }
+                Err(_) => {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
+    }
+}
+```
+
+FUSE operations that are in-flight during snapshot are lost — the
+application’s syscall is paused in the kernel. On restore, the
+kernel retries (FUSE has a request timeout), or the application gets
+a transient error and retries. For dev workloads (editors, git, builds),
+this is the same experience as resuming a laptop from sleep with a
+network mount.
+
+### Restore sequence diagram
+
+```
+Snapshot:                            Restore:
+  host pauses VM                      host creates fresh netns + passt
+  firecracker snapshot to disk        host starts vsock listener (:5000)
+  copy overlay.ext4                   firecracker restore (joins netns)
+  stop VM                             resume VM
+  netns destroyed                       │
+                                        ├─ guest agent wakes up
+                                        ├─ vsock connections are dead
+                                        ├─ reconnect loop kicks in
+                                        ├─ connects vsock:5000 (Control)
+                                        ├─ connects vsock:5000 (Fs per mount)
+                                        ├─ FUSE mounts resume
+                                        ├─ sends Ready
+                                        └─ VM fully operational (~200ms gap)
+```
+
+### What survives restore
+
+|State                          |Survives?          |How?                             |
+|-------------------------------|-------------------|---------------------------------|
+|Running processes inside VM    |Yes                |VM memory snapshot               |
+|Open files, shell history      |Yes                |VM memory snapshot               |
+|Installed packages             |Yes                |overlay.ext4 in snapshot         |
+|/workspace files               |Yes                |Host directory, FUSE reconnects  |
+|Credentials (gh, claude, codex)|Yes                |Host directory, FUSE reconnects  |
+|Network connections (outbound) |No                 |TCP connections break, apps retry|
+|FUSE mounts                    |~200ms interruption|Agent reconnects automatically   |
+|tmux/screen sessions           |Yes                |In VM memory, terminals resume   |
+
+### Snapshot size
+
+Dominated by VM memory. A 2GB VM produces ~2GB snapshot (Firecracker
+compresses memory). The overlay.ext4 adds a few MB. Credentials are
+NOT in the snapshot — they live on the host and are re-mounted via
+FUSE on reconnect.
+
+### CLI
+
+```bash
+motlie-vmm snapshot alice            # pause, snapshot, stop
+motlie-vmm restore alice             # restore from latest snapshot
+motlie-vmm snapshots                 # list all snapshots
+motlie-vmm snapshot alice --keep     # snapshot without stopping (clone)
+```
+
+### Filesystem layout for snapshots
+
+```
+/var/lib/motlie-vmm/snapshots/       # persistent
+  alice/
+    vmstate.bin
+    mem.bin
+    overlay.ext4
+    meta.json
+  alice-20260322T1830/                # named/timestamped snapshots
+    ...
+```
+
 ## Project Planning: Incremental Build Phases
 
 Each phase produces a testable milestone. No phase requires the next
@@ -2210,6 +2458,24 @@ Verify next startup cleans up leftover files.
 
 **Components:** §12 Lifecycle.
 
+### Phase 10: Snapshot and restore (advanced)
+
+**Build:** Firecracker snapshot/restore API integration, guest agent
+reconnection resilience (`ResilientVsockConnection`), snapshot CLI,
+snapshot filesystem layout.
+
+**Test:** `motlie-vmm snapshot alice`, verify snapshot files on disk.
+`motlie-vmm restore alice`, verify VM resumes with running processes
+intact, FUSE mounts reconnect within ~200ms, workspace and credentials
+available immediately.
+
+**Dependencies:** Phase 9 + guest agent reconnection logic. Requires
+modifying the guest agent to wrap all vsock connections in reconnect
+loops. Firecracker snapshot API is the easy part; the guest agent
+resilience is the work.
+
+**Components:** Advanced: Snapshot and Restore section.
+
 ### Dependency graph
 
 ```
@@ -2230,6 +2496,8 @@ Phase 7: + dynamic mounts
 Phase 8: + credentials + events ←── full feature set
     │
 Phase 9: + lifecycle hardening ←── production ready
+    │
+Phase 10: + snapshot/restore ←── advanced (optional)
 ```
 
 ### Binary build targets
