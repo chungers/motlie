@@ -1962,20 +1962,27 @@ binary-local module that subscribes to the existing `OutputBus` via
 `Subscription::history()` and drives a `ratatui` draw loop. No terminal
 dependencies are added to `libs/tmux`.
 
-**REPL commands**:
+**REPL commands** (all core REPL commands work in TUI mode):
 
 ```
 repl> tui on
   → enters alternate-screen split mode
   → top mirror frame (empty until a session is watched)
   → bottom REPL frame with prompt + command history
+  → status bar shows MonitorHealth (active/reconnecting/failed/stopped)
 
-repl> monitor agents
-  → binds the "agents" session to the mirror frame
-  → transcript updates via HistoryHandle::render_text()
+# session management
+monitor agents       → bind session to mirror frame
+create myapp         → create a session
+kill myapp           → kill a target
+targets              → list sessions with target tree
 
-repl> tui off
-  → leaves alternate screen, restores plain REPL
+# interaction
+send myapp:0 ls      → send text + Enter
+keys myapp {C-c}     → send raw key sequence
+capture myapp 20     → show last 20 scrollback lines
+
+tui off              → leave alternate screen, restore plain REPL
 ```
 
 **Consumer data flow**:
