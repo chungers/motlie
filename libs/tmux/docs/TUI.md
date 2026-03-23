@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-22 | @codex | Narrow the first TUI delivery to a split-screen REPL mirror mode: top frame mirrors a watched remote session, bottom frame keeps the REPL prompt. Recommend a binary-local `TuiMirrorSink` consumer for this path rather than a new core `SinkKind::Tui`. Add mock asset and explicit `tui on` / `tui off` REPL semantics. |
 | 2026-03-20 | @codex | Align TUI deep dive with simplified post-Track-A direction: TUI remains fully supported because it consumes `OutputBus`/`Subscription`/`JoinedStream` and routes interactive actions through `Fleet` / `HostHandle` / `Target`. No dependency on deferred matcher/rule/reactor/config abstractions. |
 | 2026-03-13 | @claude | Add §TUI Mirror Sink — detailed design for replicating tmux pane content in a ratatui frame. Two approaches analyzed: polling `capture-pane -ep` vs tmux control mode. Crate evaluation, SGR mapping, architecture, and trade-off matrix. R1: fix StyledCell to support grapheme clusters, wide chars, underline color; reframe recommendation as exploratory analysis (Phase 5 per DESIGN/PLAN is authoritative). |
 | 2026-03-10 | @codex | Address PR #65 review feedback: clarify that normalized matching is shell-oriented, full-screen TUI workflows default to `Raw`, screen-buffer reconstruction is a Phase `5+` idea, and fixed geometry is best-effort unless automation is isolated. |
@@ -158,6 +159,119 @@ Use only when occasional fidelity loss is acceptable.
 
 ---
 
+## Split-Screen REPL TUI Mode
+
+The first TUI-facing deliverable should be narrower than a full standalone
+dashboard. The immediate user-facing win is a **split-screen REPL mode**:
+
+- top frame: live mirror of a watched remote session
+- bottom frame: the existing REPL prompt and command echo
+
+This keeps the feature tightly scoped to an existing example, makes the UX easy
+to validate, and avoids forcing a full navigation/dashboard design before the
+underlying mirror path is proven.
+
+### Mock-up
+
+![TUI Mirror Mock-up](tui-mirror-mock.png)
+
+The mock shows the intended first delivery:
+- a large top mirror frame rendering the watched remote session
+- a compact bottom REPL frame with prompt, command history, and a mode line
+- explicit status text for host, session, stream health, and whether TUI mode is on
+
+### Recommended Product Cut
+
+The first implementation should prioritize **shell/chat/agent traces** rather
+than perfect reproduction of full-screen applications:
+
+- use `Subscription::history()` / rolling transcript semantics for the top frame
+- preserve source/discontinuity markers so operators can tell when continuity broke
+- allow `capture-pane` refresh or future raw-terminal upgrades later without changing
+  the REPL mode contract
+
+This is still a real "mirror" for the dominant use case: watching line-oriented
+remote conversations, logs, or agent traces while retaining an interactive local
+prompt.
+
+### Why This Should Not Be a Core `SinkKind::Tui` Yet
+
+For this first delivery, a new library-level `SinkKind::Tui` does **not** make
+sense:
+
+- `ratatui`/terminal ownership is a binary concern, not a library concern
+- the UI needs local terminal lifecycle management (alternate screen, raw mode,
+  cursor visibility, resize handling), which does not fit the current `SinkKind`
+  contract
+- the existing pipeline already allows a binary-local consumer to subscribe and
+  render without extending the core sink enum
+
+**Recommendation**:
+- keep `libs/tmux` unchanged at the sink-enum level
+- implement a binary/example-local `TuiMirrorSink` or `ReplTuiMirror` consumer in
+  `examples/repl.rs` or a small helper module beside it
+- only consider promoting it to a reusable sink type later if more than one binary
+  needs the same terminal-rendering lifecycle
+
+### REPL Command Contract
+
+The REPL should grow a small, explicit TUI mode state machine:
+
+- `tui on`
+  - enter alternate-screen TUI mode
+  - split the local screen vertically into:
+    - top mirror frame
+    - bottom REPL frame
+  - do not start mirroring by itself; show an empty-state placeholder until a
+    session is watched
+- `monitor <session>`
+  - in plain REPL mode: keep today's stdout-stream behavior
+  - in TUI mode: bind the watched session for the top frame and keep the mirror
+    active until changed or stopped
+- `tui off`
+  - stop the active mirror subscription
+  - leave alternate-screen/raw mode
+  - return to the current plain REPL behavior
+
+This keeps `tui on/off` as the mode switch the user asked for while preserving
+the existing `monitor` mental model.
+
+### Consumer Architecture
+
+For the first cut, the mirror consumer should sit **beside** the existing sink
+pipeline rather than inside `SinkKind`:
+
+```
+HostHandle / OutputBus
+        │
+        ▼
+subscribe(filters) -> Subscription
+        │
+        ├── plain REPL monitor path (stdout)
+        └── TUI mode path
+             ├── history(opts) for bounded top-frame transcript
+             ├── async UI state store
+             └── ratatui draw loop
+```
+
+That gives the TUI path:
+- source labels and discontinuity markers from the existing stream substrate
+- bounded memory via `HistoryHandle`
+- no new core sink variant or terminal dependency in `libs/tmux`
+
+### Relationship to the Deeper TUI Mirror Work
+
+This split-screen REPL mode is **Phase 5a**. It is intentionally narrower than
+the full terminal-state mirror described below:
+
+- Phase 5a: transcript/history-oriented mirror for shell/chat traces
+- Phase 5b: full-fidelity terminal-state mirror for apps like `vim` or `htop`
+
+The first delivery should land 5a before 5b. That gives a useful, testable UX
+sooner and avoids dragging terminal-emulation complexity into the first TUI step.
+
+---
+
 ## TUI Mirror Sink
 
 This section designs a **Sink** that replicates a tmux pane's visual content —
@@ -168,9 +282,10 @@ ratatui frame. Two approaches are analyzed: polling-based and control-mode-based
 
 ![TUI Mirror Mock-up](tui-mirror-mock.png)
 
-Three-pane layout: two mirrored sessions (htop on prod-web, vim on prod-api)
-at top, with a summary/alerting pane spanning the bottom. Status bar shows
-connection state and poll mode.
+For the first delivery, interpret this as the split-screen REPL layout above:
+top mirror frame, bottom REPL frame, explicit stream status, and a watched
+session such as a remote shell or agent trace. A future standalone dashboard can
+grow beyond this layout once the mirror path is proven.
 
 ### Problem Statement
 
