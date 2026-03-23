@@ -390,7 +390,100 @@ Image building (one-time): debootstrap, mksquashfs
 Run `motlie-vmm check` to verify all of the above.
 ```
 
-### 2. Embedded Binary Launcher (phase 1)
+### 2. VMM Backend Abstraction (phase 1)
+
+The core abstraction that enables multiple hypervisor backends. All
+components above this trait (SSH proxy, FUSE mounts, credential
+management, event bus) are backend-agnostic. The initial implementation
+is `FirecrackerBackend` for Linux/KVM. A future `VzBackend` targets
+macOS with Apple’s Virtualization.framework.
+
+```rust
+pub trait VmmBackend: Send + Sync {
+    type Vm: VmHandle;
+
+    /// Verify platform prerequisites (KVM, vsock, etc.)
+    fn check_platform(&self) -> Result<Report>;
+
+    /// Build a guest image for this backend
+    fn build_image(&self, config: &BuildConfig) -> Result<()>;
+
+    /// Create and boot a VM
+    fn create_vm(&self, config: &VmConfig) -> Result<Self::Vm>;
+
+    /// Stop and destroy a VM
+    fn stop_vm(&self, vm: &mut Self::Vm) -> Result<()>;
+
+    /// Snapshot a running VM
+    fn snapshot(&self, vm: &Self::Vm, path: &Path) -> Result<()>;
+
+    /// Restore a VM from snapshot
+    fn restore(&self, path: &Path, config: &VmConfig) -> Result<Self::Vm>;
+}
+
+pub trait VmHandle: Send + Sync {
+    /// Get a vsock listener for the multiplexed port
+    fn vsock_listener(&self) -> Result<VsockListener>;
+
+    /// Guest IP for internal SSH connection
+    fn guest_ip(&self) -> Ipv4Addr;
+
+    /// CID for vsock
+    fn cid(&self) -> u32;
+
+    /// Check if VM is running
+    fn is_running(&self) -> bool;
+}
+```
+
+**FirecrackerBackend** (Linux):
+
+```rust
+pub struct FirecrackerBackend {
+    firecracker: &'static EmbeddedBinary,
+    passt: &'static EmbeddedBinary,
+    guest_agent: &'static EmbeddedBinary,
+    bootstrap: &'static EmbeddedBinary,
+}
+
+pub struct FirecrackerVm {
+    pub name: String,
+    pub firecracker: Child,
+    pub passt: Child,
+    pub guest_ip: Ipv4Addr,
+    pub cid: u32,
+    pub last_activity: Arc<Mutex<Instant>>,
+    pub vsock_uds: PathBuf,
+    _fc_fd: OwnedFd,
+    _passt_fd: OwnedFd,
+}
+
+impl VmHandle for FirecrackerVm {
+    fn vsock_listener(&self) -> Result<VsockListener> {
+        vsock_listen(&self.vsock_uds, 5000)
+    }
+    fn guest_ip(&self) -> Ipv4Addr { self.guest_ip }
+    fn cid(&self) -> u32 { self.cid }
+    fn is_running(&self) -> bool { /* check PID */ }
+}
+```
+
+The Daemon holds a `Box<dyn VmmBackend>` and all VM operations go
+through the trait. The SSH server, FS server, control protocol, event
+bus, and credential management never know which backend is running.
+
+```rust
+pub struct Daemon {
+    backend: Box<dyn VmmBackend<Vm = Box<dyn VmHandle>>>,
+    config: DaemonConfig,
+    ca: SshCa,
+    vms: Arc<Mutex<HashMap<String, Box<dyn VmHandle>>>>,
+    event_bus: Arc<EventBus>,
+    // ...
+}
+```
+
+### 3. Embedded Binary Launcher (phase 1)
 
 Writes an embedded binary to memfd, spawns it via `/proc/self/fd/{N}`.
 Binary never touches disk.
@@ -446,7 +539,7 @@ pub static BOOTSTRAP: EmbeddedBinary = EmbeddedBinary::new(
     "motlie-vmm-bootstrap", include_bytes!(concat!(env!("OUT_DIR"), "/motlie-vmm-bootstrap")));
 ```
 
-### 3. Image Builder (phase 1)
+### 4. Image Builder (phase 1)
 
 Builds from the running host without Docker. The image contains NO
 motlie-vmm binaries — only a tiny vsock bootstrap (~100KB, ~50 lines)
@@ -696,12 +789,16 @@ Firecracker boots kernel with init=/sbin/overlay-init overlay_root=vdb
   └─ VM ready (host receives "ready" signal, completes ensure_vm)
 ```
 
-### 4. VM Manager + Networking (phase 2)
+### 5. VM Manager + Networking (phase 2)
 
-Each VM gets: passt (memfd) in its own netns, firecracker (memfd)
-joining the same netns, vsock mounts for workspace + scratch + credentials.
+This is the `FirecrackerBackend` implementation of the `VmmBackend`
+trait (§2). Each VM gets: passt (memfd) in its own netns, firecracker
+(memfd) joining the same netns, vsock mounts for workspace + scratch
+
+- credentials.
 
 ```rust
+// FirecrackerBackend's Vm — implements VmHandle trait
 pub struct Vm {
     pub name: String,
     pub firecracker: Child,
@@ -1012,7 +1109,7 @@ impl Daemon {
 }
 ```
 
-### 5. SSH CA (phase 3)
+### 6. SSH CA (phase 3)
 
 ```rust
 pub struct SshCa { user_ca: PrivateKey, host_ca: PrivateKey }
@@ -1051,7 +1148,7 @@ impl SshCa {
 }
 ```
 
-### 6. SSH Configuration Inside the VM (phase 3)
+### 7. SSH Configuration Inside the VM (phase 3)
 
 The VM runs stock OpenSSH with CA-based authentication. No custom
 sshd patches — only standard `sshd_config` directives (stable since
@@ -1117,7 +1214,7 @@ the SSH client — it signs a throwaway cert and immediately uses it
 to connect, all inside the same process. The 60-second TTL means the
 cert is useless by the time anyone could intercept it.
 
-### 7. Daemon (phase 4)
+### 8. Daemon (phase 4)
 
 ```rust
 pub struct DaemonConfig {
@@ -1211,7 +1308,7 @@ fn preflight_checks(config: &DaemonConfig) -> Result<()> {
 }
 ```
 
-### 8. SSH Server — russh, in-process (phase 4)
+### 9. SSH Server — russh, in-process (phase 4)
 
 ```rust
 impl russh::server::Server for Daemon {
@@ -1257,7 +1354,7 @@ impl russh::server::Handler for SshSession {
 }
 ```
 
-### 9. vsock Multiplexed Listener + Guest Agent (phases 5–6)
+### 10. vsock Multiplexed Listener + Guest Agent (phases 5–6)
 
 All VM↔host communication flows through a single vsock port (5000).
 Each incoming connection sends a handshake message identifying its type:
@@ -1298,7 +1395,7 @@ guest agent opens one connection per mount at the tool-expected paths.
 The tools read/write tokens normally, unaware they’re on a vsock-backed
 FUSE mount.
 
-### 10. Control Protocol + Dynamic Mounts (phase 7)
+### 11. Control Protocol + Dynamic Mounts (phase 7)
 
 Mounts are not limited to VM creation time. Because the filesystem
 is vsock-backed FUSE (not block devices), new mounts can be added
@@ -1501,7 +1598,7 @@ motlie-vmm mount alice /home/shared:/shared
 motlie-vmm unmount alice /data
 ```
 
-### 11. Event Bus + Audit (phase 8)
+### 12. Event Bus + Audit (phase 8)
 
 Every filesystem operation flows through the vsock FS server’s
 `handle_request()` — motlie-vmm *is* the filesystem. Events are emitted
@@ -1681,7 +1778,7 @@ if is_cred && matches!(req, FsRequest::Write { .. }) {
 }
 ```
 
-### 12. Lifecycle: process isolation and cleanup (phase 9)
+### 13. Lifecycle: process isolation and cleanup (phase 9)
 
 **Why cleanup is guaranteed:**
 
@@ -1920,7 +2017,7 @@ Processes:
 In squashfs (built once, same for all VMs, no motlie binaries except bootstrap):
   /usr/local/bin/motlie-vmm-bootstrap            ← ~100KB, fetches guest agent over vsock
   /etc/systemd/system/motlie-vmm-guest.service   ← starts bootstrap → exec's guest agent
-  /etc/ssh/sshd_config                           ← CA trust config (see §6)
+  /etc/ssh/sshd_config                           ← CA trust config (see §7)
   /etc/ssh/ssh_host_ed25519_key                  ← host keypair (generated at build)
   /etc/ssh/ssh_host_ed25519_key.pub
   /etc/profile.d/motlie-vmm-credentials.sh       ← sources /etc/motlie-vmm/env
@@ -2036,6 +2133,7 @@ Guest agent: `fuser`, `vsock`, `rmp-serde`, `serde`, `serde_json`
 |Component                                 |Lines    |
 |------------------------------------------|---------|
 |CLI + main                                |200      |
+|VmmBackend trait + FirecrackerBackend     |100      |
 |Platform check (`motlie-vmm check`)       |100      |
 |Embedded binary launcher                  |100      |
 |Build script (build.rs)                   |150      |
@@ -2051,7 +2149,7 @@ Guest agent: `fuser`, `vsock`, `rmp-serde`, `serde`, `serde_json`
 |Lifecycle (signals, cleanup)              |100      |
 |Guest agent (FUSE + vsock + control loop) |700      |
 |Bootstrap (separate crate, in squashfs)   |50       |
-|**Total**                                 |**~4250**|
+|**Total**                                 |**~4350**|
 
 ## Security
 
@@ -2341,7 +2439,7 @@ console.
 **Dependencies:** debootstrap, mksquashfs, a firecracker binary, a kernel.
 No custom guest binaries. No passt. No networking. No SSH.
 
-**Components:** §1 Platform Check, §2 Embedded Binary Launcher, §3 Image Builder.
+**Components:** §1 Platform Check, §2 VMM Backend, §3 Embedded Binary Launcher, §4 Image Builder.
 
 ```bash
 motlie-vmm build --include "openssh-server" --output ./images/devbox
@@ -2360,7 +2458,7 @@ console (ping, curl).
 **Dependencies:** Phase 1 + passt binary. Still no SSH, no vsock, no
 custom guest binaries.
 
-**Components:** §4 VM Manager (networking portions).
+**Components:** §5 VM Manager (networking portions).
 
 ### Phase 3: SSH CA + overlay injection
 
@@ -2373,7 +2471,7 @@ SSH in from the host using a manually signed cert.
 **Dependencies:** Phase 2 + ssh-key crate. Still no russh, no vsock, no
 guest binaries.
 
-**Components:** §5 SSH CA, §6 SSH Configuration Inside the VM.
+**Components:** §6 SSH CA, §7 SSH Configuration Inside the VM.
 
 ```bash
 # manually: ssh -i /tmp/ephemeral root@172.16.0.2
@@ -2390,7 +2488,7 @@ internet-connected VMs per user.
 
 **Dependencies:** Phase 3 + russh crate.
 
-**Components:** §7 Daemon, §8 SSH Server.
+**Components:** §8 Daemon, §9 SSH Server.
 
 **This is already a useful product** — isolated VMs with SSH access,
 internet, per-user workspaces (via overlay). You can install tools,
@@ -2409,7 +2507,7 @@ hello-world that prints and exits — doesn’t need to be the real guest agent.
 **Dependencies:** Phase 4 + vsock crate. First time a custom binary is
 baked into the image.
 
-**Components:** §9 vsock Multiplexed Listener (BinaryRequest handler only).
+**Components:** §10 vsock Multiplexed Listener (BinaryRequest handler only).
 
 ### Phase 6: Guest agent + FUSE mounts
 
@@ -2422,7 +2520,7 @@ listener.
 
 **Dependencies:** Phase 5 + fuser crate.
 
-**Components:** §9 vsock Multiplexed Listener (Fs handler), Guest Agent.
+**Components:** §10 vsock Multiplexed Listener (Fs handler), Guest Agent.
 
 ### Phase 7: Control protocol + dynamic mounts
 
@@ -2433,7 +2531,7 @@ listener.
 
 **Dependencies:** Phase 6.
 
-**Components:** §10 Control Protocol + Dynamic Mounts.
+**Components:** §11 Control Protocol + Dynamic Mounts.
 
 ### Phase 8: Credentials + events + graph
 
@@ -2445,7 +2543,7 @@ Event log records credential access.
 
 **Dependencies:** Phase 7 + motlie-db.
 
-**Components:** §11 Event Bus + Audit, credential portions of §4 VM Manager.
+**Components:** §12 Event Bus + Audit, credential portions of §5 VM Manager.
 
 ### Phase 9: Lifecycle hardening
 
@@ -2456,7 +2554,7 @@ Verify next startup cleans up leftover files.
 
 **Dependencies:** Phase 8.
 
-**Components:** §12 Lifecycle.
+**Components:** §13 Lifecycle.
 
 ### Phase 10: Snapshot and restore (advanced)
 
@@ -2479,7 +2577,7 @@ resilience is the work.
 ### Dependency graph
 
 ```
-Phase 1: check + build + firecracker boot
+Phase 1: check + trait + build + firecracker boot
     │
 Phase 2: + passt networking
     │
@@ -2495,9 +2593,11 @@ Phase 7: + dynamic mounts
     │
 Phase 8: + credentials + events ←── full feature set
     │
-Phase 9: + lifecycle hardening ←── production ready
+Phase 9: + lifecycle hardening ←── production ready (Linux)
     │
-Phase 10: + snapshot/restore ←── advanced (optional)
+Phase 10: + snapshot/restore ←── advanced
+    │
+Phase 11: + macOS VzBackend ←── cross-platform
 ```
 
 ### Binary build targets
@@ -2509,3 +2609,185 @@ Phase 10: + snapshot/restore ←── advanced (optional)
 |`passt`               |downloaded    |Phase 2    |Host (memfd)             |
 |`motlie-vmm-bootstrap`|separate crate|Phase 5    |Guest (in squashfs)      |
 |`motlie-vmm-guest`    |separate crate|Phase 6    |Guest (tmpfs via vsock)  |
+
+## Advanced: macOS Port with Virtualization.framework
+
+A future `VzBackend` implementation of the `VmmBackend` trait (§2)
+targeting Apple Silicon Macs. The VM boundary changes completely
+(Firecracker/KVM → Virtualization.framework), but everything above
+the trait — SSH proxy, FUSE mounts, credential management, event
+bus — is backend-agnostic and ports unchanged.
+
+### What carries over unchanged
+
+Everything above the `VmmBackend` trait:
+
+- russh SSH server (pure Rust, cross-platform)
+- SSH CA (ssh-key crate, cross-platform)
+- vsock FS protocol, FUSE guest agent, bootstrap binary (run inside Linux VM)
+- Control protocol, HandshakeMsg, multiplexed listener design
+- Event bus, motlie-db integration
+- Credential management (host-side directory structure)
+
+The guest image (kernel + rootfs) is format-compatible — VZ’s
+`VZLinuxBootLoader` takes a kernel + initrd + cmdline, same as
+Firecracker. The guest agent and bootstrap run inside the Linux VM
+and don’t know which hypervisor is underneath.
+
+### What changes
+
+|Linux (FirecrackerBackend)            |macOS (VzBackend)                           |Impact              |
+|--------------------------------------|--------------------------------------------|--------------------|
+|Firecracker + KVM                     |Virtualization.framework (VZ)               |VM lifecycle rewrite|
+|`/dev/kvm`                            |`VZVirtualMachine` API (Obj-C FFI)          |New Rust bindings   |
+|`memfd_create` for binary execution   |Not needed (VZ is a framework)              |Removed             |
+|`unshare(CLONE_NEWNET)` + per-VM netns|VZ NAT (`VZNATNetworkDeviceAttachment`)     |Simpler             |
+|passt (userspace network stack)       |Not needed (VZ provides NAT)                |Removed             |
+|overlayfs (squashfs + ext4)           |APFS clone of base disk image               |Rewritten           |
+|debootstrap                           |Download pre-built image or build externally|Simplified          |
+|`vhost_vsock` kernel module           |`VZVirtioSocketDeviceConfiguration`         |Different API       |
+|cgroup (process cleanup)              |Process groups + launchd                    |Weaker but adequate |
+|`/proc/modules`, `/proc/meminfo`      |`sysctl`, IOKit                             |Small rewrite       |
+
+### VzBackend implementation
+
+```rust
+pub struct VzBackend {
+    // No embedded binaries — VZ is a linked framework
+}
+
+pub struct VzVm {
+    vm: VzVirtualMachine,    // Rust wrapper around VZVirtualMachine
+    guest_ip: Ipv4Addr,
+    cid: u32,
+    vsock_device: VzVsockDevice,
+}
+
+impl VmHandle for VzVm {
+    fn vsock_listener(&self) -> Result<VsockListener> {
+        // VZ vsock API — get listener from VZVirtioSocketDevice
+        self.vsock_device.listen(5000)
+    }
+    fn guest_ip(&self) -> Ipv4Addr { self.guest_ip }
+    fn cid(&self) -> u32 { self.cid }
+    fn is_running(&self) -> bool { self.vm.state() == VzVmState::Running }
+}
+
+impl VmmBackend for VzBackend {
+    type Vm = VzVm;
+
+    fn check_platform(&self) -> Result<Report> {
+        // Check: macOS ≥ 13, Apple Silicon, VZ entitlement signed
+        // No KVM, no vhost_vsock
+    }
+
+    fn build_image(&self, config: &BuildConfig) -> Result<()> {
+        // APFS clone of base image instead of overlayfs
+        // No overlay-init needed — VM boots directly from writable clone
+        // Bootstrap still baked into image (same as Linux)
+    }
+
+    fn create_vm(&self, config: &VmConfig) -> Result<VzVm> {
+        // VZLinuxBootLoader with kernel + cmdline
+        // VZDiskImageStorageDeviceAttachment for root + overlay
+        // VZNATNetworkDeviceAttachment (replaces passt + netns)
+        // VZVirtioSocketDeviceConfiguration (replaces vhost_vsock)
+        // vm.start()
+    }
+
+    fn stop_vm(&self, vm: &mut VzVm) -> Result<()> {
+        // vm.stop() — VZ cleans up networking automatically
+    }
+
+    fn snapshot(&self, vm: &VzVm, path: &Path) -> Result<()> {
+        // vm.pause() + VZ saveMachineStateTo (mature API)
+    }
+
+    fn restore(&self, path: &Path, config: &VmConfig) -> Result<VzVm> {
+        // VZ restoreMachineStateFrom + resume
+    }
+}
+```
+
+### VZ Rust bindings
+
+Apple’s Virtualization.framework is Objective-C/Swift. The existing
+Rust crates (`virtualization-rs`, `virt-fwk`) are incomplete and
+unmaintained. A thin FFI layer (~600 lines) using the `objc2` crate
+covers the needed API surface:
+
+```rust
+// Minimal VZ binding — what we need
+pub struct VzVirtualMachine { /* objc2 wrapper */ }
+pub struct VzVsockDevice { /* objc2 wrapper */ }
+
+impl VzVirtualMachine {
+    fn new(config: &VzMachineConfig) -> Result<Self>;
+    fn start(&self) -> Result<()>;
+    fn pause(&self) -> Result<()>;
+    fn resume(&self) -> Result<()>;
+    fn stop(&self) -> Result<()>;
+    fn save_state(&self, path: &Path) -> Result<()>;
+    fn restore_state(&self, path: &Path) -> Result<()>;
+    fn vsock_device(&self) -> &VzVsockDevice;
+}
+
+impl VzVsockDevice {
+    fn listen(&self, port: u32) -> Result<VsockListener>;
+    fn connect(&self, port: u32) -> Result<VsockStream>;
+}
+```
+
+### Disk image management (replaces overlayfs)
+
+```
+Linux:                                macOS:
+  rootfs.squashfs (read-only base)      rootfs.img (raw/qcow2 base, read-only)
+  + overlay.ext4 (per-VM writable)      → APFS clone → alice.img (CoW, instant)
+  + overlay-init stacks them            VM boots directly from alice.img
+                                        inject config by mounting + writing + unmounting
+```
+
+APFS clone-on-write is instant and space-efficient. The per-VM image
+starts at ~0 bytes overhead and grows only as the guest writes.
+No overlay-init script needed — the VM boots directly from the
+writable image.
+
+### macOS-specific constraints
+
+1. **Entitlement required.** Binary must be signed with
+   `com.apple.security.virtualization`. Distribute signed or user
+   signs locally.
+1. **macOS 13 (Ventura) minimum** for VZ Linux boot. macOS 14+ for
+   better vsock support.
+1. **Apple Silicon only** for Linux guest VMs. Intel Macs can’t run
+   aarch64 Linux guests via VZ.
+1. **No cgroup.** Process cleanup via `killpg()` + `launchd` policies.
+   Less robust than Linux cgroup but adequate for single-user macOS.
+1. **Not zero host impact.** VZ creates `vmnet` interfaces (managed
+   by macOS, cleaned up when VM stops). Unlike Linux where passt +
+   netns leaves the host untouched.
+
+### Porting effort estimate
+
+|Category                               |Lines|
+|---------------------------------------|-----|
+|Code unchanged (above VmmBackend trait)|~1750|
+|Code rewritten (below VmmBackend trait)|~1300|
+|New code (VZ bindings, disk management)|~800 |
+|Code removed (memfd, passt, netns)     |-400 |
+
+~50% of the codebase carries over unchanged. Estimated timeline:
+~7-8 weeks after the Linux version is feature-complete (phases 1–9).
+
+### Phase 11 in project planning
+
+The macOS port is Phase 11, after snapshot/restore:
+
+```
+Phase 9:  + lifecycle hardening ←── production ready (Linux)
+    │
+Phase 10: + snapshot/restore ←── advanced
+    │
+Phase 11: + macOS VzBackend ←── cross-platform
+```
