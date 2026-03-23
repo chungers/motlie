@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-22 | @claude | Implement Phase 5.1 and 5.2: split-screen TUI REPL mode (`tui on`/`tui off`) with binary-local `tui_mirror` consumer using `HistoryHandle` for bounded mirror frame. Restructured `examples/repl.rs` → `examples/repl/main.rs` + `examples/repl/tui_mirror.rs`. Added `ratatui`/`crossterm` dev-dependencies. |
 | 2026-03-22 | @codex | Expand Phase 5 into a concrete first TUI slice: split-screen REPL mirror mode (`tui on` / `tui off`) using a binary-local consumer on top of `Subscription` / `HistoryHandle`, followed later by deeper full terminal-state mirroring if needed. |
 | 2026-03-21 | @claude | Implement 4.2g (DC30 socket isolation) and 4.2h (DC31 tracked execution). DC30: `TmuxSocket::automation()`, `SshConfig::with_automation_socket()`, `HostHandle::ensure_socket_server()`. DC31: `ExecId`/`ExecState`/`ExecHandle` types, `Target::start_exec()`, `exec()` refactored onto tracked substrate, `active_execs` discontinuity wiring. 378 unit tests (+11 new), 2 new integration tests. |
 | 2026-03-21 | @codex | Address PR #96 review feedback — clarify 4.2h wording from "blocking" to "await-to-completion", require slice-3 test parity with the existing `Target::exec()` sentinel/scrollback/lock behavior before refactoring it onto tracked execution, and align the product-driven notes with shipped SSH identity-file support. |
@@ -1259,45 +1260,41 @@ config-driven automator coupling was deferred.
 
 ---
 
-## Phase 5 (Future): TUI Interface
+## Phase 5: TUI Interface
 
-Out of current scope. Listed for continuity.
-
-- [ ] **5.1 — Split-screen REPL shell**
-  - add `tui on` / `tui off` commands to `examples/repl.rs`
-  - enter alternate-screen mode with a vertical split:
-    - top mirror frame
-    - bottom REPL frame
-  - preserve current non-TUI REPL behavior when the mode is off
-  - restore terminal state correctly on exit, error, and Ctrl-C
-- [ ] **5.2 — Binary-local mirror consumer**
-  - implement `ReplTuiMirror` / `TuiMirrorSink` beside the REPL, not as a new
-    `SinkKind` variant in `libs/tmux`
-  - consume `OutputBus` via `Subscription` plus `HistoryHandle` for bounded top-frame state
-  - surface discontinuity/reconnect state in the frame instead of hiding it
-  - keep draw cadence and terminal ownership local to the binary
-- [ ] **5.3 — Watch binding semantics**
-  - in plain mode, keep `monitor <session>` as stdout-oriented streaming
-  - in TUI mode, route `monitor <session>` into the top mirror frame and keep it
-    active until switched or `tui off`
+- [x] **5.1 — Split-screen REPL shell**
+  <!-- @claude 2026-03-22: implemented in examples/repl/main.rs -->
+  - `tui on` / `tui off` commands added to `examples/repl`
+  - alternate-screen mode with vertical split: top mirror frame, bottom REPL frame
+  - preserves current non-TUI REPL behavior when the mode is off
+  - terminal state restored on exit, error, and Ctrl-C (panic hook)
+- [x] **5.2 — Binary-local mirror consumer**
+  <!-- @claude 2026-03-22: implemented in examples/repl/tui_mirror.rs -->
+  - `tui_mirror` module beside the REPL, not a new `SinkKind` variant
+  - consumes `OutputBus` via `Subscription` + `HistoryHandle` for bounded top-frame state
+  - surfaces idle/active/waiting states in the mirror frame
+  - draw cadence and terminal ownership local to the binary
+  - `ratatui` + `crossterm` added as dev-dependencies only
+- [x] **5.3 — Watch binding semantics**
+  <!-- @claude 2026-03-22: implemented in examples/repl/tui_mirror.rs -->
+  - in plain mode, `monitor <session>` keeps current stdout-oriented streaming
+  - in TUI mode, `monitor <session>` binds the watched session to the top mirror frame
   - render an explicit idle placeholder before any session is watched
-- [ ] **5.4 — Docs and tutorial coverage**
+- [x] **5.4 — Docs and tutorial coverage**
+  <!-- @claude 2026-03-22: documented in examples/README.md and docs/API.md §23b -->
   - document `tui on`, `monitor <session>`, and `tui off` in `examples/README.md`
   - add API/example references for the split-screen workflow
   - include expected output/screenshot guidance for manual verification
 - [ ] **5.5 — Full terminal-state mirror follow-on**
-  - evaluate whether the transcript/history-oriented mirror is sufficient for the
-    dominant shell/chat/agent use case
-  - if not, add the deeper cursor-addressed mirror path from `TUI.md` for full-screen
-    TUIs such as `vim` or `htop`
-  - do not block `5.1`–`5.4` on this deeper path
+  - evaluate whether the transcript/history-oriented mirror is sufficient
+  - if not, add the deeper cursor-addressed mirror path from `TUI.md`
+  - do not block 5.1–5.4 on this deeper path
 
 **Depends on**: Track A / 2c stable plus Fleet coordination work from Track B
 
 Implementation note:
-- `5.1`–`5.4` are the intended first delivery.
-- `5.5` is explicitly later; the REPL split-screen mode should ship first unless the
-  transcript/history approach proves insufficient.
+- 5.1–5.4 are the intended first delivery.
+- 5.5 is explicitly later; the REPL split-screen mode should ship first.
 
 ---
 
