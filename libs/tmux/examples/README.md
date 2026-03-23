@@ -195,14 +195,21 @@ cargo run -p motlie-tmux --example repl -- ssh://localhost
 ./target/debug/examples/repl ssh://localhost
 ```
 
-Planned split-screen TUI follow-on for the REPL:
+#### Design mock vs actual
 
-![Planned REPL TUI mock](tui-repl-mock.png)
+| Mock (design target) | Actual (`tui on`, live capture) |
+|---|---|
+| ![Mock](tui-repl-mock.png) | ![Actual](tui-repl-actual.png) |
 
-The intended future UX is:
-- top frame mirrors a watched remote session or agent/chat trace
-- bottom frame keeps the interactive REPL prompt
-- `tui on` enters the split-screen mode and `tui off` returns to the current plain REPL
+The mock shows the aspirational multi-agent scenario with colored source labels,
+discontinuity markers, and a richer status bar. The actual screenshot is a live
+capture of the shipped `tui on` mode monitoring a real tmux session.
+
+What shipped:
+- top mirror frame with `HistoryHandle`-driven rolling transcript
+- bottom REPL frame preserving the full command surface
+- status bar with `MonitorHealth` state (active/reconnecting/failed/stopped)
+- `tui on` / `tui off` mode toggling
 
 #### Commands
 
