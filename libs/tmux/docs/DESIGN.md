@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-22 | @claude: Update Phase 5 section to reflect shipped DC32 split-screen REPL mode — replace "not in current scope" / generic `TuiSink` with shipped 5.1+5.2 status and binary-local consumer description. | Phase 5, DC32 |
 | 2026-03-21 | @claude: Update DC31 `ExecHandle` contract to match shipped API — `status()` is sync/infallible, `wait()` consumes self. | DC31 |
 | 2026-03-21 | @codex: Address PR #96 review feedback — clarify DC31 exit-code semantics, narrow `exec()` wording from "blocking" to "await-to-completion", and tighten product/design wording around competitive evidence and SSH ergonomics. | DC31, DC19, PRODUCT cross-reference |
 | 2026-03-21 | @codex: Product-driven follow-up from [`docs/PRODUCT.md`](../../../docs/PRODUCT.md): add DC30 (socket-isolation ergonomics) and DC31 (tracked command execution) as concrete robustness features. Prioritize dedicated automation sockets first, tracked command execution second. | DC30, DC31, DC19, Phase 4 |
@@ -4524,19 +4525,27 @@ multi-host/Fleet operation.
 **Technology**: [ratatui](https://ratatui.rs/) — a Rust library for building terminal
 user interfaces.
 
-**Not in current scope**. Listed here for planning continuity. The TUI will consume
-the `Fleet` API from `libs/tmux` and provide:
-- Live pane content display via `TuiSink` registered with `OutputBus` (Phase 2c)
-- Session/window/pane tree navigation across targets
-- Interactive send-keys input via `Fleet`, `HostHandle`, or `Target`
-- Transcript/history views and host connection status
-- Host connection status dashboard
+**Status**: Phase 5.1 and 5.2 shipped (DC32). The first TUI delivery is a
+split-screen REPL mode, not a standalone dashboard:
+- `tui on` / `tui off` commands in `examples/repl`
+- top-frame mirror of a watched remote session via `HistoryHandle`
+- bottom-frame REPL prompt and command history
+- transcript/history-oriented rendering (Phase 5a)
 
-The `TuiSink` implementation lives in the binary (`bins/tmux-automator/`), not in
-`libs/tmux`, consistent with DC11. It registers with the library's `OutputBus` and
-manages its own rendering cadence (e.g., 60fps batching).
+The TUI mirror consumer lives in the example layer (`examples/repl/tui_mirror.rs`),
+not in `libs/tmux`, consistent with DC11 and DC32. It consumes the library's
+`OutputBus`/`Subscription`/`HistoryHandle` surface and manages its own rendering
+cadence locally. `ratatui` and `crossterm` are dev-dependencies only.
 
-This phase depends on Phases 1-3 and 2c being complete and stable.
+Follow-on TUI work can grow toward:
+- standalone multi-pane/dashboard surfaces
+- session/window/pane tree navigation across targets
+- interactive send-keys input via `Fleet`, `HostHandle`, or `Target`
+- full terminal-state mirroring for cursor-addressed TUIs (Phase 5b)
+
+If later multiple binaries need the same TUI lifecycle, the consumer can be
+promoted to a reusable helper crate or feature-gated module.
+
 For TUI fidelity/reliability constraints under mixed-client attachment and resizing,
 see [`TUI.md`](./TUI.md).
 

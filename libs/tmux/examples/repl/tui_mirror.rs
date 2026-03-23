@@ -84,12 +84,15 @@ pub async fn run(host: &HostHandle, host_uri: &str) -> anyhow::Result<TuiAction>
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Restore terminal on panic so the user's shell isn't left in raw mode.
-    let original_hook = std::panic::take_hook();
+    // Install a panic hook that restores the terminal so the user's shell
+    // isn't left in raw mode. The original hook is shared via Arc so it
+    // can be restored on non-panic exit paths.
+    let original_hook = std::sync::Arc::new(std::panic::take_hook());
+    let hook_for_panic = std::sync::Arc::clone(&original_hook);
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
-        original_hook(info);
+        hook_for_panic(info);
     }));
 
     let mut state = TuiState::new(host_uri);
@@ -100,8 +103,14 @@ pub async fn run(host: &HostHandle, host_uri: &str) -> anyhow::Result<TuiAction>
     // Restore terminal.
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    // Drop the panic hook installed above.
+    // Remove our panic hook and restore the original. Arc::try_unwrap
+    // succeeds here because the panic hook closure (the other Arc ref)
+    // was just removed by take_hook().
     let _ = std::panic::take_hook();
+    match std::sync::Arc::try_unwrap(original_hook) {
+        Ok(hook) => std::panic::set_hook(hook),
+        Err(_) => {} // Should not happen; fall back to default hook.
+    }
 
     // Tear down any active watch.
     if let Some(watch) = state.watch.take() {
@@ -237,9 +246,17 @@ async fn process_command(
                     let filter = SinkFilter::for_session(session_name);
                     match bus.subscribe(vec![filter], 64) {
                         Ok(sub) => {
+                            // Bound the history to roughly 2x the visible
+                            // mirror frame so render_text() cost stays
+                            // proportional to the terminal, not the total
+                            // session output.
+                            let (cols, rows) =
+                                crossterm::terminal::size().unwrap_or((120, 40));
+                            let mirror_chars =
+                                (cols as usize) * (rows as usize * 3 / 4) * 2;
                             let history = sub.history(HistoryOptions {
                                 max_entries: 500,
-                                max_render_chars: 0,
+                                max_render_chars: mirror_chars,
                                 label_format: LabelFormat::Bracketed,
                                 include_omission_marker: true,
                             });
