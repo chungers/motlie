@@ -17,6 +17,8 @@
 //!   keys <target> <keys...>  Send key sequence ({Escape}, {C-c}, etc.)
 //!   capture <target> <n>     Print last N scrollback lines
 //!   monitor <session> [secs] Stream live output for N seconds (default 3)
+//!   tui on                   Enter split-screen TUI mirror mode (DC32)
+//!   tui off                  Return to plain REPL mode (inside TUI)
 //!   upload <local> <remote>  Upload a file or directory to the host
 //!   download <remote> <local> Download a file or directory from the host
 //!   quit                     Disconnect and exit
@@ -25,12 +27,14 @@
 //!   cargo run -p motlie-tmux --example repl -- ssh://localhost
 //!   cargo run -p motlie-tmux --example repl -- 'ssh://deploy@prod?identity-file=/path/to/key'
 
+mod tui_mirror;
+
 use motlie_tmux::{
     CreateSessionOptions, CreateWindowOptions, KeySequence, LabelFormat, ScrollbackQuery,
     SinkFilter, SplitDirection, SplitPaneOptions, SplitSize, SshConfig, TargetSpec,
     TransferOptions,
 };
-use std::io::{self, BufRead, Write};
+use std::io::{self, Write};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -41,15 +45,21 @@ async fn main() -> anyhow::Result<()> {
     let host = SshConfig::parse(&uri)?.connect().await?;
     println!("Connected to {}", uri);
 
-    let stdin = io::stdin().lock();
     let mut stdout = io::stdout().lock();
     let enter = KeySequence::parse("{Enter}")?;
 
     write!(stdout, "repl> ")?;
     stdout.flush()?;
 
-    for line in stdin.lines() {
-        let line = line?;
+    loop {
+        let mut line = String::new();
+        // Drop stdout lock briefly so read_line can print if needed.
+        drop(stdout);
+        let bytes = io::stdin().read_line(&mut line)?;
+        stdout = io::stdout().lock();
+        if bytes == 0 {
+            break; // EOF
+        }
         let parts: Vec<&str> = line.trim().splitn(3, ' ').collect();
         if parts.is_empty() || parts[0].is_empty() {
             write!(stdout, "repl> ")?;
@@ -77,6 +87,7 @@ async fn main() -> anyhow::Result<()> {
                 println!(
                     "  monitor <session> [secs]                Stream live output (default 3s)"
                 );
+                println!("  tui on                                  Enter split-screen TUI mode");
                 println!("  upload <local> <remote> [-r]            Upload file/dir to the host");
                 println!(
                     "  download <remote> <local> [-r]          Download file/dir from the host"
@@ -518,6 +529,25 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
+            "tui" => {
+                if parts.get(1) == Some(&"on") {
+                    // Drop stdout lock — TUI takes over the terminal.
+                    drop(stdout);
+                    match tui_mirror::run(&host, &uri).await? {
+                        tui_mirror::TuiAction::TuiOff => {
+                            stdout = io::stdout().lock();
+                            println!("Returned to plain REPL mode.");
+                        }
+                        tui_mirror::TuiAction::Quit => {
+                            println!("Disconnected.");
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    println!("usage: tui on | tui off (off only works inside TUI mode)");
+                }
+            }
+
             "upload" => {
                 if parts.len() < 3 {
                     println!("usage: upload <local_path> <remote_path> [--recursive]");
@@ -586,6 +616,7 @@ async fn main() -> anyhow::Result<()> {
         stdout.flush()?;
     }
 
+    println!("Disconnected.");
     Ok(())
 }
 
