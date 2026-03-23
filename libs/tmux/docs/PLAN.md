@@ -1274,11 +1274,13 @@ config-driven automator coupling was deferred.
   - surfaces idle/active/waiting states in the mirror frame
   - draw cadence and terminal ownership local to the binary
   - `ratatui` + `crossterm` added as dev-dependencies only
-- [ ] **5.3 — Watch binding semantics**
+- [x] **5.3 — Watch binding semantics**
+  <!-- @claude 2026-03-22: implemented in examples/repl/tui_mirror.rs -->
   - in plain mode, `monitor <session>` keeps current stdout-oriented streaming
   - in TUI mode, `monitor <session>` binds the watched session to the top mirror frame
   - render an explicit idle placeholder before any session is watched
-- [ ] **5.4 — Docs and tutorial coverage**
+- [x] **5.4 — Docs and tutorial coverage**
+  <!-- @claude 2026-03-22: documented in examples/README.md and docs/API.md §23b -->
   - document `tui on`, `monitor <session>`, and `tui off` in `examples/README.md`
   - add API/example references for the split-screen workflow
   - include expected output/screenshot guidance for manual verification
