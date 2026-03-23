@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-22 | @codex: Add DC32 for the first TUI delivery: a split-screen REPL mirror mode with `tui on` / `tui off`. Keep the first mirror consumer binary-local instead of adding a core `SinkKind::Tui`, and stage full terminal-state mirroring after the transcript/history-oriented REPL cut. | DC32, Phase 5, TUI cross-reference |
 | 2026-03-21 | @claude: Update DC31 `ExecHandle` contract to match shipped API — `status()` is sync/infallible, `wait()` consumes self. | DC31 |
 | 2026-03-21 | @codex: Address PR #96 review feedback — clarify DC31 exit-code semantics, narrow `exec()` wording from "blocking" to "await-to-completion", and tighten product/design wording around competitive evidence and SSH ergonomics. | DC31, DC19, PRODUCT cross-reference |
 | 2026-03-21 | @codex: Product-driven follow-up from [`docs/PRODUCT.md`](../../../docs/PRODUCT.md): add DC30 (socket-isolation ergonomics) and DC31 (tracked command execution) as concrete robustness features. Prioritize dedicated automation sockets first, tracked command execution second. | DC30, DC31, DC19, Phase 4 |
@@ -3476,6 +3477,59 @@ impl ExecHandle {
 - DC31 is about explicit execution state and truthfulness over time.
 - Both belong on `Target`, and both preserve the tmux-pane abstraction boundary.
 
+### DC32: Split-Screen REPL TUI Mirror First, Full Dashboard Later
+
+**Decision**: The first TUI-facing delivery should be a split-screen REPL mode,
+not a standalone dashboard and not a new core `SinkKind::Tui` variant.
+
+The immediate product cut is:
+- top frame mirrors a watched remote session
+- bottom frame preserves the existing REPL prompt and command history
+- `tui on` enters the split-screen mode
+- `tui off` stops the active mirror and returns to plain REPL mode
+
+**Why this shape first**:
+- It proves the user-facing value of TUI output without forcing a full navigation
+  or dashboard design immediately.
+- It fits the existing examples/repl workflow, so the feature is easy to demo and test.
+- The dominant near-term use case is line-oriented shells, logs, and agent/chat
+  traces, which are already well served by the stream/history substrate.
+
+**Why this should not be a core `SinkKind::Tui` yet**:
+- Terminal UI ownership (alternate screen, raw mode, cursor, resize, draw cadence)
+  is a binary concern, not a core library concern.
+- Extending `SinkKind` with a TUI variant would drag local-terminal lifecycle and
+  `ratatui`-style dependencies into `libs/tmux` prematurely.
+- The current `OutputBus` / `Subscription` / `HistoryHandle` surface already gives
+  a binary-local consumer enough structure to render the watched stream.
+
+**Recommended architecture**:
+1. `libs/tmux` remains unchanged at the sink-enum layer.
+2. The REPL or a small helper module beside it creates a binary-local `TuiMirrorSink`
+   / `ReplTuiMirror` consumer.
+3. That consumer subscribes to the existing bus, uses transcript/history semantics
+   for bounded top-frame state, and drives a `ratatui` draw loop locally.
+
+**Command semantics**:
+- `tui on`
+  - enter alternate-screen split mode
+  - show top mirror frame + bottom REPL frame
+  - no watched session initially; render placeholder state
+- `monitor <session>`
+  - in plain REPL mode: preserve current stdout-stream behavior
+  - in TUI mode: bind or switch the watched session for the top frame
+- `tui off`
+  - drop the watched-session subscription
+  - leave alternate-screen/raw mode
+  - restore plain REPL
+
+**Delivery staging**:
+- **Phase 5a**: transcript/history-oriented mirror for shell/chat/agent traces
+- **Phase 5b**: full terminal-state mirror for cursor-addressed TUIs (`vim`, `htop`)
+
+This keeps the first implementation aligned with the current external-agent and
+conversation-history direction while leaving room for a deeper full-fidelity TUI path.
+
 ### DC27: Fleet Routing Convenience vs Direct Target Use
 
 **Decision**: Keep both levels. `Target` remains the canonical direct-control handle,
@@ -4524,17 +4578,24 @@ multi-host/Fleet operation.
 **Technology**: [ratatui](https://ratatui.rs/) — a Rust library for building terminal
 user interfaces.
 
-**Not in current scope**. Listed here for planning continuity. The TUI will consume
-the `Fleet` API from `libs/tmux` and provide:
-- Live pane content display via `TuiSink` registered with `OutputBus` (Phase 2c)
-- Session/window/pane tree navigation across targets
-- Interactive send-keys input via `Fleet`, `HostHandle`, or `Target`
-- Transcript/history views and host connection status
-- Host connection status dashboard
+**Not in current scope**. Listed here for planning continuity. The first TUI cut
+should be the narrower REPL split-screen mode from DC32:
+- `tui on` / `tui off` in `examples/repl.rs`
+- top-frame mirror of a watched remote session
+- bottom-frame REPL prompt and command history
+- transcript/history-oriented rendering first
 
-The `TuiSink` implementation lives in the binary (`bins/tmux-automator/`), not in
-`libs/tmux`, consistent with DC11. It registers with the library's `OutputBus` and
-manages its own rendering cadence (e.g., 60fps batching).
+Follow-on TUI work can then grow toward:
+- standalone multi-pane/dashboard surfaces
+- session/window/pane tree navigation across targets
+- interactive send-keys input via `Fleet`, `HostHandle`, or `Target`
+- full terminal-state mirroring for cursor-addressed TUIs
+
+The first TUI mirror consumer should live in the binary/example layer, not in
+`libs/tmux`, consistent with DC11 and DC32. It consumes the library's
+`OutputBus`/`Subscription`/`HistoryHandle` surface and manages its own rendering
+cadence locally. If later multiple binaries need the same TUI lifecycle, that
+consumer can be promoted to a reusable helper crate or feature-gated module.
 
 This phase depends on Phases 1-3 and 2c being complete and stable.
 For TUI fidelity/reliability constraints under mixed-client attachment and resizing,
