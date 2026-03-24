@@ -22,9 +22,12 @@
 //!             resize/reflow detection.
 //!
 //!   monitor   Event-driven streaming via tmux control mode. Opens a control
-//!             mode connection and prints output events as they arrive — no
-//!             polling. Labels each line with its source pane. Demonstrates
+//!             mode connection and prints raw output events as they arrive —
+//!             no polling. Labels each line with its source pane. Demonstrates
 //!             the OutputBus/Subscription/JoinedStream pipeline.
+//!
+//!   render    TUI-oriented watch mode. Uses monitor readiness/events to drive
+//!             visible-pane recapture and redraw, with a short polling fallback.
 //!
 //! Usage:
 //!   stream_pane <uri> <target> [--mode MODE] [--lines N] [--interval MS] [--pattern REGEX]
@@ -48,12 +51,15 @@
 //!   # Event-driven monitoring (no polling, real-time output events)
 //!   ./target/debug/examples/stream_pane ssh://localhost my_session --mode monitor
 //!
+//!   # TUI-oriented rendered watch mode
+//!   ./target/debug/examples/stream_pane ssh://localhost my_session --mode render
+//!
 //!   # Connect with an explicit SSH key file
 //!   ./target/debug/examples/stream_pane 'ssh://deploy@prod?identity-file=/path/to/key' my_session
 
 use motlie_tmux::{
-    overlap_deduplicate, CaptureNormalizeMode, CaptureOptions, LabelFormat, ScrollbackQuery,
-    SinkFilter, SshConfig, TargetSpec,
+    overlap_deduplicate, strip_ansi, CaptureNormalizeMode, CaptureOptions, LabelFormat,
+    ScrollbackQuery, SinkFilter, SshConfig, TargetSpec,
 };
 use std::io::Write;
 use std::time::Duration;
@@ -65,6 +71,7 @@ enum Mode {
     Until,
     Fidelity,
     Monitor,
+    Render,
 }
 
 struct Args {
@@ -117,11 +124,19 @@ MODES:
 
     monitor    Event-driven streaming via tmux control mode. No polling —
                output events arrive in real-time as the pane produces them.
-               Each line is labeled with its source pane. Demonstrates the
-               OutputBus / Subscription / JoinedStream pipeline.
+               ANSI/control sequences are stripped to keep the output readable,
+               but this is still a raw stream view rather than a rendered TUI.
+               Demonstrates the OutputBus / Subscription / JoinedStream pipeline.
                --interval and --lines are ignored in this mode.
                Uses: HostHandle::start_monitoring_session(), OutputBus,
                      Subscription::joined(), JoinedStream
+
+    render     TUI-oriented watch mode. Uses monitor startup/events plus
+               capture_all() redraws to show the current rendered pane state.
+               Includes a short polling fallback for sessions whose control-mode
+               stream is not sufficient for human-readable updates.
+               --interval and --lines are ignored in this mode.
+               Uses: HostHandle::start_monitoring_session(), capture_all()
 
 EXAMPLES:
     stream_pane ssh://localhost my_session
@@ -130,6 +145,7 @@ EXAMPLES:
     stream_pane ssh://localhost my_session --mode until --pattern '^\\$ '
     stream_pane ssh://localhost my_session --mode fidelity
     stream_pane ssh://localhost my_session --mode monitor
+    stream_pane ssh://localhost my_session --mode render
     stream_pane ssh://localhost \"my_session:0.1\" --lines 30
     stream_pane 'ssh://deploy@prod?identity-file=/path/to/key' my_session";
 
@@ -144,7 +160,7 @@ fn parse_args() -> Result<Args, String> {
 
     if args.len() < 3 {
         return Err(format!(
-            "usage: {} <uri> <target> [--mode visible|tail|until|fidelity|monitor] \
+            "usage: {} <uri> <target> [--mode visible|tail|until|fidelity|monitor|render] \
              [--lines N] [--interval MS] [--pattern REGEX]\n\n\
              Try -h for detailed help.",
             args[0]
@@ -167,7 +183,8 @@ fn parse_args() -> Result<Args, String> {
                     "until" => Mode::Until,
                     "fidelity" => Mode::Fidelity,
                     "monitor" => Mode::Monitor,
-                    other => return Err(format!("unknown mode: '{}' (visible|tail|until|fidelity|monitor)", other)),
+                    "render" => Mode::Render,
+                    other => return Err(format!("unknown mode: '{}' (visible|tail|until|fidelity|monitor|render)", other)),
                 };
             }
             "--lines" => {
@@ -238,12 +255,14 @@ async fn main() -> anyhow::Result<()> {
         Mode::Until => "until",
         Mode::Fidelity => "fidelity",
         Mode::Monitor => "monitor",
+        Mode::Render => "render",
     };
 
-    if matches!(args.mode, Mode::Monitor) {
+    if matches!(args.mode, Mode::Monitor | Mode::Render) {
         eprintln!(
-            "Monitoring {} [mode=monitor, event-driven]. Ctrl-C to stop.",
+            "Monitoring {} [mode={}, event-driven]. Ctrl-C to stop.",
             target.target_string(),
+            mode_name,
         );
     } else {
         eprintln!(
@@ -263,6 +282,7 @@ async fn main() -> anyhow::Result<()> {
         Mode::Until => stream_until(&target, interval, args.lines, &args.pattern).await,
         Mode::Fidelity => stream_fidelity(&target, interval).await,
         Mode::Monitor => stream_monitor(&host, &target).await,
+        Mode::Render => stream_render(&host, &target).await,
     }
 }
 
@@ -489,9 +509,6 @@ async fn stream_monitor(
 
     // Start monitoring the session — opens control mode via a shell channel
     let monitor_handle = host.start_monitoring_session(&session_name).await?;
-    // Give the monitor task time to attach control mode before we rely on
-    // event-driven output from the session.
-    tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Convert to a JoinedStream — merges events with source labels
     let mut stream = subscription.joined(LabelFormat::Bracketed);
@@ -504,12 +521,12 @@ async fn stream_monitor(
         panes.sort_by_key(|(addr, _)| (addr.window, addr.pane));
 
         for (addr, content) in panes {
-            if content.trim().is_empty() {
+            if !has_visible_text(&content) {
                 continue;
             }
             writeln!(
                 stdout,
-                "\x1b[2m--- {}(%{}) ---\x1b[0m",
+                "\x1b[2m--- {}({}) ---\x1b[0m",
                 session_name,
                 addr.pane_id
             )?;
@@ -531,13 +548,16 @@ async fn stream_monitor(
             chunk = stream.next() => {
                 match chunk {
                     Some(chunk) => {
-                        // Print source label on source change
+                        let clean = strip_ansi(&chunk.output.content);
+                        if clean.trim().is_empty() {
+                            continue;
+                        }
                         if chunk.source_changed || !primed {
                             let label = chunk.source.minimal();
                             writeln!(stdout, "\x1b[2m--- {} ---\x1b[0m", label)?;
                         }
-                        stdout.write_all(chunk.output.content.as_bytes())?;
-                        if !chunk.output.content.ends_with('\n') {
+                        stdout.write_all(clean.as_bytes())?;
+                        if !clean.ends_with('\n') {
                             stdout.write_all(b"\n")?;
                         }
                         stdout.flush()?;
@@ -556,4 +576,100 @@ async fn stream_monitor(
     monitor_handle.shutdown().await?;
     eprintln!("\nStopped.");
     Ok(())
+}
+
+/// Mode: render — watch the currently rendered pane state for TUIs.
+async fn stream_render(
+    host: &motlie_tmux::HostHandle,
+    target: &motlie_tmux::Target,
+) -> anyhow::Result<()> {
+    let session_name = target.session_name();
+    let mut previous = target.capture_all().await?;
+    let mut refresh = tokio::time::interval(Duration::from_millis(250));
+
+    let bus = host.output_bus();
+    let filter = SinkFilter::for_session(&session_name);
+    let subscription = bus.subscribe(vec![filter], 64)?;
+
+    let monitor_handle = host.start_monitoring_session(&session_name).await?;
+    let mut stream = subscription.joined(LabelFormat::Bracketed);
+
+    let mut stdout = std::io::stdout().lock();
+    let primed = render_snapshot(&mut stdout, session_name, &previous)?;
+    if primed {
+        stdout.flush()?;
+    }
+
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => break,
+            _ = refresh.tick() => {
+                let current = target.capture_all().await?;
+                if current == previous {
+                    continue;
+                }
+
+                write!(stdout, "\x1b[2J\x1b[H")?;
+                let _ = render_snapshot(&mut stdout, session_name, &current)?;
+                stdout.flush()?;
+                previous = current;
+            }
+            chunk = stream.next() => {
+                match chunk {
+                    Some(_chunk) => {
+                        let current = target.capture_all().await?;
+                        if current == previous {
+                            continue;
+                        }
+
+                        write!(stdout, "\x1b[2J\x1b[H")?;
+                        let _ = render_snapshot(&mut stdout, session_name, &current)?;
+                        stdout.flush()?;
+                        previous = current;
+                    }
+                    None => {
+                        eprintln!("Monitor stream ended.");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    monitor_handle.shutdown().await?;
+    eprintln!("\nStopped.");
+    Ok(())
+}
+
+fn has_visible_text(content: &str) -> bool {
+    !strip_ansi(content).trim().is_empty()
+}
+
+fn render_snapshot(
+    stdout: &mut dyn Write,
+    session_name: &str,
+    panes: &std::collections::HashMap<motlie_tmux::PaneAddress, String>,
+) -> anyhow::Result<bool> {
+    let mut panes: Vec<_> = panes.iter().collect();
+    panes.sort_by_key(|(addr, _)| (addr.window, addr.pane));
+
+    let mut rendered_any = false;
+    for (addr, content) in panes {
+        if !has_visible_text(content) {
+            continue;
+        }
+        writeln!(
+            stdout,
+            "\x1b[2m--- {}({}) ---\x1b[0m",
+            session_name,
+            addr.pane_id
+        )?;
+        stdout.write_all(content.as_bytes())?;
+        if !content.ends_with('\n') {
+            stdout.write_all(b"\n")?;
+        }
+        rendered_any = true;
+    }
+
+    Ok(rendered_any)
 }
