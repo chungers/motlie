@@ -277,11 +277,6 @@ impl SessionMonitor {
                 event = shell.read() => {
                     match event {
                         Some(ShellEvent::Data(bytes)) => {
-                            if !bytes.is_empty() {
-                                if let Some(tx) = startup_ready.take() {
-                                    let _ = tx.send(());
-                                }
-                            }
                             let text = String::from_utf8_lossy(&bytes);
                             line_buf.push_str(&text);
 
@@ -296,6 +291,9 @@ impl SessionMonitor {
 
                                 match parse_control_line(&line) {
                                     ControlModeMessage::Output { pane_id, data } => {
+                                        if let Some(tx) = startup_ready.take() {
+                                            let _ = tx.send(());
+                                        }
                                         let output = self.process_output(&pane_id, &data);
                                         bus.publish(output);
                                     }
