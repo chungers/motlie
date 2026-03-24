@@ -201,6 +201,11 @@ async fn run_live(
         }
     }
 
+    // Shut down monitors before taking the final snapshot so no trailing
+    // output arrives after the snapshot is captured.
+    monitor_a.shutdown().await?;
+    monitor_b.shutdown().await?;
+
     let snapshot = history.snapshot().await;
     println!(
         "\nFinal snapshot: entries={}, omitted_entries={}, rendered_chars={}",
@@ -209,8 +214,6 @@ async fn run_live(
         snapshot.rendered_chars
     );
 
-    monitor_a.shutdown().await?;
-    monitor_b.shutdown().await?;
     bus.unsubscribe(history.id())?;
     history.join().await?;
 
@@ -258,6 +261,8 @@ async fn run_simulated(host: &motlie_tmux::HostHandle, args: &Args) -> Result<()
     });
 
     let monitor = host.start_monitoring_session(&session).await?;
+    // Give the monitor task time to attach control mode before sending turns
+    tokio::time::sleep(Duration::from_millis(400)).await;
 
     println!("Session: {}", session);
     println!(
