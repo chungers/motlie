@@ -7,20 +7,31 @@ use crate::types::{
     WindowInfo,
 };
 
+/// Field separator for tmux format strings.
+///
+/// tmux 3.6+ sanitizes control characters (bytes < 0x20) in format output,
+/// converting them to underscores. We use a printable multi-char delimiter
+/// that won't appear in tmux field values (session names, pane titles, etc.).
+pub const FIELD_SEP: &str = "@@";
+
+pub fn split_fields(line: &str) -> Vec<&str> {
+    line.split(FIELD_SEP).collect()
+}
+
 pub const LIST_CLIENTS_FMT: &str =
-    "#{client_width}\t#{client_height}\t#{client_session}";
+    "#{client_width}@@#{client_height}@@#{client_session}";
 
 pub const PANE_GEOMETRY_FMT: &str =
-    "#{pane_width}\t#{pane_height}\t#{history_size}\t#{history_limit}";
+    "#{pane_width}@@#{pane_height}@@#{history_size}@@#{history_limit}";
 
 pub const LIST_SESSIONS_FMT: &str =
-    "#{session_name}\t#{session_id}\t#{session_created}\t#{session_attached}\t#{session_windows}\t#{session_group}";
+    "#{session_name}@@#{session_id}@@#{session_created}@@#{session_attached}@@#{session_windows}@@#{session_group}";
 
 pub const LIST_WINDOWS_FMT: &str =
-    "#{session_id}\t#{session_name}\t#{window_index}\t#{window_name}\t#{window_active}\t#{window_panes}\t#{window_layout}";
+    "#{session_id}@@#{session_name}@@#{window_index}@@#{window_name}@@#{window_active}@@#{window_panes}@@#{window_layout}";
 
 pub const LIST_PANES_FMT: &str =
-    "#{pane_id}\t#{session_name}:#{window_index}.#{pane_index}\t#{pane_title}\t#{pane_current_command}\t#{pane_pid}\t#{pane_width}\t#{pane_height}\t#{pane_active}";
+    "#{pane_id}@@#{session_name}:#{window_index}.#{pane_index}@@#{pane_title}@@#{pane_current_command}@@#{pane_pid}@@#{pane_width}@@#{pane_height}@@#{pane_active}";
 
 /// List all tmux sessions.
 pub async fn list_sessions(
@@ -182,7 +193,7 @@ fn parse_clients(output: &str) -> Result<Vec<ClientInfo>> {
         if line.is_empty() {
             continue;
         }
-        let fields: Vec<&str> = line.split('\t').collect();
+        let fields: Vec<&str> = split_fields(line);
         if fields.len() < 3 {
             tracing::warn!("skipping malformed client line: {}", line);
             continue;
@@ -198,7 +209,7 @@ fn parse_clients(output: &str) -> Result<Vec<ClientInfo>> {
 
 fn parse_pane_geometry(output: &str) -> Result<PaneGeometry> {
     let line = output.trim();
-    let fields: Vec<&str> = line.split('\t').collect();
+    let fields: Vec<&str> = split_fields(line);
     if fields.len() < 4 {
         return Err(anyhow!(
             "malformed pane geometry output (expected 4 fields): {}",
@@ -213,14 +224,14 @@ fn parse_pane_geometry(output: &str) -> Result<PaneGeometry> {
     })
 }
 
-fn parse_sessions(output: &str) -> Result<Vec<SessionInfo>> {
+pub(crate) fn parse_sessions(output: &str) -> Result<Vec<SessionInfo>> {
     let mut sessions = Vec::new();
     for line in output.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let fields: Vec<&str> = line.split('\t').collect();
+        let fields: Vec<&str> = split_fields(line);
         if fields.len() < 5 {
             tracing::warn!("skipping malformed session line: {}", line);
             continue;
@@ -250,7 +261,7 @@ fn parse_windows(output: &str) -> Result<Vec<WindowInfo>> {
         if line.is_empty() {
             continue;
         }
-        let fields: Vec<&str> = line.split('\t').collect();
+        let fields: Vec<&str> = split_fields(line);
         if fields.len() < 7 {
             tracing::warn!("skipping malformed window line: {}", line);
             continue;
@@ -275,7 +286,7 @@ fn parse_panes(output: &str, filter: Option<&Regex>) -> Result<Vec<PaneInfo>> {
         if line.is_empty() {
             continue;
         }
-        let fields: Vec<&str> = line.split('\t').collect();
+        let fields: Vec<&str> = split_fields(line);
         if fields.len() < 8 {
             tracing::warn!("skipping malformed pane line: {}", line);
             continue;
@@ -315,7 +326,7 @@ mod tests {
     async fn list_sessions_parses_output() {
         let mock = MockTransport::new().with_response(
             "list-sessions",
-            "build\t$0\t1709900000\t1\t3\t\ntest\t$1\t1709900100\t0\t1\tgroup1\n",
+            "build@@$0@@1709900000@@1@@3@@\ntest@@$1@@1709900100@@0@@1@@group1\n",
         );
         let transport = TransportKind::Mock(mock);
         let sessions = list_sessions(&transport, None).await.unwrap();
@@ -341,7 +352,7 @@ mod tests {
     #[tokio::test]
     async fn list_sessions_malformed_skipped() {
         let mock = MockTransport::new()
-            .with_response("list-sessions", "bad\nok\t$0\t0\t0\t1\t\n");
+            .with_response("list-sessions", "bad\nok@@$0@@0@@0@@1@@\n");
         let transport = TransportKind::Mock(mock);
         let sessions = list_sessions(&transport, None).await.unwrap();
         assert_eq!(sessions.len(), 1);
@@ -352,7 +363,7 @@ mod tests {
     async fn list_windows_parses() {
         let mock = MockTransport::new().with_response(
             "list-windows",
-            "$0\tbuild\t0\tmain\t1\t2\teven-horizontal\n$0\tbuild\t1\teditor\t0\t1\teven-vertical\n",
+            "$0@@build@@0@@main@@1@@2@@even-horizontal\n$0@@build@@1@@editor@@0@@1@@even-vertical\n",
         );
         let transport = TransportKind::Mock(mock);
         let windows = list_windows(&transport, None, "build").await.unwrap();
@@ -367,7 +378,7 @@ mod tests {
     async fn list_panes_parses() {
         let mock = MockTransport::new().with_response(
             "list-panes",
-            "%0\tbuild:0.0\ttitle0\tbash\t1234\t80\t24\t1\n%1\tbuild:0.1\ttitle1\tvim\t1235\t80\t24\t0\n",
+            "%0@@build:0.0@@title0@@bash@@1234@@80@@24@@1\n%1@@build:0.1@@title1@@vim@@1235@@80@@24@@0\n",
         );
         let transport = TransportKind::Mock(mock);
         let panes = list_panes(&transport, None, None).await.unwrap();
@@ -387,7 +398,7 @@ mod tests {
     async fn list_panes_with_filter() {
         let mock = MockTransport::new().with_response(
             "list-panes",
-            "%0\tbuild:0.0\t\tbash\t1234\t80\t24\t1\n%1\ttest:0.0\t\tsh\t1235\t80\t24\t1\n",
+            "%0@@build:0.0@@@@bash@@1234@@80@@24@@1\n%1@@test:0.0@@@@sh@@1235@@80@@24@@1\n",
         );
         let transport = TransportKind::Mock(mock);
         let filter = Regex::new("^build").unwrap();
@@ -400,7 +411,7 @@ mod tests {
     async fn list_clients_parses() {
         let mock = MockTransport::new().with_response(
             "list-clients",
-            "200\t50\tbuild\n180\t40\ttest\n",
+            "200@@50@@build\n180@@40@@test\n",
         );
         let transport = TransportKind::Mock(mock);
         let clients = list_clients(&transport, None).await.unwrap();
@@ -423,7 +434,7 @@ mod tests {
     #[tokio::test]
     async fn query_pane_geometry_parses() {
         let mock = MockTransport::new()
-            .with_response("display-message", "80\t24\t150\t2000\n");
+            .with_response("display-message", "80@@24@@150@@2000\n");
         let transport = TransportKind::Mock(mock);
         let geo = query_pane_geometry(&transport, None, "build:0.0")
             .await
@@ -437,8 +448,8 @@ mod tests {
     #[tokio::test]
     async fn take_snapshot_combines_clients_and_pane() {
         let mock = MockTransport::new()
-            .with_response("list-clients", "200\t50\tbuild\n")
-            .with_response("display-message", "80\t24\t100\t2000\n");
+            .with_response("list-clients", "200@@50@@build\n")
+            .with_response("display-message", "80@@24@@100@@2000\n");
         let transport = TransportKind::Mock(mock);
         let snap = take_geometry_snapshot(&transport, None, "build:0.0")
             .await

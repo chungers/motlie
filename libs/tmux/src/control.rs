@@ -24,7 +24,7 @@ fn shell_escape_path(path: &Path) -> Result<String> {
 
 fn parse_created_window(output: &str) -> Result<WindowInfo> {
     let line = output.trim();
-    let fields: Vec<&str> = line.split('\t').collect();
+    let fields = crate::discovery::split_fields(line);
     if fields.len() < 7 {
         return Err(anyhow::anyhow!(
             "malformed new-window output (expected 7 fields): {}",
@@ -49,7 +49,7 @@ fn parse_created_window(output: &str) -> Result<WindowInfo> {
 
 fn parse_created_pane(output: &str) -> Result<PaneAddress> {
     let line = output.trim();
-    let fields: Vec<&str> = line.split('\t').collect();
+    let fields = crate::discovery::split_fields(line);
     if fields.len() < 2 {
         return Err(anyhow::anyhow!(
             "malformed split-pane output (expected 2 fields): {}",
@@ -134,7 +134,7 @@ pub async fn new_window(
 ) -> Result<WindowInfo> {
     let prefix = tmux_prefix(socket);
     let mut cmd = format!(
-        "{} new-window -P -F '#{{session_id}}\t#{{session_name}}\t#{{window_index}}\t#{{window_name}}\t#{{window_active}}\t#{{window_panes}}\t#{{window_layout}}'",
+        "{} new-window -P -F '#{{session_id}}@@#{{session_name}}@@#{{window_index}}@@#{{window_name}}@@#{{window_active}}@@#{{window_panes}}@@#{{window_layout}}'",
         prefix
     );
 
@@ -168,7 +168,7 @@ pub async fn split_pane(
 ) -> Result<PaneAddress> {
     let prefix = tmux_prefix(socket);
     let mut cmd = format!(
-        "{} split-window -P -F '#{{pane_id}}\t#{{session_name}}:#{{window_index}}.#{{pane_index}}'",
+        "{} split-window -P -F '#{{pane_id}}@@#{{session_name}}:#{{window_index}}.#{{pane_index}}'",
         prefix
     );
 
@@ -506,9 +506,9 @@ mod tests {
 
     #[tokio::test]
     async fn new_window_with_all_options_builds_expected_command() {
-        let expected = "tmux new-window -P -F '#{session_id}\t#{session_name}\t#{window_index}\t#{window_name}\t#{window_active}\t#{window_panes}\t#{window_layout}' -n 'editor' -x 200 -y 50 -c '/tmp/project' -t 'build' 'vim'";
+        let expected = "tmux new-window -P -F '#{session_id}@@#{session_name}@@#{window_index}@@#{window_name}@@#{window_active}@@#{window_panes}@@#{window_layout}' -n 'editor' -x 200 -y 50 -c '/tmp/project' -t 'build' 'vim'";
         let mock =
-            MockTransport::new().with_response(expected, "$0\tbuild\t1\teditor\t1\t1\tlayout");
+            MockTransport::new().with_response(expected, "$0@@build@@1@@editor@@1@@1@@layout");
         let transport = TransportKind::Mock(mock);
         let opts = CreateWindowOptions {
             name: Some("editor".to_string()),
@@ -526,8 +526,8 @@ mod tests {
 
     #[tokio::test]
     async fn split_pane_with_all_options_builds_expected_command() {
-        let expected = "tmux split-window -P -F '#{pane_id}\t#{session_name}:#{window_index}.#{pane_index}' -h -l 40% -c '/tmp/project' -t 'build:1.0' 'htop'";
-        let mock = MockTransport::new().with_response(expected, "%9\tbuild:1.1");
+        let expected = "tmux split-window -P -F '#{pane_id}@@#{session_name}:#{window_index}.#{pane_index}' -h -l 40% -c '/tmp/project' -t 'build:1.0' 'htop'";
+        let mock = MockTransport::new().with_response(expected, "%9@@build:1.1");
         let transport = TransportKind::Mock(mock);
         let opts = SplitPaneOptions {
             direction: SplitDirection::Horizontal,
@@ -575,7 +575,7 @@ mod tests {
     async fn new_window_rejects_invalid_numeric_fields() {
         let mock = MockTransport::new().with_response(
             "new-window -P",
-            "$0\tbuild\tnot-a-number\teditor\t1\talso-bad\tlayout",
+            "$0@@build@@not-a-number@@editor@@1@@also-bad@@layout",
         );
         let transport = TransportKind::Mock(mock);
 

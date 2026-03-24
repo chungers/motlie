@@ -31,9 +31,53 @@ struct HostHandleInner {
     /// Keyed by `session_name:pane_id` for session-scoped discontinuity invalidation.
     /// Each entry holds Arc refs to ExecState for running execs.
     active_execs: std::sync::Mutex<HashMap<String, Vec<Arc<std::sync::Mutex<ExecState>>>>>,
+    /// Resolved tmux binary path (e.g. "/opt/homebrew/bin/tmux").
+    /// Set once after connection via `resolve_tmux_bin()`.
+    tmux_bin: std::sync::Mutex<Option<String>>,
 }
 
 impl HostHandleInner {
+    /// Resolve the tmux binary path on the remote host.
+    /// Uses `command -v tmux` through a login shell to get the full PATH.
+    /// Caches the result. Falls back to bare `"tmux"` on localhost/mock.
+    async fn resolve_tmux_bin(&self) -> String {
+        {
+            let cached = self.tmux_bin.lock().expect("tmux_bin lock poisoned");
+            if let Some(ref bin) = *cached {
+                return bin.clone();
+            }
+        }
+
+        // Use login shell variants to get the user's full PATH.
+        // `command -v` returns exit code 1 when not found (unlike `which`
+        // on macOS zsh which returns "not found" text with exit 0).
+        let probes: &[&str] = &[
+            "command -v tmux",
+            "zsh -lc 'command -v tmux' 2>/dev/null",
+            "bash -lc 'command -v tmux' 2>/dev/null",
+        ];
+
+        let mut resolved = "tmux".to_string();
+        for probe in probes {
+            if let Ok(out) = self.transport.exec(probe).await {
+                let out = out.trim().to_string();
+                if !out.is_empty() && out.starts_with('/') {
+                    resolved = out;
+                    break;
+                }
+            }
+        }
+
+        let mut cached = self.tmux_bin.lock().expect("tmux_bin lock poisoned");
+        *cached = Some(resolved.clone());
+        resolved
+    }
+
+    /// Build the tmux command prefix using the resolved binary path.
+    async fn tmux_prefix(&self) -> String {
+        let bin = self.resolve_tmux_bin().await;
+        crate::transport::tmux_prefix_with_bin(&bin, self.socket.as_ref())
+    }
     /// Get or create an exec lock for a given pane identity key.
     fn exec_lock(&self, key: &str) -> Arc<Mutex<()>> {
         let mut locks = self.exec_locks.lock().expect("exec_locks poisoned");
@@ -85,6 +129,7 @@ impl HostHandle {
                 output_bus: std::sync::Mutex::new(None),
                 monitor_signals: std::sync::Mutex::new(HashMap::new()),
                 active_execs: std::sync::Mutex::new(HashMap::new()),
+                tmux_bin: std::sync::Mutex::new(None),
             }),
         }
     }
@@ -106,6 +151,7 @@ impl HostHandle {
                 output_bus: std::sync::Mutex::new(None),
                 monitor_signals: std::sync::Mutex::new(HashMap::new()),
                 active_execs: std::sync::Mutex::new(HashMap::new()),
+                tmux_bin: std::sync::Mutex::new(None),
             }),
         }
     }
@@ -121,6 +167,7 @@ impl HostHandle {
                 output_bus: std::sync::Mutex::new(None),
                 monitor_signals: std::sync::Mutex::new(HashMap::new()),
                 active_execs: std::sync::Mutex::new(HashMap::new()),
+                tmux_bin: std::sync::Mutex::new(None),
             }),
         }
     }
@@ -136,6 +183,7 @@ impl HostHandle {
                 output_bus: std::sync::Mutex::new(None),
                 monitor_signals: std::sync::Mutex::new(HashMap::new()),
                 active_execs: std::sync::Mutex::new(HashMap::new()),
+                tmux_bin: std::sync::Mutex::new(None),
             }),
         }
     }
@@ -156,7 +204,7 @@ impl HostHandle {
     /// no-op if the server is already running. Call this before creating sessions
     /// on a dedicated automation socket to ensure the server exists.
     pub async fn ensure_socket_server(&self) -> Result<()> {
-        let prefix = crate::transport::tmux_prefix(self.inner.socket.as_ref());
+        let prefix = self.inner.tmux_prefix().await;
         let cmd = format!("{} start-server", prefix);
         self.inner.transport.exec(&cmd).await?;
         Ok(())
@@ -164,7 +212,20 @@ impl HostHandle {
 
     /// List all tmux sessions on this host.
     pub async fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
-        discovery::list_sessions(&self.inner.transport, self.inner.socket.as_ref()).await
+        let prefix = self.inner.tmux_prefix().await;
+        let cmd = format!("{} list-sessions -F '{}'", prefix, discovery::LIST_SESSIONS_FMT);
+        let output = match self.inner.transport.exec(&cmd).await {
+            Ok(o) => o,
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("no server running") || msg.contains("no sessions") {
+                    return Ok(Vec::new());
+                }
+                return Err(e);
+            }
+        };
+        let result = discovery::parse_sessions(&output)?;
+        Ok(result)
     }
 
     /// List attached clients on this host (DC20, Phase 1.9b).
@@ -206,7 +267,7 @@ impl HostHandle {
 
         // Query the created session to get full info
         let sessions =
-            discovery::list_sessions(&self.inner.transport, self.inner.socket.as_ref()).await?;
+            self.list_sessions().await?;
         let info = sessions
             .into_iter()
             .find(|s| s.name == name)
@@ -221,7 +282,7 @@ impl HostHandle {
     /// Get a Target for an existing session by name.
     pub async fn session(&self, name: &str) -> Result<Option<Target>> {
         let sessions =
-            discovery::list_sessions(&self.inner.transport, self.inner.socket.as_ref()).await?;
+            self.list_sessions().await?;
         Ok(sessions
             .into_iter()
             .find(|s| s.name == name)
@@ -235,7 +296,7 @@ impl HostHandle {
     pub async fn target(&self, spec: &TargetSpec) -> Result<Option<Target>> {
         // Check session exists
         let sessions =
-            discovery::list_sessions(&self.inner.transport, self.inner.socket.as_ref()).await?;
+            self.list_sessions().await?;
         let session_info = match sessions.into_iter().find(|s| s.name == spec.session_name()) {
             Some(s) => s,
             None => return Ok(None),
@@ -390,7 +451,7 @@ impl HostHandle {
 
         // Resolve the session first — fail before any registration
         let sessions =
-            discovery::list_sessions(&self.inner.transport, self.inner.socket.as_ref()).await?;
+            self.list_sessions().await?;
         let session_info = sessions
             .into_iter()
             .find(|s| s.name == session)
@@ -495,10 +556,13 @@ impl HostHandle {
                         }
 
                         // Check session still exists before reconnecting
-                        let sessions = match discovery::list_sessions(
-                            &inner_ref.transport,
-                            inner_ref.socket.as_ref(),
-                        ).await {
+                        let reconnect_prefix = inner_ref.tmux_prefix().await;
+                        let reconnect_cmd = format!(
+                            "{} list-sessions -F '{}'",
+                            reconnect_prefix, discovery::LIST_SESSIONS_FMT
+                        );
+                        let sessions = match inner_ref.transport.exec(&reconnect_cmd).await
+                            .and_then(|o| discovery::parse_sessions(&o)) {
                             Ok(s) => s,
                             Err(_) => continue, // Can't reach host, retry after next backoff
                         };
@@ -1707,7 +1771,7 @@ mod tests {
     async fn create_session_returns_target() {
         let mock = MockTransport::new()
             .with_default("")
-            .with_response("list-sessions", "test\t$0\t1700000000\t0\t1\t\n");
+            .with_response("list-sessions", "test@@$0@@1700000000@@0@@1@@\n");
         let host = mock_host(mock);
         let target = host
             .create_session("test", &Default::default())
@@ -1720,7 +1784,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_not_found() {
-        let mock = MockTransport::new().with_response("list-sessions", "other\t$0\t0\t0\t1\t\n");
+        let mock = MockTransport::new().with_response("list-sessions", "other@@$0@@0@@0@@1@@\n");
         let host = mock_host(mock);
         let result = host.session("nonexistent").await.unwrap();
         assert!(result.is_none());
@@ -1728,7 +1792,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_found() {
-        let mock = MockTransport::new().with_response("list-sessions", "build\t$0\t0\t1\t2\t\n");
+        let mock = MockTransport::new().with_response("list-sessions", "build@@$0@@0@@1@@2@@\n");
         let host = mock_host(mock);
         let target = host.session("build").await.unwrap();
         assert!(target.is_some());
@@ -1739,7 +1803,7 @@ mod tests {
 
     #[tokio::test]
     async fn target_spec_session_level() {
-        let mock = MockTransport::new().with_response("list-sessions", "build\t$0\t0\t0\t1\t\n");
+        let mock = MockTransport::new().with_response("list-sessions", "build@@$0@@0@@0@@1@@\n");
         let host = mock_host(mock);
         let spec = TargetSpec::session("build");
         let t = host.target(&spec).await.unwrap();
@@ -1750,10 +1814,10 @@ mod tests {
     #[tokio::test]
     async fn children_session_lists_windows() {
         let mock = MockTransport::new()
-            .with_response("list-sessions", "build\t$0\t0\t0\t2\t\n")
+            .with_response("list-sessions", "build@@$0@@0@@0@@2@@\n")
             .with_response(
                 "list-windows",
-                "$0\tbuild\t0\tmain\t1\t1\tlayout\n$0\tbuild\t1\teditor\t0\t1\tlayout\n",
+                "$0@@build@@0@@main@@1@@1@@layout\n$0@@build@@1@@editor@@0@@1@@layout\n",
             );
         let host = mock_host(mock);
         let target = host.session("build").await.unwrap().unwrap();
@@ -1768,7 +1832,7 @@ mod tests {
     async fn new_window_returns_window_target() {
         let expected = "new-window -P";
         let mock =
-            MockTransport::new().with_response(expected, "$0\tbuild\t1\teditor\t1\t1\tlayout");
+            MockTransport::new().with_response(expected, "$0@@build@@1@@editor@@1@@1@@layout");
         let host = mock_host(mock);
         let target = host.create_target_for_test("build");
 
@@ -1818,7 +1882,7 @@ mod tests {
 
     #[tokio::test]
     async fn split_pane_returns_pane_target_from_window() {
-        let mock = MockTransport::new().with_response("split-window -P", "%9\tbuild:0.1");
+        let mock = MockTransport::new().with_response("split-window -P", "%9@@build:0.1");
         let host = mock_host(mock);
         let window_target = Target {
             inner: host.inner.clone(),
@@ -1964,14 +2028,14 @@ mod tests {
         // Session with 2 windows: window 0 (inactive) and window 1 (active).
         // Both have pane 0. Session-level pane(0) should return window 1's pane.
         let mock = MockTransport::new()
-            .with_response("list-sessions", "build\t$0\t0\t0\t2\t\n")
+            .with_response("list-sessions", "build@@$0@@0@@0@@2@@\n")
             .with_response(
                 "list-windows",
-                "$0\tbuild\t0\tmain\t0\t1\tlayout\n$0\tbuild\t1\teditor\t1\t1\tlayout\n",
+                "$0@@build@@0@@main@@0@@1@@layout\n$0@@build@@1@@editor@@1@@1@@layout\n",
             )
             .with_response(
                 "list-panes",
-                "%0\tbuild:0.0\t\tbash\t100\t80\t24\t1\n%1\tbuild:1.0\t\tvim\t101\t80\t24\t1\n",
+                "%0@@build:0.0@@@@bash@@100@@80@@24@@1\n%1@@build:1.0@@@@vim@@101@@80@@24@@1\n",
             );
         let host = mock_host(mock);
         let session = host.session("build").await.unwrap().unwrap();
