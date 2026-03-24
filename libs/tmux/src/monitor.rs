@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{anyhow, Result};
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 
 // ---------------------------------------------------------------------------
 // Per-session monitor health (DC29, 4.2a/4.2d)
@@ -258,6 +258,7 @@ impl SessionMonitor {
         shell: &mut ShellChannelKind,
         bus: &OutputBus,
         mut stop: watch::Receiver<bool>,
+        startup_ready: &mut Option<oneshot::Sender<()>>,
     ) -> Result<MonitorExitReason> {
         // Send the tmux control mode attach command
         let attach_cmd = self.attach_command();
@@ -276,6 +277,11 @@ impl SessionMonitor {
                 event = shell.read() => {
                     match event {
                         Some(ShellEvent::Data(bytes)) => {
+                            if !bytes.is_empty() {
+                                if let Some(tx) = startup_ready.take() {
+                                    let _ = tx.send(());
+                                }
+                            }
                             let text = String::from_utf8_lossy(&bytes);
                             line_buf.push_str(&text);
 
@@ -798,7 +804,13 @@ mod tests {
         let mut monitor = SessionMonitor::new("test".into(), "localhost".into());
 
         // Run monitor — it will process the canned data then hit EOF
-        monitor.run(&mut shell, &bus, stop_rx).await.unwrap();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let mut ready = Some(ready_tx);
+        monitor
+            .run(&mut shell, &bus, stop_rx, &mut ready)
+            .await
+            .unwrap();
+        ready_rx.await.expect("ready signal should be sent");
 
         // Verify two TargetOutput events were published
         match rx.try_recv().unwrap() {
@@ -860,8 +872,14 @@ mod tests {
         let (_stop_tx, stop_rx) = watch::channel(false);
         let mut monitor = SessionMonitor::new("test".into(), "localhost".into());
 
-        let result = monitor.run(&mut shell, &bus, stop_rx).await.unwrap();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let mut ready = Some(ready_tx);
+        let result = monitor
+            .run(&mut shell, &bus, stop_rx, &mut ready)
+            .await
+            .unwrap();
         assert_eq!(result, MonitorExitReason::ConnectionLost);
+        ready_rx.await.expect("ready signal should be sent before EOF");
 
         // Verify data was still published before EOF
         match rx.try_recv().unwrap() {
@@ -892,7 +910,11 @@ mod tests {
         // Stop immediately
         stop_tx.send(true).unwrap();
 
-        let result = monitor.run(&mut shell, &bus, stop_rx).await.unwrap();
+        let mut ready = None;
+        let result = monitor
+            .run(&mut shell, &bus, stop_rx, &mut ready)
+            .await
+            .unwrap();
         assert_eq!(result, MonitorExitReason::Stopped);
     }
 }
