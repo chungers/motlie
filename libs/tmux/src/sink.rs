@@ -743,13 +743,15 @@ impl HistoryHandle {
         self.state.lock().await.render_text()
     }
 
-    /// Await the background accumulator task to completion.
-    /// The task finishes when the subscription channel closes
-    /// (via `unsubscribe()` or bus `shutdown()`).
-    pub async fn join(self) -> Result<()> {
+    /// Await the background accumulator task to completion and return the
+    /// final snapshot. The task finishes when the subscription channel closes
+    /// (via `unsubscribe()` or bus `shutdown()`), guaranteeing all buffered
+    /// events have been drained into the snapshot.
+    pub async fn join(self) -> Result<HistorySnapshot> {
         self.task
             .await
-            .map_err(|e| anyhow!("history accumulator task panicked: {}", e))
+            .map_err(|e| anyhow!("history accumulator task panicked: {}", e))?;
+        Ok(self.state.lock().await.snapshot())
     }
 }
 
