@@ -59,18 +59,23 @@ fn parse_created_pane(output: &str) -> Result<PaneAddress> {
     PaneAddress::parse(fields[0], fields[1])
 }
 
-/// Create a new detached tmux session (DC22).
-///
-/// Runs `tmux new-session -d -s <name>` with optional `-n`, `-x`, `-y`, and command.
-/// If `opts.history_limit` is set, issues two additional `set-option` commands:
-/// per-session (covers future panes) and per-pane (tmux 3.1+, covers initial pane).
+/// Create a new detached tmux session (using bare "tmux" prefix).
 pub async fn create_session(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
     name: &str,
     opts: &CreateSessionOptions,
 ) -> Result<()> {
-    let prefix = tmux_prefix(socket);
+    create_session_with_prefix(transport, &tmux_prefix(socket), name, opts).await
+}
+
+/// Create a new detached tmux session using a caller-provided prefix (DC22).
+pub async fn create_session_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    name: &str,
+    opts: &CreateSessionOptions,
+) -> Result<()> {
     let mut cmd = format!("{} new-session -d -s {}", prefix, shell_escape(name));
 
     if let Some(wn) = &opts.window_name {
@@ -89,11 +94,8 @@ pub async fn create_session(
     transport.exec(&cmd).await?;
 
     // Set history-limit if requested (DC22, Option B).
-    // If either set-option fails, kill the just-created session to avoid
-    // leaked state, then propagate the error.
     if let Some(limit) = opts.history_limit {
         let result = async {
-            // Per-session: covers future windows/panes
             let session_cmd = format!(
                 "{} set-option -t {} history-limit {}",
                 prefix,
@@ -102,7 +104,6 @@ pub async fn create_session(
             );
             transport.exec(&session_cmd).await?;
 
-            // Per-pane: covers the initial pane created by new-session (tmux 3.1+)
             let pane_cmd = format!(
                 "{} set-option -p -t {} history-limit {}",
                 prefix,
@@ -115,7 +116,6 @@ pub async fn create_session(
         .await;
 
         if let Err(e) = result {
-            // Best-effort cleanup: kill the session we just created
             let kill_cmd = format!("{} kill-session -t {}", prefix, shell_escape(name));
             let _ = transport.exec(&kill_cmd).await;
             return Err(e);
@@ -125,16 +125,25 @@ pub async fn create_session(
     Ok(())
 }
 
-/// Create a new tmux window and return its typed address metadata (DC25).
+/// Create a new tmux window (using bare "tmux" prefix).
 pub async fn new_window(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
     session: &str,
     opts: &CreateWindowOptions,
 ) -> Result<WindowInfo> {
-    let prefix = tmux_prefix(socket);
+    new_window_with_prefix(transport, &tmux_prefix(socket), session, opts).await
+}
+
+/// Create a new tmux window using a caller-provided prefix (DC25).
+pub async fn new_window_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    session: &str,
+    opts: &CreateWindowOptions,
+) -> Result<WindowInfo> {
     let mut cmd = format!(
-        "{} new-window -P -F '#{{session_id}}@@#{{session_name}}@@#{{window_index}}@@#{{window_name}}@@#{{window_active}}@@#{{window_panes}}@@#{{window_layout}}'",
+        "{} new-window -P -F '#{{session_id}}<|>#{{session_name}}<|>#{{window_index}}<|>#{{window_name}}<|>#{{window_active}}<|>#{{window_panes}}<|>#{{window_layout}}'",
         prefix
     );
 
@@ -159,16 +168,25 @@ pub async fn new_window(
     parse_created_window(&output)
 }
 
-/// Split a tmux pane/window and return the created pane address (DC25).
+/// Split a tmux pane/window (using bare "tmux" prefix).
 pub async fn split_pane(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
     target: &str,
     opts: &SplitPaneOptions,
 ) -> Result<PaneAddress> {
-    let prefix = tmux_prefix(socket);
+    split_pane_with_prefix(transport, &tmux_prefix(socket), target, opts).await
+}
+
+/// Split a tmux pane/window using a caller-provided prefix (DC25).
+pub async fn split_pane_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    opts: &SplitPaneOptions,
+) -> Result<PaneAddress> {
     let mut cmd = format!(
-        "{} split-window -P -F '#{{pane_id}}@@#{{session_name}}:#{{window_index}}.#{{pane_index}}'",
+        "{} split-window -P -F '#{{pane_id}}<|>#{{session_name}}:#{{window_index}}.#{{pane_index}}'",
         prefix
     );
 
@@ -206,63 +224,93 @@ pub async fn split_pane(
     parse_created_pane(&output)
 }
 
-/// Kill a tmux session by name.
+/// Kill a tmux session by name (using bare "tmux" prefix).
 pub async fn kill_session(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
     name: &str,
 ) -> Result<()> {
-    let prefix = tmux_prefix(socket);
+    kill_session_with_prefix(transport, &tmux_prefix(socket), name).await
+}
+
+/// Kill a tmux session using a caller-provided prefix.
+pub async fn kill_session_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    name: &str,
+) -> Result<()> {
     let cmd = format!("{} kill-session -t {}", prefix, shell_escape(name));
     transport.exec(&cmd).await?;
     Ok(())
 }
 
-/// Kill a tmux window.
+/// Kill a tmux window (using bare "tmux" prefix).
 pub async fn kill_window(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
     target: &str,
 ) -> Result<()> {
-    let prefix = tmux_prefix(socket);
+    kill_window_with_prefix(transport, &tmux_prefix(socket), target).await
+}
+
+/// Kill a tmux window using a caller-provided prefix.
+pub async fn kill_window_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+) -> Result<()> {
     let cmd = format!("{} kill-window -t {}", prefix, shell_escape(target));
     transport.exec(&cmd).await?;
     Ok(())
 }
 
-/// Kill a tmux pane.
+/// Kill a tmux pane (using bare "tmux" prefix).
 pub async fn kill_pane(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
     target: &str,
 ) -> Result<()> {
-    let prefix = tmux_prefix(socket);
+    kill_pane_with_prefix(transport, &tmux_prefix(socket), target).await
+}
+
+/// Kill a tmux pane using a caller-provided prefix.
+pub async fn kill_pane_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+) -> Result<()> {
     let cmd = format!("{} kill-pane -t {}", prefix, shell_escape(target));
     transport.exec(&cmd).await?;
     Ok(())
 }
 
-/// Send a key sequence to a tmux target.
+/// Send a key sequence to a tmux target (using bare "tmux" prefix).
 pub async fn send_keys(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
     target: &str,
     keys: &KeySequence,
 ) -> Result<()> {
-    let prefix = tmux_prefix(socket);
+    send_keys_with_prefix(transport, &tmux_prefix(socket), target, keys).await
+}
+
+/// Send a key sequence using a caller-provided prefix.
+pub async fn send_keys_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    keys: &KeySequence,
+) -> Result<()> {
     let tmux_target = shell_escape(target);
 
     for args in keys.to_tmux_args(target) {
-        // Build the full command: tmux [socket] send-keys [-l] -t target [text|key]
-        // All arguments are shell-escaped to prevent injection via Raw key names.
         let has_literal = args.contains(&"-l".to_string());
-        let mut cmd = prefix.clone();
+        let mut cmd = prefix.to_string();
         cmd.push_str(" send-keys");
         if has_literal {
             cmd.push_str(" -l");
         }
         cmd.push_str(&format!(" -t {}", tmux_target));
-        // Last element is the value (text or key name)
         let value = &args[args.len() - 1];
         cmd.push_str(&format!(" {}", shell_escape(value)));
         transport.exec(&cmd).await?;
@@ -270,14 +318,23 @@ pub async fn send_keys(
     Ok(())
 }
 
-/// Send literal text to a tmux target (send-keys -l).
+/// Send literal text to a tmux target (using bare "tmux" prefix).
 pub async fn send_text(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
     target: &str,
     text: &str,
 ) -> Result<()> {
-    let prefix = tmux_prefix(socket);
+    send_text_with_prefix(transport, &tmux_prefix(socket), target, text).await
+}
+
+/// Send literal text using a caller-provided prefix.
+pub async fn send_text_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    text: &str,
+) -> Result<()> {
     let cmd = format!(
         "{} send-keys -l -t {} {}",
         prefix,
@@ -288,14 +345,23 @@ pub async fn send_text(
     Ok(())
 }
 
-/// Rename a tmux session.
+/// Rename a tmux session (using bare "tmux" prefix).
 pub async fn rename_session(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
     current_name: &str,
     new_name: &str,
 ) -> Result<()> {
-    let prefix = tmux_prefix(socket);
+    rename_session_with_prefix(transport, &tmux_prefix(socket), current_name, new_name).await
+}
+
+/// Rename a tmux session using a caller-provided prefix.
+pub async fn rename_session_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    current_name: &str,
+    new_name: &str,
+) -> Result<()> {
     let cmd = format!(
         "{} rename-session -t {} {}",
         prefix,
@@ -306,7 +372,7 @@ pub async fn rename_session(
     Ok(())
 }
 
-/// Rename a tmux window.
+/// Rename a tmux window (using bare "tmux" prefix).
 pub async fn rename_window(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
@@ -314,7 +380,18 @@ pub async fn rename_window(
     window_index: u32,
     new_name: &str,
 ) -> Result<()> {
-    let prefix = tmux_prefix(socket);
+    rename_window_with_prefix(transport, &tmux_prefix(socket), session, window_index, new_name)
+        .await
+}
+
+/// Rename a tmux window using a caller-provided prefix.
+pub async fn rename_window_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    session: &str,
+    window_index: u32,
+    new_name: &str,
+) -> Result<()> {
     let target = format!("{}:{}", session, window_index);
     let cmd = format!(
         "{} rename-window -t {} {}",
@@ -326,20 +403,23 @@ pub async fn rename_window(
     Ok(())
 }
 
-/// Set `history-limit` for a tmux session or globally (DC20, Phase 1.9b).
-///
-/// **Important**: `history-limit` only applies to panes created *after* this
-/// call. Existing panes retain their creation-time limit. For automation,
-/// call this before creating the session/window.
-///
-/// - `target`: session name for session-level, or `None` for global server-level.
+/// Set `history-limit` (using bare "tmux" prefix).
 pub async fn set_history_limit(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
     target: Option<&str>,
     limit: u32,
 ) -> Result<()> {
-    let prefix = tmux_prefix(socket);
+    set_history_limit_with_prefix(transport, &tmux_prefix(socket), target, limit).await
+}
+
+/// Set `history-limit` using a caller-provided prefix (DC20, Phase 1.9b).
+pub async fn set_history_limit_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: Option<&str>,
+    limit: u32,
+) -> Result<()> {
     let cmd = match target {
         Some(t) => format!(
             "{} set-option -t {} history-limit {}",
@@ -353,19 +433,21 @@ pub async fn set_history_limit(
     Ok(())
 }
 
-/// Query the current `history-limit` for a session (or global default).
-///
-/// **Note**: the returned value is the *configured* limit, which only applies
-/// to panes created after it was set. Existing panes retain their
-/// creation-time limit regardless of subsequent changes. To verify a
-/// specific pane's effective limit, use `display-message -p '#{history_limit}'`
-/// targeted at that pane.
+/// Query the current `history-limit` (using bare "tmux" prefix).
 pub async fn get_history_limit(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
     target: Option<&str>,
 ) -> Result<u32> {
-    let prefix = tmux_prefix(socket);
+    get_history_limit_with_prefix(transport, &tmux_prefix(socket), target).await
+}
+
+/// Query the current `history-limit` using a caller-provided prefix.
+pub async fn get_history_limit_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: Option<&str>,
+) -> Result<u32> {
     let cmd = match target {
         Some(t) => format!(
             "{} show-option -v -t {} history-limit",
@@ -506,9 +588,9 @@ mod tests {
 
     #[tokio::test]
     async fn new_window_with_all_options_builds_expected_command() {
-        let expected = "tmux new-window -P -F '#{session_id}@@#{session_name}@@#{window_index}@@#{window_name}@@#{window_active}@@#{window_panes}@@#{window_layout}' -n 'editor' -x 200 -y 50 -c '/tmp/project' -t 'build' 'vim'";
+        let expected = "tmux new-window -P -F '#{session_id}<|>#{session_name}<|>#{window_index}<|>#{window_name}<|>#{window_active}<|>#{window_panes}<|>#{window_layout}' -n 'editor' -x 200 -y 50 -c '/tmp/project' -t 'build' 'vim'";
         let mock =
-            MockTransport::new().with_response(expected, "$0@@build@@1@@editor@@1@@1@@layout");
+            MockTransport::new().with_response(expected, "$0<|>build<|>1<|>editor<|>1<|>1<|>layout");
         let transport = TransportKind::Mock(mock);
         let opts = CreateWindowOptions {
             name: Some("editor".to_string()),
@@ -526,8 +608,8 @@ mod tests {
 
     #[tokio::test]
     async fn split_pane_with_all_options_builds_expected_command() {
-        let expected = "tmux split-window -P -F '#{pane_id}@@#{session_name}:#{window_index}.#{pane_index}' -h -l 40% -c '/tmp/project' -t 'build:1.0' 'htop'";
-        let mock = MockTransport::new().with_response(expected, "%9@@build:1.1");
+        let expected = "tmux split-window -P -F '#{pane_id}<|>#{session_name}:#{window_index}.#{pane_index}' -h -l 40% -c '/tmp/project' -t 'build:1.0' 'htop'";
+        let mock = MockTransport::new().with_response(expected, "%9<|>build:1.1");
         let transport = TransportKind::Mock(mock);
         let opts = SplitPaneOptions {
             direction: SplitDirection::Horizontal,
@@ -575,7 +657,7 @@ mod tests {
     async fn new_window_rejects_invalid_numeric_fields() {
         let mock = MockTransport::new().with_response(
             "new-window -P",
-            "$0@@build@@not-a-number@@editor@@1@@also-bad@@layout",
+            "$0<|>build<|>not-a-number<|>editor<|>1<|>also-bad<|>layout",
         );
         let transport = TransportKind::Mock(mock);
 

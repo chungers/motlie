@@ -159,6 +159,9 @@ pub struct SessionMonitor {
     session_name: String,
     host_alias: String,
     socket: Option<TmuxSocket>,
+    /// Resolved tmux binary path (e.g. "/opt/homebrew/bin/tmux").
+    /// When set, used instead of bare "tmux" for the attach command.
+    tmux_bin: Option<String>,
     normalize: CaptureNormalizeMode,
     pane_states: HashMap<String, PaneAssemblyState>,
 }
@@ -169,6 +172,7 @@ impl SessionMonitor {
             session_name,
             host_alias,
             socket: None,
+            tmux_bin: None,
             normalize: CaptureNormalizeMode::Raw,
             pane_states: HashMap::new(),
         }
@@ -184,6 +188,7 @@ impl SessionMonitor {
             session_name,
             host_alias,
             socket: None,
+            tmux_bin: None,
             normalize,
             pane_states: HashMap::new(),
         }
@@ -195,8 +200,18 @@ impl SessionMonitor {
         self
     }
 
+    /// Set the resolved tmux binary path for the attach command.
+    pub fn with_tmux_bin(mut self, tmux_bin: Option<String>) -> Self {
+        self.tmux_bin = tmux_bin;
+        self
+    }
+
     fn attach_command(&self) -> String {
-        build_attach_command(&self.session_name, self.socket.as_ref())
+        build_attach_command(
+            &self.session_name,
+            self.socket.as_ref(),
+            self.tmux_bin.as_deref(),
+        )
     }
 
     /// Process a parsed %output frame: return a TargetOutput.
@@ -324,10 +339,18 @@ impl SessionMonitor {
     }
 }
 
-fn build_attach_command(session_name: &str, socket: Option<&TmuxSocket>) -> String {
+fn build_attach_command(
+    session_name: &str,
+    socket: Option<&TmuxSocket>,
+    tmux_bin: Option<&str>,
+) -> String {
+    let prefix = match tmux_bin {
+        Some(bin) => crate::transport::tmux_prefix_with_bin(bin, socket),
+        None => tmux_prefix(socket),
+    };
     format!(
         "{} -C attach-session -t {}\n",
-        tmux_prefix(socket),
+        prefix,
         crate::control::shell_escape(session_name)
     )
 }
@@ -605,7 +628,7 @@ mod tests {
     #[test]
     fn attach_command_default_socket() {
         assert_eq!(
-            build_attach_command("build", None),
+            build_attach_command("build", None, None),
             "tmux -C attach-session -t 'build'\n"
         );
     }
@@ -613,7 +636,7 @@ mod tests {
     #[test]
     fn attach_command_named_socket() {
         assert_eq!(
-            build_attach_command("build", Some(&TmuxSocket::Name("sock".into()))),
+            build_attach_command("build", Some(&TmuxSocket::Name("sock".into())), None),
             "tmux -L 'sock' -C attach-session -t 'build'\n"
         );
     }
@@ -621,8 +644,32 @@ mod tests {
     #[test]
     fn attach_command_path_socket() {
         assert_eq!(
-            build_attach_command("build", Some(&TmuxSocket::Path("/tmp/tmux.sock".into()))),
+            build_attach_command(
+                "build",
+                Some(&TmuxSocket::Path("/tmp/tmux.sock".into())),
+                None
+            ),
             "tmux -S '/tmp/tmux.sock' -C attach-session -t 'build'\n"
+        );
+    }
+
+    #[test]
+    fn attach_command_with_resolved_bin() {
+        assert_eq!(
+            build_attach_command("build", None, Some("/opt/homebrew/bin/tmux")),
+            "/opt/homebrew/bin/tmux -C attach-session -t 'build'\n"
+        );
+    }
+
+    #[test]
+    fn attach_command_with_resolved_bin_and_socket() {
+        assert_eq!(
+            build_attach_command(
+                "build",
+                Some(&TmuxSocket::Name("sock".into())),
+                Some("/usr/local/bin/tmux")
+            ),
+            "/usr/local/bin/tmux -L 'sock' -C attach-session -t 'build'\n"
         );
     }
 

@@ -11,34 +11,44 @@ use crate::types::{
 ///
 /// tmux 3.6+ sanitizes control characters (bytes < 0x20) in format output,
 /// converting them to underscores. We use a printable multi-char delimiter
-/// that won't appear in tmux field values (session names, pane titles, etc.).
-pub const FIELD_SEP: &str = "@@";
+/// that is extremely unlikely to appear in tmux field values (session names,
+/// pane titles, etc.). The `<|>` sequence combines angle brackets and pipe
+/// in a way that doesn't occur in normal terminal data, command output, or
+/// tmux metadata.
+pub const FIELD_SEP: &str = "<|>";
 
 pub fn split_fields(line: &str) -> Vec<&str> {
     line.split(FIELD_SEP).collect()
 }
 
 pub const LIST_CLIENTS_FMT: &str =
-    "#{client_width}@@#{client_height}@@#{client_session}";
+    "#{client_width}<|>#{client_height}<|>#{client_session}";
 
 pub const PANE_GEOMETRY_FMT: &str =
-    "#{pane_width}@@#{pane_height}@@#{history_size}@@#{history_limit}";
+    "#{pane_width}<|>#{pane_height}<|>#{history_size}<|>#{history_limit}";
 
 pub const LIST_SESSIONS_FMT: &str =
-    "#{session_name}@@#{session_id}@@#{session_created}@@#{session_attached}@@#{session_windows}@@#{session_group}";
+    "#{session_name}<|>#{session_id}<|>#{session_created}<|>#{session_attached}<|>#{session_windows}<|>#{session_group}";
 
 pub const LIST_WINDOWS_FMT: &str =
-    "#{session_id}@@#{session_name}@@#{window_index}@@#{window_name}@@#{window_active}@@#{window_panes}@@#{window_layout}";
+    "#{session_id}<|>#{session_name}<|>#{window_index}<|>#{window_name}<|>#{window_active}<|>#{window_panes}<|>#{window_layout}";
 
 pub const LIST_PANES_FMT: &str =
-    "#{pane_id}@@#{session_name}:#{window_index}.#{pane_index}@@#{pane_title}@@#{pane_current_command}@@#{pane_pid}@@#{pane_width}@@#{pane_height}@@#{pane_active}";
+    "#{pane_id}<|>#{session_name}:#{window_index}.#{pane_index}<|>#{pane_title}<|>#{pane_current_command}<|>#{pane_pid}<|>#{pane_width}<|>#{pane_height}<|>#{pane_active}";
 
-/// List all tmux sessions.
+/// List all tmux sessions (using bare "tmux" prefix).
 pub async fn list_sessions(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
 ) -> Result<Vec<SessionInfo>> {
-    let prefix = tmux_prefix(socket);
+    list_sessions_with_prefix(transport, &tmux_prefix(socket)).await
+}
+
+/// List all tmux sessions using a caller-provided prefix (resolved binary + socket).
+pub async fn list_sessions_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+) -> Result<Vec<SessionInfo>> {
     let cmd = format!("{} list-sessions -F '{}'", prefix, LIST_SESSIONS_FMT);
 
     let output = match transport.exec(&cmd).await {
@@ -56,13 +66,21 @@ pub async fn list_sessions(
     parse_sessions(&output)
 }
 
-/// List windows in a session.
+/// List windows in a session (using bare "tmux" prefix).
 pub async fn list_windows(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
     session: &str,
 ) -> Result<Vec<WindowInfo>> {
-    let prefix = tmux_prefix(socket);
+    list_windows_with_prefix(transport, &tmux_prefix(socket), session).await
+}
+
+/// List windows in a session using a caller-provided prefix.
+pub async fn list_windows_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    session: &str,
+) -> Result<Vec<WindowInfo>> {
     let cmd = format!(
         "{} list-windows -t '{}' -F '{}'",
         prefix,
@@ -74,25 +92,41 @@ pub async fn list_windows(
     parse_windows(&output)
 }
 
-/// List all panes, optionally filtered by regex on session:window.pane.
+/// List all panes, optionally filtered by regex (using bare "tmux" prefix).
 pub async fn list_panes(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
     filter: Option<&Regex>,
 ) -> Result<Vec<PaneInfo>> {
-    let prefix = tmux_prefix(socket);
+    list_panes_with_prefix(transport, &tmux_prefix(socket), filter).await
+}
+
+/// List all panes using a caller-provided prefix.
+pub async fn list_panes_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    filter: Option<&Regex>,
+) -> Result<Vec<PaneInfo>> {
     let cmd = format!("{} list-panes -a -F '{}'", prefix, LIST_PANES_FMT);
     let output = transport.exec(&cmd).await?;
     parse_panes(&output, filter)
 }
 
-/// List panes in a specific session.
+/// List panes in a specific session (using bare "tmux" prefix).
 pub async fn list_panes_in_session(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
     session: &str,
 ) -> Result<Vec<PaneInfo>> {
-    let prefix = tmux_prefix(socket);
+    list_panes_in_session_with_prefix(transport, &tmux_prefix(socket), session).await
+}
+
+/// List panes in a specific session using a caller-provided prefix.
+pub async fn list_panes_in_session_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    session: &str,
+) -> Result<Vec<PaneInfo>> {
     let cmd = format!(
         "{} list-panes -s -t '{}' -F '{}'",
         prefix,
@@ -103,12 +137,19 @@ pub async fn list_panes_in_session(
     parse_panes(&output, None)
 }
 
-/// List attached tmux clients with their screen dimensions (DC20, Phase 1.9b).
+/// List attached tmux clients (using bare "tmux" prefix).
 pub async fn list_clients(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
 ) -> Result<Vec<ClientInfo>> {
-    let prefix = tmux_prefix(socket);
+    list_clients_with_prefix(transport, &tmux_prefix(socket)).await
+}
+
+/// List attached tmux clients using a caller-provided prefix (DC20, Phase 1.9b).
+pub async fn list_clients_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+) -> Result<Vec<ClientInfo>> {
     let cmd = format!("{} list-clients -F '{}'", prefix, LIST_CLIENTS_FMT);
 
     let output = match transport.exec(&cmd).await {
@@ -125,13 +166,21 @@ pub async fn list_clients(
     parse_clients(&output)
 }
 
-/// Query pane geometry and scrollback state via `display-message` (DC20, Phase 1.9b).
+/// Query pane geometry (using bare "tmux" prefix).
 pub async fn query_pane_geometry(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
     target: &str,
 ) -> Result<PaneGeometry> {
-    let prefix = tmux_prefix(socket);
+    query_pane_geometry_with_prefix(transport, &tmux_prefix(socket), target).await
+}
+
+/// Query pane geometry using a caller-provided prefix (DC20, Phase 1.9b).
+pub async fn query_pane_geometry_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+) -> Result<PaneGeometry> {
     let cmd = format!(
         "{} display-message -p -t '{}' '{}'",
         prefix,
@@ -143,23 +192,31 @@ pub async fn query_pane_geometry(
     parse_pane_geometry(&output)
 }
 
-/// Take a full geometry snapshot: clients + pane state (DC20, Phase 1.9b).
-///
-/// `target` is a tmux target string (e.g. "build:0.0"). The session name
-/// is extracted from the target to scope client filtering.
+/// Take a full geometry snapshot (using bare "tmux" prefix).
 pub async fn take_geometry_snapshot(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
     target: &str,
 ) -> Result<GeometrySnapshot> {
-    let clients = list_clients(transport, socket).await?;
-    let pane = query_pane_geometry(transport, socket, target).await?;
+    take_geometry_snapshot_with_prefix(transport, &tmux_prefix(socket), target).await
+}
+
+/// Take a full geometry snapshot using a caller-provided prefix (DC20, Phase 1.9b).
+///
+/// `target` is a tmux target string (e.g. "build:0.0"). The session name
+/// is extracted from the target to scope client filtering.
+pub async fn take_geometry_snapshot_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+) -> Result<GeometrySnapshot> {
+    let clients = list_clients_with_prefix(transport, prefix).await?;
+    let pane = query_pane_geometry_with_prefix(transport, prefix, target).await?;
 
     // Extract session name from target string for session-scoped client filtering.
     // Target formats: "session", "session:window", "session:window.pane", "%pane_id"
     let session = if target.starts_with('%') {
         // Pane ID target — query tmux for session name
-        let prefix = tmux_prefix(socket);
         let cmd = format!(
             "{} display-message -p -t '{}' '#{{session_name}}'",
             prefix,
@@ -326,7 +383,7 @@ mod tests {
     async fn list_sessions_parses_output() {
         let mock = MockTransport::new().with_response(
             "list-sessions",
-            "build@@$0@@1709900000@@1@@3@@\ntest@@$1@@1709900100@@0@@1@@group1\n",
+            "build<|>$0<|>1709900000<|>1<|>3<|>\ntest<|>$1<|>1709900100<|>0<|>1<|>group1\n",
         );
         let transport = TransportKind::Mock(mock);
         let sessions = list_sessions(&transport, None).await.unwrap();
@@ -352,7 +409,7 @@ mod tests {
     #[tokio::test]
     async fn list_sessions_malformed_skipped() {
         let mock = MockTransport::new()
-            .with_response("list-sessions", "bad\nok@@$0@@0@@0@@1@@\n");
+            .with_response("list-sessions", "bad\nok<|>$0<|>0<|>0<|>1<|>\n");
         let transport = TransportKind::Mock(mock);
         let sessions = list_sessions(&transport, None).await.unwrap();
         assert_eq!(sessions.len(), 1);
@@ -363,7 +420,7 @@ mod tests {
     async fn list_windows_parses() {
         let mock = MockTransport::new().with_response(
             "list-windows",
-            "$0@@build@@0@@main@@1@@2@@even-horizontal\n$0@@build@@1@@editor@@0@@1@@even-vertical\n",
+            "$0<|>build<|>0<|>main<|>1<|>2<|>even-horizontal\n$0<|>build<|>1<|>editor<|>0<|>1<|>even-vertical\n",
         );
         let transport = TransportKind::Mock(mock);
         let windows = list_windows(&transport, None, "build").await.unwrap();
@@ -378,7 +435,7 @@ mod tests {
     async fn list_panes_parses() {
         let mock = MockTransport::new().with_response(
             "list-panes",
-            "%0@@build:0.0@@title0@@bash@@1234@@80@@24@@1\n%1@@build:0.1@@title1@@vim@@1235@@80@@24@@0\n",
+            "%0<|>build:0.0<|>title0<|>bash<|>1234<|>80<|>24<|>1\n%1<|>build:0.1<|>title1<|>vim<|>1235<|>80<|>24<|>0\n",
         );
         let transport = TransportKind::Mock(mock);
         let panes = list_panes(&transport, None, None).await.unwrap();
@@ -398,7 +455,7 @@ mod tests {
     async fn list_panes_with_filter() {
         let mock = MockTransport::new().with_response(
             "list-panes",
-            "%0@@build:0.0@@@@bash@@1234@@80@@24@@1\n%1@@test:0.0@@@@sh@@1235@@80@@24@@1\n",
+            "%0<|>build:0.0<|><|>bash<|>1234<|>80<|>24<|>1\n%1<|>test:0.0<|><|>sh<|>1235<|>80<|>24<|>1\n",
         );
         let transport = TransportKind::Mock(mock);
         let filter = Regex::new("^build").unwrap();
@@ -411,7 +468,7 @@ mod tests {
     async fn list_clients_parses() {
         let mock = MockTransport::new().with_response(
             "list-clients",
-            "200@@50@@build\n180@@40@@test\n",
+            "200<|>50<|>build\n180<|>40<|>test\n",
         );
         let transport = TransportKind::Mock(mock);
         let clients = list_clients(&transport, None).await.unwrap();
@@ -434,7 +491,7 @@ mod tests {
     #[tokio::test]
     async fn query_pane_geometry_parses() {
         let mock = MockTransport::new()
-            .with_response("display-message", "80@@24@@150@@2000\n");
+            .with_response("display-message", "80<|>24<|>150<|>2000\n");
         let transport = TransportKind::Mock(mock);
         let geo = query_pane_geometry(&transport, None, "build:0.0")
             .await
@@ -448,8 +505,8 @@ mod tests {
     #[tokio::test]
     async fn take_snapshot_combines_clients_and_pane() {
         let mock = MockTransport::new()
-            .with_response("list-clients", "200@@50@@build\n")
-            .with_response("display-message", "80@@24@@100@@2000\n");
+            .with_response("list-clients", "200<|>50<|>build\n")
+            .with_response("display-message", "80<|>24<|>100<|>2000\n");
         let transport = TransportKind::Mock(mock);
         let snap = take_geometry_snapshot(&transport, None, "build:0.0")
             .await
