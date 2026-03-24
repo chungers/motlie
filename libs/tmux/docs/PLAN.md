@@ -930,6 +930,9 @@ via JoinedStream — with no matcher or action dispatch dependency.
 - [x] `HostHandle::start_monitoring()` — discovers sessions, spawns per-session monitors,
   returns `MonitorHandle` (no rules parameter — monitors all output)
 - [x] `HostHandle::start_monitoring_session()`
+  <!-- @claude 2026-03-24: Startup now blocks until the monitor has parsed its
+       first `%output` frame, replacing example-level sleep-based readiness
+       workarounds with a library contract. -->
 - [x] `stop_monitoring_session()`, `stop_monitoring()`, `monitored_sessions()` (DC13)
   <!-- @claude 2026-03-18: Implemented. Per-host tracking via monitor_signals map in
        HostHandleInner (watch::Sender keyed by session name). Stop signals fire the
@@ -1365,6 +1368,10 @@ Notes:
 - Completed **4.2 streaming resilience** established reconnect supervision, explicit
   discontinuity semantics, fresh snapshot anchoring, and Fleet health visibility for
   long-lived agent loops.
+- Example surfaces now distinguish raw stream semantics from rendered TUI watching:
+  `stream_pane --mode monitor` remains OutputBus/JoinedStream-oriented, while
+  `stream_pane --mode render` uses capture-driven redraws without changing
+  transcript/history semantics.
 - The older matcher/rule/reactor/config direction is preserved in the historical
   context section, not in the active dependency chain.
 - `1.10` gates Track A start (2a.2a).

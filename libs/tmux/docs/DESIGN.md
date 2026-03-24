@@ -666,7 +666,9 @@ impl HostHandle {
     pub async fn stop_monitoring(&self) -> Result<()>;
 
     /// Start monitoring a single session (DC13 session-level).
-    /// Accepts a session-level Target. Opens one control-mode connection.
+    /// Accepts a session-level Target. Opens one control-mode connection and
+    /// does not return until the monitor has parsed its first `%output` frame,
+    /// so callers do not need sleep-based readiness workarounds.
     pub async fn start_monitoring_session(
         &self,
         target: &Target,
@@ -2344,7 +2346,10 @@ The parser maintains per-pane assembly state to make the stream consumer-friendl
 
 **Lifecycle**: Each `SessionMonitor::run()` is spawned as a tokio task by `HostHandle`.
 The `SessionMonitorHandle` returned to the caller holds the task's `JoinHandle` and stop
-channel. Stopping a session monitor is non-disruptive to other sessions (DC13).
+channel. `HostHandle::start_monitoring_session()` blocks until the monitor has parsed
+its first `%output` frame, establishing a concrete readiness contract for callers and
+eliminating sleep-based startup guesses in examples/consumers. Stopping a session
+monitor is non-disruptive to other sessions (DC13).
 
 ### `sink.rs`
 
@@ -4551,6 +4556,8 @@ external-agent workflow instead of a built-in automator.
 **Acceptance criteria**:
 - Public docs present `Fleet` as registry/aggregation/routing rather than rule runner
 - Examples cover monitor → transcript/history → external decision → routed control
+- `stream_pane` distinguishes raw monitor output (`--mode monitor`) from rendered
+  TUI watching (`--mode render`) so stream/history semantics stay explicit
 - CLI/examples remain useful without a config-driven rule engine
 
 ### Phase 4: Hardening + Testing

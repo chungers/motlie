@@ -604,28 +604,12 @@ async fn stream_render(
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,
             _ = refresh.tick() => {
-                let current = target.capture_all().await?;
-                if current == previous {
-                    continue;
-                }
-
-                write!(stdout, "\x1b[2J\x1b[H")?;
-                let _ = render_snapshot(&mut stdout, session_name, &current)?;
-                stdout.flush()?;
-                previous = current;
+                redraw_if_changed(target, &mut stdout, session_name, &mut previous).await?;
             }
             chunk = stream.next() => {
                 match chunk {
                     Some(_chunk) => {
-                        let current = target.capture_all().await?;
-                        if current == previous {
-                            continue;
-                        }
-
-                        write!(stdout, "\x1b[2J\x1b[H")?;
-                        let _ = render_snapshot(&mut stdout, session_name, &current)?;
-                        stdout.flush()?;
-                        previous = current;
+                        redraw_if_changed(target, &mut stdout, session_name, &mut previous).await?;
                     }
                     None => {
                         eprintln!("Monitor stream ended.");
@@ -650,11 +634,11 @@ fn render_snapshot(
     session_name: &str,
     panes: &std::collections::HashMap<motlie_tmux::PaneAddress, String>,
 ) -> anyhow::Result<bool> {
-    let mut panes: Vec<_> = panes.iter().collect();
-    panes.sort_by_key(|(addr, _)| (addr.window, addr.pane));
+    let mut pane_list: Vec<_> = panes.iter().collect();
+    pane_list.sort_by_key(|(addr, _)| (addr.window, addr.pane));
 
     let mut rendered_any = false;
-    for (addr, content) in panes {
+    for (addr, content) in pane_list {
         if !has_visible_text(content) {
             continue;
         }
@@ -672,4 +656,22 @@ fn render_snapshot(
     }
 
     Ok(rendered_any)
+}
+
+async fn redraw_if_changed(
+    target: &motlie_tmux::Target,
+    stdout: &mut dyn Write,
+    session_name: &str,
+    previous: &mut std::collections::HashMap<motlie_tmux::PaneAddress, String>,
+) -> anyhow::Result<()> {
+    let current = target.capture_all().await?;
+    if current == *previous {
+        return Ok(());
+    }
+
+    write!(stdout, "\x1b[2J\x1b[H")?;
+    let _ = render_snapshot(stdout, session_name, &current)?;
+    stdout.flush()?;
+    *previous = current;
+    Ok(())
 }
