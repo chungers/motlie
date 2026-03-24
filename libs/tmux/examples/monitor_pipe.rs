@@ -237,6 +237,8 @@ async fn main() -> Result<()> {
     let sub = bus.subscribe(vec![SinkFilter::for_session(&args.session)], 64)?;
 
     let monitor = host.start_monitoring_session(&args.session).await?;
+    // Give the monitor task time to attach control mode before piping output.
+    tokio::time::sleep(Duration::from_millis(500)).await;
     let pipe = sub.pipe(build_sink(args.sink));
 
     eprintln!(
@@ -246,7 +248,7 @@ async fn main() -> Result<()> {
         sink_name(args.sink)
     );
     eprintln!(
-        "Flow: start_monitoring_session -> output_bus.subscribe -> pipe -> unsubscribe -> join"
+        "Flow: output_bus.subscribe -> start_monitoring_session -> pipe -> unsubscribe -> join"
     );
 
     tokio::select! {
