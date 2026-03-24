@@ -480,13 +480,14 @@ async fn stream_monitor(
 ) -> anyhow::Result<()> {
     let session_name = target.session_name();
 
-    // Start monitoring the session — opens control mode via a shell channel
-    let monitor_handle = host.start_monitoring_session(&session_name).await?;
-
-    // Subscribe to the output bus, filtering to this session
+    // Subscribe to the output bus BEFORE starting the monitor to avoid a race
+    // where initial %output frames are published before any subscriber exists.
     let bus = host.output_bus();
     let filter = SinkFilter::for_session(&session_name);
     let subscription = bus.subscribe(vec![filter], 64)?;
+
+    // Start monitoring the session — opens control mode via a shell channel
+    let monitor_handle = host.start_monitoring_session(&session_name).await?;
 
     // Convert to a JoinedStream — merges events with source labels
     let mut stream = subscription.joined(LabelFormat::Bracketed);

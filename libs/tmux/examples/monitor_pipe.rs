@@ -231,10 +231,12 @@ async fn main() -> Result<()> {
     let args = parse_args()?;
 
     let host = SshConfig::parse(&args.uri)?.connect().await?;
-    let monitor = host.start_monitoring_session(&args.session).await?;
 
+    // Subscribe BEFORE starting the monitor to avoid losing initial output frames
     let bus = host.output_bus();
     let sub = bus.subscribe(vec![SinkFilter::for_session(&args.session)], 64)?;
+
+    let monitor = host.start_monitoring_session(&args.session).await?;
     let pipe = sub.pipe(build_sink(args.sink));
 
     eprintln!(
