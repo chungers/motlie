@@ -78,13 +78,10 @@ async fn main() -> Result<()> {
         .await?;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    // Start monitoring the session
-    let monitor = host.start_monitoring_session(&session).await?;
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    // Subscribe and create JoinedStream
+    // Subscribe before starting the monitor to avoid missing initial output.
     let bus = host.output_bus();
     let sub = bus.subscribe(vec![SinkFilter::for_session(&session)], 64)?;
+    let monitor = host.start_monitoring_session(&session).await?;
 
     let label_format = match mode {
         Mode::Bracketed => LabelFormat::Bracketed,
