@@ -32,6 +32,7 @@ cargo build -p motlie-tmux --examples
 ./target/debug/examples/joined_demo ssh://localhost
 ./target/debug/examples/joined_demo ssh://localhost --format separator
 ./target/debug/examples/history_demo ssh://localhost
+./target/debug/examples/history_demo ssh://localhost session_a session_b
 ```
 
 ## Examples
@@ -491,10 +492,15 @@ drwxrwxrwt 35 root   root     118784 Mar 19 21:42 .
 
 ### history_demo — Rolling LLM context from two chat traces
 
-Demonstrates the new history API for external-agent workflows. The example
-creates a 2-pane session where each pane simulates another agent's chat trace,
-subscribes to the session output, builds a `HistoryHandle`, and prints the
-rolling `render_text()` context after each turn.
+Demonstrates the history API for external-agent workflows. Supports two modes:
+
+**Simulated mode** (default): creates a 2-pane session where each pane simulates
+another agent's chat trace, replays scripted turns, and prints the rolling
+`render_text()` context after each turn.
+
+**Live mode** (two session names): monitors two existing tmux sessions in real
+time and builds a combined rolling history from their output. Prints a context
+snapshot every second until Ctrl-C.
 
 This is the clearest tutorial for the intended Track B shape:
 - `OutputBus::subscribe()`
@@ -503,17 +509,23 @@ This is the clearest tutorial for the intended Track B shape:
 - a bounded, source-labeled context window ready for an external LLM/classifier
 
 ```sh
-# Default rolling window (large enough to show both traces, small enough to trim later)
+# Simulated mode — scripted two-pane demo
 ./target/debug/examples/history_demo ssh://localhost
 
 # Larger rolling context window
 ./target/debug/examples/history_demo ssh://localhost --chars 520 --entries 10
 
+# Live mode — monitor two existing sessions
+./target/debug/examples/history_demo ssh://localhost agent_session build_session
+
+# Live mode with custom window
+./target/debug/examples/history_demo ssh://localhost sess_a sess_b --chars 1000 --entries 20
+
 # Remote host with explicit SSH key
 ./target/debug/examples/history_demo 'ssh://deploy@prod?identity-file=/path/to/key'
 ```
 
-Expected output shape:
+Expected output (simulated mode):
 ```text
 Session: history_demo_12345
 Simulating two chat traces: history_demo_12345:0.0 and history_demo_12345:0.1
@@ -536,7 +548,28 @@ localhost:history_demo_12345(%6)> agent-b> Great. Update DESIGN and API to match
 Final snapshot: entries=3, omitted_entries=3, rendered_chars=...
 ```
 
+Expected output (live mode):
+```text
+Monitoring live sessions: agent_session and build_session
+History window: max_entries=8, max_render_chars=420
+Ctrl-C to stop.
+
+=== rolling context (t=1s) ===
+localhost:agent_session(%5)> $ cargo test
+localhost:build_session(%8)> running lint checks...
+
+=== rolling context (t=2s) ===
+localhost:agent_session(%5)> $ cargo test
+localhost:agent_session(%5)> running 42 tests...
+localhost:build_session(%8)> running lint checks...
+localhost:build_session(%8)> lint: ok
+^C
+
+Final snapshot: entries=4, omitted_entries=0, rendered_chars=...
+```
+
 Why this matters:
 - it shows the exact rolling prompt context an external reasoning agent would consume
 - the source labels identify which agent trace produced each line
 - trimming and omission markers are explicit instead of silently dropping earlier context
+- live mode lets you point at real sessions without scripted content

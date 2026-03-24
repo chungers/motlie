@@ -1,12 +1,14 @@
 //! Demo: rolling transcript/history for an external LLM-style agent loop.
 //!
-//! Creates a 2-pane tmux session where each pane simulates a different agent
-//! chat trace. The example subscribes to the session output, builds a
-//! `HistoryHandle`, and prints the exact rolling context window an external
-//! reasoning agent would consume after each turn.
+//! In **simulated** mode (default), creates a 2-pane tmux session where each
+//! pane simulates a different agent chat trace.
+//!
+//! In **live** mode (two session names given), monitors two existing tmux
+//! sessions and builds a combined rolling history from their real output.
 //!
 //! Usage:
 //!   history_demo [ssh://host] [--chars N] [--entries N]
+//!   history_demo [ssh://host] SESSION_A SESSION_B [--chars N] [--entries N]
 //!   history_demo 'ssh://host?identity-file=/path/to/key'
 
 use anyhow::{anyhow, Result};
@@ -22,10 +24,13 @@ history_demo — rolling transcript for an external LLM/classifier loop
 
 USAGE:
     history_demo [ssh://host] [--chars N] [--entries N]
+    history_demo [ssh://host] SESSION_A SESSION_B [--chars N] [--entries N]
 
 ARGS:
-    [ssh://host]   Optional SSH URI [default: ssh://localhost]
-                   Supports ?identity-file=/path/to/key
+    [ssh://host]       Optional SSH URI [default: ssh://localhost]
+                       Supports ?identity-file=/path/to/key
+    SESSION_A SESSION_B  Two existing tmux session names to monitor live
+                         (omit to run in simulated mode)
 
 OPTIONS:
     --chars N      Max rendered characters kept in rolling context [default: 420]
@@ -33,21 +38,28 @@ OPTIONS:
     -h, --help     Print this help
 
 WHAT IT SHOWS:
+    Simulated mode (no session args):
     - two panes simulating two other agent chat traces
     - one OutputBus subscription filtered to the session
     - one HistoryHandle building rolling context
-    - render_text() snapshots after each turn, exactly what an external
-      reasoning agent would send to its model
+    - render_text() snapshots after each turn
+
+    Live mode (two session args):
+    - monitors two existing tmux sessions in real time
+    - combined rolling history from both sessions
+    - Ctrl-C to stop and print final snapshot
 
 EXAMPLES:
     history_demo
     history_demo ssh://localhost --chars 520
-    history_demo 'ssh://deploy@prod?identity-file=/path/to/key'";
+    history_demo ssh://localhost agent_a agent_b
+    history_demo 'ssh://deploy@prod?identity-file=/path/to/key' sess1 sess2";
 
 struct Args {
     uri: String,
     max_chars: usize,
     max_entries: usize,
+    live_sessions: Option<(String, String)>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -60,6 +72,7 @@ fn parse_args() -> Result<Args> {
     let mut uri = "ssh://localhost".to_string();
     let mut max_chars = 420usize;
     let mut max_entries = 8usize;
+    let mut positional: Vec<String> = Vec::new();
     let mut i = 1usize;
 
     while i < argv.len() {
@@ -89,20 +102,35 @@ fn parse_args() -> Result<Args> {
             value if value.starts_with("ssh://") => {
                 uri = value.to_string();
             }
-            other => {
+            value if value.starts_with('-') => {
                 return Err(anyhow!(
-                    "unknown argument '{}'\n\nTry -h for detailed help.",
-                    other
+                    "unknown option '{}'\n\nTry -h for detailed help.",
+                    value
                 ));
+            }
+            _ => {
+                positional.push(argv[i].clone());
             }
         }
         i += 1;
     }
 
+    let live_sessions = match positional.len() {
+        0 => None,
+        2 => Some((positional[0].clone(), positional[1].clone())),
+        _ => {
+            return Err(anyhow!(
+                "expected 0 or 2 session names, got {}\n\nTry -h for detailed help.",
+                positional.len()
+            ));
+        }
+    };
+
     Ok(Args {
         uri,
         max_chars,
         max_entries,
+        live_sessions,
     })
 }
 
@@ -115,8 +143,84 @@ async fn send_line(target: &motlie_tmux::Target, text: &str) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = parse_args()?;
-    let session = format!("history_demo_{}", std::process::id());
     let host = SshConfig::parse(&args.uri)?.connect().await?;
+
+    match args.live_sessions {
+        Some((ref a, ref b)) => run_live(&host, a, b, &args).await,
+        None => run_simulated(&host, &args).await,
+    }
+}
+
+/// Live mode: monitor two existing tmux sessions and build combined history.
+async fn run_live(
+    host: &motlie_tmux::HostHandle,
+    session_a: &str,
+    session_b: &str,
+    args: &Args,
+) -> Result<()> {
+    // Subscribe BEFORE starting monitors to avoid the initial-output race
+    let bus = host.output_bus();
+    let filters = vec![
+        SinkFilter::for_session(session_a),
+        SinkFilter::for_session(session_b),
+    ];
+    let sub = bus.subscribe(filters, 64)?;
+    let history = sub.history(HistoryOptions {
+        max_entries: args.max_entries,
+        max_render_chars: args.max_chars,
+        label_format: LabelFormat::Prompt,
+        include_omission_marker: true,
+    });
+
+    let monitor_a = host.start_monitoring_session(session_a).await?;
+    let monitor_b = host.start_monitoring_session(session_b).await?;
+
+    println!(
+        "Monitoring live sessions: {} and {}",
+        session_a, session_b
+    );
+    println!(
+        "History window: max_entries={}, max_render_chars={}",
+        args.max_entries, args.max_chars
+    );
+    println!("Ctrl-C to stop.\n");
+
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    let mut tick = 0u64;
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => break,
+            _ = interval.tick() => {
+                tick += 1;
+                let rendered = history.render_text().await;
+                if !rendered.is_empty() {
+                    println!("=== rolling context (t={}s) ===", tick);
+                    println!("{}", rendered.replace('\r', ""));
+                }
+            }
+        }
+    }
+
+    // Shutdown order: stop monitors → unsubscribe (close channel) → join
+    // (drains all buffered events and returns the final snapshot).
+    monitor_a.shutdown().await?;
+    monitor_b.shutdown().await?;
+    bus.unsubscribe(history.id())?;
+
+    let snapshot = history.join().await?;
+    println!(
+        "\nFinal snapshot: entries={}, omitted_entries={}, rendered_chars={}",
+        snapshot.entries.len(),
+        snapshot.omitted_entries,
+        snapshot.rendered_chars
+    );
+
+    Ok(())
+}
+
+/// Simulated mode: create a temporary 2-pane session and replay scripted turns.
+async fn run_simulated(host: &motlie_tmux::HostHandle, args: &Args) -> Result<()> {
+    let session = format!("history_demo_{}", std::process::id());
 
     if let Ok(Some(existing)) = host.session(&session).await {
         let _ = existing.kill().await;
@@ -144,9 +248,7 @@ async fn main() -> Result<()> {
     let pane_a = &panes[0];
     let pane_b = &panes[1];
 
-    let monitor = host.start_monitoring_session(&session).await?;
-    tokio::time::sleep(Duration::from_millis(400)).await;
-
+    // Subscribe BEFORE starting the monitor to avoid the initial-output race
     let bus = host.output_bus();
     let sub = bus.subscribe(vec![SinkFilter::for_session(&session)], 64)?;
     let history = sub.history(HistoryOptions {
@@ -155,6 +257,10 @@ async fn main() -> Result<()> {
         label_format: LabelFormat::Prompt,
         include_omission_marker: true,
     });
+
+    let monitor = host.start_monitoring_session(&session).await?;
+    // Give the monitor task time to attach control mode before sending turns
+    tokio::time::sleep(Duration::from_millis(400)).await;
 
     println!("Session: {}", session);
     println!(
@@ -197,22 +303,20 @@ async fn main() -> Result<()> {
         tokio::time::sleep(Duration::from_millis(250)).await;
 
         println!("=== rolling context after turn {} ===", idx + 1);
-        // Normalize CRLF-ish terminal echo artifacts so the tutorial output stays
-        // readable across platforms while still using the real HistoryHandle API.
         println!("{}", history.render_text().await.replace('\r', ""));
     }
 
-    let snapshot = history.snapshot().await;
+    // Shutdown order: stop monitor → unsubscribe → join (drains and snapshots).
+    monitor.shutdown().await?;
+    bus.unsubscribe(history.id())?;
+
+    let snapshot = history.join().await?;
     println!(
         "Final snapshot: entries={}, omitted_entries={}, rendered_chars={}",
         snapshot.entries.len(),
         snapshot.omitted_entries,
         snapshot.rendered_chars
     );
-
-    monitor.shutdown().await?;
-    bus.unsubscribe(history.id())?;
-    history.join().await?;
 
     if let Ok(Some(t)) = host.session(&session).await {
         let _ = t.kill().await;

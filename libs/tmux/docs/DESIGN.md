@@ -1644,8 +1644,9 @@ impl HistoryHandle {
     /// This is the primary ergonomic API for rolling-context consumers.
     pub async fn render_text(&self) -> String;
 
-    /// Await the background accumulator task to completion.
-    pub async fn join(self) -> Result<()>;
+    /// Await the background accumulator task to completion and return
+    /// the final snapshot, guaranteed to include all buffered events.
+    pub async fn join(self) -> Result<HistorySnapshot>;
 }
 ```
 
