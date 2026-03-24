@@ -201,10 +201,15 @@ async fn run_live(
         }
     }
 
-    // Shut down monitors before taking the final snapshot so no trailing
-    // output arrives after the snapshot is captured.
+    // Shutdown order: stop monitors (no new publishes) → unsubscribe (close
+    // the channel so the accumulator drains remaining events) → snapshot → join.
     monitor_a.shutdown().await?;
     monitor_b.shutdown().await?;
+    bus.unsubscribe(history.id())?;
+    // Brief yield so the accumulator task can drain any buffered events
+    // before we read the snapshot. join() consumes self, so we must
+    // snapshot first.
+    tokio::task::yield_now().await;
 
     let snapshot = history.snapshot().await;
     println!(
@@ -214,7 +219,6 @@ async fn run_live(
         snapshot.rendered_chars
     );
 
-    bus.unsubscribe(history.id())?;
     history.join().await?;
 
     Ok(())
@@ -308,6 +312,11 @@ async fn run_simulated(host: &motlie_tmux::HostHandle, args: &Args) -> Result<()
         println!("{}", history.render_text().await.replace('\r', ""));
     }
 
+    // Shutdown order: stop monitor → unsubscribe → drain → snapshot → join.
+    monitor.shutdown().await?;
+    bus.unsubscribe(history.id())?;
+    tokio::task::yield_now().await;
+
     let snapshot = history.snapshot().await;
     println!(
         "Final snapshot: entries={}, omitted_entries={}, rendered_chars={}",
@@ -316,8 +325,6 @@ async fn run_simulated(host: &motlie_tmux::HostHandle, args: &Args) -> Result<()
         snapshot.rendered_chars
     );
 
-    monitor.shutdown().await?;
-    bus.unsubscribe(history.id())?;
     history.join().await?;
 
     if let Ok(Some(t)) = host.session(&session).await {
