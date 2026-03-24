@@ -1858,10 +1858,10 @@ loop {
 ### Lifecycle
 
 ```rust
-// Stop monitoring → close bus → history task drains and exits
+// Stop monitoring → close bus → join drains and returns final snapshot
 monitor.shutdown().await?;
 bus.unsubscribe(history.id())?;
-history.join().await?;
+let snapshot = history.join().await?;
 ```
 
 ## 23. Fleet — Multi-Host Coordination (DC27)
