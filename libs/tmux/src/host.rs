@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 use tokio::time::Duration;
 
 use crate::capture;
@@ -417,6 +417,7 @@ impl HostHandle {
         // Shared health state (DC29, 4.2d)
         let health = Arc::new(std::sync::Mutex::new(MonitorHealth::Streaming));
         let health_task = health.clone();
+        let (startup_ready_tx, startup_ready_rx) = oneshot::channel();
 
         // Spawn the supervised monitor task (4.2a)
         let inner_ref = self.inner.clone();
@@ -425,6 +426,7 @@ impl HostHandle {
             let max_retries = 5u32;
             let mut attempt = 0u32;
             let mut shell = shell;
+            let mut startup_ready = Some(startup_ready_tx);
 
             let set_health = |h: MonitorHealth| {
                 *health_task.lock().expect("health lock poisoned") = h;
@@ -436,7 +438,9 @@ impl HostHandle {
                     host_alias.clone(),
                 ).with_socket(inner_ref.socket.clone());
 
-                let exit = monitor.run(&mut shell, &bus, stop_rx.clone()).await?;
+                let exit = monitor
+                    .run(&mut shell, &bus, stop_rx.clone(), &mut startup_ready)
+                    .await?;
 
                 match exit {
                     MonitorExitReason::Stopped => {
@@ -600,6 +604,13 @@ impl HostHandle {
                 }
             }
         });
+
+        startup_ready_rx.await.map_err(|_| {
+            anyhow!(
+                "monitor for '{}' exited before control mode became ready",
+                session_name
+            )
+        })?;
 
         Ok(SessionMonitorHandle::new(target, stop_tx, task, health))
     }

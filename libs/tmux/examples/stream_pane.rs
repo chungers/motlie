@@ -52,8 +52,8 @@
 //!   ./target/debug/examples/stream_pane 'ssh://deploy@prod?identity-file=/path/to/key' my_session
 
 use motlie_tmux::{
-    overlap_deduplicate, CaptureNormalizeMode, CaptureOptions, LabelFormat, ScrollbackQuery,
-    SinkFilter, SshConfig, TargetSpec,
+    overlap_deduplicate, strip_ansi, CaptureNormalizeMode, CaptureOptions, LabelFormat,
+    ScrollbackQuery, SinkFilter, SshConfig, TargetSpec,
 };
 use std::io::Write;
 use std::time::Duration;
@@ -489,9 +489,6 @@ async fn stream_monitor(
 
     // Start monitoring the session — opens control mode via a shell channel
     let monitor_handle = host.start_monitoring_session(&session_name).await?;
-    // Give the monitor task time to attach control mode before we rely on
-    // event-driven output from the session.
-    tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Convert to a JoinedStream — merges events with source labels
     let mut stream = subscription.joined(LabelFormat::Bracketed);
@@ -509,7 +506,7 @@ async fn stream_monitor(
             }
             writeln!(
                 stdout,
-                "\x1b[2m--- {}(%{}) ---\x1b[0m",
+                "\x1b[2m--- {}({}) ---\x1b[0m",
                 session_name,
                 addr.pane_id
             )?;
@@ -531,13 +528,17 @@ async fn stream_monitor(
             chunk = stream.next() => {
                 match chunk {
                     Some(chunk) => {
+                        let clean = strip_ansi(&chunk.output.content);
+                        if clean.trim().is_empty() {
+                            continue;
+                        }
                         // Print source label on source change
                         if chunk.source_changed || !primed {
                             let label = chunk.source.minimal();
                             writeln!(stdout, "\x1b[2m--- {} ---\x1b[0m", label)?;
                         }
-                        stdout.write_all(chunk.output.content.as_bytes())?;
-                        if !chunk.output.content.ends_with('\n') {
+                        stdout.write_all(clean.as_bytes())?;
+                        if !clean.ends_with('\n') {
                             stdout.write_all(b"\n")?;
                         }
                         stdout.flush()?;

@@ -259,8 +259,6 @@ async fn run_simulated(host: &motlie_tmux::HostHandle, args: &Args) -> Result<()
     });
 
     let monitor = host.start_monitoring_session(&session).await?;
-    // Give the monitor task time to attach control mode before sending turns
-    tokio::time::sleep(Duration::from_millis(400)).await;
 
     println!("Session: {}", session);
     println!(
