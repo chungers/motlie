@@ -479,6 +479,7 @@ async fn stream_monitor(
     target: &motlie_tmux::Target,
 ) -> anyhow::Result<()> {
     let session_name = target.session_name();
+    let initial = target.capture_all().await?;
 
     // Subscribe to the output bus BEFORE starting the monitor to avoid a race
     // where initial %output frames are published before any subscriber exists.
@@ -488,11 +489,41 @@ async fn stream_monitor(
 
     // Start monitoring the session — opens control mode via a shell channel
     let monitor_handle = host.start_monitoring_session(&session_name).await?;
+    // Give the monitor task time to attach control mode before we rely on
+    // event-driven output from the session.
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Convert to a JoinedStream — merges events with source labels
     let mut stream = subscription.joined(LabelFormat::Bracketed);
 
     let mut stdout = std::io::stdout().lock();
+    let mut primed = false;
+
+    if !initial.is_empty() {
+        let mut panes: Vec<_> = initial.into_iter().collect();
+        panes.sort_by_key(|(addr, _)| (addr.window, addr.pane));
+
+        for (addr, content) in panes {
+            if content.trim().is_empty() {
+                continue;
+            }
+            writeln!(
+                stdout,
+                "\x1b[2m--- {}(%{}) ---\x1b[0m",
+                session_name,
+                addr.pane_id
+            )?;
+            stdout.write_all(content.as_bytes())?;
+            if !content.ends_with('\n') {
+                stdout.write_all(b"\n")?;
+            }
+            primed = true;
+        }
+
+        if primed {
+            stdout.flush()?;
+        }
+    }
 
     loop {
         tokio::select! {
@@ -501,7 +532,7 @@ async fn stream_monitor(
                 match chunk {
                     Some(chunk) => {
                         // Print source label on source change
-                        if chunk.source_changed {
+                        if chunk.source_changed || !primed {
                             let label = chunk.source.minimal();
                             writeln!(stdout, "\x1b[2m--- {} ---\x1b[0m", label)?;
                         }
@@ -510,6 +541,7 @@ async fn stream_monitor(
                             stdout.write_all(b"\n")?;
                         }
                         stdout.flush()?;
+                        primed = true;
                     }
                     None => {
                         eprintln!("Monitor stream ended.");
