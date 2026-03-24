@@ -30,7 +30,7 @@
 mod tui_mirror;
 
 use motlie_tmux::{
-    CreateSessionOptions, CreateWindowOptions, KeySequence, LabelFormat, ScrollbackQuery,
+    strip_ansi, CreateSessionOptions, CreateWindowOptions, KeySequence, LabelFormat, ScrollbackQuery,
     SinkFilter, SplitDirection, SplitPaneOptions, SplitSize, SshConfig, TargetSpec,
     TransferOptions,
 };
@@ -481,51 +481,53 @@ async fn main() -> anyhow::Result<()> {
                 let session_name = parts[1];
                 let seconds: u64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(3);
 
-                match host.start_monitoring_session(session_name).await {
-                    Ok(monitor_handle) => {
-                        let bus = host.output_bus();
-                        let filter = SinkFilter::for_session(session_name);
-                        match bus.subscribe(vec![filter], 64) {
-                            Ok(sub) => {
-                                println!("Monitoring {} for {}s...", session_name, seconds);
-                                // Drop stdout lock so monitor output can print
-                                drop(stdout);
+                let bus = host.output_bus();
+                let filter = SinkFilter::for_session(session_name);
+                match bus.subscribe(vec![filter], 64) {
+                    Ok(sub) => match host.start_monitoring_session(session_name).await {
+                        Ok(monitor_handle) => {
+                            println!("Monitoring {} for {}s...", session_name, seconds);
+                            // Drop stdout lock so monitor output can print
+                            drop(stdout);
 
-                                let mut stream = sub.joined(LabelFormat::Bracketed);
-                                let deadline = tokio::time::Instant::now()
-                                    + std::time::Duration::from_secs(seconds);
+                            let mut stream = sub.joined(LabelFormat::Bracketed);
+                            let deadline = tokio::time::Instant::now()
+                                + std::time::Duration::from_secs(seconds);
 
-                                loop {
-                                    tokio::select! {
-                                        _ = tokio::time::sleep_until(deadline) => break,
-                                        chunk = stream.next() => {
-                                            match chunk {
-                                                Some(chunk) => {
-                                                    if chunk.source_changed {
-                                                        println!("\x1b[2m--- {} ---\x1b[0m",
-                                                            chunk.source.minimal());
-                                                    }
-                                                    print!("{}", chunk.output.content);
-                                                    if !chunk.output.content.ends_with('\n') {
-                                                        println!();
-                                                    }
+                            loop {
+                                tokio::select! {
+                                    _ = tokio::time::sleep_until(deadline) => break,
+                                    chunk = stream.next() => {
+                                        match chunk {
+                                            Some(chunk) => {
+                                                let clean = strip_ansi(&chunk.output.content);
+                                                if clean.trim().is_empty() {
+                                                    continue;
                                                 }
-                                                None => break,
+                                                if chunk.source_changed {
+                                                    println!("\x1b[2m--- {} ---\x1b[0m",
+                                                        chunk.source.minimal());
+                                                }
+                                                print!("{}", clean);
+                                                if !clean.ends_with('\n') {
+                                                    println!();
+                                                }
                                             }
+                                            None => break,
                                         }
                                     }
                                 }
-
-                                let _ = monitor_handle.shutdown().await;
-                                println!("Monitor stopped.");
-
-                                // Re-acquire stdout lock
-                                stdout = io::stdout().lock();
                             }
-                            Err(e) => println!("Subscribe error: {}", e),
+
+                            let _ = monitor_handle.shutdown().await;
+                            println!("Monitor stopped.");
+
+                            // Re-acquire stdout lock
+                            stdout = io::stdout().lock();
                         }
-                    }
-                    Err(e) => println!("Error: {}", e),
+                        Err(e) => println!("Error: {}", e),
+                    },
+                    Err(e) => println!("Subscribe error: {}", e),
                 }
             }
 
