@@ -2498,6 +2498,22 @@ mod tests {
     }
 
     #[test]
+    fn ssh_exec_timeout_does_not_imply_inactivity_timeout() {
+        let cfg = SshConfig::new("host", "user")
+            .with_timeout(std::time::Duration::from_secs(45));
+        assert_eq!(cfg.timeout(), std::time::Duration::from_secs(45));
+        assert_eq!(
+            cfg.inactivity_timeout(),
+            None,
+            "exec timeout must stay independent from long-lived SSH idle timeout"
+        );
+        assert_eq!(
+            cfg.keepalive_interval(),
+            Some(std::time::Duration::from_secs(30))
+        );
+    }
+
+    #[test]
     fn ssh_config_is_localhost() {
         assert!(SshConfig::new("localhost", "u").is_localhost());
         assert!(SshConfig::new("127.0.0.1", "u").is_localhost());
