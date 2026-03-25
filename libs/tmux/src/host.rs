@@ -31,9 +31,54 @@ struct HostHandleInner {
     /// Keyed by `session_name:pane_id` for session-scoped discontinuity invalidation.
     /// Each entry holds Arc refs to ExecState for running execs.
     active_execs: std::sync::Mutex<HashMap<String, Vec<Arc<std::sync::Mutex<ExecState>>>>>,
+    /// Resolved tmux binary path (e.g. "/opt/homebrew/bin/tmux").
+    /// Set once after connection via `resolve_tmux_bin()`.
+    tmux_bin: std::sync::Mutex<Option<String>>,
 }
 
 impl HostHandleInner {
+    /// Resolve the tmux binary path on the remote host.
+    /// Uses `command -v tmux` through a login shell to get the full PATH.
+    /// Caches the result. Falls back to bare `"tmux"` on localhost/mock.
+    async fn resolve_tmux_bin(&self) -> String {
+        {
+            let cached = self.tmux_bin.lock().expect("tmux_bin lock poisoned");
+            if let Some(ref bin) = *cached {
+                return bin.clone();
+            }
+        }
+
+        // Use login shell to get the user's full PATH.
+        // `command -v` returns exit code 1 when not found (unlike `which`
+        // on macOS zsh which returns "not found" text with exit 0).
+        // $SHELL is set by sshd from the user's passwd entry, so
+        // `$SHELL -lc` works regardless of which shell the user has.
+        let probes: &[&str] = &[
+            "command -v tmux",
+            "$SHELL -lc 'command -v tmux' 2>/dev/null",
+        ];
+
+        let mut resolved = "tmux".to_string();
+        for probe in probes {
+            if let Ok(out) = self.transport.exec(probe).await {
+                let out = out.trim().to_string();
+                if !out.is_empty() && out.starts_with('/') {
+                    resolved = out;
+                    break;
+                }
+            }
+        }
+
+        let mut cached = self.tmux_bin.lock().expect("tmux_bin lock poisoned");
+        *cached = Some(resolved.clone());
+        resolved
+    }
+
+    /// Build the tmux command prefix using the resolved binary path.
+    async fn tmux_prefix(&self) -> String {
+        let bin = self.resolve_tmux_bin().await;
+        crate::transport::tmux_prefix_with_bin(&bin, self.socket.as_ref())
+    }
     /// Get or create an exec lock for a given pane identity key.
     fn exec_lock(&self, key: &str) -> Arc<Mutex<()>> {
         let mut locks = self.exec_locks.lock().expect("exec_locks poisoned");
@@ -85,6 +130,7 @@ impl HostHandle {
                 output_bus: std::sync::Mutex::new(None),
                 monitor_signals: std::sync::Mutex::new(HashMap::new()),
                 active_execs: std::sync::Mutex::new(HashMap::new()),
+                tmux_bin: std::sync::Mutex::new(None),
             }),
         }
     }
@@ -106,6 +152,7 @@ impl HostHandle {
                 output_bus: std::sync::Mutex::new(None),
                 monitor_signals: std::sync::Mutex::new(HashMap::new()),
                 active_execs: std::sync::Mutex::new(HashMap::new()),
+                tmux_bin: std::sync::Mutex::new(None),
             }),
         }
     }
@@ -121,6 +168,7 @@ impl HostHandle {
                 output_bus: std::sync::Mutex::new(None),
                 monitor_signals: std::sync::Mutex::new(HashMap::new()),
                 active_execs: std::sync::Mutex::new(HashMap::new()),
+                tmux_bin: std::sync::Mutex::new(None),
             }),
         }
     }
@@ -136,6 +184,7 @@ impl HostHandle {
                 output_bus: std::sync::Mutex::new(None),
                 monitor_signals: std::sync::Mutex::new(HashMap::new()),
                 active_execs: std::sync::Mutex::new(HashMap::new()),
+                tmux_bin: std::sync::Mutex::new(None),
             }),
         }
     }
@@ -156,7 +205,7 @@ impl HostHandle {
     /// no-op if the server is already running. Call this before creating sessions
     /// on a dedicated automation socket to ensure the server exists.
     pub async fn ensure_socket_server(&self) -> Result<()> {
-        let prefix = crate::transport::tmux_prefix(self.inner.socket.as_ref());
+        let prefix = self.inner.tmux_prefix().await;
         let cmd = format!("{} start-server", prefix);
         self.inner.transport.exec(&cmd).await?;
         Ok(())
@@ -164,12 +213,26 @@ impl HostHandle {
 
     /// List all tmux sessions on this host.
     pub async fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
-        discovery::list_sessions(&self.inner.transport, self.inner.socket.as_ref()).await
+        let prefix = self.inner.tmux_prefix().await;
+        let cmd = format!("{} list-sessions -F '{}'", prefix, discovery::LIST_SESSIONS_FMT);
+        let output = match self.inner.transport.exec(&cmd).await {
+            Ok(o) => o,
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("no server running") || msg.contains("no sessions") {
+                    return Ok(Vec::new());
+                }
+                return Err(e);
+            }
+        };
+        let result = discovery::parse_sessions(&output)?;
+        Ok(result)
     }
 
     /// List attached clients on this host (DC20, Phase 1.9b).
     pub async fn list_clients(&self) -> Result<Vec<ClientInfo>> {
-        discovery::list_clients(&self.inner.transport, self.inner.socket.as_ref()).await
+        let prefix = self.inner.tmux_prefix().await;
+        discovery::list_clients_with_prefix(&self.inner.transport, &prefix).await
     }
 
     /// Set global `history-limit` (DC20, Phase 1.9b).
@@ -177,9 +240,10 @@ impl HostHandle {
     /// **Must be set before creating sessions/panes.** Existing panes
     /// retain their creation-time limit.
     pub async fn set_global_history_limit(&self, limit: u32) -> Result<()> {
-        control::set_history_limit(
+        let prefix = self.inner.tmux_prefix().await;
+        control::set_history_limit_with_prefix(
             &self.inner.transport,
-            self.inner.socket.as_ref(),
+            &prefix,
             None,
             limit,
         )
@@ -188,7 +252,8 @@ impl HostHandle {
 
     /// Query the global `history-limit` default.
     pub async fn get_global_history_limit(&self) -> Result<u32> {
-        control::get_history_limit(&self.inner.transport, self.inner.socket.as_ref(), None).await
+        let prefix = self.inner.tmux_prefix().await;
+        control::get_history_limit_with_prefix(&self.inner.transport, &prefix, None).await
     }
 
     /// Create a new tmux session. Returns a Target at session level (DC22).
@@ -196,9 +261,10 @@ impl HostHandle {
     /// Use `CreateSessionOptions` to set window size, history limit, etc.
     /// `CreateSessionOptions::default()` preserves pre-DC22 behavior.
     pub async fn create_session(&self, name: &str, opts: &CreateSessionOptions) -> Result<Target> {
-        control::create_session(
+        let prefix = self.inner.tmux_prefix().await;
+        control::create_session_with_prefix(
             &self.inner.transport,
-            self.inner.socket.as_ref(),
+            &prefix,
             name,
             opts,
         )
@@ -206,7 +272,7 @@ impl HostHandle {
 
         // Query the created session to get full info
         let sessions =
-            discovery::list_sessions(&self.inner.transport, self.inner.socket.as_ref()).await?;
+            self.list_sessions().await?;
         let info = sessions
             .into_iter()
             .find(|s| s.name == name)
@@ -221,7 +287,7 @@ impl HostHandle {
     /// Get a Target for an existing session by name.
     pub async fn session(&self, name: &str) -> Result<Option<Target>> {
         let sessions =
-            discovery::list_sessions(&self.inner.transport, self.inner.socket.as_ref()).await?;
+            self.list_sessions().await?;
         Ok(sessions
             .into_iter()
             .find(|s| s.name == name)
@@ -233,9 +299,10 @@ impl HostHandle {
 
     /// Get a Target from a TargetSpec. Verifies the entity exists.
     pub async fn target(&self, spec: &TargetSpec) -> Result<Option<Target>> {
+        let prefix = self.inner.tmux_prefix().await;
         // Check session exists
         let sessions =
-            discovery::list_sessions(&self.inner.transport, self.inner.socket.as_ref()).await?;
+            self.list_sessions().await?;
         let session_info = match sessions.into_iter().find(|s| s.name == spec.session_name()) {
             Some(s) => s,
             None => return Ok(None),
@@ -253,9 +320,9 @@ impl HostHandle {
                 address: TargetAddress::Session(session_info),
             })),
             (Some(window_str), None) => {
-                let windows = discovery::list_windows(
+                let windows = discovery::list_windows_with_prefix(
                     &self.inner.transport,
-                    self.inner.socket.as_ref(),
+                    &prefix,
                     spec.session_name(),
                 )
                 .await?;
@@ -269,9 +336,9 @@ impl HostHandle {
             }
             (Some(window_str), Some(pane_idx)) => {
                 // Resolve window by index or name → actual window index
-                let windows = discovery::list_windows(
+                let windows = discovery::list_windows_with_prefix(
                     &self.inner.transport,
-                    self.inner.socket.as_ref(),
+                    &prefix,
                     spec.session_name(),
                 )
                 .await?;
@@ -283,9 +350,9 @@ impl HostHandle {
                     None => return Ok(None),
                 };
 
-                let panes = discovery::list_panes_in_session(
+                let panes = discovery::list_panes_in_session_with_prefix(
                     &self.inner.transport,
-                    self.inner.socket.as_ref(),
+                    &prefix,
                     spec.session_name(),
                 )
                 .await?;
@@ -390,7 +457,7 @@ impl HostHandle {
 
         // Resolve the session first — fail before any registration
         let sessions =
-            discovery::list_sessions(&self.inner.transport, self.inner.socket.as_ref()).await?;
+            self.list_sessions().await?;
         let session_info = sessions
             .into_iter()
             .find(|s| s.name == session)
@@ -419,6 +486,9 @@ impl HostHandle {
         let health_task = health.clone();
         let (startup_ready_tx, startup_ready_rx) = oneshot::channel();
 
+        // Resolve tmux binary once before spawning the monitor task
+        let resolved_tmux_bin = self.inner.resolve_tmux_bin().await;
+
         // Spawn the supervised monitor task (4.2a)
         let inner_ref = self.inner.clone();
         let session_for_cleanup = session_name.to_string();
@@ -436,7 +506,9 @@ impl HostHandle {
                 let mut monitor = SessionMonitor::new(
                     session.clone(),
                     host_alias.clone(),
-                ).with_socket(inner_ref.socket.clone());
+                )
+                .with_socket(inner_ref.socket.clone())
+                .with_tmux_bin(Some(resolved_tmux_bin.clone()));
 
                 let exit = monitor
                     .run(&mut shell, &bus, stop_rx.clone(), &mut startup_ready)
@@ -495,10 +567,13 @@ impl HostHandle {
                         }
 
                         // Check session still exists before reconnecting
-                        let sessions = match discovery::list_sessions(
-                            &inner_ref.transport,
-                            inner_ref.socket.as_ref(),
-                        ).await {
+                        let reconnect_prefix = inner_ref.tmux_prefix().await;
+                        let reconnect_cmd = format!(
+                            "{} list-sessions -F '{}'",
+                            reconnect_prefix, discovery::LIST_SESSIONS_FMT
+                        );
+                        let sessions = match inner_ref.transport.exec(&reconnect_cmd).await
+                            .and_then(|o| discovery::parse_sessions(&o)) {
                             Ok(s) => s,
                             Err(_) => continue, // Can't reach host, retry after next backoff
                         };
@@ -534,17 +609,18 @@ impl HostHandle {
 
                                 let mut snapshot_panes = 0usize;
                                 let mut snapshot_failed = false;
-                                match discovery::list_panes_in_session(
+                                let reconnect_pfx = inner_ref.tmux_prefix().await;
+                                match discovery::list_panes_in_session_with_prefix(
                                     &inner_ref.transport,
-                                    inner_ref.socket.as_ref(),
+                                    &reconnect_pfx,
                                     &session,
                                 ).await {
                                     Ok(panes) => {
                                         for pane in &panes {
                                             let target = pane.address.to_string();
-                                            if let Ok(content) = capture::capture_pane(
+                                            if let Ok(content) = capture::capture_pane_with_prefix(
                                                 &inner_ref.transport,
-                                                inner_ref.socket.as_ref(),
+                                                &reconnect_pfx,
                                                 &target,
                                             ).await {
                                                 if !content.is_empty() {
@@ -727,7 +803,7 @@ impl Target {
         match &self.address {
             TargetAddress::Pane(p) => p.pane_id.clone(),
             _ => {
-                let prefix = crate::transport::tmux_prefix(self.inner.socket.as_ref());
+                let prefix = self.inner.tmux_prefix().await;
                 let cmd = format!(
                     "{} display-message -p -t {} '#{{pane_id}}'",
                     prefix,
@@ -813,11 +889,12 @@ impl Target {
 
     /// List children one level down.
     pub async fn children(&self) -> Result<Vec<Target>> {
+        let prefix = self.inner.tmux_prefix().await;
         match &self.address {
             TargetAddress::Session(s) => {
-                let windows = discovery::list_windows(
+                let windows = discovery::list_windows_with_prefix(
                     &self.inner.transport,
-                    self.inner.socket.as_ref(),
+                    &prefix,
                     &s.name,
                 )
                 .await?;
@@ -830,9 +907,9 @@ impl Target {
                     .collect())
             }
             TargetAddress::Window(w) => {
-                let panes = discovery::list_panes_in_session(
+                let panes = discovery::list_panes_in_session_with_prefix(
                     &self.inner.transport,
-                    self.inner.socket.as_ref(),
+                    &prefix,
                     &w.session_name,
                 )
                 .await?;
@@ -851,10 +928,11 @@ impl Target {
 
     /// Navigate to a window by index (from session level).
     pub async fn window(&self, index: u32) -> Result<Option<Target>> {
+        let prefix = self.inner.tmux_prefix().await;
         let session_name = self.session_name().to_string();
-        let windows = discovery::list_windows(
+        let windows = discovery::list_windows_with_prefix(
             &self.inner.transport,
-            self.inner.socket.as_ref(),
+            &prefix,
             &session_name,
         )
         .await?;
@@ -879,14 +957,15 @@ impl Target {
     /// At window level: filters panes within this window.
     /// At pane level: only matches if the current pane has the given index.
     pub async fn pane(&self, index: u32) -> Result<Option<Target>> {
+        let prefix = self.inner.tmux_prefix().await;
         let session_name = self.session_name().to_string();
 
         let window_filter = match &self.address {
             TargetAddress::Session(_) => {
                 // Resolve active window for session-level targets
-                let windows = discovery::list_windows(
+                let windows = discovery::list_windows_with_prefix(
                     &self.inner.transport,
-                    self.inner.socket.as_ref(),
+                    &prefix,
                     &session_name,
                 )
                 .await?;
@@ -910,9 +989,9 @@ impl Target {
             }
         };
 
-        let panes = discovery::list_panes_in_session(
+        let panes = discovery::list_panes_in_session_with_prefix(
             &self.inner.transport,
-            self.inner.socket.as_ref(),
+            &prefix,
             &session_name,
         )
         .await?;
@@ -937,11 +1016,12 @@ impl Target {
 
     /// Create a new child window from a session target (DC25).
     pub async fn new_window(&self, opts: &CreateWindowOptions) -> Result<Target> {
+        let prefix = self.inner.tmux_prefix().await;
         match &self.address {
             TargetAddress::Session(s) => {
-                let window = control::new_window(
+                let window = control::new_window_with_prefix(
                     &self.inner.transport,
-                    self.inner.socket.as_ref(),
+                    &prefix,
                     &s.name,
                     opts,
                 )
@@ -967,9 +1047,10 @@ impl Target {
                 "split_pane() requires a window or pane target, got session"
             )),
             TargetAddress::Window(_) | TargetAddress::Pane(_) => {
-                let pane = control::split_pane(
+                let prefix = self.inner.tmux_prefix().await;
+                let pane = control::split_pane_with_prefix(
                     &self.inner.transport,
-                    self.inner.socket.as_ref(),
+                    &prefix,
                     &self.target_string(),
                     opts,
                 )
@@ -986,9 +1067,10 @@ impl Target {
 
     /// Send literal text.
     pub async fn send_text(&self, text: &str) -> Result<()> {
-        control::send_text(
+        let prefix = self.inner.tmux_prefix().await;
+        control::send_text_with_prefix(
             &self.inner.transport,
-            self.inner.socket.as_ref(),
+            &prefix,
             &self.target_string(),
             text,
         )
@@ -997,9 +1079,10 @@ impl Target {
 
     /// Send a key sequence.
     pub async fn send_keys(&self, keys: &KeySequence) -> Result<()> {
-        control::send_keys(
+        let prefix = self.inner.tmux_prefix().await;
+        control::send_keys_with_prefix(
             &self.inner.transport,
-            self.inner.socket.as_ref(),
+            &prefix,
             &self.target_string(),
             keys,
         )
@@ -1012,9 +1095,10 @@ impl Target {
     /// (the pane tmux resolves for the target string). To capture all panes,
     /// use [`capture_all()`](Self::capture_all).
     pub async fn capture(&self) -> Result<String> {
-        capture::capture_pane(
+        let prefix = self.inner.tmux_prefix().await;
+        capture::capture_pane_with_prefix(
             &self.inner.transport,
-            self.inner.socket.as_ref(),
+            &prefix,
             &self.target_string(),
         )
         .await
@@ -1022,9 +1106,10 @@ impl Target {
 
     /// Capture with scrollback history. `start` is negative for scrollback lines.
     pub async fn capture_with_history(&self, start: i32) -> Result<String> {
-        capture::capture_pane_history(
+        let prefix = self.inner.tmux_prefix().await;
+        capture::capture_pane_history_with_prefix(
             &self.inner.transport,
-            self.inner.socket.as_ref(),
+            &prefix,
             &self.target_string(),
             start,
         )
@@ -1033,9 +1118,10 @@ impl Target {
 
     /// Sample recent scrollback.
     pub async fn sample_text(&self, query: &ScrollbackQuery) -> Result<String> {
-        capture::sample_text(
+        let prefix = self.inner.tmux_prefix().await;
+        capture::sample_text_with_tmux_prefix(
             &self.inner.transport,
-            self.inner.socket.as_ref(),
+            &prefix,
             &self.target_string(),
             query,
         )
@@ -1044,9 +1130,10 @@ impl Target {
 
     /// Capture with options, returning `CaptureResult` with fidelity metadata (DC20).
     pub async fn capture_with_options(&self, opts: &CaptureOptions) -> Result<CaptureResult> {
-        capture::capture_pane_with_options(
+        let prefix = self.inner.tmux_prefix().await;
+        capture::capture_pane_with_options_prefix(
             &self.inner.transport,
-            self.inner.socket.as_ref(),
+            &prefix,
             &self.target_string(),
             opts,
         )
@@ -1063,9 +1150,10 @@ impl Target {
         opts: &CaptureOptions,
         previous_text: Option<&str>,
     ) -> Result<CaptureResult> {
-        capture::sample_text_with_options(
+        let prefix = self.inner.tmux_prefix().await;
+        capture::sample_text_with_options_prefix(
             &self.inner.transport,
-            self.inner.socket.as_ref(),
+            &prefix,
             &self.target_string(),
             query,
             opts,
@@ -1078,28 +1166,29 @@ impl Target {
     /// Session: all panes in all windows. Window: all panes in that window.
     /// Pane: single-entry map.
     pub async fn capture_all(&self) -> Result<HashMap<PaneAddress, String>> {
+        let prefix = self.inner.tmux_prefix().await;
         match &self.address {
             TargetAddress::Session(_) => {
-                capture::capture_session(
+                capture::capture_session_with_tmux_prefix(
                     &self.inner.transport,
-                    self.inner.socket.as_ref(),
+                    &prefix,
                     self.session_name(),
                 )
                 .await
             }
             TargetAddress::Window(w) => {
-                let panes = discovery::list_panes_in_session(
+                let panes = discovery::list_panes_in_session_with_prefix(
                     &self.inner.transport,
-                    self.inner.socket.as_ref(),
+                    &prefix,
                     &w.session_name,
                 )
                 .await?;
                 let mut result = HashMap::new();
                 for pane in panes.into_iter().filter(|p| p.address.window == w.index) {
                     let target = pane.address.to_tmux_target();
-                    let content = capture::capture_pane(
+                    let content = capture::capture_pane_with_prefix(
                         &self.inner.transport,
-                        self.inner.socket.as_ref(),
+                        &prefix,
                         &target,
                     )
                     .await?;
@@ -1108,9 +1197,9 @@ impl Target {
                 Ok(result)
             }
             TargetAddress::Pane(p) => {
-                let content = capture::capture_pane(
+                let content = capture::capture_pane_with_prefix(
                     &self.inner.transport,
-                    self.inner.socket.as_ref(),
+                    &prefix,
                     &p.to_tmux_target(),
                 )
                 .await?;
@@ -1126,29 +1215,30 @@ impl Target {
         &self,
         opts: &CaptureOptions,
     ) -> Result<HashMap<PaneAddress, CaptureResult>> {
+        let prefix = self.inner.tmux_prefix().await;
         match &self.address {
             TargetAddress::Session(_) => {
-                capture::capture_session_with_options(
+                capture::capture_session_with_options_prefix(
                     &self.inner.transport,
-                    self.inner.socket.as_ref(),
+                    &prefix,
                     self.session_name(),
                     opts,
                 )
                 .await
             }
             TargetAddress::Window(w) => {
-                let panes = discovery::list_panes_in_session(
+                let panes = discovery::list_panes_in_session_with_prefix(
                     &self.inner.transport,
-                    self.inner.socket.as_ref(),
+                    &prefix,
                     &w.session_name,
                 )
                 .await?;
                 let mut result = HashMap::new();
                 for pane in panes.into_iter().filter(|p| p.address.window == w.index) {
                     let target = pane.address.to_tmux_target();
-                    let cr = capture::capture_pane_with_options(
+                    let cr = capture::capture_pane_with_options_prefix(
                         &self.inner.transport,
-                        self.inner.socket.as_ref(),
+                        &prefix,
                         &target,
                         opts,
                     )
@@ -1158,9 +1248,9 @@ impl Target {
                 Ok(result)
             }
             TargetAddress::Pane(p) => {
-                let cr = capture::capture_pane_with_options(
+                let cr = capture::capture_pane_with_options_prefix(
                     &self.inner.transport,
-                    self.inner.socket.as_ref(),
+                    &prefix,
                     &p.to_tmux_target(),
                     opts,
                 )
@@ -1176,23 +1266,24 @@ impl Target {
 
     /// Kill this entity.
     pub async fn kill(&self) -> Result<()> {
+        let prefix = self.inner.tmux_prefix().await;
         match &self.address {
             TargetAddress::Session(s) => {
-                control::kill_session(&self.inner.transport, self.inner.socket.as_ref(), &s.name)
+                control::kill_session_with_prefix(&self.inner.transport, &prefix, &s.name)
                     .await
             }
             TargetAddress::Window(_) => {
-                control::kill_window(
+                control::kill_window_with_prefix(
                     &self.inner.transport,
-                    self.inner.socket.as_ref(),
+                    &prefix,
                     &self.target_string(),
                 )
                 .await
             }
             TargetAddress::Pane(_) => {
-                control::kill_pane(
+                control::kill_pane_with_prefix(
                     &self.inner.transport,
-                    self.inner.socket.as_ref(),
+                    &prefix,
                     &self.target_string(),
                 )
                 .await
@@ -1212,11 +1303,12 @@ impl Target {
     ///
     /// Pane-level rename is not supported by tmux and returns `Err`.
     pub async fn rename(&self, new_name: &str) -> Result<Target> {
+        let prefix = self.inner.tmux_prefix().await;
         match &self.address {
             TargetAddress::Session(s) => {
-                control::rename_session(
+                control::rename_session_with_prefix(
                     &self.inner.transport,
-                    self.inner.socket.as_ref(),
+                    &prefix,
                     &s.name,
                     new_name,
                 )
@@ -1229,9 +1321,9 @@ impl Target {
                 })
             }
             TargetAddress::Window(w) => {
-                control::rename_window(
+                control::rename_window_with_prefix(
                     &self.inner.transport,
-                    self.inner.socket.as_ref(),
+                    &prefix,
                     &w.session_name,
                     w.index,
                     new_name,
@@ -1293,9 +1385,10 @@ impl Target {
 
     /// Query the current pane geometry and scrollback state.
     pub async fn pane_geometry(&self) -> Result<PaneGeometry> {
-        discovery::query_pane_geometry(
+        let prefix = self.inner.tmux_prefix().await;
+        discovery::query_pane_geometry_with_prefix(
             &self.inner.transport,
-            self.inner.socket.as_ref(),
+            &prefix,
             &self.target_string(),
         )
         .await
@@ -1303,9 +1396,10 @@ impl Target {
 
     /// Take a full geometry snapshot (clients + pane state).
     pub async fn geometry_snapshot(&self) -> Result<GeometrySnapshot> {
-        discovery::take_geometry_snapshot(
+        let prefix = self.inner.tmux_prefix().await;
+        discovery::take_geometry_snapshot_with_prefix(
             &self.inner.transport,
-            self.inner.socket.as_ref(),
+            &prefix,
             &self.target_string(),
         )
         .await
@@ -1316,9 +1410,10 @@ impl Target {
     /// **Must be called before creating panes** — existing panes keep their
     /// creation-time limit. Only meaningful at session level.
     pub async fn set_history_limit(&self, limit: u32) -> Result<()> {
-        control::set_history_limit(
+        let prefix = self.inner.tmux_prefix().await;
+        control::set_history_limit_with_prefix(
             &self.inner.transport,
-            self.inner.socket.as_ref(),
+            &prefix,
             Some(self.session_name()),
             limit,
         )
@@ -1331,9 +1426,10 @@ impl Target {
     /// panes. Existing panes retain their creation-time limit. See
     /// [`set_history_limit`](Self::set_history_limit) for details.
     pub async fn get_history_limit(&self) -> Result<u32> {
-        control::get_history_limit(
+        let prefix = self.inner.tmux_prefix().await;
+        control::get_history_limit_with_prefix(
             &self.inner.transport,
-            self.inner.socket.as_ref(),
+            &prefix,
             Some(self.session_name()),
         )
         .await
@@ -1414,16 +1510,16 @@ impl Target {
                 state_arc.lock().expect("exec state poisoned").clone()
             };
 
-            let socket_ref = inner_ref.socket.as_ref();
             let transport = &inner_ref.transport;
+            let exec_prefix = inner_ref.tmux_prefix().await;
 
             // Detect shell for exit code variable
-            let exit_var = detect_exit_var(transport, socket_ref, &target_str).await;
+            let exit_var = detect_exit_var(transport, &exec_prefix, &target_str).await;
 
             // Send command with sentinel
             let sentinel_cmd = format!("{} ; echo \"{} {}\"", command, marker, exit_var);
             let keys = KeySequence::literal(&sentinel_cmd).then_enter();
-            if let Err(e) = control::send_keys(transport, socket_ref, &target_str, &keys).await {
+            if let Err(e) = control::send_keys_with_prefix(transport, &exec_prefix, &target_str, &keys).await {
                 let err_state = ExecState::Unknown {
                     reason: format!("send_keys failed: {}", e),
                 };
@@ -1454,9 +1550,9 @@ impl Target {
                     };
                 }
 
-                match capture::capture_pane_escape_history(
+                match capture::capture_pane_escape_history_with_prefix(
                     transport,
-                    socket_ref,
+                    &exec_prefix,
                     &target_str,
                     -500,
                 )
@@ -1514,14 +1610,13 @@ impl Target {
     }
 }
 
-/// Detect the shell exit code variable.
+/// Detect the shell exit code variable using a caller-provided prefix.
 async fn detect_exit_var(
     transport: &TransportKind,
-    socket: Option<&TmuxSocket>,
+    prefix: &str,
     target: &str,
 ) -> &'static str {
     // Try to detect fish shell
-    let prefix = crate::transport::tmux_prefix(socket);
     let cmd = format!(
         "{} display-message -p -t '{}' '#{{pane_current_command}}'",
         prefix,
@@ -1707,7 +1802,7 @@ mod tests {
     async fn create_session_returns_target() {
         let mock = MockTransport::new()
             .with_default("")
-            .with_response("list-sessions", "test\t$0\t1700000000\t0\t1\t\n");
+            .with_response("list-sessions", "test $0 1700000000 0 1 \n");
         let host = mock_host(mock);
         let target = host
             .create_session("test", &Default::default())
@@ -1720,7 +1815,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_not_found() {
-        let mock = MockTransport::new().with_response("list-sessions", "other\t$0\t0\t0\t1\t\n");
+        let mock = MockTransport::new().with_response("list-sessions", "other $0 0 0 1 \n");
         let host = mock_host(mock);
         let result = host.session("nonexistent").await.unwrap();
         assert!(result.is_none());
@@ -1728,7 +1823,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_found() {
-        let mock = MockTransport::new().with_response("list-sessions", "build\t$0\t0\t1\t2\t\n");
+        let mock = MockTransport::new().with_response("list-sessions", "build $0 0 1 2 \n");
         let host = mock_host(mock);
         let target = host.session("build").await.unwrap();
         assert!(target.is_some());
@@ -1739,7 +1834,7 @@ mod tests {
 
     #[tokio::test]
     async fn target_spec_session_level() {
-        let mock = MockTransport::new().with_response("list-sessions", "build\t$0\t0\t0\t1\t\n");
+        let mock = MockTransport::new().with_response("list-sessions", "build $0 0 0 1 \n");
         let host = mock_host(mock);
         let spec = TargetSpec::session("build");
         let t = host.target(&spec).await.unwrap();
@@ -1750,10 +1845,10 @@ mod tests {
     #[tokio::test]
     async fn children_session_lists_windows() {
         let mock = MockTransport::new()
-            .with_response("list-sessions", "build\t$0\t0\t0\t2\t\n")
+            .with_response("list-sessions", "build $0 0 0 2 \n")
             .with_response(
                 "list-windows",
-                "$0\tbuild\t0\tmain\t1\t1\tlayout\n$0\tbuild\t1\teditor\t0\t1\tlayout\n",
+                "$0 build 0 main 1 1 layout\n$0 build 1 editor 0 1 layout\n",
             );
         let host = mock_host(mock);
         let target = host.session("build").await.unwrap().unwrap();
@@ -1768,7 +1863,7 @@ mod tests {
     async fn new_window_returns_window_target() {
         let expected = "new-window -P";
         let mock =
-            MockTransport::new().with_response(expected, "$0\tbuild\t1\teditor\t1\t1\tlayout");
+            MockTransport::new().with_response(expected, "$0 build 1 editor 1 1 layout");
         let host = mock_host(mock);
         let target = host.create_target_for_test("build");
 
@@ -1818,7 +1913,7 @@ mod tests {
 
     #[tokio::test]
     async fn split_pane_returns_pane_target_from_window() {
-        let mock = MockTransport::new().with_response("split-window -P", "%9\tbuild:0.1");
+        let mock = MockTransport::new().with_response("split-window -P", "%9 build 0 1");
         let host = mock_host(mock);
         let window_target = Target {
             inner: host.inner.clone(),
@@ -1964,14 +2059,14 @@ mod tests {
         // Session with 2 windows: window 0 (inactive) and window 1 (active).
         // Both have pane 0. Session-level pane(0) should return window 1's pane.
         let mock = MockTransport::new()
-            .with_response("list-sessions", "build\t$0\t0\t0\t2\t\n")
+            .with_response("list-sessions", "build $0 0 0 2 \n")
             .with_response(
                 "list-windows",
-                "$0\tbuild\t0\tmain\t0\t1\tlayout\n$0\tbuild\t1\teditor\t1\t1\tlayout\n",
+                "$0 build 0 main 0 1 layout\n$0 build 1 editor 1 1 layout\n",
             )
             .with_response(
                 "list-panes",
-                "%0\tbuild:0.0\t\tbash\t100\t80\t24\t1\n%1\tbuild:1.0\t\tvim\t101\t80\t24\t1\n",
+                "%0 build 0 0  bash 100 80 24 1\n%1 build 1 0  vim 101 80 24 1\n",
             );
         let host = mock_host(mock);
         let session = host.session("build").await.unwrap().unwrap();
