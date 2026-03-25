@@ -13,9 +13,11 @@
 
 use anyhow::{anyhow, Result};
 use motlie_tmux::{
-    CreateSessionOptions, HistoryOptions, KeySequence, LabelFormat, SinkFilter, SplitPaneOptions,
-    SshConfig,
+    strip_ansi, CreateSessionOptions, HistoryOptions, KeySequence, LabelFormat, SinkFilter,
+    SplitPaneOptions, SshConfig,
 };
+use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::time::Duration;
 
 const CHAT_CMD: &str = "sh -c 'stty -echo 2>/dev/null || true; cat'";
@@ -24,7 +26,7 @@ history_demo — rolling transcript for an external LLM/classifier loop
 
 USAGE:
     history_demo [ssh://host] [--chars N] [--entries N]
-    history_demo [ssh://host] SESSION_A SESSION_B [--chars N] [--entries N]
+    history_demo [ssh://host] SESSION_A SESSION_B [--mode render|tail] [--chars N] [--entries N]
 
 ARGS:
     [ssh://host]       Optional SSH URI [default: ssh://localhost]
@@ -35,6 +37,7 @@ ARGS:
 OPTIONS:
     --chars N      Max rendered characters kept in rolling context [default: 420]
     --entries N    Max logical history entries kept [default: 8]
+    --mode MODE    Live capture mode for existing sessions [default: tail]
     -h, --help     Print this help
 
 WHAT IT SHOWS:
@@ -45,21 +48,109 @@ WHAT IT SHOWS:
     - render_text() snapshots after each turn
 
     Live mode (two session args):
-    - monitors two existing tmux sessions in real time
+    - polls two existing tmux sessions in real time
     - combined rolling history from both sessions
     - Ctrl-C to stop and print final snapshot
 
 EXAMPLES:
     history_demo
     history_demo ssh://localhost --chars 520
-    history_demo ssh://localhost agent_a agent_b
+    history_demo ssh://localhost agent_a agent_b --mode tail
     history_demo 'ssh://deploy@prod?identity-file=/path/to/key' sess1 sess2";
+
+#[derive(Clone, Copy)]
+enum LiveMode {
+    Render,
+    Tail,
+}
 
 struct Args {
     uri: String,
     max_chars: usize,
     max_entries: usize,
     live_sessions: Option<(String, String)>,
+    live_mode: LiveMode,
+}
+
+struct LiveRenderedEntry {
+    rendered: String,
+    char_count: usize,
+}
+
+struct LiveHistory {
+    entries: VecDeque<LiveRenderedEntry>,
+    max_entries: usize,
+    max_render_chars: usize,
+    rendered_chars: usize,
+    omitted_entries: usize,
+}
+
+impl LiveHistory {
+    fn new(max_entries: usize, max_render_chars: usize) -> Self {
+        Self {
+            entries: VecDeque::new(),
+            max_entries,
+            max_render_chars,
+            rendered_chars: 0,
+            omitted_entries: 0,
+        }
+    }
+
+    fn push(&mut self, rendered: String) {
+        let char_count = rendered.len();
+        self.entries.push_back(LiveRenderedEntry {
+            rendered,
+            char_count,
+        });
+        self.rendered_chars += char_count;
+        self.trim();
+    }
+
+    fn trim(&mut self) {
+        while self.entries.len() > self.max_entries {
+            if let Some(removed) = self.entries.pop_front() {
+                self.rendered_chars = self.rendered_chars.saturating_sub(removed.char_count);
+                self.omitted_entries += 1;
+            }
+        }
+        if self.max_render_chars > 0 {
+            while self.rendered_chars > self.max_render_chars && !self.entries.is_empty() {
+                if let Some(removed) = self.entries.pop_front() {
+                    self.rendered_chars = self.rendered_chars.saturating_sub(removed.char_count);
+                    self.omitted_entries += 1;
+                }
+            }
+        }
+    }
+
+    fn render_text(&self) -> String {
+        let mut result = String::with_capacity(self.rendered_chars + 64);
+        if self.omitted_entries > 0 {
+            result.push_str(&format!(
+                "[... {} earlier entries omitted ...]\n",
+                self.omitted_entries
+            ));
+        }
+        for entry in &self.entries {
+            result.push_str(&entry.rendered);
+        }
+        result
+    }
+}
+
+fn parse_live_mode(value: &str) -> Result<LiveMode> {
+    match value {
+        "render" => Ok(LiveMode::Render),
+        "tail" => Ok(LiveMode::Tail),
+        other => Err(anyhow!("unknown mode '{}' (render|tail)", other)),
+    }
+}
+
+fn live_mode_name(mode: LiveMode) -> &'static str {
+    match mode {
+        LiveMode::Render => "render",
+        LiveMode::Tail => "tail",
+    }
 }
 
 fn parse_args() -> Result<Args> {
@@ -72,6 +163,7 @@ fn parse_args() -> Result<Args> {
     let mut uri = "ssh://localhost".to_string();
     let mut max_chars = 420usize;
     let mut max_entries = 8usize;
+    let mut live_mode = LiveMode::Tail;
     let mut positional: Vec<String> = Vec::new();
     let mut i = 1usize;
 
@@ -98,6 +190,13 @@ fn parse_args() -> Result<Args> {
                 if max_entries == 0 {
                     return Err(anyhow!("--entries must be > 0"));
                 }
+            }
+            "--mode" => {
+                i += 1;
+                live_mode = parse_live_mode(
+                    argv.get(i)
+                        .ok_or_else(|| anyhow!("--mode requires a value"))?,
+                )?;
             }
             value if value.starts_with("ssh://") => {
                 uri = value.to_string();
@@ -131,6 +230,7 @@ fn parse_args() -> Result<Args> {
         max_chars,
         max_entries,
         live_sessions,
+        live_mode,
     })
 }
 
@@ -158,64 +258,196 @@ async fn run_live(
     session_b: &str,
     args: &Args,
 ) -> Result<()> {
-    // Subscribe BEFORE starting monitors to avoid the initial-output race
-    let bus = host.output_bus();
-    let filters = vec![
-        SinkFilter::for_session(session_a),
-        SinkFilter::for_session(session_b),
-    ];
-    let sub = bus.subscribe(filters, 64)?;
-    let history = sub.history(HistoryOptions {
-        max_entries: args.max_entries,
-        max_render_chars: args.max_chars,
-        label_format: LabelFormat::Prompt,
-        include_omission_marker: true,
-    });
-
-    let monitor_a = host.start_monitoring_session(session_a).await?;
-    let monitor_b = host.start_monitoring_session(session_b).await?;
+    let mut history = LiveHistory::new(args.max_entries, args.max_chars);
+    let target_a = host
+        .session(session_a)
+        .await?
+        .ok_or_else(|| anyhow!("session '{}' not found", session_a))?;
+    let target_b = host
+        .session(session_b)
+        .await?
+        .ok_or_else(|| anyhow!("session '{}' not found", session_b))?;
 
     println!(
-        "Monitoring live sessions: {} and {}",
-        session_a, session_b
+        "Polling live sessions: {} and {} [mode={}]",
+        session_a,
+        session_b,
+        live_mode_name(args.live_mode)
     );
     println!(
         "History window: max_entries={}, max_render_chars={}",
         args.max_entries, args.max_chars
     );
+    println!("Baseline captured at startup; only new changes are appended.");
     println!("Ctrl-C to stop.\n");
 
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     let mut tick = 0u64;
-    loop {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => break,
-            _ = interval.tick() => {
-                tick += 1;
-                let rendered = history.render_text().await;
-                if !rendered.is_empty() {
-                    println!("=== rolling context (t={}s) ===", tick);
-                    println!("{}", rendered.replace('\r', ""));
+    let mut last_rendered = String::new();
+
+    match args.live_mode {
+        LiveMode::Tail => {
+            let mut previous_a = target_a.capture_all().await?;
+            let mut previous_b = target_b.capture_all().await?;
+
+            loop {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => break,
+                    _ = interval.tick() => {
+                        tick += 1;
+
+                        let current_a = target_a.capture_all().await?;
+                        if let Some(rendered) = tail_history_entry(session_a, &mut previous_a, &current_a) {
+                            history.push(rendered);
+                        }
+                        let current_b = target_b.capture_all().await?;
+                        if let Some(rendered) = tail_history_entry(session_b, &mut previous_b, &current_b) {
+                            history.push(rendered);
+                        }
+
+                        let rendered = history.render_text();
+                        if !rendered.is_empty() && rendered != last_rendered {
+                            println!("=== rolling context (t={}s) ===", tick);
+                            println!("{}", rendered);
+                            last_rendered = rendered;
+                        }
+                    }
+                }
+            }
+        }
+        LiveMode::Render => {
+            let mut previous_a = target_a.capture_all().await?;
+            let mut previous_b = target_b.capture_all().await?;
+
+            loop {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => break,
+                    _ = interval.tick() => {
+                        tick += 1;
+
+                        let current_a = target_a.capture_all().await?;
+                        if current_a != previous_a {
+                            if let Some(rendered) = render_history_entry(session_a, &current_a) {
+                                history.push(rendered);
+                            }
+                            previous_a = current_a;
+                        }
+
+                        let current_b = target_b.capture_all().await?;
+                        if current_b != previous_b {
+                            if let Some(rendered) = render_history_entry(session_b, &current_b) {
+                                history.push(rendered);
+                            }
+                            previous_b = current_b;
+                        }
+
+                        let rendered = history.render_text();
+                        if !rendered.is_empty() && rendered != last_rendered {
+                            println!("=== rolling context (t={}s) ===", tick);
+                            println!("{}", rendered);
+                            last_rendered = rendered;
+                        }
+                    }
                 }
             }
         }
     }
 
-    // Shutdown order: stop monitors → unsubscribe (close channel) → join
-    // (drains all buffered events and returns the final snapshot).
-    monitor_a.shutdown().await?;
-    monitor_b.shutdown().await?;
-    bus.unsubscribe(history.id())?;
-
-    let snapshot = history.join().await?;
     println!(
         "\nFinal snapshot: entries={}, omitted_entries={}, rendered_chars={}",
-        snapshot.entries.len(),
-        snapshot.omitted_entries,
-        snapshot.rendered_chars
+        history.entries.len(),
+        history.omitted_entries,
+        history.rendered_chars
     );
 
     Ok(())
+}
+
+fn tail_history_entry(
+    session_name: &str,
+    previous: &mut HashMap<motlie_tmux::PaneAddress, String>,
+    current: &HashMap<motlie_tmux::PaneAddress, String>,
+) -> Option<String> {
+    if current.is_empty() || current == previous {
+        return None;
+    }
+
+    let mut pane_list: Vec<_> = current.iter().collect();
+    pane_list.sort_by_key(|(addr, _)| (addr.window, addr.pane));
+
+    let mut rendered = String::new();
+    for (addr, content) in pane_list {
+        let previous_content = previous.get(addr).map(String::as_str).unwrap_or_default();
+        let previous_excerpt = pane_tail_excerpt(previous_content, 6);
+        let current_excerpt = pane_tail_excerpt(content, 6);
+        if current_excerpt.is_empty() || current_excerpt == previous_excerpt {
+            continue;
+        }
+        rendered.push_str(&format!(
+            "{}({})> {}\n",
+            session_name,
+            addr.pane_id,
+            current_excerpt.trim_end()
+        ));
+    }
+
+    *previous = current.clone();
+    if rendered.is_empty() {
+        None
+    } else {
+        Some(rendered)
+    }
+}
+
+fn pane_tail_excerpt(content: &str, max_lines: usize) -> String {
+    let clean = strip_ansi(content).replace('\r', "");
+    let lines: Vec<&str> = clean
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+
+    if lines.is_empty() {
+        return String::new();
+    }
+
+    let start = lines.len().saturating_sub(max_lines);
+    let excerpt = lines[start..].join("\n");
+    if excerpt.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", excerpt)
+    }
+}
+
+fn render_history_entry(
+    session_name: &str,
+    panes: &HashMap<motlie_tmux::PaneAddress, String>,
+) -> Option<String> {
+    let mut pane_list: Vec<_> = panes.iter().collect();
+    pane_list.sort_by_key(|(addr, _)| (addr.window, addr.pane));
+
+    let mut rendered = String::new();
+    for (addr, content) in pane_list {
+        if !has_visible_text(content) {
+            continue;
+        }
+        rendered.push_str(&format!("--- {}({}) ---\n", session_name, addr.pane_id));
+        rendered.push_str(content);
+        if !content.ends_with('\n') {
+            rendered.push('\n');
+        }
+    }
+
+    if rendered.is_empty() {
+        None
+    } else {
+        Some(rendered)
+    }
+}
+
+fn has_visible_text(content: &str) -> bool {
+    !strip_ansi(content).trim().is_empty()
 }
 
 /// Simulated mode: create a temporary 2-pane session and replay scripted turns.
@@ -273,7 +505,10 @@ async fn run_simulated(host: &motlie_tmux::HostHandle, args: &Args) -> Result<()
     println!();
 
     let turns = [
-        (pane_a, "agent-a> I found the failing assertion in monitor.rs."),
+        (
+            pane_a,
+            "agent-a> I found the failing assertion in monitor.rs.",
+        ),
         (
             pane_b,
             "agent-b> Verify the shared OutputBus is injected before monitoring starts.",
