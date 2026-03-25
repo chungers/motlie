@@ -1801,7 +1801,7 @@ mod tests {
     async fn create_session_returns_target() {
         let mock = MockTransport::new()
             .with_default("")
-            .with_response("list-sessions", "test<|>$0<|>1700000000<|>0<|>1<|>\n");
+            .with_response("list-sessions", "test $0 1700000000 0 1 \n");
         let host = mock_host(mock);
         let target = host
             .create_session("test", &Default::default())
@@ -1814,7 +1814,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_not_found() {
-        let mock = MockTransport::new().with_response("list-sessions", "other<|>$0<|>0<|>0<|>1<|>\n");
+        let mock = MockTransport::new().with_response("list-sessions", "other $0 0 0 1 \n");
         let host = mock_host(mock);
         let result = host.session("nonexistent").await.unwrap();
         assert!(result.is_none());
@@ -1822,7 +1822,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_found() {
-        let mock = MockTransport::new().with_response("list-sessions", "build<|>$0<|>0<|>1<|>2<|>\n");
+        let mock = MockTransport::new().with_response("list-sessions", "build $0 0 1 2 \n");
         let host = mock_host(mock);
         let target = host.session("build").await.unwrap();
         assert!(target.is_some());
@@ -1833,7 +1833,7 @@ mod tests {
 
     #[tokio::test]
     async fn target_spec_session_level() {
-        let mock = MockTransport::new().with_response("list-sessions", "build<|>$0<|>0<|>0<|>1<|>\n");
+        let mock = MockTransport::new().with_response("list-sessions", "build $0 0 0 1 \n");
         let host = mock_host(mock);
         let spec = TargetSpec::session("build");
         let t = host.target(&spec).await.unwrap();
@@ -1844,10 +1844,10 @@ mod tests {
     #[tokio::test]
     async fn children_session_lists_windows() {
         let mock = MockTransport::new()
-            .with_response("list-sessions", "build<|>$0<|>0<|>0<|>2<|>\n")
+            .with_response("list-sessions", "build $0 0 0 2 \n")
             .with_response(
                 "list-windows",
-                "$0<|>build<|>0<|>main<|>1<|>1<|>layout\n$0<|>build<|>1<|>editor<|>0<|>1<|>layout\n",
+                "$0 build 0 main 1 1 layout\n$0 build 1 editor 0 1 layout\n",
             );
         let host = mock_host(mock);
         let target = host.session("build").await.unwrap().unwrap();
@@ -1862,7 +1862,7 @@ mod tests {
     async fn new_window_returns_window_target() {
         let expected = "new-window -P";
         let mock =
-            MockTransport::new().with_response(expected, "$0<|>build<|>1<|>editor<|>1<|>1<|>layout");
+            MockTransport::new().with_response(expected, "$0 build 1 editor 1 1 layout");
         let host = mock_host(mock);
         let target = host.create_target_for_test("build");
 
@@ -1912,7 +1912,7 @@ mod tests {
 
     #[tokio::test]
     async fn split_pane_returns_pane_target_from_window() {
-        let mock = MockTransport::new().with_response("split-window -P", "%9<|>build:0.1");
+        let mock = MockTransport::new().with_response("split-window -P", "%9 build 0 1");
         let host = mock_host(mock);
         let window_target = Target {
             inner: host.inner.clone(),
@@ -2058,14 +2058,14 @@ mod tests {
         // Session with 2 windows: window 0 (inactive) and window 1 (active).
         // Both have pane 0. Session-level pane(0) should return window 1's pane.
         let mock = MockTransport::new()
-            .with_response("list-sessions", "build<|>$0<|>0<|>0<|>2<|>\n")
+            .with_response("list-sessions", "build $0 0 0 2 \n")
             .with_response(
                 "list-windows",
-                "$0<|>build<|>0<|>main<|>0<|>1<|>layout\n$0<|>build<|>1<|>editor<|>1<|>1<|>layout\n",
+                "$0 build 0 main 0 1 layout\n$0 build 1 editor 1 1 layout\n",
             )
             .with_response(
                 "list-panes",
-                "%0<|>build:0.0<|><|>bash<|>100<|>80<|>24<|>1\n%1<|>build:1.0<|><|>vim<|>101<|>80<|>24<|>1\n",
+                "%0 build 0 0  bash 100 80 24 1\n%1 build 1 0  vim 101 80 24 1\n",
             );
         let host = mock_host(mock);
         let session = host.session("build").await.unwrap().unwrap();

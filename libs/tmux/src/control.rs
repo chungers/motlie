@@ -24,7 +24,7 @@ fn shell_escape_path(path: &Path) -> Result<String> {
 
 fn parse_created_window(output: &str) -> Result<WindowInfo> {
     let line = output.trim();
-    let fields = crate::discovery::split_fields(line);
+    let fields = crate::discovery::parse_escaped_fields(line);
     if fields.len() < 7 {
         return Err(anyhow::anyhow!(
             "malformed new-window output (expected 7 fields): {}",
@@ -33,30 +33,41 @@ fn parse_created_window(output: &str) -> Result<WindowInfo> {
     }
 
     Ok(WindowInfo {
-        session_id: fields[0].to_string(),
-        session_name: fields[1].to_string(),
+        session_id: fields[0].clone(),
+        session_name: fields[1].clone(),
         index: fields[2]
             .parse()
             .map_err(|_| anyhow::anyhow!("invalid window_index: {}", fields[2]))?,
-        name: fields[3].to_string(),
+        name: fields[3].clone(),
         active: fields[4] == "1",
         pane_count: fields[5]
             .parse()
             .map_err(|_| anyhow::anyhow!("invalid window_panes: {}", fields[5]))?,
-        layout: fields[6].to_string(),
+        layout: fields[6].clone(),
     })
 }
 
 fn parse_created_pane(output: &str) -> Result<PaneAddress> {
     let line = output.trim();
-    let fields = crate::discovery::split_fields(line);
-    if fields.len() < 2 {
+    let fields = crate::discovery::parse_escaped_fields(line);
+    if fields.len() < 4 {
         return Err(anyhow::anyhow!(
-            "malformed split-pane output (expected 2 fields): {}",
+            "malformed split-pane output (expected 4 fields): {}",
             line
         ));
     }
-    PaneAddress::parse(fields[0], fields[1])
+    let window: u32 = fields[2]
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid window_index: {}", fields[2]))?;
+    let pane: u32 = fields[3]
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid pane_index: {}", fields[3]))?;
+    Ok(PaneAddress {
+        pane_id: fields[0].clone(),
+        session: fields[1].clone(),
+        window,
+        pane,
+    })
 }
 
 /// Create a new detached tmux session (using bare "tmux" prefix).
@@ -143,7 +154,7 @@ pub async fn new_window_with_prefix(
     opts: &CreateWindowOptions,
 ) -> Result<WindowInfo> {
     let mut cmd = format!(
-        "{} new-window -P -F '#{{session_id}}<|>#{{session_name}}<|>#{{window_index}}<|>#{{window_name}}<|>#{{window_active}}<|>#{{window_panes}}<|>#{{window_layout}}'",
+        "{} new-window -P -F '#{{q:session_id}} #{{q:session_name}} #{{q:window_index}} #{{q:window_name}} #{{q:window_active}} #{{q:window_panes}} #{{q:window_layout}}'",
         prefix
     );
 
@@ -186,7 +197,7 @@ pub async fn split_pane_with_prefix(
     opts: &SplitPaneOptions,
 ) -> Result<PaneAddress> {
     let mut cmd = format!(
-        "{} split-window -P -F '#{{pane_id}}<|>#{{session_name}}:#{{window_index}}.#{{pane_index}}'",
+        "{} split-window -P -F '#{{q:pane_id}} #{{q:session_name}} #{{q:window_index}} #{{q:pane_index}}'",
         prefix
     );
 
@@ -588,9 +599,9 @@ mod tests {
 
     #[tokio::test]
     async fn new_window_with_all_options_builds_expected_command() {
-        let expected = "tmux new-window -P -F '#{session_id}<|>#{session_name}<|>#{window_index}<|>#{window_name}<|>#{window_active}<|>#{window_panes}<|>#{window_layout}' -n 'editor' -x 200 -y 50 -c '/tmp/project' -t 'build' 'vim'";
+        let expected = "tmux new-window -P -F '#{q:session_id} #{q:session_name} #{q:window_index} #{q:window_name} #{q:window_active} #{q:window_panes} #{q:window_layout}' -n 'editor' -x 200 -y 50 -c '/tmp/project' -t 'build' 'vim'";
         let mock =
-            MockTransport::new().with_response(expected, "$0<|>build<|>1<|>editor<|>1<|>1<|>layout");
+            MockTransport::new().with_response(expected, "$0 build 1 editor 1 1 layout");
         let transport = TransportKind::Mock(mock);
         let opts = CreateWindowOptions {
             name: Some("editor".to_string()),
@@ -608,8 +619,8 @@ mod tests {
 
     #[tokio::test]
     async fn split_pane_with_all_options_builds_expected_command() {
-        let expected = "tmux split-window -P -F '#{pane_id}<|>#{session_name}:#{window_index}.#{pane_index}' -h -l 40% -c '/tmp/project' -t 'build:1.0' 'htop'";
-        let mock = MockTransport::new().with_response(expected, "%9<|>build:1.1");
+        let expected = "tmux split-window -P -F '#{q:pane_id} #{q:session_name} #{q:window_index} #{q:pane_index}' -h -l 40% -c '/tmp/project' -t 'build:1.0' 'htop'";
+        let mock = MockTransport::new().with_response(expected, "%9 build 1 1");
         let transport = TransportKind::Mock(mock);
         let opts = SplitPaneOptions {
             direction: SplitDirection::Horizontal,
@@ -657,7 +668,7 @@ mod tests {
     async fn new_window_rejects_invalid_numeric_fields() {
         let mock = MockTransport::new().with_response(
             "new-window -P",
-            "$0<|>build<|>not-a-number<|>editor<|>1<|>also-bad<|>layout",
+            "$0 build not-a-number editor 1 also-bad layout",
         );
         let transport = TransportKind::Mock(mock);
 
