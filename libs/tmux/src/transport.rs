@@ -2101,10 +2101,15 @@ impl MockShellChannel {
 
 /// Build the tmux command prefix with optional socket args.
 pub fn tmux_prefix(socket: Option<&TmuxSocket>) -> String {
+    tmux_prefix_with_bin("tmux", socket)
+}
+
+/// Build the tmux command prefix using a specific binary path.
+pub fn tmux_prefix_with_bin(tmux_bin: &str, socket: Option<&TmuxSocket>) -> String {
     match socket {
-        None => "tmux".to_string(),
-        Some(TmuxSocket::Name(n)) => format!("tmux -L '{}'", shell_escape_arg(n)),
-        Some(TmuxSocket::Path(p)) => format!("tmux -S '{}'", shell_escape_arg(p)),
+        None => tmux_bin.to_string(),
+        Some(TmuxSocket::Name(n)) => format!("{} -L '{}'", tmux_bin, shell_escape_arg(n)),
+        Some(TmuxSocket::Path(p)) => format!("{} -S '{}'", tmux_bin, shell_escape_arg(p)),
     }
 }
 

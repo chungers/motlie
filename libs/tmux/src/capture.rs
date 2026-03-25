@@ -9,16 +9,24 @@ use crate::types::{
 };
 
 // ---------------------------------------------------------------------------
-// Raw capture primitives (unchanged)
+// Raw capture primitives
 // ---------------------------------------------------------------------------
 
-/// Capture visible pane content.
+/// Capture visible pane content (using bare "tmux" prefix).
 pub async fn capture_pane(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
     target: &str,
 ) -> Result<String> {
-    let prefix = tmux_prefix(socket);
+    capture_pane_with_prefix(transport, &tmux_prefix(socket), target).await
+}
+
+/// Capture visible pane content using a caller-provided prefix.
+pub async fn capture_pane_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+) -> Result<String> {
     let cmd = format!(
         "{} capture-pane -p -t '{}'",
         prefix,
@@ -27,16 +35,23 @@ pub async fn capture_pane(
     transport.exec(&cmd).await
 }
 
-/// Capture pane content with scrollback history.
-/// `start` is negative to go into scrollback (e.g. -100 = 100 lines above visible area).
-/// Captures through the end of the visible area.
+/// Capture pane content with scrollback history (using bare "tmux" prefix).
 pub async fn capture_pane_history(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
     target: &str,
     start: i32,
 ) -> Result<String> {
-    let prefix = tmux_prefix(socket);
+    capture_pane_history_with_prefix(transport, &tmux_prefix(socket), target, start).await
+}
+
+/// Capture pane content with scrollback history using a caller-provided prefix.
+pub async fn capture_pane_history_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    start: i32,
+) -> Result<String> {
     let cmd = format!(
         "{} capture-pane -p -t '{}' -S {}",
         prefix,
@@ -46,49 +61,67 @@ pub async fn capture_pane_history(
     transport.exec(&cmd).await
 }
 
-/// Capture all panes in a session.
+/// Capture all panes in a session (using bare "tmux" prefix).
 pub async fn capture_session(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
     session: &str,
 ) -> Result<HashMap<PaneAddress, String>> {
-    let panes = discovery::list_panes_in_session(transport, socket, session).await?;
+    capture_session_with_tmux_prefix(transport, &tmux_prefix(socket), session).await
+}
+
+/// Capture all panes in a session using a caller-provided prefix.
+pub async fn capture_session_with_tmux_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    session: &str,
+) -> Result<HashMap<PaneAddress, String>> {
+    let panes =
+        discovery::list_panes_in_session_with_prefix(transport, prefix, session).await?;
     let mut result = HashMap::new();
     for pane in panes {
         let target = pane.address.to_tmux_target();
-        let content = capture_pane(transport, socket, &target).await?;
+        let content = capture_pane_with_prefix(transport, prefix, &target).await?;
         result.insert(pane.address, content);
     }
     Ok(result)
 }
 
-/// Sample scrollback text according to a query.
+/// Sample scrollback text according to a query (using bare "tmux" prefix).
 pub async fn sample_text(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
     target: &str,
     query: &ScrollbackQuery,
 ) -> Result<String> {
+    sample_text_with_tmux_prefix(transport, &tmux_prefix(socket), target, query).await
+}
+
+/// Sample scrollback text using a caller-provided prefix.
+pub async fn sample_text_with_tmux_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    query: &ScrollbackQuery,
+) -> Result<String> {
     match query {
         ScrollbackQuery::LastLines(n) => {
             let n = *n as i32;
-            let content = capture_pane_history(transport, socket, target, -n).await?;
-            // Trim trailing blank lines from visible area padding
+            let content =
+                capture_pane_history_with_prefix(transport, prefix, target, -n).await?;
             let trimmed = content.trim_end();
             Ok(trimmed.to_string())
         }
         ScrollbackQuery::Until { pattern, max_lines } => {
             let max = *max_lines as i32;
             let content =
-                capture_pane_history(transport, socket, target, -max).await?;
+                capture_pane_history_with_prefix(transport, prefix, target, -max).await?;
             let lines: Vec<&str> = content.lines().collect();
-            // Scan from end to find the pattern
             for (i, line) in lines.iter().enumerate().rev() {
                 if pattern.is_match(line) {
                     return Ok(lines[i..].join("\n"));
                 }
             }
-            // Pattern not found — return all captured
             Ok(content)
         }
         ScrollbackQuery::LastLinesUntil {
@@ -97,9 +130,8 @@ pub async fn sample_text(
         } => {
             let n = *lines as i32;
             let content =
-                capture_pane_history(transport, socket, target, -n).await?;
+                capture_pane_history_with_prefix(transport, prefix, target, -n).await?;
             let lines: Vec<&str> = content.lines().collect();
-            // Scan from end to find stop pattern
             for (i, line) in lines.iter().enumerate().rev() {
                 if stop_pattern.is_match(line) {
                     return Ok(lines[i..].join("\n"));
@@ -114,13 +146,21 @@ pub async fn sample_text(
 // Escape-mode capture primitive (ScreenStable)
 // ---------------------------------------------------------------------------
 
-/// Capture visible pane content with ANSI/control sequences preserved (`-ep`).
+/// Capture visible pane content with ANSI sequences preserved (using bare "tmux" prefix).
 pub async fn capture_pane_escape(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
     target: &str,
 ) -> Result<String> {
-    let prefix = tmux_prefix(socket);
+    capture_pane_escape_with_prefix(transport, &tmux_prefix(socket), target).await
+}
+
+/// Capture visible pane content with ANSI sequences using a caller-provided prefix.
+pub async fn capture_pane_escape_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+) -> Result<String> {
     let cmd = format!(
         "{} capture-pane -ep -t '{}'",
         prefix,
@@ -129,14 +169,23 @@ pub async fn capture_pane_escape(
     transport.exec(&cmd).await
 }
 
-/// Capture pane content with ANSI preservation and scrollback history.
+/// Capture pane with ANSI and scrollback history (using bare "tmux" prefix).
 pub async fn capture_pane_escape_history(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
     target: &str,
     start: i32,
 ) -> Result<String> {
-    let prefix = tmux_prefix(socket);
+    capture_pane_escape_history_with_prefix(transport, &tmux_prefix(socket), target, start).await
+}
+
+/// Capture pane with ANSI and scrollback history using a caller-provided prefix.
+pub async fn capture_pane_escape_history_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    start: i32,
+) -> Result<String> {
     let cmd = format!(
         "{} capture-pane -ep -t '{}' -S {}",
         prefix,
@@ -250,23 +299,23 @@ pub fn normalize_plain_text(raw: &str) -> String {
 // Options-based capture API (DC20)
 // ---------------------------------------------------------------------------
 
-/// Perform raw tmux capture based on options (mode + history).
-async fn raw_capture(
+/// Perform raw tmux capture using a caller-provided prefix.
+async fn raw_capture_with_prefix(
     transport: &TransportKind,
-    socket: Option<&TmuxSocket>,
+    prefix: &str,
     target: &str,
     opts: &CaptureOptions,
 ) -> Result<String> {
     let use_escape = opts.normalize == CaptureNormalizeMode::ScreenStable;
 
     match (opts.history_start, use_escape) {
-        (None, false) => capture_pane(transport, socket, target).await,
-        (None, true) => capture_pane_escape(transport, socket, target).await,
+        (None, false) => capture_pane_with_prefix(transport, prefix, target).await,
+        (None, true) => capture_pane_escape_with_prefix(transport, prefix, target).await,
         (Some(start), false) => {
-            capture_pane_history(transport, socket, target, start).await
+            capture_pane_history_with_prefix(transport, prefix, target, start).await
         }
         (Some(start), true) => {
-            capture_pane_escape_history(transport, socket, target, start).await
+            capture_pane_escape_history_with_prefix(transport, prefix, target, start).await
         }
     }
 }
@@ -286,10 +335,10 @@ fn apply_normalization(raw: &str, mode: CaptureNormalizeMode) -> (String, Option
     }
 }
 
-/// Detect geometry changes around a capture and build fidelity metadata.
-async fn detect_fidelity(
+/// Detect geometry changes using a caller-provided prefix.
+async fn detect_fidelity_with_prefix(
     transport: &TransportKind,
-    socket: Option<&TmuxSocket>,
+    prefix: &str,
     target: &str,
     detect_reflow: bool,
 ) -> (Option<crate::types::GeometrySnapshot>, OutputFidelity) {
@@ -297,19 +346,16 @@ async fn detect_fidelity(
         return (None, OutputFidelity::clean());
     }
 
-    match discovery::take_geometry_snapshot(transport, socket, target).await {
+    match discovery::take_geometry_snapshot_with_prefix(transport, prefix, target).await {
         Ok(snap) => (Some(snap), OutputFidelity::clean()),
-        Err(_) => {
-            // If we can't take a snapshot, proceed with clean fidelity
-            (None, OutputFidelity::clean())
-        }
+        Err(_) => (None, OutputFidelity::clean()),
     }
 }
 
-/// Finalize fidelity by comparing pre/post snapshots.
-async fn finalize_fidelity(
+/// Finalize fidelity using a caller-provided prefix.
+async fn finalize_fidelity_with_prefix(
     transport: &TransportKind,
-    socket: Option<&TmuxSocket>,
+    prefix: &str,
     target: &str,
     pre_snapshot: Option<crate::types::GeometrySnapshot>,
 ) -> OutputFidelity {
@@ -318,10 +364,11 @@ async fn finalize_fidelity(
         None => return OutputFidelity::clean(),
     };
 
-    let post = match discovery::take_geometry_snapshot(transport, socket, target).await {
-        Ok(s) => s,
-        Err(_) => return OutputFidelity::clean(),
-    };
+    let post =
+        match discovery::take_geometry_snapshot_with_prefix(transport, prefix, target).await {
+            Ok(s) => s,
+            Err(_) => return OutputFidelity::clean(),
+        };
 
     let issues = pre.compare(&post);
     if issues.is_empty() {
@@ -331,20 +378,30 @@ async fn finalize_fidelity(
     }
 }
 
-/// Capture pane content with options, returning a `CaptureResult`.
+/// Capture pane content with options (using bare "tmux" prefix).
 pub async fn capture_pane_with_options(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
     target: &str,
     opts: &CaptureOptions,
 ) -> Result<CaptureResult> {
-    let (pre_snapshot, _) =
-        detect_fidelity(transport, socket, target, opts.detect_reflow).await;
+    capture_pane_with_options_prefix(transport, &tmux_prefix(socket), target, opts).await
+}
 
-    let raw = raw_capture(transport, socket, target, opts).await?;
+/// Capture pane content with options using a caller-provided prefix.
+pub async fn capture_pane_with_options_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    opts: &CaptureOptions,
+) -> Result<CaptureResult> {
+    let (pre_snapshot, _) =
+        detect_fidelity_with_prefix(transport, prefix, target, opts.detect_reflow).await;
+
+    let raw = raw_capture_with_prefix(transport, prefix, target, opts).await?;
 
     let fidelity =
-        finalize_fidelity(transport, socket, target, pre_snapshot).await;
+        finalize_fidelity_with_prefix(transport, prefix, target, pre_snapshot).await;
 
     let (text, raw_text) = apply_normalization(&raw, opts.normalize);
 
@@ -355,11 +412,7 @@ pub async fn capture_pane_with_options(
     })
 }
 
-/// Sample scrollback text with options, returning a `CaptureResult`.
-///
-/// When `previous_text` is provided and `opts.overlap_lines >= 2`, performs
-/// overlap-aware dedup between the previous capture and the new one.
-/// If overlap matching fails, the result includes `OverlapResync` in fidelity.
+/// Sample scrollback text with options (using bare "tmux" prefix).
 pub async fn sample_text_with_options(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
@@ -368,16 +421,35 @@ pub async fn sample_text_with_options(
     opts: &CaptureOptions,
     previous_text: Option<&str>,
 ) -> Result<CaptureResult> {
-    let (pre_snapshot, _) =
-        detect_fidelity(transport, socket, target, opts.detect_reflow).await;
+    sample_text_with_options_prefix(
+        transport,
+        &tmux_prefix(socket),
+        target,
+        query,
+        opts,
+        previous_text,
+    )
+    .await
+}
 
-    // Build effective options with history from query
+/// Sample scrollback text with options using a caller-provided prefix.
+pub async fn sample_text_with_options_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    query: &ScrollbackQuery,
+    opts: &CaptureOptions,
+    previous_text: Option<&str>,
+) -> Result<CaptureResult> {
+    let (pre_snapshot, _) =
+        detect_fidelity_with_prefix(transport, prefix, target, opts.detect_reflow).await;
+
     let effective_opts = match query {
         ScrollbackQuery::LastLines(n) => CaptureOptions {
             history_start: Some(-(*n as i32)),
             normalize: opts.normalize,
             overlap_lines: opts.overlap_lines,
-            detect_reflow: false, // already handled above
+            detect_reflow: false,
         },
         ScrollbackQuery::Until { max_lines, .. } => CaptureOptions {
             history_start: Some(-(*max_lines as i32)),
@@ -393,12 +465,11 @@ pub async fn sample_text_with_options(
         },
     };
 
-    let raw = raw_capture(transport, socket, target, &effective_opts).await?;
+    let raw = raw_capture_with_prefix(transport, prefix, target, &effective_opts).await?;
 
     let mut fidelity =
-        finalize_fidelity(transport, socket, target, pre_snapshot).await;
+        finalize_fidelity_with_prefix(transport, prefix, target, pre_snapshot).await;
 
-    // Apply query-specific filtering on normalized text
     let (text, raw_text) = apply_normalization(&raw, opts.normalize);
 
     let filtered = match query {
@@ -433,16 +504,12 @@ pub async fn sample_text_with_options(
         }
     };
 
-    // Apply overlap dedup if previous text and sufficient overlap lines provided
     let final_text = if let Some(prev) = previous_text {
         if opts.overlap_lines >= 2 {
             let (merged, overlap_issues) =
                 overlap_deduplicate(prev, &filtered, opts.overlap_lines);
             if !overlap_issues.is_empty() {
-                // Merge overlap issues into fidelity
-                let mut all_issues = fidelity
-                    .issues
-                    .unwrap_or_default();
+                let mut all_issues = fidelity.issues.unwrap_or_default();
                 all_issues.extend(overlap_issues);
                 fidelity = OutputFidelity::degraded(all_issues);
             }
@@ -551,18 +618,29 @@ pub fn overlap_deduplicate(
     }
 }
 
-/// Capture all panes in a session with options.
+/// Capture all panes in a session with options (using bare "tmux" prefix).
 pub async fn capture_session_with_options(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
     session: &str,
     opts: &CaptureOptions,
 ) -> Result<HashMap<PaneAddress, CaptureResult>> {
-    let panes = discovery::list_panes_in_session(transport, socket, session).await?;
+    capture_session_with_options_prefix(transport, &tmux_prefix(socket), session, opts).await
+}
+
+/// Capture all panes in a session with options using a caller-provided prefix.
+pub async fn capture_session_with_options_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    session: &str,
+    opts: &CaptureOptions,
+) -> Result<HashMap<PaneAddress, CaptureResult>> {
+    let panes =
+        discovery::list_panes_in_session_with_prefix(transport, prefix, session).await?;
     let mut result = HashMap::new();
     for pane in panes {
         let target = pane.address.to_tmux_target();
-        let cr = capture_pane_with_options(transport, socket, &target, opts).await?;
+        let cr = capture_pane_with_options_prefix(transport, prefix, &target, opts).await?;
         result.insert(pane.address, cr);
     }
     Ok(result)
