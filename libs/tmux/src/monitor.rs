@@ -214,6 +214,12 @@ impl SessionMonitor {
         )
     }
 
+    fn signal_startup_ready(startup_ready: &mut Option<oneshot::Sender<()>>) {
+        if let Some(tx) = startup_ready.take() {
+            let _ = tx.send(());
+        }
+    }
+
     /// Process a parsed %output frame: return a TargetOutput.
     ///
     /// Applies the configured normalization mode (1.9a):
@@ -306,17 +312,17 @@ impl SessionMonitor {
 
                                 match parse_control_line(&line) {
                                     ControlModeMessage::Output { pane_id, data } => {
-                                        if let Some(tx) = startup_ready.take() {
-                                            let _ = tx.send(());
-                                        }
+                                        Self::signal_startup_ready(startup_ready);
                                         let output = self.process_output(&pane_id, &data);
                                         bus.publish(output);
                                     }
                                     ControlModeMessage::CommandResponse(_) => {
-                                        // Ignore command responses for now
+                                        // Any control-mode frame means attach succeeded,
+                                        // even if the session has not emitted pane output yet.
+                                        Self::signal_startup_ready(startup_ready);
                                     }
                                     ControlModeMessage::Notification(_) => {
-                                        // Ignore notifications for now
+                                        Self::signal_startup_ready(startup_ready);
                                     }
                                     ControlModeMessage::Unknown(line) => {
                                         tracing::warn!(
@@ -931,6 +937,33 @@ mod tests {
             SinkEvent::Data(out) => assert_eq!(out.content, "hello"),
             other => panic!("expected Data, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn monitor_signals_ready_on_control_frame_without_output() {
+        use crate::sink::OutputBus;
+        use crate::transport::MockTransport;
+
+        let control_output = b"%begin 1234 1 0\n%end 1234 1 0\n";
+        let mock = MockTransport::new().with_shell_data(vec![control_output.to_vec()]);
+        let mut shell = mock.open_shell_for_test().await;
+
+        let bus = OutputBus::new();
+        let _sub = bus.subscribe(vec![], 16).unwrap();
+
+        let (_stop_tx, stop_rx) = watch::channel(false);
+        let mut monitor = SessionMonitor::new("test".into(), "localhost".into());
+
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let mut ready = Some(ready_tx);
+        let result = monitor
+            .run(&mut shell, &bus, stop_rx, &mut ready)
+            .await
+            .unwrap();
+        assert_eq!(result, MonitorExitReason::ConnectionLost);
+        ready_rx
+            .await
+            .expect("ready signal should be sent on control-mode frames");
     }
 
     #[tokio::test]
