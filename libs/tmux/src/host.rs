@@ -48,13 +48,14 @@ impl HostHandleInner {
             }
         }
 
-        // Use login shell variants to get the user's full PATH.
+        // Use login shell to get the user's full PATH.
         // `command -v` returns exit code 1 when not found (unlike `which`
         // on macOS zsh which returns "not found" text with exit 0).
+        // $SHELL is set by sshd from the user's passwd entry, so
+        // `$SHELL -lc` works regardless of which shell the user has.
         let probes: &[&str] = &[
             "command -v tmux",
-            "zsh -lc 'command -v tmux' 2>/dev/null",
-            "bash -lc 'command -v tmux' 2>/dev/null",
+            "$SHELL -lc 'command -v tmux' 2>/dev/null",
         ];
 
         let mut resolved = "tmux".to_string();
