@@ -8,7 +8,9 @@ use crate::capture;
 use crate::control;
 use crate::discovery;
 use crate::keys::KeySequence;
-use crate::monitor::{MonitorExitReason, MonitorHandle, MonitorHealth, SessionMonitor, SessionMonitorHandle};
+use crate::monitor::{
+    MonitorExitReason, MonitorHandle, MonitorHealth, SessionMonitor, SessionMonitorHandle,
+};
 use crate::sink::{OutputBus, TargetOutput};
 use crate::transport::TransportKind;
 use crate::types::*;
@@ -214,19 +216,7 @@ impl HostHandle {
     /// List all tmux sessions on this host.
     pub async fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
         let prefix = self.inner.tmux_prefix().await;
-        let cmd = format!("{} list-sessions -F '{}'", prefix, discovery::LIST_SESSIONS_FMT);
-        let output = match self.inner.transport.exec(&cmd).await {
-            Ok(o) => o,
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("no server running") || msg.contains("no sessions") {
-                    return Ok(Vec::new());
-                }
-                return Err(e);
-            }
-        };
-        let result = discovery::parse_sessions(&output)?;
-        Ok(result)
+        discovery::list_sessions_with_prefix(&self.inner.transport, &prefix).await
     }
 
     /// List attached clients on this host (DC20, Phase 1.9b).
@@ -241,13 +231,7 @@ impl HostHandle {
     /// retain their creation-time limit.
     pub async fn set_global_history_limit(&self, limit: u32) -> Result<()> {
         let prefix = self.inner.tmux_prefix().await;
-        control::set_history_limit_with_prefix(
-            &self.inner.transport,
-            &prefix,
-            None,
-            limit,
-        )
-        .await
+        control::set_history_limit_with_prefix(&self.inner.transport, &prefix, None, limit).await
     }
 
     /// Query the global `history-limit` default.
@@ -262,17 +246,10 @@ impl HostHandle {
     /// `CreateSessionOptions::default()` preserves pre-DC22 behavior.
     pub async fn create_session(&self, name: &str, opts: &CreateSessionOptions) -> Result<Target> {
         let prefix = self.inner.tmux_prefix().await;
-        control::create_session_with_prefix(
-            &self.inner.transport,
-            &prefix,
-            name,
-            opts,
-        )
-        .await?;
+        control::create_session_with_prefix(&self.inner.transport, &prefix, name, opts).await?;
 
         // Query the created session to get full info
-        let sessions =
-            self.list_sessions().await?;
+        let sessions = self.list_sessions().await?;
         let info = sessions
             .into_iter()
             .find(|s| s.name == name)
@@ -286,8 +263,7 @@ impl HostHandle {
 
     /// Get a Target for an existing session by name.
     pub async fn session(&self, name: &str) -> Result<Option<Target>> {
-        let sessions =
-            self.list_sessions().await?;
+        let sessions = self.list_sessions().await?;
         Ok(sessions
             .into_iter()
             .find(|s| s.name == name)
@@ -301,8 +277,7 @@ impl HostHandle {
     pub async fn target(&self, spec: &TargetSpec) -> Result<Option<Target>> {
         let prefix = self.inner.tmux_prefix().await;
         // Check session exists
-        let sessions =
-            self.list_sessions().await?;
+        let sessions = self.list_sessions().await?;
         let session_info = match sessions.into_iter().find(|s| s.name == spec.session_name()) {
             Some(s) => s,
             None => return Ok(None),
@@ -456,8 +431,7 @@ impl HostHandle {
         let session = session_name.to_string();
 
         // Resolve the session first — fail before any registration
-        let sessions =
-            self.list_sessions().await?;
+        let sessions = self.list_sessions().await?;
         let session_info = sessions
             .into_iter()
             .find(|s| s.name == session)
@@ -503,12 +477,9 @@ impl HostHandle {
             };
 
             loop {
-                let mut monitor = SessionMonitor::new(
-                    session.clone(),
-                    host_alias.clone(),
-                )
-                .with_socket(inner_ref.socket.clone())
-                .with_tmux_bin(Some(resolved_tmux_bin.clone()));
+                let mut monitor = SessionMonitor::new(session.clone(), host_alias.clone())
+                    .with_socket(inner_ref.socket.clone())
+                    .with_tmux_bin(Some(resolved_tmux_bin.clone()));
 
                 let exit = monitor
                     .run(&mut shell, &bus, stop_rx.clone(), &mut startup_ready)
@@ -524,9 +495,10 @@ impl HostHandle {
                     }
                     MonitorExitReason::ConnectionLost => {
                         // Transition Running execs in this session to Unknown (DC31)
-                        inner_ref.notify_exec_discontinuity(&session, &format!(
-                            "connection lost for {}:{}", host_alias, session
-                        ));
+                        inner_ref.notify_exec_discontinuity(
+                            &session,
+                            &format!("connection lost for {}:{}", host_alias, session),
+                        );
 
                         // Unexpected EOF — emit discontinuity and attempt reconnect
                         bus.publish_discontinuity(&format!(
@@ -543,7 +515,8 @@ impl HostHandle {
                             }
                             return Err(anyhow!(
                                 "monitor for '{}' exhausted {} reconnect attempts",
-                                session, max_retries
+                                session,
+                                max_retries
                             ));
                         }
 
@@ -570,10 +543,15 @@ impl HostHandle {
                         let reconnect_prefix = inner_ref.tmux_prefix().await;
                         let reconnect_cmd = format!(
                             "{} list-sessions -F '{}'",
-                            reconnect_prefix, discovery::LIST_SESSIONS_FMT
+                            reconnect_prefix,
+                            discovery::LIST_SESSIONS_FMT
                         );
-                        let sessions = match inner_ref.transport.exec(&reconnect_cmd).await
-                            .and_then(|o| discovery::parse_sessions(&o)) {
+                        let sessions = match inner_ref
+                            .transport
+                            .exec(&reconnect_cmd)
+                            .await
+                            .and_then(|o| discovery::parse_sessions(&o))
+                        {
                             Ok(s) => s,
                             Err(_) => continue, // Can't reach host, retry after next backoff
                         };
@@ -589,7 +567,8 @@ impl HostHandle {
                                 signals.remove(&session_for_cleanup);
                             }
                             return Err(anyhow!(
-                                "session '{}' no longer exists after reconnect", session
+                                "session '{}' no longer exists after reconnect",
+                                session
                             ));
                         }
 
@@ -614,7 +593,9 @@ impl HostHandle {
                                     &inner_ref.transport,
                                     &reconnect_pfx,
                                     &session,
-                                ).await {
+                                )
+                                .await
+                                {
                                     Ok(panes) => {
                                         for pane in &panes {
                                             let target = pane.address.to_string();
@@ -622,10 +603,14 @@ impl HostHandle {
                                                 &inner_ref.transport,
                                                 &reconnect_pfx,
                                                 &target,
-                                            ).await {
+                                            )
+                                            .await
+                                            {
                                                 if !content.is_empty() {
                                                     bus.publish(TargetOutput {
-                                                        source: TargetAddress::Pane(pane.address.clone()),
+                                                        source: TargetAddress::Pane(
+                                                            pane.address.clone(),
+                                                        ),
                                                         host: host_alias.clone(),
                                                         content,
                                                         raw_content: None,
@@ -665,7 +650,9 @@ impl HostHandle {
                                         "stream snapshot: captured current screen state \
                                          after reconnect for {}:{} ({} pane{}); \
                                          intermediate output may be missing",
-                                        host_alias, session, snapshot_panes,
+                                        host_alias,
+                                        session,
+                                        snapshot_panes,
                                         if snapshot_panes == 1 { "" } else { "s" }
                                     )
                                 };
@@ -782,7 +769,9 @@ impl ExecHandle {
 
     /// Await completion, consuming the handle. Returns the final `ExecState`.
     pub async fn wait(self) -> Result<ExecState> {
-        self.task.await.map_err(|e| anyhow!("exec task panicked: {}", e))?
+        self.task
+            .await
+            .map_err(|e| anyhow!("exec task panicked: {}", e))?
     }
 }
 
@@ -892,12 +881,9 @@ impl Target {
         let prefix = self.inner.tmux_prefix().await;
         match &self.address {
             TargetAddress::Session(s) => {
-                let windows = discovery::list_windows_with_prefix(
-                    &self.inner.transport,
-                    &prefix,
-                    &s.name,
-                )
-                .await?;
+                let windows =
+                    discovery::list_windows_with_prefix(&self.inner.transport, &prefix, &s.name)
+                        .await?;
                 Ok(windows
                     .into_iter()
                     .map(|w| Target {
@@ -930,12 +916,9 @@ impl Target {
     pub async fn window(&self, index: u32) -> Result<Option<Target>> {
         let prefix = self.inner.tmux_prefix().await;
         let session_name = self.session_name().to_string();
-        let windows = discovery::list_windows_with_prefix(
-            &self.inner.transport,
-            &prefix,
-            &session_name,
-        )
-        .await?;
+        let windows =
+            discovery::list_windows_with_prefix(&self.inner.transport, &prefix, &session_name)
+                .await?;
         Ok(windows
             .into_iter()
             .find(|w| w.index == index)
@@ -1019,13 +1002,9 @@ impl Target {
         let prefix = self.inner.tmux_prefix().await;
         match &self.address {
             TargetAddress::Session(s) => {
-                let window = control::new_window_with_prefix(
-                    &self.inner.transport,
-                    &prefix,
-                    &s.name,
-                    opts,
-                )
-                .await?;
+                let window =
+                    control::new_window_with_prefix(&self.inner.transport, &prefix, &s.name, opts)
+                        .await?;
                 Ok(Target {
                     inner: self.inner.clone(),
                     address: TargetAddress::Window(window),
@@ -1068,25 +1047,15 @@ impl Target {
     /// Send literal text.
     pub async fn send_text(&self, text: &str) -> Result<()> {
         let prefix = self.inner.tmux_prefix().await;
-        control::send_text_with_prefix(
-            &self.inner.transport,
-            &prefix,
-            &self.target_string(),
-            text,
-        )
-        .await
+        control::send_text_with_prefix(&self.inner.transport, &prefix, &self.target_string(), text)
+            .await
     }
 
     /// Send a key sequence.
     pub async fn send_keys(&self, keys: &KeySequence) -> Result<()> {
         let prefix = self.inner.tmux_prefix().await;
-        control::send_keys_with_prefix(
-            &self.inner.transport,
-            &prefix,
-            &self.target_string(),
-            keys,
-        )
-        .await
+        control::send_keys_with_prefix(&self.inner.transport, &prefix, &self.target_string(), keys)
+            .await
     }
 
     /// Capture visible pane content.
@@ -1096,12 +1065,8 @@ impl Target {
     /// use [`capture_all()`](Self::capture_all).
     pub async fn capture(&self) -> Result<String> {
         let prefix = self.inner.tmux_prefix().await;
-        capture::capture_pane_with_prefix(
-            &self.inner.transport,
-            &prefix,
-            &self.target_string(),
-        )
-        .await
+        capture::capture_pane_with_prefix(&self.inner.transport, &prefix, &self.target_string())
+            .await
     }
 
     /// Capture with scrollback history. `start` is negative for scrollback lines.
@@ -1186,12 +1151,9 @@ impl Target {
                 let mut result = HashMap::new();
                 for pane in panes.into_iter().filter(|p| p.address.window == w.index) {
                     let target = pane.address.to_tmux_target();
-                    let content = capture::capture_pane_with_prefix(
-                        &self.inner.transport,
-                        &prefix,
-                        &target,
-                    )
-                    .await?;
+                    let content =
+                        capture::capture_pane_with_prefix(&self.inner.transport, &prefix, &target)
+                            .await?;
                     result.insert(pane.address, content);
                 }
                 Ok(result)
@@ -1269,8 +1231,7 @@ impl Target {
         let prefix = self.inner.tmux_prefix().await;
         match &self.address {
             TargetAddress::Session(s) => {
-                control::kill_session_with_prefix(&self.inner.transport, &prefix, &s.name)
-                    .await
+                control::kill_session_with_prefix(&self.inner.transport, &prefix, &s.name).await
             }
             TargetAddress::Window(_) => {
                 control::kill_window_with_prefix(
@@ -1467,7 +1428,11 @@ impl Target {
 
         // Register in active_execs before spawning
         {
-            let mut active = self.inner.active_execs.lock().expect("active_execs poisoned");
+            let mut active = self
+                .inner
+                .active_execs
+                .lock()
+                .expect("active_execs poisoned");
             let pane_states = active.entry(active_key.clone()).or_default();
             pane_states.push(state.clone());
         }
@@ -1519,13 +1484,18 @@ impl Target {
             // Send command with sentinel
             let sentinel_cmd = format!("{} ; echo \"{} {}\"", command, marker, exit_var);
             let keys = KeySequence::literal(&sentinel_cmd).then_enter();
-            if let Err(e) = control::send_keys_with_prefix(transport, &exec_prefix, &target_str, &keys).await {
+            if let Err(e) =
+                control::send_keys_with_prefix(transport, &exec_prefix, &target_str, &keys).await
+            {
                 let err_state = ExecState::Unknown {
                     reason: format!("send_keys failed: {}", e),
                 };
                 let final_state = finalize(
-                    &inner_ref, &state_task, &state_cleanup,
-                    &active_key_cleanup, err_state,
+                    &inner_ref,
+                    &state_task,
+                    &state_cleanup,
+                    &active_key_cleanup,
+                    err_state,
                 );
                 return Ok(final_state);
             }
@@ -1575,8 +1545,11 @@ impl Target {
             };
 
             let final_state = finalize(
-                &inner_ref, &state_task, &state_cleanup,
-                &active_key_cleanup, poll_result,
+                &inner_ref,
+                &state_task,
+                &state_cleanup,
+                &active_key_cleanup,
+                poll_result,
             );
             Ok(final_state)
         });
@@ -1611,11 +1584,7 @@ impl Target {
 }
 
 /// Detect the shell exit code variable using a caller-provided prefix.
-async fn detect_exit_var(
-    transport: &TransportKind,
-    prefix: &str,
-    target: &str,
-) -> &'static str {
+async fn detect_exit_var(transport: &TransportKind, prefix: &str, target: &str) -> &'static str {
     // Try to detect fish shell
     let cmd = format!(
         "{} display-message -p -t '{}' '#{{pane_current_command}}'",
@@ -1782,16 +1751,14 @@ mod tests {
     #[tokio::test]
     async fn ensure_socket_server_sends_start_server() {
         // Mock verifies the correct command is sent
-        let mock = MockTransport::new()
-            .with_response("start-server", "");
+        let mock = MockTransport::new().with_response("start-server", "");
         let host = mock_host(mock);
         host.ensure_socket_server().await.unwrap();
     }
 
     #[tokio::test]
     async fn ensure_socket_server_with_named_socket() {
-        let mock = MockTransport::new()
-            .with_response("start-server", "");
+        let mock = MockTransport::new().with_response("start-server", "");
         let socket = TmuxSocket::automation("ci").unwrap();
         let host = HostHandle::new(TransportKind::Mock(mock), Some(socket));
         // Should succeed — the mock matches "start-server" in the command
@@ -1862,8 +1829,7 @@ mod tests {
     #[tokio::test]
     async fn new_window_returns_window_target() {
         let expected = "new-window -P";
-        let mock =
-            MockTransport::new().with_response(expected, "$0 build 1 editor 1 1 layout");
+        let mock = MockTransport::new().with_response(expected, "$0 build 1 editor 1 1 layout");
         let host = mock_host(mock);
         let target = host.create_target_for_test("build");
 
@@ -2153,10 +2119,20 @@ mod tests {
             .with_response("send-keys", "")
             // capture returns sentinel on second call
             .with_response("capture-pane", "")
-            .with_response("capture-pane", format!("$ cmd ; echo \"{}test1234__ $?\"\nhello\n{}test1234__ 0\n$", marker_re, marker_re).as_str());
+            .with_response(
+                "capture-pane",
+                format!(
+                    "$ cmd ; echo \"{}test1234__ $?\"\nhello\n{}test1234__ 0\n$",
+                    marker_re, marker_re
+                )
+                .as_str(),
+            );
         let host = mock_host(mock);
         let target = host.create_target_for_test("build");
-        let handle = target.start_exec("echo hello", Duration::from_secs(5)).await.unwrap();
+        let handle = target
+            .start_exec("echo hello", Duration::from_secs(5))
+            .await
+            .unwrap();
 
         // Handle should be immediately available with Running state
         assert_eq!(handle.id().short_hex().len(), 8);
@@ -2208,7 +2184,10 @@ mod tests {
 
         // active_execs should be empty after completion
         let active = host.inner.active_execs.lock().unwrap();
-        assert!(active.is_empty(), "active_execs should be empty after completion");
+        assert!(
+            active.is_empty(),
+            "active_execs should be empty after completion"
+        );
     }
 
     // --- Discontinuity notification tests (DC31) ---
@@ -2225,7 +2204,8 @@ mod tests {
                 .or_default()
                 .push(state.clone());
         }
-        host.inner.notify_exec_discontinuity("test-session", "connection lost");
+        host.inner
+            .notify_exec_discontinuity("test-session", "connection lost");
         let guard = state.lock().unwrap();
         match &*guard {
             ExecState::Unknown { reason } => assert!(reason.contains("connection lost")),
@@ -2248,7 +2228,8 @@ mod tests {
                 .or_default()
                 .push(state.clone());
         }
-        host.inner.notify_exec_discontinuity("test-session", "connection lost");
+        host.inner
+            .notify_exec_discontinuity("test-session", "connection lost");
         let guard = state.lock().unwrap();
         match &*guard {
             ExecState::Completed(out) => assert_eq!(out.stdout, "ok"),
@@ -2275,14 +2256,21 @@ mod tests {
                 .push(state_b.clone());
         }
         // Only session-a loses connection
-        host.inner.notify_exec_discontinuity("session-a", "connection lost");
+        host.inner
+            .notify_exec_discontinuity("session-a", "connection lost");
 
         let guard_a = state_a.lock().unwrap();
-        assert!(matches!(&*guard_a, ExecState::Unknown { .. }), "session-a exec should be Unknown");
+        assert!(
+            matches!(&*guard_a, ExecState::Unknown { .. }),
+            "session-a exec should be Unknown"
+        );
         drop(guard_a);
 
         let guard_b = state_b.lock().unwrap();
-        assert!(matches!(&*guard_b, ExecState::Running), "session-b exec should still be Running");
+        assert!(
+            matches!(&*guard_b, ExecState::Running),
+            "session-b exec should still be Running"
+        );
     }
 
     #[tokio::test]

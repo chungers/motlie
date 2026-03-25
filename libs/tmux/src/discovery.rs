@@ -41,8 +41,7 @@ pub fn parse_escaped_fields(line: &str) -> Vec<String> {
     fields
 }
 
-pub const LIST_CLIENTS_FMT: &str =
-    "#{q:client_width} #{q:client_height} #{q:client_session}";
+pub const LIST_CLIENTS_FMT: &str = "#{q:client_width} #{q:client_height} #{q:client_session}";
 
 pub const PANE_GEOMETRY_FMT: &str =
     "#{q:pane_width} #{q:pane_height} #{q:history_size} #{q:history_limit}";
@@ -75,8 +74,7 @@ pub async fn list_sessions_with_prefix(
         Ok(o) => o,
         Err(e) => {
             let msg = e.to_string();
-            // "no server running" or "no sessions" → empty list
-            if msg.contains("no server running") || msg.contains("no sessions") {
+            if is_tmux_empty_state_error(&msg, &cmd, &["no server running", "no sessions"]) {
                 return Ok(Vec::new());
             }
             return Err(e);
@@ -176,7 +174,7 @@ pub async fn list_clients_with_prefix(
         Ok(o) => o,
         Err(e) => {
             let msg = e.to_string();
-            if msg.contains("no server running") || msg.contains("no clients") {
+            if is_tmux_empty_state_error(&msg, &cmd, &["no server running", "no clients"]) {
                 return Ok(Vec::new());
             }
             return Err(e);
@@ -246,14 +244,16 @@ pub async fn take_geometry_snapshot_with_prefix(
             .exec(&cmd)
             .await
             .map(|s| s.trim().to_string())
-            .unwrap_or_default()
+            .map_err(|e| {
+                anyhow!(
+                    "failed to resolve session for pane target '{}': {}",
+                    target,
+                    e
+                )
+            })?
     } else {
         // Parse session from target string (everything before first ':')
-        target
-            .split(':')
-            .next()
-            .unwrap_or(target)
-            .to_string()
+        target.split(':').next().unwrap_or(target).to_string()
     };
 
     Ok(GeometrySnapshot {
@@ -263,21 +263,86 @@ pub async fn take_geometry_snapshot_with_prefix(
     })
 }
 
+pub(crate) fn is_tmux_empty_state_error(message: &str, command: &str, patterns: &[&str]) -> bool {
+    if !message.starts_with("command failed (exit 1): ") {
+        return false;
+    }
+    if !message.contains(command) {
+        return false;
+    }
+
+    patterns.iter().any(|pattern| {
+        message
+            .lines()
+            .any(|line| line.starts_with("stderr:") && line.contains(pattern))
+    })
+}
+
+fn parse_exact_fields(line: &str, expected: usize, kind: &str) -> Result<Vec<String>> {
+    let fields = parse_escaped_fields(line);
+    if fields.len() != expected {
+        return Err(anyhow!(
+            "malformed {} line (expected {} fields, got {}): {}",
+            kind,
+            expected,
+            fields.len(),
+            line
+        ));
+    }
+    Ok(fields)
+}
+
+fn parse_u32_field(value: &str, field: &str, kind: &str, line: &str) -> Result<u32> {
+    value.parse().map_err(|e| {
+        anyhow!(
+            "invalid {} {} value '{}': {} (line: {})",
+            kind,
+            field,
+            value,
+            e,
+            line
+        )
+    })
+}
+
+fn parse_u64_field(value: &str, field: &str, kind: &str, line: &str) -> Result<u64> {
+    value.parse().map_err(|e| {
+        anyhow!(
+            "invalid {} {} value '{}': {} (line: {})",
+            kind,
+            field,
+            value,
+            e,
+            line
+        )
+    })
+}
+
+fn parse_bool_field(value: &str, field: &str, kind: &str, line: &str) -> Result<bool> {
+    match value {
+        "0" => Ok(false),
+        "1" => Ok(true),
+        _ => Err(anyhow!(
+            "invalid {} {} flag '{}': expected 0 or 1 (line: {})",
+            kind,
+            field,
+            value,
+            line
+        )),
+    }
+}
+
 fn parse_clients(output: &str) -> Result<Vec<ClientInfo>> {
     let mut clients = Vec::new();
     for line in output.lines() {
-        let line = line.trim();
+        let line = line.trim_end_matches('\r');
         if line.is_empty() {
             continue;
         }
-        let fields = parse_escaped_fields(line);
-        if fields.len() < 3 {
-            tracing::warn!("skipping malformed client line: {}", line);
-            continue;
-        }
+        let fields = parse_exact_fields(line, 3, "client")?;
         clients.push(ClientInfo {
-            width: fields[0].parse().unwrap_or(0),
-            height: fields[1].parse().unwrap_or(0),
+            width: parse_u32_field(&fields[0], "width", "client", line)?,
+            height: parse_u32_field(&fields[1], "height", "client", line)?,
             session: fields[2].clone(),
         });
     }
@@ -285,47 +350,35 @@ fn parse_clients(output: &str) -> Result<Vec<ClientInfo>> {
 }
 
 fn parse_pane_geometry(output: &str) -> Result<PaneGeometry> {
-    let line = output.trim();
-    let fields = parse_escaped_fields(line);
-    if fields.len() < 4 {
-        return Err(anyhow!(
-            "malformed pane geometry output (expected 4 fields): {}",
-            line
-        ));
-    }
+    let line = output.trim_end_matches('\n').trim_end_matches('\r');
+    let fields = parse_exact_fields(line, 4, "pane geometry")?;
     Ok(PaneGeometry {
-        pane_width: fields[0].parse().unwrap_or(0),
-        pane_height: fields[1].parse().unwrap_or(0),
-        history_size: fields[2].parse().unwrap_or(0),
-        history_limit: fields[3].parse().unwrap_or(0),
+        pane_width: parse_u32_field(&fields[0], "pane_width", "pane geometry", line)?,
+        pane_height: parse_u32_field(&fields[1], "pane_height", "pane geometry", line)?,
+        history_size: parse_u32_field(&fields[2], "history_size", "pane geometry", line)?,
+        history_limit: parse_u32_field(&fields[3], "history_limit", "pane geometry", line)?,
     })
 }
 
 pub(crate) fn parse_sessions(output: &str) -> Result<Vec<SessionInfo>> {
     let mut sessions = Vec::new();
     for line in output.lines() {
-        let line = line.trim();
+        let line = line.trim_end_matches('\r');
         if line.is_empty() {
             continue;
         }
-        let fields = parse_escaped_fields(line);
-        if fields.len() < 5 {
-            tracing::warn!("skipping malformed session line: {}", line);
-            continue;
-        }
+        let fields = parse_exact_fields(line, 6, "session")?;
         sessions.push(SessionInfo {
             name: fields[0].clone(),
             id: fields[1].clone(),
-            created: fields[2].parse().unwrap_or(0),
-            attached: fields[3] == "1",
-            window_count: fields[4].parse().unwrap_or(0),
-            group: fields.get(5).and_then(|g| {
-                if g.is_empty() {
-                    None
-                } else {
-                    Some(g.clone())
-                }
-            }),
+            created: parse_u64_field(&fields[2], "created", "session", line)?,
+            attached: parse_u32_field(&fields[3], "attached", "session", line)? > 0,
+            window_count: parse_u32_field(&fields[4], "window_count", "session", line)?,
+            group: if fields[5].is_empty() {
+                None
+            } else {
+                Some(fields[5].clone())
+            },
         });
     }
     Ok(sessions)
@@ -334,22 +387,18 @@ pub(crate) fn parse_sessions(output: &str) -> Result<Vec<SessionInfo>> {
 fn parse_windows(output: &str) -> Result<Vec<WindowInfo>> {
     let mut windows = Vec::new();
     for line in output.lines() {
-        let line = line.trim();
+        let line = line.trim_end_matches('\r');
         if line.is_empty() {
             continue;
         }
-        let fields = parse_escaped_fields(line);
-        if fields.len() < 7 {
-            tracing::warn!("skipping malformed window line: {}", line);
-            continue;
-        }
+        let fields = parse_exact_fields(line, 7, "window")?;
         windows.push(WindowInfo {
             session_id: fields[0].clone(),
             session_name: fields[1].clone(),
-            index: fields[2].parse().unwrap_or(0),
+            index: parse_u32_field(&fields[2], "index", "window", line)?,
             name: fields[3].clone(),
-            active: fields[4] == "1",
-            pane_count: fields[5].parse().unwrap_or(0),
+            active: parse_bool_field(&fields[4], "active", "window", line)?,
+            pane_count: parse_u32_field(&fields[5], "pane_count", "window", line)?,
             layout: fields[6].clone(),
         });
     }
@@ -359,21 +408,17 @@ fn parse_windows(output: &str) -> Result<Vec<WindowInfo>> {
 fn parse_panes(output: &str, filter: Option<&Regex>) -> Result<Vec<PaneInfo>> {
     let mut panes = Vec::new();
     for line in output.lines() {
-        let line = line.trim();
+        let line = line.trim_end_matches('\r');
         if line.is_empty() {
             continue;
         }
-        let fields = parse_escaped_fields(line);
-        if fields.len() < 10 {
-            tracing::warn!("skipping malformed pane line: {}", line);
-            continue;
-        }
+        let fields = parse_exact_fields(line, 10, "pane")?;
 
         // fields: pane_id, session_name, window_index, pane_index, pane_title,
         //         pane_current_command, pane_pid, pane_width, pane_height, pane_active
         let session_name = &fields[1];
-        let window_index: u32 = fields[2].parse().unwrap_or(0);
-        let pane_index: u32 = fields[3].parse().unwrap_or(0);
+        let window_index = parse_u32_field(&fields[2], "window_index", "pane", line)?;
+        let pane_index = parse_u32_field(&fields[3], "pane_index", "pane", line)?;
 
         // Construct the address string for filter matching
         let address_str = format!("{}:{}.{}", session_name, window_index, pane_index);
@@ -395,10 +440,10 @@ fn parse_panes(output: &str, filter: Option<&Regex>) -> Result<Vec<PaneInfo>> {
             address,
             title: fields[4].clone(),
             current_command: fields[5].clone(),
-            pid: fields[6].parse().unwrap_or(0),
-            width: fields[7].parse().unwrap_or(0),
-            height: fields[8].parse().unwrap_or(0),
-            active: fields[9] == "1",
+            pid: parse_u32_field(&fields[6], "pid", "pane", line)?,
+            width: parse_u32_field(&fields[7], "width", "pane", line)?,
+            height: parse_u32_field(&fields[8], "height", "pane", line)?,
+            active: parse_bool_field(&fields[9], "active", "pane", line)?,
         });
     }
     Ok(panes)
@@ -474,13 +519,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_sessions_malformed_skipped() {
-        let mock = MockTransport::new()
-            .with_response("list-sessions", "bad\nok $0 0 0 1 \n");
+    async fn list_sessions_malformed_returns_error() {
+        let mock = MockTransport::new().with_response("list-sessions", "bad\nok $0 0 0 1 \n");
+        let transport = TransportKind::Mock(mock);
+        let err = list_sessions(&transport, None).await.unwrap_err();
+        assert!(err.to_string().contains("malformed session line"));
+    }
+
+    #[tokio::test]
+    async fn list_sessions_true_empty_state_returns_empty() {
+        let cmd = format!("tmux list-sessions -F '{}'", LIST_SESSIONS_FMT);
+        let mock = MockTransport::new().with_error(
+            "list-sessions",
+            format!(
+                "command failed (exit 1): {}\nstderr: no server running on /tmp/tmux-1000/default",
+                cmd
+            )
+            .as_str(),
+        );
+        let transport = TransportKind::Mock(mock);
+        let sessions = list_sessions(&transport, None).await.unwrap();
+        assert!(sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_sessions_non_tmux_error_is_not_collapsed() {
+        let mock = MockTransport::new().with_error(
+            "list-sessions",
+            "SSH transport hiccup mentioning no sessions in passing",
+        );
+        let transport = TransportKind::Mock(mock);
+        let err = list_sessions(&transport, None).await.unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("SSH transport hiccup mentioning no sessions in passing"));
+    }
+
+    #[tokio::test]
+    async fn list_sessions_attached_count_above_one_is_true() {
+        let mock = MockTransport::new().with_response("list-sessions", "build $0 0 2 1 \n");
         let transport = TransportKind::Mock(mock);
         let sessions = list_sessions(&transport, None).await.unwrap();
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].name, "ok");
+        assert!(sessions[0].attached);
     }
 
     #[tokio::test]
@@ -535,10 +616,8 @@ mod tests {
 
     #[tokio::test]
     async fn list_clients_parses() {
-        let mock = MockTransport::new().with_response(
-            "list-clients",
-            "200 50 build\n180 40 test\n",
-        );
+        let mock =
+            MockTransport::new().with_response("list-clients", "200 50 build\n180 40 test\n");
         let transport = TransportKind::Mock(mock);
         let clients = list_clients(&transport, None).await.unwrap();
         assert_eq!(clients.len(), 2);
@@ -558,9 +637,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_clients_malformed_returns_error() {
+        let mock = MockTransport::new().with_response("list-clients", "200 bad\n");
+        let transport = TransportKind::Mock(mock);
+        let err = list_clients(&transport, None).await.unwrap_err();
+        assert!(err.to_string().contains("malformed client line"));
+    }
+
+    #[tokio::test]
     async fn query_pane_geometry_parses() {
-        let mock = MockTransport::new()
-            .with_response("display-message", "80 24 150 2000\n");
+        let mock = MockTransport::new().with_response("display-message", "80 24 150 2000\n");
         let transport = TransportKind::Mock(mock);
         let geo = query_pane_geometry(&transport, None, "build:0.0")
             .await
@@ -569,6 +655,18 @@ mod tests {
         assert_eq!(geo.pane_height, 24);
         assert_eq!(geo.history_size, 150);
         assert_eq!(geo.history_limit, 2000);
+    }
+
+    #[tokio::test]
+    async fn query_pane_geometry_invalid_number_returns_error() {
+        let mock = MockTransport::new().with_response("display-message", "80 24 bad 2000\n");
+        let transport = TransportKind::Mock(mock);
+        let err = query_pane_geometry(&transport, None, "build:0.0")
+            .await
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("invalid pane geometry history_size value"));
     }
 
     #[tokio::test]
@@ -584,5 +682,38 @@ mod tests {
         assert_eq!(snap.pane.pane_width, 80);
         assert_eq!(snap.pane.history_size, 100);
         assert_eq!(snap.session, "build");
+    }
+
+    #[tokio::test]
+    async fn list_windows_invalid_flag_returns_error() {
+        let mock = MockTransport::new()
+            .with_response("list-windows", "$0 build 0 main maybe 2 even-horizontal\n");
+        let transport = TransportKind::Mock(mock);
+        let err = list_windows(&transport, None, "build").await.unwrap_err();
+        assert!(err.to_string().contains("invalid window active flag"));
+    }
+
+    #[tokio::test]
+    async fn list_panes_invalid_number_returns_error() {
+        let mock = MockTransport::new()
+            .with_response("list-panes", "%0 build 0 0 title0 bash bad 80 24 1\n");
+        let transport = TransportKind::Mock(mock);
+        let err = list_panes(&transport, None, None).await.unwrap_err();
+        assert!(err.to_string().contains("invalid pane pid value"));
+    }
+
+    #[tokio::test]
+    async fn take_snapshot_pane_target_session_lookup_failure_is_error() {
+        let mock = MockTransport::new()
+            .with_response("list-clients", "200 50 build\n")
+            .with_response("display-message", "80 24 100 2000\n")
+            .with_error("#{session_name}", "lookup failed");
+        let transport = TransportKind::Mock(mock);
+        let err = take_geometry_snapshot(&transport, None, "%5")
+            .await
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("failed to resolve session for pane target '%5'"));
     }
 }
