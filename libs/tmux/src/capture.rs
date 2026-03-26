@@ -76,8 +76,7 @@ pub async fn capture_session_with_tmux_prefix(
     prefix: &str,
     session: &str,
 ) -> Result<HashMap<PaneAddress, String>> {
-    let panes =
-        discovery::list_panes_in_session_with_prefix(transport, prefix, session).await?;
+    let panes = discovery::list_panes_in_session_with_prefix(transport, prefix, session).await?;
     let mut result = HashMap::new();
     for pane in panes {
         let target = pane.address.to_tmux_target();
@@ -107,15 +106,13 @@ pub async fn sample_text_with_tmux_prefix(
     match query {
         ScrollbackQuery::LastLines(n) => {
             let n = *n as i32;
-            let content =
-                capture_pane_history_with_prefix(transport, prefix, target, -n).await?;
+            let content = capture_pane_history_with_prefix(transport, prefix, target, -n).await?;
             let trimmed = content.trim_end();
             Ok(trimmed.to_string())
         }
         ScrollbackQuery::Until { pattern, max_lines } => {
             let max = *max_lines as i32;
-            let content =
-                capture_pane_history_with_prefix(transport, prefix, target, -max).await?;
+            let content = capture_pane_history_with_prefix(transport, prefix, target, -max).await?;
             let lines: Vec<&str> = content.lines().collect();
             for (i, line) in lines.iter().enumerate().rev() {
                 if pattern.is_match(line) {
@@ -129,8 +126,7 @@ pub async fn sample_text_with_tmux_prefix(
             stop_pattern,
         } => {
             let n = *lines as i32;
-            let content =
-                capture_pane_history_with_prefix(transport, prefix, target, -n).await?;
+            let content = capture_pane_history_with_prefix(transport, prefix, target, -n).await?;
             let lines: Vec<&str> = content.lines().collect();
             for (i, line) in lines.iter().enumerate().rev() {
                 if stop_pattern.is_match(line) {
@@ -286,6 +282,33 @@ pub fn strip_ansi(text: &str) -> String {
     result
 }
 
+/// True when content contains visible non-whitespace text after ANSI stripping.
+pub fn has_visible_text(content: &str) -> bool {
+    !strip_ansi(content).trim().is_empty()
+}
+
+/// Return the last `max_lines` non-empty visible lines from captured content.
+pub fn pane_tail_excerpt(content: &str, max_lines: usize) -> String {
+    let clean = strip_ansi(content).replace('\r', "");
+    let lines: Vec<&str> = clean
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+
+    if lines.is_empty() {
+        return String::new();
+    }
+
+    let start = lines.len().saturating_sub(max_lines);
+    let excerpt = lines[start..].join("\n");
+    if excerpt.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", excerpt)
+    }
+}
+
 /// Normalize captured text for PlainText mode.
 ///
 /// Canonicalizes line endings, strips ANSI/control sequences,
@@ -364,11 +387,11 @@ async fn finalize_fidelity_with_prefix(
         None => return OutputFidelity::clean(),
     };
 
-    let post =
-        match discovery::take_geometry_snapshot_with_prefix(transport, prefix, target).await {
-            Ok(s) => s,
-            Err(_) => return OutputFidelity::clean(),
-        };
+    let post = match discovery::take_geometry_snapshot_with_prefix(transport, prefix, target).await
+    {
+        Ok(s) => s,
+        Err(_) => return OutputFidelity::clean(),
+    };
 
     let issues = pre.compare(&post);
     if issues.is_empty() {
@@ -400,8 +423,7 @@ pub async fn capture_pane_with_options_prefix(
 
     let raw = raw_capture_with_prefix(transport, prefix, target, opts).await?;
 
-    let fidelity =
-        finalize_fidelity_with_prefix(transport, prefix, target, pre_snapshot).await;
+    let fidelity = finalize_fidelity_with_prefix(transport, prefix, target, pre_snapshot).await;
 
     let (text, raw_text) = apply_normalization(&raw, opts.normalize);
 
@@ -467,8 +489,7 @@ pub async fn sample_text_with_options_prefix(
 
     let raw = raw_capture_with_prefix(transport, prefix, target, &effective_opts).await?;
 
-    let mut fidelity =
-        finalize_fidelity_with_prefix(transport, prefix, target, pre_snapshot).await;
+    let mut fidelity = finalize_fidelity_with_prefix(transport, prefix, target, pre_snapshot).await;
 
     let (text, raw_text) = apply_normalization(&raw, opts.normalize);
 
@@ -506,8 +527,7 @@ pub async fn sample_text_with_options_prefix(
 
     let final_text = if let Some(prev) = previous_text {
         if opts.overlap_lines >= 2 {
-            let (merged, overlap_issues) =
-                overlap_deduplicate(prev, &filtered, opts.overlap_lines);
+            let (merged, overlap_issues) = overlap_deduplicate(prev, &filtered, opts.overlap_lines);
             if !overlap_issues.is_empty() {
                 let mut all_issues = fidelity.issues.unwrap_or_default();
                 all_issues.extend(overlap_issues);
@@ -603,17 +623,11 @@ pub fn overlap_deduplicate(
         }
         0 => {
             // No match — resync with full current content
-            (
-                current.to_string(),
-                vec![FidelityIssue::OverlapResync],
-            )
+            (current.to_string(), vec![FidelityIssue::OverlapResync])
         }
         _ => {
             // Ambiguous (multiple matches) — resync
-            (
-                current.to_string(),
-                vec![FidelityIssue::OverlapResync],
-            )
+            (current.to_string(), vec![FidelityIssue::OverlapResync])
         }
     }
 }
@@ -635,8 +649,7 @@ pub async fn capture_session_with_options_prefix(
     session: &str,
     opts: &CaptureOptions,
 ) -> Result<HashMap<PaneAddress, CaptureResult>> {
-    let panes =
-        discovery::list_panes_in_session_with_prefix(transport, prefix, session).await?;
+    let panes = discovery::list_panes_in_session_with_prefix(transport, prefix, session).await?;
     let mut result = HashMap::new();
     for pane in panes {
         let target = pane.address.to_tmux_target();
@@ -658,8 +671,7 @@ mod tests {
 
     #[tokio::test]
     async fn capture_pane_basic() {
-        let mock = MockTransport::new()
-            .with_response("capture-pane", "line1\nline2\nline3\n");
+        let mock = MockTransport::new().with_response("capture-pane", "line1\nline2\nline3\n");
         let transport = TransportKind::Mock(mock);
         let result = capture_pane(&transport, None, "build:0.0").await.unwrap();
         assert_eq!(result, "line1\nline2\nline3\n");
@@ -796,14 +808,12 @@ mod tests {
 
     #[tokio::test]
     async fn capture_with_options_raw() {
-        let mock = MockTransport::new()
-            .with_response("capture-pane", "line1\nline2\n");
+        let mock = MockTransport::new().with_response("capture-pane", "line1\nline2\n");
         let transport = TransportKind::Mock(mock);
         let opts = CaptureOptions::default();
-        let result =
-            capture_pane_with_options(&transport, None, "test:0.0", &opts)
-                .await
-                .unwrap();
+        let result = capture_pane_with_options(&transport, None, "test:0.0", &opts)
+            .await
+            .unwrap();
         assert_eq!(result.text, "line1\nline2\n");
         assert!(result.raw_text.is_none());
         assert!(!result.fidelity.degraded);
@@ -811,16 +821,13 @@ mod tests {
 
     #[tokio::test]
     async fn capture_with_options_screen_stable() {
-        let mock = MockTransport::new().with_response(
-            "capture-pane",
-            "\x1b[32mhello\x1b[0m   \nworld  \n\n",
-        );
+        let mock = MockTransport::new()
+            .with_response("capture-pane", "\x1b[32mhello\x1b[0m   \nworld  \n\n");
         let transport = TransportKind::Mock(mock);
         let opts = CaptureOptions::with_mode(CaptureNormalizeMode::ScreenStable);
-        let result =
-            capture_pane_with_options(&transport, None, "test:0.0", &opts)
-                .await
-                .unwrap();
+        let result = capture_pane_with_options(&transport, None, "test:0.0", &opts)
+            .await
+            .unwrap();
         // Normalized: trailing spaces trimmed, trailing empty lines removed
         assert_eq!(result.text, "\x1b[32mhello\x1b[0m\nworld\n");
         // raw_text preserves the original
@@ -830,16 +837,13 @@ mod tests {
 
     #[tokio::test]
     async fn capture_with_options_plain_text() {
-        let mock = MockTransport::new().with_response(
-            "capture-pane",
-            "\x1b[32mhello\x1b[0m   \nworld  \n\n",
-        );
+        let mock = MockTransport::new()
+            .with_response("capture-pane", "\x1b[32mhello\x1b[0m   \nworld  \n\n");
         let transport = TransportKind::Mock(mock);
         let opts = CaptureOptions::with_mode(CaptureNormalizeMode::PlainText);
-        let result =
-            capture_pane_with_options(&transport, None, "test:0.0", &opts)
-                .await
-                .unwrap();
+        let result = capture_pane_with_options(&transport, None, "test:0.0", &opts)
+            .await
+            .unwrap();
         assert_eq!(result.text, "hello\nworld\n");
         // PlainText does not produce raw_text
         assert!(result.raw_text.is_none());
@@ -847,14 +851,12 @@ mod tests {
 
     #[tokio::test]
     async fn capture_with_options_history() {
-        let mock = MockTransport::new()
-            .with_response("capture-pane", "scrollback\nvisible\n");
+        let mock = MockTransport::new().with_response("capture-pane", "scrollback\nvisible\n");
         let transport = TransportKind::Mock(mock);
         let opts = CaptureOptions::with_history(-100);
-        let result =
-            capture_pane_with_options(&transport, None, "test:0.0", &opts)
-                .await
-                .unwrap();
+        let result = capture_pane_with_options(&transport, None, "test:0.0", &opts)
+            .await
+            .unwrap();
         assert!(result.text.contains("scrollback"));
     }
 
@@ -870,10 +872,9 @@ mod tests {
             max_lines: 100,
         };
         let opts = CaptureOptions::with_mode(CaptureNormalizeMode::PlainText);
-        let result =
-            sample_text_with_options(&transport, None, "test:0.0", &query, &opts, None)
-                .await
-                .unwrap();
+        let result = sample_text_with_options(&transport, None, "test:0.0", &query, &opts, None)
+            .await
+            .unwrap();
         // ANSI stripped, pattern matching works on plain text
         assert!(result.text.starts_with("$ prompt"));
         assert!(result.text.contains("output"));
@@ -960,12 +961,22 @@ mod tests {
         assert_eq!(merged, "a\nb\nc\nd\ne\nf\ng");
     }
 
+    #[test]
+    fn has_visible_text_strips_ansi_before_testing() {
+        assert!(!has_visible_text("\x1b[31m   \x1b[0m"));
+        assert!(has_visible_text("\x1b[31mhello\x1b[0m"));
+    }
+
+    #[test]
+    fn pane_tail_excerpt_keeps_last_non_empty_visible_lines() {
+        let excerpt = pane_tail_excerpt("one\n\n\x1b[31mtwo\x1b[0m\r\nthree\n", 2);
+        assert_eq!(excerpt, "two\nthree\n");
+    }
+
     #[tokio::test]
     async fn sample_text_with_options_overlap_dedup() {
-        let mock = MockTransport::new().with_response(
-            "capture-pane",
-            "line3\nline4\nline5\nline6\n",
-        );
+        let mock =
+            MockTransport::new().with_response("capture-pane", "line3\nline4\nline5\nline6\n");
         let transport = TransportKind::Mock(mock);
         let query = ScrollbackQuery::LastLines(4);
         let opts = CaptureOptions {
@@ -986,10 +997,8 @@ mod tests {
 
     #[tokio::test]
     async fn sample_text_with_options_overlap_resync() {
-        let mock = MockTransport::new().with_response(
-            "capture-pane",
-            "completely\ndifferent\ncontent\n",
-        );
+        let mock =
+            MockTransport::new().with_response("capture-pane", "completely\ndifferent\ncontent\n");
         let transport = TransportKind::Mock(mock);
         let query = ScrollbackQuery::LastLines(3);
         let opts = CaptureOptions {
@@ -1021,10 +1030,9 @@ mod tests {
             detect_reflow: true,
             ..Default::default()
         };
-        let result =
-            capture_pane_with_options(&transport, None, "test:0.0", &opts)
-                .await
-                .unwrap();
+        let result = capture_pane_with_options(&transport, None, "test:0.0", &opts)
+            .await
+            .unwrap();
         assert_eq!(result.text, "content\n");
         // MockTransport returns same response for same command prefix,
         // so pre/post snapshots match → clean fidelity
