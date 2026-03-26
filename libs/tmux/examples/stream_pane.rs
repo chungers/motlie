@@ -58,8 +58,8 @@
 //!   ./target/debug/examples/stream_pane 'ssh://deploy@prod?identity-file=/path/to/key' my_session
 
 use motlie_tmux::{
-    overlap_deduplicate, strip_ansi, CaptureNormalizeMode, CaptureOptions, LabelFormat,
-    ScrollbackQuery, SinkFilter, SshConfig, TargetSpec,
+    has_visible_text, overlap_deduplicate, strip_ansi, CaptureNormalizeMode, CaptureOptions,
+    LabelFormat, ScrollbackQuery, SinkFilter, SshConfig, TargetSpec,
 };
 use std::io::Write;
 use std::time::Duration;
@@ -184,7 +184,12 @@ fn parse_args() -> Result<Args, String> {
                     "fidelity" => Mode::Fidelity,
                     "monitor" => Mode::Monitor,
                     "render" => Mode::Render,
-                    other => return Err(format!("unknown mode: '{}' (visible|tail|until|fidelity|monitor|render)", other)),
+                    other => {
+                        return Err(format!(
+                            "unknown mode: '{}' (visible|tail|until|fidelity|monitor|render)",
+                            other
+                        ))
+                    }
                 };
             }
             "--lines" => {
@@ -211,10 +216,7 @@ fn parse_args() -> Result<Args, String> {
             }
             "--pattern" => {
                 i += 1;
-                pattern = args
-                    .get(i)
-                    .ok_or("--pattern requires a value")?
-                    .clone();
+                pattern = args.get(i).ok_or("--pattern requires a value")?.clone();
             }
             other => return Err(format!("unknown flag: {}", other)),
         }
@@ -291,10 +293,7 @@ async fn main() -> anyhow::Result<()> {
 /// Uses `capture()` which returns the visible pane area only (no scrollback).
 /// Simple string comparison detects changes. Best for watching TUI programs
 /// where the entire screen may repaint.
-async fn stream_visible(
-    target: &motlie_tmux::Target,
-    interval: Duration,
-) -> anyhow::Result<()> {
+async fn stream_visible(target: &motlie_tmux::Target, interval: Duration) -> anyhow::Result<()> {
     let mut previous = String::new();
     let mut stdout = std::io::stdout().lock();
     let mut tick = 0u64;
@@ -397,10 +396,7 @@ async fn stream_until(
 ) -> anyhow::Result<()> {
     let pattern = regex::Regex::new(pattern_str)
         .map_err(|e| anyhow::anyhow!("invalid regex '{}': {}", pattern_str, e))?;
-    let query = ScrollbackQuery::Until {
-        pattern,
-        max_lines,
-    };
+    let query = ScrollbackQuery::Until { pattern, max_lines };
     let mut previous = String::new();
     let mut stdout = std::io::stdout().lock();
 
@@ -430,10 +426,7 @@ async fn stream_until(
 /// capture the visible pane with geometry snapshot comparison. Prints content
 /// plus a fidelity status line. Try resizing the target terminal while this
 /// runs to see `ClientResize` / `PaneResize` fidelity issues appear.
-async fn stream_fidelity(
-    target: &motlie_tmux::Target,
-    interval: Duration,
-) -> anyhow::Result<()> {
+async fn stream_fidelity(target: &motlie_tmux::Target, interval: Duration) -> anyhow::Result<()> {
     let opts = CaptureOptions {
         detect_reflow: true,
         normalize: CaptureNormalizeMode::PlainText,
@@ -527,8 +520,7 @@ async fn stream_monitor(
             writeln!(
                 stdout,
                 "\x1b[2m--- {}({}) ---\x1b[0m",
-                session_name,
-                addr.pane_id
+                session_name, addr.pane_id
             )?;
             stdout.write_all(content.as_bytes())?;
             if !content.ends_with('\n') {
@@ -625,10 +617,6 @@ async fn stream_render(
     Ok(())
 }
 
-fn has_visible_text(content: &str) -> bool {
-    !strip_ansi(content).trim().is_empty()
-}
-
 fn render_snapshot(
     stdout: &mut dyn Write,
     session_name: &str,
@@ -645,8 +633,7 @@ fn render_snapshot(
         writeln!(
             stdout,
             "\x1b[2m--- {}({}) ---\x1b[0m",
-            session_name,
-            addr.pane_id
+            session_name, addr.pane_id
         )?;
         stdout.write_all(content.as_bytes())?;
         if !content.ends_with('\n') {

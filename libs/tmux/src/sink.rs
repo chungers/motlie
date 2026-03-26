@@ -174,10 +174,11 @@ impl CompiledSinkFilter {
     pub fn compile(filter: &SinkFilter) -> Result<Self> {
         let compile_opt = |opt: &Option<String>| -> Result<Option<regex::Regex>> {
             match opt {
-                Some(pat) => Ok(Some(
-                    regex::Regex::new(pat)
-                        .map_err(|e| anyhow!("invalid filter regex '{}': {}", pat, e))?,
-                )),
+                Some(pat) => {
+                    Ok(Some(regex::Regex::new(pat).map_err(|e| {
+                        anyhow!("invalid filter regex '{}': {}", pat, e)
+                    })?))
+                }
                 None => Ok(None),
             }
         };
@@ -220,9 +221,7 @@ impl CompiledSinkFilter {
                     // control mode; target string is available when indices are known.
                     re.is_match(&p.pane_id) || re.is_match(&p.to_tmux_target())
                 }
-                TargetAddress::Window(w) => {
-                    re.is_match(&format!("{}:{}", w.session_name, w.index))
-                }
+                TargetAddress::Window(w) => re.is_match(&format!("{}:{}", w.session_name, w.index)),
                 TargetAddress::Session(s) => re.is_match(&s.name),
             };
             if !matched {
@@ -288,7 +287,8 @@ pub struct CallbackSink {
     /// Shared state passed to callbacks.
     pub state: std::sync::Arc<dyn Any + Send + Sync>,
     /// Synchronous callback for each output event.
-    pub on_output: fn(state: &std::sync::Arc<dyn Any + Send + Sync>, event: SinkEvent) -> Result<()>,
+    pub on_output:
+        fn(state: &std::sync::Arc<dyn Any + Send + Sync>, event: SinkEvent) -> Result<()>,
     /// Called on bus shutdown. Returns a boxed future.
     pub on_flush: Option<
         fn(
@@ -644,6 +644,89 @@ pub struct HistorySnapshot {
     pub omitted_entries: usize,
 }
 
+/// Bounded rolling text history for poll-based consumers.
+///
+/// This mirrors the trimming and omission-marker behavior of `HistoryHandle`
+/// without requiring an `OutputBus` subscription. It is intended for examples
+/// and higher-level polling workflows that already have rendered text.
+#[derive(Debug, Clone)]
+pub struct PollHistory {
+    entries: VecDeque<String>,
+    max_entries: usize,
+    max_render_chars: usize,
+    rendered_chars: usize,
+    omitted_entries: usize,
+    include_omission_marker: bool,
+}
+
+impl PollHistory {
+    pub fn new(max_entries: usize, max_render_chars: usize) -> Self {
+        Self {
+            entries: VecDeque::new(),
+            max_entries,
+            max_render_chars,
+            rendered_chars: 0,
+            omitted_entries: 0,
+            include_omission_marker: true,
+        }
+    }
+
+    pub fn with_omission_marker(mut self, include: bool) -> Self {
+        self.include_omission_marker = include;
+        self
+    }
+
+    pub fn push_text(&mut self, entry: String) {
+        let chars = entry.len();
+        self.entries.push_back(entry);
+        self.rendered_chars += chars;
+        self.trim();
+    }
+
+    pub fn render_text(&self) -> String {
+        let mut result = String::with_capacity(self.rendered_chars + 64);
+        if self.include_omission_marker && self.omitted_entries > 0 {
+            result.push_str(&format!(
+                "[... {} earlier entries omitted ...]\n",
+                self.omitted_entries
+            ));
+        }
+        for entry in &self.entries {
+            result.push_str(entry);
+        }
+        result
+    }
+
+    pub fn rendered_chars(&self) -> usize {
+        self.rendered_chars
+    }
+
+    pub fn omitted_entries(&self) -> usize {
+        self.omitted_entries
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn trim(&mut self) {
+        while self.entries.len() > self.max_entries {
+            if let Some(removed) = self.entries.pop_front() {
+                self.rendered_chars = self.rendered_chars.saturating_sub(removed.len());
+                self.omitted_entries += 1;
+            }
+        }
+        if self.max_render_chars > 0 {
+            while self.rendered_chars > self.max_render_chars && !self.entries.is_empty() {
+                if let Some(removed) = self.entries.pop_front() {
+                    self.rendered_chars = self.rendered_chars.saturating_sub(removed.len());
+                    self.omitted_entries += 1;
+                }
+            }
+        }
+    }
+}
+
 /// Shared state for the history accumulator.
 struct HistoryState {
     entries: VecDeque<HistoryEntry>,
@@ -883,7 +966,10 @@ impl OutputBus {
             missed_discontinuities: 0,
         };
 
-        self.subscribers.lock().expect("bus lock poisoned").push(entry);
+        self.subscribers
+            .lock()
+            .expect("bus lock poisoned")
+            .push(entry);
         Ok(Subscription { id, rx })
     }
 
@@ -908,8 +994,7 @@ impl OutputBus {
         let mut subs = self.subscribers.lock().expect("bus lock poisoned");
         for sub in subs.iter_mut() {
             // Check filters: empty filters = match all; else OR across filters
-            let matched = sub.filters.is_empty()
-                || sub.filters.iter().any(|f| f.matches(&output));
+            let matched = sub.filters.is_empty() || sub.filters.iter().any(|f| f.matches(&output));
             if !matched {
                 continue;
             }
@@ -1025,7 +1110,13 @@ mod tests {
     use crate::types::{OutputFidelity, PaneAddress, SessionInfo};
     use std::sync::Arc;
 
-    fn make_output(host: &str, session: &str, pane_id: &str, content: &str, seq: u64) -> TargetOutput {
+    fn make_output(
+        host: &str,
+        session: &str,
+        pane_id: &str,
+        content: &str,
+        seq: u64,
+    ) -> TargetOutput {
         TargetOutput {
             source: TargetAddress::Pane(PaneAddress {
                 pane_id: pane_id.to_string(),
@@ -1503,7 +1594,8 @@ mod tests {
         let bus = OutputBus::new();
         let sub = bus.subscribe(vec![], 16).unwrap();
 
-        let events: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
         let events_clone: Arc<dyn Any + Send + Sync> = events.clone();
 
         let sink = SinkKind::Callback(CallbackSink {
@@ -1607,7 +1699,8 @@ mod tests {
 
         let filtered = sub.filter_fn(|out| out.content.contains("important"));
 
-        let events: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
         let events_clone: Arc<dyn Any + Send + Sync> = events.clone();
 
         let sink = SinkKind::Callback(CallbackSink {
@@ -1664,14 +1757,22 @@ mod tests {
         assert_eq!(snap.entries.len(), 2);
         assert_eq!(snap.omitted_entries, 0);
         match &snap.entries[0] {
-            HistoryEntry::Output { text, source_changed, .. } => {
+            HistoryEntry::Output {
+                text,
+                source_changed,
+                ..
+            } => {
                 assert_eq!(text, "hello");
                 assert!(*source_changed); // first entry
             }
             _ => panic!("expected Output"),
         }
         match &snap.entries[1] {
-            HistoryEntry::Output { text, source_changed, .. } => {
+            HistoryEntry::Output {
+                text,
+                source_changed,
+                ..
+            } => {
                 assert_eq!(text, "world");
                 assert!(!*source_changed); // same source
             }
@@ -1763,14 +1864,24 @@ mod tests {
 
         // Each entry: "[h:s(%1)] <text>\n" — label is about 11 chars + text + newline
         for i in 0..10 {
-            bus.publish(make_output("h", "s", "%1", &format!("line-{:03}", i), i as u64));
+            bus.publish(make_output(
+                "h",
+                "s",
+                "%1",
+                &format!("line-{:03}", i),
+                i as u64,
+            ));
         }
 
         tokio::task::yield_now().await;
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
         let snap = history.snapshot().await;
-        assert!(snap.rendered_chars <= 50, "rendered_chars {} > 50", snap.rendered_chars);
+        assert!(
+            snap.rendered_chars <= 50,
+            "rendered_chars {} > 50",
+            snap.rendered_chars
+        );
         assert!(snap.omitted_entries > 0, "should have trimmed some entries");
 
         bus.shutdown();
@@ -1837,8 +1948,11 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
         let text = history.render_text().await;
-        assert!(text.contains("[... 1 earlier entries omitted ...]"),
-            "expected omission marker, got: {}", text);
+        assert!(
+            text.contains("[... 1 earlier entries omitted ...]"),
+            "expected omission marker, got: {}",
+            text
+        );
         assert!(text.contains("mid"));
         assert!(text.contains("new"));
         assert!(!text.contains("old")); // trimmed
@@ -1923,7 +2037,10 @@ mod tests {
     #[tokio::test]
     async fn discontinuity_forwarded_by_filter_fn() {
         let (tx, rx) = mpsc::channel(16);
-        let sub = Subscription { id: SinkId(100), rx };
+        let sub = Subscription {
+            id: SinkId(100),
+            rx,
+        };
         let filtered = sub.filter_fn(|_| false); // Block all data
         let mut rx = filtered.into_receiver();
 
@@ -1946,7 +2063,10 @@ mod tests {
     #[tokio::test]
     async fn discontinuity_resets_joined_stream_source() {
         let (tx, rx) = mpsc::channel(16);
-        let sub = Subscription { id: SinkId(101), rx };
+        let sub = Subscription {
+            id: SinkId(101),
+            rx,
+        };
         let mut joined = sub.joined(LabelFormat::Prompt);
 
         // First output from pane A
@@ -1975,7 +2095,10 @@ mod tests {
             .await
             .unwrap();
         let chunk = joined.next().await.unwrap();
-        assert!(chunk.source_changed, "source should be changed after discontinuity");
+        assert!(
+            chunk.source_changed,
+            "source should be changed after discontinuity"
+        );
     }
 
     #[tokio::test]
@@ -2008,9 +2131,16 @@ mod tests {
             other => panic!("expected Discontinuity, got {:?}", other),
         }
         match &snap.entries[2] {
-            HistoryEntry::Output { text, source_changed, .. } => {
+            HistoryEntry::Output {
+                text,
+                source_changed,
+                ..
+            } => {
                 assert_eq!(text, "after");
-                assert!(*source_changed, "source should be reset after discontinuity");
+                assert!(
+                    *source_changed,
+                    "source should be reset after discontinuity"
+                );
             }
             other => panic!("expected Output, got {:?}", other),
         }
@@ -2062,8 +2192,11 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
         let text = history.render_text().await;
-        assert!(text.contains("[stream interrupted: ssh lost]"),
-            "rendered text should contain discontinuity marker, got: {}", text);
+        assert!(
+            text.contains("[stream interrupted: ssh lost]"),
+            "rendered text should contain discontinuity marker, got: {}",
+            text
+        );
         assert!(text.contains("hello"));
         assert!(text.contains("resumed"));
 
@@ -2075,10 +2208,9 @@ mod tests {
     async fn publish_discontinuity_broadcasts_to_all_subscribers() {
         let bus = OutputBus::new();
         let sub1 = bus.subscribe(vec![], 16).unwrap();
-        let sub2 = bus.subscribe(
-            vec![SinkFilter::for_session("specific")],
-            16,
-        ).unwrap();
+        let sub2 = bus
+            .subscribe(vec![SinkFilter::for_session("specific")], 16)
+            .unwrap();
 
         let mut rx1 = sub1.into_receiver();
         let mut rx2 = sub2.into_receiver();
@@ -2118,7 +2250,10 @@ mod tests {
         while let Ok(event) = slow_rx.try_recv() {
             match event {
                 SinkEvent::Data(_) => slow_data += 1,
-                SinkEvent::Gap { dropped, .. } => { slow_gaps += 1; total_dropped += dropped; }
+                SinkEvent::Gap { dropped, .. } => {
+                    slow_gaps += 1;
+                    total_dropped += dropped;
+                }
                 _ => {}
             }
         }
@@ -2131,7 +2266,10 @@ mod tests {
         while let Ok(event) = slow_rx.try_recv() {
             match event {
                 SinkEvent::Data(_) => slow_data += 1,
-                SinkEvent::Gap { dropped, .. } => { slow_gaps += 1; total_dropped += dropped; }
+                SinkEvent::Gap { dropped, .. } => {
+                    slow_gaps += 1;
+                    total_dropped += dropped;
+                }
                 _ => {}
             }
         }
@@ -2139,11 +2277,20 @@ mod tests {
         let mut fast_rx = fast_sub.into_receiver();
         let mut fast_data = 0u64;
         while let Ok(event) = fast_rx.try_recv() {
-            if matches!(event, SinkEvent::Data(_)) { fast_data += 1; }
+            if matches!(event, SinkEvent::Data(_)) {
+                fast_data += 1;
+            }
         }
         assert_eq!(fast_data, 100, "fast subscriber should get all 100 events");
-        assert!(slow_data < 100, "slow subscriber should have dropped some (got {})", slow_data);
-        assert!(slow_gaps > 0, "slow subscriber should have at least one Gap");
+        assert!(
+            slow_data < 100,
+            "slow subscriber should have dropped some (got {})",
+            slow_data
+        );
+        assert!(
+            slow_gaps > 0,
+            "slow subscriber should have at least one Gap"
+        );
         assert!(total_dropped > 0, "Gap should report dropped events");
     }
 
@@ -2187,23 +2334,37 @@ mod tests {
         // 4. Discontinuity
         // 5. Data (alpha-3, source_changed=true — source reset by discontinuity)
         // 6. Data (beta-2, source_changed=true)
-        assert_eq!(snap.entries.len(), 6, "expected 6 entries, got {}", snap.entries.len());
+        assert_eq!(
+            snap.entries.len(),
+            6,
+            "expected 6 entries, got {}",
+            snap.entries.len()
+        );
 
         // Entry 4 should be Discontinuity
-        assert!(matches!(&snap.entries[3], HistoryEntry::Discontinuity { reason } if reason == "reconnect"),
-            "entry[3] should be Discontinuity(reconnect), got {:?}", snap.entries[3]);
+        assert!(
+            matches!(&snap.entries[3], HistoryEntry::Discontinuity { reason } if reason == "reconnect"),
+            "entry[3] should be Discontinuity(reconnect), got {:?}",
+            snap.entries[3]
+        );
 
         // Entry 5 should have source_changed=true (reset by discontinuity)
         match &snap.entries[4] {
             HistoryEntry::Output { source_changed, .. } => {
-                assert!(*source_changed, "first output after discontinuity should have source_changed=true");
+                assert!(
+                    *source_changed,
+                    "first output after discontinuity should have source_changed=true"
+                );
             }
             other => panic!("entry[4] should be Output, got {:?}", other),
         }
 
         // Rendered text should contain the discontinuity marker
         let text = history.render_text().await;
-        assert!(text.contains("[reconnect]"), "rendered text should contain [reconnect]");
+        assert!(
+            text.contains("[reconnect]"),
+            "rendered text should contain [reconnect]"
+        );
 
         bus.shutdown();
         history.join().await.unwrap();
@@ -2245,19 +2406,43 @@ mod tests {
 
         // Should see Gap, then Discontinuity, then Data
         let has_gap = events.iter().any(|e| matches!(e, SinkEvent::Gap { .. }));
-        let has_discontinuity = events.iter().any(|e| matches!(e, SinkEvent::Discontinuity { .. }));
+        let has_discontinuity = events
+            .iter()
+            .any(|e| matches!(e, SinkEvent::Discontinuity { .. }));
         let has_data = events.iter().any(|e| matches!(e, SinkEvent::Data(_)));
 
         assert!(has_gap, "should have a Gap event for dropped events");
-        assert!(has_discontinuity,
-            "should have a synthesized Discontinuity event for missed signal, events: {:?}", events);
+        assert!(
+            has_discontinuity,
+            "should have a synthesized Discontinuity event for missed signal, events: {:?}",
+            events
+        );
         assert!(has_data, "should have the new Data event");
 
         // Verify the discontinuity mentions it was missed
         for ev in &events {
             if let SinkEvent::Discontinuity { reason } = ev {
-                assert!(reason.contains("missed"), "reason should mention missed: {}", reason);
+                assert!(
+                    reason.contains("missed"),
+                    "reason should mention missed: {}",
+                    reason
+                );
             }
         }
+    }
+
+    #[test]
+    fn poll_history_trims_by_entry_and_char_budget() {
+        let mut history = PollHistory::new(2, 12);
+        history.push_text("first\n".to_string());
+        history.push_text("second\n".to_string());
+        history.push_text("third\n".to_string());
+
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.omitted_entries(), 2);
+        assert_eq!(
+            history.render_text(),
+            "[... 2 earlier entries omitted ...]\nthird\n"
+        );
     }
 }
