@@ -346,6 +346,7 @@ async fn run_live_monitor(
         max_render_chars: args.max_chars,
         label_format: LabelFormat::Prompt,
         include_omission_marker: true,
+        ..Default::default()
     });
     let monitor_a = host.start_monitoring_session(session_a).await?;
     let monitor_b = host.start_monitoring_session(session_b).await?;
@@ -491,6 +492,7 @@ async fn run_simulated(host: &motlie_tmux::HostHandle, args: &Args) -> Result<()
         max_render_chars: args.max_chars,
         label_format: LabelFormat::Prompt,
         include_omission_marker: true,
+        ..Default::default()
     });
 
     let monitor = host.start_monitoring_session(&session).await?;

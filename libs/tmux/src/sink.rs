@@ -8,7 +8,7 @@
 //! - **Terminal consumers**: SinkKind (stdio, callback), custom code via into_receiver()
 
 use std::any::Any;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -545,6 +545,21 @@ impl JoinedStream {
 // 2b.1 — Transcript/History for external LLM context (DC28)
 // ---------------------------------------------------------------------------
 
+/// Rendering mode for history output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderMode {
+    /// Entries in arrival order with source labels on source transitions.
+    Interleaved,
+    /// Group entries by source, render each source as a labeled section.
+    PerSource,
+}
+
+impl Default for RenderMode {
+    fn default() -> Self {
+        RenderMode::Interleaved
+    }
+}
+
 /// Options for configuring a rolling transcript/history handle.
 #[derive(Debug, Clone)]
 pub struct HistoryOptions {
@@ -558,6 +573,13 @@ pub struct HistoryOptions {
     /// When true, `render_text()` prepends an omission marker if entries were
     /// trimmed (e.g. `[... 37 earlier entries omitted ...]`).
     pub include_omission_marker: bool,
+    /// Rendering mode: `Interleaved` (default) or `PerSource` for grouped sections.
+    pub render_mode: RenderMode,
+    /// Global character cap across all sources (Phase 3, DC33). When > 0 and
+    /// `render_mode == PerSource`, after per-source trimming the largest
+    /// source windows are trimmed until total rendered chars is within budget.
+    /// `0` means no global cap. Ignored when `render_mode == Interleaved`.
+    pub global_max_render_chars: usize,
 }
 
 impl Default for HistoryOptions {
@@ -567,6 +589,8 @@ impl Default for HistoryOptions {
             max_render_chars: 0,
             label_format: LabelFormat::Bracketed,
             include_omission_marker: true,
+            render_mode: RenderMode::Interleaved,
+            global_max_render_chars: 0,
         }
     }
 }
@@ -596,6 +620,31 @@ pub enum HistoryEntry {
 }
 
 impl HistoryEntry {
+    /// Source key for per-source grouping (Phase 2, DC33).
+    ///
+    /// Returns the source's `short()` label for Output entries, or a synthetic
+    /// key for Gap/Discontinuity entries so they can be handled uniformly.
+    pub fn source_key(&self) -> String {
+        match self {
+            HistoryEntry::Output { source, .. } => source.short(),
+            HistoryEntry::Gap { .. } => "__system__".to_string(),
+            HistoryEntry::Discontinuity { .. } => "__system__".to_string(),
+        }
+    }
+
+    /// Plain text content without source labels (for per-source rendering).
+    fn text_content(&self) -> String {
+        match self {
+            HistoryEntry::Output { text, .. } => format!("{}\n", text),
+            HistoryEntry::Gap { dropped_events } => {
+                format!("[gap: {} event(s) dropped]\n", dropped_events)
+            }
+            HistoryEntry::Discontinuity { reason } => {
+                format!("[{}]\n", reason)
+            }
+        }
+    }
+
     /// Rendered character count for budget trimming.
     ///
     /// Measures the actual rendered string length to ensure accurate budget
@@ -644,6 +693,14 @@ pub struct HistorySnapshot {
     pub omitted_entries: usize,
 }
 
+/// Internal entry for `PollHistory` with optional source tagging (Phase 2, DC33).
+#[derive(Debug, Clone)]
+struct PollHistoryEntry {
+    source: Option<String>,
+    text: String,
+    char_count: usize,
+}
+
 /// Bounded rolling text history for poll-based consumers.
 ///
 /// This mirrors the trimming and omission-marker behavior of `HistoryHandle`
@@ -651,12 +708,13 @@ pub struct HistorySnapshot {
 /// and higher-level polling workflows that already have rendered text.
 #[derive(Debug, Clone)]
 pub struct PollHistory {
-    entries: VecDeque<String>,
+    entries: VecDeque<PollHistoryEntry>,
     max_entries: usize,
     max_render_chars: usize,
     rendered_chars: usize,
     omitted_entries: usize,
     include_omission_marker: bool,
+    render_mode: RenderMode,
 }
 
 impl PollHistory {
@@ -668,6 +726,7 @@ impl PollHistory {
             rendered_chars: 0,
             omitted_entries: 0,
             include_omission_marker: true,
+            render_mode: RenderMode::Interleaved,
         }
     }
 
@@ -676,14 +735,46 @@ impl PollHistory {
         self
     }
 
+    /// Set the render mode (Phase 2, DC33).
+    pub fn with_render_mode(mut self, mode: RenderMode) -> Self {
+        self.render_mode = mode;
+        self
+    }
+
     pub fn push_text(&mut self, entry: String) {
         let chars = entry.len();
-        self.entries.push_back(entry);
+        self.entries.push_back(PollHistoryEntry {
+            source: None,
+            text: entry,
+            char_count: chars,
+        });
+        self.rendered_chars += chars;
+        self.trim();
+    }
+
+    /// Push a text entry tagged with a source key (Phase 2, DC33).
+    ///
+    /// When `render_mode == PerSource`, entries with the same source are
+    /// grouped together in `render_text()`.
+    pub fn push_text_for_source(&mut self, source: &str, text: String) {
+        let chars = text.len();
+        self.entries.push_back(PollHistoryEntry {
+            source: Some(source.to_string()),
+            text,
+            char_count: chars,
+        });
         self.rendered_chars += chars;
         self.trim();
     }
 
     pub fn render_text(&self) -> String {
+        match self.render_mode {
+            RenderMode::Interleaved => self.render_interleaved(),
+            RenderMode::PerSource => self.render_per_source(),
+        }
+    }
+
+    fn render_interleaved(&self) -> String {
         let mut result = String::with_capacity(self.rendered_chars + 64);
         if self.include_omission_marker && self.omitted_entries > 0 {
             result.push_str(&format!(
@@ -692,7 +783,38 @@ impl PollHistory {
             ));
         }
         for entry in &self.entries {
-            result.push_str(entry);
+            result.push_str(&entry.text);
+        }
+        result
+    }
+
+    fn render_per_source(&self) -> String {
+        let mut sections: Vec<(String, Vec<&PollHistoryEntry>)> = Vec::new();
+        let mut index: HashMap<String, usize> = HashMap::new();
+
+        for entry in &self.entries {
+            let key = entry.source.clone().unwrap_or_else(|| "__unsourced__".to_string());
+            if let Some(&idx) = index.get(&key) {
+                sections[idx].1.push(entry);
+            } else {
+                index.insert(key.clone(), sections.len());
+                sections.push((key, vec![entry]));
+            }
+        }
+
+        let mut result = String::new();
+        if self.include_omission_marker && self.omitted_entries > 0 {
+            result.push_str(&format!(
+                "[... {} earlier entries omitted ...]\n",
+                self.omitted_entries
+            ));
+        }
+        for (source, entries) in &sections {
+            result.push_str(&format!("=== {} ===\n", source));
+            for entry in entries {
+                result.push_str(&entry.text);
+            }
+            result.push('\n');
         }
         result
     }
@@ -712,14 +834,80 @@ impl PollHistory {
     fn trim(&mut self) {
         while self.entries.len() > self.max_entries {
             if let Some(removed) = self.entries.pop_front() {
-                self.rendered_chars = self.rendered_chars.saturating_sub(removed.len());
+                self.rendered_chars = self.rendered_chars.saturating_sub(removed.char_count);
                 self.omitted_entries += 1;
             }
         }
         if self.max_render_chars > 0 {
             while self.rendered_chars > self.max_render_chars && !self.entries.is_empty() {
                 if let Some(removed) = self.entries.pop_front() {
-                    self.rendered_chars = self.rendered_chars.saturating_sub(removed.len());
+                    self.rendered_chars = self.rendered_chars.saturating_sub(removed.char_count);
+                    self.omitted_entries += 1;
+                }
+            }
+        }
+    }
+}
+
+/// Per-source entry window for Phase 3 (DC33).
+///
+/// Holds entries for a single source with independent budget trimming.
+struct SourceWindow {
+    entries: VecDeque<HistoryEntry>,
+    rendered_chars: usize,
+    omitted_entries: usize,
+}
+
+impl SourceWindow {
+    fn new() -> Self {
+        SourceWindow {
+            entries: VecDeque::new(),
+            rendered_chars: 0,
+            omitted_entries: 0,
+        }
+    }
+
+    fn push(&mut self, entry: HistoryEntry, label_format: &LabelFormat) {
+        let entry_chars = entry.rendered_chars(label_format);
+        self.entries.push_back(entry);
+        self.rendered_chars += entry_chars;
+    }
+
+    fn append_to_last(&mut self, text: &str, label_format: &LabelFormat) -> bool {
+        if let Some(last) = self.entries.back() {
+            if !matches!(last, HistoryEntry::Output { .. }) {
+                return false;
+            }
+            let old_chars = last.rendered_chars(label_format);
+            // Drop the immutable borrow before mutating
+            if let Some(HistoryEntry::Output {
+                text: ref mut existing,
+                ..
+            }) = self.entries.back_mut()
+            {
+                existing.push_str(text);
+            }
+            let new_chars = self.entries.back().unwrap().rendered_chars(label_format);
+            self.rendered_chars = self.rendered_chars.saturating_sub(old_chars) + new_chars;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn trim(&mut self, max_entries: usize, max_render_chars: usize, label_format: &LabelFormat) {
+        while self.entries.len() > max_entries {
+            if let Some(removed) = self.entries.pop_front() {
+                let chars = removed.rendered_chars(label_format);
+                self.rendered_chars = self.rendered_chars.saturating_sub(chars);
+                self.omitted_entries += 1;
+            }
+        }
+        if max_render_chars > 0 {
+            while self.rendered_chars > max_render_chars && !self.entries.is_empty() {
+                if let Some(removed) = self.entries.pop_front() {
+                    let chars = removed.rendered_chars(label_format);
+                    self.rendered_chars = self.rendered_chars.saturating_sub(chars);
                     self.omitted_entries += 1;
                 }
             }
@@ -729,25 +917,117 @@ impl PollHistory {
 
 /// Shared state for the history accumulator.
 struct HistoryState {
+    // --- Interleaved mode storage (existing behavior) ---
     entries: VecDeque<HistoryEntry>,
-    max_entries: usize,
-    max_render_chars: usize,
     rendered_chars: usize,
     omitted_entries: usize,
+
+    // --- Per-source mode storage (Phase 3, DC33) ---
+    per_source: HashMap<String, SourceWindow>,
+    source_order: Vec<String>,
+
+    // --- Configuration ---
+    max_entries: usize,
+    max_render_chars: usize,
+    global_max_render_chars: usize,
     label_format: LabelFormat,
     include_omission_marker: bool,
+    render_mode: RenderMode,
 }
 
 impl HistoryState {
     fn push(&mut self, entry: HistoryEntry) {
+        match self.render_mode {
+            RenderMode::Interleaved => self.push_interleaved(entry),
+            RenderMode::PerSource => self.push_per_source(entry),
+        }
+    }
+
+    fn push_interleaved(&mut self, entry: HistoryEntry) {
         let entry_chars = entry.rendered_chars(&self.label_format);
         self.entries.push_back(entry);
         self.rendered_chars += entry_chars;
-        self.trim();
+        self.trim_interleaved();
     }
 
-    fn trim(&mut self) {
-        // Trim by entry count
+    fn push_per_source(&mut self, entry: HistoryEntry) {
+        let key = entry.source_key();
+
+        // Gap and Discontinuity go to all existing source windows
+        match &entry {
+            HistoryEntry::Gap { .. } | HistoryEntry::Discontinuity { .. } => {
+                // Add to a __system__ window for rendering
+                if !self.source_order.contains(&key) {
+                    self.source_order.push(key.clone());
+                }
+                let window = self.per_source.entry(key).or_insert_with(SourceWindow::new);
+                window.push(entry, &self.label_format);
+                window.trim(self.max_entries, self.max_render_chars, &self.label_format);
+            }
+            HistoryEntry::Output { .. } => {
+                if !self.source_order.contains(&key) {
+                    self.source_order.push(key.clone());
+                }
+                let label_format = self.label_format.clone();
+                let max_entries = self.max_entries;
+                let max_render_chars = self.max_render_chars;
+                let window = self.per_source.entry(key).or_insert_with(SourceWindow::new);
+                window.push(entry, &label_format);
+                window.trim(max_entries, max_render_chars, &label_format);
+            }
+        }
+
+        self.trim_global();
+    }
+
+    /// Phase 1 (DC33): Append text to the last entry if it's the same source.
+    /// Returns `true` if the append succeeded, `false` if the caller should
+    /// fall back to pushing a new entry (e.g. the last entry is a Gap).
+    fn append_to_last(&mut self, text: &str) -> bool {
+        match self.render_mode {
+            RenderMode::Interleaved => self.append_to_last_interleaved(text),
+            RenderMode::PerSource => self.append_to_last_per_source(text),
+        }
+    }
+
+    fn append_to_last_interleaved(&mut self, text: &str) -> bool {
+        let is_output = matches!(self.entries.back(), Some(HistoryEntry::Output { .. }));
+        if is_output {
+            let old_chars = self.entries.back().unwrap().rendered_chars(&self.label_format);
+            if let Some(HistoryEntry::Output {
+                text: ref mut existing,
+                ..
+            }) = self.entries.back_mut()
+            {
+                existing.push_str(text);
+            }
+            let new_chars = self.entries.back().unwrap().rendered_chars(&self.label_format);
+            self.rendered_chars = self.rendered_chars.saturating_sub(old_chars) + new_chars;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn append_to_last_per_source(&mut self, text: &str) -> bool {
+        // Find the last source that was pushed and append to its window
+        if let Some(last_key) = self.source_order.last().cloned() {
+            if let Some(window) = self.per_source.get_mut(&last_key) {
+                if !window.append_to_last(text, &self.label_format) {
+                    return false;
+                }
+                let max_entries = self.max_entries;
+                let max_render_chars = self.max_render_chars;
+                let label_format = self.label_format.clone();
+                window.trim(max_entries, max_render_chars, &label_format);
+                self.trim_global();
+                return true;
+            }
+        }
+        false
+    }
+
+    fn trim_interleaved(&mut self) {
         while self.entries.len() > self.max_entries {
             if let Some(removed) = self.entries.pop_front() {
                 let chars = removed.rendered_chars(&self.label_format);
@@ -755,7 +1035,6 @@ impl HistoryState {
                 self.omitted_entries += 1;
             }
         }
-        // Trim by character budget
         if self.max_render_chars > 0 {
             while self.rendered_chars > self.max_render_chars && !self.entries.is_empty() {
                 if let Some(removed) = self.entries.pop_front() {
@@ -767,15 +1046,82 @@ impl HistoryState {
         }
     }
 
+    /// Phase 3 (DC33): Trim across all source windows until total rendered
+    /// chars is within the global cap. Trims from the source with the most
+    /// rendered chars first.
+    fn trim_global(&mut self) {
+        if self.global_max_render_chars == 0 {
+            return;
+        }
+        let total: usize = self.per_source.values().map(|w| w.rendered_chars).sum();
+        if total <= self.global_max_render_chars {
+            return;
+        }
+
+        let mut to_trim = total - self.global_max_render_chars;
+        while to_trim > 0 {
+            // Find the source window with the most rendered chars
+            let largest_key = self
+                .per_source
+                .iter()
+                .filter(|(_, w)| !w.entries.is_empty())
+                .max_by_key(|(_, w)| w.rendered_chars)
+                .map(|(k, _)| k.clone());
+
+            match largest_key {
+                Some(key) => {
+                    if let Some(window) = self.per_source.get_mut(&key) {
+                        if let Some(removed) = window.entries.pop_front() {
+                            let chars = removed.rendered_chars(&self.label_format);
+                            window.rendered_chars = window.rendered_chars.saturating_sub(chars);
+                            window.omitted_entries += 1;
+                            to_trim = to_trim.saturating_sub(chars);
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                None => break,
+            }
+        }
+    }
+
     fn snapshot(&self) -> HistorySnapshot {
-        HistorySnapshot {
-            entries: self.entries.iter().cloned().collect(),
-            rendered_chars: self.rendered_chars,
-            omitted_entries: self.omitted_entries,
+        match self.render_mode {
+            RenderMode::Interleaved => HistorySnapshot {
+                entries: self.entries.iter().cloned().collect(),
+                rendered_chars: self.rendered_chars,
+                omitted_entries: self.omitted_entries,
+            },
+            RenderMode::PerSource => {
+                // Flatten per-source windows in source_order
+                let mut entries = Vec::new();
+                let mut total_rendered = 0usize;
+                let mut total_omitted = 0usize;
+                for key in &self.source_order {
+                    if let Some(window) = self.per_source.get(key) {
+                        entries.extend(window.entries.iter().cloned());
+                        total_rendered += window.rendered_chars;
+                        total_omitted += window.omitted_entries;
+                    }
+                }
+                HistorySnapshot {
+                    entries,
+                    rendered_chars: total_rendered,
+                    omitted_entries: total_omitted,
+                }
+            }
         }
     }
 
     fn render_text(&self) -> String {
+        match self.render_mode {
+            RenderMode::Interleaved => self.render_interleaved(),
+            RenderMode::PerSource => self.render_per_source(),
+        }
+    }
+
+    fn render_interleaved(&self) -> String {
         let mut result = String::with_capacity(self.rendered_chars + 64);
 
         if self.include_omission_marker && self.omitted_entries > 0 {
@@ -794,6 +1140,33 @@ impl HistoryState {
             result.push_str(&entry.render(&self.label_format, source_changed));
         }
 
+        result
+    }
+
+    fn render_per_source(&self) -> String {
+        let mut result = String::new();
+
+        // Collect total omissions for the marker
+        let total_omitted: usize = self.per_source.values().map(|w| w.omitted_entries).sum();
+        if self.include_omission_marker && total_omitted > 0 {
+            result.push_str(&format!(
+                "[... {} earlier entries omitted ...]\n",
+                total_omitted
+            ));
+        }
+
+        for key in &self.source_order {
+            if let Some(window) = self.per_source.get(key) {
+                if window.entries.is_empty() {
+                    continue;
+                }
+                result.push_str(&format!("=== {} ===\n", key));
+                for entry in &window.entries {
+                    result.push_str(&entry.text_content());
+                }
+                result.push('\n');
+            }
+        }
         result
     }
 }
@@ -853,12 +1226,16 @@ impl Subscription {
 
         let state = Arc::new(Mutex::new(HistoryState {
             entries: VecDeque::new(),
-            max_entries: opts.max_entries,
-            max_render_chars: opts.max_render_chars,
             rendered_chars: 0,
             omitted_entries: 0,
+            per_source: HashMap::new(),
+            source_order: Vec::new(),
+            max_entries: opts.max_entries,
+            max_render_chars: opts.max_render_chars,
+            global_max_render_chars: opts.global_max_render_chars,
             label_format: opts.label_format,
             include_omission_marker: opts.include_omission_marker,
+            render_mode: opts.render_mode,
         }));
 
         let state_clone = state.clone();
@@ -877,12 +1254,28 @@ impl Subscription {
                         };
                         last_source = Some(source.clone());
 
-                        let entry = HistoryEntry::Output {
-                            source,
-                            text: output.content.clone(),
-                            source_changed,
-                        };
-                        state_clone.lock().await.push(entry);
+                        // Phase 1 (DC33): coalesce consecutive same-source
+                        // chunks by appending to the last entry. Falls back
+                        // to pushing a new entry if the last entry is not
+                        // Output (e.g. a Gap or Discontinuity intervened).
+                        if !source_changed {
+                            let appended = state_clone.lock().await.append_to_last(&output.content);
+                            if !appended {
+                                let entry = HistoryEntry::Output {
+                                    source,
+                                    text: output.content.clone(),
+                                    source_changed: false,
+                                };
+                                state_clone.lock().await.push(entry);
+                            }
+                        } else {
+                            let entry = HistoryEntry::Output {
+                                source,
+                                text: output.content.clone(),
+                                source_changed,
+                            };
+                            state_clone.lock().await.push(entry);
+                        }
                     }
                     SinkEvent::Gap { dropped, .. } => {
                         let entry = HistoryEntry::Gap {
@@ -1744,10 +2137,12 @@ mod tests {
             max_render_chars: 0,
             label_format: LabelFormat::Bracketed,
             include_omission_marker: true,
+            ..Default::default()
         });
 
+        // Two outputs from different sources — each gets its own entry
         bus.publish(make_output("h", "s", "%1", "hello", 1));
-        bus.publish(make_output("h", "s", "%1", "world", 2));
+        bus.publish(make_output("h", "s", "%2", "world", 2));
 
         // Let accumulator process
         tokio::task::yield_now().await;
@@ -1774,7 +2169,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(text, "world");
-                assert!(!*source_changed); // same source
+                assert!(*source_changed); // different source
             }
             _ => panic!("expected Output"),
         }
@@ -1785,33 +2180,37 @@ mod tests {
 
     #[tokio::test]
     async fn history_source_coalescing() {
+        // Phase 1 (DC33): consecutive same-source chunks are coalesced.
         let bus = OutputBus::new();
         let sub = bus.subscribe(vec![], 16).unwrap();
         let history = sub.history(HistoryOptions::default());
 
         bus.publish(make_output("h", "s", "%1", "a", 1));
         bus.publish(make_output("h", "s", "%2", "b", 2)); // different pane
-        bus.publish(make_output("h", "s", "%2", "c", 3)); // same pane
+        bus.publish(make_output("h", "s", "%2", "c", 3)); // same pane — coalesced
 
         tokio::task::yield_now().await;
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
         let snap = history.snapshot().await;
-        assert_eq!(snap.entries.len(), 3);
+        // Third event coalesced into second — only 2 entries
+        assert_eq!(snap.entries.len(), 2);
 
         // First: source_changed = true (initial)
         match &snap.entries[0] {
             HistoryEntry::Output { source_changed, .. } => assert!(*source_changed),
             _ => panic!("expected Output"),
         }
-        // Second: source_changed = true (different pane)
+        // Second: source_changed = true (different pane), text is "bc" (coalesced)
         match &snap.entries[1] {
-            HistoryEntry::Output { source_changed, .. } => assert!(*source_changed),
-            _ => panic!("expected Output"),
-        }
-        // Third: source_changed = false (same pane as previous)
-        match &snap.entries[2] {
-            HistoryEntry::Output { source_changed, .. } => assert!(!*source_changed),
+            HistoryEntry::Output {
+                source_changed,
+                text,
+                ..
+            } => {
+                assert!(*source_changed);
+                assert_eq!(text, "bc");
+            }
             _ => panic!("expected Output"),
         }
 
@@ -1828,10 +2227,18 @@ mod tests {
             max_render_chars: 0,
             label_format: LabelFormat::Bracketed,
             include_omission_marker: true,
+            ..Default::default()
         });
 
+        // Use different panes to prevent coalescing
         for i in 0..5 {
-            bus.publish(make_output("h", "s", "%1", &format!("msg{}", i), i as u64));
+            bus.publish(make_output(
+                "h",
+                "s",
+                &format!("%{}", i),
+                &format!("msg{}", i),
+                i as u64,
+            ));
         }
 
         tokio::task::yield_now().await;
@@ -1860,14 +2267,16 @@ mod tests {
             max_render_chars: 50,
             label_format: LabelFormat::Bracketed,
             include_omission_marker: false,
+            ..Default::default()
         });
 
-        // Each entry: "[h:s(%1)] <text>\n" — label is about 11 chars + text + newline
+        // Use different panes so coalescing doesn't merge them.
+        // Each entry: "[h:s(%N)] <text>\n" — label is ~12 chars + text + newline
         for i in 0..10 {
             bus.publish(make_output(
                 "h",
                 "s",
-                "%1",
+                &format!("%{}", i),
                 &format!("line-{:03}", i),
                 i as u64,
             ));
@@ -1938,11 +2347,13 @@ mod tests {
             max_render_chars: 0,
             label_format: LabelFormat::Bracketed,
             include_omission_marker: true,
+            ..Default::default()
         });
 
+        // Use different sources to prevent coalescing
         bus.publish(make_output("h", "build", "%1", "old", 1));
-        bus.publish(make_output("h", "build", "%1", "mid", 2));
-        bus.publish(make_output("h", "build", "%1", "new", 3));
+        bus.publish(make_output("h", "build", "%2", "mid", 2));
+        bus.publish(make_output("h", "build", "%3", "new", 3));
 
         tokio::task::yield_now().await;
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -1970,6 +2381,7 @@ mod tests {
             max_render_chars: 0,
             label_format: LabelFormat::Bracketed,
             include_omission_marker: false,
+            ..Default::default()
         });
 
         bus.publish(make_output("web", "build", "%1", "compiling", 1));
@@ -2000,6 +2412,7 @@ mod tests {
             max_render_chars: 0,
             label_format: LabelFormat::Bracketed,
             include_omission_marker: true,
+            ..Default::default()
         });
 
         // Publish 20 events from alternating sources
@@ -2299,6 +2712,7 @@ mod tests {
         // Verifies transcript determinism: multi-source output interleaved with
         // discontinuity events produces a history where discontinuity markers
         // appear at the correct positions and source labels are re-emitted.
+        // Phase 1 (DC33) coalesces consecutive same-source chunks.
         let bus = Arc::new(OutputBus::new());
         let sub = bus.subscribe(vec![], 128).unwrap();
         let history = sub.history(HistoryOptions {
@@ -2307,7 +2721,7 @@ mod tests {
             ..Default::default()
         });
 
-        // Phase 1: output from source A
+        // Phase 1: output from source A (alpha-1 + alpha-2 coalesced)
         bus.publish(make_output("h", "s", "%0", "alpha-1\n", 1));
         bus.publish(make_output("h", "s", "%0", "alpha-2\n", 2));
 
@@ -2327,36 +2741,47 @@ mod tests {
 
         let snap = history.snapshot().await;
 
-        // Verify structure:
-        // 1. Data (alpha-1, source_changed=true)
-        // 2. Data (alpha-2, source_changed=false)
-        // 3. Data (beta-1, source_changed=true)
-        // 4. Discontinuity
-        // 5. Data (alpha-3, source_changed=true — source reset by discontinuity)
-        // 6. Data (beta-2, source_changed=true)
+        // Verify structure (alpha-1 and alpha-2 coalesced):
+        // 0. Data ("alpha-1\nalpha-2\n", source_changed=true) — coalesced
+        // 1. Data (beta-1, source_changed=true)
+        // 2. Discontinuity
+        // 3. Data (alpha-3, source_changed=true — source reset by discontinuity)
+        // 4. Data (beta-2, source_changed=true)
         assert_eq!(
             snap.entries.len(),
-            6,
-            "expected 6 entries, got {}",
+            5,
+            "expected 5 entries, got {}",
             snap.entries.len()
         );
 
-        // Entry 4 should be Discontinuity
+        // Entry 0 should have coalesced alpha-1 and alpha-2
+        match &snap.entries[0] {
+            HistoryEntry::Output { text, .. } => {
+                assert!(
+                    text.contains("alpha-1") && text.contains("alpha-2"),
+                    "expected coalesced alpha text, got: {}",
+                    text
+                );
+            }
+            other => panic!("entry[0] should be Output, got {:?}", other),
+        }
+
+        // Entry 2 should be Discontinuity
         assert!(
-            matches!(&snap.entries[3], HistoryEntry::Discontinuity { reason } if reason == "reconnect"),
-            "entry[3] should be Discontinuity(reconnect), got {:?}",
-            snap.entries[3]
+            matches!(&snap.entries[2], HistoryEntry::Discontinuity { reason } if reason == "reconnect"),
+            "entry[2] should be Discontinuity(reconnect), got {:?}",
+            snap.entries[2]
         );
 
-        // Entry 5 should have source_changed=true (reset by discontinuity)
-        match &snap.entries[4] {
+        // Entry 3 should have source_changed=true (reset by discontinuity)
+        match &snap.entries[3] {
             HistoryEntry::Output { source_changed, .. } => {
                 assert!(
                     *source_changed,
                     "first output after discontinuity should have source_changed=true"
                 );
             }
-            other => panic!("entry[4] should be Output, got {:?}", other),
+            other => panic!("entry[3] should be Output, got {:?}", other),
         }
 
         // Rendered text should contain the discontinuity marker
@@ -2443,6 +2868,370 @@ mod tests {
         assert_eq!(
             history.render_text(),
             "[... 2 earlier entries omitted ...]\nthird\n"
+        );
+    }
+
+    // --- DC33: Per-source coherent history tests ---
+
+    #[tokio::test]
+    async fn history_coalesces_same_source_chunks() {
+        // Phase 1 (DC33): 5 rapid same-source events produce fewer than 5 entries.
+        let bus = OutputBus::new();
+        let sub = bus.subscribe(vec![], 16).unwrap();
+        let history = sub.history(HistoryOptions::default());
+
+        for i in 0..5 {
+            bus.publish(make_output("h", "s", "%1", &format!("chunk{}", i), i as u64));
+        }
+
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let snap = history.snapshot().await;
+        assert!(
+            snap.entries.len() < 5,
+            "coalescing should reduce 5 same-source events to fewer entries, got {}",
+            snap.entries.len()
+        );
+        // All text should be present in the coalesced entry
+        match &snap.entries[0] {
+            HistoryEntry::Output { text, .. } => {
+                for i in 0..5 {
+                    assert!(
+                        text.contains(&format!("chunk{}", i)),
+                        "missing chunk{} in coalesced text: {}",
+                        i,
+                        text
+                    );
+                }
+            }
+            other => panic!("expected Output, got {:?}", other),
+        }
+
+        bus.shutdown();
+        history.join().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn history_per_source_render_groups_by_source() {
+        // Phase 2 (DC33): interleaved events from 2 sources produce grouped sections.
+        let (tx, rx) = mpsc::channel(16);
+        let sub = Subscription {
+            id: SinkId(200),
+            rx,
+        };
+        let history = sub.history(HistoryOptions {
+            max_entries: 100,
+            render_mode: RenderMode::PerSource,
+            include_omission_marker: false,
+            ..Default::default()
+        });
+
+        // Interleave source A and B
+        tx.send(SinkEvent::Data(make_output("h", "build", "%1", "compiling", 1)))
+            .await
+            .unwrap();
+        tx.send(SinkEvent::Data(make_output("h", "test", "%2", "test_a PASS", 1)))
+            .await
+            .unwrap();
+        tx.send(SinkEvent::Data(make_output("h", "build", "%1", "linking", 2)))
+            .await
+            .unwrap();
+        tx.send(SinkEvent::Data(make_output("h", "test", "%2", "test_b PASS", 2)))
+            .await
+            .unwrap();
+
+        drop(tx);
+        history.task.await.unwrap();
+
+        let text = history.state.lock().await.render_text();
+        // Each source should appear as a section
+        assert!(
+            text.contains("=== h:build(%1) ==="),
+            "should have build section header, got: {}",
+            text
+        );
+        assert!(
+            text.contains("=== h:test(%2) ==="),
+            "should have test section header, got: {}",
+            text
+        );
+        // Build entries should be contiguous
+        let build_pos = text.find("compiling").unwrap();
+        let linking_pos = text.find("linking").unwrap();
+        let test_a_pos = text.find("test_a PASS").unwrap();
+        // compiling and linking should both appear before test_a (grouped)
+        assert!(
+            build_pos < test_a_pos && linking_pos < test_a_pos,
+            "build entries should be grouped before test entries"
+        );
+    }
+
+    #[tokio::test]
+    async fn history_per_source_section_order() {
+        // Phase 2 (DC33): sections appear in first-seen order.
+        let (tx, rx) = mpsc::channel(16);
+        let sub = Subscription {
+            id: SinkId(201),
+            rx,
+        };
+        let history = sub.history(HistoryOptions {
+            max_entries: 100,
+            render_mode: RenderMode::PerSource,
+            include_omission_marker: false,
+            ..Default::default()
+        });
+
+        // Source B appears first, then A, then C
+        tx.send(SinkEvent::Data(make_output("h", "beta", "%2", "b1", 1)))
+            .await
+            .unwrap();
+        tx.send(SinkEvent::Data(make_output("h", "alpha", "%1", "a1", 1)))
+            .await
+            .unwrap();
+        tx.send(SinkEvent::Data(make_output("h", "gamma", "%3", "c1", 1)))
+            .await
+            .unwrap();
+
+        drop(tx);
+        history.task.await.unwrap();
+
+        let text = history.state.lock().await.render_text();
+        let beta_pos = text.find("=== h:beta(%2) ===").unwrap();
+        let alpha_pos = text.find("=== h:alpha(%1) ===").unwrap();
+        let gamma_pos = text.find("=== h:gamma(%3) ===").unwrap();
+
+        assert!(
+            beta_pos < alpha_pos && alpha_pos < gamma_pos,
+            "sections should appear in first-seen order: beta < alpha < gamma, got beta={}, alpha={}, gamma={}",
+            beta_pos, alpha_pos, gamma_pos
+        );
+    }
+
+    #[tokio::test]
+    async fn history_per_source_budget_isolates_sources() {
+        // Phase 3 (DC33): many events from source A don't evict source B.
+        let (tx, rx) = mpsc::channel(128);
+        let sub = Subscription {
+            id: SinkId(202),
+            rx,
+        };
+        let history = sub.history(HistoryOptions {
+            max_entries: 3, // per-source limit
+            render_mode: RenderMode::PerSource,
+            include_omission_marker: false,
+            ..Default::default()
+        });
+
+        // Push a few from source B
+        tx.send(SinkEvent::Data(make_output("h", "quiet", "%2", "q1", 1)))
+            .await
+            .unwrap();
+        tx.send(SinkEvent::Data(make_output("h", "quiet", "%2", "q2", 2)))
+            .await
+            .unwrap();
+
+        // Flood source A with many events (different panes to prevent coalescing)
+        for i in 0..20 {
+            // Alternate back to source A to break coalescing
+            tx.send(SinkEvent::Data(make_output(
+                "h",
+                "noisy",
+                "%1",
+                &format!("n{}", i),
+                i as u64,
+            )))
+            .await
+            .unwrap();
+            // Brief switch to another source to break coalescing for the next %1
+            if i < 19 {
+                tx.send(SinkEvent::Data(make_output(
+                    "h",
+                    "quiet",
+                    "%2",
+                    &format!("q_extra_{}", i),
+                    100 + i as u64,
+                )))
+                .await
+                .unwrap();
+            }
+        }
+
+        drop(tx);
+        history.task.await.unwrap();
+
+        let text = history.state.lock().await.render_text();
+        // Source B should still have entries — not evicted by A's flood
+        assert!(
+            text.contains("=== h:quiet(%2) ==="),
+            "quiet source should still have a section, got: {}",
+            text
+        );
+        // Source B should have some entries (at most max_entries=3)
+        let quiet_section_start = text.find("=== h:quiet(%2) ===").unwrap();
+        let quiet_section = &text[quiet_section_start..];
+        assert!(
+            quiet_section.contains("q"),
+            "quiet source should have entries, section: {}",
+            quiet_section
+        );
+    }
+
+    #[tokio::test]
+    async fn history_interleaved_mode_unchanged() {
+        // Verify Interleaved mode produces identical output to pre-change behavior.
+        // Same test as history_render_text_labels_on_source_change but explicit
+        // about render_mode.
+        let (tx, rx) = mpsc::channel(16);
+        let sub = Subscription {
+            id: SinkId(203),
+            rx,
+        };
+        let history = sub.history(HistoryOptions {
+            max_entries: 100,
+            render_mode: RenderMode::Interleaved,
+            include_omission_marker: false,
+            ..Default::default()
+        });
+
+        tx.send(SinkEvent::Data(make_output("web", "build", "%1", "compiling", 1)))
+            .await
+            .unwrap();
+        tx.send(SinkEvent::Data(make_output("web", "deploy", "%2", "deploying", 2)))
+            .await
+            .unwrap();
+        tx.send(SinkEvent::Data(make_output("web", "build", "%1", "done", 3)))
+            .await
+            .unwrap();
+
+        drop(tx);
+        history.task.await.unwrap();
+
+        let text = history.state.lock().await.render_text();
+        // Interleaved: entries in arrival order with labels on source change
+        assert!(
+            text.contains("[web:build(%1)] compiling"),
+            "got: {}",
+            text
+        );
+        assert!(
+            text.contains("[web:deploy(%2)] deploying"),
+            "got: {}",
+            text
+        );
+        assert!(
+            text.contains("[web:build(%1)] done"),
+            "got: {}",
+            text
+        );
+        // Should NOT have per-source section headers
+        assert!(
+            !text.contains("==="),
+            "interleaved mode should not have section headers, got: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn poll_history_per_source_render() {
+        // Phase 2 (DC33): PollHistory with push_text_for_source and PerSource mode.
+        let mut history = PollHistory::new(100, 0)
+            .with_render_mode(RenderMode::PerSource)
+            .with_omission_marker(false);
+
+        history.push_text_for_source("build", "compiling\n".to_string());
+        history.push_text_for_source("test", "test_a PASS\n".to_string());
+        history.push_text_for_source("build", "linking\n".to_string());
+        history.push_text_for_source("test", "test_b PASS\n".to_string());
+
+        let text = history.render_text();
+        assert!(
+            text.contains("=== build ==="),
+            "should have build section, got: {}",
+            text
+        );
+        assert!(
+            text.contains("=== test ==="),
+            "should have test section, got: {}",
+            text
+        );
+
+        // Build entries grouped
+        let compile_pos = text.find("compiling").unwrap();
+        let linking_pos = text.find("linking").unwrap();
+        let test_a_pos = text.find("test_a PASS").unwrap();
+        assert!(
+            compile_pos < linking_pos && linking_pos < test_a_pos,
+            "build entries should be grouped before test entries"
+        );
+    }
+
+    #[tokio::test]
+    async fn history_global_char_cap_trims_across_sources() {
+        // Phase 3 (DC33): global cap trims from largest source first.
+        let (tx, rx) = mpsc::channel(64);
+        let sub = Subscription {
+            id: SinkId(204),
+            rx,
+        };
+        let history = sub.history(HistoryOptions {
+            max_entries: 100,                // large per-source limit
+            max_render_chars: 0,             // no per-source char limit
+            global_max_render_chars: 100,    // tight global cap
+            render_mode: RenderMode::PerSource,
+            include_omission_marker: false,
+            ..Default::default()
+        });
+
+        // Source A: lots of text
+        for i in 0..10 {
+            tx.send(SinkEvent::Data(make_output(
+                "h",
+                "big",
+                "%1",
+                &format!("big-line-{:03}\n", i),
+                i as u64,
+            )))
+            .await
+            .unwrap();
+            // Break coalescing with B
+            tx.send(SinkEvent::Data(make_output(
+                "h",
+                "small",
+                "%2",
+                &format!("s{}\n", i),
+                i as u64,
+            )))
+            .await
+            .unwrap();
+        }
+
+        drop(tx);
+        history.task.await.unwrap();
+
+        let snap = history.state.lock().await.snapshot();
+        // Total rendered chars should be under the global cap
+        let total_chars: usize = snap
+            .entries
+            .iter()
+            .map(|e| e.rendered_chars(&LabelFormat::Bracketed))
+            .sum();
+        // The rendered_chars from snapshot may not include section headers,
+        // but the trimming should have brought entries down.
+        assert!(
+            snap.omitted_entries > 0,
+            "global cap should have trimmed some entries"
+        );
+        // The small source should still have some entries
+        let has_small = snap.entries.iter().any(|e| match e {
+            HistoryEntry::Output { source, .. } => source.short().contains("small"),
+            _ => false,
+        });
+        assert!(
+            has_small,
+            "small source should still have entries after global trimming, total_chars={}, entries={:?}",
+            total_chars,
+            snap.entries.iter().map(|e| e.source_key()).collect::<Vec<_>>()
         );
     }
 }

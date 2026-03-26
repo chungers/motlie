@@ -271,6 +271,7 @@ async fn process_command(
                                 max_render_chars: mirror_chars,
                                 label_format: LabelFormat::Bracketed,
                                 include_omission_marker: true,
+                                ..Default::default()
                             });
                             state.watch = Some(WatchState {
                                 session_name: session_name.to_string(),

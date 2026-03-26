@@ -21,8 +21,8 @@ pub use keys::{KeySequence, SpecialKey};
 pub use monitor::{MonitorExitReason, MonitorHandle, MonitorHealth, SessionMonitorHandle};
 pub use sink::{
     CallbackSink, HistoryEntry, HistoryHandle, HistoryOptions, HistorySnapshot, JoinedStream,
-    LabelFormat, OutputBus, PipeHandle, PollHistory, SinkEvent, SinkFilter, SinkId, SinkKind,
-    SourceLabel, StreamChunk, Subscription, TargetOutput,
+    LabelFormat, OutputBus, PipeHandle, PollHistory, RenderMode, SinkEvent, SinkFilter, SinkId,
+    SinkKind, SourceLabel, StreamChunk, Subscription, TargetOutput,
 };
 pub use sinks::stdio::{StdioFormat, StdioSink};
 pub use transport::{
