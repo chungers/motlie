@@ -498,9 +498,9 @@ Demonstrates the history API for external-agent workflows. Supports two modes:
 another agent's chat trace, replays scripted turns, and prints the rolling
 `render_text()` context after each turn.
 
-**Live mode** (two session names): monitors two existing tmux sessions in real
-time and builds a combined rolling history from their output. Prints a context
-snapshot every second until Ctrl-C.
+**Live mode** (two session names): polls two existing tmux sessions and builds
+a combined rolling history from their output. Live mode captures a startup
+baseline, then appends only new changes while it runs.
 
 This is the clearest tutorial for the intended Track B shape:
 - `OutputBus::subscribe()`
@@ -515,11 +515,14 @@ This is the clearest tutorial for the intended Track B shape:
 # Larger rolling context window
 ./target/debug/examples/history_demo ssh://localhost --chars 520 --entries 10
 
-# Live mode — monitor two existing sessions
-./target/debug/examples/history_demo ssh://localhost agent_session build_session
+# Live mode — compact tail-style polling from two existing sessions
+./target/debug/examples/history_demo ssh://localhost agent_session build_session --mode tail
 
-# Live mode with custom window
-./target/debug/examples/history_demo ssh://localhost sess_a sess_b --chars 1000 --entries 20
+# Live mode — rendered snapshot polling
+./target/debug/examples/history_demo ssh://localhost sess_a sess_b --mode render
+
+# Live mode with custom rolling window
+./target/debug/examples/history_demo ssh://localhost sess_a sess_b --mode tail --chars 1000 --entries 20
 
 # Remote host with explicit SSH key
 ./target/debug/examples/history_demo 'ssh://deploy@prod?identity-file=/path/to/key'
@@ -546,6 +549,28 @@ localhost:history_demo_12345(%5)> agent-a> rendered_chars now measures the fully
 localhost:history_demo_12345(%6)> agent-b> Great. Update DESIGN and API to match the shipped contract.
 
 Final snapshot: entries=3, omitted_entries=3, rendered_chars=...
+
+Expected output (live mode):
+```text
+Polling live sessions: claude-tmux and codex-tmux [mode=tail]
+History window: max_entries=8, max_render_chars=420
+Baseline captured at startup; only new changes are appended.
+Ctrl-C to stop.
+
+=== rolling context (t=2s) ===
+claude-tmux(%1)> echo HISTORY_TAIL_TIGHTEN4
+  HISTORY_TAIL_TIGHTEN4
+codex-tmux(%0)> echo HISTORY_TAIL_TIGHTEN4_CODEX
+  HISTORY_TAIL_TIGHTEN4_CODEX
+```
+
+Live mode now has two polling strategies:
+- `--mode tail`: compact pane-tail excerpts when a pane changes
+- `--mode render`: append full rendered pane snapshots when the visible state changes
+
+The simulated mode still demonstrates the full monitor -> OutputBus ->
+Subscription -> HistoryHandle pipeline. Live mode is intentionally poll-based
+for reliability on long-lived remote sessions.
 ```
 
 Expected output (live mode):

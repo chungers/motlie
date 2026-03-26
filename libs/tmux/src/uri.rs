@@ -269,12 +269,8 @@ impl SshConfig {
         if self.timeout() != std::time::Duration::from_secs(10) {
             nassh_params.push(("timeout", self.timeout().as_secs().to_string()));
         }
-        if self.inactivity_timeout() != None {
-            let val = match self.inactivity_timeout() {
-                Some(d) => d.as_secs().to_string(),
-                None => "0".to_string(),
-            };
-            nassh_params.push(("inactivity-timeout", val));
+        if let Some(timeout) = self.inactivity_timeout() {
+            nassh_params.push(("inactivity-timeout", timeout.as_secs().to_string()));
         }
         if self.keepalive_interval() != Some(std::time::Duration::from_secs(30)) {
             let val = match self.keepalive_interval() {

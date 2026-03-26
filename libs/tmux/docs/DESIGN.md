@@ -2634,7 +2634,8 @@ Parameter names align with OpenSSH `ssh_config(5)` where an equivalent exists:
 | Parameter | ssh_config Equivalent | Maps to | Default |
 |---|---|---|---|
 | `host-key-policy` | `StrictHostKeyChecking` | `HostKeyPolicy` | `verify` |
-| `timeout` | `ConnectTimeout` | `SshConfig::timeout` (seconds) | `10` |
+| `timeout` | `ConnectTimeout` | `SshConfig::timeout` (seconds, per-command exec/connect timeout) | `10` |
+| `inactivity-timeout` | — | `SshConfig::inactivity_timeout` (seconds, 0=unlimited) | unlimited |
 | `keepalive` | `ServerAliveInterval` | `SshConfig::keepalive_interval` (seconds, 0=off) | `30` |
 | `socket-name` | — (tmux-specific) | `TmuxSocket::Name(...)` | none |
 | `identity-file` | `IdentityFile` | `SshConfig::identity_file` (absolute path) | none (agent auth) |
@@ -2678,6 +2679,7 @@ pub struct SshConfig {
     user: String,
     host_key_policy: HostKeyPolicy,
     timeout: Duration,
+    inactivity_timeout: Option<Duration>,
     keepalive_interval: Option<Duration>,
     socket: Option<TmuxSocket>,
     identity_file: Option<PathBuf>,     // DC26
@@ -2690,6 +2692,7 @@ impl SshConfig {
     pub fn with_port(self, port: u16) -> Self;
     pub fn with_host_key_policy(self, policy: HostKeyPolicy) -> Self;
     pub fn with_timeout(self, timeout: Duration) -> Self;
+    pub fn with_inactivity_timeout(self, timeout: Option<Duration>) -> Self;
     pub fn with_keepalive(self, interval: Option<Duration>) -> Self;
     pub fn with_socket(self, socket: TmuxSocket) -> Self;  // NEW
 
