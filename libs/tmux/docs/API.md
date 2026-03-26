@@ -175,6 +175,7 @@ let config = SshConfig::new("server.example.com", "deploy")
     .with_port(22)                                          // default: 22
     .with_host_key_policy(HostKeyPolicy::Verify)            // default: Verify
     .with_timeout(std::time::Duration::from_secs(10))       // default: 10s
+    .with_inactivity_timeout(None)                          // default: unlimited
     .with_keepalive(Some(std::time::Duration::from_secs(30))); // default: 30s
 
 let ssh = SshTransport::connect(config).await?;
@@ -225,9 +226,12 @@ if ssh.is_closed() {
 
 ### Characteristics
 
-- **Timeout**: `SshConfig::timeout` governs connection, authentication, and
+- **Exec timeout**: `SshConfig::timeout` governs connection, authentication, and
   each `exec()` call (channel open + exec + output collection are all inside
   one `tokio::time::timeout` boundary).
+- **Inactivity timeout**: `SshConfig::inactivity_timeout` governs how long an
+  SSH connection may sit idle before the client closes it. Default: `None`
+  because monitor/stream use cases are expected to be long-lived.
 - **Keepalive**: `SshConfig::keepalive_interval` sends SSH keepalives.
   `None` disables. Local/Mock have no equivalent (not applicable).
 - **Concurrency**: The SSH handle mutex is held only during
@@ -267,7 +271,9 @@ use motlie_tmux::SshConfig;
 let cfg = SshConfig::parse("ssh://deploy@prod-server")?;
 
 // With port and parameters
-let cfg = SshConfig::parse("ssh://deploy@prod:2222?host-key-policy=tofu&timeout=30")?;
+let cfg = SshConfig::parse(
+    "ssh://deploy@prod:2222?host-key-policy=tofu&timeout=30&inactivity-timeout=120"
+)?;
 
 // Nassh-style parameters in userinfo
 let cfg = SshConfig::parse("ssh://deploy;host-key-policy=tofu;timeout=30@prod")?;
@@ -298,6 +304,7 @@ let cfg: SshConfig = "ssh://deploy@prod:2222".parse()?;
 |-----------|--------|---------|-------------|
 | `host-key-policy` | `verify`, `tofu`, `insecure` | `verify` | SSH host key verification policy |
 | `timeout` | integer seconds (> 0) | `10` | Per-command execution timeout |
+| `inactivity-timeout` | integer seconds (0 = unlimited) | unlimited | SSH connection idle timeout for long-lived shells/monitors |
 | `keepalive` | integer seconds (0 = off) | `30` | SSH keepalive interval |
 | `socket-name` | `[A-Za-z0-9._-]+` | none | Tmux socket name (`tmux -L`) |
 | `identity-file` | absolute path | none | SSH private key file (query-only, DC26) |
@@ -367,8 +374,10 @@ let sessions = host.list_sessions().await?;
 // Remote — requires user, uses SshTransport
 let host = SshConfig::parse("ssh://deploy@prod-server")?.connect().await?;
 
-// With timeout and policy
-let host = SshConfig::parse("ssh://deploy;host-key-policy=tofu@prod?timeout=30")?
+// With separate exec and inactivity timeouts
+let host = SshConfig::parse(
+    "ssh://deploy;host-key-policy=tofu@prod?timeout=30&inactivity-timeout=120"
+)?
     .connect()
     .await?;
 
@@ -2116,7 +2125,7 @@ assert!(issues.is_empty());
 | `TransportKind` | Enum: Local, Ssh, Mock — static dispatch |
 | `LocalTransport` | Subprocess exec, configurable timeout |
 | `SshTransport` | russh 0.46, ssh-agent or key-file auth (DC26); `connect()`, `is_closed()` |
-| `SshConfig` | host, port, user, host_key_policy, timeout, keepalive_interval, socket; `parse()`, `to_uri_string()`, `connect()`, `Display`/`FromStr` |
+| `SshConfig` | host, port, user, host_key_policy, timeout, inactivity_timeout, keepalive_interval, socket; `parse()`, `to_uri_string()`, `connect()`, `Display`/`FromStr` |
 | `MockTransport` | Canned responses; `with_response()`, `with_default()`, `with_file()`, `with_dir()`, `with_shell_sequence()` |
 | `HostKeyPolicy` | Enum: Verify (default), TrustFirstUse, Insecure |
 | `TmuxSocket` | Enum: Name(String), Path(String) |

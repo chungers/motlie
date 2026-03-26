@@ -20,6 +20,7 @@ const CANONICAL_COMPONENTS: &[&str] = &["user", "host", "port"];
 const KNOWN_PARAMS: &[&str] = &[
     "host-key-policy",
     "timeout",
+    "inactivity-timeout",
     "keepalive",
     "socket-name",
     "identity-file",
@@ -171,6 +172,20 @@ impl SshConfig {
                     }
                     config = config.with_timeout(std::time::Duration::from_secs(secs));
                 }
+                "inactivity-timeout" => {
+                    let secs: u64 = value.parse().map_err(|_| {
+                        anyhow!(
+                            "invalid inactivity-timeout value '{}' (expected integer seconds)",
+                            value
+                        )
+                    })?;
+                    let timeout = if secs == 0 {
+                        None
+                    } else {
+                        Some(std::time::Duration::from_secs(secs))
+                    };
+                    config = config.with_inactivity_timeout(timeout);
+                }
                 "keepalive" => {
                     let secs: u64 = value.parse().map_err(|_| {
                         anyhow!(
@@ -253,6 +268,9 @@ impl SshConfig {
         }
         if self.timeout() != std::time::Duration::from_secs(10) {
             nassh_params.push(("timeout", self.timeout().as_secs().to_string()));
+        }
+        if let Some(timeout) = self.inactivity_timeout() {
+            nassh_params.push(("inactivity-timeout", timeout.as_secs().to_string()));
         }
         if self.keepalive_interval() != Some(std::time::Duration::from_secs(30)) {
             let val = match self.keepalive_interval() {
@@ -599,6 +617,7 @@ mod tests {
         assert_eq!(cfg.port(), 22);
         assert_eq!(*cfg.host_key_policy(), HostKeyPolicy::Verify);
         assert_eq!(cfg.timeout(), Duration::from_secs(10));
+        assert_eq!(cfg.inactivity_timeout(), None);
         assert_eq!(cfg.keepalive_interval(), Some(Duration::from_secs(30)));
         assert!(cfg.socket().is_none());
     }
@@ -622,6 +641,14 @@ mod tests {
             SshConfig::parse("ssh://deploy@prod?host-key-policy=tofu&timeout=30").unwrap();
         assert_eq!(*cfg.host_key_policy(), HostKeyPolicy::TrustFirstUse);
         assert_eq!(cfg.timeout(), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn parse_inactivity_timeout() {
+        let cfg =
+            SshConfig::parse("ssh://deploy@prod?inactivity-timeout=120&keepalive=15").unwrap();
+        assert_eq!(cfg.inactivity_timeout(), Some(Duration::from_secs(120)));
+        assert_eq!(cfg.keepalive_interval(), Some(Duration::from_secs(15)));
     }
 
     #[test]
@@ -855,6 +882,13 @@ mod tests {
         let cfg =
             SshConfig::new("host", "user").with_timeout(Duration::from_secs(30));
         assert_eq!(cfg.to_uri_string(), "ssh://user;timeout=30@host");
+    }
+
+    #[test]
+    fn to_uri_string_with_inactivity_timeout() {
+        let cfg = SshConfig::new("host", "user")
+            .with_inactivity_timeout(Some(Duration::from_secs(120)));
+        assert_eq!(cfg.to_uri_string(), "ssh://user;inactivity-timeout=120@host");
     }
 
     #[test]

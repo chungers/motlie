@@ -1374,6 +1374,7 @@ pub struct SshConfig {
     user: String,
     host_key_policy: HostKeyPolicy,
     timeout: std::time::Duration,
+    inactivity_timeout: Option<std::time::Duration>,
     keepalive_interval: Option<std::time::Duration>,
     socket: Option<TmuxSocket>,
     identity_file: Option<std::path::PathBuf>,
@@ -1389,6 +1390,7 @@ impl SshConfig {
             user: user.into(),
             host_key_policy: HostKeyPolicy::default(),
             timeout: std::time::Duration::from_secs(10),
+            inactivity_timeout: None,
             keepalive_interval: Some(std::time::Duration::from_secs(30)),
             socket: None,
             identity_file: None,
@@ -1415,6 +1417,16 @@ impl SshConfig {
     /// user commands.
     pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Set the SSH connection inactivity timeout.
+    ///
+    /// This controls how long the underlying SSH connection may remain idle
+    /// before the client closes it. Long-lived tmux monitoring is expected to
+    /// stay open while output is sparse, so the default is `None`.
+    pub fn with_inactivity_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
+        self.inactivity_timeout = timeout;
         self
     }
 
@@ -1498,6 +1510,10 @@ impl SshConfig {
 
     pub fn timeout(&self) -> std::time::Duration {
         self.timeout
+    }
+
+    pub fn inactivity_timeout(&self) -> Option<std::time::Duration> {
+        self.inactivity_timeout
     }
 
     pub fn keepalive_interval(&self) -> Option<std::time::Duration> {
@@ -1660,7 +1676,7 @@ impl SshTransport {
     /// or the agent has no identities (OC3).
     pub async fn connect(config: SshConfig) -> Result<Self> {
         let ssh_config = russh::client::Config {
-            inactivity_timeout: Some(config.timeout),
+            inactivity_timeout: config.inactivity_timeout,
             keepalive_interval: config.keepalive_interval,
             ..<_>::default()
         };
@@ -2452,6 +2468,7 @@ mod tests {
         assert_eq!(cfg.user(), "deploy");
         assert_eq!(*cfg.host_key_policy(), HostKeyPolicy::Verify);
         assert_eq!(cfg.timeout(), std::time::Duration::from_secs(10));
+        assert_eq!(cfg.inactivity_timeout(), None);
         assert_eq!(
             cfg.keepalive_interval(),
             Some(std::time::Duration::from_secs(30))
@@ -2465,14 +2482,35 @@ mod tests {
             .with_port(2222)
             .with_host_key_policy(HostKeyPolicy::Insecure)
             .with_timeout(std::time::Duration::from_secs(30))
+            .with_inactivity_timeout(Some(std::time::Duration::from_secs(90)))
             .with_keepalive(None)
             .with_socket(TmuxSocket::Name("test".into()))
             .unwrap();
         assert_eq!(cfg.port(), 2222);
         assert_eq!(*cfg.host_key_policy(), HostKeyPolicy::Insecure);
         assert_eq!(cfg.timeout(), std::time::Duration::from_secs(30));
+        assert_eq!(
+            cfg.inactivity_timeout(),
+            Some(std::time::Duration::from_secs(90))
+        );
         assert_eq!(cfg.keepalive_interval(), None);
         assert_eq!(cfg.socket(), Some(&TmuxSocket::Name("test".into())));
+    }
+
+    #[test]
+    fn ssh_exec_timeout_does_not_imply_inactivity_timeout() {
+        let cfg = SshConfig::new("host", "user")
+            .with_timeout(std::time::Duration::from_secs(45));
+        assert_eq!(cfg.timeout(), std::time::Duration::from_secs(45));
+        assert_eq!(
+            cfg.inactivity_timeout(),
+            None,
+            "exec timeout must stay independent from long-lived SSH idle timeout"
+        );
+        assert_eq!(
+            cfg.keepalive_interval(),
+            Some(std::time::Duration::from_secs(30))
+        );
     }
 
     #[test]
