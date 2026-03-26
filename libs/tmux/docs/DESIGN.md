@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-03-25 | @claude: DC33 — per-source coherent history rendering. Coalesce same-source chunks, add `RenderMode::PerSource`, per-source budgets. See [`docs/HISTORY.md`](./HISTORY.md). | DC28, DC33, History |
 | 2026-03-22 | @claude: Update Phase 5 section to reflect shipped DC32 split-screen REPL mode — replace "not in current scope" / generic `TuiSink` with shipped 5.1+5.2 status and binary-local consumer description. | Phase 5, DC32 |
 | 2026-03-22 | @codex: Add DC32 for the first TUI delivery: a split-screen REPL mirror mode with `tui on` / `tui off`. Keep the first mirror consumer binary-local instead of adding a core `SinkKind::Tui`, and stage full terminal-state mirroring after the transcript/history-oriented REPL cut. | DC32, Phase 5, TUI cross-reference |
 | 2026-03-21 | @claude: Update DC31 `ExecHandle` contract to match shipped API — `status()` is sync/infallible, `wait()` consumes self. | DC31 |
@@ -3226,6 +3227,29 @@ consumer surfaces:
 - Gap markers and omission markers make uncertainty explicit instead of silently
   pretending the transcript is complete.
 - External policy stays simple: “get latest context, infer, act.”
+
+### DC33: Per-Source Coherent History Rendering
+
+**Decision**: Multi-pane history rendering switches from a single interleaved
+timeline to per-source coherent sections. See [`docs/HISTORY.md`](./HISTORY.md)
+for full design.
+
+**Problem**: The DC28 interleaved timeline garbles multi-pane output — an LLM
+reading the context cannot reconstruct what happened in each pane because
+entries are arbitrarily interleaved by tmux `%output` frame timing.
+
+**Solution** (three phases):
+1. **Coalesce** consecutive same-source `%output` chunks into single entries
+   (reduces interleaving noise, no API change).
+2. **`RenderMode::PerSource`** groups entries by source and renders each as a
+   labeled section. Default stays `Interleaved` for backward compat.
+3. **Per-source budgets** — each source gets independent `max_entries` /
+   `max_render_chars` so a noisy pane cannot evict a quiet pane's context.
+
+**Impact on DC28**: The `HistoryOptions` struct gains a `render_mode` field.
+`HistoryHandle::render_text()` dispatches on it. `PollHistory` gains a
+matching `push_text_for_source()` + `RenderMode` option. Existing callers
+using `RenderMode::Interleaved` (the default) see no behavior change.
 
 ### DC29: Streaming Resilience, Discontinuity, and Resync
 
