@@ -327,3 +327,109 @@ Spinner word dictionaries completely eliminated.
 
 Result: heuristic filters match or exceed dictionary-based quality while being
 future-proof against agent vocabulary changes.
+
+## Phase 5: Library folding plan
+
+Move validated prototypes from `history_demo.rs` into the core library.
+
+### New module: `filter.rs`
+
+```rust
+pub trait ContentFilter: Send + Sync {
+    fn filter_line(&self, line: &str) -> Option<String>;
+    fn is_meaningful_batch(&self, lines: &[String]) -> bool;
+    fn is_prompt(&self, line: &str) -> bool;
+}
+```
+
+Heuristic detection functions (no dictionaries):
+
+| Function | Detection method | Stability |
+|----------|-----------------|-----------|
+| `is_spinner_line` | Non-ASCII symbol + space + `…` in text | High — structural, agent-independent |
+| `is_box_drawing_line` | All chars in box-drawing set | High — character set is stable |
+| `is_status_bar` | ≥2 `·`/`•` separated segments | High — universal TUI pattern |
+| `is_affordance_hint` | Short line + low alpha ratio or "esc to"/"ctrl+"/"tab to" | Medium — stable UI conventions |
+| `is_context_indicator` | "N% left/context/remaining" | Medium — common model UI pattern |
+| `is_bare_prompt` | Lone prompt char (❯ › $ %) | High — fundamental |
+
+Built-in filter types:
+
+| Type | Config | Use case |
+|------|--------|----------|
+| `RawFilter` | None | Debug, raw capture, build logs. Strips ANSI, keeps everything. |
+| `ShellFilter` | None | Plain shells, CI, deploy scripts. Drops empty lines. Prompt = `$`/`%`/`#`. |
+| `AgentTuiFilter` | `prompt_char: char` | Any agent TUI. One parameter: the prompt character. `AgentTuiFilter::claude_code()` = `❯`, `AgentTuiFilter::codex()` = `›`. Custom agents supply their own prompt char. |
+
+### Extend `sink.rs`: FlushPolicy + SourceAccumulator
+
+```rust
+pub enum FlushPolicy {
+    LineCount { min_lines: usize, max_wait: Duration },
+    Idle { idle_duration: Duration, max_wait: Duration },
+    PromptBoundary { max_wait: Duration, min_content_lines: usize },
+}
+```
+
+| Policy | Parameters | Use case |
+|--------|------------|----------|
+| `LineCount` | `min_lines=3`, `max_wait=10s` | Build output, log tailing, high-throughput streams. Regular cadence — flush every N lines or T seconds. |
+| `Idle` | `idle_duration=3s`, `max_wait=15s` | CI jobs, test runners, deploy scripts. Flush when output pauses (burst ends). Captures complete test results or build phases. |
+| `PromptBoundary` | `max_wait=30s`, `min_content_lines=1` | Interactive agents (Claude, Codex, shells). Waits for prompt to reappear after content. Produces complete Q&A turns. |
+
+`SourceAccumulator`: caller-driven per-source accumulator.
+
+```rust
+pub struct SourceAccumulator {
+    previous: HashMap<PaneAddress, String>,
+    pending_lines: Vec<String>,
+    last_flush: Instant,
+    last_change: Instant,
+    saw_prompt: bool,
+    filter: Box<dyn ContentFilter>,
+    policy: FlushPolicy,
+}
+
+impl SourceAccumulator {
+    pub fn new(name, baseline, filter, policy) -> Self;
+    pub fn ingest(&mut self, current: &HashMap<PaneAddress, String>) -> Option<String>;
+    pub fn flush_remaining(&mut self) -> Option<String>;
+}
+```
+
+`diff_new_lines(previous, current, filter)`: set-based diff with per-line
+filtering. Moved to `filter.rs` or `capture.rs`.
+
+### Recommended combinations by scenario
+
+| Scenario | Filter | Policy | Render | Notes |
+|----------|--------|--------|--------|-------|
+| Multi-agent supervisor | `AgentTuiFilter` | `PromptBoundary(30s)` | `PerSource` | Validated configuration. Coherent per-turn sections. |
+| Build log watcher | `ShellFilter` | `Idle(3s)` | `PerSource` | Each build target grouped. Flush between compiler phases. |
+| Test runner dashboard | `ShellFilter` | `Idle(2s)` | `PerSource` | Test output by session. Flush after each test batch. |
+| Live debug / raw watch | `RawFilter` | `LineCount(10)` | `Interleaved` | Rapid updates, raw content, temporal ordering. |
+| Single agent deep-watch | `AgentTuiFilter` | `PromptBoundary(30s)` | `Interleaved` | One agent, temporal ordering. Cleaned-up terminal log. |
+| Heterogeneous mix | Per-source: `AgentTuiFilter` for agents, `ShellFilter` for shells | `PromptBoundary` for agents, `Idle` for shells | `PerSource` | Different filters per pane type. |
+
+### What stays in the example after folding
+
+The example becomes ~200 lines of wiring:
+- Parse CLI args
+- Create filter + policy per source
+- Construct `SourceAccumulator` per source from library types
+- Poll loop: `target.capture_all()` → `acc.ingest()` → `history.push_text_for_source()`
+- Print rolling context
+
+All filter logic, heuristics, flush policies, and accumulation move to the library.
+
+### Re-exports from `lib.rs`
+
+```rust
+pub use filter::{
+    ContentFilter, RawFilter, ShellFilter, AgentTuiFilter,
+    is_spinner_line, is_box_drawing_line, is_status_bar,
+    is_tui_chrome, clean_line, diff_new_lines,
+};
+pub use sink::{FlushPolicy, SourceAccumulator};
+// Existing: PollHistory, RenderMode, HistoryHandle, etc.
+```
