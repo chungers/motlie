@@ -259,3 +259,48 @@ later (e.g. `--filter-tmux-claude=agent --filter-tmux=shell`).
 - Adversarial: single-source monitoring still works identically.
 - Backward compat: `RenderMode::Interleaved` produces identical output
   to the pre-change implementation.
+
+## Experiment Results
+
+Prototyped in `history_demo.rs` (not library code). Transcripts in `/tmp/`.
+
+### Best configuration found
+
+```
+--mode tail --render-mode per-source --filter codex --policy prompt
+--chars 6000 --entries 40
+```
+
+- **CodexFilter**: strips Codex spinner words (Kneading, Garnishing, Whirring,
+  Hatching, etc.), box-drawing, status bar chrome. `is_meaningful_batch` requires
+  at least one non-prompt content line to prevent empty flushes.
+- **PromptBoundaryPolicy**: waits for agent prompt (`›` for Codex, `❯` for
+  Claude) before flushing. Falls back to 30s max_wait. Produces complete
+  per-turn chunks.
+- **Per-source rendering**: each session rendered as `=== session ===` section.
+
+### Experiment progression
+
+| Run | Lines | Turns | Filter | Policy | Issues |
+|-----|-------|-------|--------|--------|--------|
+| v1 | 76 | 4 | none | line(3)/time(5s) | tmux session missing, TUI chrome |
+| v2 | 902 | 4 | none | line(3)/time(5s) | noisy, repeated tail excerpts |
+| v3 | 62 | 4 | codex | line(3)/time(5s) | too aggressive, responses filtered |
+| v4 | 1272 | 4 | codex | line(3)/time(5s) | both sessions captured, noise reduced |
+| v5 | 168 | 3 | codex | prompt(30s) | excellent coherence, complete turns |
+| exp1 | 219 | 6 | codex | prompt(30s) | long horizon works, some empty flushes |
+| exp2 | 122 | 4 | codex+tuned | prompt(30s) | minimal noise, clean per-turn output |
+
+### Key insights
+
+1. **PromptBoundary >> LineCount** for agent TUI sessions. Waiting for the
+   agent's prompt produces complete, coherent turns instead of fragmented
+   line-at-a-time drips.
+2. **Agent-specific filters are essential**. Codex and Claude Code have
+   different spinner words, status patterns, and prompt characters.
+3. **`is_meaningful_batch` prevents empty flushes**. Without it, the max_wait
+   fallback produces question-only entries with no answer.
+4. **Set-based diff + filter** works better than tail-excerpt diff for TUI
+   programs that redraw the whole screen.
+5. **TUI table rendering** is a remaining challenge — tables built incrementally
+   produce multiple partial renders as separate entries.

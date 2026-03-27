@@ -170,7 +170,11 @@ impl ContentFilter for ClaudeCodeFilter {
         }
     }
     fn is_meaningful_batch(&self, lines: &[String]) -> bool {
-        lines.iter().any(|l| l.trim().len() > 2)
+        // Require at least one line that isn't just a prompt/question
+        lines.iter().any(|l| {
+            let t = l.trim();
+            t.len() > 2 && !t.starts_with("❯ ") && !t.starts_with("› ")
+        })
     }
     fn is_prompt(&self, line: &str) -> bool {
         let t = line.trim();
@@ -197,6 +201,9 @@ impl CodexFilter {
         "Marinating",
         "Whirring",
         "Explored",
+        "Hatching",
+        "Composing",
+        "Polishing",
     ];
 
     /// Codex status bar / chrome fragments.
@@ -207,6 +214,10 @@ impl CodexFilter {
         "/ps to view",
         "/stop to close",
         "ctrl+o to expand",
+        "Explain this codebase",
+        "context left",
+        "gpt-5",
+        "tab to queue",
     ];
 
     fn is_chrome(trimmed: &str) -> bool {
@@ -250,7 +261,11 @@ impl ContentFilter for CodexFilter {
         }
     }
     fn is_meaningful_batch(&self, lines: &[String]) -> bool {
-        lines.iter().any(|l| l.trim().len() > 2)
+        // Require at least one line that isn't just a prompt/question
+        lines.iter().any(|l| {
+            let t = l.trim();
+            t.len() > 2 && !t.starts_with("› ") && !t.starts_with("❯ ")
+        })
     }
     fn is_prompt(&self, line: &str) -> bool {
         let t = line.trim();
