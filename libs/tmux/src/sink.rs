@@ -1298,6 +1298,218 @@ impl Subscription {
 }
 
 // ---------------------------------------------------------------------------
+// DC33 Phase 4/5 — FlushPolicy + SourceAccumulator
+// ---------------------------------------------------------------------------
+
+/// Flush policy for [`SourceAccumulator`] — controls when accumulated lines
+/// are committed as a history entry.
+#[derive(Debug, Clone)]
+pub enum FlushPolicy {
+    /// Flush after `min_lines` accumulate, or after `max_wait` with any content.
+    /// Good for build output, log tailing, high-throughput streams.
+    LineCount {
+        min_lines: usize,
+        max_wait: std::time::Duration,
+    },
+
+    /// Flush when content stops changing for `idle_duration`.
+    /// Good for CI jobs, test runners, deploy scripts — output arrives in bursts.
+    Idle {
+        idle_duration: std::time::Duration,
+        max_wait: std::time::Duration,
+    },
+
+    /// Flush when a prompt line appears after content, indicating the agent
+    /// finished its turn. Falls back to `max_wait` if no prompt is detected.
+    /// Best for interactive agent sessions (Claude Code, Codex, shells).
+    PromptBoundary {
+        max_wait: std::time::Duration,
+        min_content_lines: usize,
+    },
+}
+
+impl FlushPolicy {
+    /// Convenience: `LineCount { min_lines: 3, max_wait: 10s }`.
+    pub fn line_count(min_lines: usize, max_wait: std::time::Duration) -> Self {
+        FlushPolicy::LineCount { min_lines, max_wait }
+    }
+
+    /// Convenience: `Idle { idle_duration: 3s, max_wait: 15s }`.
+    pub fn idle(idle_duration: std::time::Duration, max_wait: std::time::Duration) -> Self {
+        FlushPolicy::Idle { idle_duration, max_wait }
+    }
+
+    /// Convenience: `PromptBoundary { max_wait: 30s, min_content_lines: 1 }`.
+    pub fn prompt_boundary(max_wait: std::time::Duration, min_content_lines: usize) -> Self {
+        FlushPolicy::PromptBoundary { max_wait, min_content_lines }
+    }
+
+    /// Evaluate whether a flush should happen given the current state.
+    pub fn should_flush(
+        &self,
+        pending: &[String],
+        time_since_flush: std::time::Duration,
+        time_since_last_change: std::time::Duration,
+        saw_prompt: bool,
+    ) -> bool {
+        if pending.is_empty() {
+            return false;
+        }
+        match self {
+            FlushPolicy::LineCount { min_lines, max_wait } => {
+                pending.len() >= *min_lines || time_since_flush >= *max_wait
+            }
+            FlushPolicy::Idle { idle_duration, max_wait } => {
+                time_since_last_change >= *idle_duration || time_since_flush >= *max_wait
+            }
+            FlushPolicy::PromptBoundary { max_wait, min_content_lines } => {
+                if saw_prompt && pending.len() >= *min_content_lines {
+                    return true;
+                }
+                time_since_flush >= *max_wait
+            }
+        }
+    }
+}
+
+/// Per-source buffered content collection with pluggable filter and flush policy.
+///
+/// Each source (tmux session/pane) gets its own accumulator. The caller polls
+/// pane content via `Target::capture_all()` and feeds it to `ingest()`. The
+/// accumulator diffs against the previous capture, applies the content filter,
+/// and flushes accumulated lines according to the flush policy.
+///
+/// ```rust,ignore
+/// use motlie_tmux::{AgentTuiFilter, FlushPolicy, SourceAccumulator};
+///
+/// let baseline = target.capture_all().await?;
+/// let mut acc = SourceAccumulator::new(
+///     "my-session",
+///     baseline,
+///     Box::new(AgentTuiFilter::codex()),
+///     FlushPolicy::prompt_boundary(Duration::from_secs(30), 1),
+/// );
+///
+/// // In polling loop:
+/// let current = target.capture_all().await?;
+/// if let Some(chunk) = acc.ingest(&current) {
+///     history.push_text_for_source("my-session", chunk);
+/// }
+/// ```
+pub struct SourceAccumulator {
+    #[allow(dead_code)]
+    name: String,
+    previous: std::collections::HashMap<crate::types::PaneAddress, String>,
+    pending_lines: Vec<String>,
+    last_flush: std::time::Instant,
+    last_change: std::time::Instant,
+    saw_prompt_since_flush: bool,
+    filter: Box<dyn crate::filter::ContentFilter>,
+    policy: FlushPolicy,
+}
+
+impl SourceAccumulator {
+    /// Create a new accumulator for a source.
+    ///
+    /// - `name`: label for this source (used for diagnostics)
+    /// - `baseline`: initial pane content from `capture_all()` (used as diff base)
+    /// - `filter`: content filter for this source
+    /// - `policy`: flush policy controlling when to commit
+    pub fn new(
+        name: &str,
+        baseline: std::collections::HashMap<crate::types::PaneAddress, String>,
+        filter: Box<dyn crate::filter::ContentFilter>,
+        policy: FlushPolicy,
+    ) -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            name: name.to_string(),
+            previous: baseline,
+            pending_lines: Vec::new(),
+            last_flush: now,
+            last_change: now,
+            saw_prompt_since_flush: false,
+            filter,
+            policy,
+        }
+    }
+
+    /// Feed new pane content. Diffs against previous, filters, accumulates.
+    /// Returns a flushed chunk if the policy triggers.
+    pub fn ingest(
+        &mut self,
+        current: &std::collections::HashMap<crate::types::PaneAddress, String>,
+    ) -> Option<String> {
+        if current == &self.previous {
+            return self.maybe_flush();
+        }
+
+        let mut pane_list: Vec<_> = current.iter().collect();
+        pane_list.sort_by_key(|(addr, _)| (addr.window, addr.pane));
+
+        for (addr, content) in pane_list {
+            let prev_content = self.previous.get(addr).map(String::as_str).unwrap_or("");
+            let new_lines = crate::filter::diff_new_lines(prev_content, content, &*self.filter);
+            for line in &new_lines {
+                if self.filter.is_prompt(line) {
+                    self.saw_prompt_since_flush = true;
+                }
+            }
+            if !new_lines.is_empty() {
+                self.pending_lines.extend(new_lines);
+                self.last_change = std::time::Instant::now();
+            }
+        }
+
+        self.previous = current.clone();
+        self.maybe_flush()
+    }
+
+    /// Force flush any remaining pending content.
+    pub fn flush_remaining(&mut self) -> Option<String> {
+        if self.pending_lines.is_empty() {
+            return None;
+        }
+        let chunk = self.pending_lines.join("\n");
+        self.pending_lines.clear();
+        self.last_flush = std::time::Instant::now();
+        self.saw_prompt_since_flush = false;
+        if chunk.trim().is_empty() { None } else { Some(format!("{}\n", chunk)) }
+    }
+
+    fn maybe_flush(&mut self) -> Option<String> {
+        if self.pending_lines.is_empty() {
+            return None;
+        }
+
+        let should = self.policy.should_flush(
+            &self.pending_lines,
+            self.last_flush.elapsed(),
+            self.last_change.elapsed(),
+            self.saw_prompt_since_flush,
+        );
+
+        if !should {
+            return None;
+        }
+
+        if !self.filter.is_meaningful_batch(&self.pending_lines) {
+            self.pending_lines.clear();
+            self.last_flush = std::time::Instant::now();
+            self.saw_prompt_since_flush = false;
+            return None;
+        }
+
+        let chunk = self.pending_lines.join("\n");
+        self.pending_lines.clear();
+        self.last_flush = std::time::Instant::now();
+        self.saw_prompt_since_flush = false;
+
+        if chunk.trim().is_empty() { None } else { Some(format!("{}\n", chunk)) }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 2c.3 — OutputBus
 // ---------------------------------------------------------------------------
 
