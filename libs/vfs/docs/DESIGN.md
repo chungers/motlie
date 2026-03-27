@@ -1,4 +1,4 @@
-# motlie-fuse: Transport-Agnostic FUSE Filesystem Library
+# motlie-vfs: Transport-Agnostic Virtual Filesystem Library
 
 ## Changelog
 
@@ -333,7 +333,7 @@ handle_op(tag, FsOp::Read { inode, .. })
 ## Crate Structure
 
 ```
-libs/fuse/
+libs/vfs/
 ├── Cargo.toml
 ├── docs/
 │   └── DESIGN.md                 # this document
@@ -640,44 +640,44 @@ Responses:
 
 ```bash
 # Inject a config file into the "defaults" layer at startup
-echo 'KEY=value' | motlie-fuse-ctl put defaults workspace /.env
+echo 'KEY=value' | motlie-vfs-ctl put defaults workspace /.env
 
 # Inject from a file
-motlie-fuse-ctl put defaults workspace /config.toml < config.toml
+motlie-vfs-ctl put defaults workspace /config.toml < config.toml
 
 # Create a high-priority hotpatch layer and override a file
-motlie-fuse-ctl layer hotpatch 100
-motlie-fuse-ctl put hotpatch workspace /src/config.rs < patched_config.rs
+motlie-vfs-ctl layer hotpatch 100
+motlie-vfs-ctl put hotpatch workspace /src/config.rs < patched_config.rs
 
 # List what's overlaid for the workspace mount
-motlie-fuse-ctl ls workspace
+motlie-vfs-ctl ls workspace
 # → /config.toml hotpatch 4821
 # → /.env defaults 42
 
 # Read back what's in the overlay
-motlie-fuse-ctl get defaults workspace /.env
+motlie-vfs-ctl get defaults workspace /.env
 # → KEY=value
 
 # Remove the hotpatch
-motlie-fuse-ctl rmlayer hotpatch
+motlie-vfs-ctl rmlayer hotpatch
 
 # List layers
-motlie-fuse-ctl layers
+motlie-vfs-ctl layers
 # → defaults 0 2
 # → alice 10 1
 ```
 
-The `motlie-fuse-ctl` CLI tool is a separate binary (not part of the library). It's a thin
+The `motlie-vfs-ctl` CLI tool is a separate binary (not part of the library). It's a thin
 wrapper that connects to the Unix socket and speaks the line protocol. It can be implemented
 in ~100 lines. For simple cases, `socat` works directly:
 
 ```bash
-echo -e "LAYERS" | socat - UNIX-CONNECT:/tmp/motlie-fuse-ctl.sock
+echo -e "LAYERS" | socat - UNIX-CONNECT:/tmp/motlie-vfs-ctl.sock
 
 # PUT with content (requires printf for binary-safe length prefix)
 content="KEY=value"
 printf "PUT defaults workspace /.env %d\n%s" ${#content} "$content" \
-  | socat - UNIX-CONNECT:/tmp/motlie-fuse-ctl.sock
+  | socat - UNIX-CONNECT:/tmp/motlie-vfs-ctl.sock
 ```
 
 ### Overlay Control: Frontend Architecture
@@ -699,14 +699,14 @@ CLI tool       curl       client   motlie-vmm daemon
 ```
 
 The library provides `MemOverlay` (always) + `ControlSocket` (feature-gated). Network
-frontends (HTTP, gRPC) are the caller's responsibility — they import `motlie-fuse` with
+frontends (HTTP, gRPC) are the caller's responsibility — they import `motlie-vfs` with
 `server-core`, obtain `server.overlay()`, and wrap it in their own transport. No library
 changes needed.
 
-**Example: HTTP/REST frontend (separate crate, not part of motlie-fuse):**
+**Example: HTTP/REST frontend (separate crate, not part of motlie-vfs):**
 
 ```rust
-use motlie_fuse::core::FsServer;
+use motlie_vfs::core::FsServer;
 use axum::{Router, extract::Path, body::Bytes, http::StatusCode};
 
 let server: Arc<FsServer> = /* ... */;
@@ -740,7 +740,7 @@ let app = Router::new()
 axum::serve(TcpListener::bind("0.0.0.0:9001").await?, app).await?;
 ```
 
-This turns motlie-fuse into a network file server with a REST API for content injection:
+This turns motlie-vfs into a network file server with a REST API for content injection:
 
 ```bash
 # Remote client injects an SSH key over the network
@@ -766,7 +766,7 @@ dynamic, mid-session credential management:
 
 ```bash
 # Mid-session: inject a deploy key (via control socket, HTTP, or in-process)
-motlie-fuse-ctl put credentials home /.ssh/id_deploy < deploy_key
+motlie-vfs-ctl put credentials home /.ssh/id_deploy < deploy_key
 # OR: curl -X PUT https://server:9001/overlay/credentials/home/.ssh/id_deploy --data-binary @deploy_key
 # OR: server.overlay().put("credentials", "home", "/.ssh/id_deploy", key_bytes)
 
@@ -774,12 +774,12 @@ motlie-fuse-ctl put credentials home /.ssh/id_deploy < deploy_key
 ssh -i ~/.ssh/id_deploy git@github.com   # works
 
 # Shadow an existing key (disk version hidden, overlay version served)
-motlie-fuse-ctl put credentials home /.ssh/id_ecdsa < ephemeral_key
+motlie-vfs-ctl put credentials home /.ssh/id_ecdsa < ephemeral_key
 # Guest reads /root/.ssh/id_ecdsa → gets ephemeral_key, not the on-disk version
 
 # Remove — original disk file reappears, synthetic files vanish
-motlie-fuse-ctl rm credentials home /.ssh/id_deploy    # gone
-motlie-fuse-ctl rm credentials home /.ssh/id_ecdsa     # disk version reappears
+motlie-vfs-ctl rm credentials home /.ssh/id_deploy    # gone
+motlie-vfs-ctl rm credentials home /.ssh/id_ecdsa     # disk version reappears
 ```
 
 **motlie-vmm integration:**
@@ -929,7 +929,7 @@ The framing layer is shared; the interpretation of the payload differs by compos
 The caller owns the transport and encoding. The library provides only the FS engine.
 
 ```rust
-use motlie_fuse::core::{FsServer, FsOp, FsResult};
+use motlie_vfs::core::{FsServer, FsOp, FsResult};
 
 let server = FsServer::builder()
     .mount("workspace", "/home/alice/projects".into(), false)
@@ -963,8 +963,8 @@ to the library.  The library never sees the `HandshakeMsg` enum -- it receives a
 that is already bound to a tag.
 
 ```rust
-use motlie_fuse::core::FsServer;
-use motlie_fuse::vsock::VsockConnectionHandler;
+use motlie_vfs::core::FsServer;
+use motlie_vfs::vsock::VsockConnectionHandler;
 
 let server = FsServer::builder()
     .mount("workspace", projects_dir.join(&username), false)
@@ -990,7 +990,7 @@ The guest agent opens a vsock connection, performs the VMM-level handshake, then
 hands the stream to the library for FUSE mounting.
 
 ```rust
-use motlie_fuse::vsock::VsockFuseMount;
+use motlie_vfs::vsock::VsockFuseMount;
 use tokio_vsock::VsockStream;
 
 // Guest agent: open vsock, do the vmm-level handshake
@@ -1008,9 +1008,9 @@ A standalone binary (separate crate) that uses the library to serve mounts over
 a Unix socket or TCP.
 
 ```rust
-use motlie_fuse::core::FsServer;
-use motlie_fuse::rpc::RpcServer;
-use motlie_fuse::codec::BincodeCodec;
+use motlie_vfs::core::FsServer;
+use motlie_vfs::rpc::RpcServer;
+use motlie_vfs::codec::BincodeCodec;
 use tokio::net::UnixListener;
 
 let server = FsServer::builder()
@@ -1023,7 +1023,7 @@ let server = FsServer::builder()
 let rpc = RpcServer::new(server, BincodeCodec);
 
 // Caller owns the listener
-let listener = UnixListener::bind("/tmp/motlie-fuse.sock")?;
+let listener = UnixListener::bind("/tmp/motlie-vfs.sock")?;
 loop {
     let (stream, _) = listener.accept().await?;
     let rpc = rpc.clone();
@@ -1037,12 +1037,12 @@ loop {
 ### Pattern 5: RPC Client -- Mount on Linux or macOS
 
 ```rust
-use motlie_fuse::rpc::RpcClient;
-use motlie_fuse::codec::BincodeCodec;
+use motlie_vfs::rpc::RpcClient;
+use motlie_vfs::codec::BincodeCodec;
 use tokio::net::UnixStream;
 
 // Connect to server
-let stream = UnixStream::connect("/tmp/motlie-fuse.sock").await?;
+let stream = UnixStream::connect("/tmp/motlie-vfs.sock").await?;
 
 // RpcClient handles Hello handshake and frame encode/decode
 let client = RpcClient::connect(stream, BincodeCodec, "workspace").await?;
@@ -1057,8 +1057,8 @@ fuser::mount2(client.into_fuse(), "/mnt/workspace", &[
 ### Pattern 6: RPC Client -- Remote Mount over TCP+TLS
 
 ```rust
-use motlie_fuse::rpc::RpcClient;
-use motlie_fuse::codec::BincodeCodec;
+use motlie_vfs::rpc::RpcClient;
+use motlie_vfs::codec::BincodeCodec;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
@@ -1075,7 +1075,7 @@ fuser::mount2(client.into_fuse(), "/Volumes/workspace", &[
 ### Pattern 7: Testing -- No FUSE, No Transport
 
 ```rust
-use motlie_fuse::core::{FsServer, FsOp, FsResult};
+use motlie_vfs::core::{FsServer, FsOp, FsResult};
 
 #[tokio::test]
 async fn test_read_write() {
@@ -1116,9 +1116,9 @@ async fn test_read_write() {
 ### Pattern 8: Testing -- RPC Over In-Memory Duplex (No FUSE)
 
 ```rust
-use motlie_fuse::core::FsServer;
-use motlie_fuse::rpc::{RpcServer, RpcClient};
-use motlie_fuse::codec::BincodeCodec;
+use motlie_vfs::core::FsServer;
+use motlie_vfs::rpc::{RpcServer, RpcClient};
+use motlie_vfs::codec::BincodeCodec;
 
 #[tokio::test]
 async fn test_rpc_round_trip() {
@@ -1151,10 +1151,10 @@ async fn test_rpc_round_trip() {
 ### Pattern 9: Overlay -- Startup Injection + Runtime Control Socket
 
 ```rust
-use motlie_fuse::core::FsServer;
-use motlie_fuse::rpc::RpcServer;
-use motlie_fuse::control::ControlSocket;
-use motlie_fuse::codec::BincodeCodec;
+use motlie_vfs::core::FsServer;
+use motlie_vfs::rpc::RpcServer;
+use motlie_vfs::control::ControlSocket;
+use motlie_vfs::codec::BincodeCodec;
 
 let server = FsServer::builder()
     .mount("workspace", "/home/alice/projects".into(), false)
@@ -1170,7 +1170,7 @@ overlay.put("defaults", "workspace", "/config.toml", config_bytes)?;
 
 // RPC server for FUSE clients
 let rpc = RpcServer::new(server.clone(), BincodeCodec);
-let listener = UnixListener::bind("/tmp/motlie-fuse.sock")?;
+let listener = UnixListener::bind("/tmp/motlie-vfs.sock")?;
 tokio::spawn(async move {
     loop {
         let (stream, _) = listener.accept().await.unwrap();
@@ -1181,14 +1181,14 @@ tokio::spawn(async move {
 
 // Control socket for runtime overlay management
 let ctl = ControlSocket::new(&server);
-ctl.listen("/tmp/motlie-fuse-ctl.sock".as_ref()).await?;
-// Now external tools can: motlie-fuse-ctl put hotpatch workspace /config.toml < new_config.toml
+ctl.listen("/tmp/motlie-vfs-ctl.sock".as_ref()).await?;
+// Now external tools can: motlie-vfs-ctl put hotpatch workspace /config.toml < new_config.toml
 ```
 
 ### Pattern 10: Overlay -- Direct Testing
 
 ```rust
-use motlie_fuse::core::{FsServer, FsOp, FsResult};
+use motlie_vfs::core::{FsServer, FsOp, FsResult};
 
 #[tokio::test]
 async fn test_overlay_shadows_disk() {
@@ -1290,12 +1290,12 @@ if not.
 
 ## Mapping to motlie-vmm Design Doc
 
-This section documents how motlie-fuse components map to the motlie-vmm architecture
+This section documents how motlie-vfs components map to the motlie-vmm architecture
 (sections 10-12 of `motlie/docs/motlie-vmm.md`).
 
 ### What the Library Extracts
 
-| motlie-vmm concept | motlie-fuse component | Notes |
+| motlie-vmm concept | motlie-vfs component | Notes |
 |---|---|---|
 | vsock FS server (~800 lines, §10) | `FsServer` (core) | Same job: tag→host_path routing, inode table, host FS ops |
 | `fs_loop(stream, vm, &tag)` in §10 | `VsockConnectionHandler::serve()` | Extracted + parameterized over stream type |
@@ -1317,14 +1317,14 @@ This section documents how motlie-fuse components map to the motlie-vmm architec
 
 ## VMM Guest Integration: vsock + Overlay
 
-This section documents how motlie-fuse integrates with the motlie-vmm guest agent over
+This section documents how motlie-vfs integrates with the motlie-vmm guest agent over
 vsock, including the full VM boot lifecycle and how the overlay enables selective in-memory
 content injection for specific paths within a pass-through mount.
 
 ### VM Boot Lifecycle (from Firecracker to FUSE mounts)
 
 The guest agent is the only custom binary inside the VM. It arrives over vsock at boot,
-never touches disk, and uses motlie-fuse for all FUSE operations. The boot sequence:
+never touches disk, and uses motlie-vfs for all FUSE operations. The boot sequence:
 
 ```
 Host (motlie-vmm daemon)                     Guest (Firecracker VM)
@@ -1381,14 +1381,14 @@ ensure_vm("alice")
   └─ VM ready, bridge SSH session
 ```
 
-### Guest Agent Code with motlie-fuse
+### Guest Agent Code with motlie-vfs
 
-The guest agent (~700 lines in the VMM doc) uses motlie-fuse's vsock composite on the
+The guest agent (~700 lines in the VMM doc) uses motlie-vfs's vsock composite on the
 client side. With the library, the FUSE mount code becomes a thin wrapper:
 
 ```rust
 // motlie-vmm-guest main.rs (inside the VM)
-use motlie_fuse::vsock::VsockFuseMount;
+use motlie_vfs::vsock::VsockFuseMount;
 
 const HOST_CID: u32 = 2;
 const VMM_PORT: u32 = 5000;
@@ -1409,10 +1409,10 @@ fn main() {
                 // 1. Connect to host vsock
                 let mut stream = vsock_connect(HOST_CID, VMM_PORT).unwrap();
 
-                // 2. VMM-level handshake (not part of motlie-fuse)
+                // 2. VMM-level handshake (not part of motlie-vfs)
                 send_handshake(&mut stream, &HandshakeMsg::Fs { tag: tag.clone() });
 
-                // 3. Hand the stream to motlie-fuse for FUSE mounting
+                // 3. Hand the stream to motlie-vfs for FUSE mounting
                 std::fs::create_dir_all(&guest_path).ok();
                 let fuse_mount = VsockFuseMount::new(stream, &tag);
                 let mut opts = vec![
@@ -1455,7 +1455,7 @@ fn main() {
 ```
 
 The boundary is clear:
-- **motlie-fuse** owns: `VsockFuseMount` (FUSE ↔ vsock bridge), frame encoding, `fuser` integration
+- **motlie-vfs** owns: `VsockFuseMount` (FUSE ↔ vsock bridge), frame encoding, `fuser` integration
 - **motlie-vmm guest** owns: vsock connect, `HandshakeMsg` handshake, control loop, mount orchestration
 - **motlie-vmm host** owns: vsock listener, `HandshakeMsg` dispatch, `FsServer` + overlay setup, control protocol
 
@@ -1468,8 +1468,8 @@ content that should never exist on disk.
 ```rust
 // Inside motlie-vmm daemon, during ensure_vm("alice"):
 
-use motlie_fuse::core::FsServer;
-use motlie_fuse::vsock::VsockConnectionHandler;
+use motlie_vfs::core::FsServer;
+use motlie_vfs::vsock::VsockConnectionHandler;
 
 // Build FsServer for this user's VM
 let server = FsServer::builder()
