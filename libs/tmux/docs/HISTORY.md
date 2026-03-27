@@ -304,3 +304,26 @@ Prototyped in `history_demo.rs` (not library code). Transcripts in `/tmp/`.
    programs that redraw the whole screen.
 5. **TUI table rendering** is a remaining challenge — tables built incrementally
    produce multiple partial renders as separate entries.
+
+### Heuristic filter experiment (exp3)
+
+Replaced dictionary-based filters with structural heuristics:
+
+| Heuristic | What it detects | Method |
+|-----------|----------------|--------|
+| `is_spinner_line` | Unicode symbol + space + ellipsis text | Structural: non-ASCII first char, space, rest contains `…` |
+| `is_box_drawing_line` | All box-drawing chars | Character set check |
+| `is_status_bar` | Multiple `·`/`•` separated segments | Segment count ≥ 2 |
+| `is_affordance_hint` | Short UI hints | Length < 40 + low alpha ratio, or contains "esc to"/"ctrl+"/"tab to" |
+| `is_context_indicator` | "N% left/context/remaining" | Substring match on percentage patterns |
+| `is_bare_prompt` | Lone prompt char | Exact match |
+
+The only agent-specific parameter is `prompt_char` (❯ for Claude, › for Codex).
+Spinner word dictionaries completely eliminated.
+
+| Run | Lines | Turns | Filter | Policy | Issues |
+|-----|-------|-------|--------|--------|--------|
+| exp3 | 204 | 4 | heuristic | prompt(30s) | clean, no spinner leaks, minor tool-use status leak |
+
+Result: heuristic filters match or exceed dictionary-based quality while being
+future-proof against agent vocabulary changes.

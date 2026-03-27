@@ -22,78 +22,127 @@ use std::time::{Duration, Instant};
 // ---------------------------------------------------------------------------
 // ContentFilter — pluggable per-source content filtering (prototype)
 //
-// Each agent TUI has its own chrome patterns (spinners, status bars, etc.)
-// that change across versions. Filters are agent-specific and expected to
-// evolve. The trait provides a stable interface; implementations are the
-// volatile part.
+// Heuristic-based: detects TUI chrome by structural patterns (symbol
+// positions, line composition, segment counts) rather than dictionaries
+// of specific words. Agent-specific knowledge is limited to the prompt
+// character, which is stable and version-coupled.
 // ---------------------------------------------------------------------------
 
 trait ContentFilter {
-    /// Filter a single line. Returns Some(cleaned) to keep, None to discard.
     fn filter_line(&self, line: &str) -> Option<String>;
-
-    /// After collecting filtered lines, decide if the batch is worth recording.
     fn is_meaningful_batch(&self, lines: &[String]) -> bool;
-
-    /// Semantic hint: does this line indicate the agent is waiting for user input?
-    /// Used by PromptBoundary flush policy to detect turn boundaries.
     #[allow(unused_variables)]
     fn is_prompt(&self, line: &str) -> bool { false }
 }
 
-// --- Shared chrome detection helpers ---
+// --- Structural heuristics (no dictionaries) ---
+
+/// Strip ANSI and normalize. Returns None if empty.
+fn clean_line(line: &str) -> Option<String> {
+    let clean = strip_ansi(line).replace('\r', "");
+    let trimmed = clean.trim_end().to_string();
+    if trimmed.trim().is_empty() { None } else { Some(trimmed) }
+}
 
 /// Lines composed entirely of box-drawing / separator characters.
 fn is_box_drawing_line(trimmed: &str) -> bool {
     trimmed.len() > 3
-        && trimmed
-            .chars()
-            .all(|c| "─━═│┃┌┐└┘├┤┬┴┼╭╮╰╯-=+|".contains(c))
+        && trimmed.chars().all(|c| "─━═│┃┌┐└┘├┤┬┴┼╭╮╰╯-=+|".contains(c))
 }
 
-/// Lines that are just a bare prompt character with no content.
+/// Lines that are just a bare prompt character.
 fn is_bare_prompt(trimmed: &str) -> bool {
     trimmed == "❯" || trimmed == "›" || trimmed == "$" || trimmed == "%"
 }
 
-/// Strip ANSI and normalize a raw line. Returns None if empty after cleaning.
-fn clean_line(line: &str) -> Option<String> {
-    let clean = strip_ansi(line).replace('\r', "");
-    let trimmed = clean.trim_end().to_string();
-    if trimmed.trim().is_empty() {
-        None
-    } else {
-        Some(trimmed)
+/// Spinner line: non-ASCII symbol at position 0, space, then text ending
+/// in ellipsis (…) or containing one. Catches any spinner word without
+/// needing a dictionary.
+///
+/// Matches: "· Thinking…", "✻ Kneading…", "⏺ Searching for 1 pattern…",
+///          "• Working (3s • esc to interrupt)"
+fn is_spinner_line(trimmed: &str) -> bool {
+    let mut chars = trimmed.chars();
+    let first = match chars.next() {
+        Some(c) => c,
+        None => return false,
+    };
+    // Must be a non-ASCII, non-alphanumeric symbol (Unicode symbols like ·✻✶⏺•)
+    if first.is_ascii() || first.is_alphanumeric() {
+        return false;
     }
+    // Must be followed by a space
+    if chars.next() != Some(' ') {
+        return false;
+    }
+    // Rest must contain ellipsis — the universal "in progress" indicator
+    let rest = &trimmed[first.len_utf8() + 1..];
+    rest.contains('…')
 }
 
-// --- RawFilter: passes everything, strips ANSI only ---
+/// Status bar: multiple ·-separated or •-separated short segments.
+/// Matches: "9 background terminals running · /ps to view · /stop to close"
+///          "gpt-5.4 default · 23% left · ~/projects/claude-tmux"
+fn is_status_bar(trimmed: &str) -> bool {
+    let sep_count = trimmed.matches(" · ").count()
+        + trimmed.matches(" • ").count();
+    sep_count >= 2
+}
 
+/// Short affordance hint: lines under 30 chars that are mostly non-alpha
+/// (keyboard hints like "esc to interrupt", "? for shortcuts").
+fn is_affordance_hint(trimmed: &str) -> bool {
+    if trimmed.len() > 40 || trimmed.len() < 3 {
+        return false;
+    }
+    let alpha_count = trimmed.chars().filter(|c| c.is_alphabetic()).count();
+    let total = trimmed.chars().count();
+    // Mostly non-alpha or very short common UI hints
+    if total > 0 && (alpha_count as f64 / total as f64) < 0.5 {
+        return true;
+    }
+    // Known stable UI affordance patterns (these are universal TUI conventions,
+    // not agent-specific dictionaries)
+    let affordances = ["esc to", "ctrl+", "tab to", "? for"];
+    affordances.iter().any(|a| trimmed.to_lowercase().contains(a))
+}
+
+/// Context/model indicator: lines with percentage + "left"/"context"/"remaining",
+/// or lines matching "model_name · N% left · path" pattern.
+fn is_context_indicator(trimmed: &str) -> bool {
+    // "N% left" or "N% context" or "N% remaining"
+    let lower = trimmed.to_lowercase();
+    if lower.contains("% left") || lower.contains("% context") || lower.contains("% remaining") {
+        return true;
+    }
+    false
+}
+
+/// Combined heuristic: is this line TUI chrome?
+fn is_tui_chrome(trimmed: &str) -> bool {
+    is_box_drawing_line(trimmed)
+        || is_bare_prompt(trimmed)
+        || is_spinner_line(trimmed)
+        || is_status_bar(trimmed)
+        || is_affordance_hint(trimmed)
+        || is_context_indicator(trimmed)
+}
+
+// --- Filter implementations ---
+
+/// Passes everything through, strips ANSI only.
 struct RawFilter;
-
 impl ContentFilter for RawFilter {
-    fn filter_line(&self, line: &str) -> Option<String> {
-        clean_line(line)
-    }
-    fn is_meaningful_batch(&self, lines: &[String]) -> bool {
-        !lines.is_empty()
-    }
-    fn is_prompt(&self, line: &str) -> bool {
-        is_bare_prompt(line.trim())
-    }
+    fn filter_line(&self, line: &str) -> Option<String> { clean_line(line) }
+    fn is_meaningful_batch(&self, lines: &[String]) -> bool { !lines.is_empty() }
+    fn is_prompt(&self, line: &str) -> bool { is_bare_prompt(line.trim()) }
 }
 
-// --- ShellFilter: plain shell sessions ---
-
+/// Plain shell sessions.
 struct ShellFilter;
-
 impl ContentFilter for ShellFilter {
-    fn filter_line(&self, line: &str) -> Option<String> {
-        clean_line(line)
-    }
-    fn is_meaningful_batch(&self, lines: &[String]) -> bool {
-        !lines.is_empty()
-    }
+    fn filter_line(&self, line: &str) -> Option<String> { clean_line(line) }
+    fn is_meaningful_batch(&self, lines: &[String]) -> bool { !lines.is_empty() }
     fn is_prompt(&self, line: &str) -> bool {
         let t = line.trim();
         t.ends_with('$') || t.ends_with('%') || t.ends_with('#')
@@ -101,175 +150,42 @@ impl ContentFilter for ShellFilter {
     }
 }
 
-// --- ClaudeCodeFilter: Claude Code CLI TUI ---
-//
-// Chrome patterns specific to Claude Code's terminal UI.
-// These will change as Claude Code evolves.
-
-struct ClaudeCodeFilter;
-
-impl ClaudeCodeFilter {
-    /// Claude Code spinner prefixes and their activity words.
-    const SPINNER_CHARS: &[char] = &['·', '✻', '✶', '✽', '✢', '✳', '⏺', '•'];
-    const SPINNER_WORDS: &[&str] = &[
-        "Thinking",
-        "Working",
-        "Searching",
-        "Reading",
-        "Writing",
-        "Analyzing",
-        "Whirring",
-    ];
-
-    /// Claude Code status bar / chrome fragments.
-    const CHROME_PATTERNS: &[&str] = &[
-        "esc to interrupt",
-        "? for shortcuts",
-        "ctrl+o to expand",
-        "Auto-updating",
-    ];
-
-    fn is_chrome(trimmed: &str) -> bool {
-        if is_box_drawing_line(trimmed) || is_bare_prompt(trimmed) {
-            return true;
-        }
-
-        // Spinner lines: "· Thinking…", "⏺ Searching for 1 pattern…"
-        if let Some(first) = trimmed.chars().next() {
-            if Self::SPINNER_CHARS.contains(&first) {
-                let rest = trimmed[first.len_utf8()..].trim();
-                if rest.ends_with('…')
-                    || Self::SPINNER_WORDS
-                        .iter()
-                        .any(|w| rest.starts_with(w))
-                {
-                    return true;
-                }
-            }
-        }
-
-        // Status bar patterns
-        if Self::CHROME_PATTERNS
-            .iter()
-            .any(|p| trimmed.contains(p))
-        {
-            return true;
-        }
-
-        false
-    }
+/// Agent TUI filter — uses structural heuristics, no word dictionaries.
+/// The only agent-specific parameter is the prompt character.
+struct AgentTuiFilter {
+    prompt_char: char,
 }
 
-impl ContentFilter for ClaudeCodeFilter {
+impl AgentTuiFilter {
+    fn claude_code() -> Self { Self { prompt_char: '❯' } }
+    fn codex() -> Self { Self { prompt_char: '›' } }
+}
+
+impl ContentFilter for AgentTuiFilter {
     fn filter_line(&self, line: &str) -> Option<String> {
         let trimmed = clean_line(line)?;
-        if ClaudeCodeFilter::is_chrome(&trimmed) {
-            None
-        } else {
-            Some(trimmed)
+        if is_tui_chrome(&trimmed) {
+            return None;
         }
+        Some(trimmed)
     }
+
     fn is_meaningful_batch(&self, lines: &[String]) -> bool {
-        // Require at least one line that isn't just a prompt/question
+        // At least one line that isn't just a user prompt/question
+        let prompt_prefix = format!("{} ", self.prompt_char);
         lines.iter().any(|l| {
             let t = l.trim();
-            t.len() > 2 && !t.starts_with("❯ ") && !t.starts_with("› ")
+            t.len() > 2
+                && !t.starts_with(&prompt_prefix)
+                && !t.starts_with("❯ ")
+                && !t.starts_with("› ")
         })
     }
+
     fn is_prompt(&self, line: &str) -> bool {
         let t = line.trim();
-        t.starts_with("❯ ") || t == "❯"
-    }
-}
-
-// --- CodexFilter: OpenAI Codex CLI TUI ---
-//
-// Chrome patterns specific to Codex's terminal UI.
-// These will change as Codex evolves.
-
-struct CodexFilter;
-
-impl CodexFilter {
-    /// Codex spinner / activity prefixes.
-    const SPINNER_CHARS: &[char] = &['·', '✻', '✶', '✽', '✢', '✳', '⏺', '•'];
-    const SPINNER_WORDS: &[&str] = &[
-        "Kneading",
-        "Garnishing",
-        "Beboppin",
-        "Propagating",
-        "Simmering",
-        "Marinating",
-        "Whirring",
-        "Explored",
-        "Hatching",
-        "Composing",
-        "Polishing",
-    ];
-
-    /// Codex status bar / chrome fragments.
-    const CHROME_PATTERNS: &[&str] = &[
-        "esc to interrupt",
-        "? for shortcuts",
-        "background terminals running",
-        "/ps to view",
-        "/stop to close",
-        "ctrl+o to expand",
-        "Explain this codebase",
-        "context left",
-        "gpt-5",
-        "tab to queue",
-    ];
-
-    fn is_chrome(trimmed: &str) -> bool {
-        if is_box_drawing_line(trimmed) || is_bare_prompt(trimmed) {
-            return true;
-        }
-
-        // Spinner lines
-        if let Some(first) = trimmed.chars().next() {
-            if Self::SPINNER_CHARS.contains(&first) {
-                let rest = trimmed[first.len_utf8()..].trim();
-                if rest.ends_with('…')
-                    || Self::SPINNER_WORDS
-                        .iter()
-                        .any(|w| rest.starts_with(w))
-                {
-                    return true;
-                }
-            }
-        }
-
-        // Status bar patterns
-        if Self::CHROME_PATTERNS
-            .iter()
-            .any(|p| trimmed.contains(p))
-        {
-            return true;
-        }
-
-        false
-    }
-}
-
-impl ContentFilter for CodexFilter {
-    fn filter_line(&self, line: &str) -> Option<String> {
-        let trimmed = clean_line(line)?;
-        if CodexFilter::is_chrome(&trimmed) {
-            None
-        } else {
-            Some(trimmed)
-        }
-    }
-    fn is_meaningful_batch(&self, lines: &[String]) -> bool {
-        // Require at least one line that isn't just a prompt/question
-        lines.iter().any(|l| {
-            let t = l.trim();
-            t.len() > 2 && !t.starts_with("› ") && !t.starts_with("❯ ")
-        })
-    }
-    fn is_prompt(&self, line: &str) -> bool {
-        let t = line.trim();
-        t.starts_with("› ") || t == "›"
+        let prefix = format!("{} ", self.prompt_char);
+        t.starts_with(&prefix) || t == &self.prompt_char.to_string()
     }
 }
 
@@ -285,8 +201,8 @@ fn make_filter(mode: FilterMode) -> Box<dyn ContentFilter> {
     match mode {
         FilterMode::Raw => Box::new(RawFilter),
         FilterMode::Shell => Box::new(ShellFilter),
-        FilterMode::ClaudeCode => Box::new(ClaudeCodeFilter),
-        FilterMode::Codex => Box::new(CodexFilter),
+        FilterMode::ClaudeCode => Box::new(AgentTuiFilter::claude_code()),
+        FilterMode::Codex => Box::new(AgentTuiFilter::codex()),
     }
 }
 
