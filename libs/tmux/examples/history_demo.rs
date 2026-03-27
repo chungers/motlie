@@ -118,6 +118,7 @@ impl ClaudeCodeFilter {
         "Reading",
         "Writing",
         "Analyzing",
+        "Whirring",
     ];
 
     /// Claude Code status bar / chrome fragments.
@@ -194,6 +195,8 @@ impl CodexFilter {
         "Propagating",
         "Simmering",
         "Marinating",
+        "Whirring",
+        "Explored",
     ];
 
     /// Codex status bar / chrome fragments.
@@ -776,7 +779,6 @@ async fn run_live(
 
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             let mut tick = 0u64;
-            let mut last_rendered = String::new();
 
             loop {
                 tokio::select! {
@@ -786,18 +788,18 @@ async fn run_live(
 
                         let current_a = target_a.capture_all().await?;
                         if let Some(chunk) = acc_a.ingest(&current_a) {
+                            // Print delta as it flushes — shows what was captured
+                            println!("[t={}s] {} flushed:", tick, session_a);
+                            println!("{}", chunk.trim_end());
+                            println!();
                             history.push_text_for_source(session_a, chunk);
                         }
                         let current_b = target_b.capture_all().await?;
                         if let Some(chunk) = acc_b.ingest(&current_b) {
+                            println!("[t={}s] {} flushed:", tick, session_b);
+                            println!("{}", chunk.trim_end());
+                            println!();
                             history.push_text_for_source(session_b, chunk);
-                        }
-
-                        let rendered = history.render_text();
-                        if !rendered.is_empty() && rendered != last_rendered {
-                            println!("=== rolling context (t={}s) ===", tick);
-                            println!("{}", rendered);
-                            last_rendered = rendered;
                         }
                     }
                 }
@@ -811,8 +813,10 @@ async fn run_live(
                 history.push_text_for_source(session_b, chunk);
             }
 
+            println!("\n========== FINAL ROLLING CONTEXT ==========");
+            println!("{}", history.render_text());
             println!(
-                "\nFinal snapshot: entries={}, omitted_entries={}, rendered_chars={}",
+                "Stats: entries={}, omitted={}, chars={}",
                 history.len(),
                 history.omitted_entries(),
                 history.rendered_chars()
