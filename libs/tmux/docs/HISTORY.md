@@ -176,6 +176,71 @@ pub struct HistoryOptions {
 For backward compatibility, `global_max_render_chars` defaults to 0 (unlimited)
 and the existing `max_entries` / `max_render_chars` become per-source limits.
 
+### Phase 4: Pluggable content filtering
+
+**Scope**: `ContentFilter` trait + built-in impls. Prototype in example first,
+fold into library once validated.
+
+**Problem**: Raw pane content includes TUI chrome (spinners, status bars,
+box-drawing separators, progress indicators) that wastes context window.
+Different programs produce different kinds of noise — a plain shell needs
+minimal filtering while Claude Code needs aggressive chrome removal. The
+filtering strategy should be selectable per source.
+
+**Design**: Two-level filtering via a trait:
+
+```rust
+/// Filters raw pane content into meaningful text for history accumulation.
+pub trait ContentFilter: Send + Sync {
+    /// Filter a single line. Returns Some(cleaned_line) to keep, None to discard.
+    fn filter_line(&self, line: &str) -> Option<String>;
+
+    /// After collecting new lines through filter_line, decide if the batch
+    /// is meaningful enough to record. Prevents flushing spinner-only updates.
+    fn is_meaningful_batch(&self, new_lines: &[String]) -> bool;
+}
+```
+
+**Built-in implementations**:
+
+| Strategy | Line filtering | Batch filtering | Use case |
+|----------|---------------|-----------------|----------|
+| `RawFilter` | Strip ANSI only | Always meaningful | Debug, raw capture |
+| `ShellFilter` | Strip ANSI, drop empty lines | ≥1 non-empty line | Plain shell sessions |
+| `AgentFilter` | Strip ANSI, drop spinners/status/box-drawing/progress | ≥1 content line (not just chrome) | Claude Code, Codex, agent TUIs |
+
+**`AgentFilter` details**:
+
+Chrome detection heuristics (lines discarded):
+- Lines that are all box-drawing characters (`─━═│┃┌┐└┘` etc.)
+- Lines matching known status patterns: `esc to interrupt`, `? for shortcuts`,
+  `background terminals running`, `/ps to view`, spinner prefixes (`· ✻ ✶ ✽ ✢ ✳`)
+- Lines that are only whitespace after ANSI stripping
+- Short progress fragments (e.g. `Working (3s • esc to interrupt)`)
+
+Batch meaningfulness:
+- At least N content lines (lines that pass line filtering) must be present
+- Configurable threshold (default: 1 meaningful line)
+
+**Wiring into SourceAccumulator**:
+
+```rust
+struct SourceAccumulator<F: ContentFilter> {
+    filter: F,
+    // ... existing fields
+}
+```
+
+Each source can have a different filter. The example CLI exposes `--filter`
+with values `raw`, `shell`, `agent`. Different sessions can use different
+filters if needed.
+
+**Per-source filter assignment**:
+
+For the common case where all sources use the same filter, the CLI flag
+applies globally. For advanced use, per-source assignment could be added
+later (e.g. `--filter-tmux-claude=agent --filter-tmux=shell`).
+
 ## Non-goals
 
 - Timestamp-based ordering or merge-sort across sources. Arrival order within

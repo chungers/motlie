@@ -13,11 +13,486 @@
 
 use anyhow::{anyhow, Result};
 use motlie_tmux::{
-    has_visible_text, pane_tail_excerpt, CreateSessionOptions, HistoryOptions, KeySequence,
-    LabelFormat, PollHistory, SinkFilter, SplitPaneOptions, SshConfig,
+    has_visible_text, pane_tail_excerpt, strip_ansi, CreateSessionOptions, HistoryOptions,
+    KeySequence, LabelFormat, PollHistory, RenderMode, SinkFilter, SplitPaneOptions, SshConfig,
 };
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+// ---------------------------------------------------------------------------
+// ContentFilter — pluggable per-source content filtering (prototype)
+//
+// Each agent TUI has its own chrome patterns (spinners, status bars, etc.)
+// that change across versions. Filters are agent-specific and expected to
+// evolve. The trait provides a stable interface; implementations are the
+// volatile part.
+// ---------------------------------------------------------------------------
+
+trait ContentFilter {
+    /// Filter a single line. Returns Some(cleaned) to keep, None to discard.
+    fn filter_line(&self, line: &str) -> Option<String>;
+
+    /// After collecting filtered lines, decide if the batch is worth recording.
+    fn is_meaningful_batch(&self, lines: &[String]) -> bool;
+
+    /// Semantic hint: does this line indicate the agent is waiting for user input?
+    /// Used by PromptBoundary flush policy to detect turn boundaries.
+    #[allow(unused_variables)]
+    fn is_prompt(&self, line: &str) -> bool { false }
+}
+
+// --- Shared chrome detection helpers ---
+
+/// Lines composed entirely of box-drawing / separator characters.
+fn is_box_drawing_line(trimmed: &str) -> bool {
+    trimmed.len() > 3
+        && trimmed
+            .chars()
+            .all(|c| "─━═│┃┌┐└┘├┤┬┴┼╭╮╰╯-=+|".contains(c))
+}
+
+/// Lines that are just a bare prompt character with no content.
+fn is_bare_prompt(trimmed: &str) -> bool {
+    trimmed == "❯" || trimmed == "›" || trimmed == "$" || trimmed == "%"
+}
+
+/// Strip ANSI and normalize a raw line. Returns None if empty after cleaning.
+fn clean_line(line: &str) -> Option<String> {
+    let clean = strip_ansi(line).replace('\r', "");
+    let trimmed = clean.trim_end().to_string();
+    if trimmed.trim().is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+// --- RawFilter: passes everything, strips ANSI only ---
+
+struct RawFilter;
+
+impl ContentFilter for RawFilter {
+    fn filter_line(&self, line: &str) -> Option<String> {
+        clean_line(line)
+    }
+    fn is_meaningful_batch(&self, lines: &[String]) -> bool {
+        !lines.is_empty()
+    }
+    fn is_prompt(&self, line: &str) -> bool {
+        is_bare_prompt(line.trim())
+    }
+}
+
+// --- ShellFilter: plain shell sessions ---
+
+struct ShellFilter;
+
+impl ContentFilter for ShellFilter {
+    fn filter_line(&self, line: &str) -> Option<String> {
+        clean_line(line)
+    }
+    fn is_meaningful_batch(&self, lines: &[String]) -> bool {
+        !lines.is_empty()
+    }
+    fn is_prompt(&self, line: &str) -> bool {
+        let t = line.trim();
+        t.ends_with('$') || t.ends_with('%') || t.ends_with('#')
+            || t.starts_with("$ ") || t.starts_with("% ")
+    }
+}
+
+// --- ClaudeCodeFilter: Claude Code CLI TUI ---
+//
+// Chrome patterns specific to Claude Code's terminal UI.
+// These will change as Claude Code evolves.
+
+struct ClaudeCodeFilter;
+
+impl ClaudeCodeFilter {
+    /// Claude Code spinner prefixes and their activity words.
+    const SPINNER_CHARS: &[char] = &['·', '✻', '✶', '✽', '✢', '✳', '⏺', '•'];
+    const SPINNER_WORDS: &[&str] = &[
+        "Thinking",
+        "Working",
+        "Searching",
+        "Reading",
+        "Writing",
+        "Analyzing",
+    ];
+
+    /// Claude Code status bar / chrome fragments.
+    const CHROME_PATTERNS: &[&str] = &[
+        "esc to interrupt",
+        "? for shortcuts",
+        "ctrl+o to expand",
+        "Auto-updating",
+    ];
+
+    fn is_chrome(trimmed: &str) -> bool {
+        if is_box_drawing_line(trimmed) || is_bare_prompt(trimmed) {
+            return true;
+        }
+
+        // Spinner lines: "· Thinking…", "⏺ Searching for 1 pattern…"
+        if let Some(first) = trimmed.chars().next() {
+            if Self::SPINNER_CHARS.contains(&first) {
+                let rest = trimmed[first.len_utf8()..].trim();
+                if rest.ends_with('…')
+                    || Self::SPINNER_WORDS
+                        .iter()
+                        .any(|w| rest.starts_with(w))
+                {
+                    return true;
+                }
+            }
+        }
+
+        // Status bar patterns
+        if Self::CHROME_PATTERNS
+            .iter()
+            .any(|p| trimmed.contains(p))
+        {
+            return true;
+        }
+
+        false
+    }
+}
+
+impl ContentFilter for ClaudeCodeFilter {
+    fn filter_line(&self, line: &str) -> Option<String> {
+        let trimmed = clean_line(line)?;
+        if ClaudeCodeFilter::is_chrome(&trimmed) {
+            None
+        } else {
+            Some(trimmed)
+        }
+    }
+    fn is_meaningful_batch(&self, lines: &[String]) -> bool {
+        lines.iter().any(|l| l.trim().len() > 2)
+    }
+    fn is_prompt(&self, line: &str) -> bool {
+        let t = line.trim();
+        t.starts_with("❯ ") || t == "❯"
+    }
+}
+
+// --- CodexFilter: OpenAI Codex CLI TUI ---
+//
+// Chrome patterns specific to Codex's terminal UI.
+// These will change as Codex evolves.
+
+struct CodexFilter;
+
+impl CodexFilter {
+    /// Codex spinner / activity prefixes.
+    const SPINNER_CHARS: &[char] = &['·', '✻', '✶', '✽', '✢', '✳', '⏺', '•'];
+    const SPINNER_WORDS: &[&str] = &[
+        "Kneading",
+        "Garnishing",
+        "Beboppin",
+        "Propagating",
+        "Simmering",
+        "Marinating",
+    ];
+
+    /// Codex status bar / chrome fragments.
+    const CHROME_PATTERNS: &[&str] = &[
+        "esc to interrupt",
+        "? for shortcuts",
+        "background terminals running",
+        "/ps to view",
+        "/stop to close",
+        "ctrl+o to expand",
+    ];
+
+    fn is_chrome(trimmed: &str) -> bool {
+        if is_box_drawing_line(trimmed) || is_bare_prompt(trimmed) {
+            return true;
+        }
+
+        // Spinner lines
+        if let Some(first) = trimmed.chars().next() {
+            if Self::SPINNER_CHARS.contains(&first) {
+                let rest = trimmed[first.len_utf8()..].trim();
+                if rest.ends_with('…')
+                    || Self::SPINNER_WORDS
+                        .iter()
+                        .any(|w| rest.starts_with(w))
+                {
+                    return true;
+                }
+            }
+        }
+
+        // Status bar patterns
+        if Self::CHROME_PATTERNS
+            .iter()
+            .any(|p| trimmed.contains(p))
+        {
+            return true;
+        }
+
+        false
+    }
+}
+
+impl ContentFilter for CodexFilter {
+    fn filter_line(&self, line: &str) -> Option<String> {
+        let trimmed = clean_line(line)?;
+        if CodexFilter::is_chrome(&trimmed) {
+            None
+        } else {
+            Some(trimmed)
+        }
+    }
+    fn is_meaningful_batch(&self, lines: &[String]) -> bool {
+        lines.iter().any(|l| l.trim().len() > 2)
+    }
+    fn is_prompt(&self, line: &str) -> bool {
+        let t = line.trim();
+        t.starts_with("› ") || t == "›"
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FilterMode {
+    Raw,
+    Shell,
+    ClaudeCode,
+    Codex,
+}
+
+fn make_filter(mode: FilterMode) -> Box<dyn ContentFilter> {
+    match mode {
+        FilterMode::Raw => Box::new(RawFilter),
+        FilterMode::Shell => Box::new(ShellFilter),
+        FilterMode::ClaudeCode => Box::new(ClaudeCodeFilter),
+        FilterMode::Codex => Box::new(CodexFilter),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FlushPolicy — when to commit accumulated lines to history (prototype)
+//
+// Static dispatch via enum. Each variant has its own flush logic.
+// The filter provides semantic hints (is_prompt) that policies can use.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+enum FlushPolicy {
+    /// Flush after N lines accumulate, or after max_wait with any content.
+    LineCount {
+        min_lines: usize,
+        max_wait: Duration,
+    },
+
+    /// Flush when content stops changing for idle_duration.
+    /// Good for build logs, streaming output.
+    Idle {
+        idle_duration: Duration,
+        max_wait: Duration,
+    },
+
+    /// Flush when a prompt line appears after content, indicating the agent
+    /// finished its turn. Falls back to max_wait if no prompt is detected.
+    /// Best for interactive agent sessions (Claude Code, Codex, shells).
+    PromptBoundary {
+        max_wait: Duration,
+        min_content_lines: usize,
+    },
+}
+
+impl FlushPolicy {
+    fn should_flush(
+        &self,
+        pending: &[String],
+        time_since_flush: Duration,
+        time_since_last_change: Duration,
+        saw_prompt: bool,
+    ) -> bool {
+        if pending.is_empty() {
+            return false;
+        }
+
+        match self {
+            FlushPolicy::LineCount { min_lines, max_wait } => {
+                pending.len() >= *min_lines || time_since_flush >= *max_wait
+            }
+            FlushPolicy::Idle { idle_duration, max_wait } => {
+                time_since_last_change >= *idle_duration || time_since_flush >= *max_wait
+            }
+            FlushPolicy::PromptBoundary { max_wait, min_content_lines } => {
+                // Flush when prompt detected after enough content
+                if saw_prompt && pending.len() >= *min_content_lines {
+                    return true;
+                }
+                // Fallback: max wait exceeded
+                time_since_flush >= *max_wait
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FlushPolicyType {
+    LineCount,
+    Idle,
+    PromptBoundary,
+}
+
+fn make_policy(policy_type: FlushPolicyType) -> FlushPolicy {
+    match policy_type {
+        FlushPolicyType::LineCount => FlushPolicy::LineCount {
+            min_lines: 3,
+            max_wait: Duration::from_secs(10),
+        },
+        FlushPolicyType::Idle => FlushPolicy::Idle {
+            idle_duration: Duration::from_secs(3),
+            max_wait: Duration::from_secs(15),
+        },
+        FlushPolicyType::PromptBoundary => FlushPolicy::PromptBoundary {
+            max_wait: Duration::from_secs(30),
+            min_content_lines: 1,
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SourceAccumulator — per-source buffered content collection (prototype)
+// ---------------------------------------------------------------------------
+
+struct SourceAccumulator {
+    #[allow(dead_code)]
+    name: String,
+    previous: HashMap<motlie_tmux::PaneAddress, String>,
+    pending_lines: Vec<String>,
+    last_flush: Instant,
+    last_change: Instant,
+    saw_prompt_since_flush: bool,
+    filter: Box<dyn ContentFilter>,
+    policy: FlushPolicy,
+}
+
+impl SourceAccumulator {
+    fn new(
+        name: &str,
+        baseline: HashMap<motlie_tmux::PaneAddress, String>,
+        filter: Box<dyn ContentFilter>,
+        policy: FlushPolicy,
+    ) -> Self {
+        let now = Instant::now();
+        Self {
+            name: name.to_string(),
+            previous: baseline,
+            pending_lines: Vec::new(),
+            last_flush: now,
+            last_change: now,
+            saw_prompt_since_flush: false,
+            filter,
+            policy,
+        }
+    }
+
+    fn ingest(&mut self, current: &HashMap<motlie_tmux::PaneAddress, String>) -> Option<String> {
+        if current == &self.previous {
+            return self.maybe_flush();
+        }
+
+        let mut pane_list: Vec<_> = current.iter().collect();
+        pane_list.sort_by_key(|(addr, _)| (addr.window, addr.pane));
+
+        for (addr, content) in pane_list {
+            let prev_content = self.previous.get(addr).map(String::as_str).unwrap_or("");
+            let new_lines = diff_new_lines(prev_content, content, &*self.filter);
+            for line in &new_lines {
+                if self.filter.is_prompt(line) {
+                    self.saw_prompt_since_flush = true;
+                }
+            }
+            if !new_lines.is_empty() {
+                self.pending_lines.extend(new_lines);
+                self.last_change = Instant::now();
+            }
+        }
+
+        self.previous = current.clone();
+        self.maybe_flush()
+    }
+
+    fn maybe_flush(&mut self) -> Option<String> {
+        if self.pending_lines.is_empty() {
+            return None;
+        }
+
+        let should = self.policy.should_flush(
+            &self.pending_lines,
+            self.last_flush.elapsed(),
+            self.last_change.elapsed(),
+            self.saw_prompt_since_flush,
+        );
+
+        if !should {
+            return None;
+        }
+
+        if !self.filter.is_meaningful_batch(&self.pending_lines) {
+            self.pending_lines.clear();
+            self.last_flush = Instant::now();
+            self.saw_prompt_since_flush = false;
+            return None;
+        }
+
+        let chunk = self.pending_lines.join("\n");
+        self.pending_lines.clear();
+        self.last_flush = Instant::now();
+        self.saw_prompt_since_flush = false;
+
+        if chunk.trim().is_empty() {
+            None
+        } else {
+            Some(format!("{}\n", chunk))
+        }
+    }
+
+    fn flush_remaining(&mut self) -> Option<String> {
+        if self.pending_lines.is_empty() {
+            return None;
+        }
+        let chunk = self.pending_lines.join("\n");
+        self.pending_lines.clear();
+        self.last_flush = Instant::now();
+        self.saw_prompt_since_flush = false;
+        if chunk.trim().is_empty() {
+            None
+        } else {
+            Some(format!("{}\n", chunk))
+        }
+    }
+}
+
+/// Extract new lines from current pane content vs previous.
+/// Uses set-based diff, then applies the content filter to each line.
+fn diff_new_lines(previous: &str, current: &str, filter: &dyn ContentFilter) -> Vec<String> {
+    let prev_set: std::collections::HashSet<String> = previous
+        .lines()
+        .filter_map(|l| clean_line(l))
+        .collect();
+
+    current
+        .lines()
+        .filter_map(|line| {
+            // First clean the raw line
+            let cleaned = clean_line(line)?;
+            // Skip if it was in previous content
+            if prev_set.contains(&cleaned) {
+                return None;
+            }
+            // Apply the content filter
+            filter.filter_line(line)
+        })
+        .collect()
+}
 
 const CHAT_CMD: &str = "sh -c 'stty -echo 2>/dev/null || true; cat'";
 const HELP: &str = "\
@@ -71,6 +546,9 @@ struct Args {
     max_entries: usize,
     live_sessions: Option<(String, String)>,
     live_mode: LiveMode,
+    render_mode: RenderMode,
+    filter_mode: FilterMode,
+    policy_type: FlushPolicyType,
 }
 
 fn parse_live_mode(value: &str) -> Result<LiveMode> {
@@ -101,6 +579,9 @@ fn parse_args() -> Result<Args> {
     let mut max_chars = 420usize;
     let mut max_entries = 8usize;
     let mut live_mode = LiveMode::Tail;
+    let mut render_mode = RenderMode::Interleaved;
+    let mut filter_mode = FilterMode::Shell;
+    let mut policy_type = FlushPolicyType::PromptBoundary;
     let mut positional: Vec<String> = Vec::new();
     let mut i = 1usize;
 
@@ -135,6 +616,60 @@ fn parse_args() -> Result<Args> {
                         .ok_or_else(|| anyhow!("--mode requires a value"))?,
                 )?;
             }
+            "--render-mode" => {
+                i += 1;
+                render_mode = match argv
+                    .get(i)
+                    .ok_or_else(|| anyhow!("--render-mode requires a value"))?
+                    .as_str()
+                {
+                    "interleaved" => RenderMode::Interleaved,
+                    "per-source" => RenderMode::PerSource,
+                    other => {
+                        return Err(anyhow!(
+                            "unknown render mode '{}' (interleaved|per-source)",
+                            other
+                        ))
+                    }
+                };
+            }
+            "--filter" => {
+                i += 1;
+                filter_mode = match argv
+                    .get(i)
+                    .ok_or_else(|| anyhow!("--filter requires a value"))?
+                    .as_str()
+                {
+                    "raw" => FilterMode::Raw,
+                    "shell" => FilterMode::Shell,
+                    "claude" => FilterMode::ClaudeCode,
+                    "codex" => FilterMode::Codex,
+                    other => {
+                        return Err(anyhow!(
+                            "unknown filter '{}' (raw|shell|claude|codex)",
+                            other
+                        ))
+                    }
+                };
+            }
+            "--policy" => {
+                i += 1;
+                policy_type = match argv
+                    .get(i)
+                    .ok_or_else(|| anyhow!("--policy requires a value"))?
+                    .as_str()
+                {
+                    "lines" => FlushPolicyType::LineCount,
+                    "idle" => FlushPolicyType::Idle,
+                    "prompt" => FlushPolicyType::PromptBoundary,
+                    other => {
+                        return Err(anyhow!(
+                            "unknown policy '{}' (lines|idle|prompt)",
+                            other
+                        ))
+                    }
+                };
+            }
             value if value.starts_with("ssh://") => {
                 uri = value.to_string();
             }
@@ -168,6 +703,9 @@ fn parse_args() -> Result<Args> {
         max_entries,
         live_sessions,
         live_mode,
+        render_mode,
+        filter_mode,
+        policy_type,
     })
 }
 
@@ -198,7 +736,8 @@ async fn run_live(
     match args.live_mode {
         LiveMode::Monitor => run_live_monitor(host, session_a, session_b, args).await,
         LiveMode::Tail => {
-            let mut history = PollHistory::new(args.max_entries, args.max_chars);
+            let mut history = PollHistory::new(args.max_entries, args.max_chars)
+                .with_render_mode(args.render_mode);
             let target_a = host
                 .session(session_a)
                 .await?
@@ -217,13 +756,27 @@ async fn run_live(
                 "History window: max_entries={}, max_render_chars={}",
                 args.max_entries, args.max_chars
             );
-            println!("Baseline captured at startup; only new changes are appended.");
+            println!("Accumulator: line_threshold=3, time_threshold=5s");
             println!("Ctrl-C to stop.\n");
+
+            let baseline_a = target_a.capture_all().await?;
+            let baseline_b = target_b.capture_all().await?;
+            let mut acc_a = SourceAccumulator::new(
+                session_a,
+                baseline_a,
+                make_filter(args.filter_mode),
+                make_policy(args.policy_type),
+            );
+            let mut acc_b = SourceAccumulator::new(
+                session_b,
+                baseline_b,
+                make_filter(args.filter_mode),
+                make_policy(args.policy_type),
+            );
+
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             let mut tick = 0u64;
             let mut last_rendered = String::new();
-            let mut previous_a = target_a.capture_all().await?;
-            let mut previous_b = target_b.capture_all().await?;
 
             loop {
                 tokio::select! {
@@ -232,12 +785,12 @@ async fn run_live(
                         tick += 1;
 
                         let current_a = target_a.capture_all().await?;
-                        if let Some(rendered) = tail_history_entry(session_a, &mut previous_a, &current_a) {
-                            history.push_text(rendered);
+                        if let Some(chunk) = acc_a.ingest(&current_a) {
+                            history.push_text_for_source(session_a, chunk);
                         }
                         let current_b = target_b.capture_all().await?;
-                        if let Some(rendered) = tail_history_entry(session_b, &mut previous_b, &current_b) {
-                            history.push_text(rendered);
+                        if let Some(chunk) = acc_b.ingest(&current_b) {
+                            history.push_text_for_source(session_b, chunk);
                         }
 
                         let rendered = history.render_text();
@@ -249,6 +802,15 @@ async fn run_live(
                     }
                 }
             }
+
+            // Flush any remaining accumulated content
+            if let Some(chunk) = acc_a.flush_remaining() {
+                history.push_text_for_source(session_a, chunk);
+            }
+            if let Some(chunk) = acc_b.flush_remaining() {
+                history.push_text_for_source(session_b, chunk);
+            }
+
             println!(
                 "\nFinal snapshot: entries={}, omitted_entries={}, rendered_chars={}",
                 history.len(),
@@ -258,7 +820,8 @@ async fn run_live(
             Ok(())
         }
         LiveMode::Render => {
-            let mut history = PollHistory::new(args.max_entries, args.max_chars);
+            let mut history = PollHistory::new(args.max_entries, args.max_chars)
+                .with_render_mode(args.render_mode);
             let target_a = host
                 .session(session_a)
                 .await?
@@ -294,7 +857,7 @@ async fn run_live(
                         let current_a = target_a.capture_all().await?;
                         if current_a != previous_a {
                             if let Some(rendered) = render_history_entry(session_a, &current_a) {
-                                history.push_text(rendered);
+                                history.push_text_for_source(session_a, rendered);
                             }
                             previous_a = current_a;
                         }
@@ -302,7 +865,7 @@ async fn run_live(
                         let current_b = target_b.capture_all().await?;
                         if current_b != previous_b {
                             if let Some(rendered) = render_history_entry(session_b, &current_b) {
-                                history.push_text(rendered);
+                                history.push_text_for_source(session_b, rendered);
                             }
                             previous_b = current_b;
                         }
@@ -346,6 +909,7 @@ async fn run_live_monitor(
         max_render_chars: args.max_chars,
         label_format: LabelFormat::Prompt,
         include_omission_marker: true,
+        render_mode: args.render_mode,
         ..Default::default()
     });
     let monitor_a = host.start_monitoring_session(session_a).await?;
