@@ -2161,12 +2161,95 @@ assert!(issues.is_empty());
 | Type | Description |
 |------|-------------|
 | `HistoryHandle` | Rolling transcript handle — `snapshot()`, `render_text()`, `join()`, `id()` |
-| `HistoryOptions` | Config: `max_entries`, `max_render_chars`, `label_format`, `include_omission_marker` |
+| `HistoryOptions` | Config: `max_entries`, `max_render_chars`, `label_format`, `render_mode`, `global_max_render_chars`, `include_omission_marker` |
 | `HistorySnapshot` | Point-in-time snapshot — `entries`, `rendered_chars`, `omitted_entries` |
 | `HistoryEntry` | Enum: `Output { source, text, source_changed }`, `Gap { dropped_events }`, `Discontinuity { reason }` |
 | `Fleet` | Multi-host registry — `register()`, `host()`, `hosts()`, `output_bus()`, monitoring, workstreams, routing |
 | `HostStatus` | Enum: `Connected`, `Monitoring { sessions: Vec<SessionMonitorStatus> }`, `Error(String)` |
 | `SessionMonitorStatus` | Per-session status: `name`, `health: MonitorHealth` |
+| `RenderMode` | Enum: `Interleaved` (default), `PerSource` — controls how `render_text()` groups entries |
+| `PollHistory` | Bounded rolling text history for polling — `push_text()`, `push_text_for_source()`, `render_text()` |
+
+### Content filtering and accumulation (DC33)
+
+| Type | Description |
+|------|-------------|
+| `ContentFilter` | Trait: `filter_line()`, `is_meaningful_batch()`, `is_prompt()` — per-line TUI chrome detection |
+| `RawFilter` | Strips ANSI only, keeps everything. For debug/build logs. |
+| `ShellFilter` | Strips ANSI, drops empty lines. Prompt = `$`/`%`/`#`. For plain shells, CI. |
+| `AgentTuiFilter` | Heuristic chrome removal (spinners, status bars, affordance hints). Parameterized by `prompt_char`. `claude_code()` = `❯`, `codex()` = `›`. |
+| `FlushPolicy` | Enum: `LineCount`, `Idle`, `PromptBoundary` — controls when `SourceAccumulator` flushes |
+| `SourceAccumulator` | Per-source buffered collection — `new(name, baseline, filter, policy)`, `ingest(current)`, `flush_remaining()` |
+
+#### Content filtering usage
+
+```rust
+use motlie_tmux::{AgentTuiFilter, FlushPolicy, SourceAccumulator, PollHistory, RenderMode};
+use std::time::Duration;
+
+// Create per-source accumulators with agent-specific filters
+let baseline = target.capture_all().await?;
+let mut acc = SourceAccumulator::new(
+    "my-session",
+    baseline,
+    Box::new(AgentTuiFilter::codex()),               // heuristic chrome removal
+    FlushPolicy::prompt_boundary(Duration::from_secs(30), 1),  // flush on agent prompt
+);
+
+// Create a per-source rolling history
+let mut history = PollHistory::new(40, 6000)
+    .with_render_mode(RenderMode::PerSource);
+
+// Polling loop:
+let current = target.capture_all().await?;
+if let Some(chunk) = acc.ingest(&current) {
+    history.push_text_for_source("my-session", chunk);
+}
+
+// Render grouped sections:
+// === my-session ===
+// <coherent per-turn content>
+let context = history.render_text();
+```
+
+#### Flush policies
+
+| Policy | When to use | Example |
+|--------|-------------|---------|
+| `FlushPolicy::line_count(3, 10s)` | Build output, log tailing | Flush every 3 lines or 10s |
+| `FlushPolicy::idle(3s, 15s)` | CI jobs, test runners | Flush when output pauses 3s |
+| `FlushPolicy::prompt_boundary(30s, 1)` | Agent TUIs (Claude, Codex) | Flush when prompt appears after content |
+
+#### Exported helper functions
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `clean_line` | `fn clean_line(line: &str) -> Option<String>` | Strip ANSI escape sequences and normalize a raw terminal line. Returns `None` if the line is empty/whitespace after cleaning. Used internally by all filters and `diff_new_lines`. |
+| `diff_new_lines` | `fn diff_new_lines(previous: &str, current: &str, filter: &dyn ContentFilter) -> Vec<String>` | Multiset-based diff: finds lines in `current` that weren't in `previous` (preserving multiplicity), then applies the content filter. Returns filtered new lines. Core of `SourceAccumulator::ingest()`. |
+| `is_tui_chrome` | `fn is_tui_chrome(trimmed: &str) -> bool` | Combined heuristic check: returns `true` if the line is TUI chrome (spinner, box-drawing, status bar, affordance hint, context indicator, or bare prompt). Used by `AgentTuiFilter` and available for custom filter implementations. |
+
+```rust
+use motlie_tmux::{clean_line, diff_new_lines, is_tui_chrome, RawFilter};
+
+// Clean a raw terminal line
+assert_eq!(clean_line("\x1b[32mhello\x1b[0m"), Some("hello".to_string()));
+assert_eq!(clean_line("   \r\n"), None);
+
+// Detect TUI chrome
+assert!(is_tui_chrome("· Thinking…"));
+assert!(is_tui_chrome("──────────────────"));
+assert!(!is_tui_chrome("actual content here"));
+
+// Diff two pane captures with a filter
+let prev = "line1\nline2\n";
+let curr = "line1\nline2\nline3\n· Thinking…\n";
+let new_lines = diff_new_lines(prev, curr, &RawFilter);
+assert_eq!(new_lines, vec!["line3", "· Thinking…"]); // RawFilter keeps spinners
+
+use motlie_tmux::AgentTuiFilter;
+let filtered = diff_new_lines(prev, curr, &AgentTuiFilter::codex());
+assert_eq!(filtered, vec!["line3"]); // AgentTuiFilter removes spinners
+```
 
 ### Shell channel (low-level, used by monitor layer — Phase 2a)
 
