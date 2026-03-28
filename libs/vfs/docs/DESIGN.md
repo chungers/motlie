@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-28 | @claude | Converge memfs model: shared inode namespace, internal tree vs inspection views, tighten wording per review |
 | 2026-03-28 | @claude | Reframe overlay as file-driven memfs layer: whiteout/tombstone semantics, transparent cross-boundary rename, OverlayEntryKind enum |
 | 2026-03-27 | @claude | Address PR #115 review: synthetic directories, policy-filtered readdir, mutation semantics table |
 | 2026-03-27 | @claude | Initial DESIGN: composable architecture (core + vsock + rpc), file-level in-memory overlay with layered injection, pluggable control frontends (Unix socket / HTTP / in-process), VMM guest integration with SSH overlay example, alternatives analysis |
@@ -301,14 +302,21 @@ backpressure (callers who care about completeness must keep up).
 
 ### In-Memory Overlay (File-Driven Memfs Layer)
 
-The overlay is a lightweight in-memory filesystem layer inside `FsServer`. It is not a
-simple path→bytes map: it is a **file-driven memfs** where injecting a file via `put()`
-automatically induces the necessary parent directory hierarchy in memory. The caller only
-specifies file paths; the overlay materializes synthetic directories, inodes, attrs, and
-readdir behavior without anything touching host disk.
+The overlay is a file-driven memfs layer merged above disk. It is not a path→bytes map
+with special cases — it is a proper in-memory filesystem layer with inode allocation,
+directory traversal, metadata, and mutation support.
 
-The overlay sits between policy enforcement and host filesystem access. Multiple named
-layers stack by priority; resolution is top-down (highest priority first).
+- `put()` inserts or replaces a file node in the memfs layer.
+- Any missing ancestors are materialized as synthetic directories in memory.
+- Directory traversal and metadata for synthetic directories are served entirely from
+  the memfs layer — nothing is forced onto host disk.
+- The memfs layer shares the mount's inode namespace: synthetic directory inodes and
+  overlay file inodes are allocated from the same `InodeTable` as disk-backed inodes.
+  This ensures a unified inode space visible to the FUSE client.
+- `handle_op()` resolves each path against the memfs layer first; only paths with no
+  overlay entry fall through to the host filesystem.
+
+Multiple named layers stack by priority; resolution is top-down (highest priority first).
 
 ```
 handle_op(tag, FsOp::Read { inode, .. })
@@ -586,8 +594,16 @@ impl PolicyFn for AllowAll {
 The overlay is a file-driven memfs layer, part of server-core (always available when
 FsServer is compiled). No additional feature flag required.
 
-Callers inject files; the overlay materializes synthetic parent directories automatically.
-The data model tracks three entry types: `Content(Bytes)`, `Whiteout`, and `SyntheticDir`.
+**Internal model:** The overlay maintains a tree of nodes — file nodes (`Content`),
+whiteout nodes (`Whiteout`), and directory nodes (`SyntheticDir`) — allocated from the
+mount's shared `InodeTable`. Each node has an inode, attrs (size, mode, timestamps),
+and parent linkage. `put()` inserts a file node and recursively creates `SyntheticDir`
+parent nodes. `handle_op()` dispatches against this tree before falling through to disk.
+
+**External API:** Callers interact through `put()` / `remove()` / `whiteout()` (mutations)
+and `resolve()` / `list_effective()` (inspection). The inspection types (`OverlayEntry`,
+`EffectiveEntry`, `LayerInfo`) are flattened views for debugging and control-socket
+responses — they do not expose the full internal tree structure or inode mappings.
 
 ```rust
 /// File-driven in-memory filesystem layer.
@@ -661,7 +677,9 @@ pub struct LayerInfo {
 #[derive(Debug, Clone)]
 pub struct OverlayEntry {
     pub path: String,
-    pub size: usize,
+    pub kind: OverlayEntryKind,
+    pub inode: u64,
+    pub size: usize,                // 0 for Whiteout and SyntheticDir
     pub injected_at: SystemTime,
 }
 
@@ -669,9 +687,16 @@ pub struct OverlayEntry {
 pub struct EffectiveEntry {
     pub path: String,
     pub layer: String,
+    pub kind: OverlayEntryKind,
+    pub inode: u64,
     pub size: usize,
 }
 ```
+
+Note: `OverlayEntry` and `EffectiveEntry` are flattened inspection views. The internal
+model is a tree of inode-allocated nodes with parent linkage and refcounting for synthetic
+directories. These structs project that tree into flat lists for the control socket,
+debugging, and programmatic introspection.
 
 Wired into FsServer:
 
