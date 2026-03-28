@@ -1724,19 +1724,27 @@ ls("/root/")
   → policy filter: all pass (no policy on /root/)
   → result: [projects, .config, .bashrc, documents, .ssh, .env, ...]
 
-ls("/root/.ssh/")  — with SshLockdown policy active:
+ls("/root/.ssh/")  — Case A: ~/alice/.ssh/ does NOT exist on disk (synthetic parent):
   → overlay.resolve("home", "/.ssh") → Some(("credentials", SyntheticDir))
+  → directory is synthetic → no host readdir, only overlay children
+  → overlay entries at /.ssh/*: [id_ed25519, id_ed25519.pub, config, authorized_keys]
+  → result: [id_ed25519, id_ed25519.pub, config, authorized_keys]
+     (pure memfs directory — no disk entries to merge or filter)
+
+ls("/root/.ssh/")  — Case B: ~/alice/.ssh/ exists on disk (disk+overlay merge):
+  → overlay.resolve("home", "/.ssh") → None (dir exists on disk, not a SyntheticDir)
   → readdir on host: ~/alice/.ssh/ → [known_hosts, old_config]
   → overlay entries at /.ssh/*: [id_ed25519, id_ed25519.pub, config, authorized_keys]
   → merge per-name: overlay entries + disk entries
-  → policy filter: SshLockdown denies disk-only entries (known_hosts, old_config)
-  → result: [id_ed25519, id_ed25519.pub, config, authorized_keys]
-     (only overlay-backed files visible — disk files filtered by policy)
 
-ls("/root/.ssh/")  — without policy (unfiltered baseline):
-  → same merge as above, but no policy filtering
+  Case B without policy (unfiltered):
   → result: [known_hosts, old_config, id_ed25519, id_ed25519.pub, config, authorized_keys]
      (disk files pass through alongside overlay entries)
+
+  Case B with SshLockdown policy:
+  → policy filter: SshLockdown denies disk-only entries (known_hosts, old_config)
+  → result: [id_ed25519, id_ed25519.pub, config, authorized_keys]
+     (disk files excluded by policy)
 ```
 
 **readdir merging with overlay and policy filtering:**
@@ -1756,28 +1764,27 @@ When `handle_op()` processes a `Readdir`, it merges entries and then filters:
 ### Overlay Scope: File-Level Granularity
 
 The overlay operates at **file granularity**. Each `put()` inserts a file node in the
-memfs layer. `readdir` merges disk and overlay entries per-file, then applies policy:
+memfs layer. `readdir` behavior depends on whether the directory is synthetic or disk-backed:
 
 ```
-readdir("/.ssh/") — unfiltered baseline (no policy):
-  disk entries from ~/alice/.ssh/:  [known_hosts, old_config]
-  overlay entries at /.ssh/*:       [id_ed25519, id_ed25519.pub, config, authorized_keys]
+Case A: synthetic directory (host dir does not exist):
+  readdir("/.ssh/") where ~/alice/.ssh/ is absent on disk
+  → directory is SyntheticDir in overlay → only overlay children returned
+  → result: [id_ed25519, id_ed25519.pub, config, authorized_keys]
+  (no disk entries to merge — pure memfs directory)
 
-  merge: overlay Content shadows disk entry with same name; disk entries without
-         overlay counterpart pass through; overlay-only entries are synthetic.
-
-  result: [known_hosts, old_config, id_ed25519, id_ed25519.pub, config, authorized_keys]
-
-readdir("/.ssh/") — with SshLockdown policy:
-  same merge, then policy.check(Readdir, tag, child_path) per entry:
-    known_hosts → not in overlay → denied → excluded
-    old_config  → not in overlay → denied → excluded
-
-  result: [id_ed25519, id_ed25519.pub, config, authorized_keys]
+Case B: disk directory with overlay children:
+  readdir("/.ssh/") where ~/alice/.ssh/ exists on disk
+  → host readdir: [known_hosts, old_config]
+  → overlay children: [id_ed25519, id_ed25519.pub, config, authorized_keys]
+  → per-name merge: overlay shadows same-name disk entries; disk-only entries pass through
+  → policy filter (step 6): each entry checked, denied entries excluded
+  → without policy: [known_hosts, old_config, id_ed25519, id_ed25519.pub, config, authorized_keys]
+  → with SshLockdown: [id_ed25519, id_ed25519.pub, config, authorized_keys]
 ```
 
-Without policy, mixed directories work: some files from disk, some from overlay. An
-overlaid file shadows only that file; disk siblings pass through.
+In Case A, no policy is needed — the directory is entirely overlay-managed. In Case B,
+disk files pass through by default; use policy to enforce isolation if needed.
 
 **For credential paths, use policy to enforce isolation:**
 
