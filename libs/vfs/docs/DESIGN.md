@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-28 | @claude | v1 mount policy (direct_io), remove stale "cached" wording from inode model |
 | 2026-03-28 | @claude | v1 no-caching principle: zero TTL everywhere, no semantic caches, correctness-first, perf phase deferred |
 | 2026-03-28 | @claude | Spec-complete: memfs-aware inode model, cache/invalidation strategy, generation semantics, control-socket wire format |
 | 2026-03-28 | @claude | Fix stale resolve() examples to use OverlayEntryKind; show policy-filtered vs unfiltered readdir for .ssh |
@@ -1143,7 +1144,11 @@ send_handshake(&mut stream, &HandshakeMsg::Fs { tag: "workspace".into() }).await
 
 // Hand the established stream to the library for FUSE mounting
 let mount = VsockFuseMount::new(stream, "workspace");
-fuser::mount2(mount, "/workspace", &[MountOption::AutoUnmount])?;
+fuser::mount2(mount, "/workspace", &[
+    MountOption::AutoUnmount,
+    MountOption::AllowRoot,
+    MountOption::CUSTOM("direct_io".into()),
+])?;
 ```
 
 ### Pattern 4: RPC Server -- Standalone Linux/macOS FS Server
@@ -1195,6 +1200,8 @@ let client = RpcClient::connect(stream, BincodeCodec, "workspace").await?;
 // Identical on Linux and macOS (FUSE-T provides libfuse compat on macOS)
 fuser::mount2(client.into_fuse(), "/mnt/workspace", &[
     MountOption::AutoUnmount,
+    MountOption::AllowRoot,
+    MountOption::CUSTOM("direct_io".into()),
 ])?;
 ```
 
@@ -1213,6 +1220,8 @@ let stream = tls.connect(server_name, tcp).await?;
 let client = RpcClient::connect(stream, BincodeCodec, "workspace").await?;
 fuser::mount2(client.into_fuse(), "/Volumes/workspace", &[
     MountOption::AutoUnmount,
+    MountOption::AllowRoot,
+    MountOption::CUSTOM("direct_io".into()),
 ])?;
 ```
 
@@ -1408,7 +1417,7 @@ InodeTable:
       host_path: Option<PathBuf>,  // Some for Disk entries, None for overlay entries
       generation: u64,       // bumped on content/kind change at this inode
       refcount: u64,         // FUSE lookup count
-      attrs: FileAttr,       // cached for Disk, authoritative for overlay entries
+      attrs: FileAttr,       // authoritative for overlay; re-fetched from std::fs for disk (v1: no cache)
   }
 
   path → inode              // reverse lookup
@@ -1418,7 +1427,7 @@ InodeTable:
 
 | Entry class | When allocated | `kind` | `host_path` | `attrs` source |
 |-------------|---------------|--------|-------------|----------------|
-| Disk file/dir | First `lookup` that resolves to host filesystem | `Disk` | `Some(host_path)` | `std::fs::metadata()`, cached with TTL |
+| Disk file/dir | First `lookup` that resolves to host filesystem | `Disk` | `Some(host_path)` | `std::fs::metadata()` on every access (v1: no attrs cache) |
 | Overlay `Content` | `put()` or `Create` under overlay-managed dir | `Content` | `None` | Size from content length, mode 0644, mtime from injection time |
 | `SyntheticDir` | Implicitly by `put()` for missing parent dirs, or explicit `Mkdir` under synthetic parent | `SyntheticDir` | `None` | Mode 0755, mtime from first child injection |
 | `Whiteout` | `Unlink` on shadowed file | `Whiteout` | `None` | Not visible (lookup returns ENOENT) |
@@ -1498,6 +1507,34 @@ Zero TTL across the board means the kernel revalidates on every access. Combined
 server-side caching, the system is fully deterministic: every operation reflects the current
 state of disk + overlay + policy. The cost is one round-trip per access, which is acceptable
 for v1 where correctness matters more than throughput.
+
+### v1 FUSE Mount Policy
+
+To make the zero-TTL / no-cache guarantee operational, the FUSE client must be mounted
+with options that prevent the kernel from caching file data in the page cache independently
+of TTL revalidation. The v1 mount options are:
+
+```rust
+// v1 mount options — correctness-first, no kernel page cache
+let mount_opts = vec![
+    MountOption::AutoUnmount,       // clean unmount on process exit
+    MountOption::AllowRoot,         // root can access the mount
+    MountOption::CUSTOM("direct_io".into()),  // bypass kernel page cache for read/write
+];
+```
+
+**Why `direct_io`:** Without `direct_io`, the kernel caches file data in the page cache.
+Even with `ttl_secs = 0` for attrs, the kernel may serve `read()` from stale page cache
+data if the overlay content was mutated via `put()` between reads. `direct_io` forces every
+`read()` and `write()` through the FUSE server, ensuring the live overlay state is returned.
+
+**Cost of `direct_io`:** No `mmap` support (already a non-goal), no kernel read-ahead, every
+read is a round-trip to the server. For the v1 workload (coding tools, credential files,
+config), this is acceptable. The future performance phase can switch to `kernel_cache` +
+targeted invalidation if profiling warrants it.
+
+All composition pattern examples in this document that call `fuser::mount2()` use these
+v1 mount options.
 
 ### Why Not Explicit Kernel Invalidation (v1)
 
@@ -1683,6 +1720,7 @@ fn main() {
                 let mut opts = vec![
                     fuser::MountOption::AutoUnmount,
                     fuser::MountOption::AllowRoot,
+                    fuser::MountOption::CUSTOM("direct_io".into()),
                 ];
                 if read_only {
                     opts.push(fuser::MountOption::RO);
