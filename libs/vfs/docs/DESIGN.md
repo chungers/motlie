@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-28 | @claude | Spec-complete: memfs-aware inode model, cache/invalidation strategy, generation semantics, control-socket wire format |
 | 2026-03-28 | @claude | Fix stale resolve() examples to use OverlayEntryKind; show policy-filtered vs unfiltered readdir for .ssh |
 | 2026-03-28 | @claude | Converge memfs model: shared inode namespace, internal tree vs inspection views, tighten wording per review |
 | 2026-03-28 | @claude | Reframe overlay as file-driven memfs layer: whiteout/tombstone semantics, transparent cross-boundary rename, OverlayEntryKind enum |
@@ -444,7 +445,7 @@ libs/vfs/
     │   ├── mod.rs
     │   ├── op.rs                 # FsOp, FsResult, FileAttr, DirEntry, FsStats
     │   ├── server.rs             # FsServer, FsServerBuilder, handle_op()
-    │   ├── inode.rs              # InodeTable: inode ↔ host path mapping
+    │   ├── inode.rs              # InodeTable: unified inode namespace (disk + overlay + synthetic)
     │   ├── overlay.rs            # MemOverlay: layered in-memory content injection
     │   ├── event.rs              # FsEvent, FsOp (event enum), EventSender
     │   └── policy.rs             # PolicyFn trait, AllowAll default
@@ -752,6 +753,7 @@ Commands:
 
   PUT <layer> <tag> <path> <len>\n    Set overlay content (len bytes follow)
   <len bytes of content>
+  WHITEOUT <layer> <tag> <path>\n    Suppress a disk file (create whiteout entry)
   RM <layer> <tag> <path>\n           Remove one overlay entry
   GET <layer> <tag> <path>\n          Read overlay content from specific layer
   LS <tag>\n                          List effective overlays for a tag
@@ -768,10 +770,11 @@ Responses:
   DATA <len>\n                        Response to GET
   <len bytes of content>
 
-  ENTRIES\n                           Response to LS or LSLAYER
-  <path> <layer> <size>\n             One line per entry (LS)
-  <path> <size>\n                     One line per entry (LSLAYER)
-  \n                                  Empty line terminates list
+  ENTRIES\n                                          Response to LS or LSLAYER
+  <path> <layer> <kind> <inode> <size>\n              One line per entry (LS)
+  <path> <kind> <inode> <size>\n                      One line per entry (LSLAYER)
+  \n                                                  Empty line terminates list
+  (kind is one of: content, whiteout, synthetic_dir)
 
   ERR <message>\n                     Error
 ```
@@ -1388,24 +1391,118 @@ async fn test_overlay_synthetic_file() {
 }
 ```
 
-## Inode Management
+## Inode Management (Memfs-Aware)
 
-The server maintains a per-mount bidirectional mapping between inodes (u64) and host paths.
-Inode 1 is always the root of the mount. Inodes are allocated on `lookup` and cached.
+The server maintains a **per-mount `InodeTable`** that is the single inode namespace for
+all entries visible through that mount — disk-backed files, overlay `Content` nodes,
+`SyntheticDir` nodes, and `Whiteout` bookkeeping. Inode 1 is always the mount root.
+
+### InodeTable Structure
 
 ```
 InodeTable:
-  inode → (host_path, refcount, attrs_cache)
-  host_path → inode
+  inode → InodeEntry {
+      kind: InodeKind,       // Disk, Content, SyntheticDir, Whiteout
+      path: String,          // mount-relative path (e.g. "/.ssh/id_ed25519")
+      host_path: Option<PathBuf>,  // Some for Disk entries, None for overlay entries
+      generation: u64,       // bumped on content/kind change at this inode
+      refcount: u64,         // FUSE lookup count
+      attrs: FileAttr,       // cached for Disk, authoritative for overlay entries
+  }
+
+  path → inode              // reverse lookup
 ```
 
-Inodes are scoped per mount tag -- two mounts can independently use the same inode numbers.
+### Inode Allocation by Entry Class
+
+| Entry class | When allocated | `kind` | `host_path` | `attrs` source |
+|-------------|---------------|--------|-------------|----------------|
+| Disk file/dir | First `lookup` that resolves to host filesystem | `Disk` | `Some(host_path)` | `std::fs::metadata()`, cached with TTL |
+| Overlay `Content` | `put()` or `Create` under overlay-managed dir | `Content` | `None` | Size from content length, mode 0644, mtime from injection time |
+| `SyntheticDir` | Implicitly by `put()` for missing parent dirs, or explicit `Mkdir` under synthetic parent | `SyntheticDir` | `None` | Mode 0755, mtime from first child injection |
+| `Whiteout` | `Unlink` on shadowed file | `Whiteout` | `None` | Not visible (lookup returns ENOENT) |
+
+### Inode Stability
+
+- **Path-stable within a mount session:** a given path always resolves to the same inode
+  as long as the mount is alive and the path hasn't been removed and re-created.
+- **Not stable across overlay mutations that change kind:** if `put()` replaces a `Whiteout`
+  with `Content` at the same path, the inode is reused but `generation` is bumped. The FUSE
+  client sees a new generation and invalidates its cache for that inode.
+- **Not stable across `remove_layer()`:** removing a layer may expose a lower-priority entry
+  or fall through to disk. If the effective entry kind changes, `generation` is bumped.
+- **Not stable across mount restart:** inode numbers are ephemeral per mount session.
+
+### Generation Semantics
+
+`generation` is a monotonically increasing counter per inode. It is bumped when:
+
+| Event | Generation bump? | Rationale |
+|-------|-----------------|-----------|
+| `put()` replacing existing `Content` at same path | Yes | Content changed; FUSE client must invalidate cached data |
+| `put()` replacing `Whiteout` with `Content` | Yes | Entry kind changed from invisible to visible |
+| `whiteout()` replacing `Content` | Yes | Entry kind changed from visible to invisible |
+| `remove()` dropping overlay entry (disk fallthrough) | Yes | Effective content changed (now from disk) |
+| `remove_layer()` changing effective entry | Yes | Winning layer may change, altering content |
+| Layer priority change (`put_layer` with new priority) | Yes (for affected paths) | Resolution order changed |
+| `Write` updating existing `Content` in-place | No | Same entry, same kind, content updated |
+| `Setattr` on overlay entry | No | Attrs updated but identity unchanged |
+
+### Mount Scoping and Removal
+
+Inodes are scoped per mount tag — two mounts can independently use the same inode numbers.
 This is safe because each client connection is bound to exactly one tag, and the FUSE kernel
 module per mount point has its own inode namespace.
 
-When a mount is removed via `remove_mount()`, its `InodeTable` is dropped. Any in-flight
-connection for that tag will receive `FsResult::Error { errno: ENOENT }` on subsequent
-requests.
+When a mount is removed via `remove_mount()`, its `InodeTable` is dropped entirely —
+disk, overlay, synthetic, and whiteout entries are all invalidated. Any in-flight connection
+for that tag receives `FsResult::Error { errno: ENOENT }` on subsequent requests.
+
+## Cache Visibility and Invalidation
+
+Runtime overlay mutations (`put`, `whiteout`, `remove`, `remove_layer`) change what a
+mounted FUSE client sees. The FUSE kernel caches lookup results, attrs, and data based on
+TTL values returned by the server. The design must specify how those caches are invalidated
+so clients observe mutations promptly.
+
+### Strategy: Short TTLs for Overlay, Normal TTLs for Disk
+
+| Entry class | `ttl_secs` for lookup/getattr | `ttl_secs` for data | Rationale |
+|-------------|-------------------------------|---------------------|-----------|
+| Disk file/dir | 1 | 1 | Host filesystem may change independently; short TTL balances freshness vs performance |
+| Overlay `Content` | 0 | 0 | Overlay content can change at any time via `put()` / control socket; zero TTL forces revalidation on every access |
+| `SyntheticDir` | 0 | N/A | May gain/lose children via `put()` / `remove()`; zero TTL forces fresh `readdir` |
+| `Whiteout` | 0 | N/A | May be replaced by `put()`; zero TTL ensures immediate visibility |
+
+Zero TTL for overlay entries means the FUSE kernel revalidates on every access. This is the
+simplest correct strategy — no stale data, no cache-coherence bugs. The cost is one extra
+`lookup` round-trip per access, which is negligible for overlay entries (in-memory, no I/O).
+
+### Why Not Explicit Kernel Invalidation
+
+FUSE supports `notify_inval_inode` and `notify_inval_entry` to proactively push cache
+invalidations from the server. This would allow longer TTLs with on-demand invalidation
+when overlay mutations occur. However:
+
+- It requires the server to hold a `Session` reference from `fuser`, coupling the server
+  core to the FUSE client — violating the composable architecture (direct and RPC composites
+  don't have a `Session`).
+- Zero TTL for overlay entries achieves the same correctness with no coupling.
+- If profiling shows the revalidation overhead is significant for specific workloads,
+  explicit invalidation can be added as an optimization in the FUSE client module without
+  changing the server core or protocol.
+
+### Generation + TTL Interaction
+
+When a FUSE client does a lookup and gets `(inode, generation, attrs, ttl=0)`:
+1. Next access: kernel revalidates (calls `lookup` or `getattr` again because `ttl=0`).
+2. Server returns current `(inode, generation, attrs)`.
+3. If `generation` changed: kernel discards all cached data/attrs for that inode.
+4. If `generation` unchanged: kernel may use previously cached data (but `ttl=0` means
+   it will revalidate again on the next access anyway).
+
+This means overlay mutations are visible on the very next filesystem operation from the
+client. No explicit invalidation needed.
 
 ## macOS: FUSE-T Strategy
 
