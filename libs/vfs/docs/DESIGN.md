@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-28 | @claude | Fix stale resolve() examples to use OverlayEntryKind; show policy-filtered vs unfiltered readdir for .ssh |
 | 2026-03-28 | @claude | Converge memfs model: shared inode namespace, internal tree vs inspection views, tighten wording per review |
 | 2026-03-28 | @claude | Reframe overlay as file-driven memfs layer: whiteout/tombstone semantics, transparent cross-boundary rename, OverlayEntryKind enum |
 | 2026-03-27 | @claude | Address PR #115 review: synthetic directories, policy-filtered readdir, mutation semantics table |
@@ -288,9 +289,12 @@ The RPC path includes its own `Hello { tag }` handshake and `request_id` for pip
 All paths converge at server.handle_op(), where:
 
 1. Policy check:    policy.check(op, tag, path) → Allow or Err(errno)
-2. Overlay check:   overlay.resolve(tag, path) → Some((layer, bytes)) or None
-3. If overlaid:     return in-memory content (read) or update layer (write)
-   If not overlaid: host FS op via std::fs::{read, write, stat, ...}
+2. Overlay check:   overlay.resolve(tag, path) → Some((layer, entry_kind))
+3. Match entry_kind:
+     Content(bytes) → return in-memory content (read) or update layer (write)
+     Whiteout       → return ENOENT (disk file suppressed)
+     SyntheticDir   → return synthetic directory attrs/entries
+     None           → fall through to host FS op via std::fs
 4. Event emit:      event_tx.try_send(FsEvent { tag, op, path, bytes })
 5. Return:          FsResult
 ```
@@ -1694,38 +1698,45 @@ per-session generation).
 ```
 read("/root/projects/README.md")
   → overlay.resolve("home", "/projects/README.md") → None
-  → std::fs::read("~/alice/projects/README.md")     ← disk
+  → fall through to std::fs::read("~/alice/projects/README.md")  ← disk
 
 read("/root/.ssh/id_ed25519")
-  → overlay.resolve("home", "/.ssh/id_ed25519") → Some(("credentials", key_bytes))
-  → return key_bytes                              ← in-memory, never touches disk
+  → overlay.resolve("home", "/.ssh/id_ed25519") → Some(("credentials", Content(key_bytes)))
+  → return key_bytes from memfs layer                             ← in-memory, never touches disk
 
 read("/root/.env")
-  → overlay.resolve("home", "/.env") → Some(("credentials", env_bytes))
-  → return env_bytes                  ← synthetic file, ~/alice/.env doesn't exist
+  → overlay.resolve("home", "/.env") → Some(("credentials", Content(env_bytes)))
+  → return env_bytes from memfs layer                             ← synthetic file, no disk backing
 
 write("/root/.ssh/known_hosts", new_entry)
-  → overlay resolves "/.ssh/known_hosts" → exists in "credentials" layer
-  → write updates the in-memory layer    ← disk untouched
+  → overlay.resolve("home", "/.ssh/known_hosts") → Some(("credentials", Content(_)))
+  → update Content entry in "credentials" layer                   ← disk untouched
 
 write("/root/projects/src/main.rs", code)
   → overlay.resolve("home", "/projects/src/main.rs") → None
-  → std::fs::write("~/alice/projects/src/main.rs")   ← goes to disk
+  → fall through to std::fs::write("~/alice/projects/src/main.rs")  ← goes to disk
 
 ls("/root/")
   → readdir on host: ~/alice/ → [projects, .config, .bashrc, documents, ...]
-  → overlay entries for "home" at depth 1: [.ssh, .env]
-  → merge per-name: .ssh exists on both? overlay entry wins for that name
+  → overlay entries for "home" at depth 1: [.ssh (SyntheticDir), .env (Content)]
+  → merge per-name: .ssh exists on both? overlay SyntheticDir wins
   →                  .env only in overlay? synthetic entry added
+  → policy filter: all pass (no policy on /root/)
   → result: [projects, .config, .bashrc, documents, .ssh, .env, ...]
 
-ls("/root/.ssh/")
+ls("/root/.ssh/")  — with SshLockdown policy active:
+  → overlay.resolve("home", "/.ssh") → Some(("credentials", SyntheticDir))
   → readdir on host: ~/alice/.ssh/ → [known_hosts, old_config]
   → overlay entries at /.ssh/*: [id_ed25519, id_ed25519.pub, config, authorized_keys]
-  → merge per-name: config exists on both? overlay wins
-  →                  known_hosts only on disk? passes through
-  →                  id_ed25519 only in overlay? synthetic entry added
+  → merge per-name: overlay entries + disk entries
+  → policy filter: SshLockdown denies disk-only entries (known_hosts, old_config)
+  → result: [id_ed25519, id_ed25519.pub, config, authorized_keys]
+     (only overlay-backed files visible — disk files filtered by policy)
+
+ls("/root/.ssh/")  — without policy (unfiltered baseline):
+  → same merge as above, but no policy filtering
   → result: [known_hosts, old_config, id_ed25519, id_ed25519.pub, config, authorized_keys]
+     (disk files pass through alongside overlay entries)
 ```
 
 **readdir merging with overlay and policy filtering:**
@@ -1744,33 +1755,37 @@ When `handle_op()` processes a `Readdir`, it merges entries and then filters:
 
 ### Overlay Scope: File-Level Granularity
 
-The overlay operates at **file granularity**. Each `put()` targets a specific file path.
-`readdir` merges disk and overlay entries per-file:
+The overlay operates at **file granularity**. Each `put()` inserts a file node in the
+memfs layer. `readdir` merges disk and overlay entries per-file, then applies policy:
 
 ```
-readdir("/.ssh/")
+readdir("/.ssh/") — unfiltered baseline (no policy):
   disk entries from ~/alice/.ssh/:  [known_hosts, old_config]
   overlay entries at /.ssh/*:       [id_ed25519, id_ed25519.pub, config, authorized_keys]
 
-  merge rules:
-    - overlay entry shadows disk entry with the same name (config replaces old_config? no,
-      "config" shadows disk "config" if both exist; "old_config" passes through)
-    - disk entries not shadowed by overlay pass through unchanged
-    - overlay entries with no disk counterpart appear as synthetic files
+  merge: overlay Content shadows disk entry with same name; disk entries without
+         overlay counterpart pass through; overlay-only entries are synthetic.
 
   result: [known_hosts, old_config, id_ed25519, id_ed25519.pub, config, authorized_keys]
+
+readdir("/.ssh/") — with SshLockdown policy:
+  same merge, then policy.check(Readdir, tag, child_path) per entry:
+    known_hosts → not in overlay → denied → excluded
+    old_config  → not in overlay → denied → excluded
+
+  result: [id_ed25519, id_ed25519.pub, config, authorized_keys]
 ```
 
-This allows mixed directories: some files from disk, some from overlay, in the same
-directory listing. An overlaid file shadows only that file; siblings are unaffected.
+Without policy, mixed directories work: some files from disk, some from overlay. An
+overlaid file shadows only that file; disk siblings pass through.
 
-**Security via policy, not overlay:**
+**For credential paths, use policy to enforce isolation:**
 
-If a caller wants full control over a directory (e.g., no unexpected disk files in `.ssh/`),
-that's a policy concern, not an overlay concern. Use `PolicyFn` to block access to
-non-overlaid files within sensitive directories. Because `policy.check()` is called for
-each `Readdir` entry (step 6 above), denied entries are excluded from directory listings
-as well as from direct access:
+The unfiltered baseline above shows disk files leaking into `.ssh/`. For credential
+isolation, callers should combine the overlay with a lockdown policy. The overlay
+provides content injection; the policy enforces visibility. `policy.check()` is called
+for each `Readdir` entry (step 6 in the merge logic), so denied entries are excluded
+from both directory listings and direct access:
 
 ```rust
 struct SshLockdown { overlay: Arc<MemOverlay> }
