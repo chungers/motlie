@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-28 | @claude | Reframe overlay as file-driven memfs layer: whiteout/tombstone semantics, transparent cross-boundary rename, OverlayEntryKind enum |
 | 2026-03-27 | @claude | Address PR #115 review: synthetic directories, policy-filtered readdir, mutation semantics table |
 | 2026-03-27 | @claude | Initial DESIGN: composable architecture (core + vsock + rpc), file-level in-memory overlay with layered injection, pluggable control frontends (Unix socket / HTTP / in-process), VMM guest integration with SSH overlay example, alternatives analysis |
 
@@ -298,10 +299,16 @@ Events are emitted regardless of whether the content came from overlay or disk.
 Events are emitted via `try_send` on a broadcast channel -- non-blocking, lossy under
 backpressure (callers who care about completeness must keep up).
 
-### In-Memory Overlay (Layered)
+### In-Memory Overlay (File-Driven Memfs Layer)
 
-The overlay sits inside `FsServer`, between policy enforcement and host filesystem access.
-Multiple named layers stack by priority; resolution is top-down (highest priority first).
+The overlay is a lightweight in-memory filesystem layer inside `FsServer`. It is not a
+simple path→bytes map: it is a **file-driven memfs** where injecting a file via `put()`
+automatically induces the necessary parent directory hierarchy in memory. The caller only
+specifies file paths; the overlay materializes synthetic directories, inodes, attrs, and
+readdir behavior without anything touching host disk.
+
+The overlay sits between policy enforcement and host filesystem access. Multiple named
+layers stack by priority; resolution is top-down (highest priority first).
 
 ```
 handle_op(tag, FsOp::Read { inode, .. })
@@ -311,6 +318,7 @@ handle_op(tag, FsOp::Read { inode, .. })
     ├─ overlay layer "hotpatch" (priority 100) → hit? return in-memory content
     ├─ overlay layer "user"     (priority 10)  → hit? return in-memory content
     ├─ overlay layer "defaults" (priority 0)   → hit? return in-memory content
+    │    (entries can be: Content(bytes), Whiteout, or SyntheticDir)
     │
     └─ disk (base)                             → std::fs::read()
     │
@@ -318,58 +326,97 @@ handle_op(tag, FsOp::Read { inode, .. })
 ```
 
 **Layer semantics:**
-- Each layer is a named, ordered collection of `(tag, path) → Bytes` entries.
+- Each layer is a named, ordered collection of `(tag, path) → Entry` mappings.
+- An `Entry` is one of: `Content(Bytes)` (file data), `Whiteout` (suppresses disk file),
+  or `SyntheticDir` (directory that exists only in memory).
 - Layers are created with an explicit priority (`u32`). Higher wins.
-- `put()` on a layer sets or replaces content for a `(tag, path)` pair.
+- `put()` on a layer sets or replaces content for a `(tag, path)` pair and automatically
+  creates `SyntheticDir` entries for any missing parent directories.
 - `remove()` on a layer deletes one entry; `remove_layer()` drops all entries.
 - Resolution: for a given `(tag, path)`, walk layers highest-to-lowest, return first hit.
-  If no layer has it, fall through to disk.
+  - `Content(bytes)` → return the in-memory content
+  - `Whiteout` → return `ENOENT` (hides disk file below)
+  - `SyntheticDir` → return directory inode/attrs
+  - No hit → fall through to disk.
 
 **Synthetic files and directories:**
 - An overlay entry for a path that doesn't exist on disk creates a synthetic file.
   It appears in `readdir` alongside real directory entries. `lookup` and `getattr` return
   the overlay's metadata (size from content length, mtime from injection time, mode 0644).
-- Removing the overlay entry makes the synthetic file disappear.
-- **Implicit synthetic directories:** When overlay entries exist under a path whose parent
-  directory does not exist on disk, the server creates synthetic directory inodes for each
-  missing ancestor. For example, `put("layer", "home", "/.ssh/id_ed25519", key)` implicitly
-  creates a synthetic `/.ssh/` directory if `~/alice/.ssh/` does not exist on the host.
+- **Implicit synthetic directories:** When `put()` injects a file, the overlay recursively
+  materializes any missing parent directories as `SyntheticDir` entries in memory. For
+  example, `put("layer", "home", "/.ssh/id_ed25519", key)` implicitly creates a
+  `SyntheticDir` entry for `/.ssh/` if `~/alice/.ssh/` does not exist on the host.
   The synthetic directory has mode 0755, mtime from the first child injection, and appears
   in its parent's `readdir`. `lookup("/.ssh")` returns a directory inode.
 - `readdir` on a synthetic directory returns only overlay entries (there are no disk entries
   to merge, since the directory doesn't exist on disk). `readdir` on a disk directory that
   also has overlay children merges both per-file as described above.
+- Synthetic directories are reference-counted: they are removed automatically when the last
+  child entry in the layer is removed.
 
 **Write behavior:**
 - Writes to an overlaid path update the highest-priority layer that owns that path.
 - Writes to a non-overlaid path go to disk.
 - A future "capture" layer mode could intercept all writes, but this is out of scope.
 
+**Whiteout semantics:**
+
+A whiteout is an overlay entry that suppresses a disk file. It makes the disk file
+invisible to `lookup`, `getattr`, `readdir`, and `open` — as if the file does not exist.
+Whiteouts are created automatically by `unlink` on shadowed files (see mutation table).
+They can also be created explicitly via the API for pre-emptive suppression.
+
+```
+resolve(tag, path):
+  → Content(bytes)   → serve in-memory content
+  → Whiteout         → return ENOENT (disk file hidden)
+  → SyntheticDir     → return directory inode
+  → None             → fall through to disk
+```
+
 **Mutation semantics:**
 
-Operations on overlay-backed paths must have well-defined behavior. The rules follow
-the principle: overlay entries live in memory, disk entries live on disk, and cross-boundary
-operations are rejected.
+Operations on overlay-backed paths follow filesystem-consistent behavior. The key
+principles: (1) deleting a visible file makes it disappear — it never resurrects hidden
+content, (2) renames across the overlay↔disk boundary are handled transparently to
+support editor atomic-save flows, (3) the overlay behaves like a real filesystem layer,
+not a cache.
 
 | Operation | Target | Behavior |
 |-----------|--------|----------|
 | `Unlink` | Synthetic file | Remove overlay entry. File vanishes. |
-| `Unlink` | Shadowed file (overlay over disk) | Remove overlay entry. Disk file reappears. Use policy to prevent if undesired. |
+| `Unlink` | Shadowed file (overlay over disk) | Replace overlay `Content` entry with `Whiteout`. File disappears; disk file stays hidden. |
+| `Unlink` | Whiteout | Return `ENOENT` (already deleted). |
 | `Unlink` | Disk-only file | Normal `std::fs::remove_file()`. |
-| `Create` | Under synthetic directory | Create in overlay (in-memory). |
-| `Create` | Under disk directory | Normal `std::fs::create()` on disk. |
-| `Mkdir` | Under synthetic parent | Create synthetic directory in overlay. |
+| `Create` | Under synthetic directory | Create `Content` entry in overlay (in-memory). |
+| `Create` | Under disk directory (no overlay children) | Normal `std::fs::create()` on disk. |
+| `Create` | Under disk directory (has overlay children) | Create `Content` entry in overlay (in-memory). Keeps overlay-managed paths consistent. |
+| `Mkdir` | Under synthetic parent | Create `SyntheticDir` entry in overlay. |
 | `Mkdir` | Under disk parent | Normal `std::fs::create_dir()` on disk. |
-| `Rmdir` | Synthetic directory (empty) | Remove from overlay. |
+| `Rmdir` | Synthetic directory (empty) | Remove `SyntheticDir` from overlay. |
 | `Rmdir` | Disk directory | Normal `std::fs::remove_dir()`. |
-| `Rename` | Overlay → same overlay dir | Rename within overlay (in-memory). |
-| `Rename` | Disk → same disk dir | Normal `std::fs::rename()`. |
-| `Rename` | Overlay ↔ disk (cross-boundary) | Return `EXDEV`. Like cross-device rename in overlayfs. |
+| `Rename` | Overlay → overlay | Rename within overlay (in-memory). |
+| `Rename` | Disk → disk | Normal `std::fs::rename()`. |
+| `Rename` | Disk → overlay target | Read disk source content, update overlay entry at target, `std::fs::remove_file()` disk source. Editor atomic-save compatible. |
+| `Rename` | Overlay source → disk target | Write overlay content to disk at target path, remove overlay entry for source. |
 | `Setattr` | Overlaid/synthetic file | Update in-memory attrs. |
 | `Setattr` | Disk file | Normal `std::fs` operation. |
 
-The `EXDEV` on cross-boundary rename is intentional: moving a file between memory and disk
-has unclear persistence semantics. Callers that need this should copy + delete explicitly.
+**Why transparent cross-boundary rename (not EXDEV):**
+
+The stated target workload is coding tools (editors, compilers, git). Editors perform
+atomic saves by writing to a temp file and renaming over the target:
+
+```
+vim writes /root/.ssh/config.tmp     (new file — created in overlay because .ssh has overlay children)
+vim renames config.tmp → config      (overlay → overlay rename — works)
+```
+
+If the temp file is created on disk (e.g., in a non-overlay directory), the rename is
+disk→overlay. Rather than returning `EXDEV` (which breaks the editor flow), the server
+handles this transparently: read the disk source, write into the overlay target, delete
+the disk source. From the editor's perspective, the rename succeeded normally.
 
 ## Crate Structure
 
@@ -536,13 +583,28 @@ impl PolicyFn for AllowAll {
 
 ### In-Memory Overlay API
 
-The overlay is part of server-core (always available when FsServer is compiled). No
-additional feature flag required.
+The overlay is a file-driven memfs layer, part of server-core (always available when
+FsServer is compiled). No additional feature flag required.
+
+Callers inject files; the overlay materializes synthetic parent directories automatically.
+The data model tracks three entry types: `Content(Bytes)`, `Whiteout`, and `SyntheticDir`.
 
 ```rust
-/// Layered in-memory content overlay.
+/// File-driven in-memory filesystem layer.
+/// Injecting a file automatically materializes synthetic parent directories.
 /// Accessed via server.overlay().
 pub struct MemOverlay { /* ... */ }
+
+/// What an overlay entry contains.
+#[derive(Clone, Debug)]
+pub enum OverlayEntryKind {
+    /// File content (injected via put() or captured from writes).
+    Content(Bytes),
+    /// Suppresses a disk file — makes it invisible (created by unlink on shadowed files).
+    Whiteout,
+    /// Directory that exists only in memory (created implicitly by put() for missing parents).
+    SyntheticDir,
+}
 
 impl MemOverlay {
     // --- Layer management ---
@@ -551,7 +613,7 @@ impl MemOverlay {
     /// Higher priority layers shadow lower ones.
     pub fn put_layer(&self, name: &str, priority: u32) -> Result<()>;
 
-    /// Remove a layer and all its entries.
+    /// Remove a layer and all its entries (including whiteouts and synthetic dirs).
     pub fn remove_layer(&self, name: &str) -> Result<()>;
 
     /// List all layers, ordered by priority (highest first).
@@ -559,11 +621,17 @@ impl MemOverlay {
 
     // --- Content management (within a layer) ---
 
-    /// Set in-memory content for a path within a mount tag.
-    /// Creates a synthetic file if path doesn't exist on disk.
+    /// Inject a file into the overlay.  Automatically creates SyntheticDir entries
+    /// for any missing parent directories in this layer.
+    /// If the path already has an entry (Content, Whiteout, or SyntheticDir), replaces it.
     pub fn put(&self, layer: &str, tag: &str, path: &str, content: Bytes) -> Result<()>;
 
-    /// Remove one overlay entry.  Falls back to disk (or disappears if synthetic).
+    /// Create a whiteout entry that suppresses a disk file.
+    pub fn whiteout(&self, layer: &str, tag: &str, path: &str) -> Result<()>;
+
+    /// Remove one overlay entry.  For Content/Whiteout: file falls back to disk
+    /// (or disappears if synthetic).  Synthetic parent dirs are removed if they
+    /// have no remaining children.
     pub fn remove(&self, layer: &str, tag: &str, path: &str) -> Result<()>;
 
     /// Read the content stored in a specific layer (for debugging/inspection).
@@ -575,8 +643,8 @@ impl MemOverlay {
     // --- Resolved view (what handle_op() sees) ---
 
     /// Resolve a path: walk layers highest-to-lowest, return first hit.
-    /// Returns (layer_name, content).  None means fall through to disk.
-    pub fn resolve(&self, tag: &str, path: &str) -> Option<(String, Bytes)>;
+    /// Returns the entry kind. None means fall through to disk.
+    pub fn resolve(&self, tag: &str, path: &str) -> Option<(String, OverlayEntryKind)>;
 
     /// List all effective overlays for a tag (one entry per path, from the
     /// highest-priority layer that owns it).
