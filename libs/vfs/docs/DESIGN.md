@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-28 | @codex-pm | Resolve implementer questions from PR #117: rename event op type, specify v1 symlink/file-handle/runner/whiteout/write-buffer behavior, and make inspection views metadata-only |
 | 2026-03-28 | @codex-pm | Address PR #117 review feedback: remove stale v1 CLI references, clarify `apply_batch` tag scoping, tighten synthetic-parent and rename semantics, and fix wording around immutable lower layers |
 | 2026-03-28 | @codex-pm | Reframe the project headline around layered guest filesystem composition instead of transport-agnostic plumbing |
 | 2026-03-28 | @codex-pm | Make the bootstrap/guest-agent boundary explicit: bootstrap and binary delivery stay VMM-owned, while the reusable guest mounter is built on public guest-side APIs in `client/` and `vsock/` |
@@ -992,7 +993,7 @@ All paths converge at server.handle_op(), where:
      Whiteout       → return ENOENT (lower-layer entry suppressed)
      SyntheticDir   → return synthetic directory attrs/entries
      None           → continue downward; if no layer resolves, return ENOENT
-4. Event emit:      event_tx.try_send(FsEvent { tag, op, path, bytes })
+4. Event emit:      event_tx.try_send(FsEvent { tag, op_kind, path, bytes })
 5. Return:          FsResult
 ```
 
@@ -1107,18 +1108,37 @@ This `(tag, path)` keying has an important scoping implication:
 - Writes to a non-overlaid path go to disk.
 - A future "capture" layer mode could intercept all writes, but this is out of scope.
 
+**Overlay file handles and writes:**
+
+- overlay-backed opens return synthetic file handles allocated from a per-mount counter
+- server state keeps an `fh -> inode` mapping for overlay-backed opens
+- `Read { fh, ... }` and `Write { fh, ... }` resolve through that mapping
+- `Release { fh }` drops the mapping
+- `Fsync { fh, .. }` on an overlay-backed file is a no-op that returns `Ok`
+- v1 does not pin old overlay content at `Open` time; reads through an already-open overlay `fh`
+  see the latest effective content for that inode/path at request time
+- the published snapshot representation uses `Bytes`, but write-side mutation may use a mutable
+  buffer internally (for example `Vec<u8>`) and freeze back to `Bytes` at publish time
+
 **Whiteout semantics:**
 
-A whiteout is a memfs-layer entry that suppresses a lower-layer file. In v1 the lower layer is
-often disk-backed, but the whiteout semantics are stack-generic. It makes the lower-layer file
-invisible to `lookup`, `getattr`, `readdir`, and `open` — as if the file does not exist.
+A whiteout is a memfs-layer entry that suppresses a lower-layer entry. In v1 the lower layer is
+often disk-backed, but the whiteout semantics are stack-generic. It makes the lower-layer entry
+invisible to `lookup`, `getattr`, `readdir`, and `open` — as if the entry does not exist.
 Whiteouts are created automatically by `unlink` on shadowed files (see mutation table).
 They can also be created explicitly via the API for pre-emptive suppression.
+
+v1 whiteout scope:
+
+- whiteouts may suppress files or empty directories
+- `whiteout()` may target a path that resolves to either kind of lower-layer entry
+- v1 does not define recursive directory masking for non-empty lower-layer directories; callers
+  that need to hide a populated subtree should whiteout individual entries or use policy filtering
 
 ```
 resolve(tag, path):
   → Content(bytes)   → serve in-memory content
-  → Whiteout         → return ENOENT (lower-layer file hidden)
+  → Whiteout         → return ENOENT (lower-layer entry hidden)
   → SyntheticDir     → return directory inode
   → None             → continue to the base layer
 ```
@@ -1140,9 +1160,12 @@ not a cache.
 | `Create` | Under synthetic directory | Create `Content` entry in the designated writable memfs layer. If a memfs layer owns the nearest visible ancestor, that layer receives the new file; otherwise the highest-priority writable memfs layer for the mount captures it. |
 | `Create` | Under disk directory (no overlay children) | Normal `std::fs::create()` on disk. |
 | `Create` | Under disk directory (has overlay children) | Create `Content` entry in the designated writable memfs layer. Keeps overlay-managed paths consistent. |
+| `Symlink` | Under synthetic or overlay-managed parent | Return `ENOTSUP` in v1. Symlinks are base-layer-only in v1. |
+| `Readlink` | Overlay-managed inode | Return `ENOTSUP` in v1. |
 | `Mkdir` | Under synthetic parent | Create `SyntheticDir` entry in the designated writable memfs layer. |
 | `Mkdir` | Under disk parent | Normal `std::fs::create_dir()` on disk. |
 | `Rmdir` | Synthetic directory (empty) | Remove `SyntheticDir` from overlay. |
+| `Rmdir` | Shadowed empty lower-layer directory | Create a directory whiteout in the designated writable memfs layer so the lower directory stays hidden. |
 | `Rmdir` | Disk directory | Normal `std::fs::remove_dir()`. |
 | `Rename` | Overlay → overlay (same memfs layer) | Rename within that memfs layer (in-memory). |
 | `Rename` | Disk → disk | Normal `std::fs::rename()`. |
@@ -1293,15 +1316,15 @@ v1 forward-compatibility constraint:
 pub struct FsEvent {
     pub timestamp: SystemTime,
     pub tag: String,
-    pub op: FsOp,
+    pub op_kind: FsOpKind,
     pub path: String,
     pub bytes: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum FsOp {
+pub enum FsOpKind {
     Lookup, Getattr, Open, Read, Write, Create,
-    Mkdir, Unlink, Rmdir, Rename, Symlink, Readlink,
+    Mkdir, Unlink, Rmdir, Rename, Symlink, Readlink, Release, Fsync, Statfs,
 }
 ```
 
@@ -1327,6 +1350,18 @@ impl PolicyFn for AllowAll {
     }
 }
 ```
+
+### Async Runtime Note
+
+`FsServer::handle_op()` is intentionally synchronous at the core API boundary. In v1 the base
+layer uses blocking `std::fs` operations, so async callers should treat `handle_op()` as
+blocking work.
+
+Required guidance for async composites:
+
+- async runtimes such as Tokio should invoke `handle_op()` via `spawn_blocking` or an equivalent
+  blocking-worker strategy
+- the core crate should not assume that an async runtime is always present
 
 ### In-Memory Overlay API
 
@@ -1369,14 +1404,22 @@ programmatic introspection — they do not expose the full internal tree structu
 /// Accessed via server.overlay().
 pub struct MemOverlay { /* ... */ }
 
-/// What an overlay entry contains.
+/// What an overlay entry contains in the internal memfs model.
 #[derive(Clone, Debug)]
 pub enum OverlayEntryKind {
     /// File content (injected via put() or captured from writes).
     Content(Bytes),
-    /// Suppresses a disk file — makes it invisible (created by unlink on shadowed files).
+    /// Suppresses a lower-layer entry — makes it invisible.
     Whiteout,
     /// Directory that exists only in memory (created implicitly by put() for missing parents).
+    SyntheticDir,
+}
+
+/// Metadata-only view used by list_layer()/list_effective().
+#[derive(Clone, Debug)]
+pub enum OverlayEntryViewKind {
+    Content { size: usize },
+    Whiteout,
     SyntheticDir,
 }
 
@@ -1439,7 +1482,7 @@ impl MemOverlay {
         content: Bytes,
     ) -> Result<()>;
 
-    /// Create a whiteout entry that suppresses a lower-layer file.
+    /// Create a whiteout entry that suppresses a lower-layer entry.
     /// `path` is mount-relative and must begin with `/`.
     pub fn whiteout(&self, layer: &str, tag: &str, path: &str) -> Result<()>;
 
@@ -1483,7 +1526,7 @@ pub struct LayerInfo {
 #[derive(Debug, Clone)]
 pub struct OverlayEntry {
     pub path: String,
-    pub kind: OverlayEntryKind,
+    pub kind: OverlayEntryViewKind,
     pub inode: u64,
     pub size: usize,                // 0 for Whiteout and SyntheticDir
     pub mode: u32,
@@ -1496,7 +1539,7 @@ pub struct OverlayEntry {
 pub struct EffectiveEntry {
     pub path: String,
     pub layer: String,
-    pub kind: OverlayEntryKind,
+    pub kind: OverlayEntryViewKind,
     pub inode: u64,
     pub size: usize,
     pub mode: u32,
@@ -1505,10 +1548,11 @@ pub struct EffectiveEntry {
 }
 ```
 
-Note: `OverlayEntry` and `EffectiveEntry` are flattened inspection views. The internal
-model is a tree of inode-allocated nodes with parent linkage and refcounting for synthetic
-directories. These structs project that tree into flat lists for embedded admin views,
-debugging, and programmatic introspection.
+Note: `OverlayEntry` and `EffectiveEntry` are metadata-only flattened inspection views.
+The internal model is a tree of inode-allocated nodes with parent linkage and refcounting
+for synthetic directories. These structs project that tree into flat lists for embedded
+admin views, debugging, and programmatic introspection without returning full file contents.
+Callers that need file data should use `get()` for a specific `(layer, tag, path)`.
 
 Wired into FsServer:
 
@@ -2350,6 +2394,15 @@ This means:
 - a future `motlie-vmm-guest` binary should also be a thin wrapper over `client::guest`
 - the tiny bootstrap binary, binary-delivery path, and VMM handshake multiplexer remain outside
   `libs/vfs`
+
+`GuestMountRunner` contract for v1:
+
+- `mount_all()` spawns one thread per `GuestMountSpec`
+- each thread obtains a transport via the caller-supplied connector, constructs `FuseClient`,
+  and then calls `fuser::mount2()`
+- `mount_all()` returns after all mount threads are started, with a handle set the caller can
+  manage or join later
+- the caller still owns any control-loop or process lifecycle above the started mounts
 
 ### Guest Agent Code with motlie-vfs
 
