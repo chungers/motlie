@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-28 | @codex-pm | Address PR #117 review feedback: remove stale v1 CLI references, clarify `apply_batch` tag scoping, tighten synthetic-parent and rename semantics, and fix wording around immutable lower layers |
 | 2026-03-28 | @codex-pm | Reframe the project headline around layered guest filesystem composition instead of transport-agnostic plumbing |
 | 2026-03-28 | @codex-pm | Make the bootstrap/guest-agent boundary explicit: bootstrap and binary delivery stay VMM-owned, while the reusable guest mounter is built on public guest-side APIs in `client/` and `vsock/` |
 | 2026-03-28 | @codex-pm | Treat the guest-side mounter as a real v1 binary: move it from `examples/` to `src/bin/motlie-vfs-guest.rs` and make image-build order explicit |
@@ -673,13 +674,14 @@ Implications:
 - they must not see only one or two of those files from that batch
 - lower-layer disk behavior remains whatever the host filesystem provides natively
 
-Deletion semantics must remain compatible with the immutable boot-image model:
+Deletion semantics must remain compatible with lower immutable layers when they exist:
 
-- if a file comes from a read-only squashfs-backed guest image (or any lower immutable layer), it
-  is **not physically deleted**
+- if a file comes from an immutable lower layer, it is **not physically deleted**
 - the supported delete/hide mechanism is a `Whiteout`/tombstone entry in the memfs overlay
 - from guest applications, that file appears absent
 - if the whiteout is later removed, the lower-layer file becomes visible again
+- in v1 the `motlie-vfs` base layer is writable host-backed storage; whiteouts remain useful when
+  the operator wants to hide a base-layer file without modifying the host tree
 
 ### Product Requirement: Transparency to Guest Applications
 
@@ -787,7 +789,7 @@ The roadmap must support three composition modes from a single server core:
 Roadmap split:
 
 - `v1`: direct + vsock
-- `v1.5`: direct + embedded admin workflows
+- `v1.5`: v1 capabilities + embedded admin workflows
 - `v2`: remote/framed protocol path
 
 Each composite reuses the same `FsServer` core (inode table, host FS ops, events, policy).
@@ -1007,7 +1009,8 @@ in-memory filesystem layer model with inode allocation, directory traversal, met
 and mutation support.
 
 - `put()` inserts or replaces a file node in the memfs layer.
-- Any missing ancestors are materialized as synthetic directories in memory.
+- Any ancestors missing from the effective stack for that tag are materialized as synthetic
+  directories in memory.
 - Directory traversal and metadata for synthetic directories are served entirely from
   the memfs layer — nothing is forced onto host disk.
 - Memfs layers share the mount's inode namespace: synthetic directory inodes and
@@ -1041,7 +1044,9 @@ handle_op(tag, FsOp::Read { inode, .. })
   or `SyntheticDir` (directory that exists only in memory).
 - Layers are created with an explicit priority (`u32`). Higher wins.
 - `put()` on a layer sets or replaces content for a `(tag, path)` pair and automatically
-  creates `SyntheticDir` entries for any missing parent directories.
+  creates `SyntheticDir` entries only for parent directories missing from the effective stack
+  for that tag. If a parent directory already exists in a lower layer, no synthetic parent entry
+  is created for that segment.
 - `remove()` on a layer deletes one entry; `remove_layer()` drops all entries.
 - Resolution: for a given `(tag, path)`, walk layers highest-to-lowest, then the base layer.
   - `Content(bytes)` → return the in-memory content
@@ -1076,9 +1081,11 @@ This `(tag, path)` keying has an important scoping implication:
   the overlay's metadata (size from content length, mtime from injection time, mode plus
   numeric `uid`/`gid`).
 - **Implicit synthetic directories:** When `put()` injects a file, the overlay recursively
-  materializes any missing parent directories as `SyntheticDir` entries in memory. For
-  example, `put("layer", "home", "/.ssh/id_ed25519", key)` implicitly creates a
-  `SyntheticDir` entry for `/.ssh/` if `~/alice/.ssh/` does not exist on the host.
+  materializes only parent directories missing from the effective stack for that tag as
+  `SyntheticDir` entries in memory. For example,
+  `put("layer", "home", "/.ssh/id_ed25519", key)` implicitly creates a `SyntheticDir`
+  entry for `/.ssh/` only if no higher-priority memfs layer and no base-layer directory already
+  provides `/.ssh/`.
   The synthetic directory has mode 0755, mtime from the first child injection, and appears
   in its parent's `readdir`. `lookup("/.ssh")` returns a directory inode.
 - `readdir` on a synthetic directory returns only overlay entries (there are no disk entries
@@ -1129,22 +1136,23 @@ not a cache.
 | `Unlink` | Synthetic file | Remove overlay entry. File vanishes. |
 | `Unlink` | Shadowed file (memfs over lower layer) | Replace overlay `Content` entry with `Whiteout`. File disappears; lower-layer file stays hidden. |
 | `Unlink` | Whiteout | Return `ENOENT` (already deleted). |
-| `Unlink` | Disk-only file | Normal `std::fs::remove_file()`. |
-| `Create` | Under synthetic directory | Create `Content` entry in overlay (in-memory). |
+| `Unlink` | Base-layer-only file | Normal base-layer remove operation. |
+| `Create` | Under synthetic directory | Create `Content` entry in the designated writable memfs layer. If a memfs layer owns the nearest visible ancestor, that layer receives the new file; otherwise the highest-priority writable memfs layer for the mount captures it. |
 | `Create` | Under disk directory (no overlay children) | Normal `std::fs::create()` on disk. |
-| `Create` | Under disk directory (has overlay children) | Create `Content` entry in overlay (in-memory). Keeps overlay-managed paths consistent. |
-| `Mkdir` | Under synthetic parent | Create `SyntheticDir` entry in overlay. |
+| `Create` | Under disk directory (has overlay children) | Create `Content` entry in the designated writable memfs layer. Keeps overlay-managed paths consistent. |
+| `Mkdir` | Under synthetic parent | Create `SyntheticDir` entry in the designated writable memfs layer. |
 | `Mkdir` | Under disk parent | Normal `std::fs::create_dir()` on disk. |
 | `Rmdir` | Synthetic directory (empty) | Remove `SyntheticDir` from overlay. |
 | `Rmdir` | Disk directory | Normal `std::fs::remove_dir()`. |
-| `Rename` | Overlay → overlay | Rename within overlay (in-memory). |
+| `Rename` | Overlay → overlay (same memfs layer) | Rename within that memfs layer (in-memory). |
 | `Rename` | Disk → disk | Normal `std::fs::rename()`. |
-| `Rename` | Disk → overlay target | Read disk source content, update overlay entry at target, `std::fs::remove_file()` disk source. Editor atomic-save compatible. |
-| `Rename` | Overlay source → disk target | Write overlay content to disk at target path, remove overlay entry for source. |
+| `Rename` | Disk → overlay target | Supported in v1 for the editor atomic-save path only: read disk source content, update the target's writable memfs layer, then remove the disk source. |
+| `Rename` | Overlay source → disk target | Return `EXDEV` in v1. Callers must fall back to copy+delete if they need this path. |
+| `Rename` | Cross-layer cases not listed above | Return `EXDEV` in v1 unless source and target are in the same memfs layer. |
 | `Setattr` | Overlaid/synthetic file | Update in-memory attrs. |
 | `Setattr` | Disk file | Normal `std::fs` operation. |
 
-**Why transparent cross-boundary rename (not EXDEV):**
+**Why the v1 rename carve-out exists:**
 
 The stated target workload is coding tools (editors, compilers, git). Editors perform
 atomic saves by writing to a temp file and renaming over the target:
@@ -1155,9 +1163,9 @@ vim renames config.tmp → config      (overlay → overlay rename — works)
 ```
 
 If the temp file is created on disk (e.g., in a non-overlay directory), the rename is
-disk→overlay. Rather than returning `EXDEV` (which breaks the editor flow), the server
-handles this transparently: read the disk source, write into the overlay target, delete
-the disk source. From the editor's perspective, the rename succeeded normally.
+disk→overlay. v1 supports this specific path so editor atomic-save flows can work for
+overlay-managed targets: read the disk source, write into the overlay target, then delete
+the disk source. Other cross-layer rename cases remain out of scope for v1 and return `EXDEV`.
 
 ## Crate Structure
 
@@ -1383,19 +1391,16 @@ pub struct OverlayAttrs {
 pub enum OverlayMutation {
     Put {
         layer: String,
-        tag: String,
         path: String,
         attrs: Option<OverlayAttrs>,
         content: Bytes,
     },
     Whiteout {
         layer: String,
-        tag: String,
         path: String,
     },
     Remove {
         layer: String,
-        tag: String,
         path: String,
     },
 }
@@ -1415,8 +1420,8 @@ impl MemOverlay {
 
     // --- Content management (within a layer) ---
 
-    /// Inject a file into the overlay.  Automatically creates SyntheticDir entries
-    /// for any missing parent directories in this layer.
+    /// Inject a file into the overlay. Automatically creates SyntheticDir entries
+    /// for parent directories missing from the effective stack for this tag.
     /// If the path already has an entry (Content, Whiteout, or SyntheticDir), replaces it.
     /// `path` is mount-relative and must begin with `/`.
     /// Synthetic ownership defaults are inherited from the nearest existing parent
@@ -1447,6 +1452,8 @@ impl MemOverlay {
     /// Apply a batch atomically for one mount tag.
     /// Single-file mutations are represented as batches of size 1.
     /// Readers observe either the pre-batch or post-batch memfs snapshot for that tag.
+    /// `OverlayMutation` does not carry its own tag; the outer `tag` parameter is authoritative
+    /// and every operation in the batch is scoped to that tag.
     pub fn apply_batch(&self, tag: &str, ops: &[OverlayMutation]) -> Result<()>;
 
     /// Read the content stored in a specific layer (for debugging/inspection).
@@ -1535,6 +1542,14 @@ Required contract for that future v1.5 path:
   - `rmlayer`
   - `ls`
   - `lslayer`
+- command/API mapping for implementers:
+  - `put` -> `put()`
+  - `putattr` -> `put_with_attrs()`
+  - `whiteout` -> `whiteout()`
+  - `rm` -> `remove()`
+  - `rmlayer` -> `remove_layer()`
+  - `ls` -> `list_effective()`
+  - `lslayer` -> `list_layer()`
 - it supports batch ingestion from a script/config format so startup and reload flows are repeatable
 
 Detailed console UX and script/config format are deferred to a future design for the v1.5 workflow.
@@ -2190,23 +2205,23 @@ For example, a basic host test setup may create:
 - a subdirectory such as `./testdata/home/alice`
 - sample disk-backed files that can later be shadowed or whiteouted by the overlay
 
-**4. Overlay mutation procedures using the motlie-vfs CLI**
+**4. Overlay mutation procedures using the v1 embedded admin workflow**
 
-The documented v1 test path should include concrete CLI examples for:
+The documented v1 test path should include concrete embedded-admin examples for:
 
 - injecting a file:
-  - `motlie-vfs-ctl put ...`
+  - `put credentials alice-home /.ssh/authorized_keys ...`
 - injecting with explicit ownership:
-  - `motlie-vfs-ctl putattr ...`
+  - `putattr credentials alice-home /.ssh/authorized_keys 1000 1000 0600 ...`
 - creating a tombstone/whiteout:
-  - `motlie-vfs-ctl whiteout ...`
+  - `whiteout credentials alice-home /.ssh/old_config`
 - removing an injected entry:
-  - `motlie-vfs-ctl rm ...`
+  - `rm credentials alice-home /.ssh/config`
 - removing an entire layer:
-  - `motlie-vfs-ctl rmlayer ...`
+  - `rmlayer credentials`
 - inspecting effective overlay state:
-  - `motlie-vfs-ctl ls ...`
-  - `motlie-vfs-ctl lslayer ...`
+  - `ls alice-home /.ssh`
+  - `lslayer credentials alice-home`
 
 These procedures must cover both:
 
