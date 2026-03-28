@@ -4,6 +4,22 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-28 | @codex-pm | Make the bootstrap/guest-agent boundary explicit: bootstrap and binary delivery stay VMM-owned, while the reusable guest mounter is built on public guest-side APIs in `client/` and `vsock/` |
+| 2026-03-28 | @codex-pm | Treat the guest-side mounter as a real v1 binary: move it from `examples/` to `src/bin/motlie-vfs-guest.rs` and make image-build order explicit |
+| 2026-03-28 | @codex-pm | Resolve v1 crate-structure ambiguity: `client/fuse.rs` owns the guest-side `fuser` bridge, `client/guest.rs` owns guest mount orchestration, `vsock/` owns transport glue only, and `libs/vfs/examples/` now contains the host REPL/demo harness while the guest mounter lives in `src/bin/` |
+| 2026-03-28 | @codex-pm | Specify v1 memfs concurrency contract: batch-first API, atomic memfs snapshot publish per mount tag, non-memfs layers keep native semantics; add rejected crate evaluations for `vfs` and Theseus `memfs` |
+| 2026-03-28 | @codex-pm | Converge on a generic ordered layer-stack model: v1 = N memfs layers + 1 disk base per mount, with shared named memfs layers spanning multiple mount tags via `(layer, tag, relative path)` keys |
+| 2026-03-28 | @codex-pm | Add non-negotiable mount/backing abstraction guidance so v1 implementation cannot accidentally internalize a permanently disk-backed model |
+| 2026-03-28 | @codex-pm | Simplify roadmap tooling: v1 uses `rustyline`, v1.5 extends the embedded admin path with script/config batch ingestion, and v2 adds the first gRPC/RPC remote admin layer |
+| 2026-03-28 | @codex-pm | Reorganize around roadmap: v1 core crate + examples, v1.5 embedded admin console + script/config ingestion, v2 external gRPC/RPC app layer |
+| 2026-03-28 | @codex-pm | Expand v1 operational scope with explicit VM image, Cloud Hypervisor, host setup, and overlay CLI test procedures |
+| 2026-03-28 | @codex-pm | Clarify v1 VM target: guest path is vsock-only, and Cloud Hypervisor is the fastest dev/test harness before a full VMM exists |
+| 2026-03-28 | @codex-pm | Clarify frontend layering: core `MemOverlay` API first, v1/v1.5 remain embedded-admin oriented, HTTP/gRPC admin wrappers appear only in v2, and VMM in-process Tokio hosting is supported |
+| 2026-03-28 | @codex-pm | Add explicit synthetic-entry uid/gid contract, mount-relative path contract, and shared-guest ownership rules for API and future control frontends |
+| 2026-03-28 | @codex-pm | Clarify shared-overlay behavior for multi-user guest paths, including tag/path scoping, concurrency caveats, and v1 ownership limitations for synthetic entries |
+| 2026-03-28 | @codex-pm | Clarify compatibility with guest boot-image paths: partial overlay of existing dirs/files, app-specific runtime dirs, squashfs deletion via whiteout only |
+| 2026-03-28 | @codex-pm | Expand product requirements and guest-runtime use cases: operator-controlled mount layout, partial memfs injection, app-specific runtime directories |
+| 2026-03-28 | @codex-pm | Clarify VMM storage model: same squashfs + ext4 stacking over virtio-block, independent of raw vs qcow2 host image backing |
 | 2026-03-28 | @claude | v1 mount policy (direct_io), remove stale "cached" wording from inode model |
 | 2026-03-28 | @claude | v1 no-caching principle: zero TTL everywhere, no semantic caches, correctness-first, perf phase deferred |
 | 2026-03-28 | @claude | Spec-complete: memfs-aware inode model, cache/invalidation strategy, generation semantics, control-socket wire format |
@@ -30,6 +46,653 @@ valuable deployment models:
 The FS server and FUSE client need to be extracted into a standalone library with pluggable
 transports and cross-platform FUSE support.
 
+That extraction is not only about transport reuse. It is also about supporting a more
+expressive **guest runtime filesystem policy** than the current "static pass-through mount"
+model. In the target product, an operator must be able to choose at runtime:
+
+- which host directories are exposed into a guest as ordinary pass-through mounts
+- which guest-visible paths receive additional in-memory files or directories from the memfs layer
+- which paths remain pure disk pass-through
+- which applications or guest sessions receive specific injected directories such as `/.ssh`,
+  `/.claude`, `/.codex`, or `/.gh`
+
+The design therefore needs to support a mixed model where:
+
+- a guest path may already exist on disk and still receive selective in-memory file injection
+- a guest path may not exist on disk and be created entirely by the memfs layer
+- injected files shadow same-path disk files when present
+- non-overlaid files in the same mounted tree continue to pass through to disk
+- overlay contents can be added or removed while the guest is running
+- guest applications observe all of this through normal filesystem operations, without needing
+  application-specific integration
+
+The goal is not merely "remote filesystem access." The goal is **runtime composition of a guest
+filesystem view** from:
+
+- a boot/storage layer provided by the VMM (`squashfs` + `ext4` overlay for the guest root)
+- pass-through host-backed mounts such as `/workspace` or `/root`
+- dynamic in-memory per-path injections for credentials, tool config, or policy-controlled files
+
+## Architectural Layering and Roadmap
+
+This DESIGN is organized around three roadmap slices with intentionally different scope
+boundaries.
+
+### v1: `libs/vfs` Core Crate + Proof of Concept Examples
+
+v1 lives inside `libs/vfs` and targets the fastest proof of concept:
+
+- core Rust API:
+  - `FsServer`
+  - `MemOverlay`
+  - inode/path/policy/event handling
+- guest transport path for VMs:
+  - vsock only
+- guest mount path:
+  - `FuseClient` in `client/fuse.rs`
+  - backed by a vsock transport adapter from `vsock/`
+- proof-of-concept host/guest harness:
+  - simple in-process REPL or command loop
+  - file serving
+  - Cloud Hypervisor guest
+  - guest runs `sshd`
+  - guest mounts host-backed trees over vsock
+- repo location for the proof-of-concept harness:
+  - `libs/vfs/examples/`
+- REPL/tooling choice:
+  - use the lightweight `rustyline` crate for the v1 proof-of-concept REPL
+
+The v1 crate is library-first, but it is allowed to include example binaries and supporting
+README/documentation under `libs/vfs/examples/` to prove the architecture quickly. The host
+REPL lives in the host example binary; there is no separate v1 crate module for a REPL.
+
+### v1.5: Embedded Admin Console + Script / Config Ingestion
+
+v1.5 remains local and embedded. It does **not** add a remote admin interface.
+
+- stays in-process with the host/server embedding
+- continues to use the `MemOverlay` Rust API directly
+- improves operator ergonomics through:
+  - a stronger embedded terminal/admin console
+  - script/config-driven batch injection and reload
+  - repeatable startup/reload flows for injected files
+- keeps remote admin out of scope until v2
+
+### v2: External gRPC / RPC Application Layer
+
+v2 is a broader remote-control and integration layer.
+
+- lives **outside** `libs/vfs`
+- may provide:
+  - gRPC
+  - custom RPC
+  - richer remote admin/API services
+- includes a microservice API that can construct memfs file trees directly,
+  without relying on local disk-backed trees of the kind used in v1 and v1.5
+- is not part of the core crate boundary
+
+### Roadmap Gaps and Forward-Compatibility Requirements
+
+The roadmap is feasible, but two areas need to be called out explicitly so v1 implementation
+choices do not block later phases.
+
+**Gap 1: v1.5 console/script parity**
+
+v1.5 introduces two local operator paths over the same core crate:
+
+- an interactive embedded terminal/admin console
+- a script/config-driven batch ingestion path
+
+The risk is semantic drift: one path may expose slightly different command behavior,
+defaults, or error handling than the other.
+
+Required mitigation:
+
+- treat the mutation surface as a single abstract API first, then bind both local paths to it
+- define command semantics once in terms of core `MemOverlay` operations
+- require parity tests so both paths produce the same:
+  - success behavior
+  - error behavior
+  - path normalization
+  - ownership/mode handling
+  - listing/output semantics
+
+Design implication for v1:
+
+- keep core overlay operations small, explicit, and backend-agnostic
+- avoid baking REPL-only or script-only assumptions into `MemOverlay`
+
+**Gap 2: v2 diskless memfs-tree construction**
+
+v2 wants to construct memfs file trees without the local disk-backed mount assumptions used
+in v1 and v1.5. The current v1 design is still centered on:
+
+- `tag -> host_path` mount registration
+- fallback to `std::fs` when no overlay entry exists
+- ownership inheritance from the nearest existing parent or mount root in a mounted tree
+
+Those choices are acceptable for v1, but they are potential blockers if implemented too rigidly.
+
+Required mitigation:
+
+- keep the core notion of a mount abstract enough that a future mount may have:
+  - disk backing
+  - synthetic backing
+  - mixed backing
+- avoid hard-coding assumptions that every mount must have a real `host_path`
+- keep overlay node representation independent from direct `std::fs` calls wherever possible
+- isolate disk access behind server-core mount/backing logic rather than spreading `std::fs`
+  assumptions through overlay code
+- make ownership/default-attr logic pluggable enough that future synthetic-root mounts can
+  choose defaults without requiring a real disk parent
+
+Recommended future extension point:
+
+- v1 should conceptually preserve room for a mount backing enum such as:
+  - `Disk { host_path }`
+  - `SyntheticRoot`
+  - `Hybrid`
+
+This enum does **not** need to be implemented in v1, but v1 code should avoid making it
+impossible.
+
+Concrete v1 guidance:
+
+- acceptable in v1:
+  - `FsServerBuilder::mount(tag, host_path, read_only)`
+  - one disk-backed base layer at the bottom of each mount stack
+  - zero or more memfs layers stacked above it
+  - ownership inheritance from nearest real parent or mount root
+- avoid in v1:
+  - assuming `host_path` exists in every internal mount representation forever
+  - baking “no overlay hit means disk must exist” into public contracts instead of “keep walking the layer stack”
+  - coupling synthetic-node creation to host-path existence checks more than necessary
+
+### Non-Negotiable Implementation Guardrails
+
+To keep implementers from internalizing “every mount is disk-backed,” the v1 implementation
+must follow these rules:
+
+1. Treat **mount** and **backing** as separate concepts internally.
+   A mount tag is the stable namespace visible to clients. Its backing is an implementation
+   detail that may be disk-backed in v1 and non-disk-backed later.
+
+2. Do not model internal mount state as only:
+   `tag -> host_path`.
+   Even if the public builder takes `host_path` in v1, the internal server representation
+   must leave room for a future backing kind.
+
+3. Route all backing access through a narrow boundary.
+   `std::fs` calls must be concentrated behind mount/backing operations, not spread through
+   overlay, inode, policy, or FUSE translation code.
+
+4. Do not define public semantics as “overlay or disk” only.
+   Public semantics should be phrased as:
+   - overlay hit
+   - fallback to mount backing
+   where v1 backing happens to be disk-backed.
+
+5. Synthetic-node defaults must not require a real disk parent.
+   Ownership/mode defaulting may consult the nearest existing parent in v1, but the code path
+   must still admit a future synthetic-root default policy.
+
+6. Inode allocation must be backing-agnostic.
+   The inode table must not assume that every non-overlay inode corresponds to a host path on disk.
+
+7. Readdir/lookup/getattr merge logic must be phrased against overlay + backing.
+   The fact that v1 backing uses `std::fs` is an implementation detail, not the architectural model.
+
+8. Tests must enforce the abstraction.
+   Add explicit design guardrails and review checkpoints that reject implementations which leak
+   raw `host_path` assumptions into overlay internals or command semantics.
+
+### Ordered Layer-Stack Model
+
+The authoritative model for mount resolution is an ordered layer stack.
+
+For each guest mount point there is one mount tag, and for each mount tag there is one
+ordered stack of filesystem layers.
+
+In v1:
+
+- each mount stack contains:
+  - zero or more writable/readable memfs layers
+  - exactly one base disk-backed layer at the bottom
+- the final guest-visible mount point is the result of resolving operations through that stack
+
+For a guest with `M` mount points, the system has `M` independent stacks.
+
+#### Layer Contract
+
+Every layer in the stack must support the same logical contract, even if its implementation
+differs:
+
+- `lookup`
+- `getattr`
+- `read`
+- `readdir`
+- `create`
+- `write`
+- `mkdir`
+- `unlink`
+- `rmdir`
+- `rename`
+- `setattr`
+
+The layer contract is semantic, not necessarily a 1:1 public Rust trait in v1. What matters is
+that stack composition logic is written generically against “the next lower layer,” not against
+special knowledge of disk paths.
+
+Each layer may differ in capability or implementation detail:
+
+- memfs layer:
+  - stores `Content`, `SyntheticDir`, and `Whiteout`
+  - may synthesize parent directories
+  - typically acts as the writable top layer in v1
+- disk-backed layer:
+  - resolves against the host filesystem for v1
+  - acts as the base layer of the stack
+- future synthetic-root or hybrid layer:
+  - may provide a non-disk base for a stack in v2+
+
+#### Generic Resolution Semantics
+
+The stack semantics are generic and must not be described as special-casing “overlay vs disk.”
+
+`lookup` / `getattr` / `read`:
+
+- walk from highest-priority layer to lowest-priority layer
+- the first `Content` or `SyntheticDir` match wins
+- the first `Whiteout` match wins as hidden / `ENOENT`
+- if no layer resolves the path, return `ENOENT`
+
+`readdir`:
+
+- start from the lowest-priority layer’s directory entries
+- apply each higher-priority layer in order
+- `Content` / `SyntheticDir` entries add or replace by name
+- `Whiteout` removes the name from the merged set
+- after merge, policy may filter the effective entries
+
+`unlink`:
+
+- if the visible target exists only in the top writable memfs layer, remove it there
+- if the visible target shadows lower-layer content, create or retain a `Whiteout` in the
+  writable memfs layer so the lower entry remains hidden
+
+`rename`:
+
+- is defined as stack-level behavior, not as a disk-specific escape hatch
+- cross-layer rename may require copy-up / materialize / remove behavior depending on which
+  layers currently provide source and target
+
+#### Shared Named Memfs Layers Across Mount Stacks
+
+Memfs layers are named and may be shared across multiple mount tags.
+
+The identity of a memfs entry is:
+
+- `layer name`
+- `mount tag`
+- mount-relative path
+
+This means one named layer may carry entries for multiple mount stacks at once without path
+collision.
+
+Example:
+
+- layer `claude-shared`
+- tag `bob-project1`, path `/CLAUDE.md`
+- tag `alice-project2-feature1`, path `/CLAUDE.md`
+
+These are two distinct entries in the same named memfs layer because they differ by tag.
+The effective guest-visible absolute path is only known after the operator binds tags to guest
+mount points.
+
+Implications:
+
+- tags and mount points define the final guest filesystem placement
+- memfs entries are specified relative to a tag, not as global guest-absolute paths
+- a single named memfs layer can inject the same relative filename into multiple mount stacks
+- operator/VMM code is responsible for coordinating tag naming, mount placement, and any desired
+  uid/gid/mode defaults for those injected entries
+
+### Required Internal Shape for v1
+
+The guardrails above are not only philosophy. They imply a concrete implementation shape for v1.
+
+Recommended internal decomposition:
+
+- `FsServer`
+  - owns tag registry
+  - owns per-tag inode table
+  - owns per-tag `MemOverlay`
+  - delegates fallback operations to a mount-backing boundary
+- `MemOverlay`
+  - never calls `std::fs` directly
+  - never stores raw host paths as part of overlay node identity
+  - operates only on mount-relative paths plus explicit attrs/generation rules
+- mount-backing boundary
+  - owns disk fallback logic in v1
+  - is the only layer allowed to translate from mount-relative paths to host filesystem paths
+  - is the only layer allowed to issue `std::fs` operations
+
+Concretely, implementers should structure v1 so it could evolve toward an internal shape like:
+
+```rust
+struct MountState {
+    tag: String,
+    read_only: bool,
+    backing: MountBacking,
+    overlay: MemOverlay,
+    inode_table: InodeTable,
+}
+
+enum MountBacking {
+    Disk(DiskBacking),
+    // Reserved future directions:
+    // SyntheticRoot(SyntheticBacking),
+    // Hybrid(HybridBacking),
+}
+```
+
+This exact enum is not required in v1, but the internal design must preserve that separation.
+
+Required consequences:
+
+- overlay APIs take `tag` + mount-relative path, never a raw `host_path`
+- inode entries may reference backing-derived data, but inode allocation rules cannot require
+  every entry to map to a disk path
+- synthetic attr/default logic must accept a future policy source that is not “inspect parent
+  on disk”
+- command/CLI/RPC layers must describe fallback as “mount backing,” not “host disk,” unless a
+  v1-only disk-specific behavior is being described explicitly
+
+### Required Review Questions for v1 Implementation
+
+Before considering the v1 implementation complete, the reviewer should be able to answer
+“yes” to all of the following:
+
+1. Can `MemOverlay` be read in isolation without seeing `std::fs`, `PathBuf` host roots, or
+   host-path concatenation logic?
+2. Is all disk access concentrated in one backing-oriented layer instead of spread across
+   overlay, inode, FUSE, and command handling?
+3. If a future `SyntheticRoot` mount backing were added, would the overlay and inode code need
+   extension rather than redesign?
+4. Do public semantics and operator-facing commands remain valid if “disk-backed fallback” is
+   replaced later by a different mount backing?
+5. Do tests include at least one explicit assertion or code-review checkpoint preventing
+   `host_path` assumptions from leaking into overlay internals?
+
+### Up-Front Layering Rule
+
+The architectural layering for the roadmap is:
+
+1. `libs/vfs` core crate
+2. example proof-of-concept programs under `libs/vfs/examples`
+3. external applications built on top of the crate
+
+Applied to this roadmap:
+
+- v1 = layers `1` + `2`
+- v1.5 = stronger embedded admin console + script/config ingestion
+- v2 = broader external remote-control layer (gRPC/RPC)
+
+## Product Requirements and Primary Use Cases
+
+This section describes the concrete operator and guest behavior the library must enable.
+
+### Product Requirement: Operator-Controlled Guest Filesystem Layout
+
+The operator or VMM daemon controls which host-backed filesystems are mounted into the guest and
+where they appear. `motlie-vfs` does not hardcode guest mount points. It provides the server,
+client, and overlay semantics needed to make those choices dynamic.
+
+Important scope boundary: `motlie-vfs` only controls paths that are inside a tree mounted through
+its FUSE/vsock/RPC client. It does **not** mutate arbitrary guest rootfs paths outside those
+mounted trees.
+
+Examples:
+
+- mount a host workspace directory at `/workspace`
+- mount a host home directory at `/root`
+- choose not to expose a host directory at all, but inject selected files into a guest-visible path
+
+### Product Requirement: Partial Overlay of Existing Guest Paths
+
+The design must support the case where a guest-visible directory already exists via disk-backed
+pass-through, but only some files in that directory are injected from the memfs layer.
+
+Examples:
+
+- `/root/.ssh/` exists on disk, but `config` and `id_ed25519` are injected from memfs
+- `/root/.claude/` exists on disk, but selected auth/config files are injected dynamically
+- `/root/.codex/` exists on disk, but a session-specific token or config file is overlaid
+
+Required behavior:
+
+- injected files shadow same-path disk files
+- disk-only files in the same directory continue to pass through unless a policy filters them
+- applications see a single coherent directory tree
+
+This requirement explicitly includes paths that already exist in the **guest-visible mounted
+subtree**, even if those paths ultimately originate from the guest boot image or from an existing
+host-backed pass-through mount. For example, if the operator mounts `/home/alice` or `/root`
+through `motlie-vfs`, and that mounted tree already contains `.ssh`, `.claude`, `.codex`, or
+`usr/local/bin`, the overlay may still patch in selected files inside those directories.
+
+Examples:
+
+- within a mounted `/home/alice` tree, `.ssh/config` or `.claude/settings.json` already exists on
+  disk, but selected files are replaced or supplemented from memfs
+- within a mounted tree that exposes `usr/local/bin`, `gh` already exists from the lower image, but
+  supporting config or auth files are injected separately at runtime
+- within a mounted home directory, `.gh/config.yml` is injected even if the config file did not
+  previously exist
+
+The important compatibility rule is: **directory existence and file existence are independent
+questions inside a mounted subtree**. A directory may already exist while some files in it are
+absent and later injected, or both the directory and files may already exist and be selectively
+shadowed.
+
+### Product Requirement: Fully Synthetic Guest Paths
+
+The design must also support the case where the guest-visible directory does not exist on disk at
+all. In that case, `put()` of a file under that path creates the parent hierarchy in the memfs
+layer automatically.
+
+Examples:
+
+- within a mounted `/home/alice` tree, `.ssh/` does not exist on disk, but `.ssh/id_ed25519` is
+  injected at runtime
+- within a mounted home tree, `.gh/` does not exist on disk, but `.gh/config.yml` is injected only
+  for guests allowed to run `gh`
+- within a mounted home tree, `.claude/` does not exist on disk, but `.claude/settings.json` and
+  auth material are injected
+
+Required behavior:
+
+- missing parent directories are synthesized recursively in memory
+- those synthetic directories behave like ordinary directories for `lookup`, `getattr`, and `readdir`
+- removing the last child can remove the synthetic hierarchy according to the overlay rules
+
+### Product Requirement: Application-Specific Runtime Injection
+
+Different guests, sessions, or policy profiles may receive different injected directories and
+files at runtime.
+
+Examples:
+
+- guests allowed to run `gh` receive a `/.gh/` tree
+- guests allowed to run Claude tooling receive a `/.claude/` tree
+- guests allowed to run Codex tooling receive a `/.codex/` tree
+- guests with SSH access needs receive a `/.ssh/` tree
+
+This is a runtime policy decision above `motlie-vfs`. The library requirement is that these
+directories can be inserted, updated, or removed dynamically without changing the mounted tree
+shape on disk.
+
+Those directories may be layered on top of, within a subtree mounted through `motlie-vfs`:
+
+- paths already present in the guest-visible lower image
+- paths already present in a host-backed pass-through mount
+- paths that do not exist yet and must be synthesized entirely in the memfs layer
+
+### Product Requirement: Shared Mounted Trees, Shared Layers, and Multi-User Paths
+
+One `MemOverlay` instance may manage entries for multiple guest-visible subpaths at once,
+including user-specific subtrees inside the same mounted tree and the same named memfs layer
+applied across multiple mount tags.
+
+Supported examples:
+
+- if the operator mounts `/home` through `motlie-vfs` with tag `home`, a single overlay
+  layer may contain both `/alice/.claude/skills/...` and `/bob/.claude/skills/...`
+- if the operator instead mounts `/home/alice` and `/home/bob` as separate tags, the same
+  `MemOverlay` instance may still hold entries for both, but they remain isolated by tag
+  because every overlay key is `(tag, path)`
+- if the operator mounts `/home/bob/project1` as tag `bob-project1` and
+  `/home/alice/project2/feature1` as tag `alice-project2-feature1`, one shared layer such as
+  `claude-shared` may inject `/CLAUDE.md` for both tags as two entries:
+  - `(claude-shared, bob-project1, /CLAUDE.md)`
+  - `(claude-shared, alice-project2-feature1, /CLAUDE.md)`
+
+Implications:
+
+- path separation is supported because overlay entries are keyed by **mount tag + mount-relative path**
+- layer sharing is supported because a single named layer may contain entries for many tags
+- tag separation is stronger than path separation; different tags have independent inode tables,
+  lookup spaces, and overlay resolution
+- if two guests are bound to the **same tag**, they observe the same effective overlay state for
+  that mounted tree
+- if two guests require isolation, the recommended v1 design is separate mount tags (or separate
+  server instances), not sharing one tag and relying on path naming alone
+
+Examples:
+
+- shared-tag case: mount guest `/home` from tag `home`; inject `/alice/.claude/skills/tool.md`
+  and `/bob/.claude/skills/tool.md` into the same overlay namespace
+- isolated-tag case: mount guest A `/home/alice` from tag `alice-home` and guest B `/home/bob`
+  from tag `bob-home`; inject each subtree independently under its own tag
+
+Concurrency and mutation caveats:
+
+- concurrent mutations to different `(tag, path)` pairs are independent
+- concurrent mutations to the same `(tag, path)` require normal in-process synchronization and
+  are logically last-writer-wins unless a higher-level control plane adds stronger guarantees
+- v1 defines atomic multi-path memfs updates **per mount tag** through the batch API
+- v1 does **not** define atomic multi-tag updates spanning several mount tags at once
+
+Ownership and permission caveats:
+
+- disk-backed files and directories retain the metadata and permission checks of the underlying
+  host filesystem as surfaced through the mounted tree
+- overlay-created `Content` and `SyntheticDir` entries in v1 expose explicit synthetic metadata:
+  mode bits plus numeric `uid`/`gid`
+- there is still no per-guest identity virtualization below a shared `(tag, path)` entry:
+  one effective overlay node has one effective `uid` and `gid`
+- therefore, using one shared overlay namespace as a security boundary between different Linux
+  users remains out of scope for v1
+
+Explicit v1 scope statement:
+
+- supported: managing both `/home/alice/...` and `/home/bob/...` inside one mounted tree when
+  path-based separation is operationally acceptable
+- supported: isolating Alice and Bob with separate mount tags while still using one `FsServer`
+  and one `MemOverlay` instance
+- supported: coordinating synthetic entry ownership with operator-provisioned guest users by
+  setting numeric `uid`/`gid` for injected entries
+- out of scope: strong per-user isolation for synthetic overlay entries that share the same
+  `(tag, path)` while needing different ownership views per guest
+
+Important ownership implication:
+
+- if the **same overlay entry** `(tag, path)` is intended to be shared across different guest VMs,
+  that one entry can only expose one numeric `uid` and `gid`
+- in that specific shared-entry case, the guests must agree on the expected numeric owner/group
+  for that path, or the operator must avoid sharing the same tag/path entry
+- if Alice and Bob run in different guests and need different ownership values, the supported v1
+  design is separate tags and separate injected entries, not guest-specific ownership views of the
+  same entry
+
+### Product Requirement: Dynamic Runtime Mutation
+
+Overlay entries must be mutable while the guest is running.
+
+Required operations:
+
+- add files
+- update files
+- create whiteouts to hide disk files
+- remove injected files
+- remove layers
+- inspect effective overlay state
+
+In v1, runtime mutation is exercised through direct Rust calls and example programs. Later
+operator workflows, such as the v1.5 embedded console/script path or a future v2 RPC admin
+surface, can be built over the same `MemOverlay` API.
+
+Roadmap note:
+
+- v1 uses direct in-process mutation through the core API
+- v1.5 strengthens the embedded admin workflow with script/config-driven batch loading
+- command semantics across those operator paths must remain identical; path-specific behavior is
+  a design bug, not a product feature
+
+v1 concurrency and atomicity contract:
+
+- the mutation API is batch-first
+- a single-file mutation is defined as a batch of size 1
+- each committed batch is atomically published for one mount tag
+- guest reads and directory traversals must observe one stable memfs snapshot for the duration
+  of a single filesystem request
+- readers must never observe:
+  - partially created synthetic parents from an in-flight batch
+  - some but not all files from one committed batch
+  - a `readdir` merge built from multiple memfs snapshots for the same request
+
+Explicit v1 scope boundary:
+
+- atomicity is guaranteed only for memfs-layer publication
+- non-memfs layers keep their native concurrency and transaction semantics
+- in v1, the disk-backed base layer is **not** made transactional
+- multi-tag atomic commit is out of scope for v1
+
+Recommended implementation direction for v1:
+
+- per mount tag, writers are serialized
+- each committed batch constructs a new memfs snapshot for that tag
+- commit is one atomic swap of the active memfs snapshot
+- read operations load one snapshot and use it for the whole request
+
+Implications:
+
+- if a batch injects `/.ssh/config`, `/.ssh/id_ed25519`, and `/.ssh/id_ed25519.pub` for one tag,
+  readers see either the state before the batch or the state after the batch
+- they must not see only one or two of those files from that batch
+- lower-layer disk behavior remains whatever the host filesystem provides natively
+
+Deletion semantics must remain compatible with the immutable boot-image model:
+
+- if a file comes from a read-only squashfs-backed guest image (or any lower immutable layer), it
+  is **not physically deleted**
+- the supported delete/hide mechanism is a `Whiteout`/tombstone entry in the memfs overlay
+- from guest applications, that file appears absent
+- if the whiteout is later removed, the lower-layer file becomes visible again
+
+### Product Requirement: Transparency to Guest Applications
+
+All of the above must be transparent to applications running inside the guest.
+
+Applications should observe:
+
+- ordinary files and directories
+- ordinary rename/unlink/read/write behavior as defined by the overlay semantics
+- no application-specific API for "overlay files" vs "disk files"
+
+This is essential for editors, shells, `git`, `gh`, SSH tooling, Claude tooling, Codex tooling,
+and similar user-space programs to work unchanged.
+
 ## Non-Goals
 
 - **General-purpose network filesystem.** This is not an NFS or CIFS replacement. It serves
@@ -42,10 +705,19 @@ transports and cross-platform FUSE support.
 - **Kernel-mode filesystem.** This is always userspace FUSE.
 - **Binary distribution / CLI.** This is a library. Binaries that use it (the VMM daemon, a
   standalone mount tool) are separate crates.
+- **Built-in admin services.** The library provides the core overlay API only. External admin
+  frontends such as a Unix-domain control socket, HTTP, gRPC, or custom network control layers
+  are wrappers above that API and are out of scope for v1.
 
 ## Functional Requirements
 
+Not every FR below is a `v1` delivery requirement. Each FR is labeled by roadmap placement so
+implementation planning does not over-claim current scope.
+
 ### FR-1: Cross-Platform FUSE Client
+Roadmap placement: roadmap-wide. `v1` only requires the Linux guest FUSE path used by the
+vsock/Cloud Hypervisor workflow. macOS FUSE-T support is a later roadmap target.
+
 Mount a directory on the local machine backed by a remote (or local) FS server. Must work on:
 - Linux (kernel 5.10+, libfuse3 / `/dev/fuse`)
 - macOS (Apple Silicon, macOS 13+, via FUSE-T)
@@ -53,6 +725,8 @@ Mount a directory on the local machine backed by a remote (or local) FS server. 
 The platform difference must be invisible to the caller -- a single `mount()` API.
 
 ### FR-2: Transport-Agnostic Protocol
+Roadmap placement: `v2`. `v1` and `v1.5` only need the fixed vsock path.
+
 The wire protocol between client and server must operate over any `AsyncRead + AsyncWrite`
 stream. Concrete transports supported out of the box:
 
@@ -65,6 +739,8 @@ stream. Concrete transports supported out of the box:
 Adding a new transport must not require changes to protocol, server, or client code.
 
 ### FR-3: Pluggable Wire Encoding
+Roadmap placement: `v2`. `v1` and `v1.5` only need the fixed bincode-based vsock path.
+
 The frame serialization format must be swappable. Default: bincode (fast, compact, Rust-native).
 The protocol layer must be parameterized by encoding so that alternative formats (msgpack,
 protobuf) can be substituted without changing the frame types or server/client logic.
@@ -72,7 +748,7 @@ protobuf) can be substituted without changing the frame types or server/client l
 ### FR-4: Tag-Based Mount Routing
 A single server instance serves multiple mount points, each identified by a string tag
 (e.g. `workspace`, `cred-claude`). Each client connection binds to exactly one tag via a
-handshake. The server maps tags to host directories.
+handshake. In v1, the server maps each tag to a mount stack whose base layer is host-backed.
 
 ### FR-5: Dynamic Mount Management
 Mounts can be added to or removed from a running server. Adding a mount registers a new
@@ -99,35 +775,50 @@ Each mount tag is independently configured as read-only or read-write. Write ope
 on a read-only mount return `EROFS` without reaching the host filesystem.
 
 ### FR-9: Composable Architecture
-The library must support three composition modes from a single server core:
+Roadmap placement: roadmap-wide.
+
+The roadmap must support three composition modes from a single server core:
 
 1. **Direct** -- in-process `handle_op()` calls, no serialization, no transport.
 2. **vsock** -- fixed bincode over vsock, thinnest wire path, for VM use case.
 3. **RPC** -- framed protocol with pluggable codec over any transport, for cross-platform mounts.
 
+Roadmap split:
+
+- `v1`: direct + vsock
+- `v1.5`: direct + embedded admin workflows
+- `v2`: remote/framed protocol path
+
 Each composite reuses the same `FsServer` core (inode table, host FS ops, events, policy).
 The difference is what sits in front of `handle_op()`.
 
 ### FR-10: In-Memory Overlay with Layered Content Injection
-The server must support an in-memory overlay that can intercept and replace file content
-without modifying the underlying host filesystem. Requirements:
+The server must support ordered layered content injection without modifying the lower backing.
+In v1, that means zero or more memfs layers stacked above one disk-backed base layer per mount.
+Requirements:
 
 - **Multiple named layers** with explicit priority ordering. Higher-priority layers shadow
-  lower ones. All layers shadow disk.
-- **Per-file granularity.** Each overlay entry targets a specific path within a mount tag.
-  Non-overlaid files fall through to the host filesystem.
+  lower ones.
+- **Per-mount stack model.** Each mount tag resolves through its own ordered stack. For `M`
+  guest mount points there are `M` stacks.
+- **Per-entry identity = `(layer, tag, path)`.** Each memfs entry targets a specific
+  mount-relative path within a mount tag, allowing one named layer to hold entries for
+  many mount tags at once.
 - **Synthetic files and directories.** An overlay can inject files that do not exist on disk.
   These appear in readdir results alongside real files. Parent directories that don't exist
   on disk are created implicitly as synthetic directories (e.g., injecting `/.ssh/id_ed25519`
   implicitly creates a synthetic `/.ssh/` directory).
-- **Write capture.** Writes to overlaid files update the in-memory layer, not the disk.
-  Writes to non-overlaid files go to disk as normal.
+- **Generic stack semantics.** Lookup/read walks top-down; readdir merges bottom-up; whiteouts
+  hide lower-layer names generically rather than special-casing disk.
+- **Write capture.** Writes to files currently owned by a memfs layer update that memfs layer.
+  Writes that resolve to the base disk layer use the base-layer behavior unless policy or
+  stack semantics cause copy-up into a memfs layer.
 - **Mutation semantics.** The overlay must define behavior for `Create`, `Unlink`, `Rename`,
-  `Mkdir`, and `Rmdir` on overlay-backed paths, covering synthetic entries, shadowed files,
-  and cross-boundary (overlay↔disk) operations.
+  `Mkdir`, and `Rmdir` on stack-managed paths, covering synthetic entries, shadowed files,
+  whiteouts, and cross-layer operations.
 - **Programmatic API** for injection at server startup or at runtime from Rust code.
-- **Control socket** (Unix domain socket) for injection from the command line or external
-  tooling while the server is running.
+- **Embedded admin workflow support** for injection from a local terminal/admin loop or
+  script/config-driven batch input while the server is running.
 
 Use cases: credential injection, config overrides, hot-patching files for development,
 providing synthetic content to AI agent sandboxes.
@@ -292,72 +983,97 @@ The RPC path includes its own `Hello { tag }` handshake and `request_id` for pip
 All paths converge at server.handle_op(), where:
 
 1. Policy check:    policy.check(op, tag, path) → Allow or Err(errno)
-2. Overlay check:   overlay.resolve(tag, path) → Some((layer, entry_kind))
-3. Match entry_kind:
-     Content(bytes) → return in-memory content (read) or update layer (write)
-     Whiteout       → return ENOENT (disk file suppressed)
+2. Layer-stack resolution: walk the mount's effective layers top-down
+3. Match resolved result:
+     Content(bytes) → return in-memory content (read) or update owning memfs layer (write)
+     Whiteout       → return ENOENT (lower-layer entry suppressed)
      SyntheticDir   → return synthetic directory attrs/entries
-     None           → fall through to host FS op via std::fs
+     None           → continue downward; if no layer resolves, return ENOENT
 4. Event emit:      event_tx.try_send(FsEvent { tag, op, path, bytes })
 5. Return:          FsResult
 ```
 
-Events are emitted regardless of whether the content came from overlay or disk.
+Events are emitted regardless of which layer supplied the content.
 
 Events are emitted via `try_send` on a broadcast channel -- non-blocking, lossy under
 backpressure (callers who care about completeness must keep up).
 
-### In-Memory Overlay (File-Driven Memfs Layer)
+### In-Memory Layers in an Ordered Mount Stack
 
-The overlay is a file-driven memfs layer merged above disk. It is not a path→bytes map
-with special cases — it is a proper in-memory filesystem layer with inode allocation,
-directory traversal, metadata, and mutation support.
+The memfs portion of the design is a set of file-driven in-memory layers composed into an
+ordered per-mount stack. It is not a path→bytes map with special cases — it is a proper
+in-memory filesystem layer model with inode allocation, directory traversal, metadata,
+and mutation support.
 
 - `put()` inserts or replaces a file node in the memfs layer.
 - Any missing ancestors are materialized as synthetic directories in memory.
 - Directory traversal and metadata for synthetic directories are served entirely from
   the memfs layer — nothing is forced onto host disk.
-- The memfs layer shares the mount's inode namespace: synthetic directory inodes and
-  overlay file inodes are allocated from the same `InodeTable` as disk-backed inodes.
+- Memfs layers share the mount's inode namespace: synthetic directory inodes and
+  overlay file inodes are allocated from the same `InodeTable` as base-layer inodes.
   This ensures a unified inode space visible to the FUSE client.
-- `handle_op()` resolves each path against the memfs layer first; only paths with no
-  overlay entry fall through to the host filesystem.
+- `handle_op()` resolves each path through the mount's ordered stack. In v1 the bottom
+  layer is disk-backed, but the stack semantics are defined generically.
 
-Multiple named layers stack by priority; resolution is top-down (highest priority first).
+Multiple named memfs layers stack by priority above the base layer; resolution is top-down
+(highest priority first).
 
 ```
 handle_op(tag, FsOp::Read { inode, .. })
     │
     ├─ policy.check() → deny? return Error { errno }
     │
-    ├─ overlay layer "hotpatch" (priority 100) → hit? return in-memory content
-    ├─ overlay layer "user"     (priority 10)  → hit? return in-memory content
-    ├─ overlay layer "defaults" (priority 0)   → hit? return in-memory content
+    ├─ memfs layer "hotpatch" (priority 100) → hit? return in-memory content
+    ├─ memfs layer "user"     (priority 10)  → hit? return in-memory content
+    ├─ memfs layer "defaults" (priority 0)   → hit? return in-memory content
     │    (entries can be: Content(bytes), Whiteout, or SyntheticDir)
     │
-    └─ disk (base)                             → std::fs::read()
+    └─ base layer                              → in v1: std::fs::read()
     │
     └─ event emit
 ```
 
 **Layer semantics:**
-- Each layer is a named, ordered collection of `(tag, path) → Entry` mappings.
-- An `Entry` is one of: `Content(Bytes)` (file data), `Whiteout` (suppresses disk file),
+- Each memfs layer is a named, ordered collection of `(tag, path) → Entry` mappings.
+- A mount stack consists of zero or more named memfs layers above one base layer.
+- An `Entry` is one of: `Content(Bytes)` (file data), `Whiteout` (suppresses lower-layer file),
   or `SyntheticDir` (directory that exists only in memory).
 - Layers are created with an explicit priority (`u32`). Higher wins.
 - `put()` on a layer sets or replaces content for a `(tag, path)` pair and automatically
   creates `SyntheticDir` entries for any missing parent directories.
 - `remove()` on a layer deletes one entry; `remove_layer()` drops all entries.
-- Resolution: for a given `(tag, path)`, walk layers highest-to-lowest, return first hit.
+- Resolution: for a given `(tag, path)`, walk layers highest-to-lowest, then the base layer.
   - `Content(bytes)` → return the in-memory content
-  - `Whiteout` → return `ENOENT` (hides disk file below)
+  - `Whiteout` → return `ENOENT` (hides lower-layer entry below)
   - `SyntheticDir` → return directory inode/attrs
-  - No hit → fall through to disk.
+  - No hit in memfs layers → continue into the base layer
+  - No hit in any layer → return `ENOENT`
+
+This `(tag, path)` keying has an important scoping implication:
+
+- one `MemOverlay` instance can hold entries for many mount tags at once
+- within a single tag, entries for `/alice/...` and `/bob/...` are just different paths in the
+  same mounted tree
+- there is no per-connection or per-guest overlay namespace beneath a tag in v1
+- if separate guests must not observe each other's overlay mutations, they should not share a tag
+
+**Path contract for operators:**
+
+- overlay paths are always specified as **mount-relative absolute paths** inside the mounted tree
+  for a tag
+- the operator does not provide a guest-global path to `MemOverlay`; it provides `tag` plus
+  `path-within-tag`
+- examples:
+  - if tag `home` is mounted at guest `/home`, inject Alice's skills file as
+    `tag="home", path="/alice/.claude/skills/tool.md"`
+  - if tag `alice-home` is mounted at guest `/home/alice`, inject the same file as
+    `tag="alice-home", path="/.claude/skills/tool.md"`
 
 **Synthetic files and directories:**
 - An overlay entry for a path that doesn't exist on disk creates a synthetic file.
   It appears in `readdir` alongside real directory entries. `lookup` and `getattr` return
-  the overlay's metadata (size from content length, mtime from injection time, mode 0644).
+  the overlay's metadata (size from content length, mtime from injection time, mode plus
+  numeric `uid`/`gid`).
 - **Implicit synthetic directories:** When `put()` injects a file, the overlay recursively
   materializes any missing parent directories as `SyntheticDir` entries in memory. For
   example, `put("layer", "home", "/.ssh/id_ed25519", key)` implicitly creates a
@@ -369,6 +1085,14 @@ handle_op(tag, FsOp::Read { inode, .. })
   also has overlay children merges both per-file as described above.
 - Synthetic directories are reference-counted: they are removed automatically when the last
   child entry in the layer is removed.
+- synthetic entry ownership rules in v1:
+  - `put()` without explicit attrs inherits `uid`/`gid` from the nearest existing parent
+    directory in the effective tree; if no nearer parent exists, inherit from the mount root
+  - synthetic parent directories created implicitly by `put()` inherit the same `uid`/`gid`
+    and default to mode `0755`
+  - synthetic files created by `put()` default to mode `0644`
+  - callers that need exact ownership may provide explicit attrs through the API described below
+- v1 still does not define guest-specific uid/gid virtualization for a shared effective entry.
 
 **Write behavior:**
 - Writes to an overlaid path update the highest-priority layer that owns that path.
@@ -377,7 +1101,8 @@ handle_op(tag, FsOp::Read { inode, .. })
 
 **Whiteout semantics:**
 
-A whiteout is an overlay entry that suppresses a disk file. It makes the disk file
+A whiteout is a memfs-layer entry that suppresses a lower-layer file. In v1 the lower layer is
+often disk-backed, but the whiteout semantics are stack-generic. It makes the lower-layer file
 invisible to `lookup`, `getattr`, `readdir`, and `open` — as if the file does not exist.
 Whiteouts are created automatically by `unlink` on shadowed files (see mutation table).
 They can also be created explicitly via the API for pre-emptive suppression.
@@ -385,23 +1110,23 @@ They can also be created explicitly via the API for pre-emptive suppression.
 ```
 resolve(tag, path):
   → Content(bytes)   → serve in-memory content
-  → Whiteout         → return ENOENT (disk file hidden)
+  → Whiteout         → return ENOENT (lower-layer file hidden)
   → SyntheticDir     → return directory inode
-  → None             → fall through to disk
+  → None             → continue to the base layer
 ```
 
 **Mutation semantics:**
 
 Operations on overlay-backed paths follow filesystem-consistent behavior. The key
 principles: (1) deleting a visible file makes it disappear — it never resurrects hidden
-content, (2) renames across the overlay↔disk boundary are handled transparently to
+content, (2) renames across the memfs↔base-layer boundary are handled transparently to
 support editor atomic-save flows, (3) the overlay behaves like a real filesystem layer,
 not a cache.
 
 | Operation | Target | Behavior |
 |-----------|--------|----------|
 | `Unlink` | Synthetic file | Remove overlay entry. File vanishes. |
-| `Unlink` | Shadowed file (overlay over disk) | Replace overlay `Content` entry with `Whiteout`. File disappears; disk file stays hidden. |
+| `Unlink` | Shadowed file (memfs over lower layer) | Replace overlay `Content` entry with `Whiteout`. File disappears; lower-layer file stays hidden. |
 | `Unlink` | Whiteout | Return `ENOENT` (already deleted). |
 | `Unlink` | Disk-only file | Normal `std::fs::remove_file()`. |
 | `Create` | Under synthetic directory | Create `Content` entry in overlay (in-memory). |
@@ -440,8 +1165,13 @@ libs/vfs/
 ├── Cargo.toml
 ├── docs/
 │   └── DESIGN.md                 # this document
+├── examples/
+│   ├── simple_host.rs            # proof-of-concept host server + rustyline REPL
+│   └── README.md                 # Cloud Hypervisor proof-of-concept instructions
 └── src/
     ├── lib.rs                    # re-exports, feature-gated module visibility
+    ├── bin/
+    │   └── motlie-vfs-guest.rs   # v1 guest-side mounter binary over public guest APIs
     │
     ├── core/
     │   ├── mod.rs
@@ -452,32 +1182,26 @@ libs/vfs/
     │   ├── event.rs              # FsEvent, FsOp (event enum), EventSender
     │   └── policy.rs             # PolicyFn trait, AllowAll default
     │
-    ├── control/                  # feature = "control"
-    │   ├── mod.rs
-    │   ├── socket.rs             # ControlSocket: Unix domain socket listener
-    │   └── protocol.rs           # Line protocol: LAYER, PUT, RM, GET, LS, etc.
-    │
     ├── vsock/                    # feature = "vsock"
     │   ├── mod.rs
     │   ├── handler.rs            # VsockConnectionHandler: bincode FsOp/FsResult over stream
-    │   └── mount.rs              # VsockFuseMount: fuser::Filesystem over vsock+bincode
-    │
-    ├── rpc/                      # feature = "rpc"
-    │   ├── mod.rs
-    │   ├── frame.rs              # Frame, FrameBody (wraps FsOp/FsResult with request_id)
-    │   ├── codec.rs              # Codec trait
-    │   ├── io.rs                 # read_frame / write_frame (length-prefixed)
-    │   ├── server.rs             # RpcServer: wraps FsServer, frame decode → handle_op()
-    │   └── client.rs             # RpcClient: frame encode/decode + handshake
-    │
-    ├── codec/                    # wire encoding implementations
-    │   ├── mod.rs
-    │   └── bincode.rs            # feature = "bincode-codec"
+    │   └── client.rs             # VsockClientTransport: guest-side request/response transport
     │
     └── client/                   # feature = "client"
         ├── mod.rs
-        └── fuse.rs               # FuseClient: fuser::Filesystem backed by any composite
+        ├── fuse.rs               # FuseClient: guest-side fuser::Filesystem over a transport
+        └── guest.rs              # GuestMountRunner + GuestMountSpec: guest-side mount orchestration over public APIs
 ```
+
+Boundary note:
+
+- `src/bin/motlie-vfs-guest.rs` is the v1 guest-side mounter binary built from this crate
+- `examples/` is reserved for harness/demo programs; the guest-side mounter is not just an
+  example because it must be packaged into the guest image for v1 testing
+- `client/guest.rs` is the guest-facing orchestration layer above `FuseClient`; example
+  binaries and guest binaries should call into it rather than reimplementing mount loops
+- the tiny bootstrap binary and `BinaryRequest` delivery path remain VMM-owned and are not part
+  of `libs/vfs`
 
 ### Feature Flags
 
@@ -488,22 +1212,14 @@ default = ["server-core", "bincode-codec"]
 # Always available -- core types, FsServer, MemOverlay
 server-core = []
 
-# Composites
+# v1 VM transport
 vsock = ["server-core", "bincode-codec", "dep:tokio-vsock"]
-rpc = ["server-core"]
 
-# FUSE client (used with either vsock or rpc composite)
+# FUSE client for the v1 guest path
 client = ["dep:fuser"]
-
-# Control socket for overlay management
-control = ["server-core"]
 
 # Wire encodings
 bincode-codec = ["dep:bincode"]
-# msgpack-codec = ["dep:rmp-serde"]   # future
-
-# Transport extras
-tls = ["rpc", "dep:tokio-rustls", "dep:rustls"]
 ```
 
 **Dependency profiles for each consumer:**
@@ -511,12 +1227,11 @@ tls = ["rpc", "dep:tokio-rustls", "dep:rustls"]
 | Consumer | Features | What compiles |
 |----------|----------|---------------|
 | motlie-vmm host | `vsock` | core + overlay + vsock handler + bincode |
-| motlie-vmm guest | `vsock, client` | core + vsock mount + fuser + bincode |
-| Standalone FS server | `rpc, bincode-codec, control` | core + overlay + rpc server + control socket + bincode |
-| Linux/macOS mount client | `rpc, client, bincode-codec` | core + rpc client + fuser + bincode |
-| Remote mount + TLS | `rpc, client, bincode-codec, tls` | above + rustls |
-| Custom embedding | `server-core` | core + overlay, caller provides own transport |
-| Tests (no FUSE) | `rpc, bincode-codec` | core + overlay + rpc, no fuser |
+| motlie-vmm guest | `vsock, client` | core + vsock client transport + `FuseClient` + fuser + bincode |
+| Proof-of-concept host example | `vsock` | core + overlay + in-process REPL + CH harness support |
+| Proof-of-concept guest example | `vsock, client` | guest bootstrap + vsock transport + `FuseClient` |
+| Custom embedding | `server-core` | core + overlay, caller provides own control loop |
+| Tests (no FUSE) | `server-core, bincode-codec` | core + overlay + direct tests |
 
 ## API Design
 
@@ -553,6 +1268,14 @@ impl FsServerBuilder {
     pub fn build(self) -> Result<FsServer>;
 }
 ```
+
+v1 forward-compatibility constraint:
+
+- these APIs are disk-backed in v1
+- their internal implementation should still leave room for a future mount type that is not
+  backed by a local host directory
+- future diskless/synthetic-root mounts must be able to coexist without requiring a redesign of
+  `MemOverlay` itself
 
 ### Event Types
 
@@ -605,12 +1328,31 @@ FsServer is compiled). No additional feature flag required.
 whiteout nodes (`Whiteout`), and directory nodes (`SyntheticDir`) — allocated from the
 mount's shared `InodeTable`. Each node has an inode, attrs (size, mode, timestamps),
 and parent linkage. `put()` inserts a file node and recursively creates `SyntheticDir`
-parent nodes. `handle_op()` dispatches against this tree before falling through to disk.
+parent nodes. `handle_op()` dispatches against this tree before continuing into the base layer.
+
+Forward-compatibility constraint:
+
+- in v1, “no memfs-layer hit” means “continue into the base layer”
+- v2 may introduce mounts whose non-overlay behavior is not disk-backed at all
+- implementers should therefore keep overlay node management independent from the concrete
+  fallback backend, even if v1 only ships disk-backed mounts
+
+**v1 concurrency model:**
+
+- per mount tag, memfs publication is snapshot-based
+- writers to the same mount tag are serialized
+- `apply_batch()` is the authoritative mutation primitive; `put()`, `put_with_attrs()`,
+  `whiteout()`, and `remove()` are convenience forms of one-op batches
+- a committed batch publishes a new memfs snapshot atomically for that tag
+- read-like operations (`lookup`, `getattr`, `read`, `readdir`) use one loaded snapshot for the
+  duration of the request
+- the base layer is not made transactional by this library; its concurrency behavior is whatever
+  the underlying backing provides
 
 **External API:** Callers interact through `put()` / `remove()` / `whiteout()` (mutations)
 and `resolve()` / `list_effective()` (inspection). The inspection types (`OverlayEntry`,
-`EffectiveEntry`, `LayerInfo`) are flattened views for debugging and control-socket
-responses — they do not expose the full internal tree structure or inode mappings.
+`EffectiveEntry`, `LayerInfo`) are flattened views for debugging, embedded admin UIs, and
+programmatic introspection — they do not expose the full internal tree structure or inode mappings.
 
 ```rust
 /// File-driven in-memory filesystem layer.
@@ -627,6 +1369,34 @@ pub enum OverlayEntryKind {
     Whiteout,
     /// Directory that exists only in memory (created implicitly by put() for missing parents).
     SyntheticDir,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct OverlayAttrs {
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
+}
+
+#[derive(Debug, Clone)]
+pub enum OverlayMutation {
+    Put {
+        layer: String,
+        tag: String,
+        path: String,
+        attrs: Option<OverlayAttrs>,
+        content: Bytes,
+    },
+    Whiteout {
+        layer: String,
+        tag: String,
+        path: String,
+    },
+    Remove {
+        layer: String,
+        tag: String,
+        path: String,
+    },
 }
 
 impl MemOverlay {
@@ -647,15 +1417,36 @@ impl MemOverlay {
     /// Inject a file into the overlay.  Automatically creates SyntheticDir entries
     /// for any missing parent directories in this layer.
     /// If the path already has an entry (Content, Whiteout, or SyntheticDir), replaces it.
+    /// `path` is mount-relative and must begin with `/`.
+    /// Synthetic ownership defaults are inherited from the nearest existing parent
+    /// directory in the effective tree, or from the mount root if no nearer parent exists.
     pub fn put(&self, layer: &str, tag: &str, path: &str, content: Bytes) -> Result<()>;
 
-    /// Create a whiteout entry that suppresses a disk file.
+    /// Inject a file into the overlay with explicit synthetic metadata.
+    /// `path` is mount-relative and must begin with `/`.
+    pub fn put_with_attrs(
+        &self,
+        layer: &str,
+        tag: &str,
+        path: &str,
+        attrs: OverlayAttrs,
+        content: Bytes,
+    ) -> Result<()>;
+
+    /// Create a whiteout entry that suppresses a lower-layer file.
+    /// `path` is mount-relative and must begin with `/`.
     pub fn whiteout(&self, layer: &str, tag: &str, path: &str) -> Result<()>;
 
-    /// Remove one overlay entry.  For Content/Whiteout: file falls back to disk
-    /// (or disappears if synthetic).  Synthetic parent dirs are removed if they
+    /// Remove one overlay entry.  For Content/Whiteout: resolution may expose a lower layer
+    /// (or disappear entirely if no lower layer provides the path). Synthetic parent dirs are removed if they
     /// have no remaining children.
+    /// `path` is mount-relative and must begin with `/`.
     pub fn remove(&self, layer: &str, tag: &str, path: &str) -> Result<()>;
+
+    /// Apply a batch atomically for one mount tag.
+    /// Single-file mutations are represented as batches of size 1.
+    /// Readers observe either the pre-batch or post-batch memfs snapshot for that tag.
+    pub fn apply_batch(&self, tag: &str, ops: &[OverlayMutation]) -> Result<()>;
 
     /// Read the content stored in a specific layer (for debugging/inspection).
     pub fn get(&self, layer: &str, tag: &str, path: &str) -> Option<Bytes>;
@@ -665,8 +1456,8 @@ impl MemOverlay {
 
     // --- Resolved view (what handle_op() sees) ---
 
-    /// Resolve a path: walk layers highest-to-lowest, return first hit.
-    /// Returns the entry kind. None means fall through to disk.
+    /// Resolve a path within the named memfs layers: walk layers highest-to-lowest, return first hit.
+    /// Returns the memfs-layer entry kind. None means the caller should continue into the base layer.
     pub fn resolve(&self, tag: &str, path: &str) -> Option<(String, OverlayEntryKind)>;
 
     /// List all effective overlays for a tag (one entry per path, from the
@@ -687,6 +1478,9 @@ pub struct OverlayEntry {
     pub kind: OverlayEntryKind,
     pub inode: u64,
     pub size: usize,                // 0 for Whiteout and SyntheticDir
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
     pub injected_at: SystemTime,
 }
 
@@ -697,12 +1491,15 @@ pub struct EffectiveEntry {
     pub kind: OverlayEntryKind,
     pub inode: u64,
     pub size: usize,
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
 }
 ```
 
 Note: `OverlayEntry` and `EffectiveEntry` are flattened inspection views. The internal
 model is a tree of inode-allocated nodes with parent linkage and refcounting for synthetic
-directories. These structs project that tree into flat lists for the control socket,
+directories. These structs project that tree into flat lists for embedded admin views,
 debugging, and programmatic introspection.
 
 Wired into FsServer:
@@ -719,189 +1516,50 @@ impl FsServer {
 }
 ```
 
-### Control Socket (Unix Domain Socket)
+### v1.5 Roadmap Sketch: Embedded Admin Console + Script / Config Loading
 
-A lightweight control interface for managing the overlay from the command line or external
-tooling at runtime. Feature-gated behind `control`.
+The first operator-facing refinement after v1 remains embedded and local to the hosting process.
 
-The control socket speaks a simple text-based line protocol over a Unix domain socket.
-Binary file content is transferred with a length prefix after the command line.
+Required contract for that future v1.5 path:
 
-**Library API:**
+- it uses the core `MemOverlay` API exposed by `FsServer`
+- it preserves the mount-relative path contract:
+  - operator supplies `tag`
+  - operator supplies mount-relative absolute `path`
+- it supports at least:
+  - `put`
+  - `putattr`
+  - `whiteout`
+  - `rm`
+  - `rmlayer`
+  - `ls`
+  - `lslayer`
+- it supports batch ingestion from a script/config format so startup and reload flows are repeatable
 
-```rust
-/// Listens on a Unix domain socket and dispatches commands to FsServer's overlay.
-pub struct ControlSocket { /* ... */ }
-
-impl ControlSocket {
-    pub fn new(server: &FsServer) -> Self;
-
-    /// Listen and serve control commands.  Blocks until the socket is closed.
-    pub async fn listen(&self, path: &Path) -> Result<()>;
-}
-```
-
-**Wire protocol:**
-
-Each command is a single line (`\n`-terminated). Commands that carry content include a
-byte length; the content follows immediately after the newline.
-
-```
-Commands:
-
-  LAYER <name> <priority>\n           Create/update layer with priority (u32)
-  RMLAYER <name>\n                    Remove layer and all its entries
-  LAYERS\n                            List all layers
-
-  PUT <layer> <tag> <path> <len>\n    Set overlay content (len bytes follow)
-  <len bytes of content>
-  WHITEOUT <layer> <tag> <path>\n    Suppress a disk file (create whiteout entry)
-  RM <layer> <tag> <path>\n           Remove one overlay entry
-  GET <layer> <tag> <path>\n          Read overlay content from specific layer
-  LS <tag>\n                          List effective overlays for a tag
-  LSLAYER <layer> <tag>\n             List entries in a specific layer for a tag
-
-Responses:
-
-  OK\n                                Success (for LAYER, RMLAYER, PUT, RM)
-
-  LAYERS\n                            Response to LAYERS command
-  <name> <priority> <entry_count>\n   One line per layer (highest priority first)
-  \n                                  Empty line terminates list
-
-  DATA <len>\n                        Response to GET
-  <len bytes of content>
-
-  ENTRIES\n                                          Response to LS or LSLAYER
-  <path> <layer> <kind> <inode> <size>\n              One line per entry (LS)
-  <path> <kind> <inode> <size>\n                      One line per entry (LSLAYER)
-  \n                                                  Empty line terminates list
-  (kind is one of: content, whiteout, synthetic_dir)
-
-  ERR <message>\n                     Error
-```
-
-**CLI usage examples:**
-
-```bash
-# Inject a config file into the "defaults" layer at startup
-echo 'KEY=value' | motlie-vfs-ctl put defaults workspace /.env
-
-# Inject from a file
-motlie-vfs-ctl put defaults workspace /config.toml < config.toml
-
-# Create a high-priority hotpatch layer and override a file
-motlie-vfs-ctl layer hotpatch 100
-motlie-vfs-ctl put hotpatch workspace /src/config.rs < patched_config.rs
-
-# List what's overlaid for the workspace mount
-motlie-vfs-ctl ls workspace
-# → /config.toml hotpatch 4821
-# → /.env defaults 42
-
-# Read back what's in the overlay
-motlie-vfs-ctl get defaults workspace /.env
-# → KEY=value
-
-# Remove the hotpatch
-motlie-vfs-ctl rmlayer hotpatch
-
-# List layers
-motlie-vfs-ctl layers
-# → defaults 0 2
-# → alice 10 1
-```
-
-The `motlie-vfs-ctl` CLI tool is a separate binary (not part of the library). It's a thin
-wrapper that connects to the Unix socket and speaks the line protocol. It can be implemented
-in ~100 lines. For simple cases, `socat` works directly:
-
-```bash
-echo -e "LAYERS" | socat - UNIX-CONNECT:/tmp/motlie-vfs-ctl.sock
-
-# PUT with content (requires printf for binary-safe length prefix)
-content="KEY=value"
-printf "PUT defaults workspace /.env %d\n%s" ${#content} "$content" \
-  | socat - UNIX-CONNECT:/tmp/motlie-vfs-ctl.sock
-```
+Detailed console UX and script/config format are deferred to a future design for the v1.5 workflow.
 
 ### Overlay Control: Frontend Architecture
 
-The `MemOverlay` is a Rust API on `FsServer`. The control socket is one frontend to it,
-not the only one. Any code with access to `server.overlay()` can call `put`/`remove`/
-`put_layer`. This makes the overlay composable with arbitrary control frontends.
+The `MemOverlay` is a Rust API on `FsServer`. Any code with access to `server.overlay()` can
+call `put`/`remove`/`put_layer`. This makes the overlay composable with embedded admin loops now
+and remote admin frontends later.
 
-```
-MemOverlay (Rust API on FsServer)       ← the core, always available
-    ↑           ↑          ↑        ↑
-    │           │          │        │
-ControlSocket  HTTP/REST  gRPC     In-process
-(Unix socket)  (axum)     (tonic)  (direct Rust calls)
-  provided     caller's   caller's   caller's
-  by library   crate      crate      code
-    │           │          │        │
-CLI tool       curl       client   motlie-vmm daemon
-```
+This layering is intentional:
 
-The library provides `MemOverlay` (always) + `ControlSocket` (feature-gated). Network
-frontends (HTTP, gRPC) are the caller's responsibility — they import `motlie-vfs` with
-`server-core`, obtain `server.overlay()`, and wrap it in their own transport. No library
-changes needed.
+- `MemOverlay` is the core overlay API surface
+- v1 uses direct Rust calls and example programs under `libs/vfs/examples`
+- v1.5 adds a stronger embedded admin console plus script/config-driven batch loading
+- v2 adds external remote-control layers such as gRPC or custom RPC
 
-**Example: HTTP/REST frontend (separate crate, not part of motlie-vfs):**
+v1 scope boundary:
 
-```rust
-use motlie_vfs::core::FsServer;
-use axum::{Router, extract::Path, body::Bytes, http::StatusCode};
-
-let server: Arc<FsServer> = /* ... */;
-
-let app = Router::new()
-    .route("/overlay/:layer/:tag/*path", put({
-        let server = server.clone();
-        move |Path((layer, tag, path)): Path<(String, String, String)>,
-              body: Bytes| async move {
-            server.overlay().unwrap().put(&layer, &tag, &path, body)?;
-            Ok::<_, _>(StatusCode::OK)
-        }
-    }))
-    .route("/overlay/:layer/:tag/*path", delete({
-        let server = server.clone();
-        move |Path((layer, tag, path)): Path<(String, String, String)>| async move {
-            server.overlay().unwrap().remove(&layer, &tag, &path)?;
-            Ok::<_, _>(StatusCode::OK)
-        }
-    }))
-    .route("/overlay/:layer/:tag/*path", get({
-        let server = server.clone();
-        move |Path((layer, tag, path)): Path<(String, String, String)>| async move {
-            match server.overlay().unwrap().get(&layer, &tag, &path) {
-                Some(data) => Ok(data),
-                None => Err(StatusCode::NOT_FOUND),
-            }
-        }
-    }));
-
-axum::serve(TcpListener::bind("0.0.0.0:9001").await?, app).await?;
-```
-
-This turns motlie-vfs into a network file server with a REST API for content injection:
-
-```bash
-# Remote client injects an SSH key over the network
-curl -X PUT https://fileserver:9001/overlay/credentials/home/.ssh/id_deploy \
-  --data-binary @deploy_key
-
-# Inject API tokens
-curl -X PUT https://fileserver:9001/overlay/credentials/home/.env \
-  --data-binary @- <<< "ANTHROPIC_API_KEY=sk-ant-..."
-
-# Read back
-curl https://fileserver:9001/overlay/credentials/home/.ssh/id_deploy
-
-# Remove
-curl -X DELETE https://fileserver:9001/overlay/credentials/home/.ssh/id_deploy
-```
+- in scope: direct Rust calls to `server.overlay()`
+- in scope: proof-of-concept REPL or command loop inside `libs/vfs/examples`
+- out of scope for v1: standalone remote admin interface
+- out of scope for v1: external CLI application
+- out of scope for v1: library-provided HTTP admin server
+- out of scope for v1: library-provided gRPC admin server
+- out of scope for v1: library-provided overlay-specific network admin service
 
 **Dynamic credential injection while mounted (all frontends):**
 
@@ -910,29 +1568,36 @@ followed by a `read()` in the guest sees the new content immediately. This enabl
 dynamic, mid-session credential management:
 
 ```bash
-# Mid-session: inject a deploy key (via control socket, HTTP, or in-process)
-motlie-vfs-ctl put credentials home /.ssh/id_deploy < deploy_key
-# OR: curl -X PUT https://server:9001/overlay/credentials/home/.ssh/id_deploy --data-binary @deploy_key
-# OR: server.overlay().put("credentials", "home", "/.ssh/id_deploy", key_bytes)
+# Mid-session: inject a deploy key (via embedded admin console, script reload, or in-process call)
+server.overlay().put("credentials", "home", "/.ssh/id_deploy", key_bytes)
 
 # Guest immediately sees it — no restart, no remount
 ssh -i ~/.ssh/id_deploy git@github.com   # works
 
 # Shadow an existing key (disk version hidden, overlay version served)
-motlie-vfs-ctl put credentials home /.ssh/id_ecdsa < ephemeral_key
+server.overlay().put("credentials", "home", "/.ssh/id_ecdsa", ephemeral_key)
 # Guest reads /root/.ssh/id_ecdsa → gets ephemeral_key, not the on-disk version
 
 # Remove — original disk file reappears, synthetic files vanish
-motlie-vfs-ctl rm credentials home /.ssh/id_deploy    # gone
-motlie-vfs-ctl rm credentials home /.ssh/id_ecdsa     # disk version reappears
+server.overlay().remove("credentials", "home", "/.ssh/id_deploy")
+server.overlay().remove("credentials", "home", "/.ssh/id_ecdsa")
 ```
 
 **motlie-vmm integration:**
 
-For the VM use case, the VMM daemon calls `server.overlay()` directly from Rust — no control
-socket or HTTP needed. The VMM's `ControlMsg::AddMount` handler can inject overlay content
-as part of VM setup. The control socket and HTTP frontends are for standalone server
-deployments where external tooling needs to manage overlays at runtime.
+For the VM use case, the VMM daemon calls `server.overlay()` directly from Rust — no remote admin
+surface needed. The VMM's `ControlMsg::AddMount` handler can inject overlay content
+as part of VM setup. Future remote admin frontends are additive and do not change the
+core VMM integration path.
+
+The same pattern supports an in-process REPL or operator loop inside the VMM process itself.
+Because `motlie-vfs` is library-first and uses Tokio-friendly async I/O, the VMM can host:
+
+- the filesystem serving tasks
+- the vsock/RPC/FUSE transport tasks
+- an interactive or programmatic admin loop that calls `server.overlay()` directly
+
+inside one async process without introducing a separate overlay daemon.
 
 ### vsock Composite
 
@@ -958,114 +1623,39 @@ impl VsockConnectionHandler {
 ```
 
 ```rust
-/// Guest side: fuser::Filesystem backed by bincode over a stream.
-pub struct VsockFuseMount { /* ... */ }
+/// Guest side: request/response transport over an established stream.
+pub struct VsockClientTransport { /* ... */ }
 
-impl VsockFuseMount {
-    /// Create a FUSE mount backed by the given stream.
+impl VsockClientTransport {
+    /// Create a transport backed by the given stream.
     /// The tag is already established by the caller (guest agent handshake).
     pub fn new<S>(stream: S, tag: &str) -> Self
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static;
 }
-
-// VsockFuseMount implements fuser::Filesystem.
 ```
 
-### RPC Composite
+### v2 Roadmap Sketch: External RPC / gRPC Layer
 
-Full-featured protocol layer: `Frame` wrapping, pluggable `Codec`, pipelining support,
-built-in handshake. For cross-platform use where client and server may be different
-machines/OSes.
+This section is a future roadmap sketch, not current `libs/vfs` v1 crate scope.
 
-```rust
-/// Frame wraps FsOp/FsResult with request_id and handshake.
-#[derive(Serialize, Deserialize, Debug)]
-pub struct Frame {
-    pub request_id: u64,
-    pub body: FrameBody,
-}
+Roadmap placement:
 
-#[derive(Serialize, Deserialize, Debug)]
-pub enum FrameBody {
-    // Handshake
-    Hello { version: u32, tag: String },
-    HelloOk { version: u32 },
-    HelloErr { message: String },
+- v2 external application layer
+- built on top of the core crate API
+- not implemented inside `libs/vfs` itself
 
-    // Wraps core types
-    Request(FsOp),
-    Response(FsResult),
-}
-```
+The future v2 layer may add:
 
-```rust
-/// Pluggable wire encoding.
-pub trait Codec: Send + Sync + 'static {
-    fn encode(&self, frame: &Frame, buf: &mut Vec<u8>) -> Result<()>;
-    fn decode(&self, buf: &[u8]) -> Result<Frame>;
-}
+- a remote admin API
+- richer request/response semantics
+- streaming or multi-client coordination
+- alternative transport choices such as gRPC or a custom RPC service
 
-pub struct BincodeCodec;
-impl Codec for BincodeCodec { /* ... */ }
-```
-
-```rust
-/// Host side: wraps FsServer with frame protocol.
-pub struct RpcServer { /* ... */ }
-
-impl RpcServer {
-    pub fn new<C: Codec>(server: FsServer, codec: C) -> Self;
-
-    /// Serve a single client connection.
-    /// Handles Hello handshake, then frame decode → handle_op() → frame encode loop.
-    pub async fn serve<S>(&self, stream: S) -> Result<()>
-    where
-        S: AsyncRead + AsyncWrite + Unpin + Send;
-}
-```
-
-```rust
-/// Client side: frame-level protocol client (no FUSE).
-pub struct RpcClient { /* ... */ }
-
-impl RpcClient {
-    /// Connect and perform Hello handshake.
-    pub async fn connect<S, C>(stream: S, codec: C, tag: &str) -> Result<Self>
-    where
-        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-        C: Codec;
-
-    /// Send FsOp, receive FsResult.
-    pub async fn request(&self, op: FsOp) -> Result<FsResult>;
-
-    /// Convert to a fuser::Filesystem for mounting.
-    /// Consumes self.
-    pub fn into_fuse(self) -> FuseClient;
-}
-```
-
-### Frame I/O
-
-Wire format for both vsock and RPC composites: `[u32 big-endian length][payload]`.
-
-For vsock composite, payload is `bincode(FsOp)` or `bincode(FsResult)`.
-For RPC composite, payload is `codec.encode(Frame)`.
-
-```rust
-/// Read/write length-prefixed payloads over any async stream.
-pub async fn write_msg<T: AsyncWrite + Unpin>(
-    stream: &mut T,
-    payload: &[u8],
-) -> Result<()>;
-
-pub async fn read_msg<T: AsyncRead + Unpin>(
-    stream: &mut T,
-    max_size: usize,
-) -> Result<Vec<u8>>;
-```
-
-The framing layer is shared; the interpretation of the payload differs by composite.
+Those details are intentionally deferred to a future design outside this crate. The only
+contract that matters here is that the `libs/vfs` core API should remain clean enough that
+such an external layer can be built later without reshaping the core filesystem and overlay
+semantics.
 
 ## Composition Patterns (Usage Examples)
 
@@ -1135,15 +1725,17 @@ The guest agent opens a vsock connection, performs the VMM-level handshake, then
 hands the stream to the library for FUSE mounting.
 
 ```rust
-use motlie_vfs::vsock::VsockFuseMount;
+use motlie_vfs::client::FuseClient;
+use motlie_vfs::vsock::VsockClientTransport;
 use tokio_vsock::VsockStream;
 
 // Guest agent: open vsock, do the vmm-level handshake
 let mut stream = VsockStream::connect(2, 5000).await?;
 send_handshake(&mut stream, &HandshakeMsg::Fs { tag: "workspace".into() }).await?;
 
-// Hand the established stream to the library for FUSE mounting
-let mount = VsockFuseMount::new(stream, "workspace");
+// Hand the established stream to the library transport, then mount via FuseClient
+let transport = VsockClientTransport::new(stream, "workspace");
+let mount = FuseClient::new(transport, "workspace");
 fuser::mount2(mount, "/workspace", &[
     MountOption::AutoUnmount,
     MountOption::AllowRoot,
@@ -1151,81 +1743,7 @@ fuser::mount2(mount, "/workspace", &[
 ])?;
 ```
 
-### Pattern 4: RPC Server -- Standalone Linux/macOS FS Server
-
-A standalone binary (separate crate) that uses the library to serve mounts over
-a Unix socket or TCP.
-
-```rust
-use motlie_vfs::core::FsServer;
-use motlie_vfs::rpc::RpcServer;
-use motlie_vfs::codec::BincodeCodec;
-use tokio::net::UnixListener;
-
-let server = FsServer::builder()
-    .mount("workspace", "/home/alice/projects".into(), false)
-    .mount("data", "/data/shared".into(), true)
-    .events(4096)
-    .policy(ReadOnlyCredentials::new())
-    .build()?;
-
-let rpc = RpcServer::new(server, BincodeCodec);
-
-// Caller owns the listener
-let listener = UnixListener::bind("/tmp/motlie-vfs.sock")?;
-loop {
-    let (stream, _) = listener.accept().await?;
-    let rpc = rpc.clone();
-    tokio::spawn(async move {
-        // Handles Hello handshake → frame loop → handle_op()
-        rpc.serve(stream).await
-    });
-}
-```
-
-### Pattern 5: RPC Client -- Mount on Linux or macOS
-
-```rust
-use motlie_vfs::rpc::RpcClient;
-use motlie_vfs::codec::BincodeCodec;
-use tokio::net::UnixStream;
-
-// Connect to server
-let stream = UnixStream::connect("/tmp/motlie-vfs.sock").await?;
-
-// RpcClient handles Hello handshake and frame encode/decode
-let client = RpcClient::connect(stream, BincodeCodec, "workspace").await?;
-
-// Convert to fuser::Filesystem and mount
-// Identical on Linux and macOS (FUSE-T provides libfuse compat on macOS)
-fuser::mount2(client.into_fuse(), "/mnt/workspace", &[
-    MountOption::AutoUnmount,
-    MountOption::AllowRoot,
-    MountOption::CUSTOM("direct_io".into()),
-])?;
-```
-
-### Pattern 6: RPC Client -- Remote Mount over TCP+TLS
-
-```rust
-use motlie_vfs::rpc::RpcClient;
-use motlie_vfs::codec::BincodeCodec;
-use tokio::net::TcpStream;
-use tokio_rustls::TlsConnector;
-
-let tcp = TcpStream::connect("build-server:9000").await?;
-let tls = TlsConnector::from(tls_config);
-let stream = tls.connect(server_name, tcp).await?;
-
-let client = RpcClient::connect(stream, BincodeCodec, "workspace").await?;
-fuser::mount2(client.into_fuse(), "/Volumes/workspace", &[
-    MountOption::AutoUnmount,
-    MountOption::AllowRoot,
-    MountOption::CUSTOM("direct_io".into()),
-])?;
-```
-
-### Pattern 7: Testing -- No FUSE, No Transport
+### Pattern 5: Testing -- No FUSE, No Transport
 
 ```rust
 use motlie_vfs::core::{FsServer, FsOp, FsResult};
@@ -1266,79 +1784,7 @@ async fn test_read_write() {
 }
 ```
 
-### Pattern 8: Testing -- RPC Over In-Memory Duplex (No FUSE)
-
-```rust
-use motlie_vfs::core::FsServer;
-use motlie_vfs::rpc::{RpcServer, RpcClient};
-use motlie_vfs::codec::BincodeCodec;
-
-#[tokio::test]
-async fn test_rpc_round_trip() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("hello.txt"), b"world").unwrap();
-
-    let server = FsServer::builder()
-        .mount("test", dir.path().to_path_buf(), false)
-        .build()
-        .unwrap();
-
-    let rpc_server = RpcServer::new(server, BincodeCodec);
-
-    // In-memory transport -- no Unix socket, no FUSE
-    let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
-
-    tokio::spawn(async move { rpc_server.serve(server_stream).await });
-
-    let client = RpcClient::connect(client_stream, BincodeCodec, "test").await.unwrap();
-
-    let result = client.request(FsOp::Lookup {
-        parent: 1,
-        name: "hello.txt".into(),
-    }).await.unwrap();
-
-    assert!(matches!(result, FsResult::Entry { .. }));
-}
-```
-
-### Pattern 9: Overlay -- Startup Injection + Runtime Control Socket
-
-```rust
-use motlie_vfs::core::FsServer;
-use motlie_vfs::rpc::RpcServer;
-use motlie_vfs::control::ControlSocket;
-use motlie_vfs::codec::BincodeCodec;
-
-let server = FsServer::builder()
-    .mount("workspace", "/home/alice/projects".into(), false)
-    .overlay(true)
-    .events(4096)
-    .build()?;
-
-// Startup: inject defaults layer with base config
-let overlay = server.overlay().unwrap();
-overlay.put_layer("defaults", 0)?;
-overlay.put("defaults", "workspace", "/.env", Bytes::from("API_KEY=sk-test-123"))?;
-overlay.put("defaults", "workspace", "/config.toml", config_bytes)?;
-
-// RPC server for FUSE clients
-let rpc = RpcServer::new(server.clone(), BincodeCodec);
-let listener = UnixListener::bind("/tmp/motlie-vfs.sock")?;
-tokio::spawn(async move {
-    loop {
-        let (stream, _) = listener.accept().await.unwrap();
-        let rpc = rpc.clone();
-        tokio::spawn(async move { rpc.serve(stream).await });
-    }
-});
-
-// Control socket for runtime overlay management
-let ctl = ControlSocket::new(&server);
-ctl.listen("/tmp/motlie-vfs-ctl.sock".as_ref()).await?;
-// Now external tools can: motlie-vfs-ctl put hotpatch workspace /config.toml < new_config.toml
-```
-
-### Pattern 10: Overlay -- Direct Testing
+### Pattern 6: Overlay -- Direct Testing
 
 ```rust
 use motlie_vfs::core::{FsServer, FsOp, FsResult};
@@ -1428,8 +1874,8 @@ InodeTable:
 | Entry class | When allocated | `kind` | `host_path` | `attrs` source |
 |-------------|---------------|--------|-------------|----------------|
 | Disk file/dir | First `lookup` that resolves to host filesystem | `Disk` | `Some(host_path)` | `std::fs::metadata()` on every access (v1: no attrs cache) |
-| Overlay `Content` | `put()` or `Create` under overlay-managed dir | `Content` | `None` | Size from content length, mode 0644, mtime from injection time |
-| `SyntheticDir` | Implicitly by `put()` for missing parent dirs, or explicit `Mkdir` under synthetic parent | `SyntheticDir` | `None` | Mode 0755, mtime from first child injection |
+| Overlay `Content` | `put()` / `put_with_attrs()` or `Create` under overlay-managed dir | `Content` | `None` | Size from content length, mode+uid+gid from explicit attrs or inherited defaults, mtime from injection time |
+| `SyntheticDir` | Implicitly by `put()` for missing parent dirs, or explicit `Mkdir` under synthetic parent | `SyntheticDir` | `None` | Mode 0755 by default, uid/gid inherited from nearest existing parent or mount root, mtime from first child injection |
 | `Whiteout` | `Unlink` on shadowed file | `Whiteout` | `None` | Not visible (lookup returns ENOENT) |
 
 ### Inode Stability
@@ -1440,7 +1886,7 @@ InodeTable:
   with `Content` at the same path, the inode is reused but `generation` is bumped. The FUSE
   client sees a new generation and invalidates its cache for that inode.
 - **Not stable across `remove_layer()`:** removing a layer may expose a lower-priority entry
-  or fall through to disk. If the effective entry kind changes, `generation` is bumped.
+  or continue into the base layer. If the effective entry kind changes, `generation` is bumped.
 - **Not stable across mount restart:** inode numbers are ephemeral per mount session.
 
 ### Generation Semantics
@@ -1452,7 +1898,7 @@ InodeTable:
 | `put()` replacing existing `Content` at same path | Yes | Content changed; FUSE client must invalidate cached data |
 | `put()` replacing `Whiteout` with `Content` | Yes | Entry kind changed from invisible to visible |
 | `whiteout()` replacing `Content` | Yes | Entry kind changed from visible to invisible |
-| `remove()` dropping overlay entry (disk fallthrough) | Yes | Effective content changed (now from disk) |
+| `remove()` dropping overlay entry (lower-layer exposure) | Yes | Effective content changed because resolution moved to a lower layer |
 | `remove_layer()` changing effective entry | Yes | Winning layer may change, altering content |
 | Layer priority change (`put_layer` with new priority) | Yes (for affected paths) | Resolution order changed |
 | `Write` updating existing `Content` in-place | No | Same entry, same kind, content updated |
@@ -1499,7 +1945,7 @@ returned by the server. The v1 strategy is zero TTL for everything:
 | Entry class | `ttl_secs` for lookup/getattr | `ttl_secs` for data | Rationale |
 |-------------|-------------------------------|---------------------|-----------|
 | Disk file/dir | 0 | 0 | No server-side cache; kernel must revalidate every access |
-| Overlay `Content` | 0 | 0 | Content can change at any time via `put()` / control socket |
+| Overlay `Content` | 0 | 0 | Content can change at any time via `put()` / `apply_batch()` / future admin frontend |
 | `SyntheticDir` | 0 | N/A | May gain/lose children via `put()` / `remove()` |
 | `Whiteout` | 0 | N/A | May be replaced by `put()` |
 
@@ -1602,8 +2048,8 @@ This section documents how motlie-vfs components map to the motlie-vmm architect
 | vsock FS server (~800 lines, §10) | `FsServer` (core) | Same job: tag→host_path routing, inode table, host FS ops |
 | `fs_loop(stream, vm, &tag)` in §10 | `VsockConnectionHandler::serve()` | Extracted + parameterized over stream type |
 | `FsServer::add_mount()` / `remove_mount()` in §11 | `FsServer::add_mount()` / `remove_mount()` | Identical interface |
-| Guest agent FUSE↔vsock bridge (~700 lines, §10-11) | `VsockFuseMount` / `FuseClient` | Same job, transport-agnostic |
-| `VsockFuse::new(HOST_CID, VMM_PORT, &tag, read_only)` in §11 | `VsockFuseMount::new(stream, tag)` | Takes established stream, not raw vsock params |
+| Guest agent FUSE↔vsock bridge (~700 lines, §10-11) | `GuestMountRunner` + `FuseClient` + `VsockClientTransport` | `GuestMountRunner` owns guest-side mount orchestration; `FuseClient` owns `fuser::Filesystem`; vsock module provides transport |
+| `VsockFuse::new(HOST_CID, VMM_PORT, &tag, read_only)` in §11 | `GuestMountRunner::mount(...)` using `VsockClientTransport::new(stream, tag)` + `FuseClient::new(transport, tag)` | Library mount runner takes established streams / connectors, not raw VMM protocol concerns |
 | Inline policy checks in §12 (`if is_cred { ... }`) | `PolicyFn` trait | Formalized into trait |
 | `AuditedFsServer` wrapping `FsServer` in §12 | `FsServer` with `.events()` builder | Events built into core, domain context added by caller |
 
@@ -1612,16 +2058,177 @@ This section documents how motlie-vfs components map to the motlie-vmm architect
 | motlie-vmm concept | Why not extracted |
 |---|---|
 | `HandshakeMsg` enum (`BinaryRequest`, `Control`, `Fs`) | Multiplexer-level routing, not an FS concern |
-| `ControlMsg` enum (`Ready`, `AddMount`, `RemoveMount`, `Shutdown`) | VM lifecycle control; calls into `FsServer::add_mount()` |
+| `ControlMsg` enum (`Ready`, `AddMount`, `RemoveMount`, `Shutdown`) | VM lifecycle control and guest orchestration; outside the `libs/vfs` crate |
 | `AuditedFsServer` domain enrichment (vm_name, credential classification) | VMM-specific; subscribes to `FsEvent` and adds context |
 | Bootstrap binary delivery (`BinaryRequest`) | VM-specific bootstrap |
-| Guest agent `main()` loop (§11) | Orchestration: control channel + spawning mounts |
+| Tiny bootstrap binary in the guest image | VM-specific bootstrap and binary loading |
+| Guest agent `main()` loop (§11) | Process/bootstrap orchestration: reads config, acquires streams, invokes `GuestMountRunner`, and coordinates with VM lifecycle |
 
 ## VMM Guest Integration: vsock + Overlay
 
 This section documents how motlie-vfs integrates with the motlie-vmm guest agent over
 vsock, including the full VM boot lifecycle and how the overlay enables selective in-memory
 content injection for specific paths within a pass-through mount.
+
+### v1 VM Target: vsock Only
+
+For VM guests, the v1 target path is **vsock only**.
+
+- the guest-side filesystem bridge uses `FuseClient`
+- the vsock module provides the guest transport adapter used by `FuseClient`
+- the host-side serving path uses `VsockConnectionHandler`
+- this is the primary VM integration path that must be correct before broader transport work
+- the transport-agnostic RPC composite remains useful for non-VM or standalone mounts, but it is
+  not required to deliver the first VM-backed product
+
+This keeps the initial guest target aligned with the existing VMM architecture and removes
+unnecessary transport work from the critical path for VM delivery.
+
+### Fastest Dev/Test Harness Before a Full VMM: Cloud Hypervisor
+
+The fastest path to validate the v1 VM design is to use **Cloud Hypervisor (CH)** as a thin
+development harness instead of building the full `motlie-vmm` orchestration stack first.
+
+Recommended approach:
+
+- boot a minimal Linux guest with the same root model assumed by this DESIGN:
+  read-only squashfs base plus writable ext4 overlay
+- enable a vsock device between host and guest
+- run the real guest-side mounter binary (`motlie-vfs-guest`) in the guest, either directly
+  from the test image or via a tiny bootstrap owned by the VMM layer:
+  - reads a static mount config prepared ahead of boot
+  - acquires one or more connected vsock streams from VMM-owned handshake/bootstrap logic
+  - invokes `client::guest::GuestMountRunner` to mount the configured guest paths
+- run `FsServer` + `MemOverlay` on the host in a simple Tokio process
+- inject files directly through `server.overlay()` or the example REPL/admin loop
+- validate guest-visible behavior without implementing the full VMM control plane,
+  SSH bridge, or binary-delivery/bootstrap flow
+
+What CH needs to provide for this harness:
+
+- kernel + initrd or disk boot for the guest
+- virtio-block devices for the squashfs/ext4 stacked root model
+- a vsock device for host↔guest transport
+- enough guest configuration to start the bootstrap/agent process
+
+What the CH harness intentionally avoids in v1:
+
+- custom VMM multiplexer/control protocol
+- dynamic guest binary delivery
+- full VM lifecycle management
+- production orchestration concerns
+
+The goal of the CH harness is not to replace `motlie-vmm`. It is to prove the core stack
+quickly:
+
+- `FsServer`
+- `MemOverlay`
+- `VsockConnectionHandler`
+- `VsockClientTransport`
+- `FuseClient`
+- guest-visible mount and overlay semantics
+
+### v1 CH Harness: Required Setup and Test Procedure
+
+The v1 scope includes enough operational setup to let developers and CI prove the guest-vsock
+path end-to-end without a full VMM. At minimum, the repo should provide documented scripts or
+CLI procedures for the following.
+
+**1. VM image building for SSH-capable guest testing**
+
+The test guest image should include:
+
+- the same stacked root model used by this DESIGN:
+  - read-only squashfs base
+  - writable ext4 overlay
+- a minimal init/bootstrap path that mounts the stacked root
+- the built `motlie-vfs-guest` binary, or a tiny bootstrap that execs it, capable of:
+  - reading a static mount config
+  - obtaining connected streams from VMM-owned bootstrap/handshake logic
+  - invoking `GuestMountRunner`
+- enough userland to validate guest behavior:
+  - `sshd` or equivalent for guest access
+  - `mount`, `stat`, `ls`, `cat`, `touch`, `rm`
+  - test user provisioning such as `/home/alice`
+
+The exact image-builder implementation can vary, but the v1 contract is that the repo must
+include a reproducible way to:
+
+- build `cargo build -p motlie-vfs --bin motlie-vfs-guest`
+- stage or embed that binary into the guest image artifacts
+- build or refresh the guest image for local testing
+
+**2. Cloud Hypervisor guest launch procedure**
+
+The repo should include documented scripts or CLI commands to:
+
+- start Cloud Hypervisor with:
+  - the kernel + root artifacts for the guest
+  - virtio-block devices for the squashfs/ext4 stack
+  - a vsock device
+  - networking sufficient for SSH-based guest validation, when SSH testing is enabled
+- pass any guest configuration needed by the bootstrap/agent
+- stop and clean up the guest after tests
+
+This can be a shell script, `just` target, `cargo xtask`, or similar. The important part is
+that the procedure is explicit and reproducible.
+
+**3. Host-side motlie-vfs server setup**
+
+The repo should include a documented procedure or script that:
+
+- creates the host backing directories used for test mounts
+- starts an `FsServer` with the intended mount tags
+- enables `MemOverlay`
+- starts the vsock serving path
+- starts the host example REPL / admin loop for manual mutation testing
+
+For example, a basic host test setup may create:
+
+- a host directory to back guest `/home`
+- a subdirectory such as `./testdata/home/alice`
+- sample disk-backed files that can later be shadowed or whiteouted by the overlay
+
+**4. Overlay mutation procedures using the motlie-vfs CLI**
+
+The documented v1 test path should include concrete CLI examples for:
+
+- injecting a file:
+  - `motlie-vfs-ctl put ...`
+- injecting with explicit ownership:
+  - `motlie-vfs-ctl putattr ...`
+- creating a tombstone/whiteout:
+  - `motlie-vfs-ctl whiteout ...`
+- removing an injected entry:
+  - `motlie-vfs-ctl rm ...`
+- removing an entire layer:
+  - `motlie-vfs-ctl rmlayer ...`
+- inspecting effective overlay state:
+  - `motlie-vfs-ctl ls ...`
+  - `motlie-vfs-ctl lslayer ...`
+
+These procedures must cover both:
+
+- synthetic paths such as `/.claude/skills/...`
+- shadowing/tombstoning files already present in the mounted disk-backed tree
+
+**5. Guest-side validation**
+
+The documented v1 validation flow should include at least:
+
+- verifying the mount is active at the expected guest path
+- verifying an injected file becomes visible without reboot or remount
+- verifying a whiteout hides a lower disk file
+- verifying `rm` of an injected synthetic file makes it disappear
+- verifying ownership and mode on synthetic entries with `stat`
+- verifying SSH-related guest behavior when the test image includes `sshd`
+
+This operational procedure is in addition to:
+
+- unit tests
+- direct-mode integration tests
+- duplex transport harnesses
+- environment-gated automated integration tests
 
 ### VM Boot Lifecycle (from Firecracker to FUSE mounts)
 
@@ -1668,7 +2275,8 @@ ensure_vm("alice")
   │                                            │      ├─ for each mount in config:
   │   HandshakeMsg::Fs { tag }  ◄──────────────│      │   connect vsock:5000
   │   → VsockConnectionHandler::serve()        │      │   handshake: Fs { tag }
-  │                                            │      │   VsockFuseMount::new(stream, tag)
+  │                                            │      │   VsockClientTransport::new(stream, tag)
+  │                                            │      │   FuseClient::new(transport, tag)
   │                                            │      │   fuser::mount2(mount, path, opts)
   │                                            │      │
   │   HandshakeMsg::Control  ◄─────────────────│      ├─ connect vsock:5000
@@ -1683,84 +2291,86 @@ ensure_vm("alice")
   └─ VM ready, bridge SSH session
 ```
 
+### VMM Storage Model: virtio-block + stacked root
+
+The guest boot/storage model remains the same as in `motlie-vmm`: a read-only squashfs
+base plus a writable ext4 overlay, stacked inside the guest by `overlay-init`.
+
+This design assumes the guest sees these inputs as ordinary **virtio-block devices**:
+
+- one block device providing the read-only base image consumed by the squashfs mount
+- one block device providing the writable ext4 overlay used for per-VM config/state
+
+The stacking model is intentionally **independent of the host-side image container format**.
+Whether the VMM stores or prepares those block devices as **raw** images or **qcow2** images
+is outside `motlie-vfs` itself and belongs to the VMM/image-build layer. The requirement at
+this boundary is only that the guest is presented with standard block devices containing:
+
+- a squashfs read-only root payload
+- an ext4 writable overlay payload
+
+So, from the perspective of this DESIGN:
+
+- **same squashfs + ext4 stacking**: yes, required
+- **virtio-block presentation to the guest**: yes, assumed
+- **raw vs qcow2 host backing**: either is acceptable, as long as the VMM presents the guest
+  with the same effective virtio-block devices and boot flow
+
+This keeps `motlie-vfs` decoupled from image-container details while preserving compatibility
+with the existing `motlie-vmm` boot architecture.
+
+### Guest-Side API Boundary
+
+The guest-side reusable library boundary in `libs/vfs` is:
+
+- `VsockClientTransport`: request/response transport over an already-established guest stream
+- `FuseClient`: the guest-side `fuser::Filesystem` implementation over a transport
+- `GuestMountRunner`: guest-side orchestration that takes mount specs plus stream/connect helpers
+  and mounts one or more guest-visible filesystems
+
+This means:
+
+- `src/bin/motlie-vfs-guest.rs` should be a thin binary over `client::guest`
+- a future `motlie-vmm-guest` binary should also be a thin wrapper over `client::guest`
+- the tiny bootstrap binary, binary-delivery path, and VMM handshake multiplexer remain outside
+  `libs/vfs`
+
 ### Guest Agent Code with motlie-vfs
 
-The guest agent (~700 lines in the VMM doc) uses motlie-vfs's vsock composite on the
-client side. With the library, the FUSE mount code becomes a thin wrapper:
+The guest agent (~700 lines in the VMM doc) should depend on the public guest-side API rather
+than reimplementing mount orchestration inline. With the library, the guest-mount logic becomes:
 
 ```rust
-// motlie-vmm-guest main.rs (inside the VM)
-use motlie_vfs::vsock::VsockFuseMount;
+// src/bin/motlie-vfs-guest.rs or motlie-vmm-guest main.rs (inside the VM)
+use motlie_vfs::client::guest::{GuestMountRunner, GuestMountSpec};
+use motlie_vfs::vsock::VsockClientTransport;
 
 const HOST_CID: u32 = 2;
 const VMM_PORT: u32 = 5000;
 
 fn main() {
     let config: MountConfig = read_json("/etc/motlie-vmm/mounts.json");
+    let specs: Vec<GuestMountSpec> = config.mounts.into_iter()
+        .map(|m| GuestMountSpec::new(m.tag, m.guest_path).read_only(m.read_only))
+        .collect();
 
-    // Spawn one FUSE mount per configured path
-    let mut handles = Vec::new();
-    for mount in &config.mounts {
-        let tag = mount.tag.clone();
-        let guest_path = mount.guest_path.clone();
-        let read_only = mount.read_only;
-
-        let handle = std::thread::Builder::new()
-            .name(format!("fuse-{}", tag))
-            .spawn(move || {
-                // 1. Connect to host vsock
-                let mut stream = vsock_connect(HOST_CID, VMM_PORT).unwrap();
-
-                // 2. VMM-level handshake (not part of motlie-vfs)
-                send_handshake(&mut stream, &HandshakeMsg::Fs { tag: tag.clone() });
-
-                // 3. Hand the stream to motlie-vfs for FUSE mounting
-                std::fs::create_dir_all(&guest_path).ok();
-                let fuse_mount = VsockFuseMount::new(stream, &tag);
-                let mut opts = vec![
-                    fuser::MountOption::AutoUnmount,
-                    fuser::MountOption::AllowRoot,
-                    fuser::MountOption::CUSTOM("direct_io".into()),
-                ];
-                if read_only {
-                    opts.push(fuser::MountOption::RO);
-                }
-                fuser::mount2(fuse_mount, &guest_path, &opts).unwrap();
-            })
-            .unwrap();
-        handles.push(handle);
-    }
-
-    // Control connection (stays in motlie-vmm, not in the library)
-    let mut control = vsock_connect(HOST_CID, VMM_PORT).unwrap();
-    send_handshake(&mut control, &HandshakeMsg::Control);
-    send_msg(&mut control, &ControlMsg::Ready);
-
-    // Listen for dynamic mount commands
-    loop {
-        match recv_msg(&mut control) {
-            Ok(ControlMsg::AddMount { tag, guest_path, read_only }) => {
-                // Same pattern: connect vsock, handshake, VsockFuseMount
-                let handle = spawn_fuse_mount(&tag, &guest_path, read_only);
-                handles.push(handle);
-                send_msg(&mut control, &ControlMsg::MountReady { tag });
-            }
-            Ok(ControlMsg::RemoveMount { tag }) => {
-                let path = find_mount_path(&tag);
-                Command::new("fusermount").args(["-u", &path]).status().ok();
-            }
-            Ok(ControlMsg::Shutdown) => break,
-            Err(_) => break,
-            _ => {}
-        }
-    }
+    let runner = GuestMountRunner::new(specs);
+    runner.mount_all(|tag| {
+        // VMM-owned connect + handshake remain outside the library.
+        let mut stream = vsock_connect(HOST_CID, VMM_PORT)?;
+        send_handshake(&mut stream, &HandshakeMsg::Fs { tag: tag.to_string() })?;
+        Ok(VsockClientTransport::new(stream, tag))
+    })?;
 }
 ```
 
 The boundary is clear:
-- **motlie-vfs** owns: `VsockFuseMount` (FUSE ↔ vsock bridge), frame encoding, `fuser` integration
-- **motlie-vmm guest** owns: vsock connect, `HandshakeMsg` handshake, control loop, mount orchestration
-- **motlie-vmm host** owns: vsock listener, `HandshakeMsg` dispatch, `FsServer` + overlay setup, control protocol
+- **motlie-vfs** owns: `GuestMountRunner`, `FuseClient` (guest-side `fuser` bridge),
+  `VsockClientTransport`, frame encoding, `fuser` integration
+- **motlie-vmm guest** owns: process/bootstrap orchestration, config loading, vsock connect,
+  `HandshakeMsg` handshake, and invoking the library guest APIs
+- **motlie-vmm host** owns: vsock listener, `HandshakeMsg` dispatch, `FsServer` + overlay setup,
+  and any VMM control protocol
 
 ### Host-Side Setup: FsServer + Overlay for a VM
 
@@ -1860,49 +2470,54 @@ per-session generation).
 
 ```
 read("/root/projects/README.md")
-  → overlay.resolve("home", "/projects/README.md") → None
-  → fall through to std::fs::read("~/alice/projects/README.md")  ← disk
+  → walk layer stack for tag "home" from top to bottom
+  → memfs layers: no entry
+  → base disk layer: ~/alice/projects/README.md found
+  → return bytes from base layer
 
 read("/root/.ssh/id_ed25519")
-  → overlay.resolve("home", "/.ssh/id_ed25519") → Some(("credentials", Content(key_bytes)))
-  → return key_bytes from memfs layer                             ← in-memory, never touches disk
+  → walk layer stack for tag "home" from top to bottom
+  → "credentials" memfs layer: Content(key_bytes)
+  → return key_bytes from memfs layer                             ← in-memory, never touches base layer
 
 read("/root/.env")
-  → overlay.resolve("home", "/.env") → Some(("credentials", Content(env_bytes)))
-  → return env_bytes from memfs layer                             ← synthetic file, no disk backing
+  → walk layer stack for tag "home" from top to bottom
+  → "credentials" memfs layer: Content(env_bytes)
+  → return env_bytes from memfs layer                             ← synthetic file, no base-layer backing required
 
 write("/root/.ssh/known_hosts", new_entry)
-  → overlay.resolve("home", "/.ssh/known_hosts") → Some(("credentials", Content(_)))
-  → update Content entry in "credentials" layer                   ← disk untouched
+  → visible owner is the "credentials" memfs layer
+  → update Content entry in "credentials" layer                   ← base layer untouched
 
 write("/root/projects/src/main.rs", code)
-  → overlay.resolve("home", "/projects/src/main.rs") → None
-  → fall through to std::fs::write("~/alice/projects/src/main.rs")  ← goes to disk
+  → walk layer stack for tag "home" from top to bottom
+  → memfs layers: no entry
+  → base disk layer owns the path
+  → write through base layer                                      ← in v1 this reaches disk
 
 ls("/root/")
-  → readdir on host: ~/alice/ → [projects, .config, .bashrc, documents, ...]
-  → overlay entries for "home" at depth 1: [.ssh (SyntheticDir), .env (Content)]
-  → merge per-name: .ssh exists on both? overlay SyntheticDir wins
-  →                  .env only in overlay? synthetic entry added
+  → start from base disk layer entries: [projects, .config, .bashrc, documents, ...]
+  → apply memfs layers for "home" at depth 1: [.ssh (SyntheticDir), .env (Content)]
+  → merge per-name: .ssh exists on both? upper memfs SyntheticDir wins
+  →                  .env only in memfs? synthetic entry added
   → policy filter: all pass (no policy on /root/)
   → result: [projects, .config, .bashrc, documents, .ssh, .env, ...]
 
 ls("/root/.ssh/")  — Case A: ~/alice/.ssh/ does NOT exist on disk (synthetic parent):
-  → overlay.resolve("home", "/.ssh") → Some(("credentials", SyntheticDir))
-  → directory is synthetic → no host readdir, only overlay children
-  → overlay entries at /.ssh/*: [id_ed25519, id_ed25519.pub, config, authorized_keys]
+  → walk stack: upper memfs layer resolves `/.ssh` as SyntheticDir
+  → effective directory is owned by upper memfs layer
+  → effective children at /.ssh/*: [id_ed25519, id_ed25519.pub, config, authorized_keys]
   → result: [id_ed25519, id_ed25519.pub, config, authorized_keys]
      (pure memfs directory — no disk entries to merge or filter)
 
 ls("/root/.ssh/")  — Case B: ~/alice/.ssh/ exists on disk (disk+overlay merge):
-  → overlay.resolve("home", "/.ssh") → None (dir exists on disk, not a SyntheticDir)
-  → readdir on host: ~/alice/.ssh/ → [known_hosts, old_config]
-  → overlay entries at /.ssh/*: [id_ed25519, id_ed25519.pub, config, authorized_keys]
-  → merge per-name: overlay entries + disk entries
+  → base disk layer entries: [known_hosts, old_config]
+  → upper memfs entries at /.ssh/*: [id_ed25519, id_ed25519.pub, config, authorized_keys]
+  → merge per-name: upper memfs entries + base-layer entries
 
   Case B without policy (unfiltered):
   → result: [known_hosts, old_config, id_ed25519, id_ed25519.pub, config, authorized_keys]
-     (disk files pass through alongside overlay entries)
+     (base-layer files pass through alongside memfs entries)
 
   Case B with SshLockdown policy:
   → policy filter: SshLockdown denies disk-only entries (known_hosts, old_config)
@@ -1910,24 +2525,27 @@ ls("/root/.ssh/")  — Case B: ~/alice/.ssh/ exists on disk (disk+overlay merge)
      (disk files excluded by policy)
 ```
 
-**readdir merging with overlay and policy filtering:**
+**readdir merging with layer-stack semantics and policy filtering:**
 
-When `handle_op()` processes a `Readdir`, it merges entries and then filters:
+When `handle_op()` processes a `Readdir`, it resolves and merges through the ordered layer stack
+and then filters:
 
-1. Read real entries from `std::fs::read_dir(host_path)`.
-   (If directory is synthetic — doesn't exist on disk — skip this step.)
-2. Collect overlay entries whose path is a direct child of the queried directory.
-3. Merge by name: overlay entry shadows disk entry with the same name.
-4. Disk entries not shadowed pass through unchanged.
-5. Overlay entries with no disk counterpart appear as synthetic entries.
-6. **Policy filter:** each merged entry is passed through `policy.check(Readdir, tag, path)`.
+1. Start from the lowest layer’s direct children for the queried directory.
+   In v1 this is the disk-backed base layer, unless the effective directory is fully synthetic
+   above it.
+2. Apply each higher layer in stack order.
+3. Merge by name:
+   - `Content` and `SyntheticDir` add or replace
+   - `Whiteout` removes the name from the effective set
+4. **Policy filter:** each merged entry is passed through `policy.check(Readdir, tag, path)`.
    Entries denied by policy are excluded from the result. This enables directory-level
-   lockdown without modifying the overlay.
+   lockdown without modifying the stack semantics.
 
 ### Overlay Scope: File-Level Granularity
 
-The overlay operates at **file granularity**. Each `put()` inserts a file node in the
-memfs layer. `readdir` behavior depends on whether the directory is synthetic or disk-backed:
+The memfs layer model operates at **file granularity**. Each `put()` inserts a file node in a
+named memfs layer for a specific `(tag, path)`. `readdir` behavior depends on the effective
+lower-layer state for that directory:
 
 ```
 Case A: synthetic directory (host dir does not exist):
@@ -1936,18 +2554,18 @@ Case A: synthetic directory (host dir does not exist):
   → result: [id_ed25519, id_ed25519.pub, config, authorized_keys]
   (no disk entries to merge — pure memfs directory)
 
-Case B: disk directory with overlay children:
+Case B: base-layer directory with memfs children:
   readdir("/.ssh/") where ~/alice/.ssh/ exists on disk
-  → host readdir: [known_hosts, old_config]
-  → overlay children: [id_ed25519, id_ed25519.pub, config, authorized_keys]
-  → per-name merge: overlay shadows same-name disk entries; disk-only entries pass through
+  → base-layer readdir: [known_hosts, old_config]
+  → memfs children: [id_ed25519, id_ed25519.pub, config, authorized_keys]
+  → per-name merge: upper memfs entries shadow same-name base entries; base-only entries pass through
   → policy filter (step 6): each entry checked, denied entries excluded
   → without policy: [known_hosts, old_config, id_ed25519, id_ed25519.pub, config, authorized_keys]
   → with SshLockdown: [id_ed25519, id_ed25519.pub, config, authorized_keys]
 ```
 
 In Case A, no policy is needed — the directory is entirely overlay-managed. In Case B,
-disk files pass through by default; use policy to enforce isolation if needed.
+base-layer files pass through by default; use policy to enforce isolation if needed.
 
 **For credential paths, use policy to enforce isolation:**
 
@@ -2097,6 +2715,74 @@ a current requirement. The event emission and policy enforcement capabilities, w
 core to the motlie-vmm use case, fit naturally into this model. The composable architecture
 means the VM path (vsock) pays no overhead for the RPC protocol layer it doesn't use.
 
+### Alternative D: Build on the `vfs` Crate
+
+Use the existing Rust `vfs` crate as the base abstraction instead of implementing a custom
+mount-stack and memfs model.
+
+Evaluation summary:
+
+- attractive because it already provides:
+  - generic virtual filesystem traits
+  - in-memory and physical filesystem implementations
+  - an overlay-style abstraction
+- not selected because it does **not** match this DESIGN closely enough
+
+Reasons not chosen:
+
+- this DESIGN needs ordered per-tag stacks with:
+  - named memfs layers
+  - `(layer, tag, path)` identity
+  - whiteout semantics
+  - shared named layers spanning many tags
+  - unified inode/generation behavior for the FUSE-facing surface
+- the `vfs` crate is shaped more as a generic VFS abstraction than as a transactional,
+  snapshot-published memfs layering engine
+- the required concurrency contract here is batch-first atomic memfs publication per tag;
+  that is not the design center of `vfs`
+- adopting `vfs` would likely force adaptation layers or internal workarounds that are more
+  complex than a focused custom implementation
+
+**Verdict:** Rejected as a foundational dependency. It may be useful as abstraction inspiration,
+but it is not a close fit for the required stack semantics, concurrency contract, or FUSE-facing
+inode/generation model.
+
+### Alternative E: Use Theseus OS `memfs`
+
+Use the `memfs` project from Theseus OS as the in-memory filesystem implementation.
+
+Evaluation summary:
+
+- this is **not** the same thing as the “memfs layer” described in this DESIGN
+- the Theseus project implements an in-memory filesystem for the Theseus OS environment
+
+Reasons not chosen:
+
+- it is tied to the Theseus OS ecosystem and design assumptions
+- it is not a drop-in implementation of this library’s required ordered layer-stack semantics
+- it does not solve the per-tag snapshot publication and batch atomicity contract required here
+- it would create naming confusion with this DESIGN’s use of “memfs layer” to mean the in-memory
+  stack layers managed by `motlie-vfs`
+
+**Verdict:** Rejected as unrelated to the implementation strategy for this crate.
+
+### Alternative F: Reuse an Existing Memfs/Overlay Engine Wholesale
+
+Adopt a third-party memfs or overlay engine and wrap it with the needed transport and FUSE code.
+
+Evaluation summary:
+
+- appealing in principle because it could reduce custom data-structure work
+- not selected because the required semantics here are unusually specific:
+  - ordered stacks per mount tag
+  - shared named layers across tags
+  - batch-first atomic memfs publication
+  - whiteouts and synthetic parents in one coherent inode namespace
+  - disk-backed base in v1, but future non-disk base compatibility
+
+**Verdict:** Rejected for v1. A small custom memfs stack implementation using focused helper
+crates is lower risk than adapting a generic engine that does not share the same semantic center.
+
 ## Components and Testing
 
 ### Components to Test
@@ -2110,18 +2796,12 @@ means the VM path (vsock) pays no overhead for the RPC protocol layer it doesn't
 | `core::policy` | Deny returns correct errno, allow passes through | Unit tests |
 | `core::overlay` | Layer priority, put/get/remove, resolve order, synthetic files in readdir | Unit tests |
 | `core::overlay` | Write capture to overlaid path updates layer, not disk | Integration tests with `tempfile` |
-| `control::socket` | LAYER/PUT/RM/GET/LS commands over Unix socket | Integration tests |
-| `control::protocol` | Line protocol parse/format round-trip | Unit tests |
 | `vsock::handler` | VsockConnectionHandler serve loop over duplex | Integration tests |
-| `vsock::mount` | VsockFuseMount translates FUSE ops correctly | Unit tests (mock stream) |
-| `rpc::frame` | Frame/FrameBody serde round-trip | Unit tests |
-| `rpc::codec` | Codec encode/decode for all variants | Unit tests |
-| `rpc::io` | Length-prefixed read/write, max frame size enforcement | Unit tests with `tokio::io::duplex` |
-| `rpc::server` | RpcServer handshake + request/response cycle | Integration tests |
-| `rpc::client` | RpcClient handshake + request/response cycle | Integration tests |
-| End-to-end (vsock) | VsockConnectionHandler + VsockFuseMount over duplex, real FUSE mount | Integration (requires FUSE) |
-| End-to-end (rpc) | RpcServer + RpcClient over Unix socket, real FUSE mount | Integration (requires FUSE) |
-| Cross-platform | macOS FUSE-T mount via RPC composite | Manual test (documented procedure) |
+| `vsock::client` | VsockClientTransport request/response behavior over duplex | Unit + integration tests |
+| `client::fuse` | FuseClient translates FUSE ops correctly over an injected transport | Unit tests (mock transport) |
+| End-to-end (vsock) | VsockConnectionHandler + VsockClientTransport + FuseClient over duplex, real FUSE mount | Integration (requires FUSE) |
+| Proof-of-concept examples | Host REPL + CH guest + vsock mount + overlay visibility | Manual + scripted integration |
+| Cross-platform roadmap | macOS FUSE-T client path in later roadmap phases | Manual test (documented procedure) |
 
 ### Test Utilities
 
@@ -2131,23 +2811,14 @@ means the VM path (vsock) pays no overhead for the RPC protocol layer it doesn't
 let server = FsServer::builder().mount("t", dir, false).build()?;
 let result = server.handle_op("t", FsOp::Lookup { parent: 1, name: "foo".into() });
 
-/// RPC testing: in-memory duplex, no FUSE.
-#[cfg(test)]
-pub fn rpc_test_pair(server: FsServer, tag: &str) -> (JoinHandle<()>, RpcClient) {
-    let (cs, ss) = tokio::io::duplex(64 * 1024);
-    let rpc = RpcServer::new(server, BincodeCodec);
-    let handle = tokio::spawn(async move { rpc.serve(ss).await.unwrap() });
-    let client = RpcClient::connect(cs, BincodeCodec, tag).await.unwrap();
-    (handle, client)
-}
-
 /// vsock testing: same pattern, duplex stream.
 #[cfg(test)]
-pub fn vsock_test_pair(server: FsServer, tag: &str) -> (JoinHandle<()>, VsockFuseMount) {
+pub fn vsock_test_pair(server: FsServer, tag: &str) -> (JoinHandle<()>, FuseClient<VsockClientTransport>) {
     let (cs, ss) = tokio::io::duplex(64 * 1024);
     let handler = VsockConnectionHandler::new(&server, tag);
     let handle = tokio::spawn(async move { handler.serve(ss).await.unwrap() });
-    let mount = VsockFuseMount::new(cs, tag);
+    let transport = VsockClientTransport::new(cs, tag);
+    let mount = FuseClient::new(transport, tag);
     (handle, mount)
 }
 ```
@@ -2168,10 +2839,9 @@ pub fn vsock_test_pair(server: FsServer, tag: &str) -> (JoinHandle<()>, VsockFus
 
 | Crate | Feature flag | Purpose |
 |-------|-------------|---------|
-| `bincode` | `bincode-codec` | Default wire encoding (used by vsock and default rpc) |
+| `bincode` | `bincode-codec` | Default wire encoding for the vsock path |
 | `fuser` | `client` | FUSE filesystem implementation |
 | `tokio-vsock` | `vsock` | vsock stream type |
-| `tokio-rustls`, `rustls` | `tls` | TLS for TCP transport |
 
 ### Dev Dependencies
 
