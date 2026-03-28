@@ -1,9 +1,10 @@
-# motlie-vfs: Transport-Agnostic Virtual Filesystem Library
+# motlie-vfs: Layered Guest Filesystem Composition
 
 ## Changelog
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-28 | @codex-pm | Reframe the project headline around layered guest filesystem composition instead of transport-agnostic plumbing |
 | 2026-03-28 | @codex-pm | Make the bootstrap/guest-agent boundary explicit: bootstrap and binary delivery stay VMM-owned, while the reusable guest mounter is built on public guest-side APIs in `client/` and `vsock/` |
 | 2026-03-28 | @codex-pm | Treat the guest-side mounter as a real v1 binary: move it from `examples/` to `src/bin/motlie-vfs-guest.rs` and make image-build order explicit |
 | 2026-03-28 | @codex-pm | Resolve v1 crate-structure ambiguity: `client/fuse.rs` owns the guest-side `fuser` bridge, `client/guest.rs` owns guest mount orchestration, `vsock/` owns transport glue only, and `libs/vfs/examples/` now contains the host REPL/demo harness while the guest mounter lives in `src/bin/` |

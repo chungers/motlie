@@ -1,9 +1,10 @@
-# motlie-vfs Implementation Plan
+# motlie-vfs Layered Guest Filesystem Composition Plan
 
 ## Changelog
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-28 | @codex-pm | Align the plan title with the product framing: layered guest filesystem composition rather than transport plumbing |
 | 2026-03-28 | @codex-pm | Resolve guest boundary in PLAN: bootstrap/binary delivery stay VMM-owned, `client/guest.rs` owns guest mount orchestration, and the real guest binary must stay a thin wrapper over public guest APIs |
 | 2026-03-28 | @codex-pm | Treat the guest-side mounter as a real v1 binary: move it from `examples/` to `src/bin/motlie-vfs-guest.rs` and make build-before-image assembly explicit in the plan |
 | 2026-03-28 | @codex-pm | Resolve v1 module split in PLAN: `client/fuse.rs` owns `FuseClient`, `vsock/` owns transport/handler glue, and `libs/vfs/examples/` contains the host REPL and guest harness binaries |
