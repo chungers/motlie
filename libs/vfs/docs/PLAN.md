@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-28 | @codex-pm | Address PR #117 review feedback: convert DESIGN links to relative paths, fix phase/task numbering, and make the v2 RPC phase specification-oriented instead of implementation-oriented |
 | 2026-03-28 | @codex-pm | Align the plan title with the product framing: layered guest filesystem composition rather than transport plumbing |
 | 2026-03-28 | @codex-pm | Resolve guest boundary in PLAN: bootstrap/binary delivery stay VMM-owned, `client/guest.rs` owns guest mount orchestration, and the real guest binary must stay a thin wrapper over public guest APIs |
 | 2026-03-28 | @codex-pm | Treat the guest-side mounter as a real v1 binary: move it from `examples/` to `src/bin/motlie-vfs-guest.rs` and make build-before-image assembly explicit in the plan |
@@ -25,7 +26,7 @@
 
 ## Purpose
 
-This plan converts [`DESIGN.md`](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md) into an implementation and tracking sequence that can be executed without inventing architecture during delivery.
+This plan converts [`DESIGN.md`](./DESIGN.md) into an implementation and tracking sequence that can be executed without inventing architecture during delivery.
 
 Roadmap slices:
 
@@ -133,7 +134,7 @@ Functional requirement coverage:
 - [ ] T.21 FR-7 Policy hooks are implemented by phases `1.2` and `2.1`/`2.2` and verified with allow/deny and filtered-`readdir` tests.
 - [ ] T.22 FR-8 Read-only and read-write mounts are implemented by phase `2.1` and verified with `EROFS` enforcement tests.
 - [ ] T.23 FR-9 roadmap split is respected: `v1` proves direct + vsock, `v1.5` proves embedded admin workflows, and `v2` adds the remote/framed protocol path.
-- [ ] T.24 FR-10 In-memory overlay with layered content injection is implemented by phases `2.2` and `3.1` and verified with layer, whiteout, synthetic-dir, runtime mutation, ownership, and CLI workflow tests.
+- [ ] T.24 FR-10 In-memory overlay with layered content injection is implemented by phases `2.2` and `3.1` and verified with layer, whiteout, synthetic-dir, runtime mutation, ownership, and embedded admin workflow tests.
 
 Non-functional requirement coverage:
 
@@ -153,9 +154,9 @@ Goal:
 
 Design references:
 
-- [Architectural Layering and Roadmap](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
-- [Crate Structure](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
-- [Feature Flags](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
+- [Architectural Layering and Roadmap](./DESIGN.md)
+- [Crate Structure](./DESIGN.md)
+- [Feature Flags](./DESIGN.md)
 
 Primary file targets:
 
@@ -203,9 +204,9 @@ Goal:
 
 Design references:
 
-- [Functional Requirements](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
-- [Core Types: FsOp and FsResult](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
-- [API Design](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
+- [Functional Requirements](./DESIGN.md)
+- [Core Types: FsOp and FsResult](./DESIGN.md)
+- [API Design](./DESIGN.md)
 
 Primary file targets:
 
@@ -245,9 +246,9 @@ Goal:
 
 Design references:
 
-- [Ordered Layer-Stack Model](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
-- [Inode Management](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
-- [Generation Semantics](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
+- [Ordered Layer-Stack Model](./DESIGN.md)
+- [Inode Management](./DESIGN.md)
+- [Generation Semantics](./DESIGN.md)
 
 Primary file targets:
 
@@ -290,9 +291,9 @@ Goal:
 
 Design references:
 
-- [Required Internal Shape for v1](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
-- [Functional Requirements](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
-- [API Design](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
+- [Required Internal Shape for v1](./DESIGN.md)
+- [Functional Requirements](./DESIGN.md)
+- [API Design](./DESIGN.md)
 
 Primary file targets:
 
@@ -338,10 +339,10 @@ Goal:
 
 Design references:
 
-- [Ordered Layer-Stack Model](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
-- [Product Requirement: Dynamic Runtime Mutation](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
-- [In-Memory Layers in an Ordered Mount Stack](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
-- [API Design](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
+- [Ordered Layer-Stack Model](./DESIGN.md)
+- [Product Requirement: Dynamic Runtime Mutation](./DESIGN.md)
+- [In-Memory Layers in an Ordered Mount Stack](./DESIGN.md)
+- [API Design](./DESIGN.md)
 
 Primary file targets:
 
@@ -420,8 +421,8 @@ Goal:
 
 Design references:
 
-- [v1 no-caching principle](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
-- [FUSE client mount policy](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
+- [v1 no-caching principle](./DESIGN.md)
+- [FUSE client mount policy](./DESIGN.md)
 
 Primary file targets:
 
@@ -460,8 +461,8 @@ Goal:
 
 Design references:
 
-- [v1.5: Embedded Admin Console + Script / Config Ingestion](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
-- [Overlay Control: Frontend Architecture](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
+- [v1.5: Embedded Admin Console + Script / Config Ingestion](./DESIGN.md)
+- [Overlay Control: Frontend Architecture](./DESIGN.md)
 
 Primary file targets:
 
@@ -499,12 +500,12 @@ Exit criteria:
 
 Goal:
 
-- define and implement the future external remote-control layer above `libs/vfs`
+- define the future external remote-control layer above `libs/vfs`
 
 Design references:
 
-- [v2: External gRPC / RPC Application Layer](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
-- [Roadmap Gaps and Forward-Compatibility Requirements](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
+- [v2: External gRPC / RPC Application Layer](./DESIGN.md)
+- [Roadmap Gaps and Forward-Compatibility Requirements](./DESIGN.md)
 
 Primary file targets:
 
@@ -517,25 +518,25 @@ Per-task reference rule:
 
 - every task in this phase traces to one or more of the DESIGN references listed above unless an individual task states a narrower reference explicitly
 
-- [ ] 3.2.1 Implement `Frame` and request/response wrapping.
-- [ ] 3.2.2 Implement `Codec` trait.
-- [ ] 3.2.3 Implement default bincode codec.
-- [ ] 3.2.4 Implement length-prefixed frame I/O.
-- [ ] 3.2.5 Implement client hello/tag binding.
-- [ ] 3.2.6 Implement `RpcServer`.
-- [ ] 3.2.7 Implement `RpcClient`.
-- [ ] 3.2.8 Ensure request/response correlation is correct.
+- [ ] 3.2.1 Define `Frame` and request/response wrapping.
+- [ ] 3.2.2 Define the `Codec` abstraction.
+- [ ] 3.2.3 Specify the default bincode codec shape.
+- [ ] 3.2.4 Define length-prefixed frame I/O semantics.
+- [ ] 3.2.5 Define client hello/tag binding semantics.
+- [ ] 3.2.6 Specify `RpcServer` responsibilities and boundaries.
+- [ ] 3.2.7 Specify `RpcClient` responsibilities and boundaries.
+- [ ] 3.2.8 Define request/response correlation requirements.
 - [ ] 3.2.9 Define the v2 microservice API for constructing memfs file trees without relying on local disk-backed trees.
 
 Tests / verification:
 
-- [ ] 3.2.10 Add codec round-trip tests.
-- [ ] 3.2.11 Add max frame size enforcement tests.
-- [ ] 3.2.12 Add duplex integration tests.
-- [ ] 3.2.13 Add direct comparison tests against server-core behavior.
-- [ ] 3.2.14 Add multi-tag handshake/routing tests proving independent clients bind to distinct mounted trees.
-- [ ] 3.2.15 Add a transport-generic test or example proving the RPC layer only requires `AsyncRead + AsyncWrite`.
-- [ ] 3.2.16 Add design-validation tests/examples for diskless memfs tree construction semantics in the v2 API.
+- [ ] 3.2.10 Define codec round-trip validation requirements.
+- [ ] 3.2.11 Define max frame size enforcement tests.
+- [ ] 3.2.12 Define duplex integration validation requirements.
+- [ ] 3.2.13 Define direct comparison tests against server-core behavior.
+- [ ] 3.2.14 Define multi-tag handshake/routing validation requirements.
+- [ ] 3.2.15 Define a transport-generic proof point showing the RPC layer only requires `AsyncRead + AsyncWrite`.
+- [ ] 3.2.16 Add design-validation examples for diskless memfs tree construction semantics in the v2 API.
 
 Exit criteria:
 
@@ -551,10 +552,10 @@ Goal:
 
 Design references:
 
-- [v1: libs/vfs Core Crate + Proof of Concept Examples](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
-- [High-Level System Design](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
-- [Guest-Side API Boundary](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
-- [Guest Agent Code with motlie-vfs](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
+- [v1: libs/vfs Core Crate + Proof of Concept Examples](./DESIGN.md)
+- [High-Level System Design](./DESIGN.md)
+- [Guest-Side API Boundary](./DESIGN.md)
+- [Guest Agent Code with motlie-vfs](./DESIGN.md)
 
 Primary file targets:
 
@@ -568,17 +569,17 @@ Per-task reference rule:
 
 - every task in this phase traces to one or more of the DESIGN references listed above unless an individual task states a narrower reference explicitly
 
-- [ ] 3.3.1 Implement bincode-over-stream request/response handling.
-- [ ] 3.3.2 Implement `VsockConnectionHandler`.
-- [ ] 3.3.3 Implement `VsockClientTransport`.
-- [ ] 3.3.4 Preserve the boundary that VMM handshake remains outside this crate.
+- [ ] 4.1.1 Implement bincode-over-stream request/response handling.
+- [ ] 4.1.2 Implement `VsockConnectionHandler`.
+- [ ] 4.1.3 Implement `VsockClientTransport`.
+- [ ] 4.1.4 Preserve the boundary that VMM handshake remains outside this crate.
 
 Tests / verification:
 
-- [ ] 3.3.5 Add duplex transport tests for handler and guest transport adapter.
-- [ ] 3.3.6 Add parity tests versus direct server-core behavior.
-- [ ] 3.3.7 Add a Cloud Hypervisor-backed smoke test or documented harness procedure for guest boot + vsock mount + overlay visibility.
-- [ ] 3.3.8 Add explicit documented steps or scripts for launching a CH guest with vsock and the stacked-root test image.
+- [ ] 4.1.5 Add duplex transport tests for handler and guest transport adapter.
+- [ ] 4.1.6 Add parity tests versus direct server-core behavior.
+- [ ] 4.1.7 Add a Cloud Hypervisor-backed smoke test or documented harness procedure for guest boot + vsock mount + overlay visibility.
+- [ ] 4.1.8 Add explicit documented steps or scripts for launching a CH guest with vsock and the stacked-root test image.
 
 Exit criteria:
 
@@ -593,9 +594,9 @@ Goal:
 
 Design references:
 
-- [FR-1: Cross-Platform FUSE Client](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
-- [Guest-Side API Boundary](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
-- [API Design](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
+- [FR-1: Cross-Platform FUSE Client](./DESIGN.md)
+- [Guest-Side API Boundary](./DESIGN.md)
+- [API Design](./DESIGN.md)
 
 Primary file targets:
 
@@ -610,23 +611,23 @@ Per-task reference rule:
 
 - every task in this phase traces to one or more of the DESIGN references listed above unless an individual task states a narrower reference explicitly
 
-- [ ] 3.4.1 Map `fuser` callbacks to `FsOp`.
-- [ ] 3.4.2 Map `FsResult` back to `fuser` reply types.
-- [ ] 3.4.3 Encode zero-TTL policy.
-- [ ] 3.4.4 Expose/document the mount option set for v1 correctness-first mode.
-- [ ] 3.4.5 Implement build-time FUSE dependency checks for Linux/macOS.
-- [ ] 3.4.5a Implement `GuestMountSpec` and `GuestMountRunner` in `client/guest.rs` as the public guest orchestration layer above `FuseClient`.
-- [ ] 3.4.5b Ensure `GuestMountRunner` consumes caller-supplied stream/transport connectors so VMM handshake/bootstrap logic stays outside this crate.
-- [ ] 3.4.5c Keep `src/bin/motlie-vfs-guest.rs` thin: it may parse config and obtain streams, but it must call `GuestMountRunner` rather than reimplementing mount orchestration.
+- [ ] 4.2.1 Map `fuser` callbacks to `FsOp`.
+- [ ] 4.2.2 Map `FsResult` back to `fuser` reply types.
+- [ ] 4.2.3 Encode zero-TTL policy.
+- [ ] 4.2.4 Expose/document the mount option set for v1 correctness-first mode.
+- [ ] 4.2.5 Implement build-time FUSE dependency checks for Linux/macOS.
+- [ ] 4.2.5a Implement `GuestMountSpec` and `GuestMountRunner` in `client/guest.rs` as the public guest orchestration layer above `FuseClient`.
+- [ ] 4.2.5b Ensure `GuestMountRunner` consumes caller-supplied stream/transport connectors so VMM handshake/bootstrap logic stays outside this crate.
+- [ ] 4.2.5c Keep `src/bin/motlie-vfs-guest.rs` thin: it may parse config and obtain streams, but it must call `GuestMountRunner` rather than reimplementing mount orchestration.
 
 Tests / verification:
 
-- [ ] 3.4.6 Add callback translation unit tests.
-- [ ] 3.4.7 Add mock transport tests.
-- [ ] 3.4.7a Add unit tests for `GuestMountRunner` using mock transport/connector closures.
-- [ ] 3.4.8 Add FUSE integration tests where the environment supports it.
-- [ ] 3.4.9 Record macOS FUSE-T as later roadmap work rather than a `v1` exit requirement.
-- [ ] 3.4.10 Add an end-to-end mounted-subtree scenario showing guest-visible behavior for partial overlay, synthetic dirs, and whiteouts.
+- [ ] 4.2.6 Add callback translation unit tests.
+- [ ] 4.2.7 Add mock transport tests.
+- [ ] 4.2.7a Add unit tests for `GuestMountRunner` using mock transport/connector closures.
+- [ ] 4.2.8 Add FUSE integration tests where the environment supports it.
+- [ ] 4.2.9 Record macOS FUSE-T as later roadmap work rather than a `v1` exit requirement.
+- [ ] 4.2.10 Add an end-to-end mounted-subtree scenario showing guest-visible behavior for partial overlay, synthetic dirs, and whiteouts.
 
 Clarification:
 
@@ -650,9 +651,9 @@ Goal:
 
 Design references:
 
-- [v1: libs/vfs Core Crate + Proof of Concept Examples](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
-- [Cloud Hypervisor fast-path / v1 operational setup](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
-- [Components and Testing](/Users/dchung/projects/codex-vfs/motlie/libs/vfs/docs/DESIGN.md)
+- [v1: libs/vfs Core Crate + Proof of Concept Examples](./DESIGN.md)
+- [Cloud Hypervisor fast-path / v1 operational setup](./DESIGN.md)
+- [Components and Testing](./DESIGN.md)
 
 Primary file targets:
 
@@ -667,18 +668,18 @@ Per-task reference rule:
 
 - every task in this phase traces to one or more of the DESIGN references listed above unless an individual task states a narrower reference explicitly
 
-- [ ] 4.1.1 Add `motlie-vfs` as a workspace dependency where appropriate.
-- [ ] 4.1.2 Ensure feature flags are cleanly consumable for direct mode, vsock host/guest paths, and future v2 expansion.
-- [ ] 4.1.3 Validate the design mapping back to `motlie-vmm`.
-- [ ] 4.1.4 Update related docs after implementation snapshots land.
-- [ ] 4.1.5 Add an implementation-readiness checklist that maps completed phases back to the DESIGN traceability items.
-- [ ] 4.1.6 Add a small benchmark or measurement harness for metadata latency and large-file throughput.
-- [ ] 4.1.7 Add explicit setup instructions or scripts for building `motlie-vfs-guest` first, then building the stacked-root guest image used in v1 guest tests.
-- [ ] 4.1.8 Add explicit setup instructions or scripts for creating host backing directories and sample disk-backed files for overlay tests.
-- [ ] 4.1.9 Add explicit setup instructions or scripts for starting the host-side `FsServer`, `MemOverlay`, and the v1 in-process REPL/example harness.
-- [ ] 4.1.10 Add explicit embedded admin console or script/config procedures for `put`, `putattr`, `whiteout`, `rm`, `rmlayer`, `ls`, and `lslayer` in the guest-harness workflow.
-- [ ] 4.1.11 Add explicit CH launch/stop commands or scripts, including vsock and block-device wiring for the stacked-root guest image.
-- [ ] 4.1.11a Document the guest boundary explicitly in harness instructions: bootstrap/binary delivery remain VMM-owned, while `src/bin/motlie-vfs-guest.rs` only exercises the public guest APIs from `client/guest.rs`.
+- [ ] 5.1.1 Add `motlie-vfs` as a workspace dependency where appropriate.
+- [ ] 5.1.2 Ensure feature flags are cleanly consumable for direct mode, vsock host/guest paths, and future v2 expansion.
+- [ ] 5.1.3 Validate the design mapping back to `motlie-vmm`.
+- [ ] 5.1.4 Update related docs after implementation snapshots land.
+- [ ] 5.1.5 Add an implementation-readiness checklist that maps completed phases back to the DESIGN traceability items.
+- [ ] 5.1.6 Add a small benchmark or measurement harness for metadata latency and large-file throughput.
+- [ ] 5.1.7 Add explicit setup instructions or scripts for building `motlie-vfs-guest` first, then building the stacked-root guest image used in v1 guest tests.
+- [ ] 5.1.8 Add explicit setup instructions or scripts for creating host backing directories and sample disk-backed files for overlay tests.
+- [ ] 5.1.9 Add explicit setup instructions or scripts for starting the host-side `FsServer`, `MemOverlay`, and the v1 in-process REPL/example harness.
+- [ ] 5.1.10 Add explicit embedded admin console or script/config procedures for `put`, `putattr`, `whiteout`, `rm`, `rmlayer`, `ls`, and `lslayer` in the guest-harness workflow.
+- [ ] 5.1.11 Add explicit CH launch/stop commands or scripts, including vsock and block-device wiring for the stacked-root guest image.
+- [ ] 5.1.11a Document the guest boundary explicitly in harness instructions: bootstrap/binary delivery remain VMM-owned, while `src/bin/motlie-vfs-guest.rs` only exercises the public guest APIs from `client/guest.rs`.
 
 Suggested setup snippets to include in this phase:
 
@@ -809,52 +810,52 @@ rm credentials home /.ssh/config
 
 Tests / verification:
 
-- [ ] 4.1.12 Run workspace `cargo check`.
-- [ ] 4.1.13 Run feature-matrix build verification.
-- [ ] 4.1.14 Validate the concrete VMM example: boot static squashfs+ext4 root, mount `/home/alice` through `motlie-vfs`, then inject `/home/alice/.ssh/...` and `/home/alice/.claude/skills/...` dynamically.
-- [ ] 4.1.15 Validate that non-overlaid files inside the mounted subtree continue to pass through unchanged.
-- [ ] 4.1.16 Record baseline latency measurements for small metadata operations over Unix sockets.
-- [ ] 4.1.17 Record baseline throughput measurements for large sequential reads/writes over Unix sockets.
-- [ ] 4.1.18 Validate operator-facing path contract examples for both `home + /alice/...` and `alice-home + /.claude/...` forms.
-- [ ] 4.1.19 Validate explicit synthetic ownership by injecting entries for provisioned guest users and checking guest-visible `uid`/`gid`.
-- [ ] 4.1.20 Validate the `whiteout` / tombstone workflow hides lower disk files from the guest.
-- [ ] 4.1.21 Validate the `rm` workflow removes injected synthetic files from the guest view.
-- [ ] 4.1.22 Validate SSH guest access against the v1 test image where applicable.
-- [ ] 4.1.23 Validate the documented CH launch and stop procedure from a clean host environment.
-- [ ] 4.1.24 Document the remaining v1 limitation that a shared `(tag, path)` entry cannot present different uid/gid ownership to different guests simultaneously.
-- [ ] 4.1.25 Validate the in-process VMM/REPL hosting pattern: a Tokio task can call `server.overlay()` directly while filesystem serving remains active.
-- [ ] 4.1.26 Validate the Cloud Hypervisor fast-path harness as the pre-VMM guest development environment for the vsock flow.
+- [ ] 5.1.12 Run workspace `cargo check`.
+- [ ] 5.1.13 Run feature-matrix build verification.
+- [ ] 5.1.14 Validate the concrete VMM example: boot static squashfs+ext4 root, mount `/home/alice` through `motlie-vfs`, then inject `/home/alice/.ssh/...` and `/home/alice/.claude/skills/...` dynamically.
+- [ ] 5.1.15 Validate that non-overlaid files inside the mounted subtree continue to pass through unchanged.
+- [ ] 5.1.16 Record baseline latency measurements for small metadata operations over Unix sockets.
+- [ ] 5.1.17 Record baseline throughput measurements for large sequential reads/writes over Unix sockets.
+- [ ] 5.1.18 Validate operator-facing path contract examples for both `home + /alice/...` and `alice-home + /.claude/...` forms.
+- [ ] 5.1.19 Validate explicit synthetic ownership by injecting entries for provisioned guest users and checking guest-visible `uid`/`gid`.
+- [ ] 5.1.20 Validate the `whiteout` / tombstone workflow hides lower disk files from the guest.
+- [ ] 5.1.21 Validate the `rm` workflow removes injected synthetic files from the guest view.
+- [ ] 5.1.22 Validate SSH guest access against the v1 test image where applicable.
+- [ ] 5.1.23 Validate the documented CH launch and stop procedure from a clean host environment.
+- [ ] 5.1.24 Document the remaining v1 limitation that a shared `(tag, path)` entry cannot present different uid/gid ownership to different guests simultaneously.
+- [ ] 5.1.25 Validate the in-process VMM/REPL hosting pattern: a Tokio task can call `server.overlay()` directly while filesystem serving remains active.
+- [ ] 5.1.26 Validate the Cloud Hypervisor fast-path harness as the pre-VMM guest development environment for the vsock flow.
 
 Exit criteria:
 
 - crate is ready for downstream adoption without reshaping public APIs
 - all traceability items in this plan can be marked complete without ad hoc interpretation
 
-## 5. Dependency Graph
+## 6. Dependency Graph
 
-- [ ] 5.1 `1.1` before everything
-- [ ] 5.2 `1.2` before `2.1`, `3.2`, `3.3`, and `3.4`
-- [ ] 5.3 `1.3` before `2.1`, `2.2`, and `2.3`
-- [ ] 5.4 `2.1` before `2.2`, `3.2`, and `3.3`
-- [ ] 5.5 `2.2` before `2.3`, `3.1`, and `3.4`
-- [ ] 5.6 `2.3` before final client/integration signoff
-- [ ] 5.7 `3.2` and `3.3` may proceed in parallel after `2.1`
-- [ ] 5.8 `3.4` depends on `2.3` and either `3.2` or `3.3` for real transport-backed tests
-- [ ] 5.9 `4.1` closes out after all functional phases are stable
+- [ ] 6.1 `1.1` before everything
+- [ ] 6.2 `1.2` before `2.1`, `3.2`, `4.1`, and `4.2`
+- [ ] 6.3 `1.3` before `2.1`, `2.2`, and `2.3`
+- [ ] 6.4 `2.1` before `2.2`, `3.2`, and `4.1`
+- [ ] 6.5 `2.2` before `2.3`, `3.1`, and `4.2`
+- [ ] 6.6 `2.3` before final client/integration signoff
+- [ ] 6.7 `3.2` and `4.1` may proceed in parallel after `2.1`
+- [ ] 6.8 `4.2` depends on `2.3` and either `3.2` or `4.1` for real transport-backed tests
+- [ ] 6.9 `5.1` closes out after all functional phases are stable
 
-## 6. Suggested Delivery Order
+## 7. Suggested Delivery Order
 
-- [ ] 6.1 `1.1`
-- [ ] 6.2 `1.2`
-- [ ] 6.3 `1.3`
-- [ ] 6.4 `2.1`
-- [ ] 6.5 `2.2`
-- [ ] 6.6 `2.3`
-- [ ] 6.7 `3.1`
-- [ ] 6.8 `3.3`
-- [ ] 6.9 `3.4` on vsock path first
-- [ ] 6.10 `4.1`
-- [ ] 6.11 `3.2` after the vsock-backed VM path is stable
+- [ ] 7.1 `1.1`
+- [ ] 7.2 `1.2`
+- [ ] 7.3 `1.3`
+- [ ] 7.4 `2.1`
+- [ ] 7.5 `2.2`
+- [ ] 7.6 `2.3`
+- [ ] 7.7 `3.1`
+- [ ] 7.8 `4.1`
+- [ ] 7.9 `4.2` on vsock path first
+- [ ] 7.10 `5.1`
+- [ ] 7.11 `3.2` after the vsock-backed VM path is stable
 
 Rationale:
 
@@ -863,39 +864,39 @@ Rationale:
 - Cloud Hypervisor provides the fastest guest harness before a full VMM exists
 - remote admin remains valuable, but it is not on the critical path for the first VM-backed product
 
-## 7. Risks to Track
+## 8. Risks to Track
 
-- [ ] 7.1 `direct_io` and mount behavior may differ across Linux and macOS/FUSE-T
-- [ ] 7.2 `fuser` behavior and kernel/FUSE caching semantics need validation against the v1 deterministic model
-- [ ] 7.3 cross-boundary rename behavior may expose platform-specific corner cases
-- [ ] 7.4 zero-TTL behavior may be correct but slower than expected; do not optimize before parity tests pass
+- [ ] 8.1 `direct_io` and mount behavior may differ across Linux and macOS/FUSE-T
+- [ ] 8.2 `fuser` behavior and kernel/FUSE caching semantics need validation against the v1 deterministic model
+- [ ] 8.3 cross-boundary rename behavior may expose platform-specific corner cases
+- [ ] 8.4 zero-TTL behavior may be correct but slower than expected; do not optimize before parity tests pass
 
-## 8. Out of Scope for v1
+## 9. Out of Scope for v1
 
-- [ ] 8.1 aggressive performance caching
-- [ ] 8.2 explicit FUSE invalidation/notification machinery
-- [ ] 8.3 alternate codecs beyond bincode
-- [ ] 8.4 Windows support
-- [ ] 8.5 generalized distributed filesystem features
-- [ ] 8.6 library-provided HTTP admin frontend
-- [ ] 8.7 library-provided gRPC admin frontend
-- [ ] 8.8 full VMM orchestration as a prerequisite for proving the first guest-vsock path
+- [ ] 9.1 aggressive performance caching
+- [ ] 9.2 explicit FUSE invalidation/notification machinery
+- [ ] 9.3 alternate codecs beyond bincode
+- [ ] 9.4 Windows support
+- [ ] 9.5 generalized distributed filesystem features
+- [ ] 9.6 library-provided HTTP admin frontend
+- [ ] 9.7 library-provided gRPC admin frontend
+- [ ] 9.8 full VMM orchestration as a prerequisite for proving the first guest-vsock path
 
-## 9. Implementation Scaffolding Notes
+## 10. Implementation Scaffolding Notes
 
 These are implementation recommendations for v1. They guide the implementer, but they are not
 public API guarantees by themselves.
 
-- [ ] 9.1 Prefer a per-tag published memfs snapshot model over fine-grained mutable tree locking.
-- [ ] 9.2 Prefer `arc-swap` for atomic publication of per-tag memfs snapshots.
-- [ ] 9.3 Prefer `parking_lot` for short writer-side critical sections and per-tag writer serialization.
-- [ ] 9.4 Use `bytes::Bytes` for file payload storage and sharing.
-- [ ] 9.5 Consider `slotmap` only if synthetic node storage benefits from stable internal keys.
-- [ ] 9.6 Do not make `im` or other persistent-collection crates mandatory up front; add them only if snapshot copy cost becomes a measured problem.
-- [ ] 9.7 Do not take a foundational dependency on the `vfs` crate.
-- [ ] 9.8 Do not take a dependency on the Theseus OS `memfs` project; it is unrelated to this design.
+- [ ] 10.1 Prefer a per-tag published memfs snapshot model over fine-grained mutable tree locking.
+- [ ] 10.2 Prefer `arc-swap` for atomic publication of per-tag memfs snapshots.
+- [ ] 10.3 Prefer `parking_lot` for short writer-side critical sections and per-tag writer serialization.
+- [ ] 10.4 Use `bytes::Bytes` for file payload storage and sharing.
+- [ ] 10.5 Consider `slotmap` only if synthetic node storage benefits from stable internal keys.
+- [ ] 10.6 Do not make `im` or other persistent-collection crates mandatory up front; add them only if snapshot copy cost becomes a measured problem.
+- [ ] 10.7 Do not take a foundational dependency on the `vfs` crate.
+- [ ] 10.8 Do not take a dependency on the Theseus OS `memfs` project; it is unrelated to this design.
 
-## 10. Tracking Update Format
+## 11. Tracking Update Format
 
 Recommended per-phase update format:
 
