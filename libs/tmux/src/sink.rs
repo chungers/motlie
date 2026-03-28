@@ -925,6 +925,8 @@ struct HistoryState {
     // --- Per-source mode storage (Phase 3, DC33) ---
     per_source: HashMap<String, SourceWindow>,
     source_order: Vec<String>,
+    /// Tracks the last source key that was written to, for correct append targeting.
+    last_written_source: Option<String>,
 
     // --- Configuration ---
     max_entries: usize,
@@ -968,6 +970,7 @@ impl HistoryState {
                 if !self.source_order.contains(&key) {
                     self.source_order.push(key.clone());
                 }
+                self.last_written_source = Some(key.clone());
                 let label_format = self.label_format.clone();
                 let max_entries = self.max_entries;
                 let max_render_chars = self.max_render_chars;
@@ -1010,8 +1013,8 @@ impl HistoryState {
     }
 
     fn append_to_last_per_source(&mut self, text: &str) -> bool {
-        // Find the last source that was pushed and append to its window
-        if let Some(last_key) = self.source_order.last().cloned() {
+        // Find the last source that was actually written to (not first-seen order)
+        if let Some(last_key) = self.last_written_source.clone() {
             if let Some(window) = self.per_source.get_mut(&last_key) {
                 if !window.append_to_last(text, &self.label_format) {
                     return false;
@@ -1230,6 +1233,7 @@ impl Subscription {
             omitted_entries: 0,
             per_source: HashMap::new(),
             source_order: Vec::new(),
+            last_written_source: None,
             max_entries: opts.max_entries,
             max_render_chars: opts.max_render_chars,
             global_max_render_chars: opts.global_max_render_chars,

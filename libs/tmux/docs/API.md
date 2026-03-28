@@ -2161,12 +2161,64 @@ assert!(issues.is_empty());
 | Type | Description |
 |------|-------------|
 | `HistoryHandle` | Rolling transcript handle — `snapshot()`, `render_text()`, `join()`, `id()` |
-| `HistoryOptions` | Config: `max_entries`, `max_render_chars`, `label_format`, `include_omission_marker` |
+| `HistoryOptions` | Config: `max_entries`, `max_render_chars`, `label_format`, `render_mode`, `global_max_render_chars`, `include_omission_marker` |
 | `HistorySnapshot` | Point-in-time snapshot — `entries`, `rendered_chars`, `omitted_entries` |
 | `HistoryEntry` | Enum: `Output { source, text, source_changed }`, `Gap { dropped_events }`, `Discontinuity { reason }` |
 | `Fleet` | Multi-host registry — `register()`, `host()`, `hosts()`, `output_bus()`, monitoring, workstreams, routing |
 | `HostStatus` | Enum: `Connected`, `Monitoring { sessions: Vec<SessionMonitorStatus> }`, `Error(String)` |
 | `SessionMonitorStatus` | Per-session status: `name`, `health: MonitorHealth` |
+| `RenderMode` | Enum: `Interleaved` (default), `PerSource` — controls how `render_text()` groups entries |
+| `PollHistory` | Bounded rolling text history for polling — `push_text()`, `push_text_for_source()`, `render_text()` |
+
+### Content filtering and accumulation (DC33)
+
+| Type | Description |
+|------|-------------|
+| `ContentFilter` | Trait: `filter_line()`, `is_meaningful_batch()`, `is_prompt()` — per-line TUI chrome detection |
+| `RawFilter` | Strips ANSI only, keeps everything. For debug/build logs. |
+| `ShellFilter` | Strips ANSI, drops empty lines. Prompt = `$`/`%`/`#`. For plain shells, CI. |
+| `AgentTuiFilter` | Heuristic chrome removal (spinners, status bars, affordance hints). Parameterized by `prompt_char`. `claude_code()` = `❯`, `codex()` = `›`. |
+| `FlushPolicy` | Enum: `LineCount`, `Idle`, `PromptBoundary` — controls when `SourceAccumulator` flushes |
+| `SourceAccumulator` | Per-source buffered collection — `new(name, baseline, filter, policy)`, `ingest(current)`, `flush_remaining()` |
+
+#### Content filtering usage
+
+```rust
+use motlie_tmux::{AgentTuiFilter, FlushPolicy, SourceAccumulator, PollHistory, RenderMode};
+use std::time::Duration;
+
+// Create per-source accumulators with agent-specific filters
+let baseline = target.capture_all().await?;
+let mut acc = SourceAccumulator::new(
+    "my-session",
+    baseline,
+    Box::new(AgentTuiFilter::codex()),               // heuristic chrome removal
+    FlushPolicy::prompt_boundary(Duration::from_secs(30), 1),  // flush on agent prompt
+);
+
+// Create a per-source rolling history
+let mut history = PollHistory::new(40, 6000)
+    .with_render_mode(RenderMode::PerSource);
+
+// Polling loop:
+let current = target.capture_all().await?;
+if let Some(chunk) = acc.ingest(&current) {
+    history.push_text_for_source("my-session", chunk);
+}
+
+// Render grouped sections:
+// === my-session ===
+// <coherent per-turn content>
+let context = history.render_text();
+```
+
+#### Flush policies
+
+| Policy | When to use | Example |
+|--------|-------------|---------|
+| `FlushPolicy::line_count(3, 10s)` | Build output, log tailing | Flush every 3 lines or 10s |
+| `FlushPolicy::idle(3s, 15s)` | CI jobs, test runners | Flush when output pauses 3s |
+| `FlushPolicy::prompt_boundary(30s, 1)` | Agent TUIs (Claude, Codex) | Flush when prompt appears after content |
 
 ### Shell channel (low-level, used by monitor layer — Phase 2a)
 

@@ -6,7 +6,7 @@
 //! character, which is stable and version-coupled.
 
 use crate::capture::strip_ansi;
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // ContentFilter trait
@@ -128,20 +128,32 @@ pub fn is_tui_chrome(trimmed: &str) -> bool {
 }
 
 /// Extract new lines from current pane content vs previous.
-/// Uses set-based diff, then applies the content filter to each line.
+/// Uses multiset-based diff (preserves multiplicity) then applies
+/// the content filter to each line.
 pub fn diff_new_lines(
     previous: &str,
     current: &str,
     filter: &dyn ContentFilter,
 ) -> Vec<String> {
-    let prev_set: HashSet<String> = previous.lines().filter_map(|l| clean_line(l)).collect();
+    // Build a multiset of previous lines so repeated lines are counted correctly.
+    // e.g. if previous has "done" twice, only the third "done" in current is new.
+    let mut prev_counts: HashMap<String, usize> = HashMap::new();
+    for line in previous.lines() {
+        if let Some(cleaned) = clean_line(line) {
+            *prev_counts.entry(cleaned).or_insert(0) += 1;
+        }
+    }
 
     current
         .lines()
         .filter_map(|line| {
             let cleaned = clean_line(line)?;
-            if prev_set.contains(&cleaned) {
-                return None;
+            // Decrement the count — if still positive, this line was in previous
+            if let Some(count) = prev_counts.get_mut(&cleaned) {
+                if *count > 0 {
+                    *count -= 1;
+                    return None;
+                }
             }
             filter.filter_line(line)
         })
@@ -356,6 +368,25 @@ mod tests {
         let curr = "content\n· Thinking…\nnew answer\n";
         let new = diff_new_lines(prev, curr, &f);
         assert_eq!(new, vec!["new answer"]);
+    }
+
+    #[test]
+    fn diff_new_lines_preserves_repeated_lines() {
+        let f = RawFilter;
+        let prev = "done\nother\n";
+        let curr = "done\nother\ndone\n";
+        let new = diff_new_lines(prev, curr, &f);
+        // The second "done" is genuinely new — must not be dropped
+        assert_eq!(new, vec!["done"]);
+    }
+
+    #[test]
+    fn diff_new_lines_same_content_produces_nothing() {
+        let f = RawFilter;
+        let prev = "done\ndone\n";
+        let curr = "done\ndone\n";
+        let new = diff_new_lines(prev, curr, &f);
+        assert!(new.is_empty());
     }
 
     #[test]
