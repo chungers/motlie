@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-28 | @codex-pm | Resolve PR #117 round-3 follow-ups: complete `FsOpKind` coverage for event emission and align the docs with the final phase numbering and overlay-behavior test expectations |
 | 2026-03-28 | @codex-pm | Resolve implementer questions from PR #117: rename event op type, specify v1 symlink/file-handle/runner/whiteout/write-buffer behavior, and make inspection views metadata-only |
 | 2026-03-28 | @codex-pm | Address PR #117 review feedback: remove stale v1 CLI references, clarify `apply_batch` tag scoping, tighten synthetic-parent and rename semantics, and fix wording around immutable lower layers |
 | 2026-03-28 | @codex-pm | Reframe the project headline around layered guest filesystem composition instead of transport-agnostic plumbing |
@@ -1323,7 +1324,7 @@ pub struct FsEvent {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum FsOpKind {
-    Lookup, Getattr, Open, Read, Write, Create,
+    Lookup, Getattr, Setattr, Readdir, Open, Read, Write, Create,
     Mkdir, Unlink, Rmdir, Rename, Symlink, Readlink, Release, Fsync, Statfs,
 }
 ```
