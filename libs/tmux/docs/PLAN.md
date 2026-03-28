@@ -1079,6 +1079,31 @@ consumption and routed control pleasant for external LLM/classifier workflows.
 
 **Depends on**: 2c.4a ✓
 
+### 2b.3b — Per-source coherent history (DC33)
+
+See [`docs/HISTORY.md`](./HISTORY.md) for full design.
+
+**Phase 1: Coalesce consecutive same-source chunks**
+- [x] In `HistoryHandle` background task, append to last entry when `source_changed == false`
+- [x] Unit test: rapid same-source frames produce fewer entries than individual pushes
+
+**Phase 2: Per-source render mode**
+- [x] Add `RenderMode` enum: `Interleaved` (default), `PerSource`
+- [x] Add `render_mode` field to `HistoryOptions`
+- [x] Implement `render_per_source()` in `HistoryState` — group entries by source key, render sections
+- [x] Add `push_text_for_source(source, text)` to `PollHistory`
+- [x] Add `render_mode` support to `PollHistory`
+- [x] Unit tests: interleaved input → grouped output, section insertion order, backward compat
+
+**Phase 3: Per-source budgets**
+- [x] Replace single `VecDeque` in `HistoryState` with per-source `SourceWindow` map
+- [x] Per-source `max_entries` / `max_render_chars` trimming
+- [x] Global `max_render_chars` cap across all sources
+- [x] Update `HistoryOptions` with per-source vs global budget fields
+- [x] Unit tests: noisy source doesn't evict quiet source, global cap still applies
+
+**Depends on**: 2b.1 ✓
+
 ### 2b.4 — Public API + examples for external-agent workflows
 
 - [ ] Re-export the active consumer-facing types from `lib.rs`:

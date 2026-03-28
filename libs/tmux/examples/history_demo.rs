@@ -13,11 +13,48 @@
 
 use anyhow::{anyhow, Result};
 use motlie_tmux::{
-    has_visible_text, pane_tail_excerpt, CreateSessionOptions, HistoryOptions, KeySequence,
-    LabelFormat, PollHistory, SinkFilter, SplitPaneOptions, SshConfig,
+    has_visible_text, pane_tail_excerpt, AgentTuiFilter, ContentFilter, CreateSessionOptions,
+    FlushPolicy, HistoryOptions, KeySequence, LabelFormat, PollHistory, RawFilter, RenderMode,
+    ShellFilter, SinkFilter, SourceAccumulator, SplitPaneOptions, SshConfig,
 };
 use std::collections::HashMap;
 use std::time::Duration;
+
+// ---------------------------------------------------------------------------
+// Filter + Policy wiring (uses library types from motlie_tmux::filter/sink)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+enum FilterMode {
+    Raw,
+    Shell,
+    ClaudeCode,
+    Codex,
+}
+
+fn make_filter(mode: FilterMode) -> Box<dyn ContentFilter> {
+    match mode {
+        FilterMode::Raw => Box::new(RawFilter),
+        FilterMode::Shell => Box::new(ShellFilter),
+        FilterMode::ClaudeCode => Box::new(AgentTuiFilter::claude_code()),
+        FilterMode::Codex => Box::new(AgentTuiFilter::codex()),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FlushPolicyType {
+    LineCount,
+    Idle,
+    PromptBoundary,
+}
+
+fn make_policy(policy_type: FlushPolicyType) -> FlushPolicy {
+    match policy_type {
+        FlushPolicyType::LineCount => FlushPolicy::line_count(3, Duration::from_secs(10)),
+        FlushPolicyType::Idle => FlushPolicy::idle(Duration::from_secs(3), Duration::from_secs(15)),
+        FlushPolicyType::PromptBoundary => FlushPolicy::prompt_boundary(Duration::from_secs(30), 1),
+    }
+}
 
 const CHAT_CMD: &str = "sh -c 'stty -echo 2>/dev/null || true; cat'";
 const HELP: &str = "\
@@ -71,6 +108,9 @@ struct Args {
     max_entries: usize,
     live_sessions: Option<(String, String)>,
     live_mode: LiveMode,
+    render_mode: RenderMode,
+    filter_mode: FilterMode,
+    policy_type: FlushPolicyType,
 }
 
 fn parse_live_mode(value: &str) -> Result<LiveMode> {
@@ -101,6 +141,9 @@ fn parse_args() -> Result<Args> {
     let mut max_chars = 420usize;
     let mut max_entries = 8usize;
     let mut live_mode = LiveMode::Tail;
+    let mut render_mode = RenderMode::Interleaved;
+    let mut filter_mode = FilterMode::Shell;
+    let mut policy_type = FlushPolicyType::PromptBoundary;
     let mut positional: Vec<String> = Vec::new();
     let mut i = 1usize;
 
@@ -135,6 +178,60 @@ fn parse_args() -> Result<Args> {
                         .ok_or_else(|| anyhow!("--mode requires a value"))?,
                 )?;
             }
+            "--render-mode" => {
+                i += 1;
+                render_mode = match argv
+                    .get(i)
+                    .ok_or_else(|| anyhow!("--render-mode requires a value"))?
+                    .as_str()
+                {
+                    "interleaved" => RenderMode::Interleaved,
+                    "per-source" => RenderMode::PerSource,
+                    other => {
+                        return Err(anyhow!(
+                            "unknown render mode '{}' (interleaved|per-source)",
+                            other
+                        ))
+                    }
+                };
+            }
+            "--filter" => {
+                i += 1;
+                filter_mode = match argv
+                    .get(i)
+                    .ok_or_else(|| anyhow!("--filter requires a value"))?
+                    .as_str()
+                {
+                    "raw" => FilterMode::Raw,
+                    "shell" => FilterMode::Shell,
+                    "claude" => FilterMode::ClaudeCode,
+                    "codex" => FilterMode::Codex,
+                    other => {
+                        return Err(anyhow!(
+                            "unknown filter '{}' (raw|shell|claude|codex)",
+                            other
+                        ))
+                    }
+                };
+            }
+            "--policy" => {
+                i += 1;
+                policy_type = match argv
+                    .get(i)
+                    .ok_or_else(|| anyhow!("--policy requires a value"))?
+                    .as_str()
+                {
+                    "lines" => FlushPolicyType::LineCount,
+                    "idle" => FlushPolicyType::Idle,
+                    "prompt" => FlushPolicyType::PromptBoundary,
+                    other => {
+                        return Err(anyhow!(
+                            "unknown policy '{}' (lines|idle|prompt)",
+                            other
+                        ))
+                    }
+                };
+            }
             value if value.starts_with("ssh://") => {
                 uri = value.to_string();
             }
@@ -168,6 +265,9 @@ fn parse_args() -> Result<Args> {
         max_entries,
         live_sessions,
         live_mode,
+        render_mode,
+        filter_mode,
+        policy_type,
     })
 }
 
@@ -198,7 +298,8 @@ async fn run_live(
     match args.live_mode {
         LiveMode::Monitor => run_live_monitor(host, session_a, session_b, args).await,
         LiveMode::Tail => {
-            let mut history = PollHistory::new(args.max_entries, args.max_chars);
+            let mut history = PollHistory::new(args.max_entries, args.max_chars)
+                .with_render_mode(args.render_mode);
             let target_a = host
                 .session(session_a)
                 .await?
@@ -217,13 +318,26 @@ async fn run_live(
                 "History window: max_entries={}, max_render_chars={}",
                 args.max_entries, args.max_chars
             );
-            println!("Baseline captured at startup; only new changes are appended.");
+            println!("Accumulator: line_threshold=3, time_threshold=5s");
             println!("Ctrl-C to stop.\n");
+
+            let baseline_a = target_a.capture_all().await?;
+            let baseline_b = target_b.capture_all().await?;
+            let mut acc_a = SourceAccumulator::new(
+                session_a,
+                baseline_a,
+                make_filter(args.filter_mode),
+                make_policy(args.policy_type),
+            );
+            let mut acc_b = SourceAccumulator::new(
+                session_b,
+                baseline_b,
+                make_filter(args.filter_mode),
+                make_policy(args.policy_type),
+            );
+
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             let mut tick = 0u64;
-            let mut last_rendered = String::new();
-            let mut previous_a = target_a.capture_all().await?;
-            let mut previous_b = target_b.capture_all().await?;
 
             loop {
                 tokio::select! {
@@ -232,25 +346,36 @@ async fn run_live(
                         tick += 1;
 
                         let current_a = target_a.capture_all().await?;
-                        if let Some(rendered) = tail_history_entry(session_a, &mut previous_a, &current_a) {
-                            history.push_text(rendered);
+                        if let Some(chunk) = acc_a.ingest(&current_a) {
+                            // Print delta as it flushes — shows what was captured
+                            println!("[t={}s] {} flushed:", tick, session_a);
+                            println!("{}", chunk.trim_end());
+                            println!();
+                            history.push_text_for_source(session_a, chunk);
                         }
                         let current_b = target_b.capture_all().await?;
-                        if let Some(rendered) = tail_history_entry(session_b, &mut previous_b, &current_b) {
-                            history.push_text(rendered);
-                        }
-
-                        let rendered = history.render_text();
-                        if !rendered.is_empty() && rendered != last_rendered {
-                            println!("=== rolling context (t={}s) ===", tick);
-                            println!("{}", rendered);
-                            last_rendered = rendered;
+                        if let Some(chunk) = acc_b.ingest(&current_b) {
+                            println!("[t={}s] {} flushed:", tick, session_b);
+                            println!("{}", chunk.trim_end());
+                            println!();
+                            history.push_text_for_source(session_b, chunk);
                         }
                     }
                 }
             }
+
+            // Flush any remaining accumulated content
+            if let Some(chunk) = acc_a.flush_remaining() {
+                history.push_text_for_source(session_a, chunk);
+            }
+            if let Some(chunk) = acc_b.flush_remaining() {
+                history.push_text_for_source(session_b, chunk);
+            }
+
+            println!("\n========== FINAL ROLLING CONTEXT ==========");
+            println!("{}", history.render_text());
             println!(
-                "\nFinal snapshot: entries={}, omitted_entries={}, rendered_chars={}",
+                "Stats: entries={}, omitted={}, chars={}",
                 history.len(),
                 history.omitted_entries(),
                 history.rendered_chars()
@@ -258,7 +383,8 @@ async fn run_live(
             Ok(())
         }
         LiveMode::Render => {
-            let mut history = PollHistory::new(args.max_entries, args.max_chars);
+            let mut history = PollHistory::new(args.max_entries, args.max_chars)
+                .with_render_mode(args.render_mode);
             let target_a = host
                 .session(session_a)
                 .await?
@@ -294,7 +420,7 @@ async fn run_live(
                         let current_a = target_a.capture_all().await?;
                         if current_a != previous_a {
                             if let Some(rendered) = render_history_entry(session_a, &current_a) {
-                                history.push_text(rendered);
+                                history.push_text_for_source(session_a, rendered);
                             }
                             previous_a = current_a;
                         }
@@ -302,7 +428,7 @@ async fn run_live(
                         let current_b = target_b.capture_all().await?;
                         if current_b != previous_b {
                             if let Some(rendered) = render_history_entry(session_b, &current_b) {
-                                history.push_text(rendered);
+                                history.push_text_for_source(session_b, rendered);
                             }
                             previous_b = current_b;
                         }
@@ -346,6 +472,8 @@ async fn run_live_monitor(
         max_render_chars: args.max_chars,
         label_format: LabelFormat::Prompt,
         include_omission_marker: true,
+        render_mode: args.render_mode,
+        ..Default::default()
     });
     let monitor_a = host.start_monitoring_session(session_a).await?;
     let monitor_b = host.start_monitoring_session(session_b).await?;
@@ -491,6 +619,7 @@ async fn run_simulated(host: &motlie_tmux::HostHandle, args: &Args) -> Result<()
         max_render_chars: args.max_chars,
         label_format: LabelFormat::Prompt,
         include_omission_marker: true,
+        ..Default::default()
     });
 
     let monitor = host.start_monitoring_session(&session).await?;
