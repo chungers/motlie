@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-28 | @claude | v1 no-caching principle: zero TTL everywhere, no semantic caches, correctness-first, perf phase deferred |
 | 2026-03-28 | @claude | Spec-complete: memfs-aware inode model, cache/invalidation strategy, generation semantics, control-socket wire format |
 | 2026-03-28 | @claude | Fix stale resolve() examples to use OverlayEntryKind; show policy-filtered vs unfiltered readdir for .ssh |
 | 2026-03-28 | @claude | Converge memfs model: shared inode namespace, internal tree vs inspection views, tighten wording per review |
@@ -1460,49 +1461,76 @@ for that tag receives `FsResult::Error { errno: ENOENT }` on subsequent requests
 
 ## Cache Visibility and Invalidation
 
-Runtime overlay mutations (`put`, `whiteout`, `remove`, `remove_layer`) change what a
-mounted FUSE client sees. The FUSE kernel caches lookup results, attrs, and data based on
-TTL values returned by the server. The design must specify how those caches are invalidated
-so clients observe mutations promptly.
+### v1 Design Principle: No Caching, Correctness First
 
-### Strategy: Short TTLs for Overlay, Normal TTLs for Disk
+The v1 implementation biases toward **determinism and correctness over cache performance**.
+There are no semantic caches inside the overlay layer beyond the required inode/object
+mappings in `InodeTable`. Every `lookup`, `getattr`, `readdir`, and `read` on an
+overlay-backed path resolves from the live in-memory state on every call. Every disk-backed
+operation goes to `std::fs` on every call.
+
+This means:
+- No attrs cache for overlay entries (attrs are computed from the live `Content`/`SyntheticDir` state).
+- No attrs cache for disk entries (every `getattr` calls `std::fs::metadata()`).
+- No readdir cache (every `readdir` re-merges disk + overlay + policy filter).
+- No data cache (every `read` returns live overlay content or calls `std::fs::read()`).
+- No background invalidation machinery.
+- Runtime `put` / `whiteout` / `remove` / `remove_layer` mutations are visible on the
+  very next filesystem operation — no stale state possible.
+
+The `InodeTable` itself is not a cache — it is the authoritative inode namespace. Inode
+allocation is stable within a mount lifetime (see Inode Stability above). The table maps
+inodes to entry metadata but does not cache file content or directory listings.
+
+### FUSE Kernel TTL Strategy
+
+The FUSE kernel independently caches lookup results, attrs, and data based on TTL values
+returned by the server. The v1 strategy is zero TTL for everything:
 
 | Entry class | `ttl_secs` for lookup/getattr | `ttl_secs` for data | Rationale |
 |-------------|-------------------------------|---------------------|-----------|
-| Disk file/dir | 1 | 1 | Host filesystem may change independently; short TTL balances freshness vs performance |
-| Overlay `Content` | 0 | 0 | Overlay content can change at any time via `put()` / control socket; zero TTL forces revalidation on every access |
-| `SyntheticDir` | 0 | N/A | May gain/lose children via `put()` / `remove()`; zero TTL forces fresh `readdir` |
-| `Whiteout` | 0 | N/A | May be replaced by `put()`; zero TTL ensures immediate visibility |
+| Disk file/dir | 0 | 0 | No server-side cache; kernel must revalidate every access |
+| Overlay `Content` | 0 | 0 | Content can change at any time via `put()` / control socket |
+| `SyntheticDir` | 0 | N/A | May gain/lose children via `put()` / `remove()` |
+| `Whiteout` | 0 | N/A | May be replaced by `put()` |
 
-Zero TTL for overlay entries means the FUSE kernel revalidates on every access. This is the
-simplest correct strategy — no stale data, no cache-coherence bugs. The cost is one extra
-`lookup` round-trip per access, which is negligible for overlay entries (in-memory, no I/O).
+Zero TTL across the board means the kernel revalidates on every access. Combined with no
+server-side caching, the system is fully deterministic: every operation reflects the current
+state of disk + overlay + policy. The cost is one round-trip per access, which is acceptable
+for v1 where correctness matters more than throughput.
 
-### Why Not Explicit Kernel Invalidation
+### Why Not Explicit Kernel Invalidation (v1)
 
 FUSE supports `notify_inval_inode` and `notify_inval_entry` to proactively push cache
-invalidations from the server. This would allow longer TTLs with on-demand invalidation
-when overlay mutations occur. However:
+invalidations. This would allow longer TTLs with on-demand invalidation on overlay
+mutations. This is explicitly deferred from v1:
 
 - It requires the server to hold a `Session` reference from `fuser`, coupling the server
   core to the FUSE client — violating the composable architecture (direct and RPC composites
   don't have a `Session`).
-- Zero TTL for overlay entries achieves the same correctness with no coupling.
-- If profiling shows the revalidation overhead is significant for specific workloads,
-  explicit invalidation can be added as an optimization in the FUSE client module without
-  changing the server core or protocol.
+- Zero TTL achieves the same correctness with no coupling and no invalidation logic.
+- Adding invalidation is a backward-compatible optimization: increase TTLs and add
+  `notify_inval_*` calls in the FUSE client module, no server core or protocol changes.
 
 ### Generation + TTL Interaction
 
 When a FUSE client does a lookup and gets `(inode, generation, attrs, ttl=0)`:
 1. Next access: kernel revalidates (calls `lookup` or `getattr` again because `ttl=0`).
-2. Server returns current `(inode, generation, attrs)`.
+2. Server returns current `(inode, generation, attrs)` from live state.
 3. If `generation` changed: kernel discards all cached data/attrs for that inode.
 4. If `generation` unchanged: kernel may use previously cached data (but `ttl=0` means
    it will revalidate again on the next access anyway).
 
-This means overlay mutations are visible on the very next filesystem operation from the
-client. No explicit invalidation needed.
+Overlay mutations are visible on the very next filesystem operation. No explicit
+invalidation needed.
+
+### Future: Performance Phase
+
+When v1 is stable, a subsequent phase can introduce caching without architectural changes:
+- Disk attrs cache with configurable TTL (e.g., `ttl_secs = 1`)
+- Overlay readdir cache invalidated on `put`/`remove` (saves re-merge cost)
+- Targeted `notify_inval_*` calls in the FUSE client for longer kernel TTLs
+- None of these require server core, protocol, or API changes
 
 ## macOS: FUSE-T Strategy
 
