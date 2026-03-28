@@ -906,5 +906,5 @@ Files: core/overlay.rs, core/server.rs, core/inode.rs
 Tests added: 12
 Tests passed: 10
 Open issues: whiteout rename edge case
-Unlocks: 2.3, 3.1, 3.4
+Unlocks: 2.3, 3.1, 4.2
 ```
