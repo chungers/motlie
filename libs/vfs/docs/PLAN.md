@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-28 | @codex-pm | Resolve PR #117 round-3 follow-ups: fix stale traceability phase references, add explicit PLAN coverage for v1 symlink/file-handle behavior, and align the plan with the completed event-emission contract |
 | 2026-03-28 | @codex-pm | Address PR #117 review feedback: convert DESIGN links to relative paths, fix phase/task numbering, and make the v2 RPC phase specification-oriented instead of implementation-oriented |
 | 2026-03-28 | @codex-pm | Align the plan title with the product framing: layered guest filesystem composition rather than transport plumbing |
 | 2026-03-28 | @codex-pm | Resolve guest boundary in PLAN: bootstrap/binary delivery stay VMM-owned, `client/guest.rs` owns guest mount orchestration, and the real guest binary must stay a thin wrapper over public guest APIs |
@@ -105,7 +106,7 @@ The implementation is not complete unless each DESIGN requirement is covered by 
 
 Product requirement coverage:
 
-- [ ] T.1 Operator-controlled guest filesystem layout is implemented by phases `2.1`, `3.2`, `3.3`, `3.4`, and `4.1`, and verified with mounted-subtree integration scenarios.
+- [ ] T.1 Operator-controlled guest filesystem layout is implemented by phases `2.1`, `3.2`, `4.1`, `4.2`, and `5.1`, and verified with mounted-subtree integration scenarios.
 - [ ] T.2 Partial overlay of existing guest paths is implemented by phase `2.2` and verified with disk+overlay directory tests inside an existing mounted subtree.
 - [ ] T.3 Fully synthetic guest paths are implemented by phase `2.2` and verified with recursive synthetic-parent tests.
 - [ ] T.4 Application-specific runtime injection is implemented by phases `2.2` and `3.1`, and verified with runtime layer add/update/remove scenarios.
@@ -114,7 +115,7 @@ Product requirement coverage:
 - [ ] T.6 Synthetic uid/gid ownership control is implemented by phases `1.2`, `2.2`, `3.1`, and `4.1`, and verified for both inherited-default and explicit-attr cases.
 - [ ] T.7 Dynamic runtime mutation is implemented by phases `2.2` and `3.1`, and verified with next-operation visibility tests.
 - [ ] T.7a Atomic memfs mutation visibility is implemented by phase `2.2` and verified with batch-commit visibility tests for lookup, read, and readdir.
-- [ ] T.8 Transparency to guest applications is implemented by phases `2.2`, `2.3`, and `3.4`, and verified with rename/unlink/editor-style workflows.
+- [ ] T.8 Transparency to guest applications is implemented by phases `2.2`, `2.3`, and `4.2`, and verified with rename/unlink/editor-style workflows.
 - [ ] T.9 Frontend layering is preserved: `MemOverlay` is core, v1 proof-of-concept examples call it directly, v1.5 extends the embedded admin path, and embedders can host in-process admin loops directly on the Rust API.
 - [ ] T.10 v1 VM guest delivery is proven on the vsock path, using Cloud Hypervisor as the fast integration harness before full VMM integration.
 - [ ] T.11 v1 operational setup is documented and testable: image build, CH launch, host server setup, and embedded admin mutation workflow.
@@ -125,7 +126,7 @@ Product requirement coverage:
 
 Functional requirement coverage:
 
-- [ ] T.15 FR-1 roadmap placement is respected: phase `3.4` proves the Linux guest FUSE path for `v1`, while macOS FUSE-T remains later roadmap work.
+- [ ] T.15 FR-1 roadmap placement is respected: phase `4.2` proves the Linux guest FUSE path for `v1`, while macOS FUSE-T remains later roadmap work.
 - [ ] T.16 FR-2 roadmap placement is respected: transport-agnostic protocol is deferred to phase `3.2` in `v2`.
 - [ ] T.17 FR-3 roadmap placement is respected: pluggable wire encoding is deferred to phase `3.2` in `v2`.
 - [ ] T.18 FR-4 Tag-based mount routing is implemented by phases `2.1` and `3.2` and verified with multi-tag routing tests.
@@ -141,7 +142,7 @@ Non-functional requirement coverage:
 - [ ] T.25 NFR-1 latency has a benchmark or timing harness defined before optimization work begins.
 - [ ] T.26 NFR-2 throughput has a benchmark or large-file transfer harness defined before optimization work begins.
 - [ ] T.27 NFR-3 minimal dependencies is verified by crate feature/build inspection in phases `1.1` and `4.1`.
-- [ ] T.28 NFR-4 library-first is verified by exposing all major functionality through library APIs in phases `1.2` through `3.4`.
+- [ ] T.28 NFR-4 library-first is verified by exposing all major functionality through library APIs in phases `1.2` through `4.2`.
 - [ ] T.29 NFR-5 testability is verified by direct-mode tests, environment-gated Linux FUSE tests, the Cloud Hypervisor guest harness, and documented operator procedures.
 
 ## 1. Foundation
@@ -310,6 +311,7 @@ Per-task reference rule:
 - [ ] 2.1.3 Implement direct host filesystem handling for `Lookup`, `Getattr`, `Setattr`, `Readdir`, `Open`, `Read`, `Write`, `Create`, `Mkdir`, `Unlink`, `Rmdir`, `Rename`, `Symlink`, `Readlink`, `Release`, `Fsync`, and `Statfs`.
 - [ ] 2.1.4 Implement read-only mount enforcement.
 - [ ] 2.1.5 Emit events through broadcast channel.
+- [ ] 2.1.5a Ensure `FsOpKind` covers every emitted server operation, including `Setattr` and `Readdir`, so FR-6 remains mechanically enforceable.
 - [ ] 2.1.6 Call policy hooks consistently.
 - [ ] 2.1.7 Keep mount/backing representation narrow enough that a future non-disk mount type can be introduced without redesigning `MemOverlay`.
 - [ ] 2.1.8 Introduce an internal mount-state abstraction that separates tag identity, overlay state, inode state, and fallback backing.
@@ -321,6 +323,7 @@ Tests / verification:
 - [ ] 2.1.11 Add integration tests against `tempfile` directories for each `FsOp`.
 - [ ] 2.1.12 Add read-only enforcement tests.
 - [ ] 2.1.13 Add event emission tests.
+- [ ] 2.1.13a Add event-emission coverage proving `Setattr` and `Readdir` produce the expected `FsOpKind`.
 - [ ] 2.1.14 Add multi-tag routing tests covering independent mounted subtrees.
 - [ ] 2.1.15 Add dynamic mount add/remove tests covering tag registration and invalidation behavior.
 - [ ] 2.1.16 Add a design guardrail review checkpoint asserting disk fallback is isolated behind mount/backing logic, not spread through overlay logic.
@@ -366,8 +369,10 @@ Per-task reference rule:
 - [ ] 2.2.7 Implement generic stack resolution for `lookup`, `getattr`, and `read`: top-down through memfs layers, then base layer.
 - [ ] 2.2.8 Implement generic stack merge for `readdir`: base-layer entries merged upward through memfs layers with whiteout removal semantics.
 - [ ] 2.2.9 Implement mutation semantics for `Unlink`, `Create`, `Mkdir`, `Rmdir`, `Rename`, and `Setattr`.
+- [ ] 2.2.9a Implement the v1 symlink/readlink rule explicitly: symlinks remain base-layer-only, and overlay-managed or synthetic-parent symlink operations return `ENOTSUP`.
 - [ ] 2.2.10 Implement transparent cross-layer rename behavior from the DESIGN.
 - [ ] 2.2.11 Implement inherited synthetic ownership defaults from nearest existing parent or mount root.
+- [ ] 2.2.11a Implement overlay file-handle bookkeeping for overlay-backed opens: synthetic `fh` allocation, `fh -> inode` mapping, `Release`, `Fsync`, and latest-effective-content read behavior.
 - [ ] 2.2.12 Keep overlay node management independent from concrete base-layer implementation details where possible.
 - [ ] 2.2.13 Ensure overlay entry identity, synthetic parent creation, whiteouts, and listings remain defined in terms of tag + mount-relative path rather than disk-path existence.
 - [ ] 2.2.14 Ensure one named memfs layer can hold entries for many tags without path collision.
@@ -395,6 +400,7 @@ Tests / verification:
 - [ ] 2.2.23 Add fully synthetic subtree tests for paths such as `/home/alice/.claude/skills` created entirely by file injection.
 - [ ] 2.2.24 Add whiteout tests showing a lower immutable file remains hidden without physical deletion.
 - [ ] 2.2.25 Add transparent app-workflow tests covering create/write/rename/unlink sequences typical of editors and CLI tools.
+- [ ] 2.2.25a Add symlink/readlink tests proving overlay-managed paths return `ENOTSUP` in v1 while base-layer symlink behavior remains available.
 - [ ] 2.2.26 Add shared-tag tests proving `/alice/...` and `/bob/...` coexist in one mounted tree without path collision.
 - [ ] 2.2.27 Add separate-tag tests proving two guest mounts remain overlay-isolated even when one `MemOverlay` instance serves both tags.
 - [ ] 2.2.28 Add shared-layer multi-tag tests proving one named layer can inject `/CLAUDE.md` into distinct tags with independent effective placement.
@@ -405,6 +411,7 @@ Tests / verification:
 - [ ] 2.2.33 Add batch atomicity tests proving a batch of injected files becomes visible all at once for `lookup`, `read`, and `readdir`.
 - [ ] 2.2.34 Add synthetic-parent atomicity tests proving readers cannot observe partially materialized parent hierarchies.
 - [ ] 2.2.35 Add concurrent reader/writer tests proving one filesystem request uses one stable memfs snapshot.
+- [ ] 2.2.35a Add overlay file-handle lifecycle tests covering synthetic `fh` allocation, `Release`, `Fsync`, and reads after content replacement.
 - [ ] 2.2.36 Add a review checkpoint confirming the base layer keeps native filesystem semantics and is not treated as transactional by `motlie-vfs`.
 
 Exit criteria:
