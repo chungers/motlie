@@ -2220,6 +2220,37 @@ let context = history.render_text();
 | `FlushPolicy::idle(3s, 15s)` | CI jobs, test runners | Flush when output pauses 3s |
 | `FlushPolicy::prompt_boundary(30s, 1)` | Agent TUIs (Claude, Codex) | Flush when prompt appears after content |
 
+#### Exported helper functions
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `clean_line` | `fn clean_line(line: &str) -> Option<String>` | Strip ANSI escape sequences and normalize a raw terminal line. Returns `None` if the line is empty/whitespace after cleaning. Used internally by all filters and `diff_new_lines`. |
+| `diff_new_lines` | `fn diff_new_lines(previous: &str, current: &str, filter: &dyn ContentFilter) -> Vec<String>` | Multiset-based diff: finds lines in `current` that weren't in `previous` (preserving multiplicity), then applies the content filter. Returns filtered new lines. Core of `SourceAccumulator::ingest()`. |
+| `is_tui_chrome` | `fn is_tui_chrome(trimmed: &str) -> bool` | Combined heuristic check: returns `true` if the line is TUI chrome (spinner, box-drawing, status bar, affordance hint, context indicator, or bare prompt). Used by `AgentTuiFilter` and available for custom filter implementations. |
+
+```rust
+use motlie_tmux::{clean_line, diff_new_lines, is_tui_chrome, RawFilter};
+
+// Clean a raw terminal line
+assert_eq!(clean_line("\x1b[32mhello\x1b[0m"), Some("hello".to_string()));
+assert_eq!(clean_line("   \r\n"), None);
+
+// Detect TUI chrome
+assert!(is_tui_chrome("· Thinking…"));
+assert!(is_tui_chrome("──────────────────"));
+assert!(!is_tui_chrome("actual content here"));
+
+// Diff two pane captures with a filter
+let prev = "line1\nline2\n";
+let curr = "line1\nline2\nline3\n· Thinking…\n";
+let new_lines = diff_new_lines(prev, curr, &RawFilter);
+assert_eq!(new_lines, vec!["line3", "· Thinking…"]); // RawFilter keeps spinners
+
+use motlie_tmux::AgentTuiFilter;
+let filtered = diff_new_lines(prev, curr, &AgentTuiFilter::codex());
+assert_eq!(filtered, vec!["line3"]); // AgentTuiFilter removes spinners
+```
+
 ### Shell channel (low-level, used by monitor layer — Phase 2a)
 
 | Type | Description |
