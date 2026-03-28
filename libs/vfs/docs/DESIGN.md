@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-27 | @claude | Address PR #115 review: synthetic directories, policy-filtered readdir, mutation semantics table |
 | 2026-03-27 | @claude | Initial DESIGN: composable architecture (core + vsock + rpc), file-level in-memory overlay with layered injection, pluggable control frontends (Unix socket / HTTP / in-process), VMM guest integration with SSH overlay example, alternatives analysis |
 
 ## Problem Statement
@@ -109,10 +110,15 @@ without modifying the underlying host filesystem. Requirements:
   lower ones. All layers shadow disk.
 - **Per-file granularity.** Each overlay entry targets a specific path within a mount tag.
   Non-overlaid files fall through to the host filesystem.
-- **Synthetic files.** An overlay can inject files that do not exist on disk. These appear
-  in readdir results alongside real files.
+- **Synthetic files and directories.** An overlay can inject files that do not exist on disk.
+  These appear in readdir results alongside real files. Parent directories that don't exist
+  on disk are created implicitly as synthetic directories (e.g., injecting `/.ssh/id_ed25519`
+  implicitly creates a synthetic `/.ssh/` directory).
 - **Write capture.** Writes to overlaid files update the in-memory layer, not the disk.
   Writes to non-overlaid files go to disk as normal.
+- **Mutation semantics.** The overlay must define behavior for `Create`, `Unlink`, `Rename`,
+  `Mkdir`, and `Rmdir` on overlay-backed paths, covering synthetic entries, shadowed files,
+  and cross-boundary (overlay↔disk) operations.
 - **Programmatic API** for injection at server startup or at runtime from Rust code.
 - **Control socket** (Unix domain socket) for injection from the command line or external
   tooling while the server is running.
@@ -319,16 +325,51 @@ handle_op(tag, FsOp::Read { inode, .. })
 - Resolution: for a given `(tag, path)`, walk layers highest-to-lowest, return first hit.
   If no layer has it, fall through to disk.
 
-**Synthetic files:**
+**Synthetic files and directories:**
 - An overlay entry for a path that doesn't exist on disk creates a synthetic file.
   It appears in `readdir` alongside real directory entries. `lookup` and `getattr` return
   the overlay's metadata (size from content length, mtime from injection time, mode 0644).
 - Removing the overlay entry makes the synthetic file disappear.
+- **Implicit synthetic directories:** When overlay entries exist under a path whose parent
+  directory does not exist on disk, the server creates synthetic directory inodes for each
+  missing ancestor. For example, `put("layer", "home", "/.ssh/id_ed25519", key)` implicitly
+  creates a synthetic `/.ssh/` directory if `~/alice/.ssh/` does not exist on the host.
+  The synthetic directory has mode 0755, mtime from the first child injection, and appears
+  in its parent's `readdir`. `lookup("/.ssh")` returns a directory inode.
+- `readdir` on a synthetic directory returns only overlay entries (there are no disk entries
+  to merge, since the directory doesn't exist on disk). `readdir` on a disk directory that
+  also has overlay children merges both per-file as described above.
 
 **Write behavior:**
 - Writes to an overlaid path update the highest-priority layer that owns that path.
 - Writes to a non-overlaid path go to disk.
 - A future "capture" layer mode could intercept all writes, but this is out of scope.
+
+**Mutation semantics:**
+
+Operations on overlay-backed paths must have well-defined behavior. The rules follow
+the principle: overlay entries live in memory, disk entries live on disk, and cross-boundary
+operations are rejected.
+
+| Operation | Target | Behavior |
+|-----------|--------|----------|
+| `Unlink` | Synthetic file | Remove overlay entry. File vanishes. |
+| `Unlink` | Shadowed file (overlay over disk) | Remove overlay entry. Disk file reappears. Use policy to prevent if undesired. |
+| `Unlink` | Disk-only file | Normal `std::fs::remove_file()`. |
+| `Create` | Under synthetic directory | Create in overlay (in-memory). |
+| `Create` | Under disk directory | Normal `std::fs::create()` on disk. |
+| `Mkdir` | Under synthetic parent | Create synthetic directory in overlay. |
+| `Mkdir` | Under disk parent | Normal `std::fs::create_dir()` on disk. |
+| `Rmdir` | Synthetic directory (empty) | Remove from overlay. |
+| `Rmdir` | Disk directory | Normal `std::fs::remove_dir()`. |
+| `Rename` | Overlay → same overlay dir | Rename within overlay (in-memory). |
+| `Rename` | Disk → same disk dir | Normal `std::fs::rename()`. |
+| `Rename` | Overlay ↔ disk (cross-boundary) | Return `EXDEV`. Like cross-device rename in overlayfs. |
+| `Setattr` | Overlaid/synthetic file | Update in-memory attrs. |
+| `Setattr` | Disk file | Normal `std::fs` operation. |
+
+The `EXDEV` on cross-boundary rename is intentional: moving a file between memory and disk
+has unclear persistence semantics. Callers that need this should copy + delete explicitly.
 
 ## Crate Structure
 
@@ -478,7 +519,9 @@ adds domain context.
 
 ```rust
 pub trait PolicyFn: Send + Sync + 'static {
+    /// Check whether an operation is allowed.
     /// Return Ok(()) to allow, Err(errno) to deny.
+    /// Called for every FsOp including individual Readdir entries.
     fn check(&self, op: FsOp, tag: &str, path: &str) -> Result<(), i32>;
 }
 
@@ -1483,6 +1526,8 @@ let server = FsServer::builder()
 // Inject SSH keys into the "home" mount's overlay.
 // On disk, ~/alice/.ssh/ may not exist or may be empty.
 // The overlay makes these files appear at /root/.ssh/ inside the VM.
+// If ~/alice/.ssh/ doesn't exist on disk, the server creates a synthetic
+// directory inode for /.ssh/ implicitly from the child entries below.
 let overlay = server.overlay().unwrap();
 overlay.put_layer("credentials", 0)?;
 overlay.put("credentials", "home", "/.ssh/authorized_keys", alice_pubkey)?;
@@ -1590,16 +1635,19 @@ ls("/root/.ssh/")
   → result: [known_hosts, old_config, id_ed25519, id_ed25519.pub, config, authorized_keys]
 ```
 
-**readdir merging with overlay:**
+**readdir merging with overlay and policy filtering:**
 
-When `handle_op()` processes a `Readdir`, it merges real directory entries from the host
-filesystem with overlay entries on a per-file basis:
+When `handle_op()` processes a `Readdir`, it merges entries and then filters:
 
 1. Read real entries from `std::fs::read_dir(host_path)`.
+   (If directory is synthetic — doesn't exist on disk — skip this step.)
 2. Collect overlay entries whose path is a direct child of the queried directory.
 3. Merge by name: overlay entry shadows disk entry with the same name.
 4. Disk entries not shadowed pass through unchanged.
 5. Overlay entries with no disk counterpart appear as synthetic entries.
+6. **Policy filter:** each merged entry is passed through `policy.check(Readdir, tag, path)`.
+   Entries denied by policy are excluded from the result. This enables directory-level
+   lockdown without modifying the overlay.
 
 ### Overlay Scope: File-Level Granularity
 
@@ -1627,14 +1675,18 @@ directory listing. An overlaid file shadows only that file; siblings are unaffec
 
 If a caller wants full control over a directory (e.g., no unexpected disk files in `.ssh/`),
 that's a policy concern, not an overlay concern. Use `PolicyFn` to block access to
-non-overlaid files within sensitive directories:
+non-overlaid files within sensitive directories. Because `policy.check()` is called for
+each `Readdir` entry (step 6 above), denied entries are excluded from directory listings
+as well as from direct access:
 
 ```rust
 struct SshLockdown { overlay: Arc<MemOverlay> }
 
 impl PolicyFn for SshLockdown {
     fn check(&self, op: FsOp, tag: &str, path: &str) -> Result<(), i32> {
-        // In /.ssh/: only serve files that exist in the overlay
+        // In /.ssh/: only serve files that exist in the overlay.
+        // This filters both direct access (Lookup, Read, Open) AND
+        // Readdir entries — disk files in .ssh/ are invisible.
         if path.starts_with("/.ssh/") && self.overlay.resolve(tag, path).is_none() {
             return Err(libc::ENOENT);
         }
@@ -1642,6 +1694,10 @@ impl PolicyFn for SshLockdown {
     }
 }
 ```
+
+With this policy, `readdir("/.ssh/")` returns only overlay entries — disk files like
+`known_hosts` or `old_config` are filtered out. Without this policy, they pass through.
+The overlay always merges; the policy decides what's visible.
 
 This separates concerns cleanly: overlay handles content injection and merging; policy
 handles access control. They compose independently.
