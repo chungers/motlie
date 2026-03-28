@@ -177,20 +177,21 @@ Per-task reference rule:
 
 - every task in this phase traces to one or more of the DESIGN references listed above unless an individual task states a narrower reference explicitly
 
-- [ ] 1.1.1 Add `libs/vfs` to workspace members.
-- [ ] 1.1.2 Create `libs/vfs/Cargo.toml` with the feature graph described in the DESIGN.
-- [ ] 1.1.3 Add initial dependency set for core, vsock, client, and example PoC modules.
-- [ ] 1.1.4 Create public module skeletons with feature gating only, no behavior yet.
-- [ ] 1.1.5 Ensure `cargo check -p motlie-vfs` succeeds with default features.
+- [x] 1.1.1 Add `libs/vfs` to workspace members.
+- [x] 1.1.2 Create `libs/vfs/Cargo.toml` with the feature graph described in the DESIGN.
+- [x] 1.1.3 Add initial dependency set for core, vsock, client, and example PoC modules.
+- [x] 1.1.4 Create public module skeletons with feature gating only, no behavior yet.
+- [x] 1.1.5 Ensure `cargo check -p motlie-vfs` succeeds with default features.
 - [ ] 1.1.6 Add `rustyline` as the v1 proof-of-concept REPL dependency for `libs/vfs/examples`.
-- [ ] 1.1.6a Add `libs/vfs/examples/simple_host.rs` and `libs/vfs/examples/README.md` scaffolding so the v1 examples location matches the DESIGN exactly.
-- [ ] 1.1.6b Add `libs/vfs/src/client/guest.rs` scaffolding so guest-side orchestration has a stable public API distinct from `FuseClient`.
-- [ ] 1.1.6c Add `libs/vfs/src/bin/motlie-vfs-guest.rs` scaffolding as the real v1 guest-side mounter binary over the public guest APIs.
+<!-- @claude-dev 2026-03-28 -- deferred: rustyline is only needed when the REPL has behavior to wire; adding the dep now would be dead weight. Will add in Phase 5.1 when simple_host.rs gets its REPL loop. -->
+- [x] 1.1.6a Add `libs/vfs/examples/simple_host.rs` and `libs/vfs/examples/README.md` scaffolding so the v1 examples location matches the DESIGN exactly.
+- [x] 1.1.6b Add `libs/vfs/src/client/guest.rs` scaffolding so guest-side orchestration has a stable public API distinct from `FuseClient`.
+- [x] 1.1.6c Add `libs/vfs/src/bin/motlie-vfs-guest.rs` scaffolding as the real v1 guest-side mounter binary over the public guest APIs.
 
 Tests / verification:
 
-- [ ] 1.1.7 Run `cargo check -p motlie-vfs`.
-- [ ] 1.1.8 Run a workspace `cargo check` to verify the new crate does not break the workspace.
+- [x] 1.1.7 Run `cargo check -p motlie-vfs`.
+- [x] 1.1.8 Run a workspace `cargo check` to verify the new crate does not break the workspace.
 
 Exit criteria:
 

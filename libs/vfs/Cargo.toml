@@ -1,0 +1,55 @@
+[package]
+name = "motlie-vfs"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Layered guest filesystem composition: transport-agnostic FUSE server with in-memory overlay"
+
+[features]
+default = ["server-core", "bincode-codec"]
+
+# Always available -- core types, FsServer, MemOverlay
+server-core = []
+
+# v1 VM transport
+vsock = ["server-core", "bincode-codec", "dep:tokio-vsock"]
+
+# FUSE client for the v1 guest path
+client = ["dep:fuser"]
+
+# Wire encodings
+bincode-codec = ["dep:bincode"]
+
+[dependencies]
+# Core (always)
+bytes = "1"
+serde = { version = "1.0", features = ["derive"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "rt"] }
+
+# vsock transport (optional)
+tokio-vsock = { version = "0.7", optional = true }
+bincode = { version = "2", optional = true }
+
+# FUSE client (optional)
+fuser = { version = "0.15", optional = true }
+
+# Snapshot / concurrency helpers
+arc-swap = "1"
+parking_lot = "0.12"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["full", "test-util"] }
+
+[[bin]]
+name = "motlie-vfs-guest"
+path = "src/bin/motlie-vfs-guest.rs"
+required-features = ["vsock", "client"]
+
+[[example]]
+name = "simple_host"
+path = "examples/simple_host.rs"
+required-features = ["vsock"]
