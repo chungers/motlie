@@ -12,6 +12,7 @@ use tokio::sync::broadcast;
 use super::event::{FsEvent, FsOpKind};
 use super::inode::{default_root_attrs, InodeTable};
 use super::op::*;
+use super::overlay::{MemOverlay, OverlayEntryKind};
 use super::policy::{AllowAll, PolicyFn};
 
 // ---------------------------------------------------------------------------
@@ -98,6 +99,7 @@ pub struct FsServer {
     mounts: RwLock<HashMap<String, MountState>>,
     policy: Box<dyn PolicyFn>,
     event_tx: Option<broadcast::Sender<FsEvent>>,
+    overlay: Option<MemOverlay>,
 }
 
 pub struct FsServerBuilder {
@@ -153,9 +155,9 @@ impl FsServer {
         self.event_tx.as_ref().map(|tx| tx.subscribe())
     }
 
-    /// Access the overlay. Returns None until Phase 2.2.
-    pub fn overlay(&self) -> Option<()> {
-        None // Phase 2.2
+    /// Access the overlay. Returns None if overlay was not enabled in the builder.
+    pub fn overlay(&self) -> Option<&MemOverlay> {
+        self.overlay.as_ref()
     }
 }
 
@@ -192,10 +194,17 @@ impl FsServerBuilder {
             tx
         });
 
+        let overlay = if self.overlay_enabled {
+            Some(MemOverlay::new())
+        } else {
+            None
+        };
+
         Ok(FsServer {
             mounts: RwLock::new(mount_map),
             policy: self.policy.unwrap_or_else(|| Box::new(AllowAll)),
             event_tx,
+            overlay,
         })
     }
 }
@@ -269,22 +278,54 @@ impl FsServer {
             None => return FsResult::Error { errno: libc::ENOENT },
         };
         let rel_path = child_path(&parent_entry.path, name);
-        let host_path = mount.backing.resolve(&rel_path);
 
+        // Check overlay first (top-down resolution)
+        if let Some(overlay) = &self.overlay {
+            if let Some((_layer, kind)) = overlay.resolve(&mount.tag, &rel_path) {
+                return match kind {
+                    OverlayEntryKind::Content(ref bytes) => {
+                        let now = SystemTime::now();
+                        FsResult::Entry {
+                            inode: 0,
+                            generation: 0,
+                            attrs: FileAttr {
+                                inode: 0, size: bytes.len() as u64, blocks: 0,
+                                atime: now, mtime: now, ctime: now,
+                                kind: FileType::RegularFile, mode: 0o644,
+                                nlink: 1, uid: 0, gid: 0,
+                            },
+                            ttl_secs: 0,
+                        }
+                    }
+                    OverlayEntryKind::Whiteout => {
+                        FsResult::Error { errno: libc::ENOENT }
+                    }
+                    OverlayEntryKind::SyntheticDir => {
+                        let now = SystemTime::now();
+                        FsResult::Entry {
+                            inode: 0,
+                            generation: 0,
+                            attrs: FileAttr {
+                                inode: 0, size: 0, blocks: 0,
+                                atime: now, mtime: now, ctime: now,
+                                kind: FileType::Directory, mode: 0o755,
+                                nlink: 2, uid: 0, gid: 0,
+                            },
+                            ttl_secs: 0,
+                        }
+                    }
+                };
+            }
+        }
+
+        // Fall through to base layer
+        let host_path = mount.backing.resolve(&rel_path);
         match fs::symlink_metadata(&host_path) {
             Ok(meta) => {
                 let kind = file_type_from_meta(&meta);
-                let mut attrs = metadata_to_attrs(&meta, 0, kind);
-                // We need mut access to inode_table, but we only have &MountState.
-                // For this phase, we allocate lazily via interior mutability pattern.
-                // This is safe because handle_op holds a read lock on the mounts map,
-                // and the inode table needs its own synchronization.
-                // For now, return attrs with inode=0; the caller will need to track this.
-                // TODO: Phase 2.2 will add proper inode allocation in the dispatch path
-                // once MountState uses interior mutability for its inode_table.
-                attrs.inode = parent; // placeholder — will be real inode after refactor
+                let attrs = metadata_to_attrs(&meta, 0, kind);
                 FsResult::Entry {
-                    inode: 0, // placeholder
+                    inode: 0,
                     generation: 0,
                     attrs,
                     ttl_secs: 0,
@@ -345,40 +386,74 @@ impl FsServer {
             Some(e) => e,
             None => return FsResult::Error { errno: libc::ENOENT },
         };
-        let host_path = match &entry.host_path {
-            Some(hp) => hp,
-            None => return FsResult::DirEntries { entries: vec![] },
-        };
-        match fs::read_dir(host_path) {
-            Ok(rd) => {
-                let mut entries = Vec::new();
-                for (i, dir_entry) in rd.enumerate() {
-                    if (i as i64) < offset {
-                        continue;
+
+        // Start from base layer entries (bottom-up merge per DESIGN)
+        let mut merged: HashMap<String, DirEntry> = HashMap::new();
+
+        // Check if this is a synthetic dir (no disk backing)
+        let is_overlay_dir = entry.host_path.is_none();
+
+        if !is_overlay_dir {
+            if let Some(hp) = &entry.host_path {
+                if let Ok(rd) = fs::read_dir(hp) {
+                    for dir_entry in rd {
+                        let de = match dir_entry {
+                            Ok(de) => de,
+                            Err(_) => continue,
+                        };
+                        let kind = match de.file_type() {
+                            Ok(ft) => {
+                                if ft.is_dir() { FileType::Directory }
+                                else if ft.is_symlink() { FileType::Symlink }
+                                else { FileType::RegularFile }
+                            }
+                            Err(_) => FileType::RegularFile,
+                        };
+                        let name = de.file_name().to_string_lossy().into_owned();
+                        merged.insert(name.clone(), DirEntry {
+                            inode: 0,
+                            offset: 0,
+                            kind,
+                            name,
+                        });
                     }
-                    let de = match dir_entry {
-                        Ok(de) => de,
-                        Err(_) => continue,
-                    };
-                    let kind = match de.file_type() {
-                        Ok(ft) => {
-                            if ft.is_dir() { FileType::Directory }
-                            else if ft.is_symlink() { FileType::Symlink }
-                            else { FileType::RegularFile }
-                        }
-                        Err(_) => FileType::RegularFile,
-                    };
-                    entries.push(DirEntry {
-                        inode: 0, // placeholder — real inode allocation in Phase 2.2
-                        offset: (i + 1) as i64,
-                        kind,
-                        name: de.file_name().to_string_lossy().into_owned(),
-                    });
                 }
-                FsResult::DirEntries { entries }
             }
-            Err(e) => FsResult::Error { errno: io_errno(&e) },
         }
+
+        // Apply overlay children (higher-priority layers shadow/remove base entries)
+        if let Some(overlay) = &self.overlay {
+            let overlay_children = overlay.readdir_children(&mount.tag, &entry.path);
+            for (name, kind) in overlay_children {
+                match kind {
+                    OverlayEntryKind::Content(_) => {
+                        merged.insert(name.clone(), DirEntry {
+                            inode: 0, offset: 0, kind: FileType::RegularFile, name,
+                        });
+                    }
+                    OverlayEntryKind::SyntheticDir => {
+                        merged.insert(name.clone(), DirEntry {
+                            inode: 0, offset: 0, kind: FileType::Directory, name,
+                        });
+                    }
+                    OverlayEntryKind::Whiteout => {
+                        merged.remove(&name);
+                    }
+                }
+            }
+        }
+
+        // Sort and apply offset
+        let mut entries: Vec<DirEntry> = merged.into_values().collect();
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        for (i, e) in entries.iter_mut().enumerate() {
+            e.offset = (i + 1) as i64;
+        }
+        if offset > 0 {
+            entries = entries.into_iter().filter(|e| e.offset > offset).collect();
+        }
+
+        FsResult::DirEntries { entries }
     }
 
     fn do_open(&self, mount: &MountState, inode: u64, _flags: u32) -> FsResult {
@@ -391,13 +466,25 @@ impl FsServer {
     }
 
     fn do_read(&self, mount: &MountState, inode: u64, offset: i64, size: u32) -> FsResult {
+        // For overlay reads: resolve by inode path if available
+        if let Some(overlay) = &self.overlay {
+            let entry = mount.inode_table.get(inode);
+            if let Some(entry) = entry {
+                if let Some((_layer, OverlayEntryKind::Content(bytes))) = overlay.resolve(&mount.tag, &entry.path) {
+                    let start = (offset as usize).min(bytes.len());
+                    let end = (start + size as usize).min(bytes.len());
+                    return FsResult::Data { data: bytes.slice(start..end) };
+                }
+            }
+        }
+
         let entry = match mount.inode_table.get(inode) {
             Some(e) => e,
             None => return FsResult::Error { errno: libc::ENOENT },
         };
         let host_path = match &entry.host_path {
             Some(hp) => hp,
-            None => return FsResult::Error { errno: libc::ENOENT }, // overlay reads in Phase 2.2
+            None => return FsResult::Error { errno: libc::ENOENT },
         };
         match read_file_range(host_path, offset, size) {
             Ok(data) => FsResult::Data { data: data.into() },
@@ -1014,4 +1101,165 @@ mod tests {
     // 2.1.18: Review checkpoint — every mount tag is modeled as MountState
     // with a MountBacking enum (currently Disk only) and a separate InodeTable.
     // This is a stack abstraction, not "overlay + ad hoc disk fallback."
+
+    // -----------------------------------------------------------------------
+    // Phase 2.2 overlay integration tests
+    // -----------------------------------------------------------------------
+
+    fn build_overlay_server(dir: &Path) -> FsServer {
+        FsServer::builder()
+            .mount("test", dir.to_path_buf(), false)
+            .overlay(true)
+            .events(64)
+            .build()
+            .unwrap()
+    }
+
+    // 2.2.7: Overlay lookup — synthetic file visible via handle_op
+    #[test]
+    fn overlay_lookup_synthetic_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = build_overlay_server(dir.path());
+        let overlay = server.overlay().unwrap();
+        overlay.put_layer("inject", 0).unwrap();
+        overlay.put("inject", "test", "/.env", bytes::Bytes::from("SECRET=abc")).unwrap();
+
+        let result = server.handle_op("test", FsOp::Lookup { parent: 1, name: ".env".into() });
+        assert!(matches!(result, FsResult::Entry { .. }));
+    }
+
+    // 2.2.7: Overlay lookup — whiteout hides disk file
+    #[test]
+    fn overlay_whiteout_hides_disk_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("secret.txt"), b"hidden").unwrap();
+        let server = build_overlay_server(dir.path());
+        let overlay = server.overlay().unwrap();
+        overlay.put_layer("hide", 0).unwrap();
+        overlay.whiteout("hide", "test", "/secret.txt").unwrap();
+
+        let result = server.handle_op("test", FsOp::Lookup { parent: 1, name: "secret.txt".into() });
+        assert!(matches!(result, FsResult::Error { errno } if errno == libc::ENOENT));
+    }
+
+    // 2.2.7: Overlay lookup — synthetic dir visible
+    #[test]
+    fn overlay_lookup_synthetic_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = build_overlay_server(dir.path());
+        let overlay = server.overlay().unwrap();
+        overlay.put_layer("inject", 0).unwrap();
+        overlay.put("inject", "test", "/.ssh/id_ed25519", bytes::Bytes::from("key")).unwrap();
+
+        // /.ssh should be visible as a directory
+        let result = server.handle_op("test", FsOp::Lookup { parent: 1, name: ".ssh".into() });
+        match result {
+            FsResult::Entry { attrs, .. } => assert_eq!(attrs.kind, FileType::Directory),
+            other => panic!("expected Entry with Directory, got {:?}", other),
+        }
+    }
+
+    // 2.2.8: Readdir merges overlay + disk children
+    #[test]
+    fn overlay_readdir_merges_disk_and_overlay() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("disk.txt"), b"from disk").unwrap();
+        let server = build_overlay_server(dir.path());
+        let overlay = server.overlay().unwrap();
+        overlay.put_layer("inject", 0).unwrap();
+        overlay.put("inject", "test", "/overlay.txt", bytes::Bytes::from("from overlay")).unwrap();
+
+        let result = server.handle_op("test", FsOp::Readdir { inode: 1, offset: 0 });
+        match result {
+            FsResult::DirEntries { entries } => {
+                let names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
+                assert!(names.contains(&"disk.txt"), "disk file should be in readdir");
+                assert!(names.contains(&"overlay.txt"), "overlay file should be in readdir");
+            }
+            other => panic!("expected DirEntries, got {:?}", other),
+        }
+    }
+
+    // 2.2.8: Readdir — whiteout removes disk entry from listing
+    #[test]
+    fn overlay_readdir_whiteout_removes_disk_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("visible.txt"), b"yes").unwrap();
+        fs::write(dir.path().join("hidden.txt"), b"no").unwrap();
+        let server = build_overlay_server(dir.path());
+        let overlay = server.overlay().unwrap();
+        overlay.put_layer("hide", 0).unwrap();
+        overlay.whiteout("hide", "test", "/hidden.txt").unwrap();
+
+        let result = server.handle_op("test", FsOp::Readdir { inode: 1, offset: 0 });
+        match result {
+            FsResult::DirEntries { entries } => {
+                let names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
+                assert!(names.contains(&"visible.txt"));
+                assert!(!names.contains(&"hidden.txt"), "whiteout should hide disk file from readdir");
+            }
+            other => panic!("expected DirEntries, got {:?}", other),
+        }
+    }
+
+    // 2.2.22: Partial overlay — disk dir with some overlay children
+    #[test]
+    fn overlay_partial_overlay_ssh_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join(".ssh")).unwrap();
+        fs::write(dir.path().join(".ssh/known_hosts"), b"host1").unwrap();
+        let server = build_overlay_server(dir.path());
+        let overlay = server.overlay().unwrap();
+        overlay.put_layer("creds", 0).unwrap();
+        overlay.put("creds", "test", "/.ssh/id_ed25519", bytes::Bytes::from("key")).unwrap();
+
+        // Readdir on root should show .ssh
+        let result = server.handle_op("test", FsOp::Readdir { inode: 1, offset: 0 });
+        match result {
+            FsResult::DirEntries { entries } => {
+                let names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
+                assert!(names.contains(&".ssh"));
+            }
+            other => panic!("expected DirEntries, got {:?}", other),
+        }
+    }
+
+    // 2.2.23: Fully synthetic subtree visible through handle_op
+    #[test]
+    fn overlay_fully_synthetic_subtree() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = build_overlay_server(dir.path());
+        let overlay = server.overlay().unwrap();
+        overlay.put_layer("inject", 0).unwrap();
+        overlay.put("inject", "test", "/.claude/skills/tool.md", bytes::Bytes::from("# tool")).unwrap();
+
+        // /.claude should be visible
+        let r = server.handle_op("test", FsOp::Lookup { parent: 1, name: ".claude".into() });
+        assert!(matches!(r, FsResult::Entry { .. }));
+    }
+
+    // 2.2.33: Batch atomicity through handle_op — all files visible after batch
+    #[test]
+    fn overlay_batch_visible_through_handle_op() {
+        use super::super::overlay::OverlayMutation;
+        let dir = tempfile::tempdir().unwrap();
+        let server = build_overlay_server(dir.path());
+        let overlay = server.overlay().unwrap();
+        overlay.put_layer("batch", 0).unwrap();
+        overlay.apply_batch("test", &[
+            OverlayMutation::Put { layer: "batch".into(), path: "/.ssh/config".into(), attrs: None, content: bytes::Bytes::from("c") },
+            OverlayMutation::Put { layer: "batch".into(), path: "/.ssh/id_ed25519".into(), attrs: None, content: bytes::Bytes::from("k") },
+        ]).unwrap();
+
+        let r = server.handle_op("test", FsOp::Lookup { parent: 1, name: ".ssh".into() });
+        assert!(matches!(r, FsResult::Entry { .. }));
+    }
+
+    // overlay() returns None when not enabled
+    #[test]
+    fn overlay_none_when_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = build_test_server(dir.path()); // no .overlay(true)
+        assert!(server.overlay().is_none());
+    }
 }
