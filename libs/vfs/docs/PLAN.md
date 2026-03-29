@@ -223,18 +223,18 @@ Per-task reference rule:
 
 - every task in this phase traces to one or more of the DESIGN references listed above unless an individual task states a narrower reference explicitly
 
-- [ ] 1.2.1 Implement `FsOp`, `FsResult`, `FileAttr`, `DirEntry`, `FsStats`, and `SetAttrFields`.
-- [ ] 1.2.2 Implement `FsEvent`.
-- [ ] 1.2.3 Implement `PolicyFn` and `AllowAll`.
-- [ ] 1.2.4 Define crate-local error types and conversion strategy.
-- [ ] 1.2.5 Add serde coverage for all wire-visible types.
-- [ ] 1.2.6 Ensure the core `FileAttr`/`SetAttrFields` model carries `uid`, `gid`, and `mode` needed by synthetic overlay entries.
+- [x] 1.2.1 Implement `FsOp`, `FsResult`, `FileAttr`, `DirEntry`, `FsStats`, and `SetAttrFields`.
+- [x] 1.2.2 Implement `FsEvent` and `FsOpKind` (with `from_op()` conversion).
+- [x] 1.2.3 Implement `PolicyFn` and `AllowAll`.
+- [x] 1.2.4 Define crate-local error types and conversion strategy (`VfsError` enum in `core/mod.rs`).
+- [x] 1.2.5 Add serde coverage for all wire-visible types (`bytes` crate `serde` feature enabled).
+- [x] 1.2.6 Ensure the core `FileAttr`/`SetAttrFields` model carries `uid`, `gid`, and `mode` needed by synthetic overlay entries.
 
 Tests / verification:
 
-- [ ] 1.2.7 Add serde round-trip tests for `FsOp` and `FsResult`.
-- [ ] 1.2.8 Add allow/deny tests for `PolicyFn`.
-- [ ] 1.2.9 Add serde coverage tests for synthetic attrs carrying `uid`, `gid`, and `mode`.
+- [x] 1.2.7 Add serde round-trip tests for `FsOp` and `FsResult`.
+- [x] 1.2.8 Add allow/deny tests for `PolicyFn`.
+- [x] 1.2.9 Add serde coverage tests for synthetic attrs carrying `uid`, `gid`, and `mode`.
 
 Exit criteria:
 
