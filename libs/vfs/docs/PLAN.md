@@ -307,29 +307,29 @@ Per-task reference rule:
 
 - every task in this phase traces to one or more of the DESIGN references listed above unless an individual task states a narrower reference explicitly
 
-- [ ] 2.1.1 Implement `FsServerBuilder`.
-- [ ] 2.1.2 Implement mount registration and lookup by tag.
-- [ ] 2.1.3 Implement direct host filesystem handling for `Lookup`, `Getattr`, `Setattr`, `Readdir`, `Open`, `Read`, `Write`, `Create`, `Mkdir`, `Unlink`, `Rmdir`, `Rename`, `Symlink`, `Readlink`, `Release`, `Fsync`, and `Statfs`.
-- [ ] 2.1.4 Implement read-only mount enforcement.
-- [ ] 2.1.5 Emit events through broadcast channel.
-- [ ] 2.1.5a Ensure `FsOpKind` covers every emitted server operation, including `Setattr` and `Readdir`, so FR-6 remains mechanically enforceable.
-- [ ] 2.1.6 Call policy hooks consistently.
-- [ ] 2.1.7 Keep mount/backing representation narrow enough that a future non-disk mount type can be introduced without redesigning `MemOverlay`.
-- [ ] 2.1.8 Introduce an internal mount-state abstraction that separates tag identity, overlay state, inode state, and fallback backing.
-- [ ] 2.1.9 Confine `std::fs` path resolution and direct disk operations to backing-oriented helpers or modules, not generic overlay/server entry points.
-- [ ] 2.1.10 Represent each mount tag internally as an ordered stack with one base-layer slot and zero-or-more memfs-layer views above it.
+- [x] 2.1.1 Implement `FsServerBuilder`.
+- [x] 2.1.2 Implement mount registration and lookup by tag.
+- [x] 2.1.3 Implement direct host filesystem handling for `Lookup`, `Getattr`, `Setattr`, `Readdir`, `Open`, `Read`, `Write`, `Create`, `Mkdir`, `Unlink`, `Rmdir`, `Rename`, `Symlink`, `Readlink`, `Release`, `Fsync`, and `Statfs`.
+- [x] 2.1.4 Implement read-only mount enforcement.
+- [x] 2.1.5 Emit events through broadcast channel.
+- [x] 2.1.5a Ensure `FsOpKind` covers every emitted server operation, including `Setattr` and `Readdir`, so FR-6 remains mechanically enforceable.
+- [x] 2.1.6 Call policy hooks consistently.
+- [x] 2.1.7 Keep mount/backing representation narrow enough that a future non-disk mount type can be introduced without redesigning `MemOverlay`.
+- [x] 2.1.8 Introduce an internal mount-state abstraction that separates tag identity, overlay state, inode state, and fallback backing.
+- [x] 2.1.9 Confine `std::fs` path resolution and direct disk operations to backing-oriented helpers or modules, not generic overlay/server entry points.
+- [x] 2.1.10 Represent each mount tag internally as an ordered stack with one base-layer slot and zero-or-more memfs-layer views above it.
 
 Tests / verification:
 
-- [ ] 2.1.11 Add integration tests against `tempfile` directories for each `FsOp`.
-- [ ] 2.1.12 Add read-only enforcement tests.
-- [ ] 2.1.13 Add event emission tests.
-- [ ] 2.1.13a Add event-emission coverage proving `Setattr` and `Readdir` produce the expected `FsOpKind`.
-- [ ] 2.1.14 Add multi-tag routing tests covering independent mounted subtrees.
-- [ ] 2.1.15 Add dynamic mount add/remove tests covering tag registration and invalidation behavior.
-- [ ] 2.1.16 Add a design guardrail review checkpoint asserting disk fallback is isolated behind mount/backing logic, not spread through overlay logic.
-- [ ] 2.1.17 Add a source-level verification step (`rg`/review checklist) proving overlay/client modules do not directly call `std::fs` or concatenate raw host-root paths.
-- [ ] 2.1.18 Add a review checkpoint proving every mount tag is modeled as a stack abstraction rather than “overlay + ad hoc disk fallback.”
+- [x] 2.1.11 Add integration tests against `tempfile` directories for each `FsOp`.
+- [x] 2.1.12 Add read-only enforcement tests.
+- [x] 2.1.13 Add event emission tests.
+- [x] 2.1.13a Add event-emission coverage proving `Setattr` and `Readdir` produce the expected `FsOpKind`.
+- [x] 2.1.14 Add multi-tag routing tests covering independent mounted subtrees.
+- [x] 2.1.15 Add dynamic mount add/remove tests covering tag registration and invalidation behavior.
+- [x] 2.1.16 Add a design guardrail review checkpoint asserting disk fallback is isolated behind mount/backing logic, not spread through overlay logic.
+- [x] 2.1.17 Add a source-level verification step (`rg`/review checklist) proving overlay/client modules do not directly call `std::fs` or concatenate raw host-root paths.
+- [x] 2.1.18 Add a review checkpoint proving every mount tag is modeled as a stack abstraction rather than “overlay + ad hoc disk fallback.”
 
 Exit criteria:
 
