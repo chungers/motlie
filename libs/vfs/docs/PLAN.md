@@ -369,15 +369,11 @@ Per-task reference rule:
 - [x] 2.2.6 Refcount and prune synthetic directories when children disappear.
 - [x] 2.2.7 Implement generic stack resolution for `lookup`, `getattr`, and `read`: top-down through memfs layers, then base layer.
 - [x] 2.2.8 Implement generic stack merge for `readdir`: base-layer entries merged upward through memfs layers with whiteout removal semantics.
-- [ ] 2.2.9 Implement mutation semantics for `Unlink`, `Create`, `Mkdir`, `Rmdir`, `Rename`, and `Setattr`.
-<!-- @claude-dev 2026-03-29 -- deferred to server-overlay integration: these require wiring MemOverlay into FsServer::dispatch() which is the next step after this overlay-core commit. -->
-- [ ] 2.2.9a Implement the v1 symlink/readlink rule explicitly: symlinks remain base-layer-only, and overlay-managed or synthetic-parent symlink operations return `ENOTSUP`.
-<!-- @claude-dev 2026-03-29 -- deferred: requires server-overlay integration. -->
-- [ ] 2.2.10 Implement transparent cross-layer rename behavior from the DESIGN.
-<!-- @claude-dev 2026-03-29 -- deferred: requires server-overlay integration. -->
+- [x] 2.2.9 Implement mutation semantics for `Unlink`, `Create`, `Mkdir`, `Rmdir`, `Rename`, and `Setattr`.
+- [x] 2.2.9a Implement the v1 symlink/readlink rule explicitly: symlinks remain base-layer-only, and overlay-managed or synthetic-parent symlink operations return `ENOTSUP`.
+- [x] 2.2.10 Implement transparent cross-layer rename behavior from the DESIGN.
 - [x] 2.2.11 Implement inherited synthetic ownership defaults from nearest existing parent or mount root.
-- [ ] 2.2.11a Implement overlay file-handle bookkeeping for overlay-backed opens: synthetic `fh` allocation, `fh -> inode` mapping, `Release`, `Fsync`, and latest-effective-content read behavior.
-<!-- @claude-dev 2026-03-29 -- deferred: requires server-overlay integration. -->
+- [x] 2.2.11a Implement overlay file-handle bookkeeping for overlay-backed opens: synthetic `fh` allocation, `fh -> inode` mapping, `Release`, `Fsync`, and latest-effective-content read behavior.
 - [x] 2.2.12 Keep overlay node management independent from concrete base-layer implementation details where possible.
 - [x] 2.2.13 Ensure overlay entry identity, synthetic parent creation, whiteouts, and listings remain defined in terms of tag + mount-relative path rather than disk-path existence.
 - [x] 2.2.14 Ensure one named memfs layer can hold entries for many tags without path collision.
@@ -398,19 +394,15 @@ Tests / verification:
 - [x] 2.2.16 Add synthetic parent creation tests.
 - [x] 2.2.17 Add whiteout suppression tests.
 - [x] 2.2.18 Add `remove_layer` effective-winner change tests.
-- [ ] 2.2.19 Add generation bump tests for required mutation cases.
-<!-- @claude-dev 2026-03-29 -- deferred: generation bumps require InodeTable integration in server dispatch. -->
-- [ ] 2.2.20 Add cross-layer rename tests for base -> memfs, memfs -> base, and memfs -> memfs.
-<!-- @claude-dev 2026-03-29 -- deferred: requires server-overlay integration. -->
+- [x] 2.2.19 Add generation bump tests for required mutation cases.
+- [x] 2.2.20 Add cross-layer rename tests for base -> memfs, memfs -> base, and memfs -> memfs.
 - [ ] 2.2.21 Add policy-filtered `readdir` tests.
-<!-- @claude-dev 2026-03-29 -- deferred: requires server-overlay integration for merged readdir. -->
+<!-- @claude-dev 2026-03-29 -- policy-filtered readdir is exercised through existing policy tests; dedicated overlay+policy readdir test deferred to Phase 2.3 which covers policy/TTL behavior. -->
 - [x] 2.2.22 Add partial-overlay tests for an existing mounted subtree such as `/home/alice/.ssh` where some files come from the base layer and some from memfs.
 - [x] 2.2.23 Add fully synthetic subtree tests for paths such as `/home/alice/.claude/skills` created entirely by file injection.
 - [x] 2.2.24 Add whiteout tests showing a lower immutable file remains hidden without physical deletion.
-- [ ] 2.2.25 Add transparent app-workflow tests covering create/write/rename/unlink sequences typical of editors and CLI tools.
-<!-- @claude-dev 2026-03-29 -- deferred: requires server-overlay integration. -->
-- [ ] 2.2.25a Add symlink/readlink tests proving overlay-managed paths return `ENOTSUP` in v1 while base-layer symlink behavior remains available.
-<!-- @claude-dev 2026-03-29 -- deferred: requires server-overlay integration. -->
+- [x] 2.2.25 Add transparent app-workflow tests covering create/write/rename/unlink sequences typical of editors and CLI tools.
+- [x] 2.2.25a Add symlink/readlink tests proving overlay-managed paths return `ENOTSUP` in v1 while base-layer symlink behavior remains available.
 - [x] 2.2.26 Add shared-tag tests proving `/alice/...` and `/bob/...` coexist in one mounted tree without path collision.
 - [x] 2.2.27 Add separate-tag tests proving two guest mounts remain overlay-isolated even when one `MemOverlay` instance serves both tags.
 - [x] 2.2.28 Add shared-layer multi-tag tests proving one named layer can inject `/CLAUDE.md` into distinct tags with independent effective placement.
@@ -421,9 +413,8 @@ Tests / verification:
 - [x] 2.2.33 Add batch atomicity tests proving a batch of injected files becomes visible all at once for `lookup`, `read`, and `readdir`.
 - [x] 2.2.34 Add synthetic-parent atomicity tests proving readers cannot observe partially materialized parent hierarchies.
 - [ ] 2.2.35 Add concurrent reader/writer tests proving one filesystem request uses one stable memfs snapshot.
-<!-- @claude-dev 2026-03-29 -- deferred: requires multi-threaded test harness with server-overlay integration. -->
-- [ ] 2.2.35a Add overlay file-handle lifecycle tests covering synthetic `fh` allocation, `Release`, `Fsync`, and reads after content replacement.
-<!-- @claude-dev 2026-03-29 -- deferred: requires server-overlay integration. -->
+<!-- @claude-dev 2026-03-29 -- concurrent snapshot isolation is architecturally enforced by arc-swap; dedicated multi-threaded stress test deferred to integration phase. -->
+- [x] 2.2.35a Add overlay file-handle lifecycle tests covering synthetic `fh` allocation, `Release`, `Fsync`, and reads after content replacement.
 - [x] 2.2.36 Add a review checkpoint confirming the base layer keeps native filesystem semantics and is not treated as transactional by `motlie-vfs`.
 
 Exit criteria:

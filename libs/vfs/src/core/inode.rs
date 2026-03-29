@@ -199,6 +199,11 @@ impl InodeTable {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Iterate all entries. Used by server dispatch for fallback lookups.
+    pub fn iter_entries(&self) -> impl Iterator<Item = &InodeEntry> {
+        self.entries.values()
+    }
 }
 
 /// Create a default root `FileAttr` for a mount root directory.
