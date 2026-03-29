@@ -1,6 +1,7 @@
 //! End-to-end duplex transport tests: VsockConnectionHandler + VsockClientTransport
 //! over tokio::io::duplex, proving the full vertical slice works without a real
 //! vsock device or FUSE mount.
+#![cfg(feature = "vsock")]
 
 use std::fs;
 use std::sync::Arc;

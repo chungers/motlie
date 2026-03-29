@@ -289,46 +289,48 @@ impl FsServer {
         };
         let rel_path = child_path(&parent_path, name);
 
-        // Check overlay first
-        if let Some((_layer, kind)) = self.resolve_overlay(&mount.tag, &rel_path) {
+        // Check overlay first — use resolve_attrs to get real metadata
+        if let Some((_layer, kind, ov_attrs)) = self.overlay.as_ref().and_then(|o| o.resolve_attrs(&mount.tag, &rel_path)) {
             let now = SystemTime::now();
-            let (file_kind, mode, size) = match &kind {
-                OverlayEntryKind::Content(b) => (FileType::RegularFile, 0o644, b.len() as u64),
+            let (file_kind, size, ino_kind) = match &kind {
+                OverlayEntryKind::Content(b) => (FileType::RegularFile, b.len() as u64, InodeKind::Content),
                 OverlayEntryKind::Whiteout => return FsResult::Error { errno: libc::ENOENT },
-                OverlayEntryKind::SyntheticDir => (FileType::Directory, 0o755, 0),
+                OverlayEntryKind::SyntheticDir => (FileType::Directory, 0u64, InodeKind::SyntheticDir),
             };
             let attrs = FileAttr {
                 inode: 0, size, blocks: 0,
                 atime: now, mtime: now, ctime: now,
-                kind: file_kind, mode, nlink: 1, uid: 0, gid: 0,
-            };
-            let ino_kind = match &kind {
-                OverlayEntryKind::Content(_) => InodeKind::Content,
-                OverlayEntryKind::SyntheticDir => InodeKind::SyntheticDir,
-                OverlayEntryKind::Whiteout => unreachable!(),
+                kind: file_kind, mode: ov_attrs.mode, nlink: 1,
+                uid: ov_attrs.uid, gid: ov_attrs.gid,
             };
             let mut table = mount.inode_table.lock();
-            let inode = table.allocate(&rel_path, ino_kind, None, attrs.clone()).unwrap_or(0);
-            let gen = table.get(inode).map(|e| e.generation).unwrap_or(0);
-            return FsResult::Entry { inode, generation: gen, attrs: table.get(inode).map(|e| e.attrs.clone()).unwrap_or(attrs), ttl_secs: 0 };
-        }
-
-        // Fall through to base layer
-        let host_path = mount.backing.resolve(&rel_path);
-        match fs::symlink_metadata(&host_path) {
-            Ok(meta) => {
-                let kind = file_type_from_meta(&meta);
-                let attrs = metadata_to_attrs(&meta, 0, kind);
-                let mut table = mount.inode_table.lock();
-                let inode = table.allocate(&rel_path, InodeKind::Disk, Some(host_path), attrs.clone()).unwrap_or(0);
-                let entry = table.get(inode);
-                let (gen, final_attrs) = match entry {
-                    Some(e) => (e.generation, e.attrs.clone()),
-                    None => (0, attrs),
-                };
-                FsResult::Entry { inode, generation: gen, attrs: final_attrs, ttl_secs: 0 }
+            match table.allocate(&rel_path, ino_kind, None, attrs.clone()) {
+                Ok(inode) => {
+                    let gen = table.get(inode).map(|e| e.generation).unwrap_or(0);
+                    let final_attrs = table.get(inode).map(|e| e.attrs.clone()).unwrap_or(attrs);
+                    FsResult::Entry { inode, generation: gen, attrs: final_attrs, ttl_secs: 0 }
+                }
+                Err(_) => FsResult::Error { errno: libc::EIO },
             }
-            Err(e) => FsResult::Error { errno: io_errno(&e) },
+        } else {
+            // Fall through to base layer
+            let host_path = mount.backing.resolve(&rel_path);
+            match fs::symlink_metadata(&host_path) {
+                Ok(meta) => {
+                    let kind = file_type_from_meta(&meta);
+                    let attrs = metadata_to_attrs(&meta, 0, kind);
+                    let mut table = mount.inode_table.lock();
+                    match table.allocate(&rel_path, InodeKind::Disk, Some(host_path), attrs.clone()) {
+                        Ok(inode) => {
+                            let gen = table.get(inode).map(|e| e.generation).unwrap_or(0);
+                            let final_attrs = table.get(inode).map(|e| e.attrs.clone()).unwrap_or(attrs);
+                            FsResult::Entry { inode, generation: gen, attrs: final_attrs, ttl_secs: 0 }
+                        }
+                        Err(_) => FsResult::Error { errno: libc::EIO },
+                    }
+                }
+                Err(e) => FsResult::Error { errno: io_errno(&e) },
+            }
         }
     }
 
@@ -387,14 +389,21 @@ impl FsServer {
             }
             self.do_getattr(mount, inode)
         } else {
-            // Overlay entry — update stored attrs
+            // Overlay entry — persist updated attrs in InodeTable
+            let inode_id = entry.inode;
             let mut attrs = entry.attrs.clone();
+            drop(table);
             if let Some(mode) = set.mode { attrs.mode = mode; }
             if let Some(uid) = set.uid { attrs.uid = uid; }
             if let Some(gid) = set.gid { attrs.gid = gid; }
             if let Some(size) = set.size { attrs.size = size; }
             if let Some(atime) = set.atime { attrs.atime = atime; }
             if let Some(mtime) = set.mtime { attrs.mtime = mtime; }
+            // Write back to inode table
+            let mut table = mount.inode_table.lock();
+            if let Some(e) = table.get_mut(inode_id) {
+                e.attrs = attrs.clone();
+            }
             FsResult::Attr { attrs, ttl_secs: 0 }
         }
     }
@@ -469,83 +478,72 @@ impl FsServer {
             None => return FsResult::Error { errno: libc::ENOENT },
         };
 
-        // Overlay-backed: allocate synthetic fh
+        let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
+
         if entry.host_path.is_none() {
-            let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
+            // Overlay-backed: track in fh_table for overlay read/write path
             self.fh_table.lock().insert(fh, (mount.tag.clone(), entry.path.clone()));
-            return FsResult::Ok; // TODO: return fh in a richer FsResult variant if needed
+        } else {
+            // Disk-backed: track inode for disk read/write fallback (fh == counter, not inode)
+            self.fh_table.lock().insert(fh, (mount.tag.clone(), entry.path.clone()));
         }
 
-        FsResult::Ok
+        FsResult::Opened { fh }
     }
 
     fn do_read(&self, mount: &MountState, fh: u64, offset: i64, size: u32) -> FsResult {
-        // Check fh_table for overlay-backed reads
-        {
-            let fh_map = self.fh_table.lock();
-            if let Some((tag, path)) = fh_map.get(&fh) {
-                if let Some(overlay) = &self.overlay {
-                    if let Some((_layer, OverlayEntryKind::Content(bytes))) = overlay.resolve(tag, path) {
-                        let start = (offset as usize).min(bytes.len());
-                        let end = (start + size as usize).min(bytes.len());
-                        return FsResult::Data { data: bytes.slice(start..end) };
-                    }
-                }
+        let fh_map = self.fh_table.lock();
+        let (tag, path) = match fh_map.get(&fh) {
+            Some(tp) => (tp.0.clone(), tp.1.clone()),
+            None => return FsResult::Error { errno: libc::EBADF },
+        };
+        drop(fh_map);
+
+        // Check overlay first
+        if let Some(overlay) = &self.overlay {
+            if let Some((_layer, OverlayEntryKind::Content(bytes))) = overlay.resolve(&tag, &path) {
+                let start = (offset as usize).min(bytes.len());
+                let end = (start + size as usize).min(bytes.len());
+                return FsResult::Data { data: bytes.slice(start..end) };
             }
         }
 
-        // Disk files: v1 does not track fh→fd for disk files (no-cache mode reopens
-        // on every access). The fh for disk files is a no-op token. We look up by inode
-        // from the inode_table where fh == inode for disk files (assigned in do_open).
-        let table = mount.inode_table.lock();
-        if let Some(entry) = table.get(fh) {
-            if let Some(hp) = &entry.host_path {
-                let hp = hp.clone();
-                drop(table);
-                match read_file_range(&hp, offset, size) {
-                    Ok(data) => return FsResult::Data { data: data.into() },
-                    Err(e) => return FsResult::Error { errno: io_errno(&e) },
-                }
-            }
+        // Disk fallback
+        let host_path = mount.backing.resolve(&path);
+        match read_file_range(&host_path, offset, size) {
+            Ok(data) => FsResult::Data { data: data.into() },
+            Err(e) => FsResult::Error { errno: io_errno(&e) },
         }
-        drop(table);
-        FsResult::Error { errno: libc::EBADF }
     }
 
     fn do_write(&self, mount: &MountState, fh: u64, offset: i64, data: &bytes::Bytes) -> FsResult {
-        // Check fh_table for overlay-backed writes
-        {
-            let fh_map = self.fh_table.lock();
-            if let Some((tag, path)) = fh_map.get(&fh) {
-                if let Some(overlay) = &self.overlay {
-                    if let Some((layer, OverlayEntryKind::Content(existing))) = overlay.resolve(tag, path) {
-                        let mut buf = existing.to_vec();
-                        let start = offset as usize;
-                        if start > buf.len() { buf.resize(start, 0); }
-                        let end = start + data.len();
-                        if end > buf.len() { buf.resize(end, 0); }
-                        buf[start..end].copy_from_slice(data);
-                        let _ = overlay.put(&layer, tag, path, bytes::Bytes::from(buf));
-                        return FsResult::Written { size: data.len() as u32 };
-                    }
-                }
+        let fh_map = self.fh_table.lock();
+        let (tag, path) = match fh_map.get(&fh) {
+            Some(tp) => (tp.0.clone(), tp.1.clone()),
+            None => return FsResult::Error { errno: libc::EBADF },
+        };
+        drop(fh_map);
+
+        // Check overlay first
+        if let Some(overlay) = &self.overlay {
+            if let Some((layer, OverlayEntryKind::Content(existing))) = overlay.resolve(&tag, &path) {
+                let mut buf = existing.to_vec();
+                let start = offset as usize;
+                if start > buf.len() { buf.resize(start, 0); }
+                let end = start + data.len();
+                if end > buf.len() { buf.resize(end, 0); }
+                buf[start..end].copy_from_slice(data);
+                let _ = overlay.put(&layer, &tag, &path, bytes::Bytes::from(buf));
+                return FsResult::Written { size: data.len() as u32 };
             }
         }
 
-        // Disk files: fh == inode for disk files
-        let table = mount.inode_table.lock();
-        if let Some(entry) = table.get(fh) {
-            if let Some(hp) = &entry.host_path {
-                let hp = hp.clone();
-                drop(table);
-                match write_file_range(&hp, offset, data) {
-                    Ok(n) => return FsResult::Written { size: n },
-                    Err(e) => return FsResult::Error { errno: io_errno(&e) },
-                }
-            }
+        // Disk fallback
+        let host_path = mount.backing.resolve(&path);
+        match write_file_range(&host_path, offset, data) {
+            Ok(n) => FsResult::Written { size: n },
+            Err(e) => FsResult::Error { errno: io_errno(&e) },
         }
-        drop(table);
-        FsResult::Error { errno: libc::EBADF }
     }
 
     fn do_create(&self, mount: &MountState, parent: u64, name: &str, mode: u32) -> FsResult {
@@ -571,9 +569,13 @@ impl FsServer {
                         kind: FileType::RegularFile, mode, nlink: 1, uid: 0, gid: 0,
                     };
                     let mut table = mount.inode_table.lock();
-                    let inode = table.allocate(&rel_path, InodeKind::Content, None, file_attrs.clone()).unwrap_or(0);
-                    let gen = table.get(inode).map(|e| e.generation).unwrap_or(0);
-                    return FsResult::Entry { inode, generation: gen, attrs: table.get(inode).map(|e| e.attrs.clone()).unwrap_or(file_attrs), ttl_secs: 0 };
+                    match table.allocate(&rel_path, InodeKind::Content, None, file_attrs.clone()) {
+                        Ok(inode) => {
+                            let gen = table.get(inode).map(|e| e.generation).unwrap_or(0);
+                            return FsResult::Entry { inode, generation: gen, attrs: table.get(inode).map(|e| e.attrs.clone()).unwrap_or(file_attrs), ttl_secs: 0 };
+                        }
+                        Err(_) => return FsResult::Error { errno: libc::EIO },
+                    };
                 }
             }
         }
@@ -587,9 +589,13 @@ impl FsServer {
                     Ok(meta) => {
                         let attrs = metadata_to_attrs(&meta, 0, FileType::RegularFile);
                         let mut table = mount.inode_table.lock();
-                        let inode = table.allocate(&rel_path, InodeKind::Disk, Some(host_path), attrs.clone()).unwrap_or(0);
-                        let gen = table.get(inode).map(|e| e.generation).unwrap_or(0);
-                        FsResult::Entry { inode, generation: gen, attrs: table.get(inode).map(|e| e.attrs.clone()).unwrap_or(attrs), ttl_secs: 0 }
+                        match table.allocate(&rel_path, InodeKind::Disk, Some(host_path), attrs.clone()) {
+                            Ok(inode) => {
+                                let gen = table.get(inode).map(|e| e.generation).unwrap_or(0);
+                                FsResult::Entry { inode, generation: gen, attrs: table.get(inode).map(|e| e.attrs.clone()).unwrap_or(attrs), ttl_secs: 0 }
+                            }
+                            Err(_) => FsResult::Error { errno: libc::EIO },
+                        }
                     }
                     Err(e) => FsResult::Error { errno: io_errno(&e) },
                 }
@@ -608,29 +614,14 @@ impl FsServer {
         };
         let rel_path = child_path(&parent_path, name);
 
-        // Under synthetic parent → create SyntheticDir in overlay
+        // Under overlay-managed parent → create SyntheticDir in overlay
         if self.is_overlay_managed(&mount.tag, &parent_path) {
             if let Some(layer) = self.writable_layer(&mount.tag, &parent_path) {
                 if let Some(overlay) = &self.overlay {
-                    // Inject a placeholder file to create the synthetic dir, then remove it
-                    // Actually, just create a whiteout-then-remove to materialize the dir.
-                    // Simpler: put a placeholder and immediately remove content but keep dir.
-                    // Best: use the overlay directly to add a SyntheticDir.
-                    // The MemOverlay materializes parents via put(). So put a dummy child,
-                    // which creates the dir, then remove the dummy.
-                    let dummy_path = child_path(&rel_path, ".motlie-mkdir-placeholder");
-                    let _ = overlay.put(&layer, &mount.tag, &dummy_path, bytes::Bytes::new());
-                    let _ = overlay.remove(&layer, &mount.tag, &dummy_path);
-                    // Actually that would prune the dir too. We need direct SyntheticDir creation.
-                    // For now, put the dir as a content entry then it becomes a parent when children are added.
-                    // Let's just put a whiteout at a dummy path under the dir to ensure the dir persists.
-                    // This is awkward. Better approach: add the dir explicitly.
-                    // The simplest correct approach: put an empty file at the dir path itself,
-                    // but that would conflict with the dir.
-                    // Let me use apply_batch with a Whiteout at the dir path — no, that hides it.
-                    // The real solution is MemOverlay needs a create_dir() method. For now,
-                    // just return the entry since the parent materialization from any future
-                    // put() will create it.
+                    let ov_attrs = super::overlay::OverlayAttrs { mode, uid: 0, gid: 0 };
+                    if let Err(_) = overlay.create_dir(&layer, &mount.tag, &rel_path, ov_attrs) {
+                        return FsResult::Error { errno: libc::EIO };
+                    }
                     let now = SystemTime::now();
                     let attrs = FileAttr {
                         inode: 0, size: 0, blocks: 0,
@@ -638,9 +629,13 @@ impl FsServer {
                         kind: FileType::Directory, mode, nlink: 2, uid: 0, gid: 0,
                     };
                     let mut table = mount.inode_table.lock();
-                    let inode = table.allocate(&rel_path, InodeKind::SyntheticDir, None, attrs.clone()).unwrap_or(0);
-                    let gen = table.get(inode).map(|e| e.generation).unwrap_or(0);
-                    return FsResult::Entry { inode, generation: gen, attrs: table.get(inode).map(|e| e.attrs.clone()).unwrap_or(attrs), ttl_secs: 0 };
+                    match table.allocate(&rel_path, InodeKind::SyntheticDir, None, attrs.clone()) {
+                        Ok(inode) => {
+                            let gen = table.get(inode).map(|e| e.generation).unwrap_or(0);
+                            return FsResult::Entry { inode, generation: gen, attrs: table.get(inode).map(|e| e.attrs.clone()).unwrap_or(attrs), ttl_secs: 0 };
+                        }
+                        Err(_) => return FsResult::Error { errno: libc::EIO },
+                    }
                 }
             }
         }
@@ -654,9 +649,13 @@ impl FsServer {
                     Ok(meta) => {
                         let attrs = metadata_to_attrs(&meta, 0, FileType::Directory);
                         let mut table = mount.inode_table.lock();
-                        let inode = table.allocate(&rel_path, InodeKind::Disk, Some(host_path), attrs.clone()).unwrap_or(0);
-                        let gen = table.get(inode).map(|e| e.generation).unwrap_or(0);
-                        FsResult::Entry { inode, generation: gen, attrs: table.get(inode).map(|e| e.attrs.clone()).unwrap_or(attrs), ttl_secs: 0 }
+                        match table.allocate(&rel_path, InodeKind::Disk, Some(host_path), attrs.clone()) {
+                            Ok(inode) => {
+                                let gen = table.get(inode).map(|e| e.generation).unwrap_or(0);
+                                FsResult::Entry { inode, generation: gen, attrs: table.get(inode).map(|e| e.attrs.clone()).unwrap_or(attrs), ttl_secs: 0 }
+                            }
+                            Err(_) => FsResult::Error { errno: libc::EIO },
+                        }
                     }
                     Err(e) => FsResult::Error { errno: io_errno(&e) },
                 }

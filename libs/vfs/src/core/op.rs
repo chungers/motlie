@@ -36,6 +36,7 @@ pub enum FsResult {
     DirEntries { entries: Vec<DirEntry> },
     Statfs { stats: FsStats },
     Symlink { target: String },
+    Opened { fh: u64 },
     Ok,
     Error { errno: i32 },
 }
