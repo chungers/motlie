@@ -195,3 +195,84 @@ async fn parity_with_direct_handle_op() {
 
     assert_eq!(direct_is_entry, transport_is_entry, "transport and direct should produce same result shape");
 }
+
+#[tokio::test]
+async fn open_read_write_release_over_transport() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("file.txt"), b"disk content").unwrap();
+    let server = build_server(dir.path());
+    let client = duplex_pair(server, "test");
+
+    // Lookup → get inode
+    let inode = match client.request(&FsOp::Lookup { parent: 1, name: "file.txt".into() }).await.unwrap() {
+        FsResult::Entry { inode, .. } => inode,
+        other => panic!("expected Entry, got {:?}", other),
+    };
+
+    // Open → get fh
+    let fh = match client.request(&FsOp::Open { inode, flags: 0 }).await.unwrap() {
+        FsResult::Opened { fh } => fh,
+        other => panic!("expected Opened, got {:?}", other),
+    };
+
+    // Read through fh
+    let data = match client.request(&FsOp::Read { inode, fh, offset: 0, size: 4096 }).await.unwrap() {
+        FsResult::Data { data } => data,
+        other => panic!("expected Data, got {:?}", other),
+    };
+    assert_eq!(&data[..], b"disk content");
+
+    // Release
+    let result = client.request(&FsOp::Release { inode, fh }).await.unwrap();
+    assert!(matches!(result, FsResult::Ok));
+}
+
+#[tokio::test]
+async fn overlay_open_read_write_release_over_transport() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = build_server(dir.path());
+
+    let overlay = server.overlay().unwrap();
+    overlay.put_layer("l", 0).unwrap();
+    overlay.put("l", "test", "/secret.txt", Bytes::from("overlay data")).unwrap();
+
+    let client = duplex_pair(server, "test");
+
+    // Lookup
+    let inode = match client.request(&FsOp::Lookup { parent: 1, name: "secret.txt".into() }).await.unwrap() {
+        FsResult::Entry { inode, .. } => inode,
+        other => panic!("expected Entry, got {:?}", other),
+    };
+
+    // Open
+    let fh = match client.request(&FsOp::Open { inode, flags: 0 }).await.unwrap() {
+        FsResult::Opened { fh } => fh,
+        other => panic!("expected Opened, got {:?}", other),
+    };
+
+    // Read overlay content through fh
+    let data = match client.request(&FsOp::Read { inode, fh, offset: 0, size: 4096 }).await.unwrap() {
+        FsResult::Data { data } => data,
+        other => panic!("expected Data, got {:?}", other),
+    };
+    assert_eq!(&data[..], b"overlay data");
+
+    // Write through fh — update overlay content
+    let result = client.request(&FsOp::Write {
+        inode, fh, offset: 0, data: Bytes::from("PATCHED data"),
+    }).await.unwrap();
+    assert!(matches!(result, FsResult::Written { size: 12 }));
+
+    // Read again — should see patched content
+    let data = match client.request(&FsOp::Read { inode, fh, offset: 0, size: 4096 }).await.unwrap() {
+        FsResult::Data { data } => data,
+        other => panic!("expected Data, got {:?}", other),
+    };
+    assert_eq!(&data[..], b"PATCHED data");
+
+    // Fsync — no-op
+    assert!(matches!(client.request(&FsOp::Fsync { inode, fh, datasync: false }).await.unwrap(), FsResult::Ok));
+
+    // Release
+    assert!(matches!(client.request(&FsOp::Release { inode, fh }).await.unwrap(), FsResult::Ok));
+}

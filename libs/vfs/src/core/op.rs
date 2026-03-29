@@ -182,6 +182,7 @@ mod tests {
                 },
             },
             FsResult::Symlink { target: "/foo/bar".into() },
+            FsResult::Opened { fh: 42 },
             FsResult::Ok,
             FsResult::Error { errno: 2 },
         ];
