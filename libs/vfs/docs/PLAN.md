@@ -360,60 +360,71 @@ Per-task reference rule:
 
 - every task in this phase traces to one or more of the DESIGN references listed above unless an individual task states a narrower reference explicitly
 
-- [ ] 2.2.1 Implement overlay layers with priority ordering.
-- [ ] 2.2.1a Implement memfs-layer ordering as an ordered stack above the base layer for each mount tag.
-- [ ] 2.2.2 Implement `OverlayEntryKind::{Content, Whiteout, SyntheticDir}`.
-- [ ] 2.2.3 Implement `put_layer`, `remove_layer`, and `layers`.
-- [ ] 2.2.4 Implement `OverlayAttrs`, `OverlayMutation`, `apply_batch`, `put`, `put_with_attrs`, `whiteout`, `remove`, `get`, `list_layer`, `resolve`, and `list_effective`.
-- [ ] 2.2.5 Recursively materialize synthetic parent directories.
-- [ ] 2.2.6 Refcount and prune synthetic directories when children disappear.
-- [ ] 2.2.7 Implement generic stack resolution for `lookup`, `getattr`, and `read`: top-down through memfs layers, then base layer.
-- [ ] 2.2.8 Implement generic stack merge for `readdir`: base-layer entries merged upward through memfs layers with whiteout removal semantics.
+- [x] 2.2.1 Implement overlay layers with priority ordering.
+- [x] 2.2.1a Implement memfs-layer ordering as an ordered stack above the base layer for each mount tag.
+- [x] 2.2.2 Implement `OverlayEntryKind::{Content, Whiteout, SyntheticDir}`.
+- [x] 2.2.3 Implement `put_layer`, `remove_layer`, and `layers`.
+- [x] 2.2.4 Implement `OverlayAttrs`, `OverlayMutation`, `apply_batch`, `put`, `put_with_attrs`, `whiteout`, `remove`, `get`, `list_layer`, `resolve`, and `list_effective`.
+- [x] 2.2.5 Recursively materialize synthetic parent directories.
+- [x] 2.2.6 Refcount and prune synthetic directories when children disappear.
+- [x] 2.2.7 Implement generic stack resolution for `lookup`, `getattr`, and `read`: top-down through memfs layers, then base layer.
+- [x] 2.2.8 Implement generic stack merge for `readdir`: base-layer entries merged upward through memfs layers with whiteout removal semantics.
 - [ ] 2.2.9 Implement mutation semantics for `Unlink`, `Create`, `Mkdir`, `Rmdir`, `Rename`, and `Setattr`.
+<!-- @claude-dev 2026-03-29 -- deferred to server-overlay integration: these require wiring MemOverlay into FsServer::dispatch() which is the next step after this overlay-core commit. -->
 - [ ] 2.2.9a Implement the v1 symlink/readlink rule explicitly: symlinks remain base-layer-only, and overlay-managed or synthetic-parent symlink operations return `ENOTSUP`.
+<!-- @claude-dev 2026-03-29 -- deferred: requires server-overlay integration. -->
 - [ ] 2.2.10 Implement transparent cross-layer rename behavior from the DESIGN.
-- [ ] 2.2.11 Implement inherited synthetic ownership defaults from nearest existing parent or mount root.
+<!-- @claude-dev 2026-03-29 -- deferred: requires server-overlay integration. -->
+- [x] 2.2.11 Implement inherited synthetic ownership defaults from nearest existing parent or mount root.
 - [ ] 2.2.11a Implement overlay file-handle bookkeeping for overlay-backed opens: synthetic `fh` allocation, `fh -> inode` mapping, `Release`, `Fsync`, and latest-effective-content read behavior.
-- [ ] 2.2.12 Keep overlay node management independent from concrete base-layer implementation details where possible.
-- [ ] 2.2.13 Ensure overlay entry identity, synthetic parent creation, whiteouts, and listings remain defined in terms of tag + mount-relative path rather than disk-path existence.
-- [ ] 2.2.14 Ensure one named memfs layer can hold entries for many tags without path collision.
-- [ ] 2.2.14a Implement per-tag writer serialization for memfs mutation.
-- [ ] 2.2.14b Implement per-tag atomic memfs snapshot publish so one committed batch becomes visible all at once.
-- [ ] 2.2.14c Ensure read-like ops (`lookup`, `getattr`, `read`, `readdir`) use one stable memfs snapshot for the duration of each request.
-- [ ] 2.2.14d Keep batch atomicity scoped to memfs layers only; do not add fake transactional semantics to the base disk layer.
-- [ ] 2.2.14e Use focused helper crates where appropriate for v1 implementation scaffolding:
+<!-- @claude-dev 2026-03-29 -- deferred: requires server-overlay integration. -->
+- [x] 2.2.12 Keep overlay node management independent from concrete base-layer implementation details where possible.
+- [x] 2.2.13 Ensure overlay entry identity, synthetic parent creation, whiteouts, and listings remain defined in terms of tag + mount-relative path rather than disk-path existence.
+- [x] 2.2.14 Ensure one named memfs layer can hold entries for many tags without path collision.
+- [x] 2.2.14a Implement per-tag writer serialization for memfs mutation.
+- [x] 2.2.14b Implement per-tag atomic memfs snapshot publish so one committed batch becomes visible all at once.
+- [x] 2.2.14c Ensure read-like ops (`lookup`, `getattr`, `read`, `readdir`) use one stable memfs snapshot for the duration of each request.
+- [x] 2.2.14d Keep batch atomicity scoped to memfs layers only; do not add fake transactional semantics to the base disk layer.
+- [x] 2.2.14e Use focused helper crates where appropriate for v1 implementation scaffolding:
   - `arc-swap` for published snapshot pointers
   - `parking_lot` for per-tag writer serialization
   - `bytes` for payload storage
   - optional `slotmap` if stable synthetic node storage benefits from it
-- [ ] 2.2.14f Do not adopt the `vfs` crate or Theseus `memfs` as foundational runtime dependencies.
+- [x] 2.2.14f Do not adopt the `vfs` crate or Theseus `memfs` as foundational runtime dependencies.
 
 Tests / verification:
 
-- [ ] 2.2.15 Add layer priority resolution tests.
-- [ ] 2.2.16 Add synthetic parent creation tests.
-- [ ] 2.2.17 Add whiteout suppression tests.
-- [ ] 2.2.18 Add `remove_layer` effective-winner change tests.
+- [x] 2.2.15 Add layer priority resolution tests.
+- [x] 2.2.16 Add synthetic parent creation tests.
+- [x] 2.2.17 Add whiteout suppression tests.
+- [x] 2.2.18 Add `remove_layer` effective-winner change tests.
 - [ ] 2.2.19 Add generation bump tests for required mutation cases.
+<!-- @claude-dev 2026-03-29 -- deferred: generation bumps require InodeTable integration in server dispatch. -->
 - [ ] 2.2.20 Add cross-layer rename tests for base -> memfs, memfs -> base, and memfs -> memfs.
+<!-- @claude-dev 2026-03-29 -- deferred: requires server-overlay integration. -->
 - [ ] 2.2.21 Add policy-filtered `readdir` tests.
-- [ ] 2.2.22 Add partial-overlay tests for an existing mounted subtree such as `/home/alice/.ssh` where some files come from the base layer and some from memfs.
-- [ ] 2.2.23 Add fully synthetic subtree tests for paths such as `/home/alice/.claude/skills` created entirely by file injection.
-- [ ] 2.2.24 Add whiteout tests showing a lower immutable file remains hidden without physical deletion.
+<!-- @claude-dev 2026-03-29 -- deferred: requires server-overlay integration for merged readdir. -->
+- [x] 2.2.22 Add partial-overlay tests for an existing mounted subtree such as `/home/alice/.ssh` where some files come from the base layer and some from memfs.
+- [x] 2.2.23 Add fully synthetic subtree tests for paths such as `/home/alice/.claude/skills` created entirely by file injection.
+- [x] 2.2.24 Add whiteout tests showing a lower immutable file remains hidden without physical deletion.
 - [ ] 2.2.25 Add transparent app-workflow tests covering create/write/rename/unlink sequences typical of editors and CLI tools.
+<!-- @claude-dev 2026-03-29 -- deferred: requires server-overlay integration. -->
 - [ ] 2.2.25a Add symlink/readlink tests proving overlay-managed paths return `ENOTSUP` in v1 while base-layer symlink behavior remains available.
-- [ ] 2.2.26 Add shared-tag tests proving `/alice/...` and `/bob/...` coexist in one mounted tree without path collision.
-- [ ] 2.2.27 Add separate-tag tests proving two guest mounts remain overlay-isolated even when one `MemOverlay` instance serves both tags.
-- [ ] 2.2.28 Add shared-layer multi-tag tests proving one named layer can inject `/CLAUDE.md` into distinct tags with independent effective placement.
-- [ ] 2.2.29 Add inherited-ownership tests proving synthetic files/dirs pick up `uid`/`gid` from nearest parent or mount root.
-- [ ] 2.2.30 Add explicit-attr tests proving `put_with_attrs` overrides default synthetic ownership.
-- [ ] 2.2.31 Add future-compatibility tests or review checkpoints ensuring stack semantics do not assume every mount has local disk backing.
-- [ ] 2.2.32 Add a source-level verification step proving overlay APIs and tests remain expressed in mount-relative paths, not raw host-disk paths.
-- [ ] 2.2.33 Add batch atomicity tests proving a batch of injected files becomes visible all at once for `lookup`, `read`, and `readdir`.
-- [ ] 2.2.34 Add synthetic-parent atomicity tests proving readers cannot observe partially materialized parent hierarchies.
+<!-- @claude-dev 2026-03-29 -- deferred: requires server-overlay integration. -->
+- [x] 2.2.26 Add shared-tag tests proving `/alice/...` and `/bob/...` coexist in one mounted tree without path collision.
+- [x] 2.2.27 Add separate-tag tests proving two guest mounts remain overlay-isolated even when one `MemOverlay` instance serves both tags.
+- [x] 2.2.28 Add shared-layer multi-tag tests proving one named layer can inject `/CLAUDE.md` into distinct tags with independent effective placement.
+- [x] 2.2.29 Add inherited-ownership tests proving synthetic files/dirs pick up `uid`/`gid` from nearest parent or mount root.
+- [x] 2.2.30 Add explicit-attr tests proving `put_with_attrs` overrides default synthetic ownership.
+- [x] 2.2.31 Add future-compatibility tests or review checkpoints ensuring stack semantics do not assume every mount has local disk backing.
+- [x] 2.2.32 Add a source-level verification step proving overlay APIs and tests remain expressed in mount-relative paths, not raw host-disk paths.
+- [x] 2.2.33 Add batch atomicity tests proving a batch of injected files becomes visible all at once for `lookup`, `read`, and `readdir`.
+- [x] 2.2.34 Add synthetic-parent atomicity tests proving readers cannot observe partially materialized parent hierarchies.
 - [ ] 2.2.35 Add concurrent reader/writer tests proving one filesystem request uses one stable memfs snapshot.
+<!-- @claude-dev 2026-03-29 -- deferred: requires multi-threaded test harness with server-overlay integration. -->
 - [ ] 2.2.35a Add overlay file-handle lifecycle tests covering synthetic `fh` allocation, `Release`, `Fsync`, and reads after content replacement.
-- [ ] 2.2.36 Add a review checkpoint confirming the base layer keeps native filesystem semantics and is not treated as transactional by `motlie-vfs`.
+<!-- @claude-dev 2026-03-29 -- deferred: requires server-overlay integration. -->
+- [x] 2.2.36 Add a review checkpoint confirming the base layer keeps native filesystem semantics and is not treated as transactional by `motlie-vfs`.
 
 Exit criteria:
 
