@@ -92,6 +92,8 @@ impl InodeTable {
                 entry.kind = kind;
             }
             entry.host_path = host_path;
+            let mut attrs = attrs;
+            attrs.inode = existing;
             entry.attrs = attrs;
             return existing;
         }
@@ -99,6 +101,8 @@ impl InodeTable {
         let inode = self.next_inode;
         self.next_inode += 1;
 
+        let mut attrs = attrs;
+        attrs.inode = inode;
         let entry = InodeEntry {
             inode,
             kind,
@@ -252,6 +256,7 @@ mod tests {
         assert_eq!(entry.kind, InodeKind::Disk);
         assert_eq!(entry.host_path.as_ref().unwrap().to_str().unwrap(), "/host/hello.txt");
         assert_eq!(entry.generation, 0);
+        assert_eq!(entry.attrs.inode, inode, "stored attrs.inode must match table inode");
 
         // Reverse lookup
         assert_eq!(table.lookup_path("/hello.txt"), Some(2));
@@ -399,5 +404,24 @@ mod tests {
         assert_eq!(entry.kind, InodeKind::Disk);
         assert!(entry.host_path.is_none());
         // No panic, no error — the structure accommodates it.
+    }
+
+    #[test]
+    fn attrs_inode_always_matches_table_inode() {
+        let mut table = InodeTable::new(default_root_attrs());
+
+        // Root: attrs.inode == 1
+        assert_eq!(table.get(1).unwrap().attrs.inode, 1);
+
+        // New allocation: caller passes inode: 0, table rewrites to actual inode
+        let attrs = make_file_attrs(0, FileType::RegularFile);
+        let inode = table.allocate("/a", InodeKind::Content, None, attrs);
+        assert_eq!(table.get(inode).unwrap().attrs.inode, inode);
+
+        // Reuse path with kind change: attrs.inode still correct
+        let attrs = make_file_attrs(999, FileType::RegularFile);
+        let same = table.allocate("/a", InodeKind::Whiteout, None, attrs);
+        assert_eq!(inode, same);
+        assert_eq!(table.get(same).unwrap().attrs.inode, same);
     }
 }
