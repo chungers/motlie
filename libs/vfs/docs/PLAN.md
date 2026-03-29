@@ -263,21 +263,21 @@ Per-task reference rule:
 
 - every task in this phase traces to one or more of the DESIGN references listed above unless an individual task states a narrower reference explicitly
 
-- [ ] 1.3.1 Implement per-mount `InodeTable`.
-- [ ] 1.3.2 Support shared inode namespace across disk entries, `Content`, `SyntheticDir`, and whiteout bookkeeping.
-- [ ] 1.3.3 Implement inode allocation rules for each entry kind.
-- [ ] 1.3.4 Implement generation tracking rules from the DESIGN.
-- [ ] 1.3.5 Implement path-to-inode reverse lookup.
-- [ ] 1.3.6 Implement stable-within-mount-lifetime behavior.
-- [ ] 1.3.7 Ensure inode data structures do not require every non-overlay inode to carry a concrete `host_path`.
+- [x] 1.3.1 Implement per-mount `InodeTable`.
+- [x] 1.3.2 Support shared inode namespace across disk entries, `Content`, `SyntheticDir`, and whiteout bookkeeping.
+- [x] 1.3.3 Implement inode allocation rules for each entry kind.
+- [x] 1.3.4 Implement generation tracking rules from the DESIGN.
+- [x] 1.3.5 Implement path-to-inode reverse lookup.
+- [x] 1.3.6 Implement stable-within-mount-lifetime behavior.
+- [x] 1.3.7 Ensure inode data structures do not require every non-overlay inode to carry a concrete `host_path`.
 
 Tests / verification:
 
-- [ ] 1.3.8 Add allocate/lookup/reuse tests for disk entries.
-- [ ] 1.3.9 Add allocate/reuse tests for overlay entries.
-- [ ] 1.3.10 Add generation bump coverage for all specified events.
-- [ ] 1.3.11 Add mount removal invalidation tests.
-- [ ] 1.3.12 Add a review checkpoint proving inode logic can describe future non-disk-backed entries without redesign.
+- [x] 1.3.8 Add allocate/lookup/reuse tests for disk entries.
+- [x] 1.3.9 Add allocate/reuse tests for overlay entries.
+- [x] 1.3.10 Add generation bump coverage for all specified events.
+- [x] 1.3.11 Add mount removal invalidation tests.
+- [x] 1.3.12 Add a review checkpoint proving inode logic can describe future non-disk-backed entries without redesign.
 
 Exit criteria:
 
