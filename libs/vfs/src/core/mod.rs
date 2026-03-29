@@ -26,6 +26,9 @@ pub enum VfsError {
     #[error("invalid path: {0}")]
     InvalidPath(String),
 
+    #[error("internal inconsistency: {0}")]
+    Internal(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }

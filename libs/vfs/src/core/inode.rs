@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use super::op::{FileAttr, FileType};
+use super::{Result, VfsError};
 
 /// What kind of entry backs this inode.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,9 +85,14 @@ impl InodeTable {
         kind: InodeKind,
         host_path: Option<PathBuf>,
         attrs: FileAttr,
-    ) -> u64 {
+    ) -> Result<u64> {
         if let Some(&existing) = self.path_to_inode.get(path) {
-            let entry = self.entries.get_mut(&existing).unwrap();
+            let entry = self.entries.get_mut(&existing).ok_or_else(|| {
+                VfsError::Internal(format!(
+                    "path_to_inode maps {:?} to inode {} but entries has no such inode",
+                    path, existing,
+                ))
+            })?;
             if entry.kind != kind {
                 entry.generation += 1;
                 entry.kind = kind;
@@ -95,7 +101,7 @@ impl InodeTable {
             let mut attrs = attrs;
             attrs.inode = existing;
             entry.attrs = attrs;
-            return existing;
+            return Ok(existing);
         }
 
         let inode = self.next_inode;
@@ -114,7 +120,7 @@ impl InodeTable {
         };
         self.entries.insert(inode, entry);
         self.path_to_inode.insert(path.to_string(), inode);
-        inode
+        Ok(inode)
     }
 
     /// Look up an entry by inode number.
@@ -250,7 +256,7 @@ mod tests {
             InodeKind::Disk,
             Some(PathBuf::from("/host/hello.txt")),
             attrs,
-        );
+        ).unwrap();
         assert_eq!(inode, 2);
         let entry = table.get(inode).unwrap();
         assert_eq!(entry.kind, InodeKind::Disk);
@@ -268,21 +274,21 @@ mod tests {
 
         // Content entry (no host_path)
         let attrs = make_file_attrs(0, FileType::RegularFile);
-        let content_inode = table.allocate("/.env", InodeKind::Content, None, attrs);
+        let content_inode = table.allocate("/.env", InodeKind::Content, None, attrs).unwrap();
         let entry = table.get(content_inode).unwrap();
         assert_eq!(entry.kind, InodeKind::Content);
         assert!(entry.host_path.is_none());
 
         // SyntheticDir entry (no host_path)
         let attrs = make_file_attrs(0, FileType::Directory);
-        let dir_inode = table.allocate("/.ssh", InodeKind::SyntheticDir, None, attrs);
+        let dir_inode = table.allocate("/.ssh", InodeKind::SyntheticDir, None, attrs).unwrap();
         let entry = table.get(dir_inode).unwrap();
         assert_eq!(entry.kind, InodeKind::SyntheticDir);
         assert!(entry.host_path.is_none());
 
         // Whiteout entry (no host_path)
         let attrs = make_file_attrs(0, FileType::RegularFile);
-        let wo_inode = table.allocate("/hidden.txt", InodeKind::Whiteout, None, attrs);
+        let wo_inode = table.allocate("/hidden.txt", InodeKind::Whiteout, None, attrs).unwrap();
         let entry = table.get(wo_inode).unwrap();
         assert_eq!(entry.kind, InodeKind::Whiteout);
         assert!(entry.host_path.is_none());
@@ -295,11 +301,11 @@ mod tests {
         let mut table = InodeTable::new(default_root_attrs());
         let attrs = make_file_attrs(0, FileType::RegularFile);
 
-        let first = table.allocate("/file", InodeKind::Disk, Some(PathBuf::from("/h/file")), attrs.clone());
+        let first = table.allocate("/file", InodeKind::Disk, Some(PathBuf::from("/h/file")), attrs.clone()).unwrap();
         assert_eq!(table.get(first).unwrap().generation, 0);
 
         // Same path, same kind → same inode, no generation bump
-        let second = table.allocate("/file", InodeKind::Disk, Some(PathBuf::from("/h/file")), attrs.clone());
+        let second = table.allocate("/file", InodeKind::Disk, Some(PathBuf::from("/h/file")), attrs.clone()).unwrap();
         assert_eq!(first, second);
         assert_eq!(table.get(first).unwrap().generation, 0);
     }
@@ -310,16 +316,16 @@ mod tests {
         let attrs = make_file_attrs(0, FileType::RegularFile);
 
         // Start as Whiteout
-        let inode = table.allocate("/file", InodeKind::Whiteout, None, attrs.clone());
+        let inode = table.allocate("/file", InodeKind::Whiteout, None, attrs.clone()).unwrap();
         assert_eq!(table.get(inode).unwrap().generation, 0);
 
         // Replace with Content → generation bump
-        let same = table.allocate("/file", InodeKind::Content, None, attrs.clone());
+        let same = table.allocate("/file", InodeKind::Content, None, attrs.clone()).unwrap();
         assert_eq!(inode, same);
         assert_eq!(table.get(inode).unwrap().generation, 1);
 
         // Replace with Whiteout again → another bump
-        let same = table.allocate("/file", InodeKind::Whiteout, None, attrs.clone());
+        let same = table.allocate("/file", InodeKind::Whiteout, None, attrs.clone()).unwrap();
         assert_eq!(inode, same);
         assert_eq!(table.get(inode).unwrap().generation, 2);
     }
@@ -328,7 +334,7 @@ mod tests {
     fn explicit_generation_bump() {
         let mut table = InodeTable::new(default_root_attrs());
         let attrs = make_file_attrs(0, FileType::RegularFile);
-        let inode = table.allocate("/f", InodeKind::Content, None, attrs);
+        let inode = table.allocate("/f", InodeKind::Content, None, attrs).unwrap();
 
         table.bump_generation(inode);
         assert_eq!(table.get(inode).unwrap().generation, 1);
@@ -341,8 +347,8 @@ mod tests {
         let mut table = InodeTable::new(default_root_attrs());
         let attrs = make_file_attrs(0, FileType::RegularFile);
 
-        let a = table.allocate("/a", InodeKind::Content, None, attrs.clone());
-        let b = table.allocate("/b", InodeKind::Content, None, attrs);
+        let a = table.allocate("/a", InodeKind::Content, None, attrs.clone()).unwrap();
+        let b = table.allocate("/b", InodeKind::Content, None, attrs).unwrap();
 
         // Remove by inode
         let removed = table.remove(a).unwrap();
@@ -361,9 +367,9 @@ mod tests {
     fn mount_removal_clears_all() {
         let mut table = InodeTable::new(default_root_attrs());
         let attrs = make_file_attrs(0, FileType::RegularFile);
-        table.allocate("/a", InodeKind::Disk, Some(PathBuf::from("/h/a")), attrs.clone());
-        table.allocate("/b", InodeKind::Content, None, attrs.clone());
-        table.allocate("/.ssh", InodeKind::SyntheticDir, None, attrs);
+        table.allocate("/a", InodeKind::Disk, Some(PathBuf::from("/h/a")), attrs.clone()).unwrap();
+        table.allocate("/b", InodeKind::Content, None, attrs.clone()).unwrap();
+        table.allocate("/.ssh", InodeKind::SyntheticDir, None, attrs).unwrap();
         assert_eq!(table.len(), 4);
 
         table.clear();
@@ -376,7 +382,7 @@ mod tests {
     fn refcount_tracking() {
         let mut table = InodeTable::new(default_root_attrs());
         let attrs = make_file_attrs(0, FileType::RegularFile);
-        let inode = table.allocate("/f", InodeKind::Disk, None, attrs);
+        let inode = table.allocate("/f", InodeKind::Disk, None, attrs).unwrap();
 
         assert_eq!(table.get(inode).unwrap().refcount, 0);
         table.inc_ref(inode);
@@ -399,7 +405,7 @@ mod tests {
         let attrs = make_file_attrs(0, FileType::Directory);
         // A "disk-like" entry with no host_path — simulating a future
         // SyntheticRoot mount backing.
-        let inode = table.allocate("/virtual-root", InodeKind::Disk, None, attrs);
+        let inode = table.allocate("/virtual-root", InodeKind::Disk, None, attrs).unwrap();
         let entry = table.get(inode).unwrap();
         assert_eq!(entry.kind, InodeKind::Disk);
         assert!(entry.host_path.is_none());
@@ -415,12 +421,12 @@ mod tests {
 
         // New allocation: caller passes inode: 0, table rewrites to actual inode
         let attrs = make_file_attrs(0, FileType::RegularFile);
-        let inode = table.allocate("/a", InodeKind::Content, None, attrs);
+        let inode = table.allocate("/a", InodeKind::Content, None, attrs).unwrap();
         assert_eq!(table.get(inode).unwrap().attrs.inode, inode);
 
         // Reuse path with kind change: attrs.inode still correct
         let attrs = make_file_attrs(999, FileType::RegularFile);
-        let same = table.allocate("/a", InodeKind::Whiteout, None, attrs);
+        let same = table.allocate("/a", InodeKind::Whiteout, None, attrs).unwrap();
         assert_eq!(inode, same);
         assert_eq!(table.get(same).unwrap().attrs.inode, same);
     }
