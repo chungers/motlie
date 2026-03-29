@@ -7,8 +7,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+use anyhow::{bail, Result};
+
 use super::op::{FileAttr, FileType};
-use super::{Result, VfsError};
 
 /// What kind of entry backs this inode.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,12 +88,14 @@ impl InodeTable {
         attrs: FileAttr,
     ) -> Result<u64> {
         if let Some(&existing) = self.path_to_inode.get(path) {
-            let entry = self.entries.get_mut(&existing).ok_or_else(|| {
-                VfsError::Internal(format!(
-                    "path_to_inode maps {:?} to inode {} but entries has no such inode",
+            let entry = match self.entries.get_mut(&existing) {
+                Some(e) => e,
+                None => bail!(
+                    "internal inconsistency: path_to_inode maps {:?} to inode {} \
+                     but entries has no such inode",
                     path, existing,
-                ))
-            })?;
+                ),
+            };
             if entry.kind != kind {
                 entry.generation += 1;
                 entry.kind = kind;

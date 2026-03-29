@@ -226,7 +226,7 @@ Per-task reference rule:
 - [x] 1.2.1 Implement `FsOp`, `FsResult`, `FileAttr`, `DirEntry`, `FsStats`, and `SetAttrFields`.
 - [x] 1.2.2 Implement `FsEvent` and `FsOpKind` (with `from_op()` conversion).
 - [x] 1.2.3 Implement `PolicyFn` and `AllowAll`.
-- [x] 1.2.4 Define crate-local error types and conversion strategy (`VfsError` enum in `core/mod.rs`).
+- [x] 1.2.4 Use `anyhow::Result` for operational APIs, matching the workspace convention.
 - [x] 1.2.5 Add serde coverage for all wire-visible types (`bytes` crate `serde` feature enabled).
 - [x] 1.2.6 Ensure the core `FileAttr`/`SetAttrFields` model carries `uid`, `gid`, and `mode` needed by synthetic overlay entries.
 
