@@ -237,6 +237,41 @@ impl MemOverlay {
         }])
     }
 
+    /// Create an explicit SyntheticDir entry in the overlay.
+    pub fn create_dir(&self, layer: &str, tag: &str, path: &str, attrs: OverlayAttrs) -> Result<()> {
+        validate_path(path)?;
+        let mut layers = self.layers.lock();
+        let l = get_layer_mut(&mut layers, layer)?;
+        let now = SystemTime::now();
+        materialize_parents(l, tag, path, attrs.uid, attrs.gid, now);
+        let key = (tag.to_string(), path.to_string());
+        l.entries.insert(key, OverlayNode {
+            kind: OverlayEntryKind::SyntheticDir,
+            mode: attrs.mode, uid: attrs.uid, gid: attrs.gid,
+            injected_at: now,
+            child_count: 0,
+        });
+        self.republish_tag(&layers, tag);
+        Ok(())
+    }
+
+    /// Get the overlay metadata (mode, uid, gid) for a resolved entry.
+    pub fn resolve_attrs(&self, tag: &str, path: &str) -> Option<(String, OverlayEntryKind, OverlayAttrs)> {
+        let snap = self.load_snapshot(tag);
+        let key_tag = tag.to_string();
+        let key_path = path.to_string();
+        for layer in &snap.layers {
+            if let Some(node) = layer.entries.get(&(key_tag.clone(), key_path.clone())) {
+                return Some((
+                    layer.name.clone(),
+                    node.kind.clone(),
+                    OverlayAttrs { mode: node.mode, uid: node.uid, gid: node.gid },
+                ));
+            }
+        }
+        None
+    }
+
     pub fn remove(&self, layer: &str, tag: &str, path: &str) -> Result<()> {
         self.apply_batch(tag, &[OverlayMutation::Remove {
             layer: layer.to_string(),
