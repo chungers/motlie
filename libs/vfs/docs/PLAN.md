@@ -177,20 +177,21 @@ Per-task reference rule:
 
 - every task in this phase traces to one or more of the DESIGN references listed above unless an individual task states a narrower reference explicitly
 
-- [ ] 1.1.1 Add `libs/vfs` to workspace members.
-- [ ] 1.1.2 Create `libs/vfs/Cargo.toml` with the feature graph described in the DESIGN.
-- [ ] 1.1.3 Add initial dependency set for core, vsock, client, and example PoC modules.
-- [ ] 1.1.4 Create public module skeletons with feature gating only, no behavior yet.
-- [ ] 1.1.5 Ensure `cargo check -p motlie-vfs` succeeds with default features.
+- [x] 1.1.1 Add `libs/vfs` to workspace members.
+- [x] 1.1.2 Create `libs/vfs/Cargo.toml` with the feature graph described in the DESIGN.
+- [x] 1.1.3 Add initial dependency set for core, vsock, client, and example PoC modules.
+- [x] 1.1.4 Create public module skeletons with feature gating only, no behavior yet.
+- [x] 1.1.5 Ensure `cargo check -p motlie-vfs` succeeds with default features.
 - [ ] 1.1.6 Add `rustyline` as the v1 proof-of-concept REPL dependency for `libs/vfs/examples`.
-- [ ] 1.1.6a Add `libs/vfs/examples/simple_host.rs` and `libs/vfs/examples/README.md` scaffolding so the v1 examples location matches the DESIGN exactly.
-- [ ] 1.1.6b Add `libs/vfs/src/client/guest.rs` scaffolding so guest-side orchestration has a stable public API distinct from `FuseClient`.
-- [ ] 1.1.6c Add `libs/vfs/src/bin/motlie-vfs-guest.rs` scaffolding as the real v1 guest-side mounter binary over the public guest APIs.
+<!-- @claude-dev 2026-03-28 -- deferred: rustyline is only needed when the REPL has behavior to wire; adding the dep now would be dead weight. Will add in Phase 5.1 when simple_host.rs gets its REPL loop. -->
+- [x] 1.1.6a Add `libs/vfs/examples/simple_host.rs` and `libs/vfs/examples/README.md` scaffolding so the v1 examples location matches the DESIGN exactly.
+- [x] 1.1.6b Add `libs/vfs/src/client/guest.rs` scaffolding so guest-side orchestration has a stable public API distinct from `FuseClient`.
+- [x] 1.1.6c Add `libs/vfs/src/bin/motlie-vfs-guest.rs` scaffolding as the real v1 guest-side mounter binary over the public guest APIs.
 
 Tests / verification:
 
-- [ ] 1.1.7 Run `cargo check -p motlie-vfs`.
-- [ ] 1.1.8 Run a workspace `cargo check` to verify the new crate does not break the workspace.
+- [x] 1.1.7 Run `cargo check -p motlie-vfs`.
+- [x] 1.1.8 Run a workspace `cargo check` to verify the new crate does not break the workspace.
 
 Exit criteria:
 
@@ -222,18 +223,18 @@ Per-task reference rule:
 
 - every task in this phase traces to one or more of the DESIGN references listed above unless an individual task states a narrower reference explicitly
 
-- [ ] 1.2.1 Implement `FsOp`, `FsResult`, `FileAttr`, `DirEntry`, `FsStats`, and `SetAttrFields`.
-- [ ] 1.2.2 Implement `FsEvent`.
-- [ ] 1.2.3 Implement `PolicyFn` and `AllowAll`.
-- [ ] 1.2.4 Define crate-local error types and conversion strategy.
-- [ ] 1.2.5 Add serde coverage for all wire-visible types.
-- [ ] 1.2.6 Ensure the core `FileAttr`/`SetAttrFields` model carries `uid`, `gid`, and `mode` needed by synthetic overlay entries.
+- [x] 1.2.1 Implement `FsOp`, `FsResult`, `FileAttr`, `DirEntry`, `FsStats`, and `SetAttrFields`.
+- [x] 1.2.2 Implement `FsEvent` and `FsOpKind` (with `from_op()` conversion).
+- [x] 1.2.3 Implement `PolicyFn` and `AllowAll`.
+- [x] 1.2.4 Use `anyhow::Result` for operational APIs, matching the workspace convention.
+- [x] 1.2.5 Add serde coverage for all wire-visible types (`bytes` crate `serde` feature enabled).
+- [x] 1.2.6 Ensure the core `FileAttr`/`SetAttrFields` model carries `uid`, `gid`, and `mode` needed by synthetic overlay entries.
 
 Tests / verification:
 
-- [ ] 1.2.7 Add serde round-trip tests for `FsOp` and `FsResult`.
-- [ ] 1.2.8 Add allow/deny tests for `PolicyFn`.
-- [ ] 1.2.9 Add serde coverage tests for synthetic attrs carrying `uid`, `gid`, and `mode`.
+- [x] 1.2.7 Add serde round-trip tests for `FsOp` and `FsResult`.
+- [x] 1.2.8 Add allow/deny tests for `PolicyFn`.
+- [x] 1.2.9 Add serde coverage tests for synthetic attrs carrying `uid`, `gid`, and `mode`.
 
 Exit criteria:
 
@@ -262,21 +263,21 @@ Per-task reference rule:
 
 - every task in this phase traces to one or more of the DESIGN references listed above unless an individual task states a narrower reference explicitly
 
-- [ ] 1.3.1 Implement per-mount `InodeTable`.
-- [ ] 1.3.2 Support shared inode namespace across disk entries, `Content`, `SyntheticDir`, and whiteout bookkeeping.
-- [ ] 1.3.3 Implement inode allocation rules for each entry kind.
-- [ ] 1.3.4 Implement generation tracking rules from the DESIGN.
-- [ ] 1.3.5 Implement path-to-inode reverse lookup.
-- [ ] 1.3.6 Implement stable-within-mount-lifetime behavior.
-- [ ] 1.3.7 Ensure inode data structures do not require every non-overlay inode to carry a concrete `host_path`.
+- [x] 1.3.1 Implement per-mount `InodeTable`.
+- [x] 1.3.2 Support shared inode namespace across disk entries, `Content`, `SyntheticDir`, and whiteout bookkeeping.
+- [x] 1.3.3 Implement inode allocation rules for each entry kind.
+- [x] 1.3.4 Implement generation tracking rules from the DESIGN.
+- [x] 1.3.5 Implement path-to-inode reverse lookup.
+- [x] 1.3.6 Implement stable-within-mount-lifetime behavior.
+- [x] 1.3.7 Ensure inode data structures do not require every non-overlay inode to carry a concrete `host_path`.
 
 Tests / verification:
 
-- [ ] 1.3.8 Add allocate/lookup/reuse tests for disk entries.
-- [ ] 1.3.9 Add allocate/reuse tests for overlay entries.
-- [ ] 1.3.10 Add generation bump coverage for all specified events.
-- [ ] 1.3.11 Add mount removal invalidation tests.
-- [ ] 1.3.12 Add a review checkpoint proving inode logic can describe future non-disk-backed entries without redesign.
+- [x] 1.3.8 Add allocate/lookup/reuse tests for disk entries.
+- [x] 1.3.9 Add allocate/reuse tests for overlay entries.
+- [x] 1.3.10 Add generation bump coverage for all specified events.
+- [x] 1.3.11 Add mount removal invalidation tests.
+- [x] 1.3.12 Add a review checkpoint proving inode logic can describe future non-disk-backed entries without redesign.
 
 Exit criteria:
 
