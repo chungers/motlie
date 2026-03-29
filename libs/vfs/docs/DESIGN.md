@@ -2902,7 +2902,7 @@ pub fn vsock_test_pair(server: FsServer, tag: &str) -> (JoinHandle<()>, FuseClie
 | `serde`, `serde_derive` | FsOp/FsResult serialization |
 | `bytes` | Zero-copy byte buffers in data ops |
 | `tokio` (features: io-util, sync, rt) | Async I/O, broadcast channel |
-| `thiserror` | Error types |
+| `anyhow` | Operational error handling (workspace convention) |
 | `tracing` | Structured logging |
 
 ### Feature-Gated
