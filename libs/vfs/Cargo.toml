@@ -32,7 +32,7 @@ tokio = { workspace = true, features = ["sync", "rt"] }
 
 # vsock transport (optional)
 tokio-vsock = { version = "0.7", optional = true }
-bincode = { version = "2", optional = true }
+bincode = { version = "2", optional = true, features = ["serde"] }
 
 # FUSE client (optional)
 fuser = { version = "0.15", optional = true }
