@@ -846,8 +846,13 @@ impl FsServer {
                     Ok(meta) => {
                         let attrs = metadata_to_attrs(&meta, 0, FileType::Symlink);
                         let mut table = mount.inode_table.lock();
-                        let inode = table.allocate(&rel_path, InodeKind::Disk, Some(host_path), attrs.clone()).unwrap_or(0);
-                        FsResult::Entry { inode, generation: 0, attrs: table.get(inode).map(|e| e.attrs.clone()).unwrap_or(attrs), ttl_secs: 0 }
+                        match table.allocate(&rel_path, InodeKind::Disk, Some(host_path), attrs.clone()) {
+                            Ok(inode) => {
+                                let gen = table.get(inode).map(|e| e.generation).unwrap_or(0);
+                                FsResult::Entry { inode, generation: gen, attrs: table.get(inode).map(|e| e.attrs.clone()).unwrap_or(attrs), ttl_secs: 0 }
+                            }
+                            Err(_) => FsResult::Error { errno: libc::EIO },
+                        }
                     }
                     Err(e) => FsResult::Error { errno: io_errno(&e) },
                 }
@@ -1424,6 +1429,89 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let server = build_test_server(dir.path());
         assert!(server.overlay().is_none());
+    }
+
+    // 2.2.35a: Overlay file-handle lifecycle: Open → Read → Write → Release → Fsync
+    #[test]
+    fn overlay_fh_lifecycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = build_overlay_server(dir.path());
+        let o = server.overlay().unwrap();
+        o.put_layer("l", 0).unwrap();
+        o.put("l", "test", "/secret.txt", bytes::Bytes::from("initial content")).unwrap();
+
+        // Lookup to register inode
+        let inode = match server.handle_op("test", FsOp::Lookup { parent: 1, name: "secret.txt".into() }) {
+            FsResult::Entry { inode, .. } => inode,
+            other => panic!("expected Entry, got {:?}", other),
+        };
+
+        // Open → get fh
+        let fh = match server.handle_op("test", FsOp::Open { inode, flags: 0 }) {
+            FsResult::Opened { fh } => fh,
+            other => panic!("expected Opened, got {:?}", other),
+        };
+        assert!(fh > 0);
+
+        // Read through fh
+        let data = match server.handle_op("test", FsOp::Read { inode, fh, offset: 0, size: 4096 }) {
+            FsResult::Data { data } => data,
+            other => panic!("expected Data, got {:?}", other),
+        };
+        assert_eq!(&data[..], b"initial content");
+
+        // Write through fh — patch content
+        let result = server.handle_op("test", FsOp::Write {
+            inode, fh, offset: 0, data: bytes::Bytes::from("UPDATED content"),
+        });
+        assert!(matches!(result, FsResult::Written { size: 15 }));
+
+        // Read again — should see updated content
+        let data = match server.handle_op("test", FsOp::Read { inode, fh, offset: 0, size: 4096 }) {
+            FsResult::Data { data } => data,
+            other => panic!("expected Data, got {:?}", other),
+        };
+        assert_eq!(&data[..], b"UPDATED content");
+
+        // Fsync — no-op for overlay, should succeed
+        assert!(matches!(server.handle_op("test", FsOp::Fsync { inode, fh, datasync: false }), FsResult::Ok));
+
+        // Release — drops fh mapping
+        assert!(matches!(server.handle_op("test", FsOp::Release { inode, fh }), FsResult::Ok));
+
+        // Read after release — fh should be invalid
+        let result = server.handle_op("test", FsOp::Read { inode, fh, offset: 0, size: 4096 });
+        assert!(matches!(result, FsResult::Error { errno } if errno == libc::EBADF));
+    }
+
+    // Disk file-handle lifecycle: Open → Read → Write → Release
+    #[test]
+    fn disk_fh_lifecycle() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("data.txt"), b"hello disk").unwrap();
+        let server = build_test_server(dir.path());
+
+        // Lookup
+        let inode = match server.handle_op("test", FsOp::Lookup { parent: 1, name: "data.txt".into() }) {
+            FsResult::Entry { inode, .. } => inode,
+            other => panic!("expected Entry, got {:?}", other),
+        };
+
+        // Open → get fh
+        let fh = match server.handle_op("test", FsOp::Open { inode, flags: 0 }) {
+            FsResult::Opened { fh } => fh,
+            other => panic!("expected Opened, got {:?}", other),
+        };
+
+        // Read through fh
+        let data = match server.handle_op("test", FsOp::Read { inode, fh, offset: 0, size: 4096 }) {
+            FsResult::Data { data } => data,
+            other => panic!("expected Data, got {:?}", other),
+        };
+        assert_eq!(&data[..], b"hello disk");
+
+        // Release
+        assert!(matches!(server.handle_op("test", FsOp::Release { inode, fh }), FsResult::Ok));
     }
 
     // Design guardrail review checkpoints (same as before)
