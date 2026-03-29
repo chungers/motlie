@@ -8,7 +8,7 @@
 | 2026-03-28 | @codex-pm | Address PR #117 review feedback: convert DESIGN links to relative paths, fix phase/task numbering, and make the v2 RPC phase specification-oriented instead of implementation-oriented |
 | 2026-03-28 | @codex-pm | Align the plan title with the product framing: layered guest filesystem composition rather than transport plumbing |
 | 2026-03-28 | @codex-pm | Resolve guest boundary in PLAN: bootstrap/binary delivery stay VMM-owned, `client/guest.rs` owns guest mount orchestration, and the real guest binary must stay a thin wrapper over public guest APIs |
-| 2026-03-28 | @codex-pm | Treat the guest-side mounter as a real v1 binary: move it from `examples/` to `src/bin/motlie-vfs-guest.rs` and make build-before-image assembly explicit in the plan |
+| 2026-03-28 | @codex-pm | Treat the guest-side mounter as a real v1 binary: move it from `examples/` to `bins/motlie-vfs-guest.rs` and make build-before-image assembly explicit in the plan |
 | 2026-03-28 | @codex-pm | Resolve v1 module split in PLAN: `client/fuse.rs` owns `FuseClient`, `vsock/` owns transport/handler glue, and `libs/vfs/examples/` contains the host REPL and guest harness binaries |
 | 2026-03-28 | @codex-pm | Add v1 memfs concurrency work: batch-first API, per-tag atomic snapshot publish, non-transactional base layer semantics, and implementation scaffolding for helper crates not chosen as foundations |
 | 2026-03-28 | @codex-pm | Converge PLAN on the ordered layer-stack model: per-mount stacks in v1 are `N` memfs layers plus one disk base, with shared named layers spanning multiple mount tags via `(layer, tag, path)` keys |
@@ -164,7 +164,7 @@ Primary file targets:
 - `Cargo.toml`
 - `libs/vfs/Cargo.toml`
 - `libs/vfs/src/lib.rs`
-- `libs/vfs/src/bin/motlie-vfs-guest.rs`
+- `libs/vfs/bins/motlie-vfs-guest.rs`
 - `libs/vfs/src/core/mod.rs`
 - `libs/vfs/src/client/mod.rs`
 - `libs/vfs/src/client/guest.rs`
@@ -186,7 +186,7 @@ Per-task reference rule:
 <!-- @claude-dev 2026-03-28 -- deferred: rustyline is only needed when the REPL has behavior to wire; adding the dep now would be dead weight. Will add in Phase 5.1 when simple_host.rs gets its REPL loop. -->
 - [x] 1.1.6a Add `libs/vfs/examples/simple_host.rs` and `libs/vfs/examples/README.md` scaffolding so the v1 examples location matches the DESIGN exactly.
 - [x] 1.1.6b Add `libs/vfs/src/client/guest.rs` scaffolding so guest-side orchestration has a stable public API distinct from `FuseClient`.
-- [x] 1.1.6c Add `libs/vfs/src/bin/motlie-vfs-guest.rs` scaffolding as the real v1 guest-side mounter binary over the public guest APIs.
+- [x] 1.1.6c Add `libs/vfs/bins/motlie-vfs-guest.rs` scaffolding as the real v1 guest-side mounter binary over the public guest APIs.
 
 Tests / verification:
 
@@ -628,7 +628,7 @@ Per-task reference rule:
 - [ ] 4.2.5 Implement build-time FUSE dependency checks for Linux/macOS.
 - [ ] 4.2.5a Implement `GuestMountSpec` and `GuestMountRunner` in `client/guest.rs` as the public guest orchestration layer above `FuseClient`.
 - [ ] 4.2.5b Ensure `GuestMountRunner` consumes caller-supplied stream/transport connectors so VMM handshake/bootstrap logic stays outside this crate.
-- [ ] 4.2.5c Keep `src/bin/motlie-vfs-guest.rs` thin: it may parse config and obtain streams, but it must call `GuestMountRunner` rather than reimplementing mount orchestration.
+- [ ] 4.2.5c Keep `bins/motlie-vfs-guest.rs` thin: it may parse config and obtain streams, but it must call `GuestMountRunner` rather than reimplementing mount orchestration.
 
 Tests / verification:
 
@@ -643,7 +643,7 @@ Clarification:
 
 - `client/fuse.rs` owns the guest-side `fuser::Filesystem` implementation
 - `client/guest.rs` owns guest-side mount orchestration over public APIs
-- `src/bin/motlie-vfs-guest.rs` is the real v1 guest-side mounter binary, not an example harness
+- `bins/motlie-vfs-guest.rs` is the real v1 guest-side mounter binary, not an example harness
 - `vsock/` owns transport and handler glue only
 
 Exit criteria:
@@ -689,7 +689,7 @@ Per-task reference rule:
 - [ ] 5.1.9 Add explicit setup instructions or scripts for starting the host-side `FsServer`, `MemOverlay`, and the v1 in-process REPL/example harness.
 - [ ] 5.1.10 Add explicit embedded admin console or script/config procedures for `put`, `putattr`, `whiteout`, `rm`, `rmlayer`, `ls`, and `lslayer` in the guest-harness workflow.
 - [ ] 5.1.11 Add explicit CH launch/stop commands or scripts, including vsock and block-device wiring for the stacked-root guest image.
-- [ ] 5.1.11a Document the guest boundary explicitly in harness instructions: bootstrap/binary delivery remain VMM-owned, while `src/bin/motlie-vfs-guest.rs` only exercises the public guest APIs from `client/guest.rs`.
+- [ ] 5.1.11a Document the guest boundary explicitly in harness instructions: bootstrap/binary delivery remain VMM-owned, while `bins/motlie-vfs-guest.rs` only exercises the public guest APIs from `client/guest.rs`.
 
 Suggested setup snippets to include in this phase:
 

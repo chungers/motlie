@@ -9,8 +9,8 @@
 | 2026-03-28 | @codex-pm | Address PR #117 review feedback: remove stale v1 CLI references, clarify `apply_batch` tag scoping, tighten synthetic-parent and rename semantics, and fix wording around immutable lower layers |
 | 2026-03-28 | @codex-pm | Reframe the project headline around layered guest filesystem composition instead of transport-agnostic plumbing |
 | 2026-03-28 | @codex-pm | Make the bootstrap/guest-agent boundary explicit: bootstrap and binary delivery stay VMM-owned, while the reusable guest mounter is built on public guest-side APIs in `client/` and `vsock/` |
-| 2026-03-28 | @codex-pm | Treat the guest-side mounter as a real v1 binary: move it from `examples/` to `src/bin/motlie-vfs-guest.rs` and make image-build order explicit |
-| 2026-03-28 | @codex-pm | Resolve v1 crate-structure ambiguity: `client/fuse.rs` owns the guest-side `fuser` bridge, `client/guest.rs` owns guest mount orchestration, `vsock/` owns transport glue only, and `libs/vfs/examples/` now contains the host REPL/demo harness while the guest mounter lives in `src/bin/` |
+| 2026-03-28 | @codex-pm | Treat the guest-side mounter as a real v1 binary: move it from `examples/` to `bins/motlie-vfs-guest.rs` and make image-build order explicit |
+| 2026-03-28 | @codex-pm | Resolve v1 crate-structure ambiguity: `client/fuse.rs` owns the guest-side `fuser` bridge, `client/guest.rs` owns guest mount orchestration, `vsock/` owns transport glue only, and `libs/vfs/examples/` now contains the host REPL/demo harness while the guest mounter lives in `bins/` |
 | 2026-03-28 | @codex-pm | Specify v1 memfs concurrency contract: batch-first API, atomic memfs snapshot publish per mount tag, non-memfs layers keep native semantics; add rejected crate evaluations for `vfs` and Theseus `memfs` |
 | 2026-03-28 | @codex-pm | Converge on a generic ordered layer-stack model: v1 = N memfs layers + 1 disk base per mount, with shared named memfs layers spanning multiple mount tags via `(layer, tag, relative path)` keys |
 | 2026-03-28 | @codex-pm | Add non-negotiable mount/backing abstraction guidance so v1 implementation cannot accidentally internalize a permanently disk-backed model |
@@ -1201,10 +1201,10 @@ libs/vfs/
 ├── examples/
 │   ├── simple_host.rs            # proof-of-concept host server + rustyline REPL
 │   └── README.md                 # Cloud Hypervisor proof-of-concept instructions
+├── bins/
+│   └── motlie-vfs-guest.rs       # v1 guest-side mounter binary over public guest APIs
 └── src/
     ├── lib.rs                    # re-exports, feature-gated module visibility
-    ├── bin/
-    │   └── motlie-vfs-guest.rs   # v1 guest-side mounter binary over public guest APIs
     │
     ├── core/
     │   ├── mod.rs
@@ -1228,7 +1228,7 @@ libs/vfs/
 
 Boundary note:
 
-- `src/bin/motlie-vfs-guest.rs` is the v1 guest-side mounter binary built from this crate
+- `bins/motlie-vfs-guest.rs` is the v1 guest-side mounter binary built from this crate
 - `examples/` is reserved for harness/demo programs; the guest-side mounter is not just an
   example because it must be packaged into the guest image for v1 testing
 - `client/guest.rs` is the guest-facing orchestration layer above `FuseClient`; example
@@ -2391,7 +2391,7 @@ The guest-side reusable library boundary in `libs/vfs` is:
 
 This means:
 
-- `src/bin/motlie-vfs-guest.rs` should be a thin binary over `client::guest`
+- `bins/motlie-vfs-guest.rs` should be a thin binary over `client::guest`
 - a future `motlie-vmm-guest` binary should also be a thin wrapper over `client::guest`
 - the tiny bootstrap binary, binary-delivery path, and VMM handshake multiplexer remain outside
   `libs/vfs`
@@ -2411,7 +2411,7 @@ The guest agent (~700 lines in the VMM doc) should depend on the public guest-si
 than reimplementing mount orchestration inline. With the library, the guest-mount logic becomes:
 
 ```rust
-// src/bin/motlie-vfs-guest.rs or motlie-vmm-guest main.rs (inside the VM)
+// bins/motlie-vfs-guest.rs or motlie-vmm-guest main.rs (inside the VM)
 use motlie_vfs::client::guest::{GuestMountRunner, GuestMountSpec};
 use motlie_vfs::vsock::VsockClientTransport;
 
