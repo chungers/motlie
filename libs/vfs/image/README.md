@@ -183,16 +183,30 @@ cargo run -p motlie-vfs --example repl_host --features vsock -- \
     --dir /path/to/bob/home
 ```
 
-The host server provides a stdin command loop for overlay mutation:
+The host server provides a rustyline REPL for overlay mutation. Example
+SSH key injection workflow for the `alice-home` tag (uid=1000 gid=1000):
 
 ```
-put credentials alice-home /.ssh/id_ed25519 <key-content>
-put credentials alice-home /.env SECRET=abc
-whiteout credentials alice-home /.bashrc
-ls alice-home
-rm credentials alice-home /.env
-quit
+vfs> layer credentials 0
+ok: layer credentials priority=0
+
+vfs> putattr credentials alice-home /.ssh/authorized_keys 1000 1000 600 ssh-ed25519 AAAA... alice@dev
+ok: putattr credentials alice-home /.ssh/authorized_keys uid=1000 gid=1000 mode=600 (38 bytes)
+
+vfs> putattr credentials alice-home /.ssh/config 1000 1000 644 Host github.com
+ok: putattr credentials alice-home /.ssh/config uid=1000 gid=1000 mode=644 (19 bytes)
+
+vfs> put credentials alice-home /.env ANTHROPIC_API_KEY=sk-ant-xxx
+ok: put credentials alice-home /.env (31 bytes)
+
+vfs> ls alice-home
+  Content { size: 38 } /.ssh/authorized_keys uid=1000 gid=1000 mode=600
+  Content { size: 19 } /.ssh/config uid=1000 gid=1000 mode=644
+  Content { size: 31 } /.env uid=0 gid=0 mode=644
+(3 entries)
 ```
+
+Type `help` for all available commands.
 
 ### 7. Shut down the guest
 
