@@ -115,10 +115,10 @@ file target/x86_64-unknown-linux-musl/release/motlie-vfs-guest
 ### 3. Build the guest images
 
 ```bash
-cd libs/vfs/image
+cd libs/vfs/examples/v1
 
 # Pass the cross-compiled binary explicitly, or let the script find it
-./build-guest.sh --guest-binary ../../target/x86_64-unknown-linux-musl/release/motlie-vfs-guest
+./build-guest.sh --guest-binary ../../../../target/x86_64-unknown-linux-musl/release/motlie-vfs-guest
 
 # Output:
 #   artifacts/rootfs.squashfs  (~30-50 MB)
