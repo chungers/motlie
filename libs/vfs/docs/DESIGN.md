@@ -2305,7 +2305,7 @@ ensure_vm("alice")
   │
   ├─ create overlay.ext4
   │   inject: CA keys, principals,
-  │   mounts.toml, env
+  │   mounts.yaml, env
   │
   ├─ spawn passt (memfd, in netns)
   ├─ spawn firecracker (memfd, in netns)
@@ -2331,7 +2331,7 @@ ensure_vm("alice")
   │   → send guest agent binary (~3MB)         │      │   receive binary → /tmp (tmpfs)
   │                                            │      │   exec into guest agent (same PID)
   │                                            │      │
-  ├─ FsServer ready  ◄────────────────────────│      ├─ read /etc/motlie-vmm/mounts.toml
+  ├─ FsServer ready  ◄────────────────────────│      ├─ read /etc/motlie-vmm/mounts.yaml
   │   (mounts registered, overlay layers set)  │      │
   │                                            │      ├─ for each mount in config:
   │   HandshakeMsg::Fs { tag }  ◄──────────────│      │   connect vsock:5000
@@ -2419,7 +2419,7 @@ const HOST_CID: u32 = 2;
 const VMM_PORT: u32 = 5000;
 
 fn main() {
-    let config: MountConfig = read_toml("/etc/motlie-vmm/mounts.toml");
+    let config: MountConfig = read_yaml("/etc/motlie-vmm/mounts.yaml");
     let specs: Vec<GuestMountSpec> = config.mounts.into_iter()
         .map(|m| GuestMountSpec::new(m.tag, m.guest_path).read_only(m.read_only))
         .collect();
@@ -2481,14 +2481,14 @@ overlay.put("credentials", "home", "/.env", Bytes::from(format!(
     anthropic_key, openai_key,
 )))?;
 
-// Write mounts.toml for guest agent to read from overlay ext4
+// Write mounts.yaml for guest agent to read from overlay ext4
 let mounts_config = MountConfig {
     mounts: vec![
         MountEntry { tag: "home", guest_path: "/root", read_only: false },
         MountEntry { tag: "scratch", guest_path: "/tmp", read_only: false },
     ],
 };
-inject_into_overlay(&overlay_ext4, "/etc/motlie-vmm/mounts.toml", &mounts_config)?;
+inject_into_overlay(&overlay_ext4, "/etc/motlie-vmm/mounts.yaml", &mounts_config)?;
 
 // Start vsock listener — dispatch connections to FsServer
 let server = Arc::new(server);
