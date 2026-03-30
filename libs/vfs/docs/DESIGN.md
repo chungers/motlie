@@ -2240,7 +2240,7 @@ The test guest image should include:
 The exact image-builder implementation can vary, but the v1 contract is that the repo must
 include a reproducible way to:
 
-- build `cargo build -p motlie-vfs --bin motlie-vfs-guest`
+- build `cross build --release --target x86_64-unknown-linux-musl --features vsock,client -p motlie-vfs --bin motlie-vfs-guest`
 - stage or embed that binary into the guest image artifacts
 - build or refresh the guest image for local testing
 

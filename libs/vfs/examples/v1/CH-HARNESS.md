@@ -59,13 +59,13 @@ The guest binary must be a statically-linked x86_64 Linux ELF. From macOS:
 ```bash
 # Option A: Using cross (recommended — Docker-based, zero setup)
 cargo install cross --git https://github.com/cross-rs/cross
-cross build --release --target x86_64-unknown-linux-musl -p motlie-vfs --bin motlie-vfs-guest
+cross build --release --target x86_64-unknown-linux-musl --features vsock,client -p motlie-vfs --bin motlie-vfs-guest
 
 # Option B: Using homebrew musl-cross
 brew install filosottile/musl-cross/musl-cross
 rustup target add x86_64-unknown-linux-musl
 CC_x86_64_unknown_linux_musl="x86_64-linux-musl-gcc" \
-    cargo build --release --target x86_64-unknown-linux-musl -p motlie-vfs --bin motlie-vfs-guest
+    cargo build --release --target x86_64-unknown-linux-musl --features vsock,client -p motlie-vfs --bin motlie-vfs-guest
 ```
 
 The image build itself (`build-guest.sh`) must run on Linux because it uses
@@ -105,7 +105,7 @@ cp arch/x86/boot/compressed/vmlinux.bin /path/to/libs/vfs/examples/v1/artifacts/
 
 ```bash
 # From the workspace root, on macOS or Linux
-cross build --release --target x86_64-unknown-linux-musl -p motlie-vfs --bin motlie-vfs-guest
+cross build --release --target x86_64-unknown-linux-musl --features vsock,client -p motlie-vfs --bin motlie-vfs-guest
 
 # Verify it's a static musl binary
 file target/x86_64-unknown-linux-musl/release/motlie-vfs-guest
