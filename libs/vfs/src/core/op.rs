@@ -36,6 +36,7 @@ pub enum FsResult {
     DirEntries { entries: Vec<DirEntry> },
     Statfs { stats: FsStats },
     Symlink { target: String },
+    Opened { fh: u64 },
     Ok,
     Error { errno: i32 },
 }
@@ -181,6 +182,7 @@ mod tests {
                 },
             },
             FsResult::Symlink { target: "/foo/bar".into() },
+            FsResult::Opened { fh: 42 },
             FsResult::Ok,
             FsResult::Error { errno: 2 },
         ];

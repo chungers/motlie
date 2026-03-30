@@ -1,0 +1,1 @@
+../../claude-harness/motlie/CLAUDE.md
