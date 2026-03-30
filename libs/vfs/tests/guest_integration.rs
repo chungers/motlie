@@ -198,7 +198,7 @@ fn e2e_ssh_subtree_scenario() {
     match request(FsOp::Lookup { parent: 1, name: ".ssh".into() }) {
         FsResult::Entry { attrs, .. } => {
             // .ssh dir inherits uid/gid from the injected children's attrs
-            // (synthetic parents use the uid/gid passed to put)
+            assert_eq!(attrs.kind, FileType::Directory);
         }
         other => panic!("expected Entry, got {:?}", other),
     }

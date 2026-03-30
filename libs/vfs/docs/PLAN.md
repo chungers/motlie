@@ -677,18 +677,18 @@ Per-task reference rule:
 
 - every task in this phase traces to one or more of the DESIGN references listed above unless an individual task states a narrower reference explicitly
 
-- [ ] 5.1.1 Add `motlie-vfs` as a workspace dependency where appropriate.
-- [ ] 5.1.2 Ensure feature flags are cleanly consumable for direct mode, vsock host/guest paths, and future v2 expansion.
+- [x] 5.1.1 Add `motlie-vfs` as a workspace dependency where appropriate.
+- [x] 5.1.2 Ensure feature flags are cleanly consumable for direct mode, vsock host/guest paths, and future v2 expansion.
 - [ ] 5.1.3 Validate the design mapping back to `motlie-vmm`.
-- [ ] 5.1.4 Update related docs after implementation snapshots land.
+- [x] 5.1.4 Update related docs after implementation snapshots land.
 - [ ] 5.1.5 Add an implementation-readiness checklist that maps completed phases back to the DESIGN traceability items.
 - [ ] 5.1.6 Add a small benchmark or measurement harness for metadata latency and large-file throughput.
-- [ ] 5.1.7 Add explicit setup instructions or scripts for building `motlie-vfs-guest` first, then building the stacked-root guest image used in v1 guest tests.
-- [ ] 5.1.8 Add explicit setup instructions or scripts for creating host backing directories and sample disk-backed files for overlay tests.
-- [ ] 5.1.9 Add explicit setup instructions or scripts for starting the host-side `FsServer`, `MemOverlay`, and the v1 in-process REPL/example harness.
-- [ ] 5.1.10 Add explicit embedded admin console or script/config procedures for `put`, `putattr`, `whiteout`, `rm`, `rmlayer`, `ls`, and `lslayer` in the guest-harness workflow.
-- [ ] 5.1.11 Add explicit CH launch/stop commands or scripts, including vsock and block-device wiring for the stacked-root guest image.
-- [ ] 5.1.11a Document the guest boundary explicitly in harness instructions: bootstrap/binary delivery remain VMM-owned, while `bins/motlie-vfs-guest.rs` only exercises the public guest APIs from `client/guest.rs`.
+- [x] 5.1.7 Add explicit setup instructions or scripts for building `motlie-vfs-guest` first, then building the stacked-root guest image used in v1 guest tests.
+- [x] 5.1.8 Add explicit setup instructions or scripts for creating host backing directories and sample disk-backed files for overlay tests.
+- [x] 5.1.9 Add explicit setup instructions or scripts for starting the host-side `FsServer`, `MemOverlay`, and the v1 in-process REPL/example harness.
+- [x] 5.1.10 Add explicit embedded admin console or script/config procedures for `put`, `putattr`, `whiteout`, `rm`, `rmlayer`, `ls`, and `lslayer` in the guest-harness workflow.
+- [x] 5.1.11 Add explicit CH launch/stop commands or scripts, including vsock and block-device wiring for the stacked-root guest image.
+- [x] 5.1.11a Document the guest boundary explicitly in harness instructions: bootstrap/binary delivery remain VMM-owned, while `bins/motlie-vfs-guest.rs` only exercises the public guest APIs from `client/guest.rs`.
 
 Suggested setup snippets to include in this phase:
 
@@ -818,21 +818,21 @@ rm credentials home /.ssh/config
 
 Tests / verification:
 
-- [ ] 5.1.12 Run workspace `cargo check`.
-- [ ] 5.1.13 Run feature-matrix build verification.
-- [ ] 5.1.14 Validate the concrete VMM example: boot static squashfs+ext4 root, mount `/home/alice` through `motlie-vfs`, then inject `/home/alice/.ssh/...` and `/home/alice/.claude/skills/...` dynamically.
-- [ ] 5.1.15 Validate that non-overlaid files inside the mounted subtree continue to pass through unchanged.
+- [x] 5.1.12 Run workspace `cargo check`.
+- [x] 5.1.13 Run feature-matrix build verification.
+- [ ] 5.1.14 Validate the concrete VMM example: boot static squashfs+ext4 root, mount `/home/alice` through `motlie-vfs`, then inject `/home/alice/.ssh/...` and `/home/alice/.claude/skills/...` dynamically (requires Linux).
+- [x] 5.1.15 Validate that non-overlaid files inside the mounted subtree continue to pass through unchanged (verified in `e2e_ssh_subtree_scenario` test).
 - [ ] 5.1.16 Record baseline latency measurements for small metadata operations over Unix sockets.
 - [ ] 5.1.17 Record baseline throughput measurements for large sequential reads/writes over Unix sockets.
-- [ ] 5.1.18 Validate operator-facing path contract examples for both `home + /alice/...` and `alice-home + /.claude/...` forms.
-- [ ] 5.1.19 Validate explicit synthetic ownership by injecting entries for provisioned guest users and checking guest-visible `uid`/`gid`.
-- [ ] 5.1.20 Validate the `whiteout` / tombstone workflow hides lower disk files from the guest.
-- [ ] 5.1.21 Validate the `rm` workflow removes injected synthetic files from the guest view.
-- [ ] 5.1.22 Validate SSH guest access against the v1 test image where applicable.
-- [ ] 5.1.23 Validate the documented CH launch and stop procedure from a clean host environment.
-- [ ] 5.1.24 Document the remaining v1 limitation that a shared `(tag, path)` entry cannot present different uid/gid ownership to different guests simultaneously.
-- [ ] 5.1.25 Validate the in-process VMM/REPL hosting pattern: a Tokio task can call `server.overlay()` directly while filesystem serving remains active.
-- [ ] 5.1.26 Validate the Cloud Hypervisor fast-path harness as the pre-VMM guest development environment for the vsock flow.
+- [x] 5.1.18 Validate operator-facing path contract examples for both `home + /alice/...` and `alice-home + /.claude/...` forms (verified in `e2e_ssh_subtree_scenario` and `e2e_multi_tag_isolation` tests).
+- [x] 5.1.19 Validate explicit synthetic ownership by injecting entries for provisioned guest users and checking guest-visible `uid`/`gid` (verified in `e2e_ssh_subtree_scenario` test).
+- [x] 5.1.20 Validate the `whiteout` / tombstone workflow hides lower disk files from the guest (verified in `e2e_ssh_subtree_scenario` test).
+- [x] 5.1.21 Validate the `rm` workflow removes injected synthetic files from the guest view (verified in `e2e_ssh_subtree_scenario` test).
+- [ ] 5.1.22 Validate SSH guest access against the v1 test image where applicable (requires Linux).
+- [ ] 5.1.23 Validate the documented CH launch and stop procedure from a clean host environment (requires Linux).
+- [x] 5.1.24 Document the remaining v1 limitation that a shared `(tag, path)` entry cannot present different uid/gid ownership to different guests simultaneously (documented in DESIGN ownership caveats).
+- [x] 5.1.25 Validate the in-process VMM/REPL hosting pattern: a Tokio task can call `server.overlay()` directly while filesystem serving remains active (verified in `in_process_overlay_mutation_while_serving` test).
+- [ ] 5.1.26 Validate the Cloud Hypervisor fast-path harness as the pre-VMM guest development environment for the vsock flow (requires Linux).
 
 Exit criteria:
 
