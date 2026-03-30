@@ -5,10 +5,10 @@ See [DESIGN.md](./DESIGN.md) for full architectural context and requirements.
 
 ## Status
 
-- Phases 1.1–1.3, 2.1–2.2, 4.1: **complete** (PRs #118, #120)
+- Phases 1.1–1.3, 2.1–2.2, 4.1: **complete** (PRs #118, #120, #121)
 - Phase 2.3: not started
-- Phase 4.2: not started — **critical path** for real FUSE mount
-- Phase 5.1 (v1 subset): not started — operational harness
+- Phase 4.2: **in progress** — FuseClient, GuestMountRunner, guest binary implemented; tests and build checks remaining
+- Phase 5.1 (v1 subset): **in progress** — CH image builder and launch scripts delivered; simple_host REPL and end-to-end validation remaining
 
 76 tests passing (64 unit + 12 transport integration), 0 warnings.
 
@@ -174,7 +174,7 @@ Design references: [v1: libs/vfs Core Crate + Proof of Concept Examples](./DESIG
 - [ ] 4.1.7 Add a Cloud Hypervisor-backed smoke test or documented harness procedure.
 - [ ] 4.1.8 Add explicit documented steps or scripts for launching a CH guest.
 
-### 4.2 Phase 9: FUSE Client — not started, critical path
+### 4.2 Phase 9: FUSE Client — in progress
 
 Design references: [FR-1: Cross-Platform FUSE Client](./DESIGN.md), [Guest-Side API Boundary](./DESIGN.md), [API Design](./DESIGN.md)
 
@@ -190,7 +190,7 @@ Primary file targets: `libs/vfs/src/client/fuse.rs`, `libs/vfs/src/client/guest.
 - [x] 4.2.5c Keep `bins/motlie-vfs-guest.rs` thin: call `GuestMountRunner` rather than reimplementing.
 - [ ] 4.2.6 Add callback translation unit tests.
 - [ ] 4.2.7 Add mock transport tests.
-- [x] 4.2.7a Add unit tests for `GuestMountRunner` using mock transport/connector closures.
+- [ ] 4.2.7a Add unit tests for `GuestMountRunner` using mock transport/connector closures.
 - [ ] 4.2.8 Add FUSE integration tests where the environment supports it.
 - [x] 4.2.9 macOS FUSE-T is v2 roadmap work, not a v1 requirement.
 - [ ] 4.2.10 Add an end-to-end mounted-subtree scenario.

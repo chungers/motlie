@@ -579,17 +579,17 @@ Per-task reference rule:
 
 - every task in this phase traces to one or more of the DESIGN references listed above unless an individual task states a narrower reference explicitly
 
-- [ ] 4.1.1 Implement bincode-over-stream request/response handling.
-- [ ] 4.1.2 Implement `VsockConnectionHandler`.
-- [ ] 4.1.3 Implement `VsockClientTransport`.
-- [ ] 4.1.4 Preserve the boundary that VMM handshake remains outside this crate.
+- [x] 4.1.1 Implement bincode-over-stream request/response handling.
+- [x] 4.1.2 Implement `VsockConnectionHandler`.
+- [x] 4.1.3 Implement `VsockClientTransport`.
+- [x] 4.1.4 Preserve the boundary that VMM handshake remains outside this crate.
 
 Tests / verification:
 
-- [ ] 4.1.5 Add duplex transport tests for handler and guest transport adapter.
-- [ ] 4.1.6 Add parity tests versus direct server-core behavior.
-- [ ] 4.1.7 Add a Cloud Hypervisor-backed smoke test or documented harness procedure for guest boot + vsock mount + overlay visibility.
-- [ ] 4.1.8 Add explicit documented steps or scripts for launching a CH guest with vsock and the stacked-root test image.
+- [x] 4.1.5 Add duplex transport tests for handler and guest transport adapter.
+- [x] 4.1.6 Add parity tests versus direct server-core behavior.
+- [x] 4.1.7 Add a Cloud Hypervisor-backed smoke test or documented harness procedure for guest boot + vsock mount + overlay visibility.
+- [x] 4.1.8 Add explicit documented steps or scripts for launching a CH guest with vsock and the stacked-root test image.
 
 Exit criteria:
 
