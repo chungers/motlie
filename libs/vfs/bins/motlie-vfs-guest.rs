@@ -1,14 +1,25 @@
 //! motlie-vfs-guest: v1 guest-side mounter binary.
 //!
-//! Reads a mount config from a JSON file, uses GuestMountRunner to mount
-//! all specified guest paths. VMM handshake and stream acquisition are
-//! caller-provided — this binary demonstrates the library guest API.
+//! Reads a mount config from a YAML file, connects to the host FsServer
+//! over vsock, and mounts FUSE filesystems at the configured guest paths.
 //!
 //! Usage: motlie-vfs-guest [/path/to/mounts.yaml]
 //! Default config path: /etc/motlie-vfs/mounts.yaml
+//!
+//! Build for guest:
+//!   cross build --release --target x86_64-unknown-linux-musl \
+//!       -p motlie-vfs --bin motlie-vfs-guest --features vsock,client
 
 use anyhow::Result;
 use motlie_vfs::client::guest::{GuestMountRunner, GuestMountSpec};
+
+/// Host CID for vsock (always 2 in the guest→host direction).
+#[cfg(all(feature = "vsock", feature = "client"))]
+const HOST_CID: u32 = 2;
+
+/// Port the host FsServer listens on via the vsock socket.
+#[cfg(all(feature = "vsock", feature = "client"))]
+const VMM_PORT: u32 = 5000;
 
 #[derive(serde::Deserialize)]
 struct MountConfig {
@@ -44,16 +55,55 @@ fn main() -> Result<()> {
         eprintln!("  tag={} path={} ro={}", spec.tag, spec.guest_path, spec.read_only);
     }
 
-    // In production, mount_all() with a real vsock connector would be used here.
-    // For now, use the stub which creates mount point directories but doesn't
-    // actually mount FUSE filesystems.
     let runner = GuestMountRunner::new(specs);
-    let handles = runner.mount_all_stub()?;
 
-    let results = handles.join_all();
-    for (i, result) in results.iter().enumerate() {
-        if let Err(e) = result {
-            eprintln!("mount {} failed: {e}", i);
+    // On Linux with the vsock + client features, use the real FUSE mount path.
+    // The connector closure:
+    // 1. Opens a vsock connection to the host (CID 2, port 5000)
+    // 2. Returns a VsockClientTransport ready for FsOp/FsResult exchange
+    //
+    // Note: VMM-level handshake (HandshakeMsg::Fs { tag }) is outside this
+    // crate. In the v1 CH harness, the host side dispatches by the vsock
+    // port convention (one port per tag, or a multiplexer). For the simplest
+    // v1 test, the host serves a single tag on port 5000.
+    #[cfg(all(feature = "vsock", feature = "client"))]
+    {
+        use motlie_vfs::vsock::client::VsockClientTransport;
+
+        let handles = runner.mount_all(|tag: &str| {
+            // Create a Tokio runtime for the async vsock connect
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+
+            let tag = tag.to_string();
+            let stream = rt.block_on(async {
+                tokio_vsock::VsockStream::connect(HOST_CID, VMM_PORT).await
+            })?;
+
+            Ok(VsockClientTransport::new(stream, &tag))
+        })?;
+
+        eprintln!("motlie-vfs-guest: all mounts started, waiting...");
+        let results = handles.join_all();
+        for (i, result) in results.iter().enumerate() {
+            if let Err(e) = result {
+                eprintln!("mount {} failed: {e}", i);
+            }
+        }
+        return Ok(());
+    }
+
+    // Fallback: no vsock+client features — use stub for testing
+    #[cfg(not(all(feature = "vsock", feature = "client")))]
+    {
+        eprintln!("motlie-vfs-guest: vsock+client features not enabled, using stub mounts");
+        let handles = runner.mount_all_stub()?;
+        let results = handles.join_all();
+        for (i, result) in results.iter().enumerate() {
+            if let Err(e) = result {
+                eprintln!("mount {} failed: {e}", i);
+            }
         }
     }
 
