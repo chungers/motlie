@@ -1,7 +1,21 @@
 # Development Process and Conventions
 
-General flow:  DESIGN (requirements/solutions) --> PLAN (phases/tasks) --> Implementation --> API (ux reviews)
-as the iterative core loop.
+ALWAYS confirm with the user your role and identity which can also change in a long session.
+When given an identity (e.g. '@claude-product-manager'), ALWAYS use that handle to self-identify, in commit
+messages, posted comments, issues, and docs.
+ 
+Confirm with the user if the current session is work for greenfield or brownfield in the product sense
+and not in the repo sense.  Greenfield products do not concern with migration.  Ask for guidance so
+so you don't waste time considering issues out of scope of the current task such as migration or backward
+api compatibility.
+
+Iterative Core Loop:
+DESIGN (requirements/solutions)
+  --> PLAN (phases/tasks)
+    --> Implementation
+      --> API and/or CLI (ux reviews)
+        --> VALIDATION (behavioral -- manual or automated)
+Each stage has a clear document deliverable (e.g. DESIGN has docs/DESIGN.md as output).
 
 To iterate quickly: *Think holistically but execute / fix / feedback / change surgically*.
 
@@ -9,14 +23,26 @@ Communication and decisions are made mostly through PR (inline and issue comment
 comments in artficats such as code or markdown comments. Comments must have datetime and self-identifier.
 They must be targeted, actionable, and contain context / links / references so context can be reconstructed.
 
-In general, create a local working branch to track your work.  NEVER stage any commits on files like CLAUDE.md
-or anything unrelated to your current work.
+ALWAYS create a local working branch to track your work. User will give instructions on submitting work.
+
+NEVER stage any commits of harness files (:= CLAUDE.md, AGENTS.md, or SKILL.md), or anything unrelated
+to your current scope of work, without user's explicit approval.
 
 ## Design and Planning Stages
 
 ### DESIGN (docs/DESIGN.md)
 In each project, docs/DESIGN.md documents the problem, and non-goals or related problems that are out of scope.
 DESIGN captures the functional/non-functional requirements, the aligned solution and alteratives considered.
+
+As a collaborator during the DESIGN phase, you always evaluate feasibility of approach, with strict
+considerations on correctness, performance, resilience, no-hack, reuse, proper layering, and elegance.
+During the interactive design session to produce DESIGN.md, you also do extensive research and evaluate
+existing options (e.g. rust crates) to leverage.  You MUST consider counter arguments and identify pitfalls,
+false assumptions, conflicting requirements, possible user confusion when considering design options.
+
+You evaluate third-party dependencies based on fit, maturity, safety, and support.  You always outline the pros
+and cons of each option to the user can decide. Always ask the user if we should include in DESIGN or PLAN so
+important details, contexts, and decisions don't get lost.
 
 DESIGN must include a high-level system design, including data flow analysis, and high level api design.
 
@@ -29,19 +55,28 @@ DESIGN must have at the top of the doc, a Changelog.  Changelog entries should c
 
 Ask the user if you're uncertain the project is 'Greenfield' (a new development) or 'Brownfield.'
 
-If Greenfield,
+If Greenfield, in the product sense (not repo sense),
 DESIGN will not consider migrations or backwards compatibility.
 DESIGN must consider 2-3 alternatives. Perform comprehensive analysis of the pros / cons and document them.
 DESIGN must evaluate alternatives in terms of robustness, correctness, user experience, and operability.
 Approved alternative becomes the main body of the DESIGN.  Alternatives considered go into the appendix.
 
-If Brownfield,
+If Brownfield, in the product sense,
 DESIGN must include migration strategy such as api migration, database migration, and deprecation strategy.
 
 ### PLAN (docs/PLAN.md)
 A PLAN (docs/PLAN.md) considers DESIGN's functional and non-functional requirements and generates a set of tasks.
 Tasks are grouped into logical Phases.  Phases and Tasks must have checkboxes and clear numbering for easy updates
 and tracking during execution.  Task assignments are outside the scope of PLAN.
+
+PLAN must include technical details such as dev or testing harness setup - incluing code snippets, shell scripts,
+or command lines needed to accomplish the task of dev verification.  DESIGN captures the what and why, and PLAN
+contains the detailed how-to, so that implementers and testers can follow without additional context.
+
+Each task in the PLAN must have a checkbox and a reference link back to an appropriate section in DESIGN. The
+PLAN item can contain technical details such as api / interface code snippets to aid execution of the task.
+ALWAYS ensure what's described in PLAN are consistent and accurate with what's in DESIGN.  Flag any exceptions
+or inaccuracies to the user.
 
 PLAN must include comprehensive test plans to verify meeting requirements and DESIGN.  DESIGN can propose but
 PLAN must make them concrete.
@@ -115,14 +150,23 @@ Broader, more general concerns can go into either a separate section (with chang
 ### Reviewing Work
 
 Always check implementation against DESIGN, PLAN, and API, if they are available.
+
 Think holistically (the broad problem) and comment / provide feedback surgically with context and in context.
+
 DESIGN and PLAN are not written in stone, so while reviewing PR, it's useful to step back and look at the big picture.
+However DESIGN and PLAN must be consistent. As a reviewer, you must ensure that there are NO inconsistencies
+or contradictions.  DESIGN and PLAN must have enough detail to leave ZERO AMBIGUITIES to implementation.
+
 API shows the UX of what's implemented.  Validate against DESIGN (functional requirements), PLAN (project tracking),
 and current snapshot of codebase (implementation).
 
-Call out any inconsistencies and inaccuracies in the DESIGN, PLAN, API, or code implementations.
+Call out any inconsistencies and inaccuracies in the DESIGN, PLAN, API, or code implementations. In general,
+the actual behavior and contract of the code, as written, is the source of truth.  Call out any inconsistencies
+or contradictions that you see in these docs -- especially when code and DESIGN conflict.
+ALWAYS flag to the user these inconsistencies and contradictions.
 
-Validate all claims. Comment inline where possible.
+Validate all claims. Comment inline where possible so there's context.  If inline comments are not possible,
+leave detailed issue-level comment with details so that the addresser of the PR reviews can re-establish context.
 
 For more general concerns, use issue comment: be specific (including code location) with actionable proposals.
 Include verdict (accept | ok to merge | needs work) in issue comment.
@@ -132,8 +176,8 @@ If any specific inline concerns are addressed to your satisfaction, resolve them
 ALWAYS identify yourself (e.g. '@codex' | '@claude') when commenting, add datetime and ' -- '.
 
 Be sure your work is tracked in a local working branch.  Stage for commits only files relevant to your tasks
-and NEVER harness files like CLAUDE.md, AGENTS.md, SKILL.md -- they are managed separately.  You can and should
-commit local changes as you go.  If you're reviewing a PR and you generated new content, ask the user for directions.
+and NEVER harness files (CLAUDE.md, AGENTS.md, etc) or files outside current scope of work, without explicit approval.
+Commit local changes as you go. Ask the user what to do with new artifacts generated.
 
 At the end of a round, summarize what you did and get user approval before you post feedback or push commits.
 
@@ -154,9 +198,10 @@ NEVER unilaterally resolve comments using gh api. ALWAYS leave the comments for 
 
 ALWAYS identify yourself (e.g. '@codex' | '@claude') when commenting, add datetime and ' -- '.
 
-Be sure your work is tracked in a local working branch.  Stage for commits only files relevant to your tasks
-and NEVER harness files like CLAUDE.md, AGENTS.md, SKILL.md -- they are managed separately.  You can and should
-commit local changes as you go.  If you're reviewing a PR and you generated new content, ask the user for directions.
+Be sure your work is tracked in a local working branch.  Stage for commits only files relevant to your tasks.
+
+NEVER commit any harness files (CLAUDE.md, AGENTS.md, etc) or files outside current scope of work,
+without explicit approval.  Commit local changes as you go.
 
 At the end of a round, summarize what you did and get user approval before you post feedback or push commits.
 
