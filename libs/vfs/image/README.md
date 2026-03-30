@@ -166,12 +166,21 @@ id alice
 **Start the host server before booting the guest** (or in a separate terminal):
 
 ```bash
-# Starts FsServer + MemOverlay, listens on /tmp/motlie-vfs.vsock_5000.
-# Creates a temp host dir with sample data, or pass a path as arg.
+# Starts one FsServer per guest VM. Each VM gets its own socket.
+# Default: socket /tmp/motlie-vfs.vsock_5000, tag alice-home, temp host dir.
 cargo run -p motlie-vfs --example simple_host --features vsock
 
-# Or with an explicit host directory:
-cargo run -p motlie-vfs --example simple_host --features vsock -- /path/to/host/dir
+# With explicit parameters (for multi-guest, run separate instances):
+cargo run -p motlie-vfs --example simple_host --features vsock -- \
+    --socket /tmp/motlie-vfs-alice.vsock_5000 \
+    --tag alice-home \
+    --dir /path/to/alice/home
+
+# Second guest VM in another terminal:
+cargo run -p motlie-vfs --example simple_host --features vsock -- \
+    --socket /tmp/motlie-vfs-bob.vsock_5000 \
+    --tag bob-home \
+    --dir /path/to/bob/home
 ```
 
 The host server provides a stdin command loop for overlay mutation:
