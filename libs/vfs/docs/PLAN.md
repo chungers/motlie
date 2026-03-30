@@ -735,13 +735,12 @@ ssh-keygen -t ed25519 -N '' -f /tmp/motlie-vfs/id_alice_test
 #    - sshd enabled
 #    - user alice with uid=1000 gid=1000 and home /home/alice
 #    - motlie-vfs-guest installed in the guest image
-#    - a config file such as /etc/motlie-vfs/mounts.json containing:
+#    - a config file such as /etc/motlie-vfs/mounts.toml containing:
 #
-#    {
-#      "mounts": [
-#        { "tag": "alice-home", "guest_path": "/home/alice", "read_only": false }
-#      ]
-#    }
+#    [[mounts]]
+#    tag = "alice-home"
+#    guest_path = "/home/alice"
+#    read_only = false
 #
 #    The image-build script for this phase should make these exact artifacts reproducible.
 

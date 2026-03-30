@@ -8,5 +8,4 @@ pub mod core;
 #[cfg(feature = "vsock")]
 pub mod vsock;
 
-#[cfg(feature = "client")]
 pub mod client;
