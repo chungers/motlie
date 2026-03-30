@@ -247,7 +247,7 @@ Server never exits on pipe EOF — guest filesystem connections stay alive.
 `quit` in the input stream is the only command that shuts down the server.
 
 Script files are plain text, one command per line. `#` comments and empty
-lines are skipped. See `libs/vfs/image/setup-alice.sh.vfs` for an example.
+lines are skipped. See `libs/vfs/examples/v1/setup-alice.sh.vfs` for an example.
 
 Commands: `layer`, `rmlayer`, `layers`, `put`, `putattr`, `mkdir`,
 `whiteout`, `rm`, `get`, `ls`, `lslayer`, `help`, `quit`.

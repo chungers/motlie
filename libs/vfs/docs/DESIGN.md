@@ -102,7 +102,7 @@ v1 lives inside `libs/vfs` and targets the fastest proof of concept:
   - guest mounts host-backed trees over vsock
 - repo location for the proof-of-concept harness:
   - `libs/vfs/examples/` (host side)
-  - `libs/vfs/image/` (guest image build + CH launch scripts)
+  - `libs/vfs/examples/v1/` (guest image build + CH launch scripts)
 - REPL/tooling choice:
   - `rustyline` for interactive mode
   - stdin pipe support for scripted/agent-driven setups
@@ -128,7 +128,7 @@ In all modes, `quit` in the input stream shuts down the server immediately. The 
 exits on pipe EOF — guest filesystem connections remain active.
 
 Script files are plain text, one command per line. Lines starting with `#` are comments.
-See `libs/vfs/image/setup-alice.sh.vfs` for an example.
+See `libs/vfs/examples/v1/setup-alice.sh.vfs` for an example.
 
 ### v1.5: Embedded Admin Console + Script / Config Ingestion
 

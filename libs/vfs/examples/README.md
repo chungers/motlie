@@ -67,7 +67,8 @@ cat setup-alice.sh.vfs | cargo run -p motlie-vfs --example repl_host --features 
 ### Script files
 
 Script files are plain text, one command per line. Lines starting with
-`#` are comments. Empty lines are skipped. See `image/setup-alice.sh.vfs`
+`#` are comments. Empty lines are skipped. See `v1/setup-alice.sh.vfs`
 for an example.
 
-See `libs/vfs/image/README.md` for the full Cloud Hypervisor setup.
+See `v1/README.md` for the full end-to-end flow and `v1/CH-HARNESS.md`
+for the Cloud Hypervisor setup.
