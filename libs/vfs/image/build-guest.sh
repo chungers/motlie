@@ -179,8 +179,12 @@ mkdir -p "$OVERLAY_SEED/work"
 # Copy the mount config
 cp "$SCRIPT_DIR/mounts.yaml" "$OVERLAY_SEED/upper/etc/motlie-vfs/mounts.yaml"
 
-# Create alice's home directory structure
-mkdir -p "$OVERLAY_SEED/upper/home/alice"
+# Create alice's home directory structure and mount points.
+# These directories must exist for the guest mounter to mount onto them.
+# uid=1000 gid=1000 matches the alice user in the squashfs image.
+mkdir -p "$OVERLAY_SEED/upper/home/alice/.ssh"
+mkdir -p "$OVERLAY_SEED/upper/home/alice/workspace"
+chmod 700 "$OVERLAY_SEED/upper/home/alice/.ssh"
 
 # Build ext4 image from the seed directory (no sudo/mount needed)
 truncate -s "$OVERLAY_SIZE" "$ARTIFACTS/overlay.ext4"
