@@ -96,19 +96,39 @@ v1 lives inside `libs/vfs` and targets the fastest proof of concept:
   - `FuseClient` in `client/fuse.rs`
   - backed by a vsock transport adapter from `vsock/`
 - proof-of-concept host/guest harness:
-  - simple in-process REPL or command loop
-  - file serving
-  - Cloud Hypervisor guest
-  - guest runs `sshd`
+  - `repl_host` example: FsServer + MemOverlay + vsock listener + admin command interface
+  - Cloud Hypervisor guest with squashfs+ext4 stacked root
+  - guest runs `sshd` and `motlie-vfs-guest`
   - guest mounts host-backed trees over vsock
 - repo location for the proof-of-concept harness:
-  - `libs/vfs/examples/`
+  - `libs/vfs/examples/` (host side)
+  - `libs/vfs/image/` (guest image build + CH launch scripts)
 - REPL/tooling choice:
-  - use the lightweight `rustyline` crate for the v1 proof-of-concept REPL
+  - `rustyline` for interactive mode
+  - stdin pipe support for scripted/agent-driven setups
 
 The v1 crate is library-first, but it is allowed to include example binaries and supporting
 README/documentation under `libs/vfs/examples/` to prove the architecture quickly. The host
-REPL lives in the host example binary; there is no separate v1 crate module for a REPL.
+admin interface lives in the `repl_host` example binary; there is no separate v1 crate module
+for admin.
+
+**Host admin input modes:**
+
+The `repl_host` example auto-detects how stdin is connected:
+
+- **Interactive** (stdin is a TTY): rustyline REPL with line editing, history, ^C handling.
+  Server runs until `quit` or Ctrl-D.
+- **Pipe then interactive** (`cat script.vfs - | repl_host ...`): executes piped commands
+  line by line, then reopens `/dev/tty` for interactive REPL. Server keeps running throughout.
+- **Pure pipe** (`cat script.vfs | repl_host ...`): executes piped commands, then server
+  keeps running and serving guest connections until SIGTERM/SIGINT. Use this for
+  automated/agent-driven setups where no human operator is present.
+
+In all modes, `quit` in the input stream shuts down the server immediately. The server never
+exits on pipe EOF — guest filesystem connections remain active.
+
+Script files are plain text, one command per line. Lines starting with `#` are comments.
+See `libs/vfs/image/setup-alice.sh.vfs` for an example.
 
 ### v1.5: Embedded Admin Console + Script / Config Ingestion
 
@@ -1204,7 +1224,7 @@ libs/vfs/
 ├── docs/
 │   └── DESIGN.md                 # this document
 ├── examples/
-│   ├── repl_host.rs            # proof-of-concept host server + rustyline REPL
+│   ├── repl_host.rs            # host server: FsServer + vsock + admin REPL (interactive/pipe/signal)
 │   └── README.md                 # Cloud Hypervisor proof-of-concept instructions
 ├── bins/
 │   └── motlie-vfs-guest.rs       # v1 guest-side mounter binary over public guest APIs

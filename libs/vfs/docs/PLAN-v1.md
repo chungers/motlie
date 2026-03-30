@@ -228,6 +228,31 @@ Design references: [v1: libs/vfs Core Crate + Proof of Concept Examples](./DESIG
 
 ---
 
+## Host Admin Interface (`repl_host`)
+
+The v1 host admin is entirely in-process — no network admin connections.
+The `repl_host` example binary (`libs/vfs/examples/repl_host.rs`) provides:
+
+- `FsServer` + `MemOverlay` serving guest filesystem connections over vsock
+- Command interface exposing every `MemOverlay` API operation
+- Three input modes auto-detected from stdin:
+
+| Mode | Invocation | After input ends |
+|------|-----------|-----------------|
+| Interactive | `repl_host --tag ...` | rustyline REPL until `quit` or Ctrl-D |
+| Pipe + TTY | `cat script.vfs - \| repl_host` | execute script, then interactive REPL |
+| Pure pipe | `cat script.vfs \| repl_host` | execute script, then serve until SIGTERM/SIGINT |
+
+Server never exits on pipe EOF — guest filesystem connections stay alive.
+`quit` in the input stream is the only command that shuts down the server.
+
+Script files are plain text, one command per line. `#` comments and empty
+lines are skipped. See `libs/vfs/image/setup-alice.sh.vfs` for an example.
+
+Commands: `layer`, `rmlayer`, `layers`, `put`, `putattr`, `mkdir`,
+`whiteout`, `rm`, `get`, `ls`, `lslayer`, `help`, `quit`.
+See `libs/vfs/examples/README.md` for full documentation.
+
 ## Delivery Order
 
 1. ~~1.1 → 1.2 → 1.3~~ (done)
