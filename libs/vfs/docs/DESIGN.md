@@ -751,9 +751,14 @@ The protocol layer must be parameterized by encoding so that alternative formats
 protobuf) can be substituted without changing the frame types or server/client logic.
 
 ### FR-4: Tag-Based Mount Routing
-A single server instance serves multiple mount points, each identified by a string tag
-(e.g. `workspace`, `cred-claude`). Each client connection binds to exactly one tag via a
-handshake. In v1, the server maps each tag to a mount stack whose base layer is host-backed.
+A single server instance serves multiple mount points for one guest VM, each identified by a
+string tag (e.g. `workspace`, `cred-claude`). Each client connection binds to exactly one tag
+via a handshake. In v1, the server maps each tag to a mount stack whose base layer is host-backed.
+
+**Guest isolation model:** Each guest VM gets its own `FsServer` instance and its own vsock
+socket. Tags identify mounted subtrees within that VM's server. For multiple guests, the host
+runs separate `FsServer` instances with separate vsock sockets — one per VM. There is no
+shared `FsServer` across VMs in v1.
 
 ### FR-5: Dynamic Mount Management
 Mounts can be added to or removed from a running server. Adding a mount registers a new
@@ -2490,7 +2495,9 @@ let mounts_config = MountConfig {
 };
 inject_into_overlay(&overlay_ext4, "/etc/motlie-vmm/mounts.yaml", &mounts_config)?;
 
-// Start vsock listener — dispatch connections to FsServer
+// Start vsock listener — one FsServer per guest VM, one socket per VM.
+// For multiple guests, the VMM daemon creates separate FsServer instances
+// with separate vsock sockets parameterized by CID or VM name.
 let server = Arc::new(server);
 tokio::spawn({
     let server = server.clone();

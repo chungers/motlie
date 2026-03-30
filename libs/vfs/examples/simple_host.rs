@@ -1,16 +1,19 @@
 //! simple_host: proof-of-concept host server for the v1 CH harness.
 //!
-//! Starts an FsServer with MemOverlay, listens on a Unix socket (simulating
-//! the vsock host-side path), and serves filesystem operations to connecting
-//! guests. Includes a simple stdin command loop for overlay mutation.
+//! Starts one FsServer per guest VM with MemOverlay, listens on a
+//! parameterized Unix socket (the vsock host-side path), and serves
+//! filesystem operations. Includes a stdin command loop for overlay mutation.
+//!
+//! Each guest VM gets its own FsServer instance and its own vsock socket.
+//! Tags identify mounted subtrees within that VM's server.
 //!
 //! Usage:
-//!   cargo run -p motlie-vfs --example simple_host --features vsock
+//!   cargo run -p motlie-vfs --example simple_host --features vsock -- [options]
 //!
-//! By default:
-//!   - Mounts a host directory at tag "alice-home"
-//!   - Listens on /tmp/motlie-vfs.vsock_5000 (CH vsock convention)
-//!   - Enables overlay with a "credentials" layer
+//! Options:
+//!   --socket <path>   vsock socket path (default: /tmp/motlie-vfs.vsock_5000)
+//!   --tag <name>      mount tag (default: alice-home)
+//!   --dir <path>      host backing directory (default: temp dir with sample data)
 //!
 //! Commands (stdin):
 //!   put <layer> <tag> <path> <content>   — inject a file
@@ -30,17 +33,29 @@ use tokio::net::UnixListener;
 use motlie_vfs::core::server::FsServer;
 use motlie_vfs::vsock::handler::VsockConnectionHandler;
 
-/// Default vsock socket path (CH convention: <base>_<port>).
-const VSOCK_SOCKET: &str = "/tmp/motlie-vfs.vsock_5000";
-
-/// Default tag for the test mount.
-const DEFAULT_TAG: &str = "alice-home";
-
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Parse optional host directory from args, default to a tempdir
-    let host_dir = std::env::args().nth(1).map(PathBuf::from);
-    let _tempdir; // keep alive if we create one
+    // Parse arguments
+    let mut socket_path = "/tmp/motlie-vfs.vsock_5000".to_string();
+    let mut tag = "alice-home".to_string();
+    let mut host_dir: Option<PathBuf> = None;
+
+    let args: Vec<String> = std::env::args().collect();
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--socket" if i + 1 < args.len() => { socket_path = args[i + 1].clone(); i += 2; }
+            "--tag" if i + 1 < args.len() => { tag = args[i + 1].clone(); i += 2; }
+            "--dir" if i + 1 < args.len() => { host_dir = Some(PathBuf::from(&args[i + 1])); i += 2; }
+            other => {
+                // Backwards compat: bare arg is host dir
+                host_dir = Some(PathBuf::from(other));
+                i += 1;
+            }
+        }
+    }
+
+    let _tempdir;
     let host_path = match host_dir {
         Some(p) => {
             std::fs::create_dir_all(&p)?;
@@ -49,7 +64,6 @@ async fn main() -> Result<()> {
         None => {
             _tempdir = tempfile::tempdir()?;
             let p = _tempdir.path().to_path_buf();
-            // Seed some test data
             std::fs::create_dir_all(p.join("projects"))?;
             std::fs::write(p.join("projects/README.md"), b"hello from host disk\n")?;
             std::fs::write(p.join(".bashrc"), b"# bashrc\n")?;
@@ -60,30 +74,34 @@ async fn main() -> Result<()> {
 
     eprintln!("=== motlie-vfs simple_host ===");
     eprintln!("Host dir: {}", host_path.display());
-    eprintln!("Tag: {DEFAULT_TAG}");
-    eprintln!("Socket: {VSOCK_SOCKET}");
+    eprintln!("Tag: {tag}");
+    eprintln!("Socket: {socket_path}");
+    eprintln!("");
+    eprintln!("One FsServer per guest VM. Each VM gets its own socket.");
+    eprintln!("For multiple guests, run separate instances with different");
+    eprintln!("--socket and --tag values.");
+    eprintln!("");
 
-    // Build FsServer with overlay
+    // Build FsServer with overlay — one per guest VM
     let server = Arc::new(
         FsServer::builder()
-            .mount(DEFAULT_TAG, host_path, false)
+            .mount(&tag, host_path, false)
             .overlay(true)
             .events(256)
             .build()?,
     );
 
-    // Set up a default credentials layer
     if let Some(overlay) = server.overlay() {
         overlay.put_layer("credentials", 0)?;
         eprintln!("Overlay layer 'credentials' created (priority 0)");
     }
 
     // Remove stale socket
-    let _ = std::fs::remove_file(VSOCK_SOCKET);
+    let _ = std::fs::remove_file(&socket_path);
 
-    // Listen for guest connections on the vsock Unix socket
-    let listener = UnixListener::bind(VSOCK_SOCKET)?;
-    eprintln!("Listening on {VSOCK_SOCKET}");
+    // Listen for guest connections
+    let listener = UnixListener::bind(&socket_path)?;
+    eprintln!("Listening on {socket_path}");
     eprintln!("");
     eprintln!("Commands: put <layer> <tag> <path> <content>");
     eprintln!("          whiteout <layer> <tag> <path>");
@@ -94,13 +112,14 @@ async fn main() -> Result<()> {
 
     // Spawn the connection acceptor
     let server_for_accept = Arc::clone(&server);
+    let tag_for_accept = tag.clone();
     tokio::spawn(async move {
         loop {
             match listener.accept().await {
                 Ok((stream, _addr)) => {
                     let handler = VsockConnectionHandler::new(
                         Arc::clone(&server_for_accept),
-                        DEFAULT_TAG,
+                        &tag_for_accept,
                     );
                     tokio::spawn(async move {
                         if let Err(e) = handler.serve(stream).await {
@@ -116,7 +135,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Simple stdin command loop for overlay mutation
+    // Stdin command loop for overlay mutation (in-process admin, no network)
     let stdin = tokio::io::stdin();
     let mut reader = BufReader::new(stdin);
     let mut line = String::new();
@@ -125,7 +144,7 @@ async fn main() -> Result<()> {
         line.clear();
         use tokio::io::AsyncBufReadExt;
         match reader.read_line(&mut line).await {
-            Ok(0) => break, // EOF
+            Ok(0) => break,
             Ok(_) => {}
             Err(e) => {
                 eprintln!("stdin error: {e}");
@@ -147,8 +166,6 @@ async fn main() -> Result<()> {
                         Ok(()) => eprintln!("put {layer} {tag} {path} ({} bytes)", content.len()),
                         Err(e) => eprintln!("error: {e}"),
                     }
-                } else {
-                    eprintln!("overlay not enabled");
                 }
             }
             "whiteout" if parts.len() >= 4 => {
@@ -192,7 +209,6 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Clean up socket
-    let _ = std::fs::remove_file(VSOCK_SOCKET);
+    let _ = std::fs::remove_file(&socket_path);
     Ok(())
 }
