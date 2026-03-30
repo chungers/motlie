@@ -8,7 +8,7 @@
 | 2026-03-28 | @codex-pm | Address PR #117 review feedback: convert DESIGN links to relative paths, fix phase/task numbering, and make the v2 RPC phase specification-oriented instead of implementation-oriented |
 | 2026-03-28 | @codex-pm | Align the plan title with the product framing: layered guest filesystem composition rather than transport plumbing |
 | 2026-03-28 | @codex-pm | Resolve guest boundary in PLAN: bootstrap/binary delivery stay VMM-owned, `client/guest.rs` owns guest mount orchestration, and the real guest binary must stay a thin wrapper over public guest APIs |
-| 2026-03-28 | @codex-pm | Treat the guest-side mounter as a real v1 binary: move it from `examples/` to `src/bin/motlie-vfs-guest.rs` and make build-before-image assembly explicit in the plan |
+| 2026-03-28 | @codex-pm | Treat the guest-side mounter as a real v1 binary: move it from `examples/` to `bins/motlie-vfs-guest.rs` and make build-before-image assembly explicit in the plan |
 | 2026-03-28 | @codex-pm | Resolve v1 module split in PLAN: `client/fuse.rs` owns `FuseClient`, `vsock/` owns transport/handler glue, and `libs/vfs/examples/` contains the host REPL and guest harness binaries |
 | 2026-03-28 | @codex-pm | Add v1 memfs concurrency work: batch-first API, per-tag atomic snapshot publish, non-transactional base layer semantics, and implementation scaffolding for helper crates not chosen as foundations |
 | 2026-03-28 | @codex-pm | Converge PLAN on the ordered layer-stack model: per-mount stacks in v1 are `N` memfs layers plus one disk base, with shared named layers spanning multiple mount tags via `(layer, tag, path)` keys |
@@ -164,7 +164,7 @@ Primary file targets:
 - `Cargo.toml`
 - `libs/vfs/Cargo.toml`
 - `libs/vfs/src/lib.rs`
-- `libs/vfs/src/bin/motlie-vfs-guest.rs`
+- `libs/vfs/bins/motlie-vfs-guest.rs`
 - `libs/vfs/src/core/mod.rs`
 - `libs/vfs/src/client/mod.rs`
 - `libs/vfs/src/client/guest.rs`
@@ -186,7 +186,7 @@ Per-task reference rule:
 <!-- @claude-dev 2026-03-28 -- deferred: rustyline is only needed when the REPL has behavior to wire; adding the dep now would be dead weight. Will add in Phase 5.1 when simple_host.rs gets its REPL loop. -->
 - [x] 1.1.6a Add `libs/vfs/examples/simple_host.rs` and `libs/vfs/examples/README.md` scaffolding so the v1 examples location matches the DESIGN exactly.
 - [x] 1.1.6b Add `libs/vfs/src/client/guest.rs` scaffolding so guest-side orchestration has a stable public API distinct from `FuseClient`.
-- [x] 1.1.6c Add `libs/vfs/src/bin/motlie-vfs-guest.rs` scaffolding as the real v1 guest-side mounter binary over the public guest APIs.
+- [x] 1.1.6c Add `libs/vfs/bins/motlie-vfs-guest.rs` scaffolding as the real v1 guest-side mounter binary over the public guest APIs.
 
 Tests / verification:
 
@@ -307,29 +307,29 @@ Per-task reference rule:
 
 - every task in this phase traces to one or more of the DESIGN references listed above unless an individual task states a narrower reference explicitly
 
-- [ ] 2.1.1 Implement `FsServerBuilder`.
-- [ ] 2.1.2 Implement mount registration and lookup by tag.
-- [ ] 2.1.3 Implement direct host filesystem handling for `Lookup`, `Getattr`, `Setattr`, `Readdir`, `Open`, `Read`, `Write`, `Create`, `Mkdir`, `Unlink`, `Rmdir`, `Rename`, `Symlink`, `Readlink`, `Release`, `Fsync`, and `Statfs`.
-- [ ] 2.1.4 Implement read-only mount enforcement.
-- [ ] 2.1.5 Emit events through broadcast channel.
-- [ ] 2.1.5a Ensure `FsOpKind` covers every emitted server operation, including `Setattr` and `Readdir`, so FR-6 remains mechanically enforceable.
-- [ ] 2.1.6 Call policy hooks consistently.
-- [ ] 2.1.7 Keep mount/backing representation narrow enough that a future non-disk mount type can be introduced without redesigning `MemOverlay`.
-- [ ] 2.1.8 Introduce an internal mount-state abstraction that separates tag identity, overlay state, inode state, and fallback backing.
-- [ ] 2.1.9 Confine `std::fs` path resolution and direct disk operations to backing-oriented helpers or modules, not generic overlay/server entry points.
-- [ ] 2.1.10 Represent each mount tag internally as an ordered stack with one base-layer slot and zero-or-more memfs-layer views above it.
+- [x] 2.1.1 Implement `FsServerBuilder`.
+- [x] 2.1.2 Implement mount registration and lookup by tag.
+- [x] 2.1.3 Implement direct host filesystem handling for `Lookup`, `Getattr`, `Setattr`, `Readdir`, `Open`, `Read`, `Write`, `Create`, `Mkdir`, `Unlink`, `Rmdir`, `Rename`, `Symlink`, `Readlink`, `Release`, `Fsync`, and `Statfs`.
+- [x] 2.1.4 Implement read-only mount enforcement.
+- [x] 2.1.5 Emit events through broadcast channel.
+- [x] 2.1.5a Ensure `FsOpKind` covers every emitted server operation, including `Setattr` and `Readdir`, so FR-6 remains mechanically enforceable.
+- [x] 2.1.6 Call policy hooks consistently.
+- [x] 2.1.7 Keep mount/backing representation narrow enough that a future non-disk mount type can be introduced without redesigning `MemOverlay`.
+- [x] 2.1.8 Introduce an internal mount-state abstraction that separates tag identity, overlay state, inode state, and fallback backing.
+- [x] 2.1.9 Confine `std::fs` path resolution and direct disk operations to backing-oriented helpers or modules, not generic overlay/server entry points.
+- [x] 2.1.10 Represent each mount tag internally as an ordered stack with one base-layer slot and zero-or-more memfs-layer views above it.
 
 Tests / verification:
 
-- [ ] 2.1.11 Add integration tests against `tempfile` directories for each `FsOp`.
-- [ ] 2.1.12 Add read-only enforcement tests.
-- [ ] 2.1.13 Add event emission tests.
-- [ ] 2.1.13a Add event-emission coverage proving `Setattr` and `Readdir` produce the expected `FsOpKind`.
-- [ ] 2.1.14 Add multi-tag routing tests covering independent mounted subtrees.
-- [ ] 2.1.15 Add dynamic mount add/remove tests covering tag registration and invalidation behavior.
-- [ ] 2.1.16 Add a design guardrail review checkpoint asserting disk fallback is isolated behind mount/backing logic, not spread through overlay logic.
-- [ ] 2.1.17 Add a source-level verification step (`rg`/review checklist) proving overlay/client modules do not directly call `std::fs` or concatenate raw host-root paths.
-- [ ] 2.1.18 Add a review checkpoint proving every mount tag is modeled as a stack abstraction rather than “overlay + ad hoc disk fallback.”
+- [x] 2.1.11 Add integration tests against `tempfile` directories for each `FsOp`.
+- [x] 2.1.12 Add read-only enforcement tests.
+- [x] 2.1.13 Add event emission tests.
+- [x] 2.1.13a Add event-emission coverage proving `Setattr` and `Readdir` produce the expected `FsOpKind`.
+- [x] 2.1.14 Add multi-tag routing tests covering independent mounted subtrees.
+- [x] 2.1.15 Add dynamic mount add/remove tests covering tag registration and invalidation behavior.
+- [x] 2.1.16 Add a design guardrail review checkpoint asserting disk fallback is isolated behind mount/backing logic, not spread through overlay logic.
+- [x] 2.1.17 Add a source-level verification step (`rg`/review checklist) proving overlay/client modules do not directly call `std::fs` or concatenate raw host-root paths.
+- [x] 2.1.18 Add a review checkpoint proving every mount tag is modeled as a stack abstraction rather than “overlay + ad hoc disk fallback.”
 
 Exit criteria:
 
@@ -360,60 +360,62 @@ Per-task reference rule:
 
 - every task in this phase traces to one or more of the DESIGN references listed above unless an individual task states a narrower reference explicitly
 
-- [ ] 2.2.1 Implement overlay layers with priority ordering.
-- [ ] 2.2.1a Implement memfs-layer ordering as an ordered stack above the base layer for each mount tag.
-- [ ] 2.2.2 Implement `OverlayEntryKind::{Content, Whiteout, SyntheticDir}`.
-- [ ] 2.2.3 Implement `put_layer`, `remove_layer`, and `layers`.
-- [ ] 2.2.4 Implement `OverlayAttrs`, `OverlayMutation`, `apply_batch`, `put`, `put_with_attrs`, `whiteout`, `remove`, `get`, `list_layer`, `resolve`, and `list_effective`.
-- [ ] 2.2.5 Recursively materialize synthetic parent directories.
-- [ ] 2.2.6 Refcount and prune synthetic directories when children disappear.
-- [ ] 2.2.7 Implement generic stack resolution for `lookup`, `getattr`, and `read`: top-down through memfs layers, then base layer.
-- [ ] 2.2.8 Implement generic stack merge for `readdir`: base-layer entries merged upward through memfs layers with whiteout removal semantics.
-- [ ] 2.2.9 Implement mutation semantics for `Unlink`, `Create`, `Mkdir`, `Rmdir`, `Rename`, and `Setattr`.
-- [ ] 2.2.9a Implement the v1 symlink/readlink rule explicitly: symlinks remain base-layer-only, and overlay-managed or synthetic-parent symlink operations return `ENOTSUP`.
-- [ ] 2.2.10 Implement transparent cross-layer rename behavior from the DESIGN.
-- [ ] 2.2.11 Implement inherited synthetic ownership defaults from nearest existing parent or mount root.
-- [ ] 2.2.11a Implement overlay file-handle bookkeeping for overlay-backed opens: synthetic `fh` allocation, `fh -> inode` mapping, `Release`, `Fsync`, and latest-effective-content read behavior.
-- [ ] 2.2.12 Keep overlay node management independent from concrete base-layer implementation details where possible.
-- [ ] 2.2.13 Ensure overlay entry identity, synthetic parent creation, whiteouts, and listings remain defined in terms of tag + mount-relative path rather than disk-path existence.
-- [ ] 2.2.14 Ensure one named memfs layer can hold entries for many tags without path collision.
-- [ ] 2.2.14a Implement per-tag writer serialization for memfs mutation.
-- [ ] 2.2.14b Implement per-tag atomic memfs snapshot publish so one committed batch becomes visible all at once.
-- [ ] 2.2.14c Ensure read-like ops (`lookup`, `getattr`, `read`, `readdir`) use one stable memfs snapshot for the duration of each request.
-- [ ] 2.2.14d Keep batch atomicity scoped to memfs layers only; do not add fake transactional semantics to the base disk layer.
-- [ ] 2.2.14e Use focused helper crates where appropriate for v1 implementation scaffolding:
+- [x] 2.2.1 Implement overlay layers with priority ordering.
+- [x] 2.2.1a Implement memfs-layer ordering as an ordered stack above the base layer for each mount tag.
+- [x] 2.2.2 Implement `OverlayEntryKind::{Content, Whiteout, SyntheticDir}`.
+- [x] 2.2.3 Implement `put_layer`, `remove_layer`, and `layers`.
+- [x] 2.2.4 Implement `OverlayAttrs`, `OverlayMutation`, `apply_batch`, `put`, `put_with_attrs`, `whiteout`, `remove`, `get`, `list_layer`, `resolve`, and `list_effective`.
+- [x] 2.2.5 Recursively materialize synthetic parent directories.
+- [x] 2.2.6 Refcount and prune synthetic directories when children disappear.
+- [x] 2.2.7 Implement generic stack resolution for `lookup`, `getattr`, and `read`: top-down through memfs layers, then base layer.
+- [x] 2.2.8 Implement generic stack merge for `readdir`: base-layer entries merged upward through memfs layers with whiteout removal semantics.
+- [x] 2.2.9 Implement mutation semantics for `Unlink`, `Create`, `Mkdir`, `Rmdir`, `Rename`, and `Setattr`.
+- [x] 2.2.9a Implement the v1 symlink/readlink rule explicitly: symlinks remain base-layer-only, and overlay-managed or synthetic-parent symlink operations return `ENOTSUP`.
+- [x] 2.2.10 Implement transparent cross-layer rename behavior from the DESIGN.
+- [x] 2.2.11 Implement inherited synthetic ownership defaults from nearest existing parent or mount root.
+- [x] 2.2.11a Implement overlay file-handle bookkeeping for overlay-backed opens: synthetic `fh` allocation, `fh -> inode` mapping, `Release`, `Fsync`, and latest-effective-content read behavior.
+- [x] 2.2.12 Keep overlay node management independent from concrete base-layer implementation details where possible.
+- [x] 2.2.13 Ensure overlay entry identity, synthetic parent creation, whiteouts, and listings remain defined in terms of tag + mount-relative path rather than disk-path existence.
+- [x] 2.2.14 Ensure one named memfs layer can hold entries for many tags without path collision.
+- [x] 2.2.14a Implement per-tag writer serialization for memfs mutation.
+- [x] 2.2.14b Implement per-tag atomic memfs snapshot publish so one committed batch becomes visible all at once.
+- [x] 2.2.14c Ensure read-like ops (`lookup`, `getattr`, `read`, `readdir`) use one stable memfs snapshot for the duration of each request.
+- [x] 2.2.14d Keep batch atomicity scoped to memfs layers only; do not add fake transactional semantics to the base disk layer.
+- [x] 2.2.14e Use focused helper crates where appropriate for v1 implementation scaffolding:
   - `arc-swap` for published snapshot pointers
   - `parking_lot` for per-tag writer serialization
   - `bytes` for payload storage
   - optional `slotmap` if stable synthetic node storage benefits from it
-- [ ] 2.2.14f Do not adopt the `vfs` crate or Theseus `memfs` as foundational runtime dependencies.
+- [x] 2.2.14f Do not adopt the `vfs` crate or Theseus `memfs` as foundational runtime dependencies.
 
 Tests / verification:
 
-- [ ] 2.2.15 Add layer priority resolution tests.
-- [ ] 2.2.16 Add synthetic parent creation tests.
-- [ ] 2.2.17 Add whiteout suppression tests.
-- [ ] 2.2.18 Add `remove_layer` effective-winner change tests.
-- [ ] 2.2.19 Add generation bump tests for required mutation cases.
-- [ ] 2.2.20 Add cross-layer rename tests for base -> memfs, memfs -> base, and memfs -> memfs.
+- [x] 2.2.15 Add layer priority resolution tests.
+- [x] 2.2.16 Add synthetic parent creation tests.
+- [x] 2.2.17 Add whiteout suppression tests.
+- [x] 2.2.18 Add `remove_layer` effective-winner change tests.
+- [x] 2.2.19 Add generation bump tests for required mutation cases.
+- [x] 2.2.20 Add cross-layer rename tests for base -> memfs, memfs -> base, and memfs -> memfs.
 - [ ] 2.2.21 Add policy-filtered `readdir` tests.
-- [ ] 2.2.22 Add partial-overlay tests for an existing mounted subtree such as `/home/alice/.ssh` where some files come from the base layer and some from memfs.
-- [ ] 2.2.23 Add fully synthetic subtree tests for paths such as `/home/alice/.claude/skills` created entirely by file injection.
-- [ ] 2.2.24 Add whiteout tests showing a lower immutable file remains hidden without physical deletion.
-- [ ] 2.2.25 Add transparent app-workflow tests covering create/write/rename/unlink sequences typical of editors and CLI tools.
-- [ ] 2.2.25a Add symlink/readlink tests proving overlay-managed paths return `ENOTSUP` in v1 while base-layer symlink behavior remains available.
-- [ ] 2.2.26 Add shared-tag tests proving `/alice/...` and `/bob/...` coexist in one mounted tree without path collision.
-- [ ] 2.2.27 Add separate-tag tests proving two guest mounts remain overlay-isolated even when one `MemOverlay` instance serves both tags.
-- [ ] 2.2.28 Add shared-layer multi-tag tests proving one named layer can inject `/CLAUDE.md` into distinct tags with independent effective placement.
-- [ ] 2.2.29 Add inherited-ownership tests proving synthetic files/dirs pick up `uid`/`gid` from nearest parent or mount root.
-- [ ] 2.2.30 Add explicit-attr tests proving `put_with_attrs` overrides default synthetic ownership.
-- [ ] 2.2.31 Add future-compatibility tests or review checkpoints ensuring stack semantics do not assume every mount has local disk backing.
-- [ ] 2.2.32 Add a source-level verification step proving overlay APIs and tests remain expressed in mount-relative paths, not raw host-disk paths.
-- [ ] 2.2.33 Add batch atomicity tests proving a batch of injected files becomes visible all at once for `lookup`, `read`, and `readdir`.
-- [ ] 2.2.34 Add synthetic-parent atomicity tests proving readers cannot observe partially materialized parent hierarchies.
+<!-- @claude-dev 2026-03-29 -- policy-filtered readdir is exercised through existing policy tests; dedicated overlay+policy readdir test deferred to Phase 2.3 which covers policy/TTL behavior. -->
+- [x] 2.2.22 Add partial-overlay tests for an existing mounted subtree such as `/home/alice/.ssh` where some files come from the base layer and some from memfs.
+- [x] 2.2.23 Add fully synthetic subtree tests for paths such as `/home/alice/.claude/skills` created entirely by file injection.
+- [x] 2.2.24 Add whiteout tests showing a lower immutable file remains hidden without physical deletion.
+- [x] 2.2.25 Add transparent app-workflow tests covering create/write/rename/unlink sequences typical of editors and CLI tools.
+- [x] 2.2.25a Add symlink/readlink tests proving overlay-managed paths return `ENOTSUP` in v1 while base-layer symlink behavior remains available.
+- [x] 2.2.26 Add shared-tag tests proving `/alice/...` and `/bob/...` coexist in one mounted tree without path collision.
+- [x] 2.2.27 Add separate-tag tests proving two guest mounts remain overlay-isolated even when one `MemOverlay` instance serves both tags.
+- [x] 2.2.28 Add shared-layer multi-tag tests proving one named layer can inject `/CLAUDE.md` into distinct tags with independent effective placement.
+- [x] 2.2.29 Add inherited-ownership tests proving synthetic files/dirs pick up `uid`/`gid` from nearest parent or mount root.
+- [x] 2.2.30 Add explicit-attr tests proving `put_with_attrs` overrides default synthetic ownership.
+- [x] 2.2.31 Add future-compatibility tests or review checkpoints ensuring stack semantics do not assume every mount has local disk backing.
+- [x] 2.2.32 Add a source-level verification step proving overlay APIs and tests remain expressed in mount-relative paths, not raw host-disk paths.
+- [x] 2.2.33 Add batch atomicity tests proving a batch of injected files becomes visible all at once for `lookup`, `read`, and `readdir`.
+- [x] 2.2.34 Add synthetic-parent atomicity tests proving readers cannot observe partially materialized parent hierarchies.
 - [ ] 2.2.35 Add concurrent reader/writer tests proving one filesystem request uses one stable memfs snapshot.
-- [ ] 2.2.35a Add overlay file-handle lifecycle tests covering synthetic `fh` allocation, `Release`, `Fsync`, and reads after content replacement.
-- [ ] 2.2.36 Add a review checkpoint confirming the base layer keeps native filesystem semantics and is not treated as transactional by `motlie-vfs`.
+<!-- @claude-dev 2026-03-29 -- concurrent snapshot isolation is architecturally enforced by arc-swap; dedicated multi-threaded stress test deferred to integration phase. -->
+- [x] 2.2.35a Add overlay file-handle lifecycle tests covering synthetic `fh` allocation, `Release`, `Fsync`, and reads after content replacement.
+- [x] 2.2.36 Add a review checkpoint confirming the base layer keeps native filesystem semantics and is not treated as transactional by `motlie-vfs`.
 
 Exit criteria:
 
@@ -626,7 +628,7 @@ Per-task reference rule:
 - [ ] 4.2.5 Implement build-time FUSE dependency checks for Linux/macOS.
 - [ ] 4.2.5a Implement `GuestMountSpec` and `GuestMountRunner` in `client/guest.rs` as the public guest orchestration layer above `FuseClient`.
 - [ ] 4.2.5b Ensure `GuestMountRunner` consumes caller-supplied stream/transport connectors so VMM handshake/bootstrap logic stays outside this crate.
-- [ ] 4.2.5c Keep `src/bin/motlie-vfs-guest.rs` thin: it may parse config and obtain streams, but it must call `GuestMountRunner` rather than reimplementing mount orchestration.
+- [ ] 4.2.5c Keep `bins/motlie-vfs-guest.rs` thin: it may parse config and obtain streams, but it must call `GuestMountRunner` rather than reimplementing mount orchestration.
 
 Tests / verification:
 
@@ -641,7 +643,7 @@ Clarification:
 
 - `client/fuse.rs` owns the guest-side `fuser::Filesystem` implementation
 - `client/guest.rs` owns guest-side mount orchestration over public APIs
-- `src/bin/motlie-vfs-guest.rs` is the real v1 guest-side mounter binary, not an example harness
+- `bins/motlie-vfs-guest.rs` is the real v1 guest-side mounter binary, not an example harness
 - `vsock/` owns transport and handler glue only
 
 Exit criteria:
@@ -687,7 +689,7 @@ Per-task reference rule:
 - [ ] 5.1.9 Add explicit setup instructions or scripts for starting the host-side `FsServer`, `MemOverlay`, and the v1 in-process REPL/example harness.
 - [ ] 5.1.10 Add explicit embedded admin console or script/config procedures for `put`, `putattr`, `whiteout`, `rm`, `rmlayer`, `ls`, and `lslayer` in the guest-harness workflow.
 - [ ] 5.1.11 Add explicit CH launch/stop commands or scripts, including vsock and block-device wiring for the stacked-root guest image.
-- [ ] 5.1.11a Document the guest boundary explicitly in harness instructions: bootstrap/binary delivery remain VMM-owned, while `src/bin/motlie-vfs-guest.rs` only exercises the public guest APIs from `client/guest.rs`.
+- [ ] 5.1.11a Document the guest boundary explicitly in harness instructions: bootstrap/binary delivery remain VMM-owned, while `bins/motlie-vfs-guest.rs` only exercises the public guest APIs from `client/guest.rs`.
 
 Suggested setup snippets to include in this phase:
 

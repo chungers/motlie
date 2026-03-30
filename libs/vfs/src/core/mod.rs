@@ -10,3 +10,4 @@ pub mod policy;
 pub use op::{DirEntry, FileAttr, FileType, FsOp, FsResult, FsStats, SetAttrFields};
 pub use event::{FsEvent, FsOpKind};
 pub use policy::{AllowAll, PolicyFn};
+pub use server::{FsServer, FsServerBuilder};
