@@ -721,11 +721,11 @@ implementation planning does not over-claim current scope.
 
 ### FR-1: Cross-Platform FUSE Client
 Roadmap placement: roadmap-wide. `v1` only requires the Linux guest FUSE path used by the
-vsock/Cloud Hypervisor workflow. macOS FUSE-T support is a later roadmap target.
+vsock/Cloud Hypervisor workflow. macOS FUSE-T support is a v2 roadmap target.
 
 Mount a directory on the local machine backed by a remote (or local) FS server. Must work on:
 - Linux (kernel 5.10+, libfuse3 / `/dev/fuse`)
-- macOS (Apple Silicon, macOS 13+, via FUSE-T)
+- macOS (Apple Silicon, macOS 13+, via FUSE-T) — **v2 roadmap target**
 
 The platform difference must be invisible to the caller -- a single `mount()` API.
 
@@ -2094,7 +2094,7 @@ this resolves to FUSE-T's compatibility library. No conditional compilation need
 code -- `fuser::mount2()` works identically on both platforms.
 
 **Build-time check**: The client feature should include a build script that verifies FUSE
-headers are available (Linux: `libfuse3-dev`, macOS: FUSE-T) and emits a clear error message
+headers are available (Linux: `libfuse3-dev`; macOS FUSE-T deferred to v2) and emits a clear error message
 if not.
 
 ## Mapping to motlie-vmm Design Doc
