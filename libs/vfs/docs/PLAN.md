@@ -699,27 +699,30 @@ mkdir -p /tmp/motlie-vfs/scratch-alice
 printf 'hello\n' > /tmp/motlie-vfs/home-alice/projects/README.md
 
 # Build the v1 host and guest binaries before guest image assembly
-cargo build -p motlie-vfs --example repl_host --bin motlie-vfs-guest
+cargo build -p motlie-vfs --example repl_host --features vsock
+cross build --release --target x86_64-unknown-linux-musl --features vsock,client -p motlie-vfs --bin motlie-vfs-guest
 
 # Start the host example / REPL
-cargo run -p motlie-vfs --example repl_host
+cargo run -p motlie-vfs --example repl_host --features vsock -- --tag alice-home --dir /tmp/motlie-vfs/home-alice
 ```
 
 ```bash
 # Example Cloud Hypervisor launch shape for the v1 harness
+# (see examples/v1/launch-ch.sh for the full command)
 cloud-hypervisor \
-  --kernel ./artifacts/vmlinux \
-  --disk path=./artifacts/root.squashfs,readonly=on \
-  --disk path=./artifacts/overlay.ext4 \
-  --vsock cid=42,socket=/tmp/motlie-vfs-vsock.sock \
-  --console tty
+  --kernel ./artifacts/vmlinux.bin \
+  --disk path=./artifacts/rootfs.squashfs,readonly=on \
+         path=./artifacts/overlay.ext4 \
+  --vsock cid=3,socket=/tmp/motlie-vfs.vsock \
+  --serial tty --console off
 ```
 
 Concrete end-to-end walkthrough to include in this phase:
 
 ```bash
-# 1. Build the host REPL and guest mounter binary on the host.
-cargo build -p motlie-vfs --example repl_host --bin motlie-vfs-guest
+# 1. Build the host REPL and guest mounter binary.
+cargo build -p motlie-vfs --example repl_host --features vsock
+cross build --release --target x86_64-unknown-linux-musl --features vsock,client -p motlie-vfs --bin motlie-vfs-guest
 
 # 2. Prepare host-backed data for the guest /home/alice subtree.
 mkdir -p /tmp/motlie-vfs/home/alice
@@ -744,7 +747,7 @@ ssh-keygen -t ed25519 -N '' -f /tmp/motlie-vfs/id_alice_test
 #    The image-build script for this phase should make these exact artifacts reproducible.
 
 # 5. Start the host-side v1 REPL / server with tag alice-home bound to the host path.
-cargo run -p motlie-vfs --example repl_host
+cargo run -p motlie-vfs --example repl_host --features vsock -- --tag alice-home --dir /tmp/motlie-vfs/home/alice
 ```
 
 ```text
