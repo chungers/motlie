@@ -163,15 +163,26 @@ id alice
 
 ### 6. Start the host-side server
 
-In a separate terminal on the host:
+**Start the host server before booting the guest** (or in a separate terminal):
 
 ```bash
-# The host FsServer will listen on the vsock socket.
-# When the guest's motlie-vfs-guest connects to vsock CID 2 port 5000,
-# it appears as a Unix connection on /tmp/motlie-vfs.vsock_5000.
-#
-# For now, use the example host binary or a custom Rust program:
+# Starts FsServer + MemOverlay, listens on /tmp/motlie-vfs.vsock_5000.
+# Creates a temp host dir with sample data, or pass a path as arg.
 cargo run -p motlie-vfs --example simple_host --features vsock
+
+# Or with an explicit host directory:
+cargo run -p motlie-vfs --example simple_host --features vsock -- /path/to/host/dir
+```
+
+The host server provides a stdin command loop for overlay mutation:
+
+```
+put credentials alice-home /.ssh/id_ed25519 <key-content>
+put credentials alice-home /.env SECRET=abc
+whiteout credentials alice-home /.bashrc
+ls alice-home
+rm credentials alice-home /.env
+quit
 ```
 
 ### 7. Shut down the guest

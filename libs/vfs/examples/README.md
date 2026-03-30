@@ -2,20 +2,29 @@
 
 Proof-of-concept programs for the v1 Cloud Hypervisor guest workflow.
 
-> **Note:** These are scaffolds only in the current phase. The examples will
-> gain real behavior in later phases (REPL in Phase 5.1, CH harness in Phase 5.1).
-
 ## simple_host
 
-Host-side server with overlay mutation testing. Will include a `rustyline`
-REPL once the server core and overlay are implemented.
+Host-side server with FsServer + MemOverlay, listening on a Unix socket
+(simulating the vsock host-side path), with a stdin command loop for
+overlay mutation.
 
 ```bash
-# Requires the vsock feature (needed for transport setup)
+# Start with a temp host directory (seeded with sample data)
 cargo run -p motlie-vfs --example simple_host --features vsock
+
+# Or with an explicit host directory
+cargo run -p motlie-vfs --example simple_host --features vsock -- /path/to/dir
 ```
 
-Currently exits immediately with a "not yet implemented" message.
+**Commands:**
+- `put <layer> <tag> <path> <content>` — inject a file
+- `whiteout <layer> <tag> <path>` — hide a lower-layer file
+- `rm <layer> <tag> <path>` — remove an overlay entry
+- `ls <tag>` — list effective overlay entries
+- `quit` — shut down
 
-See `libs/vfs/docs/DESIGN.md` for the full Cloud Hypervisor proof-of-concept
-setup and validation procedure.
+The server listens on `/tmp/motlie-vfs.vsock_5000` (the CH vsock
+convention for guest→host connections on port 5000).
+
+See `libs/vfs/image/README.md` for the full Cloud Hypervisor
+proof-of-concept setup and validation procedure.
