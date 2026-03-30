@@ -721,11 +721,11 @@ implementation planning does not over-claim current scope.
 
 ### FR-1: Cross-Platform FUSE Client
 Roadmap placement: roadmap-wide. `v1` only requires the Linux guest FUSE path used by the
-vsock/Cloud Hypervisor workflow. macOS FUSE-T support is a later roadmap target.
+vsock/Cloud Hypervisor workflow. macOS FUSE-T support is a v2 roadmap target.
 
 Mount a directory on the local machine backed by a remote (or local) FS server. Must work on:
 - Linux (kernel 5.10+, libfuse3 / `/dev/fuse`)
-- macOS (Apple Silicon, macOS 13+, via FUSE-T)
+- macOS (Apple Silicon, macOS 13+, via FUSE-T) — **v2 roadmap target**
 
 The platform difference must be invisible to the caller -- a single `mount()` API.
 
@@ -751,9 +751,14 @@ The protocol layer must be parameterized by encoding so that alternative formats
 protobuf) can be substituted without changing the frame types or server/client logic.
 
 ### FR-4: Tag-Based Mount Routing
-A single server instance serves multiple mount points, each identified by a string tag
-(e.g. `workspace`, `cred-claude`). Each client connection binds to exactly one tag via a
-handshake. In v1, the server maps each tag to a mount stack whose base layer is host-backed.
+A single server instance serves multiple mount points for one guest VM, each identified by a
+string tag (e.g. `workspace`, `cred-claude`). Each client connection binds to exactly one tag
+via a handshake. In v1, the server maps each tag to a mount stack whose base layer is host-backed.
+
+**Guest isolation model:** Each guest VM gets its own `FsServer` instance and its own vsock
+socket. Tags identify mounted subtrees within that VM's server. For multiple guests, the host
+runs separate `FsServer` instances with separate vsock sockets — one per VM. There is no
+shared `FsServer` across VMs in v1.
 
 ### FR-5: Dynamic Mount Management
 Mounts can be added to or removed from a running server. Adding a mount registers a new
@@ -2094,7 +2099,7 @@ this resolves to FUSE-T's compatibility library. No conditional compilation need
 code -- `fuser::mount2()` works identically on both platforms.
 
 **Build-time check**: The client feature should include a build script that verifies FUSE
-headers are available (Linux: `libfuse3-dev`, macOS: FUSE-T) and emits a clear error message
+headers are available (Linux: `libfuse3-dev`; macOS FUSE-T deferred to v2) and emits a clear error message
 if not.
 
 ## Mapping to motlie-vmm Design Doc
@@ -2305,7 +2310,7 @@ ensure_vm("alice")
   │
   ├─ create overlay.ext4
   │   inject: CA keys, principals,
-  │   mounts.json, env
+  │   mounts.yaml, env
   │
   ├─ spawn passt (memfd, in netns)
   ├─ spawn firecracker (memfd, in netns)
@@ -2331,7 +2336,7 @@ ensure_vm("alice")
   │   → send guest agent binary (~3MB)         │      │   receive binary → /tmp (tmpfs)
   │                                            │      │   exec into guest agent (same PID)
   │                                            │      │
-  ├─ FsServer ready  ◄────────────────────────│      ├─ read /etc/motlie-vmm/mounts.json
+  ├─ FsServer ready  ◄────────────────────────│      ├─ read /etc/motlie-vmm/mounts.yaml
   │   (mounts registered, overlay layers set)  │      │
   │                                            │      ├─ for each mount in config:
   │   HandshakeMsg::Fs { tag }  ◄──────────────│      │   connect vsock:5000
@@ -2419,7 +2424,7 @@ const HOST_CID: u32 = 2;
 const VMM_PORT: u32 = 5000;
 
 fn main() {
-    let config: MountConfig = read_json("/etc/motlie-vmm/mounts.json");
+    let config: MountConfig = read_yaml("/etc/motlie-vmm/mounts.yaml");
     let specs: Vec<GuestMountSpec> = config.mounts.into_iter()
         .map(|m| GuestMountSpec::new(m.tag, m.guest_path).read_only(m.read_only))
         .collect();
@@ -2481,16 +2486,18 @@ overlay.put("credentials", "home", "/.env", Bytes::from(format!(
     anthropic_key, openai_key,
 )))?;
 
-// Write mounts.json for guest agent to read from overlay ext4
+// Write mounts.yaml for guest agent to read from overlay ext4
 let mounts_config = MountConfig {
     mounts: vec![
         MountEntry { tag: "home", guest_path: "/root", read_only: false },
         MountEntry { tag: "scratch", guest_path: "/tmp", read_only: false },
     ],
 };
-inject_into_overlay(&overlay_ext4, "/etc/motlie-vmm/mounts.json", &mounts_config)?;
+inject_into_overlay(&overlay_ext4, "/etc/motlie-vmm/mounts.yaml", &mounts_config)?;
 
-// Start vsock listener — dispatch connections to FsServer
+// Start vsock listener — one FsServer per guest VM, one socket per VM.
+// For multiple guests, the VMM daemon creates separate FsServer instances
+// with separate vsock sockets parameterized by CID or VM name.
 let server = Arc::new(server);
 tokio::spawn({
     let server = server.clone();

@@ -1,0 +1,10 @@
+# Default mount config for motlie-vfs-guest test harness.
+# Placed at /etc/motlie-vfs/mounts.yaml inside the guest image.
+#
+# Each mount entry tells the guest binary which tag to request from the
+# host FsServer and where to mount it inside the guest.
+
+mounts:
+  - tag: alice-home
+    guest_path: /home/alice
+    read_only: false
