@@ -632,11 +632,11 @@ Per-task reference rule:
 Tests / verification:
 
 - [ ] 4.2.6 Add callback translation unit tests.
-- [ ] 4.2.7 Add mock transport tests.
-- [ ] 4.2.7a Add unit tests for `GuestMountRunner` using mock transport/connector closures.
-- [ ] 4.2.8 Add FUSE integration tests where the environment supports it.
+- [x] 4.2.7 Add mock transport tests.
+- [x] 4.2.7a Add unit tests for `GuestMountRunner` using mock transport/connector closures.
+- [ ] 4.2.8 Add FUSE integration tests where the environment supports it (requires Linux).
 - [x] 4.2.9 macOS FUSE-T is v2 roadmap work, not a v1 requirement.
-- [ ] 4.2.10 Add an end-to-end mounted-subtree scenario showing guest-visible behavior for partial overlay, synthetic dirs, and whiteouts.
+- [x] 4.2.10 Add an end-to-end mounted-subtree scenario showing guest-visible behavior for partial overlay, synthetic dirs, and whiteouts.
 
 Clarification:
 
