@@ -1518,4 +1518,171 @@ mod tests {
     // 2.1.16: std::fs confined to server.rs helpers
     // 2.1.17: rg 'std::fs' libs/vfs/src/ --glob '!**/server.rs' --glob '!**/inode.rs' → no hits
     // 2.1.18: MountState + MountBacking enum = stack abstraction
+
+    // --- Phase 2.3: Deterministic Cache/TTL Behavior ---
+
+    // 2.3.1 + 2.3.3: Disk attrs re-fetched every time, ttl_secs always 0
+    #[test]
+    fn getattr_returns_zero_ttl() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("f.txt"), b"data").unwrap();
+        let server = build_test_server(dir.path());
+        // Lookup to register inode
+        let inode = match server.handle_op("test", FsOp::Lookup { parent: 1, name: "f.txt".into() }) {
+            FsResult::Entry { inode, ttl_secs, .. } => {
+                assert_eq!(ttl_secs, 0, "lookup ttl must be 0");
+                inode
+            }
+            other => panic!("expected Entry, got {:?}", other),
+        };
+        // Getattr must also return 0
+        match server.handle_op("test", FsOp::Getattr { inode }) {
+            FsResult::Attr { ttl_secs, .. } => assert_eq!(ttl_secs, 0, "getattr ttl must be 0"),
+            other => panic!("expected Attr, got {:?}", other),
+        }
+    }
+
+    // 2.3.1: Disk attrs re-fetched — modifying file on disk changes getattr
+    #[test]
+    fn disk_attrs_refetched_on_every_getattr() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grow.txt");
+        fs::write(&path, b"small").unwrap();
+        let server = build_test_server(dir.path());
+
+        let inode = match server.handle_op("test", FsOp::Lookup { parent: 1, name: "grow.txt".into() }) {
+            FsResult::Entry { inode, .. } => inode,
+            other => panic!("expected Entry, got {:?}", other),
+        };
+
+        // First getattr
+        let size1 = match server.handle_op("test", FsOp::Getattr { inode }) {
+            FsResult::Attr { attrs, .. } => attrs.size,
+            other => panic!("expected Attr, got {:?}", other),
+        };
+
+        // Modify on disk behind the server's back
+        fs::write(&path, b"much larger content now").unwrap();
+
+        // Second getattr must see the new size (no cache)
+        let size2 = match server.handle_op("test", FsOp::Getattr { inode }) {
+            FsResult::Attr { attrs, .. } => attrs.size,
+            other => panic!("expected Attr, got {:?}", other),
+        };
+
+        assert_ne!(size1, size2, "getattr must re-fetch from disk, not cache");
+        assert!(size2 > size1);
+    }
+
+    // 2.3.2: No server-side readdir cache — new file on disk appears immediately
+    #[test]
+    fn readdir_not_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        let server = build_test_server(dir.path());
+
+        let names1 = match server.handle_op("test", FsOp::Readdir { inode: 1, offset: 0 }) {
+            FsResult::DirEntries { entries } => entries.iter().map(|e| e.name.clone()).collect::<Vec<_>>(),
+            other => panic!("expected DirEntries, got {:?}", other),
+        };
+        assert!(names1.contains(&"a.txt".to_string()));
+        assert!(!names1.contains(&"b.txt".to_string()));
+
+        // Create a new file on disk
+        fs::write(dir.path().join("b.txt"), b"b").unwrap();
+
+        // Next readdir must see it immediately
+        let names2 = match server.handle_op("test", FsOp::Readdir { inode: 1, offset: 0 }) {
+            FsResult::DirEntries { entries } => entries.iter().map(|e| e.name.clone()).collect::<Vec<_>>(),
+            other => panic!("expected DirEntries, got {:?}", other),
+        };
+        assert!(names2.contains(&"b.txt".to_string()), "new file must appear in readdir immediately");
+    }
+
+    // 2.3.5: Overlay mutation visible on next operation
+    #[test]
+    fn overlay_mutation_visible_on_next_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = build_overlay_server(dir.path());
+        let o = server.overlay().unwrap();
+        o.put_layer("l", 0).unwrap();
+
+        // File doesn't exist yet
+        assert!(matches!(
+            server.handle_op("test", FsOp::Lookup { parent: 1, name: "injected.txt".into() }),
+            FsResult::Error { .. }
+        ));
+
+        // Inject via overlay
+        o.put("l", "test", "/injected.txt", bytes::Bytes::from("content")).unwrap();
+
+        // Immediately visible on the very next op
+        assert!(matches!(
+            server.handle_op("test", FsOp::Lookup { parent: 1, name: "injected.txt".into() }),
+            FsResult::Entry { .. }
+        ));
+
+        // Whiteout makes it disappear immediately
+        o.whiteout("l", "test", "/injected.txt").unwrap();
+        assert!(matches!(
+            server.handle_op("test", FsOp::Lookup { parent: 1, name: "injected.txt".into() }),
+            FsResult::Error { errno } if errno == libc::ENOENT
+        ));
+    }
+
+    // 2.3.6: Zero TTL on overlay entries too
+    #[test]
+    fn overlay_entries_return_zero_ttl() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = build_overlay_server(dir.path());
+        let o = server.overlay().unwrap();
+        o.put_layer("l", 0).unwrap();
+        o.put("l", "test", "/f.txt", bytes::Bytes::from("data")).unwrap();
+
+        match server.handle_op("test", FsOp::Lookup { parent: 1, name: "f.txt".into() }) {
+            FsResult::Entry { ttl_secs, inode, .. } => {
+                assert_eq!(ttl_secs, 0, "overlay lookup ttl must be 0");
+                match server.handle_op("test", FsOp::Getattr { inode }) {
+                    FsResult::Attr { ttl_secs, .. } => assert_eq!(ttl_secs, 0, "overlay getattr ttl must be 0"),
+                    other => panic!("expected Attr, got {:?}", other),
+                }
+            }
+            other => panic!("expected Entry, got {:?}", other),
+        }
+    }
+
+    // 2.3.7: No stale view across admin-driven mutations
+    #[test]
+    fn no_stale_view_across_mutations() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = build_overlay_server(dir.path());
+        let o = server.overlay().unwrap();
+        o.put_layer("l", 0).unwrap();
+
+        // Inject → read → update → read must see update
+        o.put("l", "test", "/config", bytes::Bytes::from("v1")).unwrap();
+        let inode = match server.handle_op("test", FsOp::Lookup { parent: 1, name: "config".into() }) {
+            FsResult::Entry { inode, .. } => inode,
+            other => panic!("expected Entry, got {:?}", other),
+        };
+        let fh = match server.handle_op("test", FsOp::Open { inode, flags: 0 }) {
+            FsResult::Opened { fh } => fh,
+            other => panic!("expected Opened, got {:?}", other),
+        };
+        match server.handle_op("test", FsOp::Read { inode, fh, offset: 0, size: 4096 }) {
+            FsResult::Data { data } => assert_eq!(&data[..], b"v1"),
+            other => panic!("expected Data, got {:?}", other),
+        }
+
+        // Admin updates the overlay
+        o.put("l", "test", "/config", bytes::Bytes::from("v2-updated")).unwrap();
+
+        // Next read through same fh sees the new content (no stale cache)
+        match server.handle_op("test", FsOp::Read { inode, fh, offset: 0, size: 4096 }) {
+            FsResult::Data { data } => assert_eq!(&data[..], b"v2-updated"),
+            other => panic!("expected Data, got {:?}", other),
+        }
+
+        server.handle_op("test", FsOp::Release { inode, fh });
+    }
 }
