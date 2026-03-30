@@ -189,7 +189,7 @@ Primary file targets: `libs/vfs/src/client/fuse.rs`, `libs/vfs/src/client/guest.
 - [x] 4.2.5c Keep `bins/motlie-vfs-guest.rs` thin: call `GuestMountRunner` rather than reimplementing.
 - [ ] 4.2.6 Add callback translation unit tests (requires Linux with libfuse3).
 - [x] 4.2.7 Add mock transport tests.
-- [x] 4.2.7a Add unit tests for `GuestMountRunner` using mock transport/connector closures.
+- [ ] 4.2.7a Add unit tests for `GuestMountRunner` using mock transport/connector closures (requires `client` feature + Linux).
 - [ ] 4.2.8 Add FUSE integration tests where the environment supports it (requires Linux).
 - [x] 4.2.9 macOS FUSE-T is v2 roadmap work, not a v1 requirement.
 - [x] 4.2.10 Add an end-to-end mounted-subtree scenario.
