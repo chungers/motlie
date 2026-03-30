@@ -1204,7 +1204,7 @@ libs/vfs/
 ├── docs/
 │   └── DESIGN.md                 # this document
 ├── examples/
-│   ├── simple_host.rs            # proof-of-concept host server + rustyline REPL
+│   ├── repl_host.rs            # proof-of-concept host server + rustyline REPL
 │   └── README.md                 # Cloud Hypervisor proof-of-concept instructions
 ├── bins/
 │   └── motlie-vfs-guest.rs       # v1 guest-side mounter binary over public guest APIs

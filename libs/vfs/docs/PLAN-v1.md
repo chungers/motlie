@@ -8,7 +8,7 @@ See [DESIGN.md](./DESIGN.md) for full architectural context and requirements.
 - Phases 1.1–1.3, 2.1–2.2, 4.1: **complete** (PRs #118, #120, #121)
 - Phase 2.3: not started
 - Phase 4.2: **in progress** — FuseClient, GuestMountRunner, guest binary implemented; tests and build checks remaining
-- Phase 5.1 (v1 subset): **in progress** — CH image builder and launch scripts delivered; simple_host REPL and end-to-end validation remaining
+- Phase 5.1 (v1 subset): **in progress** — CH image builder and launch scripts delivered; repl_host REPL and end-to-end validation remaining
 
 76 tests passing (64 unit + 12 transport integration), 0 warnings.
 
@@ -25,7 +25,7 @@ Design references: [Architectural Layering and Roadmap](./DESIGN.md), [Crate Str
 - [x] 1.1.3 Add initial dependency set for core, vsock, client, and example PoC modules.
 - [x] 1.1.4 Create public module skeletons with feature gating only, no behavior yet.
 - [x] 1.1.5 Ensure `cargo check -p motlie-vfs` succeeds with default features.
-- [x] 1.1.6a Add `libs/vfs/examples/simple_host.rs` and `libs/vfs/examples/README.md` scaffolding.
+- [x] 1.1.6a Add `libs/vfs/examples/repl_host.rs` and `libs/vfs/examples/README.md` scaffolding.
 - [x] 1.1.6b Add `libs/vfs/src/client/guest.rs` scaffolding.
 - [x] 1.1.6c Add `libs/vfs/bins/motlie-vfs-guest.rs` scaffolding.
 - [x] 1.1.7 Run `cargo check -p motlie-vfs`.

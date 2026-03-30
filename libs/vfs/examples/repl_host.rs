@@ -1,4 +1,4 @@
-//! simple_host: proof-of-concept host server for the v1 CH harness.
+//! repl_host: proof-of-concept host server for the v1 CH harness.
 //!
 //! Starts one FsServer per guest VM with MemOverlay, listens on a
 //! parameterized Unix socket (the vsock host-side path), and serves
@@ -9,7 +9,7 @@
 //! Admin is in-process REPL only — no network admin connections.
 //!
 //! Usage:
-//!   cargo run -p motlie-vfs --example simple_host --features vsock -- [options]
+//!   cargo run -p motlie-vfs --example repl_host --features vsock -- [options]
 //!
 //! Options:
 //!   --socket <path>   vsock socket path (default: /tmp/motlie-vfs.vsock_5000)
@@ -67,7 +67,7 @@ async fn main() -> Result<()> {
         }
     };
 
-    eprintln!("=== motlie-vfs simple_host ===");
+    eprintln!("=== motlie-vfs repl_host ===");
     eprintln!("Host dir: {}", host_path.display());
     eprintln!("Tag: {tag}");
     eprintln!("Socket: {socket_path}");
