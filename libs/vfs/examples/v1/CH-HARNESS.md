@@ -98,7 +98,7 @@ make olddefconfig
 make bzImage -j$(nproc)
 
 # Copy the kernel
-cp arch/x86/boot/compressed/vmlinux.bin /path/to/libs/vfs/image/artifacts/vmlinux.bin
+cp arch/x86/boot/compressed/vmlinux.bin /path/to/libs/vfs/examples/v1/artifacts/vmlinux.bin
 ```
 
 ### 2. Cross-compile the guest binary
