@@ -55,6 +55,6 @@ name = "motlie-vfs-guest"
 path = "bins/motlie-vfs-guest.rs"
 
 [[example]]
-name = "simple_host"
-path = "examples/simple_host.rs"
+name = "repl_host"
+path = "examples/repl_host.rs"
 required-features = ["vsock"]

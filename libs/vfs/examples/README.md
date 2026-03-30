@@ -2,7 +2,7 @@
 
 Proof-of-concept programs for the v1 Cloud Hypervisor guest workflow.
 
-## simple_host
+## repl_host
 
 Host-side server: one `FsServer` + `MemOverlay` per guest VM, listening on a
 parameterized Unix socket (the vsock host-side path), with a stdin command
@@ -10,10 +10,10 @@ loop for overlay mutation. No network admin — admin is in-process only.
 
 ```bash
 # Default: socket /tmp/motlie-vfs.vsock_5000, tag alice-home, temp host dir
-cargo run -p motlie-vfs --example simple_host --features vsock
+cargo run -p motlie-vfs --example repl_host --features vsock
 
 # Explicit parameters:
-cargo run -p motlie-vfs --example simple_host --features vsock -- \
+cargo run -p motlie-vfs --example repl_host --features vsock -- \
     --socket /tmp/motlie-vfs-alice.vsock_5000 \
     --tag alice-home \
     --dir /path/to/host/dir

@@ -183,7 +183,7 @@ Per-task reference rule:
 - [x] 1.1.4 Create public module skeletons with feature gating only, no behavior yet.
 - [x] 1.1.5 Ensure `cargo check -p motlie-vfs` succeeds with default features.
 - [x] 1.1.6 Add `rustyline` as the v1 proof-of-concept REPL dependency for `libs/vfs/examples`.
-- [x] 1.1.6a Add `libs/vfs/examples/simple_host.rs` and `libs/vfs/examples/README.md` scaffolding so the v1 examples location matches the DESIGN exactly.
+- [x] 1.1.6a Add `libs/vfs/examples/repl_host.rs` and `libs/vfs/examples/README.md` scaffolding so the v1 examples location matches the DESIGN exactly.
 - [x] 1.1.6b Add `libs/vfs/src/client/guest.rs` scaffolding so guest-side orchestration has a stable public API distinct from `FuseClient`.
 - [x] 1.1.6c Add `libs/vfs/bins/motlie-vfs-guest.rs` scaffolding as the real v1 guest-side mounter binary over the public guest APIs.
 
@@ -475,7 +475,7 @@ Design references:
 
 Primary file targets:
 
-- `libs/vfs/examples/simple_host.rs`
+- `libs/vfs/examples/repl_host.rs`
 - `libs/vfs/examples/README.md`
 - docs under `libs/vfs/docs/` that describe the protocol and usage contract
 
@@ -699,10 +699,10 @@ mkdir -p /tmp/motlie-vfs/scratch-alice
 printf 'hello\n' > /tmp/motlie-vfs/home-alice/projects/README.md
 
 # Build the v1 host and guest binaries before guest image assembly
-cargo build -p motlie-vfs --example simple_host --bin motlie-vfs-guest
+cargo build -p motlie-vfs --example repl_host --bin motlie-vfs-guest
 
 # Start the host example / REPL
-cargo run -p motlie-vfs --example simple_host
+cargo run -p motlie-vfs --example repl_host
 ```
 
 ```bash
@@ -719,7 +719,7 @@ Concrete end-to-end walkthrough to include in this phase:
 
 ```bash
 # 1. Build the host REPL and guest mounter binary on the host.
-cargo build -p motlie-vfs --example simple_host --bin motlie-vfs-guest
+cargo build -p motlie-vfs --example repl_host --bin motlie-vfs-guest
 
 # 2. Prepare host-backed data for the guest /home/alice subtree.
 mkdir -p /tmp/motlie-vfs/home/alice
@@ -744,7 +744,7 @@ ssh-keygen -t ed25519 -N '' -f /tmp/motlie-vfs/id_alice_test
 #    The image-build script for this phase should make these exact artifacts reproducible.
 
 # 5. Start the host-side v1 REPL / server with tag alice-home bound to the host path.
-cargo run -p motlie-vfs --example simple_host
+cargo run -p motlie-vfs --example repl_host
 ```
 
 ```text

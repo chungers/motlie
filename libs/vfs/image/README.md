@@ -168,16 +168,16 @@ id alice
 ```bash
 # Starts one FsServer per guest VM. Each VM gets its own socket.
 # Default: socket /tmp/motlie-vfs.vsock_5000, tag alice-home, temp host dir.
-cargo run -p motlie-vfs --example simple_host --features vsock
+cargo run -p motlie-vfs --example repl_host --features vsock
 
 # With explicit parameters (for multi-guest, run separate instances):
-cargo run -p motlie-vfs --example simple_host --features vsock -- \
+cargo run -p motlie-vfs --example repl_host --features vsock -- \
     --socket /tmp/motlie-vfs-alice.vsock_5000 \
     --tag alice-home \
     --dir /path/to/alice/home
 
 # Second guest VM in another terminal:
-cargo run -p motlie-vfs --example simple_host --features vsock -- \
+cargo run -p motlie-vfs --example repl_host --features vsock -- \
     --socket /tmp/motlie-vfs-bob.vsock_5000 \
     --tag bob-home \
     --dir /path/to/bob/home
