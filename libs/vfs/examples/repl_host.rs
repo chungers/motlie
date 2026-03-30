@@ -1,24 +1,55 @@
-//! repl_host: v1 host-side filesystem server with rustyline admin REPL.
+//! repl_host: v1 host-side filesystem server with admin REPL.
 //!
 //! Starts one FsServer per guest VM with MemOverlay, listens on a
 //! parameterized Unix socket (the vsock host-side path), and serves
-//! filesystem operations. Includes a rustyline REPL exposing every
-//! MemOverlay API operation for interactive overlay mutation.
+//! filesystem operations. Exposes every MemOverlay API operation
+//! through a command interface.
 //!
-//! Supports loading a script file at startup via `--script <file>`.
-//! The script is a plain text file of REPL commands, one per line.
-//! After the script finishes, the interactive REPL takes over.
-//! Lines starting with `#` are comments. Empty lines are skipped.
+//! # Input modes
 //!
-//! Usage:
-//!   cargo run -p motlie-vfs --example repl_host --features vsock -- [options]
+//! The REPL detects how stdin is connected and adapts:
 //!
-//! Options:
+//! **Interactive (stdin is a TTY):**
+//!   Rustyline REPL with line editing, history, and tab completion.
+//!   Server runs until `quit` command or Ctrl-D.
+//!
+//! **Pipe then interactive (`cat script.vfs - | repl_host ...`):**
+//!   Reads and executes piped commands line by line.
+//!   After pipe EOF, reopens `/dev/tty` for interactive rustyline REPL.
+//!   Server keeps running throughout.
+//!
+//! **Pure pipe (`cat script.vfs | repl_host ...`):**
+//!   Reads and executes piped commands line by line.
+//!   After pipe EOF, server keeps running and serves guest filesystem
+//!   connections until SIGTERM/SIGINT/SIGHUP is received.
+//!   Use this mode for automated/agent-driven setups.
+//!
+//! In all modes, the `quit` command in the input stream shuts down
+//! the server immediately.
+//!
+//! # Usage
+//!
+//! ```bash
+//! # Interactive
+//! cargo run --example repl_host --features vsock -- --tag alice-home --dir ~/alice
+//!
+//! # Script then interactive
+//! cat setup-alice.sh.vfs - | cargo run --example repl_host --features vsock -- --tag alice-home
+//!
+//! # Script only (server stays alive until signaled)
+//! cat setup-alice.sh.vfs | cargo run --example repl_host --features vsock -- --tag alice-home
+//!
+//! # Agent-driven (write commands to stdin, server stays alive)
+//! echo "layer creds 0" | cargo run --example repl_host --features vsock -- --tag alice-home
+//! ```
+//!
+//! # Options
+//!
 //!   --socket <path>   vsock socket path (default: /tmp/motlie-vfs.vsock_5000)
 //!   --tag <name>      mount tag (default: alice-home)
 //!   --dir <path>      host backing directory (default: temp dir with sample data)
-//!   --script <file>   play commands from file at startup, then enter interactive REPL
 
+use std::io::{self, BufRead};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -36,7 +67,6 @@ async fn main() -> Result<()> {
     let mut socket_path = "/tmp/motlie-vfs.vsock_5000".to_string();
     let mut tag = "alice-home".to_string();
     let mut host_dir: Option<PathBuf> = None;
-    let mut script_path: Option<String> = None;
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -45,7 +75,6 @@ async fn main() -> Result<()> {
             "--socket" if i + 1 < args.len() => { socket_path = args[i + 1].clone(); i += 2; }
             "--tag" if i + 1 < args.len() => { tag = args[i + 1].clone(); i += 2; }
             "--dir" if i + 1 < args.len() => { host_dir = Some(PathBuf::from(&args[i + 1])); i += 2; }
-            "--script" if i + 1 < args.len() => { script_path = Some(args[i + 1].clone()); i += 2; }
             other => { host_dir = Some(PathBuf::from(other)); i += 1; }
         }
     }
@@ -68,9 +97,6 @@ async fn main() -> Result<()> {
     eprintln!("Host dir: {}", host_path.display());
     eprintln!("Tag: {tag}");
     eprintln!("Socket: {socket_path}");
-    if let Some(ref s) = script_path {
-        eprintln!("Script: {s}");
-    }
     eprintln!("");
 
     let server = Arc::new(
@@ -87,6 +113,7 @@ async fn main() -> Result<()> {
     eprintln!("Type 'help' for commands.");
     eprintln!("");
 
+    // Spawn vsock connection acceptor (guest filesystem traffic only)
     let server_for_accept = Arc::clone(&server);
     let tag_for_accept = tag.clone();
     tokio::spawn(async move {
@@ -109,12 +136,13 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Spawn the admin input handler on a blocking thread
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-    let server_for_repl = Arc::clone(&server);
+    let server_for_input = Arc::clone(&server);
     let socket_for_cleanup = socket_path.clone();
 
     tokio::task::spawn_blocking(move || {
-        run_repl(server_for_repl, script_path);
+        run_input(server_for_input);
         let _ = std::fs::remove_file(&socket_for_cleanup);
         let _ = shutdown_tx.send(());
     });
@@ -124,10 +152,58 @@ async fn main() -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// REPL
+// Input handling — adapts to TTY, pipe+TTY, or pure pipe
 // ---------------------------------------------------------------------------
 
-fn run_repl(server: Arc<FsServer>, script_path: Option<String>) {
+fn run_input(server: Arc<FsServer>) {
+    let stdin_is_tty = atty::is(atty::Stream::Stdin);
+
+    if stdin_is_tty {
+        // Mode 1: Interactive TTY — rustyline REPL
+        run_interactive_repl(&server);
+    } else {
+        // Modes 2 & 3: Piped input — read stdin line by line
+        eprintln!("--- reading commands from stdin ---");
+        let stdin = io::stdin();
+        for line in stdin.lock().lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(e) => { eprintln!("stdin read error: {e}"); break; }
+            };
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
+            eprintln!("vfs> {trimmed}");
+            if dispatch_command(&server, trimmed) == ControlFlow::Quit {
+                eprintln!("shutting down (quit command)");
+                return;
+            }
+        }
+        eprintln!("--- stdin EOF ---");
+
+        // Try to reopen /dev/tty for interactive mode (Mode 2: pipe then TTY)
+        #[cfg(unix)]
+        {
+            if let Ok(_tty) = std::fs::File::open("/dev/tty") {
+                // /dev/tty is available — the user piped a script but still has a terminal.
+                // Switch to interactive rustyline REPL.
+                eprintln!("--- entering interactive REPL (Ctrl-D to stop, server keeps running) ---");
+                eprintln!("");
+                run_interactive_repl(&server);
+                return;
+            }
+        }
+
+        // Mode 3: Pure pipe, no TTY available.
+        // Server keeps running for guest filesystem connections.
+        // Wait for SIGTERM/SIGINT/SIGHUP.
+        eprintln!("--- no TTY available, server running until signaled ---");
+        eprintln!("--- send SIGTERM or SIGINT to stop ---");
+        wait_for_signal();
+        eprintln!("shutting down (signal received)");
+    }
+}
+
+fn run_interactive_repl(server: &FsServer) {
     let mut rl = match rustyline::DefaultEditor::new() {
         Ok(rl) => rl,
         Err(e) => {
@@ -136,33 +212,6 @@ fn run_repl(server: Arc<FsServer>, script_path: Option<String>) {
         }
     };
 
-    // Play script file if provided
-    if let Some(path) = script_path {
-        match std::fs::read_to_string(&path) {
-            Ok(content) => {
-                eprintln!("--- playing script: {path} ---");
-                for (lineno, line) in content.lines().enumerate() {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() || trimmed.starts_with('#') {
-                        continue;
-                    }
-                    eprintln!("vfs> {trimmed}");
-                    if dispatch_command(&server, trimmed) == ControlFlow::Quit {
-                        eprintln!("--- script quit at line {} ---", lineno + 1);
-                        return;
-                    }
-                }
-                eprintln!("--- script complete, entering interactive REPL ---");
-                eprintln!("");
-            }
-            Err(e) => {
-                eprintln!("error: failed to read script {path}: {e}");
-                eprintln!("continuing with interactive REPL");
-            }
-        }
-    }
-
-    // Interactive REPL
     loop {
         let line = match rl.readline("vfs> ") {
             Ok(line) => line,
@@ -175,7 +224,7 @@ fn run_repl(server: Arc<FsServer>, script_path: Option<String>) {
         if trimmed.is_empty() { continue; }
         let _ = rl.add_history_entry(trimmed);
 
-        if dispatch_command(&server, trimmed) == ControlFlow::Quit {
+        if dispatch_command(server, trimmed) == ControlFlow::Quit {
             break;
         }
     }
@@ -183,8 +232,23 @@ fn run_repl(server: Arc<FsServer>, script_path: Option<String>) {
     eprintln!("shutting down");
 }
 
+/// Block until SIGTERM, SIGINT, or SIGHUP is received.
+fn wait_for_signal() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let running = Arc::new(AtomicBool::new(true));
+    let r = Arc::clone(&running);
+    ctrlc::set_handler(move || { r.store(false, Ordering::SeqCst); })
+        .unwrap_or_else(|e| eprintln!("warning: failed to set signal handler: {e}"));
+
+    while running.load(Ordering::SeqCst) {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
 // ---------------------------------------------------------------------------
-// Command dispatch — shared between script playback and interactive REPL
+// Command dispatch — shared between all input modes
 // ---------------------------------------------------------------------------
 
 #[derive(PartialEq)]
@@ -333,7 +397,12 @@ fn dispatch_command(server: &FsServer, line: &str) -> ControlFlow {
             println!("");
             println!("Other:");
             println!("  help                                            — show this help");
-            println!("  quit                                            — shut down");
+            println!("  quit                                            — shut down server");
+            println!("");
+            println!("Input modes:");
+            println!("  Interactive:  stdin is a TTY → rustyline REPL");
+            println!("  Pipe + TTY:   cat script.vfs - | repl_host → script then REPL");
+            println!("  Pure pipe:    cat script.vfs | repl_host → script then serve until signaled");
         }
 
         "quit" | "exit" => return ControlFlow::Quit,
