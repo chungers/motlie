@@ -621,14 +621,14 @@ Per-task reference rule:
 
 - every task in this phase traces to one or more of the DESIGN references listed above unless an individual task states a narrower reference explicitly
 
-- [ ] 4.2.1 Map `fuser` callbacks to `FsOp`.
-- [ ] 4.2.2 Map `FsResult` back to `fuser` reply types.
-- [ ] 4.2.3 Encode zero-TTL policy.
-- [ ] 4.2.4 Expose/document the mount option set for v1 correctness-first mode.
+- [x] 4.2.1 Map `fuser` callbacks to `FsOp`.
+- [x] 4.2.2 Map `FsResult` back to `fuser` reply types.
+- [x] 4.2.3 Encode zero-TTL policy.
+- [x] 4.2.4 Expose/document the mount option set for v1 correctness-first mode.
 - [ ] 4.2.5 Implement build-time FUSE dependency checks for Linux (macOS deferred to v2).
-- [ ] 4.2.5a Implement `GuestMountSpec` and `GuestMountRunner` in `client/guest.rs` as the public guest orchestration layer above `FuseClient`.
-- [ ] 4.2.5b Ensure `GuestMountRunner` consumes caller-supplied stream/transport connectors so VMM handshake/bootstrap logic stays outside this crate.
-- [ ] 4.2.5c Keep `bins/motlie-vfs-guest.rs` thin: it may parse config and obtain streams, but it must call `GuestMountRunner` rather than reimplementing mount orchestration.
+- [x] 4.2.5a Implement `GuestMountSpec` and `GuestMountRunner` in `client/guest.rs` as the public guest orchestration layer above `FuseClient`.
+- [x] 4.2.5b Ensure `GuestMountRunner` consumes caller-supplied stream/transport connectors so VMM handshake/bootstrap logic stays outside this crate.
+- [x] 4.2.5c Keep `bins/motlie-vfs-guest.rs` thin: it may parse config and obtain streams, but it must call `GuestMountRunner` rather than reimplementing mount orchestration.
 
 Tests / verification:
 
