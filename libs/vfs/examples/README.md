@@ -5,24 +5,41 @@ Proof-of-concept programs for the v1 Cloud Hypervisor guest workflow.
 ## repl_host
 
 Host-side filesystem server: one `FsServer` + `MemOverlay` per guest VM,
-listening on a parameterized Unix socket (the vsock host-side path), with a
-rustyline REPL exposing every `MemOverlay` API operation. Admin is in-process
-only — no network admin connections.
+listening on a parameterized Unix socket, with an admin command interface
+exposing every `MemOverlay` API operation. Admin is in-process only — no
+network admin connections.
 
+### Input modes
+
+The server detects how stdin is connected and adapts:
+
+**Interactive (stdin is a TTY):**
 ```bash
-# Default: socket /tmp/motlie-vfs.vsock_5000, tag alice-home, temp host dir
-cargo run -p motlie-vfs --example repl_host --features vsock
-
-# Explicit parameters:
-cargo run -p motlie-vfs --example repl_host --features vsock -- \
-    --socket /tmp/motlie-vfs-alice.vsock_5000 \
-    --tag alice-home \
-    --dir /path/to/host/dir
-
-# Multi-guest: run separate instances with different socket/tag/dir
+cargo run -p motlie-vfs --example repl_host --features vsock -- --tag alice-home
+# → rustyline REPL with line editing, history, ^C handling
 ```
 
-### REPL Commands
+**Pipe then interactive (`cat script - | ...`):**
+```bash
+cat setup-alice.sh.vfs - | cargo run -p motlie-vfs --example repl_host --features vsock -- --tag alice-home
+# → executes script, then drops into interactive REPL
+# → server keeps serving throughout
+```
+
+**Pure pipe (`cat script | ...`):**
+```bash
+cat setup-alice.sh.vfs | cargo run -p motlie-vfs --example repl_host --features vsock -- --tag alice-home
+# → executes script, then server keeps running until SIGTERM/SIGINT
+# → use this for automated/agent-driven setups
+```
+
+### Options
+
+- `--socket <path>` — vsock socket path (default: `/tmp/motlie-vfs.vsock_5000`)
+- `--tag <name>` — mount tag (default: `alice-home`)
+- `--dir <path>` — host backing directory (default: temp dir with sample data)
+
+### Commands
 
 **Layer management:**
 - `layer <name> <priority>` — create or update a named layer
@@ -31,7 +48,7 @@ cargo run -p motlie-vfs --example repl_host --features vsock -- \
 
 **Content injection:**
 - `put <layer> <tag> <path> <content>` — inject file with default attrs
-- `putattr <layer> <tag> <path> <uid> <gid> <mode> <content>` — inject with explicit ownership/mode (mode is octal)
+- `putattr <layer> <tag> <path> <uid> <gid> <mode> <content>` — inject with explicit ownership/mode
 - `mkdir <layer> <tag> <path> [mode]` — create synthetic directory
 
 **Suppression / removal:**
@@ -40,16 +57,17 @@ cargo run -p motlie-vfs --example repl_host --features vsock -- \
 
 **Inspection:**
 - `get <layer> <tag> <path>` — read content from a specific layer
-- `ls <tag>` — list effective overlay entries (highest-priority wins)
+- `ls <tag>` — list effective overlay entries
 - `lslayer <layer> <tag>` — list entries in a specific layer
 
 **Other:**
 - `help` — show all commands
-- `quit` — shut down
+- `quit` — shut down server
 
-Each guest VM gets its own `FsServer` instance and vsock socket. Tags identify
-mounted subtrees within that VM's server. See `libs/vfs/docs/DESIGN.md` FR-4
-for the isolation model.
+### Script files
 
-See `libs/vfs/image/README.md` for the full Cloud Hypervisor setup and
-validation procedure.
+Script files are plain text, one command per line. Lines starting with
+`#` are comments. Empty lines are skipped. See `image/setup-alice.sh.vfs`
+for an example.
+
+See `libs/vfs/image/README.md` for the full Cloud Hypervisor setup.
