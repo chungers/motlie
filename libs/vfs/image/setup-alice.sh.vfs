@@ -1,0 +1,27 @@
+# setup-alice.sh.vfs — example REPL script for the SSH use case.
+#
+# Usage:
+#   cargo run --example repl_host --features vsock -- \
+#       --tag alice-home --dir ~/alice --script libs/vfs/image/setup-alice.sh.vfs
+#
+# This script creates a credentials layer and injects SSH keys,
+# config, and API tokens for alice (uid=1000 gid=1000).
+# After the script plays, the interactive REPL takes over.
+
+# Create the credentials layer
+layer credentials 0
+
+# SSH keys — owned by alice, mode 600
+putattr credentials alice-home /.ssh/authorized_keys 1000 1000 600 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample alice@dev
+putattr credentials alice-home /.ssh/id_ed25519 1000 1000 600 PRIVATE_KEY_PLACEHOLDER
+putattr credentials alice-home /.ssh/id_ed25519.pub 1000 1000 644 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample alice@dev
+
+# SSH config — owned by alice, mode 644
+putattr credentials alice-home /.ssh/config 1000 1000 644 Host github.com
+
+# API tokens — default ownership (operator-controlled)
+put credentials alice-home /.env ANTHROPIC_API_KEY=sk-ant-placeholder
+
+# Verify what was injected
+ls alice-home
+layers
