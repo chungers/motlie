@@ -143,19 +143,19 @@ Design references: [Ordered Layer-Stack Model](./DESIGN.md), [Product Requiremen
 
 ---
 
-## 2.3 Phase 5: Deterministic Cache/TTL Behavior — not started
+## 2.3 Phase 5: Deterministic Cache/TTL Behavior — complete
 
 Design references: [v1 no-caching principle](./DESIGN.md), [FUSE client mount policy](./DESIGN.md)
 
 Primary file targets: `libs/vfs/src/core/server.rs`, `libs/vfs/src/client/fuse.rs`, `libs/vfs/src/core/op.rs`
 
-- [ ] 2.3.1 Ensure disk attrs are re-fetched each time in v1.
-- [ ] 2.3.2 Ensure no server-side readdir/data caches exist.
-- [ ] 2.3.3 Emit `ttl_secs = 0` consistently where specified.
-- [ ] 2.3.4 Encode the v1 mount behavior required for correctness-first mode.
-- [ ] 2.3.5 Add mutation-visibility-on-next-operation tests.
-- [ ] 2.3.6 Add zero-TTL response assertions.
-- [ ] 2.3.7 Add no-stale-view tests across admin-driven mutations in direct mode.
+- [x] 2.3.1 Ensure disk attrs are re-fetched each time in v1.
+- [x] 2.3.2 Ensure no server-side readdir/data caches exist.
+- [x] 2.3.3 Emit `ttl_secs = 0` consistently where specified.
+- [x] 2.3.4 Encode the v1 mount behavior required for correctness-first mode.
+- [x] 2.3.5 Add mutation-visibility-on-next-operation tests.
+- [x] 2.3.6 Add zero-TTL response assertions.
+- [x] 2.3.7 Add no-stale-view tests across admin-driven mutations in direct mode.
 
 ---
 

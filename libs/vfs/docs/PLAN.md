@@ -182,8 +182,7 @@ Per-task reference rule:
 - [x] 1.1.3 Add initial dependency set for core, vsock, client, and example PoC modules.
 - [x] 1.1.4 Create public module skeletons with feature gating only, no behavior yet.
 - [x] 1.1.5 Ensure `cargo check -p motlie-vfs` succeeds with default features.
-- [ ] 1.1.6 Add `rustyline` as the v1 proof-of-concept REPL dependency for `libs/vfs/examples`.
-<!-- @claude-dev 2026-03-28 -- deferred: rustyline is only needed when the REPL has behavior to wire; adding the dep now would be dead weight. Will add in Phase 5.1 when simple_host.rs gets its REPL loop. -->
+- [x] 1.1.6 Add `rustyline` as the v1 proof-of-concept REPL dependency for `libs/vfs/examples`.
 - [x] 1.1.6a Add `libs/vfs/examples/simple_host.rs` and `libs/vfs/examples/README.md` scaffolding so the v1 examples location matches the DESIGN exactly.
 - [x] 1.1.6b Add `libs/vfs/src/client/guest.rs` scaffolding so guest-side orchestration has a stable public API distinct from `FuseClient`.
 - [x] 1.1.6c Add `libs/vfs/bins/motlie-vfs-guest.rs` scaffolding as the real v1 guest-side mounter binary over the public guest APIs.
@@ -446,16 +445,16 @@ Per-task reference rule:
 
 - every task in this phase traces to one or more of the DESIGN references listed above unless an individual task states a narrower reference explicitly
 
-- [ ] 2.3.1 Ensure disk attrs are re-fetched each time in v1.
-- [ ] 2.3.2 Ensure no server-side readdir/data caches exist.
-- [ ] 2.3.3 Emit `ttl_secs = 0` consistently where specified.
-- [ ] 2.3.4 Encode the v1 mount behavior required for correctness-first mode.
+- [x] 2.3.1 Ensure disk attrs are re-fetched each time in v1.
+- [x] 2.3.2 Ensure no server-side readdir/data caches exist.
+- [x] 2.3.3 Emit `ttl_secs = 0` consistently where specified.
+- [x] 2.3.4 Encode the v1 mount behavior required for correctness-first mode.
 
 Tests / verification:
 
-- [ ] 2.3.5 Add mutation-visibility-on-next-operation tests.
-- [ ] 2.3.6 Add zero-TTL response assertions.
-- [ ] 2.3.7 Add no-stale-view tests across admin-driven mutations in direct mode.
+- [x] 2.3.5 Add mutation-visibility-on-next-operation tests.
+- [x] 2.3.6 Add zero-TTL response assertions.
+- [x] 2.3.7 Add no-stale-view tests across admin-driven mutations in direct mode.
 
 Exit criteria:
 
