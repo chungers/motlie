@@ -59,13 +59,13 @@ The guest binary must be a statically-linked x86_64 Linux ELF. From macOS:
 ```bash
 # Option A: Using cross (recommended — Docker-based, zero setup)
 cargo install cross --git https://github.com/cross-rs/cross
-cross build --release --target x86_64-unknown-linux-musl -p motlie-vfs --bin motlie-vfs-guest
+cross build --release --target x86_64-unknown-linux-musl --features vsock,client -p motlie-vfs --bin motlie-vfs-guest
 
 # Option B: Using homebrew musl-cross
 brew install filosottile/musl-cross/musl-cross
 rustup target add x86_64-unknown-linux-musl
 CC_x86_64_unknown_linux_musl="x86_64-linux-musl-gcc" \
-    cargo build --release --target x86_64-unknown-linux-musl -p motlie-vfs --bin motlie-vfs-guest
+    cargo build --release --target x86_64-unknown-linux-musl --features vsock,client -p motlie-vfs --bin motlie-vfs-guest
 ```
 
 The image build itself (`build-guest.sh`) must run on Linux because it uses
@@ -98,14 +98,14 @@ make olddefconfig
 make bzImage -j$(nproc)
 
 # Copy the kernel
-cp arch/x86/boot/compressed/vmlinux.bin /path/to/libs/vfs/image/artifacts/vmlinux.bin
+cp arch/x86/boot/compressed/vmlinux.bin /path/to/libs/vfs/examples/v1/artifacts/vmlinux.bin
 ```
 
 ### 2. Cross-compile the guest binary
 
 ```bash
 # From the workspace root, on macOS or Linux
-cross build --release --target x86_64-unknown-linux-musl -p motlie-vfs --bin motlie-vfs-guest
+cross build --release --target x86_64-unknown-linux-musl --features vsock,client -p motlie-vfs --bin motlie-vfs-guest
 
 # Verify it's a static musl binary
 file target/x86_64-unknown-linux-musl/release/motlie-vfs-guest
@@ -115,10 +115,10 @@ file target/x86_64-unknown-linux-musl/release/motlie-vfs-guest
 ### 3. Build the guest images
 
 ```bash
-cd libs/vfs/image
+cd libs/vfs/examples/v1
 
 # Pass the cross-compiled binary explicitly, or let the script find it
-./build-guest.sh --guest-binary ../../target/x86_64-unknown-linux-musl/release/motlie-vfs-guest
+./build-guest.sh --guest-binary ../../../../target/x86_64-unknown-linux-musl/release/motlie-vfs-guest
 
 # Output:
 #   artifacts/rootfs.squashfs  (~30-50 MB)
@@ -168,31 +168,45 @@ id alice
 ```bash
 # Starts one FsServer per guest VM. Each VM gets its own socket.
 # Default: socket /tmp/motlie-vfs.vsock_5000, tag alice-home, temp host dir.
-cargo run -p motlie-vfs --example simple_host --features vsock
+cargo run -p motlie-vfs --example repl_host --features vsock
 
 # With explicit parameters (for multi-guest, run separate instances):
-cargo run -p motlie-vfs --example simple_host --features vsock -- \
+cargo run -p motlie-vfs --example repl_host --features vsock -- \
     --socket /tmp/motlie-vfs-alice.vsock_5000 \
     --tag alice-home \
     --dir /path/to/alice/home
 
 # Second guest VM in another terminal:
-cargo run -p motlie-vfs --example simple_host --features vsock -- \
+cargo run -p motlie-vfs --example repl_host --features vsock -- \
     --socket /tmp/motlie-vfs-bob.vsock_5000 \
     --tag bob-home \
     --dir /path/to/bob/home
 ```
 
-The host server provides a stdin command loop for overlay mutation:
+The host server provides a rustyline REPL for overlay mutation. Example
+SSH key injection workflow for the `alice-home` tag (uid=1000 gid=1000):
 
 ```
-put credentials alice-home /.ssh/id_ed25519 <key-content>
-put credentials alice-home /.env SECRET=abc
-whiteout credentials alice-home /.bashrc
-ls alice-home
-rm credentials alice-home /.env
-quit
+vfs> layer credentials 0
+ok: layer credentials priority=0
+
+vfs> putattr credentials alice-home /.ssh/authorized_keys 1000 1000 600 ssh-ed25519 AAAA... alice@dev
+ok: putattr credentials alice-home /.ssh/authorized_keys uid=1000 gid=1000 mode=600 (38 bytes)
+
+vfs> putattr credentials alice-home /.ssh/config 1000 1000 644 Host github.com
+ok: putattr credentials alice-home /.ssh/config uid=1000 gid=1000 mode=644 (19 bytes)
+
+vfs> put credentials alice-home /.env ANTHROPIC_API_KEY=sk-ant-xxx
+ok: put credentials alice-home /.env (31 bytes)
+
+vfs> ls alice-home
+  Content { size: 38 } /.ssh/authorized_keys uid=1000 gid=1000 mode=600
+  Content { size: 19 } /.ssh/config uid=1000 gid=1000 mode=644
+  Content { size: 31 } /.env uid=0 gid=0 mode=644
+(3 entries)
 ```
+
+Type `help` for all available commands.
 
 ### 7. Shut down the guest
 

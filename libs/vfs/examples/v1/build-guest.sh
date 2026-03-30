@@ -25,7 +25,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 ARTIFACTS="$SCRIPT_DIR/artifacts"
 
 # ---------------------------------------------------------------------------
@@ -66,6 +66,7 @@ if [ -z "$GUEST_BINARY" ]; then
         echo "Using 'cross' for musl cross-compilation"
         (cd "$WORKSPACE_ROOT" && cross build --release \
             --target x86_64-unknown-linux-musl \
+            --features vsock,client \
             -p motlie-vfs --bin motlie-vfs-guest)
         GUEST_BINARY="$WORKSPACE_ROOT/target/x86_64-unknown-linux-musl/release/motlie-vfs-guest"
     else
@@ -74,6 +75,7 @@ if [ -z "$GUEST_BINARY" ]; then
         rustup target add x86_64-unknown-linux-musl 2>/dev/null || true
         (cd "$WORKSPACE_ROOT" && cargo build --release \
             --target x86_64-unknown-linux-musl \
+            --features vsock,client \
             -p motlie-vfs --bin motlie-vfs-guest)
         GUEST_BINARY="$WORKSPACE_ROOT/target/x86_64-unknown-linux-musl/release/motlie-vfs-guest"
     fi
@@ -139,6 +141,22 @@ sudo chroot "$ROOTFS_DIR" /bin/sh -c '
 
     # Create motlie-vfs config directory
     mkdir -p /etc/motlie-vfs
+
+    # Create OpenRC service for motlie-vfs-guest
+    cat > /etc/init.d/motlie-vfs-guest << "INITEOF"
+#!/sbin/openrc-run
+description="motlie-vfs guest filesystem mounter"
+command="/usr/local/bin/motlie-vfs-guest"
+command_args="/etc/motlie-vfs/mounts.yaml"
+command_background=true
+pidfile="/run/motlie-vfs-guest.pid"
+depend() {
+    need localmount
+    after sshd
+}
+INITEOF
+    chmod 755 /etc/init.d/motlie-vfs-guest
+    rc-update add motlie-vfs-guest default
 '
 
 # Install the guest binary
@@ -179,8 +197,12 @@ mkdir -p "$OVERLAY_SEED/work"
 # Copy the mount config
 cp "$SCRIPT_DIR/mounts.yaml" "$OVERLAY_SEED/upper/etc/motlie-vfs/mounts.yaml"
 
-# Create alice's home directory structure
-mkdir -p "$OVERLAY_SEED/upper/home/alice"
+# Create alice's home directory structure and mount points.
+# These directories must exist for the guest mounter to mount onto them.
+# uid=1000 gid=1000 matches the alice user in the squashfs image.
+mkdir -p "$OVERLAY_SEED/upper/home/alice/.ssh"
+mkdir -p "$OVERLAY_SEED/upper/home/alice/workspace"
+chmod 700 "$OVERLAY_SEED/upper/home/alice/.ssh"
 
 # Build ext4 image from the seed directory (no sudo/mount needed)
 truncate -s "$OVERLAY_SIZE" "$ARTIFACTS/overlay.ext4"

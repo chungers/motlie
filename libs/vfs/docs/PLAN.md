@@ -182,9 +182,8 @@ Per-task reference rule:
 - [x] 1.1.3 Add initial dependency set for core, vsock, client, and example PoC modules.
 - [x] 1.1.4 Create public module skeletons with feature gating only, no behavior yet.
 - [x] 1.1.5 Ensure `cargo check -p motlie-vfs` succeeds with default features.
-- [ ] 1.1.6 Add `rustyline` as the v1 proof-of-concept REPL dependency for `libs/vfs/examples`.
-<!-- @claude-dev 2026-03-28 -- deferred: rustyline is only needed when the REPL has behavior to wire; adding the dep now would be dead weight. Will add in Phase 5.1 when simple_host.rs gets its REPL loop. -->
-- [x] 1.1.6a Add `libs/vfs/examples/simple_host.rs` and `libs/vfs/examples/README.md` scaffolding so the v1 examples location matches the DESIGN exactly.
+- [x] 1.1.6 Add `rustyline` as the v1 proof-of-concept REPL dependency for `libs/vfs/examples`.
+- [x] 1.1.6a Add `libs/vfs/examples/repl_host.rs` and `libs/vfs/examples/README.md` scaffolding so the v1 examples location matches the DESIGN exactly.
 - [x] 1.1.6b Add `libs/vfs/src/client/guest.rs` scaffolding so guest-side orchestration has a stable public API distinct from `FuseClient`.
 - [x] 1.1.6c Add `libs/vfs/bins/motlie-vfs-guest.rs` scaffolding as the real v1 guest-side mounter binary over the public guest APIs.
 
@@ -446,16 +445,16 @@ Per-task reference rule:
 
 - every task in this phase traces to one or more of the DESIGN references listed above unless an individual task states a narrower reference explicitly
 
-- [ ] 2.3.1 Ensure disk attrs are re-fetched each time in v1.
-- [ ] 2.3.2 Ensure no server-side readdir/data caches exist.
-- [ ] 2.3.3 Emit `ttl_secs = 0` consistently where specified.
-- [ ] 2.3.4 Encode the v1 mount behavior required for correctness-first mode.
+- [x] 2.3.1 Ensure disk attrs are re-fetched each time in v1.
+- [x] 2.3.2 Ensure no server-side readdir/data caches exist.
+- [x] 2.3.3 Emit `ttl_secs = 0` consistently where specified.
+- [x] 2.3.4 Encode the v1 mount behavior required for correctness-first mode.
 
 Tests / verification:
 
-- [ ] 2.3.5 Add mutation-visibility-on-next-operation tests.
-- [ ] 2.3.6 Add zero-TTL response assertions.
-- [ ] 2.3.7 Add no-stale-view tests across admin-driven mutations in direct mode.
+- [x] 2.3.5 Add mutation-visibility-on-next-operation tests.
+- [x] 2.3.6 Add zero-TTL response assertions.
+- [x] 2.3.7 Add no-stale-view tests across admin-driven mutations in direct mode.
 
 Exit criteria:
 
@@ -476,7 +475,7 @@ Design references:
 
 Primary file targets:
 
-- `libs/vfs/examples/simple_host.rs`
+- `libs/vfs/examples/repl_host.rs`
 - `libs/vfs/examples/README.md`
 - docs under `libs/vfs/docs/` that describe the protocol and usage contract
 
@@ -633,11 +632,11 @@ Per-task reference rule:
 Tests / verification:
 
 - [ ] 4.2.6 Add callback translation unit tests.
-- [ ] 4.2.7 Add mock transport tests.
-- [ ] 4.2.7a Add unit tests for `GuestMountRunner` using mock transport/connector closures.
-- [ ] 4.2.8 Add FUSE integration tests where the environment supports it.
+- [x] 4.2.7 Add mock transport tests.
+- [x] 4.2.7a Add unit tests for `GuestMountRunner` using mock transport/connector closures.
+- [ ] 4.2.8 Add FUSE integration tests where the environment supports it (requires Linux).
 - [x] 4.2.9 macOS FUSE-T is v2 roadmap work, not a v1 requirement.
-- [ ] 4.2.10 Add an end-to-end mounted-subtree scenario showing guest-visible behavior for partial overlay, synthetic dirs, and whiteouts.
+- [x] 4.2.10 Add an end-to-end mounted-subtree scenario showing guest-visible behavior for partial overlay, synthetic dirs, and whiteouts.
 
 Clarification:
 
@@ -678,18 +677,18 @@ Per-task reference rule:
 
 - every task in this phase traces to one or more of the DESIGN references listed above unless an individual task states a narrower reference explicitly
 
-- [ ] 5.1.1 Add `motlie-vfs` as a workspace dependency where appropriate.
-- [ ] 5.1.2 Ensure feature flags are cleanly consumable for direct mode, vsock host/guest paths, and future v2 expansion.
+- [x] 5.1.1 Add `motlie-vfs` as a workspace dependency where appropriate.
+- [x] 5.1.2 Ensure feature flags are cleanly consumable for direct mode, vsock host/guest paths, and future v2 expansion.
 - [ ] 5.1.3 Validate the design mapping back to `motlie-vmm`.
-- [ ] 5.1.4 Update related docs after implementation snapshots land.
+- [x] 5.1.4 Update related docs after implementation snapshots land.
 - [ ] 5.1.5 Add an implementation-readiness checklist that maps completed phases back to the DESIGN traceability items.
 - [ ] 5.1.6 Add a small benchmark or measurement harness for metadata latency and large-file throughput.
-- [ ] 5.1.7 Add explicit setup instructions or scripts for building `motlie-vfs-guest` first, then building the stacked-root guest image used in v1 guest tests.
-- [ ] 5.1.8 Add explicit setup instructions or scripts for creating host backing directories and sample disk-backed files for overlay tests.
-- [ ] 5.1.9 Add explicit setup instructions or scripts for starting the host-side `FsServer`, `MemOverlay`, and the v1 in-process REPL/example harness.
-- [ ] 5.1.10 Add explicit embedded admin console or script/config procedures for `put`, `putattr`, `whiteout`, `rm`, `rmlayer`, `ls`, and `lslayer` in the guest-harness workflow.
-- [ ] 5.1.11 Add explicit CH launch/stop commands or scripts, including vsock and block-device wiring for the stacked-root guest image.
-- [ ] 5.1.11a Document the guest boundary explicitly in harness instructions: bootstrap/binary delivery remain VMM-owned, while `bins/motlie-vfs-guest.rs` only exercises the public guest APIs from `client/guest.rs`.
+- [x] 5.1.7 Add explicit setup instructions or scripts for building `motlie-vfs-guest` first, then building the stacked-root guest image used in v1 guest tests.
+- [x] 5.1.8 Add explicit setup instructions or scripts for creating host backing directories and sample disk-backed files for overlay tests.
+- [x] 5.1.9 Add explicit setup instructions or scripts for starting the host-side `FsServer`, `MemOverlay`, and the v1 in-process REPL/example harness.
+- [x] 5.1.10 Add explicit embedded admin console or script/config procedures for `put`, `putattr`, `whiteout`, `rm`, `rmlayer`, `ls`, and `lslayer` in the guest-harness workflow.
+- [x] 5.1.11 Add explicit CH launch/stop commands or scripts, including vsock and block-device wiring for the stacked-root guest image.
+- [x] 5.1.11a Document the guest boundary explicitly in harness instructions: bootstrap/binary delivery remain VMM-owned, while `bins/motlie-vfs-guest.rs` only exercises the public guest APIs from `client/guest.rs`.
 
 Suggested setup snippets to include in this phase:
 
@@ -700,27 +699,30 @@ mkdir -p /tmp/motlie-vfs/scratch-alice
 printf 'hello\n' > /tmp/motlie-vfs/home-alice/projects/README.md
 
 # Build the v1 host and guest binaries before guest image assembly
-cargo build -p motlie-vfs --example simple_host --bin motlie-vfs-guest
+cargo build -p motlie-vfs --example repl_host --features vsock
+cross build --release --target x86_64-unknown-linux-musl --features vsock,client -p motlie-vfs --bin motlie-vfs-guest
 
 # Start the host example / REPL
-cargo run -p motlie-vfs --example simple_host
+cargo run -p motlie-vfs --example repl_host --features vsock -- --tag alice-home --dir /tmp/motlie-vfs/home-alice
 ```
 
 ```bash
 # Example Cloud Hypervisor launch shape for the v1 harness
+# (see examples/v1/launch-ch.sh for the full command)
 cloud-hypervisor \
-  --kernel ./artifacts/vmlinux \
-  --disk path=./artifacts/root.squashfs,readonly=on \
-  --disk path=./artifacts/overlay.ext4 \
-  --vsock cid=42,socket=/tmp/motlie-vfs-vsock.sock \
-  --console tty
+  --kernel ./artifacts/vmlinux.bin \
+  --disk path=./artifacts/rootfs.squashfs,readonly=on \
+         path=./artifacts/overlay.ext4 \
+  --vsock cid=3,socket=/tmp/motlie-vfs.vsock \
+  --serial tty --console off
 ```
 
 Concrete end-to-end walkthrough to include in this phase:
 
 ```bash
-# 1. Build the host REPL and guest mounter binary on the host.
-cargo build -p motlie-vfs --example simple_host --bin motlie-vfs-guest
+# 1. Build the host REPL and guest mounter binary.
+cargo build -p motlie-vfs --example repl_host --features vsock
+cross build --release --target x86_64-unknown-linux-musl --features vsock,client -p motlie-vfs --bin motlie-vfs-guest
 
 # 2. Prepare host-backed data for the guest /home/alice subtree.
 mkdir -p /tmp/motlie-vfs/home/alice
@@ -745,7 +747,7 @@ ssh-keygen -t ed25519 -N '' -f /tmp/motlie-vfs/id_alice_test
 #    The image-build script for this phase should make these exact artifacts reproducible.
 
 # 5. Start the host-side v1 REPL / server with tag alice-home bound to the host path.
-cargo run -p motlie-vfs --example simple_host
+cargo run -p motlie-vfs --example repl_host --features vsock -- --tag alice-home --dir /tmp/motlie-vfs/home/alice
 ```
 
 ```text
@@ -819,21 +821,21 @@ rm credentials home /.ssh/config
 
 Tests / verification:
 
-- [ ] 5.1.12 Run workspace `cargo check`.
-- [ ] 5.1.13 Run feature-matrix build verification.
-- [ ] 5.1.14 Validate the concrete VMM example: boot static squashfs+ext4 root, mount `/home/alice` through `motlie-vfs`, then inject `/home/alice/.ssh/...` and `/home/alice/.claude/skills/...` dynamically.
-- [ ] 5.1.15 Validate that non-overlaid files inside the mounted subtree continue to pass through unchanged.
+- [x] 5.1.12 Run workspace `cargo check`.
+- [x] 5.1.13 Run feature-matrix build verification.
+- [ ] 5.1.14 Validate the concrete VMM example: boot static squashfs+ext4 root, mount `/home/alice` through `motlie-vfs`, then inject `/home/alice/.ssh/...` and `/home/alice/.claude/skills/...` dynamically (requires Linux).
+- [x] 5.1.15 Validate that non-overlaid files inside the mounted subtree continue to pass through unchanged (verified in `e2e_ssh_subtree_scenario` test).
 - [ ] 5.1.16 Record baseline latency measurements for small metadata operations over Unix sockets.
 - [ ] 5.1.17 Record baseline throughput measurements for large sequential reads/writes over Unix sockets.
-- [ ] 5.1.18 Validate operator-facing path contract examples for both `home + /alice/...` and `alice-home + /.claude/...` forms.
-- [ ] 5.1.19 Validate explicit synthetic ownership by injecting entries for provisioned guest users and checking guest-visible `uid`/`gid`.
-- [ ] 5.1.20 Validate the `whiteout` / tombstone workflow hides lower disk files from the guest.
-- [ ] 5.1.21 Validate the `rm` workflow removes injected synthetic files from the guest view.
-- [ ] 5.1.22 Validate SSH guest access against the v1 test image where applicable.
-- [ ] 5.1.23 Validate the documented CH launch and stop procedure from a clean host environment.
-- [ ] 5.1.24 Document the remaining v1 limitation that a shared `(tag, path)` entry cannot present different uid/gid ownership to different guests simultaneously.
-- [ ] 5.1.25 Validate the in-process VMM/REPL hosting pattern: a Tokio task can call `server.overlay()` directly while filesystem serving remains active.
-- [ ] 5.1.26 Validate the Cloud Hypervisor fast-path harness as the pre-VMM guest development environment for the vsock flow.
+- [x] 5.1.18 Validate operator-facing path contract examples for both `home + /alice/...` and `alice-home + /.claude/...` forms (verified in `e2e_ssh_subtree_scenario` and `e2e_multi_tag_isolation` tests).
+- [x] 5.1.19 Validate explicit synthetic ownership by injecting entries for provisioned guest users and checking guest-visible `uid`/`gid` (verified in `e2e_ssh_subtree_scenario` test).
+- [x] 5.1.20 Validate the `whiteout` / tombstone workflow hides lower disk files from the guest (verified in `e2e_ssh_subtree_scenario` test).
+- [x] 5.1.21 Validate the `rm` workflow removes injected synthetic files from the guest view (verified in `e2e_ssh_subtree_scenario` test).
+- [ ] 5.1.22 Validate SSH guest access against the v1 test image where applicable (requires Linux).
+- [ ] 5.1.23 Validate the documented CH launch and stop procedure from a clean host environment (requires Linux).
+- [x] 5.1.24 Document the remaining v1 limitation that a shared `(tag, path)` entry cannot present different uid/gid ownership to different guests simultaneously (documented in DESIGN ownership caveats).
+- [x] 5.1.25 Validate the in-process VMM/REPL hosting pattern: a Tokio task can call `server.overlay()` directly while filesystem serving remains active (verified in `in_process_overlay_mutation_while_serving` test).
+- [ ] 5.1.26 Validate the Cloud Hypervisor fast-path harness as the pre-VMM guest development environment for the vsock flow (requires Linux).
 
 Exit criteria:
 

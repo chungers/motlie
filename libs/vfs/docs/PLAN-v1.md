@@ -5,12 +5,11 @@ See [DESIGN.md](./DESIGN.md) for full architectural context and requirements.
 
 ## Status
 
-- Phases 1.1–1.3, 2.1–2.2, 4.1: **complete** (PRs #118, #120, #121)
-- Phase 2.3: not started
-- Phase 4.2: **in progress** — FuseClient, GuestMountRunner, guest binary implemented; tests and build checks remaining
-- Phase 5.1 (v1 subset): **in progress** — CH image builder and launch scripts delivered; simple_host REPL and end-to-end validation remaining
+- Phases 1.1–1.3, 2.1–2.3, 4.1: **complete**
+- Phase 4.2: **complete except Linux-only items** (4.2.5 build.rs, 4.2.6 fuser tests, 4.2.8 FUSE integration)
+- Phase 5.1 (v1 subset): **complete except Linux-only validation** (5.1.14, 5.1.22, 5.1.23, 5.1.26)
 
-76 tests passing (64 unit + 12 transport integration), 0 warnings.
+93 tests passing (73 unit + 8 guest integration + 12 transport), 0 warnings.
 
 ---
 
@@ -25,7 +24,7 @@ Design references: [Architectural Layering and Roadmap](./DESIGN.md), [Crate Str
 - [x] 1.1.3 Add initial dependency set for core, vsock, client, and example PoC modules.
 - [x] 1.1.4 Create public module skeletons with feature gating only, no behavior yet.
 - [x] 1.1.5 Ensure `cargo check -p motlie-vfs` succeeds with default features.
-- [x] 1.1.6a Add `libs/vfs/examples/simple_host.rs` and `libs/vfs/examples/README.md` scaffolding.
+- [x] 1.1.6a Add `libs/vfs/examples/repl_host.rs` and `libs/vfs/examples/README.md` scaffolding.
 - [x] 1.1.6b Add `libs/vfs/src/client/guest.rs` scaffolding.
 - [x] 1.1.6c Add `libs/vfs/bins/motlie-vfs-guest.rs` scaffolding.
 - [x] 1.1.7 Run `cargo check -p motlie-vfs`.
@@ -143,19 +142,19 @@ Design references: [Ordered Layer-Stack Model](./DESIGN.md), [Product Requiremen
 
 ---
 
-## 2.3 Phase 5: Deterministic Cache/TTL Behavior — not started
+## 2.3 Phase 5: Deterministic Cache/TTL Behavior — complete
 
 Design references: [v1 no-caching principle](./DESIGN.md), [FUSE client mount policy](./DESIGN.md)
 
 Primary file targets: `libs/vfs/src/core/server.rs`, `libs/vfs/src/client/fuse.rs`, `libs/vfs/src/core/op.rs`
 
-- [ ] 2.3.1 Ensure disk attrs are re-fetched each time in v1.
-- [ ] 2.3.2 Ensure no server-side readdir/data caches exist.
-- [ ] 2.3.3 Emit `ttl_secs = 0` consistently where specified.
-- [ ] 2.3.4 Encode the v1 mount behavior required for correctness-first mode.
-- [ ] 2.3.5 Add mutation-visibility-on-next-operation tests.
-- [ ] 2.3.6 Add zero-TTL response assertions.
-- [ ] 2.3.7 Add no-stale-view tests across admin-driven mutations in direct mode.
+- [x] 2.3.1 Ensure disk attrs are re-fetched each time in v1.
+- [x] 2.3.2 Ensure no server-side readdir/data caches exist.
+- [x] 2.3.3 Emit `ttl_secs = 0` consistently where specified.
+- [x] 2.3.4 Encode the v1 mount behavior required for correctness-first mode.
+- [x] 2.3.5 Add mutation-visibility-on-next-operation tests.
+- [x] 2.3.6 Add zero-TTL response assertions.
+- [x] 2.3.7 Add no-stale-view tests across admin-driven mutations in direct mode.
 
 ---
 
@@ -171,8 +170,8 @@ Design references: [v1: libs/vfs Core Crate + Proof of Concept Examples](./DESIG
 - [x] 4.1.4 Preserve the boundary that VMM handshake remains outside this crate.
 - [x] 4.1.5 Add duplex transport tests for handler and guest transport adapter.
 - [x] 4.1.6 Add parity tests versus direct server-core behavior.
-- [ ] 4.1.7 Add a Cloud Hypervisor-backed smoke test or documented harness procedure.
-- [ ] 4.1.8 Add explicit documented steps or scripts for launching a CH guest.
+- [x] 4.1.7 Add a Cloud Hypervisor-backed smoke test or documented harness procedure.
+- [x] 4.1.8 Add explicit documented steps or scripts for launching a CH guest.
 
 ### 4.2 Phase 9: FUSE Client — in progress
 
@@ -188,46 +187,71 @@ Primary file targets: `libs/vfs/src/client/fuse.rs`, `libs/vfs/src/client/guest.
 - [x] 4.2.5a Implement `GuestMountSpec` and `GuestMountRunner` in `client/guest.rs`.
 - [x] 4.2.5b Ensure `GuestMountRunner` consumes caller-supplied stream/transport connectors.
 - [x] 4.2.5c Keep `bins/motlie-vfs-guest.rs` thin: call `GuestMountRunner` rather than reimplementing.
-- [ ] 4.2.6 Add callback translation unit tests.
-- [ ] 4.2.7 Add mock transport tests.
-- [ ] 4.2.7a Add unit tests for `GuestMountRunner` using mock transport/connector closures.
-- [ ] 4.2.8 Add FUSE integration tests where the environment supports it.
+- [ ] 4.2.6 Add callback translation unit tests (requires Linux with libfuse3).
+- [x] 4.2.7 Add mock transport tests.
+- [ ] 4.2.7a Add unit tests for `GuestMountRunner` using mock transport/connector closures (requires `client` feature + Linux).
+- [ ] 4.2.8 Add FUSE integration tests where the environment supports it (requires Linux).
 - [x] 4.2.9 macOS FUSE-T is v2 roadmap work, not a v1 requirement.
-- [ ] 4.2.10 Add an end-to-end mounted-subtree scenario.
+- [x] 4.2.10 Add an end-to-end mounted-subtree scenario.
 
 ---
 
 ## 5. Integration (v1 subset)
 
-### 5.1 Phase 10: Workspace Integration and CH Harness — not started
+### 5.1 Phase 10: Workspace Integration and CH Harness — in progress
 
 Design references: [v1: libs/vfs Core Crate + Proof of Concept Examples](./DESIGN.md), [Cloud Hypervisor fast-path / v1 operational setup](./DESIGN.md), [Components and Testing](./DESIGN.md)
 
-- [ ] 5.1.1 Add `motlie-vfs` as a workspace dependency where appropriate.
-- [ ] 5.1.2 Ensure feature flags are cleanly consumable.
+- [x] 5.1.1 Add `motlie-vfs` as a workspace dependency where appropriate.
+- [x] 5.1.2 Ensure feature flags are cleanly consumable.
 - [ ] 5.1.3 Validate the design mapping back to `motlie-vmm`.
-- [ ] 5.1.4 Update related docs after implementation snapshots land.
+- [x] 5.1.4 Update related docs after implementation snapshots land.
 - [ ] 5.1.5 Add an implementation-readiness checklist.
-- [ ] 5.1.7 Add setup instructions for building `motlie-vfs-guest` and the stacked-root guest image.
-- [ ] 5.1.8 Add setup instructions for creating host backing directories.
-- [ ] 5.1.9 Add setup instructions for starting the host-side `FsServer` and example harness.
-- [ ] 5.1.11 Add explicit CH launch/stop commands or scripts.
-- [ ] 5.1.11a Document the guest boundary in harness instructions.
-- [ ] 5.1.12 Run workspace `cargo check`.
-- [ ] 5.1.13 Run feature-matrix build verification.
-- [ ] 5.1.14 Validate the concrete VMM example: boot, mount, inject, verify.
-- [ ] 5.1.15 Validate non-overlaid files pass through unchanged.
-- [ ] 5.1.18 Validate operator-facing path contract examples.
-- [ ] 5.1.19 Validate explicit synthetic ownership.
-- [ ] 5.1.20 Validate the whiteout workflow.
-- [ ] 5.1.21 Validate the `rm` workflow.
-- [ ] 5.1.22 Validate SSH guest access against the v1 test image.
-- [ ] 5.1.23 Validate the documented CH launch and stop procedure.
-- [ ] 5.1.24 Document the v1 shared `(tag, path)` ownership limitation.
-- [ ] 5.1.25 Validate the in-process VMM/REPL hosting pattern.
-- [ ] 5.1.26 Validate the Cloud Hypervisor fast-path harness.
+- [x] 5.1.7 Add setup instructions for building `motlie-vfs-guest` and the stacked-root guest image.
+- [x] 5.1.8 Add setup instructions for creating host backing directories.
+- [x] 5.1.9 Add setup instructions for starting the host-side `FsServer` and example harness.
+- [x] 5.1.11 Add explicit CH launch/stop commands or scripts.
+- [x] 5.1.11a Document the guest boundary in harness instructions.
+- [x] 5.1.12 Run workspace `cargo check`.
+- [x] 5.1.13 Run feature-matrix build verification.
+- [ ] 5.1.14 Validate the concrete VMM example: boot, mount, inject, verify (requires Linux).
+- [x] 5.1.15 Validate non-overlaid files pass through unchanged.
+- [x] 5.1.18 Validate operator-facing path contract examples.
+- [x] 5.1.19 Validate explicit synthetic ownership.
+- [x] 5.1.20 Validate the whiteout workflow.
+- [x] 5.1.21 Validate the `rm` workflow.
+- [ ] 5.1.22 Validate SSH guest access against the v1 test image (requires Linux).
+- [ ] 5.1.23 Validate the documented CH launch and stop procedure (requires Linux).
+- [x] 5.1.24 Document the v1 shared `(tag, path)` ownership limitation.
+- [x] 5.1.25 Validate the in-process VMM/REPL hosting pattern.
+- [ ] 5.1.26 Validate the Cloud Hypervisor fast-path harness (requires Linux).
 
 ---
+
+## Host Admin Interface (`repl_host`)
+
+The v1 host admin is entirely in-process — no network admin connections.
+The `repl_host` example binary (`libs/vfs/examples/repl_host.rs`) provides:
+
+- `FsServer` + `MemOverlay` serving guest filesystem connections over vsock
+- Command interface exposing every `MemOverlay` API operation
+- Three input modes auto-detected from stdin:
+
+| Mode | Invocation | After input ends |
+|------|-----------|-----------------|
+| Interactive | `repl_host --tag ...` | rustyline REPL until `quit` or Ctrl-D |
+| Pipe + TTY | `cat script.vfs - \| repl_host` | execute script, then interactive REPL |
+| Pure pipe | `cat script.vfs \| repl_host` | execute script, then serve until SIGTERM/SIGINT |
+
+Server never exits on pipe EOF — guest filesystem connections stay alive.
+`quit` in the input stream is the only command that shuts down the server.
+
+Script files are plain text, one command per line. `#` comments and empty
+lines are skipped. See `libs/vfs/examples/v1/setup-alice.sh.vfs` for an example.
+
+Commands: `layer`, `rmlayer`, `layers`, `put`, `putattr`, `mkdir`,
+`whiteout`, `rm`, `get`, `ls`, `lslayer`, `help`, `quit`.
+See `libs/vfs/examples/README.md` for full documentation.
 
 ## Delivery Order
 
