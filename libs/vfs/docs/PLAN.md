@@ -579,17 +579,17 @@ Per-task reference rule:
 
 - every task in this phase traces to one or more of the DESIGN references listed above unless an individual task states a narrower reference explicitly
 
-- [ ] 4.1.1 Implement bincode-over-stream request/response handling.
-- [ ] 4.1.2 Implement `VsockConnectionHandler`.
-- [ ] 4.1.3 Implement `VsockClientTransport`.
-- [ ] 4.1.4 Preserve the boundary that VMM handshake remains outside this crate.
+- [x] 4.1.1 Implement bincode-over-stream request/response handling.
+- [x] 4.1.2 Implement `VsockConnectionHandler`.
+- [x] 4.1.3 Implement `VsockClientTransport`.
+- [x] 4.1.4 Preserve the boundary that VMM handshake remains outside this crate.
 
 Tests / verification:
 
-- [ ] 4.1.5 Add duplex transport tests for handler and guest transport adapter.
-- [ ] 4.1.6 Add parity tests versus direct server-core behavior.
-- [ ] 4.1.7 Add a Cloud Hypervisor-backed smoke test or documented harness procedure for guest boot + vsock mount + overlay visibility.
-- [ ] 4.1.8 Add explicit documented steps or scripts for launching a CH guest with vsock and the stacked-root test image.
+- [x] 4.1.5 Add duplex transport tests for handler and guest transport adapter.
+- [x] 4.1.6 Add parity tests versus direct server-core behavior.
+- [x] 4.1.7 Add a Cloud Hypervisor-backed smoke test or documented harness procedure for guest boot + vsock mount + overlay visibility.
+- [x] 4.1.8 Add explicit documented steps or scripts for launching a CH guest with vsock and the stacked-root test image.
 
 Exit criteria:
 
@@ -621,14 +621,14 @@ Per-task reference rule:
 
 - every task in this phase traces to one or more of the DESIGN references listed above unless an individual task states a narrower reference explicitly
 
-- [ ] 4.2.1 Map `fuser` callbacks to `FsOp`.
-- [ ] 4.2.2 Map `FsResult` back to `fuser` reply types.
-- [ ] 4.2.3 Encode zero-TTL policy.
-- [ ] 4.2.4 Expose/document the mount option set for v1 correctness-first mode.
-- [ ] 4.2.5 Implement build-time FUSE dependency checks for Linux/macOS.
-- [ ] 4.2.5a Implement `GuestMountSpec` and `GuestMountRunner` in `client/guest.rs` as the public guest orchestration layer above `FuseClient`.
-- [ ] 4.2.5b Ensure `GuestMountRunner` consumes caller-supplied stream/transport connectors so VMM handshake/bootstrap logic stays outside this crate.
-- [ ] 4.2.5c Keep `bins/motlie-vfs-guest.rs` thin: it may parse config and obtain streams, but it must call `GuestMountRunner` rather than reimplementing mount orchestration.
+- [x] 4.2.1 Map `fuser` callbacks to `FsOp`.
+- [x] 4.2.2 Map `FsResult` back to `fuser` reply types.
+- [x] 4.2.3 Encode zero-TTL policy.
+- [x] 4.2.4 Expose/document the mount option set for v1 correctness-first mode.
+- [ ] 4.2.5 Implement build-time FUSE dependency checks for Linux (macOS deferred to v2).
+- [x] 4.2.5a Implement `GuestMountSpec` and `GuestMountRunner` in `client/guest.rs` as the public guest orchestration layer above `FuseClient`.
+- [x] 4.2.5b Ensure `GuestMountRunner` consumes caller-supplied stream/transport connectors so VMM handshake/bootstrap logic stays outside this crate.
+- [x] 4.2.5c Keep `bins/motlie-vfs-guest.rs` thin: it may parse config and obtain streams, but it must call `GuestMountRunner` rather than reimplementing mount orchestration.
 
 Tests / verification:
 
@@ -636,7 +636,7 @@ Tests / verification:
 - [ ] 4.2.7 Add mock transport tests.
 - [ ] 4.2.7a Add unit tests for `GuestMountRunner` using mock transport/connector closures.
 - [ ] 4.2.8 Add FUSE integration tests where the environment supports it.
-- [ ] 4.2.9 Record macOS FUSE-T as later roadmap work rather than a `v1` exit requirement.
+- [x] 4.2.9 macOS FUSE-T is v2 roadmap work, not a v1 requirement.
 - [ ] 4.2.10 Add an end-to-end mounted-subtree scenario showing guest-visible behavior for partial overlay, synthetic dirs, and whiteouts.
 
 Clarification:
@@ -735,13 +735,12 @@ ssh-keygen -t ed25519 -N '' -f /tmp/motlie-vfs/id_alice_test
 #    - sshd enabled
 #    - user alice with uid=1000 gid=1000 and home /home/alice
 #    - motlie-vfs-guest installed in the guest image
-#    - a config file such as /etc/motlie-vfs/mounts.json containing:
+#    - a config file such as /etc/motlie-vfs/mounts.yaml containing:
 #
-#    {
-#      "mounts": [
-#        { "tag": "alice-home", "guest_path": "/home/alice", "read_only": false }
-#      ]
-#    }
+#    mounts:
+#      - tag: alice-home
+#        guest_path: /home/alice
+#        read_only: false
 #
 #    The image-build script for this phase should make these exact artifacts reproducible.
 
@@ -876,7 +875,7 @@ Rationale:
 
 ## 8. Risks to Track
 
-- [ ] 8.1 `direct_io` and mount behavior may differ across Linux and macOS/FUSE-T
+- [ ] 8.1 `direct_io` and mount behavior may differ across Linux and macOS/FUSE-T (macOS deferred to v2)
 - [ ] 8.2 `fuser` behavior and kernel/FUSE caching semantics need validation against the v1 deterministic model
 - [ ] 8.3 cross-boundary rename behavior may expose platform-specific corner cases
 - [ ] 8.4 zero-TTL behavior may be correct but slower than expected; do not optimize before parity tests pass
