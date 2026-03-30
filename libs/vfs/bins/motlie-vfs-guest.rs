@@ -4,8 +4,8 @@
 //! all specified guest paths. VMM handshake and stream acquisition are
 //! caller-provided — this binary demonstrates the library guest API.
 //!
-//! Usage: motlie-vfs-guest [/path/to/mounts.toml]
-//! Default config path: /etc/motlie-vfs/mounts.toml
+//! Usage: motlie-vfs-guest [/path/to/mounts.yaml]
+//! Default config path: /etc/motlie-vfs/mounts.yaml
 
 use anyhow::Result;
 use motlie_vfs::client::guest::{GuestMountRunner, GuestMountSpec};
@@ -26,11 +26,11 @@ struct MountEntry {
 fn main() -> Result<()> {
     let config_path = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "/etc/motlie-vfs/mounts.toml".to_string());
+        .unwrap_or_else(|| "/etc/motlie-vfs/mounts.yaml".to_string());
 
     let config_str = std::fs::read_to_string(&config_path)
         .map_err(|e| anyhow::anyhow!("failed to read config {config_path}: {e}"))?;
-    let config: MountConfig = toml::from_str(&config_str)
+    let config: MountConfig = serde_yaml::from_str(&config_str)
         .map_err(|e| anyhow::anyhow!("failed to parse config {config_path}: {e}"))?;
 
     let specs: Vec<GuestMountSpec> = config
