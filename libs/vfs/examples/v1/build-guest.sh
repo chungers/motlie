@@ -204,10 +204,16 @@ sudo chroot "$ROOTFS_DIR" /bin/bash -c '
     sed -i "s/#PermitRootLogin.*/PermitRootLogin yes/" /etc/ssh/sshd_config
     echo "root:rootpass" | chpasswd
 
-    # Auto-start tmux on SSH login (for all users via /etc/profile.d)
+    # Prompt to start/attach tmux on SSH login (for all users via /etc/profile.d)
     cat > /etc/profile.d/tmux-auto.sh << "TMUXEOF"
 if [ -n "$SSH_CONNECTION" ] && [ -z "$TMUX" ] && command -v tmux >/dev/null 2>&1; then
-    tmux new-session -A -s main
+    printf "Start/Attach to tmux session? [Y/n] "
+    read -r -n 1 answer
+    echo
+    case "$answer" in
+        n|N) ;;
+        *) exec tmux new-session -A -s main ;;
+    esac
 fi
 TMUXEOF
 
