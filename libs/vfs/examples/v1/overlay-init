@@ -1,25 +1,21 @@
 #!/bin/sh
-# overlay-init — PID 1 init script baked into the squashfs root image.
+# overlay-init — PID 1 init script for squashfs + ext4 overlay boot.
 #
-# The kernel boots with:
-#   init=/sbin/overlay-init overlay_root=vdb
-#
-# This script:
-# 1. Mounts the squashfs root (already mounted by kernel as /)
-# 2. Mounts the writable ext4 overlay from the specified block device
-# 3. Stacks them with overlayfs (lower=squashfs, upper=ext4)
-# 4. pivot_root into the merged view
-# 5. Execs the real init (OpenRC on Alpine)
-#
-# The result is a unified root where:
-# - Base OS files come from the read-only squashfs
-# - Per-VM config, state, and writes go to the ext4 overlay
-# - The guest sees a single coherent filesystem tree
-set -e
+# Kernel cmdline: init=/sbin/overlay-init overlay_root=vdb
 
-# ---------------------------------------------------------------------------
-# Parse overlay device from kernel command line
-# ---------------------------------------------------------------------------
+die() { echo "overlay-init FATAL: $*" > /dev/kmsg 2>/dev/null; echo "$*"; exec /bin/sh; }
+log() { echo "overlay-init: $*" > /dev/kmsg 2>/dev/null; }
+
+log "starting"
+
+# 1. Mount pseudo-filesystems
+/bin/mount -t proc proc /proc            || die "mount /proc failed"
+/bin/mount -t sysfs sysfs /sys           || die "mount /sys failed"
+/bin/mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+
+log "pseudo-fs mounted"
+
+# Parse overlay_root= from kernel cmdline
 OVERLAY_DEV=""
 for arg in $(cat /proc/cmdline); do
     case "$arg" in
@@ -28,69 +24,44 @@ for arg in $(cat /proc/cmdline); do
 done
 
 if [ -z "$OVERLAY_DEV" ]; then
-    echo "overlay-init: ERROR: no overlay_root= on kernel cmdline"
-    echo "overlay-init: expected e.g. overlay_root=vdb"
-    exec /sbin/init  # fall back to normal init
+    die "no overlay_root= on kernel cmdline"
 fi
+log "overlay dev=$OVERLAY_DEV"
 
-# ---------------------------------------------------------------------------
-# 1. Mount essential pseudo-filesystems (needed before we can do anything)
-# ---------------------------------------------------------------------------
-mount -t proc proc /proc
-mount -t sysfs sysfs /sys
-mount -t devtmpfs devtmpfs /dev
+# 2. Writable workspace (root is read-only squashfs)
+/bin/mount -t tmpfs tmpfs /mnt                              || die "mount tmpfs failed"
+/bin/mkdir -p /mnt/lower /mnt/upper /mnt/merged             || die "mkdir failed"
+log "tmpfs workspace ready"
 
-# ---------------------------------------------------------------------------
-# 2. Create mount points for the overlay assembly
-# ---------------------------------------------------------------------------
-mkdir -p /mnt/lower /mnt/upper /mnt/work /mnt/merged
+# 3. Bind the current squashfs root as lower layer
+/bin/mount --bind / /mnt/lower                              || die "bind / failed"
 
-# ---------------------------------------------------------------------------
-# 3. Bind-mount the current root (squashfs, mounted by kernel as /)
-#    This gives us a stable reference to the lower layer after pivot_root.
-# ---------------------------------------------------------------------------
-mount --bind / /mnt/lower
+# 4. Mount ext4 overlay device
+log "mounting $OVERLAY_DEV"
+/bin/mount -t ext4 "$OVERLAY_DEV" /mnt/upper                || die "mount ext4 failed"
+/bin/mkdir -p /mnt/upper/upper /mnt/upper/work
 
-# ---------------------------------------------------------------------------
-# 4. Mount the writable ext4 overlay device
-# ---------------------------------------------------------------------------
-echo "overlay-init: mounting ext4 overlay from $OVERLAY_DEV"
-mount -t ext4 "$OVERLAY_DEV" /mnt/upper
-
-# Create overlayfs upper/work directories on the ext4 device.
-# These must be on the same filesystem as upperdir.
-mkdir -p /mnt/upper/upper /mnt/upper/work
-
-# ---------------------------------------------------------------------------
-# 5. Stack overlayfs: lower=squashfs(ro) + upper=ext4(rw) -> merged
-# ---------------------------------------------------------------------------
-mount -t overlay overlay \
+# 5. Stack overlayfs
+/bin/mount -t overlay overlay \
     -o lowerdir=/mnt/lower,upperdir=/mnt/upper/upper,workdir=/mnt/upper/work \
-    /mnt/merged
+    /mnt/merged                                             || die "mount overlay failed"
+log "overlayfs mounted"
 
-# ---------------------------------------------------------------------------
-# 6. Move mount points into the merged root so they survive pivot_root
-# ---------------------------------------------------------------------------
-mkdir -p /mnt/merged/mnt/lower /mnt/merged/mnt/upper
-mount --move /mnt/lower /mnt/merged/mnt/lower
-mount --move /mnt/upper /mnt/merged/mnt/upper
+# 6. Unmount pseudo-fs (systemd will remount them after pivot)
+/bin/umount /proc
+/bin/umount /sys
+# /dev stays — pivot_root needs it
 
-# ---------------------------------------------------------------------------
-# 7. Pivot into the merged root
-# ---------------------------------------------------------------------------
-cd /mnt/merged
-mkdir -p mnt/old_root
-pivot_root . mnt/old_root
+# 7. Pivot root
+/bin/mount --make-rprivate /
+cd /mnt/merged                                              || die "cd merged failed"
+/bin/mkdir -p old_root
+pivot_root . old_root                                       || die "pivot_root failed"
+log "pivot complete"
 
-# ---------------------------------------------------------------------------
-# 8. Clean up old mounts from the previous root
-# ---------------------------------------------------------------------------
-umount -l /mnt/old_root/proc 2>/dev/null || true
-umount -l /mnt/old_root/sys 2>/dev/null || true
-umount -l /mnt/old_root/dev 2>/dev/null || true
+# 8. Clean up old mounts
+/bin/umount -l /old_root 2>/dev/null || true
 
-# ---------------------------------------------------------------------------
-# 9. Hand off to the real init
-# ---------------------------------------------------------------------------
-echo "overlay-init: pivoted into merged root, execing /sbin/init"
-exec /sbin/init
+# 9. Exec real init
+log "execing /sbin/init"
+exec /sbin/init "$@"

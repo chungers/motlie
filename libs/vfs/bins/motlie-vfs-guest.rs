@@ -70,15 +70,11 @@ fn main() -> Result<()> {
     {
         use motlie_vfs::vsock::client::VsockClientTransport;
 
-        let handles = runner.mount_all(|tag: &str| {
-            // Create a Tokio runtime for the async vsock connect
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?;
-
+        let handles = runner.mount_all(|tag: &str, rt: &tokio::runtime::Runtime| {
             let tag = tag.to_string();
             let stream = rt.block_on(async {
-                tokio_vsock::VsockStream::connect(HOST_CID, VMM_PORT).await
+                let addr = tokio_vsock::VsockAddr::new(HOST_CID, VMM_PORT);
+                tokio_vsock::VsockStream::connect(addr).await
             })?;
 
             Ok(VsockClientTransport::new(stream, &tag))

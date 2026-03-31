@@ -29,6 +29,24 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ARTIFACTS="$SCRIPT_DIR/artifacts"
 
 # ---------------------------------------------------------------------------
+# Detect host architecture
+# ---------------------------------------------------------------------------
+HOST_ARCH="$(uname -m)"
+case "$HOST_ARCH" in
+    x86_64)
+        KERNEL_IMAGE="vmlinux.bin"
+        ;;
+    aarch64)
+        # CH on aarch64 expects an uncompressed Image or PE binary
+        KERNEL_IMAGE="Image"
+        ;;
+    *)
+        echo "ERROR: unsupported host architecture: $HOST_ARCH"
+        exit 1
+        ;;
+esac
+
+# ---------------------------------------------------------------------------
 # Parse arguments
 # ---------------------------------------------------------------------------
 USE_NET=true
@@ -42,7 +60,7 @@ done
 # ---------------------------------------------------------------------------
 # Validate artifacts exist
 # ---------------------------------------------------------------------------
-for f in vmlinux.bin rootfs.squashfs overlay.ext4; do
+for f in "$KERNEL_IMAGE" rootfs.squashfs overlay.ext4; do
     if [ ! -f "$ARTIFACTS/$f" ]; then
         echo "ERROR: $ARTIFACTS/$f not found."
         echo "Run ./build-guest.sh first, and place vmlinux.bin in artifacts/."
@@ -83,7 +101,7 @@ fi
 # ---------------------------------------------------------------------------
 CH_ARGS=(
     --api-socket /tmp/motlie-vfs-api.sock
-    --kernel "$ARTIFACTS/vmlinux.bin"
+    --kernel "$ARTIFACTS/$KERNEL_IMAGE"
     --cmdline "$CMDLINE"
     --cpus boot=2
     --memory size=512M
@@ -115,7 +133,8 @@ rm -f /tmp/motlie-vfs-api.sock /tmp/motlie-vfs.vsock
 # Launch
 # ---------------------------------------------------------------------------
 echo "=== Launching Cloud Hypervisor ==="
-echo "  Kernel:    $ARTIFACTS/vmlinux.bin"
+echo "  Arch:      $HOST_ARCH"
+echo "  Kernel:    $ARTIFACTS/$KERNEL_IMAGE"
 echo "  Squashfs:  $ARTIFACTS/rootfs.squashfs (vda, ro)"
 echo "  Overlay:   $ARTIFACTS/overlay.ext4 (vdb, rw)"
 echo "  vsock:     CID 3, socket /tmp/motlie-vfs.vsock"
