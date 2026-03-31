@@ -158,10 +158,14 @@ where
         }
     }
 
-    fn create(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, mode: u32, _umask: u32, flags: i32, reply: ReplyCreate) {
+    fn create(&mut self, req: &Request<'_>, parent: u64, name: &OsStr, mode: u32, _umask: u32, flags: i32, reply: ReplyCreate) {
         let name = name.to_string_lossy().into_owned();
-        match self.request(FsOp::Create { parent, name, mode, flags: flags as u32 }) {
+        match self.request(FsOp::Create { parent, name, mode, flags: flags as u32, uid: req.uid(), gid: req.gid() }) {
+            FsResult::Created { inode, generation, attrs, fh, .. } => {
+                reply.created(&ZERO_TTL, &to_fuser_attr(&attrs, inode), generation, fh, 0);
+            }
             FsResult::Entry { inode, generation, attrs, .. } => {
+                // Backwards compat: server didn't return Created
                 reply.created(&ZERO_TTL, &to_fuser_attr(&attrs, inode), generation, 0, 0);
             }
             FsResult::Error { errno } => reply.error(errno),
