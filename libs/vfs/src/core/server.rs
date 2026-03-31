@@ -340,21 +340,36 @@ impl FsServer {
             Some(e) => e,
             None => return FsResult::Error { errno: libc::ENOENT },
         };
+        let path = entry.path.clone();
+        let host_path = entry.host_path.clone();
+        let stored_attrs = entry.attrs.clone();
+        drop(table);
 
-        // Overlay entries: check for updated content
-        if entry.host_path.is_none() {
-            if let Some(overlay) = &self.overlay {
-                if let Some((_layer, OverlayEntryKind::Content(bytes))) = overlay.resolve(&mount.tag, &entry.path) {
-                    let mut attrs = entry.attrs.clone();
-                    attrs.size = bytes.len() as u64;
-                    return FsResult::Attr { attrs, ttl_secs: 0 };
-                }
+        // Check overlay first — overlay attrs take precedence over disk
+        if let Some(overlay) = &self.overlay {
+            if let Some((_layer, kind, ov_attrs)) = overlay.resolve_attrs(&mount.tag, &path) {
+                let (file_kind, size) = match &kind {
+                    OverlayEntryKind::Content(bytes) => (FileType::RegularFile, bytes.len() as u64),
+                    OverlayEntryKind::SyntheticDir => (FileType::Directory, 0u64),
+                    OverlayEntryKind::Whiteout => return FsResult::Error { errno: libc::ENOENT },
+                };
+                let attrs = FileAttr {
+                    inode, size, blocks: 0,
+                    atime: stored_attrs.atime, mtime: stored_attrs.mtime, ctime: stored_attrs.ctime,
+                    kind: file_kind, mode: ov_attrs.mode, nlink: 1,
+                    uid: ov_attrs.uid, gid: ov_attrs.gid,
+                };
+                return FsResult::Attr { attrs, ttl_secs: 0 };
             }
-            return FsResult::Attr { attrs: entry.attrs.clone(), ttl_secs: 0 };
+        }
+
+        // No overlay entry — use disk or stored attrs
+        if host_path.is_none() {
+            return FsResult::Attr { attrs: stored_attrs, ttl_secs: 0 };
         }
 
         // Disk entries: re-fetch from fs (v1 no-cache)
-        match &entry.host_path {
+        match &host_path {
             Some(hp) => match fs::symlink_metadata(hp) {
                 Ok(meta) => {
                     let kind = file_type_from_meta(&meta);
@@ -364,7 +379,7 @@ impl FsServer {
                 }
                 Err(e) => FsResult::Error { errno: io_errno(&e) },
             },
-            None => FsResult::Attr { attrs: entry.attrs.clone(), ttl_secs: 0 },
+            None => FsResult::Attr { attrs: stored_attrs, ttl_secs: 0 },
         }
     }
 

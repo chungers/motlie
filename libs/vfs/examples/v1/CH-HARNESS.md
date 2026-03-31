@@ -17,8 +17,8 @@ FsServer + MemOverlay                    motlie-vfs-guest
 by `overlay-init` at boot via overlayfs. This matches the `motlie-vmm` design.
 
 **Guest image contents:**
-- Alpine Linux minimal (sshd, bash, coreutils)
-- `motlie-vfs-guest` binary (statically linked, musl)
+- Debian Bookworm minimal (sshd, bash, coreutils, tmux, fuse3, systemd)
+- `motlie-vfs-guest` binary (dynamically linked, GNU libc)
 - `overlay-init` script (squashfs + ext4 → overlayfs → pivot_root)
 - `/etc/motlie-vfs/mounts.yaml` (seeded in the ext4 overlay)
 - Test user `alice` (uid=1000, gid=1000, password `testpass`)
@@ -39,93 +39,95 @@ by `overlay-init` at boot via overlayfs. This matches the `motlie-vmm` design.
 
 ```bash
 # Package dependencies
-sudo apt install squashfs-tools e2fsprogs wget    # Debian/Ubuntu
-# or
-sudo apk add squashfs-tools e2fsprogs wget        # Alpine
+sudo apt install squashfs-tools e2fsprogs debootstrap libfuse3-dev pkg-config    # Debian/Ubuntu
 
-# Cloud Hypervisor
+# Cloud Hypervisor — download the binary for your architecture
+# x86_64:
 wget https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v44.0/cloud-hypervisor-static
 chmod +x cloud-hypervisor-static
 sudo mv cloud-hypervisor-static /usr/local/bin/cloud-hypervisor
+
+# aarch64:
+wget https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v44.0/cloud-hypervisor-static-aarch64
+chmod +x cloud-hypervisor-static-aarch64
+sudo mv cloud-hypervisor-static-aarch64 /usr/local/bin/cloud-hypervisor
 
 # vsock kernel module
 sudo modprobe vhost_vsock
 ```
 
-### Cross-compiling from macOS
+### Building the guest binary
 
-The guest binary must be a statically-linked x86_64 Linux ELF. From macOS:
+On a native Linux host with `libfuse3-dev` installed, `build-guest.sh`
+compiles the guest binary automatically using the default cargo target
+(dynamically linked GNU libc). The Debian-based guest image includes the
+required shared libraries (`libfuse3`, `libc`, etc.).
 
 ```bash
-# Option A: Using cross (recommended — Docker-based, zero setup)
-cargo install cross --git https://github.com/cross-rs/cross
-cross build --release --target x86_64-unknown-linux-musl --features vsock,client -p motlie-vfs --bin motlie-vfs-guest
+# Automatic (build-guest.sh handles this):
+cargo build --release --features vsock,client -p motlie-vfs --bin motlie-vfs-guest
 
-# Option B: Using homebrew musl-cross
-brew install filosottile/musl-cross/musl-cross
-rustup target add x86_64-unknown-linux-musl
-CC_x86_64_unknown_linux_musl="x86_64-linux-musl-gcc" \
-    cargo build --release --target x86_64-unknown-linux-musl --features vsock,client -p motlie-vfs --bin motlie-vfs-guest
+# Or supply a pre-built binary:
+./build-guest.sh --guest-binary /path/to/motlie-vfs-guest
+```
+
+### Cross-compiling from macOS
+
+From macOS, use `cross` (Docker-based) to produce a Linux binary:
+
+```bash
+cargo install cross --git https://github.com/cross-rs/cross
+
+# x86_64 guest:
+cross build --release --target x86_64-unknown-linux-gnu --features vsock,client -p motlie-vfs --bin motlie-vfs-guest
+
+# aarch64 guest:
+cross build --release --target aarch64-unknown-linux-gnu --features vsock,client -p motlie-vfs --bin motlie-vfs-guest
 ```
 
 The image build itself (`build-guest.sh`) must run on Linux because it uses
-`chroot` and `mksquashfs`. Run it in a Linux VM, CI, or Docker container.
+`debootstrap`, `chroot`, and `mksquashfs`. Run it on a Linux host, in CI,
+or in a Docker container.
 
 ## Step-by-Step
 
-### 1. Build the kernel
+### 1. Build everything
 
-Cloud Hypervisor needs a kernel with squashfs, overlayfs, and vsock support.
-The CH project maintains a kernel branch with their recommended config:
-
-```bash
-git clone --depth 1 https://github.com/cloud-hypervisor/linux.git \
-    -b ch-6.12.8 linux-cloud-hypervisor
-cd linux-cloud-hypervisor
-
-# Start from CH's default config
-make ch_defconfig
-
-# Ensure squashfs, overlayfs, and vsock are enabled
-cat >> .config << 'EOF'
-CONFIG_SQUASHFS=y
-CONFIG_SQUASHFS_ZSTD=y
-CONFIG_OVERLAY_FS=y
-EOF
-make olddefconfig
-
-# Build
-make bzImage -j$(nproc)
-
-# Copy the kernel
-cp arch/x86/boot/compressed/vmlinux.bin /path/to/libs/vfs/examples/v1/artifacts/vmlinux.bin
-```
-
-### 2. Cross-compile the guest binary
-
-```bash
-# From the workspace root, on macOS or Linux
-cross build --release --target x86_64-unknown-linux-musl --features vsock,client -p motlie-vfs --bin motlie-vfs-guest
-
-# Verify it's a static musl binary
-file target/x86_64-unknown-linux-musl/release/motlie-vfs-guest
-# → ELF 64-bit LSB executable, x86-64, statically linked
-```
-
-### 3. Build the guest images
+`build-guest.sh` handles kernel, guest binary, and images in one command:
 
 ```bash
 cd libs/vfs/examples/v1
 
-# Pass the cross-compiled binary explicitly, or let the script find it
-./build-guest.sh --guest-binary ../../../../target/x86_64-unknown-linux-musl/release/motlie-vfs-guest
+# Default: downloads pre-built kernel, builds guest binary, creates images
+sudo ./build-guest.sh
 
-# Output:
-#   artifacts/rootfs.squashfs  (~30-50 MB)
-#   artifacts/overlay.ext4     (64 MB, sparse)
+# With a pre-built guest binary:
+sudo ./build-guest.sh --guest-binary /path/to/motlie-vfs-guest
+
+# Kernel modes:
+sudo ./build-guest.sh --kernel download   # (default) pre-built from cloud-hypervisor/linux
+sudo ./build-guest.sh --kernel build      # clone and build from source
+sudo ./build-guest.sh --kernel skip       # use existing kernel in artifacts/
 ```
 
-### 4. Launch the guest
+Output in `artifacts/`:
+- `Image` or `vmlinux.bin` — CH-compatible kernel
+- `rootfs.squashfs` — Debian root image (~80-120 MB)
+- `overlay.ext4` — writable ext4 overlay (64 MB, sparse)
+
+The pre-built kernel comes from the
+[cloud-hypervisor/linux releases](https://github.com/cloud-hypervisor/linux/releases)
+(`ch-release-v6.16.9-20251112`). It includes squashfs, overlayfs, and
+virtio-vsock support — the same kernel CH's own CI tests against.
+
+To build from source instead (requires git, make, gcc, flex, bison,
+libelf-dev, libssl-dev):
+
+```bash
+sudo ./build-guest.sh --kernel build
+```
+
+### 2. Launch the guest
 
 ```bash
 ./launch-ch.sh
@@ -261,7 +263,10 @@ sudo umount /tmp/overlay-mnt
 | Problem | Fix |
 |---------|-----|
 | `vhost_vsock` not found | `sudo modprobe vhost_vsock` |
-| CH fails with permission error | Run with `sudo` or grant `CAP_NET_ADMIN` |
+| `debootstrap: command not found` | `sudo apt install debootstrap` |
+| CH disk `PermissionDenied` | Artifacts are root-owned after `sudo build-guest.sh`. The script auto-chowns via `$SUDO_USER`, but if you ran it differently: `sudo chown $USER:$USER artifacts/*` |
+| CH TAP `Operation not permitted` | TAP networking needs `CAP_NET_ADMIN`. Use `./launch-ch.sh --no-net` for vsock-only, or grant the capability: `sudo setcap cap_net_admin+ep $(which cloud-hypervisor)` |
+| CH fails with KVM permission error | Ensure user is in `kvm` group (`sudo usermod -aG kvm $USER`, then re-login) |
 | Guest kernel panic at boot | Ensure kernel has `CONFIG_SQUASHFS=y CONFIG_OVERLAY_FS=y` |
 | No serial output | Check `--serial tty --console off` in CH args |
 | SSH connection refused | Wait for sshd to start (~2s after boot), check `192.168.249.2` |

@@ -2,25 +2,27 @@
 # build-guest.sh — Build the squashfs + ext4 guest image for Cloud Hypervisor.
 #
 # Produces:
-#   artifacts/rootfs.squashfs  — read-only Alpine root with sshd, bash, motlie-vfs-guest
+#   artifacts/rootfs.squashfs  — read-only Debian root with sshd, bash, fuse3, motlie-vfs-guest
 #   artifacts/overlay.ext4     — writable ext4 overlay pre-seeded with mounts.yaml
-#   artifacts/vmlinux.bin      — CH-compatible kernel (built separately, see README)
+#   artifacts/Image|vmlinux.bin — CH-compatible kernel
 #
-# Prerequisites (Linux host or Docker):
+# Prerequisites (Linux host):
 #   - squashfs-tools (mksquashfs)
-#   - e2fsprogs (mkfs.ext4, mke2fs)
-#   - wget or curl
+#   - e2fsprogs (mkfs.ext4)
+#   - debootstrap
 #   - sudo (for chroot-based rootfs assembly)
-#
-# For cross-compiling the guest binary from macOS:
-#   - cargo install cross (uses Docker)
-#   - or: brew install filosottile/musl-cross/musl-cross
+#   - For --kernel build: git, make, gcc, flex, bison, libelf-dev, libssl-dev
 #
 # Usage:
-#   ./build-guest.sh [--guest-binary /path/to/motlie-vfs-guest]
+#   ./build-guest.sh [--guest-binary /path/to/motlie-vfs-guest] [--kernel download|build|skip]
 #
-# If --guest-binary is not provided, the script will attempt to cross-compile
-# it from the workspace root.
+# --kernel modes:
+#   download  — (default) download pre-built kernel from cloud-hypervisor/linux releases
+#   build     — clone cloud-hypervisor/linux and build from source
+#   skip      — assume kernel already exists in artifacts/
+#
+# If --guest-binary is not provided, the script builds it with the native
+# cargo toolchain (dynamically linked, requires libfuse3-dev on the host).
 
 set -euo pipefail
 
@@ -32,53 +34,84 @@ ARTIFACTS="$SCRIPT_DIR/artifacts"
 # Parse arguments
 # ---------------------------------------------------------------------------
 GUEST_BINARY=""
+KERNEL_MODE="download"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --guest-binary) GUEST_BINARY="$2"; shift 2 ;;
+        --kernel) KERNEL_MODE="$2"; shift 2 ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
 done
 
+if [[ "$KERNEL_MODE" != "download" && "$KERNEL_MODE" != "build" && "$KERNEL_MODE" != "skip" ]]; then
+    echo "ERROR: --kernel must be one of: download, build, skip"
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Detect host architecture
+# ---------------------------------------------------------------------------
+HOST_ARCH="$(uname -m)"
+case "$HOST_ARCH" in
+    x86_64)
+        RUST_TARGET="x86_64-unknown-linux-gnu"
+        DEBOOTSTRAP_ARCH="amd64"
+        KERNEL_IMAGE="vmlinux.bin"
+        KERNEL_RELEASE_ASSET="vmlinux"
+        KERNEL_BUILD_TARGET="bzImage"
+        KERNEL_BUILD_OUTPUT="arch/x86/boot/compressed/vmlinux.bin"
+        ;;
+    aarch64)
+        RUST_TARGET="aarch64-unknown-linux-gnu"
+        DEBOOTSTRAP_ARCH="arm64"
+        KERNEL_IMAGE="Image"
+        KERNEL_RELEASE_ASSET="Image-arm64"
+        KERNEL_BUILD_TARGET="Image"
+        KERNEL_BUILD_OUTPUT="arch/arm64/boot/Image"
+        ;;
+    *)
+        echo "ERROR: unsupported host architecture: $HOST_ARCH"
+        exit 1
+        ;;
+esac
+
+# Pre-built kernel release from cloud-hypervisor/linux
+CH_KERNEL_RELEASE="ch-release-v6.16.9-20251112"
+CH_KERNEL_URL="https://github.com/cloud-hypervisor/linux/releases/download/${CH_KERNEL_RELEASE}/${KERNEL_RELEASE_ASSET}"
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-ALPINE_VERSION="3.21"
-ALPINE_MIRROR="https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION}"
+DEBIAN_SUITE="bookworm"
+DEBIAN_MIRROR="http://deb.debian.org/debian"
 ROOTFS_DIR="/tmp/motlie-vfs-rootfs-$$"
 OVERLAY_SEED="/tmp/motlie-vfs-overlay-seed-$$"
 OVERLAY_SIZE="64M"
 
 echo "=== motlie-vfs guest image builder ==="
-echo "Artifacts dir: $ARTIFACTS"
-echo "Workspace root: $WORKSPACE_ROOT"
+echo "Host arch:        $HOST_ARCH"
+echo "Rust target:      $RUST_TARGET"
+echo "Debootstrap arch: $DEBOOTSTRAP_ARCH"
+echo "Debian suite:     $DEBIAN_SUITE"
+echo "Kernel mode:      $KERNEL_MODE"
+echo "Artifacts dir:    $ARTIFACTS"
+echo "Workspace root:   $WORKSPACE_ROOT"
 
 mkdir -p "$ARTIFACTS"
 
 # ---------------------------------------------------------------------------
-# Step 1: Cross-compile the guest binary (if not provided)
+# Step 1: Build the guest binary (if not provided)
 # ---------------------------------------------------------------------------
 if [ -z "$GUEST_BINARY" ]; then
     echo ""
-    echo "--- Step 1: Cross-compiling motlie-vfs-guest for x86_64-linux-musl ---"
+    echo "--- Step 1: Building motlie-vfs-guest ($RUST_TARGET) ---"
 
-    # Prefer `cross` if available (Docker-based, works from macOS)
-    if command -v cross &>/dev/null; then
-        echo "Using 'cross' for musl cross-compilation"
-        (cd "$WORKSPACE_ROOT" && cross build --release \
-            --target x86_64-unknown-linux-musl \
-            --features vsock,client \
-            -p motlie-vfs --bin motlie-vfs-guest)
-        GUEST_BINARY="$WORKSPACE_ROOT/target/x86_64-unknown-linux-musl/release/motlie-vfs-guest"
-    else
-        echo "Using native cargo (requires musl toolchain installed)"
-        echo "Install cross for easier cross-compilation: cargo install cross"
-        rustup target add x86_64-unknown-linux-musl 2>/dev/null || true
-        (cd "$WORKSPACE_ROOT" && cargo build --release \
-            --target x86_64-unknown-linux-musl \
-            --features vsock,client \
-            -p motlie-vfs --bin motlie-vfs-guest)
-        GUEST_BINARY="$WORKSPACE_ROOT/target/x86_64-unknown-linux-musl/release/motlie-vfs-guest"
-    fi
+    # Native build with GNU target (dynamically linked).
+    # The guest image will include the required shared libraries.
+    (cd "$WORKSPACE_ROOT" && cargo build --release \
+        --features vsock,client \
+        -p motlie-vfs --bin motlie-vfs-guest)
+    GUEST_BINARY="$WORKSPACE_ROOT/target/release/motlie-vfs-guest"
 
     echo "Guest binary: $GUEST_BINARY"
     file "$GUEST_BINARY"
@@ -90,46 +123,81 @@ if [ ! -f "$GUEST_BINARY" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Step 2: Build the Alpine squashfs root image
+# Step 2: Obtain the CH-compatible kernel
 # ---------------------------------------------------------------------------
 echo ""
-echo "--- Step 2: Building Alpine squashfs root image ---"
+echo "--- Step 2: Kernel ($KERNEL_MODE) ---"
 
-# Download apk.static if not cached
-APK_STATIC="$ARTIFACTS/apk.static"
-if [ ! -f "$APK_STATIC" ]; then
-    echo "Downloading apk.static..."
-    wget -q -O "$APK_STATIC" \
-        "https://gitlab.alpinelinux.org/api/v4/projects/5/packages/generic/v2.14.6/x86_64/apk.static"
-    chmod +x "$APK_STATIC"
-fi
+case "$KERNEL_MODE" in
+    download)
+        if [ -f "$ARTIFACTS/$KERNEL_IMAGE" ]; then
+            echo "Kernel already exists: $ARTIFACTS/$KERNEL_IMAGE ($(du -h "$ARTIFACTS/$KERNEL_IMAGE" | cut -f1))"
+        else
+            echo "Downloading pre-built kernel from cloud-hypervisor/linux..."
+            echo "  Release: $CH_KERNEL_RELEASE"
+            echo "  URL:     $CH_KERNEL_URL"
+            wget -q --show-progress -O "$ARTIFACTS/$KERNEL_IMAGE" "$CH_KERNEL_URL"
+            echo "Kernel: $ARTIFACTS/$KERNEL_IMAGE ($(du -h "$ARTIFACTS/$KERNEL_IMAGE" | cut -f1))"
+        fi
+        ;;
+    build)
+        if [ -f "$ARTIFACTS/$KERNEL_IMAGE" ]; then
+            echo "Kernel already exists: $ARTIFACTS/$KERNEL_IMAGE — rebuilding..."
+        fi
+        KERNEL_SRC="/tmp/motlie-vfs-kernel-$$"
+        echo "Cloning cloud-hypervisor/linux into $KERNEL_SRC..."
+        git clone --depth 1 https://github.com/cloud-hypervisor/linux.git \
+            -b ch-6.12.8 "$KERNEL_SRC"
+        (
+            cd "$KERNEL_SRC"
+            make ch_defconfig
+            cat >> .config << 'KEOF'
+CONFIG_SQUASHFS=y
+CONFIG_SQUASHFS_ZSTD=y
+CONFIG_OVERLAY_FS=y
+KEOF
+            make olddefconfig
+            make "$KERNEL_BUILD_TARGET" -j"$(nproc)"
+            cp "$KERNEL_BUILD_OUTPUT" "$ARTIFACTS/$KERNEL_IMAGE"
+        )
+        rm -rf "$KERNEL_SRC"
+        echo "Kernel: $ARTIFACTS/$KERNEL_IMAGE ($(du -h "$ARTIFACTS/$KERNEL_IMAGE" | cut -f1))"
+        ;;
+    skip)
+        if [ ! -f "$ARTIFACTS/$KERNEL_IMAGE" ]; then
+            echo "WARNING: kernel not found at $ARTIFACTS/$KERNEL_IMAGE"
+            echo "Place a CH-compatible kernel there before running launch-ch.sh."
+        else
+            echo "Using existing kernel: $ARTIFACTS/$KERNEL_IMAGE ($(du -h "$ARTIFACTS/$KERNEL_IMAGE" | cut -f1))"
+        fi
+        ;;
+esac
 
-# Bootstrap Alpine rootfs
-echo "Bootstrapping Alpine rootfs into $ROOTFS_DIR..."
+# ---------------------------------------------------------------------------
+# Step 3: Build the Debian squashfs root image
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- Step 3: Building Debian ($DEBIAN_SUITE) squashfs root image ---"
+
+echo "Bootstrapping Debian rootfs into $ROOTFS_DIR..."
 sudo rm -rf "$ROOTFS_DIR"
 mkdir -p "$ROOTFS_DIR"
 
-sudo "$APK_STATIC" \
-    --arch x86_64 \
-    -X "$ALPINE_MIRROR/main" \
-    -X "$ALPINE_MIRROR/community" \
-    -U --allow-untrusted \
-    --root "$ROOTFS_DIR" \
-    --initdb \
-    add alpine-base openssh-server bash util-linux coreutils
+sudo debootstrap \
+    --arch="$DEBOOTSTRAP_ARCH" \
+    --variant=minbase \
+    --include=openssh-server,bash,coreutils,tmux,fuse3,libfuse3-3,systemd,systemd-sysv,dbus,iproute2 \
+    "$DEBIAN_SUITE" "$ROOTFS_DIR" "$DEBIAN_MIRROR"
 
 # Configure the rootfs inside chroot
 echo "Configuring rootfs..."
-sudo chroot "$ROOTFS_DIR" /bin/sh -c '
-    # Enable services for OpenRC
-    rc-update add sshd default
-    rc-update add devfs sysinit
-    rc-update add procfs sysinit
-    rc-update add sysfs sysinit
+sudo chroot "$ROOTFS_DIR" /bin/bash -c '
+    # Enable sshd
+    systemctl enable ssh
 
     # Create test user alice (uid=1000, gid=1000)
-    addgroup -g 1000 alice
-    adduser -D -u 1000 -G alice -h /home/alice -s /bin/bash alice
+    groupadd -g 1000 alice
+    useradd -m -u 1000 -g alice -s /bin/bash alice
     echo "alice:testpass" | chpasswd
 
     # Enable root login for dev/test SSH access
@@ -142,21 +210,42 @@ sudo chroot "$ROOTFS_DIR" /bin/sh -c '
     # Create motlie-vfs config directory
     mkdir -p /etc/motlie-vfs
 
-    # Create OpenRC service for motlie-vfs-guest
-    cat > /etc/init.d/motlie-vfs-guest << "INITEOF"
-#!/sbin/openrc-run
-description="motlie-vfs guest filesystem mounter"
-command="/usr/local/bin/motlie-vfs-guest"
-command_args="/etc/motlie-vfs/mounts.yaml"
-command_background=true
-pidfile="/run/motlie-vfs-guest.pid"
-depend() {
-    need localmount
-    after sshd
-}
-INITEOF
-    chmod 755 /etc/init.d/motlie-vfs-guest
-    rc-update add motlie-vfs-guest default
+    # Create systemd service for motlie-vfs-guest
+    cat > /etc/systemd/system/motlie-vfs-guest.service << "SVCEOF"
+[Unit]
+Description=motlie-vfs guest filesystem mounter
+After=local-fs.target
+Before=ssh.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/motlie-vfs-guest /etc/motlie-vfs/mounts.yaml
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+    systemctl enable motlie-vfs-guest
+
+    # Set hostname
+    echo "motlie-guest" > /etc/hostname
+
+    # Minimal fstab
+    cat > /etc/fstab << "FSTABEOF"
+# <device>  <mount>  <type>  <options>       <dump> <pass>
+proc        /proc    proc    defaults        0      0
+sysfs       /sys     sysfs   defaults        0      0
+devtmpfs    /dev     devtmpfs defaults       0      0
+FSTABEOF
+
+    # Enable user_allow_other for FUSE — required so alice can access
+    # the FUSE mount created by motlie-vfs-guest (runs as root)
+    echo "user_allow_other" >> /etc/fuse.conf
+
+    # Clean up apt cache
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
 '
 
 # Install the guest binary
@@ -164,18 +253,25 @@ echo "Installing motlie-vfs-guest binary..."
 sudo cp "$GUEST_BINARY" "$ROOTFS_DIR/usr/local/bin/motlie-vfs-guest"
 sudo chmod 755 "$ROOTFS_DIR/usr/local/bin/motlie-vfs-guest"
 
+# Copy required shared libraries into the rootfs if not already present
+echo "Ensuring shared library dependencies are satisfied..."
+for lib in $(ldd "$GUEST_BINARY" | grep -o '/lib[^ ]*'); do
+    target="$ROOTFS_DIR$lib"
+    if [ ! -f "$target" ]; then
+        echo "  copying $lib"
+        sudo cp "$lib" "$target"
+    fi
+done
+
 # Install overlay-init
 echo "Installing overlay-init..."
 sudo cp "$SCRIPT_DIR/overlay-init" "$ROOTFS_DIR/sbin/overlay-init"
 sudo chmod 755 "$ROOTFS_DIR/sbin/overlay-init"
 
-# Clean up package cache to reduce image size
-sudo rm -rf "$ROOTFS_DIR/var/cache/apk"/*
-
 # Build squashfs
 echo "Building squashfs image..."
 sudo mksquashfs "$ROOTFS_DIR" "$ARTIFACTS/rootfs.squashfs" \
-    -noappend -comp zstd -quiet
+    -noappend -comp gzip -quiet
 
 echo "Squashfs image: $ARTIFACTS/rootfs.squashfs ($(du -h "$ARTIFACTS/rootfs.squashfs" | cut -f1))"
 
@@ -183,10 +279,10 @@ echo "Squashfs image: $ARTIFACTS/rootfs.squashfs ($(du -h "$ARTIFACTS/rootfs.squ
 sudo rm -rf "$ROOTFS_DIR"
 
 # ---------------------------------------------------------------------------
-# Step 3: Build the ext4 overlay image with pre-seeded config
+# Step 4: Build the ext4 overlay image with pre-seeded config
 # ---------------------------------------------------------------------------
 echo ""
-echo "--- Step 3: Building ext4 overlay image ---"
+echo "--- Step 4: Building ext4 overlay image ---"
 
 # Create directory tree to seed into the ext4 image.
 # This uses mkfs.ext4 -d to avoid needing sudo mount -o loop.
@@ -214,6 +310,18 @@ echo "Overlay image: $ARTIFACTS/overlay.ext4 ($OVERLAY_SIZE)"
 rm -rf "$OVERLAY_SEED"
 
 # ---------------------------------------------------------------------------
+# Step 5: Fix artifact ownership
+# ---------------------------------------------------------------------------
+# build-guest.sh runs under sudo, so artifacts are root-owned.
+# CH and launch-ch.sh run as the normal user and need read access to the
+# disk images.  Chown everything back to the invoking user.
+if [ -n "${SUDO_USER:-}" ]; then
+    echo ""
+    echo "--- Step 5: Fixing artifact ownership (SUDO_USER=$SUDO_USER) ---"
+    chown -R "$SUDO_USER:$SUDO_USER" "$ARTIFACTS"
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
@@ -221,5 +329,4 @@ echo "=== Build complete ==="
 echo "Artifacts:"
 ls -lh "$ARTIFACTS/"
 echo ""
-echo "Next: build or download a CH-compatible kernel (see README.md)"
-echo "Then: ./launch-ch.sh"
+echo "Next: ./launch-ch.sh"
