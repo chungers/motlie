@@ -270,6 +270,23 @@ The following PLAN phases are v1.5/v2 and are not in this plan:
 - Phase 3.2 (v2): External RPC / gRPC Application Layer
 - PLAN tasks 5.1.6 (benchmarks), 5.1.10 (embedded admin procedures), 5.1.16–5.1.17 (latency/throughput baselines)
 
+### Known bugs (discovered during aarch64 CH harness testing, 2026-03-31)
+
+<!-- @claude 2026-03-31 — found during end-to-end FUSE testing via SSH -->
+
+1. **Overlay create uses uid=0/gid=0 instead of caller's uid/gid**
+   - `server.rs:do_create()` line 578,584 hardcodes `uid: 0, gid: 0`
+   - FsOp::Create doesn't carry uid/gid from the FUSE request
+   - Fix: add uid/gid fields to FsOp::Create, pass from fuse.rs `req.uid()`/`req.gid()`
+
+2. **FUSE create doesn't return a file handle (EBADF on write after create)**
+   - FUSE `create` is atomic create+open, must return an fh
+   - Current FsOp::Create only creates; server doesn't allocate an fh
+   - fuse.rs `reply.created(..., 0, 0)` passes fh=0 — subsequent writes fail
+   - Fix: server do_create must also do_open (allocate fh, track in fh_table),
+     return both Entry attrs and fh. May need a new FsResult variant or
+     combine Entry + Opened.
+
 ### v1.5: Embedded vhost-user-net with slirp (rootless guest networking)
 
 <!-- @claude 2026-03-31 — documented after CH aarch64 harness work.
