@@ -1668,8 +1668,14 @@ fn parse_sentinel_output(content: &str, marker: &str) -> Option<ExecOutput> {
 
         // Check this isn't the echo command (look back for "echo")
         let before = &joined[..pos];
-        let is_echo_cmd =
-            before.len() >= 4 && before[before.len().saturating_sub(20)..].contains("echo");
+        let lookback = {
+            let mut b = before.len().saturating_sub(20);
+            while b > 0 && !before.is_char_boundary(b) {
+                b -= 1;
+            }
+            b
+        };
+        let is_echo_cmd = before.len() >= 4 && before[lookback..].contains("echo");
 
         if !is_echo_cmd {
             break pos;
