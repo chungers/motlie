@@ -231,6 +231,16 @@ SVCEOF
     # Set hostname
     echo "motlie-guest" > /etc/hostname
 
+    # MOTD
+    cat > /etc/motd << "MOTDEOF"
+                    _   _ _
+  _ __ ___   ___ | |_| (_) ___
+ | '"'"'_ ` _ \ / _ \| __| | |/ _ \
+ | | | | | | (_) | |_| | |  __/
+ |_| |_| |_|\___/ \__|_|_|\___|
+
+MOTDEOF
+
     # Minimal fstab
     cat > /etc/fstab << "FSTABEOF"
 # <device>  <mount>  <type>  <options>       <dump> <pass>
