@@ -215,7 +215,7 @@ impl FsServer {
             FsOp::Open { inode, flags } => self.do_open(mount, *inode, *flags),
             FsOp::Read { inode: _, fh, offset, size } => self.do_read(mount, *fh, *offset, *size),
             FsOp::Write { inode: _, fh, offset, data } => self.do_write(mount, *fh, *offset, data),
-            FsOp::Create { parent, name, mode, flags: _ } => self.do_create(mount, *parent, name, *mode),
+            FsOp::Create { parent, name, mode, flags: _, uid, gid } => self.do_create(mount, *parent, name, *mode, *uid, *gid),
             FsOp::Mkdir { parent, name, mode } => self.do_mkdir(mount, *parent, name, *mode),
             FsOp::Unlink { parent, name } => self.do_unlink(mount, *parent, name),
             FsOp::Rmdir { parent, name } => self.do_rmdir(mount, *parent, name),
@@ -561,7 +561,7 @@ impl FsServer {
         }
     }
 
-    fn do_create(&self, mount: &MountState, parent: u64, name: &str, mode: u32) -> FsResult {
+    fn do_create(&self, mount: &MountState, parent: u64, name: &str, mode: u32, uid: u32, gid: u32) -> FsResult {
         let parent_path = {
             let table = mount.inode_table.lock();
             match table.get(parent) {
@@ -575,19 +575,23 @@ impl FsServer {
         if self.is_overlay_managed(&mount.tag, &parent_path) {
             if let Some(layer) = self.writable_layer(&mount.tag, &parent_path) {
                 if let Some(overlay) = &self.overlay {
-                    let attrs = super::overlay::OverlayAttrs { mode, uid: 0, gid: 0 };
+                    let attrs = super::overlay::OverlayAttrs { mode, uid, gid };
                     let _ = overlay.put_with_attrs(&layer, &mount.tag, &rel_path, attrs, bytes::Bytes::new());
                     let now = SystemTime::now();
                     let file_attrs = FileAttr {
                         inode: 0, size: 0, blocks: 0,
                         atime: now, mtime: now, ctime: now,
-                        kind: FileType::RegularFile, mode, nlink: 1, uid: 0, gid: 0,
+                        kind: FileType::RegularFile, mode, nlink: 1, uid, gid,
                     };
                     let mut table = mount.inode_table.lock();
                     match table.allocate(&rel_path, InodeKind::Content, None, file_attrs.clone()) {
                         Ok(inode) => {
                             let gen = table.get(inode).map(|e| e.generation).unwrap_or(0);
-                            return FsResult::Entry { inode, generation: gen, attrs: table.get(inode).map(|e| e.attrs.clone()).unwrap_or(file_attrs), ttl_secs: 0 };
+                            let final_attrs = table.get(inode).map(|e| e.attrs.clone()).unwrap_or(file_attrs);
+                            // Allocate fh — create is atomic create+open in FUSE
+                            let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
+                            self.fh_table.lock().insert(fh, (mount.tag.clone(), rel_path));
+                            return FsResult::Created { inode, generation: gen, attrs: final_attrs, fh, ttl_secs: 0 };
                         }
                         Err(_) => return FsResult::Error { errno: libc::EIO },
                     };
@@ -607,7 +611,10 @@ impl FsServer {
                         match table.allocate(&rel_path, InodeKind::Disk, Some(host_path), attrs.clone()) {
                             Ok(inode) => {
                                 let gen = table.get(inode).map(|e| e.generation).unwrap_or(0);
-                                FsResult::Entry { inode, generation: gen, attrs: table.get(inode).map(|e| e.attrs.clone()).unwrap_or(attrs), ttl_secs: 0 }
+                                let final_attrs = table.get(inode).map(|e| e.attrs.clone()).unwrap_or(attrs);
+                                let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
+                                self.fh_table.lock().insert(fh, (mount.tag.clone(), rel_path));
+                                FsResult::Created { inode, generation: gen, attrs: final_attrs, fh, ttl_secs: 0 }
                             }
                             Err(_) => FsResult::Error { errno: libc::EIO },
                         }
@@ -1144,8 +1151,8 @@ mod tests {
     fn create_and_verify_on_disk() {
         let dir = tempfile::tempdir().unwrap();
         let server = build_test_server(dir.path());
-        let result = server.handle_op("test", FsOp::Create { parent: 1, name: "new.txt".into(), mode: 0o644, flags: 0 });
-        assert!(matches!(result, FsResult::Entry { .. }));
+        let result = server.handle_op("test", FsOp::Create { parent: 1, name: "new.txt".into(), mode: 0o644, flags: 0, uid: 1000, gid: 1000 });
+        assert!(matches!(result, FsResult::Created { .. }));
         assert!(dir.path().join("new.txt").exists());
     }
 
@@ -1208,7 +1215,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let server = FsServer::builder().mount("ro", dir.path().to_path_buf(), true).build().unwrap();
         let ops: Vec<FsOp> = vec![
-            FsOp::Create { parent: 1, name: "f".into(), mode: 0o644, flags: 0 },
+            FsOp::Create { parent: 1, name: "f".into(), mode: 0o644, flags: 0, uid: 0, gid: 0 },
             FsOp::Mkdir { parent: 1, name: "d".into(), mode: 0o755 },
             FsOp::Unlink { parent: 1, name: "f".into() },
             FsOp::Rmdir { parent: 1, name: "d".into() },
@@ -1363,8 +1370,8 @@ mod tests {
             FsResult::Entry { inode, .. } => inode,
             other => panic!("expected Entry, got {:?}", other),
         };
-        let result = server.handle_op("test", FsOp::Create { parent: ssh_inode, name: "config".into(), mode: 0o644, flags: 0 });
-        assert!(matches!(result, FsResult::Entry { .. }));
+        let result = server.handle_op("test", FsOp::Create { parent: ssh_inode, name: "config".into(), mode: 0o644, flags: 0, uid: 1000, gid: 1000 });
+        assert!(matches!(result, FsResult::Created { .. }));
     }
 
     // 2.2.9a: Symlink under overlay parent → ENOTSUP

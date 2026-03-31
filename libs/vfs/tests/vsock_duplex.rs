@@ -98,9 +98,9 @@ async fn create_and_unlink_over_transport() {
     let client = duplex_pair(server, "test");
 
     let result = client.request(&FsOp::Create {
-        parent: 1, name: "new.txt".into(), mode: 0o644, flags: 0,
+        parent: 1, name: "new.txt".into(), mode: 0o644, flags: 0, uid: 0, gid: 0,
     }).await.unwrap();
-    assert!(matches!(result, FsResult::Entry { .. }));
+    assert!(matches!(result, FsResult::Created { .. }));
     assert!(dir.path().join("new.txt").exists());
 
     let result = client.request(&FsOp::Unlink { parent: 1, name: "new.txt".into() }).await.unwrap();

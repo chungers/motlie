@@ -274,18 +274,14 @@ The following PLAN phases are v1.5/v2 and are not in this plan:
 
 <!-- @claude 2026-03-31 — found during end-to-end FUSE testing via SSH -->
 
-1. **Overlay create uses uid=0/gid=0 instead of caller's uid/gid**
-   - `server.rs:do_create()` line 578,584 hardcodes `uid: 0, gid: 0`
-   - FsOp::Create doesn't carry uid/gid from the FUSE request
-   - Fix: add uid/gid fields to FsOp::Create, pass from fuse.rs `req.uid()`/`req.gid()`
+1. ~~**Overlay create uses uid=0/gid=0 instead of caller's uid/gid**~~
+   **FIXED** (@claude 2026-03-31): Added uid/gid fields to FsOp::Create.
+   fuse.rs passes `req.uid()`/`req.gid()`, server uses them for overlay attrs.
 
-2. **FUSE create doesn't return a file handle (EBADF on write after create)**
-   - FUSE `create` is atomic create+open, must return an fh
-   - Current FsOp::Create only creates; server doesn't allocate an fh
-   - fuse.rs `reply.created(..., 0, 0)` passes fh=0 — subsequent writes fail
-   - Fix: server do_create must also do_open (allocate fh, track in fh_table),
-     return both Entry attrs and fh. May need a new FsResult variant or
-     combine Entry + Opened.
+2. ~~**FUSE create doesn't return a file handle (EBADF on write after create)**~~
+   **FIXED** (@claude 2026-03-31): Added FsResult::Created variant with fh.
+   Server do_create now allocates fh and tracks in fh_table (atomic create+open).
+   fuse.rs uses the returned fh in `reply.created()`.
 
 ### v1.5: Embedded vhost-user-net with slirp (rootless guest networking)
 
