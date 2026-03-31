@@ -663,13 +663,21 @@ async fn run_simulated(host: &motlie_tmux::HostHandle, args: &Args) -> Result<()
         ),
     ];
 
-    for (idx, (pane, line)) in turns.iter().enumerate() {
-        send_line(pane, line).await?;
-        tokio::time::sleep(Duration::from_millis(250)).await;
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            println!("\nInterrupted.");
+        }
+        result = async {
+            for (idx, (pane, line)) in turns.iter().enumerate() {
+                send_line(pane, line).await?;
+                tokio::time::sleep(Duration::from_millis(250)).await;
 
-        println!("=== rolling context after turn {} ===", idx + 1);
-        println!("{}", history.render_text().await.replace('\r', ""));
-    }
+                println!("=== rolling context after turn {} ===", idx + 1);
+                println!("{}", history.render_text().await.replace('\r', ""));
+            }
+            Ok::<_, anyhow::Error>(())
+        } => { result?; }
+    };
 
     // Shutdown order: stop monitor → unsubscribe → join (drains and snapshots).
     monitor.shutdown().await?;
