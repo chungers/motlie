@@ -216,10 +216,10 @@ DOTENVEOF
     # Prompt to start/attach tmux on SSH login (for all users via /etc/profile.d)
     cat > /etc/profile.d/tmux-auto.sh << "TMUXEOF"
 if [ -n "$SSH_CONNECTION" ] && [ -z "$TMUX" ] && command -v tmux >/dev/null 2>&1; then
-    if tmux has-session -t main 2>/dev/null; then
+    if tmux has-session -t "$USER" 2>/dev/null; then
         echo "Attaching to existing tmux session..."
         sleep 1
-        exec tmux attach-session -t main
+        exec tmux attach-session -t "$USER"
     else
         printf "Start tmux session? [Y/n] (auto-yes in 3s) "
         if read -r -n 1 -t 3 answer; then
@@ -230,7 +230,7 @@ if [ -n "$SSH_CONNECTION" ] && [ -z "$TMUX" ] && command -v tmux >/dev/null 2>&1
         fi
         case "$answer" in
             n|N) ;;
-            *) exec tmux new-session -s main ;;
+            *) exec tmux new-session -s "$USER" ;;
         esac
     fi
 fi
