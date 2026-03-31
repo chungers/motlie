@@ -204,6 +204,15 @@ sudo chroot "$ROOTFS_DIR" /bin/bash -c '
     sed -i "s/#PermitRootLogin.*/PermitRootLogin yes/" /etc/ssh/sshd_config
     echo "root:rootpass" | chpasswd
 
+    # Source ~/.env into the user environment on login
+    cat > /etc/profile.d/dotenv.sh << "DOTENVEOF"
+if [ -f "$HOME/.env" ]; then
+    set -a
+    . "$HOME/.env"
+    set +a
+fi
+DOTENVEOF
+
     # Prompt to start/attach tmux on SSH login (for all users via /etc/profile.d)
     cat > /etc/profile.d/tmux-auto.sh << "TMUXEOF"
 if [ -n "$SSH_CONNECTION" ] && [ -z "$TMUX" ] && command -v tmux >/dev/null 2>&1; then
