@@ -269,3 +269,30 @@ The following PLAN phases are v1.5/v2 and are not in this plan:
 - Phase 3.1 (v1.5): Embedded Admin Console + Script / Config Ingestion
 - Phase 3.2 (v2): External RPC / gRPC Application Layer
 - PLAN tasks 5.1.6 (benchmarks), 5.1.10 (embedded admin procedures), 5.1.16–5.1.17 (latency/throughput baselines)
+
+### v1.5: Embedded vhost-user-net with slirp (rootless guest networking)
+
+<!-- @claude 2026-03-31 — documented after CH aarch64 harness work.
+     Current v1 uses TAP networking (requires CAP_NET_ADMIN or sudo).
+     This item captures the path to rootless, zero-config guest internet. -->
+
+**Goal:** Embed a vhost-user-net backend with user-mode TCP/IP (libslirp) into `repl_host`,
+so the guest gets internet access without any host networking configuration, root privileges,
+or CAP_NET_ADMIN.
+
+**Architecture:** `repl_host` spawns a vhost-user-net backend thread that listens on a Unix
+socket. CH connects via `--net vhost_user=true,socket=/path`. The backend receives Ethernet
+frames from the guest's virtio-net, translates them to host TCP/UDP sockets via libslirp.
+
+**Key crates:**
+- `vhost-user-backend` (rust-vmm) — vhost-user protocol + virtqueue handling
+- `vhost` (rust-vmm) — low-level vhost/vhost-user protocol
+- `libslirp` / `libslirp-rs` — user-mode TCP/IP stack (C library + Rust bindings)
+
+**Why not simpler alternatives:**
+- `vhost-device-net` does not exist in the rust-vmm workspace (as of 2026-03-31)
+- `passt` runs as a separate process and doesn't speak vhost-user natively
+- TAP-based approaches (slirp4netns, pasta) still require network namespaces or capabilities
+
+**Effort:** Non-trivial — requires wiring libslirp's event loop with vhost-user-backend's
+virtqueue processing. Estimated multi-session implementation.
