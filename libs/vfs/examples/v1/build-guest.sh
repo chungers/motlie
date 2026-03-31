@@ -207,13 +207,23 @@ sudo chroot "$ROOTFS_DIR" /bin/bash -c '
     # Prompt to start/attach tmux on SSH login (for all users via /etc/profile.d)
     cat > /etc/profile.d/tmux-auto.sh << "TMUXEOF"
 if [ -n "$SSH_CONNECTION" ] && [ -z "$TMUX" ] && command -v tmux >/dev/null 2>&1; then
-    printf "Start/Attach to tmux session? [Y/n] "
-    read -r -n 1 answer
-    echo
-    case "$answer" in
-        n|N) ;;
-        *) exec tmux new-session -A -s main ;;
-    esac
+    if tmux has-session -t main 2>/dev/null; then
+        echo "Attaching to existing tmux session..."
+        sleep 1
+        exec tmux attach-session -t main
+    else
+        printf "Start tmux session? [Y/n] (auto-yes in 3s) "
+        if read -r -n 1 -t 3 answer; then
+            echo
+        else
+            answer=Y
+            echo
+        fi
+        case "$answer" in
+            n|N) ;;
+            *) exec tmux new-session -s main ;;
+        esac
+    fi
 fi
 TMUXEOF
 
