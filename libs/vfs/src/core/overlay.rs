@@ -207,6 +207,18 @@ impl MemOverlay {
         infos
     }
 
+    /// Return all distinct tags that have at least one entry across all layers.
+    pub fn tags(&self) -> Vec<String> {
+        let layers = self.layers.lock();
+        let mut tags: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for layer in layers.values() {
+            for (tag, _) in layer.entries.keys() {
+                tags.insert(tag.clone());
+            }
+        }
+        tags.into_iter().collect()
+    }
+
     // --- Content management ---
 
     pub fn put(&self, layer: &str, tag: &str, path: &str, content: Bytes) -> Result<()> {
