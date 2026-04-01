@@ -102,15 +102,16 @@ or in a Docker container.
 cd libs/vfs/examples/v1
 
 # Default: downloads pre-built kernel, builds guest binary, creates images
-sudo ./build-guest.sh
+# No sudo required — uses mmdebstrap for rootless image building.
+./build-guest.sh
 
 # With a pre-built guest binary:
-sudo ./build-guest.sh --guest-binary /path/to/motlie-vfs-guest
+./build-guest.sh --guest-binary /path/to/motlie-vfs-guest
 
 # Kernel modes:
-sudo ./build-guest.sh --kernel download   # (default) pre-built from cloud-hypervisor/linux
-sudo ./build-guest.sh --kernel build      # clone and build from source
-sudo ./build-guest.sh --kernel skip       # use existing kernel in artifacts/
+./build-guest.sh --kernel download   # (default) pre-built from cloud-hypervisor/linux
+./build-guest.sh --kernel build      # clone and build from source
+./build-guest.sh --kernel skip       # use existing kernel in artifacts/
 ```
 
 Output in `artifacts/`:
@@ -127,7 +128,7 @@ To build from source instead (requires git, make, gcc, flex, bison,
 libelf-dev, libssl-dev):
 
 ```bash
-sudo ./build-guest.sh --kernel build
+./build-guest.sh --kernel build
 ```
 
 ### 2. Launch the guest
@@ -136,7 +137,7 @@ sudo ./build-guest.sh --kernel build
 ./launch-ch.sh
 ```
 
-The guest boots to a serial console. You'll see Alpine's OpenRC init sequence
+The guest boots to a serial console. You'll see Debian's systemd init sequence
 and a login prompt. The boot takes ~1-2 seconds.
 
 ### 5. Validate
@@ -267,7 +268,7 @@ sudo umount /tmp/overlay-mnt
 |---------|-----|
 | `vhost_vsock` not found | `sudo modprobe vhost_vsock` |
 | `debootstrap: command not found` | `sudo apt install debootstrap` |
-| CH disk `PermissionDenied` | Artifacts are root-owned after `sudo build-guest.sh`. The script auto-chowns via `$SUDO_USER`, but if you ran it differently: `sudo chown $USER:$USER artifacts/*` |
+| CH disk `PermissionDenied` | Artifacts should be user-owned (rootless build). If stale root-owned artifacts remain from an old sudo build: `sudo chown $USER:$USER artifacts/*` |
 | CH TAP `Operation not permitted` | TAP networking needs `CAP_NET_ADMIN`. Use `./launch-ch.sh --no-net` for vsock-only, or grant the capability: `sudo setcap cap_net_admin+ep $(which cloud-hypervisor)` |
 | CH fails with KVM permission error | Ensure user is in `kvm` group (`sudo usermod -aG kvm $USER`, then re-login) |
 | Guest kernel panic at boot | Ensure kernel has `CONFIG_SQUASHFS=y CONFIG_OVERLAY_FS=y` |
