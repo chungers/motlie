@@ -913,10 +913,10 @@ impl FsServer {
             None => return FsResult::Error { errno: libc::ENOENT },
         };
         // Overlay-managed inodes → ENOTSUP in v1
-        if entry.host_path.is_none() {
-            return FsResult::Error { errno: libc::ENOTSUP };
-        }
-        let hp = entry.host_path.clone().unwrap();
+        let hp = match &entry.host_path {
+            Some(hp) => hp.clone(),
+            None => return FsResult::Error { errno: libc::ENOTSUP },
+        };
         drop(table);
         match fs::read_link(&hp) {
             Ok(target) => FsResult::Symlink { target: target.to_string_lossy().into_owned() },
