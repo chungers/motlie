@@ -432,8 +432,9 @@ impl FsServer {
             }
         };
 
-        // Start from base layer entries (bottom-up merge)
-        let mut merged: HashMap<String, DirEntry> = HashMap::new();
+        // Collect child names + kinds from base layer and overlay, then
+        // allocate stable inodes for each via InodeTable.
+        let mut merged: HashMap<String, (FileType, InodeKind, Option<PathBuf>)> = HashMap::new();
 
         if let Some(hp) = &host_path {
             if let Ok(rd) = fs::read_dir(hp) {
@@ -451,7 +452,8 @@ impl FsServer {
                         Err(_) => FileType::RegularFile,
                     };
                     let name = de.file_name().to_string_lossy().into_owned();
-                    merged.insert(name.clone(), DirEntry { inode: 0, offset: 0, kind, name });
+                    let child_host = hp.join(&name);
+                    merged.insert(name, (kind, InodeKind::Disk, Some(child_host)));
                 }
             }
         }
@@ -462,10 +464,10 @@ impl FsServer {
             for (name, kind) in children {
                 match kind {
                     OverlayEntryKind::Content(_) => {
-                        merged.insert(name.clone(), DirEntry { inode: 0, offset: 0, kind: FileType::RegularFile, name });
+                        merged.insert(name, (FileType::RegularFile, InodeKind::Content, None));
                     }
                     OverlayEntryKind::SyntheticDir => {
-                        merged.insert(name.clone(), DirEntry { inode: 0, offset: 0, kind: FileType::Directory, name });
+                        merged.insert(name, (FileType::Directory, InodeKind::SyntheticDir, None));
                     }
                     OverlayEntryKind::Whiteout => {
                         merged.remove(&name);
@@ -474,7 +476,23 @@ impl FsServer {
             }
         }
 
-        let mut entries: Vec<DirEntry> = merged.into_values().collect();
+        // Allocate stable inodes for each child
+        let mut entries: Vec<DirEntry> = Vec::with_capacity(merged.len());
+        {
+            let mut table = mount.inode_table.lock();
+            for (name, (file_kind, ino_kind, child_host)) in &merged {
+                let child_path = child_path(&entry_path, name);
+                let now = SystemTime::now();
+                let attrs = FileAttr {
+                    inode: 0, size: 0, blocks: 0,
+                    atime: now, mtime: now, ctime: now,
+                    kind: *file_kind, mode: 0o755, nlink: 1, uid: 0, gid: 0,
+                };
+                let child_inode = table.allocate(&child_path, *ino_kind, child_host.clone(), attrs).unwrap_or(0);
+                entries.push(DirEntry { inode: child_inode, offset: 0, kind: *file_kind, name: name.clone() });
+            }
+        }
+
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         for (i, e) in entries.iter_mut().enumerate() {
             e.offset = (i + 1) as i64;
