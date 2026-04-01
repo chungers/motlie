@@ -9,6 +9,12 @@ listening on a parameterized Unix socket, with an admin command interface
 exposing every `MemOverlay` API operation. Admin is in-process only — no
 network admin connections.
 
+`repl_host` supports three provisioning styles:
+
+- legacy single-guest `--tag` / `--dir` for `v1`
+- startup-flag multi-guest `--guest` / guest-qualified `--mount`
+- REPL-driven `--empty` plus `provision` / `mount` for `v1.1`
+
 ### Input modes
 
 The server detects how stdin is connected and adapts:
@@ -35,12 +41,21 @@ cat setup-alice.sh.vfs | cargo run -p motlie-vfs --example repl_host --features 
 
 ### Options
 
+- `--empty` — start with no guest and provision from REPL commands
 - `--socket <path>` — vsock socket path (default: `/tmp/motlie-vfs.vsock_5000`)
+- `--guest <id=socket>` — add one guest-scoped `FsServer` at startup
 - `--mount <tag=dir>` — add a mount; repeat for multi-tag servers
+- `--mount <id:tag=dir>` — add one mount to one guest at startup
 - `--tag <name>` — mount tag (default: `alice-home`)
 - `--dir <path>` — host backing directory (default: temp dir with sample data)
 
 ### Commands
+
+**Provisioning / targeting:**
+- `guests` — list provisioned guests, sockets, and mount counts
+- `use <guest>` — set the default target guest
+- `provision <guest> <socket>` — create one guest-scoped `FsServer` and listener
+- `mount <guest> <tag>=<guest_path>,<host_path> [more...]` — add one or more mounts to a guest
 
 **Layer management:**
 - `layer <name> <priority>` — create or update a named layer
@@ -63,7 +78,37 @@ cat setup-alice.sh.vfs | cargo run -p motlie-vfs --example repl_host --features 
 
 **Other:**
 - `help` — show all commands
+- `help <command>` — show detailed usage for one command, for example `help provision`
 - `quit` — shut down server
+
+### Coordination Contract
+
+The guest and host must agree on several parameters. This is important enough
+to treat as an explicit contract:
+
+- `socket`: the host-side Unix socket created by `repl_host` must match the socket path that the guest connects to
+- `guest id`: only the admin control plane uses this; it selects which guest-scoped `FsServer` owns a socket and a set of mounts
+- `tag`: the guest sends `TAG <name>` on connect, and the host must have provisioned that same tag in the target guest `FsServer`
+- `guest_path`: the guest mount config decides where a tag is mounted inside the guest, for example `/home/alice` or `/workspace`
+- `host_path`: `repl_host` binds each tag to a host backing directory
+- `uid/gid/mode`: overlay-injected files such as `.ssh/authorized_keys` or `.env` must use values that make sense for the guest user
+
+Important nuance:
+
+- the host-side `FsServer` routes by `tag -> host_path`
+- the guest decides `tag -> guest_path`
+- the `guest_path` written in the REPL `mount` command is documentation and operator coordination data; the runtime mount location still comes from the guest `mounts.yaml`
+
+Example:
+
+```text
+guest config:  tag=alice-home guest_path=/home/alice
+host config:   guest=alice tag=alice-home host_path=/tmp/motlie-vfs-demo/alice-home
+overlay attrs: uid=1000 gid=1000 mode=0600 for /home/alice/.ssh/authorized_keys
+```
+
+If any of those parameters drift apart, mounts may connect to the wrong place,
+overlay ownership may be wrong, or the guest may fail to see the expected data.
 
 ### Script files
 

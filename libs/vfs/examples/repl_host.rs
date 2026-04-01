@@ -1,9 +1,9 @@
 //! repl_host: v1 host-side filesystem server with admin REPL.
 //!
-//! Starts one FsServer per guest VM with MemOverlay, listens on a
-//! parameterized Unix socket (the vsock host-side path), and serves
-//! filesystem operations. Exposes every MemOverlay API operation
-//! through a command interface.
+//! Starts one or more guest-scoped FsServer instances with MemOverlay,
+//! listens on one Unix socket per guest, and serves filesystem
+//! operations. Exposes every MemOverlay API operation through a command
+//! interface.
 //!
 //! # Input modes
 //!
@@ -39,6 +39,18 @@
 //!     --mount alice-home=~/alice \
 //!     --mount workspace=~/workspace
 //!
+//! # Multi-guest (repeat --guest and guest-qualified --mount)
+//! cargo run --example repl_host --features vsock -- \
+//!     --guest alice=/tmp/motlie-vfs-alice.vsock_5000 \
+//!     --mount alice:alice-home=~/alice \
+//!     --mount alice:alice-workspace=~/workspace \
+//!     --guest bob=/tmp/motlie-vfs-bob.vsock_5000 \
+//!     --mount bob:bob-home=~/bob \
+//!     --mount bob:bob-workspace=~/workspace-bob
+//!
+//! # Empty admin mode, provision from REPL script
+//! cat setup-multiguest.sh.vfs | cargo run --example repl_host --features vsock -- --empty
+//!
 //! # Script then interactive
 //! cat setup-alice.sh.vfs - | cargo run --example repl_host --features vsock -- --tag alice-home
 //!
@@ -51,38 +63,105 @@
 //!
 //! # Options
 //!
-//!   --socket <path>   vsock socket path (default: /tmp/motlie-vfs.vsock_5000)
-//!   --mount <tag=dir> add a mount; repeat for multi-tag servers
-//!   --tag <name>      mount tag (default: alice-home)
-//!   --dir <path>      host backing directory (default: temp dir with sample data)
+//!   --empty                 start with no guest and provision from REPL
+//!   --socket <path>         vsock socket path (single-guest mode)
+//!   --guest <id=socket>     add a guest-scoped FsServer and listener
+//!   --mount <tag=dir>       add a mount in single-guest mode
+//!   --mount <id:tag=dir>    add a mount to one guest in multi-guest mode
+//!   --tag <name>            mount tag (single-guest mode)
+//!   --dir <path>            host backing directory (single-guest mode)
 
 use std::io::{self, BufRead};
 use std::path::PathBuf;
+use std::sync::Mutex as StdMutex;
 use std::sync::Arc;
+use std::collections::HashMap;
 
 use anyhow::Result;
 use bytes::Bytes;
 use tokio::net::UnixListener;
+use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 
 use motlie_vfs::core::overlay::OverlayAttrs;
 use motlie_vfs::core::server::FsServer;
 use motlie_vfs::vsock::handler::VsockConnectionHandler;
 
+#[derive(Clone)]
+struct GuestConfig {
+    name: String,
+    socket_path: String,
+    mounts: Vec<ConfiguredMount>,
+}
+
+#[derive(Clone)]
+struct ConfiguredMount {
+    tag: String,
+    guest_path: Option<String>,
+    host_path: PathBuf,
+}
+
+struct GuestRuntime {
+    server: Arc<FsServer>,
+    socket_path: String,
+    mounts: Vec<ConfiguredMount>,
+}
+
+struct AdminState {
+    guests: HashMap<String, GuestRuntime>,
+    guest_order: Vec<String>,
+    current_guest: String,
+    multi_guest: bool,
+    runtime: Handle,
+    sockets_for_cleanup: Arc<StdMutex<Vec<String>>>,
+}
+
+enum MountSpec {
+    Single { tag: String, dir: PathBuf },
+    Guest { guest: String, tag: String, dir: PathBuf },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut socket_path = "/tmp/motlie-vfs.vsock_5000".to_string();
     let mut tag = "alice-home".to_string();
     let mut host_dir: Option<PathBuf> = None;
-    let mut mounts: Vec<(String, PathBuf)> = Vec::new();
+    let mut single_mounts: Vec<(String, PathBuf)> = Vec::new();
+    let mut guest_configs: Vec<GuestConfig> = Vec::new();
+    let mut empty_mode = false;
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "--empty" => { empty_mode = true; i += 1; }
             "--socket" if i + 1 < args.len() => { socket_path = args[i + 1].clone(); i += 2; }
+            "--guest" if i + 1 < args.len() => {
+                let (guest_name, guest_socket) = parse_guest_spec(&args[i + 1])?;
+                if guest_configs.iter().any(|cfg| cfg.name == guest_name) {
+                    anyhow::bail!("duplicate --guest '{}'", guest_name);
+                }
+                guest_configs.push(GuestConfig {
+                    name: guest_name,
+                    socket_path: guest_socket,
+                    mounts: Vec::new(),
+                });
+                i += 2;
+            }
             "--mount" if i + 1 < args.len() => {
-                mounts.push(parse_mount_spec(&args[i + 1])?);
+                match parse_mount_spec(&args[i + 1])? {
+                    MountSpec::Single { tag, dir } => single_mounts.push((tag, dir)),
+                    MountSpec::Guest { guest, tag, dir } => {
+                        let Some(config) = guest_configs.iter_mut().find(|cfg| cfg.name == guest) else {
+                            anyhow::bail!("guest '{guest}' must be declared with --guest before its --mount entries");
+                        };
+                        config.mounts.push(ConfiguredMount {
+                            tag,
+                            guest_path: None,
+                            host_path: dir,
+                        });
+                    }
+                }
                 i += 2;
             }
             "--tag" if i + 1 < args.len() => { tag = args[i + 1].clone(); i += 2; }
@@ -91,102 +170,130 @@ async fn main() -> Result<()> {
         }
     }
 
-    if !mounts.is_empty() && host_dir.is_some() {
-        anyhow::bail!("cannot mix --mount with legacy --dir/positional path");
-    }
-    if !mounts.is_empty() && tag != "alice-home" {
-        anyhow::bail!("cannot mix --mount with legacy --tag");
-    }
+    let multi_guest = empty_mode || !guest_configs.is_empty();
+    if multi_guest {
+        if host_dir.is_some() {
+            anyhow::bail!("cannot use --dir/positional path in multi-guest mode");
+        }
+        if tag != "alice-home" {
+            anyhow::bail!("cannot use --tag in multi-guest mode");
+        }
+        if !single_mounts.is_empty() {
+            anyhow::bail!("multi-guest mode requires --mount <guest>:<tag>=<dir>");
+        }
+        for config in &guest_configs {
+            if config.mounts.is_empty() {
+                anyhow::bail!("guest '{}' has no mounts; add at least one --mount {}:<tag>=<dir>", config.name, config.name);
+            }
+        }
+    } else if !empty_mode {
+        if !single_mounts.is_empty() && host_dir.is_some() {
+            anyhow::bail!("cannot mix --mount with legacy --dir/positional path");
+        }
+        if !single_mounts.is_empty() && tag != "alice-home" {
+            anyhow::bail!("cannot mix --mount with legacy --tag");
+        }
 
-    let _tempdir = if mounts.is_empty() && host_dir.is_none() {
-        Some(tempfile::tempdir()?)
-    } else {
-        None
-    };
-    if mounts.is_empty() {
-        let host_path = match host_dir {
-            Some(p) => {
-                std::fs::create_dir_all(&p)?;
-                p
-            }
-            None => {
-                let p = _tempdir
-                    .as_ref()
-                    .map(|d| d.path().to_path_buf())
-                    .ok_or_else(|| anyhow::anyhow!("internal tempdir setup failed"))?;
-                std::fs::create_dir_all(p.join("projects"))?;
-                std::fs::write(p.join("projects/README.md"), b"hello from host disk\n")?;
-                std::fs::write(p.join(".bashrc"), b"# bashrc\n")?;
-                eprintln!("Created temp host dir: {}", p.display());
-                p
-            }
+        let tempdir = if single_mounts.is_empty() && host_dir.is_none() {
+            Some(tempfile::tempdir()?)
+        } else {
+            None
         };
-        mounts.push((tag.clone(), host_path));
+        if single_mounts.is_empty() {
+            let host_path = match host_dir {
+                Some(p) => {
+                    std::fs::create_dir_all(&p)?;
+                    p
+                }
+                None => {
+                    let p = tempdir
+                        .as_ref()
+                        .map(|d| d.path().to_path_buf())
+                        .ok_or_else(|| anyhow::anyhow!("internal tempdir setup failed"))?;
+                    std::fs::create_dir_all(p.join("projects"))?;
+                    std::fs::write(p.join("projects/README.md"), b"hello from host disk\n")?;
+                    std::fs::write(p.join(".bashrc"), b"# bashrc\n")?;
+                    eprintln!("Created temp host dir: {}", p.display());
+                    p
+                }
+            };
+            single_mounts.push((tag.clone(), host_path));
+        }
+        guest_configs.push(GuestConfig {
+            name: "default".to_string(),
+            socket_path,
+            mounts: single_mounts.into_iter().map(|(tag, host_path)| ConfiguredMount {
+                tag,
+                guest_path: None,
+                host_path,
+            }).collect(),
+        });
+        std::mem::forget(tempdir);
     }
 
     eprintln!("=== motlie-vfs repl_host ===");
-    eprintln!("Socket: {socket_path}");
-    eprintln!("Mounts:");
-    for (mount_tag, mount_path) in &mounts {
-        eprintln!("  {mount_tag} -> {}", mount_path.display());
+    for config in &guest_configs {
+        if multi_guest {
+            eprintln!("Guest: {}", config.name);
+        }
+        eprintln!("  Socket: {}", config.socket_path);
+        eprintln!("  Mounts:");
+        for mount in &config.mounts {
+            if let Some(guest_path) = &mount.guest_path {
+                eprintln!("    {}: {} -> {}", mount.tag, guest_path, mount.host_path.display());
+            } else {
+                eprintln!("    {} -> {}", mount.tag, mount.host_path.display());
+            }
+        }
     }
     eprintln!("");
 
-    let mut builder = FsServer::builder()
-        .overlay(true)
-        .events(256);
-    for (mount_tag, mount_path) in &mounts {
-        builder = builder.mount(mount_tag, mount_path.clone(), false);
-    }
-    let server = Arc::new(builder.build()?);
+    let mut admin_guests: HashMap<String, GuestRuntime> = HashMap::new();
+    let mut guest_order = Vec::new();
+    let sockets_for_cleanup = Arc::new(StdMutex::new(Vec::new()));
+    let runtime = Handle::current();
 
-    let _ = std::fs::remove_file(&socket_path);
-    let listener = UnixListener::bind(&socket_path)?;
-    eprintln!("Listening on {socket_path} (guest filesystem connections)");
+    for config in guest_configs {
+        let mut builder = FsServer::builder()
+            .overlay(true)
+            .events(256);
+        for mount in &config.mounts {
+            builder = builder.mount(&mount.tag, mount.host_path.clone(), false);
+        }
+        let server = Arc::new(builder.build()?);
+        guest_order.push(config.name.clone());
+        admin_guests.insert(config.name.clone(), GuestRuntime {
+            server: Arc::clone(&server),
+            socket_path: config.socket_path.clone(),
+            mounts: config.mounts.clone(),
+        });
+
+        let _ = std::fs::remove_file(&config.socket_path);
+        let listener = UnixListener::bind(&config.socket_path)?;
+        sockets_for_cleanup.lock().expect("cleanup socket lock poisoned").push(config.socket_path.clone());
+        spawn_guest_listener(&runtime, config.name.clone(), config.socket_path.clone(), listener, server);
+    }
+
     eprintln!("Type 'help' for commands.");
     eprintln!("");
 
-    // Spawn vsock connection acceptor (guest filesystem traffic only)
-    let server_for_accept = Arc::clone(&server);
-    tokio::spawn(async move {
-        loop {
-            match listener.accept().await {
-                Ok((mut stream, _addr)) => {
-                    let tag = match motlie_vfs::vsock::read_tag_handshake(&mut stream).await {
-                        Ok(tag) => tag,
-                        Err(e) => {
-                            eprintln!("Connection handshake error: {e}");
-                            continue;
-                        }
-                    };
-                    if !server_for_accept.has_mount(&tag) {
-                        eprintln!("Connection requested unknown tag: {tag}");
-                        continue;
-                    }
-                    let handler = VsockConnectionHandler::new(
-                        Arc::clone(&server_for_accept),
-                        &tag,
-                    );
-                    tokio::spawn(async move {
-                        if let Err(e) = handler.serve(stream).await {
-                            eprintln!("Connection handler error: {e}");
-                        }
-                    });
-                    eprintln!("[accepted guest connection for tag {tag}]");
-                }
-                Err(e) => eprintln!("Accept error: {e}"),
-            }
-        }
-    });
+    let current_guest = guest_order.first().cloned().unwrap_or_default();
+    let admin = AdminState {
+        guests: admin_guests,
+        guest_order,
+        current_guest,
+        multi_guest,
+        runtime,
+        sockets_for_cleanup: Arc::clone(&sockets_for_cleanup),
+    };
 
     // Spawn the admin input handler on a blocking thread
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-    let server_for_input = Arc::clone(&server);
-    let socket_for_cleanup = socket_path.clone();
-
     tokio::task::spawn_blocking(move || {
-        run_input(server_for_input);
-        let _ = std::fs::remove_file(&socket_for_cleanup);
+        run_input(admin);
+        for socket_path in sockets_for_cleanup.lock().expect("cleanup socket lock poisoned").iter() {
+            let _ = std::fs::remove_file(socket_path);
+        }
         let _ = shutdown_tx.send(());
     });
 
@@ -198,12 +305,12 @@ async fn main() -> Result<()> {
 // Input handling — adapts to TTY, pipe+TTY, or pure pipe
 // ---------------------------------------------------------------------------
 
-fn run_input(server: Arc<FsServer>) {
+fn run_input(mut admin: AdminState) {
     let stdin_is_tty = atty::is(atty::Stream::Stdin);
 
     if stdin_is_tty {
         // Mode 1: Interactive TTY — rustyline REPL
-        run_interactive_repl(&server);
+        run_interactive_repl(&mut admin);
     } else {
         // Modes 2 & 3: Piped input — read stdin line by line
         eprintln!("--- reading commands from stdin ---");
@@ -216,7 +323,7 @@ fn run_input(server: Arc<FsServer>) {
             let trimmed = line.trim();
             if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
             eprintln!("vfs> {trimmed}");
-            if dispatch_command(&server, trimmed) == ControlFlow::Quit {
+            if dispatch_command(&mut admin, trimmed) == ControlFlow::Quit {
                 eprintln!("shutting down (quit command)");
                 return;
             }
@@ -231,7 +338,7 @@ fn run_input(server: Arc<FsServer>) {
                 // Switch to interactive rustyline REPL.
                 eprintln!("--- entering interactive REPL (Ctrl-D to stop, server keeps running) ---");
                 eprintln!("");
-                run_interactive_repl(&server);
+                run_interactive_repl(&mut admin);
                 return;
             }
         }
@@ -246,7 +353,7 @@ fn run_input(server: Arc<FsServer>) {
     }
 }
 
-fn run_interactive_repl(server: &FsServer) {
+fn run_interactive_repl(admin: &mut AdminState) {
     let mut rl = match rustyline::DefaultEditor::new() {
         Ok(rl) => rl,
         Err(e) => {
@@ -256,7 +363,12 @@ fn run_interactive_repl(server: &FsServer) {
     };
 
     loop {
-        let line = match rl.readline("vfs> ") {
+        let prompt = if admin.multi_guest {
+            format!("vfs[{}]> ", admin.current_guest)
+        } else {
+            "vfs> ".to_string()
+        };
+        let line = match rl.readline(&prompt) {
             Ok(line) => line,
             Err(rustyline::error::ReadlineError::Interrupted) => { eprintln!("^C"); continue; }
             Err(rustyline::error::ReadlineError::Eof) => break,
@@ -267,7 +379,7 @@ fn run_interactive_repl(server: &FsServer) {
         if trimmed.is_empty() { continue; }
         let _ = rl.add_history_entry(trimmed);
 
-        if dispatch_command(server, trimmed) == ControlFlow::Quit {
+        if dispatch_command(admin, trimmed) == ControlFlow::Quit {
             break;
         }
     }
@@ -290,16 +402,158 @@ fn wait_for_signal() {
     }
 }
 
-fn parse_mount_spec(spec: &str) -> Result<(String, PathBuf)> {
-    let Some((tag, dir)) = spec.split_once('=') else {
-        anyhow::bail!("invalid --mount '{spec}'; expected <tag>=<dir>");
+fn spawn_guest_listener(
+    runtime: &Handle,
+    guest_name: String,
+    socket_path: String,
+    listener: UnixListener,
+    server: Arc<FsServer>,
+) {
+    eprintln!("Listening on {socket_path} for guest '{guest_name}' (guest filesystem connections)");
+
+    runtime.spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok((mut stream, _addr)) => {
+                    let tag = match motlie_vfs::vsock::read_tag_handshake(&mut stream).await {
+                        Ok(tag) => tag,
+                        Err(e) => {
+                            eprintln!("[{guest_name}] connection handshake error: {e}");
+                            continue;
+                        }
+                    };
+                    if !server.has_mount(&tag) {
+                        eprintln!("[{guest_name}] connection requested unknown tag: {tag}");
+                        continue;
+                    }
+                    let handler = VsockConnectionHandler::new(Arc::clone(&server), &tag);
+                    let guest_name_for_conn = guest_name.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handler.serve(stream).await {
+                            eprintln!("[{guest_name_for_conn}] connection handler error: {e}");
+                        }
+                    });
+                    eprintln!("[accepted guest connection guest={guest_name} tag={tag}]");
+                }
+                Err(e) => eprintln!("[{guest_name}] accept error: {e}"),
+            }
+        }
+    });
+}
+
+fn parse_guest_spec(spec: &str) -> Result<(String, String)> {
+    let Some((guest, socket_path)) = spec.split_once('=') else {
+        anyhow::bail!("invalid --guest '{spec}'; expected <guest>=<socket>");
     };
-    if tag.is_empty() || dir.is_empty() {
-        anyhow::bail!("invalid --mount '{spec}'; tag and dir must be non-empty");
+    if guest.is_empty() || socket_path.is_empty() {
+        anyhow::bail!("invalid --guest '{spec}'; guest and socket must be non-empty");
+    }
+    Ok((guest.to_string(), socket_path.to_string()))
+}
+
+fn parse_mount_spec(spec: &str) -> Result<MountSpec> {
+    let Some((lhs, dir)) = spec.split_once('=') else {
+        anyhow::bail!("invalid --mount '{spec}'; expected <tag>=<dir> or <guest>:<tag>=<dir>");
+    };
+    if lhs.is_empty() || dir.is_empty() {
+        anyhow::bail!("invalid --mount '{spec}'; left-hand side and dir must be non-empty");
     }
     let path = PathBuf::from(dir);
     std::fs::create_dir_all(&path)?;
-    Ok((tag.to_string(), path))
+
+    if let Some((guest, tag)) = lhs.split_once(':') {
+        if guest.is_empty() || tag.is_empty() {
+            anyhow::bail!("invalid --mount '{spec}'; guest and tag must be non-empty");
+        }
+        return Ok(MountSpec::Guest {
+            guest: guest.to_string(),
+            tag: tag.to_string(),
+            dir: path,
+        });
+    }
+
+    Ok(MountSpec::Single {
+        tag: lhs.to_string(),
+        dir: path,
+    })
+}
+
+fn parse_repl_mount_target(spec: &str) -> Result<ConfiguredMount> {
+    let Some((tag, rhs)) = spec.split_once('=') else {
+        anyhow::bail!("invalid mount spec '{spec}'; expected <tag>=<guest_path>,<host_path>");
+    };
+    let (guest_path, host_path) = match rhs.split_once(',') {
+        Some((guest_path, host_path)) if !guest_path.is_empty() && !host_path.is_empty() => {
+            (Some(guest_path.to_string()), PathBuf::from(host_path))
+        }
+        None if !rhs.is_empty() => (None, PathBuf::from(rhs)),
+        _ => anyhow::bail!("invalid mount spec '{spec}'; expected <tag>=<guest_path>,<host_path>"),
+    };
+    std::fs::create_dir_all(&host_path)?;
+    Ok(ConfiguredMount {
+        tag: tag.to_string(),
+        guest_path,
+        host_path,
+    })
+}
+
+fn provision_guest(admin: &mut AdminState, guest_name: &str, socket_path: &str) -> Result<()> {
+    if guest_name.is_empty() || socket_path.is_empty() {
+        anyhow::bail!("provision requires non-empty guest and socket");
+    }
+    if admin.guests.contains_key(guest_name) {
+        anyhow::bail!("guest '{guest_name}' already provisioned");
+    }
+
+    let server = Arc::new(
+        FsServer::builder()
+            .overlay(true)
+            .events(256)
+            .build()?,
+    );
+    let _ = std::fs::remove_file(socket_path);
+    let listener = UnixListener::bind(socket_path)?;
+    admin
+        .sockets_for_cleanup
+        .lock()
+        .expect("cleanup socket lock poisoned")
+        .push(socket_path.to_string());
+    spawn_guest_listener(
+        &admin.runtime,
+        guest_name.to_string(),
+        socket_path.to_string(),
+        listener,
+        Arc::clone(&server),
+    );
+
+    admin.guests.insert(
+        guest_name.to_string(),
+        GuestRuntime {
+            server,
+            socket_path: socket_path.to_string(),
+            mounts: Vec::new(),
+        },
+    );
+    admin.guest_order.push(guest_name.to_string());
+    if admin.current_guest.is_empty() {
+        admin.current_guest = guest_name.to_string();
+    }
+    admin.multi_guest = true;
+    Ok(())
+}
+
+fn add_guest_mount(admin: &mut AdminState, guest_name: &str, mount: ConfiguredMount) -> Result<()> {
+    let Some(runtime) = admin.guests.get_mut(guest_name) else {
+        anyhow::bail!("unknown guest '{guest_name}'");
+    };
+    if runtime.server.has_mount(&mount.tag) {
+        anyhow::bail!("guest '{guest_name}' already has mount '{}'", mount.tag);
+    }
+    runtime
+        .server
+        .add_mount(&mount.tag, mount.host_path.clone(), false)?;
+    runtime.mounts.push(mount);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -312,11 +566,210 @@ enum ControlFlow {
     Quit,
 }
 
-fn dispatch_command(server: &FsServer, line: &str) -> ControlFlow {
-    let parts: Vec<&str> = line.split_whitespace().collect();
+fn print_help(topic: Option<&str>, multi_guest: bool) {
+    match topic {
+        Some("provision") => {
+            println!("provision <guest> <socket>");
+            println!("  Create one guest-scoped FsServer and bind its Unix socket listener.");
+            println!("  Example:");
+            println!("    provision bob /tmp/motlie-vfs-bob.vsock_5000");
+        }
+        Some("mount") => {
+            println!("mount <guest> <tag>=<guest_path>,<host_path> [more...]");
+            println!("  Add one or more host-backed mount tags to an already-provisioned guest.");
+            println!("  guest_path is recorded for operator clarity and should match mounts.<guest>.yaml.");
+            println!("  FsServer routing still uses tag -> host_path on the host side.");
+            println!("  Example:");
+            println!("    mount bob bob-home=/home/bob,/tmp/motlie-vfs-demo/bob-home bob-workspace=/workspace,/tmp/motlie-vfs-demo/bob-workspace");
+        }
+        Some("use") => {
+            println!("use <guest>");
+            println!("  Set the default target guest for subsequent admin commands.");
+        }
+        Some("guests") => {
+            println!("guests");
+            println!("  List provisioned guests, sockets, and configured mount counts.");
+        }
+        Some("layer") => {
+            println!("layer <name> <priority>");
+            println!("  Create or update a named overlay layer.");
+        }
+        Some("put") => {
+            println!("put <layer> <tag> <path> <content>");
+            println!("  Inject a file with default attrs into one tag within the current guest.");
+        }
+        Some("putattr") => {
+            println!("putattr <layer> <tag> <path> <uid> <gid> <mode> <content>");
+            println!("  Inject a file with explicit ownership and mode.");
+        }
+        Some("mkdir") => {
+            println!("mkdir <layer> <tag> <path> [mode]");
+            println!("  Create a synthetic directory in one overlay layer.");
+        }
+        Some("whiteout") => {
+            println!("whiteout <layer> <tag> <path>");
+            println!("  Hide a lower-layer entry at the effective view.");
+        }
+        Some("rm") => {
+            println!("rm <layer> <tag> <path>");
+            println!("  Remove an overlay entry from one layer.");
+        }
+        Some("get") => {
+            println!("get <layer> <tag> <path>");
+            println!("  Read content from one overlay layer.");
+        }
+        Some("ls") => {
+            println!("ls <tag>");
+            println!("  List effective overlay entries for one tag.");
+        }
+        Some("lslayer") => {
+            println!("lslayer <layer> <tag>");
+            println!("  List entries from one layer only.");
+        }
+        Some("tree") => {
+            println!("tree [tag]");
+            println!("  Show the layered tree and effective winners. Without tag, show all tags.");
+        }
+        Some("quit") | Some("exit") => {
+            println!("quit");
+            println!("  Shut down repl_host.");
+        }
+        Some(other) => {
+            println!("unknown help topic: {other}");
+            println!("type 'help' for commands");
+        }
+        None => {
+            if multi_guest {
+                println!("Multi-guest targeting:");
+                println!("  guests                                          — list configured guests");
+                println!("  use <guest>                                     — set default guest for subsequent commands");
+                println!("  <guest> <command ...>                           — run one command against a specific guest");
+                println!("  provision <guest> <socket>                      — create one guest-scoped FsServer and listener");
+                println!("  mount <guest> <tag>=<guest_path>,<host_path>... — add one or more mounts to a guest");
+                println!("");
+            }
+            println!("Layer management:");
+            println!("  layer <name> <priority>                         — create/update layer");
+            println!("  rmlayer <name>                                  — remove layer and all entries");
+            println!("  layers                                          — list all layers");
+            println!("");
+            println!("Content injection:");
+            println!("  put <layer> <tag> <path> <content>              — inject file (default attrs)");
+            println!("  putattr <layer> <tag> <path> <uid> <gid> <mode> <content>");
+            println!("                                                  — inject file with explicit attrs");
+            println!("  mkdir <layer> <tag> <path> [mode]               — create synthetic directory");
+            println!("");
+            println!("Suppression / removal:");
+            println!("  whiteout <layer> <tag> <path>                   — hide a lower-layer entry");
+            println!("  rm <layer> <tag> <path>                         — remove an overlay entry");
+            println!("");
+            println!("Inspection:");
+            println!("  get <layer> <tag> <path>                        — read content from a layer");
+            println!("  ls <tag>                                        — list effective overlay entries");
+            println!("  lslayer <layer> <tag>                           — list entries in a layer");
+            println!("  tree [tag]                                      — show layered tree (* = winner)");
+            println!("                                                    no tag = show all tags");
+            println!("");
+            println!("Other:");
+            println!("  help [command]                                  — show all commands or one command");
+            println!("  quit                                            — shut down server");
+            println!("");
+            println!("Input modes:");
+            println!("  Interactive:  stdin is a TTY → rustyline REPL");
+            println!("  Pipe + TTY:   cat script.vfs - | repl_host → script then REPL");
+            println!("  Pure pipe:    cat script.vfs | repl_host → script then serve until signaled");
+        }
+    }
+}
+
+fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
+    let mut parts: Vec<&str> = line.split_whitespace().collect();
     if parts.is_empty() { return ControlFlow::Continue; }
 
-    let overlay = match server.overlay() {
+    match parts[0] {
+        "guests" => {
+            for guest in &admin.guest_order {
+                let marker = if guest == &admin.current_guest { "*" } else { " " };
+                if let Some(runtime) = admin.guests.get(guest) {
+                    println!("{marker} {guest} socket={} mounts={}", runtime.socket_path, runtime.mounts.len());
+                } else {
+                    println!("{marker} {guest}");
+                }
+            }
+            return ControlFlow::Continue;
+        }
+        "use" if parts.len() == 2 => {
+            if admin.guests.contains_key(parts[1]) {
+                admin.current_guest = parts[1].to_string();
+                println!("ok: using guest {}", admin.current_guest);
+            } else {
+                println!("error: unknown guest {}", parts[1]);
+            }
+            return ControlFlow::Continue;
+        }
+        "use" => {
+            println!("error: use <guest>");
+            return ControlFlow::Continue;
+        }
+        "provision" if parts.len() == 3 => {
+            match provision_guest(admin, parts[1], parts[2]) {
+                Ok(()) => println!("ok: provision {} {}", parts[1], parts[2]),
+                Err(e) => println!("error: {e}"),
+            }
+            return ControlFlow::Continue;
+        }
+        "provision" => {
+            println!("error: provision <guest> <socket>");
+            return ControlFlow::Continue;
+        }
+        "mount" if parts.len() >= 3 => {
+            let guest_name = parts[1];
+            for spec in &parts[2..] {
+                match parse_repl_mount_target(spec)
+                    .and_then(|mount| {
+                        let mount_desc = if let Some(guest_path) = &mount.guest_path {
+                            format!("{}:{} -> {}", mount.tag, guest_path, mount.host_path.display())
+                        } else {
+                            format!("{} -> {}", mount.tag, mount.host_path.display())
+                        };
+                        add_guest_mount(admin, guest_name, mount)?;
+                        Ok(mount_desc)
+                    }) {
+                    Ok(mount_desc) => println!("ok: mount {guest_name} {mount_desc}"),
+                    Err(e) => println!("error: {e}"),
+                }
+            }
+            return ControlFlow::Continue;
+        }
+        "mount" => {
+            println!("error: mount <guest> <tag>=<guest_path>,<host_path> [more...]");
+            return ControlFlow::Continue;
+        }
+        "help" => {
+            print_help(parts.get(1).copied(), admin.multi_guest);
+            return ControlFlow::Continue;
+        }
+        "quit" | "exit" => return ControlFlow::Quit,
+        _ => {}
+    }
+
+    let target_guest = if admin.guests.contains_key(parts[0]) && parts.len() >= 2 {
+        let guest = parts[0].to_string();
+        parts.remove(0);
+        guest
+    } else {
+        if admin.current_guest.is_empty() {
+            println!("error: no guest selected; provision/use a guest or prefix commands with <guest>");
+            return ControlFlow::Continue;
+        }
+        admin.current_guest.clone()
+    };
+
+    let Some(runtime) = admin.guests.get(&target_guest) else {
+        println!("error: unknown guest {target_guest}");
+        return ControlFlow::Continue;
+    };
+    let overlay = match runtime.server.overlay() {
         Some(o) => o,
         None => { println!("error: overlay not enabled"); return ControlFlow::Continue; }
     };
@@ -498,42 +951,6 @@ fn dispatch_command(server: &FsServer, line: &str) -> ControlFlow {
                 println!("(* = effective winner)");
             }
         }
-
-        // --- Help ---
-        "help" => {
-            println!("Layer management:");
-            println!("  layer <name> <priority>                         — create/update layer");
-            println!("  rmlayer <name>                                  — remove layer and all entries");
-            println!("  layers                                          — list all layers");
-            println!("");
-            println!("Content injection:");
-            println!("  put <layer> <tag> <path> <content>              — inject file (default attrs)");
-            println!("  putattr <layer> <tag> <path> <uid> <gid> <mode> <content>");
-            println!("                                                  — inject file with explicit attrs");
-            println!("  mkdir <layer> <tag> <path> [mode]               — create synthetic directory");
-            println!("");
-            println!("Suppression / removal:");
-            println!("  whiteout <layer> <tag> <path>                   — hide a lower-layer entry");
-            println!("  rm <layer> <tag> <path>                         — remove an overlay entry");
-            println!("");
-            println!("Inspection:");
-            println!("  get <layer> <tag> <path>                        — read content from a layer");
-            println!("  ls <tag>                                        — list effective overlay entries");
-            println!("  lslayer <layer> <tag>                           — list entries in a layer");
-            println!("  tree [tag]                                      — show layered tree (* = winner)");
-            println!("                                                    no tag = show all tags");
-            println!("");
-            println!("Other:");
-            println!("  help                                            — show this help");
-            println!("  quit                                            — shut down server");
-            println!("");
-            println!("Input modes:");
-            println!("  Interactive:  stdin is a TTY → rustyline REPL");
-            println!("  Pipe + TTY:   cat script.vfs - | repl_host → script then REPL");
-            println!("  Pure pipe:    cat script.vfs | repl_host → script then serve until signaled");
-        }
-
-        "quit" | "exit" => return ControlFlow::Quit,
 
         _ => {
             println!("unknown command: {line}");

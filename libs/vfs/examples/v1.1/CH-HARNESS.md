@@ -6,90 +6,97 @@
 - multiple mount tags inside each server
 - one vsock socket per guest VM
 - one guest-side FUSE mount thread per tag
+- one shared `repl_host` process managing all guest-scoped `FsServer` instances
+
+## Original Requirements
+
+This harness was reshaped around these requirements:
+
+- build one generic shared image set
+- do not bake Alice/Bob identity into the build artifact
+- allow guest-local writes to `/`, including disposable package installs
+- keep Alice and Bob isolated from each other's writable root state
+- recreate that writable root state on the next launch
+
+The harness therefore combines:
+
+- one shared squashfs base built ahead of time
+- one fresh per-guest ext4 runtime overlay created on every launch
+- `vfs` subtree mounts layered on top of that merged guest root
 
 ## What Differs Vs v1
 
-- `v1` runs one guest-oriented server flow at a time; `v1.1` is meant to run Alice and Bob concurrently
-- `v1` uses the legacy single-tag `--tag` / `--dir` server startup path; `v1.1` uses repeated `--mount <tag>=<dir>`
+- `v1` runs one guest-oriented server flow at a time; `v1.1` is meant to run Alice and Bob concurrently from one host process
+- `v1` uses the legacy single-tag `--tag` / `--dir` server startup path; `v1.1` starts `repl_host --empty` and provisions guests from REPL commands
+- `repl_host` still supports repeated `--guest <id>=<socket>` and guest-qualified `--mount` flags, but the `v1.1` harness now drives guest creation through `provision` and `mount`
 - `v1` typically mounts one guest path; `v1.1` mounts two tags per guest in the demo
-- `v1` is single-socket, single-CID, single-artifact-tree; `v1.1` uses separate sockets, CIDs, and artifact trees per guest
+- `v1` is single-socket, single-CID, single-artifact-tree; `v1.1` uses separate sockets, CIDs, and runtime overlays per guest while still using one host process
 - `v1.1` relies on the guest-side `TAG <name>` handshake so one server socket can route multiple tag connections for the same guest
+- `v1.1` builds one generic base image set and synthesizes per-guest writable overlays at launch time
 
 ## Topology
 
 ```text
 Host                                          Guest VMs
 ----                                          ---------
-repl_host (alice server)                      alice VM
-  socket /tmp/motlie-vfs-alice.vsock_5000       tags: alice-home, alice-workspace
-  mounts:
-    alice-home -> /tmp/.../alice-home         repl_host (bob server)
-    alice-workspace -> /tmp/.../alice-workspace
+repl_host (one process)
+  guest alice -> FsServer + socket /tmp/motlie-vfs-alice.vsock_5000
+    mounts:
+      alice-home -> /tmp/.../alice-home       alice VM
+      alice-workspace -> /tmp/.../alice-workspace
 
-repl_host (bob server)                        bob VM
-  socket /tmp/motlie-vfs-bob.vsock_5000         tags: bob-home, bob-workspace
-  mounts:
-    bob-home -> /tmp/.../bob-home
-    bob-workspace -> /tmp/.../bob-workspace
+  guest bob -> FsServer + socket /tmp/motlie-vfs-bob.vsock_5000
+    mounts:
+      bob-home -> /tmp/.../bob-home           bob VM
+      bob-workspace -> /tmp/.../bob-workspace
 ```
 
-Each guest mount connection goes to the guest's one socket and immediately sends `TAG <name>\n`. `repl_host` uses that handshake to route the stream to the right tag in its `FsServer`.
+Each guest mount connection goes to that guest's socket and immediately sends `TAG <name>\n`. `repl_host` uses the socket/listener to select the guest `FsServer`, then uses the tag handshake to route within that guest's mounts.
 
 ## Prerequisites
 
 Before following this harness:
 
-- build both `v1.1` guest image sets
+- build the shared base image set
 - ensure `/dev/vhost-vsock` exists or load it with `sudo modprobe vhost_vsock`
 - use a shell that can successfully run the rootless `build-guest.sh` flow if you are rebuilding images
 - ensure `cloud-hypervisor` is installed and on `PATH`
+- ensure `mkfs.ext4` is installed for runtime overlay creation
 
 ## Build
 
 ```bash
 cd libs/vfs/examples/v1.1
 
-./build-guest.sh --guest alice
-./build-guest.sh --guest bob
+./build-guest.sh
 ```
 
-Artifacts land in:
-
-- `artifacts/alice/`
-- `artifacts/bob/`
+Artifacts land in `artifacts/base/`.
 
 You do not need a prior `v1` build. This harness uses only `v1.1` artifacts.
 
-## Start Host Servers
-
-Alice server:
+## Start Host Server
 
 ```bash
-cat setup-alice.sh.vfs | \
-  cargo run -p motlie-vfs --example repl_host --features vsock -- \
-  --socket /tmp/motlie-vfs-alice.vsock_5000 \
-  --mount alice-home=/tmp/motlie-vfs-demo/alice-home \
-  --mount alice-workspace=/tmp/motlie-vfs-demo/alice-workspace
+cat setup-multiguest.sh.vfs | \
+  cargo run -p motlie-vfs --example repl_host --features vsock -- --empty
 ```
 
-Bob server:
-
-```bash
-cat setup-bob.sh.vfs | \
-  cargo run -p motlie-vfs --example repl_host --features vsock -- \
-  --socket /tmp/motlie-vfs-bob.vsock_5000 \
-  --mount bob-home=/tmp/motlie-vfs-demo/bob-home \
-  --mount bob-workspace=/tmp/motlie-vfs-demo/bob-workspace
-```
-
-`repl_host` still supports the old `--tag` / `--dir` path for `v1`, but `v1.1` uses repeated `--mount`.
+`repl_host` still supports the old `--tag` / `--dir` path for `v1`, but `v1.1` now provisions guests from REPL commands instead of startup flags.
 
 In this demo:
 
-- Alice server owns `alice-home` and `alice-workspace`
-- Bob server owns `bob-home` and `bob-workspace`
-- each `repl_host` process serves exactly one guest VM
+- the one `repl_host` process owns Alice's and Bob's `FsServer` instances
+- Alice's `FsServer` owns `alice-home` and `alice-workspace`
+- Bob's `FsServer` owns `bob-home` and `bob-workspace`
 - each guest VM opens one connection per mount tag back to its own server socket
+
+The combined setup script uses:
+
+- `provision alice /tmp/motlie-vfs-alice.vsock_5000`
+- `mount alice alice-home=/home/alice,/tmp/motlie-vfs-demo/alice-home ...`
+- `provision bob /tmp/motlie-vfs-bob.vsock_5000`
+- `mount bob bob-home=/home/bob,/tmp/motlie-vfs-demo/bob-home ...`
 
 ## Launch Guests
 
@@ -107,6 +114,13 @@ With TAP networking enabled:
 ./launch-ch.sh --guest bob
 ```
 
+For disposable package-install experiments, use a larger runtime overlay:
+
+```bash
+./launch-ch.sh --guest alice --overlay-size 2G
+./launch-ch.sh --guest bob --overlay-size 2G
+```
+
 Defaults:
 
 | Guest | CID | vsock socket | API socket | Guest IP |
@@ -114,14 +128,19 @@ Defaults:
 | alice | 3 | `/tmp/motlie-vfs-alice.vsock` | `/tmp/motlie-vfs-alice-api.sock` | `192.168.249.2` |
 | bob | 4 | `/tmp/motlie-vfs-bob.vsock` | `/tmp/motlie-vfs-bob-api.sock` | `192.168.250.2` |
 
+Launch uses:
+
+- the shared base kernel and squashfs from `artifacts/base/`
+- a fresh per-guest ext4 runtime overlay created under `/tmp/motlie-vfs-v11-runtime/<guest>/`
+- `2G` as the default runtime overlay size unless `--overlay-size` or `OVERLAY_SIZE` overrides it
+
 ## Manual Run Order
 
-Use four terminals for the clearest flow:
+Use three terminals for the clearest flow:
 
-1. Terminal 1: start Alice `repl_host`
-2. Terminal 2: start Bob `repl_host`
-3. Terminal 3: launch Alice guest
-4. Terminal 4: launch Bob guest
+1. Terminal 1: start the shared `repl_host`
+2. Terminal 2: launch Alice guest
+3. Terminal 3: launch Bob guest
 
 If you want SSH access for both guests, omit `--no-net` on both launch commands and connect to the guest IPs shown above.
 
@@ -151,6 +170,23 @@ Expected shape:
 - `/home/bob` is backed by the `bob-home` tag
 - both guests mount `/workspace`, but each guest gets its own tag and own host backing directory
 - `.env` and `.ssh` contents come from the in-memory overlay injected by the corresponding `setup-*.sh.vfs` file
+- extra files placed under `overlay.d/common/` or `overlay.d/<guest>/` appear through the guest root overlay at boot
+- Alice and Bob do not share the same writable ext4; each guest gets its own runtime overlay file
+
+Disposable root-mutation check:
+
+Inside Alice, with networking enabled:
+
+```bash
+apt update
+apt install -y python3
+python3 --version
+```
+
+Then confirm:
+
+- Bob still does not have `python3` if it was not already in the shared base
+- after shutting down Alice and launching her again, that `python3` install is gone because the runtime overlay was recreated
 
 ## Shut Down
 

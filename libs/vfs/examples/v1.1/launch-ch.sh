@@ -5,12 +5,26 @@
 #   ./launch-ch.sh --guest alice
 #   ./launch-ch.sh --guest bob
 #   ./launch-ch.sh --guest alice --no-net
+#   ./launch-ch.sh --guest alice --overlay-size 2G
 #
-# Guest-specific defaults:
-#   alice -> CID 3, socket /tmp/motlie-vfs-alice.vsock, api /tmp/motlie-vfs-alice-api.sock
-#   bob   -> CID 4, socket /tmp/motlie-vfs-bob.vsock,   api /tmp/motlie-vfs-bob-api.sock
+# Shared built artifacts:
+#   artifacts/base/rootfs.squashfs
+#   artifacts/base/Image|vmlinux.bin
+#
+# Per-guest writable runtime overlays are created on each launch under:
+#   ${RUNTIME_ROOT:-/tmp/motlie-vfs-v11-runtime}/<guest>/overlay.ext4
 
 set -euo pipefail
+
+copy_overlay_tree() {
+    local source_dir="$1"
+    local dest_dir="$2"
+
+    if [ -d "$source_dir" ]; then
+        mkdir -p "$dest_dir"
+        cp -a "$source_dir"/. "$dest_dir"/
+    fi
+}
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -23,10 +37,13 @@ esac
 
 GUEST_NAME="alice"
 USE_NET=true
+OVERLAY_SIZE="${OVERLAY_SIZE:-2G}"
+RUNTIME_ROOT="${RUNTIME_ROOT:-/tmp/motlie-vfs-v11-runtime}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --guest) GUEST_NAME="$2"; shift 2 ;;
+        --overlay-size) OVERLAY_SIZE="$2"; shift 2 ;;
         --no-net) USE_NET=false; shift ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
@@ -34,7 +51,7 @@ done
 
 case "$GUEST_NAME" in
     alice)
-        ARTIFACTS="$SCRIPT_DIR/artifacts/alice"
+        BASE_ARTIFACTS="$SCRIPT_DIR/artifacts/base"
         API_SOCKET="/tmp/motlie-vfs-alice-api.sock"
         VSOCK_SOCKET="/tmp/motlie-vfs-alice.vsock"
         CID=3
@@ -42,9 +59,13 @@ case "$GUEST_NAME" in
         GUEST_IP="192.168.249.2"
         MAC="12:34:56:78:90:aa"
         SSH_USER="alice"
+        GUEST_HOSTNAME="motlie-alice"
+        LOGIN_HOME="/home/alice"
+        MOUNT_CONFIG="$SCRIPT_DIR/mounts.alice.yaml"
+        GUEST_OVERLAY_CONTENT="$SCRIPT_DIR/overlay.d/alice"
         ;;
     bob)
-        ARTIFACTS="$SCRIPT_DIR/artifacts/bob"
+        BASE_ARTIFACTS="$SCRIPT_DIR/artifacts/base"
         API_SOCKET="/tmp/motlie-vfs-bob-api.sock"
         VSOCK_SOCKET="/tmp/motlie-vfs-bob.vsock"
         CID=4
@@ -52,6 +73,10 @@ case "$GUEST_NAME" in
         GUEST_IP="192.168.250.2"
         MAC="12:34:56:78:90:bb"
         SSH_USER="bob"
+        GUEST_HOSTNAME="motlie-bob"
+        LOGIN_HOME="/home/bob"
+        MOUNT_CONFIG="$SCRIPT_DIR/mounts.bob.yaml"
+        GUEST_OVERLAY_CONTENT="$SCRIPT_DIR/overlay.d/bob"
         ;;
     *)
         echo "ERROR: --guest must be one of: alice, bob"
@@ -59,13 +84,45 @@ case "$GUEST_NAME" in
         ;;
 esac
 
-for f in "$KERNEL_IMAGE" rootfs.squashfs overlay.ext4; do
-    if [ ! -f "$ARTIFACTS/$f" ]; then
-        echo "ERROR: $ARTIFACTS/$f not found."
-        echo "Run ./build-guest.sh --guest $GUEST_NAME first."
-        exit 1
-    fi
-done
+if [ ! -f "$BASE_ARTIFACTS/$KERNEL_IMAGE" ]; then
+    echo "ERROR: $BASE_ARTIFACTS/$KERNEL_IMAGE not found."
+    echo "Run ./build-guest.sh first."
+    exit 1
+fi
+if [ ! -f "$BASE_ARTIFACTS/rootfs.squashfs" ]; then
+    echo "ERROR: $BASE_ARTIFACTS/rootfs.squashfs not found."
+    echo "Run ./build-guest.sh first."
+    exit 1
+fi
+if [ ! -f "$MOUNT_CONFIG" ]; then
+    echo "ERROR: mount config not found at $MOUNT_CONFIG"
+    exit 1
+fi
+if ! command -v mkfs.ext4 >/dev/null 2>&1; then
+    echo "ERROR: mkfs.ext4 not found. Install: sudo apt install e2fsprogs"
+    exit 1
+fi
+
+COMMON_OVERLAY_CONTENT="$SCRIPT_DIR/overlay.d/common"
+RUNTIME_DIR="$RUNTIME_ROOT/$GUEST_NAME"
+RUNTIME_OVERLAY="$RUNTIME_DIR/overlay.ext4"
+OVERLAY_SEED="$RUNTIME_DIR/seed"
+
+rm -rf "$OVERLAY_SEED"
+mkdir -p "$OVERLAY_SEED/upper/etc/motlie-vfs"
+mkdir -p "$OVERLAY_SEED/work"
+cp "$MOUNT_CONFIG" "$OVERLAY_SEED/upper/etc/motlie-vfs/mounts.yaml"
+printf '%s\n' "$GUEST_HOSTNAME" > "$OVERLAY_SEED/upper/etc/hostname"
+mkdir -p "$OVERLAY_SEED/upper${LOGIN_HOME}/.ssh"
+mkdir -p "$OVERLAY_SEED/upper/workspace"
+chmod 700 "$OVERLAY_SEED/upper${LOGIN_HOME}/.ssh"
+copy_overlay_tree "$COMMON_OVERLAY_CONTENT" "$OVERLAY_SEED/upper"
+copy_overlay_tree "$GUEST_OVERLAY_CONTENT" "$OVERLAY_SEED/upper"
+mkdir -p "$RUNTIME_DIR"
+rm -f "$RUNTIME_OVERLAY"
+truncate -s "$OVERLAY_SIZE" "$RUNTIME_OVERLAY"
+mkfs.ext4 -F -d "$OVERLAY_SEED" "$RUNTIME_OVERLAY" -q
+rm -rf "$OVERLAY_SEED"
 
 if [ ! -e /dev/vhost-vsock ]; then
     echo "Loading vhost_vsock kernel module..."
@@ -82,12 +139,12 @@ fi
 
 CH_ARGS=(
     --api-socket "$API_SOCKET"
-    --kernel "$ARTIFACTS/$KERNEL_IMAGE"
+    --kernel "$BASE_ARTIFACTS/$KERNEL_IMAGE"
     --cmdline "$CMDLINE"
     --cpus boot=2
     --memory size=512M
-    --disk "path=$ARTIFACTS/rootfs.squashfs,readonly=on"
-           "path=$ARTIFACTS/overlay.ext4"
+    --disk "path=$BASE_ARTIFACTS/rootfs.squashfs,readonly=on"
+           "path=$RUNTIME_OVERLAY"
     --vsock "cid=$CID,socket=$VSOCK_SOCKET"
     --serial tty
     --console off
@@ -100,9 +157,10 @@ fi
 rm -f "$API_SOCKET" "$VSOCK_SOCKET"
 
 echo "=== Launching Cloud Hypervisor ($GUEST_NAME) ==="
-echo "  Kernel:    $ARTIFACTS/$KERNEL_IMAGE"
-echo "  Squashfs:  $ARTIFACTS/rootfs.squashfs (vda, ro)"
-echo "  Overlay:   $ARTIFACTS/overlay.ext4 (vdb, rw)"
+echo "  Kernel:    $BASE_ARTIFACTS/$KERNEL_IMAGE"
+echo "  Squashfs:  $BASE_ARTIFACTS/rootfs.squashfs (vda, ro)"
+echo "  Overlay:   $RUNTIME_OVERLAY (vdb, rw runtime)"
+echo "  Size:      $OVERLAY_SIZE"
 echo "  vsock:     CID $CID, socket $VSOCK_SOCKET"
 if $USE_NET; then
     echo "  Network:   TAP, guest $GUEST_IP, host $HOST_IP"
@@ -110,6 +168,7 @@ if $USE_NET; then
 else
     echo "  Network:   disabled (--no-net)"
 fi
+echo "  Lifetime:  recreated on every launch"
 echo "  API:       $API_SOCKET"
 echo ""
 echo "To stop: curl --unix-socket $API_SOCKET -X PUT http://localhost/api/v1/vm.shutdown"
