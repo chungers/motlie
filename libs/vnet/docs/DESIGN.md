@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-31 | @claude | Complete API design: builder, start/shutdown, multi-guest, error types, repl_host integration. Resolve all open questions (features, shared memory, thread safety). Expand testing matrix |
 | 2026-03-31 | @claude | Expand NFRs: instance model, isolation, socket parametrization, teardown, netns, performance on DGX Spark |
 | 2026-03-31 | @claude | Initial DESIGN: problem statement, motivation, architecture, alternatives analysis |
 
@@ -311,21 +312,161 @@ libs/vnet/
 
 ### API Design
 
+#### Public Types
+
 ```rust
-use motlie_vnet::VnetBackend;
+// libs/vnet/src/lib.rs
 
-// In repl_host or VMM orchestrator:
-let backend = VnetBackend::builder()
-    .socket_path("/tmp/motlie-vhost-net.sock")
-    .guest_ipv4("10.0.2.15")
-    .host_ipv4("10.0.2.2")
+use std::net::Ipv4Addr;
+use std::path::PathBuf;
+
+/// Configuration for a vhost-user-net backend instance.
+/// One instance per guest VM. See NFR-4 for the isolation model.
+pub struct VnetConfig {
+    /// Path to the vhost-user Unix socket.
+    /// CH connects to this via: --net vhost_user=true,socket=<path>
+    /// Must be unique per guest. Builder validates path is writable.
+    pub socket_path: PathBuf,
+
+    /// Guest-visible IP address. Assigned via DHCP.
+    /// Default: 10.0.2.15
+    pub guest_ipv4: Ipv4Addr,
+
+    /// Host-side gateway IP inside libslirp's virtual network.
+    /// Not visible on any host interface — exists only inside libslirp.
+    /// Default: 10.0.2.2
+    pub host_ipv4: Ipv4Addr,
+
+    /// Subnet mask for the virtual network.
+    /// Default: 255.255.255.0
+    pub netmask: Ipv4Addr,
+
+    /// DNS server IP presented to the guest via DHCP.
+    /// Default: parsed from host /etc/resolv.conf at build time.
+    /// libslirp forwards guest DNS queries to this address on the host.
+    pub dns_ipv4: Ipv4Addr,
+
+    /// MAC address for the guest's virtio-net device.
+    /// Default: 52:54:00:12:34:56 (QEMU convention)
+    pub mac: [u8; 6],
+}
+
+/// Handle to a running vhost-user-net backend.
+/// Returned by VnetBackend::start(). Drop to shut down.
+pub struct VnetHandle {
+    // join handle + shutdown signal
+}
+
+/// The backend. Constructed via builder, started with start().
+pub struct VnetBackend {
+    config: VnetConfig,
+}
+```
+
+#### Builder Pattern
+
+```rust
+let config = VnetConfig::builder()
+    .socket_path("/tmp/motlie-vnet-0.sock")  // required — no default
+    .guest_ipv4([10, 0, 2, 15])              // optional, shown with default
+    .dns_ipv4([8, 8, 8, 8])                  // override DNS
+    .mac([0x52, 0x54, 0x00, 0x12, 0x34, 0x56])
     .build()?;
+// build() fails if:
+//   - socket_path is empty
+//   - socket_path parent directory doesn't exist or isn't writable
+//   - guest_ipv4 and host_ipv4 are not in the same subnet
+```
 
-// Spawn on a background thread — blocks until CH disconnects
-let handle = std::thread::spawn(move || backend.serve());
+#### Starting and Stopping
 
-// Launch CH with:
-//   --net vhost_user=true,socket=/tmp/motlie-vhost-net.sock,num_queues=2
+```rust
+// Start the backend. Spawns a background thread.
+// Removes stale socket file if it exists, binds new socket,
+// and waits for CH to connect.
+let handle: VnetHandle = VnetBackend::new(config).start()?;
+// start() fails if:
+//   - socket bind fails (address in use, permission denied)
+//   - libslirp context creation fails
+
+// The backend thread blocks in the vhost-user event loop until:
+//   1. CH disconnects (guest shutdown / CH exit)
+//   2. handle.shutdown() is called
+//   3. handle is dropped
+
+// Explicit shutdown (blocks until thread exits):
+handle.shutdown()?;
+
+// Or just drop — triggers shutdown, but does not wait:
+drop(handle);
+```
+
+#### Multi-Guest Orchestrator Example
+
+```rust
+use motlie_vnet::{VnetBackend, VnetConfig};
+
+fn start_networking(guest_id: usize) -> anyhow::Result<VnetHandle> {
+    let config = VnetConfig::builder()
+        .socket_path(format!("/tmp/motlie-vnet-{guest_id}.sock"))
+        .guest_ipv4([10, 0, 2, 15])  // same IP is fine — each slirp is isolated
+        .build()?;
+    VnetBackend::new(config).start()
+}
+
+// In the orchestrator:
+let mut handles = Vec::new();
+for i in 0..num_guests {
+    handles.push(start_networking(i)?);
+}
+
+// Each guest's CH is launched with:
+//   --memory size=512M,shared=true
+//   --net vhost_user=true,socket=/tmp/motlie-vnet-{i}.sock,num_queues=2
+
+// Shutdown all:
+for h in handles {
+    h.shutdown()?;
+}
+```
+
+#### Integration with repl_host
+
+```rust
+// In examples/repl_host.rs:
+#[cfg(feature = "net-backend")]
+let _net_handle = {
+    let socket = format!("/tmp/motlie-vnet-{}.sock", tag);
+    let config = motlie_vnet::VnetConfig::builder()
+        .socket_path(&socket)
+        .build()?;
+    let handle = motlie_vnet::VnetBackend::new(config).start()?;
+    eprintln!("vhost-user-net: {socket}");
+    eprintln!("  Launch CH with: --memory size=512M,shared=true");
+    eprintln!("  --net vhost_user=true,socket={socket},num_queues=2");
+    handle  // held until repl_host exits
+};
+```
+
+#### Error Handling Contract
+
+```rust
+// All public methods return Result. No panics.
+// Error types:
+pub enum VnetError {
+    /// Socket path validation failed (not writable, parent missing)
+    InvalidConfig(String),
+    /// Socket bind failed (EADDRINUSE, EACCES)
+    SocketBind(std::io::Error),
+    /// libslirp context creation failed
+    SlirpInit(String),
+    /// vhost-user daemon error (protocol negotiation, memory mapping)
+    VhostUser(String),
+    /// Backend thread panicked (should never happen — defensive)
+    ThreadPanic,
+}
+
+impl From<VnetError> for anyhow::Error { ... }
 ```
 
 ### Threading Model
@@ -333,60 +474,122 @@ let handle = std::thread::spawn(move || backend.serve());
 ```
 Thread 1: repl_host main (REPL input + vsock accept)
 Thread 2: vsock connection handler (FsServer per connection)
-Thread 3: vhost-user-net backend ← new
-           ├── VhostUserDaemon event loop (virtqueue kicks)
-           └── libslirp poll loop (socket I/O + timers)
+Thread 3: vhost-user-net backend (per guest)
+           ├── VhostUserDaemon::run() — epoll on:
+           │     - vhost-user socket fd (CH protocol messages)
+           │     - tx virtqueue kick eventfd (guest sent a frame)
+           │     - libslirp timer fds (TCP retransmits, DHCP lease)
+           │     - libslirp socket fds (host TCP/UDP connections)
+           └── On each epoll iteration:
+                 1. Process tx virtqueue → extract frames → slirp.input()
+                 2. slirp.pollfds_poll() → processes host socket events
+                 3. slirp callback send_packet() → queue rx frames
+                 4. Drain rx queue → write to rx virtqueue → signal guest
 ```
 
-The backend thread runs two interleaved loops:
-- **Virtqueue events:** CH kicks a virtqueue → read tx frames → feed to slirp
-- **Slirp events:** slirp socket becomes readable → slirp processes → produces
-  rx frames → write to rx virtqueue → signal CH
+The vhost-user-backend crate provides the epoll loop. We register libslirp's
+fds alongside the virtqueue eventfds so both are driven by one `epoll_wait()`.
 
-Both loops are driven by `epoll` on a shared fd set.
+**Thread ownership:** libslirp is `!Send + !Sync` (C library, single-threaded).
+The `Context` is created and used exclusively on the backend thread. It is
+never shared or moved across threads.
 
 ### CH Integration
 
+CH must be launched with shared memory for vhost-user to work:
+
 ```bash
-# launch-ch.sh updated:
 cloud-hypervisor \
-    --net vhost_user=true,socket=/tmp/motlie-vhost-net.sock,num_queues=2,mac=12:34:56:78:90:ab \
-    ...
+    --memory size=512M,shared=true \
+    --net vhost_user=true,socket=/tmp/motlie-vnet-0.sock,num_queues=2,mac=12:34:56:78:90:ab \
+    --kernel artifacts/Image \
+    --disk "path=artifacts/rootfs.squashfs,readonly=on" \
+           "path=artifacts/overlay.ext4" \
+    --vsock "cid=3,socket=/tmp/motlie-vfs.vsock" \
+    --serial tty --console off
 ```
 
-CH acts as the vhost-user **frontend** (it owns the virtqueues in shared
-memory). Our backend is the **backend** (it processes frames). CH connects
-to the Unix socket, negotiates features, and maps shared memory.
+**`shared=true` is required.** Without it, CH cannot share guest RAM with the
+vhost-user backend via fd passing. CH validates this at startup and rejects
+vhost-user devices without shared memory.
+
+The backend socket must exist **before** CH starts. CH connects to it during
+boot. If the socket doesn't exist, CH fails with a connection error.
+
+**Startup order:**
+1. Start repl_host (creates vsock socket + vhost-user-net socket)
+2. Start CH (connects to both sockets)
+3. Guest boots, gets DHCP IP, has internet
 
 ### Guest Experience
 
 The guest sees a standard `virtio-net` device. On boot:
 
-1. Kernel detects `virtio-net` PCI device
-2. DHCP client requests IP from libslirp's built-in DHCP server
-3. Guest gets: IP `10.0.2.15`, gateway `10.0.2.2`, DNS from host `/etc/resolv.conf`
-4. Outbound TCP/UDP works immediately (e.g., `apt update`, `curl`, `git clone`)
-5. ICMP ping works (libslirp translates to host ICMP sockets)
+1. Kernel detects `virtio-net` PCI device (no driver changes needed)
+2. systemd-networkd or dhclient requests DHCP from libslirp (gateway 10.0.2.2)
+3. Guest gets: IP `10.0.2.15`, netmask `255.255.255.0`, gateway `10.0.2.2`
+4. DNS resolver set to host's nameserver (from `/etc/resolv.conf`)
+5. Outbound TCP/UDP: `curl`, `apt update`, `git clone` work immediately
+6. ICMP: `ping 8.8.8.8` works (libslirp translates to unprivileged ICMP socket)
+7. No inbound connections from host — use vsock for SSH, not TCP
+
+**What doesn't work:**
+- Inbound connections from the host to the guest via TCP/IP (by design —
+  use vsock for management access)
+- Guest-to-guest TCP/IP (each guest has its own isolated slirp network)
+- Raw sockets / protocols other than TCP/UDP/ICMP
+- IPv6 (libslirp supports it, but we disable it in v1 for simplicity)
+
+## Resolved Design Decisions
+
+These were listed as open questions in the initial DESIGN. All are now resolved:
+
+### 1. vhost-user Feature Negotiation
+
+**Resolved:** The backend advertises a minimal feature set:
+
+```rust
+const BACKEND_FEATURES: u64 =
+    1 << VIRTIO_NET_F_GUEST_CSUM    // guest handles checksum
+  | 1 << VIRTIO_NET_F_CSUM          // backend handles checksum
+  | 1 << VIRTIO_NET_F_MAC           // backend provides MAC
+  | 1 << VIRTIO_F_VERSION_1         // virtio 1.0 (required by CH)
+  | 1 << VIRTIO_F_RING_PACKED;      // packed virtqueue (if CH offers)
+```
+
+We do **not** advertise `VIRTIO_NET_F_MRG_RXBUF` (mergeable rx buffers) in v1
+to keep the rx path simple — one frame per descriptor. This limits rx frame
+size to the virtqueue buffer size (typically 1514 bytes for standard Ethernet).
+If jumbo frames are needed later, `MRG_RXBUF` can be added.
+
+CH negotiates features via the vhost-user protocol. The intersection of CH's
+offered features and our advertised features becomes the active set.
+
+### 2. Shared Memory
+
+**Resolved:** CH requires `--memory size=NM,shared=true` for any vhost-user
+device. Without `shared=true`, CH rejects the device at startup. This is
+documented in CH's [memory docs](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/main/docs/memory.md).
+
+The vhost-user-backend crate handles memory mapping via `VhostUserMemoryRegion`
+messages from CH. No hugepages required — regular `shared=true` memory works.
+
+### 3. libslirp Thread Safety
+
+**Resolved:** libslirp's C API is single-threaded. The `libslirp-rs` bindings
+do **not** enforce `!Send` on the `Context` type, so we must enforce it ourselves:
+the `Context` is created on the backend thread and never moved. The `VnetBackend`
+struct is `Send` (can be moved to the thread), but the `Context` is created
+inside `start()` after the thread is spawned.
 
 ## Components and Testing
 
 | Component | Test approach |
 |-----------|--------------|
-| `backend.rs` | Unit test: mock virtqueue, verify VhostUserBackend trait methods |
-| `slirp.rs` | Integration test: feed raw Ethernet frames, verify socket creation |
-| `virtq.rs` | Unit test: descriptor chain parsing, frame extraction |
-| End-to-end | CH guest boots, `curl` reaches the internet |
-
-## Open Questions
-
-1. **vhost-user feature negotiation:** Which virtio-net features does CH
-   require vs. which does libslirp support? Need to verify the feature
-   intersection (e.g., VIRTIO_NET_F_MRG_RXBUF, VIRTIO_NET_F_CSUM).
-
-2. **Shared memory:** vhost-user requires the frontend to share guest memory
-   with the backend via fd passing. CH uses `--memory size=512M` without
-   hugepages. Need to verify this works with the vhost-user-backend crate
-   or if `shared=true` is required.
-
-3. **libslirp thread safety:** libslirp is single-threaded. Need to confirm
-   the Rust bindings enforce this or if we need to pin to one thread.
+| `VnetConfig` builder | Unit test: valid configs succeed, invalid fail with specific errors |
+| `SlirpHandler` | Unit test: verify `send_packet()` queues frames, `clock_get_ns()` advances |
+| `slirp.rs` event loop | Integration test: create context, feed DHCP discover frame, verify offer response |
+| `backend.rs` tx path | Unit test: mock virtqueue descriptor with Ethernet frame, verify `slirp.input()` called |
+| `backend.rs` rx path | Unit test: slirp produces frame, verify it appears in rx virtqueue |
+| `VnetBackend::start/shutdown` | Integration test: start backend, verify socket exists, shutdown, verify socket removed |
+| End-to-end | CH guest boots with vhost-user-net, `curl http://example.com` succeeds, `apt update` works |
