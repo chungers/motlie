@@ -81,11 +81,17 @@ impl GuestMountRunner {
     /// Returns after all mount threads are started. Each thread blocks in
     /// `fuser::mount2()` until the filesystem is unmounted. The caller owns
     /// any subsequent control-loop lifecycle.
+    /// Mount all specified filesystems over FUSE.
+    ///
+    /// `connector` is called once per spec with the tag and a reference to the
+    /// thread's Tokio runtime handle. The connector must use this runtime for
+    /// any async work (e.g. vsock connect) so that IO resources are registered
+    /// with the same reactor that will later drive the FUSE request loop.
     #[cfg(feature = "client")]
     pub fn mount_all<S, F>(self, connector: F) -> Result<MountHandles>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
-        F: Fn(&str) -> Result<crate::vsock::client::VsockClientTransport<S>> + Send + Sync + 'static,
+        F: Fn(&str, &tokio::runtime::Runtime) -> Result<crate::vsock::client::VsockClientTransport<S>> + Send + Sync + 'static,
     {
         let connector = Arc::new(connector);
         let mut handles = Vec::new();
@@ -95,23 +101,22 @@ impl GuestMountRunner {
             let h = thread::Builder::new()
                 .name(format!("fuse-{}", spec.tag))
                 .spawn(move || -> Result<()> {
-                    // 1. Connect transport
-                    let transport = connector(&spec.tag)?;
-                    let transport = Arc::new(transport);
-
-                    // 2. Create a Tokio runtime for the async transport.
-                    //    fuser callbacks are synchronous (called from fuser's own thread),
-                    //    so we need block_on() to bridge to the async transport.
+                    // 1. Create a single Tokio runtime for this mount thread.
+                    //    Both the connector (vsock connect) and the FUSE request
+                    //    loop must use the same runtime so IO resources (AsyncFd)
+                    //    are registered with the correct reactor.
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()?;
+
+                    // 2. Connect transport using this thread's runtime
+                    let transport = connector(&spec.tag, &rt)?;
+                    let transport = Arc::new(transport);
 
                     // 3. Build the blocking request function for FuseClient
                     let transport_for_fuse = Arc::clone(&transport);
                     let request_fn = move |op: crate::core::op::FsOp| -> crate::core::op::FsResult {
                         let transport = Arc::clone(&transport_for_fuse);
-                        // Block on the async request. If the transport fails,
-                        // return EIO rather than panicking.
                         match rt.block_on(transport.request(&op)) {
                             Ok(result) => result,
                             Err(_) => crate::core::op::FsResult::Error { errno: libc::EIO },

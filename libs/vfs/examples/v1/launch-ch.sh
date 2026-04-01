@@ -3,15 +3,15 @@
 #
 # Prerequisites:
 #   - Cloud Hypervisor installed (https://github.com/cloud-hypervisor/cloud-hypervisor)
-#   - artifacts/vmlinux.bin (CH-compatible kernel with squashfs + overlayfs + vsock)
+#   - artifacts/vmlinux.bin or Image (CH-compatible kernel)
 #   - artifacts/rootfs.squashfs (built by build-guest.sh)
 #   - artifacts/overlay.ext4 (built by build-guest.sh)
 #   - /dev/vhost-vsock accessible (sudo modprobe vhost_vsock)
-#   - CAP_NET_ADMIN for TAP networking (or run with sudo)
+#   - CAP_NET_ADMIN for TAP networking (sudo setcap cap_net_admin+ep $(which cloud-hypervisor))
 #
 # Usage:
-#   ./launch-ch.sh
-#   ./launch-ch.sh --no-net    # skip TAP networking, vsock only
+#   ./launch-ch.sh              # TAP networking (needs CAP_NET_ADMIN)
+#   ./launch-ch.sh --no-net     # vsock only, no networking
 #
 # Guest will boot with:
 #   /dev/vda = rootfs.squashfs (read-only)
@@ -29,6 +29,24 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ARTIFACTS="$SCRIPT_DIR/artifacts"
 
 # ---------------------------------------------------------------------------
+# Detect host architecture
+# ---------------------------------------------------------------------------
+HOST_ARCH="$(uname -m)"
+case "$HOST_ARCH" in
+    x86_64)
+        KERNEL_IMAGE="vmlinux.bin"
+        ;;
+    aarch64)
+        # CH on aarch64 expects an uncompressed Image or PE binary
+        KERNEL_IMAGE="Image"
+        ;;
+    *)
+        echo "ERROR: unsupported host architecture: $HOST_ARCH"
+        exit 1
+        ;;
+esac
+
+# ---------------------------------------------------------------------------
 # Parse arguments
 # ---------------------------------------------------------------------------
 USE_NET=true
@@ -42,10 +60,10 @@ done
 # ---------------------------------------------------------------------------
 # Validate artifacts exist
 # ---------------------------------------------------------------------------
-for f in vmlinux.bin rootfs.squashfs overlay.ext4; do
+for f in "$KERNEL_IMAGE" rootfs.squashfs overlay.ext4; do
     if [ ! -f "$ARTIFACTS/$f" ]; then
         echo "ERROR: $ARTIFACTS/$f not found."
-        echo "Run ./build-guest.sh first, and place vmlinux.bin in artifacts/."
+        echo "Run ./build-guest.sh first, and place the kernel in artifacts/."
         exit 1
     fi
 done
@@ -65,16 +83,9 @@ fi
 # ---------------------------------------------------------------------------
 # Build the kernel command line
 # ---------------------------------------------------------------------------
-# root=/dev/vda  — the squashfs is the first --disk entry
-# rootfstype=squashfs ro — mount as read-only squashfs
-# init=/sbin/overlay-init — our custom init that stacks overlayfs
-# overlay_root=vdb — tells overlay-init which device is the ext4 overlay
-# console=hvc0 — serial console for boot messages
 CMDLINE="console=hvc0 root=/dev/vda rootfstype=squashfs ro init=/sbin/overlay-init overlay_root=vdb"
 
 if $USE_NET; then
-    # Static IP for the guest via kernel ip= parameter
-    # Format: ip=<client-ip>::<gateway>:<netmask>::<device>:off
     CMDLINE="$CMDLINE ip=192.168.249.2::192.168.249.1:255.255.255.0::eth0:off"
 fi
 
@@ -83,26 +94,18 @@ fi
 # ---------------------------------------------------------------------------
 CH_ARGS=(
     --api-socket /tmp/motlie-vfs-api.sock
-    --kernel "$ARTIFACTS/vmlinux.bin"
+    --kernel "$ARTIFACTS/$KERNEL_IMAGE"
     --cmdline "$CMDLINE"
     --cpus boot=2
     --memory size=512M
-    # Disk 1: squashfs root (vda, read-only)
-    # Disk 2: ext4 overlay (vdb, read-write)
     --disk "path=$ARTIFACTS/rootfs.squashfs,readonly=on"
            "path=$ARTIFACTS/overlay.ext4"
-    # vsock: CID 3, socket at /tmp/motlie-vfs.vsock
-    # Host listens on /tmp/motlie-vfs.vsock_<port> for guest-initiated connections
-    # Host connects via /tmp/motlie-vfs.vsock with "CONNECT <port>\n" prefix
     --vsock "cid=3,socket=/tmp/motlie-vfs.vsock"
-    # Serial console on the terminal
     --serial tty
     --console off
 )
 
 if $USE_NET; then
-    # TAP networking: CH auto-creates a vmtapX device
-    # Guest is 192.168.249.2, host is 192.168.249.1
     CH_ARGS+=(--net "tap=,mac=12:34:56:78:90:ab,ip=192.168.249.1,mask=255.255.255.0")
 fi
 
@@ -115,7 +118,8 @@ rm -f /tmp/motlie-vfs-api.sock /tmp/motlie-vfs.vsock
 # Launch
 # ---------------------------------------------------------------------------
 echo "=== Launching Cloud Hypervisor ==="
-echo "  Kernel:    $ARTIFACTS/vmlinux.bin"
+echo "  Arch:      $HOST_ARCH"
+echo "  Kernel:    $ARTIFACTS/$KERNEL_IMAGE"
 echo "  Squashfs:  $ARTIFACTS/rootfs.squashfs (vda, ro)"
 echo "  Overlay:   $ARTIFACTS/overlay.ext4 (vdb, rw)"
 echo "  vsock:     CID 3, socket /tmp/motlie-vfs.vsock"

@@ -12,7 +12,7 @@ use anyhow::{bail, Result};
 use super::op::{FileAttr, FileType};
 
 /// What kind of entry backs this inode.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InodeKind {
     /// Backed by a host filesystem path (base layer in v1).
     Disk,

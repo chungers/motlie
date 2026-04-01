@@ -373,6 +373,77 @@ fn dispatch_command(server: &FsServer, line: &str) -> ControlFlow {
             println!("({} entries)", entries.len());
         }
 
+        // --- Tree view ---
+        "tree" if parts.len() >= 2 => {
+            let tag = parts[1];
+            let layers = overlay.layers();
+            if layers.is_empty() {
+                println!("(no layers)");
+            } else {
+                // Collect effective entries to show which layer wins
+                let effective = overlay.list_effective(tag);
+                let mut winner: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+                for e in &effective {
+                    winner.insert(e.path.clone(), e.layer.clone());
+                }
+
+                println!("tag: {tag}");
+                println!();
+                for l in &layers {
+                    let mut entries = overlay.list_layer(&l.name, tag);
+                    entries.sort_by(|a, b| a.path.cmp(&b.path));
+                    if entries.is_empty() { continue; }
+                    println!("  layer: {} (priority={})", l.name, l.priority);
+                    for entry in &entries {
+                        let eff = if winner.get(&entry.path).map(|w| w == &l.name).unwrap_or(false) {
+                            "*"
+                        } else {
+                            " "  // shadowed by higher-priority layer
+                        };
+                        println!("   {eff} {:?} {} uid={} gid={} mode={:o}",
+                            entry.kind, entry.path, entry.uid, entry.gid, entry.mode);
+                    }
+                    println!();
+                }
+                println!("  (* = effective winner)");
+            }
+        }
+        "tree" => {
+            let layers = overlay.layers();
+            let tags = overlay.tags();
+            if layers.is_empty() {
+                println!("(no layers)");
+            } else if tags.is_empty() {
+                println!("(no entries)");
+            } else {
+                for tag in &tags {
+                    println!("tag: {tag}");
+                    let effective = overlay.list_effective(tag);
+                    let mut winner: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+                    for e in &effective {
+                        winner.insert(e.path.clone(), e.layer.clone());
+                    }
+                    for l in &layers {
+                        let mut entries = overlay.list_layer(&l.name, tag);
+                        entries.sort_by(|a, b| a.path.cmp(&b.path));
+                        if entries.is_empty() { continue; }
+                        println!("  layer: {} (priority={})", l.name, l.priority);
+                        for entry in &entries {
+                            let eff = if winner.get(&entry.path).map(|w| w == &l.name).unwrap_or(false) {
+                                "*"
+                            } else {
+                                " "
+                            };
+                            println!("   {eff} {:?} {} uid={} gid={} mode={:o}",
+                                entry.kind, entry.path, entry.uid, entry.gid, entry.mode);
+                        }
+                    }
+                    println!();
+                }
+                println!("(* = effective winner)");
+            }
+        }
+
         // --- Help ---
         "help" => {
             println!("Layer management:");
@@ -394,6 +465,8 @@ fn dispatch_command(server: &FsServer, line: &str) -> ControlFlow {
             println!("  get <layer> <tag> <path>                        — read content from a layer");
             println!("  ls <tag>                                        — list effective overlay entries");
             println!("  lslayer <layer> <tag>                           — list entries in a layer");
+            println!("  tree [tag]                                      — show layered tree (* = winner)");
+            println!("                                                    no tag = show all tags");
             println!("");
             println!("Other:");
             println!("  help                                            — show this help");
