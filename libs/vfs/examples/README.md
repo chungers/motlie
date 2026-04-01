@@ -36,6 +36,7 @@ cat setup-alice.sh.vfs | cargo run -p motlie-vfs --example repl_host --features 
 ### Options
 
 - `--socket <path>` — vsock socket path (default: `/tmp/motlie-vfs.vsock_5000`)
+- `--mount <tag=dir>` — add a mount; repeat for multi-tag servers
 - `--tag <name>` — mount tag (default: `alice-home`)
 - `--dir <path>` — host backing directory (default: temp dir with sample data)
 
@@ -71,4 +72,5 @@ Script files are plain text, one command per line. Lines starting with
 for an example.
 
 See `v1/README.md` for the full end-to-end flow and `v1/CH-HARNESS.md`
-for the Cloud Hypervisor setup.
+for the single-guest Cloud Hypervisor setup. See `v1.1/README.md` for
+the multi-guest, multi-mount variant.

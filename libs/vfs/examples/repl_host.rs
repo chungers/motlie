@@ -33,6 +33,12 @@
 //! # Interactive
 //! cargo run --example repl_host --features vsock -- --tag alice-home --dir ~/alice
 //!
+//! # Multi-mount (repeat --mount)
+//! cargo run --example repl_host --features vsock -- \
+//!     --socket /tmp/motlie-vfs.vsock_5000 \
+//!     --mount alice-home=~/alice \
+//!     --mount workspace=~/workspace
+//!
 //! # Script then interactive
 //! cat setup-alice.sh.vfs - | cargo run --example repl_host --features vsock -- --tag alice-home
 //!
@@ -46,6 +52,7 @@
 //! # Options
 //!
 //!   --socket <path>   vsock socket path (default: /tmp/motlie-vfs.vsock_5000)
+//!   --mount <tag=dir> add a mount; repeat for multi-tag servers
 //!   --tag <name>      mount tag (default: alice-home)
 //!   --dir <path>      host backing directory (default: temp dir with sample data)
 
@@ -67,45 +74,71 @@ async fn main() -> Result<()> {
     let mut socket_path = "/tmp/motlie-vfs.vsock_5000".to_string();
     let mut tag = "alice-home".to_string();
     let mut host_dir: Option<PathBuf> = None;
+    let mut mounts: Vec<(String, PathBuf)> = Vec::new();
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
             "--socket" if i + 1 < args.len() => { socket_path = args[i + 1].clone(); i += 2; }
+            "--mount" if i + 1 < args.len() => {
+                mounts.push(parse_mount_spec(&args[i + 1])?);
+                i += 2;
+            }
             "--tag" if i + 1 < args.len() => { tag = args[i + 1].clone(); i += 2; }
             "--dir" if i + 1 < args.len() => { host_dir = Some(PathBuf::from(&args[i + 1])); i += 2; }
             other => { host_dir = Some(PathBuf::from(other)); i += 1; }
         }
     }
 
-    let _tempdir;
-    let host_path = match host_dir {
-        Some(p) => { std::fs::create_dir_all(&p)?; p }
-        None => {
-            _tempdir = tempfile::tempdir()?;
-            let p = _tempdir.path().to_path_buf();
-            std::fs::create_dir_all(p.join("projects"))?;
-            std::fs::write(p.join("projects/README.md"), b"hello from host disk\n")?;
-            std::fs::write(p.join(".bashrc"), b"# bashrc\n")?;
-            eprintln!("Created temp host dir: {}", p.display());
-            p
-        }
+    if !mounts.is_empty() && host_dir.is_some() {
+        anyhow::bail!("cannot mix --mount with legacy --dir/positional path");
+    }
+    if !mounts.is_empty() && tag != "alice-home" {
+        anyhow::bail!("cannot mix --mount with legacy --tag");
+    }
+
+    let _tempdir = if mounts.is_empty() && host_dir.is_none() {
+        Some(tempfile::tempdir()?)
+    } else {
+        None
     };
+    if mounts.is_empty() {
+        let host_path = match host_dir {
+            Some(p) => {
+                std::fs::create_dir_all(&p)?;
+                p
+            }
+            None => {
+                let p = _tempdir
+                    .as_ref()
+                    .map(|d| d.path().to_path_buf())
+                    .ok_or_else(|| anyhow::anyhow!("internal tempdir setup failed"))?;
+                std::fs::create_dir_all(p.join("projects"))?;
+                std::fs::write(p.join("projects/README.md"), b"hello from host disk\n")?;
+                std::fs::write(p.join(".bashrc"), b"# bashrc\n")?;
+                eprintln!("Created temp host dir: {}", p.display());
+                p
+            }
+        };
+        mounts.push((tag.clone(), host_path));
+    }
 
     eprintln!("=== motlie-vfs repl_host ===");
-    eprintln!("Host dir: {}", host_path.display());
-    eprintln!("Tag: {tag}");
     eprintln!("Socket: {socket_path}");
+    eprintln!("Mounts:");
+    for (mount_tag, mount_path) in &mounts {
+        eprintln!("  {mount_tag} -> {}", mount_path.display());
+    }
     eprintln!("");
 
-    let server = Arc::new(
-        FsServer::builder()
-            .mount(&tag, host_path, false)
-            .overlay(true)
-            .events(256)
-            .build()?,
-    );
+    let mut builder = FsServer::builder()
+        .overlay(true)
+        .events(256);
+    for (mount_tag, mount_path) in &mounts {
+        builder = builder.mount(mount_tag, mount_path.clone(), false);
+    }
+    let server = Arc::new(builder.build()?);
 
     let _ = std::fs::remove_file(&socket_path);
     let listener = UnixListener::bind(&socket_path)?;
@@ -115,21 +148,31 @@ async fn main() -> Result<()> {
 
     // Spawn vsock connection acceptor (guest filesystem traffic only)
     let server_for_accept = Arc::clone(&server);
-    let tag_for_accept = tag.clone();
     tokio::spawn(async move {
         loop {
             match listener.accept().await {
-                Ok((stream, _addr)) => {
+                Ok((mut stream, _addr)) => {
+                    let tag = match motlie_vfs::vsock::read_tag_handshake(&mut stream).await {
+                        Ok(tag) => tag,
+                        Err(e) => {
+                            eprintln!("Connection handshake error: {e}");
+                            continue;
+                        }
+                    };
+                    if !server_for_accept.has_mount(&tag) {
+                        eprintln!("Connection requested unknown tag: {tag}");
+                        continue;
+                    }
                     let handler = VsockConnectionHandler::new(
                         Arc::clone(&server_for_accept),
-                        &tag_for_accept,
+                        &tag,
                     );
                     tokio::spawn(async move {
                         if let Err(e) = handler.serve(stream).await {
                             eprintln!("Connection handler error: {e}");
                         }
                     });
-                    eprintln!("[accepted guest connection]");
+                    eprintln!("[accepted guest connection for tag {tag}]");
                 }
                 Err(e) => eprintln!("Accept error: {e}"),
             }
@@ -245,6 +288,18 @@ fn wait_for_signal() {
     while running.load(Ordering::SeqCst) {
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
+}
+
+fn parse_mount_spec(spec: &str) -> Result<(String, PathBuf)> {
+    let Some((tag, dir)) = spec.split_once('=') else {
+        anyhow::bail!("invalid --mount '{spec}'; expected <tag>=<dir>");
+    };
+    if tag.is_empty() || dir.is_empty() {
+        anyhow::bail!("invalid --mount '{spec}'; tag and dir must be non-empty");
+    }
+    let path = PathBuf::from(dir);
+    std::fs::create_dir_all(&path)?;
+    Ok((tag.to_string(), path))
 }
 
 // ---------------------------------------------------------------------------

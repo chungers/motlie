@@ -137,6 +137,10 @@ impl FsServer {
         Ok(())
     }
 
+    pub fn has_mount(&self, tag: &str) -> bool {
+        self.mounts.read().map(|m| m.contains_key(tag)).unwrap_or(false)
+    }
+
     pub fn subscribe_events(&self) -> Option<broadcast::Receiver<FsEvent>> {
         self.event_tx.as_ref().map(|tx| tx.subscribe())
     }
