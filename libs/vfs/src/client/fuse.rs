@@ -22,11 +22,12 @@ use fuser::{
 use crate::core::op::*;
 
 /// The v1 mount options for correctness-first mode.
+/// Note: direct_io is a per-open flag (set via FOPEN_DIRECT_IO in the open
+/// response), not a mount option. It is not included here.
 pub fn v1_mount_options(read_only: bool) -> Vec<MountOption> {
     let mut opts = vec![
         MountOption::AutoUnmount,
-        MountOption::AllowRoot,
-        MountOption::CUSTOM("direct_io".into()),
+        MountOption::AllowOther,
     ];
     if read_only {
         opts.push(MountOption::RO);
@@ -117,7 +118,11 @@ where
             FsResult::DirEntries { entries } => {
                 for entry in entries {
                     let kind = to_fuser_filetype(entry.kind);
-                    if reply.add(entry.inode, entry.offset, kind, &entry.name) {
+                    // Use inode from server, or a placeholder (u64::MAX) if 0.
+                    // FUSE drops entries with inode 0. The kernel will do a
+                    // lookup to resolve the real inode regardless.
+                    let ino_hint = if entry.inode == 0 { u64::MAX } else { entry.inode };
+                    if reply.add(ino_hint, entry.offset, kind, &entry.name) {
                         break; // buffer full
                     }
                 }
@@ -153,10 +158,14 @@ where
         }
     }
 
-    fn create(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, mode: u32, _umask: u32, flags: i32, reply: ReplyCreate) {
+    fn create(&mut self, req: &Request<'_>, parent: u64, name: &OsStr, mode: u32, _umask: u32, flags: i32, reply: ReplyCreate) {
         let name = name.to_string_lossy().into_owned();
-        match self.request(FsOp::Create { parent, name, mode, flags: flags as u32 }) {
+        match self.request(FsOp::Create { parent, name, mode, flags: flags as u32, uid: req.uid(), gid: req.gid() }) {
+            FsResult::Created { inode, generation, attrs, fh, .. } => {
+                reply.created(&ZERO_TTL, &to_fuser_attr(&attrs, inode), generation, fh, 0);
+            }
             FsResult::Entry { inode, generation, attrs, .. } => {
+                // Backwards compat: server didn't return Created
                 reply.created(&ZERO_TTL, &to_fuser_attr(&attrs, inode), generation, 0, 0);
             }
             FsResult::Error { errno } => reply.error(errno),

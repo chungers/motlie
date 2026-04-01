@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-31 | @claude | Update wire protocol: `FsOp::Create` now carries `uid`/`gid`, add `FsResult::Created` with `fh` for atomic create+open, add `FsResult::Opened` (PR #123 review) |
 | 2026-03-28 | @codex-pm | Resolve PR #117 round-3 follow-ups: complete `FsOpKind` coverage for event emission and align the docs with the final phase numbering and overlay-behavior test expectations |
 | 2026-03-28 | @codex-pm | Resolve implementer questions from PR #117: rename event op type, specify v1 symlink/file-handle/runner/whiteout/write-buffer behavior, and make inspection views metadata-only |
 | 2026-03-28 | @codex-pm | Address PR #117 review feedback: remove stale v1 CLI references, clarify `apply_batch` tag scoping, tighten synthetic-parent and rename semantics, and fix wording around immutable lower layers |
@@ -950,7 +951,7 @@ pub enum FsOp {
     Open { inode: u64, flags: u32 },
     Read { inode: u64, fh: u64, offset: i64, size: u32 },
     Write { inode: u64, fh: u64, offset: i64, data: Bytes },
-    Create { parent: u64, name: String, mode: u32, flags: u32 },
+    Create { parent: u64, name: String, mode: u32, flags: u32, uid: u32, gid: u32 },
     Mkdir { parent: u64, name: String, mode: u32 },
     Unlink { parent: u64, name: String },
     Rmdir { parent: u64, name: String },
@@ -966,12 +967,14 @@ pub enum FsOp {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum FsResult {
     Entry { inode: u64, generation: u64, attrs: FileAttr, ttl_secs: u32 },
+    Created { inode: u64, generation: u64, attrs: FileAttr, fh: u64, ttl_secs: u32 },
     Attr { attrs: FileAttr, ttl_secs: u32 },
     Data { data: Bytes },
     Written { size: u32 },
     DirEntries { entries: Vec<DirEntry> },
     Statfs { stats: FsStats },
     Symlink { target: String },
+    Opened { fh: u64 },
     Ok,
     Error { errno: i32 },
 }
