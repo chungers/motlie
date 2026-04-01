@@ -7,7 +7,11 @@ Cloud Hypervisor guests. **No sudo required** — the script uses
 ## Prerequisites
 
 ```bash
+# Image builder
 sudo apt install mmdebstrap squashfs-tools-ng e2fsprogs uidmap debian-archive-keyring
+
+# Guest binary build (needed if --guest-binary is not passed)
+sudo apt install libfuse3-dev pkg-config
 ```
 
 On Ubuntu 24.04, unprivileged user namespaces must be allowed:
