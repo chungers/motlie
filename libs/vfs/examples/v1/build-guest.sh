@@ -8,7 +8,7 @@
 #
 # Prerequisites (Linux host):
 #   - mmdebstrap (rootless image builder)
-#   - squashfs-tools (mksquashfs — used by mmdebstrap for squashfs output)
+#   - squashfs-tools-ng (tar2sqfs — used by mmdebstrap for squashfs output)
 #   - e2fsprogs (mkfs.ext4)
 #   - uidmap (newuidmap/newgidmap for user namespace mapping)
 #   - For --kernel build: git, make, gcc, flex, bison, libelf-dev, libssl-dev

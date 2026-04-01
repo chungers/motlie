@@ -7,7 +7,7 @@ Cloud Hypervisor guests. **No sudo required** — the script uses
 ## Prerequisites
 
 ```bash
-sudo apt install mmdebstrap squashfs-tools e2fsprogs uidmap
+sudo apt install mmdebstrap squashfs-tools-ng e2fsprogs uidmap
 ```
 
 On Ubuntu 24.04, unprivileged user namespaces must be allowed:
@@ -133,6 +133,7 @@ hook receives the rootfs path as `$1`:
 | Problem | Fix |
 |---------|-----|
 | `mmdebstrap: command not found` | `sudo apt install mmdebstrap` |
+| `need tar2sqfs binary` | `sudo apt install squashfs-tools-ng` |
 | `newuidmap: command not found` | `sudo apt install uidmap` |
 | `unshare: Operation not permitted` | `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` |
 | `No matching subuids/subgids` | Check `/etc/subuid` and `/etc/subgid` have entries for your user |
