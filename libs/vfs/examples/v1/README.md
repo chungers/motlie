@@ -9,7 +9,8 @@ overlay injection → vsock transport → Cloud Hypervisor guest with FUSE mount
 |------|---------|
 | `setup-alice.sh.vfs` | REPL script: creates credentials layer, injects SSH keys + API tokens for alice |
 | `mounts.yaml` | Guest config: tells `motlie-vfs-guest` which tags to mount and where |
-| `build-guest.sh` | Builds Debian squashfs root + ext4 overlay guest images + kernel |
+| `build-guest.sh` | Builds Debian squashfs root + ext4 overlay guest images + kernel (rootless) |
+| `IMAGE.md` | Image builder docs: prerequisites, how it works, troubleshooting |
 | `launch-ch.sh` | Launches Cloud Hypervisor with vsock + TAP networking |
 | `overlay-init` | Boot-time init script: squashfs + ext4 → overlayfs → pivot_root |
 | `CH-HARNESS.md` | Detailed Cloud Hypervisor setup: prerequisites, troubleshooting |
@@ -21,11 +22,14 @@ overlay injection → vsock transport → Cloud Hypervisor guest with FUSE mount
 
 ```bash
 # Builds guest binary, downloads CH kernel, creates squashfs + ext4 images
-sudo ./build-guest.sh
+# No sudo required — uses mmdebstrap for rootless image building.
+./build-guest.sh
 
 # Or with a pre-built guest binary and existing kernel
-sudo ./build-guest.sh --guest-binary /path/to/motlie-vfs-guest --kernel skip
+./build-guest.sh --guest-binary /path/to/motlie-vfs-guest --kernel skip
 ```
+
+See [IMAGE.md](IMAGE.md) for prerequisites and how it works.
 
 ### 2. Start the host server
 

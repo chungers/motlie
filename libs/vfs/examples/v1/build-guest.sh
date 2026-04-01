@@ -7,11 +7,14 @@
 #   artifacts/Image|vmlinux.bin — CH-compatible kernel
 #
 # Prerequisites (Linux host):
-#   - squashfs-tools (mksquashfs)
+#   - mmdebstrap (rootless image builder)
+#   - squashfs-tools-ng (tar2sqfs — used by mmdebstrap for squashfs output)
 #   - e2fsprogs (mkfs.ext4)
-#   - debootstrap
-#   - sudo (for chroot-based rootfs assembly)
+#   - uidmap (newuidmap/newgidmap for user namespace mapping)
+#   - debian-archive-keyring (GPG keys for Debian repos)
 #   - For --kernel build: git, make, gcc, flex, bison, libelf-dev, libssl-dev
+#
+# No sudo required. Uses mmdebstrap --mode=unshare for rootless operation.
 #
 # Usage:
 #   ./build-guest.sh [--guest-binary /path/to/motlie-vfs-guest] [--kernel download|build|skip]
@@ -80,18 +83,42 @@ CH_KERNEL_RELEASE="ch-release-v6.16.9-20251112"
 CH_KERNEL_URL="https://github.com/cloud-hypervisor/linux/releases/download/${CH_KERNEL_RELEASE}/${KERNEL_RELEASE_ASSET}"
 
 # ---------------------------------------------------------------------------
+# Check prerequisites
+# ---------------------------------------------------------------------------
+for cmd in mmdebstrap mkfs.ext4 tar2sqfs; do
+    if ! command -v "$cmd" &>/dev/null; then
+        echo "ERROR: $cmd not found."
+        echo "Install: sudo apt install mmdebstrap squashfs-tools-ng e2fsprogs uidmap debian-archive-keyring"
+        exit 1
+    fi
+done
+
+if [ ! -f /usr/share/keyrings/debian-archive-keyring.gpg ]; then
+    echo "ERROR: Debian archive keyring not found."
+    echo "Install: sudo apt install debian-archive-keyring"
+    exit 1
+fi
+
+# Check user namespace support
+APPARMOR_USERNS=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)
+if [ "$APPARMOR_USERNS" = "1" ]; then
+    echo "ERROR: AppArmor restricts unprivileged user namespaces."
+    echo "Fix:   sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 DEBIAN_SUITE="bookworm"
 DEBIAN_MIRROR="http://deb.debian.org/debian"
-ROOTFS_DIR="/tmp/motlie-vfs-rootfs-$$"
 OVERLAY_SEED="/tmp/motlie-vfs-overlay-seed-$$"
 OVERLAY_SIZE="64M"
 
-echo "=== motlie-vfs guest image builder ==="
+echo "=== motlie-vfs guest image builder (rootless) ==="
 echo "Host arch:        $HOST_ARCH"
 echo "Rust target:      $RUST_TARGET"
-echo "Debootstrap arch: $DEBOOTSTRAP_ARCH"
+echo "Debian arch:      $DEBOOTSTRAP_ARCH"
 echo "Debian suite:     $DEBIAN_SUITE"
 echo "Kernel mode:      $KERNEL_MODE"
 echo "Artifacts dir:    $ARTIFACTS"
@@ -106,8 +133,6 @@ if [ -z "$GUEST_BINARY" ]; then
     echo ""
     echo "--- Step 1: Building motlie-vfs-guest ($RUST_TARGET) ---"
 
-    # Native build with GNU target (dynamically linked).
-    # The guest image will include the required shared libraries.
     (cd "$WORKSPACE_ROOT" && cargo build --release \
         --features vsock,client \
         -p motlie-vfs --bin motlie-vfs-guest)
@@ -174,47 +199,38 @@ KEOF
 esac
 
 # ---------------------------------------------------------------------------
-# Step 3: Build the Debian squashfs root image
+# Step 3: Build the Debian squashfs root image (rootless via mmdebstrap)
 # ---------------------------------------------------------------------------
 echo ""
-echo "--- Step 3: Building Debian ($DEBIAN_SUITE) squashfs root image ---"
+echo "--- Step 3: Building Debian ($DEBIAN_SUITE) squashfs root image (rootless) ---"
 
-echo "Bootstrapping Debian rootfs into $ROOTFS_DIR..."
-sudo rm -rf "$ROOTFS_DIR"
-mkdir -p "$ROOTFS_DIR"
+# Resolve absolute path for guest binary (mmdebstrap hooks need it)
+GUEST_BINARY_ABS="$(realpath "$GUEST_BINARY")"
+OVERLAY_INIT_ABS="$(realpath "$SCRIPT_DIR/overlay-init")"
 
-sudo debootstrap \
+mmdebstrap \
+    --mode=unshare \
     --arch="$DEBOOTSTRAP_ARCH" \
     --variant=minbase \
+    --format=squashfs \
+    --keyring=/usr/share/keyrings/debian-archive-keyring.gpg \
     --include=openssh-server,bash,coreutils,tmux,fuse3,libfuse3-3,systemd,systemd-sysv,dbus,iproute2 \
-    "$DEBIAN_SUITE" "$ROOTFS_DIR" "$DEBIAN_MIRROR"
-
-# Configure the rootfs inside chroot
-echo "Configuring rootfs..."
-sudo chroot "$ROOTFS_DIR" /bin/bash -c '
-    # Enable sshd
-    systemctl enable ssh
-
-    # Create test user alice (uid=1000, gid=1000)
-    groupadd -g 1000 alice
-    useradd -m -u 1000 -g alice -s /bin/bash alice
-    echo "alice:testpass" | chpasswd
-
-    # Enable root login for dev/test SSH access
-    sed -i "s/#PermitRootLogin.*/PermitRootLogin yes/" /etc/ssh/sshd_config
-    echo "root:rootpass" | chpasswd
-
-    # Source ~/.env into the user environment on login
-    cat > /etc/profile.d/dotenv.sh << "DOTENVEOF"
+    --customize-hook='chroot "$1" systemctl enable ssh' \
+    --customize-hook='chroot "$1" groupadd -g 1000 alice' \
+    --customize-hook='chroot "$1" useradd -m -u 1000 -g alice -s /bin/bash alice' \
+    --customize-hook='echo "alice:testpass" | chroot "$1" chpasswd' \
+    --customize-hook='sed -i "s/#PermitRootLogin.*/PermitRootLogin yes/" "$1/etc/ssh/sshd_config"' \
+    --customize-hook='echo "root:rootpass" | chroot "$1" chpasswd' \
+    --customize-hook='chroot "$1" ssh-keygen -A' \
+    --customize-hook='mkdir -p "$1/etc/motlie-vfs"' \
+    --customize-hook='cat > "$1/etc/profile.d/dotenv.sh" << "DOTENVEOF"
 if [ -f "$HOME/.env" ]; then
     set -a
     . "$HOME/.env"
     set +a
 fi
-DOTENVEOF
-
-    # Prompt to start/attach tmux on SSH login (for all users via /etc/profile.d)
-    cat > /etc/profile.d/tmux-auto.sh << "TMUXEOF"
+DOTENVEOF' \
+    --customize-hook='cat > "$1/etc/profile.d/tmux-auto.sh" << "TMUXEOF"
 if [ -n "$SSH_CONNECTION" ] && [ -z "$TMUX" ] && command -v tmux >/dev/null 2>&1; then
     if tmux has-session -t "$USER" 2>/dev/null; then
         echo "Attaching to existing tmux session..."
@@ -234,16 +250,8 @@ if [ -n "$SSH_CONNECTION" ] && [ -z "$TMUX" ] && command -v tmux >/dev/null 2>&1
         esac
     fi
 fi
-TMUXEOF
-
-    # Generate SSH host keys
-    ssh-keygen -A
-
-    # Create motlie-vfs config directory
-    mkdir -p /etc/motlie-vfs
-
-    # Create systemd service for motlie-vfs-guest
-    cat > /etc/systemd/system/motlie-vfs-guest.service << "SVCEOF"
+TMUXEOF' \
+    --customize-hook='cat > "$1/etc/systemd/system/motlie-vfs-guest.service" << "SVCEOF"
 [Unit]
 Description=motlie-vfs guest filesystem mounter
 After=local-fs.target
@@ -257,68 +265,32 @@ RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
-SVCEOF
-    systemctl enable motlie-vfs-guest
-
-    # Set hostname
-    echo "motlie-guest" > /etc/hostname
-
-    # MOTD
-    cat > /etc/motd << "MOTDEOF"
+SVCEOF' \
+    --customize-hook='chroot "$1" systemctl enable motlie-vfs-guest' \
+    --customize-hook='echo "motlie-guest" > "$1/etc/hostname"' \
+    --customize-hook='cat > "$1/etc/motd" << "MOTDEOF"
                     _   _ _
   _ __ ___   ___ | |_| (_) ___
  | '"'"'_ ` _ \ / _ \| __| | |/ _ \
  | | | | | | (_) | |_| | |  __/
  |_| |_| |_|\___/ \__|_|_|\___|
 
-MOTDEOF
-
-    # Minimal fstab
-    cat > /etc/fstab << "FSTABEOF"
-# <device>  <mount>  <type>  <options>       <dump> <pass>
+MOTDEOF' \
+    --customize-hook='cat > "$1/etc/fstab" << "FSTABEOF"
 proc        /proc    proc    defaults        0      0
 sysfs       /sys     sysfs   defaults        0      0
 devtmpfs    /dev     devtmpfs defaults       0      0
-FSTABEOF
-
-    # Enable user_allow_other for FUSE — required so alice can access
-    # the FUSE mount created by motlie-vfs-guest (runs as root)
-    echo "user_allow_other" >> /etc/fuse.conf
-
-    # Clean up apt cache
-    apt-get clean
-    rm -rf /var/lib/apt/lists/*
-'
-
-# Install the guest binary
-echo "Installing motlie-vfs-guest binary..."
-sudo cp "$GUEST_BINARY" "$ROOTFS_DIR/usr/local/bin/motlie-vfs-guest"
-sudo chmod 755 "$ROOTFS_DIR/usr/local/bin/motlie-vfs-guest"
-
-# Copy required shared libraries into the rootfs if not already present
-echo "Ensuring shared library dependencies are satisfied..."
-for lib in $(ldd "$GUEST_BINARY" | grep -o '/lib[^ ]*'); do
-    target="$ROOTFS_DIR$lib"
-    if [ ! -f "$target" ]; then
-        echo "  copying $lib"
-        sudo cp "$lib" "$target"
-    fi
-done
-
-# Install overlay-init
-echo "Installing overlay-init..."
-sudo cp "$SCRIPT_DIR/overlay-init" "$ROOTFS_DIR/sbin/overlay-init"
-sudo chmod 755 "$ROOTFS_DIR/sbin/overlay-init"
-
-# Build squashfs
-echo "Building squashfs image..."
-sudo mksquashfs "$ROOTFS_DIR" "$ARTIFACTS/rootfs.squashfs" \
-    -noappend -comp gzip -quiet
+FSTABEOF' \
+    --customize-hook='echo "user_allow_other" >> "$1/etc/fuse.conf"' \
+    --customize-hook="upload $GUEST_BINARY_ABS /usr/local/bin/motlie-vfs-guest" \
+    --customize-hook="chmod 755 \"\$1/usr/local/bin/motlie-vfs-guest\"" \
+    --customize-hook="upload $OVERLAY_INIT_ABS /sbin/overlay-init" \
+    --customize-hook="chmod 755 \"\$1/sbin/overlay-init\"" \
+    --customize-hook='chroot "$1" apt-get clean' \
+    --customize-hook='rm -rf "$1/var/lib/apt/lists"/*' \
+    "$DEBIAN_SUITE" "$ARTIFACTS/rootfs.squashfs" "$DEBIAN_MIRROR"
 
 echo "Squashfs image: $ARTIFACTS/rootfs.squashfs ($(du -h "$ARTIFACTS/rootfs.squashfs" | cut -f1))"
-
-# Clean up rootfs build dir
-sudo rm -rf "$ROOTFS_DIR"
 
 # ---------------------------------------------------------------------------
 # Step 4: Build the ext4 overlay image with pre-seeded config
@@ -326,42 +298,22 @@ sudo rm -rf "$ROOTFS_DIR"
 echo ""
 echo "--- Step 4: Building ext4 overlay image ---"
 
-# Create directory tree to seed into the ext4 image.
-# This uses mkfs.ext4 -d to avoid needing sudo mount -o loop.
 rm -rf "$OVERLAY_SEED"
 mkdir -p "$OVERLAY_SEED/upper/etc/motlie-vfs"
 mkdir -p "$OVERLAY_SEED/work"
 
-# Copy the mount config
 cp "$SCRIPT_DIR/mounts.yaml" "$OVERLAY_SEED/upper/etc/motlie-vfs/mounts.yaml"
 
-# Create alice's home directory structure and mount points.
-# These directories must exist for the guest mounter to mount onto them.
-# uid=1000 gid=1000 matches the alice user in the squashfs image.
 mkdir -p "$OVERLAY_SEED/upper/home/alice/.ssh"
 mkdir -p "$OVERLAY_SEED/upper/home/alice/workspace"
 chmod 700 "$OVERLAY_SEED/upper/home/alice/.ssh"
 
-# Build ext4 image from the seed directory (no sudo/mount needed)
 truncate -s "$OVERLAY_SIZE" "$ARTIFACTS/overlay.ext4"
 mkfs.ext4 -F -d "$OVERLAY_SEED" "$ARTIFACTS/overlay.ext4" -q
 
 echo "Overlay image: $ARTIFACTS/overlay.ext4 ($OVERLAY_SIZE)"
 
-# Clean up
 rm -rf "$OVERLAY_SEED"
-
-# ---------------------------------------------------------------------------
-# Step 5: Fix artifact ownership
-# ---------------------------------------------------------------------------
-# build-guest.sh runs under sudo, so artifacts are root-owned.
-# CH and launch-ch.sh run as the normal user and need read access to the
-# disk images.  Chown everything back to the invoking user.
-if [ -n "${SUDO_USER:-}" ]; then
-    echo ""
-    echo "--- Step 5: Fixing artifact ownership (SUDO_USER=$SUDO_USER) ---"
-    chown -R "$SUDO_USER:$SUDO_USER" "$ARTIFACTS"
-fi
 
 # ---------------------------------------------------------------------------
 # Summary
