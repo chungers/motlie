@@ -34,6 +34,7 @@ admin plane. The important parameters are:
 
 - `guest id`: `alice` or `bob` in the host admin plane
 - `socket`: the Unix socket file owned by that guest-scoped `FsServer`
+- `uid/gid`: the guest identity the host should reflect in overlay ownership
 - `tag`: the mount identifier sent in the `TAG <name>` handshake
 - `guest_path`: where the guest mounts that tag inside `/`
 - `host_path`: which host directory the host `FsServer` serves for that tag
@@ -62,7 +63,7 @@ mount the wrong subtree or see files with unusable ownership.
 | `mounts.bob.yaml` | Guest mount config for the Bob VM |
 | `setup-alice.sh.vfs` | Host REPL script for Alice's tags |
 | `setup-bob.sh.vfs` | Host REPL script for Bob's tags |
-| `setup-multiguest.sh.vfs` | Combined host REPL script that provisions both guests and their mounts |
+| `setup-multiguest.sh.vfs` | Combined host REPL script that provisions both guests, assigns uid/gid, and defines their mounts |
 | `build-guest.sh` | Builds one generic shared base image set under `artifacts/base/` |
 | `launch-ch.sh` | Launches one guest VM at a time with guest-specific sockets/CID/IP |
 | `overlay-init` | Boot-time init script |
@@ -127,8 +128,9 @@ That one `repl_host` process owns:
 
 The provisioning script now uses REPL commands:
 
-- `provision <guest> <socket>`
+- `provision <guest> <socket> <uid> <gid>`
 - `mount <guest> <tag>=<guest_path>,<host_path> ...`
+- `launch <guest>`
 
 You can inspect the control plane interactively with:
 
@@ -136,6 +138,7 @@ You can inspect the control plane interactively with:
 help
 help provision
 help mount
+help launch
 guests
 ```
 
@@ -145,6 +148,31 @@ host path. The actual guest mount points still come from `mounts.alice.yaml`
 and `mounts.bob.yaml`.
 
 The guest mounter still connects once per tag and sends a small one-line `TAG <name>` handshake before FsOp/FsResult traffic begins. Guest selection happens at the socket/listener boundary, not in the wire protocol.
+
+`launch <guest>` is a prototype control-plane helper. It renders a shell script
+to stdout that embeds:
+
+- guest-specific `mounts.yaml`
+- guest-specific cloud-init `user-data`
+- guest-specific cloud-init `meta-data`
+- explicit `groupadd` / `useradd` commands in cloud-init `runcmd` for the provisioned uid/gid
+
+The intended operator flow is:
+
+1. `provision alice /tmp/... 1000 1000`
+2. `mount alice alice-home=/home/alice,...`
+3. `launch alice > /tmp/launch-alice-cloud-init.sh`
+4. run that script outside the REPL
+
+This is a prototype workflow for the control plane. `launch <guest>` now emits
+real guest-specific cloud-init assets, but the guest-launch path is still a
+shell-script helper rather than a VMM library API.
+
+Current limitations:
+
+- `launch <guest>` currently targets the demo guests `alice` and `bob`
+- the generated script requires `cloud-localds` from `cloud-image-utils`
+- the shared base must be rebuilt with the current `build-guest.sh` so the guest includes `cloud-init` and consumes the attached NoCloud seed at boot
 
 The `.vfs` setup files are plain one-command-per-line REPL input, so any demo file content injected there must stay on one line as well.
 
@@ -267,7 +295,7 @@ cat /workspace/README.md
 
 - `repl_host` now supports repeated `--mount <tag>=<dir>`
 - `repl_host` now also supports repeated `--guest <id>=<socket>` and guest-qualified `--mount <id>:<tag>=<dir>` for one-process multi-guest demos
-- `repl_host` now also supports REPL-driven `provision` and `mount` commands, so `v1.1` can define guest topology from stdin instead of process flags
+- `repl_host` now also supports REPL-driven `provision`, `mount`, and `launch` commands, so `v1.1` can define guest topology and render guest-specific cloud-init from stdin instead of process flags
 - `motlie-vfs-guest` still reads a YAML mount list, but now each mount performs a tag-binding handshake on connect
 - the demo scripts use separate sockets/CIDs/runtime overlays per guest so Alice and Bob can run at the same time
 - `v1.1` now runs Alice and Bob through one host `repl_host` process while still keeping one `FsServer` per guest internally

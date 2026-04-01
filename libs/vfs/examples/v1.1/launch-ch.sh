@@ -6,6 +6,7 @@
 #   ./launch-ch.sh --guest bob
 #   ./launch-ch.sh --guest alice --no-net
 #   ./launch-ch.sh --guest alice --overlay-size 2G
+#   ./launch-ch.sh --guest alice --cloud-init-seed /tmp/alice-seed.img
 #
 # Shared built artifacts:
 #   artifacts/base/rootfs.squashfs
@@ -39,11 +40,13 @@ GUEST_NAME="alice"
 USE_NET=true
 OVERLAY_SIZE="${OVERLAY_SIZE:-2G}"
 RUNTIME_ROOT="${RUNTIME_ROOT:-/tmp/motlie-vfs-v11-runtime}"
+CLOUD_INIT_SEED=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --guest) GUEST_NAME="$2"; shift 2 ;;
         --overlay-size) OVERLAY_SIZE="$2"; shift 2 ;;
+        --cloud-init-seed) CLOUD_INIT_SEED="$2"; shift 2 ;;
         --no-net) USE_NET=false; shift ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
@@ -102,6 +105,10 @@ if ! command -v mkfs.ext4 >/dev/null 2>&1; then
     echo "ERROR: mkfs.ext4 not found. Install: sudo apt install e2fsprogs"
     exit 1
 fi
+if [ -n "$CLOUD_INIT_SEED" ] && [ ! -f "$CLOUD_INIT_SEED" ]; then
+    echo "ERROR: cloud-init seed not found at $CLOUD_INIT_SEED"
+    exit 1
+fi
 
 COMMON_OVERLAY_CONTENT="$SCRIPT_DIR/overlay.d/common"
 RUNTIME_DIR="$RUNTIME_ROOT/$GUEST_NAME"
@@ -150,6 +157,10 @@ CH_ARGS=(
     --console off
 )
 
+if [ -n "$CLOUD_INIT_SEED" ]; then
+    CH_ARGS+=(--disk "path=$CLOUD_INIT_SEED,readonly=on")
+fi
+
 if $USE_NET; then
     CH_ARGS+=(--net "tap=,mac=$MAC,ip=$HOST_IP,mask=255.255.255.0")
 fi
@@ -161,6 +172,9 @@ echo "  Kernel:    $BASE_ARTIFACTS/$KERNEL_IMAGE"
 echo "  Squashfs:  $BASE_ARTIFACTS/rootfs.squashfs (vda, ro)"
 echo "  Overlay:   $RUNTIME_OVERLAY (vdb, rw runtime)"
 echo "  Size:      $OVERLAY_SIZE"
+if [ -n "$CLOUD_INIT_SEED" ]; then
+    echo "  CloudInit: $CLOUD_INIT_SEED (extra readonly disk)"
+fi
 echo "  vsock:     CID $CID, socket $VSOCK_SOCKET"
 if $USE_NET; then
     echo "  Network:   TAP, guest $GUEST_IP, host $HOST_IP"

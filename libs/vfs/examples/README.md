@@ -13,7 +13,7 @@ network admin connections.
 
 - legacy single-guest `--tag` / `--dir` for `v1`
 - startup-flag multi-guest `--guest` / guest-qualified `--mount`
-- REPL-driven `--empty` plus `provision` / `mount` for `v1.1`
+- REPL-driven `--empty` plus `provision` / `mount` / `launch` for `v1.1`
 
 ### Input modes
 
@@ -54,8 +54,9 @@ cat setup-alice.sh.vfs | cargo run -p motlie-vfs --example repl_host --features 
 **Provisioning / targeting:**
 - `guests` — list provisioned guests, sockets, and mount counts
 - `use <guest>` — set the default target guest
-- `provision <guest> <socket>` — create one guest-scoped `FsServer` and listener
+- `provision <guest> <socket> <uid> <gid>` — create one guest-scoped `FsServer`, record guest identity, and listener
 - `mount <guest> <tag>=<guest_path>,<host_path> [more...]` — add one or more mounts to a guest
+- `launch <guest>` — print a prototype shell script that embeds generated cloud-init assets
 
 **Layer management:**
 - `layer <name> <priority>` — create or update a named layer
@@ -81,6 +82,19 @@ cat setup-alice.sh.vfs | cargo run -p motlie-vfs --example repl_host --features 
 - `help <command>` — show detailed usage for one command, for example `help provision`
 - `quit` — shut down server
 
+The `launch <guest>` command is a prototype workflow helper. It renders a
+shell script to stdout that embeds generated `mounts.yaml`, cloud-init
+`user-data`, and `meta-data` for that guest, including explicit identity setup
+commands in cloud-init `runcmd`. The intent is that a future VMM
+library can reuse the same rendering helpers programmatically.
+
+Current prototype limitation:
+
+- the helper currently targets the demo guests `alice` and `bob`
+- it requires `cloud-localds` (`cloud-image-utils`)
+- it attaches the generated seed image through `launch-ch.sh --cloud-init-seed`
+- the shared `v1.1` base image must be rebuilt with the current `build-guest.sh` so the guest consumes the attached NoCloud seed
+
 ### Coordination Contract
 
 The guest and host must agree on several parameters. This is important enough
@@ -91,7 +105,7 @@ to treat as an explicit contract:
 - `tag`: the guest sends `TAG <name>` on connect, and the host must have provisioned that same tag in the target guest `FsServer`
 - `guest_path`: the guest mount config decides where a tag is mounted inside the guest, for example `/home/alice` or `/workspace`
 - `host_path`: `repl_host` binds each tag to a host backing directory
-- `uid/gid/mode`: overlay-injected files such as `.ssh/authorized_keys` or `.env` must use values that make sense for the guest user
+- `uid/gid/mode`: overlay-injected files such as `.ssh/authorized_keys` or `.env` must use values that make sense for the guest user, and `provision` now records the intended guest uid/gid explicitly
 
 Important nuance:
 
@@ -103,7 +117,7 @@ Example:
 
 ```text
 guest config:  tag=alice-home guest_path=/home/alice
-host config:   guest=alice tag=alice-home host_path=/tmp/motlie-vfs-demo/alice-home
+host config:   guest=alice uid=1000 gid=1000 tag=alice-home host_path=/tmp/motlie-vfs-demo/alice-home
 overlay attrs: uid=1000 gid=1000 mode=0600 for /home/alice/.ssh/authorized_keys
 ```
 

@@ -250,7 +250,7 @@ GUEST_BINARY_ABS="$(realpath "$GUEST_BINARY")"
 OVERLAY_INIT_ABS="$(realpath "$SCRIPT_DIR/overlay-init")"
 
 run_mmdebstrap "$BASE_ROOTFS" \
-    --include=openssh-server,bash,coreutils,tmux,fuse3,libfuse3-3,systemd,systemd-sysv,dbus,iproute2 \
+    --include=openssh-server,bash,coreutils,tmux,fuse3,libfuse3-3,systemd,systemd-sysv,dbus,iproute2,cloud-init \
     --customize-hook='chroot "$1" systemctl enable ssh' \
     --customize-hook='chroot "$1" groupadd -g 1000 alice' \
     --customize-hook='chroot "$1" useradd -m -u 1000 -g alice -s /bin/bash alice' \
@@ -293,7 +293,8 @@ TMUXEOF' \
     --customize-hook='cat > "$1/etc/systemd/system/motlie-vfs-guest.service" << "SVCEOF"
 [Unit]
 Description=motlie-vfs guest filesystem mounter
-After=local-fs.target
+After=local-fs.target cloud-final.service
+Wants=cloud-final.service
 Before=ssh.service
 
 [Service]

@@ -93,10 +93,16 @@ In this demo:
 
 The combined setup script uses:
 
-- `provision alice /tmp/motlie-vfs-alice.vsock_5000`
+- `provision alice /tmp/motlie-vfs-alice.vsock_5000 1000 1000`
 - `mount alice alice-home=/home/alice,/tmp/motlie-vfs-demo/alice-home ...`
-- `provision bob /tmp/motlie-vfs-bob.vsock_5000`
+- `provision bob /tmp/motlie-vfs-bob.vsock_5000 1001 1001`
 - `mount bob bob-home=/home/bob,/tmp/motlie-vfs-demo/bob-home ...`
+
+Prototype helper:
+
+- `launch alice` prints a shell script that embeds generated cloud-init assets for Alice and then calls `launch-ch.sh --guest alice --cloud-init-seed ...`
+- `launch bob` does the same for Bob
+- this helper requires `cloud-localds` (`cloud-image-utils`) and a shared base rebuilt with the current `build-guest.sh` so cloud-init is present in the guest
 
 ## Launch Guests
 
