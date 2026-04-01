@@ -282,9 +282,9 @@ sysfs       /sys     sysfs   defaults        0      0
 devtmpfs    /dev     devtmpfs defaults       0      0
 FSTABEOF' \
     --customize-hook='echo "user_allow_other" >> "$1/etc/fuse.conf"' \
-    --customize-hook="cp $GUEST_BINARY_ABS \"\$1/usr/local/bin/motlie-vfs-guest\"" \
+    --customize-hook="upload $GUEST_BINARY_ABS /usr/local/bin/motlie-vfs-guest" \
     --customize-hook="chmod 755 \"\$1/usr/local/bin/motlie-vfs-guest\"" \
-    --customize-hook="cp $OVERLAY_INIT_ABS \"\$1/sbin/overlay-init\"" \
+    --customize-hook="upload $OVERLAY_INIT_ABS /sbin/overlay-init" \
     --customize-hook="chmod 755 \"\$1/sbin/overlay-init\"" \
     --customize-hook='chroot "$1" apt-get clean' \
     --customize-hook='rm -rf "$1/var/lib/apt/lists"/*' \
