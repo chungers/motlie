@@ -89,8 +89,9 @@ cross build --release --target aarch64-unknown-linux-gnu --features vsock,client
 ```
 
 The image build itself (`build-guest.sh`) must run on Linux because it uses
-`debootstrap`, `chroot`, and `mksquashfs`. Run it on a Linux host, in CI,
-or in a Docker container.
+`mmdebstrap --mode=unshare` (Linux user namespaces). No sudo required.
+Run it on a Linux host, in CI, or in a Docker container with user namespace
+support. See [IMAGE.md](IMAGE.md) for full prerequisites.
 
 ## Step-by-Step
 
@@ -267,7 +268,8 @@ sudo umount /tmp/overlay-mnt
 | Problem | Fix |
 |---------|-----|
 | `vhost_vsock` not found | `sudo modprobe vhost_vsock` |
-| `debootstrap: command not found` | `sudo apt install debootstrap` |
+| `mmdebstrap: command not found` | `sudo apt install mmdebstrap squashfs-tools-ng uidmap debian-archive-keyring` |
+| `unshare: Operation not permitted` | `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` |
 | CH disk `PermissionDenied` | Artifacts should be user-owned (rootless build). If stale root-owned artifacts remain from an old sudo build: `sudo chown $USER:$USER artifacts/*` |
 | CH TAP `Operation not permitted` | TAP networking needs `CAP_NET_ADMIN`. Use `./launch-ch.sh --no-net` for vsock-only, or grant the capability: `sudo setcap cap_net_admin+ep $(which cloud-hypervisor)` |
 | CH fails with KVM permission error | Ensure user is in `kvm` group (`sudo usermod -aG kvm $USER`, then re-login) |
