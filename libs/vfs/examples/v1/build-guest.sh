@@ -11,6 +11,7 @@
 #   - squashfs-tools-ng (tar2sqfs — used by mmdebstrap for squashfs output)
 #   - e2fsprogs (mkfs.ext4)
 #   - uidmap (newuidmap/newgidmap for user namespace mapping)
+#   - debian-archive-keyring (GPG keys for Debian repos)
 #   - For --kernel build: git, make, gcc, flex, bison, libelf-dev, libssl-dev
 #
 # No sudo required. Uses mmdebstrap --mode=unshare for rootless operation.
@@ -84,13 +85,19 @@ CH_KERNEL_URL="https://github.com/cloud-hypervisor/linux/releases/download/${CH_
 # ---------------------------------------------------------------------------
 # Check prerequisites
 # ---------------------------------------------------------------------------
-for cmd in mmdebstrap mkfs.ext4; do
+for cmd in mmdebstrap mkfs.ext4 tar2sqfs; do
     if ! command -v "$cmd" &>/dev/null; then
         echo "ERROR: $cmd not found."
-        echo "Install: sudo apt install mmdebstrap e2fsprogs squashfs-tools uidmap"
+        echo "Install: sudo apt install mmdebstrap squashfs-tools-ng e2fsprogs uidmap debian-archive-keyring"
         exit 1
     fi
 done
+
+if [ ! -f /usr/share/keyrings/debian-archive-keyring.gpg ]; then
+    echo "ERROR: Debian archive keyring not found."
+    echo "Install: sudo apt install debian-archive-keyring"
+    exit 1
+fi
 
 # Check user namespace support
 APPARMOR_USERNS=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)
@@ -206,6 +213,7 @@ mmdebstrap \
     --arch="$DEBOOTSTRAP_ARCH" \
     --variant=minbase \
     --format=squashfs \
+    --keyring=/usr/share/keyrings/debian-archive-keyring.gpg \
     --include=openssh-server,bash,coreutils,tmux,fuse3,libfuse3-3,systemd,systemd-sysv,dbus,iproute2 \
     --customize-hook='chroot "$1" systemctl enable ssh' \
     --customize-hook='chroot "$1" groupadd -g 1000 alice' \

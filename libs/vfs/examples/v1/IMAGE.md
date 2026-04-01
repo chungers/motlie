@@ -7,7 +7,7 @@ Cloud Hypervisor guests. **No sudo required** — the script uses
 ## Prerequisites
 
 ```bash
-sudo apt install mmdebstrap squashfs-tools-ng e2fsprogs uidmap
+sudo apt install mmdebstrap squashfs-tools-ng e2fsprogs uidmap debian-archive-keyring
 ```
 
 On Ubuntu 24.04, unprivileged user namespaces must be allowed:
