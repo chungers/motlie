@@ -9,7 +9,9 @@ See [DESIGN.md](./DESIGN.md) for full architectural context and requirements.
 - Phase 4.2: **complete except Linux-only items** (4.2.5 build.rs, 4.2.6 fuser tests, 4.2.8 FUSE integration)
 - Phase 5.1 (v1 subset): **complete except Linux-only validation** (5.1.14, 5.1.22, 5.1.23, 5.1.26)
 
-93 tests passing (73 unit + 8 guest integration + 12 transport), 0 warnings.
+93 tests passing (73 unit + 8 guest integration + 12 transport), 0 warnings (default features).
+
+<!-- @claude 2026-03-31 — updated: unreachable Ok(()) warning in guest binary fixed. -->
 
 ---
 

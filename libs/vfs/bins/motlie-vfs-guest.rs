@@ -67,10 +67,10 @@ fn main() -> Result<()> {
     // port convention (one port per tag, or a multiplexer). For the simplest
     // v1 test, the host serves a single tag on port 5000.
     #[cfg(all(feature = "vsock", feature = "client"))]
-    {
+    let handles = {
         use motlie_vfs::vsock::client::VsockClientTransport;
 
-        let handles = runner.mount_all(|tag: &str, rt: &tokio::runtime::Runtime| {
+        runner.mount_all(|tag: &str, rt: &tokio::runtime::Runtime| {
             let tag = tag.to_string();
             let stream = rt.block_on(async {
                 let addr = tokio_vsock::VsockAddr::new(HOST_CID, VMM_PORT);
@@ -78,28 +78,20 @@ fn main() -> Result<()> {
             })?;
 
             Ok(VsockClientTransport::new(stream, &tag))
-        })?;
+        })?
+    };
 
-        eprintln!("motlie-vfs-guest: all mounts started, waiting...");
-        let results = handles.join_all();
-        for (i, result) in results.iter().enumerate() {
-            if let Err(e) = result {
-                eprintln!("mount {} failed: {e}", i);
-            }
-        }
-        return Ok(());
-    }
-
-    // Fallback: no vsock+client features — use stub for testing
     #[cfg(not(all(feature = "vsock", feature = "client")))]
-    {
+    let handles = {
         eprintln!("motlie-vfs-guest: vsock+client features not enabled, using stub mounts");
-        let handles = runner.mount_all_stub()?;
-        let results = handles.join_all();
-        for (i, result) in results.iter().enumerate() {
-            if let Err(e) = result {
-                eprintln!("mount {} failed: {e}", i);
-            }
+        runner.mount_all_stub()?
+    };
+
+    eprintln!("motlie-vfs-guest: all mounts started, waiting...");
+    let results = handles.join_all();
+    for (i, result) in results.iter().enumerate() {
+        if let Err(e) = result {
+            eprintln!("mount {} failed: {e}", i);
         }
     }
 

@@ -182,6 +182,18 @@ mod tests {
                     namelen: 255, frsize: 4096,
                 },
             },
+            FsResult::Created {
+                inode: 99,
+                generation: 0,
+                attrs: FileAttr {
+                    inode: 99, size: 0, blocks: 0,
+                    atime: now, mtime: now, ctime: now,
+                    kind: FileType::RegularFile,
+                    mode: 0o644, nlink: 1, uid: 1000, gid: 1000,
+                },
+                fh: 7,
+                ttl_secs: 0,
+            },
             FsResult::Symlink { target: "/foo/bar".into() },
             FsResult::Opened { fh: 42 },
             FsResult::Ok,
