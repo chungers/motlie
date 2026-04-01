@@ -137,4 +137,6 @@ hook receives the rootfs path as `$1`:
 | `newuidmap: command not found` | `sudo apt install uidmap` |
 | `unshare: Operation not permitted` | `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` |
 | `No matching subuids/subgids` | Check `/etc/subuid` and `/etc/subgid` have entries for your user |
+| `tar2sqfs does not support extended attributes` | Harmless — ACL/security xattrs from systemd packages. squashfs works fine without them |
+| `failed to open configuration file .dpkg.cfg` | Harmless — uid remapping inside user namespace prevents reading host home dir. No dpkg config override exists anyway |
 | Squashfs too large | Add `--customize-hook='rm -rf "$1/usr/share/doc"'` to strip docs |
