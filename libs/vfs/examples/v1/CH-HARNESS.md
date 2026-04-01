@@ -39,7 +39,10 @@ by `overlay-init` at boot via overlayfs. This matches the `motlie-vmm` design.
 
 ```bash
 # Package dependencies
-sudo apt install squashfs-tools e2fsprogs debootstrap libfuse3-dev pkg-config    # Debian/Ubuntu
+# Image builder (rootless — no sudo needed for build-guest.sh)
+sudo apt install mmdebstrap squashfs-tools-ng e2fsprogs uidmap debian-archive-keyring libfuse3-dev pkg-config
+# On Ubuntu 24.04, also allow unprivileged user namespaces:
+sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
 # Cloud Hypervisor — download the binary for your architecture
 # x86_64:
