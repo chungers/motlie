@@ -1,49 +1,136 @@
 #!/usr/bin/env bash
-# build-guest.sh — Build a guest image set for the v1.1 multi-guest demo.
+# build-guest.sh — Build the generic shared base image set for v1.1.
 #
-# Produces guest-specific artifacts under artifacts/<guest>/:
-#   rootfs.squashfs        — Debian root with sshd, bash, fuse3, motlie-vfs-guest
-#   overlay.ext4           — writable ext4 overlay seeded with mounts config
-#   Image|vmlinux.bin      — CH-compatible kernel
+# Produces:
+#   artifacts/base/rootfs.squashfs   — shared Debian rootfs for alice+bob
+#   artifacts/base/Image|vmlinux.bin — shared CH-compatible kernel
 #
-# Usage:
-#   ./build-guest.sh --guest alice
-#   ./build-guest.sh --guest bob
-#   ./build-guest.sh --guest alice --guest-binary /path/to/motlie-vfs-guest
-#   ./build-guest.sh --guest bob --kernel skip
-#
-# Notes:
-#   - No sudo required. Uses mmdebstrap --mode=unshare for rootless operation.
-#   - The rootfs includes both alice (uid=1000) and bob (uid=1001) so either
-#     guest overlay can boot the same binary/service set cleanly.
+# Guest identity is not baked here. Alice/Bob differences are created by
+# launch-ch.sh as runtime writable overlays.
 
 set -euo pipefail
+
+die() {
+    echo "ERROR: $*" >&2
+    exit 1
+}
+
+require_cmd() {
+    local cmd="$1"
+    local install_hint="$2"
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        die "$cmd not found. Install: $install_hint"
+    fi
+}
+
+passwd_primary_gid() {
+    getent passwd "$USER" | cut -d: -f4
+}
+
+passwd_primary_group() {
+    getent group "$(passwd_primary_gid)" | cut -d: -f1
+}
+
+check_unshare_prereqs() {
+    local current_gid expected_gid expected_group
+
+    current_gid="$(id -g)"
+    expected_gid="$(passwd_primary_gid)"
+    expected_group="$(passwd_primary_group)"
+
+    if [ -z "$expected_gid" ] || [ -z "$expected_group" ]; then
+        die "failed to resolve passwd primary gid/group for $USER"
+    fi
+
+    if [ "$current_gid" != "$expected_gid" ]; then
+        cat >&2 <<EOF
+ERROR: mmdebstrap --mode=unshare requires this shell's primary gid to match the
+passwd entry for $USER.
+
+Current shell gid: $current_gid ($(id -gn))
+Passwd primary gid: $expected_gid ($expected_group)
+
+Try one of:
+  1. Open a fresh login shell for $USER
+  2. Run: exec newgrp
+  3. Use a rootful fallback: MMDEBSTRAP_MODE=root ./build-guest.sh
+EOF
+        exit 1
+    fi
+
+    if ! grep -q "^${USER}:" /etc/subuid; then
+        die "/etc/subuid has no entry for $USER"
+    fi
+    if ! grep -q "^${USER}:" /etc/subgid; then
+        die "/etc/subgid has no entry for $USER"
+    fi
+}
+
+run_mmdebstrap() {
+    local target="$1"
+    shift
+
+    local -a cmd=(
+        mmdebstrap
+        --mode="$MMDEBSTRAP_MODE"
+        --arch="$DEBOOTSTRAP_ARCH"
+        --variant=minbase
+        --format=squashfs
+        --keyring=/usr/share/keyrings/debian-archive-keyring.gpg
+        "$@"
+        "$DEBIAN_SUITE" "$target" "$DEBIAN_MIRROR"
+    )
+
+    if [ "$MMDEBSTRAP_MODE" = "unshare" ]; then
+        check_unshare_prereqs
+        "${cmd[@]}"
+        return
+    fi
+
+    if [ "$MMDEBSTRAP_MODE" = "root" ] || [ "$MMDEBSTRAP_MODE" = "sudo" ]; then
+        if [ "$EUID" -eq 0 ]; then
+            "${cmd[@]}"
+        else
+            sudo "${cmd[@]}"
+            sudo chown "$(id -u):$(id -g)" "$target"
+        fi
+        return
+    fi
+
+    "${cmd[@]}"
+}
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 
-GUEST_NAME="alice"
 GUEST_BINARY=""
 KERNEL_MODE="download"
+MMDEBSTRAP_MODE="${MMDEBSTRAP_MODE:-unshare}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --guest) GUEST_NAME="$2"; shift 2 ;;
+        --guest)
+            die "v1.1 builds one generic base image; guest selection moved to launch-ch.sh"
+            ;;
         --guest-binary) GUEST_BINARY="$2"; shift 2 ;;
         --kernel) KERNEL_MODE="$2"; shift 2 ;;
-        *) echo "Unknown argument: $1"; exit 1 ;;
+        --base-only) shift ;;
+        --overlay-only)
+            die "--overlay-only no longer applies; launch-ch.sh creates per-guest runtime overlays"
+            ;;
+        *) die "Unknown argument: $1" ;;
     esac
 done
 
-case "$GUEST_NAME" in
-    alice|bob) ;;
-    *) echo "ERROR: --guest must be one of: alice, bob"; exit 1 ;;
+case "$KERNEL_MODE" in
+    download|build|skip) ;;
+    *) die "--kernel must be one of: download, build, skip" ;;
 esac
 
-if [[ "$KERNEL_MODE" != "download" && "$KERNEL_MODE" != "build" && "$KERNEL_MODE" != "skip" ]]; then
-    echo "ERROR: --kernel must be one of: download, build, skip"
-    exit 1
-fi
+case "$MMDEBSTRAP_MODE" in
+    auto|sudo|root|unshare|fakeroot|fakechroot|chrootless) ;;
+    *) die "MMDEBSTRAP_MODE must be one of: auto, sudo, root, unshare, fakeroot, fakechroot, chrootless" ;;
+esac
 
 HOST_ARCH="$(uname -m)"
 case "$HOST_ARCH" in
@@ -64,73 +151,42 @@ case "$HOST_ARCH" in
         KERNEL_BUILD_OUTPUT="arch/arm64/boot/Image"
         ;;
     *)
-        echo "ERROR: unsupported host architecture: $HOST_ARCH"
-        exit 1
+        die "unsupported host architecture: $HOST_ARCH"
         ;;
 esac
 
 CH_KERNEL_RELEASE="ch-release-v6.16.9-20251112"
 CH_KERNEL_URL="https://github.com/cloud-hypervisor/linux/releases/download/${CH_KERNEL_RELEASE}/${KERNEL_RELEASE_ASSET}"
 
-for cmd in mmdebstrap mkfs.ext4 tar2sqfs; do
-    if ! command -v "$cmd" &>/dev/null; then
-        echo "ERROR: $cmd not found."
-        echo "Install: sudo apt install mmdebstrap squashfs-tools-ng e2fsprogs uidmap debian-archive-keyring"
-        exit 1
-    fi
-done
+require_cmd mmdebstrap "sudo apt install mmdebstrap squashfs-tools-ng e2fsprogs uidmap debian-archive-keyring"
+require_cmd tar2sqfs "sudo apt install squashfs-tools-ng"
 
 if [ ! -f /usr/share/keyrings/debian-archive-keyring.gpg ]; then
-    echo "ERROR: Debian archive keyring not found."
-    echo "Install: sudo apt install debian-archive-keyring"
-    exit 1
+    die "Debian archive keyring not found. Install: sudo apt install debian-archive-keyring"
 fi
 
 APPARMOR_USERNS=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)
-if [ "$APPARMOR_USERNS" = "1" ]; then
-    echo "ERROR: AppArmor restricts unprivileged user namespaces."
-    echo "Fix:   sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"
-    exit 1
+if [ "$APPARMOR_USERNS" = "1" ] && [ "$MMDEBSTRAP_MODE" = "unshare" ]; then
+    die "AppArmor restricts unprivileged user namespaces. Fix: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"
 fi
 
 DEBIAN_SUITE="bookworm"
 DEBIAN_MIRROR="http://deb.debian.org/debian"
-ARTIFACTS="$SCRIPT_DIR/artifacts/$GUEST_NAME"
-OVERLAY_SEED="/tmp/motlie-vfs-v11-overlay-${GUEST_NAME}-$$"
-OVERLAY_SIZE="64M"
-MOUNT_CONFIG="$SCRIPT_DIR/mounts.${GUEST_NAME}.yaml"
+BASE_ARTIFACTS="$SCRIPT_DIR/artifacts/base"
+BASE_ROOTFS="$BASE_ARTIFACTS/rootfs.squashfs"
+BASE_KERNEL="$BASE_ARTIFACTS/$KERNEL_IMAGE"
+BASE_HOSTNAME="motlie-vfs-v11"
 
-case "$GUEST_NAME" in
-    alice)
-        LOGIN_UID=1000
-        LOGIN_GID=1000
-        LOGIN_HOME="/home/alice"
-        HOSTNAME="motlie-alice"
-        ;;
-    bob)
-        LOGIN_UID=1001
-        LOGIN_GID=1001
-        LOGIN_HOME="/home/bob"
-        HOSTNAME="motlie-bob"
-        ;;
-esac
-
-if [ ! -f "$MOUNT_CONFIG" ]; then
-    echo "ERROR: mount config not found at $MOUNT_CONFIG"
-    exit 1
-fi
-
-echo "=== motlie-vfs v1.1 guest image builder ==="
-echo "Guest:            $GUEST_NAME"
-echo "Host arch:        $HOST_ARCH"
-echo "Rust target:      $RUST_TARGET"
-echo "Debian arch:      $DEBOOTSTRAP_ARCH"
-echo "Kernel mode:      $KERNEL_MODE"
-echo "Artifacts dir:    $ARTIFACTS"
-echo "Mount config:     $MOUNT_CONFIG"
+echo "=== motlie-vfs v1.1 base image builder ==="
+echo "Host arch:          $HOST_ARCH"
+echo "Rust target:        $RUST_TARGET"
+echo "Debian arch:        $DEBOOTSTRAP_ARCH"
+echo "Kernel mode:        $KERNEL_MODE"
+echo "mmdebstrap mode:    $MMDEBSTRAP_MODE"
+echo "Base dir:           $BASE_ARTIFACTS"
 echo ""
 
-mkdir -p "$ARTIFACTS"
+mkdir -p "$BASE_ARTIFACTS"
 
 if [ -z "$GUEST_BINARY" ]; then
     echo "--- Step 1: Building motlie-vfs-guest ($RUST_TARGET) ---"
@@ -144,23 +200,22 @@ if [ -z "$GUEST_BINARY" ]; then
 fi
 
 if [ ! -f "$GUEST_BINARY" ]; then
-    echo "ERROR: guest binary not found at $GUEST_BINARY"
-    exit 1
+    die "guest binary not found at $GUEST_BINARY"
 fi
 
 echo "--- Step 2: Kernel ($KERNEL_MODE) ---"
 case "$KERNEL_MODE" in
     download)
-        if [ -f "$ARTIFACTS/$KERNEL_IMAGE" ]; then
-            echo "Kernel already exists: $ARTIFACTS/$KERNEL_IMAGE ($(du -h "$ARTIFACTS/$KERNEL_IMAGE" | cut -f1))"
+        if [ -f "$BASE_KERNEL" ]; then
+            echo "Kernel already exists: $BASE_KERNEL ($(du -h "$BASE_KERNEL" | cut -f1))"
         else
             echo "Downloading pre-built kernel from cloud-hypervisor/linux..."
-            wget -q --show-progress -O "$ARTIFACTS/$KERNEL_IMAGE" "$CH_KERNEL_URL"
-            echo "Kernel: $ARTIFACTS/$KERNEL_IMAGE ($(du -h "$ARTIFACTS/$KERNEL_IMAGE" | cut -f1))"
+            wget -q --show-progress -O "$BASE_KERNEL" "$CH_KERNEL_URL"
+            echo "Kernel: $BASE_KERNEL ($(du -h "$BASE_KERNEL" | cut -f1))"
         fi
         ;;
     build)
-        KERNEL_SRC="/tmp/motlie-vfs-kernel-${GUEST_NAME}-$$"
+        KERNEL_SRC="/tmp/motlie-vfs-kernel-$$"
         echo "Cloning cloud-hypervisor/linux into $KERNEL_SRC..."
         git clone --depth 1 https://github.com/cloud-hypervisor/linux.git \
             -b ch-6.12.8 "$KERNEL_SRC"
@@ -174,32 +229,27 @@ CONFIG_OVERLAY_FS=y
 KEOF
             make olddefconfig
             make "$KERNEL_BUILD_TARGET" -j"$(nproc)"
-            cp "$KERNEL_BUILD_OUTPUT" "$ARTIFACTS/$KERNEL_IMAGE"
+            cp "$KERNEL_BUILD_OUTPUT" "$BASE_KERNEL"
         )
         rm -rf "$KERNEL_SRC"
-        echo "Kernel: $ARTIFACTS/$KERNEL_IMAGE ($(du -h "$ARTIFACTS/$KERNEL_IMAGE" | cut -f1))"
+        echo "Kernel: $BASE_KERNEL ($(du -h "$BASE_KERNEL" | cut -f1))"
         ;;
     skip)
-        if [ ! -f "$ARTIFACTS/$KERNEL_IMAGE" ]; then
-            echo "WARNING: kernel not found at $ARTIFACTS/$KERNEL_IMAGE"
+        if [ ! -f "$BASE_KERNEL" ]; then
+            echo "WARNING: kernel not found at $BASE_KERNEL"
             echo "Place a CH-compatible kernel there before running launch-ch.sh."
         else
-            echo "Using existing kernel: $ARTIFACTS/$KERNEL_IMAGE ($(du -h "$ARTIFACTS/$KERNEL_IMAGE" | cut -f1))"
+            echo "Using existing kernel: $BASE_KERNEL ($(du -h "$BASE_KERNEL" | cut -f1))"
         fi
         ;;
 esac
 echo ""
 
-echo "--- Step 3: Building Debian squashfs root image (rootless) ---"
+echo "--- Step 3: Building shared Debian squashfs root image ---"
 GUEST_BINARY_ABS="$(realpath "$GUEST_BINARY")"
 OVERLAY_INIT_ABS="$(realpath "$SCRIPT_DIR/overlay-init")"
 
-mmdebstrap \
-    --mode=unshare \
-    --arch="$DEBOOTSTRAP_ARCH" \
-    --variant=minbase \
-    --format=squashfs \
-    --keyring=/usr/share/keyrings/debian-archive-keyring.gpg \
+run_mmdebstrap "$BASE_ROOTFS" \
     --include=openssh-server,bash,coreutils,tmux,fuse3,libfuse3-3,systemd,systemd-sysv,dbus,iproute2 \
     --customize-hook='chroot "$1" systemctl enable ssh' \
     --customize-hook='chroot "$1" groupadd -g 1000 alice' \
@@ -256,7 +306,7 @@ RestartSec=2
 WantedBy=multi-user.target
 SVCEOF' \
     --customize-hook='chroot "$1" systemctl enable motlie-vfs-guest' \
-    --customize-hook="echo \"$HOSTNAME\" > \"\$1/etc/hostname\"" \
+    --customize-hook="echo \"$BASE_HOSTNAME\" > \"\$1/etc/hostname\"" \
     --customize-hook='cat > "$1/etc/motd" << "MOTDEOF"
                     _   _ _
   _ __ ___   ___ | |_| (_) ___
@@ -277,32 +327,11 @@ FSTABEOF' \
     --customize-hook="upload $OVERLAY_INIT_ABS /sbin/overlay-init" \
     --customize-hook="chmod 755 \"\$1/sbin/overlay-init\"" \
     --customize-hook='chroot "$1" apt-get clean' \
-    --customize-hook='rm -rf "$1/var/lib/apt/lists"/*' \
-    "$DEBIAN_SUITE" "$ARTIFACTS/rootfs.squashfs" "$DEBIAN_MIRROR"
+    --customize-hook='rm -rf "$1/var/lib/apt/lists"/*'
 
-echo "Squashfs image: $ARTIFACTS/rootfs.squashfs ($(du -h "$ARTIFACTS/rootfs.squashfs" | cut -f1))"
-echo ""
-
-echo "--- Step 4: Building ext4 overlay image ---"
-rm -rf "$OVERLAY_SEED"
-mkdir -p "$OVERLAY_SEED/upper/etc/motlie-vfs"
-mkdir -p "$OVERLAY_SEED/work"
-cp "$MOUNT_CONFIG" "$OVERLAY_SEED/upper/etc/motlie-vfs/mounts.yaml"
-
-mkdir -p "$OVERLAY_SEED/upper${LOGIN_HOME}/.ssh"
-mkdir -p "$OVERLAY_SEED/upper/workspace"
-chmod 700 "$OVERLAY_SEED/upper${LOGIN_HOME}/.ssh"
-
-truncate -s "$OVERLAY_SIZE" "$ARTIFACTS/overlay.ext4"
-mkfs.ext4 -F -d "$OVERLAY_SEED" "$ARTIFACTS/overlay.ext4" -q
-rm -rf "$OVERLAY_SEED"
-
-echo "Overlay image: $ARTIFACTS/overlay.ext4 ($OVERLAY_SIZE)"
+echo "Shared squashfs image: $BASE_ROOTFS ($(du -h "$BASE_ROOTFS" | cut -f1))"
 echo ""
 echo "=== Build complete ==="
-echo "Guest:     $GUEST_NAME"
-echo "Login:     uid=$LOGIN_UID gid=$LOGIN_GID home=$LOGIN_HOME"
-echo "Artifacts: $ARTIFACTS"
-ls -lh "$ARTIFACTS/"
+ls -lh "$BASE_ARTIFACTS/"
 echo ""
-echo "Next: ./launch-ch.sh --guest $GUEST_NAME"
+echo "Next: ./launch-ch.sh --guest alice"
