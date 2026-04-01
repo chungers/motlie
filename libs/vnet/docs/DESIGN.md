@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-03-31 | @claude | Expand NFRs: instance model, isolation, socket parametrization, teardown, netns, performance on DGX Spark |
 | 2026-03-31 | @claude | Initial DESIGN: problem statement, motivation, architecture, alternatives analysis |
 
 ## Problem Statement
@@ -132,10 +133,123 @@ libslirp for user-mode TCP/IP translation.
 
 ## Non-Functional Requirements
 
-- **NFR-1:** Single-threaded or minimal-thread backend (dev/test workload)
-- **NFR-2:** No unsafe code in the glue layer (unsafe is acceptable inside
-  libslirp C bindings)
-- **NFR-3:** Clean shutdown — backend stops when the host process exits
+### Embeddability and Error Handling
+
+- **NFR-1:** Library-embeddable — the backend is a Rust struct that callers
+  spawn on a thread, not a binary. No `main()`, no global state, no
+  `std::process::exit()`. Multiple instances can coexist in one process.
+- **NFR-2:** No panics in library code. All errors returned as `Result`.
+  `unwrap()` / `expect()` / `assert!()` are forbidden in non-test code.
+  libslirp C callbacks that cannot return errors must log and degrade
+  gracefully (e.g. drop the frame) rather than panic.
+- **NFR-3:** No unsafe code in the glue layer. `unsafe` is acceptable only
+  inside libslirp C bindings and vm-memory mappings where the crate
+  requires it.
+
+### Instance Model: One Stack Per Guest
+
+- **NFR-4:** Each guest VM gets its own `VnetBackend` instance with its own:
+  - libslirp context (separate TCP/IP state, DHCP leases, DNS cache)
+  - vhost-user Unix socket (unique path per guest)
+  - background thread
+  - No shared state between instances — full isolation by construction.
+
+  This means an orchestrator managing N guests spawns N backend threads,
+  each bound to a distinct socket. Example:
+
+  ```
+  Guest 0: /tmp/motlie-vnet-0.sock  →  VnetBackend thread 0
+  Guest 1: /tmp/motlie-vnet-1.sock  →  VnetBackend thread 1
+  Guest 2: /tmp/motlie-vnet-2.sock  →  VnetBackend thread 2
+  ```
+
+  The per-guest model is chosen over a shared/multiplexed model because:
+  - libslirp is single-threaded and not thread-safe — sharing requires
+    serialization which defeats the purpose
+  - vhost-user is a 1:1 protocol (one frontend ↔ one backend per socket)
+  - Isolation: a misbehaving guest cannot affect another guest's network
+  - Simplicity: no routing, no NAT between guests, no shared IP space
+
+- **NFR-5:** Socket path is caller-specified via the builder API:
+  ```rust
+  VnetBackend::builder()
+      .socket_path("/tmp/motlie-vnet-0.sock")  // required, no default
+      .build()?;
+  ```
+  The builder validates the path is writable and removes stale sockets
+  before binding. Socket cleanup on drop is best-effort (unlink on
+  `Drop`, but not guaranteed if the process is killed with SIGKILL).
+
+### Lifecycle and Teardown
+
+- **NFR-6:** Clean shutdown sequence:
+  1. Caller drops `VnetBackend` or the `serve()` method returns
+  2. vhost-user daemon closes the Unix socket
+  3. CH detects backend disconnect → guest sees link-down on virtio-net
+  4. libslirp context is dropped → all host sockets (TCP/UDP) are closed
+  5. Socket file is unlinked (best-effort)
+  6. Thread exits
+
+- **NFR-7:** Abrupt termination (SIGKILL, process crash):
+  - Stale socket file may remain — callers must handle this at startup
+    (the builder unlinks existing sockets before binding)
+  - Host TCP/UDP sockets are closed by the OS (fd cleanup)
+  - No persistent state — restart is clean with no recovery needed
+  - CH handles backend disappearance: guest sees link-down, no crash
+
+### Network Namespace Requirements
+
+- **NFR-8:** No network namespace required. The backend operates entirely
+  in the host's network namespace using unprivileged sockets:
+  - TCP connections: `connect()` as regular user
+  - UDP: `sendto()` / `recvfrom()` as regular user
+  - ICMP: libslirp uses unprivileged ICMP sockets (requires
+    `net.ipv4.ping_group_range` to include the user's gid, which is
+    the default on modern Linux)
+  - DNS: forwarded to host resolver via UDP socket
+
+  If the orchestrator wants to isolate guests from each other at the
+  network level (e.g. prevent guest A from connecting to guest B's
+  host-side ports), it can run each backend in a separate network
+  namespace. But this is not required and is outside the scope of
+  this library.
+
+### Performance Characteristics
+
+- **NFR-9:** Performance target: sufficient for interactive development
+  workloads (package installation, git operations, API calls). Not
+  designed for production data-plane or bulk transfer workloads.
+
+  **Overhead model:**
+  - Each Ethernet frame traverses: virtqueue → memcpy → libslirp L2 parse
+    → L4 socket syscall. This is ~2 context switches per packet (one for
+    the virtqueue kick eventfd, one for the socket syscall).
+  - libslirp adds CPU overhead for TCP/IP stack emulation — roughly
+    equivalent to QEMU's `-net user` mode, which sustains ~1-5 Gbps
+    depending on packet size and host CPU.
+
+  **Expected throughput (dev/test workloads):**
+
+  | Workload | Expected | Notes |
+  |----------|----------|-------|
+  | `apt update` | Seconds | Small metadata downloads |
+  | `git clone` (100MB repo) | ~10-30s | Limited by libslirp TCP window |
+  | `curl` download (1GB) | ~100-500 MB/s | CPU-bound in libslirp |
+  | ICMP ping RTT | <1ms | Host-local translation |
+
+  **Scaling on DGX Spark:**
+  - Each backend thread consumes ~1-5% of one CPU core at idle (epoll wait)
+  - Active network I/O: ~10-30% of one core per guest (libslirp processing)
+  - Memory: ~2-5 MB per backend instance (libslirp buffers + virtqueue)
+  - A DGX Spark with 20 cores and 128GB RAM can comfortably run 10-20
+    concurrent guests with active network I/O, or 50+ mostly-idle guests
+  - The bottleneck is CPU for libslirp, not memory or fd limits
+
+  **Not at line rate.** Line rate (100 Gbps on DGX Spark) requires
+  kernel bypass (DPDK, io_uring, XDP). libslirp is fundamentally
+  limited by syscall overhead and single-threaded TCP processing.
+  For production networking, the v2 path would use a DPDK-based
+  vhost-user backend instead of libslirp.
 
 ## High-Level System Design
 
