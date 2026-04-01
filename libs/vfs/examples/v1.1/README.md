@@ -93,6 +93,115 @@ The `.vfs` setup files are plain one-command-per-line REPL input, so any demo fi
 
 For SSH-enabled runs, drop `--no-net`. Alice uses `192.168.249.2`; Bob uses `192.168.250.2`.
 
+## Manual Validation On This Host
+
+If you are running from the same host shape as this session, use these
+manual prep steps before the `Quick Start` flow above.
+
+### 1. Check your primary group
+
+The rootless `mmdebstrap --mode=unshare` build path expects your login
+shell's primary gid to match the passwd entry for your user.
+
+```bash
+id
+getent passwd "$USER"
+```
+
+The important part is that the shell's primary gid matches the gid in the
+passwd entry. In this session, `id` showed `gid=994(kvm)` while
+`getent passwd dchung` showed primary gid `1000`, and that caused:
+
+```text
+newuidmap ... failed
+failed to unshare the user namespace
+```
+
+If you see that mismatch, run the build from a normal login shell for the
+user instead of this restricted session.
+
+### 2. Load the vsock kernel module
+
+Cloud Hypervisor needs `/dev/vhost-vsock` for the guest vsock device:
+
+```bash
+sudo modprobe vhost_vsock
+ls -l /dev/vhost-vsock
+```
+
+### 3. Build both guest image sets
+
+Run these from a shell where step 1 is satisfied:
+
+```bash
+cd libs/vfs/examples/v1.1
+
+./build-guest.sh --guest alice
+./build-guest.sh --guest bob
+```
+
+### 4. Start one host server per guest
+
+In terminal 1:
+
+```bash
+cd /tmp/vfs-v11-multiguest
+
+cat libs/vfs/examples/v1.1/setup-alice.sh.vfs | \
+  cargo run -p motlie-vfs --example repl_host --features vsock -- \
+  --socket /tmp/motlie-vfs-alice.vsock_5000 \
+  --mount alice-home=/tmp/motlie-vfs-demo/alice-home \
+  --mount alice-workspace=/tmp/motlie-vfs-demo/alice-workspace
+```
+
+In terminal 2:
+
+```bash
+cd /tmp/vfs-v11-multiguest
+
+cat libs/vfs/examples/v1.1/setup-bob.sh.vfs | \
+  cargo run -p motlie-vfs --example repl_host --features vsock -- \
+  --socket /tmp/motlie-vfs-bob.vsock_5000 \
+  --mount bob-home=/tmp/motlie-vfs-demo/bob-home \
+  --mount bob-workspace=/tmp/motlie-vfs-demo/bob-workspace
+```
+
+### 5. Launch both guests
+
+In terminal 3:
+
+```bash
+cd libs/vfs/examples/v1.1
+./launch-ch.sh --guest alice --no-net
+```
+
+In terminal 4:
+
+```bash
+cd libs/vfs/examples/v1.1
+./launch-ch.sh --guest bob --no-net
+```
+
+### 6. Validate the mounted views
+
+Inside Alice:
+
+```bash
+mount | grep -E '/home/alice|/workspace'
+ls -la /home/alice/.ssh
+cat /home/alice/.env
+cat /workspace/README.md
+```
+
+Inside Bob:
+
+```bash
+mount | grep -E '/home/bob|/workspace'
+ls -la /home/bob/.ssh
+cat /home/bob/.env
+cat /workspace/README.md
+```
+
 ## What Changed Relative To v1
 
 - `repl_host` now supports repeated `--mount <tag>=<dir>`
