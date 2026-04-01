@@ -83,7 +83,7 @@ cd libs/vfs/examples/v1.1
    - `openssh-server`
    - `bash`, `coreutils`, `tmux`
    - `fuse3`, `libfuse3-3`
-   - `systemd`, `dbus`, `iproute2`
+   - `systemd`, `dbus`, `iproute2`, `cloud-init`
    - both demo users: `alice` and `bob`
    - `motlie-vfs-guest`
    - `overlay-init`
@@ -112,6 +112,7 @@ package-manager state under `/usr`, `/etc`, and `/var`.
 ```bash
 sudo apt install mmdebstrap squashfs-tools-ng e2fsprogs uidmap debian-archive-keyring
 sudo apt install libfuse3-dev pkg-config
+sudo apt install cloud-image-utils
 ```
 
 Also required:
@@ -119,6 +120,7 @@ Also required:
 - outbound network access for Debian packages and kernel download
 - a login shell whose primary gid matches the passwd entry for the user when using `mmdebstrap --mode=unshare`
 - `mkfs.ext4` at launch time for runtime overlay creation (`sudo apt install e2fsprogs`)
+- `cloud-localds` at launch-helper time when using `repl_host launch <guest>` (`sudo apt install cloud-image-utils`)
 
 On Ubuntu 24.04:
 

@@ -72,6 +72,7 @@
 //!   --dir <path>            host backing directory (single-guest mode)
 
 use std::io::{self, BufRead};
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::Mutex as StdMutex;
 use std::sync::Arc;
@@ -92,6 +93,7 @@ struct GuestConfig {
     name: String,
     socket_path: String,
     mounts: Vec<ConfiguredMount>,
+    identity: Option<GuestIdentity>,
 }
 
 #[derive(Clone)]
@@ -101,10 +103,17 @@ struct ConfiguredMount {
     host_path: PathBuf,
 }
 
+#[derive(Clone, Copy)]
+struct GuestIdentity {
+    uid: u32,
+    gid: u32,
+}
+
 struct GuestRuntime {
     server: Arc<FsServer>,
     socket_path: String,
     mounts: Vec<ConfiguredMount>,
+    identity: Option<GuestIdentity>,
 }
 
 struct AdminState {
@@ -145,6 +154,7 @@ async fn main() -> Result<()> {
                     name: guest_name,
                     socket_path: guest_socket,
                     mounts: Vec::new(),
+                    identity: None,
                 });
                 i += 2;
             }
@@ -227,6 +237,7 @@ async fn main() -> Result<()> {
                 guest_path: None,
                 host_path,
             }).collect(),
+            identity: None,
         });
         std::mem::forget(tempdir);
     }
@@ -237,6 +248,9 @@ async fn main() -> Result<()> {
             eprintln!("Guest: {}", config.name);
         }
         eprintln!("  Socket: {}", config.socket_path);
+        if let Some(identity) = config.identity {
+            eprintln!("  Identity: uid={} gid={}", identity.uid, identity.gid);
+        }
         eprintln!("  Mounts:");
         for mount in &config.mounts {
             if let Some(guest_path) = &mount.guest_path {
@@ -266,6 +280,7 @@ async fn main() -> Result<()> {
             server: Arc::clone(&server),
             socket_path: config.socket_path.clone(),
             mounts: config.mounts.clone(),
+            identity: config.identity,
         });
 
         let _ = std::fs::remove_file(&config.socket_path);
@@ -497,7 +512,12 @@ fn parse_repl_mount_target(spec: &str) -> Result<ConfiguredMount> {
     })
 }
 
-fn provision_guest(admin: &mut AdminState, guest_name: &str, socket_path: &str) -> Result<()> {
+fn provision_guest(
+    admin: &mut AdminState,
+    guest_name: &str,
+    socket_path: &str,
+    identity: Option<GuestIdentity>,
+) -> Result<()> {
     if guest_name.is_empty() || socket_path.is_empty() {
         anyhow::bail!("provision requires non-empty guest and socket");
     }
@@ -532,6 +552,7 @@ fn provision_guest(admin: &mut AdminState, guest_name: &str, socket_path: &str) 
             server,
             socket_path: socket_path.to_string(),
             mounts: Vec::new(),
+            identity,
         },
     );
     admin.guest_order.push(guest_name.to_string());
@@ -556,6 +577,141 @@ fn add_guest_mount(admin: &mut AdminState, guest_name: &str, mount: ConfiguredMo
     Ok(())
 }
 
+fn guest_login_name(guest_name: &str) -> &str {
+    guest_name
+}
+
+fn guest_home(runtime: &GuestRuntime, guest_name: &str) -> String {
+    runtime
+        .mounts
+        .iter()
+        .find_map(|mount| {
+            let guest_path = mount.guest_path.as_deref()?;
+            if guest_path == format!("/home/{guest_name}") {
+                Some(guest_path.to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| format!("/home/{guest_name}"))
+}
+
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\"'\"'"))
+}
+
+fn render_mounts_yaml(runtime: &GuestRuntime) -> Result<String> {
+    let mut out = String::from("mounts:\n");
+    for mount in &runtime.mounts {
+        let Some(guest_path) = &mount.guest_path else {
+            anyhow::bail!("mount '{}' is missing guest_path; cannot render mounts.yaml", mount.tag);
+        };
+        writeln!(&mut out, "  - tag: {}", mount.tag)?;
+        writeln!(&mut out, "    guest_path: {}", guest_path)?;
+        writeln!(&mut out, "    read_only: false")?;
+    }
+    Ok(out)
+}
+
+fn render_cloud_init(guest_name: &str, runtime: &GuestRuntime) -> Result<String> {
+    let identity = runtime
+        .identity
+        .ok_or_else(|| anyhow::anyhow!("guest '{guest_name}' is missing uid/gid; provision with explicit uid/gid"))?;
+    let mounts_yaml = render_mounts_yaml(runtime)?;
+    let home_dir = guest_home(runtime, guest_name);
+
+    let mut out = String::new();
+    out.push_str("#cloud-config\n");
+    out.push_str("write_files:\n");
+    out.push_str("  - path: /etc/motlie-vfs/mounts.yaml\n");
+    out.push_str("    owner: root:root\n");
+    out.push_str("    permissions: '0644'\n");
+    out.push_str("    content: |\n");
+    for line in mounts_yaml.lines() {
+        writeln!(&mut out, "      {line}")?;
+    }
+    out.push_str("runcmd:\n");
+    out.push_str("  - |\n");
+    writeln!(
+        &mut out,
+        "      if getent group {0} >/dev/null; then current_gid=\"$(getent group {0} | cut -d: -f3)\"; [ \"$current_gid\" = \"{1}\" ] || {{ echo \"gid mismatch for {0}: $current_gid != {1}\" >&2; exit 1; }}; else groupadd -g {1} {0}; fi",
+        guest_login_name(guest_name),
+        identity.gid
+    )?;
+    out.push_str("  - |\n");
+    writeln!(
+        &mut out,
+        "      if id -u {0} >/dev/null 2>&1; then current_uid=\"$(id -u {0})\"; current_gid=\"$(id -g {0})\"; [ \"$current_uid\" = \"{1}\" ] && [ \"$current_gid\" = \"{2}\" ] || {{ echo \"uid/gid mismatch for {0}: $current_uid:$current_gid != {1}:{2}\" >&2; exit 1; }}; else useradd -m -u {1} -g {2} -s /bin/bash {0}; fi",
+        guest_login_name(guest_name),
+        identity.uid,
+        identity.gid
+    )?;
+    out.push_str("  - |\n");
+    writeln!(
+        &mut out,
+        "      install -d -m 0755 -o {0} -g {0} {1}",
+        guest_login_name(guest_name),
+        home_dir
+    )?;
+    out.push_str("  - |\n");
+    writeln!(
+        &mut out,
+        "      install -d -m 0700 -o {0} -g {0} {1}/.ssh",
+        guest_login_name(guest_name),
+        home_dir
+    )?;
+    for mount in &runtime.mounts {
+        if let Some(guest_path) = &mount.guest_path {
+            if guest_path != &home_dir {
+                out.push_str("  - |\n");
+                writeln!(&mut out, "      install -d -m 0755 {}", guest_path)?;
+            }
+        }
+    }
+    out.push_str("  - systemctl restart motlie-vfs-guest\n");
+    Ok(out)
+}
+
+fn render_launch_script(guest_name: &str, runtime: &GuestRuntime) -> Result<String> {
+    let cloud_init = render_cloud_init(guest_name, runtime)?;
+    if guest_name != "alice" && guest_name != "bob" {
+        anyhow::bail!("launch prototype currently targets v1.1 demo guests alice/bob because launch-ch.sh still carries guest-specific runtime defaults");
+    }
+    let base_dir = "/tmp/vfs-v11-multiguest/libs/vfs/examples/v1.1";
+    let mut out = String::new();
+    out.push_str("#!/usr/bin/env bash\n");
+    out.push_str("set -euo pipefail\n\n");
+    out.push_str("# Generated by repl_host from the provisioned guest state.\n");
+    out.push_str("# Rebuild the shared v1.1 base image with the current build-guest.sh so the\n");
+    out.push_str("# guest includes cloud-init and consumes the attached NoCloud seed at boot.\n\n");
+    writeln!(&mut out, "GUEST_ID={}", shell_single_quote(guest_name))?;
+    writeln!(&mut out, "BASE_DIR=\"${{BASE_DIR:-{}}}\"", base_dir)?;
+    writeln!(&mut out, "SEED_DIR=\"${{SEED_DIR:-/tmp/motlie-vfs-cloud-init-${{GUEST_ID}}}}\"")?;
+    out.push_str("SEED_IMG=\"${SEED_IMG:-${SEED_DIR}/seed.img}\"\n");
+    out.push_str("INSTANCE_ID=\"${INSTANCE_ID:-${GUEST_ID}}\"\n");
+    out.push_str("LOCAL_HOSTNAME=\"${LOCAL_HOSTNAME:-motlie-${GUEST_ID}}\"\n");
+    out.push_str("if ! command -v cloud-localds >/dev/null 2>&1; then\n");
+    out.push_str("  echo \"ERROR: cloud-localds not found. Install cloud-image-utils.\" >&2\n");
+    out.push_str("  exit 1\n");
+    out.push_str("fi\n\n");
+    out.push_str("mkdir -p \"$SEED_DIR\"\n");
+    out.push_str("cat > \"$SEED_DIR/meta-data\" <<EOF\n");
+    out.push_str("instance-id: ${INSTANCE_ID}\n");
+    out.push_str("local-hostname: ${LOCAL_HOSTNAME}\n");
+    out.push_str("EOF\n\n");
+    out.push_str("cat > \"$SEED_DIR/user-data\" <<'EOF'\n");
+    out.push_str(&cloud_init);
+    if !cloud_init.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("EOF\n\n");
+    out.push_str("cloud-localds \"$SEED_IMG\" \"$SEED_DIR/user-data\" \"$SEED_DIR/meta-data\"\n\n");
+    out.push_str("echo \"Generated cloud-init assets in $SEED_DIR\"\n");
+    out.push_str("echo \"Launching guest ${GUEST_ID} with attached seed image ${SEED_IMG}\"\n");
+    out.push_str("\"$BASE_DIR/launch-ch.sh\" --guest \"$GUEST_ID\" --cloud-init-seed \"$SEED_IMG\" \"$@\"\n");
+    Ok(out)
+}
+
 // ---------------------------------------------------------------------------
 // Command dispatch — shared between all input modes
 // ---------------------------------------------------------------------------
@@ -569,10 +725,10 @@ enum ControlFlow {
 fn print_help(topic: Option<&str>, multi_guest: bool) {
     match topic {
         Some("provision") => {
-            println!("provision <guest> <socket>");
-            println!("  Create one guest-scoped FsServer and bind its Unix socket listener.");
+            println!("provision <guest> <socket> <uid> <gid>");
+            println!("  Create one guest-scoped FsServer, record the guest uid/gid contract, and bind its Unix socket listener.");
             println!("  Example:");
-            println!("    provision bob /tmp/motlie-vfs-bob.vsock_5000");
+            println!("    provision bob /tmp/motlie-vfs-bob.vsock_5000 1001 1001");
         }
         Some("mount") => {
             println!("mount <guest> <tag>=<guest_path>,<host_path> [more...]");
@@ -581,6 +737,12 @@ fn print_help(topic: Option<&str>, multi_guest: bool) {
             println!("  FsServer routing still uses tag -> host_path on the host side.");
             println!("  Example:");
             println!("    mount bob bob-home=/home/bob,/tmp/motlie-vfs-demo/bob-home bob-workspace=/workspace,/tmp/motlie-vfs-demo/bob-workspace");
+        }
+        Some("launch") => {
+            println!("launch <guest>");
+            println!("  Render a prototype helper shell script to stdout.");
+            println!("  The script embeds guest-specific cloud-init user-data and meta-data");
+            println!("  generated from the provisioned uid/gid and mount topology.");
         }
         Some("use") => {
             println!("use <guest>");
@@ -605,6 +767,7 @@ fn print_help(topic: Option<&str>, multi_guest: bool) {
         Some("mkdir") => {
             println!("mkdir <layer> <tag> <path> [mode]");
             println!("  Create a synthetic directory in one overlay layer.");
+            println!("  Defaults ownership to the provisioned guest uid/gid when available.");
         }
         Some("whiteout") => {
             println!("whiteout <layer> <tag> <path>");
@@ -644,8 +807,9 @@ fn print_help(topic: Option<&str>, multi_guest: bool) {
                 println!("  guests                                          — list configured guests");
                 println!("  use <guest>                                     — set default guest for subsequent commands");
                 println!("  <guest> <command ...>                           — run one command against a specific guest");
-                println!("  provision <guest> <socket>                      — create one guest-scoped FsServer and listener");
+                println!("  provision <guest> <socket> <uid> <gid>          — create one guest-scoped FsServer and listener");
                 println!("  mount <guest> <tag>=<guest_path>,<host_path>... — add one or more mounts to a guest");
+                println!("  launch <guest>                                  — print a prototype cloud-init launch helper");
                 println!("");
             }
             println!("Layer management:");
@@ -691,7 +855,11 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
             for guest in &admin.guest_order {
                 let marker = if guest == &admin.current_guest { "*" } else { " " };
                 if let Some(runtime) = admin.guests.get(guest) {
-                    println!("{marker} {guest} socket={} mounts={}", runtime.socket_path, runtime.mounts.len());
+                    if let Some(identity) = runtime.identity {
+                        println!("{marker} {guest} socket={} uid={} gid={} mounts={}", runtime.socket_path, identity.uid, identity.gid, runtime.mounts.len());
+                    } else {
+                        println!("{marker} {guest} socket={} mounts={}", runtime.socket_path, runtime.mounts.len());
+                    }
                 } else {
                     println!("{marker} {guest}");
                 }
@@ -711,15 +879,29 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
             println!("error: use <guest>");
             return ControlFlow::Continue;
         }
-        "provision" if parts.len() == 3 => {
-            match provision_guest(admin, parts[1], parts[2]) {
-                Ok(()) => println!("ok: provision {} {}", parts[1], parts[2]),
+        "provision" if parts.len() == 5 => {
+            let uid = match parts[3].parse::<u32>() {
+                Ok(uid) => uid,
+                Err(_) => {
+                    println!("error: uid must be a number");
+                    return ControlFlow::Continue;
+                }
+            };
+            let gid = match parts[4].parse::<u32>() {
+                Ok(gid) => gid,
+                Err(_) => {
+                    println!("error: gid must be a number");
+                    return ControlFlow::Continue;
+                }
+            };
+            match provision_guest(admin, parts[1], parts[2], Some(GuestIdentity { uid, gid })) {
+                Ok(()) => println!("ok: provision {} {} uid={} gid={}", parts[1], parts[2], uid, gid),
                 Err(e) => println!("error: {e}"),
             }
             return ControlFlow::Continue;
         }
         "provision" => {
-            println!("error: provision <guest> <socket>");
+            println!("error: provision <guest> <socket> <uid> <gid>");
             return ControlFlow::Continue;
         }
         "mount" if parts.len() >= 3 => {
@@ -743,6 +925,19 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
         }
         "mount" => {
             println!("error: mount <guest> <tag>=<guest_path>,<host_path> [more...]");
+            return ControlFlow::Continue;
+        }
+        "launch" if parts.len() == 2 => {
+            let guest_name = parts[1];
+            match admin.guests.get(guest_name).ok_or_else(|| anyhow::anyhow!("unknown guest '{guest_name}'"))
+                .and_then(|runtime| render_launch_script(guest_name, runtime)) {
+                Ok(script) => print!("{script}"),
+                Err(e) => println!("error: {e}"),
+            }
+            return ControlFlow::Continue;
+        }
+        "launch" => {
+            println!("error: launch <guest>");
             return ControlFlow::Continue;
         }
         "help" => {
@@ -826,9 +1021,13 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
             let mode = if parts.len() >= 5 {
                 u32::from_str_radix(parts[4], 8).unwrap_or(0o755)
             } else { 0o755 };
-            let attrs = OverlayAttrs { mode, uid: 0, gid: 0 };
+            let (uid, gid) = runtime
+                .identity
+                .map(|identity| (identity.uid, identity.gid))
+                .unwrap_or((0, 0));
+            let attrs = OverlayAttrs { mode, uid, gid };
             match overlay.create_dir(layer, tag, path, attrs) {
-                Ok(()) => println!("ok: mkdir {layer} {tag} {path} mode={mode:o}"),
+                Ok(()) => println!("ok: mkdir {layer} {tag} {path} mode={mode:o} uid={uid} gid={gid}"),
                 Err(e) => println!("error: {e}"),
             }
         }

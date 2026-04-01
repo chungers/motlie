@@ -175,7 +175,7 @@ where
 
     fn mkdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, mode: u32, _umask: u32, reply: ReplyEntry) {
         let name = name.to_string_lossy().into_owned();
-        match self.request(FsOp::Mkdir { parent, name, mode }) {
+        match self.request(FsOp::Mkdir { parent, name, mode, uid: _req.uid(), gid: _req.gid() }) {
             FsResult::Entry { inode, generation, attrs, .. } => {
                 reply.entry(&ZERO_TTL, &to_fuser_attr(&attrs, inode), generation);
             }
