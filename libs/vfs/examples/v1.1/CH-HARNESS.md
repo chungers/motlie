@@ -7,6 +7,14 @@
 - one vsock socket per guest VM
 - one guest-side FUSE mount thread per tag
 
+## What Differs Vs v1
+
+- `v1` runs one guest-oriented server flow at a time; `v1.1` is meant to run Alice and Bob concurrently
+- `v1` uses the legacy single-tag `--tag` / `--dir` server startup path; `v1.1` uses repeated `--mount <tag>=<dir>`
+- `v1` typically mounts one guest path; `v1.1` mounts two tags per guest in the demo
+- `v1` is single-socket, single-CID, single-artifact-tree; `v1.1` uses separate sockets, CIDs, and artifact trees per guest
+- `v1.1` relies on the guest-side `TAG <name>` handshake so one server socket can route multiple tag connections for the same guest
+
 ## Topology
 
 ```text
@@ -27,6 +35,15 @@ repl_host (bob server)                        bob VM
 
 Each guest mount connection goes to the guest's one socket and immediately sends `TAG <name>\n`. `repl_host` uses that handshake to route the stream to the right tag in its `FsServer`.
 
+## Prerequisites
+
+Before following this harness:
+
+- build both `v1.1` guest image sets
+- ensure `/dev/vhost-vsock` exists or load it with `sudo modprobe vhost_vsock`
+- use a shell that can successfully run the rootless `build-guest.sh` flow if you are rebuilding images
+- ensure `cloud-hypervisor` is installed and on `PATH`
+
 ## Build
 
 ```bash
@@ -40,6 +57,8 @@ Artifacts land in:
 
 - `artifacts/alice/`
 - `artifacts/bob/`
+
+You do not need a prior `v1` build. This harness uses only `v1.1` artifacts.
 
 ## Start Host Servers
 
@@ -65,6 +84,13 @@ cat setup-bob.sh.vfs | \
 
 `repl_host` still supports the old `--tag` / `--dir` path for `v1`, but `v1.1` uses repeated `--mount`.
 
+In this demo:
+
+- Alice server owns `alice-home` and `alice-workspace`
+- Bob server owns `bob-home` and `bob-workspace`
+- each `repl_host` process serves exactly one guest VM
+- each guest VM opens one connection per mount tag back to its own server socket
+
 ## Launch Guests
 
 Minimal concurrent demo:
@@ -88,6 +114,17 @@ Defaults:
 | alice | 3 | `/tmp/motlie-vfs-alice.vsock` | `/tmp/motlie-vfs-alice-api.sock` | `192.168.249.2` |
 | bob | 4 | `/tmp/motlie-vfs-bob.vsock` | `/tmp/motlie-vfs-bob-api.sock` | `192.168.250.2` |
 
+## Manual Run Order
+
+Use four terminals for the clearest flow:
+
+1. Terminal 1: start Alice `repl_host`
+2. Terminal 2: start Bob `repl_host`
+3. Terminal 3: launch Alice guest
+4. Terminal 4: launch Bob guest
+
+If you want SSH access for both guests, omit `--no-net` on both launch commands and connect to the guest IPs shown above.
+
 ## Validate
 
 Alice VM:
@@ -108,9 +145,20 @@ cat /home/bob/.env
 cat /workspace/README.md
 ```
 
+Expected shape:
+
+- `/home/alice` is backed by the `alice-home` tag
+- `/home/bob` is backed by the `bob-home` tag
+- both guests mount `/workspace`, but each guest gets its own tag and own host backing directory
+- `.env` and `.ssh` contents come from the in-memory overlay injected by the corresponding `setup-*.sh.vfs` file
+
 ## Shut Down
 
 ```bash
 curl --unix-socket /tmp/motlie-vfs-alice-api.sock -X PUT http://localhost/api/v1/vm.shutdown
 curl --unix-socket /tmp/motlie-vfs-bob-api.sock -X PUT http://localhost/api/v1/vm.shutdown
 ```
+
+## Standalone Expectation
+
+This document is the `v1.1` runtime runbook. It does not require a `v1` harness run first. The only shared pieces are the repository binaries and libraries that both examples build from the same workspace.
