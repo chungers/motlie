@@ -7,7 +7,8 @@ backend with libslirp for rootless guest networking.
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-03-31 | @claude | Initial PLAN: 4 phases from bootstrap to CH integration |
+| 2026-04-01 | @chungers | Address PR #125 review: add fd registration task, logging task, crate validation, fix vnet-vfs coupling, fix stale paths |
+| 2026-04-01 | @claude | Initial PLAN: 4 phases from bootstrap to CH integration |
 
 ## Status
 
@@ -42,7 +43,12 @@ Design references: [Component Architecture](./DESIGN.md), [Key Crates](./DESIGN.
   # Requires: sudo apt install libslirp-dev
   cargo check -p motlie-vnet
   ```
-- [ ] 1.1.5 Run workspace `cargo check` to verify no breakage.
+- [ ] 1.1.5 Validate crate versions on crates.io and workspace compatibility.
+  Verify `libslirp 4+`, `vhost 0.12+`, `vhost-user-backend 0.16+`,
+  `virtio-queue 0.12+`, `vm-memory 0.16+` are published and compatible
+  with the workspace's existing dependency tree (especially `vm-memory`
+  version alignment across vhost crates).
+- [ ] 1.1.6 Run workspace `cargo check` to verify no breakage.
 
 ### 1.2 libslirp Wrapper (`src/slirp.rs`)
 
@@ -84,7 +90,12 @@ Design references: [Data Flow](./DESIGN.md), [Open Questions: libslirp thread sa
   verify slirp responds with a DHCP offer.
 - [ ] 1.2.6 Add test: feed a DNS query frame, verify slirp produces a
   response (forwarded to host resolver).
-- [ ] 1.2.7 Verify libslirp is single-threaded safe: confirm the Rust bindings
+- [ ] 1.2.7 Set up `log` crate integration for the slirp wrapper.
+  - `guest_error()` callback → `log::warn!`
+  - Frame drops in `send_packet()` (e.g. queue full) → `log::debug!`
+  - Context creation / teardown → `log::info!`
+  This satisfies DESIGN NFR-2 (no panics — log and degrade gracefully).
+- [ ] 1.2.8 Verify libslirp is single-threaded safe: confirm the Rust bindings
   enforce `!Send` or document the pinning requirement.
 
 ---
@@ -122,6 +133,7 @@ Design references: [Data Flow](./DESIGN.md), [Threading Model](./DESIGN.md), [FR
   | 1 << VIRTIO_NET_F_CSUM
   | 1 << VIRTIO_NET_F_MAC
   | 1 << VIRTIO_F_VERSION_1
+  | 1 << VIRTIO_F_RING_PACKED  // optional — negotiated only if CH offers
   ```
   Verify against CH's required features (ref: [Open Questions](./DESIGN.md)).
 - [ ] 2.2.3 Implement tx path (guest → host):
@@ -133,12 +145,18 @@ Design references: [Data Flow](./DESIGN.md), [Threading Model](./DESIGN.md), [FR
   - After `slirp.pollfds_poll()`, drain rx frames from `SlirpHandler`
   - For each frame, write to rx virtqueue descriptor chain
   - Signal guest via eventfd
-- [ ] 2.2.5 Wire the slirp event loop into `handle_event()`:
+- [ ] 2.2.5 Register libslirp fds in the vhost-user epoll loop.
+  libslirp's `register_poll_fd()` / `unregister_poll_fd()` callbacks add/remove
+  host TCP/UDP socket fds. These must be registered with the `VhostUserDaemon`'s
+  epoll alongside the virtqueue kick eventfds, so a single `epoll_wait()` drives
+  both virtqueue processing and slirp's network I/O. This is the bridge between
+  the vhost-user event loop and the slirp event loop from Phase 1.
+- [ ] 2.2.6 Wire the slirp event loop into `handle_event()`:
   - On tx virtqueue kick: process all pending tx descriptors → slirp.input()
   - On timer/poll: run slirp poll cycle → drain rx → inject to rx virtqueue
-- [ ] 2.2.6 Add test: mock virtqueue with a tx descriptor containing an ARP
+- [ ] 2.2.7 Add test: mock virtqueue with a tx descriptor containing an ARP
   request, verify slirp processes it.
-- [ ] 2.2.7 Add test: inject an rx frame via slirp, verify it appears in the
+- [ ] 2.2.8 Add test: inject an rx frame via slirp, verify it appears in the
   rx virtqueue.
 
 ### 2.3 Public API (`src/lib.rs`)
@@ -180,27 +198,28 @@ Design references: [CH Integration](./DESIGN.md), [Guest Experience](./DESIGN.md
 
 ### 3.2 Integration with repl_host
 
-- [ ] 3.2.1 Add `motlie-vnet` as a dependency of `motlie-vfs` (optional, feature-gated).
+- [ ] 3.2.1 Add `motlie-vnet` as a **dev-dependency** of `motlie-vfs`.
+  `repl_host` is an `[[example]]`, so dev-dependencies suffice. This avoids
+  coupling the vfs library to vnet at the crate level.
   ```toml
   # libs/vfs/Cargo.toml
-  motlie-vnet = { path = "../vnet", optional = true }
-
-  [features]
-  net-backend = ["dep:motlie-vnet"]
+  [dev-dependencies]
+  motlie-vnet = { path = "../vnet" }
   ```
-- [ ] 3.2.2 In `repl_host.rs`, spawn vnet backend thread before entering REPL:
+- [ ] 3.2.2 In `repl_host.rs`, spawn vnet backend thread before entering REPL.
+  Gate on a CLI flag (e.g. `--net`) rather than a compile-time feature, since
+  the dependency is always available in dev builds:
   ```rust
-  #[cfg(feature = "net-backend")]
-  {
-      let backend = motlie_vnet::VnetBackend::builder()
-          .socket_path("/tmp/motlie-vhost-net.sock")
+  if args.net {
+      let socket = format!("/tmp/motlie-vnet-{}.sock", tag);
+      let config = motlie_vnet::VnetConfig::builder()
+          .socket_path(&socket)
           .build()?;
-      std::thread::spawn(move || {
-          if let Err(e) = backend.serve() {
-              eprintln!("vnet backend error: {e}");
-          }
-      });
-      eprintln!("vhost-user-net backend listening on /tmp/motlie-vhost-net.sock");
+      let handle = motlie_vnet::VnetBackend::new(config).start()?;
+      eprintln!("vhost-user-net: {socket}");
+      eprintln!("  Launch CH with: --memory size=512M,shared=true");
+      eprintln!("  --net vhost_user=true,socket={socket},num_queues=2");
+      // hold handle until repl_host exits
   }
   ```
 - [ ] 3.2.3 Update `launch-ch.sh` to detect socket and add `--net vhost_user=true,...`.
