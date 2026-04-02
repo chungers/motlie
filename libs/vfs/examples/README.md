@@ -58,7 +58,8 @@ cat setup-alice.sh.vfs | cargo run -p motlie-vfs --example repl_host --features 
 - `use <guest>` — set the default target guest
 - `provision <guest> <socket> <uid> <gid>` — create one guest-scoped `FsServer`, record guest identity, and listener
 - `mount <guest> <tag>=<guest_path>,<host_path> [more...]` — add one or more mounts to a guest
-- `launch <guest>` — print a prototype shell script that embeds generated cloud-init assets
+- `launch <guest>` — generate and execute a prototype shell script that embeds generated cloud-init assets
+- `launch -script <guest>` — print that helper shell script to stdout without executing it
 
 **Layer management:**
 - `layer <name> <priority>` — create or update a named layer
@@ -84,11 +85,15 @@ cat setup-alice.sh.vfs | cargo run -p motlie-vfs --example repl_host --features 
 - `help <command>` — show detailed usage for one command, for example `help provision`
 - `quit` — shut down server
 
-The `launch <guest>` command is a prototype workflow helper. It renders a
-shell script to stdout that embeds generated `mounts.yaml`, cloud-init
-`user-data`, and `meta-data` for that guest, including explicit identity setup
-commands in cloud-init `runcmd`. The intent is that a future VMM
-library can reuse the same rendering helpers programmatically.
+The `launch` commands are prototype workflow helpers.
+
+- `launch <guest>` renders the helper script to a temp file and executes it via `/bin/bash`
+- `launch -script <guest>` prints the same script to stdout
+
+The helper embeds generated `mounts.yaml`, cloud-init `user-data`, and
+`meta-data` for that guest, including explicit identity setup commands in
+cloud-init `runcmd`. The intent is that a future VMM library can reuse the
+same rendering helpers programmatically.
 
 Current prototype limitation:
 

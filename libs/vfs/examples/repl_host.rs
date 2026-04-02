@@ -74,6 +74,7 @@
 use std::io::{self, BufRead};
 use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::sync::Mutex as StdMutex;
 use std::sync::Arc;
 use std::collections::HashMap;
@@ -714,6 +715,26 @@ fn render_launch_script(guest_name: &str, runtime: &GuestRuntime) -> Result<Stri
     Ok(out)
 }
 
+fn execute_launch_script(script: &str) -> Result<()> {
+    let mut temp = tempfile::NamedTempFile::new()?;
+    use std::io::Write as _;
+    temp.write_all(script.as_bytes())?;
+    temp.flush()?;
+
+    let status = Command::new("/bin/bash")
+        .arg(temp.path())
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        anyhow::bail!("launch helper exited with status {status}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Command dispatch — shared between all input modes
 // ---------------------------------------------------------------------------
@@ -761,10 +782,12 @@ fn print_help(topic: Option<&str>, multi_guest: bool, comment_stdout: bool) {
         }
         Some("launch") => {
             out("launch <guest>");
-            out("  Render a prototype helper shell script to stdout.");
-            out("  The script embeds guest-specific cloud-init user-data and meta-data");
+            out("  Generate a guest helper script and execute it via /bin/bash.");
+            out("  The helper writes guest-specific cloud-init user-data and meta-data");
             out("  generated from the provisioned uid/gid and mount topology.");
-            out("  launch-ch.sh then seeds those files into /var/lib/cloud/seed/nocloud/");
+            out("  launch-ch.sh then seeds those files into /var/lib/cloud/seed/nocloud/.");
+            out("launch -script <guest>");
+            out("  Render the helper shell script to stdout without executing it.");
         }
         Some("use") => {
             out("use <guest>");
@@ -831,7 +854,8 @@ fn print_help(topic: Option<&str>, multi_guest: bool, comment_stdout: bool) {
                 out("  <guest> <command ...>                           — run one command against a specific guest");
                 out("  provision <guest> <socket> <uid> <gid>          — create one guest-scoped FsServer and listener");
                 out("  mount <guest> <tag>=<guest_path>,<host_path>... — add one or more mounts to a guest");
-                out("  launch <guest>                                  — print a prototype cloud-init launch helper");
+                out("  launch <guest>                                  — generate and execute a guest launch helper");
+                out("  launch -script <guest>                          — print the guest launch helper script");
                 out("");
             }
             out("Layer management:");
@@ -949,17 +973,27 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
             emit_status(admin, "error: mount <guest> <tag>=<guest_path>,<host_path> [more...]");
             return ControlFlow::Continue;
         }
-        "launch" if parts.len() == 2 => {
-            let guest_name = parts[1];
+        "launch" if parts.len() == 2 || (parts.len() == 3 && parts[1] == "-script") => {
+            let render_only = parts.len() == 3;
+            let guest_name = if render_only { parts[2] } else { parts[1] };
             match admin.guests.get(guest_name).ok_or_else(|| anyhow::anyhow!("unknown guest '{guest_name}'"))
                 .and_then(|runtime| render_launch_script(guest_name, runtime)) {
-                Ok(script) => emit_raw(script),
+                Ok(script) => {
+                    if render_only {
+                        emit_raw(script);
+                    } else {
+                        emit_status(admin, format!("ok: launch {guest_name} (executing helper script)"));
+                        if let Err(e) = execute_launch_script(&script) {
+                            emit_status(admin, format!("error: {e}"));
+                        }
+                    }
+                }
                 Err(e) => emit_status(admin, format!("error: {e}")),
             }
             return ControlFlow::Continue;
         }
         "launch" => {
-            emit_status(admin, "error: launch <guest>");
+            emit_status(admin, "error: launch <guest> | launch -script <guest>");
             return ControlFlow::Continue;
         }
         "help" => {
