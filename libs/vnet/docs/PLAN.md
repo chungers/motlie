@@ -7,6 +7,7 @@ backend with libslirp for rootless guest networking.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-02 | @claude | Address blocking review: SSH ingress tasks, guest migration tasks, crate layering, composed acceptance milestone, fix validation commands |
 | 2026-04-01 | @chungers | Address PR #125 review: add fd registration task, logging task, crate validation, fix vnet-vfs coupling, fix stale paths |
 | 2026-04-01 | @claude | Initial PLAN: 4 phases from bootstrap to CH integration |
 
@@ -83,19 +84,28 @@ Design references: [Data Flow](./DESIGN.md), [Open Questions: libslirp thread sa
       pub guest_ipv4: Ipv4Addr,   // default: 10.0.2.15
       pub host_ipv4: Ipv4Addr,    // default: 10.0.2.2
       pub netmask: Ipv4Addr,      // default: 255.255.255.0
-      pub dns: Ipv4Addr,          // default: from host /etc/resolv.conf
+      pub dns: Ipv4Addr,          // default: from host /etc/resolv.conf (runtime)
+      pub host_forwards: Vec<PortForward>,  // host→guest TCP port forwards
   }
   ```
-- [ ] 1.2.5 Add test: create slirp context, feed a DHCP discover frame,
+- [ ] 1.2.5 Implement `host_forward_tcp()` via libslirp's `slirp_add_hostfwd()`.
+  Design ref: [FR-7](./DESIGN.md). Each `PortForward` entry calls
+  `slirp_add_hostfwd(context, is_udp=false, host_addr, host_port, guest_addr, guest_port)`.
+  libslirp binds a host-side TCP listener and forwards accepted connections
+  to the guest IP inside the virtual network. This is the mechanism for SSH ingress.
+- [ ] 1.2.6 Add test: create slirp context, feed a DHCP discover frame,
   verify slirp responds with a DHCP offer.
-- [ ] 1.2.6 Add test: feed a DNS query frame, verify slirp produces a
+- [ ] 1.2.7 Add test: feed a DNS query frame, verify slirp produces a
   response (forwarded to host resolver).
-- [ ] 1.2.7 Set up `log` crate integration for the slirp wrapper.
+- [ ] 1.2.8 Add test: configure `host_forward_tcp(12222, 22)`, verify host
+  can connect to `127.0.0.1:12222` and the connection is accepted by libslirp.
+  (Full SSH validation requires a guest — see Phase 3.)
+- [ ] 1.2.9 Set up `log` crate integration for the slirp wrapper.
   - `guest_error()` callback → `log::warn!`
   - Frame drops in `send_packet()` (e.g. queue full) → `log::debug!`
   - Context creation / teardown → `log::info!`
   This satisfies DESIGN NFR-2 (no panics — log and degrade gracefully).
-- [ ] 1.2.8 Verify libslirp is single-threaded safe: confirm the Rust bindings
+- [ ] 1.2.10 Verify libslirp is single-threaded safe: confirm the Rust bindings
   enforce `!Send` or document the pinning requirement.
 
 ---
@@ -164,13 +174,17 @@ Design references: [Data Flow](./DESIGN.md), [Threading Model](./DESIGN.md), [FR
 Design references: [API Design](./DESIGN.md), [FR-6](./DESIGN.md)
 
 - [ ] 2.3.1 Implement `VnetBackend` builder:
+  Design ref: [API Design](./DESIGN.md), [FR-7](./DESIGN.md)
   ```rust
   pub struct VnetBackendBuilder {
       socket_path: PathBuf,
       guest_ipv4: Ipv4Addr,
       host_ipv4: Ipv4Addr,
+      host_forwards: Vec<PortForward>,  // host→guest TCP forwards
   }
   ```
+  Builder methods include `.host_forward_tcp(host_port, guest_port)` which
+  appends a `PortForward { bind_addr: 127.0.0.1, host_port, guest_port }`.
 - [ ] 2.3.2 Implement `VnetBackend::serve()`:
   - Create `VhostUserDaemon` with the backend
   - Bind Unix socket at `socket_path`
@@ -180,25 +194,139 @@ Design references: [API Design](./DESIGN.md), [FR-6](./DESIGN.md)
 
 ---
 
-## Phase 3: CH Integration and End-to-End Testing
+## Phase 3: Guest Migration, CH Integration, and End-to-End Testing
 
-Design references: [CH Integration](./DESIGN.md), [Guest Experience](./DESIGN.md)
+Design references: [CH Integration](./DESIGN.md), [Guest Experience](./DESIGN.md),
+[Guest Image and Launcher Migration](./DESIGN.md), [Zero-Host-Impact Model](./DESIGN.md)
 
-### 3.1 Shared Memory Requirement
+### 3.1 Guest Image Changes
 
-- [ ] 3.1.1 Verify CH vhost-user requires `--memory shared=true`.
-  Per [CH docs](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/main/docs/memory.md),
-  vhost-user devices need shared memory for guest RAM access.
-  ```bash
-  # launch-ch.sh must use:
-  --memory size=512M,shared=true
+Based on current `libs/vfs/examples/v1/build-guest.sh`. Changes are additive
+and do not break existing TAP or no-net modes.
+
+- [ ] 3.1.1 Add `systemd-networkd` DHCP config to guest image build.
+  Drop a network unit file into the squashfs that enables DHCP on `eth0`:
+  ```ini
+  # /etc/systemd/network/20-eth0.network
+  [Match]
+  Name=eth0
+
+  [Network]
+  DHCP=ipv4
+
+  [DHCPv4]
+  UseDNS=yes
   ```
-- [ ] 3.1.2 Update `launch-ch.sh` to add `shared=true` when vhost-user net is used.
-- [ ] 3.1.3 Test: verify CH starts with `shared=true` and vhost-user net socket.
+  This is a no-op when no NIC exists (`--no-net`) and harmless in TAP mode
+  (kernel `ip=` takes precedence for already-configured interfaces).
+- [ ] 3.1.2 Enable `systemd-networkd` in the guest image:
+  ```bash
+  chroot "$ROOTFS" systemctl enable systemd-networkd
+  ```
+- [ ] 3.1.3 Add validation packages to `build-guest.sh` package list.
+  Current packages: `openssh-server bash coreutils tmux fuse3 libfuse3-3
+  systemd systemd-sysv dbus iproute2`. Add:
+  ```
+  curl dnsutils
+  ```
+  These are needed for e2e network validation (3.4) and are small (~5MB).
+- [ ] 3.1.4 Rebuild guest image and verify existing TAP mode still works.
+  ```bash
+  cd libs/vfs/examples/v1
+  ./build-guest.sh
+  ./launch-ch.sh --net-mode=tap
+  # Inside guest: ip addr show eth0 should show 192.168.249.2 (static)
+  ```
 
-### 3.2 Integration with repl_host
+### 3.2 Launcher Migration
 
-- [ ] 3.2.1 Add `motlie-vnet` as a **dev-dependency** of `motlie-vfs`.
+- [ ] 3.2.1 Add `--net-mode={none,tap,vhost-user}` flag to `launch-ch.sh`.
+  Design ref: [Guest Image and Launcher Migration](./DESIGN.md).
+  ```bash
+  # --net-mode=none     → no --net arg, no ip= kernel param
+  # --net-mode=tap      → --net "tap=,...", ip=192.168.249.2...
+  # --net-mode=vhost-user → --memory shared=true, --net vhost_user=true,...
+  ```
+  Default: `none` (preserves current `--no-net` behavior).
+- [ ] 3.2.2 In `vhost-user` mode, add `shared=true` to `--memory` arg.
+  Per [CH docs](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/main/docs/memory.md),
+  vhost-user devices require shared memory for guest RAM access.
+- [ ] 3.2.3 In `vhost-user` mode, accept `--vnet-socket` path (default:
+  `/tmp/motlie-vnet-0.sock`). Do **not** add `ip=` to kernel cmdline —
+  guest uses DHCP via systemd-networkd.
+- [ ] 3.2.4 Verify CH starts in each mode:
+  ```bash
+  ./launch-ch.sh --net-mode=none       # vsock only
+  ./launch-ch.sh --net-mode=tap        # legacy TAP
+  ./launch-ch.sh --net-mode=vhost-user --vnet-socket=/tmp/motlie-vnet-0.sock
+  ```
+
+### 3.3 Crate Layering and Standalone Example
+
+Design ref: [Component Architecture](./DESIGN.md)
+
+- [ ] 3.3.1 Create `libs/vnet/examples/demo_host.rs` — standalone vnet demo.
+  Starts vnet backend with SSH port forward, prints connection instructions,
+  waits for Ctrl-C. No vfs dependency.
+  ```rust
+  // libs/vnet/examples/demo_host.rs
+  fn main() -> anyhow::Result<()> {
+      let config = motlie_vnet::VnetConfig::builder()
+          .socket_path("/tmp/motlie-vnet-0.sock")
+          .host_forward_tcp(2222, 22)
+          .build()?;
+      let handle = motlie_vnet::VnetBackend::new(config).start()?;
+      eprintln!("vnet backend running. SSH: ssh -p 2222 alice@127.0.0.1");
+      eprintln!("Launch CH: ./launch-ch.sh --net-mode=vhost-user");
+      // wait for Ctrl-C
+      handle.shutdown()
+  }
+  ```
+- [ ] 3.3.2 Add `[[example]]` entry to `libs/vnet/Cargo.toml`.
+- [ ] 3.3.3 Verify: `cargo run -p motlie-vnet --example demo_host` starts
+  the backend, socket file is created, CH can connect.
+
+### 3.4 End-to-End Validation (Standalone vnet)
+
+All validation uses commands available in the updated base image
+(3.1.3: `curl`, `dnsutils` added; `iproute2` already present).
+
+- [ ] 3.4.1 Boot CH guest with vhost-user-net, verify DHCP:
+  ```bash
+  # Inside guest:
+  ip addr show eth0
+  # Should show: 10.0.2.15/24 (assigned by libslirp DHCP)
+  ```
+- [ ] 3.4.2 Verify outbound TCP:
+  ```bash
+  curl -s -o /dev/null -w "%{http_code}" http://example.com
+  # Should print: 200
+  ```
+- [ ] 3.4.3 Verify DNS resolution:
+  ```bash
+  host google.com
+  # Should resolve to IP addresses
+  ```
+- [ ] 3.4.4 Verify `apt update` works inside the guest.
+- [ ] 3.4.5 Verify SSH ingress via hostfwd:
+  ```bash
+  # From host:
+  ssh -p 2222 -o StrictHostKeyChecking=no alice@127.0.0.1
+  # Should get interactive shell. Password: testpass
+  ```
+- [ ] 3.4.6 Verify zero host impact: no `CAP_NET_ADMIN` on CH binary,
+  no TAP device created, no host routes modified. `ip link` on host
+  shows no new interfaces.
+- [ ] 3.4.7 Verify clean shutdown: stop vnet backend, confirm CH handles
+  backend disconnect gracefully (guest sees link-down, no crash).
+
+### 3.5 Composed Acceptance: VFS + SSH Ingress + Internet Egress
+
+Design ref: [FR-7](./DESIGN.md). This is the feasibility target — proving
+that virtual filesystem, inbound SSH, and outbound Internet all work in
+the same guest VM flow.
+
+- [ ] 3.5.1 Add `motlie-vnet` as a **dev-dependency** of `motlie-vfs`.
   `repl_host` is an `[[example]]`, so dev-dependencies suffice. This avoids
   coupling the vfs library to vnet at the crate level.
   ```toml
@@ -206,49 +334,56 @@ Design references: [CH Integration](./DESIGN.md), [Guest Experience](./DESIGN.md
   [dev-dependencies]
   motlie-vnet = { path = "../vnet" }
   ```
-- [ ] 3.2.2 In `repl_host.rs`, spawn vnet backend thread before entering REPL.
-  Gate on a CLI flag (e.g. `--net`) rather than a compile-time feature, since
-  the dependency is always available in dev builds:
+- [ ] 3.5.2 In `repl_host.rs`, add `--net` CLI flag that spawns vnet backend
+  with SSH port forward before entering REPL:
   ```rust
   if args.net {
       let socket = format!("/tmp/motlie-vnet-{}.sock", tag);
       let config = motlie_vnet::VnetConfig::builder()
           .socket_path(&socket)
+          .host_forward_tcp(2222, 22)
           .build()?;
       let handle = motlie_vnet::VnetBackend::new(config).start()?;
       eprintln!("vhost-user-net: {socket}");
-      eprintln!("  Launch CH with: --memory size=512M,shared=true");
-      eprintln!("  --net vhost_user=true,socket={socket},num_queues=2");
+      eprintln!("  SSH: ssh -p 2222 alice@127.0.0.1");
       // hold handle until repl_host exits
   }
   ```
-- [ ] 3.2.3 Update `launch-ch.sh` to detect socket and add `--net vhost_user=true,...`.
-- [ ] 3.2.4 Update guest image to include DHCP client (already in Debian bookworm).
-
-### 3.3 End-to-End Validation
-
-- [ ] 3.3.1 Boot CH guest with vhost-user-net, verify `eth0` gets IP via DHCP.
+- [ ] 3.5.3 Full composed flow test:
   ```bash
-  # Inside guest:
-  ip addr show eth0
-  # Should show: 10.0.2.15/24
+  # Terminal 1: start host with VFS + vnet
+  cat setup-alice.sh.vfs | cargo run --example repl_host -- \
+      --tag alice-home --net
+
+  # Terminal 2: launch CH with vhost-user networking
+  ./launch-ch.sh --net-mode=vhost-user
+
+  # Terminal 3: verify all three capabilities
+  # 1. SSH ingress
+  ssh -p 2222 alice@127.0.0.1    # → interactive shell
+
+  # 2. VFS mounts (inside guest SSH session)
+  ls /home/alice/.ssh/            # → authorized_keys (from overlay)
+  cat /home/alice/.env            # → ANTHROPIC_API_KEY (from overlay)
+
+  # 3. Internet egress (inside guest SSH session)
+  curl -s http://example.com      # → HTML response
+  apt update                      # → package list refresh
   ```
-- [ ] 3.3.2 Verify outbound TCP: `curl -s http://example.com`.
-- [ ] 3.3.3 Verify DNS resolution: `host google.com`.
-- [ ] 3.3.4 Verify `apt update` works inside the guest.
-- [ ] 3.3.5 Verify no host capabilities needed: remove `CAP_NET_ADMIN` from CH,
-  confirm guest still has internet.
-- [ ] 3.3.6 Verify clean shutdown: stop repl_host, confirm CH handles
-  backend disconnect gracefully.
+- [ ] 3.5.4 Document the composed flow in `libs/vfs/examples/v1/README.md`
+  as the recommended development setup.
 
 ---
 
 ## Phase 4: Documentation and Cleanup
 
-- [ ] 4.1.1 Update `libs/vfs/examples/v1/README.md` with vhost-user-net instructions.
-- [ ] 4.1.2 Update `libs/vfs/examples/v1/CH-HARNESS.md` prerequisites and launch flow.
-- [ ] 4.1.3 Remove `CAP_NET_ADMIN` / `setcap` references from all docs.
-- [ ] 4.1.4 Add `libs/vnet/README.md` with usage examples.
+- [ ] 4.1.1 Update `libs/vfs/examples/v1/README.md` with vhost-user-net instructions
+  and the composed VFS + SSH + Internet flow.
+- [ ] 4.1.2 Update `libs/vfs/examples/v1/CH-HARNESS.md` prerequisites and launch flow
+  for all three `--net-mode` options.
+- [ ] 4.1.3 Remove `CAP_NET_ADMIN` / `setcap` references from all docs (TAP mode
+  docs should note it as legacy requiring capabilities).
+- [ ] 4.1.4 Add `libs/vnet/README.md` with usage examples (standalone and composed).
 - [ ] 4.1.5 Remove `libs/vfs/docs/PLAN-v1.md` v1.5 networking section (now lives here).
 - [ ] 4.1.6 Update DESIGN.md open questions with resolved answers.
 
@@ -256,13 +391,16 @@ Design references: [CH Integration](./DESIGN.md), [Guest Experience](./DESIGN.md
 
 ## Delivery Order
 
-1. **Phase 1** (1.1 → 1.2) — bootstrap + libslirp wrapper
-2. **Phase 2** (2.1 → 2.2 → 2.3) — vhost-user backend
-3. **Phase 3** (3.1 → 3.2 → 3.3) — CH integration + e2e
+1. **Phase 1** (1.1 → 1.2) — bootstrap + libslirp wrapper + hostfwd
+2. **Phase 2** (2.1 → 2.2 → 2.3) — vhost-user backend + public API
+3. **Phase 3** (3.1 → 3.2 → 3.3 → 3.4 → 3.5) — guest migration, launcher,
+   standalone e2e, composed acceptance
 4. **Phase 4** — docs and cleanup
 
 Phases 1 and 2 can be developed and tested independently of CH.
-Phase 3 requires a running CH instance for e2e validation.
+Phase 3.1–3.2 (guest image + launcher) can be done in parallel with Phases 1–2.
+Phase 3.3–3.5 require both the vnet library (Phase 2) and the updated guest
+image (Phase 3.1) to be ready.
 
 ## Dependencies
 
@@ -271,4 +409,8 @@ Phase 3 requires a running CH instance for e2e validation.
 | `libslirp-dev` | System (apt) | Phase 1+ |
 | `vhost` crate | Rust | Phase 2+ |
 | `vhost-user-backend` crate | Rust | Phase 2+ |
-| CH with `--memory shared=true` | Runtime | Phase 3 |
+| `curl`, `dnsutils` | Guest image (apt) | Phase 3.1+ |
+| `systemd-networkd` config | Guest image | Phase 3.1+ |
+| Updated `launch-ch.sh` | Script | Phase 3.2+ |
+| CH with `--memory shared=true` | Runtime | Phase 3.3+ |
+| `motlie-vfs` dev-dep on `motlie-vnet` | Rust | Phase 3.5 |
