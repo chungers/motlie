@@ -25,6 +25,14 @@ cargo run -p motlie-vfs --example repl_host --features vsock -- --tag alice-home
 # → rustyline REPL with line editing, history, ^C handling
 ```
 
+**Preferred setup-file startup (`--script ...`):**
+```bash
+cargo run -p motlie-vfs --example repl_host --features vsock -- --empty --script setup-multiguest.sh.vfs
+# → executes the setup file first
+# → keeps stdin attached to the real terminal
+# → full rustyline history, arrows, and control characters work
+```
+
 **Pipe then interactive (`cat script - | ...`):**
 ```bash
 cat setup-alice.sh.vfs - | cargo run -p motlie-vfs --example repl_host --features vsock -- --tag alice-home
@@ -39,6 +47,8 @@ cat setup-alice.sh.vfs | cargo run -p motlie-vfs --example repl_host --features 
 # → for v1.1 operator-driven flows, prefer `cat script - | ...`
 # → status/help lines emitted during scripted stdin are prefixed with `# `
 #   so generated helper scripts remain executable shell scripts
+# → arrow keys and other terminal control sequences may still be degraded
+#   because the shell pipeline sits between your terminal and repl_host
 ```
 
 ### Options

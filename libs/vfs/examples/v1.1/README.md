@@ -153,6 +153,20 @@ package installs.
 
 ### 2. Start one host server process for both guest VMs
 
+Preferred interactive startup:
+
+```bash
+cd /tmp/vfs-v11-multiguest
+
+cargo run -p motlie-vfs --example repl_host --features vsock -- \
+  --empty --script libs/vfs/examples/v1.1/setup-multiguest.sh.vfs
+```
+
+This keeps `repl_host` attached directly to your terminal, so `rustyline`
+history, arrow keys, and other control sequences work normally.
+
+Pipe-based startup still works:
+
 ```bash
 cd /tmp/vfs-v11-multiguest
 
@@ -232,6 +246,7 @@ shell-script helper rather than a VMM library API.
 
 Operator notes:
 
+- prefer `--script <file>` for interactive operator use; that keeps stdin on the real TTY so `rustyline` history and non-printable keys work correctly
 - use `cat ... - | cargo run ...` so the setup file is consumed first and stdin stays attached to your terminal
 - that keeps the shared `repl_host` process alive while guests boot and connect
 - the generated helper does not require `cloud-localds`; `launch-ch.sh` copies the NoCloud files into the per-launch guest overlay directly
