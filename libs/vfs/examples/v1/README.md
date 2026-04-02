@@ -54,7 +54,7 @@ cargo run -p motlie-vfs --example repl_host --features vsock -- \
 The host server:
 - Creates `FsServer` with tag `alice-home` backed by the specified directory
 - Listens on `/tmp/motlie-vfs.vsock_5000` for guest vsock connections
-- Binds each guest connection to its tag with a short `TAG <name>` handshake
+- Serves the configured single-tag `alice-home` mount on the legacy v1 transport
 - Accepts REPL commands to inject/whiteout/remove overlay files
 
 Start the server **before** launching the VM.
@@ -146,7 +146,7 @@ Host                                      Guest (Cloud Hypervisor VM)
 ────                                      ─────
 repl_host                                 motlie-vfs-guest
   FsServer + MemOverlay                     reads mounts.yaml
-  vsock listener (:5000)  ←── vsock ──→     tag handshake + VsockClientTransport
+  vsock listener (:5000)  ←── vsock ──→     VsockClientTransport
   stdin REPL (admin)                        FuseClient → fuser::mount2
                                             /home/alice (FUSE mount)
 ```

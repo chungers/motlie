@@ -58,9 +58,14 @@ fn main() -> Result<()> {
     let runner = GuestMountRunner::new(specs);
 
     // On Linux with the vsock + client features, use the real FUSE mount path.
-    // Each mount connects to the host listener on port 5000, sends a tiny
-    // `TAG <name>\n` prelude, and then switches to the framed FsOp/FsResult
-    // request/response stream.
+    // The connector closure:
+    // 1. Opens a vsock connection to the host (CID 2, port 5000)
+    // 2. Returns a VsockClientTransport ready for FsOp/FsResult exchange
+    //
+    // Note: VMM-level handshake (HandshakeMsg::Fs { tag }) is outside this
+    // crate. In the v1 CH harness, the host side dispatches by the vsock
+    // port convention (one port per tag, or a multiplexer). For the simplest
+    // v1 test, the host serves a single tag on port 5000.
     #[cfg(all(feature = "vsock", feature = "client"))]
     let handles = {
         use motlie_vfs::vsock::client::VsockClientTransport;
@@ -69,9 +74,7 @@ fn main() -> Result<()> {
             let tag = tag.to_string();
             let stream = rt.block_on(async {
                 let addr = tokio_vsock::VsockAddr::new(HOST_CID, VMM_PORT);
-                let mut stream = tokio_vsock::VsockStream::connect(addr).await?;
-                motlie_vfs::vsock::write_tag_handshake(&mut stream, &tag).await?;
-                Ok::<_, anyhow::Error>(stream)
+                tokio_vsock::VsockStream::connect(addr).await
             })?;
 
             Ok(VsockClientTransport::new(stream, &tag))

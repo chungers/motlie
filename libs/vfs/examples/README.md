@@ -90,7 +90,7 @@ to treat as an explicit contract for both binaries:
 
 - `socket`: the host-side Unix socket created by `repl_host` or `repl_host_v1_1` must match the socket path that the guest connects to
 - `guest id`: only the admin control plane uses this; it selects which guest-scoped `FsServer` owns a socket and a set of mounts
-- `tag`: the guest sends `TAG <name>` on connect, and the host must have provisioned that same tag in the target guest `FsServer`
+- `tag`: in `v1.1`, the guest sends `TAG <name>` on connect and the host must have provisioned that same tag in the target guest `FsServer`; in `v1`, the single configured tag is selected by the host-side listener setup
 - `guest_path`: the guest mount config decides where a tag is mounted inside the guest, for example `/home/alice` or `/workspace`
 - `host_path`: the host REPL binds each tag to a host backing directory
 - `uid/gid/mode`: overlay-injected files such as `.ssh/authorized_keys` or `.env` must use values that make sense for the guest user, and `provision` now records the intended guest uid/gid explicitly
