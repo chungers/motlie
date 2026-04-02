@@ -4,9 +4,10 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-03-31 | @claude | Complete API design: builder, start/shutdown, multi-guest, error types, repl_host integration. Resolve all open questions (features, shared memory, thread safety). Expand testing matrix |
-| 2026-03-31 | @claude | Expand NFRs: instance model, isolation, socket parametrization, teardown, netns, performance on DGX Spark |
-| 2026-03-31 | @claude | Initial DESIGN: problem statement, motivation, architecture, alternatives analysis |
+| 2026-04-01 | @chungers | Address PR #125 review: clarify RING_PACKED, DNS build-time, drop vs shutdown, MAC defaults, ICMP fallback, module re-exports, thiserror |
+| 2026-04-01 | @claude | Complete API design: builder, start/shutdown, multi-guest, error types, repl_host integration. Resolve all open questions (features, shared memory, thread safety). Expand testing matrix |
+| 2026-04-01 | @claude | Expand NFRs: instance model, isolation, socket parametrization, teardown, netns, performance on DGX Spark |
+| 2026-04-01 | @claude | Initial DESIGN: problem statement, motivation, architecture, alternatives analysis |
 
 ## Problem Statement
 
@@ -206,7 +207,9 @@ libslirp for user-mode TCP/IP translation.
   - UDP: `sendto()` / `recvfrom()` as regular user
   - ICMP: libslirp uses unprivileged ICMP sockets (requires
     `net.ipv4.ping_group_range` to include the user's gid, which is
-    the default on modern Linux)
+    the default on modern Linux). If the sysctl is restrictive, `ping`
+    from the guest silently fails (ICMP socket creation returns EACCES,
+    libslirp drops the packet). TCP/UDP are unaffected.
   - DNS: forwarded to host resolver via UDP socket
 
   If the orchestrator wants to isolate guests from each other at the
@@ -289,7 +292,7 @@ Cloud Hypervisor (vhost-user frontend)
 ```
 libs/vnet/
 ├── src/
-│   ├── lib.rs              # Public API: VnetBackend::new().serve(socket_path)
+│   ├── lib.rs              # Public API: re-exports VnetConfig, VnetBackend, VnetHandle, VnetError
 │   ├── backend.rs          # VhostUserBackend trait implementation
 │   ├── slirp.rs            # libslirp wrapper: event loop, frame I/O
 │   └── virtq.rs            # Virtqueue ↔ slirp frame bridging
@@ -342,12 +345,15 @@ pub struct VnetConfig {
     pub netmask: Ipv4Addr,
 
     /// DNS server IP presented to the guest via DHCP.
-    /// Default: parsed from host /etc/resolv.conf at build time.
+    /// Default: parsed from host /etc/resolv.conf when `.build()` is called (runtime).
     /// libslirp forwards guest DNS queries to this address on the host.
     pub dns_ipv4: Ipv4Addr,
 
     /// MAC address for the guest's virtio-net device.
-    /// Default: 52:54:00:12:34:56 (QEMU convention)
+    /// Default: 52:54:00:12:34:56 (QEMU convention).
+    /// Safe to reuse across guests since each slirp instance is isolated.
+    /// For multi-guest orchestrators that may bridge guests in the future,
+    /// generate unique MACs (e.g. randomize the last 3 octets per guest).
     pub mac: [u8; 6],
 }
 
@@ -397,7 +403,9 @@ let handle: VnetHandle = VnetBackend::new(config).start()?;
 // Explicit shutdown (blocks until thread exits):
 handle.shutdown()?;
 
-// Or just drop — triggers shutdown, but does not wait:
+// Or just drop — triggers shutdown, but does not block on thread exit.
+// Prefer shutdown() when deterministic cleanup matters (e.g. ensuring
+// the socket file is unlinked before starting a new backend).
 drop(handle);
 ```
 
@@ -466,7 +474,8 @@ pub enum VnetError {
     ThreadPanic,
 }
 
-impl From<VnetError> for anyhow::Error { ... }
+// Derive with thiserror — anyhow::Error conversion is automatic.
+// impl std::error::Error for VnetError { ... }
 ```
 
 ### Threading Model
@@ -554,7 +563,8 @@ const BACKEND_FEATURES: u64 =
   | 1 << VIRTIO_NET_F_CSUM          // backend handles checksum
   | 1 << VIRTIO_NET_F_MAC           // backend provides MAC
   | 1 << VIRTIO_F_VERSION_1         // virtio 1.0 (required by CH)
-  | 1 << VIRTIO_F_RING_PACKED;      // packed virtqueue (if CH offers)
+  | 1 << VIRTIO_F_RING_PACKED;      // packed virtqueue (optional — negotiated only if CH offers it;
+                                     // the vhost-user-backend crate handles split vs packed transparently)
 ```
 
 We do **not** advertise `VIRTIO_NET_F_MRG_RXBUF` (mergeable rx buffers) in v1
