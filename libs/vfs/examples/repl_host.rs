@@ -71,7 +71,7 @@
 //!   --tag <name>            mount tag (single-guest mode)
 //!   --dir <path>            host backing directory (single-guest mode)
 
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Write};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::fs::File;
@@ -124,6 +124,7 @@ struct AdminState {
     current_guest: String,
     multi_guest: bool,
     comment_stdout: bool,
+    prompt_state: Arc<StdMutex<String>>,
     runtime: Handle,
     sockets_for_cleanup: Arc<StdMutex<Vec<String>>>,
 }
@@ -269,6 +270,7 @@ async fn main() -> Result<()> {
     let mut guest_order = Vec::new();
     let sockets_for_cleanup = Arc::new(StdMutex::new(Vec::new()));
     let runtime = Handle::current();
+    let prompt_state = Arc::new(StdMutex::new("vfs> ".to_string()));
 
     for config in guest_configs {
         let mut builder = FsServer::builder()
@@ -289,7 +291,14 @@ async fn main() -> Result<()> {
         let _ = std::fs::remove_file(&config.socket_path);
         let listener = UnixListener::bind(&config.socket_path)?;
         sockets_for_cleanup.lock().expect("cleanup socket lock poisoned").push(config.socket_path.clone());
-        spawn_guest_listener(&runtime, config.name.clone(), config.socket_path.clone(), listener, server);
+        spawn_guest_listener(
+            &runtime,
+            config.name.clone(),
+            config.socket_path.clone(),
+            listener,
+            server,
+            Arc::clone(&prompt_state),
+        );
     }
 
     eprintln!("Type 'help' for commands.");
@@ -302,6 +311,7 @@ async fn main() -> Result<()> {
         current_guest,
         multi_guest,
         comment_stdout: false,
+        prompt_state,
         runtime,
         sockets_for_cleanup: Arc::clone(&sockets_for_cleanup),
     };
@@ -390,6 +400,7 @@ fn run_interactive_repl(admin: &mut AdminState) {
         } else {
             "vfs> ".to_string()
         };
+        store_prompt(&admin.prompt_state, prompt.clone());
         let line = match rl.readline(&prompt) {
             Ok(line) => line,
             Err(rustyline::error::ReadlineError::Interrupted) => { eprintln!("^C"); continue; }
@@ -424,12 +435,29 @@ fn wait_for_signal() {
     }
 }
 
+fn store_prompt(prompt_state: &Arc<StdMutex<String>>, prompt: String) {
+    if let Ok(mut current) = prompt_state.lock() {
+        *current = prompt;
+    }
+}
+
+fn redraw_prompt(prompt_state: &Arc<StdMutex<String>>) {
+    let prompt = match prompt_state.lock() {
+        Ok(current) => current.clone(),
+        Err(_) => "vfs> ".to_string(),
+    };
+    let _ = writeln!(io::stderr());
+    let _ = write!(io::stderr(), "{prompt}");
+    let _ = io::stderr().flush();
+}
+
 fn spawn_guest_listener(
     runtime: &Handle,
     guest_name: String,
     socket_path: String,
     listener: UnixListener,
     server: Arc<FsServer>,
+    prompt_state: Arc<StdMutex<String>>,
 ) {
     eprintln!("Listening on {socket_path} for guest '{guest_name}' (guest filesystem connections)");
 
@@ -441,25 +469,33 @@ fn spawn_guest_listener(
                         Ok(tag) => tag,
                         Err(e) => {
                             eprintln!("[{guest_name}] connection handshake error: {e}");
+                            redraw_prompt(&prompt_state);
                             continue;
                         }
                     };
                     if !server.has_mount(&tag) {
                         eprintln!("[{guest_name}] connection requested unknown tag: {tag}");
+                        redraw_prompt(&prompt_state);
                         continue;
                     }
                     let handler = VsockConnectionHandler::new(Arc::clone(&server), &tag);
                     let guest_name_for_conn = guest_name.clone();
                     let tag_for_conn = tag.clone();
+                    let prompt_state_for_conn = Arc::clone(&prompt_state);
                     tokio::spawn(async move {
                         match handler.serve(stream).await {
                             Ok(()) => eprintln!("[{guest_name_for_conn}] connection handler closed cleanly for tag={tag_for_conn}"),
                             Err(e) => eprintln!("[{guest_name_for_conn}] connection handler error for tag={tag_for_conn}: {e}"),
                         }
+                        redraw_prompt(&prompt_state_for_conn);
                     });
                     eprintln!("[accepted guest connection guest={guest_name} tag={tag}]");
+                    redraw_prompt(&prompt_state);
                 }
-                Err(e) => eprintln!("[{guest_name}] accept error: {e}"),
+                Err(e) => {
+                    eprintln!("[{guest_name}] accept error: {e}");
+                    redraw_prompt(&prompt_state);
+                }
             }
         }
     });
@@ -553,6 +589,7 @@ fn provision_guest(
         socket_path.to_string(),
         listener,
         Arc::clone(&server),
+        Arc::clone(&admin.prompt_state),
     );
 
     admin.guests.insert(
@@ -971,6 +1008,11 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
         "use" if parts.len() == 2 => {
             if admin.guests.contains_key(parts[1]) {
                 admin.current_guest = parts[1].to_string();
+                if admin.multi_guest {
+                    store_prompt(&admin.prompt_state, format!("vfs[{}]> ", admin.current_guest));
+                } else {
+                    store_prompt(&admin.prompt_state, "vfs> ".to_string());
+                }
                 emit_status(admin, format!("ok: using guest {}", admin.current_guest));
             } else {
                 emit_status(admin, format!("error: unknown guest {}", parts[1]));
