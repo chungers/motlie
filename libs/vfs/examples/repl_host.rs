@@ -121,6 +121,7 @@ struct AdminState {
     guest_order: Vec<String>,
     current_guest: String,
     multi_guest: bool,
+    comment_stdout: bool,
     runtime: Handle,
     sockets_for_cleanup: Arc<StdMutex<Vec<String>>>,
 }
@@ -298,6 +299,7 @@ async fn main() -> Result<()> {
         guest_order,
         current_guest,
         multi_guest,
+        comment_stdout: false,
         runtime,
         sockets_for_cleanup: Arc::clone(&sockets_for_cleanup),
     };
@@ -324,9 +326,11 @@ fn run_input(mut admin: AdminState) {
     let stdin_is_tty = atty::is(atty::Stream::Stdin);
 
     if stdin_is_tty {
+        admin.comment_stdout = false;
         // Mode 1: Interactive TTY — rustyline REPL
         run_interactive_repl(&mut admin);
     } else {
+        admin.comment_stdout = true;
         // Modes 2 & 3: Piped input — read stdin line by line
         eprintln!("--- reading commands from stdin ---");
         let stdin = io::stdin();
@@ -353,6 +357,7 @@ fn run_input(mut admin: AdminState) {
                 // Switch to interactive rustyline REPL.
                 eprintln!("--- entering interactive REPL (Ctrl-D to stop, server keeps running) ---");
                 eprintln!("");
+                admin.comment_stdout = false;
                 run_interactive_repl(&mut admin);
                 return;
             }
@@ -719,127 +724,146 @@ enum ControlFlow {
     Quit,
 }
 
-fn print_help(topic: Option<&str>, multi_guest: bool) {
+fn emit_line(comment_stdout: bool, line: impl AsRef<str>) {
+    let line = line.as_ref();
+    if comment_stdout {
+        println!("# {line}");
+    } else {
+        println!("{line}");
+    }
+}
+
+fn emit_status(admin: &AdminState, line: impl AsRef<str>) {
+    emit_line(admin.comment_stdout, line);
+}
+
+fn emit_raw(text: impl AsRef<str>) {
+    print!("{}", text.as_ref());
+}
+
+fn print_help(topic: Option<&str>, multi_guest: bool, comment_stdout: bool) {
+    let out = |line: &str| emit_line(comment_stdout, line);
+
     match topic {
         Some("provision") => {
-            println!("provision <guest> <socket> <uid> <gid>");
-            println!("  Create one guest-scoped FsServer, record the guest uid/gid contract, and bind its Unix socket listener.");
-            println!("  Example:");
-            println!("    provision bob /tmp/motlie-vfs-bob.vsock_5000 1001 1001");
+            out("provision <guest> <socket> <uid> <gid>");
+            out("  Create one guest-scoped FsServer, record the guest uid/gid contract, and bind its Unix socket listener.");
+            out("  Example:");
+            out("    provision bob /tmp/motlie-vfs-bob.vsock_5000 1001 1001");
         }
         Some("mount") => {
-            println!("mount <guest> <tag>=<guest_path>,<host_path> [more...]");
-            println!("  Add one or more host-backed mount tags to an already-provisioned guest.");
-            println!("  guest_path is recorded for operator clarity and should match mounts.<guest>.yaml.");
-            println!("  FsServer routing still uses tag -> host_path on the host side.");
-            println!("  Example:");
-            println!("    mount bob bob-home=/home/bob,/tmp/motlie-vfs-demo/bob-home bob-workspace=/workspace,/tmp/motlie-vfs-demo/bob-workspace");
+            out("mount <guest> <tag>=<guest_path>,<host_path> [more...]");
+            out("  Add one or more host-backed mount tags to an already-provisioned guest.");
+            out("  guest_path is recorded for operator clarity and should match mounts.<guest>.yaml.");
+            out("  FsServer routing still uses tag -> host_path on the host side.");
+            out("  Example:");
+            out("    mount bob bob-home=/home/bob,/tmp/motlie-vfs-demo/bob-home bob-workspace=/workspace,/tmp/motlie-vfs-demo/bob-workspace");
         }
         Some("launch") => {
-            println!("launch <guest>");
-            println!("  Render a prototype helper shell script to stdout.");
-            println!("  The script embeds guest-specific cloud-init user-data and meta-data");
-            println!("  generated from the provisioned uid/gid and mount topology.");
-            println!("  launch-ch.sh then seeds those files into /var/lib/cloud/seed/nocloud/");
+            out("launch <guest>");
+            out("  Render a prototype helper shell script to stdout.");
+            out("  The script embeds guest-specific cloud-init user-data and meta-data");
+            out("  generated from the provisioned uid/gid and mount topology.");
+            out("  launch-ch.sh then seeds those files into /var/lib/cloud/seed/nocloud/");
         }
         Some("use") => {
-            println!("use <guest>");
-            println!("  Set the default target guest for subsequent admin commands.");
+            out("use <guest>");
+            out("  Set the default target guest for subsequent admin commands.");
         }
         Some("guests") => {
-            println!("guests");
-            println!("  List provisioned guests, sockets, and configured mount counts.");
+            out("guests");
+            out("  List provisioned guests, sockets, and configured mount counts.");
         }
         Some("layer") => {
-            println!("layer <name> <priority>");
-            println!("  Create or update a named overlay layer.");
+            out("layer <name> <priority>");
+            out("  Create or update a named overlay layer.");
         }
         Some("put") => {
-            println!("put <layer> <tag> <path> <content>");
-            println!("  Inject a file with default attrs into one tag within the current guest.");
+            out("put <layer> <tag> <path> <content>");
+            out("  Inject a file with default attrs into one tag within the current guest.");
         }
         Some("putattr") => {
-            println!("putattr <layer> <tag> <path> <uid> <gid> <mode> <content>");
-            println!("  Inject a file with explicit ownership and mode.");
+            out("putattr <layer> <tag> <path> <uid> <gid> <mode> <content>");
+            out("  Inject a file with explicit ownership and mode.");
         }
         Some("mkdir") => {
-            println!("mkdir <layer> <tag> <path> [mode]");
-            println!("  Create a synthetic directory in one overlay layer.");
-            println!("  Defaults ownership to the provisioned guest uid/gid when available.");
+            out("mkdir <layer> <tag> <path> [mode]");
+            out("  Create a synthetic directory in one overlay layer.");
+            out("  Defaults ownership to the provisioned guest uid/gid when available.");
         }
         Some("whiteout") => {
-            println!("whiteout <layer> <tag> <path>");
-            println!("  Hide a lower-layer entry at the effective view.");
+            out("whiteout <layer> <tag> <path>");
+            out("  Hide a lower-layer entry at the effective view.");
         }
         Some("rm") => {
-            println!("rm <layer> <tag> <path>");
-            println!("  Remove an overlay entry from one layer.");
+            out("rm <layer> <tag> <path>");
+            out("  Remove an overlay entry from one layer.");
         }
         Some("get") => {
-            println!("get <layer> <tag> <path>");
-            println!("  Read content from one overlay layer.");
+            out("get <layer> <tag> <path>");
+            out("  Read content from one overlay layer.");
         }
         Some("ls") => {
-            println!("ls <tag>");
-            println!("  List effective overlay entries for one tag.");
+            out("ls <tag>");
+            out("  List effective overlay entries for one tag.");
         }
         Some("lslayer") => {
-            println!("lslayer <layer> <tag>");
-            println!("  List entries from one layer only.");
+            out("lslayer <layer> <tag>");
+            out("  List entries from one layer only.");
         }
         Some("tree") => {
-            println!("tree [tag]");
-            println!("  Show the layered tree and effective winners. Without tag, show all tags.");
+            out("tree [tag]");
+            out("  Show the layered tree and effective winners. Without tag, show all tags.");
         }
         Some("quit") | Some("exit") => {
-            println!("quit");
-            println!("  Shut down repl_host.");
+            out("quit");
+            out("  Shut down repl_host.");
         }
         Some(other) => {
-            println!("unknown help topic: {other}");
-            println!("type 'help' for commands");
+            emit_line(comment_stdout, format!("unknown help topic: {other}"));
+            out("type 'help' for commands");
         }
         None => {
             if multi_guest {
-                println!("Multi-guest targeting:");
-                println!("  guests                                          — list configured guests");
-                println!("  use <guest>                                     — set default guest for subsequent commands");
-                println!("  <guest> <command ...>                           — run one command against a specific guest");
-                println!("  provision <guest> <socket> <uid> <gid>          — create one guest-scoped FsServer and listener");
-                println!("  mount <guest> <tag>=<guest_path>,<host_path>... — add one or more mounts to a guest");
-                println!("  launch <guest>                                  — print a prototype cloud-init launch helper");
-                println!("");
+                out("Multi-guest targeting:");
+                out("  guests                                          — list configured guests");
+                out("  use <guest>                                     — set default guest for subsequent commands");
+                out("  <guest> <command ...>                           — run one command against a specific guest");
+                out("  provision <guest> <socket> <uid> <gid>          — create one guest-scoped FsServer and listener");
+                out("  mount <guest> <tag>=<guest_path>,<host_path>... — add one or more mounts to a guest");
+                out("  launch <guest>                                  — print a prototype cloud-init launch helper");
+                out("");
             }
-            println!("Layer management:");
-            println!("  layer <name> <priority>                         — create/update layer");
-            println!("  rmlayer <name>                                  — remove layer and all entries");
-            println!("  layers                                          — list all layers");
-            println!("");
-            println!("Content injection:");
-            println!("  put <layer> <tag> <path> <content>              — inject file (default attrs)");
-            println!("  putattr <layer> <tag> <path> <uid> <gid> <mode> <content>");
-            println!("                                                  — inject file with explicit attrs");
-            println!("  mkdir <layer> <tag> <path> [mode]               — create synthetic directory");
-            println!("");
-            println!("Suppression / removal:");
-            println!("  whiteout <layer> <tag> <path>                   — hide a lower-layer entry");
-            println!("  rm <layer> <tag> <path>                         — remove an overlay entry");
-            println!("");
-            println!("Inspection:");
-            println!("  get <layer> <tag> <path>                        — read content from a layer");
-            println!("  ls <tag>                                        — list effective overlay entries");
-            println!("  lslayer <layer> <tag>                           — list entries in a layer");
-            println!("  tree [tag]                                      — show layered tree (* = winner)");
-            println!("                                                    no tag = show all tags");
-            println!("");
-            println!("Other:");
-            println!("  help [command]                                  — show all commands or one command");
-            println!("  quit                                            — shut down server");
-            println!("");
-            println!("Input modes:");
-            println!("  Interactive:  stdin is a TTY → rustyline REPL");
-            println!("  Pipe + TTY:   cat script.vfs - | repl_host → script then REPL");
-            println!("  Pure pipe:    cat script.vfs | repl_host → script then serve until signaled");
+            out("Layer management:");
+            out("  layer <name> <priority>                         — create/update layer");
+            out("  rmlayer <name>                                  — remove layer and all entries");
+            out("  layers                                          — list all layers");
+            out("");
+            out("Content injection:");
+            out("  put <layer> <tag> <path> <content>              — inject file (default attrs)");
+            out("  putattr <layer> <tag> <path> <uid> <gid> <mode> <content>");
+            out("                                                  — inject file with explicit attrs");
+            out("  mkdir <layer> <tag> <path> [mode]               — create synthetic directory");
+            out("");
+            out("Suppression / removal:");
+            out("  whiteout <layer> <tag> <path>                   — hide a lower-layer entry");
+            out("  rm <layer> <tag> <path>                         — remove an overlay entry");
+            out("");
+            out("Inspection:");
+            out("  get <layer> <tag> <path>                        — read content from a layer");
+            out("  ls <tag>                                        — list effective overlay entries");
+            out("  lslayer <layer> <tag>                           — list entries in a layer");
+            out("  tree [tag]                                      — show layered tree (* = winner)");
+            out("                                                    no tag = show all tags");
+            out("");
+            out("Other:");
+            out("  help [command]                                  — show all commands or one command");
+            out("  quit                                            — shut down server");
+            out("");
+            out("Input modes:");
+            out("  Interactive:  stdin is a TTY → rustyline REPL");
+            out("  Pipe + TTY:   cat script.vfs - | repl_host → script then REPL");
+            out("  Pure pipe:    cat script.vfs | repl_host → script then serve until signaled");
         }
     }
 }
@@ -854,12 +878,12 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
                 let marker = if guest == &admin.current_guest { "*" } else { " " };
                 if let Some(runtime) = admin.guests.get(guest) {
                     if let Some(identity) = runtime.identity {
-                        println!("{marker} {guest} socket={} uid={} gid={} mounts={}", runtime.socket_path, identity.uid, identity.gid, runtime.mounts.len());
+                        emit_status(admin, format!("{marker} {guest} socket={} uid={} gid={} mounts={}", runtime.socket_path, identity.uid, identity.gid, runtime.mounts.len()));
                     } else {
-                        println!("{marker} {guest} socket={} mounts={}", runtime.socket_path, runtime.mounts.len());
+                        emit_status(admin, format!("{marker} {guest} socket={} mounts={}", runtime.socket_path, runtime.mounts.len()));
                     }
                 } else {
-                    println!("{marker} {guest}");
+                    emit_status(admin, format!("{marker} {guest}"));
                 }
             }
             return ControlFlow::Continue;
@@ -867,39 +891,39 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
         "use" if parts.len() == 2 => {
             if admin.guests.contains_key(parts[1]) {
                 admin.current_guest = parts[1].to_string();
-                println!("ok: using guest {}", admin.current_guest);
+                emit_status(admin, format!("ok: using guest {}", admin.current_guest));
             } else {
-                println!("error: unknown guest {}", parts[1]);
+                emit_status(admin, format!("error: unknown guest {}", parts[1]));
             }
             return ControlFlow::Continue;
         }
         "use" => {
-            println!("error: use <guest>");
+            emit_status(admin, "error: use <guest>");
             return ControlFlow::Continue;
         }
         "provision" if parts.len() == 5 => {
             let uid = match parts[3].parse::<u32>() {
                 Ok(uid) => uid,
                 Err(_) => {
-                    println!("error: uid must be a number");
+                    emit_status(admin, "error: uid must be a number");
                     return ControlFlow::Continue;
                 }
             };
             let gid = match parts[4].parse::<u32>() {
                 Ok(gid) => gid,
                 Err(_) => {
-                    println!("error: gid must be a number");
+                    emit_status(admin, "error: gid must be a number");
                     return ControlFlow::Continue;
                 }
             };
             match provision_guest(admin, parts[1], parts[2], Some(GuestIdentity { uid, gid })) {
-                Ok(()) => println!("ok: provision {} {} uid={} gid={}", parts[1], parts[2], uid, gid),
-                Err(e) => println!("error: {e}"),
+                Ok(()) => emit_status(admin, format!("ok: provision {} {} uid={} gid={}", parts[1], parts[2], uid, gid)),
+                Err(e) => emit_status(admin, format!("error: {e}")),
             }
             return ControlFlow::Continue;
         }
         "provision" => {
-            println!("error: provision <guest> <socket> <uid> <gid>");
+            emit_status(admin, "error: provision <guest> <socket> <uid> <gid>");
             return ControlFlow::Continue;
         }
         "mount" if parts.len() >= 3 => {
@@ -915,31 +939,31 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
                         add_guest_mount(admin, guest_name, mount)?;
                         Ok(mount_desc)
                     }) {
-                    Ok(mount_desc) => println!("ok: mount {guest_name} {mount_desc}"),
-                    Err(e) => println!("error: {e}"),
+                    Ok(mount_desc) => emit_status(admin, format!("ok: mount {guest_name} {mount_desc}")),
+                    Err(e) => emit_status(admin, format!("error: {e}")),
                 }
             }
             return ControlFlow::Continue;
         }
         "mount" => {
-            println!("error: mount <guest> <tag>=<guest_path>,<host_path> [more...]");
+            emit_status(admin, "error: mount <guest> <tag>=<guest_path>,<host_path> [more...]");
             return ControlFlow::Continue;
         }
         "launch" if parts.len() == 2 => {
             let guest_name = parts[1];
             match admin.guests.get(guest_name).ok_or_else(|| anyhow::anyhow!("unknown guest '{guest_name}'"))
                 .and_then(|runtime| render_launch_script(guest_name, runtime)) {
-                Ok(script) => print!("{script}"),
-                Err(e) => println!("error: {e}"),
+                Ok(script) => emit_raw(script),
+                Err(e) => emit_status(admin, format!("error: {e}")),
             }
             return ControlFlow::Continue;
         }
         "launch" => {
-            println!("error: launch <guest>");
+            emit_status(admin, "error: launch <guest>");
             return ControlFlow::Continue;
         }
         "help" => {
-            print_help(parts.get(1).copied(), admin.multi_guest);
+            print_help(parts.get(1).copied(), admin.multi_guest, admin.comment_stdout);
             return ControlFlow::Continue;
         }
         "quit" | "exit" => return ControlFlow::Quit,
@@ -952,19 +976,19 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
         guest
     } else {
         if admin.current_guest.is_empty() {
-            println!("error: no guest selected; provision/use a guest or prefix commands with <guest>");
+            emit_status(admin, "error: no guest selected; provision/use a guest or prefix commands with <guest>");
             return ControlFlow::Continue;
         }
         admin.current_guest.clone()
     };
 
     let Some(runtime) = admin.guests.get(&target_guest) else {
-        println!("error: unknown guest {target_guest}");
+        emit_status(admin, format!("error: unknown guest {target_guest}"));
         return ControlFlow::Continue;
     };
     let overlay = match runtime.server.overlay() {
         Some(o) => o,
-        None => { println!("error: overlay not enabled"); return ControlFlow::Continue; }
+        None => { emit_status(admin, "error: overlay not enabled"); return ControlFlow::Continue; }
     };
 
     match parts[0] {
@@ -973,23 +997,23 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
             let name = parts[1];
             match parts[2].parse::<u32>() {
                 Ok(priority) => match overlay.put_layer(name, priority) {
-                    Ok(()) => println!("ok: layer {name} priority={priority}"),
-                    Err(e) => println!("error: {e}"),
+                    Ok(()) => emit_status(admin, format!("ok: layer {name} priority={priority}")),
+                    Err(e) => emit_status(admin, format!("error: {e}")),
                 },
-                Err(_) => println!("error: priority must be a number"),
+                Err(_) => emit_status(admin, "error: priority must be a number"),
             }
         }
         "rmlayer" if parts.len() >= 2 => {
             match overlay.remove_layer(parts[1]) {
-                Ok(()) => println!("ok: rmlayer {}", parts[1]),
-                Err(e) => println!("error: {e}"),
+                Ok(()) => emit_status(admin, format!("ok: rmlayer {}", parts[1])),
+                Err(e) => emit_status(admin, format!("error: {e}")),
             }
         }
         "layers" => {
             let layers = overlay.layers();
-            if layers.is_empty() { println!("(no layers)"); }
+            if layers.is_empty() { emit_status(admin, "(no layers)"); }
             for l in &layers {
-                println!("  {} priority={} entries={}", l.name, l.priority, l.entry_count);
+                emit_status(admin, format!("  {} priority={} entries={}", l.name, l.priority, l.entry_count));
             }
         }
 
@@ -998,20 +1022,20 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
             let (layer, tag, path) = (parts[1], parts[2], parts[3]);
             let content = parts[4..].join(" ");
             match overlay.put(layer, tag, path, Bytes::from(content.clone())) {
-                Ok(()) => println!("ok: put {layer} {tag} {path} ({} bytes)", content.len()),
-                Err(e) => println!("error: {e}"),
+                Ok(()) => emit_status(admin, format!("ok: put {layer} {tag} {path} ({} bytes)", content.len())),
+                Err(e) => emit_status(admin, format!("error: {e}")),
             }
         }
         "putattr" if parts.len() >= 8 => {
             let (layer, tag, path) = (parts[1], parts[2], parts[3]);
-            let uid = match parts[4].parse::<u32>() { Ok(v) => v, Err(_) => { println!("error: uid must be a number"); return ControlFlow::Continue; } };
-            let gid = match parts[5].parse::<u32>() { Ok(v) => v, Err(_) => { println!("error: gid must be a number"); return ControlFlow::Continue; } };
-            let mode = match u32::from_str_radix(parts[6], 8) { Ok(v) => v, Err(_) => { println!("error: mode must be octal"); return ControlFlow::Continue; } };
+            let uid = match parts[4].parse::<u32>() { Ok(v) => v, Err(_) => { emit_status(admin, "error: uid must be a number"); return ControlFlow::Continue; } };
+            let gid = match parts[5].parse::<u32>() { Ok(v) => v, Err(_) => { emit_status(admin, "error: gid must be a number"); return ControlFlow::Continue; } };
+            let mode = match u32::from_str_radix(parts[6], 8) { Ok(v) => v, Err(_) => { emit_status(admin, "error: mode must be octal"); return ControlFlow::Continue; } };
             let content = parts[7..].join(" ");
             let attrs = OverlayAttrs { mode, uid, gid };
             match overlay.put_with_attrs(layer, tag, path, attrs, Bytes::from(content.clone())) {
-                Ok(()) => println!("ok: putattr {layer} {tag} {path} uid={uid} gid={gid} mode={mode:o} ({} bytes)", content.len()),
-                Err(e) => println!("error: {e}"),
+                Ok(()) => emit_status(admin, format!("ok: putattr {layer} {tag} {path} uid={uid} gid={gid} mode={mode:o} ({} bytes)", content.len())),
+                Err(e) => emit_status(admin, format!("error: {e}")),
             }
         }
         "mkdir" if parts.len() >= 4 => {
@@ -1025,8 +1049,8 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
                 .unwrap_or((0, 0));
             let attrs = OverlayAttrs { mode, uid, gid };
             match overlay.create_dir(layer, tag, path, attrs) {
-                Ok(()) => println!("ok: mkdir {layer} {tag} {path} mode={mode:o} uid={uid} gid={gid}"),
-                Err(e) => println!("error: {e}"),
+                Ok(()) => emit_status(admin, format!("ok: mkdir {layer} {tag} {path} mode={mode:o} uid={uid} gid={gid}")),
+                Err(e) => emit_status(admin, format!("error: {e}")),
             }
         }
 
@@ -1034,15 +1058,15 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
         "whiteout" if parts.len() >= 4 => {
             let (layer, tag, path) = (parts[1], parts[2], parts[3]);
             match overlay.whiteout(layer, tag, path) {
-                Ok(()) => println!("ok: whiteout {layer} {tag} {path}"),
-                Err(e) => println!("error: {e}"),
+                Ok(()) => emit_status(admin, format!("ok: whiteout {layer} {tag} {path}")),
+                Err(e) => emit_status(admin, format!("error: {e}")),
             }
         }
         "rm" if parts.len() >= 4 => {
             let (layer, tag, path) = (parts[1], parts[2], parts[3]);
             match overlay.remove(layer, tag, path) {
-                Ok(()) => println!("ok: rm {layer} {tag} {path}"),
-                Err(e) => println!("error: {e}"),
+                Ok(()) => emit_status(admin, format!("ok: rm {layer} {tag} {path}")),
+                Err(e) => emit_status(admin, format!("error: {e}")),
             }
         }
 
@@ -1052,30 +1076,30 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
             match overlay.get(layer, tag, path) {
                 Some(data) => {
                     match std::str::from_utf8(&data) {
-                        Ok(s) => println!("{s}"),
-                        Err(_) => println!("({} bytes, binary)", data.len()),
+                        Ok(s) => emit_raw(format!("{s}\n")),
+                        Err(_) => emit_status(admin, format!("({} bytes, binary)", data.len())),
                     }
                 }
-                None => println!("(not found)"),
+                None => emit_status(admin, "(not found)"),
             }
         }
         "ls" if parts.len() >= 2 => {
             let tag = parts[1];
             let entries = overlay.list_effective(tag);
-            if entries.is_empty() { println!("(no overlay entries for tag '{tag}')"); }
+            if entries.is_empty() { emit_status(admin, format!("(no overlay entries for tag '{tag}')")); }
             for entry in &entries {
-                println!("  {:?} {} uid={} gid={} mode={:o}", entry.kind, entry.path, entry.uid, entry.gid, entry.mode);
+                emit_status(admin, format!("  {:?} {} uid={} gid={} mode={:o}", entry.kind, entry.path, entry.uid, entry.gid, entry.mode));
             }
-            println!("({} entries)", entries.len());
+            emit_status(admin, format!("({} entries)", entries.len()));
         }
         "lslayer" if parts.len() >= 3 => {
             let (layer, tag) = (parts[1], parts[2]);
             let entries = overlay.list_layer(layer, tag);
-            if entries.is_empty() { println!("(no entries in layer '{layer}' for tag '{tag}')"); }
+            if entries.is_empty() { emit_status(admin, format!("(no entries in layer '{layer}' for tag '{tag}')")); }
             for entry in &entries {
-                println!("  {:?} {} uid={} gid={} mode={:o}", entry.kind, entry.path, entry.uid, entry.gid, entry.mode);
+                emit_status(admin, format!("  {:?} {} uid={} gid={} mode={:o}", entry.kind, entry.path, entry.uid, entry.gid, entry.mode));
             }
-            println!("({} entries)", entries.len());
+            emit_status(admin, format!("({} entries)", entries.len()));
         }
 
         // --- Tree view ---
@@ -1083,7 +1107,7 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
             let tag = parts[1];
             let layers = overlay.layers();
             if layers.is_empty() {
-                println!("(no layers)");
+                emit_status(admin, "(no layers)");
             } else {
                 // Collect effective entries to show which layer wins
                 let effective = overlay.list_effective(tag);
@@ -1092,37 +1116,37 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
                     winner.insert(e.path.clone(), e.layer.clone());
                 }
 
-                println!("tag: {tag}");
-                println!();
+                emit_status(admin, format!("tag: {tag}"));
+                emit_status(admin, "");
                 for l in &layers {
                     let mut entries = overlay.list_layer(&l.name, tag);
                     entries.sort_by(|a, b| a.path.cmp(&b.path));
                     if entries.is_empty() { continue; }
-                    println!("  layer: {} (priority={})", l.name, l.priority);
+                    emit_status(admin, format!("  layer: {} (priority={})", l.name, l.priority));
                     for entry in &entries {
                         let eff = if winner.get(&entry.path).map(|w| w == &l.name).unwrap_or(false) {
                             "*"
                         } else {
                             " "  // shadowed by higher-priority layer
                         };
-                        println!("   {eff} {:?} {} uid={} gid={} mode={:o}",
-                            entry.kind, entry.path, entry.uid, entry.gid, entry.mode);
+                        emit_status(admin, format!("   {eff} {:?} {} uid={} gid={} mode={:o}",
+                            entry.kind, entry.path, entry.uid, entry.gid, entry.mode));
                     }
-                    println!();
+                    emit_status(admin, "");
                 }
-                println!("  (* = effective winner)");
+                emit_status(admin, "  (* = effective winner)");
             }
         }
         "tree" => {
             let layers = overlay.layers();
             let tags = overlay.tags();
             if layers.is_empty() {
-                println!("(no layers)");
+                emit_status(admin, "(no layers)");
             } else if tags.is_empty() {
-                println!("(no entries)");
+                emit_status(admin, "(no entries)");
             } else {
                 for tag in &tags {
-                    println!("tag: {tag}");
+                    emit_status(admin, format!("tag: {tag}"));
                     let effective = overlay.list_effective(tag);
                     let mut winner: std::collections::HashMap<String, String> = std::collections::HashMap::new();
                     for e in &effective {
@@ -1132,26 +1156,26 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
                         let mut entries = overlay.list_layer(&l.name, tag);
                         entries.sort_by(|a, b| a.path.cmp(&b.path));
                         if entries.is_empty() { continue; }
-                        println!("  layer: {} (priority={})", l.name, l.priority);
+                        emit_status(admin, format!("  layer: {} (priority={})", l.name, l.priority));
                         for entry in &entries {
                             let eff = if winner.get(&entry.path).map(|w| w == &l.name).unwrap_or(false) {
                                 "*"
                             } else {
                                 " "
                             };
-                            println!("   {eff} {:?} {} uid={} gid={} mode={:o}",
-                                entry.kind, entry.path, entry.uid, entry.gid, entry.mode);
+                            emit_status(admin, format!("   {eff} {:?} {} uid={} gid={} mode={:o}",
+                                entry.kind, entry.path, entry.uid, entry.gid, entry.mode));
                         }
                     }
-                    println!();
+                    emit_status(admin, "");
                 }
-                println!("(* = effective winner)");
+                emit_status(admin, "(* = effective winner)");
             }
         }
 
         _ => {
-            println!("unknown command: {line}");
-            println!("type 'help' for commands");
+            emit_status(admin, format!("unknown command: {line}"));
+            emit_status(admin, "type 'help' for commands");
         }
     }
 

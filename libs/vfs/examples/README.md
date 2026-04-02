@@ -37,6 +37,8 @@ cat setup-alice.sh.vfs - | cargo run -p motlie-vfs --example repl_host --feature
 cat setup-alice.sh.vfs | cargo run -p motlie-vfs --example repl_host --features vsock -- --tag alice-home
 # → executes script, then may reopen /dev/tty if one is available
 # → for v1.1 operator-driven flows, prefer `cat script - | ...`
+# → status/help lines emitted during scripted stdin are prefixed with `# `
+#   so generated helper scripts remain executable shell scripts
 ```
 
 ### Options

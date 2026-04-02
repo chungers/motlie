@@ -218,6 +218,7 @@ Operator notes:
 - use `cat ... - | cargo run ...` so the setup file is consumed first and stdin stays attached to your terminal
 - that keeps the shared `repl_host` process alive while guests boot and connect
 - the generated helper does not require `cloud-localds`; `launch-ch.sh` copies the NoCloud files into the per-launch guest overlay directly
+- when `repl_host` is driven by scripted stdin, its status/help lines are emitted as shell comments (`# ...`) so `launch <guest>` output can be redirected directly into an executable helper script
 
 Current limitations:
 
