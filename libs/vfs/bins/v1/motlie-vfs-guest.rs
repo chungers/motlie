@@ -89,10 +89,18 @@ fn main() -> Result<()> {
 
     eprintln!("motlie-vfs-guest: all mounts started, waiting...");
     let results = handles.join_all();
+    let mut mount_failed = false;
     for (i, result) in results.iter().enumerate() {
-        if let Err(e) = result {
-            eprintln!("mount {} failed: {e}", i);
+        match result {
+            Ok(()) => {}
+            Err(e) => {
+                mount_failed = true;
+                eprintln!("mount {} failed: {e}", i);
+            }
         }
+    }
+    if mount_failed {
+        anyhow::bail!("one or more guest mounts failed");
     }
 
     Ok(())
