@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-02 | @claude | Address blocking review: SSH ingress as FR-7 via hostfwd, guest migration plan, crate layering (src/examples/bins), composed acceptance milestone, zero-host-impact model |
 | 2026-04-01 | @chungers | Address PR #125 review: clarify RING_PACKED, DNS build-time, drop vs shutdown, MAC defaults, ICMP fallback, module re-exports, thiserror |
 | 2026-04-01 | @claude | Complete API design: builder, start/shutdown, multi-guest, error types, repl_host integration. Resolve all open questions (features, shared memory, thread safety). Expand testing matrix |
 | 2026-04-01 | @claude | Expand NFRs: instance model, isolation, socket parametrization, teardown, netns, performance on DGX Spark |
@@ -47,10 +48,11 @@ vhost-vsock (which the user already has via the `kvm` group).
 ## Non-Goals
 
 - High-performance networking (DPDK-class throughput)
-- Host-to-guest ingress connections (SSH into guest will continue to use vsock)
 - IPv6 support in v1 (guest-initiated IPv4 egress only)
 - Network policy enforcement (firewall rules, traffic shaping)
 - Multi-VM networking (VM-to-VM communication)
+- General-purpose inbound port forwarding beyond SSH (v1 supports SSH only;
+  additional forwards can be added later via the `host_forward_tcp` API)
 
 ## Background: Alternatives Investigated
 
@@ -132,6 +134,13 @@ libslirp for user-mode TCP/IP translation.
   (beyond KVM + vhost-vsock already needed for the VM)
 - **FR-6:** The backend is embeddable as a library — callers spawn it as a
   thread, not a separate process
+- **FR-7:** Host-to-guest SSH ingress via libslirp port forwarding. The
+  backend binds a host-side TCP listener (e.g. `127.0.0.1:2222`) and
+  forwards connections to the guest's SSH daemon (`10.0.2.15:22`). This
+  replaces the TAP-based `ssh alice@192.168.249.2` path with
+  `ssh -p 2222 alice@127.0.0.1`. The host listener is an unprivileged
+  socket — no capabilities required. This is the same mechanism as
+  QEMU's `-net user,hostfwd=tcp::2222-:22`
 
 ## Non-Functional Requirements
 
@@ -291,15 +300,29 @@ Cloud Hypervisor (vhost-user frontend)
 
 ```
 libs/vnet/
-├── src/
-│   ├── lib.rs              # Public API: re-exports VnetConfig, VnetBackend, VnetHandle, VnetError
-│   ├── backend.rs          # VhostUserBackend trait implementation
-│   ├── slirp.rs            # libslirp wrapper: event loop, frame I/O
-│   └── virtq.rs            # Virtqueue ↔ slirp frame bridging
+├── src/                              # Panic-free reusable library (no main(), no process::exit())
+│   ├── lib.rs                        # Public API: re-exports VnetConfig, VnetBackend, VnetHandle, VnetError
+│   ├── backend.rs                    # VhostUserBackend trait implementation
+│   ├── slirp.rs                      # libslirp wrapper: event loop, frame I/O
+│   └── virtq.rs                      # Virtqueue ↔ slirp frame bridging
+├── examples/                         # Feasibility demos (standalone vnet, no vfs dependency)
+│   └── demo_host.rs                  # Minimal: start vnet backend, print SSH command, wait
+├── bins/                             # Host-side binaries (layered on top of library)
+│   └── (future: composed host runtime combining vfs + vnet)
 ├── docs/
-│   └── DESIGN.md           # This document
+│   ├── DESIGN.md                     # This document
+│   └── PLAN.md                       # Delivery plan
 └── Cargo.toml
 ```
+
+**Layering principle** (following `libs/vfs` pattern):
+- **`src/`** — All reusable logic. No panics (`unwrap`/`expect`/`assert!`
+  forbidden in non-test code). No global state. Multiple instances coexist.
+- **`examples/`** — Standalone demos proving feasibility. May panic on setup
+  errors (e.g. `unwrap()` on config). Depend only on `motlie-vnet`.
+- **`bins/`** — Production host-side binaries. May combine `motlie-vnet` +
+  `motlie-vfs` + CLI parsing. Layered above library — no library code depends
+  on bins.
 
 ### Key Crates
 
@@ -355,6 +378,27 @@ pub struct VnetConfig {
     /// For multi-guest orchestrators that may bridge guests in the future,
     /// generate unique MACs (e.g. randomize the last 3 octets per guest).
     pub mac: [u8; 6],
+
+    /// Host-to-guest TCP port forwards. Each entry maps a host-side
+    /// listener (bind_addr, host_port) to a guest-side destination
+    /// (guest_port). libslirp binds the host-side listener as a regular
+    /// unprivileged socket.
+    ///
+    /// Example: forward host 127.0.0.1:2222 → guest 10.0.2.15:22 (SSH)
+    pub host_forwards: Vec<PortForward>,
+}
+
+/// A single host-to-guest TCP port forward rule.
+/// libslirp binds `bind_addr:host_port` on the host and forwards
+/// accepted connections to `guest_ipv4:guest_port` inside the
+/// virtual network.
+pub struct PortForward {
+    /// Host-side bind address. Default: 127.0.0.1 (loopback only).
+    pub bind_addr: Ipv4Addr,
+    /// Host-side port to listen on.
+    pub host_port: u16,
+    /// Guest-side port to forward to.
+    pub guest_port: u16,
 }
 
 /// Handle to a running vhost-user-net backend.
@@ -377,11 +421,13 @@ let config = VnetConfig::builder()
     .guest_ipv4([10, 0, 2, 15])              // optional, shown with default
     .dns_ipv4([8, 8, 8, 8])                  // override DNS
     .mac([0x52, 0x54, 0x00, 0x12, 0x34, 0x56])
+    .host_forward_tcp(2222, 22)              // host:2222 → guest:22 (SSH)
     .build()?;
 // build() fails if:
 //   - socket_path is empty
 //   - socket_path parent directory doesn't exist or isn't writable
 //   - guest_ipv4 and host_ipv4 are not in the same subnet
+//   - host_forward host_port conflicts (same port forwarded twice)
 ```
 
 #### Starting and Stopping
@@ -415,9 +461,11 @@ drop(handle);
 use motlie_vnet::{VnetBackend, VnetConfig};
 
 fn start_networking(guest_id: usize) -> anyhow::Result<VnetHandle> {
+    let ssh_port = 2222 + guest_id as u16;  // unique host port per guest
     let config = VnetConfig::builder()
         .socket_path(format!("/tmp/motlie-vnet-{guest_id}.sock"))
         .guest_ipv4([10, 0, 2, 15])  // same IP is fine — each slirp is isolated
+        .host_forward_tcp(ssh_port, 22)  // host:{ssh_port} → guest:22
         .build()?;
     VnetBackend::new(config).start()
 }
@@ -441,18 +489,20 @@ for h in handles {
 #### Integration with repl_host
 
 ```rust
-// In examples/repl_host.rs:
-#[cfg(feature = "net-backend")]
+// In examples/repl_host.rs (or libs/vnet/examples/demo_host.rs):
 let _net_handle = {
     let socket = format!("/tmp/motlie-vnet-{}.sock", tag);
+    let ssh_port = 2222;
     let config = motlie_vnet::VnetConfig::builder()
         .socket_path(&socket)
+        .host_forward_tcp(ssh_port, 22)
         .build()?;
     let handle = motlie_vnet::VnetBackend::new(config).start()?;
     eprintln!("vhost-user-net: {socket}");
+    eprintln!("  SSH: ssh -p {ssh_port} alice@127.0.0.1");
     eprintln!("  Launch CH with: --memory size=512M,shared=true");
     eprintln!("  --net vhost_user=true,socket={socket},num_queues=2");
-    handle  // held until repl_host exits
+    handle  // held until host process exits
 };
 ```
 
@@ -470,6 +520,8 @@ pub enum VnetError {
     SlirpInit(String),
     /// vhost-user daemon error (protocol negotiation, memory mapping)
     VhostUser(String),
+    /// Port forward bind failed (EADDRINUSE on host-side listener)
+    PortForwardBind { host_port: u16, source: std::io::Error },
     /// Backend thread panicked (should never happen — defensive)
     ThreadPanic,
 }
@@ -538,16 +590,105 @@ The guest sees a standard `virtio-net` device. On boot:
 2. systemd-networkd or dhclient requests DHCP from libslirp (gateway 10.0.2.2)
 3. Guest gets: IP `10.0.2.15`, netmask `255.255.255.0`, gateway `10.0.2.2`
 4. DNS resolver set to host's nameserver (from `/etc/resolv.conf`)
-5. Outbound TCP/UDP: `curl`, `apt update`, `git clone` work immediately
+5. Outbound TCP/UDP: `apt update`, `git clone` work immediately
 6. ICMP: `ping 8.8.8.8` works (libslirp translates to unprivileged ICMP socket)
-7. No inbound connections from host — use vsock for SSH, not TCP
+7. Inbound SSH via port forward: host connects to `127.0.0.1:2222`,
+   libslirp forwards to guest `10.0.2.15:22`. Replaces TAP-based
+   `ssh alice@192.168.249.2` with `ssh -p 2222 alice@127.0.0.1`
 
 **What doesn't work:**
-- Inbound connections from the host to the guest via TCP/IP (by design —
-  use vsock for management access)
+- Arbitrary inbound connections (only configured `host_forward_tcp` ports)
 - Guest-to-guest TCP/IP (each guest has its own isolated slirp network)
 - Raw sockets / protocols other than TCP/UDP/ICMP
 - IPv6 (libslirp supports it, but we disable it in v1 for simplicity)
+
+### Zero-Host-Impact Model
+
+With `vnet`, the host requires **no networking configuration changes**:
+
+| Concern | TAP (v1) | vhost-user + libslirp (vnet) |
+|---------|----------|------------------------------|
+| Kernel capabilities | `CAP_NET_ADMIN` on CH binary | None |
+| Host interfaces | TAP device created per VM | No host interfaces created |
+| Bridge / routing | Manual or scripted | Not needed |
+| Network namespaces | Optional (passt requires them) | Not needed |
+| iptables / nftables | NAT rules for internet | Not needed — libslirp uses user sockets |
+| Host ports | Guest IP reachable directly | Only `hostfwd` listeners (e.g. 127.0.0.1:2222) |
+| Cleanup on crash | Stale TAP device + routes | Stale Unix socket (auto-cleaned by builder) |
+
+All host-side network I/O is via regular unprivileged sockets:
+- Outbound: `connect()` / `sendto()` as regular user
+- Inbound (hostfwd): `bind()` + `listen()` on localhost ports
+- No `sudo`, no `setcap`, no `sysctl` changes (except default `ping_group_range`)
+
+### Guest Image and Launcher Migration
+
+The current v1 guest path (`libs/vfs/examples/v1`) uses static kernel `ip=`
+configuration and TAP networking. Migrating to vhost-user requires modular
+changes that preserve backwards compatibility across three networking modes:
+
+**Networking modes:**
+
+| Mode | Kernel cmdline | CH args | Guest NIC config |
+|------|---------------|---------|-----------------|
+| `--no-net` | No `ip=` param | No `--net` | No interface |
+| `--net-mode=tap` (legacy) | `ip=192.168.249.2::192.168.249.1:...::eth0:off` | `--net tap=,...` | Static (kernel param) |
+| `--net-mode=vhost-user` | No `ip=` param | `--memory shared=true --net vhost_user=true,...` | DHCP via systemd-networkd |
+
+**Guest image changes (`build-guest.sh`):**
+
+1. **Add `systemd-networkd` DHCP configuration** — drop-in config that
+   enables DHCP on `eth0` when present. This is a no-op in `--no-net` mode
+   (no interface) and harmless in TAP mode (kernel `ip=` takes precedence
+   over systemd-networkd for already-configured interfaces):
+   ```ini
+   # /etc/systemd/network/20-eth0.network
+   [Match]
+   Name=eth0
+
+   [Network]
+   DHCP=ipv4
+
+   [DHCPv4]
+   UseDNS=yes
+   ```
+
+2. **Enable `systemd-networkd`** in the guest image:
+   ```bash
+   systemctl enable systemd-networkd
+   ```
+
+3. **Add validation packages** to the base image package list:
+   ```
+   curl, dnsutils   # needed for e2e network validation
+   ```
+
+4. **Remove static IP dependency** — the kernel `ip=` parameter is only
+   added by `launch-ch.sh` in TAP mode, not baked into the image.
+
+**Launcher changes (`launch-ch.sh`):**
+
+The launcher gains a `--net-mode` flag that controls both CH args and
+kernel cmdline:
+
+```bash
+# --net-mode=none (vsock only, no networking)
+# No --net arg, no ip= kernel param
+
+# --net-mode=tap (legacy, requires CAP_NET_ADMIN)
+# --net "tap=,ip=192.168.249.1,mask=255.255.255.0"
+# ip=192.168.249.2::192.168.249.1:255.255.255.0::eth0:off
+
+# --net-mode=vhost-user (rootless, requires vnet backend running)
+# --memory size=512M,shared=true
+# --net vhost_user=true,socket=/tmp/motlie-vnet-0.sock,num_queues=2
+# No ip= kernel param — guest uses DHCP
+```
+
+**Modularity principle:** The filesystem stack (`motlie-vfs-guest`,
+overlayfs, squashfs) is completely independent of networking. The same
+base image works with all three modes. The only difference is which
+`launch-ch.sh` flags are passed and whether a vnet backend is running.
 
 ## Resolved Design Decisions
 
@@ -602,4 +743,7 @@ inside `start()` after the thread is spawned.
 | `backend.rs` tx path | Unit test: mock virtqueue descriptor with Ethernet frame, verify `slirp.input()` called |
 | `backend.rs` rx path | Unit test: slirp produces frame, verify it appears in rx virtqueue |
 | `VnetBackend::start/shutdown` | Integration test: start backend, verify socket exists, shutdown, verify socket removed |
-| End-to-end | CH guest boots with vhost-user-net, `curl http://example.com` succeeds, `apt update` works |
+| `PortForward` (hostfwd) | Integration test: configure host_forward_tcp(2222, 22), verify host can connect to 127.0.0.1:2222, traffic reaches guest port 22 |
+| End-to-end (egress) | CH guest boots with vhost-user-net, `apt update` succeeds, DNS resolves |
+| End-to-end (ingress) | `ssh -p 2222 alice@127.0.0.1` succeeds, interactive session works |
+| End-to-end (composed) | VFS mounts + Internet egress + SSH ingress all work in same guest |
