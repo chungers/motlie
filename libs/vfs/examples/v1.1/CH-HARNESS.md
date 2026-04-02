@@ -57,7 +57,22 @@ Each guest mount connection goes to that guest's socket and immediately sends `T
 
 Before following this harness:
 
+- install the host package set:
+
+```bash
+sudo apt install \
+  cloud-hypervisor \
+  debian-archive-keyring \
+  e2fsprogs \
+  libfuse3-dev \
+  mmdebstrap \
+  pkg-config \
+  squashfs-tools-ng \
+  uidmap
+```
+
 - build the shared base image set
+- ensure a working Rust toolchain with `cargo` is installed for `build-guest.sh` and `cargo run --example repl_host`
 - ensure `/dev/vhost-vsock` exists or load it with `sudo modprobe vhost_vsock`
 - use a shell that can successfully run the rootless `build-guest.sh` flow if you are rebuilding images
 - ensure `cloud-hypervisor` is installed and on `PATH`
@@ -78,7 +93,7 @@ You do not need a prior `v1` build. This harness uses only `v1.1` artifacts.
 ## Start Host Server
 
 ```bash
-cat setup-multiguest.sh.vfs | \
+cat setup-multiguest.sh.vfs - | \
   cargo run -p motlie-vfs --example repl_host --features vsock -- --empty
 ```
 
@@ -100,9 +115,16 @@ The combined setup script uses:
 
 Prototype helper:
 
-- `launch alice` prints a shell script that embeds generated cloud-init assets for Alice and then calls `launch-ch.sh --guest alice --cloud-init-seed ...`
+- `launch alice` prints a shell script that embeds generated cloud-init assets for Alice and then calls `launch-ch.sh --guest alice --cloud-init-dir ...`
 - `launch bob` does the same for Bob
-- this helper requires `cloud-localds` (`cloud-image-utils`) and a shared base rebuilt with the current `build-guest.sh` so cloud-init is present in the guest
+- this helper requires a shared base rebuilt with the current `build-guest.sh` so cloud-init is present in the guest
+- cloud-init writes guest config and directories, then queues `systemctl --no-block start motlie-vfs-guest.service` so the guest mounter starts after final-stage config without deadlocking `cloud-final.service`
+- the helper does not require `cloud-localds`; `launch-ch.sh` seeds the NoCloud files into the per-launch guest overlay directly
+
+Operator note:
+
+- use `cat setup-multiguest.sh.vfs - | ...` so stdin stays attached to your terminal after the setup script is consumed
+- that keeps `repl_host` serving guest connections while the VMs boot
 
 ## Launch Guests
 
@@ -139,6 +161,12 @@ Launch uses:
 - the shared base kernel and squashfs from `artifacts/base/`
 - a fresh per-guest ext4 runtime overlay created under `/tmp/motlie-vfs-v11-runtime/<guest>/`
 - `2G` as the default runtime overlay size unless `--overlay-size` or `OVERLAY_SIZE` overrides it
+
+Console/boot note:
+
+- `launch-ch.sh` uses `console=ttyS0` with Cloud Hypervisor `--serial tty --console off`
+- this avoids the 90-second `dev-hvc0.device` / `serial-getty@hvc0.service` timeout caused by a mismatched `hvc0` console expectation
+- the launch terminal is the guest console
 
 ## Manual Run Order
 
@@ -178,6 +206,12 @@ Expected shape:
 - `.env` and `.ssh` contents come from the in-memory overlay injected by the corresponding `setup-*.sh.vfs` file
 - extra files placed under `overlay.d/common/` or `overlay.d/<guest>/` appear through the guest root overlay at boot
 - Alice and Bob do not share the same writable ext4; each guest gets its own runtime overlay file
+
+Mounted-home note:
+
+- if an SSH session starts before `/home/<guest>` is mounted by `motlie-vfs-guest`, that shell can retain the pre-mount cwd inode
+- in that case `.` may still show the old base-image home even though `/home/<guest>` and `~` resolve through the mounted VFS path
+- `cd "$HOME"` or a fresh SSH session after the mount is active fixes the view
 
 Disposable root-mutation check:
 

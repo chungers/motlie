@@ -6,7 +6,7 @@
 #   ./launch-ch.sh --guest bob
 #   ./launch-ch.sh --guest alice --no-net
 #   ./launch-ch.sh --guest alice --overlay-size 2G
-#   ./launch-ch.sh --guest alice --cloud-init-seed /tmp/alice-seed.img
+#   ./launch-ch.sh --guest alice --cloud-init-dir /tmp/alice-cloud-init
 #
 # Shared built artifacts:
 #   artifacts/base/rootfs.squashfs
@@ -40,13 +40,13 @@ GUEST_NAME="alice"
 USE_NET=true
 OVERLAY_SIZE="${OVERLAY_SIZE:-2G}"
 RUNTIME_ROOT="${RUNTIME_ROOT:-/tmp/motlie-vfs-v11-runtime}"
-CLOUD_INIT_SEED=""
+CLOUD_INIT_DIR=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --guest) GUEST_NAME="$2"; shift 2 ;;
         --overlay-size) OVERLAY_SIZE="$2"; shift 2 ;;
-        --cloud-init-seed) CLOUD_INIT_SEED="$2"; shift 2 ;;
+        --cloud-init-dir) CLOUD_INIT_DIR="$2"; shift 2 ;;
         --no-net) USE_NET=false; shift ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
@@ -105,9 +105,19 @@ if ! command -v mkfs.ext4 >/dev/null 2>&1; then
     echo "ERROR: mkfs.ext4 not found. Install: sudo apt install e2fsprogs"
     exit 1
 fi
-if [ -n "$CLOUD_INIT_SEED" ] && [ ! -f "$CLOUD_INIT_SEED" ]; then
-    echo "ERROR: cloud-init seed not found at $CLOUD_INIT_SEED"
-    exit 1
+if [ -n "$CLOUD_INIT_DIR" ]; then
+    if [ ! -d "$CLOUD_INIT_DIR" ]; then
+        echo "ERROR: cloud-init dir not found at $CLOUD_INIT_DIR"
+        exit 1
+    fi
+    if [ ! -f "$CLOUD_INIT_DIR/user-data" ]; then
+        echo "ERROR: cloud-init dir is missing user-data at $CLOUD_INIT_DIR/user-data"
+        exit 1
+    fi
+    if [ ! -f "$CLOUD_INIT_DIR/meta-data" ]; then
+        echo "ERROR: cloud-init dir is missing meta-data at $CLOUD_INIT_DIR/meta-data"
+        exit 1
+    fi
 fi
 
 COMMON_OVERLAY_CONTENT="$SCRIPT_DIR/overlay.d/common"
@@ -118,11 +128,22 @@ OVERLAY_SEED="$RUNTIME_DIR/seed"
 rm -rf "$OVERLAY_SEED"
 mkdir -p "$OVERLAY_SEED/upper/etc/motlie-vfs"
 mkdir -p "$OVERLAY_SEED/work"
-cp "$MOUNT_CONFIG" "$OVERLAY_SEED/upper/etc/motlie-vfs/mounts.yaml"
-printf '%s\n' "$GUEST_HOSTNAME" > "$OVERLAY_SEED/upper/etc/hostname"
-mkdir -p "$OVERLAY_SEED/upper${LOGIN_HOME}/.ssh"
-mkdir -p "$OVERLAY_SEED/upper/workspace"
-chmod 700 "$OVERLAY_SEED/upper${LOGIN_HOME}/.ssh"
+
+if [ -n "$CLOUD_INIT_DIR" ]; then
+    mkdir -p "$OVERLAY_SEED/upper/var/lib/cloud/seed/nocloud"
+    cp "$CLOUD_INIT_DIR/user-data" "$OVERLAY_SEED/upper/var/lib/cloud/seed/nocloud/user-data"
+    cp "$CLOUD_INIT_DIR/meta-data" "$OVERLAY_SEED/upper/var/lib/cloud/seed/nocloud/meta-data"
+    if [ -f "$CLOUD_INIT_DIR/network-config" ]; then
+        cp "$CLOUD_INIT_DIR/network-config" "$OVERLAY_SEED/upper/var/lib/cloud/seed/nocloud/network-config"
+    fi
+else
+    cp "$MOUNT_CONFIG" "$OVERLAY_SEED/upper/etc/motlie-vfs/mounts.yaml"
+    printf '%s\n' "$GUEST_HOSTNAME" > "$OVERLAY_SEED/upper/etc/hostname"
+    mkdir -p "$OVERLAY_SEED/upper${LOGIN_HOME}/.ssh"
+    mkdir -p "$OVERLAY_SEED/upper/workspace"
+    chmod 700 "$OVERLAY_SEED/upper${LOGIN_HOME}/.ssh"
+fi
+
 copy_overlay_tree "$COMMON_OVERLAY_CONTENT" "$OVERLAY_SEED/upper"
 copy_overlay_tree "$GUEST_OVERLAY_CONTENT" "$OVERLAY_SEED/upper"
 mkdir -p "$RUNTIME_DIR"
@@ -139,7 +160,10 @@ if [ ! -e /dev/vhost-vsock ]; then
     }
 fi
 
-CMDLINE="console=hvc0 root=/dev/vda rootfstype=squashfs ro init=/sbin/overlay-init overlay_root=vdb"
+CMDLINE="console=ttyS0 root=/dev/vda rootfstype=squashfs ro init=/sbin/overlay-init overlay_root=vdb"
+if [ -n "$CLOUD_INIT_DIR" ]; then
+    CMDLINE="$CMDLINE ds=nocloud;s=file:///var/lib/cloud/seed/nocloud/"
+fi
 if $USE_NET; then
     CMDLINE="$CMDLINE ip=${GUEST_IP}::${HOST_IP}:255.255.255.0::eth0:off"
 fi
@@ -150,16 +174,15 @@ CH_ARGS=(
     --cmdline "$CMDLINE"
     --cpus boot=2
     --memory size=512M
-    --disk "path=$BASE_ARTIFACTS/rootfs.squashfs,readonly=on"
-           "path=$RUNTIME_OVERLAY"
     --vsock "cid=$CID,socket=$VSOCK_SOCKET"
     --serial tty
     --console off
 )
 
-if [ -n "$CLOUD_INIT_SEED" ]; then
-    CH_ARGS+=(--disk "path=$CLOUD_INIT_SEED,readonly=on")
-fi
+DISK_ARGS=(
+    "path=$BASE_ARTIFACTS/rootfs.squashfs,readonly=on"
+    "path=$RUNTIME_OVERLAY"
+)
 
 if $USE_NET; then
     CH_ARGS+=(--net "tap=,mac=$MAC,ip=$HOST_IP,mask=255.255.255.0")
@@ -172,8 +195,8 @@ echo "  Kernel:    $BASE_ARTIFACTS/$KERNEL_IMAGE"
 echo "  Squashfs:  $BASE_ARTIFACTS/rootfs.squashfs (vda, ro)"
 echo "  Overlay:   $RUNTIME_OVERLAY (vdb, rw runtime)"
 echo "  Size:      $OVERLAY_SIZE"
-if [ -n "$CLOUD_INIT_SEED" ]; then
-    echo "  CloudInit: $CLOUD_INIT_SEED (extra readonly disk)"
+if [ -n "$CLOUD_INIT_DIR" ]; then
+    echo "  CloudInit: $CLOUD_INIT_DIR (seeded into /var/lib/cloud/seed/nocloud)"
 fi
 echo "  vsock:     CID $CID, socket $VSOCK_SOCKET"
 if $USE_NET; then
@@ -188,4 +211,4 @@ echo ""
 echo "To stop: curl --unix-socket $API_SOCKET -X PUT http://localhost/api/v1/vm.shutdown"
 echo ""
 
-cloud-hypervisor "${CH_ARGS[@]}"
+cloud-hypervisor "${CH_ARGS[@]}" --disk "${DISK_ARGS[@]}"
