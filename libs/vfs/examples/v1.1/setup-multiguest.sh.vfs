@@ -1,6 +1,6 @@
 # v1.1 combined demo data for one repl_host process managing two guests
 
-provision alice /tmp/motlie-vfs-alice.vsock 1000 1000
+provision alice /tmp/motlie-vfs-alice.vsock_5000 1000 1000
 mount alice alice-home=/home/alice,/tmp/motlie-vfs-demo/alice-home alice-workspace=/workspace,/tmp/motlie-vfs-demo/alice-workspace
 
 use alice
@@ -14,7 +14,7 @@ put workspace alice-workspace /README.md Alice workspace mounted from the host.
 ls alice-home
 ls alice-workspace
 
-provision bob /tmp/motlie-vfs-bob.vsock 1001 1001
+provision bob /tmp/motlie-vfs-bob.vsock_5000 1001 1001
 mount bob bob-home=/home/bob,/tmp/motlie-vfs-demo/bob-home bob-workspace=/workspace,/tmp/motlie-vfs-demo/bob-workspace
 
 use bob
