@@ -75,17 +75,18 @@
 //!   --tag <name>            mount tag (single-guest mode)
 //!   --dir <path>            host backing directory (single-guest mode)
 
-use std::io::{self, BufRead, Write};
-use std::fmt::Write as _;
-use std::path::PathBuf;
-use std::fs::File;
-use std::process::{Command, Stdio};
-use std::sync::Mutex as StdMutex;
-use std::sync::Arc;
 use std::collections::HashMap;
+use std::fmt::Write as _;
+use std::fs::File;
+use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 
 use anyhow::Result;
 use bytes::Bytes;
+use tempfile::TempDir;
 use tokio::net::UnixListener;
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
@@ -130,13 +131,21 @@ struct AdminState {
     comment_stdout: bool,
     prompt_state: Arc<StdMutex<String>>,
     startup_scripts: Vec<PathBuf>,
+    _retained_tempdirs: Vec<TempDir>,
     runtime: Handle,
     sockets_for_cleanup: Arc<StdMutex<Vec<String>>>,
 }
 
 enum MountSpec {
-    Single { tag: String, dir: PathBuf },
-    Guest { guest: String, tag: String, dir: PathBuf },
+    Single {
+        tag: String,
+        dir: PathBuf,
+    },
+    Guest {
+        guest: String,
+        tag: String,
+        dir: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -148,13 +157,20 @@ async fn main() -> Result<()> {
     let mut guest_configs: Vec<GuestConfig> = Vec::new();
     let mut empty_mode = false;
     let mut startup_scripts: Vec<PathBuf> = Vec::new();
+    let mut retained_tempdirs = Vec::new();
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--empty" => { empty_mode = true; i += 1; }
-            "--socket" if i + 1 < args.len() => { socket_path = args[i + 1].clone(); i += 2; }
+            "--empty" => {
+                empty_mode = true;
+                i += 1;
+            }
+            "--socket" if i + 1 < args.len() => {
+                socket_path = args[i + 1].clone();
+                i += 2;
+            }
             "--guest" if i + 1 < args.len() => {
                 let (guest_name, guest_socket) = parse_guest_spec(&args[i + 1])?;
                 if guest_configs.iter().any(|cfg| cfg.name == guest_name) {
@@ -172,7 +188,8 @@ async fn main() -> Result<()> {
                 match parse_mount_spec(&args[i + 1])? {
                     MountSpec::Single { tag, dir } => single_mounts.push((tag, dir)),
                     MountSpec::Guest { guest, tag, dir } => {
-                        let Some(config) = guest_configs.iter_mut().find(|cfg| cfg.name == guest) else {
+                        let Some(config) = guest_configs.iter_mut().find(|cfg| cfg.name == guest)
+                        else {
                             anyhow::bail!("guest '{guest}' must be declared with --guest before its --mount entries");
                         };
                         config.mounts.push(ConfiguredMount {
@@ -188,9 +205,18 @@ async fn main() -> Result<()> {
                 startup_scripts.push(PathBuf::from(&args[i + 1]));
                 i += 2;
             }
-            "--tag" if i + 1 < args.len() => { tag = args[i + 1].clone(); i += 2; }
-            "--dir" if i + 1 < args.len() => { host_dir = Some(PathBuf::from(&args[i + 1])); i += 2; }
-            other => { host_dir = Some(PathBuf::from(other)); i += 1; }
+            "--tag" if i + 1 < args.len() => {
+                tag = args[i + 1].clone();
+                i += 2;
+            }
+            "--dir" if i + 1 < args.len() => {
+                host_dir = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            other => {
+                host_dir = Some(PathBuf::from(other));
+                i += 1;
+            }
         }
     }
 
@@ -207,7 +233,11 @@ async fn main() -> Result<()> {
         }
         for config in &guest_configs {
             if config.mounts.is_empty() {
-                anyhow::bail!("guest '{}' has no mounts; add at least one --mount {}:<tag>=<dir>", config.name, config.name);
+                anyhow::bail!(
+                    "guest '{}' has no mounts; add at least one --mount {}:<tag>=<dir>",
+                    config.name,
+                    config.name
+                );
             }
         }
     } else if !empty_mode {
@@ -246,14 +276,19 @@ async fn main() -> Result<()> {
         guest_configs.push(GuestConfig {
             name: "default".to_string(),
             socket_path,
-            mounts: single_mounts.into_iter().map(|(tag, host_path)| ConfiguredMount {
-                tag,
-                guest_path: None,
-                host_path,
-            }).collect(),
+            mounts: single_mounts
+                .into_iter()
+                .map(|(tag, host_path)| ConfiguredMount {
+                    tag,
+                    guest_path: None,
+                    host_path,
+                })
+                .collect(),
             identity: None,
         });
-        std::mem::forget(tempdir);
+        if let Some(tempdir) = tempdir {
+            retained_tempdirs.push(tempdir);
+        }
     }
 
     eprintln!("=== motlie-vfs repl_host ===");
@@ -268,7 +303,12 @@ async fn main() -> Result<()> {
         eprintln!("  Mounts:");
         for mount in &config.mounts {
             if let Some(guest_path) = &mount.guest_path {
-                eprintln!("    {}: {} -> {}", mount.tag, guest_path, mount.host_path.display());
+                eprintln!(
+                    "    {}: {} -> {}",
+                    mount.tag,
+                    guest_path,
+                    mount.host_path.display()
+                );
             } else {
                 eprintln!("    {} -> {}", mount.tag, mount.host_path.display());
             }
@@ -283,24 +323,25 @@ async fn main() -> Result<()> {
     let prompt_state = Arc::new(StdMutex::new("vfs> ".to_string()));
 
     for config in guest_configs {
-        let mut builder = FsServer::builder()
-            .overlay(true)
-            .events(256);
+        let mut builder = FsServer::builder().overlay(true).events(256);
         for mount in &config.mounts {
             builder = builder.mount(&mount.tag, mount.host_path.clone(), false);
         }
         let server = Arc::new(builder.build()?);
         guest_order.push(config.name.clone());
-        admin_guests.insert(config.name.clone(), GuestRuntime {
-            server: Arc::clone(&server),
-            socket_path: config.socket_path.clone(),
-            mounts: config.mounts.clone(),
-            identity: config.identity,
-        });
+        admin_guests.insert(
+            config.name.clone(),
+            GuestRuntime {
+                server: Arc::clone(&server),
+                socket_path: config.socket_path.clone(),
+                mounts: config.mounts.clone(),
+                identity: config.identity,
+            },
+        );
 
         let _ = std::fs::remove_file(&config.socket_path);
         let listener = UnixListener::bind(&config.socket_path)?;
-        sockets_for_cleanup.lock().expect("cleanup socket lock poisoned").push(config.socket_path.clone());
+        push_cleanup_socket(&sockets_for_cleanup, config.socket_path.clone());
         spawn_guest_listener(
             &runtime,
             config.name.clone(),
@@ -323,6 +364,7 @@ async fn main() -> Result<()> {
         comment_stdout: false,
         prompt_state,
         startup_scripts,
+        _retained_tempdirs: retained_tempdirs,
         runtime,
         sockets_for_cleanup: Arc::clone(&sockets_for_cleanup),
     };
@@ -331,7 +373,7 @@ async fn main() -> Result<()> {
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     tokio::task::spawn_blocking(move || {
         run_input(admin);
-        for socket_path in sockets_for_cleanup.lock().expect("cleanup socket lock poisoned").iter() {
+        for socket_path in cleanup_sockets_snapshot(&sockets_for_cleanup) {
             let _ = std::fs::remove_file(socket_path);
         }
         let _ = shutdown_tx.send(());
@@ -370,10 +412,15 @@ fn run_input(mut admin: AdminState) {
         for line in stdin.lock().lines() {
             let line = match line {
                 Ok(l) => l,
-                Err(e) => { eprintln!("stdin read error: {e}"); break; }
+                Err(e) => {
+                    eprintln!("stdin read error: {e}");
+                    break;
+                }
             };
             let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
             eprintln!("vfs> {trimmed}");
             if dispatch_command(&mut admin, trimmed) == ControlFlow::Quit {
                 eprintln!("shutting down (quit command)");
@@ -388,7 +435,9 @@ fn run_input(mut admin: AdminState) {
             if let Ok(_tty) = std::fs::File::open("/dev/tty") {
                 // /dev/tty is available — the user piped a script but still has a terminal.
                 // Switch to interactive rustyline REPL.
-                eprintln!("--- entering interactive REPL (Ctrl-D to stop, server keeps running) ---");
+                eprintln!(
+                    "--- entering interactive REPL (Ctrl-D to stop, server keeps running) ---"
+                );
                 eprintln!("");
                 admin.comment_stdout = false;
                 run_interactive_repl(&mut admin);
@@ -442,13 +491,21 @@ fn run_interactive_repl(admin: &mut AdminState) {
         store_prompt(&admin.prompt_state, prompt.clone());
         let line = match rl.readline(&prompt) {
             Ok(line) => line,
-            Err(rustyline::error::ReadlineError::Interrupted) => { eprintln!("^C"); continue; }
+            Err(rustyline::error::ReadlineError::Interrupted) => {
+                eprintln!("^C");
+                continue;
+            }
             Err(rustyline::error::ReadlineError::Eof) => break,
-            Err(e) => { eprintln!("REPL error: {e}"); break; }
+            Err(e) => {
+                eprintln!("REPL error: {e}");
+                break;
+            }
         };
 
         let trimmed = line.trim();
-        if trimmed.is_empty() { continue; }
+        if trimmed.is_empty() {
+            continue;
+        }
         let _ = rl.add_history_entry(trimmed);
 
         if dispatch_command(admin, trimmed) == ControlFlow::Quit {
@@ -466,8 +523,10 @@ fn wait_for_signal() {
 
     let running = Arc::new(AtomicBool::new(true));
     let r = Arc::clone(&running);
-    ctrlc::set_handler(move || { r.store(false, Ordering::SeqCst); })
-        .unwrap_or_else(|e| eprintln!("warning: failed to set signal handler: {e}"));
+    ctrlc::set_handler(move || {
+        r.store(false, Ordering::SeqCst);
+    })
+    .unwrap_or_else(|e| eprintln!("warning: failed to set signal handler: {e}"));
 
     while running.load(Ordering::SeqCst) {
         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -488,6 +547,23 @@ fn redraw_prompt(prompt_state: &Arc<StdMutex<String>>) {
     let _ = writeln!(io::stderr());
     let _ = write!(io::stderr(), "{prompt}");
     let _ = io::stderr().flush();
+}
+
+fn push_cleanup_socket(sockets_for_cleanup: &Arc<StdMutex<Vec<String>>>, socket_path: String) {
+    match sockets_for_cleanup.lock() {
+        Ok(mut sockets) => sockets.push(socket_path),
+        Err(_) => eprintln!("warning: cleanup socket list poisoned; skipping socket retention"),
+    }
+}
+
+fn cleanup_sockets_snapshot(sockets_for_cleanup: &Arc<StdMutex<Vec<String>>>) -> Vec<String> {
+    match sockets_for_cleanup.lock() {
+        Ok(sockets) => sockets.clone(),
+        Err(_) => {
+            eprintln!("warning: cleanup socket list poisoned; skipping socket cleanup");
+            Vec::new()
+        }
+    }
 }
 
 fn spawn_guest_listener(
@@ -609,19 +685,10 @@ fn provision_guest(
         anyhow::bail!("guest '{guest_name}' already provisioned");
     }
 
-    let server = Arc::new(
-        FsServer::builder()
-            .overlay(true)
-            .events(256)
-            .build()?,
-    );
+    let server = Arc::new(FsServer::builder().overlay(true).events(256).build()?);
     let _ = std::fs::remove_file(socket_path);
     let listener = UnixListener::bind(socket_path)?;
-    admin
-        .sockets_for_cleanup
-        .lock()
-        .expect("cleanup socket lock poisoned")
-        .push(socket_path.to_string());
+    push_cleanup_socket(&admin.sockets_for_cleanup, socket_path.to_string());
     spawn_guest_listener(
         &admin.runtime,
         guest_name.to_string(),
@@ -693,7 +760,10 @@ fn render_mounts_yaml(runtime: &GuestRuntime) -> Result<String> {
     let mut out = String::from("mounts:\n");
     for mount in &runtime.mounts {
         let Some(guest_path) = &mount.guest_path else {
-            anyhow::bail!("mount '{}' is missing guest_path; cannot render mounts.yaml", mount.tag);
+            anyhow::bail!(
+                "mount '{}' is missing guest_path; cannot render mounts.yaml",
+                mount.tag
+            );
         };
         writeln!(&mut out, "  - tag: {}", mount.tag)?;
         writeln!(&mut out, "    guest_path: {}", guest_path)?;
@@ -703,9 +773,9 @@ fn render_mounts_yaml(runtime: &GuestRuntime) -> Result<String> {
 }
 
 fn render_cloud_init(guest_name: &str, runtime: &GuestRuntime) -> Result<String> {
-    let identity = runtime
-        .identity
-        .ok_or_else(|| anyhow::anyhow!("guest '{guest_name}' is missing uid/gid; provision with explicit uid/gid"))?;
+    let identity = runtime.identity.ok_or_else(|| {
+        anyhow::anyhow!("guest '{guest_name}' is missing uid/gid; provision with explicit uid/gid")
+    })?;
     let mounts_yaml = render_mounts_yaml(runtime)?;
     let home_dir = guest_home(runtime, guest_name);
 
@@ -773,10 +843,15 @@ fn render_launch_script(guest_name: &str, runtime: &GuestRuntime) -> Result<Stri
     out.push_str("set -euo pipefail\n\n");
     out.push_str("# Generated by repl_host from the provisioned guest state.\n");
     out.push_str("# Rebuild the shared v1.1 base image with the current build-guest.sh so the\n");
-    out.push_str("# guest includes cloud-init and consumes the seeded NoCloud directory at boot.\n\n");
+    out.push_str(
+        "# guest includes cloud-init and consumes the seeded NoCloud directory at boot.\n\n",
+    );
     writeln!(&mut out, "GUEST_ID={}", shell_single_quote(guest_name))?;
     writeln!(&mut out, "BASE_DIR=\"${{BASE_DIR:-{}}}\"", base_dir)?;
-    writeln!(&mut out, "SEED_DIR=\"${{SEED_DIR:-/tmp/motlie-vfs-cloud-init-${{GUEST_ID}}}}\"")?;
+    writeln!(
+        &mut out,
+        "SEED_DIR=\"${{SEED_DIR:-/tmp/motlie-vfs-cloud-init-${{GUEST_ID}}}}\""
+    )?;
     out.push_str("INSTANCE_ID=\"${INSTANCE_ID:-${GUEST_ID}}\"\n");
     out.push_str("LOCAL_HOSTNAME=\"${LOCAL_HOSTNAME:-motlie-${GUEST_ID}}\"\n");
     out.push_str("mkdir -p \"$SEED_DIR\"\n");
@@ -792,7 +867,9 @@ fn render_launch_script(guest_name: &str, runtime: &GuestRuntime) -> Result<Stri
     out.push_str("EOF\n\n");
     out.push_str("echo \"Generated cloud-init assets in $SEED_DIR\"\n");
     out.push_str("echo \"Launching guest ${GUEST_ID} with seeded NoCloud dir ${SEED_DIR}\"\n");
-    out.push_str("\"$BASE_DIR/launch-ch.sh\" --guest \"$GUEST_ID\" --cloud-init-dir \"$SEED_DIR\" \"$@\"\n");
+    out.push_str(
+        "\"$BASE_DIR/launch-ch.sh\" --guest \"$GUEST_ID\" --cloud-init-dir \"$SEED_DIR\" \"$@\"\n",
+    );
     Ok(out)
 }
 
@@ -818,7 +895,10 @@ fn execute_launch_script(guest_name: &str, script: &str) -> Result<LaunchExecuti
 
     let child = Command::new("/bin/bash")
         .arg(&script_path)
-        .env("CH_SERIAL_BACKEND", format!("file={}", serial_log_path.display()))
+        .env(
+            "CH_SERIAL_BACKEND",
+            format!("file={}", serial_log_path.display()),
+        )
         .env("CH_CONSOLE_BACKEND", "off")
         .stdin(Stdio::null())
         .stdout(Stdio::from(launch_log))
@@ -1027,17 +1107,39 @@ fn print_help(topic: Option<&str>, multi_guest: bool, comment_stdout: bool) {
 
 fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
     let mut parts: Vec<&str> = line.split_whitespace().collect();
-    if parts.is_empty() { return ControlFlow::Continue; }
+    if parts.is_empty() {
+        return ControlFlow::Continue;
+    }
 
     match parts[0] {
         "guests" => {
             for guest in &admin.guest_order {
-                let marker = if guest == &admin.current_guest { "*" } else { " " };
+                let marker = if guest == &admin.current_guest {
+                    "*"
+                } else {
+                    " "
+                };
                 if let Some(runtime) = admin.guests.get(guest) {
                     if let Some(identity) = runtime.identity {
-                        emit_status(admin, format!("{marker} {guest} socket={} uid={} gid={} mounts={}", runtime.socket_path, identity.uid, identity.gid, runtime.mounts.len()));
+                        emit_status(
+                            admin,
+                            format!(
+                                "{marker} {guest} socket={} uid={} gid={} mounts={}",
+                                runtime.socket_path,
+                                identity.uid,
+                                identity.gid,
+                                runtime.mounts.len()
+                            ),
+                        );
                     } else {
-                        emit_status(admin, format!("{marker} {guest} socket={} mounts={}", runtime.socket_path, runtime.mounts.len()));
+                        emit_status(
+                            admin,
+                            format!(
+                                "{marker} {guest} socket={} mounts={}",
+                                runtime.socket_path,
+                                runtime.mounts.len()
+                            ),
+                        );
                     }
                 } else {
                     emit_status(admin, format!("{marker} {guest}"));
@@ -1049,7 +1151,10 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
             if admin.guests.contains_key(parts[1]) {
                 admin.current_guest = parts[1].to_string();
                 if admin.multi_guest {
-                    store_prompt(&admin.prompt_state, format!("vfs[{}]> ", admin.current_guest));
+                    store_prompt(
+                        &admin.prompt_state,
+                        format!("vfs[{}]> ", admin.current_guest),
+                    );
                 } else {
                     store_prompt(&admin.prompt_state, "vfs> ".to_string());
                 }
@@ -1079,7 +1184,13 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
                 }
             };
             match provision_guest(admin, parts[1], parts[2], Some(GuestIdentity { uid, gid })) {
-                Ok(()) => emit_status(admin, format!("ok: provision {} {} uid={} gid={}", parts[1], parts[2], uid, gid)),
+                Ok(()) => emit_status(
+                    admin,
+                    format!(
+                        "ok: provision {} {} uid={} gid={}",
+                        parts[1], parts[2], uid, gid
+                    ),
+                ),
                 Err(e) => emit_status(admin, format!("error: {e}")),
             }
             return ControlFlow::Continue;
@@ -1091,43 +1202,60 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
         "mount" if parts.len() >= 3 => {
             let guest_name = parts[1];
             for spec in &parts[2..] {
-                match parse_repl_mount_target(spec)
-                    .and_then(|mount| {
-                        let mount_desc = if let Some(guest_path) = &mount.guest_path {
-                            format!("{}:{} -> {}", mount.tag, guest_path, mount.host_path.display())
-                        } else {
-                            format!("{} -> {}", mount.tag, mount.host_path.display())
-                        };
-                        add_guest_mount(admin, guest_name, mount)?;
-                        Ok(mount_desc)
-                    }) {
-                    Ok(mount_desc) => emit_status(admin, format!("ok: mount {guest_name} {mount_desc}")),
+                match parse_repl_mount_target(spec).and_then(|mount| {
+                    let mount_desc = if let Some(guest_path) = &mount.guest_path {
+                        format!(
+                            "{}:{} -> {}",
+                            mount.tag,
+                            guest_path,
+                            mount.host_path.display()
+                        )
+                    } else {
+                        format!("{} -> {}", mount.tag, mount.host_path.display())
+                    };
+                    add_guest_mount(admin, guest_name, mount)?;
+                    Ok(mount_desc)
+                }) {
+                    Ok(mount_desc) => {
+                        emit_status(admin, format!("ok: mount {guest_name} {mount_desc}"))
+                    }
                     Err(e) => emit_status(admin, format!("error: {e}")),
                 }
             }
             return ControlFlow::Continue;
         }
         "mount" => {
-            emit_status(admin, "error: mount <guest> <tag>=<guest_path>,<host_path> [more...]");
+            emit_status(
+                admin,
+                "error: mount <guest> <tag>=<guest_path>,<host_path> [more...]",
+            );
             return ControlFlow::Continue;
         }
         "launch" if parts.len() == 2 || (parts.len() == 3 && parts[1] == "-script") => {
             let render_only = parts.len() == 3;
             let guest_name = if render_only { parts[2] } else { parts[1] };
-            match admin.guests.get(guest_name).ok_or_else(|| anyhow::anyhow!("unknown guest '{guest_name}'"))
-                .and_then(|runtime| render_launch_script(guest_name, runtime)) {
+            match admin
+                .guests
+                .get(guest_name)
+                .ok_or_else(|| anyhow::anyhow!("unknown guest '{guest_name}'"))
+                .and_then(|runtime| render_launch_script(guest_name, runtime))
+            {
                 Ok(script) => {
                     if render_only {
                         emit_raw(script);
                     } else {
                         match execute_launch_script(guest_name, &script) {
                             Ok(exec) => {
-                                emit_status(admin, format!("ok: launch {guest_name} pid={} script={} log={} serial={}",
-                                    exec.pid,
-                                    exec.script_path.display(),
-                                    exec.launch_log_path.display(),
-                                    exec.serial_log_path.display(),
-                                ));
+                                emit_status(
+                                    admin,
+                                    format!(
+                                        "ok: launch {guest_name} pid={} script={} log={} serial={}",
+                                        exec.pid,
+                                        exec.script_path.display(),
+                                        exec.launch_log_path.display(),
+                                        exec.serial_log_path.display(),
+                                    ),
+                                );
                             }
                             Err(e) => emit_status(admin, format!("error: {e}")),
                         }
@@ -1144,7 +1272,13 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
         "shutdown" if parts.len() == 2 => {
             let guest_name = parts[1];
             match shutdown_guest(guest_name) {
-                Ok(()) => emit_status(admin, format!("ok: shutdown {guest_name} api_socket={}", guest_api_socket_path(guest_name).display())),
+                Ok(()) => emit_status(
+                    admin,
+                    format!(
+                        "ok: shutdown {guest_name} api_socket={}",
+                        guest_api_socket_path(guest_name).display()
+                    ),
+                ),
                 Err(e) => emit_status(admin, format!("error: {e}")),
             }
             return ControlFlow::Continue;
@@ -1154,7 +1288,11 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
             return ControlFlow::Continue;
         }
         "help" => {
-            print_help(parts.get(1).copied(), admin.multi_guest, admin.comment_stdout);
+            print_help(
+                parts.get(1).copied(),
+                admin.multi_guest,
+                admin.comment_stdout,
+            );
             return ControlFlow::Continue;
         }
         "quit" | "exit" => return ControlFlow::Quit,
@@ -1167,7 +1305,10 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
         guest
     } else {
         if admin.current_guest.is_empty() {
-            emit_status(admin, "error: no guest selected; provision/use a guest or prefix commands with <guest>");
+            emit_status(
+                admin,
+                "error: no guest selected; provision/use a guest or prefix commands with <guest>",
+            );
             return ControlFlow::Continue;
         }
         admin.current_guest.clone()
@@ -1179,7 +1320,10 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
     };
     let overlay = match runtime.server.overlay() {
         Some(o) => o,
-        None => { emit_status(admin, "error: overlay not enabled"); return ControlFlow::Continue; }
+        None => {
+            emit_status(admin, "error: overlay not enabled");
+            return ControlFlow::Continue;
+        }
     };
 
     match parts[0] {
@@ -1194,17 +1338,23 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
                 Err(_) => emit_status(admin, "error: priority must be a number"),
             }
         }
-        "rmlayer" if parts.len() >= 2 => {
-            match overlay.remove_layer(parts[1]) {
-                Ok(()) => emit_status(admin, format!("ok: rmlayer {}", parts[1])),
-                Err(e) => emit_status(admin, format!("error: {e}")),
-            }
-        }
+        "rmlayer" if parts.len() >= 2 => match overlay.remove_layer(parts[1]) {
+            Ok(()) => emit_status(admin, format!("ok: rmlayer {}", parts[1])),
+            Err(e) => emit_status(admin, format!("error: {e}")),
+        },
         "layers" => {
             let layers = overlay.layers();
-            if layers.is_empty() { emit_status(admin, "(no layers)"); }
+            if layers.is_empty() {
+                emit_status(admin, "(no layers)");
+            }
             for l in &layers {
-                emit_status(admin, format!("  {} priority={} entries={}", l.name, l.priority, l.entry_count));
+                emit_status(
+                    admin,
+                    format!(
+                        "  {} priority={} entries={}",
+                        l.name, l.priority, l.entry_count
+                    ),
+                );
             }
         }
 
@@ -1213,15 +1363,36 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
             let (layer, tag, path) = (parts[1], parts[2], parts[3]);
             let content = parts[4..].join(" ");
             match overlay.put(layer, tag, path, Bytes::from(content.clone())) {
-                Ok(()) => emit_status(admin, format!("ok: put {layer} {tag} {path} ({} bytes)", content.len())),
+                Ok(()) => emit_status(
+                    admin,
+                    format!("ok: put {layer} {tag} {path} ({} bytes)", content.len()),
+                ),
                 Err(e) => emit_status(admin, format!("error: {e}")),
             }
         }
         "putattr" if parts.len() >= 8 => {
             let (layer, tag, path) = (parts[1], parts[2], parts[3]);
-            let uid = match parts[4].parse::<u32>() { Ok(v) => v, Err(_) => { emit_status(admin, "error: uid must be a number"); return ControlFlow::Continue; } };
-            let gid = match parts[5].parse::<u32>() { Ok(v) => v, Err(_) => { emit_status(admin, "error: gid must be a number"); return ControlFlow::Continue; } };
-            let mode = match u32::from_str_radix(parts[6], 8) { Ok(v) => v, Err(_) => { emit_status(admin, "error: mode must be octal"); return ControlFlow::Continue; } };
+            let uid = match parts[4].parse::<u32>() {
+                Ok(v) => v,
+                Err(_) => {
+                    emit_status(admin, "error: uid must be a number");
+                    return ControlFlow::Continue;
+                }
+            };
+            let gid = match parts[5].parse::<u32>() {
+                Ok(v) => v,
+                Err(_) => {
+                    emit_status(admin, "error: gid must be a number");
+                    return ControlFlow::Continue;
+                }
+            };
+            let mode = match u32::from_str_radix(parts[6], 8) {
+                Ok(v) => v,
+                Err(_) => {
+                    emit_status(admin, "error: mode must be octal");
+                    return ControlFlow::Continue;
+                }
+            };
             let content = parts[7..].join(" ");
             let attrs = OverlayAttrs { mode, uid, gid };
             match overlay.put_with_attrs(layer, tag, path, attrs, Bytes::from(content.clone())) {
@@ -1233,14 +1404,19 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
             let (layer, tag, path) = (parts[1], parts[2], parts[3]);
             let mode = if parts.len() >= 5 {
                 u32::from_str_radix(parts[4], 8).unwrap_or(0o755)
-            } else { 0o755 };
+            } else {
+                0o755
+            };
             let (uid, gid) = runtime
                 .identity
                 .map(|identity| (identity.uid, identity.gid))
                 .unwrap_or((0, 0));
             let attrs = OverlayAttrs { mode, uid, gid };
             match overlay.create_dir(layer, tag, path, attrs) {
-                Ok(()) => emit_status(admin, format!("ok: mkdir {layer} {tag} {path} mode={mode:o} uid={uid} gid={gid}")),
+                Ok(()) => emit_status(
+                    admin,
+                    format!("ok: mkdir {layer} {tag} {path} mode={mode:o} uid={uid} gid={gid}"),
+                ),
                 Err(e) => emit_status(admin, format!("error: {e}")),
             }
         }
@@ -1265,30 +1441,47 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
         "get" if parts.len() >= 4 => {
             let (layer, tag, path) = (parts[1], parts[2], parts[3]);
             match overlay.get(layer, tag, path) {
-                Some(data) => {
-                    match std::str::from_utf8(&data) {
-                        Ok(s) => emit_raw(format!("{s}\n")),
-                        Err(_) => emit_status(admin, format!("({} bytes, binary)", data.len())),
-                    }
-                }
+                Some(data) => match std::str::from_utf8(&data) {
+                    Ok(s) => emit_raw(format!("{s}\n")),
+                    Err(_) => emit_status(admin, format!("({} bytes, binary)", data.len())),
+                },
                 None => emit_status(admin, "(not found)"),
             }
         }
         "ls" if parts.len() >= 2 => {
             let tag = parts[1];
             let entries = overlay.list_effective(tag);
-            if entries.is_empty() { emit_status(admin, format!("(no overlay entries for tag '{tag}')")); }
+            if entries.is_empty() {
+                emit_status(admin, format!("(no overlay entries for tag '{tag}')"));
+            }
             for entry in &entries {
-                emit_status(admin, format!("  {:?} {} uid={} gid={} mode={:o}", entry.kind, entry.path, entry.uid, entry.gid, entry.mode));
+                emit_status(
+                    admin,
+                    format!(
+                        "  {:?} {} uid={} gid={} mode={:o}",
+                        entry.kind, entry.path, entry.uid, entry.gid, entry.mode
+                    ),
+                );
             }
             emit_status(admin, format!("({} entries)", entries.len()));
         }
         "lslayer" if parts.len() >= 3 => {
             let (layer, tag) = (parts[1], parts[2]);
             let entries = overlay.list_layer(layer, tag);
-            if entries.is_empty() { emit_status(admin, format!("(no entries in layer '{layer}' for tag '{tag}')")); }
+            if entries.is_empty() {
+                emit_status(
+                    admin,
+                    format!("(no entries in layer '{layer}' for tag '{tag}')"),
+                );
+            }
             for entry in &entries {
-                emit_status(admin, format!("  {:?} {} uid={} gid={} mode={:o}", entry.kind, entry.path, entry.uid, entry.gid, entry.mode));
+                emit_status(
+                    admin,
+                    format!(
+                        "  {:?} {} uid={} gid={} mode={:o}",
+                        entry.kind, entry.path, entry.uid, entry.gid, entry.mode
+                    ),
+                );
             }
             emit_status(admin, format!("({} entries)", entries.len()));
         }
@@ -1302,7 +1495,8 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
             } else {
                 // Collect effective entries to show which layer wins
                 let effective = overlay.list_effective(tag);
-                let mut winner: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+                let mut winner: std::collections::HashMap<String, String> =
+                    std::collections::HashMap::new();
                 for e in &effective {
                     winner.insert(e.path.clone(), e.layer.clone());
                 }
@@ -1312,16 +1506,30 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
                 for l in &layers {
                     let mut entries = overlay.list_layer(&l.name, tag);
                     entries.sort_by(|a, b| a.path.cmp(&b.path));
-                    if entries.is_empty() { continue; }
-                    emit_status(admin, format!("  layer: {} (priority={})", l.name, l.priority));
+                    if entries.is_empty() {
+                        continue;
+                    }
+                    emit_status(
+                        admin,
+                        format!("  layer: {} (priority={})", l.name, l.priority),
+                    );
                     for entry in &entries {
-                        let eff = if winner.get(&entry.path).map(|w| w == &l.name).unwrap_or(false) {
+                        let eff = if winner
+                            .get(&entry.path)
+                            .map(|w| w == &l.name)
+                            .unwrap_or(false)
+                        {
                             "*"
                         } else {
-                            " "  // shadowed by higher-priority layer
+                            " " // shadowed by higher-priority layer
                         };
-                        emit_status(admin, format!("   {eff} {:?} {} uid={} gid={} mode={:o}",
-                            entry.kind, entry.path, entry.uid, entry.gid, entry.mode));
+                        emit_status(
+                            admin,
+                            format!(
+                                "   {eff} {:?} {} uid={} gid={} mode={:o}",
+                                entry.kind, entry.path, entry.uid, entry.gid, entry.mode
+                            ),
+                        );
                     }
                     emit_status(admin, "");
                 }
@@ -1339,23 +1547,38 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
                 for tag in &tags {
                     emit_status(admin, format!("tag: {tag}"));
                     let effective = overlay.list_effective(tag);
-                    let mut winner: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+                    let mut winner: std::collections::HashMap<String, String> =
+                        std::collections::HashMap::new();
                     for e in &effective {
                         winner.insert(e.path.clone(), e.layer.clone());
                     }
                     for l in &layers {
                         let mut entries = overlay.list_layer(&l.name, tag);
                         entries.sort_by(|a, b| a.path.cmp(&b.path));
-                        if entries.is_empty() { continue; }
-                        emit_status(admin, format!("  layer: {} (priority={})", l.name, l.priority));
+                        if entries.is_empty() {
+                            continue;
+                        }
+                        emit_status(
+                            admin,
+                            format!("  layer: {} (priority={})", l.name, l.priority),
+                        );
                         for entry in &entries {
-                            let eff = if winner.get(&entry.path).map(|w| w == &l.name).unwrap_or(false) {
+                            let eff = if winner
+                                .get(&entry.path)
+                                .map(|w| w == &l.name)
+                                .unwrap_or(false)
+                            {
                                 "*"
                             } else {
                                 " "
                             };
-                            emit_status(admin, format!("   {eff} {:?} {} uid={} gid={} mode={:o}",
-                                entry.kind, entry.path, entry.uid, entry.gid, entry.mode));
+                            emit_status(
+                                admin,
+                                format!(
+                                    "   {eff} {:?} {} uid={} gid={} mode={:o}",
+                                    entry.kind, entry.path, entry.uid, entry.gid, entry.mode
+                                ),
+                            );
                         }
                     }
                     emit_status(admin, "");
