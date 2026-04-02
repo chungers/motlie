@@ -72,31 +72,16 @@ async fn main() -> Result<()> {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--socket" if i + 1 < args.len() => {
-                socket_path = args[i + 1].clone();
-                i += 2;
-            }
-            "--tag" if i + 1 < args.len() => {
-                tag = args[i + 1].clone();
-                i += 2;
-            }
-            "--dir" if i + 1 < args.len() => {
-                host_dir = Some(PathBuf::from(&args[i + 1]));
-                i += 2;
-            }
-            other => {
-                host_dir = Some(PathBuf::from(other));
-                i += 1;
-            }
+            "--socket" if i + 1 < args.len() => { socket_path = args[i + 1].clone(); i += 2; }
+            "--tag" if i + 1 < args.len() => { tag = args[i + 1].clone(); i += 2; }
+            "--dir" if i + 1 < args.len() => { host_dir = Some(PathBuf::from(&args[i + 1])); i += 2; }
+            other => { host_dir = Some(PathBuf::from(other)); i += 1; }
         }
     }
 
     let _tempdir;
     let host_path = match host_dir {
-        Some(p) => {
-            std::fs::create_dir_all(&p)?;
-            p
-        }
+        Some(p) => { std::fs::create_dir_all(&p)?; p }
         None => {
             _tempdir = tempfile::tempdir()?;
             let p = _tempdir.path().to_path_buf();
@@ -128,6 +113,7 @@ async fn main() -> Result<()> {
     eprintln!("Type 'help' for commands.");
     eprintln!("");
 
+    // Spawn vsock connection acceptor (guest filesystem traffic only)
     let server_for_accept = Arc::clone(&server);
     let tag_for_accept = tag.clone();
     tokio::spawn(async move {
@@ -150,6 +136,7 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Spawn the admin input handler on a blocking thread
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let server_for_input = Arc::clone(&server);
     let socket_for_cleanup = socket_path.clone();
@@ -164,26 +151,27 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Input handling — adapts to TTY, pipe+TTY, or pure pipe
+// ---------------------------------------------------------------------------
+
 fn run_input(server: Arc<FsServer>) {
     let stdin_is_tty = atty::is(atty::Stream::Stdin);
 
     if stdin_is_tty {
+        // Mode 1: Interactive TTY — rustyline REPL
         run_interactive_repl(&server);
     } else {
+        // Modes 2 & 3: Piped input — read stdin line by line
         eprintln!("--- reading commands from stdin ---");
         let stdin = io::stdin();
         for line in stdin.lock().lines() {
             let line = match line {
                 Ok(l) => l,
-                Err(e) => {
-                    eprintln!("stdin read error: {e}");
-                    break;
-                }
+                Err(e) => { eprintln!("stdin read error: {e}"); break; }
             };
             let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                continue;
-            }
+            if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
             eprintln!("vfs> {trimmed}");
             if dispatch_command(&server, trimmed) == ControlFlow::Quit {
                 eprintln!("shutting down (quit command)");
@@ -192,18 +180,22 @@ fn run_input(server: Arc<FsServer>) {
         }
         eprintln!("--- stdin EOF ---");
 
+        // Try to reopen /dev/tty for interactive mode (Mode 2: pipe then TTY)
         #[cfg(unix)]
         {
             if let Ok(_tty) = std::fs::File::open("/dev/tty") {
-                eprintln!(
-                    "--- entering interactive REPL (Ctrl-D to stop, server keeps running) ---"
-                );
+                // /dev/tty is available — the user piped a script but still has a terminal.
+                // Switch to interactive rustyline REPL.
+                eprintln!("--- entering interactive REPL (Ctrl-D to stop, server keeps running) ---");
                 eprintln!("");
                 run_interactive_repl(&server);
                 return;
             }
         }
 
+        // Mode 3: Pure pipe, no TTY available.
+        // Server keeps running for guest filesystem connections.
+        // Wait for SIGTERM/SIGINT/SIGHUP.
         eprintln!("--- no TTY available, server running until signaled ---");
         eprintln!("--- send SIGTERM or SIGINT to stop ---");
         wait_for_signal();
@@ -223,21 +215,13 @@ fn run_interactive_repl(server: &FsServer) {
     loop {
         let line = match rl.readline("vfs> ") {
             Ok(line) => line,
-            Err(rustyline::error::ReadlineError::Interrupted) => {
-                eprintln!("^C");
-                continue;
-            }
+            Err(rustyline::error::ReadlineError::Interrupted) => { eprintln!("^C"); continue; }
             Err(rustyline::error::ReadlineError::Eof) => break,
-            Err(e) => {
-                eprintln!("REPL error: {e}");
-                break;
-            }
+            Err(e) => { eprintln!("REPL error: {e}"); break; }
         };
 
         let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
+        if trimmed.is_empty() { continue; }
         let _ = rl.add_history_entry(trimmed);
 
         if dispatch_command(server, trimmed) == ControlFlow::Quit {
@@ -248,21 +232,24 @@ fn run_interactive_repl(server: &FsServer) {
     eprintln!("shutting down");
 }
 
+/// Block until SIGTERM, SIGINT, or SIGHUP is received.
 fn wait_for_signal() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
     let running = Arc::new(AtomicBool::new(true));
     let r = Arc::clone(&running);
-    ctrlc::set_handler(move || {
-        r.store(false, Ordering::SeqCst);
-    })
-    .unwrap_or_else(|e| eprintln!("warning: failed to set signal handler: {e}"));
+    ctrlc::set_handler(move || { r.store(false, Ordering::SeqCst); })
+        .unwrap_or_else(|e| eprintln!("warning: failed to set signal handler: {e}"));
 
     while running.load(Ordering::SeqCst) {
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Command dispatch — shared between all input modes
+// ---------------------------------------------------------------------------
 
 #[derive(PartialEq)]
 enum ControlFlow {
@@ -272,19 +259,15 @@ enum ControlFlow {
 
 fn dispatch_command(server: &FsServer, line: &str) -> ControlFlow {
     let parts: Vec<&str> = line.split_whitespace().collect();
-    if parts.is_empty() {
-        return ControlFlow::Continue;
-    }
+    if parts.is_empty() { return ControlFlow::Continue; }
 
     let overlay = match server.overlay() {
         Some(o) => o,
-        None => {
-            println!("error: overlay not enabled");
-            return ControlFlow::Continue;
-        }
+        None => { println!("error: overlay not enabled"); return ControlFlow::Continue; }
     };
 
     match parts[0] {
+        // --- Layer management ---
         "layer" if parts.len() >= 3 => {
             let name = parts[1];
             match parts[2].parse::<u32>() {
@@ -295,22 +278,21 @@ fn dispatch_command(server: &FsServer, line: &str) -> ControlFlow {
                 Err(_) => println!("error: priority must be a number"),
             }
         }
-        "rmlayer" if parts.len() >= 2 => match overlay.remove_layer(parts[1]) {
-            Ok(()) => println!("ok: rmlayer {}", parts[1]),
-            Err(e) => println!("error: {e}"),
-        },
-        "layers" => {
-            let layers = overlay.layers();
-            if layers.is_empty() {
-                println!("(no layers)");
-            }
-            for l in &layers {
-                println!(
-                    "  {} priority={} entries={}",
-                    l.name, l.priority, l.entry_count
-                );
+        "rmlayer" if parts.len() >= 2 => {
+            match overlay.remove_layer(parts[1]) {
+                Ok(()) => println!("ok: rmlayer {}", parts[1]),
+                Err(e) => println!("error: {e}"),
             }
         }
+        "layers" => {
+            let layers = overlay.layers();
+            if layers.is_empty() { println!("(no layers)"); }
+            for l in &layers {
+                println!("  {} priority={} entries={}", l.name, l.priority, l.entry_count);
+            }
+        }
+
+        // --- Content injection ---
         "put" if parts.len() >= 5 => {
             let (layer, tag, path) = (parts[1], parts[2], parts[3]);
             let content = parts[4..].join(" ");
@@ -321,34 +303,13 @@ fn dispatch_command(server: &FsServer, line: &str) -> ControlFlow {
         }
         "putattr" if parts.len() >= 8 => {
             let (layer, tag, path) = (parts[1], parts[2], parts[3]);
-            let uid = match parts[4].parse::<u32>() {
-                Ok(v) => v,
-                Err(_) => {
-                    println!("error: uid must be a number");
-                    return ControlFlow::Continue;
-                }
-            };
-            let gid = match parts[5].parse::<u32>() {
-                Ok(v) => v,
-                Err(_) => {
-                    println!("error: gid must be a number");
-                    return ControlFlow::Continue;
-                }
-            };
-            let mode = match u32::from_str_radix(parts[6], 8) {
-                Ok(v) => v,
-                Err(_) => {
-                    println!("error: mode must be octal");
-                    return ControlFlow::Continue;
-                }
-            };
+            let uid = match parts[4].parse::<u32>() { Ok(v) => v, Err(_) => { println!("error: uid must be a number"); return ControlFlow::Continue; } };
+            let gid = match parts[5].parse::<u32>() { Ok(v) => v, Err(_) => { println!("error: gid must be a number"); return ControlFlow::Continue; } };
+            let mode = match u32::from_str_radix(parts[6], 8) { Ok(v) => v, Err(_) => { println!("error: mode must be octal"); return ControlFlow::Continue; } };
             let content = parts[7..].join(" ");
             let attrs = OverlayAttrs { mode, uid, gid };
             match overlay.put_with_attrs(layer, tag, path, attrs, Bytes::from(content.clone())) {
-                Ok(()) => println!(
-                    "ok: putattr {layer} {tag} {path} uid={uid} gid={gid} mode={mode:o} ({} bytes)",
-                    content.len()
-                ),
+                Ok(()) => println!("ok: putattr {layer} {tag} {path} uid={uid} gid={gid} mode={mode:o} ({} bytes)", content.len()),
                 Err(e) => println!("error: {e}"),
             }
         }
@@ -356,19 +317,15 @@ fn dispatch_command(server: &FsServer, line: &str) -> ControlFlow {
             let (layer, tag, path) = (parts[1], parts[2], parts[3]);
             let mode = if parts.len() >= 5 {
                 u32::from_str_radix(parts[4], 8).unwrap_or(0o755)
-            } else {
-                0o755
-            };
-            let attrs = OverlayAttrs {
-                mode,
-                uid: 0,
-                gid: 0,
-            };
+            } else { 0o755 };
+            let attrs = OverlayAttrs { mode, uid: 0, gid: 0 };
             match overlay.create_dir(layer, tag, path, attrs) {
                 Ok(()) => println!("ok: mkdir {layer} {tag} {path} mode={mode:o}"),
                 Err(e) => println!("error: {e}"),
             }
         }
+
+        // --- Suppression / removal ---
         "whiteout" if parts.len() >= 4 => {
             let (layer, tag, path) = (parts[1], parts[2], parts[3]);
             match overlay.whiteout(layer, tag, path) {
@@ -383,53 +340,49 @@ fn dispatch_command(server: &FsServer, line: &str) -> ControlFlow {
                 Err(e) => println!("error: {e}"),
             }
         }
+
+        // --- Inspection ---
         "get" if parts.len() >= 4 => {
             let (layer, tag, path) = (parts[1], parts[2], parts[3]);
             match overlay.get(layer, tag, path) {
-                Some(data) => match std::str::from_utf8(&data) {
-                    Ok(s) => println!("{s}"),
-                    Err(_) => println!("({} bytes, binary)", data.len()),
-                },
+                Some(data) => {
+                    match std::str::from_utf8(&data) {
+                        Ok(s) => println!("{s}"),
+                        Err(_) => println!("({} bytes, binary)", data.len()),
+                    }
+                }
                 None => println!("(not found)"),
             }
         }
         "ls" if parts.len() >= 2 => {
             let tag = parts[1];
             let entries = overlay.list_effective(tag);
-            if entries.is_empty() {
-                println!("(no overlay entries for tag '{tag}')");
-            }
+            if entries.is_empty() { println!("(no overlay entries for tag '{tag}')"); }
             for entry in &entries {
-                println!(
-                    "  {:?} {} uid={} gid={} mode={:o}",
-                    entry.kind, entry.path, entry.uid, entry.gid, entry.mode
-                );
+                println!("  {:?} {} uid={} gid={} mode={:o}", entry.kind, entry.path, entry.uid, entry.gid, entry.mode);
             }
             println!("({} entries)", entries.len());
         }
         "lslayer" if parts.len() >= 3 => {
             let (layer, tag) = (parts[1], parts[2]);
             let entries = overlay.list_layer(layer, tag);
-            if entries.is_empty() {
-                println!("(no entries in layer '{layer}' for tag '{tag}')");
-            }
+            if entries.is_empty() { println!("(no entries in layer '{layer}' for tag '{tag}')"); }
             for entry in &entries {
-                println!(
-                    "  {:?} {} uid={} gid={} mode={:o}",
-                    entry.kind, entry.path, entry.uid, entry.gid, entry.mode
-                );
+                println!("  {:?} {} uid={} gid={} mode={:o}", entry.kind, entry.path, entry.uid, entry.gid, entry.mode);
             }
             println!("({} entries)", entries.len());
         }
+
+        // --- Tree view ---
         "tree" if parts.len() >= 2 => {
             let tag = parts[1];
             let layers = overlay.layers();
             if layers.is_empty() {
                 println!("(no layers)");
             } else {
+                // Collect effective entries to show which layer wins
                 let effective = overlay.list_effective(tag);
-                let mut winner: std::collections::HashMap<String, String> =
-                    std::collections::HashMap::new();
+                let mut winner: std::collections::HashMap<String, String> = std::collections::HashMap::new();
                 for e in &effective {
                     winner.insert(e.path.clone(), e.layer.clone());
                 }
@@ -439,24 +392,16 @@ fn dispatch_command(server: &FsServer, line: &str) -> ControlFlow {
                 for l in &layers {
                     let mut entries = overlay.list_layer(&l.name, tag);
                     entries.sort_by(|a, b| a.path.cmp(&b.path));
-                    if entries.is_empty() {
-                        continue;
-                    }
+                    if entries.is_empty() { continue; }
                     println!("  layer: {} (priority={})", l.name, l.priority);
                     for entry in &entries {
-                        let eff = if winner
-                            .get(&entry.path)
-                            .map(|w| w == &l.name)
-                            .unwrap_or(false)
-                        {
+                        let eff = if winner.get(&entry.path).map(|w| w == &l.name).unwrap_or(false) {
                             "*"
                         } else {
-                            " "
+                            " "  // shadowed by higher-priority layer
                         };
-                        println!(
-                            "   {eff} {:?} {} uid={} gid={} mode={:o}",
-                            entry.kind, entry.path, entry.uid, entry.gid, entry.mode
-                        );
+                        println!("   {eff} {:?} {} uid={} gid={} mode={:o}",
+                            entry.kind, entry.path, entry.uid, entry.gid, entry.mode);
                     }
                     println!();
                 }
@@ -474,32 +419,23 @@ fn dispatch_command(server: &FsServer, line: &str) -> ControlFlow {
                 for tag in &tags {
                     println!("tag: {tag}");
                     let effective = overlay.list_effective(tag);
-                    let mut winner: std::collections::HashMap<String, String> =
-                        std::collections::HashMap::new();
+                    let mut winner: std::collections::HashMap<String, String> = std::collections::HashMap::new();
                     for e in &effective {
                         winner.insert(e.path.clone(), e.layer.clone());
                     }
                     for l in &layers {
                         let mut entries = overlay.list_layer(&l.name, tag);
                         entries.sort_by(|a, b| a.path.cmp(&b.path));
-                        if entries.is_empty() {
-                            continue;
-                        }
+                        if entries.is_empty() { continue; }
                         println!("  layer: {} (priority={})", l.name, l.priority);
                         for entry in &entries {
-                            let eff = if winner
-                                .get(&entry.path)
-                                .map(|w| w == &l.name)
-                                .unwrap_or(false)
-                            {
+                            let eff = if winner.get(&entry.path).map(|w| w == &l.name).unwrap_or(false) {
                                 "*"
                             } else {
                                 " "
                             };
-                            println!(
-                                "   {eff} {:?} {} uid={} gid={} mode={:o}",
-                                entry.kind, entry.path, entry.uid, entry.gid, entry.mode
-                            );
+                            println!("   {eff} {:?} {} uid={} gid={} mode={:o}",
+                                entry.kind, entry.path, entry.uid, entry.gid, entry.mode);
                         }
                     }
                     println!();
@@ -507,34 +443,26 @@ fn dispatch_command(server: &FsServer, line: &str) -> ControlFlow {
                 println!("(* = effective winner)");
             }
         }
+
+        // --- Help ---
         "help" => {
             println!("Layer management:");
             println!("  layer <name> <priority>                         — create/update layer");
-            println!(
-                "  rmlayer <name>                                  — remove layer and all entries"
-            );
+            println!("  rmlayer <name>                                  — remove layer and all entries");
             println!("  layers                                          — list all layers");
             println!("");
             println!("Content injection:");
-            println!(
-                "  put <layer> <tag> <path> <content>              — inject file (default attrs)"
-            );
+            println!("  put <layer> <tag> <path> <content>              — inject file (default attrs)");
             println!("  putattr <layer> <tag> <path> <uid> <gid> <mode> <content>");
             println!("                                                  — inject file with explicit attrs");
-            println!(
-                "  mkdir <layer> <tag> <path> [mode]               — create synthetic directory"
-            );
+            println!("  mkdir <layer> <tag> <path> [mode]               — create synthetic directory");
             println!("");
             println!("Suppression / removal:");
-            println!(
-                "  whiteout <layer> <tag> <path>                   — hide a lower-layer entry"
-            );
+            println!("  whiteout <layer> <tag> <path>                   — hide a lower-layer entry");
             println!("  rm <layer> <tag> <path>                         — remove an overlay entry");
             println!("");
             println!("Inspection:");
-            println!(
-                "  get <layer> <tag> <path>                        — read content from a layer"
-            );
+            println!("  get <layer> <tag> <path>                        — read content from a layer");
             println!("  ls <tag>                                        — list effective overlay entries");
             println!("  lslayer <layer> <tag>                           — list entries in a layer");
             println!("  tree [tag]                                      — show layered tree (* = winner)");
@@ -547,11 +475,11 @@ fn dispatch_command(server: &FsServer, line: &str) -> ControlFlow {
             println!("Input modes:");
             println!("  Interactive:  stdin is a TTY → rustyline REPL");
             println!("  Pipe + TTY:   cat script.vfs - | repl_host → script then REPL");
-            println!(
-                "  Pure pipe:    cat script.vfs | repl_host → script then serve until signaled"
-            );
+            println!("  Pure pipe:    cat script.vfs | repl_host → script then serve until signaled");
         }
+
         "quit" | "exit" => return ControlFlow::Quit,
+
         _ => {
             println!("unknown command: {line}");
             println!("type 'help' for commands");
