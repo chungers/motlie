@@ -308,7 +308,6 @@ RestartSec=2
 [Install]
 WantedBy=multi-user.target
 SVCEOF' \
-    --customize-hook='chroot "$1" systemctl enable motlie-vfs-guest' \
     --customize-hook="echo \"$BASE_HOSTNAME\" > \"\$1/etc/hostname\"" \
     --customize-hook='cat > "$1/etc/motd" << "MOTDEOF"
                     _   _ _
