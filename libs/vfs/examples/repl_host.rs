@@ -51,6 +51,9 @@
 //! # Empty admin mode, provision from REPL script
 //! cat setup-multiguest.sh.vfs | cargo run --example repl_host --features vsock -- --empty
 //!
+//! # Preferred interactive setup-file flow (keeps rustyline on a real TTY)
+//! cargo run --example repl_host --features vsock -- --empty --script setup-multiguest.sh.vfs
+//!
 //! # Script then interactive
 //! cat setup-alice.sh.vfs - | cargo run --example repl_host --features vsock -- --tag alice-home
 //!
@@ -64,6 +67,7 @@
 //! # Options
 //!
 //!   --empty                 start with no guest and provision from REPL
+//!   --script <path>         execute a setup file before entering the REPL
 //!   --socket <path>         vsock socket path (single-guest mode)
 //!   --guest <id=socket>     add a guest-scoped FsServer and listener
 //!   --mount <tag=dir>       add a mount in single-guest mode
@@ -125,6 +129,7 @@ struct AdminState {
     multi_guest: bool,
     comment_stdout: bool,
     prompt_state: Arc<StdMutex<String>>,
+    startup_scripts: Vec<PathBuf>,
     runtime: Handle,
     sockets_for_cleanup: Arc<StdMutex<Vec<String>>>,
 }
@@ -142,6 +147,7 @@ async fn main() -> Result<()> {
     let mut single_mounts: Vec<(String, PathBuf)> = Vec::new();
     let mut guest_configs: Vec<GuestConfig> = Vec::new();
     let mut empty_mode = false;
+    let mut startup_scripts: Vec<PathBuf> = Vec::new();
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -176,6 +182,10 @@ async fn main() -> Result<()> {
                         });
                     }
                 }
+                i += 2;
+            }
+            "--script" if i + 1 < args.len() => {
+                startup_scripts.push(PathBuf::from(&args[i + 1]));
                 i += 2;
             }
             "--tag" if i + 1 < args.len() => { tag = args[i + 1].clone(); i += 2; }
@@ -312,6 +322,7 @@ async fn main() -> Result<()> {
         multi_guest,
         comment_stdout: false,
         prompt_state,
+        startup_scripts,
         runtime,
         sockets_for_cleanup: Arc::clone(&sockets_for_cleanup),
     };
@@ -335,6 +346,16 @@ async fn main() -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn run_input(mut admin: AdminState) {
+    if !admin.startup_scripts.is_empty() {
+        let scripts = std::mem::take(&mut admin.startup_scripts);
+        for script in scripts {
+            if let Err(e) = run_script_file(&mut admin, &script) {
+                eprintln!("script {} failed: {e}", script.display());
+                return;
+            }
+        }
+    }
+
     let stdin_is_tty = atty::is(atty::Stream::Stdin);
 
     if stdin_is_tty {
@@ -383,6 +404,24 @@ fn run_input(mut admin: AdminState) {
         wait_for_signal();
         eprintln!("shutting down (signal received)");
     }
+}
+
+fn run_script_file(admin: &mut AdminState, path: &PathBuf) -> Result<()> {
+    let file = File::open(path)?;
+    let reader = io::BufReader::new(file);
+    eprintln!("--- reading commands from script {} ---", path.display());
+    for line in reader.lines() {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        eprintln!("vfs> {trimmed}");
+        if dispatch_command(admin, trimmed) == ControlFlow::Quit {
+            anyhow::bail!("quit command encountered in {}", path.display());
+        }
+    }
+    Ok(())
 }
 
 fn run_interactive_repl(admin: &mut AdminState) {
@@ -979,7 +1018,8 @@ fn print_help(topic: Option<&str>, multi_guest: bool, comment_stdout: bool) {
             out("");
             out("Input modes:");
             out("  Interactive:  stdin is a TTY → rustyline REPL");
-            out("  Pipe + TTY:   cat script.vfs - | repl_host → script then REPL");
+            out("  Preferred scripted startup: repl_host --script setup.vfs → script then REPL");
+            out("  Pipe + TTY:   cat script.vfs - | repl_host → limited terminal semantics");
             out("  Pure pipe:    cat script.vfs | repl_host → script then serve until signaled");
         }
     }
