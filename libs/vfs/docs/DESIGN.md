@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-02 | @codex | Split the host example boundary so `examples/repl_host.rs` remains the stable v1 single-guest harness while `examples/v1.1/repl_host.rs` carries the v1.1 multi-guest control-plane extensions |
 | 2026-04-02 | @codex | Sync `FsOp::Mkdir` wire protocol with `uid`/`gid` and clarify that explicit overlay-managed `mkdir` uses caller ownership while implicit parent dirs created by `put()` still inherit defaults |
 | 2026-03-31 | @claude | Update wire protocol: `FsOp::Create` now carries `uid`/`gid`, add `FsResult::Created` with `fh` for atomic create+open, add `FsResult::Opened` (PR #123 review) |
 | 2026-03-28 | @codex-pm | Resolve PR #117 round-3 follow-ups: complete `FsOpKind` coverage for event emission and align the docs with the final phase numbering and overlay-behavior test expectations |
@@ -98,12 +99,13 @@ v1 lives inside `libs/vfs` and targets the fastest proof of concept:
   - `FuseClient` in `client/fuse.rs`
   - backed by a vsock transport adapter from `vsock/`
 - proof-of-concept host/guest harness:
-  - `repl_host` example: FsServer + MemOverlay + vsock listener + admin command interface
+  - `repl_host` example: stable v1 single-guest host REPL
   - Cloud Hypervisor guest with squashfs+ext4 stacked root
   - guest runs `sshd` and `motlie-vfs-guest`
   - guest mounts host-backed trees over vsock
 - repo location for the proof-of-concept harness:
-  - `libs/vfs/examples/` (host side)
+  - `libs/vfs/examples/repl_host.rs` (v1 host side)
+  - `libs/vfs/examples/v1.1/repl_host.rs` (v1.1 multi-guest host side)
   - `libs/vfs/examples/v1/` (guest image build + CH launch scripts)
 - REPL/tooling choice:
   - `rustyline` for interactive mode
@@ -111,8 +113,9 @@ v1 lives inside `libs/vfs` and targets the fastest proof of concept:
 
 The v1 crate is library-first, but it is allowed to include example binaries and supporting
 README/documentation under `libs/vfs/examples/` to prove the architecture quickly. The host
-admin interface lives in the `repl_host` example binary; there is no separate v1 crate module
-for admin.
+admin interface for v1 lives in the `repl_host` example binary; v1.1 carries its own host
+harness in `examples/v1.1/repl_host.rs` so later roadmap slices do not keep changing the
+original v1 example in place. There is no separate crate module for admin.
 
 **Host admin input modes:**
 
@@ -1228,7 +1231,9 @@ libs/vfs/
 ├── docs/
 │   └── DESIGN.md                 # this document
 ├── examples/
-│   ├── repl_host.rs            # host server: FsServer + vsock + admin REPL (interactive/pipe/signal)
+│   ├── repl_host.rs              # stable v1 single-guest host REPL example
+│   ├── v1.1/
+│   │   └── repl_host.rs          # v1.1 multi-guest host REPL example
 │   └── README.md                 # Cloud Hypervisor proof-of-concept instructions
 ├── bins/
 │   └── motlie-vfs-guest.rs       # v1 guest-side mounter binary over public guest APIs
