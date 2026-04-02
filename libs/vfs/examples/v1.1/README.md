@@ -43,7 +43,7 @@ admin plane. The important parameters are:
 In `v1.1`, those parameters are split across two sides:
 
 - guest side: [mounts.alice.yaml](/tmp/vfs-v11-multiguest/libs/vfs/examples/v1.1/mounts.alice.yaml) and [mounts.bob.yaml](/tmp/vfs-v11-multiguest/libs/vfs/examples/v1.1/mounts.bob.yaml)
-- host side: [setup-multiguest.sh.vfs](/tmp/vfs-v11-multiguest/libs/vfs/examples/v1.1/setup-multiguest.sh.vfs) and the `repl_host` provisioning commands
+- host side: [setup-multiguest.sh.vfs](/tmp/vfs-v11-multiguest/libs/vfs/examples/v1.1/setup-multiguest.sh.vfs) and the `repl_host_v1_1` provisioning commands
 
 Important nuance:
 
@@ -64,6 +64,7 @@ mount the wrong subtree or see files with unusable ownership.
 | `setup-alice.sh.vfs` | Host REPL script for Alice's tags |
 | `setup-bob.sh.vfs` | Host REPL script for Bob's tags |
 | `setup-multiguest.sh.vfs` | Combined host REPL script that provisions both guests, assigns uid/gid, and defines their mounts |
+| `repl_host.rs` | `v1.1`-specific multi-guest host REPL example (`cargo run --example repl_host_v1_1`) |
 | `build-guest.sh` | Builds one generic shared base image set under `artifacts/base/` |
 | `launch-ch.sh` | Launches one guest VM at a time with guest-specific sockets/CID/IP |
 | `overlay-init` | Boot-time init script |
@@ -98,7 +99,7 @@ What each host package is used for:
 You also need a working Rust toolchain with `cargo`, because:
 
 - `build-guest.sh` compiles `motlie-vfs-guest` from the workspace
-- the runbooks use `cargo run -p motlie-vfs --example repl_host --features vsock`
+- the runbooks use `cargo run -p motlie-vfs --example repl_host_v1_1 --features vsock`
 
 You also need:
 
@@ -158,11 +159,11 @@ Preferred interactive startup:
 ```bash
 cd /tmp/vfs-v11-multiguest
 
-cargo run -p motlie-vfs --example repl_host --features vsock -- \
+cargo run -p motlie-vfs --example repl_host_v1_1 --features vsock -- \
   --empty --script libs/vfs/examples/v1.1/setup-multiguest.sh.vfs
 ```
 
-This keeps `repl_host` attached directly to your terminal, so `rustyline`
+This keeps `repl_host_v1_1` attached directly to your terminal, so `rustyline`
 history, arrow keys, and other control sequences work normally.
 
 Pipe-based startup still works:
@@ -171,10 +172,10 @@ Pipe-based startup still works:
 cd /tmp/vfs-v11-multiguest
 
 cat libs/vfs/examples/v1.1/setup-multiguest.sh.vfs - | \
-  cargo run -p motlie-vfs --example repl_host --features vsock -- --empty
+  cargo run -p motlie-vfs --example repl_host_v1_1 --features vsock -- --empty
 ```
 
-That one `repl_host` process owns:
+That one `repl_host_v1_1` process owns:
 
 - one `FsServer` instance for Alice
 - one `FsServer` instance for Bob
@@ -248,9 +249,9 @@ Operator notes:
 
 - prefer `--script <file>` for interactive operator use; that keeps stdin on the real TTY so `rustyline` history and non-printable keys work correctly
 - use `cat ... - | cargo run ...` so the setup file is consumed first and stdin stays attached to your terminal
-- that keeps the shared `repl_host` process alive while guests boot and connect
+- that keeps the shared `repl_host_v1_1` process alive while guests boot and connect
 - the generated helper does not require `cloud-localds`; `launch-ch.sh` copies the NoCloud files into the per-launch guest overlay directly
-- when `repl_host` is driven by scripted stdin, its status/help lines are emitted as shell comments (`# ...`) so `launch <guest>` output can be redirected directly into an executable helper script
+- when `repl_host_v1_1` is driven by scripted stdin, its status/help lines are emitted as shell comments (`# ...`) so `launch <guest>` output can be redirected directly into an executable helper script
 
 Current limitations:
 
@@ -341,7 +342,7 @@ In terminal 1:
 cd /tmp/vfs-v11-multiguest
 
 cat libs/vfs/examples/v1.1/setup-multiguest.sh.vfs - | \
-  cargo run -p motlie-vfs --example repl_host --features vsock -- --empty
+  cargo run -p motlie-vfs --example repl_host_v1_1 --features vsock -- --empty
 ```
 
 ### 5. Launch both guests
@@ -388,12 +389,12 @@ Mounted-home note:
 
 ## What Changed Relative To v1
 
-- `repl_host` now supports repeated `--mount <tag>=<dir>`
-- `repl_host` now also supports repeated `--guest <id>=<socket>` and guest-qualified `--mount <id>:<tag>=<dir>` for one-process multi-guest demos
-- `repl_host` now also supports REPL-driven `provision`, `mount`, and `launch` commands, so `v1.1` can define guest topology and render guest-specific cloud-init from stdin instead of process flags
+- `repl_host_v1_1` supports repeated `--mount <tag>=<dir>`
+- `repl_host_v1_1` also supports repeated `--guest <id>=<socket>` and guest-qualified `--mount <id>:<tag>=<dir>` for one-process multi-guest demos
+- `repl_host_v1_1` also supports REPL-driven `provision`, `mount`, and `launch` commands, so `v1.1` can define guest topology and render guest-specific cloud-init from stdin instead of process flags
 - `motlie-vfs-guest` still reads a YAML mount list, but now each mount performs a tag-binding handshake on connect
 - the demo scripts use separate sockets/CIDs/runtime overlays per guest so Alice and Bob can run at the same time
-- `v1.1` now runs Alice and Bob through one host `repl_host` process while still keeping one `FsServer` per guest internally
+- `v1.1` now runs Alice and Bob through one host `repl_host_v1_1` process while still keeping one `FsServer` per guest internally
 - `v1.1` now builds one generic base image set and creates guest-specific writable overlays at launch time
 - `v1.1` moved guest identity, hostname, and mount config out of `build-guest.sh` and into `launch-ch.sh`
 - `v1.1` treats package-manager writes as disposable guest-local root mutations, not as `vfs` content

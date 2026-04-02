@@ -1,19 +1,14 @@
 # motlie-vfs Examples
 
-Proof-of-concept programs for the v1 Cloud Hypervisor guest workflow.
+Proof-of-concept programs for the `v1` and `v1.1` Cloud Hypervisor guest workflows.
 
 ## repl_host
 
-Host-side filesystem server: one `FsServer` + `MemOverlay` per guest VM,
-listening on a parameterized Unix socket, with an admin command interface
-exposing every `MemOverlay` API operation. Admin is in-process only — no
-network admin connections.
+Stable `v1` host-side filesystem server: one single-guest `FsServer` +
+`MemOverlay`, listening on one Unix socket, with an in-process admin REPL.
 
-`repl_host` supports three provisioning styles:
-
-- legacy single-guest `--tag` / `--dir` for `v1`
-- startup-flag multi-guest `--guest` / guest-qualified `--mount`
-- REPL-driven `--empty` plus `provision` / `mount` / `launch` for `v1.1`
+`repl_host` intentionally stays on the `v1` single-guest surface so later
+roadmap slices do not drift or break the original example.
 
 ### Input modes
 
@@ -23,14 +18,6 @@ The server detects how stdin is connected and adapts:
 ```bash
 cargo run -p motlie-vfs --example repl_host --features vsock -- --tag alice-home
 # → rustyline REPL with line editing, history, ^C handling
-```
-
-**Preferred setup-file startup (`--script ...`):**
-```bash
-cargo run -p motlie-vfs --example repl_host --features vsock -- --empty --script setup-multiguest.sh.vfs
-# → executes the setup file first
-# → keeps stdin attached to the real terminal
-# → full rustyline history, arrows, and control characters work
 ```
 
 **Pipe then interactive (`cat script - | ...`):**
@@ -44,33 +31,15 @@ cat setup-alice.sh.vfs - | cargo run -p motlie-vfs --example repl_host --feature
 ```bash
 cat setup-alice.sh.vfs | cargo run -p motlie-vfs --example repl_host --features vsock -- --tag alice-home
 # → executes script, then may reopen /dev/tty if one is available
-# → for v1.1 operator-driven flows, prefer `cat script - | ...`
-# → status/help lines emitted during scripted stdin are prefixed with `# `
-#   so generated helper scripts remain executable shell scripts
-# → arrow keys and other terminal control sequences may still be degraded
-#   because the shell pipeline sits between your terminal and repl_host
 ```
 
 ### Options
 
-- `--empty` — start with no guest and provision from REPL commands
 - `--socket <path>` — vsock socket path (default: `/tmp/motlie-vfs.vsock_5000`)
-- `--guest <id=socket>` — add one guest-scoped `FsServer` at startup
-- `--mount <tag=dir>` — add a mount; repeat for multi-tag servers
-- `--mount <id:tag=dir>` — add one mount to one guest at startup
 - `--tag <name>` — mount tag (default: `alice-home`)
 - `--dir <path>` — host backing directory (default: temp dir with sample data)
 
 ### Commands
-
-**Provisioning / targeting:**
-- `guests` — list provisioned guests, sockets, and mount counts
-- `use <guest>` — set the default target guest
-- `provision <guest> <socket> <uid> <gid>` — create one guest-scoped `FsServer`, record guest identity, and listener
-- `mount <guest> <tag>=<guest_path>,<host_path> [more...]` — add one or more mounts to a guest
-- `launch <guest>` — generate and start a prototype shell script asynchronously; logs land under `/tmp/motlie-vfs-launch/<guest>/`
-- `launch -script <guest>` — print that helper shell script to stdout without executing it
-- `shutdown <guest>` — request guest shutdown through `/tmp/motlie-vfs-<guest>-api.sock`
 
 **Layer management:**
 - `layer <name> <priority>` — create or update a named layer
@@ -93,48 +62,37 @@ cat setup-alice.sh.vfs | cargo run -p motlie-vfs --example repl_host --features 
 
 **Other:**
 - `help` — show all commands
-- `help <command>` — show detailed usage for one command, for example `help provision`
 - `quit` — shut down server
 
-The `launch` commands are prototype workflow helpers.
+## repl_host_v1_1
 
-- `launch <guest>` writes the helper to `/tmp/motlie-vfs-launch/<guest>/launch.sh`, starts it asynchronously, and returns the REPL prompt immediately
-- `launch -script <guest>` prints the same script to stdout
-- `shutdown <guest>` shells out to `curl`, so the host running `repl_host` must have `curl` installed if you want REPL-driven shutdown
+`repl_host_v1_1` is the `v1.1`-specific multi-guest host harness. It owns the
+admin-plane features that were added after `v1`:
 
-The helper embeds generated `mounts.yaml`, cloud-init `user-data`, and
-`meta-data` for that guest, including explicit identity setup commands in
-cloud-init `runcmd`. The intent is that a future VMM library can reuse the
-same rendering helpers programmatically.
+- `--empty`, `--script`
+- `provision`, `mount`, `guests`, `use`
+- `launch`, `launch -script`, `shutdown`
+- one `FsServer` per guest in one shared host process
 
-When `launch <guest>` executes the helper, it redirects:
+Run it with:
 
-- helper stdout/stderr to `/tmp/motlie-vfs-launch/<guest>/launch.log`
-- guest serial console output to `/tmp/motlie-vfs-launch/<guest>/serial.log`
+```bash
+cargo run -p motlie-vfs --example repl_host_v1_1 --features vsock -- \
+  --empty --script libs/vfs/examples/v1.1/setup-multiguest.sh.vfs
+```
 
-That avoids Cloud Hypervisor taking over the REPL terminal.
-
-`launch <guest>` is intentionally fire-and-forget in this prototype: `repl_host`
-reports the spawned PID and log paths, but does not currently supervise or
-reap the helper process afterward.
-
-Current prototype limitation:
-
-- the helper currently targets the demo guests `alice` and `bob`
-- it seeds a NoCloud directory through `launch-ch.sh --cloud-init-dir`
-- the shared `v1.1` base image must be rebuilt with the current `build-guest.sh` so the guest consumes the seeded NoCloud directory
-- the generated helper does not require `cloud-localds`; `launch-ch.sh` seeds the NoCloud files into the guest runtime overlay directly
+See [v1.1/README.md](./v1.1/README.md) for the full multi-guest workflow.
 
 ### Coordination Contract
 
 The guest and host must agree on several parameters. This is important enough
-to treat as an explicit contract:
+to treat as an explicit contract for both binaries:
 
-- `socket`: the host-side Unix socket created by `repl_host` must match the socket path that the guest connects to
+- `socket`: the host-side Unix socket created by `repl_host` or `repl_host_v1_1` must match the socket path that the guest connects to
 - `guest id`: only the admin control plane uses this; it selects which guest-scoped `FsServer` owns a socket and a set of mounts
 - `tag`: the guest sends `TAG <name>` on connect, and the host must have provisioned that same tag in the target guest `FsServer`
 - `guest_path`: the guest mount config decides where a tag is mounted inside the guest, for example `/home/alice` or `/workspace`
-- `host_path`: `repl_host` binds each tag to a host backing directory
+- `host_path`: the host REPL binds each tag to a host backing directory
 - `uid/gid/mode`: overlay-injected files such as `.ssh/authorized_keys` or `.env` must use values that make sense for the guest user, and `provision` now records the intended guest uid/gid explicitly
 
 Important nuance:
@@ -158,7 +116,8 @@ overlay ownership may be wrong, or the guest may fail to see the expected data.
 
 Script files are plain text, one command per line. Lines starting with
 `#` are comments. Empty lines are skipped. See `v1/setup-alice.sh.vfs`
-for an example.
+for the single-guest shape and `v1.1/setup-multiguest.sh.vfs` for the
+multi-guest shape.
 
 See `v1/README.md` for the full end-to-end flow and `v1/CH-HARNESS.md`
 for the single-guest Cloud Hypervisor setup. See `v1.1/README.md` for

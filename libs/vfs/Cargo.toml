@@ -60,3 +60,8 @@ path = "bins/motlie-vfs-guest.rs"
 name = "repl_host"
 path = "examples/repl_host.rs"
 required-features = ["vsock"]
+
+[[example]]
+name = "repl_host_v1_1"
+path = "examples/v1.1/repl_host.rs"
+required-features = ["vsock"]

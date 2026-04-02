@@ -6,7 +6,7 @@
 - multiple mount tags inside each server
 - one vsock socket per guest VM
 - one guest-side FUSE mount thread per tag
-- one shared `repl_host` process managing all guest-scoped `FsServer` instances
+- one shared `repl_host_v1_1` process managing all guest-scoped `FsServer` instances
 
 ## Original Requirements
 
@@ -27,8 +27,8 @@ The harness therefore combines:
 ## What Differs Vs v1
 
 - `v1` runs one guest-oriented server flow at a time; `v1.1` is meant to run Alice and Bob concurrently from one host process
-- `v1` uses the legacy single-tag `--tag` / `--dir` server startup path; `v1.1` starts `repl_host --empty` and provisions guests from REPL commands
-- `repl_host` still supports repeated `--guest <id>=<socket>` and guest-qualified `--mount` flags, but the `v1.1` harness now drives guest creation through `provision` and `mount`
+- `v1` uses the legacy single-tag `--tag` / `--dir` server startup path; `v1.1` starts `repl_host_v1_1 --empty` and provisions guests from REPL commands
+- `repl_host_v1_1` still supports repeated `--guest <id>=<socket>` and guest-qualified `--mount` flags, but the `v1.1` harness now drives guest creation through `provision` and `mount`
 - `v1` typically mounts one guest path; `v1.1` mounts two tags per guest in the demo
 - `v1` is single-socket, single-CID, single-artifact-tree; `v1.1` uses separate sockets, CIDs, and runtime overlays per guest while still using one host process
 - `v1.1` relies on the guest-side `TAG <name>` handshake so one server socket can route multiple tag connections for the same guest
@@ -39,7 +39,7 @@ The harness therefore combines:
 ```text
 Host                                          Guest VMs
 ----                                          ---------
-repl_host (one process)
+repl_host_v1_1 (one process)
   guest alice -> FsServer + socket /tmp/motlie-vfs-alice.vsock_5000
     mounts:
       alice-home -> /tmp/.../alice-home       alice VM
@@ -51,7 +51,7 @@ repl_host (one process)
       bob-workspace -> /tmp/.../bob-workspace
 ```
 
-Each guest mount connection goes to that guest's socket and immediately sends `TAG <name>\n`. `repl_host` uses the socket/listener to select the guest `FsServer`, then uses the tag handshake to route within that guest's mounts.
+Each guest mount connection goes to that guest's socket and immediately sends `TAG <name>\n`. `repl_host_v1_1` uses the socket/listener to select the guest `FsServer`, then uses the tag handshake to route within that guest's mounts.
 
 ## Prerequisites
 
@@ -73,7 +73,7 @@ sudo apt install \
 ```
 
 - build the shared base image set
-- ensure a working Rust toolchain with `cargo` is installed for `build-guest.sh` and `cargo run --example repl_host`
+- ensure a working Rust toolchain with `cargo` is installed for `build-guest.sh` and `cargo run --example repl_host_v1_1`
 - ensure `/dev/vhost-vsock` exists or load it with `sudo modprobe vhost_vsock`
 - use a shell that can successfully run the rootless `build-guest.sh` flow if you are rebuilding images
 - ensure `cloud-hypervisor` is installed and on `PATH`
@@ -95,14 +95,14 @@ You do not need a prior `v1` build. This harness uses only `v1.1` artifacts.
 
 ```bash
 cat setup-multiguest.sh.vfs - | \
-  cargo run -p motlie-vfs --example repl_host --features vsock -- --empty
+  cargo run -p motlie-vfs --example repl_host_v1_1 --features vsock -- --empty
 ```
 
-`repl_host` still supports the old `--tag` / `--dir` path for `v1`, but `v1.1` now provisions guests from REPL commands instead of startup flags.
+`repl_host` still supports the old `--tag` / `--dir` path for `v1`, but `v1.1` now uses the separate `repl_host_v1_1` binary and provisions guests from REPL commands instead of startup flags.
 
 In this demo:
 
-- the one `repl_host` process owns Alice's and Bob's `FsServer` instances
+- the one `repl_host_v1_1` process owns Alice's and Bob's `FsServer` instances
 - Alice's `FsServer` owns `alice-home` and `alice-workspace`
 - Bob's `FsServer` owns `bob-home` and `bob-workspace`
 - each guest VM opens one connection per mount tag back to its own server socket
@@ -128,7 +128,7 @@ Prototype helper:
 Operator note:
 
 - use `cat setup-multiguest.sh.vfs - | ...` so stdin stays attached to your terminal after the setup script is consumed
-- that keeps `repl_host` serving guest connections while the VMs boot
+- that keeps `repl_host_v1_1` serving guest connections while the VMs boot
 
 ## Launch Guests
 
@@ -176,7 +176,7 @@ Console/boot note:
 
 Use three terminals for the clearest flow:
 
-1. Terminal 1: start the shared `repl_host`
+1. Terminal 1: start the shared `repl_host_v1_1`
 2. Terminal 2: launch Alice guest
 3. Terminal 3: launch Bob guest
 
