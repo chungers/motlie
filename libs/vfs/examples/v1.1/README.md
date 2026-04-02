@@ -71,6 +71,46 @@ mount the wrong subtree or see files with unusable ownership.
 | `IMAGE.md` | Guest-image build notes for v1.1 |
 | `CH-HARNESS.md` | End-to-end commands and topology |
 
+## Host Requirements
+
+`v1.1` assumes a Linux host with these host-side packages installed:
+
+```bash
+sudo apt install \
+  cloud-hypervisor \
+  debian-archive-keyring \
+  e2fsprogs \
+  libfuse3-dev \
+  mmdebstrap \
+  pkg-config \
+  squashfs-tools-ng \
+  uidmap
+```
+
+What each host package is used for:
+
+- `cloud-hypervisor`: runs the guest VMs
+- `debian-archive-keyring`: keyring for `mmdebstrap`
+- `e2fsprogs`: provides `mkfs.ext4` for per-launch runtime overlays
+- `libfuse3-dev` and `pkg-config`: build dependencies for `motlie-vfs-guest`
+- `mmdebstrap`, `squashfs-tools-ng`, `uidmap`: shared base image build
+
+You also need a working Rust toolchain with `cargo`, because:
+
+- `build-guest.sh` compiles `motlie-vfs-guest` from the workspace
+- the runbooks use `cargo run -p motlie-vfs --example repl_host --features vsock`
+
+You also need:
+
+- outbound network access to download Debian packages and the CH kernel during image builds
+- `/dev/vhost-vsock` available at guest-launch time, usually via `sudo modprobe vhost_vsock`
+- a shell whose primary gid matches the passwd primary gid when using `mmdebstrap --mode=unshare`
+
+Optional but useful:
+
+- `tmux` for the guest login experience inside the built image
+- `curl` on the host for the CH shutdown examples in this runbook
+
 ## Mount Layout
 
 Alice VM:
@@ -116,7 +156,7 @@ package installs.
 ```bash
 cd /tmp/vfs-v11-multiguest
 
-cat libs/vfs/examples/v1.1/setup-multiguest.sh.vfs | \
+cat libs/vfs/examples/v1.1/setup-multiguest.sh.vfs - | \
   cargo run -p motlie-vfs --example repl_host --features vsock -- --empty
 ```
 
@@ -157,6 +197,11 @@ to stdout that embeds:
 - guest-specific cloud-init `meta-data`
 - explicit `groupadd` / `useradd` commands in cloud-init `runcmd` for the provisioned uid/gid
 
+Cloud-init in this flow writes guest config and creates mountpoint
+directories, then queues a non-blocking `systemctl start motlie-vfs-guest.service`.
+The helper avoids `restart` and uses `--no-block` so `cloud-final.service`
+does not deadlock waiting on a unit that is ordered after `cloud-final.service`.
+
 The intended operator flow is:
 
 1. `provision alice /tmp/... 1000 1000`
@@ -168,11 +213,16 @@ This is a prototype workflow for the control plane. `launch <guest>` now emits
 real guest-specific cloud-init assets, but the guest-launch path is still a
 shell-script helper rather than a VMM library API.
 
+Operator notes:
+
+- use `cat ... - | cargo run ...` so the setup file is consumed first and stdin stays attached to your terminal
+- that keeps the shared `repl_host` process alive while guests boot and connect
+- the generated helper does not require `cloud-localds`; `launch-ch.sh` copies the NoCloud files into the per-launch guest overlay directly
+
 Current limitations:
 
 - `launch <guest>` currently targets the demo guests `alice` and `bob`
-- the generated script requires `cloud-localds` from `cloud-image-utils`
-- the shared base must be rebuilt with the current `build-guest.sh` so the guest includes `cloud-init` and consumes the attached NoCloud seed at boot
+- the shared base must be rebuilt with the current `build-guest.sh` so the guest includes `cloud-init` and consumes the seeded NoCloud directory at boot
 
 The `.vfs` setup files are plain one-command-per-line REPL input, so any demo file content injected there must stay on one line as well.
 
@@ -192,6 +242,12 @@ larger runtime overlay:
 ./launch-ch.sh --guest alice --overlay-size 2G
 ./launch-ch.sh --guest bob --overlay-size 2G
 ```
+
+Console/boot note:
+
+- `v1.1` now boots with `console=ttyS0` and Cloud Hypervisor `--serial tty --console off`
+- this avoids the long `dev-hvc0.device` / `serial-getty@hvc0.service` timeout caused by a kernel cmdline that expects `hvc0`
+- the terminal where `launch-ch.sh` runs is the guest console
 
 ## Manual Validation On This Host
 
@@ -251,7 +307,7 @@ In terminal 1:
 ```bash
 cd /tmp/vfs-v11-multiguest
 
-cat libs/vfs/examples/v1.1/setup-multiguest.sh.vfs | \
+cat libs/vfs/examples/v1.1/setup-multiguest.sh.vfs - | \
   cargo run -p motlie-vfs --example repl_host --features vsock -- --empty
 ```
 
@@ -290,6 +346,12 @@ ls -la /home/bob/.ssh
 cat /home/bob/.env
 cat /workspace/README.md
 ```
+
+Mounted-home note:
+
+- if you SSH in before `motlie-vfs-guest` mounts `/home/<guest>`, your shell can retain the old cwd inode from the base image home
+- in that case `.` may still show the old home even though `/home/<guest>` and `~` resolve through the mounted VFS path
+- if `cat /home/alice/.env` works but `cat .env` does not, run `cd "$HOME"` or open a fresh SSH session after the mount is active
 
 ## What Changed Relative To v1
 

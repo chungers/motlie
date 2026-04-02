@@ -109,18 +109,35 @@ package-manager state under `/usr`, `/etc`, and `/var`.
 
 ## Prerequisites
 
+Host package checklist:
+
 ```bash
-sudo apt install mmdebstrap squashfs-tools-ng e2fsprogs uidmap debian-archive-keyring
-sudo apt install libfuse3-dev pkg-config
-sudo apt install cloud-image-utils
+sudo apt install \
+  cloud-hypervisor \
+  debian-archive-keyring \
+  e2fsprogs \
+  libfuse3-dev \
+  mmdebstrap \
+  pkg-config \
+  squashfs-tools-ng \
+  uidmap
 ```
 
 Also required:
 
+- a working Rust toolchain with `cargo`, because `build-guest.sh` compiles `motlie-vfs-guest`
 - outbound network access for Debian packages and kernel download
 - a login shell whose primary gid matches the passwd entry for the user when using `mmdebstrap --mode=unshare`
 - `mkfs.ext4` at launch time for runtime overlay creation (`sudo apt install e2fsprogs`)
-- `cloud-localds` at launch-helper time when using `repl_host launch <guest>` (`sudo apt install cloud-image-utils`)
+- `cloud-hypervisor` on `PATH` at guest-launch time
+- no `cloud-localds` requirement; `v1.1` seeds NoCloud files into the launch-time overlay directly
+
+Host tool usage summary:
+
+- `mmdebstrap`, `squashfs-tools-ng`, `uidmap`, `debian-archive-keyring`: shared base image build
+- `libfuse3-dev`, `pkg-config`: build prerequisites for `motlie-vfs-guest`
+- `e2fsprogs`: creates the runtime ext4 overlays used at launch
+- `cloud-hypervisor`: boots the guests
 
 On Ubuntu 24.04:
 

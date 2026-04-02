@@ -35,8 +35,8 @@ cat setup-alice.sh.vfs - | cargo run -p motlie-vfs --example repl_host --feature
 **Pure pipe (`cat script | ...`):**
 ```bash
 cat setup-alice.sh.vfs | cargo run -p motlie-vfs --example repl_host --features vsock -- --tag alice-home
-# → executes script, then server keeps running until SIGTERM/SIGINT
-# → use this for automated/agent-driven setups
+# → executes script, then may reopen /dev/tty if one is available
+# → for v1.1 operator-driven flows, prefer `cat script - | ...`
 ```
 
 ### Options
@@ -91,9 +91,9 @@ library can reuse the same rendering helpers programmatically.
 Current prototype limitation:
 
 - the helper currently targets the demo guests `alice` and `bob`
-- it requires `cloud-localds` (`cloud-image-utils`)
-- it attaches the generated seed image through `launch-ch.sh --cloud-init-seed`
-- the shared `v1.1` base image must be rebuilt with the current `build-guest.sh` so the guest consumes the attached NoCloud seed
+- it seeds a NoCloud directory through `launch-ch.sh --cloud-init-dir`
+- the shared `v1.1` base image must be rebuilt with the current `build-guest.sh` so the guest consumes the seeded NoCloud directory
+- the generated helper does not require `cloud-localds`; `launch-ch.sh` seeds the NoCloud files into the guest runtime overlay directly
 
 ### Coordination Contract
 

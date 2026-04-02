@@ -250,8 +250,11 @@ GUEST_BINARY_ABS="$(realpath "$GUEST_BINARY")"
 OVERLAY_INIT_ABS="$(realpath "$SCRIPT_DIR/overlay-init")"
 
 run_mmdebstrap "$BASE_ROOTFS" \
-    --include=openssh-server,bash,coreutils,tmux,fuse3,libfuse3-3,systemd,systemd-sysv,dbus,iproute2,cloud-init \
+    --include=openssh-server,bash,coreutils,tmux,fuse3,libfuse3-3,systemd,systemd-sysv,dbus,iproute2,cloud-init,locales \
     --customize-hook='chroot "$1" systemctl enable ssh' \
+    --customize-hook='printf "en_US.UTF-8 UTF-8\n" > "$1/etc/locale.gen"' \
+    --customize-hook='chroot "$1" locale-gen en_US.UTF-8' \
+    --customize-hook='chroot "$1" update-locale LANG=en_US.UTF-8' \
     --customize-hook='chroot "$1" groupadd -g 1000 alice' \
     --customize-hook='chroot "$1" useradd -m -u 1000 -g alice -s /bin/bash alice' \
     --customize-hook='echo "alice:testpass" | chroot "$1" chpasswd' \
@@ -295,7 +298,6 @@ TMUXEOF' \
 Description=motlie-vfs guest filesystem mounter
 After=local-fs.target cloud-final.service
 Wants=cloud-final.service
-Before=ssh.service
 
 [Service]
 Type=simple
