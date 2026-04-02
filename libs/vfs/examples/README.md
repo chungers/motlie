@@ -60,6 +60,7 @@ cat setup-alice.sh.vfs | cargo run -p motlie-vfs --example repl_host --features 
 - `mount <guest> <tag>=<guest_path>,<host_path> [more...]` — add one or more mounts to a guest
 - `launch <guest>` — generate and start a prototype shell script asynchronously; logs land under `/tmp/motlie-vfs-launch/<guest>/`
 - `launch -script <guest>` — print that helper shell script to stdout without executing it
+- `shutdown <guest>` — request guest shutdown through `/tmp/motlie-vfs-<guest>-api.sock`
 
 **Layer management:**
 - `layer <name> <priority>` — create or update a named layer
