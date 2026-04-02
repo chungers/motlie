@@ -115,8 +115,9 @@ The combined setup script uses:
 
 Prototype helper:
 
-- `launch alice` prints a shell script that embeds generated cloud-init assets for Alice and then calls `launch-ch.sh --guest alice --cloud-init-dir ...`
+- `launch alice` generates a helper script and executes it via `/bin/bash`
 - `launch bob` does the same for Bob
+- `launch -script alice` prints the helper script instead of executing it
 - this helper requires a shared base rebuilt with the current `build-guest.sh` so cloud-init is present in the guest
 - cloud-init writes guest config and directories, then queues `systemctl --no-block start motlie-vfs-guest.service` so the guest mounter starts after final-stage config without deadlocking `cloud-final.service`
 - the helper does not require `cloud-localds`; `launch-ch.sh` seeds the NoCloud files into the per-launch guest overlay directly

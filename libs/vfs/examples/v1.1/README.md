@@ -171,6 +171,7 @@ The provisioning script now uses REPL commands:
 - `provision <guest> <socket> <uid> <gid>`
 - `mount <guest> <tag>=<guest_path>,<host_path> ...`
 - `launch <guest>`
+- `launch -script <guest>`
 
 You can inspect the control plane interactively with:
 
@@ -189,8 +190,12 @@ and `mounts.bob.yaml`.
 
 The guest mounter still connects once per tag and sends a small one-line `TAG <name>` handshake before FsOp/FsResult traffic begins. Guest selection happens at the socket/listener boundary, not in the wire protocol.
 
-`launch <guest>` is a prototype control-plane helper. It renders a shell script
-to stdout that embeds:
+`launch` is a prototype control-plane helper.
+
+- `launch <guest>` renders the helper script to a temp file and executes it with `/bin/bash`
+- `launch -script <guest>` prints the same script to stdout
+
+The helper embeds:
 
 - guest-specific `mounts.yaml`
 - guest-specific cloud-init `user-data`
@@ -206,7 +211,11 @@ The intended operator flow is:
 
 1. `provision alice /tmp/... 1000 1000`
 2. `mount alice alice-home=/home/alice,...`
-3. `launch alice > /tmp/launch-alice-cloud-init.sh`
+3. `launch alice`
+
+If you want the raw helper instead:
+
+3. `launch -script alice > /tmp/launch-alice-cloud-init.sh`
 4. run that script outside the REPL
 
 This is a prototype workflow for the control plane. `launch <guest>` now emits
