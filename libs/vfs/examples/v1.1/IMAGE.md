@@ -69,7 +69,7 @@ artifacts/
 cd libs/vfs/examples/v1.1
 
 ./build-guest.sh
-./build-guest.sh --guest-binary /path/to/motlie-vfs-guest
+./build-guest.sh --guest-binary /path/to/motlie-vfs-guest-v1_1
 ./build-guest.sh --kernel skip
 ```
 
@@ -77,7 +77,7 @@ cd libs/vfs/examples/v1.1
 
 `build-guest.sh` performs three steps:
 
-1. Builds the shared `motlie-vfs-guest` binary from the workspace root unless `--guest-binary` is supplied.
+1. Builds the shared `motlie-vfs-guest-v1_1` binary from the workspace root unless `--guest-binary` is supplied.
 2. Downloads or builds a shared Cloud Hypervisor-compatible kernel unless `--kernel skip` is used.
 3. Builds a shared Debian Bookworm squashfs root image with:
    - `openssh-server`
@@ -85,7 +85,7 @@ cd libs/vfs/examples/v1.1
    - `fuse3`, `libfuse3-3`
    - `systemd`, `dbus`, `iproute2`, `cloud-init`
    - both demo users: `alice` and `bob`
-   - `motlie-vfs-guest`
+   - `motlie-vfs-guest` (installed from the `motlie-vfs-guest-v1_1` build target)
    - `overlay-init`
 Guest-specific writable overlays are not built here. `launch-ch.sh` creates
 them at boot time from guest-specific runtime seed content.
@@ -125,7 +125,7 @@ sudo apt install \
 
 Also required:
 
-- a working Rust toolchain with `cargo`, because `build-guest.sh` compiles `motlie-vfs-guest`
+- a working Rust toolchain with `cargo`, because `build-guest.sh` compiles `motlie-vfs-guest-v1_1`
 - outbound network access for Debian packages and kernel download
 - a login shell whose primary gid matches the passwd entry for the user when using `mmdebstrap --mode=unshare`
 - `mkfs.ext4` at launch time for runtime overlay creation (`sudo apt install e2fsprogs`)
@@ -135,7 +135,7 @@ Also required:
 Host tool usage summary:
 
 - `mmdebstrap`, `squashfs-tools-ng`, `uidmap`, `debian-archive-keyring`: shared base image build
-- `libfuse3-dev`, `pkg-config`: build prerequisites for `motlie-vfs-guest`
+- `libfuse3-dev`, `pkg-config`: build prerequisites for `motlie-vfs-guest-v1_1`
 - `e2fsprogs`: creates the runtime ext4 overlays used at launch
 - `cloud-hypervisor`: boots the guests
 
@@ -150,7 +150,7 @@ sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 Use a prebuilt guest binary:
 
 ```bash
-./build-guest.sh --guest-binary /path/to/motlie-vfs-guest
+./build-guest.sh --guest-binary /path/to/motlie-vfs-guest-v1_1
 ```
 
 Reuse an already downloaded or prepositioned kernel:
@@ -240,4 +240,4 @@ You do not need to build `examples/v1` first. `examples/v1.1` contains its own:
 - mount configs
 - demo REPL scripts
 
-The only shared dependency is the workspace binary build of `motlie-vfs-guest`, which is expected because `v1.1` is an example harness inside the same repository.
+The only shared dependency is the workspace binary build of `motlie-vfs-guest-v1_1`, which is expected because `v1.1` is an example harness inside the same repository.

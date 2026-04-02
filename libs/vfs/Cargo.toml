@@ -41,7 +41,7 @@ fuser = { version = "0.15", optional = true }
 arc-swap = "1"
 parking_lot = "0.12"
 
-# Binary dependencies (used by bins/motlie-vfs-guest)
+# Binary dependencies (used by bins/v1*/motlie-vfs-guest.rs)
 serde_yaml = "0.9"
 
 [dev-dependencies]
@@ -54,11 +54,15 @@ ctrlc = "3"
 
 [[bin]]
 name = "motlie-vfs-guest"
-path = "bins/motlie-vfs-guest.rs"
+path = "bins/v1/motlie-vfs-guest.rs"
+
+[[bin]]
+name = "motlie-vfs-guest-v1_1"
+path = "bins/v1.1/motlie-vfs-guest.rs"
 
 [[example]]
 name = "repl_host"
-path = "examples/repl_host.rs"
+path = "examples/v1/repl_host.rs"
 required-features = ["vsock"]
 
 [[example]]

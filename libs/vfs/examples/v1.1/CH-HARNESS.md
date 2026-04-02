@@ -40,12 +40,12 @@ The harness therefore combines:
 Host                                          Guest VMs
 ----                                          ---------
 repl_host_v1_1 (one process)
-  guest alice -> FsServer + socket /tmp/motlie-vfs-alice.vsock_5000
+  guest alice -> FsServer + socket /tmp/motlie-vfs-alice.vsock
     mounts:
       alice-home -> /tmp/.../alice-home       alice VM
       alice-workspace -> /tmp/.../alice-workspace
 
-  guest bob -> FsServer + socket /tmp/motlie-vfs-bob.vsock_5000
+  guest bob -> FsServer + socket /tmp/motlie-vfs-bob.vsock
     mounts:
       bob-home -> /tmp/.../bob-home           bob VM
       bob-workspace -> /tmp/.../bob-workspace
@@ -109,9 +109,9 @@ In this demo:
 
 The combined setup script uses:
 
-- `provision alice /tmp/motlie-vfs-alice.vsock_5000 1000 1000`
+- `provision alice /tmp/motlie-vfs-alice.vsock 1000 1000`
 - `mount alice alice-home=/home/alice,/tmp/motlie-vfs-demo/alice-home ...`
-- `provision bob /tmp/motlie-vfs-bob.vsock_5000 1001 1001`
+- `provision bob /tmp/motlie-vfs-bob.vsock 1001 1001`
 - `mount bob bob-home=/home/bob,/tmp/motlie-vfs-demo/bob-home ...`
 
 Prototype helper:

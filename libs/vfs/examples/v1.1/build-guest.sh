@@ -189,11 +189,11 @@ echo ""
 mkdir -p "$BASE_ARTIFACTS"
 
 if [ -z "$GUEST_BINARY" ]; then
-    echo "--- Step 1: Building motlie-vfs-guest ($RUST_TARGET) ---"
+    echo "--- Step 1: Building motlie-vfs-guest-v1_1 ($RUST_TARGET) ---"
     (cd "$WORKSPACE_ROOT" && cargo build --release \
         --features vsock,client \
-        -p motlie-vfs --bin motlie-vfs-guest)
-    GUEST_BINARY="$WORKSPACE_ROOT/target/release/motlie-vfs-guest"
+        -p motlie-vfs --bin motlie-vfs-guest-v1_1)
+    GUEST_BINARY="$WORKSPACE_ROOT/target/release/motlie-vfs-guest-v1_1"
     echo "Guest binary: $GUEST_BINARY"
     file "$GUEST_BINARY"
     echo ""

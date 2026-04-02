@@ -93,12 +93,12 @@ What each host package is used for:
 - `cloud-hypervisor`: runs the guest VMs
 - `debian-archive-keyring`: keyring for `mmdebstrap`
 - `e2fsprogs`: provides `mkfs.ext4` for per-launch runtime overlays
-- `libfuse3-dev` and `pkg-config`: build dependencies for `motlie-vfs-guest`
+- `libfuse3-dev` and `pkg-config`: build dependencies for `motlie-vfs-guest-v1_1`
 - `mmdebstrap`, `squashfs-tools-ng`, `uidmap`: shared base image build
 
 You also need a working Rust toolchain with `cargo`, because:
 
-- `build-guest.sh` compiles `motlie-vfs-guest` from the workspace
+- `build-guest.sh` compiles `motlie-vfs-guest-v1_1` from the workspace and installs it into the guest image as `motlie-vfs-guest`
 - the runbooks use `cargo run -p motlie-vfs --example repl_host_v1_1 --features vsock`
 
 You also need:

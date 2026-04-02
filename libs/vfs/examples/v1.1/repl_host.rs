@@ -41,10 +41,10 @@
 //!
 //! # Multi-guest (repeat --guest and guest-qualified --mount)
 //! cargo run --example repl_host_v1_1 --features vsock -- \
-//!     --guest alice=/tmp/motlie-vfs-alice.vsock_5000 \
+//!     --guest alice=/tmp/motlie-vfs-alice.vsock \
 //!     --mount alice:alice-home=~/alice \
 //!     --mount alice:alice-workspace=~/workspace \
-//!     --guest bob=/tmp/motlie-vfs-bob.vsock_5000 \
+//!     --guest bob=/tmp/motlie-vfs-bob.vsock \
 //!     --mount bob:bob-home=~/bob \
 //!     --mount bob:bob-workspace=~/workspace-bob
 //!
@@ -837,7 +837,7 @@ fn render_launch_script(guest_name: &str, runtime: &GuestRuntime) -> Result<Stri
     if guest_name != "alice" && guest_name != "bob" {
         anyhow::bail!("launch prototype currently targets v1.1 demo guests alice/bob because launch-ch.sh still carries guest-specific runtime defaults");
     }
-    let base_dir = "/tmp/vfs-v11-multiguest/libs/vfs/examples/v1.1";
+    let base_dir = format!("{}/examples/v1.1", env!("CARGO_MANIFEST_DIR"));
     let mut out = String::new();
     out.push_str("#!/usr/bin/env bash\n");
     out.push_str("set -euo pipefail\n\n");
@@ -975,7 +975,7 @@ fn print_help(topic: Option<&str>, multi_guest: bool, comment_stdout: bool) {
             out("provision <guest> <socket> <uid> <gid>");
             out("  Create one guest-scoped FsServer, record the guest uid/gid contract, and bind its Unix socket listener.");
             out("  Example:");
-            out("    provision bob /tmp/motlie-vfs-bob.vsock_5000 1001 1001");
+            out("    provision bob /tmp/motlie-vfs-bob.vsock 1001 1001");
         }
         Some("mount") => {
             out("mount <guest> <tag>=<guest_path>,<host_path> [more...]");
