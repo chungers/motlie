@@ -172,6 +172,7 @@ The provisioning script now uses REPL commands:
 - `mount <guest> <tag>=<guest_path>,<host_path> ...`
 - `launch <guest>`
 - `launch -script <guest>`
+- `shutdown <guest>`
 
 You can inspect the control plane interactively with:
 

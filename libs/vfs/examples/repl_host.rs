@@ -590,6 +590,10 @@ fn guest_login_name(guest_name: &str) -> &str {
     guest_name
 }
 
+fn guest_api_socket_path(guest_name: &str) -> PathBuf {
+    PathBuf::from(format!("/tmp/motlie-vfs-{guest_name}-api.sock"))
+}
+
 fn guest_home(runtime: &GuestRuntime, guest_name: &str) -> String {
     runtime
         .mounts
@@ -753,6 +757,33 @@ fn execute_launch_script(guest_name: &str, script: &str) -> Result<LaunchExecuti
     })
 }
 
+fn shutdown_guest(guest_name: &str) -> Result<()> {
+    let api_socket = guest_api_socket_path(guest_name);
+    if !api_socket.exists() {
+        anyhow::bail!("guest API socket not found at {}", api_socket.display());
+    }
+
+    let output = Command::new("curl")
+        .arg("--unix-socket")
+        .arg(&api_socket)
+        .arg("-X")
+        .arg("PUT")
+        .arg("http://localhost/api/v1/vm.shutdown")
+        .stdin(Stdio::null())
+        .output()?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            anyhow::bail!("curl exited with status {}", output.status);
+        } else {
+            anyhow::bail!("curl exited with status {}: {}", output.status, stderr);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Command dispatch — shared between all input modes
 // ---------------------------------------------------------------------------
@@ -807,6 +838,11 @@ fn print_help(topic: Option<&str>, multi_guest: bool, comment_stdout: bool) {
             out("  Logs land under /tmp/motlie-vfs-launch/<guest>/.");
             out("launch -script <guest>");
             out("  Render the helper shell script to stdout without executing it.");
+        }
+        Some("shutdown") => {
+            out("shutdown <guest>");
+            out("  Request VM shutdown through the guest's Cloud Hypervisor API socket.");
+            out("  This shells out to curl --unix-socket /tmp/motlie-vfs-<guest>-api.sock ...");
         }
         Some("use") => {
             out("use <guest>");
@@ -875,6 +911,7 @@ fn print_help(topic: Option<&str>, multi_guest: bool, comment_stdout: bool) {
                 out("  mount <guest> <tag>=<guest_path>,<host_path>... — add one or more mounts to a guest");
                 out("  launch <guest>                                  — generate and start a guest launch helper asynchronously");
                 out("  launch -script <guest>                          — print the guest launch helper script");
+                out("  shutdown <guest>                                — request guest shutdown via CH API socket");
                 out("");
             }
             out("Layer management:");
@@ -1020,6 +1057,18 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
         }
         "launch" => {
             emit_status(admin, "error: launch <guest> | launch -script <guest>");
+            return ControlFlow::Continue;
+        }
+        "shutdown" if parts.len() == 2 => {
+            let guest_name = parts[1];
+            match shutdown_guest(guest_name) {
+                Ok(()) => emit_status(admin, format!("ok: shutdown {guest_name} api_socket={}", guest_api_socket_path(guest_name).display())),
+                Err(e) => emit_status(admin, format!("error: {e}")),
+            }
+            return ControlFlow::Continue;
+        }
+        "shutdown" => {
+            emit_status(admin, "error: shutdown <guest>");
             return ControlFlow::Continue;
         }
         "help" => {
