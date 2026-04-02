@@ -41,10 +41,10 @@
 //!
 //! # Multi-guest (repeat --guest and guest-qualified --mount)
 //! cargo run --example repl_host_v1_1 --features vsock -- \
-//!     --guest alice=/tmp/motlie-vfs-alice.vsock \
+//!     --guest alice=/tmp/motlie-vfs-alice.vsock_5000 \
 //!     --mount alice:alice-home=~/alice \
 //!     --mount alice:alice-workspace=~/workspace \
-//!     --guest bob=/tmp/motlie-vfs-bob.vsock \
+//!     --guest bob=/tmp/motlie-vfs-bob.vsock_5000 \
 //!     --mount bob:bob-home=~/bob \
 //!     --mount bob:bob-workspace=~/workspace-bob
 //!
@@ -975,7 +975,7 @@ fn print_help(topic: Option<&str>, multi_guest: bool, comment_stdout: bool) {
             out("provision <guest> <socket> <uid> <gid>");
             out("  Create one guest-scoped FsServer, record the guest uid/gid contract, and bind its Unix socket listener.");
             out("  Example:");
-            out("    provision bob /tmp/motlie-vfs-bob.vsock 1001 1001");
+            out("    provision bob /tmp/motlie-vfs-bob.vsock_5000 1001 1001");
         }
         Some("mount") => {
             out("mount <guest> <tag>=<guest_path>,<host_path> [more...]");

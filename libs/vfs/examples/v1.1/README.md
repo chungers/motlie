@@ -33,7 +33,7 @@ overlay, not from a `vfs` mount at `/`.
 admin plane. The important parameters are:
 
 - `guest id`: `alice` or `bob` in the host admin plane
-- `socket`: the Unix socket file owned by that guest-scoped `FsServer`
+- `socket`: the host listener socket for that guest-scoped `FsServer` (the demo uses `*.vsock_5000` for guest port 5000)
 - `uid/gid`: the guest identity the host should reflect in overlay ownership
 - `tag`: the mount identifier sent in the `TAG <name>` handshake
 - `guest_path`: where the guest mounts that tag inside `/`
@@ -204,7 +204,7 @@ guest mount config, but the host-side `FsServer` still routes by `tag` to the
 host path. The actual guest mount points still come from `mounts.alice.yaml`
 and `mounts.bob.yaml`.
 
-The guest mounter still connects once per tag and sends a small one-line `TAG <name>` handshake before FsOp/FsResult traffic begins. Guest selection happens at the socket/listener boundary, not in the wire protocol.
+The guest mounter still connects once per tag to guest vsock port `5000` and sends a small one-line `TAG <name>` handshake before FsOp/FsResult traffic begins. In the CH demo, the hypervisor owns `/tmp/motlie-vfs-<guest>.vsock` while `repl_host_v1_1` listens on `/tmp/motlie-vfs-<guest>.vsock_5000`.
 
 `launch` is a prototype control-plane helper.
 
@@ -225,7 +225,7 @@ does not deadlock waiting on a unit that is ordered after `cloud-final.service`.
 
 The intended operator flow is:
 
-1. `provision alice /tmp/... 1000 1000`
+1. `provision alice /tmp/motlie-vfs-alice.vsock_5000 1000 1000`
 2. `mount alice alice-home=/home/alice,...`
 3. `launch alice`
 
