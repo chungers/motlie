@@ -58,7 +58,7 @@ cat setup-alice.sh.vfs | cargo run -p motlie-vfs --example repl_host --features 
 - `use <guest>` — set the default target guest
 - `provision <guest> <socket> <uid> <gid>` — create one guest-scoped `FsServer`, record guest identity, and listener
 - `mount <guest> <tag>=<guest_path>,<host_path> [more...]` — add one or more mounts to a guest
-- `launch <guest>` — generate and execute a prototype shell script that embeds generated cloud-init assets
+- `launch <guest>` — generate and start a prototype shell script asynchronously; logs land under `/tmp/motlie-vfs-launch/<guest>/`
 - `launch -script <guest>` — print that helper shell script to stdout without executing it
 
 **Layer management:**
@@ -87,13 +87,20 @@ cat setup-alice.sh.vfs | cargo run -p motlie-vfs --example repl_host --features 
 
 The `launch` commands are prototype workflow helpers.
 
-- `launch <guest>` renders the helper script to a temp file and executes it via `/bin/bash`
+- `launch <guest>` writes the helper to `/tmp/motlie-vfs-launch/<guest>/launch.sh`, starts it asynchronously, and returns the REPL prompt immediately
 - `launch -script <guest>` prints the same script to stdout
 
 The helper embeds generated `mounts.yaml`, cloud-init `user-data`, and
 `meta-data` for that guest, including explicit identity setup commands in
 cloud-init `runcmd`. The intent is that a future VMM library can reuse the
 same rendering helpers programmatically.
+
+When `launch <guest>` executes the helper, it redirects:
+
+- helper stdout/stderr to `/tmp/motlie-vfs-launch/<guest>/launch.log`
+- guest serial console output to `/tmp/motlie-vfs-launch/<guest>/serial.log`
+
+That avoids Cloud Hypervisor taking over the REPL terminal.
 
 Current prototype limitation:
 

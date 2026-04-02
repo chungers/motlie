@@ -74,6 +74,7 @@
 use std::io::{self, BufRead};
 use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::fs::File;
 use std::process::{Command, Stdio};
 use std::sync::Mutex as StdMutex;
 use std::sync::Arc;
@@ -715,24 +716,41 @@ fn render_launch_script(guest_name: &str, runtime: &GuestRuntime) -> Result<Stri
     Ok(out)
 }
 
-fn execute_launch_script(script: &str) -> Result<()> {
-    let mut temp = tempfile::NamedTempFile::new()?;
-    use std::io::Write as _;
-    temp.write_all(script.as_bytes())?;
-    temp.flush()?;
+struct LaunchExecution {
+    pid: u32,
+    script_path: PathBuf,
+    launch_log_path: PathBuf,
+    serial_log_path: PathBuf,
+}
 
-    let status = Command::new("/bin/bash")
-        .arg(temp.path())
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()?;
+fn execute_launch_script(guest_name: &str, script: &str) -> Result<LaunchExecution> {
+    let log_dir = PathBuf::from(format!("/tmp/motlie-vfs-launch/{guest_name}"));
+    std::fs::create_dir_all(&log_dir)?;
 
-    if status.success() {
-        Ok(())
-    } else {
-        anyhow::bail!("launch helper exited with status {status}");
-    }
+    let script_path = log_dir.join("launch.sh");
+    let launch_log_path = log_dir.join("launch.log");
+    let serial_log_path = log_dir.join("serial.log");
+
+    std::fs::write(&script_path, script)?;
+
+    let launch_log = File::create(&launch_log_path)?;
+    let launch_log_err = launch_log.try_clone()?;
+
+    let child = Command::new("/bin/bash")
+        .arg(&script_path)
+        .env("CH_SERIAL_BACKEND", format!("file={}", serial_log_path.display()))
+        .env("CH_CONSOLE_BACKEND", "off")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(launch_log))
+        .stderr(Stdio::from(launch_log_err))
+        .spawn()?;
+
+    Ok(LaunchExecution {
+        pid: child.id(),
+        script_path,
+        launch_log_path,
+        serial_log_path,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -782,10 +800,11 @@ fn print_help(topic: Option<&str>, multi_guest: bool, comment_stdout: bool) {
         }
         Some("launch") => {
             out("launch <guest>");
-            out("  Generate a guest helper script and execute it via /bin/bash.");
+            out("  Generate a guest helper script and execute it asynchronously via /bin/bash.");
             out("  The helper writes guest-specific cloud-init user-data and meta-data");
             out("  generated from the provisioned uid/gid and mount topology.");
             out("  launch-ch.sh then seeds those files into /var/lib/cloud/seed/nocloud/.");
+            out("  Logs land under /tmp/motlie-vfs-launch/<guest>/.");
             out("launch -script <guest>");
             out("  Render the helper shell script to stdout without executing it.");
         }
@@ -854,7 +873,7 @@ fn print_help(topic: Option<&str>, multi_guest: bool, comment_stdout: bool) {
                 out("  <guest> <command ...>                           — run one command against a specific guest");
                 out("  provision <guest> <socket> <uid> <gid>          — create one guest-scoped FsServer and listener");
                 out("  mount <guest> <tag>=<guest_path>,<host_path>... — add one or more mounts to a guest");
-                out("  launch <guest>                                  — generate and execute a guest launch helper");
+                out("  launch <guest>                                  — generate and start a guest launch helper asynchronously");
                 out("  launch -script <guest>                          — print the guest launch helper script");
                 out("");
             }
@@ -982,9 +1001,16 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
                     if render_only {
                         emit_raw(script);
                     } else {
-                        emit_status(admin, format!("ok: launch {guest_name} (executing helper script)"));
-                        if let Err(e) = execute_launch_script(&script) {
-                            emit_status(admin, format!("error: {e}"));
+                        match execute_launch_script(guest_name, &script) {
+                            Ok(exec) => {
+                                emit_status(admin, format!("ok: launch {guest_name} pid={} script={} log={} serial={}",
+                                    exec.pid,
+                                    exec.script_path.display(),
+                                    exec.launch_log_path.display(),
+                                    exec.serial_log_path.display(),
+                                ));
+                            }
+                            Err(e) => emit_status(admin, format!("error: {e}")),
                         }
                     }
                 }

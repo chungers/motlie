@@ -115,9 +115,10 @@ The combined setup script uses:
 
 Prototype helper:
 
-- `launch alice` generates a helper script and executes it via `/bin/bash`
+- `launch alice` generates a helper script, starts it asynchronously, and returns the REPL prompt immediately
 - `launch bob` does the same for Bob
 - `launch -script alice` prints the helper script instead of executing it
+- direct `launch` writes helper and serial logs under `/tmp/motlie-vfs-launch/<guest>/`
 - this helper requires a shared base rebuilt with the current `build-guest.sh` so cloud-init is present in the guest
 - cloud-init writes guest config and directories, then queues `systemctl --no-block start motlie-vfs-guest.service` so the guest mounter starts after final-stage config without deadlocking `cloud-final.service`
 - the helper does not require `cloud-localds`; `launch-ch.sh` seeds the NoCloud files into the per-launch guest overlay directly

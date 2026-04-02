@@ -41,6 +41,8 @@ USE_NET=true
 OVERLAY_SIZE="${OVERLAY_SIZE:-2G}"
 RUNTIME_ROOT="${RUNTIME_ROOT:-/tmp/motlie-vfs-v11-runtime}"
 CLOUD_INIT_DIR=""
+SERIAL_BACKEND="${CH_SERIAL_BACKEND:-tty}"
+CONSOLE_BACKEND="${CH_CONSOLE_BACKEND:-off}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -175,8 +177,8 @@ CH_ARGS=(
     --cpus boot=2
     --memory size=512M
     --vsock "cid=$CID,socket=$VSOCK_SOCKET"
-    --serial tty
-    --console off
+    --serial "$SERIAL_BACKEND"
+    --console "$CONSOLE_BACKEND"
 )
 
 DISK_ARGS=(
@@ -199,6 +201,8 @@ if [ -n "$CLOUD_INIT_DIR" ]; then
     echo "  CloudInit: $CLOUD_INIT_DIR (seeded into /var/lib/cloud/seed/nocloud)"
 fi
 echo "  vsock:     CID $CID, socket $VSOCK_SOCKET"
+echo "  Serial:    $SERIAL_BACKEND"
+echo "  Console:   $CONSOLE_BACKEND"
 if $USE_NET; then
     echo "  Network:   TAP, guest $GUEST_IP, host $HOST_IP"
     echo "  SSH:       ssh $SSH_USER@$GUEST_IP (password: testpass)"

@@ -192,7 +192,7 @@ The guest mounter still connects once per tag and sends a small one-line `TAG <n
 
 `launch` is a prototype control-plane helper.
 
-- `launch <guest>` renders the helper script to a temp file and executes it with `/bin/bash`
+- `launch <guest>` writes the helper under `/tmp/motlie-vfs-launch/<guest>/`, starts it asynchronously, and immediately returns control to the REPL
 - `launch -script <guest>` prints the same script to stdout
 
 The helper embeds:
@@ -217,6 +217,13 @@ If you want the raw helper instead:
 
 3. `launch -script alice > /tmp/launch-alice-cloud-init.sh`
 4. run that script outside the REPL
+
+When `launch <guest>` runs directly from the REPL, logs go to:
+
+- `/tmp/motlie-vfs-launch/<guest>/launch.log`
+- `/tmp/motlie-vfs-launch/<guest>/serial.log`
+
+That keeps guest boot output out of the REPL terminal.
 
 This is a prototype workflow for the control plane. `launch <guest>` now emits
 real guest-specific cloud-init assets, but the guest-launch path is still a
