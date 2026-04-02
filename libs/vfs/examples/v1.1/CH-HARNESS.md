@@ -62,6 +62,7 @@ Before following this harness:
 ```bash
 sudo apt install \
   cloud-hypervisor \
+  curl \
   debian-archive-keyring \
   e2fsprogs \
   libfuse3-dev \

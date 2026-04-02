@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-02 | @codex | Sync `FsOp::Mkdir` wire protocol with `uid`/`gid` and clarify that explicit overlay-managed `mkdir` uses caller ownership while implicit parent dirs created by `put()` still inherit defaults |
 | 2026-03-31 | @claude | Update wire protocol: `FsOp::Create` now carries `uid`/`gid`, add `FsResult::Created` with `fh` for atomic create+open, add `FsResult::Opened` (PR #123 review) |
 | 2026-03-28 | @codex-pm | Resolve PR #117 round-3 follow-ups: complete `FsOpKind` coverage for event emission and align the docs with the final phase numbering and overlay-behavior test expectations |
 | 2026-03-28 | @codex-pm | Resolve implementer questions from PR #117: rename event op type, specify v1 symlink/file-handle/runner/whiteout/write-buffer behavior, and make inspection views metadata-only |
@@ -952,7 +953,7 @@ pub enum FsOp {
     Read { inode: u64, fh: u64, offset: i64, size: u32 },
     Write { inode: u64, fh: u64, offset: i64, data: Bytes },
     Create { parent: u64, name: String, mode: u32, flags: u32, uid: u32, gid: u32 },
-    Mkdir { parent: u64, name: String, mode: u32 },
+    Mkdir { parent: u64, name: String, mode: u32, uid: u32, gid: u32 },
     Unlink { parent: u64, name: String },
     Rmdir { parent: u64, name: String },
     Rename { parent: u64, name: String, new_parent: u64, new_name: String },
@@ -1191,7 +1192,7 @@ not a cache.
 | `Create` | Under disk directory (has overlay children) | Create `Content` entry in the designated writable memfs layer. Keeps overlay-managed paths consistent. |
 | `Symlink` | Under synthetic or overlay-managed parent | Return `ENOTSUP` in v1. Symlinks are base-layer-only in v1. |
 | `Readlink` | Overlay-managed inode | Return `ENOTSUP` in v1. |
-| `Mkdir` | Under synthetic parent | Create `SyntheticDir` entry in the designated writable memfs layer. |
+| `Mkdir` | Under synthetic parent | Create `SyntheticDir` entry in the designated writable memfs layer using the request `mode` and caller `uid`/`gid`. |
 | `Mkdir` | Under disk parent | Normal `std::fs::create_dir()` on disk. |
 | `Rmdir` | Synthetic directory (empty) | Remove `SyntheticDir` from overlay. |
 | `Rmdir` | Shadowed empty lower-layer directory | Create a directory whiteout in the designated writable memfs layer so the lower directory stays hidden. |
@@ -1964,7 +1965,8 @@ InodeTable:
 |-------------|---------------|--------|-------------|----------------|
 | Disk file/dir | First `lookup` that resolves to host filesystem | `Disk` | `Some(host_path)` | `std::fs::metadata()` on every access (v1: no attrs cache) |
 | Overlay `Content` | `put()` / `put_with_attrs()` or `Create` under overlay-managed dir | `Content` | `None` | Size from content length, mode+uid+gid from explicit attrs or inherited defaults, mtime from injection time |
-| `SyntheticDir` | Implicitly by `put()` for missing parent dirs, or explicit `Mkdir` under synthetic parent | `SyntheticDir` | `None` | Mode 0755 by default, uid/gid inherited from nearest existing parent or mount root, mtime from first child injection |
+| `SyntheticDir` | Implicitly by `put()` for missing parent dirs | `SyntheticDir` | `None` | Mode 0755 by default, uid/gid inherited from nearest existing parent or mount root, mtime from first child injection |
+| `SyntheticDir` | Explicit `Mkdir` under synthetic parent | `SyntheticDir` | `None` | Mode from the request, uid/gid from the caller, mtime from creation time |
 | `Whiteout` | `Unlink` on shadowed file | `Whiteout` | `None` | Not visible (lookup returns ENOENT) |
 
 ### Inode Stability

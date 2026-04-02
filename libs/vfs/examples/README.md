@@ -100,6 +100,7 @@ The `launch` commands are prototype workflow helpers.
 
 - `launch <guest>` writes the helper to `/tmp/motlie-vfs-launch/<guest>/launch.sh`, starts it asynchronously, and returns the REPL prompt immediately
 - `launch -script <guest>` prints the same script to stdout
+- `shutdown <guest>` shells out to `curl`, so the host running `repl_host` must have `curl` installed if you want REPL-driven shutdown
 
 The helper embeds generated `mounts.yaml`, cloud-init `user-data`, and
 `meta-data` for that guest, including explicit identity setup commands in
@@ -112,6 +113,10 @@ When `launch <guest>` executes the helper, it redirects:
 - guest serial console output to `/tmp/motlie-vfs-launch/<guest>/serial.log`
 
 That avoids Cloud Hypervisor taking over the REPL terminal.
+
+`launch <guest>` is intentionally fire-and-forget in this prototype: `repl_host`
+reports the spawned PID and log paths, but does not currently supervise or
+reap the helper process afterward.
 
 Current prototype limitation:
 
