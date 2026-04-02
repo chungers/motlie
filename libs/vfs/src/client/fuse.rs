@@ -5,8 +5,13 @@
 //!
 //! v1 mount options (correctness-first):
 //! - `direct_io`: bypass kernel page cache
-//! - `AutoUnmount`: clean up on process exit
-//! - `AllowRoot`: allow root access to the mount
+//! - `AllowOther`: allow access outside the mounting user
+//!
+//! We intentionally avoid `AutoUnmount` here. In the guest image the mounter
+//! runs as a root-managed systemd service, and `fuser` implements
+//! `AutoUnmount` by shelling out to `fusermount3`. The minimal guest image has
+//! proven unreliable on that helper path; direct `/dev/fuse` mounts are the
+//! correct service-managed behavior here.
 //!
 //! This module requires the `client` feature (which pulls in `fuser`).
 
@@ -25,7 +30,7 @@ use crate::core::op::*;
 /// Note: direct_io is a per-open flag (set via FOPEN_DIRECT_IO in the open
 /// response), not a mount option. It is not included here.
 pub fn v1_mount_options(read_only: bool) -> Vec<MountOption> {
-    let mut opts = vec![MountOption::AutoUnmount, MountOption::AllowOther];
+    let mut opts = vec![MountOption::AllowOther];
     if read_only {
         opts.push(MountOption::RO);
     }
