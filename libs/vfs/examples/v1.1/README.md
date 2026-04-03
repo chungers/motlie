@@ -42,14 +42,14 @@ admin plane. The important parameters are:
 
 In `v1.1`, those parameters are split across two sides:
 
-- guest side: [mounts.alice.yaml](/tmp/vfs-v11-multiguest/libs/vfs/examples/v1.1/mounts.alice.yaml) and [mounts.bob.yaml](/tmp/vfs-v11-multiguest/libs/vfs/examples/v1.1/mounts.bob.yaml)
-- host side: [setup-multiguest.sh.vfs](/tmp/vfs-v11-multiguest/libs/vfs/examples/v1.1/setup-multiguest.sh.vfs) and the `repl_host_v1_1` provisioning commands
+- guest side: runtime `mounts.yaml` rendered from the provisioned guest state in the `launch <guest>` flow, or the checked-in [mounts.alice.yaml](./mounts.alice.yaml) / [mounts.bob.yaml](./mounts.bob.yaml) defaults for direct `launch-ch.sh --guest ...` runs
+- host side: [setup-multiguest.sh.vfs](./setup-multiguest.sh.vfs) and the `repl_host_v1_1` provisioning commands
 
 Important nuance:
 
 - the host routes by `guest id + tag -> host_path`
 - the guest decides `tag -> guest_path`
-- the `guest_path` recorded in the host `mount` command is there to make that contract explicit for operators; the actual mount location still comes from the guest `mounts.yaml`
+- the `guest_path` recorded in the host `mount` command is there to make that contract explicit for operators; the actual mount location still comes from the guest `mounts.yaml`, which `launch <guest>` renders from the provisioned runtime state
 
 This is on the same level of importance as getting `uid/gid` correct. If the
 tag, guest path, host path, or ownership values drift apart, the guest may
@@ -59,8 +59,8 @@ mount the wrong subtree or see files with unusable ownership.
 
 | File | Purpose |
 |------|---------|
-| `mounts.alice.yaml` | Guest mount config for the Alice VM |
-| `mounts.bob.yaml` | Guest mount config for the Bob VM |
+| `mounts.alice.yaml` | Default guest mount config for direct Alice launches without REPL-generated cloud-init |
+| `mounts.bob.yaml` | Default guest mount config for direct Bob launches without REPL-generated cloud-init |
 | `setup-alice.sh.vfs` | Host REPL script for Alice's tags |
 | `setup-bob.sh.vfs` | Host REPL script for Bob's tags |
 | `setup-multiguest.sh.vfs` | Combined host REPL script that provisions both guests, assigns uid/gid, and defines their mounts |
@@ -157,7 +157,7 @@ package installs.
 Preferred interactive startup:
 
 ```bash
-cd /tmp/vfs-v11-multiguest
+cd /path/to/motlie
 
 cargo run -p motlie-vfs --example repl_host_v1_1 --features vsock -- \
   --empty --script libs/vfs/examples/v1.1/setup-multiguest.sh.vfs
@@ -169,7 +169,7 @@ history, arrow keys, and other control sequences work normally.
 Pipe-based startup still works:
 
 ```bash
-cd /tmp/vfs-v11-multiguest
+cd /path/to/motlie
 
 cat libs/vfs/examples/v1.1/setup-multiguest.sh.vfs - | \
   cargo run -p motlie-vfs --example repl_host_v1_1 --features vsock -- --empty
@@ -201,8 +201,11 @@ guests
 
 The `guest_path` portion is recorded for operator clarity and to match the
 guest mount config, but the host-side `FsServer` still routes by `tag` to the
-host path. The actual guest mount points still come from `mounts.alice.yaml`
-and `mounts.bob.yaml`.
+host path. In the validated REPL-driven flow, `launch <guest>` renders a fresh
+guest `mounts.yaml` from the provisioned guest state and cloud-init writes it
+into `/etc/motlie-vfs/mounts.yaml`. The checked-in `mounts.alice.yaml` and
+`mounts.bob.yaml` files remain the direct-launch defaults when `launch-ch.sh`
+is used without `--cloud-init-dir`.
 
 The guest mounter still connects once per tag to guest vsock port `5000` and sends a small one-line `TAG <name>` handshake before FsOp/FsResult traffic begins. In the CH demo, the hypervisor owns `/tmp/motlie-vfs-<guest>.vsock` while `repl_host_v1_1` listens on `/tmp/motlie-vfs-<guest>.vsock_5000`.
 
@@ -261,6 +264,13 @@ Current limitations:
 The `.vfs` setup files are plain one-command-per-line REPL input, so any demo file content injected there must stay on one line as well.
 
 ### 3. Launch both guests
+
+```text
+launch alice
+launch bob
+```
+
+Direct launch scripts still work too:
 
 ```bash
 ./launch-ch.sh --guest alice --no-net
@@ -339,10 +349,10 @@ cd libs/vfs/examples/v1.1
 In terminal 1:
 
 ```bash
-cd /tmp/vfs-v11-multiguest
+cd /path/to/motlie
 
-cat libs/vfs/examples/v1.1/setup-multiguest.sh.vfs - | \
-  cargo run -p motlie-vfs --example repl_host_v1_1 --features vsock -- --empty
+cargo run -p motlie-vfs --example repl_host_v1_1 --features vsock -- \
+  --empty --script libs/vfs/examples/v1.1/setup-multiguest.sh.vfs
 ```
 
 ### 5. Launch both guests

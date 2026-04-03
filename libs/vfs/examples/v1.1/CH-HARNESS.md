@@ -94,8 +94,8 @@ You do not need a prior `v1` build. This harness uses only `v1.1` artifacts.
 ## Start Host Server
 
 ```bash
-cat setup-multiguest.sh.vfs - | \
-  cargo run -p motlie-vfs --example repl_host_v1_1 --features vsock -- --empty
+cargo run -p motlie-vfs --example repl_host_v1_1 --features vsock -- \
+  --empty --script setup-multiguest.sh.vfs
 ```
 
 `repl_host` still supports the old `--tag` / `--dir` path for `v1`, but `v1.1` now uses the separate `repl_host_v1_1` binary and provisions guests from REPL commands instead of startup flags.
@@ -127,8 +127,8 @@ Prototype helper:
 
 Operator note:
 
-- use `cat setup-multiguest.sh.vfs - | ...` so stdin stays attached to your terminal after the setup script is consumed
-- that keeps `repl_host_v1_1` serving guest connections while the VMs boot
+- prefer `--script setup-multiguest.sh.vfs` for interactive use; that keeps `rustyline` attached to the real TTY
+- `cat setup-multiguest.sh.vfs - | ...` still works if you explicitly want a pipe-driven startup
 
 ## Launch Guests
 
