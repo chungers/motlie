@@ -277,6 +277,11 @@ Direct launch scripts still work too:
 ./launch-ch.sh --guest bob --no-net
 ```
 
+For that direct path without REPL-generated `--cloud-init-dir`, the guest boots
+with the demo mount config present but does not auto-start
+`motlie-vfs-guest.service`; start it from the guest console or a root shell with
+`systemctl start motlie-vfs-guest`.
+
 For SSH-enabled runs, drop `--no-net`. Alice uses `192.168.249.2`; Bob uses `192.168.250.2`.
 
 For disposable root-mutation experiments such as `apt install python3`, use a

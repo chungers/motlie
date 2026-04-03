@@ -146,6 +146,12 @@ With TAP networking enabled:
 ./launch-ch.sh --guest bob
 ```
 
+Direct-launch note:
+
+- `launch-ch.sh --guest ...` without REPL-generated `--cloud-init-dir` seeds the demo mount config directly, but it does not auto-start `motlie-vfs-guest.service`
+- for that direct path, start the service from the guest console or a root shell with `systemctl start motlie-vfs-guest`
+- the validated `launch <guest>` REPL workflow does start the guest mounter automatically via cloud-init
+
 For disposable package-install experiments, use a larger runtime overlay:
 
 ```bash
