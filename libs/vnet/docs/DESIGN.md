@@ -4,7 +4,8 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-04-02 | @claude | Address blocking review: SSH ingress as FR-7 via hostfwd, guest migration plan, crate layering (src/examples/bins), composed acceptance milestone, zero-host-impact model |
+| 2026-04-03 | @codex | Split SSH ingress from outbound egress: short-term migration keeps TAP admin SSH while `motlie-vnet` owns outbound internet, and the long-term target moves ingress into a host-side `russhd` / REPL proxy |
+| 2026-04-02 | @claude | Address blocking review: restore SSH ingress as a system requirement, add guest migration plan, crate layering (src/examples/bins), composed acceptance milestone, and zero-host-impact model |
 | 2026-04-01 | @chungers | Address PR #125 review: clarify RING_PACKED, DNS build-time, drop vs shutdown, MAC defaults, ICMP fallback, module re-exports, thiserror |
 | 2026-04-01 | @claude | Complete API design: builder, start/shutdown, multi-guest, error types, repl_host integration. Resolve all open questions (features, shared memory, thread safety). Expand testing matrix |
 | 2026-04-01 | @claude | Expand NFRs: instance model, isolation, socket parametrization, teardown, netns, performance on DGX Spark |
@@ -134,13 +135,18 @@ libslirp for user-mode TCP/IP translation.
   (beyond KVM + vhost-vsock already needed for the VM)
 - **FR-6:** The backend is embeddable as a library — callers spawn it as a
   thread, not a separate process
-- **FR-7:** Host-to-guest SSH ingress via libslirp port forwarding. The
-  backend binds a host-side TCP listener (e.g. `127.0.0.1:2222`) and
-  forwards connections to the guest's SSH daemon (`10.0.2.15:22`). This
-  replaces the TAP-based `ssh alice@192.168.249.2` path with
-  `ssh -p 2222 alice@127.0.0.1`. The host listener is an unprivileged
-  socket — no capabilities required. This is the same mechanism as
-  QEMU's `-net user,hostfwd=tcp::2222-:22`
+- **FR-7:** The overall host/guest system must preserve host-to-guest SSH
+  ingress while `motlie-vnet` replaces TAP / passt for outbound internet
+  egress.
+  - **Short term migration:** preserve the existing TAP-based admin / SSH
+    path from the `vfs/examples/v1.1` lineage while moving outbound guest
+    internet to `motlie-vnet`.
+  - **Long term target:** move SSH ingress above `motlie-vnet` into the
+    composed host runtime (for example a `russhd` / REPL-hosted proxy),
+    so `motlie-vnet` remains focused on DHCP, DNS, and outbound egress.
+  - libslirp `hostfwd` may still exist as an optional standalone
+    debugging / demo capability, but it is not the primary product
+    architecture for SSH ingress.
 
 ## Non-Functional Requirements
 
@@ -379,12 +385,12 @@ pub struct VnetConfig {
     /// generate unique MACs (e.g. randomize the last 3 octets per guest).
     pub mac: [u8; 6],
 
-    /// Host-to-guest TCP port forwards. Each entry maps a host-side
-    /// listener (bind_addr, host_port) to a guest-side destination
-    /// (guest_port). libslirp binds the host-side listener as a regular
-    /// unprivileged socket.
+    /// Optional host-to-guest TCP port forwards for standalone demos and
+    /// debugging. These are not the primary composed-runtime ingress path.
+    /// The long-term ingress design lives above `motlie-vnet` in the host
+    /// runtime / REPL layer.
     ///
-    /// Example: forward host 127.0.0.1:2222 → guest 10.0.2.15:22 (SSH)
+    /// Example: forward host 127.0.0.1:2222 → guest 10.0.2.15:22
     pub host_forwards: Vec<PortForward>,
 }
 
@@ -421,7 +427,7 @@ let config = VnetConfig::builder()
     .guest_ipv4([10, 0, 2, 15])              // optional, shown with default
     .dns_ipv4([8, 8, 8, 8])                  // override DNS
     .mac([0x52, 0x54, 0x00, 0x12, 0x34, 0x56])
-    .host_forward_tcp(2222, 22)              // host:2222 → guest:22 (SSH)
+    .host_forward_tcp(2222, 22)              // optional standalone debug forward
     .build()?;
 // build() fails if:
 //   - socket_path is empty
@@ -461,11 +467,9 @@ drop(handle);
 use motlie_vnet::{VnetBackend, VnetConfig};
 
 fn start_networking(guest_id: usize) -> anyhow::Result<VnetHandle> {
-    let ssh_port = 2222 + guest_id as u16;  // unique host port per guest
     let config = VnetConfig::builder()
         .socket_path(format!("/tmp/motlie-vnet-{guest_id}.sock"))
         .guest_ipv4([10, 0, 2, 15])  // same IP is fine — each slirp is isolated
-        .host_forward_tcp(ssh_port, 22)  // host:{ssh_port} → guest:22
         .build()?;
     VnetBackend::new(config).start()
 }
@@ -492,16 +496,15 @@ for h in handles {
 // In examples/repl_host.rs (or libs/vnet/examples/demo_host.rs):
 let _net_handle = {
     let socket = format!("/tmp/motlie-vnet-{}.sock", tag);
-    let ssh_port = 2222;
     let config = motlie_vnet::VnetConfig::builder()
         .socket_path(&socket)
-        .host_forward_tcp(ssh_port, 22)
         .build()?;
     let handle = motlie_vnet::VnetBackend::new(config).start()?;
     eprintln!("vhost-user-net: {socket}");
-    eprintln!("  SSH: ssh -p {ssh_port} alice@127.0.0.1");
     eprintln!("  Launch CH with: --memory size=512M,shared=true");
     eprintln!("  --net vhost_user=true,socket={socket},num_queues=2");
+    eprintln!("  Pair with existing TAP admin ingress in the short term,");
+    eprintln!("  or with a future host-side russh proxy in the long term.");
     handle  // held until host process exits
 };
 ```
@@ -592,19 +595,40 @@ The guest sees a standard `virtio-net` device. On boot:
 4. DNS resolver set to host's nameserver (from `/etc/resolv.conf`)
 5. Outbound TCP/UDP: `apt update`, `git clone` work immediately
 6. ICMP: `ping 8.8.8.8` works (libslirp translates to unprivileged ICMP socket)
-7. Inbound SSH via port forward: host connects to `127.0.0.1:2222`,
-   libslirp forwards to guest `10.0.2.15:22`. Replaces TAP-based
-   `ssh alice@192.168.249.2` with `ssh -p 2222 alice@127.0.0.1`
+
+Inbound SSH is intentionally separated from outbound egress:
+
+- **Short term migration:** preserve the existing TAP-based admin / SSH
+  path (`ssh alice@192.168.249.2`) while `motlie-vnet` provides outbound
+  internet on a separate guest path / NIC.
+- **Long term target:** terminate client SSH in the host runtime
+  (`russhd` / REPL layer) and proxy it into the guest over a
+  runtime-managed control channel, leaving `motlie-vnet` responsible for
+  outbound networking only.
+
+### Phased SSH Ingress Strategy
+
+`motlie-vnet` owns outbound guest networking. SSH ingress is treated as a
+separate system concern so the ingress path can evolve without forcing
+egress, DHCP, and DNS to change at the same time:
+
+- **Short term:** keep the current TAP-based admin / SSH path from the v1/v1.1
+  lineage and move only outbound internet access to `motlie-vnet`.
+- **Long term:** move SSH ingress into a host-side `russhd` / REPL-hosted
+  proxy and keep `motlie-vnet` as the reusable outbound networking layer.
 
 **What doesn't work:**
-- Arbitrary inbound connections (only configured `host_forward_tcp` ports)
+- `motlie-vnet` does not define the product ingress path by itself
 - Guest-to-guest TCP/IP (each guest has its own isolated slirp network)
 - Raw sockets / protocols other than TCP/UDP/ICMP
 - IPv6 (libslirp supports it, but we disable it in v1 for simplicity)
 
 ### Zero-Host-Impact Model
 
-With `vnet`, the host requires **no networking configuration changes**:
+With `vnet`, the **egress backend** requires no host networking configuration
+changes. During the short-term migration, an existing TAP admin path may still
+exist for SSH ingress; that exception lives above `motlie-vnet` and should be
+treated as migration debt rather than part of the egress design.
 
 | Concern | TAP (v1) | vhost-user + libslirp (vnet) |
 |---------|----------|------------------------------|
@@ -613,38 +637,40 @@ With `vnet`, the host requires **no networking configuration changes**:
 | Bridge / routing | Manual or scripted | Not needed |
 | Network namespaces | Optional (passt requires them) | Not needed |
 | iptables / nftables | NAT rules for internet | Not needed — libslirp uses user sockets |
-| Host ports | Guest IP reachable directly | Only `hostfwd` listeners (e.g. 127.0.0.1:2222) |
+| Host ports | Guest IP reachable directly | None required for egress; optional debug `hostfwd` or future host proxy may bind localhost listeners |
 | Cleanup on crash | Stale TAP device + routes | Stale Unix socket (auto-cleaned by builder) |
 
-All host-side network I/O is via regular unprivileged sockets:
+All host-side egress I/O is via regular unprivileged sockets:
 - Outbound: `connect()` / `sendto()` as regular user
-- Inbound (hostfwd): `bind()` + `listen()` on localhost ports
 - No `sudo`, no `setcap`, no `sysctl` changes (except default `ping_group_range`)
 
 ### Guest Image and Launcher Migration
 
-The current v1 guest path (`libs/vfs/examples/v1`) uses static kernel `ip=`
-configuration and TAP networking. Migrating to vhost-user requires modular
-changes that preserve backwards compatibility across three networking modes:
+The current v1 guest path (`libs/vfs/examples/v1`) uses one TAP-oriented
+network design for both admin ingress and outbound internet. Migrating to
+`motlie-vnet` requires splitting those concerns so ingress and egress can
+evolve independently.
 
-**Networking modes:**
+**Ingress / egress combinations:**
 
-| Mode | Kernel cmdline | CH args | Guest NIC config |
-|------|---------------|---------|-----------------|
-| `--no-net` | No `ip=` param | No `--net` | No interface |
-| `--net-mode=tap` (legacy) | `ip=192.168.249.2::192.168.249.1:...::eth0:off` | `--net tap=,...` | Static (kernel param) |
-| `--net-mode=vhost-user` | No `ip=` param | `--memory shared=true --net vhost_user=true,...` | DHCP via systemd-networkd |
+| Phase | Ingress path | Egress path | Guest NIC config |
+|------|--------------|-------------|------------------|
+| Legacy v1 | TAP (`eth0`) | TAP (`eth0`) | Static via kernel `ip=` |
+| Short-term migration | TAP admin (`eth0`) | vhost-user / libslirp (`eth1`) | `eth0` static, `eth1` DHCP |
+| Long-term target | Host `russhd` proxy | vhost-user / libslirp | Egress NIC only; ingress no longer depends on guest-reachable TAP IP |
 
 **Guest image changes (`build-guest.sh`):**
 
-1. **Add `systemd-networkd` DHCP configuration** — drop-in config that
-   enables DHCP on `eth0` when present. This is a no-op in `--no-net` mode
-   (no interface) and harmless in TAP mode (kernel `ip=` takes precedence
-   over systemd-networkd for already-configured interfaces):
+1. **Add `systemd-networkd` DHCP configuration for the egress NIC** —
+   the launcher owns which guest interface is designated as egress. In the
+   short-term dual-NIC migration that will likely be the second NIC
+   (`eth1`), leaving the existing TAP admin path on `eth0` untouched. In the
+   standalone / long-term egress-only case it may be `eth0`. The build +
+   launcher plan must keep the interface naming consistent with the DHCP unit:
    ```ini
-   # /etc/systemd/network/20-eth0.network
+   # /etc/systemd/network/20-egress.network
    [Match]
-   Name=eth0
+   Name=eth1
 
    [Network]
    DHCP=ipv4
@@ -663,32 +689,35 @@ changes that preserve backwards compatibility across three networking modes:
    curl, dnsutils   # needed for e2e network validation
    ```
 
-4. **Remove static IP dependency** — the kernel `ip=` parameter is only
-   added by `launch-ch.sh` in TAP mode, not baked into the image.
+4. **Keep static admin IP modular** — the kernel `ip=` parameter remains
+   a launcher concern for the short-term TAP admin path and is never baked
+   into the image.
 
 **Launcher changes (`launch-ch.sh`):**
 
-The launcher gains a `--net-mode` flag that controls both CH args and
-kernel cmdline:
+The launcher should stop treating ingress and egress as one knob. Instead it
+should gain separate admin / egress controls:
 
 ```bash
-# --net-mode=none (vsock only, no networking)
-# No --net arg, no ip= kernel param
-
-# --net-mode=tap (legacy, requires CAP_NET_ADMIN)
-# --net "tap=,ip=192.168.249.1,mask=255.255.255.0"
-# ip=192.168.249.2::192.168.249.1:255.255.255.0::eth0:off
-
-# --net-mode=vhost-user (rootless, requires vnet backend running)
-# --memory size=512M,shared=true
-# --net vhost_user=true,socket=/tmp/motlie-vnet-0.sock,num_queues=2
-# No ip= kernel param — guest uses DHCP
+# --admin-net=none --egress-net=none
+#   no networking
+#
+# --admin-net=tap --egress-net=tap   (legacy all-in-one)
+#   TAP handles both SSH ingress and outbound internet
+#
+# --admin-net=tap --egress-net=vhost-user   (short-term migration)
+#   eth0: TAP admin NIC with static ip=
+#   eth1: vhost-user egress NIC with DHCP
+#
+# long-term target:
+#   no guest-reachable TAP ingress path required for SSH;
+#   host russh proxy lives above the launcher/runtime
 ```
 
 **Modularity principle:** The filesystem stack (`motlie-vfs-guest`,
 overlayfs, squashfs) is completely independent of networking. The same
-base image works with all three modes. The only difference is which
-`launch-ch.sh` flags are passed and whether a vnet backend is running.
+base image works across the migration. The only differences are which
+ingress / egress knobs the launcher uses and whether a vnet backend is running.
 
 ## Resolved Design Decisions
 
@@ -743,7 +772,6 @@ inside `start()` after the thread is spawned.
 | `backend.rs` tx path | Unit test: mock virtqueue descriptor with Ethernet frame, verify `slirp.input()` called |
 | `backend.rs` rx path | Unit test: slirp produces frame, verify it appears in rx virtqueue |
 | `VnetBackend::start/shutdown` | Integration test: start backend, verify socket exists, shutdown, verify socket removed |
-| `PortForward` (hostfwd) | Integration test: configure host_forward_tcp(2222, 22), verify host can connect to 127.0.0.1:2222, traffic reaches guest port 22 |
 | End-to-end (egress) | CH guest boots with vhost-user-net, `apt update` succeeds, DNS resolves |
-| End-to-end (ingress) | `ssh -p 2222 alice@127.0.0.1` succeeds, interactive session works |
-| End-to-end (composed) | VFS mounts + Internet egress + SSH ingress all work in same guest |
+| End-to-end (short-term composed) | VFS mounts + Internet egress via vnet + SSH ingress via TAP admin path all work in same guest |
+| End-to-end (long-term composed) | VFS mounts + Internet egress via vnet + SSH ingress via host proxy all work in same guest |
