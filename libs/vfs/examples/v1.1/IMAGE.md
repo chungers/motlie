@@ -95,13 +95,14 @@ them at boot time from guest-specific runtime seed content.
 At launch time, `launch-ch.sh` creates one per-guest writable ext4 overlay
 under `${RUNTIME_ROOT:-/tmp/motlie-vfs-v11-runtime}/<guest>/overlay.ext4`.
 
-That runtime overlay seeds:
+That runtime overlay always seeds:
 
-- `/etc/motlie-vfs/mounts.yaml`
-- `/etc/hostname`
-- `/home/<guest>/.ssh`
-- `/workspace`
 - optional files from `overlay.d/common` and `overlay.d/<guest>`
+
+The rest depends on launch mode:
+
+- direct `launch-ch.sh --guest alice|bob` seeds `/etc/motlie-vfs/mounts.yaml`, `/etc/hostname`, `/home/<guest>/.ssh`, and `/workspace` from the checked-in demo defaults
+- REPL-driven `launch <guest>` seeds NoCloud files into `/var/lib/cloud/seed/nocloud/`, and cloud-init then writes `/etc/motlie-vfs/mounts.yaml`, creates mountpoints, and starts `motlie-vfs-guest.service`
 
 This ext4 image is the writable upper layer for the guest root. It starts
 small and sparse, but it can absorb writes anywhere under `/`, including
@@ -174,7 +175,7 @@ MMDEBSTRAP_MODE=root ./build-guest.sh
 ## What Differs Vs v1
 
 - `v1` builds one artifact set in `artifacts/`; `v1.1` builds one generic shared base in `artifacts/base/`
-- `v1` seeds one mount config file during the build; `v1.1` injects `mounts.alice.yaml` or `mounts.bob.yaml` only at launch
+- `v1` seeds one mount config file during the build; `v1.1` moves mount config to launch time, either via direct checked-in defaults or REPL-rendered cloud-init state
 - `v1` is centered on one guest user (`alice`); `v1.1` includes both `alice` and `bob` in the shared base and specializes only the launch-time overlay per guest
 - `v1` demonstrates one guest VM and typically one mount tag; `v1.1` is built to support multiple guests and multiple tags per guest
 - `v1.1` creates per-guest runtime writable overlays at launch time instead of baking guest identity during the build
