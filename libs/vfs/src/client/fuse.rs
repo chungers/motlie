@@ -5,8 +5,13 @@
 //!
 //! v1 mount options (correctness-first):
 //! - `direct_io`: bypass kernel page cache
-//! - `AutoUnmount`: clean up on process exit
-//! - `AllowRoot`: allow root access to the mount
+//! - `AllowOther`: allow access outside the mounting user
+//!
+//! We intentionally avoid `AutoUnmount` here. In the guest image the mounter
+//! runs as a root-managed systemd service, and `fuser` implements
+//! `AutoUnmount` by shelling out to `fusermount3`. The minimal guest image has
+//! proven unreliable on that helper path; direct `/dev/fuse` mounts are the
+//! correct service-managed behavior here.
 //!
 //! This module requires the `client` feature (which pulls in `fuser`).
 
@@ -14,9 +19,9 @@ use std::ffi::OsStr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuser::{
-    FileAttr as FuserFileAttr, FileType as FuserFileType, Filesystem, MountOption,
-    ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
-    ReplyStatfs, ReplyWrite, Request,
+    FileAttr as FuserFileAttr, FileType as FuserFileType, Filesystem, MountOption, ReplyAttr,
+    ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs,
+    ReplyWrite, Request,
 };
 
 use crate::core::op::*;
@@ -25,10 +30,7 @@ use crate::core::op::*;
 /// Note: direct_io is a per-open flag (set via FOPEN_DIRECT_IO in the open
 /// response), not a mount option. It is not included here.
 pub fn v1_mount_options(read_only: bool) -> Vec<MountOption> {
-    let mut opts = vec![
-        MountOption::AutoUnmount,
-        MountOption::AllowOther,
-    ];
+    let mut opts = vec![MountOption::AllowOther];
     if read_only {
         opts.push(MountOption::RO);
     }
@@ -70,7 +72,12 @@ where
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
         let name = name.to_string_lossy().into_owned();
         match self.request(FsOp::Lookup { parent, name }) {
-            FsResult::Entry { inode, generation, attrs, .. } => {
+            FsResult::Entry {
+                inode,
+                generation,
+                attrs,
+                ..
+            } => {
                 reply.entry(&ZERO_TTL, &to_fuser_attr(&attrs, inode), generation);
             }
             FsResult::Error { errno } => reply.error(errno),
@@ -89,12 +96,22 @@ where
     }
 
     fn setattr(
-        &mut self, _req: &Request<'_>, ino: u64,
-        mode: Option<u32>, uid: Option<u32>, gid: Option<u32>,
-        size: Option<u64>, atime: Option<fuser::TimeOrNow>, mtime: Option<fuser::TimeOrNow>,
-        _ctime: Option<SystemTime>, _fh: Option<u64>, _crtime: Option<SystemTime>,
-        _chgtime: Option<SystemTime>, _bkuptime: Option<SystemTime>,
-        _flags: Option<u32>, reply: ReplyAttr,
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+        atime: Option<fuser::TimeOrNow>,
+        mtime: Option<fuser::TimeOrNow>,
+        _ctime: Option<SystemTime>,
+        _fh: Option<u64>,
+        _crtime: Option<SystemTime>,
+        _chgtime: Option<SystemTime>,
+        _bkuptime: Option<SystemTime>,
+        _flags: Option<u32>,
+        reply: ReplyAttr,
     ) {
         let set = SetAttrFields {
             mode,
@@ -104,7 +121,10 @@ where
             atime: atime.map(time_or_now_to_system_time),
             mtime: mtime.map(time_or_now_to_system_time),
         };
-        match self.request(FsOp::Setattr { inode: ino, attrs: set }) {
+        match self.request(FsOp::Setattr {
+            inode: ino,
+            attrs: set,
+        }) {
             FsResult::Attr { attrs, .. } => {
                 reply.attr(&ZERO_TTL, &to_fuser_attr(&attrs, ino));
             }
@@ -113,7 +133,14 @@ where
         }
     }
 
-    fn readdir(&mut self, _req: &Request<'_>, ino: u64, _fh: u64, offset: i64, mut reply: ReplyDirectory) {
+    fn readdir(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        mut reply: ReplyDirectory,
+    ) {
         match self.request(FsOp::Readdir { inode: ino, offset }) {
             FsResult::DirEntries { entries } => {
                 for entry in entries {
@@ -121,7 +148,11 @@ where
                     // Use inode from server, or a placeholder (u64::MAX) if 0.
                     // FUSE drops entries with inode 0. The kernel will do a
                     // lookup to resolve the real inode regardless.
-                    let ino_hint = if entry.inode == 0 { u64::MAX } else { entry.inode };
+                    let ino_hint = if entry.inode == 0 {
+                        u64::MAX
+                    } else {
+                        entry.inode
+                    };
                     if reply.add(ino_hint, entry.offset, kind, &entry.name) {
                         break; // buffer full
                     }
@@ -134,7 +165,10 @@ where
     }
 
     fn open(&mut self, _req: &Request<'_>, ino: u64, flags: i32, reply: ReplyOpen) {
-        match self.request(FsOp::Open { inode: ino, flags: flags as u32 }) {
+        match self.request(FsOp::Open {
+            inode: ino,
+            flags: flags as u32,
+        }) {
             FsResult::Opened { fh } => reply.opened(fh, 0),
             FsResult::Ok => reply.opened(0, 0), // fallback for no-fh case
             FsResult::Error { errno } => reply.error(errno),
@@ -142,29 +176,87 @@ where
         }
     }
 
-    fn read(&mut self, _req: &Request<'_>, ino: u64, fh: u64, offset: i64, size: u32, _flags: i32, _lock_owner: Option<u64>, reply: ReplyData) {
-        match self.request(FsOp::Read { inode: ino, fh, offset, size }) {
+    fn read(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        fh: u64,
+        offset: i64,
+        size: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: ReplyData,
+    ) {
+        match self.request(FsOp::Read {
+            inode: ino,
+            fh,
+            offset,
+            size,
+        }) {
             FsResult::Data { data } => reply.data(&data),
             FsResult::Error { errno } => reply.error(errno),
             _ => reply.error(libc::EIO),
         }
     }
 
-    fn write(&mut self, _req: &Request<'_>, ino: u64, fh: u64, offset: i64, data: &[u8], _write_flags: u32, _flags: i32, _lock_owner: Option<u64>, reply: ReplyWrite) {
-        match self.request(FsOp::Write { inode: ino, fh, offset, data: bytes::Bytes::copy_from_slice(data) }) {
+    fn write(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        fh: u64,
+        offset: i64,
+        data: &[u8],
+        _write_flags: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: ReplyWrite,
+    ) {
+        match self.request(FsOp::Write {
+            inode: ino,
+            fh,
+            offset,
+            data: bytes::Bytes::copy_from_slice(data),
+        }) {
             FsResult::Written { size } => reply.written(size),
             FsResult::Error { errno } => reply.error(errno),
             _ => reply.error(libc::EIO),
         }
     }
 
-    fn create(&mut self, req: &Request<'_>, parent: u64, name: &OsStr, mode: u32, _umask: u32, flags: i32, reply: ReplyCreate) {
+    fn create(
+        &mut self,
+        req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        _umask: u32,
+        flags: i32,
+        reply: ReplyCreate,
+    ) {
         let name = name.to_string_lossy().into_owned();
-        match self.request(FsOp::Create { parent, name, mode, flags: flags as u32, uid: req.uid(), gid: req.gid() }) {
-            FsResult::Created { inode, generation, attrs, fh, .. } => {
+        match self.request(FsOp::Create {
+            parent,
+            name,
+            mode,
+            flags: flags as u32,
+            uid: req.uid(),
+            gid: req.gid(),
+        }) {
+            FsResult::Created {
+                inode,
+                generation,
+                attrs,
+                fh,
+                ..
+            } => {
                 reply.created(&ZERO_TTL, &to_fuser_attr(&attrs, inode), generation, fh, 0);
             }
-            FsResult::Entry { inode, generation, attrs, .. } => {
+            FsResult::Entry {
+                inode,
+                generation,
+                attrs,
+                ..
+            } => {
                 // Backwards compat: server didn't return Created
                 reply.created(&ZERO_TTL, &to_fuser_attr(&attrs, inode), generation, 0, 0);
             }
@@ -173,10 +265,29 @@ where
         }
     }
 
-    fn mkdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, mode: u32, _umask: u32, reply: ReplyEntry) {
+    fn mkdir(
+        &mut self,
+        req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        _umask: u32,
+        reply: ReplyEntry,
+    ) {
         let name = name.to_string_lossy().into_owned();
-        match self.request(FsOp::Mkdir { parent, name, mode }) {
-            FsResult::Entry { inode, generation, attrs, .. } => {
+        match self.request(FsOp::Mkdir {
+            parent,
+            name,
+            mode,
+            uid: req.uid(),
+            gid: req.gid(),
+        }) {
+            FsResult::Entry {
+                inode,
+                generation,
+                attrs,
+                ..
+            } => {
                 reply.entry(&ZERO_TTL, &to_fuser_attr(&attrs, inode), generation);
             }
             FsResult::Error { errno } => reply.error(errno),
@@ -202,11 +313,27 @@ where
         }
     }
 
-    fn symlink(&mut self, _req: &Request<'_>, parent: u64, link_name: &OsStr, target: &std::path::Path, reply: ReplyEntry) {
+    fn symlink(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        link_name: &OsStr,
+        target: &std::path::Path,
+        reply: ReplyEntry,
+    ) {
         let name = link_name.to_string_lossy().into_owned();
         let target = target.to_string_lossy().into_owned();
-        match self.request(FsOp::Symlink { parent, name, target }) {
-            FsResult::Entry { inode, generation, attrs, .. } => {
+        match self.request(FsOp::Symlink {
+            parent,
+            name,
+            target,
+        }) {
+            FsResult::Entry {
+                inode,
+                generation,
+                attrs,
+                ..
+            } => {
                 reply.entry(&ZERO_TTL, &to_fuser_attr(&attrs, inode), generation);
             }
             FsResult::Error { errno } => reply.error(errno),
@@ -222,17 +349,40 @@ where
         }
     }
 
-    fn rename(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, newparent: u64, newname: &OsStr, _flags: u32, reply: ReplyEmpty) {
+    fn rename(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        newparent: u64,
+        newname: &OsStr,
+        _flags: u32,
+        reply: ReplyEmpty,
+    ) {
         let name = name.to_string_lossy().into_owned();
         let new_name = newname.to_string_lossy().into_owned();
-        match self.request(FsOp::Rename { parent, name, new_parent: newparent, new_name }) {
+        match self.request(FsOp::Rename {
+            parent,
+            name,
+            new_parent: newparent,
+            new_name,
+        }) {
             FsResult::Ok => reply.ok(),
             FsResult::Error { errno } => reply.error(errno),
             _ => reply.error(libc::EIO),
         }
     }
 
-    fn release(&mut self, _req: &Request<'_>, ino: u64, fh: u64, _flags: i32, _lock_owner: Option<u64>, _flush: bool, reply: ReplyEmpty) {
+    fn release(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        fh: u64,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        _flush: bool,
+        reply: ReplyEmpty,
+    ) {
         match self.request(FsOp::Release { inode: ino, fh }) {
             FsResult::Ok => reply.ok(),
             FsResult::Error { errno } => reply.error(errno),
@@ -241,7 +391,11 @@ where
     }
 
     fn fsync(&mut self, _req: &Request<'_>, ino: u64, fh: u64, datasync: bool, reply: ReplyEmpty) {
-        match self.request(FsOp::Fsync { inode: ino, fh, datasync }) {
+        match self.request(FsOp::Fsync {
+            inode: ino,
+            fh,
+            datasync,
+        }) {
             FsResult::Ok => reply.ok(),
             FsResult::Error { errno } => reply.error(errno),
             _ => reply.error(libc::EIO),
@@ -252,9 +406,14 @@ where
         match self.request(FsOp::Statfs) {
             FsResult::Statfs { stats } => {
                 reply.statfs(
-                    stats.blocks, stats.bfree, stats.bavail,
-                    stats.files, stats.ffree, stats.bsize,
-                    stats.namelen, stats.frsize,
+                    stats.blocks,
+                    stats.bfree,
+                    stats.bavail,
+                    stats.files,
+                    stats.ffree,
+                    stats.bsize,
+                    stats.namelen,
+                    stats.frsize,
                 );
             }
             FsResult::Error { errno } => reply.error(errno),

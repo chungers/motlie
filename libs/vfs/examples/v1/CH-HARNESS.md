@@ -237,7 +237,8 @@ Cloud Hypervisor uses the Firecracker vsock model:
 For motlie-vfs:
 - Host `FsServer` listens on `/tmp/motlie-vfs.vsock_5000`
 - Guest `motlie-vfs-guest` connects to vsock CID 2, port 5000
-- The `VsockConnectionHandler` serves the connection
+- The host binds the connection to the configured single v1 tag on accept
+- The `VsockConnectionHandler` serves the framed FsOp/FsResult traffic directly
 
 ## Modifying the Config
 

@@ -137,6 +137,10 @@ impl FsServer {
         Ok(())
     }
 
+    pub fn has_mount(&self, tag: &str) -> bool {
+        self.mounts.read().map(|m| m.contains_key(tag)).unwrap_or(false)
+    }
+
     pub fn subscribe_events(&self) -> Option<broadcast::Receiver<FsEvent>> {
         self.event_tx.as_ref().map(|tx| tx.subscribe())
     }
@@ -216,7 +220,7 @@ impl FsServer {
             FsOp::Read { inode: _, fh, offset, size } => self.do_read(mount, *fh, *offset, *size),
             FsOp::Write { inode: _, fh, offset, data } => self.do_write(mount, *fh, *offset, data),
             FsOp::Create { parent, name, mode, flags: _, uid, gid } => self.do_create(mount, *parent, name, *mode, *uid, *gid),
-            FsOp::Mkdir { parent, name, mode } => self.do_mkdir(mount, *parent, name, *mode),
+            FsOp::Mkdir { parent, name, mode, uid, gid } => self.do_mkdir(mount, *parent, name, *mode, *uid, *gid),
             FsOp::Unlink { parent, name } => self.do_unlink(mount, *parent, name),
             FsOp::Rmdir { parent, name } => self.do_rmdir(mount, *parent, name),
             FsOp::Rename { parent, name, new_parent, new_name } => {
@@ -297,8 +301,9 @@ impl FsServer {
                 OverlayEntryKind::Whiteout => return FsResult::Error { errno: libc::ENOENT },
                 OverlayEntryKind::SyntheticDir => (FileType::Directory, 0u64, InodeKind::SyntheticDir),
             };
+            let blocks = logical_blocks(file_kind, size);
             let attrs = FileAttr {
-                inode: 0, size, blocks: 0,
+                inode: 0, size, blocks,
                 atime: now, mtime: now, ctime: now,
                 kind: file_kind, mode: ov_attrs.mode, nlink: 1,
                 uid: ov_attrs.uid, gid: ov_attrs.gid,
@@ -353,8 +358,9 @@ impl FsServer {
                     OverlayEntryKind::SyntheticDir => (FileType::Directory, 0u64),
                     OverlayEntryKind::Whiteout => return FsResult::Error { errno: libc::ENOENT },
                 };
+                let blocks = logical_blocks(file_kind, size);
                 let attrs = FileAttr {
-                    inode, size, blocks: 0,
+                    inode, size, blocks,
                     atime: stored_attrs.atime, mtime: stored_attrs.mtime, ctime: stored_attrs.ctime,
                     kind: file_kind, mode: ov_attrs.mode, nlink: 1,
                     uid: ov_attrs.uid, gid: ov_attrs.gid,
@@ -483,8 +489,9 @@ impl FsServer {
             for (name, (file_kind, ino_kind, child_host)) in &merged {
                 let child_path = child_path(&entry_path, name);
                 let now = SystemTime::now();
+                let blocks = logical_blocks(*file_kind, 0);
                 let attrs = FileAttr {
-                    inode: 0, size: 0, blocks: 0,
+                    inode: 0, size: 0, blocks,
                     atime: now, mtime: now, ctime: now,
                     kind: *file_kind, mode: 0o755, nlink: 1, uid: 0, gid: 0,
                 };
@@ -596,8 +603,9 @@ impl FsServer {
                     let attrs = super::overlay::OverlayAttrs { mode, uid, gid };
                     let _ = overlay.put_with_attrs(&layer, &mount.tag, &rel_path, attrs, bytes::Bytes::new());
                     let now = SystemTime::now();
+                    let blocks = logical_blocks(FileType::RegularFile, 0);
                     let file_attrs = FileAttr {
-                        inode: 0, size: 0, blocks: 0,
+                        inode: 0, size: 0, blocks,
                         atime: now, mtime: now, ctime: now,
                         kind: FileType::RegularFile, mode, nlink: 1, uid, gid,
                     };
@@ -644,7 +652,7 @@ impl FsServer {
         }
     }
 
-    fn do_mkdir(&self, mount: &MountState, parent: u64, name: &str, mode: u32) -> FsResult {
+    fn do_mkdir(&self, mount: &MountState, parent: u64, name: &str, mode: u32, uid: u32, gid: u32) -> FsResult {
         let parent_path = {
             let table = mount.inode_table.lock();
             match table.get(parent) {
@@ -658,15 +666,16 @@ impl FsServer {
         if self.is_overlay_managed(&mount.tag, &parent_path) {
             if let Some(layer) = self.writable_layer(&mount.tag, &parent_path) {
                 if let Some(overlay) = &self.overlay {
-                    let ov_attrs = super::overlay::OverlayAttrs { mode, uid: 0, gid: 0 };
+                    let ov_attrs = super::overlay::OverlayAttrs { mode, uid, gid };
                     if let Err(_) = overlay.create_dir(&layer, &mount.tag, &rel_path, ov_attrs) {
                         return FsResult::Error { errno: libc::EIO };
                     }
                     let now = SystemTime::now();
+                    let blocks = logical_blocks(FileType::Directory, 0);
                     let attrs = FileAttr {
-                        inode: 0, size: 0, blocks: 0,
+                        inode: 0, size: 0, blocks,
                         atime: now, mtime: now, ctime: now,
-                        kind: FileType::Directory, mode, nlink: 2, uid: 0, gid: 0,
+                        kind: FileType::Directory, mode, nlink: 2, uid, gid,
                     };
                     let mut table = mount.inode_table.lock();
                     match table.allocate(&rel_path, InodeKind::SyntheticDir, None, attrs.clone()) {
@@ -1010,6 +1019,24 @@ fn parent_path(path: &str) -> String {
     }
 }
 
+fn logical_blocks(kind: FileType, size: u64) -> u64 {
+    const BLOCK_SIZE: u64 = 4096;
+    const STAT_BLOCK_SIZE: u64 = 512;
+    const BLOCK_UNITS: u64 = BLOCK_SIZE / STAT_BLOCK_SIZE;
+
+    match kind {
+        FileType::Directory => BLOCK_UNITS,
+        FileType::RegularFile => {
+            if size == 0 {
+                0
+            } else {
+                size.div_ceil(BLOCK_SIZE) * BLOCK_UNITS
+            }
+        }
+        FileType::Symlink => 0,
+    }
+}
+
 #[cfg(unix)]
 fn fill_attrs_from_metadata(attrs: &mut FileAttr, meta: &fs::Metadata, inode: u64) {
     use std::os::unix::fs::MetadataExt;
@@ -1178,7 +1205,7 @@ mod tests {
     fn mkdir_and_rmdir() {
         let dir = tempfile::tempdir().unwrap();
         let server = build_test_server(dir.path());
-        assert!(matches!(server.handle_op("test", FsOp::Mkdir { parent: 1, name: "sub".into(), mode: 0o755 }), FsResult::Entry { .. }));
+        assert!(matches!(server.handle_op("test", FsOp::Mkdir { parent: 1, name: "sub".into(), mode: 0o755, uid: 1000, gid: 1000 }), FsResult::Entry { .. }));
         assert!(dir.path().join("sub").is_dir());
         assert!(matches!(server.handle_op("test", FsOp::Rmdir { parent: 1, name: "sub".into() }), FsResult::Ok));
         assert!(!dir.path().join("sub").exists());
@@ -1234,7 +1261,7 @@ mod tests {
         let server = FsServer::builder().mount("ro", dir.path().to_path_buf(), true).build().unwrap();
         let ops: Vec<FsOp> = vec![
             FsOp::Create { parent: 1, name: "f".into(), mode: 0o644, flags: 0, uid: 0, gid: 0 },
-            FsOp::Mkdir { parent: 1, name: "d".into(), mode: 0o755 },
+            FsOp::Mkdir { parent: 1, name: "d".into(), mode: 0o755, uid: 0, gid: 0 },
             FsOp::Unlink { parent: 1, name: "f".into() },
             FsOp::Rmdir { parent: 1, name: "d".into() },
         ];
@@ -1390,6 +1417,26 @@ mod tests {
         };
         let result = server.handle_op("test", FsOp::Create { parent: ssh_inode, name: "config".into(), mode: 0o644, flags: 0, uid: 1000, gid: 1000 });
         assert!(matches!(result, FsResult::Created { .. }));
+    }
+
+    #[test]
+    fn overlay_mkdir_under_synthetic_parent_preserves_guest_uid_gid() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = build_overlay_server(dir.path());
+        let o = server.overlay().unwrap();
+        o.put_layer("l", 0).unwrap();
+        o.put("l", "test", "/.ssh/id_ed25519", bytes::Bytes::from("key")).unwrap();
+        let ssh_inode = match server.handle_op("test", FsOp::Lookup { parent: 1, name: ".ssh".into() }) {
+            FsResult::Entry { inode, .. } => inode,
+            other => panic!("expected Entry, got {:?}", other),
+        };
+        match server.handle_op("test", FsOp::Mkdir { parent: ssh_inode, name: "config.d".into(), mode: 0o700, uid: 1000, gid: 1000 }) {
+            FsResult::Entry { attrs, .. } => {
+                assert_eq!(attrs.uid, 1000);
+                assert_eq!(attrs.gid, 1000);
+            }
+            other => panic!("expected Entry, got {:?}", other),
+        }
     }
 
     // 2.2.9a: Symlink under overlay parent → ENOTSUP

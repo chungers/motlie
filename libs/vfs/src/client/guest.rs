@@ -7,7 +7,8 @@
 //! the caller-supplied connector closure to obtain a transport, wraps it in
 //! a `FuseClient`, and calls `fuser::mount2()`.
 //!
-//! Both `bins/motlie-vfs-guest.rs` and future `motlie-vmm-guest` binaries
+//! The `bins/v1/motlie-vfs-guest.rs`, `bins/v1.1/motlie-vfs-guest.rs`, and
+//! future `motlie-vmm-guest` binaries
 //! should call into this module rather than reimplementing mount loops.
 
 use std::thread::{self, JoinHandle};
