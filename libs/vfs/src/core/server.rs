@@ -301,8 +301,9 @@ impl FsServer {
                 OverlayEntryKind::Whiteout => return FsResult::Error { errno: libc::ENOENT },
                 OverlayEntryKind::SyntheticDir => (FileType::Directory, 0u64, InodeKind::SyntheticDir),
             };
+            let blocks = logical_blocks(file_kind, size);
             let attrs = FileAttr {
-                inode: 0, size, blocks: 0,
+                inode: 0, size, blocks,
                 atime: now, mtime: now, ctime: now,
                 kind: file_kind, mode: ov_attrs.mode, nlink: 1,
                 uid: ov_attrs.uid, gid: ov_attrs.gid,
@@ -357,8 +358,9 @@ impl FsServer {
                     OverlayEntryKind::SyntheticDir => (FileType::Directory, 0u64),
                     OverlayEntryKind::Whiteout => return FsResult::Error { errno: libc::ENOENT },
                 };
+                let blocks = logical_blocks(file_kind, size);
                 let attrs = FileAttr {
-                    inode, size, blocks: 0,
+                    inode, size, blocks,
                     atime: stored_attrs.atime, mtime: stored_attrs.mtime, ctime: stored_attrs.ctime,
                     kind: file_kind, mode: ov_attrs.mode, nlink: 1,
                     uid: ov_attrs.uid, gid: ov_attrs.gid,
@@ -487,8 +489,9 @@ impl FsServer {
             for (name, (file_kind, ino_kind, child_host)) in &merged {
                 let child_path = child_path(&entry_path, name);
                 let now = SystemTime::now();
+                let blocks = logical_blocks(*file_kind, 0);
                 let attrs = FileAttr {
-                    inode: 0, size: 0, blocks: 0,
+                    inode: 0, size: 0, blocks,
                     atime: now, mtime: now, ctime: now,
                     kind: *file_kind, mode: 0o755, nlink: 1, uid: 0, gid: 0,
                 };
@@ -600,8 +603,9 @@ impl FsServer {
                     let attrs = super::overlay::OverlayAttrs { mode, uid, gid };
                     let _ = overlay.put_with_attrs(&layer, &mount.tag, &rel_path, attrs, bytes::Bytes::new());
                     let now = SystemTime::now();
+                    let blocks = logical_blocks(FileType::RegularFile, 0);
                     let file_attrs = FileAttr {
-                        inode: 0, size: 0, blocks: 0,
+                        inode: 0, size: 0, blocks,
                         atime: now, mtime: now, ctime: now,
                         kind: FileType::RegularFile, mode, nlink: 1, uid, gid,
                     };
@@ -667,8 +671,9 @@ impl FsServer {
                         return FsResult::Error { errno: libc::EIO };
                     }
                     let now = SystemTime::now();
+                    let blocks = logical_blocks(FileType::Directory, 0);
                     let attrs = FileAttr {
-                        inode: 0, size: 0, blocks: 0,
+                        inode: 0, size: 0, blocks,
                         atime: now, mtime: now, ctime: now,
                         kind: FileType::Directory, mode, nlink: 2, uid, gid,
                     };
@@ -1011,6 +1016,24 @@ fn parent_path(path: &str) -> String {
         Some(0) => "/".to_string(),
         Some(i) => path[..i].to_string(),
         None => "/".to_string(),
+    }
+}
+
+fn logical_blocks(kind: FileType, size: u64) -> u64 {
+    const BLOCK_SIZE: u64 = 4096;
+    const STAT_BLOCK_SIZE: u64 = 512;
+    const BLOCK_UNITS: u64 = BLOCK_SIZE / STAT_BLOCK_SIZE;
+
+    match kind {
+        FileType::Directory => BLOCK_UNITS,
+        FileType::RegularFile => {
+            if size == 0 {
+                0
+            } else {
+                size.div_ceil(BLOCK_SIZE) * BLOCK_UNITS
+            }
+        }
+        FileType::Symlink => 0,
     }
 }
 
