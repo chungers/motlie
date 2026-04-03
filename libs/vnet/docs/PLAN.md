@@ -89,10 +89,12 @@ Design references: [Data Flow](./DESIGN.md), [Open Questions: libslirp thread sa
   }
   ```
 - [ ] 1.2.5 Implement `host_forward_tcp()` via libslirp's `slirp_add_hostfwd()`.
-  Design ref: [FR-7](./DESIGN.md). Each `PortForward` entry calls
+  Design ref: [FR-7](./DESIGN.md). Treat this as an optional standalone
+  debug / demo helper, not as the primary composed runtime ingress path.
+  Each `PortForward` entry calls
   `slirp_add_hostfwd(context, is_udp=false, host_addr, host_port, guest_addr, guest_port)`.
   libslirp binds a host-side TCP listener and forwards accepted connections
-  to the guest IP inside the virtual network. This is the mechanism for SSH ingress.
+  to the guest IP inside the virtual network.
 - [ ] 1.2.6 Add test: create slirp context, feed a DHCP discover frame,
   verify slirp responds with a DHCP offer.
 - [ ] 1.2.7 Add test: feed a DNS query frame, verify slirp produces a
@@ -204,12 +206,14 @@ Design references: [CH Integration](./DESIGN.md), [Guest Experience](./DESIGN.md
 Based on current `libs/vfs/examples/v1/build-guest.sh`. Changes are additive
 and do not break existing TAP or no-net modes.
 
-- [ ] 3.1.1 Add `systemd-networkd` DHCP config to guest image build.
-  Drop a network unit file into the squashfs that enables DHCP on `eth0`:
+- [ ] 3.1.1 Add `systemd-networkd` DHCP config for the vnet egress NIC to guest image build.
+  Short-term migration keeps TAP admin SSH on `eth0` and will likely use DHCP
+  on `eth1` for vnet egress. The launcher must keep the chosen egress NIC name
+  consistent with the DHCP unit. Drop a network unit file into the squashfs:
   ```ini
-  # /etc/systemd/network/20-eth0.network
+  # /etc/systemd/network/20-egress.network
   [Match]
-  Name=eth0
+  Name=eth1
 
   [Network]
   DHCP=ipv4
@@ -217,8 +221,7 @@ and do not break existing TAP or no-net modes.
   [DHCPv4]
   UseDNS=yes
   ```
-  This is a no-op when no NIC exists (`--no-net`) and harmless in TAP mode
-  (kernel `ip=` takes precedence for already-configured interfaces).
+  This is a no-op when no egress NIC exists and preserves the TAP admin path.
 - [ ] 3.1.2 Enable `systemd-networkd` in the guest image:
   ```bash
   chroot "$ROOTFS" systemctl enable systemd-networkd
@@ -240,25 +243,25 @@ and do not break existing TAP or no-net modes.
 
 ### 3.2 Launcher Migration
 
-- [ ] 3.2.1 Add `--net-mode={none,tap,vhost-user}` flag to `launch-ch.sh`.
+- [ ] 3.2.1 Split launcher controls into ingress vs egress instead of one `--net-mode`.
   Design ref: [Guest Image and Launcher Migration](./DESIGN.md).
   ```bash
-  # --net-mode=none     → no --net arg, no ip= kernel param
-  # --net-mode=tap      → --net "tap=,...", ip=192.168.249.2...
-  # --net-mode=vhost-user → --memory shared=true, --net vhost_user=true,...
+  # --admin-net=none --egress-net=none
+  # --admin-net=tap  --egress-net=tap         (legacy)
+  # --admin-net=tap  --egress-net=vhost-user  (short-term migration)
   ```
   Default: `none` (preserves current `--no-net` behavior).
-- [ ] 3.2.2 In `vhost-user` mode, add `shared=true` to `--memory` arg.
+- [ ] 3.2.2 In `vhost-user` egress mode, add `shared=true` to `--memory` arg.
   Per [CH docs](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/main/docs/memory.md),
   vhost-user devices require shared memory for guest RAM access.
-- [ ] 3.2.3 In `vhost-user` mode, accept `--vnet-socket` path (default:
-  `/tmp/motlie-vnet-0.sock`). Do **not** add `ip=` to kernel cmdline —
-  guest uses DHCP via systemd-networkd.
+- [ ] 3.2.3 In `vhost-user` egress mode, accept `--vnet-socket` path (default:
+  `/tmp/motlie-vnet-0.sock`) and attach the egress NIC without disturbing
+  the TAP admin NIC.
 - [ ] 3.2.4 Verify CH starts in each mode:
   ```bash
-  ./launch-ch.sh --net-mode=none       # vsock only
-  ./launch-ch.sh --net-mode=tap        # legacy TAP
-  ./launch-ch.sh --net-mode=vhost-user --vnet-socket=/tmp/motlie-vnet-0.sock
+  ./launch-ch.sh --admin-net=none --egress-net=none
+  ./launch-ch.sh --admin-net=tap --egress-net=tap
+  ./launch-ch.sh --admin-net=tap --egress-net=vhost-user --vnet-socket=/tmp/motlie-vnet-0.sock
   ```
 
 ### 3.3 Crate Layering and Standalone Example
@@ -266,18 +269,17 @@ and do not break existing TAP or no-net modes.
 Design ref: [Component Architecture](./DESIGN.md)
 
 - [ ] 3.3.1 Create `libs/vnet/examples/demo_host.rs` — standalone vnet demo.
-  Starts vnet backend with SSH port forward, prints connection instructions,
-  waits for Ctrl-C. No vfs dependency.
+  Starts the vnet backend, prints egress / CH launch instructions, waits for
+  Ctrl-C. No vfs dependency and no requirement to own the SSH ingress story.
   ```rust
   // libs/vnet/examples/demo_host.rs
   fn main() -> anyhow::Result<()> {
       let config = motlie_vnet::VnetConfig::builder()
           .socket_path("/tmp/motlie-vnet-0.sock")
-          .host_forward_tcp(2222, 22)
           .build()?;
       let handle = motlie_vnet::VnetBackend::new(config).start()?;
-      eprintln!("vnet backend running. SSH: ssh -p 2222 alice@127.0.0.1");
-      eprintln!("Launch CH: ./launch-ch.sh --net-mode=vhost-user");
+      eprintln!("vnet backend running.");
+      eprintln!("Launch CH: ./launch-ch.sh --admin-net=none --egress-net=vhost-user");
       // wait for Ctrl-C
       handle.shutdown()
   }
@@ -294,7 +296,8 @@ All validation uses commands available in the updated base image
 - [ ] 3.4.1 Boot CH guest with vhost-user-net, verify DHCP:
   ```bash
   # Inside guest:
-  ip addr show eth0
+  ip addr show eth1   # short-term dual-NIC migration
+  # or ip addr show eth0 in standalone egress-only mode
   # Should show: 10.0.2.15/24 (assigned by libslirp DHCP)
   ```
 - [ ] 3.4.2 Verify outbound TCP:
@@ -308,23 +311,18 @@ All validation uses commands available in the updated base image
   # Should resolve to IP addresses
   ```
 - [ ] 3.4.4 Verify `apt update` works inside the guest.
-- [ ] 3.4.5 Verify SSH ingress via hostfwd:
-  ```bash
-  # From host:
-  ssh -p 2222 -o StrictHostKeyChecking=no alice@127.0.0.1
-  # Should get interactive shell. Password: testpass
-  ```
-- [ ] 3.4.6 Verify zero host impact: no `CAP_NET_ADMIN` on CH binary,
+- [ ] 3.4.5 Verify zero host impact: no `CAP_NET_ADMIN` on CH binary,
   no TAP device created, no host routes modified. `ip link` on host
   shows no new interfaces.
-- [ ] 3.4.7 Verify clean shutdown: stop vnet backend, confirm CH handles
+- [ ] 3.4.6 Verify clean shutdown: stop vnet backend, confirm CH handles
   backend disconnect gracefully (guest sees link-down, no crash).
 
 ### 3.5 Composed Acceptance: VFS + SSH Ingress + Internet Egress
 
-Design ref: [FR-7](./DESIGN.md). This is the feasibility target — proving
-that virtual filesystem, inbound SSH, and outbound Internet all work in
-the same guest VM flow.
+Design ref: [FR-7](./DESIGN.md). This is the short-term migration acceptance
+target — proving that virtual filesystem, inbound SSH, and outbound Internet
+all work in the same guest VM flow even while ingress and egress use different
+designs.
 
 - [ ] 3.5.1 Add `motlie-vnet` as a **dev-dependency** of `motlie-vfs`.
   `repl_host` is an `[[example]]`, so dev-dependencies suffice. This avoids
@@ -334,33 +332,33 @@ the same guest VM flow.
   [dev-dependencies]
   motlie-vnet = { path = "../vnet" }
   ```
-- [ ] 3.5.2 In `repl_host.rs`, add `--net` CLI flag that spawns vnet backend
-  with SSH port forward before entering REPL:
+- [ ] 3.5.2 In `repl_host.rs`, add `--egress-net=vhost-user` CLI support that
+  spawns vnet backend before entering REPL, while preserving the existing TAP
+  admin / SSH path:
   ```rust
-  if args.net {
+  if args.egress_net == "vhost-user" {
       let socket = format!("/tmp/motlie-vnet-{}.sock", tag);
       let config = motlie_vnet::VnetConfig::builder()
           .socket_path(&socket)
-          .host_forward_tcp(2222, 22)
           .build()?;
       let handle = motlie_vnet::VnetBackend::new(config).start()?;
       eprintln!("vhost-user-net: {socket}");
-      eprintln!("  SSH: ssh -p 2222 alice@127.0.0.1");
+      // TAP admin ingress remains unchanged in the short term
       // hold handle until repl_host exits
   }
   ```
 - [ ] 3.5.3 Full composed flow test:
   ```bash
-  # Terminal 1: start host with VFS + vnet
+  # Terminal 1: start host with VFS + vnet egress
   cat setup-alice.sh.vfs | cargo run --example repl_host -- \
-      --tag alice-home --net
+      --tag alice-home --egress-net=vhost-user
 
-  # Terminal 2: launch CH with vhost-user networking
-  ./launch-ch.sh --net-mode=vhost-user
+  # Terminal 2: launch CH with TAP admin ingress + vhost-user egress
+  ./launch-ch.sh --admin-net=tap --egress-net=vhost-user
 
   # Terminal 3: verify all three capabilities
-  # 1. SSH ingress
-  ssh -p 2222 alice@127.0.0.1    # → interactive shell
+  # 1. SSH ingress over existing TAP/admin path
+  ssh alice@192.168.249.2        # → interactive shell
 
   # 2. VFS mounts (inside guest SSH session)
   ls /home/alice/.ssh/            # → authorized_keys (from overlay)
@@ -371,7 +369,19 @@ the same guest VM flow.
   apt update                      # → package list refresh
   ```
 - [ ] 3.5.4 Document the composed flow in `libs/vfs/examples/v1/README.md`
-  as the recommended development setup.
+  as the recommended migration/development setup.
+
+### 3.6 Long-Term Ingress: Host SSH Proxy
+
+- [ ] 3.6.1 Add a DESIGN-level host runtime section showing SSH ingress
+  terminating in the host process (`russhd` / REPL layer) instead of in
+  libslirp host forwarding.
+- [ ] 3.6.2 Define the guest-facing handoff for that proxy as a runtime-layer
+  concern above `motlie-vnet` (for example a guest control/admin channel),
+  keeping `motlie-vnet` focused on outbound networking.
+- [ ] 3.6.3 Add a future composed acceptance target:
+  `ssh -p 2222 alice@127.0.0.1` reaches the guest via host proxy while
+  outbound internet still uses `motlie-vnet`.
 
 ---
 
@@ -391,10 +401,10 @@ the same guest VM flow.
 
 ## Delivery Order
 
-1. **Phase 1** (1.1 → 1.2) — bootstrap + libslirp wrapper + hostfwd
+1. **Phase 1** (1.1 → 1.2) — bootstrap + libslirp wrapper + optional hostfwd helper
 2. **Phase 2** (2.1 → 2.2 → 2.3) — vhost-user backend + public API
-3. **Phase 3** (3.1 → 3.2 → 3.3 → 3.4 → 3.5) — guest migration, launcher,
-   standalone e2e, composed acceptance
+3. **Phase 3** (3.1 → 3.2 → 3.3 → 3.4 → 3.5 → 3.6) — guest migration, launcher,
+   standalone e2e, short-term composed acceptance, long-term ingress design
 4. **Phase 4** — docs and cleanup
 
 Phases 1 and 2 can be developed and tested independently of CH.
