@@ -7,6 +7,7 @@ backend with libslirp for rootless guest networking.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-03 | @codex | Address review follow-ups: expand public API tasks to match DESIGN, add epoll fallback spike, make short-term dual-NIC routing explicit, and document the long-term host SSH proxy path |
 | 2026-04-02 | @claude | Address blocking review: SSH ingress tasks, guest migration tasks, crate layering, composed acceptance milestone, fix validation commands |
 | 2026-04-01 | @chungers | Address PR #125 review: add fd registration task, logging task, crate validation, fix vnet-vfs coupling, fix stale paths |
 | 2026-04-01 | @claude | Initial PLAN: 4 phases from bootstrap to CH integration |
@@ -23,17 +24,13 @@ Design references: [Component Architecture](./DESIGN.md), [Key Crates](./DESIGN.
 
 ### 1.1 Crate Setup
 
-- [ ] 1.1.1 Create `libs/vnet/Cargo.toml` with feature-gated dependencies.
+- [ ] 1.1.1 Create `libs/vnet/Cargo.toml` with the core dependencies.
   ```toml
   [package]
   name = "motlie-vnet"
 
-  [features]
-  default = ["slirp"]
-  slirp = ["dep:libslirp"]
-
   [dependencies]
-  libslirp = { version = "4", optional = true }
+  libslirp = "4"
   anyhow.workspace = true
   log = "0.4"
   ```
@@ -88,27 +85,28 @@ Design references: [Data Flow](./DESIGN.md), [Open Questions: libslirp thread sa
       pub host_forwards: Vec<PortForward>,  // host→guest TCP port forwards
   }
   ```
-- [ ] 1.2.5 Implement `host_forward_tcp()` via libslirp's `slirp_add_hostfwd()`.
+- [ ] 1.2.5 Verify libslirp is single-threaded safe before the wrapper is used by
+  the backend: confirm the Rust bindings enforce `!Send` or document the
+  pinning requirement.
+- [ ] 1.2.6 Implement `host_forward_tcp()` via libslirp's `slirp_add_hostfwd()`.
   Design ref: [FR-7](./DESIGN.md). Treat this as an optional standalone
   debug / demo helper, not as the primary composed runtime ingress path.
   Each `PortForward` entry calls
   `slirp_add_hostfwd(context, is_udp=false, host_addr, host_port, guest_addr, guest_port)`.
   libslirp binds a host-side TCP listener and forwards accepted connections
   to the guest IP inside the virtual network.
-- [ ] 1.2.6 Add test: create slirp context, feed a DHCP discover frame,
+- [ ] 1.2.7 Add test: create slirp context, feed a DHCP discover frame,
   verify slirp responds with a DHCP offer.
-- [ ] 1.2.7 Add test: feed a DNS query frame, verify slirp produces a
+- [ ] 1.2.8 Add test: feed a DNS query frame, verify slirp produces a
   response (forwarded to host resolver).
-- [ ] 1.2.8 Add test: configure `host_forward_tcp(12222, 22)`, verify host
+- [ ] 1.2.9 Add test: configure `host_forward_tcp(12222, 22)`, verify host
   can connect to `127.0.0.1:12222` and the connection is accepted by libslirp.
   (Full SSH validation requires a guest — see Phase 3.)
-- [ ] 1.2.9 Set up `log` crate integration for the slirp wrapper.
+- [ ] 1.2.10 Set up `log` crate integration for the slirp wrapper.
   - `guest_error()` callback → `log::warn!`
   - Frame drops in `send_packet()` (e.g. queue full) → `log::debug!`
   - Context creation / teardown → `log::info!`
   This satisfies DESIGN NFR-2 (no panics — log and degrade gracefully).
-- [ ] 1.2.10 Verify libslirp is single-threaded safe: confirm the Rust bindings
-  enforce `!Send` or document the pinning requirement.
 
 ---
 
@@ -163,6 +161,12 @@ Design references: [Data Flow](./DESIGN.md), [Threading Model](./DESIGN.md), [FR
   epoll alongside the virtqueue kick eventfds, so a single `epoll_wait()` drives
   both virtqueue processing and slirp's network I/O. This is the bridge between
   the vhost-user event loop and the slirp event loop from Phase 1.
+  - First do a spike against `vhost-user-backend` to confirm whether the daemon
+    can expose or register non-virtqueue fds cleanly.
+  - If that integration is awkward or unsupported, fall back to a dedicated
+    slirp thread that polls libslirp fds separately and hands rx work to the
+    backend thread over an internal channel/eventfd. Document the chosen shape
+    before implementation continues.
 - [ ] 2.2.6 Wire the slirp event loop into `handle_event()`:
   - On tx virtqueue kick: process all pending tx descriptors → slirp.input()
   - On timer/poll: run slirp poll cycle → drain rx → inject to rx virtqueue
@@ -187,12 +191,26 @@ Design references: [API Design](./DESIGN.md), [FR-6](./DESIGN.md)
   ```
   Builder methods include `.host_forward_tcp(host_port, guest_port)` which
   appends a `PortForward { bind_addr: 127.0.0.1, host_port, guest_port }`.
-- [ ] 2.3.2 Implement `VnetBackend::serve()`:
+- [ ] 2.3.2 Define and implement `PortForward` exactly as in DESIGN, including
+  localhost-default binding semantics for the optional hostfwd helper.
+- [ ] 2.3.3 Implement host `/etc/resolv.conf` parsing for the default DNS
+  resolver path, with explicit fallback/error behavior when no usable nameserver
+  is present.
+- [ ] 2.3.4 Define `VnetError` and map builder/start/runtime failures into it
+  (`SocketPath`, `SocketBind`, `SocketCleanup`, `SlirpInit`, `BackendInit`,
+  `DnsResolver`, `PortForwardBind`).
+- [ ] 2.3.5 Implement `VnetBackend::start()` as the primary API from DESIGN.
+  It should spawn the background thread, bind the socket, and return a
+  `VnetHandle` for deterministic teardown.
+- [ ] 2.3.6 Implement `VnetHandle` with `shutdown()` and `Drop` semantics from
+  DESIGN. `shutdown()` is the explicit cleanup path; `Drop` remains best-effort.
+- [ ] 2.3.7 Keep `VnetBackend::serve()` as the lower-level/blocking primitive:
   - Create `VhostUserDaemon` with the backend
   - Bind Unix socket at `socket_path`
   - Run daemon event loop (blocks until client disconnects)
-- [ ] 2.3.3 Add test: start backend on a socket, verify socket file is created.
-- [ ] 2.3.4 Add shutdown test: verify backend exits cleanly when socket is closed.
+- [ ] 2.3.8 Add test: start backend on a socket, verify socket file is created.
+- [ ] 2.3.9 Add shutdown test: verify backend exits cleanly when socket is
+  closed or `VnetHandle::shutdown()` is called.
 
 ---
 
@@ -207,19 +225,23 @@ Based on current `libs/vfs/examples/v1/build-guest.sh`. Changes are additive
 and do not break existing TAP or no-net modes.
 
 - [ ] 3.1.1 Add `systemd-networkd` DHCP config for the vnet egress NIC to guest image build.
-  Short-term migration keeps TAP admin SSH on `eth0` and will likely use DHCP
-  on `eth1` for vnet egress. The launcher must keep the chosen egress NIC name
-  consistent with the DHCP unit. Drop a network unit file into the squashfs:
+  Short-term migration keeps TAP admin SSH on one NIC and uses DHCP on a
+  separate vnet egress NIC. Match the egress NIC by launcher-assigned MAC,
+  not by interface name, so the guest does not depend on `eth1` ordering.
+  The egress NIC owns the default route and DNS. The TAP admin NIC must stay
+  limited to the host-reachable management subnet and must not install a
+  competing default route. Drop a network unit file into the squashfs:
   ```ini
   # /etc/systemd/network/20-egress.network
   [Match]
-  Name=eth1
+  MACAddress=12:34:56:78:90:ab
 
   [Network]
   DHCP=ipv4
 
   [DHCPv4]
   UseDNS=yes
+  RouteMetric=100
   ```
   This is a no-op when no egress NIC exists and preserves the TAP admin path.
 - [ ] 3.1.2 Enable `systemd-networkd` in the guest image:
@@ -237,7 +259,7 @@ and do not break existing TAP or no-net modes.
   ```bash
   cd libs/vfs/examples/v1
   ./build-guest.sh
-  ./launch-ch.sh --net-mode=tap
+  ./launch-ch.sh --admin-net=tap --egress-net=tap
   # Inside guest: ip addr show eth0 should show 192.168.249.2 (static)
   ```
 
@@ -251,13 +273,20 @@ and do not break existing TAP or no-net modes.
   # --admin-net=tap  --egress-net=vhost-user  (short-term migration)
   ```
   Default: `none` (preserves current `--no-net` behavior).
-- [ ] 3.2.2 In `vhost-user` egress mode, add `shared=true` to `--memory` arg.
+- [ ] 3.2.2 Keep `--no-net` as a backward-compatible alias for
+  `--admin-net=none --egress-net=none`, document the migration path, and warn
+  in help text once the split flags exist.
+- [ ] 3.2.3 In `vhost-user` egress mode, add `shared=true` to `--memory` arg.
   Per [CH docs](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/main/docs/memory.md),
   vhost-user devices require shared memory for guest RAM access.
-- [ ] 3.2.3 In `vhost-user` egress mode, accept `--vnet-socket` path (default:
+- [ ] 3.2.4 In `vhost-user` egress mode, accept `--vnet-socket` path (default:
   `/tmp/motlie-vnet-0.sock`) and attach the egress NIC without disturbing
   the TAP admin NIC.
-- [ ] 3.2.4 Verify CH starts in each mode:
+- [ ] 3.2.5 In short-term dual-NIC mode, make route ownership explicit:
+  the admin TAP NIC must remain host-reachable only, while the vnet egress NIC
+  owns the default route. Prefer configuring this by omitting the admin default
+  gateway rather than relying on device-order-dependent route metrics.
+- [ ] 3.2.6 Verify CH starts in each mode:
   ```bash
   ./launch-ch.sh --admin-net=none --egress-net=none
   ./launch-ch.sh --admin-net=tap --egress-net=tap
@@ -296,9 +325,11 @@ All validation uses commands available in the updated base image
 - [ ] 3.4.1 Boot CH guest with vhost-user-net, verify DHCP:
   ```bash
   # Inside guest:
-  ip addr show eth1   # short-term dual-NIC migration
-  # or ip addr show eth0 in standalone egress-only mode
-  # Should show: 10.0.2.15/24 (assigned by libslirp DHCP)
+  ip addr
+  ip -4 route show default
+  # The launcher-assigned egress NIC should show 10.0.2.15/24 (libslirp DHCP)
+  # and own the default route. In short-term dual-NIC mode the TAP admin NIC
+  # remains only for the host-side management subnet.
   ```
 - [ ] 3.4.2 Verify outbound TCP:
   ```bash
@@ -322,7 +353,9 @@ All validation uses commands available in the updated base image
 Design ref: [FR-7](./DESIGN.md). This is the short-term migration acceptance
 target — proving that virtual filesystem, inbound SSH, and outbound Internet
 all work in the same guest VM flow even while ingress and egress use different
-designs.
+designs. This phase still depends on the legacy TAP admin path, so it retains
+the existing `CAP_NET_ADMIN` / host-networking prerequisites until the
+long-term ingress proxy replaces guest-reachable TAP SSH.
 
 - [ ] 3.5.1 Add `motlie-vnet` as a **dev-dependency** of `motlie-vfs`.
   `repl_host` is an `[[example]]`, so dev-dependencies suffice. This avoids
@@ -376,10 +409,16 @@ designs.
 - [ ] 3.6.1 Add a DESIGN-level host runtime section showing SSH ingress
   terminating in the host process (`russhd` / REPL layer) instead of in
   libslirp host forwarding.
-- [ ] 3.6.2 Define the guest-facing handoff for that proxy as a runtime-layer
-  concern above `motlie-vnet` (for example a guest control/admin channel),
-  keeping `motlie-vnet` focused on outbound networking.
-- [ ] 3.6.3 Add a future composed acceptance target:
+- [ ] 3.6.2 Define mechanism A explicitly: host `russhd` / REPL proxy
+  terminates client SSH, bridges it over vsock to a guest PTY/control endpoint,
+  and keeps `motlie-vnet` focused on outbound networking.
+- [ ] 3.6.3 Document why this is the target architecture: host-controlled auth,
+  CA/key rotation without guest image churn, session multiplexing, and removal
+  of guest `openssh-server` from the steady-state attack surface.
+- [ ] 3.6.4 Add a guest migration/deprecation plan: once host-proxied SSH is
+  validated, stop requiring guest `openssh-server` in the image and remove the
+  TAP-admin SSH dependency from the default launch path.
+- [ ] 3.6.5 Add a future composed acceptance target:
   `ssh -p 2222 alice@127.0.0.1` reaches the guest via host proxy while
   outbound internet still uses `motlie-vnet`.
 

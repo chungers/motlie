@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-03 | @codex | Address review follow-ups: document why long-term SSH ingress moves into a host-side proxy, make short-term dual-NIC route ownership explicit, and align migration/docs with the public `start()` / `VnetHandle` API |
 | 2026-04-03 | @codex | Split SSH ingress from outbound egress: short-term migration keeps TAP admin SSH while `motlie-vnet` owns outbound internet, and the long-term target moves ingress into a host-side `russhd` / REPL proxy |
 | 2026-04-02 | @claude | Address blocking review: restore SSH ingress as a system requirement, add guest migration plan, crate layering (src/examples/bins), composed acceptance milestone, and zero-host-impact model |
 | 2026-04-01 | @chungers | Address PR #125 review: clarify RING_PACKED, DNS build-time, drop vs shutdown, MAC defaults, ICMP fallback, module re-exports, thiserror |
@@ -52,8 +53,9 @@ vhost-vsock (which the user already has via the `kvm` group).
 - IPv6 support in v1 (guest-initiated IPv4 egress only)
 - Network policy enforcement (firewall rules, traffic shaping)
 - Multi-VM networking (VM-to-VM communication)
-- General-purpose inbound port forwarding beyond SSH (v1 supports SSH only;
-  additional forwards can be added later via the `host_forward_tcp` API)
+- General-purpose inbound port forwarding as a product requirement. v1 only
+  needs system SSH/admin ingress, and the long-term ingress path is expected
+  to terminate in the host runtime rather than in libslirp host forwarding.
 
 ## Background: Alternatives Investigated
 
@@ -594,7 +596,9 @@ The guest sees a standard `virtio-net` device. On boot:
 3. Guest gets: IP `10.0.2.15`, netmask `255.255.255.0`, gateway `10.0.2.2`
 4. DNS resolver set to host's nameserver (from `/etc/resolv.conf`)
 5. Outbound TCP/UDP: `apt update`, `git clone` work immediately
-6. ICMP: `ping 8.8.8.8` works (libslirp translates to unprivileged ICMP socket)
+6. ICMP: `ping 8.8.8.8` works when `net.ipv4.ping_group_range` allows
+   unprivileged ICMP sockets; otherwise ping silently fails while TCP/UDP
+   continue to work
 
 Inbound SSH is intentionally separated from outbound egress:
 
@@ -603,8 +607,9 @@ Inbound SSH is intentionally separated from outbound egress:
   internet on a separate guest path / NIC.
 - **Long term target:** terminate client SSH in the host runtime
   (`russhd` / REPL layer) and proxy it into the guest over a
-  runtime-managed control channel, leaving `motlie-vnet` responsible for
-  outbound networking only.
+  vsock-backed PTY/control endpoint, leaving `motlie-vnet` responsible
+  for outbound networking only and making guest `openssh-server`
+  removable from the steady-state image later.
 
 ### Phased SSH Ingress Strategy
 
@@ -616,6 +621,16 @@ egress, DHCP, and DNS to change at the same time:
   lineage and move only outbound internet access to `motlie-vnet`.
 - **Long term:** move SSH ingress into a host-side `russhd` / REPL-hosted
   proxy and keep `motlie-vnet` as the reusable outbound networking layer.
+
+The long-term host-side proxy is preferred because it keeps the SSH control
+plane with the orchestrator rather than with the guest image:
+
+- Host-controlled authentication and authorization policy
+- CA rotation or key distribution without rebuilding guest images
+- Session multiplexing and richer REPL-driven workflows above raw TCP forwarding
+- Smaller guest attack surface once guest `openssh-server` is no longer required
+- A more opinionated, product-owned ingress stack instead of "whatever the
+  guest image currently happens to run"
 
 **What doesn't work:**
 - `motlie-vnet` does not define the product ingress path by itself
@@ -656,28 +671,34 @@ evolve independently.
 | Phase | Ingress path | Egress path | Guest NIC config |
 |------|--------------|-------------|------------------|
 | Legacy v1 | TAP (`eth0`) | TAP (`eth0`) | Static via kernel `ip=` |
-| Short-term migration | TAP admin (`eth0`) | vhost-user / libslirp (`eth1`) | `eth0` static, `eth1` DHCP |
+| Short-term migration | TAP admin (`eth0`) | vhost-user / libslirp (`eth1`) | Admin NIC gets only the host-reachable management subnet; egress NIC owns the default route and DNS via DHCP |
 | Long-term target | Host `russhd` proxy | vhost-user / libslirp | Egress NIC only; ingress no longer depends on guest-reachable TAP IP |
 
 **Guest image changes (`build-guest.sh`):**
 
 1. **Add `systemd-networkd` DHCP configuration for the egress NIC** —
-   the launcher owns which guest interface is designated as egress. In the
-   short-term dual-NIC migration that will likely be the second NIC
-   (`eth1`), leaving the existing TAP admin path on `eth0` untouched. In the
-   standalone / long-term egress-only case it may be `eth0`. The build +
-   launcher plan must keep the interface naming consistent with the DHCP unit:
+   the launcher owns which guest interface is designated as egress and
+   should stamp a stable MAC for that NIC. The guest image should match on
+   that MAC rather than assuming `eth1`, because device enumeration order
+   should not be the source of truth. In the short-term dual-NIC migration,
+   the admin TAP path remains host-reachable only and must not own the
+   default route; the vhost-user egress NIC owns the default route and DNS:
    ```ini
    # /etc/systemd/network/20-egress.network
    [Match]
-   Name=eth1
+   MACAddress=12:34:56:78:90:ab
 
    [Network]
    DHCP=ipv4
 
    [DHCPv4]
    UseDNS=yes
+   RouteMetric=100
    ```
+
+   The matching MAC is a launcher/runtime contract, not a hard-coded product
+   value. The important constraint is "egress NIC is selected explicitly and
+   owns the default route", not "it happens to be named `eth1`".
 
 2. **Enable `systemd-networkd`** in the guest image:
    ```bash
@@ -707,12 +728,17 @@ should gain separate admin / egress controls:
 #
 # --admin-net=tap --egress-net=vhost-user   (short-term migration)
 #   eth0: TAP admin NIC with static ip=
-#   eth1: vhost-user egress NIC with DHCP
+#   egress NIC (matched by launcher-assigned MAC) gets DHCP + default route
 #
 # long-term target:
 #   no guest-reachable TAP ingress path required for SSH;
 #   host russh proxy lives above the launcher/runtime
 ```
+
+`--no-net` remains the backward-compatible "disable both admin and egress"
+spelling during migration. The split flags make the new combinations explicit:
+`--admin-net=none --egress-net=none` is the old `--no-net`, and callers can
+incrementally move only the egress side to `vhost-user`.
 
 **Modularity principle:** The filesystem stack (`motlie-vfs-guest`,
 overlayfs, squashfs) is completely independent of networking. The same
