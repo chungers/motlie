@@ -62,10 +62,9 @@ fn main() -> Result<()> {
     // 1. Opens a vsock connection to the host (CID 2, port 5000)
     // 2. Returns a VsockClientTransport ready for FsOp/FsResult exchange
     //
-    // Note: VMM-level handshake (HandshakeMsg::Fs { tag }) is outside this
-    // crate. In the v1 CH harness, the host side dispatches by the vsock
-    // port convention (one port per tag, or a multiplexer). For the simplest
-    // v1 test, the host serves a single tag on port 5000.
+    // Note: the v1 guest does not send a per-tag handshake. The host binds
+    // the single configured v1 tag on accept, and the transport starts
+    // immediately with framed FsOp/FsResult traffic on vsock port 5000.
     #[cfg(all(feature = "vsock", feature = "client"))]
     let handles = {
         use motlie_vfs::vsock::client::VsockClientTransport;
