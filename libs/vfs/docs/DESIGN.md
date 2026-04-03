@@ -4,13 +4,15 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-02 | @codex | Split the host/guest example boundary so `examples/v1/repl_host.rs` remains the stable v1 single-guest harness, `examples/v1.1/repl_host.rs` carries the v1.1 multi-guest control-plane extensions, and the guest mounters now live under `bins/v1/` and `bins/v1.1/` |
+| 2026-04-02 | @codex | Sync `FsOp::Mkdir` wire protocol with `uid`/`gid` and clarify that explicit overlay-managed `mkdir` uses caller ownership while implicit parent dirs created by `put()` still inherit defaults |
 | 2026-03-31 | @claude | Update wire protocol: `FsOp::Create` now carries `uid`/`gid`, add `FsResult::Created` with `fh` for atomic create+open, add `FsResult::Opened` (PR #123 review) |
 | 2026-03-28 | @codex-pm | Resolve PR #117 round-3 follow-ups: complete `FsOpKind` coverage for event emission and align the docs with the final phase numbering and overlay-behavior test expectations |
 | 2026-03-28 | @codex-pm | Resolve implementer questions from PR #117: rename event op type, specify v1 symlink/file-handle/runner/whiteout/write-buffer behavior, and make inspection views metadata-only |
 | 2026-03-28 | @codex-pm | Address PR #117 review feedback: remove stale v1 CLI references, clarify `apply_batch` tag scoping, tighten synthetic-parent and rename semantics, and fix wording around immutable lower layers |
 | 2026-03-28 | @codex-pm | Reframe the project headline around layered guest filesystem composition instead of transport-agnostic plumbing |
 | 2026-03-28 | @codex-pm | Make the bootstrap/guest-agent boundary explicit: bootstrap and binary delivery stay VMM-owned, while the reusable guest mounter is built on public guest-side APIs in `client/` and `vsock/` |
-| 2026-03-28 | @codex-pm | Treat the guest-side mounter as a real v1 binary: move it from `examples/` to `bins/motlie-vfs-guest.rs` and make image-build order explicit |
+| 2026-03-28 | @codex-pm | Treat the guest-side mounter as a real v1 binary: move it from `examples/` into `bins/` and make image-build order explicit |
 | 2026-03-28 | @codex-pm | Resolve v1 crate-structure ambiguity: `client/fuse.rs` owns the guest-side `fuser` bridge, `client/guest.rs` owns guest mount orchestration, `vsock/` owns transport glue only, and `libs/vfs/examples/` now contains the host REPL/demo harness while the guest mounter lives in `bins/` |
 | 2026-03-28 | @codex-pm | Specify v1 memfs concurrency contract: batch-first API, atomic memfs snapshot publish per mount tag, non-memfs layers keep native semantics; add rejected crate evaluations for `vfs` and Theseus `memfs` |
 | 2026-03-28 | @codex-pm | Converge on a generic ordered layer-stack model: v1 = N memfs layers + 1 disk base per mount, with shared named memfs layers spanning multiple mount tags via `(layer, tag, relative path)` keys |
@@ -97,21 +99,23 @@ v1 lives inside `libs/vfs` and targets the fastest proof of concept:
   - `FuseClient` in `client/fuse.rs`
   - backed by a vsock transport adapter from `vsock/`
 - proof-of-concept host/guest harness:
-  - `repl_host` example: FsServer + MemOverlay + vsock listener + admin command interface
+  - `repl_host` example: stable v1 single-guest host REPL
   - Cloud Hypervisor guest with squashfs+ext4 stacked root
   - guest runs `sshd` and `motlie-vfs-guest`
   - guest mounts host-backed trees over vsock
 - repo location for the proof-of-concept harness:
-  - `libs/vfs/examples/` (host side)
-  - `libs/vfs/examples/v1/` (guest image build + CH launch scripts)
+  - `libs/vfs/examples/v1/repl_host.rs` (v1 host side)
+  - `libs/vfs/examples/v1.1/repl_host.rs` (v1.1 multi-guest host side)
+  - `libs/vfs/examples/v1/` and `libs/vfs/examples/v1.1/` (guest image build + CH launch scripts)
 - REPL/tooling choice:
   - `rustyline` for interactive mode
   - stdin pipe support for scripted/agent-driven setups
 
 The v1 crate is library-first, but it is allowed to include example binaries and supporting
 README/documentation under `libs/vfs/examples/` to prove the architecture quickly. The host
-admin interface lives in the `repl_host` example binary; there is no separate v1 crate module
-for admin.
+admin interface for v1 lives in the `repl_host` example binary; v1.1 carries its own host
+harness in `examples/v1.1/repl_host.rs` so later roadmap slices do not keep changing the
+original v1 example in place. There is no separate crate module for admin.
 
 **Host admin input modes:**
 
@@ -952,7 +956,7 @@ pub enum FsOp {
     Read { inode: u64, fh: u64, offset: i64, size: u32 },
     Write { inode: u64, fh: u64, offset: i64, data: Bytes },
     Create { parent: u64, name: String, mode: u32, flags: u32, uid: u32, gid: u32 },
-    Mkdir { parent: u64, name: String, mode: u32 },
+    Mkdir { parent: u64, name: String, mode: u32, uid: u32, gid: u32 },
     Unlink { parent: u64, name: String },
     Rmdir { parent: u64, name: String },
     Rename { parent: u64, name: String, new_parent: u64, new_name: String },
@@ -1191,7 +1195,7 @@ not a cache.
 | `Create` | Under disk directory (has overlay children) | Create `Content` entry in the designated writable memfs layer. Keeps overlay-managed paths consistent. |
 | `Symlink` | Under synthetic or overlay-managed parent | Return `ENOTSUP` in v1. Symlinks are base-layer-only in v1. |
 | `Readlink` | Overlay-managed inode | Return `ENOTSUP` in v1. |
-| `Mkdir` | Under synthetic parent | Create `SyntheticDir` entry in the designated writable memfs layer. |
+| `Mkdir` | Under synthetic parent | Create `SyntheticDir` entry in the designated writable memfs layer using the request `mode` and caller `uid`/`gid`. |
 | `Mkdir` | Under disk parent | Normal `std::fs::create_dir()` on disk. |
 | `Rmdir` | Synthetic directory (empty) | Remove `SyntheticDir` from overlay. |
 | `Rmdir` | Shadowed empty lower-layer directory | Create a directory whiteout in the designated writable memfs layer so the lower directory stays hidden. |
@@ -1227,10 +1231,16 @@ libs/vfs/
 ├── docs/
 │   └── DESIGN.md                 # this document
 ├── examples/
-│   ├── repl_host.rs            # host server: FsServer + vsock + admin REPL (interactive/pipe/signal)
-│   └── README.md                 # Cloud Hypervisor proof-of-concept instructions
+│   ├── README.md                 # Cloud Hypervisor proof-of-concept instructions
+│   ├── v1/
+│   │   └── repl_host.rs          # stable v1 single-guest host REPL example
+│   └── v1.1/
+│       └── repl_host.rs          # v1.1 multi-guest host REPL example
 ├── bins/
-│   └── motlie-vfs-guest.rs       # v1 guest-side mounter binary over public guest APIs
+│   ├── v1/
+│   │   └── motlie-vfs-guest.rs   # v1 guest-side mounter binary over public guest APIs
+│   └── v1.1/
+│       └── motlie-vfs-guest.rs   # v1.1 guest-side mounter binary with TAG handshake
 └── src/
     ├── lib.rs                    # re-exports, feature-gated module visibility
     │
@@ -1256,7 +1266,8 @@ libs/vfs/
 
 Boundary note:
 
-- `bins/motlie-vfs-guest.rs` is the v1 guest-side mounter binary built from this crate
+- `bins/v1/motlie-vfs-guest.rs` is the stable v1 guest-side mounter binary built from this crate
+- `bins/v1.1/motlie-vfs-guest.rs` is the v1.1 guest-side mounter binary that sends the per-tag handshake
 - `examples/` is reserved for harness/demo programs; the guest-side mounter is not just an
   example because it must be packaged into the guest image for v1 testing
 - `client/guest.rs` is the guest-facing orchestration layer above `FuseClient`; example
@@ -1826,9 +1837,7 @@ send_handshake(&mut stream, &HandshakeMsg::Fs { tag: "workspace".into() }).await
 let transport = VsockClientTransport::new(stream, "workspace");
 let mount = FuseClient::new(transport, "workspace");
 fuser::mount2(mount, "/workspace", &[
-    MountOption::AutoUnmount,
-    MountOption::AllowRoot,
-    MountOption::CUSTOM("direct_io".into()),
+    MountOption::AllowOther,
 ])?;
 ```
 
@@ -1964,7 +1973,8 @@ InodeTable:
 |-------------|---------------|--------|-------------|----------------|
 | Disk file/dir | First `lookup` that resolves to host filesystem | `Disk` | `Some(host_path)` | `std::fs::metadata()` on every access (v1: no attrs cache) |
 | Overlay `Content` | `put()` / `put_with_attrs()` or `Create` under overlay-managed dir | `Content` | `None` | Size from content length, mode+uid+gid from explicit attrs or inherited defaults, mtime from injection time |
-| `SyntheticDir` | Implicitly by `put()` for missing parent dirs, or explicit `Mkdir` under synthetic parent | `SyntheticDir` | `None` | Mode 0755 by default, uid/gid inherited from nearest existing parent or mount root, mtime from first child injection |
+| `SyntheticDir` | Implicitly by `put()` for missing parent dirs | `SyntheticDir` | `None` | Mode 0755 by default, uid/gid inherited from nearest existing parent or mount root, mtime from first child injection |
+| `SyntheticDir` | Explicit `Mkdir` under synthetic parent | `SyntheticDir` | `None` | Mode from the request, uid/gid from the caller, mtime from creation time |
 | `Whiteout` | `Unlink` on shadowed file | `Whiteout` | `None` | Not visible (lookup returns ENOENT) |
 
 ### Inode Stability
@@ -2046,19 +2056,23 @@ for v1 where correctness matters more than throughput.
 ### v1 FUSE Mount Policy
 
 To make the zero-TTL / no-cache guarantee operational, the FUSE client must be mounted
-with options that prevent the kernel from caching file data in the page cache independently
-of TTL revalidation. The v1 mount options are:
+with the stable access-control options below, and each opened file handle must request
+`direct_io` so the kernel does not serve stale page-cache data independently of TTL
+revalidation. The v1 mount options are:
 
 ```rust
-// v1 mount options — correctness-first, no kernel page cache
+// v1 mount options — correctness-first, direct /dev/fuse mount
 let mount_opts = vec![
-    MountOption::AutoUnmount,       // clean unmount on process exit
-    MountOption::AllowRoot,         // root can access the mount
-    MountOption::CUSTOM("direct_io".into()),  // bypass kernel page cache for read/write
+    MountOption::AllowOther,        // any guest user, including root, can access the mount
 ];
 ```
 
-**Why `direct_io`:** Without `direct_io`, the kernel caches file data in the page cache.
+`AutoUnmount` is intentionally not used in the guest service path because `fuser`
+implements it via `fusermount3`, which is unreliable in the minimal guest image.
+The service mounts directly through `/dev/fuse` instead.
+
+**Why `direct_io`:** `direct_io` is applied per open via `FOPEN_DIRECT_IO`, not as a
+mount option. Without it, the kernel caches file data in the page cache.
 Even with `ttl_secs = 0` for attrs, the kernel may serve `read()` from stale page cache
 data if the overlay content was mutated via `put()` between reads. `direct_io` forces every
 `read()` and `write()` through the FUSE server, ensuring the live overlay state is returned.
@@ -2419,7 +2433,8 @@ The guest-side reusable library boundary in `libs/vfs` is:
 
 This means:
 
-- `bins/motlie-vfs-guest.rs` should be a thin binary over `client::guest`
+- `bins/v1/motlie-vfs-guest.rs` should be a thin binary over `client::guest`
+- `bins/v1.1/motlie-vfs-guest.rs` should do the same, adding only the v1.1 tag handshake before transport use
 - a future `motlie-vmm-guest` binary should also be a thin wrapper over `client::guest`
 - the tiny bootstrap binary, binary-delivery path, and VMM handshake multiplexer remain outside
   `libs/vfs`
@@ -2439,7 +2454,8 @@ The guest agent (~700 lines in the VMM doc) should depend on the public guest-si
 than reimplementing mount orchestration inline. With the library, the guest-mount logic becomes:
 
 ```rust
-// bins/motlie-vfs-guest.rs or motlie-vmm-guest main.rs (inside the VM)
+// bins/v1/motlie-vfs-guest.rs, bins/v1.1/motlie-vfs-guest.rs, or
+// motlie-vmm-guest main.rs (inside the VM)
 use motlie_vfs::client::guest::{GuestMountRunner, GuestMountSpec};
 use motlie_vfs::vsock::VsockClientTransport;
 

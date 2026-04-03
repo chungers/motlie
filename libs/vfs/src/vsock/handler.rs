@@ -49,7 +49,19 @@ impl VsockConnectionHandler {
                 .map(|(v, _)| v)
                 .map_err(|e| anyhow::anyhow!("bincode decode error: {e}"))?;
 
-            let result = self.server.handle_op(&self.tag, op);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.server.handle_op(&self.tag, op)
+            }))
+            .map_err(|payload| {
+                let reason = if let Some(s) = payload.downcast_ref::<&str>() {
+                    (*s).to_string()
+                } else if let Some(s) = payload.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "non-string panic payload".to_string()
+                };
+                anyhow::anyhow!("server panic while handling tag {}: {reason}", self.tag)
+            })?;
 
             let encoded = bincode::serde::encode_to_vec(&result, bincode::config::standard())
                 .map_err(|e| anyhow::anyhow!("bincode encode error: {e}"))?;

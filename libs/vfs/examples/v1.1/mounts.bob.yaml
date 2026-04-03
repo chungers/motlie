@@ -1,0 +1,7 @@
+mounts:
+  - tag: bob-home
+    guest_path: /home/bob
+    read_only: false
+  - tag: bob-workspace
+    guest_path: /workspace
+    read_only: false

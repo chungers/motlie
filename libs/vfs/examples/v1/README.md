@@ -54,6 +54,7 @@ cargo run -p motlie-vfs --example repl_host --features vsock -- \
 The host server:
 - Creates `FsServer` with tag `alice-home` backed by the specified directory
 - Listens on `/tmp/motlie-vfs.vsock_5000` for guest vsock connections
+- Serves the configured single-tag `alice-home` mount on the legacy v1 transport
 - Accepts REPL commands to inject/whiteout/remove overlay files
 
 Start the server **before** launching the VM.
