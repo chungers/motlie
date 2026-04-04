@@ -51,6 +51,7 @@ serde_json = "1"
 rustyline = "15"
 atty = "0.2"
 ctrlc = "3"
+motlie-vnet = { path = "../vnet" }
 
 [[bin]]
 name = "motlie-vfs-guest"
@@ -68,4 +69,9 @@ required-features = ["vsock"]
 [[example]]
 name = "repl_host_v1_1"
 path = "examples/v1.1/repl_host.rs"
+required-features = ["vsock"]
+
+[[example]]
+name = "repl_host_v1_2"
+path = "examples/v1.2/repl_host.rs"
 required-features = ["vsock"]
