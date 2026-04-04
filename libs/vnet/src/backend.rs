@@ -72,10 +72,10 @@ struct VnetVhostBackend {
     acked_features: Arc<RwLock<u64>>,
     mem: VnetMemory,
     mac: [u8; 6],
-    /// Pre-created exit event pairs (one per worker thread).
-    /// The consumer is returned by exit_event(); the notifier is cloned
-    /// to VnetHandle for deterministic shutdown.
-    exit_events: Vec<Arc<(EventConsumer, EventNotifier)>>,
+    /// Pre-cloned exit event pairs ready for the framework to consume.
+    /// exit_event() pops from this — it cannot fail at call time because
+    /// all cloning is done up front in the constructor.
+    framework_exit_events: Arc<Mutex<Vec<(EventConsumer, EventNotifier)>>>,
 }
 
 impl VnetVhostBackend {
@@ -86,12 +86,27 @@ impl VnetVhostBackend {
         rx_eventfd: EventFd,
         tx_wake_eventfd: EventFd,
         mem: VnetMemory,
-    ) -> Result<Self, VnetError> {
-        // Pre-create one exit event per worker thread (we use 1 thread).
-        let exit_pair = new_event_consumer_and_notifier(EventFlag::empty())
-            .map_err(|e| VnetError::BackendInit(format!("exit event: {}", e)))?;
+    ) -> Result<(Self, EventNotifier), VnetError> {
+        // Pre-create the exit event and clone all needed copies up front.
+        // This ensures exit_event() cannot fail at call time.
+        let (exit_consumer, exit_notifier) =
+            new_event_consumer_and_notifier(EventFlag::empty())
+                .map_err(|e| VnetError::BackendInit(format!("exit event: {}", e)))?;
 
-        Ok(Self {
+        // Clone for the framework (returned by exit_event).
+        let framework_consumer = exit_consumer
+            .try_clone()
+            .map_err(|e| VnetError::BackendInit(format!("exit consumer clone: {}", e)))?;
+        let framework_notifier = exit_notifier
+            .try_clone()
+            .map_err(|e| VnetError::BackendInit(format!("exit notifier clone: {}", e)))?;
+
+        // Clone for VnetHandle (used during shutdown to signal workers).
+        let shutdown_notifier = exit_notifier
+            .try_clone()
+            .map_err(|e| VnetError::BackendInit(format!("shutdown notifier clone: {}", e)))?;
+
+        let backend = Self {
             rx_eventfd: Arc::new(rx_eventfd),
             tx_wake_eventfd: Arc::new(tx_wake_eventfd),
             tx_sender: Arc::new(Mutex::new(tx_sender)),
@@ -99,19 +114,22 @@ impl VnetVhostBackend {
             acked_features: Arc::new(RwLock::new(0)),
             mem,
             mac: config.mac,
-            exit_events: vec![Arc::new(exit_pair)],
-        })
+            framework_exit_events: Arc::new(Mutex::new(vec![
+                (framework_consumer, framework_notifier),
+            ])),
+        };
+
+        Ok((backend, shutdown_notifier))
     }
 
     /// Process tx virtqueue: read frames from guest, send to slirp thread.
-    fn process_tx(&self, vring: &VringRwLock) {
-        let tx_lock = match self.tx_sender.lock() {
-            Ok(guard) => guard,
-            Err(e) => {
-                tracing::error!("tx lock poisoned, skipping tx processing: {}", e);
-                return;
-            }
-        };
+    /// Returns Err on fatal backend state (lock poison) to signal the
+    /// framework to shut down this worker — prevents half-alive degradation.
+    fn process_tx(&self, vring: &VringRwLock) -> std::io::Result<()> {
+        let tx_lock = self.tx_sender.lock().map_err(|e| {
+            tracing::error!("tx lock poisoned, backend fatally degraded: {}", e);
+            std::io::Error::new(std::io::ErrorKind::Other, "tx lock poisoned")
+        })?;
 
         let mem_guard = self.mem.memory();
         let mem = mem_guard.deref();
@@ -168,19 +186,17 @@ impl VnetVhostBackend {
             }
             let _ = self.tx_wake_eventfd.write(1);
         }
+        Ok(())
     }
 
     /// Process rx: drain frames from slirp, inject into rx virtqueue.
-    fn process_rx(&self, vring: &VringRwLock) {
+    fn process_rx(&self, vring: &VringRwLock) -> std::io::Result<()> {
         let _ = self.rx_eventfd.read();
 
-        let rx_lock = match self.rx_receiver.lock() {
-            Ok(guard) => guard,
-            Err(e) => {
-                tracing::error!("rx lock poisoned, skipping rx processing: {}", e);
-                return;
-            }
-        };
+        let rx_lock = self.rx_receiver.lock().map_err(|e| {
+            tracing::error!("rx lock poisoned, backend fatally degraded: {}", e);
+            std::io::Error::new(std::io::ErrorKind::Other, "rx lock poisoned")
+        })?;
 
         let mem_guard = self.mem.memory();
         let mem = mem_guard.deref();
@@ -271,6 +287,7 @@ impl VnetVhostBackend {
                 tracing::warn!("rx: signal_used_queue failed: {}", e);
             }
         }
+        Ok(())
     }
 }
 
@@ -323,12 +340,10 @@ impl VhostUserBackend for VnetVhostBackend {
         Ok(())
     }
 
-    fn exit_event(&self, thread_index: usize) -> Option<(EventConsumer, EventNotifier)> {
-        self.exit_events.get(thread_index).and_then(|pair| {
-            let consumer = pair.0.try_clone().ok()?;
-            let notifier = pair.1.try_clone().ok()?;
-            Some((consumer, notifier))
-        })
+    fn exit_event(&self, _thread_index: usize) -> Option<(EventConsumer, EventNotifier)> {
+        // Pop a pre-cloned pair. All cloning was done in the constructor
+        // where errors propagate — this path cannot fail silently.
+        self.framework_exit_events.lock().ok()?.pop()
     }
 
     fn handle_event(
@@ -341,10 +356,10 @@ impl VhostUserBackend for VnetVhostBackend {
         match device_event {
             RX_QUEUE => {}
             TX_QUEUE => {
-                self.process_tx(&vrings[TX_QUEUE as usize]);
+                self.process_tx(&vrings[TX_QUEUE as usize])?;
             }
             SLIRP_RX_TOKEN => {
-                self.process_rx(&vrings[RX_QUEUE as usize]);
+                self.process_rx(&vrings[RX_QUEUE as usize])?;
             }
             _ => {
                 tracing::warn!("unexpected device_event: {}", device_event);
@@ -466,7 +481,9 @@ impl VnetBackend {
 
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::<()>::new());
 
-        let backend = VnetVhostBackend::new(
+        // Constructor returns (backend, shutdown_notifier). All exit-event
+        // cloning is done inside — no silent clone failures at call time.
+        let (backend, exit_notifier) = VnetVhostBackend::new(
             &self.config,
             tx_sender,
             rx_receiver,
@@ -474,12 +491,6 @@ impl VnetBackend {
             tx_wake_eventfd,
             mem.clone(),
         )?;
-
-        // Clone exit notifier before backend is moved into daemon.
-        let exit_notifier = backend.exit_events[0]
-            .1
-            .try_clone()
-            .map_err(|e| VnetError::BackendInit(format!("exit notifier clone: {}", e)))?;
 
         let mut daemon = VhostUserDaemon::new(
             "motlie-vnet".to_string(),
@@ -837,7 +848,7 @@ mod tests {
         // Create backend with channels.
         let (tx_sender, tx_receiver) = mpsc::channel();
         let (_rx_sender, rx_receiver) = mpsc::channel();
-        let backend = VnetVhostBackend::new(
+        let (backend, _exit_notifier) = VnetVhostBackend::new(
             &VnetConfig::builder().socket_path("/tmp/test.sock").build().unwrap(),
             tx_sender,
             rx_receiver,
@@ -847,7 +858,7 @@ mod tests {
         )
         .unwrap();
 
-        backend.process_tx(&vring);
+        backend.process_tx(&vring).unwrap();
 
         // Verify: payload arrived in the tx channel (header stripped).
         assert_eq!(tx_receiver.try_recv().unwrap(), payload);
@@ -898,7 +909,7 @@ mod tests {
         rx_sender.send(vec![1, 2, 3, 4]).unwrap();
         eventfd.write(1).unwrap();
 
-        let backend = VnetVhostBackend::new(
+        let (backend, _exit_notifier) = VnetVhostBackend::new(
             &VnetConfig::builder().socket_path("/tmp/test.sock").build().unwrap(),
             mpsc::channel().0,
             rx_receiver,
@@ -908,7 +919,7 @@ mod tests {
         )
         .unwrap();
 
-        backend.process_rx(&vring);
+        backend.process_rx(&vring).unwrap();
 
         // Verify: guest memory has zeroed header.
         let mut hdr = [0xFF; VIRTIO_NET_HDR_SIZE];
