@@ -7,6 +7,7 @@ backend with libslirp for rootless guest networking.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-03 | @codex | Address final PR review nits: align `VnetError` naming with DESIGN and remove stale `--net-mode` wording |
 | 2026-04-03 | @codex | Address review follow-ups: expand public API tasks to match DESIGN, add epoll fallback spike, make short-term dual-NIC routing explicit, and document the long-term host SSH proxy path |
 | 2026-04-02 | @claude | Address blocking review: SSH ingress tasks, guest migration tasks, crate layering, composed acceptance milestone, fix validation commands |
 | 2026-04-01 | @chungers | Address PR #125 review: add fd registration task, logging task, crate validation, fix vnet-vfs coupling, fix stale paths |
@@ -429,7 +430,7 @@ long-term ingress proxy replaces guest-reachable TAP SSH.
 - [ ] 4.1.1 Update `libs/vfs/examples/v1/README.md` with vhost-user-net instructions
   and the composed VFS + SSH + Internet flow.
 - [ ] 4.1.2 Update `libs/vfs/examples/v1/CH-HARNESS.md` prerequisites and launch flow
-  for all three `--net-mode` options.
+  for the split `--admin-net` / `--egress-net` launcher flags.
 - [ ] 4.1.3 Remove `CAP_NET_ADMIN` / `setcap` references from all docs (TAP mode
   docs should note it as legacy requiring capabilities).
 - [ ] 4.1.4 Add `libs/vnet/README.md` with usage examples (standalone and composed).
