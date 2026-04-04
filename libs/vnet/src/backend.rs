@@ -342,8 +342,20 @@ impl VhostUserBackend for VnetVhostBackend {
 
     fn exit_event(&self, _thread_index: usize) -> Option<(EventConsumer, EventNotifier)> {
         // Pop a pre-cloned pair. All cloning was done in the constructor
-        // where errors propagate — this path cannot fail silently.
-        self.framework_exit_events.lock().ok()?.pop()
+        // where errors propagate. Mutex poison is recovered (not silenced)
+        // so the exit event is always delivered if one was prepared.
+        let mut guard = self
+            .framework_exit_events
+            .lock()
+            .unwrap_or_else(|poisoned| {
+                tracing::error!("exit event mutex poisoned — recovering to deliver exit event");
+                poisoned.into_inner()
+            });
+        let pair = guard.pop();
+        if pair.is_none() {
+            tracing::error!("exit_event called but no pre-cloned pair available — worker thread will not have an exit signal");
+        }
+        pair
     }
 
     fn handle_event(
