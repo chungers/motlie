@@ -16,7 +16,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use vhost::vhost_user::message::*;
-use vhost::vhost_user::Listener;
+use vhost::vhost_user::{Error as VhostUserError, Listener};
 use vhost_user_backend::{VhostUserBackend, VhostUserDaemon, VringRwLock, VringT};
 use virtio_bindings::virtio_net::*;
 use virtio_bindings::virtio_config::VIRTIO_F_VERSION_1;
@@ -32,6 +32,20 @@ use crate::config::VnetConfig;
 use crate::error::VnetError;
 
 type VnetMemory = GuestMemoryAtomic<GuestMemoryMmap>;
+
+/// Returns true for vhost-user errors that indicate a benign frontend
+/// disconnect (guest shutdown, dummy-connect during our shutdown, etc.)
+/// rather than a real runtime failure. Only these are silenced in the
+/// daemon thread; everything else propagates to shutdown().
+fn is_benign_vhost_error(e: &vhost_user_backend::Error) -> bool {
+    use vhost_user_backend::Error as BE;
+    matches!(
+        e,
+        BE::HandleRequest(VhostUserError::Disconnected)
+            | BE::HandleRequest(VhostUserError::PartialMessage)
+            | BE::HandleRequest(VhostUserError::SocketBroken(_))
+    )
+}
 
 const RX_QUEUE: u16 = 0;
 const TX_QUEUE: u16 = 1;
@@ -481,16 +495,25 @@ impl VnetBackend {
         tracing::info!("vnet socket bound: {}", socket_path.display());
 
         // Daemon thread accepts connections and runs the vhost-user protocol.
+        // Only known benign disconnect errors (Disconnected, PartialMessage,
+        // SocketBroken) are mapped to Ok — everything else propagates.
         let daemon_handle: JoinHandle<Result<(), VnetError>> = thread::Builder::new()
             .name("motlie-vnet-daemon".into())
             .spawn(move || {
                 daemon.start(&mut listener).map_err(|e| {
                     VnetError::BackendInit(format!("daemon accept: {}", e))
                 })?;
-                daemon.wait().map_err(|e| {
-                    VnetError::BackendInit(format!("daemon wait: {}", e))
-                })?;
-                Ok(())
+                match daemon.wait() {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        if is_benign_vhost_error(&e) {
+                            tracing::debug!("daemon exited on disconnect: {}", e);
+                            Ok(())
+                        } else {
+                            Err(VnetError::BackendInit(format!("daemon: {}", e)))
+                        }
+                    }
+                }
             })
             .map_err(|e| VnetError::BackendInit(format!("daemon thread: {}", e)))?;
 
@@ -533,15 +556,14 @@ impl VnetHandle {
             let _ = handle.join();
         }
 
-        // Join daemon thread and propagate errors.
+        // Join daemon thread and propagate non-benign errors.
+        // Benign disconnect errors (Disconnected, PartialMessage, SocketBroken)
+        // are already mapped to Ok(()) inside the daemon thread. Any Err here
+        // is a real failure that callers should see.
         if let Some(handle) = self.daemon_thread.take() {
             match handle.join() {
                 Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    // Expected on dummy-connect shutdown — daemon sees invalid
-                    // vhost-user handshake and returns an error. Not a real failure.
-                    tracing::debug!("daemon thread exited with: {}", e);
-                }
+                Ok(Err(e)) => return Err(e),
                 Err(panic_payload) => {
                     return Err(VnetError::BackendInit(format!(
                         "daemon thread panicked: {:?}", panic_payload
