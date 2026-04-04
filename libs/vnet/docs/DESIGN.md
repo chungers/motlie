@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-03 | @codex | Address final PR review nits: align `VnetError` variants with PLAN and remove stale `--net-mode` wording |
 | 2026-04-03 | @codex | Address review follow-ups: document why long-term SSH ingress moves into a host-side proxy, make short-term dual-NIC route ownership explicit, and align migration/docs with the public `start()` / `VnetHandle` API |
 | 2026-04-03 | @codex | Split SSH ingress from outbound egress: short-term migration keeps TAP admin SSH while `motlie-vnet` owns outbound internet, and the long-term target moves ingress into a host-side `russhd` / REPL proxy |
 | 2026-04-02 | @claude | Address blocking review: restore SSH ingress as a system requirement, add guest migration plan, crate layering (src/examples/bins), composed acceptance milestone, and zero-host-impact model |
@@ -518,17 +519,19 @@ let _net_handle = {
 // Error types:
 pub enum VnetError {
     /// Socket path validation failed (not writable, parent missing)
-    InvalidConfig(String),
+    SocketPath(String),
     /// Socket bind failed (EADDRINUSE, EACCES)
     SocketBind(std::io::Error),
+    /// Best-effort stale socket cleanup failed before bind
+    SocketCleanup(std::io::Error),
     /// libslirp context creation failed
     SlirpInit(String),
-    /// vhost-user daemon error (protocol negotiation, memory mapping)
-    VhostUser(String),
+    /// vhost-user backend initialization failed
+    BackendInit(String),
+    /// Host DNS resolver discovery/parsing failed
+    DnsResolver(String),
     /// Port forward bind failed (EADDRINUSE on host-side listener)
     PortForwardBind { host_port: u16, source: std::io::Error },
-    /// Backend thread panicked (should never happen — defensive)
-    ThreadPanic,
 }
 
 // Derive with thiserror — anyhow::Error conversion is automatic.
