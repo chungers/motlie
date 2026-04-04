@@ -193,8 +193,9 @@ impl VnetVhostBackend {
             if let Some(mut desc_chain) = queue.pop_descriptor_chain(mem) {
                 let desc_idx = desc_chain.head_index();
                 let mut offset = 0usize;
+                let mut write_failed = false;
 
-                while let Some(desc) = desc_chain.next() {
+                'desc: while let Some(desc) = desc_chain.next() {
                     if !desc.is_write_only() {
                         continue;
                     }
@@ -208,6 +209,8 @@ impl VnetVhostBackend {
                         let zeros = vec![0u8; hdr_write];
                         if let Err(e) = mem.write(&zeros, addr) {
                             tracing::warn!("rx: header write failed at {}: {}", addr.raw_value(), e);
+                            write_failed = true;
+                            break 'desc;
                         }
                         offset += hdr_write;
 
@@ -222,6 +225,8 @@ impl VnetVhostBackend {
                                     write_addr,
                                 ) {
                                     tracing::warn!("rx: payload write failed at {}: {}", write_addr.raw_value(), e);
+                                    write_failed = true;
+                                    break 'desc;
                                 }
                                 offset += data_write;
                             }
@@ -235,16 +240,29 @@ impl VnetVhostBackend {
                                 addr,
                             ) {
                                 tracing::warn!("rx: payload write failed at {}: {}", addr.raw_value(), e);
+                                write_failed = true;
+                                break 'desc;
                             }
                             offset += data_write;
                         }
                     }
                 }
 
-                if let Err(e) = queue.add_used(mem, desc_idx, offset as u32) {
-                    tracing::warn!("rx: add_used failed for desc {}: {}", desc_idx, e);
+                // Publish only the bytes actually written. On write failure,
+                // offset reflects the last successful write position — the
+                // guest sees a truncated or empty frame rather than stale data.
+                if write_failed && offset == 0 {
+                    // Nothing was written — return the descriptor without
+                    // claiming any bytes so the guest can reuse it.
+                    if let Err(e) = queue.add_used(mem, desc_idx, 0) {
+                        tracing::warn!("rx: add_used failed for desc {}: {}", desc_idx, e);
+                    }
+                } else {
+                    if let Err(e) = queue.add_used(mem, desc_idx, offset as u32) {
+                        tracing::warn!("rx: add_used failed for desc {}: {}", desc_idx, e);
+                    }
+                    injected = true;
                 }
-                injected = true;
             } else {
                 tracing::debug!("rx vring full, dropping frame ({} bytes)", frame.len());
                 break;
@@ -520,15 +538,31 @@ impl VnetBackend {
             }
         }
 
+        // Helper: clean up the slirp thread and socket on any failure after
+        // slirp readiness. Without this, a failed Listener::new or daemon spawn
+        // would leave the slirp thread running and hostfwd ports held.
+        let cleanup_slirp = |shutdown: &Arc<AtomicBool>,
+                             slirp_handle: JoinHandle<()>,
+                             socket_path: &std::path::Path| {
+            shutdown.store(true, Ordering::Relaxed);
+            let _ = slirp_handle.join();
+            let _ = std::fs::remove_file(socket_path);
+        };
+
         // Bind socket on calling thread — socket is live when start() returns.
-        let mut listener = Listener::new(&socket_path, true)
-            .map_err(|e| VnetError::SocketBind(std::io::Error::other(format!("{}", e))))?;
+        let mut listener = match Listener::new(&socket_path, true) {
+            Ok(l) => l,
+            Err(e) => {
+                cleanup_slirp(&shutdown, slirp_handle, &socket_path);
+                return Err(VnetError::SocketBind(std::io::Error::other(format!("{}", e))));
+            }
+        };
         tracing::info!("vnet socket bound: {}", socket_path.display());
 
         // Daemon thread accepts connections and runs the vhost-user protocol.
         // Only known benign disconnect errors (Disconnected, PartialMessage,
         // SocketBroken) are mapped to Ok — everything else propagates.
-        let daemon_handle: JoinHandle<Result<(), VnetError>> = thread::Builder::new()
+        let daemon_handle: JoinHandle<Result<(), VnetError>> = match thread::Builder::new()
             .name("motlie-vnet-daemon".into())
             .spawn(move || {
                 daemon.start(&mut listener).map_err(|e| {
@@ -545,8 +579,13 @@ impl VnetBackend {
                         }
                     }
                 }
-            })
-            .map_err(|e| VnetError::BackendInit(format!("daemon thread: {}", e)))?;
+            }) {
+            Ok(handle) => handle,
+            Err(e) => {
+                cleanup_slirp(&shutdown, slirp_handle, &socket_path);
+                return Err(VnetError::BackendInit(format!("daemon thread: {}", e)));
+            }
+        };
 
         tracing::info!("vnet backend started: {}", socket_path.display());
 
