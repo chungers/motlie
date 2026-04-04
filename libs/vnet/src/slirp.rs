@@ -75,27 +75,6 @@ impl SlirpHandler {
         std::mem::take(&mut self.notified)
     }
 
-    /// Fire all expired timer callbacks. Called by `SlirpInstance::run_once()`
-    /// after `pollfds_poll()` so libslirp's timer-driven work (TCP retransmits,
-    /// DHCP lease timers, etc.) actually executes.
-    pub fn fire_expired_timers(&mut self) {
-        let now = self.clock_get_ns();
-        // Collect IDs of expired timers to avoid borrow conflict.
-        let expired: Vec<u64> = self
-            .timers
-            .iter()
-            .filter(|(_, entry)| entry.expire_ns <= now)
-            .map(|(id, _)| *id)
-            .collect();
-
-        for id in expired {
-            if let Some(entry) = self.timers.get_mut(&id) {
-                // Reset expiry so it doesn't fire again until re-armed.
-                entry.expire_ns = i64::MAX;
-                (entry.callback)();
-            }
-        }
-    }
 }
 
 impl Handler for SlirpHandler {
@@ -293,10 +272,67 @@ impl SlirpInstance {
         });
 
         // Phase 4: fire expired timers (TCP retransmits, DHCP leases, etc.)
-        self.handler.borrow_mut().fire_expired_timers();
+        // This must be done at the SlirpInstance level, not inside a handler
+        // borrow, because timer callbacks reenter the handler through
+        // libslirp C → timer_mod_handler → Rc<RefCell<SlirpHandler>>::borrow_mut.
+        self.fire_expired_timers();
 
         // Phase 5: drain rx frames queued by send_packet callbacks
         self.handler.borrow_mut().drain_rx_frames()
+    }
+
+    /// Fire expired timer callbacks with proper borrow scoping.
+    ///
+    /// Timer callbacks reenter the handler through the C FFI
+    /// (libslirp C → timer_mod_handler → Rc<RefCell<SlirpHandler>>::borrow_mut),
+    /// so we must not hold a handler borrow while invoking them.
+    ///
+    /// Strategy: borrow briefly to extract expired callback closures, drop the
+    /// borrow, invoke callbacks (which may safely re-borrow), then re-borrow to
+    /// put callbacks back for future re-arming.
+    fn fire_expired_timers(&self) {
+        // Step 1: extract expired callbacks under a short borrow.
+        let to_fire: Vec<(u64, Box<dyn FnMut()>)> = {
+            let mut handler = self.handler.borrow_mut();
+            let now = handler.clock_get_ns();
+
+            let expired_ids: Vec<u64> = handler
+                .timers
+                .iter()
+                .filter(|(_, e)| e.expire_ns <= now)
+                .map(|(id, _)| *id)
+                .collect();
+
+            let mut callbacks = Vec::with_capacity(expired_ids.len());
+            for id in expired_ids {
+                if let Some(entry) = handler.timers.get_mut(&id) {
+                    entry.expire_ns = i64::MAX;
+                    // Swap out the real callback, leaving a no-op placeholder.
+                    let cb = std::mem::replace(&mut entry.callback, Box::new(|| {}));
+                    callbacks.push((id, cb));
+                }
+            }
+            callbacks
+        }; // handler borrow dropped — callbacks can now safely reenter
+
+        // Step 2: fire callbacks outside any handler borrow.
+        let mut fired: Vec<(u64, Box<dyn FnMut()>)> = Vec::with_capacity(to_fire.len());
+        for (id, mut cb) in to_fire {
+            cb();
+            fired.push((id, cb));
+        }
+
+        // Step 3: restore callbacks so they can fire again if re-armed.
+        {
+            let mut handler = self.handler.borrow_mut();
+            for (id, cb) in fired {
+                if let Some(entry) = handler.timers.get_mut(&id) {
+                    entry.callback = cb;
+                }
+                // If the timer was freed during the callback, it's gone — the
+                // callback is simply dropped.
+            }
+        }
     }
 
     /// Add a host→guest TCP port forward via libslirp's `slirp_add_hostfwd`.
