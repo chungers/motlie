@@ -2890,12 +2890,12 @@ name = "motlie-vnet"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "env_logger",
  "libc",
  "libslirp",
  "libslirp-sys",
- "log",
  "thiserror 1.0.69",
+ "tracing",
+ "tracing-subscriber",
  "vhost",
  "vhost-user-backend",
  "virtio-bindings",

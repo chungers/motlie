@@ -90,7 +90,7 @@ impl Handler for SlirpHandler {
             return Ok(0);
         }
         self.rx_queue.push(buf.to_vec());
-        log::debug!("send_packet: queued {} byte frame ({} pending)", len, self.rx_queue.len());
+        tracing::debug!("send_packet: queued {} byte frame ({} pending)", len, self.rx_queue.len());
         Ok(len)
     }
 
@@ -103,7 +103,7 @@ impl Handler for SlirpHandler {
     }
 
     fn guest_error(&mut self, msg: &str) {
-        log::warn!("libslirp guest error: {}", msg);
+        tracing::warn!("libslirp guest error: {}", msg);
     }
 
     fn notify(&mut self) {
@@ -209,7 +209,7 @@ impl SlirpInstance {
             handler.clone(),
         );
 
-        log::info!(
+        tracing::info!(
             "slirp context created: host={}, guest={}, dns={}",
             config.host_ipv4,
             config.guest_ipv4,
@@ -373,13 +373,13 @@ impl SlirpInstance {
             )
         };
         if ret < 0 {
-            log::warn!(
+            tracing::warn!(
                 "slirp_add_hostfwd failed: host={}:{} -> guest={}:{}",
                 host_addr, host_port, guest_addr, guest_port,
             );
             Err(host_port)
         } else {
-            log::info!(
+            tracing::info!(
                 "hostfwd: {}:{} -> {}:{} (tcp)",
                 host_addr, host_port, guest_addr, guest_port,
             );
@@ -400,7 +400,7 @@ impl SlirpInstance {
 
 impl Drop for SlirpInstance {
     fn drop(&mut self) {
-        log::info!("slirp context dropped");
+        tracing::info!("slirp context dropped");
     }
 }
 
@@ -461,7 +461,7 @@ pub fn parse_host_dns() -> Ipv4Addr {
     let content = match std::fs::read_to_string("/etc/resolv.conf") {
         Ok(c) => c,
         Err(e) => {
-            log::warn!("failed to read /etc/resolv.conf: {}, using default DNS {}", e, default_dns);
+            tracing::warn!("failed to read /etc/resolv.conf: {}, using default DNS {}", e, default_dns);
             return default_dns;
         }
     };
@@ -477,7 +477,7 @@ pub fn parse_host_dns() -> Ipv4Addr {
         }
     }
 
-    log::warn!("no IPv4 nameserver found in /etc/resolv.conf, using default DNS {}", default_dns);
+    tracing::warn!("no IPv4 nameserver found in /etc/resolv.conf, using default DNS {}", default_dns);
     default_dns
 }
 
@@ -490,7 +490,7 @@ mod tests {
     use super::*;
 
     fn init_logging() {
-        let _ = env_logger::builder().is_test(true).try_init();
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     }
 
     #[test]

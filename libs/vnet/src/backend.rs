@@ -113,8 +113,8 @@ impl VnetVhostBackend {
             }
 
             if !frame.is_empty() {
-                if let Err(e) = self.tx_sender.lock().unwrap().send(frame) {
-                    log::warn!("tx channel send failed: {}", e);
+                if let Err(e) = self.tx_sender.lock().expect("tx lock not poisoned").send(frame) {
+                    tracing::warn!("tx channel send failed: {}", e);
                 }
                 sent = true;
             }
@@ -126,7 +126,7 @@ impl VnetVhostBackend {
         // reclaim them. Mirrors the rx-side signal_used_queue pattern.
         if sent {
             if let Err(e) = state.signal_used_queue() {
-                log::warn!("failed to signal tx used queue: {}", e);
+                tracing::warn!("failed to signal tx used queue: {}", e);
             }
             let _ = self.tx_wake_eventfd.write(1);
         }
@@ -140,7 +140,7 @@ impl VnetVhostBackend {
         let mem_guard = self.mem.memory();
         let mem = mem_guard.deref();
 
-        let rx_lock = self.rx_receiver.lock().unwrap();
+        let rx_lock = self.rx_receiver.lock().expect("rx lock not poisoned");
         let mut state = vring.get_mut();
         let queue = state.get_queue_mut();
         let mut injected = false;
@@ -193,14 +193,14 @@ impl VnetVhostBackend {
                 let _ = queue.add_used(mem, desc_idx, offset as u32);
                 injected = true;
             } else {
-                log::debug!("rx vring full, dropping frame ({} bytes)", frame.len());
+                tracing::debug!("rx vring full, dropping frame ({} bytes)", frame.len());
                 break;
             }
         }
 
         if injected {
             if let Err(e) = state.signal_used_queue() {
-                log::warn!("failed to signal rx used queue: {}", e);
+                tracing::warn!("failed to signal rx used queue: {}", e);
             }
         }
     }
@@ -228,7 +228,7 @@ impl VhostUserBackend for VnetVhostBackend {
     }
 
     fn acked_features(&self, features: u64) {
-        *self.acked_features.write().unwrap() = features;
+        *self.acked_features.write().expect("features lock not poisoned") = features;
     }
 
     fn protocol_features(&self) -> VhostUserProtocolFeatures {
@@ -271,7 +271,7 @@ impl VhostUserBackend for VnetVhostBackend {
                 self.process_rx(&vrings[RX_QUEUE as usize]);
             }
             _ => {
-                log::warn!("unexpected device_event: {}", device_event);
+                tracing::warn!("unexpected device_event: {}", device_event);
             }
         }
         Ok(())
@@ -305,11 +305,11 @@ fn slirp_thread_main(
             config.guest_ipv4,
             fwd.guest_port,
         ) {
-            log::error!("hostfwd failed for port {}", port);
+            tracing::error!("hostfwd failed for port {}", port);
         }
     }
 
-    log::info!("slirp thread started");
+    tracing::info!("slirp thread started");
 
     while !shutdown.load(Ordering::Relaxed) {
         while let Ok(frame) = tx_receiver.try_recv() {
@@ -330,7 +330,7 @@ fn slirp_thread_main(
         }
     }
 
-    log::info!("slirp thread exiting");
+    tracing::info!("slirp thread exiting");
 }
 
 // ---------------------------------------------------------------------------
@@ -354,7 +354,7 @@ impl VnetBackend {
         // Clean up stale socket.
         if socket_path.exists() {
             std::fs::remove_file(&socket_path).map_err(VnetError::SocketCleanup)?;
-            log::info!("removed stale socket: {}", socket_path.display());
+            tracing::info!("removed stale socket: {}", socket_path.display());
         }
 
         let (tx_sender, tx_receiver) = mpsc::channel::<Vec<u8>>();
@@ -419,7 +419,7 @@ impl VnetBackend {
         let mut listener = Listener::new(&socket_path, true)
             .map_err(|e| VnetError::SocketBind(std::io::Error::other(format!("{}", e))))?;
 
-        log::info!("vnet socket bound: {}", socket_path.display());
+        tracing::info!("vnet socket bound: {}", socket_path.display());
 
         // Hand the bound listener to the daemon thread which will accept
         // connections and run the vhost-user protocol handler loop.
@@ -427,17 +427,17 @@ impl VnetBackend {
             .name("motlie-vnet-daemon".into())
             .spawn(move || {
                 if let Err(e) = daemon.start(&mut listener) {
-                    log::error!("vhost-user daemon accept error: {}", e);
+                    tracing::error!("vhost-user daemon accept error: {}", e);
                     return;
                 }
                 if let Err(e) = daemon.wait() {
                     // Disconnect is expected on clean shutdown.
-                    log::debug!("vhost-user daemon wait: {}", e);
+                    tracing::debug!("vhost-user daemon wait: {}", e);
                 }
             })
             .map_err(|e| VnetError::BackendInit(format!("daemon thread: {}", e)))?;
 
-        log::info!("vnet backend started: {}", socket_path.display());
+        tracing::info!("vnet backend started: {}", socket_path.display());
 
         Ok(VnetHandle {
             slirp_thread: Some(slirp_handle),
@@ -479,7 +479,7 @@ impl VnetHandle {
             drop(handle);
         }
         let _ = std::fs::remove_file(&self.socket_path);
-        log::info!("vnet backend shut down: {}", self.socket_path.display());
+        tracing::info!("vnet backend shut down: {}", self.socket_path.display());
     }
 }
 
@@ -495,7 +495,7 @@ mod tests {
     use crate::config::VnetConfig;
 
     fn init_logging() {
-        let _ = env_logger::builder().is_test(true).try_init();
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     }
 
     /// Task 2.3.8: verify config builder + backend construction.
