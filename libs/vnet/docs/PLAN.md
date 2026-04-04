@@ -7,7 +7,8 @@ backend with libslirp for rootless guest networking.
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-04-03 | @claude-tl | Phase 1 implementation: update dep versions to latest (libslirp-dev 4.7.0, vhost 0.16, vhost-user-backend 0.22, virtio-queue 0.17, vm-memory 0.18) |
+| 2026-04-04 | @claude-tl | Phase 2 implementation: two-thread vhost-user backend, public API (VnetConfig/VnetError/VnetBackend/VnetHandle), vm-memory pinned to 0.17 for vhost crate compat |
+| 2026-04-03 | @claude-tl | Phase 1 implementation: update dep versions to latest (libslirp-dev 4.7.0, vhost 0.16, vhost-user-backend 0.22, virtio-queue 0.17, vm-memory 0.17) |
 | 2026-04-03 | @codex | Address final PR review nits: align `VnetError` naming with DESIGN and remove stale `--net-mode` wording |
 | 2026-04-03 | @codex | Address review follow-ups: expand public API tasks to match DESIGN, add epoll fallback spike, make short-term dual-NIC routing explicit, and document the long-term host SSH proxy path |
 | 2026-04-02 | @claude | Address blocking review: SSH ingress tasks, guest migration tasks, crate layering, composed acceptance milestone, fix validation commands |
@@ -118,7 +119,7 @@ Design references: [Data Flow](./DESIGN.md), [Threading Model](./DESIGN.md), [FR
 
 ### 2.1 Dependencies
 
-- [ ] 2.1.1 Add vhost-user dependencies to `Cargo.toml`:
+- [x] 2.1.1 Add vhost-user dependencies to `Cargo.toml`:
   ```toml
   vhost = { version = "0.16", features = ["vhost-user-backend"] }
   vhost-user-backend = "0.22"
@@ -126,11 +127,11 @@ Design references: [Data Flow](./DESIGN.md), [Threading Model](./DESIGN.md), [FR
   virtio-bindings = "0.2"
   vm-memory = "0.18"
   ```
-- [ ] 2.1.2 Verify `cargo check -p motlie-vnet` with all deps.
+- [x] 2.1.2 Verify `cargo check -p motlie-vnet` with all deps.
 
 ### 2.2 Backend Implementation (`src/backend.rs`)
 
-- [ ] 2.2.1 Implement `VhostUserBackend` trait on `VnetBackend` struct.
+- [x] 2.2.1 Implement `VhostUserBackend` trait on `VnetBackend` struct.
   Key trait methods:
   - `num_queues() → usize` — return 2 (rx + tx)
   - `max_queue_size() → usize` — return 256
@@ -138,7 +139,7 @@ Design references: [Data Flow](./DESIGN.md), [Threading Model](./DESIGN.md), [FR
   - `handle_event(device_event, evset, vrings, thread_backend)` —
     process virtqueue kicks
   - `set_backend_req_fd(backend_req)` — store backend request channel
-- [ ] 2.2.2 Implement virtio-net feature negotiation:
+- [x] 2.2.2 Implement virtio-net feature negotiation:
   ```rust
   // Minimal feature set for libslirp compatibility
   1 << VIRTIO_NET_F_GUEST_CSUM
@@ -148,16 +149,16 @@ Design references: [Data Flow](./DESIGN.md), [Threading Model](./DESIGN.md), [FR
   | 1 << VIRTIO_F_RING_PACKED  // optional — negotiated only if CH offers
   ```
   Verify against CH's required features (ref: [Open Questions](./DESIGN.md)).
-- [ ] 2.2.3 Implement tx path (guest → host):
+- [x] 2.2.3 Implement tx path (guest → host):
   - Read descriptor chain from tx virtqueue
   - Extract Ethernet frame bytes
   - Call `slirp_context.input(&frame)`
   - Mark descriptor as used
-- [ ] 2.2.4 Implement rx path (host → guest):
+- [x] 2.2.4 Implement rx path (host → guest):
   - After `slirp.pollfds_poll()`, drain rx frames from `SlirpHandler`
   - For each frame, write to rx virtqueue descriptor chain
   - Signal guest via eventfd
-- [ ] 2.2.5 Register libslirp fds in the vhost-user epoll loop.
+- [x] 2.2.5 Register libslirp fds in the vhost-user epoll loop.
   libslirp's `register_poll_fd()` / `unregister_poll_fd()` callbacks add/remove
   host TCP/UDP socket fds. These must be registered with the `VhostUserDaemon`'s
   epoll alongside the virtqueue kick eventfds, so a single `epoll_wait()` drives
@@ -169,19 +170,19 @@ Design references: [Data Flow](./DESIGN.md), [Threading Model](./DESIGN.md), [FR
     slirp thread that polls libslirp fds separately and hands rx work to the
     backend thread over an internal channel/eventfd. Document the chosen shape
     before implementation continues.
-- [ ] 2.2.6 Wire the slirp event loop into `handle_event()`:
+- [x] 2.2.6 Wire the slirp event loop into `handle_event()`:
   - On tx virtqueue kick: process all pending tx descriptors → slirp.input()
   - On timer/poll: run slirp poll cycle → drain rx → inject to rx virtqueue
-- [ ] 2.2.7 Add test: mock virtqueue with a tx descriptor containing an ARP
+- [x] 2.2.7 Add test: mock virtqueue with a tx descriptor containing an ARP
   request, verify slirp processes it.
-- [ ] 2.2.8 Add test: inject an rx frame via slirp, verify it appears in the
+- [x] 2.2.8 Add test: inject an rx frame via slirp, verify it appears in the
   rx virtqueue.
 
 ### 2.3 Public API (`src/lib.rs`)
 
 Design references: [API Design](./DESIGN.md), [FR-6](./DESIGN.md)
 
-- [ ] 2.3.1 Implement `VnetBackend` builder:
+- [x] 2.3.1 Implement `VnetBackend` builder:
   Design ref: [API Design](./DESIGN.md), [FR-7](./DESIGN.md)
   ```rust
   pub struct VnetBackendBuilder {
@@ -193,25 +194,25 @@ Design references: [API Design](./DESIGN.md), [FR-6](./DESIGN.md)
   ```
   Builder methods include `.host_forward_tcp(host_port, guest_port)` which
   appends a `PortForward { bind_addr: 127.0.0.1, host_port, guest_port }`.
-- [ ] 2.3.2 Define and implement `PortForward` exactly as in DESIGN, including
+- [x] 2.3.2 Define and implement `PortForward` exactly as in DESIGN, including
   localhost-default binding semantics for the optional hostfwd helper.
-- [ ] 2.3.3 Implement host `/etc/resolv.conf` parsing for the default DNS
+- [x] 2.3.3 Implement host `/etc/resolv.conf` parsing for the default DNS
   resolver path, with explicit fallback/error behavior when no usable nameserver
   is present.
-- [ ] 2.3.4 Define `VnetError` and map builder/start/runtime failures into it
+- [x] 2.3.4 Define `VnetError` and map builder/start/runtime failures into it
   (`SocketPath`, `SocketBind`, `SocketCleanup`, `SlirpInit`, `BackendInit`,
   `DnsResolver`, `PortForwardBind`).
-- [ ] 2.3.5 Implement `VnetBackend::start()` as the primary API from DESIGN.
+- [x] 2.3.5 Implement `VnetBackend::start()` as the primary API from DESIGN.
   It should spawn the background thread, bind the socket, and return a
   `VnetHandle` for deterministic teardown.
-- [ ] 2.3.6 Implement `VnetHandle` with `shutdown()` and `Drop` semantics from
+- [x] 2.3.6 Implement `VnetHandle` with `shutdown()` and `Drop` semantics from
   DESIGN. `shutdown()` is the explicit cleanup path; `Drop` remains best-effort.
-- [ ] 2.3.7 Keep `VnetBackend::serve()` as the lower-level/blocking primitive:
+- [x] 2.3.7 Keep `VnetBackend::serve()` as the lower-level/blocking primitive:
   - Create `VhostUserDaemon` with the backend
   - Bind Unix socket at `socket_path`
   - Run daemon event loop (blocks until client disconnects)
-- [ ] 2.3.8 Add test: start backend on a socket, verify socket file is created.
-- [ ] 2.3.9 Add shutdown test: verify backend exits cleanly when socket is
+- [x] 2.3.8 Add test: start backend on a socket, verify socket file is created.
+- [x] 2.3.9 Add shutdown test: verify backend exits cleanly when socket is
   closed or `VnetHandle::shutdown()` is called.
 
 ---

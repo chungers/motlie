@@ -90,7 +90,7 @@ impl Handler for SlirpHandler {
             return Ok(0);
         }
         self.rx_queue.push(buf.to_vec());
-        log::debug!("send_packet: queued {} byte frame ({} pending)", len, self.rx_queue.len());
+        tracing::debug!("send_packet: queued {} byte frame ({} pending)", len, self.rx_queue.len());
         Ok(len)
     }
 
@@ -103,7 +103,7 @@ impl Handler for SlirpHandler {
     }
 
     fn guest_error(&mut self, msg: &str) {
-        log::warn!("libslirp guest error: {}", msg);
+        tracing::warn!("libslirp guest error: {}", msg);
     }
 
     fn notify(&mut self) {
@@ -209,7 +209,7 @@ impl SlirpInstance {
             handler.clone(),
         );
 
-        log::info!(
+        tracing::info!(
             "slirp context created: host={}, guest={}, dns={}",
             config.host_ipv4,
             config.guest_ipv4,
@@ -233,6 +233,17 @@ impl SlirpInstance {
     ///
     /// Returns the frames libslirp wants sent to the guest (host→guest).
     pub fn run_once(&self) -> Vec<Vec<u8>> {
+        self.run_once_inner(None)
+    }
+
+    /// Like `run_once()`, but caps the poll timeout to `max_timeout_ms`.
+    /// Used by the slirp thread to ensure it checks for tx frames and
+    /// shutdown signals reasonably often.
+    pub fn run_once_with_max_timeout(&self, max_timeout_ms: i32) -> Vec<Vec<u8>> {
+        self.run_once_inner(Some(max_timeout_ms))
+    }
+
+    fn run_once_inner(&self, max_timeout: Option<i32>) -> Vec<Vec<u8>> {
         // Phase 1: collect fds slirp wants polled
         let mut timeout: u32 = u32::MAX;
         let mut poll_entries: Vec<(RawFd, PollEvents)> = Vec::new();
@@ -253,20 +264,37 @@ impl SlirpInstance {
             })
             .collect();
 
-        let timeout_ms = if timeout == u32::MAX { -1 } else { timeout as i32 };
-        if !pollfds.is_empty() || timeout_ms >= 0 {
+        let mut timeout_ms = if timeout == u32::MAX { -1 } else { timeout as i32 };
+        if let Some(max) = max_timeout {
+            if timeout_ms < 0 || timeout_ms > max {
+                timeout_ms = max;
+            }
+        }
+        let poll_error = if !pollfds.is_empty() || timeout_ms >= 0 {
             // Safety: pollfds is a valid slice of libc::pollfd structs.
-            unsafe {
+            let ret = unsafe {
                 libc::poll(
                     pollfds.as_mut_ptr(),
                     pollfds.len() as libc::nfds_t,
                     timeout_ms,
-                );
+                )
+            };
+            if ret < 0 {
+                let err = std::io::Error::last_os_error();
+                // EINTR is expected (signal interrupted poll) — not an error.
+                if err.kind() != std::io::ErrorKind::Interrupted {
+                    tracing::warn!("poll() failed: {}", err);
+                }
+                true
+            } else {
+                false
             }
-        }
+        } else {
+            false
+        };
 
         // Phase 3: report poll results to slirp
-        self.ctx.pollfds_poll(false, |idx| {
+        self.ctx.pollfds_poll(poll_error, |idx| {
             let revents = pollfds[idx as usize].revents;
             poll_flags_to_poll_events(revents)
         });
@@ -357,13 +385,13 @@ impl SlirpInstance {
             )
         };
         if ret < 0 {
-            log::warn!(
+            tracing::warn!(
                 "slirp_add_hostfwd failed: host={}:{} -> guest={}:{}",
                 host_addr, host_port, guest_addr, guest_port,
             );
             Err(host_port)
         } else {
-            log::info!(
+            tracing::info!(
                 "hostfwd: {}:{} -> {}:{} (tcp)",
                 host_addr, host_port, guest_addr, guest_port,
             );
@@ -384,7 +412,7 @@ impl SlirpInstance {
 
 impl Drop for SlirpInstance {
     fn drop(&mut self) {
-        log::info!("slirp context dropped");
+        tracing::info!("slirp context dropped");
     }
 }
 
@@ -445,7 +473,7 @@ pub fn parse_host_dns() -> Ipv4Addr {
     let content = match std::fs::read_to_string("/etc/resolv.conf") {
         Ok(c) => c,
         Err(e) => {
-            log::warn!("failed to read /etc/resolv.conf: {}, using default DNS {}", e, default_dns);
+            tracing::warn!("failed to read /etc/resolv.conf: {}, using default DNS {}", e, default_dns);
             return default_dns;
         }
     };
@@ -461,7 +489,7 @@ pub fn parse_host_dns() -> Ipv4Addr {
         }
     }
 
-    log::warn!("no IPv4 nameserver found in /etc/resolv.conf, using default DNS {}", default_dns);
+    tracing::warn!("no IPv4 nameserver found in /etc/resolv.conf, using default DNS {}", default_dns);
     default_dns
 }
 
@@ -474,7 +502,7 @@ mod tests {
     use super::*;
 
     fn init_logging() {
-        let _ = env_logger::builder().is_test(true).try_init();
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     }
 
     #[test]
