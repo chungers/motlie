@@ -142,8 +142,9 @@ impl VnetVhostBackend {
             let desc_idx = desc_chain.head_index();
             let mut frame = Vec::new();
             let mut first = true;
+            let mut read_failed = false;
 
-            while let Some(desc) = desc_chain.next() {
+            'tx_desc: while let Some(desc) = desc_chain.next() {
                 let addr = desc.addr();
                 let len = desc.len() as usize;
 
@@ -157,18 +158,27 @@ impl VnetVhostBackend {
                     let data_addr = addr.unchecked_add(VIRTIO_NET_HDR_SIZE as u64);
                     match mem.read(&mut buf, data_addr) {
                         Ok(_) => frame.extend_from_slice(&buf),
-                        Err(e) => tracing::warn!("tx: guest memory read failed at {}: {}", data_addr.raw_value(), e),
+                        Err(e) => {
+                            tracing::warn!("tx: guest memory read failed at {}: {}", data_addr.raw_value(), e);
+                            read_failed = true;
+                            break 'tx_desc;
+                        }
                     }
                 } else {
                     let mut buf = vec![0u8; len];
                     match mem.read(&mut buf, addr) {
                         Ok(_) => frame.extend_from_slice(&buf),
-                        Err(e) => tracing::warn!("tx: guest memory read failed at {}: {}", addr.raw_value(), e),
+                        Err(e) => {
+                            tracing::warn!("tx: guest memory read failed at {}: {}", addr.raw_value(), e);
+                            read_failed = true;
+                            break 'tx_desc;
+                        }
                     }
                 }
             }
 
-            if !frame.is_empty() {
+            // Only send complete frames — drop truncated ones on read failure.
+            if !read_failed && !frame.is_empty() {
                 if let Err(e) = tx_lock.send(frame) {
                     tracing::warn!("tx channel send failed: {}", e);
                 }
@@ -559,9 +569,19 @@ impl VnetBackend {
         }
 
         // Helper: shut down the slirp thread on any failure after slirp readiness.
-        let stop_slirp = |shutdown: &Arc<AtomicBool>, slirp_handle: JoinHandle<()>| {
+        // Returns the slirp panic if one occurred — caller can decide whether to
+        // prefer the slirp panic or the original error.
+        let stop_slirp = |shutdown: &Arc<AtomicBool>,
+                          slirp_handle: JoinHandle<()>|
+         -> Option<VnetError> {
             shutdown.store(true, Ordering::Relaxed);
-            let _ = slirp_handle.join();
+            match slirp_handle.join() {
+                Ok(()) => None,
+                Err(panic_payload) => Some(VnetError::BackendInit(format!(
+                    "slirp thread panicked: {:?}",
+                    panic_payload
+                ))),
+            }
         };
 
         // Bind socket on calling thread — socket is live when start() returns.
@@ -571,7 +591,10 @@ impl VnetBackend {
         let mut listener = match Listener::new(&socket_path, true) {
             Ok(l) => l,
             Err(e) => {
-                stop_slirp(&shutdown, slirp_handle);
+                // Prefer slirp panic over bind error if both occurred.
+                if let Some(slirp_err) = stop_slirp(&shutdown, slirp_handle) {
+                    return Err(slirp_err);
+                }
                 return Err(VnetError::SocketBind(std::io::Error::other(format!("{}", e))));
             }
         };
@@ -598,7 +621,10 @@ impl VnetBackend {
             }) {
             Ok(handle) => handle,
             Err(e) => {
-                stop_slirp(&shutdown, slirp_handle);
+                if let Some(slirp_err) = stop_slirp(&shutdown, slirp_handle) {
+                    let _ = std::fs::remove_file(&socket_path);
+                    return Err(slirp_err);
+                }
                 let _ = std::fs::remove_file(&socket_path);
                 return Err(VnetError::BackendInit(format!("daemon thread: {}", e)));
             }
@@ -645,7 +671,9 @@ impl VnetHandle {
                 if let Some(dh) = self.daemon_thread.take() {
                     let _ = dh.join();
                 }
-                let _ = std::fs::remove_file(&self.socket_path);
+                if let Err(e) = std::fs::remove_file(&self.socket_path) {
+                    tracing::warn!("socket cleanup failed during slirp panic recovery: {}", e);
+                }
                 return Err(VnetError::BackendInit(format!(
                     "slirp thread panicked: {:?}", panic_payload
                 )));
@@ -657,11 +685,15 @@ impl VnetHandle {
             match handle.join() {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => {
-                    let _ = std::fs::remove_file(&self.socket_path);
+                    if let Err(ce) = std::fs::remove_file(&self.socket_path) {
+                        tracing::warn!("socket cleanup failed during daemon error recovery: {}", ce);
+                    }
                     return Err(e);
                 }
                 Err(panic_payload) => {
-                    let _ = std::fs::remove_file(&self.socket_path);
+                    if let Err(ce) = std::fs::remove_file(&self.socket_path) {
+                        tracing::warn!("socket cleanup failed during daemon panic recovery: {}", ce);
+                    }
                     return Err(VnetError::BackendInit(format!(
                         "daemon thread panicked: {:?}", panic_payload
                     )));
