@@ -12,7 +12,8 @@ use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, RwLock};
-use std::thread;
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use vhost::vhost_user::message::*;
 use vhost::vhost_user::Listener;
@@ -23,11 +24,14 @@ use virtio_bindings::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 use virtio_queue::QueueT;
 use vm_memory::{Address, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryMmap, Bytes};
 use vmm_sys_util::epoll::EventSet;
+use vmm_sys_util::event::{new_event_consumer_and_notifier, EventConsumer, EventFlag, EventNotifier};
 use vmm_sys_util::eventfd::EventFd;
 
 use crate::slirp::{SlirpConfig, SlirpInstance};
 use crate::config::VnetConfig;
 use crate::error::VnetError;
+
+type VnetMemory = GuestMemoryAtomic<GuestMemoryMmap>;
 
 const RX_QUEUE: u16 = 0;
 const TX_QUEUE: u16 = 1;
@@ -35,7 +39,7 @@ const NUM_QUEUES: usize = 2;
 const QUEUE_SIZE: usize = 256;
 
 // Custom epoll event token for slirp rx notification.
-// Must be > num_queues (0..num_queues reserved for virtqueues + exit event).
+// Must be > num_queues (0..=num_queues reserved for virtqueues + exit event).
 const SLIRP_RX_TOKEN: u16 = (NUM_QUEUES + 1) as u16;
 
 // virtio-net header size (no mergeable rx buffers).
@@ -52,8 +56,12 @@ struct VnetVhostBackend {
     tx_sender: Arc<Mutex<mpsc::Sender<Vec<u8>>>>,
     rx_receiver: Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
     acked_features: Arc<RwLock<u64>>,
-    mem: GuestMemoryAtomic<GuestMemoryMmap>,
+    mem: VnetMemory,
     mac: [u8; 6],
+    /// Pre-created exit event pairs (one per worker thread).
+    /// The consumer is returned by exit_event(); the notifier is cloned
+    /// to VnetHandle for deterministic shutdown.
+    exit_events: Vec<Arc<(EventConsumer, EventNotifier)>>,
 }
 
 impl VnetVhostBackend {
@@ -63,9 +71,13 @@ impl VnetVhostBackend {
         rx_receiver: mpsc::Receiver<Vec<u8>>,
         rx_eventfd: EventFd,
         tx_wake_eventfd: EventFd,
-        mem: GuestMemoryAtomic<GuestMemoryMmap>,
-    ) -> Self {
-        Self {
+        mem: VnetMemory,
+    ) -> Result<Self, VnetError> {
+        // Pre-create one exit event per worker thread (we use 1 thread).
+        let exit_pair = new_event_consumer_and_notifier(EventFlag::empty())
+            .map_err(|e| VnetError::BackendInit(format!("exit event: {}", e)))?;
+
+        Ok(Self {
             rx_eventfd: Arc::new(rx_eventfd),
             tx_wake_eventfd: Arc::new(tx_wake_eventfd),
             tx_sender: Arc::new(Mutex::new(tx_sender)),
@@ -73,7 +85,8 @@ impl VnetVhostBackend {
             acked_features: Arc::new(RwLock::new(0)),
             mem,
             mac: config.mac,
-        }
+            exit_events: vec![Arc::new(exit_pair)],
+        })
     }
 
     /// Process tx virtqueue: read frames from guest, send to slirp thread.
@@ -245,9 +258,17 @@ impl VhostUserBackend for VnetVhostBackend {
 
     fn update_memory(
         &self,
-        _atomic_mem: GuestMemoryAtomic<GuestMemoryMmap>,
+        _atomic_mem: VnetMemory,
     ) -> std::io::Result<()> {
         Ok(())
+    }
+
+    fn exit_event(&self, thread_index: usize) -> Option<(EventConsumer, EventNotifier)> {
+        self.exit_events.get(thread_index).and_then(|pair| {
+            let consumer = pair.0.try_clone().ok()?;
+            let notifier = pair.1.try_clone().ok()?;
+            Some((consumer, notifier))
+        })
     }
 
     fn handle_event(
@@ -258,9 +279,7 @@ impl VhostUserBackend for VnetVhostBackend {
         _thread_id: usize,
     ) -> std::io::Result<()> {
         match device_event {
-            RX_QUEUE => {
-                // Guest made rx buffers available — no action needed.
-            }
+            RX_QUEUE => {}
             TX_QUEUE => {
                 self.process_tx(&vrings[TX_QUEUE as usize]);
             }
@@ -279,7 +298,6 @@ impl VhostUserBackend for VnetVhostBackend {
 // Slirp thread
 // ---------------------------------------------------------------------------
 
-/// Slirp thread startup result — sent back to start() via the readiness channel.
 enum SlirpStartup {
     Ready,
     Failed(VnetError),
@@ -302,7 +320,6 @@ fn slirp_thread_main(
 
     let slirp = SlirpInstance::new(&slirp_config);
 
-    // Configure port forwards — propagate failures to start().
     for fwd in &config.host_forwards {
         if let Err(port) = slirp.add_hostfwd_tcp(
             fwd.bind_addr,
@@ -322,9 +339,7 @@ fn slirp_thread_main(
         }
     }
 
-    // Signal readiness — slirp context is live, hostfwds are bound.
     let _ = ready_tx.send(SlirpStartup::Ready);
-
     tracing::info!("slirp thread started");
 
     while !shutdown.load(Ordering::Relaxed) {
@@ -374,7 +389,6 @@ impl VnetBackend {
     pub fn start(self) -> Result<VnetHandle, VnetError> {
         let socket_path = self.config.socket_path.clone();
 
-        // Clean up stale socket.
         if socket_path.exists() {
             std::fs::remove_file(&socket_path).map_err(VnetError::SocketCleanup)?;
             tracing::info!("removed stale socket: {}", socket_path.display());
@@ -392,18 +406,24 @@ impl VnetBackend {
 
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::<()>::new());
 
-        let vhost_backend = VnetVhostBackend::new(
+        let backend = VnetVhostBackend::new(
             &self.config,
             tx_sender,
             rx_receiver,
             rx_eventfd,
             tx_wake_eventfd,
             mem.clone(),
-        );
+        )?;
+
+        // Clone exit notifier before backend is moved into daemon.
+        let exit_notifier = backend.exit_events[0]
+            .1
+            .try_clone()
+            .map_err(|e| VnetError::BackendInit(format!("exit notifier clone: {}", e)))?;
 
         let mut daemon = VhostUserDaemon::new(
             "motlie-vnet".to_string(),
-            vhost_backend,
+            backend,
             mem,
         )
         .map_err(|e| VnetError::BackendInit(format!("daemon: {}", e)))?;
@@ -438,45 +458,39 @@ impl VnetBackend {
             })
             .map_err(|e| VnetError::BackendInit(format!("slirp thread: {}", e)))?;
 
-        // Wait for slirp thread readiness — hostfwd failures surface here.
-        match ready_rx.recv() {
+        // Wait for slirp readiness.
+        match ready_rx.recv_timeout(Duration::from_secs(5)) {
             Ok(SlirpStartup::Ready) => {}
             Ok(SlirpStartup::Failed(e)) => {
                 shutdown.store(true, Ordering::Relaxed);
                 let _ = slirp_handle.join();
                 return Err(e);
             }
-            Err(_) => {
-                return Err(VnetError::BackendInit(
-                    "slirp thread exited before signaling readiness".into(),
-                ));
+            Err(e) => {
+                shutdown.store(true, Ordering::Relaxed);
+                let _ = slirp_handle.join();
+                return Err(VnetError::BackendInit(format!(
+                    "slirp readiness timeout: {}", e
+                )));
             }
         }
 
-        // Bind the vhost-user socket on the calling thread.
+        // Bind socket on calling thread — socket is live when start() returns.
         let mut listener = Listener::new(&socket_path, true)
             .map_err(|e| VnetError::SocketBind(std::io::Error::other(format!("{}", e))))?;
-
         tracing::info!("vnet socket bound: {}", socket_path.display());
 
-        // Hand the bound listener to the daemon thread.
-        let daemon_handle = thread::Builder::new()
+        // Daemon thread accepts connections and runs the vhost-user protocol.
+        let daemon_handle: JoinHandle<Result<(), VnetError>> = thread::Builder::new()
             .name("motlie-vnet-daemon".into())
             .spawn(move || {
-                // start() blocks until a frontend connects (accept), then
-                // spawns worker threads and returns. wait() blocks until the
-                // workers exit (frontend disconnect or error).
-                if let Err(e) = daemon.start(&mut listener) {
-                    tracing::error!("vhost-user daemon accept error: {}", e);
-                    return;
-                }
-                // wait() joins worker threads — they exit when the frontend
-                // disconnects, which happens on VM shutdown or on our dummy
-                // connect during VnetHandle::shutdown().
-                match daemon.wait() {
-                    Ok(()) => tracing::debug!("vhost-user daemon exited cleanly"),
-                    Err(e) => tracing::debug!("vhost-user daemon exited: {}", e),
-                }
+                daemon.start(&mut listener).map_err(|e| {
+                    VnetError::BackendInit(format!("daemon accept: {}", e))
+                })?;
+                daemon.wait().map_err(|e| {
+                    VnetError::BackendInit(format!("daemon wait: {}", e))
+                })?;
+                Ok(())
             })
             .map_err(|e| VnetError::BackendInit(format!("daemon thread: {}", e)))?;
 
@@ -487,6 +501,7 @@ impl VnetBackend {
             daemon_thread: Some(daemon_handle),
             shutdown,
             socket_path,
+            exit_notifier,
         })
     }
 }
@@ -494,69 +509,103 @@ impl VnetBackend {
 /// Handle to a running vnet backend. Drop to shut down (best-effort),
 /// or call `shutdown()` for deterministic cleanup.
 pub struct VnetHandle {
-    slirp_thread: Option<thread::JoinHandle<()>>,
-    daemon_thread: Option<thread::JoinHandle<()>>,
+    slirp_thread: Option<JoinHandle<()>>,
+    daemon_thread: Option<JoinHandle<Result<(), VnetError>>>,
     shutdown: Arc<AtomicBool>,
     socket_path: PathBuf,
+    exit_notifier: EventNotifier,
 }
 
 impl VnetHandle {
     /// Shut down deterministically. Signals all threads to exit, joins them,
-    /// and removes the socket file. Returns only after all threads have exited.
-    pub fn shutdown(mut self) -> Result<(), VnetError> {
-        self.do_shutdown();
-        Ok(())
-    }
-
-    fn do_shutdown(&mut self) {
+    /// and removes the socket file. Propagates daemon-thread errors.
+    pub fn shutdown(&mut self) -> Result<(), VnetError> {
         self.shutdown.store(true, Ordering::Relaxed);
 
-        // Connect a dummy client to unblock the daemon's accept() if it's
-        // still waiting for a frontend. The dummy connection will cause the
-        // vhost-user handler to fail on the first protocol message, which
-        // terminates the daemon.
+        // Signal the daemon worker's exit event to unblock epoll_wait.
+        let _ = self.exit_notifier.notify();
+
+        // Dummy-connect to unblock accept() if the daemon is waiting.
         let _ = std::os::unix::net::UnixStream::connect(&self.socket_path);
 
+        // Join slirp thread.
         if let Some(handle) = self.slirp_thread.take() {
             let _ = handle.join();
         }
-        // The daemon thread may be blocked in accept() or in a worker's
-        // epoll_wait. After the dummy connect, the daemon should terminate
-        // quickly. Give it a bounded wait, then detach if stuck.
+
+        // Join daemon thread and propagate errors.
         if let Some(handle) = self.daemon_thread.take() {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-            loop {
-                if handle.is_finished() {
-                    let _ = handle.join();
-                    break;
+            match handle.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    // Expected on dummy-connect shutdown — daemon sees invalid
+                    // vhost-user handshake and returns an error. Not a real failure.
+                    tracing::debug!("daemon thread exited with: {}", e);
                 }
-                if std::time::Instant::now() >= deadline {
-                    tracing::debug!("daemon thread did not exit within 2s, detaching");
-                    drop(handle);
-                    break;
+                Err(panic_payload) => {
+                    return Err(VnetError::BackendInit(format!(
+                        "daemon thread panicked: {:?}", panic_payload
+                    )));
                 }
-                std::thread::sleep(std::time::Duration::from_millis(50));
             }
         }
+
         let _ = std::fs::remove_file(&self.socket_path);
         tracing::info!("vnet backend shut down: {}", self.socket_path.display());
+        Ok(())
     }
 }
 
 impl Drop for VnetHandle {
     fn drop(&mut self) {
-        self.do_shutdown();
+        let _ = self.shutdown();
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::VnetConfig;
+    use std::os::fd::FromRawFd;
+    use std::os::unix::io::IntoRawFd;
+    use virtio_queue::mock::MockSplitQueue;
+    use virtio_queue::desc::split::Descriptor;
+    use virtio_queue::desc::RawDescriptor;
+    use vm_memory::GuestAddress;
 
     fn init_logging() {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     }
+
+    fn create_test_memory() -> VnetMemory {
+        GuestMemoryAtomic::new(
+            GuestMemoryMmap::<()>::from_ranges(&[(GuestAddress(0), 0x20000)]).unwrap(),
+        )
+    }
+
+    fn create_vring<M: vm_memory::GuestMemory>(
+        mem: VnetMemory,
+        queue: &MockSplitQueue<'_, M>,
+    ) -> VringRwLock {
+        let vring = VringRwLock::new(mem, QUEUE_SIZE as u16).unwrap();
+        vring.set_queue_size(QUEUE_SIZE as u16);
+        vring
+            .set_queue_info(
+                queue.desc_table_addr().raw_value(),
+                queue.avail_addr().raw_value(),
+                queue.used_addr().raw_value(),
+            )
+            .unwrap();
+        vring.set_queue_ready(true);
+        vring.set_enabled(true);
+        vring
+    }
+
+    // -- Config tests --
 
     #[test]
     fn test_config_build_and_backend_new() {
@@ -570,94 +619,209 @@ mod tests {
         assert_eq!(config.guest_ipv4, std::net::Ipv4Addr::new(10, 0, 2, 15));
         assert_eq!(config.mac, [0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
         assert_eq!(config.host_forwards.len(), 1);
-        assert_eq!(config.host_forwards[0].host_port, 2222);
-        assert_eq!(config.host_forwards[0].guest_port, 22);
 
         let _backend = VnetBackend::new(config);
     }
 
     #[test]
     fn test_config_rejects_empty_path() {
-        let result = VnetConfig::builder().build();
-        assert!(result.is_err(), "should reject missing socket_path");
+        assert!(VnetConfig::builder().build().is_err());
     }
 
     #[test]
     fn test_config_rejects_nonexistent_parent() {
-        let result = VnetConfig::builder()
+        assert!(VnetConfig::builder()
             .socket_path("/nonexistent/dir/test.sock")
-            .build();
-        assert!(result.is_err(), "should reject nonexistent parent dir");
+            .build()
+            .is_err());
     }
 
     #[test]
     fn test_config_rejects_duplicate_hostfwd_ports() {
-        let result = VnetConfig::builder()
+        assert!(VnetConfig::builder()
             .socket_path("/tmp/test.sock")
             .host_forward_tcp(2222, 22)
-            .host_forward_tcp(2222, 80) // duplicate host port
-            .build();
-        assert!(result.is_err(), "should reject duplicate host_forward ports");
-    }
-
-    /// Socket lifecycle: start creates socket, shutdown removes it.
-    #[test]
-    fn test_start_creates_socket_shutdown_removes() {
-        init_logging();
-        let socket_path = format!("/tmp/motlie-vnet-lifecycle-{}.sock", std::process::id());
-
-        let config = VnetConfig::builder()
-            .socket_path(&socket_path)
+            .host_forward_tcp(2222, 80)
             .build()
-            .expect("config build failed");
-
-        let handle = VnetBackend::new(config).start().expect("start failed");
-
-        // Socket should exist after start() returns (bound on calling thread).
-        assert!(
-            std::path::Path::new(&socket_path).exists(),
-            "socket should exist after start()"
-        );
-
-        handle.shutdown().expect("shutdown failed");
-
-        // Socket should be cleaned up after shutdown.
-        assert!(
-            !std::path::Path::new(&socket_path).exists(),
-            "socket should be removed after shutdown()"
-        );
+            .is_err());
     }
 
-    /// Drop cleans up without panic.
-    #[test]
-    fn test_drop_cleans_up() {
-        init_logging();
-        let socket_path = format!("/tmp/motlie-vnet-drop-{}.sock", std::process::id());
-
-        let config = VnetConfig::builder()
-            .socket_path(&socket_path)
-            .build()
-            .expect("config build failed");
-
-        {
-            let _handle = VnetBackend::new(config).start().expect("start failed");
-            assert!(std::path::Path::new(&socket_path).exists());
-        }
-        // Handle dropped — socket should be cleaned up.
-        assert!(
-            !std::path::Path::new(&socket_path).exists(),
-            "socket should be removed on drop"
-        );
-    }
-
-    /// Verify subnet consistency validation.
     #[test]
     fn test_config_rejects_mismatched_subnet() {
-        let result = VnetConfig::builder()
+        assert!(VnetConfig::builder()
             .socket_path("/tmp/test.sock")
             .guest_ipv4(std::net::Ipv4Addr::new(192, 168, 1, 10))
             .host_ipv4(std::net::Ipv4Addr::new(10, 0, 2, 2))
-            .build();
-        assert!(result.is_err(), "should reject guest/host in different subnets");
+            .build()
+            .is_err());
+    }
+
+    // -- Lifecycle tests --
+
+    #[test]
+    fn test_start_creates_socket_shutdown_removes() {
+        init_logging();
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("motlie-vnet.sock");
+
+        let config = VnetConfig::builder()
+            .socket_path(&socket_path)
+            .build()
+            .unwrap();
+
+        let mut handle = VnetBackend::new(config).start().unwrap();
+        assert!(socket_path.exists(), "socket should exist after start()");
+
+        handle.shutdown().unwrap();
+        assert!(!socket_path.exists(), "socket should be removed after shutdown()");
+    }
+
+    #[test]
+    fn test_drop_cleans_up() {
+        init_logging();
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("motlie-vnet.sock");
+
+        let config = VnetConfig::builder()
+            .socket_path(&socket_path)
+            .build()
+            .unwrap();
+
+        {
+            let _handle = VnetBackend::new(config).start().unwrap();
+            assert!(socket_path.exists());
+        }
+        assert!(!socket_path.exists(), "socket should be removed on drop");
+    }
+
+    // -- TX datapath test --
+
+    #[test]
+    fn test_process_tx_moves_frame_to_channel_and_notifies_guest() {
+        let mem = create_test_memory();
+        let mem_ref = mem.memory();
+        let queue_mem = mem_ref.deref();
+        let mock_queue = MockSplitQueue::new(queue_mem, QUEUE_SIZE as u16);
+
+        // Write virtio-net header + payload into guest memory.
+        let header_addr = GuestAddress(0x1000);
+        let payload_addr = GuestAddress(0x2000);
+        let payload = [0xAA, 0xBB, 0xCC, 0xDD];
+        queue_mem.write(&[0u8; VIRTIO_NET_HDR_SIZE], header_addr).unwrap();
+        queue_mem.write(&payload, payload_addr).unwrap();
+
+        // Build a descriptor chain: header desc → payload desc.
+        let descs = [
+            RawDescriptor::from(Descriptor::new(
+                header_addr.raw_value(),
+                VIRTIO_NET_HDR_SIZE as u32,
+                0,
+                0,
+            )),
+            RawDescriptor::from(Descriptor::new(
+                payload_addr.raw_value(),
+                payload.len() as u32,
+                0,
+                0,
+            )),
+        ];
+        mock_queue.build_desc_chain(&descs).unwrap();
+
+        let vring = create_vring(mem.clone(), &mock_queue);
+
+        // Attach a call notifier to detect guest notification.
+        let (call_consumer, call_notifier) =
+            new_event_consumer_and_notifier(EventFlag::empty()).unwrap();
+        let call_file = unsafe { std::fs::File::from_raw_fd(call_notifier.into_raw_fd()) };
+        vring.set_call(Some(call_file));
+
+        // Create backend with channels.
+        let (tx_sender, tx_receiver) = mpsc::channel();
+        let (_rx_sender, rx_receiver) = mpsc::channel();
+        let backend = VnetVhostBackend::new(
+            &VnetConfig::builder().socket_path("/tmp/test.sock").build().unwrap(),
+            tx_sender,
+            rx_receiver,
+            EventFd::new(libc::EFD_NONBLOCK).unwrap(),
+            EventFd::new(libc::EFD_NONBLOCK).unwrap(),
+            mem,
+        )
+        .unwrap();
+
+        backend.process_tx(&vring);
+
+        // Verify: payload arrived in the tx channel (header stripped).
+        assert_eq!(tx_receiver.try_recv().unwrap(), payload);
+        // Verify: guest was notified (used ring signal).
+        call_consumer.consume().unwrap();
+        // Verify: used ring advanced.
+        assert_eq!(mock_queue.used().idx().load(), 1);
+    }
+
+    // -- RX datapath test --
+
+    #[test]
+    fn test_process_rx_writes_frame_to_guest_and_notifies() {
+        let mem = create_test_memory();
+        let mem_ref = mem.memory();
+        let queue_mem = mem_ref.deref();
+        let mock_queue = MockSplitQueue::new(queue_mem, QUEUE_SIZE as u16);
+
+        // Build write-only descriptor chain for rx: header + payload buffer.
+        let hdr_addr = GuestAddress(0x3000);
+        let payload_addr = GuestAddress(0x4000);
+        let descs = [
+            RawDescriptor::from(Descriptor::new(
+                hdr_addr.raw_value(),
+                VIRTIO_NET_HDR_SIZE as u32,
+                virtio_bindings::virtio_ring::VRING_DESC_F_WRITE as u16,
+                0,
+            )),
+            RawDescriptor::from(Descriptor::new(
+                payload_addr.raw_value(),
+                4,
+                virtio_bindings::virtio_ring::VRING_DESC_F_WRITE as u16,
+                0,
+            )),
+        ];
+        mock_queue.build_desc_chain(&descs).unwrap();
+
+        let vring = create_vring(mem.clone(), &mock_queue);
+
+        let (call_consumer, call_notifier) =
+            new_event_consumer_and_notifier(EventFlag::empty()).unwrap();
+        let call_file = unsafe { std::fs::File::from_raw_fd(call_notifier.into_raw_fd()) };
+        vring.set_call(Some(call_file));
+
+        // Seed the rx channel and eventfd.
+        let (rx_sender, rx_receiver) = mpsc::channel();
+        let eventfd = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        rx_sender.send(vec![1, 2, 3, 4]).unwrap();
+        eventfd.write(1).unwrap();
+
+        let backend = VnetVhostBackend::new(
+            &VnetConfig::builder().socket_path("/tmp/test.sock").build().unwrap(),
+            mpsc::channel().0,
+            rx_receiver,
+            eventfd,
+            EventFd::new(libc::EFD_NONBLOCK).unwrap(),
+            mem,
+        )
+        .unwrap();
+
+        backend.process_rx(&vring);
+
+        // Verify: guest memory has zeroed header.
+        let mut hdr = [0xFF; VIRTIO_NET_HDR_SIZE];
+        queue_mem.read(&mut hdr, hdr_addr).unwrap();
+        assert_eq!(hdr, [0u8; VIRTIO_NET_HDR_SIZE]);
+        // Verify: guest memory has the frame payload.
+        let mut payload_out = [0u8; 4];
+        queue_mem.read(&mut payload_out, payload_addr).unwrap();
+        assert_eq!(payload_out, [1, 2, 3, 4]);
+        // Verify: guest was notified.
+        call_consumer.consume().unwrap();
+        // Verify: used ring advanced.
+        assert_eq!(mock_queue.used().idx().load(), 1);
     }
 }

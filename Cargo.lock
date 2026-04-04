@@ -2893,6 +2893,7 @@ dependencies = [
  "libc",
  "libslirp",
  "libslirp-sys",
+ "tempfile",
  "thiserror 1.0.69",
  "tracing",
  "tracing-subscriber",
