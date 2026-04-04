@@ -551,26 +551,8 @@ impl VnetBackend {
             })
             .map_err(|e| VnetError::BackendInit(format!("slirp thread: {}", e)))?;
 
-        // Wait for slirp readiness.
-        match ready_rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(SlirpStartup::Ready) => {}
-            Ok(SlirpStartup::Failed(e)) => {
-                shutdown.store(true, Ordering::Relaxed);
-                let _ = slirp_handle.join();
-                return Err(e);
-            }
-            Err(e) => {
-                shutdown.store(true, Ordering::Relaxed);
-                let _ = slirp_handle.join();
-                return Err(VnetError::BackendInit(format!(
-                    "slirp readiness timeout: {}", e
-                )));
-            }
-        }
-
-        // Helper: shut down the slirp thread on any failure after slirp readiness.
-        // Returns the slirp panic if one occurred — caller can decide whether to
-        // prefer the slirp panic or the original error.
+        // Helper: shut down the slirp thread and return its panic if one occurred.
+        // Used in both pre-readiness and post-readiness failure paths.
         let stop_slirp = |shutdown: &Arc<AtomicBool>,
                           slirp_handle: JoinHandle<()>|
          -> Option<VnetError> {
@@ -583,6 +565,26 @@ impl VnetBackend {
                 ))),
             }
         };
+
+        // Wait for slirp readiness. Prefer slirp panic over readiness error
+        // if both occurred.
+        match ready_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(SlirpStartup::Ready) => {}
+            Ok(SlirpStartup::Failed(e)) => {
+                if let Some(panic_err) = stop_slirp(&shutdown, slirp_handle) {
+                    return Err(panic_err);
+                }
+                return Err(e);
+            }
+            Err(e) => {
+                if let Some(panic_err) = stop_slirp(&shutdown, slirp_handle) {
+                    return Err(panic_err);
+                }
+                return Err(VnetError::BackendInit(format!(
+                    "slirp readiness timeout: {}", e
+                )));
+            }
+        }
 
         // Bind socket on calling thread — socket is live when start() returns.
         // Listener::new(path, true) does its own unlink-before-bind. If it fails,
@@ -621,12 +623,15 @@ impl VnetBackend {
             }) {
             Ok(handle) => handle,
             Err(e) => {
-                if let Some(slirp_err) = stop_slirp(&shutdown, slirp_handle) {
-                    let _ = std::fs::remove_file(&socket_path);
-                    return Err(slirp_err);
+                let primary_err = if let Some(slirp_err) = stop_slirp(&shutdown, slirp_handle) {
+                    slirp_err
+                } else {
+                    VnetError::BackendInit(format!("daemon thread: {}", e))
+                };
+                if let Err(ce) = std::fs::remove_file(&socket_path) {
+                    tracing::warn!("socket cleanup failed during daemon spawn recovery: {}", ce);
                 }
-                let _ = std::fs::remove_file(&socket_path);
-                return Err(VnetError::BackendInit(format!("daemon thread: {}", e)));
+                return Err(primary_err);
             }
         };
 
@@ -976,6 +981,79 @@ mod tests {
         // Verify: guest was notified.
         call_consumer.consume().unwrap();
         // Verify: used ring advanced.
+        assert_eq!(mock_queue.used().idx().load(), 1);
+    }
+
+    // -- TX read-failure regression test --
+
+    /// Verify that a guest memory read failure drops the frame rather than
+    /// sending a truncated packet to the slirp channel.
+    #[test]
+    fn test_process_tx_drops_frame_on_read_failure() {
+        // Guest memory is only 0x20000 bytes (128KB).
+        let mem = create_test_memory();
+        let mem_ref = mem.memory();
+        let queue_mem = mem_ref.deref();
+        let mock_queue = MockSplitQueue::new(queue_mem, QUEUE_SIZE as u16);
+
+        // First descriptor: valid header at a good address.
+        let header_addr = GuestAddress(0x1000);
+        queue_mem.write(&[0u8; VIRTIO_NET_HDR_SIZE], header_addr).unwrap();
+
+        // Second descriptor: payload at an address PAST the end of guest memory.
+        // mem.read() will fail on this address → frame should be dropped.
+        let bad_addr = GuestAddress(0x30000); // beyond 0x20000
+
+        let descs = [
+            RawDescriptor::from(Descriptor::new(
+                header_addr.raw_value(),
+                (VIRTIO_NET_HDR_SIZE + 4) as u32, // header + some payload
+                0,
+                0,
+            )),
+            RawDescriptor::from(Descriptor::new(
+                bad_addr.raw_value(),
+                64,
+                0,
+                0,
+            )),
+        ];
+        mock_queue.build_desc_chain(&descs).unwrap();
+
+        let vring = create_vring(mem.clone(), &mock_queue);
+
+        let (tx_sender, tx_receiver) = mpsc::channel();
+        let (_rx_sender, rx_receiver) = mpsc::channel();
+        let (backend, _exit_notifier) = VnetVhostBackend::new(
+            &VnetConfig::builder().socket_path("/tmp/test.sock").build().unwrap(),
+            tx_sender,
+            rx_receiver,
+            EventFd::new(libc::EFD_NONBLOCK).unwrap(),
+            EventFd::new(libc::EFD_NONBLOCK).unwrap(),
+            mem,
+        )
+        .unwrap();
+
+        backend.process_tx(&vring).unwrap();
+
+        // Frame should NOT have been sent — the read failure on the second
+        // descriptor should have dropped the entire frame.
+        // Note: the first descriptor includes header + 4 payload bytes in a
+        // single buffer. The read of the first descriptor succeeds (valid addr),
+        // but the second descriptor's read fails. Since we break on first failure,
+        // the partial frame from the first descriptor is accumulated but the
+        // read_failed flag prevents it from being sent.
+        //
+        // Actually, the first descriptor reads successfully (4 payload bytes
+        // after header), then the second descriptor at bad_addr fails. The
+        // read_failed flag is set and the frame is dropped.
+        assert!(
+            tx_receiver.try_recv().is_err(),
+            "truncated frame should NOT be sent to slirp channel"
+        );
+
+        // Descriptor should still be returned to the used ring so the guest
+        // doesn't wedge.
         assert_eq!(mock_queue.used().idx().load(), 1);
     }
 }
