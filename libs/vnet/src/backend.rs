@@ -584,18 +584,28 @@ impl VnetBackend {
                 // Set the shutdown flag and spawn a detached cleanup thread
                 // so start() returns within the documented timeout bound.
                 shutdown.store(true, Ordering::Relaxed);
-                thread::Builder::new()
+                let cleanup_failed = match thread::Builder::new()
                     .name("motlie-vnet-slirp-cleanup".into())
                     .spawn(move || {
                         match slirp_handle.join() {
                             Ok(()) => {}
                             Err(p) => tracing::error!("slirp thread panicked during timeout cleanup: {:?}", p),
                         }
-                    })
-                    .ok(); // best-effort — if spawn fails, the slirp thread is leaked
-                return Err(VnetError::BackendInit(format!(
-                    "slirp readiness timeout: {}", e
-                )));
+                    }) {
+                    Ok(_) => None,
+                    Err(spawn_err) => {
+                        tracing::error!(
+                            "failed to spawn slirp cleanup thread — slirp thread leaked: {}",
+                            spawn_err
+                        );
+                        Some(spawn_err)
+                    }
+                };
+                let mut msg = format!("slirp readiness timeout: {}", e);
+                if let Some(ce) = cleanup_failed {
+                    msg.push_str(&format!(" (cleanup thread spawn also failed: {})", ce));
+                }
+                return Err(VnetError::BackendInit(msg));
             }
         }
 
