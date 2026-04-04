@@ -131,15 +131,25 @@ impl VnetConfigBuilder {
             )));
         }
 
-        // Check for duplicate host_forward ports.
-        let mut seen_ports = std::collections::HashSet::new();
+        // Check for duplicate host_forward (bind_addr, host_port) pairs.
+        let mut seen_binds = std::collections::HashSet::new();
         for fwd in &self.host_forwards {
-            if !seen_ports.insert(fwd.host_port) {
+            if !seen_binds.insert((fwd.bind_addr, fwd.host_port)) {
                 return Err(VnetError::SocketPath(format!(
-                    "duplicate host_forward port: {}",
-                    fwd.host_port
+                    "duplicate host_forward bind: {}:{}",
+                    fwd.bind_addr, fwd.host_port
                 )));
             }
+        }
+
+        // Validate guest and host are in the same subnet.
+        let guest_net = u32::from(self.guest_ipv4) & u32::from(self.netmask);
+        let host_net = u32::from(self.host_ipv4) & u32::from(self.netmask);
+        if guest_net != host_net {
+            return Err(VnetError::SocketPath(format!(
+                "guest {} and host {} are not in the same subnet (mask {})",
+                self.guest_ipv4, self.host_ipv4, self.netmask
+            )));
         }
 
         // Resolve DNS at build() time if not explicitly set.
