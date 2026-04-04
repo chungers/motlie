@@ -15,6 +15,7 @@ use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread;
 
 use vhost::vhost_user::message::*;
+use vhost::vhost_user::Listener;
 use vhost_user_backend::{VhostUserBackend, VhostUserDaemon, VringRwLock, VringT};
 use virtio_bindings::virtio_net::*;
 use virtio_bindings::virtio_config::VIRTIO_F_VERSION_1;
@@ -121,7 +122,12 @@ impl VnetVhostBackend {
             let _ = queue.add_used(mem, desc_idx, 0);
         }
 
+        // Notify the guest that tx buffers have been consumed so it can
+        // reclaim them. Mirrors the rx-side signal_used_queue pattern.
         if sent {
+            if let Err(e) = state.signal_used_queue() {
+                log::warn!("failed to signal tx used queue: {}", e);
+            }
             let _ = self.tx_wake_eventfd.write(1);
         }
     }
@@ -407,13 +413,26 @@ impl VnetBackend {
             })
             .map_err(|e| VnetError::BackendInit(format!("slirp thread: {}", e)))?;
 
-        // Start daemon on its own thread.
-        let socket_path_for_daemon = socket_path.clone();
+        // Bind the vhost-user socket on the calling thread so that start()
+        // only returns after the socket is live and ready for CH to connect.
+        // Errors (EADDRINUSE, permission) surface to the caller immediately.
+        let mut listener = Listener::new(&socket_path, true)
+            .map_err(|e| VnetError::SocketBind(std::io::Error::other(format!("{}", e))))?;
+
+        log::info!("vnet socket bound: {}", socket_path.display());
+
+        // Hand the bound listener to the daemon thread which will accept
+        // connections and run the vhost-user protocol handler loop.
         let daemon_handle = thread::Builder::new()
             .name("motlie-vnet-daemon".into())
             .spawn(move || {
-                if let Err(e) = daemon.serve(&socket_path_for_daemon) {
-                    log::error!("vhost-user daemon error: {}", e);
+                if let Err(e) = daemon.start(&mut listener) {
+                    log::error!("vhost-user daemon accept error: {}", e);
+                    return;
+                }
+                if let Err(e) = daemon.wait() {
+                    // Disconnect is expected on clean shutdown.
+                    log::debug!("vhost-user daemon wait: {}", e);
                 }
             })
             .map_err(|e| VnetError::BackendInit(format!("daemon thread: {}", e)))?;
