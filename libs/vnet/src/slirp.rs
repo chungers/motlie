@@ -270,19 +270,31 @@ impl SlirpInstance {
                 timeout_ms = max;
             }
         }
-        if !pollfds.is_empty() || timeout_ms >= 0 {
+        let poll_error = if !pollfds.is_empty() || timeout_ms >= 0 {
             // Safety: pollfds is a valid slice of libc::pollfd structs.
-            unsafe {
+            let ret = unsafe {
                 libc::poll(
                     pollfds.as_mut_ptr(),
                     pollfds.len() as libc::nfds_t,
                     timeout_ms,
-                );
+                )
+            };
+            if ret < 0 {
+                let err = std::io::Error::last_os_error();
+                // EINTR is expected (signal interrupted poll) — not an error.
+                if err.kind() != std::io::ErrorKind::Interrupted {
+                    tracing::warn!("poll() failed: {}", err);
+                }
+                true
+            } else {
+                false
             }
-        }
+        } else {
+            false
+        };
 
         // Phase 3: report poll results to slirp
-        self.ctx.pollfds_poll(false, |idx| {
+        self.ctx.pollfds_poll(poll_error, |idx| {
             let revents = pollfds[idx as usize].revents;
             poll_flags_to_poll_events(revents)
         });

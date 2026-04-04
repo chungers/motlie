@@ -105,6 +105,14 @@ impl VnetVhostBackend {
 
     /// Process tx virtqueue: read frames from guest, send to slirp thread.
     fn process_tx(&self, vring: &VringRwLock) {
+        let tx_lock = match self.tx_sender.lock() {
+            Ok(guard) => guard,
+            Err(e) => {
+                tracing::error!("tx lock poisoned, skipping tx processing: {}", e);
+                return;
+            }
+        };
+
         let mem_guard = self.mem.memory();
         let mem = mem_guard.deref();
 
@@ -129,30 +137,34 @@ impl VnetVhostBackend {
                     let data_len = len - VIRTIO_NET_HDR_SIZE;
                     let mut buf = vec![0u8; data_len];
                     let data_addr = addr.unchecked_add(VIRTIO_NET_HDR_SIZE as u64);
-                    if mem.read(&mut buf, data_addr).is_ok() {
-                        frame.extend_from_slice(&buf);
+                    match mem.read(&mut buf, data_addr) {
+                        Ok(_) => frame.extend_from_slice(&buf),
+                        Err(e) => tracing::warn!("tx: guest memory read failed at {}: {}", data_addr.raw_value(), e),
                     }
                 } else {
                     let mut buf = vec![0u8; len];
-                    if mem.read(&mut buf, addr).is_ok() {
-                        frame.extend_from_slice(&buf);
+                    match mem.read(&mut buf, addr) {
+                        Ok(_) => frame.extend_from_slice(&buf),
+                        Err(e) => tracing::warn!("tx: guest memory read failed at {}: {}", addr.raw_value(), e),
                     }
                 }
             }
 
             if !frame.is_empty() {
-                if let Err(e) = self.tx_sender.lock().expect("tx lock not poisoned").send(frame) {
+                if let Err(e) = tx_lock.send(frame) {
                     tracing::warn!("tx channel send failed: {}", e);
                 }
                 sent = true;
             }
 
-            let _ = queue.add_used(mem, desc_idx, 0);
+            if let Err(e) = queue.add_used(mem, desc_idx, 0) {
+                tracing::warn!("tx: add_used failed for desc {}: {}", desc_idx, e);
+            }
         }
 
         if sent {
             if let Err(e) = state.signal_used_queue() {
-                tracing::warn!("failed to signal tx used queue: {}", e);
+                tracing::warn!("tx: signal_used_queue failed: {}", e);
             }
             let _ = self.tx_wake_eventfd.write(1);
         }
@@ -162,10 +174,17 @@ impl VnetVhostBackend {
     fn process_rx(&self, vring: &VringRwLock) {
         let _ = self.rx_eventfd.read();
 
+        let rx_lock = match self.rx_receiver.lock() {
+            Ok(guard) => guard,
+            Err(e) => {
+                tracing::error!("rx lock poisoned, skipping rx processing: {}", e);
+                return;
+            }
+        };
+
         let mem_guard = self.mem.memory();
         let mem = mem_guard.deref();
 
-        let rx_lock = self.rx_receiver.lock().expect("rx lock not poisoned");
         let mut state = vring.get_mut();
         let queue = state.get_queue_mut();
         let mut injected = false;
@@ -187,7 +206,9 @@ impl VnetVhostBackend {
                         let hdr_remaining = VIRTIO_NET_HDR_SIZE - offset;
                         let hdr_write = hdr_remaining.min(avail);
                         let zeros = vec![0u8; hdr_write];
-                        let _ = mem.write(&zeros, addr);
+                        if let Err(e) = mem.write(&zeros, addr) {
+                            tracing::warn!("rx: header write failed at {}: {}", addr.raw_value(), e);
+                        }
                         offset += hdr_write;
 
                         if hdr_write < avail && offset >= VIRTIO_NET_HDR_SIZE {
@@ -195,10 +216,13 @@ impl VnetVhostBackend {
                             let data_write = (avail - hdr_write)
                                 .min(frame.len().saturating_sub(frame_offset));
                             if data_write > 0 {
-                                let _ = mem.write(
+                                let write_addr = addr.unchecked_add(hdr_write as u64);
+                                if let Err(e) = mem.write(
                                     &frame[frame_offset..frame_offset + data_write],
-                                    addr.unchecked_add(hdr_write as u64),
-                                );
+                                    write_addr,
+                                ) {
+                                    tracing::warn!("rx: payload write failed at {}: {}", write_addr.raw_value(), e);
+                                }
                                 offset += data_write;
                             }
                         }
@@ -206,16 +230,20 @@ impl VnetVhostBackend {
                         let frame_offset = offset - VIRTIO_NET_HDR_SIZE;
                         if frame_offset < frame.len() {
                             let data_write = avail.min(frame.len() - frame_offset);
-                            let _ = mem.write(
+                            if let Err(e) = mem.write(
                                 &frame[frame_offset..frame_offset + data_write],
                                 addr,
-                            );
+                            ) {
+                                tracing::warn!("rx: payload write failed at {}: {}", addr.raw_value(), e);
+                            }
                             offset += data_write;
                         }
                     }
                 }
 
-                let _ = queue.add_used(mem, desc_idx, offset as u32);
+                if let Err(e) = queue.add_used(mem, desc_idx, offset as u32) {
+                    tracing::warn!("rx: add_used failed for desc {}: {}", desc_idx, e);
+                }
                 injected = true;
             } else {
                 tracing::debug!("rx vring full, dropping frame ({} bytes)", frame.len());
@@ -225,7 +253,7 @@ impl VnetVhostBackend {
 
         if injected {
             if let Err(e) = state.signal_used_queue() {
-                tracing::warn!("failed to signal rx used queue: {}", e);
+                tracing::warn!("rx: signal_used_queue failed: {}", e);
             }
         }
     }
@@ -253,7 +281,10 @@ impl VhostUserBackend for VnetVhostBackend {
     }
 
     fn acked_features(&self, features: u64) {
-        *self.acked_features.write().expect("features lock not poisoned") = features;
+        match self.acked_features.write() {
+            Ok(mut guard) => *guard = features,
+            Err(e) => tracing::error!("features lock poisoned, cannot ack: {}", e),
+        }
     }
 
     fn protocol_features(&self) -> VhostUserProtocolFeatures {
