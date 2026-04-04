@@ -1,0 +1,39 @@
+# v1.2 combined demo data for one repl_host process managing two guests
+
+provision alice /tmp/motlie-vfs-alice.vsock_5000 1000 1000
+mount alice alice-home=/home/alice,/tmp/motlie-vfs-demo/alice-home alice-workspace=/workspace,/tmp/motlie-vfs-demo/alice-workspace alice-agent-state=/agent-state,/tmp/motlie-vfs-demo/alice-agent-state
+
+use alice
+layer credentials 0
+layer workspace 10
+
+mkdir credentials alice-agent-state /codex 700
+mkdir credentials alice-agent-state /claude 700
+mkdir credentials alice-agent-state /claude-code 700
+putattr credentials alice-home /.ssh/authorized_keys 1000 1000 600 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample alice@dev
+putattr credentials alice-home /.ssh/config 1000 1000 644 Host github.com User git
+putattr credentials alice-home /.env 1000 1000 644 ALICE_API_KEY=demo-alice
+put workspace alice-agent-state /README.md Dedicated read-write agent-state layer for Codex and Claude lives here.
+put workspace alice-workspace /README.md Alice workspace mounted from the host.
+ls alice-home
+ls alice-workspace
+ls alice-agent-state
+
+provision bob /tmp/motlie-vfs-bob.vsock_5000 1001 1001
+mount bob bob-home=/home/bob,/tmp/motlie-vfs-demo/bob-home bob-workspace=/workspace,/tmp/motlie-vfs-demo/bob-workspace bob-agent-state=/agent-state,/tmp/motlie-vfs-demo/bob-agent-state
+
+use bob
+layer credentials 0
+layer workspace 10
+
+mkdir credentials bob-agent-state /codex 700
+mkdir credentials bob-agent-state /claude 700
+mkdir credentials bob-agent-state /claude-code 700
+putattr credentials bob-home /.ssh/authorized_keys 1001 1001 600 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample bob@dev
+putattr credentials bob-home /.ssh/config 1001 1001 644 Host gitlab.com User git
+putattr credentials bob-home /.env 1001 1001 644 BOB_API_KEY=demo-bob
+put workspace bob-agent-state /README.md Dedicated read-write agent-state layer for Codex and Claude lives here.
+put workspace bob-workspace /README.md Bob workspace mounted from the host.
+ls bob-home
+ls bob-workspace
+ls bob-agent-state
