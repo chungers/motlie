@@ -251,18 +251,15 @@ impl VnetVhostBackend {
                 // Publish only the bytes actually written. On write failure,
                 // offset reflects the last successful write position — the
                 // guest sees a truncated or empty frame rather than stale data.
-                if write_failed && offset == 0 {
-                    // Nothing was written — return the descriptor without
-                    // claiming any bytes so the guest can reuse it.
-                    if let Err(e) = queue.add_used(mem, desc_idx, 0) {
-                        tracing::warn!("rx: add_used failed for desc {}: {}", desc_idx, e);
-                    }
-                } else {
-                    if let Err(e) = queue.add_used(mem, desc_idx, offset as u32) {
-                        tracing::warn!("rx: add_used failed for desc {}: {}", desc_idx, e);
-                    }
-                    injected = true;
+                // Publish only the bytes actually written. On write failure,
+                // offset reflects the last successful write position.
+                let used_len = if write_failed && offset == 0 { 0 } else { offset as u32 };
+                if let Err(e) = queue.add_used(mem, desc_idx, used_len) {
+                    tracing::warn!("rx: add_used failed for desc {}: {}", desc_idx, e);
                 }
+                // Always notify — even zero-length returns must be signaled
+                // so the guest recycles the descriptor and avoids rx stalls.
+                injected = true;
             } else {
                 tracing::debug!("rx vring full, dropping frame ({} bytes)", frame.len());
                 break;
@@ -538,30 +535,26 @@ impl VnetBackend {
             }
         }
 
-        // Helper: clean up the slirp thread and socket on any failure after
-        // slirp readiness. Without this, a failed Listener::new or daemon spawn
-        // would leave the slirp thread running and hostfwd ports held.
-        let cleanup_slirp = |shutdown: &Arc<AtomicBool>,
-                             slirp_handle: JoinHandle<()>,
-                             socket_path: &std::path::Path| {
+        // Helper: shut down the slirp thread on any failure after slirp readiness.
+        let stop_slirp = |shutdown: &Arc<AtomicBool>, slirp_handle: JoinHandle<()>| {
             shutdown.store(true, Ordering::Relaxed);
             let _ = slirp_handle.join();
-            let _ = std::fs::remove_file(socket_path);
         };
 
         // Bind socket on calling thread — socket is live when start() returns.
+        // Listener::new(path, true) does its own unlink-before-bind. If it fails,
+        // we did NOT create the socket, so we must NOT unlink it (another process
+        // may own that path).
         let mut listener = match Listener::new(&socket_path, true) {
             Ok(l) => l,
             Err(e) => {
-                cleanup_slirp(&shutdown, slirp_handle, &socket_path);
+                stop_slirp(&shutdown, slirp_handle);
                 return Err(VnetError::SocketBind(std::io::Error::other(format!("{}", e))));
             }
         };
         tracing::info!("vnet socket bound: {}", socket_path.display());
 
-        // Daemon thread accepts connections and runs the vhost-user protocol.
-        // Only known benign disconnect errors (Disconnected, PartialMessage,
-        // SocketBroken) are mapped to Ok — everything else propagates.
+        // From this point on, WE own the socket file and must clean it up on failure.
         let daemon_handle: JoinHandle<Result<(), VnetError>> = match thread::Builder::new()
             .name("motlie-vnet-daemon".into())
             .spawn(move || {
@@ -582,7 +575,8 @@ impl VnetBackend {
             }) {
             Ok(handle) => handle,
             Err(e) => {
-                cleanup_slirp(&shutdown, slirp_handle, &socket_path);
+                stop_slirp(&shutdown, slirp_handle);
+                let _ = std::fs::remove_file(&socket_path);
                 return Err(VnetError::BackendInit(format!("daemon thread: {}", e)));
             }
         };
@@ -621,20 +615,30 @@ impl VnetHandle {
         // Dummy-connect to unblock accept() if the daemon is waiting.
         let _ = std::os::unix::net::UnixStream::connect(&self.socket_path);
 
-        // Join slirp thread.
+        // Join slirp thread — propagate panics.
         if let Some(handle) = self.slirp_thread.take() {
-            let _ = handle.join();
+            if let Err(panic_payload) = handle.join() {
+                // Still attempt daemon cleanup before returning the error.
+                if let Some(dh) = self.daemon_thread.take() {
+                    let _ = dh.join();
+                }
+                let _ = std::fs::remove_file(&self.socket_path);
+                return Err(VnetError::BackendInit(format!(
+                    "slirp thread panicked: {:?}", panic_payload
+                )));
+            }
         }
 
-        // Join daemon thread and propagate non-benign errors.
-        // Benign disconnect errors (Disconnected, PartialMessage, SocketBroken)
-        // are already mapped to Ok(()) inside the daemon thread. Any Err here
-        // is a real failure that callers should see.
+        // Join daemon thread — propagate non-benign errors and panics.
         if let Some(handle) = self.daemon_thread.take() {
             match handle.join() {
                 Ok(Ok(())) => {}
-                Ok(Err(e)) => return Err(e),
+                Ok(Err(e)) => {
+                    let _ = std::fs::remove_file(&self.socket_path);
+                    return Err(e);
+                }
                 Err(panic_payload) => {
+                    let _ = std::fs::remove_file(&self.socket_path);
                     return Err(VnetError::BackendInit(format!(
                         "daemon thread panicked: {:?}", panic_payload
                     )));
@@ -642,7 +646,10 @@ impl VnetHandle {
             }
         }
 
-        let _ = std::fs::remove_file(&self.socket_path);
+        // Socket cleanup — propagate failure.
+        if self.socket_path.exists() {
+            std::fs::remove_file(&self.socket_path).map_err(VnetError::SocketCleanup)?;
+        }
         tracing::info!("vnet backend shut down: {}", self.socket_path.display());
         Ok(())
     }
