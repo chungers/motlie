@@ -18,9 +18,15 @@ use std::time::Instant;
 // SlirpHandler — implements libslirp::Handler
 // ---------------------------------------------------------------------------
 
-/// Timer handle: a closure that libslirp calls on expiry, plus the scheduled
-/// expiry time in nanoseconds.
+/// Timer handle returned to libslirp via the Handler trait. Holds only an ID;
+/// the actual callback and expiry live in SlirpHandler's timer registry so
+/// `run_once()` can fire expired timers without raw pointer gymnastics.
 pub struct SlirpTimer {
+    id: u64,
+}
+
+/// Internal timer state stored in the handler's registry.
+struct TimerEntry {
     callback: Box<dyn FnMut()>,
     expire_ns: i64,
 }
@@ -35,6 +41,10 @@ pub struct SlirpHandler {
     poll_fds: HashMap<RawFd, ()>,
     /// Whether the event loop needs to be woken (e.g. timer fired).
     notified: bool,
+    /// Active timer registry. Keyed by timer ID.
+    timers: HashMap<u64, TimerEntry>,
+    /// Next timer ID to assign.
+    next_timer_id: u64,
 }
 
 impl SlirpHandler {
@@ -44,6 +54,8 @@ impl SlirpHandler {
             rx_queue: Vec::new(),
             poll_fds: HashMap::new(),
             notified: false,
+            timers: HashMap::new(),
+            next_timer_id: 0,
         }
     }
 
@@ -61,6 +73,28 @@ impl SlirpHandler {
     /// Clear and return the notified flag.
     pub fn take_notified(&mut self) -> bool {
         std::mem::take(&mut self.notified)
+    }
+
+    /// Fire all expired timer callbacks. Called by `SlirpInstance::run_once()`
+    /// after `pollfds_poll()` so libslirp's timer-driven work (TCP retransmits,
+    /// DHCP lease timers, etc.) actually executes.
+    pub fn fire_expired_timers(&mut self) {
+        let now = self.clock_get_ns();
+        // Collect IDs of expired timers to avoid borrow conflict.
+        let expired: Vec<u64> = self
+            .timers
+            .iter()
+            .filter(|(_, entry)| entry.expire_ns <= now)
+            .map(|(id, _)| *id)
+            .collect();
+
+        for id in expired {
+            if let Some(entry) = self.timers.get_mut(&id) {
+                // Reset expiry so it doesn't fire again until re-armed.
+                entry.expire_ns = i64::MAX;
+                (entry.callback)();
+            }
+        }
     }
 }
 
@@ -98,18 +132,23 @@ impl Handler for SlirpHandler {
     }
 
     fn timer_new(&mut self, func: Box<dyn FnMut()>) -> Box<SlirpTimer> {
-        Box::new(SlirpTimer {
+        let id = self.next_timer_id;
+        self.next_timer_id += 1;
+        self.timers.insert(id, TimerEntry {
             callback: func,
             expire_ns: i64::MAX,
-        })
+        });
+        Box::new(SlirpTimer { id })
     }
 
     fn timer_mod(&mut self, timer: &mut Box<SlirpTimer>, expire_time: i64) {
-        timer.expire_ns = expire_time;
+        if let Some(entry) = self.timers.get_mut(&timer.id) {
+            entry.expire_ns = expire_time;
+        }
     }
 
-    fn timer_free(&mut self, _timer: Box<SlirpTimer>) {
-        // Drop the timer — the Box is consumed.
+    fn timer_free(&mut self, timer: Box<SlirpTimer>) {
+        self.timers.remove(&timer.id);
     }
 }
 
@@ -120,11 +159,28 @@ impl Handler for SlirpHandler {
 /// Configuration for creating a libslirp Context.
 /// Maps to the public VnetConfig fields relevant to slirp initialization.
 pub struct SlirpConfig {
+    /// Guest IP assigned via DHCP. Maps to libslirp's `vdhcp_start`.
+    /// Default: 10.0.2.15
     pub guest_ipv4: Ipv4Addr,
+    /// Gateway IP inside the virtual network. Maps to libslirp's `vhost`.
+    /// Default: 10.0.2.2
     pub host_ipv4: Ipv4Addr,
+    /// Subnet mask. Used to compute the network base (`vnetwork = host_ipv4 & netmask`).
+    /// Default: 255.255.255.0
     pub netmask: Ipv4Addr,
+    /// DNS server IP. Maps to libslirp's `vnameserver`.
+    /// Default: 10.0.2.3
     pub dns: Ipv4Addr,
-    pub dhcp_start: Ipv4Addr,
+}
+
+impl SlirpConfig {
+    /// Compute the network base address: `host_ipv4 & netmask`.
+    /// This is libslirp's `vnetwork` parameter.
+    fn vnetwork(&self) -> Ipv4Addr {
+        let host = u32::from(self.host_ipv4);
+        let mask = u32::from(self.netmask);
+        Ipv4Addr::from(host & mask)
+    }
 }
 
 impl Default for SlirpConfig {
@@ -134,7 +190,6 @@ impl Default for SlirpConfig {
             host_ipv4: Ipv4Addr::new(10, 0, 2, 2),
             netmask: Ipv4Addr::new(255, 255, 255, 0),
             dns: Ipv4Addr::new(10, 0, 2, 3),
-            dhcp_start: Ipv4Addr::new(10, 0, 2, 15),
         }
     }
 }
@@ -152,12 +207,13 @@ impl SlirpInstance {
     /// Create a new slirp instance with the given config.
     pub fn new(config: &SlirpConfig) -> Self {
         let handler = Rc::new(RefCell::new(SlirpHandler::new()));
+        let vnetwork = config.vnetwork();
         let ctx = Context::new(
             false,                                          // restricted
             true,                                           // ipv4_enabled
-            config.host_ipv4,                               // vnetwork (gateway/host)
+            vnetwork,                                       // vnetwork (network base, e.g. 10.0.2.0)
             config.netmask,                                 // vnetmask
-            config.host_ipv4,                               // vhost
+            config.host_ipv4,                               // vhost (gateway, e.g. 10.0.2.2)
             false,                                          // ipv6_enabled
             std::net::Ipv6Addr::UNSPECIFIED,                // vprefix_addr6
             0,                                              // vprefix_len
@@ -166,7 +222,7 @@ impl SlirpInstance {
             None,                                           // tftp_server_name
             None,                                           // tftp_path
             None,                                           // tftp_bootfile
-            config.dhcp_start,                              // vdhcp_start
+            config.guest_ipv4,                              // vdhcp_start (guest's DHCP-assigned IP)
             config.dns,                                     // vnameserver
             std::net::Ipv6Addr::UNSPECIFIED,                // vnameserver6
             Vec::new(),                                     // vdnssearch
@@ -193,7 +249,8 @@ impl SlirpInstance {
     /// 1. Ask slirp which fds need polling (`pollfds_fill`)
     /// 2. `poll()` those fds
     /// 3. Report results back (`pollfds_poll`)
-    /// 4. Drain and return any rx frames produced by `send_packet` callbacks
+    /// 4. Fire expired timer callbacks (TCP retransmits, DHCP leases, etc.)
+    /// 5. Drain and return any rx frames produced by `send_packet` callbacks
     ///
     /// Returns the frames libslirp wants sent to the guest (host→guest).
     pub fn run_once(&self) -> Vec<Vec<u8>> {
@@ -235,7 +292,10 @@ impl SlirpInstance {
             poll_flags_to_poll_events(revents)
         });
 
-        // Phase 4: drain rx frames queued by send_packet callbacks
+        // Phase 4: fire expired timers (TCP retransmits, DHCP leases, etc.)
+        self.handler.borrow_mut().fire_expired_timers();
+
+        // Phase 5: drain rx frames queued by send_packet callbacks
         self.handler.borrow_mut().drain_rx_frames()
     }
 
