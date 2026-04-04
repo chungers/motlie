@@ -754,6 +754,62 @@ mod tests {
         assert!(!dns.is_unspecified(), "DNS should not be 0.0.0.0");
     }
 
+    /// Regression test: timer callbacks that reenter the handler through
+    /// libslirp's C FFI must not cause a double-borrow panic.
+    ///
+    /// We exercise this by running a DHCP exchange which arms libslirp's
+    /// internal timers (DHCP lease, TCP retransmit). If fire_expired_timers()
+    /// held a handler borrow while invoking callbacks, the reentrancy through
+    /// timer_mod_handler → Rc<RefCell<SlirpHandler>>::borrow_mut() would panic.
+    #[test]
+    fn test_timer_reentrancy_no_panic() {
+        init_logging();
+        let config = SlirpConfig::default();
+        let instance = SlirpInstance::new(&config);
+
+        // Feed a DHCP discover to arm libslirp's internal timers.
+        let mut frame = vec![0u8; 342];
+        frame[0..6].copy_from_slice(&[0xFF; 6]);
+        frame[6..12].copy_from_slice(&[0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
+        frame[12] = 0x08;
+        frame[13] = 0x00;
+        let ip = 14;
+        frame[ip] = 0x45;
+        frame[ip + 2] = 0x01;
+        frame[ip + 3] = 0x48;
+        frame[ip + 8] = 64;
+        frame[ip + 9] = 17;
+        frame[ip + 16..ip + 20].copy_from_slice(&[255, 255, 255, 255]);
+        let cksum = ip_checksum(&frame[ip..ip + 20]);
+        frame[ip + 10] = (cksum >> 8) as u8;
+        frame[ip + 11] = (cksum & 0xFF) as u8;
+        let udp = ip + 20;
+        frame[udp + 1] = 68;
+        frame[udp + 3] = 67;
+        frame[udp + 4] = 0x01;
+        frame[udp + 5] = 0x34;
+        let bootp = udp + 8;
+        frame[bootp] = 1;
+        frame[bootp + 1] = 1;
+        frame[bootp + 2] = 6;
+        frame[bootp + 28..bootp + 34].copy_from_slice(&[0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
+        let cookie = bootp + 236;
+        frame[cookie..cookie + 4].copy_from_slice(&[99, 130, 83, 99]);
+        frame[cookie + 4] = 53;
+        frame[cookie + 5] = 1;
+        frame[cookie + 6] = 1;
+        frame[cookie + 7] = 255;
+
+        instance.input(&frame);
+
+        // Run many iterations to exercise timer arming, firing, and re-arming.
+        // If the three-step borrow scoping is wrong, this panics with
+        // "already borrowed: BorrowMutError".
+        for _ in 0..50 {
+            instance.run_once();
+        }
+    }
+
     /// Helper: compute IP header checksum.
     fn ip_checksum(header: &[u8]) -> u16 {
         let mut sum: u32 = 0;
