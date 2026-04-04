@@ -7,6 +7,7 @@ backend with libslirp for rootless guest networking.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-03 | @claude-tl | Phase 1 implementation: update dep versions to latest (libslirp-dev 4.7.0, vhost 0.16, vhost-user-backend 0.22, virtio-queue 0.17, vm-memory 0.18) |
 | 2026-04-03 | @codex | Address final PR review nits: align `VnetError` naming with DESIGN and remove stale `--net-mode` wording |
 | 2026-04-03 | @codex | Address review follow-ups: expand public API tasks to match DESIGN, add epoll fallback spike, make short-term dual-NIC routing explicit, and document the long-term host SSH proxy path |
 | 2026-04-02 | @claude | Address blocking review: SSH ingress tasks, guest migration tasks, crate layering, composed acceptance milestone, fix validation commands |
@@ -25,7 +26,7 @@ Design references: [Component Architecture](./DESIGN.md), [Key Crates](./DESIGN.
 
 ### 1.1 Crate Setup
 
-- [ ] 1.1.1 Create `libs/vnet/Cargo.toml` with the core dependencies.
+- [x] 1.1.1 Create `libs/vnet/Cargo.toml` with the core dependencies.
   ```toml
   [package]
   name = "motlie-vnet"
@@ -35,25 +36,25 @@ Design references: [Component Architecture](./DESIGN.md), [Key Crates](./DESIGN.
   anyhow.workspace = true
   log = "0.4"
   ```
-- [ ] 1.1.2 Add `libs/vnet` to workspace `Cargo.toml` members.
-- [ ] 1.1.3 Create `src/lib.rs` with module skeleton: `pub mod slirp;`
-- [ ] 1.1.4 Verify `cargo check -p motlie-vnet` succeeds.
+- [x] 1.1.2 Add `libs/vnet` to workspace `Cargo.toml` members.
+- [x] 1.1.3 Create `src/lib.rs` with module skeleton: `pub mod slirp;`
+- [x] 1.1.4 Verify `cargo check -p motlie-vnet` succeeds.
   ```bash
   # Requires: sudo apt install libslirp-dev
   cargo check -p motlie-vnet
   ```
-- [ ] 1.1.5 Validate crate versions on crates.io and workspace compatibility.
-  Verify `libslirp 4+`, `vhost 0.12+`, `vhost-user-backend 0.16+`,
-  `virtio-queue 0.12+`, `vm-memory 0.16+` are published and compatible
-  with the workspace's existing dependency tree (especially `vm-memory`
-  version alignment across vhost crates).
-- [ ] 1.1.6 Run workspace `cargo check` to verify no breakage.
+- [x] 1.1.5 Validate crate versions on crates.io and workspace compatibility.
+  Validated 2026-04-03: `libslirp 4.3.2` (Rust crate), `libslirp-dev 4.7.0`
+  (system apt), `vhost 0.16.0`, `vhost-user-backend 0.22.0`,
+  `virtio-queue 0.17.0`, `vm-memory 0.18.0`. Also requires `libglib2.0-dev`
+  as a transitive system dependency of `libslirp-dev`.
+- [x] 1.1.6 Run workspace `cargo check` to verify no breakage.
 
 ### 1.2 libslirp Wrapper (`src/slirp.rs`)
 
 Design references: [Data Flow](./DESIGN.md), [Open Questions: libslirp thread safety](./DESIGN.md)
 
-- [ ] 1.2.1 Implement the `libslirp::Handler` trait on a `SlirpHandler` struct.
+- [x] 1.2.1 Implement the `libslirp::Handler` trait on a `SlirpHandler` struct.
   Required methods:
   - `clock_get_ns() → i64` — return `Instant::now()` elapsed nanoseconds
   - `timer_new(cb) → Box<Timer>` — create timer with callback
@@ -63,10 +64,10 @@ Design references: [Data Flow](./DESIGN.md), [Open Questions: libslirp thread sa
   - `guest_error(msg)` — log error
   - `register_poll_fd(fd)` / `unregister_poll_fd(fd)` — track polled fds
   - `notify()` — wake event loop
-- [ ] 1.2.2 Implement frame output: `SlirpHandler` holds a `Vec<Vec<u8>>` for
+- [x] 1.2.2 Implement frame output: `SlirpHandler` holds a `Vec<Vec<u8>>` for
   queued rx frames. `send_packet()` pushes to it. Caller drains after
   `pollfds_poll()`.
-- [ ] 1.2.3 Implement the slirp event loop:
+- [x] 1.2.3 Implement the slirp event loop:
   ```rust
   pub fn run_once(ctxt: &mut Context<SlirpHandler>) → Vec<Vec<u8>> {
       let mut fds = Vec::new();
@@ -76,7 +77,7 @@ Design references: [Data Flow](./DESIGN.md), [Open Questions: libslirp thread sa
       ctxt.handler().drain_rx_frames()
   }
   ```
-- [ ] 1.2.4 Wrap `Context::new_with_opt()` with a builder for config:
+- [x] 1.2.4 Wrap `Context::new()` with a builder for config:
   ```rust
   pub struct SlirpConfig {
       pub guest_ipv4: Ipv4Addr,   // default: 10.0.2.15
@@ -86,24 +87,24 @@ Design references: [Data Flow](./DESIGN.md), [Open Questions: libslirp thread sa
       pub host_forwards: Vec<PortForward>,  // host→guest TCP port forwards
   }
   ```
-- [ ] 1.2.5 Verify libslirp is single-threaded safe before the wrapper is used by
+- [x] 1.2.5 Verify libslirp is single-threaded safe before the wrapper is used by
   the backend: confirm the Rust bindings enforce `!Send` or document the
   pinning requirement.
-- [ ] 1.2.6 Implement `host_forward_tcp()` via libslirp's `slirp_add_hostfwd()`.
+- [x] 1.2.6 Implement `host_forward_tcp()` via libslirp's `slirp_add_hostfwd()`.
   Design ref: [FR-7](./DESIGN.md). Treat this as an optional standalone
   debug / demo helper, not as the primary composed runtime ingress path.
   Each `PortForward` entry calls
   `slirp_add_hostfwd(context, is_udp=false, host_addr, host_port, guest_addr, guest_port)`.
   libslirp binds a host-side TCP listener and forwards accepted connections
   to the guest IP inside the virtual network.
-- [ ] 1.2.7 Add test: create slirp context, feed a DHCP discover frame,
+- [x] 1.2.7 Add test: create slirp context, feed a DHCP discover frame,
   verify slirp responds with a DHCP offer.
-- [ ] 1.2.8 Add test: feed a DNS query frame, verify slirp produces a
+- [x] 1.2.8 Add test: feed a DNS query frame, verify slirp produces a
   response (forwarded to host resolver).
-- [ ] 1.2.9 Add test: configure `host_forward_tcp(12222, 22)`, verify host
+- [x] 1.2.9 Add test: configure `host_forward_tcp(12222, 22)`, verify host
   can connect to `127.0.0.1:12222` and the connection is accepted by libslirp.
   (Full SSH validation requires a guest — see Phase 3.)
-- [ ] 1.2.10 Set up `log` crate integration for the slirp wrapper.
+- [x] 1.2.10 Set up `log` crate integration for the slirp wrapper.
   - `guest_error()` callback → `log::warn!`
   - Frame drops in `send_packet()` (e.g. queue full) → `log::debug!`
   - Context creation / teardown → `log::info!`
@@ -119,11 +120,11 @@ Design references: [Data Flow](./DESIGN.md), [Threading Model](./DESIGN.md), [FR
 
 - [ ] 2.1.1 Add vhost-user dependencies to `Cargo.toml`:
   ```toml
-  vhost = { version = "0.12", features = ["vhost-user-backend"] }
-  vhost-user-backend = "0.16"
-  virtio-queue = "0.12"
+  vhost = { version = "0.16", features = ["vhost-user-backend"] }
+  vhost-user-backend = "0.22"
+  virtio-queue = "0.17"
   virtio-bindings = "0.2"
-  vm-memory = "0.16"
+  vm-memory = "0.18"
   ```
 - [ ] 2.1.2 Verify `cargo check -p motlie-vnet` with all deps.
 
@@ -456,7 +457,7 @@ image (Phase 3.1) to be ready.
 
 | Dependency | Type | Required for |
 |------------|------|-------------|
-| `libslirp-dev` | System (apt) | Phase 1+ |
+| `libslirp-dev` 4.7.0 + `libglib2.0-dev` | System (apt) | Phase 1+ |
 | `vhost` crate | Rust | Phase 2+ |
 | `vhost-user-backend` crate | Rust | Phase 2+ |
 | `curl`, `dnsutils` | Guest image (apt) | Phase 3.1+ |

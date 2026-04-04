@@ -1,0 +1,18 @@
+[package]
+name = "motlie-vnet"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Embeddable user-mode networking for virtual machines (vhost-user-net + libslirp)"
+
+[dependencies]
+libslirp = "4"
+libslirp-sys = "4"
+libc = "0.2"
+anyhow.workspace = true
+log = "0.4"
+thiserror.workspace = true
+
+[dev-dependencies]
+env_logger.workspace = true
