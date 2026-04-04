@@ -233,6 +233,17 @@ impl SlirpInstance {
     ///
     /// Returns the frames libslirp wants sent to the guest (host→guest).
     pub fn run_once(&self) -> Vec<Vec<u8>> {
+        self.run_once_inner(None)
+    }
+
+    /// Like `run_once()`, but caps the poll timeout to `max_timeout_ms`.
+    /// Used by the slirp thread to ensure it checks for tx frames and
+    /// shutdown signals reasonably often.
+    pub fn run_once_with_max_timeout(&self, max_timeout_ms: i32) -> Vec<Vec<u8>> {
+        self.run_once_inner(Some(max_timeout_ms))
+    }
+
+    fn run_once_inner(&self, max_timeout: Option<i32>) -> Vec<Vec<u8>> {
         // Phase 1: collect fds slirp wants polled
         let mut timeout: u32 = u32::MAX;
         let mut poll_entries: Vec<(RawFd, PollEvents)> = Vec::new();
@@ -253,7 +264,12 @@ impl SlirpInstance {
             })
             .collect();
 
-        let timeout_ms = if timeout == u32::MAX { -1 } else { timeout as i32 };
+        let mut timeout_ms = if timeout == u32::MAX { -1 } else { timeout as i32 };
+        if let Some(max) = max_timeout {
+            if timeout_ms < 0 || timeout_ms > max {
+                timeout_ms = max;
+            }
+        }
         if !pollfds.is_empty() || timeout_ms >= 0 {
             // Safety: pollfds is a valid slice of libc::pollfd structs.
             unsafe {
