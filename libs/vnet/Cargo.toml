@@ -15,10 +15,11 @@ tracing = "0.1"
 thiserror.workspace = true
 vhost = { version = "0.16", features = ["vhost-user-backend"] }
 vhost-user-backend = "0.22"
-virtio-queue = "0.17"
+virtio-queue = { version = "0.17", features = ["test-utils"] }
 virtio-bindings = "0.2"
 vm-memory = { version = "0.17", features = ["backend-mmap"] }
 vmm-sys-util = "0.15"
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tempfile = "3"
