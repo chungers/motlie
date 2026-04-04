@@ -67,6 +67,65 @@ The home-directory symlinks are set up by the guest image at login time. The
 backing directories live in the dedicated VFS mount, not in the writable `/`
 overlay and not in the general home mount.
 
+## Host Requirements
+
+`v1.2` does not yet remove the inherited `v1.1` host requirements for the
+admin SSH path. The current example still needs:
+
+- `cloud-hypervisor`
+- `mmdebstrap`
+- `squashfs-tools-ng`
+- `e2fsprogs`
+- `uidmap`
+- `debian-archive-keyring`
+- `libfuse3-dev`
+- `pkg-config`
+- `wget`
+- `git`
+- `curl`
+- Rust toolchain with `cargo`
+- `/dev/vhost-vsock` or the ability to load `vhost_vsock`
+
+On Debian/Ubuntu:
+
+```bash
+sudo apt install \
+  cloud-hypervisor \
+  debian-archive-keyring \
+  e2fsprogs \
+  libfuse3-dev \
+  mmdebstrap \
+  pkg-config \
+  squashfs-tools-ng \
+  uidmap \
+  wget \
+  curl \
+  git
+```
+
+If `build-guest.sh` runs in the default rootless `MMDEBSTRAP_MODE=unshare`,
+the host also needs:
+
+- `newuidmap` and `newgidmap`
+- `/etc/subuid` entry for `$USER`
+- `/etc/subgid` entry for `$USER`
+- user namespaces allowed by the local AppArmor policy
+
+If `/dev/vhost-vsock` is missing, the current guest launch path will not work
+until you load the module:
+
+```bash
+sudo modprobe vhost_vsock
+ls -l /dev/vhost-vsock
+```
+
+If that still fails, inspect:
+
+```bash
+modinfo vhost_vsock
+dmesg | tail -n 50
+```
+
 ## Current Phase Mapping
 
 This tree now covers the first concrete slice of Phase 3:
