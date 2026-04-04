@@ -571,15 +571,28 @@ impl VnetBackend {
         match ready_rx.recv_timeout(Duration::from_secs(5)) {
             Ok(SlirpStartup::Ready) => {}
             Ok(SlirpStartup::Failed(e)) => {
+                // Thread already exited (it sent Failed before returning) —
+                // blocking join is safe and bounded.
                 if let Some(panic_err) = stop_slirp(&shutdown, slirp_handle) {
                     return Err(panic_err);
                 }
                 return Err(e);
             }
             Err(e) => {
-                if let Some(panic_err) = stop_slirp(&shutdown, slirp_handle) {
-                    return Err(panic_err);
-                }
+                // Timeout: the slirp thread may be hung in SlirpInstance::new()
+                // or a libslirp C call. A blocking join would defeat the timeout.
+                // Set the shutdown flag and spawn a detached cleanup thread
+                // so start() returns within the documented timeout bound.
+                shutdown.store(true, Ordering::Relaxed);
+                thread::Builder::new()
+                    .name("motlie-vnet-slirp-cleanup".into())
+                    .spawn(move || {
+                        match slirp_handle.join() {
+                            Ok(()) => {}
+                            Err(p) => tracing::error!("slirp thread panicked during timeout cleanup: {:?}", p),
+                        }
+                    })
+                    .ok(); // best-effort — if spawn fails, the slirp thread is leaked
                 return Err(VnetError::BackendInit(format!(
                     "slirp readiness timeout: {}", e
                 )));
