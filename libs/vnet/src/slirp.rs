@@ -483,6 +483,14 @@ pub fn parse_host_dns() -> Ipv4Addr {
         if let Some(rest) = line.strip_prefix("nameserver") {
             let addr_str = rest.trim();
             if let Ok(addr) = addr_str.parse::<Ipv4Addr>() {
+                if addr.is_loopback() || addr.is_unspecified() {
+                    tracing::warn!(
+                        "ignoring loopback/unspecified host DNS {} from /etc/resolv.conf, using default DNS {}",
+                        addr,
+                        default_dns
+                    );
+                    continue;
+                }
                 return addr;
             }
             // Skip IPv6 nameservers
@@ -749,6 +757,68 @@ mod tests {
         // If we get here without panic, slirp processed the DNS query.
         // A full response test requires network connectivity and is covered
         // by e2e tests in Phase 3.
+    }
+
+    /// Feed an ARP who-has request for the slirp gateway and verify we get an
+    /// ARP reply back. This isolates the most basic guest→gateway datapath that
+    /// the v1.2 demo depends on before any IP/DNS traffic can work.
+    #[test]
+    fn test_arp_request_for_gateway_gets_reply() {
+        init_logging();
+        let config = SlirpConfig::default();
+        let instance = SlirpInstance::new(&config);
+
+        let guest_mac = [0x12, 0x34, 0x56, 0x78, 0x90, 0xAB];
+        let guest_ip = config.guest_ipv4.octets();
+        let gateway_ip = config.host_ipv4.octets();
+
+        // Ethernet (14) + ARP (28)
+        let mut frame = vec![0u8; 42];
+
+        // Ethernet header
+        frame[0..6].copy_from_slice(&[0xFF; 6]); // broadcast
+        frame[6..12].copy_from_slice(&guest_mac); // sender
+        frame[12] = 0x08;
+        frame[13] = 0x06; // ARP
+
+        // ARP payload
+        frame[14] = 0x00;
+        frame[15] = 0x01; // Ethernet
+        frame[16] = 0x08;
+        frame[17] = 0x00; // IPv4
+        frame[18] = 6; // hlen
+        frame[19] = 4; // plen
+        frame[20] = 0x00;
+        frame[21] = 0x01; // opcode=request
+        frame[22..28].copy_from_slice(&guest_mac); // sender MAC
+        frame[28..32].copy_from_slice(&guest_ip); // sender IP
+        frame[32..38].copy_from_slice(&[0u8; 6]); // target MAC unknown
+        frame[38..42].copy_from_slice(&gateway_ip); // target IP
+
+        instance.input(&frame);
+
+        let mut all_rx = Vec::new();
+        for _ in 0..10 {
+            let rx = instance.run_once();
+            all_rx.extend(rx);
+            if !all_rx.is_empty() {
+                break;
+            }
+        }
+
+        assert!(
+            !all_rx.is_empty(),
+            "expected ARP reply for gateway, got no frames"
+        );
+
+        let reply = &all_rx[0];
+        assert_eq!(&reply[0..6], &guest_mac, "reply should target guest MAC");
+        assert_eq!(reply[12], 0x08);
+        assert_eq!(reply[13], 0x06, "reply should be ARP");
+        assert_eq!(reply[20], 0x00);
+        assert_eq!(reply[21], 0x02, "ARP opcode should be reply");
+        assert_eq!(&reply[28..32], &gateway_ip, "ARP sender IP should be gateway");
+        assert_eq!(&reply[38..42], &guest_ip, "ARP target IP should be guest");
     }
 
     /// Verify hostfwd binds a host-side port (task 1.2.9).

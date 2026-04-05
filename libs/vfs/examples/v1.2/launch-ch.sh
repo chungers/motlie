@@ -28,6 +28,23 @@ copy_overlay_tree() {
     fi
 }
 
+seed_mount_paths_from_mounts_yaml() {
+    local mounts_yaml="$1"
+    local guest_path
+
+    [ -f "$mounts_yaml" ] || return 0
+
+    while read -r guest_path; do
+        [ -n "$guest_path" ] || continue
+        mkdir -p "$OVERLAY_SEED/upper$guest_path"
+        if [[ "$guest_path" == /home/* ]]; then
+            mkdir -p "$OVERLAY_SEED/upper$guest_path/.ssh"
+            mkdir -p "$OVERLAY_SEED/upper$guest_path/.config"
+            chmod 700 "$OVERLAY_SEED/upper$guest_path/.ssh"
+        fi
+    done < <(sed -n 's/^    guest_path: //p' "$mounts_yaml")
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 HOST_ARCH="$(uname -m)"
@@ -162,14 +179,18 @@ if [ -n "$CLOUD_INIT_DIR" ]; then
     if [ -f "$CLOUD_INIT_DIR/network-config" ]; then
         cp "$CLOUD_INIT_DIR/network-config" "$OVERLAY_SEED/upper/var/lib/cloud/seed/nocloud/network-config"
     fi
+    if [ -f "$CLOUD_INIT_DIR/mounts.yaml" ]; then
+        cp "$CLOUD_INIT_DIR/mounts.yaml" "$OVERLAY_SEED/upper/etc/motlie-vfs/mounts.yaml"
+        seed_mount_paths_from_mounts_yaml "$CLOUD_INIT_DIR/mounts.yaml"
+    else
+        cp "$MOUNT_CONFIG" "$OVERLAY_SEED/upper/etc/motlie-vfs/mounts.yaml"
+        seed_mount_paths_from_mounts_yaml "$MOUNT_CONFIG"
+    fi
+    printf '%s\n' "$GUEST_HOSTNAME" > "$OVERLAY_SEED/upper/etc/hostname"
 else
     cp "$MOUNT_CONFIG" "$OVERLAY_SEED/upper/etc/motlie-vfs/mounts.yaml"
     printf '%s\n' "$GUEST_HOSTNAME" > "$OVERLAY_SEED/upper/etc/hostname"
-    mkdir -p "$OVERLAY_SEED/upper${LOGIN_HOME}/.ssh"
-    mkdir -p "$OVERLAY_SEED/upper${LOGIN_HOME}/.config"
-    mkdir -p "$OVERLAY_SEED/upper/agent-state"
-    mkdir -p "$OVERLAY_SEED/upper/workspace"
-    chmod 700 "$OVERLAY_SEED/upper${LOGIN_HOME}/.ssh"
+    seed_mount_paths_from_mounts_yaml "$MOUNT_CONFIG"
 fi
 
 copy_overlay_tree "$COMMON_OVERLAY_CONTENT" "$OVERLAY_SEED/upper"
@@ -193,7 +214,11 @@ if [ -n "$CLOUD_INIT_DIR" ]; then
     CMDLINE="$CMDLINE ds=nocloud;s=file:///var/lib/cloud/seed/nocloud/"
 fi
 if [ "$ADMIN_NET" = "tap" ]; then
-    CMDLINE="$CMDLINE ip=${GUEST_IP}::${HOST_IP}:255.255.255.0::eth0:off"
+    if [ "$EGRESS_NET" = "vhost-user" ]; then
+        CMDLINE="$CMDLINE ip=${GUEST_IP}:::255.255.255.0::eth0:off"
+    else
+        CMDLINE="$CMDLINE ip=${GUEST_IP}::${HOST_IP}:255.255.255.0::eth0:off"
+    fi
 fi
 
 MEMORY_ARG="size=512M"
@@ -217,11 +242,12 @@ DISK_ARGS=(
     "path=$RUNTIME_OVERLAY"
 )
 
+NET_ARGS=()
 if [ "$ADMIN_NET:$EGRESS_NET" = "tap:tap" ]; then
-    CH_ARGS+=(--net "tap=,mac=$ADMIN_MAC,ip=$HOST_IP,mask=255.255.255.0")
+    NET_ARGS+=("tap=,mac=$ADMIN_MAC,ip=$HOST_IP,mask=255.255.255.0")
 elif [ "$ADMIN_NET:$EGRESS_NET" = "tap:vhost-user" ]; then
-    CH_ARGS+=(--net "tap=,mac=$ADMIN_MAC,ip=$HOST_IP,mask=255.255.255.0")
-    CH_ARGS+=(--net "vhost_user=true,socket=$VNET_SOCKET,mac=$EGRESS_MAC")
+    NET_ARGS+=("tap=,mac=$ADMIN_MAC,ip=$HOST_IP,mask=255.255.255.0")
+    NET_ARGS+=("vhost_user=true,socket=$VNET_SOCKET,mac=$EGRESS_MAC")
 fi
 
 rm -f "$API_SOCKET" "$VSOCK_SOCKET"
@@ -253,4 +279,8 @@ echo ""
 echo "To stop: curl --unix-socket $API_SOCKET -X PUT http://localhost/api/v1/vm.shutdown"
 echo ""
 
-cloud-hypervisor "${CH_ARGS[@]}" --disk "${DISK_ARGS[@]}"
+if [ "${#NET_ARGS[@]}" -gt 0 ]; then
+    exec cloud-hypervisor "${CH_ARGS[@]}" --disk "${DISK_ARGS[@]}" --net "${NET_ARGS[@]}"
+else
+    exec cloud-hypervisor "${CH_ARGS[@]}" --disk "${DISK_ARGS[@]}"
+fi
