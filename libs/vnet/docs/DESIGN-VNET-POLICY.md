@@ -933,22 +933,94 @@ is ~5 lines per field. No architectural change needed.
 | **libslirp connection state** | `slirp_connection_info()` FFI | Active connection list with protocol, addresses, ports, state. Could be used for connection inventory and orphan detection. | **Available but unstructured.** Returns a human-readable string, not a parsed struct. Would need string parsing, which is fragile across libslirp versions. |
 | **libslirp fd→connection mapping** | `register_poll_fd()`/`unregister_poll_fd()` callbacks | Which host-side fds belong to which guest connections. Could correlate fd lifecycle with connection events. | **Callback provides fd only, no connection metadata.** libslirp does not expose which connection a fd belongs to through the callback API. |
 
-### Guest Process Identity: Parallel Gap with vfs
+### Guest Process Identity: Why vnet Cannot Do What vfs Can
 
-The vnet and vfs stacks have the **same process identity gap**, requiring
-the same solution:
+The vfs and vnet stacks both want process identity (which PID initiated
+this operation?), but the gaps are **fundamentally different** because
+the transport architectures are different:
+
+**vfs transport: vsock with motlie's own wire protocol**
+
+```
+Guest process → FUSE syscall → kernel FUSE driver → fuse_in_header
+    (PID is here ──────────────────────────────────────────┘)
+        │
+        ▼
+    FuseClient (guest, our code) → vsock → FsOp → host FsServer
+```
+
+The kernel FUSE driver stamps every request with the caller's PID, UID,
+and GID in `fuse_in_header`. This is part of the FUSE protocol — the
+kernel gives it to us for free. Our `FuseClient` receives a `Request`
+object with `req.pid()` → `u32`. The gap is purely plumbing: the guest
+client has the data but doesn't forward it. Fix: ~95 lines, 4 files,
+no guest-side infrastructure needed.
+
+**vnet transport: standard Ethernet over virtio-net**
+
+```
+Guest process → socket() + connect() → kernel TCP/IP stack → NIC driver
+    (PID is here ─────┘)                         │
+                                    packet on the wire (PID is GONE)
+                                                  │
+                                                  ▼
+                              virtio-net → vhost-user → our interceptor
+```
+
+The kernel TCP/IP stack **strips all process identity** when it
+constructs the Ethernet frame. A TCP SYN from `apt` (PID 1234) is
+byte-identical to a TCP SYN from `malware` (PID 9999) — both are just
+Ethernet/IP/TCP headers with source port, destination port, and flags.
+PID, UID, GID, process name — none of this is in the packet. This is
+not a motlie limitation; it is how TCP/IP works. No amount of plumbing
+on the vnet side can recover it.
+
+**Why vsock doesn't help for vnet**
+
+The vfs stack uses vsock as its transport — motlie controls the wire
+format and can add any fields it wants (like `CallerIdentity`). The
+vnet stack uses **standard Ethernet** over virtio-net — the wire format
+is the TCP/IP protocol, which we cannot modify. The guest kernel's
+virtio-net driver sends standard Ethernet frames, and our vhost-user
+backend receives them. There is no vsock in the vnet data path.
+
+**The only path: out-of-band guest agent**
+
+To get PID for network connections, the guest must report it through a
+**separate channel** (not through the network packets themselves):
+
+```
+Guest agent (runs inside VM, communicates over vsock)
+    │
+    ├─ Reads /proc/net/tcp → maps (local_port, remote_ip:port) → inode
+    ├─ Reads /proc/[pid]/fd/ → maps inode → PID
+    ├─ Reads /proc/[pid]/comm → maps PID → process name
+    │
+    ▼
+Reports to host via vsock: { source_port: 48832, pid: 1234, name: "apt" }
+```
+
+The host interceptor receives these reports and maintains a lookup table.
+When a TCP SYN arrives with `source_port: 48832`, the interceptor looks
+up PID 1234 / "apt" and enriches `TcpConnectContext.guest_process`.
+
+This requires:
+1. A guest agent binary running in the VM (part of v1.3 russhd work)
+2. A vsock control channel between agent and host (already exists for vfs)
+3. Agent-side `/proc` scanning (race-prone: short-lived connections
+   may close before the agent scans; mitigation: agent uses netlink
+   `SOCK_DIAG` for real-time socket events)
+4. Host-side lookup table with TTL (source ports are reused)
+
+**Comparison:**
 
 | | vfs | vnet |
 |---|---|---|
-| **What we want** | Which PID opened this file? | Which PID opened this socket? |
-| **What the kernel knows** | FUSE `fuse_in_header.pid` | Socket owner PID in `/proc/net/tcp` |
-| **What the protocol provides** | FUSE: yes (not forwarded yet) | Ethernet/IP/TCP: no (PID is not in packet headers) |
-| **Path to resolution** | Forward `req.pid()` in FuseClient (4-layer plumbing, ~95 LOC) | Guest agent reports socket→PID via vsock side channel (v1.3 russhd) |
-
-For vfs, the kernel already provides PID in the FUSE protocol — it just
-needs plumbing. For vnet, the kernel does NOT include PID in packet
-headers — it requires an out-of-band mechanism (guest agent reading
-`/proc/net/tcp` or using netlink socket diag).
+| **Transport** | vsock (motlie controls wire format) | virtio-net (standard Ethernet, immutable) |
+| **PID in protocol?** | Yes — FUSE `fuse_in_header.pid` | No — TCP/IP has no PID field |
+| **Fix complexity** | Plumbing: forward existing data (~95 LOC) | Infrastructure: guest agent + vsock channel + /proc scanning |
+| **Dependency** | None (data already available) | v1.3 (russhd/vsock agent) |
+| **Race conditions** | None (FUSE request is synchronous) | Yes (short-lived connections may close before agent scans) |
 
 The `guest_process: Option<String>` field is already in
 `TcpConnectContext` and `TcpFlowContext`, waiting for this integration.
