@@ -5,6 +5,7 @@ members = [
     "libs/mcp",
     "libs/vfs",
     "libs/vnet",
+    "libs/policy",
 ]
 resolver = "2"
 
