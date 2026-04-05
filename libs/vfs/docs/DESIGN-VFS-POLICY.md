@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-05 | @claude-tl | Add 3-phase detection framework (discovery→staging→execution), enriched FsOpContext (inode, is_sensitive, parent_path), write_entropy in FsOpResult, detector examples |
 | 2026-04-05 | @claude-tl | Initial DESIGN: FsPolicy trait, PolicyAction with errno, chaining, enriched events, OTel logging, event sink policy |
 
 ## Problem Statement
@@ -170,15 +171,27 @@ pub struct FsOpContext {
     pub op: FsOpKind,
     /// Mount tag (e.g. "alice-home").
     pub tag: String,
+    /// Inode number of the target file/directory. Enables cross-operation
+    /// correlation: a policy can track "read inode X then write inode X"
+    /// patterns (in-place encryption detection).
+    pub inode: u64,
     /// Mount-relative path (e.g. "/.ssh/authorized_keys").
     pub path: String,
+    /// Parent directory path (for Create, Mkdir, Unlink, Rename).
+    /// None for operations on existing files (Read, Write, Getattr).
+    pub parent_path: Option<String>,
     /// Whether this path is overlay-managed (injected by the host).
     pub is_overlay: bool,
+    /// Whether this path matches a predefined sensitive pattern
+    /// (.ssh/, .env, credentials, secrets). Pre-classified by the
+    /// dispatch layer so policies don't need to recompute it.
+    pub is_sensitive: bool,
     /// Timestamp when the operation was received.
     pub timestamp: Instant,
 }
 
 /// Result provided to on_complete() after the operation executes.
+#[derive(Clone)]
 pub struct FsOpResult {
     /// Whether the operation succeeded.
     pub success: bool,
@@ -186,12 +199,37 @@ pub struct FsOpResult {
     pub errno: i32,
     /// Bytes transferred (for Read/Write operations).
     pub bytes: Option<usize>,
+    /// Shannon entropy of written data (Write operations only).
+    /// Computed from the write buffer during dispatch — the server
+    /// already handles this data, so entropy is metadata, not DPI.
+    /// None for non-Write operations.
+    pub write_entropy: Option<f64>,
     /// Wall-clock latency of the operation.
     pub latency: Duration,
 }
 ```
 
-`FsOpContext` is `Clone + Send` to support the event sink policy.
+`FsOpContext` and `FsOpResult` are `Clone + Send` to support the event
+sink policy.
+
+**Why `inode` matters:** Filesystem attacks correlate operations on the
+same file. A process that reads a file then immediately writes high-entropy
+data back to the same inode is likely encrypting it in place (ransomware
+pattern). Without inode tracking, the policy can only reason about
+individual operations — with it, it can detect sequences.
+
+**Why `write_entropy` is not DPI:** Unlike network payload inspection
+(which requires TLS termination), filesystem write data passes through
+the vfs server in plaintext — the server already copies it from the FUSE
+buffer to disk. Computing entropy of the buffer before writing is
+essentially free (~50ns) and provides a strong signal for detecting
+encrypted/compressed staging without inspecting the actual content
+semantics.
+
+**Why `is_sensitive` is pre-classified:** Every policy in the chain
+would otherwise need to implement the same path-matching logic for
+credential paths. Pre-classifying in the dispatch layer avoids redundant
+work and ensures consistent classification across policies.
 
 ### NoPolicy (zero-cost default)
 
@@ -268,6 +306,224 @@ fn is_credential_path(path: &str) -> bool {
         || path.contains("/credentials") || path.contains("/secrets")
 }
 ```
+
+## Anomaly Detection by Filesystem Phase
+
+Filesystem attacks follow a timeline analogous to network connection
+phases. Detection moves from **discovery** (what is the attacker looking
+for?), to **staging** (how is data being prepared?), to **execution**
+(how does data leave or get destroyed?).
+
+All detection is implemented via stateful `FsPolicy` implementations
+using `on_op()` and `on_complete()` — no additional callbacks needed.
+The enriched `FsOpContext` (inode, is_sensitive, parent_path) and
+`FsOpResult` (write_entropy, bytes) provide the fields each detector
+needs.
+
+### Phase 1: Discovery (Scanning & Enumeration)
+
+Before stealing data, an attacker must find it. Characterized by
+"breadth over depth" — many metadata operations across sensitive paths.
+
+**Policy callbacks:** `on_op()` for pre-op gate, `on_complete()` for
+rate tracking.
+
+| Technique | Method | Detection Pattern | API fields |
+|-----------|--------|-------------------|-----------|
+| **Directory Crawling** | Rapid Lookup/Getattr/Readdir across sensitive paths | High-frequency metadata access: single session querying thousands of files in seconds | `ctx.op` (Lookup/Getattr/Readdir), `ctx.timestamp` → stateful rate counter per tag |
+| **Configuration Hunting** | Targeting `.env`, `.ssh/id_rsa`, `config.toml` | Any non-overlay access to known-secret file paths | `ctx.is_sensitive`, `ctx.is_overlay` → deny if `is_sensitive && !is_overlay` |
+| **Breadth Scanning** | Accessing many distinct paths in a short window | Unique path count per time window exceeds threshold | `ctx.path`, `ctx.timestamp` → stateful `HashSet<String>` per window |
+
+**Example: ScanDetector**
+
+```rust
+struct ScanDetector {
+    // tag → (op_count, unique_paths, window_start)
+    windows: RwLock<HashMap<String, (u64, HashSet<String>, Instant)>>,
+}
+
+impl FsPolicy for ScanDetector {
+    fn on_op(&self, ctx: &FsOpContext) -> PolicyAction {
+        if !matches!(ctx.op, FsOpKind::Lookup | FsOpKind::Getattr | FsOpKind::Readdir) {
+            return PolicyAction::Allow { reason: None };
+        }
+        let mut windows = self.windows.write().unwrap();
+        let entry = windows.entry(ctx.tag.clone())
+            .or_insert((0, HashSet::new(), Instant::now()));
+        if entry.2.elapsed() > Duration::from_secs(10) {
+            *entry = (0, HashSet::new(), Instant::now());
+        }
+        entry.0 += 1;
+        entry.1.insert(ctx.path.clone());
+
+        // >500 metadata ops or >200 unique paths in 10s = scan
+        if entry.0 > 500 || entry.1.len() > 200 {
+            PolicyAction::Observe {
+                reason: PolicyReason::Custom(
+                    format!("scan pattern: {} ops, {} paths in 10s",
+                            entry.0, entry.1.len()).into()
+                ),
+            }
+        } else {
+            PolicyAction::Allow { reason: None }
+        }
+    }
+}
+```
+
+**API coverage:** Fully supported. `FsOpContext` provides `op`, `path`,
+`timestamp`, `is_sensitive`, `is_overlay`. All discovery patterns are
+detectable with stateful `on_op()` policies.
+
+### Phase 2: Staging (Modification & Collection)
+
+Data is prepared for theft — moved, compressed, or encrypted to a
+staging location.
+
+**Policy callbacks:** `on_op()` for path deviation, `on_complete()` for
+write analysis.
+
+| Technique | Method | Detection Pattern | API fields |
+|-----------|--------|-------------------|-----------|
+| **Archive Creation** | `tar`, `zip`, `7z` bundling directories into one file | Sudden spike in write bytes producing a single high-entropy file | `result.bytes`, `result.write_entropy` → large write + entropy > 4.0 |
+| **Data Siphoning** | Copying to `/tmp/.hidden/` or `/var/tmp/` | Files written to world-writable directories by processes that usually stay in `/home` | `ctx.path` (starts with `/tmp/`, `/var/tmp/`), `ctx.op` (Create/Write) |
+| **MIME-Type Mismatch** | Renaming `.zip` to `.txt` to bypass DLP | File extension doesn't match the entropy/magic of the content | `ctx.path` (extension), `result.write_entropy` (high entropy + `.txt` extension) |
+
+**Example: StagingDetector**
+
+```rust
+struct StagingDetector;
+
+impl FsPolicy for StagingDetector {
+    fn on_complete(&self, ctx: &FsOpContext, result: &FsOpResult) -> PolicyAction {
+        if ctx.op != FsOpKind::Write {
+            return PolicyAction::Allow { reason: None };
+        }
+        // Large high-entropy write to temp directory = staging
+        if let (Some(bytes), Some(entropy)) = (result.bytes, result.write_entropy) {
+            let is_temp = ctx.path.starts_with("/tmp/") || ctx.path.starts_with("/var/tmp/");
+            if is_temp && bytes > 1_000_000 && entropy > 4.0 {
+                return PolicyAction::Observe {
+                    reason: PolicyReason::Custom(
+                        format!("staging pattern: {}MB high-entropy write to {}",
+                                bytes / 1_000_000, ctx.path).into()
+                    ),
+                };
+            }
+        }
+        PolicyAction::Allow { reason: None }
+    }
+}
+```
+
+**API coverage:** Fully supported. `FsOpResult.write_entropy` is the
+key enabler — it detects compressed/encrypted staging without inspecting
+content semantics. `FsOpResult.bytes` and `FsOpContext.path` detect
+path deviation and volume anomalies.
+
+### Phase 3: Execution/Exit (Exfiltration or Destruction)
+
+The "final act" — data leaves the system or is rendered useless.
+
+**Policy callbacks:** `on_op()` + `on_complete()` with cross-operation
+correlation via `ctx.inode`.
+
+| Technique | Method | Detection Pattern | API fields |
+|-----------|--------|-------------------|-----------|
+| **In-Place Encryption** | Read file, encrypt, write back (ransomware) | Read-write symmetry: process reads a block then writes high-entropy block to same inode | `ctx.inode` → stateful: track (inode, last_read_bytes), then `on_complete` for Write to same inode with high `write_entropy` |
+| **File Shredding** | Overwriting with null bytes or random data | Entropy collapse: write_entropy ≈ 0.0 (all zeros) or ≈ 8.0 (random) followed by Unlink | `result.write_entropy` (near 0 or near max), then `ctx.op` = Unlink on same inode |
+| **Bulk Delete** | Rapid deletion of many files | High-rate Unlink/Rmdir operations in a short window | `ctx.op` (Unlink/Rmdir), `ctx.timestamp` → stateful rate counter |
+
+**Example: RansomwareDetector**
+
+```rust
+struct RansomwareDetector {
+    // inode → (last_read_bytes, last_read_time)
+    recent_reads: RwLock<HashMap<u64, (usize, Instant)>>,
+}
+
+impl FsPolicy for RansomwareDetector {
+    fn on_complete(&self, ctx: &FsOpContext, result: &FsOpResult) -> PolicyAction {
+        match ctx.op {
+            FsOpKind::Read => {
+                if let Some(bytes) = result.bytes {
+                    self.recent_reads.write().unwrap()
+                        .insert(ctx.inode, (bytes, Instant::now()));
+                }
+            }
+            FsOpKind::Write => {
+                if let (Some(write_bytes), Some(entropy)) = (result.bytes, result.write_entropy) {
+                    let reads = self.recent_reads.read().unwrap();
+                    if let Some((read_bytes, read_time)) = reads.get(&ctx.inode) {
+                        // Read N bytes, then write ~N high-entropy bytes
+                        // to the same inode within 1 second = encryption
+                        let similar_size = (*read_bytes as f64 - write_bytes as f64).abs()
+                            / (*read_bytes as f64).max(1.0) < 0.2;
+                        let recent = read_time.elapsed() < Duration::from_secs(1);
+                        if similar_size && recent && entropy > 4.0 {
+                            return PolicyAction::Deny {
+                                errno: libc::EACCES,
+                                reason: PolicyReason::Custom(
+                                    format!("ransomware pattern: read {}B then write {}B \
+                                             (entropy {:.1}) to inode {}",
+                                            read_bytes, write_bytes, entropy, ctx.inode).into()
+                                ),
+                            };
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        PolicyAction::Allow { reason: None }
+    }
+}
+```
+
+**API coverage:** Fully supported. `ctx.inode` enables cross-operation
+correlation. `result.write_entropy` detects encryption. Stateful policy
+tracks read→write sequences per inode. No additional callbacks needed —
+`on_complete()` with the enriched context is sufficient.
+
+### Phase Summary
+
+```
+Guest fs operations timeline:
+
+  Lookup Lookup Getattr Readdir    Create Write Write    Read Write Unlink
+  ─────────────────────────────    ──────────────────    ──────────────────
+       Phase 1                       Phase 2                Phase 3
+       Discovery                     Staging                Execution
+
+  ┌─────────────────┐        ┌─────────────────┐      ┌─────────────────┐
+  │ ScanDetector    │        │ StagingDetector  │      │ RansomDetector  │
+  │                 │        │                  │      │                 │
+  │ Rate counting   │        │ Write entropy    │      │ Inode tracking  │
+  │ Path breadth    │        │ Path deviation   │      │ Read-write sym  │
+  │ Sensitive flag  │        │ Volume anomaly   │      │ Entropy shift   │
+  │                 │        │                  │      │                 │
+  │ on_op()         │        │ on_complete()    │      │ on_complete()   │
+  │ on_complete()   │        │                  │      │ + stateful map  │
+  └─────────────────┘        └─────────────────┘      └─────────────────┘
+```
+
+### API Coverage Summary
+
+| Detector | Phase | Callback | Key fields | Coverage |
+|----------|-------|----------|-----------|----------|
+| Directory crawling | Discovery | `on_op` | `op`, `timestamp` | Full |
+| Configuration hunting | Discovery | `on_op` | `is_sensitive`, `is_overlay` | Full |
+| Breadth scanning | Discovery | `on_op` | `path`, `timestamp` | Full |
+| Archive creation | Staging | `on_complete` | `bytes`, `write_entropy` | Full |
+| Data siphoning | Staging | `on_op` | `path` (temp dirs) | Full |
+| MIME mismatch | Staging | `on_complete` | `path` (ext), `write_entropy` | Full |
+| In-place encryption | Execution | `on_complete` | `inode`, `write_entropy`, `bytes` | Full |
+| File shredding | Execution | `on_complete` | `write_entropy` (near 0/max), then Unlink | Full |
+| Bulk delete | Execution | `on_op` | `op` (Unlink/Rmdir), `timestamp` | Full |
+
+All nine detection techniques are implementable with the two existing
+callbacks (`on_op`, `on_complete`) and the enriched context types. No
+additional callbacks needed.
 
 ### EventSinkPolicy (generic event producer)
 
