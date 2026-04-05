@@ -13,7 +13,7 @@ Current expectations:
 
 - build the guest image with [build-guest.sh](./build-guest.sh)
 - use [launch-ch.sh](./launch-ch.sh) for direct launches
-- use [repl_host.rs](./repl_host.rs) via `cargo run -p motlie-vfs --example repl_host_v1_2 --features vsock -- ...` as the only host-side runtime entry point
+- use [repl_host.rs](./repl_host.rs) via `cargo run -p motlie-vnet --example repl_host_v1_2 -- ...` as the only host-side runtime entry point
 
 ## Host Preflight
 

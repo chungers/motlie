@@ -104,11 +104,11 @@ use motlie_vfs::core::server::FsServer;
 use motlie_vfs::vsock::handler::VsockConnectionHandler;
 
 fn build_git_sha() -> &'static str {
-    option_env!("MOTLIE_VFS_BUILD_GIT_SHA").unwrap_or("unknown")
+    option_env!("MOTLIE_VNET_BUILD_GIT_SHA").unwrap_or("unknown")
 }
 
 fn build_time_utc() -> &'static str {
-    option_env!("MOTLIE_VFS_BUILD_TIME_UTC").unwrap_or("unknown")
+    option_env!("MOTLIE_VNET_BUILD_TIME_UTC").unwrap_or("unknown")
 }
 
 #[derive(Clone)]

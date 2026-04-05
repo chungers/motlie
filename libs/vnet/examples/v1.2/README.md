@@ -276,7 +276,7 @@ validated `v1.1` SSH/VFS path.
 The current branch has been validated with this host flow:
 
 1. run the `v1.2` REPL host:
-   - `cargo run -p motlie-vfs --example repl_host_v1_2 --features vsock -- --empty --script libs/vnet/examples/v1.2/setup-multiguest.sh.vfs --admin-net=tap --egress-net=vhost-user`
+   - `cargo run -p motlie-vnet --example repl_host_v1_2 -- --empty --script libs/vnet/examples/v1.2/setup-multiguest.sh.vfs --admin-net=tap --egress-net=vhost-user`
 2. launch a guest from the REPL:
    - `launch alice`
 3. connect over TAP-admin SSH:
