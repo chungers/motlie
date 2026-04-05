@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-05 | @claude-tl | Add errno to PolicyAction, predefined errno pairs, OTel logging, EventSinkPolicy, cross-stack alignment with vfs, chain returns impl EgressPolicy |
 | 2026-04-05 | @claude-tl | Add PolicyReason (Cow-backed enum), on_tcp_flow with flow metadata + SNI, exfiltration/C2/fronting use cases, honest DPI limitations, &self + interior mutability guidance |
 | 2026-04-05 | @claude-tl | Redesign: fully generic policy (no Box/dyn), chainable via trait method, logging-as-policy, zero-cost NoPolicy default, honest intent derivation layering |
 | 2026-04-05 | @claude-tl | Initial DESIGN: DNS interception, TCP connection control, intent-based policy, callback API |
@@ -164,17 +165,34 @@ impl From<DomainCategory> for PolicyReason { ... }
 ### Core Trait
 
 ```rust
-/// Policy decision returned by callbacks.
+/// Policy decision. Shared shape with motlie-vfs's FsPolicy.
 pub enum PolicyAction {
     /// Allow the request. Optionally attach a reason for audit logging.
     Allow { reason: Option<PolicyReason> },
-    /// Deny the request. The engine forges a failure response (NXDOMAIN
-    /// for DNS, RST for TCP). The reason is logged.
-    Deny { reason: PolicyReason },
+    /// Deny the request. `errno` gives the policy a semantic hook into
+    /// *how* the denial manifests (NXDOMAIN, RST, etc.). The interceptor
+    /// maps errno to the appropriate forged response.
+    Deny { errno: i32, reason: PolicyReason },
     /// Allow but flag for observation. The request proceeds normally but
     /// the engine logs it at a higher severity.
     Observe { reason: PolicyReason },
 }
+```
+
+### Predefined (errno, reason) Pairs for Network Denials
+
+| errno | DomainCategory | Forged response | Use case |
+|-------|---------------|-----------------|----------|
+| `EHOSTUNREACH` | `AdNetwork` | DNS NXDOMAIN | Blocked domain lookup |
+| `ENETUNREACH` | `Analytics` | DNS NXDOMAIN | Blocked analytics domain |
+| `ECONNREFUSED` | `Unknown` | TCP RST | Denied TCP connection |
+| `EACCES` | (any) | TCP RST | Generic policy denial |
+
+The interceptor maps errno to the forged response:
+- `EHOSTUNREACH`, `ENETUNREACH` → forge DNS NXDOMAIN response
+- `ECONNREFUSED`, `EACCES` → forge TCP RST
+
+```
 
 /// Egress policy callbacks. All methods have default allow-all impls.
 ///
@@ -226,63 +244,33 @@ pub trait EgressPolicy: Send + 'static {
     /// - First `Deny` wins (short-circuit).
     /// - `Observe` is sticky — propagates even if `next` returns `Allow`.
     /// - `Allow` defers to `next`.
-    fn chain<N: EgressPolicy>(self, next: N) -> ChainedPolicy<Self, N>
+    fn chain<N: EgressPolicy>(self, next: N) -> impl EgressPolicy
     where
         Self: Sized,
     {
-        ChainedPolicy { current: self, next }
+        ChainedEgressPolicy { current: self, next }
     }
 }
 ```
 
 ### Chaining
 
-Policies compose via the `chain()` method on the trait. The result is a
-concrete generic type — no heap allocation, no vtable dispatch.
+Policies compose via the `chain()` method on the trait. The result is an
+opaque `impl EgressPolicy` — the internal `ChainedEgressPolicy<A, B>`
+struct is not part of the public API. No heap allocation, no vtable dispatch.
+
+Evaluation rules (same as `motlie-vfs`'s `FsPolicy`):
+- First `Deny` wins (short-circuit)
+- `Observe` is sticky — propagates even if next policy returns Allow
+- `Allow` defers to next policy
 
 ```rust
-/// Two policies evaluated in sequence. First Deny wins, Observe is sticky.
-pub struct ChainedPolicy<A, B> {
-    current: A,
-    next: B,
-}
-
-impl<A: EgressPolicy, B: EgressPolicy> EgressPolicy for ChainedPolicy<A, B> {
-    fn on_dns_query(&self, ctx: &DnsQueryContext) -> PolicyAction {
-        match self.current.on_dns_query(ctx) {
-            PolicyAction::Deny { reason } => PolicyAction::Deny { reason },
-            PolicyAction::Observe { reason } => {
-                match self.next.on_dns_query(ctx) {
-                    PolicyAction::Deny { reason } => PolicyAction::Deny { reason },
-                    _ => PolicyAction::Observe { reason },
-                }
-            }
-            PolicyAction::Allow { .. } => self.next.on_dns_query(ctx),
-        }
-    }
-
-    fn on_dns_response(&self, ctx: &DnsResponseContext) -> PolicyAction {
-        // same pattern
-        # ..
-    }
-
-    fn on_tcp_connect(&self, ctx: &TcpConnectContext) -> PolicyAction {
-        // same pattern
-        # ..
-    }
-}
-```
-
-The compiler monomorphizes the chain:
-
-```rust
-let policy = LoggingPolicy::new()
+let policy = LoggingPolicy
     .chain(CategoryPolicy::default())
     .chain(my_runtime_policy);
 
-// Concrete type at compile time:
-// ChainedPolicy<LoggingPolicy, ChainedPolicy<CategoryPolicy, MyPolicy>>
-// All calls inlined — zero dynamic dispatch in the hot loop.
+// Opaque type: impl EgressPolicy
+// Compiler monomorphizes all calls — zero dynamic dispatch in the hot loop.
 ```
 
 ### Zero-Cost NoPolicy Default
@@ -306,42 +294,58 @@ impl EgressPolicy for NoPolicy {
 }
 ```
 
-### Logging as a Policy
+### Logging as a Policy (OTel-compatible)
 
 Logging is not special — it's a regular `EgressPolicy` implementation
-that always returns `Allow` but emits structured tracing events. It
-participates in the chain like any other policy.
+that always returns `Allow` but emits OTel-compatible tracing events.
+If the host runtime wires `tracing-opentelemetry`, events automatically
+flow to Jaeger/OTLP without policy changes.
 
 ```rust
-/// Logs every DNS query and TCP connection via tracing.
-/// Always returns Allow — observe-only, no enforcement.
 pub struct LoggingPolicy;
 
 impl EgressPolicy for LoggingPolicy {
     fn on_dns_query(&self, ctx: &DnsQueryContext) -> PolicyAction {
         tracing::info!(
-            subsystem = "vnet-policy",
-            domain = %ctx.domain,
-            query_type = ?ctx.query_type,
-            source_port = ctx.source_port,
-            "DNS query"
+            otel.kind = "CLIENT",
+            otel.name = "vnet.dns.query",
+            net.host.name = %ctx.domain,
+            net.protocol.name = "dns",
+            net.source.port = ctx.source_port,
+            "net.dns.start"
         );
         PolicyAction::Allow { reason: None }
     }
 
     fn on_tcp_connect(&self, ctx: &TcpConnectContext) -> PolicyAction {
         tracing::info!(
-            subsystem = "vnet-policy",
-            dst_ip = %ctx.dst_ip,
-            dst_port = ctx.dst_port,
-            domain = ?ctx.domain,
-            source_port = ctx.source_port,
-            "TCP connect"
+            otel.kind = "CLIENT",
+            otel.name = "vnet.tcp.connect",
+            net.peer.ip = %ctx.dst_ip,
+            net.peer.port = ctx.dst_port,
+            net.host.name = ?ctx.domain,
+            net.source.port = ctx.source_port,
+            "net.tcp.start"
         );
         PolicyAction::Allow { reason: None }
     }
 
-    // on_dns_response: log resolved IPs
+    fn on_tcp_flow(&self, ctx: &TcpFlowContext) -> PolicyAction {
+        tracing::info!(
+            otel.kind = "CLIENT",
+            otel.name = "vnet.tcp.flow",
+            net.peer.ip = %ctx.dst_ip,
+            net.peer.port = ctx.dst_port,
+            net.host.name = ?ctx.domain,
+            net.tls.sni = ?ctx.sni,
+            net.bytes.tx = ctx.bytes_tx,
+            net.bytes.rx = ctx.bytes_rx,
+            net.duration_ms = ctx.duration.as_millis() as u64,
+            net.flow.closed = ctx.is_close,
+            "net.tcp.flow"
+        );
+        PolicyAction::Allow { reason: None }
+    }
 }
 ```
 
@@ -562,6 +566,99 @@ The flow callback is explicitly metadata-only. We do not:
 This is a deliberate design constraint. Payload inspection would require
 TLS MITM (CA trust, certificate pinning breakage) and violate the
 zero-capability, embeddable-library design goal.
+
+## EventSinkPolicy (generic event producer)
+
+A chainable policy that sends context to a caller-supplied closure.
+Always returns Allow — observe-only, no enforcement. Enables cross-stack
+event correlation without coupling vnet to vfs.
+
+```rust
+pub struct EventSinkPolicy<F> {
+    on_event: F,
+}
+
+impl<F> EventSinkPolicy<F>
+where
+    F: Fn(NetEvent) + Send + 'static,
+{
+    pub fn new(on_event: F) -> Self {
+        Self { on_event }
+    }
+}
+
+/// Events emitted by the sink policy.
+pub enum NetEvent {
+    DnsQuery(DnsQueryContext),
+    DnsResponse(DnsResponseContext),
+    TcpConnect(TcpConnectContext),
+    TcpFlow(TcpFlowContext),
+}
+```
+
+Usage at the host runtime (which depends on both vfs and vnet):
+
+```rust
+// Host runtime defines its own unified event:
+enum RuntimeEvent {
+    Fs(motlie_vfs::FsOpContext),
+    Net(motlie_vnet::NetEvent),
+}
+
+let (tx, rx) = mpsc::channel::<RuntimeEvent>();
+
+// vnet side:
+let tx_net = tx.clone();
+let net_policy = LoggingPolicy
+    .chain(CategoryPolicy::default())
+    .chain(EventSinkPolicy::new(move |evt| {
+        let _ = tx_net.send(RuntimeEvent::Net(evt));
+    }));
+```
+
+Neither crate depends on the other. The host runtime owns the unified
+enum and the channel. Each crate provides `EventSinkPolicy<F>` with a
+generic `Fn` — it doesn't know about the other crate's types.
+
+### Design Alignment with motlie-vfs
+
+Both `motlie-vfs` and `motlie-vnet` follow the same policy patterns
+but are separate trait hierarchies — filesystem and network policies
+do not intermingle because they operate on fundamentally different stacks:
+
+| Aspect | vfs (`FsPolicy`) | vnet (`EgressPolicy`) |
+|--------|-------------------|----------------------|
+| Context | `FsOpContext` (op, tag, path, overlay) | `DnsQueryContext`, `TcpConnectContext`, `TcpFlowContext` |
+| Deny mechanism | Return errno to FUSE layer | Forge NXDOMAIN/RST (mapped from errno) |
+| Post-op hook | `on_complete()` with result + bytes + latency | `on_tcp_flow()` with byte counts + duration |
+| Chaining | `.chain()` → `impl FsPolicy` | `.chain()` → `impl EgressPolicy` |
+| Default | `NoPolicy` (compiled out) | `NoPolicy` (compiled out) |
+| Action type | `PolicyAction` (same shape) | `PolicyAction` (same shape) |
+| Reason type | `PolicyReason` (Category or Custom Cow) | `PolicyReason` (same shape) |
+| Event sink | `EventSinkPolicy<F>` | `EventSinkPolicy<F>` |
+| Thread safety | `Send + Sync` (multi-thread vsock) | `Send` (single slirp thread) |
+
+### Future: Cross-Stack Event Correlation
+
+The `EventSinkPolicy` in both crates enables a host-runtime correlator
+that sees both filesystem and network activity:
+
+```
+FsPolicy chain ──→ EventSinkPolicy ──→ mpsc::Sender<RuntimeEvent>
+                                              │
+EgressPolicy chain ──→ EventSinkPolicy ──→────┘
+                                              │
+                                              ▼
+                                       Correlator thread
+                                       (sees both stacks)
+```
+
+Example correlation signals (host runtime concern, not vnet):
+- "read `/.env` then DNS lookup for `pastebin.com`" → exfiltration
+- "write to `/tmp/payload` then connect to unknown IP:4444" → reverse shell
+
+The vnet DESIGN requirement: **context types must be `Clone + Send`** so
+the event sink policy can transport them across thread boundaries.
 
 ## Generic Type Flow
 
