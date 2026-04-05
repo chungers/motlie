@@ -390,9 +390,29 @@ Even with full PID/UID/GID:
 | **Pipe to shell** (`curl \| sh`) | Process I/O, not filesystem I/O. stdin pipe doesn't touch the FUSE mount. |
 | **Process ancestry** | FUSE provides PID but not parent PID or process tree. Would need `/proc` inspection in the guest agent. |
 
-These are guest-kernel limitations, not vfs design limitations. They
-match vnet's documented limitations (encrypted payload invisible,
-guest process name requires vsock agent).
+**Scope-limited visibility:**
+
+| Scenario | Why limited | Path to coverage |
+|----------|------------|-----------------|
+| **Unix domain socket creation** (`bind()` on `/tmp/evil.sock`) | Only visible if the socket path is under a FUSE-mounted tag. In motlie's architecture, `/tmp`, `/var/run`, `/dev/shm` are on the guest's root filesystem (squashfs + ext4 overlay), not FUSE-mounted. | Could be covered if mount scope expands to include `/tmp` — but that changes motlie-vfs from "targeted host directory mounts" to "full guest filesystem proxy," which is a different architecture. |
+| **Network socket creation** (`socket(AF_INET)` + `connect()`) | Kernel network stack, not filesystem. | This is vnet's domain — `on_tcp_connect()` sees it. Cross-stack correlation (via EventSinkPolicy) bridges the gap. |
+
+These are guest-kernel and mount-scope limitations, not vfs API
+limitations. They match vnet's documented limitations (encrypted payload
+invisible, guest process name requires vsock agent).
+
+### Roadmap Context
+
+The policy capabilities described in this DESIGN build on the current
+v1.2 motlie-vfs implementation. Future versions expand the testing and
+enforcement surface:
+
+- **v1.3** (`libs/vmm/examples`): SSH proxy and automated harness,
+  enabling automated scenario testing of both vnet and vfs policies
+  in composed guest VM flows.
+- **v1.4** (TBD): Extended mount scope, policy prototyping for paths
+  currently outside FUSE visibility (`/tmp`, `/var/run`). May require
+  guest-side cooperation (mount delegation or guest agent extensions).
 
 ### NoPolicy (zero-cost default)
 
