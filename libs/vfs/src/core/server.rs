@@ -240,6 +240,7 @@ impl FsServer {
         match op {
             FsOp::Lookup { parent, name } => self.do_lookup(mount, *parent, name),
             FsOp::Getattr { inode } => self.do_getattr(mount, *inode),
+            FsOp::Access { inode, mask, uid, gid } => self.do_access(mount, *inode, *mask, *uid, *gid),
             FsOp::Setattr { inode, attrs } => self.do_setattr(mount, *inode, attrs),
             FsOp::Readdir { inode, offset } => self.do_readdir(mount, *inode, *offset),
             FsOp::Open { inode, flags } => self.do_open(mount, *inode, *flags),
@@ -309,6 +310,24 @@ impl FsServer {
 // ---------------------------------------------------------------------------
 
 impl FsServer {
+    fn do_access(&self, mount: &MountState, inode: u64, mask: i32, uid: u32, gid: u32) -> FsResult {
+        if mount.read_only && mask & libc::W_OK != 0 {
+            return FsResult::Error { errno: libc::EROFS };
+        }
+
+        let attrs = match self.do_getattr(mount, inode) {
+            FsResult::Attr { attrs, .. } => attrs,
+            FsResult::Error { errno } => return FsResult::Error { errno },
+            _ => return FsResult::Error { errno: libc::EIO },
+        };
+
+        if access_allowed(&attrs, mask, uid, gid) {
+            FsResult::Ok
+        } else {
+            FsResult::Error { errno: libc::EACCES }
+        }
+    }
+
     fn do_lookup(&self, mount: &MountState, parent: u64, name: &str) -> FsResult {
         let parent_path = {
             let table = mount.inode_table.lock();
@@ -1010,6 +1029,7 @@ impl FsServer {
                 child_path(p, name)
             }
             FsOp::Getattr { inode }
+            | FsOp::Access { inode, .. }
             | FsOp::Setattr { inode, .. }
             | FsOp::Readdir { inode, .. }
             | FsOp::Open { inode, .. }
@@ -1042,6 +1062,31 @@ fn is_write_op(op: &FsOp) -> bool {
         | FsOp::Unlink { .. } | FsOp::Rmdir { .. } | FsOp::Rename { .. }
         | FsOp::Symlink { .. } | FsOp::Setattr { .. }
     )
+}
+
+fn access_allowed(attrs: &FileAttr, mask: i32, uid: u32, gid: u32) -> bool {
+    if mask == libc::F_OK {
+        return true;
+    }
+
+    let mode = attrs.mode & 0o777;
+    if uid == 0 {
+        let needs_exec = mask & libc::X_OK != 0;
+        let has_any_exec = mode & 0o111 != 0;
+        return !needs_exec || has_any_exec;
+    }
+
+    let perm_bits = if uid == attrs.uid {
+        (mode >> 6) & 0o7
+    } else if gid == attrs.gid {
+        (mode >> 3) & 0o7
+    } else {
+        mode & 0o7
+    };
+
+    (mask & libc::R_OK == 0 || perm_bits & 0o4 != 0)
+        && (mask & libc::W_OK == 0 || perm_bits & 0o2 != 0)
+        && (mask & libc::X_OK == 0 || perm_bits & 0o1 != 0)
 }
 
 fn child_path(parent: &str, name: &str) -> String {
@@ -1189,6 +1234,7 @@ fn truncate_file(path: &Path, size: u64) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     fn build_test_server(dir: &Path) -> FsServer {
         FsServer::builder()
@@ -1318,6 +1364,56 @@ mod tests {
         let server = build_test_server(dir.path());
         assert!(matches!(server.handle_op("test", FsOp::Release { inode: 1, fh: 0 }), FsResult::Ok));
         assert!(matches!(server.handle_op("test", FsOp::Fsync { inode: 1, fh: 0, datasync: false }), FsResult::Ok));
+    }
+
+    #[test]
+    fn access_respects_basic_mode_bits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.txt");
+        fs::write(&path, b"secret").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+
+        let server = build_test_server(dir.path());
+        let inode = match server.handle_op("test", FsOp::Lookup { parent: 1, name: "secret.txt".into() }) {
+            FsResult::Entry { inode, .. } => inode,
+            other => panic!("expected Entry, got {:?}", other),
+        };
+
+        assert!(matches!(
+            server.handle_op("test", FsOp::Access { inode, mask: libc::R_OK, uid: 1000, gid: 1000 }),
+            FsResult::Ok
+        ));
+        assert!(matches!(
+            server.handle_op("test", FsOp::Access { inode, mask: libc::W_OK, uid: 1000, gid: 1000 }),
+            FsResult::Ok
+        ));
+        assert!(matches!(
+            server.handle_op("test", FsOp::Access { inode, mask: libc::R_OK, uid: 2000, gid: 2000 }),
+            FsResult::Error { errno } if errno == libc::EACCES
+        ));
+    }
+
+    #[test]
+    fn access_root_bypasses_rw_but_not_exec() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tool.sh");
+        fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let server = build_test_server(dir.path());
+        let inode = match server.handle_op("test", FsOp::Lookup { parent: 1, name: "tool.sh".into() }) {
+            FsResult::Entry { inode, .. } => inode,
+            other => panic!("expected Entry, got {:?}", other),
+        };
+
+        assert!(matches!(
+            server.handle_op("test", FsOp::Access { inode, mask: libc::W_OK, uid: 0, gid: 0 }),
+            FsResult::Ok
+        ));
+        assert!(matches!(
+            server.handle_op("test", FsOp::Access { inode, mask: libc::X_OK, uid: 0, gid: 0 }),
+            FsResult::Error { errno } if errno == libc::EACCES
+        ));
     }
 
     #[test]

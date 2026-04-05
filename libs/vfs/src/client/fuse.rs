@@ -95,6 +95,19 @@ where
         }
     }
 
+    fn access(&mut self, req: &Request<'_>, ino: u64, mask: i32, reply: ReplyEmpty) {
+        match self.request(FsOp::Access {
+            inode: ino,
+            mask,
+            uid: req.uid(),
+            gid: req.gid(),
+        }) {
+            FsResult::Ok => reply.ok(),
+            FsResult::Error { errno } => reply.error(errno),
+            _ => reply.error(libc::EIO),
+        }
+    }
+
     fn setattr(
         &mut self,
         _req: &Request<'_>,
