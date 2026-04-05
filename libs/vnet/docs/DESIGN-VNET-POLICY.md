@@ -4,14 +4,15 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-04-05 | @claude-tl | Add connection timeline framework: 3-phase detection (DNS intent → handshake → flow), technique tables with API mapping, JA3/beacon gaps documented |
-| 2026-04-05 | @claude-tl | Add DNS exfiltration detection use case, label_lengths/name_wire_len in DnsQueryContext, defense-in-depth rationale |
-| 2026-04-05 | @claude-tl | PolicyEvaluator plumbing: builder→config→slirp thread, chaining examples with step-by-step walkthroughs (known-bad, unknown, known-good), correct zero-cost claims |
-| 2026-04-05 | @claude-tl | Add confidence to PolicyAction (min-propagation in chains), InterceptPolicy with ArcSwap (latency analysis), PolicyEvent enum at call site, remove EventSinkPolicy |
-| 2026-04-05 | @claude-tl | Add network metadata gaps: IP TTL, TCP window/options, DNS counts, MAC verification, guest PID parallel gap with vfs, priority assessment |
-| 2026-04-05 | @claude-tl | Add errno to PolicyAction, predefined errno pairs, OTel logging, EventSinkPolicy, cross-stack alignment with vfs, chain returns impl EgressPolicy |
-| 2026-04-05 | @claude-tl | Add PolicyReason (Cow-backed enum), on_tcp_flow with flow metadata + SNI, exfiltration/C2/fronting use cases, honest DPI limitations, &self + interior mutability guidance |
-| 2026-04-05 | @claude-tl | Redesign: fully generic policy (no Box/dyn), chainable via trait method, logging-as-policy, zero-cost NoPolicy default, honest intent derivation layering |
+| 2026-04-05 | @claude-tl | PolicyEvaluator plumbing: builder→config→slirp thread, chaining examples with walkthroughs (known-bad, unknown, known-good) |
+| 2026-04-05 | @claude-tl | Drop Observe, two-action PolicyAction (Allow/Deny + confidence), deny_threshold, emission truth table |
+| 2026-04-05 | @claude-tl | Network metadata gaps evaluated: keep DNS counts + guest PID, reject TTL/TCP options/MAC/libslirp state |
+| 2026-04-05 | @claude-tl | Confidence on PolicyAction, InterceptPolicy with ArcSwap (latency analysis), PolicyEvent enum at call site |
+| 2026-04-05 | @claude-tl | Connection timeline: 3-phase detection (DNS intent → handshake → flow), technique tables, JA3/beacon gaps |
+| 2026-04-05 | @claude-tl | DNS exfiltration detection, entropy analysis, label_lengths/name_wire_len in DnsQueryContext |
+| 2026-04-05 | @claude-tl | errno on PolicyAction, predefined errno pairs, OTel logging, cross-stack alignment with vfs |
+| 2026-04-05 | @claude-tl | PolicyReason (Cow-backed enum), on_tcp_flow with flow metadata + SNI, DPI limitations |
+| 2026-04-05 | @claude-tl | Redesign: generic policy (no Box/dyn), chainable via trait, NoPolicy default, intent derivation layering |
 | 2026-04-05 | @claude-tl | Initial DESIGN: DNS interception, TCP connection control, intent-based policy, callback API |
 
 ## Problem Statement
