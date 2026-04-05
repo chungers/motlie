@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-05 | @claude-tl | Redesign: fully generic policy (no Box/dyn), chainable via trait method, logging-as-policy, zero-cost NoPolicy default, honest intent derivation layering |
 | 2026-04-05 | @claude-tl | Initial DESIGN: DNS interception, TCP connection control, intent-based policy, callback API |
 
 ## Problem Statement
@@ -31,14 +32,16 @@ suspicious domains should be caught and optionally blocked.
    logged reason), or observe-only (allow but flag).
 
 3. **Intent-based policy**: policy decisions should consider the *intent*
-   behind an action (e.g. "this is a package manager doing apt update"
-   vs "this is an unknown binary phoning home"), not just the domain name.
-   The engine provides context; the policy callback decides.
+   behind an action, not just the domain name. The engine provides
+   context; the policy callback decides. See "Intent Derivation" for
+   what context is available at each stage.
 
-4. **Extensibility**: the policy engine is a set of Rust trait callbacks.
-   The host runtime supplies the policy implementation. `motlie-vnet`
-   provides default implementations (allow-all with logging, and a
-   category-based reference policy).
+4. **Extensibility**: the policy engine is a Rust trait with a `chain()`
+   method for composition. Policies are generic type parameters —
+   monomorphized at compile time with zero dynamic dispatch.
+
+5. **Zero-cost when unused**: when no policy is configured, the interceptor
+   is compiled out entirely. The hot path is identical to no-policy code.
 
 ### Non-Goals
 
@@ -67,7 +70,7 @@ Guest VM
 │        │                                         │
 │        ▼                                         │
 │  ┌─────────────────────────────────────┐        │
-│  │ TX Policy Interceptor               │        │
+│  │ TX Interceptor<P: EgressPolicy>     │        │
 │  │                                     │        │
 │  │ Parse: Eth → IP → UDP/TCP headers  │        │
 │  │                                     │        │
@@ -97,21 +100,13 @@ Guest VM
 │        │                                         │
 │        ▼                                         │
 │  ┌─────────────────────────────────────┐        │
-│  │ RX Policy Interceptor               │        │
+│  │ RX Interceptor<P: EgressPolicy>     │        │
 │  │                                     │        │
 │  │ DNS response (UDP port 53)?        │        │
 │  │   → parse response, extract domain │        │
 │  │     + resolved IPs                  │        │
 │  │   → call policy.on_dns_response()  │        │
-│  │   → if Deny: drop or rewrite to   │        │
-│  │     NXDOMAIN                        │        │
 │  │   → update domain→IP reverse map  │        │
-│  │                                     │        │
-│  │ TCP data?                          │        │
-│  │   → look up dst IP in reverse map │        │
-│  │   → enrich with domain context    │        │
-│  │   → call policy.on_tcp_data()     │        │
-│  │     (observe only — no modification)│        │
 │  │                                     │        │
 │  │ Otherwise: pass through            │        │
 │  └─────────────────────────────────────┘        │
@@ -141,21 +136,180 @@ from creating a host-side socket. Benefits:
 - The domain→IP reverse map (populated from DNS responses) enriches TCP
   decisions with domain context even though TCP only has IP addresses
 
-## Policy Callback API
+## Policy API
 
 ### Core Trait
 
 ```rust
-/// Context provided to policy callbacks for decision-making.
+/// Policy decision returned by callbacks.
+pub enum PolicyAction {
+    /// Allow the request. Optionally attach a reason for audit logging.
+    Allow { reason: Option<String> },
+    /// Deny the request. The engine forges a failure response (NXDOMAIN
+    /// for DNS, RST for TCP). The reason is logged.
+    Deny { reason: String },
+    /// Allow but flag for observation. The request proceeds normally but
+    /// the engine logs it at a higher severity.
+    Observe { reason: String },
+}
+
+/// Egress policy callbacks. All methods have default allow-all impls.
+///
+/// Callbacks run on the slirp thread. They must not block or perform I/O.
+/// For async policy evaluation, return Observe and make the decision
+/// asynchronously with a later connection teardown if needed.
+pub trait EgressPolicy: Send + 'static {
+    /// Called when the guest issues a DNS query.
+    fn on_dns_query(&self, ctx: &DnsQueryContext) -> PolicyAction {
+        PolicyAction::Allow { reason: None }
+    }
+
+    /// Called when a DNS response arrives from the host resolver.
+    fn on_dns_response(&self, ctx: &DnsResponseContext) -> PolicyAction {
+        PolicyAction::Allow { reason: None }
+    }
+
+    /// Called when the guest initiates a TCP connection (SYN detected).
+    fn on_tcp_connect(&self, ctx: &TcpConnectContext) -> PolicyAction {
+        PolicyAction::Allow { reason: None }
+    }
+
+    /// Chain another policy after this one.
+    ///
+    /// Evaluation order: `self` first, then `next`.
+    /// - First `Deny` wins (short-circuit).
+    /// - `Observe` is sticky — propagates even if `next` returns `Allow`.
+    /// - `Allow` defers to `next`.
+    fn chain<N: EgressPolicy>(self, next: N) -> ChainedPolicy<Self, N>
+    where
+        Self: Sized,
+    {
+        ChainedPolicy { current: self, next }
+    }
+}
+```
+
+### Chaining
+
+Policies compose via the `chain()` method on the trait. The result is a
+concrete generic type — no heap allocation, no vtable dispatch.
+
+```rust
+/// Two policies evaluated in sequence. First Deny wins, Observe is sticky.
+pub struct ChainedPolicy<A, B> {
+    current: A,
+    next: B,
+}
+
+impl<A: EgressPolicy, B: EgressPolicy> EgressPolicy for ChainedPolicy<A, B> {
+    fn on_dns_query(&self, ctx: &DnsQueryContext) -> PolicyAction {
+        match self.current.on_dns_query(ctx) {
+            PolicyAction::Deny { reason } => PolicyAction::Deny { reason },
+            PolicyAction::Observe { reason } => {
+                match self.next.on_dns_query(ctx) {
+                    PolicyAction::Deny { reason } => PolicyAction::Deny { reason },
+                    _ => PolicyAction::Observe { reason },
+                }
+            }
+            PolicyAction::Allow { .. } => self.next.on_dns_query(ctx),
+        }
+    }
+
+    fn on_dns_response(&self, ctx: &DnsResponseContext) -> PolicyAction {
+        // same pattern
+        # ..
+    }
+
+    fn on_tcp_connect(&self, ctx: &TcpConnectContext) -> PolicyAction {
+        // same pattern
+        # ..
+    }
+}
+```
+
+The compiler monomorphizes the chain:
+
+```rust
+let policy = LoggingPolicy::new()
+    .chain(CategoryPolicy::default())
+    .chain(my_runtime_policy);
+
+// Concrete type at compile time:
+// ChainedPolicy<LoggingPolicy, ChainedPolicy<CategoryPolicy, MyPolicy>>
+// All calls inlined — zero dynamic dispatch in the hot loop.
+```
+
+### Zero-Cost NoPolicy Default
+
+```rust
+/// Zero-cost policy that allows everything. When used as the policy type,
+/// the compiler optimizes the entire interceptor away — the hot path
+/// compiles to the same code as if policy support did not exist.
+pub struct NoPolicy;
+
+impl EgressPolicy for NoPolicy {
+    fn on_dns_query(&self, _: &DnsQueryContext) -> PolicyAction {
+        PolicyAction::Allow { reason: None }
+    }
+    fn on_dns_response(&self, _: &DnsResponseContext) -> PolicyAction {
+        PolicyAction::Allow { reason: None }
+    }
+    fn on_tcp_connect(&self, _: &TcpConnectContext) -> PolicyAction {
+        PolicyAction::Allow { reason: None }
+    }
+}
+```
+
+### Logging as a Policy
+
+Logging is not special — it's a regular `EgressPolicy` implementation
+that always returns `Allow` but emits structured tracing events. It
+participates in the chain like any other policy.
+
+```rust
+/// Logs every DNS query and TCP connection via tracing.
+/// Always returns Allow — observe-only, no enforcement.
+pub struct LoggingPolicy;
+
+impl EgressPolicy for LoggingPolicy {
+    fn on_dns_query(&self, ctx: &DnsQueryContext) -> PolicyAction {
+        tracing::info!(
+            subsystem = "vnet-policy",
+            domain = %ctx.domain,
+            query_type = ?ctx.query_type,
+            source_port = ctx.source_port,
+            "DNS query"
+        );
+        PolicyAction::Allow { reason: None }
+    }
+
+    fn on_tcp_connect(&self, ctx: &TcpConnectContext) -> PolicyAction {
+        tracing::info!(
+            subsystem = "vnet-policy",
+            dst_ip = %ctx.dst_ip,
+            dst_port = ctx.dst_port,
+            domain = ?ctx.domain,
+            source_port = ctx.source_port,
+            "TCP connect"
+        );
+        PolicyAction::Allow { reason: None }
+    }
+
+    // on_dns_response: log resolved IPs
+}
+```
+
+### Policy Context Types
+
+```rust
 pub struct DnsQueryContext {
     /// The queried domain name (e.g. "archive.ubuntu.com").
     pub domain: String,
     /// DNS record type (A, AAAA, CNAME, etc.).
     pub query_type: DnsQueryType,
-    /// Guest-side source port (correlates with the requesting process
-    /// if the host runtime has process visibility via vsock).
+    /// Guest-side source port.
     pub source_port: u16,
-    /// Timestamp of the query.
+    /// Timestamp.
     pub timestamp: std::time::Instant,
 }
 
@@ -183,104 +337,96 @@ pub struct DnsResponseContext {
     /// Timestamp.
     pub timestamp: std::time::Instant,
 }
+```
 
-/// Policy decision returned by callbacks.
-pub enum PolicyAction {
-    /// Allow the request. Optionally attach a reason for audit logging.
-    Allow { reason: Option<String> },
-    /// Deny the request. The engine forges a failure response (NXDOMAIN
-    /// for DNS, RST for TCP). The reason is logged.
-    Deny { reason: String },
-    /// Allow but flag for observation. The request proceeds normally but
-    /// the engine logs it at a higher severity.
-    Observe { reason: String },
-}
+## Intent Derivation
 
-/// Policy callbacks implemented by the host runtime.
-///
-/// All methods have default implementations that allow everything with
-/// logging (observe-all). Override specific methods to enforce policy.
-///
-/// Callbacks are invoked on the slirp thread. They must not block or
-/// perform I/O — compute a decision and return immediately. For async
-/// policy evaluation, return Observe and make the decision asynchronously
-/// with a later connection teardown if needed.
-pub trait EgressPolicy: Send + 'static {
-    /// Called when the guest issues a DNS query. Return Deny to prevent
-    /// the query from reaching the host resolver (forged NXDOMAIN).
-    fn on_dns_query(&self, ctx: &DnsQueryContext) -> PolicyAction {
-        PolicyAction::Allow { reason: None }
-    }
+Intent-based policy requires context about *why* a connection is
+happening, not just *where* it goes. The available context depends on
+the maturity of the guest agent integration:
 
-    /// Called when a DNS response is received from the host resolver,
-    /// before it is forwarded to the guest. Return Deny to rewrite the
-    /// response to NXDOMAIN.
-    fn on_dns_response(&self, ctx: &DnsResponseContext) -> PolicyAction {
-        PolicyAction::Allow { reason: None }
-    }
+### v1: Domain + Port Heuristics (available now)
 
-    /// Called when the guest initiates a TCP connection (SYN detected).
-    /// The domain field is populated from the DNS reverse map if the
-    /// guest resolved this IP via DNS. Return Deny to forge a RST.
-    fn on_tcp_connect(&self, ctx: &TcpConnectContext) -> PolicyAction {
-        PolicyAction::Allow { reason: None }
-    }
+The policy engine can classify connections based on:
+- **Domain patterns**: suffix matching (`*.ubuntu.com` → PackageManager)
+- **Well-known ports**: 443 (HTTPS), 22 (SSH), 80 (HTTP)
+- **Destination port + domain combination**: port 443 + `crates.io` = cargo fetch
+
+This is the CategoryPolicy's approach. It's a heuristic — better than
+blanket IP rules, but cannot distinguish `curl evil.com` from `apt update`
+when both use HTTPS to the same CDN.
+
+### v2: Guest Process Identity (requires russhd, Phase 3.6)
+
+When the host-side russhd + vsock agent is running, the guest agent can
+report which PID opened which socket. This context flows into
+`TcpConnectContext` as an optional field:
+
+```rust
+pub struct TcpConnectContext {
+    // ... existing fields ...
+    /// Guest process name that initiated this connection, if reported
+    /// by the guest agent. Enables true intent-based decisions:
+    /// "apt" connecting to ubuntu.com = Allow
+    /// "unknown-binary" connecting to ubuntu.com = Observe
+    pub guest_process: Option<String>,
 }
 ```
 
-### Intent-Based Policy Example
+This is the long-term target. The policy trait is designed to accommodate
+it — `guest_process` is `Option`, so v1 policies work without it, and
+v2 policies can use it when available.
 
-The callback API provides context — the policy implementation decides
-based on intent. Example: a category-based policy that classifies domains
-by purpose:
+### v3: Project Manifest Correlation (future)
+
+The host runtime could parse `Cargo.toml`, `package.json`, `requirements.txt`
+to derive an expected dependency set, then auto-generate an allowlist of
+domains those dependencies need (crates.io, npmjs.com, pypi.org, etc.).
+Connections outside the manifest are flagged.
+
+This is a host-runtime concern, not a vnet concern — it would be
+implemented as a custom `EgressPolicy` that reads the manifest.
+
+## Generic Type Flow
+
+The policy type parameter flows through the entire stack:
+
+```
+VnetConfig<P>           // P = NoPolicy | LoggingPolicy | ChainedPolicy<...>
+  → VnetBackend<P>
+    → slirp_thread_main<P>()
+      → TxInterceptor<P>   // owns the policy, calls on_dns_query/on_tcp_connect
+      → RxInterceptor<P>   // borrows the policy, calls on_dns_response
+```
+
+`VnetConfig` defaults to `NoPolicy`:
 
 ```rust
-pub enum DomainCategory {
-    PackageManager,  // archive.ubuntu.com, pypi.org, crates.io, npmjs.com
-    SourceControl,   // github.com, gitlab.com, bitbucket.org
-    ApiEndpoint,     // api.anthropic.com, api.openai.com
-    DnsInfra,        // dns.google, 1.1.1.1
-    AdNetwork,       // doubleclick.net, googlesyndication.com
-    Analytics,       // google-analytics.com, mixpanel.com
-    Unknown,         // not categorized
+impl VnetConfig<NoPolicy> {
+    pub fn builder() -> VnetConfigBuilder<NoPolicy> { ... }
 }
 
-impl EgressPolicy for CategoryPolicy {
-    fn on_dns_query(&self, ctx: &DnsQueryContext) -> PolicyAction {
-        let category = self.categorize(&ctx.domain);
-        match category {
-            DomainCategory::PackageManager
-            | DomainCategory::SourceControl
-            | DomainCategory::ApiEndpoint
-            | DomainCategory::DnsInfra => PolicyAction::Allow {
-                reason: Some(format!("{:?}", category)),
-            },
-            DomainCategory::AdNetwork
-            | DomainCategory::Analytics => PolicyAction::Deny {
-                reason: format!("blocked {:?}: {}", category, ctx.domain),
-            },
-            DomainCategory::Unknown => PolicyAction::Observe {
-                reason: format!("unknown domain: {}", ctx.domain),
-            },
+impl<P: EgressPolicy> VnetConfigBuilder<P> {
+    pub fn egress_policy<Q: EgressPolicy>(self, policy: Q) -> VnetConfigBuilder<Q> {
+        // Replaces the policy type — builder returns a new generic variant
+        VnetConfigBuilder {
+            policy,
+            socket_path: self.socket_path,
+            // ... copy other fields
         }
     }
 }
 ```
 
-This is not the only policy shape — the trait is open. The host runtime
-could implement:
-- A learning-mode policy that observes all traffic for N minutes, then
-  locks down to only the domains seen during learning
-- A prompt-based policy that asks the user "allow git clone from X?"
-  (via the REPL) on first access to an unknown domain
-- An allowlist derived from a project manifest (Cargo.toml dependencies
-  → crates.io, github.com)
+When `P = NoPolicy`, the compiler sees that all interceptor methods
+return `Allow { reason: None }` and optimizes away the parsing, the
+reverse map lookup, and the response forging code. The slirp thread
+loop compiles to the same machine code as the no-policy path.
 
-### Domain→IP Reverse Map
+## Domain→IP Reverse Map
 
-DNS interception populates a reverse map (`HashMap<Ipv4Addr, DomainInfo>`)
-so TCP connection decisions have domain context. Without this, TCP-level
-policy would only see raw IP addresses.
+DNS interception populates a reverse map so TCP connection decisions
+have domain context:
 
 ```rust
 struct DomainInfo {
@@ -294,15 +440,13 @@ struct DnsReverseMap {
 }
 
 impl DnsReverseMap {
-    /// Record a DNS resolution.
-    fn insert(&mut self, ip: Ipv4Addr, domain: String, ttl: u32) { ... }
-
-    /// Look up the domain that resolved to this IP.
-    /// Returns None if the IP was never resolved via DNS (direct IP access)
-    /// or if the TTL has expired.
-    fn lookup(&self, ip: &Ipv4Addr) -> Option<&str> { ... }
+    fn insert(&mut self, ip: Ipv4Addr, domain: String, ttl: u32);
+    fn lookup(&self, ip: &Ipv4Addr) -> Option<&str>;
 }
 ```
+
+The reverse map is owned by the interceptor on the slirp thread — no
+synchronization needed.
 
 ## Packet Parsing
 
@@ -324,12 +468,7 @@ pub enum ParsedPacket {
     DnsQuery { domain: String, query_type: u16, src_port: u16 },
     DnsResponse { domain: String, answers: Vec<DnsAnswer>, src_port: u16 },
     TcpSyn { dst_ip: Ipv4Addr, dst_port: u16, src_port: u16 },
-    Other, // pass through without policy evaluation
-}
-
-pub struct DnsAnswer {
-    pub ip: Ipv4Addr,
-    pub ttl: u32,
+    Other,
 }
 ```
 
@@ -339,79 +478,133 @@ When policy denies a request, the interceptor forges a guest-visible
 response:
 
 - **DNS deny**: construct an NXDOMAIN response with the original query's
-  transaction ID, matching the expected DNS response format. Inject into
-  the rx path (bypassing libslirp entirely).
-- **TCP deny**: construct a TCP RST packet with correct sequence numbers
-  derived from the SYN. Inject into the rx path.
+  transaction ID. Inject into the rx path (bypassing libslirp).
+- **TCP deny**: construct a TCP RST packet with correct sequence numbers.
+  Inject into the rx path.
 
 Both require constructing valid Ethernet + IP + protocol headers with
 correct checksums.
 
-## Integration with VnetBackend
+## Performance
 
-### Configuration
+### Per-Packet Overhead by Policy Configuration
+
+| Configuration | Parse cost | Policy cost | Forge cost | Total |
+|--------------|-----------|------------|-----------|-------|
+| `NoPolicy` (default) | 0 | 0 | 0 | **0** (compiled out) |
+| `LoggingPolicy` only | ~50ns (IP header) / ~300ns (DNS) | ~20ns (tracing) | 0 | ~70-320ns |
+| `LoggingPolicy.chain(CategoryPolicy)` | same | ~70ns (HashMap lookup) | 0 (allow) / ~500ns (deny) | ~120-870ns |
+| Any chain with deny | same | same | ~500ns (per denied packet) | ~120-870ns |
+
+At 1000 packets/s (heavy development workload), worst-case overhead is
+~1ms/s — negligible compared to libslirp's ~1-10us per packet and
+syscall costs.
+
+### Zero-Cost NoPolicy Guarantee
+
+When `P = NoPolicy`:
+- `on_dns_query()` is `{ PolicyAction::Allow { reason: None } }`
+- The compiler inlines this → the interceptor's `if let Deny = ...` branch
+  is statically false → the parser call, reverse map lookup, and forge
+  call are all dead code → eliminated
+- The slirp thread loop compiles to:
+  ```rust
+  while let Ok(frame) = tx_receiver.try_recv() {
+      slirp.input(&frame);
+  }
+  ```
+  Identical to the current no-policy code. Verified by inspecting the
+  generated assembly (future: add a `#[test]` that checks binary size
+  delta between NoPolicy and no-policy-support builds).
+
+## Integration Examples
+
+### Observe-only (logging, no enforcement)
 
 ```rust
-let policy = Arc::new(MyPolicy::new());
-
 let config = VnetConfig::builder()
     .socket_path("/tmp/motlie-vnet-0.sock")
-    .egress_policy(policy)  // optional — default is allow-all with logging
+    .egress_policy(LoggingPolicy::new())
     .build()?;
 ```
 
-The `EgressPolicy` trait object is `Arc<dyn EgressPolicy>` — shared
-between the slirp thread (where interception runs) and the host runtime
-(which may update policy state).
-
-### Threading
-
-Policy callbacks run on the slirp thread. They must be non-blocking.
-The `EgressPolicy` trait requires `Send` (moved to slirp thread) but
-not `Sync` — the slirp thread is the sole caller.
-
-If the host runtime needs to update policy state (e.g. add a domain to
-an allowlist), it communicates via `Arc<AtomicBool>` flags or
-`Arc<RwLock<PolicyState>>` — the policy implementation manages its own
-synchronization.
-
-### Performance Impact
-
-Per-packet overhead:
-- **Ethernet/IP/TCP header parsing**: ~50ns (fixed offsets, no allocation)
-- **DNS name parsing**: ~200ns (label decompression, string allocation)
-- **Policy callback**: depends on implementation (HashMap lookup ~50ns)
-- **Response forging (deny only)**: ~500ns (construct + checksum)
-
-Total: ~300ns per allowed packet, ~800ns per denied packet. Negligible
-compared to libslirp's per-packet overhead (~1-10us) and syscall costs.
-
-## Observability
-
-### Structured Logging
-
-All policy decisions are logged via `tracing` with structured fields:
+### Full enforcement with chaining
 
 ```rust
-tracing::info!(
-    subsystem = "vnet-policy",
-    domain = %ctx.domain,
-    action = "deny",
-    reason = %reason,
-    query_type = ?ctx.query_type,
-    source_port = ctx.source_port,
-    "DNS query denied"
-);
+let config = VnetConfig::builder()
+    .socket_path("/tmp/motlie-vnet-0.sock")
+    .egress_policy(
+        LoggingPolicy::new()
+            .chain(CategoryPolicy::from_rules(my_rules))
+            .chain(my_runtime_policy)
+    )
+    .build()?;
 ```
 
-### Metrics (Future)
+### No policy (zero overhead, current behavior)
 
-The interceptor maintains counters:
-- `dns_queries_total` (by action: allow/deny/observe)
-- `tcp_connections_total` (by action)
-- `dns_domains_seen` (unique count)
+```rust
+let config = VnetConfig::builder()
+    .socket_path("/tmp/motlie-vnet-0.sock")
+    .build()?;
+// P = NoPolicy, interceptor compiled out
+```
 
-Exposed via a `PolicyStats` struct accessible from `VnetHandle`.
+## Category Policy
+
+### Domain Classification
+
+The `CategoryPolicy` classifies domains by purpose using a configurable
+rule set. The library ships a default rule set but the host runtime can
+override it.
+
+```rust
+pub enum DomainCategory {
+    PackageManager,  // archive.ubuntu.com, pypi.org, crates.io
+    SourceControl,   // github.com, gitlab.com
+    ApiEndpoint,     // api.anthropic.com
+    DnsInfra,        // dns.google
+    AdNetwork,       // doubleclick.net
+    Analytics,       // google-analytics.com
+    Unknown,
+}
+```
+
+Rules are suffix-based with exact-match priority:
+
+```rust
+pub struct CategoryRule {
+    /// Domain pattern: exact ("crates.io") or suffix ("*.ubuntu.com")
+    pub pattern: String,
+    /// Category to assign
+    pub category: DomainCategory,
+}
+
+impl CategoryPolicy {
+    pub fn from_rules(rules: Vec<CategoryRule>) -> Self;
+    pub fn default() -> Self; // built-in rule set
+}
+```
+
+The default rule set is a starting point. It is not comprehensive — the
+host runtime should extend or replace it based on the project's needs.
+
+### Category → Action Mapping
+
+Default behavior per category:
+
+| Category | Action | Rationale |
+|----------|--------|-----------|
+| PackageManager | Allow | Expected dev workflow |
+| SourceControl | Allow | Expected dev workflow |
+| ApiEndpoint | Allow | Expected dev workflow |
+| DnsInfra | Allow | Required for resolution |
+| AdNetwork | Deny | Not expected in dev VM |
+| Analytics | Deny | Not expected in dev VM |
+| Unknown | Observe | Flag for review, don't block |
+
+The mapping is configurable — the host runtime can change Unknown → Deny
+for stricter environments.
 
 ## Components and Testing
 
@@ -422,41 +615,51 @@ Exposed via a `PolicyStats` struct accessible from `VnetHandle`.
 | Response forging (NXDOMAIN) | Unit test: forge response, re-parse, verify NXDOMAIN |
 | Response forging (TCP RST) | Unit test: forge RST, verify flags + sequence numbers |
 | `DnsReverseMap` | Unit test: insert, lookup, TTL expiry |
-| TX interceptor | Integration test: inject DNS query frame, verify policy callback called |
-| RX interceptor | Integration test: inject DNS response, verify reverse map updated |
+| `ChainedPolicy` | Unit test: Deny short-circuits, Observe sticky, Allow defers |
+| `LoggingPolicy` | Unit test: always Allow, tracing events emitted |
+| `CategoryPolicy` | Unit test: suffix matching, known domains, Unknown handling |
+| TX interceptor | Integration test: denied DNS → forged NXDOMAIN in rx channel |
+| RX interceptor | Integration test: DNS response → reverse map updated |
+| NoPolicy optimization | Build test: binary size delta ≈ 0 vs no-policy-support |
 | End-to-end deny | Integration test: denied domain → guest sees NXDOMAIN |
-| CategoryPolicy | Unit test: known domains categorized correctly |
 
 ## Alternatives Considered
 
 ### Alternative 1: Custom DNS Resolver (proxy approach)
 
-Run a local DNS resolver on the host that `motlie-vnet` points to
-(via `dns_ipv4`). The resolver applies policy before forwarding.
+Run a local DNS resolver on the host that `motlie-vnet` points to.
 
-**Pros**: clean separation, standard DNS protocol, works with any policy engine
-**Cons**: extra process, extra latency (local socket hop), doesn't cover
-TCP connections, doesn't have guest-process context
+**Pros**: clean separation, standard DNS protocol
+**Cons**: extra process, extra latency, doesn't cover TCP connections,
+doesn't have guest-process context
 
 ### Alternative 2: eBPF/XDP in libslirp
 
 Hook into libslirp's internal packet processing via eBPF.
 
 **Pros**: zero-copy, kernel-level performance
-**Cons**: requires kernel features, platform-dependent, libslirp doesn't
-expose eBPF hooks, violates the rootless/no-capability design goal
+**Cons**: requires kernel features, platform-dependent, violates the
+rootless/no-capability design goal
 
 ### Alternative 3: Transparent proxy (e.g. mitmproxy)
 
 Route all guest traffic through a proxy.
 
-**Pros**: full application-layer visibility, TLS inspection possible
-**Cons**: requires CA trust, breaks certificate pinning, adds significant
-latency, complex setup, violates the embeddable library goal
+**Pros**: full application-layer visibility, TLS inspection
+**Cons**: requires CA trust, breaks certificate pinning, complex setup,
+violates the embeddable library goal
 
-### Chosen: Frame-level interception in the Rust layer
+### Alternative 4: Box<dyn EgressPolicy> dynamic dispatch
 
-**Why**: works within the existing two-thread architecture, no extra
-processes, no kernel features, no TLS breakage. Policy callbacks keep
-the engine extensible without baking in specific rules. The domain→IP
-reverse map bridges the DNS→TCP context gap.
+Use trait objects for runtime polymorphism.
+
+**Pros**: simpler type signatures, runtime-configurable chains
+**Cons**: vtable dispatch per packet in the hot loop, heap allocation
+for the policy chain, cannot be optimized away for NoPolicy
+
+### Chosen: Generic type parameter with trait-level chaining
+
+**Why**: zero-cost when unused (NoPolicy compiled out), monomorphized
+chain calls in the hot loop, no heap allocation, composable via
+`.chain()` on the trait. The host runtime knows all policy types at
+compile time — dynamic dispatch adds cost without benefit.

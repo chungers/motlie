@@ -7,6 +7,7 @@ DNS/TCP interception with extensible policy callbacks.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-05 | @claude-tl | Update: generic policy type flow, ChainedPolicy tasks, NoPolicy zero-cost tasks, logging-as-policy |
 | 2026-04-05 | @claude-tl | Initial PLAN: 4 phases from packet parsing to composed integration |
 
 ## Status
@@ -80,18 +81,35 @@ Design references: [Policy Callback API](./DESIGN-policy.md), [Domain→IP Rever
 ### 2.1 Policy Types and Trait (`src/policy/mod.rs`)
 
 - [ ] 2.1.1 Define `DnsQueryContext`, `TcpConnectContext`, `DnsResponseContext` structs.
-  Design ref: [Core Trait](./DESIGN-policy.md)
+  Design ref: [Policy Context Types](./DESIGN-policy.md)
 
 - [ ] 2.1.2 Define `PolicyAction` enum: `Allow { reason }`, `Deny { reason }`, `Observe { reason }`.
 
-- [ ] 2.1.3 Define `EgressPolicy` trait with default implementations (allow-all).
-  Methods: `on_dns_query()`, `on_dns_response()`, `on_tcp_connect()`.
+- [ ] 2.1.3 Define `EgressPolicy` trait with default allow-all impls and `chain()` method.
+  Methods: `on_dns_query()`, `on_dns_response()`, `on_tcp_connect()`, `chain()`.
   Trait bound: `Send + 'static`.
+  `chain()` returns `ChainedPolicy<Self, N>` — generic, no Box/dyn.
+  Design ref: [Core Trait](./DESIGN-policy.md), [Chaining](./DESIGN-policy.md)
 
-- [ ] 2.1.4 Implement `LoggingPolicy` — default allow-all that logs every decision
-  via `tracing::info!` with structured fields.
+- [ ] 2.1.4 Implement `ChainedPolicy<A, B>` struct with `EgressPolicy` impl.
+  Evaluation: first Deny wins (short-circuit), Observe is sticky, Allow defers.
+  Design ref: [Chaining](./DESIGN-policy.md)
 
-- [ ] 2.1.5 Add test: `LoggingPolicy` returns `Allow` for all contexts.
+- [ ] 2.1.5 Implement `NoPolicy` — zero-cost default, all methods return `Allow { reason: None }`.
+  When used as the generic parameter, the compiler eliminates the interceptor entirely.
+  Design ref: [Zero-Cost NoPolicy Default](./DESIGN-policy.md)
+
+- [ ] 2.1.6 Implement `LoggingPolicy` — always returns `Allow`, logs every decision
+  via `tracing::info!` with structured fields. Participates in the chain like
+  any other policy — it is not special-cased.
+  Design ref: [Logging as a Policy](./DESIGN-policy.md)
+
+- [ ] 2.1.7 Add test: `NoPolicy` returns `Allow` for all contexts.
+- [ ] 2.1.8 Add test: `LoggingPolicy` returns `Allow` for all contexts.
+- [ ] 2.1.9 Add test: `ChainedPolicy` — first Deny wins.
+- [ ] 2.1.10 Add test: `ChainedPolicy` — Observe is sticky (not overridden by later Allow).
+- [ ] 2.1.11 Add test: `ChainedPolicy` — Allow defers to next policy.
+- [ ] 2.1.12 Add test: three-policy chain via `.chain().chain()` compiles and works.
 
 ### 2.2 DNS Reverse Map (`src/policy/reverse_map.rs`)
 
@@ -141,16 +159,19 @@ Design references: [Interception Points](./DESIGN-policy.md), [Integration with 
 
 ### 3.1 TX Interceptor (`src/policy/interceptor.rs`)
 
-- [ ] 3.1.1 Implement `TxInterceptor` struct that holds the policy, reverse map,
-  and forging functions. Interface:
+- [ ] 3.1.1 Implement `TxInterceptor<P: EgressPolicy>` — generic over the policy type.
+  Holds the policy, reverse map, and forging functions. Interface:
   ```rust
-  impl TxInterceptor {
+  impl<P: EgressPolicy> TxInterceptor<P> {
       /// Inspect a guest→host frame. Returns:
       /// - Some(response_frame) if denied (forged NXDOMAIN or RST to inject)
       /// - None if allowed (frame should proceed to slirp.input())
       fn intercept(&mut self, frame: &[u8]) -> Option<Vec<u8>>;
   }
   ```
+  When `P = NoPolicy`, the compiler eliminates the parse + callback + forge
+  code entirely.
+  Design ref: [Generic Type Flow](./DESIGN-policy.md)
 
 - [ ] 3.1.2 Wire `TxInterceptor` into `slirp_thread_main()`.
   Before `slirp.input(&frame)`, call `interceptor.intercept(&frame)`.
@@ -178,11 +199,13 @@ Design references: [Interception Points](./DESIGN-policy.md), [Integration with 
 
 ### 3.3 VnetConfig Integration
 
-- [ ] 3.3.1 Add `egress_policy: Option<Arc<dyn EgressPolicy>>` to `VnetConfig`.
-  Builder method: `.egress_policy(policy)`. Default: `LoggingPolicy`.
+- [ ] 3.3.1 Make `VnetConfig<P: EgressPolicy = NoPolicy>` generic over the policy type.
+  Builder method `.egress_policy(policy)` changes the generic parameter.
+  Default: `NoPolicy` (zero-cost, interceptor compiled out).
+  Design ref: [Generic Type Flow](./DESIGN-policy.md)
 
-- [ ] 3.3.2 Thread the policy through `VnetBackend::start()` → slirp thread →
-  `TxInterceptor` + RX interceptor.
+- [ ] 3.3.2 Make `VnetBackend<P>`, `slirp_thread_main<P>()` generic over P.
+  Thread the policy through `start()` → slirp thread → `TxInterceptor<P>`.
 
 - [ ] 3.3.3 Add `PolicyStats` struct to `VnetHandle`:
   ```rust
@@ -197,8 +220,10 @@ Design references: [Interception Points](./DESIGN-policy.md), [Integration with 
   }
   ```
 
-- [ ] 3.3.4 Add test: VnetConfig with custom policy → policy callbacks invoked.
-- [ ] 3.3.5 Add test: VnetConfig without policy → LoggingPolicy used.
+- [ ] 3.3.4 Add test: `VnetConfig<NoPolicy>` compiles, starts, and runs with
+  zero interceptor overhead (existing tests continue to pass unchanged).
+- [ ] 3.3.5 Add test: `VnetConfig` with `LoggingPolicy` → policy callbacks invoked.
+- [ ] 3.3.6 Add test: `VnetConfig` with chained policy → chain evaluated correctly.
 
 ---
 
