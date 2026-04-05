@@ -7,6 +7,7 @@ DNS/TCP interception with extensible policy callbacks.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-05 | @claude-tl | Add PolicyReason, on_tcp_flow, FlowTracker, SNI parsing tasks. Renumber Phase 3 sections |
 | 2026-04-05 | @claude-tl | Update: generic policy type flow, ChainedPolicy tasks, NoPolicy zero-cost tasks, logging-as-policy |
 | 2026-04-05 | @claude-tl | Initial PLAN: 4 phases from packet parsing to composed integration |
 
@@ -68,9 +69,16 @@ Design references: [Packet Parsing](./DESIGN-policy.md), [Response Forging](./DE
   - Compute IP + TCP checksums
   Design ref: [Response Forging](./DESIGN-policy.md)
 
-- [ ] 1.2.3 Add test: forge NXDOMAIN from a real DNS query, re-parse → verify NXDOMAIN.
-- [ ] 1.2.4 Add test: forge RST from a real TCP SYN, re-parse → verify RST+ACK flags.
-- [ ] 1.2.5 Add test: forged responses have correct checksums (validate with `ip_checksum`).
+- [ ] 1.2.3 Implement `parse_tls_sni(payload: &[u8]) -> Option<String>`.
+  Parse TLS ClientHello to extract the SNI extension hostname.
+  Only parses the first data packet on port 443 connections.
+  Design ref: [SNI Extraction](./DESIGN-policy.md)
+
+- [ ] 1.2.4 Add test: forge NXDOMAIN from a real DNS query, re-parse → verify NXDOMAIN.
+- [ ] 1.2.5 Add test: forge RST from a real TCP SYN, re-parse → verify RST+ACK flags.
+- [ ] 1.2.6 Add test: forged responses have correct checksums (validate with `ip_checksum`).
+- [ ] 1.2.7 Add test: extract SNI from a real TLS ClientHello.
+- [ ] 1.2.8 Add test: non-TLS data on port 443 → SNI returns None (no panic).
 
 ---
 
@@ -83,10 +91,17 @@ Design references: [Policy Callback API](./DESIGN-policy.md), [Domain→IP Rever
 - [ ] 2.1.1 Define `DnsQueryContext`, `TcpConnectContext`, `DnsResponseContext` structs.
   Design ref: [Policy Context Types](./DESIGN-policy.md)
 
-- [ ] 2.1.2 Define `PolicyAction` enum: `Allow { reason }`, `Deny { reason }`, `Observe { reason }`.
+- [ ] 2.1.2 Define `PolicyReason` enum: `Category(DomainCategory)`, `Custom(Cow<'static, str>)`.
+  Implement `From<&'static str>`, `From<String>`, `From<DomainCategory>`.
+  Design ref: [PolicyReason](./DESIGN-policy.md)
 
-- [ ] 2.1.3 Define `EgressPolicy` trait with default allow-all impls and `chain()` method.
-  Methods: `on_dns_query()`, `on_dns_response()`, `on_tcp_connect()`, `chain()`.
+- [ ] 2.1.3 Define `PolicyAction` enum using `PolicyReason`:
+  `Allow { reason: Option<PolicyReason> }`, `Deny { reason: PolicyReason }`,
+  `Observe { reason: PolicyReason }`.
+
+- [ ] 2.1.4 Define `EgressPolicy` trait with default allow-all impls and `chain()` method.
+  Methods: `on_dns_query()`, `on_dns_response()`, `on_tcp_connect()`, `on_tcp_flow()`, `chain()`.
+  All callbacks take `&self` — stateful policies use interior mutability.
   Trait bound: `Send + 'static`.
   `chain()` returns `ChainedPolicy<Self, N>` — generic, no Box/dyn.
   Design ref: [Core Trait](./DESIGN-policy.md), [Chaining](./DESIGN-policy.md)
@@ -188,26 +203,56 @@ Design references: [Interception Points](./DESIGN-policy.md), [Integration with 
 - [ ] 3.1.5 Add test: TX interceptor with allow-all → frame passed through, no
   forged response.
 
-### 3.2 RX Interceptor
+### 3.2 Flow Tracker (`src/policy/flow.rs`)
 
-- [ ] 3.2.1 Implement RX-side DNS response observation in `SlirpHandler::send_packet()`.
+- [ ] 3.2.1 Implement `FlowTracker` — maintains per-connection state:
+  ```rust
+  struct FlowState {
+      dst_ip: Ipv4Addr,
+      dst_port: u16,
+      domain: Option<String>,
+      sni: Option<String>,       // extracted from first TX data packet
+      source_port: u16,
+      bytes_tx: u64,
+      bytes_rx: u64,
+      started: Instant,
+      sni_checked: bool,         // only parse first TX packet for SNI
+  }
+  ```
+  Keyed by `(src_port, dst_ip, dst_port)`. Created on SYN, updated on
+  data packets, removed on FIN/RST.
+
+- [ ] 3.2.2 On first TX data packet to port 443: call `parse_tls_sni()`,
+  store in `FlowState.sni`.
+
+- [ ] 3.2.3 Call `policy.on_tcp_flow()` periodically (every N packets or
+  every T seconds) and once on flow close. If Deny, forge RST.
+
+- [ ] 3.2.4 Add test: flow tracker creates state on SYN, removes on FIN.
+- [ ] 3.2.5 Add test: SNI extracted from first TLS packet on port 443.
+- [ ] 3.2.6 Add test: on_tcp_flow called with correct byte counts.
+
+### 3.3 RX Interceptor
+
+- [ ] 3.3.1 Implement RX-side DNS response observation in `SlirpHandler::send_packet()`.
   Parse DNS responses, update the reverse map, call `policy.on_dns_response()`.
   If Deny, rewrite frame to NXDOMAIN before queueing.
 
-- [ ] 3.2.2 Add test: DNS response updates reverse map.
-- [ ] 3.2.3 Add test: RX deny rewrites response to NXDOMAIN.
+- [ ] 3.3.2 Add test: DNS response updates reverse map.
+- [ ] 3.3.3 Add test: RX deny rewrites response to NXDOMAIN.
 
-### 3.3 VnetConfig Integration
+### 3.4 VnetConfig Integration
 
-- [ ] 3.3.1 Make `VnetConfig<P: EgressPolicy = NoPolicy>` generic over the policy type.
+- [ ] 3.4.1 Make `VnetConfig<P: EgressPolicy = NoPolicy>` generic over the policy type.
   Builder method `.egress_policy(policy)` changes the generic parameter.
   Default: `NoPolicy` (zero-cost, interceptor compiled out).
   Design ref: [Generic Type Flow](./DESIGN-policy.md)
 
-- [ ] 3.3.2 Make `VnetBackend<P>`, `slirp_thread_main<P>()` generic over P.
-  Thread the policy through `start()` → slirp thread → `TxInterceptor<P>`.
+- [ ] 3.4.2 Make `VnetBackend<P>`, `slirp_thread_main<P>()` generic over P.
+  Thread the policy through `start()` → slirp thread → `TxInterceptor<P>`
+  + `FlowTracker` + RX interceptor.
 
-- [ ] 3.3.3 Add `PolicyStats` struct to `VnetHandle`:
+- [ ] 3.4.3 Add `PolicyStats` struct to `VnetHandle`:
   ```rust
   pub struct PolicyStats {
       pub dns_allowed: u64,
@@ -220,10 +265,10 @@ Design references: [Interception Points](./DESIGN-policy.md), [Integration with 
   }
   ```
 
-- [ ] 3.3.4 Add test: `VnetConfig<NoPolicy>` compiles, starts, and runs with
+- [ ] 3.4.4 Add test: `VnetConfig<NoPolicy>` compiles, starts, and runs with
   zero interceptor overhead (existing tests continue to pass unchanged).
-- [ ] 3.3.5 Add test: `VnetConfig` with `LoggingPolicy` → policy callbacks invoked.
-- [ ] 3.3.6 Add test: `VnetConfig` with chained policy → chain evaluated correctly.
+- [ ] 3.4.5 Add test: `VnetConfig` with `LoggingPolicy` → policy callbacks invoked.
+- [ ] 3.4.6 Add test: `VnetConfig` with chained policy → chain evaluated correctly.
 
 ---
 

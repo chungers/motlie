@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-05 | @claude-tl | Add PolicyReason (Cow-backed enum), on_tcp_flow with flow metadata + SNI, exfiltration/C2/fronting use cases, honest DPI limitations, &self + interior mutability guidance |
 | 2026-04-05 | @claude-tl | Redesign: fully generic policy (no Box/dyn), chainable via trait method, logging-as-policy, zero-cost NoPolicy default, honest intent derivation layering |
 | 2026-04-05 | @claude-tl | Initial DESIGN: DNS interception, TCP connection control, intent-based policy, callback API |
 
@@ -138,39 +139,84 @@ from creating a host-side socket. Benefits:
 
 ## Policy API
 
+### PolicyReason
+
+Policy reasons are zero-allocation for common cases (category labels)
+and flexible for custom policies:
+
+```rust
+/// Reason attached to a policy decision. Zero-alloc for categories,
+/// Cow-backed for custom strings.
+pub enum PolicyReason {
+    /// Domain category (zero-alloc — the category is a static label).
+    Category(DomainCategory),
+    /// Custom reason string. Static for compile-time constants,
+    /// owned for runtime-generated reasons.
+    Custom(Cow<'static, str>),
+}
+
+// Convenience: any &'static str or String converts to PolicyReason
+impl From<&'static str> for PolicyReason { ... }
+impl From<String> for PolicyReason { ... }
+impl From<DomainCategory> for PolicyReason { ... }
+```
+
 ### Core Trait
 
 ```rust
 /// Policy decision returned by callbacks.
 pub enum PolicyAction {
     /// Allow the request. Optionally attach a reason for audit logging.
-    Allow { reason: Option<String> },
+    Allow { reason: Option<PolicyReason> },
     /// Deny the request. The engine forges a failure response (NXDOMAIN
     /// for DNS, RST for TCP). The reason is logged.
-    Deny { reason: String },
+    Deny { reason: PolicyReason },
     /// Allow but flag for observation. The request proceeds normally but
     /// the engine logs it at a higher severity.
-    Observe { reason: String },
+    Observe { reason: PolicyReason },
 }
 
 /// Egress policy callbacks. All methods have default allow-all impls.
 ///
-/// Callbacks run on the slirp thread. They must not block or perform I/O.
-/// For async policy evaluation, return Observe and make the decision
+/// Callbacks run on the slirp thread via `&self`. They must not block
+/// or perform I/O — compute a decision and return immediately.
+///
+/// **Statefulness**: the trait uses `&self` to keep chaining simple.
+/// Policies that need mutable state (counters, dynamic allowlists)
+/// should use interior mutability (`AtomicU64`, `RwLock`, etc.). The
+/// policy implementer manages their own synchronization — the trait
+/// does not impose a synchronization strategy.
+///
+/// For async policy evaluation, return `Observe` and make the decision
 /// asynchronously with a later connection teardown if needed.
 pub trait EgressPolicy: Send + 'static {
-    /// Called when the guest issues a DNS query.
+    /// Called when the guest issues a DNS query. Return Deny to prevent
+    /// the query from reaching the host resolver (forged NXDOMAIN).
     fn on_dns_query(&self, ctx: &DnsQueryContext) -> PolicyAction {
         PolicyAction::Allow { reason: None }
     }
 
-    /// Called when a DNS response arrives from the host resolver.
+    /// Called when a DNS response arrives from the host resolver,
+    /// before it is forwarded to the guest.
     fn on_dns_response(&self, ctx: &DnsResponseContext) -> PolicyAction {
         PolicyAction::Allow { reason: None }
     }
 
     /// Called when the guest initiates a TCP connection (SYN detected).
+    /// Return Deny to forge a RST — no host-side socket is created.
     fn on_tcp_connect(&self, ctx: &TcpConnectContext) -> PolicyAction {
+        PolicyAction::Allow { reason: None }
+    }
+
+    /// Called periodically for active TCP flows and once on flow close.
+    /// Provides flow-level metadata: byte counts, timing, SNI.
+    ///
+    /// **Cannot see encrypted payload.** For HTTPS connections (the
+    /// majority of traffic), only metadata is visible — see
+    /// "Flow-Level Observability" for what is and is not available.
+    ///
+    /// Return Deny to tear down the flow (forge RST in both directions).
+    fn on_tcp_flow(&self, ctx: &TcpFlowContext) -> PolicyAction {
         PolicyAction::Allow { reason: None }
     }
 
@@ -310,12 +356,23 @@ pub struct DnsQueryContext {
     /// Guest-side source port.
     pub source_port: u16,
     /// Timestamp.
-    pub timestamp: std::time::Instant,
+    pub timestamp: Instant,
+}
+
+pub struct DnsResponseContext {
+    /// The queried domain name.
+    pub domain: String,
+    /// Resolved IPv4 addresses.
+    pub resolved_ips: Vec<Ipv4Addr>,
+    /// TTL from the DNS response.
+    pub ttl: u32,
+    /// Timestamp.
+    pub timestamp: Instant,
 }
 
 pub struct TcpConnectContext {
     /// Destination IP address.
-    pub dst_ip: std::net::Ipv4Addr,
+    pub dst_ip: Ipv4Addr,
     /// Destination port.
     pub dst_port: u16,
     /// Domain name that resolved to this IP, if known from a prior DNS
@@ -324,18 +381,39 @@ pub struct TcpConnectContext {
     /// Guest-side source port.
     pub source_port: u16,
     /// Timestamp.
-    pub timestamp: std::time::Instant,
+    pub timestamp: Instant,
+    /// Guest process name that initiated this connection, if reported
+    /// by the guest agent via vsock. None until russhd integration (v2).
+    pub guest_process: Option<String>,
 }
 
-pub struct DnsResponseContext {
-    /// The queried domain name.
-    pub domain: String,
-    /// Resolved IPv4 addresses.
-    pub resolved_ips: Vec<std::net::Ipv4Addr>,
-    /// TTL from the DNS response.
-    pub ttl: u32,
+pub struct TcpFlowContext {
+    /// Destination IP address.
+    pub dst_ip: Ipv4Addr,
+    /// Destination port.
+    pub dst_port: u16,
+    /// Domain name from DNS reverse map (if resolved via DNS).
+    pub domain: Option<String>,
+    /// TLS Server Name Indication extracted from the ClientHello.
+    /// Available on the first TX packet of a TLS connection (plaintext
+    /// before encryption starts). Provides the domain even if the guest
+    /// bypassed DNS and connected by IP. None for non-TLS connections
+    /// or if the ClientHello did not contain SNI.
+    pub sni: Option<String>,
+    /// Guest-side source port.
+    pub source_port: u16,
+    /// Cumulative bytes sent guest→host.
+    pub bytes_tx: u64,
+    /// Cumulative bytes sent host→guest.
+    pub bytes_rx: u64,
+    /// Time since the TCP SYN.
+    pub duration: Duration,
+    /// Whether this is the final report (flow closed).
+    pub is_close: bool,
     /// Timestamp.
-    pub timestamp: std::time::Instant,
+    pub timestamp: Instant,
+    /// Guest process name (v2, requires russhd).
+    pub guest_process: Option<String>,
 }
 ```
 
@@ -359,23 +437,13 @@ when both use HTTPS to the same CDN.
 ### v2: Guest Process Identity (requires russhd, Phase 3.6)
 
 When the host-side russhd + vsock agent is running, the guest agent can
-report which PID opened which socket. This context flows into
-`TcpConnectContext` as an optional field:
+report which PID opened which socket. This flows into `TcpConnectContext`
+and `TcpFlowContext` via the `guest_process: Option<String>` field
+(already present in the context types — `None` until the agent is live).
 
-```rust
-pub struct TcpConnectContext {
-    // ... existing fields ...
-    /// Guest process name that initiated this connection, if reported
-    /// by the guest agent. Enables true intent-based decisions:
-    /// "apt" connecting to ubuntu.com = Allow
-    /// "unknown-binary" connecting to ubuntu.com = Observe
-    pub guest_process: Option<String>,
-}
-```
-
-This is the long-term target. The policy trait is designed to accommodate
-it — `guest_process` is `Option`, so v1 policies work without it, and
-v2 policies can use it when available.
+Enables true intent-based decisions:
+- `apt` connecting to `ubuntu.com` → Allow (PackageManager + known process)
+- `unknown-binary` connecting to `ubuntu.com` → Observe (unexpected process)
 
 ### v3: Project Manifest Correlation (future)
 
@@ -386,6 +454,114 @@ Connections outside the manifest are flagged.
 
 This is a host-runtime concern, not a vnet concern — it would be
 implemented as a custom `EgressPolicy` that reads the manifest.
+
+## Flow-Level Observability
+
+The `on_tcp_flow` callback provides metadata about active and closed TCP
+connections. This is distinct from `on_tcp_connect` (which fires once at
+SYN time) — `on_tcp_flow` is called periodically during the connection
+lifetime and once on close.
+
+### What Is Visible
+
+| Signal | Source | When |
+|--------|--------|------|
+| Flow identity (src/dst IP:port) | IP/TCP headers | Every report |
+| Domain name | DNS reverse map | If resolved via DNS |
+| TLS SNI (Server Name Indication) | ClientHello first byte (plaintext) | First TX packet only |
+| Byte counts (tx/rx) | Cumulative frame sizes | Every report |
+| Duration since SYN | Timer | Every report |
+| Flow close event | TCP FIN/RST detection | Once |
+| Guest process name | vsock agent (v2) | When available |
+
+### What Is NOT Visible
+
+| Signal | Why |
+|--------|-----|
+| HTTP method, path, headers | Encrypted after TLS handshake |
+| Request/response body | Encrypted |
+| Application-layer protocol | Cannot infer from encrypted bytes |
+| Certificate details | Would require TLS parsing beyond SNI |
+| Individual request boundaries | Encrypted; HTTP/2 multiplexes |
+
+### Use Cases for Flow Metadata
+
+**Exfiltration detection**: a flow to an Unknown domain that transfers
+>10MB in the TX direction is suspicious. The policy can flag or tear it
+down:
+
+```rust
+fn on_tcp_flow(&self, ctx: &TcpFlowContext) -> PolicyAction {
+    if ctx.bytes_tx > 10_000_000 {
+        if let Some(domain) = &ctx.domain {
+            if self.categorize(domain) == DomainCategory::Unknown {
+                return PolicyAction::Deny {
+                    reason: PolicyReason::Custom(
+                        format!("large upload to unknown domain: {} ({} bytes)",
+                                domain, ctx.bytes_tx).into()
+                    ),
+                };
+            }
+        }
+    }
+    PolicyAction::Allow { reason: None }
+}
+```
+
+**C2 beacon detection**: a flow with periodic small tx/rx bursts to an
+Unknown domain over a long duration (>30min) matches a command-and-control
+pattern. The policy can observe and alert.
+
+**Bandwidth accounting**: track bytes per domain/category for reporting.
+`LoggingPolicy` can aggregate flow stats and emit periodic summaries.
+
+**SNI verification**: if the DNS reverse map says domain X but the TLS
+SNI says domain Y, the connection may be using domain fronting. The
+policy can flag the mismatch:
+
+```rust
+fn on_tcp_flow(&self, ctx: &TcpFlowContext) -> PolicyAction {
+    if let (Some(dns_domain), Some(sni)) = (&ctx.domain, &ctx.sni) {
+        if dns_domain != sni {
+            return PolicyAction::Observe {
+                reason: PolicyReason::Custom(
+                    format!("SNI mismatch: DNS={}, SNI={}", dns_domain, sni).into()
+                ),
+            };
+        }
+    }
+    PolicyAction::Allow { reason: None }
+}
+```
+
+### SNI Extraction
+
+The TLS ClientHello is the first data the client sends on a TLS
+connection. It is sent in plaintext (before encryption is negotiated)
+and contains the Server Name Indication extension — the hostname the
+client wants to connect to.
+
+The interceptor parses the first TX data packet on port 443 connections:
+1. Check for TLS record header (content type 0x16, version)
+2. Check for Handshake type ClientHello (0x01)
+3. Skip to extensions
+4. Find SNI extension (type 0x0000)
+5. Extract the hostname string
+
+This is a one-time parse per connection — subsequent data packets on
+the same flow are not parsed for SNI.
+
+### Design Constraint: No DPI
+
+The flow callback is explicitly metadata-only. We do not:
+- Buffer or inspect encrypted payload bytes
+- Attempt TLS decryption
+- Parse application-layer protocols inside encrypted streams
+- Expose raw packet bytes to policy callbacks
+
+This is a deliberate design constraint. Payload inspection would require
+TLS MITM (CA trust, certificate pinning breakage) and violate the
+zero-capability, embeddable-library design goal.
 
 ## Generic Type Flow
 
