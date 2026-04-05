@@ -82,6 +82,8 @@ use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::{self, BufRead, Write};
 use std::net::Ipv4Addr;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -439,7 +441,9 @@ async fn main() -> Result<()> {
     for config in guest_configs {
         let mut builder = FsServer::builder().overlay(true).events(256);
         for mount in &config.mounts {
-            builder = builder.mount(&mount.tag, mount.host_path.clone(), false);
+            let owner_override = config.identity.map(|identity| (identity.uid, identity.gid));
+            seed_demo_host_mount(&config.name, mount)?;
+            builder = builder.mount_as(&mount.tag, mount.host_path.clone(), false, owner_override);
         }
         let server = Arc::new(builder.build()?);
         guest_order.push(config.name.clone());
@@ -842,8 +846,65 @@ fn add_guest_mount(admin: &mut AdminState, guest_name: &str, mount: ConfiguredMo
     }
     runtime
         .server
-        .add_mount(&mount.tag, mount.host_path.clone(), false)?;
+        .add_mount_as(
+            &mount.tag,
+            mount.host_path.clone(),
+            false,
+            runtime.identity.map(|identity| (identity.uid, identity.gid)),
+        )?;
+    seed_demo_host_mount(guest_name, &mount)?;
     runtime.mounts.push(mount);
+    Ok(())
+}
+
+fn write_host_file_if_missing(path: &std::path::Path, content: &str, mode: u32) -> Result<()> {
+    if !path.exists() {
+        fs::write(path, content)?;
+        #[cfg(unix)]
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    }
+    Ok(())
+}
+
+fn seed_demo_host_mount(guest_name: &str, mount: &ConfiguredMount) -> Result<()> {
+    let Some(guest_path) = &mount.guest_path else {
+        return Ok(());
+    };
+
+    if guest_path != &format!("/home/{guest_name}") {
+        return Ok(());
+    }
+
+    fs::create_dir_all(&mount.host_path)?;
+    fs::create_dir_all(mount.host_path.join(".config"))?;
+    fs::create_dir_all(mount.host_path.join(".ssh"))?;
+    #[cfg(unix)]
+    fs::set_permissions(mount.host_path.join(".ssh"), fs::Permissions::from_mode(0o700))?;
+
+    let (authorized_key, ssh_config, env_content) = match guest_name {
+        "alice" => (
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample alice@dev\n",
+            "Host github.com\n  User git\n",
+            "ALICE_API_KEY=demo-alice\n",
+        ),
+        "bob" => (
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample bob@dev\n",
+            "Host gitlab.com\n  User git\n",
+            "BOB_API_KEY=demo-bob\n",
+        ),
+        _ => return Ok(()),
+    };
+
+    write_host_file_if_missing(&mount.host_path.join(".ssh/authorized_keys"), authorized_key, 0o600)?;
+    write_host_file_if_missing(&mount.host_path.join(".ssh/config"), ssh_config, 0o644)?;
+    write_host_file_if_missing(&mount.host_path.join(".env"), env_content, 0o644)?;
+    write_host_file_if_missing(&mount.host_path.join(".bashrc"), "# motlie v1.2 demo bashrc\n", 0o644)?;
+    write_host_file_if_missing(
+        &mount.host_path.join(".profile"),
+        "if [ -f \"$HOME/.bashrc\" ]; then\n  . \"$HOME/.bashrc\"\nfi\n",
+        0o644,
+    )?;
+
     Ok(())
 }
 

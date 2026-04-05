@@ -2,14 +2,10 @@
 layer credentials 0
 layer workspace 10
 
-mkdir credentials bob-home /.config 755
 mkdir credentials bob-agent-state /codex 700
 mkdir credentials bob-agent-state /codex/sqlite 700
 mkdir credentials bob-agent-state /claude 700
 mkdir credentials bob-agent-state /claude-code 700
-putattr credentials bob-home /.ssh/authorized_keys 1001 1001 600 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample bob@dev
-putattr credentials bob-home /.ssh/config 1001 1001 644 Host gitlab.com User git
-put credentials bob-home /.env BOB_API_KEY=demo-bob
 put workspace bob-agent-state /README.md Dedicated read-write agent-state layer for Codex and Claude lives here.
 put workspace bob-workspace /README.md Bob workspace mounted from the host.
 
