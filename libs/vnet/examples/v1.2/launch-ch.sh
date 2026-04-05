@@ -14,7 +14,7 @@
 #   artifacts/base/Image|vmlinux.bin
 #
 # Per-guest writable runtime overlays are created on each launch under:
-#   ${RUNTIME_ROOT:-/tmp/motlie-vfs-v12-runtime}/<guest>/overlay.ext4
+#   ${RUNTIME_ROOT:-/tmp/motlie-vnet-v12-runtime}/<guest>/overlay.ext4
 
 set -euo pipefail
 
@@ -58,7 +58,7 @@ GUEST_NAME="alice"
 ADMIN_NET="tap"
 EGRESS_NET="tap"
 OVERLAY_SIZE="${OVERLAY_SIZE:-2G}"
-RUNTIME_ROOT="${RUNTIME_ROOT:-/tmp/motlie-vfs-v12-runtime}"
+RUNTIME_ROOT="${RUNTIME_ROOT:-/tmp/motlie-vnet-v12-runtime}"
 CLOUD_INIT_DIR=""
 SERIAL_BACKEND="${CH_SERIAL_BACKEND:-tty}"
 CONSOLE_BACKEND="${CH_CONSOLE_BACKEND:-off}"
@@ -94,8 +94,8 @@ esac
 case "$GUEST_NAME" in
     alice)
         BASE_ARTIFACTS="$SCRIPT_DIR/artifacts/base"
-        API_SOCKET="/tmp/motlie-vfs-alice-api.sock"
-        VSOCK_SOCKET="/tmp/motlie-vfs-alice.vsock"
+        API_SOCKET="/tmp/motlie-vnet-alice-api.sock"
+        VSOCK_SOCKET="/tmp/motlie-vnet-alice.vsock"
         CID=3
         HOST_IP="192.168.249.1"
         GUEST_IP="192.168.249.2"
@@ -110,8 +110,8 @@ case "$GUEST_NAME" in
         ;;
     bob)
         BASE_ARTIFACTS="$SCRIPT_DIR/artifacts/base"
-        API_SOCKET="/tmp/motlie-vfs-bob-api.sock"
-        VSOCK_SOCKET="/tmp/motlie-vfs-bob.vsock"
+        API_SOCKET="/tmp/motlie-vnet-bob-api.sock"
+        VSOCK_SOCKET="/tmp/motlie-vnet-bob.vsock"
         CID=4
         HOST_IP="192.168.250.1"
         GUEST_IP="192.168.250.2"

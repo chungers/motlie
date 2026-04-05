@@ -177,7 +177,7 @@ DEBIAN_MIRROR="http://deb.debian.org/debian"
 BASE_ARTIFACTS="$SCRIPT_DIR/artifacts/base"
 BASE_ROOTFS="$BASE_ARTIFACTS/rootfs.squashfs"
 BASE_KERNEL="$BASE_ARTIFACTS/$KERNEL_IMAGE"
-BASE_HOSTNAME="motlie-vfs-v12"
+BASE_HOSTNAME="motlie-vnet-v12"
 EGRESS_MAC="12:34:56:78:90:ab"
 
 echo "=== motlie-vnet v1.2 base image builder ==="
@@ -218,7 +218,7 @@ case "$KERNEL_MODE" in
         fi
         ;;
     build)
-        KERNEL_SRC="/tmp/motlie-vfs-kernel-$$"
+        KERNEL_SRC="/tmp/motlie-vnet-kernel-$$"
         echo "Cloning cloud-hypervisor/linux into $KERNEL_SRC..."
         git clone --depth 1 https://github.com/cloud-hypervisor/linux.git \
             -b ch-6.12.8 "$KERNEL_SRC"
