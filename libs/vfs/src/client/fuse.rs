@@ -20,7 +20,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuser::{
     FileAttr as FuserFileAttr, FileType as FuserFileType, Filesystem, MountOption, ReplyAttr,
-    ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs,
+    ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyLock, ReplyOpen, ReplyStatfs,
     ReplyWrite, ReplyXattr, Request,
 };
 
@@ -336,6 +336,62 @@ where
                 // Backwards compat: server didn't return Created
                 reply.created(&ZERO_TTL, &to_fuser_attr(&attrs, inode), generation, 0, 0);
             }
+            FsResult::Error { errno } => reply.error(errno),
+            _ => reply.error(libc::EIO),
+        }
+    }
+
+    fn getlk(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        fh: u64,
+        lock_owner: u64,
+        start: u64,
+        end: u64,
+        typ: i32,
+        pid: u32,
+        reply: ReplyLock,
+    ) {
+        match self.request(FsOp::Getlk {
+            inode: ino,
+            fh,
+            lock_owner,
+            start,
+            end,
+            typ,
+            pid,
+        }) {
+            FsResult::Lock { start, end, typ, pid } => reply.locked(start, end, typ, pid),
+            FsResult::Error { errno } => reply.error(errno),
+            _ => reply.error(libc::EIO),
+        }
+    }
+
+    fn setlk(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        fh: u64,
+        lock_owner: u64,
+        start: u64,
+        end: u64,
+        typ: i32,
+        pid: u32,
+        sleep: bool,
+        reply: ReplyEmpty,
+    ) {
+        match self.request(FsOp::Setlk {
+            inode: ino,
+            fh,
+            lock_owner,
+            start,
+            end,
+            typ,
+            pid,
+            sleep,
+        }) {
+            FsResult::Ok => reply.ok(),
             FsResult::Error { errno } => reply.error(errno),
             _ => reply.error(libc::EIO),
         }
