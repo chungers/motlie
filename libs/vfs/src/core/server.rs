@@ -3,6 +3,8 @@
 use std::collections::HashMap;
 #[cfg(unix)]
 use std::ffi::CString;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -241,6 +243,12 @@ impl FsServer {
             FsOp::Lookup { parent, name } => self.do_lookup(mount, *parent, name),
             FsOp::Getattr { inode } => self.do_getattr(mount, *inode),
             FsOp::Access { inode, mask, uid, gid } => self.do_access(mount, *inode, *mask, *uid, *gid),
+            FsOp::Setxattr { inode, name, value, flags, position } => {
+                self.do_setxattr(mount, *inode, name, value, *flags, *position)
+            }
+            FsOp::Getxattr { inode, name, size } => self.do_getxattr(mount, *inode, name, *size),
+            FsOp::Listxattr { inode, size } => self.do_listxattr(mount, *inode, *size),
+            FsOp::Removexattr { inode, name } => self.do_removexattr(mount, *inode, name),
             FsOp::Setattr { inode, attrs } => self.do_setattr(mount, *inode, attrs),
             FsOp::Readdir { inode, offset } => self.do_readdir(mount, *inode, *offset),
             FsOp::Open { inode, flags } => self.do_open(mount, *inode, *flags),
@@ -310,6 +318,17 @@ impl FsServer {
 // ---------------------------------------------------------------------------
 
 impl FsServer {
+    fn host_path_for_inode(&self, mount: &MountState, inode: u64) -> Result<PathBuf, i32> {
+        let table = mount.inode_table.lock();
+        match table.get(inode) {
+            Some(entry) => match &entry.host_path {
+                Some(path) => Ok(path.clone()),
+                None => Err(libc::ENOTSUP),
+            },
+            None => Err(libc::ENOENT),
+        }
+    }
+
     fn do_access(&self, mount: &MountState, inode: u64, mask: i32, uid: u32, gid: u32) -> FsResult {
         if mount.read_only && mask & libc::W_OK != 0 {
             return FsResult::Error { errno: libc::EROFS };
@@ -326,6 +345,72 @@ impl FsServer {
         } else {
             FsResult::Error { errno: libc::EACCES }
         }
+    }
+
+    fn do_setxattr(
+        &self,
+        mount: &MountState,
+        inode: u64,
+        name: &str,
+        value: &bytes::Bytes,
+        flags: i32,
+        position: u32,
+    ) -> FsResult {
+        let host_path = match self.host_path_for_inode(mount, inode) {
+            Ok(path) => path,
+            Err(errno) => return FsResult::Error { errno },
+        };
+        set_xattr(&host_path, name, value, flags, position)
+            .map(|_| FsResult::Ok)
+            .unwrap_or_else(|errno| FsResult::Error { errno })
+    }
+
+    fn do_getxattr(&self, mount: &MountState, inode: u64, name: &str, size: u32) -> FsResult {
+        let host_path = match self.host_path_for_inode(mount, inode) {
+            Ok(path) => path,
+            Err(errno) => return FsResult::Error { errno },
+        };
+        match get_xattr(&host_path, name) {
+            Ok(data) => {
+                if size == 0 {
+                    FsResult::XattrSize { size: data.len() as u32 }
+                } else if data.len() > size as usize {
+                    FsResult::Error { errno: libc::ERANGE }
+                } else {
+                    FsResult::Data { data: bytes::Bytes::from(data) }
+                }
+            }
+            Err(errno) => FsResult::Error { errno },
+        }
+    }
+
+    fn do_listxattr(&self, mount: &MountState, inode: u64, size: u32) -> FsResult {
+        let host_path = match self.host_path_for_inode(mount, inode) {
+            Ok(path) => path,
+            Err(errno) => return FsResult::Error { errno },
+        };
+        match list_xattrs(&host_path) {
+            Ok(data) => {
+                if size == 0 {
+                    FsResult::XattrSize { size: data.len() as u32 }
+                } else if data.len() > size as usize {
+                    FsResult::Error { errno: libc::ERANGE }
+                } else {
+                    FsResult::Data { data: bytes::Bytes::from(data) }
+                }
+            }
+            Err(errno) => FsResult::Error { errno },
+        }
+    }
+
+    fn do_removexattr(&self, mount: &MountState, inode: u64, name: &str) -> FsResult {
+        let host_path = match self.host_path_for_inode(mount, inode) {
+            Ok(path) => path,
+            Err(errno) => return FsResult::Error { errno },
+        };
+        remove_xattr(&host_path, name)
+            .map(|_| FsResult::Ok)
+            .unwrap_or_else(|errno| FsResult::Error { errno })
     }
 
     fn do_lookup(&self, mount: &MountState, parent: u64, name: &str) -> FsResult {
@@ -1030,6 +1115,10 @@ impl FsServer {
             }
             FsOp::Getattr { inode }
             | FsOp::Access { inode, .. }
+            | FsOp::Getxattr { inode, .. }
+            | FsOp::Listxattr { inode, .. }
+            | FsOp::Removexattr { inode, .. }
+            | FsOp::Setxattr { inode, .. }
             | FsOp::Setattr { inode, .. }
             | FsOp::Readdir { inode, .. }
             | FsOp::Open { inode, .. }
@@ -1061,6 +1150,7 @@ fn is_write_op(op: &FsOp) -> bool {
         FsOp::Write { .. } | FsOp::Create { .. } | FsOp::Mkdir { .. }
         | FsOp::Unlink { .. } | FsOp::Rmdir { .. } | FsOp::Rename { .. }
         | FsOp::Symlink { .. } | FsOp::Setattr { .. }
+        | FsOp::Setxattr { .. } | FsOp::Removexattr { .. }
     )
 }
 
@@ -1087,6 +1177,96 @@ fn access_allowed(attrs: &FileAttr, mask: i32, uid: u32, gid: u32) -> bool {
     (mask & libc::R_OK == 0 || perm_bits & 0o4 != 0)
         && (mask & libc::W_OK == 0 || perm_bits & 0o2 != 0)
         && (mask & libc::X_OK == 0 || perm_bits & 0o1 != 0)
+}
+
+#[cfg(unix)]
+fn set_xattr(path: &Path, name: &str, value: &[u8], flags: i32, position: u32) -> Result<(), i32> {
+    if position != 0 {
+        return Err(libc::EINVAL);
+    }
+    let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| libc::EINVAL)?;
+    let name = CString::new(name).map_err(|_| libc::EINVAL)?;
+    let rc = unsafe {
+        libc::setxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            value.as_ptr().cast(),
+            value.len(),
+            flags,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO))
+    }
+}
+
+#[cfg(not(unix))]
+fn set_xattr(_path: &Path, _name: &str, _value: &[u8], _flags: i32, _position: u32) -> Result<(), i32> {
+    Err(libc::ENOTSUP)
+}
+
+#[cfg(unix)]
+fn get_xattr(path: &Path, name: &str) -> Result<Vec<u8>, i32> {
+    let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| libc::EINVAL)?;
+    let name = CString::new(name).map_err(|_| libc::EINVAL)?;
+    let size = unsafe { libc::getxattr(path.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
+    if size < 0 {
+        return Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO));
+    }
+    let mut buf = vec![0u8; size as usize];
+    let rc = unsafe { libc::getxattr(path.as_ptr(), name.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
+    if rc < 0 {
+        Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO))
+    } else {
+        buf.truncate(rc as usize);
+        Ok(buf)
+    }
+}
+
+#[cfg(not(unix))]
+fn get_xattr(_path: &Path, _name: &str) -> Result<Vec<u8>, i32> {
+    Err(libc::ENOTSUP)
+}
+
+#[cfg(unix)]
+fn list_xattrs(path: &Path) -> Result<Vec<u8>, i32> {
+    let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| libc::EINVAL)?;
+    let size = unsafe { libc::listxattr(path.as_ptr(), std::ptr::null_mut(), 0) };
+    if size < 0 {
+        return Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO));
+    }
+    let mut buf = vec![0u8; size as usize];
+    let rc = unsafe { libc::listxattr(path.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
+    if rc < 0 {
+        Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO))
+    } else {
+        buf.truncate(rc as usize);
+        Ok(buf)
+    }
+}
+
+#[cfg(not(unix))]
+fn list_xattrs(_path: &Path) -> Result<Vec<u8>, i32> {
+    Err(libc::ENOTSUP)
+}
+
+#[cfg(unix)]
+fn remove_xattr(path: &Path, name: &str) -> Result<(), i32> {
+    let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| libc::EINVAL)?;
+    let name = CString::new(name).map_err(|_| libc::EINVAL)?;
+    let rc = unsafe { libc::removexattr(path.as_ptr(), name.as_ptr()) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO))
+    }
+}
+
+#[cfg(not(unix))]
+fn remove_xattr(_path: &Path, _name: &str) -> Result<(), i32> {
+    Err(libc::ENOTSUP)
 }
 
 fn child_path(parent: &str, name: &str) -> String {
@@ -1413,6 +1593,51 @@ mod tests {
         assert!(matches!(
             server.handle_op("test", FsOp::Access { inode, mask: libc::X_OK, uid: 0, gid: 0 }),
             FsResult::Error { errno } if errno == libc::EACCES
+        ));
+    }
+
+    #[test]
+    fn xattr_round_trip_on_disk_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.txt");
+        fs::write(&path, b"hello").unwrap();
+
+        let server = build_test_server(dir.path());
+        let inode = match server.handle_op("test", FsOp::Lookup { parent: 1, name: "note.txt".into() }) {
+            FsResult::Entry { inode, .. } => inode,
+            other => panic!("expected Entry, got {:?}", other),
+        };
+
+        assert!(matches!(
+            server.handle_op("test", FsOp::Setxattr {
+                inode,
+                name: "user.note".into(),
+                value: bytes::Bytes::from_static(b"value"),
+                flags: 0,
+                position: 0,
+            }),
+            FsResult::Ok
+        ));
+
+        assert!(matches!(
+            server.handle_op("test", FsOp::Getxattr { inode, name: "user.note".into(), size: 0 }),
+            FsResult::XattrSize { size } if size == 5
+        ));
+        assert!(matches!(
+            server.handle_op("test", FsOp::Getxattr { inode, name: "user.note".into(), size: 5 }),
+            FsResult::Data { data } if data.as_ref() == b"value"
+        ));
+        assert!(matches!(
+            server.handle_op("test", FsOp::Listxattr { inode, size: 0 }),
+            FsResult::XattrSize { size } if size >= 10
+        ));
+        assert!(matches!(
+            server.handle_op("test", FsOp::Removexattr { inode, name: "user.note".into() }),
+            FsResult::Ok
+        ));
+        assert!(matches!(
+            server.handle_op("test", FsOp::Getxattr { inode, name: "user.note".into(), size: 0 }),
+            FsResult::Error { errno } if errno == libc::ENODATA
         ));
     }
 
