@@ -102,6 +102,7 @@ struct OverlayNode {
     mode: u32,
     uid: u32,
     gid: u32,
+    xattrs: HashMap<String, Bytes>,
     injected_at: SystemTime,
     /// Number of child entries in this layer that depend on this synthetic dir.
     child_count: u32,
@@ -260,6 +261,7 @@ impl MemOverlay {
         l.entries.insert(key, OverlayNode {
             kind: OverlayEntryKind::SyntheticDir,
             mode: attrs.mode, uid: attrs.uid, gid: attrs.gid,
+            xattrs: HashMap::new(),
             injected_at: now,
             child_count: 0,
         });
@@ -291,6 +293,89 @@ impl MemOverlay {
         }])
     }
 
+    pub fn set_xattr(
+        &self,
+        tag: &str,
+        path: &str,
+        name: &str,
+        value: Bytes,
+        flags: i32,
+        position: u32,
+    ) -> Result<(), i32> {
+        if position != 0 {
+            return Err(libc::ENOTSUP);
+        }
+        let snap = self.load_snapshot(tag);
+        let key = (tag.to_string(), path.to_string());
+        let Some(layer_name) = snap.layers.iter().find_map(|layer| {
+            layer.entries.get(&key).map(|_| layer.name.clone())
+        }) else {
+            return Err(libc::ENOENT);
+        };
+
+        let mut layers = self.layers.lock();
+        let layer = get_layer_mut(&mut layers, &layer_name).map_err(|_| libc::ENOENT)?;
+        let Some(node) = layer.entries.get_mut(&key) else {
+            return Err(libc::ENOENT);
+        };
+        let exists = node.xattrs.contains_key(name);
+        if flags & libc::XATTR_CREATE != 0 && exists {
+            return Err(libc::EEXIST);
+        }
+        if flags & libc::XATTR_REPLACE != 0 && !exists {
+            return Err(libc::ENODATA);
+        }
+        node.xattrs.insert(name.to_string(), value);
+        self.republish_tag(&layers, tag);
+        Ok(())
+    }
+
+    pub fn get_xattr(&self, tag: &str, path: &str, name: &str) -> Result<Bytes, i32> {
+        let snap = self.load_snapshot(tag);
+        let key = (tag.to_string(), path.to_string());
+        let Some(node) = snap.layers.iter().find_map(|layer| layer.entries.get(&key)) else {
+            return Err(libc::ENOENT);
+        };
+        node.xattrs.get(name).cloned().ok_or(libc::ENODATA)
+    }
+
+    pub fn list_xattrs(&self, tag: &str, path: &str) -> Result<Vec<u8>, i32> {
+        let snap = self.load_snapshot(tag);
+        let key = (tag.to_string(), path.to_string());
+        let Some(node) = snap.layers.iter().find_map(|layer| layer.entries.get(&key)) else {
+            return Err(libc::ENOENT);
+        };
+        let mut names: Vec<_> = node.xattrs.keys().cloned().collect();
+        names.sort();
+        let mut out = Vec::new();
+        for name in names {
+            out.extend_from_slice(name.as_bytes());
+            out.push(0);
+        }
+        Ok(out)
+    }
+
+    pub fn remove_xattr(&self, tag: &str, path: &str, name: &str) -> Result<(), i32> {
+        let snap = self.load_snapshot(tag);
+        let key = (tag.to_string(), path.to_string());
+        let Some(layer_name) = snap.layers.iter().find_map(|layer| {
+            layer.entries.get(&key).map(|_| layer.name.clone())
+        }) else {
+            return Err(libc::ENOENT);
+        };
+
+        let mut layers = self.layers.lock();
+        let layer = get_layer_mut(&mut layers, &layer_name).map_err(|_| libc::ENOENT)?;
+        let Some(node) = layer.entries.get_mut(&key) else {
+            return Err(libc::ENOENT);
+        };
+        if node.xattrs.remove(name).is_none() {
+            return Err(libc::ENODATA);
+        }
+        self.republish_tag(&layers, tag);
+        Ok(())
+    }
+
     pub fn apply_batch(&self, tag: &str, ops: &[OverlayMutation]) -> Result<()> {
         let mut layers = self.layers.lock();
 
@@ -309,12 +394,16 @@ impl MemOverlay {
                     materialize_parents(l, tag, path, uid, gid, now);
 
                     let key = (tag.to_string(), path.to_string());
-                    // If replacing a SyntheticDir, preserve its child_count
+                    let (xattrs, child_count) = match l.entries.get(&key) {
+                        Some(existing) => (existing.xattrs.clone(), existing.child_count),
+                        None => (HashMap::new(), 0),
+                    };
                     l.entries.insert(key, OverlayNode {
                         kind: OverlayEntryKind::Content(content.clone()),
                         mode, uid, gid,
+                        xattrs,
                         injected_at: now,
-                        child_count: 0,
+                        child_count,
                     });
                 }
                 OverlayMutation::Whiteout { layer, path } => {
@@ -326,6 +415,7 @@ impl MemOverlay {
                     l.entries.insert(key, OverlayNode {
                         kind: OverlayEntryKind::Whiteout,
                         mode: 0, uid: 0, gid: 0,
+                        xattrs: HashMap::new(),
                         injected_at: now,
                         child_count: 0,
                     });
@@ -515,6 +605,7 @@ fn materialize_parents(layer: &mut Layer, tag: &str, path: &str, uid: u32, gid: 
             kind: OverlayEntryKind::SyntheticDir,
             mode: 0o755,
             uid, gid,
+            xattrs: HashMap::new(),
             injected_at: now,
             child_count: 0,
         });
@@ -756,6 +847,33 @@ mod tests {
         assert_eq!(e.uid, 1000);
         assert_eq!(e.gid, 1000);
         assert_eq!(e.mode, 0o600);
+    }
+
+    #[test]
+    fn overlay_xattr_round_trip() {
+        let o = overlay();
+        o.put_layer("l", 0).unwrap();
+        o.put("l", "t", "/f", Bytes::from("content")).unwrap();
+
+        o.set_xattr("t", "/f", "user.note", Bytes::from("value"), 0, 0).unwrap();
+        assert_eq!(o.get_xattr("t", "/f", "user.note").unwrap(), Bytes::from("value"));
+        let listed = o.list_xattrs("t", "/f").unwrap();
+        assert_eq!(listed, b"user.note\0");
+        o.remove_xattr("t", "/f", "user.note").unwrap();
+        assert_eq!(o.get_xattr("t", "/f", "user.note"), Err(libc::ENODATA));
+    }
+
+    #[test]
+    fn overlay_put_preserves_xattrs() {
+        let o = overlay();
+        o.put_layer("l", 0).unwrap();
+        o.put("l", "t", "/f", Bytes::from("v1")).unwrap();
+        o.set_xattr("t", "/f", "user.note", Bytes::from("value"), 0, 0).unwrap();
+
+        o.put("l", "t", "/f", Bytes::from("v2")).unwrap();
+
+        assert_eq!(o.get("l", "t", "/f").unwrap(), "v2");
+        assert_eq!(o.get_xattr("t", "/f", "user.note").unwrap(), Bytes::from("value"));
     }
 
     // 2.2.33: Batch atomicity — all or nothing visibility
