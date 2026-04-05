@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-05 | @claude-tl | Confidence on PolicyAction, FsInterceptPolicy with ArcSwap, PolicyEvent at call site, remove EventSinkPolicy |
 | 2026-04-05 | @claude-tl | Stateless policy redesign: dispatch-layer state, caller identity (UID/GID/PID) with FUSE plumbing gap, pre-computed signals, fd hijacking/execve limitations, Setattr mode/ownership tracking |
 | 2026-04-05 | @claude-tl | Add 3-phase detection framework (discovery→staging→execution), enriched FsOpContext (inode, is_sensitive, parent_path), write_entropy in FsOpResult, detector examples |
 | 2026-04-05 | @claude-tl | Initial DESIGN: FsPolicy trait, PolicyAction with errno, chaining, enriched events, OTel logging, event sink policy |
@@ -76,13 +77,29 @@ The existing `PolicyFn` trait is replaced by `FsPolicy`:
 /// Policy decision. Shared shape with motlie-vnet's EgressPolicy.
 pub enum PolicyAction {
     /// Allow the operation.
-    Allow { reason: Option<PolicyReason> },
+    Allow {
+        reason: Option<PolicyReason>,
+        /// Confidence in this decision (0.0–1.0).
+        confidence: f64,
+    },
     /// Deny the operation. `errno` is returned to the guest via FUSE.
-    Deny { errno: i32, reason: PolicyReason },
+    Deny {
+        errno: i32,
+        reason: PolicyReason,
+        confidence: f64,
+    },
     /// Allow but flag for observation.
-    Observe { reason: PolicyReason },
+    Observe {
+        reason: PolicyReason,
+        confidence: f64,
+    },
 }
 ```
+
+**Confidence propagation:** the chain propagates the minimum confidence
+across all policies — the composite's confidence is its weakest link.
+Same semantics as vnet. See DESIGN-VNET-POLICY for the full confidence
+model (rule-based, heuristic, ML, session-aware use cases).
 
 ### PolicyReason
 
@@ -445,7 +462,7 @@ Even with full PID/UID/GID:
 | Scenario | Why limited | Path to coverage |
 |----------|------------|-----------------|
 | **Unix domain socket creation** (`bind()` on `/tmp/evil.sock`) | Only visible if the socket path is under a FUSE-mounted tag. In motlie's architecture, `/tmp`, `/var/run`, `/dev/shm` are on the guest's root filesystem (squashfs + ext4 overlay), not FUSE-mounted. | Could be covered if mount scope expands to include `/tmp` — but that changes motlie-vfs from "targeted host directory mounts" to "full guest filesystem proxy," which is a different architecture. |
-| **Network socket creation** (`socket(AF_INET)` + `connect()`) | Kernel network stack, not filesystem. | This is vnet's domain — `on_tcp_connect()` sees it. Cross-stack correlation (via EventSinkPolicy) bridges the gap. |
+| **Network socket creation** (`socket(AF_INET)` + `connect()`) | Kernel network stack, not filesystem. | This is vnet's domain — `on_tcp_connect()` sees it. Cross-stack correlation (via PolicyEvent channels) bridges the gap. |
 
 These are guest-kernel and mount-scope limitations, not vfs API
 limitations. They match vnet's documented limitations (encrypted payload
@@ -539,6 +556,41 @@ fn is_credential_path(path: &str) -> bool {
         || path.contains("/credentials") || path.contains("/secrets")
 }
 ```
+
+### InterceptPolicy (externally-fed blocklist)
+
+Same pattern as vnet's `InterceptPolicy`. A policy whose deny set is
+managed by an external correlator thread via `ArcSwap`. The policy reads
+a concurrent snapshot (~25ns), the correlator writes atomically.
+
+```rust
+use arc_swap::ArcSwap;
+
+pub struct FsInterceptPolicy {
+    /// Blocked paths. Updated atomically by the correlator.
+    blocked: Arc<ArcSwap<HashSet<String>>>,
+}
+
+impl FsPolicy for FsInterceptPolicy {
+    fn on_op(&self, ctx: &FsOpContext) -> PolicyAction {
+        let snapshot = self.blocked.load();
+        if snapshot.contains(&ctx.path) {
+            PolicyAction::Deny {
+                errno: libc::EACCES,
+                reason: PolicyReason::Custom("correlator: blocked path".into()),
+                confidence: 1.0,
+            }
+        } else {
+            PolicyAction::Allow { reason: None, confidence: 1.0 }
+        }
+    }
+}
+```
+
+Key type differs from vnet: vnet blocks by `(Ipv4Addr, u16)`, vfs blocks
+by `String` (path). Same `ArcSwap` pattern, same latency characteristics.
+See DESIGN-VNET-POLICY InterceptPolicy section for the full latency
+analysis (ArcSwap ~25ns read vs RwLock ~50ns vs try_recv ~50ns).
 
 ## Anomaly Detection by Filesystem Phase
 
@@ -733,74 +785,70 @@ All nine detection techniques are implementable with the two existing
 callbacks (`on_op`, `on_complete`) and the enriched context types. No
 additional callbacks needed.
 
-### EventSinkPolicy (generic event producer)
+## Policy Event Emission
 
-A chainable policy that sends `FsOpContext` to a caller-supplied closure.
-The policy does not know what the caller does with the event — it could
-log, buffer, or send to a cross-stack correlator channel.
+Event emission is **infrastructure at the call site** (`FsServer::dispatch`),
+not a policy concern. Policies are pure decision functions.
+
+### PolicyEvent Enum
 
 ```rust
-/// Sends operation context to a caller-supplied sink function.
-/// Always returns Allow — observe-only, no enforcement.
-pub struct EventSinkPolicy<F> {
-    on_event: F,
+/// Emitted by FsServer::dispatch after every policy evaluation.
+pub enum PolicyEvent {
+    FsOp {
+        ctx: FsOpContext,
+        action: PolicyAction,
+    },
+    FsComplete {
+        ctx: FsOpContext,
+        result: FsOpResult,
+        action: PolicyAction,
+    },
+}
+```
+
+### Emission at the Call Site
+
+```rust
+// In FsServer::dispatch — NOT inside a policy:
+let action = self.policy.on_op(&ctx);           // pure decision
+
+if let Some(ref tx) = self.event_tx {            // infrastructure
+    let _ = tx.try_send(PolicyEvent::FsOp {
+        ctx: ctx.clone(),
+        action: action.clone(),
+    });
 }
 
-impl<F> EventSinkPolicy<F>
-where
-    F: Fn(&FsOpContext, Option<&FsOpResult>) + Send + Sync + 'static,
-{
-    pub fn new(on_event: F) -> Self {
-        Self { on_event }
-    }
-}
-
-impl<F> FsPolicy for EventSinkPolicy<F>
-where
-    F: Fn(&FsOpContext, Option<&FsOpResult>) + Send + Sync + 'static,
-{
-    fn on_op(&self, ctx: &FsOpContext) -> PolicyAction {
-        (self.on_event)(ctx, None);
-        PolicyAction::Allow { reason: None }
-    }
-
-    fn on_complete(&self, ctx: &FsOpContext, result: &FsOpResult) -> PolicyAction {
-        (self.on_event)(ctx, Some(result));
-        PolicyAction::Allow { reason: None }
+match action {                                    // enforcement
+    PolicyAction::Deny { errno, .. } => FsResult::Error { errno },
+    _ => {
+        let result = self.execute_op(mount, op);
+        let completion_action = self.policy.on_complete(&ctx, &op_result);
+        if let Some(ref tx) = self.event_tx {
+            let _ = tx.try_send(PolicyEvent::FsComplete {
+                ctx, result: op_result, action: completion_action,
+            });
+        }
+        result
     }
 }
 ```
 
-Usage at the host runtime level (which depends on both vfs and vnet):
+### Cross-Stack Correlation
+
+The host runtime subscribes to both vfs and vnet PolicyEvent channels:
 
 ```rust
-// Host runtime constructs its own unified event type:
 enum RuntimeEvent {
-    Fs(motlie_vfs::FsOpContext),
-    Net(motlie_vnet::DnsQueryContext),
+    Net(motlie_vnet::PolicyEvent),
+    Fs(motlie_vfs::PolicyEvent),
 }
-
-let (tx, rx) = mpsc::channel::<RuntimeEvent>();
-
-// vfs side:
-let tx_fs = tx.clone();
-let fs_policy = LoggingPolicy
-    .chain(CredentialGuard)
-    .chain(EventSinkPolicy::new(move |ctx, _| {
-        let _ = tx_fs.send(RuntimeEvent::Fs(ctx.clone()));
-    }));
-
-// vnet side (analogous EventSinkPolicy in motlie-vnet):
-let tx_net = tx.clone();
-let net_policy = motlie_vnet::LoggingPolicy
-    .chain(motlie_vnet::EventSinkPolicy::new(move |ctx| {
-        let _ = tx_net.send(RuntimeEvent::Net(ctx.clone()));
-    }));
+// Correlator thread reads from unified channel, sees both stacks.
 ```
 
-Neither crate depends on the other. The host runtime owns the enum and
-the channel. Each crate provides a generic `EventSinkPolicy<F>` that
-accepts any `Fn` — it doesn't know about the other crate's types.
+Neither crate depends on the other. The host runtime owns the unified
+enum and the channel.
 
 ## Generic Type Flow
 
@@ -839,21 +887,22 @@ what happens.
 
 ## Future: Cross-Stack Event Correlation
 
-The `EventSinkPolicy` in both vfs and vnet enables a host-runtime
+The `PolicyEvent` emission in both vfs and vnet enables a host-runtime
 correlator that sees both filesystem and network activity. This is NOT
 a vfs concern — the host runtime owns composition:
 
-- vfs provides: `EventSinkPolicy<F>` + `FsOpContext: Clone + Send`
-- vnet provides: `EventSinkPolicy<F>` + context types `Clone + Send`
-- Host runtime defines its own `UnifiedEvent` enum wrapping both
-- No shared crate needed — each crate is independent
+- vfs emits: `PolicyEvent::FsOp` / `PolicyEvent::FsComplete`
+- vnet emits: `PolicyEvent::DnsQuery` / `PolicyEvent::TcpConnect` / etc.
+- Host runtime wraps both in a `RuntimeEvent` enum
+- Correlator reads the unified channel, writes to `InterceptPolicy`
+  blocklists (ArcSwap) in both stacks
 
 Example correlation signals (host runtime, not vfs):
 - "read `/.env` then DNS lookup for `pastebin.com`" → exfiltration
 - "write to `/tmp/payload` then connect to unknown IP:4444" → reverse shell
 
 The vfs DESIGN requirement is: **context types must be `Clone + Send`**
-so the event sink policy can transport them across thread boundaries.
+so the call-site emission can clone them into the event channel.
 
 ## Detection Primitives
 
@@ -875,7 +924,8 @@ at that point — but not speculatively.
 | Chain evaluation (on_complete) | Unit: both policies always see completions |
 | `LoggingPolicy` | Unit: returns Allow, tracing events match OTel conventions |
 | `CredentialGuard` | Unit: denies non-overlay credential paths, allows overlay |
-| `EventSinkPolicy` | Unit: closure receives context on both on_op and on_complete |
+| `InterceptPolicy` | Unit: reads ArcSwap blocklist, denies blocked paths |
+| `PolicyEvent` emission | Integration: events emitted at dispatch call site |
 | `FsOpContext` population | Integration: dispatch populates path, overlay status |
 | `FsOpResult` population | Integration: dispatch measures latency, captures bytes |
 | `FsEvent` enrichment | Integration: events carry path, bytes, result, latency |
