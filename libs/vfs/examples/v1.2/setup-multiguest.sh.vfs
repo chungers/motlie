@@ -7,14 +7,10 @@ use alice
 layer credentials 0
 layer workspace 10
 
-mkdir credentials alice-home /.config 755
 mkdir credentials alice-agent-state /codex 700
 mkdir credentials alice-agent-state /codex/sqlite 700
 mkdir credentials alice-agent-state /claude 700
 mkdir credentials alice-agent-state /claude-code 700
-putattr credentials alice-home /.ssh/authorized_keys 1000 1000 600 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample alice@dev
-putattr credentials alice-home /.ssh/config 1000 1000 644 Host github.com User git
-putattr credentials alice-home /.env 1000 1000 644 ALICE_API_KEY=demo-alice
 put workspace alice-agent-state /README.md Dedicated read-write agent-state layer for Codex and Claude lives here.
 put workspace alice-workspace /README.md Alice workspace mounted from the host.
 ls alice-home
@@ -28,14 +24,10 @@ use bob
 layer credentials 0
 layer workspace 10
 
-mkdir credentials bob-home /.config 755
 mkdir credentials bob-agent-state /codex 700
 mkdir credentials bob-agent-state /codex/sqlite 700
 mkdir credentials bob-agent-state /claude 700
 mkdir credentials bob-agent-state /claude-code 700
-putattr credentials bob-home /.ssh/authorized_keys 1001 1001 600 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample bob@dev
-putattr credentials bob-home /.ssh/config 1001 1001 644 Host gitlab.com User git
-putattr credentials bob-home /.env 1001 1001 644 BOB_API_KEY=demo-bob
 put workspace bob-agent-state /README.md Dedicated read-write agent-state layer for Codex and Claude lives here.
 put workspace bob-workspace /README.md Bob workspace mounted from the host.
 ls bob-home

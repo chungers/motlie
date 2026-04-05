@@ -6,7 +6,8 @@ Phase 3 migration toward `motlie-vnet`:
 - keep inbound SSH on the existing TAP admin path
 - move outbound internet to a separate `motlie-vnet` egress NIC
 - preserve the per-launch writable root overlay from `v1.1`
-- add one dedicated read/write VFS-backed layer at `/agent-state` for Codex + Claude state
+- keep `/home/<user>` disk-backed from the host
+- add one dedicated read/write VFS-backed layer at `/agent-state` for Codex + Claude state during the lifetime of the host REPL
 
 This directory is the working implementation area for Phase 3.1-3.5. It is
 intentionally ahead of the fully validated runbook; the point is to make the
@@ -24,7 +25,7 @@ before the final composed host flow lands.
 4. the user installs Codex CLI and Claude Code CLI inside the guest
 5. the user completes auth/login for both tools inside the guest
 6. the user runs the agent CLIs over SSH and verifies their state is written
-   and read from the dedicated read/write agent-state layer
+   and read from the dedicated read/write agent-state layer for the lifetime of the running host REPL
 
 ## Feasibility Assessment
 
@@ -188,8 +189,18 @@ The split is deliberate:
 
 ### Agent-state layout
 
-The combined dedicated read/write layer is mounted at `/agent-state`. The setup
-scripts pre-create these directories per guest:
+The combined dedicated read/write layer is mounted at `/agent-state`. In the
+current POC, `/home/<user>` is backed by real host directories, while
+`/agent-state` is intentionally used as a REPL-overlay-backed tool-state area.
+That means:
+
+- normal home-directory behavior should look more like a usual disk-backed home
+- Codex / Claude auth and state survive guest relaunch while the same host REPL
+  process remains alive
+- restarting the host REPL can discard `/agent-state` overlay state in the
+  current POC
+
+The setup scripts pre-create these directories per guest:
 
 - `/agent-state/codex`
 - `/agent-state/claude`
@@ -204,6 +215,20 @@ The guest image then redirects:
 `CODEX_HOME` and `CODEX_SQLITE_HOME` are also exported from the login profile
 so Codex uses the dedicated read/write layer even if its path conventions
 evolve.
+
+### Home vs tool-state backing
+
+For the current `v1.2` POC:
+
+- `/home/alice` and `/home/bob` are meant to be host-disk-backed mounts
+- home bootstrap files such as `.ssh`, `.env`, `.bashrc`, `.profile`, and
+  `.config` are seeded onto that host-backed home path
+- `~/.codex`, `~/.claude`, and `~/.config/claude-code` are redirected into the
+  dedicated `/agent-state` mount
+
+This split is intentional. It keeps ordinary home-directory behavior closer to
+a normal disk-backed Linux home while still isolating agent state into one
+separate area for the demo.
 
 ### Network model
 

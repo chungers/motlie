@@ -2,14 +2,10 @@
 layer credentials 0
 layer workspace 10
 
-mkdir credentials alice-home /.config 755
 mkdir credentials alice-agent-state /codex 700
 mkdir credentials alice-agent-state /codex/sqlite 700
 mkdir credentials alice-agent-state /claude 700
 mkdir credentials alice-agent-state /claude-code 700
-putattr credentials alice-home /.ssh/authorized_keys 1000 1000 600 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample alice@dev
-putattr credentials alice-home /.ssh/config 1000 1000 644 Host github.com User git
-put credentials alice-home /.env ALICE_API_KEY=demo-alice
 put workspace alice-agent-state /README.md Dedicated read-write agent-state layer for Codex and Claude lives here.
 put workspace alice-workspace /README.md Alice workspace mounted from the host.
 
