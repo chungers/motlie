@@ -293,32 +293,29 @@ pub trait EgressPolicy: Send + 'static {
     /// - `Allow` defers to `next`.
     fn chain<N: EgressPolicy>(self, next: N) -> impl EgressPolicy
     where
-        Self: Sized,
-    {
-        ChainedEgressPolicy { current: self, next }
-    }
+        Self: Sized;
 }
 ```
 
 ### Chaining
 
-Policies compose via the `chain()` method on the trait. The result is an
-opaque `impl EgressPolicy` — the internal `ChainedEgressPolicy<A, B>`
-struct is not part of the public API. No heap allocation, no vtable dispatch.
-
-Evaluation rules (same as `motlie-vfs`'s `FsPolicy`):
-- First `Deny` wins (short-circuit)
-- `Observe` is sticky — propagates even if next policy returns Allow
-- `Allow` defers to next policy
+Policies compose via `.chain()`. The developer never names or sees the
+intermediate types — the compiler resolves them.
 
 ```rust
 let policy = LoggingPolicy
+    .chain(InterceptPolicy::new(blocked.clone()))
     .chain(CategoryPolicy::default())
-    .chain(my_runtime_policy);
+    .chain(DnsExfilDetector::new(config));
 
-// Opaque type: impl EgressPolicy
-// Compiler monomorphizes all calls — zero dynamic dispatch in the hot loop.
+// `policy` implements EgressPolicy. No heap allocation, no vtable dispatch.
 ```
+
+Chain evaluation rules:
+- First `Deny` wins (short-circuit)
+- `Observe` is sticky — propagates even if next policy returns `Allow`
+- `Allow` defers to next policy
+- Minimum confidence propagated across the chain
 
 ### Zero-Cost NoPolicy Default
 
@@ -1551,3 +1548,47 @@ for the policy chain, cannot be optimized away for NoPolicy
 chain calls in the hot loop, no heap allocation, composable via
 `.chain()` on the trait. The host runtime knows all policy types at
 compile time — dynamic dispatch adds cost without benefit.
+
+---
+
+## Appendix: How Chain Evaluation Works Internally
+
+*This section is technical background for implementers. Developers using
+the policy API never interact with these internals — they only call
+`.chain()` on the trait and get back an `impl EgressPolicy`.*
+
+When a developer writes:
+
+```rust
+let policy = LoggingPolicy.chain(CategoryPolicy::default()).chain(ExfilDetector::new(cfg));
+```
+
+The compiler constructs a nested type. Conceptually:
+
+```
+policy: Chain<LoggingPolicy, Chain<CategoryPolicy, ExfilDetector>>
+```
+
+The actual struct name is internal to the crate and not exported. Each
+link holds `current` (this policy) and `next` (the rest of the chain).
+The struct implements `EgressPolicy` by calling `self.current` first,
+then `self.next`, with these rules:
+
+- `Deny` from current → return immediately (short-circuit), carry its confidence
+- `Observe` from current → call next; if next says `Deny`, return Deny;
+  otherwise return `Observe` with `min(current.confidence, next.confidence)`
+- `Allow` from current → defer entirely to next; propagate
+  `min(current.confidence, next.confidence)` on the composite Allow
+
+For `on_tcp_flow` (and vfs `on_complete`), there is **no short-circuit**
+— all policies in the chain see every flow report, because the flow
+already exists and observation should not be suppressed.
+
+Because the type is fully generic (no `Box<dyn>`), the compiler
+monomorphizes the entire chain at compile time. Each callback inlines
+through the nesting — zero vtable dispatch, zero heap allocation, zero
+dynamic method resolution on the hot path.
+
+When `P = NoPolicy`, the compiler sees that all methods return
+`PolicyAction::Allow { confidence: 1.0 }` and eliminates the entire
+chain evaluation as dead code.
