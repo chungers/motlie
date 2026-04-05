@@ -9,6 +9,7 @@ use std::time::SystemTime;
 pub enum FsOpKind {
     Lookup,
     Getattr,
+    Access,
     Setattr,
     Readdir,
     Open,
@@ -47,6 +48,7 @@ impl FsOpKind {
         match op {
             FsOp::Lookup { .. } => Self::Lookup,
             FsOp::Getattr { .. } => Self::Getattr,
+            FsOp::Access { .. } => Self::Access,
             FsOp::Setattr { .. } => Self::Setattr,
             FsOp::Readdir { .. } => Self::Readdir,
             FsOp::Open { .. } => Self::Open,

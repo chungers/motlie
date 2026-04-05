@@ -9,6 +9,7 @@ use std::time::SystemTime;
 pub enum FsOp {
     Lookup { parent: u64, name: String },
     Getattr { inode: u64 },
+    Access { inode: u64, mask: i32, uid: u32, gid: u32 },
     Setattr { inode: u64, attrs: SetAttrFields },
     Readdir { inode: u64, offset: i64 },
     Open { inode: u64, flags: u32 },
@@ -109,6 +110,7 @@ mod tests {
         let ops = vec![
             FsOp::Lookup { parent: 1, name: "hello.txt".into() },
             FsOp::Getattr { inode: 42 },
+            FsOp::Access { inode: 42, mask: libc::R_OK, uid: 1000, gid: 1000 },
             FsOp::Setattr {
                 inode: 42,
                 attrs: SetAttrFields {
