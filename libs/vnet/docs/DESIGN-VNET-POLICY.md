@@ -630,6 +630,110 @@ impl EgressPolicy for DnsExfilDetector {
 }
 ```
 
+### Entropy Analysis for Detection
+
+Shannon entropy measures the randomness of a string. Natural language
+hostnames (`archive.ubuntu.com`, `api.github.com`) have low entropy
+because they use common letter patterns. Encoded data (base64, hex,
+compressed) has high entropy because the byte distribution is near-uniform.
+
+**Entropy scale for DNS labels:**
+
+| Entropy (bits/char) | Interpretation | Examples |
+|---------------------|----------------|----------|
+| 1.0 – 2.5 | Natural language | `archive`, `ubuntu`, `github` |
+| 2.5 – 3.5 | Mixed / ambiguous | `cdn-a1b2c3`, `edge-us-west` |
+| 3.5 – 4.5 | Likely encoded data | `aGVsbG8gd29ybGQ` (base64) |
+| 4.5 – 5.0 | Near-random / compressed | `7f3a9c2e` (hex), encrypted blobs |
+
+The threshold of ~3.5 bits/char separates most legitimate hostnames from
+encoded payloads. Combined with label length (>30 chars), this produces
+a low false positive rate — short high-entropy labels are common (CDN
+hashes like `d1234.cloudfront.net`), but long high-entropy labels are
+rare in legitimate traffic.
+
+**Implementation using the policy API:**
+
+```rust
+/// Shannon entropy of a byte string (bits per character).
+/// Returns 0.0 for empty input.
+fn shannon_entropy(s: &str) -> f64 {
+    if s.is_empty() {
+        return 0.0;
+    }
+    let mut freq = [0u32; 256];
+    for &b in s.as_bytes() {
+        freq[b as usize] += 1;
+    }
+    let len = s.len() as f64;
+    freq.iter()
+        .filter(|&&count| count > 0)
+        .map(|&count| {
+            let p = count as f64 / len;
+            -p * p.log2()
+        })
+        .sum()
+}
+
+/// Extract the base domain (last two labels) from an FQDN.
+/// "a.b.c.attacker.com" → "attacker.com"
+fn extract_base_domain(domain: &str) -> String {
+    let labels: Vec<&str> = domain.split('.').collect();
+    if labels.len() >= 2 {
+        labels[labels.len() - 2..].join(".")
+    } else {
+        domain.to_string()
+    }
+}
+```
+
+**Composing entropy analysis into a policy chain:**
+
+The `DnsExfilDetector` shown above uses `shannon_entropy` internally.
+It can be chained with other policies — entropy analysis happens only
+in the DNS query callback, not on every packet:
+
+```rust
+let policy = LoggingPolicy                    // OTel-compatible tracing
+    .chain(CategoryPolicy::default())         // allow pkg mgrs, deny adtech
+    .chain(DnsExfilDetector::new(             // entropy + rate detection
+        EntropyConfig {
+            min_label_len: 30,                // only check labels > 30 chars
+            entropy_threshold: 3.5,           // bits/char
+            rate_window: Duration::from_secs(60),
+            rate_limit: 50,                   // unique subdomains per base domain
+        },
+    ));
+```
+
+**Tuning considerations:**
+
+- **`entropy_threshold`**: 3.5 is conservative. Raising to 4.0 reduces
+  false positives (CDN hashes) but may miss smaller exfil payloads.
+- **`min_label_len`**: 30 filters out normal short subdomains. Lowering
+  catches smaller chunks but increases false positives on CDN patterns.
+- **`rate_limit`**: 50 queries/60s per base domain is well above normal
+  browsing patterns but below a sustained exfil stream. Adjust based
+  on the guest workload (a build system doing many package fetches may
+  legitimately query many subdomains of `*.ubuntu.com`).
+- **Allowlist integration**: `CategoryPolicy` runs before
+  `DnsExfilDetector` in the chain. Known package manager domains
+  (which may have high-entropy CDN subdomains) return `Allow` and
+  short-circuit — the exfil detector never sees them.
+
+**Limitations:**
+
+- Entropy analysis cannot detect low-entropy exfiltration (e.g. English
+  words used as a covert channel). This is rare in practice because
+  it is extremely bandwidth-inefficient.
+- Very short exfil chunks (< 10 chars per label) may fall below both
+  the length and entropy thresholds. Rate-based detection catches the
+  aggregate pattern even when individual queries look benign.
+- DNS-over-HTTPS (DoH) bypasses this entirely because queries go over
+  an encrypted HTTPS connection to a DoH resolver. However, the TCP
+  flow observer would see the connection to the DoH resolver, and the
+  `CategoryPolicy` can flag unknown resolver IPs.
+
 **Why DNS exfiltration is a first-class concern for motlie:**
 
 Development VMs have access to credentials (`/.ssh/`, `/.env`, API keys)
