@@ -1,0 +1,43 @@
+[package]
+name = "motlie-vmm"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Reusable VM orchestration: guest lifecycle, SSH proxy, and programmatic control plane"
+
+[features]
+default = []
+
+[dependencies]
+# SSH proxy + CA
+russh = "0.49"
+russh-keys = "0.49"
+ssh-key = { version = "0.6", features = ["ed25519", "std", "crypto", "p256"] }
+rand = "0.8"
+
+# Async
+async-trait = "0.1"
+
+# Core
+anyhow.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "rt", "net", "io-util", "time", "process"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tempfile = "3"
+# Example deps: v1.3 repl_host needs vfs + vnet
+motlie-vfs = { path = "../vfs", features = ["vsock"] }
+motlie-vnet = { path = "../vnet" }
+bytes = { version = "1", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+rustyline = "15"
+atty = "0.2"
+ctrlc = "3"
+
+[[example]]
+name = "repl_host_v1_3"
+path = "examples/v1.3/repl_host.rs"
