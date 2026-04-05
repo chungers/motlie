@@ -10,7 +10,10 @@
 use std::ops::Deref;
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "debug-trace")]
+use std::sync::atomic::AtomicUsize;
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -20,7 +23,6 @@ use vhost::vhost_user::{Error as VhostUserError, Listener};
 use vhost_user_backend::{VhostUserBackend, VhostUserDaemon, VringRwLock, VringT};
 use virtio_bindings::virtio_net::*;
 use virtio_bindings::virtio_config::VIRTIO_F_VERSION_1;
-use virtio_bindings::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 use virtio_queue::QueueT;
 use vm_memory::{Address, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryMmap, Bytes};
 use vmm_sys_util::epoll::EventSet;
@@ -56,7 +58,10 @@ const QUEUE_SIZE: usize = 256;
 // Must be > num_queues (0..=num_queues reserved for virtqueues + exit event).
 const SLIRP_RX_TOKEN: u16 = (NUM_QUEUES + 1) as u16;
 
-// virtio-net header size (no mergeable rx buffers).
+// virtio-net header size used by the current CH/Linux guest combination.
+// Live packet inspection shows the guest presents 12 bytes before the Ethernet
+// frame on TX (two zero bytes followed by the expected L2 header), so the
+// backend must strip/write 12 bytes here.
 const VIRTIO_NET_HDR_SIZE: usize = 12;
 
 // ---------------------------------------------------------------------------
@@ -69,16 +74,32 @@ struct VnetVhostBackend {
     tx_wake_eventfd: Arc<EventFd>,
     tx_sender: Arc<Mutex<mpsc::Sender<Vec<u8>>>>,
     rx_receiver: Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
+    pending_rx: Arc<Mutex<VecDeque<Vec<u8>>>>,
     acked_features: Arc<RwLock<u64>>,
-    mem: VnetMemory,
+    mem: Arc<RwLock<VnetMemory>>,
     mac: [u8; 6],
     /// Pre-cloned exit event pairs ready for the framework to consume.
     /// exit_event() pops from this — it cannot fail at call time because
     /// all cloning is done up front in the constructor.
     framework_exit_events: Arc<Mutex<Vec<(EventConsumer, EventNotifier)>>>,
+    #[cfg(feature = "debug-trace")]
+    tx_debug_budget: Arc<AtomicUsize>,
+    #[cfg(feature = "debug-trace")]
+    rx_debug_budget: Arc<AtomicUsize>,
+    #[cfg(feature = "debug-trace")]
+    tx_event_debug_budget: Arc<AtomicUsize>,
 }
 
 impl VnetVhostBackend {
+    #[cfg(feature = "debug-trace")]
+    fn debug_budget_tick(counter: &AtomicUsize) -> bool {
+        counter
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+    }
+
     fn new(
         config: &VnetConfig,
         tx_sender: mpsc::Sender<Vec<u8>>,
@@ -111,12 +132,19 @@ impl VnetVhostBackend {
             tx_wake_eventfd: Arc::new(tx_wake_eventfd),
             tx_sender: Arc::new(Mutex::new(tx_sender)),
             rx_receiver: Arc::new(Mutex::new(rx_receiver)),
+            pending_rx: Arc::new(Mutex::new(VecDeque::new())),
             acked_features: Arc::new(RwLock::new(0)),
-            mem,
+            mem: Arc::new(RwLock::new(mem)),
             mac: config.mac,
             framework_exit_events: Arc::new(Mutex::new(vec![
                 (framework_consumer, framework_notifier),
             ])),
+            #[cfg(feature = "debug-trace")]
+            tx_debug_budget: Arc::new(AtomicUsize::new(8)),
+            #[cfg(feature = "debug-trace")]
+            rx_debug_budget: Arc::new(AtomicUsize::new(8)),
+            #[cfg(feature = "debug-trace")]
+            tx_event_debug_budget: Arc::new(AtomicUsize::new(16)),
         };
 
         Ok((backend, shutdown_notifier))
@@ -131,14 +159,32 @@ impl VnetVhostBackend {
             std::io::Error::new(std::io::ErrorKind::Other, "tx lock poisoned")
         })?;
 
-        let mem_guard = self.mem.memory();
+        let mem_atomic = self.mem.read().map_err(|e| {
+            tracing::error!("memory lock poisoned, backend fatally degraded: {}", e);
+            std::io::Error::new(std::io::ErrorKind::Other, "memory lock poisoned")
+        })?;
+        let mem_guard = mem_atomic.memory();
         let mem = mem_guard.deref();
 
         let mut state = vring.get_mut();
+        #[cfg(feature = "debug-trace")]
+        let call_present = state.get_call().is_some();
         let queue = state.get_queue_mut();
         let mut sent = false;
+        let mut returned_any = false;
+        #[cfg(feature = "debug-trace")]
+        let mut saw_desc = false;
+
+        #[cfg(feature = "debug-trace")]
+        if Self::debug_budget_tick(&self.tx_event_debug_budget) {
+            eprintln!("motlie-vnet tx-event: kick received call_present={call_present}");
+        }
 
         while let Some(mut desc_chain) = queue.pop_descriptor_chain(mem) {
+            #[cfg(feature = "debug-trace")]
+            {
+                saw_desc = true;
+            }
             let desc_idx = desc_chain.head_index();
             let mut frame = Vec::new();
             let mut first = true;
@@ -159,6 +205,14 @@ impl VnetVhostBackend {
                     match mem.read(&mut buf, data_addr) {
                         Ok(_) => frame.extend_from_slice(&buf),
                         Err(e) => {
+                            #[cfg(feature = "debug-trace")]
+                            eprintln!(
+                                "motlie-vnet tx-read-fail: desc={} first=true addr={} len={} err={}",
+                                desc_idx,
+                                data_addr.raw_value(),
+                                data_len,
+                                e
+                            );
                             tracing::warn!("tx: guest memory read failed at {}: {}", data_addr.raw_value(), e);
                             read_failed = true;
                             break 'tx_desc;
@@ -169,6 +223,14 @@ impl VnetVhostBackend {
                     match mem.read(&mut buf, addr) {
                         Ok(_) => frame.extend_from_slice(&buf),
                         Err(e) => {
+                            #[cfg(feature = "debug-trace")]
+                            eprintln!(
+                                "motlie-vnet tx-read-fail: desc={} first=false addr={} len={} err={}",
+                                desc_idx,
+                                addr.raw_value(),
+                                len,
+                                e
+                            );
                             tracing::warn!("tx: guest memory read failed at {}: {}", addr.raw_value(), e);
                             read_failed = true;
                             break 'tx_desc;
@@ -179,6 +241,31 @@ impl VnetVhostBackend {
 
             // Only send complete frames — drop truncated ones on read failure.
             if !read_failed && !frame.is_empty() {
+                #[cfg(feature = "debug-trace")]
+                if Self::debug_budget_tick(&self.tx_debug_budget) {
+                    let ethertype = if frame.len() >= 14 {
+                        u16::from_be_bytes([frame[12], frame[13]])
+                    } else {
+                        0
+                    };
+                    eprintln!(
+                        "motlie-vnet tx: len={} ethertype=0x{:04x} dst={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} src={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                        frame.len(),
+                        ethertype,
+                        frame.get(0).copied().unwrap_or(0),
+                        frame.get(1).copied().unwrap_or(0),
+                        frame.get(2).copied().unwrap_or(0),
+                        frame.get(3).copied().unwrap_or(0),
+                        frame.get(4).copied().unwrap_or(0),
+                        frame.get(5).copied().unwrap_or(0),
+                        frame.get(6).copied().unwrap_or(0),
+                        frame.get(7).copied().unwrap_or(0),
+                        frame.get(8).copied().unwrap_or(0),
+                        frame.get(9).copied().unwrap_or(0),
+                        frame.get(10).copied().unwrap_or(0),
+                        frame.get(11).copied().unwrap_or(0),
+                    );
+                }
                 if let Err(e) = tx_lock.send(frame) {
                     tracing::warn!("tx channel send failed: {}", e);
                 }
@@ -186,14 +273,38 @@ impl VnetVhostBackend {
             }
 
             if let Err(e) = queue.add_used(mem, desc_idx, 0) {
+                #[cfg(feature = "debug-trace")]
+                eprintln!("motlie-vnet tx-add-used-fail: desc={} err={}", desc_idx, e);
                 tracing::warn!("tx: add_used failed for desc {}: {}", desc_idx, e);
+            } else {
+                returned_any = true;
             }
         }
 
-        if sent {
+        #[cfg(feature = "debug-trace")]
+        if Self::debug_budget_tick(&self.tx_event_debug_budget) {
+            eprintln!(
+                "motlie-vnet tx-event: saw_desc={} returned_any={} sent_any={} call_present={}",
+                saw_desc,
+                returned_any,
+                sent,
+                call_present
+            );
+        }
+
+        if returned_any {
             if let Err(e) = state.signal_used_queue() {
+                #[cfg(feature = "debug-trace")]
+                eprintln!("motlie-vnet tx-signal-fail: err={}", e);
                 tracing::warn!("tx: signal_used_queue failed: {}", e);
+            } else {
+                #[cfg(feature = "debug-trace")]
+                if Self::debug_budget_tick(&self.tx_event_debug_budget) {
+                    eprintln!("motlie-vnet tx-signal-ok: call_present={call_present}");
+                }
             }
+        }
+        if sent {
             let _ = self.tx_wake_eventfd.write(1);
         }
         Ok(())
@@ -207,16 +318,53 @@ impl VnetVhostBackend {
             tracing::error!("rx lock poisoned, backend fatally degraded: {}", e);
             std::io::Error::new(std::io::ErrorKind::Other, "rx lock poisoned")
         })?;
+        let mut pending_rx = self.pending_rx.lock().map_err(|e| {
+            tracing::error!("pending rx lock poisoned, backend fatally degraded: {}", e);
+            std::io::Error::new(std::io::ErrorKind::Other, "pending rx lock poisoned")
+        })?;
 
-        let mem_guard = self.mem.memory();
+        while let Ok(frame) = rx_lock.try_recv() {
+            pending_rx.push_back(frame);
+        }
+
+        let mem_atomic = self.mem.read().map_err(|e| {
+            tracing::error!("memory lock poisoned, backend fatally degraded: {}", e);
+            std::io::Error::new(std::io::ErrorKind::Other, "memory lock poisoned")
+        })?;
+        let mem_guard = mem_atomic.memory();
         let mem = mem_guard.deref();
 
         let mut state = vring.get_mut();
         let queue = state.get_queue_mut();
         let mut injected = false;
 
-        while let Ok(frame) = rx_lock.try_recv() {
+        while let Some(frame) = pending_rx.pop_front() {
             if let Some(mut desc_chain) = queue.pop_descriptor_chain(mem) {
+                #[cfg(feature = "debug-trace")]
+                if Self::debug_budget_tick(&self.rx_debug_budget) {
+                    let ethertype = if frame.len() >= 14 {
+                        u16::from_be_bytes([frame[12], frame[13]])
+                    } else {
+                        0
+                    };
+                    eprintln!(
+                        "motlie-vnet rx: len={} ethertype=0x{:04x} dst={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} src={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                        frame.len(),
+                        ethertype,
+                        frame.get(0).copied().unwrap_or(0),
+                        frame.get(1).copied().unwrap_or(0),
+                        frame.get(2).copied().unwrap_or(0),
+                        frame.get(3).copied().unwrap_or(0),
+                        frame.get(4).copied().unwrap_or(0),
+                        frame.get(5).copied().unwrap_or(0),
+                        frame.get(6).copied().unwrap_or(0),
+                        frame.get(7).copied().unwrap_or(0),
+                        frame.get(8).copied().unwrap_or(0),
+                        frame.get(9).copied().unwrap_or(0),
+                        frame.get(10).copied().unwrap_or(0),
+                        frame.get(11).copied().unwrap_or(0),
+                    );
+                }
                 let desc_idx = desc_chain.head_index();
                 let mut offset = 0usize;
                 let mut write_failed = false;
@@ -287,7 +435,12 @@ impl VnetVhostBackend {
                 // so the guest recycles the descriptor and avoids rx stalls.
                 injected = true;
             } else {
-                tracing::debug!("rx vring full, dropping frame ({} bytes)", frame.len());
+                tracing::debug!(
+                    "rx vring empty/full, deferring frame ({} bytes, {} pending)",
+                    frame.len(),
+                    pending_rx.len() + 1
+                );
+                pending_rx.push_front(frame);
                 break;
             }
         }
@@ -314,11 +467,8 @@ impl VhostUserBackend for VnetVhostBackend {
     }
 
     fn features(&self) -> u64 {
-        1 << VIRTIO_NET_F_GUEST_CSUM
-            | 1 << VIRTIO_NET_F_CSUM
-            | 1 << VIRTIO_NET_F_MAC
+        1 << VIRTIO_NET_F_MAC
             | 1 << VIRTIO_F_VERSION_1
-            | 1 << VIRTIO_RING_F_EVENT_IDX
             | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits()
     }
 
@@ -345,9 +495,21 @@ impl VhostUserBackend for VnetVhostBackend {
 
     fn update_memory(
         &self,
-        _atomic_mem: VnetMemory,
+        atomic_mem: VnetMemory,
     ) -> std::io::Result<()> {
-        Ok(())
+        match self.mem.write() {
+            Ok(mut guard) => {
+                *guard = atomic_mem;
+                Ok(())
+            }
+            Err(e) => {
+                tracing::error!("memory lock poisoned during update_memory: {}", e);
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "memory lock poisoned",
+                ))
+            }
+        }
     }
 
     fn exit_event(&self, _thread_index: usize) -> Option<(EventConsumer, EventNotifier)> {
@@ -376,7 +538,9 @@ impl VhostUserBackend for VnetVhostBackend {
         _thread_id: usize,
     ) -> std::io::Result<()> {
         match device_event {
-            RX_QUEUE => {}
+            RX_QUEUE => {
+                self.process_rx(&vrings[RX_QUEUE as usize])?;
+            }
             TX_QUEUE => {
                 self.process_tx(&vrings[TX_QUEUE as usize])?;
             }
@@ -681,6 +845,20 @@ pub struct VnetHandle {
 }
 
 impl VnetHandle {
+    pub fn is_alive(&self) -> bool {
+        let slirp_alive = self
+            .slirp_thread
+            .as_ref()
+            .map(|h| !h.is_finished())
+            .unwrap_or(false);
+        let daemon_alive = self
+            .daemon_thread
+            .as_ref()
+            .map(|h| !h.is_finished())
+            .unwrap_or(false);
+        slirp_alive && daemon_alive && self.socket_path.exists()
+    }
+
     /// Shut down deterministically. Signals all threads to exit, joins them,
     /// and removes the socket file. Propagates daemon-thread errors.
     pub fn shutdown(&mut self) -> Result<(), VnetError> {
@@ -1007,6 +1185,69 @@ mod tests {
         assert_eq!(mock_queue.used().idx().load(), 1);
     }
 
+    #[test]
+    fn test_process_rx_defers_frame_until_guest_posts_buffers() {
+        let mem = create_test_memory();
+        let mem_ref = mem.memory();
+        let queue_mem = mem_ref.deref();
+        let mock_queue = MockSplitQueue::new(queue_mem, QUEUE_SIZE as u16);
+        let vring = create_vring(mem.clone(), &mock_queue);
+
+        let (call_consumer, call_notifier) =
+            new_event_consumer_and_notifier(EventFlag::empty()).unwrap();
+        let call_file = unsafe { std::fs::File::from_raw_fd(call_notifier.into_raw_fd()) };
+        vring.set_call(Some(call_file));
+
+        let (rx_sender, rx_receiver) = mpsc::channel();
+        let eventfd = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        rx_sender.send(vec![1, 2, 3, 4]).unwrap();
+        eventfd.write(1).unwrap();
+
+        let (backend, _exit_notifier) = VnetVhostBackend::new(
+            &VnetConfig::builder().socket_path("/tmp/test.sock").build().unwrap(),
+            mpsc::channel().0,
+            rx_receiver,
+            eventfd,
+            EventFd::new(libc::EFD_NONBLOCK).unwrap(),
+            mem,
+        )
+        .unwrap();
+
+        // No RX descriptors yet: frame should be retained, not dropped.
+        backend.process_rx(&vring).unwrap();
+        assert_eq!(backend.pending_rx.lock().unwrap().len(), 1);
+        assert_eq!(mock_queue.used().idx().load(), 0);
+
+        // Guest posts buffers later.
+        let hdr_addr = GuestAddress(0x3000);
+        let payload_addr = GuestAddress(0x4000);
+        let descs = [
+            RawDescriptor::from(Descriptor::new(
+                hdr_addr.raw_value(),
+                VIRTIO_NET_HDR_SIZE as u32,
+                virtio_bindings::virtio_ring::VRING_DESC_F_WRITE as u16,
+                0,
+            )),
+            RawDescriptor::from(Descriptor::new(
+                payload_addr.raw_value(),
+                4,
+                virtio_bindings::virtio_ring::VRING_DESC_F_WRITE as u16,
+                0,
+            )),
+        ];
+        mock_queue.build_desc_chain(&descs).unwrap();
+
+        // RX queue kick should retry pending delivery.
+        backend.handle_event(RX_QUEUE, EventSet::IN, &[vring.clone(), vring.clone()], 0).unwrap();
+
+        let mut payload_out = [0u8; 4];
+        queue_mem.read(&mut payload_out, payload_addr).unwrap();
+        assert_eq!(payload_out, [1, 2, 3, 4]);
+        call_consumer.consume().unwrap();
+        assert_eq!(backend.pending_rx.lock().unwrap().len(), 0);
+        assert_eq!(mock_queue.used().idx().load(), 1);
+    }
+
     // -- TX read-failure regression test --
 
     /// Verify that a guest memory read failure drops the frame rather than
@@ -1077,6 +1318,59 @@ mod tests {
 
         // Descriptor should still be returned to the used ring so the guest
         // doesn't wedge.
+        assert_eq!(mock_queue.used().idx().load(), 1);
+    }
+
+    #[test]
+    fn test_process_tx_read_failure_still_notifies_guest() {
+        let mem = create_test_memory();
+        let mem_ref = mem.memory();
+        let queue_mem = mem_ref.deref();
+        let mock_queue = MockSplitQueue::new(queue_mem, QUEUE_SIZE as u16);
+
+        let header_addr = GuestAddress(0x1000);
+        queue_mem.write(&[0u8; VIRTIO_NET_HDR_SIZE], header_addr).unwrap();
+        let bad_addr = GuestAddress(0x30000);
+
+        let descs = [
+            RawDescriptor::from(Descriptor::new(
+                header_addr.raw_value(),
+                (VIRTIO_NET_HDR_SIZE + 4) as u32,
+                0,
+                0,
+            )),
+            RawDescriptor::from(Descriptor::new(
+                bad_addr.raw_value(),
+                64,
+                0,
+                0,
+            )),
+        ];
+        mock_queue.build_desc_chain(&descs).unwrap();
+
+        let vring = create_vring(mem.clone(), &mock_queue);
+
+        let (call_consumer, call_notifier) =
+            new_event_consumer_and_notifier(EventFlag::empty()).unwrap();
+        let call_file = unsafe { std::fs::File::from_raw_fd(call_notifier.into_raw_fd()) };
+        vring.set_call(Some(call_file));
+
+        let (tx_sender, tx_receiver) = mpsc::channel();
+        let (_rx_sender, rx_receiver) = mpsc::channel();
+        let (backend, _exit_notifier) = VnetVhostBackend::new(
+            &VnetConfig::builder().socket_path("/tmp/test.sock").build().unwrap(),
+            tx_sender,
+            rx_receiver,
+            EventFd::new(libc::EFD_NONBLOCK).unwrap(),
+            EventFd::new(libc::EFD_NONBLOCK).unwrap(),
+            mem,
+        )
+        .unwrap();
+
+        backend.process_tx(&vring).unwrap();
+
+        assert!(tx_receiver.try_recv().is_err(), "truncated frame should be dropped");
+        call_consumer.consume().unwrap();
         assert_eq!(mock_queue.used().idx().load(), 1);
     }
 }
