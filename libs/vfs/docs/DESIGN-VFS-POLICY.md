@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-05 | @claude-tl | Drop Observe, two-action PolicyAction (Allow/Deny + confidence), deny_threshold, emission truth table, appendix updated |
 | 2026-04-05 | @claude-tl | Confidence on PolicyAction, FsInterceptPolicy with ArcSwap, PolicyEvent at call site, remove EventSinkPolicy |
 | 2026-04-05 | @claude-tl | Stateless policy redesign: dispatch-layer state, caller identity (UID/GID/PID) with FUSE plumbing gap, pre-computed signals, fd hijacking/execve limitations, Setattr mode/ownership tracking |
 | 2026-04-05 | @claude-tl | Add 3-phase detection framework (discovery→staging→execution), enriched FsOpContext (inode, is_sensitive, parent_path), write_entropy in FsOpResult, detector examples |
@@ -34,7 +35,7 @@ access control:
 1. **Enriched context**: pre-op callbacks see operation kind, tag, path,
    overlay status. Post-op callbacks see result, bytes, latency.
 2. **Chainable policies**: `.chain()` method on the trait. First Deny wins,
-   Observe is sticky, Allow defers. Same chaining pattern used by
+   min-confidence propagated, Allow defers. Same chaining pattern used by
    `motlie-vnet`'s `EgressPolicy`.
 3. **Zero-cost default**: `NoPolicy` compiles out entirely. Generic
    `P: FsPolicy` threaded through `FsServer<P>`.
@@ -62,7 +63,7 @@ The existing `PolicyFn` trait is replaced by `FsPolicy`:
 | Before (`PolicyFn`) | After (`FsPolicy`) |
 |---------------------|---------------------|
 | `fn check(&self, op, tag, path) -> Result<(), i32>` | `fn on_op(&self, ctx: &FsOpContext) -> PolicyAction` |
-| `Ok(())` | `PolicyAction::Allow { reason: None }` |
+| `Ok(())` | `PolicyAction::Allow { reason: None, confidence: 1.0 }` |
 | `Err(libc::EROFS)` | `PolicyAction::Deny { errno: libc::EROFS, reason: ... }` |
 | `Box<dyn PolicyFn>` | Generic `P: FsPolicy` |
 | No post-op | `fn on_complete(&self, ctx, result)` |
@@ -74,22 +75,22 @@ The existing `PolicyFn` trait is replaced by `FsPolicy`:
 ### PolicyAction
 
 ```rust
-/// Policy decision. Shared shape with motlie-vnet's EgressPolicy.
+/// Policy decision. Binary: Allow or Deny. Confidence carries the
+/// uncertainty signal — no separate "Observe" variant.
+/// Shared shape with motlie-vnet's EgressPolicy.
 pub enum PolicyAction {
-    /// Allow the operation.
+    /// Allow the operation to proceed.
     Allow {
+        /// Why this was allowed. The chain keeps the reason from the
+        /// lowest-confidence policy (the weakest link).
         reason: Option<PolicyReason>,
-        /// Confidence in this decision (0.0–1.0).
+        /// Confidence (0.0–1.0). Below deny_threshold → auto-converted
+        /// to Deny at the dispatch layer.
         confidence: f64,
     },
     /// Deny the operation. `errno` is returned to the guest via FUSE.
     Deny {
         errno: i32,
-        reason: PolicyReason,
-        confidence: f64,
-    },
-    /// Allow but flag for observation.
-    Observe {
         reason: PolicyReason,
         confidence: f64,
     },
@@ -146,21 +147,21 @@ pub trait FsPolicy: Send + Sync + 'static {
     /// Called before every filesystem operation. Return Deny to prevent
     /// the operation from executing (guest sees the errno).
     fn on_op(&self, ctx: &FsOpContext) -> PolicyAction {
-        PolicyAction::Allow { reason: None }
+        PolicyAction::Allow { reason: None, confidence: 1.0 }
     }
 
     /// Called after every filesystem operation completes. The operation
     /// has already executed — this is observe-only. Used for logging,
     /// metrics, latency tracking, and audit trails.
     fn on_complete(&self, ctx: &FsOpContext, result: &FsOpResult) -> PolicyAction {
-        PolicyAction::Allow { reason: None }
+        PolicyAction::Allow { reason: None, confidence: 1.0 }
     }
 
     /// Chain another policy after this one.
     ///
     /// Evaluation order: `self` first, then `next`.
     /// - First Deny wins (short-circuit) for `on_op`.
-    /// - Observe is sticky — propagates even if next returns Allow.
+    /// - Minimum confidence propagated (weakest link).
     /// - Allow defers to next.
     /// - `on_complete` does NOT short-circuit — both policies always
     ///   see completions (the operation already executed).
@@ -184,7 +185,7 @@ let policy = LoggingPolicy
 
 Chain evaluation rules:
 - First `Deny` wins (short-circuit)
-- `Observe` is sticky — propagates even if next returns `Allow`
+- Minimum confidence propagated across the chain (weakest link)
 - `Allow` defers to next
 - Minimum confidence propagated across the chain
 - `on_complete` does NOT short-circuit — all policies see completions
@@ -243,7 +244,7 @@ pub struct FsOpContext {
     pub caller_gid: Option<u32>,
     /// Guest-side caller PID. Enables per-process policy decisions:
     /// "apt (PID 1234) reading /etc/apt/ = Allow" vs
-    /// "unknown (PID 9999) reading /.ssh/ = Observe".
+    /// "unknown (PID 9999) reading /.ssh/ = Allow { confidence: 0.3 }".
     pub caller_pid: Option<u32>,
 
     // --- Dispatch-layer pre-computed signals ---
@@ -441,11 +442,11 @@ With PID available, the policy API supports:
 // Per-process policy decisions (stateless — dispatch pre-computes)
 fn on_op(&self, ctx: &FsOpContext) -> PolicyAction {
     // Known package manager PID accessing package cache = Allow
-    // Unknown PID accessing /.ssh/ = Observe
+    // Unknown PID accessing /.ssh/ = Allow { confidence: 0.3 }
     if ctx.is_sensitive && !is_known_process(ctx.caller_pid) {
-        PolicyAction::Observe { reason: ... }
+        PolicyAction::Allow { reason: ... }
     } else {
-        PolicyAction::Allow { reason: None }
+        PolicyAction::Allow { reason: None, confidence: 1.0 }
     }
 }
 ```
@@ -520,7 +521,7 @@ impl FsPolicy for LoggingPolicy {
             vfs.overlay = ctx.is_overlay,
             "fs.op.start"
         );
-        PolicyAction::Allow { reason: None }
+        PolicyAction::Allow { reason: None, confidence: 1.0 }
     }
 
     fn on_complete(&self, ctx: &FsOpContext, result: &FsOpResult) -> PolicyAction {
@@ -536,7 +537,7 @@ impl FsPolicy for LoggingPolicy {
             vfs.errno = result.errno,
             "fs.op.end"
         );
-        PolicyAction::Allow { reason: None }
+        PolicyAction::Allow { reason: None, confidence: 1.0 }
     }
 }
 ```
@@ -554,7 +555,7 @@ impl FsPolicy for CredentialGuard {
                 reason: PolicyReason::Category(FsCategory::CredentialAccess),
             }
         } else {
-            PolicyAction::Allow { reason: None }
+            PolicyAction::Allow { reason: None, confidence: 1.0 }
         }
     }
 }
@@ -637,14 +638,14 @@ impl FsPolicy for ScanDetector {
         // Dispatch layer pre-computes metadata_rate and unique_paths_in_window.
         // No RwLock, no HashMap — just compare against thresholds.
         if ctx.metadata_rate > 500 || ctx.unique_paths_in_window > 200 {
-            PolicyAction::Observe {
+            PolicyAction::Allow {
                 reason: PolicyReason::Custom(
                     format!("scan: {} ops/s, {} unique paths",
                             ctx.metadata_rate, ctx.unique_paths_in_window).into()
                 ),
             }
         } else {
-            PolicyAction::Allow { reason: None }
+            PolicyAction::Allow { reason: None, confidence: 1.0 }
         }
     }
 }
@@ -675,13 +676,13 @@ struct StagingDetector;
 impl FsPolicy for StagingDetector {
     fn on_complete(&self, ctx: &FsOpContext, result: &FsOpResult) -> PolicyAction {
         if ctx.op != FsOpKind::Write {
-            return PolicyAction::Allow { reason: None };
+            return PolicyAction::Allow { reason: None, confidence: 1.0 };
         }
         // Large high-entropy write to temp directory = staging
         if let (Some(bytes), Some(entropy)) = (result.bytes, result.write_entropy) {
             let is_temp = ctx.path.starts_with("/tmp/") || ctx.path.starts_with("/var/tmp/");
             if is_temp && bytes > 1_000_000 && entropy > 4.0 {
-                return PolicyAction::Observe {
+                return PolicyAction::Allow {
                     reason: PolicyReason::Custom(
                         format!("staging pattern: {}MB high-entropy write to {}",
                                 bytes / 1_000_000, ctx.path).into()
@@ -689,7 +690,7 @@ impl FsPolicy for StagingDetector {
                 };
             }
         }
-        PolicyAction::Allow { reason: None }
+        PolicyAction::Allow { reason: None, confidence: 1.0 }
     }
 }
 ```
@@ -720,7 +721,7 @@ struct RansomwareDetector;
 impl FsPolicy for RansomwareDetector {
     fn on_complete(&self, ctx: &FsOpContext, result: &FsOpResult) -> PolicyAction {
         if ctx.op != FsOpKind::Write {
-            return PolicyAction::Allow { reason: None };
+            return PolicyAction::Allow { reason: None, confidence: 1.0 };
         }
         // Dispatch layer pre-computes: was this inode recently Read?
         // How many bytes? Policy just checks the pre-computed fields.
@@ -743,7 +744,7 @@ impl FsPolicy for RansomwareDetector {
                 }
             }
         }
-        PolicyAction::Allow { reason: None }
+        PolicyAction::Allow { reason: None, confidence: 1.0 }
     }
 }
 ```
@@ -858,17 +859,33 @@ enum RuntimeEvent {
 Neither crate depends on the other. The host runtime owns the unified
 enum and the channel.
 
+## deny_threshold
+
+The dispatch layer converts low-confidence Allows to Denys:
+
+```rust
+let server = FsServer::builder()
+    .policy(my_chain)
+    .deny_threshold(0.5)   // Allow with confidence < 0.5 → Deny
+    .build()?;
+```
+
+Default: `0.0` (only explicit Denys block). Strict mode: `0.8`.
+
 ## Generic Type Flow
 
 ```
 FsServer<P: FsPolicy = NoPolicy>
   → dispatch<P>()
-    → build FsOpContext (path, tag, overlay status)
-    → policy.on_op(&ctx)              // pre-op check
+    → build FsOpContext (path, tag, overlay, rates, inode history)
+    → policy.on_op(&ctx)              // pure decision
+    → apply deny_threshold            // low-confidence Allow → Deny
+    → emit PolicyEvent::FsOp          // if Deny or uncertain Allow
     → if Deny: return errno immediately
     → execute operation
-    → build FsOpResult (success, errno, bytes, latency)
-    → policy.on_complete(&ctx, &result)  // post-op observe
+    → build FsOpResult (success, errno, bytes, write_entropy, latency)
+    → policy.on_complete(&ctx, &result)  // post-op (all policies see)
+    → emit PolicyEvent::FsComplete       // if Deny or uncertain Allow
     → emit_event()                     // enriched FsEvent
 ```
 
@@ -928,7 +945,7 @@ at that point — but not speculatively.
 | Component | Test approach |
 |-----------|--------------|
 | `FsPolicy` trait + `NoPolicy` | Unit: returns Allow for all ops |
-| Chain evaluation (on_op) | Unit: Deny short-circuits, Observe sticky, Allow defers |
+| Chain evaluation (on_op) | Unit: Deny short-circuits, min-confidence propagation, reason from weakest link |
 | Chain evaluation (on_complete) | Unit: both policies always see completions |
 | `LoggingPolicy` | Unit: returns Allow, tracing events match OTel conventions |
 | `CredentialGuard` | Unit: denies non-overlay credential paths, allows overlay |
@@ -973,25 +990,18 @@ impl<A: FsPolicy, B: FsPolicy> FsPolicy for ChainedFsPolicy<A, B> {
         let first = self.current.on_op(ctx);
         match first {
             PolicyAction::Deny { .. } => first,  // short-circuit
-            PolicyAction::Observe { confidence: c1, .. } => {
+            PolicyAction::Allow { confidence: c1, reason: r1 } => {
                 let second = self.next.on_op(ctx);
                 match second {
                     PolicyAction::Deny { .. } => second,
-                    _ => PolicyAction::Observe {
-                        confidence: c1.min(second.confidence()),
-                        ..first
-                    },
-                }
-            }
-            PolicyAction::Allow { confidence: c1, .. } => {
-                let second = self.next.on_op(ctx);
-                match &second {
-                    PolicyAction::Allow { confidence: c2, .. } =>
-                        PolicyAction::Allow {
-                            confidence: c1.min(*c2),
-                            ..second
-                        },
-                    _ => second,  // Deny or Observe from next wins
+                    PolicyAction::Allow { confidence: c2, reason: r2 } => {
+                        // Min confidence, reason from weakest link
+                        if c2 < c1 {
+                            PolicyAction::Allow { confidence: c2, reason: r2 }
+                        } else {
+                            PolicyAction::Allow { confidence: c1, reason: r1 }
+                        }
+                    }
                 }
             }
         }
