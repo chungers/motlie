@@ -1,4 +1,4 @@
-//! Shannon entropy analysis for detecting encoded/encrypted data.
+//! Shannon entropy analysis for detecting encoded/encrypted data in DNS labels.
 //!
 //! Measures the randomness of a string in bits per character. Natural language
 //! and readable hostnames have low entropy (1.0–2.5); base64/hex-encoded data
@@ -6,10 +6,8 @@
 //!
 //! # Use cases
 //!
-//! - **DNS exfiltration** (vnet): high-entropy subdomain labels carrying
-//!   encoded payloads (e.g. `aGVsbG8gd29ybGQ.exfil.attacker.com`)
-//! - **Filesystem staging** (vfs): high-entropy filenames indicating
-//!   obfuscated or encrypted payloads written to disk
+//! - **DNS exfiltration**: high-entropy subdomain labels carrying encoded
+//!   payloads (e.g. `aGVsbG8gd29ybGQ.exfil.attacker.com`)
 //!
 //! # Entropy scale
 //!
@@ -65,7 +63,6 @@ mod tests {
 
     #[test]
     fn base64_has_high_entropy() {
-        // "hello world" in base64
         let e = shannon_entropy("aGVsbG8gd29ybGQ");
         assert!(e > 3.0, "expected high entropy for base64, got {}", e);
     }
@@ -78,7 +75,6 @@ mod tests {
 
     #[test]
     fn short_cdn_hash_moderate_entropy() {
-        // Short CDN-style hashes may have moderate entropy
         let e = shannon_entropy("d1a2b3c4");
         assert!(e > 2.5, "expected moderate+ entropy for short hash, got {}", e);
     }

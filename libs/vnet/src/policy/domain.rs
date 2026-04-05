@@ -1,14 +1,14 @@
-//! Domain name utilities for policy implementations.
+//! Domain name utilities for network policy implementations.
 //!
-//! Provides base domain extraction, suffix matching, and label parsing
-//! used by category policies and DNS exfiltration detectors.
+//! Base domain extraction, suffix matching, and label parsing for
+//! category policies and DNS exfiltration detectors.
 
 /// Extract the base domain (last two labels) from an FQDN.
 ///
 /// # Examples
 ///
 /// ```
-/// use motlie_policy::domain::extract_base_domain;
+/// use motlie_vnet::policy::domain::extract_base_domain;
 ///
 /// assert_eq!(extract_base_domain("a.b.c.attacker.com"), "attacker.com");
 /// assert_eq!(extract_base_domain("archive.ubuntu.com"), "ubuntu.com");
@@ -30,7 +30,7 @@ pub fn extract_base_domain(domain: &str) -> String {
 /// # Examples
 ///
 /// ```
-/// use motlie_policy::domain::matches_suffix;
+/// use motlie_vnet::policy::domain::matches_suffix;
 ///
 /// assert!(matches_suffix("crates.io", "crates.io"));
 /// assert!(matches_suffix("archive.ubuntu.com", "*.ubuntu.com"));
@@ -38,12 +38,9 @@ pub fn extract_base_domain(domain: &str) -> String {
 /// ```
 pub fn matches_suffix(domain: &str, pattern: &str) -> bool {
     if let Some(suffix) = pattern.strip_prefix("*.") {
-        // Suffix match: domain must end with .suffix and have at least one
-        // label before it (to avoid matching "ubuntu.com" against "*.ubuntu.com")
         domain.ends_with(suffix) && domain.len() > suffix.len() + 1
             && domain.as_bytes()[domain.len() - suffix.len() - 1] == b'.'
     } else {
-        // Exact match
         domain == pattern
     }
 }
@@ -78,9 +75,7 @@ mod tests {
 
     #[test]
     fn suffix_wildcard_no_false_positive() {
-        // "ubuntu.com" itself should NOT match "*.ubuntu.com"
         assert!(!matches_suffix("ubuntu.com", "*.ubuntu.com"));
-        // "evil-ubuntu.com" should NOT match
         assert!(!matches_suffix("evil-ubuntu.com", "*.ubuntu.com"));
     }
 }

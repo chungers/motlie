@@ -652,23 +652,21 @@ a low false positive rate — short high-entropy labels are common (CDN
 hashes like `d1234.cloudfront.net`), but long high-entropy labels are
 rare in legitimate traffic.
 
-**Implementation via `motlie-policy` crate:**
+**Implementation in `motlie_vnet::policy::entropy`:**
 
-Entropy analysis and other detection primitives live in `libs/policy/`
-(`motlie-policy` crate) — shared by both `motlie-vfs` and `motlie-vnet`
-without either depending on the other.
+Network detection primitives live in `libs/vnet/src/policy/` — these
+are network-specific utilities scoped to the vnet crate.
 
 ```
-libs/policy/
-├── src/
-│   ├── lib.rs          // pub mod entropy; pub mod domain;
-│   ├── entropy.rs      // shannon_entropy(), EntropyConfig
-│   └── domain.rs       // extract_base_domain(), domain utilities
-└── Cargo.toml          // motlie-policy, zero deps on vfs/vnet
+libs/vnet/src/policy/
+├── mod.rs              // pub mod entropy; pub mod domain;
+├── entropy.rs          // shannon_entropy()
+├── domain.rs           // extract_base_domain(), matches_suffix()
+└── (future: ratio.rs, duration.rs, beacon.rs, first_seen.rs)
 ```
 
 ```rust
-// libs/policy/src/entropy.rs
+// libs/vnet/src/policy/entropy.rs
 
 /// Shannon entropy of a byte string (bits per character).
 /// Returns 0.0 for empty input.
@@ -690,7 +688,7 @@ pub fn shannon_entropy(s: &str) -> f64 {
         .sum()
 }
 
-// libs/policy/src/domain.rs
+// libs/vnet/src/policy/domain.rs
 
 /// Extract the base domain (last two labels) from an FQDN.
 /// "a.b.c.attacker.com" → "attacker.com"
@@ -704,18 +702,8 @@ pub fn extract_base_domain(domain: &str) -> String {
 }
 ```
 
-Policy implementations in `motlie-vnet` and `motlie-vfs` depend on
-`motlie-policy` for these primitives:
-
-```toml
-# libs/vnet/Cargo.toml
-[dependencies]
-motlie-policy = { path = "../policy" }
-
-# libs/vfs/Cargo.toml
-[dependencies]
-motlie-policy = { path = "../policy" }
-```
+Policy implementations use these as `motlie_vnet::policy::entropy::shannon_entropy()`
+and `motlie_vnet::policy::domain::extract_base_domain()`. No separate crate needed.
 
 **Composing entropy analysis into a policy chain:**
 
