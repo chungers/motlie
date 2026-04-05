@@ -180,7 +180,7 @@ BASE_KERNEL="$BASE_ARTIFACTS/$KERNEL_IMAGE"
 BASE_HOSTNAME="motlie-vfs-v12"
 EGRESS_MAC="12:34:56:78:90:ab"
 
-echo "=== motlie-vfs v1.2 base image builder ==="
+echo "=== motlie-vnet v1.2 base image builder ==="
 echo "Host arch:          $HOST_ARCH"
 echo "Rust target:        $RUST_TARGET"
 echo "Debian arch:        $DEBOOTSTRAP_ARCH"
