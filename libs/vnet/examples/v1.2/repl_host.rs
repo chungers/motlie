@@ -1,4 +1,4 @@
-//! repl_host_v1_2 scaffold: copied host-side filesystem server with admin REPL.
+//! repl_host_v1_2: v1.2 host-side VFS+vnet server with admin REPL (motlie-vnet package).
 //!
 //! Starts one or more guest-scoped FsServer instances with MemOverlay,
 //! listens on one Unix socket per guest, and serves filesystem
@@ -31,16 +31,16 @@
 //!
 //! ```bash
 //! # Interactive
-//! cargo run --example repl_host_v1_2 --features vsock -- --tag alice-home --dir ~/alice
+//! cargo run -p motlie-vnet --example repl_host_v1_2 -- --tag alice-home --dir ~/alice
 //!
 //! # Multi-mount (repeat --mount)
-//! cargo run --example repl_host_v1_2 --features vsock -- \
+//! cargo run -p motlie-vnet --example repl_host_v1_2 -- \
 //!     --socket /tmp/motlie-vfs.vsock_5000 \
 //!     --mount alice-home=~/alice \
 //!     --mount workspace=~/workspace
 //!
 //! # Multi-guest (repeat --guest and guest-qualified --mount)
-//! cargo run --example repl_host_v1_2 --features vsock -- \
+//! cargo run -p motlie-vnet --example repl_host_v1_2 -- \
 //!     --guest alice=/tmp/motlie-vfs-alice.vsock_5000 \
 //!     --mount alice:alice-home=~/alice \
 //!     --mount alice:alice-workspace=~/workspace \
@@ -49,19 +49,19 @@
 //!     --mount bob:bob-workspace=~/workspace-bob
 //!
 //! # Empty admin mode, provision from REPL script
-//! cat setup-multiguest.sh.vfs | cargo run --example repl_host_v1_2 --features vsock -- --empty
+//! cat setup-multiguest.sh.vfs | cargo run -p motlie-vnet --example repl_host_v1_2 -- --empty
 //!
 //! # Preferred interactive setup-file flow (keeps rustyline on a real TTY)
-//! cargo run --example repl_host_v1_2 --features vsock -- --empty --script setup-multiguest.sh.vfs --admin-net=tap --egress-net=vhost-user
+//! cargo run -p motlie-vnet --example repl_host_v1_2 -- --empty --script setup-multiguest.sh.vfs --admin-net=tap --egress-net=vhost-user
 //!
 //! # Script then interactive
-//! cat setup-alice.sh.vfs - | cargo run --example repl_host_v1_2 --features vsock -- --tag alice-home
+//! cat setup-alice.sh.vfs - | cargo run -p motlie-vnet --example repl_host_v1_2 -- --tag alice-home
 //!
 //! # Script only (server stays alive until signaled)
-//! cat setup-alice.sh.vfs | cargo run --example repl_host_v1_2 --features vsock -- --tag alice-home
+//! cat setup-alice.sh.vfs | cargo run -p motlie-vnet --example repl_host_v1_2 -- --tag alice-home
 //!
 //! # Agent-driven (write commands to stdin, server stays alive)
-//! echo "layer creds 0" | cargo run --example repl_host_v1_2 --features vsock -- --tag alice-home
+//! echo "layer creds 0" | cargo run -p motlie-vnet --example repl_host_v1_2 -- --tag alice-home
 //! ```
 //!
 //! # Options
@@ -400,7 +400,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    eprintln!("=== motlie-vfs repl_host_v1_2 ===");
+    eprintln!("=== motlie-vnet repl_host_v1_2 ===");
     eprintln!("Build: {}", build_git_sha());
     eprintln!("Built At: {}", build_time_utc());
     eprintln!(
