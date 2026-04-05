@@ -166,20 +166,28 @@ pub trait FsPolicy: Send + Sync + 'static {
     ///   see completions (the operation already executed).
     fn chain<N: FsPolicy>(self, next: N) -> impl FsPolicy
     where
-        Self: Sized,
-    {
-        ChainedFsPolicy { current: self, next }
-    }
+        Self: Sized;
 }
 ```
 
-The internal `ChainedFsPolicy<A, B>` struct is not part of the public API.
-Users interact with it only through `impl FsPolicy`:
+**Chaining usage:**
 
 ```rust
-let policy = LoggingPolicy.chain(CredentialGuard);
-// type: impl FsPolicy (opaque)
+let policy = LoggingPolicy
+    .chain(InterceptPolicy::new(blocked.clone()))
+    .chain(ScanDetector)
+    .chain(CategoryGuard);
+
+// `policy` implements FsPolicy. The developer never names or sees
+// the intermediate types — the compiler resolves them.
 ```
+
+Chain evaluation rules:
+- First `Deny` wins (short-circuit)
+- `Observe` is sticky — propagates even if next returns `Allow`
+- `Allow` defers to next
+- Minimum confidence propagated across the chain
+- `on_complete` does NOT short-circuit — all policies see completions
 
 ### Stateless Policy Design
 
@@ -930,4 +938,80 @@ at that point — but not speculatively.
 | `FsOpResult` population | Integration: dispatch measures latency, captures bytes |
 | `FsEvent` enrichment | Integration: events carry path, bytes, result, latency |
 | Zero-cost NoPolicy | Build: binary size delta ≈ 0 vs current code |
+
+---
+
+## Appendix: How Chain Evaluation Works Internally
+
+*This section is technical background for implementers. Developers using
+the policy API never interact with these internals — they only call
+`.chain()` on the trait and get back an `impl FsPolicy`.*
+
+When a developer writes:
+
+```rust
+let policy = LoggingPolicy.chain(ScanDetector).chain(CategoryGuard);
+```
+
+The compiler constructs a nested type. Conceptually:
+
+```
+policy: Chain<LoggingPolicy, Chain<ScanDetector, CategoryGuard>>
+```
+
+The actual struct name is internal to the crate and not exported. Each
+"link" in the chain holds two fields: `current` (this policy) and `next`
+(the rest of the chain). The struct implements `FsPolicy` by calling
+`self.current` first, then `self.next`:
+
+```rust
+// Internal to the crate — not public API:
+struct ChainedFsPolicy<A, B> { current: A, next: B }
+
+impl<A: FsPolicy, B: FsPolicy> FsPolicy for ChainedFsPolicy<A, B> {
+    fn on_op(&self, ctx: &FsOpContext) -> PolicyAction {
+        let first = self.current.on_op(ctx);
+        match first {
+            PolicyAction::Deny { .. } => first,  // short-circuit
+            PolicyAction::Observe { confidence: c1, .. } => {
+                let second = self.next.on_op(ctx);
+                match second {
+                    PolicyAction::Deny { .. } => second,
+                    _ => PolicyAction::Observe {
+                        confidence: c1.min(second.confidence()),
+                        ..first
+                    },
+                }
+            }
+            PolicyAction::Allow { confidence: c1, .. } => {
+                let second = self.next.on_op(ctx);
+                match &second {
+                    PolicyAction::Allow { confidence: c2, .. } =>
+                        PolicyAction::Allow {
+                            confidence: c1.min(*c2),
+                            ..second
+                        },
+                    _ => second,  // Deny or Observe from next wins
+                }
+            }
+        }
+    }
+
+    fn on_complete(&self, ctx: &FsOpContext, result: &FsOpResult) -> PolicyAction {
+        // No short-circuit: both policies always see completions.
+        let _ = self.current.on_complete(ctx, result);
+        self.next.on_complete(ctx, result)
+    }
+}
+```
+
+Because the type is fully generic (no `Box<dyn>`), the compiler
+monomorphizes the entire chain at compile time. Each `.on_op()` call
+inlines through the nesting — there is no vtable dispatch, no heap
+allocation, and no dynamic method resolution on the hot path.
+
+When `P = NoPolicy`, the compiler sees that all methods return
+`PolicyAction::Allow { confidence: 1.0 }` and eliminates the entire
+chain evaluation as dead code. The dispatch loop compiles to the same
+machine code as if policy support did not exist.
 | Migration compat | Integration: existing tests pass with NoPolicy default |
