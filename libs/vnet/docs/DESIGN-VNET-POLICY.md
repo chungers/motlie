@@ -235,7 +235,42 @@ let config = VnetConfig::builder()
 
 Default threshold: `0.0` (only explicit Denys block). Strict mode: `0.8`.
 
-**Call site logic (slirp thread loop):**
+**Hot-path before and after:**
+
+Before (current `slirp_thread_main`, no policy):
+```rust
+while let Ok(frame) = tx_receiver.try_recv() {
+    slirp.input(&frame);   // every frame passes through, no inspection
+}
+```
+
+After (with policy + threshold + emission):
+```rust
+while let Ok(frame) = tx_receiver.try_recv() {
+    match parse_frame(&frame) {
+        ParsedPacket::DnsQuery(ctx) => {
+            let action = policy.on_dns_query(&ctx);          // ~50ns (chain)
+            let action = apply_threshold(action, threshold);  // ~5ns (comparison)
+            emit_if_interesting(&event_tx, &ctx, &action);   // ~20ns (try_send or skip)
+            match action {
+                PolicyAction::Deny { errno, .. } => {
+                    let resp = forge_nxdomain(&frame, errno);
+                    rx_sender.send(resp);                     // forged response to guest
+                }
+                PolicyAction::Allow { .. } => slirp.input(&frame),
+            }
+        }
+        ParsedPacket::TcpSyn(ctx) => { /* same pattern with on_tcp_connect */ }
+        ParsedPacket::Other => slirp.input(&frame),  // non-DNS/TCP: pass through
+    }
+}
+```
+
+When `P = NoPolicy` and `threshold = 0.0`, the compiler eliminates
+`parse_frame`, `apply_threshold`, `emit_if_interesting`, and the match
+arms — the loop compiles to the same code as "before."
+
+**Call site logic (detailed):**
 
 ```rust
 // Step 1: call the policy chain
