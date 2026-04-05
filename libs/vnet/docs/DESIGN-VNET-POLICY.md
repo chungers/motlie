@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-05 | @claude-tl | Cross-stack correlator design: unified event pipeline, credential→exfil walkthrough, staging→execution walkthrough, ML/LLM as correlator, architecture diagram, PID preconditions |
 | 2026-04-05 | @claude-tl | PolicyEvaluator plumbing: builder→config→slirp thread, chaining examples with walkthroughs (known-bad, unknown, known-good) |
 | 2026-04-05 | @claude-tl | Drop Observe, two-action PolicyAction (Allow/Deny + confidence), deny_threshold, emission truth table |
 | 2026-04-05 | @claude-tl | Network metadata gaps evaluated: keep DNS counts + guest PID, reject TTL/TCP options/MAC/libslirp state |
@@ -1313,26 +1314,317 @@ match action {                                      // enforcement
 If no event subscriber is configured, `event_tx` is `None` and the
 branch is skipped — zero overhead.
 
-### Cross-Stack Correlation
+### Cross-Stack Correlation and Correlator Design
 
-The host runtime (which depends on both vfs and vnet) defines its own
-unified event type and subscribes to both stacks:
+The correlator is a **host-runtime component** (not part of motlie-vnet
+or motlie-vfs). It receives policy events from both stacks via a unified
+`mpsc` channel, accumulates state over time, and writes back to
+`InterceptPolicy` blocklists via `ArcSwap` when confidence thresholds
+are crossed.
+
+#### Assumptions and Preconditions
+
+| Precondition | Status | Impact if not met |
+|---|---|---|
+| **vfs emits PolicyEvent::FsOp with path, is_sensitive** | Ready (dispatch layer enrichment) | Correlator cannot see filesystem activity |
+| **vnet emits PolicyEvent::DnsQuery with domain, confidence** | Ready (PolicyEvaluator) | Correlator cannot see DNS activity |
+| **vnet emits PolicyEvent::TcpFlow with bytes_tx/rx, SNI** | Ready (PolicyEvaluator) | Correlator cannot see flow patterns |
+| **vfs caller_pid available** | **NOT YET** (FUSE plumbing gap, ~95 LOC) | Cannot correlate "which process read the file" with "which process opened the socket" |
+| **vnet guest_process available** | **NOT YET** (v1.3 vsock agent) | Cannot attribute network connections to specific guest processes |
+| **Cross-stack PID correlation** | **NOT YET** (requires both above) | Cannot detect "PID 1234 read /.env then PID 1234 connected to pastebin.com" |
+
+Without PID, the correlator can still detect patterns based on
+**timing proximity** ("a sensitive file was read, then 2 seconds later
+a DNS query for an unknown domain occurred") but cannot prove the
+same process did both. PID plumbing (vfs: ~95 LOC, vnet: v1.3 agent)
+is the highest-value gap for cross-stack correlation.
+
+#### Unified Event Pipeline
 
 ```rust
-// Host runtime:
+// --- Host runtime (depends on both motlie-vfs and motlie-vnet) ---
+
+/// Unified event wrapping both stacks.
 enum RuntimeEvent {
-    Net(motlie_vnet::PolicyEvent),
     Fs(motlie_vfs::PolicyEvent),
+    Net(motlie_vnet::PolicyEvent),
 }
 
+// Event channels: one sender per stack, one receiver for the correlator.
 let (tx, rx) = mpsc::channel::<RuntimeEvent>();
-// vnet emits PolicyEvent::DnsQuery { ... } → tx.send(RuntimeEvent::Net(...))
-// vfs emits PolicyEvent::FsOp { ... } → tx.send(RuntimeEvent::Fs(...))
-// Correlator reads from rx, sees both stacks
+let tx_fs = tx.clone();
+let tx_net = tx.clone();
+
+// --- vfs policy setup ---
+let fs_blocked = Arc::new(ArcSwap::from_pointee(HashSet::<String>::new()));
+
+let fs_server = FsServer::builder()
+    .policy(
+        LoggingPolicy
+            .chain(FsInterceptPolicy::new(fs_blocked.clone()))
+            .chain(ScanDetector)
+    )
+    .deny_threshold(0.5)
+    .policy_events(tx_fs)   // events flow to correlator
+    .build();
+
+// --- vnet policy setup ---
+let net_blocked = Arc::new(ArcSwap::from_pointee(HashSet::<(Ipv4Addr, u16)>::new()));
+
+let vnet_config = VnetConfig::builder()
+    .socket_path("/tmp/motlie-vnet-0.sock")
+    .egress_policy(
+        LoggingPolicy
+            .chain(InterceptPolicy::new(net_blocked.clone()))
+            .chain(CategoryPolicy::default())
+            .chain(DnsExfilDetector::new(entropy_config))
+    )
+    .deny_threshold(0.5)
+    .policy_events(tx_net)  // events flow to correlator
+    .build()?;
 ```
 
-Neither crate depends on the other. The host runtime owns the enum
-and the channel.
+#### Correlator Thread
+
+```rust
+// Correlator: separate thread, reads from unified channel,
+// writes to both blocklists.
+
+struct CorrelatorState {
+    // Recent filesystem events (sliding window)
+    recent_fs_events: VecDeque<(Instant, motlie_vfs::FsOpContext, PolicyAction)>,
+    // Recent network events
+    recent_net_events: VecDeque<(Instant, NetEventSummary)>,
+    // Known sensitive file accesses awaiting network correlation
+    pending_sensitive_reads: Vec<SensitiveReadRecord>,
+    // Active flow tracking for exfiltration detection
+    active_flows: HashMap<(Ipv4Addr, u16), FlowAccumulator>,
+}
+
+struct SensitiveReadRecord {
+    path: String,
+    timestamp: Instant,
+    caller_pid: Option<u32>,  // None until FUSE PID plumbed
+}
+
+struct FlowAccumulator {
+    domain: Option<String>,
+    bytes_tx: u64,
+    first_seen: Instant,
+    dns_confidence: f64,  // confidence from the DNS Allow
+}
+
+thread::spawn(move || {
+    let mut state = CorrelatorState::new();
+
+    for event in rx {
+        match event {
+            RuntimeEvent::Fs(motlie_vfs::PolicyEvent::FsOp { ctx, action }) => {
+                state.handle_fs_op(&ctx, &action, &fs_blocked, &net_blocked);
+            }
+            RuntimeEvent::Fs(motlie_vfs::PolicyEvent::FsComplete { ctx, result, action }) => {
+                state.handle_fs_complete(&ctx, &result, &action);
+            }
+            RuntimeEvent::Net(motlie_vnet::PolicyEvent::DnsQuery { ctx, action }) => {
+                state.handle_dns(&ctx, &action, &net_blocked);
+            }
+            RuntimeEvent::Net(motlie_vnet::PolicyEvent::TcpConnect { ctx, action }) => {
+                state.handle_tcp_connect(&ctx, &action);
+            }
+            RuntimeEvent::Net(motlie_vnet::PolicyEvent::TcpFlow { ctx, action }) => {
+                state.handle_tcp_flow(&ctx, &action, &net_blocked);
+            }
+            _ => {}
+        }
+
+        // Periodic: expire old events, run cross-stack correlation
+        state.expire_old_events(Duration::from_secs(60));
+        state.run_cross_correlation(&fs_blocked, &net_blocked);
+    }
+});
+```
+
+#### Cross-Stack Detection: Credential Read → DNS Exfiltration
+
+The highest-value cross-stack pattern: a sensitive file is read via vfs,
+then shortly after, a suspicious DNS query or large upload occurs via
+vnet. Neither event alone is definitive — combined, they are a strong
+exfiltration signal.
+
+```
+Timeline:
+
+T+0s    vfs: Read /.env → Allow { confidence: 0.4, reason: "sensitive file" }
+        → correlator records: SensitiveReadRecord { path: "/.env", t: T+0 }
+
+T+2s    vnet: DNS query for suspicious-cdn.xyz → Allow { confidence: 0.5 }
+        → correlator: recent sensitive read + uncertain DNS → bump suspicion
+
+T+3s    vnet: TCP connect to 93.184.216.34:443 (resolved from suspicious-cdn.xyz)
+        → correlator: tracks flow
+
+T+10s   vnet: TcpFlow { bytes_tx: 5MB, domain: "suspicious-cdn.xyz" }
+        → correlator: sensitive read within 60s + uncertain DNS +
+          large upload to unknown domain
+        → compound confidence: 0.9
+        → ACTION: net_blocked.store(Arc::new({ (93.184.216.34, 443) }))
+        → next packet to 93.184.216.34:443 → InterceptPolicy → Deny
+
+T+10.1s vnet: next frame to 93.184.216.34:443
+        → InterceptPolicy reads blocklist → match → Deny { confidence: 1.0 }
+        → forge TCP RST → connection killed
+```
+
+**Correlator logic for this pattern:**
+
+```rust
+impl CorrelatorState {
+    fn run_cross_correlation(
+        &mut self,
+        fs_blocked: &Arc<ArcSwap<HashSet<String>>>,
+        net_blocked: &Arc<ArcSwap<HashSet<(Ipv4Addr, u16)>>>,
+    ) {
+        // Pattern: sensitive file read followed by large upload to unknown domain
+        for flow in self.active_flows.values() {
+            if flow.bytes_tx < 1_000_000 { continue; }  // <1MB not interesting
+            if flow.dns_confidence > 0.8 { continue; }  // known domain
+
+            // Check if a sensitive file was read recently
+            let recent_sensitive = self.pending_sensitive_reads.iter().any(|r| {
+                r.timestamp.elapsed() < Duration::from_secs(60)
+            });
+
+            if recent_sensitive {
+                // Compound signal: sensitive read + low-confidence DNS + large upload
+                let compound_confidence = 0.9;
+
+                if compound_confidence > 0.8 {
+                    // Block the destination
+                    if let Some(domain) = &flow.domain {
+                        // Also block the domain's other IPs if known
+                    }
+                    let mut current = (**net_blocked.load()).clone();
+                    // Insert all IPs associated with this flow
+                    // current.insert((flow_dst_ip, flow_dst_port));
+                    net_blocked.store(Arc::new(current));
+                }
+            }
+        }
+    }
+}
+```
+
+#### Cross-Stack Detection: Staging → Execution
+
+Another pattern: a high-entropy file is written to a temp directory
+(staging), then a new outbound connection is established (exfiltration
+or C2 callback).
+
+```
+Timeline:
+
+T+0s    vfs: Write /tmp/payload.bin → on_complete: write_entropy=4.8, bytes=2MB
+        → correlator: staging pattern (high entropy write to temp)
+
+T+5s    vnet: DNS query for never-seen-before.io → Allow { confidence: 0.3 }
+        → correlator: staging + novel domain
+
+T+6s    vnet: TCP connect to resolved IP:4444
+        → correlator: staging + novel domain + unusual port (4444)
+        → compound confidence: 0.95
+        → ACTION: block IP:4444, also block path /tmp/payload.bin
+          (vfs InterceptPolicy → future reads of /tmp/payload.bin denied)
+```
+
+#### ML / LLM as Correlator (Future)
+
+The correlator is a function: `stream<RuntimeEvent> → write(blocklists)`.
+Nothing constrains this to be rule-based code. Future implementations
+could replace or augment the rule-based correlator with:
+
+**Supervised ML model:** trained on labeled event streams (normal dev
+workflows vs attack scenarios). Input: sliding window of `RuntimeEvent`s
+with extracted features (event type, confidence, timing deltas, byte
+volumes, entropy values). Output: per-destination threat score (0.0–1.0).
+When score exceeds threshold → write to blocklist.
+
+**LLM-based correlator:** the event stream is structured data that an
+LLM can reason about. A prompt-based correlator could:
+- Receive batches of recent events as structured JSON
+- Apply natural-language reasoning ("the guest read SSH keys, then
+  resolved a domain registered 2 days ago, then uploaded 5MB —
+  this looks like credential exfiltration")
+- Return a structured decision: `{ action: "block", target: "1.2.3.4:443",
+  confidence: 0.92, reasoning: "..." }`
+- The host runtime parses the response and writes to the blocklist
+
+This is feasible because:
+- The event stream is structured and bounded (not raw packet data)
+- Decisions are asynchronous (correlator runs off the hot path)
+- Latency tolerance is high (seconds, not nanoseconds)
+- The blocklist write is the same `ArcSwap` mechanism regardless of
+  whether the correlator is rules, ML, or LLM
+
+The policy API and event pipeline do not need to change — the correlator
+is a pluggable consumer of the `mpsc::Receiver<RuntimeEvent>` channel.
+
+#### Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      Host Runtime                           │
+│                                                             │
+│  ┌──────────────────┐      ┌──────────────────┐           │
+│  │ FsServer         │      │ VnetBackend      │           │
+│  │ + PolicyEvaluator│      │ + PolicyEvaluator│           │
+│  │                  │      │                  │           │
+│  │ LoggingPolicy    │      │ LoggingPolicy    │           │
+│  │ .chain(Intercept)│      │ .chain(Intercept)│           │
+│  │ .chain(Scan)     │      │ .chain(Category) │           │
+│  │                  │      │ .chain(Exfil)    │           │
+│  └───────┬──────────┘      └────────┬─────────┘           │
+│          │ PolicyEvent::FsOp        │ PolicyEvent::DnsQuery│
+│          │ PolicyEvent::FsComplete  │ PolicyEvent::TcpFlow │
+│          │                          │                      │
+│          ▼                          ▼                      │
+│  ┌──────────────────────────────────────────────┐         │
+│  │              mpsc::channel                    │         │
+│  │         rx: Receiver<RuntimeEvent>            │         │
+│  └──────────────────┬───────────────────────────┘         │
+│                     │                                      │
+│                     ▼                                      │
+│  ┌──────────────────────────────────────────────┐         │
+│  │              Correlator Thread                │         │
+│  │                                               │         │
+│  │  Rules / ML model / LLM                      │         │
+│  │                                               │         │
+│  │  Accumulates state:                           │         │
+│  │  - recent sensitive file reads               │         │
+│  │  - uncertain DNS allows                       │         │
+│  │  - active flow byte counts                   │         │
+│  │  - timing correlation                         │         │
+│  │                                               │         │
+│  │  When compound confidence > threshold:       │         │
+│  │                                               │         │
+│  │  ┌──────────────┐    ┌──────────────┐        │         │
+│  │  │fs_blocked    │    │net_blocked   │        │         │
+│  │  │ArcSwap<Hash> │    │ArcSwap<Hash> │        │         │
+│  │  │(path blocklist)   │(IP:port list)│        │         │
+│  │  └──────┬───────┘    └──────┬───────┘        │         │
+│  └─────────┼───────────────────┼────────────────┘         │
+│            │                   │                           │
+│            │ ~25ns read        │ ~25ns read                │
+│            ▼                   ▼                           │
+│   FsInterceptPolicy    InterceptPolicy                    │
+│   in FsServer chain    in VnetBackend chain               │
+│                                                            │
+└────────────────────────────────────────────────────────────┘
+```
+
+Neither `motlie-vfs` nor `motlie-vnet` depends on the other. Each crate
+provides: `PolicyEvaluator`, `PolicyEvent` enum, `InterceptPolicy` with
+`ArcSwap`, and the `EgressPolicy`/`FsPolicy` trait. The host runtime
+owns the unified channel, the correlator, and the blocklists.
 
 ### Design Alignment with motlie-vfs
 
