@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-05 | @claude-tl | Full construction code, correlator event handling with confidence values, example event stream, guest quarantine (future TODO) |
 | 2026-04-05 | @claude-tl | Cross-stack correlator design: unified event pipeline, credential→exfil walkthrough, staging→execution walkthrough, ML/LLM as correlator, architecture diagram, PID preconditions |
 | 2026-04-05 | @claude-tl | PolicyEvaluator plumbing: builder→config→slirp thread, chaining examples with walkthroughs (known-bad, unknown, known-good) |
 | 2026-04-05 | @claude-tl | Drop Observe, two-action PolicyAction (Allow/Deny + confidence), deny_threshold, emission truth table |
@@ -1864,6 +1865,58 @@ This is feasible because:
 
 The policy API and event pipeline do not need to change — the correlator
 is a pluggable consumer of the `mpsc::Receiver<RuntimeEvent>` channel.
+
+#### Future: Full Guest Quarantine
+
+When the correlator reaches high compound confidence that a guest is
+compromised, the current design blocks individual destinations (IP:port
+in vnet, path in vfs). A future enhancement is **full guest quarantine**
+— locking down both stacks simultaneously in real-time:
+
+**Network quarantine:**
+- Write a wildcard entry to `net_blocked` that the `InterceptPolicy`
+  interprets as "deny all outbound" (e.g. a sentinel value like
+  `(Ipv4Addr::UNSPECIFIED, 0)`)
+- All subsequent DNS queries → NXDOMAIN, all TCP SYNs → RST
+- The guest's network is instantly dead — no exfiltration possible
+- Existing established flows: forge RST for each tracked flow in
+  the correlator's `active_flows` map
+
+**Filesystem quarantine:**
+- Write a wildcard entry to `fs_blocked` that `FsInterceptPolicy`
+  interprets as "deny all mutations" (e.g. sentinel path `"*"`)
+- All Write/Create/Unlink/Rename/Mkdir/Rmdir → `EACCES`
+- Reads remain allowed (forensic access to understand what happened)
+- Alternatively: deny all operations including reads for full isolation
+
+**Quarantine signal:**
+
+```rust
+/// Sent from correlator to both stacks simultaneously.
+struct QuarantineSignal {
+    guest_id: String,
+    reason: String,
+    compound_confidence: f64,
+    /// Which stacks to lock down.
+    network: bool,   // kill all outbound
+    filesystem: bool, // kill all mutations (or all ops)
+}
+```
+
+The correlator writes to both blocklists atomically (two `ArcSwap`
+stores). The next operation on either stack hits the sentinel entry
+and is denied. Latency from decision to enforcement: ~25ns (one
+`ArcSwap` read).
+
+**Recovery:** quarantine is reversible — the correlator (or a human
+operator via the REPL) clears the sentinel entries from the blocklists.
+The guest resumes normal operation. This enables a "quarantine, inspect,
+release" workflow for false positives.
+
+**Prerequisites:** same as the correlator itself — no new API needed.
+The `InterceptPolicy` already reads from `ArcSwap`; the only change is
+recognizing a sentinel value as "deny all." This is a policy
+implementation detail, not an architecture change.
 
 #### Architecture Diagram
 
