@@ -33,6 +33,7 @@ struct FileLock {
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 enum LockKey {
     Path(String, String),
+    OverlayFile { tag: String, inode: u64 },
     DiskFile { dev: u64, ino: u64 },
 }
 
@@ -436,6 +437,23 @@ impl FsServer {
         flags: i32,
         position: u32,
     ) -> FsResult {
+        let (path, host_path) = {
+            let table = mount.inode_table.lock();
+            match table.get(inode) {
+                Some(entry) => (entry.path.clone(), entry.host_path.clone()),
+                None => return FsResult::Error { errno: libc::ENOENT },
+            }
+        };
+        if host_path.is_none() {
+            if let Some(overlay) = &self.overlay {
+                return overlay
+                    .set_xattr(&mount.tag, &path, name, value.clone(), flags, position)
+                    .map(|_| FsResult::Ok)
+                    .unwrap_or_else(|errno| FsResult::Error { errno });
+            }
+            return FsResult::Error { errno: libc::ENOTSUP };
+        }
+
         let host_path = match self.host_path_for_inode(mount, inode) {
             Ok(path) => path,
             Err(errno) => return FsResult::Error { errno },
@@ -446,6 +464,31 @@ impl FsServer {
     }
 
     fn do_getxattr(&self, mount: &MountState, inode: u64, name: &str, size: u32) -> FsResult {
+        let (path, host_path) = {
+            let table = mount.inode_table.lock();
+            match table.get(inode) {
+                Some(entry) => (entry.path.clone(), entry.host_path.clone()),
+                None => return FsResult::Error { errno: libc::ENOENT },
+            }
+        };
+        if host_path.is_none() {
+            if let Some(overlay) = &self.overlay {
+                return match overlay.get_xattr(&mount.tag, &path, name) {
+                    Ok(data) => {
+                        if size == 0 {
+                            FsResult::XattrSize { size: data.len() as u32 }
+                        } else if data.len() > size as usize {
+                            FsResult::Error { errno: libc::ERANGE }
+                        } else {
+                            FsResult::Data { data }
+                        }
+                    }
+                    Err(errno) => FsResult::Error { errno },
+                };
+            }
+            return FsResult::Error { errno: libc::ENOTSUP };
+        }
+
         let host_path = match self.host_path_for_inode(mount, inode) {
             Ok(path) => path,
             Err(errno) => return FsResult::Error { errno },
@@ -465,6 +508,31 @@ impl FsServer {
     }
 
     fn do_listxattr(&self, mount: &MountState, inode: u64, size: u32) -> FsResult {
+        let (path, host_path) = {
+            let table = mount.inode_table.lock();
+            match table.get(inode) {
+                Some(entry) => (entry.path.clone(), entry.host_path.clone()),
+                None => return FsResult::Error { errno: libc::ENOENT },
+            }
+        };
+        if host_path.is_none() {
+            if let Some(overlay) = &self.overlay {
+                return match overlay.list_xattrs(&mount.tag, &path) {
+                    Ok(data) => {
+                        if size == 0 {
+                            FsResult::XattrSize { size: data.len() as u32 }
+                        } else if data.len() > size as usize {
+                            FsResult::Error { errno: libc::ERANGE }
+                        } else {
+                            FsResult::Data { data: bytes::Bytes::from(data) }
+                        }
+                    }
+                    Err(errno) => FsResult::Error { errno },
+                };
+            }
+            return FsResult::Error { errno: libc::ENOTSUP };
+        }
+
         let host_path = match self.host_path_for_inode(mount, inode) {
             Ok(path) => path,
             Err(errno) => return FsResult::Error { errno },
@@ -484,6 +552,23 @@ impl FsServer {
     }
 
     fn do_removexattr(&self, mount: &MountState, inode: u64, name: &str) -> FsResult {
+        let (path, host_path) = {
+            let table = mount.inode_table.lock();
+            match table.get(inode) {
+                Some(entry) => (entry.path.clone(), entry.host_path.clone()),
+                None => return FsResult::Error { errno: libc::ENOENT },
+            }
+        };
+        if host_path.is_none() {
+            if let Some(overlay) = &self.overlay {
+                return overlay
+                    .remove_xattr(&mount.tag, &path, name)
+                    .map(|_| FsResult::Ok)
+                    .unwrap_or_else(|errno| FsResult::Error { errno });
+            }
+            return FsResult::Error { errno: libc::ENOTSUP };
+        }
+
         let host_path = match self.host_path_for_inode(mount, inode) {
             Ok(path) => path,
             Err(errno) => return FsResult::Error { errno },
@@ -877,7 +962,7 @@ impl FsServer {
                 tag: mount.tag.clone(),
                 path: path.clone(),
                 backing: FhBacking::Overlay,
-                lock_key: LockKey::Path(mount.tag.clone(), path),
+                lock_key: LockKey::OverlayFile { tag: mount.tag.clone(), inode },
                 lock_owners: HashSet::new(),
             },
         };
@@ -1006,7 +1091,7 @@ impl FsServer {
                                         tag: mount.tag.clone(),
                                         path: rel_path.clone(),
                                         backing: FhBacking::Overlay,
-                                        lock_key: LockKey::Path(mount.tag.clone(), rel_path),
+                                        lock_key: LockKey::OverlayFile { tag: mount.tag.clone(), inode },
                                         lock_owners: HashSet::new(),
                                     },
                                 );
@@ -2230,6 +2315,66 @@ mod tests {
     }
 
     #[test]
+    fn xattr_round_trip_on_overlay_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = build_overlay_server(dir.path());
+        let o = server.overlay().unwrap();
+        o.put_layer("l", 0).unwrap();
+        o.put("l", "test", "/note.txt", bytes::Bytes::from("hello")).unwrap();
+
+        let inode = match server.handle_op("test", FsOp::Lookup { parent: 1, name: "note.txt".into() }) {
+            FsResult::Entry { inode, .. } => inode,
+            other => panic!("expected Entry, got {:?}", other),
+        };
+
+        assert!(matches!(
+            server.handle_op("test", FsOp::Setxattr {
+                inode,
+                name: "user.note".into(),
+                value: bytes::Bytes::from_static(b"value"),
+                flags: 0,
+                position: 0,
+            }),
+            FsResult::Ok
+        ));
+        assert!(matches!(
+            server.handle_op("test", FsOp::Getxattr { inode, name: "user.note".into(), size: 5 }),
+            FsResult::Data { data } if data.as_ref() == b"value"
+        ));
+        assert!(matches!(
+            server.handle_op("test", FsOp::Listxattr { inode, size: 0 }),
+            FsResult::XattrSize { size } if size >= 10
+        ));
+
+        let fh = match server.handle_op("test", FsOp::Open { inode, flags: libc::O_RDWR as u32 }) {
+            FsResult::Opened { fh } => fh,
+            other => panic!("expected Opened, got {:?}", other),
+        };
+        assert!(matches!(
+            server.handle_op("test", FsOp::Write {
+                inode,
+                fh,
+                offset: 0,
+                data: bytes::Bytes::from_static(b"HELLO"),
+            }),
+            FsResult::Written { .. }
+        ));
+        assert!(matches!(
+            server.handle_op("test", FsOp::Getxattr { inode, name: "user.note".into(), size: 5 }),
+            FsResult::Data { data } if data.as_ref() == b"value"
+        ));
+
+        assert!(matches!(
+            server.handle_op("test", FsOp::Removexattr { inode, name: "user.note".into() }),
+            FsResult::Ok
+        ));
+        assert!(matches!(
+            server.handle_op("test", FsOp::Getxattr { inode, name: "user.note".into(), size: 0 }),
+            FsResult::Error { errno } if errno == libc::ENODATA
+        ));
+    }
+
+    #[test]
     fn disk_setattr_updates_file_times() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("time.txt");
@@ -2846,6 +2991,74 @@ mod tests {
         fs::write(dir.path().join("src.txt"), b"src").unwrap();
         fs::write(dir.path().join("dst.txt"), b"dst").unwrap();
         let server = build_test_server(dir.path());
+
+        let src_inode = match server.handle_op("test", FsOp::Lookup { parent: 1, name: "src.txt".into() }) {
+            FsResult::Entry { inode, .. } => inode,
+            other => panic!("expected Entry, got {:?}", other),
+        };
+        let dst_inode = match server.handle_op("test", FsOp::Lookup { parent: 1, name: "dst.txt".into() }) {
+            FsResult::Entry { inode, .. } => inode,
+            other => panic!("expected Entry, got {:?}", other),
+        };
+        let dst_fh = match server.handle_op("test", FsOp::Open { inode: dst_inode, flags: libc::O_RDWR as u32 }) {
+            FsResult::Opened { fh } => fh,
+            other => panic!("expected Opened, got {:?}", other),
+        };
+
+        assert!(matches!(
+            server.handle_op("test", FsOp::Setlk {
+                inode: dst_inode,
+                fh: dst_fh,
+                lock_owner: 7,
+                start: 0,
+                end: 9,
+                typ: libc::F_WRLCK,
+                pid: 1234,
+                sleep: false,
+            }),
+            FsResult::Ok
+        ));
+        assert!(matches!(
+            server.handle_op(
+                "test",
+                FsOp::Rename {
+                    parent: 1,
+                    name: "src.txt".into(),
+                    new_parent: 1,
+                    new_name: "dst.txt".into(),
+                }
+            ),
+            FsResult::Ok
+        ));
+
+        assert!(matches!(
+            server.handle_op("test", FsOp::Getlk {
+                inode: dst_inode,
+                fh: dst_fh,
+                lock_owner: 8,
+                start: 0,
+                end: 9,
+                typ: libc::F_RDLCK,
+                pid: 5678,
+            }),
+            FsResult::Lock { typ, pid, .. } if typ == libc::F_WRLCK && pid == 1234
+        ));
+
+        let new_dst_inode = match server.handle_op("test", FsOp::Lookup { parent: 1, name: "dst.txt".into() }) {
+            FsResult::Entry { inode, .. } => inode,
+            other => panic!("expected Entry, got {:?}", other),
+        };
+        assert_eq!(new_dst_inode, src_inode);
+    }
+
+    #[test]
+    fn overlay_rename_keeps_open_handle_lock_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = build_overlay_server(dir.path());
+        let o = server.overlay().unwrap();
+        o.put_layer("l", 0).unwrap();
+        o.put("l", "test", "/src.txt", bytes::Bytes::from("src")).unwrap();
+        o.put("l", "test", "/dst.txt", bytes::Bytes::from("dst")).unwrap();
 
         let src_inode = match server.handle_op("test", FsOp::Lookup { parent: 1, name: "src.txt".into() }) {
             FsResult::Entry { inode, .. } => inode,
