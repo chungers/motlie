@@ -907,31 +907,32 @@ zero-capability, embeddable-library design goal.
 
 The TX/RX interceptor parses Ethernet → IP → UDP/TCP headers but
 currently extracts only destination IP, port, DNS domain, and TLS SNI.
-Several additional fields are available in the parsed headers or in the
-architecture but are not yet exposed to the policy API.
+Additional fields are available in the parsed headers and in the
+architecture. Each was evaluated against motlie's threat model: a
+single-guest Linux VM with overlay-injected credentials.
 
-### Available in Packet Headers (parsed but discarded)
+### Gaps Worth Filling
 
-| Field | Header location | Policy value | Context type |
-|-------|----------------|-------------|-------------|
-| **IP TTL** | IPv4 byte 8 | Unusual TTL indicates tunneling or proxy hops. Low TTL (< 32) or non-standard values (e.g. 127 instead of 128) can fingerprint OS or detect man-in-the-middle. | `TcpConnectContext.ip_ttl: u8` |
-| **TCP initial window size** | TCP SYN bytes 14-15 | Passive OS fingerprinting (p0f-style). Each OS has characteristic initial window sizes (Linux: 29200, Windows: 65535, macOS: 65535). Unexpected OS signature from a dev VM = suspicious. | `TcpConnectContext.tcp_window: u16` |
-| **TCP options** (MSS, timestamps, SACK, window scale) | TCP SYN options | Combined with window size for more accurate OS fingerprinting. Custom tools (exfil binaries, C2 implants) often have stripped or non-standard TCP options. | `TcpConnectContext.tcp_options_hash: Option<u32>` |
-| **DNS query count per packet** | DNS header QDCOUNT | Legitimate clients send 1 query/packet. Batching (>1) or zero queries can indicate tooling. | `DnsQueryContext.query_count: u16` |
-| **DNS additional/authority sections** | DNS header ARCOUNT/NSCOUNT | Some exfil tools encode data in additional or authority RRs rather than query labels. Non-zero counts in a stub resolver query are unusual. | `DnsQueryContext.additional_count: u16` |
-| **Ethernet source MAC** | Ethernet bytes 6-11 | Guest MAC is configured in VnetConfig. A mismatch indicates MAC spoofing or a misconfigured guest NIC. | `TcpConnectContext.src_mac: [u8; 6]` |
+| Field | Header location | Security value | Context type |
+|-------|----------------|---------------|-------------|
+| **DNS query count** (QDCOUNT) | DNS header bytes 4-5 | Legitimate stub resolvers send exactly 1 query/packet. Batching (>1) or zero queries indicates custom tooling (exfil tools, tunneling utilities). Strong supplemental signal alongside entropy and rate detection. | `DnsQueryContext.query_count: u16` |
+| **DNS additional/authority counts** (ARCOUNT, NSCOUNT) | DNS header bytes 8-11 | Exfil tools encode data in TXT/NULL records in additional or authority sections. A stub resolver query should have ARCOUNT=0, NSCOUNT=0 — any non-zero value from the guest is anomalous and a strong exfil signal. | `DnsQueryContext.additional_count: u16`, `authority_count: u16` |
+| **Guest PID** | Not in packets — requires guest agent | The single highest-value gap. Distinguishes `apt` (PID 1234) from `unknown-binary` (PID 9999). Enables true intent-based policy. Blocked on v1.3 vsock agent infrastructure. | `TcpConnectContext.guest_process: Option<String>` (already defined) |
 
-**Implementation effort:** Low. The interceptor already parses these
-headers — the fields are at fixed offsets. Adding them to context types
-is ~5 lines per field. No architectural change needed.
+**Implementation effort:** DNS counts are ~5 LOC each (fixed header
+offsets, parsed during existing DNS extraction). Guest PID requires
+v1.3 infrastructure (see below).
 
-### Available in Architecture (not packet-level)
+### Gaps Evaluated and Rejected
 
-| Signal | Source | Policy value | Gap |
-|--------|--------|-------------|-----|
-| **Guest PID/UID per connection** | Guest kernel socket table | Same value as vfs's caller_pid — which process opened this socket? Enables "apt connecting to ubuntu.com = Allow" vs "unknown binary connecting = Observe". | **Not in packet headers.** Requires guest-agent cooperation: the vsock agent (russhd, v1.3) reports socket→PID mappings via a side channel. Same gap as vfs FUSE PID. |
-| **libslirp connection state** | `slirp_connection_info()` FFI | Active connection list with protocol, addresses, ports, state. Could be used for connection inventory and orphan detection. | **Available but unstructured.** Returns a human-readable string, not a parsed struct. Would need string parsing, which is fragile across libslirp versions. |
-| **libslirp fd→connection mapping** | `register_poll_fd()`/`unregister_poll_fd()` callbacks | Which host-side fds belong to which guest connections. Could correlate fd lifecycle with connection events. | **Callback provides fd only, no connection metadata.** libslirp does not expose which connection a fd belongs to through the callback API. |
+| Field | Header location | Why not useful for motlie |
+|-------|----------------|--------------------------|
+| ~~**IP TTL**~~ | IPv4 byte 8 | Guest is always one hop from libslirp. TTL is always the guest OS default (64 for Linux). Never varies between processes, never indicates tunneling in this architecture. TTL fingerprinting detects remote hosts behind proxies — irrelevant when the guest is local. |
+| ~~**TCP initial window size**~~ | TCP SYN bytes 14-15 | Guest is always the same Linux kernel. Window size is a kernel TCP parameter, identical for all guest processes. `apt` and `malware` have the same TCP window. OS fingerprinting distinguishes different hosts/OSes — we have one guest OS. |
+| ~~**TCP options**~~ (MSS, SACK, timestamps) | TCP SYN options | Same kernel → same TCP stack → same options for all processes. Custom userspace TCP stacks (that would produce different options) are vanishingly rare in development VMs. The theoretical detection value does not justify the parsing complexity. |
+| ~~**Ethernet source MAC**~~ | Ethernet bytes 6-11 | We configure the MAC in VnetConfig. MAC spoofing detection matters on shared LANs with multiple hosts. Our virtual network has one guest and one gateway — there is no other host to deceive by spoofing. |
+| ~~**libslirp connection_info()**~~ | `slirp_connection_info()` FFI | Returns a human-readable string (not a struct). Provides no information the packet-level interceptor doesn't already have. Fragile to parse across libslirp versions. Debugging utility, not a detection signal. |
+| ~~**libslirp fd→connection mapping**~~ | `register_poll_fd()` callbacks | Callback provides raw fd only, no connection metadata. Even if we mapped fds to connections, it adds nothing beyond what the packet parser already extracts. Internal libslirp state with no policy value. |
 
 ### Guest Process Identity: Why vnet Cannot Do What vfs Can
 
@@ -1025,21 +1026,19 @@ This requires:
 The `guest_process: Option<String>` field is already in
 `TcpConnectContext` and `TcpFlowContext`, waiting for this integration.
 
-### Priority Assessment
+### Priority Assessment (actionable gaps only)
 
 | Gap | Detection value | Effort | Priority |
 |-----|----------------|--------|----------|
-| IP TTL | Medium (tunneling, OS fingerprint) | Low (~5 LOC) | P2 |
-| TCP window + options | Medium (OS fingerprint, tool detection) | Low (~15 LOC) | P2 |
-| DNS query/additional counts | High (exfil detection supplement) | Low (~5 LOC) | P1 |
-| Ethernet MAC verification | Low (misconfiguration detection) | Low (~5 LOC) | P3 |
-| Guest PID (vsock agent) | High (intent-based policy) | High (v1.3 dependency) | P1 (but blocked) |
-| libslirp connection info | Low (inventory only) | Medium (string parsing) | P3 |
+| DNS QDCOUNT | High — detects batching/malformed queries | ~5 LOC (fixed offset) | P1: add during Phase 1 packet parser |
+| DNS ARCOUNT/NSCOUNT | High — detects data in extra RR sections | ~5 LOC (fixed offset) | P1: add during Phase 1 packet parser |
+| Guest PID | Highest — enables intent-based policy | High (v1.3 agent infrastructure) | P1 priority, blocked on v1.3 |
 
-The DNS counts and IP TTL fields should be added when the packet parser
-is implemented (Phase 1 of the policy PLAN) — they are at fixed header
-offsets and add near-zero parsing cost. Guest PID is the highest-value
-gap but requires the v1.3 vsock agent infrastructure.
+The DNS count fields should be added when the packet parser is
+implemented (Phase 1 of the policy PLAN) — they are at fixed header
+offsets in the DNS message and add near-zero parsing cost. Guest PID
+is the highest-value gap but requires the v1.3 vsock agent
+infrastructure (see section below).
 
 ## EventSinkPolicy (generic event producer)
 
