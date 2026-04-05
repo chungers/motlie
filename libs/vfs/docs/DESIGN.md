@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-05 | @codex | Extend the v1 wire protocol and semantics with `Access`, xattrs, and byte-range locks; document handle-based fsync/rename behavior and the remaining lock-limitations for the compatibility pass |
 | 2026-04-02 | @codex | Split the host/guest example boundary so `examples/v1/repl_host.rs` remains the stable v1 single-guest harness, `examples/v1.1/repl_host.rs` carries the v1.1 multi-guest control-plane extensions, and the guest mounters now live under `bins/v1/` and `bins/v1.1/` |
 | 2026-04-02 | @codex | Sync `FsOp::Mkdir` wire protocol with `uid`/`gid` and clarify that explicit overlay-managed `mkdir` uses caller ownership while implicit parent dirs created by `put()` still inherit defaults |
 | 2026-03-31 | @claude | Update wire protocol: `FsOp::Create` now carries `uid`/`gid`, add `FsResult::Created` with `fh` for atomic create+open, add `FsResult::Opened` (PR #123 review) |
@@ -728,9 +729,10 @@ and similar user-space programs to work unchanged.
 - **General-purpose network filesystem.** This is not an NFS or CIFS replacement. It serves
   known, pre-configured mount points with tag-based routing, not arbitrary network shares.
 - **Distributed filesystem.** No replication, no consensus, no multi-server coordination.
-- **POSIX completeness.** Extended attributes, ACLs, file locking (`flock`/`fcntl`), and
-  `mmap` are out of scope. The target workload is coding tools (editors, compilers, git, AI
-  agents) which rely on basic POSIX: open/read/write/close, stat, readdir, rename, symlinks.
+- **POSIX completeness.** ACLs, `mmap`, and the broader long tail of filesystem operations
+  outside the current protocol surface are still out of scope. v1 now includes basic extended
+  attributes, `access`, and byte-range lock support because real coding tools probe them, but it
+  still does not claim kernel-parity semantics across every edge case.
 - **Windows support.**
 - **Kernel-mode filesystem.** This is always userspace FUSE.
 - **Binary distribution / CLI.** This is a library. Binaries that use it (the VMM daemon, a
@@ -950,6 +952,13 @@ These are the types at the center of the design. Every composite converges on th
 pub enum FsOp {
     Lookup { parent: u64, name: String },
     Getattr { inode: u64 },
+    Access { inode: u64, mask: i32, uid: u32, gid: u32 },
+    Setxattr { inode: u64, name: String, value: Bytes, flags: i32, position: u32 },
+    Getxattr { inode: u64, name: String, size: u32 },
+    Listxattr { inode: u64, size: u32 },
+    Removexattr { inode: u64, name: String },
+    Getlk { inode: u64, fh: u64, lock_owner: u64, start: u64, end: u64, typ: i32, pid: u32 },
+    Setlk { inode: u64, fh: u64, lock_owner: u64, start: u64, end: u64, typ: i32, pid: u32, sleep: bool },
     Setattr { inode: u64, attrs: SetAttrFields },
     Readdir { inode: u64, offset: i64 },
     Open { inode: u64, flags: u32 },
@@ -978,6 +987,8 @@ pub enum FsResult {
     DirEntries { entries: Vec<DirEntry> },
     Statfs { stats: FsStats },
     Symlink { target: String },
+    XattrSize { size: u32 },
+    Lock { start: u64, end: u64, typ: i32, pid: u32 },
     Opened { fh: u64 },
     Ok,
     Error { errno: i32 },
@@ -985,6 +996,25 @@ pub enum FsResult {
 ```
 
 `Bytes` is `bytes::Bytes` -- zero-copy for bulk data during encode/decode.
+
+The compatibility pass adds three important semantics on top of the original v1 surface:
+
+- `Access` is a server-side permission probe used by FUSE `access(2)` and toolchain preflight
+  checks. It follows the inode attrs visible through the VFS view, with the known limitation that
+  FUSE only supplies the caller's primary `gid`, not supplementary groups.
+- xattrs are supported on both disk-backed and overlay-backed entries through
+  `Setxattr`/`Getxattr`/`Listxattr`/`Removexattr`. Overlay xattrs are stored in the in-memory
+  overlay node and survive overlay content replacement for that node.
+- byte-range locks are exposed through `Getlk`/`Setlk`. Opened disk-backed files use stable
+  `(dev, ino)` lock identity across rename; opened overlay-backed files use stable `(tag, inode)`
+  identity. Blocking `Setlk { sleep: true }` waits in-process until the conflicting lock clears.
+
+Known lock limits for v1:
+
+- lock state is server-local and not durable across server restart
+- the wait implementation is a single process-local condvar, so unrelated unlocks may wake other
+  waiting lockers
+- there is no FUSE `INTERRUPT` handling for blocked `Setlk { sleep: true }` requests yet
 
 ### Data Flow by Composite
 
