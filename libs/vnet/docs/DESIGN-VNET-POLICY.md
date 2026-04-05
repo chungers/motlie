@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-05 | @claude-tl | Add DNS exfiltration detection use case, label_lengths/name_wire_len in DnsQueryContext, defense-in-depth rationale |
 | 2026-04-05 | @claude-tl | Add errno to PolicyAction, predefined errno pairs, OTel logging, EventSinkPolicy, cross-stack alignment with vfs, chain returns impl EgressPolicy |
 | 2026-04-05 | @claude-tl | Add PolicyReason (Cow-backed enum), on_tcp_flow with flow metadata + SNI, exfiltration/C2/fronting use cases, honest DPI limitations, &self + interior mutability guidance |
 | 2026-04-05 | @claude-tl | Redesign: fully generic policy (no Box/dyn), chainable via trait method, logging-as-policy, zero-cost NoPolicy default, honest intent derivation layering |
@@ -361,6 +362,15 @@ pub struct DnsQueryContext {
     pub source_port: u16,
     /// Timestamp.
     pub timestamp: Instant,
+    /// Individual label lengths in the queried name.
+    /// e.g. "aGVsbG8.exfil.com" → [7, 5, 3].
+    /// Useful for detecting DNS exfiltration (encoded payloads in
+    /// long subdomain labels). See "DNS Exfiltration Detection".
+    pub label_lengths: Vec<usize>,
+    /// Total wire-format length of the DNS name (bytes, including
+    /// length prefixes and root label). Exceeding ~200 bytes is
+    /// a strong exfiltration signal.
+    pub name_wire_len: usize,
 }
 
 pub struct DnsResponseContext {
@@ -537,6 +547,104 @@ fn on_tcp_flow(&self, ctx: &TcpFlowContext) -> PolicyAction {
     PolicyAction::Allow { reason: None }
 }
 ```
+
+### DNS Exfiltration Detection
+
+DNS exfiltration encodes stolen data in subdomain labels of DNS queries:
+
+```
+aGVsbG8gd29ybGQ.chunk2.attacker.com    ← base64 payload in labels
+78e731027d8fd50ed642340b7c9a63b3.x.evil.io  ← hex-encoded data
+```
+
+The attacker controls the authoritative nameserver for `attacker.com` and
+receives the encoded data as query labels — bypassing all TCP-level
+egress controls because DNS queries appear to go to the configured
+resolver (`10.0.2.3`), not to the attacker directly.
+
+**This is a DNS-layer exfiltration path, not a TCP-layer path.** The
+TCP flow metadata (`on_tcp_flow`) cannot detect it because the data
+never travels over a TCP connection to the attacker. Only `on_dns_query`
+sees it.
+
+**Detection signals available in `DnsQueryContext`:**
+
+| Signal | Field | Threshold | False positive risk |
+|--------|-------|-----------|---------------------|
+| Long subdomain labels | `label_lengths` | Any label > 30 chars | Low — legitimate subdomains rarely this long |
+| Many labels (deep nesting) | `label_lengths.len()` | > 5 levels | Medium — some CDNs use deep subdomains |
+| High total name length | `name_wire_len` | > 200 bytes | Low — DNS max is 253, normal queries ~30-60 |
+| High entropy in labels | `domain` (compute Shannon entropy) | > 3.5 bits/char | Medium — CDN hashes look similar |
+| High query rate to one base domain | Stateful: track per base domain | > 50 unique subdomains / 60s | Low — strong signal |
+| Non-alphanumeric density | `domain` | Base64 chars (`+`, `/`, `=`) in labels | Low |
+
+**Example policy: combined heuristic + rate detection**
+
+```rust
+struct DnsExfilDetector {
+    // base_domain → (unique_subdomain_count, window_start)
+    query_counts: RwLock<HashMap<String, (u64, Instant)>>,
+}
+
+impl EgressPolicy for DnsExfilDetector {
+    fn on_dns_query(&self, ctx: &DnsQueryContext) -> PolicyAction {
+        // Heuristic: long label with high entropy
+        let has_suspicious_label = ctx.label_lengths.iter()
+            .zip(ctx.domain.split('.'))
+            .any(|(len, label)| *len > 30 && shannon_entropy(label) > 3.5);
+
+        if has_suspicious_label {
+            return PolicyAction::Deny {
+                errno: libc::EHOSTUNREACH,
+                reason: PolicyReason::Custom(
+                    format!("DNS exfil pattern: long high-entropy label in {}",
+                            ctx.domain).into()
+                ),
+            };
+        }
+
+        // Rate-based: many unique subdomains to one base domain
+        let base = extract_base_domain(&ctx.domain);
+        let mut counts = self.query_counts.write().unwrap();
+        let entry = counts.entry(base.clone())
+            .or_insert((0, Instant::now()));
+
+        // Reset window after 60s
+        if entry.1.elapsed() > Duration::from_secs(60) {
+            *entry = (0, Instant::now());
+        }
+        entry.0 += 1;
+
+        if entry.0 > 50 {
+            return PolicyAction::Deny {
+                errno: libc::EHOSTUNREACH,
+                reason: PolicyReason::Custom(
+                    format!("DNS exfil rate: {} queries to {} in 60s",
+                            entry.0, base).into()
+                ),
+            };
+        }
+
+        PolicyAction::Allow { reason: None }
+    }
+}
+```
+
+**Why DNS exfiltration is a first-class concern for motlie:**
+
+Development VMs have access to credentials (`/.ssh/`, `/.env`, API keys)
+injected via the vfs overlay. DNS exfiltration is one of the few channels
+that bypasses TCP-level controls entirely — a compromised tool or
+dependency in the guest can silently encode and exfiltrate secrets
+through DNS queries that look like normal name resolution traffic.
+
+The combination of:
+1. `CredentialGuard` (vfs policy — blocks unauthorized file access)
+2. `DnsExfilDetector` (vnet policy — catches encoded DNS queries)
+3. TCP flow observation (catches large transfers to unknown hosts)
+
+provides defense-in-depth across both stacks without requiring DPI or
+TLS interception.
 
 ### SNI Extraction
 
