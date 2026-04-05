@@ -336,6 +336,25 @@ impl FsServer {
 // ---------------------------------------------------------------------------
 
 impl FsServer {
+    fn update_runtime_paths_after_rename(&self, tag: &str, src_path: &str, dst_path: &str) {
+        {
+            let mut fh_table = self.fh_table.lock();
+            for (entry_tag, entry_path) in fh_table.values_mut() {
+                if entry_tag == tag && entry_path == src_path {
+                    *entry_path = dst_path.to_string();
+                }
+            }
+        }
+
+        let mut lock_table = self.lock_table.lock();
+        let src_key = (tag.to_string(), src_path.to_string());
+        let dst_key = (tag.to_string(), dst_path.to_string());
+        lock_table.remove(&dst_key);
+        if let Some(mut moved) = lock_table.remove(&src_key) {
+            lock_table.insert(dst_key, std::mem::take(&mut moved));
+        }
+    }
+
     fn host_path_for_inode(&self, mount: &MountState, inode: u64) -> Result<PathBuf, i32> {
         let table = mount.inode_table.lock();
         match table.get(inode) {
@@ -1080,7 +1099,14 @@ impl FsServer {
                         let _ = overlay.put(&src_layer, &mount.tag, &dst_path, content);
                         let _ = overlay.remove(&src_layer, &mount.tag, &src_path);
                         let mut table = mount.inode_table.lock();
-                        table.remove_path(&src_path);
+                        if let Some(inode) = table.rename_path(&src_path, &dst_path) {
+                            if let Some(entry) = table.get_mut(inode) {
+                                entry.kind = InodeKind::Content;
+                                entry.host_path = None;
+                            }
+                        }
+                        drop(table);
+                        self.update_runtime_paths_after_rename(&mount.tag, &src_path, &dst_path);
                         return FsResult::Ok;
                     }
                 }
@@ -1096,7 +1122,14 @@ impl FsServer {
                                 let _ = overlay.put(&layer, &mount.tag, &dst_path, bytes::Bytes::from(content));
                                 let _ = fs::remove_file(&host_src);
                                 let mut table = mount.inode_table.lock();
-                                table.remove_path(&src_path);
+                                if let Some(inode) = table.rename_path(&src_path, &dst_path) {
+                                    if let Some(entry) = table.get_mut(inode) {
+                                        entry.kind = InodeKind::Content;
+                                        entry.host_path = None;
+                                    }
+                                }
+                                drop(table);
+                                self.update_runtime_paths_after_rename(&mount.tag, &src_path, &dst_path);
                                 return FsResult::Ok;
                             }
                         }
@@ -1114,7 +1147,13 @@ impl FsServer {
                 match fs::rename(&src_host, &dst_host) {
                     Ok(()) => {
                         let mut table = mount.inode_table.lock();
-                        table.remove_path(&src_path);
+                        if let Some(inode) = table.rename_path(&src_path, &dst_path) {
+                            if let Some(entry) = table.get_mut(inode) {
+                                entry.host_path = Some(dst_host);
+                            }
+                        }
+                        drop(table);
+                        self.update_runtime_paths_after_rename(&mount.tag, &src_path, &dst_path);
                         FsResult::Ok
                     }
                     Err(e) => FsResult::Error { errno: io_errno(&e) },
@@ -1729,6 +1768,51 @@ mod tests {
         assert!(dir.path().join("new.txt").exists());
     }
 
+    #[test]
+    fn rename_keeps_source_open_handle_working() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("old.txt"), b"data").unwrap();
+        let server = build_test_server(dir.path());
+
+        let inode = match server.handle_op("test", FsOp::Lookup { parent: 1, name: "old.txt".into() }) {
+            FsResult::Entry { inode, .. } => inode,
+            other => panic!("expected Entry, got {:?}", other),
+        };
+        let fh = match server.handle_op("test", FsOp::Open { inode, flags: 0 }) {
+            FsResult::Opened { fh } => fh,
+            other => panic!("expected Opened, got {:?}", other),
+        };
+
+        assert!(matches!(
+            server.handle_op(
+                "test",
+                FsOp::Rename {
+                    parent: 1,
+                    name: "old.txt".into(),
+                    new_parent: 1,
+                    new_name: "new.txt".into(),
+                }
+            ),
+            FsResult::Ok
+        ));
+
+        let data = match server.handle_op("test", FsOp::Read { inode, fh, offset: 0, size: 4096 }) {
+            FsResult::Data { data } => data,
+            other => panic!("expected Data, got {:?}", other),
+        };
+        assert_eq!(&data[..], b"data");
+        assert!(matches!(
+            server.handle_op("test", FsOp::Fsync { inode, fh, datasync: false }),
+            FsResult::Ok
+        ));
+
+        let renamed_inode = match server.handle_op("test", FsOp::Lookup { parent: 1, name: "new.txt".into() }) {
+            FsResult::Entry { inode, .. } => inode,
+            other => panic!("expected Entry, got {:?}", other),
+        };
+        assert_eq!(renamed_inode, inode);
+    }
+
     #[cfg(unix)]
     #[test]
     fn symlink_and_readlink() {
@@ -2297,6 +2381,54 @@ mod tests {
         assert!(matches!(result, FsResult::Ok));
         // tmp.txt should be gone from disk
         assert!(!dir.path().join("tmp.txt").exists());
+    }
+
+    #[test]
+    fn overlay_rename_disk_to_overlay_keeps_source_open_handle_working() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("tmp.txt"), b"new content").unwrap();
+        let server = build_overlay_server(dir.path());
+        let o = server.overlay().unwrap();
+        o.put_layer("l", 0).unwrap();
+        o.put("l", "test", "/target.txt", bytes::Bytes::from("old")).unwrap();
+
+        let inode = match server.handle_op("test", FsOp::Lookup { parent: 1, name: "tmp.txt".into() }) {
+            FsResult::Entry { inode, .. } => inode,
+            other => panic!("expected Entry, got {:?}", other),
+        };
+        let fh = match server.handle_op("test", FsOp::Open { inode, flags: 0 }) {
+            FsResult::Opened { fh } => fh,
+            other => panic!("expected Opened, got {:?}", other),
+        };
+
+        assert!(matches!(
+            server.handle_op(
+                "test",
+                FsOp::Rename {
+                    parent: 1,
+                    name: "tmp.txt".into(),
+                    new_parent: 1,
+                    new_name: "target.txt".into(),
+                }
+            ),
+            FsResult::Ok
+        ));
+
+        let data = match server.handle_op("test", FsOp::Read { inode, fh, offset: 0, size: 4096 }) {
+            FsResult::Data { data } => data,
+            other => panic!("expected Data, got {:?}", other),
+        };
+        assert_eq!(&data[..], b"new content");
+        assert!(matches!(
+            server.handle_op("test", FsOp::Fsync { inode, fh, datasync: false }),
+            FsResult::Ok
+        ));
+
+        let target_inode = match server.handle_op("test", FsOp::Lookup { parent: 1, name: "target.txt".into() }) {
+            FsResult::Entry { inode, .. } => inode,
+            other => panic!("expected Entry, got {:?}", other),
+        };
+        assert_eq!(target_inode, inode);
     }
 
     // 2.2.10: Overlay→disk rename → EXDEV
