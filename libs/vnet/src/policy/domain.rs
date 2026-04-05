@@ -1,7 +1,17 @@
 //! Domain name utilities for network policy implementations.
 //!
+//! **Connection phase: Phase 1 (DNS — "Intent")**
+//!
 //! Base domain extraction, suffix matching, and label parsing for
 //! category policies and DNS exfiltration detectors.
+//!
+//! # Policy API integration
+//!
+//! - `extract_base_domain()` — used with `DnsQueryContext.domain` to
+//!   group queries by base domain for rate tracking (request frequency
+//!   detection).
+//! - `matches_suffix()` — used in `CategoryPolicy` to classify domains
+//!   by pattern (e.g. `*.ubuntu.com` → PackageManager).
 
 /// Extract the base domain (last two labels) from an FQDN.
 ///

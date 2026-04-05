@@ -1,13 +1,31 @@
-//! Shannon entropy analysis for detecting encoded/encrypted data in DNS labels.
+//! Shannon entropy analysis for detecting encoded/encrypted data.
+//!
+//! **Connection phase: Phase 1 (DNS — "Intent")**
 //!
 //! Measures the randomness of a string in bits per character. Natural language
 //! and readable hostnames have low entropy (1.0–2.5); base64/hex-encoded data
 //! has high entropy (3.5–5.0).
 //!
+//! # Policy API integration
+//!
+//! Used in `EgressPolicy::on_dns_query()` with `DnsQueryContext`:
+//! ```rust,ignore
+//! fn on_dns_query(&self, ctx: &DnsQueryContext) -> PolicyAction {
+//!     let suspicious = ctx.label_lengths.iter()
+//!         .zip(ctx.domain.split('.'))
+//!         .any(|(len, label)| *len > 30 && shannon_entropy(label) > 3.5);
+//!     if suspicious {
+//!         PolicyAction::Deny { errno: libc::EHOSTUNREACH, reason: ... }
+//!     } else {
+//!         PolicyAction::Allow { reason: None }
+//!     }
+//! }
+//! ```
+//!
 //! # Use cases
 //!
-//! - **DNS exfiltration**: high-entropy subdomain labels carrying encoded
-//!   payloads (e.g. `aGVsbG8gd29ybGQ.exfil.attacker.com`)
+//! - **DNS exfiltration** (Phase 1): high-entropy subdomain labels carrying
+//!   encoded payloads (e.g. `aGVsbG8gd29ybGQ.exfil.attacker.com`)
 //!
 //! # Entropy scale
 //!

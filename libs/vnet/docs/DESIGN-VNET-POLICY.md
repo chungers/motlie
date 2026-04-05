@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-05 | @claude-tl | Add connection timeline framework: 3-phase detection (DNS intent → handshake → flow), technique tables with API mapping, JA3/beacon gaps documented |
 | 2026-04-05 | @claude-tl | Add DNS exfiltration detection use case, label_lengths/name_wire_len in DnsQueryContext, defense-in-depth rationale |
 | 2026-04-05 | @claude-tl | Add errno to PolicyAction, predefined errno pairs, OTel logging, EventSinkPolicy, cross-stack alignment with vfs, chain returns impl EgressPolicy |
 | 2026-04-05 | @claude-tl | Add PolicyReason (Cow-backed enum), on_tcp_flow with flow metadata + SNI, exfiltration/C2/fronting use cases, honest DPI limitations, &self + interior mutability guidance |
@@ -497,6 +498,110 @@ lifetime and once on close.
 | Application-layer protocol | Cannot infer from encrypted bytes |
 | Certificate details | Would require TLS parsing beyond SNI |
 | Individual request boundaries | Encrypted; HTTP/2 multiplexes |
+
+## Anomaly Detection by Connection Phase
+
+A network connection is a timeline. Detection moves from identifying
+the **intent** (DNS), to the **handshake** (pre-connection/initial), and
+finally to the **behavior** (flow/established). The vnet policy API
+provides callbacks at each phase — the right detector runs at the right
+stage.
+
+### Phase 1: DNS — The "Intent" Phase
+
+The connection hasn't started. The guest is asking "where is this?"
+This is the best place to catch stealthy smuggling before a single byte
+of real data is exchanged.
+
+**Policy callback:** `on_dns_query(&self, ctx: &DnsQueryContext)`
+
+| Technique | Method | What it Detects | API fields used |
+|-----------|--------|----------------|-----------------|
+| **Entropy Analysis** | Calculate Shannon entropy of subdomain labels | High-entropy strings encoding data (`a1z9b2k8...`) | `ctx.domain`, `ctx.label_lengths` → `policy::entropy::shannon_entropy()` |
+| **Request Frequency** | Monitor DNS query volume per base domain over time | High-volume "chunking" — data split across thousands of queries | `ctx.domain`, `ctx.timestamp` → stateful rate counter (`RwLock<HashMap>`) |
+| **Domain Aging** | Check registration date of destination domain | "Burner" domains registered recently for the attack | `ctx.domain` → external WHOIS/threat-intel lookup (async, return Observe) |
+| **Record Type Profiling** | Monitor for rare record types (TXT, NULL, CNAME chains) | Non-standard DNS records carrying larger data payloads | `ctx.query_type` → flag non-A/AAAA lookups to unknown domains |
+
+**API coverage:** Entropy and frequency are fully supported with existing
+context fields. Domain aging requires external lookup (policy returns
+Observe, resolves asynchronously). Record type profiling uses
+`ctx.query_type` which is already in `DnsQueryContext`.
+
+### Phase 2: Pre-Connection / Initial Handshake
+
+The TCP 3-way handshake and TLS negotiation. Looking at the identity
+and parameters of the connection before data flows.
+
+**Policy callbacks:** `on_tcp_connect(&self, ctx: &TcpConnectContext)`,
+`on_tcp_flow(&self, ctx: &TcpFlowContext)` (first report with SNI)
+
+| Technique | Method | What it Detects | API fields used |
+|-----------|--------|----------------|-----------------|
+| **JA3/JA3S Fingerprinting** | Analyze TLS ClientHello cipher suites and extensions | Known malicious tools (Python/Rust exfiltrators with non-browser signatures) | `TcpFlowContext.sni` + future: raw ClientHello bytes for JA3 hash |
+| **Protocol Validation** | Verify traffic on a port matches expected protocol | Protocol tunneling — SSH or raw data over port 443 | First TX bytes in `on_tcp_flow` — check for TLS record header vs raw data |
+| **Geo-Fencing / Rare IP** | Compare destination IP against historical baselines | Connections to rare ASNs or countries where the guest never talks | `ctx.dst_ip` → external GeoIP lookup, or stateful IP baseline |
+| **SNI / DNS Mismatch** | Compare TLS SNI with DNS-resolved domain | Domain fronting — hiding the real destination behind a CDN | `TcpFlowContext.sni` vs `TcpFlowContext.domain` |
+
+**API coverage:** SNI extraction and DNS/SNI mismatch are fully supported.
+JA3 fingerprinting would require exposing raw ClientHello bytes in
+`TcpFlowContext` (not currently available — future enhancement). Protocol
+validation can check first-byte patterns in `on_tcp_flow`. GeoIP requires
+external lookup.
+
+**API gap for JA3:** The current SNI extraction parses only the server
+name extension. Full JA3 fingerprinting needs the cipher suite list,
+extension list, and elliptic curve parameters from the ClientHello. This
+could be added to `TcpFlowContext` as an optional `ja3_hash: Option<String>`
+field, computed during SNI extraction at near-zero additional cost (the
+ClientHello is already being parsed).
+
+### Phase 3: Flow — The "Established" Session
+
+The connection is live and data is moving. Analyze the shape and rhythm
+of the traffic.
+
+**Policy callback:** `on_tcp_flow(&self, ctx: &TcpFlowContext)`
+
+| Technique | Method | What it Detects | API fields used |
+|-----------|--------|----------------|-----------------|
+| **Directional Asymmetry** | Measure bytes_tx / bytes_rx ratio | Large-scale uploads from a machine that is normally a consumer | `ctx.bytes_tx`, `ctx.bytes_rx` → `policy::ratio` |
+| **Duration Analysis** | Identify long-lived sessions with low throughput | Persistent tunnels trickling data out slowly over hours | `ctx.duration`, `ctx.bytes_tx` → bytes/sec rate |
+| **Beaconing Detection** | Find fixed timing intervals between reports | Automated heartbeats — malware checking in at exact intervals (e.g. every 30s) | `ctx.timestamp` → stateful inter-report timing, coefficient of variation |
+| **Payload Entropy** | Measure randomness of the data stream | Distinguishing natural encrypted traffic from high-entropy data dumps | Not directly available — would require sampling payload bytes (DPI concern) |
+
+**API coverage:** Directional asymmetry and duration analysis are fully
+supported. Beaconing detection is partially supported (requires stateful
+inter-report timing; report interval is not policy-configurable — see API
+gap below). Payload entropy conflicts with the No-DPI design constraint
+and is explicitly out of scope.
+
+**API gap for beaconing:** The `on_tcp_flow` report interval is
+interceptor-controlled, not policy-controlled. If reports are every 10s
+but the beacon interval is 30s, the policy sees 3 reports per beacon
+cycle — sufficient for detection. But if reports are every 60s and the
+beacon is every 30s, periodicity is masked. Future enhancement: make
+the report interval configurable per-flow or per-policy.
+
+### Phase Summary
+
+```
+Guest DNS query        TCP SYN            TLS ClientHello        Data flow
+     │                    │                     │                    │
+     ▼                    ▼                     ▼                    ▼
+┌──────────┐      ┌──────────────┐      ┌──────────────┐    ┌──────────────┐
+│ Phase 1  │      │   Phase 2    │      │   Phase 2    │    │   Phase 3    │
+│ DNS      │      │ TCP Connect  │      │ TLS Hello    │    │ Flow         │
+│          │      │              │      │              │    │              │
+│ Entropy  │      │ Geo-fence    │      │ JA3 (future) │    │ Byte ratio   │
+│ Rate     │      │ Rare IP      │      │ SNI verify   │    │ Duration     │
+│ Aging    │      │ Protocol val │      │ Protocol val │    │ Beaconing    │
+│ Type     │      │              │      │              │    │              │
+│          │      │              │      │              │    │              │
+│ callback:│      │ callback:    │      │ callback:    │    │ callback:    │
+│ on_dns_  │      │ on_tcp_      │      │ on_tcp_      │    │ on_tcp_      │
+│ query()  │      │ connect()    │      │ flow() #1    │    │ flow() #N    │
+└──────────┘      └──────────────┘      └──────────────┘    └──────────────┘
+```
 
 ### Use Cases for Flow Metadata
 
