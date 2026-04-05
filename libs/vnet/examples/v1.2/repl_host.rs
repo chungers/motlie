@@ -35,16 +35,16 @@
 //!
 //! # Multi-mount (repeat --mount)
 //! cargo run -p motlie-vnet --example repl_host_v1_2 -- \
-//!     --socket /tmp/motlie-vfs.vsock_5000 \
+//!     --socket /tmp/motlie-vnet.vsock_5000 \
 //!     --mount alice-home=~/alice \
 //!     --mount workspace=~/workspace
 //!
 //! # Multi-guest (repeat --guest and guest-qualified --mount)
 //! cargo run -p motlie-vnet --example repl_host_v1_2 -- \
-//!     --guest alice=/tmp/motlie-vfs-alice.vsock_5000 \
+//!     --guest alice=/tmp/motlie-vnet-alice.vsock_5000 \
 //!     --mount alice:alice-home=~/alice \
 //!     --mount alice:alice-workspace=~/workspace \
-//!     --guest bob=/tmp/motlie-vfs-bob.vsock_5000 \
+//!     --guest bob=/tmp/motlie-vnet-bob.vsock_5000 \
 //!     --mount bob:bob-home=~/bob \
 //!     --mount bob:bob-workspace=~/workspace-bob
 //!
@@ -230,7 +230,7 @@ enum MountSpec {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut socket_path = "/tmp/motlie-vfs.vsock_5000".to_string();
+    let mut socket_path = "/tmp/motlie-vnet.vsock_5000".to_string();
     let mut tag = "alice-home".to_string();
     let mut host_dir: Option<PathBuf> = None;
     let mut single_mounts: Vec<(String, PathBuf)> = Vec::new();
@@ -909,7 +909,7 @@ fn seed_demo_host_mount(guest_name: &str, mount: &ConfiguredMount) -> Result<()>
 }
 
 fn guest_api_socket_path(guest_name: &str) -> PathBuf {
-    PathBuf::from(format!("/tmp/motlie-vfs-{guest_name}-api.sock"))
+    PathBuf::from(format!("/tmp/motlie-vnet-{guest_name}-api.sock"))
 }
 
 fn guest_vnet_socket_path(guest_name: &str) -> PathBuf {
@@ -973,7 +973,7 @@ fn render_launch_script(
     writeln!(&mut out, "BASE_DIR=\"${{BASE_DIR:-{}}}\"", base_dir)?;
     writeln!(
         &mut out,
-        "SEED_DIR=\"${{SEED_DIR:-/tmp/motlie-vfs-cloud-init-${{GUEST_ID}}}}\""
+        "SEED_DIR=\"${{SEED_DIR:-/tmp/motlie-vnet-cloud-init-${{GUEST_ID}}}}\""
     )?;
     writeln!(
         &mut out,
@@ -1029,7 +1029,7 @@ struct LaunchExecution {
 }
 
 fn execute_launch_script(guest_name: &str, script: &str) -> Result<LaunchExecution> {
-    let log_dir = PathBuf::from(format!("/tmp/motlie-vfs-launch/{guest_name}"));
+    let log_dir = PathBuf::from(format!("/tmp/motlie-vnet-launch/{guest_name}"));
     std::fs::create_dir_all(&log_dir)?;
 
     let script_path = log_dir.join("launch.sh");
@@ -1315,7 +1315,7 @@ fn print_help(topic: Option<&str>, multi_guest: bool, comment_stdout: bool) {
             out("provision <guest> <socket> <uid> <gid>");
             out("  Create one guest-scoped FsServer, record the guest uid/gid contract, and bind its Unix socket listener.");
             out("  Example:");
-            out("    provision bob /tmp/motlie-vfs-bob.vsock_5000 1001 1001");
+            out("    provision bob /tmp/motlie-vnet-bob.vsock_5000 1001 1001");
         }
         Some("mount") => {
             out("mount <guest> <tag>=<guest_path>,<host_path> [more...]");
@@ -1323,7 +1323,7 @@ fn print_help(topic: Option<&str>, multi_guest: bool, comment_stdout: bool) {
             out("  guest_path is recorded for operator clarity and should match mounts.<guest>.yaml.");
             out("  FsServer routing still uses tag -> host_path on the host side.");
             out("  Example:");
-            out("    mount bob bob-home=/home/bob,/tmp/motlie-vfs-demo/bob-home bob-workspace=/workspace,/tmp/motlie-vfs-demo/bob-workspace");
+            out("    mount bob bob-home=/home/bob,/tmp/motlie-vnet-demo/bob-home bob-workspace=/workspace,/tmp/motlie-vnet-demo/bob-workspace");
         }
         Some("launch") => {
             out("launch <guest>");
@@ -1333,7 +1333,7 @@ fn print_help(topic: Option<&str>, multi_guest: bool, comment_stdout: bool) {
             out("  launch-ch.sh then seeds those files into /var/lib/cloud/seed/nocloud/.");
             out("  In --egress-net=vhost-user mode, repl_host_v1_2 starts one motlie-vnet");
             out("  backend per guest before launching and reuses it across later launches.");
-            out("  Logs land under /tmp/motlie-vfs-launch/<guest>/.");
+            out("  Logs land under /tmp/motlie-vnet-launch/<guest>/.");
             out("launch -script <guest>");
             out("  Render the helper shell script to stdout without executing it.");
             out("  In vhost-user mode, the helper assumes a motlie-vnet backend is");
@@ -1342,7 +1342,7 @@ fn print_help(topic: Option<&str>, multi_guest: bool, comment_stdout: bool) {
         Some("shutdown") => {
             out("shutdown <guest>");
             out("  Request VM shutdown through the guest's Cloud Hypervisor API socket.");
-            out("  This shells out to curl --unix-socket /tmp/motlie-vfs-<guest>-api.sock ...");
+            out("  This shells out to curl --unix-socket /tmp/motlie-vnet-<guest>-api.sock ...");
         }
         Some("use") => {
             out("use <guest>");
