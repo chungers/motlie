@@ -14,6 +14,8 @@ pub enum FsOp {
     Getxattr { inode: u64, name: String, size: u32 },
     Listxattr { inode: u64, size: u32 },
     Removexattr { inode: u64, name: String },
+    Getlk { inode: u64, fh: u64, lock_owner: u64, start: u64, end: u64, typ: i32, pid: u32 },
+    Setlk { inode: u64, fh: u64, lock_owner: u64, start: u64, end: u64, typ: i32, pid: u32, sleep: bool },
     Setattr { inode: u64, attrs: SetAttrFields },
     Readdir { inode: u64, offset: i64 },
     Open { inode: u64, flags: u32 },
@@ -43,6 +45,7 @@ pub enum FsResult {
     Statfs { stats: FsStats },
     Symlink { target: String },
     XattrSize { size: u32 },
+    Lock { start: u64, end: u64, typ: i32, pid: u32 },
     Opened { fh: u64 },
     Ok,
     Error { errno: i32 },
@@ -120,6 +123,8 @@ mod tests {
             FsOp::Getxattr { inode: 42, name: "user.test".into(), size: 0 },
             FsOp::Listxattr { inode: 42, size: 0 },
             FsOp::Removexattr { inode: 42, name: "user.test".into() },
+            FsOp::Getlk { inode: 42, fh: 1, lock_owner: 7, start: 0, end: 9, typ: libc::F_WRLCK, pid: 1234 },
+            FsOp::Setlk { inode: 42, fh: 1, lock_owner: 7, start: 0, end: 9, typ: libc::F_WRLCK, pid: 1234, sleep: false },
             FsOp::Setattr {
                 inode: 42,
                 attrs: SetAttrFields {
@@ -207,6 +212,7 @@ mod tests {
             },
             FsResult::Symlink { target: "/foo/bar".into() },
             FsResult::XattrSize { size: 5 },
+            FsResult::Lock { start: 0, end: 9, typ: libc::F_UNLCK, pid: 0 },
             FsResult::Opened { fh: 42 },
             FsResult::Ok,
             FsResult::Error { errno: 2 },
