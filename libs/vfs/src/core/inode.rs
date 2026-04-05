@@ -167,6 +167,20 @@ impl InodeTable {
         }
     }
 
+    /// Move an existing path mapping to a new path, replacing any destination
+    /// entry if needed. Returns the moved inode number.
+    pub fn rename_path(&mut self, src_path: &str, dst_path: &str) -> Option<u64> {
+        let inode = self.path_to_inode.remove(src_path)?;
+        if let Some(dst_inode) = self.path_to_inode.remove(dst_path) {
+            self.entries.remove(&dst_inode);
+        }
+        if let Some(entry) = self.entries.get_mut(&inode) {
+            entry.path = dst_path.to_string();
+        }
+        self.path_to_inode.insert(dst_path.to_string(), inode);
+        Some(inode)
+    }
+
     /// Increment the FUSE lookup refcount.
     pub fn inc_ref(&mut self, inode: u64) {
         if let Some(entry) = self.entries.get_mut(&inode) {

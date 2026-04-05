@@ -20,8 +20,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuser::{
     FileAttr as FuserFileAttr, FileType as FuserFileType, Filesystem, MountOption, ReplyAttr,
-    ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs,
-    ReplyWrite, Request,
+    ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyLock, ReplyOpen, ReplyStatfs,
+    ReplyWrite, ReplyXattr, Request,
 };
 
 use crate::core::op::*;
@@ -95,6 +95,19 @@ where
         }
     }
 
+    fn access(&mut self, req: &Request<'_>, ino: u64, mask: i32, reply: ReplyEmpty) {
+        match self.request(FsOp::Access {
+            inode: ino,
+            mask,
+            uid: req.uid(),
+            gid: req.gid(),
+        }) {
+            FsResult::Ok => reply.ok(),
+            FsResult::Error { errno } => reply.error(errno),
+            _ => reply.error(libc::EIO),
+        }
+    }
+
     fn setattr(
         &mut self,
         _req: &Request<'_>,
@@ -128,6 +141,69 @@ where
             FsResult::Attr { attrs, .. } => {
                 reply.attr(&ZERO_TTL, &to_fuser_attr(&attrs, ino));
             }
+            FsResult::Error { errno } => reply.error(errno),
+            _ => reply.error(libc::EIO),
+        }
+    }
+
+    fn setxattr(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        name: &OsStr,
+        value: &[u8],
+        flags: i32,
+        position: u32,
+        reply: ReplyEmpty,
+    ) {
+        match self.request(FsOp::Setxattr {
+            inode: ino,
+            name: name.to_string_lossy().into_owned(),
+            value: bytes::Bytes::copy_from_slice(value),
+            flags,
+            position,
+        }) {
+            FsResult::Ok => reply.ok(),
+            FsResult::Error { errno } => reply.error(errno),
+            _ => reply.error(libc::EIO),
+        }
+    }
+
+    fn getxattr(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        name: &OsStr,
+        size: u32,
+        reply: ReplyXattr,
+    ) {
+        match self.request(FsOp::Getxattr {
+            inode: ino,
+            name: name.to_string_lossy().into_owned(),
+            size,
+        }) {
+            FsResult::XattrSize { size } => reply.size(size),
+            FsResult::Data { data } => reply.data(&data),
+            FsResult::Error { errno } => reply.error(errno),
+            _ => reply.error(libc::EIO),
+        }
+    }
+
+    fn listxattr(&mut self, _req: &Request<'_>, ino: u64, size: u32, reply: ReplyXattr) {
+        match self.request(FsOp::Listxattr { inode: ino, size }) {
+            FsResult::XattrSize { size } => reply.size(size),
+            FsResult::Data { data } => reply.data(&data),
+            FsResult::Error { errno } => reply.error(errno),
+            _ => reply.error(libc::EIO),
+        }
+    }
+
+    fn removexattr(&mut self, _req: &Request<'_>, ino: u64, name: &OsStr, reply: ReplyEmpty) {
+        match self.request(FsOp::Removexattr {
+            inode: ino,
+            name: name.to_string_lossy().into_owned(),
+        }) {
+            FsResult::Ok => reply.ok(),
             FsResult::Error { errno } => reply.error(errno),
             _ => reply.error(libc::EIO),
         }
@@ -260,6 +336,62 @@ where
                 // Backwards compat: server didn't return Created
                 reply.created(&ZERO_TTL, &to_fuser_attr(&attrs, inode), generation, 0, 0);
             }
+            FsResult::Error { errno } => reply.error(errno),
+            _ => reply.error(libc::EIO),
+        }
+    }
+
+    fn getlk(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        fh: u64,
+        lock_owner: u64,
+        start: u64,
+        end: u64,
+        typ: i32,
+        pid: u32,
+        reply: ReplyLock,
+    ) {
+        match self.request(FsOp::Getlk {
+            inode: ino,
+            fh,
+            lock_owner,
+            start,
+            end,
+            typ,
+            pid,
+        }) {
+            FsResult::Lock { start, end, typ, pid } => reply.locked(start, end, typ, pid),
+            FsResult::Error { errno } => reply.error(errno),
+            _ => reply.error(libc::EIO),
+        }
+    }
+
+    fn setlk(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        fh: u64,
+        lock_owner: u64,
+        start: u64,
+        end: u64,
+        typ: i32,
+        pid: u32,
+        sleep: bool,
+        reply: ReplyEmpty,
+    ) {
+        match self.request(FsOp::Setlk {
+            inode: ino,
+            fh,
+            lock_owner,
+            start,
+            end,
+            typ,
+            pid,
+            sleep,
+        }) {
+            FsResult::Ok => reply.ok(),
             FsResult::Error { errno } => reply.error(errno),
             _ => reply.error(libc::EIO),
         }
