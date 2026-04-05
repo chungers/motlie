@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-05 | @claude-tl | PolicyEvaluator plumbing: builder→FsServer→dispatch, chaining examples with step-by-step walkthroughs (normal read, scanning, staging) |
 | 2026-04-05 | @claude-tl | Drop Observe, two-action PolicyAction (Allow/Deny + confidence), deny_threshold, emission truth table, appendix updated |
 | 2026-04-05 | @claude-tl | Confidence on PolicyAction, FsInterceptPolicy with ArcSwap, PolicyEvent at call site, remove EventSinkPolicy |
 | 2026-04-05 | @claude-tl | Stateless policy redesign: dispatch-layer state, caller identity (UID/GID/PID) with FUSE plumbing gap, pre-computed signals, fd hijacking/execve limitations, Setattr mode/ownership tracking |
@@ -892,105 +893,331 @@ enum RuntimeEvent {
 Neither crate depends on the other. The host runtime owns the unified
 enum and the channel.
 
-## deny_threshold
+## PolicyEvaluator and Plumbing
 
-The dispatch layer converts low-confidence Allows to Denys:
+### PolicyEvaluator
+
+The runtime bundle that sits between `FsServer::dispatch()` and the
+policy chain. Owns the chain, the threshold, and the event channel.
+The handler calls `evaluate()` and `complete()` — threshold and emission
+are internal.
+
+```rust
+pub struct PolicyEvaluator<P: FsPolicy> {
+    policy: P,
+    deny_threshold: f64,
+    event_tx: Option<mpsc::Sender<PolicyEvent>>,
+}
+
+impl<P: FsPolicy> PolicyEvaluator<P> {
+    /// Pre-op: evaluate chain, apply threshold, emit event.
+    pub fn evaluate(&self, ctx: &FsOpContext) -> PolicyAction {
+        let action = self.policy.on_op(ctx);
+        let action = self.apply_threshold(action);
+        self.emit(PolicyEvent::FsOp { ctx: ctx.clone(), action: action.clone() }, &action);
+        action
+    }
+
+    /// Post-op: all policies see the completion.
+    pub fn complete(&self, ctx: &FsOpContext, result: &FsOpResult) {
+        let action = self.policy.on_complete(ctx, result);
+        self.emit(PolicyEvent::FsComplete {
+            ctx: ctx.clone(), result: result.clone(), action: action.clone(),
+        }, &action);
+    }
+
+    fn apply_threshold(&self, action: PolicyAction) -> PolicyAction {
+        match action {
+            PolicyAction::Allow { confidence, reason } if confidence < self.deny_threshold => {
+                PolicyAction::Deny {
+                    errno: libc::EACCES,
+                    reason: reason.unwrap_or(PolicyReason::Custom("below threshold".into())),
+                    confidence,
+                }
+            }
+            other => other,
+        }
+    }
+
+    fn emit(&self, event: PolicyEvent, action: &PolicyAction) {
+        if let Some(ref tx) = self.event_tx {
+            let dominated = match action {
+                PolicyAction::Deny { .. } => true,
+                PolicyAction::Allow { confidence, .. } => *confidence < 1.0,
+            };
+            if dominated {
+                let _ = tx.try_send(event);
+            }
+        }
+    }
+}
+```
+
+### Builder → FsServer
+
+```rust
+pub struct FsServerBuilder<P: FsPolicy = NoPolicy> {
+    policy: P,
+    deny_threshold: f64,
+    event_tx: Option<mpsc::Sender<PolicyEvent>>,
+    // ... other FsServer config ...
+}
+
+impl FsServerBuilder<NoPolicy> {
+    pub fn new() -> Self {
+        Self {
+            policy: NoPolicy,
+            deny_threshold: 0.0,
+            event_tx: None,
+        }
+    }
+}
+
+impl<P: FsPolicy> FsServerBuilder<P> {
+    /// Set the policy chain. Changes the generic parameter.
+    pub fn policy<Q: FsPolicy>(self, policy: Q) -> FsServerBuilder<Q> {
+        FsServerBuilder {
+            policy,
+            deny_threshold: self.deny_threshold,
+            event_tx: self.event_tx,
+        }
+    }
+
+    pub fn deny_threshold(mut self, threshold: f64) -> Self {
+        self.deny_threshold = threshold;
+        self
+    }
+
+    pub fn policy_events(mut self, tx: mpsc::Sender<PolicyEvent>) -> Self {
+        self.event_tx = Some(tx);
+        self
+    }
+
+    pub fn build(self) -> FsServer<P> {
+        let policy_evaluator = if /* P is NoPolicy and no threshold and no events */ {
+            None
+        } else {
+            Some(PolicyEvaluator {
+                policy: self.policy,
+                deny_threshold: self.deny_threshold,
+                event_tx: self.event_tx,
+            })
+        };
+
+        FsServer {
+            policy_evaluator,
+            // ... mounts, overlay, etc ...
+        }
+    }
+}
+```
+
+### FsServer dispatch integration
+
+```rust
+pub struct FsServer<P: FsPolicy = NoPolicy> {
+    policy_evaluator: Option<PolicyEvaluator<P>>,
+    // ... mounts, overlay, etc ...
+}
+
+impl<P: FsPolicy> FsServer<P> {
+    fn dispatch(&self, mount: &MountState, op: &FsOp) -> FsResult {
+        if mount.read_only && is_write_op(op) {
+            return FsResult::Error { errno: libc::EROFS };
+        }
+
+        if let Some(ref evaluator) = self.policy_evaluator {
+            let ctx = self.build_context(mount, op);
+            let action = evaluator.evaluate(&ctx);
+
+            match action {
+                PolicyAction::Deny { errno, .. } => FsResult::Error { errno },
+                PolicyAction::Allow { .. } => {
+                    let start = Instant::now();
+                    let result = self.execute_op(mount, op);
+                    let op_result = self.build_result(&result, start);
+                    evaluator.complete(&ctx, &op_result);
+                    result
+                }
+            }
+        } else {
+            // No evaluator — zero overhead (single null-check, ~1ns)
+            self.execute_op(mount, op)
+        }
+    }
+}
+```
+
+### deny_threshold
 
 ```rust
 let server = FsServer::builder()
     .policy(my_chain)
     .deny_threshold(0.5)   // Allow with confidence < 0.5 → Deny
-    .build()?;
+    .build();
 ```
 
 Default: `0.0` (only explicit Denys block). Strict mode: `0.8`.
 
-**Hot-path before and after:**
+## Chaining Example: LoggingPolicy + ScanDetector
 
-Before (current `FsServer::dispatch`, no policy):
+### Code
+
 ```rust
-fn dispatch(&self, mount: &MountState, op: &FsOp) -> FsResult {
-    if mount.read_only && is_write_op(op) {
-        return FsResult::Error { errno: libc::EROFS };
+// --- LoggingPolicy: always Allow, logs via OTel tracing ---
+pub struct LoggingPolicy;
+
+impl FsPolicy for LoggingPolicy {
+    fn on_op(&self, ctx: &FsOpContext) -> PolicyAction {
+        tracing::info!(
+            otel.kind = "INTERNAL",
+            otel.name = %format!("vfs.{:?}", ctx.op),
+            vfs.op = ?ctx.op,
+            vfs.tag = %ctx.tag,
+            vfs.path = %ctx.path,
+            vfs.overlay = ctx.is_overlay,
+            vfs.sensitive = ctx.is_sensitive,
+            "fs.op"
+        );
+        PolicyAction::Allow { reason: None, confidence: 1.0 }
     }
-    // execute immediately, no inspection
-    match op { ... }
+
+    fn on_complete(&self, ctx: &FsOpContext, result: &FsOpResult) -> PolicyAction {
+        tracing::info!(
+            otel.kind = "INTERNAL",
+            otel.name = %format!("vfs.{:?}", ctx.op),
+            otel.status_code = if result.success { "OK" } else { "ERROR" },
+            vfs.op = ?ctx.op,
+            vfs.tag = %ctx.tag,
+            vfs.path = %ctx.path,
+            vfs.bytes = ?result.bytes,
+            vfs.latency_us = result.latency.as_micros() as u64,
+            vfs.write_entropy = ?result.write_entropy,
+            "fs.op.complete"
+        );
+        PolicyAction::Allow { reason: None, confidence: 1.0 }
+    }
 }
-```
 
-After (with policy + threshold + emission):
-```rust
-fn dispatch(&self, mount: &MountState, op: &FsOp) -> FsResult {
-    if mount.read_only && is_write_op(op) {
-        return FsResult::Error { errno: libc::EROFS };
-    }
-    let ctx = self.build_context(mount, op);        // enrich from dispatch state
+// --- ScanDetector: flags high-rate metadata scanning ---
+pub struct ScanDetector;
 
-    // Step 1: policy chain (pure decision)
-    let action = self.policy.on_op(&ctx);            // ~50ns (chain)
-
-    // Step 2: apply threshold
-    let action = match action {
-        PolicyAction::Allow { confidence, reason } if confidence < self.deny_threshold => {
-            PolicyAction::Deny {
-                errno: libc::EACCES,
-                reason: reason.unwrap_or(PolicyReason::Custom("below threshold".into())),
-                confidence,
+impl FsPolicy for ScanDetector {
+    fn on_op(&self, ctx: &FsOpContext) -> PolicyAction {
+        // Dispatch layer pre-computed metadata_rate and unique_paths_in_window
+        if ctx.metadata_rate > 500 || ctx.unique_paths_in_window > 200 {
+            PolicyAction::Allow {
+                reason: Some(PolicyReason::Custom(
+                    format!("scan: {} ops/s, {} paths", ctx.metadata_rate,
+                            ctx.unique_paths_in_window).into()
+                )),
+                confidence: 0.3,  // suspicious but not blocking
             }
+        } else {
+            PolicyAction::Allow { reason: None, confidence: 1.0 }
         }
-        other => other,
-    };
-
-    // Step 3: emit (always Deny, uncertain Allow)
-    match &action {
-        PolicyAction::Deny { .. } => {
-            self.emit_policy_event(PolicyEvent::FsOp { ctx: ctx.clone(), action: action.clone() });
-        }
-        PolicyAction::Allow { confidence, .. } if *confidence < 1.0 => {
-            self.emit_policy_event(PolicyEvent::FsOp { ctx: ctx.clone(), action: action.clone() });
-        }
-        _ => {}
     }
 
-    // Step 4: enforce
-    match &action {
-        PolicyAction::Deny { errno, .. } => FsResult::Error { errno: *errno },
-        PolicyAction::Allow { .. } => {
-            let start = Instant::now();
-            let result = self.execute_op(mount, op);
-            let op_result = self.build_result(&result, start);
-
-            // Step 5: post-op (all policies see completions)
-            let post_action = self.policy.on_complete(&ctx, &op_result);
-            self.emit_policy_event(PolicyEvent::FsComplete {
-                ctx, result: op_result, action: post_action,
-            });
-
-            result
-        }
+    fn on_complete(&self, _ctx: &FsOpContext, _result: &FsOpResult) -> PolicyAction {
+        PolicyAction::Allow { reason: None, confidence: 1.0 }
     }
 }
+
+// --- Chain and configure ---
+let server = FsServer::builder()
+    .policy(
+        LoggingPolicy                    // logs every operation
+            .chain(ScanDetector)         // flags scanning patterns
+    )
+    .deny_threshold(0.5)
+    .policy_events(event_tx)
+    .build();
 ```
 
-When `P = NoPolicy` and `threshold = 0.0`, the compiler eliminates
-`build_context`, threshold check, `emit_policy_event`, and the match
-arms — `dispatch` compiles to the same code as "before."
+**Note:** `LoggingPolicy` goes first because it always returns
+`Allow { confidence: 1.0 }`. If `ScanDetector` were first and a future
+enforcement policy returned `Deny`, `LoggingPolicy` would never run.
+Putting the logger first ensures every operation is traced.
 
-## Generic Type Flow
+### Walkthrough: normal file read (known-good)
 
 ```
-FsServer<P: FsPolicy = NoPolicy>
-  → dispatch<P>()
-    → build FsOpContext (path, tag, overlay, rates, inode history)
-    → policy.on_op(&ctx)              // pure decision
-    → apply deny_threshold            // low-confidence Allow → Deny
-    → emit PolicyEvent::FsOp          // if Deny or uncertain Allow
-    → if Deny: return errno immediately
-    → execute operation
-    → build FsOpResult (success, errno, bytes, write_entropy, latency)
-    → policy.on_complete(&ctx, &result)  // post-op (all policies see)
-    → emit PolicyEvent::FsComplete       // if Deny or uncertain Allow
-    → emit_event()                     // enriched FsEvent
+1. LoggingPolicy.on_op(ctx { op: Read, path: "/src/main.rs", metadata_rate: 5 })
+   → tracing::info!(vfs.op = Read, vfs.path = "/src/main.rs", ...)
+   → returns Allow { confidence: 1.0 }
+
+2. ScanDetector.on_op(ctx)
+   → metadata_rate 5 < 500 and unique_paths 3 < 200
+   → returns Allow { confidence: 1.0 }
+
+3. Chain merges: both Allow { 1.0 }, min = 1.0
+   → composite: Allow { reason: None, confidence: 1.0 }
+
+4. PolicyEvaluator.apply_threshold: Allow 1.0 ≥ any threshold → pass through
+
+5. PolicyEvaluator.emit: confidence 1.0 → NOT emitted (not interesting)
+
+6. FsServer: execute_op → read file → return data to guest
+```
+
+### Walkthrough: rapid directory scanning (suspicious)
+
+```
+1. LoggingPolicy.on_op(ctx { op: Lookup, path: "/.ssh/id_rsa", metadata_rate: 800 })
+   → tracing::info!(vfs.op = Lookup, vfs.path = "/.ssh/id_rsa", ...)
+   → returns Allow { confidence: 1.0 }
+
+2. ScanDetector.on_op(ctx)
+   → metadata_rate 800 > 500
+   → returns Allow { reason: Custom("scan: 800 ops/s, 150 paths"), confidence: 0.3 }
+
+3. Chain merges: Allow 1.0 vs Allow 0.3, min = 0.3
+   → composite: Allow { reason: Custom("scan: 800 ops/s, 150 paths"), confidence: 0.3 }
+   → reason from ScanDetector (weakest link)
+
+4. PolicyEvaluator.apply_threshold(0.5):
+   → confidence 0.3 < threshold 0.5? → YES
+   → converted to: Deny { errno: EACCES, reason: Custom("scan: 800 ops/s..."), confidence: 0.3 }
+
+5. PolicyEvaluator.emit: Deny → always emitted
+   → PolicyEvent::FsOp { ctx, action: Deny { scan pattern, 0.3 } }
+   → correlator receives: "rapid scanning pattern detected, 800 ops/s"
+
+6. FsServer: return FsResult::Error { errno: EACCES } to guest
+   Guest sees: Lookup of /.ssh/id_rsa → Permission denied
+```
+
+### Walkthrough: write to temp directory (staging detection via on_complete)
+
+```
+1. LoggingPolicy.on_op(ctx { op: Write, path: "/tmp/payload.bin" })
+   → tracing::info!(...)
+   → returns Allow { confidence: 1.0 }
+
+2. ScanDetector.on_op(ctx)
+   → metadata_rate 10 < 500 → normal
+   → returns Allow { confidence: 1.0 }
+
+3. Chain merges: Allow { 1.0 }
+
+4. Threshold: passes. Emit: not interesting (confidence 1.0).
+
+5. FsServer: execute_op → write succeeds
+
+6. PolicyEvaluator.complete(ctx, result { write_entropy: Some(4.8), bytes: Some(5_000_000) })
+   
+   LoggingPolicy.on_complete(ctx, result)
+   → tracing::info!(vfs.write_entropy = 4.8, vfs.bytes = 5000000, ...)
+   → returns Allow { confidence: 1.0 }
+
+   ScanDetector.on_complete(ctx, result)
+   → returns Allow { confidence: 1.0 }
+
+   (A StagingDetector in the chain would see write_entropy 4.8 + /tmp/ path
+   and return Allow { confidence: 0.2 } — but ScanDetector doesn't check writes)
+
+7. Emit: post-op Allow 1.0 → not emitted.
+   (If StagingDetector were chained, confidence 0.2 → would be emitted)
 ```
 
 ## Enriched FsEvent
