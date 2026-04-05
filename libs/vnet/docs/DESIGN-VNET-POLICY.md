@@ -6,6 +6,7 @@
 |------|-----|---------|
 | 2026-04-05 | @claude-tl | Add connection timeline framework: 3-phase detection (DNS intent → handshake → flow), technique tables with API mapping, JA3/beacon gaps documented |
 | 2026-04-05 | @claude-tl | Add DNS exfiltration detection use case, label_lengths/name_wire_len in DnsQueryContext, defense-in-depth rationale |
+| 2026-04-05 | @claude-tl | PolicyEvaluator plumbing: builder→config→slirp thread, chaining examples with step-by-step walkthroughs (known-bad, unknown, known-good), correct zero-cost claims |
 | 2026-04-05 | @claude-tl | Add confidence to PolicyAction (min-propagation in chains), InterceptPolicy with ArcSwap (latency analysis), PolicyEvent enum at call site, remove EventSinkPolicy |
 | 2026-04-05 | @claude-tl | Add network metadata gaps: IP TTL, TCP window/options, DNS counts, MAC verification, guest PID parallel gap with vfs, priority assessment |
 | 2026-04-05 | @claude-tl | Add errno to PolicyAction, predefined errno pairs, OTel logging, EventSinkPolicy, cross-stack alignment with vfs, chain returns impl EgressPolicy |
@@ -1372,41 +1373,356 @@ Example correlation signals (host runtime concern, not vnet):
 The vnet DESIGN requirement: **context types must be `Clone + Send`** so
 the event sink policy can transport them across thread boundaries.
 
-## Generic Type Flow
+## PolicyEvaluator and Plumbing
 
-The policy type parameter flows through the entire stack:
+### PolicyEvaluator
 
-```
-VnetConfig<P>           // P = NoPolicy | LoggingPolicy | impl EgressPolicy (chained)
-  → VnetBackend<P>
-    → slirp_thread_main<P>()
-      → TxInterceptor<P>   // owns the policy, calls on_dns_query/on_tcp_connect
-      → RxInterceptor<P>   // borrows the policy, calls on_dns_response
-```
-
-`VnetConfig` defaults to `NoPolicy`:
+The runtime bundle that sits between the handler and the policy chain.
+Owns the chain, the threshold, and the event channel. The handler calls
+`evaluate_dns()` / `evaluate_tcp()` / `evaluate_flow()` — everything
+else (threshold, emission) is internal to the evaluator.
 
 ```rust
-impl VnetConfig<NoPolicy> {
-    pub fn builder() -> VnetConfigBuilder<NoPolicy> { ... }
+pub struct PolicyEvaluator<P: EgressPolicy> {
+    policy: P,
+    deny_threshold: f64,
+    event_tx: Option<mpsc::Sender<PolicyEvent>>,
 }
 
-impl<P: EgressPolicy> VnetConfigBuilder<P> {
-    pub fn egress_policy<Q: EgressPolicy>(self, policy: Q) -> VnetConfigBuilder<Q> {
-        // Replaces the policy type — builder returns a new generic variant
-        VnetConfigBuilder {
-            policy,
-            socket_path: self.socket_path,
-            // ... copy other fields
+impl<P: EgressPolicy> PolicyEvaluator<P> {
+    pub fn evaluate_dns(&self, ctx: &DnsQueryContext) -> PolicyAction {
+        let action = self.policy.on_dns_query(ctx);
+        let action = self.apply_threshold(action);
+        self.emit(PolicyEvent::DnsQuery { ctx: ctx.clone(), action: action.clone() }, &action);
+        action
+    }
+
+    pub fn evaluate_tcp(&self, ctx: &TcpConnectContext) -> PolicyAction {
+        let action = self.policy.on_tcp_connect(ctx);
+        let action = self.apply_threshold(action);
+        self.emit(PolicyEvent::TcpConnect { ctx: ctx.clone(), action: action.clone() }, &action);
+        action
+    }
+
+    pub fn evaluate_flow(&self, ctx: &TcpFlowContext) -> PolicyAction {
+        let action = self.policy.on_tcp_flow(ctx);
+        // No threshold on flow — connection already established.
+        self.emit(PolicyEvent::TcpFlow { ctx: ctx.clone(), action: action.clone() }, &action);
+        action
+    }
+
+    fn apply_threshold(&self, action: PolicyAction) -> PolicyAction {
+        match action {
+            PolicyAction::Allow { confidence, reason } if confidence < self.deny_threshold => {
+                PolicyAction::Deny {
+                    errno: libc::EHOSTUNREACH,
+                    reason: reason.unwrap_or(PolicyReason::Custom("below threshold".into())),
+                    confidence,
+                }
+            }
+            other => other,
+        }
+    }
+
+    fn emit(&self, event: PolicyEvent, action: &PolicyAction) {
+        if let Some(ref tx) = self.event_tx {
+            let dominated = match action {
+                PolicyAction::Deny { .. } => true,
+                PolicyAction::Allow { confidence, .. } => *confidence < 1.0,
+            };
+            if dominated {
+                let _ = tx.try_send(event);
+            }
         }
     }
 }
 ```
 
-When `P = NoPolicy`, the compiler sees that all interceptor methods
-return `Allow { reason: None }` and optimizes away the parsing, the
-reverse map lookup, and the response forging code. The slirp thread
-loop compiles to the same machine code as the no-policy path.
+### Builder → VnetConfig → slirp thread
+
+```rust
+// Builder:
+pub struct VnetConfigBuilder<P: EgressPolicy = NoPolicy> {
+    socket_path: Option<PathBuf>,
+    policy: P,
+    deny_threshold: f64,
+    event_tx: Option<mpsc::Sender<PolicyEvent>>,
+    // ... other network config ...
+}
+
+impl VnetConfigBuilder<NoPolicy> {
+    pub fn new() -> Self {
+        Self {
+            socket_path: None,
+            policy: NoPolicy,
+            deny_threshold: 0.0,
+            event_tx: None,
+        }
+    }
+}
+
+impl<P: EgressPolicy> VnetConfigBuilder<P> {
+    /// Set the policy chain. Changes the generic parameter.
+    pub fn egress_policy<Q: EgressPolicy>(self, policy: Q) -> VnetConfigBuilder<Q> {
+        VnetConfigBuilder {
+            policy,
+            deny_threshold: self.deny_threshold,
+            event_tx: self.event_tx,
+            socket_path: self.socket_path,
+        }
+    }
+
+    pub fn deny_threshold(mut self, threshold: f64) -> Self {
+        self.deny_threshold = threshold;
+        self
+    }
+
+    pub fn policy_events(mut self, tx: mpsc::Sender<PolicyEvent>) -> Self {
+        self.event_tx = Some(tx);
+        self
+    }
+
+    pub fn build(self) -> Result<VnetConfig<P>, VnetError> {
+        let policy_evaluator = if /* P is NoPolicy and no threshold and no events */ {
+            None  // truly nothing to do
+        } else {
+            Some(PolicyEvaluator {
+                policy: self.policy,
+                deny_threshold: self.deny_threshold,
+                event_tx: self.event_tx,
+            })
+        };
+
+        Ok(VnetConfig {
+            socket_path: self.socket_path.unwrap(),
+            policy_evaluator,
+            // ... other fields
+        })
+    }
+}
+
+// VnetConfig stores the evaluator:
+pub struct VnetConfig<P: EgressPolicy = NoPolicy> {
+    pub socket_path: PathBuf,
+    pub policy_evaluator: Option<PolicyEvaluator<P>>,
+    // ... guest_ipv4, host_ipv4, mac, etc ...
+}
+```
+
+### Slirp thread integration
+
+```rust
+fn slirp_thread_main<P: EgressPolicy>(
+    evaluator: Option<&PolicyEvaluator<P>>,
+    tx_receiver: mpsc::Receiver<Vec<u8>>,
+    rx_sender: mpsc::Sender<Vec<u8>>,
+    slirp: &SlirpInstance,
+    // ... shutdown, rx_eventfd ...
+) {
+    while let Ok(frame) = tx_receiver.try_recv() {
+        if let Some(eval) = evaluator {
+            match parse_frame(&frame) {
+                ParsedPacket::DnsQuery(ctx) => {
+                    let action = eval.evaluate_dns(&ctx);
+                    match action {
+                        PolicyAction::Deny { errno, .. } => {
+                            let resp = forge_nxdomain(&frame, errno);
+                            let _ = rx_sender.send(resp);
+                        }
+                        PolicyAction::Allow { .. } => slirp.input(&frame),
+                    }
+                }
+                ParsedPacket::TcpSyn(ctx) => {
+                    let action = eval.evaluate_tcp(&ctx);
+                    match action {
+                        PolicyAction::Deny { .. } => {
+                            let resp = forge_tcp_rst(&frame);
+                            let _ = rx_sender.send(resp);
+                        }
+                        PolicyAction::Allow { .. } => slirp.input(&frame),
+                    }
+                }
+                ParsedPacket::Other => slirp.input(&frame),
+            }
+        } else {
+            slirp.input(&frame);  // no evaluator — zero overhead
+        }
+    }
+}
+```
+
+When `policy_evaluator` is `None`, the `if let Some` branch is a single
+null-pointer check (~1ns). The parse, threshold, and emission code never
+executes.
+
+## Chaining Example: LoggingPolicy + CategoryPolicy
+
+### Code
+
+```rust
+// --- LoggingPolicy: always Allow, logs via OTel tracing ---
+pub struct LoggingPolicy;
+
+impl EgressPolicy for LoggingPolicy {
+    fn on_dns_query(&self, ctx: &DnsQueryContext) -> PolicyAction {
+        tracing::info!(
+            otel.kind = "CLIENT",
+            otel.name = "vnet.dns.query",
+            net.host.name = %ctx.domain,
+            net.protocol.name = "dns",
+            dns.query_type = ?ctx.query_type,
+            dns.label_count = ctx.label_lengths.len(),
+            dns.name_wire_len = ctx.name_wire_len,
+            "dns.query"
+        );
+        PolicyAction::Allow { reason: None, confidence: 1.0 }
+    }
+
+    fn on_tcp_connect(&self, ctx: &TcpConnectContext) -> PolicyAction {
+        tracing::info!(
+            otel.kind = "CLIENT",
+            otel.name = "vnet.tcp.connect",
+            net.peer.ip = %ctx.dst_ip,
+            net.peer.port = ctx.dst_port,
+            net.host.name = ?ctx.domain,
+            "tcp.connect"
+        );
+        PolicyAction::Allow { reason: None, confidence: 1.0 }
+    }
+
+    fn on_tcp_flow(&self, ctx: &TcpFlowContext) -> PolicyAction {
+        tracing::info!(
+            otel.kind = "CLIENT",
+            otel.name = "vnet.tcp.flow",
+            net.peer.ip = %ctx.dst_ip,
+            net.peer.port = ctx.dst_port,
+            net.host.name = ?ctx.domain,
+            net.tls.sni = ?ctx.sni,
+            net.bytes.tx = ctx.bytes_tx,
+            net.bytes.rx = ctx.bytes_rx,
+            net.duration_ms = ctx.duration.as_millis() as u64,
+            "tcp.flow"
+        );
+        PolicyAction::Allow { reason: None, confidence: 1.0 }
+    }
+}
+
+// --- CategoryPolicy: classifies domains, decides Allow/Deny ---
+pub struct CategoryPolicy { rules: Vec<CategoryRule> }
+
+impl EgressPolicy for CategoryPolicy {
+    fn on_dns_query(&self, ctx: &DnsQueryContext) -> PolicyAction {
+        match self.categorize(&ctx.domain) {
+            DomainCategory::PackageManager => PolicyAction::Allow {
+                reason: Some(PolicyReason::Category(DomainCategory::PackageManager)),
+                confidence: 1.0,
+            },
+            DomainCategory::AdNetwork => PolicyAction::Deny {
+                errno: libc::EHOSTUNREACH,
+                reason: PolicyReason::Category(DomainCategory::AdNetwork),
+                confidence: 1.0,
+            },
+            DomainCategory::Unknown => PolicyAction::Allow {
+                reason: Some(PolicyReason::Category(DomainCategory::Unknown)),
+                confidence: 0.5,
+            },
+        }
+    }
+    // on_tcp_connect, on_tcp_flow: similar pattern
+}
+
+// --- Chain and configure ---
+let config = VnetConfig::builder()
+    .socket_path("/tmp/motlie-vnet-0.sock")
+    .egress_policy(
+        LoggingPolicy                          // logs every operation
+            .chain(CategoryPolicy::default())  // classifies and decides
+    )
+    .deny_threshold(0.5)
+    .build()?;
+```
+
+**Note:** `LoggingPolicy` goes first because it always returns
+`Allow { confidence: 1.0 }`. If `CategoryPolicy` were first and returned
+`Deny`, `LoggingPolicy` would never run (Deny short-circuits). Putting
+the logger first ensures every operation is traced regardless of outcome.
+
+### Walkthrough: DNS query for `doubleclick.net` (known-bad)
+
+```
+1. LoggingPolicy.on_dns_query(ctx)
+   → tracing::info!(net.host.name = "doubleclick.net", ...)
+   → returns Allow { confidence: 1.0 }
+
+2. CategoryPolicy.on_dns_query(ctx)
+   → categorize("doubleclick.net") = AdNetwork
+   → returns Deny { errno: EHOSTUNREACH, reason: Category(AdNetwork), confidence: 1.0 }
+
+3. Chain merges: first Deny wins
+   → composite: Deny { errno: EHOSTUNREACH, reason: Category(AdNetwork), confidence: 1.0 }
+
+4. PolicyEvaluator.apply_threshold: Deny passes through unchanged
+
+5. PolicyEvaluator.emit: Deny → always emitted to correlator
+   → PolicyEvent::DnsQuery { ctx, action: Deny { AdNetwork, 1.0 } }
+
+6. Slirp thread: forge NXDOMAIN response → inject into guest rx path
+   Guest sees: DNS lookup for doubleclick.net → NXDOMAIN
+```
+
+### Walkthrough: DNS query for `suspicious-cdn.xyz` (unknown)
+
+```
+1. LoggingPolicy.on_dns_query(ctx)
+   → tracing::info!(net.host.name = "suspicious-cdn.xyz", ...)
+   → returns Allow { confidence: 1.0 }
+
+2. CategoryPolicy.on_dns_query(ctx)
+   → categorize("suspicious-cdn.xyz") = Unknown
+   → returns Allow { reason: Category(Unknown), confidence: 0.5 }
+
+3. Chain merges: both Allow, take min confidence
+   → LoggingPolicy had 1.0, CategoryPolicy had 0.5
+   → composite: Allow { reason: Category(Unknown), confidence: 0.5 }
+   → reason from CategoryPolicy (it had the lower confidence = weakest link)
+
+4. PolicyEvaluator.apply_threshold(0.5):
+   → confidence 0.5 < threshold 0.5? → 0.5 < 0.5 is FALSE (strict less-than)
+   → Allow passes through unchanged
+   (if threshold were 0.6: this would become Deny { errno: EHOSTUNREACH,
+    reason: Category(Unknown), confidence: 0.5 })
+
+5. PolicyEvaluator.emit: Allow with confidence 0.5 < 1.0 → emitted
+   → PolicyEvent::DnsQuery { ctx, action: Allow { Category(Unknown), 0.5 } }
+   → correlator receives: "suspicious-cdn.xyz allowed at 0.5 confidence
+     because CategoryPolicy classified it as Unknown"
+
+6. Slirp thread: slirp.input(&frame) — query proceeds to host resolver
+   Guest sees: DNS lookup for suspicious-cdn.xyz → resolves normally
+```
+
+### Walkthrough: DNS query for `archive.ubuntu.com` (known-good)
+
+```
+1. LoggingPolicy.on_dns_query(ctx)
+   → tracing::info!(net.host.name = "archive.ubuntu.com", ...)
+   → returns Allow { confidence: 1.0 }
+
+2. CategoryPolicy.on_dns_query(ctx)
+   → categorize("archive.ubuntu.com") = PackageManager
+   → returns Allow { reason: Category(PackageManager), confidence: 1.0 }
+
+3. Chain merges: both Allow { 1.0 }, min = 1.0
+   → composite: Allow { reason: Category(PackageManager), confidence: 1.0 }
+
+4. PolicyEvaluator.apply_threshold: Allow 1.0 >= any threshold → passes through
+
+5. PolicyEvaluator.emit: Allow with confidence 1.0 → NOT emitted (not interesting)
+
+6. Slirp thread: slirp.input(&frame) — query proceeds
+   Guest sees: DNS lookup for archive.ubuntu.com → resolves normally
+   Correlator sees: nothing (confident Allow skipped)
+```
 
 ## Domain→IP Reverse Map
 
