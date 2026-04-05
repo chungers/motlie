@@ -1,6 +1,6 @@
 //! FsServer and FsServerBuilder: tag-based mount routing and handle_op() dispatch.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[cfg(unix)]
 use std::ffi::CString;
 #[cfg(unix)]
@@ -8,7 +8,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
 use anyhow::{anyhow, Result};
@@ -28,6 +28,25 @@ struct FileLock {
     typ: i32,
     pid: u32,
     owner: u64,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+enum LockKey {
+    Path(String, String),
+    DiskFile { dev: u64, ino: u64 },
+}
+
+enum FhBacking {
+    Overlay,
+    Disk(Arc<Mutex<fs::File>>),
+}
+
+struct FhEntry {
+    tag: String,
+    path: String,
+    backing: FhBacking,
+    lock_key: LockKey,
+    lock_owners: HashSet<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -104,10 +123,10 @@ pub struct FsServer {
     overlay: Option<MemOverlay>,
     /// Monotonic counter for synthetic file handles (overlay-backed opens).
     next_fh: AtomicU64,
-    /// Maps synthetic fh → (tag, mount-relative path) for overlay-backed files.
-    fh_table: Mutex<HashMap<u64, (String, String)>>,
+    /// Maps synthetic fh → open-handle metadata for overlay and disk-backed files.
+    fh_table: Mutex<HashMap<u64, FhEntry>>,
     /// In-process POSIX-style byte-range locks keyed by (mount tag, path).
-    lock_table: Mutex<HashMap<(String, String), Vec<FileLock>>>,
+    lock_table: Mutex<HashMap<LockKey, Vec<FileLock>>>,
 }
 
 pub struct FsServerBuilder {
@@ -272,7 +291,9 @@ impl FsServer {
             FsOp::Open { inode, flags } => self.do_open(mount, *inode, *flags),
             FsOp::Read { inode: _, fh, offset, size } => self.do_read(mount, *fh, *offset, *size),
             FsOp::Write { inode: _, fh, offset, data } => self.do_write(mount, *fh, *offset, data),
-            FsOp::Create { parent, name, mode, flags: _, uid, gid } => self.do_create(mount, *parent, name, *mode, *uid, *gid),
+            FsOp::Create { parent, name, mode, flags, uid, gid } => {
+                self.do_create(mount, *parent, name, *mode, *flags, *uid, *gid)
+            }
             FsOp::Mkdir { parent, name, mode, uid, gid } => self.do_mkdir(mount, *parent, name, *mode, *uid, *gid),
             FsOp::Unlink { parent, name } => self.do_unlink(mount, *parent, name),
             FsOp::Rmdir { parent, name } => self.do_rmdir(mount, *parent, name),
@@ -339,16 +360,21 @@ impl FsServer {
     fn update_runtime_paths_after_rename(&self, tag: &str, src_path: &str, dst_path: &str) {
         {
             let mut fh_table = self.fh_table.lock();
-            for (entry_tag, entry_path) in fh_table.values_mut() {
-                if entry_tag == tag && entry_path == src_path {
-                    *entry_path = dst_path.to_string();
+            for entry in fh_table.values_mut() {
+                if entry.tag == tag && entry.path == src_path {
+                    entry.path = dst_path.to_string();
+                    if let LockKey::Path(entry_tag, entry_path) = &mut entry.lock_key {
+                        if entry_tag == tag && entry_path == src_path {
+                            *entry_path = dst_path.to_string();
+                        }
+                    }
                 }
             }
         }
 
         let mut lock_table = self.lock_table.lock();
-        let src_key = (tag.to_string(), src_path.to_string());
-        let dst_key = (tag.to_string(), dst_path.to_string());
+        let src_key = LockKey::Path(tag.to_string(), src_path.to_string());
+        let dst_key = LockKey::Path(tag.to_string(), dst_path.to_string());
         lock_table.remove(&dst_key);
         if let Some(mut moved) = lock_table.remove(&src_key) {
             lock_table.insert(dst_key, std::mem::take(&mut moved));
@@ -366,10 +392,16 @@ impl FsServer {
         }
     }
 
-    fn lock_key_for_inode(&self, mount: &MountState, inode: u64) -> Result<(String, String), i32> {
+    fn lock_key_for_request(&self, mount: &MountState, inode: u64, fh: u64) -> Result<LockKey, i32> {
+        if fh != 0 {
+            let fh_table = self.fh_table.lock();
+            if let Some(entry) = fh_table.get(&fh) {
+                return Ok(entry.lock_key.clone());
+            }
+        }
         let table = mount.inode_table.lock();
         match table.get(inode) {
-            Some(entry) => Ok((mount.tag.clone(), entry.path.clone())),
+            Some(entry) => Ok(LockKey::Path(mount.tag.clone(), entry.path.clone())),
             None => Err(libc::ENOENT),
         }
     }
@@ -469,7 +501,7 @@ impl FsServer {
         typ: i32,
         _pid: u32,
     ) -> FsResult {
-        let lock_key = match self.lock_key_for_inode(mount, inode) {
+        let lock_key = match self.lock_key_for_request(mount, inode, _fh) {
             Ok(key) => key,
             Err(errno) => return FsResult::Error { errno },
         };
@@ -507,7 +539,7 @@ impl FsServer {
         pid: u32,
         sleep: bool,
     ) -> FsResult {
-        let lock_key = match self.lock_key_for_inode(mount, inode) {
+        let lock_key = match self.lock_key_for_request(mount, inode, _fh) {
             Ok(key) => key,
             Err(errno) => return FsResult::Error { errno },
         };
@@ -534,6 +566,14 @@ impl FsServer {
             pid,
             owner: lock_owner,
         });
+        drop(table);
+
+        if _fh != 0 {
+            let mut fh_table = self.fh_table.lock();
+            if let Some(entry) = fh_table.get_mut(&_fh) {
+                entry.lock_owners.insert(lock_owner);
+            }
+        }
         FsResult::Ok
     }
 
@@ -779,33 +819,71 @@ impl FsServer {
         FsResult::DirEntries { entries }
     }
 
-    fn do_open(&self, mount: &MountState, inode: u64, _flags: u32) -> FsResult {
+    fn do_open(&self, mount: &MountState, inode: u64, flags: u32) -> FsResult {
         let table = mount.inode_table.lock();
         let entry = match table.get(inode) {
             Some(e) => e,
             None => return FsResult::Error { errno: libc::ENOENT },
         };
+        let path = entry.path.clone();
+        let host_path = entry.host_path.clone();
+        drop(table);
 
         let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
 
-        if entry.host_path.is_none() {
-            // Overlay-backed: track in fh_table for overlay read/write path
-            self.fh_table.lock().insert(fh, (mount.tag.clone(), entry.path.clone()));
-        } else {
-            // Disk-backed: track inode for disk read/write fallback (fh == counter, not inode)
-            self.fh_table.lock().insert(fh, (mount.tag.clone(), entry.path.clone()));
-        }
+        let fh_entry = match host_path {
+            Some(host_path) => {
+                let file = match open_disk_handle(&host_path, flags) {
+                    Ok(file) => file,
+                    Err(e) => return FsResult::Error { errno: io_errno(&e) },
+                };
+                let lock_key = match disk_lock_key_for_file(&file, &host_path) {
+                    Ok(lock_key) => lock_key,
+                    Err(e) => return FsResult::Error { errno: io_errno(&e) },
+                };
+                FhEntry {
+                    tag: mount.tag.clone(),
+                    path,
+                    backing: FhBacking::Disk(Arc::new(Mutex::new(file))),
+                    lock_key,
+                    lock_owners: HashSet::new(),
+                }
+            }
+            None => FhEntry {
+                tag: mount.tag.clone(),
+                path: path.clone(),
+                backing: FhBacking::Overlay,
+                lock_key: LockKey::Path(mount.tag.clone(), path),
+                lock_owners: HashSet::new(),
+            },
+        };
+
+        self.fh_table.lock().insert(fh, fh_entry);
 
         FsResult::Opened { fh }
     }
 
     fn do_read(&self, mount: &MountState, fh: u64, offset: i64, size: u32) -> FsResult {
         let fh_map = self.fh_table.lock();
-        let (tag, path) = match fh_map.get(&fh) {
-            Some(tp) => (tp.0.clone(), tp.1.clone()),
+        let (tag, path, backing) = match fh_map.get(&fh) {
+            Some(entry) => (
+                entry.tag.clone(),
+                entry.path.clone(),
+                match &entry.backing {
+                    FhBacking::Overlay => None,
+                    FhBacking::Disk(file) => Some(file.clone()),
+                },
+            ),
             None => return FsResult::Error { errno: libc::EBADF },
         };
         drop(fh_map);
+
+        if let Some(file) = backing {
+            match read_file_handle_range(&file, offset, size) {
+                Ok(data) => return FsResult::Data { data: data.into() },
+                Err(e) => return FsResult::Error { errno: io_errno(&e) },
+            }
+        }
 
         // Check overlay first
         if let Some(overlay) = &self.overlay {
@@ -826,11 +904,25 @@ impl FsServer {
 
     fn do_write(&self, mount: &MountState, fh: u64, offset: i64, data: &bytes::Bytes) -> FsResult {
         let fh_map = self.fh_table.lock();
-        let (tag, path) = match fh_map.get(&fh) {
-            Some(tp) => (tp.0.clone(), tp.1.clone()),
+        let (tag, path, backing) = match fh_map.get(&fh) {
+            Some(entry) => (
+                entry.tag.clone(),
+                entry.path.clone(),
+                match &entry.backing {
+                    FhBacking::Overlay => None,
+                    FhBacking::Disk(file) => Some(file.clone()),
+                },
+            ),
             None => return FsResult::Error { errno: libc::EBADF },
         };
         drop(fh_map);
+
+        if let Some(file) = backing {
+            return match write_file_handle_range(&file, offset, data) {
+                Ok(n) => FsResult::Written { size: n },
+                Err(e) => FsResult::Error { errno: io_errno(&e) },
+            };
+        }
 
         // Check overlay first
         if let Some(overlay) = &self.overlay {
@@ -854,7 +946,7 @@ impl FsServer {
         }
     }
 
-    fn do_create(&self, mount: &MountState, parent: u64, name: &str, mode: u32, uid: u32, gid: u32) -> FsResult {
+    fn do_create(&self, mount: &MountState, parent: u64, name: &str, mode: u32, flags: u32, uid: u32, gid: u32) -> FsResult {
         let parent_path = {
             let table = mount.inode_table.lock();
             match table.get(parent) {
@@ -878,18 +970,27 @@ impl FsServer {
                         kind: FileType::RegularFile, mode, nlink: 1, uid, gid,
                     };
                     let mut table = mount.inode_table.lock();
-                    match table.allocate(&rel_path, InodeKind::Content, None, file_attrs.clone()) {
-                        Ok(inode) => {
-                            let gen = table.get(inode).map(|e| e.generation).unwrap_or(0);
-                            let final_attrs = table.get(inode).map(|e| e.attrs.clone()).unwrap_or(file_attrs);
-                            // Allocate fh — create is atomic create+open in FUSE
-                            let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
-                            self.fh_table.lock().insert(fh, (mount.tag.clone(), rel_path));
-                            return FsResult::Created { inode, generation: gen, attrs: final_attrs, fh, ttl_secs: 0 };
-                        }
-                        Err(_) => return FsResult::Error { errno: libc::EIO },
-                    };
-                }
+                        match table.allocate(&rel_path, InodeKind::Content, None, file_attrs.clone()) {
+                            Ok(inode) => {
+                                let gen = table.get(inode).map(|e| e.generation).unwrap_or(0);
+                                let final_attrs = table.get(inode).map(|e| e.attrs.clone()).unwrap_or(file_attrs);
+                                // Allocate fh — create is atomic create+open in FUSE
+                                let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
+                                self.fh_table.lock().insert(
+                                    fh,
+                                    FhEntry {
+                                        tag: mount.tag.clone(),
+                                        path: rel_path.clone(),
+                                        backing: FhBacking::Overlay,
+                                        lock_key: LockKey::Path(mount.tag.clone(), rel_path),
+                                        lock_owners: HashSet::new(),
+                                    },
+                                );
+                                return FsResult::Created { inode, generation: gen, attrs: final_attrs, fh, ttl_secs: 0 };
+                            }
+                            Err(_) => return FsResult::Error { errno: libc::EIO },
+                        };
+                    }
             }
         }
 
@@ -903,12 +1004,29 @@ impl FsServer {
                         let mut attrs = metadata_to_attrs(&meta, 0, FileType::RegularFile);
                         apply_owner_override(&mut attrs, mount.owner_override);
                         let mut table = mount.inode_table.lock();
-                        match table.allocate(&rel_path, InodeKind::Disk, Some(host_path), attrs.clone()) {
+                        match table.allocate(&rel_path, InodeKind::Disk, Some(host_path.clone()), attrs.clone()) {
                             Ok(inode) => {
                                 let gen = table.get(inode).map(|e| e.generation).unwrap_or(0);
                                 let final_attrs = table.get(inode).map(|e| e.attrs.clone()).unwrap_or(attrs);
                                 let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
-                                self.fh_table.lock().insert(fh, (mount.tag.clone(), rel_path));
+                                let file = match open_disk_handle(&host_path, flags) {
+                                    Ok(file) => file,
+                                    Err(e) => return FsResult::Error { errno: io_errno(&e) },
+                                };
+                                let lock_key = match disk_lock_key_for_file(&file, &host_path) {
+                                    Ok(lock_key) => lock_key,
+                                    Err(e) => return FsResult::Error { errno: io_errno(&e) },
+                                };
+                                self.fh_table.lock().insert(
+                                    fh,
+                                    FhEntry {
+                                        tag: mount.tag.clone(),
+                                        path: rel_path,
+                                        backing: FhBacking::Disk(Arc::new(Mutex::new(file))),
+                                        lock_key,
+                                        lock_owners: HashSet::new(),
+                                    },
+                                );
                                 FsResult::Created { inode, generation: gen, attrs: final_attrs, fh, ttl_secs: 0 }
                             }
                             Err(_) => FsResult::Error { errno: libc::EIO },
@@ -1225,17 +1343,45 @@ impl FsServer {
     }
 
     fn do_release(&self, fh: u64) -> FsResult {
-        self.fh_table.lock().remove(&fh);
+        let removed = self.fh_table.lock().remove(&fh);
+        if let Some(entry) = removed {
+            if !entry.lock_owners.is_empty() {
+                let mut lock_table = self.lock_table.lock();
+                let remove_key = if let Some(locks) = lock_table.get_mut(&entry.lock_key) {
+                    locks.retain(|lock| !entry.lock_owners.contains(&lock.owner));
+                    locks.is_empty()
+                } else {
+                    false
+                };
+                if remove_key {
+                    lock_table.remove(&entry.lock_key);
+                }
+            }
+        }
         FsResult::Ok
     }
 
     fn do_fsync(&self, mount: &MountState, fh: u64) -> FsResult {
         let fh_map = self.fh_table.lock();
-        let (_tag, path) = match fh_map.get(&fh) {
-            Some(tp) => (tp.0.clone(), tp.1.clone()),
+        let (_tag, path, backing) = match fh_map.get(&fh) {
+            Some(entry) => (
+                entry.tag.clone(),
+                entry.path.clone(),
+                match &entry.backing {
+                    FhBacking::Overlay => None,
+                    FhBacking::Disk(file) => Some(file.clone()),
+                },
+            ),
             None => return FsResult::Error { errno: libc::EBADF },
         };
         drop(fh_map);
+
+        if let Some(file) = backing {
+            return match fsync_file_handle(&file) {
+                Ok(()) => FsResult::Ok,
+                Err(errno) => FsResult::Error { errno },
+            };
+        }
 
         if let Some(overlay) = &self.overlay {
             if overlay.resolve(&mount.tag, &path).is_some() {
@@ -1618,6 +1764,68 @@ fn write_file_range(path: &Path, offset: i64, data: &[u8]) -> std::io::Result<u3
     Ok(data.len() as u32)
 }
 
+fn open_disk_handle(path: &Path, flags: u32) -> std::io::Result<fs::File> {
+    let accmode = (flags as i32) & libc::O_ACCMODE;
+    let mut opts = fs::OpenOptions::new();
+    match accmode {
+        libc::O_WRONLY => {
+            opts.write(true);
+        }
+        libc::O_RDWR => {
+            opts.read(true).write(true);
+        }
+        _ => {
+            opts.read(true);
+        }
+    }
+    opts.open(path).or_else(|_| fs::OpenOptions::new().read(true).write(true).open(path))
+}
+
+fn read_file_handle_range(file: &Arc<Mutex<fs::File>>, offset: i64, size: u32) -> std::io::Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = file.lock();
+    if offset > 0 {
+        file.seek(SeekFrom::Start(offset as u64))?;
+    } else {
+        file.seek(SeekFrom::Start(0))?;
+    }
+    let mut buf = vec![0u8; size as usize];
+    let n = file.read(&mut buf)?;
+    buf.truncate(n);
+    Ok(buf)
+}
+
+fn write_file_handle_range(file: &Arc<Mutex<fs::File>>, offset: i64, data: &[u8]) -> std::io::Result<u32> {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut file = file.lock();
+    if offset > 0 {
+        file.seek(SeekFrom::Start(offset as u64))?;
+    } else {
+        file.seek(SeekFrom::Start(0))?;
+    }
+    file.write_all(data)?;
+    Ok(data.len() as u32)
+}
+
+fn fsync_file_handle(file: &Arc<Mutex<fs::File>>) -> Result<(), i32> {
+    file.lock().sync_all().map_err(|e| io_errno(&e))
+}
+
+#[cfg(unix)]
+fn disk_lock_key_for_file(file: &fs::File, _path: &Path) -> std::io::Result<LockKey> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = file.metadata()?;
+    Ok(LockKey::DiskFile {
+        dev: meta.dev(),
+        ino: meta.ino(),
+    })
+}
+
+#[cfg(not(unix))]
+fn disk_lock_key_for_file(_file: &fs::File, path: &Path) -> std::io::Result<LockKey> {
+    Ok(LockKey::Path(String::new(), path.to_string_lossy().into_owned()))
+}
+
 #[cfg(unix)]
 fn set_permissions(path: &Path, mode: u32) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -1811,6 +2019,62 @@ mod tests {
             other => panic!("expected Entry, got {:?}", other),
         };
         assert_eq!(renamed_inode, inode);
+    }
+
+    #[test]
+    fn rename_over_existing_destination_keeps_old_destination_handle_working() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("src.txt"), b"src").unwrap();
+        fs::write(dir.path().join("dst.txt"), b"dst").unwrap();
+        let server = build_test_server(dir.path());
+
+        let src_inode = match server.handle_op("test", FsOp::Lookup { parent: 1, name: "src.txt".into() }) {
+            FsResult::Entry { inode, .. } => inode,
+            other => panic!("expected Entry, got {:?}", other),
+        };
+        let dst_inode = match server.handle_op("test", FsOp::Lookup { parent: 1, name: "dst.txt".into() }) {
+            FsResult::Entry { inode, .. } => inode,
+            other => panic!("expected Entry, got {:?}", other),
+        };
+        let dst_fh = match server.handle_op("test", FsOp::Open { inode: dst_inode, flags: libc::O_RDONLY as u32 }) {
+            FsResult::Opened { fh } => fh,
+            other => panic!("expected Opened, got {:?}", other),
+        };
+
+        assert!(matches!(
+            server.handle_op(
+                "test",
+                FsOp::Rename {
+                    parent: 1,
+                    name: "src.txt".into(),
+                    new_parent: 1,
+                    new_name: "dst.txt".into(),
+                }
+            ),
+            FsResult::Ok
+        ));
+
+        let old_dst_data = match server.handle_op("test", FsOp::Read { inode: dst_inode, fh: dst_fh, offset: 0, size: 4096 }) {
+            FsResult::Data { data } => data,
+            other => panic!("expected Data, got {:?}", other),
+        };
+        assert_eq!(&old_dst_data[..], b"dst");
+
+        let new_dst_inode = match server.handle_op("test", FsOp::Lookup { parent: 1, name: "dst.txt".into() }) {
+            FsResult::Entry { inode, .. } => inode,
+            other => panic!("expected Entry, got {:?}", other),
+        };
+        assert_eq!(new_dst_inode, src_inode);
+
+        let new_dst_fh = match server.handle_op("test", FsOp::Open { inode: new_dst_inode, flags: libc::O_RDONLY as u32 }) {
+            FsResult::Opened { fh } => fh,
+            other => panic!("expected Opened, got {:?}", other),
+        };
+        let new_dst_data = match server.handle_op("test", FsOp::Read { inode: new_dst_inode, fh: new_dst_fh, offset: 0, size: 4096 }) {
+            FsResult::Data { data } => data,
+            other => panic!("expected Data, got {:?}", other),
+        };
+        assert_eq!(&new_dst_data[..], b"src");
     }
 
     #[cfg(unix)]
@@ -2060,6 +2324,50 @@ mod tests {
                 sleep: false,
             }),
             FsResult::Ok
+        ));
+    }
+
+    #[test]
+    fn release_drops_handle_scoped_locks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("locks.txt");
+        fs::write(&path, b"hello").unwrap();
+
+        let server = build_test_server(dir.path());
+        let inode = match server.handle_op("test", FsOp::Lookup { parent: 1, name: "locks.txt".into() }) {
+            FsResult::Entry { inode, .. } => inode,
+            other => panic!("expected Entry, got {:?}", other),
+        };
+        let fh = match server.handle_op("test", FsOp::Open { inode, flags: libc::O_RDWR as u32 }) {
+            FsResult::Opened { fh } => fh,
+            other => panic!("expected Opened, got {:?}", other),
+        };
+
+        assert!(matches!(
+            server.handle_op("test", FsOp::Setlk {
+                inode,
+                fh,
+                lock_owner: 7,
+                start: 0,
+                end: 9,
+                typ: libc::F_WRLCK,
+                pid: 1234,
+                sleep: false,
+            }),
+            FsResult::Ok
+        ));
+        assert!(matches!(server.handle_op("test", FsOp::Release { inode, fh }), FsResult::Ok));
+        assert!(matches!(
+            server.handle_op("test", FsOp::Getlk {
+                inode,
+                fh: 0,
+                lock_owner: 8,
+                start: 0,
+                end: 9,
+                typ: libc::F_RDLCK,
+                pid: 5678,
+            }),
+            FsResult::Lock { typ, .. } if typ == libc::F_UNLCK
         ));
     }
 
@@ -2429,6 +2737,72 @@ mod tests {
             other => panic!("expected Entry, got {:?}", other),
         };
         assert_eq!(target_inode, inode);
+    }
+
+    #[test]
+    fn rename_over_existing_destination_keeps_old_destination_lock_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("src.txt"), b"src").unwrap();
+        fs::write(dir.path().join("dst.txt"), b"dst").unwrap();
+        let server = build_test_server(dir.path());
+
+        let src_inode = match server.handle_op("test", FsOp::Lookup { parent: 1, name: "src.txt".into() }) {
+            FsResult::Entry { inode, .. } => inode,
+            other => panic!("expected Entry, got {:?}", other),
+        };
+        let dst_inode = match server.handle_op("test", FsOp::Lookup { parent: 1, name: "dst.txt".into() }) {
+            FsResult::Entry { inode, .. } => inode,
+            other => panic!("expected Entry, got {:?}", other),
+        };
+        let dst_fh = match server.handle_op("test", FsOp::Open { inode: dst_inode, flags: libc::O_RDWR as u32 }) {
+            FsResult::Opened { fh } => fh,
+            other => panic!("expected Opened, got {:?}", other),
+        };
+
+        assert!(matches!(
+            server.handle_op("test", FsOp::Setlk {
+                inode: dst_inode,
+                fh: dst_fh,
+                lock_owner: 7,
+                start: 0,
+                end: 9,
+                typ: libc::F_WRLCK,
+                pid: 1234,
+                sleep: false,
+            }),
+            FsResult::Ok
+        ));
+        assert!(matches!(
+            server.handle_op(
+                "test",
+                FsOp::Rename {
+                    parent: 1,
+                    name: "src.txt".into(),
+                    new_parent: 1,
+                    new_name: "dst.txt".into(),
+                }
+            ),
+            FsResult::Ok
+        ));
+
+        assert!(matches!(
+            server.handle_op("test", FsOp::Getlk {
+                inode: dst_inode,
+                fh: dst_fh,
+                lock_owner: 8,
+                start: 0,
+                end: 9,
+                typ: libc::F_RDLCK,
+                pid: 5678,
+            }),
+            FsResult::Lock { typ, pid, .. } if typ == libc::F_WRLCK && pid == 1234
+        ));
+
+        let new_dst_inode = match server.handle_op("test", FsOp::Lookup { parent: 1, name: "dst.txt".into() }) {
+            FsResult::Entry { inode, .. } => inode,
+            other => panic!("expected Entry, got {:?}", other),
+        };
+        assert_eq!(new_dst_inode, src_inode);
     }
 
     // 2.2.10: Overlay→disk rename → EXDEV
