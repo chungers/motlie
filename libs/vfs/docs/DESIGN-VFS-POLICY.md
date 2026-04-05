@@ -391,22 +391,16 @@ Example correlation signals (host runtime, not vfs):
 The vfs DESIGN requirement is: **context types must be `Clone + Send`**
 so the event sink policy can transport them across thread boundaries.
 
-## Shared Detection Primitives (`motlie-policy`)
+## Detection Primitives
 
-Detection utilities (entropy analysis, domain parsing, rate limiters)
-live in `libs/policy/` (`motlie-policy` crate) — shared by both
-`motlie-vfs` and `motlie-vnet` without either depending on the other.
+Network detection primitives (entropy analysis, domain parsing, rate
+tracking) live in `motlie_vnet::policy` — they are network-specific.
 
-```toml
-# libs/vfs/Cargo.toml
-[dependencies]
-motlie-policy = { path = "../policy" }
-```
-
-For example, a vfs policy that detects high-entropy filenames (potential
-encrypted/obfuscated payload staging) can use the same
-`motlie_policy::entropy::shannon_entropy()` function used by vnet's
-DNS exfiltration detector. The primitives are stack-agnostic.
+Filesystem-specific detection utilities (e.g. path pattern matching for
+credential paths) live in `motlie_vfs::policy` when implemented. Each
+crate owns its own detection primitives. If a truly stack-agnostic
+primitive emerges in the future, it can be extracted to a shared crate
+at that point — but not speculatively.
 
 ## Components and Testing
 
