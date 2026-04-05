@@ -102,6 +102,8 @@ run_mmdebstrap() {
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+IMAGE_BUILD_GIT_SHA="$(git -C "$WORKSPACE_ROOT" rev-parse HEAD)"
+IMAGE_BUILD_TIME_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 GUEST_BINARY=""
 KERNEL_MODE="download"
@@ -251,7 +253,7 @@ GUEST_BINARY_ABS="$(realpath "$GUEST_BINARY")"
 OVERLAY_INIT_ABS="$(realpath "$SCRIPT_DIR/overlay-init")"
 
 run_mmdebstrap "$BASE_ROOTFS" \
-    --include=openssh-server,bash,ca-certificates,coreutils,curl,dnsutils,tmux,fuse3,libfuse3-3,systemd,systemd-sysv,dbus,iproute2,cloud-init,locales \
+    --include=openssh-server,bash,bubblewrap,ca-certificates,coreutils,curl,dnsutils,tmux,fuse3,libfuse3-3,systemd,systemd-sysv,dbus,iproute2,cloud-init,locales,sudo,python3,npm \
     --customize-hook='chroot "$1" systemctl enable ssh' \
     --customize-hook='chroot "$1" systemctl enable systemd-networkd' \
     --customize-hook='chroot "$1" systemctl disable systemd-networkd-wait-online.service' \
@@ -261,13 +263,17 @@ run_mmdebstrap "$BASE_ROOTFS" \
     --customize-hook='chroot "$1" update-locale LANG=en_US.UTF-8' \
     --customize-hook='chroot "$1" groupadd -g 1000 alice' \
     --customize-hook='chroot "$1" useradd -m -u 1000 -g alice -s /bin/bash alice' \
+    --customize-hook='chroot "$1" usermod -aG sudo alice' \
     --customize-hook='echo "alice:testpass" | chroot "$1" chpasswd' \
     --customize-hook='chroot "$1" groupadd -g 1001 bob' \
     --customize-hook='chroot "$1" useradd -m -u 1001 -g bob -s /bin/bash bob' \
+    --customize-hook='chroot "$1" usermod -aG sudo bob' \
     --customize-hook='echo "bob:testpass" | chroot "$1" chpasswd' \
     --customize-hook='sed -i "s/#PermitRootLogin.*/PermitRootLogin yes/" "$1/etc/ssh/sshd_config"' \
     --customize-hook='echo "root:rootpass" | chroot "$1" chpasswd' \
     --customize-hook='chroot "$1" ssh-keygen -A' \
+    --customize-hook='chroot "$1" npm install -g @openai/codex' \
+    --customize-hook='chroot "$1" npm install -g @anthropic-ai/claude-code' \
     --customize-hook='mkdir -p "$1/etc/motlie-vfs"' \
     --customize-hook='cat > "$1/etc/profile.d/dotenv.sh" << "DOTENVEOF"
 if [ -f "$HOME/.env" ]; then
@@ -320,22 +326,23 @@ setup_user() {
     [ -d "$home_dir" ] || return 0
 
     install -d -m 0755 "$home_dir/.config"
-    install -d -m 0700 "$home_dir/.codex" "$home_dir/.claude" "$home_dir/.config/claude-code"
     install -d -m 0700 /agent-state/codex /agent-state/claude /agent-state/claude-code /agent-state/codex/sqlite
 
     chown -R "$user_name:$user_name" \
         "$home_dir/.config" \
-        "$home_dir/.codex" \
-        "$home_dir/.claude" \
-        "$home_dir/.config/claude-code" \
         /agent-state/codex \
         /agent-state/codex/sqlite \
         /agent-state/claude \
         /agent-state/claude-code || true
 
-    mountpoint -q "$home_dir/.codex" || mount --bind /agent-state/codex "$home_dir/.codex"
-    mountpoint -q "$home_dir/.claude" || mount --bind /agent-state/claude "$home_dir/.claude"
-    mountpoint -q "$home_dir/.config/claude-code" || mount --bind /agent-state/claude-code "$home_dir/.config/claude-code"
+    rm -rf "$home_dir/.codex" "$home_dir/.claude" "$home_dir/.config/claude-code"
+    ln -sfn /agent-state/codex "$home_dir/.codex"
+    ln -sfn /agent-state/claude "$home_dir/.claude"
+    ln -sfn /agent-state/claude-code "$home_dir/.config/claude-code"
+    chown -h "$user_name:$user_name" \
+        "$home_dir/.codex" \
+        "$home_dir/.claude" \
+        "$home_dir/.config/claude-code" || true
 }
 
 for user_name in alice bob; do
@@ -386,7 +393,7 @@ SVCEOF' \
     --customize-hook='chroot "$1" systemctl enable motlie-vfs-guest' \
     --customize-hook='cat > "$1/etc/systemd/system/motlie-agent-state.service" << "AGENTUNITEOF"
 [Unit]
-Description=Bind agent state into mounted guest home
+Description=Link agent state into mounted guest home
 After=motlie-vfs-guest.service
 Requires=motlie-vfs-guest.service
 ConditionPathIsDirectory=/agent-state
@@ -425,7 +432,11 @@ EGRESSUNITEOF' \
  |_| |_| |_|\___/ \__|_|_|\___|
 
 v1.2 split-network / agent-state demo
+Build: __MOTLIE_IMAGE_BUILD_GIT_SHA__
+Built At: __MOTLIE_IMAGE_BUILD_TIME_UTC__
 MOTDEOF' \
+    --customize-hook='sed -i "s/__MOTLIE_IMAGE_BUILD_GIT_SHA__/'"$IMAGE_BUILD_GIT_SHA"'/g" "$1/etc/motd"' \
+    --customize-hook='sed -i "s/__MOTLIE_IMAGE_BUILD_TIME_UTC__/'"$IMAGE_BUILD_TIME_UTC"'/g" "$1/etc/motd"' \
     --customize-hook='cat > "$1/etc/fstab" << "FSTABEOF"
 proc        /proc    proc    defaults        0      0
 sysfs       /sys     sysfs   defaults        0      0

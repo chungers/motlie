@@ -64,9 +64,10 @@ dedicated read/write VFS-backed home for:
 - `~/.claude`
 - `~/.config/claude-code`
 
-The home-directory symlinks are set up by the guest image at login time. The
-backing directories live in the dedicated VFS mount, not in the writable `/`
-overlay and not in the general home mount.
+The home-directory symlinks are set up by the guest image at boot via the
+`motlie-agent-state` systemd service. The backing directories live in the
+dedicated VFS mount, not in the writable `/` overlay and not in the general
+home mount.
 
 ## Host Requirements
 
@@ -133,23 +134,38 @@ This tree now covers the first concrete slice of Phase 3:
 
 - Phase 3.1 guest-image changes:
   - `systemd-networkd` is enabled in the image
-  - the image includes a DHCP unit for the launcher-assigned egress NIC MAC
   - validation packages (`curl`, `dnsutils`, `ca-certificates`) are present
-  - login shells redirect Codex/Claude state into `/agent-state`
+  - baked image tools now include `sudo`, `python3`, `npm`, `bubblewrap`,
+    `@openai/codex`, and `@anthropic-ai/claude-code`
+  - the image MOTD shows the image build SHA and UTC build timestamp
+  - the `motlie-agent-state` boot service redirects Codex/Claude state into
+    `/agent-state`
 - Phase 3.2 launcher migration:
   - `launch-ch.sh` now accepts `--admin-net`, `--egress-net`, and `--vnet-socket`
   - supported modes are:
     - `--admin-net=none --egress-net=none`
     - `--admin-net=tap --egress-net=tap`
     - `--admin-net=tap --egress-net=vhost-user`
+  - the launcher seeds `/etc/hostname` and `/etc/hosts` into the runtime
+    overlay so `sudo` and hostname-based tools work normally
 - Phase 3.3/3.4 validation now stays inside the forked `v1.2` host flow:
   - `repl_host_v1_2` is the only host-side binary entry point
   - `launch-ch.sh` remains the only guest launcher script entry point
+  - `repl_host_v1_2` prints the host binary build SHA and UTC build timestamp
+    at startup
+
+Validated in this branch:
+
+- TAP-admin SSH ingress still works
+- outbound internet works over the `motlie-vnet` egress NIC
+- `apt-get` works against the disposable writable `/` overlay
+- `codex` and `claude` run in-guest
+- Codex and Claude auth/state resolve into `/agent-state`
+- `shutdown <guest>` in the REPL is deterministic, with fallback to process
+  termination when Cloud Hypervisor API shutdown fails
 
 Still pending:
 
-- Phase 3.4: real standalone end-to-end validation against a guest using the
-  `motlie-vnet` egress socket
 - Phase 3.5: host-side composed launch flow where the `v1.2` control plane
   starts `motlie-vnet` automatically and wires it into `launch <guest>`
 
@@ -238,8 +254,11 @@ Short-term `v1.2` keeps the validated `v1.1` ingress path:
 
 New in `v1.2`:
 
-- egress NIC: `vhost-user-net`, matched in-guest by a stable MAC and configured
-  by `systemd-networkd` via DHCP
+- egress NIC: `vhost-user-net`, matched in-guest by a stable MAC and
+  configured by a guest boot service with the slirp defaults:
+  - `10.0.2.15/24` on `eth1`
+  - default route via `10.0.2.2`
+  - DNS server `10.0.2.3`
 
 The intent is:
 
@@ -252,25 +271,52 @@ The VFS stack and the writable root overlay do not depend on the network mode.
 That lets `v1.2` move the egress side first without destabilizing the already
 validated `v1.1` SSH/VFS path.
 
-## Near-Term Validation Plan
+## Validated Runbook
 
-1. forked `v1.2` host flow:
-   - run `cargo run -p motlie-vfs --example repl_host_v1_2 --features vsock -- --empty --script libs/vfs/examples/v1.2/setup-multiguest.sh.vfs --admin-net=tap --egress-net=vhost-user`
-   - use `launch alice` or `launch bob`
-   - confirm the per-guest `motlie-vnet` socket appears before guest boot
-   2. guest egress:
-   - `ip addr`
+The current branch has been validated with this host flow:
+
+1. run the `v1.2` REPL host:
+   - `cargo run -p motlie-vfs --example repl_host_v1_2 --features vsock -- --empty --script libs/vfs/examples/v1.2/setup-multiguest.sh.vfs --admin-net=tap --egress-net=vhost-user`
+2. launch a guest from the REPL:
+   - `launch alice`
+3. connect over TAP-admin SSH:
+   - `ssh alice@192.168.249.2`
+4. verify split networking:
    - `ip route`
-   - `resolvectl status` or `cat /etc/resolv.conf`
-   - `curl https://example.com`
-   - `apt-get update`
-3. writable root:
-   - `apt-get install -y python3 nodejs npm`
-   - reboot/relaunch guest and confirm those installs disappear unless baked
-4. dedicated agent state:
-   - inspect `~/.codex`, `~/.claude`, `~/.config/claude-code`
-   - verify they resolve into `/agent-state`
-   - run auth flows and confirm writes land in that mount
+   - `cat /etc/resolv.conf`
+   - `curl -I https://example.com`
+   - `nslookup example.com 10.0.2.3`
+5. verify baked image tools:
+   - `which sudo python3 npm codex claude`
+6. verify disposable writable `/` still behaves correctly:
+   - `sudo apt-get update`
+7. verify agent-state redirection:
+   - `ls -ald ~/.codex ~/.claude ~/.config/claude-code`
+   - `readlink ~/.codex ~/.claude ~/.config/claude-code`
+   - `find /agent-state -maxdepth 4 -type f | sort`
+8. verify auth persistence for the lifetime of the running host REPL:
+   - sign in to `codex` and `claude`
+   - confirm their auth files appear under `/agent-state`
+   - `shutdown alice`
+   - `launch alice`
+   - confirm the auth files remain available
 
-This README should stay honest about what has been validated versus what is now
-only scaffolded for the next implementation slice.
+## Known Gaps / TODO
+
+The current `v1.2` POC is intentionally not a production-grade general-purpose
+filesystem. The most important known gaps are:
+
+- `/agent-state` persistence is scoped to the lifetime of the running host
+  REPL, not durable across host REPL restart
+- Cloud Hypervisor graceful shutdown still returns HTTP `500` for this launch
+  shape; the REPL relies on a `TERM`/`KILL` fallback
+- Codex still warns `could not update PATH: Not supported (os error 95)`
+  because `motlie-vfs` does not yet implement the full set of filesystem
+  operations that developer tools expect on a normal home directory
+
+The next VFS compatibility work should focus on:
+
+1. `access`
+2. file locking
+3. xattrs
+4. rename / setattr / fsync completeness for more editor and CLI workflows
