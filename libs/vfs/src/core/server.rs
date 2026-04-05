@@ -12,7 +12,7 @@ use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
 use anyhow::{anyhow, Result};
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use tokio::sync::broadcast;
 
 use super::event::{FsEvent, FsOpKind};
@@ -127,6 +127,8 @@ pub struct FsServer {
     fh_table: Mutex<HashMap<u64, FhEntry>>,
     /// In-process POSIX-style byte-range locks keyed by (mount tag, path).
     lock_table: Mutex<HashMap<LockKey, Vec<FileLock>>>,
+    /// Wakeups for blocking lock acquisition.
+    lock_wait: Condvar,
 }
 
 pub struct FsServerBuilder {
@@ -250,6 +252,7 @@ impl FsServerBuilder {
             next_fh: AtomicU64::new(1),
             fh_table: Mutex::new(HashMap::new()),
             lock_table: Mutex::new(HashMap::new()),
+            lock_wait: Condvar::new(),
         })
     }
 }
@@ -545,27 +548,48 @@ impl FsServer {
         };
 
         let mut table = self.lock_table.lock();
-        let locks = table.entry(lock_key).or_default();
-
         if typ == libc::F_UNLCK {
-            locks.retain(|lock| !(lock.owner == lock_owner && ranges_overlap(lock.start, lock.end, start, end)));
+            let mut changed = false;
+            let remove_key = if let Some(locks) = table.get_mut(&lock_key) {
+                let before = locks.len();
+                locks.retain(|lock| !(lock.owner == lock_owner && ranges_overlap(lock.start, lock.end, start, end)));
+                changed = locks.len() != before;
+                locks.is_empty()
+            } else {
+                false
+            };
+            if remove_key {
+                table.remove(&lock_key);
+            }
+            drop(table);
+            if changed {
+                self.lock_wait.notify_all();
+            }
             return FsResult::Ok;
         }
 
-        if let Some(_conflict) = find_conflict(locks, lock_owner, start, end, typ) {
-            return FsResult::Error {
-                errno: if sleep { libc::EAGAIN } else { libc::EAGAIN },
-            };
-        }
+        loop {
+            if let Some(locks) = table.get(&lock_key) {
+                if find_conflict(locks, lock_owner, start, end, typ).is_some() {
+                    if sleep {
+                        self.lock_wait.wait(&mut table);
+                        continue;
+                    }
+                    return FsResult::Error { errno: libc::EAGAIN };
+                }
+            }
 
-        locks.retain(|lock| !(lock.owner == lock_owner && ranges_overlap(lock.start, lock.end, start, end)));
-        locks.push(FileLock {
-            start,
-            end,
-            typ,
-            pid,
-            owner: lock_owner,
-        });
+            let locks = table.entry(lock_key.clone()).or_default();
+            locks.retain(|lock| !(lock.owner == lock_owner && ranges_overlap(lock.start, lock.end, start, end)));
+            locks.push(FileLock {
+                start,
+                end,
+                typ,
+                pid,
+                owner: lock_owner,
+            });
+            break;
+        }
         drop(table);
 
         if _fh != 0 {
@@ -1344,11 +1368,14 @@ impl FsServer {
 
     fn do_release(&self, fh: u64) -> FsResult {
         let removed = self.fh_table.lock().remove(&fh);
+        let mut notify_waiters = false;
         if let Some(entry) = removed {
             if !entry.lock_owners.is_empty() {
                 let mut lock_table = self.lock_table.lock();
                 let remove_key = if let Some(locks) = lock_table.get_mut(&entry.lock_key) {
+                    let before = locks.len();
                     locks.retain(|lock| !entry.lock_owners.contains(&lock.owner));
+                    notify_waiters = locks.len() != before;
                     locks.is_empty()
                 } else {
                     false
@@ -1357,6 +1384,9 @@ impl FsServer {
                     lock_table.remove(&entry.lock_key);
                 }
             }
+        }
+        if notify_waiters {
+            self.lock_wait.notify_all();
         }
         FsResult::Ok
     }
@@ -1868,7 +1898,9 @@ fn truncate_file(path: &Path, size: u64) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{mpsc, Arc};
     use std::os::unix::fs::PermissionsExt;
+    use std::thread;
     use std::time::Duration;
 
     fn build_test_server(dir: &Path) -> FsServer {
@@ -2369,6 +2401,75 @@ mod tests {
             }),
             FsResult::Lock { typ, .. } if typ == libc::F_UNLCK
         ));
+    }
+
+    #[test]
+    fn blocking_setlk_waits_until_unlock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("locks.txt");
+        fs::write(&path, b"hello").unwrap();
+
+        let server = Arc::new(build_test_server(dir.path()));
+        let inode = match server.handle_op("test", FsOp::Lookup { parent: 1, name: "locks.txt".into() }) {
+            FsResult::Entry { inode, .. } => inode,
+            other => panic!("expected Entry, got {:?}", other),
+        };
+
+        assert!(matches!(
+            server.handle_op("test", FsOp::Setlk {
+                inode,
+                fh: 0,
+                lock_owner: 7,
+                start: 0,
+                end: 9,
+                typ: libc::F_WRLCK,
+                pid: 1234,
+                sleep: false,
+            }),
+            FsResult::Ok
+        ));
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = {
+            let server = Arc::clone(&server);
+            thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                let result = server.handle_op("test", FsOp::Setlk {
+                    inode,
+                    fh: 0,
+                    lock_owner: 8,
+                    start: 0,
+                    end: 9,
+                    typ: libc::F_WRLCK,
+                    pid: 5678,
+                    sleep: true,
+                });
+                done_tx.send(result).unwrap();
+            })
+        };
+
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        thread::sleep(Duration::from_millis(100));
+        assert!(done_rx.try_recv().is_err(), "blocking lock unexpectedly completed before unlock");
+
+        assert!(matches!(
+            server.handle_op("test", FsOp::Setlk {
+                inode,
+                fh: 0,
+                lock_owner: 7,
+                start: 0,
+                end: 9,
+                typ: libc::F_UNLCK,
+                pid: 1234,
+                sleep: false,
+            }),
+            FsResult::Ok
+        ));
+
+        let result = done_rx.recv_timeout(Duration::from_secs(1)).expect("blocked lock did not resume");
+        assert!(matches!(result, FsResult::Ok));
+        worker.join().unwrap();
     }
 
     #[test]
