@@ -171,6 +171,19 @@ OVERLAY_SEED="$RUNTIME_DIR/seed"
 rm -rf "$OVERLAY_SEED"
 mkdir -p "$OVERLAY_SEED/upper/etc/motlie-vfs"
 mkdir -p "$OVERLAY_SEED/work"
+mkdir -p "$OVERLAY_SEED/upper/etc"
+
+seed_guest_hosts_file() {
+    cat > "$OVERLAY_SEED/upper/etc/hosts" <<EOF
+127.0.0.1 localhost
+127.0.1.1 $GUEST_HOSTNAME
+
+# IPv6 defaults
+::1 localhost ip6-localhost ip6-loopback
+ff02::1 ip6-allnodes
+ff02::2 ip6-allrouters
+EOF
+}
 
 if [ -n "$CLOUD_INIT_DIR" ]; then
     mkdir -p "$OVERLAY_SEED/upper/var/lib/cloud/seed/nocloud"
@@ -187,9 +200,11 @@ if [ -n "$CLOUD_INIT_DIR" ]; then
         seed_mount_paths_from_mounts_yaml "$MOUNT_CONFIG"
     fi
     printf '%s\n' "$GUEST_HOSTNAME" > "$OVERLAY_SEED/upper/etc/hostname"
+    seed_guest_hosts_file
 else
     cp "$MOUNT_CONFIG" "$OVERLAY_SEED/upper/etc/motlie-vfs/mounts.yaml"
     printf '%s\n' "$GUEST_HOSTNAME" > "$OVERLAY_SEED/upper/etc/hostname"
+    seed_guest_hosts_file
     seed_mount_paths_from_mounts_yaml "$MOUNT_CONFIG"
 fi
 
