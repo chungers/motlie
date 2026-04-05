@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 description = "Embeddable user-mode networking for virtual machines (vhost-user-net + libslirp)"
+build = "build.rs"
 
 [features]
 default = []
@@ -27,3 +28,15 @@ vmm-sys-util = "0.15"
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
+motlie-vfs = { path = "../vfs", features = ["vsock"] }
+bytes = "1"
+tokio = { workspace = true, features = ["full"] }
+rustyline = "15"
+atty = "0.2"
+ctrlc = "3"
+serde_yaml = "0.9"
+serde = { version = "1.0", features = ["derive"] }
+
+[[example]]
+name = "repl_host_v1_2"
+path = "examples/v1.2/repl_host.rs"

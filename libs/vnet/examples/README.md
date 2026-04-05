@@ -21,7 +21,7 @@ VFS flow:
 The host REPL binary is `repl_host_v1_2`:
 
 ```bash
-cargo run -p motlie-vfs --example repl_host_v1_2 --features vsock -- \
+cargo run -p motlie-vnet --example repl_host_v1_2 -- \
   --empty --script libs/vnet/examples/v1.2/setup-multiguest.sh.vfs \
   --admin-net=tap --egress-net=vhost-user
 ```
