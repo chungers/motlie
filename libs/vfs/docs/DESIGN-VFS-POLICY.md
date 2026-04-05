@@ -311,8 +311,14 @@ The Linux FUSE driver includes caller identity in every request header
 - **GID** (group ID) — always available
 - **PID** (process ID) — always available
 
-The `fuser` crate (v0.15, used by the guest FUSE client) exposes
-`Request::uid()`, `Request::gid()`, and `Request::pid()`.
+The `fuser` crate (v0.15.1, used by the guest FUSE client) exposes
+all three per request — confirmed in source:
+- `Request::uid() -> u32` (`fuser-0.15.1/src/request.rs:658`)
+- `Request::gid() -> u32` (`fuser-0.15.1/src/request.rs:664`)
+- `Request::pid() -> u32` (`fuser-0.15.1/src/request.rs:670`)
+
+These read directly from the kernel's `fuse_in_header`. There is no
+protocol limitation — the data is available, just not forwarded.
 
 ### What motlie-vfs Currently Forwards
 
@@ -324,39 +330,83 @@ The `fuser` crate (v0.15, used by the guest FUSE client) exposes
 | `Getlk`/`Setlk` | No | Yes (from param) | PID from lock param, not from `Request` |
 | All other 20 ops | No | No | `_req` parameter ignored |
 
-### Implementation Gap
+### Implementation Gap (4 layers, each self-contained)
 
-To plumb full caller identity through the stack:
+**Layer 1: Guest FUSE client** (`libs/vfs/src/client/fuse.rs`)
 
-1. **Guest FUSE client** (`libs/vfs/src/client/fuse.rs`):
-   - For all 24 operations, extract `req.uid()`, `req.gid()`, `req.pid()`
-   - Currently only 3 operations extract uid/gid; 21 prefix `req` with `_`
+The `FuseClient` implements the `fuser::Filesystem` trait. Each method
+receives a `Request` parameter. Currently 21 of 24 methods prefix it
+with `_req` (intentionally ignored). Change: extract identity from all.
 
-2. **FsOp enum** (`libs/vfs/src/core/op.rs`):
-   - Option A: Add `uid: u32, gid: u32, pid: u32` to every variant
-   - Option B (preferred): Add a wrapper struct:
-     ```rust
-     pub struct CallerIdentity {
-         pub uid: u32,
-         pub gid: u32,
-         pub pid: u32,
-     }
+Operations that need `_req` → `req` + extraction:
+```
+lookup (line 72), getattr (line 88), setattr (line 111),
+setxattr (line 149), getxattr (line 172), listxattr (line 192),
+removexattr (line 201), open (line 243), read (line 255),
+write (line 278), readdir (line 284), unlink (line 430),
+rmdir (line 439), readlink (line 476), rename (line 484),
+symlink (line 498), release (line 517), fsync (line 525),
+statfs (line 537), getlk (line 344), setlk (line 371)
+```
 
-     pub struct IdentifiedOp {
-         pub caller: CallerIdentity,
-         pub op: FsOp,
-     }
-     ```
-     This avoids modifying every FsOp variant.
+Each becomes: `let caller = CallerIdentity::from_req(&req);`
 
-3. **Wire format** (`libs/vfs/src/vsock/`):
-   - Serialize `IdentifiedOp` instead of `FsOp` over vsock
-   - Wire-compatible change if using a new message type (existing clients
-     send `FsOp`, new clients send `IdentifiedOp`)
+**Layer 2: FsOp wire type** (`libs/vfs/src/core/op.rs`)
 
-4. **Host server dispatch** (`libs/vfs/src/core/server.rs`):
-   - Extract `CallerIdentity` from the deserialized message
-   - Pass to `FsOpContext.caller_uid`, `caller_gid`, `caller_pid`
+Preferred: wrapper struct to avoid modifying every FsOp variant:
+```rust
+#[derive(Serialize, Deserialize)]
+pub struct CallerIdentity {
+    pub uid: u32,
+    pub gid: u32,
+    pub pid: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct IdentifiedOp {
+    pub caller: CallerIdentity,
+    pub op: FsOp,
+}
+```
+
+The existing `uid`/`gid` fields in `Access`, `Create`, `Mkdir` become
+redundant — the caller identity is always in the wrapper. These fields
+can be deprecated but kept for backward compatibility during migration.
+
+**Layer 3: Wire format** (`libs/vfs/src/vsock/client.rs`)
+
+Currently serializes `FsOp` directly (line 34):
+```rust
+let encoded = bincode::serde::encode_to_vec(op, bincode::config::standard())
+```
+
+Change to serialize `IdentifiedOp`. For backward compatibility, use a
+version byte or message-type tag so the host server can accept both
+old (`FsOp`) and new (`IdentifiedOp`) messages during migration.
+
+**Layer 4: Host server dispatch** (`libs/vfs/src/core/server.rs`)
+
+`handle_op()` (line 155) currently receives `(tag, op: FsOp)`.
+Change to receive `(tag, identified_op: IdentifiedOp)`, extract
+`CallerIdentity`, and populate `FsOpContext.caller_uid/gid/pid`.
+
+For old clients that send bare `FsOp`, use `CallerIdentity::default()`
+with uid=0, gid=0, pid=0 (root, unknown process) — the `Option<u32>`
+fields in `FsOpContext` become `None` when identity is not available.
+
+### Effort Estimate
+
+| Layer | Files changed | Lines (est.) | Risk |
+|-------|--------------|-------------|------|
+| Guest FUSE client | 1 | ~50 (mechanical: `_req` → `req`, add extraction) | Low |
+| FsOp wire type | 1 | ~15 (new struct + derive) | Low |
+| Wire format | 1 | ~10 (serialize wrapper instead of bare FsOp) | Medium (backward compat) |
+| Host dispatch | 1 | ~20 (extract identity, populate context) | Low |
+| **Total** | **4** | **~95** | **Low–Medium** |
+
+The mechanical nature of the change (21 identical `_req` → `req`
+substitutions) makes it low-risk. The wire format change is the only
+medium-risk step due to backward compatibility.
 
 ### What PID Enables
 
