@@ -12,6 +12,8 @@ use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "debug-trace")]
+use std::sync::atomic::AtomicUsize;
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -80,12 +82,24 @@ struct VnetVhostBackend {
     /// exit_event() pops from this — it cannot fail at call time because
     /// all cloning is done up front in the constructor.
     framework_exit_events: Arc<Mutex<Vec<(EventConsumer, EventNotifier)>>>,
-    tx_debug_budget: Arc<std::sync::atomic::AtomicUsize>,
-    rx_debug_budget: Arc<std::sync::atomic::AtomicUsize>,
-    tx_event_debug_budget: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(feature = "debug-trace")]
+    tx_debug_budget: Arc<AtomicUsize>,
+    #[cfg(feature = "debug-trace")]
+    rx_debug_budget: Arc<AtomicUsize>,
+    #[cfg(feature = "debug-trace")]
+    tx_event_debug_budget: Arc<AtomicUsize>,
 }
 
 impl VnetVhostBackend {
+    #[cfg(feature = "debug-trace")]
+    fn debug_budget_tick(counter: &AtomicUsize) -> bool {
+        counter
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+    }
+
     fn new(
         config: &VnetConfig,
         tx_sender: mpsc::Sender<Vec<u8>>,
@@ -125,9 +139,12 @@ impl VnetVhostBackend {
             framework_exit_events: Arc::new(Mutex::new(vec![
                 (framework_consumer, framework_notifier),
             ])),
-            tx_debug_budget: Arc::new(std::sync::atomic::AtomicUsize::new(8)),
-            rx_debug_budget: Arc::new(std::sync::atomic::AtomicUsize::new(8)),
-            tx_event_debug_budget: Arc::new(std::sync::atomic::AtomicUsize::new(16)),
+            #[cfg(feature = "debug-trace")]
+            tx_debug_budget: Arc::new(AtomicUsize::new(8)),
+            #[cfg(feature = "debug-trace")]
+            rx_debug_budget: Arc::new(AtomicUsize::new(8)),
+            #[cfg(feature = "debug-trace")]
+            tx_event_debug_budget: Arc::new(AtomicUsize::new(16)),
         };
 
         Ok((backend, shutdown_notifier))
@@ -150,18 +167,24 @@ impl VnetVhostBackend {
         let mem = mem_guard.deref();
 
         let mut state = vring.get_mut();
+        #[cfg(feature = "debug-trace")]
         let call_present = state.get_call().is_some();
         let queue = state.get_queue_mut();
         let mut sent = false;
         let mut returned_any = false;
+        #[cfg(feature = "debug-trace")]
         let mut saw_desc = false;
 
-        if self.tx_event_debug_budget.fetch_sub(1, Ordering::Relaxed) > 0 {
+        #[cfg(feature = "debug-trace")]
+        if Self::debug_budget_tick(&self.tx_event_debug_budget) {
             eprintln!("motlie-vnet tx-event: kick received call_present={call_present}");
         }
 
         while let Some(mut desc_chain) = queue.pop_descriptor_chain(mem) {
-            saw_desc = true;
+            #[cfg(feature = "debug-trace")]
+            {
+                saw_desc = true;
+            }
             let desc_idx = desc_chain.head_index();
             let mut frame = Vec::new();
             let mut first = true;
@@ -182,6 +205,7 @@ impl VnetVhostBackend {
                     match mem.read(&mut buf, data_addr) {
                         Ok(_) => frame.extend_from_slice(&buf),
                         Err(e) => {
+                            #[cfg(feature = "debug-trace")]
                             eprintln!(
                                 "motlie-vnet tx-read-fail: desc={} first=true addr={} len={} err={}",
                                 desc_idx,
@@ -199,6 +223,7 @@ impl VnetVhostBackend {
                     match mem.read(&mut buf, addr) {
                         Ok(_) => frame.extend_from_slice(&buf),
                         Err(e) => {
+                            #[cfg(feature = "debug-trace")]
                             eprintln!(
                                 "motlie-vnet tx-read-fail: desc={} first=false addr={} len={} err={}",
                                 desc_idx,
@@ -216,7 +241,8 @@ impl VnetVhostBackend {
 
             // Only send complete frames — drop truncated ones on read failure.
             if !read_failed && !frame.is_empty() {
-                if self.tx_debug_budget.fetch_sub(1, Ordering::Relaxed) > 0 {
+                #[cfg(feature = "debug-trace")]
+                if Self::debug_budget_tick(&self.tx_debug_budget) {
                     let ethertype = if frame.len() >= 14 {
                         u16::from_be_bytes([frame[12], frame[13]])
                     } else {
@@ -247,6 +273,7 @@ impl VnetVhostBackend {
             }
 
             if let Err(e) = queue.add_used(mem, desc_idx, 0) {
+                #[cfg(feature = "debug-trace")]
                 eprintln!("motlie-vnet tx-add-used-fail: desc={} err={}", desc_idx, e);
                 tracing::warn!("tx: add_used failed for desc {}: {}", desc_idx, e);
             } else {
@@ -254,7 +281,8 @@ impl VnetVhostBackend {
             }
         }
 
-        if self.tx_event_debug_budget.fetch_sub(1, Ordering::Relaxed) > 0 {
+        #[cfg(feature = "debug-trace")]
+        if Self::debug_budget_tick(&self.tx_event_debug_budget) {
             eprintln!(
                 "motlie-vnet tx-event: saw_desc={} returned_any={} sent_any={} call_present={}",
                 saw_desc,
@@ -266,10 +294,14 @@ impl VnetVhostBackend {
 
         if returned_any {
             if let Err(e) = state.signal_used_queue() {
+                #[cfg(feature = "debug-trace")]
                 eprintln!("motlie-vnet tx-signal-fail: err={}", e);
                 tracing::warn!("tx: signal_used_queue failed: {}", e);
-            } else if self.tx_event_debug_budget.fetch_sub(1, Ordering::Relaxed) > 0 {
-                eprintln!("motlie-vnet tx-signal-ok: call_present={call_present}");
+            } else {
+                #[cfg(feature = "debug-trace")]
+                if Self::debug_budget_tick(&self.tx_event_debug_budget) {
+                    eprintln!("motlie-vnet tx-signal-ok: call_present={call_present}");
+                }
             }
         }
         if sent {
@@ -308,7 +340,8 @@ impl VnetVhostBackend {
 
         while let Some(frame) = pending_rx.pop_front() {
             if let Some(mut desc_chain) = queue.pop_descriptor_chain(mem) {
-                if self.rx_debug_budget.fetch_sub(1, Ordering::Relaxed) > 0 {
+                #[cfg(feature = "debug-trace")]
+                if Self::debug_budget_tick(&self.rx_debug_budget) {
                     let ethertype = if frame.len() >= 14 {
                         u16::from_be_bytes([frame[12], frame[13]])
                     } else {
