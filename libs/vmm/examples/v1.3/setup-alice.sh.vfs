@@ -1,0 +1,14 @@
+# Alice demo data for v1.2
+layer credentials 0
+layer workspace 10
+
+mkdir credentials alice-agent-state /codex 700
+mkdir credentials alice-agent-state /codex/sqlite 700
+mkdir credentials alice-agent-state /claude 700
+mkdir credentials alice-agent-state /claude-code 700
+put workspace alice-agent-state /README.md Dedicated read-write agent-state layer for Codex and Claude lives here.
+put workspace alice-workspace /README.md Alice workspace mounted from the host.
+
+ls alice-home
+ls alice-workspace
+ls alice-agent-state
