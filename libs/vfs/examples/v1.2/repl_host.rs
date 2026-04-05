@@ -79,13 +79,15 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, BufRead, Write};
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use bytes::Bytes;
@@ -98,6 +100,14 @@ use motlie_vnet::{VnetBackend, VnetConfig, VnetHandle};
 use motlie_vfs::core::overlay::OverlayAttrs;
 use motlie_vfs::core::server::FsServer;
 use motlie_vfs::vsock::handler::VsockConnectionHandler;
+
+fn build_git_sha() -> &'static str {
+    option_env!("MOTLIE_VFS_BUILD_GIT_SHA").unwrap_or("unknown")
+}
+
+fn build_time_utc() -> &'static str {
+    option_env!("MOTLIE_VFS_BUILD_TIME_UTC").unwrap_or("unknown")
+}
 
 #[derive(Clone)]
 struct GuestConfig {
@@ -201,6 +211,7 @@ struct AdminState {
     admin_net: AdminNet,
     egress_net: EgressNet,
     vnet_handles: HashMap<String, VnetHandle>,
+    launch_pids: HashMap<String, u32>,
 }
 
 enum MountSpec {
@@ -388,6 +399,8 @@ async fn main() -> Result<()> {
     }
 
     eprintln!("=== motlie-vfs repl_host_v1_2 ===");
+    eprintln!("Build: {}", build_git_sha());
+    eprintln!("Built At: {}", build_time_utc());
     eprintln!(
         "Network: admin={} egress={}",
         admin_net.as_str(),
@@ -471,6 +484,7 @@ async fn main() -> Result<()> {
         admin_net,
         egress_net,
         vnet_handles: HashMap::new(),
+        launch_pids: HashMap::new(),
     };
 
     // Spawn the admin input handler on a blocking thread
@@ -833,10 +847,6 @@ fn add_guest_mount(admin: &mut AdminState, guest_name: &str, mount: ConfiguredMo
     Ok(())
 }
 
-fn guest_login_name(guest_name: &str) -> &str {
-    guest_name
-}
-
 fn guest_api_socket_path(guest_name: &str) -> PathBuf {
     PathBuf::from(format!("/tmp/motlie-vfs-{guest_name}-api.sock"))
 }
@@ -845,19 +855,8 @@ fn guest_vnet_socket_path(guest_name: &str) -> PathBuf {
     PathBuf::from(format!("/tmp/motlie-vnet-{guest_name}.sock"))
 }
 
-fn guest_home(runtime: &GuestRuntime, guest_name: &str) -> String {
-    runtime
-        .mounts
-        .iter()
-        .find_map(|mount| {
-            let guest_path = mount.guest_path.as_deref()?;
-            if guest_path == format!("/home/{guest_name}") {
-                Some(guest_path.to_string())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| format!("/home/{guest_name}"))
+fn guest_egress_mac(_guest_name: &str) -> [u8; 6] {
+    [0x12, 0x34, 0x56, 0x78, 0x90, 0xab]
 }
 
 fn shell_single_quote(s: &str) -> String {
@@ -881,62 +880,11 @@ fn render_mounts_yaml(runtime: &GuestRuntime) -> Result<String> {
 }
 
 fn render_cloud_init(guest_name: &str, runtime: &GuestRuntime) -> Result<String> {
-    let identity = runtime.identity.ok_or_else(|| {
+    let _identity = runtime.identity.ok_or_else(|| {
         anyhow::anyhow!("guest '{guest_name}' is missing uid/gid; provision with explicit uid/gid")
     })?;
-    let mounts_yaml = render_mounts_yaml(runtime)?;
-    let home_dir = guest_home(runtime, guest_name);
-
     let mut out = String::new();
     out.push_str("#cloud-config\n");
-    out.push_str("write_files:\n");
-    out.push_str("  - path: /etc/motlie-vfs/mounts.yaml\n");
-    out.push_str("    owner: root:root\n");
-    out.push_str("    permissions: '0644'\n");
-    out.push_str("    content: |\n");
-    for line in mounts_yaml.lines() {
-        writeln!(&mut out, "      {line}")?;
-    }
-    out.push_str("runcmd:\n");
-    out.push_str("  - |\n");
-    writeln!(
-        &mut out,
-        "      if getent group {0} >/dev/null; then current_gid=\"$(getent group {0} | cut -d: -f3)\"; [ \"$current_gid\" = \"{1}\" ] || {{ echo \"gid mismatch for {0}: $current_gid != {1}\" >&2; exit 1; }}; else groupadd -g {1} {0}; fi",
-        guest_login_name(guest_name),
-        identity.gid
-    )?;
-    out.push_str("  - |\n");
-    writeln!(
-        &mut out,
-        "      if id -u {0} >/dev/null 2>&1; then current_uid=\"$(id -u {0})\"; current_gid=\"$(id -g {0})\"; [ \"$current_uid\" = \"{1}\" ] && [ \"$current_gid\" = \"{2}\" ] || {{ echo \"uid/gid mismatch for {0}: $current_uid:$current_gid != {1}:{2}\" >&2; exit 1; }}; else useradd -m -u {1} -g {2} -s /bin/bash {0}; fi",
-        guest_login_name(guest_name),
-        identity.uid,
-        identity.gid
-    )?;
-    out.push_str("  - |\n");
-    writeln!(
-        &mut out,
-        "      install -d -m 0755 -o {0} -g {0} {1}",
-        guest_login_name(guest_name),
-        home_dir
-    )?;
-    out.push_str("  - |\n");
-    writeln!(
-        &mut out,
-        "      install -d -m 0700 -o {0} -g {0} {1}/.ssh",
-        guest_login_name(guest_name),
-        home_dir
-    )?;
-    for mount in &runtime.mounts {
-        if let Some(guest_path) = &mount.guest_path {
-            if guest_path != &home_dir {
-                out.push_str("  - |\n");
-                writeln!(&mut out, "      install -d -m 0755 {}", guest_path)?;
-            }
-        }
-    }
-    out.push_str("  - |\n");
-    out.push_str("      systemctl --no-block start motlie-vfs-guest.service\n");
     Ok(out)
 }
 
@@ -989,6 +937,9 @@ fn render_launch_script(
     out.push_str("cat > \"$SEED_DIR/meta-data\" <<EOF\n");
     out.push_str("instance-id: ${INSTANCE_ID}\n");
     out.push_str("local-hostname: ${LOCAL_HOSTNAME}\n");
+    out.push_str("EOF\n\n");
+    out.push_str("cat > \"$SEED_DIR/mounts.yaml\" <<'EOF'\n");
+    out.push_str(&render_mounts_yaml(runtime)?);
     out.push_str("EOF\n\n");
     out.push_str("cat > \"$SEED_DIR/user-data\" <<'EOF'\n");
     out.push_str(&cloud_init);
@@ -1049,13 +1000,104 @@ fn execute_launch_script(guest_name: &str, script: &str) -> Result<LaunchExecuti
     })
 }
 
-fn shutdown_guest(guest_name: &str) -> Result<()> {
+fn process_exists(pid: u32) -> bool {
+    std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
+fn find_cloud_hypervisor_pid(api_socket: &std::path::Path) -> Option<u32> {
+    let api_socket = api_socket.to_string_lossy();
+    let proc_entries = fs::read_dir("/proc").ok()?;
+
+    for entry in proc_entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(pid) = file_name.to_string_lossy().parse::<u32>().ok() else {
+            continue;
+        };
+        let cmdline_path = entry.path().join("cmdline");
+        let Some(cmdline) = fs::read(&cmdline_path).ok() else {
+            continue;
+        };
+        if cmdline.is_empty() {
+            continue;
+        }
+
+        let argv: Vec<String> = cmdline
+            .split(|b| *b == 0)
+            .filter(|part| !part.is_empty())
+            .map(|part| String::from_utf8_lossy(part).into_owned())
+            .collect();
+
+        if argv.is_empty() || !argv[0].contains("cloud-hypervisor") {
+            continue;
+        }
+
+        let mut i = 0;
+        while i < argv.len() {
+            if argv[i] == "--api-socket" && i + 1 < argv.len() && argv[i + 1] == api_socket {
+                return Some(pid);
+            }
+            i += 1;
+        }
+    }
+
+    None
+}
+
+fn signal_pid(pid: u32, signal: &str) -> Result<()> {
+    let status = Command::new("kill")
+        .arg(format!("-{signal}"))
+        .arg(pid.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        anyhow::bail!("kill -{signal} {pid} exited with status {status}");
+    }
+}
+
+fn wait_for_guest_exit(guest_name: &str, pid: Option<u32>, timeout: Duration) -> Result<()> {
+    let api_socket = guest_api_socket_path(guest_name);
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let pid_gone = pid.map(|p| !process_exists(p));
+        if pid_gone == Some(true) {
+            if api_socket.exists() {
+                let _ = std::fs::remove_file(&api_socket);
+            }
+            return Ok(());
+        }
+        let socket_gone = !api_socket.exists();
+        if pid.is_none() && socket_gone {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    anyhow::bail!("guest did not exit within {}", timeout.as_secs());
+}
+
+struct ShutdownOutcome {
+    pid: Option<u32>,
+    api_failure: Option<String>,
+    forced: Option<&'static str>,
+}
+
+fn shutdown_guest(guest_name: &str, pid: Option<u32>) -> Result<ShutdownOutcome> {
     let api_socket = guest_api_socket_path(guest_name);
     if !api_socket.exists() {
         anyhow::bail!("guest API socket not found at {}", api_socket.display());
     }
+    let pid = find_cloud_hypervisor_pid(&api_socket).or(pid);
 
     let output = Command::new("curl")
+        .arg("--silent")
+        .arg("--show-error")
+        .arg("--max-time")
+        .arg("5")
+        .arg("--write-out")
+        .arg("\n%{http_code}")
         .arg("--unix-socket")
         .arg(&api_socket)
         .arg("-X")
@@ -1064,14 +1106,70 @@ fn shutdown_guest(guest_name: &str) -> Result<()> {
         .stdin(Stdio::null())
         .output()?;
 
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        if stderr.is_empty() {
-            anyhow::bail!("curl exited with status {}", output.status);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let (body, http_code) = match stdout.rsplit_once('\n') {
+        Some((body, code)) => (body.trim().to_string(), code.trim().to_string()),
+        None => (stdout.trim().to_string(), String::new()),
+    };
+    let api_request_ok = output.status.success();
+    let api_http_ok = matches!(http_code.as_str(), "200" | "202" | "204");
+    let api_failure = if api_request_ok && api_http_ok {
+        None
+    } else if !api_request_ok {
+        Some(if stderr.is_empty() {
+            format!("curl exited with status {}", output.status)
         } else {
-            anyhow::bail!("curl exited with status {}: {}", output.status, stderr);
+            format!("curl exited with status {}: {}", output.status, stderr)
+        })
+    } else if body.is_empty() {
+        Some(format!("shutdown API returned HTTP {}", http_code))
+    } else {
+        Some(format!("shutdown API returned HTTP {}: {}", http_code, body))
+    };
+
+    if api_failure.is_none() && wait_for_guest_exit(guest_name, pid, Duration::from_secs(15)).is_ok() {
+        return Ok(ShutdownOutcome {
+            pid,
+            api_failure,
+            forced: None,
+        });
+    }
+
+    if let Some(pid) = pid {
+        if process_exists(pid) {
+            signal_pid(pid, "TERM")?;
+            if wait_for_guest_exit(guest_name, Some(pid), Duration::from_secs(5)).is_ok() {
+                return Ok(ShutdownOutcome {
+                    pid: Some(pid),
+                    api_failure,
+                    forced: Some("TERM"),
+                });
+            }
+            if process_exists(pid) {
+                signal_pid(pid, "KILL")?;
+                wait_for_guest_exit(guest_name, Some(pid), Duration::from_secs(2))?;
+                return Ok(ShutdownOutcome {
+                    pid: Some(pid),
+                    api_failure,
+                    forced: Some("KILL"),
+                });
+            }
+        }
+    }
+
+    match wait_for_guest_exit(guest_name, pid, Duration::from_secs(2)) {
+        Ok(()) => Ok(ShutdownOutcome {
+            pid,
+            api_failure,
+            forced: None,
+        }),
+        Err(wait_err) => {
+            if let Some(api_failure) = api_failure {
+                anyhow::bail!("{api_failure}; {wait_err}");
+            } else {
+                Err(wait_err)
+            }
         }
     }
 }
@@ -1081,16 +1179,31 @@ fn ensure_vnet_backend(admin: &mut AdminState, guest_name: &str) -> Result<Optio
         return Ok(None);
     }
 
-    if admin.vnet_handles.contains_key(guest_name) {
-        return Ok(Some(guest_vnet_socket_path(guest_name)));
+    let socket_path = guest_vnet_socket_path(guest_name);
+
+    if let Some(handle) = admin.vnet_handles.get_mut(guest_name) {
+        if handle.is_alive() {
+            return Ok(Some(socket_path));
+        }
+
+        let _ = handle.shutdown();
+        admin.vnet_handles.remove(guest_name);
+        emit_status(
+            admin,
+            format!(
+                "warn: restarted stale vnet backend for {guest_name} socket={}",
+                socket_path.display()
+            ),
+        );
     }
 
-    let socket_path = guest_vnet_socket_path(guest_name);
     let config = VnetConfig::builder()
         .socket_path(&socket_path)
         .guest_ipv4(Ipv4Addr::new(10, 0, 2, 15))
         .host_ipv4(Ipv4Addr::new(10, 0, 2, 2))
         .netmask(Ipv4Addr::new(255, 255, 255, 0))
+        .dns_ipv4(Ipv4Addr::new(10, 0, 2, 3))
+        .mac(guest_egress_mac(guest_name))
         .build()?;
 
     let handle = VnetBackend::new(config).start()?;
@@ -1178,6 +1291,10 @@ fn print_help(topic: Option<&str>, multi_guest: bool, comment_stdout: bool) {
             out("guests");
             out("  List provisioned guests, sockets, and configured mount counts.");
         }
+        Some("build") => {
+            out("build");
+            out("  Print the git commit SHA and build timestamp baked into this repl_host_v1_2 binary at compile time.");
+        }
         Some("layer") => {
             out("layer <name> <priority>");
             out("  Create or update a named overlay layer.");
@@ -1238,6 +1355,7 @@ fn print_help(topic: Option<&str>, multi_guest: bool, comment_stdout: bool) {
                 out("  launch <guest>                                  — generate and start a guest launch helper asynchronously");
                 out("  launch -script <guest>                          — print the guest launch helper script");
                 out("  shutdown <guest>                                — request guest shutdown via CH API socket");
+                out("  build                                           — print the build commit SHA");
                 out("");
             }
             out("Layer management:");
@@ -1442,6 +1560,7 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
                     } else {
                         match execute_launch_script(guest_name, &script) {
                             Ok(exec) => {
+                                admin.launch_pids.insert(guest_name.to_string(), exec.pid);
                                 emit_status(
                                     admin,
                                     format!(
@@ -1467,20 +1586,42 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
         }
         "shutdown" if parts.len() == 2 => {
             let guest_name = parts[1];
-            match shutdown_guest(guest_name) {
-                Ok(()) => emit_status(
-                    admin,
-                    format!(
-                        "ok: shutdown {guest_name} api_socket={}",
-                        guest_api_socket_path(guest_name).display()
-                    ),
-                ),
+            let launch_pid = admin.launch_pids.get(guest_name).copied();
+            match shutdown_guest(guest_name, launch_pid) {
+                Ok(outcome) => {
+                    admin.launch_pids.remove(guest_name);
+                    let mut detail = String::new();
+                    if let Some(pid) = outcome.pid {
+                        detail.push_str(&format!(" pid={pid}"));
+                    }
+                    if let Some(forced) = outcome.forced {
+                        detail.push_str(&format!(" forced={forced}"));
+                    }
+                    if let Some(api_failure) = outcome.api_failure {
+                        detail.push_str(&format!(" api_fallback={}", api_failure));
+                    }
+                    emit_status(
+                        admin,
+                        format!(
+                            "ok: shutdown {guest_name} api_socket={}{}",
+                            guest_api_socket_path(guest_name).display(),
+                            detail
+                        ),
+                    )
+                }
                 Err(e) => emit_status(admin, format!("error: {e}")),
             }
             return ControlFlow::Continue;
         }
         "shutdown" => {
             emit_status(admin, "error: shutdown <guest>");
+            return ControlFlow::Continue;
+        }
+        "build" if parts.len() == 1 => {
+            emit_status(
+                admin,
+                format!("build: sha={} built_at={}", build_git_sha(), build_time_utc()),
+            );
             return ControlFlow::Continue;
         }
         "help" => {

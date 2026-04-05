@@ -6,6 +6,7 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Layered guest filesystem composition: transport-agnostic FUSE server with in-memory overlay"
+build = "build.rs"
 
 [features]
 default = ["server-core", "bincode-codec"]

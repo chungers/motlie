@@ -254,6 +254,8 @@ run_mmdebstrap "$BASE_ROOTFS" \
     --include=openssh-server,bash,ca-certificates,coreutils,curl,dnsutils,tmux,fuse3,libfuse3-3,systemd,systemd-sysv,dbus,iproute2,cloud-init,locales \
     --customize-hook='chroot "$1" systemctl enable ssh' \
     --customize-hook='chroot "$1" systemctl enable systemd-networkd' \
+    --customize-hook='chroot "$1" systemctl disable systemd-networkd-wait-online.service' \
+    --customize-hook='rm -f "$1/etc/systemd/system/systemd-networkd-wait-online.service" "$1/etc/systemd/system/network-online.target.wants/systemd-networkd-wait-online.service"' \
     --customize-hook='printf "en_US.UTF-8 UTF-8\n" > "$1/etc/locale.gen"' \
     --customize-hook='chroot "$1" locale-gen en_US.UTF-8' \
     --customize-hook='chroot "$1" update-locale LANG=en_US.UTF-8' \
@@ -301,46 +303,76 @@ codex_root="$agent_state_root/codex"
 codex_sqlite_root="$codex_root/sqlite"
 claude_root="$agent_state_root/claude"
 claude_code_root="$agent_state_root/claude-code"
-
-ensure_link() {
-    target="$1"
-    link_path="$2"
-    if [ -L "$link_path" ]; then
-        if [ "$(readlink "$link_path")" != "$target" ]; then
-            ln -snf "$target" "$link_path" >/dev/null 2>&1 || true
-        fi
-        return
-    fi
-    if [ ! -e "$link_path" ]; then
-        ln -snf "$target" "$link_path" >/dev/null 2>&1 || true
-    fi
-}
-
 if [ -d "$agent_state_root" ] && [ -n "${HOME:-}" ] && [ -d "$HOME" ]; then
     mkdir -p "$codex_root" "$codex_sqlite_root" "$claude_root" "$claude_code_root" "$HOME/.config" >/dev/null 2>&1 || true
-    ensure_link "$codex_root" "$HOME/.codex"
-    ensure_link "$claude_root" "$HOME/.claude"
-    ensure_link "$claude_code_root" "$HOME/.config/claude-code"
     export CODEX_HOME="$codex_root"
     export CODEX_SQLITE_HOME="$codex_sqlite_root"
 fi
 AGENTEOF' \
+    --customize-hook='cat > "$1/usr/local/bin/motlie-agent-state-setup" << "AGENTSVCEOF"
+#!/bin/sh
+set -eu
+
+setup_user() {
+    user_name="$1"
+    home_dir="/home/$user_name"
+
+    [ -d "$home_dir" ] || return 0
+
+    install -d -m 0755 "$home_dir/.config"
+    install -d -m 0700 "$home_dir/.codex" "$home_dir/.claude" "$home_dir/.config/claude-code"
+    install -d -m 0700 /agent-state/codex /agent-state/claude /agent-state/claude-code /agent-state/codex/sqlite
+
+    chown "$user_name:$user_name" \
+        "$home_dir/.config" \
+        "$home_dir/.codex" \
+        "$home_dir/.claude" \
+        "$home_dir/.config/claude-code" \
+        /agent-state/codex \
+        /agent-state/codex/sqlite \
+        /agent-state/claude \
+        /agent-state/claude-code || true
+
+    mountpoint -q "$home_dir/.codex" || mount --bind /agent-state/codex "$home_dir/.codex"
+    mountpoint -q "$home_dir/.claude" || mount --bind /agent-state/claude "$home_dir/.claude"
+    mountpoint -q "$home_dir/.config/claude-code" || mount --bind /agent-state/claude-code "$home_dir/.config/claude-code"
+}
+
+for user_name in alice bob; do
+    if id -u "$user_name" >/dev/null 2>&1; then
+        setup_user "$user_name"
+    fi
+done
+AGENTSVCEOF' \
+    --customize-hook='chmod 755 "$1/usr/local/bin/motlie-agent-state-setup"' \
     --customize-hook="cat > \"\$1/etc/systemd/network/20-egress.network\" << \"NETEOF\"
 [Match]
+Name=eth1
 MACAddress=$EGRESS_MAC
 
 [Network]
-DHCP=ipv4
-
-[DHCPv4]
-UseDNS=yes
-RouteMetric=100
+ConfigureWithoutCarrier=yes
 NETEOF" \
+    --customize-hook='cat > "$1/usr/local/bin/motlie-vnet-egress-setup" << "EGRESSEOF"
+#!/bin/sh
+set -eu
+
+ip link set eth1 up || exit 0
+ip addr replace 10.0.2.15/24 dev eth1
+ip route replace 10.0.2.0/24 dev eth1 scope link src 10.0.2.15
+ip route replace default via 10.0.2.2 dev eth1 metric 100
+ip route del default dev eth0 2>/dev/null || true
+cat > /etc/resolv.conf << "RESOLVEOF"
+nameserver 10.0.2.3
+options edns0
+RESOLVEOF
+EGRESSEOF' \
+    --customize-hook='chmod 755 "$1/usr/local/bin/motlie-vnet-egress-setup"' \
     --customize-hook='cat > "$1/etc/systemd/system/motlie-vfs-guest.service" << "SVCEOF"
 [Unit]
 Description=motlie-vfs guest filesystem mounter
-After=local-fs.target cloud-final.service
-Wants=cloud-final.service
+ConditionPathExists=/etc/motlie-vfs/mounts.yaml
+After=local-fs.target
 
 [Service]
 Type=simple
@@ -351,6 +383,39 @@ RestartSec=2
 [Install]
 WantedBy=multi-user.target
 SVCEOF' \
+    --customize-hook='chroot "$1" systemctl enable motlie-vfs-guest' \
+    --customize-hook='cat > "$1/etc/systemd/system/motlie-agent-state.service" << "AGENTUNITEOF"
+[Unit]
+Description=Bind agent state into mounted guest home
+After=motlie-vfs-guest.service
+Requires=motlie-vfs-guest.service
+ConditionPathIsDirectory=/agent-state
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/motlie-agent-state-setup
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+AGENTUNITEOF' \
+    --customize-hook='chroot "$1" systemctl enable motlie-agent-state' \
+    --customize-hook='cat > "$1/etc/systemd/system/motlie-vnet-egress.service" << "EGRESSUNITEOF"
+[Unit]
+Description=Configure static v1.2 egress NIC
+After=systemd-networkd.service
+Wants=systemd-networkd.service
+ConditionPathExists=/sys/class/net/eth1
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/motlie-vnet-egress-setup
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EGRESSUNITEOF' \
+    --customize-hook='chroot "$1" systemctl enable motlie-vnet-egress' \
     --customize-hook="echo \"$BASE_HOSTNAME\" > \"\$1/etc/hostname\"" \
     --customize-hook='cat > "$1/etc/motd" << "MOTDEOF"
                     _   _ _
