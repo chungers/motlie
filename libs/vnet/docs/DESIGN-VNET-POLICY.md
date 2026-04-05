@@ -6,6 +6,7 @@
 |------|-----|---------|
 | 2026-04-05 | @claude-tl | Add connection timeline framework: 3-phase detection (DNS intent → handshake → flow), technique tables with API mapping, JA3/beacon gaps documented |
 | 2026-04-05 | @claude-tl | Add DNS exfiltration detection use case, label_lengths/name_wire_len in DnsQueryContext, defense-in-depth rationale |
+| 2026-04-05 | @claude-tl | Add confidence to PolicyAction (min-propagation in chains), InterceptPolicy with ArcSwap (latency analysis), PolicyEvent enum at call site, remove EventSinkPolicy |
 | 2026-04-05 | @claude-tl | Add network metadata gaps: IP TTL, TCP window/options, DNS counts, MAC verification, guest PID parallel gap with vfs, priority assessment |
 | 2026-04-05 | @claude-tl | Add errno to PolicyAction, predefined errno pairs, OTel logging, EventSinkPolicy, cross-stack alignment with vfs, chain returns impl EgressPolicy |
 | 2026-04-05 | @claude-tl | Add PolicyReason (Cow-backed enum), on_tcp_flow with flow metadata + SNI, exfiltration/C2/fronting use cases, honest DPI limitations, &self + interior mutability guidance |
@@ -170,17 +171,60 @@ impl From<DomainCategory> for PolicyReason { ... }
 ```rust
 /// Policy decision. Shared shape with motlie-vfs's FsPolicy.
 pub enum PolicyAction {
-    /// Allow the request. Optionally attach a reason for audit logging.
-    Allow { reason: Option<PolicyReason> },
-    /// Deny the request. `errno` gives the policy a semantic hook into
-    /// *how* the denial manifests (NXDOMAIN, RST, etc.). The interceptor
-    /// maps errno to the appropriate forged response.
-    Deny { errno: i32, reason: PolicyReason },
-    /// Allow but flag for observation. The request proceeds normally but
-    /// the engine logs it at a higher severity.
-    Observe { reason: PolicyReason },
+    /// Allow the request.
+    Allow {
+        reason: Option<PolicyReason>,
+        /// Confidence in this decision (0.0–1.0). Rule-based policies
+        /// return 1.0 (certain). Heuristic policies return lower values.
+        /// ML models return model output probability. The chain
+        /// propagates the minimum confidence across all policies —
+        /// one uncertain Allow in a chain of certain Allows makes the
+        /// composite uncertain.
+        confidence: f64,
+    },
+    /// Deny the request. `errno` maps to the forged response.
+    Deny {
+        errno: i32,
+        reason: PolicyReason,
+        /// Confidence in the denial. High confidence (>0.9) = definitive
+        /// block. Lower confidence = correlator may override or escalate.
+        confidence: f64,
+    },
+    /// Allow but flag for observation.
+    Observe {
+        reason: PolicyReason,
+        /// Confidence that this is suspicious (0.0 = barely worth noting,
+        /// 1.0 = almost certainly malicious but not blocking).
+        confidence: f64,
+    },
+}
+
+impl PolicyAction {
+    pub fn confidence(&self) -> f64 {
+        match self {
+            Self::Allow { confidence, .. }
+            | Self::Deny { confidence, .. }
+            | Self::Observe { confidence, .. } => *confidence,
+        }
+    }
 }
 ```
+
+**Confidence propagation in chains:** when `.chain()` merges two
+decisions, the composite carries the **minimum confidence** across the
+chain — the chain's confidence is its weakest link. This means one
+low-confidence Allow in a chain of high-confidence Allows makes the
+composite uncertain, which the correlator can act on.
+
+**Confidence use cases:**
+
+| Policy type | Confidence source |
+|------------|------------------|
+| Rule-based (`CategoryPolicy`) | 1.0 (certain: domain matches known pattern) |
+| Heuristic (`DnsExfilDetector`) | 0.3–0.8 (entropy threshold met, rate not definitive) |
+| Blocklist (`InterceptPolicy`) | 1.0 (correlator already decided) |
+| ML model (future) | Model output probability (0.0–1.0) |
+| Session-aware (future) | Adjusted by accumulated session context keyed by UID |
 
 ### Predefined (errno, reason) Pairs for Network Denials
 
@@ -295,6 +339,77 @@ impl EgressPolicy for NoPolicy {
         PolicyAction::Allow { reason: None }
     }
 }
+```
+
+### InterceptPolicy (externally-fed blocklist)
+
+A policy whose deny set is managed by an external correlator thread.
+The policy itself is stateless in its decision logic — it reads from a
+concurrent snapshot, never writes. The correlator writes.
+
+```rust
+use arc_swap::ArcSwap;
+
+pub struct InterceptPolicy {
+    /// Blocklist snapshot. Updated atomically by the correlator thread.
+    /// Policy reads via load() — ~5ns, zero contention.
+    blocked: Arc<ArcSwap<HashSet<(Ipv4Addr, u16)>>>,
+}
+
+impl EgressPolicy for InterceptPolicy {
+    fn on_tcp_connect(&self, ctx: &TcpConnectContext) -> PolicyAction {
+        let snapshot = self.blocked.load();
+        if snapshot.contains(&(ctx.dst_ip, ctx.dst_port)) {
+            PolicyAction::Deny {
+                errno: libc::ECONNREFUSED,
+                reason: PolicyReason::Custom("correlator: blocked".into()),
+                confidence: 1.0,  // correlator already decided
+            }
+        } else {
+            PolicyAction::Allow { reason: None, confidence: 1.0 }
+        }
+    }
+}
+```
+
+**Correlator writes (separate thread):**
+
+```rust
+// Clone-on-write: amortized O(1) insert, O(1) atomic swap
+let mut current = (**blocklist.load()).clone();
+current.insert((target_ip, target_port));
+blocklist.store(Arc::new(current));
+```
+
+**Latency analysis — why ArcSwap:**
+
+| Approach | Hot-path read | Correlator write | Contention |
+|----------|-------------|-----------------|-----------|
+| `Arc<RwLock<HashSet>>` | ~50ns (read lock + lookup + release) | ~100ns (write lock) | Possible: writer blocks readers |
+| `try_recv` + local map | ~50ns (try_recv miss + local lookup) | ~20ns (channel send) | None, but 1-call delay |
+| **`ArcSwap<HashSet>`** | **~25ns** (atomic load + lookup) | ~50ns + O(N) clone per update | **Zero: readers never block** |
+
+ArcSwap wins: 2x faster reads than RwLock, zero reader-writer contention.
+The O(N) clone happens on the correlator thread (off hot path) and only
+when the blocklist changes (rare — seconds between updates, not per-packet).
+For a 1000-entry blocklist, clone is ~50μs — negligible for a thread that
+runs every few seconds.
+
+**Feedback loop:**
+
+```
+Slirp thread (hot path)         Correlator thread (slow path)
+    │                                    │
+    ├─ policy.on_dns_query(&ctx)        │
+    ├─ emit PolicyEvent ──────────────→ │ receives event
+    ├─ enforce action                    │ accumulates state
+    │                                    │ computes confidence
+    │                                    │ if confidence > threshold:
+    │   ┌────────────────────────────── │   blocklist.store(new_set)
+    │   │  ArcSwap (~25ns read)         │
+    │   ▼                                │
+    ├─ InterceptPolicy reads snapshot   │
+    ├─ Deny if blocked                  │
 ```
 
 ### Logging as a Policy (OTel-compatible)
@@ -1040,58 +1155,85 @@ offsets in the DNS message and add near-zero parsing cost. Guest PID
 is the highest-value gap but requires the v1.3 vsock agent
 infrastructure (see section below).
 
-## EventSinkPolicy (generic event producer)
+## Policy Event Emission
 
-A chainable policy that sends context to a caller-supplied closure.
-Always returns Allow — observe-only, no enforcement. Enables cross-stack
-event correlation without coupling vnet to vfs.
+Event emission is **infrastructure at the call site** (the slirp thread
+loop), not a policy concern. Policies are pure decision functions — they
+don't know their decisions are being observed.
+
+### PolicyEvent Enum
 
 ```rust
-pub struct EventSinkPolicy<F> {
-    on_event: F,
-}
-
-impl<F> EventSinkPolicy<F>
-where
-    F: Fn(NetEvent) + Send + 'static,
-{
-    pub fn new(on_event: F) -> Self {
-        Self { on_event }
-    }
-}
-
-/// Events emitted by the sink policy.
-pub enum NetEvent {
-    DnsQuery(DnsQueryContext),
-    DnsResponse(DnsResponseContext),
-    TcpConnect(TcpConnectContext),
-    TcpFlow(TcpFlowContext),
+/// Emitted by the slirp thread after every policy evaluation.
+/// Identifies which callback was invoked and carries the context +
+/// composite action (with confidence).
+pub enum PolicyEvent {
+    DnsQuery {
+        ctx: DnsQueryContext,
+        action: PolicyAction,
+    },
+    DnsResponse {
+        ctx: DnsResponseContext,
+        action: PolicyAction,
+    },
+    TcpConnect {
+        ctx: TcpConnectContext,
+        action: PolicyAction,
+    },
+    TcpFlow {
+        ctx: TcpFlowContext,
+        action: PolicyAction,
+    },
 }
 ```
 
-Usage at the host runtime (which depends on both vfs and vnet):
+### Emission at the Call Site
+
+The slirp thread loop already parses frames, calls the policy chain,
+and enforces the decision. Event emission is a `try_send` added between
+the decision and enforcement steps:
 
 ```rust
-// Host runtime defines its own unified event:
+// In slirp_thread_main — NOT inside a policy:
+let ctx = parse_dns_query(&frame);
+let action = policy.on_dns_query(&ctx);           // pure decision
+
+if let Some(ref tx) = event_tx {                   // infrastructure
+    let _ = tx.try_send(PolicyEvent::DnsQuery {
+        ctx: ctx.clone(),
+        action: action.clone(),
+    });
+}
+
+match action {                                      // enforcement
+    PolicyAction::Deny { errno, .. } => inject_nxdomain(&frame, errno),
+    _ => slirp.input(&frame),
+}
+```
+
+If no event subscriber is configured, `event_tx` is `None` and the
+branch is skipped — zero overhead.
+
+### Cross-Stack Correlation
+
+The host runtime (which depends on both vfs and vnet) defines its own
+unified event type and subscribes to both stacks:
+
+```rust
+// Host runtime:
 enum RuntimeEvent {
-    Fs(motlie_vfs::FsOpContext),
-    Net(motlie_vnet::NetEvent),
+    Net(motlie_vnet::PolicyEvent),
+    Fs(motlie_vfs::PolicyEvent),
 }
 
 let (tx, rx) = mpsc::channel::<RuntimeEvent>();
-
-// vnet side:
-let tx_net = tx.clone();
-let net_policy = LoggingPolicy
-    .chain(CategoryPolicy::default())
-    .chain(EventSinkPolicy::new(move |evt| {
-        let _ = tx_net.send(RuntimeEvent::Net(evt));
-    }));
+// vnet emits PolicyEvent::DnsQuery { ... } → tx.send(RuntimeEvent::Net(...))
+// vfs emits PolicyEvent::FsOp { ... } → tx.send(RuntimeEvent::Fs(...))
+// Correlator reads from rx, sees both stacks
 ```
 
-Neither crate depends on the other. The host runtime owns the unified
-enum and the channel. Each crate provides `EventSinkPolicy<F>` with a
-generic `Fn` — it doesn't know about the other crate's types.
+Neither crate depends on the other. The host runtime owns the enum
+and the channel.
 
 ### Design Alignment with motlie-vfs
 
@@ -1138,7 +1280,7 @@ the event sink policy can transport them across thread boundaries.
 The policy type parameter flows through the entire stack:
 
 ```
-VnetConfig<P>           // P = NoPolicy | LoggingPolicy | ChainedPolicy<...>
+VnetConfig<P>           // P = NoPolicy | LoggingPolicy | impl EgressPolicy (chained)
   → VnetBackend<P>
     → slirp_thread_main<P>()
       → TxInterceptor<P>   // owns the policy, calls on_dns_query/on_tcp_connect
@@ -1361,7 +1503,7 @@ for stricter environments.
 | Response forging (NXDOMAIN) | Unit test: forge response, re-parse, verify NXDOMAIN |
 | Response forging (TCP RST) | Unit test: forge RST, verify flags + sequence numbers |
 | `DnsReverseMap` | Unit test: insert, lookup, TTL expiry |
-| `ChainedPolicy` | Unit test: Deny short-circuits, Observe sticky, Allow defers |
+| Chain evaluation | Unit test: Deny short-circuits, Observe sticky, min-confidence propagation |
 | `LoggingPolicy` | Unit test: always Allow, tracing events emitted |
 | `CategoryPolicy` | Unit test: suffix matching, known domains, Unknown handling |
 | TX interceptor | Integration test: denied DNS → forged NXDOMAIN in rx channel |
