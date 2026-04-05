@@ -1339,49 +1339,346 @@ a DNS query for an unknown domain occurred") but cannot prove the
 same process did both. PID plumbing (vfs: ~95 LOC, vnet: v1.3 agent)
 is the highest-value gap for cross-stack correlation.
 
-#### Unified Event Pipeline
+#### Full Construction Example
 
 ```rust
-// --- Host runtime (depends on both motlie-vfs and motlie-vnet) ---
+use std::sync::Arc;
+use std::collections::HashSet;
+use std::net::Ipv4Addr;
+use std::time::Duration;
+use arc_swap::ArcSwap;
 
-/// Unified event wrapping both stacks.
-enum RuntimeEvent {
-    Fs(motlie_vfs::PolicyEvent),
-    Net(motlie_vnet::PolicyEvent),
+use motlie_vfs::{FsServer, FsInterceptPolicy, LoggingPolicy as FsLoggingPolicy, ScanDetector};
+use motlie_vnet::{
+    VnetConfig, VnetBackend, InterceptPolicy, LoggingPolicy as NetLoggingPolicy,
+    CategoryPolicy, DnsExfilDetector, EntropyConfig,
+};
+
+fn main() -> anyhow::Result<()> {
+    // ---------------------------------------------------------------
+    // Step 1: Create shared blocklists (correlator writes, policies read)
+    // ---------------------------------------------------------------
+    let fs_blocked: Arc<ArcSwap<HashSet<String>>> =
+        Arc::new(ArcSwap::from_pointee(HashSet::new()));
+    let net_blocked: Arc<ArcSwap<HashSet<(Ipv4Addr, u16)>>> =
+        Arc::new(ArcSwap::from_pointee(HashSet::new()));
+
+    // ---------------------------------------------------------------
+    // Step 2: Create unified event channel
+    // ---------------------------------------------------------------
+    enum RuntimeEvent {
+        Fs(motlie_vfs::PolicyEvent),
+        Net(motlie_vnet::PolicyEvent),
+    }
+
+    let (tx, rx) = std::sync::mpsc::channel::<RuntimeEvent>();
+    let tx_fs = tx.clone();
+    let tx_net = tx.clone();
+
+    // ---------------------------------------------------------------
+    // Step 3: Build vfs stack with PolicyEvaluator
+    // ---------------------------------------------------------------
+    let fs_server = FsServer::builder()
+        .policy(
+            FsLoggingPolicy                                 // logs every fs op via OTel tracing
+                .chain(FsInterceptPolicy::new(fs_blocked.clone()))  // reads correlator blocklist
+                .chain(ScanDetector)                        // flags rapid metadata scanning
+        )
+        .deny_threshold(0.5)                                // Allow < 0.5 → auto Deny
+        .policy_events(tx_fs)                               // events → correlator
+        .build();
+
+    // Add mounts (existing FsServer API)
+    fs_server.add_mount("alice-home", "/home/dchung".into(), false)?;
+
+    // ---------------------------------------------------------------
+    // Step 4: Build vnet stack with PolicyEvaluator
+    // ---------------------------------------------------------------
+    let vnet_config = VnetConfig::builder()
+        .socket_path("/tmp/motlie-vnet-0.sock")
+        .egress_policy(
+            NetLoggingPolicy                                // logs every DNS/TCP via OTel tracing
+                .chain(InterceptPolicy::new(net_blocked.clone()))   // reads correlator blocklist
+                .chain(CategoryPolicy::default())           // classifies domains by category
+                .chain(DnsExfilDetector::new(EntropyConfig {
+                    min_label_len: 30,
+                    entropy_threshold: 3.5,
+                    rate_window: Duration::from_secs(60),
+                    rate_limit: 50,
+                }))
+        )
+        .deny_threshold(0.5)                                // Allow < 0.5 → auto Deny
+        .policy_events(tx_net)                              // events → correlator
+        .build()?;
+
+    let vnet_handle = VnetBackend::new(vnet_config).start()?;
+    eprintln!("vnet: socket ready at /tmp/motlie-vnet-0.sock");
+
+    // ---------------------------------------------------------------
+    // Step 5: Start correlator thread
+    // ---------------------------------------------------------------
+    let fs_blocked_for_correlator = fs_blocked.clone();
+    let net_blocked_for_correlator = net_blocked.clone();
+
+    std::thread::Builder::new()
+        .name("correlator".into())
+        .spawn(move || {
+            correlator_main(rx, fs_blocked_for_correlator, net_blocked_for_correlator);
+        })?;
+
+    // ---------------------------------------------------------------
+    // Step 6: Launch CH guest (existing workflow)
+    // ---------------------------------------------------------------
+    eprintln!("Launch CH: ./launch-ch.sh --admin-net=tap --egress-net=vhost-user");
+
+    // ... wait for shutdown signal ...
+    Ok(())
 }
+```
 
-// Event channels: one sender per stack, one receiver for the correlator.
-let (tx, rx) = mpsc::channel::<RuntimeEvent>();
-let tx_fs = tx.clone();
-let tx_net = tx.clone();
+#### Correlator with Concrete Event Handling
 
-// --- vfs policy setup ---
-let fs_blocked = Arc::new(ArcSwap::from_pointee(HashSet::<String>::new()));
+```rust
+fn correlator_main(
+    rx: mpsc::Receiver<RuntimeEvent>,
+    fs_blocked: Arc<ArcSwap<HashSet<String>>>,
+    net_blocked: Arc<ArcSwap<HashSet<(Ipv4Addr, u16)>>>,
+) {
+    struct PendingRead {
+        path: String,
+        confidence: f64,
+        timestamp: Instant,
+    }
 
-let fs_server = FsServer::builder()
-    .policy(
-        LoggingPolicy
-            .chain(FsInterceptPolicy::new(fs_blocked.clone()))
-            .chain(ScanDetector)
-    )
-    .deny_threshold(0.5)
-    .policy_events(tx_fs)   // events flow to correlator
-    .build();
+    struct TrackedFlow {
+        domain: Option<String>,
+        dns_confidence: f64,
+        bytes_tx: u64,
+        started: Instant,
+    }
 
-// --- vnet policy setup ---
-let net_blocked = Arc::new(ArcSwap::from_pointee(HashSet::<(Ipv4Addr, u16)>::new()));
+    let mut pending_reads: Vec<PendingRead> = Vec::new();
+    let mut tracked_flows: HashMap<(Ipv4Addr, u16), TrackedFlow> = HashMap::new();
 
-let vnet_config = VnetConfig::builder()
-    .socket_path("/tmp/motlie-vnet-0.sock")
-    .egress_policy(
-        LoggingPolicy
-            .chain(InterceptPolicy::new(net_blocked.clone()))
-            .chain(CategoryPolicy::default())
-            .chain(DnsExfilDetector::new(entropy_config))
-    )
-    .deny_threshold(0.5)
-    .policy_events(tx_net)  // events flow to correlator
-    .build()?;
+    for event in rx {
+        // Expire old state (sliding 60s window)
+        pending_reads.retain(|r| r.timestamp.elapsed() < Duration::from_secs(60));
+
+        match event {
+            // -------------------------------------------------------
+            // vfs: sensitive file accessed
+            // -------------------------------------------------------
+            RuntimeEvent::Fs(motlie_vfs::PolicyEvent::FsOp { ref ctx, ref action }) => {
+                if ctx.is_sensitive {
+                    // Example event:
+                    // FsOp {
+                    //   ctx: { op: Read, path: "/.env", is_sensitive: true,
+                    //          is_overlay: false, metadata_rate: 12 },
+                    //   action: Allow { reason: Category(CredentialAccess), confidence: 0.4 }
+                    // }
+                    pending_reads.push(PendingRead {
+                        path: ctx.path.clone(),
+                        confidence: action.confidence(),
+                        timestamp: Instant::now(),
+                    });
+                    eprintln!("[correlator] sensitive read: {} (confidence: {:.1})",
+                              ctx.path, action.confidence());
+                }
+            }
+
+            // -------------------------------------------------------
+            // vfs: high-entropy write to temp (staging)
+            // -------------------------------------------------------
+            RuntimeEvent::Fs(motlie_vfs::PolicyEvent::FsComplete {
+                ref ctx, ref result, ..
+            }) => {
+                if let Some(entropy) = result.write_entropy {
+                    if entropy > 4.0 && ctx.path.starts_with("/tmp/") {
+                        // Example event:
+                        // FsComplete {
+                        //   ctx: { op: Write, path: "/tmp/payload.bin" },
+                        //   result: { bytes: Some(2_000_000), write_entropy: Some(4.8) },
+                        //   action: Allow { confidence: 1.0 }
+                        // }
+                        pending_reads.push(PendingRead {
+                            path: ctx.path.clone(),
+                            confidence: 0.3,  // staging = suspicious
+                            timestamp: Instant::now(),
+                        });
+                        eprintln!("[correlator] staging detected: {} (entropy: {:.1}, {}B)",
+                                  ctx.path, entropy, result.bytes.unwrap_or(0));
+                    }
+                }
+            }
+
+            // -------------------------------------------------------
+            // vnet: uncertain DNS allow
+            // -------------------------------------------------------
+            RuntimeEvent::Net(motlie_vnet::PolicyEvent::DnsQuery { ref ctx, ref action }) => {
+                // Example event:
+                // DnsQuery {
+                //   ctx: { domain: "suspicious-cdn.xyz", query_type: A,
+                //          label_lengths: [15, 3], name_wire_len: 20 },
+                //   action: Allow { reason: Category(Unknown), confidence: 0.5 }
+                // }
+                if action.confidence() < 0.8 {
+                    eprintln!("[correlator] uncertain DNS: {} (confidence: {:.1})",
+                              ctx.domain, action.confidence());
+                }
+            }
+
+            // -------------------------------------------------------
+            // vnet: TCP connection established
+            // -------------------------------------------------------
+            RuntimeEvent::Net(motlie_vnet::PolicyEvent::TcpConnect { ref ctx, ref action }) => {
+                // Example event:
+                // TcpConnect {
+                //   ctx: { dst_ip: 93.184.216.34, dst_port: 443,
+                //          domain: Some("suspicious-cdn.xyz"), source_port: 48832 },
+                //   action: Allow { reason: Category(Unknown), confidence: 0.5 }
+                // }
+                tracked_flows.insert(
+                    (ctx.dst_ip, ctx.dst_port),
+                    TrackedFlow {
+                        domain: ctx.domain.clone(),
+                        dns_confidence: action.confidence(),
+                        bytes_tx: 0,
+                        started: Instant::now(),
+                    },
+                );
+            }
+
+            // -------------------------------------------------------
+            // vnet: flow update — check for exfiltration
+            // -------------------------------------------------------
+            RuntimeEvent::Net(motlie_vnet::PolicyEvent::TcpFlow { ref ctx, ref action }) => {
+                // Example event:
+                // TcpFlow {
+                //   ctx: { dst_ip: 93.184.216.34, dst_port: 443,
+                //          domain: Some("suspicious-cdn.xyz"),
+                //          sni: Some("suspicious-cdn.xyz"),
+                //          bytes_tx: 5_200_000, bytes_rx: 1_200,
+                //          duration: 8s, is_close: false },
+                //   action: Allow { confidence: 0.5 }
+                // }
+                let key = (ctx.dst_ip, ctx.dst_port);
+                if let Some(flow) = tracked_flows.get_mut(&key) {
+                    flow.bytes_tx = ctx.bytes_tx;
+
+                    // Cross-stack check: sensitive read + uncertain flow + large upload
+                    let has_recent_sensitive = pending_reads.iter().any(|r| {
+                        r.timestamp.elapsed() < Duration::from_secs(60)
+                    });
+
+                    if has_recent_sensitive && flow.dns_confidence < 0.8 && flow.bytes_tx > 1_000_000 {
+                        // Compound signal!
+                        let compound_confidence = 0.9;
+                        eprintln!(
+                            "[correlator] EXFIL DETECTED: {}:{} domain={:?} \
+                             bytes_tx={} dns_confidence={:.1} → BLOCKING",
+                            ctx.dst_ip, ctx.dst_port, flow.domain,
+                            flow.bytes_tx, flow.dns_confidence,
+                        );
+
+                        // Write to vnet blocklist
+                        let mut current = (**net_blocked.load()).clone();
+                        current.insert(key);
+                        net_blocked.store(Arc::new(current));
+
+                        // Optionally also block the staged file in vfs
+                        for read in &pending_reads {
+                            if read.path.starts_with("/tmp/") {
+                                let mut fs_current = (**fs_blocked.load()).clone();
+                                fs_current.insert(read.path.clone());
+                                fs_blocked.store(Arc::new(fs_current));
+                                eprintln!("[correlator] also blocking fs path: {}", read.path);
+                            }
+                        }
+                    }
+                }
+
+                // Clean up closed flows
+                if ctx.is_close {
+                    tracked_flows.remove(&key);
+                }
+            }
+
+            _ => {}
+        }
+    }
+}
+```
+
+#### Example Event Stream
+
+A concrete sequence showing the events the correlator receives, with
+actual `PolicyAction` values and confidence scores:
+
+```
+T+0.0s  ← Fs(FsOp {
+            ctx: { op: Read, tag: "alice-home", path: "/.env",
+                   is_sensitive: true, is_overlay: false,
+                   metadata_rate: 12, unique_paths_in_window: 5 },
+            action: Allow { reason: Some(Category(CredentialAccess)),
+                            confidence: 0.4 }
+          })
+        → correlator: records pending sensitive read "/.env" at 0.4
+
+T+1.2s  ← Fs(FsComplete {
+            ctx: { op: Read, path: "/.env" },
+            result: { success: true, bytes: Some(256), write_entropy: None,
+                      latency: 0.3ms },
+            action: Allow { confidence: 1.0 }
+          })
+        → correlator: notes 256 bytes read (small, likely API key)
+
+T+2.1s  ← Net(DnsQuery {
+            ctx: { domain: "drop.evil-cdn.xyz",
+                   query_type: A, source_port: 43210,
+                   label_lengths: [4, 8, 3], name_wire_len: 20 },
+            action: Allow { reason: Some(Category(Unknown)),
+                            confidence: 0.5 }
+          })
+        → correlator: uncertain DNS 2.1s after sensitive read — tracking
+
+T+2.3s  ← Net(TcpConnect {
+            ctx: { dst_ip: 198.51.100.42, dst_port: 443,
+                   domain: Some("drop.evil-cdn.xyz"),
+                   source_port: 48832 },
+            action: Allow { reason: Some(Category(Unknown)),
+                            confidence: 0.5 }
+          })
+        → correlator: flow started to uncertain domain — tracking
+
+T+3.5s  ← Net(TcpFlow {
+            ctx: { dst_ip: 198.51.100.42, dst_port: 443,
+                   domain: Some("drop.evil-cdn.xyz"),
+                   sni: Some("drop.evil-cdn.xyz"),
+                   bytes_tx: 52_000, bytes_rx: 800,
+                   duration: 1.2s, is_close: false },
+            action: Allow { confidence: 0.5 }
+          })
+        → correlator: 52KB uploaded — not yet threshold (1MB)
+
+T+8.7s  ← Net(TcpFlow {
+            ctx: { dst_ip: 198.51.100.42, dst_port: 443,
+                   bytes_tx: 2_100_000, bytes_rx: 1_200,
+                   duration: 6.4s, is_close: false },
+            action: Allow { confidence: 0.5 }
+          })
+        → correlator: 2.1MB uploaded!
+          sensitive read (T+0, confidence 0.4) +
+          uncertain DNS (confidence 0.5) +
+          large upload (2.1MB tx, 1.2KB rx = 1750:1 ratio)
+          → compound confidence: 0.9
+          → WRITE net_blocked: { (198.51.100.42, 443) }
+
+T+8.8s  (next packet from guest to 198.51.100.42:443)
+        → InterceptPolicy reads ArcSwap → match!
+        → Deny { errno: ECONNREFUSED, reason: "correlator: blocked",
+                  confidence: 1.0 }
+        → forge TCP RST → inject into guest
+        → connection killed, exfiltration stopped
 ```
 
 #### Correlator Thread
