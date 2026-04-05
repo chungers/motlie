@@ -308,6 +308,7 @@ architecture. Phase 4 validates end-to-end.
 
 | Dependency | Type | Required for |
 |------------|------|-------------|
+| `motlie-policy` | Crate (`libs/policy`) | Phase 2+ (entropy, domain utilities) |
 | Existing `motlie-vnet` (Phases 1-2) | Crate | Phase 3+ |
 | `EgressPolicy` trait impl | Host runtime | Phase 3+ (default provided) |
 | No new system dependencies | — | — |

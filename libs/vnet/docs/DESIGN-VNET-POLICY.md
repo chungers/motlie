@@ -652,12 +652,27 @@ a low false positive rate — short high-entropy labels are common (CDN
 hashes like `d1234.cloudfront.net`), but long high-entropy labels are
 rare in legitimate traffic.
 
-**Implementation using the policy API:**
+**Implementation via `motlie-policy` crate:**
+
+Entropy analysis and other detection primitives live in `libs/policy/`
+(`motlie-policy` crate) — shared by both `motlie-vfs` and `motlie-vnet`
+without either depending on the other.
+
+```
+libs/policy/
+├── src/
+│   ├── lib.rs          // pub mod entropy; pub mod domain;
+│   ├── entropy.rs      // shannon_entropy(), EntropyConfig
+│   └── domain.rs       // extract_base_domain(), domain utilities
+└── Cargo.toml          // motlie-policy, zero deps on vfs/vnet
+```
 
 ```rust
+// libs/policy/src/entropy.rs
+
 /// Shannon entropy of a byte string (bits per character).
 /// Returns 0.0 for empty input.
-fn shannon_entropy(s: &str) -> f64 {
+pub fn shannon_entropy(s: &str) -> f64 {
     if s.is_empty() {
         return 0.0;
     }
@@ -675,9 +690,11 @@ fn shannon_entropy(s: &str) -> f64 {
         .sum()
 }
 
+// libs/policy/src/domain.rs
+
 /// Extract the base domain (last two labels) from an FQDN.
 /// "a.b.c.attacker.com" → "attacker.com"
-fn extract_base_domain(domain: &str) -> String {
+pub fn extract_base_domain(domain: &str) -> String {
     let labels: Vec<&str> = domain.split('.').collect();
     if labels.len() >= 2 {
         labels[labels.len() - 2..].join(".")
@@ -685,6 +702,19 @@ fn extract_base_domain(domain: &str) -> String {
         domain.to_string()
     }
 }
+```
+
+Policy implementations in `motlie-vnet` and `motlie-vfs` depend on
+`motlie-policy` for these primitives:
+
+```toml
+# libs/vnet/Cargo.toml
+[dependencies]
+motlie-policy = { path = "../policy" }
+
+# libs/vfs/Cargo.toml
+[dependencies]
+motlie-policy = { path = "../policy" }
 ```
 
 **Composing entropy analysis into a policy chain:**
