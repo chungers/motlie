@@ -4,6 +4,7 @@ members = [
     "libs/db",
     "libs/mcp",
     "libs/vfs",
+    "libs/vnet",
 ]
 resolver = "2"
 

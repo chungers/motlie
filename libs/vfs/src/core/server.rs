@@ -1,6 +1,8 @@
 //! FsServer and FsServerBuilder: tag-based mount routing and handle_op() dispatch.
 
 use std::collections::HashMap;
+#[cfg(unix)]
+use std::ffi::CString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -56,14 +58,16 @@ struct MountState {
     read_only: bool,
     backing: MountBacking,
     inode_table: Mutex<InodeTable>,
+    owner_override: Option<(u32, u32)>,
 }
 
 impl MountState {
-    fn new(tag: &str, host_path: PathBuf, read_only: bool) -> Self {
+    fn new(tag: &str, host_path: PathBuf, read_only: bool, owner_override: Option<(u32, u32)>) -> Self {
         let mut root_attrs = default_root_attrs();
         if let Ok(meta) = fs::metadata(&host_path) {
             fill_attrs_from_metadata(&mut root_attrs, &meta, 1);
         }
+        apply_owner_override(&mut root_attrs, owner_override);
         let mut inode_table = InodeTable::new(root_attrs);
         if let Some(root) = inode_table.get_mut(1) {
             root.host_path = Some(host_path.clone());
@@ -73,6 +77,7 @@ impl MountState {
             read_only,
             backing: MountBacking::Disk(DiskBacking { host_root: host_path }),
             inode_table: Mutex::new(inode_table),
+            owner_override,
         }
     }
 }
@@ -93,7 +98,7 @@ pub struct FsServer {
 }
 
 pub struct FsServerBuilder {
-    mounts: Vec<(String, PathBuf, bool)>,
+    mounts: Vec<(String, PathBuf, bool, Option<(u32, u32)>)>,
     event_capacity: Option<usize>,
     policy: Option<Box<dyn PolicyFn>>,
     overlay_enabled: bool,
@@ -125,7 +130,17 @@ impl FsServer {
     }
 
     pub fn add_mount(&self, tag: &str, host_path: PathBuf, read_only: bool) -> Result<()> {
-        let state = MountState::new(tag, host_path, read_only);
+        self.add_mount_as(tag, host_path, read_only, None)
+    }
+
+    pub fn add_mount_as(
+        &self,
+        tag: &str,
+        host_path: PathBuf,
+        read_only: bool,
+        owner_override: Option<(u32, u32)>,
+    ) -> Result<()> {
+        let state = MountState::new(tag, host_path, read_only, owner_override);
         let mut mounts = self.mounts.write().map_err(|e| anyhow!("lock poisoned: {e}"))?;
         mounts.insert(tag.to_string(), state);
         Ok(())
@@ -152,7 +167,18 @@ impl FsServer {
 
 impl FsServerBuilder {
     pub fn mount(mut self, tag: &str, host_path: PathBuf, read_only: bool) -> Self {
-        self.mounts.push((tag.to_string(), host_path, read_only));
+        self.mounts.push((tag.to_string(), host_path, read_only, None));
+        self
+    }
+
+    pub fn mount_as(
+        mut self,
+        tag: &str,
+        host_path: PathBuf,
+        read_only: bool,
+        owner_override: Option<(u32, u32)>,
+    ) -> Self {
+        self.mounts.push((tag.to_string(), host_path, read_only, owner_override));
         self
     }
 
@@ -173,8 +199,8 @@ impl FsServerBuilder {
 
     pub fn build(self) -> Result<FsServer> {
         let mut mount_map = HashMap::new();
-        for (tag, host_path, read_only) in self.mounts {
-            mount_map.insert(tag.clone(), MountState::new(&tag, host_path, read_only));
+        for (tag, host_path, read_only, owner_override) in self.mounts {
+            mount_map.insert(tag.clone(), MountState::new(&tag, host_path, read_only, owner_override));
         }
 
         let event_tx = self.event_capacity.map(|cap| {
@@ -323,7 +349,8 @@ impl FsServer {
             match fs::symlink_metadata(&host_path) {
                 Ok(meta) => {
                     let kind = file_type_from_meta(&meta);
-                    let attrs = metadata_to_attrs(&meta, 0, kind);
+                    let mut attrs = metadata_to_attrs(&meta, 0, kind);
+                    apply_owner_override(&mut attrs, mount.owner_override);
                     let mut table = mount.inode_table.lock();
                     match table.allocate(&rel_path, InodeKind::Disk, Some(host_path), attrs.clone()) {
                         Ok(inode) => {
@@ -380,6 +407,7 @@ impl FsServer {
                 Ok(meta) => {
                     let kind = file_type_from_meta(&meta);
                     let mut attrs = metadata_to_attrs(&meta, inode, kind);
+                    apply_owner_override(&mut attrs, mount.owner_override);
                     attrs.inode = inode;
                     FsResult::Attr { attrs, ttl_secs: 0 }
                 }
@@ -398,6 +426,11 @@ impl FsServer {
         if let Some(hp) = &entry.host_path {
             let hp = hp.clone();
             drop(table);
+            if set.uid.is_some() || set.gid.is_some() {
+                if let Err(e) = set_ownership(&hp, set.uid, set.gid) {
+                    return FsResult::Error { errno: io_errno(&e) };
+                }
+            }
             if let Some(mode) = set.mode {
                 if let Err(e) = set_permissions(&hp, mode) {
                     return FsResult::Error { errno: io_errno(&e) };
@@ -495,6 +528,8 @@ impl FsServer {
                     atime: now, mtime: now, ctime: now,
                     kind: *file_kind, mode: 0o755, nlink: 1, uid: 0, gid: 0,
                 };
+                let mut attrs = attrs;
+                apply_owner_override(&mut attrs, mount.owner_override);
                 let child_inode = table.allocate(&child_path, *ino_kind, child_host.clone(), attrs).unwrap_or(0);
                 entries.push(DirEntry { inode: child_inode, offset: 0, kind: *file_kind, name: name.clone() });
             }
@@ -632,7 +667,8 @@ impl FsServer {
                 let _ = set_permissions(&host_path, mode);
                 match fs::symlink_metadata(&host_path) {
                     Ok(meta) => {
-                        let attrs = metadata_to_attrs(&meta, 0, FileType::RegularFile);
+                        let mut attrs = metadata_to_attrs(&meta, 0, FileType::RegularFile);
+                        apply_owner_override(&mut attrs, mount.owner_override);
                         let mut table = mount.inode_table.lock();
                         match table.allocate(&rel_path, InodeKind::Disk, Some(host_path), attrs.clone()) {
                             Ok(inode) => {
@@ -696,7 +732,8 @@ impl FsServer {
                 let _ = set_permissions(&host_path, mode);
                 match fs::symlink_metadata(&host_path) {
                     Ok(meta) => {
-                        let attrs = metadata_to_attrs(&meta, 0, FileType::Directory);
+                        let mut attrs = metadata_to_attrs(&meta, 0, FileType::Directory);
+                        apply_owner_override(&mut attrs, mount.owner_override);
                         let mut table = mount.inode_table.lock();
                         match table.allocate(&rel_path, InodeKind::Disk, Some(host_path), attrs.clone()) {
                             Ok(inode) => {
@@ -893,7 +930,8 @@ impl FsServer {
             Ok(()) => {
                 match fs::symlink_metadata(&host_path) {
                     Ok(meta) => {
-                        let attrs = metadata_to_attrs(&meta, 0, FileType::Symlink);
+                        let mut attrs = metadata_to_attrs(&meta, 0, FileType::Symlink);
+                        apply_owner_override(&mut attrs, mount.owner_override);
                         let mut table = mount.inode_table.lock();
                         match table.allocate(&rel_path, InodeKind::Disk, Some(host_path), attrs.clone()) {
                             Ok(inode) => {
@@ -1072,6 +1110,13 @@ fn metadata_to_attrs(meta: &fs::Metadata, inode: u64, kind: FileType) -> FileAtt
     attrs
 }
 
+fn apply_owner_override(attrs: &mut FileAttr, owner_override: Option<(u32, u32)>) {
+    if let Some((uid, gid)) = owner_override {
+        attrs.uid = uid;
+        attrs.gid = gid;
+    }
+}
+
 fn file_type_from_meta(meta: &fs::Metadata) -> FileType {
     if meta.is_dir() { FileType::Directory }
     else if meta.file_type().is_symlink() { FileType::Symlink }
@@ -1110,6 +1155,26 @@ fn set_permissions(path: &Path, mode: u32) -> std::io::Result<()> {
 
 #[cfg(not(unix))]
 fn set_permissions(_path: &Path, _mode: u32) -> std::io::Result<()> { Ok(()) }
+
+#[cfg(unix)]
+fn set_ownership(path: &Path, uid: Option<u32>, gid: Option<u32>) -> std::io::Result<()> {
+    use std::io;
+    use std::os::unix::ffi::OsStrExt;
+
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains interior NUL"))?;
+    let owner = uid.map(|v| v as libc::uid_t).unwrap_or(!0);
+    let group = gid.map(|v| v as libc::gid_t).unwrap_or(!0);
+    let rc = unsafe { libc::chown(c_path.as_ptr(), owner, group) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn set_ownership(_path: &Path, _uid: Option<u32>, _gid: Option<u32>) -> std::io::Result<()> { Ok(()) }
 
 fn truncate_file(path: &Path, size: u64) -> std::io::Result<()> {
     let f = fs::OpenOptions::new().write(true).open(path)?;
@@ -1289,6 +1354,69 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap().op_kind, FsOpKind::Setattr);
         server.handle_op("test", FsOp::Readdir { inode: 1, offset: 0 });
         assert_eq!(rx.try_recv().unwrap().op_kind, FsOpKind::Readdir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disk_setattr_uid_gid_change_is_not_silently_ignored() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owned.txt");
+        fs::write(&path, b"x").unwrap();
+
+        let server = build_test_server(dir.path());
+        let lookup = server.handle_op(
+            "test",
+            FsOp::Lookup {
+                parent: 1,
+                name: "owned.txt".into(),
+            },
+        );
+        let inode = match lookup {
+            FsResult::Entry { inode, .. } => inode,
+            other => panic!("lookup failed: {:?}", other),
+        };
+
+        let meta = fs::symlink_metadata(&path).unwrap();
+        let current_uid = meta.uid();
+        let current_gid = meta.gid();
+
+        if unsafe { libc::geteuid() } == 0 {
+            let result = server.handle_op(
+                "test",
+                FsOp::Setattr {
+                    inode,
+                    attrs: SetAttrFields {
+                        mode: None,
+                        uid: Some(current_uid),
+                        gid: Some(current_gid),
+                        size: None,
+                        atime: None,
+                        mtime: None,
+                    },
+                },
+            );
+            assert!(matches!(result, FsResult::Attr { .. }));
+        } else {
+            let target_uid = current_uid.saturating_add(1);
+            let target_gid = current_gid.saturating_add(1);
+            let result = server.handle_op(
+                "test",
+                FsOp::Setattr {
+                    inode,
+                    attrs: SetAttrFields {
+                        mode: None,
+                        uid: Some(target_uid),
+                        gid: Some(target_gid),
+                        size: None,
+                        atime: None,
+                        mtime: None,
+                    },
+                },
+            );
+            assert!(matches!(result, FsResult::Error { errno } if errno == libc::EPERM));
+        }
     }
 
     #[test]
