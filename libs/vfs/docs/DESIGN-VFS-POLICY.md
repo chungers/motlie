@@ -568,9 +568,10 @@ fn is_credential_path(path: &str) -> bool {
 
 ### InterceptPolicy (externally-fed blocklist)
 
-Same pattern as vnet's `InterceptPolicy`. A policy whose deny set is
-managed by an external correlator thread via `ArcSwap`. The policy reads
-a concurrent snapshot (~25ns), the correlator writes atomically.
+A policy whose deny set is managed by an external correlator thread.
+The policy reads from a concurrent `ArcSwap` snapshot (~25ns, zero
+reader-writer contention). The correlator writes atomically from a
+separate thread.
 
 ```rust
 use arc_swap::ArcSwap;
@@ -596,10 +597,42 @@ impl FsPolicy for FsInterceptPolicy {
 }
 ```
 
-Key type differs from vnet: vnet blocks by `(Ipv4Addr, u16)`, vfs blocks
-by `String` (path). Same `ArcSwap` pattern, same latency characteristics.
-See DESIGN-VNET-POLICY InterceptPolicy section for the full latency
-analysis (ArcSwap ~25ns read vs RwLock ~50ns vs try_recv ~50ns).
+**Correlator writes (separate thread):**
+
+```rust
+// Clone-on-write: amortized O(1) insert, O(1) atomic swap
+let mut current = (**blocklist.load()).clone();
+current.insert("/tmp/suspicious_payload".to_string());
+blocklist.store(Arc::new(current));
+```
+
+**Latency analysis — why ArcSwap:**
+
+| Approach | Hot-path read | Correlator write | Contention |
+|----------|-------------|-----------------|-----------|
+| `Arc<RwLock<HashSet>>` | ~50ns | ~100ns | Writer blocks readers |
+| `try_recv` + local map | ~50ns | ~20ns | None, but 1-call delay |
+| **`ArcSwap<HashSet>`** | **~25ns** | ~50ns + O(N) clone | **Zero contention** |
+
+The O(N) clone happens on the correlator thread (off hot path) and only
+when the blocklist changes — rare compared to per-operation frequency.
+
+**Feedback loop:**
+
+```
+Dispatch thread (hot path)       Correlator thread (slow path)
+    │                                    │
+    ├─ policy.on_op(&ctx)               │
+    ├─ emit PolicyEvent ──────────────→ │ receives event
+    ├─ enforce action                    │ accumulates state
+    │                                    │ computes confidence
+    │                                    │ if confidence > threshold:
+    │   ┌────────────────────────────── │   blocklist.store(new_set)
+    │   │  ArcSwap (~25ns read)         │
+    │   ▼                                │
+    ├─ InterceptPolicy reads snapshot   │
+    ├─ Deny if blocked                  │
+```
 
 ## Anomaly Detection by Filesystem Phase
 
@@ -871,6 +904,77 @@ let server = FsServer::builder()
 ```
 
 Default: `0.0` (only explicit Denys block). Strict mode: `0.8`.
+
+**Hot-path before and after:**
+
+Before (current `FsServer::dispatch`, no policy):
+```rust
+fn dispatch(&self, mount: &MountState, op: &FsOp) -> FsResult {
+    if mount.read_only && is_write_op(op) {
+        return FsResult::Error { errno: libc::EROFS };
+    }
+    // execute immediately, no inspection
+    match op { ... }
+}
+```
+
+After (with policy + threshold + emission):
+```rust
+fn dispatch(&self, mount: &MountState, op: &FsOp) -> FsResult {
+    if mount.read_only && is_write_op(op) {
+        return FsResult::Error { errno: libc::EROFS };
+    }
+    let ctx = self.build_context(mount, op);        // enrich from dispatch state
+
+    // Step 1: policy chain (pure decision)
+    let action = self.policy.on_op(&ctx);            // ~50ns (chain)
+
+    // Step 2: apply threshold
+    let action = match action {
+        PolicyAction::Allow { confidence, reason } if confidence < self.deny_threshold => {
+            PolicyAction::Deny {
+                errno: libc::EACCES,
+                reason: reason.unwrap_or(PolicyReason::Custom("below threshold".into())),
+                confidence,
+            }
+        }
+        other => other,
+    };
+
+    // Step 3: emit (always Deny, uncertain Allow)
+    match &action {
+        PolicyAction::Deny { .. } => {
+            self.emit_policy_event(PolicyEvent::FsOp { ctx: ctx.clone(), action: action.clone() });
+        }
+        PolicyAction::Allow { confidence, .. } if *confidence < 1.0 => {
+            self.emit_policy_event(PolicyEvent::FsOp { ctx: ctx.clone(), action: action.clone() });
+        }
+        _ => {}
+    }
+
+    // Step 4: enforce
+    match &action {
+        PolicyAction::Deny { errno, .. } => FsResult::Error { errno: *errno },
+        PolicyAction::Allow { .. } => {
+            let start = Instant::now();
+            let result = self.execute_op(mount, op);
+            let op_result = self.build_result(&result, start);
+
+            // Step 5: post-op (all policies see completions)
+            let post_action = self.policy.on_complete(&ctx, &op_result);
+            self.emit_policy_event(PolicyEvent::FsComplete {
+                ctx, result: op_result, action: post_action,
+            });
+
+            result
+        }
+    }
+}
+```
+
+When `P = NoPolicy` and `threshold = 0.0`, the compiler eliminates
+`build_context`, threshold check, `emit_policy_event`, and the match
+arms — `dispatch` compiles to the same code as "before."
 
 ## Generic Type Flow
 
