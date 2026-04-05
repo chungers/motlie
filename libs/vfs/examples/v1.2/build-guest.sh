@@ -303,7 +303,7 @@ codex_root="$agent_state_root/codex"
 codex_sqlite_root="$codex_root/sqlite"
 claude_root="$agent_state_root/claude"
 claude_code_root="$agent_state_root/claude-code"
-if [ -d "$agent_state_root" ] && [ -n "${HOME:-}" ] && [ -d "$HOME" ]; then
+if [ -d "$agent_state_root" ] && [ -n "${HOME:-}" ] && [ -d "$HOME" ] && [ "${USER:-}" != "root" ] && [ "${HOME#"/home/"}" != "$HOME" ]; then
     mkdir -p "$codex_root" "$codex_sqlite_root" "$claude_root" "$claude_code_root" "$HOME/.config" >/dev/null 2>&1 || true
     export CODEX_HOME="$codex_root"
     export CODEX_SQLITE_HOME="$codex_sqlite_root"
@@ -323,7 +323,7 @@ setup_user() {
     install -d -m 0700 "$home_dir/.codex" "$home_dir/.claude" "$home_dir/.config/claude-code"
     install -d -m 0700 /agent-state/codex /agent-state/claude /agent-state/claude-code /agent-state/codex/sqlite
 
-    chown "$user_name:$user_name" \
+    chown -R "$user_name:$user_name" \
         "$home_dir/.config" \
         "$home_dir/.codex" \
         "$home_dir/.claude" \
