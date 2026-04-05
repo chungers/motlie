@@ -17,6 +17,10 @@ server-core = []
 # v1 VM transport
 vsock = ["server-core", "bincode-codec", "dep:tokio-vsock"]
 
+# Forward motlie-vnet's live backend diagnostics so example/binary builds can
+# opt into packet/queue tracing from the top-level cargo invocation.
+vnet-debug-trace = ["motlie-vnet/debug-trace"]
+
 # FUSE client for the v1 guest path
 client = ["dep:fuser"]
 

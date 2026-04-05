@@ -6,6 +6,10 @@ authors.workspace = true
 license.workspace = true
 description = "Embeddable user-mode networking for virtual machines (vhost-user-net + libslirp)"
 
+[features]
+default = []
+debug-trace = []
+
 [dependencies]
 libslirp = "4"
 libslirp-sys = "4"
