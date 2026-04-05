@@ -35,7 +35,9 @@ suspicious domains should be caught and optionally blocked.
 
 2. **Policy control**: allow the host runtime to evaluate each DNS query
    and TCP connection against a policy and decide: allow, deny (with
-   logged reason), or observe-only (allow but flag).
+   logged reason). Confidence (0.0–1.0) on every decision enables a
+   configurable `deny_threshold` that auto-converts uncertain Allows
+   to Denys.
 
 3. **Intent-based policy**: policy decisions should consider the *intent*
    behind an action, not just the domain name. The engine provides
@@ -169,62 +171,123 @@ impl From<DomainCategory> for PolicyReason { ... }
 ### Core Trait
 
 ```rust
-/// Policy decision. Shared shape with motlie-vfs's FsPolicy.
+/// Policy decision. Binary: Allow or Deny. Confidence carries the
+/// uncertainty signal — no separate "Observe" variant needed.
+/// Shared shape with motlie-vfs's FsPolicy.
 pub enum PolicyAction {
-    /// Allow the request.
+    /// Allow the request to proceed.
     Allow {
+        /// Why this was allowed. None = no notable reason (confident allow).
+        /// The chain keeps the reason from the lowest-confidence policy
+        /// (the weakest link explains why it's weak).
         reason: Option<PolicyReason>,
-        /// Confidence in this decision (0.0–1.0). Rule-based policies
-        /// return 1.0 (certain). Heuristic policies return lower values.
-        /// ML models return model output probability. The chain
-        /// propagates the minimum confidence across all policies —
-        /// one uncertain Allow in a chain of certain Allows makes the
-        /// composite uncertain.
+        /// Confidence in this decision (0.0–1.0).
+        /// 1.0 = certain (known-good domain).
+        /// 0.5 = uncertain (unknown domain).
+        /// 0.1 = barely allowed (high entropy, almost blocked).
+        /// Below the deny_threshold → converted to Deny at the call site.
         confidence: f64,
     },
-    /// Deny the request. `errno` maps to the forged response.
+    /// Deny the request. The interceptor forges a failure response
+    /// (NXDOMAIN, RST) based on errno.
     Deny {
         errno: i32,
         reason: PolicyReason,
-        /// Confidence in the denial. High confidence (>0.9) = definitive
-        /// block. Lower confidence = correlator may override or escalate.
+        /// Confidence in the denial.
+        /// 1.0 = definitive (known-bad, blocklist match).
+        /// Lower values = policy-decided deny with some uncertainty.
         confidence: f64,
     },
-    /// Allow but flag for observation.
-    Observe {
-        reason: PolicyReason,
-        /// Confidence that this is suspicious (0.0 = barely worth noting,
-        /// 1.0 = almost certainly malicious but not blocking).
-        confidence: f64,
-    },
-}
-
-impl PolicyAction {
-    pub fn confidence(&self) -> f64 {
-        match self {
-            Self::Allow { confidence, .. }
-            | Self::Deny { confidence, .. }
-            | Self::Observe { confidence, .. } => *confidence,
-        }
-    }
 }
 ```
 
-**Confidence propagation in chains:** when `.chain()` merges two
-decisions, the composite carries the **minimum confidence** across the
-chain — the chain's confidence is its weakest link. This means one
-low-confidence Allow in a chain of high-confidence Allows makes the
-composite uncertain, which the correlator can act on.
+**Chain evaluation:**
+- First `Deny` wins — its reason and confidence are the composite.
+- All `Allow` → composite is `Allow` with the **minimum confidence**
+  across the chain. The **reason comes from the policy that had the
+  lowest confidence** (the weakest link explains *why* it's weak).
+
+**Example chain evaluation:**
+
+```
+Chain: LoggingPolicy → CategoryPolicy → ExfilDetector
+
+LoggingPolicy.on_dns_query(ctx)  → Allow { reason: None, confidence: 1.0 }
+CategoryPolicy.on_dns_query(ctx) → Allow { reason: Category(Unknown), confidence: 0.5 }
+ExfilDetector.on_dns_query(ctx)  → Allow { reason: Custom("moderate entropy"), confidence: 0.3 }
+
+Composite: Allow {
+    reason: Some(Custom("moderate entropy")),  // from ExfilDetector (0.3 = lowest)
+    confidence: 0.3,
+}
+```
+
+**deny_threshold:** The call site converts low-confidence Allows to Denys:
+
+```rust
+// In VnetConfig:
+let config = VnetConfig::builder()
+    .socket_path("/tmp/vnet.sock")
+    .egress_policy(my_chain)
+    .deny_threshold(0.5)  // Allow with confidence < 0.5 → Deny
+    .build()?;
+```
+
+Default threshold: `0.0` (only explicit Denys block). Strict mode: `0.8`.
+
+**Call site logic (slirp thread loop):**
+
+```rust
+// Step 1: call the policy chain
+let action = policy.on_dns_query(&ctx);
+
+// Step 2: apply threshold
+let action = match action {
+    PolicyAction::Allow { confidence, reason } if confidence < deny_threshold => {
+        PolicyAction::Deny {
+            errno: libc::EHOSTUNREACH,
+            reason: reason.unwrap_or(PolicyReason::Custom("below threshold".into())),
+            confidence,
+        }
+    }
+    other => other,
+};
+
+// Step 3: emit (always Deny, uncertain Allow only)
+match &action {
+    PolicyAction::Deny { .. } => {
+        event_tx.try_send(PolicyEvent::DnsQuery { ctx: ctx.clone(), action: action.clone() });
+    }
+    PolicyAction::Allow { confidence, .. } if *confidence < 1.0 => {
+        event_tx.try_send(PolicyEvent::DnsQuery { ctx: ctx.clone(), action: action.clone() });
+    }
+    _ => {}  // confident Allow — skip (not interesting)
+};
+
+// Step 4: enforce
+match &action {
+    PolicyAction::Deny { errno, .. } => inject_nxdomain(&frame, *errno),
+    PolicyAction::Allow { .. } => slirp.input(&frame),
+}
+```
+
+**Emission truth table:**
+
+| Chain result | Threshold | After threshold | Emitted? | Correlator sees |
+|---|---|---|---|---|
+| Allow { 1.0 } | 0.5 | Allow { 1.0 } | No | Nothing (confident, not interesting) |
+| Allow { 0.9 } | 0.5 | Allow { 0.9 } | Yes | Uncertain allow — worth watching |
+| Allow { 0.3 } | 0.5 | **Deny { 0.3 }** | Yes | Threshold-converted deny |
+| Deny { 0.95 } | 0.5 | Deny { 0.95 } | Yes | Policy-decided deny |
 
 **Confidence use cases:**
 
-| Policy type | Confidence source |
-|------------|------------------|
-| Rule-based (`CategoryPolicy`) | 1.0 (certain: domain matches known pattern) |
-| Heuristic (`DnsExfilDetector`) | 0.3–0.8 (entropy threshold met, rate not definitive) |
-| Blocklist (`InterceptPolicy`) | 1.0 (correlator already decided) |
-| ML model (future) | Model output probability (0.0–1.0) |
-| Session-aware (future) | Adjusted by accumulated session context keyed by UID |
+| Policy type | Confidence source | Example |
+|------------|------------------|---------|
+| Rule-based (`CategoryPolicy`) | 1.0 (certain match) | `Allow { Category(PackageManager), 1.0 }` |
+| Heuristic (`ExfilDetector`) | 0.3–0.8 (signal strength) | `Allow { Custom("moderate entropy"), 0.3 }` |
+| Blocklist (`InterceptPolicy`) | 1.0 (correlator decided) | `Deny { Custom("correlator: blocked"), 1.0 }` |
+| ML model (future) | Model probability | `Allow { Custom("model: benign"), 0.87 }` |
 
 ### Predefined (errno, reason) Pairs for Network Denials
 
@@ -252,25 +315,25 @@ The interceptor maps errno to the forged response:
 /// policy implementer manages their own synchronization — the trait
 /// does not impose a synchronization strategy.
 ///
-/// For async policy evaluation, return `Observe` and make the decision
+/// For async policy evaluation, return `Allow` with low confidence and
 /// asynchronously with a later connection teardown if needed.
 pub trait EgressPolicy: Send + 'static {
     /// Called when the guest issues a DNS query. Return Deny to prevent
     /// the query from reaching the host resolver (forged NXDOMAIN).
     fn on_dns_query(&self, ctx: &DnsQueryContext) -> PolicyAction {
-        PolicyAction::Allow { reason: None }
+        PolicyAction::Allow { reason: None, confidence: 1.0 }
     }
 
     /// Called when a DNS response arrives from the host resolver,
     /// before it is forwarded to the guest.
     fn on_dns_response(&self, ctx: &DnsResponseContext) -> PolicyAction {
-        PolicyAction::Allow { reason: None }
+        PolicyAction::Allow { reason: None, confidence: 1.0 }
     }
 
     /// Called when the guest initiates a TCP connection (SYN detected).
     /// Return Deny to forge a RST — no host-side socket is created.
     fn on_tcp_connect(&self, ctx: &TcpConnectContext) -> PolicyAction {
-        PolicyAction::Allow { reason: None }
+        PolicyAction::Allow { reason: None, confidence: 1.0 }
     }
 
     /// Called periodically for active TCP flows and once on flow close.
@@ -282,14 +345,14 @@ pub trait EgressPolicy: Send + 'static {
     ///
     /// Return Deny to tear down the flow (forge RST in both directions).
     fn on_tcp_flow(&self, ctx: &TcpFlowContext) -> PolicyAction {
-        PolicyAction::Allow { reason: None }
+        PolicyAction::Allow { reason: None, confidence: 1.0 }
     }
 
     /// Chain another policy after this one.
     ///
     /// Evaluation order: `self` first, then `next`.
     /// - First `Deny` wins (short-circuit).
-    /// - `Observe` is sticky — propagates even if `next` returns `Allow`.
+    /// - Minimum confidence propagated across the chain.
     /// - `Allow` defers to `next`.
     fn chain<N: EgressPolicy>(self, next: N) -> impl EgressPolicy
     where
@@ -313,7 +376,7 @@ let policy = LoggingPolicy
 
 Chain evaluation rules:
 - First `Deny` wins (short-circuit)
-- `Observe` is sticky — propagates even if next policy returns `Allow`
+- Minimum confidence propagated across the chain (weakest link)
 - `Allow` defers to next policy
 - Minimum confidence propagated across the chain
 
@@ -327,13 +390,13 @@ pub struct NoPolicy;
 
 impl EgressPolicy for NoPolicy {
     fn on_dns_query(&self, _: &DnsQueryContext) -> PolicyAction {
-        PolicyAction::Allow { reason: None }
+        PolicyAction::Allow { reason: None, confidence: 1.0 }
     }
     fn on_dns_response(&self, _: &DnsResponseContext) -> PolicyAction {
-        PolicyAction::Allow { reason: None }
+        PolicyAction::Allow { reason: None, confidence: 1.0 }
     }
     fn on_tcp_connect(&self, _: &TcpConnectContext) -> PolicyAction {
-        PolicyAction::Allow { reason: None }
+        PolicyAction::Allow { reason: None, confidence: 1.0 }
     }
 }
 ```
@@ -429,7 +492,7 @@ impl EgressPolicy for LoggingPolicy {
             net.source.port = ctx.source_port,
             "net.dns.start"
         );
-        PolicyAction::Allow { reason: None }
+        PolicyAction::Allow { reason: None, confidence: 1.0 }
     }
 
     fn on_tcp_connect(&self, ctx: &TcpConnectContext) -> PolicyAction {
@@ -442,7 +505,7 @@ impl EgressPolicy for LoggingPolicy {
             net.source.port = ctx.source_port,
             "net.tcp.start"
         );
-        PolicyAction::Allow { reason: None }
+        PolicyAction::Allow { reason: None, confidence: 1.0 }
     }
 
     fn on_tcp_flow(&self, ctx: &TcpFlowContext) -> PolicyAction {
@@ -459,7 +522,7 @@ impl EgressPolicy for LoggingPolicy {
             net.flow.closed = ctx.is_close,
             "net.tcp.flow"
         );
-        PolicyAction::Allow { reason: None }
+        PolicyAction::Allow { reason: None, confidence: 1.0 }
     }
 }
 ```
@@ -571,7 +634,7 @@ and `TcpFlowContext` via the `guest_process: Option<String>` field
 
 Enables true intent-based decisions:
 - `apt` connecting to `ubuntu.com` → Allow (PackageManager + known process)
-- `unknown-binary` connecting to `ubuntu.com` → Observe (unexpected process)
+- `unknown-binary` connecting to `ubuntu.com` → Allow { confidence: 0.3 } (unexpected process)
 
 ### v3: Project Manifest Correlation (future)
 
@@ -632,12 +695,12 @@ of real data is exchanged.
 |-----------|--------|----------------|-----------------|
 | **Entropy Analysis** | Calculate Shannon entropy of subdomain labels | High-entropy strings encoding data (`a1z9b2k8...`) | `ctx.domain`, `ctx.label_lengths` → `policy::entropy::shannon_entropy()` |
 | **Request Frequency** | Monitor DNS query volume per base domain over time | High-volume "chunking" — data split across thousands of queries | `ctx.domain`, `ctx.timestamp` → stateful rate counter (`RwLock<HashMap>`) |
-| **Domain Aging** | Check registration date of destination domain | "Burner" domains registered recently for the attack | `ctx.domain` → external WHOIS/threat-intel lookup (async, return Observe) |
+| **Domain Aging** | Check registration date of destination domain | "Burner" domains registered recently for the attack | `ctx.domain` → external WHOIS/threat-intel lookup (async, return Allow with low confidence) |
 | **Record Type Profiling** | Monitor for rare record types (TXT, NULL, CNAME chains) | Non-standard DNS records carrying larger data payloads | `ctx.query_type` → flag non-A/AAAA lookups to unknown domains |
 
 **API coverage:** Entropy and frequency are fully supported with existing
 context fields. Domain aging requires external lookup (policy returns
-Observe, resolves asynchronously). Record type profiling uses
+Allow with low confidence, resolves asynchronously). Record type profiling uses
 `ctx.query_type` which is already in `DnsQueryContext`.
 
 ### Phase 2: Pre-Connection / Initial Handshake
@@ -736,13 +799,14 @@ fn on_tcp_flow(&self, ctx: &TcpFlowContext) -> PolicyAction {
             }
         }
     }
-    PolicyAction::Allow { reason: None }
+    PolicyAction::Allow { reason: None, confidence: 1.0 }
 }
 ```
 
 **C2 beacon detection**: a flow with periodic small tx/rx bursts to an
 Unknown domain over a long duration (>30min) matches a command-and-control
-pattern. The policy can observe and alert.
+pattern. The policy returns `Allow { confidence: 0.2 }` — the
+deny_threshold or correlator decides whether to block.
 
 **Bandwidth accounting**: track bytes per domain/category for reporting.
 `LoggingPolicy` can aggregate flow stats and emit periodic summaries.
@@ -755,14 +819,15 @@ policy can flag the mismatch:
 fn on_tcp_flow(&self, ctx: &TcpFlowContext) -> PolicyAction {
     if let (Some(dns_domain), Some(sni)) = (&ctx.domain, &ctx.sni) {
         if dns_domain != sni {
-            return PolicyAction::Observe {
-                reason: PolicyReason::Custom(
+            return PolicyAction::Allow {
+                reason: Some(PolicyReason::Custom(
                     format!("SNI mismatch: DNS={}, SNI={}", dns_domain, sni).into()
-                ),
+                )),
+                confidence: 0.2,  // strong suspicion but allow (threshold decides)
             };
         }
     }
-    PolicyAction::Allow { reason: None }
+    PolicyAction::Allow { reason: None, confidence: 1.0 }
 }
 ```
 
@@ -843,7 +908,7 @@ impl EgressPolicy for DnsExfilDetector {
             };
         }
 
-        PolicyAction::Allow { reason: None }
+        PolicyAction::Allow { reason: None, confidence: 1.0 }
     }
 }
 ```
@@ -1388,7 +1453,7 @@ syscall costs.
 ### Zero-Cost NoPolicy Guarantee
 
 When `P = NoPolicy`:
-- `on_dns_query()` is `{ PolicyAction::Allow { reason: None } }`
+- `on_dns_query()` is `{ PolicyAction::Allow { reason: None, confidence: 1.0 } }`
 - The compiler inlines this → the interceptor's `if let Deny = ...` branch
   is statically false → the parser call, reverse map lookup, and forge
   call are all dead code → eliminated
@@ -1404,7 +1469,7 @@ When `P = NoPolicy`:
 
 ## Integration Examples
 
-### Observe-only (logging, no enforcement)
+### Logging-only (no enforcement, threshold=0.0)
 
 ```rust
 let config = VnetConfig::builder()
@@ -1486,7 +1551,7 @@ Default behavior per category:
 | DnsInfra | Allow | Required for resolution |
 | AdNetwork | Deny | Not expected in dev VM |
 | Analytics | Deny | Not expected in dev VM |
-| Unknown | Observe | Flag for review, don't block |
+| Unknown | Allow (confidence: 0.5) | Uncertain — deny_threshold or correlator decides |
 
 The mapping is configurable — the host runtime can change Unknown → Deny
 for stricter environments.
@@ -1500,7 +1565,7 @@ for stricter environments.
 | Response forging (NXDOMAIN) | Unit test: forge response, re-parse, verify NXDOMAIN |
 | Response forging (TCP RST) | Unit test: forge RST, verify flags + sequence numbers |
 | `DnsReverseMap` | Unit test: insert, lookup, TTL expiry |
-| Chain evaluation | Unit test: Deny short-circuits, Observe sticky, min-confidence propagation |
+| Chain evaluation | Unit test: Deny short-circuits, Allow min-confidence propagation, reason from weakest link |
 | `LoggingPolicy` | Unit test: always Allow, tracing events emitted |
 | `CategoryPolicy` | Unit test: suffix matching, known domains, Unknown handling |
 | TX interceptor | Integration test: denied DNS → forged NXDOMAIN in rx channel |
@@ -1574,11 +1639,13 @@ link holds `current` (this policy) and `next` (the rest of the chain).
 The struct implements `EgressPolicy` by calling `self.current` first,
 then `self.next`, with these rules:
 
-- `Deny` from current → return immediately (short-circuit), carry its confidence
-- `Observe` from current → call next; if next says `Deny`, return Deny;
-  otherwise return `Observe` with `min(current.confidence, next.confidence)`
-- `Allow` from current → defer entirely to next; propagate
-  `min(current.confidence, next.confidence)` on the composite Allow
+- `Deny` from current → return immediately (short-circuit), carry its
+  reason and confidence
+- `Allow` from current → call next:
+  - If next says `Deny` → return that Deny
+  - If next says `Allow` → return `Allow` with
+    `min(current.confidence, next.confidence)` and the reason from
+    whichever had the lower confidence (weakest link)
 
 For `on_tcp_flow` (and vfs `on_complete`), there is **no short-circuit**
 — all policies in the chain see every flow report, because the flow
