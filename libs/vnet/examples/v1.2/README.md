@@ -9,10 +9,9 @@ Phase 3 migration toward `motlie-vnet`:
 - keep `/home/<user>` disk-backed from the host
 - add one dedicated read/write VFS-backed layer at `/agent-state` for Codex + Claude state during the lifetime of the host REPL
 
-This directory is the working implementation area for Phase 3.1-3.5. It is
-intentionally ahead of the fully validated runbook; the point is to make the
-guest image, launch contract, and mount layout match the target architecture
-before the final composed host flow lands.
+This directory is the source of truth for the `v1.2` example / validation
+harness. `v1` and `v1.1` remain in `libs/vfs/examples/`; beginning with
+`v1.2`, the composed host flow is owned here in `motlie-vnet`.
 
 ## Success Outcomes
 
@@ -148,7 +147,7 @@ This tree now covers the first concrete slice of Phase 3:
     - `--admin-net=tap --egress-net=vhost-user`
   - the launcher seeds `/etc/hostname` and `/etc/hosts` into the runtime
     overlay so `sudo` and hostname-based tools work normally
-- Phase 3.3/3.4 validation now stays inside the forked `v1.2` host flow:
+- Phase 3.3/3.4 validation now stays inside the canonical `v1.2` host flow:
   - `repl_host_v1_2` is the only host-side binary entry point
   - `launch-ch.sh` remains the only guest launcher script entry point
   - `repl_host_v1_2` prints the host binary build SHA and UTC build timestamp

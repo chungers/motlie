@@ -1,6 +1,7 @@
 # v1.2 Guest Image Notes
 
-`v1.2` is still in active Phase 3 implementation.
+`v1.2` is the current, validated guest-image source of truth for the
+`motlie-vnet` example / validation harness line.
 
 The authoritative design/status document for this example is
 [README.md](./README.md). Use that file first.
@@ -11,17 +12,20 @@ What is already true about the `v1.2` image build:
 - guest identity remains launch-time state, not build-time state
 - guest-local root writes still live in the per-launch writable ext4 overlay
 - the image now includes:
-  - `systemd-networkd` enabled for the egress NIC
+  - `systemd-networkd`
+  - the boot-time `motlie-vnet-egress` service that programs the current
+    libslirp-compatible egress defaults
   - validation packages such as `curl`, `dnsutils`, and `ca-certificates`
-  - login-time agent-state redirection into the dedicated read/write
-    VFS-backed `/agent-state` layer
+  - `sudo`, `python3`, `npm`, and `bubblewrap`
+  - baked Codex CLI and Claude Code CLI installs
+  - boot-time symlink redirection of `~/.codex`, `~/.claude`, and
+    `~/.config/claude-code` into the dedicated read/write `/agent-state` layer
 
-What is not yet fully documented here:
+Current runtime contract:
 
-- the final composed `v1.2` host flow once `motlie-vnet` is launched directly
-  from the control plane
-- the final end-to-end validation runbook for internet access and CLI auth
+- the composed host flow is `cargo run -p motlie-vnet --example repl_host_v1_2`
+- the launcher contract lives in [CH-HARNESS.md](./CH-HARNESS.md)
+- the end-to-end validation runbook lives in [README.md](./README.md)
 
-Until that composed flow is validated, prefer [README.md](./README.md) for the
-current implementation status and use the forked `repl_host_v1_2` /
-`launch-ch.sh` flow as the only runtime entry point.
+This file exists to describe the image contents and image-build methodology; it
+is no longer a placeholder for future validation.
