@@ -78,6 +78,30 @@ The current implementation also includes:
 - `permit-agent-forwarding`
 - `permit-X11-forwarding`
 
+### 4. Guest boot services must tolerate early-boot vsock races
+
+Two guest-side services depend on host listeners that may not be usable at the
+exact instant systemd first starts them:
+
+- `motlie-vfs-guest.service`
+- `motlie-vmm-vsock-ssh.service`
+
+Required behavior:
+
+- `motlie-vfs-guest` must retry its initial `vsock://cid=2,port=5000`
+  connection and tag handshake instead of mounting FUSE against a dead backend
+- the guest SSH bridge must reconnect in a loop instead of treating the first
+  `socat VSOCK-CONNECT:2:2222 TCP:127.0.0.1:22` failure as terminal
+- the systemd units must not get stuck in a start-limit failure state after an
+  early-boot miss
+
+Why this matters:
+
+- otherwise `/home/<guest>`, `/workspace`, and `/agent-state` can come up as
+  mounted FUSE paths that only return `EIO`
+- direct admin SSH may still work, but proxied `ssh -p 2222 <guest>@localhost`
+  will fail because the guest never keeps the vsock SSH bridge alive
+
 Why this matters:
 
 - without `permit-pty`, guest sshd accepts the login/exec path but rejects PTY

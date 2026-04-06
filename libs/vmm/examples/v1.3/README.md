@@ -470,8 +470,11 @@ channels — no need for multiple vsock connections.
 | Guest changes | socat bridge service | None |
 | Product alignment | Matches motlie-vmm.md | Not the target arch |
 
-The guest runs `socat VSOCK-CONNECT:2:2222 TCP:127.0.0.1:22`
-as the `motlie-vmm-vsock-ssh` systemd service, baked into the image.
+The guest runs a persistent `socat VSOCK-CONNECT:2:2222 TCP:127.0.0.1:22`
+reconnect loop as the `motlie-vmm-vsock-ssh` systemd service, baked into the
+image. This is intentional: early boot can race the host-side vsock listener,
+so the guest bridge must retry instead of treating the first connect failure as
+terminal.
 
 ## SSH Auth Model
 

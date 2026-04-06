@@ -402,11 +402,22 @@ options edns0
 RESOLVEOF
 EGRESSEOF' \
     --customize-hook='chmod 755 "$1/usr/local/bin/motlie-vmm-egress-setup"' \
+    --customize-hook='cat > "$1/usr/local/bin/motlie-vmm-vsock-ssh-loop" << "VSOCKSSHLOOPEOF"
+#!/bin/sh
+set -eu
+
+while true; do
+    /usr/bin/socat VSOCK-CONNECT:2:2222 TCP:127.0.0.1:22 || true
+    sleep 1
+done
+VSOCKSSHLOOPEOF' \
+    --customize-hook='chmod 755 "$1/usr/local/bin/motlie-vmm-vsock-ssh-loop"' \
     --customize-hook='cat > "$1/etc/systemd/system/motlie-vfs-guest.service" << "SVCEOF"
 [Unit]
 Description=motlie-vfs guest filesystem mounter
 ConditionPathExists=/etc/motlie-vfs/mounts.yaml
 After=local-fs.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -455,6 +466,7 @@ EGRESSUNITEOF' \
 Description=motlie-vmm vsock-to-SSH bridge (socat, guest→host)
 After=ssh.service
 Requires=ssh.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -462,7 +474,7 @@ Type=simple
 # CH routes this to the host UDS at $VSOCK_SOCKET_2222.
 # The host accepts and runs russh client over the stream.
 # socat bridges the vsock connection to local sshd.
-ExecStart=/usr/bin/socat VSOCK-CONNECT:2:2222 TCP:127.0.0.1:22
+ExecStart=/usr/local/bin/motlie-vmm-vsock-ssh-loop
 Restart=always
 RestartSec=1
 

@@ -109,7 +109,7 @@ use tokio::sync::oneshot;
 
 use motlie_vnet::{VnetBackend, VnetConfig, VnetHandle};
 use motlie_vmm::ca::SshCa;
-use motlie_vmm::ssh::{self, GuestEndpoint, GuestRegistry, SshProxyConfig};
+use motlie_vmm::ssh::{self, GuestRegistry, SshProxyConfig};
 use motlie_vfs::core::overlay::OverlayAttrs;
 use motlie_vfs::core::server::FsServer;
 use motlie_vfs::vsock::handler::VsockConnectionHandler;
@@ -1753,19 +1753,14 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
                                     let bridge_reg = Arc::clone(&admin.guest_registry);
                                     let bridge_name = guest_name.to_string();
                                     admin.runtime.spawn(async move {
-                                        match ssh::accept_guest_ssh(listener, &uds_path, &bridge_ca, &bridge_name).await {
-                                            Ok(handle) => {
-                                                let handle = Arc::new(tokio::sync::Mutex::new(handle));
-                                                bridge_reg.lock().unwrap().insert(
-                                                    bridge_name.clone(),
-                                                    GuestEndpoint { ssh_handle: Some(handle) },
-                                                );
-                                                eprintln!("SSH bridge ready for guest '{bridge_name}'");
-                                            }
-                                            Err(e) => {
-                                                eprintln!("SSH bridge failed for guest '{bridge_name}': {e}");
-                                            }
-                                        }
+                                        ssh::run_guest_ssh_bridge(
+                                            listener,
+                                            uds_path,
+                                            bridge_ca,
+                                            bridge_name,
+                                            bridge_reg,
+                                        )
+                                        .await;
                                     });
                                 }
                                 emit_status(
