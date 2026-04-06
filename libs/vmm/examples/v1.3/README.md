@@ -16,7 +16,7 @@
 
 1. `exec alice uname -a` returns output from the guest via the SSH proxy
 2. `validate alice` passes all checks (egress, DNS, writable root,
-   agent-state symlinks, default route)
+   agent-state presentation in home, default route)
 3. Multiple guests (alice, bob, arbitrary names) launch with unique
    resources — no collisions
 4. The guest image only needs one rebuild (for sshd_config CA trust);
@@ -71,15 +71,19 @@ proxy path, not the guest image or guest `sshd`.
 
 ### D. Agent-state redirection is a boot-time service contract
 
-`motlie-agent-state.service` must keep:
+`motlie-agent-state.service` must present:
 
-- `~/.codex -> /agent-state/codex`
-- `~/.claude -> /agent-state/claude`
-- `~/.config/claude-code -> /agent-state/claude-code`
+- `~/.codex`
+- `~/.claude`
+- `~/.config/claude-code`
 
-This is part of the validated `v1.2`/`v1.3` contract. If those symlinks are
+from `/agent-state`, not from the disk-backed home layer.
+
+This is part of the validated `v1.2`/`v1.3` contract. If those paths are
 replaced with home-local directories, tool auth/state silently stops landing in
-the dedicated VFS-backed layer.
+the dedicated VFS-backed layer. Bind mounts are preferred here over symlinks
+because normal guest tools like `ls -l` should see stable directories rather
+than occasionally warning on cross-mount symlink target lookups.
 
 ## Architecture Overview
 
@@ -303,8 +307,8 @@ cloud-hypervisor          Guest kernel              Guest userspace
       │                       │              │   DNS → 10.0.2.3         │
       │                       │              │                          │
       │                       │              ├─ motlie-agent-state      │
-      │                       │              │   ~/.codex → /agent-state/codex
-      │                       │              │   ~/.claude → /agent-state/claude
+      │                       │              │   ~/.codex   bind-mounts /agent-state/codex
+      │                       │              │   ~/.claude  bind-mounts /agent-state/claude
       │                       │              │                          │
       │                       │              └─ cloud-init              │
       │                       │                  reads /var/lib/cloud/  │
@@ -520,7 +524,7 @@ mounts:
 
 - `/home/<guest>` — host-disk-backed working tree
 - `/agent-state` — dedicated VFS-backed tool-state layer
-  (`~/.codex`, `~/.claude`, `~/.config/claude-code` symlinked here)
+  (`~/.codex`, `~/.claude`, `~/.config/claude-code` bind-mounted from here)
 - `/workspace` — separate project tree
 
 ## Host Requirements

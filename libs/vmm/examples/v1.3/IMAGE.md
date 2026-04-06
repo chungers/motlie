@@ -45,11 +45,12 @@ Why this matters:
 
 ### 2. Agent-state setup is boot-time, not login-time
 
-`motlie-agent-state-setup` must keep:
+`motlie-agent-state-setup` must present these guest-home paths from
+`/agent-state`:
 
-- `~/.codex -> /agent-state/codex`
-- `~/.claude -> /agent-state/claude`
-- `~/.config/claude-code -> /agent-state/claude-code`
+- `~/.codex`
+- `~/.claude`
+- `~/.config/claude-code`
 
 and must also create:
 
@@ -59,9 +60,12 @@ and must also create:
 
 Why this matters:
 
-- if these paths are created in the disk-backed home instead of symlinked into
-  `/agent-state`, tool auth/state silently lands in the wrong layer
+- if these paths are created in the disk-backed home instead of being bind-mounted
+  from `/agent-state`, tool auth/state silently lands in the wrong layer
 - if ownership is wrong, Codex/Claude can read but fail to refresh/update state
+- bind mounts are preferred here over symlinks because normal guest tools like
+  `ls -l` should see stable directories rather than occasionally warning on
+  cross-mount symlink target lookups
 
 ### 3. The proxy's ephemeral user cert must include `permit-pty`
 

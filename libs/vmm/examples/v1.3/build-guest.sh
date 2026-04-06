@@ -307,8 +307,6 @@ case "${TERM:-}" in
 esac
 command -v infocmp >/dev/null 2>&1 || return 0
 infocmp "$TERM" >/dev/null 2>&1 || return 0
-command -v tput >/dev/null 2>&1 || return 0
-tput clear >/dev/null 2>&1 || return 0
 
 if tmux has-session -t "$USER" 2>/dev/null; then
     echo "Attaching to existing tmux session..."
@@ -349,27 +347,36 @@ set -eu
 setup_user() {
     user_name="$1"
     home_dir="/home/$user_name"
+    config_dir="$home_dir/.config"
+    codex_dst="$home_dir/.codex"
+    claude_dst="$home_dir/.claude"
+    claude_code_dst="$config_dir/claude-code"
 
     [ -d "$home_dir" ] || return 0
 
-    install -d -m 0755 "$home_dir/.config"
+    install -d -m 0755 "$config_dir"
     install -d -m 0700 /agent-state/codex /agent-state/claude /agent-state/claude-code /agent-state/codex/sqlite
 
     chown -R "$user_name:$user_name" \
-        "$home_dir/.config" \
+        "$config_dir" \
         /agent-state/codex \
         /agent-state/codex/sqlite \
         /agent-state/claude \
         /agent-state/claude-code || true
 
-    rm -rf "$home_dir/.codex" "$home_dir/.claude" "$home_dir/.config/claude-code"
-    ln -sfn /agent-state/codex "$home_dir/.codex"
-    ln -sfn /agent-state/claude "$home_dir/.claude"
-    ln -sfn /agent-state/claude-code "$home_dir/.config/claude-code"
-    chown -h "$user_name:$user_name" \
-        "$home_dir/.codex" \
-        "$home_dir/.claude" \
-        "$home_dir/.config/claude-code" || true
+    for mount_path in "$codex_dst" "$claude_dst" "$claude_code_dst"; do
+        if grep -F " $mount_path " /proc/self/mountinfo >/dev/null 2>&1; then
+            umount "$mount_path" || true
+        fi
+    done
+
+    rm -rf "$codex_dst" "$claude_dst" "$claude_code_dst"
+    install -d -m 0700 "$codex_dst" "$claude_dst" "$claude_code_dst"
+    chown "$user_name:$user_name" "$codex_dst" "$claude_dst" "$claude_code_dst" || true
+
+    mount --bind /agent-state/codex "$codex_dst"
+    mount --bind /agent-state/claude "$claude_dst"
+    mount --bind /agent-state/claude-code "$claude_code_dst"
 }
 
 for user_name in alice bob; do
