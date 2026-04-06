@@ -334,9 +334,8 @@ libs/vnet/
 │   ├── backend.rs                    # VhostUserBackend trait implementation
 │   ├── slirp.rs                      # libslirp wrapper: event loop, frame I/O
 │   └── virtq.rs                      # Virtqueue ↔ slirp frame bridging
-├── examples/                         # Validation and feasibility harnesses owned by vnet
-│   ├── v1.2/repl_host.rs             # Current canonical composed v1.2 host flow (depends on motlie-vfs as a dev-dependency)
-│   └── demo_host.rs                  # Future optional standalone vnet-only demo
+├── examples/                         # Validation harnesses owned by vnet
+│   └── v1.2/repl_host.rs             # Current canonical composed v1.2 host flow (depends on motlie-vfs as a dev-dependency)
 ├── bins/                             # Host-side binaries (layered on top of library)
 │   └── (future: composed host runtime combining vfs + vnet)
 ├── docs/
@@ -348,10 +347,9 @@ libs/vnet/
 **Layering principle** (following `libs/vfs` pattern):
 - **`src/`** — All reusable logic. No panics (`unwrap`/`expect`/`assert!`
   forbidden in non-test code). No global state. Multiple instances coexist.
-- **`examples/`** — Validation/demo harnesses layered on top of the library.
-  `v1.2` is intentionally a composed `motlie-vnet` + `motlie-vfs` harness;
-  a future standalone `demo_host.rs` remains useful if a pure vnet-only demo
-  is still wanted later.
+- **`examples/`** — Validation harnesses layered on top of the library.
+  `v1.2` is intentionally a composed `motlie-vnet` + `motlie-vfs` harness, and
+  `repl_host_v1_2` is the only current host-side example entry point.
 - **`bins/`** — Production host-side binaries. May combine `motlie-vnet` +
   `motlie-vfs` + CLI parsing. Layered above library — no library code depends
   on bins.
@@ -519,7 +517,7 @@ for h in handles {
 #### Integration with repl_host
 
 ```rust
-// In examples/repl_host.rs (or libs/vnet/examples/demo_host.rs):
+// In libs/vnet/examples/v1.2/repl_host.rs:
 let _net_handle = {
     let socket = format!("/tmp/motlie-vnet-{}.sock", tag);
     let config = motlie_vnet::VnetConfig::builder()
