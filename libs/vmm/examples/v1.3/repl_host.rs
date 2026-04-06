@@ -226,12 +226,15 @@ struct AdminState {
     vnet_handles: HashMap<String, VnetHandle>,
     launch_pids: HashMap<String, u32>,
     ssh_ca: Arc<SshCa>,
+    net_allocs: HashMap<String, GuestNetAlloc>,
+    next_net_slot: usize,
 }
 
-/// Per-guest network parameters, derived from the guest's position in the
-/// provisioning order.  These are passed to launch-ch.sh as explicit flags
-/// so the shell script has no hardcoded guest names.
-struct GuestNetParams {
+/// Per-guest allocated network resources.  Once allocated for a guest name,
+/// these are reused across shutdown/relaunch within the same REPL session.
+#[derive(Clone)]
+struct GuestNetAlloc {
+    _slot: usize,
     cid: u32,
     host_ip: Ipv4Addr,
     guest_ip: Ipv4Addr,
@@ -239,26 +242,34 @@ struct GuestNetParams {
     egress_mac: [u8; 6],
 }
 
-/// Derive per-guest network parameters from the guest's index (0-based
-/// position in the provisioning order).
-fn guest_net_params(guest_index: usize) -> GuestNetParams {
-    // CID starts at 3 (0-2 reserved by vsock spec)
-    let cid = 3 + guest_index as u32;
-    // Each guest gets its own /24 subnet on the admin TAP: 192.168.(249+index).*
-    let subnet = 249u8.saturating_add(guest_index as u8);
-    let host_ip = Ipv4Addr::new(192, 168, subnet, 1);
-    let guest_ip = Ipv4Addr::new(192, 168, subnet, 2);
-    // Admin MAC: last byte = 0xaa + index
-    let admin_mac = [0x12, 0x34, 0x56, 0x78, 0x90, 0xaa_u8.wrapping_add(guest_index as u8)];
-    // Egress MAC: shared across guests (libslirp doesn't care)
-    let egress_mac = [0x12, 0x34, 0x56, 0x78, 0x90, 0xab];
-    GuestNetParams { cid, host_ip, guest_ip, admin_mac, egress_mac }
+/// Allocate (or return existing) network resources for a guest.
+/// The slot counter is monotonic — a shutdown guest keeps its allocation
+/// so relaunch gets the same CID/IP/MAC.
+fn ensure_net_alloc<'a>(admin: &'a mut AdminState, guest_name: &str) -> &'a GuestNetAlloc {
+    if !admin.net_allocs.contains_key(guest_name) {
+        let slot = admin.next_net_slot;
+        admin.next_net_slot += 1;
+        let cid = 3 + slot as u32;
+        let subnet = 249u8.saturating_add(slot as u8);
+        let alloc = GuestNetAlloc {
+            _slot: slot,
+            cid,
+            host_ip: Ipv4Addr::new(192, 168, subnet, 1),
+            guest_ip: Ipv4Addr::new(192, 168, subnet, 2),
+            // Admin and egress MACs use different OUI bytes to avoid collisions:
+            //   admin:  52:54:00:ad:00:XX
+            //   egress: 52:54:00:eg:00:XX
+            admin_mac: [0x52, 0x54, 0x00, 0xad, 0x00, (slot + 1) as u8],
+            egress_mac: [0x52, 0x54, 0x00, 0xe9, 0x00, (slot + 1) as u8],
+        };
+        admin.net_allocs.insert(guest_name.to_string(), alloc);
+    }
+    admin.net_allocs.get(guest_name).unwrap()
 }
 
-/// Resolve guest TAP admin IP from the guest's index.
+/// Look up the allocated admin TAP IP for a guest, if any.
 fn guest_admin_ip(admin: &AdminState, guest_name: &str) -> Option<Ipv4Addr> {
-    let index = admin.guest_order.iter().position(|g| g == guest_name)?;
-    Some(guest_net_params(index).guest_ip)
+    admin.net_allocs.get(guest_name).map(|a| a.guest_ip)
 }
 
 enum MountSpec {
@@ -538,6 +549,8 @@ async fn main() -> Result<()> {
         vnet_handles: HashMap::new(),
         launch_pids: HashMap::new(),
         ssh_ca,
+        net_allocs: HashMap::new(),
+        next_net_slot: 0,
     };
 
     // Spawn the admin input handler on a blocking thread
@@ -990,7 +1003,7 @@ fn render_cloud_init(guest_name: &str, runtime: &GuestRuntime) -> Result<String>
 
 fn render_launch_script(
     guest_name: &str,
-    guest_index: usize,
+    net: &GuestNetAlloc,
     runtime: &GuestRuntime,
     admin_net: AdminNet,
     egress_net: EgressNet,
@@ -998,7 +1011,6 @@ fn render_launch_script(
     ssh_ca_pubkey: Option<&str>,
 ) -> Result<String> {
     let cloud_init = render_cloud_init(guest_name, runtime)?;
-    let net = guest_net_params(guest_index);
     let base_dir = format!("{}/examples/v1.3", env!("CARGO_MANIFEST_DIR"));
     let mut out = String::new();
     out.push_str("#!/usr/bin/env bash\n");
@@ -1683,16 +1695,17 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
                     }
                 }
             };
+            // Allocate network resources before borrowing admin.guests.
+            let net_alloc = ensure_net_alloc(admin, guest_name).clone();
+            let ca_pubkey = admin.ssh_ca.public_key_openssh().ok();
             match admin
                 .guests
                 .get(guest_name)
                 .ok_or_else(|| anyhow::anyhow!("unknown guest '{guest_name}'"))
                 .and_then(|runtime| {
-                    let ca_pubkey = admin.ssh_ca.public_key_openssh().ok();
-                    let guest_index = admin.guest_order.iter().position(|g| g == guest_name).unwrap_or(0);
                     render_launch_script(
                         guest_name,
-                        guest_index,
+                        &net_alloc,
                         runtime,
                         admin.admin_net,
                         admin.egress_net,
