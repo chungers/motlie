@@ -619,6 +619,10 @@ image:
 1. Kernel detects `virtio-net` PCI device (no driver changes needed)
 2. The boot-time `motlie-vnet-egress` service brings up the egress NIC with the
    libslirp-compatible defaults used in `v1.2`
+   - implemented as a oneshot systemd unit in the guest image
+   - brings the egress NIC up, assigns `10.0.2.15/24`, adds default route via
+     `10.0.2.2`, writes resolver `10.0.2.3`, and removes any competing default
+     route from the TAP admin NIC
 3. Guest gets: IP `10.0.2.15`, netmask `255.255.255.0`, gateway `10.0.2.2`,
    DNS `10.0.2.3`
 4. Outbound TCP/UDP: `apt update`, `git clone`, and the agent CLI auth flows work

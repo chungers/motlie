@@ -18,6 +18,10 @@ backend with libslirp for rootless guest networking.
 
 ## Status
 
+- `[ ]` not started
+- `[x]` completed and verified
+- `[>]` superseded or handed off; preserved here as historical traceability,
+  with the current source of truth linked inline
 - Phase 1 is implemented and merged.
 - Phase 2 is implemented and merged.
 - `v1.2` is the current source of truth for the composed validation harness:
@@ -242,6 +246,13 @@ guest image work for `v1.2+` now lives under `libs/vnet/examples/v1.2/`.
   Completed in `v1.2` with an equivalent boot-time `motlie-vnet-egress`
   service that programs the libslirp defaults explicitly instead of relying
   purely on DHCP. Current SOT: `libs/vnet/examples/v1.2/README.md`.
+  Original DHCP-oriented target preserved below for traceability; the actual
+  implementation diverged to a oneshot boot-time service that:
+  - brings the egress NIC up
+  - assigns `10.0.2.15/24`
+  - installs default route via `10.0.2.2`
+  - writes DNS resolver `10.0.2.3`
+  - removes any default route from the TAP admin NIC
   Short-term migration keeps TAP admin SSH on one NIC and uses DHCP on a
   separate vnet egress NIC. Match the egress NIC by launcher-assigned MAC,
   not by interface name, so the guest does not depend on `eth1` ordering.
