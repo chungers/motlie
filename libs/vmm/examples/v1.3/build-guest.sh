@@ -282,6 +282,7 @@ AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u
 SSHCAEOF' \
     --customize-hook='chroot "$1" npm install -g @openai/codex' \
     --customize-hook='chroot "$1" npm install -g @anthropic-ai/claude-code' \
+    --customize-hook='GH_ARCH="$(uname -m)"; case "$GH_ARCH" in x86_64) GH_ARCH=amd64;; aarch64) GH_ARCH=arm64;; esac; GH_VER=2.65.0; wget -qO- "https://github.com/cli/cli/releases/download/v${GH_VER}/gh_${GH_VER}_linux_${GH_ARCH}.tar.gz" | tar xz -C "$1/usr/local" --strip-components=1' \
     --customize-hook='mkdir -p "$1/etc/motlie-vfs"' \
     --customize-hook='cat > "$1/etc/profile.d/dotenv.sh" << "DOTENVEOF"
 if [ -f "$HOME/.env" ]; then
