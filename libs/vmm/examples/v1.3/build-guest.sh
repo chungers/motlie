@@ -434,13 +434,17 @@ EGRESSUNITEOF' \
     --customize-hook='chroot "$1" systemctl enable motlie-vmm-egress' \
     --customize-hook='cat > "$1/etc/systemd/system/motlie-vmm-vsock-ssh.service" << "VSOCKSSHEOF"
 [Unit]
-Description=motlie-vmm vsock-to-SSH bridge (socat)
+Description=motlie-vmm vsock-to-SSH bridge (socat, guest→host)
 After=ssh.service
 Requires=ssh.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/socat VSOCK-LISTEN:2222,reuseaddr,fork TCP:127.0.0.1:22
+# Guest connects OUT to host CID 2, port 2222.
+# CH routes this to the host UDS at $VSOCK_SOCKET_2222.
+# The host accepts and runs russh client over the stream.
+# socat bridges the vsock connection to local sshd.
+ExecStart=/usr/bin/socat VSOCK-CONNECT:2:2222 TCP:127.0.0.1:22
 Restart=always
 RestartSec=1
 
