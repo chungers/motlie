@@ -1732,30 +1732,42 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
                     if render_only {
                         emit_raw(script);
                     } else {
+                        // Bind the vsock SSH bridge listener BEFORE launching
+                        // the guest, so the UDS exists when socat connects.
+                        let vsock_path = guest_vsock_path(guest_name);
+                        let ssh_listener = match ssh::bind_vsock_ssh_listener(&vsock_path) {
+                            Ok((listener, uds_path)) => Some((listener, uds_path)),
+                            Err(e) => {
+                                emit_status(admin, format!("warning: SSH bridge bind failed: {e}"));
+                                None
+                            }
+                        };
+
                         match execute_launch_script(guest_name, &script) {
                             Ok(exec) => {
                                 admin.launch_pids.insert(guest_name.to_string(), exec.pid);
+
                                 // Spawn background task to accept the guest's vsock SSH bridge.
-                                // The guest's socat will connect after boot.
-                                let vsock_path = guest_vsock_path(guest_name);
-                                let bridge_ca = Arc::clone(&admin.ssh_ca);
-                                let bridge_reg = Arc::clone(&admin.guest_registry);
-                                let bridge_name = guest_name.to_string();
-                                admin.runtime.spawn(async move {
-                                    match ssh::accept_guest_ssh(&vsock_path, &bridge_ca, &bridge_name).await {
-                                        Ok(handle) => {
-                                            let handle = Arc::new(tokio::sync::Mutex::new(handle));
-                                            bridge_reg.lock().unwrap().insert(
-                                                bridge_name.clone(),
-                                                GuestEndpoint { ssh_handle: Some(handle) },
-                                            );
-                                            eprintln!("SSH bridge ready for guest '{bridge_name}'");
+                                if let Some((listener, uds_path)) = ssh_listener {
+                                    let bridge_ca = Arc::clone(&admin.ssh_ca);
+                                    let bridge_reg = Arc::clone(&admin.guest_registry);
+                                    let bridge_name = guest_name.to_string();
+                                    admin.runtime.spawn(async move {
+                                        match ssh::accept_guest_ssh(listener, &uds_path, &bridge_ca, &bridge_name).await {
+                                            Ok(handle) => {
+                                                let handle = Arc::new(tokio::sync::Mutex::new(handle));
+                                                bridge_reg.lock().unwrap().insert(
+                                                    bridge_name.clone(),
+                                                    GuestEndpoint { ssh_handle: Some(handle) },
+                                                );
+                                                eprintln!("SSH bridge ready for guest '{bridge_name}'");
+                                            }
+                                            Err(e) => {
+                                                eprintln!("SSH bridge failed for guest '{bridge_name}': {e}");
+                                            }
                                         }
-                                        Err(e) => {
-                                            eprintln!("SSH bridge failed for guest '{bridge_name}': {e}");
-                                        }
-                                    }
-                                });
+                                    });
+                                }
                                 emit_status(
                                     admin,
                                     format!(

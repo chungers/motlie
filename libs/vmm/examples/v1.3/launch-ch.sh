@@ -252,7 +252,9 @@ fi
 mkdir -p "$RUNTIME_DIR"
 rm -f "$RUNTIME_OVERLAY"
 truncate -s "$OVERLAY_SIZE" "$RUNTIME_OVERLAY"
-mkfs.ext4 -F -d "$OVERLAY_SEED" "$RUNTIME_OVERLAY" -q
+# Use fakeroot so all overlay files get root:root ownership.
+# sshd rejects CA/principals files not owned by root.
+fakeroot mkfs.ext4 -F -d "$OVERLAY_SEED" "$RUNTIME_OVERLAY" -q
 rm -rf "$OVERLAY_SEED"
 
 if [ ! -e /dev/vhost-vsock ]; then
