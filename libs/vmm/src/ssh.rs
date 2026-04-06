@@ -27,11 +27,13 @@ use std::collections::{HashMap, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use russh::server::{Auth, Msg, Session};
 use russh::{Channel, ChannelMsg, ChannelWriteHalf, Pty};
 use thiserror::Error;
 use tokio::net::UnixListener;
+use tokio::time::{sleep, Instant};
 
 use crate::ca::{CaError, SshCa};
 
@@ -163,9 +165,9 @@ pub fn bind_vsock_ssh_listener(
     Ok((listener, uds_path))
 }
 
-/// Accept the guest's vsock SSH bridge and authenticate with CA cert.
-pub async fn accept_guest_ssh(
-    listener: UnixListener,
+/// Accept one guest vsock SSH bridge connection and authenticate with a CA cert.
+async fn accept_guest_ssh_once(
+    listener: &UnixListener,
     uds_path: &std::path::Path,
     ca: &SshCa,
     guest_name: &str,
@@ -210,6 +212,96 @@ pub async fn accept_guest_ssh(
     Ok(handle)
 }
 
+/// Accept guest SSH bridge reconnects forever and keep the registry updated
+/// with the most recent authenticated bridge handle.
+pub async fn run_guest_ssh_bridge(
+    listener: UnixListener,
+    uds_path: PathBuf,
+    ca: Arc<SshCa>,
+    guest_name: String,
+    registry: GuestRegistry,
+) {
+    loop {
+        match accept_guest_ssh_once(&listener, &uds_path, &ca, &guest_name).await {
+            Ok(handle) => {
+                let handle = Arc::new(tokio::sync::Mutex::new(handle));
+                registry.lock().unwrap().insert(
+                    guest_name.clone(),
+                    GuestEndpoint {
+                        ssh_handle: Some(handle),
+                    },
+                );
+                eprintln!("SSH bridge ready for guest '{guest_name}'");
+            }
+            Err(e) => {
+                eprintln!("SSH bridge failed for guest '{guest_name}': {e}");
+                sleep(Duration::from_millis(250)).await;
+            }
+        }
+    }
+}
+
+fn current_guest_handle(
+    registry: &GuestRegistry,
+    guest_name: &str,
+) -> Option<Arc<tokio::sync::Mutex<russh::client::Handle<GuestClientHandler>>>> {
+    let reg = registry.lock().unwrap();
+    reg.get(guest_name).and_then(|ep| ep.ssh_handle.clone())
+}
+
+async fn open_guest_session_with_retry(
+    registry: &GuestRegistry,
+    guest_name: &str,
+    timeout: Duration,
+) -> Result<Channel<russh::client::Msg>, SshProxyError> {
+    let deadline = Instant::now() + timeout;
+    let mut last_err: Option<String> = None;
+
+    loop {
+        let Some(handle) = current_guest_handle(registry, guest_name) else {
+            if Instant::now() >= deadline {
+                return Err(SshProxyError::GuestConnection {
+                    guest: guest_name.into(),
+                    reason: last_err.unwrap_or_else(|| "SSH bridge not ready".into()),
+                });
+            }
+            sleep(Duration::from_millis(100)).await;
+            continue;
+        };
+
+        let open_result = {
+            let guard = handle.lock().await;
+            guard.channel_open_session().await
+        };
+
+        match open_result {
+            Ok(channel) => return Ok(channel),
+            Err(e) => {
+                last_err = Some(e.to_string());
+                {
+                    let mut reg = registry.lock().unwrap();
+                    if let Some(endpoint) = reg.get_mut(guest_name) {
+                        if endpoint
+                            .ssh_handle
+                            .as_ref()
+                            .is_some_and(|current| Arc::ptr_eq(current, &handle))
+                        {
+                            endpoint.ssh_handle = None;
+                        }
+                    }
+                }
+                if Instant::now() >= deadline {
+                    return Err(SshProxyError::GuestConnection {
+                        guest: guest_name.into(),
+                        reason: last_err.unwrap_or_else(|| "SSH channel open failed".into()),
+                    });
+                }
+                sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // FR-7: Programmatic exec
 // ---------------------------------------------------------------------------
@@ -219,12 +311,11 @@ pub async fn exec_on_handle(
     guest_name: &str,
     command: &str,
 ) -> Result<ExecOutput, SshProxyError> {
-    let guard = handle.lock().await;
-    let mut channel = guard
-        .channel_open_session()
-        .await
-        .map_err(|e| SshProxyError::Ssh(e.to_string()))?;
-    drop(guard);
+    let mut channel = {
+        let guard = handle.lock().await;
+        guard.channel_open_session().await
+    }
+    .map_err(|e| SshProxyError::Ssh(e.to_string()))?;
 
     channel
         .exec(true, command)
@@ -389,13 +480,27 @@ impl russh::server::Handler for ProxyHandler {
                 None => return Ok(false),
             };
 
-            let endpoint = {
-                let reg = registry.lock().unwrap();
-                reg.get(&username).cloned()
-            };
-            let ssh_handle = match endpoint.and_then(|ep| ep.ssh_handle) {
-                Some(h) => h,
-                None => {
+            if current_guest_handle(&registry, &username).is_none() {
+                let msg = format!(
+                    "Guest '{}' is not launched or SSH bridge not ready.\r\n",
+                    username
+                );
+                let _ = channel.data(msg.as_bytes()).await;
+                let _ = channel.close().await;
+                return Ok(false);
+            }
+
+            tracing::info!("SSH proxy: opening session to guest '{username}'");
+
+            let guest_ch = match open_guest_session_with_retry(
+                &registry,
+                &username,
+                Duration::from_secs(3),
+            )
+            .await
+            {
+                Ok(ch) => ch,
+                Err(_) => {
                     let msg = format!(
                         "Guest '{}' is not launched or SSH bridge not ready.\r\n",
                         username
@@ -405,12 +510,6 @@ impl russh::server::Handler for ProxyHandler {
                     return Ok(false);
                 }
             };
-
-            tracing::info!("SSH proxy: opening session to guest '{username}'");
-
-            let guard = ssh_handle.lock().await;
-            let guest_ch = guard.channel_open_session().await?;
-            drop(guard);
 
             let (mut guest_read, guest_write) = guest_ch.split();
             let guest_channels_for_read = Arc::clone(&guest_channels);
