@@ -188,6 +188,11 @@ RUNTIME_DIR="$RUNTIME_ROOT/$GUEST_NAME"
 RUNTIME_OVERLAY="$RUNTIME_DIR/overlay.ext4"
 OVERLAY_SEED="$RUNTIME_DIR/seed"
 
+# Set umask 022 for the entire overlay seed creation.
+# sshd checks ownership+mode on every directory in the path up to /.
+# Intermediate dirs created by mkdir -p must be 755 (not 775).
+umask 022
+
 rm -rf "$OVERLAY_SEED"
 mkdir -p "$OVERLAY_SEED/upper/etc/motlie-vfs"
 mkdir -p "$OVERLAY_SEED/work"
@@ -235,10 +240,6 @@ copy_overlay_tree "$GUEST_OVERLAY_CONTENT" "$OVERLAY_SEED/upper"
 # sshd_config references these paths via TrustedUserCAKeys and
 # AuthorizedPrincipalsFile directives baked into the guest image.
 if [ -n "$SSH_CA_PUBKEY" ]; then
-    # sshd checks ownership+mode on the entire directory path up to /.
-    # Set umask 022 so all mkdir -p intermediate dirs get 755 not 775.
-    old_umask=$(umask)
-    umask 022
     mkdir -p "$OVERLAY_SEED/upper/etc/ssh/ca"
     printf '%s\n' "$SSH_CA_PUBKEY" > "$OVERLAY_SEED/upper/etc/ssh/ca/user_ca.pub"
     chmod 644 "$OVERLAY_SEED/upper/etc/ssh/ca/user_ca.pub"
@@ -251,7 +252,6 @@ if [ -n "$SSH_CA_PUBKEY" ]; then
     chmod 644 "$OVERLAY_SEED/upper/etc/ssh/auth_principals/$SSH_USER"
     chmod 644 "$OVERLAY_SEED/upper/etc/ssh/auth_principals/root"
     echo "  SSH CA:    injected user_ca.pub + auth_principals/$SSH_USER"
-    umask "$old_umask"
 fi
 
 mkdir -p "$RUNTIME_DIR"

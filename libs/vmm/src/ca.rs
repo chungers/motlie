@@ -162,4 +162,30 @@ mod tests {
         let ca = SshCa::with_ttl(Duration::from_secs(30)).unwrap();
         assert_eq!(ca.cert_ttl, Duration::from_secs(30));
     }
+
+    #[test]
+    fn cert_validates_with_ssh_keygen() {
+        let ca = SshCa::new().unwrap();
+        let eph = ca.sign_ephemeral("alice").unwrap();
+
+        // Write cert to temp file and validate with ssh-keygen -L
+        let dir = tempfile::tempdir().unwrap();
+        let cert_path = dir.path().join("cert.pub");
+        let ca_path = dir.path().join("ca.pub");
+
+        std::fs::write(&cert_path, eph.cert.to_openssh().unwrap()).unwrap();
+        std::fs::write(&ca_path, ca.public_key_openssh().unwrap()).unwrap();
+
+        // ssh-keygen -L shows cert details
+        let output = std::process::Command::new("ssh-keygen")
+            .args(["-L", "-f"])
+            .arg(&cert_path)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        eprintln!("=== ssh-keygen -L ===\n{stdout}");
+        assert!(output.status.success(), "ssh-keygen -L failed: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(stdout.contains("alice"), "cert should contain principal 'alice': {stdout}");
+        assert!(stdout.contains("Type: ssh-ed25519-cert-v01@openssh.com user"), "should be user cert: {stdout}");
+    }
 }
