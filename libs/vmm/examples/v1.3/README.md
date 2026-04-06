@@ -380,19 +380,26 @@ seed/upper/
 
 ## SSH Transport: vsock (Fully Userspace)
 
-The SSH proxy reaches guest sshd over **AF_VSOCK** — not TCP over a
-TAP NIC. This eliminates TAP and `CAP_NET_ADMIN` entirely.
+The SSH proxy reaches guest sshd over vsock — not TCP over a TAP NIC.
+The guest connects OUT to the host (guest→host direction, same as VFS).
+This eliminates TAP and `CAP_NET_ADMIN` entirely.
 
 ```
-Host process                 Kernel                  Guest VM
-─────────────                ──────                  ────────
-VsockStream::connect ──► vhost-vsock ──► /dev/vsock
-  (cid=3, port=2222)       routes by CID     socat VSOCK-LISTEN:2222
-                                                  │
-                                              TCP localhost:22
-                                                  │
-                                               sshd (CA trust)
+Guest VM (after boot)              CH vhost-vsock              Host process
+─────────────────────              ──────────────              ────────────
+socat VSOCK-CONNECT:2:2222 ──► /dev/vsock ──► $VSOCK_SOCKET_2222 (UDS)
+  │                                                │
+  TCP:localhost:22                          UnixListener::accept()
+  │                                                │
+  sshd (CA trust)                          russh::client::connect_stream()
+                                                   │
+                                           SSH Handle (multiplexed sessions)
 ```
+
+**Key insight:** CH's vhost-vsock only supports guest→host connections.
+The guest's socat bridge initiates the connection; the host accepts.
+Multiple SSH sessions multiplex over this single connection via SSH
+channels — no need for multiple vsock connections.
 
 **Why vsock over libslirp hostfwd:**
 
@@ -404,7 +411,7 @@ VsockStream::connect ──► vhost-vsock ──► /dev/vsock
 | Guest changes | socat bridge service | None |
 | Product alignment | Matches motlie-vmm.md | Not the target arch |
 
-The guest runs `socat VSOCK-LISTEN:2222,reuseaddr,fork TCP:127.0.0.1:22`
+The guest runs `socat VSOCK-CONNECT:2:2222 TCP:127.0.0.1:22`
 as the `motlie-vmm-vsock-ssh` systemd service, baked into the image.
 
 ## SSH Auth Model
