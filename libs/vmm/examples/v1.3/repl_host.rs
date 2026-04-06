@@ -1,4 +1,13 @@
-//! repl_host_v1_2: v1.2 host-side VFS+vnet server with admin REPL (motlie-vnet package).
+//! repl_host_v1_3: v1.3 host-side VFS+vnet+vmm server with admin REPL (motlie-vmm package).
+//!
+//! Builds on v1.2 by adding an SSH proxy (russh) for programmatic guest
+//! command execution. The proxy uses the existing TAP admin path to reach
+//! guest sshd, with CA-signed ephemeral certs for authentication.
+//!
+//! New in v1.3:
+//!   - `exec <guest> <command>` — run a command inside a guest via SSH
+//!   - `validate <guest>` — automated runbook verification via exec
+//!   - SSH CA initialized at startup for guest authentication
 //!
 //! Starts one or more guest-scoped FsServer instances with MemOverlay,
 //! listens on one Unix socket per guest, and serves filesystem
@@ -31,37 +40,37 @@
 //!
 //! ```bash
 //! # Interactive
-//! cargo run -p motlie-vnet --example repl_host_v1_2 -- --tag alice-home --dir ~/alice
+//! cargo run -p motlie-vmm --example repl_host_v1_3 -- --tag alice-home --dir ~/alice
 //!
 //! # Multi-mount (repeat --mount)
-//! cargo run -p motlie-vnet --example repl_host_v1_2 -- \
-//!     --socket /tmp/motlie-vnet.vsock_5000 \
+//! cargo run -p motlie-vmm --example repl_host_v1_3 -- \
+//!     --socket /tmp/motlie-vmm.vsock_5000 \
 //!     --mount alice-home=~/alice \
 //!     --mount workspace=~/workspace
 //!
 //! # Multi-guest (repeat --guest and guest-qualified --mount)
-//! cargo run -p motlie-vnet --example repl_host_v1_2 -- \
-//!     --guest alice=/tmp/motlie-vnet-alice.vsock_5000 \
+//! cargo run -p motlie-vmm --example repl_host_v1_3 -- \
+//!     --guest alice=/tmp/motlie-vmm-alice.vsock_5000 \
 //!     --mount alice:alice-home=~/alice \
 //!     --mount alice:alice-workspace=~/workspace \
-//!     --guest bob=/tmp/motlie-vnet-bob.vsock_5000 \
+//!     --guest bob=/tmp/motlie-vmm-bob.vsock_5000 \
 //!     --mount bob:bob-home=~/bob \
 //!     --mount bob:bob-workspace=~/workspace-bob
 //!
 //! # Empty admin mode, provision from REPL script
-//! cat setup-multiguest.sh.vfs | cargo run -p motlie-vnet --example repl_host_v1_2 -- --empty
+//! cat setup-multiguest.sh.vfs | cargo run -p motlie-vmm --example repl_host_v1_3 -- --empty
 //!
 //! # Preferred interactive setup-file flow (keeps rustyline on a real TTY)
-//! cargo run -p motlie-vnet --example repl_host_v1_2 -- --empty --script setup-multiguest.sh.vfs --admin-net=tap --egress-net=vhost-user
+//! cargo run -p motlie-vmm --example repl_host_v1_3 -- --empty --script setup-multiguest.sh.vfs --admin-net=tap --egress-net=vhost-user
 //!
 //! # Script then interactive
-//! cat setup-alice.sh.vfs - | cargo run -p motlie-vnet --example repl_host_v1_2 -- --tag alice-home
+//! cat setup-alice.sh.vfs - | cargo run -p motlie-vmm --example repl_host_v1_3 -- --tag alice-home
 //!
 //! # Script only (server stays alive until signaled)
-//! cat setup-alice.sh.vfs | cargo run -p motlie-vnet --example repl_host_v1_2 -- --tag alice-home
+//! cat setup-alice.sh.vfs | cargo run -p motlie-vmm --example repl_host_v1_3 -- --tag alice-home
 //!
 //! # Agent-driven (write commands to stdin, server stays alive)
-//! echo "layer creds 0" | cargo run -p motlie-vnet --example repl_host_v1_2 -- --tag alice-home
+//! echo "layer creds 0" | cargo run -p motlie-vmm --example repl_host_v1_3 -- --tag alice-home
 //! ```
 //!
 //! # Options
@@ -99,16 +108,18 @@ use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 
 use motlie_vnet::{VnetBackend, VnetConfig, VnetHandle};
+use motlie_vmm::ca::SshCa;
+use motlie_vmm::ssh;
 use motlie_vfs::core::overlay::OverlayAttrs;
 use motlie_vfs::core::server::FsServer;
 use motlie_vfs::vsock::handler::VsockConnectionHandler;
 
 fn build_git_sha() -> &'static str {
-    option_env!("MOTLIE_VNET_BUILD_GIT_SHA").unwrap_or("unknown")
+    option_env!("MOTLIE_VMM_BUILD_GIT_SHA").unwrap_or("unknown")
 }
 
 fn build_time_utc() -> &'static str {
-    option_env!("MOTLIE_VNET_BUILD_TIME_UTC").unwrap_or("unknown")
+    option_env!("MOTLIE_VMM_BUILD_TIME_UTC").unwrap_or("unknown")
 }
 
 #[derive(Clone)]
@@ -214,6 +225,17 @@ struct AdminState {
     egress_net: EgressNet,
     vnet_handles: HashMap<String, VnetHandle>,
     launch_pids: HashMap<String, u32>,
+    ssh_ca: Arc<SshCa>,
+}
+
+/// Resolve guest TAP admin IP from guest name.
+/// Matches the static allocation in launch-ch.sh.
+fn guest_admin_ip(guest_name: &str) -> Option<Ipv4Addr> {
+    match guest_name {
+        "alice" => Some(Ipv4Addr::new(192, 168, 249, 2)),
+        "bob" => Some(Ipv4Addr::new(192, 168, 250, 2)),
+        _ => None,
+    }
 }
 
 enum MountSpec {
@@ -230,7 +252,7 @@ enum MountSpec {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut socket_path = "/tmp/motlie-vnet.vsock_5000".to_string();
+    let mut socket_path = "/tmp/motlie-vmm.vsock_5000".to_string();
     let mut tag = "alice-home".to_string();
     let mut host_dir: Option<PathBuf> = None;
     let mut single_mounts: Vec<(String, PathBuf)> = Vec::new();
@@ -400,7 +422,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    eprintln!("=== motlie-vnet repl_host_v1_2 ===");
+    eprintln!("=== motlie-vmm repl_host_v1_3 ===");
     eprintln!("Build: {}", build_git_sha());
     eprintln!("Built At: {}", build_time_utc());
     eprintln!(
@@ -470,6 +492,9 @@ async fn main() -> Result<()> {
         );
     }
 
+    // Initialize SSH CA for guest authentication (FR-6).
+    let ssh_ca = Arc::new(SshCa::new().expect("failed to initialize SSH CA"));
+    eprintln!("SSH CA: initialized (ephemeral Ed25519)");
     eprintln!("Type 'help' for commands.");
     eprintln!("");
 
@@ -489,6 +514,7 @@ async fn main() -> Result<()> {
         egress_net,
         vnet_handles: HashMap::new(),
         launch_pids: HashMap::new(),
+        ssh_ca,
     };
 
     // Spawn the admin input handler on a blocking thread
@@ -1331,7 +1357,7 @@ fn print_help(topic: Option<&str>, multi_guest: bool, comment_stdout: bool) {
             out("  The helper writes guest-specific cloud-init user-data and meta-data");
             out("  generated from the provisioned uid/gid and mount topology.");
             out("  launch-ch.sh then seeds those files into /var/lib/cloud/seed/nocloud/.");
-            out("  In --egress-net=vhost-user mode, repl_host_v1_2 starts one motlie-vnet");
+            out("  In --egress-net=vhost-user mode, repl_host_v1_3 starts one motlie-vnet");
             out("  backend per guest before launching and reuses it across later launches.");
             out("  Logs land under /tmp/motlie-vnet-launch/<guest>/.");
             out("launch -script <guest>");
@@ -1354,7 +1380,7 @@ fn print_help(topic: Option<&str>, multi_guest: bool, comment_stdout: bool) {
         }
         Some("build") => {
             out("build");
-            out("  Print the git commit SHA and build timestamp baked into this repl_host_v1_2 binary at compile time.");
+            out("  Print the git commit SHA and build timestamp baked into this repl_host_v1_3 binary at compile time.");
         }
         Some("layer") => {
             out("layer <name> <priority>");
@@ -1397,6 +1423,23 @@ fn print_help(topic: Option<&str>, multi_guest: bool, comment_stdout: bool) {
             out("tree [tag]");
             out("  Show the layered tree and effective winners. Without tag, show all tags.");
         }
+        Some("exec") => {
+            out("exec <guest> <command...>");
+            out("  Execute a command inside a launched guest via SSH proxy.");
+            out("  Uses the SSH CA to sign an ephemeral cert and connects to");
+            out("  guest sshd over the TAP admin IP. Captures stdout, stderr,");
+            out("  and exit code.");
+            out("  Example:");
+            out("    exec alice uname -a");
+            out("    exec alice curl -s https://example.com");
+        }
+        Some("validate") => {
+            out("validate <guest>");
+            out("  Run automated validation checks against a launched guest.");
+            out("  Tests egress networking, DNS, writable root, agent-state");
+            out("  symlinks, and default route — all via SSH exec.");
+            out("  Reports PASS/FAIL for each check.");
+        }
         Some("quit") | Some("exit") => {
             out("quit");
             out("  Shut down repl_host.");
@@ -1416,6 +1459,8 @@ fn print_help(topic: Option<&str>, multi_guest: bool, comment_stdout: bool) {
                 out("  launch <guest>                                  — generate and start a guest launch helper asynchronously");
                 out("  launch -script <guest>                          — print the guest launch helper script");
                 out("  shutdown <guest>                                — request guest shutdown via CH API socket");
+                out("  exec <guest> <command...>                       — run a command inside guest via SSH proxy");
+                out("  validate <guest>                                — run automated runbook checks via SSH proxy");
                 out("  build                                           — print the build commit SHA");
                 out("");
             }
@@ -1447,9 +1492,9 @@ fn print_help(topic: Option<&str>, multi_guest: bool, comment_stdout: bool) {
             out("");
             out("Input modes:");
             out("  Interactive:  stdin is a TTY → rustyline REPL");
-            out("  Preferred scripted startup: repl_host_v1_2 --script setup.vfs → script then REPL");
-            out("  Pipe + TTY:   cat script.vfs - | repl_host_v1_2 → limited terminal semantics");
-            out("  Pure pipe:    cat script.vfs | repl_host_v1_2 → script then serve until signaled");
+            out("  Preferred scripted startup: repl_host_v1_3 --script setup.vfs → script then REPL");
+            out("  Pipe + TTY:   cat script.vfs - | repl_host_v1_3 → limited terminal semantics");
+            out("  Pure pipe:    cat script.vfs | repl_host_v1_3 → script then serve until signaled");
         }
     }
 }
@@ -1676,6 +1721,100 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
         }
         "shutdown" => {
             emit_status(admin, "error: shutdown <guest>");
+            return ControlFlow::Continue;
+        }
+        "exec" if parts.len() >= 3 => {
+            let guest_name = parts[1];
+            let command = parts[2..].join(" ");
+            let guest_ip = match guest_admin_ip(guest_name) {
+                Some(ip) => ip,
+                None => {
+                    emit_status(admin, format!("error: no admin IP known for guest '{guest_name}'"));
+                    return ControlFlow::Continue;
+                }
+            };
+            emit_status(admin, format!("exec {guest_name}: {command}"));
+            match admin.runtime.block_on(ssh::exec(
+                &admin.ssh_ca,
+                guest_name,
+                guest_ip,
+                22,
+                &command,
+            )) {
+                Ok(output) => {
+                    if !output.stdout.is_empty() {
+                        emit_raw(&output.stdout);
+                        if !output.stdout.ends_with('\n') {
+                            emit_raw("\n");
+                        }
+                    }
+                    if !output.stderr.is_empty() {
+                        emit_status(admin, format!("stderr: {}", output.stderr.trim_end()));
+                    }
+                    emit_status(admin, format!("exit_code: {}", output.exit_code));
+                }
+                Err(e) => emit_status(admin, format!("error: {e}")),
+            }
+            return ControlFlow::Continue;
+        }
+        "exec" => {
+            emit_status(admin, "error: exec <guest> <command...>");
+            return ControlFlow::Continue;
+        }
+        "validate" if parts.len() == 2 => {
+            let guest_name = parts[1];
+            let guest_ip = match guest_admin_ip(guest_name) {
+                Some(ip) => ip,
+                None => {
+                    emit_status(admin, format!("error: no admin IP known for guest '{guest_name}'"));
+                    return ControlFlow::Continue;
+                }
+            };
+            emit_status(admin, format!("=== validate {guest_name} ==="));
+            let checks: Vec<(&str, &str, Box<dyn Fn(&ssh::ExecOutput) -> bool>)> = vec![
+                ("egress: curl https://example.com", "curl -s -o /dev/null -w '%{http_code}' https://example.com",
+                    Box::new(|out| out.exit_code == 0 && out.stdout.trim() == "200")),
+                ("dns: nslookup via motlie-vnet", "nslookup example.com 10.0.2.3 2>&1 | head -1",
+                    Box::new(|out| out.exit_code == 0)),
+                ("writable root: touch /tmp/test", "touch /tmp/motlie-validate-test && rm /tmp/motlie-validate-test",
+                    Box::new(|out| out.exit_code == 0)),
+                ("agent-state: readlink ~/.codex", "readlink ~/.codex 2>/dev/null || echo 'no-link'",
+                    Box::new(|out| out.stdout.trim() == "/agent-state/codex")),
+                ("agent-state: readlink ~/.claude", "readlink ~/.claude 2>/dev/null || echo 'no-link'",
+                    Box::new(|out| out.stdout.trim() == "/agent-state/claude")),
+                ("ip route: default via motlie-vnet", "ip route show default",
+                    Box::new(|out| out.exit_code == 0 && out.stdout.contains("10.0.2.2"))),
+            ];
+            let mut passed = 0;
+            let mut failed = 0;
+            for (label, cmd, check) in &checks {
+                match admin.runtime.block_on(ssh::exec(
+                    &admin.ssh_ca,
+                    guest_name,
+                    guest_ip,
+                    22,
+                    cmd,
+                )) {
+                    Ok(output) => {
+                        if check(&output) {
+                            emit_status(admin, format!("  PASS: {label}"));
+                            passed += 1;
+                        } else {
+                            emit_status(admin, format!("  FAIL: {label} (exit={}, stdout={})", output.exit_code, output.stdout.trim()));
+                            failed += 1;
+                        }
+                    }
+                    Err(e) => {
+                        emit_status(admin, format!("  ERROR: {label}: {e}"));
+                        failed += 1;
+                    }
+                }
+            }
+            emit_status(admin, format!("=== {passed} passed, {failed} failed ==="));
+            return ControlFlow::Continue;
+        }
+        "validate" => {
+            emit_status(admin, "error: validate <guest>");
             return ControlFlow::Continue;
         }
         "build" if parts.len() == 1 => {
