@@ -618,6 +618,55 @@ orch.shutdown(&handle).await?;
 
 `examples/v1.3` is the live proving ground for the VMM-owned harness.
 
+## BIG TODO: move guest network allocation out of `examples/v1.3`
+
+`v1.3` still owns its guest identity allocation table inside
+[`examples/v1.3/repl_host.rs`](../examples/v1.3/repl_host.rs):
+
+- `AdminState.net_allocs`
+- `AdminState.next_net_slot`
+- `GuestNetAlloc`
+- `ensure_net_alloc()`
+
+Current gap:
+
+- the example-local allocator is safe for `alice`, `bob`, and a small number of
+  additional guests, but it is not a real library-owned allocation model
+- admin subnets are derived from `249u8.saturating_add(slot as u8)`, so the
+  current example logic starts colliding once it moves past the `192.168.255.0`
+  range
+- egress identity is still assembled ad hoc in the example instead of being
+  represented as one typed reusable assignment
+
+Scaffold added for the future extraction:
+
+- [`libs/vnet/src/alloc.rs`](../../vnet/src/alloc.rs)
+
+That scaffold now contains:
+
+- `GuestNetAllocatorConfig`
+- `GuestNetAllocator`
+- `GuestNetAssignment`
+- `AdminIpv4Pair`
+- `EgressIpv4Layout`
+
+Important:
+
+- this scaffold is intentionally non-authoritative today
+- `examples/v1.3` behavior is unchanged until a follow-up extraction PR moves
+  the live allocation path onto the library type
+- when that happens, `libs/vmm` should consume `libs/vnet::GuestNetAllocator`
+  rather than continuing to allocate CID/IP/MAC identity inside the REPL
+  example
+
+Extraction target:
+
+1. replace `ensure_net_alloc()` in `repl_host.rs` with a library-owned table
+2. make launch rendering consume a typed `GuestNetAssignment`
+3. make allocation exhaustion explicit and machine-readable instead of silently
+   saturating into collisions
+4. move the resulting call path behind the future `boot` / `boot_and_wait`
+   orchestration API
 Once validated, the extraction sequence should be:
 
 1. move typed config and network allocation into `libs/vmm`
