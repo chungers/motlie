@@ -268,16 +268,16 @@ pub async fn run_proxy(
     }
 }
 
-/// Shared write channel to the guest, set by channel_open_session,
+/// Shared write half of the guest channel, set by channel_open_session,
 /// used by data/pty/shell/exec/window_change handler methods.
-type SharedGuestChannel = Arc<tokio::sync::Mutex<Option<Channel<russh::client::Msg>>>>;
+type SharedGuestWrite = Arc<tokio::sync::Mutex<Option<russh::ChannelWriteHalf<russh::client::Msg>>>>;
 
 struct ProxyHandler {
     registry: GuestRegistry,
     username: Option<String>,
-    /// Write channel to guest sshd, shared between the async block in
-    /// channel_open_session and the handler methods.
-    guest_write: SharedGuestChannel,
+    /// Write half of the guest channel, shared between channel_open_session
+    /// (async block) and handler methods.
+    guest_write: SharedGuestWrite,
 }
 
 impl russh::server::Handler for ProxyHandler {
@@ -333,19 +333,20 @@ impl russh::server::Handler for ProxyHandler {
 
             tracing::info!("SSH proxy: opening session to guest '{username}'");
 
-            // Open two channels on the guest's multiplexed SSH connection:
-            // one for reading (guest→client), one for writing (client→guest).
+            // Open ONE channel and split into read/write halves.
+            // Both halves operate on the same SSH channel, so PTY/shell
+            // requests and data flow through the same session.
             let guard = ssh_handle.lock().await;
-            let guest_read_ch = guard.channel_open_session().await?;
-            let guest_write_ch = guard.channel_open_session().await?;
+            let guest_ch = guard.channel_open_session().await?;
             drop(guard);
 
-            // Store the write channel for handler methods.
-            *guest_write.lock().await = Some(guest_write_ch);
+            let (mut guest_read, guest_write_half) = guest_ch.split();
 
-            // Spawn guest→client forwarding task (read channel).
+            // Store the write half for handler methods.
+            *guest_write.lock().await = Some(guest_write_half);
+
+            // Spawn guest→client forwarding task (read half).
             let server_channel = channel;
-            let mut guest_read = guest_read_ch;
             tokio::spawn(async move {
                 while let Some(msg) = guest_read.wait().await {
                     match msg {
