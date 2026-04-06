@@ -935,11 +935,11 @@ fn seed_demo_host_mount(guest_name: &str, mount: &ConfiguredMount) -> Result<()>
 }
 
 fn guest_api_socket_path(guest_name: &str) -> PathBuf {
-    PathBuf::from(format!("/tmp/motlie-vnet-{guest_name}-api.sock"))
+    PathBuf::from(format!("/tmp/motlie-vmm-{guest_name}-api.sock"))
 }
 
 fn guest_vnet_socket_path(guest_name: &str) -> PathBuf {
-    PathBuf::from(format!("/tmp/motlie-vnet-{guest_name}.sock"))
+    PathBuf::from(format!("/tmp/motlie-vmm-{guest_name}.sock"))
 }
 
 fn guest_egress_mac(_guest_name: &str) -> [u8; 6] {
@@ -1000,7 +1000,7 @@ fn render_launch_script(
     writeln!(&mut out, "BASE_DIR=\"${{BASE_DIR:-{}}}\"", base_dir)?;
     writeln!(
         &mut out,
-        "SEED_DIR=\"${{SEED_DIR:-/tmp/motlie-vnet-cloud-init-${{GUEST_ID}}}}\""
+        "SEED_DIR=\"${{SEED_DIR:-/tmp/motlie-vmm-cloud-init-${{GUEST_ID}}}}\""
     )?;
     writeln!(
         &mut out,
@@ -1045,7 +1045,7 @@ fn render_launch_script(
     out.push_str("echo \"Generated cloud-init assets in $SEED_DIR\"\n");
     out.push_str("echo \"Launching guest ${GUEST_ID} with seeded NoCloud dir ${SEED_DIR}\"\n");
     if egress_net == EgressNet::VhostUser {
-        out.push_str("echo \"Using motlie-vnet egress socket ${VNET_SOCKET}\"\n");
+        out.push_str("echo \"Using motlie-vmm egress socket ${VNET_SOCKET}\"\n");
     }
     out.push_str("LAUNCH_ARGS=(--guest \"$GUEST_ID\" --cloud-init-dir \"$SEED_DIR\" --admin-net \"$ADMIN_NET\" --egress-net \"$EGRESS_NET\")\n");
     if egress_net == EgressNet::VhostUser {
@@ -1066,7 +1066,7 @@ struct LaunchExecution {
 }
 
 fn execute_launch_script(guest_name: &str, script: &str) -> Result<LaunchExecution> {
-    let log_dir = PathBuf::from(format!("/tmp/motlie-vnet-launch/{guest_name}"));
+    let log_dir = PathBuf::from(format!("/tmp/motlie-vmm-launch/{guest_name}"));
     std::fs::create_dir_all(&log_dir)?;
 
     let script_path = log_dir.join("launch.sh");
@@ -1352,7 +1352,7 @@ fn print_help(topic: Option<&str>, multi_guest: bool, comment_stdout: bool) {
             out("provision <guest> <socket> <uid> <gid>");
             out("  Create one guest-scoped FsServer, record the guest uid/gid contract, and bind its Unix socket listener.");
             out("  Example:");
-            out("    provision bob /tmp/motlie-vnet-bob.vsock_5000 1001 1001");
+            out("    provision bob /tmp/motlie-vmm-bob.vsock_5000 1001 1001");
         }
         Some("mount") => {
             out("mount <guest> <tag>=<guest_path>,<host_path> [more...]");
@@ -1360,7 +1360,7 @@ fn print_help(topic: Option<&str>, multi_guest: bool, comment_stdout: bool) {
             out("  guest_path is recorded for operator clarity and should match mounts.<guest>.yaml.");
             out("  FsServer routing still uses tag -> host_path on the host side.");
             out("  Example:");
-            out("    mount bob bob-home=/home/bob,/tmp/motlie-vnet-demo/bob-home bob-workspace=/workspace,/tmp/motlie-vnet-demo/bob-workspace");
+            out("    mount bob bob-home=/home/bob,/tmp/motlie-vmm-demo/bob-home bob-workspace=/workspace,/tmp/motlie-vmm-demo/bob-workspace");
         }
         Some("launch") => {
             out("launch <guest>");
@@ -1368,18 +1368,18 @@ fn print_help(topic: Option<&str>, multi_guest: bool, comment_stdout: bool) {
             out("  The helper writes guest-specific cloud-init user-data and meta-data");
             out("  generated from the provisioned uid/gid and mount topology.");
             out("  launch-ch.sh then seeds those files into /var/lib/cloud/seed/nocloud/.");
-            out("  In --egress-net=vhost-user mode, repl_host_v1_3 starts one motlie-vnet");
+            out("  In --egress-net=vhost-user mode, repl_host_v1_3 starts one motlie-vmm");
             out("  backend per guest before launching and reuses it across later launches.");
-            out("  Logs land under /tmp/motlie-vnet-launch/<guest>/.");
+            out("  Logs land under /tmp/motlie-vmm-launch/<guest>/.");
             out("launch -script <guest>");
             out("  Render the helper shell script to stdout without executing it.");
-            out("  In vhost-user mode, the helper assumes a motlie-vnet backend is");
+            out("  In vhost-user mode, the helper assumes a motlie-vmm backend is");
             out("  already listening on the derived guest socket.");
         }
         Some("shutdown") => {
             out("shutdown <guest>");
             out("  Request VM shutdown through the guest's Cloud Hypervisor API socket.");
-            out("  This shells out to curl --unix-socket /tmp/motlie-vnet-<guest>-api.sock ...");
+            out("  This shells out to curl --unix-socket /tmp/motlie-vmm-<guest>-api.sock ...");
         }
         Some("use") => {
             out("use <guest>");
@@ -1787,7 +1787,7 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
             let checks: Vec<(&str, &str, Box<dyn Fn(&ssh::ExecOutput) -> bool>)> = vec![
                 ("egress: curl https://example.com", "curl -s -o /dev/null -w '%{http_code}' https://example.com",
                     Box::new(|out| out.exit_code == 0 && out.stdout.trim() == "200")),
-                ("dns: nslookup via motlie-vnet", "nslookup example.com 10.0.2.3 2>&1 | head -1",
+                ("dns: nslookup via motlie-vmm", "nslookup example.com 10.0.2.3 2>&1 | head -1",
                     Box::new(|out| out.exit_code == 0)),
                 ("writable root: touch /tmp/test", "touch /tmp/motlie-validate-test && rm /tmp/motlie-validate-test",
                     Box::new(|out| out.exit_code == 0)),
@@ -1795,7 +1795,7 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
                     Box::new(|out| out.stdout.trim() == "/agent-state/codex")),
                 ("agent-state: readlink ~/.claude", "readlink ~/.claude 2>/dev/null || echo 'no-link'",
                     Box::new(|out| out.stdout.trim() == "/agent-state/claude")),
-                ("ip route: default via motlie-vnet", "ip route show default",
+                ("ip route: default via motlie-vmm", "ip route show default",
                     Box::new(|out| out.exit_code == 0 && out.stdout.contains("10.0.2.2"))),
             ];
             let mut passed = 0;

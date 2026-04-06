@@ -1,7 +1,7 @@
-# v1.2 combined demo data for one repl_host process managing two guests
+# v1.3 combined demo data for one repl_host process managing two guests
 
-provision alice /tmp/motlie-vnet-alice.vsock_5000 1000 1000
-mount alice alice-home=/home/alice,/tmp/motlie-vnet-demo/alice-home alice-workspace=/workspace,/tmp/motlie-vnet-demo/alice-workspace alice-agent-state=/agent-state,/tmp/motlie-vnet-demo/alice-agent-state
+provision alice /tmp/motlie-vmm-alice.vsock_5000 1000 1000
+mount alice alice-home=/home/alice,/tmp/motlie-vmm-demo/alice-home alice-workspace=/workspace,/tmp/motlie-vmm-demo/alice-workspace alice-agent-state=/agent-state,/tmp/motlie-vmm-demo/alice-agent-state
 
 use alice
 layer credentials 0
@@ -17,8 +17,8 @@ ls alice-home
 ls alice-workspace
 ls alice-agent-state
 
-provision bob /tmp/motlie-vnet-bob.vsock_5000 1001 1001
-mount bob bob-home=/home/bob,/tmp/motlie-vnet-demo/bob-home bob-workspace=/workspace,/tmp/motlie-vnet-demo/bob-workspace bob-agent-state=/agent-state,/tmp/motlie-vnet-demo/bob-agent-state
+provision bob /tmp/motlie-vmm-bob.vsock_5000 1001 1001
+mount bob bob-home=/home/bob,/tmp/motlie-vmm-demo/bob-home bob-workspace=/workspace,/tmp/motlie-vmm-demo/bob-workspace bob-agent-state=/agent-state,/tmp/motlie-vmm-demo/bob-agent-state
 
 use bob
 layer credentials 0

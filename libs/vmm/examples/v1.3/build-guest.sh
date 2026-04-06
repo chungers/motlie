@@ -177,10 +177,10 @@ DEBIAN_MIRROR="http://deb.debian.org/debian"
 BASE_ARTIFACTS="$SCRIPT_DIR/artifacts/base"
 BASE_ROOTFS="$BASE_ARTIFACTS/rootfs.squashfs"
 BASE_KERNEL="$BASE_ARTIFACTS/$KERNEL_IMAGE"
-BASE_HOSTNAME="motlie-vnet-v12"
+BASE_HOSTNAME="motlie-vmm-v12"
 EGRESS_MAC="12:34:56:78:90:ab"
 
-echo "=== motlie-vnet v1.2 base image builder ==="
+echo "=== motlie-vmm v1.2 base image builder ==="
 echo "Host arch:          $HOST_ARCH"
 echo "Rust target:        $RUST_TARGET"
 echo "Debian arch:        $DEBOOTSTRAP_ARCH"
@@ -218,7 +218,7 @@ case "$KERNEL_MODE" in
         fi
         ;;
     build)
-        KERNEL_SRC="/tmp/motlie-vnet-kernel-$$"
+        KERNEL_SRC="/tmp/motlie-vmm-kernel-$$"
         echo "Cloning cloud-hypervisor/linux into $KERNEL_SRC..."
         git clone --depth 1 https://github.com/cloud-hypervisor/linux.git \
             -b ch-6.12.8 "$KERNEL_SRC"
@@ -368,7 +368,7 @@ MACAddress=$EGRESS_MAC
 [Network]
 ConfigureWithoutCarrier=yes
 NETEOF" \
-    --customize-hook='cat > "$1/usr/local/bin/motlie-vnet-egress-setup" << "EGRESSEOF"
+    --customize-hook='cat > "$1/usr/local/bin/motlie-vmm-egress-setup" << "EGRESSEOF"
 #!/bin/sh
 set -eu
 
@@ -382,7 +382,7 @@ nameserver 10.0.2.3
 options edns0
 RESOLVEOF
 EGRESSEOF' \
-    --customize-hook='chmod 755 "$1/usr/local/bin/motlie-vnet-egress-setup"' \
+    --customize-hook='chmod 755 "$1/usr/local/bin/motlie-vmm-egress-setup"' \
     --customize-hook='cat > "$1/etc/systemd/system/motlie-vfs-guest.service" << "SVCEOF"
 [Unit]
 Description=motlie-vfs guest filesystem mounter
@@ -415,7 +415,7 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 AGENTUNITEOF' \
     --customize-hook='chroot "$1" systemctl enable motlie-agent-state' \
-    --customize-hook='cat > "$1/etc/systemd/system/motlie-vnet-egress.service" << "EGRESSUNITEOF"
+    --customize-hook='cat > "$1/etc/systemd/system/motlie-vmm-egress.service" << "EGRESSUNITEOF"
 [Unit]
 Description=Configure static v1.2 egress NIC
 After=systemd-networkd.service
@@ -424,13 +424,13 @@ ConditionPathExists=/sys/class/net/eth1
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/motlie-vnet-egress-setup
+ExecStart=/usr/local/bin/motlie-vmm-egress-setup
 RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
 EGRESSUNITEOF' \
-    --customize-hook='chroot "$1" systemctl enable motlie-vnet-egress' \
+    --customize-hook='chroot "$1" systemctl enable motlie-vmm-egress' \
     --customize-hook="echo \"$BASE_HOSTNAME\" > \"\$1/etc/hostname\"" \
     --customize-hook='cat > "$1/etc/motd" << "MOTDEOF"
                     _   _ _

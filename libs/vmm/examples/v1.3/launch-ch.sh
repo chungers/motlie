@@ -14,7 +14,7 @@
 #   artifacts/base/Image|vmlinux.bin
 #
 # Per-guest writable runtime overlays are created on each launch under:
-#   ${RUNTIME_ROOT:-/tmp/motlie-vnet-v12-runtime}/<guest>/overlay.ext4
+#   ${RUNTIME_ROOT:-/tmp/motlie-vmm-v12-runtime}/<guest>/overlay.ext4
 
 set -euo pipefail
 
@@ -58,7 +58,7 @@ GUEST_NAME="alice"
 ADMIN_NET="tap"
 EGRESS_NET="tap"
 OVERLAY_SIZE="${OVERLAY_SIZE:-2G}"
-RUNTIME_ROOT="${RUNTIME_ROOT:-/tmp/motlie-vnet-v12-runtime}"
+RUNTIME_ROOT="${RUNTIME_ROOT:-/tmp/motlie-vmm-v12-runtime}"
 CLOUD_INIT_DIR=""
 SERIAL_BACKEND="${CH_SERIAL_BACKEND:-tty}"
 CONSOLE_BACKEND="${CH_CONSOLE_BACKEND:-off}"
@@ -97,8 +97,8 @@ esac
 case "$GUEST_NAME" in
     alice)
         BASE_ARTIFACTS="$SCRIPT_DIR/artifacts/base"
-        API_SOCKET="/tmp/motlie-vnet-alice-api.sock"
-        VSOCK_SOCKET="/tmp/motlie-vnet-alice.vsock"
+        API_SOCKET="/tmp/motlie-vmm-alice-api.sock"
+        VSOCK_SOCKET="/tmp/motlie-vmm-alice.vsock"
         CID=3
         HOST_IP="192.168.249.1"
         GUEST_IP="192.168.249.2"
@@ -109,12 +109,12 @@ case "$GUEST_NAME" in
         LOGIN_HOME="/home/alice"
         MOUNT_CONFIG="$SCRIPT_DIR/mounts.alice.yaml"
         GUEST_OVERLAY_CONTENT="$SCRIPT_DIR/overlay.d/alice"
-        [ -n "$VNET_SOCKET" ] || VNET_SOCKET="/tmp/motlie-vnet-alice.sock"
+        [ -n "$VNET_SOCKET" ] || VNET_SOCKET="/tmp/motlie-vmm-alice.sock"
         ;;
     bob)
         BASE_ARTIFACTS="$SCRIPT_DIR/artifacts/base"
-        API_SOCKET="/tmp/motlie-vnet-bob-api.sock"
-        VSOCK_SOCKET="/tmp/motlie-vnet-bob.vsock"
+        API_SOCKET="/tmp/motlie-vmm-bob-api.sock"
+        VSOCK_SOCKET="/tmp/motlie-vmm-bob.vsock"
         CID=4
         HOST_IP="192.168.250.1"
         GUEST_IP="192.168.250.2"
@@ -125,7 +125,7 @@ case "$GUEST_NAME" in
         LOGIN_HOME="/home/bob"
         MOUNT_CONFIG="$SCRIPT_DIR/mounts.bob.yaml"
         GUEST_OVERLAY_CONTENT="$SCRIPT_DIR/overlay.d/bob"
-        [ -n "$VNET_SOCKET" ] || VNET_SOCKET="/tmp/motlie-vnet-bob.sock"
+        [ -n "$VNET_SOCKET" ] || VNET_SOCKET="/tmp/motlie-vmm-bob.sock"
         ;;
     *)
         echo "ERROR: --guest must be one of: alice, bob"
