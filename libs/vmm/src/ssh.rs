@@ -255,7 +255,7 @@ pub async fn run_proxy(
         let handler = ProxyHandler {
             registry: Arc::clone(&registry),
             username: None,
-            guest_write: Arc::new(tokio::sync::Mutex::new(None)),
+            guest_ch: Arc::new(tokio::sync::Mutex::new(None)),
         };
 
         let cfg = Arc::clone(&russh_config);
@@ -268,16 +268,17 @@ pub async fn run_proxy(
     }
 }
 
-/// Shared write half of the guest channel, set by channel_open_session,
-/// used by data/pty/shell/exec/window_change handler methods.
-type SharedGuestWrite = Arc<tokio::sync::Mutex<Option<russh::ChannelWriteHalf<russh::client::Msg>>>>;
+/// Shared guest channel, set by channel_open_session,
+/// used by handler methods for client→guest forwarding.
+type SharedGuestChannel = Arc<tokio::sync::Mutex<Option<Channel<russh::client::Msg>>>>;
 
 struct ProxyHandler {
     registry: GuestRegistry,
     username: Option<String>,
-    /// Write half of the guest channel, shared between channel_open_session
-    /// (async block) and handler methods.
-    guest_write: SharedGuestWrite,
+    /// Full guest channel (not split). Handler methods use this for
+    /// PTY/shell/data forwarding. A background task reads from it
+    /// and sends output to the client via a server Handle.
+    guest_ch: SharedGuestChannel,
 }
 
 impl russh::server::Handler for ProxyHandler {
@@ -312,11 +313,13 @@ impl russh::server::Handler for ProxyHandler {
     fn channel_open_session(
         &mut self,
         channel: Channel<Msg>,
-        _session: &mut Session,
+        session: &mut Session,
     ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
         let username = self.username.clone();
         let registry = Arc::clone(&self.registry);
-        let guest_write = Arc::clone(&self.guest_write);
+        let guest_ch_slot = Arc::clone(&self.guest_ch);
+        let server_handle = session.handle();
+        let client_ch_id = channel.id();
 
         async move {
             let username = match username {
@@ -343,45 +346,50 @@ impl russh::server::Handler for ProxyHandler {
 
             tracing::info!("SSH proxy: opening session to guest '{username}'");
 
-            // Open ONE channel and split into read/write halves.
-            // Both halves operate on the same SSH channel, so PTY/shell
-            // requests and data flow through the same session.
             let guard = ssh_handle.lock().await;
-            let guest_ch = guard.channel_open_session().await?;
+            let mut guest_ch = guard.channel_open_session().await?;
             drop(guard);
 
-            let (mut guest_read, guest_write_half) = guest_ch.split();
-
-            // Store the write half for handler methods.
-            *guest_write.lock().await = Some(guest_write_half);
-
-            // Spawn guest→client forwarding task (read half).
-            let server_channel = channel;
+            // Spawn guest→client forwarding via the server Handle.
+            // The Handle can send data to the client independently of
+            // the handler methods.
+            let ch_id = client_ch_id;
             tokio::spawn(async move {
-                while let Some(msg) = guest_read.wait().await {
+                while let Some(msg) = guest_ch.wait().await {
                     match msg {
                         ChannelMsg::Data { ref data } => {
-                            if server_channel.data(data.as_ref()).await.is_err() {
+                            let bytes = bytes::Bytes::copy_from_slice(data);
+                            if server_handle.data(ch_id, bytes).await.is_err() {
                                 break;
                             }
                         }
                         ChannelMsg::ExtendedData { ref data, ext } if ext == 1 => {
-                            if server_channel.extended_data(1, data.as_ref()).await.is_err() {
+                            let bytes = bytes::Bytes::copy_from_slice(data);
+                            if server_handle.extended_data(ch_id, ext, bytes).await.is_err() {
                                 break;
                             }
                         }
                         ChannelMsg::Eof => {
-                            let _ = server_channel.eof().await;
+                            let _ = server_handle.eof(ch_id).await;
                             break;
                         }
                         ChannelMsg::Close => {
-                            let _ = server_channel.close().await;
+                            let _ = server_handle.close(ch_id).await;
                             break;
                         }
                         _ => {}
                     }
                 }
+                tracing::debug!("SSH proxy: guest→client read loop ended");
             });
+
+            // Open a SEPARATE channel for client→guest forwarding (handler
+            // methods: data, pty, shell, exec). This channel handles the
+            // interactive session — PTY is requested on it, shell runs on it.
+            let guard2 = ssh_handle.lock().await;
+            let handler_ch = guard2.channel_open_session().await?;
+            drop(guard2);
+            *guest_ch_slot.lock().await = Some(handler_ch);
 
             Ok(true)
         }
@@ -393,10 +401,10 @@ impl russh::server::Handler for ProxyHandler {
         data: &[u8],
         _session: &mut Session,
     ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
-        let guest_write = Arc::clone(&self.guest_write);
+        let guest_ch = Arc::clone(&self.guest_ch);
         let data = data.to_vec();
         async move {
-            if let Some(ref ch) = *guest_write.lock().await {
+            if let Some(ref ch) = *guest_ch.lock().await {
                 ch.data(&data[..]).await?;
             }
             Ok(())
@@ -414,14 +422,12 @@ impl russh::server::Handler for ProxyHandler {
         modes: &[(russh::Pty, u32)],
         session: &mut Session,
     ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
-        let guest_write = Arc::clone(&self.guest_write);
+        let guest_ch = Arc::clone(&self.guest_ch);
         let term = term.to_string();
         let modes = modes.to_vec();
         session.channel_success(channel).ok();
         async move {
-            if let Some(ref ch) = *guest_write.lock().await {
-                // want_reply=false: don't wait for reply because the read
-                // half's forwarding task would consume it.
+            if let Some(ref ch) = *guest_ch.lock().await {
                 ch.request_pty(false, &term, col_width, row_height, pix_width, pix_height, &modes)
                     .await?;
             }
@@ -434,10 +440,10 @@ impl russh::server::Handler for ProxyHandler {
         channel: russh::ChannelId,
         session: &mut Session,
     ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
-        let guest_write = Arc::clone(&self.guest_write);
+        let guest_ch = Arc::clone(&self.guest_ch);
         session.channel_success(channel).ok();
         async move {
-            if let Some(ref ch) = *guest_write.lock().await {
+            if let Some(ref ch) = *guest_ch.lock().await {
                 ch.request_shell(false).await?;
             }
             Ok(())
@@ -450,11 +456,11 @@ impl russh::server::Handler for ProxyHandler {
         data: &[u8],
         session: &mut Session,
     ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
-        let guest_write = Arc::clone(&self.guest_write);
+        let guest_ch = Arc::clone(&self.guest_ch);
         let data = data.to_vec();
         session.channel_success(channel).ok();
         async move {
-            if let Some(ref ch) = *guest_write.lock().await {
+            if let Some(ref ch) = *guest_ch.lock().await {
                 ch.exec(false, &data[..]).await?;
             }
             Ok(())
@@ -470,9 +476,9 @@ impl russh::server::Handler for ProxyHandler {
         pix_height: u32,
         _session: &mut Session,
     ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
-        let guest_write = Arc::clone(&self.guest_write);
+        let guest_ch = Arc::clone(&self.guest_ch);
         async move {
-            if let Some(ref ch) = *guest_write.lock().await {
+            if let Some(ref ch) = *guest_ch.lock().await {
                 ch.window_change(col_width, row_height, pix_width, pix_height)
                     .await?;
             }
