@@ -15,6 +15,8 @@ default = []
 russh = { version = "0.60", features = ["aws-lc-rs"] }
 rand = "0.10"
 
+bytes = "1"
+
 # Async
 futures = "0.3"
 
