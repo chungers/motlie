@@ -36,7 +36,7 @@ motlie-vfs = { path = "../vfs", features = ["vsock"] }
 motlie-vnet = { path = "../vnet" }
 bytes = { version = "1", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
-rustyline = "15"
+rustyline = "18"
 atty = "0.2"
 ctrlc = "3"
 
