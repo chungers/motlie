@@ -33,7 +33,6 @@ use std::sync::{Arc, Mutex};
 
 use russh::server::{Auth, Msg, Session};
 use russh::{Channel, ChannelId, ChannelMsg, Pty};
-use russh_keys::key::PrivateKeyWithHashAlg;
 use thiserror::Error;
 use tokio::net::UnixListener;
 use tracing;
@@ -122,28 +121,39 @@ pub fn vsock_ssh_uds_path(vsock_socket: &str) -> PathBuf {
     PathBuf::from(format!("{}_{}", vsock_socket, VSOCK_SSH_PORT))
 }
 
-/// Listen for the guest's vsock SSH bridge connection.
+/// Bind the vsock SSH bridge UDS listener BEFORE the guest boots.
 ///
-/// After guest boot, the guest's socat service connects to host CID 2
-/// on VSOCK_SSH_PORT. CH routes this to the UDS at `vsock_socket_<port>`.
-/// We accept that connection and authenticate to guest sshd over it.
-///
-/// Returns an authenticated russh client handle that supports multiplexed
-/// SSH sessions via `channel_open_session()`.
-pub async fn accept_guest_ssh(
+/// Must be called before `execute_launch_script` so the UDS file
+/// exists when the guest's socat tries to connect.
+/// Pass the returned listener to `accept_guest_ssh`.
+pub fn bind_vsock_ssh_listener(
     vsock_socket: &str,
-    ca: &SshCa,
-    guest_name: &str,
-) -> Result<russh::client::Handle<GuestClientHandler>, SshProxyError> {
+) -> Result<(UnixListener, PathBuf), SshProxyError> {
     let uds_path = vsock_ssh_uds_path(vsock_socket);
-
-    // Remove stale socket file.
     let _ = std::fs::remove_file(&uds_path);
 
     let listener = UnixListener::bind(&uds_path).map_err(|e| SshProxyError::Ssh(
         format!("failed to bind vsock SSH UDS {}: {e}", uds_path.display()),
     ))?;
 
+    tracing::info!("Bound vsock SSH bridge UDS at {}", uds_path.display());
+    Ok((listener, uds_path))
+}
+
+/// Accept the guest's vsock SSH bridge connection and authenticate.
+///
+/// The listener must be bound BEFORE the guest boots (via
+/// `bind_vsock_ssh_listener`). After guest boot, the guest's socat
+/// service connects to host CID 2 on VSOCK_SSH_PORT. CH routes this
+/// to the UDS. We accept and authenticate to guest sshd over it.
+///
+/// Returns an authenticated russh client handle.
+pub async fn accept_guest_ssh(
+    listener: UnixListener,
+    uds_path: &std::path::Path,
+    ca: &SshCa,
+    guest_name: &str,
+) -> Result<russh::client::Handle<GuestClientHandler>, SshProxyError> {
     tracing::info!(
         "Waiting for guest '{}' vsock SSH bridge on {}",
         guest_name,
@@ -157,7 +167,8 @@ pub async fn accept_guest_ssh(
 
     tracing::info!("Guest '{}' vsock SSH bridge connected", guest_name);
 
-    // Authenticate to guest sshd over the accepted stream.
+    // Authenticate to guest sshd over the accepted stream using the
+    // CA-signed ephemeral certificate (not bare publickey).
     let eph = ca.sign_ephemeral(guest_name)?;
     let config = Arc::new(russh::client::Config::default());
 
@@ -168,13 +179,10 @@ pub async fn accept_guest_ssh(
             reason: format!("SSH handshake failed: {e}"),
         })?;
 
-    let key_with_alg = PrivateKeyWithHashAlg::new(Arc::new(eph.key), None)
-        .map_err(|e| SshProxyError::Ssh(e.to_string()))?;
-
     let authed = handle
-        .authenticate_publickey(guest_name, key_with_alg)
+        .authenticate_openssh_cert(guest_name, Arc::new(eph.key), eph.cert)
         .await
-        .map_err(|e| SshProxyError::Ssh(format!("SSH auth failed: {e}")))?;
+        .map_err(|e| SshProxyError::Ssh(format!("SSH cert auth failed: {e}")))?;
 
     if !authed {
         return Err(SshProxyError::GuestConnection {
