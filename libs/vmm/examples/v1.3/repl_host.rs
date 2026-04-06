@@ -1930,6 +1930,9 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
                 admin,
                 format!("build: sha={} built_at={}", build_git_sha(), build_time_utc()),
             );
+            if let Ok(pubkey) = admin.ssh_ca.public_key_openssh() {
+                emit_status(admin, format!("ssh_ca: {}", pubkey));
+            }
             return ControlFlow::Continue;
         }
         "help" => {

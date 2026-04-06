@@ -28,6 +28,8 @@
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -170,6 +172,24 @@ pub async fn accept_guest_ssh(
     // Authenticate to guest sshd over the accepted stream using the
     // CA-signed ephemeral certificate (not bare publickey).
     let eph = ca.sign_ephemeral(guest_name)?;
+
+    // Debug: dump cert and key to /tmp for manual testing with ssh(1).
+    let debug_dir = std::path::PathBuf::from(format!("/tmp/motlie-vmm-ssh-debug-{}", guest_name));
+    let _ = std::fs::create_dir_all(&debug_dir);
+    if let Ok(cert_str) = eph.cert.to_openssh() {
+        let _ = std::fs::write(debug_dir.join("cert.pub"), &cert_str);
+        eprintln!("SSH debug: wrote cert to {}/cert.pub", debug_dir.display());
+    }
+    if let Ok(key_str) = eph.key.to_openssh(ssh_key::LineEnding::LF) {
+        let _ = std::fs::write(debug_dir.join("key"), AsRef::<[u8]>::as_ref(&key_str));
+        let _ = std::fs::set_permissions(debug_dir.join("key"), std::fs::Permissions::from_mode(0o600));
+        eprintln!("SSH debug: wrote key to {}/key", debug_dir.display());
+    }
+    if let Ok(ca_pub) = ca.public_key_openssh() {
+        let _ = std::fs::write(debug_dir.join("ca.pub"), &ca_pub);
+    }
+    eprintln!("SSH debug: cert principals={:?} type={:?}", eph.cert.valid_principals(), eph.cert.cert_type());
+
     let config = Arc::new(russh::client::Config::default());
 
     let mut handle = russh::client::connect_stream(config, stream, GuestClientHandler)
