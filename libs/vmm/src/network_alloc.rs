@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map::Entry};
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
@@ -71,7 +71,9 @@ impl Default for GuestNetAllocatorConfig {
 pub enum GuestNetAllocatorError {
     #[error("guest name cannot be empty")]
     EmptyGuestName,
-    #[error("guest slot space exhausted: next slot {next_slot} exceeds configured admin subnet capacity {capacity}")]
+    #[error(
+        "guest slot space exhausted: next slot {next_slot} exceeds configured admin subnet capacity {capacity}"
+    )]
     Exhausted { next_slot: u16, capacity: u16 },
 }
 
@@ -112,30 +114,38 @@ impl GuestNetAllocator {
         self.assignments.get(guest_name)
     }
 
-    pub fn ensure(&mut self, guest_name: &str) -> Result<&GuestNetAssignment, GuestNetAllocatorError> {
+    pub fn ensure(
+        &mut self,
+        guest_name: &str,
+    ) -> Result<&GuestNetAssignment, GuestNetAllocatorError> {
         if guest_name.is_empty() {
             return Err(GuestNetAllocatorError::EmptyGuestName);
         }
 
-        if !self.assignments.contains_key(guest_name) {
-            let slot = self.next_slot;
-            if slot >= self.config.max_admin_subnets {
-                return Err(GuestNetAllocatorError::Exhausted {
-                    next_slot: slot,
-                    capacity: self.config.max_admin_subnets,
-                });
+        match self.assignments.entry(guest_name.to_string()) {
+            Entry::Occupied(entry) => Ok(entry.into_mut()),
+            Entry::Vacant(entry) => {
+                let slot = self.next_slot;
+                if slot >= self.config.max_admin_subnets {
+                    return Err(GuestNetAllocatorError::Exhausted {
+                        next_slot: slot,
+                        capacity: self.config.max_admin_subnets,
+                    });
+                }
+
+                self.next_slot += 1;
+                let assignment = Self::build_assignment(&self.config, guest_name, slot);
+                Ok(entry.insert(assignment))
             }
-
-            self.next_slot += 1;
-            let assignment = self.build_assignment(guest_name, slot);
-            self.assignments.insert(guest_name.to_string(), assignment);
         }
-
-        Ok(self.assignments.get(guest_name).expect("assignment inserted or existed"))
     }
 
-    fn build_assignment(&self, guest_name: &str, slot: u16) -> GuestNetAssignment {
-        let subnet = self.config.first_admin_subnet + slot;
+    fn build_assignment(
+        config: &GuestNetAllocatorConfig,
+        guest_name: &str,
+        slot: u16,
+    ) -> GuestNetAssignment {
+        let subnet = config.first_admin_subnet + slot;
         let host = Ipv4Addr::new(192, 168, subnet as u8, 1);
         let guest = Ipv4Addr::new(192, 168, subnet as u8, 2);
         let suffix = (slot + 1) as u8;
@@ -143,7 +153,7 @@ impl GuestNetAllocator {
         GuestNetAssignment {
             guest_name: guest_name.to_string(),
             slot,
-            cid: self.config.first_cid + slot as u32,
+            cid: config.first_cid + slot as u32,
             admin_ipv4: AdminIpv4Pair { host, guest },
             admin_mac: [0x52, 0x54, 0x00, 0xad, 0x00, suffix],
             egress_ipv4: EgressIpv4Layout {
@@ -153,8 +163,7 @@ impl GuestNetAllocator {
                 netmask: Ipv4Addr::new(255, 255, 255, 0),
             },
             egress_mac: [0x52, 0x54, 0x00, 0xe9, 0x00, suffix],
-            vnet_socket_path: self
-                .config
+            vnet_socket_path: config
                 .socket_dir
                 .join(format!("motlie-vmm-{guest_name}.sock")),
         }
