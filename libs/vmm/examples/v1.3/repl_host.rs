@@ -109,7 +109,7 @@ use tokio::sync::oneshot;
 
 use motlie_vnet::{VnetBackend, VnetConfig, VnetHandle};
 use motlie_vmm::ca::SshCa;
-use motlie_vmm::ssh;
+use motlie_vmm::ssh::{self, GuestRegistry, SshProxyConfig};
 use motlie_vfs::core::overlay::OverlayAttrs;
 use motlie_vfs::core::server::FsServer;
 use motlie_vfs::vsock::handler::VsockConnectionHandler;
@@ -228,6 +228,7 @@ struct AdminState {
     ssh_ca: Arc<SshCa>,
     net_allocs: HashMap<String, GuestNetAlloc>,
     next_net_slot: usize,
+    guest_registry: GuestRegistry,
 }
 
 /// Per-guest allocated network resources.  Once allocated for a guest name,
@@ -526,8 +527,20 @@ async fn main() -> Result<()> {
         );
     }
 
-    // Initialize SSH CA for guest authentication (FR-6).
+    // Initialize SSH CA and proxy (FR-6).
     let ssh_ca = Arc::new(SshCa::new().expect("failed to initialize SSH CA"));
+    let guest_registry = ssh::new_guest_registry();
+
+    // Start SSH proxy server in the background.
+    let proxy_config = SshProxyConfig::default();
+    let proxy_ca = Arc::clone(&ssh_ca);
+    let proxy_registry = Arc::clone(&guest_registry);
+    tokio::spawn(async move {
+        if let Err(e) = ssh::run_proxy(proxy_config, proxy_ca, proxy_registry).await {
+            eprintln!("SSH proxy error: {e}");
+        }
+    });
+
     eprintln!("SSH CA: initialized (ephemeral Ed25519)");
     eprintln!("Type 'help' for commands.");
     eprintln!("");
@@ -551,6 +564,7 @@ async fn main() -> Result<()> {
         ssh_ca,
         net_allocs: HashMap::new(),
         next_net_slot: 0,
+        guest_registry,
     };
 
     // Spawn the admin input handler on a blocking thread
@@ -1721,6 +1735,10 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
                         match execute_launch_script(guest_name, &script) {
                             Ok(exec) => {
                                 admin.launch_pids.insert(guest_name.to_string(), exec.pid);
+                                // Register guest IP for the SSH proxy.
+                                if let Some(ip) = guest_admin_ip(admin, guest_name) {
+                                    admin.guest_registry.lock().unwrap().insert(guest_name.to_string(), ip);
+                                }
                                 emit_status(
                                     admin,
                                     format!(
@@ -1750,6 +1768,7 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
             match shutdown_guest(guest_name, launch_pid) {
                 Ok(outcome) => {
                     admin.launch_pids.remove(guest_name);
+                    admin.guest_registry.lock().unwrap().remove(guest_name);
                     let mut detail = String::new();
                     if let Some(pid) = outcome.pid {
                         detail.push_str(&format!(" pid={pid}"));
