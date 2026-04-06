@@ -272,6 +272,14 @@ run_mmdebstrap "$BASE_ROOTFS" \
     --customize-hook='sed -i "s/#PermitRootLogin.*/PermitRootLogin yes/" "$1/etc/ssh/sshd_config"' \
     --customize-hook='echo "root:rootpass" | chroot "$1" chpasswd' \
     --customize-hook='chroot "$1" ssh-keygen -A' \
+    --customize-hook='cat >> "$1/etc/ssh/sshd_config" << "SSHCAEOF"
+
+# motlie-vmm SSH CA trust (v1.3+)
+# The CA public key and per-user principals are injected at launch time
+# into the runtime overlay, not baked into the image.
+TrustedUserCAKeys /etc/ssh/ca/user_ca.pub
+AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u
+SSHCAEOF' \
     --customize-hook='chroot "$1" npm install -g @openai/codex' \
     --customize-hook='chroot "$1" npm install -g @anthropic-ai/claude-code' \
     --customize-hook='mkdir -p "$1/etc/motlie-vfs"' \
