@@ -289,6 +289,16 @@ impl russh::server::Handler for ProxyHandler {
         async { Ok(Auth::Accept) }
     }
 
+    fn auth_publickey_offered(
+        &mut self,
+        user: &str,
+        _public_key: &russh::keys::PublicKey,
+    ) -> impl std::future::Future<Output = Result<Auth, Self::Error>> + Send {
+        self.username = Some(user.to_string());
+        tracing::info!("SSH proxy: auth_publickey_offered user={user}");
+        async { Ok(Auth::Accept) }
+    }
+
     fn auth_publickey(
         &mut self,
         user: &str,
