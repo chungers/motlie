@@ -23,7 +23,7 @@
 //! - Inbound: localhost trust (username = guest identity)
 //! - Outbound: ephemeral Ed25519 cert signed by in-memory CA
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -138,51 +138,6 @@ fn default_pty_modes() -> Vec<(Pty, u32)> {
         (Pty::TTY_OP_ISPEED, 38_400),
         (Pty::TTY_OP_OSPEED, 38_400),
     ]
-}
-
-fn upsert_pty_mode(modes: &mut Vec<(Pty, u32)>, key: Pty, value: u32) {
-    if let Some((_, existing)) = modes.iter_mut().find(|(mode, _)| *mode == key) {
-        *existing = value;
-    } else {
-        modes.push((key, value));
-    }
-}
-
-fn normalize_pty_modes(modes: &mut Vec<(Pty, u32)>) {
-    // Preserve the client's terminal sizing and most mode settings, but force
-    // a sane cooked interactive baseline so Enter/Ctrl-D/job control work
-    // through the SSH proxy like a normal shell session.
-    for (key, value) in [
-        (Pty::VINTR, 3),
-        (Pty::VQUIT, 28),
-        (Pty::VERASE, 127),
-        (Pty::VKILL, 21),
-        (Pty::VEOF, 4),
-        (Pty::VWERASE, 23),
-        (Pty::VLNEXT, 22),
-        (Pty::VREPRINT, 18),
-        (Pty::VSUSP, 26),
-        (Pty::INLCR, 0),
-        (Pty::IGNCR, 0),
-        (Pty::ICRNL, 1),
-        (Pty::IXON, 1),
-        (Pty::ISIG, 1),
-        (Pty::ICANON, 1),
-        (Pty::IEXTEN, 1),
-        (Pty::ECHO, 1),
-        (Pty::ECHOE, 1),
-        (Pty::ECHOK, 1),
-        (Pty::ECHONL, 0),
-        (Pty::ECHOCTL, 1),
-        (Pty::ECHOKE, 1),
-        (Pty::OPOST, 1),
-        (Pty::ONLCR, 1),
-        (Pty::OCRNL, 0),
-        (Pty::ONOCR, 0),
-        (Pty::ONLRET, 0),
-    ] {
-        upsert_pty_mode(modes, key, value);
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -340,7 +295,7 @@ pub async fn run_proxy(
         let handler = ProxyHandler {
             registry: Arc::clone(&registry),
             username: None,
-            guest_ch: Arc::new(tokio::sync::Mutex::new(None)),
+            guest_channels: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         };
 
         let cfg = Arc::clone(&russh_config);
@@ -356,16 +311,36 @@ pub async fn run_proxy(
 /// Shared guest channel write half, set by channel_open_session,
 /// used by handler methods for client→guest forwarding on the same SSH channel
 /// whose read half is being forwarded back to the client.
-type SharedGuestChannel =
-    Arc<tokio::sync::Mutex<Option<ChannelWriteHalf<russh::client::Msg>>>>;
+#[derive(Debug, Clone, Copy)]
+enum PendingReplyKind {
+    Pty,
+    Shell,
+    Exec,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingReply {
+    client_channel: russh::ChannelId,
+    kind: PendingReplyKind,
+}
+
+#[derive(Default)]
+struct ProxyChannelState {
+    writer: Option<ChannelWriteHalf<russh::client::Msg>>,
+    pending_replies: VecDeque<PendingReply>,
+}
+
+type SharedGuestChannels =
+    Arc<tokio::sync::Mutex<HashMap<russh::ChannelId, ProxyChannelState>>>;
 
 struct ProxyHandler {
     registry: GuestRegistry,
     username: Option<String>,
-    /// Full guest channel (not split). Handler methods use this for
-    /// PTY/shell/data forwarding. A background task reads from it
-    /// and sends output to the client via a server Handle.
-    guest_ch: SharedGuestChannel,
+    /// Per-client-channel proxied guest state. Each inbound localhost SSH
+    /// session channel gets its own guest SSH channel and ordered queue of
+    /// pending want-reply requests whose actual Success/Failure arrives later
+    /// from the guest channel.
+    guest_channels: SharedGuestChannels,
 }
 
 impl russh::server::Handler for ProxyHandler {
@@ -404,7 +379,7 @@ impl russh::server::Handler for ProxyHandler {
     ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
         let username = self.username.clone();
         let registry = Arc::clone(&self.registry);
-        let guest_ch_slot = Arc::clone(&self.guest_ch);
+        let guest_channels = Arc::clone(&self.guest_channels);
         let server_handle = session.handle();
         let client_ch_id = channel.id();
 
@@ -438,11 +413,9 @@ impl russh::server::Handler for ProxyHandler {
             drop(guard);
 
             let (mut guest_read, guest_write) = guest_ch.split();
+            let guest_channels_for_read = Arc::clone(&guest_channels);
 
             // Spawn guest→client forwarding via the server Handle.
-            // The Handle can send data to the client independently of
-            // the handler methods, while those methods use the same guest
-            // channel's write half for PTY/shell/exec/data forwarding.
             let ch_id = client_ch_id;
             tokio::spawn(async move {
                 while let Some(msg) = guest_read.wait().await {
@@ -461,19 +434,61 @@ impl russh::server::Handler for ProxyHandler {
                         }
                         ChannelMsg::Success => {
                             debug_trace!("SSH proxy: guest channel reported Success");
+                            let pending = {
+                                let mut states = guest_channels_for_read.lock().await;
+                                states
+                                    .get_mut(&ch_id)
+                                    .and_then(|state| state.pending_replies.pop_front())
+                            };
+                            if let Some(pending) = pending {
+                                debug_trace!(
+                                    "SSH proxy: forwarding {:?} success to client channel {:?}",
+                                    pending.kind,
+                                    pending.client_channel
+                                );
+                                let _ = server_handle.channel_success(pending.client_channel).await;
+                            }
                         }
                         ChannelMsg::Failure => {
                             debug_trace!("SSH proxy: guest channel reported Failure");
+                            let pending = {
+                                let mut states = guest_channels_for_read.lock().await;
+                                states
+                                    .get_mut(&ch_id)
+                                    .and_then(|state| state.pending_replies.pop_front())
+                            };
+                            if let Some(pending) = pending {
+                                debug_trace!(
+                                    "SSH proxy: forwarding {:?} failure to client channel {:?}",
+                                    pending.kind,
+                                    pending.client_channel
+                                );
+                                let _ = server_handle.channel_failure(pending.client_channel).await;
+                            }
                         }
                         ChannelMsg::ExitStatus { exit_status } => {
                             debug_trace!("SSH proxy: guest channel exit-status={exit_status}");
+                            let _ = server_handle.exit_status_request(ch_id, exit_status).await;
                         }
-                        ChannelMsg::ExitSignal { ref signal_name, .. } => {
+                        ChannelMsg::ExitSignal {
+                            signal_name,
+                            core_dumped,
+                            ref error_message,
+                            ref lang_tag,
+                        } => {
                             debug_trace!("SSH proxy: guest channel exit-signal={signal_name:?}");
+                            let _ = server_handle
+                                .exit_signal_request(
+                                    ch_id,
+                                    signal_name,
+                                    core_dumped,
+                                    error_message.to_string(),
+                                    lang_tag.to_string(),
+                                )
+                                .await;
                         }
                         ChannelMsg::Eof => {
                             let _ = server_handle.eof(ch_id).await;
-                            break;
                         }
                         ChannelMsg::Close => {
                             let _ = server_handle.close(ch_id).await;
@@ -482,10 +497,19 @@ impl russh::server::Handler for ProxyHandler {
                         _ => {}
                     }
                 }
+                let mut states = guest_channels_for_read.lock().await;
+                states.remove(&ch_id);
                 tracing::debug!("SSH proxy: guest→client read loop ended");
             });
 
-            *guest_ch_slot.lock().await = Some(guest_write);
+            let mut states = guest_channels.lock().await;
+            states.insert(
+                client_ch_id,
+                ProxyChannelState {
+                    writer: Some(guest_write),
+                    pending_replies: VecDeque::new(),
+                },
+            );
 
             Ok(true)
         }
@@ -493,15 +517,18 @@ impl russh::server::Handler for ProxyHandler {
 
     fn data(
         &mut self,
-        _channel: russh::ChannelId,
+        channel: russh::ChannelId,
         data: &[u8],
         _session: &mut Session,
     ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
-        let guest_ch = Arc::clone(&self.guest_ch);
+        let guest_channels = Arc::clone(&self.guest_channels);
         let data = data.to_vec();
         async move {
-            if let Some(ref ch) = *guest_ch.lock().await {
-                ch.data(&data[..]).await?;
+            let states = guest_channels.lock().await;
+            if let Some(state) = states.get(&channel) {
+                if let Some(ref ch) = state.writer {
+                    ch.data(&data[..]).await?;
+                }
             }
             Ok(())
         }
@@ -518,7 +545,7 @@ impl russh::server::Handler for ProxyHandler {
         _modes: &[(russh::Pty, u32)],
         session: &mut Session,
     ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
-        let guest_ch = Arc::clone(&self.guest_ch);
+        let guest_channels = Arc::clone(&self.guest_channels);
         let term = term.to_string();
         #[cfg(feature = "debug-trace")]
         let incoming_mode_count = _modes
@@ -533,19 +560,25 @@ impl russh::server::Handler for ProxyHandler {
         );
         let server_handle = session.handle();
         async move {
-            if let Some(ref ch) = *guest_ch.lock().await {
-                match ch
-                    .request_pty(true, &term, col_width, row_height, pix_width, pix_height, &modes)
-                    .await
-                {
-                    Ok(()) => {
-                        let _ = server_handle.channel_success(channel).await;
-                    }
-                    Err(e) => {
+            let mut states = guest_channels.lock().await;
+            if let Some(state) = states.get_mut(&channel) {
+                if let Some(ref ch) = state.writer {
+                    if let Err(e) = ch
+                        .request_pty(true, &term, col_width, row_height, pix_width, pix_height, &modes)
+                        .await
+                    {
                         let _ = server_handle.channel_failure(channel).await;
                         return Err(e.into());
                     }
+                    state.pending_replies.push_back(PendingReply {
+                        client_channel: channel,
+                        kind: PendingReplyKind::Pty,
+                    });
+                } else {
+                    let _ = server_handle.channel_failure(channel).await;
                 }
+            } else {
+                let _ = server_handle.channel_failure(channel).await;
             }
             Ok(())
         }
@@ -556,19 +589,25 @@ impl russh::server::Handler for ProxyHandler {
         channel: russh::ChannelId,
         session: &mut Session,
     ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
-        let guest_ch = Arc::clone(&self.guest_ch);
+        let guest_channels = Arc::clone(&self.guest_channels);
         let server_handle = session.handle();
         async move {
-            if let Some(ref ch) = *guest_ch.lock().await {
-                match ch.request_shell(true).await {
-                    Ok(()) => {
-                        let _ = server_handle.channel_success(channel).await;
-                    }
-                    Err(e) => {
+            let mut states = guest_channels.lock().await;
+            if let Some(state) = states.get_mut(&channel) {
+                if let Some(ref ch) = state.writer {
+                    if let Err(e) = ch.request_shell(true).await {
                         let _ = server_handle.channel_failure(channel).await;
                         return Err(e.into());
                     }
+                    state.pending_replies.push_back(PendingReply {
+                        client_channel: channel,
+                        kind: PendingReplyKind::Shell,
+                    });
+                } else {
+                    let _ = server_handle.channel_failure(channel).await;
                 }
+            } else {
+                let _ = server_handle.channel_failure(channel).await;
             }
             Ok(())
         }
@@ -580,20 +619,26 @@ impl russh::server::Handler for ProxyHandler {
         data: &[u8],
         session: &mut Session,
     ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
-        let guest_ch = Arc::clone(&self.guest_ch);
+        let guest_channels = Arc::clone(&self.guest_channels);
         let data = data.to_vec();
         let server_handle = session.handle();
         async move {
-            if let Some(ref ch) = *guest_ch.lock().await {
-                match ch.exec(true, &data[..]).await {
-                    Ok(()) => {
-                        let _ = server_handle.channel_success(channel).await;
-                    }
-                    Err(e) => {
+            let mut states = guest_channels.lock().await;
+            if let Some(state) = states.get_mut(&channel) {
+                if let Some(ref ch) = state.writer {
+                    if let Err(e) = ch.exec(true, &data[..]).await {
                         let _ = server_handle.channel_failure(channel).await;
                         return Err(e.into());
                     }
+                    state.pending_replies.push_back(PendingReply {
+                        client_channel: channel,
+                        kind: PendingReplyKind::Exec,
+                    });
+                } else {
+                    let _ = server_handle.channel_failure(channel).await;
                 }
+            } else {
+                let _ = server_handle.channel_failure(channel).await;
             }
             Ok(())
         }
@@ -601,18 +646,21 @@ impl russh::server::Handler for ProxyHandler {
 
     fn window_change_request(
         &mut self,
-        _channel: russh::ChannelId,
+        channel: russh::ChannelId,
         col_width: u32,
         row_height: u32,
         pix_width: u32,
         pix_height: u32,
         _session: &mut Session,
     ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
-        let guest_ch = Arc::clone(&self.guest_ch);
+        let guest_channels = Arc::clone(&self.guest_channels);
         async move {
-            if let Some(ref ch) = *guest_ch.lock().await {
-                ch.window_change(col_width, row_height, pix_width, pix_height)
-                    .await?;
+            let states = guest_channels.lock().await;
+            if let Some(state) = states.get(&channel) {
+                if let Some(ref ch) = state.writer {
+                    ch.window_change(col_width, row_height, pix_width, pix_height)
+                        .await?;
+                }
             }
             Ok(())
         }
@@ -620,13 +668,16 @@ impl russh::server::Handler for ProxyHandler {
 
     fn channel_eof(
         &mut self,
-        _channel: russh::ChannelId,
+        channel: russh::ChannelId,
         _session: &mut Session,
     ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
-        let guest_ch = Arc::clone(&self.guest_ch);
+        let guest_channels = Arc::clone(&self.guest_channels);
         async move {
-            if let Some(ref ch) = *guest_ch.lock().await {
-                ch.eof().await?;
+            let states = guest_channels.lock().await;
+            if let Some(state) = states.get(&channel) {
+                if let Some(ref ch) = state.writer {
+                    ch.eof().await?;
+                }
             }
             Ok(())
         }
@@ -634,14 +685,17 @@ impl russh::server::Handler for ProxyHandler {
 
     fn channel_close(
         &mut self,
-        _channel: russh::ChannelId,
+        channel: russh::ChannelId,
         _session: &mut Session,
     ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
-        let guest_ch = Arc::clone(&self.guest_ch);
+        let guest_channels = Arc::clone(&self.guest_channels);
         async move {
-            let mut guard = guest_ch.lock().await;
-            if let Some(ch) = guard.take() {
-                ch.close().await?;
+            let mut states = guest_channels.lock().await;
+            if let Some(mut state) = states.remove(&channel) {
+                if let Some(ch) = state.writer.take() {
+                    ch.close().await?;
+                }
+                state.pending_replies.clear();
             }
             Ok(())
         }
