@@ -235,13 +235,13 @@ copy_overlay_tree "$GUEST_OVERLAY_CONTENT" "$OVERLAY_SEED/upper"
 # sshd_config references these paths via TrustedUserCAKeys and
 # AuthorizedPrincipalsFile directives baked into the guest image.
 if [ -n "$SSH_CA_PUBKEY" ]; then
-    mkdir -p "$OVERLAY_SEED/upper/etc/ssh/ca"
+    mkdir -m 755 -p "$OVERLAY_SEED/upper/etc/ssh/ca"
     printf '%s\n' "$SSH_CA_PUBKEY" > "$OVERLAY_SEED/upper/etc/ssh/ca/user_ca.pub"
     chmod 644 "$OVERLAY_SEED/upper/etc/ssh/ca/user_ca.pub"
 
     # Each user that the CA can authenticate needs a principals file.
-    # The principal in the ephemeral cert must appear in this file.
-    mkdir -p "$OVERLAY_SEED/upper/etc/ssh/auth_principals"
+    # sshd requires the directory to be root-owned with mode 755 (not 775).
+    mkdir -m 755 -p "$OVERLAY_SEED/upper/etc/ssh/auth_principals"
     printf '%s\n' "$SSH_USER" > "$OVERLAY_SEED/upper/etc/ssh/auth_principals/$SSH_USER"
     printf '%s\n' "$SSH_USER" > "$OVERLAY_SEED/upper/etc/ssh/auth_principals/root"
     chmod 644 "$OVERLAY_SEED/upper/etc/ssh/auth_principals/$SSH_USER"
