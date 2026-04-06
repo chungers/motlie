@@ -228,14 +228,37 @@ struct AdminState {
     ssh_ca: Arc<SshCa>,
 }
 
-/// Resolve guest TAP admin IP from guest name.
-/// Matches the static allocation in launch-ch.sh.
-fn guest_admin_ip(guest_name: &str) -> Option<Ipv4Addr> {
-    match guest_name {
-        "alice" => Some(Ipv4Addr::new(192, 168, 249, 2)),
-        "bob" => Some(Ipv4Addr::new(192, 168, 250, 2)),
-        _ => None,
-    }
+/// Per-guest network parameters, derived from the guest's position in the
+/// provisioning order.  These are passed to launch-ch.sh as explicit flags
+/// so the shell script has no hardcoded guest names.
+struct GuestNetParams {
+    cid: u32,
+    host_ip: Ipv4Addr,
+    guest_ip: Ipv4Addr,
+    admin_mac: [u8; 6],
+    egress_mac: [u8; 6],
+}
+
+/// Derive per-guest network parameters from the guest's index (0-based
+/// position in the provisioning order).
+fn guest_net_params(guest_index: usize) -> GuestNetParams {
+    // CID starts at 3 (0-2 reserved by vsock spec)
+    let cid = 3 + guest_index as u32;
+    // Each guest gets its own /24 subnet on the admin TAP: 192.168.(249+index).*
+    let subnet = 249u8.saturating_add(guest_index as u8);
+    let host_ip = Ipv4Addr::new(192, 168, subnet, 1);
+    let guest_ip = Ipv4Addr::new(192, 168, subnet, 2);
+    // Admin MAC: last byte = 0xaa + index
+    let admin_mac = [0x12, 0x34, 0x56, 0x78, 0x90, 0xaa_u8.wrapping_add(guest_index as u8)];
+    // Egress MAC: shared across guests (libslirp doesn't care)
+    let egress_mac = [0x12, 0x34, 0x56, 0x78, 0x90, 0xab];
+    GuestNetParams { cid, host_ip, guest_ip, admin_mac, egress_mac }
+}
+
+/// Resolve guest TAP admin IP from the guest's index.
+fn guest_admin_ip(admin: &AdminState, guest_name: &str) -> Option<Ipv4Addr> {
+    let index = admin.guest_order.iter().position(|g| g == guest_name)?;
+    Some(guest_net_params(index).guest_ip)
 }
 
 enum MountSpec {
@@ -907,24 +930,14 @@ fn seed_demo_host_mount(guest_name: &str, mount: &ConfiguredMount) -> Result<()>
     #[cfg(unix)]
     fs::set_permissions(mount.host_path.join(".ssh"), fs::Permissions::from_mode(0o700))?;
 
-    let (authorized_key, ssh_config, env_content) = match guest_name {
-        "alice" => (
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample alice@dev\n",
-            "Host github.com\n  User git\n",
-            "ALICE_API_KEY=demo-alice\n",
-        ),
-        "bob" => (
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample bob@dev\n",
-            "Host gitlab.com\n  User git\n",
-            "BOB_API_KEY=demo-bob\n",
-        ),
-        _ => return Ok(()),
-    };
+    let authorized_key = format!("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample {guest_name}@dev\n");
+    let ssh_config = "Host github.com\n  User git\n";
+    let env_content = format!("{}_API_KEY=demo-{guest_name}\n", guest_name.to_uppercase());
 
-    write_host_file_if_missing(&mount.host_path.join(".ssh/authorized_keys"), authorized_key, 0o600)?;
+    write_host_file_if_missing(&mount.host_path.join(".ssh/authorized_keys"), &authorized_key, 0o600)?;
     write_host_file_if_missing(&mount.host_path.join(".ssh/config"), ssh_config, 0o644)?;
-    write_host_file_if_missing(&mount.host_path.join(".env"), env_content, 0o644)?;
-    write_host_file_if_missing(&mount.host_path.join(".bashrc"), "# motlie v1.2 demo bashrc\n", 0o644)?;
+    write_host_file_if_missing(&mount.host_path.join(".env"), &env_content, 0o644)?;
+    write_host_file_if_missing(&mount.host_path.join(".bashrc"), "# motlie v1.3 demo bashrc\n", 0o644)?;
     write_host_file_if_missing(
         &mount.host_path.join(".profile"),
         "if [ -f \"$HOME/.bashrc\" ]; then\n  . \"$HOME/.bashrc\"\nfi\n",
@@ -977,6 +990,7 @@ fn render_cloud_init(guest_name: &str, runtime: &GuestRuntime) -> Result<String>
 
 fn render_launch_script(
     guest_name: &str,
+    guest_index: usize,
     runtime: &GuestRuntime,
     admin_net: AdminNet,
     egress_net: EgressNet,
@@ -984,9 +998,7 @@ fn render_launch_script(
     ssh_ca_pubkey: Option<&str>,
 ) -> Result<String> {
     let cloud_init = render_cloud_init(guest_name, runtime)?;
-    if guest_name != "alice" && guest_name != "bob" {
-        anyhow::bail!("launch prototype currently targets v1.2 demo guests alice/bob because launch-ch.sh still carries guest-specific runtime defaults");
-    }
+    let net = guest_net_params(guest_index);
     let base_dir = format!("{}/examples/v1.3", env!("CARGO_MANIFEST_DIR"));
     let mut out = String::new();
     out.push_str("#!/usr/bin/env bash\n");
@@ -1047,7 +1059,21 @@ fn render_launch_script(
     if egress_net == EgressNet::VhostUser {
         out.push_str("echo \"Using motlie-vmm egress socket ${VNET_SOCKET}\"\n");
     }
+    // Per-guest network parameters passed as explicit flags so launch-ch.sh
+    // has no hardcoded guest names.
+    let mac_fmt = |m: &[u8; 6]| format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", m[0], m[1], m[2], m[3], m[4], m[5]);
+    writeln!(&mut out, "GUEST_CID={}", net.cid)?;
+    writeln!(&mut out, "HOST_IP={}", net.host_ip)?;
+    writeln!(&mut out, "GUEST_IP={}", net.guest_ip)?;
+    writeln!(&mut out, "ADMIN_MAC={}", shell_single_quote(&mac_fmt(&net.admin_mac)))?;
+    writeln!(&mut out, "EGRESS_MAC={}", shell_single_quote(&mac_fmt(&net.egress_mac)))?;
+    writeln!(&mut out, "SSH_USER={}", shell_single_quote(guest_name))?;
+    writeln!(&mut out, "GUEST_HOSTNAME={}", shell_single_quote(&format!("motlie-{guest_name}")))?;
+    writeln!(&mut out, "LOGIN_HOME={}", shell_single_quote(&format!("/home/{guest_name}")))?;
     out.push_str("LAUNCH_ARGS=(--guest \"$GUEST_ID\" --cloud-init-dir \"$SEED_DIR\" --admin-net \"$ADMIN_NET\" --egress-net \"$EGRESS_NET\")\n");
+    out.push_str("LAUNCH_ARGS+=(--cid \"$GUEST_CID\" --host-ip \"$HOST_IP\" --guest-ip \"$GUEST_IP\")\n");
+    out.push_str("LAUNCH_ARGS+=(--admin-mac \"$ADMIN_MAC\" --egress-mac \"$EGRESS_MAC\")\n");
+    out.push_str("LAUNCH_ARGS+=(--ssh-user \"$SSH_USER\" --hostname \"$GUEST_HOSTNAME\" --login-home \"$LOGIN_HOME\")\n");
     if egress_net == EgressNet::VhostUser {
         out.push_str("LAUNCH_ARGS+=(--vnet-socket \"$VNET_SOCKET\")\n");
     }
@@ -1663,8 +1689,10 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
                 .ok_or_else(|| anyhow::anyhow!("unknown guest '{guest_name}'"))
                 .and_then(|runtime| {
                     let ca_pubkey = admin.ssh_ca.public_key_openssh().ok();
+                    let guest_index = admin.guest_order.iter().position(|g| g == guest_name).unwrap_or(0);
                     render_launch_script(
                         guest_name,
+                        guest_index,
                         runtime,
                         admin.admin_net,
                         admin.egress_net,
@@ -1739,7 +1767,7 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
         "exec" if parts.len() >= 3 => {
             let guest_name = parts[1];
             let command = parts[2..].join(" ");
-            let guest_ip = match guest_admin_ip(guest_name) {
+            let guest_ip = match guest_admin_ip(admin, guest_name) {
                 Some(ip) => ip,
                 None => {
                     emit_status(admin, format!("error: no admin IP known for guest '{guest_name}'"));
@@ -1776,7 +1804,7 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
         }
         "validate" if parts.len() == 2 => {
             let guest_name = parts[1];
-            let guest_ip = match guest_admin_ip(guest_name) {
+            let guest_ip = match guest_admin_ip(admin, guest_name) {
                 Some(ip) => ip,
                 None => {
                     emit_status(admin, format!("error: no admin IP known for guest '{guest_name}'"));
