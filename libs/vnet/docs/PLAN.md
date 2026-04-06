@@ -25,7 +25,6 @@ backend with libslirp for rootless guest networking.
 - `motlie-vnet` owns the `v1.2+` example / validation harness line.
 - Remaining work is primarily:
   - documenting the handoff cleanly across `vfs` and `vnet`
-  - deciding whether a pure standalone `demo_host.rs` still matters
   - long-term ingress migration away from the TAP admin path
 
 ---
@@ -311,39 +310,21 @@ guest image work for `v1.2+` now lives under `libs/vnet/examples/v1.2/`.
   ./launch-ch.sh --admin-net=tap --egress-net=vhost-user --vnet-socket=/tmp/motlie-vnet-0.sock
   ```
 
-### 3.3 Crate Layering and Standalone Example
+### 3.3 Crate Layering and Host Example Entry Point
 
 Design ref: [Component Architecture](./DESIGN.md)
 
-- [>] 3.3.1 Create `libs/vnet/examples/demo_host.rs` — standalone vnet demo.
-  Superseded for the current harness line by `libs/vnet/examples/v1.2/repl_host.rs`,
-  which is now the canonical `v1.2+` example / validation entry point. A future
-  pure vnet-only `demo_host.rs` remains optional if a standalone demo still
-  provides distinct value.
-  Starts the vnet backend, prints egress / CH launch instructions, waits for
-  Ctrl-C. No vfs dependency and no requirement to own the SSH ingress story.
-  ```rust
-  // libs/vnet/examples/demo_host.rs
-  fn main() -> anyhow::Result<()> {
-      let config = motlie_vnet::VnetConfig::builder()
-          .socket_path("/tmp/motlie-vnet-0.sock")
-          .build()?;
-      let handle = motlie_vnet::VnetBackend::new(config).start()?;
-      eprintln!("vnet backend running.");
-      eprintln!("Launch CH: ./launch-ch.sh --admin-net=none --egress-net=vhost-user");
-      // wait for Ctrl-C
-      handle.shutdown()
-  }
-  ```
+- [x] 3.3.1 Make `libs/vnet/examples/v1.2/repl_host.rs` the canonical vnet-owned
+  host example entry point.
+  `repl_host_v1_2` is the only current host-side example entry point for the
+  `v1.2+` harness line.
 - [x] 3.3.2 Add `[[example]]` entry to `libs/vnet/Cargo.toml`.
-  Completed for `repl_host_v1_2`, which is the canonical vnet-owned example.
-- [>] 3.3.3 Verify: `cargo run -p motlie-vnet --example demo_host` starts
-  the backend, socket file is created, CH can connect.
-  Superseded by the validated `repl_host_v1_2` path:
+  Completed for `repl_host_v1_2`.
+- [x] 3.3.3 Verify the vnet-owned host example target:
   `cargo check -p motlie-vnet --example repl_host_v1_2` and the runbook in
   `libs/vnet/examples/v1.2/README.md`.
 
-### 3.4 End-to-End Validation (Standalone vnet)
+### 3.4 End-to-End Validation (`v1.2` host flow)
 
 All validation uses commands available in the updated base image
 (3.1.3: `curl`, `dnsutils` added; `iproute2` already present).
