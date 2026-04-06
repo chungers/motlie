@@ -1,94 +1,432 @@
-# v1.2 Split-Network / Agent-State Example
+# v1.3 SSH Proxy + Programmatic Guest Control Plane
 
-`v1.2` starts from the validated `v1.1` multi-guest VFS flow and adds the
-Phase 3 migration toward `motlie-vnet`:
+`v1.3` builds on the validated `v1.2` split-network flow and adds:
 
-- keep inbound SSH on the existing TAP admin path
-- move outbound internet to a separate `motlie-vnet` egress NIC
-- preserve the per-launch writable root overlay from `v1.1`
-- keep `/home/<user>` disk-backed from the host
-- add one dedicated read/write VFS-backed layer at `/agent-state` for Codex + Claude state during the lifetime of the host REPL
-
-This directory is the working implementation area for Phase 3.1-3.5. It is
-intentionally ahead of the fully validated runbook; the point is to make the
-guest image, launch contract, and mount layout match the target architecture
-before the final composed host flow lands.
+- **SSH proxy** (russh) for host-side ingress via CA-signed ephemeral certs
+- **Programmatic guest exec** (`exec <guest> <command>`) — run commands
+  inside guests without human intervention
+- **Automated validation** (`validate <guest>`) — v1.2 runbook as assertions
+- **Fully parameterized launch** — no hardcoded guest names in shell scripts
+- **Per-guest resource allocation** — CID, IPs, MACs allocated from a
+  monotonic slot allocator, reused across shutdown/relaunch
 
 ## Success Outcomes
 
-`v1.2` is considered successful when one guest can demonstrate all of these:
+`v1.3` is considered successful when:
 
-1. the guest reaches the internet over the new egress path
-2. the user still connects via the `v1.1` TAP-admin SSH path
-3. the user installs `python3` and other Debian packages with `apt-get`,
-   proving the writable `/` overlay is stable
-4. the user installs Codex CLI and Claude Code CLI inside the guest
-5. the user completes auth/login for both tools inside the guest
-6. the user runs the agent CLIs over SSH and verifies their state is written
-   and read from the dedicated read/write agent-state layer for the lifetime of the running host REPL
+1. `exec alice uname -a` returns output from the guest via the SSH proxy
+2. `validate alice` passes all checks (egress, DNS, writable root,
+   agent-state symlinks, default route)
+3. Multiple guests (alice, bob, arbitrary names) launch with unique
+   resources — no collisions
+4. The guest image only needs one rebuild (for sshd_config CA trust);
+   the CA pubkey and principals are injected per-launch
 
-## Feasibility Assessment
+## Architecture Overview
 
-The current `feature/vnet` state is enough to start `v1.2` now.
+```
+ ┌──────────────────────────────────────────────────────────────────┐
+ │                    repl_host_v1_3 (Rust, tokio)                 │
+ │                                                                  │
+ │  SshCa ─────────────────────┐                                    │
+ │  (in-memory Ed25519 CA)     │                                    │
+ │                             │                                    │
+ │  AdminState                 │                                    │
+ │  ├─ guests: FsServer+mounts│                                    │
+ │  ├─ net_allocs: slot→alloc  │                                    │
+ │  ├─ vnet_handles: per-guest │                                    │
+ │  └─ launch_pids: per-guest  │                                    │
+ │         │                   │                                    │
+ │  ┌──────┴───────┐    ┌─────┴────────┐    ┌────────────────┐     │
+ │  │ launch alice │    │ exec alice   │    │ validate alice │     │
+ │  │              │    │ uname -a     │    │ (6 checks)     │     │
+ │  └──────┬───────┘    └─────┬────────┘    └───────┬────────┘     │
+ └─────────┼──────────────────┼─────────────────────┼──────────────┘
+           │                  │                     │
+           │           ┌──────┴──────────────────────┘
+           │           │  ssh::exec()
+           │           │  ├─ ca.sign_ephemeral("alice")
+           │           │  ├─ russh::client::connect(192.168.249.2:22)
+           │           │  ├─ authenticate_publickey(ephemeral_cert)
+           │           │  ├─ channel.exec("uname -a")
+           │           │  └─ collect stdout/stderr/exit_code
+           │           │
+           ▼           ▼
+   ┌─────────────┐  ┌─────────────────────┐
+   │ launch-ch.sh│  │  Guest VM (KVM/CH)  │
+   │ (overlay +  │  │  ├─ sshd (CA trust) │
+   │  CH launch) │  │  ├─ eth0: TAP admin │
+   └──────┬──────┘  │  ├─ eth1: vnet egress│
+          │         │  └─ VFS mounts       │
+          ▼         └─────────────────────┘
+   cloud-hypervisor
+```
 
-What is already in place:
+## End-to-End Flow
 
-- `v1.1` proved the multi-guest VFS mount model, launch-time writable root
-  overlay, and TAP-admin SSH path
-- `motlie-vnet` Phase 2 is merged, including the usable `VnetBackend` /
-  `VnetHandle` API and the `vhost-user-net + libslirp` backend
+### Phase 1: Image Build (one-time)
 
-What follows directly from that:
+```
+User                build-guest.sh                    Output
+ │                       │                              │
+ │  ./build-guest.sh     │                              │
+ │──────────────────────>│                              │
+ │                       │  mmdebstrap                  │
+ │                       │──────────────────────>       │
+ │                       │  Debian rootfs with:         │
+ │                       │    openssh-server             │
+ │                       │    cloud-init                 │
+ │                       │    systemd-networkd           │
+ │                       │    codex, claude-code, npm    │
+ │                       │                              │
+ │                       │  customize hooks:             │
+ │                       │    sshd_config +=             │
+ │                       │      TrustedUserCAKeys        │
+ │                       │        /etc/ssh/ca/user_ca.pub│
+ │                       │      AuthorizedPrincipalsFile │
+ │                       │        ...auth_principals/%u  │
+ │                       │    create users (alice, bob)  │
+ │                       │    ssh-keygen -A              │
+ │                       │    egress NIC service         │
+ │                       │    agent-state service        │
+ │                       │    overlay-init as /sbin/init │
+ │                       │                              │
+ │                       │  mksquashfs                   │
+ │                       │──────────────────────>       │
+ │                       │              artifacts/base/  │
+ │                       │                Image          │
+ │                       │                rootfs.squashfs│
+```
 
-- Goal 1 is feasible once the guest image can DHCP on a second NIC and the
-  launcher can attach a `motlie-vnet` socket
-- Goal 2 should remain feasible because `v1.2` keeps the existing TAP-admin
-  path instead of changing SSH ingress
-- Goal 3 is already aligned with `v1.1`: package installs belong in the
-  per-launch writable root overlay, not in VFS-backed trees
-- Goals 4-5 are feasible once outbound internet works and the guest has the
-  packages needed to install Node/npm and talk to remote auth endpoints
-- Goal 6 is feasible if agent state is isolated from the writable root overlay
-  and from the general home mount
+The image is generic — no per-guest state. The sshd_config CA directives
+point to paths that don't exist yet; they're populated per-launch via
+the runtime overlay.
 
-The one scope change agreed during planning is important:
+### Phase 2: REPL Startup + Provisioning
 
-- do not define success as only `~/.claude` and `~/.codex`
-- instead define success as all tool state living under one dedicated read/write
-  VFS-backed layer, with home/config paths redirected into that layer
+```
+User                       repl_host_v1_3
+ │                              │
+ │  cargo run -p motlie-vmm    │
+ │    --example repl_host_v1_3 │
+ │    -- --empty               │
+ │    --script setup-multi...  │
+ │    --admin-net=tap          │
+ │    --egress-net=vhost-user  │
+ │─────────────────────────────>│
+ │                              │  SshCa::new()
+ │                              │    → Ed25519 CA keypair (in memory)
+ │                              │
+ │                              │  execute setup-multiguest.sh.vfs:
+ │                              │    provision alice ... 1000 1000
+ │                              │      → FsServer + overlay + vsock listener
+ │                              │    mount alice alice-home=... alice-workspace=...
+ │                              │    layer / mkdir / put (overlay content)
+ │                              │    provision bob ... 1001 1001
+ │                              │    mount bob ...
+ │                              │
+ │                              │  AdminState ready:
+ │                              │    guests: {alice, bob}
+ │                              │    ssh_ca: SshCa
+ │                              │    net_allocs: {}  (empty until launch)
+ │  vfs> _                      │
+```
 
-That is why `v1.2` mounts `/agent-state` separately and treats it as the single
-dedicated read/write VFS-backed home for:
+### Phase 3: Launch (per guest)
 
-- `~/.codex`
-- `~/.claude`
-- `~/.config/claude-code`
+```
+REPL         repl_host_v1_3       wrapper.sh        launch-ch.sh      cloud-hypervisor
+ │                │                   │                  │                   │
+ │ launch alice   │                   │                  │                   │
+ │───────────────>│                   │                  │                   │
+ │                │                   │                  │                   │
+ │                │ ensure_vnet_backend(alice)            │                   │
+ │                │   VnetBackend::builder()              │                   │
+ │                │     .socket(motlie-vmm-alice.sock)    │                   │
+ │                │     .build()?.start()?                │                   │
+ │                │   → libslirp thread running           │                   │
+ │                │                   │                  │                   │
+ │                │ ensure_net_alloc(alice) → slot 0      │                   │
+ │                │   cid=3, host_ip=192.168.249.1        │                   │
+ │                │   guest_ip=192.168.249.2              │                   │
+ │                │   admin_mac=52:54:00:ad:00:01         │                   │
+ │                │   egress_mac=52:54:00:e9:00:01        │                   │
+ │                │                   │                  │                   │
+ │                │ ssh_ca.public_key_openssh()            │                   │
+ │                │   → "ssh-ed25519 AAAA..."             │                   │
+ │                │                   │                  │                   │
+ │                │ render_launch_script()                 │                   │
+ │                │ ├─ render_cloud_init()                 │                   │
+ │                │ │    → "#cloud-config\n"               │                   │
+ │                │ ├─ render_mounts_yaml()                │                   │
+ │                │ │    → "mounts:\n  - tag: ..."         │                   │
+ │                │ └─ emit wrapper.sh with all params     │                   │
+ │                │                   │                  │                   │
+ │                │ execute_launch_script()                │                   │
+ │                │   write /tmp/motlie-vmm-launch/        │                   │
+ │                │     alice/launch.sh                    │                   │
+ │                │   /bin/bash launch.sh ────────────────>│                   │
+ │                │                   │                  │                   │
+ │                │                   │  mkdir $SEED_DIR  │                   │
+ │                │                   │  write meta-data  │                   │
+ │                │                   │  write mounts.yaml│                   │
+ │                │                   │  write user-data  │                   │
+ │                │                   │                  │                   │
+ │                │                   │  launch-ch.sh \   │                   │
+ │                │                   │    --guest alice \ │                   │
+ │                │                   │    --cloud-init.. \│                   │
+ │                │                   │    --cid 3 \      │                   │
+ │                │                   │    --host-ip .. \  │                   │
+ │                │                   │    --ssh-ca-pub.. \│                   │
+ │                │                   │    ...            │                   │
+ │                │                   │──────────────────>│                   │
+ │                │                   │                  │                   │
+ │                │                   │                  │ Build overlay:     │
+ │                │                   │                  │ seed/upper/        │
+ │                │                   │                  │  ├─ nocloud/       │
+ │                │                   │                  │  │  user-data      │
+ │                │                   │                  │  │  meta-data      │
+ │                │                   │                  │  ├─ mounts.yaml    │
+ │                │                   │                  │  ├─ hostname       │
+ │                │                   │                  │  ├─ hosts          │
+ │                │                   │                  │  ├─ ssh/ca/        │
+ │                │                   │                  │  │  user_ca.pub    │
+ │                │                   │                  │  └─ auth_principals│
+ │                │                   │                  │     alice, root    │
+ │                │                   │                  │                   │
+ │                │                   │                  │ mkfs.ext4 → overlay│
+ │                │                   │                  │                   │
+ │                │                   │                  │ cloud-hypervisor   │
+ │                │                   │                  │  --kernel Image    │
+ │                │                   │                  │  --disk squashfs,  │
+ │                │                   │                  │         overlay    │
+ │                │                   │                  │  --net tap(admin)  │
+ │                │                   │                  │  --net vhost(egress)
+ │                │                   │                  │  --vsock cid=3     │
+ │                │                   │                  │──────────────────>│
+ │                │                   │                  │                   │
+ │ ok: launch     │                   │                  │          VM boots │
+ │ alice pid=...  │                   │                  │                   │
+```
 
-The home-directory symlinks are set up by the guest image at boot via the
-`motlie-agent-state` systemd service. The backing directories live in the
-dedicated VFS mount, not in the writable `/` overlay and not in the general
-home mount.
+### Phase 4: Guest Boot
+
+```
+cloud-hypervisor          Guest kernel              Guest userspace
+      │                       │                          │
+      │  boot Image           │                          │
+      │──────────────────────>│                          │
+      │                       │                          │
+      │                       │  overlay-init            │
+      │                       │  mount squashfs (ro)     │
+      │                       │  mount overlay.ext4 (rw) │
+      │                       │  overlayfs merge         │
+      │                       │  pivot_root              │
+      │                       │  exec /sbin/init         │
+      │                       │─────────────────────────>│
+      │                       │                          │
+      │                       │              systemd     │
+      │                       │              ├─ sshd     │
+      │                       │              │   reads:  │
+      │                       │              │   TrustedUserCAKeys
+      │                       │              │     /etc/ssh/ca/user_ca.pub ✓
+      │                       │              │   AuthorizedPrincipalsFile
+      │                       │              │     .../auth_principals/%u ✓
+      │                       │              │                          │
+      │                       │              ├─ systemd-networkd        │
+      │                       │              │   eth0: static (admin TAP)
+      │                       │              │   eth1: DHCP (egress)    │
+      │                       │              │     → 10.0.2.15/24       │
+      │                       │              │                          │
+      │                       │              ├─ motlie-vmm-egress       │
+      │                       │              │   default route → 10.0.2.2
+      │                       │              │   DNS → 10.0.2.3         │
+      │                       │              │                          │
+      │                       │              ├─ motlie-agent-state      │
+      │                       │              │   ~/.codex → /agent-state/codex
+      │                       │              │   ~/.claude → /agent-state/claude
+      │                       │              │                          │
+      │                       │              └─ cloud-init              │
+      │                       │                  reads /var/lib/cloud/  │
+      │                       │                  seed/nocloud/user-data │
+      │                       │                  processes #cloud-config│
+      │                       │                                        │
+      │                       │              Guest ready:               │
+      │                       │                sshd on :22 (CA trust)   │
+      │                       │                eth0: 192.168.249.2 (TAP)│
+      │                       │                eth1: 10.0.2.15 (egress) │
+```
+
+### Phase 5: SSH Proxy Exec / Validate
+
+```
+REPL           repl_host_v1_3         SshCa          russh           Guest sshd
+ │                  │                   │               │                │
+ │ exec alice       │                   │               │                │
+ │   uname -a       │                   │               │                │
+ │─────────────────>│                   │               │                │
+ │                  │                   │               │                │
+ │                  │ guest_admin_ip()   │               │                │
+ │                  │  → 192.168.249.2   │               │                │
+ │                  │                   │               │                │
+ │                  │ sign_ephemeral    │               │                │
+ │                  │  ("alice")        │               │                │
+ │                  │──────────────────>│               │                │
+ │                  │                   │               │                │
+ │                  │  EphemeralCert    │               │                │
+ │                  │  { key, cert      │               │                │
+ │                  │    principal=alice │               │                │
+ │                  │    ttl=60s }      │               │                │
+ │                  │<──────────────────│               │                │
+ │                  │                   │               │                │
+ │                  │ ssh::exec()       │               │                │
+ │                  │──────────────────────────────────>│                │
+ │                  │                   │  connect       │                │
+ │                  │                   │  192.168.249.2:22              │
+ │                  │                   │               │───────────────>│
+ │                  │                   │               │                │
+ │                  │                   │  authenticate  │                │
+ │                  │                   │  publickey     │                │
+ │                  │                   │  (ephemeral)   │                │
+ │                  │                   │               │───────────────>│
+ │                  │                   │               │                │
+ │                  │                   │               │  cert signed   │
+ │                  │                   │               │  by user_ca? ✓ │
+ │                  │                   │               │  "alice" in    │
+ │                  │                   │               │  principals? ✓ │
+ │                  │                   │               │  not expired? ✓│
+ │                  │                   │               │                │
+ │                  │                   │               │  Auth::Accept  │
+ │                  │                   │               │<───────────────│
+ │                  │                   │               │                │
+ │                  │                   │  channel_exec  │                │
+ │                  │                   │  "uname -a"   │                │
+ │                  │                   │               │───────────────>│
+ │                  │                   │               │                │
+ │                  │                   │               │  stdout:       │
+ │                  │                   │               │  "Linux motlie │
+ │                  │                   │               │   -alice 6.1.."│
+ │                  │                   │               │  exit_code: 0  │
+ │                  │                   │               │<───────────────│
+ │                  │                   │               │                │
+ │                  │  ExecOutput       │               │                │
+ │                  │  { stdout, stderr,│               │                │
+ │                  │    exit_code: 0 } │               │                │
+ │                  │<─────────────────────────────────│                │
+ │                  │                   │               │                │
+ │ Linux motlie-    │                   │               │                │
+ │ alice 6.1...     │                   │               │                │
+ │ exit_code: 0     │                   │               │                │
+ │<─────────────────│                   │               │                │
+```
+
+## Data Generation Ownership
+
+All per-guest dynamic content is generated by Rust code in `repl_host_v1_3`.
+Shell scripts receive everything via CLI flags — no hardcoded guest names.
+
+| Artifact | Generated by | Consumed by |
+|---|---|---|
+| rootfs.squashfs, Image | `build-guest.sh` (one-time) | `launch-ch.sh` → CH `--kernel`/`--disk` |
+| user-data, meta-data | `render_cloud_init()` + `render_launch_script()` (Rust) | wrapper → `$SEED_DIR` → `launch-ch.sh` → overlay → cloud-init |
+| mounts.yaml | `render_mounts_yaml()` (Rust) | wrapper → `$SEED_DIR` → `launch-ch.sh` → overlay → guest agent |
+| CID, IPs, MACs | `ensure_net_alloc()` (Rust, monotonic slot allocator) | wrapper → `launch-ch.sh` CLI flags → CH args |
+| SSH CA pubkey | `SshCa::new()` (Rust, in-memory per session) | wrapper → `launch-ch.sh` `--ssh-ca-pubkey` → overlay → guest sshd |
+| auth_principals | `launch-ch.sh` (from `--ssh-user` flag) | overlay → guest sshd |
+| overlay.ext4 | `launch-ch.sh` (`mkfs.ext4 -d seed/`) | CH `--disk` (rw) |
+| CH command line | `launch-ch.sh` (from CLI flags) | `cloud-hypervisor` process |
+| Ephemeral SSH cert | `SshCa::sign_ephemeral()` (Rust, per-exec) | `ssh::exec()` → russh → guest sshd |
+
+## Resource Allocation
+
+Per-guest network resources are allocated from a monotonic slot counter
+in `AdminState`. Once allocated, resources persist across shutdown/relaunch
+within the same REPL session.
+
+| Resource | Derivation | Example (slot 0) | Example (slot 1) |
+|---|---|---|---|
+| CID | `3 + slot` | 3 | 4 |
+| Admin subnet | `192.168.(249+slot).0/24` | 192.168.249.0/24 | 192.168.250.0/24 |
+| Host IP | `192.168.(249+slot).1` | 192.168.249.1 | 192.168.250.1 |
+| Guest IP | `192.168.(249+slot).2` | 192.168.249.2 | 192.168.250.2 |
+| Admin MAC | `52:54:00:ad:00:(slot+1)` | 52:54:00:ad:00:01 | 52:54:00:ad:00:02 |
+| Egress MAC | `52:54:00:e9:00:(slot+1)` | 52:54:00:e9:00:01 | 52:54:00:e9:00:02 |
+
+Admin and egress MACs use different OUI bytes (`ad` vs `e9`) to avoid
+collisions. The slot counter never decrements — a shutdown guest keeps
+its allocation.
+
+## Runtime Overlay Contents
+
+At launch time, `launch-ch.sh` assembles this overlay tree into ext4:
+
+```
+seed/upper/
+  ├── var/lib/cloud/seed/nocloud/
+  │     ├── user-data            ◄── render_cloud_init() (Rust)
+  │     └── meta-data            ◄── render_launch_script() (Rust)
+  ├── etc/motlie-vfs/
+  │     └── mounts.yaml          ◄── render_mounts_yaml() (Rust)
+  ├── etc/hostname               ◄── --hostname flag
+  ├── etc/hosts                  ◄── launch-ch.sh (from hostname)
+  ├── etc/ssh/ca/
+  │     └── user_ca.pub          ◄── --ssh-ca-pubkey flag (v1.3)
+  ├── etc/ssh/auth_principals/
+  │     ├── <user>               ◄── --ssh-user flag (v1.3)
+  │     └── root                 ◄── --ssh-user flag (v1.3)
+  └── overlay.d/{common,<guest>}/ ◄── static overlay tree
+```
+
+## SSH Auth Model
+
+```
+Inbound (user/exec → repl_host):
+  Localhost trust. russh binds 127.0.0.1 only.
+  Username = guest identity. No key verification.
+
+Outbound (repl_host → guest sshd):
+  CA-based ephemeral certs.
+  ┌─────────────────────────────────────────┐
+  │ SshCa (in-memory, per REPL session)     │
+  │   signs: Ed25519, principal=<guest>,    │
+  │          TTL=60s                        │
+  │                                         │
+  │ Guest sshd validates:                   │
+  │   1. cert signed by user_ca.pub?    ✓   │
+  │   2. principal in auth_principals?  ✓   │
+  │   3. cert not expired?              ✓   │
+  └─────────────────────────────────────────┘
+
+The CA keypair is fresh each REPL session. The pubkey is injected into
+each guest's overlay at launch. No image rebuild needed when the CA rotates.
+```
+
+## Mount Contract
+
+Per-guest mounts are generated from the provisioned state by
+`render_mounts_yaml()`. The typical layout:
+
+```yaml
+mounts:
+  - tag: <guest>-home
+    guest_path: /home/<guest>
+    read_only: false
+  - tag: <guest>-agent-state
+    guest_path: /agent-state
+    read_only: false
+  - tag: <guest>-workspace
+    guest_path: /workspace
+    read_only: false
+```
+
+- `/home/<guest>` — host-disk-backed working tree
+- `/agent-state` — dedicated VFS-backed tool-state layer
+  (`~/.codex`, `~/.claude`, `~/.config/claude-code` symlinked here)
+- `/workspace` — separate project tree
 
 ## Host Requirements
 
-`v1.2` does not yet remove the inherited `v1.1` host requirements for the
-admin SSH path. The current example still needs:
-
-- `cloud-hypervisor`
-- `mmdebstrap`
-- `squashfs-tools-ng`
-- `e2fsprogs`
-- `uidmap`
-- `debian-archive-keyring`
-- `libfuse3-dev`
-- `pkg-config`
-- `wget`
-- `git`
-- `curl`
-- Rust toolchain with `cargo`
-- `/dev/vhost-vsock` or the ability to load `vhost_vsock`
-
-On Debian/Ubuntu:
+Same as v1.2. On Debian/Ubuntu:
 
 ```bash
 sudo apt install \
@@ -105,218 +443,44 @@ sudo apt install \
   git
 ```
 
-If `build-guest.sh` runs in the default rootless `MMDEBSTRAP_MODE=unshare`,
-the host also needs:
+Plus: Rust toolchain, `/dev/vhost-vsock` (`sudo modprobe vhost_vsock`).
 
-- `newuidmap` and `newgidmap`
-- `/etc/subuid` entry for `$USER`
-- `/etc/subgid` entry for `$USER`
-- user namespaces allowed by the local AppArmor policy
-
-If `/dev/vhost-vsock` is missing, the current guest launch path will not work
-until you load the module:
+## Quick Start
 
 ```bash
-sudo modprobe vhost_vsock
-ls -l /dev/vhost-vsock
+# 1. Build guest image (one-time, ~5min)
+cd libs/vmm/examples/v1.3
+./build-guest.sh
+
+# 2. Start REPL
+cargo run -p motlie-vmm --example repl_host_v1_3 -- \
+  --empty \
+  --script libs/vmm/examples/v1.3/setup-multiguest.sh.vfs \
+  --admin-net=tap --egress-net=vhost-user
+
+# 3. Launch a guest
+launch alice
+
+# 4. Exec into it (SSH proxy)
+exec alice uname -a
+exec alice curl -s https://example.com | head -5
+
+# 5. Run automated validation
+validate alice
+
+# 6. Interactive SSH still works
+#    ssh alice@192.168.249.2
+
+# 7. Shutdown
+shutdown alice
 ```
 
-If that still fails, inspect:
+## Known Gaps
 
-```bash
-modinfo vhost_vsock
-dmesg | tail -n 50
-```
-
-## Current Phase Mapping
-
-This tree now covers the first concrete slice of Phase 3:
-
-- Phase 3.1 guest-image changes:
-  - `systemd-networkd` is enabled in the image
-  - validation packages (`curl`, `dnsutils`, `ca-certificates`) are present
-  - baked image tools now include `sudo`, `python3`, `npm`, `bubblewrap`,
-    `@openai/codex`, and `@anthropic-ai/claude-code`
-  - the image MOTD shows the image build SHA and UTC build timestamp
-  - the `motlie-agent-state` boot service redirects Codex/Claude state into
-    `/agent-state`
-- Phase 3.2 launcher migration:
-  - `launch-ch.sh` now accepts `--admin-net`, `--egress-net`, and `--vnet-socket`
-  - supported modes are:
-    - `--admin-net=none --egress-net=none`
-    - `--admin-net=tap --egress-net=tap`
-    - `--admin-net=tap --egress-net=vhost-user`
-  - the launcher seeds `/etc/hostname` and `/etc/hosts` into the runtime
-    overlay so `sudo` and hostname-based tools work normally
-- Phase 3.3/3.4 validation now stays inside the forked `v1.2` host flow:
-  - `repl_host_v1_2` is the only host-side binary entry point
-  - `launch-ch.sh` remains the only guest launcher script entry point
-  - `repl_host_v1_2` prints the host binary build SHA and UTC build timestamp
-    at startup
-
-Validated in this branch:
-
-- TAP-admin SSH ingress still works
-- outbound internet works over the `motlie-vnet` egress NIC
-- `apt-get` works against the disposable writable `/` overlay
-- `codex` and `claude` run in-guest
-- Codex and Claude auth/state resolve into `/agent-state`
-- `shutdown <guest>` in the REPL is deterministic, with fallback to process
-  termination when Cloud Hypervisor API shutdown fails
-
-Still pending:
-
-- Phase 3.5: host-side composed launch flow where the `v1.2` control plane
-  starts `motlie-vnet` automatically and wires it into `launch <guest>`
-
-## Mount Contract
-
-Alice:
-
-```yaml
-mounts:
-  - tag: alice-home
-    guest_path: /home/alice
-  - tag: alice-agent-state
-    guest_path: /agent-state
-  - tag: alice-workspace
-    guest_path: /workspace
-```
-
-Bob:
-
-```yaml
-mounts:
-  - tag: bob-home
-    guest_path: /home/bob
-  - tag: bob-agent-state
-    guest_path: /agent-state
-  - tag: bob-workspace
-    guest_path: /workspace
-```
-
-The split is deliberate:
-
-- `/home/<user>` stays the user-visible working tree
-- `/agent-state` is the dedicated read/write VFS-backed tool-state layer
-- `/workspace` remains the separate working/project tree
-
-## Implementation Notes
-
-### Agent-state layout
-
-The combined dedicated read/write layer is mounted at `/agent-state`. In the
-current POC, `/home/<user>` is backed by real host directories, while
-`/agent-state` is intentionally used as a REPL-overlay-backed tool-state area.
-That means:
-
-- normal home-directory behavior should look more like a usual disk-backed home
-- Codex / Claude auth and state survive guest relaunch while the same host REPL
-  process remains alive
-- restarting the host REPL can discard `/agent-state` overlay state in the
-  current POC
-
-The setup scripts pre-create these directories per guest:
-
-- `/agent-state/codex`
-- `/agent-state/claude`
-- `/agent-state/claude-code`
-
-The guest image then redirects:
-
-- `~/.codex -> /agent-state/codex`
-- `~/.claude -> /agent-state/claude`
-- `~/.config/claude-code -> /agent-state/claude-code`
-
-`CODEX_HOME` and `CODEX_SQLITE_HOME` are also exported from the login profile
-so Codex uses the dedicated read/write layer even if its path conventions
-evolve.
-
-### Home vs tool-state backing
-
-For the current `v1.2` POC:
-
-- `/home/alice` and `/home/bob` are meant to be host-disk-backed mounts
-- home bootstrap files such as `.ssh`, `.env`, `.bashrc`, `.profile`, and
-  `.config` are seeded onto that host-backed home path
-- `~/.codex`, `~/.claude`, and `~/.config/claude-code` are redirected into the
-  dedicated `/agent-state` mount
-
-This split is intentional. It keeps ordinary home-directory behavior closer to
-a normal disk-backed Linux home while still isolating agent state into one
-separate area for the demo.
-
-### Network model
-
-Short-term `v1.2` keeps the validated `v1.1` ingress path:
-
-- admin NIC: TAP, static `ip=` kernel cmdline, host-reachable SSH
-
-New in `v1.2`:
-
-- egress NIC: `vhost-user-net`, matched in-guest by a stable MAC and
-  configured by a guest boot service with the slirp defaults:
-  - `10.0.2.15/24` on `eth1`
-  - default route via `10.0.2.2`
-  - DNS server `10.0.2.3`
-
-The intent is:
-
-- TAP remains the management/SSH path
-- `motlie-vnet` owns default route, DNS, and outbound internet
-
-### Why this is safe to build incrementally
-
-The VFS stack and the writable root overlay do not depend on the network mode.
-That lets `v1.2` move the egress side first without destabilizing the already
-validated `v1.1` SSH/VFS path.
-
-## Validated Runbook
-
-The current branch has been validated with this host flow:
-
-1. run the `v1.2` REPL host:
-   - `cargo run -p motlie-vnet --example repl_host_v1_2 -- --empty --script libs/vnet/examples/v1.2/setup-multiguest.sh.vfs --admin-net=tap --egress-net=vhost-user`
-2. launch a guest from the REPL:
-   - `launch alice`
-3. connect over TAP-admin SSH:
-   - `ssh alice@192.168.249.2`
-4. verify split networking:
-   - `ip route`
-   - `cat /etc/resolv.conf`
-   - `curl -I https://example.com`
-   - `nslookup example.com 10.0.2.3`
-5. verify baked image tools:
-   - `which sudo python3 npm codex claude`
-6. verify disposable writable `/` still behaves correctly:
-   - `sudo apt-get update`
-7. verify agent-state redirection:
-   - `ls -ald ~/.codex ~/.claude ~/.config/claude-code`
-   - `readlink ~/.codex ~/.claude ~/.config/claude-code`
-   - `find /agent-state -maxdepth 4 -type f | sort`
-8. verify auth persistence for the lifetime of the running host REPL:
-   - sign in to `codex` and `claude`
-   - confirm their auth files appear under `/agent-state`
-   - `shutdown alice`
-   - `launch alice`
-   - confirm the auth files remain available
-
-## Known Gaps / TODO
-
-The current `v1.2` POC is intentionally not a production-grade general-purpose
-filesystem. The most important known gaps are:
-
-- `/agent-state` persistence is scoped to the lifetime of the running host
-  REPL, not durable across host REPL restart
-- Cloud Hypervisor graceful shutdown still returns HTTP `500` for this launch
-  shape; the REPL relies on a `TERM`/`KILL` fallback
-- Codex still warns `could not update PATH: Not supported (os error 95)`
-  because `motlie-vfs` does not yet implement the full set of filesystem
-  operations that developer tools expect on a normal home directory
-
-The next VFS compatibility work should focus on:
-
-1. `access`
-2. file locking
-3. xattrs
-4. rename / setattr / fsync completeness for more editor and CLI workflows
+- The SSH proxy currently layers on the TAP admin path. Eliminating TAP
+  entirely (via libslirp hostfwd or vsock) is a follow-up.
+- `render_cloud_init()` is minimal (`#cloud-config\n`). User account
+  creation and package installation are baked into the image.
+- `/agent-state` persistence is scoped to the REPL session lifetime.
+- CH graceful shutdown returns HTTP 500; the REPL falls back to
+  SIGTERM/SIGKILL.
