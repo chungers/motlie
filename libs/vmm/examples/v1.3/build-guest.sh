@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build-guest.sh — Build the generic shared base image set for v1.2.
+# build-guest.sh — Build the generic shared base image set for v1.3.
 #
 # Produces:
 #   artifacts/base/rootfs.squashfs   — shared Debian rootfs for alice+bob
@@ -112,7 +112,7 @@ MMDEBSTRAP_MODE="${MMDEBSTRAP_MODE:-unshare}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --guest)
-            die "v1.2 builds one generic base image; guest selection moved to launch-ch.sh"
+            die "v1.3 builds one generic base image; guest selection moved to launch-ch.sh"
             ;;
         --guest-binary) GUEST_BINARY="$2"; shift 2 ;;
         --kernel) KERNEL_MODE="$2"; shift 2 ;;
@@ -177,10 +177,10 @@ DEBIAN_MIRROR="http://deb.debian.org/debian"
 BASE_ARTIFACTS="$SCRIPT_DIR/artifacts/base"
 BASE_ROOTFS="$BASE_ARTIFACTS/rootfs.squashfs"
 BASE_KERNEL="$BASE_ARTIFACTS/$KERNEL_IMAGE"
-BASE_HOSTNAME="motlie-vmm-v12"
+BASE_HOSTNAME="motlie-vmm-v13"
 EGRESS_MAC="12:34:56:78:90:ab"
 
-echo "=== motlie-vmm v1.2 base image builder ==="
+echo "=== motlie-vmm v1.3 base image builder ==="
 echo "Host arch:          $HOST_ARCH"
 echo "Rust target:        $RUST_TARGET"
 echo "Debian arch:        $DEBOOTSTRAP_ARCH"
@@ -397,7 +397,7 @@ AGENTUNITEOF' \
     --customize-hook='chroot "$1" systemctl enable motlie-agent-state' \
     --customize-hook='cat > "$1/etc/systemd/system/motlie-vmm-egress.service" << "EGRESSUNITEOF"
 [Unit]
-Description=Configure static v1.2 egress NIC
+Description=Configure static v1.3 egress NIC
 After=systemd-networkd.service
 Wants=systemd-networkd.service
 ConditionPathExists=/sys/class/net/eth1
@@ -439,7 +439,7 @@ VSOCKSSHEOF' \
  | | | | | | (_) | |_| | |  __/
  |_| |_| |_|\___/ \__|_|_|\___|
 
-v1.2 split-network / agent-state demo
+v1.3 ssh-proxy / agent-state demo
 Build: __MOTLIE_IMAGE_BUILD_GIT_SHA__
 Built At: __MOTLIE_IMAGE_BUILD_TIME_UTC__
 MOTDEOF' \
