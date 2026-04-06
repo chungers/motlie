@@ -253,7 +253,7 @@ GUEST_BINARY_ABS="$(realpath "$GUEST_BINARY")"
 OVERLAY_INIT_ABS="$(realpath "$SCRIPT_DIR/overlay-init")"
 
 run_mmdebstrap "$BASE_ROOTFS" \
-    --include=openssh-server,bash,bubblewrap,ca-certificates,coreutils,curl,dnsutils,tmux,fuse3,libfuse3-3,systemd,systemd-sysv,dbus,iproute2,cloud-init,locales,sudo,python3,npm \
+    --include=openssh-server,bash,bubblewrap,ca-certificates,coreutils,curl,dnsutils,tmux,fuse3,libfuse3-3,systemd,systemd-sysv,dbus,iproute2,cloud-init,locales,sudo,python3,npm,strace \
     --customize-hook='chroot "$1" systemctl enable ssh' \
     --customize-hook='chroot "$1" systemctl enable systemd-networkd' \
     --customize-hook='chroot "$1" systemctl disable systemd-networkd-wait-online.service' \
