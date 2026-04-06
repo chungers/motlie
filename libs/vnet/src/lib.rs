@@ -15,19 +15,10 @@
 //! This design avoids unsafe Send impls on libslirp's C state.
 
 pub mod slirp;
-pub mod alloc;
 mod backend;
 mod error;
 mod config;
 
-pub use alloc::{
-    AdminIpv4Pair,
-    EgressIpv4Layout,
-    GuestNetAssignment,
-    GuestNetAllocator,
-    GuestNetAllocatorConfig,
-    GuestNetAllocatorError,
-};
 pub use config::{PortForward, VnetConfig};
 pub use error::VnetError;
 pub use backend::{VnetBackend, VnetHandle};

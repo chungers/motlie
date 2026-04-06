@@ -640,7 +640,7 @@ Current gap:
 
 Scaffold added for the future extraction:
 
-- [`libs/vnet/src/alloc.rs`](../../vnet/src/alloc.rs)
+- [`libs/vmm/src/network_alloc.rs`](../src/network_alloc.rs)
 
 That scaffold now contains:
 
@@ -655,9 +655,9 @@ Important:
 - this scaffold is intentionally non-authoritative today
 - `examples/v1.3` behavior is unchanged until a follow-up extraction PR moves
   the live allocation path onto the library type
-- when that happens, `libs/vmm` should consume `libs/vnet::GuestNetAllocator`
-  rather than continuing to allocate CID/IP/MAC identity inside the REPL
-  example
+- when that happens, `libs/vmm` should consume its own
+  `network_alloc::GuestNetAllocator` rather than continuing to allocate
+  CID/IP/MAC identity inside the REPL example
 
 Extraction target:
 
