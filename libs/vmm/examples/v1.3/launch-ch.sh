@@ -54,16 +54,28 @@ case "$HOST_ARCH" in
     *) echo "ERROR: unsupported host architecture: $HOST_ARCH"; exit 1 ;;
 esac
 
-GUEST_NAME="alice"
+GUEST_NAME=""
 ADMIN_NET="tap"
 EGRESS_NET="tap"
 OVERLAY_SIZE="${OVERLAY_SIZE:-2G}"
-RUNTIME_ROOT="${RUNTIME_ROOT:-/tmp/motlie-vmm-v12-runtime}"
+RUNTIME_ROOT="${RUNTIME_ROOT:-/tmp/motlie-vmm-runtime}"
 CLOUD_INIT_DIR=""
 SERIAL_BACKEND="${CH_SERIAL_BACKEND:-tty}"
 CONSOLE_BACKEND="${CH_CONSOLE_BACKEND:-off}"
 VNET_SOCKET=""
 SSH_CA_PUBKEY=""
+# Per-guest overrides (all derivable from GUEST_NAME if not supplied)
+CID=""
+HOST_IP=""
+GUEST_IP=""
+ADMIN_MAC=""
+EGRESS_MAC=""
+SSH_USER=""
+GUEST_HOSTNAME=""
+LOGIN_HOME=""
+MOUNT_CONFIG=""
+API_SOCKET=""
+VSOCK_SOCKET=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -81,10 +93,33 @@ while [[ $# -gt 0 ]]; do
         --vnet-socket=*) VNET_SOCKET="${1#*=}"; shift ;;
         --ssh-ca-pubkey) SSH_CA_PUBKEY="$2"; shift 2 ;;
         --ssh-ca-pubkey=*) SSH_CA_PUBKEY="${1#*=}"; shift ;;
+        --cid) CID="$2"; shift 2 ;;
+        --cid=*) CID="${1#*=}"; shift ;;
+        --host-ip) HOST_IP="$2"; shift 2 ;;
+        --host-ip=*) HOST_IP="${1#*=}"; shift ;;
+        --guest-ip) GUEST_IP="$2"; shift 2 ;;
+        --guest-ip=*) GUEST_IP="${1#*=}"; shift ;;
+        --admin-mac) ADMIN_MAC="$2"; shift 2 ;;
+        --admin-mac=*) ADMIN_MAC="${1#*=}"; shift ;;
+        --egress-mac) EGRESS_MAC="$2"; shift 2 ;;
+        --egress-mac=*) EGRESS_MAC="${1#*=}"; shift ;;
+        --ssh-user) SSH_USER="$2"; shift 2 ;;
+        --ssh-user=*) SSH_USER="${1#*=}"; shift ;;
+        --hostname) GUEST_HOSTNAME="$2"; shift 2 ;;
+        --hostname=*) GUEST_HOSTNAME="${1#*=}"; shift ;;
+        --login-home) LOGIN_HOME="$2"; shift 2 ;;
+        --login-home=*) LOGIN_HOME="${1#*=}"; shift ;;
+        --mount-config) MOUNT_CONFIG="$2"; shift 2 ;;
+        --mount-config=*) MOUNT_CONFIG="${1#*=}"; shift ;;
         --no-net) ADMIN_NET="none"; EGRESS_NET="none"; shift ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
 done
+
+if [ -z "$GUEST_NAME" ]; then
+    echo "ERROR: --guest <name> is required"
+    exit 1
+fi
 
 case "$ADMIN_NET:$EGRESS_NET" in
     none:none|tap:tap|tap:vhost-user) ;;
@@ -94,44 +129,21 @@ case "$ADMIN_NET:$EGRESS_NET" in
         ;;
 esac
 
-case "$GUEST_NAME" in
-    alice)
-        BASE_ARTIFACTS="$SCRIPT_DIR/artifacts/base"
-        API_SOCKET="/tmp/motlie-vmm-alice-api.sock"
-        VSOCK_SOCKET="/tmp/motlie-vmm-alice.vsock"
-        CID=3
-        HOST_IP="192.168.249.1"
-        GUEST_IP="192.168.249.2"
-        ADMIN_MAC="12:34:56:78:90:aa"
-        EGRESS_MAC="12:34:56:78:90:ab"
-        SSH_USER="alice"
-        GUEST_HOSTNAME="motlie-alice"
-        LOGIN_HOME="/home/alice"
-        MOUNT_CONFIG="$SCRIPT_DIR/mounts.alice.yaml"
-        GUEST_OVERLAY_CONTENT="$SCRIPT_DIR/overlay.d/alice"
-        [ -n "$VNET_SOCKET" ] || VNET_SOCKET="/tmp/motlie-vmm-alice.sock"
-        ;;
-    bob)
-        BASE_ARTIFACTS="$SCRIPT_DIR/artifacts/base"
-        API_SOCKET="/tmp/motlie-vmm-bob-api.sock"
-        VSOCK_SOCKET="/tmp/motlie-vmm-bob.vsock"
-        CID=4
-        HOST_IP="192.168.250.1"
-        GUEST_IP="192.168.250.2"
-        ADMIN_MAC="12:34:56:78:90:bb"
-        EGRESS_MAC="12:34:56:78:90:ab"
-        SSH_USER="bob"
-        GUEST_HOSTNAME="motlie-bob"
-        LOGIN_HOME="/home/bob"
-        MOUNT_CONFIG="$SCRIPT_DIR/mounts.bob.yaml"
-        GUEST_OVERLAY_CONTENT="$SCRIPT_DIR/overlay.d/bob"
-        [ -n "$VNET_SOCKET" ] || VNET_SOCKET="/tmp/motlie-vmm-bob.sock"
-        ;;
-    *)
-        echo "ERROR: --guest must be one of: alice, bob"
-        exit 1
-        ;;
-esac
+# Derive defaults from GUEST_NAME when not explicitly supplied.
+BASE_ARTIFACTS="$SCRIPT_DIR/artifacts/base"
+[ -n "$API_SOCKET" ]      || API_SOCKET="/tmp/motlie-vmm-${GUEST_NAME}-api.sock"
+[ -n "$VSOCK_SOCKET" ]    || VSOCK_SOCKET="/tmp/motlie-vmm-${GUEST_NAME}.vsock"
+[ -n "$CID" ]             || CID=3
+[ -n "$HOST_IP" ]         || HOST_IP="192.168.249.1"
+[ -n "$GUEST_IP" ]        || GUEST_IP="192.168.249.2"
+[ -n "$ADMIN_MAC" ]       || ADMIN_MAC="12:34:56:78:90:aa"
+[ -n "$EGRESS_MAC" ]      || EGRESS_MAC="12:34:56:78:90:ab"
+[ -n "$SSH_USER" ]        || SSH_USER="$GUEST_NAME"
+[ -n "$GUEST_HOSTNAME" ]  || GUEST_HOSTNAME="motlie-${GUEST_NAME}"
+[ -n "$LOGIN_HOME" ]      || LOGIN_HOME="/home/${GUEST_NAME}"
+[ -n "$MOUNT_CONFIG" ]    || MOUNT_CONFIG="$SCRIPT_DIR/mounts.${GUEST_NAME}.yaml"
+[ -n "$VNET_SOCKET" ]     || VNET_SOCKET="/tmp/motlie-vmm-${GUEST_NAME}.sock"
+GUEST_OVERLAY_CONTENT="$SCRIPT_DIR/overlay.d/${GUEST_NAME}"
 
 if [ ! -f "$BASE_ARTIFACTS/$KERNEL_IMAGE" ]; then
     echo "ERROR: $BASE_ARTIFACTS/$KERNEL_IMAGE not found."
