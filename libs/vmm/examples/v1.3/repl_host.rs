@@ -109,7 +109,7 @@ use tokio::sync::oneshot;
 
 use motlie_vnet::{VnetBackend, VnetConfig, VnetHandle};
 use motlie_vmm::ca::SshCa;
-use motlie_vmm::ssh::{self, GuestRegistry, SshProxyConfig};
+use motlie_vmm::ssh::{self, GuestEndpoint, GuestRegistry, SshProxyConfig};
 use motlie_vfs::core::overlay::OverlayAttrs;
 use motlie_vfs::core::server::FsServer;
 use motlie_vfs::vsock::handler::VsockConnectionHandler;
@@ -268,10 +268,6 @@ fn ensure_net_alloc<'a>(admin: &'a mut AdminState, guest_name: &str) -> &'a Gues
     admin.net_allocs.get(guest_name).unwrap()
 }
 
-/// Look up the allocated admin TAP IP for a guest, if any.
-fn guest_admin_ip(admin: &AdminState, guest_name: &str) -> Option<Ipv4Addr> {
-    admin.net_allocs.get(guest_name).map(|a| a.guest_ip)
-}
 
 enum MountSpec {
     Single {
@@ -1735,9 +1731,15 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
                         match execute_launch_script(guest_name, &script) {
                             Ok(exec) => {
                                 admin.launch_pids.insert(guest_name.to_string(), exec.pid);
-                                // Register guest IP for the SSH proxy.
-                                if let Some(ip) = guest_admin_ip(admin, guest_name) {
-                                    admin.guest_registry.lock().unwrap().insert(guest_name.to_string(), ip);
+                                // Register guest for the SSH proxy.
+                                if let Some(alloc) = admin.net_allocs.get(guest_name) {
+                                    admin.guest_registry.lock().unwrap().insert(
+                                        guest_name.to_string(),
+                                        GuestEndpoint {
+                                            cid: alloc.cid,
+                                            admin_ip: Some(alloc.guest_ip),
+                                        },
+                                    );
                                 }
                                 emit_status(
                                     admin,
@@ -1799,19 +1801,18 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
         "exec" if parts.len() >= 3 => {
             let guest_name = parts[1];
             let command = parts[2..].join(" ");
-            let guest_ip = match guest_admin_ip(admin, guest_name) {
-                Some(ip) => ip,
+            let cid = match admin.net_allocs.get(guest_name) {
+                Some(alloc) => alloc.cid,
                 None => {
-                    emit_status(admin, format!("error: no admin IP known for guest '{guest_name}'"));
+                    emit_status(admin, format!("error: guest '{guest_name}' has not been launched"));
                     return ControlFlow::Continue;
                 }
             };
-            emit_status(admin, format!("exec {guest_name}: {command}"));
-            match admin.runtime.block_on(ssh::exec(
+            emit_status(admin, format!("exec {guest_name} (vsock cid={cid}): {command}"));
+            match admin.runtime.block_on(ssh::exec_vsock(
                 &admin.ssh_ca,
                 guest_name,
-                guest_ip,
-                22,
+                cid,
                 &command,
             )) {
                 Ok(output) => {
@@ -1836,15 +1837,17 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
         }
         "validate" if parts.len() == 2 => {
             let guest_name = parts[1];
-            let guest_ip = match guest_admin_ip(admin, guest_name) {
-                Some(ip) => ip,
+            let cid = match admin.net_allocs.get(guest_name) {
+                Some(alloc) => alloc.cid,
                 None => {
-                    emit_status(admin, format!("error: no admin IP known for guest '{guest_name}'"));
+                    emit_status(admin, format!("error: guest '{guest_name}' has not been launched"));
                     return ControlFlow::Continue;
                 }
             };
-            emit_status(admin, format!("=== validate {guest_name} ==="));
+            emit_status(admin, format!("=== validate {guest_name} (vsock cid={cid}) ==="));
             let checks: Vec<(&str, &str, Box<dyn Fn(&ssh::ExecOutput) -> bool>)> = vec![
+                ("vsock-ssh: uname", "uname -s",
+                    Box::new(|out| out.exit_code == 0 && out.stdout.trim() == "Linux")),
                 ("egress: curl https://example.com", "curl -s -o /dev/null -w '%{http_code}' https://example.com",
                     Box::new(|out| out.exit_code == 0 && out.stdout.trim() == "200")),
                 ("dns: nslookup via motlie-vmm", "nslookup example.com 10.0.2.3 2>&1 | head -1",
@@ -1861,11 +1864,10 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
             let mut passed = 0;
             let mut failed = 0;
             for (label, cmd, check) in &checks {
-                match admin.runtime.block_on(ssh::exec(
+                match admin.runtime.block_on(ssh::exec_vsock(
                     &admin.ssh_ca,
                     guest_name,
-                    guest_ip,
-                    22,
+                    cid,
                     cmd,
                 )) {
                     Ok(output) => {
