@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-06 | @codex | Record the harness ownership handoff: `v1` and `v1.1` remain VFS-owned, while the `v1.2+` example / validation harness moves to `motlie-vnet` with `libs/vnet/docs/{DESIGN,PLAN}.md` as the networking source of truth |
 | 2026-04-05 | @codex | Extend the v1 wire protocol and semantics with `Access`, xattrs, and byte-range locks; document handle-based fsync/rename behavior and the remaining lock-limitations for the compatibility pass |
 | 2026-04-02 | @codex | Split the host/guest example boundary so `examples/v1/repl_host.rs` remains the stable v1 single-guest harness, `examples/v1.1/repl_host.rs` carries the v1.1 multi-guest control-plane extensions, and the guest mounters now live under `bins/v1/` and `bins/v1.1/` |
 | 2026-04-02 | @codex | Sync `FsOp::Mkdir` wire protocol with `uid`/`gid` and clarify that explicit overlay-managed `mkdir` uses caller ownership while implicit parent dirs created by `put()` still inherit defaults |
@@ -108,6 +109,12 @@ v1 lives inside `libs/vfs` and targets the fastest proof of concept:
   - `libs/vfs/examples/v1/repl_host.rs` (v1 host side)
   - `libs/vfs/examples/v1.1/repl_host.rs` (v1.1 multi-guest host side)
   - `libs/vfs/examples/v1/` and `libs/vfs/examples/v1.1/` (guest image build + CH launch scripts)
+- harness lineage handoff:
+  - `v1` and `v1.1` remain owned here under `libs/vfs/examples/`
+  - beginning with `v1.2`, the composed host / networking harness is owned by
+    `motlie-vnet` under `libs/vnet/examples/v1.2/`
+  - networking design / follow-up work for `v1.2+` therefore lives in
+    `libs/vnet/docs/{DESIGN,PLAN}.md`
 - REPL/tooling choice:
   - `rustyline` for interactive mode
   - stdin pipe support for scripted/agent-driven setups

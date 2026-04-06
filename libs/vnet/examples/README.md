@@ -29,17 +29,20 @@ cargo run -p motlie-vnet --example repl_host_v1_2 -- \
 See [v1.2/README.md](./v1.2/README.md) for the full workflow, validation
 runbook, and known gaps.
 
-### Relationship to libs/vfs/examples
+### Harness Ownership Handoff
 
-The `v1.2` example set here is forked from `libs/vfs/examples/v1.2` because
-`v1.2` is the first demo that exercises `motlie-vnet`. The two copies are
-intentionally kept in sync:
+The example lineage now splits by subsystem ownership:
 
-- `libs/vfs/examples/v1.2` is the canonical copy from the VFS perspective
-- `libs/vnet/examples/v1.2` is the canonical copy from the vnet perspective
+- `libs/vfs/examples/v1/` and `libs/vfs/examples/v1.1/` remain the historical
+  VFS-owned harnesses
+- `libs/vnet/examples/v1.2/` is the canonical source of truth for the
+  `v1.2+` composed harness line
 
-Both contain the same guest image builder, launcher, REPL host, and mount
-configs. The docs, scripts, and harness files are identical.
+The handoff is recorded in:
+
+- `libs/vfs/docs/PLAN.md` for the historical completion trail
+- `libs/vnet/docs/DESIGN.md` and `libs/vnet/docs/PLAN.md` for the current
+  design and follow-up work
 
 ### Key files
 

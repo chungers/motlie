@@ -19,18 +19,17 @@ Build the crate directly with tracing enabled:
 cargo check -p motlie-vnet --features debug-trace
 ```
 
-## Using The Flag From `motlie-vfs`
+## Using The Flag In `v1.2`
 
-The `motlie-vfs` crate forwards this feature as `vnet-debug-trace`, so the
-`v1.2` host REPL can enable the same diagnostics without building
-`motlie-vnet` separately.
+The `v1.2` harness is now owned by `motlie-vnet`, so debug tracing is enabled
+directly on the `motlie-vnet` example binary.
 
 Normal `v1.2` host run:
 
 ```bash
-cargo run -p motlie-vfs --example repl_host_v1_2 --features vsock -- \
+cargo run -p motlie-vnet --example repl_host_v1_2 -- \
   --empty \
-  --script libs/vfs/examples/v1.2/setup-multiguest.sh.vfs \
+  --script libs/vnet/examples/v1.2/setup-multiguest.sh.vfs \
   --admin-net=tap \
   --egress-net=vhost-user
 ```
@@ -38,9 +37,9 @@ cargo run -p motlie-vfs --example repl_host_v1_2 --features vsock -- \
 Debug `v1.2` host run with backend traces enabled:
 
 ```bash
-cargo run -p motlie-vfs --example repl_host_v1_2 --features vsock,vnet-debug-trace -- \
+cargo run -p motlie-vnet --example repl_host_v1_2 --features debug-trace -- \
   --empty \
-  --script libs/vfs/examples/v1.2/setup-multiguest.sh.vfs \
+  --script libs/vnet/examples/v1.2/setup-multiguest.sh.vfs \
   --admin-net=tap \
   --egress-net=vhost-user
 ```
@@ -49,3 +48,4 @@ cargo run -p motlie-vfs --example repl_host_v1_2 --features vsock,vnet-debug-tra
 
 - [DESIGN.md](/home/dchung/codex-vfs/motlie-vnet/libs/vnet/docs/DESIGN.md)
 - [PLAN.md](/home/dchung/codex-vfs/motlie-vnet/libs/vnet/docs/PLAN.md)
+- [examples/README.md](/home/dchung/codex-vfs/motlie-vnet/libs/vnet/examples/README.md)
