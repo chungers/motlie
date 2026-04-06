@@ -22,6 +22,65 @@
 4. The guest image only needs one rebuild (for sshd_config CA trust);
    the CA pubkey and principals are injected per-launch
 
+## Non-Regression Constraints
+
+These points were easy to get subtly wrong during `v1.3` bring-up and should be
+treated as part of the design, not incidental implementation details.
+
+### A. SSH overlay paths must not be group-writable
+
+The runtime overlay built by [launch-ch.sh](./launch-ch.sh) must keep:
+
+- intermediate directories at `755`, not `775`
+- `/etc/ssh/auth_principals` at `root:root` and `755`
+- `/etc/ssh/auth_principals/<user>` files at `644`
+- `/etc/ssh/ca/user_ca.pub` at `644`
+
+`fakeroot mkfs.ext4 -d ...` is intentional here. It ensures the injected CA and
+principals files appear as `root:root` inside the guest. If ownership or any
+parent directory mode is loosened, guest `sshd` can reject cert-based auth.
+
+### B. The proxy's ephemeral SSH cert must include `permit-pty`
+
+The proxy authenticates to guest `sshd` with an ephemeral user certificate from
+[`SshCa::sign_ephemeral()`](../../src/ca.rs). That cert must include the
+OpenSSH user-cert extension `permit-pty`.
+
+Without `permit-pty`, the proxy can still authenticate and run plain `exec`
+requests, but guest `sshd` rejects PTY allocation. The observed failure mode
+was:
+
+- `ssh -p 2222 alice@localhost` hung after MOTD
+- `ssh -tt -p 2222 alice@localhost /bin/cat -v` printed raw `^M` / literal `^D`
+- proxy debug output showed guest-side `Failure` followed by `Success`
+
+After adding `permit-pty`, proxied interactive shells and PTY-backed exec paths
+started working again.
+
+### C. Compare direct guest SSH with proxied SSH when debugging PTY issues
+
+Use these as the first differential test:
+
+```bash
+ssh -tt alice@192.168.249.2 /bin/cat -v
+ssh -tt -p 2222 alice@localhost /bin/cat -v
+```
+
+If direct guest SSH is correct and proxied SSH is wrong, the bug is in the
+proxy path, not the guest image or guest `sshd`.
+
+### D. Agent-state redirection is a boot-time service contract
+
+`motlie-agent-state.service` must keep:
+
+- `~/.codex -> /agent-state/codex`
+- `~/.claude -> /agent-state/claude`
+- `~/.config/claude-code -> /agent-state/claude-code`
+
+This is part of the validated `v1.2`/`v1.3` contract. If those symlinks are
+replaced with home-local directories, tool auth/state silently stops landing in
+the dedicated VFS-backed layer.
+
 ## Architecture Overview
 
 ```

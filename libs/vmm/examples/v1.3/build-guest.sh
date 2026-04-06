@@ -291,27 +291,6 @@ if [ -f "$HOME/.env" ]; then
     set +a
 fi
 DOTENVEOF' \
-    --customize-hook='cat > "$1/etc/profile.d/tmux-auto.sh" << "TMUXEOF"
-if [ -n "$SSH_CONNECTION" ] && [ -z "$TMUX" ] && command -v tmux >/dev/null 2>&1; then
-    if tmux has-session -t "$USER" 2>/dev/null; then
-        echo "Attaching to existing tmux session..."
-        sleep 1
-        exec tmux attach-session -t "$USER"
-    else
-        printf "Start tmux session? [Y/n] (auto-yes in 3s) "
-        if read -r -n 1 -t 3 answer; then
-            echo
-        else
-            answer=Y
-            echo
-        fi
-        case "$answer" in
-            n|N) ;;
-            *) exec tmux new-session -s "$USER" ;;
-        esac
-    fi
-fi
-TMUXEOF' \
     --customize-hook='cat > "$1/etc/profile.d/agent-state.sh" << "AGENTEOF"
 agent_state_root=/agent-state
 codex_root="$agent_state_root/codex"
@@ -454,7 +433,7 @@ VSOCKSSHEOF' \
     --customize-hook='chroot "$1" systemctl enable motlie-vmm-vsock-ssh' \
     --customize-hook="echo \"$BASE_HOSTNAME\" > \"\$1/etc/hostname\"" \
     --customize-hook='cat > "$1/etc/motd" << "MOTDEOF"
-                    _   _ _
+                  _   _ _
   _ __ ___   ___ | |_| (_) ___
  | '"'"'_ ` _ \ / _ \| __| | |/ _ \
  | | | | | | (_) | |_| | |  __/

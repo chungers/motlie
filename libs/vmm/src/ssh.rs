@@ -29,11 +29,23 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use russh::server::{Auth, Msg, Session};
-use russh::{Channel, ChannelMsg, ChannelWriteHalf};
+use russh::{Channel, ChannelMsg, ChannelWriteHalf, Pty};
 use thiserror::Error;
 use tokio::net::UnixListener;
 
 use crate::ca::{CaError, SshCa};
+
+#[cfg(feature = "debug-trace")]
+macro_rules! debug_trace {
+    ($($arg:tt)*) => {
+        eprintln!($($arg)*);
+    };
+}
+
+#[cfg(not(feature = "debug-trace"))]
+macro_rules! debug_trace {
+    ($($arg:tt)*) => {};
+}
 
 /// vsock port used for the guest→host SSH bridge.
 pub const VSOCK_SSH_PORT: u32 = 2222;
@@ -98,6 +110,79 @@ pub type GuestRegistry = Arc<Mutex<HashMap<String, GuestEndpoint>>>;
 
 pub fn new_guest_registry() -> GuestRegistry {
     Arc::new(Mutex::new(HashMap::new()))
+}
+
+fn default_pty_modes() -> Vec<(Pty, u32)> {
+    vec![
+        (Pty::VINTR, 3),
+        (Pty::VQUIT, 28),
+        (Pty::VERASE, 127),
+        (Pty::VKILL, 21),
+        (Pty::VEOF, 4),
+        (Pty::VWERASE, 23),
+        (Pty::VLNEXT, 22),
+        (Pty::VREPRINT, 18),
+        (Pty::VSUSP, 26),
+        (Pty::ICRNL, 1),
+        (Pty::IXON, 1),
+        (Pty::ISIG, 1),
+        (Pty::ICANON, 1),
+        (Pty::IEXTEN, 1),
+        (Pty::ECHO, 1),
+        (Pty::ECHOE, 1),
+        (Pty::ECHOK, 1),
+        (Pty::ECHOCTL, 1),
+        (Pty::ECHOKE, 1),
+        (Pty::OPOST, 1),
+        (Pty::ONLCR, 1),
+        (Pty::TTY_OP_ISPEED, 38_400),
+        (Pty::TTY_OP_OSPEED, 38_400),
+    ]
+}
+
+fn upsert_pty_mode(modes: &mut Vec<(Pty, u32)>, key: Pty, value: u32) {
+    if let Some((_, existing)) = modes.iter_mut().find(|(mode, _)| *mode == key) {
+        *existing = value;
+    } else {
+        modes.push((key, value));
+    }
+}
+
+fn normalize_pty_modes(modes: &mut Vec<(Pty, u32)>) {
+    // Preserve the client's terminal sizing and most mode settings, but force
+    // a sane cooked interactive baseline so Enter/Ctrl-D/job control work
+    // through the SSH proxy like a normal shell session.
+    for (key, value) in [
+        (Pty::VINTR, 3),
+        (Pty::VQUIT, 28),
+        (Pty::VERASE, 127),
+        (Pty::VKILL, 21),
+        (Pty::VEOF, 4),
+        (Pty::VWERASE, 23),
+        (Pty::VLNEXT, 22),
+        (Pty::VREPRINT, 18),
+        (Pty::VSUSP, 26),
+        (Pty::INLCR, 0),
+        (Pty::IGNCR, 0),
+        (Pty::ICRNL, 1),
+        (Pty::IXON, 1),
+        (Pty::ISIG, 1),
+        (Pty::ICANON, 1),
+        (Pty::IEXTEN, 1),
+        (Pty::ECHO, 1),
+        (Pty::ECHOE, 1),
+        (Pty::ECHOK, 1),
+        (Pty::ECHONL, 0),
+        (Pty::ECHOCTL, 1),
+        (Pty::ECHOKE, 1),
+        (Pty::OPOST, 1),
+        (Pty::ONLCR, 1),
+        (Pty::OCRNL, 0),
+        (Pty::ONOCR, 0),
+        (Pty::ONLRET, 0),
+    ] {
+        upsert_pty_mode(modes, key, value);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -374,6 +459,18 @@ impl russh::server::Handler for ProxyHandler {
                                 break;
                             }
                         }
+                        ChannelMsg::Success => {
+                            debug_trace!("SSH proxy: guest channel reported Success");
+                        }
+                        ChannelMsg::Failure => {
+                            debug_trace!("SSH proxy: guest channel reported Failure");
+                        }
+                        ChannelMsg::ExitStatus { exit_status } => {
+                            debug_trace!("SSH proxy: guest channel exit-status={exit_status}");
+                        }
+                        ChannelMsg::ExitSignal { ref signal_name, .. } => {
+                            debug_trace!("SSH proxy: guest channel exit-signal={signal_name:?}");
+                        }
                         ChannelMsg::Eof => {
                             let _ = server_handle.eof(ch_id).await;
                             break;
@@ -418,17 +515,37 @@ impl russh::server::Handler for ProxyHandler {
         row_height: u32,
         pix_width: u32,
         pix_height: u32,
-        modes: &[(russh::Pty, u32)],
+        _modes: &[(russh::Pty, u32)],
         session: &mut Session,
     ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
         let guest_ch = Arc::clone(&self.guest_ch);
         let term = term.to_string();
-        let modes = modes.to_vec();
-        session.channel_success(channel).ok();
+        #[cfg(feature = "debug-trace")]
+        let incoming_mode_count = _modes
+            .iter()
+            .copied()
+            .take_while(|(mode, _)| *mode != Pty::TTY_OP_END)
+            .count();
+        let modes = default_pty_modes();
+        debug_trace!(
+            "SSH proxy: forwarding pty term={} rows={} cols={} incoming_modes={} effective_modes={}",
+            term, row_height, col_width, incoming_mode_count, modes.len()
+        );
+        let server_handle = session.handle();
         async move {
             if let Some(ref ch) = *guest_ch.lock().await {
-                ch.request_pty(false, &term, col_width, row_height, pix_width, pix_height, &modes)
-                    .await?;
+                match ch
+                    .request_pty(true, &term, col_width, row_height, pix_width, pix_height, &modes)
+                    .await
+                {
+                    Ok(()) => {
+                        let _ = server_handle.channel_success(channel).await;
+                    }
+                    Err(e) => {
+                        let _ = server_handle.channel_failure(channel).await;
+                        return Err(e.into());
+                    }
+                }
             }
             Ok(())
         }
@@ -440,10 +557,18 @@ impl russh::server::Handler for ProxyHandler {
         session: &mut Session,
     ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
         let guest_ch = Arc::clone(&self.guest_ch);
-        session.channel_success(channel).ok();
+        let server_handle = session.handle();
         async move {
             if let Some(ref ch) = *guest_ch.lock().await {
-                ch.request_shell(false).await?;
+                match ch.request_shell(true).await {
+                    Ok(()) => {
+                        let _ = server_handle.channel_success(channel).await;
+                    }
+                    Err(e) => {
+                        let _ = server_handle.channel_failure(channel).await;
+                        return Err(e.into());
+                    }
+                }
             }
             Ok(())
         }
@@ -457,10 +582,18 @@ impl russh::server::Handler for ProxyHandler {
     ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
         let guest_ch = Arc::clone(&self.guest_ch);
         let data = data.to_vec();
-        session.channel_success(channel).ok();
+        let server_handle = session.handle();
         async move {
             if let Some(ref ch) = *guest_ch.lock().await {
-                ch.exec(false, &data[..]).await?;
+                match ch.exec(true, &data[..]).await {
+                    Ok(()) => {
+                        let _ = server_handle.channel_success(channel).await;
+                    }
+                    Err(e) => {
+                        let _ = server_handle.channel_failure(channel).await;
+                        return Err(e.into());
+                    }
+                }
             }
             Ok(())
         }

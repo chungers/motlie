@@ -9,6 +9,7 @@ build = "build.rs"
 
 [features]
 default = []
+debug-trace = []
 
 [dependencies]
 # SSH proxy + CA

@@ -80,6 +80,17 @@ impl SshCa {
         builder
             .valid_principal(guest_name)
             .map_err(|e| CaError::CertSigning(e.to_string()))?;
+        for ext in [
+            "permit-pty",
+            "permit-user-rc",
+            "permit-port-forwarding",
+            "permit-agent-forwarding",
+            "permit-X11-forwarding",
+        ] {
+            builder
+                .extension(ext, "")
+                .map_err(|e| CaError::CertSigning(e.to_string()))?;
+        }
 
         let cert = builder
             .sign(&self.ca_key)
@@ -110,6 +121,7 @@ mod tests {
         assert_eq!(eph.cert.cert_type(), CertType::User);
         let principals: Vec<&str> = eph.cert.valid_principals().iter().map(|s| s.as_str()).collect();
         assert!(principals.contains(&"alice"));
+        assert_eq!(eph.cert.extensions().get("permit-pty").map(|s| s.as_str()), Some(""));
     }
 
     #[test]
