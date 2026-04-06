@@ -981,12 +981,13 @@ fn render_launch_script(
     admin_net: AdminNet,
     egress_net: EgressNet,
     vnet_socket: Option<&PathBuf>,
+    ssh_ca_pubkey: Option<&str>,
 ) -> Result<String> {
     let cloud_init = render_cloud_init(guest_name, runtime)?;
     if guest_name != "alice" && guest_name != "bob" {
         anyhow::bail!("launch prototype currently targets v1.2 demo guests alice/bob because launch-ch.sh still carries guest-specific runtime defaults");
     }
-    let base_dir = format!("{}/examples/v1.2", env!("CARGO_MANIFEST_DIR"));
+    let base_dir = format!("{}/examples/v1.3", env!("CARGO_MANIFEST_DIR"));
     let mut out = String::new();
     out.push_str("#!/usr/bin/env bash\n");
     out.push_str("set -euo pipefail\n\n");
@@ -1018,6 +1019,13 @@ fn render_launch_script(
             shell_single_quote(socket.to_string_lossy().as_ref())
         )?;
     }
+    if let Some(ca_pubkey) = ssh_ca_pubkey {
+        writeln!(
+            &mut out,
+            "SSH_CA_PUBKEY={}",
+            shell_single_quote(ca_pubkey)
+        )?;
+    }
     out.push_str("INSTANCE_ID=\"${INSTANCE_ID:-${GUEST_ID}}\"\n");
     out.push_str("LOCAL_HOSTNAME=\"${LOCAL_HOSTNAME:-motlie-${GUEST_ID}}\"\n");
     out.push_str("mkdir -p \"$SEED_DIR\"\n");
@@ -1042,6 +1050,9 @@ fn render_launch_script(
     out.push_str("LAUNCH_ARGS=(--guest \"$GUEST_ID\" --cloud-init-dir \"$SEED_DIR\" --admin-net \"$ADMIN_NET\" --egress-net \"$EGRESS_NET\")\n");
     if egress_net == EgressNet::VhostUser {
         out.push_str("LAUNCH_ARGS+=(--vnet-socket \"$VNET_SOCKET\")\n");
+    }
+    if ssh_ca_pubkey.is_some() {
+        out.push_str("LAUNCH_ARGS+=(--ssh-ca-pubkey \"$SSH_CA_PUBKEY\")\n");
     }
     out.push_str("\"$BASE_DIR/launch-ch.sh\" \"${LAUNCH_ARGS[@]}\" \"$@\"\n");
     Ok(out)
@@ -1651,12 +1662,14 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
                 .get(guest_name)
                 .ok_or_else(|| anyhow::anyhow!("unknown guest '{guest_name}'"))
                 .and_then(|runtime| {
+                    let ca_pubkey = admin.ssh_ca.public_key_openssh().ok();
                     render_launch_script(
                         guest_name,
                         runtime,
                         admin.admin_net,
                         admin.egress_net,
                         vnet_socket.as_ref(),
+                        ca_pubkey.as_deref(),
                     )
                 })
             {

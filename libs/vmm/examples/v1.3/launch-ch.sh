@@ -63,6 +63,7 @@ CLOUD_INIT_DIR=""
 SERIAL_BACKEND="${CH_SERIAL_BACKEND:-tty}"
 CONSOLE_BACKEND="${CH_CONSOLE_BACKEND:-off}"
 VNET_SOCKET=""
+SSH_CA_PUBKEY=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -78,6 +79,8 @@ while [[ $# -gt 0 ]]; do
         --egress-net=*) EGRESS_NET="${1#*=}"; shift ;;
         --vnet-socket) VNET_SOCKET="$2"; shift 2 ;;
         --vnet-socket=*) VNET_SOCKET="${1#*=}"; shift ;;
+        --ssh-ca-pubkey) SSH_CA_PUBKEY="$2"; shift 2 ;;
+        --ssh-ca-pubkey=*) SSH_CA_PUBKEY="${1#*=}"; shift ;;
         --no-net) ADMIN_NET="none"; EGRESS_NET="none"; shift ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
@@ -210,6 +213,25 @@ fi
 
 copy_overlay_tree "$COMMON_OVERLAY_CONTENT" "$OVERLAY_SEED/upper"
 copy_overlay_tree "$GUEST_OVERLAY_CONTENT" "$OVERLAY_SEED/upper"
+
+# Inject SSH CA pubkey and per-guest principals for cert-based auth (v1.3+).
+# sshd_config references these paths via TrustedUserCAKeys and
+# AuthorizedPrincipalsFile directives baked into the guest image.
+if [ -n "$SSH_CA_PUBKEY" ]; then
+    mkdir -p "$OVERLAY_SEED/upper/etc/ssh/ca"
+    printf '%s\n' "$SSH_CA_PUBKEY" > "$OVERLAY_SEED/upper/etc/ssh/ca/user_ca.pub"
+    chmod 644 "$OVERLAY_SEED/upper/etc/ssh/ca/user_ca.pub"
+
+    # Each user that the CA can authenticate needs a principals file.
+    # The principal in the ephemeral cert must appear in this file.
+    mkdir -p "$OVERLAY_SEED/upper/etc/ssh/auth_principals"
+    printf '%s\n' "$SSH_USER" > "$OVERLAY_SEED/upper/etc/ssh/auth_principals/$SSH_USER"
+    printf '%s\n' "$SSH_USER" > "$OVERLAY_SEED/upper/etc/ssh/auth_principals/root"
+    chmod 644 "$OVERLAY_SEED/upper/etc/ssh/auth_principals/$SSH_USER"
+    chmod 644 "$OVERLAY_SEED/upper/etc/ssh/auth_principals/root"
+    echo "  SSH CA:    injected user_ca.pub + auth_principals/$SSH_USER"
+fi
+
 mkdir -p "$RUNTIME_DIR"
 rm -f "$RUNTIME_OVERLAY"
 truncate -s "$OVERLAY_SIZE" "$RUNTIME_OVERLAY"
