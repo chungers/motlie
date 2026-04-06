@@ -141,7 +141,8 @@ BASE_ARTIFACTS="$SCRIPT_DIR/artifacts/base"
 [ -n "$SSH_USER" ]        || SSH_USER="$GUEST_NAME"
 [ -n "$GUEST_HOSTNAME" ]  || GUEST_HOSTNAME="motlie-${GUEST_NAME}"
 [ -n "$LOGIN_HOME" ]      || LOGIN_HOME="/home/${GUEST_NAME}"
-[ -n "$MOUNT_CONFIG" ]    || MOUNT_CONFIG="$SCRIPT_DIR/mounts.${GUEST_NAME}.yaml"
+# MOUNT_CONFIG is only required when --cloud-init-dir is not set (manual mode).
+# When repl_host generates the launch script, mounts.yaml is in the cloud-init dir.
 [ -n "$VNET_SOCKET" ]     || VNET_SOCKET="/tmp/motlie-vmm-${GUEST_NAME}.sock"
 GUEST_OVERLAY_CONTENT="$SCRIPT_DIR/overlay.d/${GUEST_NAME}"
 
@@ -155,8 +156,12 @@ if [ ! -f "$BASE_ARTIFACTS/rootfs.squashfs" ]; then
     echo "Run ./build-guest.sh first."
     exit 1
 fi
-if [ ! -f "$MOUNT_CONFIG" ]; then
+if [ -z "$CLOUD_INIT_DIR" ] && [ -n "$MOUNT_CONFIG" ] && [ ! -f "$MOUNT_CONFIG" ]; then
     echo "ERROR: mount config not found at $MOUNT_CONFIG"
+    exit 1
+fi
+if [ -z "$CLOUD_INIT_DIR" ] && [ -z "$MOUNT_CONFIG" ]; then
+    echo "ERROR: either --cloud-init-dir or --mount-config is required"
     exit 1
 fi
 if ! command -v mkfs.ext4 >/dev/null 2>&1; then
