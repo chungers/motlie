@@ -529,10 +529,9 @@ async fn main() -> Result<()> {
 
     // Start SSH proxy server in the background.
     let proxy_config = SshProxyConfig::default();
-    let proxy_ca = Arc::clone(&ssh_ca);
     let proxy_registry = Arc::clone(&guest_registry);
     tokio::spawn(async move {
-        if let Err(e) = ssh::run_proxy(proxy_config, proxy_ca, proxy_registry).await {
+        if let Err(e) = ssh::run_proxy(proxy_config, proxy_registry).await {
             eprintln!("SSH proxy error: {e}");
         }
     });
@@ -976,6 +975,11 @@ fn guest_api_socket_path(guest_name: &str) -> PathBuf {
 
 fn guest_vnet_socket_path(guest_name: &str) -> PathBuf {
     PathBuf::from(format!("/tmp/motlie-vmm-{guest_name}.sock"))
+}
+
+/// CH vsock UDS path for a guest (matches launch-ch.sh VSOCK_SOCKET default).
+fn guest_vsock_path(guest_name: &str) -> String {
+    format!("/tmp/motlie-vmm-{guest_name}.vsock")
 }
 
 fn guest_egress_mac(_guest_name: &str) -> [u8; 6] {
@@ -1731,16 +1735,27 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
                         match execute_launch_script(guest_name, &script) {
                             Ok(exec) => {
                                 admin.launch_pids.insert(guest_name.to_string(), exec.pid);
-                                // Register guest for the SSH proxy.
-                                if let Some(alloc) = admin.net_allocs.get(guest_name) {
-                                    admin.guest_registry.lock().unwrap().insert(
-                                        guest_name.to_string(),
-                                        GuestEndpoint {
-                                            cid: alloc.cid,
-                                            admin_ip: Some(alloc.guest_ip),
-                                        },
-                                    );
-                                }
+                                // Spawn background task to accept the guest's vsock SSH bridge.
+                                // The guest's socat will connect after boot.
+                                let vsock_path = guest_vsock_path(guest_name);
+                                let bridge_ca = Arc::clone(&admin.ssh_ca);
+                                let bridge_reg = Arc::clone(&admin.guest_registry);
+                                let bridge_name = guest_name.to_string();
+                                admin.runtime.spawn(async move {
+                                    match ssh::accept_guest_ssh(&vsock_path, &bridge_ca, &bridge_name).await {
+                                        Ok(handle) => {
+                                            let handle = Arc::new(tokio::sync::Mutex::new(handle));
+                                            bridge_reg.lock().unwrap().insert(
+                                                bridge_name.clone(),
+                                                GuestEndpoint { ssh_handle: Some(handle) },
+                                            );
+                                            eprintln!("SSH bridge ready for guest '{bridge_name}'");
+                                        }
+                                        Err(e) => {
+                                            eprintln!("SSH bridge failed for guest '{bridge_name}': {e}");
+                                        }
+                                    }
+                                });
                                 emit_status(
                                     admin,
                                     format!(
@@ -1801,18 +1816,21 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
         "exec" if parts.len() >= 3 => {
             let guest_name = parts[1];
             let command = parts[2..].join(" ");
-            let cid = match admin.net_allocs.get(guest_name) {
-                Some(alloc) => alloc.cid,
+            let ssh_handle = {
+                let reg = admin.guest_registry.lock().unwrap();
+                reg.get(guest_name).and_then(|ep| ep.ssh_handle.clone())
+            };
+            let ssh_handle = match ssh_handle {
+                Some(h) => h,
                 None => {
-                    emit_status(admin, format!("error: guest '{guest_name}' has not been launched"));
+                    emit_status(admin, format!("error: SSH bridge not ready for guest '{guest_name}' (guest may still be booting)"));
                     return ControlFlow::Continue;
                 }
             };
-            emit_status(admin, format!("exec {guest_name} (vsock cid={cid}): {command}"));
-            match admin.runtime.block_on(ssh::exec_vsock(
-                &admin.ssh_ca,
+            emit_status(admin, format!("exec {guest_name}: {command}"));
+            match admin.runtime.block_on(ssh::exec_on_handle(
+                &ssh_handle,
                 guest_name,
-                cid,
                 &command,
             )) {
                 Ok(output) => {
@@ -1837,14 +1855,18 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
         }
         "validate" if parts.len() == 2 => {
             let guest_name = parts[1];
-            let cid = match admin.net_allocs.get(guest_name) {
-                Some(alloc) => alloc.cid,
+            let ssh_handle = {
+                let reg = admin.guest_registry.lock().unwrap();
+                reg.get(guest_name).and_then(|ep| ep.ssh_handle.clone())
+            };
+            let ssh_handle = match ssh_handle {
+                Some(h) => h,
                 None => {
-                    emit_status(admin, format!("error: guest '{guest_name}' has not been launched"));
+                    emit_status(admin, format!("error: SSH bridge not ready for guest '{guest_name}'"));
                     return ControlFlow::Continue;
                 }
             };
-            emit_status(admin, format!("=== validate {guest_name} (vsock cid={cid}) ==="));
+            emit_status(admin, format!("=== validate {guest_name} ==="));
             let checks: Vec<(&str, &str, Box<dyn Fn(&ssh::ExecOutput) -> bool>)> = vec![
                 ("vsock-ssh: uname", "uname -s",
                     Box::new(|out| out.exit_code == 0 && out.stdout.trim() == "Linux")),
@@ -1864,10 +1886,9 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
             let mut passed = 0;
             let mut failed = 0;
             for (label, cmd, check) in &checks {
-                match admin.runtime.block_on(ssh::exec_vsock(
-                    &admin.ssh_ca,
+                match admin.runtime.block_on(ssh::exec_on_handle(
+                    &ssh_handle,
                     guest_name,
-                    cid,
                     cmd,
                 )) {
                     Ok(output) => {
