@@ -420,7 +420,9 @@ impl russh::server::Handler for ProxyHandler {
         session.channel_success(channel).ok();
         async move {
             if let Some(ref ch) = *guest_write.lock().await {
-                ch.request_pty(true, &term, col_width, row_height, pix_width, pix_height, &modes)
+                // want_reply=false: don't wait for reply because the read
+                // half's forwarding task would consume it.
+                ch.request_pty(false, &term, col_width, row_height, pix_width, pix_height, &modes)
                     .await?;
             }
             Ok(())
@@ -436,7 +438,7 @@ impl russh::server::Handler for ProxyHandler {
         session.channel_success(channel).ok();
         async move {
             if let Some(ref ch) = *guest_write.lock().await {
-                ch.request_shell(true).await?;
+                ch.request_shell(false).await?;
             }
             Ok(())
         }
@@ -453,7 +455,7 @@ impl russh::server::Handler for ProxyHandler {
         session.channel_success(channel).ok();
         async move {
             if let Some(ref ch) = *guest_write.lock().await {
-                ch.exec(true, &data[..]).await?;
+                ch.exec(false, &data[..]).await?;
             }
             Ok(())
         }
