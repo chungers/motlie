@@ -134,11 +134,23 @@ Product requirement coverage:
 - [ ] T.8 Transparency to guest applications is implemented by phases `2.2`, `2.3`, and `4.2`, and verified with rename/unlink/editor-style workflows.
 - [ ] T.9 Frontend layering is preserved: `MemOverlay` is core, v1 proof-of-concept examples call it directly, v1.5 extends the embedded admin path, and embedders can host in-process admin loops directly on the Rust API.
 - [x] T.10 v1 VM guest delivery is proven on the vsock path, using Cloud Hypervisor as the fast integration harness before full VMM integration.
-  Historical `motlie-vfs` harness evidence lives under `v1` / `v1.1`; the
-  current `v1.2+` harness source of truth moved to `libs/vnet/examples/v1.2/`.
+  Evidence trail:
+  - `libs/vfs/examples/v1/README.md` and `libs/vfs/examples/v1/CH-HARNESS.md`
+    document the original single-guest vsock + CH flow
+  - `libs/vfs/examples/v1.1/README.md` and
+    `libs/vfs/examples/v1.1/CH-HARNESS.md` document the validated multi-guest
+    `repl_host_v1_1` vsock + CH workflow
+  The current `v1.2+` harness source of truth moved to
+  `libs/vnet/examples/v1.2/`.
 - [x] T.11 v1 operational setup is documented and testable: image build, CH launch, host server setup, and embedded admin mutation workflow.
-  Post-handoff networking flow and runbooks now live in `libs/vnet/docs/PLAN.md`
-  and `libs/vnet/examples/v1.2/README.md`.
+  Evidence trail:
+  - `libs/vfs/examples/v1/README.md` and `libs/vfs/examples/v1/CH-HARNESS.md`
+    cover image build, host startup, CH launch, and direct admin mutation
+  - `libs/vfs/examples/v1.1/README.md` and
+    `libs/vfs/examples/v1.1/CH-HARNESS.md` cover the multi-guest REPL-driven
+    `provision` / `mount` / `launch` workflow
+  Post-handoff networking runbooks now live in `libs/vnet/examples/v1.2/` and
+  `libs/vnet/docs/PLAN.md`.
 - [ ] T.12 Roadmap tooling choices are reflected in implementation planning: `rustyline` for v1, embedded console plus script/config ingestion for v1.5, and a diskless memfs-tree microservice direction for v2.
 - [ ] T.13 Forward-compatibility is preserved: v1 core implementation leaves room for future non-disk mount backing, and v1.5 console/script parity is explicitly tested.
 - [ ] T.14 Implementation guardrails are enforced: v1 code keeps mount/backing separate, isolates `std::fs` behind backing logic, models per-tag ordered stacks, and avoids raw `host_path` assumptions in overlay semantics.

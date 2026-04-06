@@ -46,6 +46,6 @@ cargo run -p motlie-vnet --example repl_host_v1_2 --features debug-trace -- \
 
 ## Related Docs
 
-- [DESIGN.md](/home/dchung/codex-vfs/motlie-vnet/libs/vnet/docs/DESIGN.md)
-- [PLAN.md](/home/dchung/codex-vfs/motlie-vnet/libs/vnet/docs/PLAN.md)
-- [examples/README.md](/home/dchung/codex-vfs/motlie-vnet/libs/vnet/examples/README.md)
+- [DESIGN.md](./docs/DESIGN.md)
+- [PLAN.md](./docs/PLAN.md)
+- [examples/README.md](./examples/README.md)
