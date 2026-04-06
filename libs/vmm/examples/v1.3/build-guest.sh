@@ -253,7 +253,7 @@ GUEST_BINARY_ABS="$(realpath "$GUEST_BINARY")"
 OVERLAY_INIT_ABS="$(realpath "$SCRIPT_DIR/overlay-init")"
 
 run_mmdebstrap "$BASE_ROOTFS" \
-    --include=openssh-server,bash,bubblewrap,ca-certificates,coreutils,curl,dnsutils,tmux,fuse3,libfuse3-3,systemd,systemd-sysv,dbus,iproute2,cloud-init,locales,sudo,python3,npm,strace,socat \
+    --include=openssh-server,bash,bubblewrap,ca-certificates,coreutils,curl,dnsutils,tmux,vim,fuse3,libfuse3-3,systemd,systemd-sysv,dbus,iproute2,cloud-init,locales,sudo,python3,npm,strace,socat \
     --customize-hook='chroot "$1" systemctl enable ssh' \
     --customize-hook='chroot "$1" systemctl enable systemd-networkd' \
     --customize-hook='chroot "$1" systemctl disable systemd-networkd-wait-online.service' \
@@ -516,9 +516,18 @@ FSTABEOF' \
     --customize-hook='chroot "$1" apt-get clean' \
     --customize-hook='rm -rf "$1/var/lib/apt/lists"/*'
 
-echo "Shared squashfs image: $BASE_ROOTFS ($(du -h "$BASE_ROOTFS" | cut -f1))"
+KERNEL_SIZE="$(du -h "$BASE_KERNEL" | cut -f1)"
+ROOTFS_SIZE="$(du -h "$BASE_ROOTFS" | cut -f1)"
+COMBINED_SIZE="$(du -ch "$BASE_KERNEL" "$BASE_ROOTFS" | tail -1 | cut -f1)"
+
+echo "Shared squashfs image: $BASE_ROOTFS ($ROOTFS_SIZE)"
 echo ""
 echo "=== Build complete ==="
 ls -lh "$BASE_ARTIFACTS/"
+echo ""
+echo "Size summary:"
+echo "  kernel:   $KERNEL_SIZE  ($BASE_KERNEL)"
+echo "  rootfs:   $ROOTFS_SIZE  ($BASE_ROOTFS)"
+echo "  combined: $COMBINED_SIZE  (kernel + squashfs)"
 echo ""
 echo "Next: ./launch-ch.sh --guest alice --admin-net=tap --egress-net=tap"
