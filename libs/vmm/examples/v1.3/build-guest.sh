@@ -302,11 +302,19 @@ esac
 [ -z "${TMUX:-}" ] || return 0
 [ -t 0 ] && [ -t 1 ] || return 0
 command -v tmux >/dev/null 2>&1 || return 0
+case "${TERM:-}" in
+    ""|dumb|unknown) return 0 ;;
+esac
+command -v infocmp >/dev/null 2>&1 || return 0
+infocmp "$TERM" >/dev/null 2>&1 || return 0
+command -v tput >/dev/null 2>&1 || return 0
+tput clear >/dev/null 2>&1 || return 0
 
 if tmux has-session -t "$USER" 2>/dev/null; then
     echo "Attaching to existing tmux session..."
     sleep 1
-    exec tmux attach-session -t "$USER"
+    tmux attach-session -t "$USER" || echo "tmux attach failed; continuing without tmux"
+    return 0
 fi
 
 printf "Start tmux session? [Y/n] (auto-yes in 3s) "
@@ -319,7 +327,7 @@ fi
 
 case "$answer" in
     n|N) ;;
-    *) exec tmux new-session -s "$USER" ;;
+    *) tmux new-session -s "$USER" || echo "tmux start failed; continuing without tmux" ;;
 esac
 TMUXEOF' \
     --customize-hook='cat > "$1/etc/profile.d/agent-state.sh" << "AGENTEOF"
