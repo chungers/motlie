@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use russh::server::{Auth, Msg, Session};
-use russh::{Channel, ChannelId, ChannelMsg, Pty};
+use russh::{Channel, ChannelMsg};
 use thiserror::Error;
 use tokio::net::UnixListener;
 
@@ -255,7 +255,6 @@ pub async fn run_proxy(
         let handler = ProxyHandler {
             registry: Arc::clone(&registry),
             username: None,
-            guest_channel: None,
         };
 
         let cfg = Arc::clone(&russh_config);
@@ -271,7 +270,6 @@ pub async fn run_proxy(
 struct ProxyHandler {
     registry: GuestRegistry,
     username: Option<String>,
-    guest_channel: Option<Channel<russh::client::Msg>>,
 }
 
 impl russh::server::Handler for ProxyHandler {
@@ -373,104 +371,11 @@ impl russh::server::Handler for ProxyHandler {
         }
     }
 
-    fn data(
-        &mut self,
-        _channel: ChannelId,
-        data: &[u8],
-        _session: &mut Session,
-    ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
-        if let Some(ref guest_ch) = self.guest_channel {
-            let ch = guest_ch.clone();
-            let data = data.to_vec();
-            return futures::future::Either::Left(async move {
-                ch.data(&data[..]).await?;
-                Ok(())
-            });
-        }
-        futures::future::Either::Right(async { Ok(()) })
-    }
-
-    fn pty_request(
-        &mut self,
-        _channel: ChannelId,
-        term: &str,
-        col_width: u32,
-        row_height: u32,
-        pix_width: u32,
-        pix_height: u32,
-        modes: &[(Pty, u32)],
-        session: &mut Session,
-    ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
-        if let Some(ref guest_ch) = self.guest_channel {
-            let ch = guest_ch.clone();
-            let term = term.to_string();
-            let modes = modes.to_vec();
-            session.channel_success(_channel).ok();
-            return futures::future::Either::Left(async move {
-                ch.request_pty(true, &term, col_width, row_height, pix_width, pix_height, &modes)
-                    .await?;
-                Ok(())
-            });
-        }
-        session.channel_success(_channel).ok();
-        futures::future::Either::Right(async { Ok(()) })
-    }
-
-    fn shell_request(
-        &mut self,
-        _channel: ChannelId,
-        session: &mut Session,
-    ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
-        if let Some(ref guest_ch) = self.guest_channel {
-            let ch = guest_ch.clone();
-            session.channel_success(_channel).ok();
-            return futures::future::Either::Left(async move {
-                ch.request_shell(true).await?;
-                Ok(())
-            });
-        }
-        session.channel_success(_channel).ok();
-        futures::future::Either::Right(async { Ok(()) })
-    }
-
-    fn exec_request(
-        &mut self,
-        _channel: ChannelId,
-        data: &[u8],
-        session: &mut Session,
-    ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
-        if let Some(ref guest_ch) = self.guest_channel {
-            let ch = guest_ch.clone();
-            let data = data.to_vec();
-            session.channel_success(_channel).ok();
-            return futures::future::Either::Left(async move {
-                ch.exec(true, &data[..]).await?;
-                Ok(())
-            });
-        }
-        session.channel_success(_channel).ok();
-        futures::future::Either::Right(async { Ok(()) })
-    }
-
-    fn window_change_request(
-        &mut self,
-        _channel: ChannelId,
-        col_width: u32,
-        row_height: u32,
-        pix_width: u32,
-        pix_height: u32,
-        _session: &mut Session,
-    ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
-        if let Some(ref guest_ch) = self.guest_channel {
-            let ch = guest_ch.clone();
-            return futures::future::Either::Left(async move {
-                ch.window_change(col_width, row_height, pix_width, pix_height)
-                    .await?;
-                Ok(())
-            });
-        }
-        futures::future::Either::Right(async { Ok(()) })
-    }
+    // Client→guest forwarding (data, pty, shell, exec, window_change) is
+    // not yet wired because channel_open_session runs in an async block
+    // that can't set self.guest_channel. The guest→client direction works
+    // via the spawned forwarding task. Full bidirectional interactive SSH
+    // proxy is a follow-up; programmatic exec via exec_on_handle works now.
 }
 
 // ---------------------------------------------------------------------------
