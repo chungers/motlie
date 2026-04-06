@@ -2,7 +2,7 @@
 //!
 //! Uses russh's re-exported ssh_key types to avoid version mismatches.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use russh::keys::ssh_key::certificate::{Builder, CertType};
 use russh::keys::{Algorithm, Certificate, PrivateKey, PublicKey};
@@ -57,13 +57,12 @@ impl SshCa {
     }
 
     pub fn sign_ephemeral(&self, guest_name: &str) -> Result<EphemeralCert, CaError> {
-        let ephemeral_key =
-            PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
-                .map_err(|e| CaError::KeyGeneration(e.to_string()))?;
+        let ephemeral_key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
+            .map_err(|e| CaError::KeyGeneration(e.to_string()))?;
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| CaError::CertSigning(format!("system clock error: {e}")))?
             .as_secs();
 
         let mut builder = Builder::new_with_random_nonce(
@@ -119,9 +118,17 @@ mod tests {
         let ca = SshCa::new().unwrap();
         let eph = ca.sign_ephemeral("alice").unwrap();
         assert_eq!(eph.cert.cert_type(), CertType::User);
-        let principals: Vec<&str> = eph.cert.valid_principals().iter().map(|s| s.as_str()).collect();
+        let principals: Vec<&str> = eph
+            .cert
+            .valid_principals()
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
         assert!(principals.contains(&"alice"));
-        assert_eq!(eph.cert.extensions().get("permit-pty").map(|s| s.as_str()), Some(""));
+        assert_eq!(
+            eph.cert.extensions().get("permit-pty").map(|s| s.as_str()),
+            Some("")
+        );
     }
 
     #[test]
