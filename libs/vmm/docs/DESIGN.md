@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-05 | @claude-vmm | SSH proxy transport: vsock (AF_VSOCK) replaces TAP for ingress, completing fully-userspace stack; update NFR-1, FR-6, data flow |
 | 2026-04-04 | @claude-vmm | Fold SSH proxy as programmatic guest control plane into DESIGN; add FR/NFR sections; update status to reflect v1.2 validation; resolve open questions |
 | 2026-04-03 | @codex | Initial DESIGN for `libs/vmm`: capture the post-`v1.2` extraction target for reusable VM orchestration code |
 
@@ -397,7 +398,7 @@ execution inside guests. The data flow:
  User / test harness
         │
         ▼
- russh server (127.0.0.1:2222)
+ russh server (127.0.0.1:2222, TCP)
         │ extract username → guest identity
         ▼
  orchestrator.ensure_vm(guest)
@@ -406,7 +407,13 @@ execution inside guests. The data flow:
  ca.sign_ephemeral(guest)
         │ Ed25519, principal=guest, TTL=60s
         ▼
- russh::client::connect(vm_ip:22, cert)
+ VsockStream::connect(cid, 2222)         ← AF_VSOCK, not TCP/TAP
+        │ host kernel routes via vhost-vsock
+        ▼
+ guest socat (vsock:2222 → TCP:localhost:22)
+        │
+        ▼
+ russh::client::connect_stream(vsock_stream, cert)
         │ guest sshd validates CA + principal
         ▼
  channel bridge (interactive)    ─or─    channel exec (programmatic)
@@ -414,13 +421,25 @@ execution inside guests. The data flow:
    data ↔ data bidirectional                stdout, stderr, exit_code
 ```
 
+**Transport: vsock, not TAP.** The proxy reaches guest sshd over
+AF_VSOCK — a direct host↔guest memory channel — rather than TCP over
+a TAP NIC. The guest runs a `socat` systemd service that bridges vsock
+port 2222 to TCP `localhost:22` (stock openssh-server). This choice:
+
+- **Eliminates TAP and `CAP_NET_ADMIN`** for ingress entirely
+- **Isolates ingress from egress** — if libslirp/vnet has issues, SSH
+  still works (critical for debugging)
+- **Reuses existing infrastructure** — vsock is already configured per
+  guest for VFS mounts (`/dev/vhost-vsock` + CID)
+- **Aligns with the product architecture** (`docs/motlie-vmm.md` §10)
+
 For interactive sessions, the proxy bridges PTY, data, and
 window-change events bidirectionally. For programmatic exec, it opens
 a non-PTY channel, sends the command, and collects output — this is the
 primitive that FR-7 requires for automated validation.
 
 The SSH proxy is the component that **eliminates TAP** from the ingress
-path. Once it lands, the only kernel interfaces the full stack requires
+path. The only kernel interfaces the full stack requires
 are `/dev/kvm` and `/dev/vhost-vsock` — both accessible via `kvm` group
 membership, no capabilities or root needed.
 
@@ -535,7 +554,7 @@ orch.shutdown(&handle).await?;
 //   1. Extracts "alice" as guest identity
 //   2. Calls orchestrator.ensure_vm("alice") — boots if needed
 //   3. Signs ephemeral cert (Ed25519, principal="alice", 60s TTL)
-//   4. Opens russh::client to guest sshd at vm_ip:22
+//   4. Opens russh::client to guest sshd over vsock (cid:2222)
 //   5. Bridges PTY, data, window-change bidirectionally
 //
 // The user lands in a shell inside the guest VM.

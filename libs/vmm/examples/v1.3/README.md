@@ -2,7 +2,7 @@
 
 `v1.3` builds on the validated `v1.2` split-network flow and adds:
 
-- **SSH proxy** (russh) for host-side ingress via CA-signed ephemeral certs
+- **SSH proxy** (russh) for host-side ingress via CA-signed ephemeral certs **over vsock** — no TAP, fully userspace
 - **Programmatic guest exec** (`exec <guest> <command>`) — run commands
   inside guests without human intervention
 - **Automated validation** (`validate <guest>`) — v1.2 runbook as assertions
@@ -44,21 +44,22 @@
  └─────────┼──────────────────┼─────────────────────┼──────────────┘
            │                  │                     │
            │           ┌──────┴──────────────────────┘
-           │           │  ssh::exec()
+           │           │  ssh::exec_vsock()
            │           │  ├─ ca.sign_ephemeral("alice")
-           │           │  ├─ russh::client::connect(192.168.249.2:22)
+           │           │  ├─ VsockStream::connect(cid=3, port=2222)
+           │           │  ├─ russh::client::connect_stream(vsock)
            │           │  ├─ authenticate_publickey(ephemeral_cert)
            │           │  ├─ channel.exec("uname -a")
            │           │  └─ collect stdout/stderr/exit_code
            │           │
-           ▼           ▼
-   ┌─────────────┐  ┌─────────────────────┐
-   │ launch-ch.sh│  │  Guest VM (KVM/CH)  │
-   │ (overlay +  │  │  ├─ sshd (CA trust) │
-   │  CH launch) │  │  ├─ eth0: TAP admin │
-   └──────┬──────┘  │  ├─ eth1: vnet egress│
-          │         │  └─ VFS mounts       │
-          ▼         └─────────────────────┘
+           ▼           ▼ (vsock, AF_VSOCK)
+   ┌─────────────┐  ┌──────────────────────────┐
+   │ launch-ch.sh│  │  Guest VM (KVM/CH)        │
+   │ (overlay +  │  │  ├─ socat vsock:2222→:22  │
+   │  CH launch) │  │  ├─ sshd (CA trust)       │
+   └──────┬──────┘  │  ├─ eth0: vnet egress     │
+          │         │  └─ VFS mounts (vsock)     │
+          ▼         └──────────────────────────┘
    cloud-hypervisor
 ```
 
@@ -377,6 +378,35 @@ seed/upper/
   └── overlay.d/{common,<guest>}/ ◄── static overlay tree
 ```
 
+## SSH Transport: vsock (Fully Userspace)
+
+The SSH proxy reaches guest sshd over **AF_VSOCK** — not TCP over a
+TAP NIC. This eliminates TAP and `CAP_NET_ADMIN` entirely.
+
+```
+Host process                 Kernel                  Guest VM
+─────────────                ──────                  ────────
+VsockStream::connect ──► vhost-vsock ──► /dev/vsock
+  (cid=3, port=2222)       routes by CID     socat VSOCK-LISTEN:2222
+                                                  │
+                                              TCP localhost:22
+                                                  │
+                                               sshd (CA trust)
+```
+
+**Why vsock over libslirp hostfwd:**
+
+| | vsock | hostfwd (libslirp) |
+|---|---|---|
+| Fault isolation | Independent of egress | Shared with egress |
+| If egress breaks | SSH still works | SSH also breaks |
+| Performance | Direct memory path | TCP through slirp stack |
+| Guest changes | socat bridge service | None |
+| Product alignment | Matches motlie-vmm.md | Not the target arch |
+
+The guest runs `socat VSOCK-LISTEN:2222,reuseaddr,fork TCP:127.0.0.1:22`
+as the `motlie-vmm-vsock-ssh` systemd service, baked into the image.
+
 ## SSH Auth Model
 
 ```
@@ -384,7 +414,7 @@ Inbound (user/exec → repl_host):
   Localhost trust. russh binds 127.0.0.1 only.
   Username = guest identity. No key verification.
 
-Outbound (repl_host → guest sshd):
+Outbound (repl_host → guest sshd, over vsock):
   CA-based ephemeral certs.
   ┌─────────────────────────────────────────┐
   │ SshCa (in-memory, per REPL session)     │
@@ -477,8 +507,8 @@ shutdown alice
 
 ## Known Gaps
 
-- The SSH proxy currently layers on the TAP admin path. Eliminating TAP
-  entirely (via libslirp hostfwd or vsock) is a follow-up.
+- The SSH proxy uses vsock (AF_VSOCK) for the host→guest path. This
+  depends on the `vhost_vsock` kernel module being loaded.
 - `render_cloud_init()` is minimal (`#cloud-config\n`). User account
   creation and package installation are baked into the image.
 - `/agent-state` persistence is scoped to the REPL session lifetime.

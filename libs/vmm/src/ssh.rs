@@ -5,10 +5,16 @@
 //! The SSH proxy serves two roles:
 //!
 //! 1. **User-facing ingress** — russh server on localhost, bridges SSH
-//!    channels to guest sshd via CA-signed ephemeral certs.
+//!    channels to guest sshd via CA-signed ephemeral certs over vsock.
 //! 2. **Programmatic exec** — opens non-PTY SSH channels to execute
 //!    commands inside guests and capture output, enabling automated
 //!    validation without human intervention.
+//!
+//! ## Transport
+//!
+//! The proxy reaches guest sshd over vsock (AF_VSOCK), not TCP/TAP.
+//! The guest runs a socat bridge: vsock port 2222 → TCP localhost:22.
+//! This eliminates the TAP NIC and CAP_NET_ADMIN requirement for ingress.
 //!
 //! ## Auth model
 //!
@@ -23,14 +29,18 @@ use russh::server::{Auth, Msg, Session};
 use russh::{Channel, ChannelId, ChannelMsg, Pty};
 use russh_keys::key::PrivateKeyWithHashAlg;
 use thiserror::Error;
+use tokio_vsock::VsockStream;
 use tracing;
 
 use crate::ca::{CaError, SshCa};
 
+/// vsock port where the guest's socat bridge listens (vsock:2222 → TCP:localhost:22).
+pub const GUEST_VSOCK_SSH_PORT: u32 = 2222;
+
 #[derive(Debug, Error)]
 pub enum SshProxyError {
-    #[error("failed to connect to guest sshd at {addr}: {reason}")]
-    GuestConnection { addr: SocketAddr, reason: String },
+    #[error("failed to connect to guest sshd via vsock cid={cid} port={port}: {reason}")]
+    GuestConnection { cid: u32, port: u32, reason: String },
     #[error("exec failed on guest {guest}: {reason}")]
     ExecFailed { guest: String, reason: String },
     #[error("CA error: {0}")]
@@ -56,15 +66,15 @@ pub struct ExecOutput {
 pub struct SshProxyConfig {
     /// Address to listen on (default: 127.0.0.1:2222).
     pub listen: SocketAddr,
-    /// Port on guest VMs where sshd listens (default: 22).
-    pub guest_ssh_port: u16,
+    /// vsock port on guest where the socat bridge listens (default: 2222).
+    pub guest_vsock_ssh_port: u32,
 }
 
 impl Default for SshProxyConfig {
     fn default() -> Self {
         Self {
             listen: SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::LOCALHOST), 2222),
-            guest_ssh_port: 22,
+            guest_vsock_ssh_port: GUEST_VSOCK_SSH_PORT,
         }
     }
 }
@@ -73,10 +83,18 @@ impl Default for SshProxyConfig {
 // Shared guest registry — the REPL updates this, the SSH proxy reads it
 // ---------------------------------------------------------------------------
 
-/// Shared registry of launched guests and their admin IPs.
+/// Per-guest connection info needed by the SSH proxy.
+#[derive(Clone, Debug)]
+pub struct GuestEndpoint {
+    pub cid: u32,
+    /// Admin TAP IP (kept for backward compat with `exec` REPL command).
+    pub admin_ip: Option<Ipv4Addr>,
+}
+
+/// Shared registry of launched guests.
 /// Updated by the REPL when guests are launched/shut down.
-/// Read by the SSH proxy to resolve guest names to IPs.
-pub type GuestRegistry = Arc<Mutex<HashMap<String, Ipv4Addr>>>;
+/// Read by the SSH proxy to resolve guest names.
+pub type GuestRegistry = Arc<Mutex<HashMap<String, GuestEndpoint>>>;
 
 /// Create a new empty guest registry.
 pub fn new_guest_registry() -> GuestRegistry {
@@ -84,30 +102,34 @@ pub fn new_guest_registry() -> GuestRegistry {
 }
 
 // ---------------------------------------------------------------------------
-// FR-7: Programmatic exec (client-side only)
+// Connect to guest sshd via vsock
 // ---------------------------------------------------------------------------
 
-/// Execute a command inside a guest VM via SSH exec channel.
-///
-/// Opens a connection to the guest's sshd using an ephemeral CA-signed
-/// cert, runs the command on a non-PTY channel, and captures output.
-pub async fn exec(
+/// Connect to a guest's sshd over vsock and authenticate with an ephemeral cert.
+/// Returns a russh client handle ready for channel operations.
+async fn connect_guest_vsock(
     ca: &SshCa,
     guest_name: &str,
-    guest_ip: Ipv4Addr,
-    guest_ssh_port: u16,
-    command: &str,
-) -> Result<ExecOutput, SshProxyError> {
+    cid: u32,
+    vsock_ssh_port: u32,
+) -> Result<russh::client::Handle<GuestClientHandler>, SshProxyError> {
     let eph = ca.sign_ephemeral(guest_name)?;
 
-    let config = russh::client::Config::default();
-    let addr = SocketAddr::new(std::net::IpAddr::V4(guest_ip), guest_ssh_port);
-
-    let sh = GuestClientHandler;
-    let mut handle = russh::client::connect(Arc::new(config), addr, sh)
+    let vsock_addr = tokio_vsock::VsockAddr::new(cid, vsock_ssh_port);
+    let stream = VsockStream::connect(vsock_addr)
         .await
         .map_err(|e| SshProxyError::GuestConnection {
-            addr,
+            cid,
+            port: vsock_ssh_port,
+            reason: e.to_string(),
+        })?;
+
+    let config = Arc::new(russh::client::Config::default());
+    let mut handle = russh::client::connect_stream(config, stream, GuestClientHandler)
+        .await
+        .map_err(|e| SshProxyError::GuestConnection {
+            cid,
+            port: vsock_ssh_port,
             reason: e.to_string(),
         })?;
 
@@ -121,10 +143,30 @@ pub async fn exec(
 
     if !authed {
         return Err(SshProxyError::GuestConnection {
-            addr,
+            cid,
+            port: vsock_ssh_port,
             reason: "authentication rejected by guest sshd".into(),
         });
     }
+
+    Ok(handle)
+}
+
+// ---------------------------------------------------------------------------
+// FR-7: Programmatic exec
+// ---------------------------------------------------------------------------
+
+/// Execute a command inside a guest VM via SSH over vsock.
+///
+/// Connects to the guest's socat vsock bridge → sshd, runs the command
+/// on a non-PTY channel, and captures output.
+pub async fn exec_vsock(
+    ca: &SshCa,
+    guest_name: &str,
+    cid: u32,
+    command: &str,
+) -> Result<ExecOutput, SshProxyError> {
+    let handle = connect_guest_vsock(ca, guest_name, cid, GUEST_VSOCK_SSH_PORT).await?;
 
     let mut channel = handle
         .channel_open_session()
@@ -167,19 +209,88 @@ pub async fn exec(
     })
 }
 
+/// Execute a command inside a guest VM via SSH over TCP (legacy TAP path).
+/// Kept for backward compat during the transition; prefer exec_vsock.
+pub async fn exec(
+    ca: &SshCa,
+    guest_name: &str,
+    guest_ip: Ipv4Addr,
+    guest_ssh_port: u16,
+    command: &str,
+) -> Result<ExecOutput, SshProxyError> {
+    let eph = ca.sign_ephemeral(guest_name)?;
+    let config = Arc::new(russh::client::Config::default());
+    let addr = SocketAddr::new(std::net::IpAddr::V4(guest_ip), guest_ssh_port);
+
+    let mut handle = russh::client::connect(config, addr, GuestClientHandler)
+        .await
+        .map_err(|e| SshProxyError::GuestConnection {
+            cid: 0,
+            port: guest_ssh_port as u32,
+            reason: e.to_string(),
+        })?;
+
+    let key_with_alg = PrivateKeyWithHashAlg::new(Arc::new(eph.key), None)
+        .map_err(|e| SshProxyError::Ssh(e.to_string()))?;
+
+    let authed = handle
+        .authenticate_publickey(guest_name, key_with_alg)
+        .await
+        .map_err(|e| SshProxyError::Ssh(e.to_string()))?;
+
+    if !authed {
+        return Err(SshProxyError::GuestConnection {
+            cid: 0,
+            port: guest_ssh_port as u32,
+            reason: "authentication rejected by guest sshd".into(),
+        });
+    }
+
+    let mut channel = handle
+        .channel_open_session()
+        .await
+        .map_err(|e| SshProxyError::Ssh(e.to_string()))?;
+
+    channel
+        .exec(true, command)
+        .await
+        .map_err(|e| SshProxyError::ExecFailed {
+            guest: guest_name.into(),
+            reason: e.to_string(),
+        })?;
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut exit_code: Option<u32> = None;
+
+    while let Some(msg) = channel.wait().await {
+        match msg {
+            ChannelMsg::Data { ref data } => stdout.extend_from_slice(data),
+            ChannelMsg::ExtendedData { ref data, ext } if ext == 1 => stderr.extend_from_slice(data),
+            ChannelMsg::ExitStatus { exit_status } => exit_code = Some(exit_status),
+            _ => {}
+        }
+    }
+
+    Ok(ExecOutput {
+        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        exit_code: exit_code.unwrap_or(255),
+    })
+}
+
 // ---------------------------------------------------------------------------
-// FR-6: SSH proxy server (listen + bridge)
+// FR-6: SSH proxy server (listen + bridge over vsock)
 // ---------------------------------------------------------------------------
 
 /// Start the SSH proxy server.
 ///
-/// Listens on `config.listen` and for each incoming connection:
+/// Listens on `config.listen` (TCP, localhost) and for each incoming connection:
 /// 1. Extracts the username as guest identity
-/// 2. Looks up the guest IP from the registry
-/// 3. Signs an ephemeral cert and connects to guest sshd
-/// 4. Bridges all channels bidirectionally
-///
-/// This function runs until the listener is dropped or an error occurs.
+/// 2. Looks up the guest CID from the registry
+/// 3. Connects to guest sshd over vsock (AF_VSOCK)
+/// 4. Signs an ephemeral cert and authenticates
+/// 5. Bridges all channels bidirectionally
 pub async fn run_proxy(
     config: SshProxyConfig,
     ca: Arc<SshCa>,
@@ -219,7 +330,7 @@ pub async fn run_proxy(
         let handler = ProxyHandler {
             ca: Arc::clone(&ca),
             registry: Arc::clone(&registry),
-            guest_ssh_port: config.guest_ssh_port,
+            guest_vsock_ssh_port: config.guest_vsock_ssh_port,
             username: None,
             guest_channel: None,
         };
@@ -239,15 +350,11 @@ pub async fn run_proxy(
 }
 
 /// Server-side handler for one SSH proxy connection.
-///
-/// Implements russh::server::Handler. On channel open, connects to the
-/// guest sshd and bridges all traffic bidirectionally.
 struct ProxyHandler {
     ca: Arc<SshCa>,
     registry: GuestRegistry,
-    guest_ssh_port: u16,
+    guest_vsock_ssh_port: u32,
     username: Option<String>,
-    /// The client-side channel to the guest sshd, set after channel_open_session.
     guest_channel: Option<Channel<russh::client::Msg>>,
 }
 
@@ -284,108 +391,91 @@ impl russh::server::Handler for ProxyHandler {
             }
         };
 
-        // Look up guest IP from the shared registry.
-        let guest_ip = {
+        // Look up guest CID from the shared registry.
+        let endpoint = {
             let reg = self.registry.lock().unwrap();
-            reg.get(&username).copied()
+            reg.get(&username).cloned()
         };
-        let guest_ip = match guest_ip {
-            Some(ip) => ip,
+        let endpoint = match endpoint {
+            Some(ep) => ep,
             None => {
                 tracing::warn!("SSH proxy: unknown or unlaunched guest '{username}'");
-                // Send an error message to the client before rejecting.
-                let msg = format!("Guest '{username}' is not launched. Use the REPL to `launch {username}` first.\r\n");
+                let msg = format!(
+                    "Guest '{username}' is not launched. Use the REPL to `launch {username}` first.\r\n"
+                );
                 let _ = channel.data(msg.as_bytes()).await;
                 let _ = channel.close().await;
                 return Ok(false);
             }
         };
 
-        tracing::info!("SSH proxy: connecting to guest '{username}' at {guest_ip}:{}", self.guest_ssh_port);
+        tracing::info!(
+            "SSH proxy: connecting to guest '{username}' via vsock cid={} port={}",
+            endpoint.cid,
+            self.guest_vsock_ssh_port
+        );
 
-        // Sign ephemeral cert and connect to guest sshd.
-        let eph = self.ca.sign_ephemeral(&username)?;
-        let client_config = Arc::new(russh::client::Config::default());
-        let addr = SocketAddr::new(std::net::IpAddr::V4(guest_ip), self.guest_ssh_port);
+        // Connect to guest sshd over vsock.
+        let client_handle = match connect_guest_vsock(
+            &self.ca,
+            &username,
+            endpoint.cid,
+            self.guest_vsock_ssh_port,
+        )
+        .await
+        {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!("SSH proxy: failed to connect to guest '{username}': {e}");
+                let msg = format!("Failed to connect to guest '{username}': {e}\r\n");
+                let _ = channel.data(msg.as_bytes()).await;
+                let _ = channel.close().await;
+                return Ok(false);
+            }
+        };
 
-        let mut client_handle =
-            russh::client::connect(client_config, addr, GuestClientHandler).await?;
-
-        let key_with_alg = PrivateKeyWithHashAlg::new(Arc::new(eph.key), None)
-            .map_err(|e| anyhow::anyhow!("key error: {e}"))?;
-
-        let authed = client_handle
-            .authenticate_publickey(&username, key_with_alg)
-            .await?;
-
-        if !authed {
-            tracing::warn!("SSH proxy: guest sshd rejected auth for '{username}'");
-            let msg = format!("Guest sshd rejected CA-based auth for '{username}'.\r\n");
-            let _ = channel.data(msg.as_bytes()).await;
-            let _ = channel.close().await;
-            return Ok(false);
-        }
-
-        let guest_ch = client_handle.channel_open_session().await?;
+        let mut guest_ch = client_handle.channel_open_session().await?;
         tracing::info!("SSH proxy: session bridged for '{username}'");
 
-        self.guest_channel = Some(guest_ch);
-
-        // Spawn a task to forward guest→client data.
-        // We clone the server-side channel to send data back.
+        // Spawn guest→client forwarding task (reads from guest, writes to client).
         let server_channel = channel;
-        if let Some(mut guest_ch_reader) = self.guest_channel.take() {
-            // We need the guest channel for both reading (background task) and
-            // writing (handler methods). Clone the writable half for the handler.
-            // Unfortunately russh Channel doesn't impl Clone, so we split the
-            // read loop into the background task and keep a reference for writes
-            // via the client_handle.
-            //
-            // Approach: the background task owns the guest channel for reading.
-            // Handler methods (data, pty_request, etc.) use client_handle to
-            // open new operations. But that doesn't work for forwarding data.
-            //
-            // The practical approach for v1.3: spawn a background task that
-            // reads from guest and writes to server_channel. The handler
-            // forwards client→guest via storing the client_handle.
-            let guest_channel_for_handler = client_handle.channel_open_session().await?;
-            self.guest_channel = Some(guest_channel_for_handler);
-
-            tokio::spawn(async move {
-                while let Some(msg) = guest_ch_reader.wait().await {
-                    match msg {
-                        ChannelMsg::Data { ref data } => {
-                            if server_channel.data(data.as_ref()).await.is_err() {
+        tokio::spawn(async move {
+            while let Some(msg) = guest_ch.wait().await {
+                match msg {
+                    ChannelMsg::Data { ref data } => {
+                        if server_channel.data(data.as_ref()).await.is_err() {
+                            break;
+                        }
+                    }
+                    ChannelMsg::ExtendedData { ref data, ext } => {
+                        if ext == 1 {
+                            if server_channel.extended_data(1, data.as_ref()).await.is_err() {
                                 break;
                             }
                         }
-                        ChannelMsg::ExtendedData { ref data, ext } => {
-                            if ext == 1 {
-                                if server_channel.extended_data(1, data.as_ref()).await.is_err() {
-                                    break;
-                                }
-                            }
-                        }
-                        ChannelMsg::ExitStatus { exit_status } => {
-                            // Can't easily forward exit status through the server channel
-                            // in the same way. The session handler would need to call
-                            // session.exit_status_request(). We'll handle this via EOF.
-                            tracing::debug!("SSH proxy: guest exit_status={exit_status}");
-                        }
-                        ChannelMsg::Eof => {
-                            let _ = server_channel.eof().await;
-                            break;
-                        }
-                        ChannelMsg::Close => {
-                            let _ = server_channel.close().await;
-                            break;
-                        }
-                        _ => {}
                     }
+                    ChannelMsg::ExitStatus { exit_status } => {
+                        tracing::debug!("SSH proxy: guest exit_status={exit_status}");
+                    }
+                    ChannelMsg::Eof => {
+                        let _ = server_channel.eof().await;
+                        break;
+                    }
+                    ChannelMsg::Close => {
+                        let _ = server_channel.close().await;
+                        break;
+                    }
+                    _ => {}
                 }
-                tracing::debug!("SSH proxy: guest→client forward loop ended");
-            });
-        }
+            }
+            tracing::debug!("SSH proxy: guest→client forward loop ended");
+        });
+
+        // For client→guest forwarding, we need a channel to write to.
+        // Open a second session channel on the same client connection for
+        // handler methods to use.
+        let write_ch = client_handle.channel_open_session().await?;
+        self.guest_channel = Some(write_ch);
 
         Ok(true)
     }
@@ -396,7 +486,6 @@ impl russh::server::Handler for ProxyHandler {
         data: &[u8],
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        // Forward client→guest data.
         if let Some(ref guest_ch) = self.guest_channel {
             guest_ch.data(data).await?;
         }
@@ -470,8 +559,6 @@ impl russh::server::Handler for ProxyHandler {
 // Client-side handler for guest connections (shared by exec + proxy)
 // ---------------------------------------------------------------------------
 
-/// Minimal russh client handler for guest connections.
-/// Accepts the guest's host key unconditionally.
 struct GuestClientHandler;
 
 #[async_trait::async_trait]

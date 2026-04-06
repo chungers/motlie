@@ -253,7 +253,7 @@ GUEST_BINARY_ABS="$(realpath "$GUEST_BINARY")"
 OVERLAY_INIT_ABS="$(realpath "$SCRIPT_DIR/overlay-init")"
 
 run_mmdebstrap "$BASE_ROOTFS" \
-    --include=openssh-server,bash,bubblewrap,ca-certificates,coreutils,curl,dnsutils,tmux,fuse3,libfuse3-3,systemd,systemd-sysv,dbus,iproute2,cloud-init,locales,sudo,python3,npm,strace \
+    --include=openssh-server,bash,bubblewrap,ca-certificates,coreutils,curl,dnsutils,tmux,fuse3,libfuse3-3,systemd,systemd-sysv,dbus,iproute2,cloud-init,locales,sudo,python3,npm,strace,socat \
     --customize-hook='chroot "$1" systemctl enable ssh' \
     --customize-hook='chroot "$1" systemctl enable systemd-networkd' \
     --customize-hook='chroot "$1" systemctl disable systemd-networkd-wait-online.service' \
@@ -432,6 +432,22 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 EGRESSUNITEOF' \
     --customize-hook='chroot "$1" systemctl enable motlie-vmm-egress' \
+    --customize-hook='cat > "$1/etc/systemd/system/motlie-vmm-vsock-ssh.service" << "VSOCKSSHEOF"
+[Unit]
+Description=motlie-vmm vsock-to-SSH bridge (socat)
+After=ssh.service
+Requires=ssh.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/socat VSOCK-LISTEN:2222,reuseaddr,fork TCP:127.0.0.1:22
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
+VSOCKSSHEOF' \
+    --customize-hook='chroot "$1" systemctl enable motlie-vmm-vsock-ssh' \
     --customize-hook="echo \"$BASE_HOSTNAME\" > \"\$1/etc/hostname\"" \
     --customize-hook='cat > "$1/etc/motd" << "MOTDEOF"
                     _   _ _
