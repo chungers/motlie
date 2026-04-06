@@ -40,8 +40,9 @@ pub struct GuestNetAssignment {
 
 /// Allocation policy for guest identity.
 ///
-/// TODO(vnet): wire this into a library-owned allocator used by `libs/vmm`.
-/// Today `examples/v1.3/repl_host.rs` still owns the live allocation logic.
+/// TODO(vmm): wire this into a library-owned allocator used by the future
+/// `boot` / `boot_and_wait` orchestration APIs. Today `examples/v1.3/repl_host.rs`
+/// still owns the live allocation logic.
 #[derive(Debug, Clone)]
 pub struct GuestNetAllocatorConfig {
     /// First guest CID to assign. Current `v1.3` starts at 3.
@@ -77,11 +78,11 @@ pub enum GuestNetAllocatorError {
 /// Stable guest network allocation table.
 ///
 /// Intended direction:
-/// - v1.3 example stops owning `net_allocs` / `next_net_slot`
+/// - `examples/v1.3` stops owning `net_allocs` / `next_net_slot`
 /// - `libs/vmm` asks this type for a stable assignment per guest name
-/// - launch rendering and vnet backend startup consume `GuestNetAssignment`
+/// - launch rendering and `motlie-vnet` backend startup consume `GuestNetAssignment`
 ///
-/// TODO(vnet): this is a scaffold only. It does not yet replace the live
+/// TODO(vmm): this is a scaffold only. It does not yet replace the live
 /// `ensure_net_alloc()` path in `examples/v1.3/repl_host.rs`.
 #[derive(Debug, Clone)]
 pub struct GuestNetAllocator {
