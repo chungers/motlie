@@ -125,6 +125,7 @@ Goal:
 Tasks:
 - [x] add `libs/vmm/src/orchestrator.rs`
 - [x] add `libs/vmm/src/backend.rs`
+- [x] move backend-specific implementation into `libs/vmm/src/backends/`
 - [x] define `PreparedGuest`, `VmHandle`, `ShutdownReport`
 - [x] define backend review types:
   - [x] `BackendKind`

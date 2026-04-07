@@ -57,7 +57,8 @@ Current `v1.4` implementation status:
 
 - the reviewed Phase 1 and Phase 2 API surface is converged in code
 - `Phase 3` now has a working lifecycle implementation:
-  - `backend.rs`
+  - contract in `backend.rs`
+  - implementation in `backends/ch_shell.rs`
   - `orchestrator.rs`
   - `ChShellBackend`
   - `prepare()`
@@ -73,8 +74,9 @@ Current `v1.4` implementation status:
   and the guest listener spawn loop
 - `examples/v1.4/harness/main.rs` now exists as a rootless automation harness
   that validates the library-owned lifecycle API end to end
-- `ChShellBackend` now tracks the spawned child process directly so readiness
-  and shutdown use real process state rather than `/proc` zombie heuristics
+- `ChShellBackend` now tracks the spawned child process directly in its
+  backend-specific module so readiness and shutdown use real process state
+  rather than `/proc` zombie heuristics
 - `examples/v1.4/build-guest.sh` and `examples/v1.4/launch-ch.sh` exist under
   the `motlie-vmm-v14-*` namespace
 

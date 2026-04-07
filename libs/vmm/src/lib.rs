@@ -8,6 +8,7 @@
 
 pub mod ca;
 pub mod artifacts;
+pub mod backends;
 pub mod backend;
 pub mod guestfs;
 pub mod network;
