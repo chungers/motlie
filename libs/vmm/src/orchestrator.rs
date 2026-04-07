@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use motlie_vnet::{VnetBackend, VnetConfig, VnetError, VnetHandle};
 use thiserror::Error;
 use tokio::time::{Instant, sleep};
 
@@ -10,19 +9,18 @@ use crate::artifacts::{
     ArtifactError, CloudInitArtifacts, LaunchArtifactRenderConfig, render_cloud_init_artifacts,
     render_launch_script,
 };
-use crate::ca::SshCa;
-use crate::backend::{BackendError, BackendHandle, BackendKind, BackendSet};
-use crate::guestfs::{GuestFsError, GuestFsHandle};
+use crate::backend::BackendHandle;
 use crate::network::{NetworkModeError, NetworkModes, validate_network_modes};
 use crate::network_alloc::{GuestNetAllocator, GuestNetAllocatorError, GuestNetAssignment};
-use crate::ssh::{GuestBridgeHandle, GuestRegistry, SshProxyError, spawn_guest_ssh_bridge};
+use crate::runtime::{
+    ControlPlaneHandle, FilesystemHandle, NetworkHandle, Runtime, RuntimeError, SharedRuntime,
+};
 use crate::spec::{GuestRuntimePaths, GuestSpec, RuntimeNamespace, SpecError};
 
 pub struct PrepareRequest {
     pub guest: GuestSpec,
     pub namespace: RuntimeNamespace,
     pub network_modes: NetworkModes,
-    pub backend_kind: BackendKind,
     pub base_dir: PathBuf,
     pub ssh_ca_pubkey: Option<String>,
 }
@@ -35,7 +33,6 @@ pub struct PreparedGuest {
     pub cloud_init: CloudInitArtifacts,
     pub launch_script: String,
     pub network_modes: NetworkModes,
-    pub backend_kind: BackendKind,
     pub base_dir: PathBuf,
 }
 
@@ -44,37 +41,22 @@ pub struct VmHandle {
     pub pid: Option<u32>,
     pub runtime_paths: GuestRuntimePaths,
     pub net_assignment: GuestNetAssignment,
-    pub backend_kind: BackendKind,
-    backends: Arc<BackendSet>,
+    runtime: SharedRuntime,
     backend_handle: BackendHandle,
-    guestfs: Option<GuestFsHandle>,
-    vnet: std::sync::Mutex<Option<VnetHandle>>,
-    ssh_bridge: Option<GuestBridgeHandle>,
-}
-
-#[derive(Clone)]
-pub struct SshBridgeServices {
-    pub ca: Arc<SshCa>,
-    pub registry: GuestRegistry,
-}
-
-impl SshBridgeServices {
-    pub fn new(ca: Arc<SshCa>, registry: GuestRegistry) -> Self {
-        Self { ca, registry }
-    }
+    filesystem: Option<FilesystemHandle>,
+    network: std::sync::Mutex<Option<NetworkHandle>>,
+    control_plane: Option<ControlPlaneHandle>,
 }
 
 #[derive(Clone)]
 pub struct LifecycleServices {
-    pub backends: Arc<BackendSet>,
-    pub ssh_bridge: Option<SshBridgeServices>,
+    pub runtime: SharedRuntime,
 }
 
 impl Default for LifecycleServices {
     fn default() -> Self {
         Self {
-            backends: Arc::new(BackendSet::default()),
-            ssh_bridge: None,
+            runtime: Arc::new(Runtime::simple_cloud_hypervisor_shell()),
         }
     }
 }
@@ -123,13 +105,9 @@ pub enum OrchestratorError {
     #[error(transparent)]
     Artifact(#[from] ArtifactError),
     #[error(transparent)]
-    Backend(#[from] BackendError),
+    Backend(#[from] crate::backend::BackendError),
     #[error(transparent)]
-    GuestFs(#[from] GuestFsError),
-    #[error(transparent)]
-    Ssh(#[from] SshProxyError),
-    #[error(transparent)]
-    Vnet(#[from] VnetError),
+    Runtime(#[from] RuntimeError),
     #[error(transparent)]
     NetworkAllocation(#[from] GuestNetAllocatorError),
     #[error("guest {guest_id} does not have SSH bridge services configured")]
@@ -168,7 +146,6 @@ pub fn prepare(
         cloud_init,
         launch_script,
         network_modes: req.network_modes,
-        backend_kind: req.backend_kind,
         base_dir: req.base_dir,
     })
 }
@@ -177,40 +154,21 @@ pub async fn boot(
     prepared: PreparedGuest,
     services: LifecycleServices,
 ) -> Result<VmHandle, OrchestratorError> {
-    let guestfs = if prepared.guest.mounts.is_empty() {
-        None
-    } else {
-        Some(GuestFsHandle::provision(&prepared.guest).await?)
-    };
+    let filesystem = services.runtime.filesystem.provision(&prepared.guest).await?;
+    let mut network = services.runtime.network.provision(&prepared)?;
+    let control_plane = services.runtime.control_plane.provision(&prepared)?;
 
-    let mut vnet = if matches!(prepared.network_modes.egress, crate::network::EgressNetMode::VhostUser) {
-        Some(start_vnet_backend(&prepared)?)
-    } else {
-        None
-    };
-
-    let ssh_bridge = if let Some(ssh) = services.ssh_bridge {
-        Some(spawn_guest_ssh_bridge(
-            prepared.runtime_paths.vsock_socket.to_string_lossy().as_ref(),
-            Arc::clone(&ssh.ca),
-            prepared.guest.guest_id.clone(),
-            Arc::clone(&ssh.registry),
-        )?)
-    } else {
-        None
-    };
-
-    let backend_handle = match services.backends.boot(&prepared) {
+    let backend_handle = match services.runtime.hypervisor.boot(&prepared) {
         Ok(handle) => handle,
         Err(err) => {
-            if let Some(bridge) = ssh_bridge.as_ref() {
-                let _ = bridge.shutdown();
+            if let Some(control_plane) = control_plane.as_ref() {
+                let _ = control_plane.shutdown();
             }
-            if let Some(vnet) = vnet.as_mut() {
-                let _ = vnet.shutdown();
+            if let Some(network) = network.as_mut() {
+                let _ = network.shutdown();
             }
-            if let Some(guestfs) = guestfs.as_ref() {
-                let _ = guestfs.shutdown();
+            if let Some(filesystem) = filesystem.as_ref() {
+                let _ = filesystem.shutdown();
             }
             return Err(err.into());
         }
@@ -221,12 +179,11 @@ pub async fn boot(
         pid: backend_handle.pid(),
         runtime_paths: prepared.runtime_paths,
         net_assignment: prepared.net_assignment,
-        backend_kind: prepared.backend_kind,
-        backends: Arc::clone(&services.backends),
+        runtime: Arc::clone(&services.runtime),
         backend_handle,
-        guestfs,
-        vnet: std::sync::Mutex::new(vnet),
-        ssh_bridge,
+        filesystem,
+        network: std::sync::Mutex::new(network),
+        control_plane,
     })
 }
 
@@ -239,12 +196,12 @@ impl VmHandle {
         )
         .await?;
 
-        if let Some(guestfs) = self.guestfs.as_ref() {
-            guestfs.wait_until_ready(policy.guestfs_timeout).await?;
+        if let Some(filesystem) = self.filesystem.as_ref() {
+            filesystem.wait_ready(policy.guestfs_timeout).await?;
         }
 
-        if let Some(bridge) = self.ssh_bridge.as_ref() {
-            bridge.wait_ready(policy.ssh_bridge_timeout).await?;
+        if let Some(control_plane) = self.control_plane.as_ref() {
+            control_plane.wait_ready(policy.ssh_bridge_timeout).await?;
             self.exec("/bin/true", policy.exec_ready_timeout).await?;
         }
 
@@ -256,33 +213,31 @@ impl VmHandle {
         command: &str,
         timeout: Duration,
     ) -> Result<crate::ssh::ExecOutput, OrchestratorError> {
-        let bridge = self
-            .ssh_bridge
+        let control_plane = self
+            .control_plane
             .as_ref()
             .ok_or_else(|| OrchestratorError::MissingSshBridge {
                 guest_id: self.guest_id.clone(),
             })?;
-        Ok(bridge.exec(command, timeout).await?)
+        Ok(control_plane.exec(command, timeout).await?)
     }
 
     pub async fn shutdown(&self) -> Result<ShutdownReport, OrchestratorError> {
-        let backend_result = self
-            .backends
-            .shutdown(self.backend_kind, &self.backend_handle)?;
+        let backend_result = self.runtime.hypervisor.shutdown(&self.backend_handle)?;
 
-        if let Some(bridge) = self.ssh_bridge.as_ref() {
-            bridge.shutdown()?;
+        if let Some(control_plane) = self.control_plane.as_ref() {
+            control_plane.shutdown()?;
         }
-        if let Some(mut vnet) = self
-            .vnet
+        if let Some(mut network) = self
+            .network
             .lock()
-            .map_err(|_| OrchestratorError::StatePoisoned("vnet handle"))?
+            .map_err(|_| OrchestratorError::StatePoisoned("network handle"))?
             .take()
         {
-            vnet.shutdown()?;
+            network.shutdown()?;
         }
-        if let Some(guestfs) = self.guestfs.as_ref() {
-            guestfs.shutdown()?;
+        if let Some(filesystem) = self.filesystem.as_ref() {
+            filesystem.shutdown()?;
         }
 
         Ok(ShutdownReport {
@@ -328,27 +283,6 @@ impl VmHandle {
     }
 }
 
-fn start_vnet_backend(prepared: &PreparedGuest) -> Result<VnetHandle, OrchestratorError> {
-    if let Some(parent) = prepared.runtime_paths.vnet_socket.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| {
-            OrchestratorError::Backend(BackendError::CreateRuntimeDir {
-                path: parent.to_path_buf(),
-                source,
-            })
-        })?;
-    }
-
-    let config = VnetConfig::builder()
-        .socket_path(&prepared.runtime_paths.vnet_socket)
-        .guest_ipv4(prepared.net_assignment.egress_ipv4.guest)
-        .host_ipv4(prepared.net_assignment.egress_ipv4.host)
-        .netmask(prepared.net_assignment.egress_ipv4.netmask)
-        .dns_ipv4(prepared.net_assignment.egress_ipv4.dns)
-        .mac(prepared.net_assignment.egress_mac)
-        .build()?;
-    Ok(VnetBackend::new(config).start()?)
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -356,6 +290,7 @@ mod tests {
     use crate::backend::ch::shell::ChShellHandle;
     use crate::network::{AdminNetMode, EgressNetMode};
     use crate::network_alloc::GuestNetAllocatorConfig;
+    use crate::runtime::{HypervisorBacking, Runtime};
     use crate::spec::{
         BootArtifacts, GuestMountSpec, GuestResources, GuestSshAccess, GuestStorage, GuestUser,
         SoftwareProfile,
@@ -409,7 +344,6 @@ mod tests {
                     admin: AdminNetMode::None,
                     egress: EgressNetMode::VhostUser,
                 },
-                backend_kind: BackendKind::ChShell,
                 base_dir: PathBuf::from("/tmp/vmm-v1.4/libs/vmm/examples/v1.4"),
                 ssh_ca_pubkey: Some("ssh-ed25519 AAAA-test".to_string()),
             },
@@ -443,17 +377,21 @@ mod tests {
                 launch_log: tempdir.path().join("launch.log"),
             },
             net_assignment: allocator.ensure("alice").unwrap().clone(),
-            backend_kind: BackendKind::ChShell,
-            backends: Arc::new(BackendSet::default()),
+            runtime: Arc::new(Runtime {
+                hypervisor: HypervisorBacking::CloudHypervisorShell(
+                    crate::backend::ch::shell::ChShellBackend::new(),
+                ),
+                ..Runtime::simple_cloud_hypervisor_shell()
+            }),
             backend_handle: BackendHandle::ChShell(ChShellHandle {
                 pid: None,
                 launch_script_path: tempdir.path().join("launch.sh"),
                 api_socket: api_socket.clone(),
                 child: std::sync::Mutex::new(None),
             }),
-            guestfs: None,
-            vnet: std::sync::Mutex::new(None),
-            ssh_bridge: None,
+            filesystem: None,
+            network: std::sync::Mutex::new(None),
+            control_plane: None,
         };
 
         tokio::spawn({

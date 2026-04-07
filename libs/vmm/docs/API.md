@@ -37,11 +37,11 @@ High-level status:
   - [x] placeholder `backend::motlie`
   - [x] placeholder `backend::vz`
 - [ ] next guest-shape convergence:
-  - [ ] `Runtime`
-  - [ ] `HypervisorBacking`
-  - [ ] `FilesystemBacking`
-  - [ ] `NetworkBacking`
-  - [ ] `ControlPlaneBacking`
+  - [x] `Runtime`
+  - [x] `HypervisorBacking`
+  - [x] `FilesystemBacking`
+  - [x] `NetworkBacking`
+  - [x] `ControlPlaneBacking`
   - [ ] `VmSpec`
   - [ ] simple CH “hello world” example over the same lifecycle API
 
@@ -89,7 +89,6 @@ Phase 3 initial implementation:
 - [x] `prepare(...)`
 - [x] `boot(...)`
 - [x] `LifecycleServices`
-- [x] `SshBridgeServices`
 - [x] `VmHandle::ready(...)`
 - [x] `VmHandle::exec(...)`
 - [x] `VmHandle::shutdown(...)`
@@ -100,14 +99,12 @@ Phase 3 initial implementation:
       cleanly through CH API shutdown or `SIGTERM` before falling back to
       `SIGKILL`
 - [ ] next structural convergence:
-  - [ ] `Runtime`
-  - [ ] `HypervisorBacking`
-  - [ ] `FilesystemBacking`
-  - [ ] `NetworkBacking`
-  - [ ] `ControlPlaneBacking`
+  - [x] `Runtime`
+  - [x] `HypervisorBacking`
+  - [x] `FilesystemBacking`
+  - [x] `NetworkBacking`
+  - [x] `ControlPlaneBacking`
   - [ ] `VmSpec`
-  - [ ] `Runtime` injection replaces the current intermediate `BackendSet`
-        wiring
   - [ ] simple CH “hello world” example using the same lifecycle API
 
 ## Layering
@@ -223,8 +220,6 @@ Reviewed intent:
   - `filesystem = HypervisorManaged`
   - `network = HypervisorManaged`
   - `control_plane = None`
-- the current code still uses an intermediate injected `BackendSet` for VM boot
-  dispatch; that is an implementation step, not the desired end-state API
 
 ## Current Implemented Guest Shape
 
@@ -500,10 +495,12 @@ Rules:
   `backend::ch::*`, `backend::vz::*`, or `backend::motlie::*` directly
 - readiness, SSH exec, validation, SSH CA, and guestfs semantics stay above the
   backend layer
-- current code is one step short of this rule:
-  - VM boot/shutdown is already injected through `BackendSet`
-  - Motlie filesystem/network/control-plane wiring still needs to move behind
-    the reviewed `Runtime` composition
+- current code now follows this rule for the active `v1.4` path:
+  - VM boot/shutdown is injected through `Runtime.hypervisor`
+  - Motlie filesystem/network/control-plane wiring is injected through the same
+    `Runtime` composition
+- `BackendSet` remains only as a transitional internal helper while the rest of
+  the crate converges on the reviewed surface
 
 ### `orchestrator.rs`
 
@@ -531,7 +528,6 @@ pub struct VmHandle {
     pub pid: Option<u32>,
     pub runtime_paths: GuestRuntimePaths,
     pub net_assignment: GuestNetAssignment,
-    pub backend_kind: BackendKind,
 }
 
 pub enum ReadinessStage {
@@ -619,12 +615,13 @@ Current implementation note:
 - backend shutdown now owns the real child process state rather than polling
   `/proc`, so readiness and shutdown no longer treat exited CH processes as
   still alive zombies
-- current code still uses `BackendSet` plus direct Motlie wiring in
-  `orchestrator.rs`; converging that to reviewed `Runtime` injection is the
-  next architectural cleanup
-- VM backend dispatch is now injected through `BackendSet`
-- guest backing providers (`guestfs`, `motlie-vnet`, SSH bridge) are still
-  wired directly in orchestrator and are the next abstraction cleanup target
+- current code now injects the active hypervisor plus Motlie guest-backing
+  providers through `Runtime`
+- the next API convergence is guest-shape cleanup:
+  - introduce `VmSpec`
+  - move user-facing runtime composition out of the current direct
+    `GuestSpec { mounts, ... }` shape
+  - add the simple Cloud Hypervisor “hello world” example
 
 ## Backend Transition Path
 

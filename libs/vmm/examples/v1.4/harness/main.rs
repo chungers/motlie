@@ -3,12 +3,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use motlie_vmm::backend::BackendKind;
 use motlie_vmm::ca::SshCa;
 use motlie_vmm::network::{AdminNetMode, EgressNetMode, NetworkModes};
 use motlie_vmm::network_alloc::{GuestNetAllocator, GuestNetAllocatorConfig};
 use motlie_vmm::orchestrator::{
-    LifecycleServices, PrepareRequest, ReadinessPolicy, SshBridgeServices, boot, prepare,
+    LifecycleServices, PrepareRequest, ReadinessPolicy, boot, prepare,
+};
+use motlie_vmm::runtime::{
+    ControlPlaneBacking, FilesystemBacking, HypervisorBacking, NetworkBacking, Runtime,
 };
 use motlie_vmm::spec::{
     BootArtifacts, GuestMountSpec, GuestResources, GuestSpec, GuestSshAccess, GuestStorage,
@@ -40,6 +42,23 @@ async fn main() -> Result<(), DynError> {
         listen: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 2224),
     };
     tokio::spawn(ssh::run_proxy(proxy_config.clone(), Arc::clone(&guest_registry)));
+    let runtime = Arc::new(Runtime {
+        hypervisor: HypervisorBacking::CloudHypervisorShell(
+            motlie_vmm::backend::ch::shell::ChShellBackend::new(),
+        ),
+        filesystem: FilesystemBacking::MotlieVfs(
+            motlie_vmm::backend::motlie::vfs::MotlieVfsBacking::new(),
+        ),
+        network: NetworkBacking::MotlieVnet(
+            motlie_vmm::backend::motlie::vnet::MotlieVnetBacking::new(),
+        ),
+        control_plane: ControlPlaneBacking::MotlieSshProxy(
+            motlie_vmm::backend::motlie::ssh_proxy::MotlieSshProxyBacking::new(
+                Arc::clone(&ca),
+                Arc::clone(&guest_registry),
+            ),
+        ),
+    });
 
     let mut allocator = GuestNetAllocator::new(GuestNetAllocatorConfig {
         socket_dir: socket_root,
@@ -53,7 +72,6 @@ async fn main() -> Result<(), DynError> {
                 admin: AdminNetMode::None,
                 egress: EgressNetMode::VhostUser,
             },
-            backend_kind: BackendKind::ChShell,
             base_dir: base_dir.clone(),
             ssh_ca_pubkey: Some(ca.public_key_openssh()?),
         },
@@ -62,11 +80,7 @@ async fn main() -> Result<(), DynError> {
     let handle = boot(
         prepared,
         LifecycleServices {
-            ssh_bridge: Some(SshBridgeServices::new(
-                Arc::clone(&ca),
-                Arc::clone(&guest_registry),
-            )),
-            ..LifecycleServices::default()
+            runtime,
         },
     )
     .await?;

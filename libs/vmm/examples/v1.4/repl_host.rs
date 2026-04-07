@@ -2,12 +2,12 @@ use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
-use motlie_vmm::backend::BackendKind;
 use motlie_vmm::network::{AdminNetMode, EgressNetMode, NetworkModes};
 use motlie_vmm::network_alloc::{GuestNetAllocator, GuestNetAllocatorConfig};
 use motlie_vmm::orchestrator::{
     LifecycleServices, PrepareRequest, ReadinessPolicy, VmHandle, boot, prepare,
 };
+use motlie_vmm::runtime::Runtime;
 use motlie_vmm::spec::{
     BootArtifacts, GuestResources, GuestSpec, GuestSshAccess, GuestStorage, GuestUser,
     RuntimeNamespace, SoftwareProfile,
@@ -30,6 +30,7 @@ async fn main() -> Result<(), DynError> {
         ..GuestNetAllocatorConfig::default()
     });
     let mut handles: HashMap<String, VmHandle> = HashMap::new();
+    let runtime = std::sync::Arc::new(Runtime::simple_cloud_hypervisor_shell());
 
     println!("=== motlie-vmm repl_host_v1_4 ===");
     println!("Thin harness over libs/vmm phase-3 services");
@@ -65,12 +66,17 @@ async fn main() -> Result<(), DynError> {
                         admin: AdminNetMode::None,
                         egress: EgressNetMode::None,
                     },
-                    backend_kind: BackendKind::ChShell,
                     base_dir: base_dir.clone(),
                     ssh_ca_pubkey: None,
                 };
                 let prepared = prepare(request, &mut allocator)?;
-                let handle = boot(prepared, LifecycleServices::default()).await?;
+                let handle = boot(
+                    prepared,
+                    LifecycleServices {
+                        runtime: std::sync::Arc::clone(&runtime),
+                    },
+                )
+                .await?;
                 println!(
                     "ok: booted {} pid={:?} api={}",
                     guest_id,

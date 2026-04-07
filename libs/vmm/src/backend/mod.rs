@@ -96,8 +96,12 @@ impl Default for BackendSet {
 }
 
 impl BackendSet {
-    pub fn boot(&self, prepared: &PreparedGuest) -> Result<BackendHandle, BackendError> {
-        match prepared.backend_kind {
+    pub fn boot(
+        &self,
+        kind: BackendKind,
+        prepared: &PreparedGuest,
+    ) -> Result<BackendHandle, BackendError> {
+        match kind {
             BackendKind::ChShell => self.ch_shell.boot(prepared),
             kind => Err(BackendError::UnsupportedBackend(kind)),
         }

@@ -4,3 +4,7 @@
 //! The current `v1.4` code still exposes these pieces through top-level
 //! modules while the API shape converges. This module is the intended vertical
 //! slice home for that functionality.
+
+pub mod ssh_proxy;
+pub mod vfs;
+pub mod vnet;
