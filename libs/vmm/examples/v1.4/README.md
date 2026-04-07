@@ -188,6 +188,7 @@ Further prototype features should be recorded in:
 
 - [`libs/vmm/docs/DESIGN.md`](../../docs/DESIGN.md)
 - [`libs/vmm/docs/PLAN.md`](../../docs/PLAN.md)
+- [`libs/vmm/docs/API.md`](../../docs/API.md)
 
 ## Future Union-Binary Prototype
 
