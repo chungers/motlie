@@ -20,8 +20,10 @@ the new library surface that `v1.4` is building.
 As of the current `v1.4` planning checkpoint, [lib.rs](/tmp/vmm-v1.4/libs/vmm/src/lib.rs) exports:
 
 - `ca`
+- `network`
 - `network_alloc`
 - `ssh`
+- `spec`
 
 These are not yet the final shape of the reusable orchestration surface. They
 are the starting point.
@@ -39,29 +41,41 @@ The first reviewable modules should be:
 - `network.rs`
 - `network_alloc.rs`
 
-### Planned `spec.rs`
+### Current `spec.rs`
 
 This module should hold typed guest/runtime inputs rather than lifecycle
 behavior.
 
-Planned types:
+Current implemented types:
 
 ```rust
 pub struct GuestSpec {
     pub name: String,
-    pub uid: u32,
-    pub gid: u32,
+    pub socket_path: String,
     pub mounts: Vec<GuestMountSpec>,
+    pub identity: Option<GuestIdentity>,
 }
 
 pub struct GuestMountSpec {
     pub tag: String,
-    pub guest_path: std::path::PathBuf,
+    pub guest_path: Option<std::path::PathBuf>,
     pub host_path: std::path::PathBuf,
+}
+
+pub struct GuestIdentity {
+    pub uid: u32,
+    pub gid: u32,
+}
+
+pub struct RuntimeNamespace {
+    pub prefix: String,
+    pub temp_root: std::path::PathBuf,
 }
 
 pub struct GuestRuntimePaths {
     pub runtime_dir: std::path::PathBuf,
+    pub launch_dir: std::path::PathBuf,
+    pub cloud_init_dir: std::path::PathBuf,
     pub api_socket: std::path::PathBuf,
     pub vsock_socket: std::path::PathBuf,
     pub vnet_socket: std::path::PathBuf,
@@ -81,24 +95,34 @@ Example usage:
 ```rust
 let guest = GuestSpec {
     name: "alice".to_string(),
-    uid: 1000,
-    gid: 1000,
+    socket_path: "/tmp/motlie-vmm-v14-alice.vsock_5000".to_string(),
     mounts: vec![
         GuestMountSpec {
             tag: "alice-home".to_string(),
-            guest_path: "/home/alice".into(),
+            guest_path: Some("/home/alice".into()),
             host_path: "/tmp/motlie-vmm-v14-demo/alice-home".into(),
         },
     ],
+    identity: Some(GuestIdentity { uid: 1000, gid: 1000 }),
 };
 ```
 
-### Planned `network.rs`
+Namespace-aware runtime path derivation now exists and is intended to replace
+ad hoc string assembly in the harness:
+
+```rust
+let namespace = RuntimeNamespace::new("motlie-vmm-v14", "/tmp")?;
+let paths = GuestRuntimePaths::for_guest(&namespace, "alice")?;
+
+assert_eq!(paths.api_socket, std::path::PathBuf::from("/tmp/motlie-vmm-v14-alice-api.sock"));
+```
+
+### Current `network.rs`
 
 This module should hold network mode selection and validation, not per-guest
 allocation state.
 
-Planned types:
+Current implemented types:
 
 ```rust
 pub enum AdminNetMode {
@@ -108,6 +132,7 @@ pub enum AdminNetMode {
 
 pub enum EgressNetMode {
     None,
+    Tap,
     VhostUser,
 }
 
@@ -117,10 +142,10 @@ pub struct NetworkModes {
 }
 ```
 
-Planned helpers:
+Current implemented helpers:
 
 ```rust
-pub fn validate_network_modes(modes: &NetworkModes) -> Result<(), NetworkModeError>;
+pub fn validate_network_modes(modes: NetworkModes) -> Result<(), NetworkModeError>;
 ```
 
 Review intent:
@@ -183,7 +208,7 @@ By the end of Phase 1, the `v1.4` harness should be able to do something like:
 ```rust
 use motlie_vmm::network::{AdminNetMode, EgressNetMode, NetworkModes, validate_network_modes};
 use motlie_vmm::network_alloc::{GuestNetAllocator, GuestNetAllocatorConfig};
-use motlie_vmm::spec::GuestSpec;
+use motlie_vmm::spec::{GuestIdentity, GuestSpec};
 
 let modes = NetworkModes {
     admin: AdminNetMode::None,
@@ -193,9 +218,9 @@ validate_network_modes(&modes)?;
 
 let guest = GuestSpec {
     name: "alice".to_string(),
-    uid: 1000,
-    gid: 1000,
+    socket_path: "/tmp/motlie-vmm-v14-alice.vsock_5000".to_string(),
     mounts: vec![],
+    identity: Some(GuestIdentity { uid: 1000, gid: 1000 }),
 };
 
 let mut alloc = GuestNetAllocator::new(GuestNetAllocatorConfig::default());
@@ -211,6 +236,8 @@ The following names are not yet fixed:
 
 - `GuestSpec`
 - `GuestMountSpec`
+- `GuestIdentity`
+- `RuntimeNamespace`
 - `GuestRuntimePaths`
 - `AdminNetMode`
 - `EgressNetMode`

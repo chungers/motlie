@@ -7,5 +7,7 @@
 //! See `docs/DESIGN.md` for architecture and requirements.
 
 pub mod ca;
+pub mod network;
 pub mod network_alloc;
 pub mod ssh;
+pub mod spec;
