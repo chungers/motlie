@@ -13,14 +13,17 @@
 
 - a real `repl_host_v1_4` example entrypoint
 - `v1.4`-namespaced `build-guest.sh` and `launch-ch.sh`
+- extracted guestfs provisioning in `libs/vmm/src/guestfs.rs`
+- a real rootless automation binary at `examples/v1.4/harness/main.rs`
 - a thin harness flow that calls library `prepare()`, `boot()`,
   `VmHandle::ready(...)`, and `VmHandle::shutdown()`
 
 It is still intentionally incomplete compared with `v1.3`:
 
-- no guestfs extraction yet
 - no SSH bridge lifecycle extraction yet
-- readiness currently stops at API socket availability
+- `VmHandle::ready(...)` still stops at API socket readiness; the harness
+  currently composes guestfs, SSH bridge, and exec/network validation above
+  that API
 
 ## Scope
 
@@ -116,6 +119,16 @@ The first successful `v1.4` slice should show:
 5. `v1.3` and `v1.4` can be launched side by side without path or socket
    collisions
 
+Current status against those criteria:
+
+- `examples/v1.4/` exists and is namespaced
+- Phase 1 and 2 reusable slices are in `libs/vmm/src`
+- `repl_host_v1_4` is a materially thinner operator shell than `v1.3`
+- `v1.3` remains unchanged
+- `examples/v1.4/harness/main.rs` now boots a guest rootlessly, waits for
+  guestfs and SSH bridge readiness, validates VFS mounts, validates outbound
+  HTTPS over rootless `vhost-user` egress, and shuts the guest down
+
 ## Future Auto-Provisioning Phase
 
 After lifecycle, guestfs, and SSH bridge ownership move into `libs/vmm`, `v1.4`
@@ -197,7 +210,9 @@ Current status against that order:
 
 - steps 1-4 are now in progress in code
 - `repl_host_v1_4` is intentionally minimal and currently boots guests through
-  `ChShellBackend` with API-socket readiness only
+  `ChShellBackend`
+- `examples/v1.4/harness/main.rs` is now the first real non-REPL `v1.4`
+  automation substrate
 
 Further prototype features should be recorded in:
 

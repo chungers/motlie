@@ -23,7 +23,10 @@ async fn main() -> Result<(), DynError> {
         cmdline: None,
     };
     let namespace = RuntimeNamespace::new("motlie-vmm-v14", "/tmp")?;
-    let mut allocator = GuestNetAllocator::new(GuestNetAllocatorConfig::default());
+    let mut allocator = GuestNetAllocator::new(GuestNetAllocatorConfig {
+        socket_dir: namespace.temp_root.join(format!("{}-sockets", namespace.prefix)),
+        ..GuestNetAllocatorConfig::default()
+    });
     let mut handles: HashMap<String, VmHandle> = HashMap::new();
 
     println!("=== motlie-vmm repl_host_v1_4 ===");

@@ -65,6 +65,18 @@ Current `v1.4` implementation status:
   - `VmHandle::shutdown()`
 - `examples/v1.4/repl_host.rs` now exists as a thin harness over those library
   services
+- `libs/vmm/src/guestfs.rs` now owns guestfs provisioning, mount attachment,
+  and the guest listener spawn loop
+- `examples/v1.4/harness/main.rs` now exists as a rootless automation harness
+  that composes:
+  - `prepare()`
+  - `boot()`
+  - `VmHandle::ready(...)`
+  - guestfs readiness
+  - SSH bridge readiness
+  - programmatic exec/VFS validation
+  - rootless `vhost-user` egress validation
+  - `VmHandle::shutdown()`
 - `examples/v1.4/build-guest.sh` and `examples/v1.4/launch-ch.sh` exist under
   the `motlie-vmm-v14-*` namespace
 

@@ -406,6 +406,38 @@ pub async fn exec_on_handle(
     })
 }
 
+pub async fn wait_for_guest_bridge_ready(
+    registry: &GuestRegistry,
+    guest_name: &str,
+    timeout: Duration,
+) -> Result<(), SshProxyError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if current_guest_handle(registry, guest_name)?.is_some() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(SshProxyError::GuestConnection {
+                guest: guest_name.into(),
+                reason: "SSH bridge not ready".into(),
+            });
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+}
+
+pub async fn exec_on_guest(
+    registry: &GuestRegistry,
+    guest_name: &str,
+    command: &str,
+    timeout: Duration,
+) -> Result<ExecOutput, SshProxyError> {
+    wait_for_guest_bridge_ready(registry, guest_name, timeout).await?;
+    let handle = current_guest_handle(registry, guest_name)?
+        .ok_or_else(|| SshProxyError::UnknownGuest(guest_name.to_string()))?;
+    exec_on_handle(&handle, guest_name, command).await
+}
+
 // ---------------------------------------------------------------------------
 // FR-6: SSH proxy server
 // ---------------------------------------------------------------------------

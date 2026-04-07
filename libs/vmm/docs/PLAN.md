@@ -165,9 +165,9 @@ Goal:
 - remove subsystem lifecycle wiring from the example
 
 Tasks:
-- [ ] add `libs/vmm/src/guestfs.rs`
-- [ ] move guest provisioning and mount attachment there
-- [ ] move guest listener spawn logic there
+- [x] add `libs/vmm/src/guestfs.rs`
+- [x] move guest provisioning and mount attachment there
+- [x] move guest listener spawn logic there
 - [ ] move SSH bridge accept/register lifecycle out of `repl_host.rs`
 - [ ] unify guest launch/SSH handle/vnet/VFS state into one library-owned handle
 
@@ -182,16 +182,16 @@ Goal:
   can use directly during development and validation
 
 Tasks:
-- [ ] add a `v1.4`-owned non-interactive harness entrypoint under
+- [x] add a `v1.4`-owned non-interactive harness entrypoint under
       `examples/v1.4/`
-- [ ] make it call library APIs instead of REPL command strings
+- [x] make it call library APIs instead of REPL command strings
 - [ ] support:
-  - [ ] `boot`
-  - [ ] `handle.ready(...)`
-  - [ ] `exec`
-  - [ ] `handle.shutdown()`
+  - [x] `boot`
+  - [x] `handle.ready(...)`
+  - [x] `exec`
+  - [x] `handle.shutdown()`
   - [ ] machine-readable result output
-- [ ] keep it rootless/userspace-only
+- [x] keep it rootless/userspace-only
 - [ ] make it the default substrate for building later `v1.4` phases
 
 Acceptance:
