@@ -583,6 +583,7 @@ Phase 3 is `Orchestrator and Blocking Readiness`.
 The owning module for this phase should be:
 
 - `orchestrator.rs`
+- `backend.rs`
 
 This module is where `libs/vmm` becomes a real lifecycle owner instead of just
 types plus renderers.
@@ -627,6 +628,34 @@ pub struct ShutdownReport {
     pub api_attempted: bool,
     pub forced: Option<&'static str>,
 }
+
+pub enum BackendKind {
+    ChShell,
+    ChForkExec,
+    ChVmmThread,
+    Vz,
+}
+
+pub struct VmBackendCapabilities {
+    pub same_process_vmm: bool,
+    pub supports_api_socket: bool,
+    pub supports_event_monitor: bool,
+    pub supports_fd_handoff: bool,
+    pub supports_memfd_boot_artifacts: bool,
+    pub supports_guest_metrics: bool,
+}
+
+pub trait VmBackend {
+    type Handle;
+    type Error;
+
+    fn kind(&self) -> BackendKind;
+    fn capabilities(&self) -> VmBackendCapabilities;
+    fn boot(&self, prepared: &PreparedGuest) -> Result<Self::Handle, Self::Error>;
+    fn shutdown(&self, handle: &Self::Handle) -> Result<(), Self::Error>;
+}
+
+pub struct ChShellBackend;
 ```
 
 Reviewed top-level orchestrator surface:
@@ -655,6 +684,11 @@ Review intent:
 - make readiness explicit and stage-based
 - return typed errors instead of REPL-oriented status text
 - establish the substrate that the later programmatic harness phase will call
+- keep backend dispatch enum-based rather than dynamically discovered
+- keep the backend trait narrow: boot, shutdown, capabilities
+- start with `ChShellBackend`, which is effectively the current `v1.3` model
+- keep `exec`, readiness, validation, SSH CA, and guestfs orchestration above
+  the backend layer
 
 Example usage:
 
@@ -670,6 +704,27 @@ handle.ready(&ReadinessPolicy {
     exec_ready_timeout: std::time::Duration::from_secs(20),
 }).await?;
 ```
+
+Reviewed backend intent:
+
+```rust
+let backend = BackendKind::ChShell;
+// internally:
+// match backend {
+//   BackendKind::ChShell => ChShellBackend::boot(...),
+//   BackendKind::ChForkExec => ...,
+//   BackendKind::ChVmmThread => ...,
+//   BackendKind::Vz => ...,
+// }
+```
+
+Important reviewed rule:
+
+- enum dispatch is preferred here because all supported backends are known and
+  implemented in-tree
+- do not introduce plugin-style or runtime-loaded backend discovery
+- even `ch_shell`, `ch_fork_exec`, and `ch_vmm_thread` count as separate
+  backends because their lifecycle semantics and isolation properties differ
 
 This is the first phase where the library should be able to say not just "the
 launch script was spawned", but "the guest is actually ready to use" and, if
@@ -697,6 +752,10 @@ The following names are not yet fixed in code, but the reviewed direction is:
 - `ReadinessStage`
 - `ReadinessPolicy`
 - `ShutdownReport`
+- `BackendKind`
+- `VmBackendCapabilities`
+- `VmBackend`
+- `ChShellBackend`
 - `AdminNetMode`
 - `EgressNetMode`
 - `NetworkModes`
@@ -708,6 +767,7 @@ The important thing for review right now is the separation of concerns:
 - `network.rs` owns mode selection and validation
 - `network_alloc.rs` owns stable per-guest allocation
 - `artifacts.rs` owns rendered boot/runtime artifacts
+- `backend.rs` will own backend-specific boot/shutdown execution
 - `orchestrator.rs` will own lifecycle control and blocking readiness
 
 ## Review Questions

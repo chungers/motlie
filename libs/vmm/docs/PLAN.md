@@ -122,7 +122,12 @@ Goal:
 
 Tasks:
 - [ ] add `libs/vmm/src/orchestrator.rs`
+- [ ] add `libs/vmm/src/backend.rs`
 - [ ] define `PreparedGuest`, `VmHandle`, `ShutdownReport`
+- [ ] define backend review types:
+  - [ ] `BackendKind`
+  - [ ] `VmBackendCapabilities`
+  - [ ] `VmBackend`
 - [ ] add `prepare()`
 - [ ] add `boot()`
 - [ ] add handle-based readiness:
@@ -142,10 +147,16 @@ Tasks:
   - [ ] reviewed `to_ch_vm_config(...)` boundary
   - [ ] preserve ability to switch from CLI launch to in-process
         `VmConfig` + `start_vmm_thread(...)`
+- [ ] make backend dispatch enum-based, not dynamically discovered
+- [ ] add the first backend implementation:
+  - [ ] `ChShellBackend`
+  - [ ] keep it semantically equivalent to current `v1.3` shell/CLI behavior
 
 Acceptance:
 - a caller can block until a guest is actually usable
 - boot/readiness failures identify which stage timed out or failed
+- the backend seam is generic enough for future `Vz` support without forcing a
+  public API rewrite
 
 ## Phase 4: GuestFS and SSH Bridge Lifecycle Extraction
 
