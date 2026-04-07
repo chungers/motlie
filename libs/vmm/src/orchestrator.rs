@@ -6,14 +6,13 @@ use motlie_vnet::{VnetBackend, VnetConfig, VnetError, VnetHandle};
 use thiserror::Error;
 use tokio::time::{Instant, sleep};
 
+use crate::backends::ch_shell::ChShellBackend;
 use crate::artifacts::{
     ArtifactError, CloudInitArtifacts, LaunchArtifactRenderConfig, render_cloud_init_artifacts,
     render_launch_script,
 };
 use crate::ca::SshCa;
-use crate::backend::{
-    BackendError, BackendHandle, BackendKind, ChShellBackend, VmBackend,
-};
+use crate::backend::{BackendError, BackendHandle, BackendKind, VmBackend};
 use crate::guestfs::{GuestFsError, GuestFsHandle};
 use crate::network::{NetworkModeError, NetworkModes, validate_network_modes};
 use crate::network_alloc::{GuestNetAllocator, GuestNetAllocatorError, GuestNetAssignment};
@@ -349,6 +348,7 @@ fn start_vnet_backend(prepared: &PreparedGuest) -> Result<VnetHandle, Orchestrat
 mod tests {
     use std::path::PathBuf;
 
+    use crate::backends::ch_shell::ChShellHandle;
     use crate::network::{AdminNetMode, EgressNetMode};
     use crate::network_alloc::GuestNetAllocatorConfig;
     use crate::spec::{
@@ -439,7 +439,7 @@ mod tests {
             },
             net_assignment: allocator.ensure("alice").unwrap().clone(),
             backend_kind: BackendKind::ChShell,
-            backend_handle: BackendHandle::ChShell(crate::backend::ChShellHandle {
+            backend_handle: BackendHandle::ChShell(ChShellHandle {
                 pid: None,
                 launch_script_path: tempdir.path().join("launch.sh"),
                 api_socket: api_socket.clone(),

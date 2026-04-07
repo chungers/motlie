@@ -381,15 +381,15 @@ pub trait VmBackend {
 pub enum BackendHandle {
     ChShell(ChShellHandle),
 }
-
-pub struct ChShellBackend;
 ```
 
 Rules:
 
 - enum dispatch, not dynamic dispatch
 - all backends are known and implemented in-tree
-- `ChShellBackend` is the first implementation and should preserve current
+- `backend.rs` defines the generic contract only
+- backend-specific realization lives under `backends/`
+- `backends/ch_shell.rs` is the first implementation and preserves current
   `v1.3` shell/CLI behavior
 - readiness, SSH exec, validation, SSH CA, and guestfs semantics stay above the
   backend layer
