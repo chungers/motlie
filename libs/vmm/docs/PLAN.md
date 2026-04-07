@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-07 | @codex | Add an explicit embedded-image / union-binary prototype phase after harness bootstrap |
 | 2026-04-07 | @codex | Insert an explicit programmatic harness bootstrap phase after lifecycle extraction so later `v1.4` phases can build on a stable non-REPL substrate |
 | 2026-04-07 | @codex | Add an explicit auto-provisioning phase for new SSH principals and document the library-owned guest allocation policy |
 | 2026-04-07 | @codex | Add an explicit reporting/metrics phase for `v1.4`, using Cloud Hypervisor host-side API/event data plus guest-side SSH probes |
@@ -38,6 +39,7 @@ What is still missing for a polished, reusable harness:
   visibility
 - automatic guest provisioning when a new SSH principal appears
 - an explicit programmatic harness layer that later phases can target directly
+- a practical single-binary distribution prototype for the curated guest image
 
 ## Objective
 
@@ -145,7 +147,35 @@ Acceptance:
 - the harness can boot, exec, and shut down a guest without depending on prompt
   parsing or human-oriented output
 
-## Phase 6: Automatic Guest Provisioning From SSH Principal
+## Phase 6: Embedded Image / Union Binary Prototype
+
+Goal:
+- prototype a single distributable `v1.4` binary that embeds an opinionated
+  guest image and boots it from memfd-backed artifacts where practical
+
+Tasks:
+- [ ] define a special build flag for the union-binary mode
+- [ ] embed curated guest image assets into the harness ELF `.rodata`
+- [ ] add library support for image sources that come from:
+  - [ ] normal on-disk artifacts
+  - [ ] embedded bytes
+- [ ] prefer memfd-backed handoff to Cloud Hypervisor using `/proc/self/fd/...`
+- [ ] keep a fallback path when a boot artifact cannot be consumed directly from
+      memfd
+- [ ] validate the prototype through the programmatic `v1.4` harness:
+  - [ ] boot
+  - [ ] SSH exec
+  - [ ] VFS mounts
+  - [ ] outbound network
+  - [ ] shutdown
+
+Acceptance:
+- the union-binary mode produces one runnable artifact
+- the prototype remains userspace-only with `kvm` group membership as the main
+  host requirement
+- the normal development/image-on-disk mode remains available
+
+## Phase 7: Automatic Guest Provisioning From SSH Principal
 
 Goal:
 - let the library resolve or create guests on first SSH contact without
@@ -178,7 +208,7 @@ Acceptance:
 - assignments are stable across relaunch within the same harness run
 - capacity exhaustion fails with a typed error instead of producing collisions
 
-## Phase 7: Validation and Agent Harness Mode
+## Phase 8: Validation and Agent Harness Mode
 
 Goal:
 - provide a runnable, non-interactive harness for automation
@@ -200,7 +230,7 @@ Acceptance:
 - an agent can drive the harness without depending on the REPL prompt
 - validation returns machine-usable results rather than only stderr text
 
-## Phase 8: Polish and Hardening
+## Phase 9: Polish and Hardening
 
 Goal:
 - make the harness dependable infrastructure for future Motlie work
@@ -215,7 +245,7 @@ Tasks:
 Acceptance:
 - future Motlie development can use the harness as a standard development/test substrate
 
-## Phase 9: Guest Reporting and Metrics
+## Phase 10: Guest Reporting and Metrics
 
 Goal:
 - provide a reusable, machine-readable VM reporting surface for debugging,

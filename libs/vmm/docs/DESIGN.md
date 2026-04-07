@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-07 | @codex | Add a `v1.4` embedded-image / union-binary phase: prototype bundling an opinionated guest image into the harness ELF and booting from memfd-backed artifacts |
 | 2026-04-07 | @codex | Insert an explicit `v1.4` programmatic harness bootstrap phase after lifecycle extraction so later phases build on a stable non-REPL substrate |
 | 2026-04-07 | @codex | Add a `v1.4` automatic guest provisioning phase driven by incoming SSH principals and document the library-owned CID/IP/MAC allocation story |
 | 2026-04-07 | @codex | Add a `v1.4` observability/reporting phase: combine Cloud Hypervisor host-side API/event data with guest-side SSH probes for CPU/memory/disk/network reporting |
@@ -37,6 +38,8 @@ The active next step is `v1.4`:
   services
 - establish a programmatic `v1.4` harness after lifecycle extraction so later
   phases can be developed and tested against a stable non-REPL entrypoint
+- prototype a distributable single-binary `v1.4` mode that embeds a curated
+  guest image in the harness ELF and boots from memfd-backed artifacts
 - move all `v1.4` bins, scripts, and runtime assets onto a distinct namespace
   so `v1.3` and `v1.4` can run side by side
 - allow new incoming SSH principals to trigger guest auto-provisioning through
@@ -96,6 +99,9 @@ state?"
   REPL.
 - Add a programmatic harness substrate that can be used to iteratively build
   and validate later `v1.4` phases without coupling new work to REPL text/UI.
+- Explore a one-binary distribution model where the host harness embeds an
+  opinionated guest image and can boot it without requiring a separate image
+  bundle on disk.
 
 ## Non-Goals
 
@@ -285,6 +291,37 @@ tested, and debugged without depending on interactive prompt behavior.
 
 This feature belongs after lifecycle, guestfs, and SSH bridge extraction
 because it depends on all three being library-owned already.
+
+### FR-11: Embedded Image / Union Binary Prototype
+
+The `v1.4` line should include an explicit prototype phase for building a
+single distributable binary that embeds an opinionated guest image payload in
+its ELF `.rodata` section.
+
+The intended operator experience is:
+
+- one host binary
+- userspace-only runtime
+- `kvm` group membership as the main host requirement
+- no separate guest image bundle required at runtime
+
+The prototype should use a special build flag to produce this combined artifact
+and should prefer memfd-backed boot assets where Cloud Hypervisor supports
+path-based handoff via `/proc/self/fd/...`.
+
+The design should preserve two modes:
+
+1. normal development/image-on-disk mode
+2. special union-binary prototype mode
+
+This phase is most appropriate after:
+
+- **Phase 2**, when image/build artifact assembly is finally library-owned
+- **Phase 5**, when the programmatic harness exists and can repeatedly validate
+  the prototype without depending on the REPL
+
+So image construction is stabilized enough by Phase 2, but the feature becomes
+an efficient prototype target after the harness bootstrap in Phase 5.
 
 **Auth model:**
 
