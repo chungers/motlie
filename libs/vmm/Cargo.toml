@@ -43,3 +43,7 @@ ctrlc = "3"
 [[example]]
 name = "repl_host_v1_3"
 path = "examples/v1.3/repl_host.rs"
+
+[[example]]
+name = "repl_host_v1_4"
+path = "examples/v1.4/repl_host.rs"

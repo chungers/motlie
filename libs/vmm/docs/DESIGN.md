@@ -52,6 +52,22 @@ The active next step is `v1.4`:
 - add a reporting layer that can answer both host-visible and guest-visible
   health/metrics questions during automated runs
 
+Current `v1.4` implementation status:
+
+- the reviewed Phase 1 and Phase 2 API surface is converged in code
+- `Phase 3` has an initial implementation:
+  - `backend.rs`
+  - `orchestrator.rs`
+  - `ChShellBackend`
+  - `prepare()`
+  - `boot()`
+  - `VmHandle::ready(...)`
+  - `VmHandle::shutdown()`
+- `examples/v1.4/repl_host.rs` now exists as a thin harness over those library
+  services
+- `examples/v1.4/build-guest.sh` and `examples/v1.4/launch-ch.sh` exist under
+  the `motlie-vmm-v14-*` namespace
+
 ## Cloud Hypervisor API Analysis
 
 Cloud Hypervisor `v44.0.0` already exposes an internal Rust API surface that is
