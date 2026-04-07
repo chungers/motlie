@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use motlie_vmm::backend::BackendKind;
 use motlie_vmm::network::{AdminNetMode, EgressNetMode, NetworkModes};
 use motlie_vmm::network_alloc::{GuestNetAllocator, GuestNetAllocatorConfig};
-use motlie_vmm::orchestrator::{PrepareRequest, ReadinessPolicy, VmHandle, boot, prepare};
+use motlie_vmm::orchestrator::{
+    LifecycleServices, PrepareRequest, ReadinessPolicy, VmHandle, boot, prepare,
+};
 use motlie_vmm::spec::{
     BootArtifacts, GuestResources, GuestSpec, GuestSshAccess, GuestStorage, GuestUser,
     RuntimeNamespace, SoftwareProfile,
@@ -68,7 +70,7 @@ async fn main() -> Result<(), DynError> {
                     ssh_ca_pubkey: None,
                 };
                 let prepared = prepare(request, &mut allocator)?;
-                let handle = boot(prepared)?;
+                let handle = boot(prepared, LifecycleServices::default()).await?;
                 println!(
                     "ok: booted {} pid={:?} api={}",
                     guest_id,

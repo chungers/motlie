@@ -1,5 +1,7 @@
 use std::fs;
 use std::fs::File;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -35,6 +37,7 @@ pub struct VmBackendCapabilities {
 pub struct ChShellHandle {
     pub pid: Option<u32>,
     pub launch_script_path: PathBuf,
+    pub api_socket: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +47,7 @@ pub enum BackendHandle {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackendShutdownOutcome {
+    pub api_attempted: bool,
     pub forced: Option<&'static str>,
 }
 
@@ -119,6 +123,8 @@ pub enum BackendError {
     },
     #[error("kill returned non-zero for pid {pid}: {stderr}")]
     KillProcessFailed { pid: u32, stderr: String },
+    #[error("failed to issue API shutdown over {path}: {reason}")]
+    ShutdownApi { path: PathBuf, reason: String },
     #[error("backend handle {actual:?} does not match expected backend {expected:?}")]
     HandleKindMismatch {
         expected: BackendKind,
@@ -216,6 +222,58 @@ impl ChShellBackend {
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
         })
     }
+
+    fn request_api_shutdown(api_socket: &Path) -> Result<bool, BackendError> {
+        if !api_socket.exists() {
+            return Ok(false);
+        }
+
+        let mut stream = UnixStream::connect(api_socket).map_err(|source| BackendError::ShutdownApi {
+            path: api_socket.to_path_buf(),
+            reason: source.to_string(),
+        })?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .map_err(|source| BackendError::ShutdownApi {
+                path: api_socket.to_path_buf(),
+                reason: source.to_string(),
+            })?;
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .map_err(|source| BackendError::ShutdownApi {
+                path: api_socket.to_path_buf(),
+                reason: source.to_string(),
+            })?;
+        stream
+            .write_all(
+                b"PUT /api/v1/vm.shutdown HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+            )
+            .map_err(|source| BackendError::ShutdownApi {
+                path: api_socket.to_path_buf(),
+                reason: source.to_string(),
+            })?;
+
+        let mut reader = BufReader::new(stream);
+        let mut status_line = String::new();
+        reader
+            .read_line(&mut status_line)
+            .map_err(|source| BackendError::ShutdownApi {
+                path: api_socket.to_path_buf(),
+                reason: source.to_string(),
+            })?;
+
+        let ok = status_line.starts_with("HTTP/1.1 200")
+            || status_line.starts_with("HTTP/1.1 202")
+            || status_line.starts_with("HTTP/1.1 204");
+        if ok {
+            Ok(true)
+        } else {
+            Err(BackendError::ShutdownApi {
+                path: api_socket.to_path_buf(),
+                reason: status_line.trim().to_string(),
+            })
+        }
+    }
 }
 
 impl VmBackend for ChShellBackend {
@@ -260,26 +318,51 @@ impl VmBackend for ChShellBackend {
         Ok(BackendHandle::ChShell(ChShellHandle {
             pid: Some(child.id()),
             launch_script_path,
+            api_socket: prepared.runtime_paths.api_socket.clone(),
         }))
     }
 
     fn shutdown(&self, handle: &BackendHandle) -> Result<BackendShutdownOutcome, BackendError> {
         let BackendHandle::ChShell(shell_handle) = handle;
         let Some(pid) = shell_handle.pid else {
-            return Ok(BackendShutdownOutcome { forced: None });
+            return Ok(BackendShutdownOutcome {
+                api_attempted: false,
+                forced: None,
+            });
         };
+
+        let mut api_attempted = false;
+        if shell_handle.api_socket.exists() {
+            api_attempted = true;
+            if Self::request_api_shutdown(&shell_handle.api_socket).is_ok() {
+                let deadline = Instant::now() + CH_SHELL_SHUTDOWN_TIMEOUT;
+                while Instant::now() < deadline {
+                    if !process_exists(pid) {
+                        return Ok(BackendShutdownOutcome {
+                            api_attempted,
+                            forced: None,
+                        });
+                    }
+                    thread::sleep(CH_SHELL_SHUTDOWN_POLL);
+                }
+            }
+        }
 
         Self::signal_process(pid, "-TERM")?;
         let deadline = Instant::now() + CH_SHELL_SHUTDOWN_TIMEOUT;
         while Instant::now() < deadline {
             if !process_exists(pid) {
-                return Ok(BackendShutdownOutcome { forced: None });
+                return Ok(BackendShutdownOutcome {
+                    api_attempted,
+                    forced: Some("term"),
+                });
             }
             thread::sleep(CH_SHELL_SHUTDOWN_POLL);
         }
 
         Self::signal_process(pid, "-KILL")?;
         Ok(BackendShutdownOutcome {
+            api_attempted,
             forced: Some("kill"),
         })
     }

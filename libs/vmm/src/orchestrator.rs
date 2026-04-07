@@ -1,6 +1,8 @@
+use std::sync::Arc;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use motlie_vnet::{VnetBackend, VnetConfig, VnetError, VnetHandle};
 use thiserror::Error;
 use tokio::time::{Instant, sleep};
 
@@ -8,11 +10,14 @@ use crate::artifacts::{
     ArtifactError, CloudInitArtifacts, LaunchArtifactRenderConfig, render_cloud_init_artifacts,
     render_launch_script,
 };
+use crate::ca::SshCa;
 use crate::backend::{
     BackendError, BackendHandle, BackendKind, ChShellBackend, VmBackend,
 };
+use crate::guestfs::{GuestFsError, GuestFsHandle};
 use crate::network::{NetworkModeError, NetworkModes, validate_network_modes};
 use crate::network_alloc::{GuestNetAllocator, GuestNetAllocatorError, GuestNetAssignment};
+use crate::ssh::{GuestBridgeHandle, GuestRegistry, SshProxyError, spawn_guest_ssh_bridge};
 use crate::spec::{GuestRuntimePaths, GuestSpec, RuntimeNamespace, SpecError};
 
 pub struct PrepareRequest {
@@ -36,7 +41,6 @@ pub struct PreparedGuest {
     pub base_dir: PathBuf,
 }
 
-#[derive(Debug, Clone)]
 pub struct VmHandle {
     pub guest_id: String,
     pub pid: Option<u32>,
@@ -44,6 +48,26 @@ pub struct VmHandle {
     pub net_assignment: GuestNetAssignment,
     pub backend_kind: BackendKind,
     backend_handle: BackendHandle,
+    guestfs: Option<GuestFsHandle>,
+    vnet: std::sync::Mutex<Option<VnetHandle>>,
+    ssh_bridge: Option<GuestBridgeHandle>,
+}
+
+#[derive(Clone)]
+pub struct SshBridgeServices {
+    pub ca: Arc<SshCa>,
+    pub registry: GuestRegistry,
+}
+
+impl SshBridgeServices {
+    pub fn new(ca: Arc<SshCa>, registry: GuestRegistry) -> Self {
+        Self { ca, registry }
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct LifecycleServices {
+    pub ssh_bridge: Option<SshBridgeServices>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,9 +116,19 @@ pub enum OrchestratorError {
     #[error(transparent)]
     Backend(#[from] BackendError),
     #[error(transparent)]
+    GuestFs(#[from] GuestFsError),
+    #[error(transparent)]
+    Ssh(#[from] SshProxyError),
+    #[error(transparent)]
+    Vnet(#[from] VnetError),
+    #[error(transparent)]
     NetworkAllocation(#[from] GuestNetAllocatorError),
     #[error("backend {0:?} is not implemented yet")]
     UnsupportedBackend(BackendKind),
+    #[error("guest {guest_id} does not have SSH bridge services configured")]
+    MissingSshBridge { guest_id: String },
+    #[error("internal lifecycle state poisoned: {0}")]
+    StatePoisoned(&'static str),
     #[error("guest {guest_id} exited before reaching readiness stage {stage:?}")]
     GuestExitedEarly { guest_id: String, stage: ReadinessStage },
     #[error("timed out waiting for readiness stage {stage:?} for guest {guest_id}")]
@@ -132,9 +166,49 @@ pub fn prepare(
     })
 }
 
-pub fn boot(prepared: PreparedGuest) -> Result<VmHandle, OrchestratorError> {
+pub async fn boot(
+    prepared: PreparedGuest,
+    services: LifecycleServices,
+) -> Result<VmHandle, OrchestratorError> {
+    let guestfs = if prepared.guest.mounts.is_empty() {
+        None
+    } else {
+        Some(GuestFsHandle::provision(&prepared.guest).await?)
+    };
+
+    let mut vnet = if matches!(prepared.network_modes.egress, crate::network::EgressNetMode::VhostUser) {
+        Some(start_vnet_backend(&prepared)?)
+    } else {
+        None
+    };
+
+    let ssh_bridge = if let Some(ssh) = services.ssh_bridge {
+        Some(spawn_guest_ssh_bridge(
+            prepared.runtime_paths.vsock_socket.to_string_lossy().as_ref(),
+            Arc::clone(&ssh.ca),
+            prepared.guest.guest_id.clone(),
+            Arc::clone(&ssh.registry),
+        )?)
+    } else {
+        None
+    };
+
     let backend_handle = match prepared.backend_kind {
-        BackendKind::ChShell => ChShellBackend::new().boot(&prepared)?,
+        BackendKind::ChShell => match ChShellBackend::new().boot(&prepared) {
+            Ok(handle) => handle,
+            Err(err) => {
+                if let Some(bridge) = ssh_bridge.as_ref() {
+                    let _ = bridge.shutdown();
+                }
+                if let Some(vnet) = vnet.as_mut() {
+                    let _ = vnet.shutdown();
+                }
+                if let Some(guestfs) = guestfs.as_ref() {
+                    let _ = guestfs.shutdown();
+                }
+                return Err(err.into());
+            }
+        },
         kind => return Err(OrchestratorError::UnsupportedBackend(kind)),
     };
 
@@ -145,6 +219,9 @@ pub fn boot(prepared: PreparedGuest) -> Result<VmHandle, OrchestratorError> {
         net_assignment: prepared.net_assignment,
         backend_kind: prepared.backend_kind,
         backend_handle,
+        guestfs,
+        vnet: std::sync::Mutex::new(vnet),
+        ssh_bridge,
     })
 }
 
@@ -155,19 +232,59 @@ impl VmHandle {
             ReadinessStage::ApiSocketReady,
             policy.api_socket_timeout,
         )
-        .await
+        .await?;
+
+        if let Some(guestfs) = self.guestfs.as_ref() {
+            guestfs.wait_until_ready(policy.guestfs_timeout).await?;
+        }
+
+        if let Some(bridge) = self.ssh_bridge.as_ref() {
+            bridge.wait_ready(policy.ssh_bridge_timeout).await?;
+            self.exec("/bin/true", policy.exec_ready_timeout).await?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn exec(
+        &self,
+        command: &str,
+        timeout: Duration,
+    ) -> Result<crate::ssh::ExecOutput, OrchestratorError> {
+        let bridge = self
+            .ssh_bridge
+            .as_ref()
+            .ok_or_else(|| OrchestratorError::MissingSshBridge {
+                guest_id: self.guest_id.clone(),
+            })?;
+        Ok(bridge.exec(command, timeout).await?)
     }
 
     pub async fn shutdown(&self) -> Result<ShutdownReport, OrchestratorError> {
-        let outcome = match self.backend_kind {
+        let backend_result = match self.backend_kind {
             BackendKind::ChShell => ChShellBackend::new().shutdown(&self.backend_handle)?,
             kind => return Err(OrchestratorError::UnsupportedBackend(kind)),
         };
 
+        if let Some(bridge) = self.ssh_bridge.as_ref() {
+            bridge.shutdown()?;
+        }
+        if let Some(mut vnet) = self
+            .vnet
+            .lock()
+            .map_err(|_| OrchestratorError::StatePoisoned("vnet handle"))?
+            .take()
+        {
+            vnet.shutdown()?;
+        }
+        if let Some(guestfs) = self.guestfs.as_ref() {
+            guestfs.shutdown()?;
+        }
+
         Ok(ShutdownReport {
             pid: self.pid,
-            api_attempted: false,
-            forced: outcome.forced,
+            api_attempted: backend_result.api_attempted,
+            forced: backend_result.forced,
         })
     }
 
@@ -199,6 +316,27 @@ impl VmHandle {
             sleep(Duration::from_millis(100)).await;
         }
     }
+}
+
+fn start_vnet_backend(prepared: &PreparedGuest) -> Result<VnetHandle, OrchestratorError> {
+    if let Some(parent) = prepared.runtime_paths.vnet_socket.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| {
+            OrchestratorError::Backend(BackendError::CreateRuntimeDir {
+                path: parent.to_path_buf(),
+                source,
+            })
+        })?;
+    }
+
+    let config = VnetConfig::builder()
+        .socket_path(&prepared.runtime_paths.vnet_socket)
+        .guest_ipv4(prepared.net_assignment.egress_ipv4.guest)
+        .host_ipv4(prepared.net_assignment.egress_ipv4.host)
+        .netmask(prepared.net_assignment.egress_ipv4.netmask)
+        .dns_ipv4(prepared.net_assignment.egress_ipv4.dns)
+        .mac(prepared.net_assignment.egress_mac)
+        .build()?;
+    Ok(VnetBackend::new(config).start()?)
 }
 
 #[cfg(test)]
@@ -298,7 +436,11 @@ mod tests {
             backend_handle: BackendHandle::ChShell(crate::backend::ChShellHandle {
                 pid: None,
                 launch_script_path: tempdir.path().join("launch.sh"),
+                api_socket: api_socket.clone(),
             }),
+            guestfs: None,
+            vnet: std::sync::Mutex::new(None),
+            ssh_bridge: None,
         };
 
         tokio::spawn({

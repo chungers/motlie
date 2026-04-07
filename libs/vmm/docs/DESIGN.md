@@ -55,28 +55,23 @@ The active next step is `v1.4`:
 Current `v1.4` implementation status:
 
 - the reviewed Phase 1 and Phase 2 API surface is converged in code
-- `Phase 3` has an initial implementation:
+- `Phase 3` now has a working lifecycle implementation:
   - `backend.rs`
   - `orchestrator.rs`
   - `ChShellBackend`
   - `prepare()`
   - `boot()`
+  - `LifecycleServices`
+  - `SshBridgeServices`
   - `VmHandle::ready(...)`
+  - `VmHandle::exec(...)`
   - `VmHandle::shutdown()`
 - `examples/v1.4/repl_host.rs` now exists as a thin harness over those library
   services
 - `libs/vmm/src/guestfs.rs` now owns guestfs provisioning, mount attachment,
   and the guest listener spawn loop
 - `examples/v1.4/harness/main.rs` now exists as a rootless automation harness
-  that composes:
-  - `prepare()`
-  - `boot()`
-  - `VmHandle::ready(...)`
-  - guestfs readiness
-  - SSH bridge readiness
-  - programmatic exec/VFS validation
-  - rootless `vhost-user` egress validation
-  - `VmHandle::shutdown()`
+  that validates the library-owned lifecycle API end to end
 - `examples/v1.4/build-guest.sh` and `examples/v1.4/launch-ch.sh` exist under
   the `motlie-vmm-v14-*` namespace
 

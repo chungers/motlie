@@ -16,14 +16,13 @@
 - extracted guestfs provisioning in `libs/vmm/src/guestfs.rs`
 - a real rootless automation binary at `examples/v1.4/harness/main.rs`
 - a thin harness flow that calls library `prepare()`, `boot()`,
-  `VmHandle::ready(...)`, and `VmHandle::shutdown()`
+  `VmHandle::ready(...)`, `VmHandle::exec(...)`, and `VmHandle::shutdown()`
 
 It is still intentionally incomplete compared with `v1.3`:
 
 - no SSH bridge lifecycle extraction yet
-- `VmHandle::ready(...)` still stops at API socket readiness; the harness
-  currently composes guestfs, SSH bridge, and exec/network validation above
-  that API
+- graceful shutdown still tends to fall back to `kill` in current practice,
+  even though the lifecycle API now owns the shutdown path
 
 ## Scope
 
@@ -126,8 +125,9 @@ Current status against those criteria:
 - `repl_host_v1_4` is a materially thinner operator shell than `v1.3`
 - `v1.3` remains unchanged
 - `examples/v1.4/harness/main.rs` now boots a guest rootlessly, waits for
-  guestfs and SSH bridge readiness, validates VFS mounts, validates outbound
-  HTTPS over rootless `vhost-user` egress, and shuts the guest down
+  guestfs and SSH bridge readiness through the library lifecycle API, validates
+  VFS mounts, validates outbound HTTPS over rootless `vhost-user` egress, and
+  shuts the guest down
 
 ## Future Auto-Provisioning Phase
 
