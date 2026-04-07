@@ -1,0 +1,189 @@
+use std::sync::Arc;
+use std::time::Duration;
+
+use crate::backend::ch::shell::ChShellBackend;
+use crate::backend::{BackendError, BackendHandle, BackendShutdownOutcome, VmBackend};
+use crate::backend::motlie::ssh_proxy::{MotlieSshProxyBacking, MotlieSshProxyHandle};
+use crate::backend::motlie::vfs::{MotlieVfsBacking, MotlieVfsHandle};
+use crate::backend::motlie::vnet::{MotlieVnetBacking, MotlieVnetHandle, MotlieVnetProvisionError};
+use crate::guestfs::GuestFsError;
+use crate::orchestrator::PreparedGuest;
+use crate::ssh::{ExecOutput, SshProxyError};
+use crate::spec::GuestSpec;
+use motlie_vnet::VnetError;
+
+#[derive(Debug, Clone)]
+pub struct Runtime {
+    pub hypervisor: HypervisorBacking,
+    pub filesystem: FilesystemBacking,
+    pub network: NetworkBacking,
+    pub control_plane: ControlPlaneBacking,
+}
+
+impl Runtime {
+    pub fn simple_cloud_hypervisor_shell() -> Self {
+        Self {
+            hypervisor: HypervisorBacking::CloudHypervisorShell(ChShellBackend::new()),
+            filesystem: FilesystemBacking::HypervisorManaged,
+            network: NetworkBacking::HypervisorManaged,
+            control_plane: ControlPlaneBacking::None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum HypervisorBacking {
+    CloudHypervisorShell(ChShellBackend),
+    CloudHypervisorForkExec,
+    CloudHypervisorVmmThread,
+    AppleVirtualization,
+}
+
+#[derive(Debug, Clone)]
+pub enum FilesystemBacking {
+    HypervisorManaged,
+    MotlieVfs(MotlieVfsBacking),
+}
+
+#[derive(Debug, Clone)]
+pub enum NetworkBacking {
+    None,
+    HypervisorManaged,
+    MotlieVnet(MotlieVnetBacking),
+    HypervisorManagedPlusMotlieVnet(MotlieVnetBacking),
+}
+
+#[derive(Debug, Clone)]
+pub enum ControlPlaneBacking {
+    None,
+    MotlieSshProxy(MotlieSshProxyBacking),
+}
+
+#[derive(Debug)]
+pub enum FilesystemHandle {
+    MotlieVfs(MotlieVfsHandle),
+}
+
+#[derive(Debug)]
+pub enum NetworkHandle {
+    MotlieVnet(MotlieVnetHandle),
+}
+
+#[derive(Debug)]
+pub enum ControlPlaneHandle {
+    MotlieSshProxy(MotlieSshProxyHandle),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RuntimeError {
+    #[error(transparent)]
+    Backend(#[from] BackendError),
+    #[error(transparent)]
+    GuestFs(#[from] GuestFsError),
+    #[error(transparent)]
+    Ssh(#[from] SshProxyError),
+    #[error(transparent)]
+    Vnet(#[from] MotlieVnetProvisionError),
+    #[error(transparent)]
+    VnetShutdown(#[from] VnetError),
+    #[error("hypervisor backing is not implemented yet")]
+    UnsupportedHypervisor,
+}
+
+impl HypervisorBacking {
+    pub fn boot(&self, prepared: &PreparedGuest) -> Result<BackendHandle, RuntimeError> {
+        match self {
+            Self::CloudHypervisorShell(backend) => Ok(backend.boot(prepared)?),
+            Self::CloudHypervisorForkExec
+            | Self::CloudHypervisorVmmThread
+            | Self::AppleVirtualization => Err(RuntimeError::UnsupportedHypervisor),
+        }
+    }
+
+    pub fn shutdown(&self, handle: &BackendHandle) -> Result<BackendShutdownOutcome, RuntimeError> {
+        match self {
+            Self::CloudHypervisorShell(backend) => Ok(backend.shutdown(handle)?),
+            Self::CloudHypervisorForkExec
+            | Self::CloudHypervisorVmmThread
+            | Self::AppleVirtualization => Err(RuntimeError::UnsupportedHypervisor),
+        }
+    }
+}
+
+impl FilesystemBacking {
+    pub async fn provision(&self, guest: &GuestSpec) -> Result<Option<FilesystemHandle>, RuntimeError> {
+        match self {
+            Self::HypervisorManaged => Ok(None),
+            Self::MotlieVfs(backing) => Ok(backing.provision(guest).await?.map(FilesystemHandle::MotlieVfs)),
+        }
+    }
+}
+
+impl FilesystemHandle {
+    pub async fn wait_ready(&self, timeout: Duration) -> Result<(), RuntimeError> {
+        match self {
+            Self::MotlieVfs(handle) => Ok(handle.wait_ready(timeout).await?),
+        }
+    }
+
+    pub fn shutdown(&self) -> Result<(), RuntimeError> {
+        match self {
+            Self::MotlieVfs(handle) => Ok(handle.shutdown()?),
+        }
+    }
+}
+
+impl NetworkBacking {
+    pub fn provision(&self, prepared: &PreparedGuest) -> Result<Option<NetworkHandle>, RuntimeError> {
+        match self {
+            Self::None | Self::HypervisorManaged => Ok(None),
+            Self::MotlieVnet(backing) | Self::HypervisorManagedPlusMotlieVnet(backing) => {
+                Ok(backing.provision(prepared)?.map(NetworkHandle::MotlieVnet))
+            }
+        }
+    }
+}
+
+impl NetworkHandle {
+    pub fn shutdown(&mut self) -> Result<(), RuntimeError> {
+        match self {
+            Self::MotlieVnet(handle) => Ok(handle.shutdown()?),
+        }
+    }
+}
+
+impl ControlPlaneBacking {
+    pub fn provision(
+        &self,
+        prepared: &PreparedGuest,
+    ) -> Result<Option<ControlPlaneHandle>, RuntimeError> {
+        match self {
+            Self::None => Ok(None),
+            Self::MotlieSshProxy(backing) => {
+                Ok(backing.provision(prepared)?.map(ControlPlaneHandle::MotlieSshProxy))
+            }
+        }
+    }
+}
+
+impl ControlPlaneHandle {
+    pub async fn wait_ready(&self, timeout: Duration) -> Result<(), RuntimeError> {
+        match self {
+            Self::MotlieSshProxy(handle) => Ok(handle.wait_ready(timeout).await?),
+        }
+    }
+
+    pub async fn exec(&self, command: &str, timeout: Duration) -> Result<ExecOutput, RuntimeError> {
+        match self {
+            Self::MotlieSshProxy(handle) => Ok(handle.exec(command, timeout).await?),
+        }
+    }
+
+    pub fn shutdown(&self) -> Result<(), RuntimeError> {
+        match self {
+            Self::MotlieSshProxy(handle) => Ok(handle.shutdown()?),
+        }
+    }
+}
+
+pub type SharedRuntime = Arc<Runtime>;

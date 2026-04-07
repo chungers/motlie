@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-07 | @codex | Replace the intermediate VM-backend injection with reviewed `Runtime` injection so `orchestrator.rs` now takes composed hypervisor/filesystem/network/control-plane backing rather than importing Motlie implementation modules directly |
 | 2026-04-07 | @codex | Complete the first usable `v1.4` lifecycle API: library-owned guestfs, SSH bridge, `VmHandle::exec(...)`, rootless harness validation, and child-handle-based shutdown/readiness instead of raw `/proc` polling |
 | 2026-04-07 | @codex | Finish Phase 1/2 convergence in code and start Phase 3 with `PrepareRequest`, `PreparedGuest`, `VmHandle`, `backend/mod.rs`, and the first `backend::ch::shell::ChShellBackend` boot path |
 | 2026-04-07 | @codex | Record the Cloud Hypervisor v44.0 internal Rust API analysis and tighten the reviewed layering around `GuestResources`, `GuestStorage`, and `BootArtifacts` below top-layer guest intent |
@@ -60,13 +61,17 @@ Current `v1.4` implementation status:
   - contract in `backend/mod.rs`
   - implementation in `backend/ch/shell.rs`
   - placeholder vertical slices in `backend/motlie/` and `backend/vz/`
-  - injected VM backend dispatch via the current intermediate `BackendSet`
+  - reviewed runtime injection via:
+    - `Runtime`
+    - `HypervisorBacking`
+    - `FilesystemBacking`
+    - `NetworkBacking`
+    - `ControlPlaneBacking`
   - `orchestrator.rs`
   - `ChShellBackend`
   - `prepare()`
   - `boot()`
   - `LifecycleServices`
-  - `SshBridgeServices`
   - `VmHandle::ready(...)`
   - `VmHandle::exec(...)`
   - `VmHandle::shutdown()`
@@ -81,9 +86,11 @@ Current `v1.4` implementation status:
   rather than `/proc` zombie heuristics
 - generic orchestrator code no longer imports CH backend implementation
   modules directly for VM boot/shutdown dispatch
-- the next convergence step is to replace the intermediate `BackendSet` with
-  reviewed `Runtime` injection so filesystem/network/control-plane backing are
-  injected alongside the hypervisor choice
+- generic orchestrator code no longer imports Motlie guestfs, userspace vnet,
+  or SSH-bridge implementation modules directly either; those are now reached
+  through reviewed `Runtime` composition
+- the next convergence step is guest-shape cleanup around `VmSpec` plus the
+  simple Cloud Hypervisor “hello world” example
 - `examples/v1.4/build-guest.sh` and `examples/v1.4/launch-ch.sh` exist under
   the `motlie-vmm-v14-*` namespace
 
@@ -215,11 +222,9 @@ implemented in-tree.
 
 The generic orchestrator should therefore depend on an injected reviewed
 `Runtime`, not on concrete backend modules directly. The current implementation
-uses an intermediate injected `BackendSet` for VM boot/shutdown only; the next
-step is to extend that same injection rule to Motlie guest backing providers
-such as guestfs, userspace vnet, and the SSH bridge so the generic
-orchestration layer does not import those implementation modules directly
-either.
+now does this for the active `v1.4` path: VM boot, filesystem backing,
+userspace network backing, and the SSH bridge are all composed outside
+`orchestrator.rs` and injected as one runtime composition.
 
 ### Anti-Drift Rule: One Backend Namespace, Separate Composition Axes
 

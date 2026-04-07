@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-07 | @codex | Implement reviewed `Runtime` injection in code: `orchestrator.rs` now composes hypervisor/filesystem/network/control-plane backing through one injected runtime, and Motlie guest backing moved behind `backend::motlie::*` adapters |
 | 2026-04-07 | @codex | Lock the reviewed `Runtime { hypervisor, filesystem, network, control_plane }` model: `BackendSet` remains only as an intermediate implementation step, and the next cleanup is to inject Motlie guest backing through the same boundary |
 | 2026-04-07 | @codex | Inject VM backend dispatch through `BackendSet` so generic orchestrator code no longer imports concrete CH backend modules directly; record Motlie guest backing injection as the next cleanup step |
 | 2026-04-07 | @codex | Start refactoring `v1.4` toward the reviewed backend hierarchy: `backend/mod.rs`, `backend/ch/`, placeholder `backend/motlie/`, placeholder `backend/vz/`, and explicitly document the simple CH guest path as a desired outcome |
@@ -68,10 +69,10 @@ Turn the working `v1.3` example into:
   - [ ] a small Cloud Hypervisor “hello world” example boots a guest through
         the same lifecycle API using ordinary hypervisor-managed resources
 - [ ] reviewed `Runtime` composition becomes the injected runtime contract:
-  - [ ] `hypervisor: HypervisorBacking`
-  - [ ] `filesystem: FilesystemBacking`
-  - [ ] `network: NetworkBacking`
-  - [ ] `control_plane: ControlPlaneBacking`
+  - [x] `hypervisor: HypervisorBacking`
+  - [x] `filesystem: FilesystemBacking`
+  - [x] `network: NetworkBacking`
+  - [x] `control_plane: ControlPlaneBacking`
 
 The rule for this plan is:
 
@@ -154,7 +155,7 @@ Tasks:
   - [x] `BackendKind`
   - [x] `VmBackendCapabilities`
   - [x] `VmBackend`
-  - [x] intermediate `BackendSet`
+  - [x] intermediate `BackendSet` during the transition to injected `Runtime`
 - [x] add `prepare()`
 - [x] add `boot()`
 - [x] add handle-based readiness:
@@ -178,22 +179,22 @@ Tasks:
         `VmConfig` + `start_vmm_thread(...)`
 - [x] make backend dispatch enum-based, not dynamically discovered
 - [x] inject backend dispatch into generic orchestrator code
-- [ ] converge the intermediate `BackendSet` injection to reviewed
+- [x] converge the intermediate `BackendSet` injection to reviewed
       `Runtime` injection
 - [x] add the first backend implementation:
   - [x] `ChShellBackend`
   - [x] keep it close enough to current `v1.3` shell/CLI behavior to boot and
         validate the `v1.4` harness
-- [ ] apply the same injection rule to guest backing providers:
-  - [ ] `motlie-vfs`
-  - [ ] `motlie-vnet`
-  - [ ] SSH bridge/control plane
-- [ ] express the reviewed runtime composition explicitly in code:
-  - [ ] `Runtime`
-  - [ ] `HypervisorBacking`
-  - [ ] `FilesystemBacking`
-  - [ ] `NetworkBacking`
-  - [ ] `ControlPlaneBacking`
+- [x] apply the same injection rule to guest backing providers:
+  - [x] `motlie-vfs`
+  - [x] `motlie-vnet`
+  - [x] SSH bridge/control plane
+- [x] express the reviewed runtime composition explicitly in code:
+  - [x] `Runtime`
+  - [x] `HypervisorBacking`
+  - [x] `FilesystemBacking`
+  - [x] `NetworkBacking`
+  - [x] `ControlPlaneBacking`
 
 Acceptance:
 - a caller can block until a guest is actually usable

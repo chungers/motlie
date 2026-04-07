@@ -440,7 +440,6 @@ mod tests {
                 admin: AdminNetMode::None,
                 egress: EgressNetMode::VhostUser,
             },
-            backend_kind: BackendKind::ChShell,
             base_dir: PathBuf::from("/tmp/vmm-v1.4/libs/vmm/examples/v1.4"),
         }
     }
