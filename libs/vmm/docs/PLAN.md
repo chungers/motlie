@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-07 | @codex | Finish Phase 1/2 API convergence in code and start Phase 3 with `backend.rs`, `orchestrator.rs`, `PrepareRequest`, `prepare()`, `boot()`, `VmHandle`, and the initial `ChShellBackend` |
 | 2026-04-07 | @codex | Record the CH v44.0 internal API alignment plan: keep `GuestUser` and `GuestSshAccess` above the adapter layer, and split CH-shaped inputs into `GuestResources`, `GuestStorage`, and `BootArtifacts` |
 | 2026-04-07 | @codex | Align the reviewed `v1.4` API around `GuestUser`, `GuestSshAccess`, explicit CA-issued credentials, and `boot()` plus handle-based readiness |
 | 2026-04-07 | @codex | Start Phase 2 extraction in `libs/vmm/src/artifacts.rs` and make it the explicit owner of rendered boot/runtime artifacts |
@@ -64,27 +65,27 @@ Goal:
 - remove pure configuration and allocation policy from `repl_host_v1_3`
 
 Tasks:
-- [ ] add `libs/vmm/src/spec.rs`
-- [ ] move guest/mount/user/SSH-access config types out of `repl_host.rs`
-- [ ] add `libs/vmm/src/network.rs`
-- [ ] move `AdminNet`, `EgressNet`, and guest CID/IP/MAC allocation there
-- [ ] expose typed helpers for socket paths and network mode validation
-- [ ] replace provisional review naming with:
-  - [ ] `GuestUser`
-  - [ ] `GuestSshAccess`
-  - [ ] `GuestResources`
-  - [ ] `GuestStorage`
-  - [ ] `BootArtifacts`
-  - [ ] `SoftwareProfile`
-- [ ] make the reviewed `GuestSpec` shape explicit:
-  - [ ] `guest_id`
-  - [ ] `hostname`
-  - [ ] `user`
-  - [ ] `ssh`
-  - [ ] `storage`
-  - [ ] `boot`
-- [ ] document the CA binding surface:
-  - [ ] `SshCa::issue_guest_ssh_credentials(&GuestUser, &GuestSshAccess)`
+- [x] add `libs/vmm/src/spec.rs`
+- [x] move guest/mount/user/SSH-access config types out of `repl_host.rs`
+- [x] add `libs/vmm/src/network.rs`
+- [x] move `AdminNet`, `EgressNet`, and guest CID/IP/MAC allocation there
+- [x] expose typed helpers for socket paths and network mode validation
+- [x] replace provisional review naming with:
+  - [x] `GuestUser`
+  - [x] `GuestSshAccess`
+  - [x] `GuestResources`
+  - [x] `GuestStorage`
+  - [x] `BootArtifacts`
+  - [x] `SoftwareProfile`
+- [x] make the reviewed `GuestSpec` shape explicit:
+  - [x] `guest_id`
+  - [x] `hostname`
+  - [x] `user`
+  - [x] `ssh`
+  - [x] `storage`
+  - [x] `boot`
+- [x] document the CA binding surface:
+  - [x] `SshCa::issue_guest_ssh_credentials(&GuestUser, &GuestSshAccess)`
 
 Acceptance:
 - `repl_host_v1_3` compiles using library-owned spec/network types
@@ -99,15 +100,15 @@ Owning module:
 - `libs/vmm/src/artifacts.rs`
 
 Tasks:
-- [ ] add `libs/vmm/src/artifacts.rs`
-- [ ] move cloud-init rendering there
-- [ ] move mounts.yaml rendering there
-- [ ] move runtime path helpers there
-- [ ] move launch script rendering there
-- [ ] make `artifacts.rs` consume reviewed declarative inputs:
-  - [ ] `SoftwareProfile`
-  - [ ] `GuestStorage`
-  - [ ] `BootArtifacts`
+- [x] add `libs/vmm/src/artifacts.rs`
+- [x] move cloud-init rendering there
+- [x] move mounts.yaml rendering there
+- [x] move runtime path helpers there
+- [x] move launch script rendering there
+- [x] make `artifacts.rs` consume reviewed declarative inputs:
+  - [x] `SoftwareProfile`
+  - [x] `GuestStorage`
+  - [x] `BootArtifacts`
 
 Acceptance:
 - `repl_host_v1_3` no longer owns cloud-init/mounts/layout string generation
@@ -121,35 +122,35 @@ Goal:
 - create a typed lifecycle API suitable for agents
 
 Tasks:
-- [ ] add `libs/vmm/src/orchestrator.rs`
-- [ ] add `libs/vmm/src/backend.rs`
-- [ ] define `PreparedGuest`, `VmHandle`, `ShutdownReport`
-- [ ] define backend review types:
-  - [ ] `BackendKind`
-  - [ ] `VmBackendCapabilities`
-  - [ ] `VmBackend`
-- [ ] add `prepare()`
-- [ ] add `boot()`
-- [ ] add handle-based readiness:
-  - [ ] `VmHandle::ready(&ReadinessPolicy)`
-- [ ] add handle-based shutdown:
-  - [ ] `VmHandle::shutdown()`
+- [x] add `libs/vmm/src/orchestrator.rs`
+- [x] add `libs/vmm/src/backend.rs`
+- [x] define `PreparedGuest`, `VmHandle`, `ShutdownReport`
+- [x] define backend review types:
+  - [x] `BackendKind`
+  - [x] `VmBackendCapabilities`
+  - [x] `VmBackend`
+- [x] add `prepare()`
+- [x] add `boot()`
+- [x] add handle-based readiness:
+  - [x] `VmHandle::ready(&ReadinessPolicy)`
+- [x] add handle-based shutdown:
+  - [x] `VmHandle::shutdown()`
 - [ ] add explicit readiness gates:
-  - [ ] API socket ready
+  - [x] API socket ready
   - [ ] guestfs connected
   - [ ] SSH bridge connected
   - [ ] exec-ready probe
-- [ ] make CH-shaped boot inputs flow through:
-  - [ ] `GuestResources`
-  - [ ] `GuestStorage`
-  - [ ] `BootArtifacts`
+- [x] make CH-shaped boot inputs flow through:
+  - [x] `GuestResources`
+  - [x] `GuestStorage`
+  - [x] `BootArtifacts`
 - [ ] add an explicit CH adapter plan:
   - [ ] reviewed `to_ch_vm_config(...)` boundary
   - [ ] preserve ability to switch from CLI launch to in-process
         `VmConfig` + `start_vmm_thread(...)`
-- [ ] make backend dispatch enum-based, not dynamically discovered
-- [ ] add the first backend implementation:
-  - [ ] `ChShellBackend`
+- [x] make backend dispatch enum-based, not dynamically discovered
+- [x] add the first backend implementation:
+  - [x] `ChShellBackend`
   - [ ] keep it semantically equivalent to current `v1.3` shell/CLI behavior
 
 Acceptance:

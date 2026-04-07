@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-07 | @codex | Finish Phase 1/2 convergence in code and start Phase 3 with `PrepareRequest`, `PreparedGuest`, `VmHandle`, `backend.rs`, and the first `ChShellBackend` boot path |
 | 2026-04-07 | @codex | Record the Cloud Hypervisor v44.0 internal Rust API analysis and tighten the reviewed layering around `GuestResources`, `GuestStorage`, and `BootArtifacts` below top-layer guest intent |
 | 2026-04-07 | @codex | Tighten the reviewed `v1.4` API shape around `GuestUser`, `GuestSshAccess`, explicit CA-issued guest SSH credentials, and `boot()` plus `VmHandle::ready(...)` |
 | 2026-04-07 | @codex | Start Phase 2 extraction in `libs/vmm/src/artifacts.rs` and record it as the owning module for rendered boot/runtime artifacts |
@@ -221,7 +222,27 @@ Current extraction checkpoints:
 
 - Phase 1: `spec.rs`, `network.rs`, `network_alloc.rs`
 - Phase 2: `artifacts.rs`
-- Planned Phase 3 review: `orchestrator.rs`
+- Phase 3 initial slice: `backend.rs`, `orchestrator.rs`
+
+Current convergence status:
+
+- Phase 1 reviewed naming is implemented in code
+- Phase 2 render APIs now consume software, storage, and boot-artifact inputs
+- Phase 3 has started with:
+  - `PrepareRequest`
+  - `PreparedGuest`
+  - `VmHandle`
+  - `BackendKind`
+  - `VmBackendCapabilities`
+  - `VmBackend`
+  - `ChShellBackend`
+  - `prepare()`
+  - `boot()`
+  - `VmHandle::ready(...)`
+  - `VmHandle::shutdown()`
+- current readiness coverage is intentionally narrow:
+  - API socket readiness is implemented
+  - guestfs / SSH bridge / exec-ready gates remain follow-up work in Phase 3
 - Explore a one-binary distribution model where the host harness embeds an
   opinionated guest image and can boot it without requiring a separate image
   bundle on disk.

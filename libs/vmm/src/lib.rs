@@ -8,7 +8,9 @@
 
 pub mod ca;
 pub mod artifacts;
+pub mod backend;
 pub mod network;
 pub mod network_alloc;
+pub mod orchestrator;
 pub mod ssh;
 pub mod spec;
