@@ -179,9 +179,10 @@ counters, but not full guest OS semantics by itself.
 2. rename the `v1.4` runtime namespace
 3. extract typed guest/network/artifact helpers into `libs/vmm/src`
 4. add a thin `repl_host_v1_4`
-5. add automatic guest provisioning from SSH principal
-6. add `v1.4`-owned smoke coverage
-7. add host-side and guest-side reporting/metrics collection
+5. add a programmatic `v1.4` harness bootstrap
+6. add automatic guest provisioning from SSH principal
+7. add `v1.4`-owned smoke coverage
+8. add host-side and guest-side reporting/metrics collection
 
 Further prototype features should be recorded in:
 

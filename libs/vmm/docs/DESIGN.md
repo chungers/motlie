@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-07 | @codex | Insert an explicit `v1.4` programmatic harness bootstrap phase after lifecycle extraction so later phases build on a stable non-REPL substrate |
 | 2026-04-07 | @codex | Add a `v1.4` automatic guest provisioning phase driven by incoming SSH principals and document the library-owned CID/IP/MAC allocation story |
 | 2026-04-07 | @codex | Add a `v1.4` observability/reporting phase: combine Cloud Hypervisor host-side API/event data with guest-side SSH probes for CPU/memory/disk/network reporting |
 | 2026-04-07 | @codex | Start `v1.4` as the library-extraction line: keep `v1.3` frozen for comparison, require a side-by-side `v1.4` namespace, and define the thin-harness target for `repl_host_v1_4` |
@@ -34,6 +35,8 @@ The active next step is `v1.4`:
 - keep `v1.3` unchanged for comparison and regression analysis
 - refactor `repl_host_v1_4` into a thin operator shell over reusable library
   services
+- establish a programmatic `v1.4` harness after lifecycle extraction so later
+  phases can be developed and tested against a stable non-REPL entrypoint
 - move all `v1.4` bins, scripts, and runtime assets onto a distinct namespace
   so `v1.3` and `v1.4` can run side by side
 - allow new incoming SSH principals to trigger guest auto-provisioning through
@@ -91,6 +94,8 @@ state?"
 - Add a stable auto-provisioning path so new guest principals can be created on
   first use without embedding more lifecycle/allocation policy into the example
   REPL.
+- Add a programmatic harness substrate that can be used to iteratively build
+  and validate later `v1.4` phases without coupling new work to REPL text/UI.
 
 ## Non-Goals
 
@@ -258,6 +263,26 @@ The resulting behavior should be:
 4. boot and wait until ready
 5. continue with the SSH session against that guest
 
+### FR-10: Programmatic Harness Bootstrap
+
+Before later `v1.4` phases such as auto-provisioning, reporting, and richer
+automation, the library must expose a stable non-interactive harness surface
+that can drive the reusable lifecycle APIs directly.
+
+This should be owned by `examples/v1.4`, but it must be library-first rather
+than REPL-first.
+
+The minimum useful surface is:
+
+- `boot_and_wait`
+- `exec`
+- `shutdown_and_wait`
+- machine-readable status/result output
+
+The purpose of this phase is not to replace the human REPL. It is to create a
+stable development substrate so subsequent `v1.4` feature phases can be built,
+tested, and debugged without depending on interactive prompt behavior.
+
 This feature belongs after lifecycle, guestfs, and SSH bridge extraction
 because it depends on all three being library-owned already.
 
@@ -381,6 +406,10 @@ contract, it should move into typed Rust structures:
 That rule also applies to guest identity allocation. The SSH principal to guest
 mapping, CID selection, MAC selection, and runtime namespace derivation must be
 typed library state, not implicit shell naming conventions.
+
+It also applies to harness execution. Future phases should be proven against a
+typed programmatic harness surface before they are considered stable enough to
+become part of the long-lived `v1.4` flow.
 
 The example can still expose an operator-friendly CLI, but the hard parts
 should not remain encoded as ad hoc environment variables and string assembly.
