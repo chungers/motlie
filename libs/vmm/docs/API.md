@@ -19,6 +19,7 @@ the new library surface that `v1.4` is building.
 
 As of the current `v1.4` planning checkpoint, [lib.rs](/tmp/vmm-v1.4/libs/vmm/src/lib.rs) exports:
 
+- `artifacts`
 - `ca`
 - `network`
 - `network_alloc`
@@ -230,6 +231,79 @@ let net = alloc.ensure(&guest.name)?;
 That is the first API slice to review before lifecycle/orchestration extraction
 begins.
 
+## Phase 2 Review Surface
+
+Phase 2 is `Launch Artifact and Runtime Layout Extraction`.
+
+The owning module for this phase is:
+
+- `artifacts.rs`
+
+This module owns pure rendering/generation of boot/runtime artifacts. It should
+not own process spawning or shutdown behavior.
+
+### Current `artifacts.rs`
+
+Current implemented types:
+
+```rust
+pub struct CloudInitArtifacts {
+    pub meta_data: String,
+    pub user_data: String,
+    pub mounts_yaml: String,
+}
+
+pub struct LaunchArtifactRenderConfig<'a> {
+    pub guest: &'a GuestSpec,
+    pub runtime_paths: &'a GuestRuntimePaths,
+    pub network_modes: NetworkModes,
+    pub net_assignment: &'a GuestNetAssignment,
+    pub base_dir: &'a std::path::Path,
+    pub ssh_ca_pubkey: Option<&'a str>,
+}
+```
+
+Current implemented helpers:
+
+```rust
+pub fn render_mounts_yaml(guest: &GuestSpec) -> Result<String, ArtifactError>;
+pub fn render_cloud_init(guest: &GuestSpec) -> Result<String, ArtifactError>;
+pub fn render_meta_data(guest_name: &str) -> String;
+pub fn render_cloud_init_artifacts(guest: &GuestSpec) -> Result<CloudInitArtifacts, ArtifactError>;
+pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<String, ArtifactError>;
+```
+
+Review intent:
+
+- keep artifact rendering pure and testable
+- keep namespace-sensitive paths sourced from `spec.rs`
+- keep network/device identity sourced from `network.rs` and `network_alloc.rs`
+- make this module the stabilization point for later image/union-binary work
+
+Example usage:
+
+```rust
+use motlie_vmm::artifacts::{render_launch_script, LaunchArtifactRenderConfig};
+use motlie_vmm::network::{AdminNetMode, EgressNetMode, NetworkModes};
+
+let script = render_launch_script(&LaunchArtifactRenderConfig {
+    guest: &guest,
+    runtime_paths: &paths,
+    network_modes: NetworkModes {
+        admin: AdminNetMode::None,
+        egress: EgressNetMode::VhostUser,
+    },
+    net_assignment: &net,
+    base_dir: std::path::Path::new("/tmp/vmm-v1.4/libs/vmm/examples/v1.4"),
+    ssh_ca_pubkey: Some("ssh-ed25519 AAAA-test"),
+})?;
+```
+
+This is the point where image/build artifact handling becomes stable enough for
+the later embedded-image / union-binary prototype phase, even though the
+programmatic harness phase is still needed before that prototype becomes
+pleasant to iterate on.
+
 ## Provisional API Notes
 
 The following names are not yet fixed:
@@ -239,6 +313,8 @@ The following names are not yet fixed:
 - `GuestIdentity`
 - `RuntimeNamespace`
 - `GuestRuntimePaths`
+- `CloudInitArtifacts`
+- `LaunchArtifactRenderConfig`
 - `AdminNetMode`
 - `EgressNetMode`
 - `NetworkModes`
@@ -249,6 +325,7 @@ The important thing for review right now is the separation of concerns:
 - `spec.rs` owns typed guest/runtime inputs
 - `network.rs` owns mode selection and validation
 - `network_alloc.rs` owns stable per-guest allocation
+- `artifacts.rs` owns rendered boot/runtime artifacts
 
 ## Review Questions
 
@@ -258,5 +335,6 @@ As Phase 1 lands, this document should answer:
 2. Are namespace-sensitive runtime paths explicit enough?
 3. Is network mode policy separated cleanly from allocation state?
 4. Is the allocator contract clear about stability and exhaustion?
-5. Is the API surface small enough that later phases can layer on top without
+5. Is `artifacts.rs` cleanly separated from lifecycle/process execution?
+6. Is the API surface small enough that later phases can layer on top without
    forcing a rewrite?

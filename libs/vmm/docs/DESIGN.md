@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-07 | @codex | Start Phase 2 extraction in `libs/vmm/src/artifacts.rs` and record it as the owning module for rendered boot/runtime artifacts |
 | 2026-04-07 | @codex | Add `libs/vmm/docs/API.md` as the running API review surface for `v1.4` extraction work |
 | 2026-04-07 | @codex | Add a `v1.4` embedded-image / union-binary phase: prototype bundling an opinionated guest image into the harness ELF and booting from memfd-backed artifacts |
 | 2026-04-07 | @codex | Insert an explicit `v1.4` programmatic harness bootstrap phase after lifecycle extraction so later phases build on a stable non-REPL substrate |
@@ -109,6 +110,11 @@ The evolving review surface for the extracted library API lives in:
 
 This is where Phase 1+ type/module surfaces and example usage should be
 documented as extraction proceeds.
+
+Current extraction checkpoints:
+
+- Phase 1: `spec.rs`, `network.rs`, `network_alloc.rs`
+- Phase 2: `artifacts.rs`
 - Explore a one-binary distribution model where the host harness embeds an
   opinionated guest image and can boot it without requiring a separate image
   bundle on disk.
@@ -560,6 +566,15 @@ Expected extraction:
 The critical rule is that `libs/vmm` should generate these assets from typed
 guest/runtime state rather than from example-specific string templates once the
 behavior is proven.
+
+The owning module for this work in `v1.4` is:
+
+- [artifacts.rs](/tmp/vmm-v1.4/libs/vmm/src/artifacts.rs)
+
+This is also the point where image/build artifact handling becomes stable
+enough for the later union-binary prototype phase, even though the
+programmatic harness bootstrap still needs to land before that prototype is a
+good iterative development target.
 
 ### 3. Runtime Layout and Artifact Assembly
 

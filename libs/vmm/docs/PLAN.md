@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-07 | @codex | Start Phase 2 extraction in `libs/vmm/src/artifacts.rs` and make it the explicit owner of rendered boot/runtime artifacts |
 | 2026-04-07 | @codex | Add an explicit embedded-image / union-binary prototype phase after harness bootstrap |
 | 2026-04-07 | @codex | Insert an explicit programmatic harness bootstrap phase after lifecycle extraction so later `v1.4` phases can build on a stable non-REPL substrate |
 | 2026-04-07 | @codex | Add an explicit auto-provisioning phase for new SSH principals and document the library-owned guest allocation policy |
@@ -76,6 +77,9 @@ Acceptance:
 Goal:
 - move render/layout code into reusable library modules
 
+Owning module:
+- `libs/vmm/src/artifacts.rs`
+
 Tasks:
 - [ ] add `libs/vmm/src/artifacts.rs`
 - [ ] move cloud-init rendering there
@@ -86,6 +90,8 @@ Tasks:
 Acceptance:
 - `repl_host_v1_3` no longer owns cloud-init/mounts/layout string generation
 - launch assets are testable without running the REPL
+- image/build artifact handling is stabilized enough for the later union-binary
+  prototype phase
 
 ## Phase 3: Orchestrator and Blocking Readiness
 
