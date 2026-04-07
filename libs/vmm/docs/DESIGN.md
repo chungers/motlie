@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-07 | @codex | Complete the first usable `v1.4` lifecycle API: library-owned guestfs, SSH bridge, `VmHandle::exec(...)`, rootless harness validation, and child-handle-based shutdown/readiness instead of raw `/proc` polling |
 | 2026-04-07 | @codex | Finish Phase 1/2 convergence in code and start Phase 3 with `PrepareRequest`, `PreparedGuest`, `VmHandle`, `backend.rs`, and the first `ChShellBackend` boot path |
 | 2026-04-07 | @codex | Record the Cloud Hypervisor v44.0 internal Rust API analysis and tighten the reviewed layering around `GuestResources`, `GuestStorage`, and `BootArtifacts` below top-layer guest intent |
 | 2026-04-07 | @codex | Tighten the reviewed `v1.4` API shape around `GuestUser`, `GuestSshAccess`, explicit CA-issued guest SSH credentials, and `boot()` plus `VmHandle::ready(...)` |
@@ -72,6 +73,8 @@ Current `v1.4` implementation status:
   and the guest listener spawn loop
 - `examples/v1.4/harness/main.rs` now exists as a rootless automation harness
   that validates the library-owned lifecycle API end to end
+- `ChShellBackend` now tracks the spawned child process directly so readiness
+  and shutdown use real process state rather than `/proc` zombie heuristics
 - `examples/v1.4/build-guest.sh` and `examples/v1.4/launch-ch.sh` exist under
   the `motlie-vmm-v14-*` namespace
 

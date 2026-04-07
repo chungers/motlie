@@ -299,6 +299,12 @@ impl VmHandle {
             if path.exists() {
                 return Ok(());
             }
+            if self.backend_handle.has_exited()? {
+                return Err(OrchestratorError::GuestExitedEarly {
+                    guest_id: self.guest_id.clone(),
+                    stage,
+                });
+            }
             if let Some(pid) = self.pid {
                 if !PathBuf::from(format!("/proc/{pid}")).exists() {
                     return Err(OrchestratorError::GuestExitedEarly {
@@ -437,6 +443,7 @@ mod tests {
                 pid: None,
                 launch_script_path: tempdir.path().join("launch.sh"),
                 api_socket: api_socket.clone(),
+                child: std::sync::Mutex::new(None),
             }),
             guestfs: None,
             vnet: std::sync::Mutex::new(None),

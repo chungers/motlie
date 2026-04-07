@@ -20,9 +20,9 @@
 
 It is still intentionally incomplete compared with `v1.3`:
 
-- no SSH bridge lifecycle extraction yet
-- graceful shutdown still tends to fall back to `kill` in current practice,
-  even though the lifecycle API now owns the shutdown path
+- `repl_host_v1_4` is still narrower than the old `v1.3` operator surface
+- backend shutdown is now library-owned and TERM-first, but cleaner CH-native
+  shutdown/reporting remains a quality follow-up
 
 ## Scope
 
