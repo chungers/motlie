@@ -164,6 +164,18 @@ Render guest boot assets from typed state rather than string templates:
 - cloud-init `meta-data` (instance-id, hostname)
 - optional `network-config` (egress NIC DHCP matching on stable MAC)
 - generated `mounts.yaml` (VFS mount tags → guest paths)
+- optional software profile inputs (for example `vim`, `gh`) that can be
+  rendered into boot-time install behavior during development
+
+Important design rule:
+
+- software customization should be expressed as typed intent
+- not hardwired to one implementation strategy
+
+That allows the same requested software set to map to:
+
+1. cloud-init package installation in the development flow
+2. baked image composition in the later union-binary phase
 
 ### FR-4: Subsystem Wiring
 

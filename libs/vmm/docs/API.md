@@ -263,6 +263,68 @@ pub struct LaunchArtifactRenderConfig<'a> {
 }
 ```
 
+### Planned software composition extension
+
+Yes, Phase 2 should grow a typed way to request guest software such as `vim`,
+`gh`, or similar packages.
+
+The important design constraint is:
+
+- express **software intent** in the API
+- do not hardcode the implementation to "always apt install at boot"
+
+That keeps the same API usable for:
+
+1. boot-time cloud-init package installation during development
+2. later baked-image / union-binary composition for distributable artifacts
+
+Planned types:
+
+```rust
+pub struct SoftwareProfile {
+    pub packages: Vec<String>,
+}
+```
+
+Likely API direction:
+
+```rust
+pub fn render_cloud_init_with_software(
+    guest: &GuestSpec,
+    software: &SoftwareProfile,
+) -> Result<String, ArtifactError>;
+```
+
+Or, if we want the software request to travel with the guest config:
+
+```rust
+pub struct GuestSpec {
+    // existing fields...
+    pub software: SoftwareProfile,
+}
+```
+
+Recommended first implementation:
+
+- start with package names only
+- render them into cloud-init package installation for the development path
+- keep the type declarative so the later union-binary phase can interpret the
+  same `SoftwareProfile` as "bake these into the image"
+
+Example usage:
+
+```rust
+let software = SoftwareProfile {
+    packages: vec!["vim".to_string(), "gh".to_string()],
+};
+```
+
+Review intent:
+
+- avoid scattering package lists through shell templates
+- keep software customization typed and reviewable
+- preserve a path from "boot-time install" to "baked image composition"
+
 Current implemented helpers:
 
 ```rust
@@ -279,6 +341,8 @@ Review intent:
 - keep namespace-sensitive paths sourced from `spec.rs`
 - keep network/device identity sourced from `network.rs` and `network_alloc.rs`
 - make this module the stabilization point for later image/union-binary work
+- allow software customization to be expressed declaratively so later phases can
+  choose between boot-time install and baked-image composition
 
 Example usage:
 
