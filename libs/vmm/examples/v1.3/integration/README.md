@@ -20,15 +20,16 @@ What it validates:
 - starts the rootless/userspace harness with:
   - `--admin-net=none`
   - `--egress-net=vhost-user`
-- boots `alice`
-- waits for `SSH bridge ready for guest 'alice'`
+- boots `alice`, then `bob`
+- waits for `SSH bridge ready` for both guests
 - validates:
-  - SSH exec through the proxy
+  - SSH exec through the proxy for both guests
   - PTY behavior through `russh_pty_probe`
-  - VFS-backed home/workspace/agent-state visibility
+  - VFS-backed home/workspace/agent-state visibility for both guests
   - rootless default route inside the guest
-  - outbound HTTPS from the guest
-  - the REPL's own `validate alice` checklist
+  - outbound HTTPS from both guests
+  - guest isolation between `alice` and `bob`
+  - the REPL's own `validate alice` / `validate bob` checklists
 
 On failure, the script dumps:
 

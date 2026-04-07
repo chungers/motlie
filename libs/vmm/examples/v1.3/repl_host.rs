@@ -980,6 +980,18 @@ fn seed_demo_host_mount(guest_name: &str, mount: &ConfiguredMount) -> Result<()>
     Ok(())
 }
 
+fn guest_display_name(name: &str) -> String {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) => {
+            let mut out = first.to_uppercase().collect::<String>();
+            out.push_str(chars.as_str());
+            out
+        }
+        None => String::new(),
+    }
+}
+
 fn guest_api_socket_path(guest_name: &str) -> PathBuf {
     PathBuf::from(format!("/tmp/motlie-vmm-{guest_name}-api.sock"))
 }
@@ -1895,6 +1907,7 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
         }
         "validate" if parts.len() == 2 => {
             let guest_name = parts[1];
+            let guest_display = guest_display_name(guest_name);
             let ssh_handle = {
                 let reg = admin.guest_registry.lock().unwrap();
                 reg.get(guest_name).and_then(|ep| ep.ssh_handle.clone())
@@ -1910,50 +1923,53 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
                 }
             };
             emit_status(admin, format!("=== validate {guest_name} ==="));
-            let checks: Vec<(&str, &str, Box<dyn Fn(&ssh::ExecOutput) -> bool>)> = vec![
+            let checks: Vec<(String, String, Box<dyn Fn(&ssh::ExecOutput) -> bool>)> = vec![
                 (
-                    "vsock-ssh: uname",
-                    "uname -s",
+                    "vsock-ssh: uname".to_string(),
+                    "uname -s".to_string(),
                     Box::new(|out| out.exit_code == 0 && out.stdout.trim() == "Linux"),
                 ),
                 (
-                    "egress: curl https://example.com",
-                    "curl -s -o /dev/null -w '%{http_code}' https://example.com",
+                    "egress: curl https://example.com".to_string(),
+                    "curl -s -o /dev/null -w '%{http_code}' https://example.com".to_string(),
                     Box::new(|out| out.exit_code == 0 && out.stdout.trim() == "200"),
                 ),
                 (
-                    "dns: nslookup via motlie-vmm",
-                    "nslookup example.com 10.0.2.3 2>&1 | head -1",
+                    "dns: nslookup via motlie-vmm".to_string(),
+                    "nslookup example.com 10.0.2.3 2>&1 | head -1".to_string(),
                     Box::new(|out| out.exit_code == 0),
                 ),
                 (
-                    "writable root: touch /tmp/test",
-                    "touch /tmp/motlie-validate-test && rm /tmp/motlie-validate-test",
+                    "writable root: touch /tmp/test".to_string(),
+                    "touch /tmp/motlie-validate-test && rm /tmp/motlie-validate-test".to_string(),
                     Box::new(|out| out.exit_code == 0),
                 ),
                 (
-                    "agent-state: ~/.codex writable directory",
-                    "test -d ~/.codex && test -w ~/.codex",
+                    "agent-state: ~/.codex writable directory".to_string(),
+                    "test -d ~/.codex && test -w ~/.codex".to_string(),
                     Box::new(|out| out.exit_code == 0),
                 ),
                 (
-                    "agent-state: ~/.claude writable directory",
-                    "test -d ~/.claude && test -w ~/.claude",
+                    "agent-state: ~/.claude writable directory".to_string(),
+                    "test -d ~/.claude && test -w ~/.claude".to_string(),
                     Box::new(|out| out.exit_code == 0),
                 ),
                 (
-                    "agent-state: ~/.config/claude-code writable directory",
-                    "test -d ~/.config/claude-code && test -w ~/.config/claude-code",
+                    "agent-state: ~/.config/claude-code writable directory".to_string(),
+                    "test -d ~/.config/claude-code && test -w ~/.config/claude-code".to_string(),
                     Box::new(|out| out.exit_code == 0),
                 ),
                 (
-                    "workspace: README visible through VFS",
-                    "grep -q 'Alice workspace mounted from the host.' /workspace/README.md",
+                    "workspace: README visible through VFS".to_string(),
+                    format!(
+                        "grep -q '{} workspace mounted from the host.' /workspace/README.md",
+                        guest_display
+                    ),
                     Box::new(|out| out.exit_code == 0),
                 ),
                 (
-                    "ip route: default via motlie-vmm",
-                    "ip route show default",
+                    "ip route: default via motlie-vmm".to_string(),
+                    "ip route show default".to_string(),
                     Box::new(|out| out.exit_code == 0 && out.stdout.contains("10.0.2.2")),
                 ),
             ];
