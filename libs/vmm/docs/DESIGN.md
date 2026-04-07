@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-07 | @codex | Add a `v1.4` observability/reporting phase: combine Cloud Hypervisor host-side API/event data with guest-side SSH probes for CPU/memory/disk/network reporting |
 | 2026-04-07 | @codex | Start `v1.4` as the library-extraction line: keep `v1.3` frozen for comparison, require a side-by-side `v1.4` namespace, and define the thin-harness target for `repl_host_v1_4` |
 | 2026-04-06 | @codex | Reframe DESIGN around `examples/v1.3` as the active proving ground; add stable harness direction, blocking readiness requirements, and extraction targets for reusable orchestration APIs |
 | 2026-04-05 | @claude-vmm | SSH proxy transport: vsock (AF_VSOCK) replaces TAP for ingress, completing fully-userspace stack; update NFR-1, FR-6, data flow |
@@ -34,6 +35,8 @@ The active next step is `v1.4`:
   services
 - move all `v1.4` bins, scripts, and runtime assets onto a distinct namespace
   so `v1.3` and `v1.4` can run side by side
+- add a reporting layer that can answer both host-visible and guest-visible
+  health/metrics questions during automated runs
 
 ## Problem Statement
 
@@ -79,6 +82,9 @@ state?"
   command execution for automated testing.
 - Let future examples become thin wiring layers over library code rather than
   carrying large shell-script control planes.
+- Add a stable reporting surface for guest lifecycle, resource use, and device
+  counters so future Motlie work can debug regressions without manual SSH-only
+  inspection.
 
 ## Non-Goals
 
@@ -174,6 +180,50 @@ The same proxy path must be good enough for:
 - human interactive shell access
 - agent-driven command execution
 - future structured readiness probes and health checks
+
+### FR-8: Guest Reporting and Metrics
+
+The library must provide a reusable reporting path for VM status and resource
+usage that supports both:
+
+- operator debugging in the REPL
+- machine-readable snapshots during automated tests
+
+The reporting surface should intentionally combine two sources:
+
+1. **Cloud Hypervisor host-side reporting**
+   - API socket exposed by `--api-socket`
+   - event stream exposed by `--event-monitor`
+   - API calls including:
+     - `/api/v1/vm.info`
+     - `/api/v1/vm.counters`
+
+2. **Guest-side reporting over the existing SSH exec path**
+   - CPU utilization probes
+   - guest memory usage probes
+   - disk/filesystem usage probes
+   - process/service health probes
+   - outbound connectivity checks
+
+This split is deliberate. Cloud Hypervisor can report VMM-visible state and
+device counters, but it does not replace guest-OS introspection for metrics
+like guest-used memory, per-process CPU, or filesystem occupancy.
+
+The intended reusable library surface is something like:
+
+```rust
+pub struct VmReport {
+    pub lifecycle: VmLifecycleReport,
+    pub host: VmHostReport,
+    pub guest: Option<GuestProbeReport>,
+}
+```
+
+Where:
+
+- `VmLifecycleReport` captures readiness/shutdown state
+- `VmHostReport` captures CH-visible state, counters, and event snapshots
+- `GuestProbeReport` captures SSH-collected guest metrics and health
 
 **Auth model:**
 
