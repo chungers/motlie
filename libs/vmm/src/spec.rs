@@ -2,11 +2,20 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-/// Guest identity override for mounted content and generated runtime state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GuestIdentity {
+/// Guest OS login user modeled above the hypervisor/backend layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestUser {
+    pub name: String,
     pub uid: u32,
     pub gid: u32,
+    pub home: PathBuf,
+}
+
+/// SSH principal/login-user policy for a guest OS account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestSshAccess {
+    pub principal: String,
+    pub login_user: String,
 }
 
 /// One host-backed mount made visible inside a guest.
@@ -17,16 +26,69 @@ pub struct GuestMountSpec {
     pub host_path: PathBuf,
 }
 
+/// Declarative software customization for the guest image / cloud-init flow.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SoftwareProfile {
+    pub packages: Vec<String>,
+}
+
+/// CH-shaped compute and memory resources.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestResources {
+    pub boot_vcpus: u8,
+    pub memory_mib: u32,
+    pub max_vcpus: Option<u8>,
+}
+
+impl Default for GuestResources {
+    fn default() -> Self {
+        Self {
+            boot_vcpus: 2,
+            memory_mib: 512,
+            max_vcpus: None,
+        }
+    }
+}
+
+/// Storage/image policy that does not directly map to CPU/RAM sizing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestStorage {
+    pub overlay_size: String,
+}
+
+impl Default for GuestStorage {
+    fn default() -> Self {
+        Self {
+            overlay_size: "2G".to_string(),
+        }
+    }
+}
+
+/// Declarative boot artifact inputs above the renderer/backend layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BootArtifacts {
+    pub kernel: PathBuf,
+    pub initramfs: Option<PathBuf>,
+    pub firmware: Option<PathBuf>,
+    pub cmdline: Option<String>,
+}
+
 /// Pure guest input configuration.
 ///
 /// This is the library-owned replacement target for the pure data currently
 /// carried by the example harness's guest configuration structs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuestSpec {
-    pub name: String,
+    pub guest_id: String,
+    pub hostname: String,
     pub socket_path: String,
+    pub user: GuestUser,
+    pub ssh: GuestSshAccess,
     pub mounts: Vec<GuestMountSpec>,
-    pub identity: Option<GuestIdentity>,
+    pub software: SoftwareProfile,
+    pub resources: GuestResources,
+    pub storage: GuestStorage,
+    pub boot: BootArtifacts,
 }
 
 /// Namespace-sensitive runtime path configuration.
@@ -66,7 +128,7 @@ pub struct GuestRuntimePaths {
 impl GuestRuntimePaths {
     pub fn for_guest(namespace: &RuntimeNamespace, guest_name: &str) -> Result<Self, SpecError> {
         if guest_name.trim().is_empty() {
-            return Err(SpecError::EmptyGuestName);
+            return Err(SpecError::EmptyGuestId);
         }
 
         let runtime_dir = namespace
@@ -109,12 +171,36 @@ impl GuestRuntimePaths {
 pub enum SpecError {
     #[error("namespace prefix cannot be empty")]
     EmptyNamespacePrefix,
-    #[error("guest name cannot be empty")]
-    EmptyGuestName,
+    #[error("guest id cannot be empty")]
+    EmptyGuestId,
+    #[error("guest hostname cannot be empty")]
+    EmptyHostname,
+    #[error("guest username cannot be empty")]
+    EmptyGuestUserName,
+    #[error("guest ssh principal cannot be empty")]
+    EmptyGuestPrincipal,
 }
 
 pub fn pathbuf_from_optional_str(value: Option<&str>) -> Option<PathBuf> {
     value.map(Path::new).map(Path::to_path_buf)
+}
+
+impl GuestSpec {
+    pub fn validate(&self) -> Result<(), SpecError> {
+        if self.guest_id.trim().is_empty() {
+            return Err(SpecError::EmptyGuestId);
+        }
+        if self.hostname.trim().is_empty() {
+            return Err(SpecError::EmptyHostname);
+        }
+        if self.user.name.trim().is_empty() {
+            return Err(SpecError::EmptyGuestUserName);
+        }
+        if self.ssh.principal.trim().is_empty() {
+            return Err(SpecError::EmptyGuestPrincipal);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -152,7 +238,7 @@ mod tests {
     fn runtime_paths_reject_empty_guest_name() {
         let namespace = RuntimeNamespace::new("motlie-vmm-v14", "/tmp").unwrap();
         let err = GuestRuntimePaths::for_guest(&namespace, "").unwrap_err();
-        assert_eq!(err, SpecError::EmptyGuestName);
+        assert_eq!(err, SpecError::EmptyGuestId);
     }
 
     #[test]
@@ -168,5 +254,36 @@ mod tests {
             pathbuf_from_optional_str(Some("/home/alice")),
             Some(PathBuf::from("/home/alice"))
         );
+    }
+
+    #[test]
+    fn guest_spec_validates_required_fields() {
+        let spec = GuestSpec {
+            guest_id: "alice".to_string(),
+            hostname: "motlie-alice".to_string(),
+            socket_path: "/tmp/motlie-vmm-v14-alice.vsock_5000".to_string(),
+            user: GuestUser {
+                name: "alice".to_string(),
+                uid: 1000,
+                gid: 1000,
+                home: PathBuf::from("/home/alice"),
+            },
+            ssh: GuestSshAccess {
+                principal: "alice".to_string(),
+                login_user: "alice".to_string(),
+            },
+            mounts: vec![],
+            software: SoftwareProfile::default(),
+            resources: GuestResources::default(),
+            storage: GuestStorage::default(),
+            boot: BootArtifacts {
+                kernel: PathBuf::from("/tmp/Image"),
+                initramfs: None,
+                firmware: None,
+                cmdline: None,
+            },
+        };
+
+        assert!(spec.validate().is_ok());
     }
 }
