@@ -11,7 +11,10 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
-use crate::backend::{BackendError, BackendHandle, BackendKind, BackendShutdownOutcome, VmBackend, VmBackendCapabilities};
+use crate::backend::{
+    BackendError, BackendHandle, BackendKind, BackendShutdownOutcome, VmBackend,
+    VmBackendCapabilities,
+};
 use crate::orchestrator::PreparedGuest;
 
 const CH_SHELL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -178,10 +181,11 @@ impl ChShellBackend {
             return Ok(false);
         }
 
-        let mut stream = UnixStream::connect(api_socket).map_err(|source| ChShellError::ShutdownApi {
-            path: api_socket.to_path_buf(),
-            reason: source.to_string(),
-        })?;
+        let mut stream =
+            UnixStream::connect(api_socket).map_err(|source| ChShellError::ShutdownApi {
+                path: api_socket.to_path_buf(),
+                reason: source.to_string(),
+            })?;
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .map_err(|source| ChShellError::ShutdownApi {
@@ -238,10 +242,12 @@ impl ChShellHandle {
         let Some(running_child) = child.as_mut() else {
             return Ok(self.pid.is_some());
         };
-        match running_child.try_wait().map_err(|source| ChShellError::KillProcess {
-            pid: self.pid.unwrap_or_default(),
-            source,
-        })? {
+        match running_child
+            .try_wait()
+            .map_err(|source| ChShellError::KillProcess {
+                pid: self.pid.unwrap_or_default(),
+                source,
+            })? {
             Some(_) => {
                 let _ = child.take();
                 Ok(true)
@@ -271,14 +277,18 @@ impl VmBackend for ChShellBackend {
         let launch_script_path = Self::launch_script_path(prepared);
         self.materialize_launch_script(prepared, &launch_script_path)?;
         let launch_log_path = prepared.runtime_paths.launch_log.clone();
-        let launch_log = File::create(&launch_log_path).map_err(|source| ChShellError::OpenLaunchLog {
-            path: launch_log_path,
-            source,
-        })?;
-        let launch_log_err = launch_log.try_clone().map_err(|source| ChShellError::OpenLaunchLog {
-            path: prepared.runtime_paths.launch_log.clone(),
-            source,
-        })?;
+        let launch_log =
+            File::create(&launch_log_path).map_err(|source| ChShellError::OpenLaunchLog {
+                path: launch_log_path,
+                source,
+            })?;
+        let launch_log_err =
+            launch_log
+                .try_clone()
+                .map_err(|source| ChShellError::OpenLaunchLog {
+                    path: prepared.runtime_paths.launch_log.clone(),
+                    source,
+                })?;
 
         let child = Command::new("bash")
             .arg(&launch_script_path)
@@ -342,8 +352,12 @@ impl VmBackend for ChShellBackend {
         {
             let mut child = Self::child_lock(&shell_handle.child)?;
             if let Some(child) = child.as_mut() {
-                child.kill().map_err(|source| ChShellError::KillProcess { pid, source })?;
-                let _ = child.wait().map_err(|source| ChShellError::KillProcess { pid, source })?;
+                child
+                    .kill()
+                    .map_err(|source| ChShellError::KillProcess { pid, source })?;
+                let _ = child
+                    .wait()
+                    .map_err(|source| ChShellError::KillProcess { pid, source })?;
             } else if process_exists(pid) {
                 Self::signal_process(pid, "-KILL")?;
             }

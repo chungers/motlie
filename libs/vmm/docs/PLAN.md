@@ -4,6 +4,8 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-07 | @codex | Inject VM backend dispatch through `BackendSet` so generic orchestrator code no longer imports concrete CH backend modules directly; record Motlie guest backing injection as the next cleanup step |
+| 2026-04-07 | @codex | Start refactoring `v1.4` toward the reviewed backend hierarchy: `backend/mod.rs`, `backend/ch/`, placeholder `backend/motlie/`, placeholder `backend/vz/`, and explicitly document the simple CH guest path as a desired outcome |
 | 2026-04-07 | @codex | Complete the first usable `v1.4` lifecycle API: library-owned guestfs and SSH bridge services, `VmHandle::exec(...)`, rootless harness validation, and child-handle-based shutdown/readiness |
 | 2026-04-07 | @codex | Finish Phase 1/2 API convergence in code and start Phase 3 with `backend.rs`, `orchestrator.rs`, `PrepareRequest`, `prepare()`, `boot()`, `VmHandle`, and the initial `ChShellBackend` |
 | 2026-04-07 | @codex | Record the CH v44.0 internal API alignment plan: keep `GuestUser` and `GuestSshAccess` above the adapter layer, and split CH-shaped inputs into `GuestResources`, `GuestStorage`, and `BootArtifacts` |
@@ -53,6 +55,17 @@ Turn the working `v1.3` example into:
 1. a thin interactive REPL for humans
 2. a reusable library for guest orchestration
 3. a stable runnable harness for agents and future Motlie development
+
+## Desired Outcomes
+
+- [ ] `v1.4` Motlie-backed path works end to end:
+  - [ ] a runnable harness uses Motlie guest backing providers
+  - [ ] scripted validation checks guest behavior end to end
+- [ ] `motlie-vmm` also supports a simple standard guest path:
+  - [ ] no Motlie guestfs backing
+  - [ ] no Motlie userspace vnet backing
+  - [ ] a small Cloud Hypervisor “hello world” example boots a guest through
+        the same lifecycle API using ordinary hypervisor-managed resources
 
 The rule for this plan is:
 
@@ -124,13 +137,18 @@ Goal:
 
 Tasks:
 - [x] add `libs/vmm/src/orchestrator.rs`
-- [x] add `libs/vmm/src/backend.rs`
-- [x] move backend-specific implementation into `libs/vmm/src/backends/`
+- [x] add `libs/vmm/src/backend/mod.rs`
+- [x] move backend-specific implementation into `libs/vmm/src/backend/`
+- [x] establish vertical backend hierarchy:
+  - [x] `backend::ch`
+  - [x] placeholder `backend::motlie`
+  - [x] placeholder `backend::vz`
 - [x] define `PreparedGuest`, `VmHandle`, `ShutdownReport`
 - [x] define backend review types:
   - [x] `BackendKind`
   - [x] `VmBackendCapabilities`
   - [x] `VmBackend`
+  - [x] `BackendSet`
 - [x] add `prepare()`
 - [x] add `boot()`
 - [x] add handle-based readiness:
@@ -153,16 +171,24 @@ Tasks:
   - [ ] preserve ability to switch from CLI launch to in-process
         `VmConfig` + `start_vmm_thread(...)`
 - [x] make backend dispatch enum-based, not dynamically discovered
+- [x] inject backend dispatch into generic orchestrator code
 - [x] add the first backend implementation:
   - [x] `ChShellBackend`
   - [x] keep it close enough to current `v1.3` shell/CLI behavior to boot and
         validate the `v1.4` harness
+- [ ] apply the same injection rule to guest backing providers:
+  - [ ] `motlie-vfs`
+  - [ ] `motlie-vnet`
+  - [ ] SSH bridge/control plane
 
 Acceptance:
 - a caller can block until a guest is actually usable
 - boot/readiness failures identify which stage timed out or failed
 - the backend seam is generic enough for future `Vz` support without forcing a
   public API rewrite
+- the backend crate layout supports both:
+  - CH/VZ simple hypervisor guests
+  - Motlie-backed guest providers as explicit vertical slices
 
 ## Phase 4: GuestFS and SSH Bridge Lifecycle Extraction
 
@@ -203,6 +229,7 @@ Acceptance:
 - later `v1.4` work can be developed against a stable non-REPL harness
 - the harness can boot, exec, and shut down a guest without depending on prompt
   parsing or human-oriented output
+- the harness remains the proving ground for the full Motlie-backed path
 
 ## Phase 6: Embedded Image / Union Binary Prototype
 
@@ -301,6 +328,8 @@ Tasks:
 
 Acceptance:
 - future Motlie development can use the harness as a standard development/test substrate
+- the crate also demonstrates a trivial standard hypervisor guest path through a
+  small example using the same lifecycle API
 
 ## Phase 10: Guest Reporting and Metrics
 

@@ -18,6 +18,14 @@
 - a thin harness flow that calls library `prepare()`, `boot()`,
   `VmHandle::ready(...)`, `VmHandle::exec(...)`, and `VmHandle::shutdown()`
 
+The intended end state is two parallel proof points:
+
+1. a full Motlie-backed path that validates guest behavior end to end through
+   the `v1.4` harness and scripts
+2. a minimal “hello world” path showing that the same library API can start a
+   simple standard Cloud Hypervisor guest without Motlie guestfs or Motlie
+   userspace vnet backing
+
 It is still intentionally incomplete compared with `v1.3`:
 
 - `repl_host_v1_4` is still narrower than the old `v1.3` operator surface

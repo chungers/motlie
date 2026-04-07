@@ -25,12 +25,21 @@ High-level status:
 - [x] Phase 2 reviewed API fully implemented in code
 - [x] Phase 3 modules added in code:
   - [x] `orchestrator.rs`
-  - [x] `backend.rs`
+  - [x] `backend/mod.rs`
+  - [x] `backend/ch/shell.rs`
 - [x] initial `examples/v1.4/repl_host_v1_4` exists and compiles against the
       library surface
 - [x] `libs/vmm/src/guestfs.rs` exists and is used by the `v1.4` harness
 - [x] initial `examples/v1.4/harness_v1_4` exists and runs against the library
       surface
+- [x] backend hierarchy is now explicitly split into:
+  - [x] `backend::ch`
+  - [x] placeholder `backend::motlie`
+  - [x] placeholder `backend::vz`
+- [ ] next guest-shape convergence:
+  - [ ] `VmSpec`
+  - [ ] `GuestBackends`
+  - [ ] simple CH “hello world” example over the same lifecycle API
 
 Phase 1 convergence:
 
@@ -86,28 +95,52 @@ Phase 3 initial implementation:
 - [x] backend shutdown now tracks the spawned child process directly and exits
       cleanly through CH API shutdown or `SIGTERM` before falling back to
       `SIGKILL`
+- [ ] next structural convergence:
+  - [ ] `GuestSpec { vm, user, ssh, software, backends }`
+  - [ ] `VmSpec`
+  - [ ] `GuestBackends`
+  - [ ] simple CH “hello world” example using the same lifecycle API
 
 ## Layering
 
 The intended layering is:
 
-- top layer: Motlie guest intent
-  - `guest_id`
-  - `hostname`
+- top layer: guest intent
   - `GuestUser`
   - `GuestSshAccess`
-  - mounts
-  - software
-- middle layer: bootable VM shape
+  - `SoftwareProfile`
+- portable VM slice
+  - `VmSpec`
   - `GuestResources`
   - `GuestStorage`
   - `BootArtifacts`
-  - network mode and allocated identities
-- bottom layer: backend realization
-  - Cloud Hypervisor shell launch
-  - Cloud Hypervisor fork/exec launch
-  - Cloud Hypervisor in-process VMM thread launch
-  - future `vz`
+- guest backing providers
+  - `GuestBackends`
+  - filesystem backing
+  - network backing
+  - control-plane backing
+- backend realization
+  - `backend::ch::*`
+  - `backend::motlie::*`
+  - `backend::vz::*`
+
+## Desired Usage Outcomes
+
+The API is aiming to support two equally explicit usage patterns:
+
+1. Motlie-backed guests
+   - guest backing providers such as Motlie guestfs, Motlie userspace vnet, and
+     the SSH proxy/control plane are composed through the library lifecycle API
+   - this is the path validated by the `v1.4` rootless harness
+
+2. Simple standard CH guests
+   - the same lifecycle API can boot a guest with ordinary hypervisor-managed
+     resources only
+   - no Motlie guestfs backing
+   - no Motlie userspace vnet backing
+   - this should be represented first by a small Cloud Hypervisor “hello world”
+     example over the same API surface
+   - the same slice should later map cleanly to `backend::vz::*`
 
 Important reviewed rule:
 
@@ -117,7 +150,65 @@ Important reviewed rule:
 - the design should translate almost mechanically into Cloud Hypervisor's
   internal `VmConfig`
 
-## Phase 1 Surface
+## Reviewed Next Surface
+
+```rust
+pub struct GuestSpec {
+    pub vm: VmSpec,
+    pub user: GuestUser,
+    pub ssh: GuestSshAccess,
+    pub software: SoftwareProfile,
+    pub backends: GuestBackends,
+}
+
+pub struct VmSpec {
+    pub guest_id: String,
+    pub hostname: String,
+    pub resources: GuestResources,
+    pub storage: GuestStorage,
+    pub boot: BootArtifacts,
+}
+
+pub struct GuestBackends {
+    pub filesystem: FilesystemBackendSpec,
+    pub network: NetworkBackendSpec,
+    pub control_plane: ControlPlaneBackendSpec,
+}
+
+pub enum FilesystemBackendSpec {
+    HostImageOnly,
+    MotlieVfs(MotlieVfsSpec),
+}
+
+pub enum NetworkBackendSpec {
+    None,
+    HypervisorManaged(HypervisorManagedNetworkSpec),
+    MotlieVnet(MotlieVnetSpec),
+    HypervisorManagedPlusMotlieVnet {
+        ingress: HypervisorManagedNetworkSpec,
+        egress: MotlieVnetSpec,
+    },
+}
+
+pub enum ControlPlaneBackendSpec {
+    None,
+    MotlieSshProxy,
+}
+```
+
+Reviewed intent:
+
+- `VmSpec` is the simple vertical slice for ordinary hypervisor guests
+- `GuestBackends` describes the real backing story for guest-visible
+  capabilities
+- Motlie guestfs and Motlie userspace vnet are not “sidecars”; they are actual
+  guest backing providers
+- the simple CH case is:
+  - `filesystem = HostImageOnly`
+  - `network = HypervisorManaged(...)`
+  - `control_plane = None`
+
+## Current Implemented Guest Shape
 
 ### `spec.rs`
 
@@ -352,7 +443,7 @@ Reviewed boundary:
 
 ## Phase 3 Surface
 
-### `backend.rs`
+### `backend/mod.rs`
 
 ```rust
 pub enum BackendKind {
@@ -381,16 +472,22 @@ pub trait VmBackend {
 pub enum BackendHandle {
     ChShell(ChShellHandle),
 }
+
+pub struct BackendSet {
+    pub ch_shell: backend::ch::shell::ChShellBackend,
+}
 ```
 
 Rules:
 
 - enum dispatch, not dynamic dispatch
 - all backends are known and implemented in-tree
-- `backend.rs` defines the generic contract only
-- backend-specific realization lives under `backends/`
-- `backends/ch_shell.rs` is the first implementation and preserves current
+- `backend/mod.rs` defines the generic contract only
+- backend-specific realization lives under `backend/`
+- `backend/ch/shell.rs` is the first implementation and preserves current
   `v1.3` shell/CLI behavior
+- generic orchestrator code should depend on an injected `BackendSet`, not
+  import `backend::ch::*` or `backend::vz::*` directly
 - readiness, SSH exec, validation, SSH CA, and guestfs semantics stay above the
   backend layer
 
@@ -447,7 +544,10 @@ pub struct ShutdownReport {
 }
 
 pub struct SshBridgeServices { /* ... */ }
-pub struct LifecycleServices { /* ... */ }
+pub struct LifecycleServices {
+    pub backends: std::sync::Arc<BackendSet>,
+    pub ssh_bridge: Option<SshBridgeServices>,
+}
 
 pub fn prepare(
     req: PrepareRequest,
@@ -481,6 +581,7 @@ let prepared = orchestrator::prepare(req, &mut allocator)?;
 let handle = orchestrator::boot(
     prepared,
     LifecycleServices {
+        backends: std::sync::Arc::new(BackendSet::default()),
         ssh_bridge: Some(SshBridgeServices::new(
             std::sync::Arc::clone(&ca),
             std::sync::Arc::clone(&guest_registry),
@@ -507,6 +608,9 @@ Current implementation note:
 - backend shutdown now owns the real child process state rather than polling
   `/proc`, so readiness and shutdown no longer treat exited CH processes as
   still alive zombies
+- VM backend dispatch is now injected through `BackendSet`
+- guest backing providers (`guestfs`, `motlie-vnet`, SSH bridge) are still
+  wired directly in orchestrator and are the next abstraction cleanup target
 
 ## Backend Transition Path
 

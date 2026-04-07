@@ -1,7 +1,11 @@
 use thiserror::Error;
 
-use crate::backends::ch_shell::{ChShellError, ChShellHandle};
+use crate::backend::ch::shell::{ChShellBackend, ChShellError, ChShellHandle};
 use crate::orchestrator::PreparedGuest;
+
+pub mod ch;
+pub mod motlie;
+pub mod vz;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
@@ -62,6 +66,8 @@ pub enum BackendError {
     },
     #[error(transparent)]
     ChShell(#[from] ChShellError),
+    #[error("backend {0:?} is not implemented yet")]
+    UnsupportedBackend(BackendKind),
     #[error("backend handle {actual:?} does not match expected backend {expected:?}")]
     HandleKindMismatch {
         expected: BackendKind,
@@ -74,4 +80,37 @@ pub trait VmBackend {
     fn capabilities(&self) -> VmBackendCapabilities;
     fn boot(&self, prepared: &PreparedGuest) -> Result<BackendHandle, BackendError>;
     fn shutdown(&self, handle: &BackendHandle) -> Result<BackendShutdownOutcome, BackendError>;
+}
+
+#[derive(Debug, Clone)]
+pub struct BackendSet {
+    pub ch_shell: ChShellBackend,
+}
+
+impl Default for BackendSet {
+    fn default() -> Self {
+        Self {
+            ch_shell: ChShellBackend::new(),
+        }
+    }
+}
+
+impl BackendSet {
+    pub fn boot(&self, prepared: &PreparedGuest) -> Result<BackendHandle, BackendError> {
+        match prepared.backend_kind {
+            BackendKind::ChShell => self.ch_shell.boot(prepared),
+            kind => Err(BackendError::UnsupportedBackend(kind)),
+        }
+    }
+
+    pub fn shutdown(
+        &self,
+        kind: BackendKind,
+        handle: &BackendHandle,
+    ) -> Result<BackendShutdownOutcome, BackendError> {
+        match kind {
+            BackendKind::ChShell => self.ch_shell.shutdown(handle),
+            kind => Err(BackendError::UnsupportedBackend(kind)),
+        }
+    }
 }
