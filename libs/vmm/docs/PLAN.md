@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-07 | @codex | Insert an explicit programmatic harness bootstrap phase after lifecycle extraction so later `v1.4` phases can build on a stable non-REPL substrate |
 | 2026-04-07 | @codex | Add an explicit auto-provisioning phase for new SSH principals and document the library-owned guest allocation policy |
 | 2026-04-07 | @codex | Add an explicit reporting/metrics phase for `v1.4`, using Cloud Hypervisor host-side API/event data plus guest-side SSH probes |
 | 2026-04-06 | @codex | Add explicit post-checkpoint plan for extracting a stable automation harness from `examples/v1.3` into reusable `libs/vmm/src` modules |
@@ -36,6 +37,7 @@ What is still missing for a polished, reusable harness:
 - a stable host-side + guest-side reporting surface for CPU/memory/disk/network
   visibility
 - automatic guest provisioning when a new SSH principal appears
+- an explicit programmatic harness layer that later phases can target directly
 
 ## Objective
 
@@ -120,7 +122,30 @@ Acceptance:
 - `repl_host_v1_3` does not manually coordinate SSH bridge and VFS listener state
 - guest lifecycle state is tracked by the library, not by ad hoc REPL maps
 
-## Phase 5: Automatic Guest Provisioning From SSH Principal
+## Phase 5: Programmatic Harness Bootstrap
+
+Goal:
+- create a stable, non-interactive `v1.4` harness substrate that later phases
+  can use directly during development and validation
+
+Tasks:
+- [ ] add a `v1.4`-owned non-interactive harness entrypoint under
+      `examples/v1.4/`
+- [ ] make it call library APIs instead of REPL command strings
+- [ ] support:
+  - [ ] `boot_and_wait`
+  - [ ] `exec`
+  - [ ] `shutdown_and_wait`
+  - [ ] machine-readable result output
+- [ ] keep it rootless/userspace-only
+- [ ] make it the default substrate for building later `v1.4` phases
+
+Acceptance:
+- later `v1.4` work can be developed against a stable non-REPL harness
+- the harness can boot, exec, and shut down a guest without depending on prompt
+  parsing or human-oriented output
+
+## Phase 6: Automatic Guest Provisioning From SSH Principal
 
 Goal:
 - let the library resolve or create guests on first SSH contact without
@@ -153,7 +178,7 @@ Acceptance:
 - assignments are stable across relaunch within the same harness run
 - capacity exhaustion fails with a typed error instead of producing collisions
 
-## Phase 6: Validation and Agent Harness Mode
+## Phase 7: Validation and Agent Harness Mode
 
 Goal:
 - provide a runnable, non-interactive harness for automation
@@ -175,7 +200,7 @@ Acceptance:
 - an agent can drive the harness without depending on the REPL prompt
 - validation returns machine-usable results rather than only stderr text
 
-## Phase 7: Polish and Hardening
+## Phase 8: Polish and Hardening
 
 Goal:
 - make the harness dependable infrastructure for future Motlie work
@@ -190,7 +215,7 @@ Tasks:
 Acceptance:
 - future Motlie development can use the harness as a standard development/test substrate
 
-## Phase 8: Guest Reporting and Metrics
+## Phase 9: Guest Reporting and Metrics
 
 Goal:
 - provide a reusable, machine-readable VM reporting surface for debugging,
