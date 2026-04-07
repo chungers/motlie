@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-07 | @codex | Add `libs/vmm/docs/API.md` as the running API review surface for `v1.4` extraction work |
 | 2026-04-07 | @codex | Add a `v1.4` embedded-image / union-binary phase: prototype bundling an opinionated guest image into the harness ELF and booting from memfd-backed artifacts |
 | 2026-04-07 | @codex | Insert an explicit `v1.4` programmatic harness bootstrap phase after lifecycle extraction so later phases build on a stable non-REPL substrate |
 | 2026-04-07 | @codex | Add a `v1.4` automatic guest provisioning phase driven by incoming SSH principals and document the library-owned CID/IP/MAC allocation story |
@@ -99,6 +100,15 @@ state?"
   REPL.
 - Add a programmatic harness substrate that can be used to iteratively build
   and validate later `v1.4` phases without coupling new work to REPL text/UI.
+
+## API Review
+
+The evolving review surface for the extracted library API lives in:
+
+- [API.md](/tmp/vmm-v1.4/libs/vmm/docs/API.md)
+
+This is where Phase 1+ type/module surfaces and example usage should be
+documented as extraction proceeds.
 - Explore a one-binary distribution model where the host harness embeds an
   opinionated guest image and can boot it without requiring a separate image
   bundle on disk.
