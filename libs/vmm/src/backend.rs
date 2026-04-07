@@ -4,7 +4,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -33,14 +34,15 @@ pub struct VmBackendCapabilities {
     pub supports_guest_metrics: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct ChShellHandle {
     pub pid: Option<u32>,
     pub launch_script_path: PathBuf,
     pub api_socket: PathBuf,
+    pub(crate) child: Mutex<Option<Child>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum BackendHandle {
     ChShell(ChShellHandle),
 }
@@ -61,6 +63,12 @@ impl BackendHandle {
     pub fn kind(&self) -> BackendKind {
         match self {
             Self::ChShell(_) => BackendKind::ChShell,
+        }
+    }
+
+    pub fn has_exited(&self) -> Result<bool, BackendError> {
+        match self {
+            Self::ChShell(handle) => handle.has_exited(),
         }
     }
 }
@@ -125,6 +133,8 @@ pub enum BackendError {
     KillProcessFailed { pid: u32, stderr: String },
     #[error("failed to issue API shutdown over {path}: {reason}")]
     ShutdownApi { path: PathBuf, reason: String },
+    #[error("backend child state poisoned")]
+    ChildStatePoisoned,
     #[error("backend handle {actual:?} does not match expected backend {expected:?}")]
     HandleKindMismatch {
         expected: BackendKind,
@@ -274,6 +284,31 @@ impl ChShellBackend {
             })
         }
     }
+
+    fn child_lock<'a>(
+        child: &'a Mutex<Option<Child>>,
+    ) -> Result<std::sync::MutexGuard<'a, Option<Child>>, BackendError> {
+        child.lock().map_err(|_| BackendError::ChildStatePoisoned)
+    }
+}
+
+impl ChShellHandle {
+    fn has_exited(&self) -> Result<bool, BackendError> {
+        let mut child = ChShellBackend::child_lock(&self.child)?;
+        let Some(running_child) = child.as_mut() else {
+            return Ok(self.pid.is_some());
+        };
+        match running_child.try_wait().map_err(|source| BackendError::KillProcess {
+            pid: self.pid.unwrap_or_default(),
+            source,
+        })? {
+            Some(_) => {
+                let _ = child.take();
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
 }
 
 impl VmBackend for ChShellBackend {
@@ -319,6 +354,7 @@ impl VmBackend for ChShellBackend {
             pid: Some(child.id()),
             launch_script_path,
             api_socket: prepared.runtime_paths.api_socket.clone(),
+            child: Mutex::new(Some(child)),
         }))
     }
 
@@ -337,7 +373,7 @@ impl VmBackend for ChShellBackend {
             if Self::request_api_shutdown(&shell_handle.api_socket).is_ok() {
                 let deadline = Instant::now() + CH_SHELL_SHUTDOWN_TIMEOUT;
                 while Instant::now() < deadline {
-                    if !process_exists(pid) {
+                    if shell_handle.has_exited()? {
                         return Ok(BackendShutdownOutcome {
                             api_attempted,
                             forced: None,
@@ -351,7 +387,7 @@ impl VmBackend for ChShellBackend {
         Self::signal_process(pid, "-TERM")?;
         let deadline = Instant::now() + CH_SHELL_SHUTDOWN_TIMEOUT;
         while Instant::now() < deadline {
-            if !process_exists(pid) {
+            if shell_handle.has_exited()? {
                 return Ok(BackendShutdownOutcome {
                     api_attempted,
                     forced: Some("term"),
@@ -360,7 +396,16 @@ impl VmBackend for ChShellBackend {
             thread::sleep(CH_SHELL_SHUTDOWN_POLL);
         }
 
-        Self::signal_process(pid, "-KILL")?;
+        {
+            let mut child = Self::child_lock(&shell_handle.child)?;
+            if let Some(child) = child.as_mut() {
+                child.kill().map_err(|source| BackendError::KillProcess { pid, source })?;
+                let _ = child.wait().map_err(|source| BackendError::KillProcess { pid, source })?;
+            } else if process_exists(pid) {
+                Self::signal_process(pid, "-KILL")?;
+            }
+            *child = None;
+        }
         Ok(BackendShutdownOutcome {
             api_attempted,
             forced: Some("kill"),
@@ -505,10 +550,10 @@ mod tests {
 
         let backend = ChShellBackend::new();
         let handle = backend.boot(&prepared).unwrap();
-        let pid = handle.pid().unwrap();
-        assert!(process_exists(pid));
+        assert!(!handle.has_exited().unwrap());
 
         let outcome = backend.shutdown(&handle).unwrap();
-        assert!(matches!(outcome.forced, None | Some("kill")));
+        assert!(matches!(outcome.forced, None | Some("term") | Some("kill")));
+        assert!(handle.has_exited().unwrap());
     }
 }

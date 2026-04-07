@@ -83,9 +83,9 @@ Phase 3 initial implementation:
 - [x] guestfs / SSH bridge / exec-ready readiness gates beyond API socket
 - [x] `boot(...)` provisions guestfs and optional rootless `vhost-user` egress
 - [x] `boot(...)` can spawn the guest SSH bridge through lifecycle services
-- [ ] graceful backend shutdown still prefers fallback `TERM`/`KILL` in current
-      practice; the API is complete, but clean CH API shutdown is still a
-      quality follow-up
+- [x] backend shutdown now tracks the spawned child process directly and exits
+      cleanly through CH API shutdown or `SIGTERM` before falling back to
+      `SIGKILL`
 
 ## Layering
 
@@ -504,8 +504,9 @@ Current implementation note:
 
 - `VmHandle::ready(...)` now covers API socket, guestfs, SSH bridge, and a
   simple exec-ready probe
-- graceful backend shutdown still tends to use fallback `TERM`/`KILL` in
-  current practice even though the API owns that path
+- backend shutdown now owns the real child process state rather than polling
+  `/proc`, so readiness and shutdown no longer treat exited CH processes as
+  still alive zombies
 
 ## Backend Transition Path
 
