@@ -75,14 +75,17 @@ Phase 3 initial implementation:
 - [x] `ChShellBackend`
 - [x] `prepare(...)`
 - [x] `boot(...)`
+- [x] `LifecycleServices`
+- [x] `SshBridgeServices`
 - [x] `VmHandle::ready(...)`
+- [x] `VmHandle::exec(...)`
 - [x] `VmHandle::shutdown(...)`
-- [ ] guestfs / SSH bridge / exec-ready readiness gates beyond API socket
-  - current status:
-    - `VmHandle::ready(...)` covers API socket
-    - the `v1.4` harness composes guestfs readiness, SSH bridge readiness,
-      programmatic exec, VFS validation, and rootless egress validation above
-      the handle API
+- [x] guestfs / SSH bridge / exec-ready readiness gates beyond API socket
+- [x] `boot(...)` provisions guestfs and optional rootless `vhost-user` egress
+- [x] `boot(...)` can spawn the guest SSH bridge through lifecycle services
+- [ ] graceful backend shutdown still prefers fallback `TERM`/`KILL` in current
+      practice; the API is complete, but clean CH API shutdown is still a
+      quality follow-up
 
 ## Layering
 
@@ -443,17 +446,29 @@ pub struct ShutdownReport {
     pub forced: Option<&'static str>,
 }
 
+pub struct SshBridgeServices { /* ... */ }
+pub struct LifecycleServices { /* ... */ }
+
 pub fn prepare(
     req: PrepareRequest,
     allocator: &mut GuestNetAllocator,
 ) -> Result<PreparedGuest, OrchestratorError>;
-pub fn boot(prepared: PreparedGuest) -> Result<VmHandle, OrchestratorError>;
+pub async fn boot(
+    prepared: PreparedGuest,
+    services: LifecycleServices,
+) -> Result<VmHandle, OrchestratorError>;
 
 impl VmHandle {
     pub async fn ready(
         &self,
         policy: &ReadinessPolicy,
     ) -> Result<(), OrchestratorError>;
+
+    pub async fn exec(
+        &self,
+        command: &str,
+        timeout: std::time::Duration,
+    ) -> Result<crate::ssh::ExecOutput, OrchestratorError>;
 
     pub async fn shutdown(&self) -> Result<ShutdownReport, OrchestratorError>;
 }
@@ -463,7 +478,15 @@ Example:
 
 ```rust
 let prepared = orchestrator::prepare(req, &mut allocator)?;
-let handle = orchestrator::boot(prepared)?;
+let handle = orchestrator::boot(
+    prepared,
+    LifecycleServices {
+        ssh_bridge: Some(SshBridgeServices::new(
+            std::sync::Arc::clone(&ca),
+            std::sync::Arc::clone(&guest_registry),
+        )),
+    },
+).await?;
 
 handle.ready(&ReadinessPolicy {
     api_socket_timeout: std::time::Duration::from_secs(10),
@@ -471,12 +494,18 @@ handle.ready(&ReadinessPolicy {
     ssh_bridge_timeout: std::time::Duration::from_secs(15),
     exec_ready_timeout: std::time::Duration::from_secs(20),
 }).await?;
+
+let out = handle
+    .exec("/bin/echo hello", std::time::Duration::from_secs(10))
+    .await?;
 ```
 
 Current implementation note:
 
-- `VmHandle::ready(...)` currently waits only for the API socket stage
-- the later guestfs / SSH bridge / exec-ready stages remain Phase 3 follow-up
+- `VmHandle::ready(...)` now covers API socket, guestfs, SSH bridge, and a
+  simple exec-ready probe
+- graceful backend shutdown still tends to use fallback `TERM`/`KILL` in
+  current practice even though the API owns that path
 
 ## Backend Transition Path
 

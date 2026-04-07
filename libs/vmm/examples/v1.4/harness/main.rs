@@ -3,21 +3,18 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use motlie_vnet::{VnetBackend, VnetConfig, VnetHandle};
 use motlie_vmm::backend::BackendKind;
 use motlie_vmm::ca::SshCa;
-use motlie_vmm::guestfs::GuestFsHandle;
 use motlie_vmm::network::{AdminNetMode, EgressNetMode, NetworkModes};
 use motlie_vmm::network_alloc::{GuestNetAllocator, GuestNetAllocatorConfig};
-use motlie_vmm::orchestrator::{PrepareRequest, PreparedGuest, ReadinessPolicy, boot, prepare};
+use motlie_vmm::orchestrator::{
+    LifecycleServices, PrepareRequest, ReadinessPolicy, SshBridgeServices, boot, prepare,
+};
 use motlie_vmm::spec::{
     BootArtifacts, GuestMountSpec, GuestResources, GuestSpec, GuestSshAccess, GuestStorage,
     GuestUser, RuntimeNamespace, SoftwareProfile,
 };
-use motlie_vmm::ssh::{
-    self, ExecOutput, GuestRegistry, SshProxyConfig, exec_on_guest, new_guest_registry,
-    wait_for_guest_bridge_ready,
-};
+use motlie_vmm::ssh::{self, ExecOutput, SshProxyConfig, new_guest_registry};
 use tokio::time::sleep;
 
 type DynError = Box<dyn std::error::Error + Send + Sync>;
@@ -44,7 +41,6 @@ async fn main() -> Result<(), DynError> {
     };
     tokio::spawn(ssh::run_proxy(proxy_config.clone(), Arc::clone(&guest_registry)));
 
-    let guestfs = GuestFsHandle::provision(&guest).await?;
     let mut allocator = GuestNetAllocator::new(GuestNetAllocatorConfig {
         socket_dir: socket_root,
         ..GuestNetAllocatorConfig::default()
@@ -63,45 +59,30 @@ async fn main() -> Result<(), DynError> {
         },
         &mut allocator,
     )?;
-    let mut vnet = Some(start_vnet_backend(&prepared)?);
-
-    let (ssh_listener, _uds_path) = ssh::bind_vsock_ssh_listener(
-        prepared.runtime_paths.vsock_socket.to_string_lossy().as_ref(),
-    )?;
-    tokio::spawn(ssh::run_guest_ssh_bridge(
-        ssh_listener,
-        ssh::vsock_ssh_uds_path(prepared.runtime_paths.vsock_socket.to_string_lossy().as_ref()),
-        Arc::clone(&ca),
-        prepared.guest.guest_id.clone(),
-        Arc::clone(&guest_registry),
-    ));
-
-    let handle = boot(prepared)?;
-    handle.ready(&ReadinessPolicy::default()).await?;
-    guestfs.wait_until_ready(Duration::from_secs(20)).await?;
-    wait_for_guest_bridge_ready(&guest_registry, &handle.guest_id, Duration::from_secs(20)).await?;
-
-    let hello = exec_on_guest(
-        &guest_registry,
-        &handle.guest_id,
-        "/bin/echo hello",
-        Duration::from_secs(10),
+    let handle = boot(
+        prepared,
+        LifecycleServices {
+            ssh_bridge: Some(SshBridgeServices::new(
+                Arc::clone(&ca),
+                Arc::clone(&guest_registry),
+            )),
+        },
     )
     .await?;
+    handle.ready(&ReadinessPolicy::default()).await?;
+    let hello = handle.exec("/bin/echo hello", Duration::from_secs(10)).await?;
     ensure_success(&hello.stdout, "hello")?;
 
-    let vfs = exec_on_guest(
-        &guest_registry,
-        &handle.guest_id,
+    let vfs = handle
+        .exec(
         "/bin/sh -lc 'pwd && test -d /home/alice && test -d /workspace && test -d /agent-state && grep -q \"Alice workspace mounted from the host.\" /workspace/README.md && echo VFS_OK'",
         Duration::from_secs(10),
     )
-    .await?;
+        .await?;
     ensure_success(&vfs.stdout, "VFS_OK")?;
 
     let route = exec_until_success(
-        &guest_registry,
-        &handle.guest_id,
+        &handle,
         r#"/bin/sh -lc 'ip route | grep -q "^default via 10.0.2.2 " && echo ROUTE_OK'"#,
         "ROUTE_OK",
         Duration::from_secs(10),
@@ -110,8 +91,7 @@ async fn main() -> Result<(), DynError> {
     ensure_success(&route.stdout, "ROUTE_OK")?;
 
     let outbound = exec_until_success(
-        &guest_registry,
-        &handle.guest_id,
+        &handle,
         r#"/bin/sh -lc 'code=$(curl -s -o /dev/null -w "%{http_code}" https://example.com); test "$code" = 200 && echo HTTPS_OK'"#,
         "HTTPS_OK",
         Duration::from_secs(20),
@@ -120,9 +100,6 @@ async fn main() -> Result<(), DynError> {
     ensure_success(&outbound.stdout, "HTTPS_OK")?;
 
     let report = handle.shutdown().await?;
-    if let Some(vnet) = vnet.as_mut() {
-        vnet.shutdown()?;
-    }
     println!(
         "v1.4 harness smoke passed: guest={} pid={:?} forced={:?} proxy=127.0.0.1:{}",
         handle.guest_id,
@@ -206,24 +183,8 @@ fn seed_host_mounts(guest: &GuestSpec) -> Result<(), DynError> {
     Ok(())
 }
 
-fn start_vnet_backend(prepared: &PreparedGuest) -> Result<VnetHandle, DynError> {
-    if let Some(parent) = prepared.runtime_paths.vnet_socket.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let config = VnetConfig::builder()
-        .socket_path(&prepared.runtime_paths.vnet_socket)
-        .guest_ipv4(prepared.net_assignment.egress_ipv4.guest)
-        .host_ipv4(prepared.net_assignment.egress_ipv4.host)
-        .netmask(prepared.net_assignment.egress_ipv4.netmask)
-        .dns_ipv4(prepared.net_assignment.egress_ipv4.dns)
-        .mac(prepared.net_assignment.egress_mac)
-        .build()?;
-    Ok(VnetBackend::new(config).start()?)
-}
-
 async fn exec_until_success(
-    guest_registry: &GuestRegistry,
-    guest_id: &str,
+    handle: &motlie_vmm::orchestrator::VmHandle,
     command: &str,
     needle: &str,
     timeout: Duration,
@@ -231,7 +192,7 @@ async fn exec_until_success(
     let deadline = tokio::time::Instant::now() + timeout;
     let mut last_output: Option<ExecOutput> = None;
     loop {
-        match exec_on_guest(guest_registry, guest_id, command, Duration::from_secs(10)).await {
+        match handle.exec(command, Duration::from_secs(10)).await {
             Ok(output) if output.exit_code == 0 && output.stdout.contains(needle) => return Ok(output),
             Ok(output) => last_output = Some(output),
             Err(_) => {}

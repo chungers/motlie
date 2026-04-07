@@ -133,13 +133,15 @@ Tasks:
 - [x] add `boot()`
 - [x] add handle-based readiness:
   - [x] `VmHandle::ready(&ReadinessPolicy)`
+- [x] add handle-based exec:
+  - [x] `VmHandle::exec(...)`
 - [x] add handle-based shutdown:
   - [x] `VmHandle::shutdown()`
-- [ ] add explicit readiness gates:
+- [x] add explicit readiness gates:
   - [x] API socket ready
-  - [ ] guestfs connected
-  - [ ] SSH bridge connected
-  - [ ] exec-ready probe
+  - [x] guestfs connected
+  - [x] SSH bridge connected
+  - [x] exec-ready probe
 - [x] make CH-shaped boot inputs flow through:
   - [x] `GuestResources`
   - [x] `GuestStorage`
@@ -151,7 +153,8 @@ Tasks:
 - [x] make backend dispatch enum-based, not dynamically discovered
 - [x] add the first backend implementation:
   - [x] `ChShellBackend`
-  - [ ] keep it semantically equivalent to current `v1.3` shell/CLI behavior
+  - [x] keep it close enough to current `v1.3` shell/CLI behavior to boot and
+        validate the `v1.4` harness
 
 Acceptance:
 - a caller can block until a guest is actually usable
@@ -168,8 +171,8 @@ Tasks:
 - [x] add `libs/vmm/src/guestfs.rs`
 - [x] move guest provisioning and mount attachment there
 - [x] move guest listener spawn logic there
-- [ ] move SSH bridge accept/register lifecycle out of `repl_host.rs`
-- [ ] unify guest launch/SSH handle/vnet/VFS state into one library-owned handle
+- [x] move SSH bridge accept/register lifecycle out of the `v1.4` harness path
+- [x] unify guest launch/SSH handle/vnet/VFS state into one library-owned handle
 
 Acceptance:
 - `repl_host_v1_3` does not manually coordinate SSH bridge and VFS listener state

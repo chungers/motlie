@@ -7,6 +7,7 @@ use motlie_vfs::core::server::FsServer;
 use motlie_vfs::vsock::handler::VsockConnectionHandler;
 use thiserror::Error;
 use tokio::net::UnixListener;
+use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep};
 
 use crate::spec::{GuestMountSpec, GuestSpec};
@@ -39,6 +40,12 @@ pub enum GuestFsError {
     AddMount { tag: String, reason: String },
     #[error("timed out waiting for guestfs mount readiness for guest '{guest_id}'")]
     WaitForMounts { guest_id: String },
+    #[error("failed to remove guestfs socket {path}: {source}")]
+    CleanupSocket {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 pub struct GuestFsHandle {
@@ -47,6 +54,7 @@ pub struct GuestFsHandle {
     server: Arc<FsServer>,
     required_mount_tags: Vec<String>,
     connected_mount_tags: Arc<tokio::sync::Mutex<HashSet<String>>>,
+    task: std::sync::Mutex<Option<JoinHandle<()>>>,
 }
 
 impl GuestFsHandle {
@@ -85,7 +93,7 @@ impl GuestFsHandle {
         }
 
         let connected_mount_tags = Arc::new(tokio::sync::Mutex::new(HashSet::new()));
-        spawn_guest_listener(
+        let task = spawn_guest_listener(
             guest.guest_id.clone(),
             listener,
             Arc::clone(&server),
@@ -98,6 +106,7 @@ impl GuestFsHandle {
             server,
             required_mount_tags,
             connected_mount_tags,
+            task: std::sync::Mutex::new(Some(task)),
         })
     }
 
@@ -135,6 +144,23 @@ impl GuestFsHandle {
     pub fn has_mount(&self, tag: &str) -> bool {
         self.server.has_mount(tag)
     }
+
+    pub fn shutdown(&self) -> Result<(), GuestFsError> {
+        if let Ok(mut task) = self.task.lock() {
+            if let Some(task) = task.take() {
+                task.abort();
+            }
+        }
+        if let Err(source) = std::fs::remove_file(&self.socket_path) {
+            if source.kind() != std::io::ErrorKind::NotFound {
+                return Err(GuestFsError::CleanupSocket {
+                    path: self.socket_path.clone(),
+                    source,
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 fn add_mount_to_server(
@@ -161,7 +187,7 @@ fn spawn_guest_listener(
     listener: UnixListener,
     server: Arc<FsServer>,
     connected_mount_tags: Arc<tokio::sync::Mutex<HashSet<String>>>,
-) {
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             match listener.accept().await {
@@ -199,7 +225,7 @@ fn spawn_guest_listener(
                 }
             }
         }
-    });
+    })
 }
 
 #[cfg(test)]

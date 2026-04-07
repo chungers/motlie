@@ -34,6 +34,7 @@ use russh::server::{Auth, Msg, Session};
 use russh::{Channel, ChannelMsg, ChannelWriteHalf, Pty};
 use thiserror::Error;
 use tokio::net::UnixListener;
+use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep};
 
 use crate::ca::{CaError, SshCa};
@@ -125,6 +126,41 @@ pub fn new_guest_registry() -> GuestRegistry {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
+pub struct GuestBridgeHandle {
+    guest_name: String,
+    uds_path: PathBuf,
+    registry: GuestRegistry,
+    task: std::sync::Mutex<Option<JoinHandle<()>>>,
+}
+
+impl GuestBridgeHandle {
+    pub async fn wait_ready(&self, timeout: Duration) -> Result<(), SshProxyError> {
+        wait_for_guest_bridge_ready(&self.registry, &self.guest_name, timeout).await
+    }
+
+    pub async fn exec(&self, command: &str, timeout: Duration) -> Result<ExecOutput, SshProxyError> {
+        exec_on_guest(&self.registry, &self.guest_name, command, timeout).await
+    }
+
+    pub fn shutdown(&self) -> Result<(), SshProxyError> {
+        if let Ok(mut task) = self.task.lock() {
+            if let Some(task) = task.take() {
+                task.abort();
+            }
+        }
+        clear_guest_handle(&self.registry, &self.guest_name)?;
+        if let Err(source) = std::fs::remove_file(&self.uds_path) {
+            if source.kind() != ErrorKind::NotFound {
+                return Err(SshProxyError::Ssh(format!(
+                    "failed to remove guest bridge socket {}: {source}",
+                    self.uds_path.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 fn default_pty_modes() -> Vec<(Pty, u32)> {
     vec![
         (Pty::VINTR, 3),
@@ -199,6 +235,16 @@ fn clear_guest_handle_if_matches(
         {
             endpoint.ssh_handle = None;
         }
+    }
+    Ok(())
+}
+
+fn clear_guest_handle(registry: &GuestRegistry, guest_name: &str) -> Result<(), SshProxyError> {
+    let mut registry = registry
+        .lock()
+        .map_err(|_| SshProxyError::StatePoisoned("guest registry"))?;
+    if let Some(endpoint) = registry.get_mut(guest_name) {
+        endpoint.ssh_handle = None;
     }
     Ok(())
 }
@@ -314,6 +360,28 @@ pub async fn run_guest_ssh_bridge(
             }
         }
     }
+}
+
+pub fn spawn_guest_ssh_bridge(
+    vsock_socket: &str,
+    ca: Arc<SshCa>,
+    guest_name: String,
+    registry: GuestRegistry,
+) -> Result<GuestBridgeHandle, SshProxyError> {
+    let (listener, uds_path) = bind_vsock_ssh_listener(vsock_socket)?;
+    let task = tokio::spawn(run_guest_ssh_bridge(
+        listener,
+        uds_path.clone(),
+        ca,
+        guest_name.clone(),
+        Arc::clone(&registry),
+    ));
+    Ok(GuestBridgeHandle {
+        guest_name,
+        uds_path,
+        registry,
+        task: std::sync::Mutex::new(Some(task)),
+    })
 }
 
 async fn open_guest_session_with_retry(
