@@ -386,23 +386,49 @@ for user_name in alice bob; do
 done
 AGENTSVCEOF' \
     --customize-hook='chmod 755 "$1/usr/local/bin/motlie-agent-state-setup"' \
-    --customize-hook="cat > \"\$1/etc/systemd/network/20-egress.network\" << \"NETEOF\"
-[Match]
-Name=eth1
-MACAddress=$EGRESS_MAC
-
-[Network]
-ConfigureWithoutCarrier=yes
-NETEOF" \
+    --customize-hook='mkdir -p "$1/etc/motlie-vmm"' \
     --customize-hook='cat > "$1/usr/local/bin/motlie-vmm-egress-setup" << "EGRESSEOF"
 #!/bin/sh
 set -eu
 
-ip link set eth1 up || exit 0
-ip addr replace 10.0.2.15/24 dev eth1
-ip route replace 10.0.2.0/24 dev eth1 scope link src 10.0.2.15
-ip route replace default via 10.0.2.2 dev eth1 metric 100
-ip route del default dev eth0 2>/dev/null || true
+EGRESS_MAC_FILE="/etc/motlie-vmm/egress.mac"
+EGRESS_IFACE=""
+
+if [ ! -f "$EGRESS_MAC_FILE" ]; then
+    echo "motlie-vmm-egress-setup: missing $EGRESS_MAC_FILE" >&2
+    exit 1
+fi
+
+EGRESS_MAC="$(cat "$EGRESS_MAC_FILE")"
+[ -n "$EGRESS_MAC" ] || {
+    echo "motlie-vmm-egress-setup: empty egress MAC" >&2
+    exit 1
+}
+
+for _attempt in $(seq 1 30); do
+    for candidate in /sys/class/net/*; do
+        [ -e "$candidate/address" ] || continue
+        candidate_mac="$(cat "$candidate/address" 2>/dev/null || true)"
+        if [ "$candidate_mac" = "$EGRESS_MAC" ]; then
+            EGRESS_IFACE="$(basename "$candidate")"
+            break
+        fi
+    done
+    [ -n "$EGRESS_IFACE" ] && break
+    sleep 1
+done
+
+[ -n "$EGRESS_IFACE" ] || {
+    echo "motlie-vmm-egress-setup: interface with MAC $EGRESS_MAC not found" >&2
+    exit 1
+}
+
+mkdir -p /run
+ln -sf "/sys/class/net/$EGRESS_IFACE" /run/motlie-vmm-egress.link
+ip link set "$EGRESS_IFACE" up || exit 0
+ip addr replace 10.0.2.15/24 dev "$EGRESS_IFACE"
+ip route replace 10.0.2.0/24 dev "$EGRESS_IFACE" scope link src 10.0.2.15
+ip route replace default via 10.0.2.2 dev "$EGRESS_IFACE" metric 100
 cat > /etc/resolv.conf << "RESOLVEOF"
 nameserver 10.0.2.3
 options edns0
@@ -457,7 +483,6 @@ AGENTUNITEOF' \
 Description=Configure static v1.3 egress NIC
 After=systemd-networkd.service
 Wants=systemd-networkd.service
-ConditionPathExists=/sys/class/net/eth1
 
 [Service]
 Type=oneshot
@@ -530,4 +555,4 @@ echo "  kernel:   $KERNEL_SIZE  ($BASE_KERNEL)"
 echo "  rootfs:   $ROOTFS_SIZE  ($BASE_ROOTFS)"
 echo "  combined: $COMBINED_SIZE  (kernel + squashfs)"
 echo ""
-echo "Next: ./launch-ch.sh --guest alice --admin-net=tap --egress-net=tap"
+echo "Next: ./launch-ch.sh --guest alice --admin-net=none --egress-net=vhost-user"

@@ -107,12 +107,12 @@ use tokio::net::UnixListener;
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 
-use motlie_vnet::{VnetBackend, VnetConfig, VnetHandle};
-use motlie_vmm::ca::SshCa;
-use motlie_vmm::ssh::{self, GuestRegistry, SshProxyConfig};
 use motlie_vfs::core::overlay::OverlayAttrs;
 use motlie_vfs::core::server::FsServer;
 use motlie_vfs::vsock::handler::VsockConnectionHandler;
+use motlie_vmm::ca::SshCa;
+use motlie_vmm::ssh::{self, GuestRegistry, SshProxyConfig};
+use motlie_vnet::{VnetBackend, VnetConfig, VnetHandle};
 
 fn build_git_sha() -> &'static str {
     option_env!("MOTLIE_VMM_BUILD_GIT_SHA").unwrap_or("unknown")
@@ -202,10 +202,11 @@ impl EgressNet {
 fn validate_network_modes(admin_net: AdminNet, egress_net: EgressNet) -> Result<()> {
     match (admin_net, egress_net) {
         (AdminNet::None, EgressNet::None)
+        | (AdminNet::None, EgressNet::VhostUser)
         | (AdminNet::Tap, EgressNet::Tap)
         | (AdminNet::Tap, EgressNet::VhostUser) => Ok(()),
         _ => anyhow::bail!(
-            "supported launch modes are --admin-net=none --egress-net=none, --admin-net=tap --egress-net=tap, and --admin-net=tap --egress-net=vhost-user"
+            "supported launch modes are --admin-net=none --egress-net=none, --admin-net=none --egress-net=vhost-user, --admin-net=tap --egress-net=tap, and --admin-net=tap --egress-net=vhost-user"
         ),
     }
 }
@@ -267,7 +268,6 @@ fn ensure_net_alloc<'a>(admin: &'a mut AdminState, guest_name: &str) -> &'a Gues
     }
     admin.net_allocs.get(guest_name).unwrap()
 }
-
 
 enum MountSpec {
     Single {
@@ -915,14 +915,14 @@ fn add_guest_mount(admin: &mut AdminState, guest_name: &str, mount: ConfiguredMo
     if runtime.server.has_mount(&mount.tag) {
         anyhow::bail!("guest '{guest_name}' already has mount '{}'", mount.tag);
     }
-    runtime
-        .server
-        .add_mount_as(
-            &mount.tag,
-            mount.host_path.clone(),
-            false,
-            runtime.identity.map(|identity| (identity.uid, identity.gid)),
-        )?;
+    runtime.server.add_mount_as(
+        &mount.tag,
+        mount.host_path.clone(),
+        false,
+        runtime
+            .identity
+            .map(|identity| (identity.uid, identity.gid)),
+    )?;
     seed_demo_host_mount(guest_name, &mount)?;
     runtime.mounts.push(mount);
     Ok(())
@@ -950,16 +950,27 @@ fn seed_demo_host_mount(guest_name: &str, mount: &ConfiguredMount) -> Result<()>
     fs::create_dir_all(mount.host_path.join(".config"))?;
     fs::create_dir_all(mount.host_path.join(".ssh"))?;
     #[cfg(unix)]
-    fs::set_permissions(mount.host_path.join(".ssh"), fs::Permissions::from_mode(0o700))?;
+    fs::set_permissions(
+        mount.host_path.join(".ssh"),
+        fs::Permissions::from_mode(0o700),
+    )?;
 
     let authorized_key = format!("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample {guest_name}@dev\n");
     let ssh_config = "Host github.com\n  User git\n";
     let env_content = format!("{}_API_KEY=demo-{guest_name}\n", guest_name.to_uppercase());
 
-    write_host_file_if_missing(&mount.host_path.join(".ssh/authorized_keys"), &authorized_key, 0o600)?;
+    write_host_file_if_missing(
+        &mount.host_path.join(".ssh/authorized_keys"),
+        &authorized_key,
+        0o600,
+    )?;
     write_host_file_if_missing(&mount.host_path.join(".ssh/config"), ssh_config, 0o644)?;
     write_host_file_if_missing(&mount.host_path.join(".env"), &env_content, 0o644)?;
-    write_host_file_if_missing(&mount.host_path.join(".bashrc"), "# motlie v1.3 demo bashrc\n", 0o644)?;
+    write_host_file_if_missing(
+        &mount.host_path.join(".bashrc"),
+        "# motlie v1.3 demo bashrc\n",
+        0o644,
+    )?;
     write_host_file_if_missing(
         &mount.host_path.join(".profile"),
         "if [ -f \"$HOME/.bashrc\" ]; then\n  . \"$HOME/.bashrc\"\nfi\n",
@@ -1058,11 +1069,7 @@ fn render_launch_script(
         )?;
     }
     if let Some(ca_pubkey) = ssh_ca_pubkey {
-        writeln!(
-            &mut out,
-            "SSH_CA_PUBKEY={}",
-            shell_single_quote(ca_pubkey)
-        )?;
+        writeln!(&mut out, "SSH_CA_PUBKEY={}", shell_single_quote(ca_pubkey))?;
     }
     out.push_str("INSTANCE_ID=\"${INSTANCE_ID:-${GUEST_ID}}\"\n");
     out.push_str("LOCAL_HOSTNAME=\"${LOCAL_HOSTNAME:-motlie-${GUEST_ID}}\"\n");
@@ -1087,17 +1094,40 @@ fn render_launch_script(
     }
     // Per-guest network parameters passed as explicit flags so launch-ch.sh
     // has no hardcoded guest names.
-    let mac_fmt = |m: &[u8; 6]| format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", m[0], m[1], m[2], m[3], m[4], m[5]);
+    let mac_fmt = |m: &[u8; 6]| {
+        format!(
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            m[0], m[1], m[2], m[3], m[4], m[5]
+        )
+    };
     writeln!(&mut out, "GUEST_CID={}", net.cid)?;
     writeln!(&mut out, "HOST_IP={}", net.host_ip)?;
     writeln!(&mut out, "GUEST_IP={}", net.guest_ip)?;
-    writeln!(&mut out, "ADMIN_MAC={}", shell_single_quote(&mac_fmt(&net.admin_mac)))?;
-    writeln!(&mut out, "EGRESS_MAC={}", shell_single_quote(&mac_fmt(&net.egress_mac)))?;
+    writeln!(
+        &mut out,
+        "ADMIN_MAC={}",
+        shell_single_quote(&mac_fmt(&net.admin_mac))
+    )?;
+    writeln!(
+        &mut out,
+        "EGRESS_MAC={}",
+        shell_single_quote(&mac_fmt(&net.egress_mac))
+    )?;
     writeln!(&mut out, "SSH_USER={}", shell_single_quote(guest_name))?;
-    writeln!(&mut out, "GUEST_HOSTNAME={}", shell_single_quote(&format!("motlie-{guest_name}")))?;
-    writeln!(&mut out, "LOGIN_HOME={}", shell_single_quote(&format!("/home/{guest_name}")))?;
+    writeln!(
+        &mut out,
+        "GUEST_HOSTNAME={}",
+        shell_single_quote(&format!("motlie-{guest_name}"))
+    )?;
+    writeln!(
+        &mut out,
+        "LOGIN_HOME={}",
+        shell_single_quote(&format!("/home/{guest_name}"))
+    )?;
     out.push_str("LAUNCH_ARGS=(--guest \"$GUEST_ID\" --cloud-init-dir \"$SEED_DIR\" --admin-net \"$ADMIN_NET\" --egress-net \"$EGRESS_NET\")\n");
-    out.push_str("LAUNCH_ARGS+=(--cid \"$GUEST_CID\" --host-ip \"$HOST_IP\" --guest-ip \"$GUEST_IP\")\n");
+    out.push_str(
+        "LAUNCH_ARGS+=(--cid \"$GUEST_CID\" --host-ip \"$HOST_IP\" --guest-ip \"$GUEST_IP\")\n",
+    );
     out.push_str("LAUNCH_ARGS+=(--admin-mac \"$ADMIN_MAC\" --egress-mac \"$EGRESS_MAC\")\n");
     out.push_str("LAUNCH_ARGS+=(--ssh-user \"$SSH_USER\" --hostname \"$GUEST_HOSTNAME\" --login-home \"$LOGIN_HOME\")\n");
     if egress_net == EgressNet::VhostUser {
@@ -1275,10 +1305,15 @@ fn shutdown_guest(guest_name: &str, pid: Option<u32>) -> Result<ShutdownOutcome>
     } else if body.is_empty() {
         Some(format!("shutdown API returned HTTP {}", http_code))
     } else {
-        Some(format!("shutdown API returned HTTP {}: {}", http_code, body))
+        Some(format!(
+            "shutdown API returned HTTP {}: {}",
+            http_code, body
+        ))
     };
 
-    if api_failure.is_none() && wait_for_guest_exit(guest_name, pid, Duration::from_secs(15)).is_ok() {
+    if api_failure.is_none()
+        && wait_for_guest_exit(guest_name, pid, Duration::from_secs(15)).is_ok()
+    {
         return Ok(ShutdownOutcome {
             pid,
             api_failure,
@@ -1726,8 +1761,7 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
                         vnet_socket.as_ref(),
                         ca_pubkey.as_deref(),
                     )
-                })
-            {
+                }) {
                 Ok(script) => {
                     if render_only {
                         emit_raw(script);
@@ -1835,11 +1869,10 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
                 }
             };
             emit_status(admin, format!("exec {guest_name}: {command}"));
-            match admin.runtime.block_on(ssh::exec_on_handle(
-                &ssh_handle,
-                guest_name,
-                &command,
-            )) {
+            match admin
+                .runtime
+                .block_on(ssh::exec_on_handle(&ssh_handle, guest_name, &command))
+            {
                 Ok(output) => {
                     if !output.stdout.is_empty() {
                         emit_raw(&output.stdout);
@@ -1869,41 +1902,81 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
             let ssh_handle = match ssh_handle {
                 Some(h) => h,
                 None => {
-                    emit_status(admin, format!("error: SSH bridge not ready for guest '{guest_name}'"));
+                    emit_status(
+                        admin,
+                        format!("error: SSH bridge not ready for guest '{guest_name}'"),
+                    );
                     return ControlFlow::Continue;
                 }
             };
             emit_status(admin, format!("=== validate {guest_name} ==="));
             let checks: Vec<(&str, &str, Box<dyn Fn(&ssh::ExecOutput) -> bool>)> = vec![
-                ("vsock-ssh: uname", "uname -s",
-                    Box::new(|out| out.exit_code == 0 && out.stdout.trim() == "Linux")),
-                ("egress: curl https://example.com", "curl -s -o /dev/null -w '%{http_code}' https://example.com",
-                    Box::new(|out| out.exit_code == 0 && out.stdout.trim() == "200")),
-                ("dns: nslookup via motlie-vmm", "nslookup example.com 10.0.2.3 2>&1 | head -1",
-                    Box::new(|out| out.exit_code == 0)),
-                ("writable root: touch /tmp/test", "touch /tmp/motlie-validate-test && rm /tmp/motlie-validate-test",
-                    Box::new(|out| out.exit_code == 0)),
-                ("agent-state: readlink ~/.codex", "readlink ~/.codex 2>/dev/null || echo 'no-link'",
-                    Box::new(|out| out.stdout.trim() == "/agent-state/codex")),
-                ("agent-state: readlink ~/.claude", "readlink ~/.claude 2>/dev/null || echo 'no-link'",
-                    Box::new(|out| out.stdout.trim() == "/agent-state/claude")),
-                ("ip route: default via motlie-vmm", "ip route show default",
-                    Box::new(|out| out.exit_code == 0 && out.stdout.contains("10.0.2.2"))),
+                (
+                    "vsock-ssh: uname",
+                    "uname -s",
+                    Box::new(|out| out.exit_code == 0 && out.stdout.trim() == "Linux"),
+                ),
+                (
+                    "egress: curl https://example.com",
+                    "curl -s -o /dev/null -w '%{http_code}' https://example.com",
+                    Box::new(|out| out.exit_code == 0 && out.stdout.trim() == "200"),
+                ),
+                (
+                    "dns: nslookup via motlie-vmm",
+                    "nslookup example.com 10.0.2.3 2>&1 | head -1",
+                    Box::new(|out| out.exit_code == 0),
+                ),
+                (
+                    "writable root: touch /tmp/test",
+                    "touch /tmp/motlie-validate-test && rm /tmp/motlie-validate-test",
+                    Box::new(|out| out.exit_code == 0),
+                ),
+                (
+                    "agent-state: ~/.codex writable directory",
+                    "test -d ~/.codex && test -w ~/.codex",
+                    Box::new(|out| out.exit_code == 0),
+                ),
+                (
+                    "agent-state: ~/.claude writable directory",
+                    "test -d ~/.claude && test -w ~/.claude",
+                    Box::new(|out| out.exit_code == 0),
+                ),
+                (
+                    "agent-state: ~/.config/claude-code writable directory",
+                    "test -d ~/.config/claude-code && test -w ~/.config/claude-code",
+                    Box::new(|out| out.exit_code == 0),
+                ),
+                (
+                    "workspace: README visible through VFS",
+                    "grep -q 'Alice workspace mounted from the host.' /workspace/README.md",
+                    Box::new(|out| out.exit_code == 0),
+                ),
+                (
+                    "ip route: default via motlie-vmm",
+                    "ip route show default",
+                    Box::new(|out| out.exit_code == 0 && out.stdout.contains("10.0.2.2")),
+                ),
             ];
             let mut passed = 0;
             let mut failed = 0;
             for (label, cmd, check) in &checks {
-                match admin.runtime.block_on(ssh::exec_on_handle(
-                    &ssh_handle,
-                    guest_name,
-                    cmd,
-                )) {
+                match admin
+                    .runtime
+                    .block_on(ssh::exec_on_handle(&ssh_handle, guest_name, cmd))
+                {
                     Ok(output) => {
                         if check(&output) {
                             emit_status(admin, format!("  PASS: {label}"));
                             passed += 1;
                         } else {
-                            emit_status(admin, format!("  FAIL: {label} (exit={}, stdout={})", output.exit_code, output.stdout.trim()));
+                            emit_status(
+                                admin,
+                                format!(
+                                    "  FAIL: {label} (exit={}, stdout={})",
+                                    output.exit_code,
+                                    output.stdout.trim()
+                                ),
+                            );
                             failed += 1;
                         }
                     }
@@ -1923,7 +1996,11 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
         "build" if parts.len() == 1 => {
             emit_status(
                 admin,
-                format!("build: sha={} built_at={}", build_git_sha(), build_time_utc()),
+                format!(
+                    "build: sha={} built_at={}",
+                    build_git_sha(),
+                    build_time_utc()
+                ),
             );
             if let Ok(pubkey) = admin.ssh_ca.public_key_openssh() {
                 emit_status(admin, format!("ssh_ca: {}", pubkey));

@@ -122,9 +122,9 @@ if [ -z "$GUEST_NAME" ]; then
 fi
 
 case "$ADMIN_NET:$EGRESS_NET" in
-    none:none|tap:tap|tap:vhost-user) ;;
+    none:none|none:vhost-user|tap:tap|tap:vhost-user) ;;
     *)
-        echo "ERROR: supported modes are --admin-net=none --egress-net=none, --admin-net=tap --egress-net=tap, and --admin-net=tap --egress-net=vhost-user"
+        echo "ERROR: supported modes are --admin-net=none --egress-net=none, --admin-net=none --egress-net=vhost-user, --admin-net=tap --egress-net=tap, and --admin-net=tap --egress-net=vhost-user"
         exit 1
         ;;
 esac
@@ -236,6 +236,12 @@ fi
 copy_overlay_tree "$COMMON_OVERLAY_CONTENT" "$OVERLAY_SEED/upper"
 copy_overlay_tree "$GUEST_OVERLAY_CONTENT" "$OVERLAY_SEED/upper"
 
+if [ "$EGRESS_NET" = "vhost-user" ]; then
+    mkdir -p "$OVERLAY_SEED/upper/etc/motlie-vmm"
+    printf '%s\n' "$EGRESS_MAC" > "$OVERLAY_SEED/upper/etc/motlie-vmm/egress.mac"
+    chmod 644 "$OVERLAY_SEED/upper/etc/motlie-vmm/egress.mac"
+fi
+
 # Inject SSH CA pubkey and per-guest principals for cert-based auth (v1.3+).
 # sshd_config references these paths via TrustedUserCAKeys and
 # AuthorizedPrincipalsFile directives baked into the guest image.
@@ -309,6 +315,8 @@ if [ "$ADMIN_NET:$EGRESS_NET" = "tap:tap" ]; then
 elif [ "$ADMIN_NET:$EGRESS_NET" = "tap:vhost-user" ]; then
     NET_ARGS+=("tap=,mac=$ADMIN_MAC,ip=$HOST_IP,mask=255.255.255.0")
     NET_ARGS+=("vhost_user=true,socket=$VNET_SOCKET,mac=$EGRESS_MAC")
+elif [ "$ADMIN_NET:$EGRESS_NET" = "none:vhost-user" ]; then
+    NET_ARGS+=("vhost_user=true,socket=$VNET_SOCKET,mac=$EGRESS_MAC")
 fi
 
 rm -f "$API_SOCKET" "$VSOCK_SOCKET"
@@ -331,6 +339,10 @@ elif [ "$ADMIN_NET:$EGRESS_NET" = "tap:vhost-user" ]; then
     echo "  Admin NIC: TAP, guest $GUEST_IP, host $HOST_IP"
     echo "  Egress:    vhost-user via $VNET_SOCKET (MAC $EGRESS_MAC)"
     echo "  SSH:       ssh $SSH_USER@$GUEST_IP (password: testpass)"
+elif [ "$ADMIN_NET:$EGRESS_NET" = "none:vhost-user" ]; then
+    echo "  Network:   rootless/userspace only"
+    echo "  Egress:    vhost-user via $VNET_SOCKET (MAC $EGRESS_MAC)"
+    echo "  SSH:       proxied only via localhost:2222"
 else
     echo "  Network:   disabled (--no-net)"
 fi

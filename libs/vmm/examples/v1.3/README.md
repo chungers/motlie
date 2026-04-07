@@ -22,6 +22,22 @@
 4. The guest image only needs one rebuild (for sshd_config CA trust);
    the CA pubkey and principals are injected per-launch
 
+## Repeatable Rootless Smoke
+
+For a repo-owned end-to-end regression check, use the example-local smoke
+runner:
+
+```bash
+cd ./libs/vmm/examples/v1.3/integration
+./rootless-smoke.sh
+```
+
+That flow is intentionally rootless/userspace-only. It rebuilds the guest
+image, starts `repl_host_v1_3` with `--admin-net=none --egress-net=vhost-user`,
+boots `alice`, and validates SSH exec, PTY behavior, VFS-backed mounts,
+default-route setup, outbound HTTPS, and the REPL's own `validate alice`
+checklist.
+
 ## Non-Regression Constraints
 
 These points were easy to get subtly wrong during `v1.3` bring-up and should be
