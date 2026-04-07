@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-07 | @codex | Start `v1.4` as the library-extraction line: keep `v1.3` frozen for comparison, require a side-by-side `v1.4` namespace, and define the thin-harness target for `repl_host_v1_4` |
 | 2026-04-06 | @codex | Reframe DESIGN around `examples/v1.3` as the active proving ground; add stable harness direction, blocking readiness requirements, and extraction targets for reusable orchestration APIs |
 | 2026-04-05 | @claude-vmm | SSH proxy transport: vsock (AF_VSOCK) replaces TAP for ingress, completing fully-userspace stack; update NFR-1, FR-6, data flow |
 | 2026-04-04 | @claude-vmm | Fold SSH proxy as programmatic guest control plane into DESIGN; add FR/NFR sections; update status to reflect v1.2 validation; resolve open questions |
@@ -15,7 +16,7 @@ The earlier `v1.2` lineage validated the composed subsystem flow:
 guest launch composition, dual-network topology, cloud-init rendering,
 VFS mount wiring, and deterministic shutdown.
 
-`libs/vmm/examples/v1.3` is now the active proving ground for the
+`libs/vmm/examples/v1.3` is now the validated comparison baseline for the
 VMM-owned harness. The current `v1.3` checkpoint has already proven:
 
 - a runnable `motlie-vmm` example harness
@@ -24,9 +25,15 @@ VMM-owned harness. The current `v1.3` checkpoint has already proven:
 - deterministic API -> SIGTERM -> SIGKILL shutdown fallback
 - image/runtime conventions for agent-state, SSH CA injection, and guest boot
 
-The active next step is to extract the remaining lifecycle/readiness logic out
-of `repl_host_v1_3` and into reusable `libs/vmm/src` APIs, so the example
-becomes a thin operator shell over a stable automation harness.
+The active next step is `v1.4`:
+
+- fork `examples/v1.3` into `examples/v1.4`
+- move reusable lifecycle/readiness/orchestration logic into `libs/vmm/src`
+- keep `v1.3` unchanged for comparison and regression analysis
+- refactor `repl_host_v1_4` into a thin operator shell over reusable library
+  services
+- move all `v1.4` bins, scripts, and runtime assets onto a distinct namespace
+  so `v1.3` and `v1.4` can run side by side
 
 ## Problem Statement
 
@@ -616,7 +623,90 @@ orch.shutdown(&handle).await?;
 
 ## Relationship to `examples/v1.3`
 
-`examples/v1.3` is the live proving ground for the VMM-owned harness.
+`examples/v1.3` is the validated comparison baseline for the VMM-owned harness.
+
+## `v1.4` Refactor Line
+
+`v1.4` is the first line where the validated `v1.3` harness starts to shed
+orchestration logic into reusable library modules.
+
+Design intent:
+
+- `v1.3` stays intact as the comparison baseline
+- `v1.4` becomes the refactor branch
+- reusable logic moves into `libs/vmm/src`
+- `repl_host_v1_4` becomes a thin application and test harness
+
+The first `v1.4` target is not a new product capability. It is a structural
+change in where the capability lives.
+
+### `v1.4` Requirements
+
+1. Move reusable `repl_host_v1_3` logic into library modules under
+   `libs/vmm/src`.
+2. Fork `examples/v1.3` into `examples/v1.4`.
+3. Refactor `repl_host_v1_4` to consume library services instead of owning the
+   orchestration logic directly.
+4. Keep `repl_host_v1_3` unchanged for comparison and API-surface review.
+5. Use a distinct `v1.4` namespace everywhere so `v1.3` and `v1.4` can run at
+   the same time without collisions.
+
+### Expected First Extractions
+
+The first reusable slices expected to move from `repl_host_v1_3` into the
+library are:
+
+- typed guest spec / mount / identity modeling
+- network allocation and reusable guest identity assignment
+- launch artifact generation
+- boot / wait-ready / shutdown orchestration
+- guestfs provisioning and mount wiring
+- validation helpers for automation-first checks
+
+This points to the following likely module layout:
+
+- `libs/vmm/src/spec.rs`
+- `libs/vmm/src/network_alloc.rs`
+- `libs/vmm/src/artifacts.rs`
+- `libs/vmm/src/orchestrator.rs`
+- `libs/vmm/src/guestfs.rs`
+- `libs/vmm/src/validation.rs`
+
+### `v1.4` Thin-Harness Target
+
+`repl_host_v1_4` should keep only:
+
+- command parsing
+- operator-facing output
+- example-specific topology choices
+- comparison/debug affordances
+
+It should stop owning:
+
+- the boot asset rendering rules
+- the reusable launch/shutdown sequencing
+- the reusable guest allocation table
+- the reusable validation command implementations
+
+### `v1.4` Namespace Rule
+
+`v1.4` must not reuse the `v1.3` runtime namespace.
+
+Expected namespace examples:
+
+- binary:
+  - `repl_host_v1_4`
+- temp/runtime roots:
+  - `/tmp/motlie-vmm-v14-*`
+- guest sockets:
+  - `/tmp/motlie-vmm-v14-alice.sock`
+  - `/tmp/motlie-vmm-v14-alice.vsock`
+  - `/tmp/motlie-vmm-v14-alice-api.sock`
+- integration/tmux names:
+  - `v14-*`
+
+This is required so `v1.3` and `v1.4` can run side by side during the
+refactor.
 
 ## BIG TODO: move guest network allocation out of `examples/v1.3`
 
