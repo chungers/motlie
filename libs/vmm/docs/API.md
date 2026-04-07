@@ -21,11 +21,11 @@ High-level status:
   - [x] `network_alloc.rs`
 - [x] Phase 2 module added in code:
   - [x] `artifacts.rs`
-- [ ] Phase 1 reviewed naming fully implemented in code
-- [ ] Phase 2 reviewed API fully implemented in code
-- [ ] Phase 3 modules added in code:
-  - [ ] `orchestrator.rs`
-  - [ ] `backend.rs`
+- [x] Phase 1 reviewed naming fully implemented in code
+- [x] Phase 2 reviewed API fully implemented in code
+- [x] Phase 3 modules added in code:
+  - [x] `orchestrator.rs`
+  - [x] `backend.rs`
 
 Phase 1 convergence:
 
@@ -44,7 +44,7 @@ Phase 1 convergence:
 - [x] `BootArtifacts`
 - [x] `RuntimeNamespace`
 - [x] `GuestRuntimePaths`
-- [ ] `SshCa::issue_guest_ssh_credentials(...)`
+- [x] `SshCa::issue_guest_ssh_credentials(...)`
 
 Phase 2 convergence:
 
@@ -54,25 +54,25 @@ Phase 2 convergence:
 - [x] `render_cloud_init(...)`
 - [x] `render_cloud_init_artifacts(...)`
 - [x] `render_launch_script(...)`
-- [x] reviewed software/storage/boot-artifact inputs partially reflected in core
-      guest shape consumed by render APIs
-- [ ] reviewed software/storage/boot-artifact inputs fully reflected in render APIs
+- [x] reviewed software/storage/boot-artifact inputs fully reflected in render APIs
 
-Phase 3 target:
+Phase 3 initial implementation:
 
-- [ ] `PreparedGuest`
-- [ ] `VmHandle`
-- [ ] `ReadinessStage`
-- [ ] `ReadinessPolicy`
-- [ ] `ShutdownReport`
-- [ ] `BackendKind`
-- [ ] `VmBackendCapabilities`
-- [ ] `VmBackend`
-- [ ] `ChShellBackend`
-- [ ] `prepare(...)`
-- [ ] `boot(...)`
-- [ ] `VmHandle::ready(...)`
-- [ ] `VmHandle::shutdown(...)`
+- [x] `PrepareRequest`
+- [x] `PreparedGuest`
+- [x] `VmHandle`
+- [x] `ReadinessStage`
+- [x] `ReadinessPolicy`
+- [x] `ShutdownReport`
+- [x] `BackendKind`
+- [x] `VmBackendCapabilities`
+- [x] `VmBackend`
+- [x] `ChShellBackend`
+- [x] `prepare(...)`
+- [x] `boot(...)`
+- [x] `VmHandle::ready(...)`
+- [x] `VmHandle::shutdown(...)`
+- [ ] guestfs / SSH bridge / exec-ready readiness gates beyond API socket
 
 ## Layering
 
@@ -288,6 +288,13 @@ impl SshCa {
 }
 ```
 
+Binding rule:
+
+- `GuestUser` names the in-guest OS account
+- `GuestSshAccess` names the SSH principal and login user policy
+- `issue_guest_ssh_credentials(...)` is the explicit binding point
+- current code rejects a `login_user` that does not match `GuestUser.name`
+
 ## Phase 2 Surface
 
 ### `artifacts.rs`
@@ -312,7 +319,7 @@ pub struct LaunchArtifactRenderConfig<'a> {
 
 pub fn render_mounts_yaml(guest: &GuestSpec) -> Result<String, ArtifactError>;
 pub fn render_cloud_init(guest: &GuestSpec) -> Result<String, ArtifactError>;
-pub fn render_meta_data(guest_name: &str) -> String;
+pub fn render_meta_data(guest_id: &str, hostname: &str) -> String;
 pub fn render_cloud_init_artifacts(
     guest: &GuestSpec,
 ) -> Result<CloudInitArtifacts, ArtifactError>;
@@ -325,6 +332,9 @@ Reviewed boundary:
 
 - `BootArtifacts` is the declarative input model
 - `artifacts.rs` produces concrete rendered files and paths
+- software packages render into cloud-init `packages:`
+- storage renders into shell-launch overlay sizing
+- boot artifacts render into backend-consumable launch-script variables
 - process spawning and shutdown stay out of this module
 
 ## Phase 3 Surface
@@ -349,13 +359,14 @@ pub struct VmBackendCapabilities {
 }
 
 pub trait VmBackend {
-    type Handle;
-    type Error;
-
     fn kind(&self) -> BackendKind;
     fn capabilities(&self) -> VmBackendCapabilities;
-    fn boot(&self, prepared: &PreparedGuest) -> Result<Self::Handle, Self::Error>;
-    fn shutdown(&self, handle: &Self::Handle) -> Result<(), Self::Error>;
+    fn boot(&self, prepared: &PreparedGuest) -> Result<BackendHandle, BackendError>;
+    fn shutdown(&self, handle: &BackendHandle) -> Result<(), BackendError>;
+}
+
+pub enum BackendHandle {
+    ChShell(ChShellHandle),
 }
 
 pub struct ChShellBackend;
@@ -373,12 +384,24 @@ Rules:
 ### `orchestrator.rs`
 
 ```rust
+pub struct PrepareRequest {
+    pub guest: GuestSpec,
+    pub namespace: RuntimeNamespace,
+    pub network_modes: NetworkModes,
+    pub backend_kind: BackendKind,
+    pub base_dir: std::path::PathBuf,
+    pub ssh_ca_pubkey: Option<String>,
+}
+
 pub struct PreparedGuest {
     pub guest: GuestSpec,
     pub runtime_paths: GuestRuntimePaths,
     pub net_assignment: GuestNetAssignment,
     pub cloud_init: CloudInitArtifacts,
     pub launch_script: String,
+    pub network_modes: NetworkModes,
+    pub backend_kind: BackendKind,
+    pub base_dir: std::path::PathBuf,
 }
 
 pub struct VmHandle {
@@ -386,6 +409,7 @@ pub struct VmHandle {
     pub pid: Option<u32>,
     pub runtime_paths: GuestRuntimePaths,
     pub net_assignment: GuestNetAssignment,
+    pub backend_kind: BackendKind,
 }
 
 pub enum ReadinessStage {
@@ -409,7 +433,10 @@ pub struct ShutdownReport {
     pub forced: Option<&'static str>,
 }
 
-pub fn prepare(...) -> Result<PreparedGuest, OrchestratorError>;
+pub fn prepare(
+    req: PrepareRequest,
+    allocator: &mut GuestNetAllocator,
+) -> Result<PreparedGuest, OrchestratorError>;
 pub fn boot(prepared: PreparedGuest) -> Result<VmHandle, OrchestratorError>;
 
 impl VmHandle {
@@ -425,7 +452,7 @@ impl VmHandle {
 Example:
 
 ```rust
-let prepared = orchestrator::prepare(/* guest + modes + namespace + alloc */)?;
+let prepared = orchestrator::prepare(req, &mut allocator)?;
 let handle = orchestrator::boot(prepared)?;
 
 handle.ready(&ReadinessPolicy {
@@ -435,6 +462,11 @@ handle.ready(&ReadinessPolicy {
     exec_ready_timeout: std::time::Duration::from_secs(20),
 }).await?;
 ```
+
+Current implementation note:
+
+- `VmHandle::ready(...)` currently waits only for the API socket stage
+- the later guestfs / SSH bridge / exec-ready stages remain Phase 3 follow-up
 
 ## Backend Transition Path
 

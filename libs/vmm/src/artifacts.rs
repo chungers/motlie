@@ -47,9 +47,22 @@ pub fn render_mounts_yaml(guest: &GuestSpec) -> Result<String, ArtifactError> {
 }
 
 pub fn render_cloud_init(guest: &GuestSpec) -> Result<String, ArtifactError> {
-    let _user = &guest.user;
+    let mut out = String::from("#cloud-config\n");
+    writeln!(&mut out, "users:").expect("writing to String cannot fail");
+    writeln!(&mut out, "  - name: {}", guest.user.name).expect("writing to String cannot fail");
+    writeln!(&mut out, "    uid: {}", guest.user.uid).expect("writing to String cannot fail");
+    writeln!(&mut out, "    gid: {}", guest.user.gid).expect("writing to String cannot fail");
+    writeln!(&mut out, "    home: {}", guest.user.home.display())
+        .expect("writing to String cannot fail");
 
-    Ok("#cloud-config\n".to_string())
+    if !guest.software.packages.is_empty() {
+        writeln!(&mut out, "packages:").expect("writing to String cannot fail");
+        for package in &guest.software.packages {
+            writeln!(&mut out, "  - {}", package).expect("writing to String cannot fail");
+        }
+    }
+
+    Ok(out)
 }
 
 pub fn render_meta_data(guest_id: &str, hostname: &str) -> String {
@@ -174,16 +187,50 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
         shell_single_quote(&login_home)
     )
     .expect("writing to String cannot fail");
+    writeln!(
+        &mut out,
+        "OVERLAY_SIZE={}",
+        shell_single_quote(&cfg.guest.storage.overlay_size)
+    )
+    .expect("writing to String cannot fail");
+    writeln!(
+        &mut out,
+        "BOOT_KERNEL={}",
+        shell_single_quote(cfg.guest.boot.kernel.to_string_lossy().as_ref())
+    )
+    .expect("writing to String cannot fail");
+    if let Some(initramfs) = &cfg.guest.boot.initramfs {
+        writeln!(
+            &mut out,
+            "BOOT_INITRAMFS={}",
+            shell_single_quote(initramfs.to_string_lossy().as_ref())
+        )
+        .expect("writing to String cannot fail");
+    }
+    if let Some(firmware) = &cfg.guest.boot.firmware {
+        writeln!(
+            &mut out,
+            "BOOT_FIRMWARE={}",
+            shell_single_quote(firmware.to_string_lossy().as_ref())
+        )
+        .expect("writing to String cannot fail");
+    }
+    if let Some(cmdline) = &cfg.guest.boot.cmdline {
+        writeln!(&mut out, "BOOT_CMDLINE_APPEND={}", shell_single_quote(cmdline))
+            .expect("writing to String cannot fail");
+    }
     out.push_str("LAUNCH_ARGS=(--guest \"$GUEST_ID\" --cloud-init-dir \"$SEED_DIR\" --admin-net \"$ADMIN_NET\" --egress-net \"$EGRESS_NET\")\n");
     out.push_str(
         "LAUNCH_ARGS+=(--cid \"$GUEST_CID\" --host-ip \"$HOST_IP\" --guest-ip \"$GUEST_IP\")\n",
     );
     out.push_str("LAUNCH_ARGS+=(--admin-mac \"$ADMIN_MAC\" --egress-mac \"$EGRESS_MAC\")\n");
     out.push_str("LAUNCH_ARGS+=(--ssh-user \"$SSH_USER\" --hostname \"$GUEST_HOSTNAME\" --login-home \"$LOGIN_HOME\")\n");
+    out.push_str("LAUNCH_ARGS+=(--overlay-size \"$OVERLAY_SIZE\")\n");
     out.push_str("LAUNCH_ARGS+=(--vnet-socket \"$VNET_SOCKET\")\n");
     if cfg.ssh_ca_pubkey.is_some() {
         out.push_str("LAUNCH_ARGS+=(--ssh-ca-pubkey \"$SSH_CA_PUBKEY\")\n");
     }
+    out.push_str("# Boot artifact variables are rendered here for backend consumption.\n");
     out.push_str("\"$BASE_DIR/launch-ch.sh\" \"${LAUNCH_ARGS[@]}\" \"$@\"\n");
 
     Ok(out)
@@ -233,14 +280,16 @@ mod tests {
                 guest_path: Some(PathBuf::from("/home/alice")),
                 host_path: PathBuf::from("/tmp/demo/alice-home"),
             }],
-            software: SoftwareProfile::default(),
+            software: SoftwareProfile {
+                packages: vec!["vim".to_string(), "gh".to_string()],
+            },
             resources: GuestResources::default(),
             storage: GuestStorage::default(),
             boot: BootArtifacts {
                 kernel: PathBuf::from("/tmp/Image"),
                 initramfs: None,
                 firmware: None,
-                cmdline: None,
+                cmdline: Some("console=ttyS0".to_string()),
             },
         }
     }
@@ -294,7 +343,11 @@ mod tests {
     #[test]
     fn cloud_init_uses_reviewed_guest_shape() {
         let guest = sample_guest();
-        assert_eq!(render_cloud_init(&guest).unwrap(), "#cloud-config\n");
+        let rendered = render_cloud_init(&guest).unwrap();
+        assert!(rendered.contains("name: alice"));
+        assert!(rendered.contains("packages:"));
+        assert!(rendered.contains("  - vim"));
+        assert!(rendered.contains("  - gh"));
     }
 
     #[test]
@@ -321,6 +374,10 @@ mod tests {
         assert!(script.contains("ADMIN_NET='none'"));
         assert!(script.contains("EGRESS_NET='vhost-user'"));
         assert!(script.contains("VNET_SOCKET='/tmp/motlie-vmm-v14-alice.sock'"));
+        assert!(script.contains("OVERLAY_SIZE='2G'"));
+        assert!(script.contains("BOOT_KERNEL='/tmp/Image'"));
+        assert!(script.contains("BOOT_CMDLINE_APPEND='console=ttyS0'"));
+        assert!(script.contains("LAUNCH_ARGS+=(--overlay-size \"$OVERLAY_SIZE\")"));
         assert!(script.contains("launch-ch.sh"));
     }
 }
