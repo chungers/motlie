@@ -6,13 +6,12 @@ use motlie_vnet::{VnetBackend, VnetConfig, VnetError, VnetHandle};
 use thiserror::Error;
 use tokio::time::{Instant, sleep};
 
-use crate::backends::ch_shell::ChShellBackend;
 use crate::artifacts::{
     ArtifactError, CloudInitArtifacts, LaunchArtifactRenderConfig, render_cloud_init_artifacts,
     render_launch_script,
 };
 use crate::ca::SshCa;
-use crate::backend::{BackendError, BackendHandle, BackendKind, VmBackend};
+use crate::backend::{BackendError, BackendHandle, BackendKind, BackendSet};
 use crate::guestfs::{GuestFsError, GuestFsHandle};
 use crate::network::{NetworkModeError, NetworkModes, validate_network_modes};
 use crate::network_alloc::{GuestNetAllocator, GuestNetAllocatorError, GuestNetAssignment};
@@ -46,6 +45,7 @@ pub struct VmHandle {
     pub runtime_paths: GuestRuntimePaths,
     pub net_assignment: GuestNetAssignment,
     pub backend_kind: BackendKind,
+    backends: Arc<BackendSet>,
     backend_handle: BackendHandle,
     guestfs: Option<GuestFsHandle>,
     vnet: std::sync::Mutex<Option<VnetHandle>>,
@@ -64,9 +64,19 @@ impl SshBridgeServices {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct LifecycleServices {
+    pub backends: Arc<BackendSet>,
     pub ssh_bridge: Option<SshBridgeServices>,
+}
+
+impl Default for LifecycleServices {
+    fn default() -> Self {
+        Self {
+            backends: Arc::new(BackendSet::default()),
+            ssh_bridge: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,8 +132,6 @@ pub enum OrchestratorError {
     Vnet(#[from] VnetError),
     #[error(transparent)]
     NetworkAllocation(#[from] GuestNetAllocatorError),
-    #[error("backend {0:?} is not implemented yet")]
-    UnsupportedBackend(BackendKind),
     #[error("guest {guest_id} does not have SSH bridge services configured")]
     MissingSshBridge { guest_id: String },
     #[error("internal lifecycle state poisoned: {0}")]
@@ -192,23 +200,20 @@ pub async fn boot(
         None
     };
 
-    let backend_handle = match prepared.backend_kind {
-        BackendKind::ChShell => match ChShellBackend::new().boot(&prepared) {
-            Ok(handle) => handle,
-            Err(err) => {
-                if let Some(bridge) = ssh_bridge.as_ref() {
-                    let _ = bridge.shutdown();
-                }
-                if let Some(vnet) = vnet.as_mut() {
-                    let _ = vnet.shutdown();
-                }
-                if let Some(guestfs) = guestfs.as_ref() {
-                    let _ = guestfs.shutdown();
-                }
-                return Err(err.into());
+    let backend_handle = match services.backends.boot(&prepared) {
+        Ok(handle) => handle,
+        Err(err) => {
+            if let Some(bridge) = ssh_bridge.as_ref() {
+                let _ = bridge.shutdown();
             }
-        },
-        kind => return Err(OrchestratorError::UnsupportedBackend(kind)),
+            if let Some(vnet) = vnet.as_mut() {
+                let _ = vnet.shutdown();
+            }
+            if let Some(guestfs) = guestfs.as_ref() {
+                let _ = guestfs.shutdown();
+            }
+            return Err(err.into());
+        }
     };
 
     Ok(VmHandle {
@@ -217,6 +222,7 @@ pub async fn boot(
         runtime_paths: prepared.runtime_paths,
         net_assignment: prepared.net_assignment,
         backend_kind: prepared.backend_kind,
+        backends: Arc::clone(&services.backends),
         backend_handle,
         guestfs,
         vnet: std::sync::Mutex::new(vnet),
@@ -260,10 +266,9 @@ impl VmHandle {
     }
 
     pub async fn shutdown(&self) -> Result<ShutdownReport, OrchestratorError> {
-        let backend_result = match self.backend_kind {
-            BackendKind::ChShell => ChShellBackend::new().shutdown(&self.backend_handle)?,
-            kind => return Err(OrchestratorError::UnsupportedBackend(kind)),
-        };
+        let backend_result = self
+            .backends
+            .shutdown(self.backend_kind, &self.backend_handle)?;
 
         if let Some(bridge) = self.ssh_bridge.as_ref() {
             bridge.shutdown()?;
@@ -348,7 +353,7 @@ fn start_vnet_backend(prepared: &PreparedGuest) -> Result<VnetHandle, Orchestrat
 mod tests {
     use std::path::PathBuf;
 
-    use crate::backends::ch_shell::ChShellHandle;
+    use crate::backend::ch::shell::ChShellHandle;
     use crate::network::{AdminNetMode, EgressNetMode};
     use crate::network_alloc::GuestNetAllocatorConfig;
     use crate::spec::{
@@ -439,6 +444,7 @@ mod tests {
             },
             net_assignment: allocator.ensure("alice").unwrap().clone(),
             backend_kind: BackendKind::ChShell,
+            backends: Arc::new(BackendSet::default()),
             backend_handle: BackendHandle::ChShell(ChShellHandle {
                 pid: None,
                 launch_script_path: tempdir.path().join("launch.sh"),

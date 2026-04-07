@@ -66,6 +66,7 @@ async fn main() -> Result<(), DynError> {
                 Arc::clone(&ca),
                 Arc::clone(&guest_registry),
             )),
+            ..LifecycleServices::default()
         },
     )
     .await?;

@@ -5,7 +5,7 @@
 | Date | Who | Summary |
 |------|-----|---------|
 | 2026-04-07 | @codex | Complete the first usable `v1.4` lifecycle API: library-owned guestfs, SSH bridge, `VmHandle::exec(...)`, rootless harness validation, and child-handle-based shutdown/readiness instead of raw `/proc` polling |
-| 2026-04-07 | @codex | Finish Phase 1/2 convergence in code and start Phase 3 with `PrepareRequest`, `PreparedGuest`, `VmHandle`, `backend.rs`, and the first `ChShellBackend` boot path |
+| 2026-04-07 | @codex | Finish Phase 1/2 convergence in code and start Phase 3 with `PrepareRequest`, `PreparedGuest`, `VmHandle`, `backend/mod.rs`, and the first `backend::ch::shell::ChShellBackend` boot path |
 | 2026-04-07 | @codex | Record the Cloud Hypervisor v44.0 internal Rust API analysis and tighten the reviewed layering around `GuestResources`, `GuestStorage`, and `BootArtifacts` below top-layer guest intent |
 | 2026-04-07 | @codex | Tighten the reviewed `v1.4` API shape around `GuestUser`, `GuestSshAccess`, explicit CA-issued guest SSH credentials, and `boot()` plus `VmHandle::ready(...)` |
 | 2026-04-07 | @codex | Start Phase 2 extraction in `libs/vmm/src/artifacts.rs` and record it as the owning module for rendered boot/runtime artifacts |
@@ -57,8 +57,10 @@ Current `v1.4` implementation status:
 
 - the reviewed Phase 1 and Phase 2 API surface is converged in code
 - `Phase 3` now has a working lifecycle implementation:
-  - contract in `backend.rs`
-  - implementation in `backends/ch_shell.rs`
+  - contract in `backend/mod.rs`
+  - implementation in `backend/ch/shell.rs`
+  - placeholder vertical slices in `backend/motlie/` and `backend/vz/`
+  - injected VM backend dispatch via `BackendSet`
   - `orchestrator.rs`
   - `ChShellBackend`
   - `prepare()`
@@ -77,8 +79,30 @@ Current `v1.4` implementation status:
 - `ChShellBackend` now tracks the spawned child process directly in its
   backend-specific module so readiness and shutdown use real process state
   rather than `/proc` zombie heuristics
+- generic orchestrator code no longer imports CH backend implementation
+  modules directly for VM boot/shutdown dispatch
 - `examples/v1.4/build-guest.sh` and `examples/v1.4/launch-ch.sh` exist under
   the `motlie-vmm-v14-*` namespace
+
+## Desired Outcome
+
+`v1.4` should prove two end states:
+
+1. Motlie-backed guest operation works end to end.
+   - `backend::motlie::*` style guest backing should support a real runnable
+     harness plus test scripts that validate guest behavior.
+   - This is the path proven today by the `v1.4` rootless harness using the
+     Motlie guestfs / vnet / SSH-proxy stack.
+
+2. The `motlie-vmm` API is also usable as a thin, simple abstraction over a
+   simple standard Cloud Hypervisor guest.
+   - A caller should be able to boot a guest with ordinary hypervisor-managed
+     networking and storage, with no Motlie-specific guestfs or userspace vnet
+     providers involved.
+   - This should be demonstrated first by a small CH “hello world” example
+     that boots a guest through the same `prepare()` / `boot()` / `ready()` /
+     `shutdown()` lifecycle API without using Motlie guest backing providers.
+   - The same portable slice should later map to `backend::vz::*`.
 
 ## Cloud Hypervisor API Analysis
 
@@ -123,23 +147,24 @@ The CH `VmConfig` surface cleanly separates:
 
 The reviewed `v1.4` API should therefore be layered:
 
-- top layer: Motlie guest intent
-  - guest identity
+- top layer: guest intent
   - guest user
   - SSH access policy
   - software profile
-  - mount intent
-  - readiness policy
-- middle layer: bootable VM shape
+- portable VM slice
+  - `VmSpec`
   - `GuestResources`
   - `GuestStorage`
   - `BootArtifacts`
-  - network mode and allocated identities
-- bottom layer: Cloud Hypervisor adapter
-  - produce `VmConfig`
-  - start event monitor thread
-  - start VMM thread
-  - send `VmCreate` / `VmBoot`
+- guest backing providers
+  - `GuestBackends`
+  - filesystem backing
+  - network backing
+  - control-plane backing
+- backend realization
+  - `backend::ch::*`
+  - `backend::motlie::*`
+  - `backend::vz::*`
 
 The critical constraint is:
 
@@ -183,6 +208,12 @@ are materially different.
 This backend seam should use enum dispatch, not dynamic discovery or plugin
 loading, because all supported backends are expected to be known and
 implemented in-tree.
+
+The generic orchestrator should therefore depend on an injected backend set,
+not on concrete backend modules directly. The same principle should later be
+applied to Motlie guest backing providers such as guestfs, userspace vnet, and
+the SSH bridge so the generic orchestration layer does not import those
+implementation modules directly either.
 
 ## Problem Statement
 
