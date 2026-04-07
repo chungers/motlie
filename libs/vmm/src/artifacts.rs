@@ -28,8 +28,6 @@ pub struct LaunchArtifactRenderConfig<'a> {
 pub enum ArtifactError {
     #[error("mount '{tag}' is missing guest_path; cannot render mounts.yaml")]
     MissingGuestPath { tag: String },
-    #[error("guest '{guest_name}' is missing uid/gid; provision with explicit uid/gid")]
-    MissingIdentity { guest_name: String },
 }
 
 pub fn render_mounts_yaml(guest: &GuestSpec) -> Result<String, ArtifactError> {
@@ -49,21 +47,18 @@ pub fn render_mounts_yaml(guest: &GuestSpec) -> Result<String, ArtifactError> {
 }
 
 pub fn render_cloud_init(guest: &GuestSpec) -> Result<String, ArtifactError> {
-    let _identity = guest.identity.ok_or_else(|| ArtifactError::MissingIdentity {
-        guest_name: guest.name.clone(),
-    })?;
+    let _user = &guest.user;
 
     Ok("#cloud-config\n".to_string())
 }
 
-pub fn render_meta_data(guest_name: &str) -> String {
-    let hostname = guest_hostname(guest_name);
-    format!("instance-id: {guest_name}\nlocal-hostname: {hostname}\n")
+pub fn render_meta_data(guest_id: &str, hostname: &str) -> String {
+    format!("instance-id: {guest_id}\nlocal-hostname: {hostname}\n")
 }
 
 pub fn render_cloud_init_artifacts(guest: &GuestSpec) -> Result<CloudInitArtifacts, ArtifactError> {
     Ok(CloudInitArtifacts {
-        meta_data: render_meta_data(&guest.name),
+        meta_data: render_meta_data(&guest.guest_id, &guest.hostname),
         user_data: render_cloud_init(guest)?,
         mounts_yaml: render_mounts_yaml(guest)?,
     })
@@ -71,15 +66,19 @@ pub fn render_cloud_init_artifacts(guest: &GuestSpec) -> Result<CloudInitArtifac
 
 pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<String, ArtifactError> {
     let cloud_init = render_cloud_init(cfg.guest)?;
-    let cloud_meta = render_meta_data(&cfg.guest.name);
+    let cloud_meta = render_meta_data(&cfg.guest.guest_id, &cfg.guest.hostname);
     let mounts_yaml = render_mounts_yaml(cfg.guest)?;
     let mut out = String::new();
-    let login_home = format!("/home/{}", cfg.guest.name);
+    let login_home = cfg.guest.user.home.display().to_string();
 
     out.push_str("#!/usr/bin/env bash\n");
     out.push_str("set -euo pipefail\n\n");
     out.push_str("# Generated from library-owned guest/runtime state.\n\n");
-    writeln!(&mut out, "GUEST_ID={}", shell_single_quote(&cfg.guest.name))
+    writeln!(
+        &mut out,
+        "GUEST_ID={}",
+        shell_single_quote(&cfg.guest.guest_id)
+    )
         .expect("writing to String cannot fail");
     writeln!(
         &mut out,
@@ -157,12 +156,16 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
         shell_single_quote(&mac_fmt(&cfg.net_assignment.egress_mac))
     )
     .expect("writing to String cannot fail");
-    writeln!(&mut out, "SSH_USER={}", shell_single_quote(&cfg.guest.name))
+    writeln!(
+        &mut out,
+        "SSH_USER={}",
+        shell_single_quote(&cfg.guest.user.name)
+    )
         .expect("writing to String cannot fail");
     writeln!(
         &mut out,
         "GUEST_HOSTNAME={}",
-        shell_single_quote(&guest_hostname(&cfg.guest.name))
+        shell_single_quote(&cfg.guest.hostname)
     )
     .expect("writing to String cannot fail");
     writeln!(
@@ -190,10 +193,6 @@ fn shell_single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\"'\"'"))
 }
 
-fn guest_hostname(guest_name: &str) -> String {
-    format!("motlie-{guest_name}")
-}
-
 fn mac_fmt(m: &[u8; 6]) -> String {
     format!(
         "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
@@ -207,20 +206,42 @@ mod tests {
 
     use crate::network::{AdminNetMode, EgressNetMode, NetworkModes};
     use crate::network_alloc::{AdminIpv4Pair, EgressIpv4Layout, GuestNetAssignment};
-    use crate::spec::{GuestIdentity, GuestMountSpec, GuestRuntimePaths, GuestSpec, RuntimeNamespace};
+    use crate::spec::{
+        BootArtifacts, GuestMountSpec, GuestResources, GuestRuntimePaths, GuestSpec,
+        GuestSshAccess, GuestStorage, GuestUser, RuntimeNamespace, SoftwareProfile,
+    };
 
     use super::*;
 
     fn sample_guest() -> GuestSpec {
         GuestSpec {
-            name: "alice".to_string(),
+            guest_id: "alice".to_string(),
+            hostname: "motlie-alice".to_string(),
             socket_path: "/tmp/motlie-vmm-v14-alice.vsock_5000".to_string(),
+            user: GuestUser {
+                name: "alice".to_string(),
+                uid: 1000,
+                gid: 1000,
+                home: PathBuf::from("/home/alice"),
+            },
+            ssh: GuestSshAccess {
+                principal: "alice".to_string(),
+                login_user: "alice".to_string(),
+            },
             mounts: vec![GuestMountSpec {
                 tag: "alice-home".to_string(),
                 guest_path: Some(PathBuf::from("/home/alice")),
                 host_path: PathBuf::from("/tmp/demo/alice-home"),
             }],
-            identity: Some(GuestIdentity { uid: 1000, gid: 1000 }),
+            software: SoftwareProfile::default(),
+            resources: GuestResources::default(),
+            storage: GuestStorage::default(),
+            boot: BootArtifacts {
+                kernel: PathBuf::from("/tmp/Image"),
+                initramfs: None,
+                firmware: None,
+                cmdline: None,
+            },
         }
     }
 
@@ -271,16 +292,9 @@ mod tests {
     }
 
     #[test]
-    fn cloud_init_requires_identity() {
-        let mut guest = sample_guest();
-        guest.identity = None;
-        let err = render_cloud_init(&guest).unwrap_err();
-        assert_eq!(
-            err,
-            ArtifactError::MissingIdentity {
-                guest_name: "alice".to_string()
-            }
-        );
+    fn cloud_init_uses_reviewed_guest_shape() {
+        let guest = sample_guest();
+        assert_eq!(render_cloud_init(&guest).unwrap(), "#cloud-config\n");
     }
 
     #[test]

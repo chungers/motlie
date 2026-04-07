@@ -29,21 +29,21 @@ High-level status:
 
 Phase 1 convergence:
 
-- [ ] `GuestSpec.guest_id`
-- [ ] `GuestSpec.hostname`
-- [ ] `GuestSpec.user`
-- [ ] `GuestSpec.ssh`
-- [ ] `GuestSpec.software`
-- [ ] `GuestSpec.resources`
-- [ ] `GuestSpec.storage`
-- [ ] `GuestSpec.boot`
-- [ ] `GuestUser`
-- [ ] `GuestSshAccess`
-- [ ] `GuestResources`
-- [ ] `GuestStorage`
-- [ ] `BootArtifacts`
-- [ ] `RuntimeNamespace`
-- [ ] `GuestRuntimePaths`
+- [x] `GuestSpec.guest_id`
+- [x] `GuestSpec.hostname`
+- [x] `GuestSpec.user`
+- [x] `GuestSpec.ssh`
+- [x] `GuestSpec.software`
+- [x] `GuestSpec.resources`
+- [x] `GuestSpec.storage`
+- [x] `GuestSpec.boot`
+- [x] `GuestUser`
+- [x] `GuestSshAccess`
+- [x] `GuestResources`
+- [x] `GuestStorage`
+- [x] `BootArtifacts`
+- [x] `RuntimeNamespace`
+- [x] `GuestRuntimePaths`
 - [ ] `SshCa::issue_guest_ssh_credentials(...)`
 
 Phase 2 convergence:
@@ -54,6 +54,8 @@ Phase 2 convergence:
 - [x] `render_cloud_init(...)`
 - [x] `render_cloud_init_artifacts(...)`
 - [x] `render_launch_script(...)`
+- [x] reviewed software/storage/boot-artifact inputs partially reflected in core
+      guest shape consumed by render APIs
 - [ ] reviewed software/storage/boot-artifact inputs fully reflected in render APIs
 
 Phase 3 target:

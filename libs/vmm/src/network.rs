@@ -84,7 +84,7 @@ pub enum NetworkModeError {
     },
 }
 
-pub fn validate_network_modes(modes: NetworkModes) -> Result<(), NetworkModeError> {
+pub fn validate_network_modes(modes: &NetworkModes) -> Result<(), NetworkModeError> {
     match (modes.admin, modes.egress) {
         (AdminNetMode::None, EgressNetMode::None)
         | (AdminNetMode::None, EgressNetMode::VhostUser)
@@ -127,22 +127,22 @@ mod tests {
 
     #[test]
     fn validate_supported_combinations() {
-        assert!(validate_network_modes(NetworkModes {
+        assert!(validate_network_modes(&NetworkModes {
             admin: AdminNetMode::None,
             egress: EgressNetMode::None,
         })
         .is_ok());
-        assert!(validate_network_modes(NetworkModes {
+        assert!(validate_network_modes(&NetworkModes {
             admin: AdminNetMode::None,
             egress: EgressNetMode::VhostUser,
         })
         .is_ok());
-        assert!(validate_network_modes(NetworkModes {
+        assert!(validate_network_modes(&NetworkModes {
             admin: AdminNetMode::Tap,
             egress: EgressNetMode::Tap,
         })
         .is_ok());
-        assert!(validate_network_modes(NetworkModes {
+        assert!(validate_network_modes(&NetworkModes {
             admin: AdminNetMode::Tap,
             egress: EgressNetMode::VhostUser,
         })
@@ -151,7 +151,7 @@ mod tests {
 
     #[test]
     fn reject_unsupported_combinations() {
-        let err = validate_network_modes(NetworkModes {
+        let err = validate_network_modes(&NetworkModes {
             admin: AdminNetMode::None,
             egress: EgressNetMode::Tap,
         })
