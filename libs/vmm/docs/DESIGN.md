@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-07 | @codex | Tighten the reviewed `v1.4` API shape around `GuestUser`, `GuestSshAccess`, explicit CA-issued guest SSH credentials, and `boot()` plus `VmHandle::ready(...)` |
 | 2026-04-07 | @codex | Start Phase 2 extraction in `libs/vmm/src/artifacts.rs` and record it as the owning module for rendered boot/runtime artifacts |
 | 2026-04-07 | @codex | Add `libs/vmm/docs/API.md` as the running API review surface for `v1.4` extraction work |
 | 2026-04-07 | @codex | Add a `v1.4` embedded-image / union-binary phase: prototype bundling an opinionated guest image into the harness ELF and booting from memfd-backed artifacts |
@@ -133,15 +134,15 @@ Current extraction checkpoints:
 
 ### FR-1: Guest Lifecycle Orchestration
 
-The library must support prepare → launch → running → shutdown → cleanup
+The library must support prepare → boot → running → shutdown → cleanup
 for one or more guest VMs. Each lifecycle transition must be explicit and
 deterministic. The orchestrator manages per-guest state and coordinates
 subsystem startup/teardown order.
 
-For harness-grade automation, launch must support both:
+For harness-grade automation, guest startup must support both:
 
 - asynchronous fire-and-forget startup for operator workflows
-- blocking "launch and wait until ready" semantics for agents and tests
+- explicit blocking readiness for agents and tests
 
 The ready state must be explicit rather than inferred from opportunistic SSH
 success.
@@ -309,9 +310,10 @@ than REPL-first.
 
 The minimum useful surface is:
 
-- `boot_and_wait`
+- `boot`
+- `handle.ready(...)`
 - `exec`
-- `shutdown_and_wait`
+- `handle.shutdown()`
 - machine-readable status/result output
 
 The purpose of this phase is not to replace the human REPL. It is to create a
@@ -713,110 +715,173 @@ derived from the proven example patterns (`GuestConfig`, `GuestRuntime`,
 ### Core types
 
 ```rust
-/// Guest identity and configuration (derived from the current example harness types).
 pub struct GuestSpec {
-    pub name: String,
-    pub user: String,
-    pub mounts: Vec<MountSpec>,
-    pub admin_net: AdminNet,
-    pub egress_net: EgressNet,
+    pub guest_id: String,
+    pub hostname: String,
+    pub socket_path: String,
+    pub user: GuestUser,
+    pub ssh: GuestSshAccess,
+    pub mounts: Vec<GuestMountSpec>,
+    pub software: SoftwareProfile,
+    pub resources: GuestResources,
 }
 
-/// Per-guest runtime state produced by prepare().
-pub struct LaunchArtifacts {
-    pub runtime_dir: PathBuf,
-    pub cloud_init_dir: PathBuf,
-    pub overlay_path: PathBuf,
-    pub vnet_socket: Option<PathBuf>,
-    pub api_socket: PathBuf,
+pub struct GuestUser {
+    pub name: String,
+    pub uid: u32,
+    pub gid: u32,
+    pub home: PathBuf,
+}
+
+pub struct GuestSshAccess {
+    pub principal: String,
+    pub login_user: String,
+}
+
+pub struct GuestMountSpec {
+    pub tag: String,
+    pub guest_path: Option<PathBuf>,
+    pub host_path: PathBuf,
+}
+
+pub struct SoftwareProfile {
+    pub packages: Vec<String>,
+}
+
+pub struct GuestResources {
+    pub boot_vcpus: u8,
+    pub memory_mib: u32,
+    pub overlay_size: String,
+}
+
+pub struct PreparedGuest {
+    pub guest: GuestSpec,
+    pub runtime_paths: GuestRuntimePaths,
+    pub net_assignment: GuestNetAssignment,
+    pub cloud_init: CloudInitArtifacts,
+    pub launch_script: String,
 }
 
 /// Handle to a running guest VM.
 pub struct VmHandle {
-    pub name: String,
+    pub guest_id: String,
     pub pid: Option<u32>,
-    pub guest_ip: Ipv4Addr,
-    // ... internal state
+    pub runtime_paths: GuestRuntimePaths,
+    pub net_assignment: GuestNetAssignment,
 }
 
 /// Explicit readiness stages for blocking launch.
 pub enum ReadinessStage {
+    LaunchSpawned,
     ApiSocketReady,
-    GuestFsMounted,
-    SshBridgeConnected,
+    GuestFsConnected,
+    SshBridgeReady,
     ExecReady,
 }
 
-/// Policy describing how much readiness launch must wait for.
 pub struct ReadinessPolicy {
-    pub wait_for: Vec<ReadinessStage>,
-    pub timeout: Duration,
-}
-
-/// Output from a programmatic command execution.
-pub struct ExecOutput {
-    pub stdout: String,
-    pub stderr: String,
-    pub exit_code: u32,
-}
-
-/// Structured shutdown result for operators and agents.
-pub struct ShutdownReport {
-    pub api_attempted: bool,
-    pub graceful: bool,
-    pub forced_signal: Option<&'static str>,
+    pub api_socket_timeout: Duration,
+    pub guestfs_timeout: Duration,
+    pub ssh_bridge_timeout: Duration,
+    pub exec_ready_timeout: Duration,
 }
 ```
 
 ### Orchestration
 
+The reviewed orchestration surface should use `boot()` as the start verb and
+hang readiness off the returned handle:
+
 ```rust
-pub struct VmOrchestrator { /* ... */ }
+pub fn prepare(req: PrepareRequest) -> Result<PreparedGuest, OrchestratorError>;
+pub fn boot(prepared: PreparedGuest) -> Result<VmHandle, OrchestratorError>;
 
-impl VmOrchestrator {
-    /// Render cloud-init, create runtime dirs, start vnet backend.
-    pub async fn prepare(&self, guest: &GuestSpec) -> Result<LaunchArtifacts>;
-
-    /// Launch CH with the prepared artifacts. Returns a handle.
-    pub async fn launch(&self, guest: &GuestSpec, artifacts: &LaunchArtifacts) -> Result<VmHandle>;
-
-    /// Launch and block until the requested readiness policy passes.
-    pub async fn launch_and_wait(
+impl VmHandle {
+    pub async fn ready(
         &self,
-        guest: &GuestSpec,
-        artifacts: &LaunchArtifacts,
-        readiness: &ReadinessPolicy,
-    ) -> Result<VmHandle>;
+        policy: &ReadinessPolicy,
+    ) -> Result<(), OrchestratorError>;
 
-    /// Deterministic shutdown: API → SIGTERM → SIGKILL fallback.
-    pub async fn shutdown(&self, handle: &VmHandle) -> Result<ShutdownReport>;
-
-    /// Execute a command inside the guest via SSH exec channel.
-    /// No PTY, no human — captures stdout/stderr/exit_code.
-    pub async fn exec(&self, handle: &VmHandle, command: &str) -> Result<ExecOutput>;
+    pub async fn shutdown(&self)
+        -> Result<ShutdownReport, OrchestratorError>;
 }
 ```
+
+This is preferred over proliferating variants such as `launch_and_wait()` or
+`boot_and_wait()` because:
+
+- there is one obvious start verb
+- readiness is clearly a state transition on a running VM handle
+- later harness and provisioning code can boot first and then decide whether,
+  when, and how long to wait for readiness
+
+### SSH user/access binding
+
+The binding between guest OS user state and SSH principal routing must be
+explicit in the API.
+
+```rust
+pub struct IssuedGuestSshCredentials {
+    pub principal: String,
+    pub login_user: String,
+    pub private_key_openssh: String,
+    pub certificate_openssh: String,
+}
+
+impl SshCa {
+    pub fn issue_guest_ssh_credentials(
+        &self,
+        user: &GuestUser,
+        access: &GuestSshAccess,
+    ) -> Result<IssuedGuestSshCredentials, CaError>;
+}
+```
+
+This is the reviewed binding point where:
+
+- `GuestUser` models the in-guest account
+- `GuestSshAccess` models principal/login-user policy
+- the CA issues the ephemeral credential material that binds the two
 
 ### Usage: automated guest validation (FR-7)
 
 ```rust
-let orch = VmOrchestrator::new(config)?;
 let spec = GuestSpec {
-    name: "alice".into(),
-    user: "alice".into(),
+    guest_id: "alice".into(),
+    hostname: "motlie-alice".into(),
+    socket_path: "/tmp/motlie-vmm-v14-alice.vsock_5000".into(),
+    user: GuestUser {
+        name: "alice".into(),
+        uid: 1000,
+        gid: 1000,
+        home: "/home/alice".into(),
+    },
+    ssh: GuestSshAccess {
+        principal: "alice".into(),
+        login_user: "alice".into(),
+    },
     mounts: vec![
-        MountSpec { tag: "alice-home".into(), guest_path: "/home/alice".into(), .. },
-        MountSpec { tag: "alice-agent-state".into(), guest_path: "/agent-state".into(), .. },
+        GuestMountSpec { tag: "alice-home".into(), guest_path: Some("/home/alice".into()), host_path: "/tmp/demo/alice-home".into() },
+        GuestMountSpec { tag: "alice-agent-state".into(), guest_path: Some("/agent-state".into()), host_path: "/tmp/demo/alice-agent-state".into() },
     ],
-    admin_net: AdminNet::None,       // no TAP — SSH proxy handles ingress
-    egress_net: EgressNet::VhostUser,
+    software: SoftwareProfile { packages: vec!["vim".into()] },
+    resources: GuestResources {
+        boot_vcpus: 2,
+        memory_mib: 512,
+        overlay_size: "2G".into(),
+    },
 };
 
-let artifacts = orch.prepare(&spec).await?;
-let handle = orch.launch(&spec, &artifacts).await?;
+let prepared = orchestrator::prepare(PrepareRequest {
+    guest: spec,
+    namespace,
+    network_modes,
+})?;
+let handle = orchestrator::boot(prepared)?;
+handle.ready(&readiness_policy).await?;
 
 // Verify egress networking
-let out = orch.exec(&handle, "curl -s -o /dev/null -w '%{http_code}' https://example.com").await?;
+let out = orchestrator.exec(&handle, "curl -s -o /dev/null -w '%{http_code}' https://example.com").await?;
 assert_eq!(out.exit_code, 0);
 assert_eq!(out.stdout.trim(), "200");
 
@@ -828,7 +893,7 @@ assert_eq!(out.stdout.trim(), "/agent-state/codex");
 let out = orch.exec(&handle, "nslookup example.com 10.0.2.3").await?;
 assert_eq!(out.exit_code, 0);
 
-orch.shutdown(&handle).await?;
+handle.shutdown().await?;
 ```
 
 ### Usage: interactive SSH ingress (FR-6)
@@ -982,7 +1047,7 @@ Extraction target:
 2. make launch rendering consume a typed `GuestNetAssignment`
 3. make allocation exhaustion explicit and machine-readable instead of silently
    saturating into collisions
-4. move the resulting call path behind the future `boot` / `boot_and_wait`
+4. move the resulting call path behind the future `boot` / `VmHandle::ready`
    orchestration API
 Once validated, the extraction sequence should be:
 
@@ -1045,7 +1110,7 @@ justify the complexity. Clean module boundaries are sufficient.
 
 **Q: How much of the current REPL launch flow should remain example-only?**
 A: The REPL is a consumer of `libs/vmm`, not part of it. The boundary is
-clear: `libs/vmm` owns `prepare` / `launch` / `shutdown` / `exec`.
+clear: `libs/vmm` owns `prepare` / `boot` / `ready` / `shutdown` / `exec`.
 The REPL owns the interactive command loop and operator UX. Examples
 become thin wiring over library calls.
 
@@ -1071,5 +1136,5 @@ SIGKILL), as already proven in v1.2's `shutdown_guest()`. Best-effort
 - Should `exec` have a timeout parameter, or should the caller wrap it?
 - Should the stable automation harness be a new binary (for example,
   `harness_host`) or a non-interactive mode layered into `repl_host_v1_3`?
-- Which readiness gates should be mandatory for `launch_and_wait()` by
+- Which readiness gates should be mandatory for `VmHandle::ready(...)` by
   default: API socket, SSH bridge, or full exec-ready?

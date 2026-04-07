@@ -15,6 +15,15 @@ Rules for this document:
 `v1.3` remains the behavioral comparison baseline. This file is for reviewing
 the new library surface that `v1.4` is building.
 
+Important:
+
+- this document distinguishes between current exported code and the reviewed
+  API direction
+- some current Phase 1 code still uses provisional names such as
+  `GuestIdentity`
+- later `v1.4` phases should follow the reviewed naming and binding model in
+  this document even where the code has not been renamed yet
+
 ## Current Exported Surface
 
 As of the current `v1.4` planning checkpoint, [lib.rs](/tmp/vmm-v1.4/libs/vmm/src/lib.rs) exports:
@@ -85,18 +94,81 @@ pub struct GuestRuntimePaths {
 }
 ```
 
+These are the currently exported Phase 1 code shapes. They are intentionally
+provisional and should be refined before later phases depend on them too
+heavily.
+
+### Reviewed Phase 1 Spec Shape
+
+The preferred reviewed shape is:
+
+```rust
+pub struct GuestSpec {
+    pub guest_id: String,
+    pub hostname: String,
+    pub socket_path: String,
+    pub user: GuestUser,
+    pub ssh: GuestSshAccess,
+    pub mounts: Vec<GuestMountSpec>,
+    pub software: SoftwareProfile,
+    pub resources: GuestResources,
+}
+
+pub struct GuestUser {
+    pub name: String,
+    pub uid: u32,
+    pub gid: u32,
+    pub home: std::path::PathBuf,
+}
+
+pub struct GuestSshAccess {
+    pub principal: String,
+    pub login_user: String,
+}
+
+pub struct GuestMountSpec {
+    pub tag: String,
+    pub guest_path: Option<std::path::PathBuf>,
+    pub host_path: std::path::PathBuf,
+}
+
+pub struct SoftwareProfile {
+    pub packages: Vec<String>,
+}
+
+pub struct GuestResources {
+    pub boot_vcpus: u8,
+    pub memory_mib: u32,
+    pub overlay_size: String,
+}
+```
+
 Review intent:
 
 - keep this module free of process launching and side effects
 - make namespace-sensitive runtime path derivation typed and explicit
 - ensure the types are valid for both `v1.3` comparison and `v1.4` namespace
+- keep guest OS account modeling (`GuestUser`) separate from SSH routing/auth
+  policy (`GuestSshAccess`)
+- keep VM identity (`guest_id`) separate from guest-visible hostname
 
-Example usage:
+Reviewed example usage:
 
 ```rust
 let guest = GuestSpec {
-    name: "alice".to_string(),
+    guest_id: "alice".to_string(),
+    hostname: "motlie-alice".to_string(),
     socket_path: "/tmp/motlie-vmm-v14-alice.vsock_5000".to_string(),
+    user: GuestUser {
+        name: "alice".to_string(),
+        uid: 1000,
+        gid: 1000,
+        home: "/home/alice".into(),
+    },
+    ssh: GuestSshAccess {
+        principal: "alice".to_string(),
+        login_user: "alice".to_string(),
+    },
     mounts: vec![
         GuestMountSpec {
             tag: "alice-home".to_string(),
@@ -104,7 +176,14 @@ let guest = GuestSpec {
             host_path: "/tmp/motlie-vmm-v14-demo/alice-home".into(),
         },
     ],
-    identity: Some(GuestIdentity { uid: 1000, gid: 1000 }),
+    software: SoftwareProfile {
+        packages: vec!["vim".to_string(), "gh".to_string()],
+    },
+    resources: GuestResources {
+        boot_vcpus: 2,
+        memory_mib: 512,
+        overlay_size: "2G".to_string(),
+    },
 };
 ```
 
@@ -202,14 +281,50 @@ assert_ne!(alice.cid, bob.cid);
 assert_ne!(alice.admin_ipv4.guest, bob.admin_ipv4.guest);
 ```
 
-### Planned Phase 1 Integration Shape
+### Reviewed SSH/CA Binding Shape
+
+The binding between guest OS user state and SSH principal policy should be
+explicit in the API.
+
+Reviewed types:
+
+```rust
+pub struct IssuedGuestSshCredentials {
+    pub principal: String,
+    pub login_user: String,
+    pub private_key_openssh: String,
+    pub certificate_openssh: String,
+}
+```
+
+Reviewed CA surface:
+
+```rust
+impl SshCa {
+    pub fn issue_guest_ssh_credentials(
+        &self,
+        user: &GuestUser,
+        access: &GuestSshAccess,
+    ) -> Result<IssuedGuestSshCredentials, CaError>;
+}
+```
+
+This should be the explicit API point where:
+
+- `GuestUser` binds the guest OS account information
+- `GuestSshAccess` binds the SSH principal/login-user policy
+- the CA returns the resulting ephemeral credential material
+
+### Reviewed Phase 1 Integration Shape
 
 By the end of Phase 1, the `v1.4` harness should be able to do something like:
 
 ```rust
 use motlie_vmm::network::{AdminNetMode, EgressNetMode, NetworkModes, validate_network_modes};
 use motlie_vmm::network_alloc::{GuestNetAllocator, GuestNetAllocatorConfig};
-use motlie_vmm::spec::{GuestIdentity, GuestSpec};
+use motlie_vmm::spec::{
+    GuestResources, GuestSpec, GuestSshAccess, GuestUser, SoftwareProfile,
+};
 
 let modes = NetworkModes {
     admin: AdminNetMode::None,
@@ -218,14 +333,32 @@ let modes = NetworkModes {
 validate_network_modes(&modes)?;
 
 let guest = GuestSpec {
-    name: "alice".to_string(),
+    guest_id: "alice".to_string(),
+    hostname: "motlie-alice".to_string(),
     socket_path: "/tmp/motlie-vmm-v14-alice.vsock_5000".to_string(),
     mounts: vec![],
-    identity: Some(GuestIdentity { uid: 1000, gid: 1000 }),
+    user: GuestUser {
+        name: "alice".to_string(),
+        uid: 1000,
+        gid: 1000,
+        home: "/home/alice".into(),
+    },
+    ssh: GuestSshAccess {
+        principal: "alice".to_string(),
+        login_user: "alice".to_string(),
+    },
+    software: SoftwareProfile {
+        packages: vec!["vim".to_string()],
+    },
+    resources: GuestResources {
+        boot_vcpus: 2,
+        memory_mib: 512,
+        overlay_size: "2G".to_string(),
+    },
 };
 
 let mut alloc = GuestNetAllocator::new(GuestNetAllocatorConfig::default());
-let net = alloc.ensure(&guest.name)?;
+let net = alloc.ensure(&guest.guest_id)?;
 ```
 
 That is the first API slice to review before lifecycle/orchestration extraction
@@ -263,7 +396,7 @@ pub struct LaunchArtifactRenderConfig<'a> {
 }
 ```
 
-### Planned software composition extension
+### Reviewed software composition extension
 
 Yes, Phase 2 should grow a typed way to request guest software such as `vim`,
 `gh`, or similar packages.
@@ -278,7 +411,7 @@ That keeps the same API usable for:
 1. boot-time cloud-init package installation during development
 2. later baked-image / union-binary composition for distributable artifacts
 
-Planned types:
+Reviewed types:
 
 ```rust
 pub struct SoftwareProfile {
@@ -393,7 +526,7 @@ pub struct PreparedGuest {
 }
 
 pub struct VmHandle {
-    pub guest_name: String,
+    pub guest_id: String,
     pub pid: Option<u32>,
     pub runtime_paths: GuestRuntimePaths,
     pub net_assignment: GuestNetAssignment,
@@ -421,19 +554,24 @@ pub struct ShutdownReport {
 }
 ```
 
-Planned helpers:
+Reviewed top-level orchestrator surface:
 
 ```rust
 pub fn prepare(...) -> Result<PreparedGuest, OrchestratorError>;
-pub fn launch(prepared: PreparedGuest) -> Result<VmHandle, OrchestratorError>;
-pub async fn launch_and_wait(
-    prepared: PreparedGuest,
-    policy: &ReadinessPolicy,
-) -> Result<VmHandle, OrchestratorError>;
-pub async fn wait_until_ready(
-    handle: &VmHandle,
-    policy: &ReadinessPolicy,
-) -> Result<(), OrchestratorError>;
+pub fn boot(prepared: PreparedGuest) -> Result<VmHandle, OrchestratorError>;
+```
+
+Reviewed handle surface:
+
+```rust
+impl VmHandle {
+    pub async fn ready(
+        &self,
+        policy: &ReadinessPolicy,
+    ) -> Result<(), OrchestratorError>;
+
+    pub async fn shutdown(&self) -> Result<ShutdownReport, OrchestratorError>;
+}
 ```
 
 Review intent:
@@ -448,16 +586,14 @@ Example usage:
 ```rust
 let prepared = orchestrator::prepare(/* guest + modes + namespace + alloc */)?;
 
-let handle = orchestrator::launch_and_wait(
-    prepared,
-    &ReadinessPolicy {
-        api_socket_timeout: std::time::Duration::from_secs(10),
-        guestfs_timeout: std::time::Duration::from_secs(15),
-        ssh_bridge_timeout: std::time::Duration::from_secs(15),
-        exec_ready_timeout: std::time::Duration::from_secs(20),
-    },
-)
-.await?;
+let handle = orchestrator::boot(prepared)?;
+
+handle.ready(&ReadinessPolicy {
+    api_socket_timeout: std::time::Duration::from_secs(10),
+    guestfs_timeout: std::time::Duration::from_secs(15),
+    ssh_bridge_timeout: std::time::Duration::from_secs(15),
+    exec_ready_timeout: std::time::Duration::from_secs(20),
+}).await?;
 ```
 
 This is the first phase where the library should be able to say not just "the
@@ -466,13 +602,17 @@ not, which readiness stage failed.
 
 ## Provisional API Notes
 
-The following names are not yet fixed:
+The following names are not yet fixed in code, but the reviewed direction is:
 
 - `GuestSpec`
 - `GuestMountSpec`
-- `GuestIdentity`
+- `GuestUser`
+- `GuestSshAccess`
+- `IssuedGuestSshCredentials`
 - `RuntimeNamespace`
 - `GuestRuntimePaths`
+- `SoftwareProfile`
+- `GuestResources`
 - `CloudInitArtifacts`
 - `LaunchArtifactRenderConfig`
 - `PreparedGuest`
@@ -502,6 +642,9 @@ As Phase 1 lands, this document should answer:
 3. Is network mode policy separated cleanly from allocation state?
 4. Is the allocator contract clear about stability and exhaustion?
 5. Is `artifacts.rs` cleanly separated from lifecycle/process execution?
-6. Is the planned readiness model explicit enough for agents and future CI?
-7. Is the API surface small enough that later phases can layer on top without
+6. Is the explicit `GuestUser` + `GuestSshAccess` -> CA-issued credentials
+   binding clear enough?
+7. Is the planned `boot()` + `VmHandle::ready(...)` model explicit enough for
+   agents and future CI?
+8. Is the API surface small enough that later phases can layer on top without
    forcing a rewrite?

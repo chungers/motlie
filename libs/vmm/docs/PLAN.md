@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-07 | @codex | Align the reviewed `v1.4` API around `GuestUser`, `GuestSshAccess`, explicit CA-issued credentials, and `boot()` plus handle-based readiness |
 | 2026-04-07 | @codex | Start Phase 2 extraction in `libs/vmm/src/artifacts.rs` and make it the explicit owner of rendered boot/runtime artifacts |
 | 2026-04-07 | @codex | Add an explicit embedded-image / union-binary prototype phase after harness bootstrap |
 | 2026-04-07 | @codex | Insert an explicit programmatic harness bootstrap phase after lifecycle extraction so later `v1.4` phases can build on a stable non-REPL substrate |
@@ -63,10 +64,22 @@ Goal:
 
 Tasks:
 - [ ] add `libs/vmm/src/spec.rs`
-- [ ] move guest/mount/identity config types out of `repl_host.rs`
+- [ ] move guest/mount/user/SSH-access config types out of `repl_host.rs`
 - [ ] add `libs/vmm/src/network.rs`
 - [ ] move `AdminNet`, `EgressNet`, and guest CID/IP/MAC allocation there
 - [ ] expose typed helpers for socket paths and network mode validation
+- [ ] replace provisional review naming with:
+  - [ ] `GuestUser`
+  - [ ] `GuestSshAccess`
+  - [ ] `GuestResources`
+  - [ ] `SoftwareProfile`
+- [ ] make the reviewed `GuestSpec` shape explicit:
+  - [ ] `guest_id`
+  - [ ] `hostname`
+  - [ ] `user`
+  - [ ] `ssh`
+- [ ] document the CA binding surface:
+  - [ ] `SshCa::issue_guest_ssh_credentials(&GuestUser, &GuestSshAccess)`
 
 Acceptance:
 - `repl_host_v1_3` compiles using library-owned spec/network types
@@ -100,19 +113,23 @@ Goal:
 
 Tasks:
 - [ ] add `libs/vmm/src/orchestrator.rs`
-- [ ] define `LaunchArtifacts`, `VmHandle`, `ShutdownReport`
+- [ ] define `PreparedGuest`, `VmHandle`, `ShutdownReport`
 - [ ] add `prepare()`
-- [ ] add `launch()`
-- [ ] add `launch_and_wait()`
+- [ ] add `boot()`
+- [ ] add handle-based readiness:
+  - [ ] `VmHandle::ready(&ReadinessPolicy)`
+- [ ] add handle-based shutdown:
+  - [ ] `VmHandle::shutdown()`
 - [ ] add explicit readiness gates:
   - [ ] API socket ready
   - [ ] guestfs connected
   - [ ] SSH bridge connected
   - [ ] exec-ready probe
+- [ ] make boot-time sizing flow through `GuestResources`
 
 Acceptance:
 - a caller can block until a guest is actually usable
-- launch failures identify which readiness stage timed out or failed
+- boot/readiness failures identify which stage timed out or failed
 
 ## Phase 4: GuestFS and SSH Bridge Lifecycle Extraction
 
@@ -141,9 +158,10 @@ Tasks:
       `examples/v1.4/`
 - [ ] make it call library APIs instead of REPL command strings
 - [ ] support:
-  - [ ] `boot_and_wait`
+  - [ ] `boot`
+  - [ ] `handle.ready(...)`
   - [ ] `exec`
-  - [ ] `shutdown_and_wait`
+  - [ ] `handle.shutdown()`
   - [ ] machine-readable result output
 - [ ] keep it rootless/userspace-only
 - [ ] make it the default substrate for building later `v1.4` phases
