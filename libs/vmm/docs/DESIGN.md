@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-07 | @codex | Record the Cloud Hypervisor v44.0 internal Rust API analysis and tighten the reviewed layering around `GuestResources`, `GuestStorage`, and `BootArtifacts` below top-layer guest intent |
 | 2026-04-07 | @codex | Tighten the reviewed `v1.4` API shape around `GuestUser`, `GuestSshAccess`, explicit CA-issued guest SSH credentials, and `boot()` plus `VmHandle::ready(...)` |
 | 2026-04-07 | @codex | Start Phase 2 extraction in `libs/vmm/src/artifacts.rs` and record it as the owning module for rendered boot/runtime artifacts |
 | 2026-04-07 | @codex | Add `libs/vmm/docs/API.md` as the running API review surface for `v1.4` extraction work |
@@ -49,6 +50,86 @@ The active next step is `v1.4`:
   library-owned allocation and lifecycle services
 - add a reporting layer that can answer both host-visible and guest-visible
   health/metrics questions during automated runs
+
+## Cloud Hypervisor API Analysis
+
+Cloud Hypervisor `v44.0.0` already exposes an internal Rust API surface that is
+more structured than the CLI wrapper used by the current examples.
+
+Important local source points used for this analysis:
+
+- [`src/main.rs`](/tmp/cloud-hypervisor-v44/src/main.rs)
+- [`vmm/src/lib.rs`](/tmp/cloud-hypervisor-v44/vmm/src/lib.rs)
+- [`vmm/src/vm_config.rs`](/tmp/cloud-hypervisor-v44/vmm/src/vm_config.rs)
+- [`vmm/src/api/mod.rs`](/tmp/cloud-hypervisor-v44/vmm/src/api/mod.rs)
+
+The important finding is that the CLI is just a front-end over the `vmm` crate:
+
+1. build a `VmConfig`
+2. start the event monitor thread separately when configured
+3. start the VMM thread through `vmm::start_vmm_thread(...)`
+4. send `VmCreate(Box<VmConfig>)`
+5. send `VmBoot`
+
+This matters for `v1.4` because it means the library should be designed so our
+typed guest inputs can be translated almost mechanically into CH's internal
+`VmConfig`, instead of baking CLI-string construction into the long-term API.
+
+### CH-Shaped Inputs
+
+The CH `VmConfig` surface cleanly separates:
+
+- `CpusConfig`
+- `MemoryConfig`
+- `PayloadConfig`
+- `DiskConfig`
+- `NetConfig`
+- `FsConfig`
+- `VsockConfig`
+- `RngConfig`
+- `BalloonConfig`
+- `PlatformConfig`
+
+### Design Consequence
+
+The reviewed `v1.4` API should therefore be layered:
+
+- top layer: Motlie guest intent
+  - guest identity
+  - guest user
+  - SSH access policy
+  - software profile
+  - mount intent
+  - readiness policy
+- middle layer: bootable VM shape
+  - `GuestResources`
+  - `GuestStorage`
+  - `BootArtifacts`
+  - network mode and allocated identities
+- bottom layer: Cloud Hypervisor adapter
+  - produce `VmConfig`
+  - start event monitor thread
+  - start VMM thread
+  - send `VmCreate` / `VmBoot`
+
+The critical constraint is:
+
+- top-layer Motlie concepts such as `GuestUser` and `GuestSshAccess` should
+  stay above the CH adapter
+- CH-facing configuration should be modeled explicitly enough that a future
+  `to_ch_vm_config(...)` step is straightforward
+
+One specific design correction from this analysis:
+
+- writable overlay sizing should not live inside generic compute/memory
+  resources
+- it belongs to storage/image modeling instead
+
+That is why the reviewed API now separates:
+
+- `GuestResources`
+- `GuestStorage`
+- `BootArtifacts`
 
 ## Problem Statement
 
@@ -582,6 +663,12 @@ The critical rule is that `libs/vmm` should generate these assets from typed
 guest/runtime state rather than from example-specific string templates once the
 behavior is proven.
 
+The reviewed API distinction is:
+
+- `BootArtifacts` is the declarative boot-input model above the renderer
+- `artifacts.rs` produces the concrete rendered files and paths below that API
+  layer
+
 The owning module for this work in `v1.4` is:
 
 - [artifacts.rs](/tmp/vmm-v1.4/libs/vmm/src/artifacts.rs)
@@ -724,6 +811,8 @@ pub struct GuestSpec {
     pub mounts: Vec<GuestMountSpec>,
     pub software: SoftwareProfile,
     pub resources: GuestResources,
+    pub storage: GuestStorage,
+    pub boot: BootArtifacts,
 }
 
 pub struct GuestUser {
@@ -751,7 +840,18 @@ pub struct SoftwareProfile {
 pub struct GuestResources {
     pub boot_vcpus: u8,
     pub memory_mib: u32,
+    pub max_vcpus: Option<u8>,
+}
+
+pub struct GuestStorage {
     pub overlay_size: String,
+}
+
+pub struct BootArtifacts {
+    pub kernel: PathBuf,
+    pub initramfs: Option<PathBuf>,
+    pub firmware: Option<PathBuf>,
+    pub cmdline: Option<String>,
 }
 
 pub struct PreparedGuest {
@@ -815,6 +915,31 @@ This is preferred over proliferating variants such as `launch_and_wait()` or
 - later harness and provisioning code can boot first and then decide whether,
   when, and how long to wait for readiness
 
+### Future Cloud Hypervisor integration approach
+
+The intended future integration point is:
+
+```rust
+fn to_ch_vm_config(
+    prepared: &PreparedGuest,
+    ch: &ChVmOptions,
+) -> Result<cloud_hypervisor_vmm::vm_config::VmConfig, ChConfigError>;
+```
+
+Where:
+
+- `PreparedGuest` carries the reviewed Motlie-layer state
+- `ChVmOptions` carries CH-specific tuning we do not want to bake into the
+  generic API too early
+- the adapter owns translation into CH's exact `VmConfig`
+
+The orchestrator should eventually be able to swap:
+
+- current shell/CLI invocation
+- future in-process CH `VmConfig` + `start_vmm_thread(...)` path
+
+without forcing a redesign of the upper Motlie API.
+
 ### SSH user/access binding
 
 The binding between guest OS user state and SSH principal routing must be
@@ -868,7 +993,16 @@ let spec = GuestSpec {
     resources: GuestResources {
         boot_vcpus: 2,
         memory_mib: 512,
+        max_vcpus: None,
+    },
+    storage: GuestStorage {
         overlay_size: "2G".into(),
+    },
+    boot: BootArtifacts {
+        kernel: "/tmp/vmm-v1.4/libs/vmm/examples/v1.4/artifacts/base/Image".into(),
+        initramfs: None,
+        firmware: None,
+        cmdline: None,
     },
 };
 

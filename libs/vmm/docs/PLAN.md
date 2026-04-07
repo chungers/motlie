@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-07 | @codex | Record the CH v44.0 internal API alignment plan: keep `GuestUser` and `GuestSshAccess` above the adapter layer, and split CH-shaped inputs into `GuestResources`, `GuestStorage`, and `BootArtifacts` |
 | 2026-04-07 | @codex | Align the reviewed `v1.4` API around `GuestUser`, `GuestSshAccess`, explicit CA-issued credentials, and `boot()` plus handle-based readiness |
 | 2026-04-07 | @codex | Start Phase 2 extraction in `libs/vmm/src/artifacts.rs` and make it the explicit owner of rendered boot/runtime artifacts |
 | 2026-04-07 | @codex | Add an explicit embedded-image / union-binary prototype phase after harness bootstrap |
@@ -72,12 +73,16 @@ Tasks:
   - [ ] `GuestUser`
   - [ ] `GuestSshAccess`
   - [ ] `GuestResources`
+  - [ ] `GuestStorage`
+  - [ ] `BootArtifacts`
   - [ ] `SoftwareProfile`
 - [ ] make the reviewed `GuestSpec` shape explicit:
   - [ ] `guest_id`
   - [ ] `hostname`
   - [ ] `user`
   - [ ] `ssh`
+  - [ ] `storage`
+  - [ ] `boot`
 - [ ] document the CA binding surface:
   - [ ] `SshCa::issue_guest_ssh_credentials(&GuestUser, &GuestSshAccess)`
 
@@ -99,6 +104,10 @@ Tasks:
 - [ ] move mounts.yaml rendering there
 - [ ] move runtime path helpers there
 - [ ] move launch script rendering there
+- [ ] make `artifacts.rs` consume reviewed declarative inputs:
+  - [ ] `SoftwareProfile`
+  - [ ] `GuestStorage`
+  - [ ] `BootArtifacts`
 
 Acceptance:
 - `repl_host_v1_3` no longer owns cloud-init/mounts/layout string generation
@@ -125,7 +134,14 @@ Tasks:
   - [ ] guestfs connected
   - [ ] SSH bridge connected
   - [ ] exec-ready probe
-- [ ] make boot-time sizing flow through `GuestResources`
+- [ ] make CH-shaped boot inputs flow through:
+  - [ ] `GuestResources`
+  - [ ] `GuestStorage`
+  - [ ] `BootArtifacts`
+- [ ] add an explicit CH adapter plan:
+  - [ ] reviewed `to_ch_vm_config(...)` boundary
+  - [ ] preserve ability to switch from CLI launch to in-process
+        `VmConfig` + `start_vmm_thread(...)`
 
 Acceptance:
 - a caller can block until a guest is actually usable
