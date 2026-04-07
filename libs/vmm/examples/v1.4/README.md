@@ -39,6 +39,8 @@ The reusable logic expected to move into `libs/vmm/src` first is:
 - boot / wait-ready / shutdown orchestration
 - guestfs provisioning and mount wiring
 - validation helpers for non-interactive harness checks
+- guest reporting helpers that combine Cloud Hypervisor host-side counters with
+  guest-side health probes
 
 The resulting shape should look like:
 
@@ -48,6 +50,7 @@ The resulting shape should look like:
 - `libs/vmm/src/orchestrator.rs`
 - `libs/vmm/src/guestfs.rs`
 - `libs/vmm/src/validation.rs`
+- `libs/vmm/src/reporting.rs`
 
 `repl_host_v1_4` should then become a thin layer that:
 
@@ -102,6 +105,33 @@ The first successful `v1.4` slice should show:
 5. `v1.3` and `v1.4` can be launched side by side without path or socket
    collisions
 
+## Future Reporting Phase
+
+After the first extraction slices, `v1.4` should add guest reporting and
+metrics collection so the harness can answer questions like:
+
+- is the VM up and healthy?
+- how much host-visible memory is assigned?
+- what device counters are moving?
+- is guest CPU, disk, and network activity progressing during a test?
+
+The intended model is:
+
+- use Cloud Hypervisor host-side reporting first for VMM-visible state:
+  - `--api-socket`
+  - `--event-monitor`
+  - `/api/v1/vm.info`
+  - `/api/v1/vm.counters`
+- use guest-side probes over the existing SSH exec path for guest-visible
+  metrics such as:
+  - CPU utilization
+  - guest-used memory
+  - filesystem usage
+  - process-level health
+
+This split is important: Cloud Hypervisor can report VMM/device state and
+counters, but not full guest OS semantics by itself.
+
 ## Near-Term Implementation Order
 
 1. create `examples/v1.4/` by forking `v1.3`
@@ -109,6 +139,7 @@ The first successful `v1.4` slice should show:
 3. extract typed guest/network/artifact helpers into `libs/vmm/src`
 4. add a thin `repl_host_v1_4`
 5. add `v1.4`-owned smoke coverage
+6. add host-side and guest-side reporting/metrics collection
 
 Further prototype features should be recorded in:
 

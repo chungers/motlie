@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-07 | @codex | Add an explicit reporting/metrics phase for `v1.4`, using Cloud Hypervisor host-side API/event data plus guest-side SSH probes |
 | 2026-04-06 | @codex | Add explicit post-checkpoint plan for extracting a stable automation harness from `examples/v1.3` into reusable `libs/vmm/src` modules |
 
 ## Status
@@ -31,6 +32,8 @@ What is still missing for a polished, reusable harness:
 - library-owned lifecycle state instead of example-owned maps
 - typed validation/reporting APIs
 - a non-interactive harness mode suitable for agents and CI
+- a stable host-side + guest-side reporting surface for CPU/memory/disk/network
+  visibility
 
 ## Objective
 
@@ -151,6 +154,41 @@ Tasks:
 
 Acceptance:
 - future Motlie development can use the harness as a standard development/test substrate
+
+## Phase 7: Guest Reporting and Metrics
+
+Goal:
+- provide a reusable, machine-readable VM reporting surface for debugging,
+  automation, and future Motlie development
+
+Tasks:
+- [ ] add `libs/vmm/src/reporting.rs`
+- [ ] add typed report structures for:
+  - [ ] lifecycle state
+  - [ ] Cloud Hypervisor host-side state
+  - [ ] guest-side probe results
+- [ ] add Cloud Hypervisor host-side collection through:
+  - [ ] `--api-socket`
+  - [ ] `--event-monitor`
+  - [ ] `/api/v1/vm.info`
+  - [ ] `/api/v1/vm.counters`
+- [ ] add guest-side reporting over SSH exec for:
+  - [ ] CPU utilization
+  - [ ] guest memory usage
+  - [ ] filesystem/disk usage
+  - [ ] process/service health
+  - [ ] outbound network reachability
+- [ ] expose a reusable `report <guest>` operator flow in `v1.4`
+- [ ] add a machine-readable output mode for automation
+
+Acceptance:
+- the harness can produce a structured snapshot for a running guest without
+  requiring an interactive SSH session
+- report output clearly distinguishes:
+  - [ ] Cloud Hypervisor-visible counters/state
+  - [ ] guest-OS-visible metrics
+- future debugging of performance or isolation regressions can start from one
+  stable reporting command rather than ad hoc shell commands
 
 ## Non-Goals for This Plan
 
