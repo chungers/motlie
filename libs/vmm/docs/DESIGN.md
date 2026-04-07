@@ -131,6 +131,30 @@ That is why the reviewed API now separates:
 - `GuestStorage`
 - `BootArtifacts`
 
+### Backend consequence
+
+The library should also define a backend seam that is generic enough for:
+
+- Cloud Hypervisor shell-driven launch
+- Cloud Hypervisor fork/exec launch
+- Cloud Hypervisor in-process `start_vmm_thread(...)`
+- future macOS `vz` support
+
+Even though `ch_shell`, `ch_fork_exec`, and `ch_vmm_thread` all target Cloud
+Hypervisor, they should still be treated as distinct backends because their:
+
+- boot mechanics
+- shutdown mechanics
+- cleanup behavior
+- control-plane attachment
+- isolation/fault boundaries
+
+are materially different.
+
+This backend seam should use enum dispatch, not dynamic discovery or plugin
+loading, because all supported backends are expected to be known and
+implemented in-tree.
+
 ## Problem Statement
 
 The current example lineage (`v1`, `v1.1`, `v1.2`, and now `v1.3`) contains
@@ -915,6 +939,54 @@ This is preferred over proliferating variants such as `launch_and_wait()` or
 - later harness and provisioning code can boot first and then decide whether,
   when, and how long to wait for readiness
 
+### Backend surface
+
+The reviewed backend surface should stay narrow and sit below
+`PreparedGuest`/`VmHandle`.
+
+```rust
+pub enum BackendKind {
+    ChShell,
+    ChForkExec,
+    ChVmmThread,
+    Vz,
+}
+
+pub struct VmBackendCapabilities {
+    pub same_process_vmm: bool,
+    pub supports_api_socket: bool,
+    pub supports_event_monitor: bool,
+    pub supports_fd_handoff: bool,
+    pub supports_memfd_boot_artifacts: bool,
+    pub supports_guest_metrics: bool,
+}
+
+pub trait VmBackend {
+    type Handle;
+    type Error;
+
+    fn kind(&self) -> BackendKind;
+    fn capabilities(&self) -> VmBackendCapabilities;
+    fn boot(&self, prepared: &PreparedGuest) -> Result<Self::Handle, Self::Error>;
+    fn shutdown(&self, handle: &Self::Handle) -> Result<(), Self::Error>;
+}
+```
+
+Important design rules:
+
+- no dynamic dispatch or runtime-discovered backends
+- use enum dispatch because the backend set is known in source
+- do not push readiness, SSH exec, validation, or guestfs semantics into the
+  backend trait
+- the first implementation should be `ChShellBackend`, which preserves the
+  current `v1.3` shell/CLI semantics behind the new interface
+
+That gives us:
+
+- stable top-level Motlie API
+- uniform backend contract
+- room to add `Vz` later without redesigning orchestration semantics
+
 ### Future Cloud Hypervisor integration approach
 
 The intended future integration point is:
@@ -939,6 +1011,16 @@ The orchestrator should eventually be able to swap:
 - future in-process CH `VmConfig` + `start_vmm_thread(...)` path
 
 without forcing a redesign of the upper Motlie API.
+
+The reviewed transition path is:
+
+1. `ChShellBackend`
+2. `ChForkExecBackend`
+3. `ChVmmThreadBackend`
+4. future `VzBackend`
+
+The initial implementation should stay simple and preserve current working
+behavior by starting with `ChShellBackend`.
 
 ### SSH user/access binding
 
