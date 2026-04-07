@@ -60,7 +60,7 @@ Current `v1.4` implementation status:
   - contract in `backend/mod.rs`
   - implementation in `backend/ch/shell.rs`
   - placeholder vertical slices in `backend/motlie/` and `backend/vz/`
-  - injected VM backend dispatch via `BackendSet`
+  - injected VM backend dispatch via the current intermediate `BackendSet`
   - `orchestrator.rs`
   - `ChShellBackend`
   - `prepare()`
@@ -81,6 +81,9 @@ Current `v1.4` implementation status:
   rather than `/proc` zombie heuristics
 - generic orchestrator code no longer imports CH backend implementation
   modules directly for VM boot/shutdown dispatch
+- the next convergence step is to replace the intermediate `BackendSet` with
+  reviewed `Runtime` injection so filesystem/network/control-plane backing are
+  injected alongside the hypervisor choice
 - `examples/v1.4/build-guest.sh` and `examples/v1.4/launch-ch.sh` exist under
   the `motlie-vmm-v14-*` namespace
 
@@ -89,7 +92,7 @@ Current `v1.4` implementation status:
 `v1.4` should prove two end states:
 
 1. Motlie-backed guest operation works end to end.
-   - `backend::motlie::*` style guest backing should support a real runnable
+   - `backend::motlie::*` guest backing should support a real runnable
      harness plus test scripts that validate guest behavior.
    - This is the path proven today by the `v1.4` rootless harness using the
      Motlie guestfs / vnet / SSH-proxy stack.
@@ -156,11 +159,12 @@ The reviewed `v1.4` API should therefore be layered:
   - `GuestResources`
   - `GuestStorage`
   - `BootArtifacts`
-- guest backing providers
-  - `GuestBackends`
-  - filesystem backing
-  - network backing
-  - control-plane backing
+- runtime composition
+  - `Runtime`
+  - `HypervisorBacking`
+  - `FilesystemBacking`
+  - `NetworkBacking`
+  - `ControlPlaneBacking`
 - backend realization
   - `backend::ch::*`
   - `backend::motlie::*`
@@ -209,11 +213,55 @@ This backend seam should use enum dispatch, not dynamic discovery or plugin
 loading, because all supported backends are expected to be known and
 implemented in-tree.
 
-The generic orchestrator should therefore depend on an injected backend set,
-not on concrete backend modules directly. The same principle should later be
-applied to Motlie guest backing providers such as guestfs, userspace vnet, and
-the SSH bridge so the generic orchestration layer does not import those
-implementation modules directly either.
+The generic orchestrator should therefore depend on an injected reviewed
+`Runtime`, not on concrete backend modules directly. The current implementation
+uses an intermediate injected `BackendSet` for VM boot/shutdown only; the next
+step is to extend that same injection rule to Motlie guest backing providers
+such as guestfs, userspace vnet, and the SSH bridge so the generic
+orchestration layer does not import those implementation modules directly
+either.
+
+### Anti-Drift Rule: One Backend Namespace, Separate Composition Axes
+
+To avoid future architectural drift, `v1.4` should follow this rule:
+
+- use one implementation namespace under `libs/vmm/src/backend/`
+- but do not collapse all backend concepts into one exclusive runtime choice
+
+In particular, the design must keep these ideas separate:
+
+- hypervisor backing
+  - example: `backend::ch::shell`
+  - future: `backend::ch::fork_exec`, `backend::ch::vmm_thread`,
+    `backend::vz::*`
+- guest capability backends
+  - example: `backend::motlie::vfs`
+  - example: `backend::motlie::vnet`
+  - example: `backend::motlie::ssh_proxy`
+
+The reason is that these are composable, not mutually exclusive. A valid guest
+runtime may be:
+
+- Cloud Hypervisor shell + hypervisor-managed filesystem + hypervisor-managed
+  networking
+- Cloud Hypervisor shell + Motlie VFS backing
+- Cloud Hypervisor shell + Motlie VFS backing + Motlie userspace vnet backing
+- future Apple Virtualization + native networking + optional Motlie guest
+  capability backends when supported
+
+So the crate should group all implementations under `backend/` for coherence,
+build flags, and vertical slices, but the API and orchestrator must preserve
+separate composition axes for the reviewed:
+
+- `Runtime`
+  - `hypervisor: HypervisorBacking`
+  - `filesystem: FilesystemBacking`
+  - `network: NetworkBacking`
+  - `control_plane: ControlPlaneBacking`
+
+This is intentionally more explicit than a single `backend = ...` choice. The
+design should tolerate duplication between backend families rather than forcing
+an early shared base layer that will later fork.
 
 ## Problem Statement
 

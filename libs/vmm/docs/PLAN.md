@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-07 | @codex | Lock the reviewed `Runtime { hypervisor, filesystem, network, control_plane }` model: `BackendSet` remains only as an intermediate implementation step, and the next cleanup is to inject Motlie guest backing through the same boundary |
 | 2026-04-07 | @codex | Inject VM backend dispatch through `BackendSet` so generic orchestrator code no longer imports concrete CH backend modules directly; record Motlie guest backing injection as the next cleanup step |
 | 2026-04-07 | @codex | Start refactoring `v1.4` toward the reviewed backend hierarchy: `backend/mod.rs`, `backend/ch/`, placeholder `backend/motlie/`, placeholder `backend/vz/`, and explicitly document the simple CH guest path as a desired outcome |
 | 2026-04-07 | @codex | Complete the first usable `v1.4` lifecycle API: library-owned guestfs and SSH bridge services, `VmHandle::exec(...)`, rootless harness validation, and child-handle-based shutdown/readiness |
@@ -66,6 +67,11 @@ Turn the working `v1.3` example into:
   - [ ] no Motlie userspace vnet backing
   - [ ] a small Cloud Hypervisor “hello world” example boots a guest through
         the same lifecycle API using ordinary hypervisor-managed resources
+- [ ] reviewed `Runtime` composition becomes the injected runtime contract:
+  - [ ] `hypervisor: HypervisorBacking`
+  - [ ] `filesystem: FilesystemBacking`
+  - [ ] `network: NetworkBacking`
+  - [ ] `control_plane: ControlPlaneBacking`
 
 The rule for this plan is:
 
@@ -148,7 +154,7 @@ Tasks:
   - [x] `BackendKind`
   - [x] `VmBackendCapabilities`
   - [x] `VmBackend`
-  - [x] `BackendSet`
+  - [x] intermediate `BackendSet`
 - [x] add `prepare()`
 - [x] add `boot()`
 - [x] add handle-based readiness:
@@ -172,6 +178,8 @@ Tasks:
         `VmConfig` + `start_vmm_thread(...)`
 - [x] make backend dispatch enum-based, not dynamically discovered
 - [x] inject backend dispatch into generic orchestrator code
+- [ ] converge the intermediate `BackendSet` injection to reviewed
+      `Runtime` injection
 - [x] add the first backend implementation:
   - [x] `ChShellBackend`
   - [x] keep it close enough to current `v1.3` shell/CLI behavior to boot and
@@ -180,6 +188,12 @@ Tasks:
   - [ ] `motlie-vfs`
   - [ ] `motlie-vnet`
   - [ ] SSH bridge/control plane
+- [ ] express the reviewed runtime composition explicitly in code:
+  - [ ] `Runtime`
+  - [ ] `HypervisorBacking`
+  - [ ] `FilesystemBacking`
+  - [ ] `NetworkBacking`
+  - [ ] `ControlPlaneBacking`
 
 Acceptance:
 - a caller can block until a guest is actually usable
@@ -189,6 +203,9 @@ Acceptance:
 - the backend crate layout supports both:
   - CH/VZ simple hypervisor guests
   - Motlie-backed guest providers as explicit vertical slices
+- the generic lifecycle API accepts an injected reviewed runtime composition,
+  rather than assembling concrete CH and Motlie implementations inside
+  `orchestrator.rs`
 
 ## Phase 4: GuestFS and SSH Bridge Lifecycle Extraction
 
