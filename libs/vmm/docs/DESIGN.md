@@ -115,6 +115,7 @@ Current extraction checkpoints:
 
 - Phase 1: `spec.rs`, `network.rs`, `network_alloc.rs`
 - Phase 2: `artifacts.rs`
+- Planned Phase 3 review: `orchestrator.rs`
 - Explore a one-binary distribution model where the host harness embeds an
   opinionated guest image and can boot it without requiring a separate image
   bundle on disk.

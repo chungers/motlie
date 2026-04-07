@@ -304,6 +304,102 @@ the later embedded-image / union-binary prototype phase, even though the
 programmatic harness phase is still needed before that prototype becomes
 pleasant to iterate on.
 
+## Phase 3 Review Surface
+
+Phase 3 is `Orchestrator and Blocking Readiness`.
+
+The owning module for this phase should be:
+
+- `orchestrator.rs`
+
+This module is where `libs/vmm` becomes a real lifecycle owner instead of just
+types plus renderers.
+
+### Planned `orchestrator.rs`
+
+Planned types:
+
+```rust
+pub struct PreparedGuest {
+    pub guest: GuestSpec,
+    pub runtime_paths: GuestRuntimePaths,
+    pub net_assignment: GuestNetAssignment,
+    pub cloud_init: CloudInitArtifacts,
+    pub launch_script: String,
+}
+
+pub struct VmHandle {
+    pub guest_name: String,
+    pub pid: Option<u32>,
+    pub runtime_paths: GuestRuntimePaths,
+    pub net_assignment: GuestNetAssignment,
+}
+
+pub enum ReadinessStage {
+    LaunchSpawned,
+    ApiSocketReady,
+    GuestFsConnected,
+    SshBridgeReady,
+    ExecReady,
+}
+
+pub struct ReadinessPolicy {
+    pub api_socket_timeout: std::time::Duration,
+    pub guestfs_timeout: std::time::Duration,
+    pub ssh_bridge_timeout: std::time::Duration,
+    pub exec_ready_timeout: std::time::Duration,
+}
+
+pub struct ShutdownReport {
+    pub pid: Option<u32>,
+    pub api_attempted: bool,
+    pub forced: Option<&'static str>,
+}
+```
+
+Planned helpers:
+
+```rust
+pub fn prepare(...) -> Result<PreparedGuest, OrchestratorError>;
+pub fn launch(prepared: PreparedGuest) -> Result<VmHandle, OrchestratorError>;
+pub async fn launch_and_wait(
+    prepared: PreparedGuest,
+    policy: &ReadinessPolicy,
+) -> Result<VmHandle, OrchestratorError>;
+pub async fn wait_until_ready(
+    handle: &VmHandle,
+    policy: &ReadinessPolicy,
+) -> Result<(), OrchestratorError>;
+```
+
+Review intent:
+
+- move lifecycle control into the library
+- make readiness explicit and stage-based
+- return typed errors instead of REPL-oriented status text
+- establish the substrate that the later programmatic harness phase will call
+
+Example usage:
+
+```rust
+let prepared = orchestrator::prepare(/* guest + modes + namespace + alloc */)?;
+
+let handle = orchestrator::launch_and_wait(
+    prepared,
+    &ReadinessPolicy {
+        api_socket_timeout: std::time::Duration::from_secs(10),
+        guestfs_timeout: std::time::Duration::from_secs(15),
+        ssh_bridge_timeout: std::time::Duration::from_secs(15),
+        exec_ready_timeout: std::time::Duration::from_secs(20),
+    },
+)
+.await?;
+```
+
+This is the first phase where the library should be able to say not just "the
+launch script was spawned", but "the guest is actually ready to use" and, if
+not, which readiness stage failed.
+
 ## Provisional API Notes
 
 The following names are not yet fixed:
@@ -315,6 +411,11 @@ The following names are not yet fixed:
 - `GuestRuntimePaths`
 - `CloudInitArtifacts`
 - `LaunchArtifactRenderConfig`
+- `PreparedGuest`
+- `VmHandle`
+- `ReadinessStage`
+- `ReadinessPolicy`
+- `ShutdownReport`
 - `AdminNetMode`
 - `EgressNetMode`
 - `NetworkModes`
@@ -326,6 +427,7 @@ The important thing for review right now is the separation of concerns:
 - `network.rs` owns mode selection and validation
 - `network_alloc.rs` owns stable per-guest allocation
 - `artifacts.rs` owns rendered boot/runtime artifacts
+- `orchestrator.rs` will own lifecycle control and blocking readiness
 
 ## Review Questions
 
@@ -336,5 +438,6 @@ As Phase 1 lands, this document should answer:
 3. Is network mode policy separated cleanly from allocation state?
 4. Is the allocator contract clear about stability and exhaustion?
 5. Is `artifacts.rs` cleanly separated from lifecycle/process execution?
-6. Is the API surface small enough that later phases can layer on top without
+6. Is the planned readiness model explicit enough for agents and future CI?
+7. Is the API surface small enough that later phases can layer on top without
    forcing a rewrite?
