@@ -188,3 +188,19 @@ Further prototype features should be recorded in:
 
 - [`libs/vmm/docs/DESIGN.md`](../../docs/DESIGN.md)
 - [`libs/vmm/docs/PLAN.md`](../../docs/PLAN.md)
+
+## Future Union-Binary Prototype
+
+`v1.4` also reserves a dedicated phase for a special distribution mode where
+the harness binary embeds an opinionated guest image in its ELF `.rodata`
+section and boots from memfd-backed artifacts.
+
+Important placement:
+
+- image construction becomes stable enough after Phase 2, once launch artifacts
+  and runtime layout are library-owned
+- the prototype becomes practical after the programmatic harness bootstrap,
+  because the non-REPL harness can validate boot/exec/network/shutdown in a
+  repeatable way
+
+So this feature belongs after the harness bootstrap phase, not before it.
