@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-07 | @codex | Add a `v1.4` automatic guest provisioning phase driven by incoming SSH principals and document the library-owned CID/IP/MAC allocation story |
 | 2026-04-07 | @codex | Add a `v1.4` observability/reporting phase: combine Cloud Hypervisor host-side API/event data with guest-side SSH probes for CPU/memory/disk/network reporting |
 | 2026-04-07 | @codex | Start `v1.4` as the library-extraction line: keep `v1.3` frozen for comparison, require a side-by-side `v1.4` namespace, and define the thin-harness target for `repl_host_v1_4` |
 | 2026-04-06 | @codex | Reframe DESIGN around `examples/v1.3` as the active proving ground; add stable harness direction, blocking readiness requirements, and extraction targets for reusable orchestration APIs |
@@ -35,6 +36,8 @@ The active next step is `v1.4`:
   services
 - move all `v1.4` bins, scripts, and runtime assets onto a distinct namespace
   so `v1.3` and `v1.4` can run side by side
+- allow new incoming SSH principals to trigger guest auto-provisioning through
+  library-owned allocation and lifecycle services
 - add a reporting layer that can answer both host-visible and guest-visible
   health/metrics questions during automated runs
 
@@ -85,6 +88,9 @@ state?"
 - Add a stable reporting surface for guest lifecycle, resource use, and device
   counters so future Motlie work can debug regressions without manual SSH-only
   inspection.
+- Add a stable auto-provisioning path so new guest principals can be created on
+  first use without embedding more lifecycle/allocation policy into the example
+  REPL.
 
 ## Non-Goals
 
@@ -225,6 +231,36 @@ Where:
 - `VmHostReport` captures CH-visible state, counters, and event snapshots
 - `GuestProbeReport` captures SSH-collected guest metrics and health
 
+### FR-9: Automatic Guest Provisioning From Incoming SSH Principals
+
+The library must support creating a new guest on first contact when the SSH
+proxy receives a principal that does not yet map to a known guest.
+
+Example:
+
+- `alice@localhost` -> resolves to existing `alice` guest if already provisioned
+- `bob@localhost` -> resolves to existing `bob` guest if already provisioned
+- `jane@localhost` -> allocates and provisions a new `jane` guest if missing
+- `mike@localhost` -> allocates and provisions a new `mike` guest if missing
+
+This must be library-owned behavior, not ad hoc REPL glue. The orchestrator
+should provide a flow like:
+
+```rust
+let handle = orchestrator.ensure_guest_for_principal("jane").await?;
+```
+
+The resulting behavior should be:
+
+1. look up existing guest by principal
+2. if missing, allocate stable guest identity/resources
+3. provision guestfs/runtime paths
+4. boot and wait until ready
+5. continue with the SSH session against that guest
+
+This feature belongs after lifecycle, guestfs, and SSH bridge extraction
+because it depends on all three being library-owned already.
+
 **Auth model:**
 
 - **Inbound (client → russh):** Localhost trust. russh binds
@@ -342,6 +378,10 @@ contract, it should move into typed Rust structures:
 - cloud-init fragments
 - launch-time artifact selection
 
+That rule also applies to guest identity allocation. The SSH principal to guest
+mapping, CID selection, MAC selection, and runtime namespace derivation must be
+typed library state, not implicit shell naming conventions.
+
 The example can still expose an operator-friendly CLI, but the hard parts
 should not remain encoded as ad hoc environment variables and string assembly.
 
@@ -456,6 +496,39 @@ Expected extraction:
 - launch-helper log/serial locations
 
 This logic is already shaping into a reusable contract in the example lineage.
+
+### 3a. Guest Allocation Policy and Identity
+
+The `v1.4` line should make the guest identity allocator explicit and
+library-owned. The current scaffold is in:
+
+- [network_alloc.rs](/tmp/vmm-v1.4/libs/vmm/src/network_alloc.rs)
+
+The intended policy is:
+
+- each guest principal maps to one stable assignment for the lifetime of the
+  harness process
+- shutting a guest down does not lose its assignment
+- reboot/restart reuses the same assignment
+- a new guest principal consumes the next free slot
+- exhaustion is a typed error, not silent wraparound/saturation
+
+The assignment should include at least:
+
+- guest slot
+- vsock CID
+- admin ingress subnet/IP pair when used
+- admin MAC
+- egress MAC
+- vhost-user socket path
+- runtime namespace roots
+
+Current direction:
+
+- `v1.3` continues using fixed example-owned provisioning for known guests
+- `v1.4` introduces library-owned dynamic provisioning keyed by SSH principal
+- the SSH proxy should call the orchestrator, not the REPL, to resolve or
+  create guests
 
 ### 4. Subsystem Lifecycle Wiring
 

@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-07 | @codex | Add an explicit auto-provisioning phase for new SSH principals and document the library-owned guest allocation policy |
 | 2026-04-07 | @codex | Add an explicit reporting/metrics phase for `v1.4`, using Cloud Hypervisor host-side API/event data plus guest-side SSH probes |
 | 2026-04-06 | @codex | Add explicit post-checkpoint plan for extracting a stable automation harness from `examples/v1.3` into reusable `libs/vmm/src` modules |
 
@@ -34,6 +35,7 @@ What is still missing for a polished, reusable harness:
 - a non-interactive harness mode suitable for agents and CI
 - a stable host-side + guest-side reporting surface for CPU/memory/disk/network
   visibility
+- automatic guest provisioning when a new SSH principal appears
 
 ## Objective
 
@@ -118,7 +120,40 @@ Acceptance:
 - `repl_host_v1_3` does not manually coordinate SSH bridge and VFS listener state
 - guest lifecycle state is tracked by the library, not by ad hoc REPL maps
 
-## Phase 5: Validation and Agent Harness Mode
+## Phase 5: Automatic Guest Provisioning From SSH Principal
+
+Goal:
+- let the library resolve or create guests on first SSH contact without
+  hardcoding a fixed guest list in the example harness
+
+Tasks:
+- [ ] add `libs/vmm/src/provisioning.rs`
+- [ ] add a library-owned guest registry keyed by principal/guest name
+- [ ] define the stable allocation policy using
+  `libs/vmm/src/network_alloc.rs`
+- [ ] make allocation include:
+  - [ ] slot
+  - [ ] vsock CID
+  - [ ] admin ingress subnet/IP pair
+  - [ ] admin MAC
+  - [ ] egress MAC
+  - [ ] vhost-user socket path
+  - [ ] runtime namespace roots
+- [ ] add typed exhaustion errors instead of silent collision-prone saturation
+- [ ] add orchestrator entrypoint:
+  - [ ] `ensure_guest_for_principal()`
+- [ ] make the SSH proxy call the orchestrator to resolve-or-create guests
+- [ ] ensure shutdown/reboot reuses existing assignments within one harness run
+
+Acceptance:
+- `ssh alice@localhost` and `ssh bob@localhost` resolve predictably to their
+  guests
+- `ssh jane@localhost` and `ssh mike@localhost` can create new guests on first
+  contact
+- assignments are stable across relaunch within the same harness run
+- capacity exhaustion fails with a typed error instead of producing collisions
+
+## Phase 6: Validation and Agent Harness Mode
 
 Goal:
 - provide a runnable, non-interactive harness for automation
@@ -140,7 +175,7 @@ Acceptance:
 - an agent can drive the harness without depending on the REPL prompt
 - validation returns machine-usable results rather than only stderr text
 
-## Phase 6: Polish and Hardening
+## Phase 7: Polish and Hardening
 
 Goal:
 - make the harness dependable infrastructure for future Motlie work
@@ -155,7 +190,7 @@ Tasks:
 Acceptance:
 - future Motlie development can use the harness as a standard development/test substrate
 
-## Phase 7: Guest Reporting and Metrics
+## Phase 8: Guest Reporting and Metrics
 
 Goal:
 - provide a reusable, machine-readable VM reporting surface for debugging,

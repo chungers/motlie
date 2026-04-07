@@ -38,6 +38,7 @@ The reusable logic expected to move into `libs/vmm/src` first is:
   - launch script / launch args
 - boot / wait-ready / shutdown orchestration
 - guestfs provisioning and mount wiring
+- on-demand guest auto-provisioning from incoming SSH principals
 - validation helpers for non-interactive harness checks
 - guest reporting helpers that combine Cloud Hypervisor host-side counters with
   guest-side health probes
@@ -49,6 +50,7 @@ The resulting shape should look like:
 - `libs/vmm/src/artifacts.rs`
 - `libs/vmm/src/orchestrator.rs`
 - `libs/vmm/src/guestfs.rs`
+- `libs/vmm/src/provisioning.rs`
 - `libs/vmm/src/validation.rs`
 - `libs/vmm/src/reporting.rs`
 
@@ -105,6 +107,45 @@ The first successful `v1.4` slice should show:
 5. `v1.3` and `v1.4` can be launched side by side without path or socket
    collisions
 
+## Future Auto-Provisioning Phase
+
+After lifecycle, guestfs, and SSH bridge ownership move into `libs/vmm`, `v1.4`
+should add on-demand guest provisioning driven by incoming SSH principals.
+
+Example flow:
+
+- `ssh alice@localhost` -> use existing `alice` guest if already known
+- `ssh bob@localhost` -> provision and boot a new `bob` guest if missing
+- `ssh jane@localhost` -> allocate a new guest identity and runtime namespace
+- `ssh mike@localhost` -> same, without colliding with prior guests
+
+This phase belongs after orchestrator and guestfs extraction, not before,
+because automatic provisioning needs:
+
+- library-owned guest lifecycle state
+- library-owned allocation tables
+- library-owned SSH bridge/orchestrator integration
+
+The allocation story for this phase should be explicit and library-owned:
+
+- each guest name gets one stable `GuestNetAssignment`
+- assignments are retained for the lifetime of the harness process
+- assignments are reused across guest shutdown/reboot within that process
+- new guest names consume the next free slot
+
+The assignment should include:
+
+- guest slot
+- vsock CID
+- admin ingress subnet/IP pair when admin ingress is enabled
+- admin MAC
+- egress MAC
+- vhost-user socket path
+- runtime namespace roots
+
+The allocator must fail clearly once the configured capacity is exhausted rather
+than silently saturating into collisions.
+
 ## Future Reporting Phase
 
 After the first extraction slices, `v1.4` should add guest reporting and
@@ -138,8 +179,9 @@ counters, but not full guest OS semantics by itself.
 2. rename the `v1.4` runtime namespace
 3. extract typed guest/network/artifact helpers into `libs/vmm/src`
 4. add a thin `repl_host_v1_4`
-5. add `v1.4`-owned smoke coverage
-6. add host-side and guest-side reporting/metrics collection
+5. add automatic guest provisioning from SSH principal
+6. add `v1.4`-owned smoke coverage
+7. add host-side and guest-side reporting/metrics collection
 
 Further prototype features should be recorded in:
 
