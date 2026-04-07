@@ -9,6 +9,7 @@
 pub mod ca;
 pub mod artifacts;
 pub mod backend;
+pub mod guestfs;
 pub mod network;
 pub mod network_alloc;
 pub mod orchestrator;

@@ -15,6 +15,7 @@ debug-trace = []
 # SSH proxy + CA
 russh = { version = "0.60", features = ["aws-lc-rs"] }
 rand = "0.10"
+motlie-vfs = { path = "../vfs", features = ["vsock"] }
 
 bytes = "1"
 
@@ -31,8 +32,7 @@ anyhow.workspace = true
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
-# Example deps: v1.3 repl_host needs vfs + vnet
-motlie-vfs = { path = "../vfs", features = ["vsock"] }
+# Example deps: v1.3 repl_host needs vnet
 motlie-vnet = { path = "../vnet" }
 bytes = { version = "1", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -47,3 +47,7 @@ path = "examples/v1.3/repl_host.rs"
 [[example]]
 name = "repl_host_v1_4"
 path = "examples/v1.4/repl_host.rs"
+
+[[example]]
+name = "harness_v1_4"
+path = "examples/v1.4/harness/main.rs"

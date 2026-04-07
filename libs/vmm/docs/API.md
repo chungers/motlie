@@ -28,6 +28,9 @@ High-level status:
   - [x] `backend.rs`
 - [x] initial `examples/v1.4/repl_host_v1_4` exists and compiles against the
       library surface
+- [x] `libs/vmm/src/guestfs.rs` exists and is used by the `v1.4` harness
+- [x] initial `examples/v1.4/harness_v1_4` exists and runs against the library
+      surface
 
 Phase 1 convergence:
 
@@ -75,6 +78,11 @@ Phase 3 initial implementation:
 - [x] `VmHandle::ready(...)`
 - [x] `VmHandle::shutdown(...)`
 - [ ] guestfs / SSH bridge / exec-ready readiness gates beyond API socket
+  - current status:
+    - `VmHandle::ready(...)` covers API socket
+    - the `v1.4` harness composes guestfs readiness, SSH bridge readiness,
+      programmatic exec, VFS validation, and rootless egress validation above
+      the handle API
 
 ## Layering
 
