@@ -9,9 +9,18 @@
 - `repl_host_v1_4` should become a thin application and test harness over
   library services
 
-This branch is intentionally documentation-first. The first `v1.4` checkpoint
-defines the extraction plan and namespace rules before adding new prototype
-features.
+`v1.4` is no longer documentation-only. The current slice now includes:
+
+- a real `repl_host_v1_4` example entrypoint
+- `v1.4`-namespaced `build-guest.sh` and `launch-ch.sh`
+- a thin harness flow that calls library `prepare()`, `boot()`,
+  `VmHandle::ready(...)`, and `VmHandle::shutdown()`
+
+It is still intentionally incomplete compared with `v1.3`:
+
+- no guestfs extraction yet
+- no SSH bridge lifecycle extraction yet
+- readiness currently stops at API socket availability
 
 ## Scope
 
@@ -183,6 +192,12 @@ counters, but not full guest OS semantics by itself.
 6. add automatic guest provisioning from SSH principal
 7. add `v1.4`-owned smoke coverage
 8. add host-side and guest-side reporting/metrics collection
+
+Current status against that order:
+
+- steps 1-4 are now in progress in code
+- `repl_host_v1_4` is intentionally minimal and currently boots guests through
+  `ChShellBackend` with API-socket readiness only
 
 Further prototype features should be recorded in:
 

@@ -8,7 +8,9 @@ use crate::artifacts::{
     ArtifactError, CloudInitArtifacts, LaunchArtifactRenderConfig, render_cloud_init_artifacts,
     render_launch_script,
 };
-use crate::backend::{BackendError, BackendHandle, BackendKind, ChShellBackend, VmBackend};
+use crate::backend::{
+    BackendError, BackendHandle, BackendKind, ChShellBackend, VmBackend,
+};
 use crate::network::{NetworkModeError, NetworkModes, validate_network_modes};
 use crate::network_alloc::{GuestNetAllocator, GuestNetAllocatorError, GuestNetAssignment};
 use crate::spec::{GuestRuntimePaths, GuestSpec, RuntimeNamespace, SpecError};
@@ -59,6 +61,17 @@ pub struct ReadinessPolicy {
     pub guestfs_timeout: Duration,
     pub ssh_bridge_timeout: Duration,
     pub exec_ready_timeout: Duration,
+}
+
+impl Default for ReadinessPolicy {
+    fn default() -> Self {
+        Self {
+            api_socket_timeout: Duration::from_secs(10),
+            guestfs_timeout: Duration::from_secs(15),
+            ssh_bridge_timeout: Duration::from_secs(15),
+            exec_ready_timeout: Duration::from_secs(20),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,15 +159,15 @@ impl VmHandle {
     }
 
     pub async fn shutdown(&self) -> Result<ShutdownReport, OrchestratorError> {
-        match self.backend_kind {
+        let outcome = match self.backend_kind {
             BackendKind::ChShell => ChShellBackend::new().shutdown(&self.backend_handle)?,
             kind => return Err(OrchestratorError::UnsupportedBackend(kind)),
-        }
+        };
 
         Ok(ShutdownReport {
             pid: self.pid,
             api_attempted: false,
-            forced: None,
+            forced: outcome.forced,
         })
     }
 

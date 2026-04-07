@@ -26,6 +26,8 @@ High-level status:
 - [x] Phase 3 modules added in code:
   - [x] `orchestrator.rs`
   - [x] `backend.rs`
+- [x] initial `examples/v1.4/repl_host_v1_4` exists and compiles against the
+      library surface
 
 Phase 1 convergence:
 
