@@ -37,8 +37,12 @@ High-level status:
   - [x] placeholder `backend::motlie`
   - [x] placeholder `backend::vz`
 - [ ] next guest-shape convergence:
+  - [ ] `Runtime`
+  - [ ] `HypervisorBacking`
+  - [ ] `FilesystemBacking`
+  - [ ] `NetworkBacking`
+  - [ ] `ControlPlaneBacking`
   - [ ] `VmSpec`
-  - [ ] `GuestBackends`
   - [ ] simple CH “hello world” example over the same lifecycle API
 
 Phase 1 convergence:
@@ -96,9 +100,14 @@ Phase 3 initial implementation:
       cleanly through CH API shutdown or `SIGTERM` before falling back to
       `SIGKILL`
 - [ ] next structural convergence:
-  - [ ] `GuestSpec { vm, user, ssh, software, backends }`
+  - [ ] `Runtime`
+  - [ ] `HypervisorBacking`
+  - [ ] `FilesystemBacking`
+  - [ ] `NetworkBacking`
+  - [ ] `ControlPlaneBacking`
   - [ ] `VmSpec`
-  - [ ] `GuestBackends`
+  - [ ] `Runtime` injection replaces the current intermediate `BackendSet`
+        wiring
   - [ ] simple CH “hello world” example using the same lifecycle API
 
 ## Layering
@@ -114,11 +123,12 @@ The intended layering is:
   - `GuestResources`
   - `GuestStorage`
   - `BootArtifacts`
-- guest backing providers
-  - `GuestBackends`
-  - filesystem backing
-  - network backing
-  - control-plane backing
+- runtime composition
+  - `Runtime`
+  - `HypervisorBacking`
+  - `FilesystemBacking`
+  - `NetworkBacking`
+  - `ControlPlaneBacking`
 - backend realization
   - `backend::ch::*`
   - `backend::motlie::*`
@@ -158,7 +168,7 @@ pub struct GuestSpec {
     pub user: GuestUser,
     pub ssh: GuestSshAccess,
     pub software: SoftwareProfile,
-    pub backends: GuestBackends,
+    pub runtime: Runtime,
 }
 
 pub struct VmSpec {
@@ -169,28 +179,33 @@ pub struct VmSpec {
     pub boot: BootArtifacts,
 }
 
-pub struct GuestBackends {
-    pub filesystem: FilesystemBackendSpec,
-    pub network: NetworkBackendSpec,
-    pub control_plane: ControlPlaneBackendSpec,
+pub struct Runtime {
+    pub hypervisor: HypervisorBacking,
+    pub filesystem: FilesystemBacking,
+    pub network: NetworkBacking,
+    pub control_plane: ControlPlaneBacking,
 }
 
-pub enum FilesystemBackendSpec {
-    HostImageOnly,
-    MotlieVfs(MotlieVfsSpec),
+pub enum HypervisorBacking {
+    CloudHypervisorShell,
+    CloudHypervisorForkExec,
+    CloudHypervisorVmmThread,
+    AppleVirtualization,
 }
 
-pub enum NetworkBackendSpec {
+pub enum FilesystemBacking {
+    HypervisorManaged,
+    MotlieVfs,
+}
+
+pub enum NetworkBacking {
     None,
-    HypervisorManaged(HypervisorManagedNetworkSpec),
-    MotlieVnet(MotlieVnetSpec),
-    HypervisorManagedPlusMotlieVnet {
-        ingress: HypervisorManagedNetworkSpec,
-        egress: MotlieVnetSpec,
-    },
+    HypervisorManaged,
+    MotlieVnet,
+    HypervisorManagedPlusMotlieVnet,
 }
 
-pub enum ControlPlaneBackendSpec {
+pub enum ControlPlaneBacking {
     None,
     MotlieSshProxy,
 }
@@ -199,14 +214,17 @@ pub enum ControlPlaneBackendSpec {
 Reviewed intent:
 
 - `VmSpec` is the simple vertical slice for ordinary hypervisor guests
-- `GuestBackends` describes the real backing story for guest-visible
+- `Runtime` describes the composed runtime/backing story for guest-visible
   capabilities
 - Motlie guestfs and Motlie userspace vnet are not “sidecars”; they are actual
   guest backing providers
 - the simple CH case is:
-  - `filesystem = HostImageOnly`
-  - `network = HypervisorManaged(...)`
+  - `hypervisor = CloudHypervisorShell`
+  - `filesystem = HypervisorManaged`
+  - `network = HypervisorManaged`
   - `control_plane = None`
+- the current code still uses an intermediate injected `BackendSet` for VM boot
+  dispatch; that is an implementation step, not the desired end-state API
 
 ## Current Implemented Guest Shape
 
@@ -468,14 +486,6 @@ pub trait VmBackend {
     fn boot(&self, prepared: &PreparedGuest) -> Result<BackendHandle, BackendError>;
     fn shutdown(&self, handle: &BackendHandle) -> Result<(), BackendError>;
 }
-
-pub enum BackendHandle {
-    ChShell(ChShellHandle),
-}
-
-pub struct BackendSet {
-    pub ch_shell: backend::ch::shell::ChShellBackend,
-}
 ```
 
 Rules:
@@ -486,10 +496,14 @@ Rules:
 - backend-specific realization lives under `backend/`
 - `backend/ch/shell.rs` is the first implementation and preserves current
   `v1.3` shell/CLI behavior
-- generic orchestrator code should depend on an injected `BackendSet`, not
-  import `backend::ch::*` or `backend::vz::*` directly
+- generic orchestrator code should depend on an injected `Runtime`, not import
+  `backend::ch::*`, `backend::vz::*`, or `backend::motlie::*` directly
 - readiness, SSH exec, validation, SSH CA, and guestfs semantics stay above the
   backend layer
+- current code is one step short of this rule:
+  - VM boot/shutdown is already injected through `BackendSet`
+  - Motlie filesystem/network/control-plane wiring still needs to move behind
+    the reviewed `Runtime` composition
 
 ### `orchestrator.rs`
 
@@ -498,7 +512,6 @@ pub struct PrepareRequest {
     pub guest: GuestSpec,
     pub namespace: RuntimeNamespace,
     pub network_modes: NetworkModes,
-    pub backend_kind: BackendKind,
     pub base_dir: std::path::PathBuf,
     pub ssh_ca_pubkey: Option<String>,
 }
@@ -510,7 +523,6 @@ pub struct PreparedGuest {
     pub cloud_init: CloudInitArtifacts,
     pub launch_script: String,
     pub network_modes: NetworkModes,
-    pub backend_kind: BackendKind,
     pub base_dir: std::path::PathBuf,
 }
 
@@ -543,10 +555,8 @@ pub struct ShutdownReport {
     pub forced: Option<&'static str>,
 }
 
-pub struct SshBridgeServices { /* ... */ }
 pub struct LifecycleServices {
-    pub backends: std::sync::Arc<BackendSet>,
-    pub ssh_bridge: Option<SshBridgeServices>,
+    pub runtime: std::sync::Arc<Runtime>,
 }
 
 pub fn prepare(
@@ -581,11 +591,12 @@ let prepared = orchestrator::prepare(req, &mut allocator)?;
 let handle = orchestrator::boot(
     prepared,
     LifecycleServices {
-        backends: std::sync::Arc::new(BackendSet::default()),
-        ssh_bridge: Some(SshBridgeServices::new(
-            std::sync::Arc::clone(&ca),
-            std::sync::Arc::clone(&guest_registry),
-        )),
+        runtime: std::sync::Arc::new(Runtime {
+            hypervisor: HypervisorBacking::CloudHypervisorShell,
+            filesystem: FilesystemBacking::MotlieVfs,
+            network: NetworkBacking::MotlieVnet,
+            control_plane: ControlPlaneBacking::MotlieSshProxy,
+        }),
     },
 ).await?;
 
@@ -608,6 +619,9 @@ Current implementation note:
 - backend shutdown now owns the real child process state rather than polling
   `/proc`, so readiness and shutdown no longer treat exited CH processes as
   still alive zombies
+- current code still uses `BackendSet` plus direct Motlie wiring in
+  `orchestrator.rs`; converging that to reviewed `Runtime` injection is the
+  next architectural cleanup
 - VM backend dispatch is now injected through `BackendSet`
 - guest backing providers (`guestfs`, `motlie-vnet`, SSH bridge) are still
   wired directly in orchestrator and are the next abstraction cleanup target
