@@ -24,6 +24,14 @@ Important:
 - later `v1.4` phases should follow the reviewed naming and binding model in
   this document even where the code has not been renamed yet
 
+Additional reviewed rule:
+
+- the public `v1.4` API should be layered so it can be translated almost
+  mechanically into Cloud Hypervisor's internal `VmConfig`
+- guest OS user, SSH access, software, and mounts stay above the CH adapter
+- CH-shaped boot inputs should be modeled separately as resources, storage, and
+  boot artifacts
+
 ## Current Exported Surface
 
 As of the current `v1.4` planning checkpoint, [lib.rs](/tmp/vmm-v1.4/libs/vmm/src/lib.rs) exports:
@@ -112,6 +120,8 @@ pub struct GuestSpec {
     pub mounts: Vec<GuestMountSpec>,
     pub software: SoftwareProfile,
     pub resources: GuestResources,
+    pub storage: GuestStorage,
+    pub boot: BootArtifacts,
 }
 
 pub struct GuestUser {
@@ -139,7 +149,18 @@ pub struct SoftwareProfile {
 pub struct GuestResources {
     pub boot_vcpus: u8,
     pub memory_mib: u32,
+    pub max_vcpus: Option<u8>,
+}
+
+pub struct GuestStorage {
     pub overlay_size: String,
+}
+
+pub struct BootArtifacts {
+    pub kernel: std::path::PathBuf,
+    pub initramfs: Option<std::path::PathBuf>,
+    pub firmware: Option<std::path::PathBuf>,
+    pub cmdline: Option<String>,
 }
 ```
 
@@ -151,6 +172,9 @@ Review intent:
 - keep guest OS account modeling (`GuestUser`) separate from SSH routing/auth
   policy (`GuestSshAccess`)
 - keep VM identity (`guest_id`) separate from guest-visible hostname
+- keep CH-shaped boot inputs (`GuestResources`, `GuestStorage`,
+  `BootArtifacts`) separate from top-layer guest intent such as user/auth,
+  mounts, and software
 
 Reviewed example usage:
 
@@ -182,10 +206,42 @@ let guest = GuestSpec {
     resources: GuestResources {
         boot_vcpus: 2,
         memory_mib: 512,
+        max_vcpus: None,
+    },
+    storage: GuestStorage {
         overlay_size: "2G".to_string(),
+    },
+    boot: BootArtifacts {
+        kernel: "/tmp/vmm-v1.4/libs/vmm/examples/v1.4/artifacts/base/Image".into(),
+        initramfs: None,
+        firmware: None,
+        cmdline: None,
     },
 };
 ```
+
+### Reviewed Layering
+
+The intended layering is:
+
+- top layer: Motlie guest intent
+  - `guest_id`
+  - `hostname`
+  - `GuestUser`
+  - `GuestSshAccess`
+  - mounts
+  - software
+- middle layer: bootable VM shape
+  - `GuestResources`
+  - `GuestStorage`
+  - `BootArtifacts`
+  - network mode and allocated identities
+- bottom layer: Cloud Hypervisor realization
+  - `VmConfig`
+  - VMM thread start
+  - event monitor thread start
+
+This is the intended review boundary for later phases.
 
 Namespace-aware runtime path derivation now exists and is intended to replace
 ad hoc string assembly in the harness:
@@ -323,7 +379,8 @@ By the end of Phase 1, the `v1.4` harness should be able to do something like:
 use motlie_vmm::network::{AdminNetMode, EgressNetMode, NetworkModes, validate_network_modes};
 use motlie_vmm::network_alloc::{GuestNetAllocator, GuestNetAllocatorConfig};
 use motlie_vmm::spec::{
-    GuestResources, GuestSpec, GuestSshAccess, GuestUser, SoftwareProfile,
+    BootArtifacts, GuestResources, GuestSpec, GuestSshAccess, GuestStorage,
+    GuestUser, SoftwareProfile,
 };
 
 let modes = NetworkModes {
@@ -353,7 +410,16 @@ let guest = GuestSpec {
     resources: GuestResources {
         boot_vcpus: 2,
         memory_mib: 512,
+        max_vcpus: None,
+    },
+    storage: GuestStorage {
         overlay_size: "2G".to_string(),
+    },
+    boot: BootArtifacts {
+        kernel: "/tmp/vmm-v1.4/libs/vmm/examples/v1.4/artifacts/base/Image".into(),
+        initramfs: None,
+        firmware: None,
+        cmdline: None,
     },
 };
 
@@ -467,6 +533,15 @@ pub fn render_meta_data(guest_name: &str) -> String;
 pub fn render_cloud_init_artifacts(guest: &GuestSpec) -> Result<CloudInitArtifacts, ArtifactError>;
 pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<String, ArtifactError>;
 ```
+
+Reviewed boundary note:
+
+- `artifacts.rs` should render concrete guest boot/runtime files from reviewed
+  inputs such as `GuestUser`, `GuestSshAccess`, `SoftwareProfile`,
+  `GuestStorage`, and `BootArtifacts`
+- `BootArtifacts` is the declarative input model
+- rendered cloud-init, mounts YAML, and launch files remain implementation
+  outputs below that API layer
 
 Review intent:
 
@@ -609,6 +684,8 @@ The following names are not yet fixed in code, but the reviewed direction is:
 - `GuestUser`
 - `GuestSshAccess`
 - `IssuedGuestSshCredentials`
+- `GuestStorage`
+- `BootArtifacts`
 - `RuntimeNamespace`
 - `GuestRuntimePaths`
 - `SoftwareProfile`
@@ -646,5 +723,7 @@ As Phase 1 lands, this document should answer:
    binding clear enough?
 7. Is the planned `boot()` + `VmHandle::ready(...)` model explicit enough for
    agents and future CI?
-8. Is the API surface small enough that later phases can layer on top without
+8. Is the split between top-layer guest intent and CH-shaped boot inputs
+   (`GuestResources`, `GuestStorage`, `BootArtifacts`) clear enough?
+9. Is the API surface small enough that later phases can layer on top without
    forcing a rewrite?
