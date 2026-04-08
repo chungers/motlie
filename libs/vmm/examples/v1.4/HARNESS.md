@@ -4,7 +4,9 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-04-08 | @codex | Quieten the bootstrap/PTTY validation path: wait for package-manager background activity to settle before running `apt-get update`, so saved scenarios record one clean apt run instead of transient first-boot lock contention |
+| 2026-04-08 | @codex | Clarify PTY sequencing for shell-driven scenarios: after visible command output assertions, wait for the shell prompt to return before sending the next command, or TUI launches can race the prior command tail |
+| 2026-04-08 | @codex | Add `wait_package_manager_quiescent` as a first-class scenario action so saved scenarios stop embedding the long package-manager idle shell loop inline |
+| 2026-04-08 | @codex | Quieten the bootstrap/PTY validation path: wait for package-manager background activity to settle before running `apt-get update`, so saved scenarios record one clean apt run instead of transient first-boot lock contention |
 | 2026-04-08 | @codex | Add the switchable terminal-backend contract: `shadow` is now the default PTY/TUI renderer, `vt100` remains as a fallback flag, `pty-screen.json` records the backend used, and PNG/GIF/movie output stays out of scope for `v1.4` |
 | 2026-04-08 | @codex | Add asciicast as the portable PTY replay/export artifact, keep NDJSON transcript + VTE screen JSON as the canonical agent-facing validation artifacts, and explicitly mark PNG/GIF/movie generation out of scope for `v1.4` |
 | 2026-04-08 | @codex | Expand HARNESS into the future-agent operating contract: design goals, autonomous workflow, troubleshooting loop, artifact/log usage, and standard verification matrix now explicitly include `agent-bootstrap.json` and the recommended shell-vs-scenario decision path |
@@ -306,6 +308,7 @@ Supported actions today:
 - `boot`
 - `ready`
 - `exec`
+- `wait_package_manager_quiescent`
 - `pty_open`
 - `pty_send`
 - `pty_send_line`
@@ -321,6 +324,9 @@ Current expectation model:
 
 - `exec` supports `expect.exit_code`, `expect.stdout_contains`,
   `expect.stderr_contains`
+- `wait_package_manager_quiescent` is the first built-in readiness-style
+  scenario action; use it instead of inlining the `apt`/`dpkg` idle loop in
+  JSON
 - PTY expectations are explicit step actions instead of being hidden in
   shell-wrapper `grep` chains
 - use `pty_expect` for new incremental PTY output and `pty_expect_screen` for
@@ -328,6 +334,9 @@ Current expectation model:
 - `pty_expect_screen` is a timed wait over the VTE buffer, so it can validate
   alternate-screen TUIs such as Codex instead of only checking an immediate
   snapshot
+- when driving an interactive shell through sequential commands, wait for the
+  prompt to reappear before sending the next command, even if the previous
+  command's success marker is already visible
 
 Current limits:
 
