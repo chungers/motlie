@@ -1,12 +1,12 @@
-use std::cmp::min;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use motlie_vmm::orchestrator::{OrchestratorError, VmHandle};
-use motlie_vmm::ssh::{GuestPtySession, PtyRead, PtyRequest, PtyTranscriptEvent};
+use motlie_vmm::ssh::{PtyRequest, PtyTranscriptEvent};
 use serde::Serialize;
 use thiserror::Error;
-use tokio::time::Instant;
+
+use crate::terminal::{HarnessTerminalSession, TerminalSessionError, VteScreenSnapshot};
 
 #[derive(Debug, Serialize)]
 pub struct PtyCheck {
@@ -31,6 +31,8 @@ pub struct PtyTranscriptSummary {
 #[derive(Debug, Serialize)]
 pub struct PtyScenarioResult {
     pub transcript_path: PathBuf,
+    pub screen_path: PathBuf,
+    pub final_screen: VteScreenSnapshot,
     pub transcript_summary: PtyTranscriptSummary,
     pub checks: Vec<PtyCheck>,
 }
@@ -45,13 +47,7 @@ pub enum PtyScenarioError {
     #[error(transparent)]
     Open(#[from] OrchestratorError),
     #[error(transparent)]
-    ControlPlane(#[from] motlie_vmm::ssh::SshProxyError),
-    #[error("PTY step '{step}' expected {expected}, got: {observed_excerpt}")]
-    Assertion {
-        step: &'static str,
-        expected: String,
-        observed_excerpt: String,
-    },
+    Terminal(#[from] TerminalSessionError),
     #[error("PTY transcript was empty after the scenario completed")]
     EmptyTranscript,
     #[error("PTY transcript did not include a terminal close/eof/exit-status event")]
@@ -61,51 +57,63 @@ pub enum PtyScenarioError {
 pub async fn run_pty_smoke(
     handle: &VmHandle,
     transcript_path: PathBuf,
+    screen_path: PathBuf,
 ) -> Result<PtyScenarioRun, PtyScenarioError> {
-    let pty = handle
-        .open_pty(PtyRequest::default(), Duration::from_secs(10))
-        .await?;
+    let request = PtyRequest::default();
+    let terminal = HarnessTerminalSession::new(
+        "alice-pty-smoke",
+        handle
+            .open_pty(request.clone(), Duration::from_secs(10))
+            .await?,
+        &request,
+        transcript_path.clone(),
+        screen_path.clone(),
+    );
     let mut checks = Vec::new();
 
-    let login = read_until_contains(
-        &pty,
-        "login_banner",
-        "Start tmux session?",
-        Duration::from_secs(20),
-    )
-    .await?;
+    let login = terminal
+        .read_until_contains(
+            "login_banner",
+            "Start tmux session?",
+            Duration::from_secs(20),
+        )
+        .await?;
     checks.push(check_contains(
         "motd",
         "v1.4 extraction / agent-state demo",
         &login.output,
     )?);
 
-    pty.send_line("n").await?;
-    let shell = read_until_contains(
-        &pty,
-        "shell_prompt",
-        "alice@motlie-alice",
-        Duration::from_secs(10),
-    )
-    .await?;
+    terminal.send_line("n").await?;
+    let shell = terminal
+        .read_until_contains(
+            "shell_prompt",
+            "alice@motlie-alice",
+            Duration::from_secs(10),
+        )
+        .await?;
     checks.push(check_contains(
         "shell_prompt",
         "alice@motlie-alice",
         &shell.output,
     )?);
 
-    pty.send_line("pwd").await?;
-    let pwd = read_until_contains(&pty, "pwd", "/home/alice", Duration::from_secs(10)).await?;
+    terminal.send_line("pwd").await?;
+    let pwd = terminal
+        .read_until_contains("pwd", "/home/alice", Duration::from_secs(10))
+        .await?;
     checks.push(check_contains("pwd", "/home/alice", &pwd.output)?);
 
-    pty.resize(120, 40, 0, 0).await?;
-    pty.send_line("stty size").await?;
-    let size = read_until_contains(&pty, "resize_ack", "40 120", Duration::from_secs(10)).await?;
+    terminal.resize(120, 40, 0, 0).await?;
+    terminal.send_line("stty size").await?;
+    let size = terminal
+        .read_until_contains("resize_ack", "40 120", Duration::from_secs(10))
+        .await?;
     checks.push(check_contains("resize_ack", "40 120", &size.output)?);
 
-    pty.send_line("exit").await?;
-    let close = read_until_terminal(&pty, Duration::from_secs(5)).await?;
-    let transcript = pty.transcript()?;
+    terminal.send_line("exit").await?;
+    let close = terminal.read_until_terminal(Duration::from_secs(5)).await?;
+    let transcript = terminal.transcript()?;
     if transcript.is_empty() {
         return Err(PtyScenarioError::EmptyTranscript);
     }
@@ -122,9 +130,14 @@ pub async fn run_pty_smoke(
         observed_excerpt: excerpt(&close.output),
     });
 
+    terminal.persist_artifacts()?;
+    let final_screen = terminal.snapshot()?;
+
     Ok(PtyScenarioRun {
         result: PtyScenarioResult {
             transcript_path,
+            screen_path,
+            final_screen,
             transcript_summary,
             checks,
         },
@@ -144,77 +157,12 @@ fn check_contains(
             observed_excerpt: excerpt(output),
         })
     } else {
-        Err(PtyScenarioError::Assertion {
+        Err(TerminalSessionError::Assertion {
             step: name,
             expected: format!("output containing '{expected}'"),
             observed_excerpt: excerpt(output),
-        })
-    }
-}
-
-async fn read_until_contains(
-    pty: &GuestPtySession,
-    step: &'static str,
-    needle: &str,
-    timeout: Duration,
-) -> Result<PtyRead, PtyScenarioError> {
-    let deadline = Instant::now() + timeout;
-    let mut combined = PtyRead::default();
-
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(PtyScenarioError::Assertion {
-                step,
-                expected: format!("output containing '{needle}'"),
-                observed_excerpt: excerpt(&combined.output),
-            });
         }
-
-        let chunk = pty
-            .read_for(min(remaining, Duration::from_millis(500)))
-            .await?;
-        combined.output.push_str(&chunk.output);
-        combined.exit_status = chunk.exit_status.or(combined.exit_status);
-        combined.eof |= chunk.eof;
-        combined.closed |= chunk.closed;
-
-        if combined.output.contains(needle) {
-            return Ok(combined);
-        }
-        if combined.eof || combined.closed {
-            return Err(PtyScenarioError::Assertion {
-                step,
-                expected: format!("output containing '{needle}'"),
-                observed_excerpt: excerpt(&combined.output),
-            });
-        }
-    }
-}
-
-async fn read_until_terminal(
-    pty: &GuestPtySession,
-    timeout: Duration,
-) -> Result<PtyRead, PtyScenarioError> {
-    let deadline = Instant::now() + timeout;
-    let mut combined = PtyRead::default();
-
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Ok(combined);
-        }
-
-        let chunk = pty
-            .read_for(min(remaining, Duration::from_millis(500)))
-            .await?;
-        combined.output.push_str(&chunk.output);
-        combined.exit_status = chunk.exit_status.or(combined.exit_status);
-        combined.eof |= chunk.eof;
-        combined.closed |= chunk.closed;
-        if combined.eof || combined.closed || combined.exit_status.is_some() {
-            return Ok(combined);
-        }
+        .into())
     }
 }
 

@@ -389,7 +389,8 @@ impl VmHandle {
             run_bundle: VmRunBundle {
                 capture_paths: VmCapturePaths {
                     scenario_result_json: bundle_root.join("scenario-result.json"),
-                    pty_transcript_json: bundle_root.join("pty-transcript.json"),
+                    pty_transcript_ndjson: bundle_root.join("pty-transcript.ndjson"),
+                    pty_screen_json: bundle_root.join("pty-screen.json"),
                 },
                 bundle_root,
                 host_mounts,
@@ -559,7 +560,7 @@ mod tests {
     #[test]
     fn prepare_materializes_reviewed_guest_inputs() {
         let namespace = RuntimeNamespace::new("motlie-vmm-v14", "/tmp").unwrap();
-        let mut allocator = GuestNetAllocator::new(GuestNetAllocatorConfig::default());
+        let mut allocator = GuestNetAllocator::new(GuestNetAllocatorConfig::default()).unwrap();
         let prepared = prepare(
             PrepareRequest {
                 guest: sample_guest(),
@@ -586,7 +587,7 @@ mod tests {
     async fn ready_waits_for_api_socket() {
         let tempdir = tempfile::tempdir().unwrap();
         let api_socket = tempdir.path().join("guest-api.sock");
-        let mut allocator = GuestNetAllocator::new(GuestNetAllocatorConfig::default());
+        let mut allocator = GuestNetAllocator::new(GuestNetAllocatorConfig::default()).unwrap();
         let handle = VmHandle {
             guest_id: "alice".to_string(),
             pid: None,

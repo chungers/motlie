@@ -114,7 +114,7 @@ Phase 3 initial implementation:
   - [ ] `VmSpec`
   - [ ] simple CH “hello world” example using the same lifecycle API
   - [ ] harness interactive mode replaces the standalone `repl_host_v1_4`
-  - [ ] harness script/scenario format for action/expectation pairs
+  - [x] harness script/scenario format for action/expectation pairs
 
 Phase 4 initial implementation:
 
@@ -139,7 +139,7 @@ Phase 5 first slice:
 - [x] structured status/error classification for agents and CI
 - [x] PTY scenario result hardening
 - [x] reusable PTY transcript artifact capture
-- [ ] VTE/rendered terminal state
+- [x] VTE/rendered terminal state
 - [ ] recording/export evaluation
 
 ## Layering
@@ -313,6 +313,7 @@ pub struct VmObservability {
     pub filesystem: FilesystemObservability,
     pub network: NetworkObservability,
     pub control_plane: ControlPlaneObservability,
+    pub run_bundle: VmRunBundle,
 }
 ```
 
@@ -323,6 +324,7 @@ Reviewed harness direction:
   - named scenarios such as `smoke`, `multiguest`, and `pty`
   - interactive/manual mode for humans and coding agents
   - transcript and log capture for PTY sessions and VM launch artifacts
+  - rendered terminal-state capture alongside raw PTY transcript capture
 - `examples/v1.4/repl_host.rs` remains useful during the transition, but it
   should not accumulate unique lifecycle/control-plane logic
 
@@ -487,6 +489,8 @@ pub fn validate_network_modes(
 ### `network_alloc.rs`
 
 ```rust
+pub struct Ipv4Subnet { /* ... */ }
+pub struct Ipv4SubnetPool { /* ... */ }
 pub struct AdminIpv4Pair { /* ... */ }
 pub struct EgressIpv4Layout { /* ... */ }
 pub struct GuestNetAssignment { /* ... */ }
@@ -500,6 +504,61 @@ Contract:
 - assignments are stable for the life of the harness process
 - exhaustion is a typed error
 - no silent collision-prone saturation
+- capacity is computed from subnet pools, CID headroom, and MAC headroom
+- config is inspectable and suitable for harness UX
+
+Reviewed shape:
+
+```rust
+impl Ipv4Subnet {
+    pub fn new(
+        network: std::net::Ipv4Addr,
+        prefix_len: u8,
+    ) -> Result<Self, GuestNetAllocatorError>;
+}
+
+impl std::str::FromStr for Ipv4Subnet { /* parses 10.0.0.0/8 style input */ }
+
+impl Ipv4SubnetPool {
+    pub fn capacity(&self) -> Result<u32, GuestNetAllocatorError>;
+    pub fn subnet_for_slot(
+        &self,
+        slot: u32,
+    ) -> Result<Ipv4Subnet, GuestNetAllocatorError>;
+}
+
+impl GuestNetAllocatorConfig {
+    pub fn capacity(&self) -> Result<u32, GuestNetAllocatorError>;
+    pub fn validate(&self) -> Result<(), GuestNetAllocatorError>;
+    pub fn with_max_guests(self, max_guests: u32) -> Self;
+}
+
+impl GuestNetAllocator {
+    pub fn new(
+        config: GuestNetAllocatorConfig,
+    ) -> Result<Self, GuestNetAllocatorError>;
+    pub fn config(&self) -> &GuestNetAllocatorConfig;
+    pub fn capacity(&self) -> Result<u32, GuestNetAllocatorError>;
+    pub fn next_slot(&self) -> u32;
+    pub fn remaining_capacity(&self) -> Result<u32, GuestNetAllocatorError>;
+    pub fn assignments(
+        &self,
+    ) -> &std::collections::BTreeMap<String, GuestNetAssignment>;
+    pub fn get(&self, guest_name: &str) -> Option<&GuestNetAssignment>;
+    pub fn ensure(
+        &mut self,
+        guest_name: &str,
+    ) -> Result<&GuestNetAssignment, GuestNetAllocatorError>;
+}
+```
+
+Default reviewed policy:
+
+- admin pool: `172.20.0.0/16` split into guest `/30`s
+- egress pool: `10.0.0.0/8` split into guest `/24`s
+- `cid = first_cid + slot`
+- admin and egress MAC addresses are derived from the slot, not truncated to
+  one byte
 
 ### SSH / CA Binding
 

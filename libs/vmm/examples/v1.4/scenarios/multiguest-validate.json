@@ -1,0 +1,54 @@
+{
+  "name": "multiguest-validate",
+  "description": "Boot alice and bob, verify guest-specific VFS plus Motlie vnet egress, then shut both guests down.",
+  "steps": [
+    { "action": "boot", "guest": "alice" },
+    { "action": "ready", "guest": "alice" },
+    { "action": "boot", "guest": "bob" },
+    { "action": "ready", "guest": "bob" },
+    {
+      "action": "exec",
+      "guest": "alice",
+      "command": "/bin/sh -lc 'test -f /workspace/README.md && grep -q \"Alice workspace mounted from the host.\" /workspace/README.md && echo WORKSPACE_OK'",
+      "timeout_ms": 10000,
+      "expect": { "exit_code": 0, "stdout_contains": "WORKSPACE_OK" }
+    },
+    {
+      "action": "exec",
+      "guest": "bob",
+      "command": "/bin/sh -lc 'test -f /workspace/README.md && grep -q \"Bob workspace mounted from the host.\" /workspace/README.md && echo WORKSPACE_OK'",
+      "timeout_ms": 10000,
+      "expect": { "exit_code": 0, "stdout_contains": "WORKSPACE_OK" }
+    },
+    {
+      "action": "exec",
+      "guest": "alice",
+      "command": "/bin/sh -lc 'ip route | grep -q \"^default via 10.0.0.2 \" && echo ROUTE_OK'",
+      "timeout_ms": 10000,
+      "expect": { "exit_code": 0, "stdout_contains": "ROUTE_OK" }
+    },
+    {
+      "action": "exec",
+      "guest": "bob",
+      "command": "/bin/sh -lc 'ip route | grep -q \"^default via 10.0.1.2 \" && echo ROUTE_OK'",
+      "timeout_ms": 10000,
+      "expect": { "exit_code": 0, "stdout_contains": "ROUTE_OK" }
+    },
+    {
+      "action": "exec",
+      "guest": "alice",
+      "command": "/bin/sh -lc 'code=$(curl -s -o /dev/null -w \"%{http_code}\" https://example.com); test \"$code\" = 200 && echo HTTPS_OK'",
+      "timeout_ms": 20000,
+      "expect": { "exit_code": 0, "stdout_contains": "HTTPS_OK" }
+    },
+    {
+      "action": "exec",
+      "guest": "bob",
+      "command": "/bin/sh -lc 'code=$(curl -s -o /dev/null -w \"%{http_code}\" https://example.com); test \"$code\" = 200 && echo HTTPS_OK'",
+      "timeout_ms": 20000,
+      "expect": { "exit_code": 0, "stdout_contains": "HTTPS_OK" }
+    },
+    { "action": "shutdown", "guest": "bob" },
+    { "action": "shutdown", "guest": "alice" }
+  ]
+}

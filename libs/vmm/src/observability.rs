@@ -85,7 +85,8 @@ pub struct VmHostMount {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct VmCapturePaths {
     pub scenario_result_json: PathBuf,
-    pub pty_transcript_json: PathBuf,
+    pub pty_transcript_ndjson: PathBuf,
+    pub pty_screen_json: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

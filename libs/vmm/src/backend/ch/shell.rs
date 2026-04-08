@@ -130,10 +130,8 @@ impl ChShellBackend {
             ("mounts.yaml", prepared.cloud_init.mounts_yaml.as_str()),
         ] {
             let path = cloud_init_dir.join(name);
-            fs::write(&path, contents).map_err(|source| ChShellError::WriteCloudInitAsset {
-                path,
-                source,
-            })?;
+            fs::write(&path, contents)
+                .map_err(|source| ChShellError::WriteCloudInitAsset { path, source })?;
         }
         fs::write(launch_script_path, &prepared.launch_script).map_err(|source| {
             ChShellError::WriteLaunchScript {
@@ -393,7 +391,7 @@ mod tests {
     fn sample_prepared_guest(script: &str) -> PreparedGuest {
         let namespace = RuntimeNamespace::new("motlie-vmm-v14", "/tmp").unwrap();
         let runtime_paths = GuestRuntimePaths::for_guest(&namespace, "alice").unwrap();
-        let mut allocator = GuestNetAllocator::new(GuestNetAllocatorConfig::default());
+        let mut allocator = GuestNetAllocator::new(GuestNetAllocatorConfig::default()).unwrap();
         let net_assignment = allocator.ensure("alice").unwrap().clone();
 
         PreparedGuest {
@@ -473,27 +471,47 @@ mod tests {
             guest_name: "alice".to_string(),
             slot: 0,
             cid: 3,
+            admin_subnet: "172.20.0.0/30".parse().unwrap(),
             admin_ipv4: AdminIpv4Pair {
-                host: Ipv4Addr::new(192, 168, 249, 1),
-                guest: Ipv4Addr::new(192, 168, 249, 2),
+                host: Ipv4Addr::new(172, 20, 0, 1),
+                guest: Ipv4Addr::new(172, 20, 0, 2),
             },
-            admin_mac: [0x52, 0x54, 0x00, 0xad, 0x00, 0x01],
+            admin_mac: [0x52, 0x54, 0x00, 0xa0, 0x00, 0x00],
+            egress_subnet: "10.0.0.0/24".parse().unwrap(),
             egress_ipv4: EgressIpv4Layout {
-                guest: Ipv4Addr::new(10, 0, 2, 15),
-                host: Ipv4Addr::new(10, 0, 2, 2),
-                dns: Ipv4Addr::new(10, 0, 2, 3),
+                guest: Ipv4Addr::new(10, 0, 0, 15),
+                host: Ipv4Addr::new(10, 0, 0, 2),
+                dns: Ipv4Addr::new(10, 0, 0, 3),
                 netmask: Ipv4Addr::new(255, 255, 255, 0),
             },
-            egress_mac: [0x52, 0x54, 0x00, 0xe9, 0x00, 0x01],
+            egress_mac: [0x52, 0x54, 0x00, 0xe0, 0x00, 0x00],
             vnet_socket_path: tempdir.path().join("alice.sock"),
         };
 
         let backend = ChShellBackend::new();
         let handle = backend.boot(&prepared).unwrap();
 
-        assert!(prepared.runtime_paths.cloud_init_dir.join("meta-data").exists());
-        assert!(prepared.runtime_paths.cloud_init_dir.join("user-data").exists());
-        assert!(prepared.runtime_paths.cloud_init_dir.join("mounts.yaml").exists());
+        assert!(
+            prepared
+                .runtime_paths
+                .cloud_init_dir
+                .join("meta-data")
+                .exists()
+        );
+        assert!(
+            prepared
+                .runtime_paths
+                .cloud_init_dir
+                .join("user-data")
+                .exists()
+        );
+        assert!(
+            prepared
+                .runtime_paths
+                .cloud_init_dir
+                .join("mounts.yaml")
+                .exists()
+        );
         assert!(prepared.runtime_paths.launch_dir.join("launch.sh").exists());
         assert!(prepared.runtime_paths.launch_log.exists());
         assert_eq!(handle.kind(), BackendKind::ChShell);

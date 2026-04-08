@@ -66,13 +66,16 @@ async fn main() -> Result<(), DynError> {
     let mut allocator = GuestNetAllocator::new(GuestNetAllocatorConfig {
         socket_dir: instance.socket_root.clone(),
         ..GuestNetAllocatorConfig::default()
-    });
+    })?;
     let ca = Arc::new(SshCa::new()?);
     let guest_registry = new_guest_registry();
     let proxy_config = SshProxyConfig {
         listen: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), instance.proxy_port),
     };
-    tokio::spawn(ssh::run_proxy(proxy_config.clone(), Arc::clone(&guest_registry)));
+    tokio::spawn(ssh::run_proxy(
+        proxy_config.clone(),
+        Arc::clone(&guest_registry),
+    ));
 
     let runtime = Arc::new(Runtime {
         hypervisor: HypervisorBacking::CloudHypervisorShell(
@@ -98,8 +101,13 @@ async fn main() -> Result<(), DynError> {
     println!("=== motlie-vmm repl_host_v1_4 ===");
     println!("Thin admin REPL over the extracted vmm lifecycle API");
     println!("Instance: {}", instance.namespace.prefix);
-    println!("SSH proxy: listening on 127.0.0.1:{}", proxy_config.listen.port());
-    println!("Commands: help | boot <guest> | ready <guest> | exec <guest> <cmd> | validate <guest> | shutdown <guest> | status | guests | where [guest] | quit");
+    println!(
+        "SSH proxy: listening on 127.0.0.1:{}",
+        proxy_config.listen.port()
+    );
+    println!(
+        "Commands: help | boot <guest> | ready <guest> | exec <guest> <cmd> | validate <guest> | shutdown <guest> | status | guests | where [guest] | quit"
+    );
 
     let mut lines = spawn_stdin_reader();
 
@@ -263,7 +271,10 @@ fn print_where(
 
 fn print_guest_where(guest_id: &str, demo_root: &Path, handle: &VmHandle) {
     println!("[{guest_id}]");
-    println!("  home_host={}", demo_root.join(format!("{guest_id}-home")).display());
+    println!(
+        "  home_host={}",
+        demo_root.join(format!("{guest_id}-home")).display()
+    );
     println!(
         "  workspace_host={}",
         demo_root.join(format!("{guest_id}-workspace")).display()
@@ -272,15 +283,24 @@ fn print_guest_where(guest_id: &str, demo_root: &Path, handle: &VmHandle) {
         "  agent_state_host={}",
         demo_root.join(format!("{guest_id}-agent-state")).display()
     );
-    println!("  runtime_dir={}", handle.runtime_paths.runtime_dir.display());
+    println!(
+        "  runtime_dir={}",
+        handle.runtime_paths.runtime_dir.display()
+    );
     println!("  launch_dir={}", handle.runtime_paths.launch_dir.display());
     println!(
         "  cloud_init_dir={}",
         handle.runtime_paths.cloud_init_dir.display()
     );
     println!("  api_socket={}", handle.runtime_paths.api_socket.display());
-    println!("  vnet_socket={}", handle.runtime_paths.vnet_socket.display());
-    println!("  vsock_socket={}", handle.runtime_paths.vsock_socket.display());
+    println!(
+        "  vnet_socket={}",
+        handle.runtime_paths.vnet_socket.display()
+    );
+    println!(
+        "  vsock_socket={}",
+        handle.runtime_paths.vsock_socket.display()
+    );
     println!("  launch_log={}", handle.runtime_paths.launch_log.display());
     println!("  serial_log={}", handle.runtime_paths.serial_log.display());
 }
@@ -331,7 +351,10 @@ async fn boot_guest(
         },
     )
     .await?;
-    println!("waiting for {}: api socket + guestfs + ssh bridge + exec-ready", guest_id);
+    println!(
+        "waiting for {}: api socket + guestfs + ssh bridge + exec-ready",
+        guest_id
+    );
     handle.ready(&ReadinessPolicy::default()).await?;
     println!(
         "ok: booted {} pid={:?} api={} proxy=127.0.0.1:{}",
@@ -593,7 +616,11 @@ fn seed_host_mounts(guest: &GuestSpec) -> Result<(), DynError> {
     )?;
     write_host_file_if_missing(
         &home.join(".env"),
-        &format!("{}_API_KEY=demo-{}\n", guest.guest_id.to_uppercase(), guest.guest_id),
+        &format!(
+            "{}_API_KEY=demo-{}\n",
+            guest.guest_id.to_uppercase(),
+            guest.guest_id
+        ),
         0o644,
     )?;
     write_host_file_if_missing(&home.join(".bashrc"), "# motlie v1.4 demo bashrc\n", 0o644)?;

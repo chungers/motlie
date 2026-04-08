@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-08 | @codex | Replace the temporary 7-slot network allocator with a dedicated slot-derived allocation design section and public API: `Ipv4Subnet`, `Ipv4SubnetPool`, computed capacity, harness-exposed allocator config, and PTY/VTE scenario-driver direction |
 | 2026-04-07 | @codex | Complete the remaining observability/result slice: `VmObservability` now exposes typed run-bundle metadata and capture paths, `harness_v1_4` persists internal result and PTY transcript artifacts, result JSON now carries structured failure classification, and PTY output is hardened into a stable evidence block |
 | 2026-04-07 | @codex | Implement the first concrete Phase 4/5 slice in code: `observability.rs`, `VmHandle::observability()`, and `harness_v1_4 --result-json ...` for machine-readable `smoke` results; PTY result capture still needs hardening |
 | 2026-04-07 | @codex | Lock the harness direction: `examples/v1.4/harness` is the future primary driver over the `libs/vmm` API, with scripted scenarios, interactive/manual mode, PTY/session control via `VmHandle`, and transcript/log capture; `repl_host_v1_4` remains transitional only |
@@ -725,7 +726,7 @@ Every step in the current manual harness runbook maps directly:
 
 | Manual step | Programmatic equivalent |
 |---|---|
-| `ssh alice@192.168.249.2` then `ip route` | `orchestrator.exec(&alice, "ip route")` |
+| `ssh -p <proxy-port> alice@localhost` then `ip route` | `orchestrator.exec(&alice, "ip route")` |
 | `curl -I https://example.com` | `orchestrator.exec(&alice, "curl ...")` → assert exit 0 |
 | `readlink ~/.codex` | `orchestrator.exec(&alice, "readlink ~/.codex")` → assert `/agent-state/codex` |
 | `sudo apt-get update` | `orchestrator.exec(&alice, "sudo apt-get update")` → assert exit 0 |
@@ -1334,7 +1335,10 @@ let out = orch.exec(&handle, "readlink ~/.codex").await?;
 assert_eq!(out.stdout.trim(), "/agent-state/codex");
 
 // Verify DNS resolution through motlie-vnet
-let out = orch.exec(&handle, "nslookup example.com 10.0.2.3").await?;
+let dns = handle.net_assignment.egress_ipv4.dns;
+let out = orch
+    .exec(&handle, &format!("nslookup example.com {}", dns))
+    .await?;
 assert_eq!(out.exit_code, 0);
 
 handle.shutdown().await?;
@@ -1444,55 +1448,160 @@ Expected namespace examples:
 This is required so `v1.3` and `v1.4` can run side by side during the
 refactor.
 
-## BIG TODO: move guest network allocation out of `examples/v1.3`
+## Allocation Design: CID, IP, and MAC
 
-`v1.3` still owns its guest identity allocation table inside
-[`examples/v1.3/repl_host.rs`](../examples/v1.3/repl_host.rs):
+`libs/vmm` now owns the reviewed guest identity allocator in
+[`src/network_alloc.rs`](../src/network_alloc.rs). The contract is no longer
+"small `alice`/`bob` demo convenience"; it is a slot-derived identity model
+that can support materially more than 7 guests in one harness instance.
 
-- `AdminState.net_allocs`
-- `AdminState.next_net_slot`
-- `GuestNetAlloc`
-- `ensure_net_alloc()`
+### Goal
 
-Current gap:
+One stable `slot` must deterministically generate all per-guest identity used
+by the composed Motlie-backed flow:
 
-- the example-local allocator is safe for `alice`, `bob`, and a small number of
-  additional guests, but it is not a real library-owned allocation model
-- admin subnets are derived from `249u8.saturating_add(slot as u8)`, so the
-  current example logic starts colliding once it moves past the `192.168.255.0`
-  range
-- egress identity is still assembled ad hoc in the example instead of being
-  represented as one typed reusable assignment
+- vsock CID
+- admin ingress subnet and host/guest IPv4 pair
+- admin MAC
+- egress subnet and guest/host/DNS IPv4 layout
+- egress MAC
+- vhost-user socket path
 
-Scaffold added for the future extraction:
+This keeps the reviewed API small:
 
-- [`libs/vmm/src/network_alloc.rs`](../src/network_alloc.rs)
-
-That scaffold now contains:
-
+- `Ipv4Subnet`
+- `Ipv4SubnetPool`
 - `GuestNetAllocatorConfig`
 - `GuestNetAllocator`
 - `GuestNetAssignment`
-- `AdminIpv4Pair`
-- `EgressIpv4Layout`
 
-Important:
+### Derivation Rule
 
-- this scaffold is intentionally non-authoritative today
-- `examples/v1.3` behavior is unchanged until a follow-up extraction PR moves
-  the live allocation path onto the library type
-- when that happens, `libs/vmm` should consume its own
-  `network_alloc::GuestNetAllocator` rather than continuing to allocate
-  CID/IP/MAC identity inside the REPL example
+For one harness process:
 
-Extraction target:
+- `slot` is the stable per-guest allocation index
+- `cid = first_cid + slot`
+- `admin_subnet = nth_child(admin_pool.base, admin_pool.guest_prefix_len, slot)`
+- `admin_host = admin_subnet + host_offset`
+- `admin_guest = admin_subnet + guest_offset`
+- `egress_subnet = nth_child(egress_pool.base, egress_pool.guest_prefix_len, slot)`
+- `egress_host = egress_subnet + host_offset`
+- `egress_guest = egress_subnet + guest_offset`
+- `egress_dns = egress_subnet + dns_offset`
 
-1. replace `ensure_net_alloc()` in `repl_host.rs` with a library-owned table
-2. make launch rendering consume a typed `GuestNetAssignment`
-3. make allocation exhaustion explicit and machine-readable instead of silently
-   saturating into collisions
-4. move the resulting call path behind the future `boot` / `VmHandle::ready`
-   orchestration API
+MAC identity is also slot-derived:
+
+- admin: `52:54:00:(0xa0 | slot_hi4):slot_mid8:slot_lo8`
+- egress: `52:54:00:(0xe0 | slot_hi4):slot_mid8:slot_lo8`
+
+This gives a deterministic per-plane MAC namespace without needing external
+state or collision-prone truncation to one byte.
+
+### Capacity Rule
+
+Allocator capacity is computed, not guessed.
+
+Effective capacity is:
+
+- `min(admin_pool.child_capacity, egress_pool.child_capacity, cid_headroom, mac_headroom, max_guests?)`
+
+Where:
+
+- `admin_pool.child_capacity = 2^(guest_prefix_len - base_prefix_len)`
+- `egress_pool.child_capacity = 2^(guest_prefix_len - base_prefix_len)`
+- `cid_headroom = u32::MAX - first_cid + 1`
+- `mac_headroom = 2^20` in the current encoded slot suffix
+- `max_guests` is an optional harness/user clamp
+
+The important behavioral property is that exhaustion is explicit and typed.
+There is no silent wraparound and no `192.168.255.x` style saturation.
+
+### Default Allocation Shape
+
+The current defaults intentionally separate admin and egress concerns:
+
+- admin pool:
+  - base `172.20.0.0/16`
+  - per-guest subnet `/30`
+  - host offset `1`
+  - guest offset `2`
+- egress pool:
+  - base `10.0.0.0/8`
+  - per-guest subnet `/24`
+  - host offset `2`
+  - guest offset `15`
+  - DNS offset `3`
+
+Default capacity under those values:
+
+- admin capacity: `16384` guests
+- egress capacity: `65536` guests
+- effective default capacity: `16384` guests
+
+This is a deliberate correction to the old `192.168.249.0/24` through
+`192.168.255.0/24` stopgap.
+
+### API Rule
+
+The reviewed API must expose both the declarative policy and the resulting
+assignment:
+
+```rust
+pub struct Ipv4Subnet {
+    pub network: Ipv4Addr,
+    pub prefix_len: u8,
+}
+
+pub struct Ipv4SubnetPool {
+    pub base: Ipv4Subnet,
+    pub guest_prefix_len: u8,
+    pub host_offset: u32,
+    pub guest_offset: u32,
+    pub dns_offset: Option<u32>,
+}
+
+pub struct GuestNetAllocatorConfig {
+    pub first_cid: u32,
+    pub max_guests: Option<u32>,
+    pub socket_dir: PathBuf,
+    pub admin_pool: Ipv4SubnetPool,
+    pub egress_pool: Ipv4SubnetPool,
+}
+
+pub struct GuestNetAssignment {
+    pub slot: u32,
+    pub cid: u32,
+    pub admin_subnet: Ipv4Subnet,
+    pub admin_ipv4: AdminIpv4Pair,
+    pub admin_mac: [u8; 6],
+    pub egress_subnet: Ipv4Subnet,
+    pub egress_ipv4: EgressIpv4Layout,
+    pub egress_mac: [u8; 6],
+    pub vnet_socket_path: PathBuf,
+}
+```
+
+Required behaviors:
+
+- config validation is explicit
+- capacity is queryable before boot
+- assignments are stable for the life of one harness run
+- exhaustion is machine-readable
+- harness UX can expose both config and computed capacity
+
+### Harness UX Rule
+
+The first customer of the public allocation API is `harness_v1_4`.
+
+The harness must expose:
+
+- allocator config via CLI (`--first-cid`, `--max-guests`, `--admin-base`,
+  `--admin-guest-prefix`, `--egress-base`, `--egress-guest-prefix`)
+- current computed capacity in shell mode
+- concrete CID/IP/MAC assignment in `where <guest>`
+
+This keeps capacity planning and debugging in the harness itself rather than
+forcing agents or operators to reverse-engineer allocation from code.
 Once validated, the extraction sequence should be:
 
 1. move typed config and network allocation into `libs/vmm`

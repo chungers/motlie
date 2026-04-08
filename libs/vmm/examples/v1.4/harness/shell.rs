@@ -14,15 +14,20 @@ use motlie_vmm::orchestrator::{
 use motlie_vmm::runtime::{
     ControlPlaneBacking, FilesystemBacking, HypervisorBacking, NetworkBacking, Runtime,
 };
-use motlie_vmm::ssh::{self, ExecOutput, SshProxyConfig, new_guest_registry};
+use motlie_vmm::ssh::{self, ExecOutput, PtyRequest, SshProxyConfig, new_guest_registry};
 use tokio::sync::mpsc;
 
-use crate::{DynError, HarnessInstance, demo_guest, ensure_file_exists, print_instance_details, seed_host_mounts};
+use crate::terminal::HarnessTerminalSession;
+use crate::{
+    DynError, HarnessInstance, demo_guest, ensure_file_exists, print_instance_details,
+    seed_host_mounts,
+};
 
 pub async fn run_shell(
     base_dir: &Path,
     artifacts_dir: &Path,
     instance: &HarnessInstance,
+    allocator_config: GuestNetAllocatorConfig,
 ) -> Result<(), DynError> {
     ensure_file_exists(&artifacts_dir.join("rootfs.squashfs"))?;
     ensure_file_exists(&artifacts_dir.join("Image"))?;
@@ -36,7 +41,10 @@ pub async fn run_shell(
             instance.proxy_port,
         ),
     };
-    tokio::spawn(ssh::run_proxy(proxy_config.clone(), Arc::clone(&guest_registry)));
+    tokio::spawn(ssh::run_proxy(
+        proxy_config.clone(),
+        Arc::clone(&guest_registry),
+    ));
     print_instance_details(instance, &proxy_config);
 
     let runtime = Arc::new(Runtime {
@@ -57,17 +65,15 @@ pub async fn run_shell(
         ),
     });
 
-    let mut allocator = GuestNetAllocator::new(GuestNetAllocatorConfig {
-        socket_dir: instance.socket_root.clone(),
-        ..GuestNetAllocatorConfig::default()
-    });
+    let mut allocator = GuestNetAllocator::new(allocator_config)?;
     let mut handles: HashMap<String, VmHandle> = HashMap::new();
+    let mut terminals: HashMap<String, HarnessTerminalSession> = HashMap::new();
     let mut stdout = io::stdout();
 
     println!("=== motlie-vmm harness shell ===");
     println!("Harness interactive/manual mode over the extracted vmm lifecycle API");
     println!(
-        "Commands: help | boot <guest> | ready <guest> | exec <guest> <cmd> | validate <guest> | shutdown <guest> | status | guests | where [guest] | quit"
+        "Commands: help | boot <guest> | ready <guest> | exec <guest> <cmd> | validate <guest> | pty-open <guest> <session> | pty-send <session> <text> | pty-send-line <session> <text> | pty-read <session> [timeout_ms] | pty-expect <session> <text> | pty-resize <session> <cols> <rows> | pty-screen <session> | shutdown <guest> | status | guests | capacity | where [guest] | quit"
     );
 
     let mut lines = spawn_stdin_reader();
@@ -87,13 +93,16 @@ pub async fn run_shell(
         } else if trimmed == "status" || trimmed == "guests" {
             print_status(&handles);
             Ok(())
+        } else if trimmed == "capacity" {
+            print_capacity(&allocator);
+            Ok(())
         } else if trimmed == "where" {
-            print_where(instance, &proxy_config, None, &handles);
+            print_where(instance, &proxy_config, &allocator, None, &handles);
             Ok(())
         } else if let Some(rest) = trimmed.strip_prefix("where ") {
             let guest_id = rest.trim();
             let guest = (!guest_id.is_empty()).then_some(guest_id);
-            print_where(instance, &proxy_config, guest, &handles);
+            print_where(instance, &proxy_config, &allocator, guest, &handles);
             Ok(())
         } else if trimmed == "quit" || trimmed == "exit" {
             break;
@@ -122,6 +131,20 @@ pub async fn run_shell(
             validate_guest(rest.trim(), &handles).await
         } else if let Some(rest) = trimmed.strip_prefix("exec ") {
             exec_guest(rest, &handles).await
+        } else if let Some(rest) = trimmed.strip_prefix("pty-open ") {
+            pty_open(rest, instance, &handles, &mut terminals).await
+        } else if let Some(rest) = trimmed.strip_prefix("pty-send-line ") {
+            pty_send_line(rest, &terminals).await
+        } else if let Some(rest) = trimmed.strip_prefix("pty-send ") {
+            pty_send(rest, &terminals).await
+        } else if let Some(rest) = trimmed.strip_prefix("pty-read ") {
+            pty_read(rest, &terminals).await
+        } else if let Some(rest) = trimmed.strip_prefix("pty-expect ") {
+            pty_expect(rest, &terminals).await
+        } else if let Some(rest) = trimmed.strip_prefix("pty-resize ") {
+            pty_resize(rest, &terminals).await
+        } else if let Some(rest) = trimmed.strip_prefix("pty-screen ") {
+            pty_screen(rest, &terminals)
         } else if let Some(rest) = trimmed.strip_prefix("launch ") {
             Err::<(), DynError>(format!("use 'boot {}' instead", rest.trim()).into())
         } else {
@@ -135,6 +158,9 @@ pub async fn run_shell(
         print_prompt(&mut stdout)?;
     }
 
+    for (_session, terminal) in terminals.drain() {
+        let _ = terminal.persist_artifacts();
+    }
     for (_guest_id, handle) in handles.drain() {
         let _ = handle.shutdown().await;
     }
@@ -159,8 +185,16 @@ fn print_help() {
     println!("ready <guest>            wait until an already-booted guest is ready");
     println!("exec <guest> <command>   run a command inside the guest over the SSH control plane");
     println!("validate <guest>         run a smoke validation inside the guest");
+    println!("pty-open <guest> <name>  open a PTY session and start VTE/transcript capture");
+    println!("pty-send <name> <text>   send raw PTY text");
+    println!("pty-send-line <name> <text>");
+    println!("pty-read <name> [ms]     read PTY output for up to the timeout");
+    println!("pty-expect <name> <text> read until output contains text");
+    println!("pty-resize <name> <cols> <rows>");
+    println!("pty-screen <name>        print the rendered VTE screen snapshot");
     println!("shutdown <guest>         stop a guest");
     println!("status | guests          show active guests");
+    println!("capacity                 show allocator capacity and address plan");
     println!("where [guest]            show current runtime roots and guest artifact paths");
     println!("quit                     exit the harness shell");
 }
@@ -186,6 +220,7 @@ fn print_status(handles: &HashMap<String, VmHandle>) {
 fn print_where(
     instance: &HarnessInstance,
     proxy_config: &SshProxyConfig,
+    allocator: &GuestNetAllocator,
     guest_id: Option<&str>,
     handles: &HashMap<String, VmHandle>,
 ) {
@@ -194,6 +229,7 @@ fn print_where(
     println!("demo_root={}", instance.demo_root.display());
     println!("socket_root={}", instance.socket_root.display());
     println!("proxy=ssh://localhost:{}", proxy_config.listen.port());
+    print_capacity(allocator);
 
     match guest_id {
         Some(guest_id) => {
@@ -211,9 +247,211 @@ fn print_where(
     }
 }
 
+fn print_capacity(allocator: &GuestNetAllocator) {
+    let config = allocator.config();
+    println!("allocator.first_cid={}", config.first_cid);
+    println!(
+        "allocator.capacity={} next_slot={} remaining={}",
+        allocator.capacity().unwrap_or_default(),
+        allocator.next_slot(),
+        allocator.remaining_capacity().unwrap_or_default(),
+    );
+    println!(
+        "allocator.admin_pool={} -> /{} host_offset={} guest_offset={}",
+        config.admin_pool.base,
+        config.admin_pool.guest_prefix_len,
+        config.admin_pool.host_offset,
+        config.admin_pool.guest_offset,
+    );
+    println!(
+        "allocator.egress_pool={} -> /{} host_offset={} guest_offset={} dns_offset={}",
+        config.egress_pool.base,
+        config.egress_pool.guest_prefix_len,
+        config.egress_pool.host_offset,
+        config.egress_pool.guest_offset,
+        config.egress_pool.dns_offset.unwrap_or_default(),
+    );
+}
+
+async fn pty_open(
+    rest: &str,
+    instance: &HarnessInstance,
+    handles: &HashMap<String, VmHandle>,
+    terminals: &mut HashMap<String, HarnessTerminalSession>,
+) -> Result<(), DynError> {
+    let mut parts = rest.split_whitespace();
+    let guest_id = parts.next().unwrap_or("").trim();
+    let session_name = parts.next().unwrap_or("").trim();
+    if guest_id.is_empty() || session_name.is_empty() {
+        return Err("pty-open <guest> <session>".into());
+    }
+    if terminals.contains_key(session_name) {
+        return Err(format!("PTY session '{session_name}' already exists").into());
+    }
+    let handle = handles
+        .get(guest_id)
+        .ok_or_else(|| format!("unknown guest '{guest_id}'"))?;
+    let request = PtyRequest::default();
+    let guest_session = handle
+        .open_pty(request.clone(), Duration::from_secs(10))
+        .await?;
+    let session_root = instance
+        .namespace
+        .temp_root
+        .join(format!("{}-shell-pty", instance.namespace.prefix))
+        .join(session_name);
+    let terminal = HarnessTerminalSession::new(
+        format!("{guest_id}:{session_name}"),
+        guest_session,
+        &request,
+        session_root.join("pty-transcript.ndjson"),
+        session_root.join("pty-screen.json"),
+    );
+    println!(
+        "ok: opened PTY {} for {} transcript={} screen={}",
+        session_name,
+        guest_id,
+        terminal.transcript_path().display(),
+        terminal.screen_path().display()
+    );
+    terminals.insert(session_name.to_string(), terminal);
+    Ok(())
+}
+
+async fn pty_send(
+    rest: &str,
+    terminals: &HashMap<String, HarnessTerminalSession>,
+) -> Result<(), DynError> {
+    let (session_name, text) = split_session_and_text(rest, "pty-send <session> <text>")?;
+    let terminal = terminals
+        .get(session_name)
+        .ok_or_else(|| format!("unknown PTY session '{session_name}'"))?;
+    terminal.send(text.as_bytes()).await?;
+    println!("ok: sent {} bytes", text.len());
+    Ok(())
+}
+
+async fn pty_send_line(
+    rest: &str,
+    terminals: &HashMap<String, HarnessTerminalSession>,
+) -> Result<(), DynError> {
+    let (session_name, text) = split_session_and_text(rest, "pty-send-line <session> <text>")?;
+    let terminal = terminals
+        .get(session_name)
+        .ok_or_else(|| format!("unknown PTY session '{session_name}'"))?;
+    terminal.send_line(text).await?;
+    println!("ok: sent line '{}'", text);
+    Ok(())
+}
+
+async fn pty_read(
+    rest: &str,
+    terminals: &HashMap<String, HarnessTerminalSession>,
+) -> Result<(), DynError> {
+    let mut parts = rest.split_whitespace();
+    let session_name = parts.next().unwrap_or("").trim();
+    if session_name.is_empty() {
+        return Err("pty-read <session> [timeout_ms]".into());
+    }
+    let timeout_ms = parts
+        .next()
+        .map(str::parse::<u64>)
+        .transpose()?
+        .unwrap_or(1000);
+    let terminal = terminals
+        .get(session_name)
+        .ok_or_else(|| format!("unknown PTY session '{session_name}'"))?;
+    let read = terminal.read_for(Duration::from_millis(timeout_ms)).await?;
+    print_pty_read(&read.output, read.exit_status, read.eof, read.closed);
+    Ok(())
+}
+
+async fn pty_expect(
+    rest: &str,
+    terminals: &HashMap<String, HarnessTerminalSession>,
+) -> Result<(), DynError> {
+    let (session_name, text) = split_session_and_text(rest, "pty-expect <session> <text>")?;
+    let terminal = terminals
+        .get(session_name)
+        .ok_or_else(|| format!("unknown PTY session '{session_name}'"))?;
+    let read = terminal
+        .read_until_contains("pty_expect", text, Duration::from_secs(10))
+        .await?;
+    print_pty_read(&read.output, read.exit_status, read.eof, read.closed);
+    Ok(())
+}
+
+async fn pty_resize(
+    rest: &str,
+    terminals: &HashMap<String, HarnessTerminalSession>,
+) -> Result<(), DynError> {
+    let mut parts = rest.split_whitespace();
+    let session_name = parts.next().unwrap_or("").trim();
+    let cols = parts
+        .next()
+        .ok_or_else(|| "pty-resize <session> <cols> <rows>".to_string())?
+        .parse::<u32>()?;
+    let rows = parts
+        .next()
+        .ok_or_else(|| "pty-resize <session> <cols> <rows>".to_string())?
+        .parse::<u32>()?;
+    let terminal = terminals
+        .get(session_name)
+        .ok_or_else(|| format!("unknown PTY session '{session_name}'"))?;
+    terminal.resize(cols, rows, 0, 0).await?;
+    println!("ok: resized {} to {}x{}", session_name, cols, rows);
+    Ok(())
+}
+
+fn pty_screen(
+    rest: &str,
+    terminals: &HashMap<String, HarnessTerminalSession>,
+) -> Result<(), DynError> {
+    let session_name = rest.trim();
+    if session_name.is_empty() {
+        return Err("pty-screen <session>".into());
+    }
+    let terminal = terminals
+        .get(session_name)
+        .ok_or_else(|| format!("unknown PTY session '{session_name}'"))?;
+    let screen = terminal.snapshot()?;
+    println!(
+        "rows={} cols={} cursor=({}, {})",
+        screen.rows, screen.cols, screen.cursor_row, screen.cursor_col
+    );
+    println!("{}", screen.visible_text);
+    Ok(())
+}
+
+fn split_session_and_text<'a>(
+    rest: &'a str,
+    usage: &'static str,
+) -> Result<(&'a str, &'a str), DynError> {
+    let mut parts = rest.trim().splitn(2, char::is_whitespace);
+    let session_name = parts.next().unwrap_or("").trim();
+    let text = parts.next().unwrap_or("").trim();
+    if session_name.is_empty() || text.is_empty() {
+        return Err(usage.into());
+    }
+    Ok((session_name, text))
+}
+
+fn print_pty_read(output: &str, exit_status: Option<u32>, eof: bool, closed: bool) {
+    if !output.is_empty() {
+        print!("{output}");
+        if !output.ends_with('\n') {
+            println!();
+        }
+    }
+    println!("pty: exit_status={exit_status:?} eof={eof} closed={closed}");
+}
+
 fn print_guest_where(guest_id: &str, demo_root: &Path, handle: &VmHandle) {
     println!("[{guest_id}]");
-    println!("  home_host={}", demo_root.join(format!("{guest_id}-home")).display());
+    println!(
+        "  home_host={}",
+        demo_root.join(format!("{guest_id}-home")).display()
+    );
     println!(
         "  workspace_host={}",
         demo_root.join(format!("{guest_id}-workspace")).display()
@@ -222,15 +460,35 @@ fn print_guest_where(guest_id: &str, demo_root: &Path, handle: &VmHandle) {
         "  agent_state_host={}",
         demo_root.join(format!("{guest_id}-agent-state")).display()
     );
-    println!("  runtime_dir={}", handle.runtime_paths.runtime_dir.display());
+    println!(
+        "  runtime_dir={}",
+        handle.runtime_paths.runtime_dir.display()
+    );
     println!("  launch_dir={}", handle.runtime_paths.launch_dir.display());
     println!(
         "  cloud_init_dir={}",
         handle.runtime_paths.cloud_init_dir.display()
     );
     println!("  api_socket={}", handle.runtime_paths.api_socket.display());
-    println!("  vnet_socket={}", handle.runtime_paths.vnet_socket.display());
-    println!("  vsock_socket={}", handle.runtime_paths.vsock_socket.display());
+    println!(
+        "  vnet_socket={}",
+        handle.runtime_paths.vnet_socket.display()
+    );
+    println!(
+        "  vsock_socket={}",
+        handle.runtime_paths.vsock_socket.display()
+    );
+    println!("  cid={}", handle.net_assignment.cid);
+    println!("  slot={}", handle.net_assignment.slot);
+    println!("  admin_subnet={}", handle.net_assignment.admin_subnet);
+    println!("  admin_host={}", handle.net_assignment.admin_ipv4.host);
+    println!("  admin_guest={}", handle.net_assignment.admin_ipv4.guest);
+    println!("  admin_mac={:02x?}", handle.net_assignment.admin_mac);
+    println!("  egress_subnet={}", handle.net_assignment.egress_subnet);
+    println!("  egress_host={}", handle.net_assignment.egress_ipv4.host);
+    println!("  egress_guest={}", handle.net_assignment.egress_ipv4.guest);
+    println!("  egress_dns={}", handle.net_assignment.egress_ipv4.dns);
+    println!("  egress_mac={:02x?}", handle.net_assignment.egress_mac);
     println!("  launch_log={}", handle.runtime_paths.launch_log.display());
     println!("  serial_log={}", handle.runtime_paths.serial_log.display());
 }
@@ -255,7 +513,12 @@ async fn boot_guest(
         return Err(format!("guest '{guest_id}' already booted").into());
     }
 
-    let guest = demo_guest(guest_id, artifacts_dir, &instance.demo_root, &instance.namespace);
+    let guest = demo_guest(
+        guest_id,
+        artifacts_dir,
+        &instance.demo_root,
+        &instance.namespace,
+    );
     seed_host_mounts(&guest)?;
 
     let prepared = prepare(
@@ -279,7 +542,10 @@ async fn boot_guest(
         },
     )
     .await?;
-    println!("waiting for {}: api socket + guestfs + ssh bridge + exec-ready", guest_id);
+    println!(
+        "waiting for {}: api socket + guestfs + ssh bridge + exec-ready",
+        guest_id
+    );
     handle.ready(&ReadinessPolicy::default()).await?;
     println!(
         "ok: booted {} pid={:?} api={} proxy=127.0.0.1:{}",
