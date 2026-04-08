@@ -38,6 +38,10 @@ use tokio::time::sleep;
 
 type DynError = Box<dyn std::error::Error + Send + Sync>;
 
+pub(crate) const PACKAGE_MANAGER_QUIESCENT_COMMAND: &str = "/bin/sh -lc 'idle=0; for _ in $(seq 1 60); do if ! pgrep -x apt >/dev/null 2>&1 && ! pgrep -x apt-get >/dev/null 2>&1 && ! pgrep -x dpkg >/dev/null 2>&1 && ! pgrep -x unattended-upgr >/dev/null 2>&1 && ! pgrep -x unattended-upgrade >/dev/null 2>&1; then idle=$((idle+1)); if [ \"$idle\" -ge 5 ]; then echo PKG_IDLE_OK; exit 0; fi; else idle=0; fi; sleep 1; done; exit 1'";
+pub(crate) const APT_UPDATE_COMMAND: &str =
+    "/bin/sh -lc 'sudo -n apt-get update >/tmp/motlie-vmm-apt-update.log 2>&1 && echo APT_OK'";
+
 #[derive(Clone)]
 pub(crate) struct HarnessInstance {
     namespace: RuntimeNamespace,
@@ -643,17 +647,30 @@ async fn run_smoke(handle: &VmHandle) -> Result<Vec<ScenarioCheck>, HarnessError
         detail: "outbound HTTPS fetch succeeded".to_string(),
     });
 
-    let apt_update = exec_until_success(
-        handle,
-        "/bin/sh -lc 'for attempt in 1 2 3; do sudo -n apt-get update >/tmp/motlie-vmm-apt-update.log 2>&1 && echo APT_OK && exit 0; sleep 2; done; exit 1'",
-        "APT_OK",
-        Duration::from_secs(60),
-    )
-    .await
-    .map_err(|source| HarnessError::SmokeExec {
-        check: "apt-update",
-        source,
-    })?;
+    let package_manager = handle
+        .exec(PACKAGE_MANAGER_QUIESCENT_COMMAND, Duration::from_secs(65))
+        .await
+        .map_err(|source| HarnessError::SmokeExec {
+            check: "package-manager-quiescent",
+            source,
+        })?;
+    ensure_contains(
+        "package-manager-quiescent",
+        &package_manager.stdout,
+        "PKG_IDLE_OK",
+    )?;
+    checks.push(ScenarioCheck {
+        name: "package-manager-quiescent".to_string(),
+        detail: "package manager background activity settled before apt validation".to_string(),
+    });
+
+    let apt_update = handle
+        .exec(APT_UPDATE_COMMAND, Duration::from_secs(60))
+        .await
+        .map_err(|source| HarnessError::SmokeExec {
+            check: "apt-update",
+            source,
+        })?;
     ensure_contains("apt-update", &apt_update.stdout, "APT_OK")?;
     checks.push(ScenarioCheck {
         name: "apt-update".to_string(),

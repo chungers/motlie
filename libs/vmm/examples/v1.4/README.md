@@ -43,6 +43,23 @@ Repeatable validation entrypoints now are:
   - boots `alice` in both
   - proves instance-specific namespace, socket, and proxy isolation
 
+## Recorded PTY Session
+
+A checked-in recorded validation session now lives under:
+
+- [`assets/pty-agent-validation.cast`](./assets/pty-agent-validation.cast)
+
+This cast is the saved `pty-agent-validation` run that:
+
+- waits for package-manager quiescence
+- shows one clean `sudo -n apt-get update`
+- launches `codex`
+- captures the Codex welcome screen
+
+For GitHub README playback, prefer an uploaded asciinema recording with the
+standard preview-image link. The checked-in `.cast` here is the local source
+artifact.
+
 Detailed repeatable runbooks live in:
 
 - [`HARNESS.md`](./HARNESS.md)
