@@ -7,6 +7,7 @@
 | Date | Change | Sections |
 |------|--------|----------|
 | 2026-04-07 | @codex-researcher: Initial greenfield design for `libs/models` as the curated bundle catalog and composition crate over `libs/model`. Migration and backward compatibility are explicitly out of scope for this first cut. | All |
+| 2026-04-07 | @codex-researcher: Clarified that curated local model download is an explicit `libs/models` control, separate from backend cache-miss behavior. | Packaging and Deployment Model, Release Assembly Utility |
 
 This document defines the design for `libs/models`, the curated bundle library that exposes opinionated model stacks as deployable product modules. A bundle in this crate includes vetted weights when applicable, a chosen backend or transport, packaging policy when applicable, capability wiring, and consistent lifecycle behavior through the contracts defined in `libs/model`.
 
@@ -215,6 +216,8 @@ Supported design directions:
 
 The public crate should describe packaging or transport mode, but the exact binary/container or HTTP integration implementation remains internal.
 
+For local curated bundles, model download should be an explicit control owned by `libs/models` rather than an implicit side effect of backend startup. A backend such as `mistral.rs` may still populate or consult its own cache layout, but curated provenance and download policy remain the responsibility of the curated bundle layer.
+
 As part of the roadmap, Motlie should provide a utility that controls:
 
 - which bundles are included
@@ -227,6 +230,7 @@ The deployment goal is for either mode to feel operationally close to a single-b
 ### Packaging Rules
 
 - Artifact provenance must be explicit in bundle descriptors or manifests
+- Curated local model download must be invokable explicitly, independent of backend cache-miss behavior
 - Bundle loading must validate artifact integrity before runtime initialization when local artifacts are used
 - Unpack-on-start must use deterministic cache paths and cleanup rules
 - Backend-specific file layout transformations must remain internal to the bundle
@@ -298,6 +302,7 @@ Responsibilities:
 - select model bundles for inclusion
 - select build features and backend options
 - select target OS, distribution, and accelerator profile
+- prefetch curated artifacts into deterministic artifact roots when local bundles are selected
 - validate that the requested bundle set is compatible with the chosen target
 - assemble either embedded-binary releases or package-bundle releases
 - emit deterministic manifests so extraction and startup behavior are predictable and auditable

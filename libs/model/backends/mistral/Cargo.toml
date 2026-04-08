@@ -13,3 +13,7 @@ path = "src/lib.rs"
 [dependencies]
 async-trait = "0.1"
 motlie-model = { path = "../.." }
+mistralrs = "0.8.1"
+
+[dev-dependencies]
+tokio.workspace = true

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use motlie_model::eval::EvalTrack;
 use motlie_model::{BundleId, Capabilities, CapabilityDescriptor, ModelBundle};
 
+use crate::artifacts::BundleArtifacts;
 use crate::bundles::embeddinggemma_300m_descriptor;
 
 /// Organizational family for related curated bundles.
@@ -78,6 +79,7 @@ pub struct BundleDescriptor {
     pub backend: BackendKind,
     pub requirements: BundleRequirements,
     pub eval_tracks: Vec<EvalTrack>,
+    pub artifacts: Option<BundleArtifacts>,
 }
 
 impl BundleDescriptor {
@@ -127,7 +129,11 @@ impl Catalog {
         catalog
     }
 
-    pub fn register<F>(&mut self, descriptor: BundleDescriptor, factory: F) -> Option<BundleDescriptor>
+    pub fn register<F>(
+        &mut self,
+        descriptor: BundleDescriptor,
+        factory: F,
+    ) -> Option<BundleDescriptor>
     where
         F: Fn() -> Box<dyn ModelBundle> + Send + Sync + 'static,
     {
@@ -146,8 +152,15 @@ impl Catalog {
         self.bundles.get(id).map(|entry| &entry.descriptor)
     }
 
+    pub fn artifacts(&self, id: &BundleId) -> Option<&BundleArtifacts> {
+        self.bundle(id)
+            .and_then(|descriptor| descriptor.artifacts.as_ref())
+    }
+
     pub fn instantiate(&self, id: &BundleId) -> Option<Box<dyn ModelBundle>> {
-        self.bundles.get(id).map(|entry| entry.factory.instantiate())
+        self.bundles
+            .get(id)
+            .map(|entry| entry.factory.instantiate())
     }
 
     pub fn bundles(&self) -> impl Iterator<Item = &BundleDescriptor> {
@@ -167,5 +180,116 @@ impl Catalog {
 
     pub fn is_empty(&self) -> bool {
         self.bundles.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use motlie_model::BundleMetadata;
+
+    use super::*;
+
+    #[derive(Clone)]
+    struct StubBundle {
+        metadata: BundleMetadata,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelBundle for StubBundle {
+        fn id(&self) -> &BundleId {
+            &self.metadata.id
+        }
+
+        fn metadata(&self) -> &BundleMetadata {
+            &self.metadata
+        }
+
+        fn capabilities(&self) -> &Capabilities {
+            &self.metadata.capabilities
+        }
+
+        async fn start(
+            &self,
+            _options: motlie_model::StartOptions,
+        ) -> Result<Box<dyn motlie_model::BundleHandle>, motlie_model::ModelError> {
+            Err(motlie_model::ModelError::InvalidConfiguration(
+                "stub bundle is not startable".into(),
+            ))
+        }
+    }
+
+    fn stub_descriptor(id: &str) -> BundleDescriptor {
+        BundleDescriptor {
+            id: BundleId::new(id),
+            display_name: format!("Bundle {id}"),
+            family: BundleFamily::Embeddings,
+            support_tier: SupportTier::Experimental,
+            capabilities: Capabilities::embeddings_only(),
+            packaging: PackagingMode::Sidecar,
+            backend: BackendKind::MistralRs,
+            requirements: BundleRequirements::default(),
+            eval_tracks: vec![EvalTrack::Embeddings],
+            artifacts: None,
+        }
+    }
+
+    #[test]
+    fn register_overwrites_prior_descriptor() {
+        let mut catalog = Catalog::new();
+
+        let first = stub_descriptor("bundle");
+        let second = BundleDescriptor {
+            display_name: "Bundle v2".into(),
+            ..stub_descriptor("bundle")
+        };
+        let first_for_factory = first.clone();
+        let second_for_factory = second.clone();
+
+        assert!(catalog
+            .register(first.clone(), move || {
+                Box::new(StubBundle {
+                    metadata: BundleMetadata {
+                        id: first_for_factory.id.clone(),
+                        display_name: first_for_factory.display_name.clone(),
+                        capabilities: first_for_factory.capabilities.clone(),
+                    },
+                })
+            })
+            .is_none());
+
+        let replaced = catalog.register(second.clone(), move || {
+            Box::new(StubBundle {
+                metadata: BundleMetadata {
+                    id: second_for_factory.id.clone(),
+                    display_name: second_for_factory.display_name.clone(),
+                    capabilities: second_for_factory.capabilities.clone(),
+                },
+            })
+        });
+
+        assert_eq!(replaced, Some(first));
+        assert_eq!(
+            catalog
+                .bundle(&BundleId::new("bundle"))
+                .map(|bundle| &bundle.display_name),
+            Some(&"Bundle v2".to_string())
+        );
+    }
+
+    #[test]
+    fn defaults_include_embeddinggemma_bundle_and_artifact_control() {
+        let catalog = Catalog::with_defaults();
+        let bundle_id = BundleId::new("embeddinggemma_300m");
+
+        assert_eq!(catalog.len(), 1);
+        assert!(catalog.instantiate(&bundle_id).is_some());
+        assert!(catalog
+            .bundles_for_track(EvalTrack::Embeddings)
+            .any(|bundle| bundle.id == bundle_id));
+
+        let artifacts = catalog
+            .artifacts(&bundle_id)
+            .expect("default embedder should expose artifact control");
+        assert_eq!(artifacts.control_name, "embeddinggemma_300m");
     }
 }

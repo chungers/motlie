@@ -11,5 +11,12 @@ description = "Curated model bundle catalog for the Motlie ecosystem"
 path = "src/lib.rs"
 
 [dependencies]
+anyhow.workspace = true
+async-trait = "0.1"
+hf-hub = "0.4.3"
 motlie-model = { path = "../model" }
 motlie-model-mistral = { path = "../model/backends/mistral" }
+
+[[bin]]
+name = "motlie-models-download"
+path = "src/bin/download_artifacts.rs"

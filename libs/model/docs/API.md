@@ -7,6 +7,7 @@
 | Date | Change | Sections |
 |------|--------|----------|
 | 2026-04-07 | @codex-researcher: Initial API sketch for `libs/model` and `libs/model::eval`. Reflects the current scaffold and keeps the focus on stable contract shapes. | All |
+| 2026-04-07 | @codex-researcher: Updated the API sketch to reflect capability introspection helpers and the explicit separation between curated artifact staging and backend startup. | Overview, Bundle API Sketch, Notes |
 
 This document sketches the concrete contract shapes currently introduced in `libs/model`. It covers both the core bundle lifecycle/capability contracts and the lightweight `model::eval` vocabulary that higher-level harness tooling should build on.
 
@@ -111,8 +112,8 @@ let embeddings = EmbeddingRequest {
 ```rust
 use async_trait::async_trait;
 use motlie_model::{
-    BundleHandle, BundleMetadata, Capabilities, ChatModel, CompletionModel, EmbeddingModel,
-    LoadedBundleDescriptor, ModelBundle, ModelError, StartOptions,
+    BundleHandle, BundleId, BundleMetadata, Capabilities, ChatModel, CompletionModel,
+    EmbeddingModel, LoadedBundleDescriptor, ModelBundle, ModelError, StartOptions,
 };
 
 #[async_trait]
@@ -129,6 +130,8 @@ impl ModelBundle for MyBundle {
     }
 }
 ```
+
+Loaded handles also expose `supports(CapabilityKind)` as a convenience over `capabilities().supports(...)`, which keeps harness and catalog-driven code simple when it only needs to branch on capability presence.
 
 ## `model::eval` API Sketch
 
@@ -163,4 +166,4 @@ let result = EvalResult {
 - `BundleId` lives in `libs/model`, not `libs/models`, because it is part of the stable contract surface.
 - capability introspection now includes task kind, input/output content kinds, and interaction style
 - `model::eval` contains small declarative types only; runners, scoring, suite loading, and reports belong in `libs/model-eval`.
-- These APIs are still scaffolding. They are concrete enough to anchor downstream crates, but not yet complete enough to implement real bundles end to end.
+- Curated artifact download and provenance control live above this crate in `libs/models`. Backend startup consumes the resulting artifact/cache root through `StartOptions` rather than using `libs/model` to define download policy.
