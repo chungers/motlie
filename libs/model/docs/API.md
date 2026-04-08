@@ -11,6 +11,7 @@
 | 2026-04-08 | @codex-researcher: Clarified the contract-level error model and the library-versus-application error boundary. `ModelError` is now explicitly specified as a typed library error derived with `thiserror`. | Overview, Core Types, Notes |
 | 2026-04-08 | @codex-researcher: Added the bundle-level embedding metadata contract (`Embedding`, `EmbeddingSpec`, distance, normalization) so curated embedding bundles can expose vector semantics before runtime startup. | Overview, Core Types, Bundle API Sketch |
 | 2026-04-08 | @codex-researcher: Added the end-to-end embedding bundle contract flow and the explicit bridge to `motlie_db::vector::EmbeddingSpec` / `Distance` so implementers can wire curated embedding bundles into the vector subsystem without guessing. | Overview, Bundle API Sketch, Notes |
+| 2026-04-08 | @codex-researcher: Added explicit notes on the planned additive chat/multimodal extensions so the current API doc is honest about what is implemented today versus what is already queued for the first chat-capable bundles. | Overview, Core Types, Notes |
 
 This document sketches the concrete contract shapes currently introduced in `libs/model`. It covers both the core bundle lifecycle/capability contracts and the lightweight `model::eval` vocabulary that higher-level harness tooling should build on.
 
@@ -31,6 +32,11 @@ The first concrete `libs/model` API now includes:
 - lightweight eval types in `model::eval`
 
 The goal is to give downstream crates a stable contract surface while keeping the implementation burden low in this first pass.
+
+Important scope note:
+
+- this API is complete for the current embedding vertical slice
+- the first chat-capable bundles will require additive extensions already tracked in `DESIGN.md` / `PLAN.md`, including multimodal chat content, `ChatRole::Tool`, richer `ChatResponse` metadata, and more detailed `StartOptions`
 
 For the current vertical slice, this contract is intended to support an end-to-end flow of:
 
@@ -70,6 +76,12 @@ Primary capability request/response types:
 - `CompletionResponse`
 - `EmbeddingRequest`
 - `EmbeddingResponse`
+
+Known near-term additive follow-ups for chat-capable bundles:
+
+- `ChatRole::Tool`
+- multimodal chat content parts in place of `ChatMessage.content: String`
+- richer `ChatResponse` metadata
 
 Primary traits:
 
@@ -359,5 +371,6 @@ The v0.1 contract is intentionally narrow: embedding capabilities map directly t
 
 - `BundleId` lives in `libs/model`, not `libs/models`, because it is part of the stable contract surface.
 - capability introspection now includes task kind, input/output content kinds, and interaction style
+- `CapabilityKind` does not imply that every variant immediately gets its own executable trait. For the planned multimodal chat path, `Vision` is expected to begin as a capability flag on the chat surface rather than as a separate `VisionModel` trait.
 - `model::eval` contains small declarative types only; runners, scoring, suite loading, and reports belong in `libs/model-eval`.
 - Curated artifact download and provenance control live above this crate in `libs/models`. Backend startup consumes the resulting artifact root and policy through `StartOptions` rather than using `libs/model` to initiate curated downloads itself.

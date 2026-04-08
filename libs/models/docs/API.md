@@ -97,6 +97,7 @@ let qwen = BundleDescriptor {
         EvalTrack::Summarization,
         EvalTrack::Classification,
     ],
+    artifacts: None,
 };
 ```
 
@@ -365,9 +366,9 @@ For a new curated embedding bundle, the intended implementation checklist is:
 
 ## Next Step
 
-The next API layer should be added in `libs/model`:
+The next model-facing API work is no longer the basic lifecycle layer; that is already in place. The next contract changes should focus on the first chat-capable bundles:
 
-- lifecycle types
-- loaded-bundle handle contracts
-- capability adapter traits
-- lightweight eval-facing case/result types beyond `EvalTrack`
+- multimodal chat content parts
+- richer `ChatResponse` metadata
+- tool-calling message roles and correlation fields
+- additive `StartOptions` controls for quantization/device/context policy

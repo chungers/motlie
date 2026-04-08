@@ -191,7 +191,7 @@ pub struct BundleMetadata {
     pub capabilities: Capabilities,
 }
 
-/// Deployment-oriented knobs used when starting a bundle.
+/// Artifact acquisition policy that bundle startup must honor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ArtifactPolicy {
     AllowFetch { root: Option<PathBuf> },
