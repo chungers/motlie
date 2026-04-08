@@ -56,7 +56,16 @@ run_shell_check() {
     local output_file="$3"
 
     : >"$output_file"
-    printf 'pwd\ncat ~/.env\ncurl -fsSL https://example.com -o ~/example.html && echo FETCH_OK && stat ~/example.html\nexit\n' |
+    {
+        # Wait for MOTD/tmux auto-start to settle before the first command so
+        # the scripted interactive SSH path does not lose initial keystrokes.
+        sleep 5
+        # The first exit leaves tmux and returns to the login shell. Send the
+        # final exit after tmux has unwound so the SSH session actually closes.
+        printf 'pwd\ncat ~/.env\ncurl -fsSL https://example.com -o ~/example.html && echo FETCH_OK && stat ~/example.html\nexit\n'
+        sleep 1
+        printf 'exit\n'
+    } |
         ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p "$port" "$guest@localhost" \
         >"$output_file"
 

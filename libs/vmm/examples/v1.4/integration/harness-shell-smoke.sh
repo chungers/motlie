@@ -80,7 +80,18 @@ run_shell_check() {
     local output_file="$CONTROL_ROOT/${guest}.out"
 
     : >"$output_file"
-    printf 'pwd\ncat ~/.env\ncurl -fsSL https://example.com -o ~/example.html && echo FETCH_OK && stat ~/example.html\nstat -c "%%U:%%G %%n" ~ ~/.env /workspace /agent-state\nexit\n' |
+    {
+        # Allow the interactive SSH login path to finish MOTD and tmux auto-start
+        # before sending the first command. Without this, the first character can
+        # race with terminal mode switches and get dropped.
+        sleep 5
+        # The first exit leaves tmux and returns to the login shell. Send the
+        # final exit only after tmux has unwound so the SSH session closes
+        # deterministically instead of hanging on the outer shell prompt.
+        printf 'pwd\ncat ~/.env\ncurl -fsSL https://example.com -o ~/example.html && echo FETCH_OK && stat ~/example.html\nstat -c "%%U:%%G %%n" ~ ~/.env /workspace /agent-state\nexit\n'
+        sleep 1
+        printf 'exit\n'
+    } |
         ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p "$PROXY_PORT" "$guest@localhost" \
         >"$output_file"
 
