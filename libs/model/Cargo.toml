@@ -11,7 +11,8 @@ description = "Core contracts for curated Motlie model bundles"
 path = "src/lib.rs"
 
 [dependencies]
-async-trait = "0.1"
+async-trait = "0.1.89"
+thiserror.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

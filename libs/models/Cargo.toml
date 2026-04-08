@@ -12,10 +12,11 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow.workspace = true
-async-trait = "0.1"
-hf-hub = "0.4.3"
+async-trait = "0.1.89"
+hf-hub = "0.5.0"
 motlie-model = { path = "../model" }
 motlie-model-mistral = { path = "../model/backends/mistral" }
+thiserror.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

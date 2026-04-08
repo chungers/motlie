@@ -7,6 +7,7 @@
 | Date | Change | Sections |
 |------|--------|----------|
 | 2026-04-07 | @codex-researcher: Initial greenfield design for `libs/model-eval` as the substantial evaluation tooling crate layered on top of `libs/model::eval`. Migration and backward compatibility are explicitly out of scope for this first cut. | All |
+| 2026-04-08 | @codex-researcher: Clarified the current crate boundary: `libs/model-eval` is scaffold-only in code today, with the first substantial runner API still specified in DESIGN/PLAN rather than implemented. | Overview, Solution, API Sketch |
 
 This document defines the design for `libs/model-eval`, the evaluation tooling crate for Motlie's curated model framework. Its job is to provide the executable harness machinery that operates on the lightweight evaluation abstractions defined in `libs/model::eval`.
 

@@ -10,8 +10,13 @@
 | 2026-04-07 | @codex-researcher: Added explicit curated artifact-control examples and updated the first embedding slice to use the real `mistralrs` builder path with separate pre-download support. | Overview, API Sketch, Notes |
 | 2026-04-07 | @codex-researcher: Added the `examples/v0.1` runnable example for the current curated embedding bundle. | Example Program |
 | 2026-04-07 | @codex-researcher: Added optional Hugging Face token support to the out-of-band downloader path only. | Explicit Artifact Control, Notes |
+| 2026-04-08 | @codex-researcher: Clarified typed catalog/artifact errors and made the first vertical-slice artifact contract explicit so the API can be implemented without hidden bundle-specific assumptions. | Overview, Core Types, Explicit Artifact Control, Notes |
+| 2026-04-08 | @codex-researcher: Updated the `v0.1` example contract so artifact download is opt-in. The default example path now exercises existing curated artifacts with `ArtifactPolicy::LocalOnly`, which is the intended regulated/offline behavior. | Example Program, Notes |
+| 2026-04-08 | @codex-researcher: Added the direct curated embedding enum and parser-oriented `ModelSelector` path to the API sketch, and removed `SupportTier` / `PackagingMode` from the recommended public surface. | Core Types, API Sketch, Example Program, Notes |
 
 This document sketches the concrete API shapes currently introduced in `libs/models`. The crate now owns both the descriptor catalog and the curated bundle constructors that bind those descriptors to a backend implementation.
+
+For implementers, this document is the current API specification for the crate surface that exists today. It should be sufficient to build compatible bundle/catalog logic without reverse-engineering unstated assumptions from the example or backend implementation.
 
 ## Overview
 
@@ -34,16 +39,19 @@ Current public shapes:
 
 - `BundleId`
 - `BundleFamily`
-- `SupportTier`
-- `PackagingMode`
 - `BackendKind`
 - `PlatformConstraint`
 - `BuildConstraint`
 - `BundleRequirements`
 - `BundleDescriptor`
 - `Catalog`
+- `EmbeddingModels`
+- `ModelSelector`
+- `ModelsError`
 
 `BundleId`, `Capabilities`, and capability introspection types come from `motlie_model`. Evaluation-track membership is expressed with `motlie_model::eval::EvalTrack`.
+
+`ModelsError` is the typed library error for catalog lookup and artifact staging. Binaries and examples may convert it to `anyhow::Error`, but the crate does not expose `anyhow::Result` as its library API.
 
 ## API Sketch
 
@@ -53,7 +61,7 @@ Current public shapes:
 use motlie_model::eval::EvalTrack;
 use motlie_models::{
     BackendKind, BuildConstraint, BundleDescriptor, BundleFamily, BundleId,
-    BundleRequirements, PackagingMode, PlatformConstraint, SupportTier,
+    BundleRequirements, PlatformConstraint,
 };
 use motlie_model::{Capabilities, CapabilityDescriptor};
 
@@ -61,12 +69,10 @@ let qwen = BundleDescriptor {
     id: BundleId::new("qwen3_5_instruct"),
     display_name: "Qwen 3.5 Instruct".into(),
     family: BundleFamily::Qwen,
-    support_tier: SupportTier::Supported,
     capabilities: Capabilities::new(vec![
         CapabilityDescriptor::chat(),
         CapabilityDescriptor::completion(),
     ]),
-    packaging: PackagingMode::Sidecar,
     backend: BackendKind::MistralRs,
     requirements: BundleRequirements {
         platform: vec![PlatformConstraint::Linux],
@@ -89,7 +95,7 @@ use motlie_models::{BundleId, Catalog};
 
 let mut catalog = Catalog::new();
 catalog.register(qwen.clone(), || {
-    panic!("example constructor omitted for API illustration")
+    build_qwen_bundle()
 });
 
 let bundle = catalog
@@ -102,6 +108,32 @@ assert_eq!(
     bundle.capability_descriptors()[0].summary,
     "Multi-turn text interaction with text output."
 );
+```
+
+### Direct Curated Embedding Enum
+
+```rust
+use motlie_models::embeddings::EmbeddingModels;
+
+let model = EmbeddingModels::GoogleGemma300m;
+
+assert_eq!(model.as_str(), "google/embeddinggemma_300m");
+
+let descriptor = model.descriptor();
+let bundle = model.bundle();
+let spec = model.embedding_spec();
+```
+
+### Parser-Oriented Model Selector
+
+```rust
+use std::str::FromStr;
+
+use motlie_models::ModelSelector;
+
+let selector = ModelSelector::from_str("embedding:google/embeddinggemma_300m")?;
+let descriptor = selector.descriptor();
+let bundle = selector.bundle();
 ```
 
 ### Selecting Bundles for an Evaluation Track
@@ -175,6 +207,21 @@ let summary = download_bundle_artifacts_with_options(
 assert!(!summary.downloaded.is_empty());
 ```
 
+For `embeddinggemma_300m`, the curated artifact set currently includes:
+
+- `config.json`
+- `modules.json`
+- `tokenizer.json`
+- `tokenizer.model`
+- `tokenizer_config.json`
+- `special_tokens_map.json`
+- `1_Pooling/config.json`
+- `2_Dense/config.json`
+- `2_Dense/model.safetensors`
+- `3_Dense/config.json`
+- `3_Dense/model.safetensors`
+- root `.safetensors` files for the base model
+
 The same flow is available from the binary target:
 
 ```sh
@@ -201,8 +248,22 @@ Run it with:
 cargo run -p motlie-models --example models_v0_1 -- "motlie curated model bundle"
 ```
 
+To exercise the parser-oriented selector path instead of the direct enum path:
+
+```sh
+cargo run -p motlie-models --example models_v0_1 -- --embedding=google/embeddinggemma_300m "motlie curated model bundle"
+```
+
+To force an out-of-band artifact fetch before startup:
+
+```sh
+cargo run -p motlie-models --example models_v0_1 -- --download-artifacts "motlie curated model bundle"
+```
+
 What it demonstrates:
 
+- direct enum resolution via `EmbeddingModels::GoogleGemma300m`
+- optional parser-driven resolution via `ModelSelector`
 - explicit curated artifact download for `embeddinggemma_300m`
 - descriptor and capability introspection through `Catalog`
 - local-only bundle startup with `ArtifactPolicy::LocalOnly`
@@ -212,10 +273,13 @@ What it demonstrates:
 
 - `BundleId` is currently a string-backed newtype rather than an enum. This keeps the catalog extensible while still giving the crate a stable selection key.
 - capability metadata comes from `motlie_model`, so the catalog can describe input/output shape and interaction style without inventing its own parallel schema
-- `BackendKind` and `PackagingMode` are metadata for catalog reasoning and observability. They do not make runtime choice part of the application control path.
+- `BackendKind` is metadata for catalog reasoning and observability. It does not make runtime choice part of the application control path.
 - `Catalog` now also owns curated bundle instantiation through registered constructors.
+- The preferred direct curated path is the bundle-family enum, such as `EmbeddingModels::GoogleGemma300m`; `ModelSelector` is the parser-friendly wrapper above that.
 - Curated artifact download is explicit and independent of the backend library's own cache-miss behavior. Backends consume the curated artifact policy through `StartOptions`. For regulated local bundles, `ArtifactPolicy::LocalOnly` is the intended fail-closed mode.
+- `embeddinggemma_300m` local-only startup depends on the full sentence-transformers module stack being present in the curated artifact root. That requirement is part of the bundle contract, not an ambient `mistralrs` cache behavior.
 - Authentication for protected upstream artifacts belongs only to the out-of-band download/build path. The runtime/bundle startup path does not accept tokens and remains artifact-consumption only.
+- The `v0.1` example now defaults to existing local artifacts and only touches Hugging Face when `--download-artifacts` is passed explicitly.
 
 ## Next Step
 

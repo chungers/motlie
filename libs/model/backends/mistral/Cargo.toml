@@ -11,8 +11,8 @@ description = "Mistral backend implementations for motlie-model contracts"
 path = "src/lib.rs"
 
 [dependencies]
-async-trait = "0.1"
-hf-hub = "0.4.3"
+async-trait = "0.1.89"
+hf-hub = "0.5.0"
 motlie-model = { path = "../.." }
 mistralrs = "0.8.1"
 

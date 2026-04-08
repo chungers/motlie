@@ -1,9 +1,8 @@
 use anyhow::{bail, Context, Result};
-use motlie_model::{ArtifactPolicy, BundleId, EmbeddingRequest, StartOptions};
-use motlie_models::{default_artifact_root, download_bundle_artifacts, Catalog};
+use motlie_model::{ArtifactPolicy, EmbeddingRequest, StartOptions};
+use motlie_models::{default_artifact_root, download_bundle_artifacts, embeddings::EmbeddingModels, ModelSelector};
 use std::time::Instant;
 
-const BUNDLE_ID: &str = "embeddinggemma_300m";
 const SIMILAR_A: &str = "A small orange cat is sleeping on the couch.";
 const SIMILAR_B: &str = "An orange kitten is napping on a sofa.";
 const DISSIMILAR_A: &str = "A small orange cat is sleeping on the couch.";
@@ -11,29 +10,69 @@ const DISSIMILAR_B: &str = "Quarterly revenue increased by twelve percent year o
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let input = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
-    if input.trim().is_empty() {
-        bail!("usage: cargo run -p motlie-models --example models_v0_1 -- <text to embed>");
+    let mut download_artifacts = false;
+    let mut embedding_selector = None;
+    let mut input_parts = Vec::new();
+
+    for arg in std::env::args().skip(1) {
+        if arg == "--download-artifacts" {
+            download_artifacts = true;
+        } else if let Some(selector) = arg.strip_prefix("--embedding=") {
+            embedding_selector = Some(selector.to_owned());
+        } else {
+            input_parts.push(arg);
+        }
     }
 
-    let catalog = Catalog::with_defaults();
-    let bundle_id = BundleId::new(BUNDLE_ID);
+    let input = input_parts.join(" ");
+    if input.trim().is_empty() {
+        bail!(
+            "usage: cargo run -p motlie-models --example models_v0_1 -- [--download-artifacts] [--embedding=google/embeddinggemma_300m] <text to embed>"
+        );
+    }
+
+    let (selector_label, bundle_id, descriptor, bundle, path_kind) =
+        if let Some(selector) = embedding_selector {
+            let model_selector: ModelSelector = format!("embedding:{selector}")
+                .parse()
+                .with_context(|| format!("failed to parse model selector `embedding:{selector}`"))?;
+            (
+                model_selector.to_string(),
+                model_selector.bundle_id(),
+                model_selector.descriptor(),
+                model_selector.bundle(),
+                "selector",
+            )
+        } else {
+            let model = EmbeddingModels::GoogleGemma300m;
+            (
+                model.to_string(),
+                model.bundle_id(),
+                model.descriptor(),
+                model.bundle(),
+                "direct-enum",
+            )
+        };
+
     let artifact_root = default_artifact_root();
 
-    println!("bundle: {BUNDLE_ID}");
+    println!("bundle-selector: {selector_label}");
+    println!("resolution-path: {path_kind}");
+    println!("bundle-id: {}", bundle_id.as_str());
     println!("artifact-root: {}", artifact_root.display());
 
-    let summary = download_bundle_artifacts(&catalog, &bundle_id, &artifact_root)
-        .with_context(|| format!("failed to download curated artifacts for `{bundle_id}`"))?;
-    println!("downloaded-files: {}", summary.downloaded.len());
+    if download_artifacts {
+        let catalog = motlie_models::Catalog::with_defaults();
+        let summary = download_bundle_artifacts(&catalog, &bundle_id, &artifact_root)
+            .with_context(|| format!("failed to download curated artifacts for `{bundle_id}`"))?;
+        println!("downloaded-files: {}", summary.downloaded.len());
+    } else {
+        println!("downloaded-files: skipped (using existing local artifacts only)");
+    }
 
-    let descriptor = catalog
-        .bundle(&bundle_id)
-        .context("bundle descriptor should exist in the default catalog")?;
     println!("display-name: {}", descriptor.display_name);
     println!("family: {:?}", descriptor.family);
     println!("backend: {:?}", descriptor.backend);
-    println!("packaging: {:?}", descriptor.packaging);
     println!("capabilities:");
     for capability in descriptor.capability_descriptors() {
         println!(
@@ -46,9 +85,6 @@ async fn main() -> Result<()> {
         );
     }
 
-    let bundle = catalog
-        .instantiate(&bundle_id)
-        .context("bundle should be constructible from the default catalog")?;
     let handle = bundle
         .start(StartOptions {
             artifact_policy: Some(ArtifactPolicy::LocalOnly {
@@ -57,7 +93,7 @@ async fn main() -> Result<()> {
             ..Default::default()
         })
         .await
-        .context("bundle startup should succeed after curated artifact download")?;
+        .context("bundle startup should succeed from local artifacts")?;
     let embeddings = handle
         .embeddings()
         .context("embeddinggemma bundle should expose embeddings")?;
