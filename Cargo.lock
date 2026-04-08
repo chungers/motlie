@@ -4605,6 +4605,7 @@ name = "motlie-model-eval"
 version = "0.1.0"
 dependencies = [
  "motlie-model",
+ "motlie-models",
 ]
 
 [[package]]

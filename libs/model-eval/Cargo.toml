@@ -12,3 +12,6 @@ path = "src/lib.rs"
 
 [dependencies]
 motlie-model = { path = "../model" }
+
+[dev-dependencies]
+motlie-models = { path = "../models" }

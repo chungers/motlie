@@ -25,8 +25,8 @@ For implementers, this document is the current API specification for the crate s
 The first concrete `libs/models` API is an in-memory `Catalog` of curated bundle descriptors. This lets Motlie start expressing:
 
 - stable bundle IDs
-- family and support tier metadata
-- packaging and backend selection
+- family metadata
+- backend selection
 - introspective capability metadata
 - build/platform constraints
 - evaluation-track membership

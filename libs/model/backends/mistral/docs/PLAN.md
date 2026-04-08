@@ -7,6 +7,7 @@
 | 2026-04-07 | @codex-researcher | Initial PLAN for the first `libs/model/backends/mistral` vertical slice. Focused on a generic embedding backend path for `google/embeddinggemma-300m` that satisfies `libs/model` contracts. |
 | 2026-04-07 | @codex-researcher | Marked the completed backend scaffold, runtime integration, and unit-test work after the first `mistralrs`-backed embedding slice passed compile/test verification. | Phases 1-4 |
 | 2026-04-07 | @codex-researcher | Updated the backend plan after investigating NaN embeddings. The slice now validates true `LocalOnly` startup from a local snapshot, requires the sentence-transformers module stack, and adds an env-gated finite-vector test. |
+| 2026-04-08 | @codex-researcher | Clarified the remaining backend TODOs after PR review. Real multi-input inference is now validated by the env-gated test; the suggested `spec.rs` / `handle.rs` file split remains an explicit cleanup follow-up rather than an implied completed task. | Phases 1, 4 |
 
 Derived from [../../docs/DESIGN.md](../../docs/DESIGN.md). This PLAN covers the generic `mistral` backend implementation work needed for the first embedding-only curated bundle.
 
@@ -22,6 +23,7 @@ Make the backend crate structurally ready to host generic `mistral.rs` implement
   DESIGN reference: `libs/model/docs/DESIGN.md` / `Architecture`
 - [ ] Add internal module structure for the first slice, for example:
   `embeddings.rs`, `spec.rs`, `handle.rs`.
+  `@codex-researcher 2026-04-08 -- Deferred intentionally. The first slice still fits comfortably in one file, and splitting it before a second backend surface lands would be churn without a behavioral benefit.`
   DESIGN reference: `Architecture`
 - [x] Keep the backend crate dependent only on `libs/model` plus `mistral.rs`-related runtime dependencies.
   DESIGN reference: `Architecture`
@@ -75,7 +77,7 @@ The current placeholder embedder is only acceptable for contract validation. The
 ### 4.2 — Integration validation
 
 - [x] Add at least one integration-style test or env-gated test for real `mistral.rs` embedding inference.
-- [ ] Validate multi-input embedding requests.
+- [x] Validate multi-input embedding requests.
 - [x] Validate that `embeddinggemma_300m` can be instantiated through `libs/models::Catalog`.
 
 ### 4.3 — Required verification commands

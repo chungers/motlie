@@ -412,7 +412,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires pre-downloaded embeddinggemma artifacts under MOTLIE_EMBEDDINGGEMMA_ROOT"]
-    async fn local_only_embeddinggemma_produces_finite_vectors() {
+    async fn local_only_embeddinggemma_produces_finite_vectors_for_multi_input_requests() {
         let root = std::env::var("MOTLIE_EMBEDDINGGEMMA_ROOT")
             .expect("MOTLIE_EMBEDDINGGEMMA_ROOT must point at the curated HF cache root");
         let bundle = MistralEmbeddingBundle::new(MistralEmbeddingSpec::embeddinggemma_300m());
@@ -430,21 +430,22 @@ mod tests {
             .embeddings()
             .expect("embeddings capability should exist")
             .embed(ModelEmbeddingRequest {
-                inputs: vec!["motlie curated model bundle".into()],
+                inputs: vec![
+                    "motlie curated model bundle".into(),
+                    "motlie regulated local-only inference".into(),
+                ],
             })
             .await
             .expect("embedding request should succeed");
 
-        let vector = response
-            .vectors
-            .into_iter()
-            .next()
-            .expect("embedding output should contain one vector");
-        assert!(!vector.is_empty(), "embedding vector should not be empty");
-        assert!(
-            vector.iter().all(|value| value.is_finite()),
-            "embedding vector should not contain NaN or Inf values: {vector:?}"
-        );
+        assert_eq!(response.vectors.len(), 2, "expected one vector per input");
+        for vector in response.vectors {
+            assert!(!vector.is_empty(), "embedding vector should not be empty");
+            assert!(
+                vector.iter().all(|value| value.is_finite()),
+                "embedding vector should not contain NaN or Inf values: {vector:?}"
+            );
+        }
     }
 
     fn unique_temp_dir() -> PathBuf {

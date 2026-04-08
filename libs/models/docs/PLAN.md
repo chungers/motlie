@@ -7,6 +7,7 @@
 | 2026-04-07 | @codex-researcher | Initial PLAN for `libs/models` vertical slice work. Covers the curated catalog, constructor registration, and the first `embeddinggemma_300m` bundle wired through the Mistral backend. |
 | 2026-04-07 | @codex-researcher | Marked the completed catalog, descriptor, artifact-control, and verification work for the first embedding slice. | Phases 1-4 |
 | 2026-04-07 | @codex-researcher | Updated the bundle plan after the NaN investigation. The `embeddinggemma_300m` descriptor now captures the full sentence-transformers module stack, and an env-gated catalog test verifies finite local-only embeddings end to end. |
+| 2026-04-08 | @codex-researcher | Reconciled the PLAN with the current public API after review. `SupportTier` and `PackagingMode` were removed from the v1 surface earlier, so the PLAN now tracks the descriptor fields that actually exist in code and docs. | Phase 1, Phase 2 |
 
 Derived from [DESIGN.md](./DESIGN.md). This PLAN focuses on the first curated bundle slice rather than the full long-term catalog.
 
@@ -19,9 +20,9 @@ Make the curated catalog concrete enough to support both listing and instantiati
 ### 1.1 — Descriptor model
 
 - [x] Finalize `BundleDescriptor` to include:
-  `id`, `display_name`, `family`, `support_tier`, `capabilities`, `packaging`, `backend`, `requirements`, `eval_tracks`.
+  `id`, `display_name`, `family`, `capabilities`, `backend`, `requirements`, `eval_tracks`, and optional curated `artifacts`.
   DESIGN reference: `Bundle Catalog Model`
-- [x] Finalize `BundleFamily`, `SupportTier`, `PackagingMode`, `BackendKind`, `PlatformConstraint`, `BuildConstraint`, and `BundleRequirements`.
+- [x] Finalize `BundleFamily`, `BackendKind`, `PlatformConstraint`, `BuildConstraint`, `BundleRequirements`, and curated artifact-control types.
   DESIGN reference: `Bundle Catalog Model`, `Packaging and Deployment Model`
 - [x] Add unit tests for descriptor equality, evaluation-track filtering, and capability-descriptor projection.
   DESIGN reference: `Testing Scope for PLAN`
@@ -48,7 +49,6 @@ Define the first curated embedding stack explicitly in this crate.
 - [x] Ensure the descriptor declares:
   `BundleFamily::Embeddings`,
   `BackendKind::MistralRs`,
-  `PackagingMode::Sidecar`,
   `EvalTrack::Embeddings`,
   and `CapabilityDescriptor::embeddings()`.
   DESIGN reference: `Capability Exposure`, `Evaluation and Curation Harnesses`

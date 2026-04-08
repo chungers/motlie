@@ -6,6 +6,7 @@
 |------|-----|---------|
 | 2026-04-07 | @codex-researcher | Initial PLAN for `libs/model` vertical slice support. Covers contract finalization for the first embedding example, including capability introspection, request/response envelopes, lifecycle traits, and lightweight `model::eval` vocabulary. |
 | 2026-04-07 | @codex-researcher | Marked the completed contract and test work for the first embedding slice after `cargo check`/`cargo test` verification. | Phases 1-5 |
+| 2026-04-08 | @codex-researcher | Closed the missing capability-ordering and eval-track mapping gaps after PR review. Added explicit `CapabilityDescriptor` -> `EvalTrack` helpers/tests and a minimal `libs/model-eval` cross-crate consumption proof so the remaining unchecked items are true deferrals rather than silent omissions. | Phases 1, 4, 5 |
 
 Derived from [DESIGN.md](./DESIGN.md). This PLAN covers the contract work needed to support the first end-to-end embedding vertical slice while preserving the longer-term curated-bundle architecture.
 
@@ -40,7 +41,7 @@ Establish stable contract vocabulary that all bundles, backends, and harnesses w
 - [x] Finalize `Capabilities` as a descriptor-backed set with:
   `new`, `descriptors`, `supports`, and first built-ins such as `embeddings()`.
   DESIGN reference: `Capability Model`
-- [ ] Add unit tests for:
+- [x] Add unit tests for:
   `supports()`, duplicate/ordering behavior, and built-in descriptor helpers.
   DESIGN reference: `Testing Scope for PLAN`
 
@@ -111,9 +112,9 @@ Keep only the small stable vocabulary needed by higher-level tooling.
 
 ### 4.2 — Introspection compatibility for eval tooling
 
-- [ ] Document and test the mapping between `CapabilityDescriptor` and `EvalTrack` selection for embeddings.
+- [x] Document and test the mapping between `CapabilityDescriptor` and `EvalTrack` selection for embeddings.
   DESIGN reference: `Evaluation Harness Support`
-- [ ] Ensure the contract is sufficient for `libs/models` to tag bundles and for `libs/model-eval` to select runners without bundle-specific branching.
+- [x] Ensure the contract is sufficient for `libs/models` to tag bundles and for `libs/model-eval` to select runners without bundle-specific branching.
   DESIGN reference: `Framework Principles` / `Evaluability as a First-Class Concern`
 
 ## Phase 5: Vertical Slice Validation
@@ -126,7 +127,7 @@ Validate that the contract is sufficient for the first curated embedding example
   DESIGN reference: `Architecture`
 - [x] Verify `libs/models` can describe and instantiate `embeddinggemma_300m` using only stable `libs/model` contracts.
   DESIGN reference: `Architecture`
-- [ ] Verify `libs/model-eval` can consume `CapabilityDescriptor` and `EvalTrack::Embeddings` without extra contract changes.
+- [x] Verify `libs/model-eval` can consume `CapabilityDescriptor` and `EvalTrack::Embeddings` without extra contract changes.
   DESIGN reference: `Evaluation Harness Support`
 
 ### 5.2 — Required verification commands
@@ -134,3 +135,4 @@ Validate that the contract is sufficient for the first curated embedding example
 - [x] `cargo check -p motlie-model`
 - [x] `cargo check -p motlie-model -p motlie-model-mistral -p motlie-models -p motlie-model-eval`
 - [x] Add unit tests in `libs/model` and run `cargo test -p motlie-model`
+- [x] Add a minimal cross-crate `libs/model-eval` consumption test and run `cargo test -p motlie-model-eval`

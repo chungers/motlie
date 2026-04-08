@@ -5,6 +5,7 @@
 | Date | Who | Summary |
 |------|-----|---------|
 | 2026-04-07 | @codex-researcher | Initial PLAN for `libs/model-eval` vertical slice work. Covers the minimum harness functionality needed to exercise the first embedding bundle and validate the `model::eval` abstractions. |
+| 2026-04-08 | @codex-researcher | Added the first implemented cross-crate proof point after PR review: `libs/model-eval` now consumes the `CapabilityDescriptor` -> `EvalTrack` mapping from `motlie_model::eval` and verifies that the default curated embedding bundle is track-eligible without bundle-specific branching. The fuller suite/runner/report work remains intentionally pending. | Phases 3-4 |
 
 Derived from [DESIGN.md](./DESIGN.md). This PLAN focuses on only the minimum tooling needed to support the first embedding vertical slice.
 
@@ -56,11 +57,11 @@ Use the curated catalog, not ad hoc bundle construction, to drive the first slic
 
 ### 3.1 — Catalog selection
 
-- [ ] Add a helper that finds bundles eligible for `EvalTrack::Embeddings`.
+- [x] Add a helper that determines whether a capability set is eligible for `EvalTrack::Embeddings` using only `motlie_model::eval` vocabulary.
   DESIGN reference: `Core Responsibilities`
-- [ ] Ensure the helper works with `libs/models::Catalog`.
+- [x] Ensure the helper works with `libs/models::Catalog`.
   DESIGN reference: `Architecture`
-- [ ] Add tests for track-based selection using the first curated bundle.
+- [x] Add tests for track-based selection using the first curated bundle.
 
 ## Phase 4: Vertical Slice Validation
 
@@ -73,6 +74,6 @@ Use the curated catalog, not ad hoc bundle construction, to drive the first slic
 
 ### 4.2 — Required verification commands
 
-- [ ] `cargo check -p motlie-model-eval`
-- [ ] `cargo test -p motlie-model-eval`
-- [ ] `cargo check -p motlie-model -p motlie-model-mistral -p motlie-models -p motlie-model-eval`
+- [x] `cargo check -p motlie-model-eval`
+- [x] `cargo test -p motlie-model-eval`
+- [x] `cargo check -p motlie-model -p motlie-model-mistral -p motlie-models -p motlie-model-eval`
