@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-08 | @codex | Expand HARNESS into the future-agent operating contract: design goals, autonomous workflow, troubleshooting loop, artifact/log usage, and standard verification matrix now explicitly include `agent-bootstrap.json` and the recommended shell-vs-scenario decision path |
 | 2026-04-08 | @codex | Add `apt-get update` to the baseline agent/bootstrap validation and document the default egress allocator compatibility rule: keep slot-based capacity growth, but start the guest-facing vnet range at `10.0.2.0/24` so harness egress stays aligned with the previously validated path |
 | 2026-04-08 | @codex | Promote HARNESS from a runbook to the harness contract and evolution log: document the stable JSON scenario format, shell/wrapper layering, allocator UX, and PTY/VTE artifacts for future agent-driven troubleshooting and feature work |
 | 2026-04-07 | @codex | Add the first `harness_v1_4` runbook covering smoke, shell, multi-guest wrappers, and live SSH validation |
@@ -30,6 +31,67 @@ This is why the harness now has both:
 
 The scenario format is the durable contract. The shell wrappers are convenience
 entrypoints and compatibility checks.
+
+## Design Goals
+
+Functional goals:
+
+- boot one or more isolated guests through the `libs/vmm` API
+- validate `vfs`, `vnet`, SSH proxy, PTY, and guest tooling behavior through
+  the same end-to-end path a real user or agent would exercise
+- capture enough machine-readable evidence that another agent can reconstruct
+  what happened without rerunning immediately
+- make bug reproduction, bug fixing, and feature validation use the same
+  harness substrate instead of ad hoc scripts
+
+Non-functional goals:
+
+- deterministic enough for CI and repeated agent use
+- reviewable in PRs
+- explicit about runtime paths, network allocation, and artifact ownership
+- isolated per harness run so multiple agents can work concurrently
+
+Non-goals for `v1.4`:
+
+- a fully general workflow language with branching, looping, and variables
+- replacing every wrapper or manual probe immediately
+- human-first recording formats as the primary artifact contract
+
+Success criteria for this harness design:
+
+- a future agent can start from this document, choose the right harness mode,
+  reproduce a problem, inspect artifacts, codify the repro as a scenario,
+  validate a fix, and leave behind reviewable evidence without human
+  intervention
+
+## Agent Operating Model
+
+Use the harness in this order:
+
+1. run a standard saved scenario if one already matches the problem
+2. use `shell` when exploring, bisecting, or discovering a new reproduction
+3. use live external SSH when the exact interactive login or TUI behavior
+   matters
+4. once the repro is understood, encode it as a saved scenario and rerun it
+   through `scenario`
+
+Choose the mode by purpose:
+
+- `smoke`: fast single-guest health check of the current harness/image path
+- `scenario`: preferred durable validation and CI/agent contract
+- `shell`: exploration, triage, one-off commands, PTY probing, runtime
+  discovery
+- `integration/*.sh`: compatibility wrappers and external-SSH regression checks
+
+The desired agent loop is:
+
+1. establish baseline health with `smoke` or `agent-bootstrap.json`
+2. reproduce the problem in `shell` or a focused scenario
+3. inspect `where <guest>`, launch logs, serial logs, PTY artifacts, and result
+   JSON
+4. change code
+5. rerun the smallest relevant saved scenario
+6. rerun the standard verification matrix before checkpoint/push
 
 ## Layering
 
@@ -92,7 +154,9 @@ This covers:
 - readiness
 - `exec`
 - `vfs`
+- passwordless sudo and baseline guest tooling
 - `vnet` route and outbound HTTPS
+- Debian package index refresh over `vnet`
 - shutdown
 
 ### `pty`
@@ -131,6 +195,15 @@ Multi-guest example:
 
 The scenario mode is the preferred non-interactive surface for future agent
 work.
+
+When an agent is uncertain where to start, default to:
+
+```bash
+./target/debug/examples/harness_v1_4 scenario \
+  ./libs/vmm/examples/v1.4/scenarios/agent-bootstrap.json
+```
+
+That is the baseline “can this guest support autonomous agent work?” check.
 
 ### `shell`
 
@@ -246,6 +319,15 @@ Current limits:
 Those are acceptable `v1.4` limits. The important part is that saved
 reproductions are now harness-native and reviewable.
 
+Scenario authoring guidance:
+
+- prefer one scenario per concrete repro or validation goal
+- keep step names implicit in the action sequence; keep descriptions concise
+- use `exec` for invariant host/guest checks and `pty_*` actions when terminal
+  behavior itself is under test
+- if an interaction was first discovered manually in `shell`, convert it into a
+  saved scenario before considering the issue closed
+
 ## PTY / VTE Artifacts
 
 The harness now keeps both raw and rendered terminal state.
@@ -309,6 +391,59 @@ Step results include:
 - shutdown report when relevant
 
 This is intended to be directly consumable by agents and CI.
+
+For future agent use, the important rule is:
+
+- treat the result JSON as the top-level verdict and index
+- treat launch logs, serial logs, transcript NDJSON, and screen JSON as the
+  evidence backing that verdict
+
+## Artifacts and Runtime Discovery
+
+Every harness run prints a namespace, root paths, and SSH proxy URI.
+
+Use `where` and `where <guest>` in shell mode to discover:
+
+- demo roots and socket roots
+- runtime directories
+- cloud-init directories
+- launch logs and serial logs
+- guest slot/CID/admin/egress allocation
+- vnet socket and vsock socket paths
+
+Use these artifacts by problem type:
+
+- boot or cloud-init failure:
+  inspect `launch.log`, `serial.log`, and `cloud_init_dir`
+- `vfs` mount problem:
+  inspect host-side `home_host`, `workspace_host`, `agent_state_host`, then
+  validate in guest with `exec` or external SSH
+- `vnet` or egress problem:
+  inspect `ip route`, `ip neigh`, `/etc/resolv.conf`, then compare against
+  allocator output from `where <guest>`
+- PTY/TUI problem:
+  inspect `pty-transcript.ndjson` and `pty-screen.json`, then attach with live
+  SSH if needed
+- proxy/login problem:
+  use the printed `ssh://localhost:<port>` endpoint and the wrapper scripts
+
+## Autonomous Troubleshooting Workflow
+
+When a future agent sees a failure, use this sequence:
+
+1. rerun the relevant scenario with `--result-json`
+2. inspect the classified failure in the result file
+3. if the failure is not already obvious, rerun in `shell`
+4. use `boot <guest>`, `where <guest>`, `validate <guest>`, and PTY commands
+   to narrow the issue
+5. if the problem is interactive, attach over SSH or open a PTY session
+6. once understood, either:
+   - fix the code and rerun the saved scenario
+   - or create a new scenario capturing the missing reproduction
+
+The harness is considered successful only if an agent can move from “something
+failed” to “here is a stable repro plus evidence plus fix validation” using
+this loop.
 
 ## Allocator UX
 
@@ -458,6 +593,34 @@ Current expected guest privilege model:
 - `sudo -n apt-get update` should succeed without DNS or route failures
 - `git` should already be present in the base image
 
+## Standard Verification
+
+For normal harness or image work, the minimum standard verification is:
+
+1. `cargo test -p motlie-vmm --lib`
+2. `cargo build -p motlie-vmm --example harness_v1_4`
+3. `./target/debug/examples/harness_v1_4 scenario ./libs/vmm/examples/v1.4/scenarios/agent-bootstrap.json`
+4. `./target/debug/examples/harness_v1_4 pty`
+
+For multi-guest or allocator changes, also run:
+
+1. `./target/debug/examples/harness_v1_4 scenario ./libs/vmm/examples/v1.4/scenarios/multiguest-validate.json`
+2. `./libs/vmm/examples/v1.4/integration/harness-shell-smoke.sh`
+
+For login, banner, TUI, PTY, or proxy changes, also run:
+
+1. `./libs/vmm/examples/v1.4/integration/harness-isolation-smoke.sh`
+2. a live external SSH attach and manual probe
+
+If a future agent changes `vnet`, allocator defaults, guest DNS, or image
+network tooling, `agent-bootstrap.json` is mandatory because it now captures
+the regressions that mattered here:
+
+- outbound HTTPS
+- `apt-get update`
+- passwordless sudo
+- base guest tooling needed for agent workflows
+
 ## Regression Matrix
 
 When changing `vmm`, `vfs`, `vnet`, SSH proxying, allocator behavior, or guest
@@ -465,10 +628,11 @@ image seeding, rerun at least:
 
 1. `cargo test -p motlie-vmm --lib`
 2. `cargo build -p motlie-vmm --example harness_v1_4`
-3. `./target/debug/examples/harness_v1_4`
-4. `./target/debug/examples/harness_v1_4 pty`
-5. `./target/debug/examples/harness_v1_4 scenario ./libs/vmm/examples/v1.4/scenarios/multiguest-validate.json`
-6. `./libs/vmm/examples/v1.4/integration/harness-shell-smoke.sh`
+3. `./target/debug/examples/harness_v1_4 scenario ./libs/vmm/examples/v1.4/scenarios/agent-bootstrap.json`
+4. `./target/debug/examples/harness_v1_4`
+5. `./target/debug/examples/harness_v1_4 pty`
+6. `./target/debug/examples/harness_v1_4 scenario ./libs/vmm/examples/v1.4/scenarios/multiguest-validate.json`
+7. `./libs/vmm/examples/v1.4/integration/harness-shell-smoke.sh`
 
 And when changing login/banner/proxy or PTY handling, also run a live external
 SSH check.
