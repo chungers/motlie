@@ -3,6 +3,9 @@ members = [
     "libs/core",
     "libs/db",
     "libs/mcp",
+    "libs/model",
+    "libs/model-eval",
+    "libs/models",
     "libs/tmux",
 ]
 resolver = "2"
