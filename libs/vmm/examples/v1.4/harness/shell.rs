@@ -73,7 +73,7 @@ pub async fn run_shell(
     println!("=== motlie-vmm harness shell ===");
     println!("Harness interactive/manual mode over the extracted vmm lifecycle API");
     println!(
-        "Commands: help | boot <guest> | ready <guest> | exec <guest> <cmd> | validate <guest> | pty-open <guest> <session> | pty-send <session> <text> | pty-send-line <session> <text> | pty-read <session> [timeout_ms] | pty-expect <session> <text> | pty-resize <session> <cols> <rows> | pty-screen <session> | shutdown <guest> | status | guests | capacity | where [guest] | quit"
+        "Commands: help | boot <guest> | ready <guest> | exec <guest> <cmd> | validate <guest> | pty-open <guest> <session> | pty-send <session> <text> | pty-send-line <session> <text> | pty-read <session> [timeout_ms] | pty-expect <session> <text> | pty-expect-screen <session> <text> | pty-resize <session> <cols> <rows> | pty-screen <session> | shutdown <guest> | status | guests | capacity | where [guest] | quit"
     );
 
     let mut lines = spawn_stdin_reader();
@@ -141,6 +141,8 @@ pub async fn run_shell(
             pty_read(rest, &terminals).await
         } else if let Some(rest) = trimmed.strip_prefix("pty-expect ") {
             pty_expect(rest, &terminals).await
+        } else if let Some(rest) = trimmed.strip_prefix("pty-expect-screen ") {
+            pty_expect_screen(rest, &terminals)
         } else if let Some(rest) = trimmed.strip_prefix("pty-resize ") {
             pty_resize(rest, &terminals).await
         } else if let Some(rest) = trimmed.strip_prefix("pty-screen ") {
@@ -190,6 +192,7 @@ fn print_help() {
     println!("pty-send-line <name> <text>");
     println!("pty-read <name> [ms]     read PTY output for up to the timeout");
     println!("pty-expect <name> <text> read until output contains text");
+    println!("pty-expect-screen <name> <text> assert the rendered VTE screen contains text");
     println!("pty-resize <name> <cols> <rows>");
     println!("pty-screen <name>        print the rendered VTE screen snapshot");
     println!("shutdown <guest>         stop a guest");
@@ -308,13 +311,15 @@ async fn pty_open(
         &request,
         session_root.join("pty-transcript.ndjson"),
         session_root.join("pty-screen.json"),
+        session_root.join("pty.cast"),
     );
     println!(
-        "ok: opened PTY {} for {} transcript={} screen={}",
+        "ok: opened PTY {} for {} transcript={} screen={} cast={}",
         session_name,
         guest_id,
         terminal.transcript_path().display(),
-        terminal.screen_path().display()
+        terminal.screen_path().display(),
+        terminal.asciicast_path().display()
     );
     terminals.insert(session_name.to_string(), terminal);
     Ok(())
@@ -380,6 +385,27 @@ async fn pty_expect(
         .read_until_contains("pty_expect", text, Duration::from_secs(10))
         .await?;
     print_pty_read(&read.output, read.exit_status, read.eof, read.closed);
+    Ok(())
+}
+
+fn pty_expect_screen(
+    rest: &str,
+    terminals: &HashMap<String, HarnessTerminalSession>,
+) -> Result<(), DynError> {
+    let (session_name, text) =
+        split_session_and_text(rest, "pty-expect-screen <session> <text>")?;
+    let terminal = terminals
+        .get(session_name)
+        .ok_or_else(|| format!("unknown PTY session '{session_name}'"))?;
+    let screen = terminal.snapshot()?;
+    if !screen.visible_text.contains(text) {
+        return Err(format!(
+            "PTY screen for '{session_name}' did not contain '{text}'; visible_text={}",
+            screen.visible_text
+        )
+        .into());
+    }
+    println!("ok: PTY screen for {} contains '{}'", session_name, text);
     Ok(())
 }
 

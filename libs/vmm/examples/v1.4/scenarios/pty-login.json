@@ -20,10 +20,9 @@
       "timeout_ms": 20000
     },
     {
-      "action": "pty_expect",
+      "action": "pty_expect_screen",
       "session": "alice-shell",
-      "contains": "v1.4 extraction / agent-state demo",
-      "timeout_ms": 1000
+      "contains": "Start tmux session?"
     },
     { "action": "pty_send_line", "session": "alice-shell", "text": "n" },
     {
@@ -31,6 +30,11 @@
       "session": "alice-shell",
       "contains": "alice@motlie-alice",
       "timeout_ms": 10000
+    },
+    {
+      "action": "pty_expect_screen",
+      "session": "alice-shell",
+      "contains": "alice@motlie-alice"
     },
     { "action": "pty_send_line", "session": "alice-shell", "text": "pwd" },
     {

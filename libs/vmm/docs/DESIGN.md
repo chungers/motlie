@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-08 | @codex | Add the PTY export design decision: keep NDJSON transcript plus VTE screen JSON as canonical validation artifacts, add asciicast export for portable replay/interchange, and explicitly defer PNG/GIF/movie generation as out of scope for `v1.4` |
 | 2026-04-08 | @codex | Replace the temporary 7-slot network allocator with a dedicated slot-derived allocation design section and public API: `Ipv4Subnet`, `Ipv4SubnetPool`, computed capacity, harness-exposed allocator config, and PTY/VTE scenario-driver direction |
 | 2026-04-07 | @codex | Complete the remaining observability/result slice: `VmObservability` now exposes typed run-bundle metadata and capture paths, `harness_v1_4` persists internal result and PTY transcript artifacts, result JSON now carries structured failure classification, and PTY output is hardened into a stable evidence block |
 | 2026-04-07 | @codex | Implement the first concrete Phase 4/5 slice in code: `observability.rs`, `VmHandle::observability()`, and `harness_v1_4 --result-json ...` for machine-readable `smoke` results; PTY result capture still needs hardening |
@@ -105,6 +106,7 @@ Current `v1.4` implementation status:
   - named checks plus `VmObservability`
   - stable success/failure status and classified error records for agents/CI
   - PTY scenario evidence plus persisted transcript capture under the run bundle
+  - PTY export as asciicast for portable replay in CLI/web viewers
 - `ChShellBackend` now tracks the spawned child process directly in its
   backend-specific module so readiness and shutdown use real process state
   rather than `/proc` zombie heuristics
@@ -271,6 +273,11 @@ The next observability/reporting steps remain:
 
 - rendered terminal state / VTE capture
 - optional recording artifacts
+  - chosen `v1.4` direction: asciicast export is in scope as a portable
+    text/timing replay format
+  - PNG, GIF, MP4, or other rendered movie artifacts are out of scope for
+    `v1.4`; those are human-review outputs, not the primary validation
+    contract for future agents
 
 This is explicitly meant to replace the old split between:
 

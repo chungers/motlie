@@ -391,6 +391,7 @@ impl VmHandle {
                     scenario_result_json: bundle_root.join("scenario-result.json"),
                     pty_transcript_ndjson: bundle_root.join("pty-transcript.ndjson"),
                     pty_screen_json: bundle_root.join("pty-screen.json"),
+                    pty_asciicast: bundle_root.join("pty.cast"),
                 },
                 bundle_root,
                 host_mounts,

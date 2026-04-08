@@ -406,9 +406,20 @@ async fn main() -> Result<(), DynError> {
                         .capture_paths
                         .pty_screen_json
                         .clone();
-                    let pty_run =
-                        pty::run_pty_smoke(active_handle, transcript_path.clone(), screen_path)
-                            .await?;
+                    let asciicast_path = observability
+                        .as_ref()
+                        .expect("observability exists after readiness")
+                        .run_bundle
+                        .capture_paths
+                        .pty_asciicast
+                        .clone();
+                    let pty_run = pty::run_pty_smoke(
+                        active_handle,
+                        transcript_path.clone(),
+                        screen_path,
+                        asciicast_path,
+                    )
+                    .await?;
                     pty = Some(pty_run.result);
                     pty_transcript = Some(pty_run.transcript);
                     checks.push(ScenarioCheck {

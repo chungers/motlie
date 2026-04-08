@@ -13,6 +13,10 @@ Rules for this document:
 
 ## Implementation Status
 
+Changelog:
+
+- 2026-04-08 | @codex | add PTY asciicast export as the portable replay artifact beside canonical transcript NDJSON + VTE screen JSON; PNG/GIF generation remains out of scope for `v1.4`
+
 High-level status:
 
 - [x] Phase 1 modules added in code:
@@ -140,7 +144,8 @@ Phase 5 first slice:
 - [x] PTY scenario result hardening
 - [x] reusable PTY transcript artifact capture
 - [x] VTE/rendered terminal state
-- [ ] recording/export evaluation
+- [x] asciicast replay/export
+- [ ] PNG/GIF/movie export
 
 ## Layering
 
@@ -325,6 +330,7 @@ Reviewed harness direction:
   - interactive/manual mode for humans and coding agents
   - transcript and log capture for PTY sessions and VM launch artifacts
   - rendered terminal-state capture alongside raw PTY transcript capture
+  - asciicast export for portable replay in terminal or web viewers
 - `examples/v1.4/repl_host.rs` remains useful during the transition, but it
   should not accumulate unique lifecycle/control-plane logic
 

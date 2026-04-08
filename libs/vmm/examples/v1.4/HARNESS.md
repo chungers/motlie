@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-08 | @codex | Add asciicast as the portable PTY replay/export artifact, keep NDJSON transcript + VTE screen JSON as the canonical agent-facing validation artifacts, and explicitly mark PNG/GIF/movie generation out of scope for `v1.4` |
 | 2026-04-08 | @codex | Expand HARNESS into the future-agent operating contract: design goals, autonomous workflow, troubleshooting loop, artifact/log usage, and standard verification matrix now explicitly include `agent-bootstrap.json` and the recommended shell-vs-scenario decision path |
 | 2026-04-08 | @codex | Add `apt-get update` to the baseline agent/bootstrap validation and document the default egress allocator compatibility rule: keep slot-based capacity growth, but start the guest-facing vnet range at `10.0.2.0/24` so harness egress stays aligned with the previously validated path |
 | 2026-04-08 | @codex | Promote HARNESS from a runbook to the harness contract and evolution log: document the stable JSON scenario format, shell/wrapper layering, allocator UX, and PTY/VTE artifacts for future agent-driven troubleshooting and feature work |
@@ -175,6 +176,7 @@ This covers:
 - terminal resize
 - raw PTY transcript capture
 - rendered terminal state capture
+- asciicast replay/export
 - terminal close/exit evidence
 
 ### `scenario`
@@ -298,6 +300,7 @@ Supported actions today:
 - `pty_read`
 - `pty_resize`
 - `pty_expect`
+- `pty_expect_screen`
 - `pty_expect_terminal`
 - `pty_snapshot`
 - `shutdown`
@@ -308,6 +311,8 @@ Current expectation model:
   `expect.stderr_contains`
 - PTY expectations are explicit step actions instead of being hidden in
   shell-wrapper `grep` chains
+- use `pty_expect` for new incremental PTY output and `pty_expect_screen` for
+  assertions against the current rendered VTE buffer
 
 Current limits:
 
@@ -336,6 +341,7 @@ Per PTY session it writes:
 
 - `pty-transcript.ndjson`
 - `pty-screen.json`
+- `pty.cast`
 
 Why both:
 
@@ -359,11 +365,28 @@ This means the harness artifact strategy is:
 - `scenario-result.json` for high-level structured results
 - `pty-transcript.ndjson` for compact raw terminal events
 - `pty-screen.json` for rendered terminal state
+- `pty.cast` for portable replay/export
 
 That split is more useful for agents than either:
 
 - raw bytes only
 - giant pretty transcript JSON only
+
+Why asciicast is included:
+
+- it preserves terminal input/output/resize flow in a portable replay format
+- agents can still parse it because it is structured timed terminal data, not
+  pixels
+- humans can replay it with asciinema-compatible viewers on Linux, macOS, or
+  the web
+
+Out of scope for `v1.4`:
+
+- PNG screenshots as a standard harness artifact
+- GIF/MP4/movie generation as part of standard validation
+
+Those are human-review outputs and can be layered on later if needed, but they
+are not the primary harness contract for autonomous agents.
 
 ## Machine-Readable Result Shape
 
@@ -395,8 +418,8 @@ This is intended to be directly consumable by agents and CI.
 For future agent use, the important rule is:
 
 - treat the result JSON as the top-level verdict and index
-- treat launch logs, serial logs, transcript NDJSON, and screen JSON as the
-  evidence backing that verdict
+- treat launch logs, serial logs, transcript NDJSON, screen JSON, and
+  asciicast as the evidence backing that verdict
 
 ## Artifacts and Runtime Discovery
 
@@ -422,8 +445,8 @@ Use these artifacts by problem type:
   inspect `ip route`, `ip neigh`, `/etc/resolv.conf`, then compare against
   allocator output from `where <guest>`
 - PTY/TUI problem:
-  inspect `pty-transcript.ndjson` and `pty-screen.json`, then attach with live
-  SSH if needed
+  inspect `pty-transcript.ndjson`, `pty-screen.json`, and `pty.cast`, then
+  attach with live SSH if needed
 - proxy/login problem:
   use the printed `ssh://localhost:<port>` endpoint and the wrapper scripts
 
@@ -653,8 +676,9 @@ Still open:
 
 - make shell mode a thin frontend over the same scenario engine
 - add typed validation profiles instead of hand-authored `exec` checks
-- decide whether to emit optional human-first artifacts such as asciinema or
-  ttyrec in addition to the current agent-first NDJSON/JSON split
+- decide later whether optional human-first artifacts such as PNG/GIF/movie
+  renderings are worth layering on top of the current NDJSON/JSON/asciicast
+  split
 
 That is acceptable for `v1.4`. The important change in this branch is that the
 harness is now strong enough for future agents to save and rerun reproductions
