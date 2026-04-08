@@ -316,6 +316,8 @@ Lightweight eval types currently include:
 - `EvalCaseId`
 - `EvalCase`
 - `EvalResult`
+- `EvalTrack::primary_for_descriptor(...)`
+- `tracks_for_capabilities(...)`
 
 These are intentionally small. They exist to let `libs/models` annotate bundles for evaluation tracks and to give `libs/model-eval` stable vocabulary to build on.
 
@@ -335,6 +337,20 @@ let result = EvalResult {
     notes: vec!["matched expected reasoning chain".into()],
 };
 ```
+
+For the current vertical slice, `motlie_model::eval` also provides the stable bridge that higher-level tooling needs in order to select embedding-oriented runners without bundle-specific branching:
+
+```rust
+use motlie_model::{Capabilities, CapabilityDescriptor};
+use motlie_model::eval::{tracks_for_capabilities, EvalTrack};
+
+let capabilities = Capabilities::new(vec![CapabilityDescriptor::embeddings()]);
+let tracks = tracks_for_capabilities(&capabilities);
+
+assert!(tracks.contains(&EvalTrack::Embeddings));
+```
+
+The v0.1 contract is intentionally narrow: embedding capabilities map directly to `EvalTrack::Embeddings`, while text-generation capabilities still require higher-level harness configuration because they may participate in multiple tracks.
 
 ## Notes
 

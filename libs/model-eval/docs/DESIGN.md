@@ -8,6 +8,7 @@
 |------|--------|----------|
 | 2026-04-07 | @codex-researcher: Initial greenfield design for `libs/model-eval` as the substantial evaluation tooling crate layered on top of `libs/model::eval`. Migration and backward compatibility are explicitly out of scope for this first cut. | All |
 | 2026-04-08 | @codex-researcher: Clarified the current crate boundary: `libs/model-eval` is scaffold-only in code today, with the first substantial runner API still specified in DESIGN/PLAN rather than implemented. | Overview, Solution, API Sketch |
+| 2026-04-08 | @codex-researcher: Recorded the first implemented slice of that boundary: the crate now exposes a minimal track-eligibility helper that consumes `motlie_model::eval` and works against `libs/models::Catalog`, while the heavier suite/runner/report API remains intentionally deferred. | Overview, Solution, API Sketch |
 
 This document defines the design for `libs/model-eval`, the evaluation tooling crate for Motlie's curated model framework. Its job is to provide the executable harness machinery that operates on the lightweight evaluation abstractions defined in `libs/model::eval`.
 
@@ -35,6 +36,8 @@ Motlie needs repeatable, structured ways to evaluate curated model bundles acros
 
 The small contracts in `libs/model::eval` are necessary, but they are not sufficient. Real evaluation requires runners, suite loading, scoring logic, result aggregation, and reporting. Putting all of that directly into `libs/model` would blur the boundary between stable API contracts and heavier tooling.
 
+The current code has now crossed the boundary in the smallest useful way: `libs/model-eval` consumes the stable `CapabilityDescriptor` -> `EvalTrack` mapping from `libs/model::eval` and proves that a catalog-provided bundle can be judged embedding-track-eligible without bundle-specific branching.
+
 ### Solution
 
 `libs/model-eval` provides the substantial evaluation machinery:
@@ -44,6 +47,8 @@ The small contracts in `libs/model::eval` are necessary, but they are not suffic
 3. task-specific scoring and normalization
 4. result aggregation, comparison, and reporting
 5. optional integration with `libs/models` for catalog-driven evaluation runs
+
+Today only the smallest precursor of item 5 is implemented: a helper that answers whether a capability set supports a requested evaluation track. That helper is intentionally not the final runner API; it simply proves the contract split in executable code.
 
 ## Goals and Non-Goals
 

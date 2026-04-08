@@ -2,6 +2,10 @@
 //!
 //! Substantial harness tooling should live in `motlie-model-eval`.
 
+use std::collections::BTreeSet;
+
+use crate::{Capabilities, CapabilityDescriptor, CapabilityKind};
+
 /// High-level evaluation tracks used to group bundle assessment suites.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum EvalTrack {
@@ -10,6 +14,30 @@ pub enum EvalTrack {
     Embeddings,
     Reasoning,
     Summarization,
+}
+
+impl EvalTrack {
+    /// Returns the primary evaluation track implied by a capability descriptor, when one exists.
+    ///
+    /// The current v0.1 contract only treats embedding capabilities as having a stable,
+    /// non-ambiguous evaluation track. Text-generation capabilities may participate in
+    /// multiple tracks (chat, reasoning, summarization, classification) and remain the
+    /// responsibility of higher-level harness configuration.
+    pub fn primary_for_descriptor(descriptor: &CapabilityDescriptor) -> Option<Self> {
+        match descriptor.kind {
+            CapabilityKind::Embeddings => Some(Self::Embeddings),
+            _ => None,
+        }
+    }
+}
+
+/// Derives the stable evaluation tracks implied directly by a capability set.
+pub fn tracks_for_capabilities(capabilities: &Capabilities) -> BTreeSet<EvalTrack> {
+    capabilities
+        .descriptors()
+        .iter()
+        .filter_map(EvalTrack::primary_for_descriptor)
+        .collect()
 }
 
 /// Stable identifier for a single evaluation case.
@@ -46,6 +74,7 @@ pub struct EvalResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CapabilityDescriptor;
 
     #[test]
     fn eval_case_ids_are_stable_strings() {
@@ -71,5 +100,40 @@ mod tests {
 
         assert_eq!(result.case_id, case.id);
         assert!(result.passed);
+    }
+
+    #[test]
+    fn embeddings_capability_maps_to_embeddings_track() {
+        let descriptor = CapabilityDescriptor::embeddings();
+
+        assert_eq!(
+            EvalTrack::primary_for_descriptor(&descriptor),
+            Some(EvalTrack::Embeddings)
+        );
+    }
+
+    #[test]
+    fn text_generation_capabilities_do_not_claim_primary_eval_tracks_yet() {
+        assert_eq!(
+            EvalTrack::primary_for_descriptor(&CapabilityDescriptor::chat()),
+            None
+        );
+        assert_eq!(
+            EvalTrack::primary_for_descriptor(&CapabilityDescriptor::completion()),
+            None
+        );
+    }
+
+    #[test]
+    fn capabilities_project_to_embedding_track_without_duplicates() {
+        let capabilities = Capabilities::new(vec![
+            CapabilityDescriptor::embeddings(),
+            CapabilityDescriptor::embeddings(),
+        ]);
+
+        let tracks = tracks_for_capabilities(&capabilities);
+
+        assert_eq!(tracks.len(), 1);
+        assert!(tracks.contains(&EvalTrack::Embeddings));
     }
 }

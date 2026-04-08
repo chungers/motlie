@@ -405,6 +405,33 @@ mod tests {
     }
 
     #[test]
+    fn capabilities_preserve_descriptor_order_and_deduplicate_support_checks() {
+        let capabilities = Capabilities::new(vec![
+            CapabilityDescriptor::embeddings(),
+            CapabilityDescriptor::chat(),
+            CapabilityDescriptor::embeddings(),
+        ]);
+
+        let kinds: Vec<_> = capabilities
+            .descriptors()
+            .iter()
+            .map(|descriptor| descriptor.kind)
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                CapabilityKind::Embeddings,
+                CapabilityKind::Chat,
+                CapabilityKind::Embeddings
+            ]
+        );
+        assert!(capabilities.supports(CapabilityKind::Embeddings));
+        assert!(capabilities.supports(CapabilityKind::Chat));
+        assert!(!capabilities.supports(CapabilityKind::Completion));
+    }
+
+    #[test]
     fn embedding_builtins_have_expected_shapes() {
         let descriptor = CapabilityDescriptor::embeddings();
 
