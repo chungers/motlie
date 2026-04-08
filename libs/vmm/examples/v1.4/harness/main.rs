@@ -540,6 +540,38 @@ async fn run_smoke(handle: &VmHandle) -> Result<Vec<ScenarioCheck>, HarnessError
         detail: "home, workspace, and agent-state mounts are visible".to_string(),
     });
 
+    let sudo = handle
+        .exec(
+            "/bin/sh -lc 'sudo -n true && echo SUDO_OK'",
+            Duration::from_secs(10),
+        )
+        .await
+        .map_err(|source| HarnessError::SmokeExec {
+            check: "sudo",
+            source,
+        })?;
+    ensure_contains("sudo", &sudo.stdout, "SUDO_OK")?;
+    checks.push(ScenarioCheck {
+        name: "sudo".to_string(),
+        detail: "passwordless sudo is available for the guest login user".to_string(),
+    });
+
+    let git = handle
+        .exec(
+            "/bin/sh -lc 'git --version | grep -q \"^git version \" && echo GIT_OK'",
+            Duration::from_secs(10),
+        )
+        .await
+        .map_err(|source| HarnessError::SmokeExec {
+            check: "git",
+            source,
+        })?;
+    ensure_contains("git", &git.stdout, "GIT_OK")?;
+    checks.push(ScenarioCheck {
+        name: "git".to_string(),
+        detail: "git is preinstalled in the guest image".to_string(),
+    });
+
     let route = exec_until_success(
         handle,
         &format!(
@@ -575,6 +607,23 @@ async fn run_smoke(handle: &VmHandle) -> Result<Vec<ScenarioCheck>, HarnessError
     checks.push(ScenarioCheck {
         name: "https".to_string(),
         detail: "outbound HTTPS fetch succeeded".to_string(),
+    });
+
+    let apt_update = exec_until_success(
+        handle,
+        "/bin/sh -lc 'for attempt in 1 2 3; do sudo -n apt-get update >/tmp/motlie-vmm-apt-update.log 2>&1 && echo APT_OK && exit 0; sleep 2; done; exit 1'",
+        "APT_OK",
+        Duration::from_secs(60),
+    )
+    .await
+    .map_err(|source| HarnessError::SmokeExec {
+        check: "apt-update",
+        source,
+    })?;
+    ensure_contains("apt-update", &apt_update.stdout, "APT_OK")?;
+    checks.push(ScenarioCheck {
+        name: "apt-update".to_string(),
+        detail: "Debian package index refresh succeeded over Motlie vnet".to_string(),
     });
     Ok(checks)
 }

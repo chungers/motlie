@@ -126,6 +126,7 @@ pub struct EgressIpv4Layout {
 pub struct Ipv4SubnetPool {
     pub base: Ipv4Subnet,
     pub guest_prefix_len: u8,
+    pub first_subnet_slot: u32,
     pub host_offset: u32,
     pub guest_offset: u32,
     pub dns_offset: Option<u32>,
@@ -133,14 +134,38 @@ pub struct Ipv4SubnetPool {
 
 impl Ipv4SubnetPool {
     pub fn capacity(&self) -> Result<u32, GuestNetAllocatorError> {
-        self.base.child_capacity(self.guest_prefix_len)
+        let raw_capacity = self.base.child_capacity(self.guest_prefix_len)?;
+        Ok(raw_capacity.saturating_sub(self.first_subnet_slot))
     }
 
     pub fn subnet_for_slot(&self, slot: u32) -> Result<Ipv4Subnet, GuestNetAllocatorError> {
-        self.base.child_subnet(self.guest_prefix_len, slot)
+        let raw_capacity = self.base.child_capacity(self.guest_prefix_len)?;
+        let subnet_slot = self.first_subnet_slot.checked_add(slot).ok_or(
+            GuestNetAllocatorError::SubnetSlotOverflow {
+                first_subnet_slot: self.first_subnet_slot,
+                slot,
+            },
+        )?;
+        if subnet_slot >= raw_capacity {
+            return Err(GuestNetAllocatorError::SubnetSlotExhausted {
+                slot: subnet_slot,
+                capacity: raw_capacity,
+            });
+        }
+        self.base.child_subnet(self.guest_prefix_len, subnet_slot)
     }
 
     pub fn validate(&self, label: &'static str) -> Result<(), GuestNetAllocatorError> {
+        let raw_capacity = self.base.child_capacity(self.guest_prefix_len)?;
+        if self.first_subnet_slot >= raw_capacity {
+            return Err(GuestNetAllocatorError::InvalidPool {
+                label,
+                reason: format!(
+                    "first_subnet_slot {} exceeds raw pool capacity {}",
+                    self.first_subnet_slot, raw_capacity
+                ),
+            });
+        }
         let subnet = self.subnet_for_slot(0)?;
         subnet
             .address_at_offset(self.host_offset)
@@ -261,6 +286,7 @@ impl Default for GuestNetAllocatorConfig {
                 base: Ipv4Subnet::new(Ipv4Addr::new(172, 20, 0, 0), 16)
                     .expect("static subnet is valid"),
                 guest_prefix_len: 30,
+                first_subnet_slot: 0,
                 host_offset: 1,
                 guest_offset: 2,
                 dns_offset: None,
@@ -269,6 +295,7 @@ impl Default for GuestNetAllocatorConfig {
                 base: Ipv4Subnet::new(Ipv4Addr::new(10, 0, 0, 0), 8)
                     .expect("static subnet is valid"),
                 guest_prefix_len: 24,
+                first_subnet_slot: 2,
                 host_offset: 2,
                 guest_offset: 15,
                 dns_offset: Some(3),
@@ -292,6 +319,10 @@ pub enum GuestNetAllocatorError {
     InvalidSubnetNotation { value: String },
     #[error("subnet slot space exhausted: slot {slot} exceeds capacity {capacity}")]
     SubnetSlotExhausted { slot: u32, capacity: u32 },
+    #[error(
+        "subnet slot overflow: first_subnet_slot {first_subnet_slot} + slot {slot} exceeds u32"
+    )]
+    SubnetSlotOverflow { first_subnet_slot: u32, slot: u32 },
     #[error(
         "address offset {offset} is out of range for subnet {subnet} (subnet size {subnet_size})"
     )]
@@ -484,6 +515,9 @@ mod tests {
         assert_eq!(first.cid, 3);
         assert_eq!(first.admin_subnet.to_string(), "172.20.0.0/30");
         assert_eq!(first.admin_ipv4.guest, Ipv4Addr::new(172, 20, 0, 2));
+        assert_eq!(first.egress_subnet.to_string(), "10.0.2.0/24");
+        assert_eq!(first.egress_ipv4.host, Ipv4Addr::new(10, 0, 2, 2));
+        assert_eq!(first.egress_ipv4.dns, Ipv4Addr::new(10, 0, 2, 3));
     }
 
     #[test]
@@ -500,6 +534,9 @@ mod tests {
         assert_ne!(bob.admin_ipv4.guest, carol.admin_ipv4.guest);
         assert_ne!(alice.admin_mac, bob.admin_mac);
         assert_ne!(bob.admin_mac, carol.admin_mac);
+        assert_eq!(alice.egress_subnet.to_string(), "10.0.2.0/24");
+        assert_eq!(bob.egress_subnet.to_string(), "10.0.3.0/24");
+        assert_eq!(carol.egress_subnet.to_string(), "10.0.4.0/24");
         assert_eq!(alloc.capacity().unwrap(), 16_384);
     }
 

@@ -257,16 +257,18 @@ fn print_capacity(allocator: &GuestNetAllocator) {
         allocator.remaining_capacity().unwrap_or_default(),
     );
     println!(
-        "allocator.admin_pool={} -> /{} host_offset={} guest_offset={}",
+        "allocator.admin_pool={} -> /{} first_subnet_slot={} host_offset={} guest_offset={}",
         config.admin_pool.base,
         config.admin_pool.guest_prefix_len,
+        config.admin_pool.first_subnet_slot,
         config.admin_pool.host_offset,
         config.admin_pool.guest_offset,
     );
     println!(
-        "allocator.egress_pool={} -> /{} host_offset={} guest_offset={} dns_offset={}",
+        "allocator.egress_pool={} -> /{} first_subnet_slot={} host_offset={} guest_offset={} dns_offset={}",
         config.egress_pool.base,
         config.egress_pool.guest_prefix_len,
+        config.egress_pool.first_subnet_slot,
         config.egress_pool.host_offset,
         config.egress_pool.guest_offset,
         config.egress_pool.dns_offset.unwrap_or_default(),
@@ -627,6 +629,18 @@ async fn validate_guest(
             Duration::from_secs(10),
         ),
         (
+            "sudo: passwordless sudo available",
+            "/bin/sh -lc 'sudo -n true && echo SUDO_OK'".to_string(),
+            "SUDO_OK".to_string(),
+            Duration::from_secs(10),
+        ),
+        (
+            "tooling: git preinstalled",
+            "/bin/sh -lc 'git --version | grep -q \"^git version \" && echo GIT_OK'".to_string(),
+            "GIT_OK".to_string(),
+            Duration::from_secs(10),
+        ),
+        (
             "ip route: default via motlie-vmm",
             format!(
                 "/bin/sh -lc 'ip route | grep -q \"^default via {} \" && echo ROUTE_OK'",
@@ -640,6 +654,12 @@ async fn validate_guest(
             "/bin/sh -lc 'code=$(curl -s -o /dev/null -w \"%{http_code}\" https://example.com); test \"$code\" = 200 && echo HTTPS_OK'".to_string(),
             "HTTPS_OK".to_string(),
             Duration::from_secs(20),
+        ),
+        (
+            "apt: package index refresh",
+            "/bin/sh -lc 'for attempt in 1 2 3; do sudo -n apt-get update >/tmp/motlie-vmm-apt-update.log 2>&1 && echo APT_OK && exit 0; sleep 2; done; exit 1'".to_string(),
+            "APT_OK".to_string(),
+            Duration::from_secs(60),
         ),
     ];
 
