@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>v1.4 PTY Agent Validation Replay</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/asciinema-player@3.10.0/dist/bundle/asciinema-player.css"
+    />
+    <style>
+      :root {
+        color-scheme: dark;
+        --page-bg: #0f1412;
+        --panel-bg: #161d19;
+        --panel-border: #2c3a33;
+        --text: #ecf3ee;
+        --muted: #a8b9ae;
+        --accent: #83d97b;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Iosevka Web", "IBM Plex Sans", sans-serif;
+        background: linear-gradient(180deg, #101612 0%, var(--page-bg) 100%);
+        color: var(--text);
+      }
+
+      main {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 32px 20px 48px;
+      }
+
+      h1 {
+        margin: 0 0 12px;
+        font-size: 32px;
+        line-height: 1.1;
+      }
+
+      p {
+        color: var(--muted);
+        line-height: 1.5;
+      }
+
+      .panel {
+        margin-top: 24px;
+        padding: 18px;
+        border: 1px solid var(--panel-border);
+        border-radius: 16px;
+        background: var(--panel-bg);
+        box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+      }
+
+      .meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px 18px;
+        margin-top: 12px;
+        font-size: 14px;
+        color: var(--muted);
+      }
+
+      .meta strong {
+        color: var(--accent);
+        font-weight: 600;
+      }
+
+      #player {
+        margin-top: 20px;
+      }
+
+      .note {
+        margin-top: 18px;
+        font-size: 14px;
+      }
+
+      a {
+        color: var(--accent);
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>v1.4 PTY Agent Validation Replay</h1>
+      <p>
+        This player replays the checked-in <code>pty-agent-validation</code>
+        shell session: one clean <code>sudo -n apt-get update</code> followed by
+        Codex TUI startup on the guest.
+      </p>
+      <div class="panel">
+        <div class="meta">
+          <span><strong>Source</strong> <code>assets/pty-agent-validation.cast</code></span>
+          <span><strong>Flow</strong> package-manager quiescence, apt refresh, Codex welcome screen</span>
+          <span><strong>Backend</strong> <code>shadow</code></span>
+        </div>
+        <div id="player"></div>
+        <p class="note">
+          If the CDN player assets are unavailable, open the raw cast with an
+          <code>asciinema</code>-compatible viewer using
+          <a href="./pty-agent-validation.cast"><code>pty-agent-validation.cast</code></a>.
+        </p>
+      </div>
+    </main>
+    <script src="https://cdn.jsdelivr.net/npm/asciinema-player@3.10.0/dist/bundle/asciinema-player.min.js"></script>
+    <script>
+      const castBase64 =
+        "eyJ2ZXJzaW9uIjozLCJ0ZXJtIjp7ImNvbHMiOjEwMCwicm93cyI6MzAsInR5cGUiOiJ4dGVybS0yNTZjb2xvciJ9LCJ0aW1lc3RhbXAiOjE3NzU2OTA3NjIsInRpdGxlIjoiYWxpY2U6YWxpY2Utc2hlbGwifQpbMC4yODQsIm8iLCJTdGFydCB0bXV4IHNlc3Npb24/IFtZL25dIChhdXRvLXllcyBpbiAzcykgIl0KWzAuMjE3LCJpIiwiblxuIl0KWzAuMDAxLCJvIiwibl5KIl0KWzAuMCwibyIsIlxyXG4iXQpbMC4wMjEsIm8iLCJcdTAwMWJbPzIwMDRoIl0KWzAuMCwibyIsImFsaWNlQG1vdGxpZS1hbGljZTp+JCAiXQpbMC4wLCJvIiwiXHJcbiJdClswLjAsIm8iLCJcdTAwMWJbPzIwMDRsXHIiXQpbMC4wLCJvIiwiXHUwMDFiWz8yMDA0aCJdClswLjAsIm8iLCJhbGljZUBtb3RsaWUtYWxpY2U6fiQgIl0KWzEwLjY5LCJpIiwic3VkbyAtbiBhcHQtZ2V0IHVwZGF0ZSAmJiBlY2hvIEFQVF9TVEFUVVM6MCB8fCBlY2hvIEFQVF9TVEFUVVM6MVxuIl0KWzAuMDQ3LCJvIiwic3VkbyAtbiBhcHQtZ2V0IHVwZGF0ZSAmJiBlY2hvIEFQVF9TVEFUVVM6MCB8fCBlY2hvIEFQVF9TVEFUVVM6MVxyXG5cdTAwMWJbPzIwMDRsXHIiXQpbMC4wOTgsIm8iLCJccjAlIFtXb3JraW5nXSJdClswLjEwNSwibyIsIlxyICAgICAgICAgICAgXHJIaXQ6MSBodHRwOi8vZGViLmRlYmlhbi5vcmcvZGViaWFuIGJvb2t3b3JtIEluUmVsZWFzZVxyXG5ccjAlIFtXb3JraW5nXSJdClswLjA2MiwibyIsIlxyMjAlIFtXb3JraW5nXVxyICAgICAgICAgICAgIFxyIl0KWzAuMDAzLCJvIiwiXHJSZWFkaW5nIHBhY2thZ2UgbGlzdHMuLi4gMCVcciJdClswLjAwMywibyIsIlxyUmVhZGluZyBwYWNrYWdlIGxpc3RzLi4uIDAlXHIiXQpbMC4wMDIsIm8iLCJcclJlYWRpbmcgcGFja2FnZSBsaXN0cy4uLiAwJVxyIl0KWzAuMTcyLCJvIiwiXHJSZWFkaW5nIHBhY2thZ2UgbGlzdHMuLi4gNTklXHJcclJlYWRpbmcgcGFja2FnZSBsaXN0cy4uLiA1OSVcciJdClswLjA0OSwibyIsIlxyUmVhZGluZyBwYWNrYWdlIGxpc3RzLi4uIDk5JVxyXHJSZWFkaW5nIHBhY2thZ2UgbGlzdHMuLi4gOTklXHIiXQpbMC4wMjEsIm8iLCJcclJlYWRpbmcgcGFja2FnZSBsaXN0cy4uLiBEb25lXHJcclxuIl0KWzAuMDEyLCJvIiwiQVBUX1NUQVRVUzowXHJcbiJdClswLjAsIm8iLCJcdTAwMWJbPzIwMDRoYWxpY2VAbW90bGllLWFsaWNlOn4kICJdClswLjQzMiwiaSIsImNvZGV4XG4iXQpbMC4wMDEsIm8iLCJjb2RleFxyXG5cdTAwMWJbPzIwMDRsXHIiXQpbMi4xMzMsIm8iLCJcdTAwMWJbPzIwMDRoIl0KWzAuMDIxLCJvIiwiXHUwMDFiWz43dVx1MDAxYls/MTAwNGgiXQpbMC4wLCJvIiwiXHUwMDFiWzZuIl0KWzAuMzU0LCJpIiwiXHUwMDFiWzc7MFIiXQpbMC4wMDQsIm8iLCJcdTAwMWJbP3VcdTAwMWJbYyJdClsyLjAwMywibyIsIlx1MDAxYl0xMDs/XHUwMDFiXFwiXQpbMi40OTUsIm8iLCJcdTAwMWJbPzIwMjZoXHUwMDFiWzE7NnJcdTAwMWJbNlNcdTAwMWJbclx1MDAxYlsxOzU1SFx1MDAxYlswbVx1MDAxYls0OW1cdTAwMWJbS1x1MDAxYlsyOzJIXHUwMDFiWzBtXHUwMDFiWzQ5bVx1MDAxYltLXHUwMDFiWzM7NjJIXHUwMDFiWzBtXHUwMDFiWzQ5bVx1MDAxYltLXHUwMDFiWzQ7NDhIXHUwMDFiWzBtXHUwMDFiWzQ5bVx1MDAxYltLXHUwMDFiWzU7MkhcdTAwMWJbMG1cdTAwMWJbNDltXHUwMDFiW0tcdTAwMWJbNjsyNkhcdTAwMWJbMG1cdTAwMWJbNDltXHUwMDFiW0tcdTAwMWJbNzs2N0hcdTAwMWJbMG1cdTAwMWJbNDltXHUwMDFiW0tcdTAwMWJbODsySFx1MDAxYlswbVx1MDAxYls0OW1cdTAwMWJbS1x1MDAxYls5OzMwSFx1MDAxYlswbVx1MDAxYls0OW1cdTAwMWJbS1x1MDAxYlsxMDs1NEhcdTAwMWJbMG1cdTAwMWJbNDltXHUwMDFiW0tcdTAwMWJbMTE7MkhcdTAwMWJbMG1cdTAwMWJbNDltXHUwMDFiW0tcdTAwMWJbMTI7MzBIXHUwMDFiWzBtXHUwMDFiWzQ5bVx1MDAxYltLXHUwMDFiWzEzOzI2SFx1MDAxYlswbVx1MDAxYls0OW1cdTAwMWJbS1x1MDAxYlsxNDsySFx1MDAxYlswbVx1MDAxYls0OW1cdTAwMWJbS1x1MDAxYlsxNTsyNkhcdTAwMWJbMG1cdTAwMWJbNDltXHUwMDFiW0tcdTAwMWJbMTY7MkhcdTAwMWJbMG1cdTAwMWJbNDltXHUwMDFiW0tcdTAwMWJbMTc7MkhcdTAwMWJbMG1cdTAwMWJbNDltXHUwMDFiW0tcdTAwMWJbMTg7MkhcdTAwMWJbMG1cdTAwMWJbNDltXHUwMDFiW0tcdTAwMWJbMTk7MkhcdTAwMWJbMG1cdTAwMWJbNDltXHUwMDFiW0tcdTAwMWJbMjA7MkhcdTAwMWJbMG1cdTAwMWJbNDltXHUwMDFiW0tcdTAwMWJbMjE7MkhcdTAwMWJbMG1cdTAwMWJbNDltXHUwMDFiW0tcdTAwMWJbMjI7MkhcdTAwMWJbMG1cdTAwMWJbNDltXHUwMDFiW0tcdTAwMWJbMjM7MkhcdTAwMWJbMG1cdTAwMWJbNDltXHUwMDFiW0tcdTAwMWJbMjQ7MkhcdTAwMWJbMG1cdTAwMWJbNDltXHUwMDFiW0tcdTAwMWJbMjU7MkhcdTAwMWJbMG1cdTAwMWJbNDltXHUwMDFiW0tcdTAwMWJbMjY7MkhcdTAwMWJbMG1cdTAwMWJbNDltXHUwMDFiW0tcdTAwMWJbMjc7MkhcdTAwMWJbMG1cdTAwMWJbNDltXHUwMDFiW0tcdTAwMWJbMjg7MkhcdTAwMWJbMG1cdTAwMWJbNDltXHUwMDFiW0tcdTAwMWJbMjk7MkhcdTAwMWJbMG1cdTAwMWJbNDltXHUwMDFiW0tcdTAwMWJbMzA7MkhcdTAwMWJbMG1cdTAwMWJbNDltXHUwMDFiW0tcdTAwMWJbMTszSFdlbGNvbWVcdTAwMWJbMTsxMUh0b1x1MDAxYlsxOzE0SFx1MDAxYlsxbUNvZGV4XHUwMDFiWzIybSxcdTAwMWJbMTsyMUhPcGVuQUknc1x1MDAxYlsxOzMwSGNvbW1hbmQtbGluZVx1MDAxYlsxOzQzSGNvZGluZ1x1MDAxYlsxOzUwSGFnZW50XHUwMDFiWzM7M0hTaWduXHUwMDFiWzM7OEhpblx1MDAxYlszOzExSHdpdGhcdTAwMWJbMzsxNkhDaGF0R1BUXHUwMDFiWzM7MjRIdG9cdTAwMWJbMzsyN0h1c2VcdTAwMWJbMzszMUhDb2RleFx1MDAxYlszOzM3SGFzXHUwMDFiWzM7NDBIcGFydFx1MDAxYlszOzQ1SG9mXHUwMDFiWzM7NDhIeW91clx1MDAxYlszOzUzSHBhaWRcdTAwMWJbMzs1OEhwbGFuXHUwMDFiWzQ7M0hvclx1MDAxYls0OzZIY29ubmVjdFx1MDAxYls0OzE0SGFuXHUwMDFiWzQ7MTdIQVBJXHUwMDFiWzQ7MjFIa2V5XHUwMDFiWzQ7MjVIZm9yXHUwMDFiWzQ7MjlIdXNhZ2UtYmFzZWRcdTAwMWJbNDs0MUhiaWxsaW5nXHUwMDFiWzY7MUhcdTAwMWJbMm1cdTAwMWJbMzg7NTs2OzQ5bT4gMS4gXHUwMDFiWzIybVNpZ24gaW4gd2l0aCBDaGF0R1BUXHUwMDFiWzc7MUhcdTAwMWJbMm0gICAgIFVzYWdlIGluY2x1ZGVkIHdpdGggUGx1cywgUHJvLCBCdXNpbmVzcywgYW5kIEVudGVycHJpc2UgcGxhbnNcdTAwMWJbOTszSFx1MDAxYlsyMm1cdTAwMWJbMzk7NDltMi5cdTAwMWJbOTs2SFNpZ25cdTAwMWJbOTsxMUhpblx1MDAxYls5OzE0SHdpdGhcdTAwMWJbOTsxOUhEZXZpY2VcdTAwMWJbOTsyNkhDb2RlXHUwMDFiWzEwOzFIXHUwMDFiWzJtICAgICBTaWduIGluIGZyb20gYW5vdGhlciBkZXZpY2Ugd2l0aCBhIG9uZS10aW1lIGNvZGVcdTAwMWJbMTI7M0hcdTAwMWJbMjJtMy5cdTAwMWJbMTI7NkhQcm92aWRlXHUwMDFiWzEyOzE0SHlvdXJcdTAwMWJbMTI7MTlIb3duXHUwMDFiWzEyOzIzSEFQSVx1MDAxYlsxMjsyN0hrZXlcdTAwMWJbMTM7MUhcdTAwMWJbMm0gICAgIFBheSBmb3Igd2hhdCB5b3UgdXNlXHUwMDFiWzE1OzFIICBQcmVzcyBFbnRlciB0byBjb250aW51ZVx1MDAxYlszOW1cdTAwMWJbNDltXHUwMDFiWzBtXHUwMDFiWz8yNWxcdTAwMWJbPzIwMjZsIl0K";
+
+      const castText = atob(castBase64);
+      const castBlob = new Blob([castText], { type: "application/x-asciicast" });
+      const castUrl = URL.createObjectURL(castBlob);
+
+      AsciinemaPlayer.create(castUrl, document.getElementById("player"), {
+        autoPlay: false,
+        preload: true,
+        fit: "width",
+        idleTimeLimit: 2,
+        theme: "asciinema",
+      });
+    </script>
+  </body>
+</html>
