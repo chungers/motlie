@@ -4,6 +4,8 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-07 | @codex | Implement the first concrete Phase 4/5 slice: `observability.rs`, `VmHandle::observability()`, and `harness_v1_4 --result-json ...` for machine-readable `smoke` results; PTY result hardening remains open |
+| 2026-04-07 | @codex | Rebase the near-term plan around the harness: defer CH internal-thread / alternate hypervisor backend work to a later `v2` track; make observability library-owned in Phase 4; add machine-readable results plus PTY/VTE recording work to Phase 5; and tighten Phase 8 around a real scenario/agent driver |
 | 2026-04-07 | @codex | Start the PTY/session harness slice: `VmHandle::open_pty(...)`, `GuestPtySession`, and a first `harness_v1_4 pty` scenario now compile; next step is to absorb the old REPL into the harness as interactive/manual mode over the same API |
 | 2026-04-07 | @codex | Implement reviewed `Runtime` injection in code: `orchestrator.rs` now composes hypervisor/filesystem/network/control-plane backing through one injected runtime, and Motlie guest backing moved behind `backend::motlie::*` adapters |
 | 2026-04-07 | @codex | Lock the reviewed `Runtime { hypervisor, filesystem, network, control_plane }` model: `BackendSet` remains only as an intermediate implementation step, and the next cleanup is to inject Motlie guest backing through the same boundary |
@@ -184,9 +186,9 @@ Tasks:
   - [x] `GuestResources`
   - [x] `GuestStorage`
   - [x] `BootArtifacts`
-- [ ] add an explicit CH adapter plan:
+- [ ] record the CH adapter boundary for later `v2` work:
   - [ ] reviewed `to_ch_vm_config(...)` boundary
-  - [ ] preserve ability to switch from CLI launch to in-process
+  - [ ] preserve a future path from shell launch to in-process
         `VmConfig` + `start_vmm_thread(...)`
 - [x] make backend dispatch enum-based, not dynamically discovered
 - [x] inject backend dispatch into generic orchestrator code
@@ -218,6 +220,9 @@ Acceptance:
 - the generic lifecycle API accepts an injected reviewed runtime composition,
   rather than assembling concrete CH and Motlie implementations inside
   `orchestrator.rs`
+- CH internal-thread / fork-exec backend work is explicitly outside the
+  critical `v1.4` path and can land later as `v2` backend expansion once the
+  harness and Motlie-backed flow are complete
 
 ## Phase 4: GuestFS and SSH Bridge Lifecycle Extraction
 
@@ -230,10 +235,20 @@ Tasks:
 - [x] move guest listener spawn logic there
 - [x] move SSH bridge accept/register lifecycle out of the `v1.4` harness path
 - [x] unify guest launch/SSH handle/vnet/VFS state into one library-owned handle
+- [ ] add library-owned observability surfaces for the running guest lifecycle:
+  - [x] launch-log path / serial-log path on the typed handle
+  - [x] typed accessors for effective runtime roots and sockets
+  - [ ] transcript/log capture surfaces that the harness can consume without
+        reimplementing path discovery
+  - [ ] enough typed metadata to bundle a run for later debugging
 
 Acceptance:
 - `repl_host_v1_3` does not manually coordinate SSH bridge and VFS listener state
 - guest lifecycle state is tracked by the library, not by ad hoc REPL maps
+- harness and future drivers can discover core run artifacts through the
+  library rather than reconstructing paths ad hoc
+- [x] first observability slice is library-owned through
+      `VmHandle::observability()`
 
 ## Phase 5: Programmatic Harness Bootstrap
 
@@ -250,7 +265,7 @@ Tasks:
   - [x] `handle.ready(...)`
   - [x] `exec`
   - [x] `handle.shutdown()`
-  - [ ] machine-readable result output
+  - [x] first machine-readable result output
 - [x] keep it rootless/userspace-only
 - [x] make it the default substrate for building later `v1.4` phases
 - [x] add the first PTY/session-driven scenario under `examples/v1.4/harness/`
@@ -263,6 +278,21 @@ Tasks:
   - [x] two concurrent harness instances
 - [ ] add transcript/log bundle capture so harness runs preserve enough state
       for debugging subtle PTY, VFS, and vnet regressions
+- [ ] add machine-readable result output for scenarios and ad-hoc operations:
+  - [x] structured pass/fail result records
+  - [x] stable machine-readable guest/run metadata
+  - [ ] structured error classification suitable for agents and CI
+- [ ] add a PTY/VTE capture layer:
+  - [ ] keep a VTE-style screen buffer for PTY sessions so the harness can
+        reason about rendered terminal state, not only raw byte streams
+  - [ ] expose rendered screen state to scripted expectations
+  - [ ] preserve PTY transcripts in a reusable artifact format
+- [ ] evaluate terminal-recording artifact generation for human verification:
+  - [ ] `ttyrec`
+  - [ ] `asciinema`
+  - [ ] `t-rec`
+  - [ ] decide whether the harness should emit raw recordings, asciinema casts,
+        or rendered movie artifacts such as GIFs for failed runs
 
 Acceptance:
 - later `v1.4` work can be developed against a stable non-REPL harness
@@ -271,6 +301,11 @@ Acceptance:
 - the harness remains the proving ground for the full Motlie-backed path
 - multi-guest scripted validation runs through the harness rather than the old
   standalone `repl_host_v1_4`
+- [x] the harness can emit first-pass structured results for agents and CI
+- PTY-driven scenarios can assert on rendered terminal state, not just command
+  exit codes
+- failed runs can preserve enough terminal/log artifacts for human
+  verification
 
 ## Phase 6: Embedded Image / Union Binary Prototype
 
@@ -350,10 +385,24 @@ Tasks:
   - [ ] validate
   - [ ] shutdown-and-wait
   - [ ] PTY/send/expect script steps
+- [ ] design and implement the stable scenario/script format:
+  - [ ] action/expectation pairs
+  - [ ] PTY send/read/resize/expect steps
+  - [ ] multi-guest coordination
+  - [ ] stable machine-readable outputs per step
+- [ ] converge ad-hoc/manual operation onto the same engine:
+  - [ ] harness shell commands should be thin wrappers over the scenario/driver
+        engine
+  - [ ] user reports should be reproducible as saved scripts, not one-off REPL
+        sessions
 
 Acceptance:
 - an agent can drive the harness without depending on the REPL prompt
 - validation returns machine-usable results rather than only stderr text
+- the same engine supports:
+  - [ ] scripted regression scenarios
+  - [ ] human interactive/manual operation
+  - [ ] ad-hoc coding-agent experimentation
 
 ## Phase 9: Polish and Hardening
 

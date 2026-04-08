@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-07 | @codex | Implement the first concrete Phase 4/5 slice in code: `observability.rs`, `VmHandle::observability()`, and `harness_v1_4 --result-json ...` for machine-readable `smoke` results; PTY result capture still needs hardening |
 | 2026-04-07 | @codex | Lock the harness direction: `examples/v1.4/harness` is the future primary driver over the `libs/vmm` API, with scripted scenarios, interactive/manual mode, PTY/session control via `VmHandle`, and transcript/log capture; `repl_host_v1_4` remains transitional only |
 | 2026-04-07 | @codex | Replace the intermediate VM-backend injection with reviewed `Runtime` injection so `orchestrator.rs` now takes composed hypervisor/filesystem/network/control-plane backing rather than importing Motlie implementation modules directly |
 | 2026-04-07 | @codex | Complete the first usable `v1.4` lifecycle API: library-owned guestfs, SSH bridge, `VmHandle::exec(...)`, rootless harness validation, and child-handle-based shutdown/readiness instead of raw `/proc` polling |
@@ -91,6 +92,15 @@ Current `v1.4` implementation status:
   - `GuestPtySession::read_for(...)`
   - `GuestPtySession::read_until_contains(...)`
   - `GuestPtySession::transcript()`
+- `VmHandle` now exposes a first library-owned observability surface:
+  - `VmHandle::observability()`
+  - runtime/log/socket roots
+  - active filesystem/network/control-plane backing identity
+- `harness_v1_4` now supports first-pass machine-readable result output:
+  - `--result-json <path>`
+  - structured `smoke` scenario results
+  - named checks plus `VmObservability`
+  - PTY result capture is not yet a stable acceptance signal
 - `ChShellBackend` now tracks the spawned child process directly in its
   backend-specific module so readiness and shutdown use real process state
   rather than `/proc` zombie heuristics
@@ -245,6 +255,19 @@ The harness should collect and preserve enough observability for debugging:
 - generated guest artifacts
 - PTY transcript
 - harness-side stdout/stderr summaries
+
+The first concrete implementation slice for this is now:
+
+- library-owned `VmHandle::observability()`
+- harness `--result-json <path>` output for the `smoke` scenario
+
+The next observability/reporting steps remain:
+
+- PTY result hardening
+- run-bundle manifests
+- transcript/log collation
+- rendered terminal state / VTE capture
+- optional recording artifacts
 
 This is explicitly meant to replace the old split between:
 

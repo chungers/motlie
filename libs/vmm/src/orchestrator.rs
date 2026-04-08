@@ -12,6 +12,10 @@ use crate::artifacts::{
 use crate::backend::BackendHandle;
 use crate::network::{NetworkModeError, NetworkModes, validate_network_modes};
 use crate::network_alloc::{GuestNetAllocator, GuestNetAllocatorError, GuestNetAssignment};
+use crate::observability::{
+    ControlPlaneObservability, FilesystemObservability, NetworkObservability, VmObservability,
+    VmRuntimePaths as VmRuntimePathsView,
+};
 use crate::runtime::{
     ControlPlaneHandle, FilesystemHandle, NetworkHandle, Runtime, RuntimeError, SharedRuntime,
 };
@@ -28,7 +32,9 @@ pub struct PrepareRequest {
 #[derive(Debug, Clone)]
 pub struct PreparedGuest {
     pub guest: GuestSpec,
+    pub namespace: RuntimeNamespace,
     pub runtime_paths: GuestRuntimePaths,
+    pub guest_socket_path: PathBuf,
     pub net_assignment: GuestNetAssignment,
     pub cloud_init: CloudInitArtifacts,
     pub launch_script: String,
@@ -39,7 +45,9 @@ pub struct PreparedGuest {
 pub struct VmHandle {
     pub guest_id: String,
     pub pid: Option<u32>,
+    namespace: RuntimeNamespace,
     pub runtime_paths: GuestRuntimePaths,
+    guest_socket_path: PathBuf,
     pub net_assignment: GuestNetAssignment,
     runtime: SharedRuntime,
     backend_handle: BackendHandle,
@@ -128,6 +136,7 @@ pub fn prepare(
     validate_network_modes(&req.network_modes)?;
 
     let runtime_paths = GuestRuntimePaths::for_guest(&req.namespace, &req.guest.guest_id)?;
+    let guest_socket_path = PathBuf::from(req.guest.socket_path.clone());
     let net_assignment = allocator.ensure(&req.guest.guest_id)?.clone();
     let cloud_init = render_cloud_init_artifacts(&req.guest)?;
     let launch_script = render_launch_script(&LaunchArtifactRenderConfig {
@@ -141,7 +150,9 @@ pub fn prepare(
 
     Ok(PreparedGuest {
         guest: req.guest,
+        namespace: req.namespace,
         runtime_paths,
+        guest_socket_path,
         net_assignment,
         cloud_init,
         launch_script,
@@ -177,7 +188,9 @@ pub async fn boot(
     Ok(VmHandle {
         guest_id: prepared.guest.guest_id.clone(),
         pid: backend_handle.pid(),
+        namespace: prepared.namespace,
         runtime_paths: prepared.runtime_paths,
+        guest_socket_path: prepared.guest_socket_path,
         net_assignment: prepared.net_assignment,
         runtime: Arc::clone(&services.runtime),
         backend_handle,
@@ -188,6 +201,63 @@ pub async fn boot(
 }
 
 impl VmHandle {
+    pub fn observability(&self) -> VmObservability {
+        VmObservability {
+            guest_id: self.guest_id.clone(),
+            pid: self.pid,
+            namespace_prefix: self.namespace.prefix.clone(),
+            temp_root: self.namespace.temp_root.clone(),
+            guest_socket_path: self.guest_socket_path.clone(),
+            runtime_paths: VmRuntimePathsView {
+                runtime_dir: self.runtime_paths.runtime_dir.clone(),
+                launch_dir: self.runtime_paths.launch_dir.clone(),
+                cloud_init_dir: self.runtime_paths.cloud_init_dir.clone(),
+                api_socket: self.runtime_paths.api_socket.clone(),
+                vnet_socket: self.runtime_paths.vnet_socket.clone(),
+                vsock_socket: self.runtime_paths.vsock_socket.clone(),
+                serial_log: self.runtime_paths.serial_log.clone(),
+                launch_log: self.runtime_paths.launch_log.clone(),
+            },
+            filesystem: match self.filesystem.as_ref() {
+                Some(filesystem) => FilesystemObservability {
+                    backing: filesystem.backing_name(),
+                    socket_path: filesystem.socket_path().map(Path::to_path_buf),
+                    mount_tags: filesystem.mount_tags(),
+                },
+                None => FilesystemObservability {
+                    backing: "none",
+                    socket_path: None,
+                    mount_tags: Vec::new(),
+                },
+            },
+            network: match self
+                .network
+                .lock()
+                .ok()
+                .and_then(|guard| guard.as_ref().map(|n| n.backing_name()))
+            {
+                Some(backing) => NetworkObservability {
+                    backing,
+                    socket_path: Some(self.runtime_paths.vnet_socket.clone()),
+                },
+                None => NetworkObservability {
+                    backing: "none",
+                    socket_path: None,
+                },
+            },
+            control_plane: match self.control_plane.as_ref() {
+                Some(control_plane) => ControlPlaneObservability {
+                    backing: control_plane.backing_name(),
+                    ssh_bridge_socket_path: control_plane.bridge_socket_path(),
+                },
+                None => ControlPlaneObservability {
+                    backing: "none",
+                    ssh_bridge_socket_path: None,
+                },
+            },
+        }
+    }
+
     pub async fn ready(&self, policy: &ReadinessPolicy) -> Result<(), OrchestratorError> {
         self.wait_for_path(
             &self.runtime_paths.api_socket,
@@ -380,6 +450,7 @@ mod tests {
         let handle = VmHandle {
             guest_id: "alice".to_string(),
             pid: None,
+            namespace: RuntimeNamespace::new("motlie-vmm-v14-test", tempdir.path()).unwrap(),
             runtime_paths: GuestRuntimePaths {
                 runtime_dir: tempdir.path().join("runtime"),
                 launch_dir: tempdir.path().join("launch"),
@@ -390,6 +461,7 @@ mod tests {
                 serial_log: tempdir.path().join("serial.log"),
                 launch_log: tempdir.path().join("launch.log"),
             },
+            guest_socket_path: tempdir.path().join("guest.vsock_5000"),
             net_assignment: allocator.ensure("alice").unwrap().clone(),
             runtime: Arc::new(Runtime {
                 hypervisor: HypervisorBacking::CloudHypervisorShell(

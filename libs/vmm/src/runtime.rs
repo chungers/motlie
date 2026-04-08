@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::backend::ch::shell::ChShellBackend;
@@ -131,6 +132,24 @@ impl FilesystemHandle {
             Self::MotlieVfs(handle) => Ok(handle.shutdown()?),
         }
     }
+
+    pub fn backing_name(&self) -> &'static str {
+        match self {
+            Self::MotlieVfs(_) => "motlie-vfs",
+        }
+    }
+
+    pub fn socket_path(&self) -> Option<&Path> {
+        match self {
+            Self::MotlieVfs(handle) => Some(handle.socket_path()),
+        }
+    }
+
+    pub fn mount_tags(&self) -> Vec<String> {
+        match self {
+            Self::MotlieVfs(handle) => handle.required_mount_tags().to_vec(),
+        }
+    }
 }
 
 impl NetworkBacking {
@@ -148,6 +167,12 @@ impl NetworkHandle {
     pub fn shutdown(&mut self) -> Result<(), RuntimeError> {
         match self {
             Self::MotlieVnet(handle) => Ok(handle.shutdown()?),
+        }
+    }
+
+    pub fn backing_name(&self) -> &'static str {
+        match self {
+            Self::MotlieVnet(_) => "motlie-vnet",
         }
     }
 }
@@ -192,6 +217,18 @@ impl ControlPlaneHandle {
     pub fn shutdown(&self) -> Result<(), RuntimeError> {
         match self {
             Self::MotlieSshProxy(handle) => Ok(handle.shutdown()?),
+        }
+    }
+
+    pub fn backing_name(&self) -> &'static str {
+        match self {
+            Self::MotlieSshProxy(_) => "motlie-ssh-proxy",
+        }
+    }
+
+    pub fn bridge_socket_path(&self) -> Option<PathBuf> {
+        match self {
+            Self::MotlieSshProxy(handle) => Some(handle.bridge_socket_path().to_path_buf()),
         }
     }
 }

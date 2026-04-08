@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
+use std::path::Path;
 
 use crate::ca::SshCa;
 use crate::orchestrator::PreparedGuest;
@@ -69,5 +70,9 @@ impl MotlieSshProxyHandle {
 
     pub fn shutdown(&self) -> Result<(), SshProxyError> {
         self.inner.shutdown()
+    }
+
+    pub fn bridge_socket_path(&self) -> &Path {
+        self.inner.uds_path()
     }
 }
