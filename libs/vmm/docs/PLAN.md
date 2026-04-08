@@ -252,10 +252,15 @@ Tasks:
   - [x] `handle.shutdown()`
   - [ ] machine-readable result output
 - [x] keep it rootless/userspace-only
-- [ ] make it the default substrate for building later `v1.4` phases
+- [x] make it the default substrate for building later `v1.4` phases
 - [x] add the first PTY/session-driven scenario under `examples/v1.4/harness/`
-- [ ] move ad-hoc/manual REPL use cases into the harness over the same
-      lifecycle and PTY APIs
+- [x] move the practical ad-hoc/manual `v1.4` shell workflow into
+      `harness_v1_4 shell` over the same lifecycle APIs
+- [x] save the standard multi-guest bring-up as
+      `examples/v1.4/setup-multiguest.harness`
+- [x] add expectation-driven harness smoke scripts for:
+  - [x] one multi-guest harness shell run
+  - [x] two concurrent harness instances
 - [ ] add transcript/log bundle capture so harness runs preserve enough state
       for debugging subtle PTY, VFS, and vnet regressions
 
@@ -264,6 +269,8 @@ Acceptance:
 - the harness can boot, exec, and shut down a guest without depending on prompt
   parsing or human-oriented output
 - the harness remains the proving ground for the full Motlie-backed path
+- multi-guest scripted validation runs through the harness rather than the old
+  standalone `repl_host_v1_4`
 
 ## Phase 6: Embedded Image / Union Binary Prototype
 
@@ -329,20 +336,20 @@ Acceptance:
 ## Phase 8: Validation and Agent Harness Mode
 
 Goal:
-- provide a runnable, non-interactive harness for automation
+- broaden the harness from smoke driver to scenario/agent driver
 
 Tasks:
 - [ ] add `libs/vmm/src/validation.rs`
 - [ ] turn current smoke tests into typed validation profiles
 - [ ] add structured pass/fail output
-- [ ] decide whether the stable harness is:
-  - [ ] a new binary
-  - [ ] or a non-interactive mode in `repl_host_v1_3`
+- [x] decide that the stable harness is the `examples/v1.4/harness` binary,
+      not a mode bolted onto the old REPL
 - [ ] ensure it supports:
-  - [ ] launch-and-wait
+  - [x] boot-and-wait through `boot` + `handle.ready(...)`
   - [ ] exec
   - [ ] validate
   - [ ] shutdown-and-wait
+  - [ ] PTY/send/expect script steps
 
 Acceptance:
 - an agent can drive the harness without depending on the REPL prompt

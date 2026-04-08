@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -15,64 +14,30 @@ use motlie_vmm::orchestrator::{
 use motlie_vmm::runtime::{
     ControlPlaneBacking, FilesystemBacking, HypervisorBacking, NetworkBacking, Runtime,
 };
-use motlie_vmm::spec::{
-    BootArtifacts, GuestMountSpec, GuestResources, GuestSpec, GuestSshAccess, GuestStorage,
-    GuestUser, RuntimeNamespace, SoftwareProfile,
-};
 use motlie_vmm::ssh::{self, ExecOutput, SshProxyConfig, new_guest_registry};
 use tokio::sync::mpsc;
 
-type DynError = Box<dyn std::error::Error + Send + Sync>;
+use crate::{DynError, HarnessInstance, demo_guest, ensure_file_exists, print_instance_details, seed_host_mounts};
 
-struct ReplInstance {
-    namespace: RuntimeNamespace,
-    demo_root: PathBuf,
-    socket_root: PathBuf,
-    proxy_port: u16,
-}
-
-#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
-async fn main() -> Result<(), DynError> {
-    let mut args = std::env::args().skip(1);
-    let mut root_override: Option<PathBuf> = None;
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--root" => {
-                let value = args
-                    .next()
-                    .ok_or_else(|| "--root requires a path".to_string())?;
-                root_override = Some(PathBuf::from(value));
-            }
-            "--help" | "-h" => {
-                print_usage();
-                return Ok(());
-            }
-            other if other.starts_with("--root=") => {
-                root_override = Some(PathBuf::from(other.trim_start_matches("--root=")));
-            }
-            other => return Err(format!("unknown option: {other}").into()),
-        }
-    }
-
-    let base_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/v1.4");
-    let artifacts_dir = base_dir.join("artifacts/base");
+pub async fn run_shell(
+    base_dir: &Path,
+    artifacts_dir: &Path,
+    instance: &HarnessInstance,
+) -> Result<(), DynError> {
     ensure_file_exists(&artifacts_dir.join("rootfs.squashfs"))?;
     ensure_file_exists(&artifacts_dir.join("Image"))?;
-
-    let root_dir = root_override.unwrap_or_else(RuntimeNamespace::root_from_env_or_temp);
-    let instance = new_repl_instance(&root_dir)?;
     std::fs::create_dir_all(&instance.socket_root)?;
 
-    let mut allocator = GuestNetAllocator::new(GuestNetAllocatorConfig {
-        socket_dir: instance.socket_root.clone(),
-        ..GuestNetAllocatorConfig::default()
-    });
     let ca = Arc::new(SshCa::new()?);
     let guest_registry = new_guest_registry();
     let proxy_config = SshProxyConfig {
-        listen: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), instance.proxy_port),
+        listen: std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            instance.proxy_port,
+        ),
     };
     tokio::spawn(ssh::run_proxy(proxy_config.clone(), Arc::clone(&guest_registry)));
+    print_instance_details(instance, &proxy_config);
 
     let runtime = Arc::new(Runtime {
         hypervisor: HypervisorBacking::CloudHypervisorShell(
@@ -92,23 +57,26 @@ async fn main() -> Result<(), DynError> {
         ),
     });
 
+    let mut allocator = GuestNetAllocator::new(GuestNetAllocatorConfig {
+        socket_dir: instance.socket_root.clone(),
+        ..GuestNetAllocatorConfig::default()
+    });
     let mut handles: HashMap<String, VmHandle> = HashMap::new();
     let mut stdout = io::stdout();
 
-    println!("=== motlie-vmm repl_host_v1_4 ===");
-    println!("Thin admin REPL over the extracted vmm lifecycle API");
-    println!("Instance: {}", instance.namespace.prefix);
-    println!("SSH proxy: listening on 127.0.0.1:{}", proxy_config.listen.port());
-    println!("Commands: help | boot <guest> | ready <guest> | exec <guest> <cmd> | validate <guest> | shutdown <guest> | status | guests | where [guest] | quit");
+    println!("=== motlie-vmm harness shell ===");
+    println!("Harness interactive/manual mode over the extracted vmm lifecycle API");
+    println!(
+        "Commands: help | boot <guest> | ready <guest> | exec <guest> <cmd> | validate <guest> | shutdown <guest> | status | guests | where [guest] | quit"
+    );
 
     let mut lines = spawn_stdin_reader();
-
     print_prompt(&mut stdout)?;
     while let Some(line_result) = lines.recv().await {
         let line = line_result?;
         let trimmed = line.trim();
 
-        if trimmed.is_empty() {
+        if trimmed.is_empty() || trimmed.starts_with('#') {
             print_prompt(&mut stdout)?;
             continue;
         }
@@ -120,26 +88,12 @@ async fn main() -> Result<(), DynError> {
             print_status(&handles);
             Ok(())
         } else if trimmed == "where" {
-            print_where(
-                &instance.namespace,
-                &instance.demo_root,
-                &instance.socket_root,
-                &proxy_config,
-                None,
-                &handles,
-            );
+            print_where(instance, &proxy_config, None, &handles);
             Ok(())
         } else if let Some(rest) = trimmed.strip_prefix("where ") {
             let guest_id = rest.trim();
             let guest = (!guest_id.is_empty()).then_some(guest_id);
-            print_where(
-                &instance.namespace,
-                &instance.demo_root,
-                &instance.socket_root,
-                &proxy_config,
-                guest,
-                &handles,
-            );
+            print_where(instance, &proxy_config, guest, &handles);
             Ok(())
         } else if trimmed == "quit" || trimmed == "exit" {
             break;
@@ -150,11 +104,9 @@ async fn main() -> Result<(), DynError> {
             } else {
                 boot_guest(
                     guest_id,
-                    &artifacts_dir,
-                    &instance.demo_root,
-                    &base_dir,
-                    &instance.namespace,
-                    &proxy_config,
+                    artifacts_dir,
+                    instance,
+                    base_dir,
                     &ca,
                     &runtime,
                     &mut allocator,
@@ -210,7 +162,7 @@ fn print_help() {
     println!("shutdown <guest>         stop a guest");
     println!("status | guests          show active guests");
     println!("where [guest]            show current runtime roots and guest artifact paths");
-    println!("quit                     exit the REPL");
+    println!("quit                     exit the harness shell");
 }
 
 fn print_status(handles: &HashMap<String, VmHandle>) {
@@ -232,17 +184,15 @@ fn print_status(handles: &HashMap<String, VmHandle>) {
 }
 
 fn print_where(
-    namespace: &RuntimeNamespace,
-    demo_root: &Path,
-    socket_root: &Path,
+    instance: &HarnessInstance,
     proxy_config: &SshProxyConfig,
     guest_id: Option<&str>,
     handles: &HashMap<String, VmHandle>,
 ) {
-    println!("namespace={}", namespace.prefix);
-    println!("temp_root={}", namespace.temp_root.display());
-    println!("demo_root={}", demo_root.display());
-    println!("socket_root={}", socket_root.display());
+    println!("namespace={}", instance.namespace.prefix);
+    println!("temp_root={}", instance.namespace.temp_root.display());
+    println!("demo_root={}", instance.demo_root.display());
+    println!("socket_root={}", instance.socket_root.display());
     println!("proxy=ssh://localhost:{}", proxy_config.listen.port());
 
     match guest_id {
@@ -251,11 +201,11 @@ fn print_where(
                 println!("guest '{guest_id}' is not currently booted");
                 return;
             };
-            print_guest_where(guest_id, demo_root, handle);
+            print_guest_where(guest_id, &instance.demo_root, handle);
         }
         None => {
             for (guest_id, handle) in handles {
-                print_guest_where(guest_id, demo_root, handle);
+                print_guest_where(guest_id, &instance.demo_root, handle);
             }
         }
     }
@@ -286,7 +236,7 @@ fn print_guest_where(guest_id: &str, demo_root: &Path, handle: &VmHandle) {
 }
 
 fn print_prompt(stdout: &mut io::Stdout) -> Result<(), DynError> {
-    print!("v14> ");
+    print!("v14-harness> ");
     stdout.flush()?;
     Ok(())
 }
@@ -294,10 +244,8 @@ fn print_prompt(stdout: &mut io::Stdout) -> Result<(), DynError> {
 async fn boot_guest(
     guest_id: &str,
     artifacts_dir: &Path,
-    demo_root: &Path,
+    instance: &HarnessInstance,
     base_dir: &Path,
-    namespace: &RuntimeNamespace,
-    proxy_config: &SshProxyConfig,
     ca: &Arc<SshCa>,
     runtime: &Arc<Runtime>,
     allocator: &mut GuestNetAllocator,
@@ -307,13 +255,13 @@ async fn boot_guest(
         return Err(format!("guest '{guest_id}' already booted").into());
     }
 
-    let guest = demo_guest(guest_id, artifacts_dir, demo_root, namespace);
+    let guest = demo_guest(guest_id, artifacts_dir, &instance.demo_root, &instance.namespace);
     seed_host_mounts(&guest)?;
 
     let prepared = prepare(
         PrepareRequest {
             guest,
-            namespace: namespace.clone(),
+            namespace: instance.namespace.clone(),
             network_modes: NetworkModes {
                 admin: AdminNetMode::None,
                 egress: EgressNetMode::VhostUser,
@@ -338,7 +286,7 @@ async fn boot_guest(
         guest_id,
         handle.pid,
         handle.runtime_paths.api_socket.display(),
-        proxy_config.listen.port(),
+        instance.proxy_port,
     );
     handles.insert(guest_id.to_string(), handle);
     Ok(())
@@ -429,38 +377,30 @@ async fn validate_guest(
         ),
     ];
 
-    println!("=== validate {guest_id} ===");
     let mut passed = 0usize;
     let mut failed = 0usize;
-
-    for (label, command, needle, timeout) in checks {
-        match handle.exec(&command, timeout).await {
-            Ok(output) if output.exit_code == 0 && output.stdout.contains(&needle) => {
-                println!("  PASS: {label}");
-                passed += 1;
-            }
-            Ok(output) => {
-                println!(
-                    "  FAIL: {} (exit={} stdout={} stderr={})",
-                    label,
-                    output.exit_code,
-                    output.stdout.trim(),
-                    output.stderr.trim()
-                );
-                failed += 1;
-            }
-            Err(err) => {
-                println!("  FAIL: {} ({})", label, err);
-                failed += 1;
-            }
+    for (label, cmd, needle, timeout) in checks {
+        let output = handle.exec(&cmd, timeout).await?;
+        if output.exit_code == 0 && output.stdout.contains(&needle) {
+            println!("ok: {label}");
+            passed += 1;
+        } else {
+            println!(
+                "fail: {} exit={} stdout={} stderr={}",
+                label,
+                output.exit_code,
+                output.stdout.trim(),
+                output.stderr.trim()
+            );
+            failed += 1;
         }
     }
 
-    println!("=== {} passed, {} failed ===", passed, failed);
+    println!("validation: {} passed, {} failed", passed, failed);
     if failed == 0 {
         Ok(())
     } else {
-        Err(format!("validation failed for guest '{guest_id}'").into())
+        Err(format!("guest '{guest_id}' validation failed").into())
     }
 }
 
@@ -478,179 +418,4 @@ fn print_exec_output(output: &ExecOutput) {
         }
     }
     println!("exit={}", output.exit_code);
-}
-
-fn ensure_file_exists(path: &Path) -> Result<(), DynError> {
-    if path.exists() {
-        Ok(())
-    } else {
-        Err(format!("required artifact missing: {}", path.display()).into())
-    }
-}
-
-fn print_usage() {
-    println!("usage: repl_host_v1_4 [--root <dir>]");
-}
-
-fn new_repl_instance(root_dir: &Path) -> Result<ReplInstance, DynError> {
-    let namespace = RuntimeNamespace::for_process("motlie-vmm-v14", "r", root_dir)?;
-    let demo_root = namespace
-        .temp_root
-        .join(format!("{}-demo", namespace.prefix));
-    let socket_root = namespace
-        .temp_root
-        .join(format!("{}-sockets", namespace.prefix));
-    let proxy_port = 42000 + port_offset(&namespace.prefix);
-    Ok(ReplInstance {
-        namespace,
-        demo_root,
-        socket_root,
-        proxy_port,
-    })
-}
-
-fn demo_guest(
-    guest_id: &str,
-    artifacts_dir: &Path,
-    demo_root: &Path,
-    namespace: &RuntimeNamespace,
-) -> GuestSpec {
-    let (uid, gid) = demo_guest_ids(guest_id);
-    GuestSpec {
-        guest_id: guest_id.to_string(),
-        hostname: format!("motlie-{guest_id}"),
-        socket_path: namespace
-            .guest_vsock_port_socket(guest_id, 5000)
-            .expect("guest_id is validated by the repl")
-            .display()
-            .to_string(),
-        user: GuestUser {
-            name: guest_id.to_string(),
-            uid,
-            gid,
-            home: PathBuf::from(format!("/home/{guest_id}")),
-        },
-        ssh: GuestSshAccess {
-            principal: guest_id.to_string(),
-            login_user: guest_id.to_string(),
-        },
-        mounts: vec![
-            GuestMountSpec {
-                tag: format!("{guest_id}-home"),
-                guest_path: Some(PathBuf::from(format!("/home/{guest_id}"))),
-                host_path: demo_root.join(format!("{guest_id}-home")),
-            },
-            GuestMountSpec {
-                tag: format!("{guest_id}-workspace"),
-                guest_path: Some(PathBuf::from("/workspace")),
-                host_path: demo_root.join(format!("{guest_id}-workspace")),
-            },
-            GuestMountSpec {
-                tag: format!("{guest_id}-agent-state"),
-                guest_path: Some(PathBuf::from("/agent-state")),
-                host_path: demo_root.join(format!("{guest_id}-agent-state")),
-            },
-        ],
-        software: SoftwareProfile {
-            packages: vec!["vim".to_string()],
-        },
-        resources: GuestResources::default(),
-        storage: GuestStorage::default(),
-        boot: BootArtifacts {
-            kernel: artifacts_dir.join("Image"),
-            initramfs: None,
-            firmware: None,
-            cmdline: None,
-        },
-    }
-}
-
-fn seed_host_mounts(guest: &GuestSpec) -> Result<(), DynError> {
-    for mount in &guest.mounts {
-        std::fs::create_dir_all(&mount.host_path)?;
-    }
-    let home = &guest.mounts[0].host_path;
-    let ssh_dir = home.join(".ssh");
-    std::fs::create_dir_all(home.join(".config"))?;
-    std::fs::create_dir_all(&ssh_dir)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(0o700))?;
-    }
-    write_host_file_if_missing(
-        &ssh_dir.join("authorized_keys"),
-        &format!(
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample {}@dev\n",
-            guest.guest_id
-        ),
-        0o600,
-    )?;
-    write_host_file_if_missing(
-        &ssh_dir.join("config"),
-        "Host github.com\n  User git\n",
-        0o644,
-    )?;
-    write_host_file_if_missing(
-        &home.join(".env"),
-        &format!("{}_API_KEY=demo-{}\n", guest.guest_id.to_uppercase(), guest.guest_id),
-        0o644,
-    )?;
-    write_host_file_if_missing(&home.join(".bashrc"), "# motlie v1.4 demo bashrc\n", 0o644)?;
-    write_host_file_if_missing(
-        &home.join(".profile"),
-        "if [ -f \"$HOME/.bashrc\" ]; then\n  . \"$HOME/.bashrc\"\nfi\n",
-        0o644,
-    )?;
-    write_host_file_if_missing(
-        &guest.mounts[2].host_path.join("README.md"),
-        "Dedicated read-write agent-state layer for Codex and Claude lives here.\n",
-        0o644,
-    )?;
-    std::fs::write(
-        guest.mounts[1].host_path.join("README.md"),
-        format!(
-            "{} workspace mounted from the host.\n",
-            guest_display_name(&guest.guest_id)
-        ),
-    )?;
-    Ok(())
-}
-
-fn demo_guest_ids(guest_id: &str) -> (u32, u32) {
-    match guest_id {
-        "alice" => (1000, 1000),
-        "bob" => (1001, 1001),
-        _ => (1000, 1000),
-    }
-}
-
-fn port_offset(seed: &str) -> u16 {
-    seed.bytes().fold(0u16, |acc, byte| {
-        acc.wrapping_mul(31).wrapping_add(u16::from(byte))
-    }) % 10_000
-}
-
-fn guest_display_name(guest_id: &str) -> String {
-    let mut chars = guest_id.chars();
-    match chars.next() {
-        Some(first) => {
-            let mut out = first.to_uppercase().collect::<String>();
-            out.push_str(chars.as_str());
-            out
-        }
-        None => String::new(),
-    }
-}
-
-fn write_host_file_if_missing(path: &Path, content: &str, mode: u32) -> Result<(), DynError> {
-    if !path.exists() {
-        std::fs::write(path, content)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
-        }
-    }
-    Ok(())
 }

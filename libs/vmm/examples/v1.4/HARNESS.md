@@ -5,8 +5,8 @@ This file is the repeatable validation guide for `examples/v1.4`.
 Use it for two different purposes:
 
 - fast non-interactive regression checking through the programmatic harness
-- higher-fidelity REPL and real interactive SSH testing through the migrated
-  `repl_host_v1_4`
+- higher-fidelity interactive/manual testing through `harness_v1_4 shell`
+- transitional compatibility checks through the migrated `repl_host_v1_4`
 - future harness-first work:
   - named scenarios
   - interactive/manual operation
@@ -57,13 +57,31 @@ Explicit PTY scenario:
 ./target/debug/examples/harness_v1_4 pty
 ```
 
-Each harness run now allocates its own per-process namespace and demo root.
-At startup it prints where to look, for example:
+Interactive/manual harness mode:
+
+```bash
+./target/debug/examples/harness_v1_4 shell
+```
+
+Run under an explicit host root:
+
+```bash
+./target/debug/examples/harness_v1_4 shell --root /var/tmp/motlie-v14
+```
+
+or:
+
+```bash
+MOTLIE_VMM_ROOT=/var/tmp/motlie-v14 ./target/debug/examples/harness_v1_4 shell
+```
+
+Each harness run now allocates its own per-process namespace and demo root
+under the selected host root. At startup it prints where to look, for example:
 
 ```text
 v1.4 harness instance: motlie-vmm-v14-h12345
-  demo_root=/tmp/motlie-vmm-v14-h12345-demo
-  socket_root=/tmp/motlie-vmm-v14-h12345-sockets
+  demo_root=/var/tmp/motlie-v14/motlie-vmm-v14-h12345-demo
+  socket_root=/var/tmp/motlie-v14/motlie-vmm-v14-h12345-sockets
   proxy=ssh://localhost:34345
 ```
 
@@ -85,7 +103,7 @@ What it proves today:
 Current limitation:
 
 - `harness_v1_4` is single-guest today
-- use the REPL path below for multi-guest validation
+- use the harness shell or REPL path below for multi-guest validation
 - the harness does not yet expose the full ad-hoc interactive/manual shell mode
   that should eventually replace the standalone `repl_host_v1_4`
 
@@ -101,18 +119,21 @@ or:
 v1.4 harness pty passed: guest=alice ...
 ```
 
-## Path 2: Automated REPL Smoke
+## Path 2: Automated Harness Shell Smoke
 
-This is the main multi-guest regression check.
+This is the main multi-guest regression check and the preferred replacement for
+the old standalone REPL-driven smoke.
 
 Run:
 
 ```bash
-./libs/vmm/examples/v1.4/integration/repl-smoke.sh
+./libs/vmm/examples/v1.4/integration/harness-shell-smoke.sh
 ```
 
 What it validates:
 
+- drives `harness_v1_4 shell`
+- replays [`setup-multiguest.harness`](./setup-multiguest.harness)
 - boots `alice`
 - boots `bob`
 - runs `validate alice`
@@ -131,16 +152,86 @@ What it validates:
 Expected success line:
 
 ```text
-v1.4 repl smoke passed
+v1.4 harness shell smoke passed
 ```
+
+Two-harness isolation smoke:
+
+```bash
+./libs/vmm/examples/v1.4/integration/harness-isolation-smoke.sh
+```
+
+This proves two separate harness shells can run concurrently, both boot
+`alice`, and not collide on namespace, sockets, demo roots, or proxy ports.
 
 If this smoke fails, inspect:
 
 ```bash
-tail -n 200 /tmp/motlie-vmm-v14-repl-smoke.log
+tail -n 200 /tmp/motlie-vmm-v14-harness-shell-smoke.log
 ```
 
-## Path 3: Live REPL
+Saved command script:
+
+```bash
+cat ./libs/vmm/examples/v1.4/setup-multiguest.harness
+```
+
+That saved script is the command sequence:
+
+- `where`
+- `boot alice`
+- `where alice`
+- `boot bob`
+- `where bob`
+- `status`
+- `validate alice`
+- `validate bob`
+
+The expectation layer lives in:
+
+- [`integration/harness-shell-smoke.sh`](./integration/harness-shell-smoke.sh)
+- [`integration/harness-isolation-smoke.sh`](./integration/harness-isolation-smoke.sh)
+
+## Path 3: Harness Shell
+
+This is the preferred ad-hoc/manual control surface going forward.
+
+Run:
+
+```bash
+./target/debug/examples/harness_v1_4 shell
+```
+
+Optional host root override:
+
+```bash
+./target/debug/examples/harness_v1_4 shell --root /var/tmp/motlie-v14
+```
+
+Core commands:
+
+```text
+boot alice
+boot bob
+status
+where
+where alice
+validate alice
+validate bob
+exec alice /bin/uname -s
+exec bob /bin/uname -s
+shutdown bob
+shutdown alice
+quit
+```
+
+Notes:
+
+- harness shell uses the same `libs/vmm` lifecycle API as the smoke scenarios
+- harness shell allocates its own namespace/demo root/proxy port per run
+- use `where` to print the current roots, sockets, and per-guest logs
+
+## Path 4: Live REPL
 
 Build:
 
@@ -181,19 +272,20 @@ Notes:
 - `where` prints the current namespace/demo root/socket root/proxy, and
   `where <guest>` prints the per-guest runtime and log paths
 
-## Path 4: Manual Interactive SSH
+## Path 5: Manual Interactive SSH
 
 This is the path that caught the earlier smoke gap. Use it when validating
 login UX, MOTD, and the real shell transport.
 
-After booting guests in the REPL:
+After booting guests in the harness shell or REPL, use the printed proxy port.
+For example, if `where` shows `proxy=ssh://localhost:38306`:
 
 ```bash
-ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2224 alice@localhost
+ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 38306 alice@localhost
 ```
 
 ```bash
-ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2224 bob@localhost
+ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 38306 bob@localhost
 ```
 
 Inside each guest, run:
@@ -236,12 +328,12 @@ rerun at least:
 1. `cargo test -p motlie-vmm --lib`
 2. `cargo test -p motlie-vnet`
 3. `./target/debug/examples/harness_v1_4`
-4. `./libs/vmm/examples/v1.4/integration/repl-smoke.sh`
+4. `./libs/vmm/examples/v1.4/integration/harness-shell-smoke.sh`
 
 And when changing any login/banner/proxy behavior, also do one live manual
 interactive check:
 
-1. start `repl_host_v1_4`
+1. start `harness_v1_4 shell`
 2. `boot alice`
 3. `boot bob`
 4. `ssh -p 2224 alice@localhost`
@@ -252,7 +344,7 @@ interactive check:
 If `alice` works and `bob` fails:
 
 - check REPL log:
-  - `/tmp/motlie-vmm-v14-repl-smoke.log`
+  - `/tmp/motlie-vmm-v14-harness-shell-smoke.log`
 - check launch logs:
   - `/tmp/motlie-vmm-v14-launch/alice/launch.log`
   - `/tmp/motlie-vmm-v14-launch/bob/launch.log`
