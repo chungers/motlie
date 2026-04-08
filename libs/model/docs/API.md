@@ -12,6 +12,7 @@
 | 2026-04-08 | @codex-researcher: Added the bundle-level embedding metadata contract (`Embedding`, `EmbeddingSpec`, distance, normalization) so curated embedding bundles can expose vector semantics before runtime startup. | Overview, Core Types, Bundle API Sketch |
 | 2026-04-08 | @codex-researcher: Added the end-to-end embedding bundle contract flow and the explicit bridge to `motlie_db::vector::EmbeddingSpec` / `Distance` so implementers can wire curated embedding bundles into the vector subsystem without guessing. | Overview, Bundle API Sketch, Notes |
 | 2026-04-08 | @codex-researcher: Added explicit notes on the planned additive chat/multimodal extensions so the current API doc is honest about what is implemented today versus what is already queued for the first chat-capable bundles. | Overview, Core Types, Notes |
+| 2026-04-08 | @codex-researcher: Clarified the implemented loaded-descriptor and backend-error contract after PR 139 review. `LoadedBundleDescriptor` is an alias of `BundleMetadata`, `ModelError` now distinguishes backend initialization and execution failures, and `ArtifactPolicy::LocalOnly` is documented as consuming a curated bundle-resolved local model path. | Overview, Core Types, Bundle API Sketch, Notes |
 
 This document sketches the concrete contract shapes currently introduced in `libs/model`. It covers both the core bundle lifecycle/capability contracts and the lightweight `model::eval` vocabulary that higher-level harness tooling should build on.
 
@@ -23,7 +24,7 @@ The first concrete `libs/model` API now includes:
 
 - stable `BundleId`
 - `CapabilityKind`, `ContentKind`, `InteractionStyle`, `CapabilityDescriptor`, and `Capabilities`
-- `BundleMetadata`, `LoadedBundleDescriptor`, and `StartOptions`
+- `BundleMetadata` (with `LoadedBundleDescriptor` as the loaded-instance alias) and `StartOptions`
 - `ArtifactPolicy`
 - `ModelError`
 - `EmbeddingDistance`, `EmbeddingNormalization`, `EmbeddingSpec`, and `Embedding`
@@ -43,6 +44,7 @@ For the current vertical slice, this contract is intended to support an end-to-e
 1. a curated embedding bundle defines bundle metadata and an `EmbeddingSpec`
 2. `libs/models` exposes that bundle through a direct module and a curated selector enum
 3. the caller starts the bundle with `ArtifactPolicy::LocalOnly`
+   after `libs/models` has resolved any curated cache layout into a concrete local model path for the backend
 4. the loaded handle exposes `EmbeddingModel`
 5. downstream crates such as `motlie_db::vector` consume the bundle-level `EmbeddingSpec` to configure vector storage and search semantics consistently
 
@@ -93,6 +95,14 @@ Primary traits:
 - `EmbeddingModel`
 
 `ModelError` is a typed library error. Binaries and examples may wrap it with `anyhow`, but libraries should return it directly from bundle lifecycle and capability APIs.
+
+The currently implemented error variants are:
+
+- `Internal`
+- `InvalidConfiguration`
+- `BackendInitialization`
+- `BackendExecution`
+- `UnsupportedCapability`
 
 ## Bundle API Sketch
 

@@ -14,12 +14,12 @@ pub mod embeddings;
 use hf_hub::api::sync::ApiBuilder;
 use thiserror::Error;
 
+pub use embeddings::EmbeddingModels;
 pub use motlie_model::eval::EvalTrack;
 pub use motlie_model::{
     BundleId, Capabilities, CapabilityDescriptor, CapabilityKind, ContentKind, InteractionStyle,
     ModelBundle,
 };
-pub use embeddings::EmbeddingModels;
 
 type BoxError = Box<dyn StdError + Send + Sync + 'static>;
 
@@ -130,9 +130,11 @@ pub fn download_bundle_artifacts_with_options(
     artifact_root: &Path,
     options: &ArtifactDownloadOptions,
 ) -> Result<ArtifactDownloadSummary> {
-    let descriptor = catalog.bundle(bundle_id).ok_or_else(|| ModelsError::UnknownBundle {
-        bundle_id: bundle_id.clone(),
-    })?;
+    let descriptor = catalog
+        .bundle(bundle_id)
+        .ok_or_else(|| ModelsError::UnknownBundle {
+            bundle_id: bundle_id.clone(),
+        })?;
     let artifacts = descriptor
         .artifacts
         .as_ref()
@@ -142,9 +144,11 @@ pub fn download_bundle_artifacts_with_options(
 
     match &artifacts.source {
         ArtifactSource::HuggingFace { repo } => {
-            std::fs::create_dir_all(artifact_root).map_err(|source| ModelsError::CreateArtifactRoot {
-                path: artifact_root.to_path_buf(),
-                source,
+            std::fs::create_dir_all(artifact_root).map_err(|source| {
+                ModelsError::CreateArtifactRoot {
+                    path: artifact_root.to_path_buf(),
+                    source,
+                }
             })?;
 
             let api = ApiBuilder::new()
@@ -155,10 +159,12 @@ pub fn download_bundle_artifacts_with_options(
                     source: Box::new(source),
                 })?;
             let repo_api = api.model((*repo).to_string());
-            let info = repo_api.info().map_err(|source| ModelsError::InspectModelRepo {
-                repo,
-                source: Box::new(source),
-            })?;
+            let info = repo_api
+                .info()
+                .map_err(|source| ModelsError::InspectModelRepo {
+                    repo,
+                    source: Box::new(source),
+                })?;
 
             let mut downloaded = Vec::new();
             for sibling in info.siblings {
@@ -257,15 +263,9 @@ pub enum ModelSelector {
 }
 
 impl ModelSelector {
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> String {
         match self {
-            Self::Embedding(model) => {
-                if model.as_str() == embeddings::GOOGLE_GEMMA_300M_SELECTOR {
-                    "embedding:google/embeddinggemma_300m"
-                } else {
-                    unreachable!("no model selectors are enabled in this build")
-                }
-            }
+            Self::Embedding(model) => format!("embedding:{}", model.as_str()),
         }
     }
 
@@ -290,7 +290,7 @@ impl ModelSelector {
 
 impl fmt::Display for ModelSelector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.as_str().fmt(f)
+        f.write_str(&self.as_str())
     }
 }
 
@@ -435,7 +435,8 @@ mod tests {
         async fn start(
             &self,
             _options: motlie_model::StartOptions,
-        ) -> std::result::Result<Box<dyn motlie_model::BundleHandle>, motlie_model::ModelError> {
+        ) -> std::result::Result<Box<dyn motlie_model::BundleHandle>, motlie_model::ModelError>
+        {
             Err(motlie_model::ModelError::InvalidConfiguration(
                 "stub bundle is not startable".into(),
             ))
@@ -467,17 +468,19 @@ mod tests {
         let first_for_factory = first.clone();
         let second_for_factory = second.clone();
 
-        assert!(catalog
-            .register(first.clone(), move || {
-                Box::new(StubBundle {
-                    metadata: BundleMetadata {
-                        id: first_for_factory.id.clone(),
-                        display_name: first_for_factory.display_name.clone(),
-                        capabilities: first_for_factory.capabilities.clone(),
-                    },
+        assert!(
+            catalog
+                .register(first.clone(), move || {
+                    Box::new(StubBundle {
+                        metadata: BundleMetadata {
+                            id: first_for_factory.id.clone(),
+                            display_name: first_for_factory.display_name.clone(),
+                            capabilities: first_for_factory.capabilities.clone(),
+                        },
+                    })
                 })
-            })
-            .is_none());
+                .is_none()
+        );
 
         let replaced = catalog.register(second.clone(), move || {
             Box::new(StubBundle {
@@ -505,16 +508,18 @@ mod tests {
 
         #[cfg(feature = "model-google-gemma-300m")]
         {
-        assert_eq!(catalog.len(), 1);
-        assert!(catalog.instantiate(&bundle_id).is_some());
-        assert!(catalog
-            .bundles_for_track(EvalTrack::Embeddings)
-            .any(|bundle| bundle.id == bundle_id));
+            assert_eq!(catalog.len(), 1);
+            assert!(catalog.instantiate(&bundle_id).is_some());
+            assert!(
+                catalog
+                    .bundles_for_track(EvalTrack::Embeddings)
+                    .any(|bundle| bundle.id == bundle_id)
+            );
 
-        let artifacts = catalog
-            .artifacts(&bundle_id)
-            .expect("default embedder should expose artifact control");
-        assert_eq!(artifacts.control_name, "embeddinggemma_300m");
+            let artifacts = catalog
+                .artifacts(&bundle_id)
+                .expect("default embedder should expose artifact control");
+            assert_eq!(artifacts.control_name, "embeddinggemma_300m");
         }
 
         #[cfg(not(feature = "model-google-gemma-300m"))]
@@ -529,12 +534,12 @@ mod tests {
     fn embedding_models_round_trip_string_selectors() {
         #[cfg(feature = "model-google-gemma-300m")]
         {
-        let model: EmbeddingModels = "google/embeddinggemma_300m"
-            .parse()
-            .expect("known embedding selector should parse");
+            let model: EmbeddingModels = "google/embeddinggemma_300m"
+                .parse()
+                .expect("known embedding selector should parse");
 
-        assert_eq!(model, EmbeddingModels::GoogleGemma300m);
-        assert_eq!(model.to_string(), "google/embeddinggemma_300m");
+            assert_eq!(model, EmbeddingModels::GoogleGemma300m);
+            assert_eq!(model.to_string(), "google/embeddinggemma_300m");
         }
     }
 
@@ -542,15 +547,15 @@ mod tests {
     fn model_selector_parses_embedding_prefix() {
         #[cfg(feature = "model-google-gemma-300m")]
         {
-        let selector: ModelSelector = "embedding:google/embeddinggemma_300m"
-            .parse()
-            .expect("known embedding model selector should parse");
+            let selector: ModelSelector = "embedding:google/embeddinggemma_300m"
+                .parse()
+                .expect("known embedding model selector should parse");
 
-        assert_eq!(
-            selector,
-            ModelSelector::Embedding(EmbeddingModels::GoogleGemma300m)
-        );
-        assert_eq!(selector.to_string(), "embedding:google/embeddinggemma_300m");
+            assert_eq!(
+                selector,
+                ModelSelector::Embedding(EmbeddingModels::GoogleGemma300m)
+            );
+            assert_eq!(selector.to_string(), "embedding:google/embeddinggemma_300m");
         }
     }
 

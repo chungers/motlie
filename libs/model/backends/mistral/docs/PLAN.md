@@ -9,7 +9,7 @@
 | 2026-04-07 | @codex-researcher | Updated the backend plan after investigating NaN embeddings. The slice now validates true `LocalOnly` startup from a local snapshot, requires the sentence-transformers module stack, and adds an env-gated finite-vector test. |
 | 2026-04-08 | @codex-researcher | Clarified the remaining backend TODOs after PR review. Real multi-input inference is now validated by the env-gated test; the suggested `spec.rs` / `handle.rs` file split remains an explicit cleanup follow-up rather than an implied completed task. | Phases 1, 4 |
 | 2026-04-08 | @codex-researcher | Moved the embedding loader choice into `MistralEmbeddingSpec` so the backend implementation is genuinely spec-driven rather than hardcoding `EmbeddingGemma` in the generic builder path. | Phase 2, Phase 3 |
-| 2026-04-08 | @codex-researcher | Moved model-specific local artifact requirements into `MistralEmbeddingSpec` so `LocalOnly` validation is parameterized by the curated spec rather than hardcoding EmbeddingGemma layout in the backend function body. | Phase 2, Phase 3 |
+| 2026-04-08 | @codex-researcher | Tightened the backend boundary after PR 139 review. Provider-specific local artifact validation moved back into the curated bundle layer, the backend crate dropped its direct `hf-hub` dependency, and `LocalOnly` startup now consumes a resolved local model path instead of reconstructing Hugging Face cache layout internally. | Phases 1, 3 |
 
 Derived from [../../docs/DESIGN.md](../../docs/DESIGN.md). This PLAN covers the generic `mistral` backend implementation work needed for the first embedding-only curated bundle.
 
@@ -37,7 +37,7 @@ Implement the first generic embedding path.
 ### 2.1 — Static backend-facing spec
 
 - [x] Finalize `MistralEmbeddingSpec` for:
-  `id`, `display_name`, `model_id`, embedding architecture, required local artifact list, and `Capabilities`.
+  `id`, `display_name`, `model_id`, embedding architecture, and `Capabilities`.
   DESIGN reference: `libs/model/docs/DESIGN.md` / `Bundle Contract`
 - [x] Provide a built-in constructor for `embeddinggemma_300m`.
   DESIGN reference: vertical slice target agreed during planning
@@ -65,7 +65,8 @@ The current placeholder embedder is only acceptable for contract validation. The
 
 ### 3.2 — Operational behavior
 
-- [x] Define how local model artifacts are located for the first slice.
+- [x] Define how the backend consumes local model artifacts for the first slice.
+- [x] Keep provider-specific cache-layout resolution and validation out of the generic backend crate.
 - [x] Define what happens when required weights are unavailable.
 - [x] Define whether the first slice assumes local sidecar assets only, or permits a preconfigured model path.
 

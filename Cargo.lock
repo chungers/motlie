@@ -4613,7 +4613,6 @@ name = "motlie-model-mistral"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "hf-hub 0.5.0",
  "mistralrs",
  "motlie-model",
  "tokio",

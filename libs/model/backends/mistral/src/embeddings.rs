@@ -1,8 +1,6 @@
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use async_trait::async_trait;
-use hf_hub::{Cache, Repo, RepoType};
 use mistralrs::core::EmbeddingLoaderType;
 use mistralrs::{EmbeddingModelBuilder, EmbeddingRequest, ModelDType};
 use motlie_model::{
@@ -32,7 +30,6 @@ pub struct MistralEmbeddingSpec {
     pub display_name: &'static str,
     pub model_id: &'static str,
     pub arch: MistralEmbeddingArch,
-    pub required_local_artifacts: &'static [&'static str],
     pub capabilities: Capabilities,
 }
 
@@ -43,14 +40,6 @@ impl MistralEmbeddingSpec {
             display_name: "EmbeddingGemma 300M",
             model_id: "google/embeddinggemma-300m",
             arch: MistralEmbeddingArch::EmbeddingGemma,
-            required_local_artifacts: &[
-                "modules.json",
-                "1_Pooling/config.json",
-                "2_Dense/config.json",
-                "2_Dense/model.safetensors",
-                "3_Dense/config.json",
-                "3_Dense/model.safetensors",
-            ],
             capabilities: Capabilities::embeddings_only(),
         }
     }
@@ -62,7 +51,6 @@ pub struct MistralEmbeddingBundle {
     metadata: BundleMetadata,
     arch: MistralEmbeddingArch,
     model_id: &'static str,
-    required_local_artifacts: &'static [&'static str],
 }
 
 impl MistralEmbeddingBundle {
@@ -75,7 +63,6 @@ impl MistralEmbeddingBundle {
             },
             arch: spec.arch,
             model_id: spec.model_id,
-            required_local_artifacts: spec.required_local_artifacts,
         }
     }
 }
@@ -95,13 +82,7 @@ impl ModelBundle for MistralEmbeddingBundle {
     }
 
     async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
-        let model = build_embedding_model(
-            self.model_id,
-            self.arch,
-            self.required_local_artifacts,
-            options,
-        )
-        .await?;
+        let model = build_embedding_model(self.model_id, self.arch, options).await?;
 
         Ok(Box::new(MistralEmbeddingHandle {
             descriptor: LoadedBundleDescriptor {
@@ -137,7 +118,11 @@ impl EmbeddingRuntime for MistralRuntime {
             .model
             .generate_embeddings(builder)
             .await
-            .map_err(|err| ModelError::Internal(err.to_string()))?;
+            .map_err(|err| ModelError::BackendExecution {
+                backend: "mistralrs",
+                operation: "generate_embeddings",
+                message: err.to_string(),
+            })?;
 
         Ok(EmbeddingResponse { vectors })
     }
@@ -187,21 +172,26 @@ impl EmbeddingModel for MistralEmbeddingHandle {
 async fn build_embedding_model(
     model_id: &str,
     arch: MistralEmbeddingArch,
-    required_local_artifacts: &[&str],
     options: StartOptions,
 ) -> Result<mistralrs::Model, ModelError> {
     let StartOptions {
         artifact_policy,
-        unpack_root: _,
+        unpack_root,
         max_concurrency,
     } = options;
+
+    if let Some(unpack_root) = unpack_root {
+        return Err(ModelError::InvalidConfiguration(format!(
+            "`mistralrs` embedding startup does not support `unpack_root` yet (got `{}`)",
+            unpack_root.display()
+        )));
+    }
 
     let mut model_target = model_id.to_owned();
     let mut hf_cache_root = None;
 
     if let Some(artifact_policy) = artifact_policy {
-        let configured =
-            configure_artifact_policy(model_id, required_local_artifacts, artifact_policy)?;
+        let configured = configure_artifact_policy(model_id, artifact_policy)?;
         model_target = configured.model_target;
         hf_cache_root = configured.hf_cache_root;
     }
@@ -223,7 +213,10 @@ async fn build_embedding_model(
     builder
         .build()
         .await
-        .map_err(|err| ModelError::Internal(err.to_string()))
+        .map_err(|err| ModelError::BackendInitialization {
+            backend: "mistralrs",
+            message: err.to_string(),
+        })
 }
 
 struct ConfiguredBuilder {
@@ -233,92 +226,18 @@ struct ConfiguredBuilder {
 
 fn configure_artifact_policy(
     model_id: &str,
-    required_local_artifacts: &[&str],
     policy: ArtifactPolicy,
 ) -> Result<ConfiguredBuilder, ModelError> {
     match policy {
         ArtifactPolicy::AllowFetch { root } => Ok(ConfiguredBuilder {
             model_target: model_id.to_owned(),
-            hf_cache_root: root.map(resolve_hf_cache_path),
+            hf_cache_root: root,
         }),
-        ArtifactPolicy::LocalOnly { root } => {
-            let local_model_path =
-                validate_local_artifacts(model_id, required_local_artifacts, &root)?;
-            Ok(ConfiguredBuilder {
-                model_target: local_model_path.display().to_string(),
-                hf_cache_root: None,
-            })
-        }
+        ArtifactPolicy::LocalOnly { root } => Ok(ConfiguredBuilder {
+            model_target: root.display().to_string(),
+            hf_cache_root: None,
+        }),
     }
-}
-
-fn validate_local_artifacts(
-    model_id: &str,
-    required_local_artifacts: &[&str],
-    root: &Path,
-) -> Result<PathBuf, ModelError> {
-    let repo = Cache::new(root.to_path_buf()).repo(Repo::new(model_id.to_owned(), RepoType::Model));
-
-    let config = repo.get("config.json").ok_or_else(|| {
-        ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` requires cached `config.json` for `{model_id}` under `{}`",
-            root.display()
-        ))
-    })?;
-
-    if repo.get("tokenizer.json").is_none() && repo.get("tokenizer.model").is_none() {
-        return Err(ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` requires cached tokenizer files for `{model_id}` under `{}`",
-            root.display()
-        )));
-    }
-
-    let snapshot_dir = config.parent().ok_or_else(|| {
-        ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` found invalid cache layout for `{model_id}` under `{}`",
-            root.display()
-        ))
-    })?;
-
-    let has_weights = fs::read_dir(snapshot_dir)
-        .map_err(|err| {
-            ModelError::InvalidConfiguration(format!(
-                "failed to inspect cached artifacts for `{model_id}` in `{}`: {err}",
-                snapshot_dir.display()
-            ))
-        })?
-        .filter_map(Result::ok)
-        .any(|entry| {
-            entry
-                .file_name()
-                .to_str()
-                .map(|name| {
-                    name.ends_with(".safetensors") || name.ends_with(".safetensors.index.json")
-                })
-                .unwrap_or(false)
-        });
-
-    if !has_weights {
-        return Err(ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` requires cached weight files for `{model_id}` under `{}`",
-            root.display()
-        )));
-    }
-
-    for required in required_local_artifacts {
-        if !snapshot_dir.join(required).exists() {
-            return Err(ModelError::InvalidConfiguration(format!(
-                "artifact policy `LocalOnly` requires cached `{required}` for `{model_id}` under `{}`",
-                root.display()
-            )));
-        }
-    }
-
-    Ok(snapshot_dir.to_path_buf())
-}
-
-fn resolve_hf_cache_path(root: PathBuf) -> PathBuf {
-    root
 }
 
 fn should_force_cpu() -> bool {
@@ -331,8 +250,8 @@ fn should_force_cpu() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
     use motlie_model::StartOptions;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     struct StubRuntime;
 
@@ -360,7 +279,6 @@ mod tests {
         assert_eq!(spec.display_name, "EmbeddingGemma 300M");
         assert_eq!(spec.model_id, "google/embeddinggemma-300m");
         assert_eq!(spec.arch, MistralEmbeddingArch::EmbeddingGemma);
-        assert!(spec.required_local_artifacts.contains(&"modules.json"));
         assert!(spec.capabilities.supports(CapabilityKind::Embeddings));
     }
 
@@ -396,60 +314,39 @@ mod tests {
     }
 
     #[test]
-    fn local_only_policy_rejects_missing_cache() {
+    fn local_only_policy_uses_resolved_local_model_path() {
         let root = unique_temp_dir();
-        fs::create_dir_all(&root).expect("temp root should be creatable");
-
-        let err = configure_artifact_policy(
+        let configured = configure_artifact_policy(
             "google/embeddinggemma-300m",
-            &["modules.json"],
             ArtifactPolicy::LocalOnly { root: root.clone() },
         )
-        .err()
-        .expect("missing artifacts should fail closed");
+        .expect("resolved local model path should be accepted");
 
-        assert!(
-            matches!(err, ModelError::InvalidConfiguration(message) if message.contains("config.json"))
-        );
+        assert_eq!(configured.model_target, root.display().to_string());
+        assert_eq!(configured.hf_cache_root, None);
     }
 
     #[test]
-    fn local_only_policy_accepts_valid_hf_cache_layout() {
-        let root = unique_temp_dir();
-        let snapshot = create_fake_hf_cache(&root, "google/embeddinggemma-300m", "main");
+    fn unpack_root_is_rejected_explicitly() {
+        let result = tokio::runtime::Runtime::new()
+            .expect("test runtime")
+            .block_on(build_embedding_model(
+                "google/embeddinggemma-300m",
+                MistralEmbeddingArch::EmbeddingGemma,
+                StartOptions {
+                    unpack_root: Some(PathBuf::from("/tmp/motlie-model-unpack")),
+                    ..Default::default()
+                },
+            ));
+        let error = result
+            .err()
+            .expect("unpack_root should be rejected for mistral embeddings");
 
-        fs::write(snapshot.join("config.json"), "{}").expect("config should be writable");
-        fs::write(snapshot.join("tokenizer.json"), "{}").expect("tokenizer should be writable");
-        fs::write(snapshot.join("model-00001-of-00001.safetensors"), "stub")
-            .expect("weights should be writable");
-        fs::create_dir_all(snapshot.join("1_Pooling")).expect("pooling dir should be creatable");
-        fs::create_dir_all(snapshot.join("2_Dense")).expect("dense dir should be creatable");
-        fs::create_dir_all(snapshot.join("3_Dense")).expect("dense dir should be creatable");
-        fs::write(snapshot.join("modules.json"), "[]").expect("modules should be writable");
-        fs::write(snapshot.join("1_Pooling/config.json"), "{}")
-            .expect("pooling config should be writable");
-        fs::write(snapshot.join("2_Dense/config.json"), "{}")
-            .expect("dense config should be writable");
-        fs::write(snapshot.join("2_Dense/model.safetensors"), "stub")
-            .expect("dense weights should be writable");
-        fs::write(snapshot.join("3_Dense/config.json"), "{}")
-            .expect("dense config should be writable");
-        fs::write(snapshot.join("3_Dense/model.safetensors"), "stub")
-            .expect("dense weights should be writable");
-
-        configure_artifact_policy(
-            "google/embeddinggemma-300m",
-            &[
-                "modules.json",
-                "1_Pooling/config.json",
-                "2_Dense/config.json",
-                "2_Dense/model.safetensors",
-                "3_Dense/config.json",
-                "3_Dense/model.safetensors",
-            ],
-            ArtifactPolicy::LocalOnly { root: root.clone() },
-        )
-        .expect("complete cache layout should be accepted");
+        assert!(matches!(
+            error,
+            ModelError::InvalidConfiguration(message)
+                if message.contains("unpack_root")
+        ));
     }
 
     #[tokio::test]
@@ -496,20 +393,5 @@ mod tests {
             .expect("clock should be monotonic enough")
             .as_nanos();
         std::env::temp_dir().join(format!("motlie-model-mistral-test-{unique}"))
-    }
-
-    fn create_fake_hf_cache(root: &Path, model_id: &str, revision: &str) -> PathBuf {
-        let repo_folder = format!("models--{}", model_id.replace('/', "--"));
-        let repo_root = root.join(repo_folder);
-        let refs_dir = repo_root.join("refs");
-        let snapshots_dir = repo_root.join("snapshots");
-        let commit = "test-commit";
-        let snapshot = snapshots_dir.join(commit);
-
-        fs::create_dir_all(&snapshot).expect("snapshot dir should be creatable");
-        fs::create_dir_all(&refs_dir).expect("refs dir should be creatable");
-        fs::write(refs_dir.join(revision), commit).expect("ref file should be writable");
-
-        snapshot
     }
 }
