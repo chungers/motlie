@@ -10,6 +10,7 @@
 | 2026-04-07 | @codex-researcher: Clarified that curated local model download is an explicit `libs/models` control, separate from backend cache-miss behavior. | Packaging and Deployment Model, Release Assembly Utility |
 | 2026-04-08 | @codex-researcher: Clarified that `libs/models` public fallible APIs should use typed library errors rather than `anyhow`, and specified the first vertical-slice artifact contract for `embeddinggemma_300m`. | Solution, Bundle Catalog Model, Packaging and Deployment Model |
 | 2026-04-08 | @codex-researcher: Locked down the crate hierarchy and direct bundle namespace so future work does not drift. Also removed over-modeled public metadata from the recommended surface and documented the preferred direct bundle API next to `Catalog`. | Architecture, Bundle Catalog Model, API Sketch |
+| 2026-04-08 | @codex-researcher: Added the bundle-build convention: curated bundles are feature-gated individually, the direct enum and `ModelSelector` only expose compiled-in bundles, and known-but-disabled bundles should report `ModelUnavailable`. | Architecture, Bundle Catalog Model, Packaging and Deployment Model |
 
 This document defines the design for `libs/models`, the curated bundle library that exposes opinionated model stacks as deployable product modules. A bundle in this crate includes vetted weights when applicable, a chosen backend or transport, packaging policy when applicable, capability wiring, and consistent lifecycle behavior through the contracts defined in `libs/model`.
 
@@ -131,6 +132,7 @@ This split is intentional:
 - capability-family directories keep related bundles grouped together
 - each bundle file maps 1:1 to a curated bundle
 - callers may use either direct bundle modules or the dynamic `Catalog`
+- bundle modules may be compiled conditionally behind per-bundle features
 
 ### High-Level Data Flow
 
@@ -192,6 +194,40 @@ Recommended public concepts:
 - artifact requirements precise enough for deterministic local-only startup where applicable
 
 `SupportTier` and `PackagingMode` are not required as first-class public catalog concepts in v1. If those ideas become operationally useful later, they can be added back with a clearer consumer and a narrower meaning.
+
+### Bundle Build Convention
+
+Curated bundles are not all expected to be linked into every build of `libs/models`.
+
+The intended convention is:
+
+- one Cargo feature per curated bundle
+- direct bundle module, enum variant, parser support, and catalog registration are all gated together
+- the default feature set may include a small recommended slice, but distro/profile builds should compose the exact curated set explicitly
+
+For example:
+
+```toml
+[features]
+default = ["model-google-gemma-300m"]
+
+model-google-gemma-300m = []
+model-qwen3-embed-600m = []
+profile-macos = ["model-google-gemma-300m"]
+profile-dgx = ["model-google-gemma-300m", "model-qwen3-embed-600m"]
+```
+
+This means:
+
+- `EmbeddingModels::GoogleGemma300m` only exists when `model-google-gemma-300m` is enabled
+- `Catalog::with_defaults()` only registers bundles that are actually compiled in
+- string parsing through `ModelSelector` should distinguish:
+  - unknown selector
+  - known selector that is unavailable in the current build
+
+Recommended typed error for the second case:
+
+- `ModelUnavailable { selector: String }`
 
 Example internal organization:
 

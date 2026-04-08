@@ -12,6 +12,7 @@
 | 2026-04-08 | @codex-researcher: Locked down the error-handling rule for the framework: library crates expose typed `thiserror` errors, while binaries/examples may use `anyhow` for propagation and CLI context. Also clarified that non-test runtime code should not panic. | Solution, Framework Principles, Core Abstractions |
 | 2026-04-08 | @codex-researcher: Tightened the design to match the current implemented contract exactly: removed unstaged future type names from the core abstraction list, corrected trait signatures, and clarified that richer artifact manifests currently live in `libs/models` while `libs/model` only standardizes startup artifact policy. | Core Abstractions, Capability Surfaces, Artifact and Packaging Contracts |
 | 2026-04-08 | @codex-researcher: Added the proposed bundle-level embedding metadata contract so curated embedding bundles can expose retrieval-relevant semantics such as preferred distance metric and normalization. This shape is intended to align cleanly with future `libs/db/vector::EmbeddingSpec` integration without creating a reverse dependency today. | Core Abstractions, Capability Surfaces, API Sketch |
+| 2026-04-08 | @codex-researcher: Referenced the `libs/models` bundle-build convention so the contract layer is explicit that bundle availability is build-dependent and selector/catalog surfaces may vary by curated feature set. | Architecture, Framework Principles |
 
 This document defines the design for `libs/model`, the contract crate for Motlie's packaged model system. The crate does not ship concrete model bundles or runtime implementations. Instead, it defines the stable public vocabulary, lifecycle, request/response types, capability adapters, composability boundaries, and artifact contracts that higher-level crates build on.
 
@@ -114,6 +115,12 @@ Dependency direction:
 - `libs/model-eval` depends on `libs/model` and may optionally integrate with `libs/models` for catalog-driven runs
 - `libs/models` depends on `libs/model` and the relevant `libs/model/backends/*` implementations
 - `libs/model` does not depend on bundle catalogs, harness tooling, or backend implementations
+
+Build note:
+
+- `libs/model` defines stable contracts
+- `libs/models` may expose only a subset of curated bundles in a given build, based on per-bundle feature flags and higher-level profile features
+- callers should therefore treat curated selector/catalog surfaces as build-dependent, while still relying on the stable trait contracts defined here
 
 ### High-Level Data Flow
 

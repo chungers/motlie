@@ -57,6 +57,8 @@ pub enum ModelsError {
     UnknownEmbeddingModel { selector: String },
     #[error("unknown model selector `{selector}`")]
     UnknownModelSelector { selector: String },
+    #[error("model selector `{selector}` is unavailable in this build")]
+    ModelUnavailable { selector: String },
 }
 
 pub type Result<T> = std::result::Result<T, ModelsError>;
@@ -257,9 +259,13 @@ pub enum ModelSelector {
 impl ModelSelector {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Embedding(model) => match model {
-                EmbeddingModels::GoogleGemma300m => "embedding:google/embeddinggemma_300m",
-            },
+            Self::Embedding(model) => {
+                if model.as_str() == embeddings::GOOGLE_GEMMA_300M_SELECTOR {
+                    "embedding:google/embeddinggemma_300m"
+                } else {
+                    unreachable!("no model selectors are enabled in this build")
+                }
+            }
         }
     }
 
@@ -293,6 +299,12 @@ impl FromStr for ModelSelector {
 
     fn from_str(value: &str) -> Result<Self> {
         if let Some(raw) = value.strip_prefix("embedding:") {
+            #[cfg(not(feature = "model-google-gemma-300m"))]
+            if raw == embeddings::GOOGLE_GEMMA_300M_SELECTOR {
+                return Err(ModelsError::ModelUnavailable {
+                    selector: value.to_owned(),
+                });
+            }
             return Ok(Self::Embedding(raw.parse()?));
         }
 
@@ -332,7 +344,9 @@ impl Catalog {
     }
 
     pub fn with_defaults() -> Self {
+        #[allow(unused_mut)]
         let mut catalog = Self::new();
+        #[cfg(feature = "model-google-gemma-300m")]
         catalog.register(embeddings::google_gemma_300m::descriptor(), || {
             embeddings::google_gemma_300m::bundle()
         });
@@ -489,6 +503,8 @@ mod tests {
         let catalog = Catalog::with_defaults();
         let bundle_id = BundleId::new("embeddinggemma_300m");
 
+        #[cfg(feature = "model-google-gemma-300m")]
+        {
         assert_eq!(catalog.len(), 1);
         assert!(catalog.instantiate(&bundle_id).is_some());
         assert!(catalog
@@ -499,20 +515,33 @@ mod tests {
             .artifacts(&bundle_id)
             .expect("default embedder should expose artifact control");
         assert_eq!(artifacts.control_name, "embeddinggemma_300m");
+        }
+
+        #[cfg(not(feature = "model-google-gemma-300m"))]
+        {
+            assert_eq!(catalog.len(), 0);
+            assert!(catalog.instantiate(&bundle_id).is_none());
+            assert!(catalog.artifacts(&bundle_id).is_none());
+        }
     }
 
     #[test]
     fn embedding_models_round_trip_string_selectors() {
+        #[cfg(feature = "model-google-gemma-300m")]
+        {
         let model: EmbeddingModels = "google/embeddinggemma_300m"
             .parse()
             .expect("known embedding selector should parse");
 
         assert_eq!(model, EmbeddingModels::GoogleGemma300m);
         assert_eq!(model.to_string(), "google/embeddinggemma_300m");
+        }
     }
 
     #[test]
     fn model_selector_parses_embedding_prefix() {
+        #[cfg(feature = "model-google-gemma-300m")]
+        {
         let selector: ModelSelector = "embedding:google/embeddinggemma_300m"
             .parse()
             .expect("known embedding model selector should parse");
@@ -522,6 +551,21 @@ mod tests {
             ModelSelector::Embedding(EmbeddingModels::GoogleGemma300m)
         );
         assert_eq!(selector.to_string(), "embedding:google/embeddinggemma_300m");
+        }
+    }
+
+    #[cfg(not(feature = "model-google-gemma-300m"))]
+    #[test]
+    fn selector_reports_unavailable_for_disabled_bundles() {
+        let err = "embedding:google/embeddinggemma_300m"
+            .parse::<ModelSelector>()
+            .expect_err("disabled known selector should be unavailable");
+
+        assert!(matches!(
+            err,
+            ModelsError::ModelUnavailable { selector }
+            if selector == "embedding:google/embeddinggemma_300m"
+        ));
     }
 
     #[test]
