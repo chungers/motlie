@@ -4,12 +4,21 @@ This example demonstrates the current curated embedding bundle in `libs/models`.
 
 Important: the current bundle is `embeddinggemma_300m` (`google/embeddinggemma-300m`), not a Gemma 3 chat bundle. This is the first curated embedding vertical slice currently implemented in the catalog.
 
+The bundle returns normalized embedding vectors. In practice that means:
+
+- cosine similarity is the intended comparison metric
+- dot product is effectively equivalent for ranking because the vectors are normalized
+- the example below computes cosine similarity directly so the retrieval semantics are visible in the output
+
 ## What It Demonstrates
 
 1. explicit curated artifact download into `artifacts/models/hf-cache`
 2. catalog lookup and descriptor/capability introspection
 3. local-only startup through `ArtifactPolicy::LocalOnly`
 4. one-shot embedding generation from command-line input
+5. a semantically similar pair with their vectors and cosine similarity
+6. a semantically dissimilar pair with their vectors and cosine similarity
+7. latency for each embedding computation
 
 ## Run
 
@@ -38,8 +47,13 @@ The example prints:
 - the number of curated files downloaded or confirmed in cache
 - bundle metadata such as family, backend, and packaging
 - capability descriptor details including normalized input/output kinds and interaction style
-- the embedding vector dimension
-- the first few floats from the embedding vector
+- the embedding vector dimension and first few floats for the command-line input
+- the latency for the command-line embedding request
+- a similar text pair, each vector head, and the computed cosine similarity
+- a dissimilar text pair, each vector head, and the computed cosine similarity
+- latency for each pair computation
+
+A successful run should show the similar pair with a noticeably higher cosine similarity than the dissimilar pair.
 
 ## Source
 
