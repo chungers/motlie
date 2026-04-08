@@ -4549,6 +4549,7 @@ dependencies = [
  "hf-hub",
  "motlie-model",
  "motlie-model-mistral",
+ "tokio",
 ]
 
 [[package]]

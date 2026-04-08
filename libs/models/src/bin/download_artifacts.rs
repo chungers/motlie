@@ -1,23 +1,55 @@
 use anyhow::{Context, Result};
 use motlie_model::BundleId;
-use motlie_models::{default_artifact_root, download_bundle_artifacts, Catalog};
+use motlie_models::{
+    default_artifact_root, download_bundle_artifacts_with_options, ArtifactDownloadOptions, Catalog,
+};
 
 fn main() -> Result<()> {
-    let mut args = std::env::args().skip(1).collect::<Vec<_>>();
+    let mut args = std::env::args().skip(1).peekable();
     let artifact_root = default_artifact_root();
     let catalog = Catalog::with_defaults();
+    let mut bundle_args = Vec::new();
+    let mut download_options = ArtifactDownloadOptions::default();
 
-    if args.is_empty() {
-        args = catalog
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--hf-token-env" => {
+                let var_name = args
+                    .next()
+                    .context("expected env var name after `--hf-token-env`")?;
+                let token = std::env::var(&var_name).with_context(|| {
+                    format!("failed to read Hugging Face token from env var `{var_name}`")
+                })?;
+                download_options.hf_token = Some(token);
+            }
+            "--hf-token-file" => {
+                let path = args
+                    .next()
+                    .context("expected file path after `--hf-token-file`")?;
+                let token = std::fs::read_to_string(&path)
+                    .with_context(|| format!("failed to read Hugging Face token file `{path}`"))?;
+                download_options.hf_token = Some(token.trim().to_string());
+            }
+            _ => bundle_args.push(arg),
+        }
+    }
+
+    if bundle_args.is_empty() {
+        bundle_args = catalog
             .bundles()
             .map(|bundle| bundle.id.as_str().to_owned())
             .collect();
     }
 
-    for raw_id in args {
+    for raw_id in bundle_args {
         let bundle_id = BundleId::new(raw_id);
-        let summary = download_bundle_artifacts(&catalog, &bundle_id, &artifact_root)
-            .with_context(|| format!("failed to download artifacts for `{bundle_id}`"))?;
+        let summary = download_bundle_artifacts_with_options(
+            &catalog,
+            &bundle_id,
+            &artifact_root,
+            &download_options,
+        )
+        .with_context(|| format!("failed to download artifacts for `{bundle_id}`"))?;
 
         println!(
             "bundle={} files={} root={}",

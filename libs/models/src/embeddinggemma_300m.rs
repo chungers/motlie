@@ -2,13 +2,12 @@ use motlie_model::eval::EvalTrack;
 use motlie_model::{BundleId, CapabilityDescriptor, ModelBundle};
 use motlie_model_mistral::{MistralEmbeddingBundle, MistralEmbeddingSpec};
 
-use crate::artifacts::{ArtifactRule, ArtifactSource, BundleArtifacts};
-use crate::catalog::{
-    BackendKind, BuildConstraint, BundleDescriptor, BundleFamily, BundleRequirements,
-    PackagingMode, PlatformConstraint, SupportTier,
+use crate::{
+    ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleArtifacts, BundleDescriptor,
+    BundleFamily, BundleRequirements, PackagingMode, PlatformConstraint, SupportTier,
 };
 
-pub fn embeddinggemma_300m_descriptor() -> BundleDescriptor {
+pub fn descriptor() -> BundleDescriptor {
     BundleDescriptor {
         id: BundleId::new("embeddinggemma_300m"),
         display_name: "EmbeddingGemma 300M".into(),
@@ -40,7 +39,7 @@ pub fn embeddinggemma_300m_descriptor() -> BundleDescriptor {
     }
 }
 
-pub fn embeddinggemma_300m_bundle() -> Box<dyn ModelBundle> {
+pub fn bundle() -> Box<dyn ModelBundle> {
     Box::new(MistralEmbeddingBundle::new(
         MistralEmbeddingSpec::embeddinggemma_300m(),
     ))
@@ -51,8 +50,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn embeddinggemma_descriptor_is_reviewable_as_data() {
-        let descriptor = embeddinggemma_300m_descriptor();
+    fn descriptor_is_reviewable_as_data() {
+        let descriptor = descriptor();
 
         assert_eq!(descriptor.id.as_str(), "embeddinggemma_300m");
         assert_eq!(descriptor.family, BundleFamily::Embeddings);

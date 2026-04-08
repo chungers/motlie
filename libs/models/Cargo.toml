@@ -17,6 +17,13 @@ hf-hub = "0.4.3"
 motlie-model = { path = "../model" }
 motlie-model-mistral = { path = "../model/backends/mistral" }
 
+[dev-dependencies]
+tokio.workspace = true
+
 [[bin]]
 name = "motlie-models-download"
 path = "src/bin/download_artifacts.rs"
+
+[[example]]
+name = "models_v0_1"
+path = "examples/v0.1/main.rs"
