@@ -91,6 +91,7 @@ Phase 3 initial implementation:
 - [x] `LifecycleServices`
 - [x] `VmHandle::ready(...)`
 - [x] `VmHandle::exec(...)`
+- [x] `VmHandle::open_pty(...)`
 - [x] `VmHandle::shutdown(...)`
 - [x] guestfs / SSH bridge / exec-ready readiness gates beyond API socket
 - [x] `boot(...)` provisions guestfs and optional rootless `vhost-user` egress
@@ -104,8 +105,11 @@ Phase 3 initial implementation:
   - [x] `FilesystemBacking`
   - [x] `NetworkBacking`
   - [x] `ControlPlaneBacking`
+  - [x] PTY/session control through `VmHandle`
   - [ ] `VmSpec`
   - [ ] simple CH “hello world” example using the same lifecycle API
+  - [ ] harness interactive mode replaces the standalone `repl_host_v1_4`
+  - [ ] harness script/scenario format for action/expectation pairs
 
 ## Layering
 
@@ -126,6 +130,10 @@ The intended layering is:
   - `FilesystemBacking`
   - `NetworkBacking`
   - `ControlPlaneBacking`
+- interactive control plane
+  - `VmHandle::exec(...)`
+  - `VmHandle::open_pty(...)`
+  - `GuestPtySession`
 - backend realization
   - `backend::ch::*`
   - `backend::motlie::*`
@@ -156,6 +164,8 @@ Important reviewed rule:
   artifacts
 - the design should translate almost mechanically into Cloud Hypervisor's
   internal `VmConfig`
+- the harness becomes the future primary driver over this API; the standalone
+  REPL is transitional only
 
 ## Reviewed Next Surface
 
@@ -207,6 +217,66 @@ pub enum ControlPlaneBacking {
     MotlieSshProxy,
 }
 ```
+
+Reviewed interactive/session surface:
+
+```rust
+impl VmHandle {
+    pub async fn exec(
+        &self,
+        command: &str,
+        timeout: std::time::Duration,
+    ) -> Result<ExecOutput, OrchestratorError>;
+
+    pub async fn open_pty(
+        &self,
+        request: PtyRequest,
+        timeout: std::time::Duration,
+    ) -> Result<GuestPtySession, OrchestratorError>;
+}
+
+pub struct PtyRequest {
+    pub term: String,
+    pub col_width: u32,
+    pub row_height: u32,
+    pub pix_width: u32,
+    pub pix_height: u32,
+    pub command: Option<String>,
+}
+
+impl GuestPtySession {
+    pub async fn send(&self, data: &[u8]) -> Result<(), SshProxyError>;
+    pub async fn send_line(&self, line: &str) -> Result<(), SshProxyError>;
+    pub async fn resize(
+        &self,
+        col_width: u32,
+        row_height: u32,
+        pix_width: u32,
+        pix_height: u32,
+    ) -> Result<(), SshProxyError>;
+    pub async fn read_for(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<PtyRead, SshProxyError>;
+    pub async fn read_until_contains(
+        &self,
+        needle: &str,
+        timeout: std::time::Duration,
+    ) -> Result<PtyRead, SshProxyError>;
+    pub fn transcript(&self) -> Result<Vec<PtyTranscriptEvent>, SshProxyError>;
+    pub async fn close(&self) -> Result<(), SshProxyError>;
+}
+```
+
+Reviewed harness direction:
+
+- `examples/v1.4/harness/main.rs` is the future primary driver
+- the harness should support:
+  - named scenarios such as `smoke`, `multiguest`, and `pty`
+  - interactive/manual mode for humans and coding agents
+  - transcript and log capture for PTY sessions and VM launch artifacts
+- `examples/v1.4/repl_host.rs` remains useful during the transition, but it
+  should not accumulate unique lifecycle/control-plane logic
 
 Reviewed intent:
 

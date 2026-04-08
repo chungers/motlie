@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-07 | @codex | Lock the harness direction: `examples/v1.4/harness` is the future primary driver over the `libs/vmm` API, with scripted scenarios, interactive/manual mode, PTY/session control via `VmHandle`, and transcript/log capture; `repl_host_v1_4` remains transitional only |
 | 2026-04-07 | @codex | Replace the intermediate VM-backend injection with reviewed `Runtime` injection so `orchestrator.rs` now takes composed hypervisor/filesystem/network/control-plane backing rather than importing Motlie implementation modules directly |
 | 2026-04-07 | @codex | Complete the first usable `v1.4` lifecycle API: library-owned guestfs, SSH bridge, `VmHandle::exec(...)`, rootless harness validation, and child-handle-based shutdown/readiness instead of raw `/proc` polling |
 | 2026-04-07 | @codex | Finish Phase 1/2 convergence in code and start Phase 3 with `PrepareRequest`, `PreparedGuest`, `VmHandle`, `backend/mod.rs`, and the first `backend::ch::shell::ChShellBackend` boot path |
@@ -81,6 +82,15 @@ Current `v1.4` implementation status:
   and the guest listener spawn loop
 - `examples/v1.4/harness/main.rs` now exists as a rootless automation harness
   that validates the library-owned lifecycle API end to end
+- `VmHandle` now exposes a first PTY/session control surface for harness-driven
+  interactive validation:
+  - `VmHandle::open_pty(...)`
+  - `GuestPtySession::send(...)`
+  - `GuestPtySession::send_line(...)`
+  - `GuestPtySession::resize(...)`
+  - `GuestPtySession::read_for(...)`
+  - `GuestPtySession::read_until_contains(...)`
+  - `GuestPtySession::transcript()`
 - `ChShellBackend` now tracks the spawned child process directly in its
   backend-specific module so readiness and shutdown use real process state
   rather than `/proc` zombie heuristics
@@ -91,6 +101,11 @@ Current `v1.4` implementation status:
   through reviewed `Runtime` composition
 - the next convergence step is guest-shape cleanup around `VmSpec` plus the
   simple Cloud Hypervisor “hello world” example
+- the next harness step is to absorb ad-hoc/manual REPL use cases into
+  `examples/v1.4/harness/` so the harness becomes the primary driver for:
+  - scripted scenarios
+  - coding-agent experimentation
+  - human manual validation
 - `examples/v1.4/build-guest.sh` and `examples/v1.4/launch-ch.sh` exist under
   the `motlie-vmm-v14-*` namespace
 
@@ -113,6 +128,13 @@ Current `v1.4` implementation status:
      that boots a guest through the same `prepare()` / `boot()` / `ready()` /
      `shutdown()` lifecycle API without using Motlie guest backing providers.
    - The same portable slice should later map to `backend::vz::*`.
+
+3. `examples/v1.4/harness` becomes the main runnable control surface.
+   - It should support repeatable scenarios and ad-hoc/manual operation.
+   - It should be able to drive PTY sessions, capture transcripts, and bundle
+     useful run artifacts such as launch logs and serial logs.
+   - The old `repl_host_v1_4` is transitional and should not accumulate unique
+     control-plane logic.
 
 ## Cloud Hypervisor API Analysis
 
@@ -183,6 +205,46 @@ The critical constraint is:
   stay above the CH adapter
 - CH-facing configuration should be modeled explicitly enough that a future
   `to_ch_vm_config(...)` step is straightforward
+- harness-specific scenario or interactive UX should stay above `libs/vmm`; the
+  library should expose the lifecycle, exec, PTY, and observability primitives
+  that the harness consumes
+
+## Harness Direction
+
+`examples/v1.4/harness/` is now the future primary driver for `v1.4`.
+
+The intended modes are:
+
+- scripted scenario mode
+  - action/expectation pairs for repeatable regression tests
+- interactive/manual mode
+  - human-driven exploratory testing
+  - coding-agent-driven ad-hoc reproduction and debugging
+
+Both modes must use the same `libs/vmm` lifecycle/control-plane APIs:
+
+- `prepare(...)`
+- `boot(...)`
+- `VmHandle::ready(...)`
+- `VmHandle::exec(...)`
+- `VmHandle::open_pty(...)`
+- `VmHandle::shutdown()`
+
+The harness should collect and preserve enough observability for debugging:
+
+- launch/boot log
+- serial/console log
+- generated guest artifacts
+- PTY transcript
+- harness-side stdout/stderr summaries
+
+This is explicitly meant to replace the old split between:
+
+- standalone REPL for ad-hoc use
+- separate smoke binaries/scripts for automation
+
+The harness should become the single coherent driver over the same underlying
+library APIs.
 
 One specific design correction from this analysis:
 

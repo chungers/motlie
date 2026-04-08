@@ -70,6 +70,9 @@ HOST_IP=""
 GUEST_IP=""
 ADMIN_MAC=""
 EGRESS_MAC=""
+EGRESS_HOST_IP=""
+EGRESS_GUEST_IP=""
+EGRESS_DNS_IP=""
 SSH_USER=""
 GUEST_HOSTNAME=""
 LOGIN_HOME=""
@@ -103,6 +106,12 @@ while [[ $# -gt 0 ]]; do
         --admin-mac=*) ADMIN_MAC="${1#*=}"; shift ;;
         --egress-mac) EGRESS_MAC="$2"; shift 2 ;;
         --egress-mac=*) EGRESS_MAC="${1#*=}"; shift ;;
+        --egress-host-ip) EGRESS_HOST_IP="$2"; shift 2 ;;
+        --egress-host-ip=*) EGRESS_HOST_IP="${1#*=}"; shift ;;
+        --egress-guest-ip) EGRESS_GUEST_IP="$2"; shift 2 ;;
+        --egress-guest-ip=*) EGRESS_GUEST_IP="${1#*=}"; shift ;;
+        --egress-dns-ip) EGRESS_DNS_IP="$2"; shift 2 ;;
+        --egress-dns-ip=*) EGRESS_DNS_IP="${1#*=}"; shift ;;
         --ssh-user) SSH_USER="$2"; shift 2 ;;
         --ssh-user=*) SSH_USER="${1#*=}"; shift ;;
         --hostname) GUEST_HOSTNAME="$2"; shift 2 ;;
@@ -138,6 +147,9 @@ BASE_ARTIFACTS="$SCRIPT_DIR/artifacts/base"
 [ -n "$GUEST_IP" ]        || GUEST_IP="192.168.249.2"
 [ -n "$ADMIN_MAC" ]       || ADMIN_MAC="12:34:56:78:90:aa"
 [ -n "$EGRESS_MAC" ]      || EGRESS_MAC="12:34:56:78:90:ab"
+[ -n "$EGRESS_HOST_IP" ]  || EGRESS_HOST_IP="10.0.2.2"
+[ -n "$EGRESS_GUEST_IP" ] || EGRESS_GUEST_IP="10.0.2.15"
+[ -n "$EGRESS_DNS_IP" ]   || EGRESS_DNS_IP="10.0.2.3"
 [ -n "$SSH_USER" ]        || SSH_USER="$GUEST_NAME"
 [ -n "$GUEST_HOSTNAME" ]  || GUEST_HOSTNAME="motlie-${GUEST_NAME}"
 [ -n "$LOGIN_HOME" ]      || LOGIN_HOME="/home/${GUEST_NAME}"
@@ -240,6 +252,13 @@ if [ "$EGRESS_NET" = "vhost-user" ]; then
     mkdir -p "$OVERLAY_SEED/upper/etc/motlie-vmm"
     printf '%s\n' "$EGRESS_MAC" > "$OVERLAY_SEED/upper/etc/motlie-vmm/egress.mac"
     chmod 644 "$OVERLAY_SEED/upper/etc/motlie-vmm/egress.mac"
+    printf '%s\n' "$EGRESS_GUEST_IP" > "$OVERLAY_SEED/upper/etc/motlie-vmm/egress.ipv4"
+    printf '%s\n' "$EGRESS_HOST_IP" > "$OVERLAY_SEED/upper/etc/motlie-vmm/egress.gateway"
+    printf '%s\n' "$EGRESS_DNS_IP" > "$OVERLAY_SEED/upper/etc/motlie-vmm/egress.dns"
+    chmod 644 \
+        "$OVERLAY_SEED/upper/etc/motlie-vmm/egress.ipv4" \
+        "$OVERLAY_SEED/upper/etc/motlie-vmm/egress.gateway" \
+        "$OVERLAY_SEED/upper/etc/motlie-vmm/egress.dns"
 fi
 
 # Inject SSH CA pubkey and per-guest principals for cert-based auth (v1.4+).

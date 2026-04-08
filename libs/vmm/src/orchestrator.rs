@@ -222,6 +222,20 @@ impl VmHandle {
         Ok(control_plane.exec(command, timeout).await?)
     }
 
+    pub async fn open_pty(
+        &self,
+        request: crate::ssh::PtyRequest,
+        timeout: Duration,
+    ) -> Result<crate::ssh::GuestPtySession, OrchestratorError> {
+        let control_plane = self
+            .control_plane
+            .as_ref()
+            .ok_or_else(|| OrchestratorError::MissingSshBridge {
+                guest_id: self.guest_id.clone(),
+            })?;
+        Ok(control_plane.open_pty(request, timeout).await?)
+    }
+
     pub async fn shutdown(&self) -> Result<ShutdownReport, OrchestratorError> {
         let backend_result = self.runtime.hypervisor.shutdown(&self.backend_handle)?;
 
