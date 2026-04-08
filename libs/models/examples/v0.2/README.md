@@ -1,0 +1,56 @@
+# `motlie-models` v0.2 Example
+
+This example demonstrates the curated Qwen3-4B chat bundle with ISQ quantization.
+
+## What It Demonstrates
+
+1. Direct curated enum selection through `ChatModels::Qwen3_4B`
+2. Optional parser-driven selection through `--chat=qwen/qwen3_4b`
+3. ISQ quantization control (Q4 default, Q8, or F32)
+4. Descriptor/capability introspection
+5. Local-only startup through `ArtifactPolicy::LocalOnly`
+6. Single-turn chat with system prompt + user message
+7. Multi-turn follow-up demonstrating message history
+8. Completion path (delegates to single-turn chat)
+9. Latency reporting for each request
+
+## Run
+
+Default path (direct enum, ISQ Q4):
+
+```sh
+cargo run -p motlie-models --example models_v0_2 -- "What is Rust's ownership model?"
+```
+
+Parser-driven selector:
+
+```sh
+cargo run -p motlie-models --example models_v0_2 -- --chat=qwen/qwen3_4b "Explain borrow checking"
+```
+
+Full precision (no quantization):
+
+```sh
+cargo run -p motlie-models --example models_v0_2 -- --precision=f32 "What is Rust's ownership model?"
+```
+
+Pre-download artifacts:
+
+```sh
+cargo run -p motlie-models --example models_v0_2 -- --download-artifacts "What is Rust?"
+```
+
+## Preconditions
+
+- Pre-downloaded Qwen3-4B artifacts in the curated artifact root, OR use `--download-artifacts`
+- Sufficient memory: ~2.5GB for Q4, ~4.5GB for Q8, ~8GB for F32
+- For authenticated download: pre-download with the artifact utility:
+  ```sh
+  export HF_TOKEN=...
+  cargo run -p motlie-models --bin motlie-models-download -- --hf-token-env HF_TOKEN qwen3_4b
+  ```
+
+## Source
+
+- Example entrypoint: [main.rs](main.rs)
+- Bundle definition: [qwen3_4b.rs](/libs/models/src/chat/qwen3_4b.rs)
