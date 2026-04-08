@@ -6,7 +6,9 @@ use motlie_vmm::ssh::{PtyRequest, PtyTranscriptEvent, PtyTranscriptEventKind};
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::terminal::{HarnessTerminalSession, TerminalSessionError, VteScreenSnapshot};
+use crate::terminal::{
+    HarnessTerminalSession, TerminalBackendKind, TerminalSessionError, VteScreenSnapshot,
+};
 
 #[derive(Debug, Serialize)]
 pub struct PtyCheck {
@@ -30,6 +32,7 @@ pub struct PtyTranscriptSummary {
 
 #[derive(Debug, Serialize)]
 pub struct PtyScenarioResult {
+    pub terminal_backend: TerminalBackendKind,
     pub transcript_path: PathBuf,
     pub screen_path: PathBuf,
     pub asciicast_path: PathBuf,
@@ -57,6 +60,7 @@ pub enum PtyScenarioError {
 
 pub async fn run_pty_smoke(
     handle: &VmHandle,
+    terminal_backend: TerminalBackendKind,
     transcript_path: PathBuf,
     screen_path: PathBuf,
     asciicast_path: PathBuf,
@@ -68,6 +72,7 @@ pub async fn run_pty_smoke(
             .open_pty(request.clone(), Duration::from_secs(10))
             .await?,
         &request,
+        terminal_backend,
         transcript_path.clone(),
         screen_path.clone(),
         asciicast_path.clone(),
@@ -151,6 +156,7 @@ pub async fn run_pty_smoke(
             persist_result?;
             Ok(PtyScenarioRun {
                 result: PtyScenarioResult {
+                    terminal_backend,
                     transcript_path,
                     screen_path,
                     asciicast_path,

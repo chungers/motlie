@@ -22,7 +22,9 @@ use motlie_vmm::ssh::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::terminal::{HarnessTerminalSession, TerminalSessionError, VteScreenSnapshot};
+use crate::terminal::{
+    HarnessTerminalSession, TerminalBackendKind, TerminalSessionError, VteScreenSnapshot,
+};
 use crate::{
     DynError, HarnessInstance, demo_guest, ensure_file_exists, persist_json,
     print_instance_details, seed_host_mounts,
@@ -161,6 +163,7 @@ pub struct DriverFailure {
 #[derive(Debug, Serialize)]
 pub struct ScenarioSessionArtifacts {
     pub guest: String,
+    pub terminal_backend: TerminalBackendKind,
     pub transcript_ndjson: PathBuf,
     pub screen_json: PathBuf,
     pub asciicast: PathBuf,
@@ -187,6 +190,7 @@ pub struct ScenarioRunResult {
     pub description: Option<String>,
     pub artifact_root: PathBuf,
     pub proxy: String,
+    pub terminal_backend: TerminalBackendKind,
     pub allocator_capacity: u32,
     pub steps: Vec<ScenarioStepResult>,
     pub sessions: HashMap<String, ScenarioSessionArtifacts>,
@@ -227,6 +231,7 @@ pub async fn run_scenario_file(
     artifacts_dir: &Path,
     instance: &HarnessInstance,
     allocator_config: GuestNetAllocatorConfig,
+    terminal_backend: TerminalBackendKind,
     path: &Path,
     result_json_path: Option<&Path>,
 ) -> Result<ScenarioRunResult, DynError> {
@@ -237,6 +242,7 @@ pub async fn run_scenario_file(
         artifacts_dir,
         instance,
         allocator_config,
+        terminal_backend,
         definition,
     )
     .await?;
@@ -251,9 +257,16 @@ pub async fn run_scenario_definition(
     artifacts_dir: &Path,
     instance: &HarnessInstance,
     allocator_config: GuestNetAllocatorConfig,
+    terminal_backend: TerminalBackendKind,
     definition: ScenarioDefinition,
 ) -> Result<ScenarioRunResult, DynError> {
-    let mut driver = ScenarioDriver::new(base_dir, artifacts_dir, instance, allocator_config)?;
+    let mut driver = ScenarioDriver::new(
+        base_dir,
+        artifacts_dir,
+        instance,
+        allocator_config,
+        terminal_backend,
+    )?;
     let result = driver.run(definition).await;
     driver.shutdown_all().await;
     Ok(result)
@@ -267,6 +280,7 @@ struct ScenarioDriver {
     ca: Arc<SshCa>,
     allocator: GuestNetAllocator,
     proxy_config: SshProxyConfig,
+    terminal_backend: TerminalBackendKind,
     handles: HashMap<String, VmHandle>,
     terminals: HashMap<String, HarnessTerminalSession>,
     session_guests: HashMap<String, String>,
@@ -279,6 +293,7 @@ impl ScenarioDriver {
         artifacts_dir: &Path,
         instance: &HarnessInstance,
         allocator_config: GuestNetAllocatorConfig,
+        terminal_backend: TerminalBackendKind,
     ) -> Result<Self, DynError> {
         ensure_file_exists(&artifacts_dir.join("rootfs.squashfs"))?;
         ensure_file_exists(&artifacts_dir.join("Image"))?;
@@ -294,6 +309,7 @@ impl ScenarioDriver {
             Arc::clone(&guest_registry),
         ));
         print_instance_details(instance, &proxy_config);
+        println!("  terminal_backend={terminal_backend}");
 
         let runtime = Arc::new(Runtime {
             hypervisor: HypervisorBacking::CloudHypervisorShell(
@@ -332,6 +348,7 @@ impl ScenarioDriver {
             ca,
             allocator,
             proxy_config,
+            terminal_backend,
             handles: HashMap::new(),
             terminals: HashMap::new(),
             session_guests: HashMap::new(),
@@ -385,6 +402,7 @@ impl ScenarioDriver {
                                 name.clone(),
                                 ScenarioSessionArtifacts {
                                     guest,
+                                    terminal_backend: session.backend(),
                                     transcript_ndjson: session.transcript_path().to_path_buf(),
                                     screen_json: session.screen_path().to_path_buf(),
                                     asciicast: session.asciicast_path().to_path_buf(),
@@ -409,6 +427,7 @@ impl ScenarioDriver {
             description: definition.description,
             artifact_root: scenario_root,
             proxy: format!("ssh://localhost:{}", self.proxy_config.listen.port()),
+            terminal_backend: self.terminal_backend,
             allocator_capacity: self.allocator.capacity().unwrap_or_default(),
             steps,
             sessions,
@@ -566,6 +585,7 @@ impl ScenarioDriver {
                     format!("{guest}:{session}"),
                     guest_session,
                     &request,
+                    self.terminal_backend,
                     session_root.join("pty-transcript.ndjson"),
                     session_root.join("pty-screen.json"),
                     session_root.join("pty.cast"),

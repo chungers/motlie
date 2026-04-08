@@ -17,7 +17,7 @@ use motlie_vmm::runtime::{
 use motlie_vmm::ssh::{self, ExecOutput, PtyRequest, SshProxyConfig, new_guest_registry};
 use tokio::sync::mpsc;
 
-use crate::terminal::HarnessTerminalSession;
+use crate::terminal::{HarnessTerminalSession, TerminalBackendKind};
 use crate::{
     DynError, HarnessInstance, demo_guest, ensure_file_exists, print_instance_details,
     seed_host_mounts,
@@ -28,6 +28,7 @@ pub async fn run_shell(
     artifacts_dir: &Path,
     instance: &HarnessInstance,
     allocator_config: GuestNetAllocatorConfig,
+    terminal_backend: TerminalBackendKind,
 ) -> Result<(), DynError> {
     ensure_file_exists(&artifacts_dir.join("rootfs.squashfs"))?;
     ensure_file_exists(&artifacts_dir.join("Image"))?;
@@ -72,6 +73,7 @@ pub async fn run_shell(
 
     println!("=== motlie-vmm harness shell ===");
     println!("Harness interactive/manual mode over the extracted vmm lifecycle API");
+    println!("Terminal backend: {terminal_backend}");
     println!(
         "Commands: help | boot <guest> | ready <guest> | exec <guest> <cmd> | validate <guest> | pty-open <guest> <session> | pty-send <session> <text> | pty-send-line <session> <text> | pty-read <session> [timeout_ms] | pty-expect <session> <text> | pty-expect-screen <session> <text> | pty-resize <session> <cols> <rows> | pty-screen <session> | shutdown <guest> | status | guests | capacity | where [guest] | quit"
     );
@@ -97,12 +99,26 @@ pub async fn run_shell(
             print_capacity(&allocator);
             Ok(())
         } else if trimmed == "where" {
-            print_where(instance, &proxy_config, &allocator, None, &handles);
+            print_where(
+                instance,
+                &proxy_config,
+                &allocator,
+                terminal_backend,
+                None,
+                &handles,
+            );
             Ok(())
         } else if let Some(rest) = trimmed.strip_prefix("where ") {
             let guest_id = rest.trim();
             let guest = (!guest_id.is_empty()).then_some(guest_id);
-            print_where(instance, &proxy_config, &allocator, guest, &handles);
+            print_where(
+                instance,
+                &proxy_config,
+                &allocator,
+                terminal_backend,
+                guest,
+                &handles,
+            );
             Ok(())
         } else if trimmed == "quit" || trimmed == "exit" {
             break;
@@ -132,7 +148,7 @@ pub async fn run_shell(
         } else if let Some(rest) = trimmed.strip_prefix("exec ") {
             exec_guest(rest, &handles).await
         } else if let Some(rest) = trimmed.strip_prefix("pty-open ") {
-            pty_open(rest, instance, &handles, &mut terminals).await
+            pty_open(rest, instance, &handles, &mut terminals, terminal_backend).await
         } else if let Some(rest) = trimmed.strip_prefix("pty-send-line ") {
             pty_send_line(rest, &terminals).await
         } else if let Some(rest) = trimmed.strip_prefix("pty-send ") {
@@ -224,6 +240,7 @@ fn print_where(
     instance: &HarnessInstance,
     proxy_config: &SshProxyConfig,
     allocator: &GuestNetAllocator,
+    terminal_backend: TerminalBackendKind,
     guest_id: Option<&str>,
     handles: &HashMap<String, VmHandle>,
 ) {
@@ -232,6 +249,7 @@ fn print_where(
     println!("demo_root={}", instance.demo_root.display());
     println!("socket_root={}", instance.socket_root.display());
     println!("proxy=ssh://localhost:{}", proxy_config.listen.port());
+    println!("terminal_backend={terminal_backend}");
     print_capacity(allocator);
 
     match guest_id {
@@ -283,6 +301,7 @@ async fn pty_open(
     instance: &HarnessInstance,
     handles: &HashMap<String, VmHandle>,
     terminals: &mut HashMap<String, HarnessTerminalSession>,
+    terminal_backend: TerminalBackendKind,
 ) -> Result<(), DynError> {
     let mut parts = rest.split_whitespace();
     let guest_id = parts.next().unwrap_or("").trim();
@@ -309,14 +328,16 @@ async fn pty_open(
         format!("{guest_id}:{session_name}"),
         guest_session,
         &request,
+        terminal_backend,
         session_root.join("pty-transcript.ndjson"),
         session_root.join("pty-screen.json"),
         session_root.join("pty.cast"),
     );
     println!(
-        "ok: opened PTY {} for {} transcript={} screen={} cast={}",
+        "ok: opened PTY {} for {} backend={} transcript={} screen={} cast={}",
         session_name,
         guest_id,
+        terminal.backend(),
         terminal.transcript_path().display(),
         terminal.screen_path().display(),
         terminal.asciicast_path().display()
@@ -392,8 +413,7 @@ async fn pty_expect_screen(
     rest: &str,
     terminals: &HashMap<String, HarnessTerminalSession>,
 ) -> Result<(), DynError> {
-    let (session_name, text) =
-        split_session_and_text(rest, "pty-expect-screen <session> <text>")?;
+    let (session_name, text) = split_session_and_text(rest, "pty-expect-screen <session> <text>")?;
     let terminal = terminals
         .get(session_name)
         .ok_or_else(|| format!("unknown PTY session '{session_name}'"))?;
@@ -440,8 +460,13 @@ fn pty_screen(
         .ok_or_else(|| format!("unknown PTY session '{session_name}'"))?;
     let screen = terminal.snapshot()?;
     println!(
-        "rows={} cols={} cursor=({}, {})",
-        screen.rows, screen.cols, screen.cursor_row, screen.cursor_col
+        "backend={} mode={:?} rows={} cols={} cursor=({}, {})",
+        screen.backend,
+        screen.screen_mode,
+        screen.rows,
+        screen.cols,
+        screen.cursor_row,
+        screen.cursor_col
     );
     println!("{}", screen.visible_text);
     Ok(())
