@@ -117,18 +117,91 @@ impl Default for PtyRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub enum PtyTranscriptEvent {
-    Sent(Vec<u8>),
-    Received(Vec<u8>),
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PtyTranscriptEventKind {
+    Sent {
+        data: Vec<u8>,
+    },
+    Received {
+        data: Vec<u8>,
+    },
     Resized {
         col_width: u32,
         row_height: u32,
         pix_width: u32,
         pix_height: u32,
     },
-    ExitStatus(u32),
+    ExitStatus {
+        exit_status: u32,
+    },
     Eof,
     Close,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PtyTranscriptEvent {
+    pub offset_ms: u64,
+    #[serde(flatten)]
+    pub event: PtyTranscriptEventKind,
+}
+
+impl PtyTranscriptEvent {
+    pub fn sent(offset_ms: u64, data: &[u8]) -> Self {
+        Self {
+            offset_ms,
+            event: PtyTranscriptEventKind::Sent {
+                data: data.to_vec(),
+            },
+        }
+    }
+
+    pub fn received(offset_ms: u64, data: &[u8]) -> Self {
+        Self {
+            offset_ms,
+            event: PtyTranscriptEventKind::Received {
+                data: data.to_vec(),
+            },
+        }
+    }
+
+    pub fn resized(
+        offset_ms: u64,
+        col_width: u32,
+        row_height: u32,
+        pix_width: u32,
+        pix_height: u32,
+    ) -> Self {
+        Self {
+            offset_ms,
+            event: PtyTranscriptEventKind::Resized {
+                col_width,
+                row_height,
+                pix_width,
+                pix_height,
+            },
+        }
+    }
+
+    pub fn exit_status(offset_ms: u64, exit_status: u32) -> Self {
+        Self {
+            offset_ms,
+            event: PtyTranscriptEventKind::ExitStatus { exit_status },
+        }
+    }
+
+    pub fn eof(offset_ms: u64) -> Self {
+        Self {
+            offset_ms,
+            event: PtyTranscriptEventKind::Eof,
+        }
+    }
+
+    pub fn close(offset_ms: u64) -> Self {
+        Self {
+            offset_ms,
+            event: PtyTranscriptEventKind::Close,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -611,6 +684,7 @@ pub struct GuestPtySession {
     guest_name: String,
     channel: Arc<tokio::sync::Mutex<Channel<russh::client::Msg>>>,
     transcript: Arc<Mutex<Vec<PtyTranscriptEvent>>>,
+    transcript_started_at: Instant,
 }
 
 impl std::fmt::Debug for GuestPtySession {
@@ -622,14 +696,24 @@ impl std::fmt::Debug for GuestPtySession {
 }
 
 impl GuestPtySession {
+    fn push_transcript_event(&self, event: PtyTranscriptEventKind) -> Result<(), SshProxyError> {
+        let mut transcript = self
+            .transcript
+            .lock()
+            .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
+        let offset_ms = self
+            .transcript_started_at
+            .elapsed()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        transcript.push(PtyTranscriptEvent { offset_ms, event });
+        Ok(())
+    }
+
     pub async fn send(&self, data: &[u8]) -> Result<(), SshProxyError> {
-        {
-            let mut transcript = self
-                .transcript
-                .lock()
-                .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
-            transcript.push(PtyTranscriptEvent::Sent(data.to_vec()));
-        }
+        self.push_transcript_event(PtyTranscriptEventKind::Sent {
+            data: data.to_vec(),
+        })?;
 
         let channel = self.channel.lock().await;
         channel.data(data).await.map_err(SshProxyError::from)
@@ -648,18 +732,12 @@ impl GuestPtySession {
         pix_width: u32,
         pix_height: u32,
     ) -> Result<(), SshProxyError> {
-        {
-            let mut transcript = self
-                .transcript
-                .lock()
-                .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
-            transcript.push(PtyTranscriptEvent::Resized {
-                col_width,
-                row_height,
-                pix_width,
-                pix_height,
-            });
-        }
+        self.push_transcript_event(PtyTranscriptEventKind::Resized {
+            col_width,
+            row_height,
+            pix_width,
+            pix_height,
+        })?;
 
         let channel = self.channel.lock().await;
         channel
@@ -688,53 +766,33 @@ impl GuestPtySession {
                 Err(_) => break,
                 Ok(None) => {
                     read.closed = true;
-                    let mut transcript = self
-                        .transcript
-                        .lock()
-                        .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
-                    transcript.push(PtyTranscriptEvent::Close);
+                    self.push_transcript_event(PtyTranscriptEventKind::Close)?;
                     break;
                 }
                 Ok(Some(ChannelMsg::Data { ref data })) => {
                     output.extend_from_slice(data);
-                    let mut transcript = self
-                        .transcript
-                        .lock()
-                        .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
-                    transcript.push(PtyTranscriptEvent::Received(data.to_vec()));
+                    self.push_transcript_event(PtyTranscriptEventKind::Received {
+                        data: data.to_vec(),
+                    })?;
                 }
                 Ok(Some(ChannelMsg::ExtendedData { ref data, .. })) => {
                     output.extend_from_slice(data);
-                    let mut transcript = self
-                        .transcript
-                        .lock()
-                        .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
-                    transcript.push(PtyTranscriptEvent::Received(data.to_vec()));
+                    self.push_transcript_event(PtyTranscriptEventKind::Received {
+                        data: data.to_vec(),
+                    })?;
                 }
                 Ok(Some(ChannelMsg::ExitStatus { exit_status })) => {
                     read.exit_status = Some(exit_status);
-                    let mut transcript = self
-                        .transcript
-                        .lock()
-                        .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
-                    transcript.push(PtyTranscriptEvent::ExitStatus(exit_status));
+                    self.push_transcript_event(PtyTranscriptEventKind::ExitStatus { exit_status })?;
                 }
                 Ok(Some(ChannelMsg::Eof)) => {
                     read.eof = true;
-                    let mut transcript = self
-                        .transcript
-                        .lock()
-                        .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
-                    transcript.push(PtyTranscriptEvent::Eof);
+                    self.push_transcript_event(PtyTranscriptEventKind::Eof)?;
                     break;
                 }
                 Ok(Some(ChannelMsg::Close)) => {
                     read.closed = true;
-                    let mut transcript = self
-                        .transcript
-                        .lock()
-                        .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
-                    transcript.push(PtyTranscriptEvent::Close);
+                    self.push_transcript_event(PtyTranscriptEventKind::Close)?;
                     break;
                 }
                 Ok(Some(_)) => {}
@@ -781,20 +839,14 @@ impl GuestPtySession {
                 }
                 Ok(None) => {
                     read.closed = true;
-                    let mut transcript = self
-                        .transcript
-                        .lock()
-                        .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
-                    transcript.push(PtyTranscriptEvent::Close);
+                    self.push_transcript_event(PtyTranscriptEventKind::Close)?;
                     break;
                 }
                 Ok(Some(ChannelMsg::Data { ref data })) => {
                     output.extend_from_slice(data);
-                    let mut transcript = self
-                        .transcript
-                        .lock()
-                        .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
-                    transcript.push(PtyTranscriptEvent::Received(data.to_vec()));
+                    self.push_transcript_event(PtyTranscriptEventKind::Received {
+                        data: data.to_vec(),
+                    })?;
                     let current = String::from_utf8_lossy(&output);
                     if current.contains(needle) {
                         read.bytes = output.clone();
@@ -804,11 +856,9 @@ impl GuestPtySession {
                 }
                 Ok(Some(ChannelMsg::ExtendedData { ref data, .. })) => {
                     output.extend_from_slice(data);
-                    let mut transcript = self
-                        .transcript
-                        .lock()
-                        .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
-                    transcript.push(PtyTranscriptEvent::Received(data.to_vec()));
+                    self.push_transcript_event(PtyTranscriptEventKind::Received {
+                        data: data.to_vec(),
+                    })?;
                     let current = String::from_utf8_lossy(&output);
                     if current.contains(needle) {
                         read.bytes = output.clone();
@@ -818,28 +868,16 @@ impl GuestPtySession {
                 }
                 Ok(Some(ChannelMsg::ExitStatus { exit_status })) => {
                     read.exit_status = Some(exit_status);
-                    let mut transcript = self
-                        .transcript
-                        .lock()
-                        .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
-                    transcript.push(PtyTranscriptEvent::ExitStatus(exit_status));
+                    self.push_transcript_event(PtyTranscriptEventKind::ExitStatus { exit_status })?;
                 }
                 Ok(Some(ChannelMsg::Eof)) => {
                     read.eof = true;
-                    let mut transcript = self
-                        .transcript
-                        .lock()
-                        .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
-                    transcript.push(PtyTranscriptEvent::Eof);
+                    self.push_transcript_event(PtyTranscriptEventKind::Eof)?;
                     break;
                 }
                 Ok(Some(ChannelMsg::Close)) => {
                     read.closed = true;
-                    let mut transcript = self
-                        .transcript
-                        .lock()
-                        .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
-                    transcript.push(PtyTranscriptEvent::Close);
+                    self.push_transcript_event(PtyTranscriptEventKind::Close)?;
                     break;
                 }
                 Ok(Some(_)) => {}
@@ -863,13 +901,7 @@ impl GuestPtySession {
     }
 
     pub async fn close(&self) -> Result<(), SshProxyError> {
-        {
-            let mut transcript = self
-                .transcript
-                .lock()
-                .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
-            transcript.push(PtyTranscriptEvent::Close);
-        }
+        self.push_transcript_event(PtyTranscriptEventKind::Close)?;
 
         let channel = self.channel.lock().await;
         channel.close().await.map_err(SshProxyError::from)
@@ -921,6 +953,7 @@ pub async fn open_pty_on_guest(
         guest_name: guest_name.to_string(),
         channel: Arc::new(tokio::sync::Mutex::new(channel)),
         transcript: Arc::new(Mutex::new(Vec::new())),
+        transcript_started_at: Instant::now(),
     })
     .map_err(SshProxyError::from)
 }

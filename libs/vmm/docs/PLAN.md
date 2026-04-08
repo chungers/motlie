@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-08 | @codex | Add asciicast export to the PTY artifact plan and standardize the scope boundary: NDJSON transcript + VTE screen JSON remain canonical, asciicast is the portable replay export, and PNG/GIF/movie generation is explicitly deferred out of `v1.4` scope |
 | 2026-04-08 | @codex | Replace the 7-slot allocator with computed subnet-pool capacity, expose allocator config through `harness_v1_4`, add a file-backed scenario driver with action/expectation steps, and complete PTY/VTE capture with raw transcript NDJSON plus rendered screen JSON |
 | 2026-04-07 | @codex | Complete the remaining Phase 4/5 observability slice: `VmObservability` now carries typed run-bundle metadata and capture paths, `harness_v1_4` persists PTY transcripts and internal result artifacts under the bundle root, result JSON now has structured status/error classification for agents/CI, and the PTY scenario emits hardened structured evidence |
 | 2026-04-07 | @codex | Implement the first concrete Phase 4/5 slice: `observability.rs`, `VmHandle::observability()`, and `harness_v1_4 --result-json ...` for machine-readable `smoke` results; PTY result hardening remains open |
@@ -291,10 +292,12 @@ Tasks:
   - [x] preserve PTY transcripts in a reusable artifact format
 - [ ] evaluate terminal-recording artifact generation for human verification:
   - [ ] `ttyrec`
-  - [ ] `asciinema`
+  - [x] `asciinema`-compatible cast export
   - [ ] `t-rec`
-  - [ ] decide whether the harness should emit raw recordings, asciinema casts,
-        or rendered movie artifacts such as GIFs for failed runs
+  - [x] decide that the harness should emit asciicast as the portable replay
+        export layered on top of the canonical NDJSON transcript + screen JSON
+  - [x] explicitly defer rendered movie artifacts such as GIF/PNG output out of
+        `v1.4` scope
 
 Acceptance:
 - later `v1.4` work can be developed against a stable non-REPL harness

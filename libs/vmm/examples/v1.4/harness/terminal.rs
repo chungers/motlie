@@ -2,9 +2,11 @@ use std::cmp::min;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use motlie_vmm::ssh::{GuestPtySession, PtyRead, PtyRequest, PtyTranscriptEvent, SshProxyError};
+use motlie_vmm::ssh::{
+    GuestPtySession, PtyRead, PtyRequest, PtyTranscriptEvent, PtyTranscriptEventKind, SshProxyError,
+};
 use serde::Serialize;
 use thiserror::Error;
 use tokio::time::Instant;
@@ -42,8 +44,14 @@ pub struct HarnessTerminalSession {
     name: String,
     inner: GuestPtySession,
     parser: Mutex<vt100::Parser>,
+    term: String,
+    command: Option<String>,
+    initial_cols: u16,
+    initial_rows: u16,
+    recorded_at_unix: u64,
     transcript_path: PathBuf,
     screen_path: PathBuf,
+    asciicast_path: PathBuf,
 }
 
 impl std::fmt::Debug for HarnessTerminalSession {
@@ -52,6 +60,7 @@ impl std::fmt::Debug for HarnessTerminalSession {
             .field("name", &self.name)
             .field("transcript_path", &self.transcript_path)
             .field("screen_path", &self.screen_path)
+            .field("asciicast_path", &self.asciicast_path)
             .finish_non_exhaustive()
     }
 }
@@ -63,6 +72,7 @@ impl HarnessTerminalSession {
         request: &PtyRequest,
         transcript_path: PathBuf,
         screen_path: PathBuf,
+        asciicast_path: PathBuf,
     ) -> Self {
         Self {
             name: name.into(),
@@ -72,8 +82,17 @@ impl HarnessTerminalSession {
                 request.col_width.try_into().unwrap_or(u16::MAX),
                 DEFAULT_SCROLLBACK,
             )),
+            term: request.term.clone(),
+            command: request.command.clone(),
+            initial_cols: request.col_width.try_into().unwrap_or(u16::MAX),
+            initial_rows: request.row_height.try_into().unwrap_or(u16::MAX),
+            recorded_at_unix: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
             transcript_path,
             screen_path,
+            asciicast_path,
         }
     }
 
@@ -199,8 +218,20 @@ impl HarnessTerminalSession {
     }
 
     pub fn persist_artifacts(&self) -> Result<(), TerminalSessionError> {
-        persist_transcript_ndjson(&self.transcript_path, &self.inner.transcript()?)?;
-        persist_screen_json(&self.screen_path, &self.snapshot()?)?;
+        let transcript = self.inner.transcript()?;
+        let snapshot = self.snapshot()?;
+        persist_transcript_ndjson(&self.transcript_path, &transcript)?;
+        persist_screen_json(&self.screen_path, &snapshot)?;
+        persist_asciicast(
+            &self.asciicast_path,
+            &self.name,
+            &self.term,
+            self.command.as_deref(),
+            self.initial_cols,
+            self.initial_rows,
+            self.recorded_at_unix,
+            &transcript,
+        )?;
         Ok(())
     }
 
@@ -214,6 +245,10 @@ impl HarnessTerminalSession {
 
     pub fn screen_path(&self) -> &Path {
         &self.screen_path
+    }
+
+    pub fn asciicast_path(&self) -> &Path {
+        &self.asciicast_path
     }
 
     fn apply_bytes(&self, bytes: &[u8]) -> Result<(), TerminalSessionError> {
@@ -261,6 +296,141 @@ pub fn persist_transcript_ndjson(
     }
     writer
         .flush()
+        .map_err(|source| TerminalSessionError::Persist {
+            path: path.to_path_buf(),
+            reason: source.to_string(),
+        })?;
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct AsciicastHeader<'a> {
+    version: u8,
+    term: AsciicastTerm<'a>,
+    timestamp: u64,
+    title: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command: Option<&'a str>,
+}
+
+#[derive(Debug, Serialize)]
+struct AsciicastTerm<'a> {
+    cols: u16,
+    rows: u16,
+    #[serde(rename = "type")]
+    term_type: &'a str,
+}
+
+pub fn persist_asciicast(
+    path: &Path,
+    title: &str,
+    term: &str,
+    command: Option<&str>,
+    initial_cols: u16,
+    initial_rows: u16,
+    recorded_at_unix: u64,
+    transcript: &[PtyTranscriptEvent],
+) -> Result<(), TerminalSessionError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| TerminalSessionError::Persist {
+            path: parent.to_path_buf(),
+            reason: source.to_string(),
+        })?;
+    }
+
+    let file = std::fs::File::create(path).map_err(|source| TerminalSessionError::Persist {
+        path: path.to_path_buf(),
+        reason: source.to_string(),
+    })?;
+    let mut writer = BufWriter::new(file);
+
+    let header = AsciicastHeader {
+        version: 3,
+        term: AsciicastTerm {
+            cols: initial_cols,
+            rows: initial_rows,
+            term_type: term,
+        },
+        timestamp: recorded_at_unix,
+        title,
+        command,
+    };
+    serde_json::to_writer(&mut writer, &header).map_err(|source| {
+        TerminalSessionError::Persist {
+            path: path.to_path_buf(),
+            reason: source.to_string(),
+        }
+    })?;
+    writer
+        .write_all(b"\n")
+        .map_err(|source| TerminalSessionError::Persist {
+            path: path.to_path_buf(),
+            reason: source.to_string(),
+        })?;
+
+    let mut previous_offset_ms = 0u64;
+    for event in transcript {
+        let delta_ms = event.offset_ms.saturating_sub(previous_offset_ms);
+        previous_offset_ms = event.offset_ms;
+        let time = delta_ms as f64 / 1000.0;
+
+        match &event.event {
+            PtyTranscriptEventKind::Sent { data } => write_asciicast_event(
+                &mut writer,
+                path,
+                time,
+                "i",
+                String::from_utf8_lossy(data).as_ref(),
+            )?,
+            PtyTranscriptEventKind::Received { data } => write_asciicast_event(
+                &mut writer,
+                path,
+                time,
+                "o",
+                String::from_utf8_lossy(data).as_ref(),
+            )?,
+            PtyTranscriptEventKind::Resized {
+                col_width,
+                row_height,
+                ..
+            } => write_asciicast_event(
+                &mut writer,
+                path,
+                time,
+                "r",
+                &format!("{col_width}x{row_height}"),
+            )?,
+            PtyTranscriptEventKind::ExitStatus { exit_status } => {
+                write_asciicast_event(&mut writer, path, time, "x", &exit_status.to_string())?
+            }
+            PtyTranscriptEventKind::Eof | PtyTranscriptEventKind::Close => {}
+        }
+    }
+
+    writer
+        .flush()
+        .map_err(|source| TerminalSessionError::Persist {
+            path: path.to_path_buf(),
+            reason: source.to_string(),
+        })?;
+    Ok(())
+}
+
+fn write_asciicast_event(
+    writer: &mut BufWriter<std::fs::File>,
+    path: &Path,
+    time: f64,
+    code: &str,
+    data: &str,
+) -> Result<(), TerminalSessionError> {
+    serde_json::to_writer(&mut *writer, &(time, code, data)).map_err(|source| {
+        TerminalSessionError::Persist {
+            path: path.to_path_buf(),
+            reason: source.to_string(),
+        }
+    })?;
+    writer
+        .write_all(b"\n")
         .map_err(|source| TerminalSessionError::Persist {
             path: path.to_path_buf(),
             reason: source.to_string(),

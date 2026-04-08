@@ -97,6 +97,10 @@ pub enum ScenarioStep {
         #[serde(default)]
         timeout_ms: Option<u64>,
     },
+    PtyExpectScreen {
+        session: String,
+        contains: String,
+    },
     PtyExpectTerminal {
         session: String,
         #[serde(default)]
@@ -157,6 +161,7 @@ pub struct ScenarioSessionArtifacts {
     pub guest: String,
     pub transcript_ndjson: PathBuf,
     pub screen_json: PathBuf,
+    pub asciicast: PathBuf,
     pub final_screen: VteScreenSnapshot,
 }
 
@@ -262,6 +267,7 @@ struct ScenarioDriver {
     proxy_config: SshProxyConfig,
     handles: HashMap<String, VmHandle>,
     terminals: HashMap<String, HarnessTerminalSession>,
+    session_guests: HashMap<String, String>,
     artifact_root: PathBuf,
 }
 
@@ -326,6 +332,7 @@ impl ScenarioDriver {
             proxy_config,
             handles: HashMap::new(),
             terminals: HashMap::new(),
+            session_guests: HashMap::new(),
             artifact_root,
         })
     }
@@ -365,9 +372,10 @@ impl ScenarioDriver {
         for (name, session) in &self.terminals {
             match session.persist_artifacts() {
                 Ok(()) => {
-                    let guest = name
-                        .split_once(':')
-                        .map(|(guest, _)| guest.to_string())
+                    let guest = self
+                        .session_guests
+                        .get(name)
+                        .cloned()
                         .unwrap_or_else(|| "unknown".to_string());
                     match session.snapshot() {
                         Ok(final_screen) => {
@@ -377,6 +385,7 @@ impl ScenarioDriver {
                                     guest,
                                     transcript_ndjson: session.transcript_path().to_path_buf(),
                                     screen_json: session.screen_path().to_path_buf(),
+                                    asciicast: session.asciicast_path().to_path_buf(),
                                     final_screen,
                                 },
                             );
@@ -557,9 +566,11 @@ impl ScenarioDriver {
                     &request,
                     session_root.join("pty-transcript.ndjson"),
                     session_root.join("pty-screen.json"),
+                    session_root.join("pty.cast"),
                 );
                 let screen = terminal.snapshot()?;
                 self.terminals.insert(session.clone(), terminal);
+                self.session_guests.insert(session.clone(), guest.clone());
                 Ok(ScenarioStepResult {
                     index,
                     action: "pty_open",
@@ -678,6 +689,29 @@ impl ScenarioDriver {
                     shutdown: None,
                 })
             }
+            ScenarioStep::PtyExpectScreen { session, contains } => {
+                let terminal = self.terminal(session)?;
+                let screen = terminal.snapshot()?;
+                if !screen.visible_text.contains(contains) {
+                    return Err(TerminalSessionError::Assertion {
+                        step: "pty_expect_screen",
+                        expected: format!("screen containing '{contains}'"),
+                        observed_excerpt: screen.visible_text.clone(),
+                    }
+                    .into());
+                }
+                Ok(ScenarioStepResult {
+                    index,
+                    action: "pty_expect_screen",
+                    guest: None,
+                    session: Some(session.clone()),
+                    detail: format!("rendered screen contains '{}'", contains),
+                    exec: None,
+                    pty_read: None,
+                    screen: Some(screen),
+                    shutdown: None,
+                })
+            }
             ScenarioStep::PtyExpectTerminal {
                 session,
                 timeout_ms,
@@ -793,6 +827,7 @@ fn action_name(step: &ScenarioStep) -> &'static str {
         ScenarioStep::PtyRead { .. } => "pty_read",
         ScenarioStep::PtyResize { .. } => "pty_resize",
         ScenarioStep::PtyExpect { .. } => "pty_expect",
+        ScenarioStep::PtyExpectScreen { .. } => "pty_expect_screen",
         ScenarioStep::PtyExpectTerminal { .. } => "pty_expect_terminal",
         ScenarioStep::PtySnapshot { .. } => "pty_snapshot",
         ScenarioStep::Shutdown { .. } => "shutdown",
@@ -818,6 +853,7 @@ fn step_session(step: &ScenarioStep) -> Option<&str> {
         | ScenarioStep::PtyRead { session, .. }
         | ScenarioStep::PtyResize { session, .. }
         | ScenarioStep::PtyExpect { session, .. }
+        | ScenarioStep::PtyExpectScreen { session, .. }
         | ScenarioStep::PtyExpectTerminal { session, .. }
         | ScenarioStep::PtySnapshot { session, .. } => Some(session),
         _ => None,
