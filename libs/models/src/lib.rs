@@ -1,7 +1,15 @@
 //! Curated model bundle catalog for the Motlie ecosystem.
 //!
-//! This scaffold intentionally avoids inventing concrete bundle APIs before the
-//! contract crate is implemented.
+//! This crate owns the bundle/catalog layer above `motlie-model`.
 
-/// Placeholder root type for the initial crate scaffold.
-pub struct ModelsScaffold;
+mod catalog;
+
+pub use motlie_model::eval::EvalTrack;
+pub use motlie_model::{
+    BundleId, Capabilities, CapabilityDescriptor, CapabilityKind, ContentKind, InteractionStyle,
+};
+
+pub use catalog::{
+    BackendKind, BuildConstraint, BundleDescriptor, BundleFamily, BundleRequirements, Catalog,
+    PackagingMode, PlatformConstraint, SupportTier,
+};

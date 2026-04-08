@@ -146,7 +146,7 @@ Recommended public concepts:
 
 - `BundleId`
 - `BundleDescriptor`
-- `BundleCatalog`
+- `Catalog`
 - `BundleFamily`
 - `SupportTier`
 
@@ -353,7 +353,9 @@ Backend composition also includes build-time composition. A bundle may depend on
 
 ### Internal Backend Boundary
 
-Backends should be hidden behind internal adapters or sibling backend crates. `libs/models` may expose backend choice in descriptor metadata for observability, but applications should not instantiate backend adapters directly.
+Generic backend implementations should live under `libs/model/backends/*`, not inside `libs/models`. This keeps reusable runtime machinery close to the contract layer while keeping `libs/models` focused on curated bundle stacks, artifacts, and bundle-specific adaptations.
+
+`libs/models` may expose backend choice in descriptor metadata for observability, but applications should not instantiate backend adapters directly.
 
 Recommended internal trait:
 
@@ -368,7 +370,11 @@ trait BackendFactory {
 }
 ```
 
-This trait is not required to be public in v1.
+This trait is not required to be public in v1. The important boundary is structural:
+
+- `libs/model/backends/mistral` owns generic `mistral.rs` contract implementations
+- `libs/model/backends/ort` owns generic ORT contract implementations
+- `libs/models` owns which curated bundle uses which backend implementation and with what artifacts or bundle-specific glue
 
 ## API Sketch
 
@@ -376,10 +382,10 @@ The application experience should feel like selecting and loading product module
 
 ```rust
 use motlie_model::BundleId;
-use motlie_models::ModelCatalog;
+use motlie_models::Catalog;
 
-let catalog = ModelCatalog::default();
-let bundle = catalog.bundle(BundleId::Qwen3_5Instruct)?;
+let catalog = Catalog::default();
+let bundle = catalog.bundle(&BundleId::new("qwen3_5_instruct"))?;
 let handle = bundle.start(Default::default()).await?;
 let chat = handle.chat()?;
 
@@ -548,6 +554,6 @@ If protected or encrypted bundle packaging enters scope, PLAN must add explicit 
 ## Open Concerns
 
 - Whether bundle IDs should include provider or packaging suffixes when multiple vetted variants exist
-- Whether `ModelCatalog` should be fully static in v1 or support external registration hooks
+- Whether `Catalog` should be fully static in v1 or support external registration hooks
 - How much backend choice should be exposed in descriptor metadata for observability and support diagnostics
 - Whether bundle manifests should live in Rust code, generated tables, or external metadata files

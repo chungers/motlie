@@ -11,3 +11,4 @@ description = "Core contracts for curated Motlie model bundles"
 path = "src/lib.rs"
 
 [dependencies]
+async-trait = "0.1"
