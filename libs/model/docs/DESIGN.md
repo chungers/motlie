@@ -13,6 +13,7 @@
 | 2026-04-08 | @codex-researcher: Tightened the design to match the current implemented contract exactly: removed unstaged future type names from the core abstraction list, corrected trait signatures, and clarified that richer artifact manifests currently live in `libs/models` while `libs/model` only standardizes startup artifact policy. | Core Abstractions, Capability Surfaces, Artifact and Packaging Contracts |
 | 2026-04-08 | @codex-researcher: Added the proposed bundle-level embedding metadata contract so curated embedding bundles can expose retrieval-relevant semantics such as preferred distance metric and normalization. This shape is intended to align cleanly with future `libs/db/vector::EmbeddingSpec` integration without creating a reverse dependency today. | Core Abstractions, Capability Surfaces, API Sketch |
 | 2026-04-08 | @codex-researcher: Referenced the `libs/models` bundle-build convention so the contract layer is explicit that bundle availability is build-dependent and selector/catalog surfaces may vary by curated feature set. | Architecture, Framework Principles |
+| 2026-04-08 | @codex-researcher: Added explicit future-model follow-up notes for multimodal chat, tool-calling, richer startup controls, and capability-role semantics so the current embedding-first contract can merge with the next required extensions already tracked in-design. | Goals and Non-Goals, Loaded Handle, Capability Model, Capability Surfaces, Open Concerns |
 
 This document defines the design for `libs/model`, the contract crate for Motlie's packaged model system. The crate does not ship concrete model bundles or runtime implementations. Instead, it defines the stable public vocabulary, lifecycle, request/response types, capability adapters, composability boundaries, and artifact contracts that higher-level crates build on.
 
@@ -86,6 +87,7 @@ The crate is intentionally small, dependency-light, and backend-agnostic.
 - Support static or embedded deployment artifacts, including future encrypted bundle formats
 - Allow higher-level crates to register and load curated bundles consistently
 - Provide ergonomic Rust APIs suitable for application integration
+- Preserve a clear additive path for the planned chat, multimodal, and tool-calling bundles that follow this embedding slice
 
 ### Non-Goals
 
@@ -245,6 +247,11 @@ This keeps lifecycle explicit:
 - bundle handle is loaded state
 - capability access happens from the loaded handle
 
+Design note:
+
+- the current per-capability accessor pattern is intentionally small and acceptable for the first three executable surfaces
+- if the count of executable capability adapters grows substantially, revisit whether `BundleHandle` should continue to grow one accessor per capability or whether a more generic capability-adapter registry becomes justified
+
 ### Capability Model
 
 Capabilities are first-class and discoverable. Not every bundle supports every capability.
@@ -328,6 +335,12 @@ pub struct Capabilities {
 
 The curated model favors a closed enum for capability kinds rather than an open-ended registry. New capability kinds are expected to arrive through code review as part of the curation process. The descriptor layer makes capabilities introspectable for catalogs, harnesses, and operators without exposing backend-specific probing logic.
 
+Important semantic rule:
+
+- some `CapabilityKind` values correspond directly to executable capability traits today (`Chat`, `Completion`, `Embeddings`)
+- some future values may begin as descriptive flags on top of an existing executable surface rather than introducing a new trait immediately
+- for the planned Gemma 4 path, `Vision` is expected to first mean "this chat surface accepts image content parts" rather than forcing a separate `VisionModel` trait on day one
+
 ## Lifecycle
 
 The lifecycle must be consistent across all bundles even when internal backends vary.
@@ -358,6 +371,12 @@ The contract should allow a loaded bundle handle to serve multiple requests conc
 - max concurrency hints
 - per-bundle runtime knobs
 
+Known additive follow-ups for the next local/chat bundles include:
+
+- quantization selection
+- explicit device selection policy
+- context-length override or budget
+
 ## Capability Surfaces
 
 The capability APIs should expose a stable user-facing interaction surface while hiding backend-specific request plumbing.
@@ -377,6 +396,13 @@ pub trait ChatModel: Send + Sync {
     async fn generate(&self, request: ChatRequest) -> Result<ChatResponse, ModelError>;
 }
 ```
+
+Planned additive extensions before the first chat-capable bundle lands:
+
+- add `ChatRole::Tool`
+- extend `ChatMessage` with optional tool-call correlation fields
+- change `ChatMessage.content` from plain `String` to a multimodal content-parts representation before any chat implementor ships
+- extend `ChatResponse` with finish reason, usage metadata, and tool-call output
 
 ### Text Completion
 
@@ -447,31 +473,38 @@ The design should assume that evaluation is part of the bundle curation lifecycl
 Example ergonomic usage for downstream callers:
 
 ```rust
-use motlie_model::BundleId;
+use motlie_model::{BundleId, ChatMessage, ChatRequest, ChatRole};
 use motlie_models::Catalog;
 
-let catalog = Catalog::default();
-let bundle = catalog.bundle(&BundleId::new("qwen3_5_instruct"))?;
+let catalog = Catalog::new();
+let bundle = catalog.instantiate(&BundleId::new("qwen3_5_instruct"))?;
 let handle = bundle.start(Default::default()).await?;
 let chat = handle.chat()?;
 
-let response = chat.generate(ChatRequest::from_messages([
-    ("system", "Be concise."),
-    ("user", "Summarize the deployment model."),
-])).await?;
+let response = chat.generate(ChatRequest {
+    messages: vec![
+        ChatMessage::new(ChatRole::System, "Be concise."),
+        ChatMessage::new(ChatRole::User, "Summarize the deployment model."),
+    ],
+    ..Default::default()
+}).await?;
 ```
 
 Embedding flow:
 
 ```rust
-let bundle = catalog.bundle(BundleId::BgeSmallEn)?;
+use motlie_model::{EmbeddingRequest, BundleId};
+
+let bundle = catalog.instantiate(&BundleId::new("bge_small_en"))?;
 let handle = bundle.start(Default::default()).await?;
 let embeddings = handle.embeddings()?;
 
-let response = embeddings.embed(EmbeddingRequest::from_inputs([
-    "motlie bundles models with their runtime",
-    "embeddings do not expose chat",
-])).await?;
+let response = embeddings.embed(EmbeddingRequest {
+    inputs: vec![
+        "motlie bundles models with their runtime".into(),
+        "embeddings do not expose chat".into(),
+    ],
+}).await?;
 ```
 
 ### API Design Notes
@@ -635,3 +668,6 @@ PLAN must specify concrete tests for:
 - Whether the first introspection vocabulary should stop at normalized content kinds or include richer transport/file-format annotations later
 - How much generation-parameter normalization to promise across heterogeneous backends
 - Whether streaming output should be part of the initial contract or deferred until the non-streaming API is stable
+- Add `ChatRole::Tool` before tool-calling support lands
+- Upgrade `ChatMessage.content` to multimodal content parts before the first chat bundle ships, so image-capable chat models do not force a post-ship breaking migration
+- Consider a `ChatSpec` bundle-level metadata trait parallel to `EmbeddingSpec` once the first curated chat bundle is introduced

@@ -7,6 +7,7 @@
 | 2026-04-07 | @codex-researcher | Initial PLAN for `libs/model` vertical slice support. Covers contract finalization for the first embedding example, including capability introspection, request/response envelopes, lifecycle traits, and lightweight `model::eval` vocabulary. |
 | 2026-04-07 | @codex-researcher | Marked the completed contract and test work for the first embedding slice after `cargo check`/`cargo test` verification. | Phases 1-5 |
 | 2026-04-08 | @codex-researcher | Closed the missing capability-ordering and eval-track mapping gaps after PR review. Added explicit `CapabilityDescriptor` -> `EvalTrack` helpers/tests and a minimal `libs/model-eval` cross-crate consumption proof so the remaining unchecked items are true deferrals rather than silent omissions. | Phases 1, 4, 5 |
+| 2026-04-08 | @codex-researcher | Added an explicit follow-up phase for the post-embedding contract extensions already known to be needed for the planned chat, multimodal, and tool-calling bundles. | Phase 6 |
 
 Derived from [DESIGN.md](./DESIGN.md). This PLAN covers the contract work needed to support the first end-to-end embedding vertical slice while preserving the longer-term curated-bundle architecture.
 
@@ -136,3 +137,30 @@ Validate that the contract is sufficient for the first curated embedding example
 - [x] `cargo check -p motlie-model -p motlie-model-mistral -p motlie-models -p motlie-model-eval`
 - [x] Add unit tests in `libs/model` and run `cargo test -p motlie-model`
 - [x] Add a minimal cross-crate `libs/model-eval` consumption test and run `cargo test -p motlie-model-eval`
+
+## Phase 6: Planned Contract Extensions for Chat-Capable Bundles
+
+Track the already-known follow-up work needed before the first non-embedding curated bundles land.
+
+### 6.1 — Multimodal chat request surface
+
+- [ ] Replace `ChatMessage.content: String` with a multimodal content-parts representation before any chat bundle ships.
+  DESIGN reference: `Capability Surfaces`
+- [ ] Ensure `CapabilityKind::Vision` is documented and implemented as a descriptive flag on the chat surface unless and until a separate executable trait is truly needed.
+  DESIGN reference: `Core Abstractions` / `Capability Model`
+
+### 6.2 — Tool-calling and richer chat metadata
+
+- [ ] Add `ChatRole::Tool` and any required tool-call correlation fields on `ChatMessage`.
+  DESIGN reference: `Capability Surfaces`
+- [ ] Extend `ChatResponse` with additive fields for finish reason, usage metadata, and tool-call output.
+  DESIGN reference: `Capability Surfaces`
+- [ ] Evaluate whether a bundle-level `ChatSpec` metadata trait should be introduced parallel to `EmbeddingSpec`.
+  DESIGN reference: `Open Concerns`
+
+### 6.3 — Startup and operational extensions
+
+- [ ] Extend `StartOptions` additively with the first chat/local-model controls such as quantization, explicit device selection, and context-length override.
+  DESIGN reference: `Lifecycle`
+- [ ] Expand `ModelError` additively once the first operationally richer chat bundle introduces clearer startup/runtime failure classes.
+  DESIGN reference: `Core Abstractions` / `Error Model`
