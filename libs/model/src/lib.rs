@@ -180,9 +180,16 @@ pub struct BundleMetadata {
 }
 
 /// Deployment-oriented knobs used when starting a bundle.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ArtifactPolicy {
+    AllowFetch { root: Option<PathBuf> },
+    LocalOnly { root: PathBuf },
+}
+
+/// Deployment-oriented knobs used when starting a bundle.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct StartOptions {
-    pub cache_root: Option<PathBuf>,
+    pub artifact_policy: Option<ArtifactPolicy>,
     pub unpack_root: Option<PathBuf>,
     pub max_concurrency: Option<usize>,
 }
@@ -432,6 +439,24 @@ mod tests {
             capabilities: metadata.capabilities.clone(),
         };
         assert_eq!(loaded, loaded.clone());
+    }
+
+    #[test]
+    fn artifact_policy_is_part_of_start_options() {
+        let options = StartOptions {
+            artifact_policy: Some(ArtifactPolicy::LocalOnly {
+                root: PathBuf::from("/tmp/models"),
+            }),
+            unpack_root: None,
+            max_concurrency: Some(4),
+        };
+
+        assert_eq!(
+            options.artifact_policy,
+            Some(ArtifactPolicy::LocalOnly {
+                root: PathBuf::from("/tmp/models"),
+            })
+        );
     }
 
     #[tokio::test]

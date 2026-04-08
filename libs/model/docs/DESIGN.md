@@ -8,6 +8,7 @@
 |------|--------|----------|
 | 2026-04-07 | @codex-researcher: Initial greenfield design for `libs/model` as the stable contract/lifecycle crate for packaged model bundles. Migration and backward compatibility are explicitly out of scope for this first cut. | All |
 | 2026-04-07 | @codex-researcher: Clarified that curated artifact download is explicit in `libs/models`, while backends consume artifact roots through `StartOptions` and artifact contracts. | Overview, Architecture, Artifact and Packaging Contracts |
+| 2026-04-07 | @codex-researcher: Added `ArtifactPolicy` to the startup contract so regulated local-only deployments can fail closed while permissive deployments may still allow runtime fetch. | Core Abstractions, Lifecycle, Artifact and Packaging Contracts |
 
 This document defines the design for `libs/model`, the contract crate for Motlie's packaged model system. The crate does not ship concrete model bundles or runtime implementations. Instead, it defines the stable public vocabulary, lifecycle, request/response types, capability adapters, composability boundaries, and artifact contracts that higher-level crates build on.
 
@@ -61,6 +62,7 @@ The core product value is not only hiding backends. It is preserving a common ab
 5. Composable contracts so bundles can be selected, loaded, and invoked uniformly
 6. Artifact descriptors for packaged weights and auxiliary assets
 7. Common errors and unsupported-capability behavior
+8. Startup artifact policy that backends must honor
 
 The crate is intentionally small, dependency-light, and backend-agnostic.
 
