@@ -9,6 +9,7 @@
 | 2026-04-07 | @codex-researcher | Updated the backend plan after investigating NaN embeddings. The slice now validates true `LocalOnly` startup from a local snapshot, requires the sentence-transformers module stack, and adds an env-gated finite-vector test. |
 | 2026-04-08 | @codex-researcher | Clarified the remaining backend TODOs after PR review. Real multi-input inference is now validated by the env-gated test; the suggested `spec.rs` / `handle.rs` file split remains an explicit cleanup follow-up rather than an implied completed task. | Phases 1, 4 |
 | 2026-04-08 | @codex-researcher | Moved the embedding loader choice into `MistralEmbeddingSpec` so the backend implementation is genuinely spec-driven rather than hardcoding `EmbeddingGemma` in the generic builder path. | Phase 2, Phase 3 |
+| 2026-04-08 | @codex-researcher | Moved model-specific local artifact requirements into `MistralEmbeddingSpec` so `LocalOnly` validation is parameterized by the curated spec rather than hardcoding EmbeddingGemma layout in the backend function body. | Phase 2, Phase 3 |
 
 Derived from [../../docs/DESIGN.md](../../docs/DESIGN.md). This PLAN covers the generic `mistral` backend implementation work needed for the first embedding-only curated bundle.
 
@@ -36,7 +37,7 @@ Implement the first generic embedding path.
 ### 2.1 — Static backend-facing spec
 
 - [x] Finalize `MistralEmbeddingSpec` for:
-  `id`, `display_name`, `model_id`, embedding architecture, and `Capabilities`.
+  `id`, `display_name`, `model_id`, embedding architecture, required local artifact list, and `Capabilities`.
   DESIGN reference: `libs/model/docs/DESIGN.md` / `Bundle Contract`
 - [x] Provide a built-in constructor for `embeddinggemma_300m`.
   DESIGN reference: vertical slice target agreed during planning
