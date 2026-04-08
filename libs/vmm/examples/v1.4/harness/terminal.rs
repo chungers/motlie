@@ -172,6 +172,52 @@ impl HarnessTerminalSession {
         }
     }
 
+    pub async fn read_until_screen_contains(
+        &self,
+        step: &'static str,
+        needle: &str,
+        timeout: Duration,
+    ) -> Result<PtyRead, TerminalSessionError> {
+        let deadline = Instant::now() + timeout;
+        let mut combined = PtyRead::default();
+
+        let initial_screen = self.snapshot()?;
+        if initial_screen.visible_text.contains(needle) {
+            return Ok(combined);
+        }
+
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                let screen = self.snapshot()?;
+                return Err(TerminalSessionError::Assertion {
+                    step,
+                    expected: format!("screen containing '{needle}'"),
+                    observed_excerpt: excerpt(&screen.visible_text),
+                });
+            }
+
+            let chunk = self.read_for(min(remaining, DEFAULT_CHUNK_TIMEOUT)).await?;
+            combined.bytes.extend_from_slice(&chunk.bytes);
+            combined.output.push_str(&chunk.output);
+            combined.exit_status = chunk.exit_status.or(combined.exit_status);
+            combined.eof |= chunk.eof;
+            combined.closed |= chunk.closed;
+
+            let screen = self.snapshot()?;
+            if screen.visible_text.contains(needle) {
+                return Ok(combined);
+            }
+            if combined.eof || combined.closed {
+                return Err(TerminalSessionError::Assertion {
+                    step,
+                    expected: format!("screen containing '{needle}'"),
+                    observed_excerpt: excerpt(&screen.visible_text),
+                });
+            }
+        }
+    }
+
     pub async fn read_until_terminal(
         &self,
         timeout: Duration,

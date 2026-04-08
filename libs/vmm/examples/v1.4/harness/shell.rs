@@ -142,7 +142,7 @@ pub async fn run_shell(
         } else if let Some(rest) = trimmed.strip_prefix("pty-expect ") {
             pty_expect(rest, &terminals).await
         } else if let Some(rest) = trimmed.strip_prefix("pty-expect-screen ") {
-            pty_expect_screen(rest, &terminals)
+            pty_expect_screen(rest, &terminals).await
         } else if let Some(rest) = trimmed.strip_prefix("pty-resize ") {
             pty_resize(rest, &terminals).await
         } else if let Some(rest) = trimmed.strip_prefix("pty-screen ") {
@@ -192,7 +192,7 @@ fn print_help() {
     println!("pty-send-line <name> <text>");
     println!("pty-read <name> [ms]     read PTY output for up to the timeout");
     println!("pty-expect <name> <text> read until output contains text");
-    println!("pty-expect-screen <name> <text> assert the rendered VTE screen contains text");
+    println!("pty-expect-screen <name> <text> wait until the rendered VTE screen contains text");
     println!("pty-resize <name> <cols> <rows>");
     println!("pty-screen <name>        print the rendered VTE screen snapshot");
     println!("shutdown <guest>         stop a guest");
@@ -388,7 +388,7 @@ async fn pty_expect(
     Ok(())
 }
 
-fn pty_expect_screen(
+async fn pty_expect_screen(
     rest: &str,
     terminals: &HashMap<String, HarnessTerminalSession>,
 ) -> Result<(), DynError> {
@@ -397,14 +397,10 @@ fn pty_expect_screen(
     let terminal = terminals
         .get(session_name)
         .ok_or_else(|| format!("unknown PTY session '{session_name}'"))?;
-    let screen = terminal.snapshot()?;
-    if !screen.visible_text.contains(text) {
-        return Err(format!(
-            "PTY screen for '{session_name}' did not contain '{text}'; visible_text={}",
-            screen.visible_text
-        )
-        .into());
-    }
+    let read = terminal
+        .read_until_screen_contains("pty_expect_screen", text, Duration::from_secs(10))
+        .await?;
+    print_pty_read(&read.output, read.exit_status, read.eof, read.closed);
     println!("ok: PTY screen for {} contains '{}'", session_name, text);
     Ok(())
 }
