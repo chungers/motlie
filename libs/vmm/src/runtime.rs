@@ -8,7 +8,7 @@ use crate::backend::motlie::vfs::{MotlieVfsBacking, MotlieVfsHandle};
 use crate::backend::motlie::vnet::{MotlieVnetBacking, MotlieVnetHandle, MotlieVnetProvisionError};
 use crate::guestfs::GuestFsError;
 use crate::orchestrator::PreparedGuest;
-use crate::ssh::{ExecOutput, SshProxyError};
+use crate::ssh::{ExecOutput, GuestPtySession, PtyRequest, SshProxyError};
 use crate::spec::GuestSpec;
 use motlie_vnet::VnetError;
 
@@ -176,6 +176,16 @@ impl ControlPlaneHandle {
     pub async fn exec(&self, command: &str, timeout: Duration) -> Result<ExecOutput, RuntimeError> {
         match self {
             Self::MotlieSshProxy(handle) => Ok(handle.exec(command, timeout).await?),
+        }
+    }
+
+    pub async fn open_pty(
+        &self,
+        request: PtyRequest,
+        timeout: Duration,
+    ) -> Result<GuestPtySession, RuntimeError> {
+        match self {
+            Self::MotlieSshProxy(handle) => Ok(handle.open_pty(request, timeout).await?),
         }
     }
 

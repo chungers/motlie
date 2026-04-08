@@ -146,6 +146,7 @@ impl GuestNetAllocator {
         slot: u16,
     ) -> GuestNetAssignment {
         let subnet = config.first_admin_subnet + slot;
+        let egress_subnet = 2 + slot;
         let host = Ipv4Addr::new(192, 168, subnet as u8, 1);
         let guest = Ipv4Addr::new(192, 168, subnet as u8, 2);
         let suffix = (slot + 1) as u8;
@@ -157,9 +158,9 @@ impl GuestNetAllocator {
             admin_ipv4: AdminIpv4Pair { host, guest },
             admin_mac: [0x52, 0x54, 0x00, 0xad, 0x00, suffix],
             egress_ipv4: EgressIpv4Layout {
-                guest: Ipv4Addr::new(10, 0, 2, 15),
-                host: Ipv4Addr::new(10, 0, 2, 2),
-                dns: Ipv4Addr::new(10, 0, 2, 3),
+                guest: Ipv4Addr::new(10, 0, egress_subnet as u8, 15),
+                host: Ipv4Addr::new(10, 0, egress_subnet as u8, 2),
+                dns: Ipv4Addr::new(10, 0, egress_subnet as u8, 3),
                 netmask: Ipv4Addr::new(255, 255, 255, 0),
             },
             egress_mac: [0x52, 0x54, 0x00, 0xe9, 0x00, suffix],

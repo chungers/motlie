@@ -169,6 +169,12 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
         shell_single_quote(&mac_fmt(&cfg.net_assignment.egress_mac))
     )
     .expect("writing to String cannot fail");
+    writeln!(&mut out, "EGRESS_HOST_IP={}", cfg.net_assignment.egress_ipv4.host)
+        .expect("writing to String cannot fail");
+    writeln!(&mut out, "EGRESS_GUEST_IP={}", cfg.net_assignment.egress_ipv4.guest)
+        .expect("writing to String cannot fail");
+    writeln!(&mut out, "EGRESS_DNS_IP={}", cfg.net_assignment.egress_ipv4.dns)
+        .expect("writing to String cannot fail");
     writeln!(
         &mut out,
         "SSH_USER={}",
@@ -224,6 +230,9 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
         "LAUNCH_ARGS+=(--cid \"$GUEST_CID\" --host-ip \"$HOST_IP\" --guest-ip \"$GUEST_IP\")\n",
     );
     out.push_str("LAUNCH_ARGS+=(--admin-mac \"$ADMIN_MAC\" --egress-mac \"$EGRESS_MAC\")\n");
+    out.push_str(
+        "LAUNCH_ARGS+=(--egress-host-ip \"$EGRESS_HOST_IP\" --egress-guest-ip \"$EGRESS_GUEST_IP\" --egress-dns-ip \"$EGRESS_DNS_IP\")\n",
+    );
     out.push_str("LAUNCH_ARGS+=(--ssh-user \"$SSH_USER\" --hostname \"$GUEST_HOSTNAME\" --login-home \"$LOGIN_HOME\")\n");
     out.push_str("LAUNCH_ARGS+=(--overlay-size \"$OVERLAY_SIZE\")\n");
     out.push_str("LAUNCH_ARGS+=(--vnet-socket \"$VNET_SOCKET\")\n");

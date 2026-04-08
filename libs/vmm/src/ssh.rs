@@ -35,7 +35,7 @@ use russh::{Channel, ChannelMsg, ChannelWriteHalf, Pty};
 use thiserror::Error;
 use tokio::net::UnixListener;
 use tokio::task::JoinHandle;
-use tokio::time::{Instant, sleep};
+use tokio::time::{Instant, sleep, timeout as tokio_timeout};
 
 use crate::ca::{CaError, SshCa};
 
@@ -72,6 +72,10 @@ pub enum SshProxyError {
     UnknownGuest(String),
     #[error("internal state poisoned: {0}")]
     StatePoisoned(&'static str),
+    #[error("PTY operation timed out on guest '{guest}': {expectation}")]
+    PtyTimeout { guest: String, expectation: String },
+    #[error("unsupported SSH control-plane operation: {0}")]
+    Unsupported(&'static str),
 }
 
 impl From<russh::Error> for SshProxyError {
@@ -86,6 +90,52 @@ pub struct ExecOutput {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct PtyRequest {
+    pub term: String,
+    pub col_width: u32,
+    pub row_height: u32,
+    pub pix_width: u32,
+    pub pix_height: u32,
+    pub command: Option<String>,
+}
+
+impl Default for PtyRequest {
+    fn default() -> Self {
+        Self {
+            term: "xterm-256color".to_string(),
+            col_width: 80,
+            row_height: 24,
+            pix_width: 0,
+            pix_height: 0,
+            command: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PtyTranscriptEvent {
+    Sent(Vec<u8>),
+    Received(Vec<u8>),
+    Resized {
+        col_width: u32,
+        row_height: u32,
+        pix_width: u32,
+        pix_height: u32,
+    },
+    ExitStatus(u32),
+    Eof,
+    Close,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PtyRead {
+    pub output: String,
+    pub exit_status: Option<u32>,
+    pub eof: bool,
+    pub closed: bool,
 }
 
 /// Configuration for the SSH proxy server.
@@ -140,6 +190,14 @@ impl GuestBridgeHandle {
 
     pub async fn exec(&self, command: &str, timeout: Duration) -> Result<ExecOutput, SshProxyError> {
         exec_on_guest(&self.registry, &self.guest_name, command, timeout).await
+    }
+
+    pub async fn open_pty(
+        &self,
+        request: PtyRequest,
+        timeout: Duration,
+    ) -> Result<GuestPtySession, SshProxyError> {
+        open_pty_on_guest(&self.registry, &self.guest_name, request, timeout).await
     }
 
     pub fn shutdown(&self) -> Result<(), SshProxyError> {
@@ -404,10 +462,23 @@ async fn open_guest_session_with_retry(
             continue;
         };
 
-        let open_result = {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(SshProxyError::GuestConnection {
+                guest: guest_name.into(),
+                reason: last_err.unwrap_or_else(|| "SSH channel open failed".into()),
+            });
+        }
+
+        let open_result = tokio_timeout(remaining, async {
             let guard = handle.lock().await;
             guard.channel_open_session().await
-        };
+        })
+        .await
+        .map_err(|_| SshProxyError::GuestConnection {
+            guest: guest_name.into(),
+            reason: "SSH channel open timed out".into(),
+        })?;
 
         match open_result {
             Ok(channel) => return Ok(channel),
@@ -435,12 +506,20 @@ pub async fn exec_on_handle(
     guest_name: &str,
     command: &str,
 ) -> Result<ExecOutput, SshProxyError> {
-    let mut channel = {
+    let channel = {
         let guard = handle.lock().await;
         guard.channel_open_session().await
     }
     .map_err(|e| SshProxyError::Ssh(e.to_string()))?;
 
+    exec_on_channel(channel, guest_name, command).await
+}
+
+async fn exec_on_channel(
+    mut channel: Channel<russh::client::Msg>,
+    guest_name: &str,
+    command: &str,
+) -> Result<ExecOutput, SshProxyError> {
     channel
         .exec(true, command)
         .await
@@ -501,9 +580,337 @@ pub async fn exec_on_guest(
     timeout: Duration,
 ) -> Result<ExecOutput, SshProxyError> {
     wait_for_guest_bridge_ready(registry, guest_name, timeout).await?;
-    let handle = current_guest_handle(registry, guest_name)?
-        .ok_or_else(|| SshProxyError::UnknownGuest(guest_name.to_string()))?;
-    exec_on_handle(&handle, guest_name, command).await
+    let started = Instant::now();
+    let channel = open_guest_session_with_retry(registry, guest_name, timeout).await?;
+    let remaining = timeout.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return Err(SshProxyError::ExecFailed {
+            guest: guest_name.into(),
+            reason: format!("command timed out after {:?}", timeout),
+        });
+    }
+    tokio_timeout(remaining, exec_on_channel(channel, guest_name, command))
+        .await
+        .map_err(|_| SshProxyError::ExecFailed {
+            guest: guest_name.into(),
+            reason: format!("command timed out after {:?}", timeout),
+        })?
+}
+
+pub struct GuestPtySession {
+    guest_name: String,
+    channel: Arc<tokio::sync::Mutex<Channel<russh::client::Msg>>>,
+    transcript: Arc<Mutex<Vec<PtyTranscriptEvent>>>,
+}
+
+impl std::fmt::Debug for GuestPtySession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GuestPtySession")
+            .field("guest_name", &self.guest_name)
+            .finish_non_exhaustive()
+    }
+}
+
+impl GuestPtySession {
+    pub async fn send(&self, data: &[u8]) -> Result<(), SshProxyError> {
+        {
+            let mut transcript = self
+                .transcript
+                .lock()
+                .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
+            transcript.push(PtyTranscriptEvent::Sent(data.to_vec()));
+        }
+
+        let channel = self.channel.lock().await;
+        channel.data(data).await.map_err(SshProxyError::from)
+    }
+
+    pub async fn send_line(&self, line: &str) -> Result<(), SshProxyError> {
+        let mut bytes = line.as_bytes().to_vec();
+        bytes.push(b'\n');
+        self.send(&bytes).await
+    }
+
+    pub async fn resize(
+        &self,
+        col_width: u32,
+        row_height: u32,
+        pix_width: u32,
+        pix_height: u32,
+    ) -> Result<(), SshProxyError> {
+        {
+            let mut transcript = self
+                .transcript
+                .lock()
+                .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
+            transcript.push(PtyTranscriptEvent::Resized {
+                col_width,
+                row_height,
+                pix_width,
+                pix_height,
+            });
+        }
+
+        let channel = self.channel.lock().await;
+        channel
+            .window_change(col_width, row_height, pix_width, pix_height)
+            .await
+            .map_err(SshProxyError::from)
+    }
+
+    pub async fn read_for(&self, timeout: Duration) -> Result<PtyRead, SshProxyError> {
+        let deadline = Instant::now() + timeout;
+        let mut read = PtyRead::default();
+        let mut output = Vec::new();
+
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+
+            let next = {
+                let mut channel = self.channel.lock().await;
+                tokio_timeout(remaining, channel.wait()).await
+            };
+
+            match next {
+                Err(_) => break,
+                Ok(None) => {
+                    read.closed = true;
+                    let mut transcript = self
+                        .transcript
+                        .lock()
+                        .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
+                    transcript.push(PtyTranscriptEvent::Close);
+                    break;
+                }
+                Ok(Some(ChannelMsg::Data { ref data })) => {
+                    output.extend_from_slice(data);
+                    let mut transcript = self
+                        .transcript
+                        .lock()
+                        .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
+                    transcript.push(PtyTranscriptEvent::Received(data.to_vec()));
+                }
+                Ok(Some(ChannelMsg::ExtendedData { ref data, .. })) => {
+                    output.extend_from_slice(data);
+                    let mut transcript = self
+                        .transcript
+                        .lock()
+                        .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
+                    transcript.push(PtyTranscriptEvent::Received(data.to_vec()));
+                }
+                Ok(Some(ChannelMsg::ExitStatus { exit_status })) => {
+                    read.exit_status = Some(exit_status);
+                    let mut transcript = self
+                        .transcript
+                        .lock()
+                        .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
+                    transcript.push(PtyTranscriptEvent::ExitStatus(exit_status));
+                }
+                Ok(Some(ChannelMsg::Eof)) => {
+                    read.eof = true;
+                    let mut transcript = self
+                        .transcript
+                        .lock()
+                        .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
+                    transcript.push(PtyTranscriptEvent::Eof);
+                    break;
+                }
+                Ok(Some(ChannelMsg::Close)) => {
+                    read.closed = true;
+                    let mut transcript = self
+                        .transcript
+                        .lock()
+                        .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
+                    transcript.push(PtyTranscriptEvent::Close);
+                    break;
+                }
+                Ok(Some(_)) => {}
+            }
+        }
+
+        read.output = String::from_utf8_lossy(&output).into_owned();
+        Ok(read)
+    }
+
+    pub async fn read_until_contains(
+        &self,
+        needle: &str,
+        timeout: Duration,
+    ) -> Result<PtyRead, SshProxyError> {
+        let deadline = Instant::now() + timeout;
+        let mut read = PtyRead::default();
+        let mut output = Vec::new();
+
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                read.output = String::from_utf8_lossy(&output).into_owned();
+                return Err(SshProxyError::PtyTimeout {
+                    guest: self.guest_name.clone(),
+                    expectation: format!("output containing '{needle}'"),
+                });
+            }
+
+            let next = {
+                let mut channel = self.channel.lock().await;
+                tokio_timeout(remaining, channel.wait()).await
+            };
+
+            match next {
+                Err(_) => {
+                    read.output = String::from_utf8_lossy(&output).into_owned();
+                    return Err(SshProxyError::PtyTimeout {
+                        guest: self.guest_name.clone(),
+                        expectation: format!("output containing '{needle}'"),
+                    });
+                }
+                Ok(None) => {
+                    read.closed = true;
+                    let mut transcript = self
+                        .transcript
+                        .lock()
+                        .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
+                    transcript.push(PtyTranscriptEvent::Close);
+                    break;
+                }
+                Ok(Some(ChannelMsg::Data { ref data })) => {
+                    output.extend_from_slice(data);
+                    let mut transcript = self
+                        .transcript
+                        .lock()
+                        .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
+                    transcript.push(PtyTranscriptEvent::Received(data.to_vec()));
+                    let current = String::from_utf8_lossy(&output);
+                    if current.contains(needle) {
+                        read.output = current.into_owned();
+                        return Ok(read);
+                    }
+                }
+                Ok(Some(ChannelMsg::ExtendedData { ref data, .. })) => {
+                    output.extend_from_slice(data);
+                    let mut transcript = self
+                        .transcript
+                        .lock()
+                        .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
+                    transcript.push(PtyTranscriptEvent::Received(data.to_vec()));
+                    let current = String::from_utf8_lossy(&output);
+                    if current.contains(needle) {
+                        read.output = current.into_owned();
+                        return Ok(read);
+                    }
+                }
+                Ok(Some(ChannelMsg::ExitStatus { exit_status })) => {
+                    read.exit_status = Some(exit_status);
+                    let mut transcript = self
+                        .transcript
+                        .lock()
+                        .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
+                    transcript.push(PtyTranscriptEvent::ExitStatus(exit_status));
+                }
+                Ok(Some(ChannelMsg::Eof)) => {
+                    read.eof = true;
+                    let mut transcript = self
+                        .transcript
+                        .lock()
+                        .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
+                    transcript.push(PtyTranscriptEvent::Eof);
+                    break;
+                }
+                Ok(Some(ChannelMsg::Close)) => {
+                    read.closed = true;
+                    let mut transcript = self
+                        .transcript
+                        .lock()
+                        .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
+                    transcript.push(PtyTranscriptEvent::Close);
+                    break;
+                }
+                Ok(Some(_)) => {}
+            }
+        }
+
+        read.output = String::from_utf8_lossy(&output).into_owned();
+        Err(SshProxyError::PtyTimeout {
+            guest: self.guest_name.clone(),
+            expectation: format!("output containing '{needle}'"),
+        })
+    }
+
+    pub fn transcript(&self) -> Result<Vec<PtyTranscriptEvent>, SshProxyError> {
+        let transcript = self
+            .transcript
+            .lock()
+            .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
+        Ok(transcript.clone())
+    }
+
+    pub async fn close(&self) -> Result<(), SshProxyError> {
+        {
+            let mut transcript = self
+                .transcript
+                .lock()
+                .map_err(|_| SshProxyError::StatePoisoned("pty transcript"))?;
+            transcript.push(PtyTranscriptEvent::Close);
+        }
+
+        let channel = self.channel.lock().await;
+        channel.close().await.map_err(SshProxyError::from)
+    }
+}
+
+pub async fn open_pty_on_guest(
+    registry: &GuestRegistry,
+    guest_name: &str,
+    request: PtyRequest,
+    timeout: Duration,
+) -> Result<GuestPtySession, SshProxyError> {
+    wait_for_guest_bridge_ready(registry, guest_name, timeout).await?;
+    let started = Instant::now();
+    let channel = open_guest_session_with_retry(registry, guest_name, timeout).await?;
+    let remaining = timeout.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return Err(SshProxyError::PtyTimeout {
+            guest: guest_name.into(),
+            expectation: "PTY open".into(),
+        });
+    }
+
+    tokio_timeout(
+        remaining,
+        async {
+            channel
+                .request_pty(
+                    true,
+                    &request.term,
+                    request.col_width,
+                    request.row_height,
+                    request.pix_width,
+                    request.pix_height,
+                    &default_pty_modes(),
+                )
+                .await?;
+            if let Some(command) = &request.command {
+                channel.exec(true, command.clone()).await?;
+            } else {
+                channel.request_shell(true).await?;
+            }
+            Ok::<_, russh::Error>(channel)
+        },
+    )
+    .await
+    .map_err(|_| SshProxyError::PtyTimeout {
+        guest: guest_name.into(),
+        expectation: "PTY request".into(),
+    })?
+    .map(|channel| GuestPtySession {
+        guest_name: guest_name.to_string(),
+        channel: Arc::new(tokio::sync::Mutex::new(channel)),
+        transcript: Arc::new(Mutex::new(Vec::new())),
+    })
+    .map_err(SshProxyError::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -594,6 +1001,9 @@ struct ProxyHandler {
     /// one inbound client channel.
     guest_channels: SharedGuestChannels,
 }
+
+const PROXY_LOGIN_SHELL_COMMAND: &str =
+    r#"if [ -r /etc/motd ]; then cat /etc/motd; fi; exec "${SHELL:-/bin/bash}" -l"#;
 
 impl russh::server::Handler for ProxyHandler {
     type Error = SshProxyError;
@@ -896,7 +1306,7 @@ impl russh::server::Handler for ProxyHandler {
             let mut states = guest_channels.lock().await;
             if let Some(state) = states.get_mut(&channel) {
                 if let Some(ref ch) = state.writer {
-                    if let Err(e) = ch.request_shell(true).await {
+                    if let Err(e) = ch.exec(true, PROXY_LOGIN_SHELL_COMMAND).await {
                         let _ = server_handle.channel_failure(channel).await;
                         return Err(e.into());
                     }

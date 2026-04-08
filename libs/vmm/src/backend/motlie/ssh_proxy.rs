@@ -4,7 +4,8 @@ use std::time::Duration;
 use crate::ca::SshCa;
 use crate::orchestrator::PreparedGuest;
 use crate::ssh::{
-    ExecOutput, GuestBridgeHandle, GuestRegistry, SshProxyError, spawn_guest_ssh_bridge,
+    ExecOutput, GuestBridgeHandle, GuestPtySession, GuestRegistry, PtyRequest, SshProxyError,
+    spawn_guest_ssh_bridge,
 };
 
 #[derive(Clone)]
@@ -56,6 +57,14 @@ impl MotlieSshProxyHandle {
 
     pub async fn exec(&self, command: &str, timeout: Duration) -> Result<ExecOutput, SshProxyError> {
         self.inner.exec(command, timeout).await
+    }
+
+    pub async fn open_pty(
+        &self,
+        request: PtyRequest,
+        timeout: Duration,
+    ) -> Result<GuestPtySession, SshProxyError> {
+        self.inner.open_pty(request, timeout).await
     }
 
     pub fn shutdown(&self) -> Result<(), SshProxyError> {

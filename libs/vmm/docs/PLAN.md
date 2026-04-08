@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-07 | @codex | Start the PTY/session harness slice: `VmHandle::open_pty(...)`, `GuestPtySession`, and a first `harness_v1_4 pty` scenario now compile; next step is to absorb the old REPL into the harness as interactive/manual mode over the same API |
 | 2026-04-07 | @codex | Implement reviewed `Runtime` injection in code: `orchestrator.rs` now composes hypervisor/filesystem/network/control-plane backing through one injected runtime, and Motlie guest backing moved behind `backend::motlie::*` adapters |
 | 2026-04-07 | @codex | Lock the reviewed `Runtime { hypervisor, filesystem, network, control_plane }` model: `BackendSet` remains only as an intermediate implementation step, and the next cleanup is to inject Motlie guest backing through the same boundary |
 | 2026-04-07 | @codex | Inject VM backend dispatch through `BackendSet` so generic orchestrator code no longer imports concrete CH backend modules directly; record Motlie guest backing injection as the next cleanup step |
@@ -44,6 +45,7 @@ What is still missing for a polished, reusable harness:
 - library-owned lifecycle state instead of example-owned maps
 - typed validation/reporting APIs
 - a non-interactive harness mode suitable for agents and CI
+- an interactive/manual harness mode suitable for humans and coding agents
 - a stable host-side + guest-side reporting surface for CPU/memory/disk/network
   visibility
 - automatic guest provisioning when a new SSH principal appears
@@ -57,6 +59,8 @@ Turn the working `v1.3` example into:
 1. a thin interactive REPL for humans
 2. a reusable library for guest orchestration
 3. a stable runnable harness for agents and future Motlie development
+4. the primary ad-hoc/manual operator surface, replacing the standalone `v1.4`
+   REPL over time
 
 ## Desired Outcomes
 
@@ -73,6 +77,13 @@ Turn the working `v1.3` example into:
   - [x] `filesystem: FilesystemBacking`
   - [x] `network: NetworkBacking`
   - [x] `control_plane: ControlPlaneBacking`
+- [ ] `examples/v1.4/harness` becomes the primary driver:
+  - [x] `smoke` scenario
+  - [x] `pty` scenario
+  - [ ] multi-guest named scenarios
+  - [ ] interactive/manual shell mode
+  - [ ] transcript/log bundle capture
+  - [ ] action/expectation script format
 
 The rule for this plan is:
 
@@ -242,6 +253,11 @@ Tasks:
   - [ ] machine-readable result output
 - [x] keep it rootless/userspace-only
 - [ ] make it the default substrate for building later `v1.4` phases
+- [x] add the first PTY/session-driven scenario under `examples/v1.4/harness/`
+- [ ] move ad-hoc/manual REPL use cases into the harness over the same
+      lifecycle and PTY APIs
+- [ ] add transcript/log bundle capture so harness runs preserve enough state
+      for debugging subtle PTY, VFS, and vnet regressions
 
 Acceptance:
 - later `v1.4` work can be developed against a stable non-REPL harness
@@ -387,7 +403,7 @@ Acceptance:
 ## Non-Goals for This Plan
 
 - replacing Cloud Hypervisor with an abstract hypervisor backend
-- removing the human REPL entirely
+- removing ad-hoc/manual operation entirely
 - moving `motlie-vfs` or `motlie-vnet` implementation details into `libs/vmm`
 
 ## Checkpoint Rule

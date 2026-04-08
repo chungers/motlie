@@ -17,6 +17,41 @@
 - a real rootless automation binary at `examples/v1.4/harness/main.rs`
 - a thin harness flow that calls library `prepare()`, `boot()`,
   `VmHandle::ready(...)`, `VmHandle::exec(...)`, and `VmHandle::shutdown()`
+- a first PTY/session slice through `VmHandle::open_pty(...)` and
+  `harness_v1_4 pty`
+
+Repeatable validation entrypoints now are:
+
+- harness lifecycle smoke:
+  - `./target/debug/examples/harness_v1_4`
+- harness PTY smoke:
+  - `./target/debug/examples/harness_v1_4 pty`
+- REPL smoke:
+  - `./libs/vmm/examples/v1.4/integration/repl-smoke.sh`
+  - boots `alice` and `bob`
+  - runs `validate` for both in the REPL
+  - then verifies proxy SSH, writable mounted state, and outbound fetches for
+    both guests
+
+Detailed repeatable runbooks live in:
+
+- [`HARNESS.md`](./HARNESS.md)
+
+The direction from here is:
+
+- the harness becomes the primary driver
+- scripted scenarios and future interactive/manual operation should both sit on
+  top of the same `libs/vmm` lifecycle and PTY APIs
+- `repl_host_v1_4` remains useful during the transition, but should not gain
+  unique control-plane logic
+
+Operational note:
+
+- `harness_v1_4` now allocates a per-run namespace/demo root/proxy port and
+  prints them at startup, so repeated or concurrent harness runs do not collide
+  on fixed filenames
+- `repl_host_v1_4` now supports `where [guest]` to print the current runtime
+  roots and per-guest artifact paths
 
 The intended end state is two parallel proof points:
 
