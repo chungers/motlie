@@ -101,6 +101,8 @@ let metadata = BundleMetadata {
 };
 ```
 
+`Capabilities::new(...)` canonicalizes descriptors by `CapabilityKind`: the first descriptor for a kind wins, later duplicates are dropped, and `supports(...)` always reflects exactly the descriptor set stored in the struct.
+
 ### Request Envelopes
 
 ```rust
@@ -342,12 +344,13 @@ For the current vertical slice, `motlie_model::eval` also provides the stable br
 
 ```rust
 use motlie_model::{Capabilities, CapabilityDescriptor};
-use motlie_model::eval::{tracks_for_capabilities, EvalTrack};
+use motlie_model::eval::{capabilities_support_track, tracks_for_capabilities, EvalTrack};
 
 let capabilities = Capabilities::new(vec![CapabilityDescriptor::embeddings()]);
 let tracks = tracks_for_capabilities(&capabilities);
 
 assert!(tracks.contains(&EvalTrack::Embeddings));
+assert!(capabilities_support_track(&capabilities, EvalTrack::Embeddings));
 ```
 
 The v0.1 contract is intentionally narrow: embedding capabilities map directly to `EvalTrack::Embeddings`, while text-generation capabilities still require higher-level harness configuration because they may participate in multiple tracks.

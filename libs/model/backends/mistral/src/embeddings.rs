@@ -12,11 +12,28 @@ use motlie_model::{
 };
 
 /// Static bundle specification for a curated Mistral-backed embedding stack.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MistralEmbeddingArch {
+    EmbeddingGemma,
+    Qwen3Embedding,
+}
+
+impl MistralEmbeddingArch {
+    fn loader_type(self) -> EmbeddingLoaderType {
+        match self {
+            Self::EmbeddingGemma => EmbeddingLoaderType::EmbeddingGemma,
+            Self::Qwen3Embedding => EmbeddingLoaderType::Qwen3Embedding,
+        }
+    }
+}
+
+/// Static bundle specification for a curated Mistral-backed embedding stack.
 #[derive(Clone, Debug)]
 pub struct MistralEmbeddingSpec {
     pub id: BundleId,
     pub display_name: &'static str,
     pub model_id: &'static str,
+    pub arch: MistralEmbeddingArch,
     pub capabilities: Capabilities,
 }
 
@@ -26,6 +43,7 @@ impl MistralEmbeddingSpec {
             id: BundleId::new("embeddinggemma_300m"),
             display_name: "EmbeddingGemma 300M",
             model_id: "google/embeddinggemma-300m",
+            arch: MistralEmbeddingArch::EmbeddingGemma,
             capabilities: Capabilities::embeddings_only(),
         }
     }
@@ -35,6 +53,7 @@ impl MistralEmbeddingSpec {
 #[derive(Clone, Debug)]
 pub struct MistralEmbeddingBundle {
     metadata: BundleMetadata,
+    arch: MistralEmbeddingArch,
     model_id: &'static str,
 }
 
@@ -46,6 +65,7 @@ impl MistralEmbeddingBundle {
                 display_name: spec.display_name.into(),
                 capabilities: spec.capabilities,
             },
+            arch: spec.arch,
             model_id: spec.model_id,
         }
     }
@@ -66,7 +86,7 @@ impl ModelBundle for MistralEmbeddingBundle {
     }
 
     async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
-        let model = build_embedding_model(self.model_id, options).await?;
+        let model = build_embedding_model(self.model_id, self.arch, options).await?;
 
         Ok(Box::new(MistralEmbeddingHandle {
             descriptor: LoadedBundleDescriptor {
@@ -151,6 +171,7 @@ impl EmbeddingModel for MistralEmbeddingHandle {
 
 async fn build_embedding_model(
     model_id: &str,
+    arch: MistralEmbeddingArch,
     options: StartOptions,
 ) -> Result<mistralrs::Model, ModelError> {
     let StartOptions {
@@ -169,7 +190,7 @@ async fn build_embedding_model(
     }
 
     let mut builder = EmbeddingModelBuilder::new(model_target)
-        .with_loader_type(EmbeddingLoaderType::EmbeddingGemma)
+        .with_loader_type(arch.loader_type())
         .with_dtype(ModelDType::F32);
 
     if should_force_cpu() {
@@ -328,6 +349,7 @@ mod tests {
         assert_eq!(spec.id.as_str(), "embeddinggemma_300m");
         assert_eq!(spec.display_name, "EmbeddingGemma 300M");
         assert_eq!(spec.model_id, "google/embeddinggemma-300m");
+        assert_eq!(spec.arch, MistralEmbeddingArch::EmbeddingGemma);
         assert!(spec.capabilities.supports(CapabilityKind::Embeddings));
     }
 

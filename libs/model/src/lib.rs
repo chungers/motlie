@@ -140,11 +140,23 @@ pub struct Capabilities {
 
 impl Capabilities {
     pub fn new(descriptors: Vec<CapabilityDescriptor>) -> Self {
-        let kinds = descriptors
+        let mut descriptors_by_kind = BTreeSet::new();
+        let mut unique_descriptors = Vec::new();
+
+        for descriptor in descriptors {
+            if descriptors_by_kind.insert(descriptor.kind) {
+                unique_descriptors.push(descriptor);
+            }
+        }
+
+        let kinds = unique_descriptors
             .iter()
             .map(|descriptor| descriptor.kind)
             .collect();
-        Self { descriptors, kinds }
+        Self {
+            descriptors: unique_descriptors,
+            kinds,
+        }
     }
 
     pub fn descriptors(&self) -> &[CapabilityDescriptor] {
@@ -405,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_preserve_descriptor_order_and_deduplicate_support_checks() {
+    fn capabilities_preserve_first_descriptor_order_and_drop_duplicates() {
         let capabilities = Capabilities::new(vec![
             CapabilityDescriptor::embeddings(),
             CapabilityDescriptor::chat(),
@@ -420,11 +432,7 @@ mod tests {
 
         assert_eq!(
             kinds,
-            vec![
-                CapabilityKind::Embeddings,
-                CapabilityKind::Chat,
-                CapabilityKind::Embeddings
-            ]
+            vec![CapabilityKind::Embeddings, CapabilityKind::Chat]
         );
         assert!(capabilities.supports(CapabilityKind::Embeddings));
         assert!(capabilities.supports(CapabilityKind::Chat));

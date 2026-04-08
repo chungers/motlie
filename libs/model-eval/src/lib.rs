@@ -4,13 +4,13 @@
 //! scoring, reporting, and other executable evaluation machinery. Lightweight
 //! eval-facing contracts remain in `motlie_model::eval`.
 
-use motlie_model::eval::{tracks_for_capabilities, EvalTrack};
+use motlie_model::eval::{capabilities_support_track, EvalTrack};
 use motlie_model::Capabilities;
 
 /// Minimal track-selection helper proving `motlie-model-eval` can consume the
 /// stable `motlie_model::eval` mapping without bundle-specific branching.
 pub fn supports_track(capabilities: &Capabilities, track: EvalTrack) -> bool {
-    tracks_for_capabilities(capabilities).contains(&track)
+    capabilities_support_track(capabilities, track)
 }
 
 /// Placeholder type so the scaffold builds cleanly once wired into the workspace.
