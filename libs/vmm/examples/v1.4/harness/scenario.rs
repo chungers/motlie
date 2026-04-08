@@ -100,6 +100,8 @@ pub enum ScenarioStep {
     PtyExpectScreen {
         session: String,
         contains: String,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
     },
     PtyExpectTerminal {
         session: String,
@@ -689,17 +691,20 @@ impl ScenarioDriver {
                     shutdown: None,
                 })
             }
-            ScenarioStep::PtyExpectScreen { session, contains } => {
+            ScenarioStep::PtyExpectScreen {
+                session,
+                contains,
+                timeout_ms,
+            } => {
                 let terminal = self.terminal(session)?;
+                let read = terminal
+                    .read_until_screen_contains(
+                        "pty_expect_screen",
+                        contains,
+                        duration_or_default(*timeout_ms, 10_000),
+                    )
+                    .await?;
                 let screen = terminal.snapshot()?;
-                if !screen.visible_text.contains(contains) {
-                    return Err(TerminalSessionError::Assertion {
-                        step: "pty_expect_screen",
-                        expected: format!("screen containing '{contains}'"),
-                        observed_excerpt: screen.visible_text.clone(),
-                    }
-                    .into());
-                }
                 Ok(ScenarioStepResult {
                     index,
                     action: "pty_expect_screen",
@@ -707,7 +712,7 @@ impl ScenarioDriver {
                     session: Some(session.clone()),
                     detail: format!("rendered screen contains '{}'", contains),
                     exec: None,
-                    pty_read: None,
+                    pty_read: Some(read),
                     screen: Some(screen),
                     shutdown: None,
                 })

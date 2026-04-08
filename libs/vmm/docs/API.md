@@ -144,6 +144,7 @@ Phase 5 first slice:
 - [x] PTY scenario result hardening
 - [x] reusable PTY transcript artifact capture
 - [x] VTE/rendered terminal state
+- [x] timed VTE screen assertions for alternate-screen TUIs via `pty_expect_screen`
 - [x] asciicast replay/export
 - [ ] PNG/GIF/movie export
 

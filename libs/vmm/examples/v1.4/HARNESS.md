@@ -313,6 +313,9 @@ Current expectation model:
   shell-wrapper `grep` chains
 - use `pty_expect` for new incremental PTY output and `pty_expect_screen` for
   assertions against the current rendered VTE buffer
+- `pty_expect_screen` is a timed wait over the VTE buffer, so it can validate
+  alternate-screen TUIs such as Codex instead of only checking an immediate
+  snapshot
 
 Current limits:
 
