@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use motlie_model::eval::EvalTrack;
-use motlie_model::{BundleId, Capabilities, CapabilityDescriptor};
+use motlie_model::{BundleId, Capabilities, CapabilityDescriptor, ModelBundle};
+
+use crate::bundles::embeddinggemma_300m_descriptor;
 
 /// Organizational family for related curated bundles.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -87,10 +90,28 @@ impl BundleDescriptor {
     }
 }
 
-/// In-memory registry of curated bundle descriptors.
-#[derive(Clone, Debug, Default)]
+trait BundleFactory: Send + Sync {
+    fn instantiate(&self) -> Box<dyn ModelBundle>;
+}
+
+impl<F> BundleFactory for F
+where
+    F: Fn() -> Box<dyn ModelBundle> + Send + Sync + 'static,
+{
+    fn instantiate(&self) -> Box<dyn ModelBundle> {
+        (self)()
+    }
+}
+
+struct CatalogEntry {
+    descriptor: BundleDescriptor,
+    factory: Arc<dyn BundleFactory>,
+}
+
+/// In-memory registry of curated bundle descriptors and constructors.
+#[derive(Default)]
 pub struct Catalog {
-    bundles: BTreeMap<BundleId, BundleDescriptor>,
+    bundles: BTreeMap<BundleId, CatalogEntry>,
 }
 
 impl Catalog {
@@ -98,21 +119,45 @@ impl Catalog {
         Self::default()
     }
 
-    pub fn register(&mut self, descriptor: BundleDescriptor) -> Option<BundleDescriptor> {
-        self.bundles.insert(descriptor.id.clone(), descriptor)
+    pub fn with_defaults() -> Self {
+        let mut catalog = Self::new();
+        catalog.register(embeddinggemma_300m_descriptor(), || {
+            crate::bundles::embeddinggemma_300m_bundle()
+        });
+        catalog
+    }
+
+    pub fn register<F>(&mut self, descriptor: BundleDescriptor, factory: F) -> Option<BundleDescriptor>
+    where
+        F: Fn() -> Box<dyn ModelBundle> + Send + Sync + 'static,
+    {
+        self.bundles
+            .insert(
+                descriptor.id.clone(),
+                CatalogEntry {
+                    descriptor: descriptor.clone(),
+                    factory: Arc::new(factory),
+                },
+            )
+            .map(|entry| entry.descriptor)
     }
 
     pub fn bundle(&self, id: &BundleId) -> Option<&BundleDescriptor> {
-        self.bundles.get(id)
+        self.bundles.get(id).map(|entry| &entry.descriptor)
+    }
+
+    pub fn instantiate(&self, id: &BundleId) -> Option<Box<dyn ModelBundle>> {
+        self.bundles.get(id).map(|entry| entry.factory.instantiate())
     }
 
     pub fn bundles(&self) -> impl Iterator<Item = &BundleDescriptor> {
-        self.bundles.values()
+        self.bundles.values().map(|entry| &entry.descriptor)
     }
 
     pub fn bundles_for_track(&self, track: EvalTrack) -> impl Iterator<Item = &BundleDescriptor> {
         self.bundles
             .values()
+            .map(|entry| &entry.descriptor)
             .filter(move |descriptor| descriptor.supports_track(track))
     }
 
