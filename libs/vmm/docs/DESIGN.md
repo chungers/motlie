@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-08 | @codex | Make the harness terminal-state engine switchable, adopt `shadow-terminal` as the default high-fidelity backend for PTY/TUI validation, keep `vt100` as an explicit fallback backend, and keep PNG/GIF/movie generation out of scope for `v1.4` |
 | 2026-04-08 | @codex | Add the PTY export design decision: keep NDJSON transcript plus VTE screen JSON as canonical validation artifacts, add asciicast export for portable replay/interchange, and explicitly defer PNG/GIF/movie generation as out of scope for `v1.4` |
 | 2026-04-08 | @codex | Replace the temporary 7-slot network allocator with a dedicated slot-derived allocation design section and public API: `Ipv4Subnet`, `Ipv4SubnetPool`, computed capacity, harness-exposed allocator config, and PTY/VTE scenario-driver direction |
 | 2026-04-07 | @codex | Complete the remaining observability/result slice: `VmObservability` now exposes typed run-bundle metadata and capture paths, `harness_v1_4` persists internal result and PTY transcript artifacts, result JSON now carries structured failure classification, and PTY output is hardened into a stable evidence block |
@@ -269,15 +270,28 @@ The first concrete implementation slice for this is now:
 - typed run-bundle metadata and capture paths under `VmObservability`
 - persisted PTY transcript and internal result artifacts under the bundle root
 
-The next observability/reporting steps remain:
+The terminal/reporting contract is now:
 
-- rendered terminal state / VTE capture
-- optional recording artifacts
-  - chosen `v1.4` direction: asciicast export is in scope as a portable
-    text/timing replay format
-  - PNG, GIF, MP4, or other rendered movie artifacts are out of scope for
-    `v1.4`; those are human-review outputs, not the primary validation
-    contract for future agents
+- rendered terminal state / VTE capture is in scope and part of the harness
+  contract
+- the terminal-state engine is switchable inside `examples/v1.4/harness`
+  - `shadow` is the default high-fidelity backend for PTY/TUI validation
+  - `vt100` remains available as an explicit fallback/backend-comparison mode
+- the key decision is to keep the backend boundary inside the harness rather
+  than inside `libs/vmm`, because the harness already owns the live PTY stream
+  and artifact persistence
+- chosen `v1.4` recording direction: asciicast export is in scope as a
+  portable text/timing replay format layered on top of the canonical NDJSON
+  transcript and rendered screen JSON
+- PNG, GIF, MP4, or other rendered movie artifacts are out of scope for
+  `v1.4`; those are human-review outputs, not the primary validation contract
+  for future agents
+
+The practical reason for the `shadow` default is Codex/TUI fidelity: the
+`shadow-terminal`/WezTerm-backed renderer produces a clean enough rendered
+screen for alternate-screen startup validation, while the lighter `vt100`
+backend remains useful as a cheap compatibility parser but is not the default
+for agent-facing TUI assertions.
 
 This is explicitly meant to replace the old split between:
 

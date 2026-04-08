@@ -1,21 +1,69 @@
 use std::cmp::min;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use motlie_vmm::ssh::{
     GuestPtySession, PtyRead, PtyRequest, PtyTranscriptEvent, PtyTranscriptEventKind, SshProxyError,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use shadow_terminal::wezterm_term;
 use thiserror::Error;
 use tokio::time::Instant;
 
 const DEFAULT_SCROLLBACK: usize = 2_000;
 const DEFAULT_CHUNK_TIMEOUT: Duration = Duration::from_millis(500);
+const CURSOR_POSITION_REQUEST: &[u8] = b"\x1b[6n";
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalBackendKind {
+    Vt100,
+    Shadow,
+}
+
+impl Default for TerminalBackendKind {
+    fn default() -> Self {
+        Self::Shadow
+    }
+}
+
+impl std::fmt::Display for TerminalBackendKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Vt100 => write!(f, "vt100"),
+            Self::Shadow => write!(f, "shadow"),
+        }
+    }
+}
+
+impl std::str::FromStr for TerminalBackendKind {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "vt100" => Ok(Self::Vt100),
+            "shadow" => Ok(Self::Shadow),
+            other => Err(format!(
+                "unsupported terminal backend '{other}' (expected 'vt100' or 'shadow')"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalScreenMode {
+    Primary,
+    Alternate,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct VteScreenSnapshot {
+    pub backend: TerminalBackendKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screen_mode: Option<TerminalScreenMode>,
     pub rows: u16,
     pub cols: u16,
     pub cursor_row: u16,
@@ -40,10 +88,195 @@ pub enum TerminalSessionError {
     },
 }
 
+struct TerminalFeedResult {
+    auto_responses: Vec<Vec<u8>>,
+}
+
+enum TerminalEmulator {
+    Vt100(Vt100Engine),
+    Shadow(ShadowEngine),
+}
+
+impl TerminalEmulator {
+    fn new(kind: TerminalBackendKind, request: &PtyRequest) -> Self {
+        let rows = request.row_height.try_into().unwrap_or(u16::MAX);
+        let cols = request.col_width.try_into().unwrap_or(u16::MAX);
+        match kind {
+            TerminalBackendKind::Vt100 => Self::Vt100(Vt100Engine::new(rows, cols)),
+            TerminalBackendKind::Shadow => Self::Shadow(ShadowEngine::new(rows, cols)),
+        }
+    }
+
+    fn resize(&mut self, rows: u16, cols: u16) {
+        match self {
+            Self::Vt100(engine) => engine.resize(rows, cols),
+            Self::Shadow(engine) => engine.resize(rows, cols),
+        }
+    }
+
+    fn apply_bytes(&mut self, bytes: &[u8]) -> TerminalFeedResult {
+        match self {
+            Self::Vt100(engine) => engine.apply_bytes(bytes),
+            Self::Shadow(engine) => engine.apply_bytes(bytes),
+        }
+    }
+
+    fn snapshot(&self) -> VteScreenSnapshot {
+        match self {
+            Self::Vt100(engine) => engine.snapshot(),
+            Self::Shadow(engine) => engine.snapshot(),
+        }
+    }
+}
+
+struct Vt100Engine {
+    parser: vt100::Parser,
+}
+
+impl Vt100Engine {
+    fn new(rows: u16, cols: u16) -> Self {
+        Self {
+            parser: vt100::Parser::new(rows, cols, DEFAULT_SCROLLBACK),
+        }
+    }
+
+    fn resize(&mut self, rows: u16, cols: u16) {
+        self.parser.screen_mut().set_size(rows, cols);
+    }
+
+    fn apply_bytes(&mut self, bytes: &[u8]) -> TerminalFeedResult {
+        self.parser.process(bytes);
+        TerminalFeedResult {
+            auto_responses: Vec::new(),
+        }
+    }
+
+    fn snapshot(&self) -> VteScreenSnapshot {
+        let screen = self.parser.screen();
+        let contents = screen.contents();
+        let visible_lines = contents.lines().map(str::to_string).collect::<Vec<_>>();
+        let (cursor_row, cursor_col) = screen.cursor_position();
+        let (rows, cols) = screen.size();
+        VteScreenSnapshot {
+            backend: TerminalBackendKind::Vt100,
+            screen_mode: None,
+            rows,
+            cols,
+            cursor_row,
+            cursor_col,
+            visible_text: contents,
+            visible_lines,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct HarnessWeztermConfig {
+    scrollback: usize,
+}
+
+impl wezterm_term::TerminalConfiguration for HarnessWeztermConfig {
+    fn scrollback_size(&self) -> usize {
+        self.scrollback
+    }
+
+    fn color_palette(&self) -> wezterm_term::color::ColorPalette {
+        wezterm_term::color::ColorPalette::default()
+    }
+}
+
+struct ShadowEngine {
+    terminal: wezterm_term::Terminal,
+}
+
+impl ShadowEngine {
+    fn new(rows: u16, cols: u16) -> Self {
+        let terminal = wezterm_term::Terminal::new(
+            wezterm_size(cols.into(), rows.into()),
+            Arc::new(HarnessWeztermConfig {
+                scrollback: DEFAULT_SCROLLBACK,
+            }),
+            "motlie-vmm",
+            "v1.4",
+            Box::<Vec<u8>>::default(),
+        );
+        Self { terminal }
+    }
+
+    fn resize(&mut self, rows: u16, cols: u16) {
+        self.terminal.resize(wezterm_size(cols.into(), rows.into()));
+    }
+
+    fn apply_bytes(&mut self, bytes: &[u8]) -> TerminalFeedResult {
+        let auto_responses = if bytes
+            .windows(CURSOR_POSITION_REQUEST.len())
+            .any(|window| window == CURSOR_POSITION_REQUEST)
+        {
+            let response = self.cursor_position_response();
+            bytes
+                .windows(CURSOR_POSITION_REQUEST.len())
+                .filter(|window| *window == CURSOR_POSITION_REQUEST)
+                .map(|_| response.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        self.terminal.advance_bytes(bytes);
+        TerminalFeedResult { auto_responses }
+    }
+
+    fn snapshot(&self) -> VteScreenSnapshot {
+        let size = self.terminal.get_size();
+        let mut screen = self.terminal.screen().clone();
+        let mut visible_lines = Vec::with_capacity(size.rows);
+        for row in 0..size.rows {
+            let mut line = String::new();
+            for col in 0..size.cols {
+                if let Some(cell) = screen.get_cell(col, row.try_into().unwrap_or(i64::MAX)) {
+                    line.push_str(cell.str());
+                }
+            }
+            visible_lines.push(line);
+        }
+        let cursor = self.terminal.cursor_pos();
+        VteScreenSnapshot {
+            backend: TerminalBackendKind::Shadow,
+            screen_mode: Some(if self.terminal.is_alt_screen_active() {
+                TerminalScreenMode::Alternate
+            } else {
+                TerminalScreenMode::Primary
+            }),
+            rows: size.rows.try_into().unwrap_or(u16::MAX),
+            cols: size.cols.try_into().unwrap_or(u16::MAX),
+            cursor_row: cursor.y.try_into().unwrap_or(u16::MAX),
+            cursor_col: cursor.x.try_into().unwrap_or(u16::MAX),
+            visible_text: visible_lines.join("\n"),
+            visible_lines,
+        }
+    }
+
+    fn cursor_position_response(&self) -> Vec<u8> {
+        let cursor = self.terminal.cursor_pos();
+        format!("\x1b[{};{}R", cursor.y, cursor.x).into_bytes()
+    }
+}
+
+const fn wezterm_size(cols: usize, rows: usize) -> wezterm_term::TerminalSize {
+    wezterm_term::TerminalSize {
+        cols,
+        rows,
+        pixel_width: 0,
+        pixel_height: 0,
+        dpi: 0,
+    }
+}
+
 pub struct HarnessTerminalSession {
     name: String,
     inner: GuestPtySession,
-    parser: Mutex<vt100::Parser>,
+    emulator: Mutex<TerminalEmulator>,
+    backend: TerminalBackendKind,
     term: String,
     command: Option<String>,
     initial_cols: u16,
@@ -58,6 +291,7 @@ impl std::fmt::Debug for HarnessTerminalSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HarnessTerminalSession")
             .field("name", &self.name)
+            .field("backend", &self.backend)
             .field("transcript_path", &self.transcript_path)
             .field("screen_path", &self.screen_path)
             .field("asciicast_path", &self.asciicast_path)
@@ -70,6 +304,7 @@ impl HarnessTerminalSession {
         name: impl Into<String>,
         inner: GuestPtySession,
         request: &PtyRequest,
+        backend: TerminalBackendKind,
         transcript_path: PathBuf,
         screen_path: PathBuf,
         asciicast_path: PathBuf,
@@ -77,11 +312,8 @@ impl HarnessTerminalSession {
         Self {
             name: name.into(),
             inner,
-            parser: Mutex::new(vt100::Parser::new(
-                request.row_height.try_into().unwrap_or(u16::MAX),
-                request.col_width.try_into().unwrap_or(u16::MAX),
-                DEFAULT_SCROLLBACK,
-            )),
+            emulator: Mutex::new(TerminalEmulator::new(backend, request)),
+            backend,
             term: request.term.clone(),
             command: request.command.clone(),
             initial_cols: request.col_width.try_into().unwrap_or(u16::MAX),
@@ -94,6 +326,10 @@ impl HarnessTerminalSession {
             screen_path,
             asciicast_path,
         }
+    }
+
+    pub fn backend(&self) -> TerminalBackendKind {
+        self.backend
     }
 
     pub async fn send(&self, data: &[u8]) -> Result<(), TerminalSessionError> {
@@ -116,11 +352,11 @@ impl HarnessTerminalSession {
         self.inner
             .resize(col_width, row_height, pix_width, pix_height)
             .await?;
-        let mut parser = self
-            .parser
+        let mut emulator = self
+            .emulator
             .lock()
             .map_err(|_| TerminalSessionError::StatePoisoned)?;
-        parser.screen_mut().set_size(
+        emulator.resize(
             row_height.try_into().unwrap_or(u16::MAX),
             col_width.try_into().unwrap_or(u16::MAX),
         );
@@ -129,7 +365,7 @@ impl HarnessTerminalSession {
 
     pub async fn read_for(&self, timeout: Duration) -> Result<PtyRead, TerminalSessionError> {
         let read = self.inner.read_for(timeout).await?;
-        self.apply_bytes(&read.bytes)?;
+        self.apply_bytes(&read.bytes).await?;
         Ok(read)
     }
 
@@ -244,23 +480,11 @@ impl HarnessTerminalSession {
     }
 
     pub fn snapshot(&self) -> Result<VteScreenSnapshot, TerminalSessionError> {
-        let parser = self
-            .parser
+        let emulator = self
+            .emulator
             .lock()
             .map_err(|_| TerminalSessionError::StatePoisoned)?;
-        let screen = parser.screen();
-        let contents = screen.contents();
-        let visible_lines = contents.lines().map(str::to_string).collect::<Vec<_>>();
-        let (cursor_row, cursor_col) = screen.cursor_position();
-        let (rows, cols) = screen.size();
-        Ok(VteScreenSnapshot {
-            rows,
-            cols,
-            cursor_row,
-            cursor_col,
-            visible_text: contents,
-            visible_lines,
-        })
+        Ok(emulator.snapshot())
     }
 
     pub fn persist_artifacts(&self) -> Result<(), TerminalSessionError> {
@@ -297,15 +521,20 @@ impl HarnessTerminalSession {
         &self.asciicast_path
     }
 
-    fn apply_bytes(&self, bytes: &[u8]) -> Result<(), TerminalSessionError> {
+    async fn apply_bytes(&self, bytes: &[u8]) -> Result<(), TerminalSessionError> {
         if bytes.is_empty() {
             return Ok(());
         }
-        let mut parser = self
-            .parser
-            .lock()
-            .map_err(|_| TerminalSessionError::StatePoisoned)?;
-        parser.process(bytes);
+        let auto_responses = {
+            let mut emulator = self
+                .emulator
+                .lock()
+                .map_err(|_| TerminalSessionError::StatePoisoned)?;
+            emulator.apply_bytes(bytes).auto_responses
+        };
+        for response in auto_responses {
+            self.inner.send(&response).await?;
+        }
         Ok(())
     }
 }

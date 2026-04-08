@@ -32,6 +32,7 @@ use motlie_vmm::ssh::{
 use pty::{PtyScenarioError, PtyScenarioResult};
 use scenario::{ScenarioRunResult, ScenarioRunStatus};
 use serde::Serialize;
+use terminal::TerminalBackendKind;
 use thiserror::Error;
 use tokio::time::sleep;
 
@@ -106,6 +107,7 @@ struct ScenarioResult {
     guest_id: String,
     pid: Option<u32>,
     proxy: String,
+    terminal_backend: Option<TerminalBackendKind>,
     shutdown: Option<ShutdownReport>,
     shutdown_forced: Option<String>,
     observability: Option<VmObservability>,
@@ -184,6 +186,7 @@ async fn main() -> Result<(), DynError> {
     let mut mode = HarnessMode::Smoke;
     let mut root_override: Option<PathBuf> = None;
     let mut result_json_path: Option<PathBuf> = None;
+    let mut terminal_backend = TerminalBackendKind::default();
     let mut allocator_options = HarnessAllocatorOptions::default();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -198,6 +201,12 @@ async fn main() -> Result<(), DynError> {
                     .next()
                     .ok_or_else(|| "--result-json requires a path".to_string())?;
                 result_json_path = Some(PathBuf::from(value));
+            }
+            "--terminal-backend" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--terminal-backend requires 'vt100' or 'shadow'".to_string())?;
+                terminal_backend = value.parse()?;
             }
             "--first-cid" => {
                 let value = args
@@ -244,6 +253,9 @@ async fn main() -> Result<(), DynError> {
             }
             other if other.starts_with("--result-json=") => {
                 result_json_path = Some(PathBuf::from(other.trim_start_matches("--result-json=")));
+            }
+            other if other.starts_with("--terminal-backend=") => {
+                terminal_backend = other.trim_start_matches("--terminal-backend=").parse()?;
             }
             other if other.starts_with("--first-cid=") => {
                 allocator_options.first_cid = other.trim_start_matches("--first-cid=").parse()?;
@@ -296,7 +308,14 @@ async fn main() -> Result<(), DynError> {
     let instance = new_harness_instance(&root_dir)?;
     let allocator_config = allocator_options.build(&instance.socket_root);
     if matches!(mode, HarnessMode::Shell) {
-        return shell::run_shell(&base_dir, &artifacts_dir, &instance, allocator_config).await;
+        return shell::run_shell(
+            &base_dir,
+            &artifacts_dir,
+            &instance,
+            allocator_config,
+            terminal_backend,
+        )
+        .await;
     }
     if let HarnessMode::Scenario(path) = &mode {
         let result = scenario::run_scenario_file(
@@ -304,6 +323,7 @@ async fn main() -> Result<(), DynError> {
             &artifacts_dir,
             &instance,
             allocator_config,
+            terminal_backend,
             path,
             result_json_path.as_deref(),
         )
@@ -332,6 +352,7 @@ async fn main() -> Result<(), DynError> {
         Arc::clone(&guest_registry),
     ));
     print_instance_details(&instance, &proxy_config);
+    println!("  terminal_backend={terminal_backend}");
     let runtime = Arc::new(Runtime {
         hypervisor: HypervisorBacking::CloudHypervisorShell(
             motlie_vmm::backend::ch::shell::ChShellBackend::new(),
@@ -415,6 +436,7 @@ async fn main() -> Result<(), DynError> {
                         .clone();
                     let pty_run = pty::run_pty_smoke(
                         active_handle,
+                        terminal_backend,
                         transcript_path.clone(),
                         screen_path,
                         asciicast_path,
@@ -473,6 +495,7 @@ async fn main() -> Result<(), DynError> {
             .and_then(|report| report.pid)
             .or_else(|| handle.as_ref().and_then(|h| h.pid)),
         proxy: proxy.clone(),
+        terminal_backend: matches!(mode, HarnessMode::Pty).then_some(terminal_backend),
         shutdown: shutdown.clone(),
         shutdown_forced: shutdown
             .as_ref()
@@ -874,7 +897,7 @@ fn excerpt(output: &str) -> String {
 
 fn print_usage() {
     println!(
-        "usage: harness_v1_4 [smoke|pty|shell|scenario <file.json>] [--root <dir>] [--result-json <path>] [--first-cid N] [--max-guests N] [--admin-base CIDR] [--admin-guest-prefix N] [--egress-base CIDR] [--egress-guest-prefix N]"
+        "usage: harness_v1_4 [smoke|pty|shell|scenario <file.json>] [--root <dir>] [--result-json <path>] [--terminal-backend vt100|shadow] [--first-cid N] [--max-guests N] [--admin-base CIDR] [--admin-guest-prefix N] [--egress-base CIDR] [--egress-guest-prefix N]"
     );
 }
 

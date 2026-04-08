@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-08 | @codex | Add the switchable terminal-backend contract: `shadow` is now the default PTY/TUI renderer, `vt100` remains as a fallback flag, `pty-screen.json` records the backend used, and PNG/GIF/movie output stays out of scope for `v1.4` |
 | 2026-04-08 | @codex | Add asciicast as the portable PTY replay/export artifact, keep NDJSON transcript + VTE screen JSON as the canonical agent-facing validation artifacts, and explicitly mark PNG/GIF/movie generation out of scope for `v1.4` |
 | 2026-04-08 | @codex | Expand HARNESS into the future-agent operating contract: design goals, autonomous workflow, troubleshooting loop, artifact/log usage, and standard verification matrix now explicitly include `agent-bootstrap.json` and the recommended shell-vs-scenario decision path |
 | 2026-04-08 | @codex | Add `apt-get update` to the baseline agent/bootstrap validation and document the default egress allocator compatibility rule: keep slot-based capacity growth, but start the guest-facing vnet range at `10.0.2.0/24` so harness egress stays aligned with the previously validated path |
@@ -137,6 +138,16 @@ Build the harness:
 ```bash
 cargo build -p motlie-vmm --example harness_v1_4
 ```
+
+Terminal backend selection:
+
+```bash
+./target/debug/examples/harness_v1_4 --terminal-backend shadow ...
+./target/debug/examples/harness_v1_4 --terminal-backend vt100 ...
+```
+
+The default is `shadow`. Use `vt100` only as an explicit fallback or
+comparison/debugging mode.
 
 ## Core Modes
 
@@ -346,10 +357,21 @@ Per PTY session it writes:
 - `pty-screen.json`
 - `pty.cast`
 
+The rendered screen JSON now records which terminal backend produced it.
+
 Why both:
 
 - raw transcript is the source-of-truth event stream
 - rendered VTE screen state is what agents and humans usually reason about
+
+Backend contract:
+
+- `shadow` is the default PTY/TUI backend because it produces a much cleaner
+  rendered screen for Codex and other alternate-screen applications
+- `vt100` remains available behind `--terminal-backend vt100` as a lightweight
+  fallback/debugging parser
+- the raw `pty.cast` replay remains control-sequence-heavy by design; clean
+  assertions should target `pty-screen.json`
 
 Why NDJSON for the raw transcript instead of one large pretty JSON array:
 

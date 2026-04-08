@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-08 | @codex | Add a switchable harness terminal backend, make `shadow-terminal` the default PTY/TUI renderer with `vt100` as an explicit fallback, and record that GIF/PNG/movie output stays deferred outside `v1.4` |
 | 2026-04-08 | @codex | Add asciicast export to the PTY artifact plan and standardize the scope boundary: NDJSON transcript + VTE screen JSON remain canonical, asciicast is the portable replay export, and PNG/GIF/movie generation is explicitly deferred out of `v1.4` scope |
 | 2026-04-08 | @codex | Replace the 7-slot allocator with computed subnet-pool capacity, expose allocator config through `harness_v1_4`, add a file-backed scenario driver with action/expectation steps, and complete PTY/VTE capture with raw transcript NDJSON plus rendered screen JSON |
 | 2026-04-07 | @codex | Complete the remaining Phase 4/5 observability slice: `VmObservability` now carries typed run-bundle metadata and capture paths, `harness_v1_4` persists PTY transcripts and internal result artifacts under the bundle root, result JSON now has structured status/error classification for agents/CI, and the PTY scenario emits hardened structured evidence |
@@ -285,11 +286,14 @@ Tasks:
   - [x] structured pass/fail result records
   - [x] stable machine-readable guest/run metadata
   - [x] structured error classification suitable for agents and CI
-- [ ] add a PTY/VTE capture layer:
+- [x] add a PTY/VTE capture layer:
   - [x] keep a VTE-style screen buffer for PTY sessions so the harness can
         reason about rendered terminal state, not only raw byte streams
   - [x] expose rendered screen state to scripted expectations
   - [x] preserve PTY transcripts in a reusable artifact format
+  - [x] make the terminal-state backend switchable in the harness
+  - [x] default the harness PTY/TUI path to the higher-fidelity `shadow`
+        backend while keeping `vt100` as a fallback/debugging mode
 - [ ] evaluate terminal-recording artifact generation for human verification:
   - [ ] `ttyrec`
   - [x] `asciinema`-compatible cast export

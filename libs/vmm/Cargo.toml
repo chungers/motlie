@@ -29,6 +29,7 @@ tokio = { workspace = true, features = ["sync", "rt", "net", "io-util", "time", 
 tracing = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+shadow-terminal = "0.2.3"
 vt100 = "0.16.2"
 
 [dev-dependencies]
