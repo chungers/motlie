@@ -1,0 +1,18 @@
+[package]
+name = "motlie-model"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core contracts for curated Motlie model bundles"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+async-trait = "0.1.89"
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
