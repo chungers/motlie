@@ -2,4 +2,4 @@
 
 mod embeddings;
 
-pub use embeddings::{MistralEmbeddingBundle, MistralEmbeddingSpec};
+pub use embeddings::{MistralEmbeddingArch, MistralEmbeddingBundle, MistralEmbeddingSpec};

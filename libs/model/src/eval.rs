@@ -40,6 +40,14 @@ pub fn tracks_for_capabilities(capabilities: &Capabilities) -> BTreeSet<EvalTrac
         .collect()
 }
 
+/// Returns whether a capability set directly implies support for an evaluation track.
+pub fn capabilities_support_track(capabilities: &Capabilities, track: EvalTrack) -> bool {
+    capabilities
+        .descriptors()
+        .iter()
+        .any(|descriptor| EvalTrack::primary_for_descriptor(descriptor) == Some(track))
+}
+
 /// Stable identifier for a single evaluation case.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct EvalCaseId(String);
@@ -135,5 +143,19 @@ mod tests {
 
         assert_eq!(tracks.len(), 1);
         assert!(tracks.contains(&EvalTrack::Embeddings));
+    }
+
+    #[test]
+    fn capability_track_boolean_check_does_not_need_allocation() {
+        let capabilities = Capabilities::new(vec![CapabilityDescriptor::embeddings()]);
+
+        assert!(capabilities_support_track(
+            &capabilities,
+            EvalTrack::Embeddings
+        ));
+        assert!(!capabilities_support_track(
+            &capabilities,
+            EvalTrack::Reasoning
+        ));
     }
 }
