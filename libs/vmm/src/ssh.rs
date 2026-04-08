@@ -32,6 +32,7 @@ use std::time::Duration;
 
 use russh::server::{Auth, Msg, Session};
 use russh::{Channel, ChannelMsg, ChannelWriteHalf, Pty};
+use serde::Serialize;
 use thiserror::Error;
 use tokio::net::UnixListener;
 use tokio::task::JoinHandle;
@@ -85,14 +86,14 @@ impl From<russh::Error> for SshProxyError {
 }
 
 /// Output from a programmatic command execution inside a guest VM.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ExecOutput {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PtyRequest {
     pub term: String,
     pub col_width: u32,
@@ -115,7 +116,7 @@ impl Default for PtyRequest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum PtyTranscriptEvent {
     Sent(Vec<u8>),
     Received(Vec<u8>),
@@ -130,7 +131,7 @@ pub enum PtyTranscriptEvent {
     Close,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct PtyRead {
     pub output: String,
     pub exit_status: Option<u32>,
@@ -216,6 +217,10 @@ impl GuestBridgeHandle {
             }
         }
         Ok(())
+    }
+
+    pub fn uds_path(&self) -> &std::path::Path {
+        &self.uds_path
     }
 }
 

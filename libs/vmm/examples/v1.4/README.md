@@ -26,6 +26,8 @@ Repeatable validation entrypoints now are:
   - `./target/debug/examples/harness_v1_4`
 - harness PTY smoke:
   - `./target/debug/examples/harness_v1_4 pty`
+- harness machine-readable result output:
+  - `./target/debug/examples/harness_v1_4 --result-json /path/to/result.json`
 - harness interactive/manual mode:
   - `./target/debug/examples/harness_v1_4 shell`
 - harness shell smoke:
@@ -70,6 +72,9 @@ Operational note:
   `MOTLIE_VMM_ROOT`, so they no longer depend on a hardcoded `/tmp` root
 - `repl_host_v1_4` now supports `where [guest]` to print the current runtime
   roots and per-guest artifact paths
+- `harness_v1_4 --result-json ...` now writes a structured result artifact for
+  the `smoke` scenario, including named checks and a library-owned
+  observability snapshot
 
 The intended end state is two parallel proof points:
 

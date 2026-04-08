@@ -51,11 +51,24 @@ Run:
 ./target/debug/examples/harness_v1_4
 ```
 
+Write a machine-readable result artifact:
+
+```bash
+./target/debug/examples/harness_v1_4 \
+  --result-json /var/tmp/motlie-v14/smoke-result.json
+```
+
 Explicit PTY scenario:
 
 ```bash
 ./target/debug/examples/harness_v1_4 pty
 ```
+
+Current note:
+
+- `smoke` is the reliable machine-readable scenario today
+- `pty` exercises the PTY path but is still being hardened before it becomes a
+  stable JSON/reporting signal
 
 Interactive/manual harness mode:
 
@@ -99,6 +112,14 @@ What it proves today:
   - prompt interaction
   - terminal resize
   - transcript capture
+
+What the JSON result includes today:
+
+- scenario name
+- guest id
+- pid and shutdown outcome
+- `VmHandle::observability()` snapshot
+- named checks for the `smoke` assertions
 
 Current limitation:
 

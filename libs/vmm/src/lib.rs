@@ -15,6 +15,7 @@ pub mod backend;
 pub mod guestfs;
 pub mod network;
 pub mod network_alloc;
+pub mod observability;
 pub mod orchestrator;
 pub mod runtime;
 pub mod ssh;

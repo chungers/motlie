@@ -428,7 +428,9 @@ mod tests {
                     cmdline: Some("console=ttyS0".to_string()),
                 },
             },
+            namespace,
             runtime_paths,
+            guest_socket_path: PathBuf::from("/tmp/motlie-vmm-v14-alice.vsock_5000"),
             net_assignment,
             cloud_init: CloudInitArtifacts {
                 meta_data: "instance-id: alice\nlocal-hostname: motlie-alice\n".to_string(),

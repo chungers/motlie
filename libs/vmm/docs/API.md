@@ -27,6 +27,8 @@ High-level status:
   - [x] `orchestrator.rs`
   - [x] `backend/mod.rs`
   - [x] `backend/ch/shell.rs`
+- [x] Phase 4 module added in code:
+  - [x] `observability.rs`
 - [x] initial `examples/v1.4/repl_host_v1_4` exists and compiles against the
       library surface
 - [x] `libs/vmm/src/guestfs.rs` exists and is used by the `v1.4` harness
@@ -114,6 +116,25 @@ Phase 3 initial implementation:
   - [ ] harness interactive mode replaces the standalone `repl_host_v1_4`
   - [ ] harness script/scenario format for action/expectation pairs
 
+Phase 4 initial implementation:
+
+- [x] `VmHandle::observability()`
+- [x] `VmObservability`
+- [x] `VmRuntimePaths`
+- [x] `FilesystemObservability`
+- [x] `NetworkObservability`
+- [x] `ControlPlaneObservability`
+- [x] library-owned runtime/log/socket visibility for the live guest handle
+
+Phase 5 first slice:
+
+- [x] harness `--result-json <path>`
+- [x] machine-readable `smoke` scenario result
+- [x] JSON includes named checks plus `VmObservability`
+- [ ] PTY scenario result hardening
+- [ ] VTE/rendered terminal state
+- [ ] recording/export evaluation
+
 ## Layering
 
 The intended layering is:
@@ -137,6 +158,9 @@ The intended layering is:
   - `VmHandle::exec(...)`
   - `VmHandle::open_pty(...)`
   - `GuestPtySession`
+- observability
+  - `VmHandle::observability()`
+  - `VmObservability`
 - backend realization
   - `backend::ch::*`
   - `backend::motlie::*`
@@ -236,6 +260,8 @@ impl VmHandle {
         request: PtyRequest,
         timeout: std::time::Duration,
     ) -> Result<GuestPtySession, OrchestratorError>;
+
+    pub fn observability(&self) -> VmObservability;
 }
 
 pub struct PtyRequest {
@@ -268,6 +294,18 @@ impl GuestPtySession {
     ) -> Result<PtyRead, SshProxyError>;
     pub fn transcript(&self) -> Result<Vec<PtyTranscriptEvent>, SshProxyError>;
     pub async fn close(&self) -> Result<(), SshProxyError>;
+}
+
+pub struct VmObservability {
+    pub guest_id: String,
+    pub pid: Option<u32>,
+    pub namespace_prefix: String,
+    pub temp_root: std::path::PathBuf,
+    pub guest_socket_path: std::path::PathBuf,
+    pub runtime_paths: VmRuntimePaths,
+    pub filesystem: FilesystemObservability,
+    pub network: NetworkObservability,
+    pub control_plane: ControlPlaneObservability,
 }
 ```
 

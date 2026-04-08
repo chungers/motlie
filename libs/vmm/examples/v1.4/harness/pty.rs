@@ -1,11 +1,11 @@
 use std::time::Duration;
 
 use motlie_vmm::orchestrator::VmHandle;
-use motlie_vmm::ssh::PtyRequest;
+use motlie_vmm::ssh::{PtyRequest, PtyTranscriptEvent};
 
 type DynError = Box<dyn std::error::Error + Send + Sync>;
 
-pub async fn run_pty_smoke(handle: &VmHandle) -> Result<(), DynError> {
+pub async fn run_pty_smoke(handle: &VmHandle) -> Result<Vec<PtyTranscriptEvent>, DynError> {
     let pty = handle
         .open_pty(PtyRequest::default(), Duration::from_secs(10))
         .await?;
@@ -48,5 +48,5 @@ pub async fn run_pty_smoke(handle: &VmHandle) -> Result<(), DynError> {
     if transcript.is_empty() {
         return Err("expected non-empty PTY transcript".into());
     }
-    Ok(())
+    Ok(transcript)
 }

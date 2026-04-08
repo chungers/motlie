@@ -9,6 +9,7 @@ use std::time::Duration;
 use motlie_vmm::ca::SshCa;
 use motlie_vmm::network::{AdminNetMode, EgressNetMode, NetworkModes};
 use motlie_vmm::network_alloc::{GuestNetAllocator, GuestNetAllocatorConfig};
+use motlie_vmm::observability::VmObservability;
 use motlie_vmm::orchestrator::{
     LifecycleServices, PrepareRequest, ReadinessPolicy, boot, prepare,
 };
@@ -19,7 +20,8 @@ use motlie_vmm::spec::{
     BootArtifacts, GuestMountSpec, GuestResources, GuestSpec, GuestSshAccess, GuestStorage,
     GuestUser, RuntimeNamespace, SoftwareProfile,
 };
-use motlie_vmm::ssh::{self, ExecOutput, SshProxyConfig, new_guest_registry};
+use motlie_vmm::ssh::{self, ExecOutput, PtyTranscriptEvent, SshProxyConfig, new_guest_registry};
+use serde::Serialize;
 use tokio::time::sleep;
 
 type DynError = Box<dyn std::error::Error + Send + Sync>;
@@ -31,11 +33,30 @@ struct HarnessInstance {
     proxy_port: u16,
 }
 
+#[derive(Debug, Serialize)]
+struct ScenarioCheck {
+    name: String,
+    detail: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ScenarioResult {
+    scenario: String,
+    guest_id: String,
+    pid: Option<u32>,
+    proxy: String,
+    shutdown_forced: Option<String>,
+    observability: VmObservability,
+    checks: Vec<ScenarioCheck>,
+    pty_transcript: Option<Vec<PtyTranscriptEvent>>,
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<(), DynError> {
     let mut args = std::env::args().skip(1);
     let mut scenario = "smoke".to_string();
     let mut root_override: Option<PathBuf> = None;
+    let mut result_json_path: Option<PathBuf> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--root" => {
@@ -44,12 +65,23 @@ async fn main() -> Result<(), DynError> {
                     .ok_or_else(|| "--root requires a path".to_string())?;
                 root_override = Some(PathBuf::from(value));
             }
+            "--result-json" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--result-json requires a path".to_string())?;
+                result_json_path = Some(PathBuf::from(value));
+            }
             "--help" | "-h" => {
                 print_usage();
                 return Ok(());
             }
             other if other.starts_with("--root=") => {
                 root_override = Some(PathBuf::from(other.trim_start_matches("--root=")));
+            }
+            other if other.starts_with("--result-json=") => {
+                result_json_path = Some(PathBuf::from(
+                    other.trim_start_matches("--result-json="),
+                ));
             }
             other if other.starts_with('-') => {
                 return Err(format!("unknown option: {other}").into());
@@ -126,13 +158,36 @@ async fn main() -> Result<(), DynError> {
     )
     .await?;
     handle.ready(&ReadinessPolicy::default()).await?;
-    match scenario.as_str() {
-        "smoke" => run_smoke(&handle).await?,
-        "pty" => pty::run_pty_smoke(&handle).await?,
+    let observability = handle.observability();
+    let (checks, pty_transcript) = match scenario.as_str() {
+        "smoke" => (run_smoke(&handle).await?, None),
+        "pty" => {
+            let transcript = pty::run_pty_smoke(&handle).await?;
+            (vec![ScenarioCheck {
+                name: "pty".to_string(),
+                detail: "PTY banner, prompt, resize, and transcript checks passed".to_string(),
+            }], Some(transcript))
+        }
         other => return Err(format!("unsupported scenario: {other}").into()),
-    }
+    };
 
     let report = handle.shutdown().await?;
+    let result = ScenarioResult {
+        scenario: scenario.clone(),
+        guest_id: handle.guest_id.clone(),
+        pid: report.pid,
+        proxy: format!("ssh://localhost:{}", proxy_config.listen.port()),
+        shutdown_forced: report.forced.map(str::to_string),
+        observability,
+        checks,
+        pty_transcript,
+    };
+    if let Some(path) = result_json_path.as_ref() {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, serde_json::to_vec_pretty(&result)?)?;
+    }
     println!(
         "v1.4 harness {} passed: guest={} pid={:?} forced={:?} proxy=127.0.0.1:{}",
         scenario,
@@ -144,9 +199,16 @@ async fn main() -> Result<(), DynError> {
     Ok(())
 }
 
-async fn run_smoke(handle: &motlie_vmm::orchestrator::VmHandle) -> Result<(), DynError> {
+async fn run_smoke(
+    handle: &motlie_vmm::orchestrator::VmHandle,
+) -> Result<Vec<ScenarioCheck>, DynError> {
+    let mut checks = Vec::new();
     let hello = handle.exec("/bin/echo hello", Duration::from_secs(10)).await?;
     ensure_success(&hello.stdout, "hello")?;
+    checks.push(ScenarioCheck {
+        name: "hello".to_string(),
+        detail: "programmatic exec returned hello".to_string(),
+    });
 
     let vfs = handle
         .exec(
@@ -155,6 +217,10 @@ async fn run_smoke(handle: &motlie_vmm::orchestrator::VmHandle) -> Result<(), Dy
         )
         .await?;
     ensure_success(&vfs.stdout, "VFS_OK")?;
+    checks.push(ScenarioCheck {
+        name: "vfs".to_string(),
+        detail: "home, workspace, and agent-state mounts are visible".to_string(),
+    });
 
     let route = exec_until_success(
         handle,
@@ -164,6 +230,10 @@ async fn run_smoke(handle: &motlie_vmm::orchestrator::VmHandle) -> Result<(), Dy
     )
     .await?;
     ensure_success(&route.stdout, "ROUTE_OK")?;
+    checks.push(ScenarioCheck {
+        name: "route".to_string(),
+        detail: "default route points at Motlie vnet".to_string(),
+    });
 
     let outbound = exec_until_success(
         handle,
@@ -173,7 +243,11 @@ async fn run_smoke(handle: &motlie_vmm::orchestrator::VmHandle) -> Result<(), Dy
     )
     .await?;
     ensure_success(&outbound.stdout, "HTTPS_OK")?;
-    Ok(())
+    checks.push(ScenarioCheck {
+        name: "https".to_string(),
+        detail: "outbound HTTPS fetch succeeded".to_string(),
+    });
+    Ok(checks)
 }
 
 fn ensure_file_exists(path: &Path) -> Result<(), DynError> {
@@ -193,7 +267,7 @@ fn ensure_success(stdout: &str, needle: &str) -> Result<(), DynError> {
 }
 
 fn print_usage() {
-    println!("usage: harness_v1_4 [smoke|pty|shell] [--root <dir>]");
+    println!("usage: harness_v1_4 [smoke|pty|shell] [--root <dir>] [--result-json <path>]");
 }
 
 fn new_harness_instance(root_dir: &Path) -> Result<HarnessInstance, DynError> {

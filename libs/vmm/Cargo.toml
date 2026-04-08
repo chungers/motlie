@@ -27,6 +27,8 @@ futures = "0.3"
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "rt", "net", "io-util", "time", "process"] }
 tracing = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 
 [dev-dependencies]
 anyhow.workspace = true
@@ -34,7 +36,6 @@ tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
 bytes = { version = "1", features = ["serde"] }
-serde = { version = "1.0", features = ["derive"] }
 rustyline = "18"
 atty = "0.2"
 ctrlc = "3"
