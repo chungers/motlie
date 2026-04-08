@@ -11,18 +11,16 @@ use motlie_model::{
     EmbeddingResponse, LoadedBundleDescriptor, ModelBundle, ModelError, StartOptions,
 };
 
-/// Static bundle specification for a curated Mistral-backed embedding stack.
+/// Embedding architecture discriminant that selects the correct `mistralrs` loader path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MistralEmbeddingArch {
     EmbeddingGemma,
-    Qwen3Embedding,
 }
 
 impl MistralEmbeddingArch {
     fn loader_type(self) -> EmbeddingLoaderType {
         match self {
             Self::EmbeddingGemma => EmbeddingLoaderType::EmbeddingGemma,
-            Self::Qwen3Embedding => EmbeddingLoaderType::Qwen3Embedding,
         }
     }
 }
@@ -34,6 +32,7 @@ pub struct MistralEmbeddingSpec {
     pub display_name: &'static str,
     pub model_id: &'static str,
     pub arch: MistralEmbeddingArch,
+    pub required_local_artifacts: &'static [&'static str],
     pub capabilities: Capabilities,
 }
 
@@ -44,6 +43,14 @@ impl MistralEmbeddingSpec {
             display_name: "EmbeddingGemma 300M",
             model_id: "google/embeddinggemma-300m",
             arch: MistralEmbeddingArch::EmbeddingGemma,
+            required_local_artifacts: &[
+                "modules.json",
+                "1_Pooling/config.json",
+                "2_Dense/config.json",
+                "2_Dense/model.safetensors",
+                "3_Dense/config.json",
+                "3_Dense/model.safetensors",
+            ],
             capabilities: Capabilities::embeddings_only(),
         }
     }
@@ -55,6 +62,7 @@ pub struct MistralEmbeddingBundle {
     metadata: BundleMetadata,
     arch: MistralEmbeddingArch,
     model_id: &'static str,
+    required_local_artifacts: &'static [&'static str],
 }
 
 impl MistralEmbeddingBundle {
@@ -67,6 +75,7 @@ impl MistralEmbeddingBundle {
             },
             arch: spec.arch,
             model_id: spec.model_id,
+            required_local_artifacts: spec.required_local_artifacts,
         }
     }
 }
@@ -86,7 +95,13 @@ impl ModelBundle for MistralEmbeddingBundle {
     }
 
     async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
-        let model = build_embedding_model(self.model_id, self.arch, options).await?;
+        let model = build_embedding_model(
+            self.model_id,
+            self.arch,
+            self.required_local_artifacts,
+            options,
+        )
+        .await?;
 
         Ok(Box::new(MistralEmbeddingHandle {
             descriptor: LoadedBundleDescriptor {
@@ -172,6 +187,7 @@ impl EmbeddingModel for MistralEmbeddingHandle {
 async fn build_embedding_model(
     model_id: &str,
     arch: MistralEmbeddingArch,
+    required_local_artifacts: &[&str],
     options: StartOptions,
 ) -> Result<mistralrs::Model, ModelError> {
     let StartOptions {
@@ -184,7 +200,8 @@ async fn build_embedding_model(
     let mut hf_cache_root = None;
 
     if let Some(artifact_policy) = artifact_policy {
-        let configured = configure_artifact_policy(model_id, artifact_policy)?;
+        let configured =
+            configure_artifact_policy(model_id, required_local_artifacts, artifact_policy)?;
         model_target = configured.model_target;
         hf_cache_root = configured.hf_cache_root;
     }
@@ -216,6 +233,7 @@ struct ConfiguredBuilder {
 
 fn configure_artifact_policy(
     model_id: &str,
+    required_local_artifacts: &[&str],
     policy: ArtifactPolicy,
 ) -> Result<ConfiguredBuilder, ModelError> {
     match policy {
@@ -224,7 +242,8 @@ fn configure_artifact_policy(
             hf_cache_root: root.map(resolve_hf_cache_path),
         }),
         ArtifactPolicy::LocalOnly { root } => {
-            let local_model_path = validate_local_artifacts(model_id, &root)?;
+            let local_model_path =
+                validate_local_artifacts(model_id, required_local_artifacts, &root)?;
             Ok(ConfiguredBuilder {
                 model_target: local_model_path.display().to_string(),
                 hf_cache_root: None,
@@ -233,7 +252,11 @@ fn configure_artifact_policy(
     }
 }
 
-fn validate_local_artifacts(model_id: &str, root: &Path) -> Result<PathBuf, ModelError> {
+fn validate_local_artifacts(
+    model_id: &str,
+    required_local_artifacts: &[&str],
+    root: &Path,
+) -> Result<PathBuf, ModelError> {
     let repo = Cache::new(root.to_path_buf()).repo(Repo::new(model_id.to_owned(), RepoType::Model));
 
     let config = repo.get("config.json").ok_or_else(|| {
@@ -282,20 +305,7 @@ fn validate_local_artifacts(model_id: &str, root: &Path) -> Result<PathBuf, Mode
         )));
     }
 
-    if !snapshot_dir.join("modules.json").exists() {
-        return Err(ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` requires cached `modules.json` for `{model_id}` under `{}`",
-            root.display()
-        )));
-    }
-
-    for required in [
-        "1_Pooling/config.json",
-        "2_Dense/config.json",
-        "2_Dense/model.safetensors",
-        "3_Dense/config.json",
-        "3_Dense/model.safetensors",
-    ] {
+    for required in required_local_artifacts {
         if !snapshot_dir.join(required).exists() {
             return Err(ModelError::InvalidConfiguration(format!(
                 "artifact policy `LocalOnly` requires cached `{required}` for `{model_id}` under `{}`",
@@ -350,6 +360,7 @@ mod tests {
         assert_eq!(spec.display_name, "EmbeddingGemma 300M");
         assert_eq!(spec.model_id, "google/embeddinggemma-300m");
         assert_eq!(spec.arch, MistralEmbeddingArch::EmbeddingGemma);
+        assert!(spec.required_local_artifacts.contains(&"modules.json"));
         assert!(spec.capabilities.supports(CapabilityKind::Embeddings));
     }
 
@@ -391,6 +402,7 @@ mod tests {
 
         let err = configure_artifact_policy(
             "google/embeddinggemma-300m",
+            &["modules.json"],
             ArtifactPolicy::LocalOnly { root: root.clone() },
         )
         .err()
@@ -427,6 +439,14 @@ mod tests {
 
         configure_artifact_policy(
             "google/embeddinggemma-300m",
+            &[
+                "modules.json",
+                "1_Pooling/config.json",
+                "2_Dense/config.json",
+                "2_Dense/model.safetensors",
+                "3_Dense/config.json",
+                "3_Dense/model.safetensors",
+            ],
             ArtifactPolicy::LocalOnly { root: root.clone() },
         )
         .expect("complete cache layout should be accepted");

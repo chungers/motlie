@@ -149,13 +149,9 @@ impl Capabilities {
             }
         }
 
-        let kinds = unique_descriptors
-            .iter()
-            .map(|descriptor| descriptor.kind)
-            .collect();
         Self {
             descriptors: unique_descriptors,
-            kinds,
+            kinds: descriptors_by_kind,
         }
     }
 
