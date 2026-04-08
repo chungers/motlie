@@ -13,6 +13,7 @@
 | 2026-04-08 | @codex-researcher: Clarified typed catalog/artifact errors and made the first vertical-slice artifact contract explicit so the API can be implemented without hidden bundle-specific assumptions. | Overview, Core Types, Explicit Artifact Control, Notes |
 | 2026-04-08 | @codex-researcher: Updated the `v0.1` example contract so artifact download is opt-in. The default example path now exercises existing curated artifacts with `ArtifactPolicy::LocalOnly`, which is the intended regulated/offline behavior. | Example Program, Notes |
 | 2026-04-08 | @codex-researcher: Added the direct curated embedding enum and parser-oriented `ModelSelector` path to the API sketch, and removed `SupportTier` / `PackagingMode` from the recommended public surface. | Core Types, API Sketch, Example Program, Notes |
+| 2026-04-08 | @codex-researcher: Added an explicit end-to-end vertical-slice walkthrough and a curator implementation checklist so both callers and bundle implementers can follow the same documented path. | Overview, API Sketch, Example Program, Notes |
 
 This document sketches the concrete API shapes currently introduced in `libs/models`. The crate now owns both the descriptor catalog and the curated bundle constructors that bind those descriptors to a backend implementation.
 
@@ -32,6 +33,13 @@ The first concrete `libs/models` API is an in-memory `Catalog` of curated bundle
 - explicit artifact download control separate from backend cache population
 
 The goal is to make the product-facing bundle layer tangible before the runtime-facing bundle handle APIs are finalized.
+
+For the current vertical slice, this crate must document two concrete experiences clearly:
+
+1. caller experience:
+   choose a curated embedding bundle, inspect its descriptor and embedding metadata, start it locally, and call `embed(...)`
+2. curator experience:
+   define a bundle module, expose `descriptor()` and `bundle()`, implement the bundle-level `Embedding` contract, and register the bundle in `Catalog`
 
 ## Core Types
 
@@ -135,6 +143,49 @@ let selector = ModelSelector::from_str("embedding:google/embeddinggemma_300m")?;
 let descriptor = selector.descriptor();
 let bundle = selector.bundle();
 ```
+
+### End-to-End Vertical Slice
+
+The current curated embedding slice is intended to be readable from the caller’s point of view as one continuous flow:
+
+```rust
+use motlie_model::{ArtifactPolicy, EmbeddingRequest, StartOptions};
+use motlie_models::{default_artifact_root, embeddings::EmbeddingModels, ModelSelector};
+
+// Direct curated enum path.
+let direct = EmbeddingModels::GoogleGemma300m;
+let direct_spec = direct.embedding_spec();
+let direct_bundle = direct.bundle();
+
+// Parser-oriented path.
+let selected: ModelSelector = "embedding:google/embeddinggemma_300m".parse()?;
+let selected_bundle = selected.bundle();
+
+// Both paths resolve to the same curated bundle behavior.
+let handle = direct_bundle
+    .start(StartOptions {
+        artifact_policy: Some(ArtifactPolicy::LocalOnly {
+            root: default_artifact_root(),
+        }),
+        ..Default::default()
+    })
+    .await?;
+
+let response = handle
+    .embeddings()?
+    .embed(EmbeddingRequest {
+        inputs: vec!["motlie curated model bundle".into()],
+    })
+    .await?;
+
+assert_eq!(direct_spec.dimensions, Some(768));
+assert_eq!(response.vectors[0].len(), 768);
+```
+
+The runnable realization of this flow is:
+
+- [main.rs](/Users/dchung/projects/claude-mistral/motlie/libs/models/examples/v0.1/main.rs)
+- [README.md](/Users/dchung/projects/claude-mistral/motlie/libs/models/examples/v0.1/README.md)
 
 ### Selecting Bundles for an Evaluation Track
 
@@ -266,8 +317,32 @@ What it demonstrates:
 - optional parser-driven resolution via `ModelSelector`
 - explicit curated artifact download for `embeddinggemma_300m`
 - descriptor and capability introspection through `Catalog`
+- bundle-level embedding metadata through `EmbeddingModels::embedding_spec()`
 - local-only bundle startup with `ArtifactPolicy::LocalOnly`
 - a one-shot embedding generation request using CLI input
+
+## Curator Implementation
+
+For a new curated embedding bundle, the intended implementation checklist is:
+
+1. create one bundle file under the capability-family namespace
+   - for example: `libs/models/src/embeddings/my_model.rs`
+2. expose:
+   - `descriptor() -> BundleDescriptor`
+   - `bundle() -> Box<dyn ModelBundle>`
+   - `embedding_spec() -> &'static motlie_model::EmbeddingSpec`
+3. define a concrete bundle type that implements:
+   - `motlie_model::ModelBundle`
+   - `motlie_model::Embedding`
+4. add a curated enum variant to `EmbeddingModels`
+5. wire `EmbeddingModels::{as_str, descriptor, bundle, embedding_spec}`
+6. optionally support parser-driven selection through `ModelSelector`
+7. register the bundle in `Catalog::with_defaults()` if it should be in the default curated set
+8. define explicit artifact rules if the bundle uses local artifacts
+9. add a focused bundle test that proves:
+   - descriptor is reviewable as data
+   - embedding spec matches expected semantics
+   - local-only startup works when curated artifacts are present
 
 ## Notes
 
@@ -276,6 +351,7 @@ What it demonstrates:
 - `BackendKind` is metadata for catalog reasoning and observability. It does not make runtime choice part of the application control path.
 - `Catalog` now also owns curated bundle instantiation through registered constructors.
 - The preferred direct curated path is the bundle-family enum, such as `EmbeddingModels::GoogleGemma300m`; `ModelSelector` is the parser-friendly wrapper above that.
+- The end-to-end caller path should be understandable by reading the `v0.1` example; the end-to-end curator path should be understandable by reading the `google_gemma_300m` bundle module and the checklist above.
 - Curated artifact download is explicit and independent of the backend library's own cache-miss behavior. Backends consume the curated artifact policy through `StartOptions`. For regulated local bundles, `ArtifactPolicy::LocalOnly` is the intended fail-closed mode.
 - `embeddinggemma_300m` local-only startup depends on the full sentence-transformers module stack being present in the curated artifact root. That requirement is part of the bundle contract, not an ambient `mistralrs` cache behavior.
 - Authentication for protected upstream artifacts belongs only to the out-of-band download/build path. The runtime/bundle startup path does not accept tokens and remains artifact-consumption only.

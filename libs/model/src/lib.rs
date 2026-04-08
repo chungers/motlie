@@ -7,7 +7,10 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use thiserror::Error;
 
+pub mod embedding;
 pub mod eval;
+
+pub use embedding::{Embedding, EmbeddingDistance, EmbeddingNormalization, EmbeddingSpec};
 
 /// Stable product-facing identifier for a curated bundle.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -285,32 +288,6 @@ pub struct EmbeddingResponse {
     pub vectors: Vec<Vec<f32>>,
 }
 
-/// Preferred vector distance semantics for an embedding bundle.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum EmbeddingDistance {
-    Cosine,
-    Dot,
-    SquaredL2,
-}
-
-/// Whether the embedding vectors are normalized before they are returned.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum EmbeddingNormalization {
-    L2,
-    None,
-}
-
-/// Bundle-level metadata that describes how embedding vectors should be interpreted downstream.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EmbeddingSpec {
-    pub dimensions: Option<usize>,
-    pub distance: EmbeddingDistance,
-    pub normalization: EmbeddingNormalization,
-    pub input: ContentKind,
-    pub output: ContentKind,
-    pub summary: &'static str,
-}
-
 /// Bundle definition that can be started into a loaded handle.
 #[async_trait]
 pub trait ModelBundle: Send + Sync {
@@ -318,11 +295,6 @@ pub trait ModelBundle: Send + Sync {
     fn metadata(&self) -> &BundleMetadata;
     fn capabilities(&self) -> &Capabilities;
     async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError>;
-}
-
-/// Bundle-level descriptive contract for curated embedding bundles.
-pub trait Embedding: ModelBundle {
-    fn embedding_spec(&self) -> &EmbeddingSpec;
 }
 
 /// Loaded bundle state that exposes capability adapters.

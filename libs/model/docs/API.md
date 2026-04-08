@@ -10,6 +10,7 @@
 | 2026-04-07 | @codex-researcher: Updated the API sketch to reflect capability introspection helpers and the explicit separation between curated artifact staging and backend startup. | Overview, Bundle API Sketch, Notes |
 | 2026-04-08 | @codex-researcher: Clarified the contract-level error model and the library-versus-application error boundary. `ModelError` is now explicitly specified as a typed library error derived with `thiserror`. | Overview, Core Types, Notes |
 | 2026-04-08 | @codex-researcher: Added the bundle-level embedding metadata contract (`Embedding`, `EmbeddingSpec`, distance, normalization) so curated embedding bundles can expose vector semantics before runtime startup. | Overview, Core Types, Bundle API Sketch |
+| 2026-04-08 | @codex-researcher: Added the end-to-end embedding bundle contract flow and the explicit bridge to `motlie_db::vector::EmbeddingSpec` / `Distance` so implementers can wire curated embedding bundles into the vector subsystem without guessing. | Overview, Bundle API Sketch, Notes |
 
 This document sketches the concrete contract shapes currently introduced in `libs/model`. It covers both the core bundle lifecycle/capability contracts and the lightweight `model::eval` vocabulary that higher-level harness tooling should build on.
 
@@ -30,6 +31,14 @@ The first concrete `libs/model` API now includes:
 - lightweight eval types in `model::eval`
 
 The goal is to give downstream crates a stable contract surface while keeping the implementation burden low in this first pass.
+
+For the current vertical slice, this contract is intended to support an end-to-end flow of:
+
+1. a curated embedding bundle defines bundle metadata and an `EmbeddingSpec`
+2. `libs/models` exposes that bundle through a direct module and a curated selector enum
+3. the caller starts the bundle with `ArtifactPolicy::LocalOnly`
+4. the loaded handle exposes `EmbeddingModel`
+5. downstream crates such as `motlie_db::vector` consume the bundle-level `EmbeddingSpec` to configure vector storage and search semantics consistently
 
 ## Core Types
 
@@ -166,6 +175,114 @@ This bundle-level metadata trait is intentionally separate from the runtime `Emb
 
 - `Embedding` describes the curated bundle's vector semantics
 - `EmbeddingModel` executes embedding generation on the loaded handle
+
+### End-to-End Embedding Bundle Contract
+
+For a curated embedding bundle, the intended contract flow is:
+
+```rust
+use motlie_model::{
+    ArtifactPolicy, ContentKind, Embedding, EmbeddingDistance, EmbeddingModel,
+    EmbeddingNormalization, EmbeddingRequest, StartOptions,
+};
+use motlie_models::{default_artifact_root, embeddings::EmbeddingModels};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let model = EmbeddingModels::GoogleGemma300m;
+
+    // Bundle-level metadata used before startup.
+    let spec = model.embedding_spec();
+    assert_eq!(spec.dimensions, Some(768));
+    assert_eq!(spec.distance, EmbeddingDistance::Cosine);
+    assert_eq!(spec.normalization, EmbeddingNormalization::L2);
+    assert_eq!(spec.input, ContentKind::Text);
+
+    // Runtime bundle start.
+    let bundle = model.bundle();
+    let handle = bundle
+        .start(StartOptions {
+            artifact_policy: Some(ArtifactPolicy::LocalOnly {
+                root: default_artifact_root(),
+            }),
+            ..Default::default()
+        })
+        .await?;
+
+    // Runtime embedding generation.
+    let embeddings: &dyn EmbeddingModel = handle.embeddings()?;
+    let response = embeddings
+        .embed(EmbeddingRequest {
+            inputs: vec!["motlie curated model bundle".into()],
+        })
+        .await?;
+
+    assert_eq!(response.vectors[0].len(), 768);
+    handle.shutdown().await?;
+    Ok(())
+}
+```
+
+From a curator’s perspective, the implementation obligations are:
+
+1. implement `ModelBundle` for the concrete curated bundle type
+2. implement `Embedding` for the same bundle type
+3. expose a stable `EmbeddingSpec`
+4. ensure the runtime handle returns a working `EmbeddingModel`
+5. ensure the bundle can be started under `ArtifactPolicy::LocalOnly` when local artifacts are required
+
+### Integration with `motlie_db::vector`
+
+`libs/model` must not depend on `motlie_db`, but the intended integration with the vector subsystem is explicit.
+
+Relevant vector types live in:
+
+- [distance.rs](/Users/dchung/projects/claude-mistral/motlie/libs/db/src/vector/distance.rs)
+- [schema.rs](/Users/dchung/projects/claude-mistral/motlie/libs/db/src/vector/schema.rs)
+
+The intended mapping is:
+
+- `motlie_model::EmbeddingDistance::Cosine` -> `motlie_db::vector::Distance::Cosine`
+- `motlie_model::EmbeddingDistance::SquaredL2` -> `motlie_db::vector::Distance::L2`
+- `motlie_model::EmbeddingDistance::Dot` -> `motlie_db::vector::Distance::DotProduct`
+- `motlie_model::EmbeddingSpec.dimensions` -> `motlie_db::vector::EmbeddingSpec.dim`
+- curated bundle model identity -> `motlie_db::vector::EmbeddingSpec.model`
+
+Illustrative bridge code:
+
+```rust
+use motlie_model::{EmbeddingDistance, EmbeddingSpec as ModelEmbeddingSpec};
+use motlie_db::vector::{Distance, EmbeddingSpec as DbEmbeddingSpec, VectorElementType};
+
+fn to_db_embedding_spec(
+    model_name: &str,
+    spec: &ModelEmbeddingSpec,
+) -> anyhow::Result<DbEmbeddingSpec> {
+    let dim = spec
+        .dimensions
+        .context("embedding bundle must declare dimensions for vector-space registration")?;
+
+    let distance = match spec.distance {
+        EmbeddingDistance::Cosine => Distance::Cosine,
+        EmbeddingDistance::SquaredL2 => Distance::L2,
+        EmbeddingDistance::Dot => Distance::DotProduct,
+    };
+
+    Ok(DbEmbeddingSpec {
+        code: 0,
+        model: model_name.to_owned(),
+        dim: dim as u32,
+        distance,
+        storage_type: VectorElementType::F32,
+        hnsw_m: 16,
+        hnsw_ef_construction: 200,
+        rabitq_bits: 1,
+        rabitq_seed: 42,
+    })
+}
+```
+
+The important contract point is that bundle curation owns the semantic truth about the vectors, and `motlie_db::vector` should derive its storage/search configuration from that truth rather than requiring the application to restate it manually.
 
 Loaded handles also expose `supports(CapabilityKind)` as a convenience over `capabilities().supports(...)`, which keeps harness and catalog-driven code simple when it only needs to branch on capability presence.
 
