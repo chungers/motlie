@@ -72,6 +72,7 @@ impl ModelBundle for GoogleGemma300m {
     ) -> Result<Box<dyn motlie_model::BundleHandle>, ModelError> {
         let StartOptions {
             artifact_policy,
+            quantization,
             unpack_root,
             max_concurrency,
         } = options;
@@ -85,6 +86,7 @@ impl ModelBundle for GoogleGemma300m {
         };
         let options = StartOptions {
             artifact_policy,
+            quantization,
             unpack_root,
             max_concurrency,
         };

@@ -176,6 +176,7 @@ async fn build_embedding_model(
 ) -> Result<mistralrs::Model, ModelError> {
     let StartOptions {
         artifact_policy,
+        quantization: _, // embedding models run in F32; quantization is not applicable
         unpack_root,
         max_concurrency,
     } = options;
