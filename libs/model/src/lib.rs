@@ -136,7 +136,10 @@ pub struct Capabilities {
 
 impl Capabilities {
     pub fn new(descriptors: Vec<CapabilityDescriptor>) -> Self {
-        let kinds = descriptors.iter().map(|descriptor| descriptor.kind).collect();
+        let kinds = descriptors
+            .iter()
+            .map(|descriptor| descriptor.kind)
+            .collect();
         Self { descriptors, kinds }
     }
 
@@ -293,10 +296,7 @@ pub trait ModelBundle: Send + Sync {
     fn id(&self) -> &BundleId;
     fn metadata(&self) -> &BundleMetadata;
     fn capabilities(&self) -> &Capabilities;
-    async fn start(
-        &self,
-        options: StartOptions,
-    ) -> Result<Box<dyn BundleHandle>, ModelError>;
+    async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError>;
 }
 
 /// Loaded bundle state that exposes capability adapters.
@@ -324,14 +324,168 @@ pub trait ChatModel: Send + Sync {
 /// Text completion capability.
 #[async_trait]
 pub trait CompletionModel: Send + Sync {
-    async fn complete(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<CompletionResponse, ModelError>;
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, ModelError>;
 }
 
 /// Embedding generation capability.
 #[async_trait]
 pub trait EmbeddingModel: Send + Sync {
     async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, ModelError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FakeHandle {
+        descriptor: LoadedBundleDescriptor,
+    }
+
+    #[async_trait]
+    impl BundleHandle for FakeHandle {
+        fn descriptor(&self) -> &LoadedBundleDescriptor {
+            &self.descriptor
+        }
+
+        fn capabilities(&self) -> &Capabilities {
+            &self.descriptor.capabilities
+        }
+
+        fn chat(&self) -> Result<&dyn ChatModel, ModelError> {
+            Err(ModelError::UnsupportedCapability(CapabilityKind::Chat))
+        }
+
+        fn completion(&self) -> Result<&dyn CompletionModel, ModelError> {
+            Err(ModelError::UnsupportedCapability(
+                CapabilityKind::Completion,
+            ))
+        }
+
+        fn embeddings(&self) -> Result<&dyn EmbeddingModel, ModelError> {
+            Ok(self)
+        }
+
+        async fn shutdown(self: Box<Self>) -> Result<(), ModelError> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl EmbeddingModel for FakeHandle {
+        async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, ModelError> {
+            Ok(EmbeddingResponse {
+                vectors: request
+                    .inputs
+                    .into_iter()
+                    .map(|input| vec![input.len() as f32])
+                    .collect(),
+            })
+        }
+    }
+
+    #[test]
+    fn bundle_id_display_and_ordering_are_stable() {
+        let alpha = BundleId::new("alpha");
+        let beta = BundleId::from("beta");
+
+        assert_eq!(alpha.to_string(), "alpha");
+        assert_eq!(beta.as_str(), "beta");
+        assert!(alpha < beta);
+    }
+
+    #[test]
+    fn capabilities_supports_descriptor_kinds() {
+        let capabilities = Capabilities::new(vec![
+            CapabilityDescriptor::chat(),
+            CapabilityDescriptor::embeddings(),
+        ]);
+
+        assert!(capabilities.supports(CapabilityKind::Chat));
+        assert!(capabilities.supports(CapabilityKind::Embeddings));
+        assert!(!capabilities.supports(CapabilityKind::Completion));
+        assert_eq!(capabilities.descriptors().len(), 2);
+    }
+
+    #[test]
+    fn embedding_builtins_have_expected_shapes() {
+        let descriptor = CapabilityDescriptor::embeddings();
+
+        assert_eq!(descriptor.kind, CapabilityKind::Embeddings);
+        assert_eq!(descriptor.inputs, vec![ContentKind::Text]);
+        assert_eq!(descriptor.outputs, vec![ContentKind::EmbeddingVector]);
+        assert_eq!(descriptor.interaction, InteractionStyle::Batch);
+    }
+
+    #[test]
+    fn metadata_round_trips_clone_and_equality() {
+        let metadata = BundleMetadata {
+            id: BundleId::new("embeddinggemma_300m"),
+            display_name: "EmbeddingGemma 300M".into(),
+            capabilities: Capabilities::embeddings_only(),
+        };
+
+        assert_eq!(metadata, metadata.clone());
+
+        let loaded = LoadedBundleDescriptor {
+            id: metadata.id.clone(),
+            display_name: metadata.display_name.clone(),
+            capabilities: metadata.capabilities.clone(),
+        };
+        assert_eq!(loaded, loaded.clone());
+    }
+
+    #[tokio::test]
+    async fn embedding_only_handle_reports_supported_surfaces() {
+        let handle = FakeHandle {
+            descriptor: LoadedBundleDescriptor {
+                id: BundleId::new("embedder"),
+                display_name: "Embedder".into(),
+                capabilities: Capabilities::embeddings_only(),
+            },
+        };
+
+        assert!(handle.supports(CapabilityKind::Embeddings));
+        assert!(!handle.supports(CapabilityKind::Chat));
+        assert!(matches!(
+            handle.chat(),
+            Err(ModelError::UnsupportedCapability(CapabilityKind::Chat))
+        ));
+        assert!(matches!(
+            handle.completion(),
+            Err(ModelError::UnsupportedCapability(
+                CapabilityKind::Completion
+            ))
+        ));
+
+        let response = handle
+            .embeddings()
+            .expect("embedding handle should expose embeddings")
+            .embed(EmbeddingRequest {
+                inputs: vec!["a".into(), "abcd".into()],
+            })
+            .await
+            .expect("fake embed should succeed");
+
+        assert_eq!(response.vectors, vec![vec![1.0], vec![4.0]]);
+    }
+
+    #[test]
+    fn request_types_preserve_expected_defaults() {
+        let chat = ChatRequest::default();
+        let completion = CompletionRequest::default();
+        let embeddings = EmbeddingRequest::default();
+        let multi = EmbeddingRequest {
+            inputs: vec!["one".into(), "two".into()],
+        };
+        let response = EmbeddingResponse {
+            vectors: vec![vec![], vec![1.0, 2.0]],
+        };
+
+        assert!(chat.messages.is_empty());
+        assert!(completion.prompt.is_empty());
+        assert!(embeddings.inputs.is_empty());
+        assert!(chat.params.stop_sequences.is_empty());
+        assert_eq!(multi.inputs.len(), 2);
+        assert_eq!(response.vectors.len(), 2);
+    }
 }

@@ -42,3 +42,34 @@ pub struct EvalResult {
     pub passed: bool,
     pub notes: Vec<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn eval_case_ids_are_stable_strings() {
+        let case_id = EvalCaseId::new("embeddings-basic-001");
+
+        assert_eq!(case_id.as_str(), "embeddings-basic-001");
+    }
+
+    #[test]
+    fn eval_result_construction_is_straightforward() {
+        let case = EvalCase {
+            id: EvalCaseId::new("embeddings-basic-001"),
+            track: EvalTrack::Embeddings,
+            prompt: "motlie model bundle".into(),
+        };
+
+        let result = EvalResult {
+            case_id: case.id.clone(),
+            score: 1.0,
+            passed: true,
+            notes: vec!["vector count matched input count".into()],
+        };
+
+        assert_eq!(result.case_id, case.id);
+        assert!(result.passed);
+    }
+}

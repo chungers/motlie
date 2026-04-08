@@ -7,6 +7,7 @@
 | Date | Change | Sections |
 |------|--------|----------|
 | 2026-04-07 | @codex-researcher: Initial greenfield design for `libs/model` as the stable contract/lifecycle crate for packaged model bundles. Migration and backward compatibility are explicitly out of scope for this first cut. | All |
+| 2026-04-07 | @codex-researcher: Clarified that curated artifact download is explicit in `libs/models`, while backends consume artifact roots through `StartOptions` and artifact contracts. | Overview, Architecture, Artifact and Packaging Contracts |
 
 This document defines the design for `libs/model`, the contract crate for Motlie's packaged model system. The crate does not ship concrete model bundles or runtime implementations. Instead, it defines the stable public vocabulary, lifecycle, request/response types, capability adapters, composability boundaries, and artifact contracts that higher-level crates build on.
 
@@ -39,6 +40,8 @@ The governing framework principle is curated sustainability: Motlie maintains op
 Motlie wants to treat models as deployable product blocks rather than as loose combinations of checkpoint files and inference runtimes. Different model families have different runtime maturity, artifact formats, and operational constraints. The application integration surface should not expose those differences directly.
 
 Some bundles may execute locally with packaged weights and a native backend, while others may be remote-backed bundles that satisfy the same contract over HTTP. The top-level lifecycle and capability API should remain stable across both cases.
+
+For local bundles, `libs/model` does not own download policy. The contract only needs to carry enough artifact and startup information for higher-level curated tooling to stage artifacts explicitly and for backend implementations to consume the resulting artifact root predictably.
 
 Without a dedicated contract crate, concrete bundle implementations would either:
 
@@ -114,6 +117,8 @@ Dependency direction:
 4. The caller requests a capability adapter such as chat or embeddings
 5. The adapter executes requests through the bundle's selected backend implementation under `libs/model/backends/*`
 6. Responses return through shared request/response types defined in `libs/model`
+
+Curated artifact staging happens outside this flow in `libs/models`. Backend startup receives the resulting artifact/cache root through `StartOptions` or later artifact descriptors rather than initiating curated downloads itself.
 
 ## Framework Principles
 

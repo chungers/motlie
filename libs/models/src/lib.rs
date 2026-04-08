@@ -2,6 +2,7 @@
 //!
 //! This crate owns the bundle/catalog layer above `motlie-model`.
 
+mod artifacts;
 mod bundles;
 mod catalog;
 
@@ -10,6 +11,10 @@ pub use motlie_model::{
     BundleId, Capabilities, CapabilityDescriptor, CapabilityKind, ContentKind, InteractionStyle,
 };
 
+pub use artifacts::{
+    default_artifact_root, download_bundle_artifacts, ArtifactDownloadSummary, ArtifactRule,
+    ArtifactSource, BundleArtifacts,
+};
 pub use bundles::embeddinggemma_300m_bundle;
 pub use catalog::{
     BackendKind, BuildConstraint, BundleDescriptor, BundleFamily, BundleRequirements, Catalog,
