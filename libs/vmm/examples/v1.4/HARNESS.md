@@ -67,8 +67,9 @@ Explicit PTY scenario:
 Current note:
 
 - `smoke` is the reliable machine-readable scenario today
-- `pty` exercises the PTY path but is still being hardened before it becomes a
-  stable JSON/reporting signal
+- `pty` now emits a stable machine-readable evidence block plus a persisted
+  transcript artifact, but rendered terminal-state / VTE assertions are still
+  future work
 
 Interactive/manual harness mode:
 
@@ -115,11 +116,23 @@ What it proves today:
 
 What the JSON result includes today:
 
+- status (`passed` / `failed`)
 - scenario name
 - guest id
 - pid and shutdown outcome
-- `VmHandle::observability()` snapshot
-- named checks for the `smoke` assertions
+- `VmHandle::observability()` snapshot, including:
+  - runtime/log/socket paths
+  - host mount metadata
+  - typed run-bundle metadata
+  - standard capture paths for `scenario-result.json` and `pty-transcript.json`
+- named scenario checks
+- structured classified error record on failure
+- PTY transcript summary and raw PTY transcript events for the `pty` scenario
+
+Each booted run also writes internal bundle artifacts under the runtime root:
+
+- `.../runtime/<guest>/bundle/scenario-result.json`
+- `.../runtime/<guest>/bundle/pty-transcript.json` for the `pty` scenario
 
 Current limitation:
 

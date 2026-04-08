@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-07 | @codex | Complete the remaining observability/result slice: `VmObservability` now exposes typed run-bundle metadata and capture paths, `harness_v1_4` persists internal result and PTY transcript artifacts, result JSON now carries structured failure classification, and PTY output is hardened into a stable evidence block |
 | 2026-04-07 | @codex | Implement the first concrete Phase 4/5 slice in code: `observability.rs`, `VmHandle::observability()`, and `harness_v1_4 --result-json ...` for machine-readable `smoke` results; PTY result capture still needs hardening |
 | 2026-04-07 | @codex | Lock the harness direction: `examples/v1.4/harness` is the future primary driver over the `libs/vmm` API, with scripted scenarios, interactive/manual mode, PTY/session control via `VmHandle`, and transcript/log capture; `repl_host_v1_4` remains transitional only |
 | 2026-04-07 | @codex | Replace the intermediate VM-backend injection with reviewed `Runtime` injection so `orchestrator.rs` now takes composed hypervisor/filesystem/network/control-plane backing rather than importing Motlie implementation modules directly |
@@ -96,11 +97,13 @@ Current `v1.4` implementation status:
   - `VmHandle::observability()`
   - runtime/log/socket roots
   - active filesystem/network/control-plane backing identity
+  - typed run-bundle metadata and standard capture paths for harness artifacts
 - `harness_v1_4` now supports first-pass machine-readable result output:
   - `--result-json <path>`
   - structured `smoke` scenario results
   - named checks plus `VmObservability`
-  - PTY result capture is not yet a stable acceptance signal
+  - stable success/failure status and classified error records for agents/CI
+  - PTY scenario evidence plus persisted transcript capture under the run bundle
 - `ChShellBackend` now tracks the spawned child process directly in its
   backend-specific module so readiness and shutdown use real process state
   rather than `/proc` zombie heuristics
@@ -260,12 +263,11 @@ The first concrete implementation slice for this is now:
 
 - library-owned `VmHandle::observability()`
 - harness `--result-json <path>` output for the `smoke` scenario
+- typed run-bundle metadata and capture paths under `VmObservability`
+- persisted PTY transcript and internal result artifacts under the bundle root
 
 The next observability/reporting steps remain:
 
-- PTY result hardening
-- run-bundle manifests
-- transcript/log collation
 - rendered terminal state / VTE capture
 - optional recording artifacts
 
