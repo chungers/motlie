@@ -11,8 +11,9 @@ description = "Curated model bundle catalog for the Motlie ecosystem"
 path = "src/lib.rs"
 
 [features]
-default = ["model-google-gemma-300m"]
+default = ["model-google-gemma-300m", "model-qwen3-4b"]
 model-google-gemma-300m = []
+model-qwen3-4b = []
 
 [dependencies]
 anyhow.workspace = true
