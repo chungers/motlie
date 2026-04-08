@@ -6,6 +6,7 @@
 |------|-----|---------|
 | 2026-04-07 | @codex-researcher | Initial PLAN for `libs/models` vertical slice work. Covers the curated catalog, constructor registration, and the first `embeddinggemma_300m` bundle wired through the Mistral backend. |
 | 2026-04-07 | @codex-researcher | Marked the completed catalog, descriptor, artifact-control, and verification work for the first embedding slice. | Phases 1-4 |
+| 2026-04-07 | @codex-researcher | Updated the bundle plan after the NaN investigation. The `embeddinggemma_300m` descriptor now captures the full sentence-transformers module stack, and an env-gated catalog test verifies finite local-only embeddings end to end. |
 
 Derived from [DESIGN.md](./DESIGN.md). This PLAN focuses on the first curated bundle slice rather than the full long-term catalog.
 
@@ -79,10 +80,10 @@ Keep this limited and explicit for the first embedder.
 
 ### 4.1 — Cross-crate end-to-end check
 
-- [ ] Verify the following flow compiles and runs:
+- [x] Verify the following flow compiles and runs:
   `Catalog::with_defaults()` -> `instantiate("embeddinggemma_300m")` -> `start()` -> `embeddings()` -> `embed()`
   DESIGN reference: `API Sketch`
-- [ ] Add one small test in `libs/models` covering that path against the backend crate’s current implementation.
+- [x] Add one small test in `libs/models` covering that path against the backend crate’s current implementation.
 
 ### 4.2 — Required verification commands
 

@@ -28,10 +28,14 @@ pub fn descriptor() -> BundleDescriptor {
             },
             include: vec![
                 ArtifactRule::Exact("config.json"),
+                ArtifactRule::Exact("modules.json"),
                 ArtifactRule::Exact("tokenizer.json"),
                 ArtifactRule::Exact("tokenizer.model"),
                 ArtifactRule::Exact("tokenizer_config.json"),
                 ArtifactRule::Exact("special_tokens_map.json"),
+                ArtifactRule::Exact("1_Pooling/config.json"),
+                ArtifactRule::Exact("2_Dense/config.json"),
+                ArtifactRule::Exact("3_Dense/config.json"),
                 ArtifactRule::Suffix(".safetensors"),
                 ArtifactRule::Suffix(".safetensors.index.json"),
             ],
@@ -48,6 +52,8 @@ pub fn bundle() -> Box<dyn ModelBundle> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use motlie_model::{ArtifactPolicy, EmbeddingRequest, StartOptions};
+    use crate::Catalog;
 
     #[test]
     fn descriptor_is_reviewable_as_data() {
@@ -73,5 +79,44 @@ mod tests {
         assert!(artifacts.includes("model.safetensors"));
         assert!(artifacts.includes("config.json"));
         assert!(!artifacts.includes("README.md"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires pre-downloaded embeddinggemma artifacts under MOTLIE_EMBEDDINGGEMMA_ROOT"]
+    async fn catalog_can_start_embeddinggemma_and_generate_finite_vectors() {
+        let root = std::env::var("MOTLIE_EMBEDDINGGEMMA_ROOT")
+            .expect("MOTLIE_EMBEDDINGGEMMA_ROOT must point at the curated HF cache root");
+        let catalog = Catalog::with_defaults();
+        let bundle = catalog
+            .instantiate(&BundleId::new("embeddinggemma_300m"))
+            .expect("default catalog should instantiate embeddinggemma");
+        let handle = bundle
+            .start(StartOptions {
+                artifact_policy: Some(ArtifactPolicy::LocalOnly { root: root.into() }),
+                ..Default::default()
+            })
+            .await
+            .expect("bundle should start from local artifacts");
+        let response = handle
+            .embeddings()
+            .expect("embeddings capability should exist")
+            .embed(EmbeddingRequest {
+                inputs: vec!["motlie curated model bundle".into()],
+            })
+            .await
+            .expect("embedding request should succeed");
+        let vector = response
+            .vectors
+            .into_iter()
+            .next()
+            .expect("embedding output should contain one vector");
+
+        assert!(!vector.is_empty(), "embedding vector should not be empty");
+        assert!(
+            vector.iter().all(|value| value.is_finite()),
+            "embedding vector should not contain NaN or Inf values: {vector:?}"
+        );
+
+        handle.shutdown().await.expect("shutdown should succeed");
     }
 }

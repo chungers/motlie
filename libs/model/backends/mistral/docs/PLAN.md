@@ -6,6 +6,7 @@
 |------|-----|---------|
 | 2026-04-07 | @codex-researcher | Initial PLAN for the first `libs/model/backends/mistral` vertical slice. Focused on a generic embedding backend path for `google/embeddinggemma-300m` that satisfies `libs/model` contracts. |
 | 2026-04-07 | @codex-researcher | Marked the completed backend scaffold, runtime integration, and unit-test work after the first `mistralrs`-backed embedding slice passed compile/test verification. | Phases 1-4 |
+| 2026-04-07 | @codex-researcher | Updated the backend plan after investigating NaN embeddings. The slice now validates true `LocalOnly` startup from a local snapshot, requires the sentence-transformers module stack, and adds an env-gated finite-vector test. |
 
 Derived from [../../docs/DESIGN.md](../../docs/DESIGN.md). This PLAN covers the generic `mistral` backend implementation work needed for the first embedding-only curated bundle.
 
@@ -61,7 +62,7 @@ The current placeholder embedder is only acceptable for contract validation. The
 ### 3.2 — Operational behavior
 
 - [x] Define how local model artifacts are located for the first slice.
-- [ ] Define what happens when required weights are unavailable.
+- [x] Define what happens when required weights are unavailable.
 - [x] Define whether the first slice assumes local sidecar assets only, or permits a preconfigured model path.
 
 ## Phase 4: Tests and Verification
@@ -73,9 +74,9 @@ The current placeholder embedder is only acceptable for contract validation. The
 
 ### 4.2 — Integration validation
 
-- [ ] Add at least one integration-style test or env-gated test for real `mistral.rs` embedding inference.
+- [x] Add at least one integration-style test or env-gated test for real `mistral.rs` embedding inference.
 - [ ] Validate multi-input embedding requests.
-- [ ] Validate that `embeddinggemma_300m` can be instantiated through `libs/models::Catalog`.
+- [x] Validate that `embeddinggemma_300m` can be instantiated through `libs/models::Catalog`.
 
 ### 4.3 — Required verification commands
 
