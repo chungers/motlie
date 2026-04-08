@@ -253,7 +253,7 @@ GUEST_BINARY_ABS="$(realpath "$GUEST_BINARY")"
 OVERLAY_INIT_ABS="$(realpath "$SCRIPT_DIR/overlay-init")"
 
 run_mmdebstrap "$BASE_ROOTFS" \
-    --include=openssh-server,bash,bubblewrap,ca-certificates,coreutils,curl,dnsutils,tmux,vim,fuse3,libfuse3-3,systemd,systemd-sysv,dbus,iproute2,cloud-init,locales,sudo,python3,npm,strace,socat \
+    --include=openssh-server,bash,bubblewrap,ca-certificates,coreutils,curl,dnsutils,git,tmux,vim,fuse3,libfuse3-3,systemd,systemd-sysv,dbus,iproute2,cloud-init,locales,sudo,python3,npm,strace,socat \
     --customize-hook='chroot "$1" systemctl enable ssh' \
     --customize-hook='chroot "$1" systemctl enable systemd-networkd' \
     --customize-hook='chroot "$1" systemctl disable systemd-networkd-wait-online.service' \
@@ -269,6 +269,11 @@ run_mmdebstrap "$BASE_ROOTFS" \
     --customize-hook='chroot "$1" useradd -m -u 1001 -g bob -s /bin/bash bob' \
     --customize-hook='chroot "$1" usermod -aG sudo bob' \
     --customize-hook='echo "bob:testpass" | chroot "$1" chpasswd' \
+    --customize-hook='cat > "$1/etc/sudoers.d/90-motlie-demo" << "SUDOERSEOF"
+alice ALL=(ALL) NOPASSWD:ALL
+bob ALL=(ALL) NOPASSWD:ALL
+SUDOERSEOF
+chmod 0440 "$1/etc/sudoers.d/90-motlie-demo"' \
     --customize-hook='sed -i "s/#PermitRootLogin.*/PermitRootLogin yes/" "$1/etc/ssh/sshd_config"' \
     --customize-hook='echo "root:rootpass" | chroot "$1" chpasswd' \
     --customize-hook='chroot "$1" ssh-keygen -A' \

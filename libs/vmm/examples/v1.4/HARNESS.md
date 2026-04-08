@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-08 | @codex | Add `apt-get update` to the baseline agent/bootstrap validation and document the default egress allocator compatibility rule: keep slot-based capacity growth, but start the guest-facing vnet range at `10.0.2.0/24` so harness egress stays aligned with the previously validated path |
 | 2026-04-08 | @codex | Promote HARNESS from a runbook to the harness contract and evolution log: document the stable JSON scenario format, shell/wrapper layering, allocator UX, and PTY/VTE artifacts for future agent-driven troubleshooting and feature work |
 | 2026-04-07 | @codex | Add the first `harness_v1_4` runbook covering smoke, shell, multi-guest wrappers, and live SSH validation |
 
@@ -360,6 +361,7 @@ This replaces the old implicit 7-guest stopgap.
 
 Saved examples live in:
 
+- [`scenarios/agent-bootstrap.json`](./scenarios/agent-bootstrap.json)
 - [`scenarios/pty-login.json`](./scenarios/pty-login.json)
 - [`scenarios/multiguest-validate.json`](./scenarios/multiguest-validate.json)
 
@@ -371,6 +373,26 @@ The multi-guest example proves the stable format is not single-guest-only:
 - validate guest-specific `vnet` routing
 - validate outbound HTTPS
 - shut both guests down
+
+The agent bootstrap example is the baseline future-agent scenario:
+
+- boot `alice`
+- verify `vfs` is mounted
+- verify `sudo -n true`
+- verify `git` is preinstalled
+- verify `codex --version`
+- verify outbound HTTPS
+- verify `sudo -n apt-get update`
+- shut the guest down
+
+Current allocator compatibility note:
+
+- the harness still uses the slot-derived allocation API and larger capacity
+  model
+- the default egress pool now reserves child slots `0` and `1`, so slot `0`
+  starts at `10.0.2.0/24`
+- this keeps the first harness guests aligned with the previously validated
+  libslirp/guest path while still allowing capacity growth well beyond `7`
 
 ## Shell and Wrapper Flows
 
@@ -415,6 +437,9 @@ Useful manual probes:
 
 ```bash
 pwd
+sudo -n true
+sudo -n apt-get update
+sudo -n apt-get install -y git
 cat ~/.env
 ls -ald /home/$USER /workspace /agent-state
 curl -fsSL https://example.com -o ~/example.html && stat ~/example.html
@@ -424,6 +449,14 @@ cat /etc/resolv.conf
 
 This path remains important because `exec` success does not prove full external
 interactive SSH correctness.
+
+Current expected guest privilege model:
+
+- `alice` and `bob` should have passwordless sudo through
+  `/etc/sudoers.d/90-motlie-demo`
+- `sudo -n true` should succeed without prompting
+- `sudo -n apt-get update` should succeed without DNS or route failures
+- `git` should already be present in the base image
 
 ## Regression Matrix
 
