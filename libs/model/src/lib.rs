@@ -183,7 +183,7 @@ impl Capabilities {
     }
 }
 
-/// Stable metadata for a curated bundle definition.
+/// Stable metadata for a curated bundle definition or a loaded bundle instance.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BundleMetadata {
     pub id: BundleId,
@@ -206,13 +206,8 @@ pub struct StartOptions {
     pub max_concurrency: Option<usize>,
 }
 
-/// Lightweight descriptor for a loaded bundle instance.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LoadedBundleDescriptor {
-    pub id: BundleId,
-    pub display_name: String,
-    pub capabilities: Capabilities,
-}
+/// Loaded bundle descriptors currently share the same shape as curated bundle metadata.
+pub type LoadedBundleDescriptor = BundleMetadata;
 
 /// Structured error surface for core bundle operations.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
@@ -221,6 +216,17 @@ pub enum ModelError {
     Internal(String),
     #[error("invalid model configuration: {0}")]
     InvalidConfiguration(String),
+    #[error("failed to initialize `{backend}` backend: {message}")]
+    BackendInitialization {
+        backend: &'static str,
+        message: String,
+    },
+    #[error("`{backend}` backend failed during `{operation}`: {message}")]
+    BackendExecution {
+        backend: &'static str,
+        operation: &'static str,
+        message: String,
+    },
     #[error("unsupported capability: {0:?}")]
     UnsupportedCapability(CapabilityKind),
 }

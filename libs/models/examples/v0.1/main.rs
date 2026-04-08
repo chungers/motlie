@@ -1,6 +1,8 @@
 use anyhow::{bail, Context, Result};
 use motlie_model::{ArtifactPolicy, EmbeddingRequest, StartOptions};
-use motlie_models::{default_artifact_root, download_bundle_artifacts, embeddings::EmbeddingModels, ModelSelector};
+use motlie_models::{
+    default_artifact_root, download_bundle_artifacts, embeddings::EmbeddingModels, ModelSelector,
+};
 use std::time::Instant;
 
 const SIMILAR_A: &str = "A small orange cat is sleeping on the couch.";
@@ -31,28 +33,29 @@ async fn main() -> Result<()> {
         );
     }
 
-    let (selector_label, bundle_id, descriptor, bundle, path_kind) =
-        if let Some(selector) = embedding_selector {
-            let model_selector: ModelSelector = format!("embedding:{selector}")
-                .parse()
-                .with_context(|| format!("failed to parse model selector `embedding:{selector}`"))?;
-            (
-                model_selector.to_string(),
-                model_selector.bundle_id(),
-                model_selector.descriptor(),
-                model_selector.bundle(),
-                "selector",
-            )
-        } else {
-            let model = EmbeddingModels::GoogleGemma300m;
-            (
-                model.to_string(),
-                model.bundle_id(),
-                model.descriptor(),
-                model.bundle(),
-                "direct-enum",
-            )
-        };
+    let (selector_label, bundle_id, descriptor, bundle, path_kind) = if let Some(selector) =
+        embedding_selector
+    {
+        let model_selector: ModelSelector = format!("embedding:{selector}")
+            .parse()
+            .with_context(|| format!("failed to parse model selector `embedding:{selector}`"))?;
+        (
+            model_selector.to_string(),
+            model_selector.bundle_id(),
+            model_selector.descriptor(),
+            model_selector.bundle(),
+            "selector",
+        )
+    } else {
+        let model = EmbeddingModels::GoogleGemma300m;
+        (
+            model.to_string(),
+            model.bundle_id(),
+            model.descriptor(),
+            model.bundle(),
+            "direct-enum",
+        )
+    };
 
     let artifact_root = default_artifact_root();
 
@@ -118,7 +121,10 @@ async fn main() -> Result<()> {
         "embedding-head: {:?}",
         vector.iter().take(8).copied().collect::<Vec<_>>()
     );
-    println!("embedding-latency-ms: {:.2}", custom_latency.as_secs_f64() * 1000.0);
+    println!(
+        "embedding-latency-ms: {:.2}",
+        custom_latency.as_secs_f64() * 1000.0
+    );
 
     run_pair_demo(
         embeddings,

@@ -15,6 +15,7 @@
 | 2026-04-08 | @codex-researcher: Added the direct curated embedding enum and parser-oriented `ModelSelector` path to the API sketch, and removed `SupportTier` / `PackagingMode` from the recommended public surface. | Core Types, API Sketch, Example Program, Notes |
 | 2026-04-08 | @codex-researcher: Added an explicit end-to-end vertical-slice walkthrough and a curator implementation checklist so both callers and bundle implementers can follow the same documented path. | Overview, API Sketch, Example Program, Notes |
 | 2026-04-08 | @codex-researcher: Documented the per-bundle feature-gating convention and the `ModelUnavailable` behavior for known selectors that are disabled in the current build. | Overview, Core Types, Notes |
+| 2026-04-08 | @codex-researcher: Clarified the local-only startup boundary after PR 139 review. Curated bundle modules now resolve and validate provider-specific cache layout before startup, while generic backends consume only a resolved local model path. Also clarified that selector strings are composed from capability family plus model selector rather than hardcoded one-off branches. | Overview, API Sketch, Notes |
 
 This document sketches the concrete API shapes currently introduced in `libs/models`. The crate now owns both the descriptor catalog and the curated bundle constructors that bind those descriptors to a backend implementation.
 
@@ -168,6 +169,8 @@ let selected: ModelSelector = "embedding:google/embeddinggemma_300m".parse()?;
 let selected_bundle = selected.bundle();
 
 // Both paths resolve to the same curated bundle behavior.
+// In LocalOnly mode, the curated bundle resolves the provider-specific cache
+// layout to a concrete local snapshot path before delegating to the backend.
 let handle = direct_bundle
     .start(StartOptions {
         artifact_policy: Some(ArtifactPolicy::LocalOnly {

@@ -8,6 +8,7 @@
 | 2026-04-07 | @codex-researcher | Marked the completed contract and test work for the first embedding slice after `cargo check`/`cargo test` verification. | Phases 1-5 |
 | 2026-04-08 | @codex-researcher | Closed the missing capability-ordering and eval-track mapping gaps after PR review. Added explicit `CapabilityDescriptor` -> `EvalTrack` helpers/tests and a minimal `libs/model-eval` cross-crate consumption proof so the remaining unchecked items are true deferrals rather than silent omissions. | Phases 1, 4, 5 |
 | 2026-04-08 | @codex-researcher | Added an explicit follow-up phase for the post-embedding contract extensions already known to be needed for the planned chat, multimodal, and tool-calling bundles. | Phase 6 |
+| 2026-04-08 | @codex-researcher | Tightened the phase notes after PR 139 review. `LoadedBundleDescriptor` is now implemented as the loaded-instance alias of `BundleMetadata`, and the v0.1 `ModelError` surface now includes explicit backend initialization/execution variants rather than only string-erased `Internal` errors. | Phases 1, 2 |
 
 Derived from [DESIGN.md](./DESIGN.md). This PLAN covers the contract work needed to support the first end-to-end embedding vertical slice while preserving the longer-term curated-bundle architecture.
 
@@ -21,8 +22,8 @@ Establish stable contract vocabulary that all bundles, backends, and harnesses w
 
 - [x] Finalize `BundleId` as the stable bundle selection type.
   DESIGN reference: `Core Abstractions` / `Bundle Identity`
-- [x] Finalize `BundleMetadata` and `LoadedBundleDescriptor` so both carry:
-  `id`, `display_name`, and `Capabilities`.
+- [x] Finalize `BundleMetadata`, with `LoadedBundleDescriptor` implemented as the loaded-instance alias for the same
+  `id`, `display_name`, and `Capabilities` shape.
   DESIGN reference: `Core Abstractions` / `Bundle Contract`
 - [x] Finalize `StartOptions` as the minimal deployment-oriented load surface for the first slice.
   DESIGN reference: `Lifecycle`
@@ -53,7 +54,7 @@ Define the actual contract backends and curated bundles must satisfy.
 ### 2.1 — Error and lifecycle traits
 
 - [x] Finalize `ModelError` for the first slice:
-  `Internal`, `InvalidConfiguration`, `UnsupportedCapability`.
+  `Internal`, `InvalidConfiguration`, `BackendInitialization`, `BackendExecution`, and `UnsupportedCapability`.
   DESIGN reference: `Core Abstractions`, `Lifecycle`
 - [x] Finalize `ModelBundle` and `BundleHandle` trait signatures.
   DESIGN reference: `Bundle Contract`, `Loaded Handle`

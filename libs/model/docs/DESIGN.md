@@ -14,6 +14,7 @@
 | 2026-04-08 | @codex-researcher: Added the proposed bundle-level embedding metadata contract so curated embedding bundles can expose retrieval-relevant semantics such as preferred distance metric and normalization. This shape is intended to align cleanly with future `libs/db/vector::EmbeddingSpec` integration without creating a reverse dependency today. | Core Abstractions, Capability Surfaces, API Sketch |
 | 2026-04-08 | @codex-researcher: Referenced the `libs/models` bundle-build convention so the contract layer is explicit that bundle availability is build-dependent and selector/catalog surfaces may vary by curated feature set. | Architecture, Framework Principles |
 | 2026-04-08 | @codex-researcher: Added explicit future-model follow-up notes for multimodal chat, tool-calling, richer startup controls, and capability-role semantics so the current embedding-first contract can merge with the next required extensions already tracked in-design. | Goals and Non-Goals, Loaded Handle, Capability Model, Capability Surfaces, Open Concerns |
+| 2026-04-08 | @codex-researcher: Clarified the reviewed responsibility split: curated bundles in `libs/models` resolve and validate artifact-layout details, while generic backends consume a plain resolved local model path or fetch-enabled cache root. Also clarified that `LoadedBundleDescriptor` is intentionally the loaded-instance alias of `BundleMetadata` in v0.1 and that `ModelError` now distinguishes backend initialization from backend execution failures. | Architecture, Core Abstractions, Artifact and Packaging Contracts |
 
 This document defines the design for `libs/model`, the contract crate for Motlie's packaged model system. The crate does not ship concrete model bundles or runtime implementations. Instead, it defines the stable public vocabulary, lifecycle, request/response types, capability adapters, composability boundaries, and artifact contracts that higher-level crates build on.
 
@@ -133,7 +134,7 @@ Build note:
 5. The adapter executes requests through the bundle's selected backend implementation under `libs/model/backends/*`
 6. Responses return through shared request/response types defined in `libs/model`
 
-Curated artifact staging happens outside this flow in `libs/models`. Backend startup receives the resulting artifact/cache root through `StartOptions` or later artifact descriptors rather than initiating curated downloads itself.
+Curated artifact staging and artifact-layout validation happen outside this flow in `libs/models`. Backend startup receives either a resolved local model path (`ArtifactPolicy::LocalOnly`) or an optional fetch-enabled cache root (`ArtifactPolicy::AllowFetch`) through `StartOptions` rather than initiating curated downloads or understanding provider-specific cache layout itself.
 
 ## Framework Principles
 
