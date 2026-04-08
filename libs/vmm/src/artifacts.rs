@@ -92,7 +92,7 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
         "GUEST_ID={}",
         shell_single_quote(&cfg.guest.guest_id)
     )
-        .expect("writing to String cannot fail");
+    .expect("writing to String cannot fail");
     writeln!(
         &mut out,
         "BASE_DIR=\"${{BASE_DIR:-{}}}\"",
@@ -168,7 +168,10 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
     out.push_str("EOF\n\n");
     out.push_str("echo \"Generated cloud-init assets in $SEED_DIR\"\n");
     out.push_str("echo \"Launching guest ${GUEST_ID} with seeded NoCloud dir ${SEED_DIR}\"\n");
-    if matches!(cfg.network_modes.egress, crate::network::EgressNetMode::VhostUser) {
+    if matches!(
+        cfg.network_modes.egress,
+        crate::network::EgressNetMode::VhostUser
+    ) {
         out.push_str("echo \"Using motlie-vmm egress socket ${VNET_SOCKET}\"\n");
     }
 
@@ -190,30 +193,38 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
         shell_single_quote(&mac_fmt(&cfg.net_assignment.egress_mac))
     )
     .expect("writing to String cannot fail");
-    writeln!(&mut out, "EGRESS_HOST_IP={}", cfg.net_assignment.egress_ipv4.host)
-        .expect("writing to String cannot fail");
-    writeln!(&mut out, "EGRESS_GUEST_IP={}", cfg.net_assignment.egress_ipv4.guest)
-        .expect("writing to String cannot fail");
-    writeln!(&mut out, "EGRESS_DNS_IP={}", cfg.net_assignment.egress_ipv4.dns)
-        .expect("writing to String cannot fail");
+    writeln!(
+        &mut out,
+        "EGRESS_HOST_IP={}",
+        cfg.net_assignment.egress_ipv4.host
+    )
+    .expect("writing to String cannot fail");
+    writeln!(
+        &mut out,
+        "EGRESS_GUEST_IP={}",
+        cfg.net_assignment.egress_ipv4.guest
+    )
+    .expect("writing to String cannot fail");
+    writeln!(
+        &mut out,
+        "EGRESS_DNS_IP={}",
+        cfg.net_assignment.egress_ipv4.dns
+    )
+    .expect("writing to String cannot fail");
     writeln!(
         &mut out,
         "SSH_USER={}",
         shell_single_quote(&cfg.guest.user.name)
     )
-        .expect("writing to String cannot fail");
+    .expect("writing to String cannot fail");
     writeln!(
         &mut out,
         "GUEST_HOSTNAME={}",
         shell_single_quote(&cfg.guest.hostname)
     )
     .expect("writing to String cannot fail");
-    writeln!(
-        &mut out,
-        "LOGIN_HOME={}",
-        shell_single_quote(&login_home)
-    )
-    .expect("writing to String cannot fail");
+    writeln!(&mut out, "LOGIN_HOME={}", shell_single_quote(&login_home))
+        .expect("writing to String cannot fail");
     writeln!(
         &mut out,
         "OVERLAY_SIZE={}",
@@ -243,8 +254,12 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
         .expect("writing to String cannot fail");
     }
     if let Some(cmdline) = &cfg.guest.boot.cmdline {
-        writeln!(&mut out, "BOOT_CMDLINE_APPEND={}", shell_single_quote(cmdline))
-            .expect("writing to String cannot fail");
+        writeln!(
+            &mut out,
+            "BOOT_CMDLINE_APPEND={}",
+            shell_single_quote(cmdline)
+        )
+        .expect("writing to String cannot fail");
     }
     out.push_str("LAUNCH_ARGS=(--guest \"$GUEST_ID\" --cloud-init-dir \"$SEED_DIR\" --admin-net \"$ADMIN_NET\" --egress-net \"$EGRESS_NET\")\n");
     out.push_str(
@@ -334,18 +349,20 @@ mod tests {
             guest_name: "alice".to_string(),
             slot: 0,
             cid: 3,
+            admin_subnet: "172.20.0.0/30".parse().unwrap(),
             admin_ipv4: AdminIpv4Pair {
-                host: "192.168.249.1".parse().unwrap(),
-                guest: "192.168.249.2".parse().unwrap(),
+                host: "172.20.0.1".parse().unwrap(),
+                guest: "172.20.0.2".parse().unwrap(),
             },
-            admin_mac: [0x52, 0x54, 0x00, 0xad, 0x00, 0x01],
+            admin_mac: [0x52, 0x54, 0x00, 0xa0, 0x00, 0x00],
+            egress_subnet: "10.0.0.0/24".parse().unwrap(),
             egress_ipv4: EgressIpv4Layout {
-                guest: "10.0.2.15".parse().unwrap(),
-                host: "10.0.2.2".parse().unwrap(),
-                dns: "10.0.2.3".parse().unwrap(),
+                guest: "10.0.0.15".parse().unwrap(),
+                host: "10.0.0.2".parse().unwrap(),
+                dns: "10.0.0.3".parse().unwrap(),
                 netmask: "255.255.255.0".parse().unwrap(),
             },
-            egress_mac: [0x52, 0x54, 0x00, 0xe9, 0x00, 0x01],
+            egress_mac: [0x52, 0x54, 0x00, 0xe0, 0x00, 0x00],
             vnet_socket_path: PathBuf::from("/tmp/motlie-vmm-v14-alice.sock"),
         }
     }
@@ -401,8 +418,12 @@ mod tests {
         assert!(script.contains("GUEST_ID='alice'"));
         assert!(script.contains("SEED_DIR=\"${SEED_DIR:-/tmp/motlie-vmm-v14-cloud-init-alice}\""));
         assert!(script.contains("RUNTIME_ROOT=\"${RUNTIME_ROOT:-/tmp/motlie-vmm-v14-runtime}\""));
-        assert!(script.contains("API_SOCKET=\"${API_SOCKET:-/tmp/motlie-vmm-v14-alice-api.sock}\""));
-        assert!(script.contains("VSOCK_SOCKET=\"${VSOCK_SOCKET:-/tmp/motlie-vmm-v14-alice.vsock}\""));
+        assert!(
+            script.contains("API_SOCKET=\"${API_SOCKET:-/tmp/motlie-vmm-v14-alice-api.sock}\"")
+        );
+        assert!(
+            script.contains("VSOCK_SOCKET=\"${VSOCK_SOCKET:-/tmp/motlie-vmm-v14-alice.vsock}\"")
+        );
         assert!(script.contains("GUEST_CID=3"));
         assert!(script.contains("ADMIN_NET='none'"));
         assert!(script.contains("EGRESS_NET='vhost-user'"));

@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-08 | @codex | Replace the 7-slot allocator with computed subnet-pool capacity, expose allocator config through `harness_v1_4`, add a file-backed scenario driver with action/expectation steps, and complete PTY/VTE capture with raw transcript NDJSON plus rendered screen JSON |
 | 2026-04-07 | @codex | Complete the remaining Phase 4/5 observability slice: `VmObservability` now carries typed run-bundle metadata and capture paths, `harness_v1_4` persists PTY transcripts and internal result artifacts under the bundle root, result JSON now has structured status/error classification for agents/CI, and the PTY scenario emits hardened structured evidence |
 | 2026-04-07 | @codex | Implement the first concrete Phase 4/5 slice: `observability.rs`, `VmHandle::observability()`, and `harness_v1_4 --result-json ...` for machine-readable `smoke` results; PTY result hardening remains open |
 | 2026-04-07 | @codex | Rebase the near-term plan around the harness: defer CH internal-thread / alternate hypervisor backend work to a later `v2` track; make observability library-owned in Phase 4; add machine-readable results plus PTY/VTE recording work to Phase 5; and tighten Phase 8 around a real scenario/agent driver |
@@ -284,9 +285,9 @@ Tasks:
   - [x] stable machine-readable guest/run metadata
   - [x] structured error classification suitable for agents and CI
 - [ ] add a PTY/VTE capture layer:
-  - [ ] keep a VTE-style screen buffer for PTY sessions so the harness can
+  - [x] keep a VTE-style screen buffer for PTY sessions so the harness can
         reason about rendered terminal state, not only raw byte streams
-  - [ ] expose rendered screen state to scripted expectations
+  - [x] expose rendered screen state to scripted expectations
   - [x] preserve PTY transcripts in a reusable artifact format
 - [ ] evaluate terminal-recording artifact generation for human verification:
   - [ ] `ttyrec`
@@ -382,15 +383,15 @@ Tasks:
       not a mode bolted onto the old REPL
 - [ ] ensure it supports:
   - [x] boot-and-wait through `boot` + `handle.ready(...)`
-  - [ ] exec
+  - [x] exec
   - [ ] validate
-  - [ ] shutdown-and-wait
-  - [ ] PTY/send/expect script steps
-- [ ] design and implement the stable scenario/script format:
-  - [ ] action/expectation pairs
-  - [ ] PTY send/read/resize/expect steps
-  - [ ] multi-guest coordination
-  - [ ] stable machine-readable outputs per step
+  - [x] shutdown-and-wait
+  - [x] PTY/send/expect script steps
+- [x] design and implement the stable scenario/script format:
+  - [x] action/expectation pairs
+  - [x] PTY send/read/resize/expect steps
+  - [x] multi-guest coordination
+  - [x] stable machine-readable outputs per step
 - [ ] converge ad-hoc/manual operation onto the same engine:
   - [ ] harness shell commands should be thin wrappers over the scenario/driver
         engine
@@ -401,9 +402,9 @@ Acceptance:
 - an agent can drive the harness without depending on the REPL prompt
 - validation returns machine-usable results rather than only stderr text
 - the same engine supports:
-  - [ ] scripted regression scenarios
+  - [x] scripted regression scenarios
   - [ ] human interactive/manual operation
-  - [ ] ad-hoc coding-agent experimentation
+  - [x] ad-hoc coding-agent experimentation
 
 ## Phase 9: Polish and Hardening
 

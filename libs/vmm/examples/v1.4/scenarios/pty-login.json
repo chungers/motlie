@@ -1,0 +1,72 @@
+{
+  "name": "pty-login",
+  "description": "Boot alice, drive the PTY login path, verify prompt and resize behavior, and capture transcript plus VTE screen state.",
+  "steps": [
+    { "action": "boot", "guest": "alice" },
+    { "action": "ready", "guest": "alice" },
+    {
+      "action": "pty_open",
+      "guest": "alice",
+      "session": "alice-shell",
+      "term": "xterm-256color",
+      "cols": 80,
+      "rows": 24,
+      "timeout_ms": 10000
+    },
+    {
+      "action": "pty_expect",
+      "session": "alice-shell",
+      "contains": "Start tmux session?",
+      "timeout_ms": 20000
+    },
+    {
+      "action": "pty_expect",
+      "session": "alice-shell",
+      "contains": "v1.4 extraction / agent-state demo",
+      "timeout_ms": 1000
+    },
+    { "action": "pty_send_line", "session": "alice-shell", "text": "n" },
+    {
+      "action": "pty_expect",
+      "session": "alice-shell",
+      "contains": "alice@motlie-alice",
+      "timeout_ms": 10000
+    },
+    { "action": "pty_send_line", "session": "alice-shell", "text": "pwd" },
+    {
+      "action": "pty_expect",
+      "session": "alice-shell",
+      "contains": "/home/alice",
+      "timeout_ms": 10000
+    },
+    {
+      "action": "pty_resize",
+      "session": "alice-shell",
+      "cols": 120,
+      "rows": 40
+    },
+    {
+      "action": "pty_send_line",
+      "session": "alice-shell",
+      "text": "stty size"
+    },
+    {
+      "action": "pty_expect",
+      "session": "alice-shell",
+      "contains": "40 120",
+      "timeout_ms": 10000
+    },
+    {
+      "action": "pty_snapshot",
+      "session": "alice-shell",
+      "name": "after-resize"
+    },
+    { "action": "pty_send_line", "session": "alice-shell", "text": "exit" },
+    {
+      "action": "pty_expect_terminal",
+      "session": "alice-shell",
+      "timeout_ms": 5000
+    },
+    { "action": "shutdown", "guest": "alice" }
+  ]
+}

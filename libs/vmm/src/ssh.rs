@@ -134,6 +134,7 @@ pub enum PtyTranscriptEvent {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct PtyRead {
     pub output: String,
+    pub bytes: Vec<u8>,
     pub exit_status: Option<u32>,
     pub eof: bool,
     pub closed: bool,
@@ -189,7 +190,11 @@ impl GuestBridgeHandle {
         wait_for_guest_bridge_ready(&self.registry, &self.guest_name, timeout).await
     }
 
-    pub async fn exec(&self, command: &str, timeout: Duration) -> Result<ExecOutput, SshProxyError> {
+    pub async fn exec(
+        &self,
+        command: &str,
+        timeout: Duration,
+    ) -> Result<ExecOutput, SshProxyError> {
         exec_on_guest(&self.registry, &self.guest_name, command, timeout).await
     }
 
@@ -736,6 +741,7 @@ impl GuestPtySession {
             }
         }
 
+        read.bytes = output.clone();
         read.output = String::from_utf8_lossy(&output).into_owned();
         Ok(read)
     }
@@ -752,6 +758,7 @@ impl GuestPtySession {
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
+                read.bytes = output.clone();
                 read.output = String::from_utf8_lossy(&output).into_owned();
                 return Err(SshProxyError::PtyTimeout {
                     guest: self.guest_name.clone(),
@@ -790,6 +797,7 @@ impl GuestPtySession {
                     transcript.push(PtyTranscriptEvent::Received(data.to_vec()));
                     let current = String::from_utf8_lossy(&output);
                     if current.contains(needle) {
+                        read.bytes = output.clone();
                         read.output = current.into_owned();
                         return Ok(read);
                     }
@@ -803,6 +811,7 @@ impl GuestPtySession {
                     transcript.push(PtyTranscriptEvent::Received(data.to_vec()));
                     let current = String::from_utf8_lossy(&output);
                     if current.contains(needle) {
+                        read.bytes = output.clone();
                         read.output = current.into_owned();
                         return Ok(read);
                     }
@@ -837,6 +846,7 @@ impl GuestPtySession {
             }
         }
 
+        read.bytes = output.clone();
         read.output = String::from_utf8_lossy(&output).into_owned();
         Err(SshProxyError::PtyTimeout {
             guest: self.guest_name.clone(),
@@ -883,28 +893,25 @@ pub async fn open_pty_on_guest(
         });
     }
 
-    tokio_timeout(
-        remaining,
-        async {
-            channel
-                .request_pty(
-                    true,
-                    &request.term,
-                    request.col_width,
-                    request.row_height,
-                    request.pix_width,
-                    request.pix_height,
-                    &default_pty_modes(),
-                )
-                .await?;
-            if let Some(command) = &request.command {
-                channel.exec(true, command.clone()).await?;
-            } else {
-                channel.request_shell(true).await?;
-            }
-            Ok::<_, russh::Error>(channel)
-        },
-    )
+    tokio_timeout(remaining, async {
+        channel
+            .request_pty(
+                true,
+                &request.term,
+                request.col_width,
+                request.row_height,
+                request.pix_width,
+                request.pix_height,
+                &default_pty_modes(),
+            )
+            .await?;
+        if let Some(command) = &request.command {
+            channel.exec(true, command.clone()).await?;
+        } else {
+            channel.request_shell(true).await?;
+        }
+        Ok::<_, russh::Error>(channel)
+    })
     .await
     .map_err(|_| SshProxyError::PtyTimeout {
         guest: guest_name.into(),

@@ -1,24 +1,57 @@
-# v1.4 Harness Runbook
+# v1.4 Harness
 
-This file is the repeatable validation guide for `examples/v1.4`.
+## Changelog
 
-Use it for two different purposes:
+| Date | Who | Summary |
+|------|-----|---------|
+| 2026-04-08 | @codex | Promote HARNESS from a runbook to the harness contract and evolution log: document the stable JSON scenario format, shell/wrapper layering, allocator UX, and PTY/VTE artifacts for future agent-driven troubleshooting and feature work |
+| 2026-04-07 | @codex | Add the first `harness_v1_4` runbook covering smoke, shell, multi-guest wrappers, and live SSH validation |
 
-- fast non-interactive regression checking through the programmatic harness
-- higher-fidelity interactive/manual testing through `harness_v1_4 shell`
-- transitional compatibility checks through the migrated `repl_host_v1_4`
-- future harness-first work:
-  - named scenarios
-  - interactive/manual operation
-  - PTY transcript-driven debugging
+## Purpose
 
-The main lesson from the recent multi-guest bug is important:
+The `v1.4` harness is the primary automation and troubleshooting surface for
+`libs/vmm`.
 
-- REPL/library `exec` checks are useful, but they are not enough by
-  themselves
-- the real interactive SSH shell path must also be tested
-- the smoke coverage should always include both guests when validating Motlie
-  `vfs` + `vnet` + SSH proxy behavior
+Success for this harness design is not merely "smoke tests pass". Success is:
+
+- a future coding agent can boot isolated harness instances without human setup
+- the agent can reproduce product bugs through `vfs`, `vnet`, SSH proxy, and
+  PTY flows
+- the agent can inspect host-side state, guest-side state, serial logs, launch
+  logs, and terminal sessions from one harness run
+- the agent can codify the reproduction as a saved scenario and reuse it for
+  validation while iterating on a fix
+
+This is why the harness now has both:
+
+- a stable machine-readable scenario format
+- thin convenience wrappers (`*.sh`) for common end-to-end flows
+
+The scenario format is the durable contract. The shell wrappers are convenience
+entrypoints and compatibility checks.
+
+## Layering
+
+The harness stack is intentionally split:
+
+1. `harness_v1_4 scenario <file.json>`
+   - stable machine-driven contract
+   - deterministic action/expectation steps
+   - machine-readable per-step results
+   - PTY transcript and VTE screen artifacts
+2. `harness_v1_4 shell`
+   - ad-hoc/manual control surface
+   - first customer for allocator UX and runtime discovery
+   - useful for debugging, one-off exploration, and live SSH attach
+3. `integration/*.sh`
+   - thin wrappers over harness behavior
+   - useful for regression convenience and external SSH checks
+   - should avoid reimplementing orchestration logic that belongs in the
+     harness itself
+
+The shell wrappers still matter because real external `ssh -tt` behavior caught
+bugs that pure `exec` did not. But the harness owns the reusable scenario
+contract.
 
 ## Preconditions
 
@@ -28,69 +61,114 @@ Work from:
 cd /tmp/vmm-v1.4
 ```
 
-Build or rebuild the image when the guest image or launch overlay behavior
+Build or rebuild the guest image when guest contents or overlay behavior
 changes:
 
 ```bash
 ./libs/vmm/examples/v1.4/build-guest.sh
 ```
 
-## Path 1: Programmatic Harness
-
-This is the fastest end-to-end rootless smoke for the extracted library API.
-
-Build:
+Build the harness:
 
 ```bash
 cargo build -p motlie-vmm --example harness_v1_4
 ```
 
-Run:
+## Core Modes
+
+### `smoke`
+
+Fast single-guest lifecycle smoke over the extracted library API:
 
 ```bash
 ./target/debug/examples/harness_v1_4
+./target/debug/examples/harness_v1_4 --result-json /var/tmp/motlie-v14/smoke-result.json
 ```
 
-Write a machine-readable result artifact:
+This covers:
 
-```bash
-./target/debug/examples/harness_v1_4 \
-  --result-json /var/tmp/motlie-v14/smoke-result.json
-```
+- boot
+- readiness
+- `exec`
+- `vfs`
+- `vnet` route and outbound HTTPS
+- shutdown
 
-Explicit PTY scenario:
+### `pty`
+
+Single-guest PTY/VTE smoke:
 
 ```bash
 ./target/debug/examples/harness_v1_4 pty
 ```
 
-Current note:
+This covers:
 
-- `smoke` is the reliable machine-readable scenario today
-- `pty` now emits a stable machine-readable evidence block plus a persisted
-  transcript artifact, but rendered terminal-state / VTE assertions are still
-  future work
+- PTY open
+- login banner / MOTD capture
+- prompt interaction
+- terminal resize
+- raw PTY transcript capture
+- rendered terminal state capture
+- terminal close/exit evidence
 
-Interactive/manual harness mode:
+### `scenario`
+
+Stable machine-readable scenario driver:
+
+```bash
+./target/debug/examples/harness_v1_4 scenario \
+  ./libs/vmm/examples/v1.4/scenarios/pty-login.json
+```
+
+Multi-guest example:
+
+```bash
+./target/debug/examples/harness_v1_4 scenario \
+  ./libs/vmm/examples/v1.4/scenarios/multiguest-validate.json
+```
+
+The scenario mode is the preferred non-interactive surface for future agent
+work.
+
+### `shell`
+
+Ad-hoc/manual harness shell:
 
 ```bash
 ./target/debug/examples/harness_v1_4 shell
 ```
 
-Run under an explicit host root:
+Optional root override:
 
 ```bash
 ./target/debug/examples/harness_v1_4 shell --root /var/tmp/motlie-v14
 ```
 
-or:
+Or:
 
 ```bash
 MOTLIE_VMM_ROOT=/var/tmp/motlie-v14 ./target/debug/examples/harness_v1_4 shell
 ```
 
-Each harness run now allocates its own per-process namespace and demo root
-under the selected host root. At startup it prints where to look, for example:
+Useful shell commands now include:
+
+```text
+capacity
+where
+where alice
+boot alice
+exec alice /bin/uname -s
+pty-open alice alice-shell
+pty-expect alice-shell Start tmux session?
+pty-send-line alice-shell n
+pty-screen alice-shell
+pty-resize alice-shell 120 40
+shutdown alice
+quit
+```
+
+Each harness run allocates its own namespace and roots, for example:
 
 ```text
 v1.4 harness instance: motlie-vmm-v14-h12345
@@ -99,297 +177,288 @@ v1.4 harness instance: motlie-vmm-v14-h12345
   proxy=ssh://localhost:34345
 ```
 
-What it proves today:
+## Scenario Format
 
-- guest boot through the extracted lifecycle API
-- guestfs-backed home/workspace/agent-state bring-up
-- SSH control-plane readiness
-- library `VmHandle::exec(...)`
-- outbound HTTPS over Motlie `vnet`
-- shutdown
-- first PTY/session path through:
-  - `VmHandle::open_pty(...)`
-  - banner/MOTD capture
-  - prompt interaction
-  - terminal resize
-  - transcript capture
+The canonical format is JSON. JSON is intentional:
 
-What the JSON result includes today:
+- agents already generate it reliably
+- it is unambiguous in PR review
+- it maps directly to machine-readable results
+- it avoids inventing a bespoke parser before the action model stabilizes
 
-- status (`passed` / `failed`)
-- scenario name
-- guest id
-- pid and shutdown outcome
-- `VmHandle::observability()` snapshot, including:
-  - runtime/log/socket paths
-  - host mount metadata
-  - typed run-bundle metadata
-  - standard capture paths for `scenario-result.json` and `pty-transcript.json`
-- named scenario checks
+Canonical top-level shape:
+
+```json
+{
+  "name": "pty-login",
+  "description": "Boot alice and validate the PTY login path.",
+  "steps": [
+    { "action": "boot", "guest": "alice" },
+    { "action": "ready", "guest": "alice" },
+    {
+      "action": "pty_open",
+      "guest": "alice",
+      "session": "alice-shell",
+      "cols": 80,
+      "rows": 24
+    },
+    {
+      "action": "pty_expect",
+      "session": "alice-shell",
+      "contains": "alice@motlie-alice",
+      "timeout_ms": 10000
+    },
+    { "action": "shutdown", "guest": "alice" }
+  ]
+}
+```
+
+Supported actions today:
+
+- `boot`
+- `ready`
+- `exec`
+- `pty_open`
+- `pty_send`
+- `pty_send_line`
+- `pty_read`
+- `pty_resize`
+- `pty_expect`
+- `pty_expect_terminal`
+- `pty_snapshot`
+- `shutdown`
+
+Current expectation model:
+
+- `exec` supports `expect.exit_code`, `expect.stdout_contains`,
+  `expect.stderr_contains`
+- PTY expectations are explicit step actions instead of being hidden in
+  shell-wrapper `grep` chains
+
+Current limits:
+
+- steps run sequentially
+- there is no branching or looping
+- `validate` is not yet a first-class scenario action
+- shell mode is not yet a thin frontend over the exact same engine
+
+Those are acceptable `v1.4` limits. The important part is that saved
+reproductions are now harness-native and reviewable.
+
+## PTY / VTE Artifacts
+
+The harness now keeps both raw and rendered terminal state.
+
+Per PTY session it writes:
+
+- `pty-transcript.ndjson`
+- `pty-screen.json`
+
+Why both:
+
+- raw transcript is the source-of-truth event stream
+- rendered VTE screen state is what agents and humans usually reason about
+
+Why NDJSON for the raw transcript instead of one large pretty JSON array:
+
+- easier for agents to stream and chunk
+- cheaper to append and inspect
+- smaller and less awkward than one giant nested JSON blob
+
+Why JSON for the rendered screen:
+
+- agents want direct structured access to rows, cols, cursor position, and
+  visible text
+- the rendered screen is a snapshot, so one structured JSON object is natural
+
+This means the harness artifact strategy is:
+
+- `scenario-result.json` for high-level structured results
+- `pty-transcript.ndjson` for compact raw terminal events
+- `pty-screen.json` for rendered terminal state
+
+That split is more useful for agents than either:
+
+- raw bytes only
+- giant pretty transcript JSON only
+
+## Machine-Readable Result Shape
+
+`smoke` and `pty` still emit the legacy top-level harness result envelope.
+
+`scenario` emits the scenario-native result envelope, including:
+
+- overall status
+- scenario name and description
+- artifact root
+- proxy URI
+- allocator capacity
+- per-step result records
+- per-session artifact paths
 - structured classified error record on failure
-- PTY transcript summary and raw PTY transcript events for the `pty` scenario
 
-Each booted run also writes internal bundle artifacts under the runtime root:
+Step results include:
 
-- `.../runtime/<guest>/bundle/scenario-result.json`
-- `.../runtime/<guest>/bundle/pty-transcript.json` for the `pty` scenario
+- action
+- guest/session identity when relevant
+- detail string
+- `exec` output when relevant
+- PTY read output when relevant
+- rendered screen snapshot when relevant
+- shutdown report when relevant
 
-Current limitation:
+This is intended to be directly consumable by agents and CI.
 
-- `harness_v1_4` is single-guest today
-- use the harness shell or REPL path below for multi-guest validation
-- the harness does not yet expose the full ad-hoc interactive/manual shell mode
-  that should eventually replace the standalone `repl_host_v1_4`
+## Allocator UX
 
-Expected success line:
+The harness is the first customer of the new allocation API.
 
-```text
-v1.4 harness smoke passed: guest=alice ...
+CLI overrides:
+
+```bash
+./target/debug/examples/harness_v1_4 shell \
+  --max-guests 64 \
+  --first-cid 100 \
+  --admin-base 172.22.0.0/16 \
+  --admin-guest-prefix 30 \
+  --egress-base 10.32.0.0/12 \
+  --egress-guest-prefix 24
 ```
 
-or:
+Shell inspection:
 
 ```text
-v1.4 harness pty passed: guest=alice ...
+capacity
+where
+where alice
 ```
 
-## Path 2: Automated Harness Shell Smoke
+`capacity` shows:
 
-This is the main multi-guest regression check and the preferred replacement for
-the old standalone REPL-driven smoke.
+- configured base pools
+- per-guest subnet size
+- computed capacity
+- next slot and remaining capacity
 
-Run:
+`where <guest>` now shows:
+
+- slot
+- CID
+- admin subnet/IP/MAC
+- egress subnet/IP/MAC
+- runtime paths and logs
+
+Default policy today:
+
+- admin base `172.20.0.0/16`, guest `/30`
+- egress base `10.0.0.0/8`, guest `/24`
+- default effective capacity `16384`
+
+This replaces the old implicit 7-guest stopgap.
+
+## Scenario Examples
+
+Saved examples live in:
+
+- [`scenarios/pty-login.json`](./scenarios/pty-login.json)
+- [`scenarios/multiguest-validate.json`](./scenarios/multiguest-validate.json)
+
+The multi-guest example proves the stable format is not single-guest-only:
+
+- boot `alice`
+- boot `bob`
+- validate guest-specific `vfs` content
+- validate guest-specific `vnet` routing
+- validate outbound HTTPS
+- shut both guests down
+
+## Shell and Wrapper Flows
+
+Main multi-guest wrapper:
 
 ```bash
 ./libs/vmm/examples/v1.4/integration/harness-shell-smoke.sh
 ```
 
-What it validates:
-
-- drives `harness_v1_4 shell`
-- replays [`setup-multiguest.harness`](./setup-multiguest.harness)
-- boots `alice`
-- boots `bob`
-- runs `validate alice`
-- runs `validate bob`
-- opens a real interactive SSH shell for `alice`
-- opens a real interactive SSH shell for `bob`
-- checks in each guest:
-  - MOTD is shown
-  - `pwd` lands in the correct home
-  - `~/.env` is guest-specific
-  - `curl https://example.com` succeeds
-  - file lands in the writable guest home overlay
-  - `/workspace` and `/agent-state` ownership is correct
-- shuts both guests down
-
-Expected success line:
-
-```text
-v1.4 harness shell smoke passed
-```
-
-Two-harness isolation smoke:
+Isolation wrapper:
 
 ```bash
 ./libs/vmm/examples/v1.4/integration/harness-isolation-smoke.sh
 ```
 
-This proves two separate harness shells can run concurrently, both boot
-`alice`, and not collide on namespace, sockets, demo roots, or proxy ports.
+These still matter because they validate:
 
-If this smoke fails, inspect:
+- shell UX
+- multi-guest bring-up from the harness shell
+- live external SSH login behavior
+- concurrent harness isolation
 
-```bash
-tail -n 200 /tmp/motlie-vmm-v14-harness-shell-smoke.log
-```
+But the wrappers should stay thin. New orchestration logic belongs in the
+harness scenario engine, not in bash.
 
-Saved command script:
+Saved shell command sequence:
 
 ```bash
 cat ./libs/vmm/examples/v1.4/setup-multiguest.harness
 ```
 
-That saved script is the command sequence:
+## Live External SSH
 
-- `where`
-- `boot alice`
-- `where alice`
-- `boot bob`
-- `where bob`
-- `status`
-- `validate alice`
-- `validate bob`
-
-The expectation layer lives in:
-
-- [`integration/harness-shell-smoke.sh`](./integration/harness-shell-smoke.sh)
-- [`integration/harness-isolation-smoke.sh`](./integration/harness-isolation-smoke.sh)
-
-## Path 3: Harness Shell
-
-This is the preferred ad-hoc/manual control surface going forward.
-
-Run:
-
-```bash
-./target/debug/examples/harness_v1_4 shell
-```
-
-Optional host root override:
-
-```bash
-./target/debug/examples/harness_v1_4 shell --root /var/tmp/motlie-v14
-```
-
-Core commands:
-
-```text
-boot alice
-boot bob
-status
-where
-where alice
-validate alice
-validate bob
-exec alice /bin/uname -s
-exec bob /bin/uname -s
-shutdown bob
-shutdown alice
-quit
-```
-
-Notes:
-
-- harness shell uses the same `libs/vmm` lifecycle API as the smoke scenarios
-- harness shell allocates its own namespace/demo root/proxy port per run
-- use `where` to print the current roots, sockets, and per-guest logs
-
-## Path 4: Live REPL
-
-Build:
-
-```bash
-cargo build -p motlie-vmm --example repl_host_v1_4
-```
-
-Run:
-
-```bash
-./target/debug/examples/repl_host_v1_4
-```
-
-Core commands:
-
-```text
-boot alice
-boot bob
-status
-validate alice
-validate bob
-exec alice /bin/uname -s
-exec bob /bin/uname -s
-shutdown bob
-shutdown alice
-where
-where alice
-quit
-```
-
-Notes:
-
-- `v1.4` uses `boot`, not `launch`
-- the REPL is intentionally thinner than `v1.3` and should stay a client of
-  `libs/vmm`, not grow orchestration logic again
-- the long-term direction is to fold this ad-hoc/manual surface into the
-  harness rather than keep two separate control planes
-- `where` prints the current namespace/demo root/socket root/proxy, and
-  `where <guest>` prints the per-guest runtime and log paths
-
-## Path 5: Manual Interactive SSH
-
-This is the path that caught the earlier smoke gap. Use it when validating
-login UX, MOTD, and the real shell transport.
-
-After booting guests in the harness shell or REPL, use the printed proxy port.
-For example, if `where` shows `proxy=ssh://localhost:38306`:
+When validating real login UX, use the printed proxy port:
 
 ```bash
 ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 38306 alice@localhost
-```
-
-```bash
 ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 38306 bob@localhost
 ```
 
-Inside each guest, run:
+Useful manual probes:
 
 ```bash
 pwd
 cat ~/.env
 ls -ald /home/$USER /workspace /agent-state
 curl -fsSL https://example.com -o ~/example.html && stat ~/example.html
-```
-
-What to expect:
-
-- MOTD is visible before the shell prompt
-- `alice` lands in `/home/alice`
-- `bob` lands in `/home/bob`
-- `~/.env` contains the guest-specific demo API key
-- `curl` succeeds for both guests
-
-Current expected egress layout:
-
-- `alice`: `10.0.2.0/24`
-- `bob`: `10.0.3.0/24`
-
-So a route check inside the guest should look like:
-
-```bash
 ip route
 cat /etc/resolv.conf
 ```
 
-with guest-specific gateway/DNS values, not a hardcoded `10.0.2.2` assumption
-for every guest.
+This path remains important because `exec` success does not prove full external
+interactive SSH correctness.
 
-## Suggested Regression Matrix
+## Regression Matrix
 
-When changing `vmm`, `vfs`, `vnet`, SSH proxying, or guest image seeding,
-rerun at least:
+When changing `vmm`, `vfs`, `vnet`, SSH proxying, allocator behavior, or guest
+image seeding, rerun at least:
 
 1. `cargo test -p motlie-vmm --lib`
-2. `cargo test -p motlie-vnet`
+2. `cargo build -p motlie-vmm --example harness_v1_4`
 3. `./target/debug/examples/harness_v1_4`
-4. `./libs/vmm/examples/v1.4/integration/harness-shell-smoke.sh`
+4. `./target/debug/examples/harness_v1_4 pty`
+5. `./target/debug/examples/harness_v1_4 scenario ./libs/vmm/examples/v1.4/scenarios/multiguest-validate.json`
+6. `./libs/vmm/examples/v1.4/integration/harness-shell-smoke.sh`
 
-And when changing any login/banner/proxy behavior, also do one live manual
-interactive check:
+And when changing login/banner/proxy or PTY handling, also run a live external
+SSH check.
 
-1. start `harness_v1_4 shell`
-2. `boot alice`
-3. `boot bob`
-4. `ssh -p 2224 alice@localhost`
-5. `ssh -p 2224 bob@localhost`
+## Evolution Notes
 
-## Failure Triage
+The current harness evolution is:
 
-If `alice` works and `bob` fails:
+1. library lifecycle extraction
+2. basic smoke harness
+3. structured machine-readable results
+4. transcript/log bundle capture
+5. PTY session support
+6. VTE screen capture
+7. stable scenario/action-expectation format
 
-- check REPL log:
-  - `/tmp/motlie-vmm-v14-harness-shell-smoke.log`
-- check launch logs:
-  - `/tmp/motlie-vmm-v14-launch/alice/launch.log`
-  - `/tmp/motlie-vmm-v14-launch/bob/launch.log`
-- check whether the failure is:
-  - REPL/library `exec` only
-  - interactive SSH shell only
-  - both
+Still open:
 
-That distinction matters:
+- make shell mode a thin frontend over the same scenario engine
+- add typed validation profiles instead of hand-authored `exec` checks
+- decide whether to emit optional human-first artifacts such as asciinema or
+  ttyrec in addition to the current agent-first NDJSON/JSON split
 
-- REPL `exec` success does not prove interactive shell success
-- interactive shell success does not prove all library `exec` semantics
-
-Both must remain green.
+That is acceptable for `v1.4`. The important change in this branch is that the
+harness is now strong enough for future agents to save and rerun reproductions
+through the same VM/VFS/VNET/PTY path they are trying to debug.

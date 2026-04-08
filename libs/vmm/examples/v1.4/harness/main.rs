@@ -1,5 +1,7 @@
 mod pty;
+mod scenario;
 mod shell;
+mod terminal;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -10,7 +12,7 @@ use motlie_vmm::backend::BackendError;
 use motlie_vmm::ca::SshCa;
 use motlie_vmm::guestfs::GuestFsError;
 use motlie_vmm::network::{AdminNetMode, EgressNetMode, NetworkModes};
-use motlie_vmm::network_alloc::{GuestNetAllocator, GuestNetAllocatorConfig};
+use motlie_vmm::network_alloc::{GuestNetAllocator, GuestNetAllocatorConfig, Ipv4Subnet};
 use motlie_vmm::observability::VmObservability;
 use motlie_vmm::orchestrator::{
     LifecycleServices, OrchestratorError, PrepareRequest, ReadinessPolicy, ShutdownReport,
@@ -28,17 +30,67 @@ use motlie_vmm::ssh::{
     self, ExecOutput, PtyTranscriptEvent, SshProxyConfig, SshProxyError, new_guest_registry,
 };
 use pty::{PtyScenarioError, PtyScenarioResult};
+use scenario::{ScenarioRunResult, ScenarioRunStatus};
 use serde::Serialize;
 use thiserror::Error;
 use tokio::time::sleep;
 
 type DynError = Box<dyn std::error::Error + Send + Sync>;
 
-struct HarnessInstance {
+#[derive(Clone)]
+pub(crate) struct HarnessInstance {
     namespace: RuntimeNamespace,
     demo_root: PathBuf,
     socket_root: PathBuf,
     proxy_port: u16,
+}
+
+#[derive(Clone)]
+pub(crate) struct HarnessAllocatorOptions {
+    first_cid: u32,
+    max_guests: Option<u32>,
+    admin_base: Ipv4Subnet,
+    admin_guest_prefix: u8,
+    egress_base: Ipv4Subnet,
+    egress_guest_prefix: u8,
+}
+
+impl Default for HarnessAllocatorOptions {
+    fn default() -> Self {
+        let defaults = GuestNetAllocatorConfig::default();
+        Self {
+            first_cid: defaults.first_cid,
+            max_guests: defaults.max_guests,
+            admin_base: defaults.admin_pool.base,
+            admin_guest_prefix: defaults.admin_pool.guest_prefix_len,
+            egress_base: defaults.egress_pool.base,
+            egress_guest_prefix: defaults.egress_pool.guest_prefix_len,
+        }
+    }
+}
+
+impl HarnessAllocatorOptions {
+    fn build(&self, socket_root: &Path) -> GuestNetAllocatorConfig {
+        let mut config = GuestNetAllocatorConfig {
+            first_cid: self.first_cid,
+            max_guests: self.max_guests,
+            socket_dir: socket_root.to_path_buf(),
+            admin_pool: GuestNetAllocatorConfig::default().admin_pool,
+            egress_pool: GuestNetAllocatorConfig::default().egress_pool,
+        };
+        config.admin_pool.base = self.admin_base;
+        config.admin_pool.guest_prefix_len = self.admin_guest_prefix;
+        config.egress_pool.base = self.egress_base;
+        config.egress_pool.guest_prefix_len = self.egress_guest_prefix;
+        config
+    }
+}
+
+enum HarnessMode {
+    Smoke,
+    Pty,
+    Shell,
+    Scenario(PathBuf),
 }
 
 #[derive(Debug, Serialize)]
@@ -60,6 +112,7 @@ struct ScenarioResult {
     checks: Vec<ScenarioCheck>,
     pty: Option<PtyScenarioResult>,
     pty_transcript: Option<Vec<PtyTranscriptEvent>>,
+    scenario_driver: Option<ScenarioRunResult>,
     error: Option<ScenarioFailure>,
     cleanup_error: Option<ScenarioFailure>,
 }
@@ -119,8 +172,6 @@ enum HarnessError {
         expected: String,
         observed_excerpt: String,
     },
-    #[error("failed to persist harness artifact {path}: {reason}")]
-    ArtifactPersist { path: PathBuf, reason: String },
     #[error(transparent)]
     Pty(#[from] PtyScenarioError),
     #[error("shutdown failed: {0}")]
@@ -130,9 +181,10 @@ enum HarnessError {
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<(), DynError> {
     let mut args = std::env::args().skip(1);
-    let mut scenario = "smoke".to_string();
+    let mut mode = HarnessMode::Smoke;
     let mut root_override: Option<PathBuf> = None;
     let mut result_json_path: Option<PathBuf> = None;
+    let mut allocator_options = HarnessAllocatorOptions::default();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--root" => {
@@ -147,6 +199,42 @@ async fn main() -> Result<(), DynError> {
                     .ok_or_else(|| "--result-json requires a path".to_string())?;
                 result_json_path = Some(PathBuf::from(value));
             }
+            "--first-cid" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--first-cid requires a number".to_string())?;
+                allocator_options.first_cid = value.parse()?;
+            }
+            "--max-guests" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--max-guests requires a number".to_string())?;
+                allocator_options.max_guests = Some(value.parse()?);
+            }
+            "--admin-base" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--admin-base requires CIDR notation".to_string())?;
+                allocator_options.admin_base = value.parse()?;
+            }
+            "--admin-guest-prefix" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--admin-guest-prefix requires a prefix length".to_string())?;
+                allocator_options.admin_guest_prefix = value.parse()?;
+            }
+            "--egress-base" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--egress-base requires CIDR notation".to_string())?;
+                allocator_options.egress_base = value.parse()?;
+            }
+            "--egress-guest-prefix" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--egress-guest-prefix requires a prefix length".to_string())?;
+                allocator_options.egress_guest_prefix = value.parse()?;
+            }
             "--help" | "-h" => {
                 print_usage();
                 return Ok(());
@@ -157,11 +245,42 @@ async fn main() -> Result<(), DynError> {
             other if other.starts_with("--result-json=") => {
                 result_json_path = Some(PathBuf::from(other.trim_start_matches("--result-json=")));
             }
+            other if other.starts_with("--first-cid=") => {
+                allocator_options.first_cid = other.trim_start_matches("--first-cid=").parse()?;
+            }
+            other if other.starts_with("--max-guests=") => {
+                allocator_options.max_guests =
+                    Some(other.trim_start_matches("--max-guests=").parse()?);
+            }
+            other if other.starts_with("--admin-base=") => {
+                allocator_options.admin_base = other.trim_start_matches("--admin-base=").parse()?;
+            }
+            other if other.starts_with("--admin-guest-prefix=") => {
+                allocator_options.admin_guest_prefix =
+                    other.trim_start_matches("--admin-guest-prefix=").parse()?;
+            }
+            other if other.starts_with("--egress-base=") => {
+                allocator_options.egress_base =
+                    other.trim_start_matches("--egress-base=").parse()?;
+            }
+            other if other.starts_with("--egress-guest-prefix=") => {
+                allocator_options.egress_guest_prefix =
+                    other.trim_start_matches("--egress-guest-prefix=").parse()?;
+            }
             other if other.starts_with('-') => {
                 return Err(format!("unknown option: {other}").into());
             }
+            "scenario" => {
+                let value = args.next().ok_or_else(|| {
+                    "scenario requires a path to a JSON scenario file".to_string()
+                })?;
+                mode = HarnessMode::Scenario(PathBuf::from(value));
+            }
+            "shell" => mode = HarnessMode::Shell,
+            "pty" => mode = HarnessMode::Pty,
+            "smoke" => mode = HarnessMode::Smoke,
             other => {
-                scenario = other.to_string();
+                return Err(format!("unsupported mode: {other}").into());
             }
         }
     }
@@ -175,8 +294,21 @@ async fn main() -> Result<(), DynError> {
 
     let root_dir = root_override.unwrap_or_else(RuntimeNamespace::root_from_env_or_temp);
     let instance = new_harness_instance(&root_dir)?;
-    if scenario == "shell" {
-        return shell::run_shell(&base_dir, &artifacts_dir, &instance).await;
+    let allocator_config = allocator_options.build(&instance.socket_root);
+    if matches!(mode, HarnessMode::Shell) {
+        return shell::run_shell(&base_dir, &artifacts_dir, &instance, allocator_config).await;
+    }
+    if let HarnessMode::Scenario(path) = &mode {
+        let result = scenario::run_scenario_file(
+            &base_dir,
+            &artifacts_dir,
+            &instance,
+            allocator_config,
+            path,
+            result_json_path.as_deref(),
+        )
+        .await?;
+        return scenario_exit(result);
     }
 
     let guest = demo_guest(
@@ -218,10 +350,7 @@ async fn main() -> Result<(), DynError> {
         ),
     });
 
-    let mut allocator = GuestNetAllocator::new(GuestNetAllocatorConfig {
-        socket_dir: instance.socket_root.clone(),
-        ..GuestNetAllocatorConfig::default()
-    });
+    let mut allocator = GuestNetAllocator::new(allocator_config)?;
     let prepared = prepare(
         PrepareRequest {
             guest,
@@ -258,26 +387,28 @@ async fn main() -> Result<(), DynError> {
                 .map_err(HarnessError::Ready)?;
             observability = Some(active_handle.observability());
 
-            match scenario.as_str() {
-                "smoke" => {
+            match &mode {
+                HarnessMode::Smoke => {
                     checks = run_smoke(active_handle).await?;
                 }
-                "pty" => {
+                HarnessMode::Pty => {
                     let transcript_path = observability
                         .as_ref()
                         .expect("observability exists after readiness")
                         .run_bundle
                         .capture_paths
-                        .pty_transcript_json
+                        .pty_transcript_ndjson
+                        .clone();
+                    let screen_path = observability
+                        .as_ref()
+                        .expect("observability exists after readiness")
+                        .run_bundle
+                        .capture_paths
+                        .pty_screen_json
                         .clone();
                     let pty_run =
-                        pty::run_pty_smoke(active_handle, transcript_path.clone()).await?;
-                    persist_json(&transcript_path, &pty_run.transcript).map_err(|source| {
-                        HarnessError::ArtifactPersist {
-                            path: transcript_path.clone(),
-                            reason: source.to_string(),
-                        }
-                    })?;
+                        pty::run_pty_smoke(active_handle, transcript_path.clone(), screen_path)
+                            .await?;
                     pty = Some(pty_run.result);
                     pty_transcript = Some(pty_run.transcript);
                     checks.push(ScenarioCheck {
@@ -286,7 +417,11 @@ async fn main() -> Result<(), DynError> {
                             .to_string(),
                     });
                 }
-                other => return Err(HarnessError::UnsupportedScenario(other.to_string())),
+                HarnessMode::Shell | HarnessMode::Scenario(_) => {
+                    return Err(HarnessError::UnsupportedScenario(
+                        "interactive mode".to_string(),
+                    ));
+                }
             }
             Ok::<(), HarnessError>(())
         };
@@ -320,7 +455,7 @@ async fn main() -> Result<(), DynError> {
         } else {
             ScenarioStatus::Failed
         },
-        scenario: scenario.clone(),
+        scenario: mode_name(&mode).to_string(),
         guest_id: "alice".to_string(),
         pid: shutdown
             .as_ref()
@@ -335,6 +470,7 @@ async fn main() -> Result<(), DynError> {
         checks,
         pty,
         pty_transcript,
+        scenario_driver: None,
         error,
         cleanup_error,
     };
@@ -353,7 +489,7 @@ async fn main() -> Result<(), DynError> {
         ScenarioStatus::Passed => {
             println!(
                 "v1.4 harness {} passed: guest={} pid={:?} forced={:?} proxy=127.0.0.1:{}",
-                scenario,
+                mode_name(&mode),
                 result.guest_id,
                 result.pid,
                 result.shutdown_forced,
@@ -374,6 +510,7 @@ async fn main() -> Result<(), DynError> {
 
 async fn run_smoke(handle: &VmHandle) -> Result<Vec<ScenarioCheck>, HarnessError> {
     let mut checks = Vec::new();
+    let expected_gateway = handle.net_assignment.egress_ipv4.host;
     let hello = handle
         .exec("/bin/echo hello", Duration::from_secs(10))
         .await
@@ -405,7 +542,10 @@ async fn run_smoke(handle: &VmHandle) -> Result<Vec<ScenarioCheck>, HarnessError
 
     let route = exec_until_success(
         handle,
-        r#"/bin/sh -lc 'ip route | grep -q "^default via 10.0.2.2 " && echo ROUTE_OK'"#,
+        &format!(
+            "/bin/sh -lc 'ip route | grep -q \"^default via {} \" && echo ROUTE_OK'",
+            expected_gateway
+        ),
         "ROUTE_OK",
         Duration::from_secs(10),
     )
@@ -439,7 +579,7 @@ async fn run_smoke(handle: &VmHandle) -> Result<Vec<ScenarioCheck>, HarnessError
     Ok(checks)
 }
 
-fn ensure_file_exists(path: &Path) -> Result<(), HarnessError> {
+pub(crate) fn ensure_file_exists(path: &Path) -> Result<(), HarnessError> {
     if path.exists() {
         Ok(())
     } else {
@@ -461,7 +601,7 @@ fn ensure_contains(check: &'static str, stdout: &str, needle: &str) -> Result<()
     }
 }
 
-fn persist_json<T: Serialize>(path: &Path, value: &T) -> Result<(), DynError> {
+pub(crate) fn persist_json<T: Serialize>(path: &Path, value: &T) -> Result<(), DynError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -493,12 +633,6 @@ fn classify_failure(error: &HarnessError) -> ScenarioFailure {
             code: "assertion_failed",
             message: error.to_string(),
         },
-        HarnessError::ArtifactPersist { .. } => ScenarioFailure {
-            class: FailureClass::Artifact,
-            stage: "capture",
-            code: "artifact_persist_failed",
-            message: error.to_string(),
-        },
         HarnessError::Pty(source) => classify_pty_failure(source),
         HarnessError::Shutdown(source) => {
             let mut failure = classify_orchestrator("shutdown", source);
@@ -511,12 +645,26 @@ fn classify_failure(error: &HarnessError) -> ScenarioFailure {
 fn classify_pty_failure(error: &PtyScenarioError) -> ScenarioFailure {
     match error {
         PtyScenarioError::Open(source) => classify_orchestrator("pty", source),
-        PtyScenarioError::ControlPlane(source) => classify_ssh_failure("pty", source),
-        PtyScenarioError::Assertion { .. } => ScenarioFailure {
-            class: FailureClass::Pty,
-            stage: "pty",
-            code: "pty_assertion_failed",
-            message: error.to_string(),
+        PtyScenarioError::Terminal(source) => match source {
+            terminal::TerminalSessionError::ControlPlane(ssh) => classify_ssh_failure("pty", ssh),
+            terminal::TerminalSessionError::StatePoisoned => ScenarioFailure {
+                class: FailureClass::Internal,
+                stage: "pty",
+                code: "pty_state_poisoned",
+                message: source.to_string(),
+            },
+            terminal::TerminalSessionError::Persist { .. } => ScenarioFailure {
+                class: FailureClass::Artifact,
+                stage: "pty",
+                code: "pty_artifact_persist_failed",
+                message: source.to_string(),
+            },
+            terminal::TerminalSessionError::Assertion { .. } => ScenarioFailure {
+                class: FailureClass::Pty,
+                stage: "pty",
+                code: "pty_assertion_failed",
+                message: source.to_string(),
+            },
         },
         PtyScenarioError::EmptyTranscript => ScenarioFailure {
             class: FailureClass::Pty,
@@ -665,7 +813,37 @@ fn excerpt(output: &str) -> String {
 }
 
 fn print_usage() {
-    println!("usage: harness_v1_4 [smoke|pty|shell] [--root <dir>] [--result-json <path>]");
+    println!(
+        "usage: harness_v1_4 [smoke|pty|shell|scenario <file.json>] [--root <dir>] [--result-json <path>] [--first-cid N] [--max-guests N] [--admin-base CIDR] [--admin-guest-prefix N] [--egress-base CIDR] [--egress-guest-prefix N]"
+    );
+}
+
+fn mode_name(mode: &HarnessMode) -> &'static str {
+    match mode {
+        HarnessMode::Smoke => "smoke",
+        HarnessMode::Pty => "pty",
+        HarnessMode::Shell => "shell",
+        HarnessMode::Scenario(_) => "scenario",
+    }
+}
+
+fn scenario_exit(result: ScenarioRunResult) -> Result<(), DynError> {
+    match result.status {
+        ScenarioRunStatus::Passed => {
+            println!(
+                "v1.4 harness scenario passed: scenario={} steps={} proxy={}",
+                result.scenario,
+                result.steps.len(),
+                result.proxy
+            );
+            Ok(())
+        }
+        ScenarioRunStatus::Failed => Err(result
+            .error
+            .map(|failure| failure.message)
+            .unwrap_or_else(|| "scenario failed".to_string())
+            .into()),
+    }
 }
 
 fn new_harness_instance(root_dir: &Path) -> Result<HarnessInstance, DynError> {
@@ -685,7 +863,7 @@ fn new_harness_instance(root_dir: &Path) -> Result<HarnessInstance, DynError> {
     })
 }
 
-fn print_instance_details(instance: &HarnessInstance, proxy_config: &SshProxyConfig) {
+pub(crate) fn print_instance_details(instance: &HarnessInstance, proxy_config: &SshProxyConfig) {
     println!("v1.4 harness instance: {}", instance.namespace.prefix);
     println!("  demo_root={}", instance.demo_root.display());
     println!("  socket_root={}", instance.socket_root.display());
@@ -698,7 +876,7 @@ fn port_offset(seed: &str) -> u16 {
     }) % 10_000
 }
 
-fn demo_guest(
+pub(crate) fn demo_guest(
     guest_id: &str,
     artifacts_dir: &Path,
     demo_root: &Path,
@@ -754,7 +932,7 @@ fn demo_guest(
     }
 }
 
-fn seed_host_mounts(guest: &GuestSpec) -> Result<(), DynError> {
+pub(crate) fn seed_host_mounts(guest: &GuestSpec) -> Result<(), DynError> {
     for mount in &guest.mounts {
         std::fs::create_dir_all(&mount.host_path)?;
     }
