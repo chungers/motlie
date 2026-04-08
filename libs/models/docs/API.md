@@ -8,6 +8,8 @@
 |------|--------|----------|
 | 2026-04-07 | @codex-researcher: Initial API sketch for `libs/models` catalog and descriptor shapes. Reflects the current scaffold, not the final loaded-bundle runtime API. | All |
 | 2026-04-07 | @codex-researcher: Added explicit curated artifact-control examples and updated the first embedding slice to use the real `mistralrs` builder path with separate pre-download support. | Overview, API Sketch, Notes |
+| 2026-04-07 | @codex-researcher: Added the `examples/v0.1` runnable example for the current curated embedding bundle. | Example Program |
+| 2026-04-07 | @codex-researcher: Added optional Hugging Face token support to the out-of-band downloader path only. | Explicit Artifact Control, Notes |
 
 This document sketches the concrete API shapes currently introduced in `libs/models`. The crate now owns both the descriptor catalog and the curated bundle constructors that bind those descriptors to a backend implementation.
 
@@ -147,7 +149,10 @@ let response = embeddings
 
 ```rust
 use motlie_model::BundleId;
-use motlie_models::{default_artifact_root, download_bundle_artifacts, Catalog};
+use motlie_models::{
+    default_artifact_root, download_bundle_artifacts_with_options, ArtifactDownloadOptions,
+    Catalog,
+};
 
 let catalog = Catalog::with_defaults();
 let bundle_id = BundleId::new("embeddinggemma_300m");
@@ -158,10 +163,13 @@ let artifacts = catalog
 
 assert_eq!(artifacts.control_name, "embeddinggemma_300m");
 
-let summary = download_bundle_artifacts(
+let summary = download_bundle_artifacts_with_options(
     &catalog,
     &bundle_id,
     &default_artifact_root(),
+    &ArtifactDownloadOptions {
+        hf_token: std::env::var("HF_TOKEN").ok(),
+    },
 )?;
 
 assert!(!summary.downloaded.is_empty());
@@ -173,6 +181,33 @@ The same flow is available from the binary target:
 cargo run -p motlie-models --bin motlie-models-download -- embeddinggemma_300m
 ```
 
+Authenticated out-of-band download:
+
+```sh
+export HF_TOKEN=...
+cargo run -p motlie-models --bin motlie-models-download -- --hf-token-env HF_TOKEN embeddinggemma_300m
+```
+
+## Example Program
+
+The current runnable example for this crate is:
+
+- [README.md](/Users/dchung/projects/claude-mistral/motlie/libs/models/examples/v0.1/README.md)
+- [main.rs](/Users/dchung/projects/claude-mistral/motlie/libs/models/examples/v0.1/main.rs)
+
+Run it with:
+
+```sh
+cargo run -p motlie-models --example models_v0_1 -- "motlie curated model bundle"
+```
+
+What it demonstrates:
+
+- explicit curated artifact download for `embeddinggemma_300m`
+- descriptor and capability introspection through `Catalog`
+- local-only bundle startup with `ArtifactPolicy::LocalOnly`
+- a one-shot embedding generation request using CLI input
+
 ## Notes
 
 - `BundleId` is currently a string-backed newtype rather than an enum. This keeps the catalog extensible while still giving the crate a stable selection key.
@@ -180,6 +215,7 @@ cargo run -p motlie-models --bin motlie-models-download -- embeddinggemma_300m
 - `BackendKind` and `PackagingMode` are metadata for catalog reasoning and observability. They do not make runtime choice part of the application control path.
 - `Catalog` now also owns curated bundle instantiation through registered constructors.
 - Curated artifact download is explicit and independent of the backend library's own cache-miss behavior. Backends consume the curated artifact policy through `StartOptions`. For regulated local bundles, `ArtifactPolicy::LocalOnly` is the intended fail-closed mode.
+- Authentication for protected upstream artifacts belongs only to the out-of-band download/build path. The runtime/bundle startup path does not accept tokens and remains artifact-consumption only.
 
 ## Next Step
 
