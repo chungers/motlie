@@ -10,6 +10,10 @@ description = "Curated model bundle catalog for the Motlie ecosystem"
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = ["model-google-gemma-300m"]
+model-google-gemma-300m = []
+
 [dependencies]
 anyhow.workspace = true
 async-trait = "0.1.89"
@@ -28,3 +32,4 @@ path = "src/bin/download_artifacts.rs"
 [[example]]
 name = "models_v0_1"
 path = "examples/v0.1/main.rs"
+required-features = ["model-google-gemma-300m"]

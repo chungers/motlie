@@ -14,6 +14,7 @@
 | 2026-04-08 | @codex-researcher: Updated the `v0.1` example contract so artifact download is opt-in. The default example path now exercises existing curated artifacts with `ArtifactPolicy::LocalOnly`, which is the intended regulated/offline behavior. | Example Program, Notes |
 | 2026-04-08 | @codex-researcher: Added the direct curated embedding enum and parser-oriented `ModelSelector` path to the API sketch, and removed `SupportTier` / `PackagingMode` from the recommended public surface. | Core Types, API Sketch, Example Program, Notes |
 | 2026-04-08 | @codex-researcher: Added an explicit end-to-end vertical-slice walkthrough and a curator implementation checklist so both callers and bundle implementers can follow the same documented path. | Overview, API Sketch, Example Program, Notes |
+| 2026-04-08 | @codex-researcher: Documented the per-bundle feature-gating convention and the `ModelUnavailable` behavior for known selectors that are disabled in the current build. | Overview, Core Types, Notes |
 
 This document sketches the concrete API shapes currently introduced in `libs/models`. The crate now owns both the descriptor catalog and the curated bundle constructors that bind those descriptors to a backend implementation.
 
@@ -41,6 +42,8 @@ For the current vertical slice, this crate must document two concrete experience
 2. curator experience:
    define a bundle module, expose `descriptor()` and `bundle()`, implement the bundle-level `Embedding` contract, and register the bundle in `Catalog`
 
+Curated bundle availability is build-dependent. The selector enums and default catalog only expose bundles compiled into the current build through per-bundle Cargo features.
+
 ## Core Types
 
 Current public shapes:
@@ -60,6 +63,8 @@ Current public shapes:
 `BundleId`, `Capabilities`, and capability introspection types come from `motlie_model`. Evaluation-track membership is expressed with `motlie_model::eval::EvalTrack`.
 
 `ModelsError` is the typed library error for catalog lookup and artifact staging. Binaries and examples may convert it to `anyhow::Error`, but the crate does not expose `anyhow::Result` as its library API.
+
+For build-gated curated bundles, `ModelsError::ModelUnavailable` is the intended error when a selector is known to the codebase but disabled in the current build.
 
 ## API Sketch
 
@@ -351,6 +356,7 @@ For a new curated embedding bundle, the intended implementation checklist is:
 - `BackendKind` is metadata for catalog reasoning and observability. It does not make runtime choice part of the application control path.
 - `Catalog` now also owns curated bundle instantiation through registered constructors.
 - The preferred direct curated path is the bundle-family enum, such as `EmbeddingModels::GoogleGemma300m`; `ModelSelector` is the parser-friendly wrapper above that.
+- Known selectors for bundles disabled by Cargo features should return `ModelsError::ModelUnavailable`, not a generic unknown-selector error.
 - The end-to-end caller path should be understandable by reading the `v0.1` example; the end-to-end curator path should be understandable by reading the `google_gemma_300m` bundle module and the checklist above.
 - Curated artifact download is explicit and independent of the backend library's own cache-miss behavior. Backends consume the curated artifact policy through `StartOptions`. For regulated local bundles, `ArtifactPolicy::LocalOnly` is the intended fail-closed mode.
 - `embeddinggemma_300m` local-only startup depends on the full sentence-transformers module stack being present in the curated artifact root. That requirement is part of the bundle contract, not an ambient `mistralrs` cache behavior.
