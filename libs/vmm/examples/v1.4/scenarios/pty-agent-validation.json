@@ -35,7 +35,13 @@
     {
       "action": "pty_send_line",
       "session": "alice-shell",
-      "text": "status=1; for attempt in 1 2 3; do echo APT_ATTEMPT:$attempt; sudo -n apt-get update && status=0 && break; sleep 2; done; echo APT_STATUS:$status"
+      "text": "idle=0; for _ in $(seq 1 60); do if ! pgrep -x apt >/dev/null 2>&1 && ! pgrep -x apt-get >/dev/null 2>&1 && ! pgrep -x dpkg >/dev/null 2>&1 && ! pgrep -x unattended-upgr >/dev/null 2>&1 && ! pgrep -x unattended-upgrade >/dev/null 2>&1; then idle=$((idle+1)); if [ \"$idle\" -ge 5 ]; then echo PKG_IDLE_OK; break; fi; else idle=0; fi; sleep 1; done; sudo -n apt-get update && echo APT_STATUS:0 || echo APT_STATUS:1"
+    },
+    {
+      "action": "pty_expect",
+      "session": "alice-shell",
+      "contains": "PKG_IDLE_OK",
+      "timeout_ms": 65000
     },
     {
       "action": "pty_expect",

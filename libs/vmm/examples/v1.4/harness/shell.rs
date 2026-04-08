@@ -19,8 +19,8 @@ use tokio::sync::mpsc;
 
 use crate::terminal::{HarnessTerminalSession, TerminalBackendKind};
 use crate::{
-    DynError, HarnessInstance, demo_guest, ensure_file_exists, print_instance_details,
-    seed_host_mounts,
+    APT_UPDATE_COMMAND, DynError, HarnessInstance, PACKAGE_MANAGER_QUIESCENT_COMMAND, demo_guest,
+    ensure_file_exists, print_instance_details, seed_host_mounts,
 };
 
 pub async fn run_shell(
@@ -703,8 +703,14 @@ async fn validate_guest(
             Duration::from_secs(20),
         ),
         (
+            "apt: package manager quiescent",
+            PACKAGE_MANAGER_QUIESCENT_COMMAND.to_string(),
+            "PKG_IDLE_OK".to_string(),
+            Duration::from_secs(65),
+        ),
+        (
             "apt: package index refresh",
-            "/bin/sh -lc 'for attempt in 1 2 3; do sudo -n apt-get update >/tmp/motlie-vmm-apt-update.log 2>&1 && echo APT_OK && exit 0; sleep 2; done; exit 1'".to_string(),
+            APT_UPDATE_COMMAND.to_string(),
             "APT_OK".to_string(),
             Duration::from_secs(60),
         ),

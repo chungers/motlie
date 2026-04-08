@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-08 | @codex | Quieten the bootstrap/PTTY validation path: wait for package-manager background activity to settle before running `apt-get update`, so saved scenarios record one clean apt run instead of transient first-boot lock contention |
 | 2026-04-08 | @codex | Add the switchable terminal-backend contract: `shadow` is now the default PTY/TUI renderer, `vt100` remains as a fallback flag, `pty-screen.json` records the backend used, and PNG/GIF/movie output stays out of scope for `v1.4` |
 | 2026-04-08 | @codex | Add asciicast as the portable PTY replay/export artifact, keep NDJSON transcript + VTE screen JSON as the canonical agent-facing validation artifacts, and explicitly mark PNG/GIF/movie generation out of scope for `v1.4` |
 | 2026-04-08 | @codex | Expand HARNESS into the future-agent operating contract: design goals, autonomous workflow, troubleshooting loop, artifact/log usage, and standard verification matrix now explicitly include `agent-bootstrap.json` and the recommended shell-vs-scenario decision path |
@@ -565,7 +566,8 @@ The agent bootstrap example is the baseline future-agent scenario:
 - verify `git` is preinstalled
 - verify `codex --version`
 - verify outbound HTTPS
-- verify `sudo -n apt-get update`
+- wait for package-manager background activity to settle
+- verify one clean `sudo -n apt-get update`
 - shut the guest down
 
 Current allocator compatibility note:
@@ -638,7 +640,9 @@ Current expected guest privilege model:
 - `alice` and `bob` should have passwordless sudo through
   `/etc/sudoers.d/90-motlie-demo`
 - `sudo -n true` should succeed without prompting
-- `sudo -n apt-get update` should succeed without DNS or route failures
+- harness validations should wait for package-manager quiescence before
+  running `sudo -n apt-get update`
+- `sudo -n apt-get update` should then succeed without DNS or route failures
 - `git` should already be present in the base image
 
 ## Standard Verification
@@ -665,7 +669,7 @@ network tooling, `agent-bootstrap.json` is mandatory because it now captures
 the regressions that mattered here:
 
 - outbound HTTPS
-- `apt-get update`
+- package-manager quiescence plus `apt-get update`
 - passwordless sudo
 - base guest tooling needed for agent workflows
 
