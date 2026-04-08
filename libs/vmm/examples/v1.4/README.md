@@ -48,6 +48,7 @@ Repeatable validation entrypoints now are:
 A checked-in recorded validation session now lives under:
 
 - [`assets/pty-agent-validation.cast`](./assets/pty-agent-validation.cast)
+- [`assets/pty-agent-validation-player.html`](./assets/pty-agent-validation-player.html)
 
 This cast is the saved `pty-agent-validation` run that:
 
@@ -56,9 +57,9 @@ This cast is the saved `pty-agent-validation` run that:
 - launches `codex`
 - captures the Codex welcome screen
 
-For GitHub README playback, prefer an uploaded asciinema recording with the
-standard preview-image link. The checked-in `.cast` here is the local source
-artifact.
+The local HTML player is the review surface for replay from this branch. GitHub
+will not execute the player inline inside rendered Markdown, so open the linked
+HTML asset to watch the session.
 
 Detailed repeatable runbooks live in:
 

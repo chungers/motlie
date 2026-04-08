@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-08 | @codex | Add a small checked-in HTML replay surface for the saved PTY validation cast and link it from README/HARNESS so the branch has a concrete review entrypoint for recorded shell sessions |
 | 2026-04-08 | @codex | Clarify PTY sequencing for shell-driven scenarios: after visible command output assertions, wait for the shell prompt to return before sending the next command, or TUI launches can race the prior command tail |
 | 2026-04-08 | @codex | Add `wait_package_manager_quiescent` as a first-class scenario action so saved scenarios stop embedding the long package-manager idle shell loop inline |
 | 2026-04-08 | @codex | Quieten the bootstrap/PTY validation path: wait for package-manager background activity to settle before running `apt-get update`, so saved scenarios record one clean apt run instead of transient first-boot lock contention |
@@ -367,6 +368,11 @@ Per PTY session it writes:
 - `pty-screen.json`
 - `pty.cast`
 
+Checked-in replay entrypoints for the saved agent-validation session:
+
+- [`assets/pty-agent-validation.cast`](./assets/pty-agent-validation.cast)
+- [`assets/pty-agent-validation-player.html`](./assets/pty-agent-validation-player.html)
+
 The rendered screen JSON now records which terminal backend produced it.
 
 Why both:
@@ -414,6 +420,8 @@ Why asciicast is included:
   pixels
 - humans can replay it with asciinema-compatible viewers on Linux, macOS, or
   the web
+- the checked-in HTML player gives this branch a concrete replay surface for
+  review, even though GitHub-rendered Markdown still cannot play it inline
 
 Out of scope for `v1.4`:
 
