@@ -62,6 +62,9 @@ Phase 1 convergence:
 - [x] `BootArtifacts`
 - [x] `RuntimeNamespace`
 - [x] `GuestRuntimePaths`
+- [x] `RuntimeNamespace::root_from_env_or_temp()`
+- [x] `RuntimeNamespace::for_process(...)`
+- [x] `RuntimeNamespace::guest_vsock_port_socket(...)`
 - [x] `SshCa::issue_guest_ssh_credentials(...)`
 
 Phase 2 convergence:

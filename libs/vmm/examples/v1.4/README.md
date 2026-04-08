@@ -26,12 +26,20 @@ Repeatable validation entrypoints now are:
   - `./target/debug/examples/harness_v1_4`
 - harness PTY smoke:
   - `./target/debug/examples/harness_v1_4 pty`
-- REPL smoke:
-  - `./libs/vmm/examples/v1.4/integration/repl-smoke.sh`
+- harness interactive/manual mode:
+  - `./target/debug/examples/harness_v1_4 shell`
+- harness shell smoke:
+  - `./libs/vmm/examples/v1.4/integration/harness-shell-smoke.sh`
+  - drives `harness_v1_4 shell` with a saved command script
   - boots `alice` and `bob`
-  - runs `validate` for both in the REPL
+  - runs `validate` for both
   - then verifies proxy SSH, writable mounted state, and outbound fetches for
     both guests
+- harness isolation smoke:
+  - `./libs/vmm/examples/v1.4/integration/harness-isolation-smoke.sh`
+  - runs two separate harness shells concurrently
+  - boots `alice` in both
+  - proves instance-specific namespace, socket, and proxy isolation
 
 Detailed repeatable runbooks live in:
 
@@ -44,12 +52,22 @@ The direction from here is:
   top of the same `libs/vmm` lifecycle and PTY APIs
 - `repl_host_v1_4` remains useful during the transition, but should not gain
   unique control-plane logic
+- `harness_v1_4 shell` is now the preferred ad-hoc/manual entrypoint
+- [`setup-multiguest.harness`](./setup-multiguest.harness) is the saved
+  command script for bringing up the standard two-guest `v1.4` flow under the
+  harness shell
+- `RuntimeNamespace` in `libs/vmm` now owns:
+  - default root resolution through `MOTLIE_VMM_ROOT` or the platform temp dir
+  - per-process namespace generation
+  - guest vsock service socket naming
 
 Operational note:
 
 - `harness_v1_4` now allocates a per-run namespace/demo root/proxy port and
   prints them at startup, so repeated or concurrent harness runs do not collide
   on fixed filenames
+- both `harness_v1_4` and `repl_host_v1_4` accept `--root <dir>` and honor
+  `MOTLIE_VMM_ROOT`, so they no longer depend on a hardcoded `/tmp` root
 - `repl_host_v1_4` now supports `where [guest]` to print the current runtime
   roots and per-guest artifact paths
 

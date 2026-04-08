@@ -1,9 +1,9 @@
 mod pty;
+mod shell;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::time::Duration;
 
 use motlie_vmm::ca::SshCa;
@@ -33,16 +33,44 @@ struct HarnessInstance {
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<(), DynError> {
-    let scenario = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "smoke".to_string());
+    let mut args = std::env::args().skip(1);
+    let mut scenario = "smoke".to_string();
+    let mut root_override: Option<PathBuf> = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--root" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--root requires a path".to_string())?;
+                root_override = Some(PathBuf::from(value));
+            }
+            "--help" | "-h" => {
+                print_usage();
+                return Ok(());
+            }
+            other if other.starts_with("--root=") => {
+                root_override = Some(PathBuf::from(other.trim_start_matches("--root=")));
+            }
+            other if other.starts_with('-') => {
+                return Err(format!("unknown option: {other}").into());
+            }
+            other => {
+                scenario = other.to_string();
+            }
+        }
+    }
 
     let base_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/v1.4");
     let artifacts_dir = base_dir.join("artifacts/base");
     ensure_file_exists(&artifacts_dir.join("rootfs.squashfs"))?;
     ensure_file_exists(&artifacts_dir.join("Image"))?;
 
-    let instance = new_harness_instance()?;
+    let root_dir = root_override.unwrap_or_else(RuntimeNamespace::root_from_env_or_temp);
+    let instance = new_harness_instance(&root_dir)?;
+    if scenario == "shell" {
+        return shell::run_shell(&base_dir, &artifacts_dir, &instance).await;
+    }
+
     let guest = demo_guest("alice", &artifacts_dir, &instance.demo_root, &instance.namespace);
     std::fs::create_dir_all(&instance.socket_root)?;
 
@@ -164,19 +192,19 @@ fn ensure_success(stdout: &str, needle: &str) -> Result<(), DynError> {
     }
 }
 
-fn new_harness_instance() -> Result<HarnessInstance, DynError> {
-    let pid = std::process::id();
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)?
-        .as_millis()
-        % 10_000;
-    let prefix = format!("motlie-vmm-v14-h{pid}-{nonce}");
-    let namespace = RuntimeNamespace::new(prefix, "/tmp")?;
-    let demo_root = namespace.temp_root.join(format!("{}-demo", namespace.prefix));
+fn print_usage() {
+    println!("usage: harness_v1_4 [smoke|pty|shell] [--root <dir>]");
+}
+
+fn new_harness_instance(root_dir: &Path) -> Result<HarnessInstance, DynError> {
+    let namespace = RuntimeNamespace::for_process("motlie-vmm-v14", "h", root_dir)?;
+    let demo_root = namespace
+        .temp_root
+        .join(format!("{}-demo", namespace.prefix));
     let socket_root = namespace
         .temp_root
         .join(format!("{}-sockets", namespace.prefix));
-    let proxy_port = 32000 + u16::try_from(((u64::from(pid)) + (nonce as u64)) % 10_000)?;
+    let proxy_port = 32000 + port_offset(&namespace.prefix);
     Ok(HarnessInstance {
         namespace,
         demo_root,
@@ -192,6 +220,12 @@ fn print_instance_details(instance: &HarnessInstance, proxy_config: &SshProxyCon
     println!("  proxy=ssh://localhost:{}", proxy_config.listen.port());
 }
 
+fn port_offset(seed: &str) -> u16 {
+    seed.bytes().fold(0u16, |acc, byte| {
+        acc.wrapping_mul(31).wrapping_add(u16::from(byte))
+    }) % 10_000
+}
+
 fn demo_guest(
     guest_id: &str,
     artifacts_dir: &Path,
@@ -202,7 +236,11 @@ fn demo_guest(
     GuestSpec {
         guest_id: guest_id.to_string(),
         hostname: format!("motlie-{guest_id}"),
-        socket_path: format!("/tmp/{}-{guest_id}.vsock_5000", namespace.prefix),
+        socket_path: namespace
+            .guest_vsock_port_socket(guest_id, 5000)
+            .expect("guest_id is validated by the harness")
+            .display()
+            .to_string(),
         user: GuestUser {
             name: guest_id.to_string(),
             uid,

@@ -105,6 +105,26 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
         cfg.runtime_paths.cloud_init_dir.display()
     )
     .expect("writing to String cannot fail");
+    if let Some(runtime_root) = cfg.runtime_paths.runtime_dir.parent() {
+        writeln!(
+            &mut out,
+            "RUNTIME_ROOT=\"${{RUNTIME_ROOT:-{}}}\"",
+            runtime_root.display()
+        )
+        .expect("writing to String cannot fail");
+    }
+    writeln!(
+        &mut out,
+        "API_SOCKET=\"${{API_SOCKET:-{}}}\"",
+        cfg.runtime_paths.api_socket.display()
+    )
+    .expect("writing to String cannot fail");
+    writeln!(
+        &mut out,
+        "VSOCK_SOCKET=\"${{VSOCK_SOCKET:-{}}}\"",
+        cfg.runtime_paths.vsock_socket.display()
+    )
+    .expect("writing to String cannot fail");
     writeln!(
         &mut out,
         "ADMIN_NET={}",
@@ -127,6 +147,7 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
         writeln!(&mut out, "SSH_CA_PUBKEY={}", shell_single_quote(ca_pubkey))
             .expect("writing to String cannot fail");
     }
+    out.push_str("export RUNTIME_ROOT API_SOCKET VSOCK_SOCKET\n");
     out.push_str("INSTANCE_ID=\"${INSTANCE_ID:-${GUEST_ID}}\"\n");
     out.push_str("LOCAL_HOSTNAME=\"${LOCAL_HOSTNAME:-motlie-${GUEST_ID}}\"\n");
     out.push_str("mkdir -p \"$SEED_DIR\"\n");
@@ -379,6 +400,9 @@ mod tests {
 
         assert!(script.contains("GUEST_ID='alice'"));
         assert!(script.contains("SEED_DIR=\"${SEED_DIR:-/tmp/motlie-vmm-v14-cloud-init-alice}\""));
+        assert!(script.contains("RUNTIME_ROOT=\"${RUNTIME_ROOT:-/tmp/motlie-vmm-v14-runtime}\""));
+        assert!(script.contains("API_SOCKET=\"${API_SOCKET:-/tmp/motlie-vmm-v14-alice-api.sock}\""));
+        assert!(script.contains("VSOCK_SOCKET=\"${VSOCK_SOCKET:-/tmp/motlie-vmm-v14-alice.vsock}\""));
         assert!(script.contains("GUEST_CID=3"));
         assert!(script.contains("ADMIN_NET='none'"));
         assert!(script.contains("EGRESS_NET='vhost-user'"));

@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 
@@ -110,6 +111,43 @@ impl RuntimeNamespace {
             temp_root: temp_root.into(),
         })
     }
+
+    pub fn root_from_env_or_temp() -> PathBuf {
+        std::env::var_os("MOTLIE_VMM_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+    }
+
+    pub fn for_process(
+        prefix_base: &str,
+        instance_tag: &str,
+        temp_root: impl Into<PathBuf>,
+    ) -> Result<Self, SpecError> {
+        if prefix_base.trim().is_empty() {
+            return Err(SpecError::EmptyNamespacePrefix);
+        }
+        let pid = std::process::id();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| SpecError::InvalidClock)?
+            .as_millis()
+            % 10_000;
+        let prefix = format!("{prefix_base}-{instance_tag}{pid}-{nonce}");
+        Self::new(prefix, temp_root)
+    }
+
+    pub fn guest_vsock_port_socket(
+        &self,
+        guest_name: &str,
+        port: u32,
+    ) -> Result<PathBuf, SpecError> {
+        if guest_name.trim().is_empty() {
+            return Err(SpecError::EmptyGuestId);
+        }
+        Ok(self
+            .temp_root
+            .join(format!("{}-{guest_name}.vsock_{port}", self.prefix)))
+    }
 }
 
 /// Deterministic runtime layout for one guest.
@@ -179,6 +217,8 @@ pub enum SpecError {
     EmptyGuestUserName,
     #[error("guest ssh principal cannot be empty")]
     EmptyGuestPrincipal,
+    #[error("system clock is invalid for instance namespace generation")]
+    InvalidClock,
 }
 
 pub fn pathbuf_from_optional_str(value: Option<&str>) -> Option<PathBuf> {
@@ -245,6 +285,16 @@ mod tests {
     fn namespace_rejects_empty_prefix() {
         let err = RuntimeNamespace::new("", "/tmp").unwrap_err();
         assert_eq!(err, SpecError::EmptyNamespacePrefix);
+    }
+
+    #[test]
+    fn runtime_namespace_guest_vsock_port_socket_follows_root_and_prefix() {
+        let namespace = RuntimeNamespace::new("motlie-vmm-v14-test", "/var/tmp").unwrap();
+        let path = namespace.guest_vsock_port_socket("alice", 5000).unwrap();
+        assert_eq!(
+            path,
+            PathBuf::from("/var/tmp/motlie-vmm-v14-test-alice.vsock_5000")
+        );
     }
 
     #[test]

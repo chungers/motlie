@@ -108,6 +108,14 @@ Current `v1.4` implementation status:
   - human manual validation
 - `examples/v1.4/build-guest.sh` and `examples/v1.4/launch-ch.sh` exist under
   the `motlie-vmm-v14-*` namespace
+- `RuntimeNamespace` now owns the core runtime-environment rules used by the
+  harness and REPL:
+  - root resolution from `MOTLIE_VMM_ROOT` or the platform temp dir
+  - per-process namespace generation
+  - guest vsock service socket naming
+- `examples/v1.4/harness` and `examples/v1.4/repl_host_v1_4` now accept
+  `--root <dir>` so live instances do not depend on a hardcoded `/tmp`
+  root and can be isolated under caller-selected host directories
 
 ## Desired Outcome
 
