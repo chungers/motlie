@@ -2985,6 +2985,9 @@ dependencies = [
 [[package]]
 name = "motlie-model"
 version = "0.1.0"
+dependencies = [
+ "async-trait",
+]
 
 [[package]]
 name = "motlie-model-eval"

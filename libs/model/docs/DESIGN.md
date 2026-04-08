@@ -54,7 +54,7 @@ The core product value is not only hiding backends. It is preserving a common ab
 1. Stable bundle identity and metadata
 2. Uniform load/start/stop lifecycle
 3. Shared request/response types for chat, text completion, and embeddings
-4. Capability discovery and capability-specific adapters
+4. Capability discovery, introspection, and capability-specific adapters
 5. Composable contracts so bundles can be selected, loaded, and invoked uniformly
 6. Artifact descriptors for packaged weights and auxiliary assets
 7. Common errors and unsupported-capability behavior
@@ -72,6 +72,7 @@ The crate is intentionally small, dependency-light, and backend-agnostic.
 - Preserve composability so application code can swap bundles without changing lifecycle logic
 - Support sustainable curated-bundle evolution as models enter or leave the Motlie catalog
 - Support evaluation harnesses used to assess model quality as part of the curation process
+- Support simple introspection of capability input/output/interaction shape for catalogs and harnesses
 - Support static or embedded deployment artifacts, including future encrypted bundle formats
 - Allow higher-level crates to register and load curated bundles consistently
 - Provide ergonomic Rust APIs suitable for application integration
@@ -90,20 +91,20 @@ The crate is intentionally small, dependency-light, and backend-agnostic.
 
 1. `libs/model`
    Public contracts, lifecycle, metadata, capability types, lightweight `model::eval` abstractions, artifact descriptors, and errors
-2. `libs/models`
-   Curated bundle catalog, bundle registration, backend composition, packaging policy
+2. `libs/model/backends/*`
+   Generic backend implementations such as `mistral`, `ort`, `llamacpp`, or later HTTP-backed providers that satisfy the `libs/model` contracts
 3. `libs/model-eval`
    Substantial evaluation tooling such as harness runners, suite loading, scoring, reporting, and CLI-oriented support built on `model::eval`
-4. Backend integration crates or private modules
-   Execution adapters such as `mistral.rs`, `llama.cpp`, `ONNX Runtime`, or HTTP-backed providers
+4. `libs/models`
+   Curated bundle catalog, bundle registration, bundle artifacts, packaging policy, and bundle-specific adaptations layered on top of `libs/model`
 
 Dependency direction:
 
 - applications depend on `libs/models` and may also use `libs/model` types directly
-- `libs/models` depends on `libs/model`
+- `libs/model/backends/*` depend on `libs/model`
 - `libs/model-eval` depends on `libs/model` and may optionally integrate with `libs/models` for catalog-driven runs
-- backend integrations depend on `libs/model` as needed for shared types
-- `libs/model` does not depend on bundle catalogs, harness tooling, or backend crates
+- `libs/models` depends on `libs/model` and the relevant `libs/model/backends/*` implementations
+- `libs/model` does not depend on bundle catalogs, harness tooling, or backend implementations
 
 ### High-Level Data Flow
 
@@ -111,7 +112,7 @@ Dependency direction:
 2. A higher-level catalog loads a concrete bundle
 3. The loaded bundle reports its metadata and capabilities
 4. The caller requests a capability adapter such as chat or embeddings
-5. The adapter executes requests through the bundle's internal backend implementation
+5. The adapter executes requests through the bundle's selected backend implementation under `libs/model/backends/*`
 6. Responses return through shared request/response types defined in `libs/model`
 
 ## Framework Principles
@@ -137,6 +138,7 @@ Implications:
 - outputs should be structured enough to support scoring, comparison, and regression checks
 - the contract should avoid bundle-specific response shapes as the primary integration path
 - lifecycle and configuration should permit deterministic harness runs where practical
+- bundles should be able to describe input/output content kinds and interaction style without backend-specific probing
 
 ### Layered Evaluation Boundary
 
@@ -160,7 +162,10 @@ Recommended types:
 - `BundleId`
 - `BundleMetadata`
 - `BundleVersion`
-- `Capability`
+- `CapabilityKind`
+- `ContentKind`
+- `InteractionStyle`
+- `CapabilityDescriptor`
 
 `BundleId` is a stable product-facing identifier such as:
 
@@ -176,7 +181,7 @@ Primary contract:
 pub trait ModelBundle: Send + Sync {
     fn id(&self) -> BundleId;
     fn metadata(&self) -> &BundleMetadata;
-    fn capabilities(&self) -> Capabilities;
+    fn capabilities(&self) -> &Capabilities;
     async fn start(&self, options: StartOptions) -> Result<BundleHandle, ModelError>;
 }
 ```
@@ -188,7 +193,7 @@ The bundle itself is metadata plus load entry point. Runtime state lives in a `B
 ```rust
 pub trait BundleHandle: Send + Sync {
     fn descriptor(&self) -> &LoadedBundleDescriptor;
-    fn capabilities(&self) -> Capabilities;
+    fn capabilities(&self) -> &Capabilities;
 
     fn chat(&self) -> Result<&dyn ChatModel, ModelError>;
     fn completion(&self) -> Result<&dyn CompletionModel, ModelError>;
@@ -209,22 +214,32 @@ This keeps lifecycle explicit:
 Capabilities are first-class and discoverable. Not every bundle supports every capability.
 
 ```rust
-pub enum Capability {
+pub enum CapabilityKind {
     Chat,
     Completion,
     Embeddings,
+    Vision,
+    Ocr,
+}
+```
+
+```rust
+pub struct CapabilityDescriptor {
+    pub kind: CapabilityKind,
+    pub summary: &'static str,
+    pub inputs: Vec<ContentKind>,
+    pub outputs: Vec<ContentKind>,
+    pub interaction: InteractionStyle,
 }
 ```
 
 ```rust
 pub struct Capabilities {
-    pub chat: bool,
-    pub completion: bool,
-    pub embeddings: bool,
+    descriptors: Vec<CapabilityDescriptor>,
 }
 ```
 
-The first cut should prefer explicit booleans over a more abstract extensible registry. This keeps the contract obvious and makes unsupported-capability failures straightforward.
+The curated model favors a closed enum for capability kinds rather than an open-ended registry. New capability kinds are expected to arrive through code review as part of the curation process. The descriptor layer makes capabilities introspectable for catalogs, harnesses, and operators without exposing backend-specific probing logic.
 
 ## Lifecycle
 
@@ -259,6 +274,14 @@ The contract should allow a loaded bundle handle to serve multiple requests conc
 ## Capability Surfaces
 
 The capability APIs should expose a stable user-facing interaction surface while hiding backend-specific request plumbing.
+
+They should also expose enough introspection for tooling to understand:
+
+- what normalized content kinds a capability accepts
+- what normalized content kinds it produces
+- whether it is request/response, multi-turn, batch-oriented, or later streaming
+
+This allows catalogs and harnesses to select the right interaction driver without having to infer semantics from bundle naming or backend choice.
 
 ### Chat
 
@@ -325,6 +348,7 @@ Contract requirements that enable harnesses:
 
 - stable request/response envelopes across bundles within a capability
 - explicit capability discovery so harnesses can select only applicable tests
+- introspective capability descriptors so harnesses can choose the right interaction driver
 - inspectable execution metadata when available, such as token counts, timings, or warnings
 - deterministic configuration surfaces where practical for reproducible comparisons
 - normalized error handling so harnesses can distinguish unsupported tasks from execution failures
@@ -336,9 +360,11 @@ The design should assume that evaluation is part of the bundle curation lifecycl
 Example ergonomic usage for downstream callers:
 
 ```rust
-use motlie_model::{BundleId, ModelCatalog};
+use motlie_model::BundleId;
+use motlie_models::Catalog;
 
-let bundle = catalog.bundle(BundleId::Qwen3_5Instruct)?;
+let catalog = Catalog::default();
+let bundle = catalog.bundle(&BundleId::new("qwen3_5_instruct"))?;
 let handle = bundle.start(Default::default()).await?;
 let chat = handle.chat()?;
 
@@ -366,7 +392,7 @@ let response = embeddings.embed(EmbeddingRequest::from_inputs([
 - `BundleId` is the stable selection mechanism
 - callers ask for capabilities from a loaded handle rather than pattern-matching on bundle family
 - runtime choice is not part of the public call path
-- a catalog trait may live here if needed, but the concrete curated catalog belongs in `libs/models`
+- the concrete curated catalog belongs in `libs/models`, with the primary public path exposed as `motlie_models::Catalog`
 
 ## Artifact and Packaging Contracts
 
@@ -511,7 +537,7 @@ PLAN must specify concrete tests for:
 
 ## Open Concerns
 
-- Whether `ModelCatalog` should live in `libs/model` as a trait or only in `libs/models`
-- Whether `Capabilities` should remain fixed booleans in v1 or use an extensible capability registry
+- Whether any catalog trait should live in `libs/model` or remain only in `libs/models`
+- Whether the first introspection vocabulary should stop at normalized content kinds or include richer transport/file-format annotations later
 - How much generation-parameter normalization to promise across heterogeneous backends
 - Whether streaming output should be part of the initial contract or deferred until the non-streaming API is stable
