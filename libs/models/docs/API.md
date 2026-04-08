@@ -116,8 +116,8 @@ let reasoning_bundles: Vec<_> = catalog
 ### Instantiating the First Vertical Slice
 
 ```rust
-use motlie_model::{BundleId, EmbeddingRequest, StartOptions};
-use motlie_models::{default_artifact_root, Catalog};
+ use motlie_model::{ArtifactPolicy, BundleId, EmbeddingRequest, StartOptions};
+ use motlie_models::{default_artifact_root, Catalog};
 
 let catalog = Catalog::with_defaults();
 let bundle = catalog
@@ -126,7 +126,9 @@ let bundle = catalog
 
 let handle = bundle
     .start(StartOptions {
-        cache_root: Some(default_artifact_root()),
+        artifact_policy: Some(ArtifactPolicy::LocalOnly {
+            root: default_artifact_root(),
+        }),
         ..Default::default()
     })
     .await?;
@@ -177,7 +179,7 @@ cargo run -p motlie-models --bin motlie-models-download -- embeddinggemma_300m
 - capability metadata comes from `motlie_model`, so the catalog can describe input/output shape and interaction style without inventing its own parallel schema
 - `BackendKind` and `PackagingMode` are metadata for catalog reasoning and observability. They do not make runtime choice part of the application control path.
 - `Catalog` now also owns curated bundle instantiation through registered constructors.
-- Curated artifact download is explicit and independent of the backend library's own cache-miss behavior. Backends consume the curated artifact root through `StartOptions`, then populate or reuse their own internal cache layout from there as needed.
+- Curated artifact download is explicit and independent of the backend library's own cache-miss behavior. Backends consume the curated artifact policy through `StartOptions`. For regulated local bundles, `ArtifactPolicy::LocalOnly` is the intended fail-closed mode.
 
 ## Next Step
 

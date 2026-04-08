@@ -18,6 +18,7 @@ The first concrete `libs/model` API now includes:
 - stable `BundleId`
 - `CapabilityKind`, `ContentKind`, `InteractionStyle`, `CapabilityDescriptor`, and `Capabilities`
 - `BundleMetadata`, `LoadedBundleDescriptor`, and `StartOptions`
+- `ArtifactPolicy`
 - `ModelError`
 - request/response envelopes for chat, completion, and embeddings
 - the `ModelBundle`, `BundleHandle`, `ChatModel`, `CompletionModel`, and `EmbeddingModel` traits
@@ -37,6 +38,7 @@ Primary bundle-contract types:
 - `Capabilities`
 - `BundleMetadata`
 - `StartOptions`
+- `ArtifactPolicy`
 - `LoadedBundleDescriptor`
 - `ModelError`
 
@@ -112,8 +114,9 @@ let embeddings = EmbeddingRequest {
 ```rust
 use async_trait::async_trait;
 use motlie_model::{
-    BundleHandle, BundleId, BundleMetadata, Capabilities, ChatModel, CompletionModel,
-    EmbeddingModel, LoadedBundleDescriptor, ModelBundle, ModelError, StartOptions,
+    ArtifactPolicy, BundleHandle, BundleId, BundleMetadata, Capabilities, ChatModel,
+    CompletionModel, EmbeddingModel, LoadedBundleDescriptor, ModelBundle, ModelError,
+    StartOptions,
 };
 
 #[async_trait]
@@ -132,6 +135,28 @@ impl ModelBundle for MyBundle {
 ```
 
 Loaded handles also expose `supports(CapabilityKind)` as a convenience over `capabilities().supports(...)`, which keeps harness and catalog-driven code simple when it only needs to branch on capability presence.
+
+### Startup Artifact Policy
+
+```rust
+use std::path::PathBuf;
+
+use motlie_model::{ArtifactPolicy, StartOptions};
+
+let regulated = StartOptions {
+    artifact_policy: Some(ArtifactPolicy::LocalOnly {
+        root: PathBuf::from("artifacts/models/hf-cache"),
+    }),
+    ..Default::default()
+};
+
+let permissive = StartOptions {
+    artifact_policy: Some(ArtifactPolicy::AllowFetch {
+        root: Some(PathBuf::from("artifacts/models/hf-cache")),
+    }),
+    ..Default::default()
+};
+```
 
 ## `model::eval` API Sketch
 
@@ -166,4 +191,4 @@ let result = EvalResult {
 - `BundleId` lives in `libs/model`, not `libs/models`, because it is part of the stable contract surface.
 - capability introspection now includes task kind, input/output content kinds, and interaction style
 - `model::eval` contains small declarative types only; runners, scoring, suite loading, and reports belong in `libs/model-eval`.
-- Curated artifact download and provenance control live above this crate in `libs/models`. Backend startup consumes the resulting artifact/cache root through `StartOptions` rather than using `libs/model` to define download policy.
+- Curated artifact download and provenance control live above this crate in `libs/models`. Backend startup consumes the resulting artifact root and policy through `StartOptions` rather than using `libs/model` to initiate curated downloads itself.
