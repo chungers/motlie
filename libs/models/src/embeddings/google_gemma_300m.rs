@@ -1,20 +1,83 @@
 use motlie_model::eval::EvalTrack;
-use motlie_model::{BundleId, CapabilityDescriptor, ModelBundle};
+use motlie_model::{
+    BundleId, CapabilityDescriptor, ContentKind, Embedding as EmbeddingBundle, EmbeddingDistance,
+    EmbeddingNormalization, EmbeddingSpec, ModelBundle,
+};
 use motlie_model_mistral::{MistralEmbeddingBundle, MistralEmbeddingSpec};
 
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleArtifacts, BundleDescriptor,
-    BundleFamily, BundleRequirements, PackagingMode, PlatformConstraint, SupportTier,
+    BundleFamily, BundleRequirements, PlatformConstraint,
 };
+
+pub const SELECTOR: &str = "google/embeddinggemma_300m";
+
+const EMBEDDING_SPEC: EmbeddingSpec = EmbeddingSpec {
+    dimensions: Some(768),
+    distance: EmbeddingDistance::Cosine,
+    normalization: EmbeddingNormalization::L2,
+    input: ContentKind::Text,
+    output: ContentKind::EmbeddingVector,
+    summary: "Normalized text embeddings for semantic similarity and retrieval.",
+};
+
+#[derive(Clone, Debug)]
+pub struct GoogleGemma300m {
+    inner: MistralEmbeddingBundle,
+}
+
+impl GoogleGemma300m {
+    pub fn new() -> Self {
+        Self {
+            inner: MistralEmbeddingBundle::new(MistralEmbeddingSpec::embeddinggemma_300m()),
+        }
+    }
+}
+
+impl Default for GoogleGemma300m {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelBundle for GoogleGemma300m {
+    fn id(&self) -> &BundleId {
+        self.inner.id()
+    }
+
+    fn metadata(&self) -> &motlie_model::BundleMetadata {
+        self.inner.metadata()
+    }
+
+    fn capabilities(&self) -> &motlie_model::Capabilities {
+        self.inner.capabilities()
+    }
+
+    async fn start(
+        &self,
+        options: motlie_model::StartOptions,
+    ) -> Result<Box<dyn motlie_model::BundleHandle>, motlie_model::ModelError> {
+        self.inner.start(options).await
+    }
+}
+
+impl EmbeddingBundle for GoogleGemma300m {
+    fn embedding_spec(&self) -> &EmbeddingSpec {
+        &EMBEDDING_SPEC
+    }
+}
+
+pub fn embedding_spec() -> &'static EmbeddingSpec {
+    &EMBEDDING_SPEC
+}
 
 pub fn descriptor() -> BundleDescriptor {
     BundleDescriptor {
         id: BundleId::new("embeddinggemma_300m"),
         display_name: "EmbeddingGemma 300M".into(),
         family: BundleFamily::Embeddings,
-        support_tier: SupportTier::Experimental,
         capabilities: motlie_model::Capabilities::new(vec![CapabilityDescriptor::embeddings()]),
-        packaging: PackagingMode::Sidecar,
         backend: BackendKind::MistralRs,
         requirements: BundleRequirements {
             platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
@@ -44,16 +107,14 @@ pub fn descriptor() -> BundleDescriptor {
 }
 
 pub fn bundle() -> Box<dyn ModelBundle> {
-    Box::new(MistralEmbeddingBundle::new(
-        MistralEmbeddingSpec::embeddinggemma_300m(),
-    ))
+    Box::new(GoogleGemma300m::new())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use motlie_model::{ArtifactPolicy, EmbeddingRequest, StartOptions};
     use crate::Catalog;
+    use motlie_model::{ArtifactPolicy, EmbeddingRequest, StartOptions};
 
     #[test]
     fn descriptor_is_reviewable_as_data() {
@@ -62,7 +123,6 @@ mod tests {
         assert_eq!(descriptor.id.as_str(), "embeddinggemma_300m");
         assert_eq!(descriptor.family, BundleFamily::Embeddings);
         assert_eq!(descriptor.backend, BackendKind::MistralRs);
-        assert_eq!(descriptor.packaging, PackagingMode::Sidecar);
         assert_eq!(descriptor.eval_tracks, vec![EvalTrack::Embeddings]);
         assert!(descriptor
             .capabilities
@@ -79,6 +139,15 @@ mod tests {
         assert!(artifacts.includes("model.safetensors"));
         assert!(artifacts.includes("config.json"));
         assert!(!artifacts.includes("README.md"));
+    }
+
+    #[test]
+    fn embedding_spec_matches_expected_semantics() {
+        let spec = embedding_spec();
+
+        assert_eq!(spec.dimensions, Some(768));
+        assert_eq!(spec.distance, EmbeddingDistance::Cosine);
+        assert_eq!(spec.normalization, EmbeddingNormalization::L2);
     }
 
     #[tokio::test]

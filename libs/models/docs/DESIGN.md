@@ -8,6 +8,8 @@
 |------|--------|----------|
 | 2026-04-07 | @codex-researcher: Initial greenfield design for `libs/models` as the curated bundle catalog and composition crate over `libs/model`. Migration and backward compatibility are explicitly out of scope for this first cut. | All |
 | 2026-04-07 | @codex-researcher: Clarified that curated local model download is an explicit `libs/models` control, separate from backend cache-miss behavior. | Packaging and Deployment Model, Release Assembly Utility |
+| 2026-04-08 | @codex-researcher: Clarified that `libs/models` public fallible APIs should use typed library errors rather than `anyhow`, and specified the first vertical-slice artifact contract for `embeddinggemma_300m`. | Solution, Bundle Catalog Model, Packaging and Deployment Model |
+| 2026-04-08 | @codex-researcher: Locked down the crate hierarchy and direct bundle namespace so future work does not drift. Also removed over-modeled public metadata from the recommended surface and documented the preferred direct bundle API next to `Catalog`. | Architecture, Bundle Catalog Model, API Sketch |
 
 This document defines the design for `libs/models`, the curated bundle library that exposes opinionated model stacks as deployable product modules. A bundle in this crate includes vetted weights when applicable, a chosen backend or transport, packaging policy when applicable, capability wiring, and consistent lifecycle behavior through the contracts defined in `libs/model`.
 
@@ -56,8 +58,11 @@ Motlie instead wants a curated system where each supported model bundle is a vet
 4. artifact packaging and/or transport policy
 5. bundle-local build and distribution customization
 6. concrete implementations of `libs/model` contracts
+7. typed catalog and artifact errors for operator-facing bundle control
 
 Callers integrate with curated bundle IDs and capability APIs. They do not choose runtimes directly.
+
+Library-level fallible APIs in this crate should return typed errors defined with `thiserror`. CLI tools and examples layered on top of the crate may use `anyhow` for propagation and user-facing context.
 
 ## Goals and Non-Goals
 
@@ -90,18 +95,42 @@ Callers integrate with curated bundle IDs and capability APIs. They do not choos
 
 Primary subsystems:
 
-1. `catalog`
-   Registry of curated bundle descriptors and constructors
-2. `bundles`
-   Concrete bundle definitions such as Qwen, Hermes, GPT, and embedding bundles
-3. `artifacts`
-   Packaging descriptors, embedded-resource access, unpack policy, integrity checks
-4. `build`
-   Bundle-local build hooks, feature gating, platform checks, distribution policy, and operator-facing build profiles
-5. `packaging`
-   Release assembly, embedded-artifact image creation, and deterministic package-bundle extraction rules
-6. `load`
-   Lifecycle orchestration from descriptor to loaded handle
+1. `lib.rs`
+   Shared catalog, descriptor, artifact-control, and crate-level infrastructure only
+2. capability-family namespaces such as `embeddings/`
+   One directory per major capability family when more than one curated bundle is expected
+3. bundle module files such as `embeddings/google_gemma_300m.rs`
+   One curated bundle per file, with direct `descriptor()` and `bundle()` functions
+4. `src/bin/`
+   Small operational entrypoints such as artifact download helpers
+
+Concrete hierarchy rule:
+
+```text
+libs/models/
+  src/
+    lib.rs
+    embeddings/
+      mod.rs
+      google_gemma_300m.rs
+    bin/
+      download_artifacts.rs
+```
+
+Public namespace rule:
+
+```rust
+motlie_models::Catalog
+motlie_models::embeddings::google_gemma_300m::descriptor()
+motlie_models::embeddings::google_gemma_300m::bundle()
+```
+
+This split is intentional:
+
+- `lib.rs` owns shared crate infrastructure
+- capability-family directories keep related bundles grouped together
+- each bundle file maps 1:1 to a curated bundle
+- callers may use either direct bundle modules or the dynamic `Catalog`
 
 ### High-Level Data Flow
 
@@ -147,7 +176,7 @@ Recommended public concepts:
 - `BundleDescriptor`
 - `Catalog`
 - `BundleFamily`
-- `SupportTier`
+- direct bundle namespaces such as `motlie_models::embeddings::google_gemma_300m`
 
 `BundleDescriptor` should describe:
 
@@ -155,26 +184,32 @@ Recommended public concepts:
 - display name
 - family
 - supported capabilities
-- packaging mode
 - selected backend
 - artifact or transport requirements
 - optional platform constraints
 - optional build/distribution constraints
 - optional evaluation tags or supported harness groups
+- artifact requirements precise enough for deterministic local-only startup where applicable
+
+`SupportTier` and `PackagingMode` are not required as first-class public catalog concepts in v1. If those ideas become operationally useful later, they can be added back with a clearer consumer and a narrower meaning.
 
 Example internal organization:
 
 ```text
-libs/models/src/
-  catalog/
-  build/
-  bundles/
-    qwen/
-    hermes/
-    gpt/
+libs/models/
+  src/
+    lib.rs
     embeddings/
-  artifacts/
-  load/
+      mod.rs
+      google_gemma_300m.rs
+    qwen/
+      mod.rs
+      qwen3_5_instruct.rs
+    hermes/
+      mod.rs
+      hermes3_chat.rs
+    bin/
+      download_artifacts.rs
 ```
 
 ### Bundle Family versus Bundle Identity
@@ -188,6 +223,32 @@ Examples:
 - `BgeSmallEn`
 
 `BundleFamily` is metadata for organization, docs, and feature flags, not the primary runtime lookup key.
+
+### Direct Bundle Access
+
+`Catalog` remains useful for configuration-driven or dynamically selected bundle loading. It is not the only intended entrypoint.
+
+For application code that wants a specific curated bundle directly, the preferred API is the bundle module path itself:
+
+```rust
+let descriptor = motlie_models::embeddings::google_gemma_300m::descriptor();
+let bundle = motlie_models::embeddings::google_gemma_300m::bundle();
+```
+
+This avoids unnecessary catalog lookup in the common case while preserving catalog-driven selection for higher-level orchestration.
+
+When the underlying bundle is an embedding bundle, the concrete bundle type should also implement the `motlie_model::Embedding` trait so callers can access embedding-specific metadata without loading the runtime handle first.
+
+### First Vertical Slice Specificity
+
+The first concrete local bundle, `embeddinggemma_300m`, is intentionally part of the framework specification because it validates the layering. Its curated artifact contract must include:
+
+- root model config and tokenizer files
+- `modules.json`
+- sentence-transformers module configs for pooling and dense stages
+- dense module safetensors files
+
+That requirement is part of the bundle definition, not an implementation detail left to backend cache discovery.
 
 ### Capability Exposure
 
@@ -214,7 +275,7 @@ Supported design directions:
 3. Remote-served bundles over controlled HTTP integrations
 4. Future protected artifact formats, including encrypted embedded data or custom bundle containers
 
-The public crate should describe packaging or transport mode, but the exact binary/container or HTTP integration implementation remains internal.
+The public crate does not need a first-class `PackagingMode` enum for v1. Artifact policy and startup behavior are the important public concerns; exact release packaging remains an internal concern of release tooling and curated bundle implementation.
 
 For local curated bundles, model download should be an explicit control owned by `libs/models` rather than an implicit side effect of backend startup. A backend such as `mistral.rs` may still populate or consult its own cache layout, but curated provenance and download policy remain the responsibility of the curated bundle layer.
 

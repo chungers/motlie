@@ -3,23 +3,63 @@
 //! This crate owns the bundle/catalog layer above `motlie-model`.
 
 use std::collections::BTreeMap;
+use std::error::Error as StdError;
+use std::fmt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Arc;
 
-mod embeddinggemma_300m;
+pub mod embeddings;
 
-use anyhow::{Context, Result};
 use hf_hub::api::sync::ApiBuilder;
+use thiserror::Error;
 
 pub use motlie_model::eval::EvalTrack;
 pub use motlie_model::{
     BundleId, Capabilities, CapabilityDescriptor, CapabilityKind, ContentKind, InteractionStyle,
     ModelBundle,
 };
+pub use embeddings::EmbeddingModels;
 
-pub use embeddinggemma_300m::{
-    bundle as embeddinggemma_300m_bundle, descriptor as embeddinggemma_300m_descriptor,
-};
+type BoxError = Box<dyn StdError + Send + Sync + 'static>;
+
+#[derive(Debug, Error)]
+pub enum ModelsError {
+    #[error("unknown bundle `{bundle_id}`")]
+    UnknownBundle { bundle_id: BundleId },
+    #[error("bundle `{bundle_id}` does not define curated artifacts")]
+    MissingArtifacts { bundle_id: BundleId },
+    #[error("failed to create artifact root `{path}`")]
+    CreateArtifactRoot {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to create Hugging Face API client")]
+    HuggingFaceClient {
+        #[source]
+        source: BoxError,
+    },
+    #[error("failed to inspect model repo `{repo}`")]
+    InspectModelRepo {
+        repo: &'static str,
+        #[source]
+        source: BoxError,
+    },
+    #[error("failed to download `{filename}` from repo `{repo}`")]
+    DownloadArtifact {
+        repo: &'static str,
+        filename: String,
+        #[source]
+        source: BoxError,
+    },
+    #[error("unknown embedding model selector `{selector}`")]
+    UnknownEmbeddingModel { selector: String },
+    #[error("unknown model selector `{selector}`")]
+    UnknownModelSelector { selector: String },
+}
+
+pub type Result<T> = std::result::Result<T, ModelsError>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ArtifactSource {
@@ -88,41 +128,45 @@ pub fn download_bundle_artifacts_with_options(
     artifact_root: &Path,
     options: &ArtifactDownloadOptions,
 ) -> Result<ArtifactDownloadSummary> {
-    let descriptor = catalog
-        .bundle(bundle_id)
-        .with_context(|| format!("unknown bundle `{bundle_id}`"))?;
+    let descriptor = catalog.bundle(bundle_id).ok_or_else(|| ModelsError::UnknownBundle {
+        bundle_id: bundle_id.clone(),
+    })?;
     let artifacts = descriptor
         .artifacts
         .as_ref()
-        .with_context(|| format!("bundle `{bundle_id}` does not define artifacts"))?;
+        .ok_or_else(|| ModelsError::MissingArtifacts {
+            bundle_id: bundle_id.clone(),
+        })?;
 
     match &artifacts.source {
         ArtifactSource::HuggingFace { repo } => {
-            std::fs::create_dir_all(artifact_root).with_context(|| {
-                format!(
-                    "failed to create artifact root `{}`",
-                    artifact_root.display()
-                )
+            std::fs::create_dir_all(artifact_root).map_err(|source| ModelsError::CreateArtifactRoot {
+                path: artifact_root.to_path_buf(),
+                source,
             })?;
 
             let api = ApiBuilder::new()
                 .with_cache_dir(artifact_root.to_path_buf())
                 .with_token(options.hf_token.clone())
                 .build()
-                .context("failed to create Hugging Face API client")?;
+                .map_err(|source| ModelsError::HuggingFaceClient {
+                    source: Box::new(source),
+                })?;
             let repo_api = api.model((*repo).to_string());
-            let info = repo_api
-                .info()
-                .with_context(|| format!("failed to inspect model repo `{repo}`"))?;
+            let info = repo_api.info().map_err(|source| ModelsError::InspectModelRepo {
+                repo,
+                source: Box::new(source),
+            })?;
 
             let mut downloaded = Vec::new();
             for sibling in info.siblings {
                 if artifacts.includes(&sibling.rfilename) {
-                    let path = repo_api.get(&sibling.rfilename).with_context(|| {
-                        format!(
-                            "failed to download `{}` from repo `{repo}`",
-                            sibling.rfilename
-                        )
+                    let path = repo_api.get(&sibling.rfilename).map_err(|source| {
+                        ModelsError::DownloadArtifact {
+                            repo,
+                            filename: sibling.rfilename.clone(),
+                            source: Box::new(source),
+                        }
                     })?;
                     downloaded.push(path);
                 }
@@ -146,22 +190,6 @@ pub enum BundleFamily {
     Hermes,
     Other(String),
     Qwen,
-}
-
-/// Product support level for a curated bundle.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SupportTier {
-    Experimental,
-    Stable,
-    Supported,
-}
-
-/// Public packaging mode for a bundle.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PackagingMode {
-    Embedded,
-    Remote,
-    Sidecar,
 }
 
 /// Internal execution substrate chosen for a bundle.
@@ -204,9 +232,7 @@ pub struct BundleDescriptor {
     pub id: BundleId,
     pub display_name: String,
     pub family: BundleFamily,
-    pub support_tier: SupportTier,
     pub capabilities: Capabilities,
-    pub packaging: PackagingMode,
     pub backend: BackendKind,
     pub requirements: BundleRequirements,
     pub eval_tracks: Vec<EvalTrack>,
@@ -220,6 +246,59 @@ impl BundleDescriptor {
 
     pub fn capability_descriptors(&self) -> &[CapabilityDescriptor] {
         self.capabilities.descriptors()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ModelSelector {
+    Embedding(EmbeddingModels),
+}
+
+impl ModelSelector {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Embedding(model) => match model {
+                EmbeddingModels::GoogleGemma300m => "embedding:google/embeddinggemma_300m",
+            },
+        }
+    }
+
+    pub fn bundle_id(&self) -> BundleId {
+        match self {
+            Self::Embedding(model) => model.bundle_id(),
+        }
+    }
+
+    pub fn descriptor(&self) -> BundleDescriptor {
+        match self {
+            Self::Embedding(model) => model.descriptor(),
+        }
+    }
+
+    pub fn bundle(&self) -> Box<dyn ModelBundle> {
+        match self {
+            Self::Embedding(model) => model.bundle(),
+        }
+    }
+}
+
+impl fmt::Display for ModelSelector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.as_str().fmt(f)
+    }
+}
+
+impl FromStr for ModelSelector {
+    type Err = ModelsError;
+
+    fn from_str(value: &str) -> Result<Self> {
+        if let Some(raw) = value.strip_prefix("embedding:") {
+            return Ok(Self::Embedding(raw.parse()?));
+        }
+
+        Err(ModelsError::UnknownModelSelector {
+            selector: value.to_owned(),
+        })
     }
 }
 
@@ -254,8 +333,8 @@ impl Catalog {
 
     pub fn with_defaults() -> Self {
         let mut catalog = Self::new();
-        catalog.register(embeddinggemma_300m::descriptor(), || {
-            embeddinggemma_300m::bundle()
+        catalog.register(embeddings::google_gemma_300m::descriptor(), || {
+            embeddings::google_gemma_300m::bundle()
         });
         catalog
     }
@@ -342,7 +421,7 @@ mod tests {
         async fn start(
             &self,
             _options: motlie_model::StartOptions,
-        ) -> Result<Box<dyn motlie_model::BundleHandle>, motlie_model::ModelError> {
+        ) -> std::result::Result<Box<dyn motlie_model::BundleHandle>, motlie_model::ModelError> {
             Err(motlie_model::ModelError::InvalidConfiguration(
                 "stub bundle is not startable".into(),
             ))
@@ -354,9 +433,7 @@ mod tests {
             id: BundleId::new(id),
             display_name: format!("Bundle {id}"),
             family: BundleFamily::Embeddings,
-            support_tier: SupportTier::Experimental,
             capabilities: Capabilities::embeddings_only(),
-            packaging: PackagingMode::Sidecar,
             backend: BackendKind::MistralRs,
             requirements: BundleRequirements::default(),
             eval_tracks: vec![EvalTrack::Embeddings],
@@ -422,6 +499,29 @@ mod tests {
             .artifacts(&bundle_id)
             .expect("default embedder should expose artifact control");
         assert_eq!(artifacts.control_name, "embeddinggemma_300m");
+    }
+
+    #[test]
+    fn embedding_models_round_trip_string_selectors() {
+        let model: EmbeddingModels = "google/embeddinggemma_300m"
+            .parse()
+            .expect("known embedding selector should parse");
+
+        assert_eq!(model, EmbeddingModels::GoogleGemma300m);
+        assert_eq!(model.to_string(), "google/embeddinggemma_300m");
+    }
+
+    #[test]
+    fn model_selector_parses_embedding_prefix() {
+        let selector: ModelSelector = "embedding:google/embeddinggemma_300m"
+            .parse()
+            .expect("known embedding model selector should parse");
+
+        assert_eq!(
+            selector,
+            ModelSelector::Embedding(EmbeddingModels::GoogleGemma300m)
+        );
+        assert_eq!(selector.to_string(), "embedding:google/embeddinggemma_300m");
     }
 
     #[test]

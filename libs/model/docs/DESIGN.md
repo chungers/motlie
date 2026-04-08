@@ -9,6 +9,9 @@
 | 2026-04-07 | @codex-researcher: Initial greenfield design for `libs/model` as the stable contract/lifecycle crate for packaged model bundles. Migration and backward compatibility are explicitly out of scope for this first cut. | All |
 | 2026-04-07 | @codex-researcher: Clarified that curated artifact download is explicit in `libs/models`, while backends consume artifact roots through `StartOptions` and artifact contracts. | Overview, Architecture, Artifact and Packaging Contracts |
 | 2026-04-07 | @codex-researcher: Added `ArtifactPolicy` to the startup contract so regulated local-only deployments can fail closed while permissive deployments may still allow runtime fetch. | Core Abstractions, Lifecycle, Artifact and Packaging Contracts |
+| 2026-04-08 | @codex-researcher: Locked down the error-handling rule for the framework: library crates expose typed `thiserror` errors, while binaries/examples may use `anyhow` for propagation and CLI context. Also clarified that non-test runtime code should not panic. | Solution, Framework Principles, Core Abstractions |
+| 2026-04-08 | @codex-researcher: Tightened the design to match the current implemented contract exactly: removed unstaged future type names from the core abstraction list, corrected trait signatures, and clarified that richer artifact manifests currently live in `libs/models` while `libs/model` only standardizes startup artifact policy. | Core Abstractions, Capability Surfaces, Artifact and Packaging Contracts |
+| 2026-04-08 | @codex-researcher: Added the proposed bundle-level embedding metadata contract so curated embedding bundles can expose retrieval-relevant semantics such as preferred distance metric and normalization. This shape is intended to align cleanly with future `libs/db/vector::EmbeddingSpec` integration without creating a reverse dependency today. | Core Abstractions, Capability Surfaces, API Sketch |
 
 This document defines the design for `libs/model`, the contract crate for Motlie's packaged model system. The crate does not ship concrete model bundles or runtime implementations. Instead, it defines the stable public vocabulary, lifecycle, request/response types, capability adapters, composability boundaries, and artifact contracts that higher-level crates build on.
 
@@ -63,6 +66,7 @@ The core product value is not only hiding backends. It is preserving a common ab
 6. Artifact descriptors for packaged weights and auxiliary assets
 7. Common errors and unsupported-capability behavior
 8. Startup artifact policy that backends must honor
+9. Typed library errors suitable for downstream matching and policy handling
 
 The crate is intentionally small, dependency-light, and backend-agnostic.
 
@@ -158,6 +162,17 @@ Evaluation support is intentionally split across two layers:
 
 This split keeps the core contract crate small while still giving evaluation tooling a clear place to grow.
 
+### Library Error Discipline
+
+Library crates in this framework must expose typed errors defined with `thiserror`. Application-facing binaries, examples, and CLIs may use `anyhow` to propagate and annotate those library errors at the boundary.
+
+Implications:
+
+- `libs/model` and `libs/models` should return explicit error enums from public fallible APIs
+- error variants should carry enough context for operators and callers to distinguish configuration problems from capability mismatches and internal failures
+- non-test runtime code should not use `panic!`, `unwrap()`, or `expect()` as normal control flow
+- examples and downloader binaries may use `anyhow` to attach CLI context without weakening the library API surface
+
 ## Core Abstractions
 
 ### Bundle Identity
@@ -168,11 +183,13 @@ Recommended types:
 
 - `BundleId`
 - `BundleMetadata`
-- `BundleVersion`
 - `CapabilityKind`
 - `ContentKind`
 - `InteractionStyle`
 - `CapabilityDescriptor`
+- `EmbeddingSpec`
+- `EmbeddingDistance`
+- `EmbeddingNormalization`
 
 `BundleId` is a stable product-facing identifier such as:
 
@@ -186,14 +203,18 @@ Primary contract:
 
 ```rust
 pub trait ModelBundle: Send + Sync {
-    fn id(&self) -> BundleId;
+    fn id(&self) -> &BundleId;
     fn metadata(&self) -> &BundleMetadata;
     fn capabilities(&self) -> &Capabilities;
-    async fn start(&self, options: StartOptions) -> Result<BundleHandle, ModelError>;
+    async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError>;
 }
 ```
 
 The bundle itself is metadata plus load entry point. Runtime state lives in a `BundleHandle`.
+
+### Error Model
+
+`libs/model` owns the stable cross-bundle error surface for lifecycle and capability use through `ModelError`. Higher-level crates such as `libs/models` may define their own typed errors for catalog lookup, artifact staging, or release assembly, but those errors should remain additive rather than replacing `ModelError` inside capability contracts.
 
 ### Loaded Handle
 
@@ -201,6 +222,7 @@ The bundle itself is metadata plus load entry point. Runtime state lives in a `B
 pub trait BundleHandle: Send + Sync {
     fn descriptor(&self) -> &LoadedBundleDescriptor;
     fn capabilities(&self) -> &Capabilities;
+    fn supports(&self, capability: CapabilityKind) -> bool;
 
     fn chat(&self) -> Result<&dyn ChatModel, ModelError>;
     fn completion(&self) -> Result<&dyn CompletionModel, ModelError>;
@@ -237,6 +259,57 @@ pub struct CapabilityDescriptor {
     pub inputs: Vec<ContentKind>,
     pub outputs: Vec<ContentKind>,
     pub interaction: InteractionStyle,
+}
+```
+
+For embedding bundles, Motlie also needs a bundle-level metadata contract that describes how the vectors should be interpreted by downstream systems such as `libs/db/vector`.
+
+Proposed stable shape:
+
+```rust
+pub enum EmbeddingDistance {
+    Cosine,
+    Dot,
+    SquaredL2,
+}
+
+pub enum EmbeddingNormalization {
+    None,
+    L2,
+}
+
+pub struct EmbeddingSpec {
+    pub dimensions: Option<usize>,
+    pub distance: EmbeddingDistance,
+    pub normalization: EmbeddingNormalization,
+    pub input: ContentKind,
+    pub output: ContentKind,
+    pub summary: &'static str,
+}
+
+pub trait Embedding: ModelBundle {
+    fn embedding_spec(&self) -> &EmbeddingSpec;
+}
+```
+
+Design notes:
+
+- this trait is about the curated bundle definition, not the loaded runtime handle
+- `EmbeddingModel` remains the execution-time trait used to actually generate vectors
+- `Embedding` is the bundle-level descriptive contract used for catalog display, evaluation selection, and future vector-store integration
+- naming is intentionally close to a future `libs/db/vector::EmbeddingSpec`, but `libs/model` must not depend on `libs/db`
+- conversion between the two specs should be straightforward later because both are intended to describe the same semantics rather than different layers of behavior
+
+For `google_gemma_300m`, the intended first implementation would be roughly:
+
+```rust
+EmbeddingSpec {
+    dimensions: Some(768),
+    distance: EmbeddingDistance::Cosine,
+    normalization: EmbeddingNormalization::L2,
+    input: ContentKind::Text,
+    output: ContentKind::EmbeddingVector,
+    summary: "Normalized text embeddings for semantic similarity and retrieval.",
 }
 ```
 
@@ -405,9 +478,16 @@ let response = embeddings.embed(EmbeddingRequest::from_inputs([
 
 `libs/model` should define enough artifact vocabulary for `libs/models` to implement packaging and deployment without forcing the core contract crate to understand specific bundle layouts.
 
-Recommended types:
+In the current implemented contract, that vocabulary is intentionally small:
 
-- `BundleArtifact`
+- `ArtifactPolicy::LocalOnly { root }`
+- `ArtifactPolicy::AllowFetch { root }`
+- `StartOptions::artifact_policy`
+
+Richer curated artifact manifests, inclusion rules, and provenance controls currently live in `libs/models`, not `libs/model`.
+
+Potential future extensions, if they become necessary, include:
+
 - `ArtifactKind`
 - `ArtifactIntegrity`
 - `ArtifactLocator`

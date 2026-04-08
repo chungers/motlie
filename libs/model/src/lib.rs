@@ -5,6 +5,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
+use thiserror::Error;
 
 pub mod eval;
 
@@ -203,28 +204,15 @@ pub struct LoadedBundleDescriptor {
 }
 
 /// Structured error surface for core bundle operations.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum ModelError {
+    #[error("internal model error: {0}")]
     Internal(String),
+    #[error("invalid model configuration: {0}")]
     InvalidConfiguration(String),
+    #[error("unsupported capability: {0:?}")]
     UnsupportedCapability(CapabilityKind),
 }
-
-impl fmt::Display for ModelError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Internal(message) => write!(f, "internal model error: {message}"),
-            Self::InvalidConfiguration(message) => {
-                write!(f, "invalid model configuration: {message}")
-            }
-            Self::UnsupportedCapability(capability) => {
-                write!(f, "unsupported capability: {capability:?}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for ModelError {}
 
 /// Role labels used in chat-style requests.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -297,6 +285,32 @@ pub struct EmbeddingResponse {
     pub vectors: Vec<Vec<f32>>,
 }
 
+/// Preferred vector distance semantics for an embedding bundle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EmbeddingDistance {
+    Cosine,
+    Dot,
+    SquaredL2,
+}
+
+/// Whether the embedding vectors are normalized before they are returned.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EmbeddingNormalization {
+    L2,
+    None,
+}
+
+/// Bundle-level metadata that describes how embedding vectors should be interpreted downstream.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EmbeddingSpec {
+    pub dimensions: Option<usize>,
+    pub distance: EmbeddingDistance,
+    pub normalization: EmbeddingNormalization,
+    pub input: ContentKind,
+    pub output: ContentKind,
+    pub summary: &'static str,
+}
+
 /// Bundle definition that can be started into a loaded handle.
 #[async_trait]
 pub trait ModelBundle: Send + Sync {
@@ -304,6 +318,11 @@ pub trait ModelBundle: Send + Sync {
     fn metadata(&self) -> &BundleMetadata;
     fn capabilities(&self) -> &Capabilities;
     async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError>;
+}
+
+/// Bundle-level descriptive contract for curated embedding bundles.
+pub trait Embedding: ModelBundle {
+    fn embedding_spec(&self) -> &EmbeddingSpec;
 }
 
 /// Loaded bundle state that exposes capability adapters.
@@ -512,5 +531,21 @@ mod tests {
         assert!(chat.params.stop_sequences.is_empty());
         assert_eq!(multi.inputs.len(), 2);
         assert_eq!(response.vectors.len(), 2);
+    }
+
+    #[test]
+    fn embedding_spec_can_describe_vector_semantics() {
+        let spec = EmbeddingSpec {
+            dimensions: Some(768),
+            distance: EmbeddingDistance::Cosine,
+            normalization: EmbeddingNormalization::L2,
+            input: ContentKind::Text,
+            output: ContentKind::EmbeddingVector,
+            summary: "Normalized text embeddings for semantic similarity and retrieval.",
+        };
+
+        assert_eq!(spec.dimensions, Some(768));
+        assert_eq!(spec.distance, EmbeddingDistance::Cosine);
+        assert_eq!(spec.normalization, EmbeddingNormalization::L2);
     }
 }
