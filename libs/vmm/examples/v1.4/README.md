@@ -48,7 +48,6 @@ Repeatable validation entrypoints now are:
 A checked-in recorded validation session now lives under:
 
 - [`assets/pty-agent-validation.cast`](./assets/pty-agent-validation.cast)
-- [`assets/pty-agent-validation-player.html`](./assets/pty-agent-validation-player.html)
 
 This cast is the saved `pty-agent-validation` run that:
 
@@ -57,9 +56,14 @@ This cast is the saved `pty-agent-validation` run that:
 - launches `codex`
 - captures the Codex welcome screen
 
-The local HTML player is the review surface for replay from this branch. GitHub
-will not execute the player inline inside rendered Markdown, so open the linked
-HTML asset to watch the session.
+Hosted replay on asciinema:
+
+[![asciicast](https://asciinema.org/a/ywqNrzixTFtKlWAA.svg)](https://asciinema.org/a/ywqNrzixTFtKlWAA)
+
+This hosted upload is currently an unlinked temporary recording and, per the
+upload response on April 8, 2026, it will be automatically deleted after 7
+days unless it is preserved through an asciinema.org account. The checked-in
+`.cast` remains the repo-local source artifact.
 
 Detailed repeatable runbooks live in:
 

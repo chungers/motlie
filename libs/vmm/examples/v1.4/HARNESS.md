@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-08 | @codex | Replace the temporary branch-local HTML replay surface with a hosted asciinema link and preview image, and remove the extra local player/Pages scaffolding to keep the review path minimal |
 | 2026-04-08 | @codex | Add a small checked-in HTML replay surface for the saved PTY validation cast and link it from README/HARNESS so the branch has a concrete review entrypoint for recorded shell sessions |
 | 2026-04-08 | @codex | Clarify PTY sequencing for shell-driven scenarios: after visible command output assertions, wait for the shell prompt to return before sending the next command, or TUI launches can race the prior command tail |
 | 2026-04-08 | @codex | Add `wait_package_manager_quiescent` as a first-class scenario action so saved scenarios stop embedding the long package-manager idle shell loop inline |
@@ -371,7 +372,11 @@ Per PTY session it writes:
 Checked-in replay entrypoints for the saved agent-validation session:
 
 - [`assets/pty-agent-validation.cast`](./assets/pty-agent-validation.cast)
-- [`assets/pty-agent-validation-player.html`](./assets/pty-agent-validation-player.html)
+- [Hosted asciinema replay](https://asciinema.org/a/ywqNrzixTFtKlWAA)
+
+Hosted preview:
+
+[![asciicast](https://asciinema.org/a/ywqNrzixTFtKlWAA.svg)](https://asciinema.org/a/ywqNrzixTFtKlWAA)
 
 The rendered screen JSON now records which terminal backend produced it.
 
@@ -420,8 +425,14 @@ Why asciicast is included:
   pixels
 - humans can replay it with asciinema-compatible viewers on Linux, macOS, or
   the web
-- the checked-in HTML player gives this branch a concrete replay surface for
-  review, even though GitHub-rendered Markdown still cannot play it inline
+- the hosted preview-image link is the minimal GitHub-friendly way to expose
+  interactive replay without carrying extra local player scaffolding
+
+Current caveat:
+
+- the current hosted upload was created on April 8, 2026 from an unlinked
+  system and asciinema reported that it will auto-delete after 7 days unless
+  preserved through an asciinema.org account
 
 Out of scope for `v1.4`:
 
