@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-07 | @codex | Complete the remaining Phase 4/5 observability slice: `VmObservability` now carries typed run-bundle metadata and capture paths, `harness_v1_4` persists PTY transcripts and internal result artifacts under the bundle root, result JSON now has structured status/error classification for agents/CI, and the PTY scenario emits hardened structured evidence |
 | 2026-04-07 | @codex | Implement the first concrete Phase 4/5 slice: `observability.rs`, `VmHandle::observability()`, and `harness_v1_4 --result-json ...` for machine-readable `smoke` results; PTY result hardening remains open |
 | 2026-04-07 | @codex | Rebase the near-term plan around the harness: defer CH internal-thread / alternate hypervisor backend work to a later `v2` track; make observability library-owned in Phase 4; add machine-readable results plus PTY/VTE recording work to Phase 5; and tighten Phase 8 around a real scenario/agent driver |
 | 2026-04-07 | @codex | Start the PTY/session harness slice: `VmHandle::open_pty(...)`, `GuestPtySession`, and a first `harness_v1_4 pty` scenario now compile; next step is to absorb the old REPL into the harness as interactive/manual mode over the same API |
@@ -84,7 +85,7 @@ Turn the working `v1.3` example into:
   - [x] `pty` scenario
   - [ ] multi-guest named scenarios
   - [ ] interactive/manual shell mode
-  - [ ] transcript/log bundle capture
+  - [x] transcript/log bundle capture
   - [ ] action/expectation script format
 
 The rule for this plan is:
@@ -238,9 +239,9 @@ Tasks:
 - [ ] add library-owned observability surfaces for the running guest lifecycle:
   - [x] launch-log path / serial-log path on the typed handle
   - [x] typed accessors for effective runtime roots and sockets
-  - [ ] transcript/log capture surfaces that the harness can consume without
+  - [x] transcript/log capture surfaces that the harness can consume without
         reimplementing path discovery
-  - [ ] enough typed metadata to bundle a run for later debugging
+  - [x] enough typed metadata to bundle a run for later debugging
 
 Acceptance:
 - `repl_host_v1_3` does not manually coordinate SSH bridge and VFS listener state
@@ -276,17 +277,17 @@ Tasks:
 - [x] add expectation-driven harness smoke scripts for:
   - [x] one multi-guest harness shell run
   - [x] two concurrent harness instances
-- [ ] add transcript/log bundle capture so harness runs preserve enough state
+- [x] add transcript/log bundle capture so harness runs preserve enough state
       for debugging subtle PTY, VFS, and vnet regressions
-- [ ] add machine-readable result output for scenarios and ad-hoc operations:
+- [x] add machine-readable result output for scenarios and ad-hoc operations:
   - [x] structured pass/fail result records
   - [x] stable machine-readable guest/run metadata
-  - [ ] structured error classification suitable for agents and CI
+  - [x] structured error classification suitable for agents and CI
 - [ ] add a PTY/VTE capture layer:
   - [ ] keep a VTE-style screen buffer for PTY sessions so the harness can
         reason about rendered terminal state, not only raw byte streams
   - [ ] expose rendered screen state to scripted expectations
-  - [ ] preserve PTY transcripts in a reusable artifact format
+  - [x] preserve PTY transcripts in a reusable artifact format
 - [ ] evaluate terminal-recording artifact generation for human verification:
   - [ ] `ttyrec`
   - [ ] `asciinema`

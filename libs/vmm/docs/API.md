@@ -124,14 +124,21 @@ Phase 4 initial implementation:
 - [x] `FilesystemObservability`
 - [x] `NetworkObservability`
 - [x] `ControlPlaneObservability`
+- [x] `VmRunBundle`
+- [x] `VmCapturePaths`
+- [x] `VmRunArtifact`
+- [x] `VmHostMount`
 - [x] library-owned runtime/log/socket visibility for the live guest handle
+- [x] typed run-bundle metadata for later debug collation
 
 Phase 5 first slice:
 
 - [x] harness `--result-json <path>`
 - [x] machine-readable `smoke` scenario result
 - [x] JSON includes named checks plus `VmObservability`
-- [ ] PTY scenario result hardening
+- [x] structured status/error classification for agents and CI
+- [x] PTY scenario result hardening
+- [x] reusable PTY transcript artifact capture
 - [ ] VTE/rendered terminal state
 - [ ] recording/export evaluation
 

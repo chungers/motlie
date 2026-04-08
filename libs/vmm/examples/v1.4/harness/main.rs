@@ -6,22 +6,30 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use motlie_vmm::backend::BackendError;
 use motlie_vmm::ca::SshCa;
+use motlie_vmm::guestfs::GuestFsError;
 use motlie_vmm::network::{AdminNetMode, EgressNetMode, NetworkModes};
 use motlie_vmm::network_alloc::{GuestNetAllocator, GuestNetAllocatorConfig};
 use motlie_vmm::observability::VmObservability;
 use motlie_vmm::orchestrator::{
-    LifecycleServices, PrepareRequest, ReadinessPolicy, boot, prepare,
+    LifecycleServices, OrchestratorError, PrepareRequest, ReadinessPolicy, ShutdownReport,
+    VmHandle, boot, prepare,
 };
 use motlie_vmm::runtime::{
     ControlPlaneBacking, FilesystemBacking, HypervisorBacking, NetworkBacking, Runtime,
+    RuntimeError,
 };
 use motlie_vmm::spec::{
     BootArtifacts, GuestMountSpec, GuestResources, GuestSpec, GuestSshAccess, GuestStorage,
     GuestUser, RuntimeNamespace, SoftwareProfile,
 };
-use motlie_vmm::ssh::{self, ExecOutput, PtyTranscriptEvent, SshProxyConfig, new_guest_registry};
+use motlie_vmm::ssh::{
+    self, ExecOutput, PtyTranscriptEvent, SshProxyConfig, SshProxyError, new_guest_registry,
+};
+use pty::{PtyScenarioError, PtyScenarioResult};
 use serde::Serialize;
+use thiserror::Error;
 use tokio::time::sleep;
 
 type DynError = Box<dyn std::error::Error + Send + Sync>;
@@ -41,14 +49,82 @@ struct ScenarioCheck {
 
 #[derive(Debug, Serialize)]
 struct ScenarioResult {
+    status: ScenarioStatus,
     scenario: String,
     guest_id: String,
     pid: Option<u32>,
     proxy: String,
+    shutdown: Option<ShutdownReport>,
     shutdown_forced: Option<String>,
-    observability: VmObservability,
+    observability: Option<VmObservability>,
     checks: Vec<ScenarioCheck>,
+    pty: Option<PtyScenarioResult>,
     pty_transcript: Option<Vec<PtyTranscriptEvent>>,
+    error: Option<ScenarioFailure>,
+    cleanup_error: Option<ScenarioFailure>,
+}
+
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ScenarioStatus {
+    Passed,
+    Failed,
+}
+
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum FailureClass {
+    Config,
+    Artifact,
+    Backend,
+    Filesystem,
+    Network,
+    Ssh,
+    Readiness,
+    Pty,
+    Assertion,
+    Shutdown,
+    Internal,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+struct ScenarioFailure {
+    class: FailureClass,
+    stage: &'static str,
+    code: &'static str,
+    message: String,
+}
+
+#[derive(Debug, Error)]
+enum HarnessError {
+    #[error("required artifact missing: {path}")]
+    MissingArtifact { path: PathBuf },
+    #[error("unsupported scenario: {0}")]
+    UnsupportedScenario(String),
+    #[error("prepare failed: {0}")]
+    Prepare(#[source] OrchestratorError),
+    #[error("boot failed: {0}")]
+    Boot(#[source] OrchestratorError),
+    #[error("readiness failed: {0}")]
+    Ready(#[source] OrchestratorError),
+    #[error("smoke exec '{check}' failed: {source}")]
+    SmokeExec {
+        check: &'static str,
+        #[source]
+        source: OrchestratorError,
+    },
+    #[error("smoke check '{check}' expected {expected}, got: {observed_excerpt}")]
+    SmokeAssertion {
+        check: &'static str,
+        expected: String,
+        observed_excerpt: String,
+    },
+    #[error("failed to persist harness artifact {path}: {reason}")]
+    ArtifactPersist { path: PathBuf, reason: String },
+    #[error(transparent)]
+    Pty(#[from] PtyScenarioError),
+    #[error("shutdown failed: {0}")]
+    Shutdown(#[source] OrchestratorError),
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
@@ -79,9 +155,7 @@ async fn main() -> Result<(), DynError> {
                 root_override = Some(PathBuf::from(other.trim_start_matches("--root=")));
             }
             other if other.starts_with("--result-json=") => {
-                result_json_path = Some(PathBuf::from(
-                    other.trim_start_matches("--result-json="),
-                ));
+                result_json_path = Some(PathBuf::from(other.trim_start_matches("--result-json=")));
             }
             other if other.starts_with('-') => {
                 return Err(format!("unknown option: {other}").into());
@@ -94,8 +168,10 @@ async fn main() -> Result<(), DynError> {
 
     let base_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/v1.4");
     let artifacts_dir = base_dir.join("artifacts/base");
-    ensure_file_exists(&artifacts_dir.join("rootfs.squashfs"))?;
-    ensure_file_exists(&artifacts_dir.join("Image"))?;
+    ensure_file_exists(&artifacts_dir.join("rootfs.squashfs"))
+        .map_err(|err| -> DynError { Box::new(err) })?;
+    ensure_file_exists(&artifacts_dir.join("Image"))
+        .map_err(|err| -> DynError { Box::new(err) })?;
 
     let root_dir = root_override.unwrap_or_else(RuntimeNamespace::root_from_env_or_temp);
     let instance = new_harness_instance(&root_dir)?;
@@ -103,7 +179,12 @@ async fn main() -> Result<(), DynError> {
         return shell::run_shell(&base_dir, &artifacts_dir, &instance).await;
     }
 
-    let guest = demo_guest("alice", &artifacts_dir, &instance.demo_root, &instance.namespace);
+    let guest = demo_guest(
+        "alice",
+        &artifacts_dir,
+        &instance.demo_root,
+        &instance.namespace,
+    );
     std::fs::create_dir_all(&instance.socket_root)?;
 
     seed_host_mounts(&guest)?;
@@ -113,7 +194,11 @@ async fn main() -> Result<(), DynError> {
     let proxy_config = SshProxyConfig {
         listen: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), instance.proxy_port),
     };
-    tokio::spawn(ssh::run_proxy(proxy_config.clone(), Arc::clone(&guest_registry)));
+    let proxy = format!("ssh://localhost:{}", proxy_config.listen.port());
+    tokio::spawn(ssh::run_proxy(
+        proxy_config.clone(),
+        Arc::clone(&guest_registry),
+    ));
     print_instance_details(&instance, &proxy_config);
     let runtime = Arc::new(Runtime {
         hypervisor: HypervisorBacking::CloudHypervisorShell(
@@ -149,62 +234,154 @@ async fn main() -> Result<(), DynError> {
             ssh_ca_pubkey: Some(ca.public_key_openssh()?),
         },
         &mut allocator,
-    )?;
-    let handle = boot(
-        prepared,
-        LifecycleServices {
-            runtime,
-        },
     )
-    .await?;
-    handle.ready(&ReadinessPolicy::default()).await?;
-    let observability = handle.observability();
-    let (checks, pty_transcript) = match scenario.as_str() {
-        "smoke" => (run_smoke(&handle).await?, None),
-        "pty" => {
-            let transcript = pty::run_pty_smoke(&handle).await?;
-            (vec![ScenarioCheck {
-                name: "pty".to_string(),
-                detail: "PTY banner, prompt, resize, and transcript checks passed".to_string(),
-            }], Some(transcript))
-        }
-        other => return Err(format!("unsupported scenario: {other}").into()),
+    .map_err(HarnessError::Prepare)?;
+    let mut handle: Option<VmHandle> = None;
+    let mut observability: Option<VmObservability> = None;
+    let mut checks = Vec::new();
+    let mut pty: Option<PtyScenarioResult> = None;
+    let mut pty_transcript: Option<Vec<PtyTranscriptEvent>> = None;
+
+    let run_error = {
+        let run = async {
+            let booted = boot(prepared, LifecycleServices { runtime })
+                .await
+                .map_err(HarnessError::Boot)?;
+            handle = Some(booted);
+
+            let active_handle = handle
+                .as_ref()
+                .expect("handle is set immediately after boot succeeds");
+            active_handle
+                .ready(&ReadinessPolicy::default())
+                .await
+                .map_err(HarnessError::Ready)?;
+            observability = Some(active_handle.observability());
+
+            match scenario.as_str() {
+                "smoke" => {
+                    checks = run_smoke(active_handle).await?;
+                }
+                "pty" => {
+                    let transcript_path = observability
+                        .as_ref()
+                        .expect("observability exists after readiness")
+                        .run_bundle
+                        .capture_paths
+                        .pty_transcript_json
+                        .clone();
+                    let pty_run =
+                        pty::run_pty_smoke(active_handle, transcript_path.clone()).await?;
+                    persist_json(&transcript_path, &pty_run.transcript).map_err(|source| {
+                        HarnessError::ArtifactPersist {
+                            path: transcript_path.clone(),
+                            reason: source.to_string(),
+                        }
+                    })?;
+                    pty = Some(pty_run.result);
+                    pty_transcript = Some(pty_run.transcript);
+                    checks.push(ScenarioCheck {
+                        name: "pty".to_string(),
+                        detail: "PTY banner, prompt, resize, transcript, and terminal-close checks passed"
+                            .to_string(),
+                    });
+                }
+                other => return Err(HarnessError::UnsupportedScenario(other.to_string())),
+            }
+            Ok::<(), HarnessError>(())
+        };
+        run.await.err()
     };
 
-    let report = handle.shutdown().await?;
+    if let Some(active_handle) = handle.as_ref() {
+        observability = Some(active_handle.observability());
+    }
+
+    let mut error = run_error.as_ref().map(classify_failure);
+    let mut cleanup_error = None;
+    let mut shutdown = None;
+    if let Some(active_handle) = handle.as_ref() {
+        match active_handle.shutdown().await {
+            Ok(report) => shutdown = Some(report),
+            Err(err) => {
+                let failure = classify_failure(&HarnessError::Shutdown(err));
+                if error.is_none() {
+                    error = Some(failure);
+                } else {
+                    cleanup_error = Some(failure);
+                }
+            }
+        }
+    }
+
     let result = ScenarioResult {
+        status: if error.is_none() {
+            ScenarioStatus::Passed
+        } else {
+            ScenarioStatus::Failed
+        },
         scenario: scenario.clone(),
-        guest_id: handle.guest_id.clone(),
-        pid: report.pid,
-        proxy: format!("ssh://localhost:{}", proxy_config.listen.port()),
-        shutdown_forced: report.forced.map(str::to_string),
+        guest_id: "alice".to_string(),
+        pid: shutdown
+            .as_ref()
+            .and_then(|report| report.pid)
+            .or_else(|| handle.as_ref().and_then(|h| h.pid)),
+        proxy: proxy.clone(),
+        shutdown: shutdown.clone(),
+        shutdown_forced: shutdown
+            .as_ref()
+            .and_then(|report| report.forced.map(str::to_string)),
         observability,
         checks,
+        pty,
         pty_transcript,
+        error,
+        cleanup_error,
     };
-    if let Some(path) = result_json_path.as_ref() {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(path, serde_json::to_vec_pretty(&result)?)?;
+    if let Some(internal_path) = result
+        .observability
+        .as_ref()
+        .map(|obs| obs.run_bundle.capture_paths.scenario_result_json.clone())
+    {
+        persist_json(&internal_path, &result)?;
     }
-    println!(
-        "v1.4 harness {} passed: guest={} pid={:?} forced={:?} proxy=127.0.0.1:{}",
-        scenario,
-        handle.guest_id,
-        report.pid,
-        report.forced,
-        proxy_config.listen.port()
-    );
-    Ok(())
+    if let Some(path) = result_json_path.as_ref() {
+        persist_json(path, &result)?;
+    }
+
+    match result.status {
+        ScenarioStatus::Passed => {
+            println!(
+                "v1.4 harness {} passed: guest={} pid={:?} forced={:?} proxy=127.0.0.1:{}",
+                scenario,
+                result.guest_id,
+                result.pid,
+                result.shutdown_forced,
+                proxy_config.listen.port()
+            );
+            Ok(())
+        }
+        ScenarioStatus::Failed => {
+            let failure = result
+                .error
+                .as_ref()
+                .map(|err| format!("{} [{}:{}]", err.message, err.stage, err.code))
+                .unwrap_or_else(|| "unknown harness failure".to_string());
+            Err(failure.into())
+        }
+    }
 }
 
-async fn run_smoke(
-    handle: &motlie_vmm::orchestrator::VmHandle,
-) -> Result<Vec<ScenarioCheck>, DynError> {
+async fn run_smoke(handle: &VmHandle) -> Result<Vec<ScenarioCheck>, HarnessError> {
     let mut checks = Vec::new();
-    let hello = handle.exec("/bin/echo hello", Duration::from_secs(10)).await?;
-    ensure_success(&hello.stdout, "hello")?;
+    let hello = handle
+        .exec("/bin/echo hello", Duration::from_secs(10))
+        .await
+        .map_err(|source| HarnessError::SmokeExec {
+            check: "hello",
+            source,
+        })?;
+    ensure_contains("hello", &hello.stdout, "hello")?;
     checks.push(ScenarioCheck {
         name: "hello".to_string(),
         detail: "programmatic exec returned hello".to_string(),
@@ -215,8 +392,12 @@ async fn run_smoke(
             "/bin/sh -lc 'pwd && test -d /home/alice && test -d /workspace && test -d /agent-state && grep -q \"Alice workspace mounted from the host.\" /workspace/README.md && echo VFS_OK'",
             Duration::from_secs(10),
         )
-        .await?;
-    ensure_success(&vfs.stdout, "VFS_OK")?;
+        .await
+        .map_err(|source| HarnessError::SmokeExec {
+            check: "vfs",
+            source,
+        })?;
+    ensure_contains("vfs", &vfs.stdout, "VFS_OK")?;
     checks.push(ScenarioCheck {
         name: "vfs".to_string(),
         detail: "home, workspace, and agent-state mounts are visible".to_string(),
@@ -228,8 +409,12 @@ async fn run_smoke(
         "ROUTE_OK",
         Duration::from_secs(10),
     )
-    .await?;
-    ensure_success(&route.stdout, "ROUTE_OK")?;
+    .await
+    .map_err(|source| HarnessError::SmokeExec {
+        check: "route",
+        source,
+    })?;
+    ensure_contains("route", &route.stdout, "ROUTE_OK")?;
     checks.push(ScenarioCheck {
         name: "route".to_string(),
         detail: "default route points at Motlie vnet".to_string(),
@@ -241,8 +426,12 @@ async fn run_smoke(
         "HTTPS_OK",
         Duration::from_secs(20),
     )
-    .await?;
-    ensure_success(&outbound.stdout, "HTTPS_OK")?;
+    .await
+    .map_err(|source| HarnessError::SmokeExec {
+        check: "https",
+        source,
+    })?;
+    ensure_contains("https", &outbound.stdout, "HTTPS_OK")?;
     checks.push(ScenarioCheck {
         name: "https".to_string(),
         detail: "outbound HTTPS fetch succeeded".to_string(),
@@ -250,19 +439,228 @@ async fn run_smoke(
     Ok(checks)
 }
 
-fn ensure_file_exists(path: &Path) -> Result<(), DynError> {
+fn ensure_file_exists(path: &Path) -> Result<(), HarnessError> {
     if path.exists() {
         Ok(())
     } else {
-        Err(format!("required artifact missing: {}", path.display()).into())
+        Err(HarnessError::MissingArtifact {
+            path: path.to_path_buf(),
+        })
     }
 }
 
-fn ensure_success(stdout: &str, needle: &str) -> Result<(), DynError> {
+fn ensure_contains(check: &'static str, stdout: &str, needle: &str) -> Result<(), HarnessError> {
     if stdout.contains(needle) {
         Ok(())
     } else {
-        Err(format!("expected output to contain '{needle}', got: {stdout}").into())
+        Err(HarnessError::SmokeAssertion {
+            check,
+            expected: format!("output containing '{needle}'"),
+            observed_excerpt: excerpt(stdout),
+        })
+    }
+}
+
+fn persist_json<T: Serialize>(path: &Path, value: &T) -> Result<(), DynError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, serde_json::to_vec_pretty(value)?)?;
+    Ok(())
+}
+
+fn classify_failure(error: &HarnessError) -> ScenarioFailure {
+    match error {
+        HarnessError::MissingArtifact { .. } => ScenarioFailure {
+            class: FailureClass::Artifact,
+            stage: "setup",
+            code: "artifact_missing",
+            message: error.to_string(),
+        },
+        HarnessError::UnsupportedScenario(_) => ScenarioFailure {
+            class: FailureClass::Config,
+            stage: "setup",
+            code: "unsupported_scenario",
+            message: error.to_string(),
+        },
+        HarnessError::Prepare(source) => classify_orchestrator("prepare", source),
+        HarnessError::Boot(source) => classify_orchestrator("boot", source),
+        HarnessError::Ready(source) => classify_orchestrator("ready", source),
+        HarnessError::SmokeExec { source, .. } => classify_orchestrator("smoke", source),
+        HarnessError::SmokeAssertion { .. } => ScenarioFailure {
+            class: FailureClass::Assertion,
+            stage: "smoke",
+            code: "assertion_failed",
+            message: error.to_string(),
+        },
+        HarnessError::ArtifactPersist { .. } => ScenarioFailure {
+            class: FailureClass::Artifact,
+            stage: "capture",
+            code: "artifact_persist_failed",
+            message: error.to_string(),
+        },
+        HarnessError::Pty(source) => classify_pty_failure(source),
+        HarnessError::Shutdown(source) => {
+            let mut failure = classify_orchestrator("shutdown", source);
+            failure.class = FailureClass::Shutdown;
+            failure
+        }
+    }
+}
+
+fn classify_pty_failure(error: &PtyScenarioError) -> ScenarioFailure {
+    match error {
+        PtyScenarioError::Open(source) => classify_orchestrator("pty", source),
+        PtyScenarioError::ControlPlane(source) => classify_ssh_failure("pty", source),
+        PtyScenarioError::Assertion { .. } => ScenarioFailure {
+            class: FailureClass::Pty,
+            stage: "pty",
+            code: "pty_assertion_failed",
+            message: error.to_string(),
+        },
+        PtyScenarioError::EmptyTranscript => ScenarioFailure {
+            class: FailureClass::Pty,
+            stage: "pty",
+            code: "pty_transcript_empty",
+            message: error.to_string(),
+        },
+        PtyScenarioError::IncompleteTranscript => ScenarioFailure {
+            class: FailureClass::Pty,
+            stage: "pty",
+            code: "pty_transcript_incomplete",
+            message: error.to_string(),
+        },
+    }
+}
+
+fn classify_orchestrator(stage: &'static str, error: &OrchestratorError) -> ScenarioFailure {
+    match error {
+        OrchestratorError::Spec(_) => ScenarioFailure {
+            class: FailureClass::Config,
+            stage,
+            code: "spec_invalid",
+            message: error.to_string(),
+        },
+        OrchestratorError::NetworkMode(_) => ScenarioFailure {
+            class: FailureClass::Config,
+            stage,
+            code: "network_mode_invalid",
+            message: error.to_string(),
+        },
+        OrchestratorError::Artifact(_) => ScenarioFailure {
+            class: FailureClass::Artifact,
+            stage,
+            code: "artifact_render_failed",
+            message: error.to_string(),
+        },
+        OrchestratorError::Backend(backend) => classify_backend_failure(stage, backend),
+        OrchestratorError::Runtime(runtime) => classify_runtime_failure(stage, runtime),
+        OrchestratorError::NetworkAllocation(_) => ScenarioFailure {
+            class: FailureClass::Network,
+            stage,
+            code: "network_allocation_failed",
+            message: error.to_string(),
+        },
+        OrchestratorError::MissingSshBridge { .. } => ScenarioFailure {
+            class: FailureClass::Ssh,
+            stage,
+            code: "ssh_bridge_missing",
+            message: error.to_string(),
+        },
+        OrchestratorError::StatePoisoned(_) => ScenarioFailure {
+            class: FailureClass::Internal,
+            stage,
+            code: "state_poisoned",
+            message: error.to_string(),
+        },
+        OrchestratorError::GuestExitedEarly { .. } => ScenarioFailure {
+            class: FailureClass::Readiness,
+            stage,
+            code: "guest_exited_early",
+            message: error.to_string(),
+        },
+        OrchestratorError::ReadinessTimeout { .. } => ScenarioFailure {
+            class: FailureClass::Readiness,
+            stage,
+            code: "readiness_timeout",
+            message: error.to_string(),
+        },
+    }
+}
+
+fn classify_runtime_failure(stage: &'static str, error: &RuntimeError) -> ScenarioFailure {
+    match error {
+        RuntimeError::Backend(backend) => classify_backend_failure(stage, backend),
+        RuntimeError::GuestFs(GuestFsError::EmptyGuestId)
+        | RuntimeError::GuestFs(GuestFsError::EmptySocketPath)
+        | RuntimeError::GuestFs(GuestFsError::RemoveSocket { .. })
+        | RuntimeError::GuestFs(GuestFsError::BindSocket { .. })
+        | RuntimeError::GuestFs(GuestFsError::CreateMountPath { .. })
+        | RuntimeError::GuestFs(GuestFsError::AddMount { .. })
+        | RuntimeError::GuestFs(GuestFsError::WaitForMounts { .. })
+        | RuntimeError::GuestFs(GuestFsError::CleanupSocket { .. }) => ScenarioFailure {
+            class: FailureClass::Filesystem,
+            stage,
+            code: "guestfs_failed",
+            message: error.to_string(),
+        },
+        RuntimeError::Ssh(ssh) => classify_ssh_failure(stage, ssh),
+        RuntimeError::Vnet(_) | RuntimeError::VnetShutdown(_) => ScenarioFailure {
+            class: FailureClass::Network,
+            stage,
+            code: "vnet_failed",
+            message: error.to_string(),
+        },
+        RuntimeError::UnsupportedHypervisor => ScenarioFailure {
+            class: FailureClass::Backend,
+            stage,
+            code: "unsupported_hypervisor",
+            message: error.to_string(),
+        },
+    }
+}
+
+fn classify_backend_failure(stage: &'static str, error: &BackendError) -> ScenarioFailure {
+    ScenarioFailure {
+        class: FailureClass::Backend,
+        stage,
+        code: match error {
+            BackendError::CreateRuntimeDir { .. } => "backend_runtime_dir_failed",
+            BackendError::ChShell(_) => "backend_ch_shell_failed",
+            BackendError::UnsupportedBackend(_) => "backend_unsupported",
+            BackendError::HandleKindMismatch { .. } => "backend_handle_mismatch",
+        },
+        message: error.to_string(),
+    }
+}
+
+fn classify_ssh_failure(stage: &'static str, error: &SshProxyError) -> ScenarioFailure {
+    ScenarioFailure {
+        class: FailureClass::Ssh,
+        stage,
+        code: match error {
+            SshProxyError::GuestConnection { .. } => "ssh_guest_connection_failed",
+            SshProxyError::ExecFailed { .. } => "ssh_exec_failed",
+            SshProxyError::Ca(_) => "ssh_ca_failed",
+            SshProxyError::Ssh(_) => "ssh_transport_failed",
+            SshProxyError::ChannelClosed => "ssh_channel_closed",
+            SshProxyError::MissingExitStatus { .. } => "ssh_missing_exit_status",
+            SshProxyError::UnknownGuest(_) => "ssh_unknown_guest",
+            SshProxyError::StatePoisoned(_) => "ssh_state_poisoned",
+            SshProxyError::PtyTimeout { .. } => "pty_timeout",
+            SshProxyError::Unsupported(_) => "ssh_unsupported",
+        },
+        message: error.to_string(),
+    }
+}
+
+fn excerpt(output: &str) -> String {
+    const LIMIT: usize = 160;
+    let normalized = output.replace('\n', "\\n");
+    if normalized.len() <= LIMIT {
+        normalized
+    } else {
+        format!("{}...", &normalized[..LIMIT])
     }
 }
 
@@ -384,7 +782,11 @@ fn seed_host_mounts(guest: &GuestSpec) -> Result<(), DynError> {
     )?;
     write_host_file_if_missing(
         &home.join(".env"),
-        &format!("{}_API_KEY=demo-{}\n", guest.guest_id.to_uppercase(), guest.guest_id),
+        &format!(
+            "{}_API_KEY=demo-{}\n",
+            guest.guest_id.to_uppercase(),
+            guest.guest_id
+        ),
         0o644,
     )?;
     write_host_file_if_missing(&home.join(".bashrc"), "# motlie v1.4 demo bashrc\n", 0o644)?;
@@ -441,29 +843,37 @@ fn guest_display_name(guest_id: &str) -> String {
 }
 
 async fn exec_until_success(
-    handle: &motlie_vmm::orchestrator::VmHandle,
+    handle: &VmHandle,
     command: &str,
     needle: &str,
     timeout: Duration,
-) -> Result<ExecOutput, DynError> {
+) -> Result<ExecOutput, OrchestratorError> {
     let deadline = tokio::time::Instant::now() + timeout;
     let mut last_output: Option<ExecOutput> = None;
+    let mut last_error: Option<OrchestratorError> = None;
     loop {
         match handle.exec(command, Duration::from_secs(10)).await {
-            Ok(output) if output.exit_code == 0 && output.stdout.contains(needle) => return Ok(output),
+            Ok(output) if output.exit_code == 0 && output.stdout.contains(needle) => {
+                return Ok(output);
+            }
             Ok(output) => last_output = Some(output),
-            Err(_) => {}
+            Err(err) => last_error = Some(err),
         }
 
         if tokio::time::Instant::now() >= deadline {
-            return Err(match last_output {
-                Some(output) => format!(
-                    "timed out waiting for command success: cmd={command} exit={} stdout={} stderr={}",
-                    output.exit_code, output.stdout, output.stderr
-                )
-                .into(),
-                None => format!("timed out waiting for command success: cmd={command}").into(),
-            });
+            return Err(last_error.unwrap_or_else(|| match last_output {
+                Some(output) => OrchestratorError::Runtime(RuntimeError::Ssh(SshProxyError::ExecFailed {
+                    guest: handle.guest_id.clone(),
+                    reason: format!(
+                        "timed out waiting for command success: cmd={command} exit={} stdout={} stderr={}",
+                        output.exit_code, output.stdout, output.stderr
+                    ),
+                })),
+                None => OrchestratorError::Runtime(RuntimeError::Ssh(SshProxyError::ExecFailed {
+                    guest: handle.guest_id.clone(),
+                    reason: format!("timed out waiting for command success: cmd={command}"),
+                })),
+            }));
         }
 
         sleep(Duration::from_secs(1)).await;
