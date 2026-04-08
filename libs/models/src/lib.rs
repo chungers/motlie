@@ -9,11 +9,13 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
+pub mod chat;
 pub mod embeddings;
 
 use hf_hub::api::sync::ApiBuilder;
 use thiserror::Error;
 
+pub use chat::ChatModels;
 pub use embeddings::EmbeddingModels;
 pub use motlie_model::eval::EvalTrack;
 pub use motlie_model::{
@@ -55,6 +57,8 @@ pub enum ModelsError {
     },
     #[error("unknown embedding model selector `{selector}`")]
     UnknownEmbeddingModel { selector: String },
+    #[error("unknown chat model selector `{selector}`")]
+    UnknownChatModel { selector: String },
     #[error("unknown model selector `{selector}`")]
     UnknownModelSelector { selector: String },
     #[error("model selector `{selector}` is unavailable in this build")]
@@ -259,30 +263,35 @@ impl BundleDescriptor {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelSelector {
+    Chat(ChatModels),
     Embedding(EmbeddingModels),
 }
 
 impl ModelSelector {
     pub fn as_str(&self) -> String {
         match self {
+            Self::Chat(model) => format!("chat:{}", model.as_str()),
             Self::Embedding(model) => format!("embedding:{}", model.as_str()),
         }
     }
 
     pub fn bundle_id(&self) -> BundleId {
         match self {
+            Self::Chat(model) => model.bundle_id(),
             Self::Embedding(model) => model.bundle_id(),
         }
     }
 
     pub fn descriptor(&self) -> BundleDescriptor {
         match self {
+            Self::Chat(model) => model.descriptor(),
             Self::Embedding(model) => model.descriptor(),
         }
     }
 
     pub fn bundle(&self) -> Box<dyn ModelBundle> {
         match self {
+            Self::Chat(model) => model.bundle(),
             Self::Embedding(model) => model.bundle(),
         }
     }
@@ -298,6 +307,16 @@ impl FromStr for ModelSelector {
     type Err = ModelsError;
 
     fn from_str(value: &str) -> Result<Self> {
+        if let Some(raw) = value.strip_prefix("chat:") {
+            #[cfg(not(feature = "model-qwen3-4b"))]
+            if raw == chat::QWEN3_4B_SELECTOR {
+                return Err(ModelsError::ModelUnavailable {
+                    selector: value.to_owned(),
+                });
+            }
+            return Ok(Self::Chat(raw.parse()?));
+        }
+
         if let Some(raw) = value.strip_prefix("embedding:") {
             #[cfg(not(feature = "model-google-gemma-300m"))]
             if raw == embeddings::GOOGLE_GEMMA_300M_SELECTOR {
@@ -349,6 +368,10 @@ impl Catalog {
         #[cfg(feature = "model-google-gemma-300m")]
         catalog.register(embeddings::google_gemma_300m::descriptor(), || {
             embeddings::google_gemma_300m::bundle()
+        });
+        #[cfg(feature = "model-qwen3-4b")]
+        catalog.register(chat::qwen3_4b::descriptor(), || {
+            chat::qwen3_4b::bundle()
         });
         catalog
     }
@@ -508,7 +531,7 @@ mod tests {
 
         #[cfg(feature = "model-google-gemma-300m")]
         {
-            assert_eq!(catalog.len(), 1);
+            assert!(catalog.len() >= 1);
             assert!(catalog.instantiate(&bundle_id).is_some());
             assert!(
                 catalog
