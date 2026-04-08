@@ -2983,6 +2983,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "motlie-model"
+version = "0.1.0"
+
+[[package]]
+name = "motlie-model-eval"
+version = "0.1.0"
+dependencies = [
+ "motlie-model",
+]
+
+[[package]]
+name = "motlie-models"
+version = "0.1.0"
+dependencies = [
+ "motlie-model",
+]
+
+[[package]]
 name = "motlie-tmux"
 version = "0.1.0"
 dependencies = [
