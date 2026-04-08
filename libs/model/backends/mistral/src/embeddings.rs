@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use hf_hub::{Cache, Repo, RepoType};
-use mistralrs::{EmbeddingModelBuilder, EmbeddingRequest};
+use mistralrs::core::EmbeddingLoaderType;
+use mistralrs::{EmbeddingModelBuilder, EmbeddingRequest, ModelDType};
 use motlie_model::{
     ArtifactPolicy, BundleHandle, BundleId, BundleMetadata, Capabilities, CapabilityKind,
     ChatModel, CompletionModel, EmbeddingModel, EmbeddingRequest as ModelEmbeddingRequest,
@@ -158,10 +159,24 @@ async fn build_embedding_model(
         max_concurrency,
     } = options;
 
-    let mut builder = EmbeddingModelBuilder::new(model_id.to_owned());
+    let mut model_target = model_id.to_owned();
+    let mut hf_cache_root = None;
 
     if let Some(artifact_policy) = artifact_policy {
-        builder = configure_artifact_policy(builder, model_id, artifact_policy)?;
+        let configured = configure_artifact_policy(model_id, artifact_policy)?;
+        model_target = configured.model_target;
+        hf_cache_root = configured.hf_cache_root;
+    }
+
+    let mut builder = EmbeddingModelBuilder::new(model_target)
+        .with_loader_type(EmbeddingLoaderType::EmbeddingGemma)
+        .with_dtype(ModelDType::F32);
+
+    if should_force_cpu() {
+        builder = builder.with_force_cpu();
+    }
+    if let Some(hf_cache_root) = hf_cache_root {
+        builder = builder.from_hf_cache_path(hf_cache_root);
     }
     if let Some(max_num_seqs) = max_concurrency {
         builder = builder.with_max_num_seqs(max_num_seqs);
@@ -173,24 +188,31 @@ async fn build_embedding_model(
         .map_err(|err| ModelError::Internal(err.to_string()))
 }
 
+struct ConfiguredBuilder {
+    model_target: String,
+    hf_cache_root: Option<PathBuf>,
+}
+
 fn configure_artifact_policy(
-    builder: EmbeddingModelBuilder,
     model_id: &str,
     policy: ArtifactPolicy,
-) -> Result<EmbeddingModelBuilder, ModelError> {
+) -> Result<ConfiguredBuilder, ModelError> {
     match policy {
-        ArtifactPolicy::AllowFetch { root } => Ok(match root {
-            Some(root) => builder.from_hf_cache_path(resolve_hf_cache_path(root)),
-            None => builder,
+        ArtifactPolicy::AllowFetch { root } => Ok(ConfiguredBuilder {
+            model_target: model_id.to_owned(),
+            hf_cache_root: root.map(resolve_hf_cache_path),
         }),
         ArtifactPolicy::LocalOnly { root } => {
-            validate_local_artifacts(model_id, &root)?;
-            Ok(builder.from_hf_cache_path(resolve_hf_cache_path(root)))
+            let local_model_path = validate_local_artifacts(model_id, &root)?;
+            Ok(ConfiguredBuilder {
+                model_target: local_model_path.display().to_string(),
+                hf_cache_root: None,
+            })
         }
     }
 }
 
-fn validate_local_artifacts(model_id: &str, root: &Path) -> Result<(), ModelError> {
+fn validate_local_artifacts(model_id: &str, root: &Path) -> Result<PathBuf, ModelError> {
     let repo = Cache::new(root.to_path_buf()).repo(Repo::new(model_id.to_owned(), RepoType::Model));
 
     let config = repo.get("config.json").ok_or_else(|| {
@@ -239,17 +261,47 @@ fn validate_local_artifacts(model_id: &str, root: &Path) -> Result<(), ModelErro
         )));
     }
 
-    Ok(())
+    if !snapshot_dir.join("modules.json").exists() {
+        return Err(ModelError::InvalidConfiguration(format!(
+            "artifact policy `LocalOnly` requires cached `modules.json` for `{model_id}` under `{}`",
+            root.display()
+        )));
+    }
+
+    for required in [
+        "1_Pooling/config.json",
+        "2_Dense/config.json",
+        "2_Dense/model.safetensors",
+        "3_Dense/config.json",
+        "3_Dense/model.safetensors",
+    ] {
+        if !snapshot_dir.join(required).exists() {
+            return Err(ModelError::InvalidConfiguration(format!(
+                "artifact policy `LocalOnly` requires cached `{required}` for `{model_id}` under `{}`",
+                root.display()
+            )));
+        }
+    }
+
+    Ok(snapshot_dir.to_path_buf())
 }
 
 fn resolve_hf_cache_path(root: PathBuf) -> PathBuf {
     root
 }
 
+fn should_force_cpu() -> bool {
+    matches!(
+        std::env::var("MOTLIE_MODEL_FORCE_CPU"),
+        Ok(value) if matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use motlie_model::StartOptions;
 
     struct StubRuntime;
 
@@ -316,7 +368,6 @@ mod tests {
         fs::create_dir_all(&root).expect("temp root should be creatable");
 
         let err = configure_artifact_policy(
-            EmbeddingModelBuilder::new("google/embeddinggemma-300m"),
             "google/embeddinggemma-300m",
             ArtifactPolicy::LocalOnly { root: root.clone() },
         )
@@ -337,13 +388,63 @@ mod tests {
         fs::write(snapshot.join("tokenizer.json"), "{}").expect("tokenizer should be writable");
         fs::write(snapshot.join("model-00001-of-00001.safetensors"), "stub")
             .expect("weights should be writable");
+        fs::create_dir_all(snapshot.join("1_Pooling")).expect("pooling dir should be creatable");
+        fs::create_dir_all(snapshot.join("2_Dense")).expect("dense dir should be creatable");
+        fs::create_dir_all(snapshot.join("3_Dense")).expect("dense dir should be creatable");
+        fs::write(snapshot.join("modules.json"), "[]").expect("modules should be writable");
+        fs::write(snapshot.join("1_Pooling/config.json"), "{}")
+            .expect("pooling config should be writable");
+        fs::write(snapshot.join("2_Dense/config.json"), "{}")
+            .expect("dense config should be writable");
+        fs::write(snapshot.join("2_Dense/model.safetensors"), "stub")
+            .expect("dense weights should be writable");
+        fs::write(snapshot.join("3_Dense/config.json"), "{}")
+            .expect("dense config should be writable");
+        fs::write(snapshot.join("3_Dense/model.safetensors"), "stub")
+            .expect("dense weights should be writable");
 
         configure_artifact_policy(
-            EmbeddingModelBuilder::new("google/embeddinggemma-300m"),
             "google/embeddinggemma-300m",
             ArtifactPolicy::LocalOnly { root: root.clone() },
         )
         .expect("complete cache layout should be accepted");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires pre-downloaded embeddinggemma artifacts under MOTLIE_EMBEDDINGGEMMA_ROOT"]
+    async fn local_only_embeddinggemma_produces_finite_vectors() {
+        let root = std::env::var("MOTLIE_EMBEDDINGGEMMA_ROOT")
+            .expect("MOTLIE_EMBEDDINGGEMMA_ROOT must point at the curated HF cache root");
+        let bundle = MistralEmbeddingBundle::new(MistralEmbeddingSpec::embeddinggemma_300m());
+        let handle = bundle
+            .start(StartOptions {
+                artifact_policy: Some(ArtifactPolicy::LocalOnly {
+                    root: PathBuf::from(root),
+                }),
+                ..Default::default()
+            })
+            .await
+            .expect("bundle should start from local artifacts");
+
+        let response = handle
+            .embeddings()
+            .expect("embeddings capability should exist")
+            .embed(ModelEmbeddingRequest {
+                inputs: vec!["motlie curated model bundle".into()],
+            })
+            .await
+            .expect("embedding request should succeed");
+
+        let vector = response
+            .vectors
+            .into_iter()
+            .next()
+            .expect("embedding output should contain one vector");
+        assert!(!vector.is_empty(), "embedding vector should not be empty");
+        assert!(
+            vector.iter().all(|value| value.is_finite()),
+            "embedding vector should not contain NaN or Inf values: {vector:?}"
+        );
     }
 
     fn unique_temp_dir() -> PathBuf {
