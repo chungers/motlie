@@ -12,3 +12,4 @@ path = "src/lib.rs"
 
 [dependencies]
 motlie-model = { path = "../model" }
+motlie-model-mistral = { path = "../model/backends/mistral" }

@@ -51,7 +51,7 @@ Motlie instead wants a curated system where each supported model bundle is a vet
 
 1. the bundle catalog
 2. bundle registration and discovery
-3. backend selection for each bundle
+3. curated binding from bundle to backend implementation
 4. artifact packaging and/or transport policy
 5. bundle-local build and distribution customization
 6. concrete implementations of `libs/model` contracts
@@ -95,11 +95,9 @@ Primary subsystems:
    Concrete bundle definitions such as Qwen, Hermes, GPT, and embedding bundles
 3. `artifacts`
    Packaging descriptors, embedded-resource access, unpack policy, integrity checks
-4. `backends`
-   Execution adapters used internally by bundles, including native runtimes and remote transports
-5. `build`
+4. `build`
    Bundle-local build hooks, feature gating, platform checks, distribution policy, and operator-facing build profiles
-6. `packaging`
+5. `packaging`
    Release assembly, embedded-artifact image creation, and deterministic package-bundle extraction rules
 6. `load`
    Lifecycle orchestration from descriptor to loaded handle
@@ -109,8 +107,8 @@ Primary subsystems:
 1. Caller selects `BundleId`
 2. Catalog resolves a bundle descriptor and constructor
 3. Loader resolves artifact or transport requirements
-4. Bundle constructor binds the bundle to its selected backend or transport
-5. Execution adapter creates a loaded runtime handle
+4. Bundle constructor binds the bundle to its selected backend implementation under `libs/model/backends/*`
+5. The selected backend creates a loaded runtime handle
 6. The loaded handle exposes capability adapters through `libs/model` traits
 
 This keeps runtime-specific and packaging-specific logic behind the bundle constructor path while preserving a common contract for callers.
@@ -175,10 +173,6 @@ libs/models/src/
     gpt/
     embeddings/
   artifacts/
-  backends/
-    mistral/
-    ort/
-    llamacpp/
   load/
 ```
 
@@ -381,29 +375,20 @@ This trait is not required to be public in v1. The important boundary is structu
 The application experience should feel like selecting and loading product modules.
 
 ```rust
-use motlie_model::BundleId;
+use motlie_model::{BundleId, EmbeddingRequest};
 use motlie_models::Catalog;
 
-let catalog = Catalog::default();
-let bundle = catalog.bundle(&BundleId::new("qwen3_5_instruct"))?;
-let handle = bundle.start(Default::default()).await?;
-let chat = handle.chat()?;
-
-let response = chat.generate(ChatRequest::from_messages([
-    ("user", "Summarize the current bundle architecture."),
-])).await?;
-```
-
-Embedding-only example:
-
-```rust
-let bundle = catalog.bundle(BundleId::BgeSmallEn)?;
+let catalog = Catalog::with_defaults();
+let bundle = catalog
+    .instantiate(&BundleId::new("embeddinggemma_300m"))?;
 let handle = bundle.start(Default::default()).await?;
 let embeddings = handle.embeddings()?;
-let response = embeddings.embed(EmbeddingRequest::from_inputs([
+let response = embeddings.embed(EmbeddingRequest {
+    inputs: vec![
     "curated bundle catalog",
-    "backend hidden behind bundle",
-])).await?;
+    "mistral embedding vertical slice",
+    ],
+}).await?;
 ```
 
 ### Feature-Gating Direction

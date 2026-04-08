@@ -1,0 +1,15 @@
+[package]
+name = "motlie-model-mistral"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Mistral backend implementations for motlie-model contracts"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+async-trait = "0.1"
+motlie-model = { path = "../.." }

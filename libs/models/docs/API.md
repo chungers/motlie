@@ -8,7 +8,7 @@
 |------|--------|----------|
 | 2026-04-07 | @codex-researcher: Initial API sketch for `libs/models` catalog and descriptor shapes. Reflects the current scaffold, not the final loaded-bundle runtime API. | All |
 
-This document sketches the concrete API shapes currently introduced in `libs/models`. It describes the bundle catalog and descriptor layer only. It does not yet describe the final loaded-bundle lifecycle or capability adapters; those still belong to the next round of `libs/model` contract work.
+This document sketches the concrete API shapes currently introduced in `libs/models`. The crate now owns both the descriptor catalog and the curated bundle constructors that bind those descriptors to a backend implementation.
 
 ## Overview
 
@@ -20,6 +20,7 @@ The first concrete `libs/models` API is an in-memory `Catalog` of curated bundle
 - introspective capability metadata
 - build/platform constraints
 - evaluation-track membership
+- curated bundle instantiation
 
 The goal is to make the product-facing bundle layer tangible before the runtime-facing bundle handle APIs are finalized.
 
@@ -108,12 +109,36 @@ let reasoning_bundles: Vec<_> = catalog
     .collect();
 ```
 
+### Instantiating the First Vertical Slice
+
+```rust
+use motlie_model::{BundleId, EmbeddingRequest};
+use motlie_models::Catalog;
+
+let catalog = Catalog::with_defaults();
+let bundle = catalog
+    .instantiate(&BundleId::new("embeddinggemma_300m"))
+    .expect("bundle should exist");
+
+let handle = bundle.start(Default::default()).await?;
+let embeddings = handle.embeddings()?;
+let response = embeddings
+    .embed(EmbeddingRequest {
+        inputs: vec![
+            "curated bundle catalog".into(),
+            "mistral embedding vertical slice".into(),
+        ],
+    })
+    .await?;
+```
+
 ## Notes
 
 - `BundleId` is currently a string-backed newtype rather than an enum. This keeps the catalog extensible while still giving the crate a stable selection key.
 - capability metadata comes from `motlie_model`, so the catalog can describe input/output shape and interaction style without inventing its own parallel schema
 - `BackendKind` and `PackagingMode` are metadata for catalog reasoning and observability. They do not make runtime choice part of the application control path.
-- `Catalog` is intentionally in-memory and lightweight in this first pass. Loading, bundle construction, and runtime handle APIs are still to come.
+- `Catalog` now also owns curated bundle instantiation through registered constructors.
+- The current `embeddinggemma_300m` path is a contract-testing vertical slice; the backend crate still uses a placeholder deterministic embedder until real `mistral.rs` runtime wiring lands.
 
 ## Next Step
 
