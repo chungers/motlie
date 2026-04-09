@@ -438,11 +438,19 @@ async fn main() -> Result<(), DynError> {
                         .capture_paths
                         .pty_asciicast
                         .clone();
+                    let screen_svg_path = observability
+                        .as_ref()
+                        .expect("observability exists after readiness")
+                        .run_bundle
+                        .capture_paths
+                        .pty_screen_svg
+                        .clone();
                     let pty_run = pty::run_pty_smoke(
                         active_handle,
                         terminal_backend,
                         transcript_path.clone(),
                         screen_path,
+                        screen_svg_path,
                         asciicast_path,
                     )
                     .await?;

@@ -35,6 +35,7 @@ pub struct PtyScenarioResult {
     pub terminal_backend: TerminalBackendKind,
     pub transcript_path: PathBuf,
     pub screen_path: PathBuf,
+    pub screen_svg_path: PathBuf,
     pub asciicast_path: PathBuf,
     pub final_screen: VteScreenSnapshot,
     pub transcript_summary: PtyTranscriptSummary,
@@ -63,6 +64,7 @@ pub async fn run_pty_smoke(
     terminal_backend: TerminalBackendKind,
     transcript_path: PathBuf,
     screen_path: PathBuf,
+    screen_svg_path: PathBuf,
     asciicast_path: PathBuf,
 ) -> Result<PtyScenarioRun, PtyScenarioError> {
     let request = PtyRequest::default();
@@ -75,6 +77,7 @@ pub async fn run_pty_smoke(
         terminal_backend,
         transcript_path.clone(),
         screen_path.clone(),
+        screen_svg_path.clone(),
         asciicast_path.clone(),
     );
     let scenario = async {
@@ -159,6 +162,7 @@ pub async fn run_pty_smoke(
                     terminal_backend,
                     transcript_path,
                     screen_path,
+                    screen_svg_path,
                     asciicast_path,
                     final_screen,
                     transcript_summary,

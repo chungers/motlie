@@ -87,6 +87,7 @@ pub struct VmCapturePaths {
     pub scenario_result_json: PathBuf,
     pub pty_transcript_ndjson: PathBuf,
     pub pty_screen_json: PathBuf,
+    pub pty_screen_svg: PathBuf,
     pub pty_asciicast: PathBuf,
 }
 

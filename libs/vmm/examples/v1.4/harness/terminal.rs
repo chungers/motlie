@@ -284,6 +284,7 @@ pub struct HarnessTerminalSession {
     recorded_at_unix: u64,
     transcript_path: PathBuf,
     screen_path: PathBuf,
+    screen_svg_path: PathBuf,
     asciicast_path: PathBuf,
 }
 
@@ -294,6 +295,7 @@ impl std::fmt::Debug for HarnessTerminalSession {
             .field("backend", &self.backend)
             .field("transcript_path", &self.transcript_path)
             .field("screen_path", &self.screen_path)
+            .field("screen_svg_path", &self.screen_svg_path)
             .field("asciicast_path", &self.asciicast_path)
             .finish_non_exhaustive()
     }
@@ -307,6 +309,7 @@ impl HarnessTerminalSession {
         backend: TerminalBackendKind,
         transcript_path: PathBuf,
         screen_path: PathBuf,
+        screen_svg_path: PathBuf,
         asciicast_path: PathBuf,
     ) -> Self {
         Self {
@@ -324,6 +327,7 @@ impl HarnessTerminalSession {
                 .as_secs(),
             transcript_path,
             screen_path,
+            screen_svg_path,
             asciicast_path,
         }
     }
@@ -492,6 +496,7 @@ impl HarnessTerminalSession {
         let snapshot = self.snapshot()?;
         persist_transcript_ndjson(&self.transcript_path, &transcript)?;
         persist_screen_json(&self.screen_path, &snapshot)?;
+        persist_screen_svg(&self.screen_svg_path, &snapshot)?;
         persist_asciicast(
             &self.asciicast_path,
             &self.name,
@@ -519,6 +524,10 @@ impl HarnessTerminalSession {
 
     pub fn asciicast_path(&self) -> &Path {
         &self.asciicast_path
+    }
+
+    pub fn screen_svg_path(&self) -> &Path {
+        &self.screen_svg_path
     }
 
     async fn apply_bytes(&self, bytes: &[u8]) -> Result<(), TerminalSessionError> {
@@ -733,6 +742,106 @@ pub fn persist_screen_json(
         reason: source.to_string(),
     })?;
     Ok(())
+}
+
+pub fn persist_screen_svg(
+    path: &Path,
+    snapshot: &VteScreenSnapshot,
+) -> Result<(), TerminalSessionError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| TerminalSessionError::Persist {
+            path: path.to_path_buf(),
+            reason: source.to_string(),
+        })?;
+    }
+    let svg = render_screen_svg(snapshot);
+    std::fs::write(path, svg).map_err(|source| TerminalSessionError::Persist {
+        path: path.to_path_buf(),
+        reason: source.to_string(),
+    })?;
+    Ok(())
+}
+
+fn render_screen_svg(snapshot: &VteScreenSnapshot) -> String {
+    const FONT_SIZE: usize = 16;
+    const LINE_HEIGHT: usize = 22;
+    const CELL_WIDTH: usize = 10;
+    const PADDING_X: usize = 18;
+    const PADDING_Y: usize = 18;
+
+    let width = snapshot.cols as usize * CELL_WIDTH + PADDING_X * 2;
+    let height = snapshot.rows as usize * LINE_HEIGHT + PADDING_Y * 2 + 24;
+    let title = match snapshot.screen_mode {
+        Some(TerminalScreenMode::Alternate) => {
+            format!("{} terminal snapshot (alternate screen)", snapshot.backend)
+        }
+        _ => format!("{} terminal snapshot", snapshot.backend),
+    };
+    let escaped_title = escape_xml(&title);
+
+    let mut svg = String::new();
+    svg.push_str(&format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="{}">"#,
+        escaped_title.as_str()
+    ));
+    svg.push_str(
+        r#"<defs><style><![CDATA[
+text {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 16px;
+  fill: #e8f0ea;
+}
+.meta {
+  font-size: 13px;
+  fill: #9ab0a1;
+}
+]]></style></defs>"#,
+    );
+    svg.push_str(r##"<rect width="100%" height="100%" fill="#0f1412"/>"##);
+    svg.push_str(&format!(
+        r##"<rect x="10" y="10" width="{}" height="{}" rx="14" fill="#161d19" stroke="#2c3a33"/>"##,
+        width.saturating_sub(20),
+        height.saturating_sub(20)
+    ));
+    svg.push_str(&format!(
+        r#"<text class="meta" x="{PADDING_X}" y="30">{}</text>"#,
+        escaped_title.as_str()
+    ));
+
+    let cursor_x = PADDING_X + snapshot.cursor_col as usize * CELL_WIDTH;
+    let cursor_y =
+        PADDING_Y + 22 + snapshot.cursor_row as usize * LINE_HEIGHT - (LINE_HEIGHT - FONT_SIZE);
+    if (snapshot.cursor_row as usize) < snapshot.visible_lines.len() {
+        svg.push_str(&format!(
+            r##"<rect x="{cursor_x}" y="{}" width="{CELL_WIDTH}" height="{LINE_HEIGHT}" fill="#83d97b" fill-opacity="0.28"/>"##,
+            cursor_y.saturating_sub(FONT_SIZE)
+        ));
+    }
+
+    svg.push_str(r#"<text xml:space="preserve">"#);
+    for (index, line) in snapshot.visible_lines.iter().enumerate() {
+        let y = PADDING_Y + 22 + index * LINE_HEIGHT;
+        let escaped_line = if line.is_empty() {
+            " ".to_string()
+        } else {
+            escape_xml(line)
+        };
+        svg.push_str(&format!(
+            r#"<tspan x="{PADDING_X}" y="{y}">{}</tspan>"#,
+            escaped_line
+        ));
+    }
+    svg.push_str("</text></svg>");
+    svg
+}
+
+fn escape_xml(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 fn excerpt(output: &str) -> String {
