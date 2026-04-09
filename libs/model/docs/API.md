@@ -131,7 +131,7 @@ This is intentionally service-level, not response-level. It is the right ownersh
 - current and peak RSS
 - request counts
 - last / max / average request latency
-- aggregate token totals and token/sec for text-generation backends
+- aggregate token totals and aggregate token/sec for text-generation backends
 
 The current unit wrappers live in `libs/model/src/units.rs`:
 
@@ -152,6 +152,7 @@ Current implementation note:
 - runtime/process memory metrics are currently collected through `sysinfo`
 - the current `mistral` implementation is intended to work on macOS and Linux without `cfg(target_os)` branches in Motlie code
 - current RSS is sampled from the current process, and peak RSS is maintained by Motlie as the max observed sample over the handle lifetime
+- the current `mistral` text-generation throughput fields are derived from cumulative token totals and cumulative prompt/generation time reported by upstream usage data
 - this metrics path is currently always built into the `mistral` backend and example binaries; it is not separately feature-gated yet
 
 ## Bundle API Sketch
