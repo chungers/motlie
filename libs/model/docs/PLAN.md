@@ -146,7 +146,7 @@ Track the already-known follow-up work needed before the first non-embedding cur
 
 ### 6.1 — Multimodal chat request surface
 
-- [ ] Replace `ChatMessage.content: String` with a multimodal content-parts representation before any chat bundle ships.
+- [ ] Replace `ChatMessage.content: String` with a multimodal content-parts representation before the first vision-capable bundle ships (#142).
   DESIGN reference: `Capability Surfaces`
 - [ ] Ensure `CapabilityKind::Vision` is documented and implemented as a descriptive flag on the chat surface unless and until a separate executable trait is truly needed.
   DESIGN reference: `Core Abstractions` / `Capability Model`

@@ -325,41 +325,54 @@ impl BundleDescriptor {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum ModelSelector {
+    #[cfg(feature = "model-qwen3-4b")]
     Chat(ChatModels),
+    #[cfg(feature = "model-google-gemma-300m")]
     Embedding(EmbeddingModels),
 }
 
+#[cfg(any(feature = "model-qwen3-4b", feature = "model-google-gemma-300m"))]
 impl ModelSelector {
     pub fn as_str(&self) -> String {
         match self {
+            #[cfg(feature = "model-qwen3-4b")]
             Self::Chat(model) => format!("chat:{}", model.as_str()),
+            #[cfg(feature = "model-google-gemma-300m")]
             Self::Embedding(model) => format!("embedding:{}", model.as_str()),
         }
     }
 
     pub fn bundle_id(&self) -> BundleId {
         match self {
+            #[cfg(feature = "model-qwen3-4b")]
             Self::Chat(model) => model.bundle_id(),
+            #[cfg(feature = "model-google-gemma-300m")]
             Self::Embedding(model) => model.bundle_id(),
         }
     }
 
     pub fn descriptor(&self) -> BundleDescriptor {
         match self {
+            #[cfg(feature = "model-qwen3-4b")]
             Self::Chat(model) => model.descriptor(),
+            #[cfg(feature = "model-google-gemma-300m")]
             Self::Embedding(model) => model.descriptor(),
         }
     }
 
     pub fn bundle(&self) -> Box<dyn ModelBundle> {
         match self {
+            #[cfg(feature = "model-qwen3-4b")]
             Self::Chat(model) => model.bundle(),
+            #[cfg(feature = "model-google-gemma-300m")]
             Self::Embedding(model) => model.bundle(),
         }
     }
 }
 
+#[cfg(any(feature = "model-qwen3-4b", feature = "model-google-gemma-300m"))]
 impl fmt::Display for ModelSelector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.as_str())
@@ -377,7 +390,12 @@ impl FromStr for ModelSelector {
                     selector: value.to_owned(),
                 });
             }
+            #[cfg(feature = "model-qwen3-4b")]
             return Ok(Self::Chat(raw.parse()?));
+            #[cfg(not(feature = "model-qwen3-4b"))]
+            return Err(ModelsError::UnknownModelSelector {
+                selector: value.to_owned(),
+            });
         }
 
         if let Some(raw) = value.strip_prefix("embedding:") {
@@ -387,7 +405,12 @@ impl FromStr for ModelSelector {
                     selector: value.to_owned(),
                 });
             }
+            #[cfg(feature = "model-google-gemma-300m")]
             return Ok(Self::Embedding(raw.parse()?));
+            #[cfg(not(feature = "model-google-gemma-300m"))]
+            return Err(ModelsError::UnknownModelSelector {
+                selector: value.to_owned(),
+            });
         }
 
         Err(ModelsError::UnknownModelSelector {
