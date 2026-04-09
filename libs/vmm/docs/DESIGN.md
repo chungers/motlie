@@ -1168,6 +1168,15 @@ pub struct ReadinessPolicy {
 }
 ```
 
+Notes:
+
+- `GuestResources` is intentionally CH-shaped for `v1.4` because the active
+  proving path is still Cloud Hypervisor shell boot plus Motlie guest backing
+  providers.
+- The next convergence target remains a broader `VmSpec` / device model for
+  backends that need GPU, NUMA, pinned-memory, or other non-CH resource
+  concepts. `v1.4` should not guess that final shape prematurely.
+
 ### Orchestration
 
 The reviewed orchestration surface should use `boot()` as the start verb and
@@ -1242,6 +1251,10 @@ Important design rules:
 - use enum dispatch because the backend set is known in source
 - do not introduce a shared `VmBackend` trait when enum dispatch already covers
   the reviewed backend set
+- out-of-tree or plugin-style backend extension is not a `v1.4` goal; if the
+  in-tree backend/provider count grows enough that enum dispatch becomes
+  unmanageable, that is the point to revisit trait-object or registry-based
+  dispatch in a later design round
 - do not push readiness, SSH exec, validation, or guestfs semantics into the
   backend implementation boundary
 - the first implementation should be `ChShellBackend`, which preserves the

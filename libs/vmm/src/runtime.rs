@@ -8,7 +8,11 @@ use crate::backend::motlie::vfs::{MotlieVfsBacking, MotlieVfsHandle};
 use crate::backend::motlie::vnet::{MotlieVnetBacking, MotlieVnetHandle, MotlieVnetProvisionError};
 use crate::backend::{BackendError, BackendHandle, BackendShutdownOutcome};
 use crate::guestfs::GuestFsError;
+use crate::observability::{
+    ControlPlaneObservability, FilesystemObservability, NetworkObservability,
+};
 use crate::orchestrator::PreparedGuest;
+use crate::spec::GuestRuntimePaths;
 use crate::spec::GuestSpec;
 use crate::ssh::{ExecOutput, GuestPtySession, PtyRequest, SshProxyError};
 use motlie_vnet::VnetError;
@@ -156,6 +160,14 @@ impl FilesystemHandle {
             Self::MotlieVfs(handle) => handle.required_mount_tags().to_vec(),
         }
     }
+
+    pub fn observability(&self) -> FilesystemObservability {
+        FilesystemObservability {
+            backing: self.backing_name(),
+            socket_path: self.socket_path().map(Path::to_path_buf),
+            mount_tags: self.mount_tags(),
+        }
+    }
 }
 
 impl NetworkBacking {
@@ -182,6 +194,13 @@ impl NetworkHandle {
     pub fn backing_name(&self) -> &'static str {
         match self {
             Self::MotlieVnet(_) => "motlie-vnet",
+        }
+    }
+
+    pub fn observability(&self, runtime_paths: &GuestRuntimePaths) -> NetworkObservability {
+        NetworkObservability {
+            backing: self.backing_name(),
+            socket_path: Some(runtime_paths.vnet_socket.clone()),
         }
     }
 }
@@ -238,6 +257,13 @@ impl ControlPlaneHandle {
     pub fn bridge_socket_path(&self) -> Option<PathBuf> {
         match self {
             Self::MotlieSshProxy(handle) => Some(handle.bridge_socket_path().to_path_buf()),
+        }
+    }
+
+    pub fn observability(&self) -> ControlPlaneObservability {
+        ControlPlaneObservability {
+            backing: self.backing_name(),
+            ssh_bridge_socket_path: self.bridge_socket_path(),
         }
     }
 }

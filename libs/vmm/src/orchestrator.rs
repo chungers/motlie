@@ -269,11 +269,7 @@ impl VmHandle {
 
     fn filesystem_observability(&self) -> FilesystemObservability {
         match self.filesystem.as_ref() {
-            Some(filesystem) => FilesystemObservability {
-                backing: filesystem.backing_name(),
-                socket_path: filesystem.socket_path().map(Path::to_path_buf),
-                mount_tags: filesystem.mount_tags(),
-            },
+            Some(filesystem) => filesystem.observability(),
             None => FilesystemObservability {
                 backing: "none",
                 socket_path: None,
@@ -283,16 +279,12 @@ impl VmHandle {
     }
 
     fn network_observability(&self) -> NetworkObservability {
-        match self
-            .network
-            .try_lock()
-            .ok()
-            .and_then(|guard| guard.as_ref().map(|network| network.backing_name()))
-        {
-            Some(backing) => NetworkObservability {
-                backing,
-                socket_path: Some(self.runtime_paths.vnet_socket.clone()),
-            },
+        match self.network.try_lock().ok().and_then(|guard| {
+            guard
+                .as_ref()
+                .map(|network| network.observability(&self.runtime_paths))
+        }) {
+            Some(observability) => observability,
             None => NetworkObservability {
                 backing: "none",
                 socket_path: None,
@@ -302,10 +294,7 @@ impl VmHandle {
 
     fn control_plane_observability(&self) -> ControlPlaneObservability {
         match self.control_plane.as_ref() {
-            Some(control_plane) => ControlPlaneObservability {
-                backing: control_plane.backing_name(),
-                ssh_bridge_socket_path: control_plane.bridge_socket_path(),
-            },
+            Some(control_plane) => control_plane.observability(),
             None => ControlPlaneObservability {
                 backing: "none",
                 ssh_bridge_socket_path: None,
