@@ -39,13 +39,7 @@
       "timeout_ms": 20000,
       "expect": { "exit_code": 0, "stdout_contains": "HTTPS_OK" }
     },
-    {
-      "action": "exec",
-      "guest": "alice",
-      "command": "/bin/sh -lc 'idle=0; for _ in $(seq 1 60); do if ! pgrep -x apt >/dev/null 2>&1 && ! pgrep -x apt-get >/dev/null 2>&1 && ! pgrep -x dpkg >/dev/null 2>&1 && ! pgrep -x unattended-upgr >/dev/null 2>&1 && ! pgrep -x unattended-upgrade >/dev/null 2>&1; then idle=$((idle+1)); if [ \"$idle\" -ge 5 ]; then echo PKG_IDLE_OK; exit 0; fi; else idle=0; fi; sleep 1; done; exit 1'",
-      "timeout_ms": 65000,
-      "expect": { "exit_code": 0, "stdout_contains": "PKG_IDLE_OK" }
-    },
+    { "action": "wait_package_manager_quiescent", "guest": "alice", "timeout_ms": 65000 },
     {
       "action": "exec",
       "guest": "alice",
