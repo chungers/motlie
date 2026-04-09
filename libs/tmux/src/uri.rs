@@ -7,7 +7,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use anyhow::{anyhow, Result};
+use crate::error::{Error, Result};
 
 use crate::host::HostHandle;
 use crate::transport::{LocalTransport, SshConfig, SshTransport, TransportKind};
@@ -53,10 +53,10 @@ impl SshConfig {
     pub fn parse(uri: &str) -> Result<Self> {
         let remainder = uri
             .strip_prefix("ssh://")
-            .ok_or_else(|| anyhow!("URI must start with ssh://"))?;
+            .ok_or_else(|| Error::Parse("URI must start with ssh://".into()))?;
 
         if remainder.is_empty() {
-            return Err(anyhow!("URI is missing host"));
+            return Err(Error::Parse("URI is missing host".into()));
         }
 
         // Split off query string
@@ -78,7 +78,7 @@ impl SshConfig {
         let (host, port, socket_path) = parse_authority_and_path(hostport_path)?;
 
         if host.is_empty() {
-            return Err(anyhow!("URI is missing host"));
+            return Err(Error::Parse("URI is missing host".into()));
         }
 
         // Validate user and host contain no URI-reserved characters
@@ -94,10 +94,10 @@ impl SshConfig {
         for params in [&userinfo_params, &query_params] {
             for (key, _) in params {
                 if CANONICAL_COMPONENTS.contains(&key.as_str()) {
-                    return Err(anyhow!(
+                    return Err(Error::Parse(format!(
                         "'{}' is a canonical URI component and cannot appear as a parameter",
                         key
-                    ));
+                    )));
                 }
             }
         }
@@ -109,10 +109,10 @@ impl SshConfig {
         }
         for (key, _) in &query_params {
             if seen_keys.contains(&key.as_str()) {
-                return Err(anyhow!(
+                return Err(Error::Parse(format!(
                     "duplicate parameter '{}' (appears in both userinfo and query)",
                     key
-                ));
+                )));
             }
         }
 
@@ -125,17 +125,17 @@ impl SshConfig {
 
         for (key, _) in &all_params {
             if !KNOWN_PARAMS.contains(key) {
-                return Err(anyhow!("unknown parameter: '{}'", key));
+                return Err(Error::Parse(format!("unknown parameter: '{}'", key)));
             }
         }
 
         // Reject query-only params that appear in userinfo (DC26)
         for (key, _) in &userinfo_params {
             if QUERY_ONLY_PARAMS.contains(&key.as_str()) {
-                return Err(anyhow!(
+                return Err(Error::Parse(format!(
                     "'{}' is a query-only parameter and cannot appear in userinfo",
                     key
-                ));
+                )));
             }
         }
 
@@ -151,33 +151,33 @@ impl SshConfig {
                         "tofu" => HostKeyPolicy::TrustFirstUse,
                         "insecure" => HostKeyPolicy::Insecure,
                         _ => {
-                            return Err(anyhow!(
+                            return Err(Error::Parse(format!(
                                 "invalid host-key-policy value '{}' \
                                  (expected: verify, tofu, insecure)",
                                 value
-                            ))
+                            )))
                         }
                     };
                     config = config.with_host_key_policy(policy);
                 }
                 "timeout" => {
                     let secs: u64 = value.parse().map_err(|_| {
-                        anyhow!(
+                        Error::Parse(format!(
                             "invalid timeout value '{}' (expected integer seconds)",
                             value
-                        )
+                        ))
                     })?;
                     if secs == 0 {
-                        return Err(anyhow!("timeout must be > 0"));
+                        return Err(Error::Parse("timeout must be > 0".into()));
                     }
                     config = config.with_timeout(std::time::Duration::from_secs(secs));
                 }
                 "inactivity-timeout" => {
                     let secs: u64 = value.parse().map_err(|_| {
-                        anyhow!(
+                        Error::Parse(format!(
                             "invalid inactivity-timeout value '{}' (expected integer seconds)",
                             value
-                        )
+                        ))
                     })?;
                     let timeout = if secs == 0 {
                         None
@@ -188,10 +188,10 @@ impl SshConfig {
                 }
                 "keepalive" => {
                     let secs: u64 = value.parse().map_err(|_| {
-                        anyhow!(
+                        Error::Parse(format!(
                             "invalid keepalive value '{}' (expected integer seconds)",
                             value
-                        )
+                        ))
                     })?;
                     let interval = if secs == 0 {
                         None
@@ -202,24 +202,24 @@ impl SshConfig {
                 }
                 "socket-name" => {
                     if !crate::transport::is_valid_socket_name(value) {
-                        return Err(anyhow!(
+                        return Err(Error::Parse(format!(
                             "invalid socket-name '{}': must match [A-Za-z0-9._-]+",
                             value
-                        ));
+                        )));
                     }
                     has_socket_name = true;
                     config = config.with_socket(TmuxSocket::Name(value.to_string()))?;
                 }
                 "identity-file" => {
                     if value.is_empty() {
-                        return Err(anyhow!("identity-file value cannot be empty"));
+                        return Err(Error::Parse("identity-file value cannot be empty".into()));
                     }
                     let path = std::path::PathBuf::from(value);
                     if !path.is_absolute() {
-                        return Err(anyhow!(
+                        return Err(Error::Parse(format!(
                             "identity-file must be an absolute path, got '{}'",
                             value
-                        ));
+                        )));
                     }
                     config = config.with_identity_file(path)?;
                 }
@@ -230,8 +230,8 @@ impl SshConfig {
         // Handle socket-path from URI path component
         if let Some(path) = socket_path {
             if has_socket_name {
-                return Err(anyhow!(
-                    "socket-path and socket-name are mutually exclusive"
+                return Err(Error::Parse(
+                    "socket-path and socket-name are mutually exclusive".into()
                 ));
             }
             config = config.with_socket(TmuxSocket::Path(path))?;
@@ -383,7 +383,7 @@ impl SshConfig {
         }
 
         if user_empty {
-            return Err(anyhow!("user is required for SSH connections"));
+            return Err(Error::Parse("user is required for SSH connections".into()));
         }
 
         let transport = TransportKind::Ssh(SshTransport::connect(self).await?);
@@ -398,7 +398,7 @@ impl fmt::Display for SshConfig {
 }
 
 impl FromStr for SshConfig {
-    type Err = anyhow::Error;
+    type Err = Error;
     fn from_str(s: &str) -> Result<Self> {
         Self::parse(s)
     }
@@ -411,7 +411,7 @@ impl FromStr for SshConfig {
 /// Validate a parsed port is in the valid range 1-65535.
 fn validate_port(port: u16) -> Result<u16> {
     if port == 0 {
-        return Err(anyhow!("invalid port '0' (expected integer 1-65535)"));
+        return Err(Error::Parse("invalid port '0' (expected integer 1-65535)".into()));
     }
     Ok(port)
 }
@@ -420,12 +420,12 @@ fn validate_port(port: u16) -> Result<u16> {
 fn validate_uri_safe(value: &str, context: &str) -> Result<()> {
     for ch in URI_RESERVED_CHARS {
         if value.contains(*ch) {
-            return Err(anyhow!(
+            return Err(Error::Parse(format!(
                 "{} contains URI-reserved character '{}' \
                  (disallowed: ; @ ? & = # [ ])",
                 context,
                 ch
-            ));
+            )));
         }
     }
     Ok(())
@@ -445,19 +445,19 @@ fn parse_userinfo(userinfo: Option<&str>) -> Result<(String, Vec<(String, String
 
     for part in &parts[1..] {
         let (key, value) = part.split_once('=').ok_or_else(|| {
-            anyhow!(
+            Error::Parse(format!(
                 "invalid userinfo parameter '{}' (expected key=value)",
                 part
-            )
+            ))
         })?;
 
         if key.is_empty() {
-            return Err(anyhow!("empty parameter name in userinfo"));
+            return Err(Error::Parse("empty parameter name in userinfo".into()));
         }
 
         // Within-location duplicate check
         if seen_keys.iter().any(|k| k == key) {
-            return Err(anyhow!("duplicate parameter '{}' within userinfo", key));
+            return Err(Error::Parse(format!("duplicate parameter '{}' within userinfo", key)));
         }
         seen_keys.push(key.to_string());
 
@@ -471,14 +471,14 @@ fn parse_userinfo(userinfo: Option<&str>) -> Result<(String, Vec<(String, String
 /// Handles IPv6 bracket notation `[::1]`.
 fn parse_authority_and_path(s: &str) -> Result<(String, u16, Option<String>)> {
     if s.is_empty() {
-        return Err(anyhow!("URI is missing host"));
+        return Err(Error::Parse("URI is missing host".into()));
     }
 
     if s.starts_with('[') {
         // IPv6 bracket notation
         let bracket_end = s
             .find(']')
-            .ok_or_else(|| anyhow!("unclosed IPv6 bracket in host"))?;
+            .ok_or_else(|| Error::Parse("unclosed IPv6 bracket in host".into()))?;
         let host = s[1..bracket_end].to_string();
         let remainder = &s[bracket_end + 1..];
 
@@ -496,7 +496,7 @@ fn parse_authority_and_path(s: &str) -> Result<(String, u16, Option<String>)> {
             Some(pos) => {
                 let port_str = &authority[pos + 1..];
                 let port: u16 = port_str.parse().map_err(|_| {
-                    anyhow!("invalid port '{}' (expected integer 1-65535)", port_str)
+                    Error::Parse(format!("invalid port '{}' (expected integer 1-65535)", port_str))
                 })?;
                 (authority[..pos].to_string(), validate_port(port)?)
             }
@@ -525,10 +525,10 @@ fn parse_port_and_path(remainder: &str) -> Result<(u16, Option<String>)> {
         match rest.find('/') {
             Some(pos) => {
                 let port: u16 = rest[..pos].parse().map_err(|_| {
-                    anyhow!(
+                    Error::Parse(format!(
                         "invalid port '{}' (expected integer 1-65535)",
                         &rest[..pos]
-                    )
+                    ))
                 })?;
                 let port = validate_port(port)?;
                 let path = &rest[pos + 1..];
@@ -541,7 +541,7 @@ fn parse_port_and_path(remainder: &str) -> Result<(u16, Option<String>)> {
             }
             None => {
                 let port: u16 = rest.parse().map_err(|_| {
-                    anyhow!("invalid port '{}' (expected integer 1-65535)", rest)
+                    Error::Parse(format!("invalid port '{}' (expected integer 1-65535)", rest))
                 })?;
                 Ok((validate_port(port)?, None))
             }
@@ -554,10 +554,10 @@ fn parse_port_and_path(remainder: &str) -> Result<(u16, Option<String>)> {
         };
         Ok((22, socket_path))
     } else {
-        Err(anyhow!(
+        Err(Error::Parse(format!(
             "unexpected character after IPv6 host: '{}'",
             remainder
-        ))
+        )))
     }
 }
 
@@ -576,19 +576,19 @@ fn parse_query_params(query: Option<&str>) -> Result<Vec<(String, String)>> {
 
     for part in q.split('&') {
         let (key, value) = part.split_once('=').ok_or_else(|| {
-            anyhow!(
+            Error::Parse(format!(
                 "invalid query parameter '{}' (expected key=value)",
                 part
-            )
+            ))
         })?;
 
         if key.is_empty() {
-            return Err(anyhow!("empty parameter name in query"));
+            return Err(Error::Parse("empty parameter name in query".into()));
         }
 
         // Within-location duplicate check
         if seen_keys.iter().any(|k| k == key) {
-            return Err(anyhow!("duplicate parameter '{}' within query", key));
+            return Err(Error::Parse(format!("duplicate parameter '{}' within query", key)));
         }
         seen_keys.push(key.to_string());
 
