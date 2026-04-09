@@ -15,53 +15,40 @@ pub enum EmbeddingModels {
     GoogleGemma300m,
 }
 
+#[cfg(feature = "model-google-gemma-300m")]
 impl EmbeddingModels {
     pub fn as_str(&self) -> &'static str {
         match self {
-            #[cfg(feature = "model-google-gemma-300m")]
             Self::GoogleGemma300m => google_gemma_300m::SELECTOR,
-            #[allow(unreachable_patterns)]
-            _ => unreachable!(),
         }
     }
 
     pub fn bundle_id(&self) -> BundleId {
         match self {
-            #[cfg(feature = "model-google-gemma-300m")]
             Self::GoogleGemma300m => google_gemma_300m::descriptor().id,
-            #[allow(unreachable_patterns)]
-            _ => unreachable!(),
         }
     }
 
     pub fn descriptor(&self) -> crate::BundleDescriptor {
         match self {
-            #[cfg(feature = "model-google-gemma-300m")]
             Self::GoogleGemma300m => google_gemma_300m::descriptor(),
-            #[allow(unreachable_patterns)]
-            _ => unreachable!(),
         }
     }
 
     pub fn bundle(&self) -> Box<dyn ModelBundle> {
         match self {
-            #[cfg(feature = "model-google-gemma-300m")]
             Self::GoogleGemma300m => google_gemma_300m::bundle(),
-            #[allow(unreachable_patterns)]
-            _ => unreachable!(),
         }
     }
 
     pub fn embedding_spec(&self) -> &'static EmbeddingSpec {
         match self {
-            #[cfg(feature = "model-google-gemma-300m")]
             Self::GoogleGemma300m => google_gemma_300m::embedding_spec(),
-            #[allow(unreachable_patterns)]
-            _ => unreachable!(),
         }
     }
 }
 
+#[cfg(feature = "model-google-gemma-300m")]
 impl fmt::Display for EmbeddingModels {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.as_str().fmt(f)

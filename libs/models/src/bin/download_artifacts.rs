@@ -1,10 +1,16 @@
-use anyhow::{Context, Result};
 use motlie_model::BundleId;
 use motlie_models::{
     default_artifact_root, download_bundle_artifacts_with_options, ArtifactDownloadOptions, Catalog,
 };
 
-fn main() -> Result<()> {
+fn main() {
+    if let Err(err) = run() {
+        eprintln!("error: {err}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1).peekable();
     let artifact_root = default_artifact_root();
     let catalog = Catalog::with_defaults();
@@ -16,18 +22,19 @@ fn main() -> Result<()> {
             "--hf-token-env" => {
                 let var_name = args
                     .next()
-                    .context("expected env var name after `--hf-token-env`")?;
-                let token = std::env::var(&var_name).with_context(|| {
-                    format!("failed to read Hugging Face token from env var `{var_name}`")
+                    .ok_or("expected env var name after `--hf-token-env`")?;
+                let token = std::env::var(&var_name).map_err(|err| {
+                    format!("failed to read Hugging Face token from env var `{var_name}`: {err}")
                 })?;
                 download_options.hf_token = Some(token);
             }
             "--hf-token-file" => {
                 let path = args
                     .next()
-                    .context("expected file path after `--hf-token-file`")?;
-                let token = std::fs::read_to_string(&path)
-                    .with_context(|| format!("failed to read Hugging Face token file `{path}`"))?;
+                    .ok_or("expected file path after `--hf-token-file`")?;
+                let token = std::fs::read_to_string(&path).map_err(|err| {
+                    format!("failed to read Hugging Face token file `{path}`: {err}")
+                })?;
                 download_options.hf_token = Some(token.trim().to_string());
             }
             _ => bundle_args.push(arg),
@@ -48,8 +55,7 @@ fn main() -> Result<()> {
             &bundle_id,
             &artifact_root,
             &download_options,
-        )
-        .with_context(|| format!("failed to download artifacts for `{bundle_id}`"))?;
+        )?;
 
         println!(
             "bundle={} files={} root={}",
