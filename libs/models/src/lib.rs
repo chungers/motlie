@@ -684,6 +684,49 @@ mod tests {
     }
 
     #[test]
+    fn chat_models_round_trip_string_selectors() {
+        #[cfg(feature = "model-qwen3-4b")]
+        {
+            let model: ChatModels = "qwen/qwen3_4b"
+                .parse()
+                .expect("known chat selector should parse");
+
+            assert_eq!(model, ChatModels::Qwen3_4B);
+            assert_eq!(model.to_string(), "qwen/qwen3_4b");
+        }
+    }
+
+    #[test]
+    fn model_selector_parses_chat_prefix() {
+        #[cfg(feature = "model-qwen3-4b")]
+        {
+            let selector: ModelSelector = "chat:qwen/qwen3_4b"
+                .parse()
+                .expect("known chat model selector should parse");
+
+            assert_eq!(
+                selector,
+                ModelSelector::Chat(ChatModels::Qwen3_4B)
+            );
+            assert_eq!(selector.to_string(), "chat:qwen/qwen3_4b");
+        }
+    }
+
+    #[cfg(not(feature = "model-qwen3-4b"))]
+    #[test]
+    fn chat_selector_reports_unavailable_for_disabled_bundles() {
+        let err = "chat:qwen/qwen3_4b"
+            .parse::<ModelSelector>()
+            .expect_err("disabled known chat selector should be unavailable");
+
+        assert!(matches!(
+            err,
+            ModelsError::ModelUnavailable { selector }
+            if selector == "chat:qwen/qwen3_4b"
+        ));
+    }
+
+    #[test]
     fn artifact_rules_match_expected_files() {
         let artifacts = BundleArtifacts {
             control_name: "embeddinggemma_300m",
