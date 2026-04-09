@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::error::Error as StdError;
+#[cfg(any(feature = "model-qwen3-4b", feature = "model-google-gemma-300m"))]
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
