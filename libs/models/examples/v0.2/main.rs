@@ -1,9 +1,12 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use motlie_model::{
     ArtifactPolicy, ChatMessage, ChatRequest, ChatRole, QuantizationBits, StartOptions,
 };
-use motlie_models::{chat::ChatModels, default_artifact_root, ModelSelector};
+use motlie_models::{ModelSelector, chat::ChatModels, default_artifact_root};
 use std::time::Instant;
+
+#[path = "../support.rs"]
+mod support;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -27,7 +30,7 @@ async fn main() -> Result<()> {
     let input = input_parts.join(" ");
     if input.trim().is_empty() {
         bail!(
-            "usage: cargo run -p motlie-models --example models_v0_2 -- \
+            "usage: cargo run -p motlie-models --no-default-features --features model-qwen3-4b --example models_v0_2 -- \
              [--download-artifacts] [--chat=qwen/qwen3_4b] [--precision=q4|q8|f32] <prompt>"
         );
     }
@@ -63,11 +66,22 @@ async fn main() -> Result<()> {
         };
 
     let artifact_root = default_artifact_root();
+    let catalog = motlie_models::Catalog::with_defaults();
+
+    println!("catalog-entry-count: {}", catalog.len());
+    ensure!(
+        catalog.len() == 1,
+        "models_v0_2 must be built with exactly one curated bundle feature enabled"
+    );
 
     println!("bundle-selector: {selector_label}");
     println!("resolution-path: {path_kind}");
     println!("bundle-id: {}", bundle_id.as_str());
     println!("artifact-root: {}", artifact_root.display());
+    support::print_process_snapshot(
+        "process-before-start",
+        &support::current_process_snapshot(),
+    );
     println!(
         "quantization: {}",
         match quantization {
@@ -78,7 +92,6 @@ async fn main() -> Result<()> {
     );
 
     if download_artifacts {
-        let catalog = motlie_models::Catalog::with_defaults();
         let summary =
             motlie_models::download_bundle_artifacts(&catalog, &bundle_id, &artifact_root)
                 .with_context(|| {
@@ -105,6 +118,7 @@ async fn main() -> Result<()> {
     }
 
     println!("starting bundle (this includes ISQ quantization if enabled)...");
+    let startup_sampler = support::StartupSampler::spawn("startup");
     let startup_at = Instant::now();
     let handle = bundle
         .start(StartOptions {
@@ -117,15 +131,16 @@ async fn main() -> Result<()> {
         .await
         .context("bundle startup should succeed from local artifacts")?;
     let startup_elapsed = startup_at.elapsed();
+    let startup_stats = startup_sampler.finish().await;
     println!(
         "startup-latency-ms: {:.0} ({:.1}s)",
         startup_elapsed.as_secs_f64() * 1000.0,
         startup_elapsed.as_secs_f64()
     );
+    support::print_startup_stats(&startup_stats);
+    support::print_process_snapshot("process-after-start", &support::current_process_snapshot());
 
-    let chat = handle
-        .chat()
-        .context("qwen3 bundle should expose chat")?;
+    let chat = handle.chat().context("qwen3 bundle should expose chat")?;
 
     // Single-turn request.
     println!("\n--- single-turn ---");
@@ -145,6 +160,10 @@ async fn main() -> Result<()> {
     println!("prompt: {input}");
     println!("response: {}", response.content);
     println!("latency-ms: {:.2}", latency.as_secs_f64() * 1000.0);
+    support::print_process_snapshot(
+        "process-after-single-turn",
+        &support::current_process_snapshot(),
+    );
 
     // Multi-turn follow-up.
     println!("\n--- multi-turn follow-up ---");
@@ -169,6 +188,10 @@ async fn main() -> Result<()> {
         "follow-up-latency-ms: {:.2}",
         followup_latency.as_secs_f64() * 1000.0
     );
+    support::print_process_snapshot(
+        "process-after-follow-up",
+        &support::current_process_snapshot(),
+    );
 
     // Completion path.
     println!("\n--- completion ---");
@@ -191,11 +214,16 @@ async fn main() -> Result<()> {
         "completion-latency-ms: {:.2}",
         completion_latency.as_secs_f64() * 1000.0
     );
+    support::print_process_snapshot(
+        "process-after-completion",
+        &support::current_process_snapshot(),
+    );
 
     handle
         .shutdown()
         .await
         .context("bundle shutdown should succeed")?;
+    support::print_process_snapshot("process-after-shutdown", &support::current_process_snapshot());
 
     Ok(())
 }

@@ -10,6 +10,8 @@
 | 2026-04-08 | @codex-researcher | Reconciled the PLAN with the current public API after review. `SupportTier` and `PackagingMode` were removed from the v1 surface earlier, so the PLAN now tracks the descriptor fields that actually exist in code and docs. | Phase 1, Phase 2 |
 | 2026-04-08 | @claude | Added Phase 5 for the Qwen3-4B chat bundle (#141). Covers `ChatModels` enum, `ModelSelector::Chat`, curated artifact rules, HF cache resolution, and `v0.2` example. | Phase 5 |
 | 2026-04-08 | @codex-researcher | Added Phase 6 for the Gemma 4 E2B-it multimodal chat bundle (#142). Covers the feature-gated chat module, multimodal artifact rules, local snapshot validation, selector/catalog wiring, and `v0.3`. | Phase 6 |
+| 2026-04-09 | @codex-researcher | Tightened the versioned-example convention. `v0.1`-`v0.3` now assert single-bundle builds by printing `catalog-entry-count: 1`, and the Gemma example follows the same rule. | Phases 4-6 |
+| 2026-04-09 | @codex-researcher | Collapsed the duplicate Gemma 4 examples into a single `v0.3` flow. `v0.3` now owns both optional artifact download and local-only startup, preserving the one-model-per-example convention. | Phase 6 |
 
 Derived from [DESIGN.md](./DESIGN.md). This PLAN focuses on the first curated bundle slice rather than the full long-term catalog.
 
@@ -136,7 +138,7 @@ Add the first curated chat bundle to validate the `ChatModel` + `CompletionModel
 
 ### 6.3 — Example and verification
 
-- [x] Add `examples/v0.3` demonstrating text-only and image+text chat through the Gemma 4 bundle.
+- [x] Add `examples/v0.3` demonstrating text-only and image+text chat through the Gemma 4 bundle, with optional `--download-artifacts` for the convenience path.
 - [x] `cargo test -p motlie-models --lib`
 - [x] `cargo build -p motlie-models --example models_v0_3`
 - [ ] Env-gated end-to-end example run with pre-downloaded Gemma 4 E2B-it artifacts.

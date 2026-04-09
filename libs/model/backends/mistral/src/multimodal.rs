@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use image::DynamicImage;
-use mistralrs::core::MultimodalLoaderType;
-use mistralrs::{MultimodalModelBuilder, RequestBuilder};
+use mistralrs::{ModelBuilder, RequestBuilder};
 use motlie_model::{
     BundleHandle, BundleId, BundleMetadata, Capabilities, CapabilityKind, ChatModel, ChatRequest,
     ChatResponse, CompletionModel, ContentPart, EmbeddingModel, LoadedBundleDescriptor,
@@ -16,14 +15,6 @@ use crate::common::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MistralMultimodalArch {
     Gemma4,
-}
-
-impl MistralMultimodalArch {
-    fn loader_type(self) -> MultimodalLoaderType {
-        match self {
-            Self::Gemma4 => MultimodalLoaderType::Gemma4,
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -224,7 +215,7 @@ impl ChatModel for MistralMultimodalHandle {
 
 async fn build_multimodal_model(
     model_id: &str,
-    arch: MistralMultimodalArch,
+    _arch: MistralMultimodalArch,
     options: StartOptions,
 ) -> Result<mistralrs::Model, ModelError> {
     let StartOptions {
@@ -249,8 +240,9 @@ async fn build_multimodal_model(
         hf_cache_root = configured.hf_cache_root;
     }
 
-    let mut builder =
-        MultimodalModelBuilder::new(model_target).with_loader_type(arch.loader_type());
+    // Use the auto-detecting builder here. Upstream's Gemma 4 multimodal examples use
+    // `ModelBuilder`, and that path preserves multimodal chat-template discovery.
+    let mut builder = ModelBuilder::new(model_target);
     if let Some(bits) = quantization {
         builder = builder.with_auto_isq(map_quantization_bits(bits));
     }
