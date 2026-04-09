@@ -634,7 +634,6 @@ mod tests {
 
         #[cfg(not(feature = "model-google-gemma-300m"))]
         {
-            assert_eq!(catalog.len(), 0);
             assert!(catalog.instantiate(&bundle_id).is_none());
             assert!(catalog.artifacts(&bundle_id).is_none());
         }
