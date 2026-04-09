@@ -21,6 +21,7 @@
 | 2026-04-09 | @codex-researcher: Tightened the example-build convention. Versioned examples now expect a single-bundle build and print `catalog-entry-count: 1`, and the Gemma example follows the same one-model-per-example rule. | Example Program, Notes |
 | 2026-04-09 | @codex-researcher: Collapsed the duplicate Gemma 4 examples into a single `v0.3` flow. `v0.3` now carries the optional `--download-artifacts` behavior directly, so each versioned example once again maps to exactly one curated model. | Example Program, Notes |
 | 2026-04-09 | @codex-researcher: Added handle-level metric snapshot usage to the examples. The current `mistral` backends now surface runtime latency/memory aggregates on the loaded bundle handle, with text-generation token metrics where the backend provides them. | Example Program, Notes |
+| 2026-04-09 | @codex-researcher: Clarified the current runtime-metrics implementation boundary for examples. The model-layer metrics path uses `sysinfo` for cross-platform current RSS on macOS and Linux, while peak RSS is maintained by Motlie as an observed-handle aggregate rather than an OS-native historical peak counter. | Notes |
 
 This document sketches the concrete API shapes currently introduced in `libs/models`. The crate now owns both the descriptor catalog and the curated bundle constructors that bind those descriptors to a backend implementation.
 
@@ -389,6 +390,7 @@ For a new curated embedding bundle, the intended implementation checklist is:
 - The preferred direct curated path is the bundle-family enum, such as `EmbeddingModels::GoogleGemma300m`; `ModelSelector` is the parser-friendly wrapper above that.
 - Known selectors for bundles disabled by Cargo features should return `ModelsError::ModelUnavailable`, not a generic unknown-selector error.
 - The embedding caller path should be understandable by reading the `v0.1` example; the text-only chat caller path by reading `v0.2`; and the multimodal chat caller path by reading `v0.3`. The curator path should be understandable by reading the `google_gemma_300m`, `qwen3_4b`, or `gemma4_e2b` bundle modules and the checklist above.
+- Current runtime-metrics support in the examples comes from the `libs/model` handle contract and the `mistral` backend implementation. It uses `sysinfo` for current RSS on macOS and Linux and keeps peak RSS as the maximum sample observed by Motlie during the handle lifetime.
 - Curated artifact download is explicit and independent of the backend library's own cache-miss behavior. Backends consume the curated artifact policy through `StartOptions`. For regulated local bundles, `ArtifactPolicy::LocalOnly` is the intended fail-closed mode.
 - `embeddinggemma_300m` local-only startup depends on the full sentence-transformers module stack being present in the curated artifact root. That requirement is part of the bundle contract, not an ambient `mistralrs` cache behavior.
 - Authentication for protected upstream artifacts belongs only to the out-of-band download/build path. The runtime/bundle startup path does not accept tokens and remains artifact-consumption only.
