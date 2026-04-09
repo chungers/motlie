@@ -7,10 +7,16 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use thiserror::Error;
 
+pub mod chat;
 pub mod embedding;
 pub mod eval;
+pub mod generation;
 
+pub use chat::{ChatMessage, ChatRole, ContentPart};
 pub use embedding::{Embedding, EmbeddingDistance, EmbeddingNormalization, EmbeddingSpec};
+pub use generation::{
+    ChatRequest, ChatResponse, CompletionRequest, CompletionResponse, GenerationParams,
+};
 
 /// Stable product-facing identifier for a curated bundle.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -129,6 +135,26 @@ impl CapabilityDescriptor {
             InteractionStyle::Batch,
         )
     }
+
+    pub fn multimodal_chat() -> Self {
+        Self::new(
+            CapabilityKind::Chat,
+            "Multi-turn interaction with text and image input, text output.",
+            vec![ContentKind::Text, ContentKind::Image],
+            vec![ContentKind::Text],
+            InteractionStyle::MultiTurn,
+        )
+    }
+
+    pub fn vision() -> Self {
+        Self::new(
+            CapabilityKind::Vision,
+            "Image content parts accepted on the chat surface.",
+            vec![ContentKind::Image, ContentKind::Text],
+            vec![ContentKind::Text],
+            InteractionStyle::MultiTurn,
+        )
+    }
 }
 
 /// Supported capability set plus introspective metadata.
@@ -179,6 +205,13 @@ impl Capabilities {
         Self::new(vec![
             CapabilityDescriptor::chat(),
             CapabilityDescriptor::completion(),
+        ])
+    }
+
+    pub fn multimodal_chat_and_vision() -> Self {
+        Self::new(vec![
+            CapabilityDescriptor::multimodal_chat(),
+            CapabilityDescriptor::vision(),
         ])
     }
 }
@@ -241,65 +274,6 @@ pub enum ModelError {
     },
     #[error("unsupported capability: {0:?}")]
     UnsupportedCapability(CapabilityKind),
-}
-
-/// Role labels used in chat-style requests.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ChatRole {
-    Assistant,
-    System,
-    User,
-}
-
-/// Single message in a chat request.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ChatMessage {
-    pub role: ChatRole,
-    pub content: String,
-}
-
-impl ChatMessage {
-    pub fn new(role: ChatRole, content: impl Into<String>) -> Self {
-        Self {
-            role,
-            content: content.into(),
-        }
-    }
-}
-
-/// Shared generation parameters used by text-producing capabilities.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct GenerationParams {
-    pub max_tokens: Option<u32>,
-    pub temperature: Option<f32>,
-    pub top_p: Option<f32>,
-    pub stop_sequences: Vec<String>,
-}
-
-/// Request for chat-style generation.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct ChatRequest {
-    pub messages: Vec<ChatMessage>,
-    pub params: GenerationParams,
-}
-
-/// Response from a chat-style generation call.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct ChatResponse {
-    pub content: String,
-}
-
-/// Request for text completion.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct CompletionRequest {
-    pub prompt: String,
-    pub params: GenerationParams,
-}
-
-/// Response from text completion.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct CompletionResponse {
-    pub content: String,
 }
 
 /// Request for embedding generation.

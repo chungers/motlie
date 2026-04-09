@@ -17,6 +17,7 @@
 | 2026-04-08 | @codex-researcher: Documented the per-bundle feature-gating convention and the `ModelUnavailable` behavior for known selectors that are disabled in the current build. | Overview, Core Types, Notes |
 | 2026-04-08 | @codex-researcher: Clarified the local-only startup boundary after PR 139 review. Curated bundle modules now resolve and validate provider-specific cache layout before startup, while generic backends consume only a resolved local model path. Also clarified that selector strings are composed from capability family plus model selector rather than hardcoded one-off branches. | Overview, API Sketch, Notes |
 | 2026-04-08 | @claude: Added the Qwen3-4B chat bundle (#141). New `ChatModels` enum, `ModelSelector::Chat` variant, `chat:qwen/qwen3_4b` parsing, ISQ quantization via `StartOptions.quantization`, and `v0.2` example. | Overview, Core Types, API Sketch, Example Program |
+| 2026-04-08 | @codex-researcher: Added the Gemma 4 E2B-it multimodal chat slice (#142). `ChatModels` now includes `Gemma4E2B`, `ModelSelector` supports `chat:google/gemma4_e2b`, and `examples/v0.3` documents the direct text-only and image+text caller paths. | Overview, Core Types, API Sketch, Example Program, Notes |
 
 This document sketches the concrete API shapes currently introduced in `libs/models`. The crate now owns both the descriptor catalog and the curated bundle constructors that bind those descriptors to a backend implementation.
 
@@ -378,7 +379,7 @@ For a new curated embedding bundle, the intended implementation checklist is:
 - `Catalog` now also owns curated bundle instantiation through registered constructors.
 - The preferred direct curated path is the bundle-family enum, such as `EmbeddingModels::GoogleGemma300m`; `ModelSelector` is the parser-friendly wrapper above that.
 - Known selectors for bundles disabled by Cargo features should return `ModelsError::ModelUnavailable`, not a generic unknown-selector error.
-- The embedding caller path should be understandable by reading the `v0.1` example; the chat caller path by reading `v0.2`. The curator path should be understandable by reading the `google_gemma_300m` or `qwen3_4b` bundle modules and the checklist above.
+- The embedding caller path should be understandable by reading the `v0.1` example; the text-only chat caller path by reading `v0.2`; and the multimodal chat caller path by reading `v0.3`. The curator path should be understandable by reading the `google_gemma_300m`, `qwen3_4b`, or `gemma4_e2b` bundle modules and the checklist above.
 - Curated artifact download is explicit and independent of the backend library's own cache-miss behavior. Backends consume the curated artifact policy through `StartOptions`. For regulated local bundles, `ArtifactPolicy::LocalOnly` is the intended fail-closed mode.
 - `embeddinggemma_300m` local-only startup depends on the full sentence-transformers module stack being present in the curated artifact root. That requirement is part of the bundle contract, not an ambient `mistralrs` cache behavior.
 - Authentication for protected upstream artifacts belongs only to the out-of-band download/build path. The runtime/bundle startup path does not accept tokens and remains artifact-consumption only.
@@ -386,9 +387,8 @@ For a new curated embedding bundle, the intended implementation checklist is:
 
 ## Next Step
 
-The text-only chat path is now functional (Qwen3-4B with ISQ). The next contract changes should focus on multimodal and operational richness:
+The text-only and first multimodal chat paths are now functional (Qwen3-4B with ISQ and Gemma 4 E2B-it through the multimodal builder path). The next contract changes should focus on richer response metadata and tool-calling:
 
-- multimodal chat content parts (`ChatMessage.content` → `Vec<ContentPart>`) for Gemma 4 (#142)
 - richer `ChatResponse` metadata (finish reason, usage, tool calls)
 - tool-calling message roles and correlation fields (`ChatRole::Tool`)
 - additive `StartOptions` controls for device selection and context-length policy

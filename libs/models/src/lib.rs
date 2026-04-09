@@ -4,7 +4,11 @@
 
 use std::collections::BTreeMap;
 use std::error::Error as StdError;
-#[cfg(any(feature = "model-qwen3-4b", feature = "model-google-gemma-300m"))]
+#[cfg(any(
+    feature = "model-qwen3-4b",
+    feature = "model-google-gemma-300m",
+    feature = "model-gemma4-e2b"
+))]
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -79,8 +83,8 @@ pub fn resolve_hf_snapshot(
 ) -> std::result::Result<PathBuf, motlie_model::ModelError> {
     use hf_hub::{Cache, Repo, RepoType};
 
-    let repo = Cache::new(cache_root.to_path_buf())
-        .repo(Repo::new(model_id.to_owned(), RepoType::Model));
+    let repo =
+        Cache::new(cache_root.to_path_buf()).repo(Repo::new(model_id.to_owned(), RepoType::Model));
 
     let config = repo.get("config.json").ok_or_else(|| {
         motlie_model::ModelError::InvalidConfiguration(format!(
@@ -262,6 +266,7 @@ pub fn download_bundle_artifacts_with_options(
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BundleFamily {
     Embeddings,
+    Gemma,
     Gpt,
     Hermes,
     Other(String),
@@ -328,17 +333,21 @@ impl BundleDescriptor {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ModelSelector {
-    #[cfg(feature = "model-qwen3-4b")]
+    #[cfg(any(feature = "model-qwen3-4b", feature = "model-gemma4-e2b"))]
     Chat(ChatModels),
     #[cfg(feature = "model-google-gemma-300m")]
     Embedding(EmbeddingModels),
 }
 
-#[cfg(any(feature = "model-qwen3-4b", feature = "model-google-gemma-300m"))]
+#[cfg(any(
+    feature = "model-qwen3-4b",
+    feature = "model-google-gemma-300m",
+    feature = "model-gemma4-e2b"
+))]
 impl ModelSelector {
     pub fn as_str(&self) -> String {
         match self {
-            #[cfg(feature = "model-qwen3-4b")]
+            #[cfg(any(feature = "model-qwen3-4b", feature = "model-gemma4-e2b"))]
             Self::Chat(model) => format!("chat:{}", model.as_str()),
             #[cfg(feature = "model-google-gemma-300m")]
             Self::Embedding(model) => format!("embedding:{}", model.as_str()),
@@ -347,7 +356,7 @@ impl ModelSelector {
 
     pub fn bundle_id(&self) -> BundleId {
         match self {
-            #[cfg(feature = "model-qwen3-4b")]
+            #[cfg(any(feature = "model-qwen3-4b", feature = "model-gemma4-e2b"))]
             Self::Chat(model) => model.bundle_id(),
             #[cfg(feature = "model-google-gemma-300m")]
             Self::Embedding(model) => model.bundle_id(),
@@ -356,7 +365,7 @@ impl ModelSelector {
 
     pub fn descriptor(&self) -> BundleDescriptor {
         match self {
-            #[cfg(feature = "model-qwen3-4b")]
+            #[cfg(any(feature = "model-qwen3-4b", feature = "model-gemma4-e2b"))]
             Self::Chat(model) => model.descriptor(),
             #[cfg(feature = "model-google-gemma-300m")]
             Self::Embedding(model) => model.descriptor(),
@@ -365,7 +374,7 @@ impl ModelSelector {
 
     pub fn bundle(&self) -> Box<dyn ModelBundle> {
         match self {
-            #[cfg(feature = "model-qwen3-4b")]
+            #[cfg(any(feature = "model-qwen3-4b", feature = "model-gemma4-e2b"))]
             Self::Chat(model) => model.bundle(),
             #[cfg(feature = "model-google-gemma-300m")]
             Self::Embedding(model) => model.bundle(),
@@ -373,7 +382,11 @@ impl ModelSelector {
     }
 }
 
-#[cfg(any(feature = "model-qwen3-4b", feature = "model-google-gemma-300m"))]
+#[cfg(any(
+    feature = "model-qwen3-4b",
+    feature = "model-google-gemma-300m",
+    feature = "model-gemma4-e2b"
+))]
 impl fmt::Display for ModelSelector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.as_str())
@@ -385,15 +398,21 @@ impl FromStr for ModelSelector {
 
     fn from_str(value: &str) -> Result<Self> {
         if let Some(raw) = value.strip_prefix("chat:") {
+            #[cfg(not(feature = "model-gemma4-e2b"))]
+            if raw == chat::GEMMA4_E2B_SELECTOR {
+                return Err(ModelsError::ModelUnavailable {
+                    selector: value.to_owned(),
+                });
+            }
             #[cfg(not(feature = "model-qwen3-4b"))]
             if raw == chat::QWEN3_4B_SELECTOR {
                 return Err(ModelsError::ModelUnavailable {
                     selector: value.to_owned(),
                 });
             }
-            #[cfg(feature = "model-qwen3-4b")]
+            #[cfg(any(feature = "model-qwen3-4b", feature = "model-gemma4-e2b"))]
             return Ok(Self::Chat(raw.parse()?));
-            #[cfg(not(feature = "model-qwen3-4b"))]
+            #[cfg(not(any(feature = "model-qwen3-4b", feature = "model-gemma4-e2b")))]
             return Err(ModelsError::UnknownModelSelector {
                 selector: value.to_owned(),
             });
@@ -457,8 +476,10 @@ impl Catalog {
             embeddings::google_gemma_300m::bundle()
         });
         #[cfg(feature = "model-qwen3-4b")]
-        catalog.register(chat::qwen3_4b::descriptor(), || {
-            chat::qwen3_4b::bundle()
+        catalog.register(chat::qwen3_4b::descriptor(), || chat::qwen3_4b::bundle());
+        #[cfg(feature = "model-gemma4-e2b")]
+        catalog.register(chat::gemma4_e2b::descriptor(), || {
+            chat::gemma4_e2b::bundle()
         });
         catalog
     }
@@ -684,6 +705,16 @@ mod tests {
 
     #[test]
     fn chat_models_round_trip_string_selectors() {
+        #[cfg(feature = "model-gemma4-e2b")]
+        {
+            let model: ChatModels = "google/gemma4_e2b"
+                .parse()
+                .expect("known multimodal chat selector should parse");
+
+            assert_eq!(model, ChatModels::Gemma4E2B);
+            assert_eq!(model.to_string(), "google/gemma4_e2b");
+        }
+
         #[cfg(feature = "model-qwen3-4b")]
         {
             let model: ChatModels = "qwen/qwen3_4b"
@@ -697,23 +728,40 @@ mod tests {
 
     #[test]
     fn model_selector_parses_chat_prefix() {
+        #[cfg(feature = "model-gemma4-e2b")]
+        {
+            let selector: ModelSelector = "chat:google/gemma4_e2b"
+                .parse()
+                .expect("known multimodal chat model selector should parse");
+
+            assert_eq!(selector, ModelSelector::Chat(ChatModels::Gemma4E2B));
+            assert_eq!(selector.to_string(), "chat:google/gemma4_e2b");
+        }
+
         #[cfg(feature = "model-qwen3-4b")]
         {
             let selector: ModelSelector = "chat:qwen/qwen3_4b"
                 .parse()
                 .expect("known chat model selector should parse");
 
-            assert_eq!(
-                selector,
-                ModelSelector::Chat(ChatModels::Qwen3_4B)
-            );
+            assert_eq!(selector, ModelSelector::Chat(ChatModels::Qwen3_4B));
             assert_eq!(selector.to_string(), "chat:qwen/qwen3_4b");
         }
     }
 
-    #[cfg(not(feature = "model-qwen3-4b"))]
+    #[cfg(not(any(feature = "model-gemma4-e2b", feature = "model-qwen3-4b")))]
     #[test]
     fn chat_selector_reports_unavailable_for_disabled_bundles() {
+        let gemma_err = "chat:google/gemma4_e2b"
+            .parse::<ModelSelector>()
+            .expect_err("disabled known gemma chat selector should be unavailable");
+
+        assert!(matches!(
+            gemma_err,
+            ModelsError::ModelUnavailable { selector }
+            if selector == "chat:google/gemma4_e2b"
+        ));
+
         let err = "chat:qwen/qwen3_4b"
             .parse::<ModelSelector>()
             .expect_err("disabled known chat selector should be unavailable");
@@ -722,6 +770,34 @@ mod tests {
             err,
             ModelsError::ModelUnavailable { selector }
             if selector == "chat:qwen/qwen3_4b"
+        ));
+    }
+
+    #[cfg(all(feature = "model-gemma4-e2b", not(feature = "model-qwen3-4b")))]
+    #[test]
+    fn qwen_chat_selector_reports_unavailable_when_only_gemma_is_enabled() {
+        let err = "chat:qwen/qwen3_4b"
+            .parse::<ModelSelector>()
+            .expect_err("disabled qwen selector should be unavailable");
+
+        assert!(matches!(
+            err,
+            ModelsError::ModelUnavailable { selector }
+            if selector == "chat:qwen/qwen3_4b"
+        ));
+    }
+
+    #[cfg(all(not(feature = "model-gemma4-e2b"), feature = "model-qwen3-4b"))]
+    #[test]
+    fn gemma_chat_selector_reports_unavailable_when_only_qwen_is_enabled() {
+        let err = "chat:google/gemma4_e2b"
+            .parse::<ModelSelector>()
+            .expect_err("disabled gemma selector should be unavailable");
+
+        assert!(matches!(
+            err,
+            ModelsError::ModelUnavailable { selector }
+            if selector == "chat:google/gemma4_e2b"
         ));
     }
 

@@ -1,10 +1,10 @@
-use std::path::{Path, PathBuf};
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
     BundleId, CapabilityDescriptor, ContentKind, Embedding as EmbeddingBundle, EmbeddingDistance,
     EmbeddingNormalization, EmbeddingSpec, ModelBundle, ModelError, StartOptions,
 };
 use motlie_model_mistral::{MistralEmbeddingBundle, MistralEmbeddingSpec};
+use std::path::{Path, PathBuf};
 
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleArtifacts, BundleDescriptor,

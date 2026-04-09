@@ -12,6 +12,7 @@
 | 2026-04-08 | @codex-researcher: Locked down the crate hierarchy and direct bundle namespace so future work does not drift. Also removed over-modeled public metadata from the recommended surface and documented the preferred direct bundle API next to `Catalog`. | Architecture, Bundle Catalog Model, API Sketch |
 | 2026-04-08 | @codex-researcher: Added the bundle-build convention: curated bundles are feature-gated individually, the direct enum and `ModelSelector` only expose compiled-in bundles, and known-but-disabled bundles should report `ModelUnavailable`. | Architecture, Bundle Catalog Model, Packaging and Deployment Model |
 | 2026-04-08 | @codex-researcher: Clarified the reviewed backend/artifact boundary. Provider-specific cache layout resolution and local artifact validation belong in curated bundle modules under `libs/models`, while generic backends under `libs/model/backends/*` consume only resolved local model paths or fetch-enabled cache roots. | Architecture, Packaging and Deployment Model, Backend Composition |
+| 2026-04-08 | @codex-researcher: Added the Gemma 4 E2B-it multimodal chat slice (#142) as the third curated vertical slice. The direct module path, `ChatModels` / `ModelSelector` selector path, per-bundle feature gate, and `examples/v0.3` now extend the established curator conventions beyond embeddings (`v0.1`) and text-only chat (`v0.2`). | Architecture, Bundle Catalog Model, API Sketch |
 
 This document defines the design for `libs/models`, the curated bundle library that exposes opinionated model stacks as deployable product modules. A bundle in this crate includes vetted weights when applicable, a chosen backend or transport, packaging policy when applicable, capability wiring, and consistent lifecycle behavior through the contracts defined in `libs/model`.
 
@@ -112,6 +113,10 @@ Concrete hierarchy rule:
 libs/models/
   src/
     lib.rs
+    chat/
+      mod.rs
+      qwen3_4b.rs
+      gemma4_e2b.rs
     embeddings/
       mod.rs
       google_gemma_300m.rs
@@ -123,6 +128,8 @@ Public namespace rule:
 
 ```rust
 motlie_models::Catalog
+motlie_models::chat::qwen3_4b::descriptor()
+motlie_models::chat::gemma4_e2b::bundle()
 motlie_models::embeddings::google_gemma_300m::descriptor()
 motlie_models::embeddings::google_gemma_300m::bundle()
 ```
@@ -210,12 +217,13 @@ For example:
 
 ```toml
 [features]
-default = ["model-google-gemma-300m"]
+default = ["model-google-gemma-300m", "model-qwen3-4b", "model-gemma4-e2b"]
 
 model-google-gemma-300m = []
-model-qwen3-embed-600m = []
-profile-macos = ["model-google-gemma-300m"]
-profile-dgx = ["model-google-gemma-300m", "model-qwen3-embed-600m"]
+model-qwen3-4b = []
+model-gemma4-e2b = []
+profile-macos = ["model-google-gemma-300m", "model-qwen3-4b"]
+profile-dgx = ["model-google-gemma-300m", "model-qwen3-4b", "model-gemma4-e2b"]
 ```
 
 This means:
@@ -239,12 +247,10 @@ libs/models/
     embeddings/
       mod.rs
       google_gemma_300m.rs
-    qwen/
+    chat/
       mod.rs
-      qwen3_5_instruct.rs
-    hermes/
-      mod.rs
-      hermes3_chat.rs
+      qwen3_4b.rs
+      gemma4_e2b.rs
     bin/
       download_artifacts.rs
 ```

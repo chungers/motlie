@@ -4613,6 +4613,7 @@ name = "motlie-model-mistral"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "image",
  "mistralrs",
  "motlie-model",
  "tokio",

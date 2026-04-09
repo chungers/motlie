@@ -10,6 +10,7 @@
 | 2026-04-08 | @codex-researcher | Added an explicit follow-up phase for the post-embedding contract extensions already known to be needed for the planned chat, multimodal, and tool-calling bundles. | Phase 6 |
 | 2026-04-08 | @codex-researcher | Tightened the phase notes after PR 139 review. `LoadedBundleDescriptor` is now implemented as the loaded-instance alias of `BundleMetadata`, and the v0.1 `ModelError` surface now includes explicit backend initialization/execution variants rather than only string-erased `Internal` errors. | Phases 1, 2 |
 | 2026-04-08 | @claude | Implemented `QuantizationBits` in `StartOptions` for #141. Partial completion of Phase 6.3 — quantization delivered, device selection and context-length still pending. | Phase 6 |
+| 2026-04-08 | @codex-researcher | Implemented the first vision-capable bundle contract for #142: `ChatMessage` now carries multimodal content parts, `CapabilityDescriptor` has multimodal chat / vision built-ins, and the Gemma 4 slice can reuse the existing `ChatModel` trait without introducing a separate `VisionModel`. | Phase 3, Phase 6 |
 
 Derived from [DESIGN.md](./DESIGN.md). This PLAN covers the contract work needed to support the first end-to-end embedding vertical slice while preserving the longer-term curated-bundle architecture.
 
@@ -146,9 +147,9 @@ Track the already-known follow-up work needed before the first non-embedding cur
 
 ### 6.1 — Multimodal chat request surface
 
-- [ ] Replace `ChatMessage.content: String` with a multimodal content-parts representation before the first vision-capable bundle ships (#142).
+- [x] Replace `ChatMessage.content: String` with a multimodal content-parts representation before the first vision-capable bundle ships (#142).
   DESIGN reference: `Capability Surfaces`
-- [ ] Ensure `CapabilityKind::Vision` is documented and implemented as a descriptive flag on the chat surface unless and until a separate executable trait is truly needed.
+- [x] Ensure `CapabilityKind::Vision` is documented and implemented as a descriptive flag on the chat surface unless and until a separate executable trait is truly needed.
   DESIGN reference: `Core Abstractions` / `Capability Model`
 
 ### 6.2 — Tool-calling and richer chat metadata
