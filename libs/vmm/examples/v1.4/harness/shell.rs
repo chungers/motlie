@@ -20,7 +20,7 @@ use tokio::sync::mpsc;
 use crate::terminal::{HarnessTerminalSession, TerminalBackendKind};
 use crate::{
     APT_UPDATE_COMMAND, DynError, HarnessInstance, PACKAGE_MANAGER_QUIESCENT_COMMAND, demo_guest,
-    ensure_file_exists, print_instance_details, seed_host_mounts,
+    ensure_file_exists, print_instance_details, seed_host_mounts, wait_for_egress_ready,
 };
 
 pub async fn run_shell(
@@ -699,12 +699,6 @@ async fn validate_guest(
             Duration::from_secs(10),
         ),
         (
-            "egress: curl https://example.com",
-            "/bin/sh -lc 'code=$(curl -s -o /dev/null -w \"%{http_code}\" https://example.com); test \"$code\" = 200 && echo HTTPS_OK'".to_string(),
-            "HTTPS_OK".to_string(),
-            Duration::from_secs(20),
-        ),
-        (
             "apt: package manager quiescent",
             PACKAGE_MANAGER_QUIESCENT_COMMAND.to_string(),
             "PKG_IDLE_OK".to_string(),
@@ -737,6 +731,26 @@ async fn validate_guest(
         }
     }
 
+    match wait_for_egress_ready(handle, Duration::from_secs(30)).await {
+        Ok(output) if output.exit_code == 0 && output.stdout.contains("EGRESS_OK") => {
+            println!("ok: egress: DNS + HTTPS ready for example.com and www.google.com");
+            passed += 1;
+        }
+        Ok(output) => {
+            println!(
+                "fail: egress: DNS + HTTPS ready exit={} stdout={} stderr={}",
+                output.exit_code,
+                excerpt(&output.stdout),
+                excerpt(&output.stderr)
+            );
+            failed += 1;
+        }
+        Err(err) => {
+            println!("fail: egress: DNS + HTTPS ready error={err}");
+            failed += 1;
+        }
+    }
+
     println!("validation: {} passed, {} failed", passed, failed);
     if failed == 0 {
         Ok(())
@@ -759,4 +773,14 @@ fn print_exec_output(output: &ExecOutput) {
         }
     }
     println!("exit={}", output.exit_code);
+}
+
+fn excerpt(value: &str) -> String {
+    const LIMIT: usize = 200;
+    let trimmed = value.trim();
+    if trimmed.len() <= LIMIT {
+        trimmed.to_string()
+    } else {
+        format!("{}...", &trimmed[..LIMIT])
+    }
 }

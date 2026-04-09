@@ -27,7 +27,7 @@ use crate::terminal::{
 };
 use crate::{
     DynError, HarnessInstance, PACKAGE_MANAGER_QUIESCENT_COMMAND, demo_guest, ensure_file_exists,
-    persist_json, print_instance_details, seed_host_mounts,
+    persist_json, print_instance_details, seed_host_mounts, wait_for_egress_ready,
 };
 
 #[derive(Debug, Deserialize)]
@@ -58,6 +58,11 @@ pub enum ScenarioStep {
         expect: Option<ExecExpectation>,
     },
     WaitPackageManagerQuiescent {
+        guest: String,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    },
+    WaitEgressReady {
         guest: String,
         #[serde(default)]
         timeout_ms: Option<u64>,
@@ -592,6 +597,34 @@ impl ScenarioDriver {
                     shutdown: None,
                 })
             }
+            ScenarioStep::WaitEgressReady { guest, timeout_ms } => {
+                let handle = self.handle(guest)?;
+                let output =
+                    wait_for_egress_ready(handle, duration_or_default(*timeout_ms, 30_000))
+                        .await
+                        .map_err(ScenarioDriverError::Exec)?;
+                check_exec_expectation(
+                    &ExecExpectation {
+                        exit_code: Some(0),
+                        stdout_contains: Some("EGRESS_OK".to_string()),
+                        stderr_contains: None,
+                    },
+                    &output,
+                )?;
+                Ok(ScenarioStepResult {
+                    index,
+                    action: "wait_egress_ready",
+                    guest: Some(guest.clone()),
+                    session: None,
+                    detail: format!(
+                        "DNS + HTTPS ready for manual-certification targets on {guest}"
+                    ),
+                    exec: Some(output),
+                    pty_read: None,
+                    screen: None,
+                    shutdown: None,
+                })
+            }
             ScenarioStep::PtyOpen {
                 guest,
                 session,
@@ -888,6 +921,7 @@ fn action_name(step: &ScenarioStep) -> &'static str {
         ScenarioStep::Ready { .. } => "ready",
         ScenarioStep::Exec { .. } => "exec",
         ScenarioStep::WaitPackageManagerQuiescent { .. } => "wait_package_manager_quiescent",
+        ScenarioStep::WaitEgressReady { .. } => "wait_egress_ready",
         ScenarioStep::PtyOpen { .. } => "pty_open",
         ScenarioStep::PtySend { .. } => "pty_send",
         ScenarioStep::PtySendLine { .. } => "pty_send_line",
@@ -907,6 +941,7 @@ fn step_guest(step: &ScenarioStep) -> Option<&str> {
         | ScenarioStep::Ready { guest, .. }
         | ScenarioStep::Exec { guest, .. }
         | ScenarioStep::WaitPackageManagerQuiescent { guest, .. }
+        | ScenarioStep::WaitEgressReady { guest, .. }
         | ScenarioStep::PtyOpen { guest, .. }
         | ScenarioStep::Shutdown { guest } => Some(guest),
         _ => None,

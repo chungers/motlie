@@ -43,6 +43,7 @@ use demo_support::{demo_guest_ids, demo_guest_socket_path};
 type DynError = Box<dyn std::error::Error + Send + Sync>;
 
 pub(crate) const PACKAGE_MANAGER_QUIESCENT_COMMAND: &str = "/bin/sh -lc 'idle=0; for _ in $(seq 1 60); do if ! pgrep -x apt >/dev/null 2>&1 && ! pgrep -x apt-get >/dev/null 2>&1 && ! pgrep -x dpkg >/dev/null 2>&1 && ! pgrep -x unattended-upgr >/dev/null 2>&1 && ! pgrep -x unattended-upgrade >/dev/null 2>&1; then idle=$((idle+1)); if [ \"$idle\" -ge 5 ]; then echo PKG_IDLE_OK; exit 0; fi; else idle=0; fi; sleep 1; done; exit 1'";
+pub(crate) const EGRESS_READY_COMMAND: &str = "/bin/sh -lc 'set -eu; getent hosts example.com >/dev/null; getent hosts www.google.com >/dev/null; code=$(curl -sS -o /dev/null -w \"%{http_code}\" --connect-timeout 5 --max-time 15 https://example.com); test \"$code\" = 200; code=$(curl -sS -o /dev/null -w \"%{http_code}\" --connect-timeout 5 --max-time 15 https://www.google.com/generate_204); test \"$code\" = 204; echo EGRESS_OK'";
 pub(crate) const APT_UPDATE_COMMAND: &str =
     "/bin/sh -lc 'sudo -n apt-get update >/tmp/motlie-vmm-apt-update.log 2>&1 && echo APT_OK'";
 
@@ -644,21 +645,17 @@ async fn run_smoke(handle: &VmHandle) -> Result<Vec<ScenarioCheck>, HarnessError
         detail: "default route points at Motlie vnet".to_string(),
     });
 
-    let outbound = exec_until_success(
-        handle,
-        r#"/bin/sh -lc 'code=$(curl -s -o /dev/null -w "%{http_code}" https://example.com); test "$code" = 200 && echo HTTPS_OK'"#,
-        "HTTPS_OK",
-        Duration::from_secs(20),
-    )
-    .await
-    .map_err(|source| HarnessError::SmokeExec {
-        check: "https",
-        source,
-    })?;
-    ensure_contains("https", &outbound.stdout, "HTTPS_OK")?;
+    let outbound = wait_for_egress_ready(handle, Duration::from_secs(30))
+        .await
+        .map_err(|source| HarnessError::SmokeExec {
+            check: "egress-ready",
+            source,
+        })?;
+    ensure_contains("egress-ready", &outbound.stdout, "EGRESS_OK")?;
     checks.push(ScenarioCheck {
-        name: "https".to_string(),
-        detail: "outbound HTTPS fetch succeeded".to_string(),
+        name: "egress-ready".to_string(),
+        detail: "DNS resolution and outbound HTTPS succeeded for the manual-certification targets"
+            .to_string(),
     });
 
     let package_manager = handle
@@ -1170,4 +1167,11 @@ async fn exec_until_success(
 
         sleep(Duration::from_secs(1)).await;
     }
+}
+
+pub(crate) async fn wait_for_egress_ready(
+    handle: &VmHandle,
+    timeout: Duration,
+) -> Result<ExecOutput, OrchestratorError> {
+    exec_until_success(handle, EGRESS_READY_COMMAND, "EGRESS_OK", timeout).await
 }
