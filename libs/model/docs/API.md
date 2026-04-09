@@ -13,6 +13,7 @@
 | 2026-04-08 | @codex-researcher: Added the end-to-end embedding bundle contract flow and the explicit bridge to `motlie_db::vector::EmbeddingSpec` / `Distance` so implementers can wire curated embedding bundles into the vector subsystem without guessing. | Overview, Bundle API Sketch, Notes |
 | 2026-04-08 | @codex-researcher: Added explicit notes on the planned additive chat/multimodal extensions so the current API doc is honest about what is implemented today versus what is already queued for the first chat-capable bundles. | Overview, Core Types, Notes |
 | 2026-04-08 | @codex-researcher: Clarified the implemented loaded-descriptor and backend-error contract after PR 139 review. `LoadedBundleDescriptor` is an alias of `BundleMetadata`, `ModelError` now distinguishes backend initialization and execution failures, and `ArtifactPolicy::LocalOnly` is documented as consuming a curated bundle-resolved local model path. | Overview, Core Types, Bundle API Sketch, Notes |
+| 2026-04-08 | @claude: Added `QuantizationBits` to `StartOptions` and documented the quantized startup pattern for the Qwen3-4B chat slice (#141). | Core Types, Bundle API Sketch |
 
 This document sketches the concrete contract shapes currently introduced in `libs/model`. It covers both the core bundle lifecycle/capability contracts and the lightweight `model::eval` vocabulary that higher-level harness tooling should build on.
 
@@ -36,8 +37,9 @@ The goal is to give downstream crates a stable contract surface while keeping th
 
 Important scope note:
 
-- this API is complete for the current embedding vertical slice
-- the first chat-capable bundles will require additive extensions already tracked in `DESIGN.md` / `PLAN.md`, including multimodal chat content, `ChatRole::Tool`, richer `ChatResponse` metadata, and more detailed `StartOptions`
+- this API covers the embedding vertical slice and the first chat vertical slice (Qwen3-4B)
+- `QuantizationBits` has been added to `StartOptions` for ISQ quantization of local chat models
+- remaining planned additive extensions are tracked in `DESIGN.md` / `PLAN.md`, including multimodal chat content, `ChatRole::Tool`, and richer `ChatResponse` metadata
 
 For the current vertical slice, this contract is intended to support an end-to-end flow of:
 
@@ -61,6 +63,7 @@ Primary bundle-contract types:
 - `BundleMetadata`
 - `StartOptions`
 - `ArtifactPolicy`
+- `QuantizationBits`
 - `LoadedBundleDescriptor`
 - `ModelError`
 - `EmbeddingDistance`
@@ -331,6 +334,30 @@ let permissive = StartOptions {
     ..Default::default()
 };
 ```
+
+### Quantized Startup
+
+```rust
+use motlie_model::{ArtifactPolicy, QuantizationBits, StartOptions};
+
+let quantized_q4 = StartOptions {
+    artifact_policy: Some(ArtifactPolicy::LocalOnly {
+        root: PathBuf::from("artifacts/models/hf-cache"),
+    }),
+    quantization: Some(QuantizationBits::Four),
+    ..Default::default()
+};
+
+let full_precision = StartOptions {
+    artifact_policy: Some(ArtifactPolicy::LocalOnly {
+        root: PathBuf::from("artifacts/models/hf-cache"),
+    }),
+    quantization: None,
+    ..Default::default()
+};
+```
+
+`QuantizationBits` is backend-agnostic. The mistral.rs backend maps `Four` → `IsqBits::Four` (ISQ Q4, ~2.5GB for Qwen3-4B) and `Eight` → `IsqBits::Eight`. Embedding bundles ignore the field since small models run comfortably in F32.
 
 ## `model::eval` API Sketch
 
