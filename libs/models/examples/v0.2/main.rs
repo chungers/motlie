@@ -104,6 +104,8 @@ async fn main() -> Result<()> {
         );
     }
 
+    println!("starting bundle (this includes ISQ quantization if enabled)...");
+    let startup_at = Instant::now();
     let handle = bundle
         .start(StartOptions {
             artifact_policy: Some(ArtifactPolicy::LocalOnly {
@@ -114,6 +116,12 @@ async fn main() -> Result<()> {
         })
         .await
         .context("bundle startup should succeed from local artifacts")?;
+    let startup_elapsed = startup_at.elapsed();
+    println!(
+        "startup-latency-ms: {:.0} ({:.1}s)",
+        startup_elapsed.as_secs_f64() * 1000.0,
+        startup_elapsed.as_secs_f64()
+    );
 
     let chat = handle
         .chat()
