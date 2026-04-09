@@ -15,6 +15,7 @@
 | 2026-04-08 | @codex-researcher: Referenced the `libs/models` bundle-build convention so the contract layer is explicit that bundle availability is build-dependent and selector/catalog surfaces may vary by curated feature set. | Architecture, Framework Principles |
 | 2026-04-08 | @codex-researcher: Added explicit future-model follow-up notes for multimodal chat, tool-calling, richer startup controls, and capability-role semantics so the current embedding-first contract can merge with the next required extensions already tracked in-design. | Goals and Non-Goals, Loaded Handle, Capability Model, Capability Surfaces, Open Concerns |
 | 2026-04-08 | @codex-researcher: Clarified the reviewed responsibility split: curated bundles in `libs/models` resolve and validate artifact-layout details, while generic backends consume a plain resolved local model path or fetch-enabled cache root. Also clarified that `LoadedBundleDescriptor` is intentionally the loaded-instance alias of `BundleMetadata` in v0.1 and that `ModelError` now distinguishes backend initialization from backend execution failures. | Architecture, Core Abstractions, Artifact and Packaging Contracts |
+| 2026-04-08 | @claude: Added `QuantizationBits` to `StartOptions` as the first chat/local-model startup extension (Phase 6.3 item). ISQ quantization is a deployment concern mapped by backends to their native mechanism. | Core Abstractions, Lifecycle |
 
 This document defines the design for `libs/model`, the contract crate for Motlie's packaged model system. The crate does not ship concrete model bundles or runtime implementations. Instead, it defines the stable public vocabulary, lifecycle, request/response types, capability adapters, composability boundaries, and artifact contracts that higher-level crates build on.
 
@@ -374,7 +375,7 @@ The contract should allow a loaded bundle handle to serve multiple requests conc
 
 Known additive follow-ups for the next local/chat bundles include:
 
-- quantization selection
+- ~~quantization selection~~ — `QuantizationBits` now implemented in `StartOptions`
 - explicit device selection policy
 - context-length override or budget
 
