@@ -88,8 +88,8 @@ pub(crate) struct TextMetricState {
     pub(crate) total_prompt_tokens: u64,
     pub(crate) total_generated_tokens: u64,
     pub(crate) total_tokens: u64,
-    pub(crate) avg_prompt_tokens_per_sec: Option<u64>,
-    pub(crate) avg_generated_tokens_per_sec: Option<u64>,
+    pub(crate) total_prompt_time_msec: u128,
+    pub(crate) total_generated_time_msec: u128,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -130,9 +130,12 @@ pub(crate) fn observe_text_usage(state: &mut TextMetricState, usage: &Usage) {
         .total_generated_tokens
         .saturating_add(usage.completion_tokens as u64);
     state.total_tokens = state.total_tokens.saturating_add(usage.total_tokens as u64);
-    state.avg_prompt_tokens_per_sec = Some(usage.avg_prompt_tok_per_sec.max(0.0).round() as u64);
-    state.avg_generated_tokens_per_sec =
-        Some(usage.avg_compl_tok_per_sec.max(0.0).round() as u64);
+    state.total_prompt_time_msec = state
+        .total_prompt_time_msec
+        .saturating_add(seconds_to_milliseconds(usage.total_prompt_time_sec));
+    state.total_generated_time_msec = state
+        .total_generated_time_msec
+        .saturating_add(seconds_to_milliseconds(usage.total_completion_time_sec));
 }
 
 pub(crate) fn observe_embedding_request(
@@ -163,8 +166,16 @@ pub(crate) fn snapshot_text_metrics(
             total_prompt_tokens: Some(Tokens(text.total_prompt_tokens)),
             total_generated_tokens: Some(Tokens(text.total_generated_tokens)),
             total_tokens: Some(Tokens(text.total_tokens)),
-            avg_prompt_tokens_per_sec: text.avg_prompt_tokens_per_sec.map(TokensPerSecond),
-            avg_generated_tokens_per_sec: text.avg_generated_tokens_per_sec.map(TokensPerSecond),
+            avg_prompt_tokens_per_sec: aggregate_tokens_per_second(
+                text.total_prompt_tokens,
+                text.total_prompt_time_msec,
+            )
+            .map(TokensPerSecond),
+            avg_generated_tokens_per_sec: aggregate_tokens_per_second(
+                text.total_generated_tokens,
+                text.total_generated_time_msec,
+            )
+            .map(TokensPerSecond),
         }),
         embeddings: None,
     }
@@ -195,6 +206,13 @@ fn duration_to_milliseconds(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
+fn seconds_to_milliseconds(seconds: f32) -> u128 {
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return 0;
+    }
+    (seconds as f64 * 1000.0).round().clamp(0.0, u64::MAX as f64) as u128
+}
+
 fn average_latency(runtime: &RuntimeMetricState) -> Option<Milliseconds> {
     if runtime.request_count == 0 {
         return None;
@@ -203,6 +221,16 @@ fn average_latency(runtime: &RuntimeMetricState) -> Option<Milliseconds> {
         (runtime.total_latency_msec / runtime.request_count as u128)
             .min(u128::from(u64::MAX)) as u64,
     ))
+}
+
+fn aggregate_tokens_per_second(tokens: u64, total_time_msec: u128) -> Option<u64> {
+    if tokens == 0 || total_time_msec == 0 {
+        return None;
+    }
+    Some(
+        ((tokens as u128 * 1000) / total_time_msec)
+            .min(u128::from(u64::MAX)) as u64,
+    )
 }
 
 fn current_resident_memory_bytes() -> Option<u64> {
@@ -221,5 +249,63 @@ fn max_opt_u64(lhs: Option<u64>, rhs: Option<u64>) -> Option<u64> {
         (Some(lhs), None) => Some(lhs),
         (None, Some(rhs)) => Some(rhs),
         (None, None) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mistralrs::core::Usage;
+
+    #[test]
+    fn text_metrics_aggregate_tokens_per_second_across_requests() {
+        let mut runtime = RuntimeMetricState::default();
+        let mut text = TextMetricState::default();
+
+        observe_latency(&mut runtime, Duration::from_millis(100));
+        observe_text_usage(
+            &mut text,
+            &Usage {
+                completion_tokens: 20,
+                prompt_tokens: 10,
+                total_tokens: 30,
+                avg_tok_per_sec: 75.0,
+                avg_prompt_tok_per_sec: 50.0,
+                avg_compl_tok_per_sec: 100.0,
+                total_time_sec: 0.3,
+                total_prompt_time_sec: 0.2,
+                total_completion_time_sec: 0.2,
+            },
+        );
+
+        observe_latency(&mut runtime, Duration::from_millis(200));
+        observe_text_usage(
+            &mut text,
+            &Usage {
+                completion_tokens: 30,
+                prompt_tokens: 30,
+                total_tokens: 60,
+                avg_tok_per_sec: 300.0,
+                avg_prompt_tok_per_sec: 300.0,
+                avg_compl_tok_per_sec: 300.0,
+                total_time_sec: 0.2,
+                total_prompt_time_sec: 0.1,
+                total_completion_time_sec: 0.1,
+            },
+        );
+
+        let snapshot = snapshot_text_metrics(&runtime, &text);
+        let text_metrics = snapshot
+            .text_generation
+            .expect("text metrics should be present");
+
+        assert_eq!(text_metrics.total_prompt_tokens, Some(Tokens(40)));
+        assert_eq!(text_metrics.total_generated_tokens, Some(Tokens(50)));
+        assert_eq!(text_metrics.total_tokens, Some(Tokens(90)));
+        assert_eq!(text_metrics.avg_prompt_tokens_per_sec, Some(TokensPerSecond(133)));
+        assert_eq!(
+            text_metrics.avg_generated_tokens_per_sec,
+            Some(TokensPerSecond(166))
+        );
     }
 }
