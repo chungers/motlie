@@ -208,21 +208,23 @@ impl ShadowEngine {
     }
 
     fn apply_bytes(&mut self, bytes: &[u8]) -> TerminalFeedResult {
-        let auto_responses = if bytes
-            .windows(CURSOR_POSITION_REQUEST.len())
-            .any(|window| window == CURSOR_POSITION_REQUEST)
-        {
-            let response = self.cursor_position_response();
-            bytes
-                .windows(CURSOR_POSITION_REQUEST.len())
-                .filter(|window| *window == CURSOR_POSITION_REQUEST)
-                .map(|_| response.clone())
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let mut auto_responses = Vec::new();
+        let mut cursor = 0usize;
 
-        self.terminal.advance_bytes(bytes);
+        while let Some(relative_match) = find_subslice(&bytes[cursor..], CURSOR_POSITION_REQUEST) {
+            let request_start = cursor + relative_match;
+            if request_start > cursor {
+                self.terminal.advance_bytes(&bytes[cursor..request_start]);
+            }
+            auto_responses.push(self.cursor_position_response());
+            self.terminal.advance_bytes(CURSOR_POSITION_REQUEST);
+            cursor = request_start + CURSOR_POSITION_REQUEST.len();
+        }
+
+        if cursor < bytes.len() {
+            self.terminal.advance_bytes(&bytes[cursor..]);
+        }
+
         TerminalFeedResult { auto_responses }
     }
 
@@ -258,8 +260,17 @@ impl ShadowEngine {
 
     fn cursor_position_response(&self) -> Vec<u8> {
         let cursor = self.terminal.cursor_pos();
-        format!("\x1b[{};{}R", cursor.y, cursor.x).into_bytes()
+        format!("\x1b[{};{}R", cursor.y + 1, cursor.x + 1).into_bytes()
     }
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 const fn wezterm_size(cols: usize, rows: usize) -> wezterm_term::TerminalSize {

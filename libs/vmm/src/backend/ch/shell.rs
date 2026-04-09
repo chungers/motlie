@@ -12,13 +12,13 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use crate::backend::{
-    BackendError, BackendHandle, BackendKind, BackendShutdownOutcome, VmBackend,
-    VmBackendCapabilities,
+    BackendError, BackendHandle, BackendKind, BackendShutdownOutcome, VmBackendCapabilities,
 };
 use crate::orchestrator::PreparedGuest;
 
 const CH_SHELL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const CH_SHELL_SHUTDOWN_POLL: Duration = Duration::from_millis(100);
+const CH_VM_SHUTDOWN_HTTP_PATH: &str = "/api/v1/vm.shutdown";
 
 #[derive(Debug)]
 pub struct ChShellHandle {
@@ -198,7 +198,10 @@ impl ChShellBackend {
             })?;
         stream
             .write_all(
-                b"PUT /api/v1/vm.shutdown HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                format!(
+                    "PUT {CH_VM_SHUTDOWN_HTTP_PATH} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+                )
+                .as_bytes(),
             )
             .map_err(|source| ChShellError::ShutdownApi {
                 path: api_socket.to_path_buf(),
@@ -255,12 +258,12 @@ impl ChShellHandle {
     }
 }
 
-impl VmBackend for ChShellBackend {
-    fn kind(&self) -> BackendKind {
+impl ChShellBackend {
+    pub fn kind(&self) -> BackendKind {
         BackendKind::ChShell
     }
 
-    fn capabilities(&self) -> VmBackendCapabilities {
+    pub fn capabilities(&self) -> VmBackendCapabilities {
         VmBackendCapabilities {
             same_process_vmm: false,
             supports_api_socket: true,
@@ -271,7 +274,7 @@ impl VmBackend for ChShellBackend {
         }
     }
 
-    fn boot(&self, prepared: &PreparedGuest) -> Result<BackendHandle, BackendError> {
+    pub fn boot(&self, prepared: &PreparedGuest) -> Result<BackendHandle, BackendError> {
         let launch_script_path = Self::launch_script_path(prepared);
         self.materialize_launch_script(prepared, &launch_script_path)?;
         let launch_log_path = prepared.runtime_paths.launch_log.clone();
@@ -306,7 +309,7 @@ impl VmBackend for ChShellBackend {
         }))
     }
 
-    fn shutdown(&self, handle: &BackendHandle) -> Result<BackendShutdownOutcome, BackendError> {
+    pub fn shutdown(&self, handle: &BackendHandle) -> Result<BackendShutdownOutcome, BackendError> {
         let shell_handle = match handle {
             BackendHandle::ChShell(shell_handle) => shell_handle,
         };
@@ -398,7 +401,7 @@ mod tests {
             guest: GuestSpec {
                 guest_id: "alice".to_string(),
                 hostname: "motlie-alice".to_string(),
-                socket_path: "/tmp/motlie-vmm-v14-alice.vsock_5000".to_string(),
+                socket_path: PathBuf::from("/tmp/motlie-vmm-v14-alice.vsock_5000"),
                 user: GuestUser {
                     name: "alice".to_string(),
                     uid: 1000,

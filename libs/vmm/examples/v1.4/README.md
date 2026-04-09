@@ -22,6 +22,9 @@
 
 Repeatable validation entrypoints now are:
 
+- run these commands from the repo root, for example:
+  - `cd /tmp/vmm-v1.4`
+
 - harness lifecycle smoke:
   - `./target/debug/examples/harness_v1_4`
 - harness PTY smoke:

@@ -1,16 +1,16 @@
-use std::sync::Arc;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::backend::ch::shell::ChShellBackend;
-use crate::backend::{BackendError, BackendHandle, BackendShutdownOutcome, VmBackend};
 use crate::backend::motlie::ssh_proxy::{MotlieSshProxyBacking, MotlieSshProxyHandle};
 use crate::backend::motlie::vfs::{MotlieVfsBacking, MotlieVfsHandle};
 use crate::backend::motlie::vnet::{MotlieVnetBacking, MotlieVnetHandle, MotlieVnetProvisionError};
+use crate::backend::{BackendError, BackendHandle, BackendShutdownOutcome};
 use crate::guestfs::GuestFsError;
 use crate::orchestrator::PreparedGuest;
-use crate::ssh::{ExecOutput, GuestPtySession, PtyRequest, SshProxyError};
 use crate::spec::GuestSpec;
+use crate::ssh::{ExecOutput, GuestPtySession, PtyRequest, SshProxyError};
 use motlie_vnet::VnetError;
 
 #[derive(Debug, Clone)]
@@ -112,10 +112,16 @@ impl HypervisorBacking {
 }
 
 impl FilesystemBacking {
-    pub async fn provision(&self, guest: &GuestSpec) -> Result<Option<FilesystemHandle>, RuntimeError> {
+    pub async fn provision(
+        &self,
+        guest: &GuestSpec,
+    ) -> Result<Option<FilesystemHandle>, RuntimeError> {
         match self {
             Self::HypervisorManaged => Ok(None),
-            Self::MotlieVfs(backing) => Ok(backing.provision(guest).await?.map(FilesystemHandle::MotlieVfs)),
+            Self::MotlieVfs(backing) => Ok(backing
+                .provision(guest)
+                .await?
+                .map(FilesystemHandle::MotlieVfs)),
         }
     }
 }
@@ -153,7 +159,10 @@ impl FilesystemHandle {
 }
 
 impl NetworkBacking {
-    pub fn provision(&self, prepared: &PreparedGuest) -> Result<Option<NetworkHandle>, RuntimeError> {
+    pub fn provision(
+        &self,
+        prepared: &PreparedGuest,
+    ) -> Result<Option<NetworkHandle>, RuntimeError> {
         match self {
             Self::None | Self::HypervisorManaged => Ok(None),
             Self::MotlieVnet(backing) | Self::HypervisorManagedPlusMotlieVnet(backing) => {
@@ -184,9 +193,9 @@ impl ControlPlaneBacking {
     ) -> Result<Option<ControlPlaneHandle>, RuntimeError> {
         match self {
             Self::None => Ok(None),
-            Self::MotlieSshProxy(backing) => {
-                Ok(backing.provision(prepared)?.map(ControlPlaneHandle::MotlieSshProxy))
-            }
+            Self::MotlieSshProxy(backing) => Ok(backing
+                .provision(prepared)?
+                .map(ControlPlaneHandle::MotlieSshProxy)),
         }
     }
 }

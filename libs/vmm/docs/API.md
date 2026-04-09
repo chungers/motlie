@@ -15,6 +15,7 @@ Rules for this document:
 
 Changelog:
 
+- 2026-04-08 | @codex | address PR 140 review drift: remove the dead `VmBackend` / `BackendSet` transitional story, update `GuestSpec` / `PreparedGuest` / shutdown snippets to match code, and record typed `OverlaySize`, namespace-sensitive socket paths, and shutdown-cleanup failure reporting
 - 2026-04-08 | @codex | add PTY asciicast export as the portable replay artifact beside canonical transcript NDJSON + VTE screen JSON, and add a Rust-native static SVG export for GitHub-friendly snapshot embedding; PNG/GIF generation remains out of scope for `v1.4`
 - 2026-04-08 | @codex | make the harness terminal-state engine switchable; `shadow` is now the default PTY/TUI backend, `vt100` remains as an explicit fallback, and result artifacts record the terminal backend used
 
@@ -94,7 +95,7 @@ Phase 3 initial implementation:
 - [x] `ShutdownReport`
 - [x] `BackendKind`
 - [x] `VmBackendCapabilities`
-- [x] `VmBackend`
+- [x] `BackendHandle`
 - [x] `ChShellBackend`
 - [x] `prepare(...)`
 - [x] `boot(...)`
@@ -362,7 +363,7 @@ Reviewed intent:
 pub struct GuestSpec {
     pub guest_id: String,
     pub hostname: String,
-    pub socket_path: String,
+    pub socket_path: std::path::PathBuf,
     pub user: GuestUser,
     pub ssh: GuestSshAccess,
     pub mounts: Vec<GuestMountSpec>,
@@ -401,8 +402,10 @@ pub struct GuestResources {
 }
 
 pub struct GuestStorage {
-    pub overlay_size: String,
+    pub overlay_size: OverlaySize,
 }
+
+pub struct OverlaySize(String);
 
 pub struct BootArtifacts {
     pub kernel: std::path::PathBuf,
@@ -464,7 +467,7 @@ let guest = GuestSpec {
         max_vcpus: None,
     },
     storage: GuestStorage {
-        overlay_size: "2G".to_string(),
+        overlay_size: OverlaySize::new("2G").unwrap(),
     },
     boot: BootArtifacts {
         kernel: "/tmp/vmm-v1.4/libs/vmm/examples/v1.4/artifacts/base/Image".into(),
@@ -665,11 +668,18 @@ pub struct VmBackendCapabilities {
     pub supports_guest_metrics: bool,
 }
 
-pub trait VmBackend {
-    fn kind(&self) -> BackendKind;
-    fn capabilities(&self) -> VmBackendCapabilities;
-    fn boot(&self, prepared: &PreparedGuest) -> Result<BackendHandle, BackendError>;
-    fn shutdown(&self, handle: &BackendHandle) -> Result<(), BackendError>;
+pub enum BackendHandle {
+    ChShell(ChShellHandle),
+}
+
+impl ChShellBackend {
+    pub fn kind(&self) -> BackendKind;
+    pub fn capabilities(&self) -> VmBackendCapabilities;
+    pub fn boot(&self, prepared: &PreparedGuest) -> Result<BackendHandle, BackendError>;
+    pub fn shutdown(
+        &self,
+        handle: &BackendHandle,
+    ) -> Result<BackendShutdownOutcome, BackendError>;
 }
 ```
 
@@ -689,8 +699,8 @@ Rules:
   - VM boot/shutdown is injected through `Runtime.hypervisor`
   - Motlie filesystem/network/control-plane wiring is injected through the same
     `Runtime` composition
-- `BackendSet` remains only as a transitional internal helper while the rest of
-  the crate converges on the reviewed surface
+- the earlier transitional `VmBackend` / `BackendSet` scaffold has now been
+  removed so the code matches the reviewed enum-dispatch design directly
 
 ### `orchestrator.rs`
 
@@ -705,7 +715,9 @@ pub struct PrepareRequest {
 
 pub struct PreparedGuest {
     pub guest: GuestSpec,
+    pub namespace: RuntimeNamespace,
     pub runtime_paths: GuestRuntimePaths,
+    pub guest_socket_path: std::path::PathBuf,
     pub net_assignment: GuestNetAssignment,
     pub cloud_init: CloudInitArtifacts,
     pub launch_script: String,

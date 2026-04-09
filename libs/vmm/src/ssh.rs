@@ -43,7 +43,7 @@ use crate::ca::{CaError, SshCa};
 #[cfg(feature = "debug-trace")]
 macro_rules! debug_trace {
     ($($arg:tt)*) => {
-        eprintln!($($arg)*);
+        tracing::debug!($($arg)*);
     };
 }
 
@@ -63,8 +63,19 @@ pub enum SshProxyError {
     ExecFailed { guest: String, reason: String },
     #[error("CA error: {0}")]
     Ca(#[from] CaError),
-    #[error("SSH error: {0}")]
-    Ssh(String),
+    #[error("failed to generate SSH proxy server key: {reason}")]
+    GenerateServerKey { reason: String },
+    #[error("failed to bind SSH proxy listener on {listen}: {reason}")]
+    ProxyBind { listen: SocketAddr, reason: String },
+    #[error("failed to bind guest bridge socket {path}: {reason}")]
+    BindGuestBridgeSocket { path: PathBuf, reason: String },
+    #[error("failed to authenticate guest {guest} with CA-signed SSH cert: {reason}")]
+    CertAuth { guest: String, reason: String },
+    #[error("SSH operation '{operation}' failed: {reason}")]
+    Russh {
+        operation: &'static str,
+        reason: String,
+    },
     #[error("channel closed before command completed")]
     ChannelClosed,
     #[error("command on guest '{guest}' completed without an exit status: {command}")]
@@ -73,6 +84,12 @@ pub enum SshProxyError {
     UnknownGuest(String),
     #[error("internal state poisoned: {0}")]
     StatePoisoned(&'static str),
+    #[error("failed to remove guest bridge socket {path}: {source}")]
+    CleanupGuestBridgeSocket {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("PTY operation timed out on guest '{guest}': {expectation}")]
     PtyTimeout { guest: String, expectation: String },
     #[error("unsupported SSH control-plane operation: {0}")]
@@ -81,7 +98,10 @@ pub enum SshProxyError {
 
 impl From<russh::Error> for SshProxyError {
     fn from(value: russh::Error) -> Self {
-        Self::Ssh(value.to_string())
+        Self::Russh {
+            operation: "russh",
+            reason: value.to_string(),
+        }
     }
 }
 
@@ -280,18 +300,20 @@ impl GuestBridgeHandle {
     }
 
     pub fn shutdown(&self) -> Result<(), SshProxyError> {
-        if let Ok(mut task) = self.task.lock() {
-            if let Some(task) = task.take() {
-                task.abort();
-            }
+        let mut task = self
+            .task
+            .lock()
+            .map_err(|_| SshProxyError::StatePoisoned("guest bridge task"))?;
+        if let Some(task) = task.take() {
+            task.abort();
         }
         clear_guest_handle(&self.registry, &self.guest_name)?;
         if let Err(source) = std::fs::remove_file(&self.uds_path) {
             if source.kind() != ErrorKind::NotFound {
-                return Err(SshProxyError::Ssh(format!(
-                    "failed to remove guest bridge socket {}: {source}",
-                    self.uds_path.display()
-                )));
+                return Err(SshProxyError::CleanupGuestBridgeSocket {
+                    path: self.uds_path.clone(),
+                    source,
+                });
             }
         }
         Ok(())
@@ -410,12 +432,11 @@ pub fn bind_vsock_ssh_listener(
             );
         }
     }
-    let listener = UnixListener::bind(&uds_path).map_err(|e| {
-        SshProxyError::Ssh(format!(
-            "failed to bind vsock SSH UDS {}: {e}",
-            uds_path.display()
-        ))
-    })?;
+    let listener =
+        UnixListener::bind(&uds_path).map_err(|e| SshProxyError::BindGuestBridgeSocket {
+            path: uds_path.clone(),
+            reason: e.to_string(),
+        })?;
     tracing::info!("Bound vsock SSH bridge UDS at {}", uds_path.display());
     Ok((listener, uds_path))
 }
@@ -457,7 +478,10 @@ async fn accept_guest_ssh_once(
     let result = handle
         .authenticate_openssh_cert(guest_name, Arc::new(eph.key), eph.cert)
         .await
-        .map_err(|e| SshProxyError::Ssh(format!("SSH cert auth failed: {e}")))?;
+        .map_err(|e| SshProxyError::CertAuth {
+            guest: guest_name.into(),
+            reason: e.to_string(),
+        })?;
 
     if !result.success() {
         return Err(SshProxyError::GuestConnection {
@@ -485,10 +509,10 @@ pub async fn run_guest_ssh_bridge(
                 let handle = Arc::new(tokio::sync::Mutex::new(handle));
                 match update_guest_handle(&registry, &guest_name, handle) {
                     Ok(()) => {
-                        eprintln!("SSH bridge ready for guest '{guest_name}'");
+                        tracing::info!("SSH bridge ready for guest '{guest_name}'");
                     }
                     Err(e) => {
-                        eprintln!(
+                        tracing::warn!(
                             "SSH bridge registry update failed for guest '{guest_name}': {e}"
                         );
                         sleep(Duration::from_millis(250)).await;
@@ -496,7 +520,7 @@ pub async fn run_guest_ssh_bridge(
                 }
             }
             Err(e) => {
-                eprintln!("SSH bridge failed for guest '{guest_name}': {e}");
+                tracing::warn!("SSH bridge failed for guest '{guest_name}': {e}");
                 sleep(Duration::from_millis(250)).await;
             }
         }
@@ -593,7 +617,10 @@ pub async fn exec_on_handle(
         let guard = handle.lock().await;
         guard.channel_open_session().await
     }
-    .map_err(|e| SshProxyError::Ssh(e.to_string()))?;
+    .map_err(|e| SshProxyError::Russh {
+        operation: "open guest session",
+        reason: e.to_string(),
+    })?;
 
     exec_on_channel(channel, guest_name, command).await
 }
@@ -716,7 +743,10 @@ impl GuestPtySession {
         })?;
 
         let channel = self.channel.lock().await;
-        channel.data(data).await.map_err(SshProxyError::from)
+        channel.data(data).await.map_err(|e| SshProxyError::Russh {
+            operation: "send PTY data",
+            reason: e.to_string(),
+        })
     }
 
     pub async fn send_line(&self, line: &str) -> Result<(), SshProxyError> {
@@ -743,7 +773,10 @@ impl GuestPtySession {
         channel
             .window_change(col_width, row_height, pix_width, pix_height)
             .await
-            .map_err(SshProxyError::from)
+            .map_err(|e| SshProxyError::Russh {
+                operation: "resize PTY",
+                reason: e.to_string(),
+            })
     }
 
     pub async fn read_for(&self, timeout: Duration) -> Result<PtyRead, SshProxyError> {
@@ -904,7 +937,10 @@ impl GuestPtySession {
         self.push_transcript_event(PtyTranscriptEventKind::Close)?;
 
         let channel = self.channel.lock().await;
-        channel.close().await.map_err(SshProxyError::from)
+        channel.close().await.map_err(|e| SshProxyError::Russh {
+            operation: "close PTY channel",
+            reason: e.to_string(),
+        })
     }
 }
 
@@ -955,7 +991,10 @@ pub async fn open_pty_on_guest(
         transcript: Arc::new(Mutex::new(Vec::new())),
         transcript_started_at: Instant::now(),
     })
-    .map_err(SshProxyError::from)
+    .map_err(|e| SshProxyError::Russh {
+        operation: "open PTY",
+        reason: e.to_string(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -968,7 +1007,9 @@ pub async fn run_proxy(
 ) -> Result<(), SshProxyError> {
     let server_key =
         russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519)
-            .map_err(|e| SshProxyError::Ssh(format!("failed to generate server key: {e}")))?;
+            .map_err(|e| SshProxyError::GenerateServerKey {
+                reason: e.to_string(),
+            })?;
 
     let russh_config = Arc::new(russh::server::Config {
         keys: vec![server_key],
@@ -977,11 +1018,12 @@ pub async fn run_proxy(
 
     let listener = tokio::net::TcpListener::bind(config.listen)
         .await
-        .map_err(|e| SshProxyError::Ssh(format!("failed to bind {}: {e}", config.listen)))?;
+        .map_err(|e| SshProxyError::ProxyBind {
+            listen: config.listen,
+            reason: e.to_string(),
+        })?;
 
     tracing::info!("SSH proxy listening on {}", config.listen);
-    eprintln!("SSH proxy: listening on {}", config.listen);
-    eprintln!("  ssh -p {} <guest>@localhost", config.listen.port());
 
     loop {
         let (stream, peer) = match listener.accept().await {
@@ -1471,6 +1513,10 @@ impl russh::client::Handler for GuestClientHandler {
         &mut self,
         _server_public_key: &russh::keys::PublicKey,
     ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
+        // The guest bridge connects over a host-created UDS/vsock path and
+        // authenticates the guest with a fresh CA-signed ephemeral cert.
+        // The guest-side sshd server key is therefore accepted as part of the
+        // localhost/vsock trust boundary for this harness-owned channel.
         async { Ok(true) }
     }
 }

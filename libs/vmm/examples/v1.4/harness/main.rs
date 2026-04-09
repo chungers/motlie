@@ -1,3 +1,5 @@
+#[path = "../demo_support.rs"]
+mod demo_support;
 mod pty;
 mod scenario;
 mod shell;
@@ -35,6 +37,8 @@ use serde::Serialize;
 use terminal::TerminalBackendKind;
 use thiserror::Error;
 use tokio::time::sleep;
+
+use demo_support::{demo_guest_ids, demo_guest_socket_path};
 
 type DynError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -75,11 +79,12 @@ impl Default for HarnessAllocatorOptions {
 }
 
 impl HarnessAllocatorOptions {
-    fn build(&self, socket_root: &Path) -> GuestNetAllocatorConfig {
+    fn build(&self, socket_root: &Path, socket_name_prefix: &str) -> GuestNetAllocatorConfig {
         let mut config = GuestNetAllocatorConfig {
             first_cid: self.first_cid,
             max_guests: self.max_guests,
             socket_dir: socket_root.to_path_buf(),
+            socket_name_prefix: socket_name_prefix.to_string(),
             admin_pool: GuestNetAllocatorConfig::default().admin_pool,
             egress_pool: GuestNetAllocatorConfig::default().egress_pool,
         };
@@ -310,7 +315,8 @@ async fn main() -> Result<(), DynError> {
 
     let root_dir = root_override.unwrap_or_else(RuntimeNamespace::root_from_env_or_temp);
     let instance = new_harness_instance(&root_dir)?;
-    let allocator_config = allocator_options.build(&instance.socket_root);
+    let allocator_config =
+        allocator_options.build(&instance.socket_root, &instance.namespace.prefix);
     if matches!(mode, HarnessMode::Shell) {
         return shell::run_shell(
             &base_dir,
@@ -340,7 +346,7 @@ async fn main() -> Result<(), DynError> {
         &artifacts_dir,
         &instance.demo_root,
         &instance.namespace,
-    );
+    )?;
     std::fs::create_dir_all(&instance.socket_root)?;
 
     seed_host_mounts(&guest)?;
@@ -829,6 +835,12 @@ fn classify_orchestrator(stage: &'static str, error: &OrchestratorError) -> Scen
             code: "state_poisoned",
             message: error.to_string(),
         },
+        OrchestratorError::ShutdownFailures { .. } => ScenarioFailure {
+            class: FailureClass::Shutdown,
+            stage,
+            code: "shutdown_cleanup_failed",
+            message: error.to_string(),
+        },
         OrchestratorError::GuestExitedEarly { .. } => ScenarioFailure {
             class: FailureClass::Readiness,
             stage,
@@ -854,7 +866,8 @@ fn classify_runtime_failure(stage: &'static str, error: &RuntimeError) -> Scenar
         | RuntimeError::GuestFs(GuestFsError::CreateMountPath { .. })
         | RuntimeError::GuestFs(GuestFsError::AddMount { .. })
         | RuntimeError::GuestFs(GuestFsError::WaitForMounts { .. })
-        | RuntimeError::GuestFs(GuestFsError::CleanupSocket { .. }) => ScenarioFailure {
+        | RuntimeError::GuestFs(GuestFsError::CleanupSocket { .. })
+        | RuntimeError::GuestFs(GuestFsError::TaskStatePoisoned) => ScenarioFailure {
             class: FailureClass::Filesystem,
             stage,
             code: "guestfs_failed",
@@ -898,11 +911,16 @@ fn classify_ssh_failure(stage: &'static str, error: &SshProxyError) -> ScenarioF
             SshProxyError::GuestConnection { .. } => "ssh_guest_connection_failed",
             SshProxyError::ExecFailed { .. } => "ssh_exec_failed",
             SshProxyError::Ca(_) => "ssh_ca_failed",
-            SshProxyError::Ssh(_) => "ssh_transport_failed",
+            SshProxyError::GenerateServerKey { .. } => "ssh_server_key_failed",
+            SshProxyError::ProxyBind { .. } => "ssh_proxy_bind_failed",
+            SshProxyError::BindGuestBridgeSocket { .. } => "ssh_bridge_bind_failed",
+            SshProxyError::CertAuth { .. } => "ssh_cert_auth_failed",
+            SshProxyError::Russh { .. } => "ssh_transport_failed",
             SshProxyError::ChannelClosed => "ssh_channel_closed",
             SshProxyError::MissingExitStatus { .. } => "ssh_missing_exit_status",
             SshProxyError::UnknownGuest(_) => "ssh_unknown_guest",
             SshProxyError::StatePoisoned(_) => "ssh_state_poisoned",
+            SshProxyError::CleanupGuestBridgeSocket { .. } => "ssh_bridge_cleanup_failed",
             SshProxyError::PtyTimeout { .. } => "pty_timeout",
             SshProxyError::Unsupported(_) => "ssh_unsupported",
         },
@@ -989,16 +1007,12 @@ pub(crate) fn demo_guest(
     artifacts_dir: &Path,
     demo_root: &Path,
     namespace: &RuntimeNamespace,
-) -> GuestSpec {
-    let (uid, gid) = demo_guest_ids(guest_id);
-    GuestSpec {
+) -> Result<GuestSpec, DynError> {
+    let (uid, gid) = demo_guest_ids(guest_id)?;
+    Ok(GuestSpec {
         guest_id: guest_id.to_string(),
         hostname: format!("motlie-{guest_id}"),
-        socket_path: namespace
-            .guest_vsock_port_socket(guest_id, 5000)
-            .expect("guest_id is validated by the harness")
-            .display()
-            .to_string(),
+        socket_path: demo_guest_socket_path(namespace, guest_id)?,
         user: GuestUser {
             name: guest_id.to_string(),
             uid,
@@ -1037,7 +1051,7 @@ pub(crate) fn demo_guest(
             firmware: None,
             cmdline: None,
         },
-    }
+    })
 }
 
 pub(crate) fn seed_host_mounts(guest: &GuestSpec) -> Result<(), DynError> {
@@ -1106,14 +1120,6 @@ fn write_host_file_if_missing(path: &Path, content: &str, mode: u32) -> Result<(
         }
     }
     Ok(())
-}
-
-fn demo_guest_ids(guest_id: &str) -> (u32, u32) {
-    match guest_id {
-        "alice" => (1000, 1000),
-        "bob" => (1001, 1001),
-        _ => (1000, 1000),
-    }
 }
 
 fn guest_display_name(guest_id: &str) -> String {

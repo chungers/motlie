@@ -46,6 +46,8 @@ pub enum GuestFsError {
         #[source]
         source: std::io::Error,
     },
+    #[error("guestfs task state poisoned")]
+    TaskStatePoisoned,
 }
 
 pub struct GuestFsHandle {
@@ -62,17 +64,21 @@ impl GuestFsHandle {
         if guest.guest_id.trim().is_empty() {
             return Err(GuestFsError::EmptyGuestId);
         }
-        if guest.socket_path.trim().is_empty() {
+        if guest.socket_path.as_os_str().is_empty() {
             return Err(GuestFsError::EmptySocketPath);
         }
 
-        let server = Arc::new(FsServer::builder().overlay(true).events(256).build().map_err(
-            |e| GuestFsError::AddMount {
-                tag: "<server>".to_string(),
-                reason: e.to_string(),
-            },
-        )?);
-        let socket_path = PathBuf::from(&guest.socket_path);
+        let server = Arc::new(
+            FsServer::builder()
+                .overlay(true)
+                .events(256)
+                .build()
+                .map_err(|e| GuestFsError::AddMount {
+                    tag: "<server>".to_string(),
+                    reason: e.to_string(),
+                })?,
+        );
+        let socket_path = guest.socket_path.clone();
         if let Err(source) = std::fs::remove_file(&socket_path) {
             if source.kind() != std::io::ErrorKind::NotFound {
                 return Err(GuestFsError::RemoveSocket {
@@ -81,10 +87,11 @@ impl GuestFsHandle {
                 });
             }
         }
-        let listener = UnixListener::bind(&socket_path).map_err(|source| GuestFsError::BindSocket {
-            path: socket_path.clone(),
-            source,
-        })?;
+        let listener =
+            UnixListener::bind(&socket_path).map_err(|source| GuestFsError::BindSocket {
+                path: socket_path.clone(),
+                source,
+            })?;
 
         let mut required_mount_tags = Vec::new();
         for mount in &guest.mounts {
@@ -146,10 +153,12 @@ impl GuestFsHandle {
     }
 
     pub fn shutdown(&self) -> Result<(), GuestFsError> {
-        if let Ok(mut task) = self.task.lock() {
-            if let Some(task) = task.take() {
-                task.abort();
-            }
+        let mut task = self
+            .task
+            .lock()
+            .map_err(|_| GuestFsError::TaskStatePoisoned)?;
+        if let Some(task) = task.take() {
+            task.abort();
         }
         if let Err(source) = std::fs::remove_file(&self.socket_path) {
             if source.kind() != std::io::ErrorKind::NotFound {
@@ -239,7 +248,7 @@ mod tests {
         GuestSpec {
             guest_id: "alice".to_string(),
             hostname: "motlie-alice".to_string(),
-            socket_path: socket_path.display().to_string(),
+            socket_path,
             user: GuestUser {
                 name: "alice".to_string(),
                 uid: 1000,

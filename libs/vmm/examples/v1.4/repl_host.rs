@@ -1,3 +1,5 @@
+mod demo_support;
+
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -21,6 +23,8 @@ use motlie_vmm::spec::{
 };
 use motlie_vmm::ssh::{self, ExecOutput, SshProxyConfig, new_guest_registry};
 use tokio::sync::mpsc;
+
+use demo_support::{demo_guest_ids, demo_guest_socket_path};
 
 type DynError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -65,6 +69,7 @@ async fn main() -> Result<(), DynError> {
 
     let mut allocator = GuestNetAllocator::new(GuestNetAllocatorConfig {
         socket_dir: instance.socket_root.clone(),
+        socket_name_prefix: instance.namespace.prefix.clone(),
         ..GuestNetAllocatorConfig::default()
     })?;
     let ca = Arc::new(SshCa::new()?);
@@ -327,7 +332,7 @@ async fn boot_guest(
         return Err(format!("guest '{guest_id}' already booted").into());
     }
 
-    let guest = demo_guest(guest_id, artifacts_dir, demo_root, namespace);
+    let guest = demo_guest(guest_id, artifacts_dir, demo_root, namespace)?;
     seed_host_mounts(&guest)?;
 
     let prepared = prepare(
@@ -537,16 +542,12 @@ fn demo_guest(
     artifacts_dir: &Path,
     demo_root: &Path,
     namespace: &RuntimeNamespace,
-) -> GuestSpec {
-    let (uid, gid) = demo_guest_ids(guest_id);
-    GuestSpec {
+) -> Result<GuestSpec, DynError> {
+    let (uid, gid) = demo_guest_ids(guest_id)?;
+    Ok(GuestSpec {
         guest_id: guest_id.to_string(),
         hostname: format!("motlie-{guest_id}"),
-        socket_path: namespace
-            .guest_vsock_port_socket(guest_id, 5000)
-            .expect("guest_id is validated by the repl")
-            .display()
-            .to_string(),
+        socket_path: demo_guest_socket_path(namespace, guest_id)?,
         user: GuestUser {
             name: guest_id.to_string(),
             uid,
@@ -585,7 +586,7 @@ fn demo_guest(
             firmware: None,
             cmdline: None,
         },
-    }
+    })
 }
 
 fn seed_host_mounts(guest: &GuestSpec) -> Result<(), DynError> {
@@ -642,14 +643,6 @@ fn seed_host_mounts(guest: &GuestSpec) -> Result<(), DynError> {
         ),
     )?;
     Ok(())
-}
-
-fn demo_guest_ids(guest_id: &str) -> (u32, u32) {
-    match guest_id {
-        "alice" => (1000, 1000),
-        "bob" => (1001, 1001),
-        _ => (1000, 1000),
-    }
 }
 
 fn port_offset(seed: &str) -> u16 {
