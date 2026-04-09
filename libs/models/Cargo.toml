@@ -11,9 +11,10 @@ description = "Curated model bundle catalog for the Motlie ecosystem"
 path = "src/lib.rs"
 
 [features]
-default = ["model-google-gemma-300m", "model-qwen3-4b"]
+default = ["model-google-gemma-300m", "model-qwen3-4b", "model-gemma4-e2b"]
 model-google-gemma-300m = []
 model-qwen3-4b = []
+model-gemma4-e2b = []
 
 [dependencies]
 async-trait = "0.1.89"
@@ -39,3 +40,8 @@ required-features = ["model-google-gemma-300m"]
 name = "models_v0_2"
 path = "examples/v0.2/main.rs"
 required-features = ["model-qwen3-4b"]
+
+[[example]]
+name = "models_v0_3"
+path = "examples/v0.3/main.rs"
+required-features = ["model-gemma4-e2b"]

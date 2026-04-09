@@ -1,13 +1,15 @@
-use std::path::PathBuf;
-
 use async_trait::async_trait;
-use mistralrs::core::{NormalLoaderType, StopTokens};
-use mistralrs::{IsqBits, RequestBuilder, SamplingParams, TextModelBuilder};
+use mistralrs::core::NormalLoaderType;
+use mistralrs::{RequestBuilder, TextModelBuilder};
 use motlie_model::{
-    ArtifactPolicy, BundleHandle, BundleId, BundleMetadata, Capabilities, CapabilityKind,
-    ChatModel, ChatRequest, ChatResponse, ChatRole, CompletionModel, CompletionRequest,
-    CompletionResponse, EmbeddingModel, GenerationParams, LoadedBundleDescriptor, ModelBundle,
-    ModelError, QuantizationBits, StartOptions,
+    BundleHandle, BundleId, BundleMetadata, Capabilities, CapabilityKind, ChatModel, ChatRequest,
+    ChatResponse, ChatRole, CompletionModel, CompletionRequest, CompletionResponse, EmbeddingModel,
+    LoadedBundleDescriptor, ModelBundle, ModelError, StartOptions,
+};
+
+use crate::common::{
+    apply_generation_params, configure_artifact_policy, map_chat_role, map_quantization_bits,
+    should_force_cpu,
 };
 
 /// Text model architecture discriminant that selects the correct `mistralrs` loader path.
@@ -113,17 +115,15 @@ struct MistralTextRuntime {
 #[async_trait]
 impl TextRuntime for MistralTextRuntime {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
-        let builder = to_request_builder(&request);
+        let builder = to_request_builder(&request)?;
 
-        let response = self
-            .model
-            .send_chat_request(builder)
-            .await
-            .map_err(|err| ModelError::BackendExecution {
+        let response = self.model.send_chat_request(builder).await.map_err(|err| {
+            ModelError::BackendExecution {
                 backend: "mistralrs",
                 operation: "send_chat_request",
                 message: err.to_string(),
-            })?;
+            }
+        })?;
 
         let content = response
             .choices
@@ -154,36 +154,26 @@ impl TextRuntime for MistralTextRuntime {
     }
 }
 
-fn to_request_builder(request: &ChatRequest) -> RequestBuilder {
+fn to_request_builder(request: &ChatRequest) -> Result<RequestBuilder, ModelError> {
     let mut builder = RequestBuilder::new();
     for msg in &request.messages {
-        let role = match msg.role {
-            ChatRole::System => mistralrs::TextMessageRole::System,
-            ChatRole::User => mistralrs::TextMessageRole::User,
-            ChatRole::Assistant => mistralrs::TextMessageRole::Assistant,
-        };
-        builder = builder.add_message(role, &msg.content);
+        builder = builder.add_message(map_chat_role(msg.role), collect_text_only_message(msg)?);
     }
-    builder = apply_generation_params(builder, &request.params);
-    builder
+    Ok(apply_generation_params(builder, &request.params))
 }
 
-fn apply_generation_params(builder: RequestBuilder, params: &GenerationParams) -> RequestBuilder {
-    let mut sampling = SamplingParams::deterministic();
-    if let Some(temperature) = params.temperature {
-        sampling.temperature = Some(temperature as f64);
-        sampling.top_k = None; // disable deterministic top_k=1 when temperature is set
+fn collect_text_only_message(message: &motlie_model::ChatMessage) -> Result<String, ModelError> {
+    let mut text = String::new();
+    for part in &message.content {
+        match part {
+            motlie_model::ContentPart::Text(part) => text.push_str(part),
+            motlie_model::ContentPart::Image { .. }
+            | motlie_model::ContentPart::ImageUrl { .. } => {
+                return Err(ModelError::UnsupportedCapability(CapabilityKind::Vision));
+            }
+        }
     }
-    if let Some(top_p) = params.top_p {
-        sampling.top_p = Some(top_p as f64);
-    }
-    if let Some(max_tokens) = params.max_tokens {
-        sampling.max_len = Some(max_tokens as usize);
-    }
-    if !params.stop_sequences.is_empty() {
-        sampling.stop_toks = Some(StopTokens::Seqs(params.stop_sequences.clone()));
-    }
-    builder.set_sampling(sampling)
+    Ok(text)
 }
 
 // ---------------------------------------------------------------------------
@@ -233,10 +223,7 @@ impl ChatModel for MistralTextHandle {
 
 #[async_trait]
 impl CompletionModel for MistralTextHandle {
-    async fn complete(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<CompletionResponse, ModelError> {
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, ModelError> {
         self.runtime.complete(request).await
     }
 }
@@ -273,8 +260,7 @@ async fn build_text_model(
         hf_cache_root = configured.hf_cache_root;
     }
 
-    let mut builder = TextModelBuilder::new(model_target)
-        .with_loader_type(arch.loader_type());
+    let mut builder = TextModelBuilder::new(model_target).with_loader_type(arch.loader_type());
 
     if let Some(bits) = quantization {
         builder = builder.with_auto_isq(map_quantization_bits(bits));
@@ -298,45 +284,13 @@ async fn build_text_model(
         })
 }
 
-fn map_quantization_bits(bits: QuantizationBits) -> IsqBits {
-    match bits {
-        QuantizationBits::Four => IsqBits::Four,
-        QuantizationBits::Eight => IsqBits::Eight,
-    }
-}
-
-struct ConfiguredBuilder {
-    model_target: String,
-    hf_cache_root: Option<PathBuf>,
-}
-
-fn configure_artifact_policy(
-    model_id: &str,
-    policy: ArtifactPolicy,
-) -> Result<ConfiguredBuilder, ModelError> {
-    match policy {
-        ArtifactPolicy::AllowFetch { root } => Ok(ConfiguredBuilder {
-            model_target: model_id.to_owned(),
-            hf_cache_root: root,
-        }),
-        ArtifactPolicy::LocalOnly { root } => Ok(ConfiguredBuilder {
-            model_target: root.display().to_string(),
-            hf_cache_root: None,
-        }),
-    }
-}
-
-fn should_force_cpu() -> bool {
-    matches!(
-        std::env::var("MOTLIE_MODEL_FORCE_CPU"),
-        Ok(value) if matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES")
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use motlie_model::StartOptions;
+    use std::path::PathBuf;
+
+    use mistralrs::IsqBits;
+    use motlie_model::{ArtifactPolicy, QuantizationBits, StartOptions};
 
     struct StubTextRuntime;
 
@@ -346,7 +300,11 @@ mod tests {
             let prompt = request
                 .messages
                 .last()
-                .map(|m| m.content.clone())
+                .and_then(|m| m.content.first())
+                .and_then(|part| match part {
+                    motlie_model::ContentPart::Text(text) => Some(text.clone()),
+                    _ => None,
+                })
                 .unwrap_or_default();
             Ok(ChatResponse {
                 content: format!("stub response to: {prompt}"),
@@ -401,10 +359,7 @@ mod tests {
             .chat()
             .expect("chat should be available")
             .generate(ChatRequest {
-                messages: vec![motlie_model::ChatMessage::new(
-                    ChatRole::User,
-                    "hello",
-                )],
+                messages: vec![motlie_model::ChatMessage::new(ChatRole::User, "hello")],
                 ..Default::default()
             })
             .await
@@ -420,18 +375,12 @@ mod tests {
             })
             .await
             .expect("stub completion should succeed");
-        assert_eq!(
-            completion_response.content,
-            "stub completion of: explain"
-        );
+        assert_eq!(completion_response.content, "stub completion of: explain");
     }
 
     #[test]
     fn quantization_bits_map_to_isq_bits() {
-        assert_eq!(
-            map_quantization_bits(QuantizationBits::Four),
-            IsqBits::Four
-        );
+        assert_eq!(map_quantization_bits(QuantizationBits::Four), IsqBits::Four);
         assert_eq!(
             map_quantization_bits(QuantizationBits::Eight),
             IsqBits::Eight

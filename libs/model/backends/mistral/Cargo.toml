@@ -12,6 +12,7 @@ path = "src/lib.rs"
 
 [dependencies]
 async-trait = "0.1.89"
+image = "0.25.8"
 motlie-model = { path = "../.." }
 mistralrs = "0.8.1"
 

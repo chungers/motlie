@@ -15,6 +15,8 @@
 | 2026-04-08 | @codex-researcher: Referenced the `libs/models` bundle-build convention so the contract layer is explicit that bundle availability is build-dependent and selector/catalog surfaces may vary by curated feature set. | Architecture, Framework Principles |
 | 2026-04-08 | @codex-researcher: Added explicit future-model follow-up notes for multimodal chat, tool-calling, richer startup controls, and capability-role semantics so the current embedding-first contract can merge with the next required extensions already tracked in-design. | Goals and Non-Goals, Loaded Handle, Capability Model, Capability Surfaces, Open Concerns |
 | 2026-04-08 | @codex-researcher: Clarified the reviewed responsibility split: curated bundles in `libs/models` resolve and validate artifact-layout details, while generic backends consume a plain resolved local model path or fetch-enabled cache root. Also clarified that `LoadedBundleDescriptor` is intentionally the loaded-instance alias of `BundleMetadata` in v0.1 and that `ModelError` now distinguishes backend initialization from backend execution failures. | Architecture, Core Abstractions, Artifact and Packaging Contracts |
+| 2026-04-08 | @codex-researcher: The first vision-capable bundle now exists via Gemma 4 E2B-it (#142). `ChatMessage` has been extended to multimodal content parts, and `Vision` remains a descriptive capability on the existing `ChatModel` surface instead of forcing a parallel `VisionModel` trait. | Capability Model, Capability Surfaces, Open Concerns |
+| 2026-04-08 | @codex-researcher: Removed the stale pre-#142 open concern about upgrading `ChatMessage.content` before the first vision-capable bundle ships. That contract change is now implemented; the remaining concerns are additive chat metadata and tool-calling work. | Open Concerns |
 | 2026-04-08 | @claude: Added `QuantizationBits` to `StartOptions` as the first chat/local-model startup extension (Phase 6.3 item). ISQ quantization is a deployment concern mapped by backends to their native mechanism. | Core Abstractions, Lifecycle |
 
 This document defines the design for `libs/model`, the contract crate for Motlie's packaged model system. The crate does not ship concrete model bundles or runtime implementations. Instead, it defines the stable public vocabulary, lifecycle, request/response types, capability adapters, composability boundaries, and artifact contracts that higher-level crates build on.
@@ -399,13 +401,12 @@ pub trait ChatModel: Send + Sync {
 }
 ```
 
-The first text-only chat bundle (Qwen3-4B) ships with the current `ChatMessage { content: String }` and `ChatResponse { content: String }` contract. This is intentionally minimal — the text-only path works correctly without multimodal content parts or rich response metadata.
+The first text-only chat bundle (Qwen3-4B) shipped with a minimal text-only chat surface. Issue #142 extends that same `ChatModel` contract to multimodal requests by changing `ChatMessage.content` into normalized content parts while leaving `ChatResponse { content: String }` intentionally simple for now.
 
-Planned additive extensions before multimodal or tool-calling bundles land:
+Planned additive extensions after the first multimodal and tool-calling bundles land:
 
 - add `ChatRole::Tool`
 - extend `ChatMessage` with optional tool-call correlation fields
-- change `ChatMessage.content` from plain `String` to a multimodal content-parts representation before the first vision-capable bundle ships
 - extend `ChatResponse` with finish reason, usage metadata, and tool-call output
 
 ### Text Completion
@@ -673,5 +674,4 @@ PLAN must specify concrete tests for:
 - How much generation-parameter normalization to promise across heterogeneous backends
 - Whether streaming output should be part of the initial contract or deferred until the non-streaming API is stable
 - Add `ChatRole::Tool` before tool-calling support lands
-- Upgrade `ChatMessage.content` to multimodal content parts before the first vision-capable bundle ships (#142), so image-capable chat models do not force a post-ship breaking migration
 - Consider a `ChatSpec` bundle-level metadata trait parallel to `EmbeddingSpec` once the first curated chat bundle is introduced
