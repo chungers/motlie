@@ -16,6 +16,7 @@
 | 2026-04-08 | @claude: Added `QuantizationBits` to `StartOptions` and documented the quantized startup pattern for the Qwen3-4B chat slice (#141). | Core Types, Bundle API Sketch |
 | 2026-04-08 | @codex-researcher: Updated the chat contract for the Gemma 4 multimodal slice (#142). `ChatMessage` now carries `ContentPart`s, the first vision-capable bundle still uses `ChatModel`, and `examples/v0.3` is now the concrete end-to-end reference for text+image chat. | Overview, Core Types, Bundle API Sketch, Notes |
 | 2026-04-09 | @codex-researcher: Added handle-level metric snapshots and unit-safe wrappers. Runtime/request aggregates now live on `BundleHandle::metric_snapshot()` instead of individual responses. | Overview, Core Types, Bundle API Sketch, Notes |
+| 2026-04-09 | @codex-researcher: Documented the current cross-platform runtime-metrics implementation. `mistral` backends and examples use `sysinfo` for current RSS on macOS and Linux, with Motlie maintaining the observed peak in-handle rather than relying on an OS-native historical peak counter. | Handle-Level Metrics, Notes |
 
 This document sketches the concrete contract shapes currently introduced in `libs/model`. It covers both the core bundle lifecycle/capability contracts and the lightweight `model::eval` vocabulary that higher-level harness tooling should build on.
 
@@ -145,6 +146,13 @@ The current metric types live in `libs/model/src/metrics.rs`:
 - `RuntimeMetrics`
 - `TextGenerationMetrics`
 - `EmbeddingMetrics`
+
+Current implementation note:
+
+- runtime/process memory metrics are currently collected through `sysinfo`
+- the current `mistral` implementation is intended to work on macOS and Linux without `cfg(target_os)` branches in Motlie code
+- current RSS is sampled from the current process, and peak RSS is maintained by Motlie as the max observed sample over the handle lifetime
+- this metrics path is currently always built into the `mistral` backend and example binaries; it is not separately feature-gated yet
 
 ## Bundle API Sketch
 
