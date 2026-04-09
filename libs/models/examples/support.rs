@@ -5,6 +5,8 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 
+use motlie_model::ModelMetricSnapshot;
+
 #[derive(Clone, Debug, Default)]
 pub struct ProcessSnapshot {
     pub pid: Option<u32>,
@@ -49,6 +51,47 @@ pub fn print_process_snapshot(label: &str, snapshot: &ProcessSnapshot) {
             println!("{label}: pid={pid} rss-mib=unavailable");
         }
         _ => println!("{label}: unavailable"),
+    }
+}
+
+pub fn print_model_metrics(label: &str, snapshot: Option<ModelMetricSnapshot>) {
+    let Some(snapshot) = snapshot else {
+        println!("{label}: unavailable");
+        return;
+    };
+
+    println!("{label}:");
+    if let Some(runtime) = snapshot.runtime {
+        println!(
+            "  runtime: resident-bytes={:?} peak-resident-bytes={:?} request-count={:?} last-latency={:?} max-latency={:?} avg-latency={:?}",
+            runtime.resident_memory,
+            runtime.peak_resident_memory,
+            runtime.request_count,
+            runtime.last_latency,
+            runtime.max_latency,
+            runtime.avg_latency
+        );
+    } else {
+        println!("  runtime: unavailable");
+    }
+
+    if let Some(text) = snapshot.text_generation {
+        println!(
+            "  text-generation: total-prompt-tokens={:?} total-generated-tokens={:?} total-tokens={:?} avg-prompt-tps={:?} avg-generated-tps={:?}",
+            text.total_prompt_tokens,
+            text.total_generated_tokens,
+            text.total_tokens,
+            text.avg_prompt_tokens_per_sec,
+            text.avg_generated_tokens_per_sec
+        );
+    }
+
+    if let Some(embeddings) = snapshot.embeddings {
+        println!(
+            "  embeddings: request-count={:?} input-count={:?}",
+            embeddings.request_count,
+            embeddings.input_count
+        );
     }
 }
 

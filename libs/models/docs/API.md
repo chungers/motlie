@@ -20,6 +20,7 @@
 | 2026-04-08 | @codex-researcher: Added the Gemma 4 E2B-it multimodal chat slice (#142). `ChatModels` now includes `Gemma4E2B`, `ModelSelector` supports `chat:google/gemma4_e2b`, and `examples/v0.3` documents the direct text-only and image+text caller paths. | Overview, Core Types, API Sketch, Example Program, Notes |
 | 2026-04-09 | @codex-researcher: Tightened the example-build convention. Versioned examples now expect a single-bundle build and print `catalog-entry-count: 1`, and the Gemma example follows the same one-model-per-example rule. | Example Program, Notes |
 | 2026-04-09 | @codex-researcher: Collapsed the duplicate Gemma 4 examples into a single `v0.3` flow. `v0.3` now carries the optional `--download-artifacts` behavior directly, so each versioned example once again maps to exactly one curated model. | Example Program, Notes |
+| 2026-04-09 | @codex-researcher: Added handle-level metric snapshot usage to the examples. The current `mistral` backends now surface runtime latency/memory aggregates on the loaded bundle handle, with text-generation token metrics where the backend provides them. | Example Program, Notes |
 
 This document sketches the concrete API shapes currently introduced in `libs/models`. The crate now owns both the descriptor catalog and the curated bundle constructors that bind those descriptors to a backend implementation.
 

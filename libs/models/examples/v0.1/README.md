@@ -22,6 +22,7 @@ The bundle returns normalized embedding vectors. In practice that means:
 8. a semantically dissimilar pair with their vectors and cosine similarity
 9. latency for startup and each embedding computation
 10. process/memory snapshots before startup, after startup, and after each embedding call
+11. handle-level model metrics after startup and after each embedding phase
 
 ## Run
 

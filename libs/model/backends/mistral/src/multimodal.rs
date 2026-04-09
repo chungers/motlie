@@ -1,15 +1,19 @@
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
 use async_trait::async_trait;
 use image::DynamicImage;
 use mistralrs::{ModelBuilder, RequestBuilder};
 use motlie_model::{
     BundleHandle, BundleId, BundleMetadata, Capabilities, CapabilityKind, ChatModel, ChatRequest,
     ChatResponse, CompletionModel, ContentPart, EmbeddingModel, LoadedBundleDescriptor,
-    ModelBundle, ModelError, StartOptions,
+    ModelBundle, ModelError, ModelMetricSnapshot, StartOptions,
 };
 
 use crate::common::{
     apply_generation_params, configure_artifact_policy, map_chat_role, map_quantization_bits,
-    should_force_cpu,
+    observe_latency, observe_memory, observe_text_usage, should_force_cpu, snapshot_text_metrics,
+    RuntimeMetricState, TextMetricState,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,6 +79,10 @@ impl ModelBundle for MistralMultimodalBundle {
 
     async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
         let model = build_multimodal_model(self.model_id, self.arch, options).await?;
+        let metrics = Arc::new(Mutex::new(MultimodalMetrics::default()));
+        if let Ok(mut metrics) = metrics.lock() {
+            observe_memory(&mut metrics.runtime);
+        }
 
         Ok(Box::new(MistralMultimodalHandle {
             descriptor: LoadedBundleDescriptor {
@@ -82,7 +90,11 @@ impl ModelBundle for MistralMultimodalBundle {
                 display_name: self.metadata.display_name.clone(),
                 capabilities: self.metadata.capabilities.clone(),
             },
-            runtime: Box::new(MistralMultimodalRuntime { model }),
+            runtime: Box::new(MistralMultimodalRuntime {
+                model,
+                metrics: Arc::clone(&metrics),
+            }),
+            metrics,
         }))
     }
 }
@@ -94,12 +106,14 @@ trait MultimodalRuntime: Send + Sync {
 
 struct MistralMultimodalRuntime {
     model: mistralrs::Model,
+    metrics: Arc<Mutex<MultimodalMetrics>>,
 }
 
 #[async_trait]
 impl MultimodalRuntime for MistralMultimodalRuntime {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
         let builder = to_request_builder(&request)?;
+        let started_at = Instant::now();
 
         let response = self.model.send_chat_request(builder).await.map_err(|err| {
             ModelError::BackendExecution {
@@ -108,7 +122,9 @@ impl MultimodalRuntime for MistralMultimodalRuntime {
                 message: err.to_string(),
             }
         })?;
+        let elapsed = started_at.elapsed();
 
+        let usage = response.usage.clone();
         let content = response
             .choices
             .into_iter()
@@ -119,6 +135,11 @@ impl MultimodalRuntime for MistralMultimodalRuntime {
                 operation: "send_chat_request",
                 message: "response contained no text content".into(),
             })?;
+
+        if let Ok(mut metrics) = self.metrics.lock() {
+            observe_latency(&mut metrics.runtime, elapsed);
+            observe_text_usage(&mut metrics.text, &usage);
+        }
 
         Ok(ChatResponse { content })
     }
@@ -173,6 +194,7 @@ fn collect_multimodal_parts(
 struct MistralMultimodalHandle {
     descriptor: LoadedBundleDescriptor,
     runtime: Box<dyn MultimodalRuntime>,
+    metrics: Arc<Mutex<MultimodalMetrics>>,
 }
 
 #[async_trait]
@@ -183,6 +205,11 @@ impl BundleHandle for MistralMultimodalHandle {
 
     fn capabilities(&self) -> &Capabilities {
         &self.descriptor.capabilities
+    }
+
+    fn metric_snapshot(&self) -> Option<ModelMetricSnapshot> {
+        let metrics = self.metrics.lock().ok()?.clone();
+        Some(snapshot_text_metrics(&metrics.runtime, &metrics.text))
     }
 
     fn chat(&self) -> Result<&dyn ChatModel, ModelError> {
@@ -211,6 +238,12 @@ impl ChatModel for MistralMultimodalHandle {
     async fn generate(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
         self.runtime.chat(request).await
     }
+}
+
+#[derive(Clone, Debug, Default)]
+struct MultimodalMetrics {
+    runtime: RuntimeMetricState,
+    text: TextMetricState,
 }
 
 async fn build_multimodal_model(
@@ -316,6 +349,7 @@ mod tests {
                 capabilities: Capabilities::multimodal_chat_and_vision(),
             },
             runtime: Box::new(StubMultimodalRuntime),
+            metrics: Arc::new(Mutex::new(MultimodalMetrics::default())),
         };
 
         assert!(handle.supports(CapabilityKind::Chat));
