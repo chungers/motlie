@@ -1,6 +1,8 @@
+#[cfg(feature = "model-google-gemma-300m")]
 use std::fmt;
 use std::str::FromStr;
 
+#[cfg(feature = "model-google-gemma-300m")]
 use motlie_model::{BundleId, EmbeddingSpec, ModelBundle};
 
 pub const GOOGLE_GEMMA_300M_SELECTOR: &str = "google/embeddinggemma_300m";

@@ -1,6 +1,8 @@
+#[cfg(feature = "model-qwen3-4b")]
 use std::fmt;
 use std::str::FromStr;
 
+#[cfg(feature = "model-qwen3-4b")]
 use motlie_model::{BundleId, ModelBundle};
 
 pub const QWEN3_4B_SELECTOR: &str = "qwen/qwen3_4b";
