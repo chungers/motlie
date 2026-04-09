@@ -9,12 +9,10 @@ pub const QWEN3_4B_SELECTOR: &str = "qwen/qwen3_4b";
 pub mod qwen3_4b;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum ChatModels {
     #[cfg(feature = "model-qwen3-4b")]
     Qwen3_4B,
-    #[doc(hidden)]
-    #[cfg(not(feature = "model-qwen3-4b"))]
-    __NoModels,
 }
 
 impl ChatModels {
@@ -22,8 +20,8 @@ impl ChatModels {
         match self {
             #[cfg(feature = "model-qwen3-4b")]
             Self::Qwen3_4B => qwen3_4b::SELECTOR,
-            #[cfg(not(feature = "model-qwen3-4b"))]
-            Self::__NoModels => unreachable!("no chat models are enabled in this build"),
+            #[allow(unreachable_patterns)]
+            _ => unreachable!(),
         }
     }
 
@@ -31,8 +29,8 @@ impl ChatModels {
         match self {
             #[cfg(feature = "model-qwen3-4b")]
             Self::Qwen3_4B => qwen3_4b::descriptor().id,
-            #[cfg(not(feature = "model-qwen3-4b"))]
-            Self::__NoModels => unreachable!("no chat models are enabled in this build"),
+            #[allow(unreachable_patterns)]
+            _ => unreachable!(),
         }
     }
 
@@ -40,8 +38,8 @@ impl ChatModels {
         match self {
             #[cfg(feature = "model-qwen3-4b")]
             Self::Qwen3_4B => qwen3_4b::descriptor(),
-            #[cfg(not(feature = "model-qwen3-4b"))]
-            Self::__NoModels => unreachable!("no chat models are enabled in this build"),
+            #[allow(unreachable_patterns)]
+            _ => unreachable!(),
         }
     }
 
@@ -49,8 +47,8 @@ impl ChatModels {
         match self {
             #[cfg(feature = "model-qwen3-4b")]
             Self::Qwen3_4B => qwen3_4b::bundle(),
-            #[cfg(not(feature = "model-qwen3-4b"))]
-            Self::__NoModels => unreachable!("no chat models are enabled in this build"),
+            #[allow(unreachable_patterns)]
+            _ => unreachable!(),
         }
     }
 }

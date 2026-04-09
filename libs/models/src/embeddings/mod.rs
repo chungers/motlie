@@ -9,12 +9,10 @@ pub const GOOGLE_GEMMA_300M_SELECTOR: &str = "google/embeddinggemma_300m";
 pub mod google_gemma_300m;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum EmbeddingModels {
     #[cfg(feature = "model-google-gemma-300m")]
     GoogleGemma300m,
-    #[doc(hidden)]
-    #[cfg(not(feature = "model-google-gemma-300m"))]
-    __NoModels,
 }
 
 impl EmbeddingModels {
@@ -22,8 +20,8 @@ impl EmbeddingModels {
         match self {
             #[cfg(feature = "model-google-gemma-300m")]
             Self::GoogleGemma300m => google_gemma_300m::SELECTOR,
-            #[cfg(not(feature = "model-google-gemma-300m"))]
-            Self::__NoModels => unreachable!("no embedding models are enabled in this build"),
+            #[allow(unreachable_patterns)]
+            _ => unreachable!(),
         }
     }
 
@@ -31,8 +29,8 @@ impl EmbeddingModels {
         match self {
             #[cfg(feature = "model-google-gemma-300m")]
             Self::GoogleGemma300m => google_gemma_300m::descriptor().id,
-            #[cfg(not(feature = "model-google-gemma-300m"))]
-            Self::__NoModels => unreachable!("no embedding models are enabled in this build"),
+            #[allow(unreachable_patterns)]
+            _ => unreachable!(),
         }
     }
 
@@ -40,8 +38,8 @@ impl EmbeddingModels {
         match self {
             #[cfg(feature = "model-google-gemma-300m")]
             Self::GoogleGemma300m => google_gemma_300m::descriptor(),
-            #[cfg(not(feature = "model-google-gemma-300m"))]
-            Self::__NoModels => unreachable!("no embedding models are enabled in this build"),
+            #[allow(unreachable_patterns)]
+            _ => unreachable!(),
         }
     }
 
@@ -49,8 +47,8 @@ impl EmbeddingModels {
         match self {
             #[cfg(feature = "model-google-gemma-300m")]
             Self::GoogleGemma300m => google_gemma_300m::bundle(),
-            #[cfg(not(feature = "model-google-gemma-300m"))]
-            Self::__NoModels => unreachable!("no embedding models are enabled in this build"),
+            #[allow(unreachable_patterns)]
+            _ => unreachable!(),
         }
     }
 
@@ -58,8 +56,8 @@ impl EmbeddingModels {
         match self {
             #[cfg(feature = "model-google-gemma-300m")]
             Self::GoogleGemma300m => google_gemma_300m::embedding_spec(),
-            #[cfg(not(feature = "model-google-gemma-300m"))]
-            Self::__NoModels => unreachable!("no embedding models are enabled in this build"),
+            #[allow(unreachable_patterns)]
+            _ => unreachable!(),
         }
     }
 }

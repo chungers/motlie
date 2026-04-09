@@ -1,13 +1,13 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use mistralrs::core::NormalLoaderType;
-use mistralrs::{IsqBits, TextModelBuilder};
+use mistralrs::core::{NormalLoaderType, StopTokens};
+use mistralrs::{IsqBits, RequestBuilder, SamplingParams, TextModelBuilder};
 use motlie_model::{
     ArtifactPolicy, BundleHandle, BundleId, BundleMetadata, Capabilities, CapabilityKind,
     ChatModel, ChatRequest, ChatResponse, ChatRole, CompletionModel, CompletionRequest,
-    CompletionResponse, EmbeddingModel, LoadedBundleDescriptor, ModelBundle, ModelError,
-    QuantizationBits, StartOptions,
+    CompletionResponse, EmbeddingModel, GenerationParams, LoadedBundleDescriptor, ModelBundle,
+    ModelError, QuantizationBits, StartOptions,
 };
 
 /// Text model architecture discriminant that selects the correct `mistralrs` loader path.
@@ -113,11 +113,11 @@ struct MistralTextRuntime {
 #[async_trait]
 impl TextRuntime for MistralTextRuntime {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
-        let messages = to_text_messages(&request);
+        let builder = to_request_builder(&request);
 
         let response = self
             .model
-            .send_chat_request(messages)
+            .send_chat_request(builder)
             .await
             .map_err(|err| ModelError::BackendExecution {
                 backend: "mistralrs",
@@ -130,13 +130,16 @@ impl TextRuntime for MistralTextRuntime {
             .into_iter()
             .next()
             .and_then(|choice| choice.message.content)
-            .unwrap_or_default();
+            .ok_or_else(|| ModelError::BackendExecution {
+                backend: "mistralrs",
+                operation: "send_chat_request",
+                message: "response contained no text content".into(),
+            })?;
 
         Ok(ChatResponse { content })
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, ModelError> {
-        // Map completion to a single-turn chat with no system prompt.
         let chat_request = ChatRequest {
             messages: vec![motlie_model::ChatMessage::new(
                 ChatRole::User,
@@ -151,17 +154,36 @@ impl TextRuntime for MistralTextRuntime {
     }
 }
 
-fn to_text_messages(request: &ChatRequest) -> mistralrs::TextMessages {
-    let mut messages = mistralrs::TextMessages::new();
+fn to_request_builder(request: &ChatRequest) -> RequestBuilder {
+    let mut builder = RequestBuilder::new();
     for msg in &request.messages {
         let role = match msg.role {
             ChatRole::System => mistralrs::TextMessageRole::System,
             ChatRole::User => mistralrs::TextMessageRole::User,
             ChatRole::Assistant => mistralrs::TextMessageRole::Assistant,
         };
-        messages = messages.add_message(role, &msg.content);
+        builder = builder.add_message(role, &msg.content);
     }
-    messages
+    builder = apply_generation_params(builder, &request.params);
+    builder
+}
+
+fn apply_generation_params(builder: RequestBuilder, params: &GenerationParams) -> RequestBuilder {
+    let mut sampling = SamplingParams::deterministic();
+    if let Some(temperature) = params.temperature {
+        sampling.temperature = Some(temperature as f64);
+        sampling.top_k = None; // disable deterministic top_k=1 when temperature is set
+    }
+    if let Some(top_p) = params.top_p {
+        sampling.top_p = Some(top_p as f64);
+    }
+    if let Some(max_tokens) = params.max_tokens {
+        sampling.max_len = Some(max_tokens as usize);
+    }
+    if !params.stop_sequences.is_empty() {
+        sampling.stop_toks = Some(StopTokens::Seqs(params.stop_sequences.clone()));
+    }
+    builder.set_sampling(sampling)
 }
 
 // ---------------------------------------------------------------------------

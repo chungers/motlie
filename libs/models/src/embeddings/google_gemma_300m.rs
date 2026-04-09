@@ -1,7 +1,4 @@
-use std::fs;
 use std::path::{Path, PathBuf};
-
-use hf_hub::{Cache, Repo, RepoType};
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
     BundleId, CapabilityDescriptor, ContentKind, Embedding as EmbeddingBundle, EmbeddingDistance,
@@ -143,57 +140,10 @@ pub fn bundle() -> Box<dyn ModelBundle> {
 }
 
 fn resolve_local_snapshot_root(root: &Path) -> Result<PathBuf, ModelError> {
-    let repo = Cache::new(root.to_path_buf()).repo(Repo::new(
-        "google/embeddinggemma-300m".to_owned(),
-        RepoType::Model,
-    ));
+    let snapshot_dir = crate::resolve_hf_snapshot("google/embeddinggemma-300m", root)?;
 
-    let config = repo.get("config.json").ok_or_else(|| {
-        ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` requires cached `config.json` for `google/embeddinggemma-300m` under `{}`",
-            root.display()
-        ))
-    })?;
-
-    if repo.get("tokenizer.json").is_none() && repo.get("tokenizer.model").is_none() {
-        return Err(ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` requires cached tokenizer files for `google/embeddinggemma-300m` under `{}`",
-            root.display()
-        )));
-    }
-
-    let snapshot_dir = config.parent().ok_or_else(|| {
-        ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` found invalid cache layout for `google/embeddinggemma-300m` under `{}`",
-            root.display()
-        ))
-    })?;
-
-    let has_weights = fs::read_dir(snapshot_dir)
-        .map_err(|err| {
-            ModelError::InvalidConfiguration(format!(
-                "failed to inspect cached artifacts for `google/embeddinggemma-300m` in `{}`: {err}",
-                snapshot_dir.display()
-            ))
-        })?
-        .filter_map(Result::ok)
-        .any(|entry| {
-            entry
-                .file_name()
-                .to_str()
-                .map(|name| {
-                    name.ends_with(".safetensors") || name.ends_with(".safetensors.index.json")
-                })
-                .unwrap_or(false)
-        });
-
-    if !has_weights {
-        return Err(ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` requires cached weight files for `google/embeddinggemma-300m` under `{}`",
-            root.display()
-        )));
-    }
-
+    // EmbeddingGemma requires sentence-transformer module files beyond the
+    // standard transformer layout validated by the shared resolver.
     for required in REQUIRED_LOCAL_ARTIFACTS {
         if !snapshot_dir.join(required).exists() {
             return Err(ModelError::InvalidConfiguration(format!(
@@ -203,7 +153,7 @@ fn resolve_local_snapshot_root(root: &Path) -> Result<PathBuf, ModelError> {
         }
     }
 
-    Ok(snapshot_dir.to_path_buf())
+    Ok(snapshot_dir)
 }
 
 #[cfg(test)]

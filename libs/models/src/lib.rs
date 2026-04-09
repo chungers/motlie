@@ -67,6 +67,69 @@ pub enum ModelsError {
 
 pub type Result<T> = std::result::Result<T, ModelsError>;
 
+/// Resolve a Hugging Face cache root to the concrete snapshot directory for a model.
+///
+/// Validates that `config.json`, a tokenizer file, and at least one weight file
+/// are present. Returns the snapshot directory path suitable for passing to a
+/// backend as `ArtifactPolicy::LocalOnly { root }`.
+pub fn resolve_hf_snapshot(
+    model_id: &str,
+    cache_root: &Path,
+) -> std::result::Result<PathBuf, motlie_model::ModelError> {
+    use hf_hub::{Cache, Repo, RepoType};
+
+    let repo = Cache::new(cache_root.to_path_buf())
+        .repo(Repo::new(model_id.to_owned(), RepoType::Model));
+
+    let config = repo.get("config.json").ok_or_else(|| {
+        motlie_model::ModelError::InvalidConfiguration(format!(
+            "artifact policy `LocalOnly` requires cached `config.json` for `{model_id}` under `{}`",
+            cache_root.display()
+        ))
+    })?;
+
+    if repo.get("tokenizer.json").is_none() && repo.get("tokenizer.model").is_none() {
+        return Err(motlie_model::ModelError::InvalidConfiguration(format!(
+            "artifact policy `LocalOnly` requires cached tokenizer files for `{model_id}` under `{}`",
+            cache_root.display()
+        )));
+    }
+
+    let snapshot_dir = config.parent().ok_or_else(|| {
+        motlie_model::ModelError::InvalidConfiguration(format!(
+            "artifact policy `LocalOnly` found invalid cache layout for `{model_id}` under `{}`",
+            cache_root.display()
+        ))
+    })?;
+
+    let has_weights = std::fs::read_dir(snapshot_dir)
+        .map_err(|err| {
+            motlie_model::ModelError::InvalidConfiguration(format!(
+                "failed to inspect cached artifacts for `{model_id}` in `{}`: {err}",
+                snapshot_dir.display()
+            ))
+        })?
+        .filter_map(std::result::Result::ok)
+        .any(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .map(|name| {
+                    name.ends_with(".safetensors") || name.ends_with(".safetensors.index.json")
+                })
+                .unwrap_or(false)
+        });
+
+    if !has_weights {
+        return Err(motlie_model::ModelError::InvalidConfiguration(format!(
+            "artifact policy `LocalOnly` requires cached weight files for `{model_id}` under `{}`",
+            cache_root.display()
+        )));
+    }
+
+    Ok(snapshot_dir.to_path_buf())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ArtifactSource {
     HuggingFace { repo: &'static str },
