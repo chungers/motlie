@@ -122,6 +122,7 @@ async fn main() -> Result<()> {
     );
     support::print_startup_stats(&startup_stats);
     support::print_process_snapshot("process-after-start", &support::current_process_snapshot());
+    support::print_model_metrics("model-metrics-after-start", handle.metric_snapshot());
 
     let embeddings = handle
         .embeddings()
@@ -155,6 +156,10 @@ async fn main() -> Result<()> {
         "process-after-custom-embed",
         &support::current_process_snapshot(),
     );
+    support::print_model_metrics(
+        "model-metrics-after-custom-embed",
+        handle.metric_snapshot(),
+    );
 
     run_pair_demo(
         embeddings,
@@ -164,6 +169,7 @@ async fn main() -> Result<()> {
         "expected to have a relatively high cosine similarity",
     )
     .await?;
+    support::print_model_metrics("model-metrics-after-similar-pair", handle.metric_snapshot());
     run_pair_demo(
         embeddings,
         "dissimilar",
@@ -172,6 +178,10 @@ async fn main() -> Result<()> {
         "expected to have a noticeably lower cosine similarity",
     )
     .await?;
+    support::print_model_metrics(
+        "model-metrics-after-dissimilar-pair",
+        handle.metric_snapshot(),
+    );
 
     handle
         .shutdown()
@@ -226,6 +236,7 @@ async fn run_pair_demo(
         &format!("process-after-{label}-pair"),
         &support::current_process_snapshot(),
     );
+    // Pair runs share the same long-lived handle; metrics are printed by the caller after each top-level step.
 
     Ok(())
 }

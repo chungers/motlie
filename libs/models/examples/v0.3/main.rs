@@ -143,6 +143,7 @@ async fn main() -> Result<()> {
     );
     support::print_startup_stats(&startup_stats);
     support::print_process_snapshot("process-after-start", &support::current_process_snapshot());
+    support::print_model_metrics("model-metrics-after-start", handle.metric_snapshot());
 
     let chat = handle.chat().context("gemma4 bundle should expose chat")?;
 
@@ -167,6 +168,7 @@ async fn main() -> Result<()> {
         "process-after-text-chat",
         &support::current_process_snapshot(),
     );
+    support::print_model_metrics("model-metrics-after-text-chat", handle.metric_snapshot());
 
     if let Some(image_path) = image_path {
         println!("\n--- image + text chat ---");
@@ -206,6 +208,7 @@ async fn main() -> Result<()> {
             "process-after-image-chat",
             &support::current_process_snapshot(),
         );
+        support::print_model_metrics("model-metrics-after-image-chat", handle.metric_snapshot());
     } else {
         println!("\n--- image + text chat ---");
         println!("skipped: pass --image=/path/to/image to exercise the multimodal path");

@@ -4616,6 +4616,7 @@ dependencies = [
  "image",
  "mistralrs",
  "motlie-model",
+ "sysinfo",
  "tokio",
 ]
 

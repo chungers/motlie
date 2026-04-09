@@ -11,12 +11,18 @@ pub mod chat;
 pub mod embedding;
 pub mod eval;
 pub mod generation;
+pub mod metrics;
+pub mod units;
 
 pub use chat::{ChatMessage, ChatRole, ContentPart};
 pub use embedding::{Embedding, EmbeddingDistance, EmbeddingNormalization, EmbeddingSpec};
 pub use generation::{
     ChatRequest, ChatResponse, CompletionRequest, CompletionResponse, GenerationParams,
 };
+pub use metrics::{
+    EmbeddingMetrics, ModelMetricSnapshot, RuntimeMetrics, TextGenerationMetrics,
+};
+pub use units::{Bytes, Milliseconds, Tokens, TokensPerSecond};
 
 /// Stable product-facing identifier for a curated bundle.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -304,6 +310,9 @@ pub trait BundleHandle: Send + Sync {
     fn capabilities(&self) -> &Capabilities;
     fn supports(&self, capability: CapabilityKind) -> bool {
         self.capabilities().supports(capability)
+    }
+    fn metric_snapshot(&self) -> Option<ModelMetricSnapshot> {
+        None
     }
 
     fn chat(&self) -> Result<&dyn ChatModel, ModelError>;

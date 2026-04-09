@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use mistralrs::core::EmbeddingLoaderType;
@@ -6,7 +8,12 @@ use mistralrs::{EmbeddingModelBuilder, EmbeddingRequest, ModelDType};
 use motlie_model::{
     ArtifactPolicy, BundleHandle, BundleId, BundleMetadata, Capabilities, CapabilityKind,
     ChatModel, CompletionModel, EmbeddingModel, EmbeddingRequest as ModelEmbeddingRequest,
-    EmbeddingResponse, LoadedBundleDescriptor, ModelBundle, ModelError, StartOptions,
+    EmbeddingResponse, LoadedBundleDescriptor, ModelBundle, ModelError, ModelMetricSnapshot,
+    StartOptions,
+};
+use crate::common::{
+    observe_embedding_request, observe_memory, snapshot_embedding_metrics, EmbeddingMetricState,
+    RuntimeMetricState,
 };
 
 /// Embedding architecture discriminant that selects the correct `mistralrs` loader path.
@@ -83,6 +90,10 @@ impl ModelBundle for MistralEmbeddingBundle {
 
     async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
         let model = build_embedding_model(self.model_id, self.arch, options).await?;
+        let metrics = Arc::new(Mutex::new(EmbeddingMetricsState::default()));
+        if let Ok(mut metrics) = metrics.lock() {
+            observe_memory(&mut metrics.runtime);
+        }
 
         Ok(Box::new(MistralEmbeddingHandle {
             descriptor: LoadedBundleDescriptor {
@@ -90,7 +101,11 @@ impl ModelBundle for MistralEmbeddingBundle {
                 display_name: self.metadata.display_name.clone(),
                 capabilities: self.metadata.capabilities.clone(),
             },
-            runtime: Box::new(MistralRuntime { model }),
+            runtime: Box::new(MistralRuntime {
+                model,
+                metrics: Arc::clone(&metrics),
+            }),
+            metrics,
         }))
     }
 }
@@ -102,17 +117,20 @@ trait EmbeddingRuntime: Send + Sync {
 
 struct MistralRuntime {
     model: mistralrs::Model,
+    metrics: Arc<Mutex<EmbeddingMetricsState>>,
 }
 
 #[async_trait]
 impl EmbeddingRuntime for MistralRuntime {
     async fn embed(&self, request: ModelEmbeddingRequest) -> Result<EmbeddingResponse, ModelError> {
+        let input_count = request.inputs.len();
         let builder = request
             .inputs
             .into_iter()
             .fold(EmbeddingRequest::builder(), |builder, input| {
                 builder.add_prompt(input)
             });
+        let started_at = Instant::now();
 
         let vectors = self
             .model
@@ -123,6 +141,15 @@ impl EmbeddingRuntime for MistralRuntime {
                 operation: "generate_embeddings",
                 message: err.to_string(),
             })?;
+        let elapsed = started_at.elapsed();
+
+        if let Ok(mut metrics) = self.metrics.lock() {
+            let EmbeddingMetricsState {
+                runtime,
+                embeddings,
+            } = &mut *metrics;
+            observe_embedding_request(runtime, embeddings, elapsed, input_count);
+        }
 
         Ok(EmbeddingResponse { vectors })
     }
@@ -131,6 +158,7 @@ impl EmbeddingRuntime for MistralRuntime {
 struct MistralEmbeddingHandle {
     descriptor: LoadedBundleDescriptor,
     runtime: Box<dyn EmbeddingRuntime>,
+    metrics: Arc<Mutex<EmbeddingMetricsState>>,
 }
 
 #[async_trait]
@@ -141,6 +169,14 @@ impl BundleHandle for MistralEmbeddingHandle {
 
     fn capabilities(&self) -> &Capabilities {
         &self.descriptor.capabilities
+    }
+
+    fn metric_snapshot(&self) -> Option<ModelMetricSnapshot> {
+        let metrics = self.metrics.lock().ok()?.clone();
+        Some(snapshot_embedding_metrics(
+            &metrics.runtime,
+            &metrics.embeddings,
+        ))
     }
 
     fn chat(&self) -> Result<&dyn ChatModel, ModelError> {
@@ -167,6 +203,12 @@ impl EmbeddingModel for MistralEmbeddingHandle {
     async fn embed(&self, request: ModelEmbeddingRequest) -> Result<EmbeddingResponse, ModelError> {
         self.runtime.embed(request).await
     }
+}
+
+#[derive(Clone, Debug, Default)]
+struct EmbeddingMetricsState {
+    runtime: RuntimeMetricState,
+    embeddings: EmbeddingMetricState,
 }
 
 async fn build_embedding_model(
@@ -298,6 +340,7 @@ mod tests {
                 capabilities: Capabilities::embeddings_only(),
             },
             runtime: Box::new(StubRuntime),
+            metrics: Arc::new(Mutex::new(EmbeddingMetricsState::default())),
         };
 
         assert!(matches!(

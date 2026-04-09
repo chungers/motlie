@@ -15,6 +15,7 @@
 | 2026-04-08 | @codex-researcher: Clarified the implemented loaded-descriptor and backend-error contract after PR 139 review. `LoadedBundleDescriptor` is an alias of `BundleMetadata`, `ModelError` now distinguishes backend initialization and execution failures, and `ArtifactPolicy::LocalOnly` is documented as consuming a curated bundle-resolved local model path. | Overview, Core Types, Bundle API Sketch, Notes |
 | 2026-04-08 | @claude: Added `QuantizationBits` to `StartOptions` and documented the quantized startup pattern for the Qwen3-4B chat slice (#141). | Core Types, Bundle API Sketch |
 | 2026-04-08 | @codex-researcher: Updated the chat contract for the Gemma 4 multimodal slice (#142). `ChatMessage` now carries `ContentPart`s, the first vision-capable bundle still uses `ChatModel`, and `examples/v0.3` is now the concrete end-to-end reference for text+image chat. | Overview, Core Types, Bundle API Sketch, Notes |
+| 2026-04-09 | @codex-researcher: Added handle-level metric snapshots and unit-safe wrappers. Runtime/request aggregates now live on `BundleHandle::metric_snapshot()` instead of individual responses. | Overview, Core Types, Bundle API Sketch, Notes |
 
 This document sketches the concrete contract shapes currently introduced in `libs/model`. It covers both the core bundle lifecycle/capability contracts and the lightweight `model::eval` vocabulary that higher-level harness tooling should build on.
 
@@ -67,6 +68,14 @@ Primary bundle-contract types:
 - `QuantizationBits`
 - `LoadedBundleDescriptor`
 - `ModelError`
+- `ModelMetricSnapshot`
+- `RuntimeMetrics`
+- `TextGenerationMetrics`
+- `EmbeddingMetrics`
+- `Milliseconds`
+- `Bytes`
+- `Tokens`
+- `TokensPerSecond`
 - `EmbeddingDistance`
 - `EmbeddingNormalization`
 - `EmbeddingSpec`
@@ -107,6 +116,35 @@ The currently implemented error variants are:
 - `BackendInitialization`
 - `BackendExecution`
 - `UnsupportedCapability`
+
+### Handle-Level Metrics
+
+Loaded bundles may expose additive runtime metrics through `BundleHandle::metric_snapshot()`:
+
+```rust
+let snapshot = handle.metric_snapshot();
+```
+
+This is intentionally service-level, not response-level. It is the right ownership boundary for:
+
+- current and peak RSS
+- request counts
+- last / max / average request latency
+- aggregate token totals and token/sec for text-generation backends
+
+The current unit wrappers live in `libs/model/src/units.rs`:
+
+- `Milliseconds(pub u64)`
+- `Bytes(pub u64)`
+- `Tokens(pub u64)`
+- `TokensPerSecond(pub u64)`
+
+The current metric types live in `libs/model/src/metrics.rs`:
+
+- `ModelMetricSnapshot`
+- `RuntimeMetrics`
+- `TextGenerationMetrics`
+- `EmbeddingMetrics`
 
 ## Bundle API Sketch
 

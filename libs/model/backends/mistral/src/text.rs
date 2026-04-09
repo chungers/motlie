@@ -1,15 +1,19 @@
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
 use async_trait::async_trait;
 use mistralrs::core::NormalLoaderType;
 use mistralrs::{RequestBuilder, TextModelBuilder};
 use motlie_model::{
     BundleHandle, BundleId, BundleMetadata, Capabilities, CapabilityKind, ChatModel, ChatRequest,
     ChatResponse, ChatRole, CompletionModel, CompletionRequest, CompletionResponse, EmbeddingModel,
-    LoadedBundleDescriptor, ModelBundle, ModelError, StartOptions,
+    LoadedBundleDescriptor, ModelBundle, ModelError, ModelMetricSnapshot, StartOptions,
 };
 
 use crate::common::{
     apply_generation_params, configure_artifact_policy, map_chat_role, map_quantization_bits,
-    should_force_cpu,
+    observe_latency, observe_memory, observe_text_usage, should_force_cpu, snapshot_text_metrics,
+    RuntimeMetricState, TextMetricState,
 };
 
 /// Text model architecture discriminant that selects the correct `mistralrs` loader path.
@@ -86,6 +90,10 @@ impl ModelBundle for MistralTextBundle {
 
     async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
         let model = build_text_model(self.model_id, self.arch, options).await?;
+        let metrics = Arc::new(Mutex::new(TextMetrics::default()));
+        if let Ok(mut metrics) = metrics.lock() {
+            observe_memory(&mut metrics.runtime);
+        }
 
         Ok(Box::new(MistralTextHandle {
             descriptor: LoadedBundleDescriptor {
@@ -93,7 +101,11 @@ impl ModelBundle for MistralTextBundle {
                 display_name: self.metadata.display_name.clone(),
                 capabilities: self.metadata.capabilities.clone(),
             },
-            runtime: Box::new(MistralTextRuntime { model }),
+            runtime: Box::new(MistralTextRuntime {
+                model,
+                metrics: Arc::clone(&metrics),
+            }),
+            metrics,
         }))
     }
 }
@@ -110,12 +122,14 @@ trait TextRuntime: Send + Sync {
 
 struct MistralTextRuntime {
     model: mistralrs::Model,
+    metrics: Arc<Mutex<TextMetrics>>,
 }
 
 #[async_trait]
 impl TextRuntime for MistralTextRuntime {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
         let builder = to_request_builder(&request)?;
+        let started_at = Instant::now();
 
         let response = self.model.send_chat_request(builder).await.map_err(|err| {
             ModelError::BackendExecution {
@@ -124,7 +138,9 @@ impl TextRuntime for MistralTextRuntime {
                 message: err.to_string(),
             }
         })?;
+        let elapsed = started_at.elapsed();
 
+        let usage = response.usage.clone();
         let content = response
             .choices
             .into_iter()
@@ -135,6 +151,11 @@ impl TextRuntime for MistralTextRuntime {
                 operation: "send_chat_request",
                 message: "response contained no text content".into(),
             })?;
+
+        if let Ok(mut metrics) = self.metrics.lock() {
+            observe_latency(&mut metrics.runtime, elapsed);
+            observe_text_usage(&mut metrics.text, &usage);
+        }
 
         Ok(ChatResponse { content })
     }
@@ -183,6 +204,7 @@ fn collect_text_only_message(message: &motlie_model::ChatMessage) -> Result<Stri
 struct MistralTextHandle {
     descriptor: LoadedBundleDescriptor,
     runtime: Box<dyn TextRuntime>,
+    metrics: Arc<Mutex<TextMetrics>>,
 }
 
 #[async_trait]
@@ -193,6 +215,11 @@ impl BundleHandle for MistralTextHandle {
 
     fn capabilities(&self) -> &Capabilities {
         &self.descriptor.capabilities
+    }
+
+    fn metric_snapshot(&self) -> Option<ModelMetricSnapshot> {
+        let metrics = self.metrics.lock().ok()?.clone();
+        Some(snapshot_text_metrics(&metrics.runtime, &metrics.text))
     }
 
     fn chat(&self) -> Result<&dyn ChatModel, ModelError> {
@@ -212,6 +239,12 @@ impl BundleHandle for MistralTextHandle {
     async fn shutdown(self: Box<Self>) -> Result<(), ModelError> {
         Ok(())
     }
+}
+
+#[derive(Clone, Debug, Default)]
+struct TextMetrics {
+    runtime: RuntimeMetricState,
+    text: TextMetricState,
 }
 
 #[async_trait]
@@ -343,6 +376,7 @@ mod tests {
                 capabilities: Capabilities::chat_and_completion(),
             },
             runtime: Box::new(StubTextRuntime),
+            metrics: Arc::new(Mutex::new(TextMetrics::default())),
         };
 
         assert!(handle.supports(CapabilityKind::Chat));

@@ -139,6 +139,7 @@ async fn main() -> Result<()> {
     );
     support::print_startup_stats(&startup_stats);
     support::print_process_snapshot("process-after-start", &support::current_process_snapshot());
+    support::print_model_metrics("model-metrics-after-start", handle.metric_snapshot());
 
     let chat = handle.chat().context("qwen3 bundle should expose chat")?;
 
@@ -164,6 +165,7 @@ async fn main() -> Result<()> {
         "process-after-single-turn",
         &support::current_process_snapshot(),
     );
+    support::print_model_metrics("model-metrics-after-single-turn", handle.metric_snapshot());
 
     // Multi-turn follow-up.
     println!("\n--- multi-turn follow-up ---");
@@ -192,6 +194,7 @@ async fn main() -> Result<()> {
         "process-after-follow-up",
         &support::current_process_snapshot(),
     );
+    support::print_model_metrics("model-metrics-after-follow-up", handle.metric_snapshot());
 
     // Completion path.
     println!("\n--- completion ---");
@@ -218,6 +221,7 @@ async fn main() -> Result<()> {
         "process-after-completion",
         &support::current_process_snapshot(),
     );
+    support::print_model_metrics("model-metrics-after-completion", handle.metric_snapshot());
 
     handle
         .shutdown()

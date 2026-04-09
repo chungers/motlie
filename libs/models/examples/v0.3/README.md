@@ -18,6 +18,7 @@ This example demonstrates the single Gemma 4 E2B-it multimodal chat flow for thi
 9. Image + text chat when `--image=/path/to/image` is provided
 10. Latency reporting for startup, text-only chat, and image+text chat
 11. Process/memory snapshots before startup, after startup, and after each request path
+12. Handle-level model metrics after startup and each request path
 
 ## Step 1: Download Artifacts
 
