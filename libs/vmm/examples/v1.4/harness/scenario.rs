@@ -26,8 +26,8 @@ use crate::terminal::{
     HarnessTerminalSession, TerminalBackendKind, TerminalSessionError, VteScreenSnapshot,
 };
 use crate::{
-    DynError, HarnessInstance, demo_guest, ensure_file_exists, persist_json,
-    print_instance_details, seed_host_mounts,
+    DynError, HarnessInstance, PACKAGE_MANAGER_QUIESCENT_COMMAND, demo_guest, ensure_file_exists,
+    persist_json, print_instance_details, seed_host_mounts,
 };
 
 #[derive(Debug, Deserialize)]
@@ -56,6 +56,11 @@ pub enum ScenarioStep {
         timeout_ms: Option<u64>,
         #[serde(default)]
         expect: Option<ExecExpectation>,
+    },
+    WaitPackageManagerQuiescent {
+        guest: String,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
     },
     PtyOpen {
         guest: String,
@@ -166,6 +171,7 @@ pub struct ScenarioSessionArtifacts {
     pub terminal_backend: TerminalBackendKind,
     pub transcript_ndjson: PathBuf,
     pub screen_json: PathBuf,
+    pub screen_svg: PathBuf,
     pub asciicast: PathBuf,
     pub final_screen: VteScreenSnapshot,
 }
@@ -405,6 +411,7 @@ impl ScenarioDriver {
                                     terminal_backend: session.backend(),
                                     transcript_ndjson: session.transcript_path().to_path_buf(),
                                     screen_json: session.screen_path().to_path_buf(),
+                                    screen_svg: session.screen_svg_path().to_path_buf(),
                                     asciicast: session.asciicast_path().to_path_buf(),
                                     final_screen,
                                 },
@@ -555,6 +562,35 @@ impl ScenarioDriver {
                     shutdown: None,
                 })
             }
+            ScenarioStep::WaitPackageManagerQuiescent { guest, timeout_ms } => {
+                let handle = self.handle(guest)?;
+                let output = handle
+                    .exec(
+                        PACKAGE_MANAGER_QUIESCENT_COMMAND,
+                        duration_or_default(*timeout_ms, 65_000),
+                    )
+                    .await
+                    .map_err(ScenarioDriverError::Exec)?;
+                check_exec_expectation(
+                    &ExecExpectation {
+                        exit_code: Some(0),
+                        stdout_contains: Some("PKG_IDLE_OK".to_string()),
+                        stderr_contains: None,
+                    },
+                    &output,
+                )?;
+                Ok(ScenarioStepResult {
+                    index,
+                    action: "wait_package_manager_quiescent",
+                    guest: Some(guest.clone()),
+                    session: None,
+                    detail: format!("package manager background activity settled for {guest}"),
+                    exec: Some(output),
+                    pty_read: None,
+                    screen: None,
+                    shutdown: None,
+                })
+            }
             ScenarioStep::PtyOpen {
                 guest,
                 session,
@@ -588,6 +624,7 @@ impl ScenarioDriver {
                     self.terminal_backend,
                     session_root.join("pty-transcript.ndjson"),
                     session_root.join("pty-screen.json"),
+                    session_root.join("pty-screen.svg"),
                     session_root.join("pty.cast"),
                 );
                 let screen = terminal.snapshot()?;
@@ -846,6 +883,7 @@ fn action_name(step: &ScenarioStep) -> &'static str {
         ScenarioStep::Boot { .. } => "boot",
         ScenarioStep::Ready { .. } => "ready",
         ScenarioStep::Exec { .. } => "exec",
+        ScenarioStep::WaitPackageManagerQuiescent { .. } => "wait_package_manager_quiescent",
         ScenarioStep::PtyOpen { .. } => "pty_open",
         ScenarioStep::PtySend { .. } => "pty_send",
         ScenarioStep::PtySendLine { .. } => "pty_send_line",
@@ -864,6 +902,7 @@ fn step_guest(step: &ScenarioStep) -> Option<&str> {
         ScenarioStep::Boot { guest }
         | ScenarioStep::Ready { guest, .. }
         | ScenarioStep::Exec { guest, .. }
+        | ScenarioStep::WaitPackageManagerQuiescent { guest, .. }
         | ScenarioStep::PtyOpen { guest, .. }
         | ScenarioStep::Shutdown { guest } => Some(guest),
         _ => None,

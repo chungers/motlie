@@ -331,15 +331,17 @@ async fn pty_open(
         terminal_backend,
         session_root.join("pty-transcript.ndjson"),
         session_root.join("pty-screen.json"),
+        session_root.join("pty-screen.svg"),
         session_root.join("pty.cast"),
     );
     println!(
-        "ok: opened PTY {} for {} backend={} transcript={} screen={} cast={}",
+        "ok: opened PTY {} for {} backend={} transcript={} screen={} screen_svg={} cast={}",
         session_name,
         guest_id,
         terminal.backend(),
         terminal.transcript_path().display(),
         terminal.screen_path().display(),
+        terminal.screen_svg_path().display(),
         terminal.asciicast_path().display()
     );
     terminals.insert(session_name.to_string(), terminal);

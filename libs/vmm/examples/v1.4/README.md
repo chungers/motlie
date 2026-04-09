@@ -47,23 +47,22 @@ Repeatable validation entrypoints now are:
 
 A checked-in recorded validation session now lives under:
 
+- [`assets/pty-agent-validation.svg`](./assets/pty-agent-validation.svg)
 - [`assets/pty-agent-validation.cast`](./assets/pty-agent-validation.cast)
 
-This cast is the saved `pty-agent-validation` run that:
+These artifacts come from the saved `pty-agent-validation` run that:
 
 - waits for package-manager quiescence
 - shows one clean `sudo -n apt-get update`
 - launches `codex`
 - captures the Codex welcome screen
 
-Hosted replay on asciinema:
+GitHub-friendly snapshot:
 
-[![asciicast](https://asciinema.org/a/ywqNrzixTFtKlWAA.svg)](https://asciinema.org/a/ywqNrzixTFtKlWAA)
+![pty-agent-validation](./assets/pty-agent-validation.svg)
 
-This hosted upload is currently an unlinked temporary recording and, per the
-upload response on April 8, 2026, it will be automatically deleted after 7
-days unless it is preserved through an asciinema.org account. The checked-in
-`.cast` remains the repo-local source artifact.
+The checked-in SVG is a Rust-native export from the harness-rendered terminal
+snapshot. The checked-in `.cast` remains the replay/source artifact.
 
 Detailed repeatable runbooks live in:
 

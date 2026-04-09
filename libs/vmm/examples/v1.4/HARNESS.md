@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-08 | @codex | Add Rust-native static SVG export from the harness-rendered VTE snapshot, check in a repo-local `pty-agent-validation.svg`, and use that as the GitHub-friendly review surface while keeping asciicast as the replay artifact |
 | 2026-04-08 | @codex | Replace the temporary branch-local HTML replay surface with a hosted asciinema link and preview image, and remove the extra local player/Pages scaffolding to keep the review path minimal |
 | 2026-04-08 | @codex | Add a small checked-in HTML replay surface for the saved PTY validation cast and link it from README/HARNESS so the branch has a concrete review entrypoint for recorded shell sessions |
 | 2026-04-08 | @codex | Clarify PTY sequencing for shell-driven scenarios: after visible command output assertions, wait for the shell prompt to return before sending the next command, or TUI launches can race the prior command tail |
@@ -367,16 +368,17 @@ Per PTY session it writes:
 
 - `pty-transcript.ndjson`
 - `pty-screen.json`
+- `pty-screen.svg`
 - `pty.cast`
 
 Checked-in replay entrypoints for the saved agent-validation session:
 
+- [`assets/pty-agent-validation.svg`](./assets/pty-agent-validation.svg)
 - [`assets/pty-agent-validation.cast`](./assets/pty-agent-validation.cast)
-- [Hosted asciinema replay](https://asciinema.org/a/ywqNrzixTFtKlWAA)
 
-Hosted preview:
+GitHub-friendly snapshot:
 
-[![asciicast](https://asciinema.org/a/ywqNrzixTFtKlWAA.svg)](https://asciinema.org/a/ywqNrzixTFtKlWAA)
+![pty-agent-validation](./assets/pty-agent-validation.svg)
 
 The rendered screen JSON now records which terminal backend produced it.
 
@@ -411,6 +413,7 @@ This means the harness artifact strategy is:
 - `scenario-result.json` for high-level structured results
 - `pty-transcript.ndjson` for compact raw terminal events
 - `pty-screen.json` for rendered terminal state
+- `pty-screen.svg` for a GitHub-renderable static screen snapshot
 - `pty.cast` for portable replay/export
 
 That split is more useful for agents than either:
@@ -425,14 +428,8 @@ Why asciicast is included:
   pixels
 - humans can replay it with asciinema-compatible viewers on Linux, macOS, or
   the web
-- the hosted preview-image link is the minimal GitHub-friendly way to expose
-  interactive replay without carrying extra local player scaffolding
-
-Current caveat:
-
-- the current hosted upload was created on April 8, 2026 from an unlinked
-  system and asciinema reported that it will auto-delete after 7 days unless
-  preserved through an asciinema.org account
+- the static SVG covers the GitHub-rendered documentation case, while the cast
+  remains the full replay artifact
 
 Out of scope for `v1.4`:
 

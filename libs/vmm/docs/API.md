@@ -15,7 +15,7 @@ Rules for this document:
 
 Changelog:
 
-- 2026-04-08 | @codex | add PTY asciicast export as the portable replay artifact beside canonical transcript NDJSON + VTE screen JSON; PNG/GIF generation remains out of scope for `v1.4`
+- 2026-04-08 | @codex | add PTY asciicast export as the portable replay artifact beside canonical transcript NDJSON + VTE screen JSON, and add a Rust-native static SVG export for GitHub-friendly snapshot embedding; PNG/GIF generation remains out of scope for `v1.4`
 - 2026-04-08 | @codex | make the harness terminal-state engine switchable; `shadow` is now the default PTY/TUI backend, `vt100` remains as an explicit fallback, and result artifacts record the terminal backend used
 
 High-level status:
@@ -145,7 +145,9 @@ Phase 5 first slice:
 - [x] PTY scenario result hardening
 - [x] reusable PTY transcript artifact capture
 - [x] VTE/rendered terminal state
+- [x] Rust-native static SVG export from rendered screen state
 - [x] timed VTE screen assertions for alternate-screen TUIs via `pty_expect_screen`
+- [x] first built-in scenario readiness primitive via `wait_package_manager_quiescent`
 - [x] asciicast replay/export
 - [x] switchable terminal-state backend in the harness (`shadow` default, `vt100` fallback)
 - [ ] PNG/GIF/movie export
