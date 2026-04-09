@@ -569,7 +569,7 @@ async fn boot_guest(
         artifacts_dir,
         &instance.demo_root,
         &instance.namespace,
-    );
+    )?;
     seed_host_mounts(&guest)?;
 
     let prepared = prepare(

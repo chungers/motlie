@@ -55,7 +55,7 @@ pub struct VmHandle {
     runtime: SharedRuntime,
     backend_handle: BackendHandle,
     filesystem: Option<FilesystemHandle>,
-    network: std::sync::Mutex<Option<NetworkHandle>>,
+    network: tokio::sync::Mutex<Option<NetworkHandle>>,
     control_plane: Option<ControlPlaneHandle>,
 }
 
@@ -125,6 +125,11 @@ pub enum OrchestratorError {
     MissingSshBridge { guest_id: String },
     #[error("internal lifecycle state poisoned: {0}")]
     StatePoisoned(&'static str),
+    #[error("shutdown for guest {guest_id} reported cleanup failures: {reasons:?}")]
+    ShutdownFailures {
+        guest_id: String,
+        reasons: Vec<String>,
+    },
     #[error("guest {guest_id} exited before reaching readiness stage {stage:?}")]
     GuestExitedEarly {
         guest_id: String,
@@ -145,7 +150,7 @@ pub fn prepare(
     validate_network_modes(&req.network_modes)?;
 
     let runtime_paths = GuestRuntimePaths::for_guest(&req.namespace, &req.guest.guest_id)?;
-    let guest_socket_path = PathBuf::from(req.guest.socket_path.clone());
+    let guest_socket_path = req.guest.socket_path.clone();
     let net_assignment = allocator.ensure(&req.guest.guest_id)?.clone();
     let cloud_init = render_cloud_init_artifacts(&req.guest)?;
     let launch_script = render_launch_script(&LaunchArtifactRenderConfig {
@@ -209,14 +214,61 @@ pub async fn boot(
         runtime: Arc::clone(&services.runtime),
         backend_handle,
         filesystem,
-        network: std::sync::Mutex::new(network),
+        network: tokio::sync::Mutex::new(network),
         control_plane,
     })
 }
 
 impl VmHandle {
     pub fn observability(&self) -> VmObservability {
-        let filesystem_observability = match self.filesystem.as_ref() {
+        let filesystem_observability = self.filesystem_observability();
+        let network_observability = self.network_observability();
+        let control_plane_observability = self.control_plane_observability();
+        let bundle_root = self.runtime_paths.runtime_dir.join("bundle");
+        let host_mounts = self.host_mounts();
+        let artifacts = self.run_artifacts(
+            &filesystem_observability,
+            &network_observability,
+            &control_plane_observability,
+            &host_mounts,
+        );
+
+        VmObservability {
+            guest_id: self.guest_id.clone(),
+            pid: self.pid,
+            namespace_prefix: self.namespace.prefix.clone(),
+            temp_root: self.namespace.temp_root.clone(),
+            guest_socket_path: self.guest_socket_path.clone(),
+            runtime_paths: VmRuntimePathsView {
+                runtime_dir: self.runtime_paths.runtime_dir.clone(),
+                launch_dir: self.runtime_paths.launch_dir.clone(),
+                cloud_init_dir: self.runtime_paths.cloud_init_dir.clone(),
+                api_socket: self.runtime_paths.api_socket.clone(),
+                vnet_socket: self.runtime_paths.vnet_socket.clone(),
+                vsock_socket: self.runtime_paths.vsock_socket.clone(),
+                serial_log: self.runtime_paths.serial_log.clone(),
+                launch_log: self.runtime_paths.launch_log.clone(),
+            },
+            filesystem: filesystem_observability,
+            network: network_observability,
+            control_plane: control_plane_observability,
+            run_bundle: VmRunBundle {
+                capture_paths: VmCapturePaths {
+                    scenario_result_json: bundle_root.join("scenario-result.json"),
+                    pty_transcript_ndjson: bundle_root.join("pty-transcript.ndjson"),
+                    pty_screen_json: bundle_root.join("pty-screen.json"),
+                    pty_screen_svg: bundle_root.join("pty-screen.svg"),
+                    pty_asciicast: bundle_root.join("pty.cast"),
+                },
+                bundle_root,
+                host_mounts,
+                artifacts,
+            },
+        }
+    }
+
+    fn filesystem_observability(&self) -> FilesystemObservability {
+        match self.filesystem.as_ref() {
             Some(filesystem) => FilesystemObservability {
                 backing: filesystem.backing_name(),
                 socket_path: filesystem.socket_path().map(Path::to_path_buf),
@@ -227,12 +279,15 @@ impl VmHandle {
                 socket_path: None,
                 mount_tags: Vec::new(),
             },
-        };
-        let network_observability = match self
+        }
+    }
+
+    fn network_observability(&self) -> NetworkObservability {
+        match self
             .network
-            .lock()
+            .try_lock()
             .ok()
-            .and_then(|guard| guard.as_ref().map(|n| n.backing_name()))
+            .and_then(|guard| guard.as_ref().map(|network| network.backing_name()))
         {
             Some(backing) => NetworkObservability {
                 backing,
@@ -242,8 +297,11 @@ impl VmHandle {
                 backing: "none",
                 socket_path: None,
             },
-        };
-        let control_plane_observability = match self.control_plane.as_ref() {
+        }
+    }
+
+    fn control_plane_observability(&self) -> ControlPlaneObservability {
+        match self.control_plane.as_ref() {
             Some(control_plane) => ControlPlaneObservability {
                 backing: control_plane.backing_name(),
                 ssh_bridge_socket_path: control_plane.bridge_socket_path(),
@@ -252,10 +310,11 @@ impl VmHandle {
                 backing: "none",
                 ssh_bridge_socket_path: None,
             },
-        };
-        let bundle_root = self.runtime_paths.runtime_dir.join("bundle");
-        let host_mounts: Vec<VmHostMount> = self
-            .guest_mounts
+        }
+    }
+
+    fn host_mounts(&self) -> Vec<VmHostMount> {
+        self.guest_mounts
             .iter()
             .map(|mount| VmHostMount {
                 tag: mount.tag.clone(),
@@ -263,7 +322,16 @@ impl VmHandle {
                 guest_path: mount.guest_path.clone(),
                 exists: mount.host_path.exists(),
             })
-            .collect();
+            .collect()
+    }
+
+    fn run_artifacts(
+        &self,
+        filesystem_observability: &FilesystemObservability,
+        network_observability: &NetworkObservability,
+        control_plane_observability: &ControlPlaneObservability,
+        host_mounts: &[VmHostMount],
+    ) -> Vec<VmRunArtifact> {
         let mut artifacts = vec![
             VmRunArtifact {
                 kind: VmArtifactKind::RuntimeDir,
@@ -338,6 +406,7 @@ impl VmHandle {
                 exists: self.runtime_paths.launch_log.exists(),
             },
         ];
+
         if let Some(socket_path) = filesystem_observability.socket_path.clone() {
             artifacts.push(VmRunArtifact {
                 kind: VmArtifactKind::FilesystemSocket,
@@ -367,38 +436,7 @@ impl VmHandle {
             exists: mount.exists,
         }));
 
-        VmObservability {
-            guest_id: self.guest_id.clone(),
-            pid: self.pid,
-            namespace_prefix: self.namespace.prefix.clone(),
-            temp_root: self.namespace.temp_root.clone(),
-            guest_socket_path: self.guest_socket_path.clone(),
-            runtime_paths: VmRuntimePathsView {
-                runtime_dir: self.runtime_paths.runtime_dir.clone(),
-                launch_dir: self.runtime_paths.launch_dir.clone(),
-                cloud_init_dir: self.runtime_paths.cloud_init_dir.clone(),
-                api_socket: self.runtime_paths.api_socket.clone(),
-                vnet_socket: self.runtime_paths.vnet_socket.clone(),
-                vsock_socket: self.runtime_paths.vsock_socket.clone(),
-                serial_log: self.runtime_paths.serial_log.clone(),
-                launch_log: self.runtime_paths.launch_log.clone(),
-            },
-            filesystem: filesystem_observability,
-            network: network_observability,
-            control_plane: control_plane_observability,
-            run_bundle: VmRunBundle {
-                capture_paths: VmCapturePaths {
-                    scenario_result_json: bundle_root.join("scenario-result.json"),
-                    pty_transcript_ndjson: bundle_root.join("pty-transcript.ndjson"),
-                    pty_screen_json: bundle_root.join("pty-screen.json"),
-                    pty_screen_svg: bundle_root.join("pty-screen.svg"),
-                    pty_asciicast: bundle_root.join("pty.cast"),
-                },
-                bundle_root,
-                host_mounts,
-                artifacts,
-            },
-        }
+        artifacts
     }
 
     pub async fn ready(&self, policy: &ReadinessPolicy) -> Result<(), OrchestratorError> {
@@ -450,22 +488,39 @@ impl VmHandle {
     }
 
     pub async fn shutdown(&self) -> Result<ShutdownReport, OrchestratorError> {
-        let backend_result = self.runtime.hypervisor.shutdown(&self.backend_handle)?;
+        let mut failures = Vec::new();
+        let backend_result = match self.runtime.hypervisor.shutdown(&self.backend_handle) {
+            Ok(report) => Some(report),
+            Err(err) => {
+                failures.push(format!("hypervisor shutdown: {err}"));
+                None
+            }
+        };
 
         if let Some(control_plane) = self.control_plane.as_ref() {
-            control_plane.shutdown()?;
+            if let Err(err) = control_plane.shutdown() {
+                failures.push(format!("control-plane shutdown: {err}"));
+            }
         }
-        if let Some(mut network) = self
-            .network
-            .lock()
-            .map_err(|_| OrchestratorError::StatePoisoned("network handle"))?
-            .take()
-        {
-            network.shutdown()?;
+        if let Some(mut network) = self.network.lock().await.take() {
+            if let Err(err) = network.shutdown() {
+                failures.push(format!("network shutdown: {err}"));
+            }
         }
         if let Some(filesystem) = self.filesystem.as_ref() {
-            filesystem.shutdown()?;
+            if let Err(err) = filesystem.shutdown() {
+                failures.push(format!("filesystem shutdown: {err}"));
+            }
         }
+
+        if !failures.is_empty() {
+            return Err(OrchestratorError::ShutdownFailures {
+                guest_id: self.guest_id.clone(),
+                reasons: failures,
+            });
+        }
+
+        let backend_result = backend_result.expect("shutdown failures would have been returned");
 
         Ok(ShutdownReport {
             pid: self.pid,
@@ -490,14 +545,6 @@ impl VmHandle {
                     guest_id: self.guest_id.clone(),
                     stage,
                 });
-            }
-            if let Some(pid) = self.pid {
-                if !PathBuf::from(format!("/proc/{pid}")).exists() {
-                    return Err(OrchestratorError::GuestExitedEarly {
-                        guest_id: self.guest_id.clone(),
-                        stage,
-                    });
-                }
             }
             if Instant::now() >= deadline {
                 return Err(OrchestratorError::ReadinessTimeout {
@@ -529,7 +576,7 @@ mod tests {
         GuestSpec {
             guest_id: "alice".to_string(),
             hostname: "motlie-alice".to_string(),
-            socket_path: "/tmp/motlie-vmm-v14-alice.vsock_5000".to_string(),
+            socket_path: PathBuf::from("/tmp/motlie-vmm-v14-alice.vsock_5000"),
             user: GuestUser {
                 name: "alice".to_string(),
                 uid: 1000,
@@ -620,7 +667,7 @@ mod tests {
                 child: std::sync::Mutex::new(None),
             }),
             filesystem: None,
-            network: std::sync::Mutex::new(None),
+            network: tokio::sync::Mutex::new(None),
             control_plane: None,
         };
 

@@ -8,6 +8,8 @@ use serde::Serialize;
 use thiserror::Error;
 
 const MAX_MAC_SLOT_CAPACITY: u32 = 1 << 20;
+const DEFAULT_SOCKET_NAME_PREFIX: &str = "motlie-vmm";
+const MAC_OUI_PREFIX: [u8; 3] = [0x52, 0x54, 0x00];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Ipv4Subnet {
@@ -238,6 +240,8 @@ pub struct GuestNetAllocatorConfig {
     pub max_guests: Option<u32>,
     /// Prefix used for vhost-user socket paths.
     pub socket_dir: PathBuf,
+    /// Namespace-sensitive socket name prefix used for vhost-user sockets.
+    pub socket_name_prefix: String,
     /// Admin ingress subnet pool.
     pub admin_pool: Ipv4SubnetPool,
     /// Egress subnet pool used by `motlie-vnet`.
@@ -281,7 +285,8 @@ impl Default for GuestNetAllocatorConfig {
         Self {
             first_cid: 3,
             max_guests: None,
-            socket_dir: PathBuf::from("/tmp"),
+            socket_dir: std::env::temp_dir(),
+            socket_name_prefix: DEFAULT_SOCKET_NAME_PREFIX.to_string(),
             admin_pool: Ipv4SubnetPool {
                 base: Ipv4Subnet::new(Ipv4Addr::new(172, 20, 0, 0), 16)
                     .expect("static subnet is valid"),
@@ -454,7 +459,7 @@ impl GuestNetAllocator {
             egress_mac: mac_from_slot(slot, 0xe0),
             vnet_socket_path: config
                 .socket_dir
-                .join(format!("motlie-vmm-{guest_name}.sock")),
+                .join(format!("{}-{guest_name}.sock", config.socket_name_prefix)),
         })
     }
 }
@@ -477,9 +482,9 @@ fn subnet_size(prefix_len: u8) -> u32 {
 
 fn mac_from_slot(slot: u32, plane_prefix: u8) -> [u8; 6] {
     [
-        0x52,
-        0x54,
-        0x00,
+        MAC_OUI_PREFIX[0],
+        MAC_OUI_PREFIX[1],
+        MAC_OUI_PREFIX[2],
         plane_prefix | ((slot >> 16) as u8 & 0x0f),
         (slot >> 8) as u8,
         slot as u8,

@@ -54,14 +54,63 @@ impl Default for GuestResources {
 /// Storage/image policy that does not directly map to CPU/RAM sizing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuestStorage {
-    pub overlay_size: String,
+    pub overlay_size: OverlaySize,
 }
 
 impl Default for GuestStorage {
     fn default() -> Self {
         Self {
-            overlay_size: "2G".to_string(),
+            overlay_size: OverlaySize::new("2G").expect("default overlay size is valid"),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlaySize(String);
+
+impl OverlaySize {
+    pub fn new(value: impl Into<String>) -> Result<Self, SpecError> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err(SpecError::InvalidOverlaySize {
+                value,
+                reason: "overlay size cannot be empty".to_string(),
+            });
+        }
+
+        let digit_len = value
+            .bytes()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        let (digits, suffix) = value.split_at(digit_len);
+        if digits.is_empty() {
+            return Err(SpecError::InvalidOverlaySize {
+                value,
+                reason: "overlay size must start with digits".to_string(),
+            });
+        }
+        if !suffix.is_empty()
+            && !matches!(suffix, "K" | "M" | "G" | "T" | "P" | "KiB" | "MiB" | "GiB")
+        {
+            return Err(SpecError::InvalidOverlaySize {
+                value,
+                reason: "overlay size suffix must be one of K/M/G/T/P or KiB/MiB/GiB".to_string(),
+            });
+        }
+
+        Ok(Self(format!("{digits}{suffix}")))
+    }
+}
+
+impl std::fmt::Display for OverlaySize {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl AsRef<str> for OverlaySize {
+    fn as_ref(&self) -> &str {
+        &self.0
     }
 }
 
@@ -82,7 +131,7 @@ pub struct BootArtifacts {
 pub struct GuestSpec {
     pub guest_id: String,
     pub hostname: String,
-    pub socket_path: String,
+    pub socket_path: PathBuf,
     pub user: GuestUser,
     pub ssh: GuestSshAccess,
     pub mounts: Vec<GuestMountSpec>,
@@ -100,7 +149,10 @@ pub struct RuntimeNamespace {
 }
 
 impl RuntimeNamespace {
-    pub fn new(prefix: impl Into<String>, temp_root: impl Into<PathBuf>) -> Result<Self, SpecError> {
+    pub fn new(
+        prefix: impl Into<String>,
+        temp_root: impl Into<PathBuf>,
+    ) -> Result<Self, SpecError> {
         let prefix = prefix.into();
         if prefix.trim().is_empty() {
             return Err(SpecError::EmptyNamespacePrefix);
@@ -217,6 +269,10 @@ pub enum SpecError {
     EmptyGuestUserName,
     #[error("guest ssh principal cannot be empty")]
     EmptyGuestPrincipal,
+    #[error("guest socket path cannot be empty")]
+    EmptySocketPath,
+    #[error("invalid overlay size '{value}': {reason}")]
+    InvalidOverlaySize { value: String, reason: String },
     #[error("system clock is invalid for instance namespace generation")]
     InvalidClock,
 }
@@ -239,6 +295,9 @@ impl GuestSpec {
         if self.ssh.principal.trim().is_empty() {
             return Err(SpecError::EmptyGuestPrincipal);
         }
+        if self.socket_path.as_os_str().is_empty() {
+            return Err(SpecError::EmptySocketPath);
+        }
         Ok(())
     }
 }
@@ -252,8 +311,14 @@ mod tests {
         let namespace = RuntimeNamespace::new("motlie-vmm-v14", "/tmp").unwrap();
         let paths = GuestRuntimePaths::for_guest(&namespace, "alice").unwrap();
 
-        assert_eq!(paths.runtime_dir, PathBuf::from("/tmp/motlie-vmm-v14-runtime/alice"));
-        assert_eq!(paths.launch_dir, PathBuf::from("/tmp/motlie-vmm-v14-launch/alice"));
+        assert_eq!(
+            paths.runtime_dir,
+            PathBuf::from("/tmp/motlie-vmm-v14-runtime/alice")
+        );
+        assert_eq!(
+            paths.launch_dir,
+            PathBuf::from("/tmp/motlie-vmm-v14-launch/alice")
+        );
         assert_eq!(
             paths.cloud_init_dir,
             PathBuf::from("/tmp/motlie-vmm-v14-cloud-init-alice")
@@ -262,8 +327,14 @@ mod tests {
             paths.api_socket,
             PathBuf::from("/tmp/motlie-vmm-v14-alice-api.sock")
         );
-        assert_eq!(paths.vnet_socket, PathBuf::from("/tmp/motlie-vmm-v14-alice.sock"));
-        assert_eq!(paths.vsock_socket, PathBuf::from("/tmp/motlie-vmm-v14-alice.vsock"));
+        assert_eq!(
+            paths.vnet_socket,
+            PathBuf::from("/tmp/motlie-vmm-v14-alice.sock")
+        );
+        assert_eq!(
+            paths.vsock_socket,
+            PathBuf::from("/tmp/motlie-vmm-v14-alice.vsock")
+        );
         assert_eq!(
             paths.serial_log,
             PathBuf::from("/tmp/motlie-vmm-v14-launch/alice/serial.log")
@@ -311,7 +382,7 @@ mod tests {
         let spec = GuestSpec {
             guest_id: "alice".to_string(),
             hostname: "motlie-alice".to_string(),
-            socket_path: "/tmp/motlie-vmm-v14-alice.vsock_5000".to_string(),
+            socket_path: PathBuf::from("/tmp/motlie-vmm-v14-alice.vsock_5000"),
             user: GuestUser {
                 name: "alice".to_string(),
                 uid: 1000,

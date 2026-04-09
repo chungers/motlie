@@ -461,7 +461,8 @@ impl ScenarioDriver {
                     &self.artifacts_dir,
                     &self.instance.demo_root,
                     &self.instance.namespace,
-                );
+                )
+                .map_err(|source| ScenarioDriverError::Setup(source.to_string()))?;
                 seed_host_mounts(&spec)
                     .map_err(|source| ScenarioDriverError::Setup(source.to_string()))?;
                 let prepared = prepare(
@@ -858,6 +859,9 @@ impl ScenarioDriver {
     }
 
     async fn shutdown_all(&mut self) {
+        for session in self.terminals.values() {
+            let _ = session.persist_artifacts();
+        }
         for (_name, handle) in self.handles.drain() {
             let _ = handle.shutdown().await;
         }
@@ -1067,6 +1071,12 @@ fn classify_orchestrator(stage: &'static str, error: &OrchestratorError) -> Driv
             code: "state_poisoned",
             message: error.to_string(),
         },
+        OrchestratorError::ShutdownFailures { .. } => DriverFailure {
+            class: DriverFailureClass::Shutdown,
+            stage,
+            code: "shutdown_cleanup_failed",
+            message: error.to_string(),
+        },
         OrchestratorError::GuestExitedEarly { .. } => DriverFailure {
             class: DriverFailureClass::Readiness,
             stage,
@@ -1106,7 +1116,8 @@ fn classify_runtime_failure(stage: &'static str, error: &RuntimeError) -> Driver
         | RuntimeError::GuestFs(GuestFsError::CreateMountPath { .. })
         | RuntimeError::GuestFs(GuestFsError::AddMount { .. })
         | RuntimeError::GuestFs(GuestFsError::WaitForMounts { .. })
-        | RuntimeError::GuestFs(GuestFsError::CleanupSocket { .. }) => DriverFailure {
+        | RuntimeError::GuestFs(GuestFsError::CleanupSocket { .. })
+        | RuntimeError::GuestFs(GuestFsError::TaskStatePoisoned) => DriverFailure {
             class: DriverFailureClass::Filesystem,
             stage,
             code: "guestfs_failed",
@@ -1136,11 +1147,16 @@ fn classify_ssh_failure(stage: &'static str, error: &SshProxyError) -> DriverFai
             SshProxyError::GuestConnection { .. } => "ssh_guest_connection_failed",
             SshProxyError::ExecFailed { .. } => "ssh_exec_failed",
             SshProxyError::Ca(_) => "ssh_ca_failed",
-            SshProxyError::Ssh(_) => "ssh_transport_failed",
+            SshProxyError::GenerateServerKey { .. } => "ssh_server_key_failed",
+            SshProxyError::ProxyBind { .. } => "ssh_proxy_bind_failed",
+            SshProxyError::BindGuestBridgeSocket { .. } => "ssh_bridge_bind_failed",
+            SshProxyError::CertAuth { .. } => "ssh_cert_auth_failed",
+            SshProxyError::Russh { .. } => "ssh_transport_failed",
             SshProxyError::ChannelClosed => "ssh_channel_closed",
             SshProxyError::MissingExitStatus { .. } => "ssh_missing_exit_status",
             SshProxyError::UnknownGuest(_) => "ssh_unknown_guest",
             SshProxyError::StatePoisoned(_) => "ssh_state_poisoned",
+            SshProxyError::CleanupGuestBridgeSocket { .. } => "ssh_bridge_cleanup_failed",
             SshProxyError::PtyTimeout { .. } => "pty_timeout",
             SshProxyError::Unsupported(_) => "ssh_unsupported",
         },

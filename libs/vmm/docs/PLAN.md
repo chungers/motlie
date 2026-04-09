@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-08 | @codex | Address PR 140 review items: remove the dead `VmBackend` / `BackendSet` transitional layer, tighten shutdown/readiness/terminal correctness, and update the plan language to match the direct enum-dispatch runtime that is now in code |
 | 2026-04-08 | @codex | Add a switchable harness terminal backend, make `shadow-terminal` the default PTY/TUI renderer with `vt100` as an explicit fallback, and record that GIF/PNG/movie output stays deferred outside `v1.4` |
 | 2026-04-08 | @codex | Add asciicast export to the PTY artifact plan and standardize the scope boundary: NDJSON transcript + VTE screen JSON remain canonical, asciicast is the portable replay export, and PNG/GIF/movie generation is explicitly deferred out of `v1.4` scope |
 | 2026-04-08 | @codex | Replace the 7-slot allocator with computed subnet-pool capacity, expose allocator config through `harness_v1_4`, add a file-backed scenario driver with action/expectation steps, and complete PTY/VTE capture with raw transcript NDJSON plus rendered screen JSON |
@@ -171,8 +172,7 @@ Tasks:
 - [x] define backend review types:
   - [x] `BackendKind`
   - [x] `VmBackendCapabilities`
-  - [x] `VmBackend`
-  - [x] intermediate `BackendSet` during the transition to injected `Runtime`
+  - [x] `BackendHandle`
 - [x] add `prepare()`
 - [x] add `boot()`
 - [x] add handle-based readiness:
@@ -196,8 +196,8 @@ Tasks:
         `VmConfig` + `start_vmm_thread(...)`
 - [x] make backend dispatch enum-based, not dynamically discovered
 - [x] inject backend dispatch into generic orchestrator code
-- [x] converge the intermediate `BackendSet` injection to reviewed
-      `Runtime` injection
+- [x] converge the earlier transitional backend injection to reviewed
+      `Runtime` injection, then remove the dead transitional scaffolding
 - [x] add the first backend implementation:
   - [x] `ChShellBackend`
   - [x] keep it close enough to current `v1.3` shell/CLI behavior to boot and

@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-08 | @codex | Address PR 140 review drift: remove the dead `VmBackend` / `BackendSet` transitional story from the design, update `GuestSpec` / `PreparedGuest` / shutdown snippets to match code, and record the typed `OverlaySize` plus namespace-sensitive socket-path allocation details |
 | 2026-04-08 | @codex | Make the harness terminal-state engine switchable, adopt `shadow-terminal` as the default high-fidelity backend for PTY/TUI validation, keep `vt100` as an explicit fallback backend, and keep PNG/GIF/movie generation out of scope for `v1.4` |
 | 2026-04-08 | @codex | Add the PTY export design decision: keep NDJSON transcript plus VTE screen JSON as canonical validation artifacts, add asciicast export for portable replay/interchange, and explicitly defer PNG/GIF/movie generation as out of scope for `v1.4` |
 | 2026-04-08 | @codex | Replace the temporary 7-slot network allocator with a dedicated slot-derived allocation design section and public API: `Ipv4Subnet`, `Ipv4SubnetPool`, computed capacity, harness-exposed allocator config, and PTY/VTE scenario-driver direction |
@@ -463,7 +464,7 @@ Current convergence status:
   - `VmHandle`
   - `BackendKind`
   - `VmBackendCapabilities`
-  - `VmBackend`
+  - `BackendHandle`
   - `ChShellBackend`
   - `prepare()`
   - `boot()`
@@ -1079,7 +1080,7 @@ derived from the proven example patterns (`GuestConfig`, `GuestRuntime`,
 pub struct GuestSpec {
     pub guest_id: String,
     pub hostname: String,
-    pub socket_path: String,
+    pub socket_path: PathBuf,
     pub user: GuestUser,
     pub ssh: GuestSshAccess,
     pub mounts: Vec<GuestMountSpec>,
@@ -1118,8 +1119,10 @@ pub struct GuestResources {
 }
 
 pub struct GuestStorage {
-    pub overlay_size: String,
+    pub overlay_size: OverlaySize,
 }
+
+pub struct OverlaySize(String);
 
 pub struct BootArtifacts {
     pub kernel: PathBuf,
@@ -1130,10 +1133,14 @@ pub struct BootArtifacts {
 
 pub struct PreparedGuest {
     pub guest: GuestSpec,
+    pub namespace: RuntimeNamespace,
     pub runtime_paths: GuestRuntimePaths,
+    pub guest_socket_path: PathBuf,
     pub net_assignment: GuestNetAssignment,
     pub cloud_init: CloudInitArtifacts,
     pub launch_script: String,
+    pub network_modes: NetworkModes,
+    pub base_dir: PathBuf,
 }
 
 /// Handle to a running guest VM.
@@ -1168,7 +1175,10 @@ hang readiness off the returned handle:
 
 ```rust
 pub fn prepare(req: PrepareRequest) -> Result<PreparedGuest, OrchestratorError>;
-pub fn boot(prepared: PreparedGuest) -> Result<VmHandle, OrchestratorError>;
+pub async fn boot(
+    prepared: PreparedGuest,
+    services: LifecycleServices,
+) -> Result<VmHandle, OrchestratorError>;
 
 impl VmHandle {
     pub async fn ready(
@@ -1211,14 +1221,18 @@ pub struct VmBackendCapabilities {
     pub supports_guest_metrics: bool,
 }
 
-pub trait VmBackend {
-    type Handle;
-    type Error;
+pub enum BackendHandle {
+    ChShell(ChShellHandle),
+}
 
-    fn kind(&self) -> BackendKind;
-    fn capabilities(&self) -> VmBackendCapabilities;
-    fn boot(&self, prepared: &PreparedGuest) -> Result<Self::Handle, Self::Error>;
-    fn shutdown(&self, handle: &Self::Handle) -> Result<(), Self::Error>;
+impl ChShellBackend {
+    pub fn kind(&self) -> BackendKind;
+    pub fn capabilities(&self) -> VmBackendCapabilities;
+    pub fn boot(&self, prepared: &PreparedGuest) -> Result<BackendHandle, BackendError>;
+    pub fn shutdown(
+        &self,
+        handle: &BackendHandle,
+    ) -> Result<BackendShutdownOutcome, BackendError>;
 }
 ```
 
@@ -1226,8 +1240,10 @@ Important design rules:
 
 - no dynamic dispatch or runtime-discovered backends
 - use enum dispatch because the backend set is known in source
+- do not introduce a shared `VmBackend` trait when enum dispatch already covers
+  the reviewed backend set
 - do not push readiness, SSH exec, validation, or guestfs semantics into the
-  backend trait
+  backend implementation boundary
 - the first implementation should be `ChShellBackend`, which preserves the
   current `v1.3` shell/CLI semantics behind the new interface
 
@@ -1328,7 +1344,7 @@ let spec = GuestSpec {
         max_vcpus: None,
     },
     storage: GuestStorage {
-        overlay_size: "2G".into(),
+        overlay_size: OverlaySize::new("2G")?,
     },
     boot: BootArtifacts {
         kernel: "/tmp/vmm-v1.4/libs/vmm/examples/v1.4/artifacts/base/Image".into(),

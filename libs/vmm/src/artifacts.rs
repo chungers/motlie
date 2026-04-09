@@ -228,7 +228,7 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
     writeln!(
         &mut out,
         "OVERLAY_SIZE={}",
-        shell_single_quote(&cfg.guest.storage.overlay_size)
+        shell_single_quote(cfg.guest.storage.overlay_size.as_ref())
     )
     .expect("writing to String cannot fail");
     writeln!(
@@ -309,7 +309,7 @@ mod tests {
         GuestSpec {
             guest_id: "alice".to_string(),
             hostname: "motlie-alice".to_string(),
-            socket_path: "/tmp/motlie-vmm-v14-alice.vsock_5000".to_string(),
+            socket_path: std::path::PathBuf::from("/tmp/motlie-vmm-v14-alice.vsock_5000"),
             user: GuestUser {
                 name: "alice".to_string(),
                 uid: 1000,

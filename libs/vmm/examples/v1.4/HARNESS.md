@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-08 | @codex | Address PR 140 review drift in the harness contract: make the repo-root working-directory assumption explicit, document that `ready.timeout_ms` is currently applied per readiness sub-phase instead of as one wall-clock budget, and keep the recorded-artifact guidance aligned with the live harness behavior |
 | 2026-04-08 | @codex | Add Rust-native static SVG export from the harness-rendered VTE snapshot, check in a repo-local `pty-agent-validation.svg`, and use that as the GitHub-friendly review surface while keeping asciicast as the replay artifact |
 | 2026-04-08 | @codex | Replace the temporary branch-local HTML replay surface with a hosted asciinema link and preview image, and remove the extra local player/Pages scaffolding to keep the review path minimal |
 | 2026-04-08 | @codex | Add a small checked-in HTML replay surface for the saved PTY validation cast and link it from README/HARNESS so the branch has a concrete review entrypoint for recorded shell sessions |
@@ -73,6 +74,13 @@ Success criteria for this harness design:
   intervention
 
 ## Agent Operating Model
+
+Unless otherwise noted, command examples in this document assume the repo root
+working directory:
+
+```bash
+cd /tmp/vmm-v1.4
+```
 
 Use the harness in this order:
 
@@ -337,6 +345,9 @@ Current expectation model:
 - `pty_expect_screen` is a timed wait over the VTE buffer, so it can validate
   alternate-screen TUIs such as Codex instead of only checking an immediate
   snapshot
+- `ready.timeout_ms` is currently expanded into one equal timeout per
+  readiness sub-phase (`api_socket`, `guestfs`, `ssh_bridge`, `exec_ready`);
+  it is not yet one wall-clock budget across the whole ready step
 - when driving an interactive shell through sequential commands, wait for the
   prompt to reappear before sending the next command, even if the previous
   command's success marker is already visible

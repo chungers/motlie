@@ -1,7 +1,6 @@
 use thiserror::Error;
 
-use crate::backend::ch::shell::{ChShellBackend, ChShellError, ChShellHandle};
-use crate::orchestrator::PreparedGuest;
+use crate::backend::ch::shell::{ChShellError, ChShellHandle};
 
 pub mod ch;
 pub mod motlie;
@@ -73,48 +72,4 @@ pub enum BackendError {
         expected: BackendKind,
         actual: BackendKind,
     },
-}
-
-pub trait VmBackend {
-    fn kind(&self) -> BackendKind;
-    fn capabilities(&self) -> VmBackendCapabilities;
-    fn boot(&self, prepared: &PreparedGuest) -> Result<BackendHandle, BackendError>;
-    fn shutdown(&self, handle: &BackendHandle) -> Result<BackendShutdownOutcome, BackendError>;
-}
-
-#[derive(Debug, Clone)]
-pub struct BackendSet {
-    pub ch_shell: ChShellBackend,
-}
-
-impl Default for BackendSet {
-    fn default() -> Self {
-        Self {
-            ch_shell: ChShellBackend::new(),
-        }
-    }
-}
-
-impl BackendSet {
-    pub fn boot(
-        &self,
-        kind: BackendKind,
-        prepared: &PreparedGuest,
-    ) -> Result<BackendHandle, BackendError> {
-        match kind {
-            BackendKind::ChShell => self.ch_shell.boot(prepared),
-            kind => Err(BackendError::UnsupportedBackend(kind)),
-        }
-    }
-
-    pub fn shutdown(
-        &self,
-        kind: BackendKind,
-        handle: &BackendHandle,
-    ) -> Result<BackendShutdownOutcome, BackendError> {
-        match kind {
-            BackendKind::ChShell => self.ch_shell.shutdown(handle),
-            kind => Err(BackendError::UnsupportedBackend(kind)),
-        }
-    }
 }
