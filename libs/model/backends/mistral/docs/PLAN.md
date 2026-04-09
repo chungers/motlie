@@ -10,8 +10,9 @@
 | 2026-04-08 | @codex-researcher | Clarified the remaining backend TODOs after PR review. Real multi-input inference is now validated by the env-gated test; the suggested `spec.rs` / `handle.rs` file split remains an explicit cleanup follow-up rather than an implied completed task. | Phases 1, 4 |
 | 2026-04-08 | @codex-researcher | Moved the embedding loader choice into `MistralEmbeddingSpec` so the backend implementation is genuinely spec-driven rather than hardcoding `EmbeddingGemma` in the generic builder path. | Phase 2, Phase 3 |
 | 2026-04-08 | @codex-researcher | Tightened the backend boundary after PR 139 review. Provider-specific local artifact validation moved back into the curated bundle layer, the backend crate dropped its direct `hf-hub` dependency, and `LocalOnly` startup now consumes a resolved local model path instead of reconstructing Hugging Face cache layout internally. | Phases 1, 3 |
+| 2026-04-08 | @claude | Added text generation backend (`text.rs`) for #141. `MistralTextBundle` implements `ChatModel` + `CompletionModel` via `TextModelBuilder`, with ISQ quantization mapping and `MistralTextArch::Qwen3` as the first architecture. | Phase 5 |
 
-Derived from [../../docs/DESIGN.md](../../docs/DESIGN.md). This PLAN covers the generic `mistral` backend implementation work needed for the first embedding-only curated bundle.
+Derived from [../../docs/DESIGN.md](../../docs/DESIGN.md). This PLAN covers the generic `mistral` backend implementation work.
 
 ---
 
@@ -88,3 +89,30 @@ The current placeholder embedder is only acceptable for contract validation. The
 - [x] `cargo check -p motlie-model-mistral`
 - [x] `cargo test -p motlie-model-mistral`
 - [x] `cargo check -p motlie-model -p motlie-model-mistral -p motlie-models`
+
+## Phase 5: Text Generation Backend
+
+Add the generic text generation path alongside the embedding backend.
+
+### 5.1 — Text architecture and spec
+
+- [x] Add `MistralTextArch` enum with `Qwen3` as the first variant.
+  Maps to `NormalLoaderType::Qwen3`.
+- [x] Add `MistralTextSpec` with `id`, `display_name`, `model_id`, `arch`, `capabilities`.
+- [x] Provide `MistralTextSpec::qwen3_4b()` built-in constructor.
+
+### 5.2 — Text bundle and handle
+
+- [x] Add `MistralTextBundle` implementing `ModelBundle`.
+- [x] `start()` uses `TextModelBuilder` with arch-driven `NormalLoaderType`.
+- [x] Map `QuantizationBits` → `mistralrs::IsqBits` via `with_auto_isq()`.
+- [x] `MistralTextHandle` implements `BundleHandle` exposing `ChatModel` + `CompletionModel`.
+- [x] `embeddings()` returns `UnsupportedCapability`.
+- [x] `CompletionModel::complete()` delegates to single-turn chat.
+- [x] `TextRuntime` internal trait enables stub testing.
+
+### 5.3 — Tests
+
+- [x] Spec identity, capability exposure, quantization mapping.
+- [x] Artifact policy, unpack_root rejection.
+- [ ] Env-gated integration test with pre-downloaded Qwen3-4B artifacts.

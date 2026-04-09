@@ -198,10 +198,22 @@ pub enum ArtifactPolicy {
     LocalOnly { root: PathBuf },
 }
 
+/// Backend-agnostic quantization precision for model weights.
+///
+/// Backends map this to their native quantization mechanism — ISQ for
+/// mistral.rs, GGUF bit width for llama.cpp, etc. `None` (the default)
+/// means the backend chooses its own default precision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QuantizationBits {
+    Four,
+    Eight,
+}
+
 /// Deployment-oriented knobs used when starting a bundle.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct StartOptions {
     pub artifact_policy: Option<ArtifactPolicy>,
+    pub quantization: Option<QuantizationBits>,
     pub unpack_root: Option<PathBuf>,
     pub max_concurrency: Option<usize>,
 }
@@ -475,6 +487,7 @@ mod tests {
             artifact_policy: Some(ArtifactPolicy::LocalOnly {
                 root: PathBuf::from("/tmp/models"),
             }),
+            quantization: None,
             unpack_root: None,
             max_concurrency: Some(4),
         };
@@ -485,6 +498,23 @@ mod tests {
                 root: PathBuf::from("/tmp/models"),
             })
         );
+    }
+
+    #[test]
+    fn start_options_carry_quantization_policy() {
+        let q4 = StartOptions {
+            quantization: Some(QuantizationBits::Four),
+            ..Default::default()
+        };
+        let q8 = StartOptions {
+            quantization: Some(QuantizationBits::Eight),
+            ..Default::default()
+        };
+        let none = StartOptions::default();
+
+        assert_eq!(q4.quantization, Some(QuantizationBits::Four));
+        assert_eq!(q8.quantization, Some(QuantizationBits::Eight));
+        assert_eq!(none.quantization, None);
     }
 
     #[tokio::test]
