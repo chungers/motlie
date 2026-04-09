@@ -176,9 +176,16 @@ async fn build_embedding_model(
 ) -> Result<mistralrs::Model, ModelError> {
     let StartOptions {
         artifact_policy,
+        quantization,
         unpack_root,
         max_concurrency,
     } = options;
+
+    if quantization.is_some() {
+        return Err(ModelError::InvalidConfiguration(
+            "`mistralrs` embedding models do not support quantization; omit `StartOptions.quantization`".into(),
+        ));
+    }
 
     if let Some(unpack_root) = unpack_root {
         return Err(ModelError::InvalidConfiguration(format!(

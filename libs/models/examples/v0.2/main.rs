@@ -1,0 +1,201 @@
+use anyhow::{bail, Context, Result};
+use motlie_model::{
+    ArtifactPolicy, ChatMessage, ChatRequest, ChatRole, QuantizationBits, StartOptions,
+};
+use motlie_models::{chat::ChatModels, default_artifact_root, ModelSelector};
+use std::time::Instant;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let mut chat_selector = None;
+    let mut precision = None;
+    let mut download_artifacts = false;
+    let mut input_parts = Vec::new();
+
+    for arg in std::env::args().skip(1) {
+        if arg == "--download-artifacts" {
+            download_artifacts = true;
+        } else if let Some(selector) = arg.strip_prefix("--chat=") {
+            chat_selector = Some(selector.to_owned());
+        } else if let Some(p) = arg.strip_prefix("--precision=") {
+            precision = Some(p.to_owned());
+        } else {
+            input_parts.push(arg);
+        }
+    }
+
+    let input = input_parts.join(" ");
+    if input.trim().is_empty() {
+        bail!(
+            "usage: cargo run -p motlie-models --example models_v0_2 -- \
+             [--download-artifacts] [--chat=qwen/qwen3_4b] [--precision=q4|q8|f32] <prompt>"
+        );
+    }
+
+    let quantization = match precision.as_deref() {
+        Some("q4") | None => Some(QuantizationBits::Four),
+        Some("q8") => Some(QuantizationBits::Eight),
+        Some("f32") => None,
+        Some(other) => bail!("unknown precision `{other}` — use q4, q8, or f32"),
+    };
+
+    let (selector_label, bundle_id, descriptor, bundle, path_kind) =
+        if let Some(selector) = chat_selector {
+            let model_selector: ModelSelector = format!("chat:{selector}")
+                .parse()
+                .with_context(|| format!("failed to parse model selector `chat:{selector}`"))?;
+            (
+                model_selector.to_string(),
+                model_selector.bundle_id(),
+                model_selector.descriptor(),
+                model_selector.bundle(),
+                "selector",
+            )
+        } else {
+            let model = ChatModels::Qwen3_4B;
+            (
+                model.to_string(),
+                model.bundle_id(),
+                model.descriptor(),
+                model.bundle(),
+                "direct-enum",
+            )
+        };
+
+    let artifact_root = default_artifact_root();
+
+    println!("bundle-selector: {selector_label}");
+    println!("resolution-path: {path_kind}");
+    println!("bundle-id: {}", bundle_id.as_str());
+    println!("artifact-root: {}", artifact_root.display());
+    println!(
+        "quantization: {}",
+        match quantization {
+            Some(QuantizationBits::Four) => "ISQ Q4",
+            Some(QuantizationBits::Eight) => "ISQ Q8",
+            None => "F32 (none)",
+        }
+    );
+
+    if download_artifacts {
+        let catalog = motlie_models::Catalog::with_defaults();
+        let summary =
+            motlie_models::download_bundle_artifacts(&catalog, &bundle_id, &artifact_root)
+                .with_context(|| {
+                    format!("failed to download curated artifacts for `{bundle_id}`")
+                })?;
+        println!("downloaded-files: {}", summary.downloaded.len());
+    } else {
+        println!("downloaded-files: skipped (using existing local artifacts only)");
+    }
+
+    println!("display-name: {}", descriptor.display_name);
+    println!("family: {:?}", descriptor.family);
+    println!("backend: {:?}", descriptor.backend);
+    println!("capabilities:");
+    for capability in descriptor.capability_descriptors() {
+        println!(
+            "  - kind={:?} input={:?} output={:?} interaction={:?} summary={}",
+            capability.kind,
+            capability.inputs,
+            capability.outputs,
+            capability.interaction,
+            capability.summary
+        );
+    }
+
+    println!("starting bundle (this includes ISQ quantization if enabled)...");
+    let startup_at = Instant::now();
+    let handle = bundle
+        .start(StartOptions {
+            artifact_policy: Some(ArtifactPolicy::LocalOnly {
+                root: artifact_root.clone(),
+            }),
+            quantization,
+            ..Default::default()
+        })
+        .await
+        .context("bundle startup should succeed from local artifacts")?;
+    let startup_elapsed = startup_at.elapsed();
+    println!(
+        "startup-latency-ms: {:.0} ({:.1}s)",
+        startup_elapsed.as_secs_f64() * 1000.0,
+        startup_elapsed.as_secs_f64()
+    );
+
+    let chat = handle
+        .chat()
+        .context("qwen3 bundle should expose chat")?;
+
+    // Single-turn request.
+    println!("\n--- single-turn ---");
+    let started_at = Instant::now();
+    let response = chat
+        .generate(ChatRequest {
+            messages: vec![
+                ChatMessage::new(ChatRole::System, "Be concise. Answer in one paragraph."),
+                ChatMessage::new(ChatRole::User, &input),
+            ],
+            ..Default::default()
+        })
+        .await
+        .context("chat generation should succeed")?;
+    let latency = started_at.elapsed();
+
+    println!("prompt: {input}");
+    println!("response: {}", response.content);
+    println!("latency-ms: {:.2}", latency.as_secs_f64() * 1000.0);
+
+    // Multi-turn follow-up.
+    println!("\n--- multi-turn follow-up ---");
+    let followup_started_at = Instant::now();
+    let followup = chat
+        .generate(ChatRequest {
+            messages: vec![
+                ChatMessage::new(ChatRole::System, "Be concise. Answer in one paragraph."),
+                ChatMessage::new(ChatRole::User, &input),
+                ChatMessage::new(ChatRole::Assistant, &response.content),
+                ChatMessage::new(ChatRole::User, "Now explain that in simpler terms."),
+            ],
+            ..Default::default()
+        })
+        .await
+        .context("multi-turn chat should succeed")?;
+    let followup_latency = followup_started_at.elapsed();
+
+    println!("follow-up-prompt: Now explain that in simpler terms.");
+    println!("follow-up-response: {}", followup.content);
+    println!(
+        "follow-up-latency-ms: {:.2}",
+        followup_latency.as_secs_f64() * 1000.0
+    );
+
+    // Completion path.
+    println!("\n--- completion ---");
+    let completion = handle
+        .completion()
+        .context("qwen3 bundle should expose completion")?;
+    let completion_started_at = Instant::now();
+    let completion_response = completion
+        .complete(motlie_model::CompletionRequest {
+            prompt: format!("Complete this sentence: {input}"),
+            ..Default::default()
+        })
+        .await
+        .context("completion should succeed")?;
+    let completion_latency = completion_started_at.elapsed();
+
+    println!("completion-prompt: Complete this sentence: {input}");
+    println!("completion-response: {}", completion_response.content);
+    println!(
+        "completion-latency-ms: {:.2}",
+        completion_latency.as_secs_f64() * 1000.0
+    );
+
+    handle
+        .shutdown()
+        .await
+        .context("bundle shutdown should succeed")?;
+
+    Ok(())
+}

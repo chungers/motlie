@@ -11,11 +11,11 @@ description = "Curated model bundle catalog for the Motlie ecosystem"
 path = "src/lib.rs"
 
 [features]
-default = ["model-google-gemma-300m"]
+default = ["model-google-gemma-300m", "model-qwen3-4b"]
 model-google-gemma-300m = []
+model-qwen3-4b = []
 
 [dependencies]
-anyhow.workspace = true
 async-trait = "0.1.89"
 hf-hub = "0.5.0"
 motlie-model = { path = "../model" }
@@ -23,6 +23,7 @@ motlie-model-mistral = { path = "../model/backends/mistral" }
 thiserror.workspace = true
 
 [dev-dependencies]
+anyhow.workspace = true
 tokio.workspace = true
 
 [[bin]]
@@ -33,3 +34,8 @@ path = "src/bin/download_artifacts.rs"
 name = "models_v0_1"
 path = "examples/v0.1/main.rs"
 required-features = ["model-google-gemma-300m"]
+
+[[example]]
+name = "models_v0_2"
+path = "examples/v0.2/main.rs"
+required-features = ["model-qwen3-4b"]

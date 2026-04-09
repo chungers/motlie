@@ -8,6 +8,7 @@
 | 2026-04-07 | @codex-researcher | Marked the completed catalog, descriptor, artifact-control, and verification work for the first embedding slice. | Phases 1-4 |
 | 2026-04-07 | @codex-researcher | Updated the bundle plan after the NaN investigation. The `embeddinggemma_300m` descriptor now captures the full sentence-transformers module stack, and an env-gated catalog test verifies finite local-only embeddings end to end. |
 | 2026-04-08 | @codex-researcher | Reconciled the PLAN with the current public API after review. `SupportTier` and `PackagingMode` were removed from the v1 surface earlier, so the PLAN now tracks the descriptor fields that actually exist in code and docs. | Phase 1, Phase 2 |
+| 2026-04-08 | @claude | Added Phase 5 for the Qwen3-4B chat bundle (#141). Covers `ChatModels` enum, `ModelSelector::Chat`, curated artifact rules, HF cache resolution, and `v0.2` example. | Phase 5 |
 
 Derived from [DESIGN.md](./DESIGN.md). This PLAN focuses on the first curated bundle slice rather than the full long-term catalog.
 
@@ -90,3 +91,29 @@ Keep this limited and explicit for the first embedder.
 - [x] `cargo check -p motlie-models`
 - [x] `cargo test -p motlie-models`
 - [x] `cargo check -p motlie-model -p motlie-model-mistral -p motlie-models`
+
+## Phase 5: Qwen3-4B Chat Bundle
+
+Add the first curated chat bundle to validate the `ChatModel` + `CompletionModel` contract paths.
+
+### 5.1 — Chat module and Qwen3-4B bundle
+
+- [x] Add `src/chat/mod.rs` with `ChatModels` enum and feature-gated `Qwen3_4B` variant.
+- [x] Add `src/chat/qwen3_4b.rs` with `descriptor()`, `bundle()`, and HF cache resolution.
+- [x] Define curated artifact rules for standard transformer layout (config, tokenizer, safetensors).
+- [x] Implement `ModelBundle` for `Qwen3_4B`, delegating to `MistralTextBundle`.
+
+### 5.2 — Catalog and selector integration
+
+- [x] Add `ModelSelector::Chat(ChatModels)` variant with `"chat:qwen/qwen3_4b"` parsing.
+- [x] Add `ModelsError::UnknownChatModel` for unknown chat selectors.
+- [x] Add `model-qwen3-4b` Cargo feature, included in defaults.
+- [x] Register in `Catalog::with_defaults()`.
+
+### 5.3 — Example and verification
+
+- [x] Add `examples/v0.2` demonstrating chat, multi-turn, completion, ISQ quantization.
+- [x] `cargo check -p motlie-models`
+- [x] `cargo test -p motlie-models --lib`
+- [x] `cargo check -p motlie-models --no-default-features`
+- [ ] Env-gated end-to-end test with pre-downloaded Qwen3-4B artifacts.

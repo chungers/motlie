@@ -4,16 +4,19 @@
 
 use std::collections::BTreeMap;
 use std::error::Error as StdError;
+#[cfg(any(feature = "model-qwen3-4b", feature = "model-google-gemma-300m"))]
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
+pub mod chat;
 pub mod embeddings;
 
 use hf_hub::api::sync::ApiBuilder;
 use thiserror::Error;
 
+pub use chat::ChatModels;
 pub use embeddings::EmbeddingModels;
 pub use motlie_model::eval::EvalTrack;
 pub use motlie_model::{
@@ -55,6 +58,8 @@ pub enum ModelsError {
     },
     #[error("unknown embedding model selector `{selector}`")]
     UnknownEmbeddingModel { selector: String },
+    #[error("unknown chat model selector `{selector}`")]
+    UnknownChatModel { selector: String },
     #[error("unknown model selector `{selector}`")]
     UnknownModelSelector { selector: String },
     #[error("model selector `{selector}` is unavailable in this build")]
@@ -62,6 +67,69 @@ pub enum ModelsError {
 }
 
 pub type Result<T> = std::result::Result<T, ModelsError>;
+
+/// Resolve a Hugging Face cache root to the concrete snapshot directory for a model.
+///
+/// Validates that `config.json`, a tokenizer file, and at least one weight file
+/// are present. Returns the snapshot directory path suitable for passing to a
+/// backend as `ArtifactPolicy::LocalOnly { root }`.
+pub fn resolve_hf_snapshot(
+    model_id: &str,
+    cache_root: &Path,
+) -> std::result::Result<PathBuf, motlie_model::ModelError> {
+    use hf_hub::{Cache, Repo, RepoType};
+
+    let repo = Cache::new(cache_root.to_path_buf())
+        .repo(Repo::new(model_id.to_owned(), RepoType::Model));
+
+    let config = repo.get("config.json").ok_or_else(|| {
+        motlie_model::ModelError::InvalidConfiguration(format!(
+            "artifact policy `LocalOnly` requires cached `config.json` for `{model_id}` under `{}`",
+            cache_root.display()
+        ))
+    })?;
+
+    if repo.get("tokenizer.json").is_none() && repo.get("tokenizer.model").is_none() {
+        return Err(motlie_model::ModelError::InvalidConfiguration(format!(
+            "artifact policy `LocalOnly` requires cached tokenizer files for `{model_id}` under `{}`",
+            cache_root.display()
+        )));
+    }
+
+    let snapshot_dir = config.parent().ok_or_else(|| {
+        motlie_model::ModelError::InvalidConfiguration(format!(
+            "artifact policy `LocalOnly` found invalid cache layout for `{model_id}` under `{}`",
+            cache_root.display()
+        ))
+    })?;
+
+    let has_weights = std::fs::read_dir(snapshot_dir)
+        .map_err(|err| {
+            motlie_model::ModelError::InvalidConfiguration(format!(
+                "failed to inspect cached artifacts for `{model_id}` in `{}`: {err}",
+                snapshot_dir.display()
+            ))
+        })?
+        .filter_map(std::result::Result::ok)
+        .any(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .map(|name| {
+                    name.ends_with(".safetensors") || name.ends_with(".safetensors.index.json")
+                })
+                .unwrap_or(false)
+        });
+
+    if !has_weights {
+        return Err(motlie_model::ModelError::InvalidConfiguration(format!(
+            "artifact policy `LocalOnly` requires cached weight files for `{model_id}` under `{}`",
+            cache_root.display()
+        )));
+    }
+
+    Ok(snapshot_dir.to_path_buf())
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ArtifactSource {
@@ -258,36 +326,54 @@ impl BundleDescriptor {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum ModelSelector {
+    #[cfg(feature = "model-qwen3-4b")]
+    Chat(ChatModels),
+    #[cfg(feature = "model-google-gemma-300m")]
     Embedding(EmbeddingModels),
 }
 
+#[cfg(any(feature = "model-qwen3-4b", feature = "model-google-gemma-300m"))]
 impl ModelSelector {
     pub fn as_str(&self) -> String {
         match self {
+            #[cfg(feature = "model-qwen3-4b")]
+            Self::Chat(model) => format!("chat:{}", model.as_str()),
+            #[cfg(feature = "model-google-gemma-300m")]
             Self::Embedding(model) => format!("embedding:{}", model.as_str()),
         }
     }
 
     pub fn bundle_id(&self) -> BundleId {
         match self {
+            #[cfg(feature = "model-qwen3-4b")]
+            Self::Chat(model) => model.bundle_id(),
+            #[cfg(feature = "model-google-gemma-300m")]
             Self::Embedding(model) => model.bundle_id(),
         }
     }
 
     pub fn descriptor(&self) -> BundleDescriptor {
         match self {
+            #[cfg(feature = "model-qwen3-4b")]
+            Self::Chat(model) => model.descriptor(),
+            #[cfg(feature = "model-google-gemma-300m")]
             Self::Embedding(model) => model.descriptor(),
         }
     }
 
     pub fn bundle(&self) -> Box<dyn ModelBundle> {
         match self {
+            #[cfg(feature = "model-qwen3-4b")]
+            Self::Chat(model) => model.bundle(),
+            #[cfg(feature = "model-google-gemma-300m")]
             Self::Embedding(model) => model.bundle(),
         }
     }
 }
 
+#[cfg(any(feature = "model-qwen3-4b", feature = "model-google-gemma-300m"))]
 impl fmt::Display for ModelSelector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.as_str())
@@ -298,6 +384,21 @@ impl FromStr for ModelSelector {
     type Err = ModelsError;
 
     fn from_str(value: &str) -> Result<Self> {
+        if let Some(raw) = value.strip_prefix("chat:") {
+            #[cfg(not(feature = "model-qwen3-4b"))]
+            if raw == chat::QWEN3_4B_SELECTOR {
+                return Err(ModelsError::ModelUnavailable {
+                    selector: value.to_owned(),
+                });
+            }
+            #[cfg(feature = "model-qwen3-4b")]
+            return Ok(Self::Chat(raw.parse()?));
+            #[cfg(not(feature = "model-qwen3-4b"))]
+            return Err(ModelsError::UnknownModelSelector {
+                selector: value.to_owned(),
+            });
+        }
+
         if let Some(raw) = value.strip_prefix("embedding:") {
             #[cfg(not(feature = "model-google-gemma-300m"))]
             if raw == embeddings::GOOGLE_GEMMA_300M_SELECTOR {
@@ -305,7 +406,12 @@ impl FromStr for ModelSelector {
                     selector: value.to_owned(),
                 });
             }
+            #[cfg(feature = "model-google-gemma-300m")]
             return Ok(Self::Embedding(raw.parse()?));
+            #[cfg(not(feature = "model-google-gemma-300m"))]
+            return Err(ModelsError::UnknownModelSelector {
+                selector: value.to_owned(),
+            });
         }
 
         Err(ModelsError::UnknownModelSelector {
@@ -349,6 +455,10 @@ impl Catalog {
         #[cfg(feature = "model-google-gemma-300m")]
         catalog.register(embeddings::google_gemma_300m::descriptor(), || {
             embeddings::google_gemma_300m::bundle()
+        });
+        #[cfg(feature = "model-qwen3-4b")]
+        catalog.register(chat::qwen3_4b::descriptor(), || {
+            chat::qwen3_4b::bundle()
         });
         catalog
     }
@@ -508,7 +618,7 @@ mod tests {
 
         #[cfg(feature = "model-google-gemma-300m")]
         {
-            assert_eq!(catalog.len(), 1);
+            assert!(catalog.len() >= 1);
             assert!(catalog.instantiate(&bundle_id).is_some());
             assert!(
                 catalog
@@ -524,7 +634,6 @@ mod tests {
 
         #[cfg(not(feature = "model-google-gemma-300m"))]
         {
-            assert_eq!(catalog.len(), 0);
             assert!(catalog.instantiate(&bundle_id).is_none());
             assert!(catalog.artifacts(&bundle_id).is_none());
         }
@@ -570,6 +679,49 @@ mod tests {
             err,
             ModelsError::ModelUnavailable { selector }
             if selector == "embedding:google/embeddinggemma_300m"
+        ));
+    }
+
+    #[test]
+    fn chat_models_round_trip_string_selectors() {
+        #[cfg(feature = "model-qwen3-4b")]
+        {
+            let model: ChatModels = "qwen/qwen3_4b"
+                .parse()
+                .expect("known chat selector should parse");
+
+            assert_eq!(model, ChatModels::Qwen3_4B);
+            assert_eq!(model.to_string(), "qwen/qwen3_4b");
+        }
+    }
+
+    #[test]
+    fn model_selector_parses_chat_prefix() {
+        #[cfg(feature = "model-qwen3-4b")]
+        {
+            let selector: ModelSelector = "chat:qwen/qwen3_4b"
+                .parse()
+                .expect("known chat model selector should parse");
+
+            assert_eq!(
+                selector,
+                ModelSelector::Chat(ChatModels::Qwen3_4B)
+            );
+            assert_eq!(selector.to_string(), "chat:qwen/qwen3_4b");
+        }
+    }
+
+    #[cfg(not(feature = "model-qwen3-4b"))]
+    #[test]
+    fn chat_selector_reports_unavailable_for_disabled_bundles() {
+        let err = "chat:qwen/qwen3_4b"
+            .parse::<ModelSelector>()
+            .expect_err("disabled known chat selector should be unavailable");
+
+        assert!(matches!(
+            err,
+            ModelsError::ModelUnavailable { selector }
+            if selector == "chat:qwen/qwen3_4b"
         ));
     }
 
