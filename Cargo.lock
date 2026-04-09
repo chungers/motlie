@@ -4628,6 +4628,7 @@ dependencies = [
  "hf-hub 0.5.0",
  "motlie-model",
  "motlie-model-mistral",
+ "sysinfo",
  "thiserror 2.0.18",
  "tokio",
 ]

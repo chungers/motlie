@@ -25,6 +25,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
+sysinfo = "0.36.1"
 tokio.workspace = true
 
 [[bin]]

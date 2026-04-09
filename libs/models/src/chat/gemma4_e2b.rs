@@ -95,6 +95,7 @@ pub fn descriptor() -> BundleDescriptor {
                 repo: "google/gemma-4-E2B-it",
             },
             include: vec![
+                ArtifactRule::Exact("chat_template.jinja"),
                 ArtifactRule::Exact("config.json"),
                 ArtifactRule::Exact("generation_config.json"),
                 ArtifactRule::Exact("tokenizer.json"),
@@ -124,6 +125,12 @@ fn resolve_local_snapshot_root(root: &Path) -> Result<PathBuf, ModelError> {
             root.display()
         )));
     }
+    if !snapshot.join("chat_template.jinja").exists() {
+        return Err(ModelError::InvalidConfiguration(format!(
+            "artifact policy `LocalOnly` requires `chat_template.jinja` for `google/gemma-4-E2B-it` under `{}`",
+            root.display()
+        )));
+    }
     Ok(snapshot)
 }
 
@@ -148,6 +155,7 @@ mod tests {
             .artifacts
             .expect("descriptor should expose curated artifact control");
         assert_eq!(artifacts.control_name, "gemma4_e2b");
+        assert!(artifacts.includes("chat_template.jinja"));
         assert!(artifacts.includes("preprocessor_config.json"));
         assert!(artifacts.includes("model-00001-of-00002.safetensors"));
     }
@@ -192,6 +200,8 @@ mod tests {
             .expect("tokenizer should be writable");
         std::fs::write(snapshot.join("preprocessor_config.json"), "{}")
             .expect("preprocessor config should be writable");
+        std::fs::write(snapshot.join("chat_template.jinja"), "{{ messages }}")
+            .expect("chat template should be writable");
         std::fs::write(snapshot.join("model-00001-of-00002.safetensors"), "stub")
             .expect("weights should be writable");
 
