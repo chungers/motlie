@@ -4,6 +4,7 @@
   "steps": [
     { "action": "boot", "guest": "alice" },
     { "action": "ready", "guest": "alice" },
+    { "action": "wait_egress_ready", "guest": "alice", "timeout_ms": 30000 },
     {
       "action": "pty_open",
       "guest": "alice",

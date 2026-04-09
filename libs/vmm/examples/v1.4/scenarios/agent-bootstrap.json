@@ -32,13 +32,7 @@
       "timeout_ms": 10000,
       "expect": { "exit_code": 0, "stdout_contains": "CODEX_OK" }
     },
-    {
-      "action": "exec",
-      "guest": "alice",
-      "command": "/bin/sh -lc 'code=$(curl -s -o /dev/null -w \"%{http_code}\" https://example.com); test \"$code\" = 200 && echo HTTPS_OK'",
-      "timeout_ms": 20000,
-      "expect": { "exit_code": 0, "stdout_contains": "HTTPS_OK" }
-    },
+    { "action": "wait_egress_ready", "guest": "alice", "timeout_ms": 30000 },
     { "action": "wait_package_manager_quiescent", "guest": "alice", "timeout_ms": 65000 },
     {
       "action": "exec",

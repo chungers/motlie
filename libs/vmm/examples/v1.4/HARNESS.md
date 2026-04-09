@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-08 | @codex | Add `wait_egress_ready` as a first-class scenario/readiness primitive so manual certification and saved validations stop relying on one opportunistic HTTPS probe; the harness now treats DNS + outbound HTTPS to the certification targets as a distinct gate |
 | 2026-04-08 | @codex | Address PR 140 review drift in the harness contract: make the repo-root working-directory assumption explicit, document that `ready.timeout_ms` is currently applied per readiness sub-phase instead of as one wall-clock budget, and keep the recorded-artifact guidance aligned with the live harness behavior |
 | 2026-04-08 | @codex | Add Rust-native static SVG export from the harness-rendered VTE snapshot, check in a repo-local `pty-agent-validation.svg`, and use that as the GitHub-friendly review surface while keeping asciicast as the replay artifact |
 | 2026-04-08 | @codex | Replace the temporary branch-local HTML replay surface with a hosted asciinema link and preview image, and remove the extra local player/Pages scaffolding to keep the review path minimal |
@@ -90,6 +91,10 @@ Use the harness in this order:
    matters
 4. once the repro is understood, encode it as a saved scenario and rerun it
    through `scenario`
+
+For manual certification handoff, do not stop at `boot` + `ready`. Run
+`validate <guest>` or a saved scenario that includes `wait_egress_ready`
+first, then attach over external SSH.
 
 Choose the mode by purpose:
 
@@ -319,6 +324,7 @@ Supported actions today:
 - `boot`
 - `ready`
 - `exec`
+- `wait_egress_ready`
 - `wait_package_manager_quiescent`
 - `pty_open`
 - `pty_send`
@@ -335,6 +341,10 @@ Current expectation model:
 
 - `exec` supports `expect.exit_code`, `expect.stdout_contains`,
   `expect.stderr_contains`
+- `wait_egress_ready` is the first harness-native network certification gate;
+  it waits for DNS resolution of `example.com` and `www.google.com`, then
+  waits for outbound HTTPS success against `https://example.com` and
+  `https://www.google.com/generate_204`
 - `wait_package_manager_quiescent` is the first built-in readiness-style
   scenario action; use it instead of inlining the `apt`/`dpkg` idle loop in
   JSON
