@@ -16,6 +16,7 @@ model-google-gemma-300m = []
 model-qwen3-4b = []
 
 [dependencies]
+# anyhow is here only for the [[bin]] target — the library surface uses typed thiserror errors.
 anyhow.workspace = true
 async-trait = "0.1.89"
 hf-hub = "0.5.0"

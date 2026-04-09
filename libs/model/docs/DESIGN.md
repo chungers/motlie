@@ -399,11 +399,13 @@ pub trait ChatModel: Send + Sync {
 }
 ```
 
-Planned additive extensions before the first chat-capable bundle lands:
+The first text-only chat bundle (Qwen3-4B) ships with the current `ChatMessage { content: String }` and `ChatResponse { content: String }` contract. This is intentionally minimal — the text-only path works correctly without multimodal content parts or rich response metadata.
+
+Planned additive extensions before multimodal or tool-calling bundles land:
 
 - add `ChatRole::Tool`
 - extend `ChatMessage` with optional tool-call correlation fields
-- change `ChatMessage.content` from plain `String` to a multimodal content-parts representation before any chat implementor ships
+- change `ChatMessage.content` from plain `String` to a multimodal content-parts representation before the first vision-capable bundle ships
 - extend `ChatResponse` with finish reason, usage metadata, and tool-call output
 
 ### Text Completion
@@ -671,5 +673,5 @@ PLAN must specify concrete tests for:
 - How much generation-parameter normalization to promise across heterogeneous backends
 - Whether streaming output should be part of the initial contract or deferred until the non-streaming API is stable
 - Add `ChatRole::Tool` before tool-calling support lands
-- Upgrade `ChatMessage.content` to multimodal content parts before the first chat bundle ships, so image-capable chat models do not force a post-ship breaking migration
+- Upgrade `ChatMessage.content` to multimodal content parts before the first vision-capable bundle ships (#142), so image-capable chat models do not force a post-ship breaking migration
 - Consider a `ChatSpec` bundle-level metadata trait parallel to `EmbeddingSpec` once the first curated chat bundle is introduced

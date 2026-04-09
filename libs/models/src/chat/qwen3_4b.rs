@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use hf_hub::{Cache, Repo, RepoType};
 use motlie_model::eval::EvalTrack;
 use motlie_model::{BundleId, ModelBundle, ModelError, StartOptions};
 use motlie_model_mistral::{MistralTextBundle, MistralTextSpec};
@@ -113,33 +112,7 @@ pub fn bundle() -> Box<dyn ModelBundle> {
 }
 
 fn resolve_local_snapshot_root(root: &Path) -> Result<PathBuf, ModelError> {
-    let repo = Cache::new(root.to_path_buf()).repo(Repo::new(
-        "Qwen/Qwen3-4B".to_owned(),
-        RepoType::Model,
-    ));
-
-    let config = repo.get("config.json").ok_or_else(|| {
-        ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` requires cached `config.json` for `Qwen/Qwen3-4B` under `{}`",
-            root.display()
-        ))
-    })?;
-
-    if repo.get("tokenizer.json").is_none() {
-        return Err(ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` requires cached `tokenizer.json` for `Qwen/Qwen3-4B` under `{}`",
-            root.display()
-        )));
-    }
-
-    let snapshot_dir = config.parent().ok_or_else(|| {
-        ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` found invalid cache layout for `Qwen/Qwen3-4B` under `{}`",
-            root.display()
-        ))
-    })?;
-
-    Ok(snapshot_dir.to_path_buf())
+    crate::resolve_hf_snapshot("Qwen/Qwen3-4B", root)
 }
 
 #[cfg(test)]
