@@ -12,6 +12,7 @@
 
 use anyhow::Result;
 use motlie_vfs::client::guest::{GuestMountRunner, GuestMountSpec};
+use std::time::Duration;
 
 /// Host CID for vsock (always 2 in the guest→host direction).
 #[cfg(all(feature = "vsock", feature = "client"))]
@@ -20,6 +21,10 @@ const HOST_CID: u32 = 2;
 /// Port the host FsServer listens on via the vsock socket.
 #[cfg(all(feature = "vsock", feature = "client"))]
 const VMM_PORT: u32 = 5000;
+#[cfg(all(feature = "vsock", feature = "client"))]
+const CONNECT_RETRY_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(all(feature = "vsock", feature = "client"))]
+const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 #[derive(serde::Deserialize)]
 struct MountConfig {
@@ -68,10 +73,33 @@ fn main() -> Result<()> {
         runner.mount_all(|tag: &str, rt: &tokio::runtime::Runtime| {
             let tag = tag.to_string();
             let stream = rt.block_on(async {
-                let addr = tokio_vsock::VsockAddr::new(HOST_CID, VMM_PORT);
-                let mut stream = tokio_vsock::VsockStream::connect(addr).await?;
-                motlie_vfs::vsock::write_tag_handshake(&mut stream, &tag).await?;
-                Ok::<_, anyhow::Error>(stream)
+                let deadline = tokio::time::Instant::now() + CONNECT_RETRY_TIMEOUT;
+
+                loop {
+                    let addr = tokio_vsock::VsockAddr::new(HOST_CID, VMM_PORT);
+                    let err = match tokio_vsock::VsockStream::connect(addr).await {
+                        Ok(mut stream) => {
+                            match motlie_vfs::vsock::write_tag_handshake(&mut stream, &tag).await {
+                                Ok(()) => break Ok::<_, anyhow::Error>(stream),
+                                Err(e) => format!("handshake failed: {e}"),
+                            }
+                        }
+                        Err(e) => e.to_string(),
+                    };
+
+                    if tokio::time::Instant::now() >= deadline {
+                        break Err(anyhow::anyhow!(
+                            "failed to connect guest mount tag '{}' to host CID {} port {} within {:?}: {}",
+                            tag,
+                            HOST_CID,
+                            VMM_PORT,
+                            CONNECT_RETRY_TIMEOUT,
+                            err
+                        ));
+                    }
+
+                    tokio::time::sleep(CONNECT_RETRY_DELAY).await;
+                }
             })?;
 
             Ok(VsockClientTransport::new(stream, &tag))

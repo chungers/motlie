@@ -1,0 +1,558 @@
+#!/usr/bin/env bash
+# build-guest.sh — Build the generic shared base image set for v1.3.
+#
+# Produces:
+#   artifacts/base/rootfs.squashfs   — shared Debian rootfs for alice+bob
+#   artifacts/base/Image|vmlinux.bin — shared CH-compatible kernel
+#
+# Guest identity is not baked here. Alice/Bob differences are created by
+# launch-ch.sh as runtime writable overlays.
+
+set -euo pipefail
+
+die() {
+    echo "ERROR: $*" >&2
+    exit 1
+}
+
+require_cmd() {
+    local cmd="$1"
+    local install_hint="$2"
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        die "$cmd not found. Install: $install_hint"
+    fi
+}
+
+passwd_primary_gid() {
+    getent passwd "$USER" | cut -d: -f4
+}
+
+passwd_primary_group() {
+    getent group "$(passwd_primary_gid)" | cut -d: -f1
+}
+
+check_unshare_prereqs() {
+    local current_gid expected_gid expected_group
+
+    current_gid="$(id -g)"
+    expected_gid="$(passwd_primary_gid)"
+    expected_group="$(passwd_primary_group)"
+
+    if [ -z "$expected_gid" ] || [ -z "$expected_group" ]; then
+        die "failed to resolve passwd primary gid/group for $USER"
+    fi
+
+    if [ "$current_gid" != "$expected_gid" ]; then
+        cat >&2 <<EOF
+ERROR: mmdebstrap --mode=unshare requires this shell's primary gid to match the
+passwd entry for $USER.
+
+Current shell gid: $current_gid ($(id -gn))
+Passwd primary gid: $expected_gid ($expected_group)
+
+Try one of:
+  1. Open a fresh login shell for $USER
+  2. Run: exec newgrp
+  3. Use a rootful fallback: MMDEBSTRAP_MODE=root ./build-guest.sh
+EOF
+        exit 1
+    fi
+
+    if ! grep -q "^${USER}:" /etc/subuid; then
+        die "/etc/subuid has no entry for $USER"
+    fi
+    if ! grep -q "^${USER}:" /etc/subgid; then
+        die "/etc/subgid has no entry for $USER"
+    fi
+}
+
+run_mmdebstrap() {
+    local target="$1"
+    shift
+
+    local -a cmd=(
+        mmdebstrap
+        --mode="$MMDEBSTRAP_MODE"
+        --arch="$DEBOOTSTRAP_ARCH"
+        --variant=minbase
+        --format=squashfs
+        --keyring=/usr/share/keyrings/debian-archive-keyring.gpg
+        "$@"
+        "$DEBIAN_SUITE" "$target" "$DEBIAN_MIRROR"
+    )
+
+    if [ "$MMDEBSTRAP_MODE" = "unshare" ]; then
+        check_unshare_prereqs
+        "${cmd[@]}"
+        return
+    fi
+
+    if [ "$MMDEBSTRAP_MODE" = "root" ] || [ "$MMDEBSTRAP_MODE" = "sudo" ]; then
+        if [ "$EUID" -eq 0 ]; then
+            "${cmd[@]}"
+        else
+            sudo "${cmd[@]}"
+            sudo chown "$(id -u):$(id -g)" "$target"
+        fi
+        return
+    fi
+
+    "${cmd[@]}"
+}
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+IMAGE_BUILD_GIT_SHA="$(git -C "$WORKSPACE_ROOT" rev-parse HEAD)"
+IMAGE_BUILD_TIME_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+GUEST_BINARY=""
+KERNEL_MODE="download"
+MMDEBSTRAP_MODE="${MMDEBSTRAP_MODE:-unshare}"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --guest)
+            die "v1.3 builds one generic base image; guest selection moved to launch-ch.sh"
+            ;;
+        --guest-binary) GUEST_BINARY="$2"; shift 2 ;;
+        --kernel) KERNEL_MODE="$2"; shift 2 ;;
+        --base-only) shift ;;
+        --overlay-only)
+            die "--overlay-only no longer applies; launch-ch.sh creates per-guest runtime overlays"
+            ;;
+        *) die "Unknown argument: $1" ;;
+    esac
+done
+
+case "$KERNEL_MODE" in
+    download|build|skip) ;;
+    *) die "--kernel must be one of: download, build, skip" ;;
+esac
+
+case "$MMDEBSTRAP_MODE" in
+    auto|sudo|root|unshare|fakeroot|fakechroot|chrootless) ;;
+    *) die "MMDEBSTRAP_MODE must be one of: auto, sudo, root, unshare, fakeroot, fakechroot, chrootless" ;;
+esac
+
+HOST_ARCH="$(uname -m)"
+case "$HOST_ARCH" in
+    x86_64)
+        RUST_TARGET="x86_64-unknown-linux-gnu"
+        DEBOOTSTRAP_ARCH="amd64"
+        KERNEL_IMAGE="vmlinux.bin"
+        KERNEL_RELEASE_ASSET="vmlinux"
+        KERNEL_BUILD_TARGET="bzImage"
+        KERNEL_BUILD_OUTPUT="arch/x86/boot/compressed/vmlinux.bin"
+        ;;
+    aarch64)
+        RUST_TARGET="aarch64-unknown-linux-gnu"
+        DEBOOTSTRAP_ARCH="arm64"
+        KERNEL_IMAGE="Image"
+        KERNEL_RELEASE_ASSET="Image-arm64"
+        KERNEL_BUILD_TARGET="Image"
+        KERNEL_BUILD_OUTPUT="arch/arm64/boot/Image"
+        ;;
+    *)
+        die "unsupported host architecture: $HOST_ARCH"
+        ;;
+esac
+
+CH_KERNEL_RELEASE="ch-release-v6.16.9-20251112"
+CH_KERNEL_URL="https://github.com/cloud-hypervisor/linux/releases/download/${CH_KERNEL_RELEASE}/${KERNEL_RELEASE_ASSET}"
+
+require_cmd mmdebstrap "sudo apt install mmdebstrap squashfs-tools-ng e2fsprogs uidmap debian-archive-keyring"
+require_cmd tar2sqfs "sudo apt install squashfs-tools-ng"
+
+if [ ! -f /usr/share/keyrings/debian-archive-keyring.gpg ]; then
+    die "Debian archive keyring not found. Install: sudo apt install debian-archive-keyring"
+fi
+
+APPARMOR_USERNS=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)
+if [ "$APPARMOR_USERNS" = "1" ] && [ "$MMDEBSTRAP_MODE" = "unshare" ]; then
+    die "AppArmor restricts unprivileged user namespaces. Fix: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"
+fi
+
+DEBIAN_SUITE="bookworm"
+DEBIAN_MIRROR="http://deb.debian.org/debian"
+BASE_ARTIFACTS="$SCRIPT_DIR/artifacts/base"
+BASE_ROOTFS="$BASE_ARTIFACTS/rootfs.squashfs"
+BASE_KERNEL="$BASE_ARTIFACTS/$KERNEL_IMAGE"
+BASE_HOSTNAME="motlie-vmm-v13"
+EGRESS_MAC="12:34:56:78:90:ab"
+
+echo "=== motlie-vmm v1.3 base image builder ==="
+echo "Host arch:          $HOST_ARCH"
+echo "Rust target:        $RUST_TARGET"
+echo "Debian arch:        $DEBOOTSTRAP_ARCH"
+echo "Kernel mode:        $KERNEL_MODE"
+echo "mmdebstrap mode:    $MMDEBSTRAP_MODE"
+echo "Base dir:           $BASE_ARTIFACTS"
+echo ""
+
+mkdir -p "$BASE_ARTIFACTS"
+
+if [ -z "$GUEST_BINARY" ]; then
+    echo "--- Step 1: Building motlie-vfs-guest-v1_1 ($RUST_TARGET) ---"
+    (cd "$WORKSPACE_ROOT" && cargo build --release \
+        --features vsock,client \
+        -p motlie-vfs --bin motlie-vfs-guest-v1_1)
+    GUEST_BINARY="$WORKSPACE_ROOT/target/release/motlie-vfs-guest-v1_1"
+    echo "Guest binary: $GUEST_BINARY"
+    file "$GUEST_BINARY"
+    echo ""
+fi
+
+if [ ! -f "$GUEST_BINARY" ]; then
+    die "guest binary not found at $GUEST_BINARY"
+fi
+
+echo "--- Step 2: Kernel ($KERNEL_MODE) ---"
+case "$KERNEL_MODE" in
+    download)
+        if [ -f "$BASE_KERNEL" ]; then
+            echo "Kernel already exists: $BASE_KERNEL ($(du -h "$BASE_KERNEL" | cut -f1))"
+        else
+            echo "Downloading pre-built kernel from cloud-hypervisor/linux..."
+            wget -q --show-progress -O "$BASE_KERNEL" "$CH_KERNEL_URL"
+            echo "Kernel: $BASE_KERNEL ($(du -h "$BASE_KERNEL" | cut -f1))"
+        fi
+        ;;
+    build)
+        KERNEL_SRC="/tmp/motlie-vmm-kernel-$$"
+        echo "Cloning cloud-hypervisor/linux into $KERNEL_SRC..."
+        git clone --depth 1 https://github.com/cloud-hypervisor/linux.git \
+            -b ch-6.12.8 "$KERNEL_SRC"
+        (
+            cd "$KERNEL_SRC"
+            make ch_defconfig
+            cat >> .config << 'KEOF'
+CONFIG_SQUASHFS=y
+CONFIG_SQUASHFS_ZSTD=y
+CONFIG_OVERLAY_FS=y
+KEOF
+            make olddefconfig
+            make "$KERNEL_BUILD_TARGET" -j"$(nproc)"
+            cp "$KERNEL_BUILD_OUTPUT" "$BASE_KERNEL"
+        )
+        rm -rf "$KERNEL_SRC"
+        echo "Kernel: $BASE_KERNEL ($(du -h "$BASE_KERNEL" | cut -f1))"
+        ;;
+    skip)
+        if [ ! -f "$BASE_KERNEL" ]; then
+            echo "WARNING: kernel not found at $BASE_KERNEL"
+            echo "Place a CH-compatible kernel there before running launch-ch.sh."
+        else
+            echo "Using existing kernel: $BASE_KERNEL ($(du -h "$BASE_KERNEL" | cut -f1))"
+        fi
+        ;;
+esac
+echo ""
+
+echo "--- Step 3: Building shared Debian squashfs root image ---"
+GUEST_BINARY_ABS="$(realpath "$GUEST_BINARY")"
+OVERLAY_INIT_ABS="$(realpath "$SCRIPT_DIR/overlay-init")"
+
+run_mmdebstrap "$BASE_ROOTFS" \
+    --include=openssh-server,bash,bubblewrap,ca-certificates,coreutils,curl,dnsutils,tmux,vim,fuse3,libfuse3-3,systemd,systemd-sysv,dbus,iproute2,cloud-init,locales,sudo,python3,npm,strace,socat \
+    --customize-hook='chroot "$1" systemctl enable ssh' \
+    --customize-hook='chroot "$1" systemctl enable systemd-networkd' \
+    --customize-hook='chroot "$1" systemctl disable systemd-networkd-wait-online.service' \
+    --customize-hook='rm -f "$1/etc/systemd/system/systemd-networkd-wait-online.service" "$1/etc/systemd/system/network-online.target.wants/systemd-networkd-wait-online.service"' \
+    --customize-hook='printf "en_US.UTF-8 UTF-8\n" > "$1/etc/locale.gen"' \
+    --customize-hook='chroot "$1" locale-gen en_US.UTF-8' \
+    --customize-hook='chroot "$1" update-locale LANG=en_US.UTF-8' \
+    --customize-hook='chroot "$1" groupadd -g 1000 alice' \
+    --customize-hook='chroot "$1" useradd -m -u 1000 -g alice -s /bin/bash alice' \
+    --customize-hook='chroot "$1" usermod -aG sudo alice' \
+    --customize-hook='echo "alice:testpass" | chroot "$1" chpasswd' \
+    --customize-hook='chroot "$1" groupadd -g 1001 bob' \
+    --customize-hook='chroot "$1" useradd -m -u 1001 -g bob -s /bin/bash bob' \
+    --customize-hook='chroot "$1" usermod -aG sudo bob' \
+    --customize-hook='echo "bob:testpass" | chroot "$1" chpasswd' \
+    --customize-hook='sed -i "s/#PermitRootLogin.*/PermitRootLogin yes/" "$1/etc/ssh/sshd_config"' \
+    --customize-hook='echo "root:rootpass" | chroot "$1" chpasswd' \
+    --customize-hook='chroot "$1" ssh-keygen -A' \
+    --customize-hook='cat >> "$1/etc/ssh/sshd_config" << "SSHCAEOF"
+
+# motlie-vmm SSH CA trust (v1.3+)
+# The CA public key and per-user principals are injected at launch time
+# into the runtime overlay, not baked into the image.
+TrustedUserCAKeys /etc/ssh/ca/user_ca.pub
+AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u
+SSHCAEOF' \
+    --customize-hook='chroot "$1" npm install -g @openai/codex' \
+    --customize-hook='chroot "$1" npm install -g @anthropic-ai/claude-code' \
+    --customize-hook='GH_ARCH="$(uname -m)"; case "$GH_ARCH" in x86_64) GH_ARCH=amd64;; aarch64) GH_ARCH=arm64;; esac; GH_VER=2.65.0; wget -qO- "https://github.com/cli/cli/releases/download/v${GH_VER}/gh_${GH_VER}_linux_${GH_ARCH}.tar.gz" | tar xz -C "$1/usr/local" --strip-components=1' \
+    --customize-hook='mkdir -p "$1/etc/motlie-vfs"' \
+    --customize-hook='cat > "$1/etc/profile.d/dotenv.sh" << "DOTENVEOF"
+if [ -f "$HOME/.env" ]; then
+    set -a
+    . "$HOME/.env"
+    set +a
+fi
+DOTENVEOF' \
+    --customize-hook='cat > "$1/etc/profile.d/tmux-auto.sh" << "TMUXEOF"
+# Auto-start tmux only for real interactive Bash SSH logins.
+[ -n "${BASH_VERSION:-}" ] || return 0
+case $- in
+    *i*) ;;
+    *) return 0 ;;
+esac
+[ -n "${SSH_CONNECTION:-}" ] || return 0
+[ -z "${TMUX:-}" ] || return 0
+[ -t 0 ] && [ -t 1 ] || return 0
+command -v tmux >/dev/null 2>&1 || return 0
+case "${TERM:-}" in
+    ""|dumb|unknown) return 0 ;;
+esac
+command -v infocmp >/dev/null 2>&1 || return 0
+infocmp "$TERM" >/dev/null 2>&1 || return 0
+
+if tmux has-session -t "$USER" 2>/dev/null; then
+    echo "Attaching to existing tmux session..."
+    sleep 1
+    tmux attach-session -t "$USER" || echo "tmux attach failed; continuing without tmux"
+    return 0
+fi
+
+printf "Start tmux session? [Y/n] (auto-yes in 3s) "
+if IFS= read -r -n 1 -t 3 answer; then
+    echo
+else
+    answer=Y
+    echo
+fi
+
+case "$answer" in
+    n|N) ;;
+    *) tmux new-session -s "$USER" || echo "tmux start failed; continuing without tmux" ;;
+esac
+TMUXEOF' \
+    --customize-hook='cat > "$1/etc/profile.d/agent-state.sh" << "AGENTEOF"
+agent_state_root=/agent-state
+codex_root="$agent_state_root/codex"
+codex_sqlite_root="$codex_root/sqlite"
+claude_root="$agent_state_root/claude"
+claude_code_root="$agent_state_root/claude-code"
+if [ -d "$agent_state_root" ] && [ -n "${HOME:-}" ] && [ -d "$HOME" ] && [ "${USER:-}" != "root" ] && [ "${HOME#"/home/"}" != "$HOME" ]; then
+    mkdir -p "$codex_root" "$codex_sqlite_root" "$claude_root" "$claude_code_root" "$HOME/.config" >/dev/null 2>&1 || true
+    export CODEX_HOME="$codex_root"
+    export CODEX_SQLITE_HOME="$codex_sqlite_root"
+fi
+AGENTEOF' \
+    --customize-hook='cat > "$1/usr/local/bin/motlie-agent-state-setup" << "AGENTSVCEOF"
+#!/bin/sh
+set -eu
+
+setup_user() {
+    user_name="$1"
+    home_dir="/home/$user_name"
+    config_dir="$home_dir/.config"
+    codex_dst="$home_dir/.codex"
+    claude_dst="$home_dir/.claude"
+    claude_code_dst="$config_dir/claude-code"
+
+    [ -d "$home_dir" ] || return 0
+
+    install -d -m 0755 "$config_dir"
+    install -d -m 0700 /agent-state/codex /agent-state/claude /agent-state/claude-code /agent-state/codex/sqlite
+
+    chown -R "$user_name:$user_name" \
+        "$config_dir" \
+        /agent-state/codex \
+        /agent-state/codex/sqlite \
+        /agent-state/claude \
+        /agent-state/claude-code || true
+
+    for mount_path in "$codex_dst" "$claude_dst" "$claude_code_dst"; do
+        if grep -F " $mount_path " /proc/self/mountinfo >/dev/null 2>&1; then
+            umount "$mount_path" || true
+        fi
+    done
+
+    rm -rf "$codex_dst" "$claude_dst" "$claude_code_dst"
+    install -d -m 0700 "$codex_dst" "$claude_dst" "$claude_code_dst"
+    chown "$user_name:$user_name" "$codex_dst" "$claude_dst" "$claude_code_dst" || true
+
+    mount --bind /agent-state/codex "$codex_dst"
+    mount --bind /agent-state/claude "$claude_dst"
+    mount --bind /agent-state/claude-code "$claude_code_dst"
+}
+
+for user_name in alice bob; do
+    if id -u "$user_name" >/dev/null 2>&1; then
+        setup_user "$user_name"
+    fi
+done
+AGENTSVCEOF' \
+    --customize-hook='chmod 755 "$1/usr/local/bin/motlie-agent-state-setup"' \
+    --customize-hook='mkdir -p "$1/etc/motlie-vmm"' \
+    --customize-hook='cat > "$1/usr/local/bin/motlie-vmm-egress-setup" << "EGRESSEOF"
+#!/bin/sh
+set -eu
+
+EGRESS_MAC_FILE="/etc/motlie-vmm/egress.mac"
+EGRESS_IFACE=""
+
+if [ ! -f "$EGRESS_MAC_FILE" ]; then
+    echo "motlie-vmm-egress-setup: missing $EGRESS_MAC_FILE" >&2
+    exit 1
+fi
+
+EGRESS_MAC="$(cat "$EGRESS_MAC_FILE")"
+[ -n "$EGRESS_MAC" ] || {
+    echo "motlie-vmm-egress-setup: empty egress MAC" >&2
+    exit 1
+}
+
+for _attempt in $(seq 1 30); do
+    for candidate in /sys/class/net/*; do
+        [ -e "$candidate/address" ] || continue
+        candidate_mac="$(cat "$candidate/address" 2>/dev/null || true)"
+        if [ "$candidate_mac" = "$EGRESS_MAC" ]; then
+            EGRESS_IFACE="$(basename "$candidate")"
+            break
+        fi
+    done
+    [ -n "$EGRESS_IFACE" ] && break
+    sleep 1
+done
+
+[ -n "$EGRESS_IFACE" ] || {
+    echo "motlie-vmm-egress-setup: interface with MAC $EGRESS_MAC not found" >&2
+    exit 1
+}
+
+mkdir -p /run
+ln -sf "/sys/class/net/$EGRESS_IFACE" /run/motlie-vmm-egress.link
+ip link set "$EGRESS_IFACE" up || exit 0
+ip addr replace 10.0.2.15/24 dev "$EGRESS_IFACE"
+ip route replace 10.0.2.0/24 dev "$EGRESS_IFACE" scope link src 10.0.2.15
+ip route replace default via 10.0.2.2 dev "$EGRESS_IFACE" metric 100
+cat > /etc/resolv.conf << "RESOLVEOF"
+nameserver 10.0.2.3
+options edns0
+RESOLVEOF
+EGRESSEOF' \
+    --customize-hook='chmod 755 "$1/usr/local/bin/motlie-vmm-egress-setup"' \
+    --customize-hook='cat > "$1/usr/local/bin/motlie-vmm-vsock-ssh-loop" << "VSOCKSSHLOOPEOF"
+#!/bin/sh
+set -eu
+
+while true; do
+    /usr/bin/socat VSOCK-CONNECT:2:2222 TCP:127.0.0.1:22 || true
+    sleep 1
+done
+VSOCKSSHLOOPEOF' \
+    --customize-hook='chmod 755 "$1/usr/local/bin/motlie-vmm-vsock-ssh-loop"' \
+    --customize-hook='cat > "$1/etc/systemd/system/motlie-vfs-guest.service" << "SVCEOF"
+[Unit]
+Description=motlie-vfs guest filesystem mounter
+ConditionPathExists=/etc/motlie-vfs/mounts.yaml
+After=local-fs.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/motlie-vfs-guest /etc/motlie-vfs/mounts.yaml
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF' \
+    --customize-hook='chroot "$1" systemctl enable motlie-vfs-guest' \
+    --customize-hook='cat > "$1/etc/systemd/system/motlie-agent-state.service" << "AGENTUNITEOF"
+[Unit]
+Description=Link agent state into mounted guest home
+After=motlie-vfs-guest.service
+Requires=motlie-vfs-guest.service
+ConditionPathIsDirectory=/agent-state
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/motlie-agent-state-setup
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+AGENTUNITEOF' \
+    --customize-hook='chroot "$1" systemctl enable motlie-agent-state' \
+    --customize-hook='cat > "$1/etc/systemd/system/motlie-vmm-egress.service" << "EGRESSUNITEOF"
+[Unit]
+Description=Configure static v1.3 egress NIC
+After=systemd-networkd.service
+Wants=systemd-networkd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/motlie-vmm-egress-setup
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EGRESSUNITEOF' \
+    --customize-hook='chroot "$1" systemctl enable motlie-vmm-egress' \
+    --customize-hook='cat > "$1/etc/systemd/system/motlie-vmm-vsock-ssh.service" << "VSOCKSSHEOF"
+[Unit]
+Description=motlie-vmm vsock-to-SSH bridge (socat, guest→host)
+After=ssh.service
+Requires=ssh.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# Guest connects OUT to host CID 2, port 2222.
+# CH routes this to the host UDS at $VSOCK_SOCKET_2222.
+# The host accepts and runs russh client over the stream.
+# socat bridges the vsock connection to local sshd.
+ExecStart=/usr/local/bin/motlie-vmm-vsock-ssh-loop
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
+VSOCKSSHEOF' \
+    --customize-hook='chroot "$1" systemctl enable motlie-vmm-vsock-ssh' \
+    --customize-hook="echo \"$BASE_HOSTNAME\" > \"\$1/etc/hostname\"" \
+    --customize-hook='cat > "$1/etc/motd" << "MOTDEOF"
+                  _   _ _
+  _ __ ___   ___ | |_| (_) ___
+ | '"'"'_ ` _ \ / _ \| __| | |/ _ \
+ | | | | | | (_) | |_| | |  __/
+ |_| |_| |_|\___/ \__|_|_|\___|
+
+v1.3 ssh-proxy / agent-state demo
+Build: __MOTLIE_IMAGE_BUILD_GIT_SHA__
+Built At: __MOTLIE_IMAGE_BUILD_TIME_UTC__
+MOTDEOF' \
+    --customize-hook='sed -i "s/__MOTLIE_IMAGE_BUILD_GIT_SHA__/'"$IMAGE_BUILD_GIT_SHA"'/g" "$1/etc/motd"' \
+    --customize-hook='sed -i "s/__MOTLIE_IMAGE_BUILD_TIME_UTC__/'"$IMAGE_BUILD_TIME_UTC"'/g" "$1/etc/motd"' \
+    --customize-hook='cat > "$1/etc/fstab" << "FSTABEOF"
+proc        /proc    proc    defaults        0      0
+sysfs       /sys     sysfs   defaults        0      0
+devtmpfs    /dev     devtmpfs defaults       0      0
+FSTABEOF' \
+    --customize-hook='echo "user_allow_other" >> "$1/etc/fuse.conf"' \
+    --customize-hook="upload $GUEST_BINARY_ABS /usr/local/bin/motlie-vfs-guest" \
+    --customize-hook="chmod 755 \"\$1/usr/local/bin/motlie-vfs-guest\"" \
+    --customize-hook="upload $OVERLAY_INIT_ABS /sbin/overlay-init" \
+    --customize-hook="chmod 755 \"\$1/sbin/overlay-init\"" \
+    --customize-hook='chroot "$1" apt-get clean' \
+    --customize-hook='rm -rf "$1/var/lib/apt/lists"/*'
+
+KERNEL_SIZE="$(du -h "$BASE_KERNEL" | cut -f1)"
+ROOTFS_SIZE="$(du -h "$BASE_ROOTFS" | cut -f1)"
+COMBINED_SIZE="$(du -ch "$BASE_KERNEL" "$BASE_ROOTFS" | tail -1 | cut -f1)"
+
+echo "Shared squashfs image: $BASE_ROOTFS ($ROOTFS_SIZE)"
+echo ""
+echo "=== Build complete ==="
+ls -lh "$BASE_ARTIFACTS/"
+echo ""
+echo "Size summary:"
+echo "  kernel:   $KERNEL_SIZE  ($BASE_KERNEL)"
+echo "  rootfs:   $ROOTFS_SIZE  ($BASE_ROOTFS)"
+echo "  combined: $COMBINED_SIZE  (kernel + squashfs)"
+echo ""
+echo "Next: ./launch-ch.sh --guest alice --admin-net=none --egress-net=vhost-user"
