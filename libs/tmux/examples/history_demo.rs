@@ -13,7 +13,7 @@
 
 use anyhow::{anyhow, Result};
 use motlie_tmux::{
-    has_visible_text, pane_tail_excerpt, AgentTuiFilter, ContentFilter, CreateSessionOptions,
+    has_visible_text, AgentTuiFilter, ContentFilter, CreateSessionOptions,
     FlushPolicy, HistoryOptions, KeySequence, LabelFormat, PollHistory, RawFilter, RenderMode,
     ShellFilter, SinkFilter, SourceAccumulator, SplitPaneOptions, SshConfig,
 };
@@ -517,42 +517,6 @@ async fn run_live_monitor(
         snapshot.rendered_chars
     );
     Ok(())
-}
-
-fn tail_history_entry(
-    session_name: &str,
-    previous: &mut HashMap<motlie_tmux::PaneAddress, String>,
-    current: &HashMap<motlie_tmux::PaneAddress, String>,
-) -> Option<String> {
-    if current.is_empty() || current == previous {
-        return None;
-    }
-
-    let mut pane_list: Vec<_> = current.iter().collect();
-    pane_list.sort_by_key(|(addr, _)| (addr.window, addr.pane));
-
-    let mut rendered = String::new();
-    for (addr, content) in pane_list {
-        let previous_content = previous.get(addr).map(String::as_str).unwrap_or_default();
-        let previous_excerpt = pane_tail_excerpt(previous_content, 6);
-        let current_excerpt = pane_tail_excerpt(content, 6);
-        if current_excerpt.is_empty() || current_excerpt == previous_excerpt {
-            continue;
-        }
-        rendered.push_str(&format!(
-            "{}({})> {}\n",
-            session_name,
-            addr.pane_id,
-            current_excerpt.trim_end()
-        ));
-    }
-
-    *previous = current.clone();
-    if rendered.is_empty() {
-        None
-    } else {
-        Some(rendered)
-    }
 }
 
 fn render_history_entry(

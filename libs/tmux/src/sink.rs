@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{anyhow, Result};
+use crate::error::{Error, Result};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 
@@ -176,7 +176,7 @@ impl CompiledSinkFilter {
             match opt {
                 Some(pat) => {
                     Ok(Some(regex::Regex::new(pat).map_err(|e| {
-                        anyhow!("invalid filter regex '{}': {}", pat, e)
+                        Error::Parse(format!("invalid filter regex '{}': {}", pat, e))
                     })?))
                 }
                 None => Ok(None),
@@ -395,7 +395,7 @@ impl PipeHandle {
     pub async fn join(self) -> Result<()> {
         self.task
             .await
-            .map_err(|e| anyhow!("piped sink task panicked: {}", e))
+            .map_err(|e| Error::State(format!("piped sink task panicked: {}", e)))
     }
 }
 
@@ -874,25 +874,21 @@ impl SourceWindow {
     }
 
     fn append_to_last(&mut self, text: &str, label_format: &LabelFormat) -> bool {
-        if let Some(last) = self.entries.back() {
-            if !matches!(last, HistoryEntry::Output { .. }) {
-                return false;
-            }
-            let old_chars = last.rendered_chars(label_format);
-            // Drop the immutable borrow before mutating
-            if let Some(HistoryEntry::Output {
-                text: ref mut existing,
-                ..
-            }) = self.entries.back_mut()
-            {
-                existing.push_str(text);
-            }
-            let new_chars = self.entries.back().unwrap().rendered_chars(label_format);
-            self.rendered_chars = self.rendered_chars.saturating_sub(old_chars) + new_chars;
-            true
-        } else {
-            false
+        if !matches!(self.entries.back(), Some(HistoryEntry::Output { .. })) {
+            return false;
         }
+        // Entry is guaranteed to exist and be Output after the guard above.
+        let old_chars = self.entries.back().map(|e| e.rendered_chars(label_format)).unwrap_or(0);
+        if let Some(HistoryEntry::Output {
+            text: ref mut existing,
+            ..
+        }) = self.entries.back_mut()
+        {
+            existing.push_str(text);
+        }
+        let new_chars = self.entries.back().map(|e| e.rendered_chars(label_format)).unwrap_or(0);
+        self.rendered_chars = self.rendered_chars.saturating_sub(old_chars) + new_chars;
+        true
     }
 
     fn trim(&mut self, max_entries: usize, max_render_chars: usize, label_format: &LabelFormat) {
@@ -994,22 +990,21 @@ impl HistoryState {
     }
 
     fn append_to_last_interleaved(&mut self, text: &str) -> bool {
-        let is_output = matches!(self.entries.back(), Some(HistoryEntry::Output { .. }));
-        if is_output {
-            let old_chars = self.entries.back().unwrap().rendered_chars(&self.label_format);
-            if let Some(HistoryEntry::Output {
-                text: ref mut existing,
-                ..
-            }) = self.entries.back_mut()
-            {
-                existing.push_str(text);
-            }
-            let new_chars = self.entries.back().unwrap().rendered_chars(&self.label_format);
-            self.rendered_chars = self.rendered_chars.saturating_sub(old_chars) + new_chars;
-            true
-        } else {
-            false
+        if !matches!(self.entries.back(), Some(HistoryEntry::Output { .. })) {
+            return false;
         }
+        // Entry is guaranteed to exist and be Output after the guard above.
+        let old_chars = self.entries.back().map(|e| e.rendered_chars(&self.label_format)).unwrap_or(0);
+        if let Some(HistoryEntry::Output {
+            text: ref mut existing,
+            ..
+        }) = self.entries.back_mut()
+        {
+            existing.push_str(text);
+        }
+        let new_chars = self.entries.back().map(|e| e.rendered_chars(&self.label_format)).unwrap_or(0);
+        self.rendered_chars = self.rendered_chars.saturating_sub(old_chars) + new_chars;
+        true
     }
 
     fn append_to_last_per_source(&mut self, text: &str) -> bool {
@@ -1209,7 +1204,7 @@ impl HistoryHandle {
     pub async fn join(self) -> Result<HistorySnapshot> {
         self.task
             .await
-            .map_err(|e| anyhow!("history accumulator task panicked: {}", e))?;
+            .map_err(|e| Error::State(format!("history accumulator task panicked: {}", e)))?;
         Ok(self.state.lock().await.snapshot())
     }
 }
@@ -1593,7 +1588,7 @@ impl OutputBus {
         let len_before = subs.len();
         subs.retain(|s| s.id != id);
         if subs.len() == len_before {
-            return Err(anyhow!("subscription {:?} not found", id));
+            return Err(Error::NotFound(format!("subscription {:?} not found", id)));
         }
         Ok(())
     }
