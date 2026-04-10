@@ -34,7 +34,8 @@ use motlie_tmux::{
     SinkFilter, SplitDirection, SplitPaneOptions, SplitSize, SshConfig, TargetSpec,
     TransferOptions,
 };
-use std::io::{self, Write};
+use rustyline::error::ReadlineError;
+use rustyline::DefaultEditor;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -45,27 +46,24 @@ async fn main() -> anyhow::Result<()> {
     let host = SshConfig::parse(&uri)?.connect().await?;
     println!("Connected to {}", uri);
 
-    let mut stdout = io::stdout().lock();
+    let mut rl = DefaultEditor::new()?;
     let enter = KeySequence::parse("{Enter}")?;
 
-    write!(stdout, "repl> ")?;
-    stdout.flush()?;
-
     loop {
-        let mut line = String::new();
-        // Drop stdout lock briefly so read_line can print if needed.
-        drop(stdout);
-        let bytes = io::stdin().read_line(&mut line)?;
-        stdout = io::stdout().lock();
-        if bytes == 0 {
-            break; // EOF
-        }
-        let parts: Vec<&str> = line.trim().splitn(3, ' ').collect();
-        if parts.is_empty() || parts[0].is_empty() {
-            write!(stdout, "repl> ")?;
-            stdout.flush()?;
+        let line = match tokio::task::block_in_place(|| rl.readline("repl> ")) {
+            Ok(line) => line,
+            Err(ReadlineError::Interrupted) => continue,
+            Err(ReadlineError::Eof) => break,
+            Err(e) => return Err(e.into()),
+        };
+
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
             continue;
         }
+        let _ = rl.add_history_entry(trimmed);
+
+        let parts: Vec<&str> = trimmed.splitn(3, ' ').collect();
 
         match parts[0] {
             "help" => {
@@ -99,11 +97,9 @@ async fn main() -> anyhow::Result<()> {
             }
 
             "create" => {
-                let words: Vec<&str> = line.trim().split_whitespace().collect();
+                let words: Vec<&str> = trimmed.split_whitespace().collect();
                 if words.len() < 2 {
                     println!("usage: create <name> [--size WxH] [--history N]");
-                    write!(stdout, "repl> ")?;
-                    stdout.flush()?;
                     continue;
                 }
                 let name = words[1];
@@ -158,8 +154,6 @@ async fn main() -> anyhow::Result<()> {
                     i += 1;
                 }
                 if parse_err {
-                    write!(stdout, "repl> ")?;
-                    stdout.flush()?;
                     continue;
                 }
                 match host.create_session(name, &opts).await {
@@ -178,11 +172,9 @@ async fn main() -> anyhow::Result<()> {
             }
 
             "new-window" => {
-                let words: Vec<&str> = line.trim().split_whitespace().collect();
+                let words: Vec<&str> = trimmed.split_whitespace().collect();
                 if words.len() < 3 {
                     println!("usage: new-window <session> <name> [--size WxH]");
-                    write!(stdout, "repl> ")?;
-                    stdout.flush()?;
                     continue;
                 }
                 let session_name = words[1];
@@ -218,8 +210,6 @@ async fn main() -> anyhow::Result<()> {
                     i += 1;
                 }
                 if parse_err {
-                    write!(stdout, "repl> ")?;
-                    stdout.flush()?;
                     continue;
                 }
                 match resolve_target(&host, session_name).await {
@@ -232,11 +222,9 @@ async fn main() -> anyhow::Result<()> {
             }
 
             "split-pane" => {
-                let words: Vec<&str> = line.trim().split_whitespace().collect();
+                let words: Vec<&str> = trimmed.split_whitespace().collect();
                 if words.len() < 2 {
                     println!("usage: split-pane <target> [--horizontal|--vertical] [--percent N|--cells N]");
-                    write!(stdout, "repl> ")?;
-                    stdout.flush()?;
                     continue;
                 }
                 let target_str = words[1];
@@ -285,8 +273,6 @@ async fn main() -> anyhow::Result<()> {
                     i += 1;
                 }
                 if parse_err {
-                    write!(stdout, "repl> ")?;
-                    stdout.flush()?;
                     continue;
                 }
                 match resolve_target(&host, target_str).await {
@@ -303,8 +289,6 @@ async fn main() -> anyhow::Result<()> {
                     Some(t) => *t,
                     None => {
                         println!("usage: kill <target>");
-                        write!(stdout, "repl> ")?;
-                        stdout.flush()?;
                         continue;
                     }
                 };
@@ -389,8 +373,6 @@ async fn main() -> anyhow::Result<()> {
             "send" => {
                 if parts.len() < 3 {
                     println!("usage: send <target> <text...>");
-                    write!(stdout, "repl> ")?;
-                    stdout.flush()?;
                     continue;
                 }
                 let target_str = parts[1];
@@ -415,8 +397,6 @@ async fn main() -> anyhow::Result<()> {
                     println!("  e.g. keys mysession {{Escape}}");
                     println!("  e.g. keys mysession {{C-c}}");
                     println!("  e.g. keys mysession echo hello{{Enter}}");
-                    write!(stdout, "repl> ")?;
-                    stdout.flush()?;
                     continue;
                 }
                 let target_str = parts[1];
@@ -436,8 +416,6 @@ async fn main() -> anyhow::Result<()> {
             "capture" => {
                 if parts.len() < 3 {
                     println!("usage: capture <target> <n>");
-                    write!(stdout, "repl> ")?;
-                    stdout.flush()?;
                     continue;
                 }
                 let target_str = parts[1];
@@ -445,8 +423,6 @@ async fn main() -> anyhow::Result<()> {
                     Ok(n) if n > 0 => n,
                     _ => {
                         println!("Error: <n> must be a positive integer");
-                        write!(stdout, "repl> ")?;
-                        stdout.flush()?;
                         continue;
                     }
                 };
@@ -474,8 +450,6 @@ async fn main() -> anyhow::Result<()> {
             "monitor" => {
                 if parts.len() < 2 {
                     println!("usage: monitor <session> [seconds]");
-                    write!(stdout, "repl> ")?;
-                    stdout.flush()?;
                     continue;
                 }
                 let session_name = parts[1];
@@ -487,8 +461,6 @@ async fn main() -> anyhow::Result<()> {
                     Ok(sub) => match host.start_monitoring_session(session_name).await {
                         Ok(monitor_handle) => {
                             println!("Monitoring {} for {}s...", session_name, seconds);
-                            // Drop stdout lock so monitor output can print
-                            drop(stdout);
 
                             let mut stream = sub.joined(LabelFormat::Bracketed);
                             let deadline = tokio::time::Instant::now()
@@ -521,9 +493,6 @@ async fn main() -> anyhow::Result<()> {
 
                             let _ = monitor_handle.shutdown().await;
                             println!("Monitor stopped.");
-
-                            // Re-acquire stdout lock
-                            stdout = io::stdout().lock();
                         }
                         Err(e) => println!("Error: {}", e),
                     },
@@ -533,11 +502,8 @@ async fn main() -> anyhow::Result<()> {
 
             "tui" => {
                 if parts.get(1) == Some(&"on") {
-                    // Drop stdout lock — TUI takes over the terminal.
-                    drop(stdout);
                     match tui_mirror::run(&host, &uri).await? {
                         tui_mirror::TuiAction::TuiOff => {
-                            stdout = io::stdout().lock();
                             println!("Returned to plain REPL mode.");
                         }
                         tui_mirror::TuiAction::Quit => {
@@ -553,8 +519,6 @@ async fn main() -> anyhow::Result<()> {
             "upload" => {
                 if parts.len() < 3 {
                     println!("usage: upload <local_path> <remote_path> [--recursive]");
-                    write!(stdout, "repl> ")?;
-                    stdout.flush()?;
                     continue;
                 }
                 let local_path = std::path::Path::new(parts[1]);
@@ -579,8 +543,6 @@ async fn main() -> anyhow::Result<()> {
             "download" => {
                 if parts.len() < 3 {
                     println!("usage: download <remote_path> <local_path> [--recursive]");
-                    write!(stdout, "repl> ")?;
-                    stdout.flush()?;
                     continue;
                 }
                 let remote_path = std::path::Path::new(parts[1]);
@@ -613,9 +575,6 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
         }
-
-        write!(stdout, "repl> ")?;
-        stdout.flush()?;
     }
 
     println!("Disconnected.");

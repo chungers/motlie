@@ -1,4 +1,4 @@
-use anyhow::Result;
+use crate::error::Result;
 use std::collections::HashMap;
 
 use crate::discovery;
