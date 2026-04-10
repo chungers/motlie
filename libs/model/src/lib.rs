@@ -272,21 +272,21 @@ impl QuantizationSupport {
 
     /// Bundle supports the given precisions with a curated default.
     ///
-    /// # Panics
-    /// Panics if `recommended` is not in `supported`.
+    /// Returns `InvalidConfiguration` if `recommended` is not in `supported`.
     pub fn with_recommended(
         supported: impl IntoIterator<Item = QuantizationBits>,
         recommended: QuantizationBits,
-    ) -> Self {
+    ) -> Result<Self, ModelError> {
         let supported: BTreeSet<_> = supported.into_iter().collect();
-        assert!(
-            supported.contains(&recommended),
-            "recommended quantization {recommended:?} must be in supported set {supported:?}"
-        );
-        Self {
+        if !supported.contains(&recommended) {
+            return Err(ModelError::InvalidConfiguration(format!(
+                "recommended quantization {recommended:?} must be in supported set {supported:?}"
+            )));
+        }
+        Ok(Self {
             supported,
             recommended: Some(recommended),
-        }
+        })
     }
 
     /// Bundle supports the given precisions with no curated default (F32 by default).
@@ -610,7 +610,8 @@ mod tests {
         let q4_q8 = QuantizationSupport::with_recommended(
             [QuantizationBits::Four, QuantizationBits::Eight],
             QuantizationBits::Four,
-        );
+        )
+        .expect("test support is valid");
         assert_eq!(
             q4_q8.resolve(Some(QuantizationBits::Four), &bundle_id).unwrap(),
             Some(QuantizationBits::Four)
@@ -636,12 +637,14 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "must be in supported set")]
     fn quantization_support_rejects_contradictory_recommended() {
-        QuantizationSupport::with_recommended(
+        let err = QuantizationSupport::with_recommended(
             [],
             QuantizationBits::Four,
-        );
+        )
+        .expect_err("contradictory recommended should fail");
+
+        assert!(matches!(err, ModelError::InvalidConfiguration(msg) if msg.contains("must be in supported set")));
     }
 
     #[tokio::test]
