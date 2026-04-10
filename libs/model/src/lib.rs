@@ -228,6 +228,7 @@ pub struct BundleMetadata {
     pub id: BundleId,
     pub display_name: String,
     pub capabilities: Capabilities,
+    pub quantization: QuantizationSupport,
 }
 
 /// Artifact acquisition policy that bundle startup must honor.
@@ -242,10 +243,93 @@ pub enum ArtifactPolicy {
 /// Backends map this to their native quantization mechanism — ISQ for
 /// mistral.rs, GGUF bit width for llama.cpp, etc. `None` (the default)
 /// means the backend chooses its own default precision.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum QuantizationBits {
     Four,
     Eight,
+}
+
+/// Bundle-level declaration of which quantization precisions are supported
+/// and which precision is recommended for default deployments.
+///
+/// Invariant: `recommended` is either `None` or present in `supported`.
+/// Use the constructors (`none`, `with_recommended`, `without_recommended`)
+/// to enforce this.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct QuantizationSupport {
+    supported: BTreeSet<QuantizationBits>,
+    recommended: Option<QuantizationBits>,
+}
+
+impl QuantizationSupport {
+    /// Bundle does not support any quantization.
+    pub fn none() -> Self {
+        Self {
+            supported: BTreeSet::new(),
+            recommended: None,
+        }
+    }
+
+    /// Bundle supports the given precisions with a curated default.
+    ///
+    /// Returns `InvalidConfiguration` if `recommended` is not in `supported`.
+    pub fn with_recommended(
+        supported: impl IntoIterator<Item = QuantizationBits>,
+        recommended: QuantizationBits,
+    ) -> Result<Self, ModelError> {
+        let supported: BTreeSet<_> = supported.into_iter().collect();
+        if !supported.contains(&recommended) {
+            return Err(ModelError::InvalidConfiguration(format!(
+                "recommended quantization {recommended:?} must be in supported set {supported:?}"
+            )));
+        }
+        Ok(Self {
+            supported,
+            recommended: Some(recommended),
+        })
+    }
+
+    /// Bundle supports the given precisions with no curated default (F32 by default).
+    pub fn without_recommended(
+        supported: impl IntoIterator<Item = QuantizationBits>,
+    ) -> Self {
+        Self {
+            supported: supported.into_iter().collect(),
+            recommended: None,
+        }
+    }
+
+    pub fn supported(&self) -> &BTreeSet<QuantizationBits> {
+        &self.supported
+    }
+
+    pub fn recommended(&self) -> Option<QuantizationBits> {
+        self.recommended
+    }
+
+    pub fn supports(&self, bits: QuantizationBits) -> bool {
+        self.supported.contains(&bits)
+    }
+
+    /// Resolve the caller's quantization request against this bundle's support.
+    ///
+    /// - `Some(bits)` where bits is supported → `Ok(Some(bits))`
+    /// - `Some(bits)` where bits is NOT supported → `Err(InvalidConfiguration)`
+    /// - `None` → `Ok(self.recommended)` (curated default or None for F32)
+    pub fn resolve(
+        &self,
+        requested: Option<QuantizationBits>,
+        bundle_id: &BundleId,
+    ) -> Result<Option<QuantizationBits>, ModelError> {
+        match requested {
+            Some(bits) if !self.supports(bits) => Err(ModelError::InvalidConfiguration(format!(
+                "bundle `{bundle_id}` does not support {bits:?} quantization; supported: {:?}",
+                self.supported
+            ))),
+            Some(bits) => Ok(Some(bits)),
+            None => Ok(self.recommended),
+        }
+    }
 }
 
 /// Deployment-oriented knobs used when starting a bundle.
@@ -257,8 +341,20 @@ pub struct StartOptions {
     pub max_concurrency: Option<usize>,
 }
 
-/// Loaded bundle descriptors currently share the same shape as curated bundle metadata.
-pub type LoadedBundleDescriptor = BundleMetadata;
+/// Runtime-resolved descriptor for a loaded bundle instance.
+///
+/// Carries the curated metadata plus the quantization precision that was
+/// actually applied at startup (which may differ from the bundle's
+/// `recommended` default).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LoadedBundleDescriptor {
+    pub id: BundleId,
+    pub display_name: String,
+    pub capabilities: Capabilities,
+    pub quantization: QuantizationSupport,
+    /// The quantization precision actually applied at startup, or `None` for F32.
+    pub resolved_quantization: Option<QuantizationBits>,
+}
 
 /// Structured error surface for core bundle operations.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
@@ -452,6 +548,7 @@ mod tests {
             id: BundleId::new("embeddinggemma_300m"),
             display_name: "EmbeddingGemma 300M".into(),
             capabilities: Capabilities::embeddings_only(),
+            quantization: QuantizationSupport::none(),
         };
 
         assert_eq!(metadata, metadata.clone());
@@ -460,6 +557,8 @@ mod tests {
             id: metadata.id.clone(),
             display_name: metadata.display_name.clone(),
             capabilities: metadata.capabilities.clone(),
+            quantization: metadata.quantization.clone(),
+            resolved_quantization: None,
         };
         assert_eq!(loaded, loaded.clone());
     }
@@ -500,6 +599,54 @@ mod tests {
         assert_eq!(none.quantization, None);
     }
 
+    #[test]
+    fn quantization_support_resolves_against_bundle_metadata() {
+        let bundle_id = BundleId::new("test_bundle");
+
+        let no_support = QuantizationSupport::none();
+        assert!(no_support.resolve(Some(QuantizationBits::Four), &bundle_id).is_err());
+        assert_eq!(no_support.resolve(None, &bundle_id).unwrap(), None);
+
+        let q4_q8 = QuantizationSupport::with_recommended(
+            [QuantizationBits::Four, QuantizationBits::Eight],
+            QuantizationBits::Four,
+        )
+        .expect("test support is valid");
+        assert_eq!(
+            q4_q8.resolve(Some(QuantizationBits::Four), &bundle_id).unwrap(),
+            Some(QuantizationBits::Four)
+        );
+        assert_eq!(
+            q4_q8.resolve(Some(QuantizationBits::Eight), &bundle_id).unwrap(),
+            Some(QuantizationBits::Eight)
+        );
+        assert_eq!(
+            q4_q8.resolve(None, &bundle_id).unwrap(),
+            Some(QuantizationBits::Four)
+        );
+
+        let q8_only = QuantizationSupport::without_recommended(
+            [QuantizationBits::Eight],
+        );
+        assert!(q8_only.resolve(Some(QuantizationBits::Four), &bundle_id).is_err());
+        assert_eq!(
+            q8_only.resolve(Some(QuantizationBits::Eight), &bundle_id).unwrap(),
+            Some(QuantizationBits::Eight)
+        );
+        assert_eq!(q8_only.resolve(None, &bundle_id).unwrap(), None);
+    }
+
+    #[test]
+    fn quantization_support_rejects_contradictory_recommended() {
+        let err = QuantizationSupport::with_recommended(
+            [],
+            QuantizationBits::Four,
+        )
+        .expect_err("contradictory recommended should fail");
+
+        assert!(matches!(err, ModelError::InvalidConfiguration(msg) if msg.contains("must be in supported set")));
+    }
+
     #[tokio::test]
     async fn embedding_only_handle_reports_supported_surfaces() {
         let handle = FakeHandle {
@@ -507,6 +654,8 @@ mod tests {
                 id: BundleId::new("embedder"),
                 display_name: "Embedder".into(),
                 capabilities: Capabilities::embeddings_only(),
+                quantization: QuantizationSupport::none(),
+                resolved_quantization: None,
             },
         };
 

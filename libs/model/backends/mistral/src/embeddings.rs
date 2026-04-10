@@ -7,11 +7,13 @@ use mistralrs::{EmbeddingModelBuilder, EmbeddingRequest, ModelDType};
 use motlie_model::{
     BundleHandle, BundleId, BundleMetadata, Capabilities, CapabilityKind, ChatModel,
     CompletionModel, EmbeddingModel, EmbeddingRequest as ModelEmbeddingRequest, EmbeddingResponse,
-    LoadedBundleDescriptor, ModelBundle, ModelError, ModelMetricSnapshot, StartOptions,
+    LoadedBundleDescriptor, ModelBundle, ModelError, ModelMetricSnapshot, QuantizationBits,
+    QuantizationSupport, StartOptions,
 };
 use crate::common::{
-    configure_artifact_policy, lock_metrics, observe_embedding_request, observe_memory,
-    should_force_cpu, snapshot_embedding_metrics, EmbeddingMetricState, RuntimeMetricState,
+    configure_artifact_policy, lock_metrics, map_quantization_bits, observe_embedding_request,
+    observe_memory, should_force_cpu, snapshot_embedding_metrics, EmbeddingMetricState,
+    RuntimeMetricState,
 };
 
 /// Embedding architecture discriminant that selects the correct `mistralrs` loader path.
@@ -36,6 +38,7 @@ pub struct MistralEmbeddingSpec {
     pub model_id: &'static str,
     pub arch: MistralEmbeddingArch,
     pub capabilities: Capabilities,
+    pub quantization: QuantizationSupport,
 }
 
 impl MistralEmbeddingSpec {
@@ -46,6 +49,7 @@ impl MistralEmbeddingSpec {
             model_id: "google/embeddinggemma-300m",
             arch: MistralEmbeddingArch::EmbeddingGemma,
             capabilities: Capabilities::embeddings_only(),
+            quantization: QuantizationSupport::none(),
         }
     }
 }
@@ -65,6 +69,7 @@ impl MistralEmbeddingBundle {
                 id: spec.id,
                 display_name: spec.display_name.into(),
                 capabilities: spec.capabilities,
+                quantization: spec.quantization,
             },
             arch: spec.arch,
             model_id: spec.model_id,
@@ -87,7 +92,12 @@ impl ModelBundle for MistralEmbeddingBundle {
     }
 
     async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
-        let model = build_embedding_model(self.model_id, self.arch, options).await?;
+        let resolved_quantization = self
+            .metadata
+            .quantization
+            .resolve(options.quantization, &self.metadata.id)?;
+        let model =
+            build_embedding_model(self.model_id, self.arch, resolved_quantization, options).await?;
         let metrics = Arc::new(Mutex::new(EmbeddingMetricsState::default()));
         {
             let mut metrics = lock_metrics(&metrics, "mistral-embeddings-start");
@@ -99,6 +109,8 @@ impl ModelBundle for MistralEmbeddingBundle {
                 id: self.metadata.id.clone(),
                 display_name: self.metadata.display_name.clone(),
                 capabilities: self.metadata.capabilities.clone(),
+                quantization: self.metadata.quantization.clone(),
+                resolved_quantization,
             },
             runtime: Box::new(MistralRuntime {
                 model,
@@ -214,20 +226,15 @@ struct EmbeddingMetricsState {
 async fn build_embedding_model(
     model_id: &str,
     arch: MistralEmbeddingArch,
+    resolved_quantization: Option<QuantizationBits>,
     options: StartOptions,
 ) -> Result<mistralrs::Model, ModelError> {
     let StartOptions {
         artifact_policy,
-        quantization,
+        quantization: _, // already resolved by caller
         unpack_root,
         max_concurrency,
     } = options;
-
-    if quantization.is_some() {
-        return Err(ModelError::InvalidConfiguration(
-            "`mistralrs` embedding models do not support quantization; omit `StartOptions.quantization`".into(),
-        ));
-    }
 
     if let Some(unpack_root) = unpack_root {
         return Err(ModelError::InvalidConfiguration(format!(
@@ -248,6 +255,10 @@ async fn build_embedding_model(
     let mut builder = EmbeddingModelBuilder::new(model_target)
         .with_loader_type(arch.loader_type())
         .with_dtype(ModelDType::F32);
+
+    if let Some(bits) = resolved_quantization {
+        builder = builder.with_auto_isq(map_quantization_bits(bits));
+    }
 
     if should_force_cpu() {
         builder = builder.with_force_cpu();
@@ -312,6 +323,8 @@ mod tests {
                 id: BundleId::new("embeddinggemma_300m"),
                 display_name: "EmbeddingGemma 300M".into(),
                 capabilities: Capabilities::embeddings_only(),
+                quantization: QuantizationSupport::none(),
+                resolved_quantization: None,
             },
             runtime: Box::new(StubRuntime),
             metrics: Arc::new(Mutex::new(EmbeddingMetricsState::default())),
@@ -357,6 +370,7 @@ mod tests {
             .block_on(build_embedding_model(
                 "google/embeddinggemma-300m",
                 MistralEmbeddingArch::EmbeddingGemma,
+                None, // resolved quantization not relevant for unpack_root test
                 StartOptions {
                     unpack_root: Some(PathBuf::from("/tmp/motlie-model-unpack")),
                     ..Default::default()

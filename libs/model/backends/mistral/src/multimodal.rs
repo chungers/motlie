@@ -7,7 +7,8 @@ use mistralrs::{ModelBuilder, RequestBuilder};
 use motlie_model::{
     BundleHandle, BundleId, BundleMetadata, Capabilities, CapabilityKind, ChatModel, ChatRequest,
     ChatResponse, CompletionModel, ContentPart, EmbeddingModel, LoadedBundleDescriptor,
-    ModelBundle, ModelError, ModelMetricSnapshot, StartOptions,
+    ModelBundle, ModelError, ModelMetricSnapshot, QuantizationBits, QuantizationSupport,
+    StartOptions,
 };
 
 use crate::common::{
@@ -28,6 +29,7 @@ pub struct MistralMultimodalSpec {
     pub model_id: &'static str,
     pub arch: MistralMultimodalArch,
     pub capabilities: Capabilities,
+    pub quantization: QuantizationSupport,
 }
 
 impl MistralMultimodalSpec {
@@ -38,6 +40,11 @@ impl MistralMultimodalSpec {
             model_id: "google/gemma-4-E2B-it",
             arch: MistralMultimodalArch::Gemma4,
             capabilities: Capabilities::multimodal_chat_and_vision(),
+            quantization: QuantizationSupport::with_recommended(
+                [QuantizationBits::Four, QuantizationBits::Eight],
+                QuantizationBits::Four,
+            )
+            .expect("curated quantization support is valid"),
         }
     }
 }
@@ -56,6 +63,7 @@ impl MistralMultimodalBundle {
                 id: spec.id,
                 display_name: spec.display_name.into(),
                 capabilities: spec.capabilities,
+                quantization: spec.quantization,
             },
             arch: spec.arch,
             model_id: spec.model_id,
@@ -78,7 +86,13 @@ impl ModelBundle for MistralMultimodalBundle {
     }
 
     async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
-        let model = build_multimodal_model(self.model_id, self.arch, options).await?;
+        let resolved_quantization = self
+            .metadata
+            .quantization
+            .resolve(options.quantization, &self.metadata.id)?;
+        let model =
+            build_multimodal_model(self.model_id, self.arch, resolved_quantization, options)
+                .await?;
         let metrics = Arc::new(Mutex::new(MultimodalMetrics::default()));
         {
             let mut metrics = lock_metrics(&metrics, "mistral-multimodal-start");
@@ -90,6 +104,8 @@ impl ModelBundle for MistralMultimodalBundle {
                 id: self.metadata.id.clone(),
                 display_name: self.metadata.display_name.clone(),
                 capabilities: self.metadata.capabilities.clone(),
+                quantization: self.metadata.quantization.clone(),
+                resolved_quantization,
             },
             runtime: Box::new(MistralMultimodalRuntime {
                 model,
@@ -251,11 +267,12 @@ struct MultimodalMetrics {
 async fn build_multimodal_model(
     model_id: &str,
     _arch: MistralMultimodalArch,
+    resolved_quantization: Option<QuantizationBits>,
     options: StartOptions,
 ) -> Result<mistralrs::Model, ModelError> {
     let StartOptions {
         artifact_policy,
-        quantization,
+        quantization: _, // already resolved by caller
         unpack_root,
         max_concurrency,
     } = options;
@@ -278,7 +295,7 @@ async fn build_multimodal_model(
     // Use the auto-detecting builder here. Upstream's Gemma 4 multimodal examples use
     // `ModelBuilder`, and that path preserves multimodal chat-template discovery.
     let mut builder = ModelBuilder::new(model_target);
-    if let Some(bits) = quantization {
+    if let Some(bits) = resolved_quantization {
         builder = builder.with_auto_isq(map_quantization_bits(bits));
     }
     if should_force_cpu() {
@@ -349,6 +366,12 @@ mod tests {
                 id: BundleId::new("gemma4_e2b"),
                 display_name: "Gemma 4 E2B-it".into(),
                 capabilities: Capabilities::multimodal_chat_and_vision(),
+                quantization: QuantizationSupport::with_recommended(
+                    [QuantizationBits::Four, QuantizationBits::Eight],
+                    QuantizationBits::Four,
+                )
+                .expect("test quantization support is valid"),
+                resolved_quantization: Some(QuantizationBits::Four),
             },
             runtime: Box::new(StubMultimodalRuntime),
             metrics: Arc::new(Mutex::new(MultimodalMetrics::default())),
