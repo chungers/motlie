@@ -147,6 +147,12 @@ The current metric types live in `libs/model/src/metrics.rs`:
 - `TextGenerationMetrics`
 - `EmbeddingMetrics`
 
+`ModelMetricSnapshot` uses `Option<T>` both at the section level and field level. This is intentional:
+
+- some sections are capability-specific and absent on bundles that do not expose that capability
+- some values are not meaningful until the handle has served at least one request
+- some values are backend/platform dependent, such as runtime memory sampling
+
 Current implementation note:
 
 - runtime/process memory metrics are currently collected through `sysinfo`
@@ -154,6 +160,7 @@ Current implementation note:
 - current RSS is sampled from the current process, and peak RSS is maintained by Motlie as the max observed sample over the handle lifetime
 - the current `mistral` text-generation throughput fields are derived from cumulative token totals and cumulative prompt/generation time reported by upstream usage data
 - this metrics path is currently always built into the `mistral` backend and example binaries; it is not separately feature-gated yet
+- `ContentPart::ImageUrl` exists at the contract layer for future remote-capable bundles, but the current `mistral` multimodal path accepts inline image bytes only
 
 ## Bundle API Sketch
 

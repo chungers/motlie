@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -6,14 +5,13 @@ use async_trait::async_trait;
 use mistralrs::core::EmbeddingLoaderType;
 use mistralrs::{EmbeddingModelBuilder, EmbeddingRequest, ModelDType};
 use motlie_model::{
-    ArtifactPolicy, BundleHandle, BundleId, BundleMetadata, Capabilities, CapabilityKind,
-    ChatModel, CompletionModel, EmbeddingModel, EmbeddingRequest as ModelEmbeddingRequest,
-    EmbeddingResponse, LoadedBundleDescriptor, ModelBundle, ModelError, ModelMetricSnapshot,
-    StartOptions,
+    BundleHandle, BundleId, BundleMetadata, Capabilities, CapabilityKind, ChatModel,
+    CompletionModel, EmbeddingModel, EmbeddingRequest as ModelEmbeddingRequest, EmbeddingResponse,
+    LoadedBundleDescriptor, ModelBundle, ModelError, ModelMetricSnapshot, StartOptions,
 };
 use crate::common::{
-    observe_embedding_request, observe_memory, snapshot_embedding_metrics, EmbeddingMetricState,
-    RuntimeMetricState,
+    configure_artifact_policy, lock_metrics, observe_embedding_request, observe_memory,
+    should_force_cpu, snapshot_embedding_metrics, EmbeddingMetricState, RuntimeMetricState,
 };
 
 /// Embedding architecture discriminant that selects the correct `mistralrs` loader path.
@@ -91,7 +89,8 @@ impl ModelBundle for MistralEmbeddingBundle {
     async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
         let model = build_embedding_model(self.model_id, self.arch, options).await?;
         let metrics = Arc::new(Mutex::new(EmbeddingMetricsState::default()));
-        if let Ok(mut metrics) = metrics.lock() {
+        {
+            let mut metrics = lock_metrics(&metrics, "mistral-embeddings-start");
             observe_memory(&mut metrics.runtime);
         }
 
@@ -143,7 +142,8 @@ impl EmbeddingRuntime for MistralRuntime {
             })?;
         let elapsed = started_at.elapsed();
 
-        if let Ok(mut metrics) = self.metrics.lock() {
+        {
+            let mut metrics = lock_metrics(&self.metrics, "mistral-embeddings-embed");
             let EmbeddingMetricsState {
                 runtime,
                 embeddings,
@@ -172,7 +172,7 @@ impl BundleHandle for MistralEmbeddingHandle {
     }
 
     fn metric_snapshot(&self) -> Option<ModelMetricSnapshot> {
-        let metrics = self.metrics.lock().ok()?.clone();
+        let metrics = lock_metrics(&self.metrics, "mistral-embeddings-metric-snapshot").clone();
         Some(snapshot_embedding_metrics(
             &metrics.runtime,
             &metrics.embeddings,
@@ -268,38 +268,12 @@ async fn build_embedding_model(
         })
 }
 
-struct ConfiguredBuilder {
-    model_target: String,
-    hf_cache_root: Option<PathBuf>,
-}
-
-fn configure_artifact_policy(
-    model_id: &str,
-    policy: ArtifactPolicy,
-) -> Result<ConfiguredBuilder, ModelError> {
-    match policy {
-        ArtifactPolicy::AllowFetch { root } => Ok(ConfiguredBuilder {
-            model_target: model_id.to_owned(),
-            hf_cache_root: root,
-        }),
-        ArtifactPolicy::LocalOnly { root } => Ok(ConfiguredBuilder {
-            model_target: root.display().to_string(),
-            hf_cache_root: None,
-        }),
-    }
-}
-
-fn should_force_cpu() -> bool {
-    matches!(
-        std::env::var("MOTLIE_MODEL_FORCE_CPU"),
-        Ok(value) if matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES")
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use motlie_model::ArtifactPolicy;
     use motlie_model::StartOptions;
+    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     struct StubRuntime;

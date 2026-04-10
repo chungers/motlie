@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use mistralrs::core::StopTokens;
@@ -72,6 +73,21 @@ pub(crate) fn apply_generation_params(
         sampling.stop_toks = Some(StopTokens::Seqs(params.stop_sequences.clone()));
     }
     builder.set_sampling(sampling)
+}
+
+pub(crate) fn lock_metrics<'a, T>(
+    mutex: &'a Mutex<T>,
+    context: &'static str,
+) -> MutexGuard<'a, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            eprintln!(
+                "warning: recovering poisoned metrics lock in `{context}`; continuing with potentially incomplete metric state"
+            );
+            poisoned.into_inner()
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
