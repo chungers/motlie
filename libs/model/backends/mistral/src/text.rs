@@ -53,7 +53,8 @@ impl MistralTextSpec {
             quantization: QuantizationSupport::with_recommended(
                 [QuantizationBits::Four, QuantizationBits::Eight],
                 QuantizationBits::Four,
-            ),
+            )
+            .expect("curated quantization support is valid"),
         }
     }
 }
@@ -394,7 +395,8 @@ mod tests {
                 quantization: QuantizationSupport::with_recommended(
                     [QuantizationBits::Four, QuantizationBits::Eight],
                     QuantizationBits::Four,
-                ),
+                )
+                .expect("test quantization support is valid"),
                 resolved_quantization: Some(QuantizationBits::Four),
             },
             runtime: Box::new(StubTextRuntime),
