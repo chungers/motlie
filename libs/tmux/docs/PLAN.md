@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-09 | @claude | Update Conventions section: library error handling migrated from `anyhow` to `thiserror`-based typed `Error` enum (PR #145). `anyhow` retained as dev-dependency only. |
 | 2026-03-22 | @claude | Implement Phase 5.1 and 5.2: split-screen TUI REPL mode (`tui on`/`tui off`) with binary-local `tui_mirror` consumer using `HistoryHandle` for bounded mirror frame. Restructured `examples/repl.rs` → `examples/repl/main.rs` + `examples/repl/tui_mirror.rs`. Added `ratatui`/`crossterm` dev-dependencies. |
 | 2026-03-22 | @codex | Expand Phase 5 into a concrete first TUI slice: split-screen REPL mirror mode (`tui on` / `tui off`) using a binary-local consumer on top of `Subscription` / `HistoryHandle`, followed later by deeper full terminal-state mirroring if needed. |
 | 2026-03-21 | @claude | Implement 4.2g (DC30 socket isolation) and 4.2h (DC31 tracked execution). DC30: `TmuxSocket::automation()`, `SshConfig::with_automation_socket()`, `HostHandle::ensure_socket_server()`. DC31: `ExecId`/`ExecState`/`ExecHandle` types, `Target::start_exec()`, `exec()` refactored onto tracked substrate, `active_execs` discontinuity wiring. 378 unit tests (+11 new), 2 new integration tests. |
@@ -77,7 +78,7 @@ No SSH, no monitoring.
 
 - [x] Add `libs/tmux` to workspace `Cargo.toml` members list
 - [x] Create `libs/tmux/Cargo.toml` with initial dependencies:
-  `tokio`, `anyhow`, `regex`, `tracing`, `serde`, `uuid`
+  `tokio`, `thiserror`, `regex`, `tracing`, `serde`, `uuid` <!-- @claude 2026-04-09: was `anyhow`, migrated PR #145 -->
 - [x] Create `src/lib.rs` with module declarations and public re-exports
 - [x] Verify `cargo check -p motlie-tmux` passes (empty lib)
 
@@ -1411,4 +1412,4 @@ Notes:
 - Every task ends with `cargo check` and `cargo test` passing
 - Use `MockTransport` for unit tests; real tmux for integration tests
 - Integration tests gated on `which tmux` availability check
-- Follow workspace patterns: `anyhow` for errors, `tracing` for logs, `serde` for config
+- Follow workspace patterns: `thiserror` typed `Error` enum for library errors (`anyhow` dev-dependency only), `tracing` for logs, `serde` for config
