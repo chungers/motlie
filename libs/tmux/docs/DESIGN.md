@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-04-09 | @claude: Note anyhow→thiserror migration in dependency table and prototype sections. Library now uses typed `Error` enum via `thiserror`; `anyhow` retained as dev-dependency only. Prototype code snippets are pre-migration and preserved as historical context. | Dependencies, Prototype |
 | 2026-03-25 | @claude: DC33 — per-source coherent history rendering. Coalesce same-source chunks, add `RenderMode::PerSource`, per-source budgets. See [`docs/HISTORY.md`](./HISTORY.md). | DC28, DC33, History |
 | 2026-03-22 | @claude: Update Phase 5 section to reflect shipped DC32 split-screen REPL mode — replace "not in current scope" / generic `TuiSink` with shipped 5.1+5.2 status and binary-local consumer description. | Phase 5, DC32 |
 | 2026-03-22 | @codex: Add DC32 for the first TUI delivery: a split-screen REPL mirror mode with `tui on` / `tui off`. Keep the first mirror consumer binary-local instead of adding a core `SinkKind::Tui`, and stage full terminal-state mirroring after the transcript/history-oriented REPL cut. | DC32, Phase 5, TUI cross-reference |
@@ -161,12 +162,15 @@ prototype source, dependencies, and origin are preserved below for traceability.
 
 ### Prototype Cargo.toml
 
+<!-- @claude 2026-04-09: Prototype code below predates the anyhow→thiserror migration.
+     The library now uses a typed Error enum (thiserror); anyhow is dev-dependency only. -->
+
 ```toml
 [dependencies]
 tokio = { version = "1.0", features = ["full"] }
 russh = "0.40"
 russh-keys = "0.40"
-anyhow = "1.0"
+anyhow = "1.0"  # migrated to thiserror in PR #145
 regex = "1.10"
 clap = { version = "4.4", features = ["derive"] }
 chrono = "0.4"
@@ -4400,7 +4404,8 @@ consumers can also use it.
 | `tokio` | 1.x | Async runtime, signals, timers | Yes |
 | `tracing` | 0.1 | Structured logging | No |
 | `tracing-subscriber` | 0.3 | Log output formatting (text/JSON) | No |
-| `anyhow` | 1.x | Error handling | Yes |
+| `thiserror` | 2.x | Typed error enum (`Error`) | Yes |
+| `anyhow` | 1.x | Dev-dependency only (examples, tests) | No |
 | `serde` | 1.x | Config deserialization | Yes |
 | `toml` | 0.8 | Config file parsing (binary only) | No |
 

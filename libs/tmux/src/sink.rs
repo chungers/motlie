@@ -395,7 +395,7 @@ impl PipeHandle {
     pub async fn join(self) -> Result<()> {
         self.task
             .await
-            .map_err(|e| Error::State(format!("piped sink task panicked: {}", e)))
+            .map_err(Error::JoinError)
     }
 }
 
@@ -1204,7 +1204,7 @@ impl HistoryHandle {
     pub async fn join(self) -> Result<HistorySnapshot> {
         self.task
             .await
-            .map_err(|e| Error::State(format!("history accumulator task panicked: {}", e)))?;
+            .map_err(Error::JoinError)?;
         Ok(self.state.lock().await.snapshot())
     }
 }

@@ -658,6 +658,12 @@ async fn process_command(
         }
         "capture" => {
             state.stream = None;
+            if let Some(prev) = state.watch.take() {
+                let bus = host.output_bus();
+                let _ = bus.unsubscribe(prev.history_handle.id());
+                let _ = prev.history_handle.join().await;
+                let _ = prev.monitor_handle.shutdown().await;
+            }
             if parts.len() < 3 {
                 state.push_output("usage: capture <target> <n>");
                 return Ok(None);
@@ -693,6 +699,12 @@ async fn process_command(
         }
         "history" => {
             state.stream = None;
+            if let Some(prev) = state.watch.take() {
+                let bus = host.output_bus();
+                let _ = bus.unsubscribe(prev.history_handle.id());
+                let _ = prev.history_handle.join().await;
+                let _ = prev.monitor_handle.shutdown().await;
+            }
             let words: Vec<&str> = cmd.trim().split_whitespace().collect();
             if words.len() < 2 {
                 state.push_output("usage: history <session> [session...]");

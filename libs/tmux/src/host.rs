@@ -771,7 +771,7 @@ impl ExecHandle {
     pub async fn wait(self) -> Result<ExecState> {
         self.task
             .await
-            .map_err(|e| Error::State(format!("exec task panicked: {}", e)))?
+            .map_err(Error::JoinError)?
     }
 }
 
