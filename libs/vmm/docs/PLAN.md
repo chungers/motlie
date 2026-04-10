@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-09 | @codex | Sync PLAN with the merged `v1.4` harness reality: mark completed harness/PTY/VTE/scenario work accurately, update the proving-ground status from `v1.3` to merged `v1.4`, and rescope Phase 8 around extracting reusable harness infrastructure into `libs/vmm` |
 | 2026-04-08 | @codex | Address PR 140 review items: remove the dead `VmBackend` / `BackendSet` transitional layer, tighten shutdown/readiness/terminal correctness, and update the plan language to match the direct enum-dispatch runtime that is now in code |
 | 2026-04-08 | @codex | Add a switchable harness terminal backend, make `shadow-terminal` the default PTY/TUI renderer with `vt100` as an explicit fallback, and record that GIF/PNG/movie output stays deferred outside `v1.4` |
 | 2026-04-08 | @codex | Add asciicast export to the PTY artifact plan and standardize the scope boundary: NDJSON transcript + VTE screen JSON remain canonical, asciicast is the portable replay export, and PNG/GIF/movie generation is explicitly deferred out of `v1.4` scope |
@@ -31,32 +32,34 @@
 
 Current source of truth for the runnable proving ground:
 
-- implementation: `libs/vmm/examples/v1.3/`
+- implementation: `libs/vmm/examples/v1.4/`
 - design: `libs/vmm/docs/DESIGN.md`
-- checkpoint PR: `dev/vmm-v1.3` -> `feature/vmm`
+- merged checkpoint PR: `dev/vmm-v1.4` -> `feature/vmm`
 
-What is already working in the current `v1.3` checkpoint:
+What is already working in the merged `v1.4` checkpoint:
 
-- Cloud Hypervisor guest launch through the VMM-owned example harness
+- Cloud Hypervisor guest launch through the extracted `libs/vmm` lifecycle API
 - VFS guest mount composition for home, workspace, and agent-state
 - motlie-vnet egress backend integration
 - SSH CA injection and CA-based guest login
-- SSH proxy ingress on `localhost:2222`
-- programmatic exec over the same SSH proxy
-- PTY correctness fixes for interactive and exec paths
+- SSH proxy ingress on harness-owned localhost ports
+- programmatic `exec` plus PTY/session control over the same SSH proxy
+- PTY/VTE capture with switchable terminal backends (`shadow` default,
+  `vt100` fallback)
+- harness-native scenario/action-expectation format with structured step output
+- machine-readable result artifacts, observability bundles, asciicast export,
+  and static SVG screen snapshots
 - deterministic shutdown fallback (API -> SIGTERM -> SIGKILL)
 
 What is still missing for a polished, reusable harness:
 
-- blocking launch with explicit readiness gates
-- library-owned lifecycle state instead of example-owned maps
 - typed validation/reporting APIs
-- a non-interactive harness mode suitable for agents and CI
-- an interactive/manual harness mode suitable for humans and coding agents
+- reusable harness-core modules in `libs/vmm` rather than `examples/v1.4`
+  owning the scenario driver and validation engine
+- full convergence of shell/manual mode onto the same reusable engine
 - a stable host-side + guest-side reporting surface for CPU/memory/disk/network
   visibility
 - automatic guest provisioning when a new SSH principal appears
-- an explicit programmatic harness layer that later phases can target directly
 - a practical single-binary distribution prototype for the curated guest image
 
 ## Objective
@@ -71,32 +74,33 @@ Turn the working `v1.3` example into:
 
 ## Desired Outcomes
 
-- [ ] `v1.4` Motlie-backed path works end to end:
-  - [ ] a runnable harness uses Motlie guest backing providers
-  - [ ] scripted validation checks guest behavior end to end
+- [x] `v1.4` Motlie-backed path works end to end:
+  - [x] a runnable harness uses Motlie guest backing providers
+  - [x] scripted validation checks guest behavior end to end
 - [ ] `motlie-vmm` also supports a simple standard guest path:
   - [ ] no Motlie guestfs backing
   - [ ] no Motlie userspace vnet backing
   - [ ] a small Cloud Hypervisor “hello world” example boots a guest through
         the same lifecycle API using ordinary hypervisor-managed resources
-- [ ] reviewed `Runtime` composition becomes the injected runtime contract:
+- [x] reviewed `Runtime` composition becomes the injected runtime contract:
   - [x] `hypervisor: HypervisorBacking`
   - [x] `filesystem: FilesystemBacking`
   - [x] `network: NetworkBacking`
   - [x] `control_plane: ControlPlaneBacking`
-- [ ] `examples/v1.4/harness` becomes the primary driver:
+- [x] `examples/v1.4/harness` becomes the primary driver for the merged
+      `v1.4` line:
   - [x] `smoke` scenario
   - [x] `pty` scenario
-  - [ ] multi-guest named scenarios
-  - [ ] interactive/manual shell mode
+  - [x] multi-guest named scenarios
+  - [x] interactive/manual shell mode
   - [x] transcript/log bundle capture
-  - [ ] action/expectation script format
+  - [x] action/expectation script format
 
-The rule for this plan is:
+The next rule for this plan is:
 
-- preserve the current working `v1.3` example behavior
-- extract stable lifecycle logic into `libs/vmm/src`
-- keep operator UX and demo-specific wiring in the example
+- preserve the merged `v1.4` harness as the proving ground
+- extract reusable harness-core logic into `libs/vmm`
+- keep `examples/v1.4` as the first consumer and operator-facing proving line
 
 ## Phase 1: Typed Spec and Network Extraction
 
@@ -239,7 +243,7 @@ Tasks:
 - [x] move guest listener spawn logic there
 - [x] move SSH bridge accept/register lifecycle out of the `v1.4` harness path
 - [x] unify guest launch/SSH handle/vnet/VFS state into one library-owned handle
-- [ ] add library-owned observability surfaces for the running guest lifecycle:
+- [x] add library-owned observability surfaces for the running guest lifecycle:
   - [x] launch-log path / serial-log path on the typed handle
   - [x] typed accessors for effective runtime roots and sockets
   - [x] transcript/log capture surfaces that the harness can consume without
@@ -264,7 +268,7 @@ Tasks:
 - [x] add a `v1.4`-owned non-interactive harness entrypoint under
       `examples/v1.4/`
 - [x] make it call library APIs instead of REPL command strings
-- [ ] support:
+- [x] support:
   - [x] `boot`
   - [x] `handle.ready(...)`
   - [x] `exec`
@@ -377,41 +381,60 @@ Acceptance:
 - assignments are stable across relaunch within the same harness run
 - capacity exhaustion fails with a typed error instead of producing collisions
 
-## Phase 8: Validation and Agent Harness Mode
+## Phase 8: Harness Core Extraction and Validation Profiles
 
 Goal:
-- broaden the harness from smoke driver to scenario/agent driver
+- extract the now-proven `v1.4` harness machinery into reusable `libs/vmm`
+  harness infrastructure so future harnesses, products, and extensions do not
+  have to clone the `examples/v1.4` scenario/validation engine
 
 Tasks:
+- [x] prove the `v1.4` harness shape in `examples/v1.4/harness` first:
+  - [x] stable binary entrypoint
+  - [x] stable scenario/action-expectation format
+  - [x] PTY/send/read/resize/expect steps
+  - [x] multi-guest coordination
+  - [x] structured per-step outputs
 - [ ] add `libs/vmm/src/validation.rs`
 - [ ] turn current smoke tests into typed validation profiles
-- [ ] add structured pass/fail output
-- [x] decide that the stable harness is the `examples/v1.4/harness` binary,
-      not a mode bolted onto the old REPL
-- [ ] ensure it supports:
-  - [x] boot-and-wait through `boot` + `handle.ready(...)`
-  - [x] exec
-  - [ ] validate
-  - [x] shutdown-and-wait
-  - [x] PTY/send/expect script steps
-- [x] design and implement the stable scenario/script format:
-  - [x] action/expectation pairs
-  - [x] PTY send/read/resize/expect steps
-  - [x] multi-guest coordination
-  - [x] stable machine-readable outputs per step
-- [ ] converge ad-hoc/manual operation onto the same engine:
-  - [ ] harness shell commands should be thin wrappers over the scenario/driver
-        engine
-  - [ ] user reports should be reproducible as saved scripts, not one-off REPL
-        sessions
+- [ ] move reusable scenario-driver types out of `examples/v1.4/harness/` into
+      `libs/vmm/src/harness/`:
+  - [ ] scenario definition types
+  - [ ] scenario step/result types
+  - [ ] driver execution engine
+  - [ ] reusable result/error envelopes
+- [ ] define the reusable library boundary for harness-core versus
+      product/example-specific UX:
+  - [ ] keep `examples/v1.4`-specific guest/image setup out of the library core
+  - [ ] keep terminal backend selection (`shadow` / `vt100`) behind a reusable
+        harness-core interface
+  - [ ] let later harnesses reuse the scenario engine without inheriting the
+        `v1.4` guest catalog or docs verbatim
+- [ ] converge ad-hoc/manual operation onto the same extracted engine:
+  - [ ] `harness_v1_4 shell` commands become thin wrappers over reusable
+        scenario/validation operations
+  - [ ] `validate <guest>` becomes a library-owned validation profile invocation
+        instead of a shell-local command list
+  - [ ] user reports become reproducible as saved scripts or validation-profile
+        runs, not one-off REPL sessions
+- [ ] keep `examples/v1.4/harness` as the first consumer after extraction:
+  - [ ] no loss of current `boot`, `ready`, `exec`, `shutdown`, PTY, or
+        multi-guest capabilities
+  - [ ] scenario artifacts and machine-readable outputs stay stable enough for
+        existing agent workflows
 
 Acceptance:
-- an agent can drive the harness without depending on the REPL prompt
-- validation returns machine-usable results rather than only stderr text
-- the same engine supports:
+- the reusable harness core lives in `libs/vmm`, not only in
+  `examples/v1.4/harness`
+- `examples/v1.4/harness` remains the proving ground but becomes one consumer
+  of the extracted scenario/validation engine
+- validation returns machine-usable results through reusable profile APIs, not
+  only shell-local command lists
+- the same extracted engine supports:
   - [x] scripted regression scenarios
   - [ ] human interactive/manual operation
   - [x] ad-hoc coding-agent experimentation
+  - [ ] future non-`v1.4` harness consumers
 
 ## Phase 9: Polish and Hardening
 

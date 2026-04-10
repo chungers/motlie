@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-09 | @codex | Rescope the post-merge harness direction: preserve `examples/v1.4/harness` as the historical origin and first consumer, but extract reusable scenario/validation infrastructure into `libs/vmm` without rewriting away the existing `v1.4` harness artifacts |
 | 2026-04-08 | @codex | Address PR 140 review drift: remove the dead `VmBackend` / `BackendSet` transitional story from the design, update `GuestSpec` / `PreparedGuest` / shutdown snippets to match code, and record the typed `OverlaySize` plus namespace-sensitive socket-path allocation details |
 | 2026-04-08 | @codex | Make the harness terminal-state engine switchable, adopt `shadow-terminal` as the default high-fidelity backend for PTY/TUI validation, keep `vt100` as an explicit fallback backend, and keep PNG/GIF/movie generation out of scope for `v1.4` |
 | 2026-04-08 | @codex | Add the PTY export design decision: keep NDJSON transcript plus VTE screen JSON as canonical validation artifacts, add asciicast export for portable replay/interchange, and explicitly defer PNG/GIF/movie generation as out of scope for `v1.4` |
@@ -119,8 +120,14 @@ Current `v1.4` implementation status:
   through reviewed `Runtime` composition
 - the next convergence step is guest-shape cleanup around `VmSpec` plus the
   simple Cloud Hypervisor “hello world” example
-- the next harness step is to absorb ad-hoc/manual REPL use cases into
-  `examples/v1.4/harness/` so the harness becomes the primary driver for:
+- the next harness step is two-stage:
+  - keep absorbing ad-hoc/manual REPL use cases into `examples/v1.4/harness/`
+    so `v1.4` remains the proving ground and historical record of how the
+    harness line was validated
+  - then extract the reusable scenario/validation engine proven there into
+    `libs/vmm`, without deleting or rewriting away the original `v1.4`
+    harness artifacts
+  so the harness line becomes the primary driver for:
   - scripted scenarios
   - coding-agent experimentation
   - human manual validation
@@ -155,12 +162,24 @@ Current `v1.4` implementation status:
      `shutdown()` lifecycle API without using Motlie guest backing providers.
    - The same portable slice should later map to `backend::vz::*`.
 
-3. `examples/v1.4/harness` becomes the main runnable control surface.
-   - It should support repeatable scenarios and ad-hoc/manual operation.
-   - It should be able to drive PTY sessions, capture transcripts, and bundle
+3. `examples/v1.4/harness` remains the main runnable proving surface for the
+   merged `v1.4` line.
+   - It should keep supporting repeatable scenarios and ad-hoc/manual
+     operation.
+   - It should keep driving PTY sessions, capturing transcripts, and bundling
      useful run artifacts such as launch logs and serial logs.
    - The old `repl_host_v1_4` is transitional and should not accumulate unique
      control-plane logic.
+
+4. The reusable harness core should then be extracted from that proven
+   `v1.4` surface into `libs/vmm`.
+   - Reusable scenario definitions, step/result types, validation profiles,
+     and driver/result plumbing should live in the library once the `v1.4`
+     behavior is proven.
+   - `examples/v1.4/harness` should remain as the first consumer and
+     historical reference implementation rather than being rewritten away.
+   - `v1.4`-specific guest/image setup, guest catalog, runbook docs, and
+     operator-facing UX should stay in `examples/v1.4`.
 
 ## Cloud Hypervisor API Analysis
 
@@ -231,13 +250,19 @@ The critical constraint is:
   stay above the CH adapter
 - CH-facing configuration should be modeled explicitly enough that a future
   `to_ch_vm_config(...)` step is straightforward
-- harness-specific scenario or interactive UX should stay above `libs/vmm`; the
-  library should expose the lifecycle, exec, PTY, and observability primitives
-  that the harness consumes
+- product/example-specific guest catalogs and operator UX should stay above
+  `libs/vmm`
+- reusable harness-core infrastructure may move into `libs/vmm` once proven in
+  `examples/v1.4`
+- the library should expose both:
+  - lifecycle, exec, PTY, and observability primitives for any caller
+  - reusable scenario/validation core that later harnesses can consume without
+    cloning the `v1.4` engine
 
 ## Harness Direction
 
-`examples/v1.4/harness/` is now the future primary driver for `v1.4`.
+`examples/v1.4/harness/` is the historical origin and first consumer of the
+merged `v1.4` harness line.
 
 The intended modes are:
 
@@ -247,7 +272,16 @@ The intended modes are:
   - human-driven exploratory testing
   - coding-agent-driven ad-hoc reproduction and debugging
 
-Both modes must use the same `libs/vmm` lifecycle/control-plane APIs:
+The post-merge extraction rule is:
+
+- preserve the existing `examples/v1.4/harness/` tree and its checked-in
+  artifacts/docs as the historical record of how the harness was proven
+- extract reusable harness-core modules into `libs/vmm` underneath that
+  already-proven surface
+- do not rewrite `v1.4` to hide where the harness came from
+
+Both the original `v1.4` harness and the extracted harness core must use the
+same `libs/vmm` lifecycle/control-plane APIs:
 
 - `prepare(...)`
 - `boot(...)`
@@ -275,12 +309,12 @@ The terminal/reporting contract is now:
 
 - rendered terminal state / VTE capture is in scope and part of the harness
   contract
-- the terminal-state engine is switchable inside `examples/v1.4/harness`
+- the terminal-state engine is switchable inside the harness line
   - `shadow` is the default high-fidelity backend for PTY/TUI validation
   - `vt100` remains available as an explicit fallback/backend-comparison mode
-- the key decision is to keep the backend boundary inside the harness rather
-  than inside `libs/vmm`, because the harness already owns the live PTY stream
-  and artifact persistence
+- the key decision is to keep the terminal backend boundary inside the harness
+  layer rather than inside the lower-level VM lifecycle primitives, because
+  the harness line owns the live PTY stream and artifact persistence
 - chosen `v1.4` recording direction: asciicast export is in scope as a
   portable text/timing replay format layered on top of the canonical NDJSON
   transcript and rendered screen JSON
@@ -299,8 +333,17 @@ This is explicitly meant to replace the old split between:
 - standalone REPL for ad-hoc use
 - separate smoke binaries/scripts for automation
 
-The harness should become the single coherent driver over the same underlying
-library APIs.
+The harness line should become the single coherent driver over the same
+underlying library APIs.
+
+That does not require deleting the original `v1.4` harness. The extracted
+`libs/vmm` harness core should be introduced underneath it, with
+`examples/v1.4/harness` remaining as:
+
+- the first real consumer
+- the preserved historical proving surface
+- the place where `v1.4`-specific guest/image/operator artifacts continue to
+  live
 
 One specific design correction from this analysis:
 
