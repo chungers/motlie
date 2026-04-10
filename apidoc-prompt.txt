@@ -1,0 +1,1965 @@
+ ▐▛███▜▌   Claude Code v2.1.72
+▝▜█████▛▘  Opus 4.6 · Claude Max
+  ▘▘ ▝▝    ~/claude-tmux/motlie
+
+✻ Conversation compacted (ctrl+o for history)
+
+  ⎿  Referenced file libs/tmux/docs/PLAN.md
+  ⎿  Referenced file libs/tmux/src/transport.rs
+  ⎿  Read libs/tmux/src/lib.rs (14 lines)
+  ⎿  Read libs/tmux/Cargo.toml (23 lines)
+  ⎿  Referenced file libs/tmux/src/types.rs
+
+● Read 1 file (ctrl+o to expand)
+
+● Now I'll fix the timeout scope to cover the full exec lifecycle, then commit,
+  push, and post PR comments.
+
+● Update(libs/tmux/src/transport.rs)
+  ⎿  Added 42 lines, removed 36 lines
+      467  
+      468      /// Execute a command on the remote host and return stdout
+           .
+      469      ///
+      470 -    /// The SSH handle lock is held only during channel open, 
+          -not for the full                                              
+      471 -    /// command lifetime, allowing multiple concurrent execs o
+          -n the same connection.                                        
+      470 +    /// The full exec lifecycle — channel open, exec request, 
+          +and output                                                    
+      471 +    /// collection — is bounded by `config.timeout`. The SSH h
+          +andle lock is                                                 
+      472 +    /// held only during channel open (not the full command li
+          +fetime), allowing                                             
+      473 +    /// multiple concurrent execs on the same connection.     
+      474      async fn exec(&self, command: &str) -> Result<String> {
+      473 -        // Lock only to open the channel, then release. The Ch
+          -annel is                                                      
+      474 -        // self-contained — its read/write operations don't ne
+          -ed the Handle.                                                
+      475 -        let mut channel = {                                   
+      476 -            let handle = self.handle.lock().await;            
+      477 -            handle.channel_open_session().await.map_err(|e| { 
+      478 -                anyhow!("SSH: failed to open session channel: 
+          -{}", e)                                                       
+      479 -            })?                                               
+      480 -        };                                                    
+      475 +        // Single timeout boundary covering channel open + exe
+          +c + output                                                    
+      476 +        // collection, so a stalled server at any phase is cau
+          +ght.                                                          
+      477 +        let (stdout, stderr, exit_code) = tokio::time::timeout
+          +(                                                             
+      478 +            self.config.timeout,                              
+      479 +            async {                                           
+      480 +                // Lock only to open the channel, then release
+          +. The Channel is                                              
+      481 +                // self-contained — its read/write operations 
+          +don't need the Handle.                                        
+      482 +                let mut channel = {                           
+      483 +                    let handle = self.handle.lock().await;    
+      484 +                    handle.channel_open_session().await.map_er
+          +r(|e| {                                                       
+      485 +                        anyhow!("SSH: failed to open session c
+          +hannel: {}", e)                                               
+      486 +                    })?                                       
+      487 +                };                                            
+      488  
+      482 -        channel.exec(true, command).await.map_err(|e| {       
+      483 -            anyhow!("SSH: failed to exec command: {}", e)     
+      484 -        })?;                                                  
+      489 +                channel.exec(true, command).await.map_err(|e| 
+          +{                                                             
+      490 +                    anyhow!("SSH: failed to exec command: {}",
+          + e)                                                           
+      491 +                })?;                                          
+      492  
+      486 -        // Collect output with timeout                        
+      487 -        let result = tokio::time::timeout(self.config.timeout,
+          - async {                                                      
+      488 -            let mut stdout = Vec::new();                      
+      489 -            let mut stderr = Vec::new();                      
+      490 -            let mut exit_code: Option<u32> = None;            
+      493 +                // Collect output                             
+      494 +                let mut stdout = Vec::new();                  
+      495 +                let mut stderr = Vec::new();                  
+      496 +                let mut exit_code: Option<u32> = None;        
+      497  
+      492 -            while let Some(msg) = channel.wait().await {      
+      493 -                match msg {                                   
+      494 -                    russh::ChannelMsg::Data { ref data } => { 
+      495 -                        stdout.extend_from_slice(data);       
+      496 -                    }                                         
+      497 -                    russh::ChannelMsg::ExtendedData { ref data
+          -, ext } => {                                                  
+      498 -                        if ext == 1 {                         
+      499 -                            stderr.extend_from_slice(data);   
+      498 +                while let Some(msg) = channel.wait().await {  
+      499 +                    match msg {                               
+      500 +                        russh::ChannelMsg::Data { ref data } =
+          +> {                                                           
+      501 +                            stdout.extend_from_slice(data);   
+      502                          }
+      503 +                        russh::ChannelMsg::ExtendedData { ref 
+          +data, ext } => {                                              
+      504 +                            if ext == 1 {                     
+      505 +                                stderr.extend_from_slice(data)
+          +;                                                             
+      506 +                            }                                 
+      507 +                        }                                     
+      508 +                        russh::ChannelMsg::ExitStatus { exit_s
+          +tatus } => {                                                  
+      509 +                            exit_code = Some(exit_status);    
+      510 +                        }                                     
+      511 +                        russh::ChannelMsg::Eof | russh::Channe
+          +lMsg::Close => break,                                         
+      512 +                        _ => {}                               
+      513                      }
+      502 -                    russh::ChannelMsg::ExitStatus { exit_statu
+          -s } => {                                                      
+      503 -                        exit_code = Some(exit_status);        
+      504 -                    }                                         
+      505 -                    russh::ChannelMsg::Eof | russh::ChannelMsg
+          -::Close => break,                                             
+      506 -                    _ => {}                                   
+      514                  }
+      508 -            }                                                 
+      515  
+      510 -            (stdout, stderr, exit_code)                       
+      511 -        })                                                    
+      516 +                Ok::<_, anyhow::Error>((stdout, stderr, exit_c
+          +ode))                                                         
+      517 +            },                                                
+      518 +        )                                                     
+      519          .await
+      520          .map_err(|_| {
+      521              anyhow!(
+     ...
+      523                  self.config.timeout,
+      524                  command
+      525              )
+      519 -        })?;                                                  
+      526 +        })??;                                                 
+      527  
+      521 -        let (stdout, stderr, exit_code) = result;             
+      528          let code = exit_code.unwrap_or(0);
+      529          if code != 0 {
+      530              let stderr_str = String::from_utf8_lossy(&stderr);
+
+● Now let me build to verify it compiles.
+
+● Bash(cargo check -p motlie-tmux 2>&1)
+  ⎿      Checking motlie-tmux v0.1.0 (/home/dchung/claude-tmux/motlie/libs/
+     tmux)
+         Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.26
+     s
+
+● Compiles clean. Now run tests and commit.
+
+● Bash(cargo test -p motlie-tmux 2>&1)
+  ⎿     Compiling motlie-tmux v0.1.0 (/home/dchung/claude-tmux/motlie/libs/
+     tmux)
+         Finished `test` profile [unoptimized + debuginfo] target(s) in 1.8
+     … +111 lines (ctrl+o to expand)
+  ⎿  (timeout 2m)
+
+● All 131 tests pass. Now commit and push, then post PR comments.
+
+● Bash(git add libs/tmux/src/transport.rs && git commit -m "$(cat <<'EOF'
+      fix(tmux): wrap full exec lifecycle in single timeout boundary (DC19)…)
+  ⎿  [feature/tmux-ssh-transport ac4bf0c] fix(tmux): wrap full exec lifecyc
+     le in single timeout boundary (DC19)
+      1 file changed, 45 insertions(+), 39 deletions(-)
+
+● Bash(git push origin feature/tmux-ssh-transport 2>&1)
+  ⎿  To https://github.com/chungers/motlie
+        aa4b31d..ac4bf0c  feature/tmux-ssh-transport -> feature/tmux-ssh-tr
+     ansport
+
+● Pushed ac4bf0c. Now post the inline reply and summary issue comment.
+
+● Bash(gh api repos/chungers/motlie/pulls/67 --jq '.head.sha')
+  ⎿  ac4bf0ca989fa11c91da757e3afc863717a999ba
+
+● Bash(gh api repos/chungers/motlie/pulls/67/comments/2916161366/replies \
+        -f body="$(cat <<'EOF'…)
+  ⎿  {"url":"https://api.github.com/repos/chungers/motlie/pulls/comments/29
+     16172774","pull_request_review_id":3927225567,"id":2916172774,"node_id
+     ":"PRRC_kwDOQIoCzc6t0UPm","diff_hunk":"@@ -154,24 +168,442 @@ impl Def
+     … +207 lines (ctrl+o to expand)
+
+● Now post the summary issue comment.
+
+● Bash(gh api repos/chungers/motlie/issues/67/comments \
+        -f body="$(cat <<'EOF'…)
+  ⎿  {
+       "url": "https://api.github.com/repos/chungers/motlie/issues/comments
+     /4036807308",
+     … +32 lines (ctrl+o to expand)
+
+● Done. PR #67 round 2 addressed:
+
+  - Fix: Wrapped channel_open_session(), channel.exec(), and output collection
+  inside a single tokio::time::timeout boundary so a stalled server at any phase
+   is caught by the configured timeout
+  - Preserved: Lock scoping (mutex held only during channel open) for concurrent
+   exec support
+  - Commit: ac4bf0c
+  - Inline reply posted to comment 2916161366 and summary issue comment posted
+
+✻ Churned for 3m 1s
+
+❯ theres a broken local integration test please fix                             
+
+● Bash(cargo test -p motlie-tmux --test integration 2>&1)
+  ⎿      Finished `test` profile [unoptimized + debuginfo] target(s) in 0.0
+     9s
+          Running tests/integration.rs (target/debug/deps/integration-9a0ab
+     … +7 lines (ctrl+o to expand)
+
+● That test passes. Let me check if there are other test files.
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ localhost integration test is broken                                          
+
+● Read 1 file (ctrl+o to expand)
+
+● Bash(cargo test -p motlie-tmux --test integration -- --nocapture 2>&1)
+  ⎿      Finished `test` profile [unoptimized + debuginfo] target(s) in 0.0
+     9s
+          Running tests/integration.rs (target/debug/deps/integration-9a0ab
+     … +7 lines (ctrl+o to expand)
+
+● The integration test passes for me. Can you share the error output you're
+  seeing? It may be an environment issue (e.g. tmux not on PATH, or a leftover
+  session from a previous run).
+
+❯ Add an issue comment to PR 67 to tell codex how to run this test.  Codex is   
+unable to verify                                                                
+
+● Bash(gh api repos/chungers/motlie/issues/67/comments \
+        -f body="$(cat <<'EOF'…)
+  ⎿  {
+       "url": "https://api.github.com/repos/chungers/motlie/issues/comments
+     /4036827712",
+     … +37 lines (ctrl+o to expand)
+
+● Posted comment with instructions on prerequisites (tmux on PATH), how to run
+  the test, and how to clean up leftover sessions from crashed runs.
+
+❯ PR 67 merged.  sync local and cleanup                                         
+
+● Bash(git fetch origin 2>&1)
+  ⎿  From https://github.com/chungers/motlie
+        f930f37..95d26ca  feature/tmux -> origin/feature/tmux
+
+● Bash(git checkout feature/tmux 2>&1 && git pull origin feature/tmux 2>&1)
+  ⎿  Switched to branch 'feature/tmux'
+     D  docs/internal/CLAUDE.md
+     Your branch is behind 'origin/feature/tmux' by 4 commits, and can be f
+     … +13 lines (ctrl+o to expand)
+
+● Bash(git branch -d feature/tmux-ssh-transport 2>&1)
+  ⎿  Deleted branch feature/tmux-ssh-transport (was ac4bf0c).
+
+● Bash(git push origin --delete feature/tmux-ssh-transport 2>&1)
+  ⎿  Error: Exit code 1
+     error: unable to delete 'feature/tmux-ssh-transport': remote ref does not 
+     exist
+     error: failed to push some refs to 'https://github.com/chungers/motlie'
+
+● Remote branch already cleaned up (likely by the merge). Local is synced:
+
+  - feature/tmux updated to 95d26ca (fast-forward, 4 commits from PR #67)
+  - Local branch feature/tmux-ssh-transport deleted
+
+❯ based on current codebase and PLAN and DESIGN, document the usage of the api  
+in docs/API.md.  you must show accurate example usage code snippets for each    
+functional requirements in DESIGN and implemented in code per PLAN so far.  Lay 
+ out the doc logically and progressively so another human or agent can quickly  
+learn to use rhis library.  Include short summary introduction for each area    
+and include setup neccesary / assumed by the code example before the code       
+example, then describe expected outcome and effects in code comments or text    
+description                                                                     
+
+● Read 10 files (ctrl+o to expand)
+
+● Now let me read the remaining part of host.rs (Target methods) to get the full
+   API surface.
+
+● Read 1 file (ctrl+o to expand)
+
+● Now I have a complete understanding of the API surface. Let me also read the
+  transport.rs SshConfig/SshTransport section one more time for the SSH API.
+
+  Now I have everything I need. Let me write the API.md.
+
+● Write(libs/tmux/docs/API.md)
+  ⎿  Wrote 723 lines to libs/tmux/docs/API.md
+       1 # motlie-tmux API Reference
+       2 
+       3 Practical usage guide for the `motlie-tmux` library. Each sectio
+         n covers one
+       4 functional area with setup, code examples, and expected outcomes
+         . Examples are
+       5 complete enough to compile given the `Cargo.toml` dependency and
+          the shown
+       6 `use` imports.
+       7 
+       8 **Cargo.toml dependency**:
+       9 
+      10 ```toml
+     … +713 lines (ctrl+o to expand)
+
+● Let me verify it renders correctly by checking it compiles against the actual
+  exports.
+
+● Read 1 file (ctrl+o to expand)
+
+● Created libs/tmux/docs/API.md. It covers all implemented functionality across
+  Phases 1.0–1.9b and 2a.1:
+
+  1. Host Handle — local, custom socket, SSH
+  2. Session Lifecycle — create, kill, rename
+  3. Discovery — list sessions/windows/panes/clients
+  4. Target Navigation — hierarchy traversal, TargetSpec, identity accessors
+  5. Sending Input — literal text, key sequences with {Enter}/{C-c} escapes,
+  builder API
+  6. Capturing Output — visible, with history, bulk capture
+  7. Structured exec — sentinel-based command execution with stdout + exit code
+  8. Advanced Capture — Raw/ScreenStable/PlainText modes, fidelity metadata,
+  reflow detection
+  9. Scrollback Sampling — LastLines, Until, LastLinesUntil queries with overlap
+   dedup
+  10. Geometry/Reflow — pane geometry, client snapshots, compare for instability
+  11. History Limit — global and per-session, timing constraints
+  12. SSH Transport — SshConfig builder, host key policies, ssh-agent auth
+  13. Mock Transport — canned responses for unit testing
+
+  Each section includes setup, code snippets, and expected outcomes matching the
+   actual API signatures.
+
+✻ Sautéed for 3m 7s
+
+❯ reorganize a bit based on different transports first then common behaviors    
+once transport is set up.  then you call easily validate and call out           
+differences in common functionality by transport (if any).  call out            
+inconsistencies or surprises clearly in the doc but in a surgical way and make  
+it easy to identify you and create issues from the content.                     
+
+● Read 1 file (ctrl+o to expand)
+
+● Now let me study the transport implementations more carefully for
+  inconsistencies before rewriting.
+
+● Read 1 file (ctrl+o to expand)
+
+● Now I have a clear picture of all the inconsistencies. Let me rewrite the doc.
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ while important to call out inconsistencies, the focus is comprehensive       
+documentation that first builds on foundation (the impls of a trait, eg.        
+transport), then common functionality or behavior (the trait, or common         
+behavior above it, eg capture).  Inconsistencies should intersperse as the doc  
+organizes based on the principle.                                               
+
+● Write(libs/tmux/docs/API.md)
+  ⎿  Added 597 lines, removed 369 lines
+      1  # motlie-tmux API Reference
+      2  
+      3 -Practical usage guide for the `motlie-tmux` library. Each sectio
+        -n covers one                                                    
+      4 -functional area with setup, code examples, and expected outcomes
+        -. Examples are                                                  
+      5 -complete enough to compile given the `Cargo.toml` dependency and
+        - the shown                                                      
+      6 -`use` imports.                                                  
+      3 +Practical usage guide for the `motlie-tmux` library. The documen
+        +t is organized                                                  
+      4 +foundation-up: transports first, then the common API layer built
+        + on top.                                                        
+      5 +Inconsistencies and surprises are called out inline where they a
+        +rise, marked                                                    
+      6 +with **`@claude NOTE`** for easy grep and issue creation.       
+      7  
+      8  **Cargo.toml dependency**:
+      9  
+     ...
+       19  
+       20  ## Table of Contents
+       21  
+       22 -1. [Host Handle — Connecting to tmux](#1-host-handle--connecti
+          -ng-to-tmux)                                                   
+       23 -2. [Session Lifecycle](#2-session-lifecycle)                  
+       24 -3. [Discovery — Listing Sessions, Windows, Panes](#3-discovery
+          ---listing-sessions-windows-panes)                             
+       25 -4. [Target Navigation](#4-target-navigation)                  
+       26 -5. [Sending Input](#5-sending-input)                          
+       27 -6. [Capturing Output](#6-capturing-output)                    
+       28 -7. [Structured Command Execution (exec)](#7-structured-command
+          --execution-exec)                                              
+       29 -8. [Advanced Capture — Modes, Fidelity, Overlap](#8-advanced-c
+          -apture--modes-fidelity-overlap)                               
+       30 -9. [Scrollback Sampling](#9-scrollback-sampling)              
+       31 -10. [Geometry and Reflow Detection](#10-geometry-and-reflow-de
+          -tection)                                                      
+       32 -11. [History Limit Management](#11-history-limit-management)  
+       33 -12. [SSH Transport](#12-ssh-transport)                        
+       34 -13. [Mock Transport for Testing](#13-mock-transport-for-testin
+          -g)                                                            
+       22 +**Part I — Transport Layer**                                  
+       23 +1. [Transport Overview](#1-transport-overview)                
+       24 +2. [LocalTransport](#2-localtransport)                        
+       25 +3. [SshTransport](#3-sshtransport)                            
+       26 +4. [MockTransport](#4-mocktransport)                          
+       27 +5. [Transport Comparison](#5-transport-comparison)            
+       28  
+       29 +**Part II — Common API (transport-agnostic)**                 
+       30 +6. [HostHandle](#6-hosthandle)                                
+       31 +7. [Session Lifecycle](#7-session-lifecycle)                  
+       32 +8. [Discovery](#8-discovery)                                  
+       33 +9. [Target and Navigation](#9-target-and-navigation)          
+       34 +10. [Sending Input](#10-sending-input)                        
+       35 +11. [Capturing Output](#11-capturing-output)                  
+       36 +12. [Structured Command Execution](#12-structured-command-exec
+          +ution)                                                        
+       37 +13. [Advanced Capture — Modes and Fidelity](#13-advanced-captu
+          +re--modes-and-fidelity)                                       
+       38 +14. [Scrollback Sampling](#14-scrollback-sampling)            
+       39 +15. [Geometry and Reflow Detection](#15-geometry-and-reflow-de
+          +tection)                                                      
+       40 +16. [History Limit Management](#16-history-limit-management)  
+       41 +                                                              
+       42 +**Part III — Reference**                                      
+       43 +17. [Normalization Utilities](#17-normalization-utilities)    
+       44 +18. [Type Quick Reference](#18-type-quick-reference)          
+       45 +                                                              
+       46  ---
+       47  
+       38 -## 1. Host Handle — Connecting to tmux                        
+       48 +# Part I — Transport Layer                                    
+       49  
+       40 -`HostHandle` is the entry point. It represents a connection to
+          - a tmux server                                                
+       41 -(local or remote). All session and target operations go throug
+          -h it.                                                         
+       50 +The transport layer executes shell commands either locally or 
+          +remotely.                                                     
+       51 +All higher-level tmux operations (discovery, capture, control)
+          + are built                                                    
+       52 +on `TransportKind::exec()`, which dispatches statically to the
+          + concrete                                                     
+       53 +transport — no vtable, no dynamic dispatch (DC6).             
+       54  
+       43 -### Localhost                                                 
+       55 +```rust                                                       
+       56 +// TransportKind is the static-dispatch enum:                 
+       57 +pub enum TransportKind {                                      
+       58 +    Local(LocalTransport),                                    
+       59 +    Mock(MockTransport),                                      
+       60 +    Ssh(SshTransport),                                        
+       61 +}                                                             
+       62 +```                                                           
+       63  
+       64 +Once a `HostHandle` is constructed with a transport, the entir
+          +e API above                                                   
+       65 +it is identical regardless of which variant is used. The secti
+          +ons below                                                     
+       66 +cover each transport's setup and characteristics.             
+       67 +                                                              
+       68 +---                                                           
+       69 +                                                              
+       70 +## 2. LocalTransport                                          
+       71 +                                                              
+       72 +Executes commands via `sh -c` subprocesses on the local machin
+          +e. This is                                                    
+       73 +the default and simplest path.                                
+       74 +                                                              
+       75 +### Quick start                                               
+       76 +                                                              
+       77  ```rust
+       78  use motlie_tmux::HostHandle;
+       79  
+       80 +// Convenience constructor — LocalTransport with 10s timeout, 
+          +default socket                                                
+       81  let host = HostHandle::local();
+       49 -// `host` is now connected to the local tmux server (default s
+          -ocket).                                                       
+       50 -// No tmux server needs to be running yet — it starts on first
+          - session creation.                                            
+       82  ```
+       83  
+       84 +### Custom timeout                                            
+       85 +                                                              
+       86 +```rust                                                       
+       87 +use motlie_tmux::HostHandle;                                  
+       88 +use motlie_tmux::transport::{TransportKind, LocalTransport};  
+       89 +                                                              
+       90 +let transport = LocalTransport::with_timeout(std::time::Durati
+          +on::from_secs(30));                                           
+       91 +let host = HostHandle::new(TransportKind::Local(transport), No
+          +ne);                                                          
+       92 +```                                                           
+       93 +                                                              
+       94 +> **`@claude NOTE`**: `HostHandle::local()` hardcodes a 10s tr
+          +ansport timeout.                                              
+       95 +> There is no builder or setter to change it — you must drop t
+          +o                                                             
+       96 +> `HostHandle::new()` + `LocalTransport::with_timeout()`. Cons
+          +ider adding                                                   
+       97 +> `HostHandle::local_with_timeout()` or a builder on `HostHand
+          +le`.                                                          
+       98 +                                                              
+       99  ### Custom tmux socket
+      100  
+      101  ```rust
+     ...
+      115  );
+      116  ```
+      117  
+      118 +### Characteristics                                           
+      119 +                                                              
+      120 +- **Timeout**: Configurable per-transport, default 10s. Govern
+          +s each individual                                             
+      121 +  `sh -c` subprocess (tmux commands like `list-sessions`, `cap
+          +ture-pane`, etc.).                                            
+      122 +- **Error messages**: Include stderr from the failed subproces
+          +s.                                                            
+      123 +- **No server required**: tmux server starts automatically on 
+          +first session creation.                                       
+      124 +                                                              
+      125  ---
+      126  
+       74 -## 2. Session Lifecycle                                       
+      127 +## 3. SshTransport                                            
+      128  
+       76 -### Create a session                                          
+      129 +Executes commands on a remote host over SSH using `russh` 0.46
+          +.                                                             
+      130 +Authentication is via ssh-agent only.                         
+      131  
+      132 +### Prerequisites                                             
+      133 +                                                              
+      134 +- `ssh-agent` running with `SSH_AUTH_SOCK` exported           
+      135 +- Keys loaded: `ssh-add ~/.ssh/id_ed25519`                    
+      136 +- Remote host in `~/.ssh/known_hosts` (for `Verify` policy)   
+      137 +                                                              
+      138 +### Connect                                                   
+      139 +                                                              
+      140  ```rust
+      141 +use motlie_tmux::{HostHandle, SshTransport, SshConfig, HostKey
+          +Policy};                                                      
+      142 +use motlie_tmux::transport::TransportKind;                    
+      143 +                                                              
+      144 +let config = SshConfig::new("server.example.com", "deploy")   
+      145 +    .with_port(22)                                          //
+          + default: 22                                                  
+      146 +    .with_host_key_policy(HostKeyPolicy::Verify)            //
+          + default: Verify                                              
+      147 +    .with_timeout(std::time::Duration::from_secs(10))       //
+          + default: 10s                                                 
+      148 +    .with_keepalive(Some(std::time::Duration::from_secs(30)));
+          + // default: 30s                                              
+      149 +                                                              
+      150 +let ssh = SshTransport::connect(config).await?;               
+      151 +let host = HostHandle::new(TransportKind::Ssh(ssh), None);    
+      152 +                                                              
+      153 +// From here, `host` is used identically to a local HostHandle
+          +.                                                             
+      154 +let sessions = host.list_sessions().await?;                   
+      155 +```                                                           
+      156 +                                                              
+      157 +### Host key policies                                         
+      158 +                                                              
+      159 +```rust                                                       
+      160 +// Verify (default) — host must exist in ~/.ssh/known_hosts   
+      161 +SshConfig::new("host", "user")                                
+      162 +    .with_host_key_policy(HostKeyPolicy::Verify);             
+      163 +                                                              
+      164 +// Trust-on-first-use — accept + persist on first connect, rej
+          +ect on mismatch                                               
+      165 +SshConfig::new("host", "user")                                
+      166 +    .with_host_key_policy(HostKeyPolicy::TrustFirstUse);      
+      167 +                                                              
+      168 +// Insecure — accept all keys (logs warning). Dev/testing only
+          +.                                                             
+      169 +SshConfig::new("host", "user")                                
+      170 +    .with_host_key_policy(HostKeyPolicy::Insecure);           
+      171 +```                                                           
+      172 +                                                              
+      173 +> **`@claude NOTE`**: `TrustFirstUse` is fail-closed — if pers
+          +isting the                                                    
+      174 +> learned key to `~/.ssh/known_hosts` fails (e.g. file not wri
+          +table), the                                                   
+      175 +> connection is **rejected**. This is intentional but may surp
+          +rise users                                                    
+      176 +> who expect TOFU to "just work". The error is logged at `erro
+          +r` level                                                      
+      177 +> with an actionable message ("check that ~/.ssh/known_hosts i
+          +s writable").                                                 
+      178 +                                                              
+      179 +### Connection status                                         
+      180 +                                                              
+      181 +```rust                                                       
+      182 +// Only available on the SshTransport directly, not through Ho
+          +stHandle.                                                     
+      183 +// You must retain a reference to the SshTransport if you need
+          + this.                                                        
+      184 +if ssh.is_closed() {                                          
+      185 +    println!("SSH connection lost");                          
+      186 +}                                                             
+      187 +```                                                           
+      188 +                                                              
+      189 +> **`@claude NOTE`**: `is_closed()` is only accessible on `Ssh
+          +Transport`,                                                   
+      190 +> not through `HostHandle` or `TransportKind`. There is no tra
+          +nsport-agnostic                                               
+      191 +> way to check connection health. `LocalTransport` has no equi
+          +valent (always                                                
+      192 +> "connected"). Consider adding `TransportKind::is_closed()` t
+          +hat returns                                                   
+      193 +> `false` for Local/Mock.                                     
+      194 +                                                              
+      195 +### Characteristics                                           
+      196 +                                                              
+      197 +- **Timeout**: `SshConfig::timeout` governs connection, authen
+          +tication, and                                                 
+      198 +  each `exec()` call (channel open + exec + output collection 
+          +are all inside                                                
+      199 +  one `tokio::time::timeout` boundary).                       
+      200 +- **Keepalive**: `SshConfig::keepalive_interval` sends SSH kee
+          +palives.                                                      
+      201 +  `None` disables. Local/Mock have no equivalent (not applicab
+          +le).                                                          
+      202 +- **Concurrency**: The SSH handle mutex is held only during   
+      203 +  `channel_open_session()`, not for the full command lifetime.
+          + Multiple                                                     
+      204 +  concurrent `exec()` calls on the same connection are safe.  
+      205 +- **Authentication**: ssh-agent only. Key file or password aut
+          +h is not supported.                                           
+      206 +  Error messages are actionable (OC3): "is SSH_AUTH_SOCK set?"
+          +,                                                             
+      207 +  "Add a key with: ssh-add ~/.ssh/id_ed25519".                
+      208 +                                                              
+      209 +---                                                           
+      210 +                                                              
+      211 +## 4. MockTransport                                           
+      212 +                                                              
+      213 +Canned responses for unit testing. No real commands are execut
+          +ed.                                                           
+      214 +                                                              
+      215 +### Setup                                                     
+      216 +                                                              
+      217 +```rust                                                       
+      218  use motlie_tmux::HostHandle;
+      219 +use motlie_tmux::transport::{TransportKind, MockTransport};   
+      220  
+      221 +let mock = MockTransport::new()                               
+      222 +    .with_response("list-sessions", "build\t$0\t0\t1\t2\t\n") 
+      223 +    .with_response("capture-pane", "hello world\n")           
+      224 +    .with_default("");  // fallback for unmatched commands    
+      225 +                                                              
+      226 +let host = HostHandle::new(TransportKind::Mock(mock), None);  
+      227 +let sessions = host.list_sessions().await?;                   
+      228 +assert_eq!(sessions[0].name, "build");                        
+      229 +```                                                           
+      230 +                                                              
+      231 +### Response matching                                         
+      232 +                                                              
+      233 +`with_response(pattern, response)` matches when the executed c
+          +ommand                                                        
+      234 +**contains** the pattern as a substring. Multiple responses fo
+          +r the same                                                    
+      235 +pattern are returned in FIFO order; when exhausted, the last o
+          +ne repeats.                                                   
+      236 +                                                              
+      237 +```rust                                                       
+      238 +let mock = MockTransport::new()                               
+      239 +    // First call containing "list-sessions" returns this:    
+      240 +    .with_response("list-sessions", "sess1\t$0\t0\t0\t1\t\n") 
+      241 +    // Second and subsequent calls return this:               
+      242 +    .with_response("list-sessions", "sess1\t$0\t0\t0\t1\t\nses
+          +s2\t$1\t0\t0\t1\t\n")                                         
+      243 +    .with_default("");                                        
+      244 +```                                                           
+      245 +                                                              
+      246 +> **`@claude NOTE`**: Pattern matching iterates the internal H
+          +ashMap, so                                                    
+      247 +> if a command matches multiple registered patterns, which one
+          + wins is                                                      
+      248 +> **non-deterministic** (HashMap iteration order). Use specifi
+          +c-enough                                                      
+      249 +> patterns to avoid ambiguity. For example, prefer `"list-sess
+          +ions"` over                                                   
+      250 +> `"list"` if you also have `"list-panes"` registered.        
+      251 +                                                              
+      252 +### Convenience helper for tests                              
+      253 +                                                              
+      254 +```rust                                                       
+      255 +fn mock_host(mock: MockTransport) -> HostHandle {             
+      256 +    HostHandle::new(TransportKind::Mock(mock), None)          
+      257 +}                                                             
+      258 +                                                              
+      259 +#[tokio::test]                                                
+      260 +async fn test_session_lifecycle() {                           
+      261 +    let mock = MockTransport::new()                           
+      262 +        .with_default("")                                     
+      263 +        .with_response("list-sessions", "test\t$0\t0\t0\t1\t\n
+          +");                                                           
+      264 +    let host = mock_host(mock);                               
+      265 +    let target = host.create_session("test", None, None).await
+          +.unwrap();                                                    
+      266 +    assert_eq!(target.session_name(), "test");                
+      267 +}                                                             
+      268 +```                                                           
+      269 +                                                              
+      270 +### Characteristics                                           
+      271 +                                                              
+      272 +- **No timeout**: Responses are instant. No timeout configurat
+          +ion.                                                          
+      273 +- **Never errors on exec**: Always returns `Ok(response)`. To 
+          +test error                                                    
+      274 +  paths, you must use `LocalTransport` or construct errors at 
+          +a higher level.                                               
+      275 +- **Shell channel**: `open_shell()` returns a `MockShellChanne
+          +l` with empty                                                 
+      276 +  data that immediately yields `Eof` on read.                 
+      277 +                                                              
+      278 +> **`@claude NOTE`**: There is no way to make `MockTransport::
+          +exec()` return                                                
+      279 +> an `Err`. This means error handling paths in discovery, capt
+          +ure, and                                                      
+      280 +> control code cannot be unit-tested with mocks alone. Conside
+          +r adding                                                      
+      281 +> `with_error(pattern, message)` to `MockTransport`.          
+      282 +                                                              
+      283 +---                                                           
+      284 +                                                              
+      285 +## 5. Transport Comparison                                    
+      286 +                                                              
+      287 +| Aspect | Local | SSH | Mock |                               
+      288 +|--------|-------|-----|------|                               
+      289 +| Timeout | 10s default, configurable | 10s default, configura
+          +ble | None |                                                  
+      290 +| Error includes stderr | Yes | Yes | N/A (never errors) |    
+      291 +| `is_closed()` | Not available | Available on `SshTransport` 
+          +| Not available |                                             
+      292 +| Keepalive | N/A | Configurable, default 30s | N/A |         
+      293 +| `open_shell()` | Spawns `sh` | PTY `xterm` 80x24 + shell | E
+          +mpty data, immediate Eof |                                    
+      294 +| Auth | N/A | ssh-agent only | N/A |                         
+      295 +                                                              
+      296 +> **`@claude NOTE`**: `SshTransport::open_shell()` requests a 
+          +PTY at fixed                                                  
+      297 +> 80x24. There is no API to specify dimensions. This may matte
+          +r for                                                         
+      298 +> applications that need a specific terminal size for the remo
+          +te shell.                                                     
+      299 +                                                              
+      300 +---                                                           
+      301 +                                                              
+      302 +# Part II — Common API (transport-agnostic)                   
+      303 +                                                              
+      304 +Everything below works identically across Local, SSH, and Mock
+          + transports.                                                  
+      305 +The transport is selected once at `HostHandle` construction an
+          +d is invisible                                                
+      306 +from that point forward.                                      
+      307 +                                                              
+      308 +---                                                           
+      309 +                                                              
+      310 +## 6. HostHandle                                              
+      311 +                                                              
+      312 +`HostHandle` is the entry point for all tmux operations on a h
+          +ost.                                                          
+      313 +It wraps `Arc<...>` and is cheaply `Clone`able — multiple hand
+          +les share                                                     
+      314 +the same transport and exec lock map.                         
+      315 +                                                              
+      316 +```rust                                                       
+      317 +use motlie_tmux::HostHandle;                                  
+      318 +                                                              
+      319 +// Localhost (most common)                                    
+      320  let host = HostHandle::local();
+      321  
+       83 -// Minimal — creates a detached session with default shell    
+      322 +// With explicit transport + socket (any transport)           
+      323 +use motlie_tmux::transport::{TransportKind, LocalTransport};  
+      324 +use motlie_tmux::TmuxSocket;                                  
+      325 +                                                              
+      326 +let host = HostHandle::new(                                   
+      327 +    TransportKind::Local(LocalTransport::new()),              
+      328 +    Some(TmuxSocket::Name("myapp".into())),                   
+      329 +);                                                            
+      330 +                                                              
+      331 +// HostHandle is Clone — both handles share state             
+      332 +let host2 = host.clone();                                     
+      333 +```                                                           
+      334 +                                                              
+      335 +---                                                           
+      336 +                                                              
+      337 +## 7. Session Lifecycle                                       
+      338 +                                                              
+      339 +### Create                                                    
+      340 +                                                              
+      341 +```rust                                                       
+      342 +// Minimal — detached session with default shell              
+      343  let target = host.create_session("build", None, None).await?;
+       85 -// target.level() == TargetLevel::Session                     
+       86 -// target.session_name() == "build"                           
+      344 +// Returns a Target at session level                          
+      345  
+      346  // With named window and startup command
+      347  let target = host.create_session("dev", Some("editor"), Some("
+           vim")).await?;
+       90 -// Creates session "dev" with window named "editor" running vi
+          -m                                                             
+      348  ```
+      349  
+       93 -`create_session` returns a `Target` at session level.         
+      350 +### Kill                                                      
+      351  
+       95 -### Kill a session                                            
+       96 -                                                              
+      352  ```rust
+       98 -// Using the Target returned from create_session or session() 
+      353  target.kill().await?;
+      100 -// The tmux session is destroyed.                             
+      354 +// Works at any level: kills session, window, or pane dependin
+          +g on target level.                                            
+      355  ```
+      356  
+      103 -### Rename a session                                          
+      357 +### Rename                                                    
+      358  
+      359  ```rust
+      360  target.rename("new_name").await?;
+      107 -// The session is now "new_name" in tmux.                     
+      108 -// Note: the Target still holds the old name internally.      
+      109 -// Retrieve a fresh Target with host.session("new_name") if ne
+          -eded.                                                         
+      361  ```
+      362  
+      363 +> **`@claude NOTE`**: `rename()` mutates tmux state but does *
+          +*not** update                                                 
+      364 +> the `Target`'s internal address. After renaming, the `Target
+          +` holds a stale                                               
+      365 +> name. Subsequent operations using that `Target` will fail be
+          +cause tmux                                                    
+      366 +> can't find the old name. You must obtain a fresh `Target`:  
+      367 +> ```rust                                                     
+      368 +> target.rename("new_name").await?;                           
+      369 +> let target = host.session("new_name").await?.unwrap(); // fr
+          +esh handle                                                    
+      370 +> ```                                                         
+      371 +> Consider having `rename()` return a new `Target` with the up
+          +dated address,                                                
+      372 +> or making `Target` internally mutable.                      
+      373 +                                                              
+      374 +> **`@claude NOTE`**: `rename()` at pane level returns `Err("c
+          +annot rename a pane")`.                                       
+      375 +> This is a tmux limitation — tmux has no `rename-pane` comman
+          +d. The error is                                               
+      376 +> clear, but it would be better to make this a compile-time re
+          +striction or at                                               
+      377 +> least document the asymmetry in the `Target::rename()` doc c
+          +omment.                                                       
+      378 +                                                              
+      379  ---
+      380  
+      114 -## 3. Discovery — Listing Sessions, Windows, Panes            
+      381 +## 8. Discovery                                               
+      382  
+      383 +All discovery methods return empty `Vec`s (not errors) when th
+          +ere is no                                                     
+      384 +tmux server running or no entities exist.                     
+      385 +                                                              
+      386  ### List sessions
+      387  
+      388  ```rust
+      119 -use motlie_tmux::HostHandle;                                  
+      120 -                                                              
+      121 -let host = HostHandle::local();                               
+      389  let sessions = host.list_sessions().await?;
+      123 -                                                              
+      390  for s in &sessions {
+      391      println!("{} (id={}, windows={}, attached={})",
+      392          s.name, s.id, s.window_count, s.attached);
+      393  }
+      128 -// Returns Vec<SessionInfo>. Empty vec if no tmux server is ru
+          -nning.                                                        
+      394  ```
+      395  
+      131 -### List clients (attached terminals)                         
+      396 +### Find a session by name                                    
+      397  
+      398  ```rust
+      134 -let clients = host.list_clients().await?;                     
+      135 -for c in &clients {                                           
+      136 -    println!("{}x{} attached to session '{}'", c.width, c.heig
+          -ht, c.session);                                               
+      137 -}                                                             
+      138 -// Returns Vec<ClientInfo>. Useful for geometry/reflow detecti
+          -on.                                                           
+      139 -```                                                           
+      140 -                                                              
+      141 -### Find a specific session                                   
+      142 -                                                              
+      143 -```rust                                                       
+      144 -let target = host.session("build").await?;                    
+      145 -match target {                                                
+      399 +match host.session("build").await? {                          
+      400      Some(t) => println!("found: {}", t.target_string()),
+      147 -    None => println!("session 'build' does not exist"),       
+      401 +    None    => println!("not found"),                         
+      402  }
+      403  ```
+      404  
+      151 -### Find a target by spec                                     
+      405 +### Find by TargetSpec                                        
+      406  
+      407  ```rust
+      408  use motlie_tmux::TargetSpec;
+      409  
+      156 -// Session level                                              
+      410 +// Session only                                               
+      411  let t = host.target(&TargetSpec::session("build")).await?;
+      412  
+      159 -// Session + window (by index)                                
+      413 +// Session + window (by index or name)                        
+      414  let t = host.target(&TargetSpec::session("build").window(0)).a
+           wait?;
+      161 -                                                              
+      162 -// Session + window (by name)                                 
+      415  let t = host.target(&TargetSpec::session("build").window_name(
+           "editor")).await?;
+      416  
+      417  // Session + window + pane
+      418  let t = host.target(&TargetSpec::session("build").window(0).pa
+           ne(1)).await?;
+      419  
+      168 -// Parse from a string                                        
+      169 -let spec = TargetSpec::parse("build:0.1")?;                   
+      170 -let t = host.target(&spec).await?;                            
+      171 -// Each returns Option<Target> — None if the entity doesn't ex
+          -ist.                                                          
+      420 +// Parse from string                                          
+      421 +let t = host.target(&TargetSpec::parse("build:0.1")?).await?; 
+      422 +// Returns Option<Target> — None if the entity doesn't exist. 
+      423  ```
+      424  
+      425 +> **`@claude NOTE`**: `TargetSpec::pane()` **panics** (not `Re
+          +sult`) if                                                     
+      426 +> `.window()` was not called first. This enforces the tmux hie
+          +rarchy                                                        
+      427 +> (pane requires window context), but a panic is a surprising 
+          +contract                                                      
+      428 +> for a builder API. Consider returning `Result` instead.     
+      429 +> ```rust                                                     
+      430 +> // This panics at runtime:                                  
+      431 +> let _ = TargetSpec::session("s").pane(0);                   
+      432 +> // Must do:                                                 
+      433 +> let _ = TargetSpec::session("s").window(0).pane(0);         
+      434 +> ```                                                         
+      435 +                                                              
+      436 +### List attached clients                                     
+      437 +                                                              
+      438 +```rust                                                       
+      439 +let clients = host.list_clients().await?;                     
+      440 +for c in &clients {                                           
+      441 +    println!("{}x{} on '{}'", c.width, c.height, c.session);  
+      442 +}                                                             
+      443 +// Useful for geometry/reflow detection (section 15).         
+      444 +```                                                           
+      445 +                                                              
+      446  ---
+      447  
+      176 -## 4. Target Navigation                                       
+      448 +## 9. Target and Navigation                                   
+      449  
+      178 -`Target` is a unified handle at any hierarchy level (session, 
+          -window, or pane).                                             
+      179 -You navigate down the hierarchy with `children()`, `window()`,
+          - and `pane()`.                                                
+      450 +`Target` is a unified handle at any hierarchy level — session,
+          + window, or pane.                                             
+      451 +It is **not `Clone`**; to share, use `HostHandle::session()` o
+          +r                                                             
+      452 +`HostHandle::target()` to obtain separate handles.            
+      453  
+      454 +### Identity                                                  
+      455 +                                                              
+      456  ```rust
+      182 -// Assume: target is a session-level Target                   
+      183 -assert_eq!(target.level(), TargetLevel::Session);             
+      457 +target.level();          // TargetLevel::Session | Window | Pa
+          +ne                                                            
+      458 +target.target_string();  // "build", "build:0", "build:0.1"   
+      459 +target.session_name();   // available at every level          
+      460 +target.session_info();   // Some(&SessionInfo) — session level
+          + only                                                         
+      461 +target.window_info();    // Some(&WindowInfo) — window level o
+          +nly                                                           
+      462 +target.pane_address();   // Some(&PaneAddress) — pane level on
+          +ly                                                            
+      463 +target.address();        // &TargetAddress enum               
+      464 +```                                                           
+      465  
+      185 -// List children (windows of this session)                    
+      466 +### Navigate down the hierarchy                               
+      467 +                                                              
+      468 +```rust                                                       
+      469 +// Session → windows                                          
+      470  let windows = target.children().await?;
+      187 -for w in &windows {                                           
+      188 -    println!("window: {}", w.target_string()); // e.g. "build:
+          -0"                                                            
+      189 -}                                                             
+      471  
+      191 -// Navigate to a specific window by index                     
+      192 -let win = target.window(0).await?; // Option<Target> at window
+          - level                                                        
+      472 +// Session → window by index                                  
+      473 +let win = target.window(0).await?; // Option<Target>          
+      474  
+      194 -// Navigate to a specific pane from session level             
+      195 -// Resolves via the active window, then filters by pane index 
+      196 -let pane = target.pane(0).await?; // Option<Target> at pane le
+          -vel                                                           
+      475 +// Session or window → pane by index                          
+      476 +let pane = target.pane(0).await?;  // Option<Target>          
+      477  
+      198 -// From window level, list panes                              
+      199 -if let Some(w) = win {                                        
+      200 -    let panes = w.children().await?;                          
+      201 -    for p in &panes {                                         
+      202 -        println!("pane: {} (id={})",                          
+      203 -            p.target_string(),                                
+      204 -            p.pane_address().unwrap().pane_id);               
+      205 -    }                                                         
+      206 -}                                                             
+      207 -                                                              
+      208 -// Direct navigation by PaneAddress                           
+      209 -use motlie_tmux::PaneAddress;                                 
+      210 -let addr = PaneAddress::parse("%5", "build:0.1")?;            
+      211 -let pane_target = target.pane_by_address(&addr);              
+      212 -// pane_target.level() == TargetLevel::Pane                   
+      478 +// Pane level: children() returns empty Vec                   
+      479  ```
+      480  
+      215 -### Identity accessors                                        
+      481 +> **`@claude NOTE`**: `target.pane(index)` from **session leve
+          +l** resolves                                                  
+      482 +> via the **active window** at call time. If the active window
+          + changes                                                      
+      483 +> between calls (e.g. another client switches windows), the sa
+          +me                                                            
+      484 +> `target.pane(0)` call returns a different pane. For determin
+          +istic                                                         
+      485 +> targeting, navigate explicitly: `target.window(0).pane(0)`. 
+      486  
+      487 +### Direct pane targeting                                     
+      488 +                                                              
+      489  ```rust
+      218 -target.level();             // TargetLevel::Session | Window |
+          - Pane                                                         
+      219 -target.target_string();     // tmux target string: "build", "b
+          -uild:0", "build:0.1"                                          
+      220 -target.session_name();      // available at any level         
+      221 -target.session_info();      // Some(&SessionInfo) at session l
+          -evel, None otherwise                                          
+      222 -target.window_info();       // Some(&WindowInfo) at window lev
+          -el, None otherwise                                            
+      223 -target.pane_address();      // Some(&PaneAddress) at pane leve
+          -l, None otherwise                                             
+      224 -target.address();           // &TargetAddress enum            
+      490 +use motlie_tmux::PaneAddress;                                 
+      491 +                                                              
+      492 +let addr = PaneAddress::parse("%5", "build:0.1")?;            
+      493 +let pane = target.pane_by_address(&addr);                     
+      494 +// Immediate — no tmux query. Creates a Target from the addres
+          +s.                                                            
+      495  ```
+      496  
+      497  ---
+      498  
+      229 -## 5. Sending Input                                           
+      499 +## 10. Sending Input                                          
+      500  
+      231 -### Send literal text                                         
+      501 +### Literal text                                              
+      502  
+      503  ```rust
+      234 -// Type text into the pane (no Enter key appended)            
+      504  target.send_text("echo hello").await?;
+      236 -// The text appears in the pane as if typed, but the command i
+          -s not executed                                                
+      237 -// until Enter is sent.                                       
+      505 +// Types the text into the pane. Does NOT append Enter.       
+      506  ```
+      507  
+      240 -### Send key sequences                                        
+      508 +### Key sequences                                             
+      509  
+      510  ```rust
+      243 -use motlie_tmux::KeySequence;                                 
+      511 +use motlie_tmux::{KeySequence, SpecialKey};                   
+      512  
+      245 -// Parse a string with {SpecialKey} escapes                   
+      513 +// Parse with {SpecialKey} escapes                            
+      514  let keys = KeySequence::parse("echo hello{Enter}")?;
+      515  target.send_keys(&keys).await?;
+      248 -// Types "echo hello" then presses Enter — the command execute
+          -s.                                                            
+      516  
+      250 -// Common special keys: {Enter}, {Tab}, {Escape}, {Up}, {Down}
+          -, {Left}, {Right},                                            
+      251 -// {C-c}, {C-d}, {C-z}, {C-l}, {Space}, {BSpace}              
+      252 -                                                              
+      517  // Builder API
+      254 -let keys = KeySequence::literal("ls -la")                     
+      255 -    .then_enter();                                            
+      518 +let keys = KeySequence::literal("ls -la").then_enter();       
+      519  target.send_keys(&keys).await?;
+      520  
+      258 -// Multiple special keys                                      
+      259 -let keys = KeySequence::parse("{C-c}{C-c}")?; // Send Ctrl-C t
+          -wice                                                          
+      260 -target.send_keys(&keys).await?;                               
+      261 -                                                              
+      262 -// Chain specials and literals                                
+      521 +// Chain multiple keys                                        
+      522  let keys = KeySequence::literal("search term")
+      523      .then_key(SpecialKey::Enter)
+      524      .then_key(SpecialKey::CtrlC);
+      525  target.send_keys(&keys).await?;
+      526 +                                                              
+      527 +// Multiple special keys                                      
+      528 +let keys = KeySequence::parse("{C-c}{C-c}")?;                 
+      529 +target.send_keys(&keys).await?;                               
+      530  ```
+      531  
+      532 +**Available special keys**: `{Enter}`, `{Tab}`, `{Escape}` / `
+          +{Esc}`,                                                       
+      533 +`{Up}`, `{Down}`, `{Left}`, `{Right}`, `{C-c}`, `{C-d}`, `{C-z
+          +}`,                                                           
+      534 +`{C-l}`, `{Space}`, `{BSpace}`.                               
+      535 +                                                              
+      536 +Arbitrary tmux key names are accepted via `{Raw}` but validate
+          +d against                                                     
+      537 +a shell-dangerous character blocklist (defense-in-depth — the 
+          +values are                                                    
+      538 +also shell-escaped before execution).                         
+      539 +                                                              
+      540  ---
+      541  
+      271 -## 6. Capturing Output                                        
+      542 +## 11. Capturing Output                                       
+      543  
+      273 -### Capture visible pane content                              
+      544 +### Visible pane content                                      
+      545  
+      546  ```rust
+      547  let content = target.capture().await?;
+      277 -// Returns the visible pane content as a String (what you see 
+          -on screen).                                                   
+      548  println!("{}", content);
+      549  ```
+      550  
+      281 -### Capture with scrollback history                           
+      551 +> **`@claude NOTE`**: At session or window level, `capture()` 
+          +captures the                                                  
+      552 +> **active pane** only — not all panes. Use `capture_all()` to
+          + capture                                                      
+      553 +> every pane under the target. This is consistent with tmux be
+          +havior                                                        
+      554 +> (`capture-pane -t session` targets the active pane) but may 
+          +surprise                                                      
+      555 +> callers who expect session-level capture to be exhaustive.  
+      556  
+      557 +### With scrollback history                                   
+      558 +                                                              
+      559  ```rust
+      284 -// Capture 200 lines above the visible area, through the end o
+          -f the visible area                                            
+      560 +// -200 = start 200 lines above the visible area, through end 
+          +of visible                                                    
+      561  let content = target.capture_with_history(-200).await?;
+      286 -// Negative number = lines into scrollback. -200 starts 200 li
+          -nes above visible.                                            
+      562  ```
+      563  
+      289 -### Capture all panes                                         
+      564 +### All panes under a target                                  
+      565  
+      566  ```rust
+      567  use std::collections::HashMap;
+      568  use motlie_tmux::PaneAddress;
+      569  
+      295 -// Capture all panes under this target                        
+      570  let all: HashMap<PaneAddress, String> = target.capture_all().a
+           wait?;
+      297 -// Session: all panes in all windows                          
+      298 -// Window: all panes in that window                           
+      299 -// Pane: single-entry map                                     
+      571 +// Session level: all panes in all windows                    
+      572 +// Window level: all panes in that window                     
+      573 +// Pane level: single-entry map                               
+      574  
+      575  for (addr, content) in &all {
+      576      println!("--- {} ---\n{}", addr, content);
+     ...
+      579  
+      580  ---
+      581  
+      308 -## 7. Structured Command Execution (exec)                     
+      582 +## 12. Structured Command Execution                           
+      583  
+      310 -`exec()` runs a shell command in the target pane and captures 
+          -structured                                                    
+      311 -output (stdout + exit code). It uses a sentinel mechanism inte
+          -rnally — it                                                   
+      312 -does not open a new shell; it runs the command in the existing
+          - pane.                                                        
+      584 +`Target::exec()` runs a shell command **inside the target's tm
+          +ux pane** and                                                 
+      585 +returns structured output. This is different from the transpor
+          +t-level `exec()`                                              
+      586 +which runs raw shell commands outside tmux.                   
+      587  
+      588  ```rust
+      589  use std::time::Duration;
+      590  
+      591  let result = target.exec("echo hello", Duration::from_secs(10)
+           ).await?;
+      318 -// result.stdout == "hello"                                   
+      319 -// result.exit_code == 0                                      
+      320 -// result.success() == true                                   
+      592  
+      593  if result.success() {
+      323 -    println!("output: {}", result.stdout);                    
+      594 +    println!("stdout: {}", result.stdout);    // "hello"      
+      595 +    println!("exit: {}", result.exit_code);   // 0            
+      596  } else {
+      325 -    eprintln!("command failed (exit {}): {}", result.exit_code
+          -, result.stdout);                                             
+      597 +    eprintln!("failed (exit {}): {}", result.exit_code, result
+          +.stdout);                                                     
+      598  }
+      599  ```
+      600  
+      329 -**How it works**: Sends `<command> ; echo "__ML<uuid>__ $?"` t
+          -o the pane,                                                   
+      330 -then polls scrollback until the sentinel marker appears. Extra
+          -cts stdout                                                    
+      331 -(lines between the command echo and the sentinel) and the exit
+          - code.                                                        
+      601 +### How it works                                              
+      602  
+      333 -**Concurrency**: Multiple `Target` handles to the same pane sh
+          -are an exec                                                   
+      334 -lock (keyed by resolved `pane_id`), so concurrent `exec()` cal
+          -ls serialize                                                  
+      335 -correctly. Exec locks for different panes are independent.    
+      603 +Sends `<command> ; echo "__ML<uuid>__ $?"` to the pane via `se
+          +nd_keys`,                                                     
+      604 +then polls scrollback (`capture-pane -ep -S -500`) until the s
+          +entinel                                                       
+      605 +marker appears. Extracts stdout (lines between command echo an
+          +d sentinel)                                                   
+      606 +and parses the exit code.                                     
+      607  
+      337 -**Shell compatibility**: Detects fish shell and uses `$status`
+          - instead of `$?`.                                             
+      608 +### Concurrency                                               
+      609  
+      339 -**Wrap tolerance**: Works in narrow panes where the sentinel m
+          -ay wrap across                                                
+      340 -lines — the parser joins text to find the marker.             
+      610 +Multiple `Target` handles to the **same pane** share an exec l
+          +ock (keyed by                                                 
+      611 +resolved `pane_id`). Concurrent `exec()` calls serialize corre
+          +ctly per-pane.                                                
+      612 +Exec locks for different panes are independent.               
+      613  
+      614 +```rust                                                       
+      615 +// Session-level and pane-level targets to the same active pan
+          +e share one lock:                                             
+      616 +let session_target = host.session("build").await?.unwrap();   
+      617 +let pane_target = session_target.pane(0).await?.unwrap();     
+      618 +// exec() on either serializes against the same lock for pane_
+          +id "%5"                                                       
+      619 +```                                                           
+      620 +                                                              
+      621 +### Two kinds of timeout                                      
+      622 +                                                              
+      623 +> **`@claude NOTE`**: `Target::exec()` has **its own timeout p
+          +arameter** that                                               
+      624 +> governs sentinel polling. This is separate from the transpor
+          +t timeout                                                     
+      625 +> (`LocalTransport::timeout` / `SshConfig::timeout`) which gov
+          +erns each                                                     
+      626 +> individual tmux command. A 30s exec timeout with a 10s trans
+          +port timeout                                                  
+      627 +> means: each `capture-pane` poll can take up to 10s, and the 
+          +overall                                                       
+      628 +> sentinel wait can take up to 30s. These are independent knob
+          +s with no                                                     
+      629 +> documentation linking them. Consider documenting the interac
+          +tion or                                                       
+      630 +> adding a note to `SshConfig::with_timeout()`.               
+      631 +                                                              
+      632 +### Limitations                                               
+      633 +                                                              
+      634 +- **Requires a shell prompt**: The pane must have a running sh
+          +ell that can                                                  
+      635 +  accept input. `exec()` will hang (until timeout) if the pane
+          + is running                                                   
+      636 +  an interactive program like `vim`, `less`, or `top`.        
+      637 +- **Shell detection**: Detects fish shell (uses `$status` inst
+          +ead of `$?`)                                                  
+      638 +  via `pane_current_command`. Other exotic shells are not dete
+          +cted.                                                         
+      639 +- **Wrap tolerance**: Works in narrow panes — the sentinel par
+          +ser joins                                                     
+      640 +  lines and searches in concatenated text.                    
+      641 +                                                              
+      642  ---
+      643  
+      344 -## 8. Advanced Capture — Modes, Fidelity, Overlap             
+      644 +## 13. Advanced Capture — Modes and Fidelity                  
+      645  
+      346 -The options-based capture API provides normalization modes and
+          - fidelity                                                     
+      347 -metadata for detecting capture instability.                   
+      646 +### Capture normalization modes                               
+      647  
+      349 -### Capture modes                                             
+      648 +Three modes control how captured content is processed:        
+      649  
+      650  ```rust
+      651  use motlie_tmux::{CaptureOptions, CaptureNormalizeMode};
+      652  
+      354 -// Raw (default) — no transformation, tmux-rendered text      
+      355 -let result = target.capture_with_options(&CaptureOptions::defa
+          -ult()).await?;                                                
+      356 -// result.text: raw tmux output                               
+      653 +// Raw (default) — no transformation                          
+      654 +let opts = CaptureOptions::default();                         
+      655 +let result = target.capture_with_options(&opts).await?;       
+      656 +// result.text: tmux-rendered text                            
+      657  // result.raw_text: None
+      658  
+      359 -// ScreenStable — canonical line endings, trim width-artifact 
+          -trailing spaces,                                              
+      360 -// preserves ANSI/control sequences                           
+      659 +// ScreenStable — normalize line endings, trim width padding, 
+          +preserve ANSI                                                 
+      660  let opts = CaptureOptions::with_mode(CaptureNormalizeMode::Scr
+           eenStable);
+      661  let result = target.capture_with_options(&opts).await?;
+      363 -// result.text: normalized, ANSI preserved                    
+      364 -// result.raw_text: Some(original -ep capture)                
+      662 +// result.text: normalized, ANSI sequences preserved          
+      663 +// result.raw_text: Some(original -ep capture before normaliza
+          +tion)                                                         
+      664  
+      366 -// PlainText — strips ANSI/control sequences, normalizes line 
+          -endings                                                       
+      665 +// PlainText — strip all ANSI/control sequences, normalize    
+      666  let opts = CaptureOptions::with_mode(CaptureNormalizeMode::Pla
+           inText);
+      667  let result = target.capture_with_options(&opts).await?;
+      369 -// result.text: clean plain text, no ANSI                     
+      668 +// result.text: clean plain text                              
+      669  // result.raw_text: None
+      670  ```
+      671  
+      672  ### Fidelity metadata
+      673  
+      674 +When `detect_reflow: true`, the library takes geometry snapsho
+          +ts before and                                                 
+      675 +after the capture to detect instability:                      
+      676 +                                                              
+      677  ```rust
+      678  use motlie_tmux::{CaptureOptions, FidelityIssue};
+      679  
+      680  let opts = CaptureOptions {
+      379 -    detect_reflow: true, // enable geometry change detection  
+      681 +    detect_reflow: true,                                      
+      682      ..Default::default()
+      683  };
+      684  let result = target.capture_with_options(&opts).await?;
+      685  
+      686  if result.fidelity.degraded {
+      385 -    // Capture happened during instability                    
+      687      for issue in result.fidelity.issues.as_ref().unwrap() {
+      688          match issue {
+      388 -            FidelityIssue::ClientResize => println!("client re
+          -sized during capture"),                                       
+      389 -            FidelityIssue::PaneResize => println!("pane resize
+          -d during capture"),                                           
+      390 -            FidelityIssue::HistoryTruncated => println!("scrol
+          -lback was truncated"),                                        
+      391 -            FidelityIssue::OverlapResync => println!("overlap 
+          -matching failed"),                                            
+      689 +            FidelityIssue::ClientResize    => { /* terminal re
+          +sized during capture */ }                                     
+      690 +            FidelityIssue::PaneResize      => { /* pane dimens
+          +ions changed */ }                                             
+      691 +            FidelityIssue::HistoryTruncated => { /* scrollback
+          + evicted by limit */ }                                        
+      692 +            FidelityIssue::OverlapResync    => { /* overlap de
+          +dup failed */ }                                               
+      693          }
+      694      }
+      695  } else {
+      395 -    // Clean capture — no allocation for issues (hot path)    
+      396 -    assert!(result.fidelity.issues.is_none());                
+      696 +    // Clean — issues field is None (zero allocation on hot pa
+          +th)                                                           
+      697  }
+      698  ```
+      699  
+     ...
+      706  let opts = CaptureOptions::with_mode(CaptureNormalizeMode::Pla
+           inText);
+      707  let all: HashMap<PaneAddress, CaptureResult> =
+      708      target.capture_all_with_options(&opts).await?;
+      409 -                                                              
+      410 -for (addr, cr) in &all {                                      
+      411 -    println!("--- {} [degraded={}] ---\n{}", addr, cr.fidelity
+          -.degraded, cr.text);                                          
+      412 -}                                                             
+      709  ```
+      710  
+      711  ---
+      712  
+      417 -## 9. Scrollback Sampling                                     
+      713 +## 14. Scrollback Sampling                                    
+      714  
+      419 -Sample specific portions of scrollback history using query pat
+          -terns.                                                        
+      715 +Query-based extraction of scrollback history.                 
+      716  
+      717  ### Last N lines
+      718  
+     ...
+      721  
+      722  let query = ScrollbackQuery::LastLines(50);
+      723  let text = target.sample_text(&query).await?;
+      428 -// Returns the last 50 lines of scrollback (trimmed).         
+      724 +// Last 50 lines, trailing blank lines trimmed.               
+      725  ```
+      726  
+      727  ### Scan backwards until pattern
+     ...
+      731  use motlie_tmux::ScrollbackQuery;
+      732  
+      733  let query = ScrollbackQuery::Until {
+      438 -    pattern: Regex::new(r"^\$ ")?,   // shell prompt          
+      439 -    max_lines: 500,                   // search limit         
+      734 +    pattern: Regex::new(r"^\$ ")?,  // shell prompt           
+      735 +    max_lines: 500,                                           
+      736  };
+      737  let text = target.sample_text(&query).await?;
+      442 -// Returns everything from the last matching line to the end. 
+      443 -// If no match found, returns all captured content.           
+      738 +// Returns from the last matching line to the end.            
+      739 +// If no match: returns all captured content.                 
+      740  ```
+      741  
+      742  ### Last N lines, stop at pattern
+     ...
+      747      stop_pattern: Regex::new(r"^---")?,
+      748  };
+      749  let text = target.sample_text(&query).await?;
+      454 -// Captures last 200 lines, but stops (starts output) at the m
+          -arker.                                                        
+      750  ```
+      751  
+      457 -### Sampling with options and overlap dedup                   
+      752 +### Incremental sampling with overlap dedup                   
+      753  
+      459 -For incremental sampling (polling for new output), use overlap
+          --aware dedup                                                  
+      460 -to avoid duplicating content between captures.                
+      754 +For polling workflows, overlap-aware dedup merges consecutive 
+          +captures                                                      
+      755 +without duplicating shared content:                           
+      756  
+      757  ```rust
+      758  use motlie_tmux::{CaptureOptions, ScrollbackQuery};
+      759  
+      760  let opts = CaptureOptions {
+      466 -    overlap_lines: 5, // use 5 lines for overlap matching     
+      761 +    overlap_lines: 5,                                         
+      762      ..Default::default()
+      763  };
+      469 -                                                              
+      470 -// First capture                                              
+      764  let query = ScrollbackQuery::LastLines(100);
+      765 +                                                              
+      766 +// First capture — no previous text                           
+      767  let first = target.sample_text_with_options(&query, &opts, Non
+           e).await?;
+      768  
+      474 -// Later capture — pass previous text for dedup               
+      769 +// Subsequent capture — pass previous text for dedup          
+      770  let second = target.sample_text_with_options(
+      476 -    &query,                                                   
+      477 -    &opts,                                                    
+      478 -    Some(&first.text),                                        
+      771 +    &query, &opts, Some(&first.text),                         
+      772  ).await?;
+      480 -// second.text contains: first.text + new-only lines (deduplic
+          -ated)                                                         
+      481 -// If overlap matching fails: second.fidelity has OverlapResyn
+          -c issue                                                       
+      773 +// second.text = first.text + new-only lines (merged)         
+      774 +// On dedup failure: second.fidelity includes OverlapResync   
+      775  ```
+      776  
+      777 +> **`@claude NOTE`**: `overlap_lines` must be **>= 2** for ded
+          +up to activate.                                               
+      778 +> With 0 or 1, `overlap_deduplicate()` returns the current cap
+          +ture unchanged                                                
+      779 +> with no fidelity issues — it silently does nothing rather th
+          +an warning.                                                   
+      780 +> This threshold is undocumented in the function signature.   
+      781 +                                                              
+      782  ---
+      783  
+      486 -## 10. Geometry and Reflow Detection                          
+      784 +## 15. Geometry and Reflow Detection                          
+      785  
+      488 -Query pane geometry and detect instability from client resizes
+          -.                                                             
+      786 +Query pane geometry and detect capture-time instability from c
+          +lient or                                                      
+      787 +pane size changes.                                            
+      788  
+      490 -### Query pane geometry                                       
+      789 +### Pane geometry                                             
+      790  
+      791  ```rust
+      792  let geo = target.pane_geometry().await?;
+      494 -println!("{}x{}, history: {}/{}",                             
+      793 +println!("{}x{}, history {}/{}",                              
+      794      geo.pane_width, geo.pane_height,
+      795      geo.history_size, geo.history_limit);
+      497 -// pane_width/pane_height: current pane dimensions in characte
+          -rs                                                            
+      498 -// history_size: lines currently in scrollback                
+      499 -// history_limit: max scrollback lines configured             
+      796  ```
+      797  
+      502 -### Full geometry snapshot                                    
+      798 +### Geometry snapshot and comparison                          
+      799  
+      800  ```rust
+      505 -let snap = target.geometry_snapshot().await?;                 
+      506 -// snap.clients: Vec<ClientInfo> — all attached clients with s
+          -izes                                                          
+      507 -// snap.pane: PaneGeometry — pane dimensions and scrollback st
+          -ate                                                           
+      508 -// snap.session: String — session name for client filtering   
+      509 -                                                              
+      510 -// Compare two snapshots to detect changes                    
+      801  let before = target.geometry_snapshot().await?;
+      512 -// ... do some work ...                                       
+      802 +// ... perform operations ...                                 
+      803  let after = target.geometry_snapshot().await?;
+      804 +                                                              
+      805  let issues = before.compare(&after);
+      515 -// issues: Vec<FidelityIssue> — empty if stable               
+      806 +// Vec<FidelityIssue> — empty if stable.                      
+      807 +// Only compares clients attached to the target's session (ign
+          +ores                                                          
+      808 +// clients attached to other sessions to avoid false positives
+          +).                                                            
+      809  ```
+      810  
+      811  ---
+      812  
+      520 -## 11. History Limit Management                               
+      813 +## 16. History Limit Management                               
+      814  
+      522 -Tmux's `history-limit` controls max scrollback lines per pane.
+          - It must be                                                   
+      523 -set **before** creating panes — existing panes keep their crea
+          -tion-time limit.                                              
+      815 +Tmux's `history-limit` controls max scrollback lines per pane.
+      816  
+      817 +> **`@claude NOTE`**: `history-limit` only affects panes creat
+          +ed **after**                                                  
+      818 +> the setting is applied. Existing panes retain their creation
+          +-time limit.                                                  
+      819 +> This is a tmux limitation, not a library limitation, but it 
+          +means                                                         
+      820 +> `set_history_limit()` has no effect on already-running sessi
+          +ons unless                                                    
+      821 +> you create new windows/panes afterward.                     
+      822 +                                                              
+      823  ### Global default
+      824  
+      825  ```rust
+      528 -// Set before creating any sessions                           
+      826 +// Set before creating sessions                               
+      827  host.set_global_history_limit(50000).await?;
+      828  
+      531 -// Query current global default                               
+      829 +// Query                                                      
+      830  let limit = host.get_global_history_limit().await?;
+      533 -println!("global history-limit: {}", limit);                  
+      831  ```
+      832  
+      833  ### Per-session
+      834  
+      835  ```rust
+      539 -// Set for a specific session (affects new panes only)        
+      836 +// Set for this session's future panes                        
+      837  target.set_history_limit(100000).await?;
+      838  
+      542 -// Query session's history-limit                              
+      839 +// Query                                                      
+      840  let limit = target.get_history_limit().await?;
+      841  ```
+      842  
+      843  ---
+      844  
+      548 -## 12. SSH Transport                                          
+      845 +# Part III — Reference                                        
+      846  
+      550 -Connect to tmux on a remote host via SSH. Authentication uses 
+          -ssh-agent.                                                    
+      847 +## 17. Normalization Utilities                                
+      848  
+      552 -### Prerequisites                                             
+      849 +Standalone functions re-exported from the crate root, usable i
+          +ndependently                                                  
+      850 +of any transport or target:                                   
+      851  
+      554 -- `ssh-agent` running with `SSH_AUTH_SOCK` exported           
+      555 -- Keys loaded: `ssh-add ~/.ssh/id_ed25519`                    
+      556 -- Remote host in `~/.ssh/known_hosts` (for `Verify` policy)   
+      557 -                                                              
+      558 -### Connect                                                   
+      559 -                                                              
+      852  ```rust
+      561 -use motlie_tmux::{HostHandle, SshTransport, SshConfig, HostKey
+          -Policy};                                                      
+      562 -use motlie_tmux::transport::TransportKind;                    
+      853 +use motlie_tmux::{                                            
+      854 +    strip_ansi, normalize_screen_stable, normalize_plain_text,
+          + overlap_deduplicate,                                         
+      855 +};                                                            
+      856  
+      564 -let config = SshConfig::new("server.example.com", "deploy")   
+      565 -    .with_port(22)                                            
+      566 -    .with_host_key_policy(HostKeyPolicy::Verify)              
+      567 -    .with_timeout(std::time::Duration::from_secs(10))         
+      568 -    .with_keepalive(Some(std::time::Duration::from_secs(30)));
+      857 +// Strip ANSI escape sequences and C0 control chars (preserves
+          + \n, \t)                                                      
+      858 +let clean = strip_ansi("\x1b[32mgreen\x1b[0m text");          
+      859 +assert_eq!(clean, "green text");                              
+      860  
+      570 -let ssh = SshTransport::connect(config).await?;               
+      571 -// SSH connection established, authenticated via ssh-agent.   
+      861 +// ScreenStable: canonical line endings, trim width-artifact t
+          +railing spaces                                                
+      862 +let norm = normalize_screen_stable("hello   \r\nworld  \n\n\n"
+          +);                                                            
+      863 +assert_eq!(norm, "hello\nworld\n");                           
+      864  
+      573 -let host = HostHandle::new(TransportKind::Ssh(ssh), None);    
+      574 -// Now use `host` exactly like a local HostHandle:            
+      575 -let sessions = host.list_sessions().await?;                   
+      576 -```                                                           
+      865 +// PlainText: strip ANSI then ScreenStable                    
+      866 +let plain = normalize_plain_text("\x1b[1mbold\x1b[0m   \n");  
+      867 +assert_eq!(plain, "bold\n");                                  
+      868  
+      578 -### Host key policies                                         
+      579 -                                                              
+      580 -```rust                                                       
+      581 -// Verify (default) — requires host in ~/.ssh/known_hosts     
+      582 -SshConfig::new("host", "user")                                
+      583 -    .with_host_key_policy(HostKeyPolicy::Verify);             
+      584 -                                                              
+      585 -// Trust-on-first-use — accept and persist new keys, reject on
+          - mismatch                                                     
+      586 -// If persisting the key fails (e.g. unwritable known_hosts), 
+          -the connection                                                
+      587 -// is rejected (fail-closed).                                 
+      588 -SshConfig::new("host", "user")                                
+      589 -    .with_host_key_policy(HostKeyPolicy::TrustFirstUse);      
+      590 -                                                              
+      591 -// Insecure — accept all keys (logs warning). For dev/testing 
+          -only.                                                         
+      592 -SshConfig::new("host", "user")                                
+      593 -    .with_host_key_policy(HostKeyPolicy::Insecure);           
+      869 +// Overlap dedup between consecutive captures                 
+      870 +let (merged, issues) = overlap_deduplicate(                   
+      871 +    "line1\nline2\nline3",  // previous                       
+      872 +    "line2\nline3\nline4",  // current                        
+      873 +    2,                       // overlap_lines (must be >= 2)  
+      874 +);                                                            
+      875 +assert_eq!(merged, "line1\nline2\nline3\nline4");             
+      876 +assert!(issues.is_empty());                                   
+      877  ```
+      878  
+      596 -### Connection status                                         
+      597 -                                                              
+      598 -```rust                                                       
+      599 -if ssh.is_closed() {                                          
+      600 -    println!("SSH connection lost");                          
+      601 -}                                                             
+      602 -```                                                           
+      603 -                                                              
+      604 -### Transparent usage                                         
+      605 -                                                              
+      606 -Once connected, the `HostHandle` API is identical for local an
+          -d SSH hosts.                                                  
+      607 -All operations — list, create, capture, send, exec — work the 
+          -same way.                                                     
+      608 -The transport is selected at construction time and dispatched 
+          -statically                                                    
+      609 -(no dynamic dispatch / vtable overhead).                      
+      610 -                                                              
+      879  ---
+      880  
+      613 -## 13. Mock Transport for Testing                             
+      881 +## 18. Type Quick Reference                                   
+      882  
+      615 -`MockTransport` provides canned responses for unit testing wit
+          -hout a real                                                   
+      616 -tmux server.                                                  
+      883 +### Core handles                                              
+      884  
+      618 -### Basic mock                                                
+      885 +| Type | Description | Clone |                                
+      886 +|------|-------------|-------|                                
+      887 +| `HostHandle` | Entry point — one per tmux host | Yes (Arc) |
+      888 +| `Target` | Unified session/window/pane handle | No |        
+      889  
+      620 -```rust                                                       
+      621 -use motlie_tmux::HostHandle;                                  
+      622 -use motlie_tmux::transport::{TransportKind, MockTransport};   
+      890 +### Target addressing                                         
+      891  
+      624 -let mock = MockTransport::new()                               
+      625 -    .with_response("list-sessions", "build\t$0\t0\t1\t2\t\n") 
+      626 -    .with_default("");  // fallback for unmatched commands    
+      892 +| Type | Description |                                        
+      893 +|------|-------------|                                        
+      894 +| `TargetSpec` | Builder: `session()` → `.window()` → `.pane()
+          +`, or `parse()` |                                             
+      895 +| `TargetAddress` | Enum: `Session(SessionInfo)`, `Window(Wind
+          +owInfo)`, `Pane(PaneAddress)` |                               
+      896 +| `TargetLevel` | Enum: `Session`, `Window`, `Pane` |         
+      897 +| `PaneAddress` | Stable `pane_id` (%N) + display fields (sess
+          +ion, window, pane) |                                          
+      898  
+      628 -let host = HostHandle::new(TransportKind::Mock(mock), None);  
+      629 -let sessions = host.list_sessions().await?;                   
+      630 -assert_eq!(sessions[0].name, "build");                        
+      631 -```                                                           
+      899 +### Tmux metadata                                             
+      900  
+      633 -### Multiple canned responses                                 
+      901 +| Type | Key fields |                                         
+      902 +|------|-----------|                                          
+      903 +| `SessionInfo` | name, id, attached, window_count, group |   
+      904 +| `WindowInfo` | session_name, index, name, active, pane_count
+          + |                                                            
+      905 +| `PaneInfo` | address, current_command, pid, width, height, a
+          +ctive |                                                       
+      906 +| `ClientInfo` | width, height, session |                     
+      907  
+      635 -Responses match on substring. Multiple responses for the same 
+          -pattern are                                                   
+      636 -returned in FIFO order; when exhausted, the last one repeats. 
+      908 +### Input                                                     
+      909  
+      638 -```rust                                                       
+      639 -let mock = MockTransport::new()                               
+      640 -    .with_response("list-sessions", "sess1\t$0\t0\t0\t1\t\n") 
+      641 -    .with_response("list-panes", "%0\tsess1:0.0\ttitle\tbash\t
+          -1234\t80\t24\t1\n")                                           
+      642 -    .with_response("capture-pane", "hello world\n")           
+      643 -    .with_default("");                                        
+      644 -```                                                           
+      910 +| Type | Description |                                        
+      911 +|------|-------------|                                        
+      912 +| `KeySequence` | Parsed key sequence: `parse()`, `literal()`,
+          + `then_enter()`, `then_key()` |                               
+      913 +| `SpecialKey` | Enum: Enter, Tab, Escape, Up, Down, Left, Rig
+          +ht, CtrlC, CtrlD, CtrlZ, CtrlL, Space, BSpace, Raw(String) |  
+      914  
+      646 -### Testing with HostHandle                                   
+      915 +### Capture and fidelity                                      
+      916  
+      648 -```rust                                                       
+      649 -fn mock_host(mock: MockTransport) -> HostHandle {             
+      650 -    HostHandle::new(TransportKind::Mock(mock), None)          
+      651 -}                                                             
+      917 +| Type | Description |                                        
+      918 +|------|-------------|                                        
+      919 +| `CaptureOptions` | history_start, normalize mode, overlap_li
+          +nes, detect_reflow |                                          
+      920 +| `CaptureNormalizeMode` | Enum: Raw (default), ScreenStable, 
+          +PlainText |                                                   
+      921 +| `CaptureResult` | text, raw_text (Option), fidelity |       
+      922 +| `OutputFidelity` | degraded (bool), issues (Option<Vec>) — N
+          +one on clean hot path |                                       
+      923 +| `FidelityIssue` | Enum: ClientResize, PaneResize, HistoryTru
+          +ncated, OverlapResync |                                       
+      924 +| `ScrollbackQuery` | Enum: LastLines(n), Until { pattern, max
+          +_lines }, LastLinesUntil { lines, stop_pattern } |            
+      925 +| `ExecOutput` | stdout, exit_code, success() |               
+      926  
+      653 -#[tokio::test]                                                
+      654 -async fn test_session_lifecycle() {                           
+      655 -    let mock = MockTransport::new()                           
+      656 -        .with_default("")                                     
+      657 -        .with_response("list-sessions", "test\t$0\t0\t0\t1\t\n
+          -");                                                           
+      658 -    let host = mock_host(mock);                               
+      659 -    let target = host.create_session("test", None, None).await
+          -.unwrap();                                                    
+      660 -    assert_eq!(target.session_name(), "test");                
+      661 -}                                                             
+      662 -```                                                           
+      927 +### Geometry                                                  
+      928  
+      664 ----                                                           
+      929 +| Type | Description |                                        
+      930 +|------|-------------|                                        
+      931 +| `GeometrySnapshot` | clients + pane geometry + session; `com
+          +pare()` → Vec<FidelityIssue> |                                
+      932 +| `PaneGeometry` | pane_width, pane_height, history_size, hist
+          +ory_limit |                                                   
+      933  
+      666 -## Normalization Utilities                                    
+      934 +### Transport                                                 
+      935  
+      668 -Standalone functions for text processing, re-exported from the
+          - crate root:                                                  
+      936 +| Type | Description |                                        
+      937 +|------|-------------|                                        
+      938 +| `TransportKind` | Enum: Local, Ssh, Mock — static dispatch |
+      939 +| `LocalTransport` | Subprocess exec, configurable timeout |  
+      940 +| `SshTransport` | russh 0.46, ssh-agent auth; `connect()`, `i
+          +s_closed()` |                                                 
+      941 +| `SshConfig` | host, port, user, host_key_policy, timeout, ke
+          +epalive_interval |                                            
+      942 +| `MockTransport` | Canned responses; `with_response()`, `with
+          +_default()` |                                                 
+      943 +| `HostKeyPolicy` | Enum: Verify (default), TrustFirstUse, Ins
+          +ecure |                                                       
+      944 +| `TmuxSocket` | Enum: Name(String), Path(String) |           
+      945  
+      670 -```rust                                                       
+      671 -use motlie_tmux::{normalize_screen_stable, normalize_plain_tex
+          -t, strip_ansi, overlap_deduplicate};                          
+      946 +### Shell channel (low-level, used by monitor layer — Phase 2a
+          +)                                                             
+      947  
+      673 -// Strip ANSI escape sequences and control characters         
+      674 -let clean = strip_ansi("\x1b[32mgreen\x1b[0m text");          
+      675 -assert_eq!(clean, "green text");                              
+      676 -                                                              
+      677 -// ScreenStable normalization: canonical line endings, trim wi
+          -dth padding                                                   
+      678 -let normalized = normalize_screen_stable("hello   \r\nworld  \
+          -n\n\n");                                                      
+      679 -assert_eq!(normalized, "hello\nworld\n");                     
+      680 -                                                              
+      681 -// PlainText normalization: strip ANSI + ScreenStable         
+      682 -let plain = normalize_plain_text("\x1b[1mbold\x1b[0m   \n");  
+      683 -assert_eq!(plain, "bold\n");                                  
+      684 -                                                              
+      685 -// Overlap dedup between consecutive captures                 
+      686 -let (merged, issues) = overlap_deduplicate(                   
+      687 -    "line1\nline2\nline3",   // previous                      
+      688 -    "line2\nline3\nline4",   // current                       
+      689 -    2,                        // overlap_lines                
+      690 -);                                                            
+      691 -assert_eq!(merged, "line1\nline2\nline3\nline4");             
+      692 -assert!(issues.is_empty()); // clean merge                    
+      693 -```                                                           
+      694 -                                                              
+      695 ----                                                           
+      696 -                                                              
+      697 -## Type Quick Reference                                       
+      698 -                                                              
+      699 -| Type | Level | Key fields |                                 
+      700 -|------|-------|-----------|                                  
+      701 -| `HostHandle` | Host | transport, socket |                   
+      702 -| `Target` | Session / Window / Pane | address, level |       
+      703 -| `TargetSpec` | Builder | session_name, window_sel, pane_idx 
+          -|                                                             
+      704 -| `SessionInfo` | Session | name, id, attached, window_count |
+      705 -| `WindowInfo` | Window | session_name, index, name, active | 
+      706 -| `PaneInfo` | Pane | address, current_command, width, height 
+          -|                                                             
+      707 -| `PaneAddress` | Pane | pane_id, session, window, pane |     
+      708 -| `ExecOutput` | Result | stdout, exit_code, success() |      
+      709 -| `CaptureResult` | Result | text, raw_text, fidelity |       
+      710 -| `CaptureOptions` | Config | history_start, normalize, overla
+          -p_lines, detect_reflow |                                      
+      711 -| `CaptureNormalizeMode` | Enum | Raw, ScreenStable, PlainText
+          - |                                                            
+      712 -| `OutputFidelity` | Metadata | degraded, issues |            
+      713 -| `FidelityIssue` | Enum | ClientResize, PaneResize, HistoryTr
+          -uncated, OverlapResync |                                      
+      714 -| `KeySequence` | Input | segments; parse(), literal(), then_e
+          -nter() |                                                      
+      715 -| `SpecialKey` | Enum | Enter, Tab, CtrlC, CtrlD, ... |       
+      716 -| `ScrollbackQuery` | Enum | LastLines, Until, LastLinesUntil 
+          -|                                                             
+      717 -| `SshConfig` | Config | host, port, user, host_key_policy, ti
+          -meout |                                                       
+      718 -| `SshTransport` | Transport | connect(), is_closed() |       
+      719 -| `HostKeyPolicy` | Enum | Verify (default), TrustFirstUse, In
+          -secure |                                                      
+      720 -| `TmuxSocket` | Enum | Name(String), Path(String) |          
+      721 -| `GeometrySnapshot` | Metadata | clients, pane, session; comp
+          -are() |                                                       
+      722 -| `PaneGeometry` | Metadata | pane_width, pane_height, history
+          -_size, history_limit |                                        
+      723 -| `ClientInfo` | Metadata | width, height, session |          
+      948 +| Type | Description |                                        
+      949 +|------|-------------|                                        
+      950 +| `ShellChannelKind` | Enum: Local, Ssh, Mock — `write()`, `re
+          +ad()` |                                                       
+      951 +| `ShellEvent` | Enum: Data(Vec<u8>), Eof |                   
+
+● Rewrote docs/API.md with the new structure:
+
+  Organization: Transport implementations first (Local, SSH, Mock with setup +
+  characteristics), then all common API built on top. Inconsistencies are
+  interspersed at the exact point they arise rather than in a separate section.
+
+  @claude NOTE markers — 9 total, each grepable and actionable:
+
+  1. HostHandle::local() hardcodes 10s timeout with no way to configure
+  2. TrustFirstUse fail-closed on write failure (intentional but surprising)
+  3. is_closed() only on SshTransport, no transport-agnostic equivalent
+  4. SSH open_shell() hardcodes 80x24 PTY dimensions
+  5. MockTransport HashMap iteration makes multi-pattern matching
+  non-deterministic
+  6. No way to make MockTransport::exec() return errors
+  7. rename() leaves Target with stale name; rename() on pane level errors
+  8. TargetSpec::pane() panics instead of returning Result
+  9. target.pane(index) from session level resolves via active window
+  (non-deterministic)
+  10. Two independent timeout knobs (transport vs exec sentinel) with no
+  documentation linking them
+  11. overlap_lines silently requires >= 2
+  12. capture() at session level captures active pane only
+  13. history-limit only affects future panes
+
+✻ Worked for 3m 9s
