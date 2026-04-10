@@ -1,6 +1,11 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use crate::common::{
+    EmbeddingMetricState, RuntimeMetricState, configure_artifact_policy, lock_metrics,
+    map_quantization_bits, observe_embedding_request, observe_memory, should_force_cpu,
+    snapshot_embedding_metrics,
+};
 use async_trait::async_trait;
 use mistralrs::core::EmbeddingLoaderType;
 use mistralrs::{EmbeddingModelBuilder, EmbeddingRequest, ModelDType};
@@ -10,22 +15,19 @@ use motlie_model::{
     LoadedBundleDescriptor, ModelBundle, ModelError, ModelMetricSnapshot, QuantizationBits,
     QuantizationSupport, StartOptions,
 };
-use crate::common::{
-    configure_artifact_policy, lock_metrics, map_quantization_bits, observe_embedding_request,
-    observe_memory, should_force_cpu, snapshot_embedding_metrics, EmbeddingMetricState,
-    RuntimeMetricState,
-};
 
 /// Embedding architecture discriminant that selects the correct `mistralrs` loader path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MistralEmbeddingArch {
     EmbeddingGemma,
+    Qwen3Embedding,
 }
 
 impl MistralEmbeddingArch {
     fn loader_type(self) -> EmbeddingLoaderType {
         match self {
             Self::EmbeddingGemma => EmbeddingLoaderType::EmbeddingGemma,
+            Self::Qwen3Embedding => EmbeddingLoaderType::Qwen3Embedding,
         }
     }
 }
@@ -50,6 +52,17 @@ impl MistralEmbeddingSpec {
             arch: MistralEmbeddingArch::EmbeddingGemma,
             capabilities: Capabilities::embeddings_only(),
             quantization: QuantizationSupport::none(),
+        }
+    }
+
+    pub fn qwen3_embedding_06b() -> Self {
+        Self {
+            id: BundleId::new("qwen3_embedding_06b"),
+            display_name: "Qwen3 Embedding 0.6B",
+            model_id: "Qwen/Qwen3-Embedding-0.6B",
+            arch: MistralEmbeddingArch::Qwen3Embedding,
+            capabilities: Capabilities::embeddings_only(),
+            quantization: QuantizationSupport::without_recommended([QuantizationBits::Eight]),
         }
     }
 }
@@ -314,6 +327,20 @@ mod tests {
         assert_eq!(spec.model_id, "google/embeddinggemma-300m");
         assert_eq!(spec.arch, MistralEmbeddingArch::EmbeddingGemma);
         assert!(spec.capabilities.supports(CapabilityKind::Embeddings));
+    }
+
+    #[test]
+    fn qwen3_embedding_spec_has_expected_identity_and_quantization_support() {
+        let spec = MistralEmbeddingSpec::qwen3_embedding_06b();
+
+        assert_eq!(spec.id.as_str(), "qwen3_embedding_06b");
+        assert_eq!(spec.display_name, "Qwen3 Embedding 0.6B");
+        assert_eq!(spec.model_id, "Qwen/Qwen3-Embedding-0.6B");
+        assert_eq!(spec.arch, MistralEmbeddingArch::Qwen3Embedding);
+        assert!(spec.capabilities.supports(CapabilityKind::Embeddings));
+        assert_eq!(spec.quantization.recommended(), None);
+        assert!(spec.quantization.supports(QuantizationBits::Eight));
+        assert!(!spec.quantization.supports(QuantizationBits::Four));
     }
 
     #[tokio::test]

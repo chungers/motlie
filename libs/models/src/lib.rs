@@ -7,6 +7,7 @@ use std::error::Error as StdError;
 #[cfg(any(
     feature = "model-qwen3-4b",
     feature = "model-google-gemma-300m",
+    feature = "model-qwen3-embedding-06b",
     feature = "model-gemma4-e2b"
 ))]
 use std::fmt;
@@ -68,6 +69,10 @@ pub enum ModelsError {
     UnknownModelSelector { selector: String },
     #[error("model selector `{selector}` is unavailable in this build")]
     ModelUnavailable { selector: String },
+    #[error("no curated embedding models are enabled in this build")]
+    NoEmbeddingModelsEnabled,
+    #[error("expected exactly one curated embedding model in this build, found {count}")]
+    AmbiguousEmbeddingModelSelection { count: usize },
 }
 
 pub type Result<T> = std::result::Result<T, ModelsError>;
@@ -335,13 +340,17 @@ impl BundleDescriptor {
 pub enum ModelSelector {
     #[cfg(any(feature = "model-qwen3-4b", feature = "model-gemma4-e2b"))]
     Chat(ChatModels),
-    #[cfg(feature = "model-google-gemma-300m")]
+    #[cfg(any(
+        feature = "model-google-gemma-300m",
+        feature = "model-qwen3-embedding-06b"
+    ))]
     Embedding(EmbeddingModels),
 }
 
 #[cfg(any(
     feature = "model-qwen3-4b",
     feature = "model-google-gemma-300m",
+    feature = "model-qwen3-embedding-06b",
     feature = "model-gemma4-e2b"
 ))]
 impl ModelSelector {
@@ -349,7 +358,10 @@ impl ModelSelector {
         match self {
             #[cfg(any(feature = "model-qwen3-4b", feature = "model-gemma4-e2b"))]
             Self::Chat(model) => format!("chat:{}", model.as_str()),
-            #[cfg(feature = "model-google-gemma-300m")]
+            #[cfg(any(
+                feature = "model-google-gemma-300m",
+                feature = "model-qwen3-embedding-06b"
+            ))]
             Self::Embedding(model) => format!("embedding:{}", model.as_str()),
         }
     }
@@ -358,7 +370,10 @@ impl ModelSelector {
         match self {
             #[cfg(any(feature = "model-qwen3-4b", feature = "model-gemma4-e2b"))]
             Self::Chat(model) => model.bundle_id(),
-            #[cfg(feature = "model-google-gemma-300m")]
+            #[cfg(any(
+                feature = "model-google-gemma-300m",
+                feature = "model-qwen3-embedding-06b"
+            ))]
             Self::Embedding(model) => model.bundle_id(),
         }
     }
@@ -367,7 +382,10 @@ impl ModelSelector {
         match self {
             #[cfg(any(feature = "model-qwen3-4b", feature = "model-gemma4-e2b"))]
             Self::Chat(model) => model.descriptor(),
-            #[cfg(feature = "model-google-gemma-300m")]
+            #[cfg(any(
+                feature = "model-google-gemma-300m",
+                feature = "model-qwen3-embedding-06b"
+            ))]
             Self::Embedding(model) => model.descriptor(),
         }
     }
@@ -376,7 +394,10 @@ impl ModelSelector {
         match self {
             #[cfg(any(feature = "model-qwen3-4b", feature = "model-gemma4-e2b"))]
             Self::Chat(model) => model.bundle(),
-            #[cfg(feature = "model-google-gemma-300m")]
+            #[cfg(any(
+                feature = "model-google-gemma-300m",
+                feature = "model-qwen3-embedding-06b"
+            ))]
             Self::Embedding(model) => model.bundle(),
         }
     }
@@ -385,6 +406,7 @@ impl ModelSelector {
 #[cfg(any(
     feature = "model-qwen3-4b",
     feature = "model-google-gemma-300m",
+    feature = "model-qwen3-embedding-06b",
     feature = "model-gemma4-e2b"
 ))]
 impl fmt::Display for ModelSelector {
@@ -425,9 +447,21 @@ impl FromStr for ModelSelector {
                     selector: value.to_owned(),
                 });
             }
-            #[cfg(feature = "model-google-gemma-300m")]
+            #[cfg(not(feature = "model-qwen3-embedding-06b"))]
+            if raw == embeddings::QWEN3_EMBEDDING_06B_SELECTOR {
+                return Err(ModelsError::ModelUnavailable {
+                    selector: value.to_owned(),
+                });
+            }
+            #[cfg(any(
+                feature = "model-google-gemma-300m",
+                feature = "model-qwen3-embedding-06b"
+            ))]
             return Ok(Self::Embedding(raw.parse()?));
-            #[cfg(not(feature = "model-google-gemma-300m"))]
+            #[cfg(not(any(
+                feature = "model-google-gemma-300m",
+                feature = "model-qwen3-embedding-06b"
+            )))]
             return Err(ModelsError::UnknownModelSelector {
                 selector: value.to_owned(),
             });
@@ -474,6 +508,10 @@ impl Catalog {
         #[cfg(feature = "model-google-gemma-300m")]
         catalog.register(embeddings::google_gemma_300m::descriptor(), || {
             embeddings::google_gemma_300m::bundle()
+        });
+        #[cfg(feature = "model-qwen3-embedding-06b")]
+        catalog.register(embeddings::qwen3_embedding_06b::descriptor(), || {
+            embeddings::qwen3_embedding_06b::bundle()
         });
         #[cfg(feature = "model-qwen3-4b")]
         catalog.register(chat::qwen3_4b::descriptor(), || chat::qwen3_4b::bundle());
@@ -635,12 +673,12 @@ mod tests {
     }
 
     #[test]
-    fn defaults_include_embeddinggemma_bundle_and_artifact_control() {
+    fn defaults_include_curated_embedding_bundles_and_artifact_control() {
         let catalog = Catalog::with_defaults();
-        let bundle_id = BundleId::new("embeddinggemma_300m");
 
         #[cfg(feature = "model-google-gemma-300m")]
         {
+            let bundle_id = BundleId::new("embeddinggemma_300m");
             assert!(catalog.len() >= 1);
             assert!(catalog.instantiate(&bundle_id).is_some());
             assert!(
@@ -657,6 +695,30 @@ mod tests {
 
         #[cfg(not(feature = "model-google-gemma-300m"))]
         {
+            let bundle_id = BundleId::new("embeddinggemma_300m");
+            assert!(catalog.instantiate(&bundle_id).is_none());
+            assert!(catalog.artifacts(&bundle_id).is_none());
+        }
+
+        #[cfg(feature = "model-qwen3-embedding-06b")]
+        {
+            let bundle_id = BundleId::new("qwen3_embedding_06b");
+            assert!(catalog.instantiate(&bundle_id).is_some());
+            assert!(
+                catalog
+                    .bundles_for_track(EvalTrack::Embeddings)
+                    .any(|bundle| bundle.id == bundle_id)
+            );
+
+            let artifacts = catalog
+                .artifacts(&bundle_id)
+                .expect("default qwen embedder should expose artifact control");
+            assert_eq!(artifacts.control_name, "qwen3_embedding_06b");
+        }
+
+        #[cfg(not(feature = "model-qwen3-embedding-06b"))]
+        {
+            let bundle_id = BundleId::new("qwen3_embedding_06b");
             assert!(catalog.instantiate(&bundle_id).is_none());
             assert!(catalog.artifacts(&bundle_id).is_none());
         }
@@ -672,6 +734,16 @@ mod tests {
 
             assert_eq!(model, EmbeddingModels::GoogleGemma300m);
             assert_eq!(model.to_string(), "google/embeddinggemma_300m");
+        }
+
+        #[cfg(feature = "model-qwen3-embedding-06b")]
+        {
+            let model: EmbeddingModels = "qwen/qwen3_embedding_06b"
+                .parse()
+                .expect("known qwen embedding selector should parse");
+
+            assert_eq!(model, EmbeddingModels::Qwen3Embedding06B);
+            assert_eq!(model.to_string(), "qwen/qwen3_embedding_06b");
         }
     }
 
@@ -689,20 +761,86 @@ mod tests {
             );
             assert_eq!(selector.to_string(), "embedding:google/embeddinggemma_300m");
         }
+
+        #[cfg(feature = "model-qwen3-embedding-06b")]
+        {
+            let selector: ModelSelector = "embedding:qwen/qwen3_embedding_06b"
+                .parse()
+                .expect("known qwen embedding model selector should parse");
+
+            assert_eq!(
+                selector,
+                ModelSelector::Embedding(EmbeddingModels::Qwen3Embedding06B)
+            );
+            assert_eq!(selector.to_string(), "embedding:qwen/qwen3_embedding_06b");
+        }
     }
 
-    #[cfg(not(feature = "model-google-gemma-300m"))]
     #[test]
-    fn selector_reports_unavailable_for_disabled_bundles() {
-        let err = "embedding:google/embeddinggemma_300m"
-            .parse::<ModelSelector>()
-            .expect_err("disabled known selector should be unavailable");
+    fn selector_reports_unavailable_for_disabled_embedding_bundles() {
+        #[cfg(not(feature = "model-google-gemma-300m"))]
+        {
+            let err = "embedding:google/embeddinggemma_300m"
+                .parse::<ModelSelector>()
+                .expect_err("disabled known gemma selector should be unavailable");
 
-        assert!(matches!(
-            err,
-            ModelsError::ModelUnavailable { selector }
-            if selector == "embedding:google/embeddinggemma_300m"
-        ));
+            assert!(matches!(
+                err,
+                ModelsError::ModelUnavailable { selector }
+                if selector == "embedding:google/embeddinggemma_300m"
+            ));
+        }
+
+        #[cfg(not(feature = "model-qwen3-embedding-06b"))]
+        {
+            let err = "embedding:qwen/qwen3_embedding_06b"
+                .parse::<ModelSelector>()
+                .expect_err("disabled known qwen selector should be unavailable");
+
+            assert!(matches!(
+                err,
+                ModelsError::ModelUnavailable { selector }
+                if selector == "embedding:qwen/qwen3_embedding_06b"
+            ));
+        }
+    }
+
+    #[test]
+    fn only_enabled_embedding_model_matches_build_shape() {
+        #[cfg(all(
+            feature = "model-google-gemma-300m",
+            not(feature = "model-qwen3-embedding-06b")
+        ))]
+        {
+            assert_eq!(
+                EmbeddingModels::only_enabled().expect("single gemma build should succeed"),
+                EmbeddingModels::GoogleGemma300m
+            );
+        }
+
+        #[cfg(all(
+            feature = "model-qwen3-embedding-06b",
+            not(feature = "model-google-gemma-300m")
+        ))]
+        {
+            assert_eq!(
+                EmbeddingModels::only_enabled().expect("single qwen build should succeed"),
+                EmbeddingModels::Qwen3Embedding06B
+            );
+        }
+
+        #[cfg(all(
+            feature = "model-google-gemma-300m",
+            feature = "model-qwen3-embedding-06b"
+        ))]
+        {
+            let err = EmbeddingModels::only_enabled()
+                .expect_err("multi-embedding build should be ambiguous");
+            assert!(matches!(
+                err,
+                ModelsError::AmbiguousEmbeddingModelSelection { count } if count == 2
+            ));
+        }
     }
 
     #[test]
