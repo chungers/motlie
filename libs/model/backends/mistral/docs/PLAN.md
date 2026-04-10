@@ -12,6 +12,7 @@
 | 2026-04-08 | @codex-researcher | Tightened the backend boundary after PR 139 review. Provider-specific local artifact validation moved back into the curated bundle layer, the backend crate dropped its direct `hf-hub` dependency, and `LocalOnly` startup now consumes a resolved local model path instead of reconstructing Hugging Face cache layout internally. | Phases 1, 3 |
 | 2026-04-08 | @claude | Added text generation backend (`text.rs`) for #141. `MistralTextBundle` implements `ChatModel` + `CompletionModel` via `TextModelBuilder`, with ISQ quantization mapping and `MistralTextArch::Qwen3` as the first architecture. | Phase 5 |
 | 2026-04-08 | @codex-researcher | Added the multimodal backend path for Gemma 4 E2B-it (#142). `MistralMultimodalBundle` uses `MultimodalModelBuilder`, shares the existing chat contract, and keeps vision support as a capability flag rather than a separate executable trait. | Phase 6 |
+| 2026-04-09 | @codex-researcher | Added the Qwen3 embedding architecture for issue #147. `MistralEmbeddingArch` now supports both EmbeddingGemma and Qwen3Embedding, with bundle-level quantization metadata validating the first `Q8`-only embedding slice. | Phase 2, Phase 4 |
 
 Derived from [../../docs/DESIGN.md](../../docs/DESIGN.md). This PLAN covers the generic `mistral` backend implementation work.
 
@@ -43,6 +44,8 @@ Implement the first generic embedding path.
   DESIGN reference: `libs/model/docs/DESIGN.md` / `Bundle Contract`
 - [x] Provide a built-in constructor for `embeddinggemma_300m`.
   DESIGN reference: vertical slice target agreed during planning
+- [x] Provide a built-in constructor for `qwen3_embedding_06b`.
+  DESIGN reference: second embedding slice (#147)
 
 ### 2.2 — Generic embedding bundle implementation
 

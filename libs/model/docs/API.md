@@ -17,6 +17,7 @@
 | 2026-04-08 | @codex-researcher: Updated the chat contract for the Gemma 4 multimodal slice (#142). `ChatMessage` now carries `ContentPart`s, the first vision-capable bundle still uses `ChatModel`, and `examples/v0.3` is now the concrete end-to-end reference for text+image chat. | Overview, Core Types, Bundle API Sketch, Notes |
 | 2026-04-09 | @codex-researcher: Added handle-level metric snapshots and unit-safe wrappers. Runtime/request aggregates now live on `BundleHandle::metric_snapshot()` instead of individual responses. | Overview, Core Types, Bundle API Sketch, Notes |
 | 2026-04-09 | @codex-researcher: Documented the current cross-platform runtime-metrics implementation. `mistral` backends and examples use `sysinfo` for current RSS on macOS and Linux, with Motlie maintaining the observed peak in-handle rather than relying on an OS-native historical peak counter. | Handle-Level Metrics, Notes |
+| 2026-04-09 | @codex-researcher: Added the second embedding slice to the quantization examples. `QuantizationSupport::without_recommended([Q8])` is now concretely exercised by the Qwen3-Embedding-0.6B bundle, while EmbeddingGemma remains unquantized. | Core Types |
 
 This document sketches the concrete contract shapes currently introduced in `libs/model`. It covers both the core bundle lifecycle/capability contracts and the lightweight `model::eval` vocabulary that higher-level harness tooling should build on.
 
@@ -124,7 +125,7 @@ The currently implemented error variants are:
 
 - `QuantizationSupport::none()` — no quantization supported (e.g., EmbeddingGemma 300M)
 - `QuantizationSupport::with_recommended([Q4, Q8], Q4)` — Q4 and Q8 supported, Q4 auto-applied when caller omits
-- `QuantizationSupport::without_recommended([Q8])` — Q8 available but F32 by default
+- `QuantizationSupport::without_recommended([Q8])` — Q8 available but F32 by default (e.g., Qwen3-Embedding-0.6B)
 
 The `resolve()` method validates caller requests: unsupported precision → `InvalidConfiguration`, omitted precision → curated default. This invariant is enforced at construction: `recommended` must be in `supported` or `None`.
 
