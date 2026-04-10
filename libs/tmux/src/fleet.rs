@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use crate::error::{Error, Result};
 
 use crate::host::{HostHandle, Target};
 use crate::keys::KeySequence;
@@ -98,15 +98,18 @@ impl Fleet {
     /// publish to a single aggregation bus (DC27).
     pub fn register(&mut self, alias: &str, host: HostHandle) -> Result<()> {
         if self.hosts.contains_key(alias) {
-            return Err(anyhow!("alias '{}' already registered", alias));
+            return Err(Error::AlreadyExists(format!(
+                "alias '{}' already registered",
+                alias
+            )));
         }
         if host.host_alias() != alias {
-            return Err(anyhow!(
+            return Err(Error::AlreadyExists(format!(
                 "fleet alias '{}' does not match host alias '{}'; \
                  create the host with HostHandle::with_alias() using the fleet alias",
                 alias,
                 host.host_alias()
-            ));
+            )));
         }
         host.inject_output_bus(self.bus.clone())?;
         self.hosts.insert(alias.to_string(), host);
@@ -183,7 +186,7 @@ impl Fleet {
         let host = self
             .hosts
             .get(alias)
-            .ok_or_else(|| anyhow!("host '{}' not registered", alias))?
+            .ok_or_else(|| Error::NotFound(format!("host '{}' not registered", alias)))?
             .clone();
 
         let monitor = host.start_monitoring_session(session).await?;
@@ -199,7 +202,7 @@ impl Fleet {
         let host = self
             .hosts
             .get(alias)
-            .ok_or_else(|| anyhow!("host '{}' not registered", alias))?
+            .ok_or_else(|| Error::NotFound(format!("host '{}' not registered", alias)))?
             .clone();
 
         let monitor = host.start_monitoring(None).await?;
@@ -210,7 +213,7 @@ impl Fleet {
     /// Stop all monitoring on a specific host.
     pub fn stop_monitoring_host(&mut self, alias: &str) -> Result<()> {
         if !self.hosts.contains_key(alias) {
-            return Err(anyhow!("host '{}' not registered", alias));
+            return Err(Error::NotFound(format!("host '{}' not registered", alias)));
         }
         // Stop session monitors
         self.session_monitors.remove(alias);
@@ -238,11 +241,11 @@ impl Fleet {
     /// Bind a workstream name to a host alias + target spec.
     pub fn bind(&mut self, workstream: &str, host_alias: &str, target: TargetSpec) -> Result<()> {
         if !self.hosts.contains_key(host_alias) {
-            return Err(anyhow!(
+            return Err(Error::NotFound(format!(
                 "cannot bind workstream '{}': host '{}' not registered",
                 workstream,
                 host_alias
-            ));
+            )));
         }
         self.workstreams.insert(
             workstream.to_string(),
@@ -259,7 +262,7 @@ impl Fleet {
         self.workstreams
             .remove(workstream)
             .map(|_| ())
-            .ok_or_else(|| anyhow!("workstream '{}' not found", workstream))
+            .ok_or_else(|| Error::NotFound(format!("workstream '{}' not found", workstream)))
     }
 
     /// Resolve a workstream name to a `Target`. Returns `None` if the
@@ -268,11 +271,11 @@ impl Fleet {
         let entry = self
             .workstreams
             .get(workstream)
-            .ok_or_else(|| anyhow!("workstream '{}' not bound", workstream))?;
+            .ok_or_else(|| Error::NotFound(format!("workstream '{}' not bound", workstream)))?;
         let host = self
             .hosts
             .get(&entry.host_alias)
-            .ok_or_else(|| anyhow!("host '{}' not registered", entry.host_alias))?;
+            .ok_or_else(|| Error::NotFound(format!("host '{}' not registered", entry.host_alias)))?;
         host.target(&entry.target_spec).await
     }
 
@@ -288,7 +291,7 @@ impl Fleet {
         let target = self
             .find(workstream)
             .await?
-            .ok_or_else(|| anyhow!("workstream '{}' target not found", workstream))?;
+            .ok_or_else(|| Error::NotFound(format!("workstream '{}' target not found", workstream)))?;
         target.send_text(text).await
     }
 
@@ -297,7 +300,7 @@ impl Fleet {
         let target = self
             .find(workstream)
             .await?
-            .ok_or_else(|| anyhow!("workstream '{}' target not found", workstream))?;
+            .ok_or_else(|| Error::NotFound(format!("workstream '{}' target not found", workstream)))?;
         target.send_keys(keys).await
     }
 
@@ -306,7 +309,7 @@ impl Fleet {
         let target = self
             .find(workstream)
             .await?
-            .ok_or_else(|| anyhow!("workstream '{}' target not found", workstream))?;
+            .ok_or_else(|| Error::NotFound(format!("workstream '{}' target not found", workstream)))?;
         target.capture().await
     }
 
@@ -314,7 +317,7 @@ impl Fleet {
     pub async fn target(&self, workstream: &str) -> Result<Target> {
         self.find(workstream)
             .await?
-            .ok_or_else(|| anyhow!("workstream '{}' target not found", workstream))
+            .ok_or_else(|| Error::NotFound(format!("workstream '{}' target not found", workstream)))
     }
 }
 

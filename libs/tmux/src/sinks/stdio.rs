@@ -8,7 +8,7 @@
 //! `JoinedStream` which provides structural `StreamChunk` with
 //! `SourceLabel` — a different layer from terminal sink formatting.
 
-use anyhow::Result;
+use crate::error::Result;
 use std::io::Write;
 
 use crate::sink::SinkEvent;
