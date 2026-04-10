@@ -228,6 +228,7 @@ pub struct BundleMetadata {
     pub id: BundleId,
     pub display_name: String,
     pub capabilities: Capabilities,
+    pub quantization: QuantizationSupport,
 }
 
 /// Artifact acquisition policy that bundle startup must honor.
@@ -246,6 +247,50 @@ pub enum ArtifactPolicy {
 pub enum QuantizationBits {
     Four,
     Eight,
+}
+
+/// Bundle-level declaration of which quantization precisions are supported
+/// and which precision is recommended for default deployments.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct QuantizationSupport {
+    /// Which precisions this bundle supports. Empty means no quantization.
+    pub supported: Vec<QuantizationBits>,
+    /// Curated recommendation for default deployments. `None` means F32.
+    pub recommended: Option<QuantizationBits>,
+}
+
+impl QuantizationSupport {
+    /// Bundle does not support any quantization.
+    pub fn none() -> Self {
+        Self {
+            supported: vec![],
+            recommended: None,
+        }
+    }
+
+    pub fn supports(&self, bits: QuantizationBits) -> bool {
+        self.supported.contains(&bits)
+    }
+
+    /// Resolve the caller's quantization request against this bundle's support.
+    ///
+    /// - `Some(bits)` where bits is supported → `Ok(Some(bits))`
+    /// - `Some(bits)` where bits is NOT supported → `Err(InvalidConfiguration)`
+    /// - `None` → `Ok(self.recommended)` (curated default or None for F32)
+    pub fn resolve(
+        &self,
+        requested: Option<QuantizationBits>,
+        bundle_id: &BundleId,
+    ) -> Result<Option<QuantizationBits>, ModelError> {
+        match requested {
+            Some(bits) if !self.supports(bits) => Err(ModelError::InvalidConfiguration(format!(
+                "bundle `{bundle_id}` does not support {bits:?} quantization; supported: {:?}",
+                self.supported
+            ))),
+            Some(bits) => Ok(Some(bits)),
+            None => Ok(self.recommended),
+        }
+    }
 }
 
 /// Deployment-oriented knobs used when starting a bundle.
@@ -452,6 +497,7 @@ mod tests {
             id: BundleId::new("embeddinggemma_300m"),
             display_name: "EmbeddingGemma 300M".into(),
             capabilities: Capabilities::embeddings_only(),
+            quantization: QuantizationSupport::none(),
         };
 
         assert_eq!(metadata, metadata.clone());
@@ -460,6 +506,7 @@ mod tests {
             id: metadata.id.clone(),
             display_name: metadata.display_name.clone(),
             capabilities: metadata.capabilities.clone(),
+            quantization: metadata.quantization.clone(),
         };
         assert_eq!(loaded, loaded.clone());
     }
@@ -500,6 +547,44 @@ mod tests {
         assert_eq!(none.quantization, None);
     }
 
+    #[test]
+    fn quantization_support_resolves_against_bundle_metadata() {
+        let bundle_id = BundleId::new("test_bundle");
+
+        let no_support = QuantizationSupport::none();
+        assert!(no_support.resolve(Some(QuantizationBits::Four), &bundle_id).is_err());
+        assert_eq!(no_support.resolve(None, &bundle_id).unwrap(), None);
+
+        let q4_q8 = QuantizationSupport {
+            supported: vec![QuantizationBits::Four, QuantizationBits::Eight],
+            recommended: Some(QuantizationBits::Four),
+        };
+        assert_eq!(
+            q4_q8.resolve(Some(QuantizationBits::Four), &bundle_id).unwrap(),
+            Some(QuantizationBits::Four)
+        );
+        assert_eq!(
+            q4_q8.resolve(Some(QuantizationBits::Eight), &bundle_id).unwrap(),
+            Some(QuantizationBits::Eight)
+        );
+        // None → recommended default
+        assert_eq!(
+            q4_q8.resolve(None, &bundle_id).unwrap(),
+            Some(QuantizationBits::Four)
+        );
+
+        let q8_only = QuantizationSupport {
+            supported: vec![QuantizationBits::Eight],
+            recommended: None,
+        };
+        assert!(q8_only.resolve(Some(QuantizationBits::Four), &bundle_id).is_err());
+        assert_eq!(
+            q8_only.resolve(Some(QuantizationBits::Eight), &bundle_id).unwrap(),
+            Some(QuantizationBits::Eight)
+        );
+        assert_eq!(q8_only.resolve(None, &bundle_id).unwrap(), None);
+    }
+
     #[tokio::test]
     async fn embedding_only_handle_reports_supported_surfaces() {
         let handle = FakeHandle {
@@ -507,6 +592,7 @@ mod tests {
                 id: BundleId::new("embedder"),
                 display_name: "Embedder".into(),
                 capabilities: Capabilities::embeddings_only(),
+                quantization: QuantizationSupport::none(),
             },
         };
 
