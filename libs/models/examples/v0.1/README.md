@@ -2,7 +2,7 @@
 
 This example demonstrates the curated embedding slice in `libs/models`.
 
-It is intentionally built with exactly one curated embedding bundle feature enabled. Today that means either:
+It is intentionally built with exactly two curated embedding bundle features enabled:
 
 - `embeddinggemma_300m` (`google/embeddinggemma-300m`)
 - `qwen3_embedding_06b` (`Qwen/Qwen3-Embedding-0.6B`)
@@ -15,8 +15,8 @@ The bundle returns normalized embedding vectors. In practice that means:
 
 ## What It Demonstrates
 
-1. direct curated enum selection through `EmbeddingModels::only_enabled()` for a single-bundle build
-2. optional parser-driven selection through `--embedding=google/embeddinggemma_300m` or `--embedding=qwen/qwen3_embedding_06b`
+1. parser-driven selection through `--embedding=google/embeddinggemma_300m` or `--embedding=qwen/qwen3_embedding_06b`
+2. one example binary built with knowledge of both curated embedding bundles
 3. optional curated artifact download into `artifacts/models/hf-cache`
 4. descriptor/capability introspection
 5. local-only startup through `ArtifactPolicy::LocalOnly`
@@ -30,32 +30,25 @@ The bundle returns normalized embedding vectors. In practice that means:
 
 ## Run
 
-EmbeddingGemma build:
+Build `v0.1` with both embedding bundles compiled in:
 
 ```sh
-cargo run -p motlie-models --no-default-features --features model-google-gemma-300m --example models_v0_1 -- "motlie curated model bundle"
+cargo run -p motlie-models --no-default-features --features "model-google-gemma-300m model-qwen3-embedding-06b" --example models_v0_1 -- --embedding=google/embeddinggemma_300m "motlie curated model bundle"
 ```
 
-Qwen build:
+Run the same binary against Qwen instead:
 
 ```sh
-cargo run -p motlie-models --no-default-features --features model-qwen3-embedding-06b --example models_v0_1 -- --precision=q8 "motlie curated model bundle"
+cargo run -p motlie-models --no-default-features --features "model-google-gemma-300m model-qwen3-embedding-06b" --example models_v0_1 -- --embedding=qwen/qwen3_embedding_06b --precision=q8 "motlie curated model bundle"
 ```
 
-The default path uses the direct enum selection for the single embedding model compiled into the build.
+The selector is now required because the binary is intentionally built with knowledge of both curated embedding bundles.
 
-If you want the example to exercise the parser-driven selector path, use the selector that matches the enabled bundle:
-
-```sh
-cargo run -p motlie-models --no-default-features --features model-google-gemma-300m --example models_v0_1 -- --embedding=google/embeddinggemma_300m "motlie curated model bundle"
-cargo run -p motlie-models --no-default-features --features model-qwen3-embedding-06b --example models_v0_1 -- --embedding=qwen/qwen3_embedding_06b --precision=q8 "motlie curated model bundle"
-```
-
-If you want the example to prefetch curated artifacts before startup:
+If you want the example to prefetch curated artifacts before startup, use the same selector:
 
 ```sh
-cargo run -p motlie-models --no-default-features --features model-google-gemma-300m --example models_v0_1 -- --download-artifacts "motlie curated model bundle"
-cargo run -p motlie-models --no-default-features --features model-qwen3-embedding-06b --example models_v0_1 -- --download-artifacts --precision=q8 "motlie curated model bundle"
+cargo run -p motlie-models --no-default-features --features "model-google-gemma-300m model-qwen3-embedding-06b" --example models_v0_1 -- --embedding=google/embeddinggemma_300m --download-artifacts "motlie curated model bundle"
+cargo run -p motlie-models --no-default-features --features "model-google-gemma-300m model-qwen3-embedding-06b" --example models_v0_1 -- --embedding=qwen/qwen3_embedding_06b --download-artifacts --precision=q8 "motlie curated model bundle"
 ```
 
 ## Preconditions
@@ -64,7 +57,7 @@ cargo run -p motlie-models --no-default-features --features model-qwen3-embeddin
 - if the upstream model requires authentication, pre-download artifacts out of band with the downloader utility and an HF token
 - the current machine can run the `mistralrs` embedding path used by the selected curated embedding bundle
 - for regulated or offline validation, omit `--download-artifacts` and rely on the previously populated curated artifact root
-- the example expects a single-bundle build and prints `catalog-entry-count: 1`; use `--no-default-features` plus exactly one embedding-bundle feature as shown above
+- the example expects the two-bundle embedding build and prints both the catalog entry count and available embedding selectors
 - not every embedding bundle supports every precision:
   - `embeddinggemma_300m` currently supports only `f32`
   - `qwen3_embedding_06b` currently supports `q8`, with `f32` as the unquantized default
@@ -73,8 +66,8 @@ Example authenticated pre-download:
 
 ```sh
 export HF_TOKEN=...
-cargo run -p motlie-models --no-default-features --features model-google-gemma-300m --bin motlie-models-download -- --hf-token-env HF_TOKEN embeddinggemma_300m
-cargo run -p motlie-models --no-default-features --features model-qwen3-embedding-06b --bin motlie-models-download -- --hf-token-env HF_TOKEN qwen3_embedding_06b
+cargo run -p motlie-models --no-default-features --features "model-google-gemma-300m model-qwen3-embedding-06b" --bin motlie-models-download -- --hf-token-env HF_TOKEN embeddinggemma_300m
+cargo run -p motlie-models --no-default-features --features "model-google-gemma-300m model-qwen3-embedding-06b" --bin motlie-models-download -- --hf-token-env HF_TOKEN qwen3_embedding_06b
 ```
 
 ## Expected Output
@@ -82,7 +75,7 @@ cargo run -p motlie-models --no-default-features --features model-qwen3-embeddin
 The example prints:
 
 - the bundle ID and artifact root
-- whether bundle resolution happened through the direct enum path or parsed selector path
+- the selected embedding selector and the list of available embedding selectors compiled into the binary
 - whether the run downloaded curated files or intentionally skipped download and used existing local artifacts
 - process snapshots including pid and RSS before startup, after startup, and after requests
 - bundle metadata such as family and backend

@@ -36,6 +36,7 @@ path = "src/bin/download_artifacts.rs"
 [[example]]
 name = "models_v0_1"
 path = "examples/v0.1/main.rs"
+required-features = ["model-google-gemma-300m", "model-qwen3-embedding-06b"]
 
 [[example]]
 name = "models_v0_2"

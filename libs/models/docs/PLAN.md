@@ -10,9 +10,9 @@
 | 2026-04-08 | @codex-researcher | Reconciled the PLAN with the current public API after review. `SupportTier` and `PackagingMode` were removed from the v1 surface earlier, so the PLAN now tracks the descriptor fields that actually exist in code and docs. | Phase 1, Phase 2 |
 | 2026-04-08 | @claude | Added Phase 5 for the Qwen3-4B chat bundle (#141). Covers `ChatModels` enum, `ModelSelector::Chat`, curated artifact rules, HF cache resolution, and `v0.2` example. | Phase 5 |
 | 2026-04-08 | @codex-researcher | Added Phase 6 for the Gemma 4 E2B-it multimodal chat bundle (#142). Covers the feature-gated chat module, multimodal artifact rules, local snapshot validation, selector/catalog wiring, and `v0.3`. | Phase 6 |
-| 2026-04-09 | @codex-researcher | Tightened the versioned-example convention. `v0.1`-`v0.3` now assert single-bundle builds by printing `catalog-entry-count: 1`, and the Gemma example follows the same rule. | Phases 4-6 |
+| 2026-04-09 | @codex-researcher | Tightened the versioned-example convention. `v0.2` and `v0.3` remain single-bundle builds; `v0.1` is now the explicit two-bundle embedding comparison example, so the binary requires `--embedding=...` and prints the compiled selector set. | Phases 4-7 |
 | 2026-04-09 | @codex-researcher | Collapsed the duplicate Gemma 4 examples into a single `v0.3` flow. `v0.3` now owns both optional artifact download and local-only startup, preserving the one-model-per-example convention. | Phase 6 |
-| 2026-04-09 | @codex-researcher | Added Phase 7 for the Qwen3-Embedding-0.6B curated bundle (#147). Covers the new Mistral embedding arch, curated bundle module, feature-gated selector/catalog wiring, and the generalized single-bundle `v0.1` embedding example. | Phase 7 |
+| 2026-04-09 | @codex-researcher | Added Phase 7 for the Qwen3-Embedding-0.6B curated bundle (#147). Covers the new Mistral embedding arch, curated bundle module, feature-gated selector/catalog wiring, and the generalized `v0.1` embedding comparison example. | Phase 7 |
 
 Derived from [DESIGN.md](./DESIGN.md). This PLAN focuses on the first curated bundle slice rather than the full long-term catalog.
 
@@ -166,10 +166,9 @@ Add the first curated chat bundle to validate the `ChatModel` + `CompletionModel
 
 ### 7.4 — Example and verification
 
-- [x] Update `examples/v0.1` to work with whichever single embedding bundle feature is enabled, while preserving the `catalog-entry-count: 1` convention.
+- [x] Update `examples/v0.1` into the shared embedding comparison binary built with both embedding bundle features enabled, requiring `--embedding=...` to choose the model at download/run time.
 - [x] Add optional `--precision=q4|q8|f32` handling to `v0.1`; bundle metadata enforces the supported subset at startup.
 - [x] `cargo test -p motlie-model-mistral --lib`
 - [x] `cargo test -p motlie-models --lib`
-- [x] `cargo build -p motlie-models --no-default-features --features model-google-gemma-300m --example models_v0_1`
-- [x] `cargo build -p motlie-models --no-default-features --features model-qwen3-embedding-06b --example models_v0_1`
+- [x] `cargo build -p motlie-models --no-default-features --features "model-google-gemma-300m model-qwen3-embedding-06b" --example models_v0_1`
 - [ ] Env-gated end-to-end example run with pre-downloaded Qwen3-Embedding-0.6B artifacts.

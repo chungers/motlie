@@ -18,7 +18,7 @@
 | 2026-04-08 | @codex-researcher: Clarified the local-only startup boundary after PR 139 review. Curated bundle modules now resolve and validate provider-specific cache layout before startup, while generic backends consume only a resolved local model path. Also clarified that selector strings are composed from capability family plus model selector rather than hardcoded one-off branches. | Overview, API Sketch, Notes |
 | 2026-04-08 | @claude: Added the Qwen3-4B chat bundle (#141). New `ChatModels` enum, `ModelSelector::Chat` variant, `chat:qwen/qwen3_4b` parsing, ISQ quantization via `StartOptions.quantization`, and `v0.2` example. | Overview, Core Types, API Sketch, Example Program |
 | 2026-04-08 | @codex-researcher: Added the Gemma 4 E2B-it multimodal chat slice (#142). `ChatModels` now includes `Gemma4E2B`, `ModelSelector` supports `chat:google/gemma4_e2b`, and `examples/v0.3` documents the direct text-only and image+text caller paths. | Overview, Core Types, API Sketch, Example Program, Notes |
-| 2026-04-09 | @codex-researcher: Tightened the example-build convention. Versioned examples now expect a single-bundle build and print `catalog-entry-count: 1`, and the Gemma example follows the same one-model-per-example rule. | Example Program, Notes |
+| 2026-04-09 | @codex-researcher: Tightened the example-build convention. Versioned examples are explicit about which curated bundles are compiled into each binary, and `v0.1` now documents the two-bundle embedding comparison build with explicit `--embedding=...` selection. | Example Program, Notes |
 | 2026-04-09 | @codex-researcher: Collapsed the duplicate Gemma 4 examples into a single `v0.3` flow. `v0.3` now carries the optional `--download-artifacts` behavior directly, so each versioned example once again maps to exactly one curated model. | Example Program, Notes |
 | 2026-04-09 | @codex-researcher: Added handle-level metric snapshot usage to the examples. The current `mistral` backends now surface runtime latency/memory aggregates on the loaded bundle handle, with text-generation token metrics where the backend provides them. | Example Program, Notes |
 | 2026-04-09 | @codex-researcher: Clarified the current runtime-metrics implementation boundary for examples. The model-layer metrics path uses `sysinfo` for cross-platform current RSS on macOS and Linux, while peak RSS is maintained by Motlie as an observed-handle aggregate rather than an OS-native historical peak counter. | Notes |
@@ -147,12 +147,6 @@ assert_eq!(qwen.as_str(), "qwen/qwen3_embedding_06b");
 let descriptor = model.descriptor();
 let bundle = model.bundle();
 let spec = model.embedding_spec();
-```
-
-For single-bundle example builds, the direct path can ask the enum for the only compiled embedding bundle:
-
-```rust
-let model = EmbeddingModels::only_enabled()?;
 ```
 
 ### Direct Curated Chat Enum
@@ -355,13 +349,13 @@ The runnable examples for this crate are:
   - [README.md](/tmp/motlie-issue142/libs/models/examples/v0.3/README.md)
   - [main.rs](/tmp/motlie-issue142/libs/models/examples/v0.3/main.rs)
 
-All versioned examples now assume a single-bundle build and print `catalog-entry-count: 1`. Run them with `--no-default-features` and only the feature for the bundle under test.
+The versioned examples are explicit about which curated bundles are compiled into the binary. `v0.2` and `v0.3` remain single-bundle builds; `v0.1` is the embedding comparison example and is built with both embedding bundles compiled in.
 
 Embedding example (`v0.1`):
 
 ```sh
-cargo run -p motlie-models --no-default-features --features model-google-gemma-300m --example models_v0_1 -- "motlie curated model bundle"
-cargo run -p motlie-models --no-default-features --features model-qwen3-embedding-06b --example models_v0_1 -- --precision=q8 "motlie curated model bundle"
+cargo run -p motlie-models --no-default-features --features "model-google-gemma-300m model-qwen3-embedding-06b" --example models_v0_1 -- --embedding=google/embeddinggemma_300m "motlie curated model bundle"
+cargo run -p motlie-models --no-default-features --features "model-google-gemma-300m model-qwen3-embedding-06b" --example models_v0_1 -- --embedding=qwen/qwen3_embedding_06b --precision=q8 "motlie curated model bundle"
 ```
 
 Text-only chat example (`v0.2`):
@@ -420,7 +414,7 @@ For a new curated embedding bundle, the intended implementation checklist is:
 - `embeddinggemma_300m` local-only startup depends on the full sentence-transformers module stack being present in the curated artifact root. That requirement is part of the bundle contract, not an ambient `mistralrs` cache behavior.
 - `qwen3_embedding_06b` currently advertises `QuantizationSupport::without_recommended([Q8])`, so `v0.1 --precision=q8` is supported for that bundle while omitted precision still means F32.
 - Authentication for protected upstream artifacts belongs only to the out-of-band download/build path. The runtime/bundle startup path does not accept tokens and remains artifact-consumption only.
-- The `v0.1` example now defaults to existing local artifacts and only touches Hugging Face when `--download-artifacts` is passed explicitly.
+- The `v0.1` example is now a two-bundle comparison binary. It prints `catalog-entry-count: 2`, lists the compiled embedding selectors, and requires `--embedding=...` so the caller chooses which curated embedder to download or run.
 
 ## Next Step
 
