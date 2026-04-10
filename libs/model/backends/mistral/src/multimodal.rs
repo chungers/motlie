@@ -40,10 +40,10 @@ impl MistralMultimodalSpec {
             model_id: "google/gemma-4-E2B-it",
             arch: MistralMultimodalArch::Gemma4,
             capabilities: Capabilities::multimodal_chat_and_vision(),
-            quantization: QuantizationSupport {
-                supported: vec![QuantizationBits::Four, QuantizationBits::Eight],
-                recommended: Some(QuantizationBits::Four),
-            },
+            quantization: QuantizationSupport::with_recommended(
+                [QuantizationBits::Four, QuantizationBits::Eight],
+                QuantizationBits::Four,
+            ),
         }
     }
 }
@@ -85,7 +85,13 @@ impl ModelBundle for MistralMultimodalBundle {
     }
 
     async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
-        let model = build_multimodal_model(self.model_id, self.arch, &self.metadata, options).await?;
+        let resolved_quantization = self
+            .metadata
+            .quantization
+            .resolve(options.quantization, &self.metadata.id)?;
+        let model =
+            build_multimodal_model(self.model_id, self.arch, resolved_quantization, options)
+                .await?;
         let metrics = Arc::new(Mutex::new(MultimodalMetrics::default()));
         {
             let mut metrics = lock_metrics(&metrics, "mistral-multimodal-start");
@@ -93,7 +99,13 @@ impl ModelBundle for MistralMultimodalBundle {
         }
 
         Ok(Box::new(MistralMultimodalHandle {
-            descriptor: self.metadata.clone(),
+            descriptor: LoadedBundleDescriptor {
+                id: self.metadata.id.clone(),
+                display_name: self.metadata.display_name.clone(),
+                capabilities: self.metadata.capabilities.clone(),
+                quantization: self.metadata.quantization.clone(),
+                resolved_quantization,
+            },
             runtime: Box::new(MistralMultimodalRuntime {
                 model,
                 metrics: Arc::clone(&metrics),
@@ -254,17 +266,15 @@ struct MultimodalMetrics {
 async fn build_multimodal_model(
     model_id: &str,
     _arch: MistralMultimodalArch,
-    metadata: &BundleMetadata,
+    resolved_quantization: Option<QuantizationBits>,
     options: StartOptions,
 ) -> Result<mistralrs::Model, ModelError> {
     let StartOptions {
         artifact_policy,
-        quantization,
+        quantization: _, // already resolved by caller
         unpack_root,
         max_concurrency,
     } = options;
-
-    let resolved_quantization = metadata.quantization.resolve(quantization, &metadata.id)?;
 
     if let Some(unpack_root) = unpack_root {
         return Err(ModelError::InvalidConfiguration(format!(
@@ -355,10 +365,11 @@ mod tests {
                 id: BundleId::new("gemma4_e2b"),
                 display_name: "Gemma 4 E2B-it".into(),
                 capabilities: Capabilities::multimodal_chat_and_vision(),
-                quantization: QuantizationSupport {
-                    supported: vec![QuantizationBits::Four, QuantizationBits::Eight],
-                    recommended: Some(QuantizationBits::Four),
-                },
+                quantization: QuantizationSupport::with_recommended(
+                    [QuantizationBits::Four, QuantizationBits::Eight],
+                    QuantizationBits::Four,
+                ),
+                resolved_quantization: Some(QuantizationBits::Four),
             },
             runtime: Box::new(StubMultimodalRuntime),
             metrics: Arc::new(Mutex::new(MultimodalMetrics::default())),
