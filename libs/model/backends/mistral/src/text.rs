@@ -12,8 +12,8 @@ use motlie_model::{
 
 use crate::common::{
     apply_generation_params, configure_artifact_policy, map_chat_role, map_quantization_bits,
-    observe_latency, observe_memory, observe_text_usage, should_force_cpu, snapshot_text_metrics,
-    RuntimeMetricState, TextMetricState,
+    lock_metrics, observe_latency, observe_memory, observe_text_usage, should_force_cpu,
+    snapshot_text_metrics, RuntimeMetricState, TextMetricState,
 };
 
 /// Text model architecture discriminant that selects the correct `mistralrs` loader path.
@@ -91,7 +91,8 @@ impl ModelBundle for MistralTextBundle {
     async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
         let model = build_text_model(self.model_id, self.arch, options).await?;
         let metrics = Arc::new(Mutex::new(TextMetrics::default()));
-        if let Ok(mut metrics) = metrics.lock() {
+        {
+            let mut metrics = lock_metrics(&metrics, "mistral-text-start");
             observe_memory(&mut metrics.runtime);
         }
 
@@ -152,7 +153,8 @@ impl TextRuntime for MistralTextRuntime {
                 message: "response contained no text content".into(),
             })?;
 
-        if let Ok(mut metrics) = self.metrics.lock() {
+        {
+            let mut metrics = lock_metrics(&self.metrics, "mistral-text-chat");
             observe_latency(&mut metrics.runtime, elapsed);
             observe_text_usage(&mut metrics.text, &usage);
         }
@@ -218,7 +220,7 @@ impl BundleHandle for MistralTextHandle {
     }
 
     fn metric_snapshot(&self) -> Option<ModelMetricSnapshot> {
-        let metrics = self.metrics.lock().ok()?.clone();
+        let metrics = lock_metrics(&self.metrics, "mistral-text-metric-snapshot").clone();
         Some(snapshot_text_metrics(&metrics.runtime, &metrics.text))
     }
 

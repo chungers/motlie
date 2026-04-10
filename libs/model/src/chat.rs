@@ -73,12 +73,35 @@ impl ChatMessage {
         Self {
             role,
             content: vec![
+                ContentPart::Text(text.into()),
                 ContentPart::Image {
                     data,
                     media_type: media_type.into(),
                 },
-                ContentPart::Text(text.into()),
             ],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_and_image_preserves_parameter_order() {
+        let message = ChatMessage::text_and_image(
+            ChatRole::User,
+            "describe this",
+            vec![1, 2, 3],
+            "image/png",
+        );
+
+        assert!(matches!(
+            message.content.as_slice(),
+            [
+                ContentPart::Text(text),
+                ContentPart::Image { data, media_type }
+            ] if text == "describe this" && data == &vec![1, 2, 3] && media_type == "image/png"
+        ));
     }
 }

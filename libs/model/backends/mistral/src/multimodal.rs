@@ -12,8 +12,8 @@ use motlie_model::{
 
 use crate::common::{
     apply_generation_params, configure_artifact_policy, map_chat_role, map_quantization_bits,
-    observe_latency, observe_memory, observe_text_usage, should_force_cpu, snapshot_text_metrics,
-    RuntimeMetricState, TextMetricState,
+    lock_metrics, observe_latency, observe_memory, observe_text_usage, should_force_cpu,
+    snapshot_text_metrics, RuntimeMetricState, TextMetricState,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,7 +80,8 @@ impl ModelBundle for MistralMultimodalBundle {
     async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
         let model = build_multimodal_model(self.model_id, self.arch, options).await?;
         let metrics = Arc::new(Mutex::new(MultimodalMetrics::default()));
-        if let Ok(mut metrics) = metrics.lock() {
+        {
+            let mut metrics = lock_metrics(&metrics, "mistral-multimodal-start");
             observe_memory(&mut metrics.runtime);
         }
 
@@ -136,7 +137,8 @@ impl MultimodalRuntime for MistralMultimodalRuntime {
                 message: "response contained no text content".into(),
             })?;
 
-        if let Ok(mut metrics) = self.metrics.lock() {
+        {
+            let mut metrics = lock_metrics(&self.metrics, "mistral-multimodal-chat");
             observe_latency(&mut metrics.runtime, elapsed);
             observe_text_usage(&mut metrics.text, &usage);
         }
@@ -182,7 +184,7 @@ fn collect_multimodal_parts(
             }
             ContentPart::ImageUrl { url } => {
                 return Err(ModelError::InvalidConfiguration(format!(
-                    "mistralrs multimodal chat does not support image urls in LocalOnly mode (`{url}`)"
+                    "mistralrs multimodal chat does not support `ContentPart::ImageUrl` yet (`{url}`); provide inline image bytes instead"
                 )));
             }
         }
@@ -208,7 +210,7 @@ impl BundleHandle for MistralMultimodalHandle {
     }
 
     fn metric_snapshot(&self) -> Option<ModelMetricSnapshot> {
-        let metrics = self.metrics.lock().ok()?.clone();
+        let metrics = lock_metrics(&self.metrics, "mistral-multimodal-metric-snapshot").clone();
         Some(snapshot_text_metrics(&metrics.runtime, &metrics.text))
     }
 
