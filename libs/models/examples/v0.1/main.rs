@@ -1,8 +1,6 @@
 use anyhow::{Context, Result, bail, ensure};
-use motlie_model::{ArtifactPolicy, EmbeddingRequest, StartOptions};
-use motlie_models::{
-    ModelSelector, default_artifact_root, download_bundle_artifacts, embeddings::EmbeddingModels,
-};
+use motlie_model::{ArtifactPolicy, EmbeddingRequest, QuantizationBits, StartOptions};
+use motlie_models::{ModelSelector, default_artifact_root, download_bundle_artifacts};
 use std::time::Instant;
 
 #[path = "../support.rs"]
@@ -12,11 +10,13 @@ const SIMILAR_A: &str = "A small orange cat is sleeping on the couch.";
 const SIMILAR_B: &str = "An orange kitten is napping on a sofa.";
 const DISSIMILAR_A: &str = "A small orange cat is sleeping on the couch.";
 const DISSIMILAR_B: &str = "Quarterly revenue increased by twelve percent year over year.";
+const DEFAULT_EMBEDDING_SELECTOR: &str = motlie_models::embeddings::GOOGLE_GEMMA_300M_SELECTOR;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut download_artifacts = false;
     let mut embedding_selector = None;
+    let mut precision = None;
     let mut input_parts = Vec::new();
 
     for arg in std::env::args().skip(1) {
@@ -24,58 +24,69 @@ async fn main() -> Result<()> {
             download_artifacts = true;
         } else if let Some(selector) = arg.strip_prefix("--embedding=") {
             embedding_selector = Some(selector.to_owned());
+        } else if let Some(p) = arg.strip_prefix("--precision=") {
+            precision = Some(p.to_owned());
         } else {
             input_parts.push(arg);
         }
     }
 
     let input = input_parts.join(" ");
+    let selector = embedding_selector.unwrap_or_else(|| DEFAULT_EMBEDDING_SELECTOR.to_owned());
     if input.trim().is_empty() {
         bail!(
-            "usage: cargo run -p motlie-models --no-default-features --features model-google-gemma-300m --example models_v0_1 -- [--download-artifacts] [--embedding=google/embeddinggemma_300m] <text to embed>"
+            "usage: cargo run -p motlie-models --no-default-features --features 'model-google-gemma-300m model-qwen3-embedding-06b' --example models_v0_1 -- [--embedding=google/embeddinggemma_300m|qwen/qwen3_embedding_06b] [--download-artifacts] [--precision=q4|q8|f32] <text to embed>"
         );
     }
 
-    let (selector_label, bundle_id, descriptor, bundle, path_kind) = if let Some(selector) =
-        embedding_selector
-    {
-        let model_selector: ModelSelector = format!("embedding:{selector}")
-            .parse()
-            .with_context(|| format!("failed to parse model selector `embedding:{selector}`"))?;
-        (
-            model_selector.to_string(),
-            model_selector.bundle_id(),
-            model_selector.descriptor(),
-            model_selector.bundle(),
-            "selector",
-        )
-    } else {
-        let model = EmbeddingModels::GoogleGemma300m;
-        (
-            model.to_string(),
-            model.bundle_id(),
-            model.descriptor(),
-            model.bundle(),
-            "direct-enum",
-        )
+    let quantization = match precision.as_deref() {
+        Some("q4") => Some(QuantizationBits::Four),
+        Some("q8") => Some(QuantizationBits::Eight),
+        Some("f32") | None => None,
+        Some(other) => bail!("unknown precision `{other}` — use q4, q8, or f32"),
     };
+
+    let model_selector: ModelSelector = format!("embedding:{selector}")
+        .parse()
+        .with_context(|| format!("failed to parse model selector `embedding:{selector}`"))?;
+    let selector_label = model_selector.to_string();
+    let bundle_id = model_selector.bundle_id();
+    let descriptor = model_selector.descriptor();
+    let bundle = model_selector.bundle();
 
     let artifact_root = default_artifact_root();
     let catalog = motlie_models::Catalog::with_defaults();
 
     println!("catalog-entry-count: {}", catalog.len());
+    println!(
+        "available-embedding-selectors: {}",
+        available_embedding_selectors().join(", ")
+    );
+    println!("default-embedding-selector: {DEFAULT_EMBEDDING_SELECTOR}");
     ensure!(
-        catalog.len() == 1,
-        "models_v0_1 must be built with exactly one curated bundle feature enabled"
+        catalog.len() == 2,
+        "models_v0_1 must be built with exactly the two curated embedding bundle features enabled"
     );
 
     println!("bundle-selector: {selector_label}");
-    println!("resolution-path: {path_kind}");
+    println!(
+        "resolution-path: {}",
+        if selector == DEFAULT_EMBEDDING_SELECTOR {
+            "default-or-selector"
+        } else {
+            "selector"
+        }
+    );
     println!("bundle-id: {}", bundle_id.as_str());
     println!("artifact-root: {}", artifact_root.display());
-    support::print_process_snapshot(
-        "process-before-start",
-        &support::current_process_snapshot(),
+    support::print_process_snapshot("process-before-start", &support::current_process_snapshot());
+    println!(
+        "quantization: {}",
+        match quantization {
+            Some(QuantizationBits::Four) => "ISQ Q4",
+            Some(QuantizationBits::Eight) => "ISQ Q8",
+            None => "F32 (none)",
+        }
     );
 
     if download_artifacts {
@@ -109,6 +120,7 @@ async fn main() -> Result<()> {
             artifact_policy: Some(ArtifactPolicy::LocalOnly {
                 root: artifact_root.clone(),
             }),
+            quantization,
             ..Default::default()
         })
         .await
@@ -126,7 +138,7 @@ async fn main() -> Result<()> {
 
     let embeddings = handle
         .embeddings()
-        .context("embeddinggemma bundle should expose embeddings")?;
+        .context("embedding bundle should expose embeddings")?;
     let custom_started_at = Instant::now();
     let custom_response = embeddings
         .embed(EmbeddingRequest {
@@ -156,10 +168,7 @@ async fn main() -> Result<()> {
         "process-after-custom-embed",
         &support::current_process_snapshot(),
     );
-    support::print_model_metrics(
-        "model-metrics-after-custom-embed",
-        handle.metric_snapshot(),
-    );
+    support::print_model_metrics("model-metrics-after-custom-embed", handle.metric_snapshot());
 
     run_pair_demo(
         embeddings,
@@ -187,9 +196,19 @@ async fn main() -> Result<()> {
         .shutdown()
         .await
         .context("bundle shutdown should succeed")?;
-    support::print_process_snapshot("process-after-shutdown", &support::current_process_snapshot());
+    support::print_process_snapshot(
+        "process-after-shutdown",
+        &support::current_process_snapshot(),
+    );
 
     Ok(())
+}
+
+fn available_embedding_selectors() -> Vec<&'static str> {
+    vec![
+        motlie_models::embeddings::GOOGLE_GEMMA_300M_SELECTOR,
+        motlie_models::embeddings::QWEN3_EMBEDDING_06B_SELECTOR,
+    ]
 }
 
 async fn run_pair_demo(
