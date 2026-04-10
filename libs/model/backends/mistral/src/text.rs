@@ -7,7 +7,8 @@ use mistralrs::{RequestBuilder, TextModelBuilder};
 use motlie_model::{
     BundleHandle, BundleId, BundleMetadata, Capabilities, CapabilityKind, ChatModel, ChatRequest,
     ChatResponse, ChatRole, CompletionModel, CompletionRequest, CompletionResponse, EmbeddingModel,
-    LoadedBundleDescriptor, ModelBundle, ModelError, ModelMetricSnapshot, StartOptions,
+    LoadedBundleDescriptor, ModelBundle, ModelError, ModelMetricSnapshot, QuantizationBits,
+    QuantizationSupport, StartOptions,
 };
 
 use crate::common::{
@@ -38,6 +39,7 @@ pub struct MistralTextSpec {
     pub model_id: &'static str,
     pub arch: MistralTextArch,
     pub capabilities: Capabilities,
+    pub quantization: QuantizationSupport,
 }
 
 impl MistralTextSpec {
@@ -48,6 +50,11 @@ impl MistralTextSpec {
             model_id: "Qwen/Qwen3-4B",
             arch: MistralTextArch::Qwen3,
             capabilities: Capabilities::chat_and_completion(),
+            quantization: QuantizationSupport::with_recommended(
+                [QuantizationBits::Four, QuantizationBits::Eight],
+                QuantizationBits::Four,
+            )
+            .expect("curated quantization support is valid"),
         }
     }
 }
@@ -67,6 +74,7 @@ impl MistralTextBundle {
                 id: spec.id,
                 display_name: spec.display_name.into(),
                 capabilities: spec.capabilities,
+                quantization: spec.quantization,
             },
             arch: spec.arch,
             model_id: spec.model_id,
@@ -89,7 +97,12 @@ impl ModelBundle for MistralTextBundle {
     }
 
     async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
-        let model = build_text_model(self.model_id, self.arch, options).await?;
+        let resolved_quantization = self
+            .metadata
+            .quantization
+            .resolve(options.quantization, &self.metadata.id)?;
+        let model =
+            build_text_model(self.model_id, self.arch, resolved_quantization, options).await?;
         let metrics = Arc::new(Mutex::new(TextMetrics::default()));
         {
             let mut metrics = lock_metrics(&metrics, "mistral-text-start");
@@ -101,6 +114,8 @@ impl ModelBundle for MistralTextBundle {
                 id: self.metadata.id.clone(),
                 display_name: self.metadata.display_name.clone(),
                 capabilities: self.metadata.capabilities.clone(),
+                quantization: self.metadata.quantization.clone(),
+                resolved_quantization,
             },
             runtime: Box::new(MistralTextRuntime {
                 model,
@@ -270,11 +285,12 @@ impl CompletionModel for MistralTextHandle {
 async fn build_text_model(
     model_id: &str,
     arch: MistralTextArch,
+    resolved_quantization: Option<QuantizationBits>,
     options: StartOptions,
 ) -> Result<mistralrs::Model, ModelError> {
     let StartOptions {
         artifact_policy,
-        quantization,
+        quantization: _, // already resolved by caller
         unpack_root,
         max_concurrency,
     } = options;
@@ -297,7 +313,7 @@ async fn build_text_model(
 
     let mut builder = TextModelBuilder::new(model_target).with_loader_type(arch.loader_type());
 
-    if let Some(bits) = quantization {
+    if let Some(bits) = resolved_quantization {
         builder = builder.with_auto_isq(map_quantization_bits(bits));
     }
     if should_force_cpu() {
@@ -376,6 +392,12 @@ mod tests {
                 id: BundleId::new("qwen3_4b"),
                 display_name: "Qwen3 4B".into(),
                 capabilities: Capabilities::chat_and_completion(),
+                quantization: QuantizationSupport::with_recommended(
+                    [QuantizationBits::Four, QuantizationBits::Eight],
+                    QuantizationBits::Four,
+                )
+                .expect("test quantization support is valid"),
+                resolved_quantization: Some(QuantizationBits::Four),
             },
             runtime: Box::new(StubTextRuntime),
             metrics: Arc::new(Mutex::new(TextMetrics::default())),
@@ -444,6 +466,7 @@ mod tests {
             .block_on(build_text_model(
                 "Qwen/Qwen3-4B",
                 MistralTextArch::Qwen3,
+                None, // resolved quantization not relevant for unpack_root test
                 StartOptions {
                     unpack_root: Some(PathBuf::from("/tmp/motlie-model-unpack")),
                     ..Default::default()
