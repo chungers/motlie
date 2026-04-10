@@ -2,36 +2,36 @@ use std::path::{Path, PathBuf};
 
 use motlie_model::eval::EvalTrack;
 use motlie_model::{BundleId, ModelBundle, ModelError, StartOptions};
-use motlie_model_mistral::{MistralTextBundle, MistralTextSpec};
+use motlie_model_mistral::{MistralMultimodalBundle, MistralMultimodalSpec};
 
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleArtifacts, BundleDescriptor,
     BundleFamily, BundleRequirements, PlatformConstraint,
 };
 
-pub const SELECTOR: &str = "qwen/qwen3_4b";
+pub const SELECTOR: &str = "google/gemma4_e2b";
 
 #[derive(Clone, Debug)]
-pub struct Qwen3_4B {
-    inner: MistralTextBundle,
+pub struct Gemma4E2B {
+    inner: MistralMultimodalBundle,
 }
 
-impl Qwen3_4B {
+impl Gemma4E2B {
     pub fn new() -> Self {
         Self {
-            inner: MistralTextBundle::new(MistralTextSpec::qwen3_4b()),
+            inner: MistralMultimodalBundle::new(MistralMultimodalSpec::gemma4_e2b()),
         }
     }
 }
 
-impl Default for Qwen3_4B {
+impl Default for Gemma4E2B {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[async_trait::async_trait]
-impl ModelBundle for Qwen3_4B {
+impl ModelBundle for Gemma4E2B {
     fn id(&self) -> &BundleId {
         self.inner.id()
     }
@@ -74,10 +74,10 @@ impl ModelBundle for Qwen3_4B {
 
 pub fn descriptor() -> BundleDescriptor {
     BundleDescriptor {
-        id: BundleId::new("qwen3_4b"),
-        display_name: "Qwen3 4B".into(),
-        family: BundleFamily::Qwen,
-        capabilities: motlie_model::Capabilities::chat_and_completion(),
+        id: BundleId::new("gemma4_e2b"),
+        display_name: "Gemma 4 E2B-it".into(),
+        family: BundleFamily::Gemma,
+        capabilities: motlie_model::Capabilities::multimodal_chat_and_vision(),
         backend: BackendKind::MistralRs,
         requirements: BundleRequirements {
             platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
@@ -90,16 +90,20 @@ pub fn descriptor() -> BundleDescriptor {
             EvalTrack::Classification,
         ],
         artifacts: Some(BundleArtifacts {
-            control_name: "qwen3_4b",
+            control_name: "gemma4_e2b",
             source: ArtifactSource::HuggingFace {
-                repo: "Qwen/Qwen3-4B",
+                repo: "google/gemma-4-E2B-it",
             },
             include: vec![
+                ArtifactRule::Exact("chat_template.jinja"),
                 ArtifactRule::Exact("config.json"),
-                ArtifactRule::Exact("tokenizer.json"),
-                ArtifactRule::Exact("tokenizer_config.json"),
                 ArtifactRule::Exact("generation_config.json"),
+                ArtifactRule::Exact("tokenizer.json"),
+                ArtifactRule::Exact("tokenizer.model"),
+                ArtifactRule::Exact("tokenizer_config.json"),
                 ArtifactRule::Exact("special_tokens_map.json"),
+                ArtifactRule::Exact("preprocessor_config.json"),
+                ArtifactRule::Exact("processor_config.json"),
                 ArtifactRule::Suffix(".safetensors"),
                 ArtifactRule::Suffix(".safetensors.index.json"),
             ],
@@ -108,63 +112,60 @@ pub fn descriptor() -> BundleDescriptor {
 }
 
 pub fn bundle() -> Box<dyn ModelBundle> {
-    Box::new(Qwen3_4B::new())
+    Box::new(Gemma4E2B::new())
 }
 
 fn resolve_local_snapshot_root(root: &Path) -> Result<PathBuf, ModelError> {
-    crate::resolve_hf_snapshot("Qwen/Qwen3-4B", root)
+    let snapshot = crate::resolve_hf_snapshot("google/gemma-4-E2B-it", root)?;
+    let has_processor = snapshot.join("preprocessor_config.json").exists()
+        || snapshot.join("processor_config.json").exists();
+    if !has_processor {
+        return Err(ModelError::InvalidConfiguration(format!(
+            "artifact policy `LocalOnly` requires cached multimodal processor config for `google/gemma-4-E2B-it` under `{}`",
+            root.display()
+        )));
+    }
+    if !snapshot.join("chat_template.jinja").exists() {
+        return Err(ModelError::InvalidConfiguration(format!(
+            "artifact policy `LocalOnly` requires `chat_template.jinja` for `google/gemma-4-E2B-it` under `{}`",
+            root.display()
+        )));
+    }
+    Ok(snapshot)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Catalog;
-    use motlie_model::CapabilityDescriptor;
+    use motlie_model::CapabilityKind;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn descriptor_is_reviewable_as_data() {
         let descriptor = descriptor();
 
-        assert_eq!(descriptor.id.as_str(), "qwen3_4b");
-        assert_eq!(descriptor.display_name, "Qwen3 4B");
-        assert_eq!(descriptor.family, BundleFamily::Qwen);
+        assert_eq!(descriptor.id.as_str(), "gemma4_e2b");
+        assert_eq!(descriptor.display_name, "Gemma 4 E2B-it");
+        assert_eq!(descriptor.family, BundleFamily::Gemma);
         assert_eq!(descriptor.backend, BackendKind::MistralRs);
-        assert!(descriptor.eval_tracks.contains(&EvalTrack::Chat));
-        assert!(descriptor.eval_tracks.contains(&EvalTrack::Reasoning));
-        assert!(
-            descriptor
-                .capabilities
-                .supports(motlie_model::CapabilityKind::Chat)
-        );
-        assert!(
-            descriptor
-                .capabilities
-                .supports(motlie_model::CapabilityKind::Completion)
-        );
-        assert_eq!(
-            descriptor.capability_descriptors(),
-            &[
-                CapabilityDescriptor::chat(),
-                CapabilityDescriptor::completion(),
-            ]
-        );
-
+        assert!(descriptor.capabilities.supports(CapabilityKind::Chat));
+        assert!(descriptor.capabilities.supports(CapabilityKind::Vision));
         let artifacts = descriptor
             .artifacts
             .expect("descriptor should expose curated artifact control");
-        assert_eq!(artifacts.control_name, "qwen3_4b");
-        assert!(artifacts.includes("config.json"));
+        assert_eq!(artifacts.control_name, "gemma4_e2b");
+        assert!(artifacts.includes("chat_template.jinja"));
+        assert!(artifacts.includes("preprocessor_config.json"));
         assert!(artifacts.includes("model-00001-of-00002.safetensors"));
-        assert!(!artifacts.includes("README.md"));
     }
 
     #[test]
-    fn default_catalog_includes_qwen3_bundle() {
+    fn default_catalog_includes_gemma4_bundle() {
         let catalog = Catalog::with_defaults();
-        let bundle_id = BundleId::new("qwen3_4b");
+        let bundle_id = BundleId::new("gemma4_e2b");
 
-        #[cfg(feature = "model-qwen3-4b")]
+        #[cfg(feature = "model-gemma4-e2b")]
         {
             assert!(catalog.instantiate(&bundle_id).is_some());
             assert!(
@@ -192,11 +193,15 @@ mod tests {
     #[test]
     fn local_snapshot_resolution_accepts_complete_hf_cache_layout() {
         let root = unique_temp_dir();
-        let snapshot = create_fake_hf_cache(&root, "Qwen/Qwen3-4B", "main");
+        let snapshot = create_fake_hf_cache(&root, "google/gemma-4-E2B-it", "main");
 
         std::fs::write(snapshot.join("config.json"), "{}").expect("config should be writable");
         std::fs::write(snapshot.join("tokenizer.json"), "{}")
             .expect("tokenizer should be writable");
+        std::fs::write(snapshot.join("preprocessor_config.json"), "{}")
+            .expect("preprocessor config should be writable");
+        std::fs::write(snapshot.join("chat_template.jinja"), "{{ messages }}")
+            .expect("chat template should be writable");
         std::fs::write(snapshot.join("model-00001-of-00002.safetensors"), "stub")
             .expect("weights should be writable");
 
@@ -211,7 +216,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock should be monotonic enough")
             .as_nanos();
-        std::env::temp_dir().join(format!("motlie-models-qwen3-test-{unique}"))
+        std::env::temp_dir().join(format!("motlie-models-gemma4-test-{unique}"))
     }
 
     fn create_fake_hf_cache(root: &Path, model_id: &str, revision: &str) -> PathBuf {

@@ -17,6 +17,11 @@
 | 2026-04-08 | @codex-researcher: Documented the per-bundle feature-gating convention and the `ModelUnavailable` behavior for known selectors that are disabled in the current build. | Overview, Core Types, Notes |
 | 2026-04-08 | @codex-researcher: Clarified the local-only startup boundary after PR 139 review. Curated bundle modules now resolve and validate provider-specific cache layout before startup, while generic backends consume only a resolved local model path. Also clarified that selector strings are composed from capability family plus model selector rather than hardcoded one-off branches. | Overview, API Sketch, Notes |
 | 2026-04-08 | @claude: Added the Qwen3-4B chat bundle (#141). New `ChatModels` enum, `ModelSelector::Chat` variant, `chat:qwen/qwen3_4b` parsing, ISQ quantization via `StartOptions.quantization`, and `v0.2` example. | Overview, Core Types, API Sketch, Example Program |
+| 2026-04-08 | @codex-researcher: Added the Gemma 4 E2B-it multimodal chat slice (#142). `ChatModels` now includes `Gemma4E2B`, `ModelSelector` supports `chat:google/gemma4_e2b`, and `examples/v0.3` documents the direct text-only and image+text caller paths. | Overview, Core Types, API Sketch, Example Program, Notes |
+| 2026-04-09 | @codex-researcher: Tightened the example-build convention. Versioned examples now expect a single-bundle build and print `catalog-entry-count: 1`, and the Gemma example follows the same one-model-per-example rule. | Example Program, Notes |
+| 2026-04-09 | @codex-researcher: Collapsed the duplicate Gemma 4 examples into a single `v0.3` flow. `v0.3` now carries the optional `--download-artifacts` behavior directly, so each versioned example once again maps to exactly one curated model. | Example Program, Notes |
+| 2026-04-09 | @codex-researcher: Added handle-level metric snapshot usage to the examples. The current `mistral` backends now surface runtime latency/memory aggregates on the loaded bundle handle, with text-generation token metrics where the backend provides them. | Example Program, Notes |
+| 2026-04-09 | @codex-researcher: Clarified the current runtime-metrics implementation boundary for examples. The model-layer metrics path uses `sysinfo` for cross-platform current RSS on macOS and Linux, while peak RSS is maintained by Motlie as an observed-handle aggregate rather than an OS-native historical peak counter. | Notes |
 
 This document sketches the concrete API shapes currently introduced in `libs/models`. The crate now owns both the descriptor catalog and the curated bundle constructors that bind those descriptors to a backend implementation.
 
@@ -314,38 +319,44 @@ cargo run -p motlie-models --bin motlie-models-download -- --hf-token-env HF_TOK
 
 ## Example Program
 
-The current runnable example for this crate is:
+The runnable examples for this crate are:
 
-- [README.md](/Users/dchung/projects/claude-mistral/motlie/libs/models/examples/v0.1/README.md)
-- [main.rs](/Users/dchung/projects/claude-mistral/motlie/libs/models/examples/v0.1/main.rs)
+- `v0.1` embedding slice
+  - [README.md](/Users/dchung/projects/claude-mistral/motlie/libs/models/examples/v0.1/README.md)
+  - [main.rs](/Users/dchung/projects/claude-mistral/motlie/libs/models/examples/v0.1/main.rs)
+- `v0.2` text-only chat slice
+  - [README.md](/Users/dchung/projects/claude-mistral/motlie/libs/models/examples/v0.2/README.md)
+  - [main.rs](/Users/dchung/projects/claude-mistral/motlie/libs/models/examples/v0.2/main.rs)
+- `v0.3` Gemma multimodal slice
+  - [README.md](/tmp/motlie-issue142/libs/models/examples/v0.3/README.md)
+  - [main.rs](/tmp/motlie-issue142/libs/models/examples/v0.3/main.rs)
 
-Run it with:
+All versioned examples now assume a single-bundle build and print `catalog-entry-count: 1`. Run them with `--no-default-features` and only the feature for the bundle under test.
 
-```sh
-cargo run -p motlie-models --example models_v0_1 -- "motlie curated model bundle"
-```
-
-To exercise the parser-oriented selector path instead of the direct enum path:
-
-```sh
-cargo run -p motlie-models --example models_v0_1 -- --embedding=google/embeddinggemma_300m "motlie curated model bundle"
-```
-
-To force an out-of-band artifact fetch before startup:
+Embedding example (`v0.1`):
 
 ```sh
-cargo run -p motlie-models --example models_v0_1 -- --download-artifacts "motlie curated model bundle"
+cargo run -p motlie-models --no-default-features --features model-google-gemma-300m --example models_v0_1 -- "motlie curated model bundle"
 ```
 
-What it demonstrates:
+Text-only chat example (`v0.2`):
 
-- direct enum resolution via `EmbeddingModels::GoogleGemma300m`
-- optional parser-driven resolution via `ModelSelector`
-- explicit curated artifact download for `embeddinggemma_300m`
-- descriptor and capability introspection through `Catalog`
-- bundle-level embedding metadata through `EmbeddingModels::embedding_spec()`
-- local-only bundle startup with `ArtifactPolicy::LocalOnly`
-- a one-shot embedding generation request using CLI input
+```sh
+cargo run -p motlie-models --no-default-features --features model-qwen3-4b --example models_v0_2 -- "What is Rust's ownership model?"
+```
+
+Gemma multimodal example (`v0.3`) with optional curated download:
+
+```sh
+cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --bin motlie-models-download -- --hf-token-env HF_TOKEN gemma4_e2b
+cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example models_v0_3 -- "Describe ownership in one paragraph"
+```
+
+Or:
+
+```sh
+cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example models_v0_3 -- --download-artifacts "Describe ownership in one paragraph"
+```
 
 ## Curator Implementation
 
@@ -378,7 +389,8 @@ For a new curated embedding bundle, the intended implementation checklist is:
 - `Catalog` now also owns curated bundle instantiation through registered constructors.
 - The preferred direct curated path is the bundle-family enum, such as `EmbeddingModels::GoogleGemma300m`; `ModelSelector` is the parser-friendly wrapper above that.
 - Known selectors for bundles disabled by Cargo features should return `ModelsError::ModelUnavailable`, not a generic unknown-selector error.
-- The embedding caller path should be understandable by reading the `v0.1` example; the chat caller path by reading `v0.2`. The curator path should be understandable by reading the `google_gemma_300m` or `qwen3_4b` bundle modules and the checklist above.
+- The embedding caller path should be understandable by reading the `v0.1` example; the text-only chat caller path by reading `v0.2`; and the multimodal chat caller path by reading `v0.3`. The curator path should be understandable by reading the `google_gemma_300m`, `qwen3_4b`, or `gemma4_e2b` bundle modules and the checklist above.
+- Current runtime-metrics support in the examples comes from the `libs/model` handle contract and the `mistral` backend implementation. It uses `sysinfo` for current RSS on macOS and Linux and keeps peak RSS as the maximum sample observed by Motlie during the handle lifetime.
 - Curated artifact download is explicit and independent of the backend library's own cache-miss behavior. Backends consume the curated artifact policy through `StartOptions`. For regulated local bundles, `ArtifactPolicy::LocalOnly` is the intended fail-closed mode.
 - `embeddinggemma_300m` local-only startup depends on the full sentence-transformers module stack being present in the curated artifact root. That requirement is part of the bundle contract, not an ambient `mistralrs` cache behavior.
 - Authentication for protected upstream artifacts belongs only to the out-of-band download/build path. The runtime/bundle startup path does not accept tokens and remains artifact-consumption only.
@@ -386,9 +398,8 @@ For a new curated embedding bundle, the intended implementation checklist is:
 
 ## Next Step
 
-The text-only chat path is now functional (Qwen3-4B with ISQ). The next contract changes should focus on multimodal and operational richness:
+The text-only and first multimodal chat paths are now functional (Qwen3-4B with ISQ and Gemma 4 E2B-it through the multimodal builder path). The next contract changes should focus on richer response metadata and tool-calling:
 
-- multimodal chat content parts (`ChatMessage.content` → `Vec<ContentPart>`) for Gemma 4 (#142)
 - richer `ChatResponse` metadata (finish reason, usage, tool calls)
 - tool-calling message roles and correlation fields (`ChatRole::Tool`)
 - additive `StartOptions` controls for device selection and context-length policy

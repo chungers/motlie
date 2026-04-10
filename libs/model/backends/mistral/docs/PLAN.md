@@ -11,6 +11,7 @@
 | 2026-04-08 | @codex-researcher | Moved the embedding loader choice into `MistralEmbeddingSpec` so the backend implementation is genuinely spec-driven rather than hardcoding `EmbeddingGemma` in the generic builder path. | Phase 2, Phase 3 |
 | 2026-04-08 | @codex-researcher | Tightened the backend boundary after PR 139 review. Provider-specific local artifact validation moved back into the curated bundle layer, the backend crate dropped its direct `hf-hub` dependency, and `LocalOnly` startup now consumes a resolved local model path instead of reconstructing Hugging Face cache layout internally. | Phases 1, 3 |
 | 2026-04-08 | @claude | Added text generation backend (`text.rs`) for #141. `MistralTextBundle` implements `ChatModel` + `CompletionModel` via `TextModelBuilder`, with ISQ quantization mapping and `MistralTextArch::Qwen3` as the first architecture. | Phase 5 |
+| 2026-04-08 | @codex-researcher | Added the multimodal backend path for Gemma 4 E2B-it (#142). `MistralMultimodalBundle` uses `MultimodalModelBuilder`, shares the existing chat contract, and keeps vision support as a capability flag rather than a separate executable trait. | Phase 6 |
 
 Derived from [../../docs/DESIGN.md](../../docs/DESIGN.md). This PLAN covers the generic `mistral` backend implementation work.
 
@@ -116,3 +117,26 @@ Add the generic text generation path alongside the embedding backend.
 - [x] Spec identity, capability exposure, quantization mapping.
 - [x] Artifact policy, unpack_root rejection.
 - [ ] Env-gated integration test with pre-downloaded Qwen3-4B artifacts.
+
+## Phase 6: Multimodal Chat Backend
+
+### 6.1 — Multimodal architecture and spec
+
+- [x] Add `MistralMultimodalArch` with `Gemma4` as the first variant.
+- [x] Add `MistralMultimodalSpec` with `id`, `display_name`, `model_id`, `arch`, `capabilities`.
+- [x] Provide `MistralMultimodalSpec::gemma4_e2b()` built-in constructor.
+
+### 6.2 — Multimodal bundle and handle
+
+- [x] Add `MistralMultimodalBundle` implementing `ModelBundle`.
+- [x] Use `MultimodalModelBuilder` with `MultimodalLoaderType::Gemma4`.
+- [x] Reuse the existing `ChatModel` trait for both text-only and image+text requests.
+- [x] Keep `completion()` and `embeddings()` unsupported for the first multimodal slice.
+- [x] Reject unsupported local-only inputs such as `ImageUrl` explicitly with typed `ModelError`.
+
+### 6.3 — Tests
+
+- [x] Spec identity and capability exposure for Gemma 4.
+- [x] Handle capability exposure and unsupported-capability behavior.
+- [x] Input validation test for unsupported image-url content parts.
+- [ ] Env-gated integration test with pre-downloaded Gemma 4 E2B-it artifacts.

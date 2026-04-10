@@ -14,6 +14,9 @@
 | 2026-04-08 | @codex-researcher: Added explicit notes on the planned additive chat/multimodal extensions so the current API doc is honest about what is implemented today versus what is already queued for the first chat-capable bundles. | Overview, Core Types, Notes |
 | 2026-04-08 | @codex-researcher: Clarified the implemented loaded-descriptor and backend-error contract after PR 139 review. `LoadedBundleDescriptor` is an alias of `BundleMetadata`, `ModelError` now distinguishes backend initialization and execution failures, and `ArtifactPolicy::LocalOnly` is documented as consuming a curated bundle-resolved local model path. | Overview, Core Types, Bundle API Sketch, Notes |
 | 2026-04-08 | @claude: Added `QuantizationBits` to `StartOptions` and documented the quantized startup pattern for the Qwen3-4B chat slice (#141). | Core Types, Bundle API Sketch |
+| 2026-04-08 | @codex-researcher: Updated the chat contract for the Gemma 4 multimodal slice (#142). `ChatMessage` now carries `ContentPart`s, the first vision-capable bundle still uses `ChatModel`, and `examples/v0.3` is now the concrete end-to-end reference for text+image chat. | Overview, Core Types, Bundle API Sketch, Notes |
+| 2026-04-09 | @codex-researcher: Added handle-level metric snapshots and unit-safe wrappers. Runtime/request aggregates now live on `BundleHandle::metric_snapshot()` instead of individual responses. | Overview, Core Types, Bundle API Sketch, Notes |
+| 2026-04-09 | @codex-researcher: Documented the current cross-platform runtime-metrics implementation. `mistral` backends and examples use `sysinfo` for current RSS on macOS and Linux, with Motlie maintaining the observed peak in-handle rather than relying on an OS-native historical peak counter. | Handle-Level Metrics, Notes |
 
 This document sketches the concrete contract shapes currently introduced in `libs/model`. It covers both the core bundle lifecycle/capability contracts and the lightweight `model::eval` vocabulary that higher-level harness tooling should build on.
 
@@ -37,9 +40,9 @@ The goal is to give downstream crates a stable contract surface while keeping th
 
 Important scope note:
 
-- this API covers the embedding vertical slice and the first chat vertical slice (Qwen3-4B)
+- this API covers the embedding vertical slice, the first text-only chat slice (Qwen3-4B), and the first multimodal chat slice (Gemma 4 E2B-it)
 - `QuantizationBits` has been added to `StartOptions` for ISQ quantization of local chat models
-- remaining planned additive extensions are tracked in `DESIGN.md` / `PLAN.md`, including multimodal chat content, `ChatRole::Tool`, and richer `ChatResponse` metadata
+- remaining planned additive extensions are tracked in `DESIGN.md` / `PLAN.md`, including `ChatRole::Tool` and richer `ChatResponse` metadata
 
 For the current vertical slice, this contract is intended to support an end-to-end flow of:
 
@@ -66,6 +69,14 @@ Primary bundle-contract types:
 - `QuantizationBits`
 - `LoadedBundleDescriptor`
 - `ModelError`
+- `ModelMetricSnapshot`
+- `RuntimeMetrics`
+- `TextGenerationMetrics`
+- `EmbeddingMetrics`
+- `Milliseconds`
+- `Bytes`
+- `Tokens`
+- `TokensPerSecond`
 - `EmbeddingDistance`
 - `EmbeddingNormalization`
 - `EmbeddingSpec`
@@ -73,6 +84,7 @@ Primary bundle-contract types:
 Primary capability request/response types:
 
 - `ChatRole`
+- `ContentPart`
 - `ChatMessage`
 - `GenerationParams`
 - `ChatRequest`
@@ -85,7 +97,6 @@ Primary capability request/response types:
 Known near-term additive follow-ups for chat-capable bundles:
 
 - `ChatRole::Tool`
-- multimodal chat content parts in place of `ChatMessage.content: String`
 - richer `ChatResponse` metadata
 
 Primary traits:
@@ -106,6 +117,50 @@ The currently implemented error variants are:
 - `BackendInitialization`
 - `BackendExecution`
 - `UnsupportedCapability`
+
+### Handle-Level Metrics
+
+Loaded bundles may expose additive runtime metrics through `BundleHandle::metric_snapshot()`:
+
+```rust
+let snapshot = handle.metric_snapshot();
+```
+
+This is intentionally service-level, not response-level. It is the right ownership boundary for:
+
+- current and peak RSS
+- request counts
+- last / max / average request latency
+- aggregate token totals and aggregate token/sec for text-generation backends
+
+The current unit wrappers live in `libs/model/src/units.rs`:
+
+- `Milliseconds(pub u64)`
+- `Bytes(pub u64)`
+- `Tokens(pub u64)`
+- `TokensPerSecond(pub u64)`
+
+The current metric types live in `libs/model/src/metrics.rs`:
+
+- `ModelMetricSnapshot`
+- `RuntimeMetrics`
+- `TextGenerationMetrics`
+- `EmbeddingMetrics`
+
+`ModelMetricSnapshot` uses `Option<T>` both at the section level and field level. This is intentional:
+
+- some sections are capability-specific and absent on bundles that do not expose that capability
+- some values are not meaningful until the handle has served at least one request
+- some values are backend/platform dependent, such as runtime memory sampling
+
+Current implementation note:
+
+- runtime/process memory metrics are currently collected through `sysinfo`
+- the current `mistral` implementation is intended to work on macOS and Linux without `cfg(target_os)` branches in Motlie code
+- current RSS is sampled from the current process, and peak RSS is maintained by Motlie as the max observed sample over the handle lifetime
+- the current `mistral` text-generation throughput fields are derived from cumulative token totals and cumulative prompt/generation time reported by upstream usage data
+- this metrics path is currently always built into the `mistral` backend and example binaries; it is not separately feature-gated yet
+- `ContentPart::ImageUrl` exists at the contract layer for future remote-capable bundles, but the current `mistral` multimodal path accepts inline image bytes only
 
 ## Bundle API Sketch
 
@@ -137,8 +192,14 @@ use motlie_model::{
 
 let chat = ChatRequest {
     messages: vec![
-        ChatMessage::new(ChatRole::System, "Be concise."),
-        ChatMessage::new(ChatRole::User, "Summarize the bundle model."),
+        ChatMessage::text(ChatRole::System, "Be concise."),
+        ChatMessage::with_parts(
+            ChatRole::User,
+            vec![
+                ContentPart::image(image_bytes, "image/png"),
+                ContentPart::text("Summarize the visible diagram."),
+            ],
+        ),
     ],
     params: GenerationParams {
         max_tokens: Some(256),
@@ -408,6 +469,6 @@ The v0.1 contract is intentionally narrow: embedding capabilities map directly t
 
 - `BundleId` lives in `libs/model`, not `libs/models`, because it is part of the stable contract surface.
 - capability introspection now includes task kind, input/output content kinds, and interaction style
-- `CapabilityKind` does not imply that every variant immediately gets its own executable trait. For the planned multimodal chat path, `Vision` is expected to begin as a capability flag on the chat surface rather than as a separate `VisionModel` trait.
+- `CapabilityKind` does not imply that every variant immediately gets its own executable trait. In the current Gemma 4 slice, `Vision` is implemented as a capability flag on the chat surface rather than as a separate `VisionModel` trait.
 - `model::eval` contains small declarative types only; runners, scoring, suite loading, and reports belong in `libs/model-eval`.
 - Curated artifact download and provenance control live above this crate in `libs/models`. Backend startup consumes the resulting artifact root and policy through `StartOptions` rather than using `libs/model` to initiate curated downloads itself.

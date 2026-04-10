@@ -4613,8 +4613,10 @@ name = "motlie-model-mistral"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "image",
  "mistralrs",
  "motlie-model",
+ "sysinfo",
  "tokio",
 ]
 
@@ -4627,6 +4629,7 @@ dependencies = [
  "hf-hub 0.5.0",
  "motlie-model",
  "motlie-model-mistral",
+ "sysinfo",
  "thiserror 2.0.18",
  "tokio",
 ]
