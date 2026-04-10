@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-04-10 | @codex-repl: Add the feature-gating contract for subsystem registration so optional crates can be selectively compiled and included in the command surface. | Principles, Subsystem-Facing Surface, What A Subsystem Must Provide |
 | 2026-04-10 | @codex-repl: Initial API contract for subsystem integration into `libs/repl`. Documents the subsystem-facing command-registration model, managed-resource adapter responsibilities, and a concrete VMM integration contract across owned, attached, and remote-management scenarios. | All |
 
 This document complements [`DESIGN.md`](./DESIGN.md) and [`LIFECYCLE.md`](./LIFECYCLE.md).
@@ -22,6 +23,8 @@ contract.
 4. Raw handle types such as `VmHandle` should not be forced to implement REPL traits
    directly.
 5. Integration should happen through typed commands plus adapter records.
+6. Optional subsystems must disappear cleanly from both the build graph and the command
+   surface when their Cargo feature is disabled.
 
 ## Subsystem-Facing Surface
 
@@ -61,6 +64,31 @@ pub trait CommandModule<C> {
 }
 ```
 
+Subsystem registration modules are expected to be feature-gated by the composing binary or
+integration crate:
+
+```rust
+#[cfg(feature = "repl-vmm")]
+pub mod repl {
+    pub struct VmmModule;
+
+    impl CommandModule<AppContext> for VmmModule {
+        fn register(self, engine: &mut CommandEngine<AppContext>) {
+            engine.add_typed::<BootGuest>();
+            engine.add_typed::<ExecGuest>();
+            engine.add_typed::<ShutdownGuest>();
+        }
+    }
+}
+```
+
+If the feature is disabled:
+
+1. the subsystem dependency is not linked,
+2. the registration module does not compile,
+3. the aggregate clap tree does not contain that command family, and
+4. neither static nor dynamic completion exposes that subsystem's values.
+
 The intended managed-resource surface is:
 
 ```rust
@@ -95,6 +123,7 @@ crate or a thin integration module:
 | Typed clap command structs | Yes | Reuse the same command schema for REPL and other frontends. |
 | `TypedCommand<C>` implementations | Yes | Define execution logic and optional dynamic completion. |
 | A registration module or function | Yes | Add all subsystem commands to the command engine. |
+| Cargo feature gate for the registration surface | Yes for optional subsystems | Allows the root binary to compile and include the subsystem selectively. |
 | Named managed-resource adapters | Yes for live resources | Tell the engine whether a resource is `Owned`, `Imported`, or `Ephemeral`, and whether it is local or remote. |
 | Cleanup semantics | Yes for live resources | Define what engine `close()` and `detach()` mean truthfully. |
 | Import / rehydrate support | Optional, scenario-dependent | Required only if the subsystem supports attaching to already-running resources. |
