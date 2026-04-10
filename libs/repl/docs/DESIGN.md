@@ -6,11 +6,13 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-04-10 | @codex-repl: Refine the design from REPL-first to command-engine-first. Lock subsystem vs command-engine boundaries, add explicit owned/imported/ephemeral semantics, document cleanup expectations, and reference the new [`LIFECYCLE.md`](./LIFECYCLE.md) resource inventory. | Goals, Requirements, Chosen Solution, Architecture, Risks, Open Questions, Summary |
 | 2026-04-10 | @codex-repl: Initial DESIGN for `libs/repl`, derived from issue #150 and reconciled against the current repo snapshot. Greenfield product direction; migration and backward-compatibility concerns are out of scope. | All |
 
 This document defines the design for a new `libs/repl` crate that provides a unified,
-composable REPL engine for Motlie. It is derived from GitHub issue #150 and the current
-checkout of `main`.
+composable command engine plus an interactive REPL frontend for Motlie. It is derived from
+GitHub issue #150, the current checkout of `main`, and a follow-up lifecycle review of the
+active VMM worktree used as a design input.
 
 ## Repo Reality Check
 
@@ -54,20 +56,24 @@ If Motlie continues with subsystem-specific shells, several costs grow linearly:
 
 ## Goals
 
-1. Define one reusable REPL engine in `libs/repl`.
+1. Define one reusable command engine in `libs/repl`.
 2. Allow subsystem crates to register commands into that engine without depending on each
    other.
 3. Support an interactive shell with line editing, history, help, and tab completion.
-4. Support dynamic completion for context-dependent values such as tmux sessions and target
+4. Support future non-REPL frontends such as TUI or socket-driven command ingress without
+   redesigning command dispatch or state ownership.
+5. Support dynamic completion for context-dependent values such as tmux sessions and target
    specs.
-5. Define a clean product direction that can coexist with current one-shot CLI behavior while
+6. Define a clean product direction that can coexist with current one-shot CLI behavior while
    the new REPL surfaces are built.
-6. Reuse existing clap command definitions where practical instead of forcing every command
+7. Reuse existing clap command definitions where practical instead of forcing every command
    to be rewritten by hand.
+8. Make engine-local management semantics explicit so the command engine can own resources it
+   created, import references to already-running resources, and later detach cleanly.
 
 ## Non-Goals
 
-1. Implement a remote or networked REPL transport in the first design slice.
+1. Implement a remote or networked command transport in the first design slice.
 2. Redesign the `db` and `fulltext` UX in this phase.
 3. Make REPL mode the default behavior of `motlie` when no subcommand is supplied in the
    first integration slice.
@@ -81,7 +87,7 @@ If Motlie continues with subsystem-specific shells, several costs grow linearly:
 1. The binary must be able to assemble REPL commands from feature-enabled subsystem crates.
 2. A command definition must be usable in interactive mode and, where practical, reusable
    from one-shot CLI wiring.
-3. The engine must support mutable session context owned by the REPL instance.
+3. The engine must support mutable session context owned by the command engine instance.
 4. The engine must support async handlers because tmux and future subsystem operations are
    async.
 5. The engine must provide built-in `help` and `quit` behavior.
@@ -89,6 +95,12 @@ If Motlie continues with subsystem-specific shells, several costs grow linearly:
    live subsystem state.
 7. The engine must surface structured command errors without panicking the session.
 8. The first concrete adopter must be the tmux example REPL.
+9. The command engine must expose frontend-neutral command execution so the same registry and
+   state model can be used by interactive REPL, TUI, or future socket/message frontends.
+10. The command engine must support attaching to already-running resources and representing
+    whether each named resource is `Owned`, `Imported`, or `Ephemeral`.
+11. The command engine must provide an explicit close/shutdown path that calls subsystem APIs
+    for owned resources rather than silently abandoning live state.
 
 ### Non-Functional Requirements
 
@@ -100,6 +112,8 @@ If Motlie continues with subsystem-specific shells, several costs grow linearly:
    cycles.
 4. The design must be testable at unit level and at integration/example level.
 5. The first integration must be additive and keep current `motlie` CLI behavior available.
+6. Cleanup semantics must be explicit and truthful: best-effort `Drop` may exist as a safety
+   net, but the primary contract is explicit close/shutdown through subsystem APIs.
 
 ## Existing State
 
@@ -167,8 +181,9 @@ Verdict: rejected. The missing dynamic completion extension point is a hard bloc
 
 ### Alternative C: Build `libs/repl` directly on `reedline` plus `clap`
 
-This creates a thin Motlie-owned engine on top of `reedline` and clap metadata, with a
-small registration API for commands, handlers, and completion providers.
+This creates a thin Motlie-owned command engine on top of clap metadata, with a `reedline`
+interactive shell frontend and a small registration API for commands, handlers, and
+completion providers.
 
 Pros:
 
@@ -191,14 +206,16 @@ Verdict: chosen.
 
 Create a new `libs/repl` crate that owns:
 
-1. The `reedline` event loop.
+1. A frontend-neutral command engine that owns the mutable session context.
 2. A command registry based on clap metadata.
-3. Async command dispatch into a mutable session context.
+3. Async command dispatch into named, mutable session state.
 4. Static and dynamic completion.
-5. Minimal built-in commands such as `help` and `quit`.
+5. An interactive `reedline` shell frontend layered on top of that engine.
+6. Minimal built-in commands such as `help` and `quit`.
 
-Subsystem crates register commands and completion providers into a `Repl<C>` builder. The
-main binary decides which subsystems are enabled and which context fields exist.
+Subsystem crates register commands and completion providers into a command engine builder.
+The main binary decides which subsystems are enabled, which context fields exist, and which
+frontend starts the engine.
 
 The first concrete adopter is the tmux example REPL. Integration into the main `motlie`
 binary is a later implementation slice behind an explicit feature gate and an explicit subcommand
@@ -228,9 +245,13 @@ libs/repl/
 ### Core Types
 
 ```rust
-pub struct Repl<C> {
+pub struct CommandEngine<C> {
     context: C,
     commands: Vec<RegisteredCommand<C>>,
+}
+
+pub struct InteractiveShell<C> {
+    engine: CommandEngine<C>,
     prompt: String,
     name: String,
 }
@@ -239,6 +260,17 @@ pub struct RegisteredCommand<C> {
     pub command: clap::Command,
     pub handler: CommandHandler<C>,
     pub completions: Vec<DynamicCompletionBinding<C>>,
+}
+
+pub enum ResourceMode {
+    Owned,
+    Imported,
+    Ephemeral,
+}
+
+pub enum ResourceLocality {
+    InProcess,
+    RemoteProxy,
 }
 ```
 
@@ -266,7 +298,7 @@ pub trait TypedReplCommand: Sized {
     fn from_matches(matches: &clap::ArgMatches) -> Result<Self, clap::Error>;
 }
 
-impl<C> Repl<C> {
+impl<C> CommandEngine<C> {
     pub fn add_command<H>(&mut self, command: clap::Command, handler: H) -> &mut Self;
 
     pub fn add_typed_command<T, H>(&mut self, handler: H) -> &mut Self
@@ -278,19 +310,124 @@ impl<C> Repl<C> {
 The exact trait names may change during implementation, but the design intent is stable:
 reuse clap metadata whenever possible.
 
-### Context Model
+In implementation terms, the registration API should land on `CommandEngine<C>`, while the
+interactive shell is just one consumer layered over the same engine.
 
-The REPL owns a single mutable context value for the lifetime of the session:
+### Session State Model
+
+The command engine owns a single mutable context value for the lifetime of the session:
 
 ```rust
 pub struct AppContext {
     #[cfg(feature = "tmux")]
-    pub tmux: Option<TmuxContext>,
+    pub tmux: TmuxSessionState,
+
+    #[cfg(feature = "vmm")]
+    pub vmm: VmmSessionState,
+}
+
+pub struct TmuxSessionState {
+    pub hosts: HashMap<String, ManagedResource<motlie_tmux::HostHandle>>,
+    pub monitors: HashMap<String, ManagedResource<motlie_tmux::SessionMonitorHandle>>,
+}
+
+pub struct VmmSessionState {
+    pub guests: HashMap<String, ManagedResource<motlie_vmm::orchestrator::VmHandle>>,
+    pub ptys: HashMap<String, ManagedResource<motlie_vmm::ssh::GuestPtySession>>,
+}
+
+pub struct ManagedResource<T> {
+    pub mode: ResourceMode,
+    pub locality: ResourceLocality,
+    pub value: T,
 }
 ```
 
 Subsystem crates do not depend on each other. They only require access to the portions of
 context they own. The binary remains the composition root.
+
+The crucial boundary is:
+
+1. Subsystem crates own business logic, validation, and real lifecycle semantics.
+2. The command engine owns session-local names, aliases, references, and management metadata.
+3. Frontends such as REPL, TUI, or future socket ingress call into the command engine; they
+   do not own resource state directly.
+
+### Boundaries and Responsibilities
+
+The command engine is intentionally not a replacement for subsystem orchestration APIs.
+
+Subsystem crates own:
+
+1. Resource creation and destruction semantics.
+2. Validation, readiness, and runtime correctness.
+3. Type-specific handles and operations such as `VmHandle::ready()`,
+   `VmHandle::shutdown()`, `Target::kill()`, or `SessionMonitorHandle::shutdown()`.
+
+The command engine owns:
+
+1. The session registry of named live objects and aliases.
+2. Resolution from command arguments such as `demo`, `alice`, or `logs-monitor` to typed
+   handles stored in context.
+3. Engine-local management policy for those named objects:
+   `Owned` means the engine is responsible for explicit cleanup, `Imported` means the engine
+   attached to an externally owned resource and should detach without destroying it by
+   default, and `Ephemeral` means the object is a short-lived child attachment that should be
+   cleaned up locally and recreated as needed.
+4. Frontend-neutral command execution and completion over the session registry.
+
+This boundary is what allows a temporary admin shell to attach to already-running resources,
+rehydrate its local state, and later detach without implicitly killing externally owned
+resources.
+
+### Managed Resource Adapters
+
+The command engine should not require `vmm`, `tmux`, `vnet`, or `vfs` crate types to
+implement command-engine traits directly. That would invert the dependency direction.
+
+Instead, the command engine owns a small adapter layer around raw handles or remote proxies.
+Those adapters are where engine-local semantics live:
+
+1. `ResourceMode` such as `Owned`, `Imported`, or `Ephemeral`.
+2. `ResourceLocality` such as `InProcess` or `RemoteProxy`.
+3. Cleanup policy: destroy, detach, or local child close.
+4. Rehydrate/import policy and completion-token generation.
+5. Invalidation rules, for example a VM restart invalidating guest PTY sessions.
+
+Ownership is therefore not a property of `VmHandle` or `Target` alone. It is a property of
+the command engine's relationship to that resource in a given session.
+
+The adapter shape can remain small. For example:
+
+```rust
+pub trait ManagedResourceAdapter {
+    fn mode(&self) -> ResourceMode;
+    fn locality(&self) -> ResourceLocality;
+    fn completion_tokens(&self) -> Vec<String>;
+}
+
+pub trait ManagedResourceLifecycle {
+    async fn close(self) -> anyhow::Result<()>;
+    async fn detach(self) -> anyhow::Result<()>;
+}
+```
+
+The final trait split may differ, but the design requirement is stable: the command-engine
+crate owns the adapter contracts, while subsystem crates remain independent and are wrapped
+by engine-local integration types.
+
+The intended contract families are:
+
+| Contract | Responsibility | Applies to | Notes |
+|----------|----------------|------------|-------|
+| `ManagedResourceAdapter` | Surface engine-local metadata such as `ResourceMode`, `ResourceLocality`, stable naming, and completion tokens. | All named managed resources. | This is the minimal contract the registry needs for lookup and completion. |
+| `ManagedResourceLifecycle` | Define what engine `close()` and `detach()` mean for the adapted resource. | Resources that may outlive one command. | `close()` destroys only when the engine truly owns the resource; `detach()` drops engine-local attachment state. |
+| Import / rehydrate adapter | Rebuild a managed entry from runtime artifacts, discovery results, or RPC connection metadata. | `Imported` resources only. | This is expected to be crate-specific and strongest for tmux first. |
+| Remote proxy adapter | Normalize RPC-backed resources into the same command surface as local in-process handles. | `RemoteProxy` locality. | This is how a temporary admin process can manage a long-running host process without owning its resources directly. |
+| Invalidation policy | Decide when a managed record becomes stale and what children must be dropped. | Parent-child resources such as VM to PTY or host to monitor. | Example: VM restart invalidates `GuestPtySession` children. |
+
+The exact trait names may change, but all five responsibilities need an explicit home in the
+implementation.
 
 ### Completion Model
 
@@ -301,7 +438,8 @@ Completion has two sources:
 
 Dynamic providers must not require `&mut C` because completion runs while the line editor is
 active. Instead, providers read a snapshot-oriented view or shared state owned by the
-context, for example `Arc<RwLock<HashSet<String>>>`.
+context, for example `Arc<RwLock<HashSet<String>>>` or the command engine's named resource
+registry.
 
 ```rust
 pub trait CompletionProvider<C>: Send + Sync + 'static {
@@ -313,19 +451,42 @@ The final implementation may use a read-only accessor or snapshot function inste
 borrowing the full context directly, but the design requirement is the same: completion must
 observe live state without taking the mutable execution borrow needed for handlers.
 
+### Lifecycle and Rehydration Model
+
+Lifecycle expectations are documented in detail in [`LIFECYCLE.md`](./LIFECYCLE.md). The
+high-level command-engine contract is:
+
+1. Frontends may create owned resources during a session.
+2. Frontends may also import references to resources that predate the engine process.
+3. The engine must keep enough typed state to support command resolution and completion.
+4. The engine must expose explicit shutdown, for example `close(self)`, that attempts cleanup
+   for `Owned` resources and local child cleanup for `Ephemeral` resources by calling the
+   correct subsystem APIs.
+5. Dropping the engine may perform best-effort fallback, but explicit close is the primary
+   contract.
+
+This distinction matters for resources such as tmux targets or guest PTY sessions:
+
+1. A tmux `HostHandle` or `Target` may be rehydrated by rediscovery on a host the engine did
+   not create.
+2. A guest PTY session is short-lived and should be recreated after VM restart or control
+   plane loss.
+3. A `VmHandle` is a long-lived control object, but rehydration of already-running VMs is a
+   future adapter problem rather than a responsibility of the command engine core.
+
 ## Data Flow
 
 ### Command Execution
 
 1. The binary creates `AppContext`.
-2. The binary creates `Repl<AppContext>`.
+2. The binary creates `CommandEngine<AppContext>`.
 3. Feature-enabled subsystem crates register commands and dynamic completion providers.
-4. `reedline` reads a line.
-5. The engine tokenizes the line using shell-aware splitting.
+4. A frontend such as the interactive shell passes one line or argv vector to the engine.
+5. The engine tokenizes shell-like input when needed.
 6. The engine identifies the command root and runs clap parsing.
 7. The typed or raw handler executes against the mutable context.
 8. The handler returns displayable output or a structured error.
-9. The REPL prints output and continues.
+9. The frontend renders the result and continues.
 
 ### Tab Completion
 
@@ -341,34 +502,37 @@ observe live state without taking the mutable execution borrow needed for handle
 
 ```rust
 use clap::{Arg, Command};
-use motlie_repl::Repl;
+use motlie_repl::{CommandEngine, InteractiveShell};
 
 struct AppContext {
-    tmux: motlie_tmux::commands::TmuxContext,
+    tmux: TmuxSessionState,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let ctx = AppContext {
-        tmux: motlie_tmux::commands::TmuxContext::connect("ssh://localhost").await?,
+        tmux: TmuxSessionState::default(),
     };
 
-    let mut repl = Repl::new(ctx)
-        .with_name("motlie")
-        .with_prompt("motlie> ");
+    let mut engine = CommandEngine::new(ctx);
 
-    repl.add_command(
+    engine.add_command(
         Command::new("ping").arg(Arg::new("value").required(true)),
         |matches, _ctx| async move {
-            let value = matches.get_one::<String>("value").unwrap();
+            let value = matches
+                .get_one::<String>("value")
+                .expect("clap requires 'value'");
             Ok(Some(format!("pong: {value}")))
         },
     );
 
     #[cfg(feature = "tmux")]
-    motlie_tmux::commands::register(&mut repl);
+    motlie_tmux::commands::register(&mut engine);
 
-    repl.run().await
+    let mut shell = InteractiveShell::new(engine)
+        .with_name("motlie")
+        .with_prompt("motlie> ");
+    shell.run().await
 }
 ```
 
@@ -395,14 +559,14 @@ phases rather than framed as migration or compatibility work.
 ### Stage 1: New crate, no product behavior change
 
 1. Add `libs/repl`.
-2. Implement the engine and tests.
+2. Implement the command engine and tests.
 3. Keep existing `motlie` CLI and tmux example untouched.
 
 ### Stage 2: Tmux example adoption
 
 1. Move tmux command definitions and handlers out of `examples/repl/main.rs` into a reusable
    registration module.
-2. Keep the example binary as a thin bootstrap over the new engine.
+2. Keep the example binary as a thin bootstrap over the new engine and interactive shell.
 3. Preserve existing command names and `tui on` behavior.
 
 ### Stage 3: Main binary integration
@@ -429,12 +593,24 @@ raw registration forms.
 The design avoids completion-time mutable borrows by requiring read-oriented providers or
 snapshot-backed shared state.
 
-### Risk 3: Scope expands to an entire product-shell rewrite
+### Risk 3: The command engine accidentally absorbs subsystem business logic
+
+The boundary is explicit: subsystem crates own real lifecycle behavior; the command engine
+only owns session registry state, engine-local management metadata, and dispatch/completion
+glue.
+
+### Risk 4: Scope expands to an entire product-shell rewrite
 
 The delivery is explicitly staged: first the engine, then the tmux example, then optional
 main-binary integration.
 
-### Risk 4: Issue #150 assumes a VMM adopter that is not in this repo
+### Risk 5: Attach/detach semantics become destructive or ambiguous
+
+The design requires per-resource management metadata so a temporary admin session can detach
+from imported resources without killing them, while still cleaning up resources it created
+itself and closing ephemeral child attachments.
+
+### Risk 6: Issue #150 assumes a VMM adopter that is not in this repo
 
 The design treats VMM as future scope and removes it from the first implementation plan.
 
@@ -455,17 +631,23 @@ The intended dependency set is:
    names like `help` through namespacing?
 3. Should typed registration use clap's existing `CommandFactory` and `FromArgMatches`
    directly, or should `libs/repl` wrap them behind a Motlie-specific trait for a cleaner API?
+4. Should subsystem commands be required to live under explicit roots such as `tmux ...` and
+   future `vmm ...`, or may flat top-level command names exist?
+5. What is the first generic rehydration contract the engine should support: tmux-only attach,
+   or a broader named-resource import surface for future VMM adapters?
 
 ## Summary
 
 The proposal is feasible, but only if it is corrected to the actual repo state. The
-appropriate first step is a thin Motlie-owned `libs/repl` crate on top of `reedline` plus
-clap, with:
+appropriate first step is a thin Motlie-owned `libs/repl` crate on top of clap plus a
+`reedline` shell frontend, with:
 
 1. Brownfield-safe staged adoption.
 2. Explicit support for dynamic completion.
 3. A registration model that supports both raw clap commands and existing derive-based CLI
    types.
-4. Tmux as the first real adopter.
+4. Explicit engine-local management semantics separated from subsystem business logic.
+5. Attach/import/detach semantics for named live resources.
+6. Tmux as the first real adopter.
 
 This is the aligned solution for subsequent planning.
