@@ -16,9 +16,9 @@
 //!   ./target/debug/examples/monitor_pipe ssh://localhost build --sink callback --seconds 5
 //!   ./target/debug/examples/monitor_pipe 'ssh://deploy@prod?identity-file=/path/to/key' build
 
-use anyhow::{anyhow, Result};
 use motlie_tmux::{
-    CallbackSink, SinkEvent, SinkFilter, SinkKind, SshConfig, StdioFormat, StdioSink,
+    CallbackSink, Error, Result, SinkEvent, SinkFilter, SinkKind, SshConfig, StdioFormat,
+    StdioSink,
 };
 use std::any::Any;
 use std::future::Future;
@@ -86,10 +86,10 @@ fn parse_args() -> Result<Args> {
     }
 
     if args.len() < 3 {
-        return Err(anyhow!(
+        return Err(Error::Parse(format!(
             "usage: {} <uri> <session> [--seconds N] [--sink raw|prefixed|json|callback]\n\nTry -h for detailed help.",
             args[0]
-        ));
+        )));
     }
 
     let mut seconds = 3u64;
@@ -101,18 +101,18 @@ fn parse_args() -> Result<Args> {
                 i += 1;
                 seconds = args
                     .get(i)
-                    .ok_or_else(|| anyhow!("--seconds requires a value"))?
+                    .ok_or_else(|| Error::Parse("--seconds requires a value".to_string()))?
                     .parse()
-                    .map_err(|_| anyhow!("--seconds must be a positive integer"))?;
+                    .map_err(|_| Error::Parse("--seconds must be a positive integer".to_string()))?;
                 if seconds == 0 {
-                    return Err(anyhow!("--seconds must be > 0"));
+                    return Err(Error::Parse("--seconds must be > 0".to_string()));
                 }
             }
             "--sink" => {
                 i += 1;
                 sink = match args
                     .get(i)
-                    .ok_or_else(|| anyhow!("--sink requires a value"))?
+                    .ok_or_else(|| Error::Parse("--sink requires a value".to_string()))?
                     .as_str()
                 {
                     "raw" => SinkMode::Raw,
@@ -120,14 +120,14 @@ fn parse_args() -> Result<Args> {
                     "json" => SinkMode::Json,
                     "callback" => SinkMode::Callback,
                     other => {
-                        return Err(anyhow!(
+                        return Err(Error::Parse(format!(
                             "unknown sink '{}' (raw|prefixed|json|callback)",
                             other
-                        ));
+                        )));
                     }
                 };
             }
-            other => return Err(anyhow!("unknown flag: {}", other)),
+            other => return Err(Error::Parse(format!("unknown flag: {}", other))),
         }
         i += 1;
     }
@@ -143,7 +143,7 @@ fn parse_args() -> Result<Args> {
 fn callback_on_output(state: &Arc<dyn Any + Send + Sync>, event: SinkEvent) -> Result<()> {
     let stats = state
         .downcast_ref::<Mutex<CallbackStats>>()
-        .ok_or_else(|| anyhow!("callback state type mismatch"))?;
+        .ok_or_else(|| Error::State("callback state type mismatch".to_string()))?;
 
     match event {
         SinkEvent::Data(output) => {

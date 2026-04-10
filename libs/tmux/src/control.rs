@@ -1,4 +1,4 @@
-use anyhow::Result;
+use crate::error::{Error, Result};
 use std::path::Path;
 
 use crate::keys::KeySequence;
@@ -18,7 +18,7 @@ pub fn shell_escape(s: &str) -> String {
 fn shell_escape_path(path: &Path) -> Result<String> {
     let s = path
         .to_str()
-        .ok_or_else(|| anyhow::anyhow!("non-UTF-8 paths are not supported: {}", path.display()))?;
+        .ok_or_else(|| Error::Parse(format!("non-UTF-8 paths are not supported: {}", path.display())))?;
     Ok(shell_escape(s))
 }
 
@@ -26,10 +26,10 @@ fn parse_created_window(output: &str) -> Result<WindowInfo> {
     let line = output.trim();
     let fields = crate::discovery::parse_escaped_fields(line);
     if fields.len() < 7 {
-        return Err(anyhow::anyhow!(
+        return Err(Error::Command(format!(
             "malformed new-window output (expected 7 fields): {}",
             line
-        ));
+        )));
     }
 
     Ok(WindowInfo {
@@ -37,12 +37,12 @@ fn parse_created_window(output: &str) -> Result<WindowInfo> {
         session_name: fields[1].clone(),
         index: fields[2]
             .parse()
-            .map_err(|_| anyhow::anyhow!("invalid window_index: {}", fields[2]))?,
+            .map_err(|_| Error::Parse(format!("invalid window_index: {}", fields[2])))?,
         name: fields[3].clone(),
         active: fields[4] == "1",
         pane_count: fields[5]
             .parse()
-            .map_err(|_| anyhow::anyhow!("invalid window_panes: {}", fields[5]))?,
+            .map_err(|_| Error::Parse(format!("invalid window_panes: {}", fields[5])))?,
         layout: fields[6].clone(),
     })
 }
@@ -51,17 +51,17 @@ fn parse_created_pane(output: &str) -> Result<PaneAddress> {
     let line = output.trim();
     let fields = crate::discovery::parse_escaped_fields(line);
     if fields.len() < 4 {
-        return Err(anyhow::anyhow!(
+        return Err(Error::Command(format!(
             "malformed split-pane output (expected 4 fields): {}",
             line
-        ));
+        )));
     }
     let window: u32 = fields[2]
         .parse()
-        .map_err(|_| anyhow::anyhow!("invalid window_index: {}", fields[2]))?;
+        .map_err(|_| Error::Parse(format!("invalid window_index: {}", fields[2])))?;
     let pane: u32 = fields[3]
         .parse()
-        .map_err(|_| anyhow::anyhow!("invalid pane_index: {}", fields[3]))?;
+        .map_err(|_| Error::Parse(format!("invalid pane_index: {}", fields[3])))?;
     Ok(PaneAddress {
         pane_id: fields[0].clone(),
         session: fields[1].clone(),
@@ -122,7 +122,7 @@ pub async fn create_session_with_prefix(
                 limit
             );
             transport.exec(&pane_cmd).await?;
-            Ok::<(), anyhow::Error>(())
+            Ok::<(), Error>(())
         }
         .await;
 
@@ -213,10 +213,10 @@ pub async fn split_pane_with_prefix(
             }
             SplitSize::Percent(percent) => {
                 if percent == 0 || percent > 100 {
-                    return Err(anyhow::anyhow!(
+                    return Err(Error::Parse(format!(
                         "split percentage must be in 1..=100, got {}",
                         percent
-                    ));
+                    )));
                 }
                 cmd.push_str(&format!(" -l {}%", percent));
             }
@@ -471,7 +471,7 @@ pub async fn get_history_limit_with_prefix(
     output
         .trim()
         .parse::<u32>()
-        .map_err(|e| anyhow::anyhow!("failed to parse history-limit '{}': {}", output.trim(), e))
+        .map_err(|e| Error::Parse(format!("failed to parse history-limit '{}': {}", output.trim(), e)))
 }
 
 #[cfg(test)]

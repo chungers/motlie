@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use crate::error::{Error, Result};
 use regex::Regex;
 
 use crate::transport::{shell_escape_arg, tmux_prefix, TransportKind};
@@ -245,11 +245,10 @@ pub async fn take_geometry_snapshot_with_prefix(
             .await
             .map(|s| s.trim().to_string())
             .map_err(|e| {
-                anyhow!(
+                Error::Command(format!(
                     "failed to resolve session for pane target '{}': {}",
-                    target,
-                    e
-                )
+                    target, e
+                ))
             })?
     } else {
         // Parse session from target string (everything before first ':')
@@ -281,40 +280,32 @@ pub(crate) fn is_tmux_empty_state_error(message: &str, command: &str, patterns: 
 fn parse_exact_fields(line: &str, expected: usize, kind: &str) -> Result<Vec<String>> {
     let fields = parse_escaped_fields(line);
     if fields.len() != expected {
-        return Err(anyhow!(
+        return Err(Error::Command(format!(
             "malformed {} line (expected {} fields, got {}): {}",
             kind,
             expected,
             fields.len(),
             line
-        ));
+        )));
     }
     Ok(fields)
 }
 
 fn parse_u32_field(value: &str, field: &str, kind: &str, line: &str) -> Result<u32> {
     value.parse().map_err(|e| {
-        anyhow!(
+        Error::Parse(format!(
             "invalid {} {} value '{}': {} (line: {})",
-            kind,
-            field,
-            value,
-            e,
-            line
-        )
+            kind, field, value, e, line
+        ))
     })
 }
 
 fn parse_u64_field(value: &str, field: &str, kind: &str, line: &str) -> Result<u64> {
     value.parse().map_err(|e| {
-        anyhow!(
+        Error::Parse(format!(
             "invalid {} {} value '{}': {} (line: {})",
-            kind,
-            field,
-            value,
-            e,
-            line
-        )
+            kind, field, value, e, line
+        ))
     })
 }
 
@@ -322,13 +313,10 @@ fn parse_bool_field(value: &str, field: &str, kind: &str, line: &str) -> Result<
     match value {
         "0" => Ok(false),
         "1" => Ok(true),
-        _ => Err(anyhow!(
+        _ => Err(Error::Parse(format!(
             "invalid {} {} flag '{}': expected 0 or 1 (line: {})",
-            kind,
-            field,
-            value,
-            line
-        )),
+            kind, field, value, line
+        ))),
     }
 }
 

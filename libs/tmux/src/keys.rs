@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use crate::error::{Error, Result};
 
 /// Special keys recognized by tmux send-keys (without -l).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,12 +59,12 @@ impl SpecialKey {
             "BSpace" => Ok(SpecialKey::BSpace),
             other => {
                 if other.is_empty() {
-                    Err(anyhow!("empty key name in braces"))
+                    Err(Error::Parse("empty key name in braces".to_string()))
                 } else if !is_valid_tmux_key_name(other) {
-                    Err(anyhow!(
+                    Err(Error::Parse(format!(
                         "invalid tmux key name '{}': contains shell-dangerous character (spaces, semicolons, backticks, $, |, &, etc. are rejected)",
                         other
-                    ))
+                    )))
                 } else {
                     Ok(SpecialKey::Raw(other.to_string()))
                 }
@@ -130,7 +130,7 @@ impl KeySequence {
                     key_name.push(ch2);
                 }
                 if !found_close {
-                    return Err(anyhow!("unclosed '{{' in key sequence"));
+                    return Err(Error::Parse("unclosed '{' in key sequence".to_string()));
                 }
                 // Flush literal buffer
                 if !literal_buf.is_empty() {
