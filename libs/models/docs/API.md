@@ -22,6 +22,7 @@
 | 2026-04-09 | @codex-researcher: Collapsed the duplicate Gemma 4 examples into a single `v0.3` flow. `v0.3` now carries the optional `--download-artifacts` behavior directly, so each versioned example once again maps to exactly one curated model. | Example Program, Notes |
 | 2026-04-09 | @codex-researcher: Added handle-level metric snapshot usage to the examples. The current `mistral` backends now surface runtime latency/memory aggregates on the loaded bundle handle, with text-generation token metrics where the backend provides them. | Example Program, Notes |
 | 2026-04-09 | @codex-researcher: Clarified the current runtime-metrics implementation boundary for examples. The model-layer metrics path uses `sysinfo` for cross-platform current RSS on macOS and Linux, while peak RSS is maintained by Motlie as an observed-handle aggregate rather than an OS-native historical peak counter. | Notes |
+| 2026-04-09 | @codex-researcher: Added the Qwen3-Embedding-0.6B curated bundle (#147). `EmbeddingModels` now includes a second feature-gated embedding variant, `v0.1` works with whichever single embedding bundle is compiled in, and the docs now describe bundle-specific quantization support for the embedding slice. | Overview, Core Types, API Sketch, Example Program, Notes |
 
 This document sketches the concrete API shapes currently introduced in `libs/models`. The crate now owns both the descriptor catalog and the curated bundle constructors that bind those descriptors to a backend implementation.
 
@@ -138,12 +139,20 @@ assert_eq!(
 use motlie_models::embeddings::EmbeddingModels;
 
 let model = EmbeddingModels::GoogleGemma300m;
+let qwen = EmbeddingModels::Qwen3Embedding06B;
 
 assert_eq!(model.as_str(), "google/embeddinggemma_300m");
+assert_eq!(qwen.as_str(), "qwen/qwen3_embedding_06b");
 
 let descriptor = model.descriptor();
 let bundle = model.bundle();
 let spec = model.embedding_spec();
+```
+
+For single-bundle example builds, the direct path can ask the enum for the only compiled embedding bundle:
+
+```rust
+let model = EmbeddingModels::only_enabled()?;
 ```
 
 ### Direct Curated Chat Enum
@@ -169,6 +178,7 @@ use std::str::FromStr;
 use motlie_models::ModelSelector;
 
 let selector = ModelSelector::from_str("embedding:google/embeddinggemma_300m")?;
+let qwen_selector = ModelSelector::from_str("embedding:qwen/qwen3_embedding_06b")?;
 let descriptor = selector.descriptor();
 let bundle = selector.bundle();
 ```
@@ -189,6 +199,10 @@ let direct_bundle = direct.bundle();
 // Parser-oriented path.
 let selected: ModelSelector = "embedding:google/embeddinggemma_300m".parse()?;
 let selected_bundle = selected.bundle();
+
+// Alternate embedding slice.
+let qwen = EmbeddingModels::Qwen3Embedding06B;
+assert_eq!(qwen.embedding_spec().dimensions, Some(1024));
 
 // Both paths resolve to the same curated bundle behavior.
 // In LocalOnly mode, the curated bundle resolves the provider-specific cache
@@ -304,10 +318,19 @@ For `embeddinggemma_300m`, the curated artifact set currently includes:
 - `3_Dense/model.safetensors`
 - root `.safetensors` files for the base model
 
+For `qwen3_embedding_06b`, the curated artifact set currently includes:
+
+- `config.json`
+- `tokenizer.json`
+- `tokenizer_config.json`
+- `special_tokens_map.json`
+- root `.safetensors` files or `.safetensors.index.json`
+
 The same flow is available from the binary target:
 
 ```sh
 cargo run -p motlie-models --bin motlie-models-download -- embeddinggemma_300m
+cargo run -p motlie-models --bin motlie-models-download -- qwen3_embedding_06b
 ```
 
 Authenticated out-of-band download:
@@ -315,6 +338,7 @@ Authenticated out-of-band download:
 ```sh
 export HF_TOKEN=...
 cargo run -p motlie-models --bin motlie-models-download -- --hf-token-env HF_TOKEN embeddinggemma_300m
+cargo run -p motlie-models --bin motlie-models-download -- --hf-token-env HF_TOKEN qwen3_embedding_06b
 ```
 
 ## Example Program
@@ -337,6 +361,7 @@ Embedding example (`v0.1`):
 
 ```sh
 cargo run -p motlie-models --no-default-features --features model-google-gemma-300m --example models_v0_1 -- "motlie curated model bundle"
+cargo run -p motlie-models --no-default-features --features model-qwen3-embedding-06b --example models_v0_1 -- --precision=q8 "motlie curated model bundle"
 ```
 
 Text-only chat example (`v0.2`):
@@ -387,12 +412,13 @@ For a new curated embedding bundle, the intended implementation checklist is:
 - capability metadata comes from `motlie_model`, so the catalog can describe input/output shape and interaction style without inventing its own parallel schema
 - `BackendKind` is metadata for catalog reasoning and observability. It does not make runtime choice part of the application control path.
 - `Catalog` now also owns curated bundle instantiation through registered constructors.
-- The preferred direct curated path is the bundle-family enum, such as `EmbeddingModels::GoogleGemma300m`; `ModelSelector` is the parser-friendly wrapper above that.
+- The preferred direct curated path is the bundle-family enum, such as `EmbeddingModels::GoogleGemma300m` or `EmbeddingModels::Qwen3Embedding06B`; `ModelSelector` is the parser-friendly wrapper above that.
 - Known selectors for bundles disabled by Cargo features should return `ModelsError::ModelUnavailable`, not a generic unknown-selector error.
-- The embedding caller path should be understandable by reading the `v0.1` example; the text-only chat caller path by reading `v0.2`; and the multimodal chat caller path by reading `v0.3`. The curator path should be understandable by reading the `google_gemma_300m`, `qwen3_4b`, or `gemma4_e2b` bundle modules and the checklist above.
+- The embedding caller path should be understandable by reading the `v0.1` example; the text-only chat caller path by reading `v0.2`; and the multimodal chat caller path by reading `v0.3`. The curator path should be understandable by reading the `google_gemma_300m`, `qwen3_embedding_06b`, `qwen3_4b`, or `gemma4_e2b` bundle modules and the checklist above.
 - Current runtime-metrics support in the examples comes from the `libs/model` handle contract and the `mistral` backend implementation. It uses `sysinfo` for current RSS on macOS and Linux and keeps peak RSS as the maximum sample observed by Motlie during the handle lifetime.
 - Curated artifact download is explicit and independent of the backend library's own cache-miss behavior. Backends consume the curated artifact policy through `StartOptions`. For regulated local bundles, `ArtifactPolicy::LocalOnly` is the intended fail-closed mode.
 - `embeddinggemma_300m` local-only startup depends on the full sentence-transformers module stack being present in the curated artifact root. That requirement is part of the bundle contract, not an ambient `mistralrs` cache behavior.
+- `qwen3_embedding_06b` currently advertises `QuantizationSupport::without_recommended([Q8])`, so `v0.1 --precision=q8` is supported for that bundle while omitted precision still means F32.
 - Authentication for protected upstream artifacts belongs only to the out-of-band download/build path. The runtime/bundle startup path does not accept tokens and remains artifact-consumption only.
 - The `v0.1` example now defaults to existing local artifacts and only touches Hugging Face when `--download-artifacts` is passed explicitly.
 

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail, ensure};
-use motlie_model::{ArtifactPolicy, EmbeddingRequest, StartOptions};
+use motlie_model::{ArtifactPolicy, EmbeddingRequest, QuantizationBits, StartOptions};
 use motlie_models::{
     ModelSelector, default_artifact_root, download_bundle_artifacts, embeddings::EmbeddingModels,
 };
@@ -17,6 +17,7 @@ const DISSIMILAR_B: &str = "Quarterly revenue increased by twelve percent year o
 async fn main() -> Result<()> {
     let mut download_artifacts = false;
     let mut embedding_selector = None;
+    let mut precision = None;
     let mut input_parts = Vec::new();
 
     for arg in std::env::args().skip(1) {
@@ -24,6 +25,8 @@ async fn main() -> Result<()> {
             download_artifacts = true;
         } else if let Some(selector) = arg.strip_prefix("--embedding=") {
             embedding_selector = Some(selector.to_owned());
+        } else if let Some(p) = arg.strip_prefix("--precision=") {
+            precision = Some(p.to_owned());
         } else {
             input_parts.push(arg);
         }
@@ -32,9 +35,16 @@ async fn main() -> Result<()> {
     let input = input_parts.join(" ");
     if input.trim().is_empty() {
         bail!(
-            "usage: cargo run -p motlie-models --no-default-features --features model-google-gemma-300m --example models_v0_1 -- [--download-artifacts] [--embedding=google/embeddinggemma_300m] <text to embed>"
+            "usage: cargo run -p motlie-models --no-default-features --features <single embedding bundle feature> --example models_v0_1 -- [--download-artifacts] [--embedding=google/embeddinggemma_300m|qwen/qwen3_embedding_06b] [--precision=q4|q8|f32] <text to embed>"
         );
     }
+
+    let quantization = match precision.as_deref() {
+        Some("q4") => Some(QuantizationBits::Four),
+        Some("q8") => Some(QuantizationBits::Eight),
+        Some("f32") | None => None,
+        Some(other) => bail!("unknown precision `{other}` — use q4, q8, or f32"),
+    };
 
     let (selector_label, bundle_id, descriptor, bundle, path_kind) = if let Some(selector) =
         embedding_selector
@@ -50,7 +60,7 @@ async fn main() -> Result<()> {
             "selector",
         )
     } else {
-        let model = EmbeddingModels::GoogleGemma300m;
+        let model = direct_embedding_model()?;
         (
             model.to_string(),
             model.bundle_id(),
@@ -73,9 +83,14 @@ async fn main() -> Result<()> {
     println!("resolution-path: {path_kind}");
     println!("bundle-id: {}", bundle_id.as_str());
     println!("artifact-root: {}", artifact_root.display());
-    support::print_process_snapshot(
-        "process-before-start",
-        &support::current_process_snapshot(),
+    support::print_process_snapshot("process-before-start", &support::current_process_snapshot());
+    println!(
+        "quantization: {}",
+        match quantization {
+            Some(QuantizationBits::Four) => "ISQ Q4",
+            Some(QuantizationBits::Eight) => "ISQ Q8",
+            None => "F32 (none)",
+        }
     );
 
     if download_artifacts {
@@ -109,6 +124,7 @@ async fn main() -> Result<()> {
             artifact_policy: Some(ArtifactPolicy::LocalOnly {
                 root: artifact_root.clone(),
             }),
+            quantization,
             ..Default::default()
         })
         .await
@@ -126,7 +142,7 @@ async fn main() -> Result<()> {
 
     let embeddings = handle
         .embeddings()
-        .context("embeddinggemma bundle should expose embeddings")?;
+        .context("embedding bundle should expose embeddings")?;
     let custom_started_at = Instant::now();
     let custom_response = embeddings
         .embed(EmbeddingRequest {
@@ -156,10 +172,7 @@ async fn main() -> Result<()> {
         "process-after-custom-embed",
         &support::current_process_snapshot(),
     );
-    support::print_model_metrics(
-        "model-metrics-after-custom-embed",
-        handle.metric_snapshot(),
-    );
+    support::print_model_metrics("model-metrics-after-custom-embed", handle.metric_snapshot());
 
     run_pair_demo(
         embeddings,
@@ -187,9 +200,32 @@ async fn main() -> Result<()> {
         .shutdown()
         .await
         .context("bundle shutdown should succeed")?;
-    support::print_process_snapshot("process-after-shutdown", &support::current_process_snapshot());
+    support::print_process_snapshot(
+        "process-after-shutdown",
+        &support::current_process_snapshot(),
+    );
 
     Ok(())
+}
+
+fn direct_embedding_model() -> Result<EmbeddingModels> {
+    #[cfg(any(
+        feature = "model-google-gemma-300m",
+        feature = "model-qwen3-embedding-06b"
+    ))]
+    {
+        return EmbeddingModels::only_enabled()
+            .map_err(anyhow::Error::from)
+            .context("models_v0_1 expects exactly one curated embedding bundle feature enabled");
+    }
+
+    #[cfg(not(any(
+        feature = "model-google-gemma-300m",
+        feature = "model-qwen3-embedding-06b"
+    )))]
+    {
+        bail!("models_v0_1 requires one curated embedding bundle feature at build time");
+    }
 }
 
 async fn run_pair_demo(

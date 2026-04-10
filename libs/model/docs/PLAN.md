@@ -11,6 +11,7 @@
 | 2026-04-08 | @codex-researcher | Tightened the phase notes after PR 139 review. `LoadedBundleDescriptor` is now implemented as the loaded-instance alias of `BundleMetadata`, and the v0.1 `ModelError` surface now includes explicit backend initialization/execution variants rather than only string-erased `Internal` errors. | Phases 1, 2 |
 | 2026-04-08 | @claude | Implemented `QuantizationBits` in `StartOptions` for #141. Partial completion of Phase 6.3 — quantization delivered, device selection and context-length still pending. | Phase 6 |
 | 2026-04-08 | @codex-researcher | Implemented the first vision-capable bundle contract for #142: `ChatMessage` now carries multimodal content parts, `CapabilityDescriptor` has multimodal chat / vision built-ins, and the Gemma 4 slice can reuse the existing `ChatModel` trait without introducing a separate `VisionModel`. | Phase 3, Phase 6 |
+| 2026-04-09 | @codex-researcher | Documented the second embedding slice (#147) in the contract PLAN. `libs/model` remains unchanged at the trait level, but the validation matrix now explicitly covers `qwen3_embedding_06b` as proof that the embedding contract can support multiple curated bundles without new lifecycle abstractions. | Phase 5 |
 
 Derived from [DESIGN.md](./DESIGN.md). This PLAN covers the contract work needed to support the first end-to-end embedding vertical slice while preserving the longer-term curated-bundle architecture.
 
@@ -130,6 +131,8 @@ Validate that the contract is sufficient for the first curated embedding example
 - [x] Verify `libs/model/backends/mistral` can implement an embedding-only bundle without adding backend-specific types to `libs/model`.
   DESIGN reference: `Architecture`
 - [x] Verify `libs/models` can describe and instantiate `embeddinggemma_300m` using only stable `libs/model` contracts.
+  DESIGN reference: `Architecture`
+- [x] Verify `libs/models` can add `qwen3_embedding_06b` as a second embedding slice without changing the core capability/lifecycle traits.
   DESIGN reference: `Architecture`
 - [x] Verify `libs/model-eval` can consume `CapabilityDescriptor` and `EvalTrack::Embeddings` without extra contract changes.
   DESIGN reference: `Evaluation Harness Support`
