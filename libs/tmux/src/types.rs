@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use crate::error::{Error, Result};
 use regex::Regex;
 use std::fmt;
 use std::path::PathBuf;
@@ -34,18 +34,18 @@ impl PaneAddress {
         // address_str is "session_name:window_index.pane_index"
         let colon_pos = address_str
             .rfind(':')
-            .ok_or_else(|| anyhow!("invalid pane address: missing ':'"))?;
+            .ok_or_else(|| Error::Parse("invalid pane address: missing ':'".to_string()))?;
         let session = address_str[..colon_pos].to_string();
         let rest = &address_str[colon_pos + 1..];
         let dot_pos = rest
             .find('.')
-            .ok_or_else(|| anyhow!("invalid pane address: missing '.'"))?;
+            .ok_or_else(|| Error::Parse("invalid pane address: missing '.'".to_string()))?;
         let window: u32 = rest[..dot_pos]
             .parse()
-            .map_err(|_| anyhow!("invalid window index"))?;
+            .map_err(|_| Error::Parse("invalid window index".to_string()))?;
         let pane: u32 = rest[dot_pos + 1..]
             .parse()
-            .map_err(|_| anyhow!("invalid pane index"))?;
+            .map_err(|_| Error::Parse("invalid pane index".to_string()))?;
 
         Ok(PaneAddress {
             pane_id: pane_id.to_string(),
@@ -143,9 +143,10 @@ impl TargetSpec {
     /// requires a window context (tmux target hierarchy: session:window.pane).
     pub fn pane(mut self, index: u32) -> Result<Self> {
         if self.window_sel.is_none() {
-            return Err(anyhow!(
+            return Err(Error::Parse(
                 "TargetSpec::pane() requires window to be set first \
                  (use .window() or .window_name() before .pane())"
+                    .to_string(),
             ));
         }
         self.pane_idx = Some(index);
@@ -169,7 +170,7 @@ impl TargetSpec {
     /// Parse a tmux target string: "session", "session:window", "session:window.pane"
     pub fn parse(target_str: &str) -> Result<Self> {
         if target_str.is_empty() {
-            return Err(anyhow!("empty target string"));
+            return Err(Error::Parse("empty target string".to_string()));
         }
 
         let (session_part, rest) = match target_str.rfind(':') {
@@ -188,7 +189,7 @@ impl TargetSpec {
         let pane = match pane_part {
             Some(p) => Some(
                 p.parse()
-                    .map_err(|_| anyhow!("invalid pane index: {}", p))?,
+                    .map_err(|_| Error::Parse(format!("invalid pane index: {}", p)))?,
             ),
             None => None,
         };
@@ -232,23 +233,23 @@ impl TmuxSocket {
     /// This isolates automation workloads from the user's default tmux server.
     pub fn automation(scope: &str) -> Result<Self> {
         if scope.is_empty() {
-            return Err(anyhow!("automation scope must not be empty"));
+            return Err(Error::Parse("automation scope must not be empty".to_string()));
         }
         if scope.len() > 64 {
-            return Err(anyhow!(
+            return Err(Error::Parse(format!(
                 "automation scope too long ({} chars, max 64): {}",
                 scope.len(),
                 scope
-            ));
+            )));
         }
         if !scope
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
         {
-            return Err(anyhow!(
+            return Err(Error::Parse(format!(
                 "automation scope contains invalid characters: '{}' (allowed: [A-Za-z0-9._-])",
                 scope
-            ));
+            )));
         }
         Ok(TmuxSocket::Name(format!("motlie-{}", scope)))
     }
@@ -470,10 +471,10 @@ impl SplitSize {
     /// Create a checked percentage value for `split-window -l <n>%`.
     pub fn percent(value: u8) -> Result<Self> {
         if value == 0 || value > 100 {
-            return Err(anyhow!(
+            return Err(Error::Parse(format!(
                 "split percentage must be in 1..=100, got {}",
                 value
-            ));
+            )));
         }
         Ok(SplitSize::Percent(value))
     }

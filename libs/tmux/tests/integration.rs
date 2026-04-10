@@ -50,10 +50,10 @@ impl Drop for NamedSocketCleanup {
 fn callback_collect_output(
     state: &Arc<dyn Any + Send + Sync>,
     event: SinkEvent,
-) -> anyhow::Result<()> {
+) -> motlie_tmux::Result<()> {
     let outputs = state
         .downcast_ref::<Mutex<Vec<String>>>()
-        .ok_or_else(|| anyhow::anyhow!("callback state type mismatch"))?;
+        .ok_or_else(|| motlie_tmux::Error::State("callback state type mismatch".to_string()))?;
     if let SinkEvent::Data(output) = event {
         outputs
             .lock()
@@ -939,7 +939,7 @@ async fn ssh_exec(host: &HostHandle, command: &str) -> anyhow::Result<motlie_tmu
         .await?;
     let result = target.exec(command, Duration::from_secs(10)).await;
     let _ = target.kill().await;
-    result
+    Ok(result?)
 }
 
 /// Helper: connect to the SSH test host, returning (host, remote_tmp_dir).

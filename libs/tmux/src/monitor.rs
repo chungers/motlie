@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{anyhow, Result};
+use crate::error::{Error, Result};
 use tokio::sync::{oneshot, watch};
 
 // ---------------------------------------------------------------------------
@@ -416,8 +416,7 @@ impl SessionMonitorHandle {
         let _ = self.stop_tx.send(true);
         let task = self.task.lock().expect("task lock poisoned").take();
         if let Some(task) = task {
-            task.await
-                .map_err(|e| anyhow!("monitor task panicked: {}", e))?
+            task.await?
                 .map(|_| ())?;
         }
         Ok(())
@@ -473,7 +472,7 @@ impl MonitorHandle {
         let handle = self
             .sessions
             .remove(name)
-            .ok_or_else(|| anyhow!("session '{}' not being monitored", name))?;
+            .ok_or_else(|| Error::NotFound(format!("session '{}' not being monitored", name)))?;
         handle.shutdown().await
     }
 
@@ -790,8 +789,8 @@ mod tests {
         let target2 = crate::host::HostHandle::local().create_target_for_test("s2");
         let (tx1, _) = watch::channel(false);
         let (tx2, _) = watch::channel(false);
-        let task1 = tokio::spawn(async { Ok::<_, anyhow::Error>(MonitorExitReason::Stopped) });
-        let task2 = tokio::spawn(async { Ok::<_, anyhow::Error>(MonitorExitReason::Stopped) });
+        let task1 = tokio::spawn(async { Ok::<_, crate::error::Error>(MonitorExitReason::Stopped) });
+        let task2 = tokio::spawn(async { Ok::<_, crate::error::Error>(MonitorExitReason::Stopped) });
 
         let mut sessions = HashMap::new();
         sessions.insert(
@@ -841,7 +840,7 @@ mod tests {
             "test_session",
         );
         let (stop_tx, _stop_rx) = watch::channel(false);
-        let task = tokio::spawn(async { Ok::<_, anyhow::Error>(MonitorExitReason::Stopped) });
+        let task = tokio::spawn(async { Ok::<_, crate::error::Error>(MonitorExitReason::Stopped) });
 
         let handle = SessionMonitorHandle::new(target, stop_tx, task, default_health());
         // Shutdown waits for the task to finish
@@ -908,7 +907,7 @@ mod tests {
         let health = Arc::new(std::sync::Mutex::new(MonitorHealth::Streaming));
         let target = crate::host::HostHandle::local().create_target_for_test("test");
         let (stop_tx, _) = watch::channel(false);
-        let task = tokio::spawn(async { Ok::<_, anyhow::Error>(MonitorExitReason::Stopped) });
+        let task = tokio::spawn(async { Ok::<_, crate::error::Error>(MonitorExitReason::Stopped) });
 
         let handle = SessionMonitorHandle::new(target, stop_tx, task, health.clone());
         assert_eq!(handle.health(), MonitorHealth::Streaming);
