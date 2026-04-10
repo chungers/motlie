@@ -7,6 +7,7 @@
 | Date | Change | Sections |
 |------|--------|----------|
 | 2026-04-10 | @codex-repl: Refine the design from REPL-first to command-engine-first. Lock subsystem vs command-engine boundaries, add explicit owned/imported/ephemeral semantics, document cleanup expectations, and reference the new [`LIFECYCLE.md`](./LIFECYCLE.md) resource inventory. | Goals, Requirements, Chosen Solution, Architecture, Risks, Open Questions, Summary |
+| 2026-04-10 | @codex-repl: Expand the command-engine and REPL relationship with a concrete code walkthrough. Replace the vague handler sketch with subsystem-facing traits that avoid exposing `Pin<Box<dyn Future>>` in the public integration surface, and reference the new [`API.md`](./API.md) contract document. | Command Registration Model, Completion Model, API Ergonomics |
 | 2026-04-10 | @codex-repl: Initial DESIGN for `libs/repl`, derived from issue #150 and reconciled against the current repo snapshot. Greenfield product direction; migration and backward-compatibility concerns are out of scope. | All |
 
 This document defines the design for a new `libs/repl` crate that provides a unified,
@@ -238,7 +239,9 @@ libs/repl/
     tokenize.rs
     error.rs
   docs/
+    API.md
     DESIGN.md
+    LIFECYCLE.md
     PLAN.md
 ```
 
@@ -287,31 +290,393 @@ The engine must support two registration styles:
 2. Typed registration for existing clap derive commands so current `db` and `fulltext`
    command structs can be reused rather than rewritten.
 
-The intended shape is:
+The public integration surface should not force subsystem crates to write or even see
+`Pin<Box<dyn Future<...>>>`. That is an acceptable internal implementation detail for erased
+dispatch, but it is not a good subsystem-facing API.
+
+The intended public shape is trait-based:
 
 ```rust
-pub trait ReplCommandFactory {
-    fn command() -> clap::Command;
+pub struct CommandOutput {
+    pub lines: Vec<String>,
 }
 
-pub trait TypedReplCommand: Sized {
-    fn from_matches(matches: &clap::ArgMatches) -> Result<Self, clap::Error>;
+pub struct CompletionRequest<'a> {
+    pub command_path: &'a [&'a str],
+    pub arg_id: Option<&'a str>,
+    pub prefix: &'a str,
+}
+
+pub struct CompletionCandidate {
+    pub value: String,
+    pub help: Option<String>,
+}
+
+#[async_trait::async_trait]
+pub trait TypedCommand<C>:
+    clap::CommandFactory + clap::FromArgMatches + Send + 'static
+{
+    const PATH: &'static [&'static str];
+
+    fn complete(_request: CompletionRequest<'_>, _context: &C) -> Vec<CompletionCandidate> {
+        Vec::new()
+    }
+
+    async fn execute(self, context: &mut C) -> anyhow::Result<CommandOutput>;
+}
+
+pub trait CommandModule<C> {
+    fn register(self, engine: &mut CommandEngine<C>);
 }
 
 impl<C> CommandEngine<C> {
-    pub fn add_command<H>(&mut self, command: clap::Command, handler: H) -> &mut Self;
-
-    pub fn add_typed_command<T, H>(&mut self, handler: H) -> &mut Self
+    pub fn add_typed<T>(&mut self) -> &mut Self
     where
-        T: clap::CommandFactory + clap::FromArgMatches + Send + 'static;
+        T: TypedCommand<C>;
+
+    pub fn add_spec<S>(&mut self, spec: S) -> &mut Self
+    where
+        S: Send + Sync + 'static;
+
+    pub async fn run_line(&mut self, line: &str) -> anyhow::Result<CommandOutput>;
+    pub async fn run_argv(&mut self, argv: &[String]) -> anyhow::Result<CommandOutput>;
+    pub fn complete(&self, line: &str, cursor: usize) -> Vec<CompletionCandidate>;
 }
 ```
 
 The exact trait names may change during implementation, but the design intent is stable:
-reuse clap metadata whenever possible.
+subsystem authors should implement typed commands and registration modules, not hand-roll
+erased futures.
 
 In implementation terms, the registration API should land on `CommandEngine<C>`, while the
 interactive shell is just one consumer layered over the same engine.
+
+The preferred registration style for subsystem crates is therefore:
+
+1. Define clap-derived command structs.
+2. Implement `TypedCommand<C>` for those structs.
+3. Group them behind a `CommandModule<C>` registration function.
+4. Let the engine internally erase those concrete command types into its runtime registry.
+
+Raw command registration still exists as an escape hatch for hand-built command surfaces, but
+typed command registration is the design center.
+
+### Detailed Walkthrough
+
+The concrete relationship between REPL and command engine should look like this:
+
+1. A subsystem such as VMM defines typed clap commands.
+2. Each command implements `TypedCommand<C>` with execution and optional dynamic completion.
+3. A subsystem registration module adds those commands to `CommandEngine<C>`.
+4. The engine builds a composite clap tree and owns the mutable session context.
+5. `InteractiveShell<C>` wraps a `reedline::Reedline` instance and forwards input and
+   completion requests into the engine.
+
+The code below is intentionally longer than the library example because it walks through the
+actual boundary in one place.
+
+#### 1. Subsystem command definitions
+
+```rust
+use std::path::PathBuf;
+
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+pub struct VmmRoot {
+    #[command(subcommand)]
+    pub command: VmmSubcommand,
+}
+
+#[derive(Subcommand)]
+pub enum VmmSubcommand {
+    Boot(BootGuest),
+    Exec(ExecGuest),
+    Shutdown(ShutdownGuest),
+}
+
+#[derive(Parser)]
+pub struct BootGuest {
+    #[arg(value_name = "NAME")]
+    pub name: String,
+
+    #[arg(long)]
+    pub image: PathBuf,
+}
+
+#[derive(Parser)]
+pub struct ExecGuest {
+    #[arg(value_name = "NAME")]
+    pub guest: String,
+
+    #[arg(trailing_var_arg = true, required = true)]
+    pub argv: Vec<String>,
+}
+
+#[derive(Parser)]
+pub struct ShutdownGuest {
+    #[arg(value_name = "NAME")]
+    pub guest: String,
+}
+```
+
+Each command is just a normal clap type. There is no REPL-specific parser model here.
+
+#### 2. Typed command implementation
+
+```rust
+#[async_trait::async_trait]
+impl TypedCommand<AppContext> for BootGuest {
+    const PATH: &'static [&'static str] = &["vmm", "boot"];
+
+    async fn execute(self, ctx: &mut AppContext) -> anyhow::Result<CommandOutput> {
+        let prepared = motlie_vmm::orchestrator::prepare(
+            ctx.vmm.prepare_request(&self.name, &self.image)?,
+        )
+        .await?;
+
+        let vm = motlie_vmm::orchestrator::boot(prepared, ctx.vmm.services()).await?;
+
+        ctx.vmm.guests.insert(
+            self.name.clone(),
+            ManagedResource {
+                mode: ResourceMode::Owned,
+                locality: ResourceLocality::InProcess,
+                value: vm,
+            },
+        );
+
+        Ok(CommandOutput {
+            lines: vec![format!("booted {}", self.name)],
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl TypedCommand<AppContext> for ExecGuest {
+    const PATH: &'static [&'static str] = &["vmm", "exec"];
+
+    fn complete(
+        request: CompletionRequest<'_>,
+        ctx: &AppContext,
+    ) -> Vec<CompletionCandidate> {
+        if request.arg_id != Some("guest") {
+            return Vec::new();
+        }
+
+        ctx.vmm
+            .guests
+            .keys()
+            .filter(|name| name.starts_with(request.prefix))
+            .map(|name| CompletionCandidate {
+                value: name.clone(),
+                help: Some("registered VM".into()),
+            })
+            .collect()
+    }
+
+    async fn execute(self, ctx: &mut AppContext) -> anyhow::Result<CommandOutput> {
+        let vm = ctx
+            .vmm
+            .guests
+            .get_mut(&self.guest)
+            .ok_or_else(|| anyhow::anyhow!("unknown guest {}", self.guest))?;
+
+        let output = vm.value.exec(self.argv).await?;
+
+        Ok(CommandOutput {
+            lines: vec![output.stdout],
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl TypedCommand<AppContext> for ShutdownGuest {
+    const PATH: &'static [&'static str] = &["vmm", "shutdown"];
+
+    fn complete(
+        request: CompletionRequest<'_>,
+        ctx: &AppContext,
+    ) -> Vec<CompletionCandidate> {
+        if request.arg_id != Some("guest") {
+            return Vec::new();
+        }
+
+        ctx.vmm
+            .guests
+            .keys()
+            .filter(|name| name.starts_with(request.prefix))
+            .map(|name| CompletionCandidate {
+                value: name.clone(),
+                help: Some("registered VM".into()),
+            })
+            .collect()
+    }
+
+    async fn execute(self, ctx: &mut AppContext) -> anyhow::Result<CommandOutput> {
+        let vm = ctx
+            .vmm
+            .guests
+            .remove(&self.guest)
+            .ok_or_else(|| anyhow::anyhow!("unknown guest {}", self.guest))?;
+
+        vm.value.shutdown().await?;
+
+        Ok(CommandOutput {
+            lines: vec![format!("stopped {}", self.guest)],
+        })
+    }
+}
+```
+
+This is the key boundary:
+
+1. clap parsing is handled by derive-generated code.
+2. VMM lifecycle work is still done by `motlie_vmm`.
+3. The command engine only manages the named registry and command dispatch.
+4. Dynamic completion reads the same registry through `&AppContext`.
+
+#### 3. Subsystem registration module
+
+```rust
+pub struct VmmModule;
+
+impl CommandModule<AppContext> for VmmModule {
+    fn register(self, engine: &mut CommandEngine<AppContext>) {
+        engine.add_typed::<BootGuest>();
+        engine.add_typed::<ExecGuest>();
+        engine.add_typed::<ShutdownGuest>();
+    }
+}
+```
+
+This is all the REPL crate should need from a subsystem integration module.
+
+#### 4. Command-engine execution path
+
+```rust
+impl<C> CommandEngine<C> {
+    pub async fn run_line(&mut self, line: &str) -> anyhow::Result<CommandOutput> {
+        let argv = shlex::split(line)
+            .ok_or_else(|| anyhow::anyhow!("invalid shell quoting"))?;
+        self.run_argv(&argv).await
+    }
+
+    pub async fn run_argv(&mut self, argv: &[String]) -> anyhow::Result<CommandOutput> {
+        let root = self.build_root_command();
+        let matches = root.try_get_matches_from(argv)?;
+        let dispatch = self.resolve_dispatch(&matches)?;
+        dispatch.run(&matches, &mut self.context).await
+    }
+}
+```
+
+At this layer, the engine is:
+
+1. building the aggregate clap tree,
+2. parsing the incoming argv,
+3. selecting the registered command implementation, and
+4. executing it against the mutable session context.
+
+The engine does not perform guest orchestration itself. It only routes to the concrete typed
+command implementation.
+
+#### 5. Static plus dynamic completion
+
+```rust
+impl<C> CommandEngine<C> {
+    pub fn complete(&self, line: &str, cursor: usize) -> Vec<CompletionCandidate> {
+        let partial = &line[..cursor];
+        let tokens = tokenize_partial(partial);
+        let request = self.analyze_completion(&tokens);
+
+        let mut out = self.static_clap_completion(&request);
+        out.extend(self.dynamic_completion(&request));
+        dedup_candidates(out)
+    }
+
+    fn dynamic_completion(
+        &self,
+        request: &CompletionRequest<'_>,
+    ) -> Vec<CompletionCandidate> {
+        self.lookup_registered_command(request.command_path)
+            .map(|command| command.complete(request.clone(), &self.context))
+            .unwrap_or_default()
+    }
+}
+```
+
+Static completion comes from clap metadata:
+
+1. command names
+2. subcommands
+3. flags
+4. value enums or static possible values
+
+Dynamic completion comes from the typed command implementation or adapter layer:
+
+1. guest names
+2. tmux targets
+3. monitor aliases
+4. imported remote resource identifiers
+
+The engine merges those two sources before returning them to the frontend.
+
+#### 6. Reedline frontend
+
+```rust
+pub struct EngineCompleter<'a, C> {
+    pub engine: &'a CommandEngine<C>,
+}
+
+impl<'a, C> reedline::Completer for EngineCompleter<'a, C> {
+    fn complete(&mut self, line: &str, cursor: usize) -> Vec<reedline::Suggestion> {
+        self.engine
+            .complete(line, cursor)
+            .into_iter()
+            .map(|candidate| reedline::Suggestion {
+                value: candidate.value,
+                description: candidate.help,
+                style: None,
+                extra: None,
+                span: reedline::Span::new(0, cursor),
+                append_whitespace: true,
+            })
+            .collect()
+    }
+}
+
+impl<C> InteractiveShell<C> {
+    pub async fn run(&mut self) -> anyhow::Result<()> {
+        let mut editor = reedline::Reedline::create()
+            .with_completer(Box::new(EngineCompleter { engine: &self.engine }));
+
+        loop {
+            match editor.read_line(&reedline::DefaultPrompt::default())? {
+                reedline::Signal::Success(line) => {
+                    let output = self.engine.run_line(&line).await?;
+                    for line in output.lines {
+                        println!("{line}");
+                    }
+                }
+                reedline::Signal::CtrlC | reedline::Signal::CtrlD => break,
+            }
+        }
+
+        Ok(())
+    }
+}
+```
+
+This makes the frontend boundary concrete:
+
+1. `reedline` owns the terminal editor loop.
+2. `InteractiveShell` adapts `reedline` signals into engine calls.
+3. `CommandEngine` owns parsing, dispatch, registry lookup, and completion.
+4. Subsystem crates only contribute command types and lifecycle-aware command handlers.
+
+The architectural consequence is simple: if later a TUI or admin socket wants the same
+command surface, it talks to `CommandEngine`, not to `reedline`.
 
 ### Session State Model
 
