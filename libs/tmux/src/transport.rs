@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use crate::error::{Error, Result};
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
@@ -104,7 +104,7 @@ fn resolve_destination(src: &Path, dst: &Path) -> Result<std::path::PathBuf> {
     if dst.is_dir() {
         let basename = src
             .file_name()
-            .ok_or_else(|| anyhow!("source path has no filename: {}", src.display()))?;
+            .ok_or_else(|| Error::Transport(format!("source path has no filename: {}", src.display())))?;
         Ok(dst.join(basename))
     } else {
         Ok(dst.to_path_buf())
@@ -122,19 +122,19 @@ fn resolve_destination(src: &Path, dst: &Path) -> Result<std::path::PathBuf> {
 fn copy_local(src: &Path, dst: &Path, opts: &TransferOptions) -> Result<()> {
     // Validate source exists
     let src_meta = std::fs::symlink_metadata(src)
-        .map_err(|e| anyhow!("source not found: {}: {}", src.display(), e))?;
+        .map_err(|e| Error::Transport(format!("source not found: {}: {}", src.display(), e)))?;
 
     // Reject symlinks
     if src_meta.file_type().is_symlink() {
-        return Err(anyhow!("symlink encountered at source: {}", src.display()));
+        return Err(Error::Transport(format!("symlink encountered at source: {}", src.display())));
     }
 
     if src_meta.is_dir() {
         if !opts.recursive {
-            return Err(anyhow!(
+            return Err(Error::Transport(format!(
                 "source is a directory but recursive=false: {}",
                 src.display()
-            ));
+            )));
         }
         copy_dir_local(src, dst, opts)
     } else {
@@ -146,10 +146,10 @@ fn copy_local(src: &Path, dst: &Path, opts: &TransferOptions) -> Result<()> {
 fn reject_local_symlink(path: &Path) -> Result<()> {
     if let Ok(meta) = std::fs::symlink_metadata(path) {
         if meta.file_type().is_symlink() {
-            return Err(anyhow!(
+            return Err(Error::Transport(format!(
                 "symlink encountered at destination: {}",
                 path.display()
-            ));
+            )));
         }
     }
     Ok(())
@@ -165,37 +165,37 @@ fn copy_file_local(src: &Path, dst: &Path, opts: &TransferOptions) -> Result<()>
 
     if effective_dst.exists() {
         if !opts.overwrite {
-            return Err(anyhow!(
+            return Err(Error::Transport(format!(
                 "destination already exists and overwrite=false: {}",
                 effective_dst.display()
-            ));
+            )));
         }
         // Type mismatch: destination is a directory but source is a file
         if effective_dst.is_dir() {
-            return Err(anyhow!(
+            return Err(Error::Transport(format!(
                 "type mismatch: source is a file but destination is a directory: {}",
                 effective_dst.display()
-            ));
+            )));
         }
     }
 
     // Ensure parent directory exists
     if let Some(parent) = effective_dst.parent() {
         if !parent.exists() {
-            return Err(anyhow!(
+            return Err(Error::Transport(format!(
                 "parent directory does not exist: {}",
                 parent.display()
-            ));
+            )));
         }
     }
 
     std::fs::copy(src, &effective_dst).map_err(|e| {
-        anyhow!(
+        Error::Transport(format!(
             "failed to copy {} -> {}: {}",
             src.display(),
             effective_dst.display(),
             e
-        )
+        ))
     })?;
     Ok(())
 }
@@ -210,34 +210,34 @@ fn copy_dir_local(src: &Path, dst: &Path, opts: &TransferOptions) -> Result<()> 
 
     if effective_dst.exists() {
         if !opts.overwrite {
-            return Err(anyhow!(
+            return Err(Error::Transport(format!(
                 "destination already exists and overwrite=false: {}",
                 effective_dst.display()
-            ));
+            )));
         }
         // Type mismatch: destination is a file but source is a directory
         if effective_dst.is_file() {
-            return Err(anyhow!(
+            return Err(Error::Transport(format!(
                 "type mismatch: source is a directory but destination is a file: {}",
                 effective_dst.display()
-            ));
+            )));
         }
     } else {
         // Ensure parent of effective_dst exists
         if let Some(parent) = effective_dst.parent() {
             if !parent.exists() {
-                return Err(anyhow!(
+                return Err(Error::Transport(format!(
                     "parent directory does not exist: {}",
                     parent.display()
-                ));
+                )));
             }
         }
         std::fs::create_dir(&effective_dst).map_err(|e| {
-            anyhow!(
+            Error::Transport(format!(
                 "failed to create directory {}: {}",
                 effective_dst.display(),
                 e
-            )
+            ))
         })?;
     }
 
@@ -248,17 +248,17 @@ fn copy_dir_local(src: &Path, dst: &Path, opts: &TransferOptions) -> Result<()> 
 /// Recursively copy directory contents with merge semantics.
 fn copy_dir_contents(src: &Path, dst: &Path, opts: &TransferOptions) -> Result<()> {
     for entry in std::fs::read_dir(src)
-        .map_err(|e| anyhow!("failed to read directory {}: {}", src.display(), e))?
+        .map_err(|e| Error::Transport(format!("failed to read directory {}: {}", src.display(), e)))?
     {
         let entry =
-            entry.map_err(|e| anyhow!("failed to read dir entry in {}: {}", src.display(), e))?;
+            entry.map_err(|e| Error::Transport(format!("failed to read dir entry in {}: {}", src.display(), e)))?;
         let entry_path = entry.path();
         let entry_meta = std::fs::symlink_metadata(&entry_path)
-            .map_err(|e| anyhow!("failed to stat {}: {}", entry_path.display(), e))?;
+            .map_err(|e| Error::Transport(format!("failed to stat {}: {}", entry_path.display(), e)))?;
 
         // Reject symlinks
         if entry_meta.file_type().is_symlink() {
-            return Err(anyhow!("symlink encountered: {}", entry_path.display()));
+            return Err(Error::Transport(format!("symlink encountered: {}", entry_path.display())));
         }
 
         let name = entry.file_name();
@@ -270,15 +270,15 @@ fn copy_dir_contents(src: &Path, dst: &Path, opts: &TransferOptions) -> Result<(
         if entry_meta.is_dir() {
             if dst_entry.exists() {
                 if dst_entry.is_file() {
-                    return Err(anyhow!(
+                    return Err(Error::Transport(format!(
                         "type mismatch: source is a directory but destination is a file: {}",
                         dst_entry.display()
-                    ));
+                    )));
                 }
                 // Merge into existing directory
             } else {
                 std::fs::create_dir(&dst_entry).map_err(|e| {
-                    anyhow!("failed to create directory {}: {}", dst_entry.display(), e)
+                    Error::Transport(format!("failed to create directory {}: {}", dst_entry.display(), e))
                 })?;
             }
             copy_dir_contents(&entry_path, &dst_entry, opts)?;
@@ -286,20 +286,20 @@ fn copy_dir_contents(src: &Path, dst: &Path, opts: &TransferOptions) -> Result<(
             // Regular file
             if dst_entry.exists() {
                 if dst_entry.is_dir() {
-                    return Err(anyhow!(
+                    return Err(Error::Transport(format!(
                         "type mismatch: source is a file but destination is a directory: {}",
                         dst_entry.display()
-                    ));
+                    )));
                 }
                 // overwrite=true is implied here since we passed the top-level check
             }
             std::fs::copy(&entry_path, &dst_entry).map_err(|e| {
-                anyhow!(
+                Error::Transport(format!(
                     "failed to copy {} -> {}: {}",
                     entry_path.display(),
                     dst_entry.display(),
                     e
-                )
+                ))
             })?;
         }
     }
@@ -321,7 +321,7 @@ async fn sftp_resolve_destination(
 ) -> Result<String> {
     let dst_str = dst
         .to_str()
-        .ok_or_else(|| anyhow!("destination path is not valid UTF-8: {}", dst.display()))?;
+        .ok_or_else(|| Error::Transport(format!("destination path is not valid UTF-8: {}", dst.display())))?;
 
     let dst_is_dir = match sftp.symlink_metadata(dst_str).await {
         Ok(meta) => meta.is_dir(),
@@ -331,7 +331,7 @@ async fn sftp_resolve_destination(
     if dst_is_dir {
         let basename = src
             .file_name()
-            .ok_or_else(|| anyhow!("source path has no filename: {}", src.display()))?;
+            .ok_or_else(|| Error::Transport(format!("source path has no filename: {}", src.display())))?;
         Ok(format!(
             "{}/{}",
             dst_str.trim_end_matches('/'),
@@ -354,22 +354,22 @@ async fn sftp_upload_file(
     // Check if destination exists, reject symlinks
     if let Ok(meta) = sftp.symlink_metadata(&effective_dst).await {
         if meta.is_symlink() {
-            return Err(anyhow!(
+            return Err(Error::Transport(format!(
                 "symlink encountered at destination: {}",
                 effective_dst
-            ));
+            )));
         }
         if !opts.overwrite {
-            return Err(anyhow!(
+            return Err(Error::Transport(format!(
                 "destination already exists and overwrite=false: {}",
                 effective_dst
-            ));
+            )));
         }
         if meta.is_dir() {
-            return Err(anyhow!(
+            return Err(Error::Transport(format!(
                 "type mismatch: source is a file but destination is a directory: {}",
                 effective_dst
-            ));
+            )));
         }
     }
 
@@ -378,20 +378,20 @@ async fn sftp_upload_file(
         let parent_str = parent.to_str().unwrap_or("");
         if !parent_str.is_empty() && parent_str != "/" {
             if sftp.symlink_metadata(parent_str).await.is_err() {
-                return Err(anyhow!("parent directory does not exist: {}", parent_str));
+                return Err(Error::Transport(format!("parent directory does not exist: {}", parent_str)));
             }
         }
     }
 
     let data = std::fs::read(local_path)
-        .map_err(|e| anyhow!("failed to read local file {}: {}", local_path.display(), e))?;
+        .map_err(|e| Error::Transport(format!("failed to read local file {}: {}", local_path.display(), e)))?;
     sftp.write(&effective_dst, &data).await.map_err(|e| {
-        anyhow!(
+        Error::Transport(format!(
             "SFTP write failed: {} -> {}: {}",
             local_path.display(),
             effective_dst,
             e
-        )
+        ))
     })?;
     Ok(())
 }
@@ -409,22 +409,22 @@ async fn sftp_upload_dir(
     match sftp.symlink_metadata(&effective_dst).await {
         Ok(meta) => {
             if meta.is_symlink() {
-                return Err(anyhow!(
+                return Err(Error::Transport(format!(
                     "symlink encountered at destination: {}",
                     effective_dst
-                ));
+                )));
             }
             if !opts.overwrite {
-                return Err(anyhow!(
+                return Err(Error::Transport(format!(
                     "destination already exists and overwrite=false: {}",
                     effective_dst
-                ));
+                )));
             }
             if !meta.is_dir() {
-                return Err(anyhow!(
+                return Err(Error::Transport(format!(
                     "type mismatch: source is a directory but destination is a file: {}",
                     effective_dst
-                ));
+                )));
             }
             // Exists as dir → merge into it
         }
@@ -434,13 +434,13 @@ async fn sftp_upload_dir(
                 let parent_str = parent.to_str().unwrap_or("");
                 if !parent_str.is_empty() && parent_str != "/" {
                     if sftp.symlink_metadata(parent_str).await.is_err() {
-                        return Err(anyhow!("parent directory does not exist: {}", parent_str));
+                        return Err(Error::Transport(format!("parent directory does not exist: {}", parent_str)));
                     }
                 }
             }
             sftp.create_dir(&effective_dst)
                 .await
-                .map_err(|e| anyhow!("SFTP mkdir failed: {}: {}", effective_dst, e))?;
+                .map_err(|e| Error::Transport(format!("SFTP mkdir failed: {}: {}", effective_dst, e)))?;
         }
     }
 
@@ -455,15 +455,15 @@ async fn sftp_upload_dir_contents(
     opts: &TransferOptions,
 ) -> Result<()> {
     for entry in std::fs::read_dir(local_dir)
-        .map_err(|e| anyhow!("failed to read local dir {}: {}", local_dir.display(), e))?
+        .map_err(|e| Error::Transport(format!("failed to read local dir {}: {}", local_dir.display(), e)))?
     {
-        let entry = entry.map_err(|e| anyhow!("dir entry error: {}", e))?;
+        let entry = entry.map_err(|e| Error::Transport(format!("dir entry error: {}", e)))?;
         let entry_path = entry.path();
         let meta = std::fs::symlink_metadata(&entry_path)
-            .map_err(|e| anyhow!("failed to stat {}: {}", entry_path.display(), e))?;
+            .map_err(|e| Error::Transport(format!("failed to stat {}: {}", entry_path.display(), e)))?;
 
         if meta.file_type().is_symlink() {
-            return Err(anyhow!("symlink encountered: {}", entry_path.display()));
+            return Err(Error::Transport(format!("symlink encountered: {}", entry_path.display())));
         }
 
         let name = entry.file_name();
@@ -478,22 +478,22 @@ async fn sftp_upload_dir_contents(
             match sftp.symlink_metadata(&remote_entry).await {
                 Ok(rmeta) => {
                     if rmeta.is_symlink() {
-                        return Err(anyhow!(
+                        return Err(Error::Transport(format!(
                             "symlink encountered at destination: {}",
                             remote_entry
-                        ));
+                        )));
                     }
                     if !rmeta.is_dir() {
-                        return Err(anyhow!(
+                        return Err(Error::Transport(format!(
                             "type mismatch: source is a directory but destination is a file: {}",
                             remote_entry
-                        ));
+                        )));
                     }
                 }
                 Err(_) => {
                     sftp.create_dir(&remote_entry)
                         .await
-                        .map_err(|e| anyhow!("SFTP mkdir failed: {}: {}", remote_entry, e))?;
+                        .map_err(|e| Error::Transport(format!("SFTP mkdir failed: {}: {}", remote_entry, e)))?;
                 }
             }
             Box::pin(sftp_upload_dir_contents(
@@ -507,17 +507,17 @@ async fn sftp_upload_dir_contents(
             // Check if remote destination for this file is a symlink
             if let Ok(rmeta) = sftp.symlink_metadata(&remote_entry).await {
                 if rmeta.is_symlink() {
-                    return Err(anyhow!(
+                    return Err(Error::Transport(format!(
                         "symlink encountered at destination: {}",
                         remote_entry
-                    ));
+                    )));
                 }
             }
             let data = std::fs::read(&entry_path)
-                .map_err(|e| anyhow!("failed to read {}: {}", entry_path.display(), e))?;
+                .map_err(|e| Error::Transport(format!("failed to read {}: {}", entry_path.display(), e)))?;
             sftp.write(&remote_entry, &data)
                 .await
-                .map_err(|e| anyhow!("SFTP write failed: {}: {}", remote_entry, e))?;
+                .map_err(|e| Error::Transport(format!("SFTP write failed: {}: {}", remote_entry, e)))?;
         }
     }
     Ok(())
@@ -532,7 +532,7 @@ async fn sftp_download_file(
 ) -> Result<()> {
     let remote_str = remote_path
         .to_str()
-        .ok_or_else(|| anyhow!("remote path is not valid UTF-8: {}", remote_path.display()))?;
+        .ok_or_else(|| Error::Transport(format!("remote path is not valid UTF-8: {}", remote_path.display())))?;
 
     // Resolve destination: if local_path is an existing dir, copy into it
     let effective_dst = resolve_destination(remote_path, local_path)?;
@@ -542,38 +542,38 @@ async fn sftp_download_file(
 
     if effective_dst.exists() {
         if !opts.overwrite {
-            return Err(anyhow!(
+            return Err(Error::Transport(format!(
                 "destination already exists and overwrite=false: {}",
                 effective_dst.display()
-            ));
+            )));
         }
         if effective_dst.is_dir() {
-            return Err(anyhow!(
+            return Err(Error::Transport(format!(
                 "type mismatch: source is a file but destination is a directory: {}",
                 effective_dst.display()
-            ));
+            )));
         }
     }
 
     if let Some(parent) = effective_dst.parent() {
         if !parent.exists() {
-            return Err(anyhow!(
+            return Err(Error::Transport(format!(
                 "parent directory does not exist: {}",
                 parent.display()
-            ));
+            )));
         }
     }
 
     let data = sftp
         .read(remote_str)
         .await
-        .map_err(|e| anyhow!("SFTP read failed: {}: {}", remote_str, e))?;
+        .map_err(|e| Error::Transport(format!("SFTP read failed: {}: {}", remote_str, e)))?;
     std::fs::write(&effective_dst, &data).map_err(|e| {
-        anyhow!(
+        Error::Transport(format!(
             "failed to write local file {}: {}",
             effective_dst.display(),
             e
-        )
+        ))
     })?;
     Ok(())
 }
@@ -592,33 +592,33 @@ async fn sftp_download_dir(
 
     if effective_dst.exists() {
         if !opts.overwrite {
-            return Err(anyhow!(
+            return Err(Error::Transport(format!(
                 "destination already exists and overwrite=false: {}",
                 effective_dst.display()
-            ));
+            )));
         }
         if effective_dst.is_file() {
-            return Err(anyhow!(
+            return Err(Error::Transport(format!(
                 "type mismatch: source is a directory but destination is a file: {}",
                 effective_dst.display()
-            ));
+            )));
         }
     } else {
         if let Some(parent) = effective_dst.parent() {
             if !parent.exists() {
-                return Err(anyhow!(
+                return Err(Error::Transport(format!(
                     "parent directory does not exist: {}",
                     parent.display()
-                ));
+                )));
             }
         }
         std::fs::create_dir(&effective_dst)
-            .map_err(|e| anyhow!("failed to create dir {}: {}", effective_dst.display(), e))?;
+            .map_err(|e| Error::Transport(format!("failed to create dir {}: {}", effective_dst.display(), e)))?;
     }
 
     let remote_str = remote_path
         .to_str()
-        .ok_or_else(|| anyhow!("remote path is not valid UTF-8: {}", remote_path.display()))?;
+        .ok_or_else(|| Error::Transport(format!("remote path is not valid UTF-8: {}", remote_path.display())))?;
     sftp_download_dir_contents(sftp, remote_str, &effective_dst, opts).await
 }
 
@@ -632,7 +632,7 @@ async fn sftp_download_dir_contents(
     let entries = sftp
         .read_dir(remote_dir)
         .await
-        .map_err(|e| anyhow!("SFTP readdir failed: {}: {}", remote_dir, e))?;
+        .map_err(|e| Error::Transport(format!("SFTP readdir failed: {}: {}", remote_dir, e)))?;
 
     for entry in entries {
         let name = entry.file_name();
@@ -646,10 +646,10 @@ async fn sftp_download_dir_contents(
         let meta = sftp
             .symlink_metadata(&remote_entry)
             .await
-            .map_err(|e| anyhow!("SFTP lstat failed: {}: {}", remote_entry, e))?;
+            .map_err(|e| Error::Transport(format!("SFTP lstat failed: {}: {}", remote_entry, e)))?;
 
         if meta.is_symlink() {
-            return Err(anyhow!("symlink encountered: {}", remote_entry));
+            return Err(Error::Transport(format!("symlink encountered: {}", remote_entry)));
         }
 
         let local_entry = local_dir.join(&name);
@@ -660,7 +660,7 @@ async fn sftp_download_dir_contents(
         if meta.is_dir() {
             if !local_entry.exists() {
                 std::fs::create_dir(&local_entry).map_err(|e| {
-                    anyhow!("failed to create dir {}: {}", local_entry.display(), e)
+                    Error::Transport(format!("failed to create dir {}: {}", local_entry.display(), e))
                 })?;
             }
             Box::pin(sftp_download_dir_contents(
@@ -674,9 +674,9 @@ async fn sftp_download_dir_contents(
             let data = sftp
                 .read(&remote_entry)
                 .await
-                .map_err(|e| anyhow!("SFTP read failed: {}: {}", remote_entry, e))?;
+                .map_err(|e| Error::Transport(format!("SFTP read failed: {}: {}", remote_entry, e)))?;
             std::fs::write(&local_entry, &data)
-                .map_err(|e| anyhow!("failed to write {}: {}", local_entry.display(), e))?;
+                .map_err(|e| Error::Transport(format!("failed to write {}: {}", local_entry.display(), e)))?;
         }
     }
     Ok(())
@@ -713,17 +713,17 @@ impl LocalTransport {
                 .output(),
         )
         .await
-        .map_err(|_| anyhow!("command timed out after {:?}: {}", self.timeout, command))?
-        .map_err(|e| anyhow!("failed to execute command: {}", e))?;
+        .map_err(|_| Error::Transport(format!("command timed out after {:?}: {}", self.timeout, command)))?
+        .map_err(|e| Error::Transport(format!("failed to execute command: {}", e)))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow!(
+            return Err(Error::Transport(format!(
                 "command failed (exit {}): {}\nstderr: {}",
                 output.status.code().unwrap_or(-1),
                 command,
                 stderr.trim()
-            ));
+            )));
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -735,7 +735,7 @@ impl LocalTransport {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| anyhow!("failed to spawn shell: {}", e))?;
+            .map_err(|e| Error::Transport(format!("failed to spawn shell: {}", e)))?;
 
         Ok(LocalShellChannel { child })
     }
@@ -759,14 +759,14 @@ impl LocalTransport {
         )
         .await
         .map_err(|_| {
-            anyhow!(
+            Error::Transport(format!(
                 "upload timed out after {:?}: {} -> {}",
                 self.timeout,
                 local_path.display(),
                 remote_path.display()
-            )
+            ))
         })?
-        .map_err(|e| anyhow!("upload task panicked: {}", e))?
+        .map_err(|e| Error::Transport(format!("upload task panicked: {}", e)))?
     }
 
     /// Download: local filesystem copy (remote_path → local_path).
@@ -788,14 +788,14 @@ impl LocalTransport {
         )
         .await
         .map_err(|_| {
-            anyhow!(
+            Error::Transport(format!(
                 "download timed out after {:?}: {} -> {}",
                 self.timeout,
                 remote_path.display(),
                 local_path.display()
-            )
+            ))
         })?
-        .map_err(|e| anyhow!("download task panicked: {}", e))?
+        .map_err(|e| Error::Transport(format!("download task panicked: {}", e)))?
     }
 }
 
@@ -810,6 +810,7 @@ impl Default for LocalTransport {
 // ---------------------------------------------------------------------------
 
 /// In-memory filesystem entry for MockTransport (DC23).
+#[doc(hidden)]
 #[derive(Debug, Clone)]
 pub enum MockFsEntry {
     File(Vec<u8>),
@@ -824,6 +825,7 @@ pub enum MockFsEntry {
 ///
 /// For file transfer testing (DC23), an in-memory filesystem is available
 /// via `with_file()`, `with_dir()`, and accessor methods.
+#[doc(hidden)]
 pub struct MockTransport {
     /// Ordered (pattern, response_queue) pairs. First-match wins.
     responses: Mutex<Vec<(String, Vec<String>)>>,
@@ -871,7 +873,7 @@ impl MockTransport {
     }
 
     /// Add a canned error for a command pattern.
-    /// When `exec()` matches this pattern, it returns `Err(anyhow!(...))`.
+    /// When `exec()` matches this pattern, it returns `Err(Error::Transport(format!(...)))`.
     /// Error patterns are checked before response patterns.
     pub fn with_error(self, command_contains: &str, message: &str) -> Self {
         let mut errors = self.errors.lock().unwrap();
@@ -892,7 +894,7 @@ impl MockTransport {
             let errors = self.errors.lock().unwrap();
             for (pattern, message) in errors.iter() {
                 if command.contains(pattern.as_str()) {
-                    return Err(anyhow!("{}", message));
+                    return Err(Error::Transport(message.to_string()));
                 }
             }
         }
@@ -1018,25 +1020,25 @@ impl MockTransport {
     ) -> Result<()> {
         // Check for injected error
         if let Some(msg) = self.transfer_error.lock().unwrap().take() {
-            return Err(anyhow!("{}", msg));
+            return Err(Error::Transport(msg.to_string()));
         }
 
         let src_meta = std::fs::symlink_metadata(local_path)
-            .map_err(|e| anyhow!("source not found: {}: {}", local_path.display(), e))?;
+            .map_err(|e| Error::Transport(format!("source not found: {}: {}", local_path.display(), e)))?;
 
         if src_meta.file_type().is_symlink() {
-            return Err(anyhow!(
+            return Err(Error::Transport(format!(
                 "symlink encountered at source: {}",
                 local_path.display()
-            ));
+            )));
         }
 
         if src_meta.is_dir() {
             if !opts.recursive {
-                return Err(anyhow!(
+                return Err(Error::Transport(format!(
                     "source is a directory but recursive=false: {}",
                     local_path.display()
-                ));
+                )));
             }
             self.mock_upload_dir(local_path, remote_path, opts)
         } else {
@@ -1057,7 +1059,7 @@ impl MockTransport {
         {
             let name = local_path
                 .file_name()
-                .ok_or_else(|| anyhow!("source has no filename: {}", local_path.display()))?;
+                .ok_or_else(|| Error::Transport(format!("source has no filename: {}", local_path.display())))?;
             remote_path.join(name)
         } else {
             remote_path.to_path_buf()
@@ -1065,31 +1067,31 @@ impl MockTransport {
 
         if let Some(existing) = fs.get(&effective_dst) {
             if !opts.overwrite {
-                return Err(anyhow!(
+                return Err(Error::Transport(format!(
                     "destination already exists and overwrite=false: {}",
                     effective_dst.display()
-                ));
+                )));
             }
             if matches!(existing, MockFsEntry::Dir) {
-                return Err(anyhow!(
+                return Err(Error::Transport(format!(
                     "type mismatch: source is a file but destination is a directory: {}",
                     effective_dst.display()
-                ));
+                )));
             }
         }
 
         // Check parent exists
         if let Some(parent) = effective_dst.parent() {
             if parent != Path::new("") && parent != Path::new("/") && !fs.contains_key(parent) {
-                return Err(anyhow!(
+                return Err(Error::Transport(format!(
                     "parent directory does not exist: {}",
                     parent.display()
-                ));
+                )));
             }
         }
 
         let data = std::fs::read(local_path)
-            .map_err(|e| anyhow!("failed to read {}: {}", local_path.display(), e))?;
+            .map_err(|e| Error::Transport(format!("failed to read {}: {}", local_path.display(), e)))?;
         fs.insert(effective_dst, MockFsEntry::File(data));
         Ok(())
     }
@@ -1108,7 +1110,7 @@ impl MockTransport {
             {
                 let name = local_path
                     .file_name()
-                    .ok_or_else(|| anyhow!("source has no filename: {}", local_path.display()))?;
+                    .ok_or_else(|| Error::Transport(format!("source has no filename: {}", local_path.display())))?;
                 remote_path.join(name)
             } else {
                 remote_path.to_path_buf()
@@ -1119,16 +1121,16 @@ impl MockTransport {
             let mut fs = self.fs.lock().unwrap();
             if let Some(existing) = fs.get(&effective_dst) {
                 if !opts.overwrite {
-                    return Err(anyhow!(
+                    return Err(Error::Transport(format!(
                         "destination already exists and overwrite=false: {}",
                         effective_dst.display()
-                    ));
+                    )));
                 }
                 if matches!(existing, MockFsEntry::File(_)) {
-                    return Err(anyhow!(
+                    return Err(Error::Transport(format!(
                         "type mismatch: source is a directory but destination is a file: {}",
                         effective_dst.display()
-                    ));
+                    )));
                 }
             } else {
                 // Check parent exists
@@ -1137,10 +1139,10 @@ impl MockTransport {
                         && parent != Path::new("/")
                         && !fs.contains_key(parent)
                     {
-                        return Err(anyhow!(
+                        return Err(Error::Transport(format!(
                             "parent directory does not exist: {}",
                             parent.display()
-                        ));
+                        )));
                     }
                 }
                 fs.insert(effective_dst.clone(), MockFsEntry::Dir);
@@ -1157,15 +1159,15 @@ impl MockTransport {
         opts: &TransferOptions,
     ) -> Result<()> {
         for entry in std::fs::read_dir(local_path)
-            .map_err(|e| anyhow!("failed to read dir {}: {}", local_path.display(), e))?
+            .map_err(|e| Error::Transport(format!("failed to read dir {}: {}", local_path.display(), e)))?
         {
-            let entry = entry.map_err(|e| anyhow!("dir entry error: {}", e))?;
+            let entry = entry.map_err(|e| Error::Transport(format!("dir entry error: {}", e)))?;
             let entry_path = entry.path();
             let meta = std::fs::symlink_metadata(&entry_path)
-                .map_err(|e| anyhow!("failed to stat {}: {}", entry_path.display(), e))?;
+                .map_err(|e| Error::Transport(format!("failed to stat {}: {}", entry_path.display(), e)))?;
 
             if meta.file_type().is_symlink() {
-                return Err(anyhow!("symlink encountered: {}", entry_path.display()));
+                return Err(Error::Transport(format!("symlink encountered: {}", entry_path.display())));
             }
 
             let name = entry.file_name();
@@ -1181,7 +1183,7 @@ impl MockTransport {
                 self.mock_upload_dir_contents(&entry_path, &remote_entry, opts)?;
             } else {
                 let data = std::fs::read(&entry_path)
-                    .map_err(|e| anyhow!("failed to read {}: {}", entry_path.display(), e))?;
+                    .map_err(|e| Error::Transport(format!("failed to read {}: {}", entry_path.display(), e)))?;
                 let mut fs = self.fs.lock().unwrap();
                 fs.insert(remote_entry, MockFsEntry::File(data));
             }
@@ -1198,23 +1200,23 @@ impl MockTransport {
     ) -> Result<()> {
         // Check for injected error
         if let Some(msg) = self.transfer_error.lock().unwrap().take() {
-            return Err(anyhow!("{}", msg));
+            return Err(Error::Transport(msg.to_string()));
         }
 
         let fs = self.fs.lock().unwrap();
         let entry = fs
             .get(remote_path)
-            .ok_or_else(|| anyhow!("source not found: {}", remote_path.display()))?
+            .ok_or_else(|| Error::Transport(format!("source not found: {}", remote_path.display())))?
             .clone();
         drop(fs);
 
         match entry {
             MockFsEntry::Dir => {
                 if !opts.recursive {
-                    return Err(anyhow!(
+                    return Err(Error::Transport(format!(
                         "source is a directory but recursive=false: {}",
                         remote_path.display()
-                    ));
+                    )));
                 }
                 self.mock_download_dir(remote_path, local_path, opts)
             }
@@ -1234,7 +1236,7 @@ impl MockTransport {
         let effective_dst = if local_path.is_dir() {
             let name = remote_path
                 .file_name()
-                .ok_or_else(|| anyhow!("source has no filename: {}", remote_path.display()))?;
+                .ok_or_else(|| Error::Transport(format!("source has no filename: {}", remote_path.display())))?;
             local_path.join(name)
         } else {
             local_path.to_path_buf()
@@ -1242,30 +1244,30 @@ impl MockTransport {
 
         if effective_dst.exists() {
             if !opts.overwrite {
-                return Err(anyhow!(
+                return Err(Error::Transport(format!(
                     "destination already exists and overwrite=false: {}",
                     effective_dst.display()
-                ));
+                )));
             }
             if effective_dst.is_dir() {
-                return Err(anyhow!(
+                return Err(Error::Transport(format!(
                     "type mismatch: source is a file but destination is a directory: {}",
                     effective_dst.display()
-                ));
+                )));
             }
         }
 
         if let Some(parent) = effective_dst.parent() {
             if !parent.exists() {
-                return Err(anyhow!(
+                return Err(Error::Transport(format!(
                     "parent directory does not exist: {}",
                     parent.display()
-                ));
+                )));
             }
         }
 
         std::fs::write(&effective_dst, data)
-            .map_err(|e| anyhow!("failed to write {}: {}", effective_dst.display(), e))?;
+            .map_err(|e| Error::Transport(format!("failed to write {}: {}", effective_dst.display(), e)))?;
         Ok(())
     }
 
@@ -1278,7 +1280,7 @@ impl MockTransport {
         let effective_dst = if local_path.is_dir() {
             let name = remote_path
                 .file_name()
-                .ok_or_else(|| anyhow!("source has no filename: {}", remote_path.display()))?;
+                .ok_or_else(|| Error::Transport(format!("source has no filename: {}", remote_path.display())))?;
             local_path.join(name)
         } else {
             local_path.to_path_buf()
@@ -1286,28 +1288,28 @@ impl MockTransport {
 
         if effective_dst.exists() {
             if !opts.overwrite {
-                return Err(anyhow!(
+                return Err(Error::Transport(format!(
                     "destination already exists and overwrite=false: {}",
                     effective_dst.display()
-                ));
+                )));
             }
             if effective_dst.is_file() {
-                return Err(anyhow!(
+                return Err(Error::Transport(format!(
                     "type mismatch: source is a directory but destination is a file: {}",
                     effective_dst.display()
-                ));
+                )));
             }
         } else {
             if let Some(parent) = effective_dst.parent() {
                 if !parent.exists() {
-                    return Err(anyhow!(
+                    return Err(Error::Transport(format!(
                         "parent directory does not exist: {}",
                         parent.display()
-                    ));
+                    )));
                 }
             }
             std::fs::create_dir(&effective_dst)
-                .map_err(|e| anyhow!("failed to create dir {}: {}", effective_dst.display(), e))?;
+                .map_err(|e| Error::Transport(format!("failed to create dir {}: {}", effective_dst.display(), e)))?;
         }
 
         self.mock_download_dir_contents(remote_path, &effective_dst, opts)
@@ -1331,17 +1333,17 @@ impl MockTransport {
         for (child_path, entry) in children {
             let name = child_path
                 .file_name()
-                .ok_or_else(|| anyhow!("child has no filename: {}", child_path.display()))?;
+                .ok_or_else(|| Error::Transport(format!("child has no filename: {}", child_path.display())))?;
             let local_child = local_dir.join(name);
             match entry {
                 MockFsEntry::File(data) => {
                     std::fs::write(&local_child, &data)
-                        .map_err(|e| anyhow!("failed to write {}: {}", local_child.display(), e))?;
+                        .map_err(|e| Error::Transport(format!("failed to write {}: {}", local_child.display(), e)))?;
                 }
                 MockFsEntry::Dir => {
                     if !local_child.exists() {
                         std::fs::create_dir(&local_child).map_err(|e| {
-                            anyhow!("failed to create dir {}: {}", local_child.display(), e)
+                            Error::Transport(format!("failed to create dir {}: {}", local_child.display(), e))
                         })?;
                     }
                     self.mock_download_dir_contents(&child_path, &local_child, opts)?;
@@ -1441,13 +1443,13 @@ impl SshConfig {
     /// URI round-trip safety and tmux compatibility. Returns `Err` on
     /// invalid names. `TmuxSocket::Path` values are not restricted
     /// (filesystem paths).
-    pub fn with_socket(mut self, socket: TmuxSocket) -> anyhow::Result<Self> {
+    pub fn with_socket(mut self, socket: TmuxSocket) -> Result<Self> {
         if let TmuxSocket::Name(ref name) = socket {
             if !is_valid_socket_name(name) {
-                return Err(anyhow::anyhow!(
+                return Err(Error::Transport(format!(
                     "invalid socket name '{}': must match [A-Za-z0-9._-]+",
                     name
-                ));
+                )));
             }
         }
         self.socket = Some(socket);
@@ -1459,12 +1461,12 @@ impl SshConfig {
     /// Convenience builder that calls `TmuxSocket::automation(scope)` and
     /// wires the result into `with_socket()`. Errors if a socket is already
     /// set (no silent overwrite) or if the scope is invalid.
-    pub fn with_automation_socket(self, scope: &str) -> anyhow::Result<Self> {
+    pub fn with_automation_socket(self, scope: &str) -> Result<Self> {
         if self.socket.is_some() {
-            return Err(anyhow::anyhow!(
+            return Err(Error::Transport(format!(
                 "socket already set; cannot overwrite with automation socket for scope '{}'",
                 scope
-            ));
+            )));
         }
         let socket = TmuxSocket::automation(scope)?;
         self.with_socket(socket)
@@ -1475,14 +1477,14 @@ impl SshConfig {
     /// When set, `SshTransport::connect()` authenticates with this key file
     /// instead of ssh-agent. Returns `Err` if the config already has an
     /// identity file set (e.g., from a parsed URI) to prevent silent overwrites.
-    pub fn with_identity_file(self, path: impl Into<std::path::PathBuf>) -> anyhow::Result<Self> {
+    pub fn with_identity_file(self, path: impl Into<std::path::PathBuf>) -> Result<Self> {
         let new_path = path.into();
         if let Some(ref existing) = self.identity_file {
-            return Err(anyhow::anyhow!(
+            return Err(Error::Transport(format!(
                 "identity-file already set to '{}'; cannot overwrite with '{}'",
                 existing.display(),
                 new_path.display()
-            ));
+            )));
         }
         Ok(SshConfig {
             identity_file: Some(new_path),
@@ -1547,7 +1549,7 @@ impl russh::client::Handler for SshHandler {
     async fn check_server_key(
         &mut self,
         server_public_key: &russh_keys::key::PublicKey,
-    ) -> Result<bool, Self::Error> {
+    ) -> std::result::Result<bool, Self::Error> {
         match &self.policy {
             HostKeyPolicy::Verify => {
                 match russh_keys::known_hosts::check_known_hosts(
@@ -1694,20 +1696,20 @@ impl SshTransport {
         )
         .await
         .map_err(|_| {
-            anyhow!(
+            Error::Transport(format!(
                 "SSH connection to {}:{} timed out after {:?}",
                 config.host,
                 config.port,
                 config.timeout
-            )
+            ))
         })?
         .map_err(|e| {
-            anyhow!(
+            Error::Transport(format!(
                 "SSH connection to {}:{} failed: {}",
                 config.host,
                 config.port,
                 e
-            )
+            ))
         })?;
 
         // Authenticate: explicit key file (DC26) or ssh-agent (default)
@@ -1731,24 +1733,24 @@ impl SshTransport {
         let mut agent = russh_keys::agent::client::AgentClient::connect_env()
             .await
             .map_err(|e| {
-                anyhow!(
+                Error::Transport(format!(
                     "Failed to connect to SSH agent (is SSH_AUTH_SOCK set?): {}. \
                      Ensure ssh-agent is running and SSH_AUTH_SOCK is exported.",
                     e
-                )
+                ))
             })?;
 
         let identities = agent.request_identities().await.map_err(|e| {
-            anyhow!(
+            Error::Transport(format!(
                 "Failed to list SSH agent identities: {}. \
                  Ensure keys are loaded with ssh-add.",
                 e
-            )
+            ))
         })?;
 
         if identities.is_empty() {
-            return Err(anyhow!(
-                "SSH agent has no identities. Add a key with: ssh-add ~/.ssh/id_ed25519"
+            return Err(Error::Transport(
+                "SSH agent has no identities. Add a key with: ssh-add ~/.ssh/id_ed25519".to_string()
             ));
         }
 
@@ -1779,14 +1781,14 @@ impl SshTransport {
             }
         }
 
-        Err(anyhow!(
+        Err(Error::Transport(format!(
             "SSH authentication failed for user '{}' on {}:{}. \
              None of the {} agent key(s) were accepted.",
             config.user,
             config.host,
             config.port,
             identities.len()
-        ))
+        )))
     }
 
     /// Authenticate using an explicit private key file (DC26).
@@ -1796,35 +1798,35 @@ impl SshTransport {
         key_path: &std::path::Path,
     ) -> Result<()> {
         let key_pair = russh_keys::load_secret_key(key_path, None).map_err(|e| {
-            anyhow!(
+            Error::Transport(format!(
                 "Failed to load SSH key '{}': {}. \
                  If the key is passphrase-protected, load it into ssh-agent instead.",
                 key_path.display(),
                 e
-            )
+            ))
         })?;
 
         let accepted = handle
             .authenticate_publickey(&config.user, Arc::new(key_pair))
             .await
             .map_err(|e| {
-                anyhow!(
+                Error::Transport(format!(
                     "SSH public key authentication failed for '{}' on {}:{}: {}",
                     key_path.display(),
                     config.host,
                     config.port,
                     e
-                )
+                ))
             })?;
 
         if !accepted {
-            return Err(anyhow!(
+            return Err(Error::Transport(format!(
                 "SSH key '{}' was rejected by {}:{}. \
                  Verify the key is authorized on the remote host.",
                 key_path.display(),
                 config.host,
                 config.port
-            ));
+            )));
         }
 
         tracing::debug!(
@@ -1853,13 +1855,13 @@ impl SshTransport {
                 handle
                     .channel_open_session()
                     .await
-                    .map_err(|e| anyhow!("SSH: failed to open session channel: {}", e))?
+                    .map_err(|e| Error::Transport(format!("SSH: failed to open session channel: {}", e)))?
             };
 
             channel
                 .exec(true, command)
                 .await
-                .map_err(|e| anyhow!("SSH: failed to exec command: {}", e))?;
+                .map_err(|e| Error::Transport(format!("SSH: failed to exec command: {}", e)))?;
 
             // Collect output
             let mut stdout = Vec::new();
@@ -1884,15 +1886,15 @@ impl SshTransport {
                 }
             }
 
-            Ok::<_, anyhow::Error>((stdout, stderr, exit_code))
+            Ok::<_, Error>((stdout, stderr, exit_code))
         })
         .await
         .map_err(|_| {
-            anyhow!(
+            Error::Transport(format!(
                 "SSH command timed out after {:?}: {}",
                 self.config.timeout,
                 command
-            )
+            ))
         })??;
 
         finalize_ssh_exec(command, stdout, stderr, exit_code)
@@ -1908,7 +1910,7 @@ impl SshTransport {
             handle
                 .channel_open_session()
                 .await
-                .map_err(|e| anyhow!("SSH: failed to open session channel for shell: {}", e))?
+                .map_err(|e| Error::Transport(format!("SSH: failed to open session channel for shell: {}", e)))?
         };
 
         // Request a PTY for interactive shell use
@@ -1923,12 +1925,12 @@ impl SshTransport {
                 &[], // terminal modes
             )
             .await
-            .map_err(|e| anyhow!("SSH: failed to request PTY: {}", e))?;
+            .map_err(|e| Error::Transport(format!("SSH: failed to request PTY: {}", e)))?;
 
         channel
             .request_shell(true)
             .await
-            .map_err(|e| anyhow!("SSH: failed to request shell: {}", e))?;
+            .map_err(|e| Error::Transport(format!("SSH: failed to request shell: {}", e)))?;
 
         Ok(SshShellChannel { channel })
     }
@@ -1957,17 +1959,17 @@ impl SshTransport {
             handle
                 .channel_open_session()
                 .await
-                .map_err(|e| anyhow!("SSH: failed to open session channel for SFTP: {}", e))?
+                .map_err(|e| Error::Transport(format!("SSH: failed to open session channel for SFTP: {}", e)))?
         };
 
         channel
             .request_subsystem(true, "sftp")
             .await
-            .map_err(|e| anyhow!("SSH: failed to request SFTP subsystem: {}", e))?;
+            .map_err(|e| Error::Transport(format!("SSH: failed to request SFTP subsystem: {}", e)))?;
 
         let sftp = russh_sftp::client::SftpSession::new(channel.into_stream())
             .await
-            .map_err(|e| anyhow!("SSH: failed to initialize SFTP session: {}", e))?;
+            .map_err(|e| Error::Transport(format!("SSH: failed to initialize SFTP session: {}", e)))?;
         Ok(sftp)
     }
 
@@ -1983,23 +1985,23 @@ impl SshTransport {
     ) -> Result<()> {
         tokio::time::timeout(self.config.timeout, async {
             let src_meta = std::fs::symlink_metadata(local_path)
-                .map_err(|e| anyhow!("source not found: {}: {}", local_path.display(), e))?;
+                .map_err(|e| Error::Transport(format!("source not found: {}: {}", local_path.display(), e)))?;
 
             if src_meta.file_type().is_symlink() {
-                return Err(anyhow!(
+                return Err(Error::Transport(format!(
                     "symlink encountered at source: {}",
                     local_path.display()
-                ));
+                )));
             }
 
             let sftp = self.open_sftp().await?;
 
             if src_meta.is_dir() {
                 if !opts.recursive {
-                    return Err(anyhow!(
+                    return Err(Error::Transport(format!(
                         "source is a directory but recursive=false: {}",
                         local_path.display()
-                    ));
+                    )));
                 }
                 sftp_upload_dir(&sftp, local_path, remote_path, opts).await
             } else {
@@ -2008,12 +2010,12 @@ impl SshTransport {
         })
         .await
         .map_err(|_| {
-            anyhow!(
+            Error::Transport(format!(
                 "SFTP upload timed out after {:?}: {} -> {}",
                 self.config.timeout,
                 local_path.display(),
                 remote_path.display()
-            )
+            ))
         })?
     }
 
@@ -2031,28 +2033,28 @@ impl SshTransport {
             let sftp = self.open_sftp().await?;
 
             let remote_str = remote_path.to_str().ok_or_else(|| {
-                anyhow!("remote path is not valid UTF-8: {}", remote_path.display())
+                Error::Transport(format!("remote path is not valid UTF-8: {}", remote_path.display()))
             })?;
 
             // Use lstat (symlink_metadata) to detect symlinks without following
             let remote_meta = sftp
                 .symlink_metadata(remote_str)
                 .await
-                .map_err(|e| anyhow!("source not found: {}: {}", remote_path.display(), e))?;
+                .map_err(|e| Error::Transport(format!("source not found: {}: {}", remote_path.display(), e)))?;
 
             if remote_meta.is_symlink() {
-                return Err(anyhow!(
+                return Err(Error::Transport(format!(
                     "symlink encountered at source: {}",
                     remote_path.display()
-                ));
+                )));
             }
 
             if remote_meta.is_dir() {
                 if !opts.recursive {
-                    return Err(anyhow!(
+                    return Err(Error::Transport(format!(
                         "source is a directory but recursive=false: {}",
                         remote_path.display()
-                    ));
+                    )));
                 }
                 sftp_download_dir(&sftp, remote_path, local_path, opts).await
             } else {
@@ -2061,12 +2063,12 @@ impl SshTransport {
         })
         .await
         .map_err(|_| {
-            anyhow!(
+            Error::Transport(format!(
                 "SFTP download timed out after {:?}: {} -> {}",
                 self.config.timeout,
                 remote_path.display(),
                 local_path.display()
-            )
+            ))
         })?
     }
 }
@@ -2082,20 +2084,20 @@ fn finalize_ssh_exec(
         if stderr_str.trim().is_empty() {
             return Ok(String::from_utf8_lossy(&stdout).to_string());
         }
-        return Err(anyhow!(
+        return Err(Error::Transport(format!(
             "command failed (missing exit status): {}\nstderr: {}",
             command,
             stderr_str.trim()
-        ));
+        )));
     };
 
     if code != 0 {
-        return Err(anyhow!(
+        return Err(Error::Transport(format!(
             "command failed (exit {}): {}\nstderr: {}",
             code,
             command,
             stderr_str.trim()
-        ));
+        )));
     }
 
     Ok(String::from_utf8_lossy(&stdout).to_string())
@@ -2148,11 +2150,11 @@ impl LocalShellChannel {
             .child
             .stdin
             .as_mut()
-            .ok_or_else(|| anyhow!("stdin not available"))?;
+            .ok_or_else(|| Error::Transport("stdin not available".to_string()))?;
         stdin
             .write_all(data)
             .await
-            .map_err(|e| anyhow!("write to shell failed: {}", e))
+            .map_err(|e| Error::Transport(format!("write to shell failed: {}", e)))
     }
 
     async fn read(&mut self) -> Option<ShellEvent> {
@@ -2179,7 +2181,7 @@ impl SshShellChannel {
         self.channel
             .data(&data[..])
             .await
-            .map_err(|e| anyhow!("SSH: write to shell failed: {}", e))
+            .map_err(|e| Error::Transport(format!("SSH: write to shell failed: {}", e)))
     }
 
     async fn read(&mut self) -> Option<ShellEvent> {

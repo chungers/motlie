@@ -1,6 +1,7 @@
 pub mod capture;
 pub mod control;
 pub mod discovery;
+pub mod error;
 pub mod filter;
 pub mod fleet;
 pub mod host;
@@ -16,6 +17,7 @@ pub use capture::{
     has_visible_text, normalize_plain_text, normalize_screen_stable, overlap_deduplicate,
     pane_tail_excerpt, strip_ansi,
 };
+pub use error::{Error, Result};
 pub use filter::{
     AgentTuiFilter, ContentFilter, RawFilter, ShellFilter,
     clean_line, diff_new_lines, is_tui_chrome,
@@ -31,7 +33,11 @@ pub use sink::{
     TargetOutput,
 };
 pub use sinks::stdio::{StdioFormat, StdioSink};
-pub use transport::{
-    MockFsEntry, ShellChannelKind, ShellEvent, SshConfig, SshTransport, TransportKind,
+pub use transport::{ShellChannelKind, ShellEvent, SshConfig, SshTransport, TransportKind};
+pub use types::{
+    CaptureNormalizeMode, CaptureOptions, CaptureResult, ClientInfo, CreateSessionOptions,
+    CreateWindowOptions, ExecId, ExecOutput, ExecState, FidelityIssue, GeometrySnapshot,
+    HostKeyPolicy, OutputFidelity, PaneAddress, PaneGeometry, PaneInfo, ScrollbackQuery,
+    SessionInfo, SplitDirection, SplitPaneOptions, SplitSize, TargetAddress, TargetLevel,
+    TargetSpec, TmuxSocket, TransferOptions, WindowInfo,
 };
-pub use types::*;

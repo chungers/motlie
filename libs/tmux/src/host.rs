@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use crate::error::{Error, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
@@ -253,7 +253,7 @@ impl HostHandle {
         let info = sessions
             .into_iter()
             .find(|s| s.name == name)
-            .ok_or_else(|| anyhow!("session '{}' created but not found in list", name))?;
+            .ok_or_else(|| Error::State(format!("session '{}' created but not found in list", name)))?;
 
         Ok(Target {
             inner: self.inner.clone(),
@@ -285,10 +285,10 @@ impl HostHandle {
 
         match (spec.window_selector(), spec.pane_index()) {
             (None, Some(_)) => {
-                return Err(anyhow!(
+                return Err(Error::Parse(format!(
                     "invalid TargetSpec: pane requires window (got session='{}', window=None, pane=Some)",
                     spec.session_name()
-                ));
+                )));
             }
             (None, None) => Ok(Some(Target {
                 inner: self.inner.clone(),
@@ -405,10 +405,10 @@ impl HostHandle {
             .lock()
             .expect("output_bus lock poisoned");
         if bus_opt.is_some() {
-            return Err(anyhow!(
+            return Err(Error::AlreadyExists(format!(
                 "output bus already initialized for host '{}'; inject before first use",
                 self.inner.host_alias
-            ));
+            )));
         }
         *bus_opt = Some(bus);
         Ok(())
@@ -435,7 +435,7 @@ impl HostHandle {
         let session_info = sessions
             .into_iter()
             .find(|s| s.name == session)
-            .ok_or_else(|| anyhow!("session '{}' not found", session))?;
+            .ok_or_else(|| Error::NotFound(format!("session '{}' not found", session)))?;
         let target = Target {
             inner: self.inner.clone(),
             address: TargetAddress::Session(session_info),
@@ -513,11 +513,11 @@ impl HostHandle {
                             if let Ok(mut signals) = inner_ref.monitor_signals.lock() {
                                 signals.remove(&session_for_cleanup);
                             }
-                            return Err(anyhow!(
+                            return Err(Error::State(format!(
                                 "monitor for '{}' exhausted {} reconnect attempts",
                                 session,
                                 max_retries
-                            ));
+                            )));
                         }
 
                         // Exponential backoff: 1s, 2s, 4s, 8s, 16s (capped at 30s)
@@ -566,10 +566,10 @@ impl HostHandle {
                             if let Ok(mut signals) = inner_ref.monitor_signals.lock() {
                                 signals.remove(&session_for_cleanup);
                             }
-                            return Err(anyhow!(
+                            return Err(Error::NotFound(format!(
                                 "session '{}' no longer exists after reconnect",
                                 session
-                            ));
+                            )));
                         }
 
                         // Reopen shell channel
@@ -669,10 +669,10 @@ impl HostHandle {
         });
 
         startup_ready_rx.await.map_err(|_| {
-            anyhow!(
+            Error::State(format!(
                 "monitor for '{}' exited before control mode became ready",
                 session_name
-            )
+            ))
         })?;
 
         Ok(SessionMonitorHandle::new(target, stop_tx, task, health))
@@ -711,7 +711,7 @@ impl HostHandle {
             .expect("monitor_signals lock poisoned");
         let tx = signals
             .get(session_name)
-            .ok_or_else(|| anyhow!("session '{}' not being monitored", session_name))?;
+            .ok_or_else(|| Error::NotFound(format!("session '{}' not being monitored", session_name)))?;
         let _ = tx.send(true);
         Ok(())
     }
@@ -771,7 +771,7 @@ impl ExecHandle {
     pub async fn wait(self) -> Result<ExecState> {
         self.task
             .await
-            .map_err(|e| anyhow!("exec task panicked: {}", e))?
+            .map_err(Error::JoinError)?
     }
 }
 
@@ -1010,11 +1010,11 @@ impl Target {
                     address: TargetAddress::Window(window),
                 })
             }
-            TargetAddress::Window(_) => Err(anyhow!(
-                "new_window() requires a session target, got window"
+            TargetAddress::Window(_) => Err(Error::Parse(
+                "new_window() requires a session target, got window".to_string(),
             )),
             TargetAddress::Pane(_) => {
-                Err(anyhow!("new_window() requires a session target, got pane"))
+                Err(Error::Parse("new_window() requires a session target, got pane".to_string()))
             }
         }
     }
@@ -1022,8 +1022,8 @@ impl Target {
     /// Split a new child pane from a window or pane target (DC25).
     pub async fn split_pane(&self, opts: &SplitPaneOptions) -> Result<Target> {
         match &self.address {
-            TargetAddress::Session(_) => Err(anyhow!(
-                "split_pane() requires a window or pane target, got session"
+            TargetAddress::Session(_) => Err(Error::Parse(
+                "split_pane() requires a window or pane target, got session".to_string(),
             )),
             TargetAddress::Window(_) | TargetAddress::Pane(_) => {
                 let prefix = self.inner.tmux_prefix().await;
@@ -1297,7 +1297,7 @@ impl Target {
                     address: TargetAddress::Window(new_info),
                 })
             }
-            TargetAddress::Pane(_) => Err(anyhow!("cannot rename a pane")),
+            TargetAddress::Pane(_) => Err(Error::Parse("cannot rename a pane".to_string())),
         }
     }
 
@@ -1310,11 +1310,11 @@ impl Target {
     /// publishes `TargetOutput` to the host's `OutputBus`.
     pub async fn start_monitoring(&self) -> Result<SessionMonitorHandle> {
         if !matches!(self.address, TargetAddress::Session(_)) {
-            return Err(anyhow!(
+            return Err(Error::Parse(format!(
                 "start_monitoring() is session-level only; target '{}' is {:?}",
                 self.target_string(),
                 self.level()
-            ));
+            )));
         }
         let host = HostHandle {
             inner: self.inner.clone(),
@@ -1330,11 +1330,11 @@ impl Target {
     /// `start_monitoring()` and call `shutdown()` on it.
     pub fn stop_monitoring(&self) -> Result<()> {
         if !matches!(self.address, TargetAddress::Session(_)) {
-            return Err(anyhow!(
+            return Err(Error::Parse(format!(
                 "stop_monitoring() is session-level only; target '{}' is {:?}",
                 self.target_string(),
                 self.level()
-            ));
+            )));
         }
         let host = HostHandle {
             inner: self.inner.clone(),
@@ -1577,8 +1577,8 @@ impl Target {
         let handle = self.start_exec(command, timeout).await?;
         match handle.wait().await? {
             ExecState::Completed(output) => Ok(output),
-            ExecState::Unknown { reason } => Err(anyhow!("exec result unknown: {}", reason)),
-            ExecState::Running => Err(anyhow!("internal error: Running after wait")),
+            ExecState::Unknown { reason } => Err(Error::State(format!("exec result unknown: {}", reason))),
+            ExecState::Running => Err(Error::State("internal error: Running after wait".to_string())),
         }
     }
 }
@@ -1668,8 +1668,14 @@ fn parse_sentinel_output(content: &str, marker: &str) -> Option<ExecOutput> {
 
         // Check this isn't the echo command (look back for "echo")
         let before = &joined[..pos];
-        let is_echo_cmd =
-            before.len() >= 4 && before[before.len().saturating_sub(20)..].contains("echo");
+        let lookback = {
+            let mut b = before.len().saturating_sub(20);
+            while b > 0 && !before.is_char_boundary(b) {
+                b -= 1;
+            }
+            b
+        };
+        let is_echo_cmd = before.len() >= 4 && before[lookback..].contains("echo");
 
         if !is_echo_cmd {
             break pos;
