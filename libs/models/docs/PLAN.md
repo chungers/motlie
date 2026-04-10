@@ -9,6 +9,9 @@
 | 2026-04-07 | @codex-researcher | Updated the bundle plan after the NaN investigation. The `embeddinggemma_300m` descriptor now captures the full sentence-transformers module stack, and an env-gated catalog test verifies finite local-only embeddings end to end. |
 | 2026-04-08 | @codex-researcher | Reconciled the PLAN with the current public API after review. `SupportTier` and `PackagingMode` were removed from the v1 surface earlier, so the PLAN now tracks the descriptor fields that actually exist in code and docs. | Phase 1, Phase 2 |
 | 2026-04-08 | @claude | Added Phase 5 for the Qwen3-4B chat bundle (#141). Covers `ChatModels` enum, `ModelSelector::Chat`, curated artifact rules, HF cache resolution, and `v0.2` example. | Phase 5 |
+| 2026-04-08 | @codex-researcher | Added Phase 6 for the Gemma 4 E2B-it multimodal chat bundle (#142). Covers the feature-gated chat module, multimodal artifact rules, local snapshot validation, selector/catalog wiring, and `v0.3`. | Phase 6 |
+| 2026-04-09 | @codex-researcher | Tightened the versioned-example convention. `v0.1`-`v0.3` now assert single-bundle builds by printing `catalog-entry-count: 1`, and the Gemma example follows the same rule. | Phases 4-6 |
+| 2026-04-09 | @codex-researcher | Collapsed the duplicate Gemma 4 examples into a single `v0.3` flow. `v0.3` now owns both optional artifact download and local-only startup, preserving the one-model-per-example convention. | Phase 6 |
 
 Derived from [DESIGN.md](./DESIGN.md). This PLAN focuses on the first curated bundle slice rather than the full long-term catalog.
 
@@ -117,3 +120,25 @@ Add the first curated chat bundle to validate the `ChatModel` + `CompletionModel
 - [x] `cargo test -p motlie-models --lib`
 - [x] `cargo check -p motlie-models --no-default-features`
 - [ ] Env-gated end-to-end test with pre-downloaded Qwen3-4B artifacts.
+
+## Phase 6: Gemma 4 E2B-it Multimodal Chat Bundle
+
+### 6.1 — Chat module and Gemma bundle
+
+- [x] Add `src/chat/gemma4_e2b.rs` with `descriptor()`, `bundle()`, and curated local snapshot resolution.
+- [x] Add `ChatModels::Gemma4E2B` behind `model-gemma4-e2b`.
+- [x] Define curated artifact rules for Gemma 4 multimodal startup, including processor config files.
+- [x] Implement `ModelBundle` for `Gemma4E2B`, delegating to `MistralMultimodalBundle`.
+
+### 6.2 — Catalog and selector integration
+
+- [x] Support `"chat:google/gemma4_e2b"` in `ModelSelector`.
+- [x] Register the bundle in `Catalog::with_defaults()`.
+- [x] Add selector/direct-enum tests for Gemma 4 matching the earlier bundle conventions.
+
+### 6.3 — Example and verification
+
+- [x] Add `examples/v0.3` demonstrating text-only and image+text chat through the Gemma 4 bundle, with optional `--download-artifacts` for the convenience path.
+- [x] `cargo test -p motlie-models --lib`
+- [x] `cargo build -p motlie-models --example models_v0_3`
+- [ ] Env-gated end-to-end example run with pre-downloaded Gemma 4 E2B-it artifacts.
