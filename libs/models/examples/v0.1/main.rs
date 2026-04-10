@@ -10,6 +10,7 @@ const SIMILAR_A: &str = "A small orange cat is sleeping on the couch.";
 const SIMILAR_B: &str = "An orange kitten is napping on a sofa.";
 const DISSIMILAR_A: &str = "A small orange cat is sleeping on the couch.";
 const DISSIMILAR_B: &str = "Quarterly revenue increased by twelve percent year over year.";
+const DEFAULT_EMBEDDING_SELECTOR: &str = motlie_models::embeddings::GOOGLE_GEMMA_300M_SELECTOR;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -31,12 +32,10 @@ async fn main() -> Result<()> {
     }
 
     let input = input_parts.join(" ");
-    let selector = embedding_selector.context(
-        "models_v0_1 requires --embedding=google/embeddinggemma_300m or --embedding=qwen/qwen3_embedding_06b",
-    )?;
+    let selector = embedding_selector.unwrap_or_else(|| DEFAULT_EMBEDDING_SELECTOR.to_owned());
     if input.trim().is_empty() {
         bail!(
-            "usage: cargo run -p motlie-models --no-default-features --features 'model-google-gemma-300m model-qwen3-embedding-06b' --example models_v0_1 -- --embedding=google/embeddinggemma_300m|qwen/qwen3_embedding_06b [--download-artifacts] [--precision=q4|q8|f32] <text to embed>"
+            "usage: cargo run -p motlie-models --no-default-features --features 'model-google-gemma-300m model-qwen3-embedding-06b' --example models_v0_1 -- [--embedding=google/embeddinggemma_300m|qwen/qwen3_embedding_06b] [--download-artifacts] [--precision=q4|q8|f32] <text to embed>"
         );
     }
 
@@ -63,13 +62,21 @@ async fn main() -> Result<()> {
         "available-embedding-selectors: {}",
         available_embedding_selectors().join(", ")
     );
+    println!("default-embedding-selector: {DEFAULT_EMBEDDING_SELECTOR}");
     ensure!(
         catalog.len() == 2,
         "models_v0_1 must be built with exactly the two curated embedding bundle features enabled"
     );
 
     println!("bundle-selector: {selector_label}");
-    println!("resolution-path: selector");
+    println!(
+        "resolution-path: {}",
+        if selector == DEFAULT_EMBEDDING_SELECTOR {
+            "default-or-selector"
+        } else {
+            "selector"
+        }
+    );
     println!("bundle-id: {}", bundle_id.as_str());
     println!("artifact-root: {}", artifact_root.display());
     support::print_process_snapshot("process-before-start", &support::current_process_snapshot());

@@ -30,7 +30,7 @@ The bundle returns normalized embedding vectors. In practice that means:
 
 ## Run
 
-Build `v0.1` with both embedding bundles compiled in:
+Build `v0.1` with both embedding bundles compiled in. If `--embedding` is omitted, the example defaults to `google/embeddinggemma_300m`:
 
 ```sh
 cargo run -p motlie-models --no-default-features --features "model-google-gemma-300m model-qwen3-embedding-06b" --example models_v0_1 -- --embedding=google/embeddinggemma_300m "motlie curated model bundle"
@@ -42,7 +42,7 @@ Run the same binary against Qwen instead:
 cargo run -p motlie-models --no-default-features --features "model-google-gemma-300m model-qwen3-embedding-06b" --example models_v0_1 -- --embedding=qwen/qwen3_embedding_06b --precision=q8 "motlie curated model bundle"
 ```
 
-The selector is now required because the binary is intentionally built with knowledge of both curated embedding bundles.
+The binary is intentionally built with knowledge of both curated embedding bundles. `--embedding=...` lets you switch to Qwen explicitly.
 
 If you want the example to prefetch curated artifacts before startup, use the same selector:
 
