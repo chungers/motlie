@@ -13,6 +13,7 @@
 | 2026-04-08 | @codex-researcher: Added the bundle-build convention: curated bundles are feature-gated individually, the direct enum and `ModelSelector` only expose compiled-in bundles, and known-but-disabled bundles should report `ModelUnavailable`. | Architecture, Bundle Catalog Model, Packaging and Deployment Model |
 | 2026-04-08 | @codex-researcher: Clarified the reviewed backend/artifact boundary. Provider-specific cache layout resolution and local artifact validation belong in curated bundle modules under `libs/models`, while generic backends under `libs/model/backends/*` consume only resolved local model paths or fetch-enabled cache roots. | Architecture, Packaging and Deployment Model, Backend Composition |
 | 2026-04-08 | @codex-researcher: Added the Gemma 4 E2B-it multimodal chat slice (#142) as the third curated vertical slice. The direct module path, `ChatModels` / `ModelSelector` selector path, per-bundle feature gate, and `examples/v0.3` now extend the established curator conventions beyond embeddings (`v0.1`) and text-only chat (`v0.2`). | Architecture, Bundle Catalog Model, API Sketch |
+| 2026-04-09 | @codex-researcher: Added the Qwen3-Embedding-0.6B curated bundle (#147) as the second embedding slice. The embedding family now validates that `v0.1` can remain a single-bundle example while supporting multiple feature-gated embedding implementations and quantization metadata. | Architecture, Bundle Build Convention, API Sketch |
 | 2026-04-09 | @codex-researcher: Reaffirmed the one-model-per-example convention. The Gemma 4 operator and convenience paths are now collapsed into `examples/v0.3`, controlled by flags instead of separate versioned examples. | Architecture, API Sketch |
 
 This document defines the design for `libs/models`, the curated bundle library that exposes opinionated model stacks as deployable product modules. A bundle in this crate includes vetted weights when applicable, a chosen backend or transport, packaging policy when applicable, capability wiring, and consistent lifecycle behavior through the contracts defined in `libs/model`.
@@ -218,18 +219,20 @@ For example:
 
 ```toml
 [features]
-default = ["model-google-gemma-300m", "model-qwen3-4b", "model-gemma4-e2b"]
+default = ["model-google-gemma-300m", "model-qwen3-embedding-06b", "model-qwen3-4b", "model-gemma4-e2b"]
 
 model-google-gemma-300m = []
+model-qwen3-embedding-06b = []
 model-qwen3-4b = []
 model-gemma4-e2b = []
-profile-macos = ["model-google-gemma-300m", "model-qwen3-4b"]
-profile-dgx = ["model-google-gemma-300m", "model-qwen3-4b", "model-gemma4-e2b"]
+profile-macos = ["model-google-gemma-300m", "model-qwen3-embedding-06b", "model-qwen3-4b"]
+profile-dgx = ["model-google-gemma-300m", "model-qwen3-embedding-06b", "model-qwen3-4b", "model-gemma4-e2b"]
 ```
 
 This means:
 
 - `EmbeddingModels::GoogleGemma300m` only exists when `model-google-gemma-300m` is enabled
+- `EmbeddingModels::Qwen3Embedding06B` only exists when `model-qwen3-embedding-06b` is enabled
 - `Catalog::with_defaults()` only registers bundles that are actually compiled in
 - string parsing through `ModelSelector` should distinguish:
   - unknown selector
@@ -248,6 +251,7 @@ libs/models/
     embeddings/
       mod.rs
       google_gemma_300m.rs
+      qwen3_embedding_06b.rs
     chat/
       mod.rs
       qwen3_4b.rs
