@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-04-10 | @codex-repl: Add a concrete feature-gating and Cargo composition design so subsystem crates can be selectively included, compiled, and registered in the command engine. | Chosen Solution, Architecture, API Ergonomics, Open Questions, Summary |
 | 2026-04-10 | @codex-repl: Refine the design from REPL-first to command-engine-first. Lock subsystem vs command-engine boundaries, add explicit owned/imported/ephemeral semantics, document cleanup expectations, and reference the new [`LIFECYCLE.md`](./LIFECYCLE.md) resource inventory. | Goals, Requirements, Chosen Solution, Architecture, Risks, Open Questions, Summary |
 | 2026-04-10 | @codex-repl: Expand the command-engine and REPL relationship with a concrete code walkthrough. Replace the vague handler sketch with subsystem-facing traits that avoid exposing `Pin<Box<dyn Future>>` in the public integration surface, and reference the new [`API.md`](./API.md) contract document. | Command Registration Model, Completion Model, API Ergonomics |
 | 2026-04-10 | @codex-repl: Initial DESIGN for `libs/repl`, derived from issue #150 and reconciled against the current repo snapshot. Greenfield product direction; migration and backward-compatibility concerns are out of scope. | All |
@@ -102,6 +103,8 @@ If Motlie continues with subsystem-specific shells, several costs grow linearly:
     whether each named resource is `Owned`, `Imported`, or `Ephemeral`.
 11. The command engine must provide an explicit close/shutdown path that calls subsystem APIs
     for owned resources rather than silently abandoning live state.
+12. Subsystem crates must be selectively includable at build time through Cargo features so a
+    given binary can compile and register only the command families it explicitly enables.
 
 ### Non-Functional Requirements
 
@@ -222,6 +225,96 @@ The first concrete adopter is the tmux example REPL. Integration into the main `
 binary is a later implementation slice behind an explicit feature gate and an explicit subcommand
 such as `motlie repl` or `motlie tmux repl`.
 
+### Feature Gating and Cargo Composition
+
+The REPL design must preserve Motlie's ability to compile a binary with only a selected set
+of subsystem crates. The correct pattern is:
+
+1. Optional subsystem dependencies in the root package.
+2. Root feature flags that enable those optional dependencies.
+3. `#[cfg(feature = "...")]` gating around app-context fields, registration modules, and
+   command-surface assembly.
+4. `required-features` on examples or bins that depend on a gated subsystem.
+
+This is consistent with how Motlie already gates optional functionality in the root package,
+and it also matches the pattern used in the `feature/mistral` branch where a bundle crate
+exposes a feature per optional model family.
+
+The intended root-package shape is:
+
+```toml
+[features]
+default = []
+repl = ["dep:motlie-repl"]
+repl-tmux = ["repl", "dep:motlie-tmux"]
+repl-vmm = ["repl", "dep:motlie-vmm"]
+repl-vnet = ["repl", "dep:motlie-vnet"]
+repl-vfs = ["repl", "dep:motlie-vfs"]
+repl-all = ["repl-tmux", "repl-vmm", "repl-vnet", "repl-vfs"]
+
+[dependencies]
+motlie-repl = { path = "libs/repl", optional = true }
+motlie-tmux = { path = "libs/tmux", optional = true }
+motlie-vmm = { path = "libs/vmm", optional = true }
+motlie-vnet = { path = "libs/vnet", optional = true }
+motlie-vfs = { path = "libs/vfs", optional = true }
+```
+
+And the first binary entrypoint should be feature-gated explicitly:
+
+```toml
+[[bin]]
+name = "motlie"
+path = "bins/motlie/src/main.rs"
+
+[[example]]
+name = "repl_vmm_host"
+path = "libs/vmm/examples/v1.4/repl_host.rs"
+required-features = ["repl-vmm"]
+```
+
+This gives the build graph the desired properties:
+
+1. If `--features repl-tmux` is absent, tmux is not compiled into the root binary.
+2. If `--features repl-vmm` is absent, VMM commands do not exist in the binary or the REPL.
+3. A small binary can include only `repl` plus one subsystem family.
+4. Tests and examples can opt into the exact subsystem features they need.
+
+Feature flags affect registration directly. Registration must be conditional and centralized
+at the binary composition root:
+
+```rust
+pub fn register_enabled_modules(engine: &mut CommandEngine<AppContext>) {
+    #[cfg(feature = "repl-tmux")]
+    motlie_tmux::repl::TmuxModule.register(engine);
+
+    #[cfg(feature = "repl-vmm")]
+    motlie_vmm::repl::VmmModule.register(engine);
+
+    #[cfg(feature = "repl-vnet")]
+    motlie_vnet::repl::VnetModule.register(engine);
+}
+```
+
+The same rule applies to session state:
+
+```rust
+pub struct AppContext {
+    #[cfg(feature = "repl-tmux")]
+    pub tmux: TmuxSessionState,
+
+    #[cfg(feature = "repl-vmm")]
+    pub vmm: VmmSessionState,
+
+    #[cfg(feature = "repl-vnet")]
+    pub vnet: VnetSessionState,
+}
+```
+
+The command engine should not need runtime plugin discovery for the first slice. Cargo
+features determine which modules exist at all; the binary then registers only compiled
+modules.
+
 ## Architecture
 
 ### Crate Layout
@@ -281,6 +374,20 @@ The registration path may use type erasure for handlers and completion callbacks
 registration is dynamic by nature. This is acceptable at the REPL boundary because command
 dispatch is user-driven and low frequency. The underlying subsystem libraries remain regular,
 typed Rust APIs.
+
+### Build-Time Command Surface
+
+Feature gating has a direct architectural consequence: the REPL command tree is assembled
+only from compiled modules.
+
+That means:
+
+1. clap metadata for disabled subsystems does not exist in the binary.
+2. static completion for disabled subsystems does not exist either.
+3. dynamic completion providers for disabled subsystems are never linked or registered.
+4. the engine does not need "disabled command" placeholder entries in the first slice.
+
+This is a build-time composition system, not a runtime plugin toggle.
 
 ### Command Registration Model
 
@@ -360,6 +467,25 @@ The preferred registration style for subsystem crates is therefore:
 
 Raw command registration still exists as an escape hatch for hand-built command surfaces, but
 typed command registration is the design center.
+
+For feature-gated modules, the expectation is:
+
+```rust
+#[cfg(feature = "repl-vmm")]
+pub struct VmmModule;
+
+#[cfg(feature = "repl-vmm")]
+impl CommandModule<AppContext> for VmmModule {
+    fn register(self, engine: &mut CommandEngine<AppContext>) {
+        engine.add_typed::<BootGuest>();
+        engine.add_typed::<ExecGuest>();
+        engine.add_typed::<ShutdownGuest>();
+    }
+}
+```
+
+If the feature is not enabled, the module does not compile and contributes nothing to the
+aggregate clap tree.
 
 ### Detailed Walkthrough
 
@@ -552,6 +678,20 @@ impl CommandModule<AppContext> for VmmModule {
 
 This is all the REPL crate should need from a subsystem integration module.
 
+In a feature-gated binary, registration stays at the composition root:
+
+```rust
+let mut engine = CommandEngine::new(ctx);
+
+#[cfg(feature = "repl-tmux")]
+motlie_tmux::repl::TmuxModule.register(&mut engine);
+
+#[cfg(feature = "repl-vmm")]
+motlie_vmm::repl::VmmModule.register(&mut engine);
+```
+
+This keeps the engine generic while letting Cargo decide which command families even exist.
+
 #### 4. Command-engine execution path
 
 ```rust
@@ -677,6 +817,30 @@ This makes the frontend boundary concrete:
 
 The architectural consequence is simple: if later a TUI or admin socket wants the same
 command surface, it talks to `CommandEngine`, not to `reedline`.
+
+### Cargo and Binary Walkthrough
+
+The full build-time flow should look like this:
+
+1. `libs/repl` is always a standalone library crate.
+2. The root package depends on `motlie-repl` optionally behind `repl`.
+3. Each subsystem that wants REPL integration is also an optional dependency behind its own
+   feature such as `repl-vmm` or `repl-tmux`.
+4. The root binary defines `AppContext` using `#[cfg(feature = "...")]` fields.
+5. The root binary conditionally calls `Module.register(&mut engine)` for each enabled
+   subsystem.
+6. clap metadata and completion only exist for modules that were compiled in.
+
+The intended user-facing build examples are:
+
+```text
+cargo run --bin motlie --features repl,repl-tmux -- repl
+cargo run --bin motlie --features repl,repl-vmm -- repl
+cargo run --bin motlie --features repl-all -- repl
+```
+
+This keeps the REPL design compatible with selective binary composition rather than assuming
+one giant always-linked command surface.
 
 ### Session State Model
 
@@ -1000,6 +1164,9 @@ The intended dependency set is:
    future `vmm ...`, or may flat top-level command names exist?
 5. What is the first generic rehydration contract the engine should support: tmux-only attach,
    or a broader named-resource import surface for future VMM adapters?
+6. Should the root package expose only coarse-grained subsystem flags such as `repl-vmm`, or
+   should some subsystems also expose finer-grained bundle features similar to the per-model
+   pattern used by `libs/models`?
 
 ## Summary
 
@@ -1014,5 +1181,7 @@ appropriate first step is a thin Motlie-owned `libs/repl` crate on top of clap p
 4. Explicit engine-local management semantics separated from subsystem business logic.
 5. Attach/import/detach semantics for named live resources.
 6. Tmux as the first real adopter.
+7. Cargo-feature-based command composition so binaries include only the subsystem crates they
+   explicitly enable.
 
 This is the aligned solution for subsequent planning.

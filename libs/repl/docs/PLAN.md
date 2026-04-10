@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-10 | @codex-repl | Add feature-gating and Cargo-composition work so subsystem crates can be selectively compiled and registered in the REPL command surface. |
 | 2026-04-10 | @codex-repl | Align the PLAN with the command-engine-first design: explicit engine-local resource management, frontend-neutral execution, attach/detach semantics, and a new [`LIFECYCLE.md`](./LIFECYCLE.md) resource inventory for tmux plus future VMM/VNET/VFS adopters. |
 | 2026-04-10 | @codex-repl | Initial PLAN for `libs/repl`, derived from [`DESIGN.md`](./DESIGN.md). Uses greenfield product direction, phased delivery, explicit design references per task, and concrete verification guidance. |
 
@@ -55,9 +56,20 @@ Resolve the open design questions before implementation spreads them across the 
 - [ ] Verify the decision set is reflected consistently in both docs before code starts.
   Run:
   ```bash
-  rg -n "motlie repl|motlie tmux repl|help|quit|CommandFactory|FromArgMatches|Owned|Imported|Ephemeral|RemoteProxy|rehydrate" libs/repl/docs
+  rg -n "motlie repl|motlie tmux repl|help|quit|CommandFactory|FromArgMatches|Owned|Imported|Ephemeral|RemoteProxy|rehydrate|repl-vmm|repl-tmux|optional = true|required-features" libs/repl/docs
   ```
   Ref: [`Summary`](./DESIGN.md#summary), [`Chosen Solution`](./DESIGN.md#chosen-solution)
+
+### 0.6 Feature-flag topology
+
+- [ ] Lock the first feature-flag topology for REPL composition in the root package:
+  `repl`, per-subsystem flags such as `repl-tmux` and `repl-vmm`, and whether an aggregate
+  `repl-all` feature exists.
+  Ref: [`Feature Gating and Cargo Composition`](./DESIGN.md#feature-gating-and-cargo-composition), [`Open Questions`](./DESIGN.md#open-questions)
+
+- [ ] Decide whether any subsystem needs finer-grained bundle features at the REPL layer, or
+  whether the first slice should stay at one flag per subsystem crate.
+  Ref: [`Feature Gating and Cargo Composition`](./DESIGN.md#feature-gating-and-cargo-composition), [`Open Questions`](./DESIGN.md#open-questions)
 
 ---
 
@@ -74,6 +86,10 @@ consumer.
 - [ ] Add the initial `libs/repl/Cargo.toml` with `reedline`, `clap`, `shlex` or equivalent,
   `thiserror`, and `tokio` as needed by the final API shape.
   Ref: [`Dependency Inventory`](./DESIGN.md#dependency-inventory), [`Chosen Solution`](./DESIGN.md#chosen-solution)
+
+- [ ] Add optional root-package dependencies and feature wiring for `motlie-repl` and the
+  first subsystem adopters, using `dep:`-style feature expansion where applicable.
+  Ref: [`Feature Gating and Cargo Composition`](./DESIGN.md#feature-gating-and-cargo-composition), [`Cargo and Binary Walkthrough`](./DESIGN.md#cargo-and-binary-walkthrough)
 
 ### 1.2 Source skeleton
 
@@ -98,7 +114,8 @@ consumer.
   ```bash
   cargo check -p motlie-repl
   cargo check -p motlie-tmux
-  cargo check --bin motlie
+  cargo check --bin motlie --features repl
+  cargo check --bin motlie --features repl,repl-tmux
   ```
   Ref: [`Non-Functional Requirements`](./DESIGN.md#non-functional-requirements), [`Dependency Inventory`](./DESIGN.md#dependency-inventory)
 
@@ -145,6 +162,10 @@ tokenization, parsing, async dispatch, and the interactive shell frontend.
 - [ ] Implement the typed registration path chosen in Phase 0 and prove it can parse a
   derive-based clap command into a handler call.
   Ref: [`Command Registration Model`](./DESIGN.md#command-registration-model), [`API Ergonomics`](./DESIGN.md#api-ergonomics)
+
+- [ ] Ensure the registry assembly API works cleanly with `#[cfg(feature = "...")]`-gated
+  subsystem registration modules so disabled crates contribute no commands at all.
+  Ref: [`Build-Time Command Surface`](./DESIGN.md#build-time-command-surface), [`Feature Gating and Cargo Composition`](./DESIGN.md#feature-gating-and-cargo-composition)
 
 ### 2.4 Engine execution and shell frontend
 
@@ -312,10 +333,15 @@ are proven.
 
 - [ ] Add an optional `motlie-tmux` dependency and root feature flag wiring needed for REPL
   composition.
-  Ref: [`Repo Reality Check`](./DESIGN.md#repo-reality-check), [`Chosen Solution`](./DESIGN.md#chosen-solution)
+  Ref: [`Repo Reality Check`](./DESIGN.md#repo-reality-check), [`Feature Gating and Cargo Composition`](./DESIGN.md#feature-gating-and-cargo-composition)
 
 - [ ] Add `motlie-repl` as a dependency of the root package.
   Ref: [`Crate Layout`](./DESIGN.md#crate-layout), [`Dependency Inventory`](./DESIGN.md#dependency-inventory)
+
+- [ ] Add the first aggregate REPL features in the root package, for example `repl`,
+  `repl-tmux`, and optionally `repl-all`, and document them in `--help` or package docs as
+  appropriate.
+  Ref: [`Feature Gating and Cargo Composition`](./DESIGN.md#feature-gating-and-cargo-composition), [`Cargo and Binary Walkthrough`](./DESIGN.md#cargo-and-binary-walkthrough)
 
 ### 5.2 Binary entrypoint
 
@@ -324,6 +350,10 @@ are proven.
 
 - [ ] Build the root application context and register only feature-enabled subsystem commands.
   Ref: [`Session State Model`](./DESIGN.md#session-state-model), [`Chosen Solution`](./DESIGN.md#chosen-solution)
+
+- [ ] Ensure the binary handles missing subsystem features by omission, not runtime error:
+  disabled command families should simply not exist in clap parsing or completion.
+  Ref: [`Build-Time Command Surface`](./DESIGN.md#build-time-command-surface), [`Feature Gating and Cargo Composition`](./DESIGN.md#feature-gating-and-cargo-composition)
 
 ### 5.3 Reuse existing clap-derived commands where practical
 
