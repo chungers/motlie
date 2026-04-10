@@ -607,6 +607,7 @@ mod tests {
                             id: first_for_factory.id.clone(),
                             display_name: first_for_factory.display_name.clone(),
                             capabilities: first_for_factory.capabilities.clone(),
+                            quantization: motlie_model::QuantizationSupport::none(),
                         },
                     })
                 })
@@ -619,6 +620,7 @@ mod tests {
                     id: second_for_factory.id.clone(),
                     display_name: second_for_factory.display_name.clone(),
                     capabilities: second_for_factory.capabilities.clone(),
+                    quantization: motlie_model::QuantizationSupport::none(),
                 },
             })
         });

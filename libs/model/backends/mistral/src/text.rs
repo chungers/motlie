@@ -7,7 +7,8 @@ use mistralrs::{RequestBuilder, TextModelBuilder};
 use motlie_model::{
     BundleHandle, BundleId, BundleMetadata, Capabilities, CapabilityKind, ChatModel, ChatRequest,
     ChatResponse, ChatRole, CompletionModel, CompletionRequest, CompletionResponse, EmbeddingModel,
-    LoadedBundleDescriptor, ModelBundle, ModelError, ModelMetricSnapshot, StartOptions,
+    LoadedBundleDescriptor, ModelBundle, ModelError, ModelMetricSnapshot, QuantizationBits,
+    QuantizationSupport, StartOptions,
 };
 
 use crate::common::{
@@ -38,6 +39,7 @@ pub struct MistralTextSpec {
     pub model_id: &'static str,
     pub arch: MistralTextArch,
     pub capabilities: Capabilities,
+    pub quantization: QuantizationSupport,
 }
 
 impl MistralTextSpec {
@@ -48,6 +50,10 @@ impl MistralTextSpec {
             model_id: "Qwen/Qwen3-4B",
             arch: MistralTextArch::Qwen3,
             capabilities: Capabilities::chat_and_completion(),
+            quantization: QuantizationSupport {
+                supported: vec![QuantizationBits::Four, QuantizationBits::Eight],
+                recommended: Some(QuantizationBits::Four),
+            },
         }
     }
 }
@@ -67,6 +73,7 @@ impl MistralTextBundle {
                 id: spec.id,
                 display_name: spec.display_name.into(),
                 capabilities: spec.capabilities,
+                quantization: spec.quantization,
             },
             arch: spec.arch,
             model_id: spec.model_id,
@@ -89,7 +96,7 @@ impl ModelBundle for MistralTextBundle {
     }
 
     async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
-        let model = build_text_model(self.model_id, self.arch, options).await?;
+        let model = build_text_model(self.model_id, self.arch, &self.metadata, options).await?;
         let metrics = Arc::new(Mutex::new(TextMetrics::default()));
         {
             let mut metrics = lock_metrics(&metrics, "mistral-text-start");
@@ -97,11 +104,7 @@ impl ModelBundle for MistralTextBundle {
         }
 
         Ok(Box::new(MistralTextHandle {
-            descriptor: LoadedBundleDescriptor {
-                id: self.metadata.id.clone(),
-                display_name: self.metadata.display_name.clone(),
-                capabilities: self.metadata.capabilities.clone(),
-            },
+            descriptor: self.metadata.clone(),
             runtime: Box::new(MistralTextRuntime {
                 model,
                 metrics: Arc::clone(&metrics),
@@ -270,6 +273,7 @@ impl CompletionModel for MistralTextHandle {
 async fn build_text_model(
     model_id: &str,
     arch: MistralTextArch,
+    metadata: &BundleMetadata,
     options: StartOptions,
 ) -> Result<mistralrs::Model, ModelError> {
     let StartOptions {
@@ -278,6 +282,8 @@ async fn build_text_model(
         unpack_root,
         max_concurrency,
     } = options;
+
+    let resolved_quantization = metadata.quantization.resolve(quantization, &metadata.id)?;
 
     if let Some(unpack_root) = unpack_root {
         return Err(ModelError::InvalidConfiguration(format!(
@@ -297,7 +303,7 @@ async fn build_text_model(
 
     let mut builder = TextModelBuilder::new(model_target).with_loader_type(arch.loader_type());
 
-    if let Some(bits) = quantization {
+    if let Some(bits) = resolved_quantization {
         builder = builder.with_auto_isq(map_quantization_bits(bits));
     }
     if should_force_cpu() {
@@ -376,6 +382,10 @@ mod tests {
                 id: BundleId::new("qwen3_4b"),
                 display_name: "Qwen3 4B".into(),
                 capabilities: Capabilities::chat_and_completion(),
+                quantization: QuantizationSupport {
+                    supported: vec![QuantizationBits::Four, QuantizationBits::Eight],
+                    recommended: Some(QuantizationBits::Four),
+                },
             },
             runtime: Box::new(StubTextRuntime),
             metrics: Arc::new(Mutex::new(TextMetrics::default())),
@@ -444,6 +454,15 @@ mod tests {
             .block_on(build_text_model(
                 "Qwen/Qwen3-4B",
                 MistralTextArch::Qwen3,
+                &BundleMetadata {
+                    id: BundleId::new("qwen3_4b"),
+                    display_name: "Qwen3 4B".into(),
+                    capabilities: Capabilities::chat_and_completion(),
+                    quantization: QuantizationSupport {
+                        supported: vec![QuantizationBits::Four, QuantizationBits::Eight],
+                        recommended: Some(QuantizationBits::Four),
+                    },
+                },
                 StartOptions {
                     unpack_root: Some(PathBuf::from("/tmp/motlie-model-unpack")),
                     ..Default::default()
