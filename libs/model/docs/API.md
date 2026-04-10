@@ -118,6 +118,18 @@ The currently implemented error variants are:
 - `BackendExecution`
 - `UnsupportedCapability`
 
+### Quantization Support
+
+`BundleMetadata.quantization` declares which precisions a bundle supports and the curated default. `LoadedBundleDescriptor.resolved_quantization` records which precision was actually applied at startup.
+
+- `QuantizationSupport::none()` — no quantization supported (e.g., EmbeddingGemma 300M)
+- `QuantizationSupport::with_recommended([Q4, Q8], Q4)` — Q4 and Q8 supported, Q4 auto-applied when caller omits
+- `QuantizationSupport::without_recommended([Q8])` — Q8 available but F32 by default
+
+The `resolve()` method validates caller requests: unsupported precision → `InvalidConfiguration`, omitted precision → curated default. This invariant is enforced at construction: `recommended` must be in `supported` or `None`.
+
+After startup, `handle.descriptor().resolved_quantization` reports what was actually loaded — not the curated recommendation, but the runtime-resolved value.
+
 ### Handle-Level Metrics
 
 Loaded bundles may expose additive runtime metrics through `BundleHandle::metric_snapshot()`:
@@ -169,6 +181,7 @@ Current implementation note:
 ```rust
 use motlie_model::{
     BundleId, BundleMetadata, Capabilities, CapabilityDescriptor,
+    QuantizationBits, QuantizationSupport,
 };
 
 let metadata = BundleMetadata {
@@ -178,6 +191,10 @@ let metadata = BundleMetadata {
         CapabilityDescriptor::chat(),
         CapabilityDescriptor::completion(),
     ]),
+    quantization: QuantizationSupport::with_recommended(
+        [QuantizationBits::Four, QuantizationBits::Eight],
+        QuantizationBits::Four,
+    ),
 };
 ```
 

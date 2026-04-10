@@ -50,10 +50,10 @@ impl MistralTextSpec {
             model_id: "Qwen/Qwen3-4B",
             arch: MistralTextArch::Qwen3,
             capabilities: Capabilities::chat_and_completion(),
-            quantization: QuantizationSupport {
-                supported: vec![QuantizationBits::Four, QuantizationBits::Eight],
-                recommended: Some(QuantizationBits::Four),
-            },
+            quantization: QuantizationSupport::with_recommended(
+                [QuantizationBits::Four, QuantizationBits::Eight],
+                QuantizationBits::Four,
+            ),
         }
     }
 }
@@ -96,7 +96,12 @@ impl ModelBundle for MistralTextBundle {
     }
 
     async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
-        let model = build_text_model(self.model_id, self.arch, &self.metadata, options).await?;
+        let resolved_quantization = self
+            .metadata
+            .quantization
+            .resolve(options.quantization, &self.metadata.id)?;
+        let model =
+            build_text_model(self.model_id, self.arch, resolved_quantization, options).await?;
         let metrics = Arc::new(Mutex::new(TextMetrics::default()));
         {
             let mut metrics = lock_metrics(&metrics, "mistral-text-start");
@@ -104,7 +109,13 @@ impl ModelBundle for MistralTextBundle {
         }
 
         Ok(Box::new(MistralTextHandle {
-            descriptor: self.metadata.clone(),
+            descriptor: LoadedBundleDescriptor {
+                id: self.metadata.id.clone(),
+                display_name: self.metadata.display_name.clone(),
+                capabilities: self.metadata.capabilities.clone(),
+                quantization: self.metadata.quantization.clone(),
+                resolved_quantization,
+            },
             runtime: Box::new(MistralTextRuntime {
                 model,
                 metrics: Arc::clone(&metrics),
@@ -273,17 +284,15 @@ impl CompletionModel for MistralTextHandle {
 async fn build_text_model(
     model_id: &str,
     arch: MistralTextArch,
-    metadata: &BundleMetadata,
+    resolved_quantization: Option<QuantizationBits>,
     options: StartOptions,
 ) -> Result<mistralrs::Model, ModelError> {
     let StartOptions {
         artifact_policy,
-        quantization,
+        quantization: _, // already resolved by caller
         unpack_root,
         max_concurrency,
     } = options;
-
-    let resolved_quantization = metadata.quantization.resolve(quantization, &metadata.id)?;
 
     if let Some(unpack_root) = unpack_root {
         return Err(ModelError::InvalidConfiguration(format!(
@@ -382,10 +391,11 @@ mod tests {
                 id: BundleId::new("qwen3_4b"),
                 display_name: "Qwen3 4B".into(),
                 capabilities: Capabilities::chat_and_completion(),
-                quantization: QuantizationSupport {
-                    supported: vec![QuantizationBits::Four, QuantizationBits::Eight],
-                    recommended: Some(QuantizationBits::Four),
-                },
+                quantization: QuantizationSupport::with_recommended(
+                    [QuantizationBits::Four, QuantizationBits::Eight],
+                    QuantizationBits::Four,
+                ),
+                resolved_quantization: Some(QuantizationBits::Four),
             },
             runtime: Box::new(StubTextRuntime),
             metrics: Arc::new(Mutex::new(TextMetrics::default())),
@@ -454,15 +464,7 @@ mod tests {
             .block_on(build_text_model(
                 "Qwen/Qwen3-4B",
                 MistralTextArch::Qwen3,
-                &BundleMetadata {
-                    id: BundleId::new("qwen3_4b"),
-                    display_name: "Qwen3 4B".into(),
-                    capabilities: Capabilities::chat_and_completion(),
-                    quantization: QuantizationSupport {
-                        supported: vec![QuantizationBits::Four, QuantizationBits::Eight],
-                        recommended: Some(QuantizationBits::Four),
-                    },
-                },
+                None, // resolved quantization not relevant for unpack_root test
                 StartOptions {
                     unpack_root: Some(PathBuf::from("/tmp/motlie-model-unpack")),
                     ..Default::default()
