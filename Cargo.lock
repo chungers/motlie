@@ -5121,6 +5121,7 @@ dependencies = [
  "motlie-model",
  "sysinfo",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

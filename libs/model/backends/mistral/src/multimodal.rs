@@ -44,7 +44,10 @@ impl MistralMultimodalSpec {
                 [QuantizationBits::Four, QuantizationBits::Eight],
                 QuantizationBits::Four,
             )
-            .expect("curated quantization support is valid"),
+            .unwrap_or_else(|e| {
+                tracing::error!("curated quantization construction failed (this is a bug): {e}");
+                QuantizationSupport::without_recommended([QuantizationBits::Four, QuantizationBits::Eight])
+            }),
         }
     }
 }
@@ -313,7 +316,7 @@ async fn build_multimodal_model(
                 builder = builder.with_paged_attn(pa_config);
             }
             Err(err) => {
-                eprintln!("warning: failed to configure PagedAttention, continuing without it: {err}");
+                tracing::warn!("failed to configure PagedAttention, continuing without it: {err}");
             }
         }
     }
