@@ -25,10 +25,11 @@ use thiserror::Error;
 
 pub use chat::ChatModels;
 pub use embeddings::EmbeddingModels;
-pub use motlie_model::eval::EvalTrack;
 pub use motlie_model::{
-    BundleId, Capabilities, CapabilityDescriptor, CapabilityKind, ContentKind, InteractionStyle,
-    ModelBundle,
+    ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleFamily, BundleId,
+    BundleRequirements, Capabilities, CapabilityDescriptor, CapabilityKind, CheckpointFormat,
+    ContentKind, EvalTrack, InteractionStyle, ModelBundle, ModelCheckpoint, ModelIdentity,
+    PlatformConstraint,
 };
 
 type BoxError = Box<dyn StdError + Send + Sync + 'static>;
@@ -207,28 +208,9 @@ pub fn resolve_hf_gguf_snapshot(
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ArtifactSource {
-    HuggingFace { repo: &'static str },
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ArtifactRule {
-    Exact(&'static str),
-    Suffix(&'static str),
-}
-
-impl ArtifactRule {
-    fn matches(&self, filename: &str) -> bool {
-        match self {
-            Self::Exact(expected) => filename == *expected,
-            Self::Suffix(suffix) => filename.ends_with(suffix),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BundleArtifacts {
     pub control_name: &'static str,
+    pub format: CheckpointFormat,
     pub source: ArtifactSource,
     pub include: Vec<ArtifactRule>,
 }
@@ -333,55 +315,11 @@ pub fn download_bundle_artifacts_with_options(
     }
 }
 
-/// Organizational family for related curated bundles.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BundleFamily {
-    Embeddings,
-    Gemma,
-    Gpt,
-    Hermes,
-    Other(String),
-    Qwen,
-}
-
-/// Internal execution substrate chosen for a bundle.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum BackendKind {
-    Http,
-    LlamaCpp,
-    MistralRs,
-    Ort,
-}
-
-/// Platform scoping visible to operators and release tooling.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PlatformConstraint {
-    Linux,
-    Macos,
-    Distribution(String),
-    Architecture(String),
-}
-
-/// Build-time constraints kept close to the bundle definition.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BuildConstraint {
-    CpuOnly,
-    CudaRequired,
-    Feature(String),
-    Profile(String),
-}
-
-/// Requirements that affect whether and how a bundle may be loaded or built.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct BundleRequirements {
-    pub platform: Vec<PlatformConstraint>,
-    pub build: Vec<BuildConstraint>,
-}
-
 /// Product-facing descriptor for a curated model bundle.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BundleDescriptor {
     pub id: BundleId,
+    pub model_id: BundleId,
     pub display_name: String,
     pub family: BundleFamily,
     pub capabilities: Capabilities,
@@ -399,6 +337,46 @@ impl BundleDescriptor {
     pub fn capability_descriptors(&self) -> &[CapabilityDescriptor] {
         self.capabilities.descriptors()
     }
+
+    pub fn identity(&self) -> ModelIdentity {
+        ModelIdentity {
+            id: self.model_id.clone(),
+            display_name: self.display_name.clone(),
+            family: self.family.clone(),
+            capabilities: self.capabilities.clone(),
+            eval_tracks: self.eval_tracks.clone(),
+            requirements: self.requirements.clone(),
+        }
+    }
+
+    pub fn checkpoint(&self) -> Option<ModelCheckpoint> {
+        self.artifacts.as_ref().map(|artifacts| ModelCheckpoint {
+            format: artifacts.format,
+            source: artifacts.source.clone(),
+            include: artifacts.include.clone(),
+            quantization: None,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelVariantDescriptor {
+    pub bundle_id: BundleId,
+    pub backend: BackendKind,
+    pub capabilities: Capabilities,
+    pub checkpoint: Option<ModelCheckpoint>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ResolveModelOptions {
+    pub backend_preference: Option<BackendKind>,
+    pub format_preference: Option<CheckpointFormat>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedModelDescriptor {
+    pub identity: ModelIdentity,
+    pub variant: ModelVariantDescriptor,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -608,10 +586,17 @@ struct CatalogEntry {
     factory: Arc<dyn BundleFactory>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ModelCatalogEntry {
+    identity: ModelIdentity,
+    variants: Vec<ModelVariantDescriptor>,
+}
+
 /// In-memory registry of curated bundle descriptors and constructors.
 #[derive(Default)]
 pub struct Catalog {
     bundles: BTreeMap<BundleId, CatalogEntry>,
+    models: BTreeMap<BundleId, ModelCatalogEntry>,
 }
 
 impl Catalog {
@@ -655,6 +640,8 @@ impl Catalog {
     where
         F: Fn() -> Box<dyn ModelBundle> + Send + Sync + 'static,
     {
+        self.upsert_model_entry(&descriptor);
+
         self.bundles
             .insert(
                 descriptor.id.clone(),
@@ -666,8 +653,52 @@ impl Catalog {
             .map(|entry| entry.descriptor)
     }
 
+    fn upsert_model_entry(&mut self, descriptor: &BundleDescriptor) {
+        let identity = descriptor.identity();
+        let variant = ModelVariantDescriptor {
+            bundle_id: descriptor.id.clone(),
+            backend: descriptor.backend,
+            capabilities: descriptor.capabilities.clone(),
+            checkpoint: descriptor.checkpoint(),
+        };
+
+        let entry = self
+            .models
+            .entry(identity.id.clone())
+            .or_insert_with(|| ModelCatalogEntry {
+                identity: identity.clone(),
+                variants: Vec::new(),
+            });
+        entry.identity = identity;
+
+        if let Some(existing) = entry
+            .variants
+            .iter_mut()
+            .find(|existing| existing.bundle_id == variant.bundle_id)
+        {
+            *existing = variant;
+        } else {
+            entry.variants.push(variant);
+        }
+    }
+
     pub fn bundle(&self, id: &BundleId) -> Option<&BundleDescriptor> {
         self.bundles.get(id).map(|entry| &entry.descriptor)
+    }
+
+    pub fn model(&self, id: &BundleId) -> Option<&ModelIdentity> {
+        self.models.get(id).map(|entry| &entry.identity)
+    }
+
+    pub fn models(&self) -> impl Iterator<Item = &ModelIdentity> {
+        self.models.values().map(|entry| &entry.identity)
+    }
+
+    pub fn variants_for_model(
+        &self,
+        id: &BundleId,
+    ) -> Option<impl Iterator<Item = &ModelVariantDescriptor>> {
+        self.models.get(id).map(|entry| entry.variants.iter())
     }
 
     pub fn artifacts(&self, id: &BundleId) -> Option<&BundleArtifacts> {
@@ -690,6 +721,39 @@ impl Catalog {
             .values()
             .map(|entry| &entry.descriptor)
             .filter(move |descriptor| descriptor.supports_track(track))
+    }
+
+    pub fn resolve_model(
+        &self,
+        id: &BundleId,
+        options: &ResolveModelOptions,
+    ) -> Option<ResolvedModelDescriptor> {
+        let entry = self.models.get(id)?;
+
+        let exact = entry.variants.iter().find(|variant| {
+            let backend_ok = options
+                .backend_preference
+                .is_none_or(|backend| variant.backend == backend);
+            let format_ok = options.format_preference.is_none_or(|format| {
+                variant
+                    .checkpoint
+                    .as_ref()
+                    .is_some_and(|checkpoint| checkpoint.format == format)
+            });
+            backend_ok && format_ok
+        })?;
+
+        Some(ResolvedModelDescriptor {
+            identity: entry.identity.clone(),
+            variant: exact.clone(),
+        })
+    }
+
+    pub fn instantiate_resolved(
+        &self,
+        resolved: &ResolvedModelDescriptor,
+    ) -> Option<Box<dyn ModelBundle>> {
+        self.instantiate(&resolved.variant.bundle_id)
     }
 
     pub fn len(&self) -> usize {
@@ -740,6 +804,7 @@ mod tests {
     fn stub_descriptor(id: &str) -> BundleDescriptor {
         BundleDescriptor {
             id: BundleId::new(id),
+            model_id: BundleId::new(id),
             display_name: format!("Bundle {id}"),
             family: BundleFamily::Embeddings,
             capabilities: Capabilities::embeddings_only(),
@@ -795,6 +860,90 @@ mod tests {
                 .map(|bundle| &bundle.display_name),
             Some(&"Bundle v2".to_string())
         );
+        assert_eq!(
+            catalog
+                .model(&BundleId::new("bundle"))
+                .map(|model| model.display_name.as_str()),
+            Some("Bundle v2")
+        );
+    }
+
+    #[test]
+    fn resolve_model_prefers_requested_backend_and_format() {
+        let mut catalog = Catalog::new();
+
+        let mistral = BundleDescriptor {
+            artifacts: Some(BundleArtifacts {
+                control_name: "qwen3_4b",
+                format: CheckpointFormat::Safetensors,
+                source: ArtifactSource::HuggingFace {
+                    repo: "Qwen/Qwen3-4B",
+                },
+                include: vec![ArtifactRule::Exact("config.json")],
+            }),
+            model_id: BundleId::new("qwen3_4b"),
+            display_name: "Qwen3 4B".into(),
+            family: BundleFamily::Qwen,
+            capabilities: Capabilities::chat_and_completion(),
+            backend: BackendKind::MistralRs,
+            requirements: BundleRequirements::default(),
+            eval_tracks: vec![EvalTrack::Chat],
+            id: BundleId::new("qwen3_4b"),
+        };
+        let llama = BundleDescriptor {
+            id: BundleId::new("qwen3_4b_gguf"),
+            model_id: BundleId::new("qwen3_4b"),
+            backend: BackendKind::LlamaCpp,
+            artifacts: Some(BundleArtifacts {
+                control_name: "qwen3_4b_gguf",
+                format: CheckpointFormat::Gguf,
+                source: ArtifactSource::HuggingFace {
+                    repo: "Qwen/Qwen3-4B-GGUF",
+                },
+                include: vec![ArtifactRule::Suffix(".gguf")],
+            }),
+            ..mistral.clone()
+        };
+
+        catalog.register(mistral.clone(), move || {
+            Box::new(StubBundle {
+                metadata: BundleMetadata {
+                    id: mistral.id.clone(),
+                    display_name: mistral.display_name.clone(),
+                    capabilities: mistral.capabilities.clone(),
+                    quantization: motlie_model::QuantizationSupport::none(),
+                },
+            })
+        });
+        catalog.register(llama.clone(), move || {
+            Box::new(StubBundle {
+                metadata: BundleMetadata {
+                    id: llama.id.clone(),
+                    display_name: llama.display_name.clone(),
+                    capabilities: llama.capabilities.clone(),
+                    quantization: motlie_model::QuantizationSupport::none(),
+                },
+            })
+        });
+
+        let resolved = catalog
+            .resolve_model(
+                &BundleId::new("qwen3_4b"),
+                &ResolveModelOptions {
+                    backend_preference: Some(BackendKind::LlamaCpp),
+                    format_preference: Some(CheckpointFormat::Gguf),
+                },
+            )
+            .expect("requested llama.cpp gguf variant should resolve");
+
+        assert_eq!(resolved.identity.id.as_str(), "qwen3_4b");
+        assert_eq!(resolved.variant.bundle_id.as_str(), "qwen3_4b_gguf");
+        assert_eq!(resolved.variant.backend, BackendKind::LlamaCpp);
+        assert_eq!(
+            resolved.variant.checkpoint.as_ref().map(|checkpoint| checkpoint.format),
+            Some(CheckpointFormat::Gguf)
+        );
+        assert!(catalog.instantiate_resolved(&resolved).is_some());
     }
 
     #[test]
@@ -1070,6 +1219,7 @@ mod tests {
     fn artifact_rules_match_expected_files() {
         let artifacts = BundleArtifacts {
             control_name: "embeddinggemma_300m",
+            format: CheckpointFormat::Safetensors,
             source: ArtifactSource::HuggingFace {
                 repo: "google/embeddinggemma-300m",
             },

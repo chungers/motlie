@@ -1,7 +1,8 @@
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
     BundleId, CapabilityDescriptor, ContentKind, Embedding as EmbeddingBundle, EmbeddingDistance,
-    EmbeddingNormalization, EmbeddingSpec, ModelBundle, ModelError, StartOptions,
+    EmbeddingNormalization, EmbeddingSpec, CheckpointFormat, ModelBundle, ModelError,
+    StartOptions,
 };
 use motlie_model_mistral::{MistralEmbeddingBundle, MistralEmbeddingSpec};
 use std::path::{Path, PathBuf};
@@ -97,6 +98,7 @@ pub fn embedding_spec() -> &'static EmbeddingSpec {
 pub fn descriptor() -> BundleDescriptor {
     BundleDescriptor {
         id: BundleId::new("qwen3_embedding_06b"),
+        model_id: BundleId::new("qwen3_embedding_06b"),
         display_name: "Qwen3 Embedding 0.6B".into(),
         family: BundleFamily::Embeddings,
         capabilities: motlie_model::Capabilities::new(vec![CapabilityDescriptor::embeddings()]),
@@ -108,6 +110,7 @@ pub fn descriptor() -> BundleDescriptor {
         eval_tracks: vec![EvalTrack::Embeddings],
         artifacts: Some(BundleArtifacts {
             control_name: "qwen3_embedding_06b",
+            format: CheckpointFormat::Safetensors,
             source: ArtifactSource::HuggingFace {
                 repo: "Qwen/Qwen3-Embedding-0.6B",
             },

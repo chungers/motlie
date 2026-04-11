@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use motlie_model::eval::EvalTrack;
-use motlie_model::{BundleId, ModelBundle, ModelError, StartOptions};
+use motlie_model::{BundleId, CheckpointFormat, ModelBundle, ModelError, StartOptions};
 use motlie_model_llama_cpp::{LlamaCppTextBundle, LlamaCppTextSpec};
 
 use crate::{
@@ -87,6 +87,7 @@ impl ModelBundle for Qwen3_4B_Gguf {
 pub fn descriptor() -> BundleDescriptor {
     BundleDescriptor {
         id: BundleId::new("qwen3_4b_gguf"),
+        model_id: BundleId::new("qwen3_4b"),
         display_name: "Qwen3 4B (GGUF/llama.cpp)".into(),
         family: BundleFamily::Qwen,
         capabilities: motlie_model::Capabilities::chat_and_completion(),
@@ -103,6 +104,7 @@ pub fn descriptor() -> BundleDescriptor {
         ],
         artifacts: Some(BundleArtifacts {
             control_name: "qwen3_4b_gguf",
+            format: CheckpointFormat::Gguf,
             source: ArtifactSource::HuggingFace {
                 repo: "Qwen/Qwen3-4B-GGUF",
             },

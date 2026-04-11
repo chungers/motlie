@@ -18,6 +18,7 @@ pub mod units;
 
 pub use chat::{ChatMessage, ChatRole, ContentPart};
 pub use embedding::{Embedding, EmbeddingDistance, EmbeddingNormalization, EmbeddingSpec};
+pub use eval::EvalTrack;
 pub use generation::{
     ChatRequest, ChatResponse, CompletionRequest, CompletionResponse, GenerationParams,
 };
@@ -55,6 +56,73 @@ impl From<String> for BundleId {
 impl fmt::Display for BundleId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
+    }
+}
+
+/// Organizational family for related curated bundles.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BundleFamily {
+    Embeddings,
+    Gemma,
+    Gpt,
+    Hermes,
+    Other(String),
+    Qwen,
+}
+
+/// Internal execution substrate chosen for a bundle or adapter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackendKind {
+    Http,
+    LlamaCpp,
+    MistralRs,
+    Ort,
+}
+
+/// Platform scoping visible to operators and release tooling.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PlatformConstraint {
+    Linux,
+    Macos,
+    Distribution(String),
+    Architecture(String),
+}
+
+/// Build-time constraints kept close to the model declaration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BuildConstraint {
+    CpuOnly,
+    CudaRequired,
+    Feature(String),
+    Profile(String),
+}
+
+/// Requirements that affect whether and how a model may be loaded or built.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BundleRequirements {
+    pub platform: Vec<PlatformConstraint>,
+    pub build: Vec<BuildConstraint>,
+}
+
+/// Artifact source backing a curated checkpoint declaration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ArtifactSource {
+    HuggingFace { repo: &'static str },
+}
+
+/// Rule used to include concrete artifacts from a source.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ArtifactRule {
+    Exact(&'static str),
+    Suffix(&'static str),
+}
+
+impl ArtifactRule {
+    pub fn matches(&self, filename: &str) -> bool {
+        match self {
+            Self::Exact(expected) => filename == *expected,
+            Self::Suffix(suffix) => filename.ends_with(suffix),
+        }
     }
 }
 
@@ -231,6 +299,54 @@ pub struct BundleMetadata {
     pub display_name: String,
     pub capabilities: Capabilities,
     pub quantization: QuantizationSupport,
+}
+
+/// Stable metadata for a logical model independent of checkpoint format or backend.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelIdentity {
+    pub id: BundleId,
+    pub display_name: String,
+    pub family: BundleFamily,
+    pub capabilities: Capabilities,
+    pub eval_tracks: Vec<EvalTrack>,
+    pub requirements: BundleRequirements,
+}
+
+/// Physical checkpoint format used to package model weights.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum CheckpointFormat {
+    Safetensors,
+    Gguf,
+    Onnx,
+}
+
+/// Checkpoint-native quantization metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CheckpointQuantization {
+    Gguf { label: String },
+    Onnx { bits: u8 },
+}
+
+/// Artifact declaration for a concrete checkpoint variant of a model.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelCheckpoint {
+    pub format: CheckpointFormat,
+    pub source: ArtifactSource,
+    pub include: Vec<ArtifactRule>,
+    pub quantization: Option<CheckpointQuantization>,
+}
+
+impl ModelCheckpoint {
+    pub fn includes(&self, filename: &str) -> bool {
+        self.include.iter().any(|rule| rule.matches(filename))
+    }
+}
+
+/// Checkpoint resolved to a local path that a backend can open.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedCheckpoint {
+    pub checkpoint: ModelCheckpoint,
+    pub path: PathBuf,
 }
 
 /// Artifact acquisition policy that bundle startup must honor.
@@ -420,6 +536,18 @@ pub trait BundleHandle: Send + Sync {
     async fn shutdown(self: Box<Self>) -> Result<(), ModelError>;
 }
 
+/// Backend-specific loader for one or more checkpoint formats.
+pub trait BackendAdapter: Send + Sync {
+    fn supported_formats(&self) -> &[CheckpointFormat];
+    fn backend_kind(&self) -> BackendKind;
+    fn start(
+        &self,
+        identity: &ModelIdentity,
+        checkpoint: &ResolvedCheckpoint,
+        options: StartOptions,
+    ) -> Result<Box<dyn BundleHandle>, ModelError>;
+}
+
 /// Chat generation capability.
 #[async_trait]
 pub trait ChatModel: Send + Sync {
@@ -563,6 +691,46 @@ mod tests {
             resolved_quantization: None,
         };
         assert_eq!(loaded, loaded.clone());
+    }
+
+    #[test]
+    fn artifact_rule_and_checkpoint_match_expected_filenames() {
+        let checkpoint = ModelCheckpoint {
+            format: CheckpointFormat::Gguf,
+            source: ArtifactSource::HuggingFace {
+                repo: "Qwen/Qwen3-4B-GGUF",
+            },
+            include: vec![
+                ArtifactRule::Suffix("-Q4_K_M.gguf"),
+                ArtifactRule::Suffix("-Q8_0.gguf"),
+            ],
+            quantization: Some(CheckpointQuantization::Gguf {
+                label: "Q4_K_M".into(),
+            }),
+        };
+
+        assert!(checkpoint.includes("Qwen3-4B-Q4_K_M.gguf"));
+        assert!(!checkpoint.includes("config.json"));
+    }
+
+    #[test]
+    fn model_identity_is_decoupled_from_checkpoint_and_backend_details() {
+        let identity = ModelIdentity {
+            id: BundleId::new("qwen3_4b"),
+            display_name: "Qwen3 4B".into(),
+            family: BundleFamily::Qwen,
+            capabilities: Capabilities::chat_and_completion(),
+            eval_tracks: vec![EvalTrack::Chat, EvalTrack::Reasoning],
+            requirements: BundleRequirements {
+                platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
+                build: vec![BuildConstraint::Feature("backend-mistral".into())],
+            },
+        };
+
+        assert_eq!(identity.id.as_str(), "qwen3_4b");
+        assert_eq!(identity.family, BundleFamily::Qwen);
+        assert!(identity.capabilities.supports(CapabilityKind::Chat));
+        assert!(identity.eval_tracks.contains(&EvalTrack::Reasoning));
     }
 
     #[test]
