@@ -13,8 +13,8 @@ use motlie_model::{
 
 use crate::common::{
     apply_generation_params, configure_artifact_policy, map_chat_role, map_quantization_bits,
-    lock_metrics, observe_latency, observe_memory, observe_text_usage, should_force_cpu,
-    snapshot_text_metrics, RuntimeMetricState, TextMetricState,
+    lock_metrics, observe_latency, observe_memory, observe_text_usage, should_enable_paged_attn,
+    should_force_cpu, snapshot_text_metrics, RuntimeMetricState, TextMetricState,
 };
 
 /// Text model architecture discriminant that selects the correct `mistralrs` loader path.
@@ -324,6 +324,16 @@ async fn build_text_model(
     }
     if let Some(max_num_seqs) = max_concurrency {
         builder = builder.with_max_num_seqs(max_num_seqs);
+    }
+    if should_enable_paged_attn() {
+        match mistralrs::PagedAttentionMetaBuilder::default().build() {
+            Ok(pa_config) => {
+                builder = builder.with_paged_attn(pa_config);
+            }
+            Err(err) => {
+                eprintln!("warning: failed to configure PagedAttention, continuing without it: {err}");
+            }
+        }
     }
 
     builder
