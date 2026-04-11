@@ -44,6 +44,24 @@ pub(crate) fn should_force_cpu() -> bool {
     )
 }
 
+/// Resolve the number of model layers to offload to GPU.
+///
+/// Priority:
+/// 1. `MOTLIE_MODEL_FORCE_CPU=1` → 0 layers (all CPU)
+/// 2. `MOTLIE_MODEL_GPU_LAYERS=<n>` → explicit layer count
+/// 3. Default → 9999 (offload everything available to GPU; no-op on CPU-only builds)
+pub(crate) fn resolve_gpu_layers() -> u32 {
+    if should_force_cpu() {
+        return 0;
+    }
+    if let Ok(val) = std::env::var("MOTLIE_MODEL_GPU_LAYERS") {
+        if let Ok(n) = val.parse::<u32>() {
+            return n;
+        }
+    }
+    9999
+}
+
 pub(crate) fn lock_metrics<'a, T>(
     mutex: &'a Mutex<T>,
     context: &'static str,

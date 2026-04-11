@@ -10,6 +10,10 @@ description = "llama.cpp backend implementations for motlie-model contracts"
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = []
+cuda = ["llama-cpp-2/cuda"]
+
 [dependencies]
 async-trait = "0.1.89"
 encoding_rs = "0.8"
