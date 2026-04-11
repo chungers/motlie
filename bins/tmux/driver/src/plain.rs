@@ -1,6 +1,4 @@
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
-
 use anyhow::Result;
 use motlie_driver::clap::analyze_completion;
 use motlie_driver::commands::tmux::{TmuxCommand, TmuxState};
@@ -110,12 +108,10 @@ pub async fn run(engine: &mut CommandEngine<TmuxState, TmuxCommand>) -> Result<(
                     *guard = engine.completion_context();
                 }
 
-                if let Some(session_name) = parse_plain_monitor(trimmed) {
-                    if engine.context().mirror_snapshot().watch_health.is_some() {
-                        run_plain_monitor(engine, &session_name, Duration::from_secs(3)).await?;
-                        if let Ok(mut guard) = completion_context.lock() {
-                            *guard = engine.completion_context();
-                        }
+                if engine.context().has_live_follow() {
+                    run_live_follow(engine).await?;
+                    if let Ok(mut guard) = completion_context.lock() {
+                        *guard = engine.completion_context();
                     }
                 }
 
@@ -135,30 +131,22 @@ pub async fn run(engine: &mut CommandEngine<TmuxState, TmuxCommand>) -> Result<(
     }
 }
 
-fn parse_plain_monitor(line: &str) -> Option<String> {
-    let argv = shlex::split(line)?;
-    if argv.len() == 2 && argv.first().map(String::as_str) == Some("monitor") {
-        return argv.get(1).cloned();
-    }
-    None
-}
-
-async fn run_plain_monitor(
-    engine: &mut CommandEngine<TmuxState, TmuxCommand>,
-    session_name: &str,
-    duration: Duration,
-) -> Result<()> {
-    println!("Monitoring {session_name} for {}s...", duration.as_secs());
-    let deadline = tokio::time::Instant::now() + duration;
+async fn run_live_follow(engine: &mut CommandEngine<TmuxState, TmuxCommand>) -> Result<()> {
+    println!("Live follow attached. Press Ctrl-C to stop and return to the prompt.");
     let mut previous = String::new();
     let mut cursor = None;
 
     loop {
-        if tokio::time::Instant::now() >= deadline {
-            break;
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                engine.context_mut().shutdown_managed_state().await?;
+                println!();
+                println!("Live follow stopped.");
+                break;
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(150)) => {}
         }
 
-        tokio::time::sleep(Duration::from_millis(150)).await;
         engine.context_mut().refresh_mirror().await?;
         let page = engine
             .context()
@@ -168,15 +156,10 @@ async fn run_plain_monitor(
             cursor = Some(record.seq);
         }
 
-        let snapshot = engine.context().mirror_snapshot();
-
-        if snapshot.watch_health.is_none() {
+        if !engine.context().has_live_follow() {
             break;
         }
     }
-
-    engine.context_mut().shutdown_managed_state().await?;
-    println!("Monitor stopped.");
     Ok(())
 }
 
