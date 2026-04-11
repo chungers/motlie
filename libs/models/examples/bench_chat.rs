@@ -13,7 +13,7 @@
 ///
 /// Environment variables:
 ///   MOTLIE_MODEL_FORCE_CPU=1  — force CPU even if built with CUDA
-///   MOTLIE_PAGED_ATTN=1       — enable PagedAttention (CUDA only)
+///   MOTLIE_PAGED_ATTN_CONTEXT=N — enable PagedAttention with N-token context budget (CUDA only)
 use anyhow::{Context, Result, bail};
 use motlie_model::{
     ArtifactPolicy, ChatMessage, ChatModel, ChatRequest, ChatRole, QuantizationBits, StartOptions,
@@ -125,7 +125,7 @@ async fn main() -> Result<()> {
     let warmup = run_one(chat, &prompt).await;
     match &warmup {
         Ok((words, ms)) => {
-            println!("warmup: {words} words in {ms:.0}ms (TTFT={ms:.0}ms)");
+            println!("warmup: {words} words in {ms:.0}ms (e2e-latency={ms:.0}ms)");
         }
         Err(e) => {
             println!("warmup: FAILED — {e}");
@@ -160,9 +160,10 @@ async fn main() -> Result<()> {
     let successful = iterations - failures;
     println!("\n--- summary ---");
     println!("note: per-iteration counts are output *words* (whitespace-split), not model tokens.");
+    println!("      latency is end-to-end request time (prefill + full decode), not true TTFT.");
     println!("      real token throughput is reported below from mistralrs internal metrics.");
     if let Ok((warmup_words, warmup_ms)) = warmup {
-        println!("first-run: {warmup_words} words, TTFT={warmup_ms:.0}ms");
+        println!("first-run: {warmup_words} words, e2e-latency={warmup_ms:.0}ms");
     }
     if successful > 0 {
         let avg_ms = total_ms / successful as f64;
