@@ -46,6 +46,13 @@ pub(crate) fn should_force_cpu() -> bool {
     )
 }
 
+pub(crate) fn should_enable_paged_attn() -> bool {
+    matches!(
+        std::env::var("MOTLIE_PAGED_ATTN"),
+        Ok(value) if matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES")
+    )
+}
+
 pub(crate) fn map_chat_role(role: ChatRole) -> mistralrs::TextMessageRole {
     match role {
         ChatRole::System => mistralrs::TextMessageRole::System,
