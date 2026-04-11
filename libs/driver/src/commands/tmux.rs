@@ -134,6 +134,10 @@ impl TmuxState {
         self.mirror_history.page_after(after, limit)
     }
 
+    pub fn has_live_follow(&self) -> bool {
+        self.active_watch.is_some() || self.active_stream.is_some()
+    }
+
     pub async fn shutdown_managed_state(&mut self) -> Result<()> {
         self.clear_stream();
         self.clear_watch().await
@@ -433,7 +437,7 @@ pub struct CaptureCommand {
 
 #[derive(Args)]
 pub struct MonitorCommand {
-    pub session: String,
+    pub session: Option<String>,
     pub seconds: Option<u64>,
 }
 
@@ -801,12 +805,29 @@ async fn execute_capture(context: &mut TmuxState, cmd: CaptureCommand) -> Result
 }
 
 async fn execute_monitor(context: &mut TmuxState, cmd: MonitorCommand) -> Result<CommandOutput> {
+    if matches!(cmd.session.as_deref(), Some("stop")) && cmd.seconds.is_none() {
+        let had_live_follow = context.has_live_follow();
+        context.shutdown_managed_state().await?;
+        if had_live_follow {
+            context.mirror_label = "monitor: stopped".to_string();
+            context.mirror_auto_refresh = false;
+            context.record_current_mirror_state();
+            return Ok(CommandOutput::line("Stopped active monitor/stream"));
+        }
+        return Ok(CommandOutput::line("No active monitor/stream"));
+    }
+
+    let session = cmd
+        .session
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("missing <session>; use `monitor <session>` or `monitor stop`"))?;
+
     context.clear_stream();
     context.clear_watch().await?;
 
     let watch = context
         .host
-        .watch_session(&cmd.session, &SessionWatchOptions::default())
+        .watch_session(session, &SessionWatchOptions::default())
         .await?;
 
     if let Some(seconds) = cmd.seconds {
@@ -818,7 +839,7 @@ async fn execute_monitor(context: &mut TmuxState, cmd: MonitorCommand) -> Result
         } else {
             rendered.clone()
         };
-        context.mirror_label = format!("watching: {}", cmd.session);
+        context.mirror_label = format!("watching: {session}");
         context.mirror_ansi = false;
         context.mirror_auto_refresh = false;
         context.record_current_mirror_state();
@@ -830,13 +851,13 @@ async fn execute_monitor(context: &mut TmuxState, cmd: MonitorCommand) -> Result
 
     context.active_watch = Some(watch);
     context.mirror_text.clear();
-    context.mirror_label = format!("watching: {}", cmd.session);
+    context.mirror_label = format!("watching: {session}");
     context.mirror_ansi = false;
     context.mirror_auto_refresh = true;
     context.record_current_mirror_state();
     Ok(CommandOutput::line(format!(
-        "Watching session: {}",
-        cmd.session
+        "Watching session: {} (attached; Ctrl-C to stop live follow)",
+        session
     )))
 }
 
@@ -1030,6 +1051,7 @@ fn tmux_root_help() -> String {
         "  keys <target> <keys...>",
         "  capture <target> <n>",
         "  monitor <session> [seconds]",
+        "  monitor stop",
         "  history <session> [session...]",
         "  stream <target> [--mode MODE] [--lines N] [--interval MS] [--pattern REGEX]",
         "",
@@ -1092,6 +1114,7 @@ fn tmux_stream_help() -> String {
 fn tmux_monitor_help() -> String {
     [
         "monitor <session> [seconds]",
+        "monitor stop",
         "",
         "Start event-driven monitoring of a tmux session.",
         "Output is mirrored in real time using tmux control mode.",
@@ -1099,12 +1122,14 @@ fn tmux_monitor_help() -> String {
         "Behavior:",
         "  Only one watch/stream is active at a time.",
         "  Starting monitor replaces any active stream or watch.",
-        "  Without [seconds], monitoring stays attached until another command replaces it.",
+        "  Without [seconds], monitoring stays attached until stopped or replaced.",
         "  With [seconds], monitoring runs for that duration and returns a one-shot transcript.",
+        "  `monitor stop` stops the active watch/stream and returns to idle state.",
         "",
         "Examples:",
         "  monitor demo",
         "  monitor demo 5",
+        "  monitor stop",
     ]
     .join("\n")
 }
@@ -1258,5 +1283,18 @@ mod tests {
         let output = engine.run_line("tui on").await.expect("tui output");
 
         assert!(output.effects.contains(&CommandEffect::EnterTui));
+    }
+
+    #[tokio::test]
+    async fn tmux_monitor_stop_is_safe_when_idle() {
+        let state = test_state();
+
+        let mut engine = CommandEngine::<TmuxState, TmuxCommand>::new(state);
+        let output = engine
+            .run_line("monitor stop")
+            .await
+            .expect("monitor stop output");
+
+        assert_eq!(output.lines, vec!["No active monitor/stream"]);
     }
 }
