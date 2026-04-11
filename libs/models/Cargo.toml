@@ -67,4 +67,3 @@ required-features = ["model-qwen3-4b-gguf"]
 [[example]]
 name = "bench_chat"
 path = "examples/bench_chat.rs"
-required-features = ["model-qwen3-4b"]
