@@ -6,9 +6,11 @@ use std::collections::BTreeMap;
 use std::error::Error as StdError;
 #[cfg(any(
     feature = "model-qwen3-4b",
+    feature = "model-qwen3-4b-gguf",
     feature = "model-google-gemma-300m",
     feature = "model-qwen3-embedding-06b",
-    feature = "model-gemma4-e2b"
+    feature = "model-gemma4-e2b",
+    feature = "model-gemma4-e2b-gguf",
 ))]
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -138,6 +140,70 @@ pub fn resolve_hf_snapshot(
     }
 
     Ok(snapshot_dir.to_path_buf())
+}
+
+/// Resolve a Hugging Face cache root to the snapshot directory for a GGUF model.
+///
+/// GGUF repos contain only `.gguf` weight files (no config.json or tokenizer).
+/// This function navigates the HF cache layout and validates that at least one
+/// `.gguf` file is present. Returns the snapshot directory path.
+pub fn resolve_hf_gguf_snapshot(
+    model_id: &str,
+    cache_root: &Path,
+) -> std::result::Result<PathBuf, motlie_model::ModelError> {
+    // GGUF repos don't have config.json. Probe for any .gguf file via the refs/snapshots layout.
+    let repo_folder = format!("models--{}", model_id.replace('/', "--"));
+    let repo_root = cache_root.join(&repo_folder);
+    let refs_dir = repo_root.join("refs");
+
+    let main_ref = refs_dir.join("main");
+    if !main_ref.exists() {
+        return Err(motlie_model::ModelError::InvalidConfiguration(format!(
+            "artifact policy `LocalOnly` requires cached GGUF artifacts for `{model_id}` under `{}`; \
+             no refs/main found — run the download step first",
+            cache_root.display()
+        )));
+    }
+
+    let commit = std::fs::read_to_string(&main_ref).map_err(|err| {
+        motlie_model::ModelError::InvalidConfiguration(format!(
+            "failed to read HF cache ref for `{model_id}`: {err}"
+        ))
+    })?;
+    let commit = commit.trim();
+
+    let snapshot_dir = repo_root.join("snapshots").join(commit);
+    if !snapshot_dir.exists() {
+        return Err(motlie_model::ModelError::InvalidConfiguration(format!(
+            "HF cache snapshot `{commit}` for `{model_id}` not found under `{}`",
+            cache_root.display()
+        )));
+    }
+
+    let has_gguf = std::fs::read_dir(&snapshot_dir)
+        .map_err(|err| {
+            motlie_model::ModelError::InvalidConfiguration(format!(
+                "failed to inspect cached GGUF artifacts for `{model_id}` in `{}`: {err}",
+                snapshot_dir.display()
+            ))
+        })?
+        .filter_map(std::result::Result::ok)
+        .any(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .map(|name| name.ends_with(".gguf"))
+                .unwrap_or(false)
+        });
+
+    if !has_gguf {
+        return Err(motlie_model::ModelError::InvalidConfiguration(format!(
+            "artifact policy `LocalOnly` requires cached .gguf files for `{model_id}` under `{}`",
+            cache_root.display()
+        )));
+    }
+
+    Ok(snapshot_dir)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -338,7 +404,12 @@ impl BundleDescriptor {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ModelSelector {
-    #[cfg(any(feature = "model-qwen3-4b", feature = "model-gemma4-e2b"))]
+    #[cfg(any(
+        feature = "model-qwen3-4b",
+        feature = "model-qwen3-4b-gguf",
+        feature = "model-gemma4-e2b",
+        feature = "model-gemma4-e2b-gguf",
+    ))]
     Chat(ChatModels),
     #[cfg(any(
         feature = "model-google-gemma-300m",
@@ -349,14 +420,21 @@ pub enum ModelSelector {
 
 #[cfg(any(
     feature = "model-qwen3-4b",
+    feature = "model-qwen3-4b-gguf",
     feature = "model-google-gemma-300m",
     feature = "model-qwen3-embedding-06b",
-    feature = "model-gemma4-e2b"
+    feature = "model-gemma4-e2b",
+    feature = "model-gemma4-e2b-gguf",
 ))]
 impl ModelSelector {
     pub fn as_str(&self) -> String {
         match self {
-            #[cfg(any(feature = "model-qwen3-4b", feature = "model-gemma4-e2b"))]
+            #[cfg(any(
+                feature = "model-qwen3-4b",
+                feature = "model-qwen3-4b-gguf",
+                feature = "model-gemma4-e2b",
+                feature = "model-gemma4-e2b-gguf",
+            ))]
             Self::Chat(model) => format!("chat:{}", model.as_str()),
             #[cfg(any(
                 feature = "model-google-gemma-300m",
@@ -368,7 +446,12 @@ impl ModelSelector {
 
     pub fn bundle_id(&self) -> BundleId {
         match self {
-            #[cfg(any(feature = "model-qwen3-4b", feature = "model-gemma4-e2b"))]
+            #[cfg(any(
+                feature = "model-qwen3-4b",
+                feature = "model-qwen3-4b-gguf",
+                feature = "model-gemma4-e2b",
+                feature = "model-gemma4-e2b-gguf",
+            ))]
             Self::Chat(model) => model.bundle_id(),
             #[cfg(any(
                 feature = "model-google-gemma-300m",
@@ -380,7 +463,12 @@ impl ModelSelector {
 
     pub fn descriptor(&self) -> BundleDescriptor {
         match self {
-            #[cfg(any(feature = "model-qwen3-4b", feature = "model-gemma4-e2b"))]
+            #[cfg(any(
+                feature = "model-qwen3-4b",
+                feature = "model-qwen3-4b-gguf",
+                feature = "model-gemma4-e2b",
+                feature = "model-gemma4-e2b-gguf",
+            ))]
             Self::Chat(model) => model.descriptor(),
             #[cfg(any(
                 feature = "model-google-gemma-300m",
@@ -392,7 +480,12 @@ impl ModelSelector {
 
     pub fn bundle(&self) -> Box<dyn ModelBundle> {
         match self {
-            #[cfg(any(feature = "model-qwen3-4b", feature = "model-gemma4-e2b"))]
+            #[cfg(any(
+                feature = "model-qwen3-4b",
+                feature = "model-qwen3-4b-gguf",
+                feature = "model-gemma4-e2b",
+                feature = "model-gemma4-e2b-gguf",
+            ))]
             Self::Chat(model) => model.bundle(),
             #[cfg(any(
                 feature = "model-google-gemma-300m",
@@ -405,9 +498,11 @@ impl ModelSelector {
 
 #[cfg(any(
     feature = "model-qwen3-4b",
+    feature = "model-qwen3-4b-gguf",
     feature = "model-google-gemma-300m",
     feature = "model-qwen3-embedding-06b",
-    feature = "model-gemma4-e2b"
+    feature = "model-gemma4-e2b",
+    feature = "model-gemma4-e2b-gguf",
 ))]
 impl fmt::Display for ModelSelector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -426,15 +521,37 @@ impl FromStr for ModelSelector {
                     selector: value.to_owned(),
                 });
             }
+            #[cfg(not(feature = "model-gemma4-e2b-gguf"))]
+            if raw == chat::GEMMA4_E2B_GGUF_SELECTOR {
+                return Err(ModelsError::ModelUnavailable {
+                    selector: value.to_owned(),
+                });
+            }
             #[cfg(not(feature = "model-qwen3-4b"))]
             if raw == chat::QWEN3_4B_SELECTOR {
                 return Err(ModelsError::ModelUnavailable {
                     selector: value.to_owned(),
                 });
             }
-            #[cfg(any(feature = "model-qwen3-4b", feature = "model-gemma4-e2b"))]
+            #[cfg(not(feature = "model-qwen3-4b-gguf"))]
+            if raw == chat::QWEN3_4B_GGUF_SELECTOR {
+                return Err(ModelsError::ModelUnavailable {
+                    selector: value.to_owned(),
+                });
+            }
+            #[cfg(any(
+                feature = "model-qwen3-4b",
+                feature = "model-qwen3-4b-gguf",
+                feature = "model-gemma4-e2b",
+                feature = "model-gemma4-e2b-gguf",
+            ))]
             return Ok(Self::Chat(raw.parse()?));
-            #[cfg(not(any(feature = "model-qwen3-4b", feature = "model-gemma4-e2b")))]
+            #[cfg(not(any(
+                feature = "model-qwen3-4b",
+                feature = "model-qwen3-4b-gguf",
+                feature = "model-gemma4-e2b",
+                feature = "model-gemma4-e2b-gguf",
+            )))]
             return Err(ModelsError::UnknownModelSelector {
                 selector: value.to_owned(),
             });
@@ -518,6 +635,14 @@ impl Catalog {
         #[cfg(feature = "model-gemma4-e2b")]
         catalog.register(chat::gemma4_e2b::descriptor(), || {
             chat::gemma4_e2b::bundle()
+        });
+        #[cfg(feature = "model-qwen3-4b-gguf")]
+        catalog.register(chat::qwen3_4b_gguf::descriptor(), || {
+            chat::qwen3_4b_gguf::bundle()
+        });
+        #[cfg(feature = "model-gemma4-e2b-gguf")]
+        catalog.register(chat::gemma4_e2b_gguf::descriptor(), || {
+            chat::gemma4_e2b_gguf::bundle()
         });
         catalog
     }
