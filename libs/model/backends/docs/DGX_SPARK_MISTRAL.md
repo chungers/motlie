@@ -524,19 +524,55 @@ because GPU prefill at 1,914 tok/s vs CPU at ~23 tok/s dominates total latency.
 
 ### Method
 
-The `bench_chat` benchmark was run across 4 input sizes (small ~10 tok, 500 tok,
-1k tok, 5k tok, 14k tok), 3 configurations (CUDA+FA, CUDA+PA, CPU), and both LLM
-models. Each run does 1 warmup iteration followed by 2–3 measured iterations to
-capture first-run and steady-state behavior.
+The `bench_chat` benchmark (`libs/models/examples/bench_chat.rs`) was run across
+4 input sizes (small ~10 tok, 500 tok, 1k tok, 5k tok, 14k tok), 3 configurations
+(CUDA+FA, CUDA+PA, CPU), and both LLM models. Each run does 1 warmup iteration
+followed by 2–3 measured iterations to capture first-run and steady-state behavior.
 
-Input fixtures:
+#### Metrics definition
+
+- **TTFT (Time To First Token)**: wall-clock time from `ChatModel::generate()` call
+  to first byte of response content returned. Measured in `bench_chat` as the total
+  elapsed time of `run_one()`, which wraps the full `generate()` request-response
+  cycle. Because `mistralrs` returns the complete response (not streaming), the
+  measured TTFT includes both prefill and full decode. This is an upper bound on true
+  TTFT — actual first-token latency would be lower with streaming, but `mistralrs`
+  0.8.1 `send_chat_request` does not support streaming output through `candle`.
+
+- **Decode tok/s**: from `mistralrs` internal `Usage` metrics, reported as
+  `avg_generated_tokens_per_sec`. This measures the autoregressive decode phase only
+  (excludes prefill), computed as total generated tokens divided by total decode time
+  across all requests in the session. This is the true per-token generation throughput.
+
+- **Prefill tok/s**: from `mistralrs` internal `Usage` metrics, reported as
+  `avg_prompt_tokens_per_sec`. Measures prompt encoding throughput (the batched
+  forward pass over all input tokens before decode begins).
+
+- **Output token count**: approximate, counted as whitespace-separated words in the
+  response text. Not exact BPE token count, but consistent across runs for the same
+  prompt/model and sufficient for relative comparison.
+
+- **RSS**: process resident set size from `sysinfo` crate, measured at startup and
+  after all iterations complete.
+
+#### Input fixtures
+
 - `baseline_chat_500.txt` (~531 tokens)
 - `short_context_chat_1k.txt` (~1,004 tokens)
 - `medium_context_chat_5k.txt` (~4,956 tokens)
 - `long_context_chat_14k.txt` (~14,809 tokens)
 
-Abort rule: stop testing slower configurations when TTFT exceeds 2 minutes
-(unacceptable interactive UX).
+Token counts are estimates (words × 1.3). Actual tokenized counts confirmed by
+`mistralrs` `total-prompt-tokens` reporting: e.g., `baseline_chat_500.txt` tokenizes
+to ~531 tokens, `long_context_chat_14k.txt` tokenizes to ~18,814 tokens.
+
+All fixtures are truncations of the same source text (this study document plus both
+DESIGN docs), ensuring consistent content characteristics across sizes.
+
+#### Abort rule
+
+Stop testing slower configurations when TTFT exceeds 2 minutes (unacceptable
+interactive UX).
 
 ### Qwen3-4B (ISQ Q4) — full sweep
 
