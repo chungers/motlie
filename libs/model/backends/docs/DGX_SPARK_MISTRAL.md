@@ -9,7 +9,7 @@
 | 2026-04-11 | @cld-mistral | Added Gemma 4 E2B-it CUDA + flash-attn results (56 tok/s, 5.6x faster than CPU). Added full RSS comparison tables for all models and configurations. |
 | 2026-04-11 | @cld-mistral | Documented `candle-flash-attn` NaN bug for Gemma 4 at >500 generated tokens on Blackwell. Isolated to flash-attn kernel (not quantization, not model weights). Revised Gemma 4 recommendation to CUDA + PagedAttention (no flash-attn). |
 | 2026-04-11 | @cld-mistral | Added Part 5: long-context stability testing (~18.8k tokens). PagedAttention crashes on long input (default KV cache too small). Only CUDA+FA (no PA) survives for Qwen3-4B; Gemma 4 has no viable CUDA path for long context. Added prefill/decode tok/s breakdown. |
-| 2026-04-11 | @cld-mistral | Added Part 6: comprehensive input-size sweep (small, 500, 1k, 5k, 14k tokens) using `bench_chat` with warmup + steady-state. Replaces earlier ad-hoc measurements. Gemma 4 CUDA limited to ~500 token context. CPU unacceptable beyond ~500 token input (TTFT >2min). |
+| 2026-04-11 | @cld-mistral | Added Part 6: comprehensive input-size sweep (small, 500, 1k, 5k, 14k tokens) using `bench_chat` with warmup + steady-state. Replaces earlier ad-hoc measurements. Gemma 4 CUDA limited to ~500 token context. CPU unacceptable beyond ~500 token input (e2e latency >2min). |
 
 ---
 
@@ -531,13 +531,14 @@ followed by 2–3 measured iterations to capture first-run and steady-state beha
 
 #### Metrics definition
 
-- **TTFT (Time To First Token)**: wall-clock time from `ChatModel::generate()` call
-  to first byte of response content returned. Measured in `bench_chat` as the total
-  elapsed time of `run_one()`, which wraps the full `generate()` request-response
-  cycle. Because `mistralrs` returns the complete response (not streaming), the
-  measured TTFT includes both prefill and full decode. This is an upper bound on true
-  TTFT — actual first-token latency would be lower with streaming, but `mistralrs`
-  0.8.1 `send_chat_request` does not support streaming output through `candle`.
+- **E2E latency (end-to-end request latency)**: wall-clock time from
+  `ChatModel::generate()` call to complete response returned. Measured in `bench_chat`
+  as the total elapsed time of `run_one()`, which wraps the full `generate()`
+  request-response cycle. Because `mistralrs` `send_chat_request` is non-streaming
+  (returns the complete response, not a token stream), this measurement includes
+  prefill *and* full decode. It is **not** true TTFT (Time To First Token) — actual
+  TTFT would be lower and would require a streaming API to measure. The tables in
+  this document label this column "E2E latency" to avoid confusion.
 
 - **Decode tok/s**: from `mistralrs` internal `Usage` metrics, reported as
   `avg_generated_tokens_per_sec`. This measures the autoregressive decode phase only
@@ -571,14 +572,14 @@ DESIGN docs), ensuring consistent content characteristics across sizes.
 
 #### Abort rule
 
-Stop testing slower configurations when TTFT exceeds 2 minutes (unacceptable
+Stop testing slower configurations when e2e latency exceeds 2 minutes (unacceptable
 interactive UX).
 
 ### Qwen3-4B (ISQ Q4) — full sweep
 
 | Input | CUDA+FA | | | CUDA+PA | | | CPU | | |
 |-------|---------|--|--|---------|--|--|-----|--|--|
-| | TTFT | Decode tok/s | Prefill tok/s | TTFT | Decode tok/s | Prefill tok/s | TTFT | Decode tok/s | Prefill tok/s |
+| | E2E latency | Decode tok/s | Prefill tok/s | E2E latency | Decode tok/s | Prefill tok/s | E2E latency | Decode tok/s | Prefill tok/s |
 | small (~10 tok) | **3.4s** | 50 | 542 | 5.6s | 51 | 12 | 16.5s | 12 | 19 |
 | 500 tok | **6.9s** | 44 | 2,085 | 8.8s | 47 | 208 | 50.5s | 12 | 24 |
 | 1k tok | **9.9s** | 39 | 2,198 | 11.5s | 46 | 378 | >2min | — | — |
@@ -589,7 +590,7 @@ interactive UX).
 
 | Input | CUDA+FA | | | CUDA+PA | | | CPU | | |
 |-------|---------|--|--|---------|--|--|-----|--|--|
-| | TTFT | Decode tok/s | Prefill tok/s | TTFT | Decode tok/s | Prefill tok/s | TTFT | Decode tok/s | Prefill tok/s |
+| | E2E latency | Decode tok/s | Prefill tok/s | E2E latency | Decode tok/s | Prefill tok/s | E2E latency | Decode tok/s | Prefill tok/s |
 | small (~10 tok) | **0.2s** | 63 | 719 | 1.7s | 61 | 20 | 14.0s | 10 | 26 |
 | 500 tok | NaN | — | — | **14.4s** | 48 | 306 | 81.4s | 9 | 30 |
 | 1k tok | NaN | — | — | CRASH | — | — | >2min | — | — |
@@ -599,19 +600,19 @@ interactive UX).
 ### Key observations
 
 1. **CUDA+FA is the only config that scales to long context for Qwen3-4B.** It works
-   at all tested sizes (up to 14k tokens) with sub-60s TTFT and stable decode throughput.
+   at all tested sizes (up to 14k tokens) with sub-60s e2e latency and stable decode throughput.
 
 2. **CUDA+PA works at short context but fails at 5k+ (Qwen) and 1k+ (Gemma).** The
    default `ContextSize(4096)` KV cache limit is the bottleneck. Decode performance
    when it works (46–51 tok/s) is comparable to CUDA+FA.
 
 3. **CPU is unacceptably slow for any non-trivial input.** Even the default short
-   prompt takes 16.5s on Qwen and 14s on Gemma. At 500 tokens input, CPU TTFT is
+   prompt takes 16.5s on Qwen and 14s on Gemma. At 500 tokens input, CPU e2e latency is
    50s (Qwen) and 81s (Gemma). Beyond 500 tokens, CPU exceeds the 2-minute threshold.
 
 4. **Gemma 4 has no viable CUDA config beyond 500 tokens.** Flash-attn NaN blocks
    any input that triggers >~500 generated tokens. PagedAttention crashes at 1k+
-   input tokens. CPU exceeds 2 min TTFT at 1k input. Gemma 4 is currently limited
+   input tokens. CPU exceeds 2 min e2e latency at 1k input. Gemma 4 is currently limited
    to short-context CUDA+PA or very short CUDA+FA interactions.
 
 5. **Prefill throughput on CUDA+FA improves with input length** (542 → 2,198 tok/s from
@@ -628,7 +629,7 @@ interactive UX).
 
 ### Per-model configuration for DGX Spark (mistral.rs 0.8.1)
 
-| Model | Best Config | Max Context | TTFT (typical) | Decode tok/s | RSS |
+| Model | Best Config | Max Context | E2E latency (typical) | Decode tok/s | RSS |
 |-------|-------------|-------------|----------------|-------------|-----|
 | Qwen3-4B | **`cuda,flash-attn`** | **14k+ tokens** | 3–60s | 9–50 | ~1.3 GiB |
 | Gemma 4 E2B-it | `cuda` + `MOTLIE_PAGED_ATTN_CONTEXT=4096` | **~500 tokens** | 1.7–14s | 48–61 | ~1.8 GiB |
