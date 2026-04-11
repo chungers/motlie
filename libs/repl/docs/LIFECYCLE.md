@@ -16,6 +16,8 @@ Scope notes:
 3. The `vmm`, `vnet`, and `vfs` review is based on the actively reviewed `feature/vmm`
    worktree as of 2026-04-10; some of those types are future adopters rather than current
    `main` dependencies.
+4. The first implementation slice still targets only the `Owned + InProcess` scenario; the
+   imported and remote-management scenarios below are future-facing design targets.
 
 ## Engine-Local Management Modes
 

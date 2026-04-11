@@ -18,13 +18,15 @@ contract.
 1. Subsystem crates own lifecycle and business logic.
 2. The command engine owns command registration, session registry state, completion wiring,
    and frontend-neutral dispatch.
-3. Subsystem authors should not have to hand-write `Pin<Box<dyn Future<...>>>` to register a
-   command.
+3. Subsystem authors should not have to hand-write `Pin<Box<dyn Future<...>>>` or dynamic
+   handler registries to register a command.
 4. Raw handle types such as `VmHandle` should not be forced to implement REPL traits
    directly.
-5. Integration should happen through typed commands plus adapter records.
+5. Integration should happen through typed command enums plus typed adapter records.
 6. Optional subsystems must disappear cleanly from both the build graph and the command
    surface when their Cargo feature is disabled.
+7. The first vertical slice is `Owned + InProcess` only; attach and remote-management
+   scenarios are documented now but are not part of the first implementation milestone.
 
 ## Subsystem-Facing Surface
 
@@ -47,45 +49,35 @@ pub struct CompletionCandidate {
 }
 
 #[async_trait::async_trait]
-pub trait TypedCommand<C>:
-    clap::CommandFactory + clap::FromArgMatches + Send + 'static
-{
-    const PATH: &'static [&'static str];
-
-    fn complete(_request: CompletionRequest<'_>, _context: &C) -> Vec<CompletionCandidate> {
-        Vec::new()
-    }
-
+pub trait CommandSet<C>: Sized {
+    fn root_command() -> clap::Command;
+    fn from_matches(matches: &clap::ArgMatches) -> anyhow::Result<Self>;
+    fn complete(request: CompletionRequest<'_>, context: &C) -> Vec<CompletionCandidate>;
     async fn execute(self, context: &mut C) -> anyhow::Result<CommandOutput>;
-}
-
-pub trait CommandModule<C> {
-    fn register(self, engine: &mut CommandEngine<C>);
 }
 ```
 
-Subsystem registration modules are expected to be feature-gated by the composing binary or
+Subsystem command enums are expected to be feature-gated by the composing binary or
 integration crate:
 
 ```rust
 #[cfg(feature = "repl-vmm")]
-pub mod repl {
-    pub struct VmmModule;
+pub enum VmmCommand {
+    Boot(BootGuest),
+    Exec(ExecGuest),
+    Shutdown(ShutdownGuest),
+}
 
-    impl CommandModule<AppContext> for VmmModule {
-        fn register(self, engine: &mut CommandEngine<AppContext>) {
-            engine.add_typed::<BootGuest>();
-            engine.add_typed::<ExecGuest>();
-            engine.add_typed::<ShutdownGuest>();
-        }
-    }
+#[cfg(feature = "repl-vmm")]
+pub enum AppCommand {
+    Vmm(VmmCommand),
 }
 ```
 
 If the feature is disabled:
 
 1. the subsystem dependency is not linked,
-2. the registration module does not compile,
+2. the subsystem command enum does not compile,
 3. the aggregate clap tree does not contain that command family, and
 4. neither static nor dynamic completion exposes that subsystem's values.
 
@@ -110,8 +102,43 @@ pub struct ManagedResource<T> {
 }
 ```
 
-The engine may internally erase these concrete command types into dynamic dispatch objects,
-but subsystem crates should only need to implement typed commands and adapter records.
+The phase-1 engine should not need to erase these concrete command types into dynamic
+dispatch objects. The binary knows the full feature-enabled command universe at compile time,
+so the command set should stay typed.
+
+## Typed Session Registry Contract
+
+The command engine stores resources created by one command so that later commands can access
+them through typed subsystem state.
+
+The intended pattern is:
+
+```rust
+pub struct ManagedVm {
+    pub mode: ResourceMode,
+    pub locality: ResourceLocality,
+    pub handle: VmHandle,
+}
+
+pub struct VmmSessionState {
+    guests: HashMap<String, ManagedVm>,
+}
+
+impl VmmSessionState {
+    pub fn insert_guest(&mut self, name: String, vm: ManagedVm) -> anyhow::Result<()>;
+    pub fn guest(&self, name: &str) -> anyhow::Result<&ManagedVm>;
+    pub fn guest_mut(&mut self, name: &str) -> anyhow::Result<&mut ManagedVm>;
+    pub fn guest_names(&self) -> impl Iterator<Item = &str>;
+}
+```
+
+This is the mechanism for command sequencing:
+
+1. one command creates a resource and inserts it under a stable key,
+2. later commands fetch it through a typed accessor,
+3. the registry remains typed throughout, and
+4. any reflection or generic listing surface is produced from explicit metadata views rather
+   than erased object storage.
 
 ## What A Subsystem Must Provide
 
@@ -121,9 +148,10 @@ crate or a thin integration module:
 | Capability | Required | Purpose |
 |------------|----------|---------|
 | Typed clap command structs | Yes | Reuse the same command schema for REPL and other frontends. |
-| `TypedCommand<C>` implementations | Yes | Define execution logic and optional dynamic completion. |
-| A registration module or function | Yes | Add all subsystem commands to the command engine. |
-| Cargo feature gate for the registration surface | Yes for optional subsystems | Allows the root binary to compile and include the subsystem selectively. |
+| Typed subsystem command enum | Yes | Group related commands into a compile-time command family such as `VmmCommand`. |
+| `CommandSet<C>` implementation | Yes | Define parsing, execution, and optional dynamic completion for the command family. |
+| App-level command composition | Yes at the binary root | Compose enabled subsystem enums into one aggregate command set. |
+| Cargo feature gate for the command family | Yes for optional subsystems | Allows the root binary to compile and include the subsystem selectively. |
 | Named managed-resource adapters | Yes for live resources | Tell the engine whether a resource is `Owned`, `Imported`, or `Ephemeral`, and whether it is local or remote. |
 | Cleanup semantics | Yes for live resources | Define what engine `close()` and `detach()` mean truthfully. |
 | Import / rehydrate support | Optional, scenario-dependent | Required only if the subsystem supports attaching to already-running resources. |
@@ -146,7 +174,7 @@ The raw `motlie_vmm` crate should continue to own:
 
 The REPL integration layer should own:
 
-1. command registration under paths such as `vmm boot`, `vmm exec`, `vmm shutdown`
+1. command-family composition under paths such as `vmm boot`, `vmm exec`, `vmm shutdown`
 2. registry naming such as `alice`, `demo`, or `ci-runner`
 3. `ResourceMode` and `ResourceLocality`
 4. completion from the named registry
@@ -177,72 +205,33 @@ The REPL integration layer should own:
 The integration layer is expected to look roughly like this:
 
 ```rust
-pub struct VmmModule;
-
-impl CommandModule<AppContext> for VmmModule {
-    fn register(self, engine: &mut CommandEngine<AppContext>) {
-        engine.add_typed::<BootGuest>();
-        engine.add_typed::<ExecGuest>();
-        engine.add_typed::<OpenGuestPty>();
-        engine.add_typed::<ShutdownGuest>();
-    }
-}
-```
-
-And one command implementation should look like this:
-
-```rust
-#[derive(clap::Parser)]
-pub struct OpenGuestPty {
-    #[arg(value_name = "NAME")]
-    pub guest: String,
+pub enum VmmCommand {
+    Boot(BootGuest),
+    Exec(ExecGuest),
+    OpenGuestPty(OpenGuestPty),
+    Shutdown(ShutdownGuest),
 }
 
 #[async_trait::async_trait]
-impl TypedCommand<AppContext> for OpenGuestPty {
-    const PATH: &'static [&'static str] = &["vmm", "pty-open"];
+impl CommandSet<AppContext> for VmmCommand {
+    fn root_command() -> clap::Command {
+        clap::Command::new("vmm")
+            .subcommand(BootGuest::command().name("boot"))
+            .subcommand(ExecGuest::command().name("exec"))
+            .subcommand(OpenGuestPty::command().name("pty-open"))
+            .subcommand(ShutdownGuest::command().name("shutdown"))
+    }
 
-    fn complete(
-        request: CompletionRequest<'_>,
-        ctx: &AppContext,
-    ) -> Vec<CompletionCandidate> {
-        if request.arg_id != Some("guest") {
-            return Vec::new();
-        }
+    fn from_matches(matches: &clap::ArgMatches) -> anyhow::Result<Self> {
+        # todo!()
+    }
 
-        ctx.vmm
-            .guests
-            .keys()
-            .filter(|name| name.starts_with(request.prefix))
-            .map(|name| CompletionCandidate {
-                value: name.clone(),
-                help: Some("registered VM".into()),
-            })
-            .collect()
+    fn complete(request: CompletionRequest<'_>, ctx: &AppContext) -> Vec<CompletionCandidate> {
+        # todo!()
     }
 
     async fn execute(self, ctx: &mut AppContext) -> anyhow::Result<CommandOutput> {
-        let pty = ctx
-            .vmm
-            .guests
-            .get_mut(&self.guest)
-            .ok_or_else(|| anyhow::anyhow!("unknown guest {}", self.guest))?
-            .value
-            .open_pty(Default::default())
-            .await?;
-
-        ctx.vmm.ptys.insert(
-            format!("{}:pty", self.guest),
-            ManagedResource {
-                mode: ResourceMode::Ephemeral,
-                locality: ResourceLocality::InProcess,
-                value: pty,
-            },
-        );
-
-        Ok(CommandOutput {
-            lines: vec![format!("opened pty for {}", self.guest)],
-        })
+        # todo!()
     }
 }
 ```
@@ -256,7 +245,7 @@ for each row below:
 |----------|-----------------|
 | How are VMs named in the engine registry? | A stable alias chosen at boot/import time. |
 | How does `vmm exec <name>` resolve the target VM? | Through the engine registry, not ad hoc global lookup. |
-| How are guest names completed? | From the engine registry through `TypedCommand::complete`. |
+| How are guest names completed? | From the engine registry through `CommandSet::complete`. |
 | What does engine `close()` do for an owned VM? | Call `VmHandle::shutdown().await`. |
 | What does engine `close()` do for an imported VM? | Detach registry state only unless the user explicitly requested destructive cleanup. |
 | What invalidates named PTYs? | PTY close, VM restart, guest shutdown, or control-plane disconnect. |
