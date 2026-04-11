@@ -3121,10 +3121,13 @@ dependencies = [
  "async-trait",
  "clap",
  "crossterm 0.29.0",
+ "motlie-tmux",
  "ratatui",
  "reedline",
+ "regex",
  "shlex",
  "thiserror 1.0.69",
+ "tokio",
  "vt100",
 ]
 
