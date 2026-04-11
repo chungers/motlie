@@ -9,7 +9,6 @@ use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
-use llama_cpp_2::token::LlamaToken;
 use motlie_model::{
     BundleHandle, BundleId, BundleMetadata, Capabilities, CapabilityKind, ChatModel, ChatRequest,
     ChatResponse, ChatRole, CompletionModel, CompletionRequest, CompletionResponse, EmbeddingModel,
@@ -63,11 +62,12 @@ impl LlamaCppTextSpec {
             model_prefix: "Qwen3-4B",
             arch: LlamaCppTextArch::Qwen3,
             capabilities: Capabilities::chat_and_completion(),
+            // Invariant: Four is in [Four, Eight]. Matches mistral backend pattern.
             quantization: QuantizationSupport::with_recommended(
                 [QuantizationBits::Four, QuantizationBits::Eight],
                 QuantizationBits::Four,
             )
-            .expect("curated quantization support is valid"),
+            .expect("curated quantization: Four is in [Four, Eight]"),
             default_context_length: 4096,
         }
     }
@@ -79,11 +79,12 @@ impl LlamaCppTextSpec {
             model_prefix: "gemma-4-E2B-it",
             arch: LlamaCppTextArch::Gemma4,
             capabilities: Capabilities::chat_and_completion(),
+            // Invariant: Four is in [Four, Eight]. Matches mistral backend pattern.
             quantization: QuantizationSupport::with_recommended(
                 [QuantizationBits::Four, QuantizationBits::Eight],
                 QuantizationBits::Four,
             )
-            .expect("curated quantization support is valid"),
+            .expect("curated quantization: Four is in [Four, Eight]"),
             default_context_length: 4096,
         }
     }
@@ -130,7 +131,7 @@ impl ModelBundle for LlamaCppTextBundle {
             .quantization
             .resolve(options.quantization, &self.metadata.id)?;
 
-        let model = build_llama_model(&self.spec, resolved_quantization, options)?;
+        let built = build_llama_model(&self.spec, resolved_quantization, options)?;
         let metrics = Arc::new(Mutex::new(TextMetrics::default()));
         {
             let mut metrics = lock_metrics(&metrics, "llama-cpp-text-start");
@@ -146,7 +147,8 @@ impl ModelBundle for LlamaCppTextBundle {
                 resolved_quantization,
             },
             runtime: Box::new(LlamaCppRuntime {
-                model,
+                backend: built.backend,
+                model: built.model,
                 arch: self.spec.arch,
                 context_length: self.spec.default_context_length,
                 metrics: Arc::clone(&metrics),
@@ -167,21 +169,25 @@ trait TextRuntime: Send + Sync {
 }
 
 struct LlamaCppRuntime {
+    backend: Arc<LlamaBackend>,
     model: Arc<LlamaModel>,
     arch: LlamaCppTextArch,
     context_length: u32,
     metrics: Arc<Mutex<TextMetrics>>,
 }
 
-// SAFETY: LlamaModel is thread-safe for read operations after construction.
-// The llama_cpp_2 crate documents that model weights are immutable once loaded.
+// SAFETY: The only non-Send/Sync field is `model: Arc<LlamaModel>` and
+// `backend: Arc<LlamaBackend>`. LlamaModel weights are immutable after
+// load_from_file(). All mutable state (LlamaContext, LlamaBatch,
+// LlamaSampler) is created per-request inside spawn_blocking and never
+// escapes the closure.
 unsafe impl Send for LlamaCppRuntime {}
 unsafe impl Sync for LlamaCppRuntime {}
 
 #[async_trait]
 impl TextRuntime for LlamaCppRuntime {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
-        let prompt = format_chat_prompt(self.arch, &request);
+        let prompt = format_chat_prompt(self.arch, &request)?;
         self.generate_text(&prompt, &request.params).await
     }
 
@@ -201,6 +207,7 @@ impl LlamaCppRuntime {
         prompt: &str,
         params: &GenerationParams,
     ) -> Result<ChatResponse, ModelError> {
+        let backend = Arc::clone(&self.backend);
         let model = Arc::clone(&self.model);
         let prompt = prompt.to_owned();
         let max_tokens: u32 = params.max_tokens.unwrap_or(512);
@@ -218,12 +225,7 @@ impl LlamaCppRuntime {
                 .with_n_ctx(std::num::NonZeroU32::new(context_length));
 
             let mut ctx = model
-                .new_context(&LlamaBackend::init().map_err(|e| {
-                    ModelError::BackendInitialization {
-                        backend: "llama-cpp",
-                        message: e.to_string(),
-                    }
-                })?, ctx_params)
+                .new_context(&backend, ctx_params)
                 .map_err(|e| ModelError::BackendExecution {
                     backend: "llama-cpp",
                     operation: "new_context",
@@ -238,12 +240,20 @@ impl LlamaCppRuntime {
                     message: e.to_string(),
                 })?;
 
+            if tokens.is_empty() {
+                return Err(ModelError::BackendExecution {
+                    backend: "llama-cpp",
+                    operation: "tokenize",
+                    message: "prompt tokenized to zero tokens".into(),
+                });
+            }
+
             let prompt_token_count = tokens.len() as u32;
 
             let mut batch = LlamaBatch::new(context_length as usize, 1);
+            let last_idx = tokens.len() - 1;
             for (i, token) in tokens.iter().enumerate() {
-                let is_last = i == tokens.len() - 1;
-                batch.add(*token, i as i32, &[0], is_last).map_err(|e| {
+                batch.add(*token, i as i32, &[0], i == last_idx).map_err(|e| {
                     ModelError::BackendExecution {
                         backend: "llama-cpp",
                         operation: "batch_add",
@@ -258,20 +268,23 @@ impl LlamaCppRuntime {
                 message: e.to_string(),
             })?;
 
+            // Use process-id-derived seed so temperature produces varied output
+            // across requests while remaining reproducible within a process lifetime.
+            let seed = std::process::id();
             let mut sampler = if let Some(top_p) = top_p {
                 LlamaSampler::chain_simple([
                     LlamaSampler::top_p(top_p, 1),
                     LlamaSampler::temp(temperature),
-                    LlamaSampler::dist(42),
+                    LlamaSampler::dist(seed),
                 ])
             } else {
                 LlamaSampler::chain_simple([
                     LlamaSampler::temp(temperature),
-                    LlamaSampler::dist(42),
+                    LlamaSampler::dist(seed),
                 ])
             };
 
-            let mut output_tokens: Vec<LlamaToken> = Vec::new();
+            let mut generated_token_count: u32 = 0;
             let mut generated_text = String::new();
             let mut n_cur = tokens.len() as i32;
             let mut decoder = encoding_rs::UTF_8.new_decoder();
@@ -292,8 +305,10 @@ impl LlamaCppRuntime {
                     }
                 })?;
 
-                // Check stop sequences.
                 generated_text.push_str(&piece);
+                generated_token_count += 1;
+
+                // Check stop sequences on the tail of generated text.
                 let should_stop = stop_sequences.iter().any(|seq| generated_text.ends_with(seq));
                 if should_stop {
                     for seq in &stop_sequences {
@@ -305,7 +320,6 @@ impl LlamaCppRuntime {
                     break;
                 }
 
-                output_tokens.push(token);
                 batch.clear();
                 batch.add(token, n_cur, &[0], true).map_err(|e| {
                     ModelError::BackendExecution {
@@ -324,7 +338,6 @@ impl LlamaCppRuntime {
             }
 
             let elapsed = started_at.elapsed();
-            let generated_token_count = output_tokens.len() as u32;
 
             {
                 let mut m = lock_metrics(&metrics, "llama-cpp-text-generate");
@@ -351,14 +364,34 @@ impl LlamaCppRuntime {
 }
 
 /// Format a chat request into the model's expected prompt template.
-fn format_chat_prompt(arch: LlamaCppTextArch, request: &ChatRequest) -> String {
+///
+/// Returns an error if any message contains non-text content parts (images).
+/// llama.cpp text-only backends do not support multimodal input.
+fn format_chat_prompt(
+    arch: LlamaCppTextArch,
+    request: &ChatRequest,
+) -> Result<String, ModelError> {
     match arch {
         LlamaCppTextArch::Qwen3 => format_qwen3_prompt(&request.messages),
         LlamaCppTextArch::Gemma4 => format_gemma4_prompt(&request.messages),
     }
 }
 
-fn format_qwen3_prompt(messages: &[motlie_model::ChatMessage]) -> String {
+fn collect_text(message: &motlie_model::ChatMessage) -> Result<String, ModelError> {
+    let mut text = String::new();
+    for part in &message.content {
+        match part {
+            motlie_model::ContentPart::Text(t) => text.push_str(t),
+            motlie_model::ContentPart::Image { .. }
+            | motlie_model::ContentPart::ImageUrl { .. } => {
+                return Err(ModelError::UnsupportedCapability(CapabilityKind::Vision));
+            }
+        }
+    }
+    Ok(text)
+}
+
+fn format_qwen3_prompt(messages: &[motlie_model::ChatMessage]) -> Result<String, ModelError> {
     let mut prompt = String::new();
     for msg in messages {
         let role = match msg.role {
@@ -367,18 +400,14 @@ fn format_qwen3_prompt(messages: &[motlie_model::ChatMessage]) -> String {
             ChatRole::Assistant => "assistant",
         };
         prompt.push_str(&format!("<|im_start|>{role}\n"));
-        for part in &msg.content {
-            if let motlie_model::ContentPart::Text(text) = part {
-                prompt.push_str(text);
-            }
-        }
+        prompt.push_str(&collect_text(msg)?);
         prompt.push_str("<|im_end|>\n");
     }
     prompt.push_str("<|im_start|>assistant\n");
-    prompt
+    Ok(prompt)
 }
 
-fn format_gemma4_prompt(messages: &[motlie_model::ChatMessage]) -> String {
+fn format_gemma4_prompt(messages: &[motlie_model::ChatMessage]) -> Result<String, ModelError> {
     let mut prompt = String::new();
     for msg in messages {
         let role = match msg.role {
@@ -387,15 +416,11 @@ fn format_gemma4_prompt(messages: &[motlie_model::ChatMessage]) -> String {
             ChatRole::Assistant => "model",
         };
         prompt.push_str(&format!("<start_of_turn>{role}\n"));
-        for part in &msg.content {
-            if let motlie_model::ContentPart::Text(text) = part {
-                prompt.push_str(text);
-            }
-        }
+        prompt.push_str(&collect_text(msg)?);
         prompt.push_str("<end_of_turn>\n");
     }
     prompt.push_str("<start_of_turn>model\n");
-    prompt
+    Ok(prompt)
 }
 
 // ---------------------------------------------------------------------------
@@ -466,11 +491,16 @@ impl CompletionModel for LlamaCppTextHandle {
 // Builder
 // ---------------------------------------------------------------------------
 
+struct BuiltModel {
+    backend: Arc<LlamaBackend>,
+    model: Arc<LlamaModel>,
+}
+
 fn build_llama_model(
     spec: &LlamaCppTextSpec,
     resolved_quantization: Option<QuantizationBits>,
     options: StartOptions,
-) -> Result<Arc<LlamaModel>, ModelError> {
+) -> Result<BuiltModel, ModelError> {
     let StartOptions {
         artifact_policy,
         quantization: _, // already resolved by caller
@@ -509,7 +539,10 @@ fn build_llama_model(
         }
     })?;
 
-    Ok(Arc::new(model))
+    Ok(BuiltModel {
+        backend: Arc::new(backend),
+        model: Arc::new(model),
+    })
 }
 
 #[cfg(test)]
@@ -588,7 +621,7 @@ mod tests {
             ChatMessage::new(ChatRole::System, "Be concise."),
             ChatMessage::new(ChatRole::User, "Hello"),
         ];
-        let prompt = format_qwen3_prompt(&messages);
+        let prompt = format_qwen3_prompt(&messages).expect("text-only messages should format");
 
         assert!(prompt.contains("<|im_start|>system\nBe concise.<|im_end|>"));
         assert!(prompt.contains("<|im_start|>user\nHello<|im_end|>"));
@@ -601,7 +634,7 @@ mod tests {
             ChatMessage::new(ChatRole::System, "Be concise."),
             ChatMessage::new(ChatRole::User, "Hello"),
         ];
-        let prompt = format_gemma4_prompt(&messages);
+        let prompt = format_gemma4_prompt(&messages).expect("text-only messages should format");
 
         assert!(prompt.contains("<start_of_turn>system\nBe concise.<end_of_turn>"));
         assert!(prompt.contains("<start_of_turn>user\nHello<end_of_turn>"));
@@ -682,30 +715,17 @@ mod tests {
         ));
     }
 
-    fn collect_text_only_message(
-        message: &motlie_model::ChatMessage,
-    ) -> Result<String, ModelError> {
-        let mut text = String::new();
-        for part in &message.content {
-            match part {
-                motlie_model::ContentPart::Text(part) => text.push_str(part),
-                motlie_model::ContentPart::Image { .. }
-                | motlie_model::ContentPart::ImageUrl { .. } => {
-                    return Err(ModelError::UnsupportedCapability(CapabilityKind::Vision));
-                }
-            }
-        }
-        Ok(text)
-    }
-
     #[test]
-    fn image_content_parts_are_rejected() {
-        let message = motlie_model::ChatMessage::with_parts(
-            ChatRole::User,
-            vec![motlie_model::ContentPart::image(vec![1, 2, 3], "image/png")],
-        );
+    fn image_content_parts_are_rejected_by_chat_template() {
+        let request = ChatRequest {
+            messages: vec![motlie_model::ChatMessage::with_parts(
+                ChatRole::User,
+                vec![motlie_model::ContentPart::image(vec![1, 2, 3], "image/png")],
+            )],
+            ..Default::default()
+        };
 
-        let error = collect_text_only_message(&message)
+        let error = format_chat_prompt(LlamaCppTextArch::Qwen3, &request)
             .expect_err("images should be rejected for text-only runtime");
         assert!(matches!(
             error,

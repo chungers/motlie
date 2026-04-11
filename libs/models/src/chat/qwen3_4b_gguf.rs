@@ -126,7 +126,6 @@ fn resolve_local_gguf_root(root: &Path) -> Result<PathBuf, ModelError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Catalog;
     use motlie_model::CapabilityDescriptor;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -169,25 +168,26 @@ mod tests {
     }
 
     #[test]
-    fn local_gguf_resolution_rejects_missing_directory() {
+    fn local_gguf_resolution_rejects_missing_cache() {
         let root = unique_temp_dir();
 
         let error =
-            resolve_local_gguf_root(&root).expect_err("missing directory should fail closed");
+            resolve_local_gguf_root(&root).expect_err("missing cache should fail closed");
 
         assert!(matches!(
             error,
-            ModelError::InvalidConfiguration(message) if message.contains("does not exist")
+            ModelError::InvalidConfiguration(message) if message.contains("refs/main")
         ));
     }
 
     #[test]
-    fn local_gguf_resolution_rejects_empty_directory() {
+    fn local_gguf_resolution_rejects_cache_without_gguf_files() {
         let root = unique_temp_dir();
-        std::fs::create_dir_all(&root).expect("temp root should be creatable");
+        let snapshot = create_fake_hf_gguf_cache(&root, "Qwen/Qwen3-4B-GGUF");
+        // snapshot exists but has no .gguf files
 
         let error = resolve_local_gguf_root(&root)
-            .expect_err("empty directory with no .gguf should fail");
+            .expect_err("cache without .gguf should fail");
 
         assert!(matches!(
             error,
@@ -198,16 +198,16 @@ mod tests {
     }
 
     #[test]
-    fn local_gguf_resolution_accepts_directory_with_gguf_file() {
+    fn local_gguf_resolution_accepts_cache_with_gguf_file() {
         let root = unique_temp_dir();
-        std::fs::create_dir_all(&root).expect("temp root should be creatable");
-        std::fs::write(root.join("qwen3-4b-Q4_K_M.gguf"), "stub")
+        let snapshot = create_fake_hf_gguf_cache(&root, "Qwen/Qwen3-4B-GGUF");
+        std::fs::write(snapshot.join("Qwen3-4B-Q4_K_M.gguf"), "stub")
             .expect("gguf stub should be writable");
 
         let resolved =
-            resolve_local_gguf_root(&root).expect("directory with .gguf should resolve");
+            resolve_local_gguf_root(&root).expect("cache with .gguf should resolve");
 
-        assert_eq!(resolved, root);
+        assert_eq!(resolved, snapshot);
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -217,5 +217,19 @@ mod tests {
             .expect("clock should be monotonic enough")
             .as_nanos();
         std::env::temp_dir().join(format!("motlie-models-qwen3-gguf-test-{unique}"))
+    }
+
+    fn create_fake_hf_gguf_cache(root: &Path, model_id: &str) -> PathBuf {
+        let repo_folder = format!("models--{}", model_id.replace('/', "--"));
+        let repo_root = root.join(repo_folder);
+        let refs_dir = repo_root.join("refs");
+        let commit = "test-commit";
+        let snapshot = repo_root.join("snapshots").join(commit);
+
+        std::fs::create_dir_all(&snapshot).expect("snapshot dir should be creatable");
+        std::fs::create_dir_all(&refs_dir).expect("refs dir should be creatable");
+        std::fs::write(refs_dir.join("main"), commit).expect("ref file should be writable");
+
+        snapshot
     }
 }
