@@ -60,7 +60,7 @@ impl LlamaCppTextSpec {
         Self {
             id: BundleId::new("qwen3_4b_gguf"),
             display_name: "Qwen3 4B (GGUF)",
-            model_prefix: "qwen3-4b",
+            model_prefix: "Qwen3-4B",
             arch: LlamaCppTextArch::Qwen3,
             capabilities: Capabilities::chat_and_completion(),
             quantization: QuantizationSupport::with_recommended(
@@ -76,7 +76,7 @@ impl LlamaCppTextSpec {
         Self {
             id: BundleId::new("gemma4_e2b_gguf"),
             display_name: "Gemma 4 E2B-it (GGUF)",
-            model_prefix: "gemma-4-e2b-it",
+            model_prefix: "gemma-4-E2B-it",
             arch: LlamaCppTextArch::Gemma4,
             capabilities: Capabilities::chat_and_completion(),
             quantization: QuantizationSupport::with_recommended(

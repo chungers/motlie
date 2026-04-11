@@ -87,7 +87,7 @@ impl ModelBundle for Gemma4E2B_Gguf {
 ///
 /// Note: unlike the Qwen3-4B GGUF which is published by the model vendor,
 /// the Gemma 4 GGUF is a community quantization. The curated artifact rules
-/// target the bartowski quantization repository on Hugging Face.
+/// target the unsloth quantization repository on Hugging Face.
 pub fn descriptor() -> BundleDescriptor {
     BundleDescriptor {
         id: BundleId::new("gemma4_e2b_gguf"),
@@ -108,7 +108,7 @@ pub fn descriptor() -> BundleDescriptor {
         artifacts: Some(BundleArtifacts {
             control_name: "gemma4_e2b_gguf",
             source: ArtifactSource::HuggingFace {
-                repo: "bartowski/gemma-4-E2B-it-GGUF",
+                repo: "unsloth/gemma-4-E2B-it-GGUF",
             },
             include: vec![
                 ArtifactRule::Suffix("-Q4_K_M.gguf"),
@@ -124,36 +124,7 @@ pub fn bundle() -> Box<dyn ModelBundle> {
 }
 
 fn resolve_local_gguf_root(root: &Path) -> Result<PathBuf, ModelError> {
-    if !root.exists() {
-        return Err(ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` root `{}` does not exist",
-            root.display()
-        )));
-    }
-    let has_gguf = std::fs::read_dir(root)
-        .map_err(|e| {
-            ModelError::InvalidConfiguration(format!(
-                "failed to inspect GGUF artifacts in `{}`: {e}",
-                root.display()
-            ))
-        })?
-        .filter_map(Result::ok)
-        .any(|entry| {
-            entry
-                .file_name()
-                .to_str()
-                .map(|name| name.ends_with(".gguf"))
-                .unwrap_or(false)
-        });
-
-    if !has_gguf {
-        return Err(ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` requires at least one .gguf file for Gemma4 E2B under `{}`",
-            root.display()
-        )));
-    }
-
-    Ok(root.to_path_buf())
+    crate::resolve_hf_gguf_snapshot("unsloth/gemma-4-E2B-it-GGUF", root)
 }
 
 #[cfg(test)]
