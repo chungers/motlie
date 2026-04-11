@@ -6,9 +6,11 @@ use std::collections::BTreeMap;
 use std::error::Error as StdError;
 #[cfg(any(
     feature = "model-qwen3-4b",
+    feature = "model-qwen3-4b-gguf",
     feature = "model-google-gemma-300m",
     feature = "model-qwen3-embedding-06b",
-    feature = "model-gemma4-e2b"
+    feature = "model-gemma4-e2b",
+    feature = "model-gemma4-e2b-gguf",
 ))]
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -338,7 +340,12 @@ impl BundleDescriptor {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ModelSelector {
-    #[cfg(any(feature = "model-qwen3-4b", feature = "model-gemma4-e2b"))]
+    #[cfg(any(
+        feature = "model-qwen3-4b",
+        feature = "model-qwen3-4b-gguf",
+        feature = "model-gemma4-e2b",
+        feature = "model-gemma4-e2b-gguf",
+    ))]
     Chat(ChatModels),
     #[cfg(any(
         feature = "model-google-gemma-300m",
@@ -349,14 +356,21 @@ pub enum ModelSelector {
 
 #[cfg(any(
     feature = "model-qwen3-4b",
+    feature = "model-qwen3-4b-gguf",
     feature = "model-google-gemma-300m",
     feature = "model-qwen3-embedding-06b",
-    feature = "model-gemma4-e2b"
+    feature = "model-gemma4-e2b",
+    feature = "model-gemma4-e2b-gguf",
 ))]
 impl ModelSelector {
     pub fn as_str(&self) -> String {
         match self {
-            #[cfg(any(feature = "model-qwen3-4b", feature = "model-gemma4-e2b"))]
+            #[cfg(any(
+                feature = "model-qwen3-4b",
+                feature = "model-qwen3-4b-gguf",
+                feature = "model-gemma4-e2b",
+                feature = "model-gemma4-e2b-gguf",
+            ))]
             Self::Chat(model) => format!("chat:{}", model.as_str()),
             #[cfg(any(
                 feature = "model-google-gemma-300m",
@@ -368,7 +382,12 @@ impl ModelSelector {
 
     pub fn bundle_id(&self) -> BundleId {
         match self {
-            #[cfg(any(feature = "model-qwen3-4b", feature = "model-gemma4-e2b"))]
+            #[cfg(any(
+                feature = "model-qwen3-4b",
+                feature = "model-qwen3-4b-gguf",
+                feature = "model-gemma4-e2b",
+                feature = "model-gemma4-e2b-gguf",
+            ))]
             Self::Chat(model) => model.bundle_id(),
             #[cfg(any(
                 feature = "model-google-gemma-300m",
@@ -380,7 +399,12 @@ impl ModelSelector {
 
     pub fn descriptor(&self) -> BundleDescriptor {
         match self {
-            #[cfg(any(feature = "model-qwen3-4b", feature = "model-gemma4-e2b"))]
+            #[cfg(any(
+                feature = "model-qwen3-4b",
+                feature = "model-qwen3-4b-gguf",
+                feature = "model-gemma4-e2b",
+                feature = "model-gemma4-e2b-gguf",
+            ))]
             Self::Chat(model) => model.descriptor(),
             #[cfg(any(
                 feature = "model-google-gemma-300m",
@@ -392,7 +416,12 @@ impl ModelSelector {
 
     pub fn bundle(&self) -> Box<dyn ModelBundle> {
         match self {
-            #[cfg(any(feature = "model-qwen3-4b", feature = "model-gemma4-e2b"))]
+            #[cfg(any(
+                feature = "model-qwen3-4b",
+                feature = "model-qwen3-4b-gguf",
+                feature = "model-gemma4-e2b",
+                feature = "model-gemma4-e2b-gguf",
+            ))]
             Self::Chat(model) => model.bundle(),
             #[cfg(any(
                 feature = "model-google-gemma-300m",
@@ -405,9 +434,11 @@ impl ModelSelector {
 
 #[cfg(any(
     feature = "model-qwen3-4b",
+    feature = "model-qwen3-4b-gguf",
     feature = "model-google-gemma-300m",
     feature = "model-qwen3-embedding-06b",
-    feature = "model-gemma4-e2b"
+    feature = "model-gemma4-e2b",
+    feature = "model-gemma4-e2b-gguf",
 ))]
 impl fmt::Display for ModelSelector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -426,15 +457,37 @@ impl FromStr for ModelSelector {
                     selector: value.to_owned(),
                 });
             }
+            #[cfg(not(feature = "model-gemma4-e2b-gguf"))]
+            if raw == chat::GEMMA4_E2B_GGUF_SELECTOR {
+                return Err(ModelsError::ModelUnavailable {
+                    selector: value.to_owned(),
+                });
+            }
             #[cfg(not(feature = "model-qwen3-4b"))]
             if raw == chat::QWEN3_4B_SELECTOR {
                 return Err(ModelsError::ModelUnavailable {
                     selector: value.to_owned(),
                 });
             }
-            #[cfg(any(feature = "model-qwen3-4b", feature = "model-gemma4-e2b"))]
+            #[cfg(not(feature = "model-qwen3-4b-gguf"))]
+            if raw == chat::QWEN3_4B_GGUF_SELECTOR {
+                return Err(ModelsError::ModelUnavailable {
+                    selector: value.to_owned(),
+                });
+            }
+            #[cfg(any(
+                feature = "model-qwen3-4b",
+                feature = "model-qwen3-4b-gguf",
+                feature = "model-gemma4-e2b",
+                feature = "model-gemma4-e2b-gguf",
+            ))]
             return Ok(Self::Chat(raw.parse()?));
-            #[cfg(not(any(feature = "model-qwen3-4b", feature = "model-gemma4-e2b")))]
+            #[cfg(not(any(
+                feature = "model-qwen3-4b",
+                feature = "model-qwen3-4b-gguf",
+                feature = "model-gemma4-e2b",
+                feature = "model-gemma4-e2b-gguf",
+            )))]
             return Err(ModelsError::UnknownModelSelector {
                 selector: value.to_owned(),
             });
@@ -518,6 +571,14 @@ impl Catalog {
         #[cfg(feature = "model-gemma4-e2b")]
         catalog.register(chat::gemma4_e2b::descriptor(), || {
             chat::gemma4_e2b::bundle()
+        });
+        #[cfg(feature = "model-qwen3-4b-gguf")]
+        catalog.register(chat::qwen3_4b_gguf::descriptor(), || {
+            chat::qwen3_4b_gguf::bundle()
+        });
+        #[cfg(feature = "model-gemma4-e2b-gguf")]
+        catalog.register(chat::gemma4_e2b_gguf::descriptor(), || {
+            chat::gemma4_e2b_gguf::bundle()
         });
         catalog
     }
