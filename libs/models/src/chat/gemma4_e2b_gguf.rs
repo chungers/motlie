@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use motlie_model::eval::EvalTrack;
-use motlie_model::{BundleId, ModelBundle, ModelError, StartOptions};
+use motlie_model::{BundleId, CheckpointFormat, ModelBundle, ModelError, StartOptions};
 use motlie_model_llama_cpp::{LlamaCppTextBundle, LlamaCppTextSpec};
 
 use crate::{
@@ -91,6 +91,7 @@ impl ModelBundle for Gemma4E2B_Gguf {
 pub fn descriptor() -> BundleDescriptor {
     BundleDescriptor {
         id: BundleId::new("gemma4_e2b_gguf"),
+        model_id: BundleId::new("gemma4_e2b"),
         display_name: "Gemma 4 E2B-it (GGUF/llama.cpp)".into(),
         family: BundleFamily::Gemma,
         capabilities: motlie_model::Capabilities::chat_and_completion(),
@@ -107,6 +108,7 @@ pub fn descriptor() -> BundleDescriptor {
         ],
         artifacts: Some(BundleArtifacts {
             control_name: "gemma4_e2b_gguf",
+            format: CheckpointFormat::Gguf,
             source: ArtifactSource::HuggingFace {
                 repo: "unsloth/gemma-4-E2B-it-GGUF",
             },
