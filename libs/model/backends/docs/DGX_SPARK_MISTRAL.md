@@ -9,7 +9,7 @@
 | 2026-04-11 | @cld-mistral | Added Gemma 4 E2B-it CUDA + flash-attn results (56 tok/s, 5.6x faster than CPU). Added full RSS comparison tables for all models and configurations. |
 | 2026-04-11 | @cld-mistral | Documented `candle-flash-attn` NaN bug for Gemma 4 at >500 generated tokens on Blackwell. Isolated to flash-attn kernel (not quantization, not model weights). Revised Gemma 4 recommendation to CUDA + PagedAttention (no flash-attn). |
 | 2026-04-11 | @cld-mistral | Added Part 5: long-context stability testing (~18.8k tokens). PagedAttention crashes on long input (default KV cache too small). Only CUDA+FA (no PA) survives for Qwen3-4B; Gemma 4 has no viable CUDA path for long context. Added prefill/decode tok/s breakdown. |
-| 2026-04-11 | @cld-mistral | Added Part 6: comprehensive input-size sweep (small, 500, 1k, 5k, 14k tokens) using `bench_chat` with warmup + steady-state. Replaces earlier ad-hoc measurements. Gemma 4 CUDA limited to ~500 token context. CPU unacceptable beyond ~500 token input (FTTT >2min). |
+| 2026-04-11 | @cld-mistral | Added Part 6: comprehensive input-size sweep (small, 500, 1k, 5k, 14k tokens) using `bench_chat` with warmup + steady-state. Replaces earlier ad-hoc measurements. Gemma 4 CUDA limited to ~500 token context. CPU unacceptable beyond ~500 token input (TTFT >2min). |
 
 ---
 
@@ -535,14 +535,14 @@ Input fixtures:
 - `medium_context_chat_5k.txt` (~4,956 tokens)
 - `long_context_chat_14k.txt` (~14,809 tokens)
 
-Abort rule: stop testing slower configurations when FTTT exceeds 2 minutes
+Abort rule: stop testing slower configurations when TTFT exceeds 2 minutes
 (unacceptable interactive UX).
 
 ### Qwen3-4B (ISQ Q4) — full sweep
 
 | Input | CUDA+FA | | | CUDA+PA | | | CPU | | |
 |-------|---------|--|--|---------|--|--|-----|--|--|
-| | FTTT | Decode tok/s | Prefill tok/s | FTTT | Decode tok/s | Prefill tok/s | FTTT | Decode tok/s | Prefill tok/s |
+| | TTFT | Decode tok/s | Prefill tok/s | TTFT | Decode tok/s | Prefill tok/s | TTFT | Decode tok/s | Prefill tok/s |
 | small (~10 tok) | **3.4s** | 50 | 542 | 5.6s | 51 | 12 | 16.5s | 12 | 19 |
 | 500 tok | **6.9s** | 44 | 2,085 | 8.8s | 47 | 208 | 50.5s | 12 | 24 |
 | 1k tok | **9.9s** | 39 | 2,198 | 11.5s | 46 | 378 | >2min | — | — |
@@ -553,7 +553,7 @@ Abort rule: stop testing slower configurations when FTTT exceeds 2 minutes
 
 | Input | CUDA+FA | | | CUDA+PA | | | CPU | | |
 |-------|---------|--|--|---------|--|--|-----|--|--|
-| | FTTT | Decode tok/s | Prefill tok/s | FTTT | Decode tok/s | Prefill tok/s | FTTT | Decode tok/s | Prefill tok/s |
+| | TTFT | Decode tok/s | Prefill tok/s | TTFT | Decode tok/s | Prefill tok/s | TTFT | Decode tok/s | Prefill tok/s |
 | small (~10 tok) | **0.2s** | 63 | 719 | 1.7s | 61 | 20 | 14.0s | 10 | 26 |
 | 500 tok | NaN | — | — | **14.4s** | 48 | 306 | 81.4s | 9 | 30 |
 | 1k tok | NaN | — | — | CRASH | — | — | >2min | — | — |
@@ -563,19 +563,19 @@ Abort rule: stop testing slower configurations when FTTT exceeds 2 minutes
 ### Key observations
 
 1. **CUDA+FA is the only config that scales to long context for Qwen3-4B.** It works
-   at all tested sizes (up to 14k tokens) with sub-60s FTTT and stable decode throughput.
+   at all tested sizes (up to 14k tokens) with sub-60s TTFT and stable decode throughput.
 
 2. **CUDA+PA works at short context but fails at 5k+ (Qwen) and 1k+ (Gemma).** The
    default `ContextSize(4096)` KV cache limit is the bottleneck. Decode performance
    when it works (46–51 tok/s) is comparable to CUDA+FA.
 
 3. **CPU is unacceptably slow for any non-trivial input.** Even the default short
-   prompt takes 16.5s on Qwen and 14s on Gemma. At 500 tokens input, CPU FTTT is
+   prompt takes 16.5s on Qwen and 14s on Gemma. At 500 tokens input, CPU TTFT is
    50s (Qwen) and 81s (Gemma). Beyond 500 tokens, CPU exceeds the 2-minute threshold.
 
 4. **Gemma 4 has no viable CUDA config beyond 500 tokens.** Flash-attn NaN blocks
    any input that triggers >~500 generated tokens. PagedAttention crashes at 1k+
-   input tokens. CPU exceeds 2 min FTTT at 1k input. Gemma 4 is currently limited
+   input tokens. CPU exceeds 2 min TTFT at 1k input. Gemma 4 is currently limited
    to short-context CUDA+PA or very short CUDA+FA interactions.
 
 5. **Prefill throughput on CUDA+FA improves with input length** (542 → 2,198 tok/s from
@@ -592,7 +592,7 @@ Abort rule: stop testing slower configurations when FTTT exceeds 2 minutes
 
 ### Per-model configuration for DGX Spark (mistral.rs 0.8.1)
 
-| Model | Best Config | Max Context | FTTT (typical) | Decode tok/s | RSS |
+| Model | Best Config | Max Context | TTFT (typical) | Decode tok/s | RSS |
 |-------|-------------|-------------|----------------|-------------|-----|
 | Qwen3-4B | **`cuda,flash-attn`** | **14k+ tokens** | 3–60s | 9–50 | ~1.3 GiB |
 | Gemma 4 E2B-it | `cuda` + `MOTLIE_PAGED_ATTN=1` | **~500 tokens** | 1.7–14s | 48–61 | ~1.8 GiB |
