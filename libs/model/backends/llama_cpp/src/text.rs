@@ -62,12 +62,7 @@ impl LlamaCppTextSpec {
             model_prefix: "Qwen3-4B",
             arch: LlamaCppTextArch::Qwen3,
             capabilities: Capabilities::chat_and_completion(),
-            // Invariant: Four is in [Four, Eight]. Matches mistral backend pattern.
-            quantization: QuantizationSupport::with_recommended(
-                [QuantizationBits::Four, QuantizationBits::Eight],
-                QuantizationBits::Four,
-            )
-            .expect("curated quantization: Four is in [Four, Eight]"),
+            quantization: curated_q4_q8_support(),
             default_context_length: 4096,
         }
     }
@@ -79,15 +74,23 @@ impl LlamaCppTextSpec {
             model_prefix: "gemma-4-E2B-it",
             arch: LlamaCppTextArch::Gemma4,
             capabilities: Capabilities::chat_and_completion(),
-            // Invariant: Four is in [Four, Eight]. Matches mistral backend pattern.
-            quantization: QuantizationSupport::with_recommended(
-                [QuantizationBits::Four, QuantizationBits::Eight],
-                QuantizationBits::Four,
-            )
-            .expect("curated quantization: Four is in [Four, Eight]"),
+            quantization: curated_q4_q8_support(),
             default_context_length: 4096,
         }
     }
+}
+
+/// Q4 recommended, Q8 supported. Inputs are compile-time constants (Four ∈ [Four, Eight]).
+/// On the unreachable error path, degrades to no-recommended rather than panicking.
+fn curated_q4_q8_support() -> QuantizationSupport {
+    QuantizationSupport::with_recommended(
+        [QuantizationBits::Four, QuantizationBits::Eight],
+        QuantizationBits::Four,
+    )
+    .unwrap_or_else(|e| {
+        tracing::error!("curated quantization construction failed (this is a bug): {e}");
+        QuantizationSupport::without_recommended([QuantizationBits::Four, QuantizationBits::Eight])
+    })
 }
 
 /// Generic `ModelBundle` implementation backed by `llama-cpp-2`.
