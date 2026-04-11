@@ -1,8 +1,10 @@
+#[path = "common/tmux_plain.rs"]
+mod tmux_plain;
 #[path = "common/tmux_ui.rs"]
 mod tmux_ui;
 
+use motlie_driver::CommandEngine;
 use motlie_driver::commands::tmux::{TmuxCommand, TmuxState};
-use motlie_driver::{CommandEffect, CommandEngine, ReplFrontend};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -28,18 +30,5 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let mut repl = ReplFrontend::new(engine)
-        .with_name("tmux")
-        .with_prompt("tmux> ");
-
-    loop {
-        match repl.run().await? {
-            Some(CommandEffect::EnterTui) => match tmux_ui::run(repl.engine_mut()).await? {
-                tmux_ui::TuiAction::Quit => return Ok(()),
-                tmux_ui::TuiAction::ReturnToRepl => continue,
-            },
-            Some(CommandEffect::ExitShell) | None => return Ok(()),
-            Some(CommandEffect::ExitTui) => continue,
-        }
-    }
+    tmux_plain::run(&mut engine).await
 }
