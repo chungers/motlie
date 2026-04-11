@@ -16,6 +16,9 @@ use motlie_tmux::{
 
 use crate::completion::{CompletionCandidate, CompletionRequest};
 use crate::engine::{CommandEffect, CommandOutput, CommandSet};
+use crate::history::{HistoryBuffer, HistoryPage};
+
+const TMUX_HISTORY_CAPACITY: usize = 256;
 
 pub struct TmuxState {
     pub host_uri: String,
@@ -29,6 +32,7 @@ pub struct TmuxState {
     mirror_label: String,
     mirror_ansi: bool,
     mirror_auto_refresh: bool,
+    mirror_history: HistoryBuffer<TmuxHistoryEntry>,
 }
 
 impl TmuxState {
@@ -52,6 +56,7 @@ impl TmuxState {
             mirror_label: String::new(),
             mirror_ansi: false,
             mirror_auto_refresh: false,
+            mirror_history: HistoryBuffer::new(TMUX_HISTORY_CAPACITY),
         }
     }
 
@@ -106,6 +111,7 @@ impl TmuxState {
         } else if self.mirror_auto_refresh {
             if let Some(ref watch) = self.active_watch {
                 self.mirror_text = watch.render_text().await.replace('\r', "");
+                self.record_current_mirror_state();
             }
         }
         Ok(())
@@ -118,6 +124,14 @@ impl TmuxState {
             ansi: self.mirror_ansi,
             watch_health: self.active_watch.as_ref().map(SessionWatchHandle::health),
         }
+    }
+
+    pub fn mirror_history_page(
+        &self,
+        after: Option<u64>,
+        limit: usize,
+    ) -> HistoryPage<TmuxHistoryEntry> {
+        self.mirror_history.page_after(after, limit)
     }
 
     pub async fn shutdown_managed_state(&mut self) -> Result<()> {
@@ -157,6 +171,7 @@ impl TmuxState {
                     if result.text != stream.previous {
                         self.mirror_text = result.text.clone();
                         stream.previous = result.text;
+                        self.record_current_mirror_state();
                     }
                 }
             }
@@ -179,6 +194,7 @@ impl TmuxState {
                     }
                 }
                 trim_mirror_text(&mut self.mirror_text);
+                self.record_current_mirror_state();
             }
             StreamModeArg::Until => {
                 if let Some(pattern) = stream.pattern.as_ref() {
@@ -190,6 +206,7 @@ impl TmuxState {
                         if content != stream.previous {
                             self.mirror_text = content.clone();
                             stream.previous = content;
+                            self.record_current_mirror_state();
                         }
                     }
                 }
@@ -221,6 +238,7 @@ impl TmuxState {
                         }
                         self.mirror_text = text;
                         stream.previous = result.text;
+                        self.record_current_mirror_state();
                     }
                 }
             }
@@ -246,6 +264,7 @@ impl TmuxState {
                     if rendered != stream.previous {
                         self.mirror_text = rendered.clone();
                         stream.previous = rendered;
+                        self.record_current_mirror_state();
                     }
                 }
             }
@@ -254,6 +273,28 @@ impl TmuxState {
 
         self.active_stream = Some(stream);
         Ok(())
+    }
+
+    fn current_mirror_entry(&self) -> TmuxHistoryEntry {
+        TmuxHistoryEntry {
+            text: self.mirror_text.clone(),
+            label: self.mirror_label.clone(),
+            ansi: self.mirror_ansi,
+            watch_health: self.active_watch.as_ref().map(SessionWatchHandle::health),
+        }
+    }
+
+    fn record_current_mirror_state(&mut self) {
+        let entry = self.current_mirror_entry();
+        let should_push = self
+            .mirror_history
+            .latest()
+            .map(|record| record.item != entry)
+            .unwrap_or(true);
+
+        if should_push {
+            let _ = self.mirror_history.push(entry);
+        }
     }
 }
 
@@ -274,6 +315,14 @@ pub struct TmuxCompletionContext {
 
 #[derive(Debug, Clone, Default)]
 pub struct TmuxMirrorSnapshot {
+    pub text: String,
+    pub label: String,
+    pub ansi: bool,
+    pub watch_health: Option<MonitorHealth>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TmuxHistoryEntry {
     pub text: String,
     pub label: String,
     pub ansi: bool,
@@ -742,6 +791,7 @@ async fn execute_capture(context: &mut TmuxState, cmd: CaptureCommand) -> Result
     context.mirror_label = format!("capture: {} (last {})", cmd.target, cmd.lines);
     context.mirror_ansi = false;
     context.mirror_auto_refresh = false;
+    context.record_current_mirror_state();
 
     if text.is_empty() {
         Ok(CommandOutput::line("(empty)"))
@@ -771,6 +821,7 @@ async fn execute_monitor(context: &mut TmuxState, cmd: MonitorCommand) -> Result
         context.mirror_label = format!("watching: {}", cmd.session);
         context.mirror_ansi = false;
         context.mirror_auto_refresh = false;
+        context.record_current_mirror_state();
         if rendered.trim().is_empty() {
             return Ok(CommandOutput::line("(empty)"));
         }
@@ -782,6 +833,7 @@ async fn execute_monitor(context: &mut TmuxState, cmd: MonitorCommand) -> Result
     context.mirror_label = format!("watching: {}", cmd.session);
     context.mirror_ansi = false;
     context.mirror_auto_refresh = true;
+    context.record_current_mirror_state();
     Ok(CommandOutput::line(format!(
         "Watching session: {}",
         cmd.session
@@ -822,6 +874,7 @@ async fn execute_history(context: &mut TmuxState, cmd: HistoryCommand) -> Result
         context.mirror_label = format!("history: {}", cmd.sessions.join(", "));
         context.mirror_ansi = false;
         context.mirror_auto_refresh = false;
+        context.record_current_mirror_state();
         return Ok(CommandOutput::line("(no visible content)"));
     }
 
@@ -829,6 +882,7 @@ async fn execute_history(context: &mut TmuxState, cmd: HistoryCommand) -> Result
     context.mirror_label = format!("history: {}", cmd.sessions.join(", "));
     context.mirror_ansi = false;
     context.mirror_auto_refresh = false;
+    context.record_current_mirror_state();
     Ok(CommandOutput::text(output))
 }
 
@@ -853,6 +907,7 @@ async fn execute_stream(context: &mut TmuxState, cmd: StreamCommand) -> Result<C
         context.mirror_label = format!("stream: {} [{}]", cmd.target, cmd.mode.as_str());
         context.mirror_ansi = false;
         context.mirror_auto_refresh = true;
+        context.record_current_mirror_state();
         return Ok(CommandOutput::line(format!(
             "Streaming {} [mode={}, event-driven]",
             cmd.target,
@@ -877,6 +932,7 @@ async fn execute_stream(context: &mut TmuxState, cmd: StreamCommand) -> Result<C
     context.mirror_label = format!("stream: {} [{}]", cmd.target, cmd.mode.as_str());
     context.mirror_ansi = matches!(cmd.mode, StreamModeArg::Visible);
     context.mirror_auto_refresh = false;
+    context.record_current_mirror_state();
     context.active_stream = Some(ManagedStream {
         target: target.target_string(),
         spec: StreamSpec {
@@ -1104,6 +1160,23 @@ mod tests {
     use super::*;
     use crate::engine::CommandEngine;
 
+    fn test_state() -> TmuxState {
+        TmuxState {
+            host_uri: "ssh://localhost".to_string(),
+            host: HostHandle::local(),
+            owned_sessions: HashSet::new(),
+            known_sessions: Vec::new(),
+            known_targets: Vec::new(),
+            active_watch: None,
+            active_stream: None,
+            mirror_text: String::new(),
+            mirror_label: String::new(),
+            mirror_ansi: false,
+            mirror_auto_refresh: false,
+            mirror_history: HistoryBuffer::new(TMUX_HISTORY_CAPACITY),
+        }
+    }
+
     #[test]
     fn tmux_root_exposes_expected_subcommands() {
         let root = TmuxCommand::root_command();
@@ -1119,23 +1192,13 @@ mod tests {
 
     #[test]
     fn tmux_completion_suggests_targets() {
-        let state = TmuxState {
-            host_uri: "ssh://localhost".to_string(),
-            host: HostHandle::local(),
-            owned_sessions: HashSet::new(),
-            known_sessions: vec!["demo".to_string()],
-            known_targets: vec![
-                "demo".to_string(),
-                "demo:0".to_string(),
-                "demo:0.0".to_string(),
-            ],
-            active_watch: None,
-            active_stream: None,
-            mirror_text: String::new(),
-            mirror_label: String::new(),
-            mirror_ansi: false,
-            mirror_auto_refresh: false,
-        };
+        let mut state = test_state();
+        state.known_sessions = vec!["demo".to_string()];
+        state.known_targets = vec![
+            "demo".to_string(),
+            "demo:0".to_string(),
+            "demo:0.0".to_string(),
+        ];
 
         let engine = CommandEngine::<TmuxState, TmuxCommand>::new(state);
         let completions = engine.complete("kill demo:", "kill demo:".len());
@@ -1150,19 +1213,7 @@ mod tests {
 
     #[test]
     fn tmux_completion_suggests_subcommands() {
-        let state = TmuxState {
-            host_uri: "ssh://localhost".to_string(),
-            host: HostHandle::local(),
-            owned_sessions: HashSet::new(),
-            known_sessions: Vec::new(),
-            known_targets: Vec::new(),
-            active_watch: None,
-            active_stream: None,
-            mirror_text: String::new(),
-            mirror_label: String::new(),
-            mirror_ansi: false,
-            mirror_auto_refresh: false,
-        };
+        let state = test_state();
 
         let engine = CommandEngine::<TmuxState, TmuxCommand>::new(state);
         let completions = engine.complete("cr", 2);
@@ -1176,19 +1227,7 @@ mod tests {
 
     #[tokio::test]
     async fn tmux_help_uses_composed_command_tree() {
-        let state = TmuxState {
-            host_uri: "ssh://localhost".to_string(),
-            host: HostHandle::local(),
-            owned_sessions: HashSet::new(),
-            known_sessions: Vec::new(),
-            known_targets: Vec::new(),
-            active_watch: None,
-            active_stream: None,
-            mirror_text: String::new(),
-            mirror_label: String::new(),
-            mirror_ansi: false,
-            mirror_auto_refresh: false,
-        };
+        let state = test_state();
 
         let mut engine = CommandEngine::<TmuxState, TmuxCommand>::new(state);
         let output = engine.run_line("help create").await.expect("help output");
@@ -1200,19 +1239,7 @@ mod tests {
 
     #[tokio::test]
     async fn tmux_help_uses_rich_stream_topic() {
-        let state = TmuxState {
-            host_uri: "ssh://localhost".to_string(),
-            host: HostHandle::local(),
-            owned_sessions: HashSet::new(),
-            known_sessions: Vec::new(),
-            known_targets: Vec::new(),
-            active_watch: None,
-            active_stream: None,
-            mirror_text: String::new(),
-            mirror_label: String::new(),
-            mirror_ansi: false,
-            mirror_auto_refresh: false,
-        };
+        let state = test_state();
 
         let mut engine = CommandEngine::<TmuxState, TmuxCommand>::new(state);
         let output = engine.run_line("help stream").await.expect("help output");
@@ -1225,19 +1252,7 @@ mod tests {
 
     #[tokio::test]
     async fn tmux_tui_on_returns_frontend_effect() {
-        let state = TmuxState {
-            host_uri: "ssh://localhost".to_string(),
-            host: HostHandle::local(),
-            owned_sessions: HashSet::new(),
-            known_sessions: Vec::new(),
-            known_targets: Vec::new(),
-            active_watch: None,
-            active_stream: None,
-            mirror_text: String::new(),
-            mirror_label: String::new(),
-            mirror_ansi: false,
-            mirror_auto_refresh: false,
-        };
+        let state = test_state();
 
         let mut engine = CommandEngine::<TmuxState, TmuxCommand>::new(state);
         let output = engine.run_line("tui on").await.expect("tui output");

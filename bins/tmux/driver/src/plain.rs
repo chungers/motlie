@@ -12,6 +12,8 @@ use reedline::{
 
 use crate::ui;
 
+const HISTORY_PAGE_SIZE: usize = 32;
+
 pub struct TmuxCompleter {
     context: Arc<Mutex<<TmuxCommand as CommandSet<TmuxState>>::CompletionContext>>,
 }
@@ -99,7 +101,6 @@ pub async fn run(engine: &mut CommandEngine<TmuxState, TmuxCommand>) -> Result<(
                     continue;
                 }
 
-                let plain_monitor = parse_plain_monitor(trimmed);
                 let output = engine.run_line(trimmed).await?;
                 for line in &output.lines {
                     println!("{line}");
@@ -109,7 +110,7 @@ pub async fn run(engine: &mut CommandEngine<TmuxState, TmuxCommand>) -> Result<(
                     *guard = engine.completion_context();
                 }
 
-                if let Some(session_name) = plain_monitor {
+                if let Some(session_name) = parse_plain_monitor(trimmed) {
                     if engine.context().mirror_snapshot().watch_health.is_some() {
                         run_plain_monitor(engine, &session_name, Duration::from_secs(3)).await?;
                         if let Ok(mut guard) = completion_context.lock() {
@@ -150,6 +151,7 @@ async fn run_plain_monitor(
     println!("Monitoring {session_name} for {}s...", duration.as_secs());
     let deadline = tokio::time::Instant::now() + duration;
     let mut previous = String::new();
+    let mut cursor = None;
 
     loop {
         if tokio::time::Instant::now() >= deadline {
@@ -158,8 +160,15 @@ async fn run_plain_monitor(
 
         tokio::time::sleep(Duration::from_millis(150)).await;
         engine.context_mut().refresh_mirror().await?;
+        let page = engine
+            .context()
+            .mirror_history_page(cursor, HISTORY_PAGE_SIZE);
+        for record in page.items {
+            render_incremental(&mut previous, &record.item.text);
+            cursor = Some(record.seq);
+        }
+
         let snapshot = engine.context().mirror_snapshot();
-        render_incremental(&mut previous, &snapshot.text);
 
         if snapshot.watch_health.is_none() {
             break;
