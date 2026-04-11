@@ -15,7 +15,7 @@ use motlie_tmux::{
 };
 
 use crate::completion::{CompletionCandidate, CompletionRequest};
-use crate::engine::{CommandOutput, CommandSet};
+use crate::engine::{CommandEffect, CommandOutput, CommandSet};
 
 pub struct TmuxState {
     pub host_uri: String,
@@ -300,6 +300,7 @@ pub enum TmuxCommand {
     NewWindow(NewWindowCommand),
     SplitPane(SplitPaneCommand),
     Kill(KillCommand),
+    Tui(TuiCommand),
     Targets(TargetsCommand),
     Send(SendCommand),
     Keys(KeysCommand),
@@ -344,6 +345,18 @@ pub struct SplitPaneCommand {
 #[derive(Args)]
 pub struct KillCommand {
     pub target: String,
+}
+
+#[derive(Args)]
+pub struct TuiCommand {
+    #[command(subcommand)]
+    pub action: TuiActionCommand,
+}
+
+#[derive(Subcommand)]
+pub enum TuiActionCommand {
+    On,
+    Off,
 }
 
 #[derive(Args)]
@@ -481,6 +494,18 @@ impl CommandSet<TmuxState> for TmuxCommand {
         }
     }
 
+    fn help(topic: &[String]) -> Option<String> {
+        Some(match topic {
+            [] => tmux_root_help(),
+            [topic] if topic == "stream" => tmux_stream_help(),
+            [topic] if topic == "monitor" => tmux_monitor_help(),
+            [topic] if topic == "capture" => tmux_capture_help(),
+            [topic] if topic == "history" => tmux_history_help(),
+            [topic] if topic == "tui" => tmux_tui_help(),
+            _ => return None,
+        })
+    }
+
     fn complete(
         request: CompletionRequest<'_>,
         context: &Self::CompletionContext,
@@ -527,6 +552,7 @@ impl CommandSet<TmuxState> for TmuxCommand {
             Self::NewWindow(cmd) => execute_new_window(context, cmd).await,
             Self::SplitPane(cmd) => execute_split_pane(context, cmd).await,
             Self::Kill(cmd) => execute_kill(context, cmd).await,
+            Self::Tui(cmd) => execute_tui(cmd),
             Self::Targets(_) => execute_targets(context).await,
             Self::Send(cmd) => execute_send(context, cmd).await,
             Self::Keys(cmd) => execute_keys(context, cmd).await,
@@ -626,6 +652,18 @@ async fn execute_kill(context: &mut TmuxState, cmd: KillCommand) -> Result<Comma
     context.unmark_owned_session(&session_name);
     context.refresh_discovery().await?;
     Ok(CommandOutput::line(format!("Killed: {}", cmd.target)))
+}
+
+fn execute_tui(cmd: TuiCommand) -> Result<CommandOutput> {
+    let output = match cmd.action {
+        TuiActionCommand::On => {
+            CommandOutput::line("Entering TUI mode").with_effect(CommandEffect::EnterTui)
+        }
+        TuiActionCommand::Off => {
+            CommandOutput::line("Leaving TUI mode").with_effect(CommandEffect::ExitTui)
+        }
+    };
+    Ok(output)
 }
 
 async fn execute_targets(context: &mut TmuxState) -> Result<CommandOutput> {
@@ -914,6 +952,153 @@ fn trim_mirror_text(text: &mut String) {
     *text = text[boundary..].to_string();
 }
 
+fn tmux_root_help() -> String {
+    [
+        "tmux driver commands",
+        "",
+        "General:",
+        "  help [command]                        Show help or detailed topic help",
+        "  tui on                               Enter split-screen TUI mode",
+        "  tui off                              Leave split-screen TUI mode",
+        "  quit                                 Exit the shell",
+        "",
+        "Session / target management:",
+        "  create <name> [--size WxH] [--history N]",
+        "  new-window <session> <name> [--size WxH]",
+        "  split-pane <target> [--horizontal|--vertical] [--percent N|--cells N]",
+        "  kill <target>",
+        "  targets",
+        "",
+        "Input / output:",
+        "  send <target> <text...>",
+        "  keys <target> <keys...>",
+        "  capture <target> <n>",
+        "  monitor <session> [seconds]",
+        "  history <session> [session...]",
+        "  stream <target> [--mode MODE] [--lines N] [--interval MS] [--pattern REGEX]",
+        "",
+        "File transfer:",
+        "  upload <local_path> <remote_path> [--recursive]",
+        "  download <remote_path> <local_path> [--recursive]",
+        "",
+        "Targets:",
+        "  session              first pane of first window",
+        "  session:window       first pane of a window",
+        "  session:window.pane  specific pane",
+        "",
+        "Helpful topics:",
+        "  help stream",
+        "  help monitor",
+        "  help capture",
+        "  help history",
+        "  help tui",
+    ]
+    .join("\n")
+}
+
+fn tmux_stream_help() -> String {
+    [
+        "stream <target> [OPTIONS]",
+        "",
+        "Continuously refresh the mirror pane from a target.",
+        "",
+        "Options:",
+        "  --mode MODE       visible | tail | until | fidelity | monitor | render",
+        "  --lines N         scrollback line count for tail/until [default: 50]",
+        "  --interval MS     polling interval for polling modes [default: 200]",
+        "  --pattern REGEX   required for --mode until",
+        "",
+        "Modes:",
+        "  tail      Append new scrollback like tail -f. Best for shells and logs.",
+        "  visible   Re-capture the visible pane. Best for a single TUI pane.",
+        "  until     Re-capture from the last line matching REGEX to the end.",
+        "  fidelity  Plain-text capture with reflow/fidelity annotations.",
+        "  render    Render all panes in the target session with pane headers.",
+        "  monitor   Event-driven session stream using tmux control mode.",
+        "",
+        "Mode guidance:",
+        "  tail / monitor    Best for shell commands and log output.",
+        "  visible / render  Best for TUIs like vim, top, htop.",
+        "  fidelity          Best when you need to see resize/reflow degradation.",
+        "",
+        "Examples:",
+        "  stream demo",
+        "  stream demo --mode visible",
+        "  stream demo --mode render",
+        "  stream demo --mode tail --lines 100 --interval 500",
+        "  stream demo --mode until --pattern '^\\$ '",
+        "  stream demo:0.1 --mode fidelity",
+        "  stream demo --mode monitor",
+    ]
+    .join("\n")
+}
+
+fn tmux_monitor_help() -> String {
+    [
+        "monitor <session> [seconds]",
+        "",
+        "Start event-driven monitoring of a tmux session.",
+        "Output is mirrored in real time using tmux control mode.",
+        "",
+        "Behavior:",
+        "  Only one watch/stream is active at a time.",
+        "  Starting monitor replaces any active stream or watch.",
+        "  Without [seconds], monitoring stays attached until another command replaces it.",
+        "  With [seconds], monitoring runs for that duration and returns a one-shot transcript.",
+        "",
+        "Examples:",
+        "  monitor demo",
+        "  monitor demo 5",
+    ]
+    .join("\n")
+}
+
+fn tmux_capture_help() -> String {
+    [
+        "capture <target> <n>",
+        "",
+        "Capture the last N lines of scrollback from a target.",
+        "This is a one-shot snapshot. Any active watch/stream is stopped first.",
+        "",
+        "Examples:",
+        "  capture demo 50",
+        "  capture demo:0.1 200",
+    ]
+    .join("\n")
+}
+
+fn tmux_history_help() -> String {
+    [
+        "history <session> [session...]",
+        "",
+        "Capture all visible panes from one or more sessions.",
+        "Each pane is rendered with a header like --- session(%pane) ---.",
+        "Empty panes are omitted. Any active watch/stream is stopped first.",
+        "",
+        "Examples:",
+        "  history demo",
+        "  history demo agent-a agent-b",
+    ]
+    .join("\n")
+}
+
+fn tmux_tui_help() -> String {
+    [
+        "tui on",
+        "tui off",
+        "",
+        "Frontend control commands for the tmux driver examples.",
+        "",
+        "tui on:",
+        "  Enter the split-screen TUI from the line REPL.",
+        "",
+        "tui off:",
+        "  Leave the split-screen TUI and return to the line REPL.",
+        "  Active monitor/stream state is torn down when leaving the TUI.",
+    ]
+    .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1011,5 +1196,52 @@ mod tests {
 
         assert!(rendered.contains("create"));
         assert!(rendered.contains("--size"));
+    }
+
+    #[tokio::test]
+    async fn tmux_help_uses_rich_stream_topic() {
+        let state = TmuxState {
+            host_uri: "ssh://localhost".to_string(),
+            host: HostHandle::local(),
+            owned_sessions: HashSet::new(),
+            known_sessions: Vec::new(),
+            known_targets: Vec::new(),
+            active_watch: None,
+            active_stream: None,
+            mirror_text: String::new(),
+            mirror_label: String::new(),
+            mirror_ansi: false,
+            mirror_auto_refresh: false,
+        };
+
+        let mut engine = CommandEngine::<TmuxState, TmuxCommand>::new(state);
+        let output = engine.run_line("help stream").await.expect("help output");
+        let rendered = output.lines.join("\n");
+
+        assert!(rendered.contains("Mode guidance:"));
+        assert!(rendered.contains("tail / monitor"));
+        assert!(rendered.contains("stream demo --mode render"));
+    }
+
+    #[tokio::test]
+    async fn tmux_tui_on_returns_frontend_effect() {
+        let state = TmuxState {
+            host_uri: "ssh://localhost".to_string(),
+            host: HostHandle::local(),
+            owned_sessions: HashSet::new(),
+            known_sessions: Vec::new(),
+            known_targets: Vec::new(),
+            active_watch: None,
+            active_stream: None,
+            mirror_text: String::new(),
+            mirror_label: String::new(),
+            mirror_ansi: false,
+            mirror_auto_refresh: false,
+        };
+
+        let mut engine = CommandEngine::<TmuxState, TmuxCommand>::new(state);
+        let output = engine.run_line("tui on").await.expect("tui output");
+
+        assert!(output.effects.contains(&CommandEffect::EnterTui));
     }
 }

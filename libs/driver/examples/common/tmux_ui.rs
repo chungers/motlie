@@ -197,9 +197,6 @@ async fn event_loop(
                     if trimmed.is_empty() {
                         continue;
                     }
-                    if trimmed == "tui off" {
-                        return Ok(TuiAction::ReturnToRepl);
-                    }
 
                     state.cmd_history.push(trimmed.to_string());
                     state.push_output(format!("tmux> {trimmed}"));
@@ -207,12 +204,12 @@ async fn event_loop(
                     for line in output.lines {
                         state.push_output(line);
                     }
-                    if output
-                        .effects
-                        .iter()
-                        .any(|effect| matches!(effect, CommandEffect::ExitShell))
-                    {
-                        return Ok(TuiAction::Quit);
+                    if let Some(effect) = output.effects.first() {
+                        match effect {
+                            CommandEffect::ExitShell => return Ok(TuiAction::Quit),
+                            CommandEffect::ExitTui => return Ok(TuiAction::ReturnToRepl),
+                            CommandEffect::EnterTui => {}
+                        }
                     }
                 }
                 _ => {}
