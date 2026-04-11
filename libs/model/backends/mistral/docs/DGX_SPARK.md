@@ -6,6 +6,7 @@
 |------|-----|---------|
 | 2026-04-10 | @cld-mistral | Initial study: CPU vs CUDA (no flash-attn) across all four curated bundles. CUDA was 5–17x slower. |
 | 2026-04-10 | @cld-mistral | Extended study: tested `flash-attn`, `PagedAttention`, and `MISTRALRS_IGPU_MEMORY_FRACTION`. Flash-attention is the critical enabler — CUDA goes from 16x slower to **4x faster** than CPU with it. Revised conclusions. |
+| 2026-04-11 | @cld-mistral | Added Gemma 4 E2B-it CUDA + flash-attn results (56 tok/s, 5.6x faster than CPU). Added full RSS comparison tables for all models and configurations. |
 
 ---
 
@@ -256,18 +257,41 @@ MOTLIE_PAGED_ATTN=1 ./target/release/examples/models_v0_2 ...
 
 ### Performance summary (recommended CUDA + flash-attn configuration)
 
-| Model | Startup | Gen Throughput | Prompt Throughput | RSS |
-|-------|---------|----------------|-------------------|-----|
-| Qwen3-4B (ISQ Q4) | 11s | **56 tok/s** | 561 tok/s | 1,375 MiB |
+#### Qwen3-4B (ISQ Q4) — all configurations
 
-Compared to CPU-only:
+| Config | Gen tok/s | Prompt tok/s | Latency | Startup RSS | Peak RSS | Settled RSS |
+|--------|-----------|--------------|---------|-------------|----------|-------------|
+| CPU | 15 | 23 | 13.0s | 3,595 MiB | 3,810 MiB | 3,791 MiB |
+| CUDA | ~1 | 22 | 210s | 1,361 MiB | 1,379 MiB | 1,379 MiB |
+| **CUDA + FA** | **56** | **561** | **3.0s** | 1,964 MiB | 1,964 MiB | **1,375 MiB** |
+| CUDA + PA | 56 | 19 | 4.2s | 2,026 MiB | 2,026 MiB | 1,368 MiB |
+| **CUDA + FA + PA** | **57** | **422** | **3.0s** | 2,007 MiB | 2,040 MiB | **1,352 MiB** |
 
-| Metric | CPU | CUDA+FA | Improvement |
-|--------|-----|---------|-------------|
-| Generation throughput | 15 tok/s | 56 tok/s | **3.7x faster** |
-| Prompt throughput | 23 tok/s | 561 tok/s | **24x faster** |
-| Latency (short prompt) | 13.0s | 3.0s | **4.3x faster** |
-| RSS | 3,595 MiB | 1,375 MiB | **2.6x less memory** |
+#### Gemma 4 E2B-it (ISQ Q4)
+
+| Config | Gen tok/s | Prompt tok/s | Latency (~470 tok) | Startup | Settled RSS |
+|--------|-----------|--------------|--------------------|---------|-----------  |
+| CPU | 10 | 26 | 47.4s | 10.2s | 9,081 MiB |
+| CUDA (no FA) | ~1 | 31 | 475s | 26.0s | 1,832 MiB |
+| **CUDA + FA** | **56** | **772** | **8.4s** | 26.1s | **1,761 MiB** |
+
+#### LLM comparison: CPU vs CUDA + flash-attn
+
+| Metric | Qwen3-4B | | Gemma 4 E2B-it | |
+|--------|----------|-|----------------|-|
+| | CPU | CUDA+FA | CPU | CUDA+FA |
+| Gen tok/s | 15 | **56** | 10 | **56** |
+| Prompt tok/s | 23 | **561** | 26 | **772** |
+| Settled RSS | 3,791 MiB | **1,375 MiB** | 9,081 MiB | **1,761 MiB** |
+| Speedup | — | **3.7x** | — | **5.6x** |
+| RSS reduction | — | **2.8x** | — | **5.2x** |
+
+Both models converge to the same **56 tok/s** generation throughput with flash-attn.
+Gemma 4 benefits even more: 5.6x faster and 5.2x less host memory than CPU.
+
+Note: Gemma 4 CUDA + flash-attn triggers a segfault during process exit cleanup
+(after shutdown completes). This is a `mistralrs` CUDA teardown issue, not a
+correctness problem — all generated output is correct and shutdown succeeds.
 
 ### Embedding models: CPU remains preferred
 
@@ -276,11 +300,19 @@ is still faster (5–8x) than CUDA. These models use batch matrix operations wit
 autoregressive decode, so flash-attention does not apply. The CUDA overhead for small
 batch inference on unified memory exceeds any GPU benefit at these model sizes.
 
+#### Embedding models (F32, no quantization)
+
+| Model | | CPU | | CUDA | |
+|-------|-|-----|-|------|-|
+| | Latency | RSS | Latency | RSS |
+| EmbeddingGemma 300M | 126 ms | 1,616 MiB | 1,017 ms | 888 MiB |
+| Qwen3 Embedding 0.6B | 219 ms | 2,516 MiB | 1,090 ms | 680 MiB |
+
 ### Configuration matrix for DGX Spark bundles
 
-| Bundle | Recommended Config | Gen tok/s | Notes |
-|--------|--------------------|-----------|-------|
-| EmbeddingGemma 300M | CPU | ~10 embed/s | CUDA 5–8x slower |
-| Qwen3 Embedding 0.6B | CPU | ~5 embed/s | CUDA 5x slower |
-| Qwen3-4B | **CUDA + flash-attn** | **56 tok/s** | 3.7x faster than CPU |
-| Gemma 4 E2B-it | **CUDA + flash-attn** (expected) | TBD | Expected similar improvement |
+| Bundle | Recommended Config | Gen tok/s | Settled RSS | Notes |
+|--------|--------------------|-----------|-------------|-------|
+| EmbeddingGemma 300M | CPU | ~10 embed/s | 1,616 MiB | CUDA 5–8x slower |
+| Qwen3 Embedding 0.6B | CPU | ~5 embed/s | 2,516 MiB | CUDA 5x slower |
+| Qwen3-4B | **CUDA + flash-attn** | **56 tok/s** | **1,375 MiB** | 3.7x faster, 2.8x less memory than CPU |
+| Gemma 4 E2B-it | **CUDA + flash-attn** | **56 tok/s** | **1,761 MiB** | 5.6x faster, 5.2x less memory than CPU |
