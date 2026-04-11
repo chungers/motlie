@@ -12,6 +12,8 @@ pub mod embedding;
 pub mod eval;
 pub mod generation;
 pub mod metrics;
+#[cfg(feature = "metrics-runtime")]
+pub mod metrics_runtime;
 pub mod units;
 
 pub use chat::{ChatMessage, ChatRole, ContentPart};
