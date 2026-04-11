@@ -2,7 +2,7 @@
 mod tmux_ui;
 
 use motlie_driver::commands::tmux::{TmuxCommand, TmuxState};
-use motlie_driver::{CommandEngine, ReplFrontend};
+use motlie_driver::{CommandEffect, CommandEngine, ReplFrontend};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -32,5 +32,14 @@ async fn main() -> anyhow::Result<()> {
         .with_name("tmux")
         .with_prompt("tmux> ");
 
-    repl.run().await
+    loop {
+        match repl.run().await? {
+            Some(CommandEffect::EnterTui) => match tmux_ui::run(repl.engine_mut()).await? {
+                tmux_ui::TuiAction::Quit => return Ok(()),
+                tmux_ui::TuiAction::ReturnToRepl => continue,
+            },
+            Some(CommandEffect::ExitShell) | None => return Ok(()),
+            Some(CommandEffect::ExitTui) => continue,
+        }
+    }
 }

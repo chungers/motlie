@@ -135,7 +135,7 @@ where
         &mut self.engine
     }
 
-    pub async fn run(&mut self) -> Result<()> {
+    pub async fn run(&mut self) -> Result<Option<CommandEffect>> {
         let completion_context = Arc::new(Mutex::new(self.engine.completion_context()));
         let completer = Box::new(EngineCompleter::<C, S>::new(completion_context.clone()));
         let mut line_editor = Reedline::create().with_completer(completer);
@@ -161,18 +161,12 @@ where
                         *guard = self.engine.completion_context();
                     }
 
-                    if output
-                        .effects
-                        .iter()
-                        .any(|effect| matches!(effect, CommandEffect::ExitShell))
-                    {
-                        break;
+                    if let Some(effect) = output.effects.first() {
+                        return Ok(Some(effect.clone()));
                     }
                 }
-                Signal::CtrlC | Signal::CtrlD => break,
+                Signal::CtrlC | Signal::CtrlD => return Ok(None),
             }
         }
-
-        Ok(())
     }
 }

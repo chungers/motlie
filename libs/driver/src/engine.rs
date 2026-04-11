@@ -8,6 +8,8 @@ use crate::completion::{CompletionCandidate, CompletionRequest};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandEffect {
     ExitShell,
+    EnterTui,
+    ExitTui,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -44,6 +46,9 @@ pub trait CommandSet<C>: Sized {
     fn root_command() -> clap::Command;
     fn from_matches(matches: &clap::ArgMatches) -> Result<Self>;
     fn completion_context(context: &C) -> Self::CompletionContext;
+    fn help(_topic: &[String]) -> Option<String> {
+        None
+    }
     fn complete(
         _request: CompletionRequest<'_>,
         _context: &Self::CompletionContext,
@@ -93,6 +98,9 @@ where
         if let Some(first) = argv.first() {
             if first == "help" {
                 let topic = argv.iter().skip(1).cloned().collect::<Vec<_>>();
+                if let Some(text) = S::help(&topic) {
+                    return Ok(CommandOutput::text(text));
+                }
                 let text = render_help(&root, &topic)?;
                 return Ok(CommandOutput::text(text));
             }
