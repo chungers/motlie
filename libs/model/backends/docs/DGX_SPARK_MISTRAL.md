@@ -430,12 +430,16 @@ for the first single-turn request).
 
 ### Results: Qwen3-4B (ISQ Q4) — ~18.8k token input
 
-| Config | Status | Prefill tok/s | Decode tok/s | Notes |
-|--------|--------|---------------|-------------|-------|
-| CPU | pending | ~23 (est.) | ~15 (est.) | ~14 min prefill expected |
-| **CUDA + FA** | **OK** | **1,914** | **9** | stable across all 3 requests |
-| CUDA + PA | **CRASH** | — | — | "channel closed unexpectedly" |
-| CUDA + FA + PA | **CRASH** | — | — | "channel closed unexpectedly" |
+| Config | Status | Prefill tok/s | Decode tok/s | Wall time (single-turn) | RSS |
+|--------|--------|---------------|-------------|------------------------|-----|
+| CPU | **OK** | ~23 | ~15 | **2,769s (46 min)** | 7,572 MiB |
+| **CUDA + FA** | **OK** | **1,914** | **9** | **55.5s** | 1,357 MiB |
+| CUDA + PA | **CRASH** | — | — | — | — |
+| CUDA + FA + PA | **CRASH** | — | — | — | — |
+
+CUDA + flash-attn is **50x faster end-to-end** than CPU on long context. Prefill
+dominates at this sequence length (83x faster on GPU) and dwarfs the decode slowdown
+(9 vs ~15 tok/s). CPU RSS doubles to 7.6 GiB from KV cache growth.
 
 ### Results: Gemma 4 E2B-it (ISQ Q4) — ~18.8k token input
 
@@ -459,7 +463,9 @@ completion. All three completed successfully with the ~18.8k token input.
 
 *Multi-turn and completion prefill tok/s derived from cumulative metric deltas.
 
-### Short vs long context performance (CUDA + flash-attn, Qwen3-4B)
+### Short vs long context performance (Qwen3-4B)
+
+#### CUDA + flash-attn
 
 | Metric | Short (~30 tok input) | Long (~18.8k tok input) | Ratio |
 |--------|----------------------|------------------------|-------|
@@ -469,6 +475,20 @@ completion. All three completed successfully with the ~18.8k token input.
 Prefill is faster at long context because the large batched matmul amortizes GPU
 launch overhead more effectively. Decode is 6x slower because each token generation
 step must attend to the full ~18.8k context.
+
+#### CPU vs CUDA + flash-attn at long context
+
+| Metric | CPU | CUDA + FA | Ratio |
+|--------|-----|-----------|-------|
+| Single-turn wall time | 2,769s (46 min) | 55.5s | **50x faster** |
+| Prefill tok/s | ~23 | 1,914 | **83x faster** |
+| Decode tok/s | ~15 | 9 | 1.7x slower |
+| RSS | 7,572 MiB | 1,357 MiB | **5.6x less** |
+
+At long context, CUDA + flash-attn is dramatically faster end-to-end because
+prefill dominates total latency and the GPU handles prefill 83x faster than CPU.
+The decode slowdown (9 vs 15 tok/s) is insignificant against 46 minutes of CPU
+prefill time.
 
 ### PagedAttention crashes on long input
 
@@ -485,14 +505,17 @@ workloads. Increasing the context size allocation may fix this but has not been 
 
 For long-context workloads on DGX Spark:
 
-| Model | Only stable config | Prefill tok/s | Decode tok/s |
-|-------|-------------------|---------------|-------------|
-| Qwen3-4B | **CUDA + flash-attn** (no PA) | 1,914 | 9 |
-| Gemma 4 E2B-it | **CPU only** | ~26 (est.) | ~10 (est.) |
-| Embeddings | CPU | — | — |
+| Model | Only stable CUDA config | Prefill tok/s | Decode tok/s | vs CPU |
+|-------|------------------------|---------------|-------------|--------|
+| Qwen3-4B | **CUDA + flash-attn** (no PA) | 1,914 | 9 | **50x faster e2e** |
+| Gemma 4 E2B-it | **none — CPU only** | ~26 (CPU) | ~10 (CPU) | — |
+| Embeddings | CPU | — | — | — |
 
 Gemma 4 has no viable CUDA path for long context: flash-attn produces NaN and
 PagedAttention crashes on the sequence length. CPU is the only stable option.
+
+For Qwen3-4B, CUDA + flash-attn is overwhelmingly faster at long context (50x)
+because GPU prefill at 1,914 tok/s vs CPU at ~23 tok/s dominates total latency.
 
 ### Final per-model recommended configuration
 
