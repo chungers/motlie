@@ -1,9 +1,9 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use async_trait::async_trait;
 
 use crate::clap::{analyze_completion, render_help};
-use crate::completion::{CompletionCandidate, CompletionRequest};
 use crate::completion::dedup_sorted;
+use crate::completion::{CompletionCandidate, CompletionRequest};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandEffect {
@@ -39,9 +39,15 @@ impl CommandOutput {
 
 #[async_trait]
 pub trait CommandSet<C>: Sized {
+    type CompletionContext: Send + 'static;
+
     fn root_command() -> clap::Command;
     fn from_matches(matches: &clap::ArgMatches) -> Result<Self>;
-    fn complete(_request: CompletionRequest<'_>, _context: &C) -> Vec<CompletionCandidate> {
+    fn completion_context(context: &C) -> Self::CompletionContext;
+    fn complete(
+        _request: CompletionRequest<'_>,
+        _context: &Self::CompletionContext,
+    ) -> Vec<CompletionCandidate> {
         Vec::new()
     }
     async fn execute(self, context: &mut C) -> Result<CommandOutput>;
@@ -72,6 +78,10 @@ where
         &mut self.context
     }
 
+    pub fn completion_context(&self) -> S::CompletionContext {
+        S::completion_context(&self.context)
+    }
+
     pub async fn run_line(&mut self, line: &str) -> Result<CommandOutput> {
         let argv = shlex::split(line).ok_or_else(|| anyhow::anyhow!("invalid shell quoting"))?;
         self.run_argv(&argv).await
@@ -92,7 +102,11 @@ where
             }
         }
 
-        let argv = if argv.first().map(|arg| arg == root.get_name()).unwrap_or(false) {
+        let argv = if argv
+            .first()
+            .map(|arg| arg == root.get_name())
+            .unwrap_or(false)
+        {
             argv.to_vec()
         } else {
             let mut prefixed = Vec::with_capacity(argv.len() + 1);
@@ -131,7 +145,7 @@ where
                 arg_id: completion.arg_id.as_deref(),
                 prefix: &completion.prefix,
             },
-            &self.context,
+            &self.completion_context(),
         ));
 
         dedup_sorted(out)

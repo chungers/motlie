@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::str::FromStr;
 use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use async_trait::async_trait;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 
@@ -102,6 +102,12 @@ impl TmuxState {
 pub struct ManagedStream {
     pub target: String,
     pub spec: StreamSpec,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct TmuxCompletionContext {
+    sessions: Vec<String>,
+    targets: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -288,6 +294,8 @@ impl FromStr for SizeSpec {
 
 #[async_trait]
 impl CommandSet<TmuxState> for TmuxCommand {
+    type CompletionContext = TmuxCompletionContext;
+
     fn root_command() -> clap::Command {
         TmuxRoot::command().name("tmux")
     }
@@ -296,12 +304,24 @@ impl CommandSet<TmuxState> for TmuxCommand {
         Ok(TmuxRoot::from_arg_matches(matches)?.command)
     }
 
-    fn complete(request: CompletionRequest<'_>, context: &TmuxState) -> Vec<CompletionCandidate> {
+    fn completion_context(context: &TmuxState) -> Self::CompletionContext {
+        TmuxCompletionContext {
+            sessions: context.known_sessions.clone(),
+            targets: context.known_targets.clone(),
+        }
+    }
+
+    fn complete(
+        request: CompletionRequest<'_>,
+        context: &Self::CompletionContext,
+    ) -> Vec<CompletionCandidate> {
         match (request.command_path, request.arg_id) {
             (["new-window"], Some("session"))
             | (["monitor"], Some("session"))
             | (["history"], Some("sessions")) => context
-                .session_names()
+                .sessions
+                .iter()
+                .map(String::as_str)
                 .filter(|name| name.starts_with(request.prefix))
                 .map(CompletionCandidate::new)
                 .collect(),
@@ -312,7 +332,9 @@ impl CommandSet<TmuxState> for TmuxCommand {
             | (["keys"], Some("target"))
             | (["capture"], Some("target"))
             | (["stream"], Some("target")) => context
-                .target_names()
+                .targets
+                .iter()
+                .map(String::as_str)
                 .filter(|name| name.starts_with(request.prefix))
                 .map(CompletionCandidate::new)
                 .collect(),
@@ -368,7 +390,10 @@ async fn execute_create(context: &mut TmuxState, cmd: CreateCommand) -> Result<C
         detail.push_str(&format!(" history={history}"));
     }
 
-    Ok(CommandOutput::line(format!("Created: {}{}", cmd.name, detail)))
+    Ok(CommandOutput::line(format!(
+        "Created: {}{}",
+        cmd.name, detail
+    )))
 }
 
 async fn execute_new_window(
@@ -460,8 +485,7 @@ async fn execute_targets(context: &mut TmuxState) -> Result<CommandOutput> {
             for pane in window.panes {
                 lines.push(format!(
                     "      {:<16} (Pane, {})",
-                    pane.target,
-                    pane.address.pane_id
+                    pane.target, pane.address.pane_id
                 ));
             }
         }
@@ -529,7 +553,10 @@ async fn execute_monitor(context: &mut TmuxState, cmd: MonitorCommand) -> Result
     }
 
     context.active_watch = Some(watch);
-    Ok(CommandOutput::line(format!("Watching session: {}", cmd.session)))
+    Ok(CommandOutput::line(format!(
+        "Watching session: {}",
+        cmd.session
+    )))
 }
 
 async fn execute_history(context: &mut TmuxState, cmd: HistoryCommand) -> Result<CommandOutput> {
@@ -611,10 +638,7 @@ async fn execute_upload(context: &mut TmuxState, cmd: UploadCommand) -> Result<C
     )))
 }
 
-async fn execute_download(
-    context: &mut TmuxState,
-    cmd: DownloadCommand,
-) -> Result<CommandOutput> {
+async fn execute_download(context: &mut TmuxState, cmd: DownloadCommand) -> Result<CommandOutput> {
     let opts = TransferOptions {
         overwrite: true,
         recursive: cmd.recursive,
