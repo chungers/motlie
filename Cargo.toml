@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "bins/tmux/driver",
     "libs/core",
     "libs/db",
     "libs/driver",
