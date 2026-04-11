@@ -80,7 +80,7 @@ impl ModelBundle for Gemma4E2B_Gguf {
 ///
 /// The mistral.rs `gemma4_e2b` bundle uses **safetensors** weights from
 /// `google/gemma-4-E2B-it`. This bundle uses **GGUF** weights from
-/// `bartowski/gemma-4-E2B-it-GGUF`. The two artifact sets are **not
+/// `unsloth/gemma-4-E2B-it-GGUF`. The two artifact sets are **not
 /// interchangeable** — each backend requires its own format — but they target
 /// the identical upstream Gemma 4 E2B-it architecture. Both backends produce
 /// equivalent inference results at the same quantization level.
@@ -153,29 +153,45 @@ mod tests {
     }
 
     #[test]
-    fn local_gguf_resolution_rejects_missing_directory() {
+    fn local_gguf_resolution_rejects_missing_cache() {
         let root = unique_temp_dir();
 
         let error =
-            resolve_local_gguf_root(&root).expect_err("missing directory should fail closed");
+            resolve_local_gguf_root(&root).expect_err("missing cache should fail closed");
 
         assert!(matches!(
             error,
-            ModelError::InvalidConfiguration(message) if message.contains("does not exist")
+            ModelError::InvalidConfiguration(message) if message.contains("refs/main")
         ));
     }
 
     #[test]
-    fn local_gguf_resolution_accepts_directory_with_gguf_file() {
+    fn local_gguf_resolution_rejects_cache_without_gguf_files() {
         let root = unique_temp_dir();
-        std::fs::create_dir_all(&root).expect("temp root should be creatable");
-        std::fs::write(root.join("gemma-4-e2b-it-Q4_K_M.gguf"), "stub")
+        let _snapshot = create_fake_hf_gguf_cache(&root, "unsloth/gemma-4-E2B-it-GGUF");
+
+        let error = resolve_local_gguf_root(&root)
+            .expect_err("cache without .gguf should fail");
+
+        assert!(matches!(
+            error,
+            ModelError::InvalidConfiguration(message) if message.contains(".gguf")
+        ));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn local_gguf_resolution_accepts_cache_with_gguf_file() {
+        let root = unique_temp_dir();
+        let snapshot = create_fake_hf_gguf_cache(&root, "unsloth/gemma-4-E2B-it-GGUF");
+        std::fs::write(snapshot.join("gemma-4-E2B-it-Q4_K_M.gguf"), "stub")
             .expect("gguf stub should be writable");
 
         let resolved =
-            resolve_local_gguf_root(&root).expect("directory with .gguf should resolve");
+            resolve_local_gguf_root(&root).expect("cache with .gguf should resolve");
 
-        assert_eq!(resolved, root);
+        assert_eq!(resolved, snapshot);
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -185,5 +201,19 @@ mod tests {
             .expect("clock should be monotonic enough")
             .as_nanos();
         std::env::temp_dir().join(format!("motlie-models-gemma4-gguf-test-{unique}"))
+    }
+
+    fn create_fake_hf_gguf_cache(root: &Path, model_id: &str) -> PathBuf {
+        let repo_folder = format!("models--{}", model_id.replace('/', "--"));
+        let repo_root = root.join(repo_folder);
+        let refs_dir = repo_root.join("refs");
+        let commit = "test-commit";
+        let snapshot = repo_root.join("snapshots").join(commit);
+
+        std::fs::create_dir_all(&snapshot).expect("snapshot dir should be creatable");
+        std::fs::create_dir_all(&refs_dir).expect("refs dir should be creatable");
+        std::fs::write(refs_dir.join("main"), commit).expect("ref file should be writable");
+
+        snapshot
     }
 }

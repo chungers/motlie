@@ -19,9 +19,15 @@ pub(crate) fn configure_artifact_policy(
     match policy {
         ArtifactPolicy::AllowFetch { root } => {
             let root = root.unwrap_or_else(|| PathBuf::from("."));
-            Ok(ConfiguredGguf {
-                model_path: root.join(gguf_filename),
-            })
+            let model_path = root.join(gguf_filename);
+            if !model_path.exists() {
+                return Err(ModelError::InvalidConfiguration(format!(
+                    "GGUF artifact `{}` not found under `{}` (auto-download not yet supported for GGUF)",
+                    gguf_filename,
+                    root.display()
+                )));
+            }
+            Ok(ConfiguredGguf { model_path })
         }
         ArtifactPolicy::LocalOnly { root } => {
             let model_path = root.join(gguf_filename);
@@ -132,7 +138,8 @@ pub(crate) fn observe_text_generation(
         .saturating_add(generated_tokens as u64);
     state.total_tokens = state
         .total_tokens
-        .saturating_add((prompt_tokens + generated_tokens) as u64);
+        .saturating_add(prompt_tokens as u64)
+        .saturating_add(generated_tokens as u64);
     state.total_generation_time_msec = state
         .total_generation_time_msec
         .saturating_add(duration_to_milliseconds(generation_time) as u128);
