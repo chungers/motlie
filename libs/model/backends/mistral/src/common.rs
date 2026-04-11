@@ -46,11 +46,19 @@ pub(crate) fn should_force_cpu() -> bool {
     )
 }
 
-pub(crate) fn should_enable_paged_attn() -> bool {
-    matches!(
-        std::env::var("MOTLIE_PAGED_ATTN"),
-        Ok(value) if matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES")
-    )
+/// Returns the requested PagedAttention context size, if configured.
+///
+/// Set `MOTLIE_PAGED_ATTN_CONTEXT=N` where N is the max context length in tokens.
+/// Omit the variable entirely to disable PagedAttention.
+///
+/// The old boolean `MOTLIE_PAGED_ATTN=1` is no longer supported because the
+/// `PagedAttentionMetaBuilder` default `ContextSize(4096)` is too small for
+/// non-trivial inputs and causes silent channel-closed crashes.
+pub(crate) fn paged_attn_context_size() -> Option<usize> {
+    std::env::var("MOTLIE_PAGED_ATTN_CONTEXT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&size| size > 0)
 }
 
 pub(crate) fn map_chat_role(role: ChatRole) -> mistralrs::TextMessageRole {
@@ -89,8 +97,8 @@ pub(crate) fn lock_metrics<'a, T>(
     match mutex.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
-            eprintln!(
-                "warning: recovering poisoned metrics lock in `{context}`; continuing with potentially incomplete metric state"
+            tracing::warn!(
+                "recovering poisoned metrics lock in `{context}`; continuing with potentially incomplete metric state"
             );
             poisoned.into_inner()
         }

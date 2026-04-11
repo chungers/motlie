@@ -64,10 +64,6 @@ async fn main() -> Result<()> {
     let force_cpu = std::env::var("MOTLIE_MODEL_FORCE_CPU")
         .map(|v| matches!(v.as_str(), "1" | "true"))
         .unwrap_or(false);
-    let paged_attn = std::env::var("MOTLIE_PAGED_ATTN")
-        .map(|v| matches!(v.as_str(), "1" | "true"))
-        .unwrap_or(false);
-
     let prompt_words = prompt.split_whitespace().count();
     let est_tokens = prompt_words * 13 / 10;
 
@@ -80,7 +76,8 @@ async fn main() -> Result<()> {
     });
     println!("iterations: {iterations}");
     println!("force-cpu: {force_cpu}");
-    println!("paged-attn: {paged_attn}");
+    let pa_context = std::env::var("MOTLIE_PAGED_ATTN_CONTEXT").ok();
+    println!("paged-attn-context: {}", pa_context.as_deref().unwrap_or("disabled"));
     println!("input-words: {prompt_words}");
     println!("input-est-tokens: ~{est_tokens}");
 
@@ -127,9 +124,8 @@ async fn main() -> Result<()> {
     println!("\n--- warmup ---");
     let warmup = run_one(chat, &prompt).await;
     match &warmup {
-        Ok((tokens, ms)) => {
-            let tps = *tokens as f64 / (*ms / 1000.0);
-            println!("warmup: {tokens} tokens in {ms:.0}ms ({tps:.1} tok/s)");
+        Ok((words, ms)) => {
+            println!("warmup: {words} words in {ms:.0}ms (TTFT={ms:.0}ms)");
         }
         Err(e) => {
             println!("warmup: FAILED — {e}");
@@ -143,16 +139,15 @@ async fn main() -> Result<()> {
 
     // Measured iterations
     println!("\n--- measured ({iterations} iterations) ---");
-    let mut total_tokens: usize = 0;
+    let mut total_words: usize = 0;
     let mut total_ms: f64 = 0.0;
     let mut failures = 0;
 
     for i in 0..iterations {
         match run_one(chat, &prompt).await {
-            Ok((tokens, ms)) => {
-                let tps = tokens as f64 / (ms / 1000.0);
-                println!("  iter {}: {} tokens in {:.0}ms ({:.1} tok/s)", i + 1, tokens, ms, tps);
-                total_tokens += tokens;
+            Ok((words, ms)) => {
+                println!("  iter {}: {} words in {:.0}ms", i + 1, words, ms);
+                total_words += words;
                 total_ms += ms;
             }
             Err(e) => {
@@ -164,19 +159,18 @@ async fn main() -> Result<()> {
 
     let successful = iterations - failures;
     println!("\n--- summary ---");
-    if let Ok((warmup_tok, warmup_ms)) = warmup {
-        let warmup_tps = warmup_tok as f64 / (warmup_ms / 1000.0);
-        println!("first-run: {warmup_tok} tokens, {warmup_ms:.0}ms, {warmup_tps:.1} tok/s");
+    println!("note: per-iteration counts are output *words* (whitespace-split), not model tokens.");
+    println!("      real token throughput is reported below from mistralrs internal metrics.");
+    if let Ok((warmup_words, warmup_ms)) = warmup {
+        println!("first-run: {warmup_words} words, TTFT={warmup_ms:.0}ms");
     }
     if successful > 0 {
-        let avg_tps = total_tokens as f64 / (total_ms / 1000.0);
         let avg_ms = total_ms / successful as f64;
-        let avg_tokens = total_tokens as f64 / successful as f64;
+        let avg_words = total_words as f64 / successful as f64;
         println!("steady-state ({successful}/{iterations} succeeded):");
-        println!("  avg-tokens: {avg_tokens:.0}");
+        println!("  avg-words: {avg_words:.0}");
         println!("  avg-latency-ms: {avg_ms:.0}");
-        println!("  avg-tok/s: {avg_tps:.1}");
-        println!("  total-tokens: {total_tokens}");
+        println!("  total-words: {total_words}");
         println!("  total-ms: {total_ms:.0}");
     }
     if failures > 0 {
