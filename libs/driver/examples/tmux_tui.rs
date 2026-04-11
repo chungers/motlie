@@ -1,5 +1,8 @@
+#[path = "common/tmux_ui.rs"]
+mod tmux_ui;
+
+use motlie_driver::CommandEngine;
 use motlie_driver::commands::tmux::{TmuxCommand, TmuxState};
-use motlie_driver::{CommandEngine, TuiFrontend};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -8,10 +11,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| "ssh://localhost".to_string());
 
     let state = TmuxState::connect(&uri).await?;
-    let engine = CommandEngine::<TmuxState, TmuxCommand>::new(state);
-    let mut frontend = TuiFrontend::new(engine)
-        .with_title(format!("tmux @ {uri}"))
-        .with_prompt("tmux> ");
-
-    frontend.run().await
+    let mut engine = CommandEngine::<TmuxState, TmuxCommand>::new(state);
+    let _ = tmux_ui::run(&mut engine).await?;
+    Ok(())
 }

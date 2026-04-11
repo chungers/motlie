@@ -13,7 +13,7 @@ path = "src/lib.rs"
 [features]
 default = []
 repl = ["dep:reedline"]
-tui = ["dep:ratatui", "dep:crossterm"]
+tui = ["dep:ratatui", "dep:crossterm", "dep:ansi-to-tui"]
 term-vt100 = ["dep:vt100"]
 term-shadow = []
 commands-vmm = []
@@ -34,6 +34,7 @@ crossterm = { version = "0.29", optional = true }
 vt100 = { version = "0.15", optional = true }
 regex = { version = "1.12", optional = true }
 motlie-tmux = { path = "../tmux", optional = true }
+ansi-to-tui = { version = "8", optional = true }
 
 [[example]]
 name = "tmux_repl"

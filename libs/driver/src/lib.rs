@@ -9,7 +9,7 @@ pub mod term;
 pub mod tui;
 
 pub use crate::completion::{CompletionCandidate, CompletionRequest};
-pub use crate::engine::{CommandEngine, CommandOutput, CommandSet};
+pub use crate::engine::{CommandEffect, CommandEngine, CommandOutput, CommandSet};
 #[cfg(feature = "repl")]
 pub use crate::repl::ReplFrontend;
 #[cfg(feature = "tui")]
