@@ -49,6 +49,10 @@ impl<T> HistoryBuffer<T> {
         self.items.back()
     }
 
+    pub fn clear(&mut self) {
+        self.items.clear();
+    }
+
     pub fn oldest_seq(&self) -> Option<u64> {
         self.items.front().map(|record| record.seq)
     }
