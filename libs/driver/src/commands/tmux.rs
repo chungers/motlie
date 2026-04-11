@@ -353,6 +353,7 @@ pub enum TmuxCommand {
     NewWindow(NewWindowCommand),
     SplitPane(SplitPaneCommand),
     Kill(KillCommand),
+    Mirror(MirrorCommand),
     Tui(TuiCommand),
     Targets(TargetsCommand),
     Send(SendCommand),
@@ -398,6 +399,26 @@ pub struct SplitPaneCommand {
 #[derive(Args)]
 pub struct KillCommand {
     pub target: String,
+}
+
+#[derive(Args)]
+pub struct MirrorCommand {
+    #[command(subcommand)]
+    pub action: MirrorActionCommand,
+}
+
+#[derive(Subcommand)]
+pub enum MirrorActionCommand {
+    History(MirrorHistoryCommand),
+    Clear,
+}
+
+#[derive(Args)]
+pub struct MirrorHistoryCommand {
+    #[arg(long)]
+    pub after: Option<u64>,
+    #[arg(long, default_value_t = 20)]
+    pub limit: usize,
 }
 
 #[derive(Args)]
@@ -552,6 +573,7 @@ impl CommandSet<TmuxState> for TmuxCommand {
             [] => tmux_root_help(),
             [topic] if topic == "stream" => tmux_stream_help(),
             [topic] if topic == "monitor" => tmux_monitor_help(),
+            [topic] if topic == "mirror" => tmux_mirror_help(),
             [topic] if topic == "capture" => tmux_capture_help(),
             [topic] if topic == "history" => tmux_history_help(),
             [topic] if topic == "tui" => tmux_tui_help(),
@@ -605,6 +627,7 @@ impl CommandSet<TmuxState> for TmuxCommand {
             Self::NewWindow(cmd) => execute_new_window(context, cmd).await,
             Self::SplitPane(cmd) => execute_split_pane(context, cmd).await,
             Self::Kill(cmd) => execute_kill(context, cmd).await,
+            Self::Mirror(cmd) => execute_mirror(context, cmd),
             Self::Tui(cmd) => execute_tui(cmd),
             Self::Targets(_) => execute_targets(context).await,
             Self::Send(cmd) => execute_send(context, cmd).await,
@@ -717,6 +740,70 @@ fn execute_tui(cmd: TuiCommand) -> Result<CommandOutput> {
         }
     };
     Ok(output)
+}
+
+fn execute_mirror(context: &mut TmuxState, cmd: MirrorCommand) -> Result<CommandOutput> {
+    match cmd.action {
+        MirrorActionCommand::History(cmd) => execute_mirror_history(context, cmd),
+        MirrorActionCommand::Clear => {
+            context.mirror_history.clear();
+            Ok(CommandOutput::line("Cleared local mirror history"))
+        }
+    }
+}
+
+fn execute_mirror_history(context: &mut TmuxState, cmd: MirrorHistoryCommand) -> Result<CommandOutput> {
+    if cmd.limit == 0 {
+        bail!("--limit must be a positive integer");
+    }
+
+    let page = context.mirror_history_page(cmd.after, cmd.limit);
+    if page.items.is_empty() {
+        return Ok(CommandOutput::line("No retained mirror history"));
+    }
+
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "mirror history: {} item(s) oldest={} newest={} next-after={}",
+        page.items.len(),
+        page.oldest_available
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        page.newest_available
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        page.next_after
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string())
+    ));
+
+    for record in page.items {
+        lines.push(format!(
+            "[seq={} label={} ansi={} watch={}]",
+            record.seq,
+            if record.item.label.is_empty() {
+                "-".to_string()
+            } else {
+                record.item.label.clone()
+            },
+            record.item.ansi,
+            match record.item.watch_health {
+                Some(health) => format!("{health:?}"),
+                None => "idle".to_string(),
+            }
+        ));
+
+        if record.item.text.is_empty() {
+            lines.push("  (empty)".to_string());
+            continue;
+        }
+
+        for line in record.item.text.lines() {
+            lines.push(format!("  {line}"));
+        }
+    }
+
+    Ok(CommandOutput { lines, effects: Vec::new() })
 }
 
 async fn execute_targets(context: &mut TmuxState) -> Result<CommandOutput> {
@@ -1052,6 +1139,8 @@ fn tmux_root_help() -> String {
         "  capture <target> <n>",
         "  monitor <session> [seconds]",
         "  monitor stop",
+        "  mirror history [--after N] [--limit N]",
+        "  mirror clear",
         "  history <session> [session...]",
         "  stream <target> [--mode MODE] [--lines N] [--interval MS] [--pattern REGEX]",
         "",
@@ -1067,6 +1156,7 @@ fn tmux_root_help() -> String {
         "Helpful topics:",
         "  help stream",
         "  help monitor",
+        "  help mirror",
         "  help capture",
         "  help history",
         "  help tui",
@@ -1130,6 +1220,28 @@ fn tmux_monitor_help() -> String {
         "  monitor demo",
         "  monitor demo 5",
         "  monitor stop",
+    ]
+    .join("\n")
+}
+
+fn tmux_mirror_help() -> String {
+    [
+        "mirror history [--after N] [--limit N]",
+        "mirror clear",
+        "",
+        "Inspect or clear the driver-local retained mirror history.",
+        "",
+        "This is local session history owned by the driver, not remote tmux scrollback.",
+        "It is populated by monitor, stream, capture, and history commands.",
+        "",
+        "Options:",
+        "  --after N   return items with sequence ids greater than N",
+        "  --limit N   maximum number of retained entries to return [default: 20]",
+        "",
+        "Examples:",
+        "  mirror history",
+        "  mirror history --after 12 --limit 5",
+        "  mirror clear",
     ]
     .join("\n")
 }
@@ -1296,5 +1408,25 @@ mod tests {
             .expect("monitor stop output");
 
         assert_eq!(output.lines, vec!["No active monitor/stream"]);
+    }
+
+    #[tokio::test]
+    async fn tmux_mirror_history_reads_retained_entries() {
+        let mut state = test_state();
+        state.mirror_text = "hello\nworld".to_string();
+        state.mirror_label = "watching: demo".to_string();
+        state.record_current_mirror_state();
+
+        let mut engine = CommandEngine::<TmuxState, TmuxCommand>::new(state);
+        let output = engine
+            .run_line("mirror history --limit 5")
+            .await
+            .expect("mirror history output");
+        let rendered = output.lines.join("\n");
+
+        assert!(rendered.contains("mirror history: 1 item(s)"));
+        assert!(rendered.contains("[seq=1 label=watching: demo"));
+        assert!(rendered.contains("  hello"));
+        assert!(rendered.contains("  world"));
     }
 }
