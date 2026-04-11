@@ -39,3 +39,8 @@ motlie-tmux = { path = "../tmux", optional = true }
 name = "tmux_repl"
 path = "examples/tmux_repl.rs"
 required-features = ["repl", "commands-tmux"]
+
+[[example]]
+name = "tmux_tui"
+path = "examples/tmux_tui.rs"
+required-features = ["tui", "commands-tmux"]
