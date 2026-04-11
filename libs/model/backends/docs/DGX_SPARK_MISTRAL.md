@@ -7,6 +7,7 @@
 | 2026-04-10 | @cld-mistral | Initial study: CPU vs CUDA (no flash-attn) across all four curated bundles. CUDA was 5–17x slower. |
 | 2026-04-10 | @cld-mistral | Extended study: tested `flash-attn`, `PagedAttention`, and `MISTRALRS_IGPU_MEMORY_FRACTION`. Flash-attention is the critical enabler — CUDA goes from 16x slower to **4x faster** than CPU with it. Revised conclusions. |
 | 2026-04-11 | @cld-mistral | Added Gemma 4 E2B-it CUDA + flash-attn results (56 tok/s, 5.6x faster than CPU). Added full RSS comparison tables for all models and configurations. |
+| 2026-04-11 | @cld-mistral | Documented `candle-flash-attn` NaN bug for Gemma 4 at >500 generated tokens on Blackwell. Isolated to flash-attn kernel (not quantization, not model weights). Revised Gemma 4 recommendation to CUDA + PagedAttention (no flash-attn). |
 
 ---
 
@@ -289,9 +290,8 @@ MOTLIE_PAGED_ATTN=1 ./target/release/examples/models_v0_2 ...
 Both models converge to the same **56 tok/s** generation throughput with flash-attn.
 Gemma 4 benefits even more: 5.6x faster and 5.2x less host memory than CPU.
 
-Note: Gemma 4 CUDA + flash-attn triggers a segfault during process exit cleanup
-(after shutdown completes). This is a `mistralrs` CUDA teardown issue, not a
-correctness problem — all generated output is correct and shutdown succeeds.
+**Important caveat**: Gemma 4 + flash-attn has a NaN stability bug at longer sequence
+lengths. See [Part 4](#part-4-gemma-4--flash-attn-nan-stability-bug) below.
 
 ### Embedding models: CPU remains preferred
 
@@ -315,4 +315,89 @@ batch inference on unified memory exceeds any GPU benefit at these model sizes.
 | EmbeddingGemma 300M | CPU | ~10 embed/s | 1,616 MiB | CUDA 5–8x slower |
 | Qwen3 Embedding 0.6B | CPU | ~5 embed/s | 2,516 MiB | CUDA 5x slower |
 | Qwen3-4B | **CUDA + flash-attn** | **56 tok/s** | **1,375 MiB** | 3.7x faster, 2.8x less memory than CPU |
-| Gemma 4 E2B-it | **CUDA + flash-attn** | **56 tok/s** | **1,761 MiB** | 5.6x faster, 5.2x less memory than CPU |
+| Gemma 4 E2B-it | **CUDA + PagedAttn** | **56 tok/s** | **~1,800 MiB** | flash-attn has NaN bug at long sequences; use PA instead |
+
+---
+
+## Part 4: Gemma 4 + flash-attn NaN Stability Bug
+
+### Discovery
+
+During the CUDA + flash-attn benchmarks, Gemma 4 E2B-it produced NaN logits on
+prompts that request longer outputs (>~500 generated tokens). The error from
+`mistralrs`:
+
+```
+inference error: Invalid sampling probability at index 0: NaN.
+The model likely produced NaN/Inf logits.
+```
+
+### Isolation
+
+Systematic testing isolated the bug to the intersection of **Gemma 4 multimodal**
+and **`candle-flash-attn`** on **Blackwell CUDA**:
+
+| Prompt length | CUDA + flash-attn | CUDA + PA (no FA) | CPU |
+|---------------|-------------------|-------------------|-----|
+| ~120 tokens | OK | OK | OK |
+| ~185 tokens | OK | OK | OK |
+| ~400 tokens (2 paragraphs) | OK | OK | OK |
+| ~500+ tokens (3+ paragraphs) | **NaN** | OK | OK |
+
+Controlling for other variables:
+
+| Variable | Tested values | NaN? |
+|----------|---------------|------|
+| Quantization | Q4, Q8, F32 | NaN at all three |
+| Model | Qwen3-4B vs Gemma 4 | Only Gemma 4 — Qwen3-4B is fine |
+| Attention path | flash-attn vs PagedAttn vs default | Only flash-attn |
+| Prompt content | Multiple different prompts | Deterministic per prompt length |
+
+### Root Cause
+
+The `candle-flash-attn` v0.10.2 flash-attention kernel produces NaN logits for the
+Gemma 4 multimodal architecture at longer sequence lengths on the Blackwell (GB10) GPU.
+
+Contributing factors:
+- **Architecture-specific**: Gemma 4 uses a different attention head configuration
+  (multi-query attention with distinct head counts) than Qwen3. The flash-attn tiling
+  strategy may interact differently with this layout.
+- **Sequence-length-dependent**: The NaN appears at a threshold around 500+ generated
+  tokens, suggesting a breakpoint in the flash-attention tiling or accumulation logic.
+- **Not a precision issue**: NaN occurs at F32, Q8, and Q4, ruling out quantization
+  as the cause.
+- **Blackwell-specific**: The `candle-flash-attn` kernel codegen for Blackwell
+  (compute capability 10.0+) may have a different code path than Hopper (9.0) or
+  Ampere (8.0). `mistralrs` does not currently use FlashAttention v3 for Blackwell.
+
+### Process Exit Segfault
+
+A separate, non-deterministic segfault was observed during process exit cleanup after
+successful inference + shutdown on some Gemma 4 CUDA runs. This is a CUDA driver
+teardown race condition, not a correctness issue — all generated output completes and
+`shutdown()` succeeds before the crash.
+
+### Workaround
+
+For Gemma 4 E2B-it on DGX Spark, use **CUDA + PagedAttention** without `flash-attn`:
+
+```bash
+# Build without flash-attn
+RUSTFLAGS="-C target-cpu=native" cargo build --release \
+  -p motlie-models --features 'cuda'
+
+# Run with PagedAttention enabled
+MOTLIE_PAGED_ATTN=1 ./target/release/examples/models_v0_3 -- "..."
+```
+
+This gives the same 56 tok/s generation throughput with correct output at all
+sequence lengths. Prompt throughput is lower (19 tok/s vs 772 tok/s with flash-attn)
+but decode performance — the bottleneck for interactive use — is identical.
+
+### Per-Model Recommended Configuration
+
+| Model | Config | Gen tok/s | Prompt tok/s | Notes |
+|-------|--------|-----------|--------------|-------|
+| Qwen3-4B | `cuda,flash-attn` | 56 | 561 | flash-attn works correctly |
+| Gemma 4 E2B-it | `cuda` + `MOTLIE_PAGED_ATTN=1` | 56 | 19 | flash-attn has NaN bug |
+| Embeddings | CPU (no cuda) | — | — | CUDA slower for batch embeddings |
