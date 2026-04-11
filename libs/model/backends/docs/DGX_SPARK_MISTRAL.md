@@ -61,8 +61,8 @@ Five build/runtime configurations were tested:
 | **A. CPU** | `model-qwen3-4b` | — | No CUDA at all |
 | **B. CUDA** | `model-qwen3-4b,cuda` | — | CUDA without flash-attention |
 | **C. CUDA+FA** | `model-qwen3-4b,cuda,flash-attn` | — | CUDA with flash-attention |
-| **D. CUDA+PA** | `model-qwen3-4b,cuda` | `MOTLIE_PAGED_ATTN=1` | CUDA with PagedAttention, no flash-attn |
-| **E. CUDA+FA+PA** | `model-qwen3-4b,cuda,flash-attn` | `MOTLIE_PAGED_ATTN=1` | Both flash-attention and PagedAttention |
+| **D. CUDA+PA** | `model-qwen3-4b,cuda` | `MOTLIE_PAGED_ATTN_CONTEXT=4096` | CUDA with PagedAttention, no flash-attn |
+| **E. CUDA+FA+PA** | `model-qwen3-4b,cuda,flash-attn` | `MOTLIE_PAGED_ATTN_CONTEXT=4096` | Both flash-attention and PagedAttention |
 
 Feature verification via `cargo tree` confirmed for each build:
 - Config A: `candle-core [default]`, `mistralrs []`
@@ -70,7 +70,7 @@ Feature verification via `cargo tree` confirmed for each build:
 - Config C: `candle-core [cuda,cudarc,default]`, `candle-flash-attn`, `mistralrs [cuda,flash-attn]`
 
 PagedAttention is **not** enabled by default in the `mistralrs` library API. It
-requires an explicit `with_paged_attn()` call on the builder. A `MOTLIE_PAGED_ATTN=1`
+requires an explicit `with_paged_attn()` call on the builder. A `MOTLIE_PAGED_ATTN_CONTEXT=4096`
 env var was added to the backend to toggle this at runtime.
 
 ### Results: Qwen3-4B (ISQ Q4, 5 measured iterations)
@@ -255,7 +255,7 @@ RUSTFLAGS="-C target-cpu=native" cargo build --release \
 Optionally enable PagedAttention at runtime for additional memory efficiency:
 
 ```bash
-MOTLIE_PAGED_ATTN=1 ./target/release/examples/models_v0_2 ...
+MOTLIE_PAGED_ATTN_CONTEXT=4096 ./target/release/examples/models_v0_2 ...
 ```
 
 ### Performance summary (recommended CUDA + flash-attn configuration)
@@ -399,7 +399,7 @@ RUSTFLAGS="-C target-cpu=native" cargo build --release \
   -p motlie-models --features 'cuda'
 
 # Run with PagedAttention enabled
-MOTLIE_PAGED_ATTN=1 ./target/release/examples/models_v0_3 -- "..."
+MOTLIE_PAGED_ATTN_CONTEXT=4096 ./target/release/examples/models_v0_3 -- "..."
 ```
 
 This gives the same 56 tok/s generation throughput with correct output at all
@@ -411,7 +411,7 @@ but decode performance — the bottleneck for interactive use — is identical.
 | Model | Config | Gen tok/s | Prompt tok/s | Notes |
 |-------|--------|-----------|--------------|-------|
 | Qwen3-4B | `cuda,flash-attn` | 56 | 561 | flash-attn works correctly |
-| Gemma 4 E2B-it | `cuda` + `MOTLIE_PAGED_ATTN=1` | 56 | 19 | flash-attn has NaN bug |
+| Gemma 4 E2B-it | `cuda` + `MOTLIE_PAGED_ATTN_CONTEXT=4096` | 56 | 19 | flash-attn has NaN bug |
 | Embeddings | CPU (no cuda) | — | — | CUDA slower for batch embeddings |
 
 **Important**: PagedAttention crashes on long input sequences. See
@@ -631,7 +631,7 @@ interactive UX).
 | Model | Best Config | Max Context | TTFT (typical) | Decode tok/s | RSS |
 |-------|-------------|-------------|----------------|-------------|-----|
 | Qwen3-4B | **`cuda,flash-attn`** | **14k+ tokens** | 3–60s | 9–50 | ~1.3 GiB |
-| Gemma 4 E2B-it | `cuda` + `MOTLIE_PAGED_ATTN=1` | **~500 tokens** | 1.7–14s | 48–61 | ~1.8 GiB |
+| Gemma 4 E2B-it | `cuda` + `MOTLIE_PAGED_ATTN_CONTEXT=4096` | **~500 tokens** | 1.7–14s | 48–61 | ~1.8 GiB |
 | Gemma 4 E2B-it | CPU (fallback) | unlimited | 14–81s+ | 9–10 | ~9.1 GiB |
 | Embeddings | CPU | n/a | <0.2s | — | 1.6–2.5 GiB |
 
@@ -645,7 +645,7 @@ RUSTFLAGS="-C target-cpu=native" cargo build --release \
 # Gemma 4 E2B-it (short-context CUDA)
 RUSTFLAGS="-C target-cpu=native" cargo build --release \
   -p motlie-models --features 'model-gemma4-e2b,cuda'
-# Run with: MOTLIE_PAGED_ATTN=1
+# Run with: MOTLIE_PAGED_ATTN_CONTEXT=4096
 
 # Gemma 4 E2B-it (long-context CPU fallback)
 RUSTFLAGS="-C target-cpu=native" cargo build --release \
