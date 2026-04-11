@@ -498,6 +498,111 @@ The engine is responsible for:
 - building the typed command enum
 - executing it against mutable context
 
+### 4a. Help Architecture
+
+`help` should be engine-owned, but feature-composed from the same command sets that define
+the executable command surface.
+
+That means:
+
+1. the aggregate `CommandSet` builds one feature-gated `clap::Command` tree
+2. the engine's built-in `help` command renders from that already-composed tree
+3. disabled command families contribute no help because they contribute no command tree
+4. frontend layers such as `driver::repl` and `driver::tui` should not carry their own
+   duplicated command help text
+
+So the source of truth stays one thing: the composed command schema.
+
+For example:
+
+```rust
+#[async_trait::async_trait]
+impl CommandSet<AppContext> for AppCommand {
+    fn root_command() -> clap::Command {
+        let mut root = clap::Command::new("motlie");
+
+        #[cfg(feature = "driver-commands-tmux")]
+        {
+            root = root.subcommand(TmuxCommand::root_command());
+        }
+
+        #[cfg(feature = "driver-commands-vmm")]
+        {
+            root = root.subcommand(VmmCommand::root_command());
+        }
+
+        root
+    }
+}
+```
+
+If `driver-commands-tmux` is disabled, `tmux` does not appear in:
+
+- parsing
+- static completion
+- `help`
+
+There are two help layers:
+
+1. structural help from `clap`
+   - command names
+   - subcommands
+   - flags
+   - argument names
+   - usage text
+2. optional extended help from adapter modules
+   - examples
+   - operator notes
+   - mode comparisons
+   - caveats
+
+The engine should support both.
+
+The default behavior should be:
+
+1. resolve the requested command path against the composed tree
+2. ask enabled command modules whether they provide extended help for that topic
+3. if extended help exists, render it
+4. otherwise fall back to `clap`-generated help for that node
+
+A minimal extension hook looks like:
+
+```rust
+pub struct HelpTopic {
+    pub command_path: &'static [&'static str],
+    pub body: &'static str,
+}
+
+pub trait CommandDocs {
+    fn help_topics() -> &'static [HelpTopic];
+}
+```
+
+This remains feature-composed in exactly the same way as the command tree:
+
+```rust
+fn render_extended_help(path: &[&str]) -> Option<&'static str> {
+    #[cfg(feature = "driver-commands-tmux")]
+    for topic in TmuxCommand::help_topics() {
+        if topic.command_path == path {
+            return Some(topic.body);
+        }
+    }
+
+    #[cfg(feature = "driver-commands-vmm")]
+    for topic in VmmCommand::help_topics() {
+        if topic.command_path == path {
+            return Some(topic.body);
+        }
+    }
+
+    None
+}
+```
+
+This is the right replacement for the current tmux example approach, where plain REPL help
+and TUI help are duplicated and drift independently.
+
 ### 5. `clap` provides static structure
 
 Static completion comes from the `clap::Command` tree:

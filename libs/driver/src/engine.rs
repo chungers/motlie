@@ -1,18 +1,39 @@
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 
+use crate::clap::{analyze_completion, render_help};
 use crate::completion::{CompletionCandidate, CompletionRequest};
+use crate::completion::dedup_sorted;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandEffect {
+    ExitShell,
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct CommandOutput {
     pub lines: Vec<String>,
+    pub effects: Vec<CommandEffect>,
 }
 
 impl CommandOutput {
     pub fn line(line: impl Into<String>) -> Self {
         Self {
             lines: vec![line.into()],
+            effects: Vec::new(),
         }
+    }
+
+    pub fn text(text: impl AsRef<str>) -> Self {
+        Self {
+            lines: text.as_ref().lines().map(ToOwned::to_owned).collect(),
+            effects: Vec::new(),
+        }
+    }
+
+    pub fn with_effect(mut self, effect: CommandEffect) -> Self {
+        self.effects.push(effect);
+        self
     }
 }
 
@@ -58,25 +79,62 @@ where
 
     pub async fn run_argv(&mut self, argv: &[String]) -> Result<CommandOutput> {
         let root = S::root_command();
+
+        if let Some(first) = argv.first() {
+            if first == "help" {
+                let topic = argv.iter().skip(1).cloned().collect::<Vec<_>>();
+                let text = render_help(&root, &topic)?;
+                return Ok(CommandOutput::text(text));
+            }
+
+            if first == "quit" || first == "exit" {
+                return Ok(CommandOutput::default().with_effect(CommandEffect::ExitShell));
+            }
+        }
+
+        let argv = if argv.first().map(|arg| arg == root.get_name()).unwrap_or(false) {
+            argv.to_vec()
+        } else {
+            let mut prefixed = Vec::with_capacity(argv.len() + 1);
+            prefixed.push(root.get_name().to_string());
+            prefixed.extend(argv.iter().cloned());
+            prefixed
+        };
+
         let matches = root.try_get_matches_from(argv)?;
         let command = S::from_matches(&matches)?;
         command.execute(&mut self.context).await
     }
 
     pub fn complete(&self, line: &str, cursor: usize) -> Vec<CompletionCandidate> {
-        let partial = line.get(..cursor).unwrap_or(line);
-        let prefix = partial
-            .split_whitespace()
-            .last()
-            .unwrap_or_default();
-        S::complete(
+        let root = S::root_command();
+        let completion = analyze_completion(&root, line, cursor);
+        let path_refs = completion
+            .command_path
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+
+        let mut out = completion.static_candidates;
+
+        if path_refs.is_empty() {
+            for builtin in ["help", "quit"] {
+                if builtin.starts_with(&completion.prefix) {
+                    out.push(CompletionCandidate::new(builtin));
+                }
+            }
+        }
+
+        out.extend(S::complete(
             CompletionRequest {
-                command_path: &[],
-                arg_id: None,
-                prefix,
+                command_path: &path_refs,
+                arg_id: completion.arg_id.as_deref(),
+                prefix: &completion.prefix,
             },
             &self.context,
-        )
+        ));
+
+        dedup_sorted(out)
     }
 }
 
