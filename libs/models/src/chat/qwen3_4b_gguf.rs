@@ -120,38 +120,7 @@ pub fn bundle() -> Box<dyn ModelBundle> {
 }
 
 fn resolve_local_gguf_root(root: &Path) -> Result<PathBuf, ModelError> {
-    if !root.exists() {
-        return Err(ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` root `{}` does not exist",
-            root.display()
-        )));
-    }
-    // For GGUF bundles the root is the directory containing .gguf files directly.
-    // The specific file is selected at startup based on the quantization parameter.
-    let has_gguf = std::fs::read_dir(root)
-        .map_err(|e| {
-            ModelError::InvalidConfiguration(format!(
-                "failed to inspect GGUF artifacts in `{}`: {e}",
-                root.display()
-            ))
-        })?
-        .filter_map(Result::ok)
-        .any(|entry| {
-            entry
-                .file_name()
-                .to_str()
-                .map(|name| name.ends_with(".gguf"))
-                .unwrap_or(false)
-        });
-
-    if !has_gguf {
-        return Err(ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` requires at least one .gguf file for Qwen3-4B under `{}`",
-            root.display()
-        )));
-    }
-
-    Ok(root.to_path_buf())
+    crate::resolve_hf_gguf_snapshot("Qwen/Qwen3-4B-GGUF", root)
 }
 
 #[cfg(test)]

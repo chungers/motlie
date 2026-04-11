@@ -18,6 +18,7 @@ model-qwen3-4b = []
 model-gemma4-e2b = []
 model-qwen3-4b-gguf = ["dep:motlie-model-llama-cpp"]
 model-gemma4-e2b-gguf = ["dep:motlie-model-llama-cpp"]
+llama-cpp-cuda = ["motlie-model-llama-cpp/cuda"]
 
 [dependencies]
 async-trait = "0.1.89"

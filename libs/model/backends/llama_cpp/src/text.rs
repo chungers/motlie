@@ -19,7 +19,7 @@ use motlie_model::{
 
 use crate::common::{
     configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
-    observe_text_generation, should_force_cpu, snapshot_text_metrics, RuntimeMetricState,
+    observe_text_generation, resolve_gpu_layers, snapshot_text_metrics, RuntimeMetricState,
     TextMetricState,
 };
 
@@ -499,9 +499,8 @@ fn build_llama_model(
     })?;
 
     let mut model_params = LlamaModelParams::default();
-    if should_force_cpu() {
-        model_params = model_params.with_n_gpu_layers(0);
-    }
+    let n_gpu_layers = resolve_gpu_layers();
+    model_params = model_params.with_n_gpu_layers(n_gpu_layers);
 
     let model = LlamaModel::load_from_file(&backend, model_path, &model_params).map_err(|e| {
         ModelError::BackendInitialization {
