@@ -41,14 +41,13 @@ Resolve the open design questions before implementation spreads them across the 
 
 ### 0.4 Session-state management and cleanup policy
 
-- [ ] Lock the engine-side resource model for named resources:
-  `Owned`, `Imported`, and `Ephemeral`, plus whether locality is tracked explicitly as
-  `InProcess` vs `RemoteProxy`. Document how explicit engine close interacts with subsystem
-  shutdown APIs.
+- [ ] Lock the first implementation slice to `Owned + InProcess` resources only, and document
+  explicitly that `Imported` and `RemoteProxy` scenarios are deferred until after the first
+  vertical slice lands.
   Ref: [`Session State Model`](./DESIGN.md#session-state-model), [`Lifecycle and Rehydration Model`](./DESIGN.md#lifecycle-and-rehydration-model), [`LIFECYCLE.md`](./LIFECYCLE.md)
 
-- [ ] Decide the first attach/rehydrate scope to support explicitly:
-  tmux-only attach, or a more generic resource-import surface.
+- [ ] Document the deferred follow-on scenarios for `Imported` and `RemoteProxy` resources so
+  later phases have a stable target without contaminating the first slice.
   Ref: [`Open Questions`](./DESIGN.md#open-questions), [`LIFECYCLE.md`](./LIFECYCLE.md#attach-rehydrate-and-detach)
 
 ### 0.5 Phase-0 verification
@@ -56,7 +55,7 @@ Resolve the open design questions before implementation spreads them across the 
 - [ ] Verify the decision set is reflected consistently in both docs before code starts.
   Run:
   ```bash
-  rg -n "motlie repl|motlie tmux repl|help|quit|CommandFactory|FromArgMatches|Owned|Imported|Ephemeral|RemoteProxy|rehydrate|repl-vmm|repl-tmux|optional = true|required-features" libs/repl/docs
+  rg -n "motlie repl|motlie tmux repl|help|quit|Owned \\+ InProcess|Imported|RemoteProxy|repl-vmm|repl-tmux|optional = true|required-features" libs/repl/docs
   ```
   Ref: [`Summary`](./DESIGN.md#summary), [`Chosen Solution`](./DESIGN.md#chosen-solution)
 
@@ -144,27 +143,25 @@ tokenization, parsing, async dispatch, and the interactive shell frontend.
 
 ### 2.3 Command registry and state management
 
-- [ ] Implement `RegisteredCommand<C>` and the command storage model in `command.rs`.
+- [ ] Implement the typed `CommandSet<C>` surface and the app-level command composition model
+  in `command.rs`.
   Ref: [`Core Types`](./DESIGN.md#core-types), [`Command Registration Model`](./DESIGN.md#command-registration-model)
 
-- [ ] Implement `CommandEngine<C>` as the owner of mutable session context and named resource
-  state, including per-resource management metadata (`Owned`, `Imported`, `Ephemeral`) and
-  optional locality metadata (`InProcess`, `RemoteProxy`).
+- [ ] Implement `CommandEngine<C, S>` as the owner of mutable session context and named resource
+  state for the first vertical slice, using typed subsystem registries and `Owned +
+  InProcess` metadata only.
   Ref: [`Session State Model`](./DESIGN.md#session-state-model), [`Boundaries and Responsibilities`](./DESIGN.md#boundaries-and-responsibilities), [`LIFECYCLE.md`](./LIFECYCLE.md)
 
-- [ ] Define the adapter layer for managed resources in the command-engine crate rather than
-  requiring subsystem crates to implement engine traits directly.
-  Ref: [`Managed Resource Adapters`](./DESIGN.md#managed-resource-adapters), [`LIFECYCLE.md`](./LIFECYCLE.md#design-implications)
-
-- [ ] Implement raw clap command registration with async handler dispatch against `&mut C`.
-  Ref: [`Chosen Solution`](./DESIGN.md#chosen-solution), [`Command Registration Model`](./DESIGN.md#command-registration-model)
-
-- [ ] Implement the typed registration path chosen in Phase 0 and prove it can parse a
-  derive-based clap command into a handler call.
+- [ ] Implement the typed `CommandSet<C>` path chosen in Phase 0 and prove it can parse a
+  derive-based clap command family into enum-based execution without `dyn` handler dispatch.
   Ref: [`Command Registration Model`](./DESIGN.md#command-registration-model), [`API Ergonomics`](./DESIGN.md#api-ergonomics)
 
-- [ ] Ensure the registry assembly API works cleanly with `#[cfg(feature = "...")]`-gated
-  subsystem registration modules so disabled crates contribute no commands at all.
+- [ ] Implement typed subsystem registries with explicit getter/insert methods so commands can
+  access resources created by earlier commands without type erasure.
+  Ref: [`Session State Model`](./DESIGN.md#session-state-model), [`Typed Session Registry Contract`](./API.md#typed-session-registry-contract)
+
+- [ ] Ensure the app-level command composition works cleanly with `#[cfg(feature = "...")]`
+  command enums so disabled crates contribute no commands at all.
   Ref: [`Build-Time Command Surface`](./DESIGN.md#build-time-command-surface), [`Feature Gating and Cargo Composition`](./DESIGN.md#feature-gating-and-cargo-composition)
 
 ### 2.4 Engine execution and shell frontend
@@ -174,12 +171,11 @@ tokenization, parsing, async dispatch, and the interactive shell frontend.
   message/socket frontends.
   Ref: [`Chosen Solution`](./DESIGN.md#chosen-solution), [`Data Flow`](./DESIGN.md#data-flow)
 
-- [ ] Implement explicit engine close/shutdown behavior for `Owned` resources, explicit detach
-  behavior for `Imported` resources, and unconditional child cleanup for `Ephemeral`
-  resources, with the exact first-slice semantics documented near the code.
+- [ ] Implement explicit engine close/shutdown behavior for `Owned + InProcess` resources in
+  the first slice, including owned child cleanup such as PTY sessions.
   Ref: [`Lifecycle and Rehydration Model`](./DESIGN.md#lifecycle-and-rehydration-model), [`LIFECYCLE.md`](./LIFECYCLE.md)
 
-- [ ] Implement `InteractiveShell<C>::new`, prompt/name configuration, built-in command
+- [ ] Implement `InteractiveShell<C, S>::new`, prompt/name configuration, built-in command
   registration, and the `reedline` event loop in `repl.rs`.
   Ref: [`Chosen Solution`](./DESIGN.md#chosen-solution), [`Core Types`](./DESIGN.md#core-types)
 
@@ -189,7 +185,7 @@ tokenization, parsing, async dispatch, and the interactive shell frontend.
 
 - [ ] Add unit tests or focused integration tests covering:
   `help`, `quit`, successful handler execution, clap parse failure, handler error paths, and
-  the first close/detach semantics for owned, imported, and ephemeral records.
+  the first close semantics for owned VM and child-session records.
   Ref: [`Functional Requirements`](./DESIGN.md#functional-requirements), [`Chosen Solution`](./DESIGN.md#chosen-solution)
 
 ### 2.5 Phase-2 verification
@@ -217,18 +213,18 @@ Implement completion as the main differentiator over off-the-shelf wrappers.
   positions.
   Ref: [`Non-Functional Requirements`](./DESIGN.md#non-functional-requirements), [`Completion Model`](./DESIGN.md#completion-model)
 
-### 3.2 Dynamic completion provider API
+### 3.2 Dynamic completion surface
 
-- [ ] Implement the completion-provider registration surface and associate providers with a
-  command name plus argument id.
+- [ ] Implement the typed dynamic-completion surface through `CommandSet::complete(...)` and
+  ensure command families can inspect typed session state without mutable borrows.
   Ref: [`Completion Model`](./DESIGN.md#completion-model), [`Chosen Solution`](./DESIGN.md#chosen-solution)
 
-- [ ] Ensure provider evaluation uses read-oriented context access or snapshot-backed shared
+- [ ] Ensure completion evaluation uses read-oriented context access or snapshot-backed shared
   state rather than `&mut C`.
   Ref: [`Completion Model`](./DESIGN.md#completion-model), [`Risks and Mitigations`](./DESIGN.md#risks-and-mitigations)
 
-- [ ] Ensure the first provider API can surface names from the engine's own session registry,
-  not just ad hoc subsystem caches.
+- [ ] Ensure the first completion API can surface names from the engine's own typed session
+  registry, not just ad hoc subsystem caches.
   Ref: [`Completion Model`](./DESIGN.md#completion-model), [`Session State Model`](./DESIGN.md#session-state-model)
 
 ### 3.3 Completion merge logic
@@ -265,8 +261,8 @@ Turn the existing tmux example REPL into the first real consumer of the new engi
 
 ### 4.1 Extract tmux command registration
 
-- [ ] Create a reusable tmux command-registration module in `libs/tmux` or a clearly-scoped
-  tmux command-support module chosen during implementation.
+- [ ] Create a reusable tmux typed command family in `libs/tmux` or a clearly-scoped tmux
+  command-support module chosen during implementation.
   Ref: [`Tmux REPL`](./DESIGN.md#tmux-repl), [`Chosen Solution`](./DESIGN.md#chosen-solution)
 
 - [ ] Move the current tmux command definitions and handler logic out of
