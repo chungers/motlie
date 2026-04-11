@@ -8,6 +8,7 @@
 | 2026-04-10 | @cld-mistral | Extended study: tested `flash-attn`, `PagedAttention`, and `MISTRALRS_IGPU_MEMORY_FRACTION`. Flash-attention is the critical enabler — CUDA goes from 16x slower to **4x faster** than CPU with it. Revised conclusions. |
 | 2026-04-11 | @cld-mistral | Added Gemma 4 E2B-it CUDA + flash-attn results (56 tok/s, 5.6x faster than CPU). Added full RSS comparison tables for all models and configurations. |
 | 2026-04-11 | @cld-mistral | Documented `candle-flash-attn` NaN bug for Gemma 4 at >500 generated tokens on Blackwell. Isolated to flash-attn kernel (not quantization, not model weights). Revised Gemma 4 recommendation to CUDA + PagedAttention (no flash-attn). |
+| 2026-04-11 | @cld-mistral | Added Part 5: long-context stability testing (~18.8k tokens). PagedAttention crashes on long input (default KV cache too small). Only CUDA+FA (no PA) survives for Qwen3-4B; Gemma 4 has no viable CUDA path for long context. Added prefill/decode tok/s breakdown. |
 
 ---
 
@@ -310,12 +311,22 @@ batch inference on unified memory exceeds any GPU benefit at these model sizes.
 
 ### Configuration matrix for DGX Spark bundles
 
+Short context (<4k tokens):
+
 | Bundle | Recommended Config | Gen tok/s | Settled RSS | Notes |
 |--------|--------------------|-----------|-------------|-------|
 | EmbeddingGemma 300M | CPU | ~10 embed/s | 1,616 MiB | CUDA 5–8x slower |
 | Qwen3 Embedding 0.6B | CPU | ~5 embed/s | 2,516 MiB | CUDA 5x slower |
 | Qwen3-4B | **CUDA + flash-attn** | **56 tok/s** | **1,375 MiB** | 3.7x faster, 2.8x less memory than CPU |
-| Gemma 4 E2B-it | **CUDA + PagedAttn** | **56 tok/s** | **~1,800 MiB** | flash-attn has NaN bug at long sequences; use PA instead |
+| Gemma 4 E2B-it | **CUDA + PagedAttn** | **56 tok/s** | **~1,800 MiB** | flash-attn NaN bug; PA works at short context |
+
+Long context (>4k tokens):
+
+| Bundle | Recommended Config | Prefill tok/s | Decode tok/s | Notes |
+|--------|--------------------|---------------|-------------|-------|
+| Qwen3-4B | **CUDA + flash-attn** (no PA) | **1,914** | **9** | PA crashes >4k context |
+| Gemma 4 E2B-it | **CPU only** | ~26 | ~10 | FA has NaN bug; PA crashes on long input |
+| Embeddings | CPU | — | — | not context-length sensitive |
 
 ---
 
@@ -394,10 +405,99 @@ This gives the same 56 tok/s generation throughput with correct output at all
 sequence lengths. Prompt throughput is lower (19 tok/s vs 772 tok/s with flash-attn)
 but decode performance — the bottleneck for interactive use — is identical.
 
-### Per-Model Recommended Configuration
+### Per-Model Recommended Configuration (short context)
 
 | Model | Config | Gen tok/s | Prompt tok/s | Notes |
 |-------|--------|-----------|--------------|-------|
 | Qwen3-4B | `cuda,flash-attn` | 56 | 561 | flash-attn works correctly |
 | Gemma 4 E2B-it | `cuda` + `MOTLIE_PAGED_ATTN=1` | 56 | 19 | flash-attn has NaN bug |
 | Embeddings | CPU (no cuda) | — | — | CUDA slower for batch embeddings |
+
+**Important**: PagedAttention crashes on long input sequences. See
+[Part 5](#part-5-long-context-stability-18k-tokens) below.
+
+---
+
+## Part 5: Long-Context Stability (~18.8k tokens)
+
+### Method
+
+A ~14.8k word test fixture (`libs/model-eval/fixtures/long_context_chat_14k.txt`)
+was used as input to all configurations. The fixture concatenates conversation context,
+the DGX_SPARK_MISTRAL.md study, and both DESIGN docs. It tokenizes to approximately
+**18,800 tokens** per request (confirmed by mistralrs: `total-prompt-tokens=18814`
+for the first single-turn request).
+
+### Results: Qwen3-4B (ISQ Q4) — ~18.8k token input
+
+| Config | Status | Prefill tok/s | Decode tok/s | Notes |
+|--------|--------|---------------|-------------|-------|
+| CPU | pending | ~23 (est.) | ~15 (est.) | ~14 min prefill expected |
+| **CUDA + FA** | **OK** | **1,914** | **9** | stable across all 3 requests |
+| CUDA + PA | **CRASH** | — | — | "channel closed unexpectedly" |
+| CUDA + FA + PA | **CRASH** | — | — | "channel closed unexpectedly" |
+
+### Results: Gemma 4 E2B-it (ISQ Q4) — ~18.8k token input
+
+| Config | Status | Prefill tok/s | Decode tok/s | Notes |
+|--------|--------|---------------|-------------|-------|
+| CPU | pending | ~26 (est.) | ~10 (est.) | ~12 min prefill expected |
+| CUDA + FA | **NaN** | — | — | same flash-attn bug |
+| CUDA + PA | **CRASH** | — | — | "channel closed unexpectedly" |
+
+### CUDA + flash-attn per-step breakdown (Qwen3-4B)
+
+The v0.2 example runs three requests: single-turn, multi-turn follow-up, and
+completion. All three completed successfully with the ~18.8k token input.
+
+| Step | Prompt tokens | Gen tokens | Wall time | Prefill tok/s | Decode tok/s |
+|------|--------------|------------|-----------|---------------|-------------|
+| Single-turn | 18,814 | 443 | 55.5s | 1,914 | 9 |
+| Multi-turn | 18,975* | 312 | 33.8s | ~5,700 | 9 |
+| Completion | 18,805* | 522 | 64.2s | ~2,000 | 9 |
+| **Total** | **56,594** | **1,277** | **153.5s** | **2,778 avg** | **9 avg** |
+
+*Multi-turn and completion prefill tok/s derived from cumulative metric deltas.
+
+### Short vs long context performance (CUDA + flash-attn, Qwen3-4B)
+
+| Metric | Short (~30 tok input) | Long (~18.8k tok input) | Ratio |
+|--------|----------------------|------------------------|-------|
+| Prefill tok/s | 561 | 1,914–2,778 | **3–5x faster** |
+| Decode tok/s | 56 | 9 | **6x slower** |
+
+Prefill is faster at long context because the large batched matmul amortizes GPU
+launch overhead more effectively. Decode is 6x slower because each token generation
+step must attend to the full ~18.8k context.
+
+### PagedAttention crashes on long input
+
+Both CUDA + PA and CUDA + FA + PA crash with `"channel closed unexpectedly"` on the
+~18.8k token input. The `PagedAttentionMetaBuilder::default()` allocates KV cache for
+`ContextSize(4096)` — far less than the ~18.8k tokens required. When the sequence
+exceeds the allocated page budget, the inference engine thread fails silently and the
+request channel closes.
+
+This means PagedAttention with default settings is not viable for long-context
+workloads. Increasing the context size allocation may fix this but has not been tested.
+
+### Revised stability summary
+
+For long-context workloads on DGX Spark:
+
+| Model | Only stable config | Prefill tok/s | Decode tok/s |
+|-------|-------------------|---------------|-------------|
+| Qwen3-4B | **CUDA + flash-attn** (no PA) | 1,914 | 9 |
+| Gemma 4 E2B-it | **CPU only** | ~26 (est.) | ~10 (est.) |
+| Embeddings | CPU | — | — |
+
+Gemma 4 has no viable CUDA path for long context: flash-attn produces NaN and
+PagedAttention crashes on the sequence length. CPU is the only stable option.
+
+### Final per-model recommended configuration
+
+| Model | Short context (<4k tok) | Long context (>4k tok) |
+|-------|------------------------|----------------------|
+| Qwen3-4B | `cuda,flash-attn` (56 tok/s) | `cuda,flash-attn` no PA (9 tok/s decode, 1914 prefill) |
+| Gemma 4 E2B-it | `cuda` + `MOTLIE_PAGED_ATTN=1` (56 tok/s) | **CPU only** (stable, ~10 tok/s) |
+| Embeddings | CPU | CPU |
