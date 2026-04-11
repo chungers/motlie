@@ -60,3 +60,45 @@ cargo run -p motlie-tmux-driver -- --tui ssh://localhost
 - `tui off` returns from the split-screen TUI back to the plain REPL
 - plain `monitor <session>` uses an application-layer live render loop owned by this binary
 - split-screen TUI uses the shared `TmuxState` mirror/watch/stream state
+
+## Validation
+
+The driver has been smoke-tested end to end against:
+- host: `ssh://dchung@motliehost?identity-file=/home/dchung/.ssh/motliehost`
+- local frontend host: `spark-2f6e`
+
+The validation flow was:
+1. Build the top-level driver:
+   `cargo build -p motlie-tmux-driver`
+2. Launch the driver inside a local tmux session so `reedline` has a real terminal.
+3. Connect to `motliehost` and confirm existing sessions with `targets`.
+4. Create an isolated test session:
+   `create codex-e2e-smoke-20260411a`
+5. Send and capture shell output:
+   `send codex-e2e-smoke-20260411a echo hello-from-validation`
+   `capture codex-e2e-smoke-20260411a 20`
+6. Start attached monitoring:
+   `monitor codex-e2e-smoke-20260411a`
+7. Use a second driver instance to inject new output into the same remote session.
+8. Stop live follow with `Ctrl-C`.
+9. Read retained local history:
+   `mirror history --limit 10`
+10. Clean up the test session:
+    `kill codex-e2e-smoke-20260411a`
+    `targets`
+
+The historical `jarvis` session was not modified during validation.
+
+Saved validation artifacts are under:
+- [`validation/README.md`](/home/dchung/cdx-repl/motlie/bins/tmux/driver/validation/README.md)
+- [`00-initial-prompt.txt`](/home/dchung/cdx-repl/motlie/bins/tmux/driver/validation/00-initial-prompt.txt)
+- [`01-targets.txt`](/home/dchung/cdx-repl/motlie/bins/tmux/driver/validation/01-targets.txt)
+- [`02-create-send-capture.txt`](/home/dchung/cdx-repl/motlie/bins/tmux/driver/validation/02-create-send-capture.txt)
+- [`03-monitor-follow.txt`](/home/dchung/cdx-repl/motlie/bins/tmux/driver/validation/03-monitor-follow.txt)
+- [`04-mirror-history.txt`](/home/dchung/cdx-repl/motlie/bins/tmux/driver/validation/04-mirror-history.txt)
+- [`05-cleanup-targets.txt`](/home/dchung/cdx-repl/motlie/bins/tmux/driver/validation/05-cleanup-targets.txt)
+- [`06-writer-pane.txt`](/home/dchung/cdx-repl/motlie/bins/tmux/driver/validation/06-writer-pane.txt)
+
+Environment note:
+- `asciinema` is not installed in this environment, so there is no `.cast` artifact yet.
+- The saved proof artifacts are plain tmux pane captures from the validated session.
