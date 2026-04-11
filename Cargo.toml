@@ -5,6 +5,7 @@ members = [
     "libs/mcp",
     "libs/model",
     "libs/model/backends/mistral",
+    "libs/model/backends/llama_cpp",
     "libs/model-eval",
     "libs/models",
     "libs/tmux",

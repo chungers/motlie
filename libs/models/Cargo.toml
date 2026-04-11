@@ -16,12 +16,15 @@ model-google-gemma-300m = []
 model-qwen3-embedding-06b = []
 model-qwen3-4b = []
 model-gemma4-e2b = []
+model-qwen3-4b-gguf = ["dep:motlie-model-llama-cpp"]
+model-gemma4-e2b-gguf = ["dep:motlie-model-llama-cpp"]
 
 [dependencies]
 async-trait = "0.1.89"
 hf-hub = "0.5.0"
 motlie-model = { path = "../model" }
 motlie-model-mistral = { path = "../model/backends/mistral" }
+motlie-model-llama-cpp = { path = "../model/backends/llama_cpp", optional = true }
 thiserror.workspace = true
 
 [dev-dependencies]
@@ -47,3 +50,8 @@ required-features = ["model-qwen3-4b"]
 name = "models_v0_3"
 path = "examples/v0.3/main.rs"
 required-features = ["model-gemma4-e2b"]
+
+[[example]]
+name = "models_v0_4"
+path = "examples/v0.4/main.rs"
+required-features = ["model-qwen3-4b-gguf"]
