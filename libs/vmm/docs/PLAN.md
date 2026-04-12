@@ -87,10 +87,10 @@ Turn the working `v1.3` example into:
 - [ ] `examples/v1.4/harness` becomes the primary driver:
   - [x] `smoke` scenario
   - [x] `pty` scenario
-  - [ ] multi-guest named scenarios
-  - [ ] interactive/manual shell mode
+  - [x] multi-guest named scenarios
+  - [x] interactive/manual shell mode
   - [x] transcript/log bundle capture
-  - [ ] action/expectation script format
+  - [x] action/expectation script format
 
 The rule for this plan is:
 
@@ -351,29 +351,29 @@ Goal:
   hardcoding a fixed guest list in the example harness
 
 Tasks:
-- [ ] add `libs/vmm/src/provisioning.rs`
-- [ ] add a library-owned guest registry keyed by principal/guest name
-- [ ] define the stable allocation policy using
+- [x] add `libs/vmm/src/provisioning.rs`
+- [x] add a library-owned guest registry keyed by principal/guest name
+- [x] define the stable allocation policy using
   `libs/vmm/src/network_alloc.rs`
-- [ ] make allocation include:
-  - [ ] slot
-  - [ ] vsock CID
-  - [ ] admin ingress subnet/IP pair
-  - [ ] admin MAC
-  - [ ] egress MAC
-  - [ ] vhost-user socket path
-  - [ ] runtime namespace roots
-- [ ] add typed exhaustion errors instead of silent collision-prone saturation
-- [ ] add orchestrator entrypoint:
-  - [ ] `ensure_guest_for_principal()`
-- [ ] make the SSH proxy call the orchestrator to resolve-or-create guests
-- [ ] ensure shutdown/reboot reuses existing assignments within one harness run
+- [x] make allocation include:
+  - [x] slot
+  - [x] vsock CID
+  - [x] admin ingress subnet/IP pair
+  - [x] admin MAC
+  - [x] egress MAC
+  - [x] vhost-user socket path
+  - [x] runtime namespace roots
+- [x] add typed exhaustion errors instead of silent collision-prone saturation
+- [x] add orchestrator entrypoint:
+  - [x] `ensure_guest_for_principal()`
+- [x] make the SSH proxy call the orchestrator to resolve-or-create guests
+- [x] ensure shutdown/reboot reuses existing assignments within one harness run
 
 Acceptance:
 - `ssh alice@localhost` and `ssh bob@localhost` resolve predictably to their
   guests
-- `ssh jane@localhost` and `ssh mike@localhost` can create new guests on first
-  contact
+- `ssh joe@localhost` and `ssh zoe@localhost` can create new guests on first
+  contact when auto-provisioning is enabled
 - assignments are stable across relaunch within the same harness run
 - capacity exhaustion fails with a typed error instead of producing collisions
 
