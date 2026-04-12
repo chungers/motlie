@@ -1,174 +1,149 @@
-# Driver Lifecycle Inventory
+# Driver Lifecycle Notes
 
-## Change Log
+## Scope
 
-| Date | Change |
-|------|--------|
-| 2026-04-10 | Rename the lifecycle inventory to the driver architecture. Clarify that ownership semantics belong to driver adapters, not raw resource crates, and keep the scenario tables aligned with `repl owns`, `repl attaches`, and `repl manages remotely`. |
+This document describes the lifecycle semantics that are actually implemented in the current
+driver slice.
 
-This document records the resource-lifecycle inputs for the driver design in
-[`DESIGN.md`](./DESIGN.md).
+Current implemented resource family:
+- tmux
 
-Scope notes:
+Future resource families such as VMM/VNET/VFS are intentionally omitted here until their
+driver adapters exist on `main`.
 
-1. This is a design-input document, not an implementation checklist.
-2. `tmux` is reviewed against the current `main` worktree.
-3. `vmm`, `vnet`, and `vfs` reflect the reviewed `feature/vmm` worktree as design input.
-4. The first implementation slice remains `Owned + InProcess` only. Attach and remote
-   management are documented here so the adapter contracts are honest from the start.
+## Layers
 
-## Driver-Local Management Semantics
+### Raw resource lifecycle
 
-The driver must distinguish raw resource lifecycle from driver-session semantics.
+Owned by the domain crate.
 
-| Mode | Meaning in driver state | Default engine-close behavior |
-|------|-------------------------|-------------------------------|
-| `Owned` | The session created the resource or explicitly claimed cleanup responsibility. | Call explicit subsystem cleanup APIs. |
-| `Imported` | The resource predated the session or was rehydrated from elsewhere. | Detach local state only by default. |
-| `Ephemeral` | A short-lived child attachment layered on a longer-lived parent. | Close the child handle unconditionally. |
+For tmux, `motlie-tmux` owns:
+- host connection lifecycle
+- session/window/pane creation and kill
+- monitor/watch handles
+- file transfer operations
 
-The driver should also track locality:
+### Driver session lifecycle
 
-| Locality | Meaning |
-|----------|---------|
-| `InProcess` | The driver holds the real handle in the current process. |
-| `RemoteProxy` | The driver holds a proxy or RPC capability managed elsewhere. |
+Owned by `TmuxState`.
 
-This is how a temporary admin shell can attach to already-running resources and later
-disappear without destroying them accidentally.
+The driver decides:
+- which sessions it considers locally owned
+- whether a watch/stream is currently active
+- what mirror content is retained locally
+- what the frontend should render from that local state
 
-## Crate Summary
+## tmux Resource Categories
 
-| Crate | Main live resources | Explicit cleanup today | Attach/import story today | Driver implication |
-|-------|---------------------|------------------------|---------------------------|--------------------|
-| `vmm` | `VmHandle`, `GuestPtySession` | Strong | Partial / future adapter work | Best lifecycle surface; explicit shutdown should remain the primary contract. |
-| `vnet` | `VnetHandle` | Strong | Weak | Good standalone managed resource if exposed directly. |
-| `vfs` | `FsServer`, guest mount helpers | Mixed | Weak | Usually better managed through a wrapper or through VMM. |
-| `tmux` | `HostHandle`, `Target`, monitor handles, `Fleet`, `OutputBus` | Mixed | Strong for rediscovery | Good attach/detach surface; be careful with ownership vs reference semantics. |
+### Host connection
 
-## Resource Inventory
+Type:
+- `HostHandle`
 
-### VMM
+Driver semantics:
+- created when `TmuxState::connect(uri)` runs
+- long-lived for the whole driver session
+- not exposed as a named child resource
 
-| Resource | Create / acquire | Main operations | Cleanup | Driver role |
-|----------|------------------|-----------------|---------|-------------|
-| `VmHandle` | `boot(...)` | `ready()`, `exec()`, `open_pty()`, observability | `shutdown().await` | Primary durable named VM resource |
-| `GuestPtySession` | `VmHandle::open_pty(...)` | send/resize/read/transcript | `close().await` | Short-lived named child attachment |
-| `GuestFsHandle` / VFS backing | provision/backing setup | readiness through VMM | `shutdown()` | Usually subordinate to VM lifecycle |
-| `GuestBridgeHandle` / SSH backing | control-plane setup | `exec()`, `open_pty()`, readiness | `shutdown()` | Usually subordinate to VM lifecycle |
-| VNET backing under VMM | network provision | health via parent | `shutdown()` | Usually subordinate to VM lifecycle |
+Cleanup:
+- implicit when the driver process exits and the handle drops
 
-### VNET
+### Owned sessions
 
-| Resource | Create / acquire | Main operations | Cleanup | Driver role |
-|----------|------------------|-----------------|---------|-------------|
-| `VnetHandle` | `VnetBackend::start()` | `is_alive()` | `shutdown()` plus best-effort `Drop` | Durable standalone network resource if exposed directly |
-| `VnetBackend` | `VnetBackend::new(config)` | `start()` | none | Setup helper only |
-| `VnetConfig` | builder/config | data only | none | Replayable setup input |
+Tracked by:
+- `TmuxState::owned_sessions`
 
-### VFS
+Driver semantics:
+- sessions created through `create` are marked locally owned
+- killing a target/session removes the owned mark
 
-| Resource | Create / acquire | Main operations | Cleanup | Driver role |
-|----------|------------------|-----------------|---------|-------------|
-| `FsServer` | builder/build | mount add/remove, `handle_op()`, events | none | Long-lived service object; usually wrapped |
-| `VsockConnectionHandler` | `new(server, tag)` | `serve(stream)` | connection close | Per-connection helper only |
-| `GuestMountRunner` | `new(specs)` | `mount_all()` | none | Setup helper only |
-| `MountHandles` | `mount_all()` | `join_all()` | external unmount / thread exit | Usually not a first-class driver root |
+Cleanup:
+- explicit `kill` when the operator requests it
+- the current tmux driver does not auto-kill all owned sessions on exit
 
-### tmux
+That is deliberate for the tmux slice:
+- a tmux operator shell may create sessions meant to outlive the shell itself
 
-| Resource | Create / acquire | Main operations | Cleanup | Driver role |
-|----------|------------------|-----------------|---------|-------------|
-| `HostHandle` | SSH/local constructors | discovery, target lookup, monitoring setup, session creation | no explicit top-level shutdown | Durable host capability |
-| `Target` | create, lookup, navigation | I/O, capture, `kill()`, `rename()`, `start_exec()` | `kill()` when destructive | Primary remote resource reference |
-| `SessionMonitorHandle` | monitoring startup | health/is-active | `shutdown().await` | Local child attachment |
-| `MonitorHandle` | aggregate monitoring startup | inspection/routing | `shutdown().await` | Local child aggregation object |
-| `ExecHandle` | `Target::start_exec()` | status/wait | task end | Short-lived child object |
-| `Fleet` | local builder/register | host routing / monitoring | `shutdown()` | Local coordination object |
-| `OutputBus` | local builder | subscribe/publish | `shutdown()` | Local coordination object |
+### Active watch
 
-## Scenario Matrices
+Type:
+- `SessionWatchHandle`
 
-The tables below describe adapter behavior, not changes required in the raw crates.
+Driver semantics:
+- at most one active watch at a time
+- starting a new watch replaces any existing watch/stream
+- `monitor stop` tears it down
+- leaving the tmux TUI also tears down managed watch/stream state
 
-### VMM
+Cleanup:
+- explicit via `shutdown_managed_state()`
 
-| Resource | `repl owns` | `repl attaches` | `repl manages remotely` |
-|----------|-------------|-----------------|-------------------------|
-| `VmHandle` | `Owned + InProcess`; registry name is driver-owned; engine close calls `shutdown().await`. | `Imported + InProcess`; attach requires future discovery/import adapter; engine close detaches only. | `Imported + RemoteProxy`; default engine close drops proxy/detaches only. |
-| `GuestPtySession` | `Ephemeral + InProcess`; always close explicitly on engine close. | Usually recreate from imported VM, not imported directly. | `Ephemeral + RemoteProxy`; close the child proxy only. |
-| VFS/network/control-plane backings | Usually subordinate to owned VM. | Usually subordinate to imported VM. | Usually subordinate to remote VM proxy. |
+### Active stream
 
-Important VMM semantic difference:
+Type:
+- driver-local `ManagedStream`
 
-- VMs and their backings are long-lived roots
-- PTYs are short-lived child attachments
-- VM restart should invalidate PTYs and similar child state
+Driver semantics:
+- at most one active stream at a time
+- polling-driven mirror updates
+- tracks consecutive failure count and last error
+- updates the mirror label when repeated polling errors happen
 
-### VNET
+Cleanup:
+- explicit via `shutdown_managed_state()`
 
-| Resource | `repl owns` | `repl attaches` | `repl manages remotely` |
-|----------|-------------|-----------------|-------------------------|
-| `VnetHandle` | `Owned + InProcess`; explicit `shutdown()` on close. | Future `Imported + InProcess` attach path if runtime discovery exists; detach by default. | `Imported + RemoteProxy`; proxy detach by default, remote destroy only via explicit command. |
-| Setup/config types | Replayable inputs only. | Rebuilt from saved metadata. | Serialized metadata only, not live managed handles. |
+### Mirror history
 
-### VFS
+Type:
+- `HistoryBuffer<TmuxHistoryEntry>`
 
-| Resource | `repl owns` | `repl attaches` | `repl manages remotely` |
-|----------|-------------|-----------------|-------------------------|
-| `FsServer` | Usually wrap it in a higher-level owned record that also owns listener/task lifecycle. | Weak today; only sensible through a wrapper that can rediscover transport state. | `Imported + RemoteProxy` only through a higher-level host/admin API. |
-| `VsockConnectionHandler` | Ephemeral child state only. | Do not import directly. | Do not proxy directly. |
-| `MountHandles` | Usually child state beneath a higher-level owner. | Prefer rebuild from higher-level state. | Manage through higher-level proxy, not raw thread handles. |
+Driver semantics:
+- local sidecar object, not a remote tmux resource
+- bounded FIFO
+- fed by monitor/stream/capture/history activity
+- consumed by:
+  - plain REPL live-follow
+  - `mirror history`
+  - future pagination/RPC work
 
-### tmux
+Cleanup:
+- local only
+- cleared by `mirror clear`
+- otherwise dropped with the driver session
 
-| Resource | `repl owns` | `repl attaches` | `repl manages remotely` |
-|----------|-------------|-----------------|-------------------------|
-| `HostHandle` | `Owned + InProcess` only if the session owns connection policy/resources; otherwise often `Imported + InProcess`. | `Imported + InProcess`; easy to recreate from saved URI/SSH config. | `Imported + RemoteProxy` if a host process exposes admin RPC. |
-| `Target` | May be `Owned` only when the driver created the tmux entity and claims cleanup responsibility. | Often `Imported + InProcess`; rediscover from host state. | `Imported + RemoteProxy`; destructive operations require explicit ownership policy. |
-| Monitor / exec handles | Usually `Ephemeral + InProcess`. | Recreate from rediscovered host/target. | Usually `Ephemeral + RemoteProxy`. |
+## Frontend Semantics
 
-Important tmux semantic difference:
+### Plain REPL
 
-- many tmux handles are references to remote state, not proof of ownership
-- only resources the session truly owns should be destroyed on default close
+Implemented in:
+- `driver::tmux_frontend::run_tmux_repl(...)`
 
-## Attach, Rehydrate, and Detach
+Lifecycle semantics:
+- command execution runs through `CommandEngine`
+- if live follow becomes active, the frontend pages through retained mirror history
+- `Ctrl-C` stops live follow and returns to the prompt
 
-The desired operator story is:
+### Split-screen TUI
 
-1. a host process or subsystem may already be running
-2. a temporary driver session attaches to it
-3. the session builds a local registry for commands and completion
-4. the session later detaches without destroying imported resources
+Implemented in:
+- `driver::tmux_frontend::run_tmux_tui(...)`
 
-Current status by crate:
+Lifecycle semantics:
+- same `CommandEngine` and `TmuxState` as the line REPL
+- mirrors the same active watch/stream state
+- `tui off` returns to the line REPL
+- leaving the TUI tears down managed watch/stream state
 
-| Crate | Attach potential today | Main gap |
-|-------|------------------------|----------|
-| `tmux` | Strong | Need explicit driver ownership policy for what is only referenced vs what is owned. |
-| `vmm` | Future-facing | Needs stable import/discovery API for already-running VMs. |
-| `vnet` | Weak | No clear import/rebuild API today. |
-| `vfs` | Weak | More service-oriented than attach-oriented. |
+## What Is Not Modeled Yet
 
-Driver close semantics should therefore be:
+Not implemented in the current driver lifecycle model:
+- imported resources
+- remote proxy resources
+- generic owned/imported/ephemeral enums
+- generalized detach/rehydrate flows across process boundaries
 
-1. close local child attachments
-2. stop local helper tasks
-3. destroy only `Owned` top-level resources
-4. drop `Imported` references cleanly
-
-## Contract Coverage Checklist
-
-The lifecycle contract is sufficiently documented when each managed resource has a clear
-answer for these questions:
-
-| Question | Why it matters |
-|----------|----------------|
-| What driver mode does it use? | Determines cleanup truthfulness. |
-| What locality does it use? | Determines real handle vs proxy semantics. |
-| What is the stable completion identity? | Keeps REPL/TUI/socket frontends aligned. |
-| What does engine close do? | Avoids leaks and accidental destruction. |
-| What does detach do? | Enables temporary admin sessions. |
-| What invalidates the record? | Prevents stale child handles after restart/disconnect. |
-| Can it be imported at all? | Avoids promising unsupported flows. |
+Those remain future design topics. The current tmux slice is intentionally:
+- local
+- in-process
+- single-session-state
+- explicit about only the resources it really manages today

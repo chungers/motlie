@@ -1,6 +1,7 @@
 use clap::{Arg, ArgAction, Command};
 
 use crate::completion::CompletionCandidate;
+use crate::error::{DriverError, DriverResult};
 
 #[derive(Debug, Clone)]
 pub struct CompletionContextOwned {
@@ -33,7 +34,11 @@ pub fn analyze_completion(root: &Command, line: &str, cursor: usize) -> Completi
         tokens.pop().unwrap_or_default()
     };
 
-    if tokens.first().map(|t| t == root.get_name()).unwrap_or(false) {
+    if tokens
+        .first()
+        .map(|t| t == root.get_name())
+        .unwrap_or(false)
+    {
         let _ = tokens.remove(0);
     }
 
@@ -79,7 +84,7 @@ pub fn analyze_completion(root: &Command, line: &str, cursor: usize) -> Completi
     }
 }
 
-pub fn render_help(root: &Command, command_path: &[String]) -> anyhow::Result<String> {
+pub fn render_help(root: &Command, command_path: &[String]) -> DriverResult<String> {
     let mut current = root.clone();
 
     for segment in command_path {
@@ -87,7 +92,7 @@ pub fn render_help(root: &Command, command_path: &[String]) -> anyhow::Result<St
             .get_subcommands()
             .find(|candidate| candidate.get_name() == segment)
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!("unknown help topic '{}'", segment))?;
+            .ok_or_else(|| DriverError::UnknownHelpTopic(segment.clone()))?;
         current = next;
     }
 
@@ -142,7 +147,10 @@ fn option_value_target(current: &Command, tokens: &[String]) -> Option<String> {
         }
 
         if let Some(long) = token.strip_prefix("--") {
-            if let Some(arg) = current.get_arguments().find(|arg| arg.get_long() == Some(long)) {
+            if let Some(arg) = current
+                .get_arguments()
+                .find(|arg| arg.get_long() == Some(long))
+            {
                 if arg_takes_value(arg) {
                     expecting = Some(arg.get_id().to_string());
                 }
@@ -152,7 +160,10 @@ fn option_value_target(current: &Command, tokens: &[String]) -> Option<String> {
 
         if token.starts_with('-') && token.len() == 2 {
             let short = token.chars().nth(1).unwrap_or_default();
-            if let Some(arg) = current.get_arguments().find(|arg| arg.get_short() == Some(short)) {
+            if let Some(arg) = current
+                .get_arguments()
+                .find(|arg| arg.get_short() == Some(short))
+            {
                 if arg_takes_value(arg) {
                     expecting = Some(arg.get_id().to_string());
                 }
@@ -179,7 +190,10 @@ fn positional_index(current: &Command, tokens: &[String], expecting_option_value
         }
 
         if let Some(long) = token.strip_prefix("--") {
-            if let Some(arg) = current.get_arguments().find(|arg| arg.get_long() == Some(long)) {
+            if let Some(arg) = current
+                .get_arguments()
+                .find(|arg| arg.get_long() == Some(long))
+            {
                 skip_option_value = arg_takes_value(arg);
                 continue;
             }
@@ -187,7 +201,10 @@ fn positional_index(current: &Command, tokens: &[String], expecting_option_value
 
         if token.starts_with('-') && token.len() == 2 {
             let short = token.chars().nth(1).unwrap_or_default();
-            if let Some(arg) = current.get_arguments().find(|arg| arg.get_short() == Some(short)) {
+            if let Some(arg) = current
+                .get_arguments()
+                .find(|arg| arg.get_short() == Some(short))
+            {
                 skip_option_value = arg_takes_value(arg);
                 continue;
             }
@@ -208,4 +225,57 @@ fn positional_args(current: &Command) -> Vec<&Arg> {
 
 fn arg_takes_value(arg: &Arg) -> bool {
     matches!(arg.get_action(), ArgAction::Set | ArgAction::Append)
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::{Arg, ArgAction, Command};
+
+    use super::{analyze_completion, render_help};
+
+    fn root() -> Command {
+        Command::new("demo")
+            .subcommand(
+                Command::new("stream")
+                    .arg(Arg::new("target").required(true))
+                    .arg(Arg::new("mode").long("mode").action(ArgAction::Set))
+                    .arg(Arg::new("pattern").long("pattern").action(ArgAction::Set)),
+            )
+            .subcommand(Command::new("capture").arg(Arg::new("lines").required(true)))
+    }
+
+    #[test]
+    fn analyze_completion_tracks_command_path_and_positional_arg() {
+        let completion = analyze_completion(&root(), "stream dem", "stream dem".len());
+        assert_eq!(completion.command_path, vec!["stream".to_string()]);
+        assert_eq!(completion.arg_id.as_deref(), Some("target"));
+        assert_eq!(completion.prefix, "dem");
+    }
+
+    #[test]
+    fn analyze_completion_suggests_option_flags() {
+        let completion = analyze_completion(&root(), "stream demo --mo", "stream demo --mo".len());
+        let values = completion
+            .static_candidates
+            .into_iter()
+            .map(|candidate| candidate.value)
+            .collect::<Vec<_>>();
+
+        assert!(values.contains(&"--mode".to_string()));
+    }
+
+    #[test]
+    fn analyze_completion_marks_option_value_target() {
+        let completion =
+            analyze_completion(&root(), "stream demo --mode ", "stream demo --mode ".len());
+        assert_eq!(completion.arg_id.as_deref(), Some("mode"));
+        assert_eq!(completion.prefix, "");
+    }
+
+    #[test]
+    fn render_help_walks_subcommand_tree() {
+        let rendered = render_help(&root(), &[String::from("stream")]).expect("stream help");
+        assert!(rendered.contains("stream"));
+        assert!(rendered.contains("--mode"));
+    }
 }

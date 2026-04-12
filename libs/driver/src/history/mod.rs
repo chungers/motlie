@@ -1,5 +1,8 @@
 use std::collections::VecDeque;
+use std::num::NonZeroUsize;
 use std::time::SystemTime;
+
+use crate::error::{DriverError, DriverResult};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryRecord<T> {
@@ -18,23 +21,27 @@ pub struct HistoryPage<T> {
 
 #[derive(Debug, Clone)]
 pub struct HistoryBuffer<T> {
-    capacity: usize,
+    capacity: NonZeroUsize,
     next_seq: u64,
     items: VecDeque<HistoryRecord<T>>,
 }
 
 impl<T> HistoryBuffer<T> {
-    pub fn new(capacity: usize) -> Self {
-        assert!(capacity > 0, "history capacity must be > 0");
+    pub fn new(capacity: NonZeroUsize) -> Self {
         Self {
             capacity,
             next_seq: 1,
-            items: VecDeque::with_capacity(capacity),
+            items: VecDeque::with_capacity(capacity.get()),
         }
     }
 
     pub fn capacity(&self) -> usize {
-        self.capacity
+        self.capacity.get()
+    }
+
+    pub fn try_with_capacity(capacity: usize) -> DriverResult<Self> {
+        let capacity = NonZeroUsize::new(capacity).ok_or(DriverError::InvalidHistoryCapacity)?;
+        Ok(Self::new(capacity))
     }
 
     pub fn len(&self) -> usize {
@@ -65,7 +72,7 @@ impl<T> HistoryBuffer<T> {
         let seq = self.next_seq;
         self.next_seq += 1;
 
-        if self.items.len() == self.capacity {
+        if self.items.len() == self.capacity.get() {
             let _ = self.items.pop_front();
         }
 
@@ -111,7 +118,7 @@ mod tests {
 
     #[test]
     fn history_buffer_is_bounded() {
-        let mut history = HistoryBuffer::new(2);
+        let mut history = HistoryBuffer::try_with_capacity(2).expect("non-zero history");
         history.push("one");
         history.push("two");
         history.push("three");
@@ -130,7 +137,7 @@ mod tests {
 
     #[test]
     fn history_buffer_pages_after_cursor() {
-        let mut history = HistoryBuffer::new(4);
+        let mut history = HistoryBuffer::try_with_capacity(4).expect("non-zero history");
         let one = history.push("one");
         let two = history.push("two");
         let _three = history.push("three");
@@ -144,5 +151,11 @@ mod tests {
 
         assert_eq!(values, vec!["two", "three"]);
         assert_eq!(page.next_after, Some(two + 1));
+    }
+
+    #[test]
+    fn history_buffer_rejects_zero_capacity() {
+        let err = HistoryBuffer::<&str>::try_with_capacity(0).expect_err("zero capacity rejected");
+        assert_eq!(err.to_string(), "history capacity must be > 0");
     }
 }

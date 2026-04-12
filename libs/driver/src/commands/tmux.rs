@@ -1,21 +1,22 @@
 use std::collections::HashSet;
+use std::num::NonZeroUsize;
 use std::str::FromStr;
 use std::time::Duration;
 
-use anyhow::{Result, bail};
 use async_trait::async_trait;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use regex::Regex;
 
 use motlie_tmux::{
     CaptureNormalizeMode, CaptureOptions, CreateSessionOptions, CreateWindowOptions, FidelityIssue,
-    HostHandle, KeySequence, MonitorHealth, ScrollbackQuery, SessionWatchHandle,
+    HostHandle, KeySequence, MonitorHealth, PaneAddress, ScrollbackQuery, SessionWatchHandle,
     SessionWatchOptions, SplitDirection, SplitPaneOptions, SplitSize, SshConfig, Target,
     TransferOptions, has_visible_text, overlap_deduplicate,
 };
 
 use crate::completion::{CompletionCandidate, CompletionRequest};
 use crate::engine::{CommandEffect, CommandOutput, CommandSet};
+use crate::error::{DriverError, DriverResult};
 use crate::history::{HistoryBuffer, HistoryPage};
 
 const TMUX_HISTORY_CAPACITY: usize = 256;
@@ -36,7 +37,7 @@ pub struct TmuxState {
 }
 
 impl TmuxState {
-    pub async fn connect(uri: &str) -> Result<Self> {
+    pub async fn connect(uri: &str) -> DriverResult<Self> {
         let host = SshConfig::parse(uri)?.connect().await?;
         let mut state = Self::new(uri.to_string(), host);
         state.refresh_discovery().await?;
@@ -56,7 +57,7 @@ impl TmuxState {
             mirror_label: String::new(),
             mirror_ansi: false,
             mirror_auto_refresh: false,
-            mirror_history: HistoryBuffer::new(TMUX_HISTORY_CAPACITY),
+            mirror_history: HistoryBuffer::new(tmux_history_capacity()),
         }
     }
 
@@ -68,7 +69,7 @@ impl TmuxState {
         self.known_targets.iter().map(String::as_str)
     }
 
-    pub async fn refresh_discovery(&mut self) -> Result<()> {
+    pub async fn refresh_discovery(&mut self) -> DriverResult<()> {
         let trees = self.host.snapshot_targets().await?;
         let mut sessions = Vec::new();
         let mut targets = Vec::new();
@@ -94,7 +95,7 @@ impl TmuxState {
         Ok(())
     }
 
-    async fn clear_watch(&mut self) -> Result<()> {
+    async fn clear_watch(&mut self) -> DriverResult<()> {
         if let Some(watch) = self.active_watch.take() {
             watch.shutdown().await?;
         }
@@ -105,7 +106,7 @@ impl TmuxState {
         self.active_stream = None;
     }
 
-    pub async fn refresh_mirror(&mut self) -> Result<()> {
+    pub async fn refresh_mirror(&mut self) -> DriverResult<()> {
         if self.active_stream.is_some() {
             self.tick_stream().await?;
         } else if self.mirror_auto_refresh {
@@ -138,7 +139,7 @@ impl TmuxState {
         self.active_watch.is_some() || self.active_stream.is_some()
     }
 
-    pub async fn shutdown_managed_state(&mut self) -> Result<()> {
+    pub async fn shutdown_managed_state(&mut self) -> DriverResult<()> {
         self.clear_stream();
         self.clear_watch().await
     }
@@ -151,7 +152,7 @@ impl TmuxState {
         self.owned_sessions.remove(session);
     }
 
-    async fn tick_stream(&mut self) -> Result<()> {
+    async fn tick_stream(&mut self) -> DriverResult<()> {
         let mut stream = match self.active_stream.take() {
             Some(stream) => stream,
             None => return Ok(()),
@@ -163,7 +164,15 @@ impl TmuxState {
         }
         stream.last_tick = tokio::time::Instant::now();
 
-        let Some(target) = self.host.resolve_target_str(&stream.target).await? else {
+        let target_name = stream.target.clone();
+        let Some(target) = self.host.resolve_target_str(&target_name).await? else {
+            self.note_stream_error(
+                &mut stream,
+                DriverError::NotFound {
+                    kind: "tmux target",
+                    name: target_name,
+                },
+            );
             self.active_stream = Some(stream);
             return Ok(());
         };
@@ -171,34 +180,42 @@ impl TmuxState {
         match stream.spec.mode {
             StreamModeArg::Visible => {
                 let opts = CaptureOptions::with_mode(CaptureNormalizeMode::ScreenStable);
-                if let Ok(result) = target.capture_with_options(&opts).await {
-                    if result.text != stream.previous {
-                        self.mirror_text = result.text.clone();
-                        stream.previous = result.text;
-                        self.record_current_mirror_state();
+                match target.capture_with_options(&opts).await {
+                    Ok(result) => {
+                        self.clear_stream_error(&mut stream);
+                        if result.text != stream.previous {
+                            self.mirror_text = result.text.clone();
+                            stream.previous = result.text;
+                            self.record_current_mirror_state();
+                        }
                     }
+                    Err(error) => self.note_stream_error(&mut stream, error.into()),
                 }
             }
             StreamModeArg::Tail => {
                 let query = ScrollbackQuery::LastLines(stream.spec.lines);
-                if let Ok(current) = target.sample_text(&query).await {
-                    if !current.is_empty() && current != stream.previous {
-                        let (merged, _) = overlap_deduplicate(&stream.previous, &current, 5);
-                        if merged != stream.previous {
-                            if merged.starts_with(&stream.previous) {
-                                self.mirror_text.push_str(&merged[stream.previous.len()..]);
-                            } else {
-                                self.mirror_text.push_str(&current);
-                                if !current.ends_with('\n') {
-                                    self.mirror_text.push('\n');
+                match target.sample_text(&query).await {
+                    Ok(current) => {
+                        self.clear_stream_error(&mut stream);
+                        if !current.is_empty() && current != stream.previous {
+                            let (merged, _) = overlap_deduplicate(&stream.previous, &current, 5);
+                            if merged != stream.previous {
+                                if merged.starts_with(&stream.previous) {
+                                    self.mirror_text.push_str(&merged[stream.previous.len()..]);
+                                } else {
+                                    self.mirror_text.push_str(&current);
+                                    if !current.ends_with('\n') {
+                                        self.mirror_text.push('\n');
+                                    }
                                 }
                             }
+                            stream.previous = merged;
                         }
-                        stream.previous = merged;
+                        trim_mirror_text(&mut self.mirror_text);
+                        self.record_current_mirror_state();
                     }
+                    Err(error) => self.note_stream_error(&mut stream, error.into()),
                 }
-                trim_mirror_text(&mut self.mirror_text);
-                self.record_current_mirror_state();
             }
             StreamModeArg::Until => {
                 if let Some(pattern) = stream.pattern.as_ref() {
@@ -206,12 +223,16 @@ impl TmuxState {
                         pattern: pattern.clone(),
                         max_lines: stream.spec.lines,
                     };
-                    if let Ok(content) = target.sample_text(&query).await {
-                        if content != stream.previous {
-                            self.mirror_text = content.clone();
-                            stream.previous = content;
-                            self.record_current_mirror_state();
+                    match target.sample_text(&query).await {
+                        Ok(content) => {
+                            self.clear_stream_error(&mut stream);
+                            if content != stream.previous {
+                                self.mirror_text = content.clone();
+                                stream.previous = content;
+                                self.record_current_mirror_state();
+                            }
                         }
+                        Err(error) => self.note_stream_error(&mut stream, error.into()),
                     }
                 }
             }
@@ -221,57 +242,47 @@ impl TmuxState {
                     normalize: CaptureNormalizeMode::PlainText,
                     ..Default::default()
                 };
-                if let Ok(result) = target.capture_with_options(&opts).await {
-                    if result.text != stream.previous {
-                        let mut text = result.text.clone();
-                        if result.fidelity.degraded {
-                            if let Some(ref issues) = result.fidelity.issues {
-                                let names = issues
-                                    .iter()
-                                    .map(|issue| match issue {
-                                        FidelityIssue::ClientResize => "ClientResize",
-                                        FidelityIssue::PaneResize => "PaneResize",
-                                        FidelityIssue::HistoryTruncated => "HistoryTruncated",
-                                        FidelityIssue::OverlapResync => "OverlapResync",
-                                    })
-                                    .collect::<Vec<_>>();
-                                text.push_str(&format!("\n[DEGRADED: {}]", names.join(", ")));
+                match target.capture_with_options(&opts).await {
+                    Ok(result) => {
+                        self.clear_stream_error(&mut stream);
+                        if result.text != stream.previous {
+                            let mut text = result.text.clone();
+                            if result.fidelity.degraded {
+                                if let Some(ref issues) = result.fidelity.issues {
+                                    let names = issues
+                                        .iter()
+                                        .map(|issue| match issue {
+                                            FidelityIssue::ClientResize => "ClientResize",
+                                            FidelityIssue::PaneResize => "PaneResize",
+                                            FidelityIssue::HistoryTruncated => "HistoryTruncated",
+                                            FidelityIssue::OverlapResync => "OverlapResync",
+                                        })
+                                        .collect::<Vec<_>>();
+                                    text.push_str(&format!("\n[DEGRADED: {}]", names.join(", ")));
+                                }
+                            } else {
+                                text.push_str("\n[FIDELITY: CLEAN]");
                             }
-                        } else {
-                            text.push_str("\n[FIDELITY: CLEAN]");
+                            self.mirror_text = text;
+                            stream.previous = result.text;
+                            self.record_current_mirror_state();
                         }
-                        self.mirror_text = text;
-                        stream.previous = result.text;
-                        self.record_current_mirror_state();
                     }
+                    Err(error) => self.note_stream_error(&mut stream, error.into()),
                 }
             }
-            StreamModeArg::Render => {
-                if let Ok(panes) = target.capture_all().await {
-                    let session_name = target.session_name().to_string();
-                    let mut pane_list = panes.iter().collect::<Vec<_>>();
-                    pane_list.sort_by_key(|(address, _)| (address.window, address.pane));
-
-                    let mut rendered = String::new();
-                    for (address, content) in pane_list {
-                        if !has_visible_text(content) {
-                            continue;
-                        }
-                        rendered
-                            .push_str(&format!("--- {}({}) ---\n", session_name, address.pane_id));
-                        rendered.push_str(content);
-                        if !content.ends_with('\n') {
-                            rendered.push('\n');
-                        }
-                    }
-
+            StreamModeArg::Render => match target.capture_all().await {
+                Ok(panes) => {
+                    self.clear_stream_error(&mut stream);
+                    let rendered = render_pane_snapshot(target.session_name(), &panes);
                     if rendered != stream.previous {
                         self.mirror_text = rendered.clone();
                         stream.previous = rendered;
                         self.record_current_mirror_state();
                     }
                 }
-            }
+                Err(error) => self.note_stream_error(&mut stream, error.into()),
+            },
             StreamModeArg::Monitor => {}
         }
 
@@ -300,6 +311,33 @@ impl TmuxState {
             let _ = self.mirror_history.push(entry);
         }
     }
+
+    fn clear_stream_error(&mut self, stream: &mut ManagedStream) {
+        if stream.consecutive_failures == 0 {
+            return;
+        }
+
+        stream.consecutive_failures = 0;
+        stream.last_error = None;
+        self.mirror_label = stream.base_label();
+        self.record_current_mirror_state();
+    }
+
+    fn note_stream_error(&mut self, stream: &mut ManagedStream, error: DriverError) {
+        stream.consecutive_failures += 1;
+        let reason = error.to_string();
+        let changed = stream.last_error.as_deref() != Some(reason.as_str());
+        stream.last_error = Some(reason.clone());
+        self.mirror_label = format!(
+            "{} [error x{}: {}]",
+            stream.base_label(),
+            stream.consecutive_failures,
+            reason
+        );
+        if changed || stream.consecutive_failures == 1 {
+            self.record_current_mirror_state();
+        }
+    }
 }
 
 pub struct ManagedStream {
@@ -309,6 +347,14 @@ pub struct ManagedStream {
     previous: String,
     interval: Duration,
     last_tick: tokio::time::Instant,
+    consecutive_failures: usize,
+    last_error: Option<String>,
+}
+
+impl ManagedStream {
+    fn base_label(&self) -> String {
+        format!("stream: {} [{}]", self.target, self.spec.mode.as_str())
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -458,7 +504,19 @@ pub struct CaptureCommand {
 
 #[derive(Args)]
 pub struct MonitorCommand {
-    pub session: Option<String>,
+    #[command(subcommand)]
+    pub action: MonitorActionCommand,
+}
+
+#[derive(Subcommand)]
+pub enum MonitorActionCommand {
+    Start(MonitorStartCommand),
+    Stop,
+}
+
+#[derive(Args)]
+pub struct MonitorStartCommand {
+    pub session: String,
     pub seconds: Option<u64>,
 }
 
@@ -557,7 +615,7 @@ impl CommandSet<TmuxState> for TmuxCommand {
         TmuxRoot::command().name("tmux")
     }
 
-    fn from_matches(matches: &clap::ArgMatches) -> Result<Self> {
+    fn from_matches(matches: &clap::ArgMatches) -> DriverResult<Self> {
         Ok(TmuxRoot::from_arg_matches(matches)?.command)
     }
 
@@ -587,7 +645,7 @@ impl CommandSet<TmuxState> for TmuxCommand {
     ) -> Vec<CompletionCandidate> {
         match (request.command_path, request.arg_id) {
             (["new-window"], Some("session"))
-            | (["monitor"], Some("session"))
+            | (["monitor", "start"], Some("session"))
             | (["history"], Some("sessions")) => context
                 .sessions
                 .iter()
@@ -621,7 +679,7 @@ impl CommandSet<TmuxState> for TmuxCommand {
         }
     }
 
-    async fn execute(self, context: &mut TmuxState) -> Result<CommandOutput> {
+    async fn execute(self, context: &mut TmuxState) -> DriverResult<CommandOutput> {
         match self {
             Self::Create(cmd) => execute_create(context, cmd).await,
             Self::NewWindow(cmd) => execute_new_window(context, cmd).await,
@@ -642,7 +700,10 @@ impl CommandSet<TmuxState> for TmuxCommand {
     }
 }
 
-async fn execute_create(context: &mut TmuxState, cmd: CreateCommand) -> Result<CommandOutput> {
+async fn execute_create(
+    context: &mut TmuxState,
+    cmd: CreateCommand,
+) -> DriverResult<CommandOutput> {
     let mut opts = CreateSessionOptions::default();
     if let Some(size) = cmd.size {
         opts.width = Some(size.width);
@@ -671,7 +732,7 @@ async fn execute_create(context: &mut TmuxState, cmd: CreateCommand) -> Result<C
 async fn execute_new_window(
     context: &mut TmuxState,
     cmd: NewWindowCommand,
-) -> Result<CommandOutput> {
+) -> DriverResult<CommandOutput> {
     let session = resolve_target(&context.host, &cmd.session).await?;
     let mut opts = CreateWindowOptions {
         name: Some(cmd.name),
@@ -693,7 +754,7 @@ async fn execute_new_window(
 async fn execute_split_pane(
     context: &mut TmuxState,
     cmd: SplitPaneCommand,
-) -> Result<CommandOutput> {
+) -> DriverResult<CommandOutput> {
     let target = resolve_target(&context.host, &cmd.target).await?;
     let mut opts = SplitPaneOptions::default();
 
@@ -708,7 +769,10 @@ async fn execute_split_pane(
     }
     if let Some(cells) = cmd.cells {
         if cells == 0 {
-            bail!("--cells must be a positive integer");
+            return Err(DriverError::invalid_argument(
+                "cells",
+                "must be a positive integer",
+            ));
         }
         opts.size = Some(SplitSize::Cells(cells));
     }
@@ -721,7 +785,7 @@ async fn execute_split_pane(
     )))
 }
 
-async fn execute_kill(context: &mut TmuxState, cmd: KillCommand) -> Result<CommandOutput> {
+async fn execute_kill(context: &mut TmuxState, cmd: KillCommand) -> DriverResult<CommandOutput> {
     let target = resolve_target(&context.host, &cmd.target).await?;
     let session_name = target.session_name().to_string();
     target.kill().await?;
@@ -730,7 +794,7 @@ async fn execute_kill(context: &mut TmuxState, cmd: KillCommand) -> Result<Comma
     Ok(CommandOutput::line(format!("Killed: {}", cmd.target)))
 }
 
-fn execute_tui(cmd: TuiCommand) -> Result<CommandOutput> {
+fn execute_tui(cmd: TuiCommand) -> DriverResult<CommandOutput> {
     let output = match cmd.action {
         TuiActionCommand::On => {
             CommandOutput::line("Entering TUI mode").with_effect(CommandEffect::EnterTui)
@@ -742,7 +806,7 @@ fn execute_tui(cmd: TuiCommand) -> Result<CommandOutput> {
     Ok(output)
 }
 
-fn execute_mirror(context: &mut TmuxState, cmd: MirrorCommand) -> Result<CommandOutput> {
+fn execute_mirror(context: &mut TmuxState, cmd: MirrorCommand) -> DriverResult<CommandOutput> {
     match cmd.action {
         MirrorActionCommand::History(cmd) => execute_mirror_history(context, cmd),
         MirrorActionCommand::Clear => {
@@ -752,9 +816,15 @@ fn execute_mirror(context: &mut TmuxState, cmd: MirrorCommand) -> Result<Command
     }
 }
 
-fn execute_mirror_history(context: &mut TmuxState, cmd: MirrorHistoryCommand) -> Result<CommandOutput> {
+fn execute_mirror_history(
+    context: &mut TmuxState,
+    cmd: MirrorHistoryCommand,
+) -> DriverResult<CommandOutput> {
     if cmd.limit == 0 {
-        bail!("--limit must be a positive integer");
+        return Err(DriverError::invalid_argument(
+            "limit",
+            "must be a positive integer",
+        ));
     }
 
     let page = context.mirror_history_page(cmd.after, cmd.limit);
@@ -803,10 +873,13 @@ fn execute_mirror_history(context: &mut TmuxState, cmd: MirrorHistoryCommand) ->
         }
     }
 
-    Ok(CommandOutput { lines, effects: Vec::new() })
+    Ok(CommandOutput {
+        lines,
+        effects: Vec::new(),
+    })
 }
 
-async fn execute_targets(context: &mut TmuxState) -> Result<CommandOutput> {
+async fn execute_targets(context: &mut TmuxState) -> DriverResult<CommandOutput> {
     let trees = context.host.snapshot_targets().await?;
     context.refresh_discovery().await?;
 
@@ -845,7 +918,7 @@ async fn execute_targets(context: &mut TmuxState) -> Result<CommandOutput> {
     })
 }
 
-async fn execute_send(context: &mut TmuxState, cmd: SendCommand) -> Result<CommandOutput> {
+async fn execute_send(context: &mut TmuxState, cmd: SendCommand) -> DriverResult<CommandOutput> {
     let target = resolve_target(&context.host, &cmd.target).await?;
     let text = cmd.text.join(" ");
     let enter = KeySequence::parse("{Enter}")?;
@@ -854,16 +927,22 @@ async fn execute_send(context: &mut TmuxState, cmd: SendCommand) -> Result<Comma
     Ok(CommandOutput::line(format!("Sent to {}", cmd.target)))
 }
 
-async fn execute_keys(context: &mut TmuxState, cmd: KeysCommand) -> Result<CommandOutput> {
+async fn execute_keys(context: &mut TmuxState, cmd: KeysCommand) -> DriverResult<CommandOutput> {
     let target = resolve_target(&context.host, &cmd.target).await?;
     let keys = KeySequence::parse(&cmd.keys.join(" "))?;
     target.send_keys(&keys).await?;
     Ok(CommandOutput::line(format!("Sent keys to {}", cmd.target)))
 }
 
-async fn execute_capture(context: &mut TmuxState, cmd: CaptureCommand) -> Result<CommandOutput> {
+async fn execute_capture(
+    context: &mut TmuxState,
+    cmd: CaptureCommand,
+) -> DriverResult<CommandOutput> {
     if cmd.lines == 0 {
-        bail!("<lines> must be a positive integer");
+        return Err(DriverError::invalid_argument(
+            "lines",
+            "must be a positive integer",
+        ));
     }
 
     context.clear_stream();
@@ -891,30 +970,26 @@ async fn execute_capture(context: &mut TmuxState, cmd: CaptureCommand) -> Result
     }
 }
 
-async fn execute_monitor(context: &mut TmuxState, cmd: MonitorCommand) -> Result<CommandOutput> {
-    if matches!(cmd.session.as_deref(), Some("stop")) && cmd.seconds.is_none() {
-        let had_live_follow = context.has_live_follow();
-        context.shutdown_managed_state().await?;
-        if had_live_follow {
-            context.mirror_label = "monitor: stopped".to_string();
-            context.mirror_auto_refresh = false;
-            context.record_current_mirror_state();
-            return Ok(CommandOutput::line("Stopped active monitor/stream"));
-        }
-        return Ok(CommandOutput::line("No active monitor/stream"));
+async fn execute_monitor(
+    context: &mut TmuxState,
+    cmd: MonitorCommand,
+) -> DriverResult<CommandOutput> {
+    match cmd.action {
+        MonitorActionCommand::Start(cmd) => execute_monitor_start(context, cmd).await,
+        MonitorActionCommand::Stop => execute_monitor_stop(context).await,
     }
+}
 
-    let session = cmd
-        .session
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("missing <session>; use `monitor <session>` or `monitor stop`"))?;
-
+async fn execute_monitor_start(
+    context: &mut TmuxState,
+    cmd: MonitorStartCommand,
+) -> DriverResult<CommandOutput> {
     context.clear_stream();
     context.clear_watch().await?;
 
     let watch = context
         .host
-        .watch_session(session, &SessionWatchOptions::default())
+        .watch_session(&cmd.session, &SessionWatchOptions::default())
         .await?;
 
     if let Some(seconds) = cmd.seconds {
@@ -926,7 +1001,7 @@ async fn execute_monitor(context: &mut TmuxState, cmd: MonitorCommand) -> Result
         } else {
             rendered.clone()
         };
-        context.mirror_label = format!("watching: {session}");
+        context.mirror_label = format!("watching: {}", cmd.session);
         context.mirror_ansi = false;
         context.mirror_auto_refresh = false;
         context.record_current_mirror_state();
@@ -938,17 +1013,32 @@ async fn execute_monitor(context: &mut TmuxState, cmd: MonitorCommand) -> Result
 
     context.active_watch = Some(watch);
     context.mirror_text.clear();
-    context.mirror_label = format!("watching: {session}");
+    context.mirror_label = format!("watching: {}", cmd.session);
     context.mirror_ansi = false;
     context.mirror_auto_refresh = true;
     context.record_current_mirror_state();
     Ok(CommandOutput::line(format!(
         "Watching session: {} (attached; Ctrl-C to stop live follow)",
-        session
+        cmd.session
     )))
 }
 
-async fn execute_history(context: &mut TmuxState, cmd: HistoryCommand) -> Result<CommandOutput> {
+async fn execute_monitor_stop(context: &mut TmuxState) -> DriverResult<CommandOutput> {
+    let had_live_follow = context.has_live_follow();
+    context.shutdown_managed_state().await?;
+    if had_live_follow {
+        context.mirror_label = "monitor: stopped".to_string();
+        context.mirror_auto_refresh = false;
+        context.record_current_mirror_state();
+        return Ok(CommandOutput::line("Stopped active monitor/stream"));
+    }
+    Ok(CommandOutput::line("No active monitor/stream"))
+}
+
+async fn execute_history(
+    context: &mut TmuxState,
+    cmd: HistoryCommand,
+) -> DriverResult<CommandOutput> {
     context.clear_stream();
     context.clear_watch().await?;
 
@@ -959,21 +1049,15 @@ async fn execute_history(context: &mut TmuxState, cmd: HistoryCommand) -> Result
         match context.host.session(name).await? {
             Some(target) => {
                 let panes = target.capture_all().await?;
-                let mut pane_list = panes.iter().collect::<Vec<_>>();
-                pane_list.sort_by_key(|(address, _)| (address.window, address.pane));
-                for (address, content) in pane_list {
-                    if !motlie_tmux::has_visible_text(content) {
-                        continue;
-                    }
-                    output.push_str(&format!("--- {}({}) ---\n", name, address.pane_id));
-                    output.push_str(content);
-                    if !content.ends_with('\n') {
-                        output.push('\n');
-                    }
-                }
+                output.push_str(&render_pane_snapshot(name, &panes));
                 captured.push(name.clone());
             }
-            None => bail!("session '{}' not found", name),
+            None => {
+                return Err(DriverError::NotFound {
+                    kind: "tmux session",
+                    name: name.clone(),
+                });
+            }
         }
     }
 
@@ -994,14 +1078,20 @@ async fn execute_history(context: &mut TmuxState, cmd: HistoryCommand) -> Result
     Ok(CommandOutput::text(output))
 }
 
-async fn execute_stream(context: &mut TmuxState, cmd: StreamCommand) -> Result<CommandOutput> {
+async fn execute_stream(
+    context: &mut TmuxState,
+    cmd: StreamCommand,
+) -> DriverResult<CommandOutput> {
     context.clear_watch().await?;
     context.clear_stream();
 
     let target = resolve_target(&context.host, &cmd.target).await?;
 
     if matches!(cmd.mode, StreamModeArg::Until) && cmd.pattern.is_none() {
-        bail!("--pattern is required when --mode until");
+        return Err(DriverError::invalid_argument(
+            "pattern",
+            "is required when --mode until",
+        ));
     }
 
     if matches!(cmd.mode, StreamModeArg::Monitor) {
@@ -1053,6 +1143,8 @@ async fn execute_stream(context: &mut TmuxState, cmd: StreamCommand) -> Result<C
         previous: initial,
         interval: Duration::from_millis(cmd.interval_ms),
         last_tick: tokio::time::Instant::now() - Duration::from_millis(cmd.interval_ms),
+        consecutive_failures: 0,
+        last_error: None,
     });
 
     Ok(CommandOutput::line(format!(
@@ -1063,7 +1155,10 @@ async fn execute_stream(context: &mut TmuxState, cmd: StreamCommand) -> Result<C
     )))
 }
 
-async fn execute_upload(context: &mut TmuxState, cmd: UploadCommand) -> Result<CommandOutput> {
+async fn execute_upload(
+    context: &mut TmuxState,
+    cmd: UploadCommand,
+) -> DriverResult<CommandOutput> {
     let opts = TransferOptions {
         overwrite: true,
         recursive: cmd.recursive,
@@ -1078,7 +1173,10 @@ async fn execute_upload(context: &mut TmuxState, cmd: UploadCommand) -> Result<C
     )))
 }
 
-async fn execute_download(context: &mut TmuxState, cmd: DownloadCommand) -> Result<CommandOutput> {
+async fn execute_download(
+    context: &mut TmuxState,
+    cmd: DownloadCommand,
+) -> DriverResult<CommandOutput> {
     let opts = TransferOptions {
         overwrite: true,
         recursive: cmd.recursive,
@@ -1093,10 +1191,40 @@ async fn execute_download(context: &mut TmuxState, cmd: DownloadCommand) -> Resu
     )))
 }
 
-async fn resolve_target(host: &HostHandle, target_str: &str) -> Result<Target> {
+async fn resolve_target(host: &HostHandle, target_str: &str) -> DriverResult<Target> {
     host.resolve_target_str(target_str)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("target '{}' not found", target_str))
+        .ok_or_else(|| DriverError::NotFound {
+            kind: "tmux target",
+            name: target_str.to_string(),
+        })
+}
+
+fn tmux_history_capacity() -> NonZeroUsize {
+    NonZeroUsize::new(TMUX_HISTORY_CAPACITY)
+        .unwrap_or_else(|| unreachable!("TMUX_HISTORY_CAPACITY must be non-zero"))
+}
+
+fn render_pane_snapshot(
+    session_name: &str,
+    panes: &std::collections::HashMap<PaneAddress, String>,
+) -> String {
+    let mut pane_list = panes.iter().collect::<Vec<_>>();
+    pane_list.sort_by_key(|(address, _)| (address.window, address.pane));
+
+    let mut rendered = String::new();
+    for (address, content) in pane_list {
+        if !has_visible_text(content) {
+            continue;
+        }
+        rendered.push_str(&format!("--- {}({}) ---\n", session_name, address.pane_id));
+        rendered.push_str(content);
+        if !content.ends_with('\n') {
+            rendered.push('\n');
+        }
+    }
+
+    rendered
 }
 
 fn trim_mirror_text(text: &mut String) {
@@ -1137,7 +1265,7 @@ fn tmux_root_help() -> String {
         "  send <target> <text...>",
         "  keys <target> <keys...>",
         "  capture <target> <n>",
-        "  monitor <session> [seconds]",
+        "  monitor start <session> [seconds]",
         "  monitor stop",
         "  mirror history [--after N] [--limit N]",
         "  mirror clear",
@@ -1203,7 +1331,7 @@ fn tmux_stream_help() -> String {
 
 fn tmux_monitor_help() -> String {
     [
-        "monitor <session> [seconds]",
+        "monitor start <session> [seconds]",
         "monitor stop",
         "",
         "Start event-driven monitoring of a tmux session.",
@@ -1217,8 +1345,8 @@ fn tmux_monitor_help() -> String {
         "  `monitor stop` stops the active watch/stream and returns to idle state.",
         "",
         "Examples:",
-        "  monitor demo",
-        "  monitor demo 5",
+        "  monitor start demo",
+        "  monitor start demo 5",
         "  monitor stop",
     ]
     .join("\n")
@@ -1310,7 +1438,7 @@ mod tests {
             mirror_label: String::new(),
             mirror_ansi: false,
             mirror_auto_refresh: false,
-            mirror_history: HistoryBuffer::new(TMUX_HISTORY_CAPACITY),
+            mirror_history: HistoryBuffer::new(tmux_history_capacity()),
         }
     }
 
@@ -1408,6 +1536,19 @@ mod tests {
             .expect("monitor stop output");
 
         assert_eq!(output.lines, vec!["No active monitor/stream"]);
+    }
+
+    #[tokio::test]
+    async fn tmux_monitor_requires_explicit_subcommand() {
+        let state = test_state();
+
+        let mut engine = CommandEngine::<TmuxState, TmuxCommand>::new(state);
+        let error = engine
+            .run_line("monitor demo")
+            .await
+            .expect_err("monitor start syntax required");
+
+        assert!(error.to_string().contains("unrecognized subcommand"));
     }
 
     #[tokio::test]

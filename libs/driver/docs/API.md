@@ -1,43 +1,47 @@
-# Driver API Contract
+# motlie-driver API
 
-## Status: Draft
+## Status
 
-## Change Log
+Implemented surface for the current driver feasibility slice.
 
-| Date | Change |
-|------|--------|
-| 2026-04-10 | Rewrite the subsystem-facing contract for `motlie-driver`. The API is now driver-first, with adapter modules under `driver::commands::*` and frontend layers such as `driver::repl` consuming the generic engine. |
+This file documents the public API shape that exists in `libs/driver` today and the contract
+used by the tmux adapter. It does not describe speculative VMM/VNET/VFS adapter code that is
+not on `main`.
 
-## Scope
+## Core Types
 
-[`DESIGN.md`](./DESIGN.md) explains the architecture. This document explains what the driver
-expects from:
-
-- applications composing command families
-- adapter modules such as `driver::commands::vmm`
-- domain crates such as `vmm`
-
-The core rule is simple:
-
-- domain crates do not implement driver contracts directly
-- driver adapter modules consume domain-crate public APIs and implement driver semantics
-
-For the current `main` branch, that also means:
-
-- adapter modules may exist as placeholders before the corresponding resource crate lands
-- placeholder modules must not force nonexistent workspace members or Cargo dependencies
-- docs may describe future adapters such as VMM, but the scaffold on `main` must remain
-  dependency-safe
-
-## Core Driver Surface
-
-The intended generic surface is:
+### Output and effects
 
 ```rust
-pub struct CommandOutput {
-    pub lines: Vec<String>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandEffect {
+    ExitShell,
+    EnterTui,
+    ExitTui,
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct CommandOutput {
+    pub lines: Vec<String>,
+    pub effects: Vec<CommandEffect>,
+}
+```
+
+`CommandOutput` is the shared frontend payload:
+- `lines` are plain rendered text lines
+- `effects` are frontend control signals
+
+Current effect semantics:
+- `ExitShell`
+  - frontend should terminate
+- `EnterTui`
+  - tmux line REPL should switch into the tmux split-screen TUI
+- `ExitTui`
+  - tmux TUI should return to the line REPL
+
+### Completion
+
+```rust
 pub struct CompletionRequest<'a> {
     pub command_path: &'a [&'a str],
     pub arg_id: Option<&'a str>,
@@ -48,261 +52,187 @@ pub struct CompletionCandidate {
     pub value: String,
     pub help: Option<String>,
 }
-
-#[async_trait::async_trait]
-pub trait CommandSet<C>: Sized {
-    fn root_command() -> clap::Command;
-    fn from_matches(matches: &clap::ArgMatches) -> anyhow::Result<Self>;
-    fn complete(request: CompletionRequest<'_>, context: &C) -> Vec<CompletionCandidate>;
-    async fn execute(self, context: &mut C) -> anyhow::Result<CommandOutput>;
-}
-
-pub struct CommandEngine<C, S> {
-    /* generic runtime state */
-}
 ```
 
-This contract is intentionally typed and frontend-neutral.
-
-## What An Application Must Provide
-
-The application root owns composition.
-
-It must provide:
-
-| Capability | Required | Notes |
-|------------|----------|-------|
-| Aggregate context type such as `AppContext` | Yes | Holds typed subsystem registries and any app-level orchestration state. |
-| Aggregate command enum such as `AppCommand` | Yes | Composes the enabled command families into one typed surface. |
-| Feature-gated command-family inclusion | Yes | Disabled subsystems must disappear from build, parsing, and completion. |
-| Frontend assembly | Yes | Example: choose `ReplFrontend` or `TuiFrontend` and pass in a `CommandEngine`. |
-
-## What A Driver Adapter Module Must Provide
-
-Each adapter module under `driver::commands::*` is responsible for one command family.
-
-For example, `driver::commands::vmm` should provide:
-
-| Capability | Required | Purpose |
-|------------|----------|---------|
-| Typed command structs or subcommand structs | Yes | Reuse `clap` declarative schema. |
-| Typed family enum such as `VmmCommand` | Yes | Gives the family one typed execution surface. |
-| `CommandSet<C>` implementation | Yes | Parsing, execution, and completion for that family. |
-| Registry mapping policy | Yes | Decide how names map to live resources. |
-| Ownership/locality semantics | Yes | Mark handles as `Owned`, `Imported`, or `Ephemeral`; `InProcess` or `RemoteProxy`. |
-| Cleanup semantics | Yes | Define what engine `close()` and `detach()` mean for that family. |
-| Invalidation rules | Yes | Explain how child handles become stale after restart/disconnect. |
-| Import/rehydrate support | Optional | Needed only if the subsystem supports attach flows. |
-| Remote proxy support | Optional | Needed only if the subsystem supports admin-session management from another process. |
-
-## Management Semantics
-
-The driver layer should use explicit metadata around raw handles:
-
-```rust
-pub enum ResourceMode {
-    Owned,
-    Imported,
-    Ephemeral,
-}
-
-pub enum ResourceLocality {
-    InProcess,
-    RemoteProxy,
-}
-
-pub struct ManagedResource<T> {
-    pub mode: ResourceMode,
-    pub locality: ResourceLocality,
-    pub value: T,
-}
-```
-
-The adapter layer defines the semantics, not the raw resource type.
-
-That matters because the same `VmHandle` may be:
-
-- created locally by the REPL host
-- imported later by a local attach flow
-- represented remotely by an admin proxy
-
-## Typed Registry Contract
-
-The command engine should never have to downcast erased resources just to execute the next
-command. Registries should stay typed.
+`command_path` is the resolved subcommand path relative to the command-family root.
 
 Example:
+- input: `stream demo --mo`
+- request path: `["stream"]`
+- prefix: `--mo`
+
+### Errors
+
+Library code uses `DriverError` and `DriverResult<T>`, not `anyhow`.
+
+The error type currently covers:
+- invalid shell quoting
+- invalid help topics
+- invalid history capacity
+- IO / clap / task join failures
+- tmux and regex errors when the tmux adapter is enabled
+- not-found and invalid-argument cases
+- asciicast persistence failures
+
+## CommandSet Contract
 
 ```rust
-pub struct ManagedVm {
-    pub mode: ResourceMode,
-    pub locality: ResourceLocality,
-    pub handle: VmHandle,
-}
-
-pub struct VmmSessionState {
-    guests: HashMap<String, ManagedVm>,
-}
-
-impl VmmSessionState {
-    pub fn insert_guest(&mut self, name: String, vm: ManagedVm) -> anyhow::Result<()>;
-    pub fn guest(&self, name: &str) -> anyhow::Result<&ManagedVm>;
-    pub fn guest_mut(&mut self, name: &str) -> anyhow::Result<&mut ManagedVm>;
-    pub fn guest_names(&self) -> impl Iterator<Item = &str>;
-}
-```
-
-That gives the driver:
-
-1. deterministic name lookup
-2. dynamic completion from live state
-3. explicit cleanup on close
-4. a clean place for attach/import semantics later
-
-## `clap` and Completion Contract
-
-The split is:
-
-- `clap` defines static structure
-- the adapter defines runtime completion
-- the engine merges both
-
-Adapter responsibilities:
-
-| Completion concern | Who owns it |
-|--------------------|-------------|
-| Root commands, subcommands, flags | `clap` tree built by `root_command()` |
-| Static argument choices | `clap` metadata |
-| Live names such as guest aliases or tmux targets | adapter `complete(...)` implementation |
-| Candidate merge, de-duplication, sorting | driver core |
-| Mapping editor/TUI completion events into `CompletionRequest` | frontend layer |
-
-## VMM Contract
-
-`vmm` is the clearest example because it already has a strong lifecycle surface.
-
-### What the raw `vmm` crate should continue to own
-
-The raw crate owns lifecycle and business logic:
-
-- `prepare(...)`
-- `boot(...)`
-- `ready()`
-- `exec(...)`
-- `open_pty(...)`
-- `shutdown(...)`
-
-The driver must consume those APIs. It should not reimplement their semantics.
-
-### What `driver::commands::vmm` must add
-
-The VMM adapter owns:
-
-- user-facing command names such as `vmm boot`
-- naming of live VMs in the session registry
-- dynamic completion for guest names
-- close/detach behavior at driver shutdown
-- child-resource invalidation rules for PTYs and similar attachments
-- import/remote proxy wrappers if and when those scenarios are implemented
-
-### VMM resource contract by type
-
-| Resource | Raw crate lifecycle | Driver adapter responsibility |
-|----------|---------------------|-------------------------------|
-| `VmHandle` | `ready()`, `exec()`, `open_pty()`, `shutdown()` | Stable registry identity, `Owned/Imported` semantics, guest-name completion, close/detach policy, optional import/proxy adapter |
-| `GuestPtySession` | `send()`, `send_line()`, `resize()`, `transcript()`, `close()` | Parent linkage to named VM, `Ephemeral` classification, optional naming, invalidation on VM restart or close |
-| `GuestFsHandle` / VFS backing | provision/readiness/shutdown through VMM internals | Usually subordinate to VM lifecycle, not a top-level user-facing driver resource |
-| `GuestBridgeHandle` / SSH control plane | readiness, `exec`, `open_pty`, `shutdown` | Usually subordinate to VM lifecycle, not a top-level driver root |
-
-### VMM contract by scenario
-
-| Resource | `repl owns` | `repl attaches` | `repl manages remotely` |
-|----------|-------------|-----------------|-------------------------|
-| `VmHandle` | Store as `Owned + InProcess`; engine close calls `shutdown().await`. | Store as `Imported + InProcess`; engine close detaches by default. | Store as `Imported + RemoteProxy`; engine close drops proxy/detaches by default. |
-| `GuestPtySession` | Store as `Ephemeral + InProcess`; engine close calls `close().await`. | Usually recreate from imported VM instead of importing PTY state. | Store as `Ephemeral + RemoteProxy`; engine close closes the remote child session only. |
-
-### VMM adapter example
-
-```rust
-pub enum VmmCommand {
-    Boot(BootGuest),
-    Exec(ExecGuest),
-    Shutdown(ShutdownGuest),
-}
-
 #[async_trait::async_trait]
-impl CommandSet<AppContext> for VmmCommand {
-    fn root_command() -> clap::Command {
-        clap::Command::new("vmm")
-            .subcommand(BootGuest::command().name("boot"))
-            .subcommand(ExecGuest::command().name("exec"))
-            .subcommand(ShutdownGuest::command().name("shutdown"))
-    }
+pub trait CommandSet<C>: Sized {
+    type CompletionContext: Send + 'static;
 
-    fn from_matches(matches: &clap::ArgMatches) -> anyhow::Result<Self> {
-        match matches.subcommand() {
-            Some(("boot", sub)) => Ok(Self::Boot(BootGuest::from_arg_matches(sub)?)),
-            Some(("exec", sub)) => Ok(Self::Exec(ExecGuest::from_arg_matches(sub)?)),
-            Some(("shutdown", sub)) => Ok(Self::Shutdown(ShutdownGuest::from_arg_matches(sub)?)),
-            _ => anyhow::bail!("unknown vmm command"),
-        }
-    }
-
-    fn complete(request: CompletionRequest<'_>, ctx: &AppContext) -> Vec<CompletionCandidate> {
-        match (request.command_path, request.arg_id) {
-            (["vmm", "exec"], Some("name")) | (["vmm", "shutdown"], Some("name")) => ctx
-                .vmm
-                .guest_names()
-                .filter(|name| name.starts_with(request.prefix))
-                .map(CompletionCandidate::new)
-                .collect(),
-            _ => Vec::new(),
-        }
-    }
-
-    async fn execute(self, ctx: &mut AppContext) -> anyhow::Result<CommandOutput> {
-        match self {
-            Self::Boot(cmd) => {
-                let handle = motlie_vmm::boot(/* ... */).await?;
-                ctx.vmm.insert_guest(cmd.name.clone(), ManagedVm::owned_local(handle))?;
-                Ok(CommandOutput::line(format!("booted {}", cmd.name)))
-            }
-            Self::Exec(cmd) => {
-                let vm = ctx.vmm.guest(&cmd.name)?;
-                vm.handle.exec(&cmd.argv).await?;
-                Ok(CommandOutput::default())
-            }
-            Self::Shutdown(cmd) => {
-                let mut vm = ctx.vmm.remove_guest(&cmd.name)?;
-                vm.handle.shutdown().await?;
-                Ok(CommandOutput::line(format!("stopped {}", cmd.name)))
-            }
-        }
-    }
+    fn root_command() -> clap::Command;
+    fn from_matches(matches: &clap::ArgMatches) -> DriverResult<Self>;
+    fn completion_context(context: &C) -> Self::CompletionContext;
+    fn help(topic: &[String]) -> Option<String> { None }
+    fn complete(
+        request: CompletionRequest<'_>,
+        context: &Self::CompletionContext,
+    ) -> Vec<CompletionCandidate> { Vec::new() }
+    async fn execute(self, context: &mut C) -> DriverResult<CommandOutput>;
 }
 ```
 
-### VMM checklist
+Responsibilities:
 
-The VMM adapter is sufficiently defined when these questions have concrete answers:
+| Method | Purpose |
+|---|---|
+| `root_command()` | Build the static `clap` command tree for this family |
+| `from_matches()` | Convert parsed `ArgMatches` into the typed command enum |
+| `completion_context()` | Produce a read-only sync snapshot for completion |
+| `help()` | Optional rich help topics that override plain `clap` help |
+| `complete()` | Adapter-owned dynamic completion |
+| `execute()` | Run the typed command against mutable session state |
 
-| Question | Expected answer |
-|----------|-----------------|
-| How is a VM named in the driver? | By a stable alias chosen at create/import time. |
-| How does `vmm exec <name>` resolve its target? | Through the typed VMM registry. |
-| Where do guest-name completion candidates come from? | From the typed VMM registry. |
-| What does engine close do to an owned VM? | `shutdown().await` through the VMM API. |
-| What does engine close do to an imported VM? | Detach local state only by default. |
-| What invalidates a PTY child? | PTY close, VM restart, guest shutdown, or control-plane loss. |
+## CommandEngine Contract
 
-## VNET, VFS, and tmux Expectations
+`CommandEngine<C, S>` is generic over context and command family.
 
-The same pattern applies to the other adapter modules:
+Current stable methods:
+- `new(context)`
+- `context()`
+- `context_mut()`
+- `completion_context()`
+- `run_line(&str)`
+- `run_argv(&[String])`
+- `complete(line, cursor)`
 
-| Adapter module | Main driver-facing resource expectation |
-|----------------|-----------------------------------------|
-| `driver::commands::vnet` | Treat `VnetHandle` as a strong first-class managed resource when used standalone; treat it as subordinate when managed through VMM. |
-| `driver::commands::vfs` | Usually wrap VFS serving in a higher-level owned record rather than managing raw `FsServer` directly. |
-| `driver::commands::tmux` | Distinguish remote resource references such as `Target` from local child monitors and buses; only destroy tmux entities the session actually owns. |
+Current built-ins:
+- `help`
+- `quit`
+- `exit`
 
-Detailed lifecycle inventory remains in [`LIFECYCLE.md`](./LIFECYCLE.md).
+Important behavior:
+- `run_line()` accepts REPL-style input without requiring the command-family root name
+- `run_argv()` also accepts already-prefixed argv like `["tmux", "targets"]`
+
+## History API
+
+The retained-history utility is generic:
+
+```rust
+pub struct HistoryBuffer<T> { /* bounded FIFO */ }
+
+impl<T> HistoryBuffer<T> {
+    pub fn new(capacity: NonZeroUsize) -> Self;
+    pub fn try_with_capacity(capacity: usize) -> DriverResult<Self>;
+    pub fn push(&mut self, item: T) -> u64;
+    pub fn clear(&mut self);
+    pub fn latest(&self) -> Option<&HistoryRecord<T>>;
+}
+
+impl<T: Clone> HistoryBuffer<T> {
+    pub fn page_after(&self, after: Option<u64>, limit: usize) -> HistoryPage<T>;
+}
+```
+
+Design points:
+- zero capacity is rejected by type/result, not by panic
+- history is local to the driver session
+- sequence ids are monotonic and page-friendly
+
+## tmux Adapter Contract
+
+The first real adapter is `driver::commands::tmux`.
+
+### Types
+
+Main public types:
+- `TmuxState`
+- `TmuxCommand`
+- `TmuxMirrorSnapshot`
+- `TmuxHistoryEntry`
+
+### TmuxState responsibilities
+
+`TmuxState` owns:
+- a connected `HostHandle`
+- discovered sessions and targets for completion
+- a set of owned sessions created by this driver session
+- active watch/stream state
+- the current mirror snapshot
+- retained mirror history
+
+Key methods:
+- `connect(uri)`
+- `refresh_discovery()`
+- `refresh_mirror()`
+- `mirror_snapshot()`
+- `mirror_history_page(after, limit)`
+- `has_live_follow()`
+- `shutdown_managed_state()`
+
+### TmuxCommand surface
+
+Current command family:
+- `create`
+- `new-window`
+- `split-pane`
+- `kill`
+- `mirror history`
+- `mirror clear`
+- `tui on`
+- `tui off`
+- `targets`
+- `send`
+- `keys`
+- `capture`
+- `monitor start`
+- `monitor stop`
+- `history`
+- `stream`
+- `upload`
+- `download`
+
+### tmux completion
+
+Current dynamic completion coverage:
+- sessions for `new-window`, `monitor start`, `history`
+- targets for `split-pane`, `kill`, `send`, `keys`, `capture`, `stream`
+- stream mode values
+
+### tmux shared frontends
+
+The real tmux product frontends are library functions:
+- `driver::tmux_frontend::run_tmux_repl(...)`
+- `driver::tmux_frontend::run_tmux_tui(...)`
+
+These are shared by:
+- the top-level tmux driver binary
+- the driver examples
+
+That is the supported shape today; there is no longer a separate generic `TuiFrontend`
+abstraction in the library.
+
+## Adapter Guidance For Future Resource Crates
+
+For future VMM/VNET/VFS adapters, the rule is:
+- resource crates expose lifecycle APIs
+- `motlie-driver` adapters consume those APIs and implement `CommandSet<C>`
+
+They should follow the tmux pattern:
+- typed command enum
+- typed session state
+- explicit dynamic completion snapshot
+- help topics close to the adapter
+- no `anyhow` in the library layer

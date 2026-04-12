@@ -4,14 +4,14 @@ use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "repl")]
-use anyhow::Result;
-#[cfg(feature = "repl")]
 use reedline::{
     Completer, DefaultPrompt, DefaultPromptSegment, Reedline, Signal, Span, Suggestion,
 };
 
 #[cfg(feature = "repl")]
 use crate::engine::{CommandEffect, CommandEngine, CommandSet};
+#[cfg(feature = "repl")]
+use crate::error::DriverResult;
 
 #[cfg(feature = "repl")]
 struct EngineCompleter<C, S>
@@ -135,7 +135,7 @@ where
         &mut self.engine
     }
 
-    pub async fn run(&mut self) -> Result<Option<CommandEffect>> {
+    pub async fn run(&mut self) -> DriverResult<Option<CommandEffect>> {
         let completion_context = Arc::new(Mutex::new(self.engine.completion_context()));
         let completer = Box::new(EngineCompleter::<C, S>::new(completion_context.clone()));
         let mut line_editor = Reedline::create().with_completer(completer);

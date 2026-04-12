@@ -1,9 +1,9 @@
-use anyhow::{Result, bail};
 use async_trait::async_trait;
 
 use crate::clap::{analyze_completion, render_help};
 use crate::completion::dedup_sorted;
 use crate::completion::{CompletionCandidate, CompletionRequest};
+use crate::error::{DriverError, DriverResult};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandEffect {
@@ -44,7 +44,7 @@ pub trait CommandSet<C>: Sized {
     type CompletionContext: Send + 'static;
 
     fn root_command() -> clap::Command;
-    fn from_matches(matches: &clap::ArgMatches) -> Result<Self>;
+    fn from_matches(matches: &clap::ArgMatches) -> DriverResult<Self>;
     fn completion_context(context: &C) -> Self::CompletionContext;
     fn help(_topic: &[String]) -> Option<String> {
         None
@@ -55,7 +55,7 @@ pub trait CommandSet<C>: Sized {
     ) -> Vec<CompletionCandidate> {
         Vec::new()
     }
-    async fn execute(self, context: &mut C) -> Result<CommandOutput>;
+    async fn execute(self, context: &mut C) -> DriverResult<CommandOutput>;
 }
 
 #[derive(Debug)]
@@ -87,12 +87,12 @@ where
         S::completion_context(&self.context)
     }
 
-    pub async fn run_line(&mut self, line: &str) -> Result<CommandOutput> {
-        let argv = shlex::split(line).ok_or_else(|| anyhow::anyhow!("invalid shell quoting"))?;
+    pub async fn run_line(&mut self, line: &str) -> DriverResult<CommandOutput> {
+        let argv = shlex::split(line).ok_or(DriverError::InvalidShellQuoting)?;
         self.run_argv(&argv).await
     }
 
-    pub async fn run_argv(&mut self, argv: &[String]) -> Result<CommandOutput> {
+    pub async fn run_argv(&mut self, argv: &[String]) -> DriverResult<CommandOutput> {
         let root = S::root_command();
 
         if let Some(first) = argv.first() {
@@ -160,6 +160,144 @@ where
     }
 }
 
-pub fn not_implemented(feature: &str) -> Result<CommandOutput> {
-    bail!("{feature} is not implemented in the driver scaffold yet")
+#[cfg(test)]
+mod tests {
+    use async_trait::async_trait;
+    use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
+
+    use super::{CommandEffect, CommandEngine, CommandOutput, CommandSet};
+    use crate::completion::{CompletionCandidate, CompletionRequest};
+    use crate::error::DriverResult;
+
+    #[derive(Default)]
+    struct DemoContext {
+        counter: usize,
+    }
+
+    #[derive(Parser)]
+    struct DemoRoot {
+        #[command(subcommand)]
+        command: DemoCommand,
+    }
+
+    #[derive(Subcommand)]
+    enum DemoCommand {
+        Echo(EchoCommand),
+        Count(CountCommand),
+        Tui,
+    }
+
+    #[derive(Args)]
+    struct EchoCommand {
+        value: String,
+    }
+
+    #[derive(Args)]
+    struct CountCommand {
+        value: usize,
+    }
+
+    #[async_trait]
+    impl CommandSet<DemoContext> for DemoCommand {
+        type CompletionContext = usize;
+
+        fn root_command() -> clap::Command {
+            DemoRoot::command().name("demo")
+        }
+
+        fn from_matches(matches: &clap::ArgMatches) -> DriverResult<Self> {
+            Ok(DemoRoot::from_arg_matches(matches)?.command)
+        }
+
+        fn completion_context(context: &DemoContext) -> Self::CompletionContext {
+            context.counter
+        }
+
+        fn help(topic: &[String]) -> Option<String> {
+            if topic == [String::from("count")] {
+                return Some("count help".to_string());
+            }
+            None
+        }
+
+        fn complete(
+            request: CompletionRequest<'_>,
+            context: &Self::CompletionContext,
+        ) -> Vec<CompletionCandidate> {
+            if request.command_path == ["echo"] && request.arg_id == Some("value") {
+                return vec![CompletionCandidate::new(format!("seen-{context}"))];
+            }
+            Vec::new()
+        }
+
+        async fn execute(self, context: &mut DemoContext) -> DriverResult<CommandOutput> {
+            match self {
+                DemoCommand::Echo(cmd) => Ok(CommandOutput::line(cmd.value)),
+                DemoCommand::Count(cmd) => {
+                    context.counter += cmd.value;
+                    Ok(CommandOutput::line(format!("count={}", context.counter)))
+                }
+                DemoCommand::Tui => {
+                    Ok(CommandOutput::line("entering tui").with_effect(CommandEffect::EnterTui))
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn run_line_prefixes_root_and_executes_command() {
+        let mut engine = CommandEngine::<DemoContext, DemoCommand>::new(DemoContext::default());
+        let output = engine.run_line("echo hello").await.expect("echo output");
+        assert_eq!(output.lines, vec!["hello"]);
+    }
+
+    #[tokio::test]
+    async fn run_argv_updates_context() {
+        let mut engine = CommandEngine::<DemoContext, DemoCommand>::new(DemoContext::default());
+        let argv = vec!["demo".to_string(), "count".to_string(), "2".to_string()];
+        let output = engine.run_argv(&argv).await.expect("count output");
+        assert_eq!(output.lines, vec!["count=2"]);
+        assert_eq!(engine.context().counter, 2);
+    }
+
+    #[tokio::test]
+    async fn builtin_help_prefers_command_set_help() {
+        let mut engine = CommandEngine::<DemoContext, DemoCommand>::new(DemoContext::default());
+        let output = engine.run_line("help count").await.expect("help output");
+        assert_eq!(output.lines, vec!["count help"]);
+    }
+
+    #[tokio::test]
+    async fn builtin_quit_returns_exit_effect() {
+        let mut engine = CommandEngine::<DemoContext, DemoCommand>::new(DemoContext::default());
+        let output = engine.run_line("quit").await.expect("quit output");
+        assert!(output.effects.contains(&CommandEffect::ExitShell));
+    }
+
+    #[test]
+    fn completion_merges_builtin_static_and_dynamic_candidates() {
+        let mut engine = CommandEngine::<DemoContext, DemoCommand>::new(DemoContext::default());
+        engine.context_mut().counter = 3;
+
+        let root = engine.complete("e", 1);
+        let values = root
+            .into_iter()
+            .map(|candidate| candidate.value)
+            .collect::<Vec<_>>();
+        assert!(values.contains(&"echo".to_string()));
+
+        let dynamic = engine.complete("echo s", "echo s".len());
+        let values = dynamic
+            .into_iter()
+            .map(|candidate| candidate.value)
+            .collect::<Vec<_>>();
+        assert!(values.contains(&"seen-3".to_string()));
+
+        let builtin = engine.complete("he", 2);
+        let values = builtin
+            .into_iter()
+            .map(|candidate| candidate.value)
+            .collect::<Vec<_>>();
+        assert!(values.contains(&"help".to_string()));
+    }
 }

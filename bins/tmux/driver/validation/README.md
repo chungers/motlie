@@ -14,7 +14,7 @@ A fresh driver-owned asciicast implementation now lives under:
 This branch does not depend on `libs/vmm` for recording.
 
 Saved replay artifact:
-- [`tmux-driver-validation.cast`](/home/dchung/cdx-repl/motlie/bins/tmux/driver/validation/tmux-driver-validation.cast)
+- [`tmux-driver-validation.cast`](./tmux-driver-validation.cast)
 
 It was recorded from the top-level tmux driver using:
 - `--record-asciicast <path>`
@@ -24,21 +24,21 @@ review directly in GitHub.
 
 ## Artifact map
 
-- [`00-initial-prompt.txt`](/home/dchung/cdx-repl/motlie/bins/tmux/driver/validation/00-initial-prompt.txt)
+- [`00-initial-prompt.txt`](./00-initial-prompt.txt)
   - initial successful connect and prompt
-- [`01-targets.txt`](/home/dchung/cdx-repl/motlie/bins/tmux/driver/validation/01-targets.txt)
+- [`01-targets.txt`](./01-targets.txt)
   - baseline session list showing existing sessions, including `jarvis`
-- [`02-create-send-capture.txt`](/home/dchung/cdx-repl/motlie/bins/tmux/driver/validation/02-create-send-capture.txt)
+- [`02-create-send-capture.txt`](./02-create-send-capture.txt)
   - create test session, send command, and capture output
-- [`03-monitor-follow.txt`](/home/dchung/cdx-repl/motlie/bins/tmux/driver/validation/03-monitor-follow.txt)
+- [`03-monitor-follow.txt`](./03-monitor-follow.txt)
   - attached monitor path showing new remote output arriving live
-- [`04-mirror-history.txt`](/home/dchung/cdx-repl/motlie/bins/tmux/driver/validation/04-mirror-history.txt)
+- [`04-mirror-history.txt`](./04-mirror-history.txt)
   - retained local history readback using `mirror history --limit 10`
-- [`05-cleanup-targets.txt`](/home/dchung/cdx-repl/motlie/bins/tmux/driver/validation/05-cleanup-targets.txt)
+- [`05-cleanup-targets.txt`](./05-cleanup-targets.txt)
   - cleanup proof showing the temporary test session was removed
-- [`06-writer-pane.txt`](/home/dchung/cdx-repl/motlie/bins/tmux/driver/validation/06-writer-pane.txt)
+- [`06-writer-pane.txt`](./06-writer-pane.txt)
   - second driver instance used to inject output into the monitored session
-- [`tmux-driver-validation.cast`](/home/dchung/cdx-repl/motlie/bins/tmux/driver/validation/tmux-driver-validation.cast)
+- [`tmux-driver-validation.cast`](./tmux-driver-validation.cast)
   - asciicast v3 replay artifact from the validated plain REPL session
 
 ## Validation summary
@@ -57,3 +57,7 @@ The smoke test covered:
 
 Constraint honored:
 - the existing `jarvis` session was not touched
+
+Current limitation:
+- the saved cast is a driver-owned command-flow/session artifact, not a frame-accurate
+  alternate-screen replay of every TUI draw
