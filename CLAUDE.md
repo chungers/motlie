@@ -23,16 +23,17 @@ Communication and decisions are made mostly through PR (inline and issue comment
 comments in artficats such as code or markdown comments. Comments must have datetime and self-identifier.
 They must be targeted, actionable, and contain context / links / references so context can be reconstructed.
 
-ALWAYS create a local working branch to track your work. User will give instructions on submitting work.
-
+ALWAYS create a local branch to track work, named in this format: {your_identity}/{summary-up-to-40-chars}.
+Push frequently to checkpoint your work.  Tell the user at every turn if you have local uncommitted changes.
+User will give instructions on when to create a PR or issue.
 NEVER stage any commits of harness files (:= CLAUDE.md, AGENTS.md, or SKILL.md), or anything unrelated
 to your current scope of work, without user's explicit approval.
 
-## Design and Planning Stages
+## Development Stages
 
-### DESIGN (docs/DESIGN.md)
+### DESIGN (docs/DESIGN.mdi, docs/API.md, docs/CLI.md)
 In each project, docs/DESIGN.md documents the problem, and non-goals or related problems that are out of scope.
-DESIGN captures the functional/non-functional requirements, the aligned solution and alteratives considered.
+DESIGN captures:w the functional/non-functional requirements, the aligned solution and alteratives considered.
 
 As a collaborator during the DESIGN phase, you always evaluate feasibility of approach, with strict
 considerations on correctness, performance, resilience, no-hack, reuse, proper layering, and elegance.
@@ -89,7 +90,7 @@ optional links to additional, deep-dive docs if created.
 Whenever the DESIGN and PLAN docs are changed, include a (date, who, summary) Changelog entry at the top of doc.
 Always identify yourself (e.g. '@codex' | '@claude') in all comments, in changelog or inline comments.
 
-## Code Implementation Stage
+### Implementation Stage
 
 Never start implementation without outlining proposal for approval, unless there's already a PLAN.
 
@@ -115,11 +116,23 @@ Commit is ready only after: all tests pass, examples/, bins/, benchmarks/ all bu
 Commit your changes locally as you progress.  NEVER push without explicit approval.  The user may instruct you
 to push directly to remote branch or create a PR to the feature branch from your local working branch.
 
-## Behavior Verification Stage (docs/API.md)
+### Verification Stage (docs/API.md)
 
-Output of the Behavior Verification Stage include an API.md in docs/ and/or binaries (mains) in examples/ directory.
+#### Ground Rules 
 
-An API is a doc that shows the user experience through code snippets of the actual api implemented.
++ Determine your role clearly.  If you don't know, ask the user.
++ Only reviewers can resolve open comments in a PR and give verdict to merge.
++ Addressers are to address feedback via code change or refute by providing clear rationale with clear examples
+in reply comments or nearby code locations, with clear reference / links for context.
+
+In general, avoid wholesale / massive rewrites.  Pinpoint where the best changes are and add comments inline,
+or post inline PR comments.  A comment must have format {your-identity} {datetime} {comment body}.
+Broader, more general concerns can go into either a separate section (with changelog) or as a PR issue comment.
+
+#### Artifacts to Help Verify Behavior
+Useful docs include API.md or CLI.md in docs/ and/or binaries (mains) in examples/ directory.
+
+An API / CLI is a doc that shows the user experience through code snippets of the actual api implemented.
 API must be an accurate reflection of what it is in the codebase.
 API represents reality / outcome, while code snippets in DESIGN represents desires / aspirations.
 API often becomes input to DESIGN refinements: the code examples in DESIGN may be changed / improved to reflect
@@ -136,18 +149,7 @@ If example programs are created, be sure to reference them in API.  ALL examples
 in API.  Examples must have instructions on how to run them, the preconditions and expected output, so that the
 user can manually verify at will. Instructions can be documented in the README.md in the examples/ directory.
 
-## Working with Reviews & Feedback (Design, Docs, and Code) 
-
-Determine your role clearly -- are you reviewing or addressing?  Check the user prompt to see if you're
-reviewing or addressing.  Only reviewers can resolve open comments in a PR.  Addressers are to address feedback
-via code change or refute by providing clear rationale / counter-point / examples in reply comments or nearby
-locations with clear reference pointers to the feedback for context.
-
-In general, avoid wholesale / massive rewrites.  Pinpoint where the best changes are and add comments inline
-either in doc - with md comment beginning with your id - @codex | @claude if no PR, or PR inline comments.
-Broader, more general concerns can go into either a separate section (with changelog) or PR issue comments.
-
-### Reviewing Work
+#### Reviewing Work
 
 Always check implementation against DESIGN, PLAN, and API, if they are available.
 
@@ -205,3 +207,59 @@ without explicit approval.  Commit local changes as you go.
 
 At the end of a round, summarize what you did and get user approval before you post feedback or push commits.
 
+## Rust Coding Guidelines
+
+### Core Principles
+Prioritize **correctness, safety, and maintainability** over stylistic preferences.
+No code smells, leaky abstractions, duplications and boilerplates without clear rationalization.
+Consult [Official Rust Style Guide](https://doc.rust-lang.org/stable/style-guide) for help when possible.
+---
+
+### 1. Basics, Ownership & Lifetimes
+- Prefer static dispatch over dynamic (must justify Box<dyn ...>).
+- Prefer **clear ownership** over complex borrowing
+- Avoid unnecessary references (`&T`, `&mut T`)
+- Refactor instead of fighting the borrow checker
+> Rule: If lifetimes are hard to reason about, redesign.
+
+---
+
+### 2. No Panics in Production
+- **Disallow `unwrap()` / `expect()`** in non-test code
+- Use `Result` + `?` for error propagation
+- Allow only for proven invariants (must justify)
+- No panics in library code especially.
+
+---
+
+### 3. Types Encode Invariants
+- Replace primitives with domain types
+- Use `enum` over strings/flags
+- Prefer `Option` / `Result` over sentinel values
+> Rule: Invalid states must be unrepresentable.
+
+---
+
+### 4. Minimize Mutability
+- Prefer `let` over `let mut`
+- Favor functional/iterator patterns where clear
+- Keep functions small and side-effect-free when possible
+
+---
+
+### 5. Errors Must Carry Context
+- Add context at I/O, network, and parsing boundaries
+- Use `anyhow::Context` or structured errors
+- Use `thiserror` in libraries to define error types. No `anyhow` in libs.
+- Use `anyhow` outside libraries to propagate error contexts.
+- Avoid bare/opaque error returns
+
+---
+
+### 6. Tooling Enforcement
+- `cargo fmt` must pass
+- `cargo clippy -- -D warnings`
+- Take deadcode warning seriously.  Do not hide them by adding `#[allow(dead_code)]`
+- No style debates in PRs
+
+---

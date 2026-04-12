@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-06 | @codex | Re-baseline docs around the implemented `v1.2` harness: `motlie-vnet` owns the `v1.2+` example line, the current composed flow lives under `libs/vnet/examples/v1.2`, and the design now distinguishes current implementation from future standalone/demo targets |
 | 2026-04-03 | @codex | Address final PR review nits: align `VnetError` variants with PLAN and remove stale `--net-mode` wording |
 | 2026-04-03 | @codex | Address review follow-ups: document why long-term SSH ingress moves into a host-side proxy, make short-term dual-NIC route ownership explicit, and align migration/docs with the public `start()` / `VnetHandle` API |
 | 2026-04-03 | @codex | Split SSH ingress from outbound egress: short-term migration keeps TAP admin SSH while `motlie-vnet` owns outbound internet, and the long-term target moves ingress into a host-side `russhd` / REPL proxy |
@@ -57,6 +58,25 @@ vhost-vsock (which the user already has via the `kvm` group).
 - General-purpose inbound port forwarding as a product requirement. v1 only
   needs system SSH/admin ingress, and the long-term ingress path is expected
   to terminate in the host runtime rather than in libslirp host forwarding.
+
+## Harness Ownership and Source of Truth
+
+The example / validation harness lineage now splits by subsystem ownership:
+
+- `motlie-vfs` owns the historical `v1` and `v1.1` harnesses under
+  `libs/vfs/examples/`
+- `motlie-vnet` owns the `v1.2+` harness line under
+  `libs/vnet/examples/v1.2/`
+
+That ownership boundary is about the harness and runbook, not about eliminating
+composition between the crates. The current `v1.2` host flow is intentionally
+composed:
+
+- `motlie-vnet` owns the split-network launcher, guest image, and validation
+  story
+- `motlie-vfs` remains the filesystem service used by the `v1.2` host REPL
+- `libs/vnet/docs/{DESIGN,PLAN}.md` are the source of truth for `v1.2+`
+  architecture and follow-up work
 
 ## Background: Alternatives Investigated
 
@@ -314,8 +334,8 @@ libs/vnet/
 │   ├── backend.rs                    # VhostUserBackend trait implementation
 │   ├── slirp.rs                      # libslirp wrapper: event loop, frame I/O
 │   └── virtq.rs                      # Virtqueue ↔ slirp frame bridging
-├── examples/                         # Feasibility demos (standalone vnet, no vfs dependency)
-│   └── demo_host.rs                  # Minimal: start vnet backend, print SSH command, wait
+├── examples/                         # Validation harnesses owned by vnet
+│   └── v1.2/repl_host.rs             # Current canonical composed v1.2 host flow (depends on motlie-vfs as a dev-dependency)
 ├── bins/                             # Host-side binaries (layered on top of library)
 │   └── (future: composed host runtime combining vfs + vnet)
 ├── docs/
@@ -327,8 +347,9 @@ libs/vnet/
 **Layering principle** (following `libs/vfs` pattern):
 - **`src/`** — All reusable logic. No panics (`unwrap`/`expect`/`assert!`
   forbidden in non-test code). No global state. Multiple instances coexist.
-- **`examples/`** — Standalone demos proving feasibility. May panic on setup
-  errors (e.g. `unwrap()` on config). Depend only on `motlie-vnet`.
+- **`examples/`** — Validation harnesses layered on top of the library.
+  `v1.2` is intentionally a composed `motlie-vnet` + `motlie-vfs` harness, and
+  `repl_host_v1_2` is the only current host-side example entry point.
 - **`bins/`** — Production host-side binaries. May combine `motlie-vnet` +
   `motlie-vfs` + CLI parsing. Layered above library — no library code depends
   on bins.
@@ -496,7 +517,7 @@ for h in handles {
 #### Integration with repl_host
 
 ```rust
-// In examples/repl_host.rs (or libs/vnet/examples/demo_host.rs):
+// In libs/vnet/examples/v1.2/repl_host.rs:
 let _net_handle = {
     let socket = format!("/tmp/motlie-vnet-{}.sock", tag);
     let config = motlie_vnet::VnetConfig::builder()
@@ -592,16 +613,27 @@ boot. If the socket doesn't exist, CH fails with a connection error.
 
 ### Guest Experience
 
-The guest sees a standard `virtio-net` device. On boot:
+The guest sees a standard `virtio-net` device. In the current validated `v1.2`
+image:
 
 1. Kernel detects `virtio-net` PCI device (no driver changes needed)
-2. systemd-networkd or dhclient requests DHCP from libslirp (gateway 10.0.2.2)
-3. Guest gets: IP `10.0.2.15`, netmask `255.255.255.0`, gateway `10.0.2.2`
-4. DNS resolver set to host's nameserver (from `/etc/resolv.conf`)
-5. Outbound TCP/UDP: `apt update`, `git clone` work immediately
-6. ICMP: `ping 8.8.8.8` works when `net.ipv4.ping_group_range` allows
+2. The boot-time `motlie-vnet-egress` service brings up the egress NIC with the
+   libslirp-compatible defaults used in `v1.2`
+   - implemented as a oneshot systemd unit in the guest image
+   - brings the egress NIC up, assigns `10.0.2.15/24`, adds default route via
+     `10.0.2.2`, writes resolver `10.0.2.3`, and removes any competing default
+     route from the TAP admin NIC
+3. Guest gets: IP `10.0.2.15`, netmask `255.255.255.0`, gateway `10.0.2.2`,
+   DNS `10.0.2.3`
+4. Outbound TCP/UDP: `apt update`, `git clone`, and the agent CLI auth flows work
+5. ICMP: `ping 8.8.8.8` works when `net.ipv4.ping_group_range` allows
    unprivileged ICMP sockets; otherwise ping silently fails while TCP/UDP
    continue to work
+
+`systemd-networkd` is enabled in the image, but the current `v1.2`
+implementation treats the boot-time `motlie-vnet-egress` service as the
+authoritative source of egress configuration. A future pure-DHCP path remains
+possible if that becomes the preferred steady-state design.
 
 Inbound SSH is intentionally separated from outbound egress:
 
@@ -663,6 +695,20 @@ All host-side egress I/O is via regular unprivileged sockets:
 - No `sudo`, no `setcap`, no `sysctl` changes (except default `ping_group_range`)
 
 ### Guest Image and Launcher Migration
+
+The migration described below has now landed in the `v1.2` harness under
+`libs/vnet/examples/v1.2/`. That implementation currently proves:
+
+- split `--admin-net` / `--egress-net` launcher controls
+- TAP admin ingress plus `motlie-vnet` vhost-user egress in one guest
+- a reusable guest base image with the baked tooling needed for validation
+  (`sudo`, `python3`, `npm`, `bubblewrap`, Codex CLI, Claude Code CLI)
+- a dedicated `/agent-state` mount with home-path symlinks for Codex and Claude
+  state during the lifetime of the running host REPL
+
+The remaining work in this section is therefore about refining or generalizing
+the current `v1.2` methodology, not about proving that the basic composed flow
+exists.
 
 The current v1 guest path (`libs/vfs/examples/v1`) uses one TAP-oriented
 network design for both admin ingress and outbound internet. Migrating to
