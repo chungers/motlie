@@ -1,0 +1,27 @@
+{
+  "name": "auto-provision-ssh",
+  "description": "Connect to the localhost SSH proxy as an unknown principal, verify the guest boots on first contact, and prove a second SSH session reuses the same running guest.",
+  "steps": [
+    {
+      "action": "proxy_exec",
+      "principal": "joe",
+      "command": "/bin/sh -lc 'whoami && hostname && cat /proc/sys/kernel/random/boot_id > /workspace/boot-id && echo BOOT_ID_CAPTURED'",
+      "timeout_ms": 90000,
+      "expect": {
+        "exit_code": 0,
+        "stdout_contains": "BOOT_ID_CAPTURED"
+      }
+    },
+    {
+      "action": "proxy_exec",
+      "principal": "joe",
+      "command": "/bin/sh -lc 'test \"$(whoami)\" = joe && test \"$(hostname)\" = motlie-joe && test -f /workspace/boot-id && test \"$(cat /proc/sys/kernel/random/boot_id)\" = \"$(cat /workspace/boot-id)\" && echo REUSED_OK'",
+      "timeout_ms": 20000,
+      "expect": {
+        "exit_code": 0,
+        "stdout_contains": "REUSED_OK"
+      }
+    },
+    { "action": "shutdown", "guest": "joe" }
+  ]
+}
