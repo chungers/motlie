@@ -10,12 +10,21 @@ description = "Mistral backend implementations for motlie-model contracts"
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = []
+cuda = ["mistralrs/cuda"]
+cudnn = ["mistralrs/cudnn"]
+flash-attn = ["mistralrs/flash-attn"]
+metal = ["mistralrs/metal"]
+accelerate = ["mistralrs/accelerate"]
+
 [dependencies]
 async-trait = "0.1.89"
 image = "0.25.8"
 motlie-model = { path = "../.." }
 mistralrs = "0.8.1"
 sysinfo = "0.36.1"
+tracing = "0.1"
 
 [dev-dependencies]
 tokio.workspace = true

@@ -7,6 +7,8 @@ license.workspace = true
 repository.workspace = true
 description = "Curated model bundle catalog for the Motlie ecosystem"
 
+autoexamples = false
+
 [lib]
 path = "src/lib.rs"
 
@@ -19,6 +21,11 @@ model-gemma4-e2b = []
 model-qwen3-4b-gguf = ["dep:motlie-model-llama-cpp"]
 model-gemma4-e2b-gguf = ["dep:motlie-model-llama-cpp"]
 llama-cpp-cuda = ["motlie-model-llama-cpp/cuda"]
+cuda = ["motlie-model-mistral/cuda"]
+cudnn = ["motlie-model-mistral/cudnn"]
+flash-attn = ["motlie-model-mistral/flash-attn"]
+metal = ["motlie-model-mistral/metal"]
+accelerate = ["motlie-model-mistral/accelerate"]
 
 [dependencies]
 async-trait = "0.1.89"
@@ -56,3 +63,7 @@ required-features = ["model-gemma4-e2b"]
 name = "models_v0_4"
 path = "examples/v0.4/main.rs"
 required-features = ["model-qwen3-4b-gguf"]
+
+[[example]]
+name = "bench_chat"
+path = "examples/bench_chat.rs"
