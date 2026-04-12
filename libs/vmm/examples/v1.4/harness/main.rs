@@ -17,8 +17,11 @@ use motlie_vmm::network::{AdminNetMode, EgressNetMode, NetworkModes};
 use motlie_vmm::network_alloc::{GuestNetAllocator, GuestNetAllocatorConfig, Ipv4Subnet};
 use motlie_vmm::observability::VmObservability;
 use motlie_vmm::orchestrator::{
-    LifecycleServices, OrchestratorError, PrepareRequest, ReadinessPolicy, ShutdownReport,
-    VmHandle, boot, prepare,
+    boot, prepare, LifecycleServices, OrchestratorError, PrepareRequest, ReadinessPolicy,
+    ShutdownReport, VmHandle,
+};
+use motlie_vmm::provisioning::{
+    GuestProvisioner, GuestProvisionerConfig, ProvisioningGuestRequest,
 };
 use motlie_vmm::runtime::{
     ControlPlaneBacking, FilesystemBacking, HypervisorBacking, NetworkBacking, Runtime,
@@ -29,7 +32,7 @@ use motlie_vmm::spec::{
     GuestUser, RuntimeNamespace, SoftwareProfile,
 };
 use motlie_vmm::ssh::{
-    self, ExecOutput, PtyTranscriptEvent, SshProxyConfig, SshProxyError, new_guest_registry,
+    self, new_guest_registry, ExecOutput, PtyTranscriptEvent, SshProxyConfig, SshProxyError,
 };
 use pty::{PtyScenarioError, PtyScenarioResult};
 use scenario::{ScenarioRunResult, ScenarioRunStatus};
@@ -190,6 +193,47 @@ enum HarnessError {
     Shutdown(#[source] OrchestratorError),
 }
 
+pub(crate) fn build_guest_provisioner(
+    base_dir: &Path,
+    artifacts_dir: &Path,
+    instance: &HarnessInstance,
+    allocator_config: GuestNetAllocatorConfig,
+    ca: &Arc<SshCa>,
+    runtime: &Arc<Runtime>,
+) -> Result<GuestProvisioner, DynError> {
+    Ok(GuestProvisioner::new(GuestProvisionerConfig {
+        namespace: instance.namespace.clone(),
+        base_dir: base_dir.to_path_buf(),
+        network_modes: NetworkModes {
+            admin: AdminNetMode::None,
+            egress: EgressNetMode::VhostUser,
+        },
+        readiness_policy: ReadinessPolicy::default(),
+        services: LifecycleServices {
+            runtime: Arc::clone(runtime),
+        },
+        allocator: GuestNetAllocator::new(allocator_config)?,
+        ssh_ca_pubkey: ca.public_key_openssh()?,
+        guest_spec_factory: Arc::new({
+            let artifacts_dir = artifacts_dir.to_path_buf();
+            let demo_root = instance.demo_root.clone();
+            move |request: &ProvisioningGuestRequest| {
+                demo_guest(
+                    &request.principal,
+                    request.net_assignment.slot,
+                    &artifacts_dir,
+                    &demo_root,
+                    &request.namespace,
+                )
+                .map_err(|err| err.to_string())
+            }
+        }),
+        host_seed_hook: Some(Arc::new(|guest| {
+            seed_host_mounts(guest).map_err(|err| err.to_string())
+        })),
+    }))
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<(), DynError> {
     let mut args = std::env::args().skip(1);
@@ -344,6 +388,7 @@ async fn main() -> Result<(), DynError> {
 
     let guest = demo_guest(
         "alice",
+        0,
         &artifacts_dir,
         &instance.demo_root,
         &instance.namespace,
@@ -356,6 +401,7 @@ async fn main() -> Result<(), DynError> {
     let guest_registry = new_guest_registry();
     let proxy_config = SshProxyConfig {
         listen: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), instance.proxy_port),
+        principal_resolver: None,
     };
     let proxy = format!("ssh://localhost:{}", proxy_config.listen.port());
     tokio::spawn(ssh::run_proxy(
@@ -910,12 +956,15 @@ fn classify_ssh_failure(stage: &'static str, error: &SshProxyError) -> ScenarioF
             SshProxyError::Ca(_) => "ssh_ca_failed",
             SshProxyError::GenerateServerKey { .. } => "ssh_server_key_failed",
             SshProxyError::ProxyBind { .. } => "ssh_proxy_bind_failed",
+            SshProxyError::ProxyConnect { .. } => "ssh_proxy_connect_failed",
+            SshProxyError::ProxyAuth { .. } => "ssh_proxy_auth_failed",
             SshProxyError::BindGuestBridgeSocket { .. } => "ssh_bridge_bind_failed",
             SshProxyError::CertAuth { .. } => "ssh_cert_auth_failed",
             SshProxyError::Russh { .. } => "ssh_transport_failed",
             SshProxyError::ChannelClosed => "ssh_channel_closed",
             SshProxyError::MissingExitStatus { .. } => "ssh_missing_exit_status",
             SshProxyError::UnknownGuest(_) => "ssh_unknown_guest",
+            SshProxyError::ResolveGuest { .. } => "ssh_guest_resolution_failed",
             SshProxyError::StatePoisoned(_) => "ssh_state_poisoned",
             SshProxyError::CleanupGuestBridgeSocket { .. } => "ssh_bridge_cleanup_failed",
             SshProxyError::PtyTimeout { .. } => "pty_timeout",
@@ -1001,11 +1050,12 @@ fn port_offset(seed: &str) -> u16 {
 
 pub(crate) fn demo_guest(
     guest_id: &str,
+    slot: u32,
     artifacts_dir: &Path,
     demo_root: &Path,
     namespace: &RuntimeNamespace,
 ) -> Result<GuestSpec, DynError> {
-    let (uid, gid) = demo_guest_ids(guest_id)?;
+    let (uid, gid) = demo_guest_ids(guest_id, slot)?;
     Ok(GuestSpec {
         guest_id: guest_id.to_string(),
         hostname: format!("motlie-{guest_id}"),

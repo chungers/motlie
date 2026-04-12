@@ -219,31 +219,34 @@ Current status against those criteria:
   VFS mounts, validates outbound HTTPS over rootless `vhost-user` egress, and
   shuts the guest down
 
-## Future Auto-Provisioning Phase
+## Automatic Provisioning From SSH Principals
 
-After lifecycle, guestfs, and SSH bridge ownership move into `libs/vmm`, `v1.4`
-should add on-demand guest provisioning driven by incoming SSH principals.
+`v1.4` now supports on-demand guest provisioning driven by incoming SSH
+principals through the library-owned `libs/vmm/src/provisioning.rs` registry.
 
 Example flow:
 
 - `ssh alice@localhost` -> use existing `alice` guest if already known
 - `ssh bob@localhost` -> provision and boot a new `bob` guest if missing
-- `ssh jane@localhost` -> allocate a new guest identity and runtime namespace
-- `ssh mike@localhost` -> same, without colliding with prior guests
+- `ssh joe@localhost` -> allocate a new guest identity, boot it, and continue
+  the SSH session once the bridge is ready
+- `ssh joe@localhost` again -> reuse the same provisioned guest and stable slot
+  assignment within the current harness run
 
-This phase belongs after orchestrator and guestfs extraction, not before,
-because automatic provisioning needs:
-
-- library-owned guest lifecycle state
-- library-owned allocation tables
-- library-owned SSH bridge/orchestrator integration
-
-The allocation story for this phase should be explicit and library-owned:
+Current implementation notes:
 
 - each guest name gets one stable `GuestNetAssignment`
 - assignments are retained for the lifetime of the harness process
 - assignments are reused across guest shutdown/reboot within that process
 - new guest names consume the next free slot
+- the SSH proxy can now call into the provisioner before opening a guest
+  session, so external localhost SSH and harness `proxy_exec` both exercise the
+  same resolve-or-create path
+- `examples/v1.4/scenarios/auto-provision-ssh.json` is the regression scenario
+  covering first-contact provisioning and guest reuse
+- `integration/repl-auto-provision-smoke.sh` is the external-SSH regression for
+  the real `ssh -p <proxy_port> joe@localhost uname -s` flow through
+  `repl_host_v1_4`
 
 The assignment should include:
 

@@ -23,22 +23,24 @@
 //! - Inbound: localhost trust (username = guest identity)
 //! - Outbound: ephemeral Ed25519 cert signed by in-memory CA
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use futures::future::BoxFuture;
 use russh::server::{Auth, Msg, Session};
 use russh::{Channel, ChannelMsg, ChannelWriteHalf, Pty};
 use serde::Serialize;
 use thiserror::Error;
 use tokio::net::UnixListener;
 use tokio::task::JoinHandle;
-use tokio::time::{Instant, sleep, timeout as tokio_timeout};
+use tokio::time::{sleep, timeout as tokio_timeout, Instant};
 
 use crate::ca::{CaError, SshCa};
+use crate::spec::GuestSshAccess;
 
 #[cfg(feature = "debug-trace")]
 macro_rules! debug_trace {
@@ -50,6 +52,18 @@ macro_rules! debug_trace {
 #[cfg(not(feature = "debug-trace"))]
 macro_rules! debug_trace {
     ($($arg:tt)*) => {};
+}
+
+fn ssh_exec_trace_enabled() -> bool {
+    std::env::var_os("MOTLIE_VMM_SSH_EXEC_TRACE").is_some()
+}
+
+macro_rules! ssh_exec_trace {
+    ($($arg:tt)*) => {
+        if crate::ssh::ssh_exec_trace_enabled() {
+            eprintln!($($arg)*);
+        }
+    };
 }
 
 /// vsock port used for the guest→host SSH bridge.
@@ -67,6 +81,10 @@ pub enum SshProxyError {
     GenerateServerKey { reason: String },
     #[error("failed to bind SSH proxy listener on {listen}: {reason}")]
     ProxyBind { listen: SocketAddr, reason: String },
+    #[error("failed to connect to SSH proxy on {listen}: {reason}")]
+    ProxyConnect { listen: SocketAddr, reason: String },
+    #[error("failed to authenticate to SSH proxy as '{principal}': {reason}")]
+    ProxyAuth { principal: String, reason: String },
     #[error("failed to bind guest bridge socket {path}: {reason}")]
     BindGuestBridgeSocket { path: PathBuf, reason: String },
     #[error("failed to authenticate guest {guest} with CA-signed SSH cert: {reason}")]
@@ -82,6 +100,8 @@ pub enum SshProxyError {
     MissingExitStatus { guest: String, command: String },
     #[error("unknown guest: {0}")]
     UnknownGuest(String),
+    #[error("failed to resolve guest for SSH principal '{principal}': {reason}")]
+    ResolveGuest { principal: String, reason: String },
     #[error("internal state poisoned: {0}")]
     StatePoisoned(&'static str),
     #[error("failed to remove guest bridge socket {path}: {source}")]
@@ -234,16 +254,33 @@ pub struct PtyRead {
 }
 
 /// Configuration for the SSH proxy server.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SshProxyConfig {
     pub listen: SocketAddr,
+    pub principal_resolver: Option<PrincipalResolver>,
 }
 
 impl Default for SshProxyConfig {
     fn default() -> Self {
         Self {
             listen: SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::LOCALHOST), 2222),
+            principal_resolver: None,
         }
+    }
+}
+
+pub type PrincipalResolver =
+    Arc<dyn Fn(String) -> BoxFuture<'static, Result<String, SshProxyError>> + Send + Sync>;
+
+impl std::fmt::Debug for SshProxyConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SshProxyConfig")
+            .field("listen", &self.listen)
+            .field(
+                "principal_resolver",
+                &self.principal_resolver.as_ref().map(|_| "..."),
+            )
+            .finish()
     }
 }
 
@@ -447,6 +484,7 @@ async fn accept_guest_ssh_once(
     uds_path: &std::path::Path,
     ca: &SshCa,
     guest_name: &str,
+    ssh_access: &GuestSshAccess,
 ) -> Result<russh::client::Handle<GuestClientHandler>, SshProxyError> {
     tracing::info!(
         "Waiting for guest '{}' vsock SSH bridge on {}",
@@ -464,7 +502,7 @@ async fn accept_guest_ssh_once(
 
     tracing::info!("Guest '{}' vsock SSH bridge connected", guest_name);
 
-    let eph = ca.sign_ephemeral(guest_name)?;
+    let eph = ca.sign_ephemeral(&ssh_access.principal)?;
     let config = Arc::new(russh::client::Config::default());
 
     let mut handle = russh::client::connect_stream(config, stream, GuestClientHandler)
@@ -476,7 +514,7 @@ async fn accept_guest_ssh_once(
 
     // Authenticate with CA-signed ephemeral certificate.
     let result = handle
-        .authenticate_openssh_cert(guest_name, Arc::new(eph.key), eph.cert)
+        .authenticate_openssh_cert(&ssh_access.login_user, Arc::new(eph.key), eph.cert)
         .await
         .map_err(|e| SshProxyError::CertAuth {
             guest: guest_name.into(),
@@ -501,10 +539,11 @@ pub async fn run_guest_ssh_bridge(
     uds_path: PathBuf,
     ca: Arc<SshCa>,
     guest_name: String,
+    ssh_access: GuestSshAccess,
     registry: GuestRegistry,
 ) {
     loop {
-        match accept_guest_ssh_once(&listener, &uds_path, &ca, &guest_name).await {
+        match accept_guest_ssh_once(&listener, &uds_path, &ca, &guest_name, &ssh_access).await {
             Ok(handle) => {
                 let handle = Arc::new(tokio::sync::Mutex::new(handle));
                 match update_guest_handle(&registry, &guest_name, handle) {
@@ -531,6 +570,7 @@ pub fn spawn_guest_ssh_bridge(
     vsock_socket: &str,
     ca: Arc<SshCa>,
     guest_name: String,
+    ssh_access: GuestSshAccess,
     registry: GuestRegistry,
 ) -> Result<GuestBridgeHandle, SshProxyError> {
     let (listener, uds_path) = bind_vsock_ssh_listener(vsock_socket)?;
@@ -539,6 +579,7 @@ pub fn spawn_guest_ssh_bridge(
         uds_path.clone(),
         ca,
         guest_name.clone(),
+        ssh_access,
         Arc::clone(&registry),
     ));
     Ok(GuestBridgeHandle {
@@ -630,6 +671,7 @@ async fn exec_on_channel(
     guest_name: &str,
     command: &str,
 ) -> Result<ExecOutput, SshProxyError> {
+    ssh_exec_trace!("exec_on_channel[{guest_name}]: sending exec {:?}", command);
     channel
         .exec(true, command)
         .await
@@ -637,21 +679,66 @@ async fn exec_on_channel(
             guest: guest_name.into(),
             reason: e.to_string(),
         })?;
+    ssh_exec_trace!("exec_on_channel[{guest_name}]: exec accepted");
+    channel.eof().await.map_err(|e| SshProxyError::ExecFailed {
+        guest: guest_name.into(),
+        reason: e.to_string(),
+    })?;
+    ssh_exec_trace!("exec_on_channel[{guest_name}]: eof sent");
 
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let mut exit_code: Option<u32> = None;
+    let mut saw_terminal_event = false;
 
     while let Some(msg) = channel.wait().await {
         match msg {
-            ChannelMsg::Data { ref data } => stdout.extend_from_slice(data),
+            ChannelMsg::Data { ref data } => {
+                ssh_exec_trace!(
+                    "exec_on_channel[{guest_name}]: stdout {} bytes",
+                    data.len()
+                );
+                stdout.extend_from_slice(data)
+            }
             ChannelMsg::ExtendedData { ref data, ext } if ext == 1 => {
+                ssh_exec_trace!(
+                    "exec_on_channel[{guest_name}]: stderr {} bytes",
+                    data.len()
+                );
                 stderr.extend_from_slice(data)
             }
-            ChannelMsg::ExitStatus { exit_status } => exit_code = Some(exit_status),
+            ChannelMsg::ExitStatus { exit_status } => {
+                ssh_exec_trace!(
+                    "exec_on_channel[{guest_name}]: exit_status {}",
+                    exit_status
+                );
+                exit_code = Some(exit_status)
+            }
+            ChannelMsg::Eof => {
+                ssh_exec_trace!("exec_on_channel[{guest_name}]: eof received");
+                saw_terminal_event = true;
+                break;
+            }
+            ChannelMsg::Close => {
+                ssh_exec_trace!("exec_on_channel[{guest_name}]: close received");
+                saw_terminal_event = true;
+                break;
+            }
             _ => {}
         }
     }
+
+    if exit_code.is_none() && saw_terminal_event {
+        ssh_exec_trace!(
+            "exec_on_channel[{guest_name}]: treating terminal event without exit status as success"
+        );
+        exit_code = Some(0);
+    }
+
+    ssh_exec_trace!(
+        "exec_on_channel[{guest_name}]: completed with exit_code={:?}",
+        exit_code
+    );
 
     Ok(ExecOutput {
         stdout: String::from_utf8_lossy(&stdout).into_owned(),
@@ -703,6 +790,88 @@ pub async fn exec_on_guest(
         .await
         .map_err(|_| SshProxyError::ExecFailed {
             guest: guest_name.into(),
+            reason: format!("command timed out after {:?}", timeout),
+        })?
+}
+
+pub async fn exec_via_proxy(
+    listen: SocketAddr,
+    principal: &str,
+    command: &str,
+    timeout: Duration,
+) -> Result<ExecOutput, SshProxyError> {
+    let started = Instant::now();
+    let config = Arc::new(russh::client::Config::default());
+    let mut handle = tokio_timeout(
+        timeout,
+        russh::client::connect(config, listen, ProxyClientHandler),
+    )
+    .await
+    .map_err(|_| SshProxyError::ProxyConnect {
+        listen,
+        reason: format!("timed out after {:?}", timeout),
+    })?
+    .map_err(|err| SshProxyError::ProxyConnect {
+        listen,
+        reason: err.to_string(),
+    })?;
+
+    let remaining = timeout.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return Err(SshProxyError::ProxyConnect {
+            listen,
+            reason: format!("timed out after {:?}", timeout),
+        });
+    }
+
+    let auth = tokio_timeout(remaining, handle.authenticate_none(principal))
+        .await
+        .map_err(|_| SshProxyError::ProxyAuth {
+            principal: principal.to_string(),
+            reason: format!("timed out after {:?}", timeout),
+        })?
+        .map_err(|err| SshProxyError::ProxyAuth {
+            principal: principal.to_string(),
+            reason: err.to_string(),
+        })?;
+    if !auth.success() {
+        return Err(SshProxyError::ProxyAuth {
+            principal: principal.to_string(),
+            reason: "SSH proxy rejected auth_none".to_string(),
+        });
+    }
+
+    let remaining = timeout.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return Err(SshProxyError::ExecFailed {
+            guest: principal.to_string(),
+            reason: format!("command timed out after {:?}", timeout),
+        });
+    }
+
+    let channel = tokio_timeout(remaining, handle.channel_open_session())
+        .await
+        .map_err(|_| SshProxyError::ProxyConnect {
+            listen,
+            reason: "timed out opening proxy session".to_string(),
+        })?
+        .map_err(|err| SshProxyError::Russh {
+            operation: "open proxy session",
+            reason: err.to_string(),
+        })?;
+
+    let remaining = timeout.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return Err(SshProxyError::ExecFailed {
+            guest: principal.to_string(),
+            reason: format!("command timed out after {:?}", timeout),
+        });
+    }
+
+    tokio_timeout(remaining, exec_on_channel(channel, principal, command))
+        .await
+        .map_err(|_| SshProxyError::ExecFailed {
+            guest: principal.to_string(),
             reason: format!("command timed out after {:?}", timeout),
         })?
 }
@@ -1039,6 +1208,7 @@ pub async fn run_proxy(
         let handler = ProxyHandler {
             registry: Arc::clone(&registry),
             username: None,
+            principal_resolver: config.principal_resolver.clone(),
             guest_channels: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         };
 
@@ -1055,24 +1225,9 @@ pub async fn run_proxy(
 /// Shared guest channel write half, set by channel_open_session,
 /// used by handler methods for client→guest forwarding on the same SSH channel
 /// whose read half is being forwarded back to the client.
-#[derive(Debug, Clone, Copy)]
-enum PendingReplyKind {
-    Pty,
-    Shell,
-    Exec,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct PendingReply {
-    client_channel: russh::ChannelId,
-    #[cfg_attr(not(feature = "debug-trace"), allow(dead_code))]
-    kind: PendingReplyKind,
-}
-
 #[derive(Default)]
 struct ProxyChannelState {
     writer: Option<ChannelWriteHalf<russh::client::Msg>>,
-    pending_replies: VecDeque<PendingReply>,
 }
 
 type SharedGuestChannels = Arc<tokio::sync::Mutex<HashMap<russh::ChannelId, ProxyChannelState>>>;
@@ -1080,12 +1235,10 @@ type SharedGuestChannels = Arc<tokio::sync::Mutex<HashMap<russh::ChannelId, Prox
 struct ProxyHandler {
     registry: GuestRegistry,
     username: Option<String>,
+    principal_resolver: Option<PrincipalResolver>,
     /// Per-client-channel proxied guest state. Each inbound localhost SSH
-    /// session channel gets its own guest SSH channel and ordered queue of
-    /// pending want-reply requests whose actual Success/Failure arrives later
-    /// from the guest channel. SSH replies are ordered per channel, so a
-    /// FIFO queue is sufficient as long as one proxied guest channel maps to
-    /// one inbound client channel.
+    /// session channel gets its own guest SSH channel writer for forwarding
+    /// client payload and lifecycle events into the guest.
     guest_channels: SharedGuestChannels,
 }
 
@@ -1131,6 +1284,7 @@ impl russh::server::Handler for ProxyHandler {
     ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
         let username = self.username.clone();
         let registry = Arc::clone(&self.registry);
+        let principal_resolver = self.principal_resolver.clone();
         let guest_channels = Arc::clone(&self.guest_channels);
         let server_handle = session.handle();
         let client_ch_id = channel.id();
@@ -1141,27 +1295,52 @@ impl russh::server::Handler for ProxyHandler {
                 None => return Ok(false),
             };
 
-            if current_guest_handle(&registry, &username)?.is_none() {
+            let guest_name = match principal_resolver.as_ref() {
+                Some(resolve) => match resolve(username.clone()).await {
+                    Ok(guest_name) => guest_name,
+                    Err(SshProxyError::ResolveGuest { reason, .. }) => {
+                        let _ = channel.data(format!("{reason}\r\n").as_bytes()).await;
+                        let _ = channel.close().await;
+                        return Ok(false);
+                    }
+                    Err(err) => {
+                        let _ = channel.data(&b"internal SSH proxy error\r\n"[..]).await;
+                        let _ = channel.close().await;
+                        return Err(err);
+                    }
+                },
+                None => username.clone(),
+            };
+
+            if guest_name != username {
+                tracing::info!(
+                    "SSH proxy: principal '{}' resolved to guest '{}'",
+                    username,
+                    guest_name
+                );
+            }
+
+            if current_guest_handle(&registry, &guest_name)?.is_none() {
                 let msg = format!(
                     "Guest '{}' is not launched or SSH bridge not ready.\r\n",
-                    username
+                    guest_name
                 );
                 let _ = channel.data(msg.as_bytes()).await;
                 let _ = channel.close().await;
                 return Ok(false);
             }
 
-            tracing::info!("SSH proxy: opening session to guest '{username}'");
+            tracing::info!("SSH proxy: opening session to guest '{guest_name}'");
 
             let guest_ch =
-                match open_guest_session_with_retry(&registry, &username, Duration::from_secs(3))
+                match open_guest_session_with_retry(&registry, &guest_name, Duration::from_secs(3))
                     .await
                 {
                     Ok(ch) => ch,
                     Err(SshProxyError::GuestConnection { .. }) => {
                         let msg = format!(
                             "Guest '{}' is not launched or SSH bridge not ready.\r\n",
-                            username
+                            guest_name
                         );
                         let _ = channel.data(msg.as_bytes()).await;
                         let _ = channel.close().await;
@@ -1200,49 +1379,9 @@ impl russh::server::Handler for ProxyHandler {
                         }
                         ChannelMsg::Success => {
                             debug_trace!("SSH proxy: guest channel reported Success");
-                            let pending = {
-                                let mut states = guest_channels_for_read.lock().await;
-                                states
-                                    .get_mut(&ch_id)
-                                    .and_then(|state| state.pending_replies.pop_front())
-                            };
-                            if let Some(pending) = pending {
-                                debug_trace!(
-                                    "SSH proxy: forwarding {:?} success to client channel {:?}",
-                                    pending.kind,
-                                    pending.client_channel
-                                );
-                                if server_handle
-                                    .channel_success(pending.client_channel)
-                                    .await
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                            }
                         }
                         ChannelMsg::Failure => {
                             debug_trace!("SSH proxy: guest channel reported Failure");
-                            let pending = {
-                                let mut states = guest_channels_for_read.lock().await;
-                                states
-                                    .get_mut(&ch_id)
-                                    .and_then(|state| state.pending_replies.pop_front())
-                            };
-                            if let Some(pending) = pending {
-                                debug_trace!(
-                                    "SSH proxy: forwarding {:?} failure to client channel {:?}",
-                                    pending.kind,
-                                    pending.client_channel
-                                );
-                                if server_handle
-                                    .channel_failure(pending.client_channel)
-                                    .await
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                            }
                         }
                         ChannelMsg::ExitStatus { exit_status } => {
                             debug_trace!("SSH proxy: guest channel exit-status={exit_status}");
@@ -1299,7 +1438,6 @@ impl russh::server::Handler for ProxyHandler {
                 client_ch_id,
                 ProxyChannelState {
                     writer: Some(guest_write),
-                    pending_replies: VecDeque::new(),
                 },
             );
 
@@ -1368,10 +1506,7 @@ impl russh::server::Handler for ProxyHandler {
                         let _ = server_handle.channel_failure(channel).await;
                         return Err(e.into());
                     }
-                    state.pending_replies.push_back(PendingReply {
-                        client_channel: channel,
-                        kind: PendingReplyKind::Pty,
-                    });
+                    let _ = server_handle.channel_success(channel).await;
                 } else {
                     let _ = server_handle.channel_failure(channel).await;
                 }
@@ -1397,10 +1532,7 @@ impl russh::server::Handler for ProxyHandler {
                         let _ = server_handle.channel_failure(channel).await;
                         return Err(e.into());
                     }
-                    state.pending_replies.push_back(PendingReply {
-                        client_channel: channel,
-                        kind: PendingReplyKind::Shell,
-                    });
+                    let _ = server_handle.channel_success(channel).await;
                 } else {
                     let _ = server_handle.channel_failure(channel).await;
                 }
@@ -1428,10 +1560,7 @@ impl russh::server::Handler for ProxyHandler {
                         let _ = server_handle.channel_failure(channel).await;
                         return Err(e.into());
                     }
-                    state.pending_replies.push_back(PendingReply {
-                        client_channel: channel,
-                        kind: PendingReplyKind::Exec,
-                    });
+                    let _ = server_handle.channel_success(channel).await;
                 } else {
                     let _ = server_handle.channel_failure(channel).await;
                 }
@@ -1493,7 +1622,6 @@ impl russh::server::Handler for ProxyHandler {
                 if let Some(ch) = state.writer.take() {
                     ch.close().await?;
                 }
-                state.pending_replies.clear();
             }
             Ok(())
         }
@@ -1517,6 +1645,19 @@ impl russh::client::Handler for GuestClientHandler {
         // authenticates the guest with a fresh CA-signed ephemeral cert.
         // The guest-side sshd server key is therefore accepted as part of the
         // localhost/vsock trust boundary for this harness-owned channel.
+        async { Ok(true) }
+    }
+}
+
+pub struct ProxyClientHandler;
+
+impl russh::client::Handler for ProxyClientHandler {
+    type Error = SshProxyError;
+
+    fn check_server_key(
+        &mut self,
+        _server_public_key: &russh::keys::PublicKey,
+    ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
         async { Ok(true) }
     }
 }
