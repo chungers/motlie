@@ -384,6 +384,28 @@ impl BundleDescriptor {
     }
 }
 
+pub(crate) fn bundle_artifacts_from_checkpoint(
+    control_name: &'static str,
+    checkpoint: &ModelCheckpoint,
+) -> BundleArtifacts {
+    BundleArtifacts {
+        control_name,
+        format: checkpoint.format,
+        source: checkpoint.source.clone(),
+        include: checkpoint.include.clone(),
+    }
+}
+
+impl ArtifactDownloadOptions {
+    fn from_env() -> Self {
+        Self {
+            hf_token: std::env::var("HF_TOKEN")
+                .ok()
+                .or_else(|| std::env::var("HUGGING_FACE_HUB_TOKEN").ok()),
+        }
+    }
+}
+
 trait LocalCheckpointResolver: Send + Sync {
     fn resolve(&self, root: &Path) -> std::result::Result<PathBuf, ModelError>;
 }
@@ -438,7 +460,7 @@ impl ModelBundle for AdapterBackedBundle {
                 download_checkpoint_artifacts_with_options(
                     &self.checkpoint,
                     &root,
-                    &ArtifactDownloadOptions::default(),
+                    &ArtifactDownloadOptions::from_env(),
                 )
                 .map_err(models_error_to_model_error)?;
                 root

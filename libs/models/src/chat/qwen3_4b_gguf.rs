@@ -25,22 +25,7 @@ pub(crate) fn register(catalog: &mut crate::Catalog) {
 }
 
 pub(crate) fn identity() -> ModelIdentity {
-    ModelIdentity {
-        id: BundleId::new("qwen3_4b"),
-        display_name: "Qwen3 4B".into(),
-        family: BundleFamily::Qwen,
-        capabilities: motlie_model::Capabilities::chat_and_completion(),
-        eval_tracks: vec![
-            EvalTrack::Chat,
-            EvalTrack::Reasoning,
-            EvalTrack::Summarization,
-            EvalTrack::Classification,
-        ],
-        requirements: BundleRequirements {
-            platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
-            build: vec![],
-        },
-    }
+    super::qwen3_4b::identity()
 }
 
 pub(crate) fn checkpoint() -> ModelCheckpoint {
@@ -70,35 +55,24 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
 /// upstream Qwen3-4B architecture. Both backends produce equivalent inference
 /// results at the same quantization level.
 pub fn descriptor() -> BundleDescriptor {
+    let identity = identity();
+    let checkpoint = checkpoint();
     BundleDescriptor {
         id: BundleId::new("qwen3_4b_gguf"),
-        model_id: BundleId::new("qwen3_4b"),
+        model_id: identity.id,
         display_name: "Qwen3 4B (GGUF/llama.cpp)".into(),
-        family: BundleFamily::Qwen,
+        family: identity.family,
         capabilities: motlie_model::Capabilities::chat_and_completion(),
         backend: BackendKind::LlamaCpp,
         requirements: BundleRequirements {
-            platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
+            platform: identity.requirements.platform,
             build: vec![BuildConstraint::Feature("backend-llama-cpp".into())],
         },
-        eval_tracks: vec![
-            EvalTrack::Chat,
-            EvalTrack::Reasoning,
-            EvalTrack::Summarization,
-            EvalTrack::Classification,
-        ],
-        artifacts: Some(BundleArtifacts {
-            control_name: "qwen3_4b_gguf",
-            format: CheckpointFormat::Gguf,
-            source: ArtifactSource::HuggingFace {
-                repo: "Qwen/Qwen3-4B-GGUF",
-            },
-            include: vec![
-                ArtifactRule::Suffix("-Q4_K_M.gguf"),
-                ArtifactRule::Suffix("-Q8_0.gguf"),
-                ArtifactRule::Suffix("-f16.gguf"),
-            ],
-        }),
+        eval_tracks: identity.eval_tracks,
+        artifacts: Some(crate::bundle_artifacts_from_checkpoint(
+            "qwen3_4b_gguf",
+            &checkpoint,
+        )),
     }
 }
 

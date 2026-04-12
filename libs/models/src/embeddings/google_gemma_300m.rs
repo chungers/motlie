@@ -9,8 +9,8 @@ use motlie_model::{
 use motlie_model_mistral::MistralEmbeddingAdapter;
 
 use crate::{
-    ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleArtifacts, BundleDescriptor,
-    BundleFamily, BundleRequirements, PlatformConstraint,
+    ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor, BundleFamily,
+    BundleRequirements, PlatformConstraint,
 };
 
 pub const SELECTOR: &str = "google/embeddinggemma_300m";
@@ -84,38 +84,24 @@ pub fn embedding_spec() -> &'static EmbeddingSpec {
 }
 
 pub fn descriptor() -> BundleDescriptor {
+    let identity = identity();
+    let checkpoint = checkpoint();
     BundleDescriptor {
-        id: BundleId::new("embeddinggemma_300m"),
-        model_id: BundleId::new("embeddinggemma_300m"),
-        display_name: "EmbeddingGemma 300M".into(),
-        family: BundleFamily::Embeddings,
-        capabilities: motlie_model::Capabilities::new(vec![CapabilityDescriptor::embeddings()]),
+        id: identity.id.clone(),
+        model_id: identity.id,
+        display_name: identity.display_name.clone(),
+        family: identity.family,
+        capabilities: identity.capabilities,
         backend: BackendKind::MistralRs,
         requirements: BundleRequirements {
-            platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
+            platform: identity.requirements.platform,
             build: vec![BuildConstraint::Feature("backend-mistral".into())],
         },
-        eval_tracks: vec![EvalTrack::Embeddings],
-        artifacts: Some(BundleArtifacts {
-            control_name: "embeddinggemma_300m",
-            format: CheckpointFormat::Safetensors,
-            source: ArtifactSource::HuggingFace {
-                repo: "google/embeddinggemma-300m",
-            },
-            include: vec![
-                ArtifactRule::Exact("config.json"),
-                ArtifactRule::Exact("modules.json"),
-                ArtifactRule::Exact("tokenizer.json"),
-                ArtifactRule::Exact("tokenizer.model"),
-                ArtifactRule::Exact("tokenizer_config.json"),
-                ArtifactRule::Exact("special_tokens_map.json"),
-                ArtifactRule::Exact("1_Pooling/config.json"),
-                ArtifactRule::Exact("2_Dense/config.json"),
-                ArtifactRule::Exact("3_Dense/config.json"),
-                ArtifactRule::Suffix(".safetensors"),
-                ArtifactRule::Suffix(".safetensors.index.json"),
-            ],
-        }),
+        eval_tracks: identity.eval_tracks,
+        artifacts: Some(crate::bundle_artifacts_from_checkpoint(
+            "embeddinggemma_300m",
+            &checkpoint,
+        )),
     }
 }
 
