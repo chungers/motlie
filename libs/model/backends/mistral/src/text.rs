@@ -5,17 +5,21 @@ use async_trait::async_trait;
 use mistralrs::core::NormalLoaderType;
 use mistralrs::{RequestBuilder, TextModelBuilder};
 use motlie_model::{
-    BundleHandle, BundleId, BundleMetadata, Capabilities, CapabilityKind, ChatModel, ChatRequest,
-    ChatResponse, ChatRole, CompletionModel, CompletionRequest, CompletionResponse, EmbeddingModel,
-    LoadedBundleDescriptor, ModelBundle, ModelError, ModelMetricSnapshot, QuantizationBits,
-    QuantizationSupport, StartOptions,
+    BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
+    CapabilityKind, ChatModel, ChatRequest, ChatResponse, ChatRole, CheckpointFormat,
+    CompletionModel, CompletionRequest, CompletionResponse, EmbeddingModel, LoadedBundleDescriptor,
+    ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot, QuantizationBits,
+    QuantizationSupport, ResolvedCheckpoint, StartOptions,
 };
 
 use crate::common::{
-    apply_generation_params, configure_artifact_policy, map_chat_role, map_quantization_bits,
-    lock_metrics, observe_latency, observe_memory, observe_text_usage, paged_attn_context_size,
-    should_force_cpu, snapshot_text_metrics, RuntimeMetricState, TextMetricState,
+    apply_generation_params, configure_artifact_policy, lock_metrics, map_chat_role,
+    map_quantization_bits, observe_latency, observe_memory, observe_text_usage,
+    paged_attn_context_size, resolve_local_checkpoint, should_force_cpu, snapshot_text_metrics,
+    RuntimeMetricState, TextMetricState,
 };
+
+const MISTRAL_TEXT_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Safetensors];
 
 /// Text model architecture discriminant that selects the correct `mistralrs` loader path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,9 +60,73 @@ impl MistralTextSpec {
             )
             .unwrap_or_else(|e| {
                 tracing::error!("curated quantization construction failed (this is a bug): {e}");
-                QuantizationSupport::without_recommended([QuantizationBits::Four, QuantizationBits::Eight])
+                QuantizationSupport::without_recommended([
+                    QuantizationBits::Four,
+                    QuantizationBits::Eight,
+                ])
             }),
         }
+    }
+}
+
+/// Backend adapter for `mistralrs` text-generation architectures over safetensors checkpoints.
+#[derive(Clone, Debug)]
+pub struct MistralTextAdapter {
+    arch: MistralTextArch,
+    capabilities: Capabilities,
+    quantization: QuantizationSupport,
+}
+
+impl MistralTextAdapter {
+    pub fn qwen3() -> Self {
+        let spec = MistralTextSpec::qwen3_4b();
+        Self {
+            arch: spec.arch,
+            capabilities: spec.capabilities,
+            quantization: spec.quantization,
+        }
+    }
+}
+
+#[async_trait]
+impl BackendAdapter for MistralTextAdapter {
+    fn supported_formats(&self) -> &[CheckpointFormat] {
+        &MISTRAL_TEXT_FORMATS
+    }
+
+    fn backend_kind(&self) -> BackendKind {
+        BackendKind::MistralRs
+    }
+
+    fn capabilities(&self) -> &Capabilities {
+        &self.capabilities
+    }
+
+    fn quantization(&self) -> &QuantizationSupport {
+        &self.quantization
+    }
+
+    async fn start(
+        &self,
+        identity: &ModelIdentity,
+        checkpoint: &ResolvedCheckpoint,
+        options: StartOptions,
+    ) -> Result<Box<dyn BundleHandle>, ModelError> {
+        let resolved_quantization = self
+            .quantization
+            .resolve(options.quantization, &identity.id)?;
+        let (model_id, options) =
+            resolve_local_checkpoint(checkpoint, CheckpointFormat::Safetensors, options)?;
+        let model = build_text_model(model_id, self.arch, resolved_quantization, options).await?;
+
+        Ok(new_text_handle(
+            identity.id.clone(),
+            identity.display_name.clone(),
+            self.capabilities.clone(),
+            self.quantization.clone(),
+            resolved_quantization,
+            model,
+        ))
     }
 }
 
@@ -106,26 +174,15 @@ impl ModelBundle for MistralTextBundle {
             .resolve(options.quantization, &self.metadata.id)?;
         let model =
             build_text_model(self.model_id, self.arch, resolved_quantization, options).await?;
-        let metrics = Arc::new(Mutex::new(TextMetrics::default()));
-        {
-            let mut metrics = lock_metrics(&metrics, "mistral-text-start");
-            observe_memory(&mut metrics.runtime);
-        }
 
-        Ok(Box::new(MistralTextHandle {
-            descriptor: LoadedBundleDescriptor {
-                id: self.metadata.id.clone(),
-                display_name: self.metadata.display_name.clone(),
-                capabilities: self.metadata.capabilities.clone(),
-                quantization: self.metadata.quantization.clone(),
-                resolved_quantization,
-            },
-            runtime: Box::new(MistralTextRuntime {
-                model,
-                metrics: Arc::clone(&metrics),
-            }),
-            metrics,
-        }))
+        Ok(new_text_handle(
+            self.metadata.id.clone(),
+            self.metadata.display_name.clone(),
+            self.metadata.capabilities.clone(),
+            self.metadata.quantization.clone(),
+            resolved_quantization,
+            model,
+        ))
     }
 }
 
@@ -281,6 +338,36 @@ impl CompletionModel for MistralTextHandle {
     }
 }
 
+fn new_text_handle(
+    id: BundleId,
+    display_name: String,
+    capabilities: Capabilities,
+    quantization: QuantizationSupport,
+    resolved_quantization: Option<QuantizationBits>,
+    model: mistralrs::Model,
+) -> Box<dyn BundleHandle> {
+    let metrics = Arc::new(Mutex::new(TextMetrics::default()));
+    {
+        let mut metrics = lock_metrics(&metrics, "mistral-text-start");
+        observe_memory(&mut metrics.runtime);
+    }
+
+    Box::new(MistralTextHandle {
+        descriptor: LoadedBundleDescriptor {
+            id,
+            display_name,
+            capabilities,
+            quantization,
+            resolved_quantization,
+        },
+        runtime: Box::new(MistralTextRuntime {
+            model,
+            metrics: Arc::clone(&metrics),
+        }),
+        metrics,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Builder
 // ---------------------------------------------------------------------------
@@ -357,7 +444,9 @@ mod tests {
     use std::path::PathBuf;
 
     use mistralrs::IsqBits;
-    use motlie_model::{ArtifactPolicy, QuantizationBits, StartOptions};
+    use motlie_model::{
+        ArtifactPolicy, BackendAdapter, BackendKind, QuantizationBits, StartOptions,
+    };
 
     struct StubTextRuntime;
 
@@ -399,6 +488,22 @@ mod tests {
         assert!(spec.capabilities.supports(CapabilityKind::Chat));
         assert!(spec.capabilities.supports(CapabilityKind::Completion));
         assert!(!spec.capabilities.supports(CapabilityKind::Embeddings));
+    }
+
+    #[test]
+    fn qwen3_adapter_reports_backend_metadata() {
+        let adapter = MistralTextAdapter::qwen3();
+
+        assert_eq!(
+            adapter.supported_formats(),
+            &[CheckpointFormat::Safetensors]
+        );
+        assert_eq!(adapter.backend_kind(), BackendKind::MistralRs);
+        assert_eq!(adapter.capabilities(), &Capabilities::chat_and_completion());
+        assert_eq!(
+            adapter.quantization().recommended(),
+            Some(QuantizationBits::Four)
+        );
     }
 
     #[tokio::test]
