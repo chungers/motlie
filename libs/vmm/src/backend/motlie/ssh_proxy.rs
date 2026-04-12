@@ -1,12 +1,12 @@
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use std::path::Path;
 
 use crate::ca::SshCa;
 use crate::orchestrator::PreparedGuest;
 use crate::ssh::{
-    ExecOutput, GuestBridgeHandle, GuestPtySession, GuestRegistry, PtyRequest, SshProxyError,
-    spawn_guest_ssh_bridge,
+    spawn_guest_ssh_bridge, ExecOutput, GuestBridgeHandle, GuestPtySession, GuestRegistry,
+    PtyRequest, SshProxyError,
 };
 
 #[derive(Clone)]
@@ -17,7 +17,8 @@ pub struct MotlieSshProxyBacking {
 
 impl std::fmt::Debug for MotlieSshProxyBacking {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MotlieSshProxyBacking").finish_non_exhaustive()
+        f.debug_struct("MotlieSshProxyBacking")
+            .finish_non_exhaustive()
     }
 }
 
@@ -32,9 +33,14 @@ impl MotlieSshProxyBacking {
     ) -> Result<Option<MotlieSshProxyHandle>, SshProxyError> {
         Ok(Some(MotlieSshProxyHandle {
             inner: spawn_guest_ssh_bridge(
-                prepared.runtime_paths.vsock_socket.to_string_lossy().as_ref(),
+                prepared
+                    .runtime_paths
+                    .vsock_socket
+                    .to_string_lossy()
+                    .as_ref(),
                 Arc::clone(&self.ca),
                 prepared.guest.guest_id.clone(),
+                prepared.guest.ssh.clone(),
                 Arc::clone(&self.registry),
             )?,
         }))
@@ -47,7 +53,8 @@ pub struct MotlieSshProxyHandle {
 
 impl std::fmt::Debug for MotlieSshProxyHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MotlieSshProxyHandle").finish_non_exhaustive()
+        f.debug_struct("MotlieSshProxyHandle")
+            .finish_non_exhaustive()
     }
 }
 
@@ -56,7 +63,11 @@ impl MotlieSshProxyHandle {
         self.inner.wait_ready(timeout).await
     }
 
-    pub async fn exec(&self, command: &str, timeout: Duration) -> Result<ExecOutput, SshProxyError> {
+    pub async fn exec(
+        &self,
+        command: &str,
+        timeout: Duration,
+    ) -> Result<ExecOutput, SshProxyError> {
         self.inner.exec(command, timeout).await
     }
 
