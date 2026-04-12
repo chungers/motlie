@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-12 | @codex-vmm | Refresh DESIGN from current merged reality: `v1.4` harness and PR #159 auto-provisioning are already proven, and the remaining work is reusable harness-core extraction, typed validation profiles, and the standard guest-path follow-up |
 | 2026-04-09 | @codex | Rescope the post-merge harness direction: preserve `examples/v1.4/harness` as the historical origin and first consumer, but extract reusable scenario/validation infrastructure into `libs/vmm` without rewriting away the existing `v1.4` harness artifacts |
 | 2026-04-08 | @codex | Address PR 140 review drift: remove the dead `VmBackend` / `BackendSet` transitional story from the design, update `GuestSpec` / `PreparedGuest` / shutdown snippets to match code, and record the typed `OverlaySize` plus namespace-sensitive socket-path allocation details |
 | 2026-04-08 | @codex | Make the harness terminal-state engine switchable, adopt `shadow-terminal` as the default high-fidelity backend for PTY/TUI validation, keep `vt100` as an explicit fallback backend, and keep PNG/GIF/movie generation out of scope for `v1.4` |
@@ -57,8 +58,11 @@ The active next step is `v1.4`:
   guest image in the harness ELF and boots from memfd-backed artifacts
 - move all `v1.4` bins, scripts, and runtime assets onto a distinct namespace
   so `v1.3` and `v1.4` can run side by side
-- allow new incoming SSH principals to trigger guest auto-provisioning through
-  library-owned allocation and lifecycle services
+- principal-driven guest auto-provisioning is now part of the merged `v1.4` line
+- the next remaining work is to extract reusable harness and validation core
+  into `libs/vmm`
+- the next API-model follow-up after that extraction is guest-shape cleanup
+  around `VmSpec` plus a simple standard Cloud Hypervisor guest path
 - add a reporting layer that can answer both host-visible and guest-visible
   health/metrics questions during automated runs
 
@@ -118,19 +122,18 @@ Current `v1.4` implementation status:
 - generic orchestrator code no longer imports Motlie guestfs, userspace vnet,
   or SSH-bridge implementation modules directly either; those are now reached
   through reviewed `Runtime` composition
-- the next convergence step is guest-shape cleanup around `VmSpec` plus the
-  simple Cloud Hypervisor “hello world” example
-- the next harness step is two-stage:
-  - keep absorbing ad-hoc/manual REPL use cases into `examples/v1.4/harness/`
-    so `v1.4` remains the proving ground and historical record of how the
-    harness line was validated
-  - then extract the reusable scenario/validation engine proven there into
-    `libs/vmm`, without deleting or rewriting away the original `v1.4`
-    harness artifacts
-  so the harness line becomes the primary driver for:
+- the next remaining API-model step is guest-shape cleanup around `VmSpec`
+  plus the simple Cloud Hypervisor “hello world” example
+- the next harness step is direct:
+  - extract reusable scenario, validation, and result infrastructure from
+    `examples/v1.4/harness/` into `libs/vmm`
+  - keep `examples/v1.4/harness/` as the concrete operator-facing harness that
+    consumes that extracted core
+  so the same harness machinery can serve:
   - scripted scenarios
   - coding-agent experimentation
   - human manual validation
+  - future non-`v1.4` harness consumers
 - `examples/v1.4/build-guest.sh` and `examples/v1.4/launch-ch.sh` exist under
   the `motlie-vmm-v14-*` namespace
 - `RuntimeNamespace` now owns the core runtime-environment rules used by the
@@ -162,7 +165,7 @@ Current `v1.4` implementation status:
      `shutdown()` lifecycle API without using Motlie guest backing providers.
    - The same portable slice should later map to `backend::vz::*`.
 
-3. `examples/v1.4/harness` remains the main runnable proving surface for the
+3. `examples/v1.4/harness` is the concrete operator-facing harness for the
    merged `v1.4` line.
    - It should keep supporting repeatable scenarios and ad-hoc/manual
      operation.
@@ -171,13 +174,10 @@ Current `v1.4` implementation status:
    - The old `repl_host_v1_4` is transitional and should not accumulate unique
      control-plane logic.
 
-4. The reusable harness core should then be extracted from that proven
-   `v1.4` surface into `libs/vmm`.
+4. Reusable harness core should live in `libs/vmm`.
    - Reusable scenario definitions, step/result types, validation profiles,
-     and driver/result plumbing should live in the library once the `v1.4`
-     behavior is proven.
-   - `examples/v1.4/harness` should remain as the first consumer and
-     historical reference implementation rather than being rewritten away.
+     and driver/result plumbing should move into the library.
+   - `examples/v1.4/harness` should consume that extracted core.
    - `v1.4`-specific guest/image setup, guest catalog, runbook docs, and
      operator-facing UX should stay in `examples/v1.4`.
 
@@ -261,10 +261,9 @@ The critical constraint is:
 
 ## Harness Direction
 
-`examples/v1.4/harness/` is the historical origin and first consumer of the
-merged `v1.4` harness line.
+`examples/v1.4/harness/` is the concrete `v1.4` operator harness.
 
-The intended modes are:
+It must keep supporting:
 
 - scripted scenario mode
   - action/expectation pairs for repeatable regression tests
@@ -272,13 +271,11 @@ The intended modes are:
   - human-driven exploratory testing
   - coding-agent-driven ad-hoc reproduction and debugging
 
-The post-merge extraction rule is:
+The extraction rule is:
 
-- preserve the existing `examples/v1.4/harness/` tree and its checked-in
-  artifacts/docs as the historical record of how the harness was proven
-- extract reusable harness-core modules into `libs/vmm` underneath that
-  already-proven surface
-- do not rewrite `v1.4` to hide where the harness came from
+- move reusable harness-core modules into `libs/vmm`
+- keep `examples/v1.4/harness/` as the `v1.4`-specific harness binary and UX
+- keep `v1.4`-specific guest/image/runbook content in `examples/v1.4`
 
 Both the original `v1.4` harness and the extracted harness core must use the
 same `libs/vmm` lifecycle/control-plane APIs:
@@ -336,14 +333,9 @@ This is explicitly meant to replace the old split between:
 The harness line should become the single coherent driver over the same
 underlying library APIs.
 
-That does not require deleting the original `v1.4` harness. The extracted
-`libs/vmm` harness core should be introduced underneath it, with
-`examples/v1.4/harness` remaining as:
-
-- the first real consumer
-- the preserved historical proving surface
-- the place where `v1.4`-specific guest/image/operator artifacts continue to
-  live
+The extracted `libs/vmm` harness core should sit underneath
+`examples/v1.4/harness`, while `v1.4`-specific guest, image, and operator
+artifacts stay in `examples/v1.4`.
 
 One specific design correction from this analysis:
 

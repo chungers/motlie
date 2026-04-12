@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-12 | @codex-vmm | Refresh PLAN from current merged reality: `v1.4` harness is proven, PR #159 auto-provisioning is complete and independently validated, and the next work is Phase 8 extraction of reusable harness/validation core plus the standard guest-path follow-up |
 | 2026-04-09 | @codex | Sync PLAN with the merged `v1.4` harness reality: mark completed harness/PTY/VTE/scenario work accurately, update the proving-ground status from `v1.3` to merged `v1.4`, and rescope Phase 8 around extracting reusable harness infrastructure into `libs/vmm` |
 | 2026-04-08 | @codex | Address PR 140 review items: remove the dead `VmBackend` / `BackendSet` transitional layer, tighten shutdown/readiness/terminal correctness, and update the plan language to match the direct enum-dispatch runtime that is now in code |
 | 2026-04-08 | @codex | Add a switchable harness terminal backend, make `shadow-terminal` the default PTY/TUI renderer with `vt100` as an explicit fallback, and record that GIF/PNG/movie output stays deferred outside `v1.4` |
@@ -30,7 +31,7 @@
 
 ## Status
 
-Current source of truth for the runnable proving ground:
+Current source of truth for the merged `v1.4` line:
 
 - implementation: `libs/vmm/examples/v1.4/`
 - design: `libs/vmm/docs/DESIGN.md`
@@ -50,6 +51,8 @@ What is already working in the merged `v1.4` checkpoint:
 - machine-readable result artifacts, observability bundles, asciicast export,
   and static SVG screen snapshots
 - deterministic shutdown fallback (API -> SIGTERM -> SIGKILL)
+- principal-driven guest auto-provisioning through the SSH proxy path
+- stable guest reuse within one harness run after first-contact provisioning
 
 What is still missing for a polished, reusable harness:
 
@@ -59,8 +62,16 @@ What is still missing for a polished, reusable harness:
 - full convergence of shell/manual mode onto the same reusable engine
 - a stable host-side + guest-side reporting surface for CPU/memory/disk/network
   visibility
-- automatic guest provisioning when a new SSH principal appears
+- a broader standard guest path that does not depend on Motlie backing
 - a practical single-binary distribution prototype for the curated guest image
+
+Independent end-to-end validation already performed for the merged line:
+
+- `harness_v1_4` smoke, PTY, multi-guest, and isolation validation
+- external SSH validation of VFS, egress, passwordless sudo, and Codex startup
+- PR #159 auto-provision validation through:
+  - `examples/v1.4/scenarios/auto-provision-ssh.json`
+  - `examples/v1.4/integration/repl-auto-provision-smoke.sh`
 
 ## Objective
 
@@ -98,9 +109,8 @@ Turn the working `v1.3` example into:
 
 The next rule for this plan is:
 
-- preserve the merged `v1.4` harness as the proving ground
 - extract reusable harness-core logic into `libs/vmm`
-- keep `examples/v1.4` as the first consumer and operator-facing proving line
+- keep `examples/v1.4` as the concrete operator-facing harness implementation
 
 ## Phase 1: Typed Spec and Network Extraction
 
@@ -380,54 +390,66 @@ Acceptance:
   contact when auto-provisioning is enabled
 - assignments are stable across relaunch within the same harness run
 - capacity exhaustion fails with a typed error instead of producing collisions
+- [x] independently validated through:
+  - [x] `examples/v1.4/scenarios/auto-provision-ssh.json`
+  - [x] `examples/v1.4/integration/repl-auto-provision-smoke.sh`
 
 ## Phase 8: Harness Core Extraction and Validation Profiles
 
 Goal:
-- extract the now-proven `v1.4` harness machinery into reusable `libs/vmm`
-  harness infrastructure so future harnesses, products, and extensions do not
-  have to clone the `examples/v1.4` scenario/validation engine
+- extract the proven `v1.4` harness machinery into reusable `libs/vmm`
+  harness and validation infrastructure so future harnesses and products can
+  reuse it directly
 
 Tasks:
-- [x] prove the `v1.4` harness shape in `examples/v1.4/harness` first:
+- [x] `v1.4` already proves the target harness surface:
   - [x] stable binary entrypoint
   - [x] stable scenario/action-expectation format
   - [x] PTY/send/read/resize/expect steps
   - [x] multi-guest coordination
   - [x] structured per-step outputs
-- [ ] add `libs/vmm/src/validation.rs`
-- [ ] turn current smoke tests into typed validation profiles
-- [ ] move reusable scenario-driver types out of `examples/v1.4/harness/` into
-      `libs/vmm/src/harness/`:
-  - [ ] scenario definition types
-  - [ ] scenario step/result types
-  - [ ] driver execution engine
-  - [ ] reusable result/error envelopes
-- [ ] define the reusable library boundary for harness-core versus
-      product/example-specific UX:
-  - [ ] keep `examples/v1.4`-specific guest/image setup out of the library core
+  - [x] ad-hoc/manual shell mode
+  - [x] principal-driven auto-provision scenario coverage
+- [ ] Phase 8A: extract reusable harness core into `libs/vmm`
+  - [ ] add `libs/vmm/src/harness/mod.rs`
+  - [ ] move scenario definition types into `libs/vmm/src/harness/`
+  - [ ] move scenario step/result types into `libs/vmm/src/harness/`
+  - [ ] move the driver execution engine into `libs/vmm/src/harness/`
+  - [ ] move reusable result/error envelopes into `libs/vmm/src/harness/`
   - [ ] keep terminal backend selection (`shadow` / `vt100`) behind a reusable
         harness-core interface
-  - [ ] let later harnesses reuse the scenario engine without inheriting the
-        `v1.4` guest catalog or docs verbatim
-- [ ] converge ad-hoc/manual operation onto the same extracted engine:
+- [ ] Phase 8A: add typed validation APIs
+  - [ ] add `libs/vmm/src/validation.rs`
+  - [ ] turn current smoke and scenario checks into typed validation profiles
+  - [ ] define first reusable profiles:
+    - [ ] `guest_bootstrap`
+    - [ ] `guest_egress_ready`
+    - [ ] `guest_vfs_ready`
+    - [ ] `guest_coding_agent_ready`
+    - [ ] `auto_provision_ssh`
+    - [ ] `multi_guest_baseline`
+- [ ] Phase 8A: converge the operator shell onto the extracted core
   - [ ] `harness_v1_4 shell` commands become thin wrappers over reusable
         scenario/validation operations
   - [ ] `validate <guest>` becomes a library-owned validation profile invocation
-        instead of a shell-local command list
-  - [ ] user reports become reproducible as saved scripts or validation-profile
-        runs, not one-off REPL sessions
-- [ ] keep `examples/v1.4/harness` as the first consumer after extraction:
+  - [ ] user reports become reproducible as saved scenarios or validation
+        profile runs rather than shell-local command lists
+- [ ] Phase 8A: preserve the current `v1.4` harness behavior after extraction
   - [ ] no loss of current `boot`, `ready`, `exec`, `shutdown`, PTY, or
         multi-guest capabilities
   - [ ] scenario artifacts and machine-readable outputs stay stable enough for
         existing agent workflows
+- [ ] Phase 8B: widen the reusable VM model after harness extraction
+  - [ ] converge the reviewed broader `VmSpec` boundary
+  - [ ] add the small standard Cloud Hypervisor “hello world” example
+  - [ ] validate the standard guest path through the same lifecycle and
+        validation APIs without Motlie guest backing
 
 Acceptance:
 - the reusable harness core lives in `libs/vmm`, not only in
   `examples/v1.4/harness`
-- `examples/v1.4/harness` remains the proving ground but becomes one consumer
-  of the extracted scenario/validation engine
+- `examples/v1.4/harness` uses that extracted core without losing current
+  operator workflows
 - validation returns machine-usable results through reusable profile APIs, not
   only shell-local command lists
 - the same extracted engine supports:
@@ -435,6 +457,8 @@ Acceptance:
   - [ ] human interactive/manual operation
   - [x] ad-hoc coding-agent experimentation
   - [ ] future non-`v1.4` harness consumers
+- the standard guest path becomes demonstrable through the same lifecycle and
+  validation APIs after the `VmSpec` follow-up slice
 
 ## Phase 9: Polish and Hardening
 
