@@ -1116,8 +1116,7 @@ async fn execute_stream(
     let initial = if matches!(cmd.mode, StreamModeArg::Tail) {
         target
             .sample_text(&ScrollbackQuery::LastLines(cmd.lines))
-            .await
-            .unwrap_or_default()
+            .await?
     } else {
         String::new()
     };

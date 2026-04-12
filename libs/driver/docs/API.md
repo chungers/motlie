@@ -136,9 +136,14 @@ pub struct HistoryBuffer<T> { /* bounded FIFO */ }
 impl<T> HistoryBuffer<T> {
     pub fn new(capacity: NonZeroUsize) -> Self;
     pub fn try_with_capacity(capacity: usize) -> DriverResult<Self>;
+    pub fn capacity(&self) -> usize;
+    pub fn len(&self) -> usize;
+    pub fn is_empty(&self) -> bool;
     pub fn push(&mut self, item: T) -> u64;
     pub fn clear(&mut self);
     pub fn latest(&self) -> Option<&HistoryRecord<T>>;
+    pub fn oldest_seq(&self) -> Option<u64>;
+    pub fn newest_seq(&self) -> Option<u64>;
 }
 
 impl<T: Clone> HistoryBuffer<T> {

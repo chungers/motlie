@@ -22,7 +22,6 @@ commands-vfs = []
 commands-tmux = ["dep:motlie-tmux", "dep:regex"]
 
 [dependencies]
-anyhow.workspace = true
 thiserror.workspace = true
 clap = { version = "4.5.58", features = ["derive"] }
 async-trait = "0.1"
@@ -37,6 +36,9 @@ vt100 = { version = "0.15", optional = true }
 regex = { version = "1.12", optional = true }
 motlie-tmux = { path = "../tmux", optional = true }
 ansi-to-tui = { version = "8", optional = true }
+
+[dev-dependencies]
+anyhow.workspace = true
 
 [[example]]
 name = "tmux_repl"
