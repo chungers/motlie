@@ -679,14 +679,20 @@ REPL auto-provision wrapper:
 ```
 
 This wrapper exists specifically for the proxy-owned auto-provision path that
-cannot be proven by `boot <guest>`:
+cannot be proven by `boot <guest>` alone:
 
 - launch `repl_host_v1_4`
+- verify `auto-provision` starts in the `off` state
+- `boot alice` and verify manual boot still works while auto-provisioning is off
+- turn `auto-provision on`
+- `boot bob` and verify manual boot still works while auto-provisioning is on
 - parse the printed proxy port
 - run a real external `ssh joe@localhost uname -s`
 - verify the command returns `Linux`
 - query REPL `status`
 - attach again as the same principal and verify the same guest PID is reused
+- turn `auto-provision off` again and verify an unknown principal no longer
+  provisions a guest
 
 Saved shell command sequence:
 

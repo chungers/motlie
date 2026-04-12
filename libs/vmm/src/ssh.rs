@@ -23,11 +23,11 @@
 //! - Inbound: localhost trust (username = guest identity)
 //! - Outbound: ephemeral Ed25519 cert signed by in-memory CA
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::ErrorKind;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
@@ -55,7 +55,8 @@ macro_rules! debug_trace {
 }
 
 fn ssh_exec_trace_enabled() -> bool {
-    std::env::var_os("MOTLIE_VMM_SSH_EXEC_TRACE").is_some()
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("MOTLIE_VMM_SSH_EXEC_TRACE").is_some())
 }
 
 macro_rules! ssh_exec_trace {
@@ -694,24 +695,15 @@ async fn exec_on_channel(
     while let Some(msg) = channel.wait().await {
         match msg {
             ChannelMsg::Data { ref data } => {
-                ssh_exec_trace!(
-                    "exec_on_channel[{guest_name}]: stdout {} bytes",
-                    data.len()
-                );
+                ssh_exec_trace!("exec_on_channel[{guest_name}]: stdout {} bytes", data.len());
                 stdout.extend_from_slice(data)
             }
             ChannelMsg::ExtendedData { ref data, ext } if ext == 1 => {
-                ssh_exec_trace!(
-                    "exec_on_channel[{guest_name}]: stderr {} bytes",
-                    data.len()
-                );
+                ssh_exec_trace!("exec_on_channel[{guest_name}]: stderr {} bytes", data.len());
                 stderr.extend_from_slice(data)
             }
             ChannelMsg::ExitStatus { exit_status } => {
-                ssh_exec_trace!(
-                    "exec_on_channel[{guest_name}]: exit_status {}",
-                    exit_status
-                );
+                ssh_exec_trace!("exec_on_channel[{guest_name}]: exit_status {}", exit_status);
                 exit_code = Some(exit_status)
             }
             ChannelMsg::Eof => {
@@ -1225,9 +1217,24 @@ pub async fn run_proxy(
 /// Shared guest channel write half, set by channel_open_session,
 /// used by handler methods for client→guest forwarding on the same SSH channel
 /// whose read half is being forwarded back to the client.
+#[derive(Debug, Clone, Copy)]
+enum PendingReplyKind {
+    Pty,
+    Shell,
+    Exec,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingReply {
+    client_channel: russh::ChannelId,
+    #[cfg_attr(not(feature = "debug-trace"), allow(dead_code))]
+    kind: PendingReplyKind,
+}
+
 #[derive(Default)]
 struct ProxyChannelState {
     writer: Option<ChannelWriteHalf<russh::client::Msg>>,
+    pending_replies: VecDeque<PendingReply>,
 }
 
 type SharedGuestChannels = Arc<tokio::sync::Mutex<HashMap<russh::ChannelId, ProxyChannelState>>>;
@@ -1379,9 +1386,49 @@ impl russh::server::Handler for ProxyHandler {
                         }
                         ChannelMsg::Success => {
                             debug_trace!("SSH proxy: guest channel reported Success");
+                            let pending = {
+                                let mut states = guest_channels_for_read.lock().await;
+                                states
+                                    .get_mut(&ch_id)
+                                    .and_then(|state| state.pending_replies.pop_front())
+                            };
+                            if let Some(pending) = pending {
+                                debug_trace!(
+                                    "SSH proxy: forwarding {:?} success to client channel {:?}",
+                                    pending.kind,
+                                    pending.client_channel
+                                );
+                                if server_handle
+                                    .channel_success(pending.client_channel)
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
                         }
                         ChannelMsg::Failure => {
                             debug_trace!("SSH proxy: guest channel reported Failure");
+                            let pending = {
+                                let mut states = guest_channels_for_read.lock().await;
+                                states
+                                    .get_mut(&ch_id)
+                                    .and_then(|state| state.pending_replies.pop_front())
+                            };
+                            if let Some(pending) = pending {
+                                debug_trace!(
+                                    "SSH proxy: forwarding {:?} failure to client channel {:?}",
+                                    pending.kind,
+                                    pending.client_channel
+                                );
+                                if server_handle
+                                    .channel_failure(pending.client_channel)
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
                         }
                         ChannelMsg::ExitStatus { exit_status } => {
                             debug_trace!("SSH proxy: guest channel exit-status={exit_status}");
@@ -1438,6 +1485,7 @@ impl russh::server::Handler for ProxyHandler {
                 client_ch_id,
                 ProxyChannelState {
                     writer: Some(guest_write),
+                    pending_replies: VecDeque::new(),
                 },
             );
 
@@ -1506,7 +1554,10 @@ impl russh::server::Handler for ProxyHandler {
                         let _ = server_handle.channel_failure(channel).await;
                         return Err(e.into());
                     }
-                    let _ = server_handle.channel_success(channel).await;
+                    state.pending_replies.push_back(PendingReply {
+                        client_channel: channel,
+                        kind: PendingReplyKind::Pty,
+                    });
                 } else {
                     let _ = server_handle.channel_failure(channel).await;
                 }
@@ -1532,7 +1583,10 @@ impl russh::server::Handler for ProxyHandler {
                         let _ = server_handle.channel_failure(channel).await;
                         return Err(e.into());
                     }
-                    let _ = server_handle.channel_success(channel).await;
+                    state.pending_replies.push_back(PendingReply {
+                        client_channel: channel,
+                        kind: PendingReplyKind::Shell,
+                    });
                 } else {
                     let _ = server_handle.channel_failure(channel).await;
                 }
@@ -1560,7 +1614,10 @@ impl russh::server::Handler for ProxyHandler {
                         let _ = server_handle.channel_failure(channel).await;
                         return Err(e.into());
                     }
-                    let _ = server_handle.channel_success(channel).await;
+                    state.pending_replies.push_back(PendingReply {
+                        client_channel: channel,
+                        kind: PendingReplyKind::Exec,
+                    });
                 } else {
                     let _ = server_handle.channel_failure(channel).await;
                 }
@@ -1622,6 +1679,7 @@ impl russh::server::Handler for ProxyHandler {
                 if let Some(ch) = state.writer.take() {
                     ch.close().await?;
                 }
+                state.pending_replies.clear();
             }
             Ok(())
         }

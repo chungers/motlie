@@ -68,13 +68,18 @@ struct GuestProvisionerInner {
     guest_spec_factory: Arc<GuestSpecFactory>,
     host_seed_hook: Option<Arc<HostSeedHook>>,
     state: Mutex<ProvisioningState>,
+    /// Serialize provisioning and restart work across principals. This keeps
+    /// allocator updates and guest lifecycle transitions simple and safe for
+    /// the current small-scale harness, at the cost of blocking unrelated
+    /// principals while another guest is booting. Per-principal locking is a
+    /// future improvement if multi-tenant parallelism becomes important.
     operation_lock: AsyncMutex<()>,
 }
 
 #[derive(Clone)]
 pub struct EnsuredGuest {
     pub principal: String,
-    pub created: bool,
+    pub spec_created: bool,
     pub spec: GuestSpec,
     pub net_assignment: GuestNetAssignment,
     pub handle: Arc<VmHandle>,
@@ -110,6 +115,13 @@ pub enum ProvisioningError {
     GuestNotBooted(String),
     #[error("internal provisioning state poisoned: {0}")]
     StatePoisoned(&'static str),
+}
+
+#[derive(Clone)]
+struct ActiveProvisionedGuestRecord {
+    spec: GuestSpec,
+    net_assignment: GuestNetAssignment,
+    handle: Arc<VmHandle>,
 }
 
 impl GuestProvisioner {
@@ -161,24 +173,28 @@ impl GuestProvisioner {
         let principal = principal.to_string();
 
         if let Some(existing) = self.active_record(&principal)? {
-            let handle = existing
-                .handle
-                .expect("active guest snapshots always include a live handle");
+            let handle = existing.handle;
             if handle.ready(&self.inner.readiness_policy).await.is_ok() {
                 return Ok(EnsuredGuest {
                     principal,
-                    created: false,
+                    spec_created: false,
                     spec: existing.spec,
                     net_assignment: existing.net_assignment,
                     handle,
                 });
             }
 
-            let _ = handle.shutdown().await;
+            if let Err(error) = handle.shutdown().await {
+                tracing::warn!(
+                    principal = %principal,
+                    error = %error,
+                    "ignoring shutdown error for stale guest before reprovision"
+                );
+            }
             self.clear_active_handle(&principal)?;
         }
 
-        let (spec, created_record) = match self.record(&principal)? {
+        let (spec, spec_created) = match self.record(&principal)? {
             Some(record) => (record.spec, false),
             None => {
                 let net_assignment = {
@@ -236,7 +252,7 @@ impl GuestProvisioner {
 
         Ok(EnsuredGuest {
             principal,
-            created: created_record,
+            spec_created,
             spec,
             net_assignment,
             handle,
@@ -351,10 +367,13 @@ impl GuestProvisioner {
     fn active_record(
         &self,
         principal: &str,
-    ) -> Result<Option<ProvisionedGuestRecordSnapshot>, ProvisioningError> {
+    ) -> Result<Option<ActiveProvisionedGuestRecord>, ProvisioningError> {
         Ok(self.record(principal)?.and_then(|record| {
-            record.handle.as_ref()?;
-            Some(record)
+            Some(ActiveProvisionedGuestRecord {
+                spec: record.spec,
+                net_assignment: record.net_assignment,
+                handle: record.handle?,
+            })
         }))
     }
 
@@ -444,5 +463,124 @@ fn snapshot_from_record(
             .handle
             .as_ref()
             .map(|handle| handle.runtime_paths.clone()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::net::Ipv4Addr;
+
+    use crate::network::{AdminNetMode, EgressNetMode, NetworkModes};
+    use crate::network_alloc::{GuestNetAllocatorConfig, GuestNetAllocatorError, Ipv4Subnet};
+    use crate::runtime::{
+        ControlPlaneBacking, FilesystemBacking, HypervisorBacking, NetworkBacking, Runtime,
+    };
+    use crate::spec::{
+        BootArtifacts, GuestResources, GuestSshAccess, GuestStorage, GuestUser, RuntimeNamespace,
+        SoftwareProfile,
+    };
+
+    fn test_guest_spec(name: &str) -> GuestSpec {
+        GuestSpec {
+            guest_id: name.to_string(),
+            hostname: format!("motlie-{name}"),
+            socket_path: PathBuf::from(format!("/tmp/{name}.sock")),
+            user: GuestUser {
+                name: name.to_string(),
+                uid: 1000,
+                gid: 1000,
+                home: PathBuf::from(format!("/home/{name}")),
+            },
+            ssh: GuestSshAccess {
+                principal: name.to_string(),
+                login_user: name.to_string(),
+            },
+            mounts: Vec::new(),
+            software: SoftwareProfile::default(),
+            resources: GuestResources::default(),
+            storage: GuestStorage::default(),
+            boot: BootArtifacts {
+                kernel: PathBuf::from("/tmp/kernel"),
+                initramfs: None,
+                firmware: None,
+                cmdline: None,
+            },
+        }
+    }
+
+    fn test_provisioner(max_guests: u32) -> GuestProvisioner {
+        let temp_root = std::env::temp_dir().join("motlie-vmm-provisioning-tests");
+        let allocator = GuestNetAllocator::new(GuestNetAllocatorConfig {
+            max_guests: Some(max_guests),
+            socket_dir: temp_root.join("sockets"),
+            socket_name_prefix: "provtest".to_string(),
+            admin_pool: crate::network_alloc::Ipv4SubnetPool {
+                base: Ipv4Subnet::new(Ipv4Addr::new(192, 168, 128, 0), 24).unwrap(),
+                guest_prefix_len: 30,
+                first_subnet_slot: 0,
+                host_offset: 1,
+                guest_offset: 2,
+                dns_offset: None,
+            },
+            egress_pool: crate::network_alloc::Ipv4SubnetPool {
+                base: Ipv4Subnet::new(Ipv4Addr::new(10, 88, 0, 0), 16).unwrap(),
+                guest_prefix_len: 24,
+                first_subnet_slot: 0,
+                host_offset: 1,
+                guest_offset: 2,
+                dns_offset: Some(3),
+            },
+            ..GuestNetAllocatorConfig::default()
+        })
+        .unwrap();
+
+        GuestProvisioner::new(GuestProvisionerConfig {
+            namespace: RuntimeNamespace::new("provtest", temp_root.clone()).unwrap(),
+            base_dir: temp_root,
+            network_modes: NetworkModes {
+                admin: AdminNetMode::None,
+                egress: EgressNetMode::None,
+            },
+            readiness_policy: ReadinessPolicy::default(),
+            services: LifecycleServices {
+                runtime: Arc::new(Runtime {
+                    hypervisor: HypervisorBacking::CloudHypervisorShell(
+                        crate::backend::ch::shell::ChShellBackend::new(),
+                    ),
+                    filesystem: FilesystemBacking::HypervisorManaged,
+                    network: NetworkBacking::None,
+                    control_plane: ControlPlaneBacking::None,
+                }),
+            },
+            allocator,
+            ssh_ca_pubkey: "test-ca".to_string(),
+            guest_spec_factory: Arc::new(|_| {
+                unreachable!("capacity exhaustion should occur before factory use")
+            }),
+            host_seed_hook: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn ensure_guest_for_principal_reports_capacity_exhaustion() {
+        let provisioner = test_provisioner(1);
+        provisioner
+            .upsert_record("alice", test_guest_spec("alice"), None)
+            .unwrap();
+
+        let error = match provisioner.ensure_guest_for_principal("bob").await {
+            Ok(_) => panic!("second principal should exhaust allocator capacity"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            ProvisioningError::NetworkAllocation(GuestNetAllocatorError::Exhausted {
+                next_slot: 1,
+                capacity: 1,
+            })
+        ));
     }
 }

@@ -3,6 +3,7 @@ mod demo_support;
 use std::io::{self, BufRead, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -21,7 +22,9 @@ use motlie_vmm::spec::{
     BootArtifacts, GuestMountSpec, GuestResources, GuestSpec, GuestSshAccess, GuestStorage,
     GuestUser, RuntimeNamespace, SoftwareProfile,
 };
-use motlie_vmm::ssh::{self, new_guest_registry, ExecOutput, SshProxyConfig};
+use motlie_vmm::ssh::{
+    self, new_guest_registry, ExecOutput, PrincipalResolver, SshProxyConfig, SshProxyError,
+};
 use tokio::sync::mpsc;
 
 use demo_support::{demo_guest_ids, demo_guest_socket_path};
@@ -74,6 +77,32 @@ fn build_guest_provisioner(
             seed_host_mounts(guest).map_err(|err| err.to_string())
         })),
     }))
+}
+
+fn build_principal_resolver(
+    provisioner: &GuestProvisioner,
+    auto_provision_enabled: &Arc<AtomicBool>,
+) -> PrincipalResolver {
+    let provisioner = provisioner.clone();
+    let auto_provision_enabled = Arc::clone(auto_provision_enabled);
+    Arc::new(move |principal: String| {
+        let provisioner = provisioner.clone();
+        let auto_provision_enabled = Arc::clone(&auto_provision_enabled);
+        Box::pin(async move {
+            if !auto_provision_enabled.load(Ordering::SeqCst) {
+                return Ok(principal);
+            }
+
+            provisioner
+                .ensure_guest_for_principal(&principal)
+                .await
+                .map(|guest| guest.spec.guest_id.clone())
+                .map_err(|err| SshProxyError::ResolveGuest {
+                    principal,
+                    reason: err.to_string(),
+                })
+        })
+    })
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
@@ -140,9 +169,13 @@ async fn main() -> Result<(), DynError> {
         &ca,
         &runtime,
     )?;
+    let auto_provision_enabled = Arc::new(AtomicBool::new(false));
     let proxy_config = SshProxyConfig {
         listen: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), instance.proxy_port),
-        principal_resolver: Some(provisioner.ssh_principal_resolver()),
+        principal_resolver: Some(build_principal_resolver(
+            &provisioner,
+            &auto_provision_enabled,
+        )),
     };
     tokio::spawn(ssh::run_proxy(
         proxy_config.clone(),
@@ -158,8 +191,9 @@ async fn main() -> Result<(), DynError> {
         "SSH proxy: listening on 127.0.0.1:{}",
         proxy_config.listen.port()
     );
+    println!("Auto-provision: disabled");
     println!(
-        "Commands: help | boot <guest> | ready <guest> | exec <guest> <cmd> | validate <guest> | shutdown <guest> | status | guests | where [guest] | quit"
+        "Commands: help | auto-provision <on|off|status> | boot <guest> | ready <guest> | exec <guest> <cmd> | validate <guest> | shutdown <guest> | status | guests | where [guest] | quit"
     );
 
     let mut lines = spawn_stdin_reader();
@@ -177,8 +211,22 @@ async fn main() -> Result<(), DynError> {
         let result = if trimmed == "help" {
             print_help();
             Ok(())
+        } else if trimmed == "auto-provision" || trimmed == "auto-provision status" {
+            println!(
+                "auto-provision={}",
+                auto_provision_status(auto_provision_enabled.load(Ordering::SeqCst))
+            );
+            Ok(())
+        } else if trimmed == "auto-provision on" {
+            auto_provision_enabled.store(true, Ordering::SeqCst);
+            println!("ok: auto-provision enabled");
+            Ok(())
+        } else if trimmed == "auto-provision off" {
+            auto_provision_enabled.store(false, Ordering::SeqCst);
+            println!("ok: auto-provision disabled");
+            Ok(())
         } else if trimmed == "status" || trimmed == "guests" {
-            print_status(&provisioner);
+            print_status(&provisioner, auto_provision_enabled.load(Ordering::SeqCst));
             Ok(())
         } else if trimmed == "where" {
             print_where(
@@ -258,6 +306,7 @@ fn spawn_stdin_reader() -> mpsc::UnboundedReceiver<Result<String, io::Error>> {
 }
 
 fn print_help() {
+    println!("auto-provision <mode>    toggle SSH principal auto-provisioning on, off, or status");
     println!("boot <guest>             boot a Motlie-backed guest and wait until ready");
     println!("ready <guest>            wait until an already-booted guest is ready");
     println!("exec <guest> <command>   run a command inside the guest over the SSH control plane");
@@ -268,7 +317,19 @@ fn print_help() {
     println!("quit                     exit the REPL");
 }
 
-fn print_status(provisioner: &GuestProvisioner) {
+fn auto_provision_status(enabled: bool) -> &'static str {
+    if enabled {
+        "on"
+    } else {
+        "off"
+    }
+}
+
+fn print_status(provisioner: &GuestProvisioner, auto_provision_enabled: bool) {
+    println!(
+        "auto-provision={}",
+        auto_provision_status(auto_provision_enabled)
+    );
     let active: Vec<_> = provisioner
         .guests()
         .unwrap_or_default()
