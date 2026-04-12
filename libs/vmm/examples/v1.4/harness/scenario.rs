@@ -7,18 +7,16 @@ use std::time::Duration;
 use motlie_vmm::backend::BackendError;
 use motlie_vmm::ca::SshCa;
 use motlie_vmm::guestfs::GuestFsError;
-use motlie_vmm::network::{AdminNetMode, EgressNetMode, NetworkModes};
-use motlie_vmm::network_alloc::{GuestNetAllocator, GuestNetAllocatorConfig};
-use motlie_vmm::orchestrator::{
-    LifecycleServices, OrchestratorError, PrepareRequest, ReadinessPolicy, ShutdownReport,
-    VmHandle, boot, prepare,
-};
+use motlie_vmm::network_alloc::GuestNetAllocatorConfig;
+use motlie_vmm::orchestrator::{OrchestratorError, ShutdownReport};
+use motlie_vmm::provisioning::{GuestProvisioner, ProvisioningError};
 use motlie_vmm::runtime::{
     ControlPlaneBacking, FilesystemBacking, HypervisorBacking, NetworkBacking, Runtime,
     RuntimeError,
 };
 use motlie_vmm::ssh::{
-    self, ExecOutput, PtyRead, PtyRequest, SshProxyConfig, SshProxyError, new_guest_registry,
+    self, exec_via_proxy, new_guest_registry, ExecOutput, PtyRead, PtyRequest, SshProxyConfig,
+    SshProxyError,
 };
 use serde::{Deserialize, Serialize};
 
@@ -26,8 +24,8 @@ use crate::terminal::{
     HarnessTerminalSession, TerminalBackendKind, TerminalSessionError, VteScreenSnapshot,
 };
 use crate::{
-    DynError, HarnessInstance, PACKAGE_MANAGER_QUIESCENT_COMMAND, demo_guest, ensure_file_exists,
-    persist_json, print_instance_details, seed_host_mounts, wait_for_egress_ready,
+    build_guest_provisioner, ensure_file_exists, persist_json, print_instance_details,
+    wait_for_egress_ready, DynError, HarnessInstance, PACKAGE_MANAGER_QUIESCENT_COMMAND,
 };
 
 #[derive(Debug, Deserialize)]
@@ -51,6 +49,14 @@ pub enum ScenarioStep {
     },
     Exec {
         guest: String,
+        command: String,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+        #[serde(default)]
+        expect: Option<ExecExpectation>,
+    },
+    ProxyExec {
+        principal: String,
         command: String,
         #[serde(default)]
         timeout_ms: Option<u64>,
@@ -211,10 +217,6 @@ pub struct ScenarioRunResult {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ScenarioDriverError {
-    #[error("scenario setup failed: {0}")]
-    Setup(String),
-    #[error("SSH CA setup failed: {0}")]
-    Ca(String),
     #[error("unknown guest '{0}'")]
     UnknownGuest(String),
     #[error("guest '{0}' is already booted")]
@@ -223,18 +225,20 @@ pub enum ScenarioDriverError {
     UnknownSession(String),
     #[error("PTY session '{0}' already exists")]
     SessionAlreadyExists(String),
-    #[error("prepare failed: {0}")]
-    Prepare(#[source] OrchestratorError),
-    #[error("boot failed: {0}")]
-    Boot(#[source] OrchestratorError),
-    #[error("readiness failed: {0}")]
-    Ready(#[source] OrchestratorError),
     #[error("exec failed: {0}")]
     Exec(#[source] OrchestratorError),
-    #[error("shutdown failed: {0}")]
-    Shutdown(#[source] OrchestratorError),
+    #[error("proxy exec failed: {0}")]
+    ProxyExec(#[source] SshProxyError),
+    #[error("provisioning failed: {0}")]
+    Provisioning(#[source] ProvisioningError),
     #[error(transparent)]
     Pty(#[from] TerminalSessionError),
+}
+
+impl From<ProvisioningError> for ScenarioDriverError {
+    fn from(value: ProvisioningError) -> Self {
+        Self::Provisioning(value)
+    }
 }
 
 pub async fn run_scenario_file(
@@ -284,15 +288,9 @@ pub async fn run_scenario_definition(
 }
 
 struct ScenarioDriver {
-    base_dir: PathBuf,
-    artifacts_dir: PathBuf,
-    instance: HarnessInstance,
-    runtime: Arc<Runtime>,
-    ca: Arc<SshCa>,
-    allocator: GuestNetAllocator,
+    provisioner: GuestProvisioner,
     proxy_config: SshProxyConfig,
     terminal_backend: TerminalBackendKind,
-    handles: HashMap<String, VmHandle>,
     terminals: HashMap<String, HarnessTerminalSession>,
     session_guests: HashMap<String, String>,
     artifact_root: PathBuf,
@@ -312,16 +310,6 @@ impl ScenarioDriver {
 
         let ca = Arc::new(SshCa::new()?);
         let guest_registry = new_guest_registry();
-        let proxy_config = SshProxyConfig {
-            listen: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), instance.proxy_port),
-        };
-        tokio::spawn(ssh::run_proxy(
-            proxy_config.clone(),
-            Arc::clone(&guest_registry),
-        ));
-        print_instance_details(instance, &proxy_config);
-        println!("  terminal_backend={terminal_backend}");
-
         let runtime = Arc::new(Runtime {
             hypervisor: HypervisorBacking::CloudHypervisorShell(
                 motlie_vmm::backend::ch::shell::ChShellBackend::new(),
@@ -339,7 +327,24 @@ impl ScenarioDriver {
                 ),
             ),
         });
-        let allocator = GuestNetAllocator::new(allocator_config)?;
+        let provisioner = build_guest_provisioner(
+            base_dir,
+            artifacts_dir,
+            instance,
+            allocator_config,
+            &ca,
+            &runtime,
+        )?;
+        let proxy_config = SshProxyConfig {
+            listen: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), instance.proxy_port),
+            principal_resolver: Some(provisioner.ssh_principal_resolver()),
+        };
+        tokio::spawn(ssh::run_proxy(
+            proxy_config.clone(),
+            Arc::clone(&guest_registry),
+        ));
+        print_instance_details(instance, &proxy_config);
+        println!("  terminal_backend={terminal_backend}");
         let artifact_root = instance
             .namespace
             .temp_root
@@ -347,20 +352,9 @@ impl ScenarioDriver {
         std::fs::create_dir_all(&artifact_root)?;
 
         Ok(Self {
-            base_dir: base_dir.to_path_buf(),
-            artifacts_dir: artifacts_dir.to_path_buf(),
-            instance: HarnessInstance {
-                namespace: instance.namespace.clone(),
-                demo_root: instance.demo_root.clone(),
-                socket_root: instance.socket_root.clone(),
-                proxy_port: instance.proxy_port,
-            },
-            runtime,
-            ca,
-            allocator,
+            provisioner,
             proxy_config,
             terminal_backend,
-            handles: HashMap::new(),
             terminals: HashMap::new(),
             session_guests: HashMap::new(),
             artifact_root,
@@ -440,7 +434,7 @@ impl ScenarioDriver {
             artifact_root: scenario_root,
             proxy: format!("ssh://localhost:{}", self.proxy_config.listen.port()),
             terminal_backend: self.terminal_backend,
-            allocator_capacity: self.allocator.capacity().unwrap_or_default(),
+            allocator_capacity: self.provisioner.capacity().unwrap_or_default(),
             steps,
             sessions,
             error,
@@ -458,55 +452,28 @@ impl ScenarioDriver {
     ) -> Result<ScenarioStepResult, ScenarioDriverError> {
         match step {
             ScenarioStep::Boot { guest } => {
-                if self.handles.contains_key(guest) {
+                if self
+                    .provisioner
+                    .snapshot(guest)
+                    .map_err(ScenarioDriverError::from)?
+                    .is_some_and(|guest| guest.active)
+                {
                     return Err(ScenarioDriverError::GuestAlreadyBooted(guest.clone()));
                 }
-                let spec = demo_guest(
-                    guest,
-                    &self.artifacts_dir,
-                    &self.instance.demo_root,
-                    &self.instance.namespace,
-                )
-                .map_err(|source| ScenarioDriverError::Setup(source.to_string()))?;
-                seed_host_mounts(&spec)
-                    .map_err(|source| ScenarioDriverError::Setup(source.to_string()))?;
-                let prepared = prepare(
-                    PrepareRequest {
-                        guest: spec,
-                        namespace: self.instance.namespace.clone(),
-                        network_modes: NetworkModes {
-                            admin: AdminNetMode::None,
-                            egress: EgressNetMode::VhostUser,
-                        },
-                        base_dir: self.base_dir.clone(),
-                        ssh_ca_pubkey: Some(
-                            self.ca
-                                .public_key_openssh()
-                                .map_err(|source| ScenarioDriverError::Ca(source.to_string()))?,
-                        ),
-                    },
-                    &mut self.allocator,
-                )
-                .map_err(ScenarioDriverError::Prepare)?;
-
-                let handle = boot(
-                    prepared,
-                    LifecycleServices {
-                        runtime: Arc::clone(&self.runtime),
-                    },
-                )
-                .await
-                .map_err(ScenarioDriverError::Boot)?;
+                let handle = self
+                    .provisioner
+                    .ensure_guest_for_principal(guest)
+                    .await
+                    .map_err(ScenarioDriverError::from)?;
                 let detail = format!(
                     "booted {} pid={:?} api={} cid={} admin_subnet={} egress_subnet={}",
                     guest,
-                    handle.pid,
-                    handle.runtime_paths.api_socket.display(),
+                    handle.handle.pid,
+                    handle.handle.runtime_paths.api_socket.display(),
                     handle.net_assignment.cid,
                     handle.net_assignment.admin_subnet,
                     handle.net_assignment.egress_subnet,
                 );
-                self.handles.insert(guest.clone(), handle);
                 Ok(ScenarioStepResult {
                     index,
                     action: "boot",
@@ -520,16 +487,11 @@ impl ScenarioDriver {
                 })
             }
             ScenarioStep::Ready { guest, timeout_ms } => {
-                let handle = self.handle(guest)?;
-                handle
-                    .ready(&ReadinessPolicy {
-                        api_socket_timeout: duration_or_default(*timeout_ms, 10_000),
-                        guestfs_timeout: duration_or_default(*timeout_ms, 15_000),
-                        ssh_bridge_timeout: duration_or_default(*timeout_ms, 15_000),
-                        exec_ready_timeout: duration_or_default(*timeout_ms, 20_000),
-                    })
+                let _ = timeout_ms;
+                self.provisioner
+                    .ready(guest)
                     .await
-                    .map_err(ScenarioDriverError::Ready)?;
+                    .map_err(ScenarioDriverError::from)?;
                 Ok(ScenarioStepResult {
                     index,
                     action: "ready",
@@ -548,11 +510,11 @@ impl ScenarioDriver {
                 timeout_ms,
                 expect,
             } => {
-                let handle = self.handle(guest)?;
-                let output = handle
-                    .exec(command, duration_or_default(*timeout_ms, 20_000))
+                let output = self
+                    .provisioner
+                    .exec(guest, command, duration_or_default(*timeout_ms, 20_000))
                     .await
-                    .map_err(ScenarioDriverError::Exec)?;
+                    .map_err(ScenarioDriverError::from)?;
                 if let Some(expect) = expect {
                     check_exec_expectation(expect, &output)?;
                 }
@@ -568,15 +530,45 @@ impl ScenarioDriver {
                     shutdown: None,
                 })
             }
+            ScenarioStep::ProxyExec {
+                principal,
+                command,
+                timeout_ms,
+                expect,
+            } => {
+                let output = exec_via_proxy(
+                    self.proxy_config.listen,
+                    principal,
+                    command,
+                    duration_or_default(*timeout_ms, 90_000),
+                )
+                .await
+                .map_err(ScenarioDriverError::ProxyExec)?;
+                if let Some(expect) = expect {
+                    check_exec_expectation(expect, &output)?;
+                }
+                Ok(ScenarioStepResult {
+                    index,
+                    action: "proxy_exec",
+                    guest: Some(principal.clone()),
+                    session: None,
+                    detail: format!("proxy exec '{}'", command),
+                    exec: Some(output),
+                    pty_read: None,
+                    screen: None,
+                    shutdown: None,
+                })
+            }
             ScenarioStep::WaitPackageManagerQuiescent { guest, timeout_ms } => {
-                let handle = self.handle(guest)?;
-                let output = handle
+                let output = self
+                    .provisioner
                     .exec(
+                        guest,
                         PACKAGE_MANAGER_QUIESCENT_COMMAND,
                         duration_or_default(*timeout_ms, 65_000),
                     )
                     .await
-                    .map_err(ScenarioDriverError::Exec)?;
+                    .map_err(ScenarioDriverError::from)?;
                 check_exec_expectation(
                     &ExecExpectation {
                         exit_code: Some(0),
@@ -598,9 +590,12 @@ impl ScenarioDriver {
                 })
             }
             ScenarioStep::WaitEgressReady { guest, timeout_ms } => {
-                let handle = self.handle(guest)?;
+                let handle = self
+                    .provisioner
+                    .active_vm_handle(guest)
+                    .map_err(ScenarioDriverError::from)?;
                 let output =
-                    wait_for_egress_ready(handle, duration_or_default(*timeout_ms, 30_000))
+                    wait_for_egress_ready(&handle, duration_or_default(*timeout_ms, 30_000))
                         .await
                         .map_err(ScenarioDriverError::Exec)?;
                 check_exec_expectation(
@@ -637,7 +632,6 @@ impl ScenarioDriver {
                 if self.terminals.contains_key(session) {
                     return Err(ScenarioDriverError::SessionAlreadyExists(session.clone()));
                 }
-                let handle = self.handle(guest)?;
                 let request = PtyRequest {
                     term: term.clone().unwrap_or_else(|| "xterm-256color".to_string()),
                     col_width: cols.unwrap_or(80),
@@ -646,10 +640,15 @@ impl ScenarioDriver {
                     pix_height: 0,
                     command: command.clone(),
                 };
-                let guest_session = handle
-                    .open_pty(request.clone(), duration_or_default(*timeout_ms, 10_000))
+                let guest_session = self
+                    .provisioner
+                    .open_pty(
+                        guest,
+                        request.clone(),
+                        duration_or_default(*timeout_ms, 10_000),
+                    )
                     .await
-                    .map_err(ScenarioDriverError::Exec)?;
+                    .map_err(ScenarioDriverError::from)?;
                 let session_root = scenario_root.join("sessions").join(sanitize(session));
                 let terminal = HarnessTerminalSession::new(
                     format!("{guest}:{session}"),
@@ -856,14 +855,12 @@ impl ScenarioDriver {
                 })
             }
             ScenarioStep::Shutdown { guest } => {
-                let handle = self
-                    .handles
-                    .remove(guest)
-                    .ok_or_else(|| ScenarioDriverError::UnknownGuest(guest.clone()))?;
-                let report = handle
-                    .shutdown()
+                let report = self
+                    .provisioner
+                    .shutdown_guest(guest)
                     .await
-                    .map_err(ScenarioDriverError::Shutdown)?;
+                    .map_err(ScenarioDriverError::from)?
+                    .ok_or_else(|| ScenarioDriverError::UnknownGuest(guest.clone()))?;
                 Ok(ScenarioStepResult {
                     index,
                     action: "shutdown",
@@ -879,12 +876,6 @@ impl ScenarioDriver {
         }
     }
 
-    fn handle(&self, guest: &str) -> Result<&VmHandle, ScenarioDriverError> {
-        self.handles
-            .get(guest)
-            .ok_or_else(|| ScenarioDriverError::UnknownGuest(guest.to_string()))
-    }
-
     fn terminal(&self, session: &str) -> Result<&HarnessTerminalSession, ScenarioDriverError> {
         self.terminals
             .get(session)
@@ -895,8 +886,15 @@ impl ScenarioDriver {
         for session in self.terminals.values() {
             let _ = session.persist_artifacts();
         }
-        for (_name, handle) in self.handles.drain() {
-            let _ = handle.shutdown().await;
+        for guest in self
+            .provisioner
+            .guests()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|guest| guest.active)
+            .map(|guest| guest.principal)
+        {
+            let _ = self.provisioner.shutdown_guest(&guest).await;
         }
     }
 }
@@ -920,6 +918,7 @@ fn action_name(step: &ScenarioStep) -> &'static str {
         ScenarioStep::Boot { .. } => "boot",
         ScenarioStep::Ready { .. } => "ready",
         ScenarioStep::Exec { .. } => "exec",
+        ScenarioStep::ProxyExec { .. } => "proxy_exec",
         ScenarioStep::WaitPackageManagerQuiescent { .. } => "wait_package_manager_quiescent",
         ScenarioStep::WaitEgressReady { .. } => "wait_egress_ready",
         ScenarioStep::PtyOpen { .. } => "pty_open",
@@ -940,6 +939,9 @@ fn step_guest(step: &ScenarioStep) -> Option<&str> {
         ScenarioStep::Boot { guest }
         | ScenarioStep::Ready { guest, .. }
         | ScenarioStep::Exec { guest, .. }
+        | ScenarioStep::ProxyExec {
+            principal: guest, ..
+        }
         | ScenarioStep::WaitPackageManagerQuiescent { guest, .. }
         | ScenarioStep::WaitEgressReady { guest, .. }
         | ScenarioStep::PtyOpen { guest, .. }
@@ -1002,18 +1004,6 @@ fn check_exec_expectation(
 
 fn classify_driver_failure(error: &ScenarioDriverError) -> DriverFailure {
     match error {
-        ScenarioDriverError::Setup(_) => DriverFailure {
-            class: DriverFailureClass::Artifact,
-            stage: "setup",
-            code: "scenario_setup_failed",
-            message: error.to_string(),
-        },
-        ScenarioDriverError::Ca(_) => DriverFailure {
-            class: DriverFailureClass::Ssh,
-            stage: "setup",
-            code: "scenario_ca_failed",
-            message: error.to_string(),
-        },
         ScenarioDriverError::UnknownGuest(_) | ScenarioDriverError::UnknownSession(_) => {
             DriverFailure {
                 class: DriverFailureClass::Config,
@@ -1029,16 +1019,39 @@ fn classify_driver_failure(error: &ScenarioDriverError) -> DriverFailure {
             code: "duplicate_target",
             message: error.to_string(),
         },
-        ScenarioDriverError::Prepare(source) => classify_orchestrator("prepare", source),
-        ScenarioDriverError::Boot(source) => classify_orchestrator("boot", source),
-        ScenarioDriverError::Ready(source) => classify_orchestrator("ready", source),
         ScenarioDriverError::Exec(source) => classify_orchestrator("exec", source),
-        ScenarioDriverError::Shutdown(source) => {
-            let mut failure = classify_orchestrator("shutdown", source);
-            failure.class = DriverFailureClass::Shutdown;
-            failure
-        }
+        ScenarioDriverError::ProxyExec(source) => classify_ssh_failure("proxy_exec", source),
+        ScenarioDriverError::Provisioning(source) => classify_provisioning_failure(source),
         ScenarioDriverError::Pty(source) => classify_terminal_failure(source),
+    }
+}
+
+fn classify_provisioning_failure(error: &ProvisioningError) -> DriverFailure {
+    match error {
+        ProvisioningError::Orchestrator(source) => classify_orchestrator("provisioning", source),
+        ProvisioningError::NetworkAllocation(_) => DriverFailure {
+            class: DriverFailureClass::Network,
+            stage: "provisioning",
+            code: "network_allocation_failed",
+            message: error.to_string(),
+        },
+        ProvisioningError::BuildGuestSpec { .. }
+        | ProvisioningError::GuestIdMismatch { .. }
+        | ProvisioningError::SeedHostState { .. }
+        | ProvisioningError::EmptyPrincipal
+        | ProvisioningError::UnknownPrincipal(_)
+        | ProvisioningError::GuestNotBooted(_) => DriverFailure {
+            class: DriverFailureClass::Config,
+            stage: "provisioning",
+            code: "guest_provisioning_failed",
+            message: error.to_string(),
+        },
+        ProvisioningError::StatePoisoned(_) => DriverFailure {
+            class: DriverFailureClass::Internal,
+            stage: "provisioning",
+            code: "provisioning_state_poisoned",
+            message: error.to_string(),
+        },
     }
 }
 
@@ -1184,12 +1197,15 @@ fn classify_ssh_failure(stage: &'static str, error: &SshProxyError) -> DriverFai
             SshProxyError::Ca(_) => "ssh_ca_failed",
             SshProxyError::GenerateServerKey { .. } => "ssh_server_key_failed",
             SshProxyError::ProxyBind { .. } => "ssh_proxy_bind_failed",
+            SshProxyError::ProxyConnect { .. } => "ssh_proxy_connect_failed",
+            SshProxyError::ProxyAuth { .. } => "ssh_proxy_auth_failed",
             SshProxyError::BindGuestBridgeSocket { .. } => "ssh_bridge_bind_failed",
             SshProxyError::CertAuth { .. } => "ssh_cert_auth_failed",
             SshProxyError::Russh { .. } => "ssh_transport_failed",
             SshProxyError::ChannelClosed => "ssh_channel_closed",
             SshProxyError::MissingExitStatus { .. } => "ssh_missing_exit_status",
             SshProxyError::UnknownGuest(_) => "ssh_unknown_guest",
+            SshProxyError::ResolveGuest { .. } => "ssh_guest_resolution_failed",
             SshProxyError::StatePoisoned(_) => "ssh_state_poisoned",
             SshProxyError::CleanupGuestBridgeSocket { .. } => "ssh_bridge_cleanup_failed",
             SshProxyError::PtyTimeout { .. } => "pty_timeout",

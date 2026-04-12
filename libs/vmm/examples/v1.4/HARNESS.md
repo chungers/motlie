@@ -225,6 +225,13 @@ Multi-guest example:
   ./libs/vmm/examples/v1.4/scenarios/multiguest-validate.json
 ```
 
+Auto-provisioning example:
+
+```bash
+./target/debug/examples/harness_v1_4 scenario \
+  ./libs/vmm/examples/v1.4/scenarios/auto-provision-ssh.json
+```
+
 The scenario mode is the preferred non-interactive surface for future agent
 work.
 
@@ -324,6 +331,7 @@ Supported actions today:
 - `boot`
 - `ready`
 - `exec`
+- `proxy_exec`
 - `wait_egress_ready`
 - `wait_package_manager_quiescent`
 - `pty_open`
@@ -341,6 +349,9 @@ Current expectation model:
 
 - `exec` supports `expect.exit_code`, `expect.stdout_contains`,
   `expect.stderr_contains`
+- `proxy_exec` opens a fresh localhost SSH session against the russh proxy as
+  the supplied principal; this is the preferred way to prove first-contact
+  auto-provisioning and guest reuse behavior
 - `wait_egress_ready` is the first harness-native network certification gate;
   it waits for DNS resolution of `example.com` and `www.google.com`, then
   waits for outbound HTTPS success against `https://example.com` and
@@ -594,6 +605,7 @@ Saved examples live in:
 - [`scenarios/agent-bootstrap.json`](./scenarios/agent-bootstrap.json)
 - [`scenarios/pty-login.json`](./scenarios/pty-login.json)
 - [`scenarios/multiguest-validate.json`](./scenarios/multiguest-validate.json)
+- [`scenarios/auto-provision-ssh.json`](./scenarios/auto-provision-ssh.json)
 
 The multi-guest example proves the stable format is not single-guest-only:
 
@@ -615,6 +627,17 @@ The agent bootstrap example is the baseline future-agent scenario:
 - wait for package-manager background activity to settle
 - verify one clean `sudo -n apt-get update`
 - shut the guest down
+
+The auto-provisioning example proves the SSH principal path:
+
+- connect to the localhost SSH proxy as an unknown principal (`joe`)
+- verify that first contact boots a new guest and captures its running identity
+- connect again as `joe` and prove the same running guest is reused
+- shut the auto-provisioned guest down
+
+Use the scenario for harness-owned regression coverage and
+`integration/repl-auto-provision-smoke.sh` for the real external `ssh`
+client path against `repl_host_v1_4`.
 
 Current allocator compatibility note:
 
@@ -649,6 +672,22 @@ These still matter because they validate:
 But the wrappers should stay thin. New orchestration logic belongs in the
 harness scenario engine, not in bash.
 
+REPL auto-provision wrapper:
+
+```bash
+./libs/vmm/examples/v1.4/integration/repl-auto-provision-smoke.sh
+```
+
+This wrapper exists specifically for the proxy-owned auto-provision path that
+cannot be proven by `boot <guest>`:
+
+- launch `repl_host_v1_4`
+- parse the printed proxy port
+- run a real external `ssh joe@localhost uname -s`
+- verify the command returns `Linux`
+- query REPL `status`
+- attach again as the same principal and verify the same guest PID is reused
+
 Saved shell command sequence:
 
 ```bash
@@ -662,6 +701,7 @@ When validating real login UX, use the printed proxy port:
 ```bash
 ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 38306 alice@localhost
 ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 38306 bob@localhost
+ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 38306 joe@localhost
 ```
 
 Useful manual probes:
@@ -708,7 +748,8 @@ For multi-guest or allocator changes, also run:
 For login, banner, TUI, PTY, or proxy changes, also run:
 
 1. `./libs/vmm/examples/v1.4/integration/harness-isolation-smoke.sh`
-2. a live external SSH attach and manual probe
+2. `./libs/vmm/examples/v1.4/integration/repl-auto-provision-smoke.sh`
+3. a live external SSH attach and manual probe
 
 If a future agent changes `vnet`, allocator defaults, guest DNS, or image
 network tooling, `agent-bootstrap.json` is mandatory because it now captures
@@ -731,6 +772,7 @@ image seeding, rerun at least:
 5. `./target/debug/examples/harness_v1_4 pty`
 6. `./target/debug/examples/harness_v1_4 scenario ./libs/vmm/examples/v1.4/scenarios/multiguest-validate.json`
 7. `./libs/vmm/examples/v1.4/integration/harness-shell-smoke.sh`
+8. `./libs/vmm/examples/v1.4/integration/repl-auto-provision-smoke.sh`
 
 And when changing login/banner/proxy or PTY handling, also run a live external
 SSH check.

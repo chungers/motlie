@@ -74,6 +74,7 @@ EGRESS_HOST_IP="${EGRESS_HOST_IP:-}"
 EGRESS_GUEST_IP="${EGRESS_GUEST_IP:-}"
 EGRESS_DNS_IP="${EGRESS_DNS_IP:-}"
 SSH_USER="${SSH_USER:-}"
+SSH_PRINCIPAL="${SSH_PRINCIPAL:-}"
 GUEST_HOSTNAME="${GUEST_HOSTNAME:-}"
 LOGIN_HOME="${LOGIN_HOME:-}"
 MOUNT_CONFIG="${MOUNT_CONFIG:-}"
@@ -114,6 +115,8 @@ while [[ $# -gt 0 ]]; do
         --egress-dns-ip=*) EGRESS_DNS_IP="${1#*=}"; shift ;;
         --ssh-user) SSH_USER="$2"; shift 2 ;;
         --ssh-user=*) SSH_USER="${1#*=}"; shift ;;
+        --ssh-principal) SSH_PRINCIPAL="$2"; shift 2 ;;
+        --ssh-principal=*) SSH_PRINCIPAL="${1#*=}"; shift ;;
         --hostname) GUEST_HOSTNAME="$2"; shift 2 ;;
         --hostname=*) GUEST_HOSTNAME="${1#*=}"; shift ;;
         --login-home) LOGIN_HOME="$2"; shift 2 ;;
@@ -151,6 +154,7 @@ BASE_ARTIFACTS="$SCRIPT_DIR/artifacts/base"
 [ -n "$EGRESS_GUEST_IP" ] || EGRESS_GUEST_IP="10.0.2.15"
 [ -n "$EGRESS_DNS_IP" ]   || EGRESS_DNS_IP="10.0.2.3"
 [ -n "$SSH_USER" ]        || SSH_USER="$GUEST_NAME"
+[ -n "$SSH_PRINCIPAL" ]   || SSH_PRINCIPAL="$SSH_USER"
 [ -n "$GUEST_HOSTNAME" ]  || GUEST_HOSTNAME="motlie-${GUEST_NAME}"
 [ -n "$LOGIN_HOME" ]      || LOGIN_HOME="/home/${GUEST_NAME}"
 # MOUNT_CONFIG is only required when --cloud-init-dir is not set (manual mode).
@@ -272,8 +276,8 @@ if [ -n "$SSH_CA_PUBKEY" ]; then
     # Each user that the CA can authenticate needs a principals file.
     # sshd requires the directory to be root-owned with mode 755 (not 775).
     mkdir -m 755 -p "$OVERLAY_SEED/upper/etc/ssh/auth_principals"
-    printf '%s\n' "$SSH_USER" > "$OVERLAY_SEED/upper/etc/ssh/auth_principals/$SSH_USER"
-    printf '%s\n' "$SSH_USER" > "$OVERLAY_SEED/upper/etc/ssh/auth_principals/root"
+    printf '%s\n' "$SSH_PRINCIPAL" > "$OVERLAY_SEED/upper/etc/ssh/auth_principals/$SSH_USER"
+    printf '%s\n' "$SSH_PRINCIPAL" > "$OVERLAY_SEED/upper/etc/ssh/auth_principals/root"
     chmod 644 "$OVERLAY_SEED/upper/etc/ssh/auth_principals/$SSH_USER"
     chmod 644 "$OVERLAY_SEED/upper/etc/ssh/auth_principals/root"
     echo "  SSH CA:    injected user_ca.pub + auth_principals/$SSH_USER"
