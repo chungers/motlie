@@ -1,8 +1,11 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use motlie_model::eval::EvalTrack;
-use motlie_model::{BundleId, CheckpointFormat, ModelBundle, ModelError, StartOptions};
-use motlie_model_mistral::{MistralTextBundle, MistralTextSpec};
+use motlie_model::{
+    BundleId, CheckpointFormat, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
+};
+use motlie_model_mistral::MistralTextAdapter;
 
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleArtifacts, BundleDescriptor,
@@ -11,64 +14,51 @@ use crate::{
 
 pub const SELECTOR: &str = "qwen/qwen3_4b";
 
-#[derive(Clone, Debug)]
-pub struct Qwen3_4B {
-    inner: MistralTextBundle,
+pub(crate) fn register(catalog: &mut crate::Catalog) {
+    catalog.register(descriptor(), bundle);
+    catalog.register_model_variant(
+        identity(),
+        checkpoint(),
+        Arc::new(resolve_local_snapshot_root),
+        Arc::new(MistralTextAdapter::qwen3()),
+    );
 }
 
-impl Qwen3_4B {
-    pub fn new() -> Self {
-        Self {
-            inner: MistralTextBundle::new(MistralTextSpec::qwen3_4b()),
-        }
+pub(crate) fn identity() -> ModelIdentity {
+    ModelIdentity {
+        id: BundleId::new("qwen3_4b"),
+        display_name: "Qwen3 4B".into(),
+        family: BundleFamily::Qwen,
+        capabilities: motlie_model::Capabilities::chat_and_completion(),
+        eval_tracks: vec![
+            EvalTrack::Chat,
+            EvalTrack::Reasoning,
+            EvalTrack::Summarization,
+            EvalTrack::Classification,
+        ],
+        requirements: BundleRequirements {
+            platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
+            build: vec![],
+        },
     }
 }
 
-impl Default for Qwen3_4B {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait::async_trait]
-impl ModelBundle for Qwen3_4B {
-    fn id(&self) -> &BundleId {
-        self.inner.id()
-    }
-
-    fn metadata(&self) -> &motlie_model::BundleMetadata {
-        self.inner.metadata()
-    }
-
-    fn capabilities(&self) -> &motlie_model::Capabilities {
-        self.inner.capabilities()
-    }
-
-    async fn start(
-        &self,
-        options: StartOptions,
-    ) -> Result<Box<dyn motlie_model::BundleHandle>, ModelError> {
-        let StartOptions {
-            artifact_policy,
-            quantization,
-            unpack_root,
-            max_concurrency,
-        } = options;
-        let artifact_policy = match artifact_policy {
-            Some(motlie_model::ArtifactPolicy::LocalOnly { root }) => {
-                Some(motlie_model::ArtifactPolicy::LocalOnly {
-                    root: resolve_local_snapshot_root(&root)?,
-                })
-            }
-            other => other,
-        };
-        let options = StartOptions {
-            artifact_policy,
-            quantization,
-            unpack_root,
-            max_concurrency,
-        };
-        self.inner.start(options).await
+pub(crate) fn checkpoint() -> ModelCheckpoint {
+    ModelCheckpoint {
+        format: CheckpointFormat::Safetensors,
+        source: ArtifactSource::HuggingFace {
+            repo: "Qwen/Qwen3-4B",
+        },
+        include: vec![
+            ArtifactRule::Exact("config.json"),
+            ArtifactRule::Exact("tokenizer.json"),
+            ArtifactRule::Exact("tokenizer_config.json"),
+            ArtifactRule::Exact("generation_config.json"),
+            ArtifactRule::Exact("special_tokens_map.json"),
+            ArtifactRule::Suffix(".safetensors"),
+            ArtifactRule::Suffix(".safetensors.index.json"),
+        ],
+        quantization: None,
     }
 }
 
@@ -110,7 +100,15 @@ pub fn descriptor() -> BundleDescriptor {
 }
 
 pub fn bundle() -> Box<dyn ModelBundle> {
-    Box::new(Qwen3_4B::new())
+    let descriptor = descriptor();
+    crate::adapter_backed_bundle(
+        descriptor.id,
+        descriptor.display_name,
+        identity(),
+        checkpoint(),
+        Arc::new(MistralTextAdapter::qwen3()),
+        Arc::new(resolve_local_snapshot_root),
+    )
 }
 
 fn resolve_local_snapshot_root(root: &Path) -> Result<PathBuf, ModelError> {
@@ -134,16 +132,12 @@ mod tests {
         assert_eq!(descriptor.backend, BackendKind::MistralRs);
         assert!(descriptor.eval_tracks.contains(&EvalTrack::Chat));
         assert!(descriptor.eval_tracks.contains(&EvalTrack::Reasoning));
-        assert!(
-            descriptor
-                .capabilities
-                .supports(motlie_model::CapabilityKind::Chat)
-        );
-        assert!(
-            descriptor
-                .capabilities
-                .supports(motlie_model::CapabilityKind::Completion)
-        );
+        assert!(descriptor
+            .capabilities
+            .supports(motlie_model::CapabilityKind::Chat));
+        assert!(descriptor
+            .capabilities
+            .supports(motlie_model::CapabilityKind::Completion));
         assert_eq!(
             descriptor.capability_descriptors(),
             &[
@@ -169,11 +163,9 @@ mod tests {
         #[cfg(feature = "model-qwen3-4b")]
         {
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(
-                catalog
-                    .bundles_for_track(EvalTrack::Chat)
-                    .any(|b| b.id == bundle_id)
-            );
+            assert!(catalog
+                .bundles_for_track(EvalTrack::Chat)
+                .any(|b| b.id == bundle_id));
         }
     }
 

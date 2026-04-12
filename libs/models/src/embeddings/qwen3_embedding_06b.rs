@@ -1,11 +1,12 @@
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
-    BundleId, CapabilityDescriptor, ContentKind, Embedding as EmbeddingBundle, EmbeddingDistance,
-    EmbeddingNormalization, EmbeddingSpec, CheckpointFormat, ModelBundle, ModelError,
-    StartOptions,
+    BundleId, CapabilityDescriptor, CheckpointFormat, ContentKind, EmbeddingDistance,
+    EmbeddingNormalization, EmbeddingSpec, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
 };
-use motlie_model_mistral::{MistralEmbeddingBundle, MistralEmbeddingSpec};
-use std::path::{Path, PathBuf};
+use motlie_model_mistral::MistralEmbeddingAdapter;
 
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleArtifacts, BundleDescriptor,
@@ -24,70 +25,49 @@ const EMBEDDING_SPEC: EmbeddingSpec = EmbeddingSpec {
     summary: "Normalized text embeddings for semantic similarity and retrieval.",
 };
 
-#[derive(Clone, Debug)]
-pub struct Qwen3Embedding06B {
-    inner: MistralEmbeddingBundle,
+pub(crate) fn register(catalog: &mut crate::Catalog) {
+    catalog.register(descriptor(), bundle);
+    catalog.register_model_variant(
+        identity(),
+        checkpoint(),
+        Arc::new(resolve_local_snapshot_root),
+        Arc::new(MistralEmbeddingAdapter::qwen3_embedding()),
+    );
 }
 
-impl Qwen3Embedding06B {
-    pub fn new() -> Self {
-        Self {
-            inner: MistralEmbeddingBundle::new(MistralEmbeddingSpec::qwen3_embedding_06b()),
-        }
-    }
-}
-
-impl Default for Qwen3Embedding06B {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait::async_trait]
-impl ModelBundle for Qwen3Embedding06B {
-    fn id(&self) -> &BundleId {
-        self.inner.id()
-    }
-
-    fn metadata(&self) -> &motlie_model::BundleMetadata {
-        self.inner.metadata()
-    }
-
-    fn capabilities(&self) -> &motlie_model::Capabilities {
-        self.inner.capabilities()
-    }
-
-    async fn start(
-        &self,
-        options: StartOptions,
-    ) -> Result<Box<dyn motlie_model::BundleHandle>, ModelError> {
-        let StartOptions {
-            artifact_policy,
-            quantization,
-            unpack_root,
-            max_concurrency,
-        } = options;
-        let artifact_policy = match artifact_policy {
-            Some(motlie_model::ArtifactPolicy::LocalOnly { root }) => {
-                Some(motlie_model::ArtifactPolicy::LocalOnly {
-                    root: resolve_local_snapshot_root(&root)?,
-                })
-            }
-            other => other,
-        };
-        let options = StartOptions {
-            artifact_policy,
-            quantization,
-            unpack_root,
-            max_concurrency,
-        };
-        self.inner.start(options).await
+pub(crate) fn identity() -> ModelIdentity {
+    ModelIdentity {
+        id: BundleId::new("qwen3_embedding_06b"),
+        display_name: "Qwen3 Embedding 0.6B".into(),
+        family: BundleFamily::Embeddings,
+        capabilities: motlie_model::Capabilities::new(vec![CapabilityDescriptor::embeddings()]),
+        eval_tracks: vec![EvalTrack::Embeddings],
+        requirements: BundleRequirements {
+            platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
+            build: vec![],
+        },
     }
 }
 
-impl EmbeddingBundle for Qwen3Embedding06B {
-    fn embedding_spec(&self) -> &EmbeddingSpec {
-        &EMBEDDING_SPEC
+pub(crate) fn checkpoint() -> ModelCheckpoint {
+    ModelCheckpoint {
+        format: CheckpointFormat::Safetensors,
+        source: ArtifactSource::HuggingFace {
+            repo: "Qwen/Qwen3-Embedding-0.6B",
+        },
+        include: vec![
+            ArtifactRule::Exact("config.json"),
+            ArtifactRule::Exact("modules.json"),
+            ArtifactRule::Exact("tokenizer.json"),
+            ArtifactRule::Exact("tokenizer.model"),
+            ArtifactRule::Exact("tokenizer_config.json"),
+            ArtifactRule::Exact("special_tokens_map.json"),
+            ArtifactRule::Exact("1_Pooling/config.json"),
+            ArtifactRule::Exact("2_Dense/config.json"),
+            ArtifactRule::Suffix(".safetensors"),
+            ArtifactRule::Suffix(".safetensors.index.json"),
+        ],
+        quantization: None,
     }
 }
 
@@ -129,7 +109,15 @@ pub fn descriptor() -> BundleDescriptor {
 }
 
 pub fn bundle() -> Box<dyn ModelBundle> {
-    Box::new(Qwen3Embedding06B::new())
+    let descriptor = descriptor();
+    crate::adapter_backed_bundle(
+        descriptor.id,
+        descriptor.display_name,
+        identity(),
+        checkpoint(),
+        Arc::new(MistralEmbeddingAdapter::qwen3_embedding()),
+        Arc::new(resolve_local_snapshot_root),
+    )
 }
 
 fn resolve_local_snapshot_root(root: &Path) -> Result<PathBuf, ModelError> {
@@ -162,11 +150,9 @@ mod tests {
         assert_eq!(descriptor.family, BundleFamily::Embeddings);
         assert_eq!(descriptor.backend, BackendKind::MistralRs);
         assert_eq!(descriptor.eval_tracks, vec![EvalTrack::Embeddings]);
-        assert!(
-            descriptor
-                .capabilities
-                .supports(motlie_model::CapabilityKind::Embeddings)
-        );
+        assert!(descriptor
+            .capabilities
+            .supports(motlie_model::CapabilityKind::Embeddings));
         assert_eq!(
             descriptor.capability_descriptors(),
             &[CapabilityDescriptor::embeddings()]
@@ -195,7 +181,7 @@ mod tests {
 
     #[test]
     fn q8_is_supported_but_q4_is_rejected() {
-        let quantization = Qwen3Embedding06B::new().metadata().quantization.clone();
+        let quantization = bundle().metadata().quantization.clone();
 
         assert_eq!(quantization.recommended(), None);
         assert!(quantization.supports(motlie_model::QuantizationBits::Eight));
