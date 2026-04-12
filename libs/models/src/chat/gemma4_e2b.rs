@@ -8,8 +8,8 @@ use motlie_model::{
 use motlie_model_mistral::MistralMultimodalAdapter;
 
 use crate::{
-    ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleArtifacts, BundleDescriptor,
-    BundleFamily, BundleRequirements, PlatformConstraint,
+    ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor, BundleFamily,
+    BundleRequirements, PlatformConstraint,
 };
 
 pub const SELECTOR: &str = "google/gemma4_e2b";
@@ -29,11 +29,7 @@ pub(crate) fn identity() -> ModelIdentity {
         id: BundleId::new("gemma4_e2b"),
         display_name: "Gemma 4 E2B-it".into(),
         family: BundleFamily::Gemma,
-        capabilities: motlie_model::Capabilities::new(vec![
-            motlie_model::CapabilityDescriptor::multimodal_chat(),
-            motlie_model::CapabilityDescriptor::vision(),
-            motlie_model::CapabilityDescriptor::completion(),
-        ]),
+        capabilities: motlie_model::Capabilities::multimodal_chat_and_vision(),
         eval_tracks: vec![
             EvalTrack::Chat,
             EvalTrack::Reasoning,
@@ -71,43 +67,24 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
 }
 
 pub fn descriptor() -> BundleDescriptor {
+    let identity = identity();
+    let checkpoint = checkpoint();
     BundleDescriptor {
         id: BundleId::new("gemma4_e2b"),
-        model_id: BundleId::new("gemma4_e2b"),
-        display_name: "Gemma 4 E2B-it".into(),
-        family: BundleFamily::Gemma,
-        capabilities: motlie_model::Capabilities::multimodal_chat_and_vision(),
+        model_id: identity.id.clone(),
+        display_name: identity.display_name.clone(),
+        family: identity.family,
+        capabilities: identity.capabilities,
         backend: BackendKind::MistralRs,
         requirements: BundleRequirements {
-            platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
+            platform: identity.requirements.platform,
             build: vec![BuildConstraint::Feature("backend-mistral".into())],
         },
-        eval_tracks: vec![
-            EvalTrack::Chat,
-            EvalTrack::Reasoning,
-            EvalTrack::Summarization,
-            EvalTrack::Classification,
-        ],
-        artifacts: Some(BundleArtifacts {
-            control_name: "gemma4_e2b",
-            format: CheckpointFormat::Safetensors,
-            source: ArtifactSource::HuggingFace {
-                repo: "google/gemma-4-E2B-it",
-            },
-            include: vec![
-                ArtifactRule::Exact("chat_template.jinja"),
-                ArtifactRule::Exact("config.json"),
-                ArtifactRule::Exact("generation_config.json"),
-                ArtifactRule::Exact("tokenizer.json"),
-                ArtifactRule::Exact("tokenizer.model"),
-                ArtifactRule::Exact("tokenizer_config.json"),
-                ArtifactRule::Exact("special_tokens_map.json"),
-                ArtifactRule::Exact("preprocessor_config.json"),
-                ArtifactRule::Exact("processor_config.json"),
-                ArtifactRule::Suffix(".safetensors"),
-                ArtifactRule::Suffix(".safetensors.index.json"),
-            ],
-        }),
+        eval_tracks: identity.eval_tracks,
+        artifacts: Some(crate::bundle_artifacts_from_checkpoint(
+            "gemma4_e2b",
+            &checkpoint,
+        )),
     }
 }
 
@@ -166,6 +143,15 @@ mod tests {
         assert!(artifacts.includes("chat_template.jinja"));
         assert!(artifacts.includes("preprocessor_config.json"));
         assert!(artifacts.includes("model-00001-of-00002.safetensors"));
+    }
+
+    #[test]
+    fn identity_exposes_logical_multimodal_capabilities_only() {
+        let identity = identity();
+
+        assert!(identity.capabilities.supports(CapabilityKind::Chat));
+        assert!(identity.capabilities.supports(CapabilityKind::Vision));
+        assert!(!identity.capabilities.supports(CapabilityKind::Completion));
     }
 
     #[test]

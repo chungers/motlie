@@ -8,8 +8,8 @@ use motlie_model::{
 use motlie_model_mistral::MistralTextAdapter;
 
 use crate::{
-    ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleArtifacts, BundleDescriptor,
-    BundleFamily, BundleRequirements, PlatformConstraint,
+    ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor, BundleFamily,
+    BundleRequirements, PlatformConstraint,
 };
 
 pub const SELECTOR: &str = "qwen/qwen3_4b";
@@ -63,39 +63,24 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
 }
 
 pub fn descriptor() -> BundleDescriptor {
+    let identity = identity();
+    let checkpoint = checkpoint();
     BundleDescriptor {
         id: BundleId::new("qwen3_4b"),
-        model_id: BundleId::new("qwen3_4b"),
-        display_name: "Qwen3 4B".into(),
-        family: BundleFamily::Qwen,
-        capabilities: motlie_model::Capabilities::chat_and_completion(),
+        model_id: identity.id.clone(),
+        display_name: identity.display_name.clone(),
+        family: identity.family,
+        capabilities: identity.capabilities,
         backend: BackendKind::MistralRs,
         requirements: BundleRequirements {
-            platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
+            platform: identity.requirements.platform,
             build: vec![BuildConstraint::Feature("backend-mistral".into())],
         },
-        eval_tracks: vec![
-            EvalTrack::Chat,
-            EvalTrack::Reasoning,
-            EvalTrack::Summarization,
-            EvalTrack::Classification,
-        ],
-        artifacts: Some(BundleArtifacts {
-            control_name: "qwen3_4b",
-            format: CheckpointFormat::Safetensors,
-            source: ArtifactSource::HuggingFace {
-                repo: "Qwen/Qwen3-4B",
-            },
-            include: vec![
-                ArtifactRule::Exact("config.json"),
-                ArtifactRule::Exact("tokenizer.json"),
-                ArtifactRule::Exact("tokenizer_config.json"),
-                ArtifactRule::Exact("generation_config.json"),
-                ArtifactRule::Exact("special_tokens_map.json"),
-                ArtifactRule::Suffix(".safetensors"),
-                ArtifactRule::Suffix(".safetensors.index.json"),
-            ],
-        }),
+        eval_tracks: identity.eval_tracks,
+        artifacts: Some(crate::bundle_artifacts_from_checkpoint(
+            "qwen3_4b",
+            &checkpoint,
+        )),
     }
 }
 

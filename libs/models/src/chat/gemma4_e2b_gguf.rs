@@ -25,26 +25,7 @@ pub(crate) fn register(catalog: &mut crate::Catalog) {
 }
 
 pub(crate) fn identity() -> ModelIdentity {
-    ModelIdentity {
-        id: BundleId::new("gemma4_e2b"),
-        display_name: "Gemma 4 E2B-it".into(),
-        family: BundleFamily::Gemma,
-        capabilities: motlie_model::Capabilities::new(vec![
-            motlie_model::CapabilityDescriptor::multimodal_chat(),
-            motlie_model::CapabilityDescriptor::vision(),
-            motlie_model::CapabilityDescriptor::completion(),
-        ]),
-        eval_tracks: vec![
-            EvalTrack::Chat,
-            EvalTrack::Reasoning,
-            EvalTrack::Summarization,
-            EvalTrack::Classification,
-        ],
-        requirements: BundleRequirements {
-            platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
-            build: vec![],
-        },
-    }
+    super::gemma4_e2b::identity()
 }
 
 pub(crate) fn checkpoint() -> ModelCheckpoint {
@@ -78,35 +59,24 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
 /// the Gemma 4 GGUF is a community quantization. The curated artifact rules
 /// target the unsloth quantization repository on Hugging Face.
 pub fn descriptor() -> BundleDescriptor {
+    let identity = identity();
+    let checkpoint = checkpoint();
     BundleDescriptor {
         id: BundleId::new("gemma4_e2b_gguf"),
-        model_id: BundleId::new("gemma4_e2b"),
+        model_id: identity.id,
         display_name: "Gemma 4 E2B-it (GGUF/llama.cpp)".into(),
-        family: BundleFamily::Gemma,
+        family: identity.family,
         capabilities: motlie_model::Capabilities::chat_and_completion(),
         backend: BackendKind::LlamaCpp,
         requirements: BundleRequirements {
-            platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
+            platform: identity.requirements.platform,
             build: vec![BuildConstraint::Feature("backend-llama-cpp".into())],
         },
-        eval_tracks: vec![
-            EvalTrack::Chat,
-            EvalTrack::Reasoning,
-            EvalTrack::Summarization,
-            EvalTrack::Classification,
-        ],
-        artifacts: Some(BundleArtifacts {
-            control_name: "gemma4_e2b_gguf",
-            format: CheckpointFormat::Gguf,
-            source: ArtifactSource::HuggingFace {
-                repo: "unsloth/gemma-4-E2B-it-GGUF",
-            },
-            include: vec![
-                ArtifactRule::Suffix("-Q4_K_M.gguf"),
-                ArtifactRule::Suffix("-Q8_0.gguf"),
-                ArtifactRule::Suffix("-f16.gguf"),
-            ],
-        }),
+        eval_tracks: identity.eval_tracks,
+        artifacts: Some(crate::bundle_artifacts_from_checkpoint(
+            "gemma4_e2b_gguf",
+            &checkpoint,
+        )),
     }
 }
 
@@ -149,6 +119,11 @@ mod tests {
         assert!(artifacts.includes("gemma-4-e2b-it-Q4_K_M.gguf"));
         assert!(artifacts.includes("gemma-4-e2b-it-Q8_0.gguf"));
         assert!(!artifacts.includes("README.md"));
+    }
+
+    #[test]
+    fn identity_matches_logical_gemma4_model() {
+        assert_eq!(identity(), super::gemma4_e2b::identity());
     }
 
     #[test]

@@ -1,17 +1,18 @@
 # Design: ModelIdentity / ModelCheckpoint / BackendAdapter Separation
 
-> @claude-llm-researcher 2026-04-11 — proposed, not yet implemented
+> @claude-llm-researcher 2026-04-11 — proposed
 >
-> Status: **Draft for review**. The current implementation ships the llama.cpp
-> vertical slice with the coupled bundle-per-format-per-backend pattern.
-> This document captures the architectural concern and proposes the refactor
-> for a follow-up task.
+> Status: **Implemented core architecture**. The `motlie-model` foundation
+> types, backend adapter shims, and `motlie-models` catalog resolution now
+> follow this separation. Legacy alias bundle descriptors still exist as
+> compatibility shims while startup flows through the shared adapter path.
 
 ## Changelog
 
 | Date | Who | Summary |
 |---|---|---|
 | 2026-04-11 | @claude-llm-researcher | Initial design proposal |
+| 2026-04-12 | @codex-models | Implemented the core separation in `motlie-model`, backend crates, and `motlie-models` catalog resolution |
 
 ---
 

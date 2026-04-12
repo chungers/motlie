@@ -249,6 +249,10 @@ struct LlamaCppRuntime {
 // load_from_file(). All mutable state (LlamaContext, LlamaBatch,
 // LlamaSampler) is created per-request inside spawn_blocking and never
 // escapes the closure.
+//
+// INVARIANT: `LlamaCppRuntime` must not gain `LlamaContext`, `LlamaBatch`, or
+// `LlamaSampler` fields. If per-request mutable llama.cpp state is ever stored
+// on the struct, these unsafe impls must be revisited.
 unsafe impl Send for LlamaCppRuntime {}
 unsafe impl Sync for LlamaCppRuntime {}
 
