@@ -7,6 +7,7 @@
 | Date | Change | Sections |
 |------|--------|----------|
 | 2026-04-12 | @codex-xar: Initial greenfield design for packaging curated `libs/models` bundle descriptors, concrete backends, and model artifacts into a single distributable executable. Migration and backward compatibility are explicitly out of scope. | All |
+| 2026-04-12 | @codex-xar: Added an OCI-as-internal-format addendum evaluating OCI image layout and manifests inside the appended executable payload, including the hybrid raw-weight-blob idea and its implications for future mmap-capable backend contracts. | Option Comparison, OCI Addendum, Recommendation, References |
 
 This document evaluates how Motlie should ship curated model bundles as a single executable artifact that contains:
 
@@ -33,6 +34,7 @@ The goal is not merely "embed files into an exe". The goal is to preserve the cu
 - [Option 2: Custom Container File with Footer TOC](#option-2-custom-container-file-with-footer-toc)
 - [Option 3: Squashfs plus `memfd` Loader](#option-3-squashfs-plus-memfd-loader)
 - [Option 4: Other Viable Options](#option-4-other-viable-options)
+- [Addendum: OCI as Internal Payload Format](#addendum-oci-as-internal-payload-format)
 - [Recommendation](#recommendation)
 - [API Sketches](#api-sketches)
 - [Testing Scope for PLAN](#testing-scope-for-plan)
@@ -427,34 +429,269 @@ Verdict:
 
 Not recommended except for platform-specific polish later.
 
+## Addendum: OCI as Internal Payload Format
+
+This section re-evaluates OCI not as the external distribution mechanism, but as the logical payload format inside the appended executable region:
+
+```text
+[ Rust executable ][ OCI image layout or OCI-like blob set ][ footer with payload start ]
+```
+
+The key distinction is:
+
+- OCI gives a standardized metadata and content-addressing model
+- the appended executable still needs a Motlie-specific physical framing layer so the runtime can find the OCI payload by offset
+
+So this is not "OCI instead of a footer".
+It is "OCI inside a footer-discoverable appended region".
+
+### Claim 1: Unified Format Across `libs/models` and `libs/vmm`
+
+This argument is strong.
+
+OCI descriptors, manifests, indexes, `artifactType`, annotations, and media types are flexible enough to describe heterogeneous payloads. In principle, one manifest graph could reference:
+
+- safetensors model bundles
+- GGUF model bundles
+- tokenizers and config files
+- kernels
+- initrds
+- rootfs images
+- auxiliary metadata for both model and VMM artifacts
+
+That is a real advantage over a Motlie-only `MTLPAY01` TOC that would otherwise need its own type system for every artifact family.
+
+Critical caveat:
+
+- "unified logical format" does not automatically mean "unified runtime handling"
+- `libs/models` and `libs/vmm` still consume very different artifact shapes
+- Motlie would still need crate-local policies for validation, extraction, and startup wiring
+
+So OCI removes format reinvention at the descriptor layer, but it does not remove product-specific materialization logic.
+
+### Claim 2: Tooling for Free
+
+This is partly true, not fully true.
+
+The ecosystem benefit is real:
+
+- ORAS already treats OCI registries as generic artifact stores and encourages artifact-specific media types
+- an OCI-native payload can be pushed to registries without redefining object identity or digest semantics
+- OCI JSON manifests are much easier to inspect than a bespoke binary TOC
+
+But the "for free" part is overstated for the appended-executable use case:
+
+- standard OCI tooling expects either a registry or an OCI layout directory
+- an appended region inside an executable is neither of those
+- Motlie would still need a small tool to expose or materialize the appended payload as an OCI layout if operators want to use `oras`, `skopeo`, or `crane`
+
+So the real benefit is:
+
+- OCI gives reusable metadata semantics and registry interoperability
+- Motlie still needs custom glue for the appended-executable embedding
+
+### Claim 3: Content Addressing and Dedup
+
+This argument is strong at the blob-store level.
+
+OCI descriptors point to digested blobs, so:
+
+- shared tokenizers
+- shared config fragments
+- shared rootfs layers
+- shared weight files across multiple manifests
+
+can all reuse the same blob identity.
+
+Critical caveat:
+
+- dedup is built into the OCI logical model, but not automatically into the final appended executable artifact
+- if Motlie appends a full OCI layout to one executable, reuse only helps if the packer emits each blob once and multiple manifests reference it
+- if every release builds one self-contained exe per bundle, cross-executable dedup is still a transport/distribution concern, not a file-size win inside one local file
+
+So OCI helps most when:
+
+- one executable carries multiple bundles, or
+- the same blobs are also published to a registry or cache, or
+- Motlie adds a shared local blob store later
+
+### Claim 4: Hybrid Raw Blobs for mmap-Capable Weights
+
+This is the most interesting part of the OCI case.
+
+The standard OCI layer media types are tar-based, including the zstd-compressed form. That is a bad direct fit for llama.cpp and current Mistral startup when the goal is zero-copy mmap of multi-GB weight files.
+
+However, OCI descriptors and manifests are not limited to the standard tar layer media types for every artifact design. OCI artifact usage allows custom media types, and unknown manifest entries are not supposed to hard-fail merely because the media type is unfamiliar.
+
+That makes the following hybrid design plausible:
+
+- small files:
+  tar+zstd OCI layer blob, extracted normally
+- large weight file:
+  custom raw blob media type such as:
+  `application/vnd.motlie.weight.gguf.v1`
+  or
+  `application/vnd.motlie.weight.safetensors.v1`
+- manifest annotations:
+  declare which descriptors are mmap-candidate payloads
+- appended-payload footer:
+  records the physical byte offset of each blob inside the executable so the runtime can open the exe and map the raw blob directly
+
+This is a real architectural path.
+
+Critical caveats:
+
+- OCI itself does not give the runtime byte offsets inside the executable; Motlie still needs an offset index
+- once Motlie adds that index, OCI is no longer the whole solution, only the logical object model
+- the current `libs/model` and backend contracts do not support `(fd, offset, len)` or equivalent mmap handles
+- safetensors is not always a single blob in practice; curated bundles often need config, tokenizer, and sometimes multiple shards
+- direct mmap from the executable is operationally cleaner for GGUF than for multi-file safetensors trees
+
+So the hybrid mmap idea is promising, but it is a second-phase architecture, not the first implementation slice.
+
+### Claim 5: Engineering Cost Delta vs Custom Format
+
+This is where OCI loses some of its appeal.
+
+If Motlie chooses OCI as the internal logical format, the implementation still needs:
+
+- a footer and payload-start locator
+- a blob-offset index for appended-executable lookup
+- bundle selection logic
+- extraction/materialization logic for directory-shaped artifacts
+- integrity checking
+- curated validation before backend startup
+
+At that point, the practical delta versus a Motlie custom TOC is:
+
+- OCI reduces schema-design work for manifests and blob typing
+- OCI increases semantic surface area, because the implementation now needs to be correct with respect to OCI layout/index/manifest/blob rules as well as Motlie's appended-file framing
+
+So the engineering comparison is not:
+
+- "custom format" versus "just reuse OCI"
+
+It is:
+
+- "small Motlie-specific manifest + offset table"
+  versus
+- "OCI manifest/index/config/blob semantics + Motlie offset table"
+
+That is still a reasonable trade if Motlie wants cross-subsystem convergence and registry reuse, but it is not free.
+
+### Claim 6: Future Path to mmap-Capable Backend Contracts
+
+This is valid and important.
+
+If Motlie eventually wants:
+
+- zero-copy GGUF startup from inside the executable
+- no extraction of multi-GB weight files
+- one local file opened and mmapped at a known offset
+
+then `libs/model` will need an additive contract extension beyond plain path-based `ArtifactPolicy`.
+
+Examples:
+
+```rust
+pub enum ResolvedArtifact {
+    Directory { root: PathBuf },
+    File { path: PathBuf },
+    MmapBlob {
+        file: std::fs::File,
+        offset: u64,
+        len: u64,
+        media_type: String,
+    },
+}
+```
+
+or a bundle-local resolver trait that returns either materialized filesystem state or mmap-capable blob handles.
+
+Critical caveat:
+
+- this is a real contract change with backend impact
+- it is not just packaging work
+- the current design principle of keeping backends generic still holds, but the generic backend abstraction itself would have to become richer
+
+That is plausible for a later phase, especially for GGUF.
+It is too expensive to make the first single-executable slice depend on it.
+
+### OCI-Inside-Executable Verdict
+
+OCI is a credible internal payload format if Motlie values:
+
+- one logical artifact model across model and VMM payloads
+- content-addressed blobs as a first-class concept
+- future registry publication without reformatting
+- a later path toward mmap-capable raw weight blobs
+
+OCI is weaker if Motlie values:
+
+- the smallest possible first implementation
+- minimal packaging machinery above the existing `LocalOnly { root }` startup path
+- the least cognitive load for a model-only first slice
+
+My updated assessment is:
+
+- OCI is better than I gave it credit for as a logical payload graph
+- OCI is still not enough by itself for the appended-executable runtime
+- a footer-discoverable appended payload still needs Motlie-owned physical framing and likely blob-offset indexing
+- therefore OCI narrows, but does not eliminate, the gap to the custom appendix design
+
 ## Recommendation
 
-### Recommended Direction
+### Revised Recommendation
 
-Adopt Option 2 with Option 4a as the concrete first encoding:
+For the first implementation slice, I still recommend:
 
-- a normal executable
-- an appended payload
-- a footer TOC
-- zstd-compressed chunked artifact data
-- bundle-layer extraction into `StartOptions.unpack_root`
-- backend startup from `ArtifactPolicy::LocalOnly { root }`
+- a custom footer-discoverable appended payload
+- a zstd-compressed chunked appendix as the first concrete encoding
+- extracted/materialized into `StartOptions.unpack_root`
+- handed to backends as `ArtifactPolicy::LocalOnly { root }`
 
-### Why This Is the Best Fit
+But the recommendation is now more specific:
 
-It aligns with the current codebase better than the alternatives:
+- the physical framing should remain Motlie-owned
+- the logical payload schema should stay open to an OCI-compatible evolution path
 
-- it does not require backends to learn about packaging formats
-- it preserves the reviewed boundary where curated bundles own artifact resolution
-- it turns single-file distribution into a packaging concern, not a compiler concern
-- it keeps `ArtifactPolicy::LocalOnly` as the final runtime contract
-- it leaves room to add lazy extraction or direct fd-based loading later
+### Decision Framing
+
+There are now two defensible directions:
+
+1. **Minimal first slice**
+   Use a Motlie-native manifest/TOC now, optimized purely for appended-executable local startup.
+2. **Converged artifact graph**
+   Use OCI manifest/index/config/blob semantics inside the appended region, plus a Motlie footer and blob-offset index.
+
+I still prefer direction 1 for the first slice because it is cheaper and keeps the path-to-value shortest.
+
+I would switch to direction 2 earlier if Motlie decides that any of the following are first-order goals rather than future possibilities:
+
+- one packaging model across `libs/models` and `libs/vmm`
+- first-class registry publication of the same blobs
+- multi-bundle executables with meaningful shared-blob reuse
+- a near-term mmap-based zero-copy path for GGUF or other single-file weights
+
+### Why the Minimal First Slice Still Wins
+
+- it aligns exactly with the current bundle-wrapper pattern in `libs/models`
+- it does not force a new `libs/model` artifact contract immediately
+- it keeps backend crates ignorant of package/container semantics
+- it is enough to validate the operational model before committing Motlie to OCI semantics everywhere
+
+### Where OCI Still Falls Short Today
+
+- appended-executable discovery still needs a Motlie footer
+- direct use of common OCI CLI tooling still needs a conversion or export step
+- standard tar-based layers do not solve mmap for large weight files
+- the hybrid raw-blob design is attractive but depends on a later backend contract expansion
 
 ### Explicit Non-Recommendations
 
 - do not start with `include_bytes!` for model weights
 - do not start with squashfs unless the product is intentionally Linux-only
-- do not make OCI the runtime package for local single-executable delivery
+- do not assume "OCI internal payload" removes the need for Motlie-specific framing, indexing, and runtime glue
 
 ## API Sketches
 
@@ -611,9 +848,19 @@ The follow-up PLAN should cover:
 
 - Rust `include_bytes!` documentation:
   https://doc.rust-lang.org/std/macro.include_bytes.html
+- OCI image layout specification:
+  https://raw.githubusercontent.com/opencontainers/image-spec/v1.1.1/image-layout.md
+- OCI manifest specification:
+  https://raw.githubusercontent.com/opencontainers/image-spec/v1.1.1/manifest.md
+- OCI media types specification:
+  https://raw.githubusercontent.com/opencontainers/image-spec/v1.1.1/media-types.md
+- OCI image index specification:
+  https://raw.githubusercontent.com/opencontainers/image-spec/v1.1.1/image-index.md
 - Linux `memfd_create(2)` manual:
   https://man7.org/linux/man-pages/man2/memfd_create.2.html
 - Linux kernel squashfs documentation:
   https://docs.kernel.org/filesystems/squashfs.html
 - OCI image specification:
   https://specs.opencontainers.org/image-spec/
+- ORAS introduction:
+  https://oras.land/docs/
