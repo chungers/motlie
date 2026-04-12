@@ -13,8 +13,8 @@ use motlie_model::{
 
 use crate::common::{
     apply_generation_params, configure_artifact_policy, map_chat_role, map_quantization_bits,
-    lock_metrics, observe_latency, observe_memory, observe_text_usage, should_force_cpu,
-    snapshot_text_metrics, RuntimeMetricState, TextMetricState,
+    lock_metrics, observe_latency, observe_memory, observe_text_usage, paged_attn_context_size,
+    should_force_cpu, snapshot_text_metrics, RuntimeMetricState, TextMetricState,
 };
 
 /// Text model architecture discriminant that selects the correct `mistralrs` loader path.
@@ -54,7 +54,10 @@ impl MistralTextSpec {
                 [QuantizationBits::Four, QuantizationBits::Eight],
                 QuantizationBits::Four,
             )
-            .expect("curated quantization support is valid"),
+            .unwrap_or_else(|e| {
+                tracing::error!("curated quantization construction failed (this is a bug): {e}");
+                QuantizationSupport::without_recommended([QuantizationBits::Four, QuantizationBits::Eight])
+            }),
         }
     }
 }
@@ -324,6 +327,19 @@ async fn build_text_model(
     }
     if let Some(max_num_seqs) = max_concurrency {
         builder = builder.with_max_num_seqs(max_num_seqs);
+    }
+    if let Some(context_size) = paged_attn_context_size() {
+        match mistralrs::PagedAttentionMetaBuilder::default()
+            .with_gpu_memory(mistralrs::MemoryGpuConfig::ContextSize(context_size))
+            .build()
+        {
+            Ok(pa_config) => {
+                builder = builder.with_paged_attn(pa_config);
+            }
+            Err(err) => {
+                tracing::warn!("failed to configure PagedAttention with context size {context_size}, continuing without it: {err}");
+            }
+        }
     }
 
     builder
