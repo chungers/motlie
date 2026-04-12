@@ -1,8 +1,6 @@
-#[path = "common/tmux_ui.rs"]
-mod tmux_ui;
-
 use motlie_driver::CommandEngine;
 use motlie_driver::commands::tmux::{TmuxCommand, TmuxState};
+use motlie_driver::tmux_frontend::run_tmux_tui;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -12,6 +10,7 @@ async fn main() -> anyhow::Result<()> {
 
     let state = TmuxState::connect(&uri).await?;
     let mut engine = CommandEngine::<TmuxState, TmuxCommand>::new(state);
-    let _ = tmux_ui::run(&mut engine).await?;
+    let mut recorder = None;
+    let _ = run_tmux_tui(&mut engine, &mut recorder).await?;
     Ok(())
 }

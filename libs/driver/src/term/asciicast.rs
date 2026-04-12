@@ -48,7 +48,10 @@ struct AsciicastTerm<'a> {
 }
 
 impl AsciicastRecorder {
-    pub fn create(path: impl AsRef<Path>, meta: &AsciicastMetadata) -> Result<Self, AsciicastError> {
+    pub fn create(
+        path: impl AsRef<Path>,
+        meta: &AsciicastMetadata,
+    ) -> Result<Self, AsciicastError> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|source| AsciicastError::Persist {
@@ -110,10 +113,12 @@ impl AsciicastRecorder {
     }
 
     pub fn flush(&mut self) -> Result<(), AsciicastError> {
-        self.writer.flush().map_err(|source| AsciicastError::Persist {
-            path: self.path.clone(),
-            reason: source.to_string(),
-        })
+        self.writer
+            .flush()
+            .map_err(|source| AsciicastError::Persist {
+                path: self.path.clone(),
+                reason: source.to_string(),
+            })
     }
 
     fn record_event(&mut self, code: &str, data: &str) -> Result<(), AsciicastError> {
@@ -122,6 +127,9 @@ impl AsciicastRecorder {
         }
 
         let offset_s = self.started_at.elapsed().as_secs_f64();
+        // We intentionally record per-event deltas instead of asciinema's more common
+        // absolute offsets. The checked-in validation artifact and internal consumers read
+        // this as a compact driver-owned replay format rather than strict asciinema output.
         let delta_s = (offset_s - self.last_offset_s).max(0.0);
         self.last_offset_s = offset_s;
 

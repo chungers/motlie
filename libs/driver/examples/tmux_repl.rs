@@ -1,10 +1,6 @@
-#[path = "common/tmux_plain.rs"]
-mod tmux_plain;
-#[path = "common/tmux_ui.rs"]
-mod tmux_ui;
-
 use motlie_driver::CommandEngine;
 use motlie_driver::commands::tmux::{TmuxCommand, TmuxState};
+use motlie_driver::tmux_frontend::{TuiAction, run_tmux_repl, run_tmux_tui};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -24,11 +20,14 @@ async fn main() -> anyhow::Result<()> {
 
     let mut engine = CommandEngine::<TmuxState, TmuxCommand>::new(state);
     if use_tui {
-        match tmux_ui::run(&mut engine).await? {
-            tmux_ui::TuiAction::Quit => return Ok(()),
-            tmux_ui::TuiAction::ReturnToRepl => {}
+        let mut recorder = None;
+        match run_tmux_tui(&mut engine, &mut recorder).await? {
+            TuiAction::Quit => return Ok(()),
+            TuiAction::ReturnToRepl => {}
         }
     }
 
-    tmux_plain::run(&mut engine).await
+    let mut recorder = None;
+    run_tmux_repl(&mut engine, &mut recorder, &uri).await?;
+    Ok(())
 }

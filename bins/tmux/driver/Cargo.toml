@@ -11,7 +11,7 @@ description = "Top-level tmux driver binary built on motlie-driver"
 default = ["repl", "tui", "commands-tmux"]
 commands-tmux = ["motlie-driver/commands-tmux", "dep:motlie-tmux"]
 repl = ["commands-tmux", "motlie-driver/repl", "dep:reedline", "dep:shlex"]
-tui = ["commands-tmux", "dep:ratatui", "dep:crossterm", "dep:ansi-to-tui", "dep:motlie-tmux"]
+tui = ["commands-tmux", "motlie-driver/tui", "dep:ratatui", "dep:crossterm", "dep:ansi-to-tui", "dep:motlie-tmux"]
 
 [dependencies]
 anyhow.workspace = true
