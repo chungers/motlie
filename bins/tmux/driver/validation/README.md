@@ -6,13 +6,21 @@ These files were captured from a real end-to-end smoke test of:
 - remote backend: `ssh://dchung@motliehost?identity-file=/home/dchung/.ssh/motliehost`
 - date: `2026-04-11`
 
-## Why pane captures instead of asciicast
+## Asciicast
 
-`asciinema` is not installed on the validation host (`spark-2f6e`), so a proper
-`.cast` file was not recorded in this run.
+A fresh driver-owned asciicast implementation now lives under:
+- `motlie_driver::term::asciicast`
 
-The saved artifacts here are plain text pane captures from the tmux-hosted REPL
-sessions used during validation.
+This branch does not depend on `libs/vmm` for recording.
+
+Saved replay artifact:
+- [`tmux-driver-validation.cast`](/home/dchung/cdx-repl/motlie/bins/tmux/driver/validation/tmux-driver-validation.cast)
+
+It was recorded from the top-level tmux driver using:
+- `--record-asciicast <path>`
+
+The pane captures remain alongside the cast because they are easy to diff and
+review directly in GitHub.
 
 ## Artifact map
 
@@ -30,6 +38,8 @@ sessions used during validation.
   - cleanup proof showing the temporary test session was removed
 - [`06-writer-pane.txt`](/home/dchung/cdx-repl/motlie/bins/tmux/driver/validation/06-writer-pane.txt)
   - second driver instance used to inject output into the monitored session
+- [`tmux-driver-validation.cast`](/home/dchung/cdx-repl/motlie/bins/tmux/driver/validation/tmux-driver-validation.cast)
+  - asciicast v3 replay artifact from the validated plain REPL session
 
 ## Validation summary
 

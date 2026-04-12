@@ -1,3 +1,5 @@
+pub mod asciicast;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TermBackendKind {
     Plain,

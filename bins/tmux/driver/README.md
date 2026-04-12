@@ -54,6 +54,14 @@ Start directly in TUI:
 cargo run -p motlie-tmux-driver -- --tui ssh://localhost
 ```
 
+Record a plain REPL session to asciicast v3:
+
+```bash
+cargo run -p motlie-tmux-driver -- \
+  --record-asciicast bins/tmux/driver/validation/tmux-driver-validation.cast \
+  ssh://localhost
+```
+
 ## Behavior
 
 - `tui on` switches from the plain REPL into the split-screen TUI
@@ -100,5 +108,7 @@ Saved validation artifacts are under:
 - [`06-writer-pane.txt`](/home/dchung/cdx-repl/motlie/bins/tmux/driver/validation/06-writer-pane.txt)
 
 Environment note:
-- `asciinema` is not installed in this environment, so there is no `.cast` artifact yet.
-- The saved proof artifacts are plain tmux pane captures from the validated session.
+- a fresh driver-owned asciicast writer now exists in `motlie_driver::term::asciicast`
+- the saved validation cast is:
+  [`tmux-driver-validation.cast`](/home/dchung/cdx-repl/motlie/bins/tmux/driver/validation/tmux-driver-validation.cast)
+- the pane captures remain useful as plain-text proof alongside the `.cast`
