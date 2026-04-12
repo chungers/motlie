@@ -1,15 +1,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use motlie_model::eval::EvalTrack;
 use motlie_model::{
     BundleId, CheckpointFormat, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
 };
 use motlie_model_llama_cpp::LlamaCppTextAdapter;
 
 use crate::{
-    ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleArtifacts, BundleDescriptor,
-    BundleFamily, BundleRequirements, PlatformConstraint,
+    ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor,
+    BundleRequirements,
 };
 
 pub const SELECTOR: &str = "qwen/qwen3_4b_gguf";
@@ -25,7 +24,7 @@ pub(crate) fn register(catalog: &mut crate::Catalog) {
 }
 
 pub(crate) fn identity() -> ModelIdentity {
-    super::qwen3_4b::identity()
+    super::qwen3_4b_identity()
 }
 
 pub(crate) fn checkpoint() -> ModelCheckpoint {
@@ -95,6 +94,7 @@ fn resolve_local_gguf_root(root: &Path) -> Result<PathBuf, ModelError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use motlie_model::eval::EvalTrack;
     use motlie_model::CapabilityDescriptor;
     use std::time::{SystemTime, UNIX_EPOCH};
 

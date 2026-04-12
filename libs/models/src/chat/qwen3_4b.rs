@@ -1,15 +1,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use motlie_model::eval::EvalTrack;
 use motlie_model::{
     BundleId, CheckpointFormat, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
 };
 use motlie_model_mistral::MistralTextAdapter;
 
 use crate::{
-    ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor, BundleFamily,
-    BundleRequirements, PlatformConstraint,
+    ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor,
+    BundleRequirements,
 };
 
 pub const SELECTOR: &str = "qwen/qwen3_4b";
@@ -25,22 +24,7 @@ pub(crate) fn register(catalog: &mut crate::Catalog) {
 }
 
 pub(crate) fn identity() -> ModelIdentity {
-    ModelIdentity {
-        id: BundleId::new("qwen3_4b"),
-        display_name: "Qwen3 4B".into(),
-        family: BundleFamily::Qwen,
-        capabilities: motlie_model::Capabilities::chat_and_completion(),
-        eval_tracks: vec![
-            EvalTrack::Chat,
-            EvalTrack::Reasoning,
-            EvalTrack::Summarization,
-            EvalTrack::Classification,
-        ],
-        requirements: BundleRequirements {
-            platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
-            build: vec![],
-        },
-    }
+    super::qwen3_4b_identity()
 }
 
 pub(crate) fn checkpoint() -> ModelCheckpoint {
@@ -103,7 +87,8 @@ fn resolve_local_snapshot_root(root: &Path) -> Result<PathBuf, ModelError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Catalog;
+    use crate::{BundleFamily, Catalog};
+    use motlie_model::eval::EvalTrack;
     use motlie_model::CapabilityDescriptor;
     use std::time::{SystemTime, UNIX_EPOCH};
 

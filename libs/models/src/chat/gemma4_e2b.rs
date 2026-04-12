@@ -1,15 +1,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use motlie_model::eval::EvalTrack;
 use motlie_model::{
     BundleId, CheckpointFormat, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
 };
 use motlie_model_mistral::MistralMultimodalAdapter;
 
 use crate::{
-    ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor, BundleFamily,
-    BundleRequirements, PlatformConstraint,
+    ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor,
+    BundleRequirements,
 };
 
 pub const SELECTOR: &str = "google/gemma4_e2b";
@@ -25,22 +24,7 @@ pub(crate) fn register(catalog: &mut crate::Catalog) {
 }
 
 pub(crate) fn identity() -> ModelIdentity {
-    ModelIdentity {
-        id: BundleId::new("gemma4_e2b"),
-        display_name: "Gemma 4 E2B-it".into(),
-        family: BundleFamily::Gemma,
-        capabilities: motlie_model::Capabilities::multimodal_chat_and_vision(),
-        eval_tracks: vec![
-            EvalTrack::Chat,
-            EvalTrack::Reasoning,
-            EvalTrack::Summarization,
-            EvalTrack::Classification,
-        ],
-        requirements: BundleRequirements {
-            platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
-            build: vec![],
-        },
-    }
+    super::gemma4_e2b_identity()
 }
 
 pub(crate) fn checkpoint() -> ModelCheckpoint {
@@ -122,7 +106,8 @@ fn resolve_local_snapshot_root(root: &Path) -> Result<PathBuf, ModelError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Catalog;
+    use crate::{BundleFamily, Catalog};
+    use motlie_model::eval::EvalTrack;
     use motlie_model::CapabilityKind;
     use std::time::{SystemTime, UNIX_EPOCH};
 
