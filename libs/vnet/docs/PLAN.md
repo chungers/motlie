@@ -7,6 +7,7 @@ backend with libslirp for rootless guest networking.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-06 | @codex | Re-baseline the plan around the implemented `v1.2` harness: mark delivered work complete, preserve superseded tasks with explicit handoff notes, and make `libs/vnet/examples/v1.2` the source of truth for the `v1.2+` validation line |
 | 2026-04-04 | @claude-tl | Phase 2 implementation: two-thread vhost-user backend, public API (VnetConfig/VnetError/VnetBackend/VnetHandle), vm-memory pinned to 0.17 for vhost crate compat |
 | 2026-04-03 | @claude-tl | Phase 1 implementation: update dep versions to latest (libslirp-dev 4.7.0, vhost 0.16, vhost-user-backend 0.22, virtio-queue 0.17, vm-memory 0.17) |
 | 2026-04-03 | @codex | Address final PR review nits: align `VnetError` naming with DESIGN and remove stale `--net-mode` wording |
@@ -17,7 +18,18 @@ backend with libslirp for rootless guest networking.
 
 ## Status
 
-All phases pending. No implementation yet.
+- `[ ]` not started
+- `[x]` completed and verified
+- `[>]` superseded or handed off; preserved here as historical traceability,
+  with the current source of truth linked inline
+- Phase 1 is implemented and merged.
+- Phase 2 is implemented and merged.
+- `v1.2` is the current source of truth for the composed validation harness:
+  `libs/vnet/examples/v1.2/`
+- `motlie-vnet` owns the `v1.2+` example / validation harness line.
+- Remaining work is primarily:
+  - documenting the handoff cleanly across `vfs` and `vnet`
+  - long-term ingress migration away from the TAP admin path
 
 ---
 
@@ -224,10 +236,23 @@ Design references: [CH Integration](./DESIGN.md), [Guest Experience](./DESIGN.md
 
 ### 3.1 Guest Image Changes
 
-Based on current `libs/vfs/examples/v1/build-guest.sh`. Changes are additive
-and do not break existing TAP or no-net modes.
+Current source of truth: `libs/vnet/examples/v1.2/build-guest.sh` and
+`libs/vnet/examples/v1.2/README.md`.
 
-- [ ] 3.1.1 Add `systemd-networkd` DHCP config for the vnet egress NIC to guest image build.
+Earlier `libs/vfs/examples/v1*` scripts are historical context only; the active
+guest image work for `v1.2+` now lives under `libs/vnet/examples/v1.2/`.
+
+- [x] 3.1.1 Add `systemd-networkd` DHCP config for the vnet egress NIC to guest image build.
+  Completed in `v1.2` with an equivalent boot-time `motlie-vnet-egress`
+  service that programs the libslirp defaults explicitly instead of relying
+  purely on DHCP. Current SOT: `libs/vnet/examples/v1.2/README.md`.
+  Original DHCP-oriented target preserved below for traceability; the actual
+  implementation diverged to a oneshot boot-time service that:
+  - brings the egress NIC up
+  - assigns `10.0.2.15/24`
+  - installs default route via `10.0.2.2`
+  - writes DNS resolver `10.0.2.3`
+  - removes any default route from the TAP admin NIC
   Short-term migration keeps TAP admin SSH on one NIC and uses DHCP on a
   separate vnet egress NIC. Match the egress NIC by launcher-assigned MAC,
   not by interface name, so the guest does not depend on `eth1` ordering.
@@ -247,20 +272,20 @@ and do not break existing TAP or no-net modes.
   RouteMetric=100
   ```
   This is a no-op when no egress NIC exists and preserves the TAP admin path.
-- [ ] 3.1.2 Enable `systemd-networkd` in the guest image:
+- [x] 3.1.2 Enable `systemd-networkd` in the guest image:
   ```bash
   chroot "$ROOTFS" systemctl enable systemd-networkd
   ```
-- [ ] 3.1.3 Add validation packages to `build-guest.sh` package list.
+- [x] 3.1.3 Add validation packages to `build-guest.sh` package list.
   Current packages: `openssh-server bash coreutils tmux fuse3 libfuse3-3
   systemd systemd-sysv dbus iproute2`. Add:
   ```
   curl dnsutils
   ```
   These are needed for e2e network validation (3.4) and are small (~5MB).
-- [ ] 3.1.4 Rebuild guest image and verify existing TAP mode still works.
+- [x] 3.1.4 Rebuild guest image and verify existing TAP mode still works.
   ```bash
-  cd libs/vfs/examples/v1
+  cd libs/vnet/examples/v1.2
   ./build-guest.sh
   ./launch-ch.sh --admin-net=tap --egress-net=tap
   # Inside guest: ip addr show eth0 should show 192.168.249.2 (static)
@@ -268,7 +293,7 @@ and do not break existing TAP or no-net modes.
 
 ### 3.2 Launcher Migration
 
-- [ ] 3.2.1 Split launcher controls into ingress vs egress instead of one `--net-mode`.
+- [x] 3.2.1 Split launcher controls into ingress vs egress instead of one `--net-mode`.
   Design ref: [Guest Image and Launcher Migration](./DESIGN.md).
   ```bash
   # --admin-net=none --egress-net=none
@@ -276,56 +301,49 @@ and do not break existing TAP or no-net modes.
   # --admin-net=tap  --egress-net=vhost-user  (short-term migration)
   ```
   Default: `none` (preserves current `--no-net` behavior).
-- [ ] 3.2.2 Keep `--no-net` as a backward-compatible alias for
+- [x] 3.2.2 Keep `--no-net` as a backward-compatible alias for
   `--admin-net=none --egress-net=none`, document the migration path, and warn
   in help text once the split flags exist.
-- [ ] 3.2.3 In `vhost-user` egress mode, add `shared=true` to `--memory` arg.
+- [x] 3.2.3 In `vhost-user` egress mode, add `shared=true` to `--memory` arg.
   Per [CH docs](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/main/docs/memory.md),
   vhost-user devices require shared memory for guest RAM access.
-- [ ] 3.2.4 In `vhost-user` egress mode, accept `--vnet-socket` path (default:
+- [x] 3.2.4 In `vhost-user` egress mode, accept `--vnet-socket` path (default:
   `/tmp/motlie-vnet-0.sock`) and attach the egress NIC without disturbing
   the TAP admin NIC.
-- [ ] 3.2.5 In short-term dual-NIC mode, make route ownership explicit:
+- [x] 3.2.5 In short-term dual-NIC mode, make route ownership explicit:
   the admin TAP NIC must remain host-reachable only, while the vnet egress NIC
   owns the default route. Prefer configuring this by omitting the admin default
   gateway rather than relying on device-order-dependent route metrics.
-- [ ] 3.2.6 Verify CH starts in each mode:
+- [x] 3.2.6 Verify CH starts in each mode:
   ```bash
   ./launch-ch.sh --admin-net=none --egress-net=none
   ./launch-ch.sh --admin-net=tap --egress-net=tap
   ./launch-ch.sh --admin-net=tap --egress-net=vhost-user --vnet-socket=/tmp/motlie-vnet-0.sock
   ```
 
-### 3.3 Crate Layering and Standalone Example
+### 3.3 Crate Layering and Host Example Entry Point
 
 Design ref: [Component Architecture](./DESIGN.md)
 
-- [ ] 3.3.1 Create `libs/vnet/examples/demo_host.rs` — standalone vnet demo.
-  Starts the vnet backend, prints egress / CH launch instructions, waits for
-  Ctrl-C. No vfs dependency and no requirement to own the SSH ingress story.
-  ```rust
-  // libs/vnet/examples/demo_host.rs
-  fn main() -> anyhow::Result<()> {
-      let config = motlie_vnet::VnetConfig::builder()
-          .socket_path("/tmp/motlie-vnet-0.sock")
-          .build()?;
-      let handle = motlie_vnet::VnetBackend::new(config).start()?;
-      eprintln!("vnet backend running.");
-      eprintln!("Launch CH: ./launch-ch.sh --admin-net=none --egress-net=vhost-user");
-      // wait for Ctrl-C
-      handle.shutdown()
-  }
-  ```
-- [ ] 3.3.2 Add `[[example]]` entry to `libs/vnet/Cargo.toml`.
-- [ ] 3.3.3 Verify: `cargo run -p motlie-vnet --example demo_host` starts
-  the backend, socket file is created, CH can connect.
+- [x] 3.3.1 Make `libs/vnet/examples/v1.2/repl_host.rs` the canonical vnet-owned
+  host example entry point.
+  `repl_host_v1_2` is the only current host-side example entry point for the
+  `v1.2+` harness line.
+- [x] 3.3.2 Add `[[example]]` entry to `libs/vnet/Cargo.toml`.
+  Completed for `repl_host_v1_2`.
+- [x] 3.3.3 Verify the vnet-owned host example target:
+  `cargo check -p motlie-vnet --example repl_host_v1_2` and the runbook in
+  `libs/vnet/examples/v1.2/README.md`.
 
-### 3.4 End-to-End Validation (Standalone vnet)
+### 3.4 End-to-End Validation (`v1.2` host flow)
 
 All validation uses commands available in the updated base image
 (3.1.3: `curl`, `dnsutils` added; `iproute2` already present).
 
-- [ ] 3.4.1 Boot CH guest with vhost-user-net, verify DHCP:
+- [x] 3.4.1 Boot CH guest with vhost-user-net, verify DHCP:
+  Completed in the current `v1.2` runbook, with the caveat that the validated
+  image now programs the libslirp defaults via a boot-time service rather than
+  through pure DHCP.
   ```bash
   # Inside guest:
   ip addr
@@ -334,21 +352,24 @@ All validation uses commands available in the updated base image
   # and own the default route. In short-term dual-NIC mode the TAP admin NIC
   # remains only for the host-side management subnet.
   ```
-- [ ] 3.4.2 Verify outbound TCP:
+- [x] 3.4.2 Verify outbound TCP:
   ```bash
   curl -s -o /dev/null -w "%{http_code}" http://example.com
   # Should print: 200
   ```
-- [ ] 3.4.3 Verify DNS resolution:
+- [x] 3.4.3 Verify DNS resolution:
   ```bash
   host google.com
   # Should resolve to IP addresses
   ```
-- [ ] 3.4.4 Verify `apt update` works inside the guest.
-- [ ] 3.4.5 Verify zero host impact: no `CAP_NET_ADMIN` on CH binary,
+- [x] 3.4.4 Verify `apt update` works inside the guest.
+- [>] 3.4.5 Verify zero host impact: no `CAP_NET_ADMIN` on CH binary,
   no TAP device created, no host routes modified. `ip link` on host
   shows no new interfaces.
-- [ ] 3.4.6 Verify clean shutdown: stop vnet backend, confirm CH handles
+  Superseded for `v1.2` by the short-term migration contract: egress is
+  rootless, but TAP admin ingress still exists as migration debt. Current SOT:
+  `libs/vnet/docs/DESIGN.md` ("Zero-Host-Impact Model").
+- [x] 3.4.6 Verify clean shutdown: stop vnet backend, confirm CH handles
   backend disconnect gracefully (guest sees link-down, no crash).
 
 ### 3.5 Composed Acceptance: VFS + SSH Ingress + Internet Egress
@@ -360,7 +381,11 @@ designs. This phase still depends on the legacy TAP admin path, so it retains
 the existing `CAP_NET_ADMIN` / host-networking prerequisites until the
 long-term ingress proxy replaces guest-reachable TAP SSH.
 
-- [ ] 3.5.1 Add `motlie-vnet` as a **dev-dependency** of `motlie-vfs`.
+- [>] 3.5.1 Add `motlie-vnet` as a **dev-dependency** of `motlie-vfs`.
+  Superseded by moving harness ownership to `motlie-vnet`. The composed `v1.2`
+  entrypoint now lives in `libs/vnet/examples/v1.2/repl_host.rs`, and
+  `motlie-vnet` depends on `motlie-vfs` for that example instead of the other
+  way around.
   `repl_host` is an `[[example]]`, so dev-dependencies suffice. This avoids
   coupling the vfs library to vnet at the crate level.
   ```toml
@@ -368,7 +393,9 @@ long-term ingress proxy replaces guest-reachable TAP SSH.
   [dev-dependencies]
   motlie-vnet = { path = "../vnet" }
   ```
-- [ ] 3.5.2 In `repl_host.rs`, add `--egress-net=vhost-user` CLI support that
+- [>] 3.5.2 In `repl_host.rs`, add `--egress-net=vhost-user` CLI support that
+  Superseded by the vnet-owned `repl_host_v1_2` binary under
+  `libs/vnet/examples/v1.2/`, which now carries the split networking controls.
   spawns vnet backend before entering REPL, while preserving the existing TAP
   admin / SSH path:
   ```rust
@@ -383,7 +410,8 @@ long-term ingress proxy replaces guest-reachable TAP SSH.
       // hold handle until repl_host exits
   }
   ```
-- [ ] 3.5.3 Full composed flow test:
+- [x] 3.5.3 Full composed flow test:
+  Completed and documented in `libs/vnet/examples/v1.2/README.md`.
   ```bash
   # Terminal 1: start host with VFS + vnet egress
   cat setup-alice.sh.vfs | cargo run --example repl_host -- \
@@ -404,8 +432,11 @@ long-term ingress proxy replaces guest-reachable TAP SSH.
   curl -s http://example.com      # → HTML response
   apt update                      # → package list refresh
   ```
-- [ ] 3.5.4 Document the composed flow in `libs/vfs/examples/v1/README.md`
+- [>] 3.5.4 Document the composed flow in `libs/vfs/examples/v1/README.md`
   as the recommended migration/development setup.
+  Superseded by making `libs/vnet/examples/v1.2/README.md` the source of truth
+  for the `v1.2+` composed runbook. `libs/vfs` now records the handoff rather
+  than owning the active networking runbook.
 
 ### 3.6 Long-Term Ingress: Host SSH Proxy
 
@@ -429,15 +460,20 @@ long-term ingress proxy replaces guest-reachable TAP SSH.
 
 ## Phase 4: Documentation and Cleanup
 
-- [ ] 4.1.1 Update `libs/vfs/examples/v1/README.md` with vhost-user-net instructions
+- [>] 4.1.1 Update `libs/vfs/examples/v1/README.md` with vhost-user-net instructions
   and the composed VFS + SSH + Internet flow.
-- [ ] 4.1.2 Update `libs/vfs/examples/v1/CH-HARNESS.md` prerequisites and launch flow
+  Superseded by the harness handoff: `v1` and `v1.1` stay under `libs/vfs`,
+  while `v1.2+` guidance is owned by `libs/vnet/examples/v1.2/` and
+  `libs/vnet/docs/`.
+- [>] 4.1.2 Update `libs/vfs/examples/v1/CH-HARNESS.md` prerequisites and launch flow
   for the split `--admin-net` / `--egress-net` launcher flags.
+  Superseded for the same reason as 4.1.1; current SOT is
+  `libs/vnet/examples/v1.2/CH-HARNESS.md`.
 - [ ] 4.1.3 Remove `CAP_NET_ADMIN` / `setcap` references from all docs (TAP mode
   docs should note it as legacy requiring capabilities).
-- [ ] 4.1.4 Add `libs/vnet/README.md` with usage examples (standalone and composed).
+- [x] 4.1.4 Add `libs/vnet/README.md` with usage examples (standalone and composed).
 - [ ] 4.1.5 Remove `libs/vfs/docs/PLAN-v1.md` v1.5 networking section (now lives here).
-- [ ] 4.1.6 Update DESIGN.md open questions with resolved answers.
+- [x] 4.1.6 Update DESIGN.md open questions with resolved answers.
 
 ---
 

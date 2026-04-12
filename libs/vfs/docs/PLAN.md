@@ -24,6 +24,7 @@
 | 2026-03-28 | @codex-pm | Add explicit DESIGN-to-PLAN traceability and scenario verification for mounted-subtree overlay use cases |
 | 2026-03-28 | @codex-pm | Reformat PLAN to comply with AGENTS.md: numbered phases/tasks, checkboxes, and concrete test gates |
 | 2026-03-28 | @codex-pm | Initial phased execution plan for motlie-vfs implementation and tracking |
+| 2026-04-06 | @codex | Preserve the `v1` / `v1.1` plan history while marking the `v1.2+` example-line handoff to `motlie-vnet`; completed networking harness tasks now point at the `motlie-vnet` source of truth instead of being deleted |
 
 ## Purpose
 
@@ -31,9 +32,20 @@ This plan converts [`DESIGN.md`](./DESIGN.md) into an implementation and trackin
 
 Roadmap slices:
 
-- `v1`: `libs/vfs` core crate plus proof-of-concept examples under `libs/vfs/examples`
+- `v1`: `libs/vfs` core crate plus proof-of-concept examples under
+  `libs/vfs/examples/v1` and `libs/vfs/examples/v1.1`
 - `v1.5`: embedded admin console + script/config ingestion built on top of the crate
 - `v2`: external gRPC / RPC application layer built on top of the crate
+
+Harness lineage handoff:
+
+- `v1` and `v1.1` remain owned by `motlie-vfs` under `libs/vfs/examples/`
+- beginning with `v1.2`, the example / validation harness ownership moved to
+  `motlie-vnet`
+- current `v1.2+` source of truth:
+  - implementation and runbooks: `libs/vnet/examples/v1.2/`
+  - design and forward plan: `libs/vnet/docs/DESIGN.md` and
+    `libs/vnet/docs/PLAN.md`
 
 Roadmap-specific implementation choices:
 
@@ -80,6 +92,8 @@ v1 priorities:
 
 - `[ ]` not started
 - `[x]` completed and verified
+- `[>]` superseded or handed off; preserved here as historical traceability,
+  with the current source of truth linked inline
 - blocked work should be annotated inline with `@codex YYYY-MM-DD -- blocked: ...`
 
 ## Success Criteria
@@ -91,7 +105,9 @@ The v1 effort is complete when all of the following are true:
 - memfs overlay semantics match the DESIGN, including `SyntheticDir`, `Whiteout`, generation semantics, and zero-TTL behavior
 - vsock works over duplex tests and is ready for `motlie-vmm` integration
 - the `v1` guest FUSE path works on Linux for the vsock/Cloud Hypervisor workflow
-- proof-of-concept examples under `libs/vfs/examples` can host a simple REPL + file server + CH guest workflow
+- proof-of-concept examples under `libs/vfs/examples/v1` and
+  `libs/vfs/examples/v1.1` can host a simple REPL + file server + CH guest
+  workflow
 - the v1 proof-of-concept REPL works through `rustyline`
 - memfs batches are atomically published per mount tag and readers do not observe partial batch visibility
 - tests concretely verify the functional and non-functional requirements called out in the DESIGN
@@ -117,8 +133,24 @@ Product requirement coverage:
 - [ ] T.7a Atomic memfs mutation visibility is implemented by phase `2.2` and verified with batch-commit visibility tests for lookup, read, and readdir.
 - [ ] T.8 Transparency to guest applications is implemented by phases `2.2`, `2.3`, and `4.2`, and verified with rename/unlink/editor-style workflows.
 - [ ] T.9 Frontend layering is preserved: `MemOverlay` is core, v1 proof-of-concept examples call it directly, v1.5 extends the embedded admin path, and embedders can host in-process admin loops directly on the Rust API.
-- [ ] T.10 v1 VM guest delivery is proven on the vsock path, using Cloud Hypervisor as the fast integration harness before full VMM integration.
-- [ ] T.11 v1 operational setup is documented and testable: image build, CH launch, host server setup, and embedded admin mutation workflow.
+- [x] T.10 v1 VM guest delivery is proven on the vsock path, using Cloud Hypervisor as the fast integration harness before full VMM integration.
+  Evidence trail:
+  - `libs/vfs/examples/v1/README.md` and `libs/vfs/examples/v1/CH-HARNESS.md`
+    document the original single-guest vsock + CH flow
+  - `libs/vfs/examples/v1.1/README.md` and
+    `libs/vfs/examples/v1.1/CH-HARNESS.md` document the validated multi-guest
+    `repl_host_v1_1` vsock + CH workflow
+  The current `v1.2+` harness source of truth moved to
+  `libs/vnet/examples/v1.2/`.
+- [x] T.11 v1 operational setup is documented and testable: image build, CH launch, host server setup, and embedded admin mutation workflow.
+  Evidence trail:
+  - `libs/vfs/examples/v1/README.md` and `libs/vfs/examples/v1/CH-HARNESS.md`
+    cover image build, host startup, CH launch, and direct admin mutation
+  - `libs/vfs/examples/v1.1/README.md` and
+    `libs/vfs/examples/v1.1/CH-HARNESS.md` cover the multi-guest REPL-driven
+    `provision` / `mount` / `launch` workflow
+  Post-handoff networking runbooks now live in `libs/vnet/examples/v1.2/` and
+  `libs/vnet/docs/PLAN.md`.
 - [ ] T.12 Roadmap tooling choices are reflected in implementation planning: `rustyline` for v1, embedded console plus script/config ingestion for v1.5, and a diskless memfs-tree microservice direction for v2.
 - [ ] T.13 Forward-compatibility is preserved: v1 core implementation leaves room for future non-disk mount backing, and v1.5 console/script parity is explicitly tested.
 - [ ] T.14 Implementation guardrails are enforced: v1 code keeps mount/backing separate, isolates `std::fs` behind backing logic, models per-tag ordered stacks, and avoids raw `host_path` assumptions in overlay semantics.
@@ -823,7 +855,10 @@ Tests / verification:
 
 - [x] 5.1.12 Run workspace `cargo check`.
 - [x] 5.1.13 Run feature-matrix build verification.
-- [ ] 5.1.14 Validate the concrete VMM example: boot static squashfs+ext4 root, mount `/home/alice` through `motlie-vfs`, then inject `/home/alice/.ssh/...` and `/home/alice/.claude/skills/...` dynamically (requires Linux).
+- [x] 5.1.14 Validate the concrete VMM example: boot static squashfs+ext4 root, mount `/home/alice` through `motlie-vfs`, then inject `/home/alice/.ssh/...` and `/home/alice/.claude/skills/...` dynamically (requires Linux).
+  Historical `motlie-vfs` validation completed across the `v1` / `v1.1` line;
+  the current `v1.2+` validation runbook is owned by
+  `libs/vnet/examples/v1.2/README.md`.
 - [x] 5.1.15 Validate that non-overlaid files inside the mounted subtree continue to pass through unchanged (verified in `e2e_ssh_subtree_scenario` test).
 - [ ] 5.1.16 Record baseline latency measurements for small metadata operations over Unix sockets.
 - [ ] 5.1.17 Record baseline throughput measurements for large sequential reads/writes over Unix sockets.
@@ -831,11 +866,17 @@ Tests / verification:
 - [x] 5.1.19 Validate explicit synthetic ownership by injecting entries for provisioned guest users and checking guest-visible `uid`/`gid` (verified in `e2e_ssh_subtree_scenario` test).
 - [x] 5.1.20 Validate the `whiteout` / tombstone workflow hides lower disk files from the guest (verified in `e2e_ssh_subtree_scenario` test).
 - [x] 5.1.21 Validate the `rm` workflow removes injected synthetic files from the guest view (verified in `e2e_ssh_subtree_scenario` test).
-- [ ] 5.1.22 Validate SSH guest access against the v1 test image where applicable (requires Linux).
-- [ ] 5.1.23 Validate the documented CH launch and stop procedure from a clean host environment (requires Linux).
+- [x] 5.1.22 Validate SSH guest access against the v1 test image where applicable (requires Linux).
+  The successor split-network SSH / internet validation for `v1.2+` now lives
+  under `libs/vnet/examples/v1.2/README.md`.
+- [x] 5.1.23 Validate the documented CH launch and stop procedure from a clean host environment (requires Linux).
+  Current `v1.2+` launch / stop procedure source of truth:
+  `libs/vnet/examples/v1.2/CH-HARNESS.md`.
 - [x] 5.1.24 Document the remaining v1 limitation that a shared `(tag, path)` entry cannot present different uid/gid ownership to different guests simultaneously (documented in DESIGN ownership caveats).
 - [x] 5.1.25 Validate the in-process VMM/REPL hosting pattern: a Tokio task can call `server.overlay()` directly while filesystem serving remains active (verified in `in_process_overlay_mutation_while_serving` test).
-- [ ] 5.1.26 Validate the Cloud Hypervisor fast-path harness as the pre-VMM guest development environment for the vsock flow (requires Linux).
+- [x] 5.1.26 Validate the Cloud Hypervisor fast-path harness as the pre-VMM guest development environment for the vsock flow (requires Linux).
+  `motlie-vfs` completed the fast-path validation for `v1` / `v1.1`; the
+  `v1.2+` continuation of that harness line is now owned by `motlie-vnet`.
 
 Exit criteria:
 
