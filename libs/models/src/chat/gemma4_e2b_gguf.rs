@@ -25,7 +25,7 @@ pub(crate) fn register(catalog: &mut crate::Catalog) {
 }
 
 pub(crate) fn identity() -> ModelIdentity {
-    super::gemma4_e2b::identity()
+    super::gemma4_e2b_identity()
 }
 
 pub(crate) fn checkpoint() -> ModelCheckpoint {

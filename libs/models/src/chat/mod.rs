@@ -13,12 +13,66 @@ use std::str::FromStr;
     feature = "model-qwen3-4b",
     feature = "model-qwen3-4b-gguf",
 ))]
+use crate::{BundleFamily, BundleRequirements, PlatformConstraint};
+#[cfg(any(
+    feature = "model-gemma4-e2b",
+    feature = "model-gemma4-e2b-gguf",
+    feature = "model-qwen3-4b",
+    feature = "model-qwen3-4b-gguf",
+))]
+use motlie_model::eval::EvalTrack;
+#[cfg(any(
+    feature = "model-gemma4-e2b",
+    feature = "model-gemma4-e2b-gguf",
+    feature = "model-qwen3-4b",
+    feature = "model-qwen3-4b-gguf",
+))]
 use motlie_model::{BundleId, ModelBundle};
 
 pub const QWEN3_4B_SELECTOR: &str = "qwen/qwen3_4b";
 pub const GEMMA4_E2B_SELECTOR: &str = "google/gemma4_e2b";
 pub const QWEN3_4B_GGUF_SELECTOR: &str = "qwen/qwen3_4b_gguf";
 pub const GEMMA4_E2B_GGUF_SELECTOR: &str = "google/gemma4_e2b_gguf";
+
+#[cfg(any(feature = "model-qwen3-4b", feature = "model-qwen3-4b-gguf"))]
+pub(crate) fn qwen3_4b_identity() -> motlie_model::ModelIdentity {
+    motlie_model::ModelIdentity {
+        id: BundleId::new("qwen3_4b"),
+        display_name: "Qwen3 4B".into(),
+        family: BundleFamily::Qwen,
+        capabilities: motlie_model::Capabilities::chat_and_completion(),
+        eval_tracks: vec![
+            EvalTrack::Chat,
+            EvalTrack::Reasoning,
+            EvalTrack::Summarization,
+            EvalTrack::Classification,
+        ],
+        requirements: BundleRequirements {
+            platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
+            build: vec![],
+        },
+    }
+}
+
+#[cfg(any(feature = "model-gemma4-e2b", feature = "model-gemma4-e2b-gguf"))]
+pub(crate) fn gemma4_e2b_identity() -> motlie_model::ModelIdentity {
+    motlie_model::ModelIdentity {
+        id: BundleId::new("gemma4_e2b"),
+        display_name: "Gemma 4 E2B-it".into(),
+        family: BundleFamily::Gemma,
+        capabilities: motlie_model::Capabilities::multimodal_chat_and_vision(),
+        eval_tracks: vec![
+            EvalTrack::Chat,
+            EvalTrack::Reasoning,
+            EvalTrack::Summarization,
+            EvalTrack::Classification,
+        ],
+        requirements: BundleRequirements {
+            platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
+            build: vec![],
+        },
+    }
+}
 
 #[cfg(feature = "model-gemma4-e2b")]
 pub mod gemma4_e2b;
