@@ -5,6 +5,8 @@ use crate::completion::dedup_sorted;
 use crate::completion::{CompletionCandidate, CompletionRequest};
 use crate::error::{DriverError, DriverResult};
 
+pub(crate) const BUILTIN_COMMANDS: &[&str] = &["help", "quit", "exit"];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandEffect {
     ExitShell,
@@ -129,35 +131,46 @@ where
     }
 
     pub fn complete(&self, line: &str, cursor: usize) -> Vec<CompletionCandidate> {
-        let root = S::root_command();
-        let completion = analyze_completion(&root, line, cursor);
-        let path_refs = completion
-            .command_path
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
+        complete_with_context::<C, S>(line, cursor, &self.completion_context())
+    }
+}
 
-        let mut out = completion.static_candidates;
+pub(crate) fn complete_with_context<C, S>(
+    line: &str,
+    cursor: usize,
+    completion_context: &S::CompletionContext,
+) -> Vec<CompletionCandidate>
+where
+    S: CommandSet<C>,
+{
+    let root = S::root_command();
+    let completion = analyze_completion(&root, line, cursor);
+    let path_refs = completion
+        .command_path
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
 
-        if path_refs.is_empty() {
-            for builtin in ["help", "quit"] {
-                if builtin.starts_with(&completion.prefix) {
-                    out.push(CompletionCandidate::new(builtin));
-                }
+    let mut out = completion.static_candidates;
+
+    if path_refs.is_empty() {
+        for builtin in BUILTIN_COMMANDS {
+            if builtin.starts_with(&completion.prefix) {
+                out.push(CompletionCandidate::new(*builtin));
             }
         }
-
-        out.extend(S::complete(
-            CompletionRequest {
-                command_path: &path_refs,
-                arg_id: completion.arg_id.as_deref(),
-                prefix: &completion.prefix,
-            },
-            &self.completion_context(),
-        ));
-
-        dedup_sorted(out)
     }
+
+    out.extend(S::complete(
+        CompletionRequest {
+            command_path: &path_refs,
+            arg_id: completion.arg_id.as_deref(),
+            prefix: &completion.prefix,
+        },
+        completion_context,
+    ));
+
+    dedup_sorted(out)
 }
 
 #[cfg(test)]

@@ -9,9 +9,11 @@ use reedline::{
 };
 
 #[cfg(feature = "repl")]
+use crate::engine::complete_with_context;
+#[cfg(feature = "repl")]
 use crate::engine::{CommandEffect, CommandEngine, CommandSet};
 #[cfg(feature = "repl")]
-use crate::error::DriverResult;
+use crate::error::{DriverError, DriverResult};
 
 #[cfg(feature = "repl")]
 struct EngineCompleter<C, S>
@@ -46,32 +48,7 @@ where
             Ok(guard) => guard,
             Err(_) => return Vec::new(),
         };
-        let root = S::root_command();
-        let completion = crate::clap::analyze_completion(&root, line, pos);
-        let path_refs = completion
-            .command_path
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        let mut candidates = completion.static_candidates;
-
-        if path_refs.is_empty() {
-            for builtin in ["help", "quit"] {
-                if builtin.starts_with(&completion.prefix) {
-                    candidates.push(crate::completion::CompletionCandidate::new(builtin));
-                }
-            }
-        }
-
-        candidates.extend(S::complete(
-            crate::completion::CompletionRequest {
-                command_path: &path_refs,
-                arg_id: completion.arg_id.as_deref(),
-                prefix: &completion.prefix,
-            },
-            &context,
-        ));
-        let candidates = crate::completion::dedup_sorted(candidates);
+        let candidates = complete_with_context::<C, S>(line, pos, &context);
         let start = line
             .get(..pos)
             .and_then(|prefix| {
@@ -152,7 +129,13 @@ where
                         continue;
                     }
 
-                    let output = self.engine.run_line(trimmed).await?;
+                    let output = match self.engine.run_line(trimmed).await {
+                        Ok(output) => output,
+                        Err(error) => {
+                            print_driver_error(&error);
+                            continue;
+                        }
+                    };
                     for line in &output.lines {
                         println!("{line}");
                     }
@@ -168,5 +151,19 @@ where
                 Signal::CtrlC | Signal::CtrlD => return Ok(None),
             }
         }
+    }
+}
+
+#[cfg(feature = "repl")]
+fn print_driver_error(error: &DriverError) {
+    match error {
+        DriverError::Clap(clap_error) => {
+            let rendered = clap_error.render().to_string();
+            print!("{rendered}");
+            if !rendered.ends_with('\n') {
+                println!();
+            }
+        }
+        _ => eprintln!("{error}"),
     }
 }

@@ -39,14 +39,12 @@ If the module lived under `driver::term`, it would overfit the first tmux use ca
 History buffers are driver-session sidecars.
 
 That means the ownership of a history buffer is local to the command engine
-session, even when the underlying resource is:
-- `Owned`
-- `Imported`
-- `Ephemeral`
+session, independent of whatever resource-mode vocabulary the driver may grow in
+the future.
 
 Example:
-- a tmux watch handle may be ephemeral
-- the watched tmux session may be imported
+- a tmux watch handle is still a short-lived child resource
+- the watched tmux session may later be modeled as locally created or attached
 - the local history buffer for that watch is still owned by the current driver
   session
 

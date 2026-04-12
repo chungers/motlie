@@ -25,17 +25,15 @@ use reedline::{
     Completer, DefaultPrompt, DefaultPromptSegment, Reedline, Signal, Span, Suggestion,
 };
 
-#[cfg(feature = "repl")]
-use crate::clap::analyze_completion;
 #[cfg(feature = "tui")]
 use crate::commands::tmux::TmuxMirrorSnapshot;
 use crate::commands::tmux::{TmuxCommand, TmuxState};
 #[cfg(feature = "repl")]
-use crate::completion::{CompletionCandidate, CompletionRequest, dedup_sorted};
-#[cfg(feature = "repl")]
 use crate::engine::CommandSet;
+#[cfg(feature = "repl")]
+use crate::engine::complete_with_context;
 use crate::engine::{CommandEffect, CommandEngine};
-use crate::error::DriverResult;
+use crate::error::{DriverError, DriverResult};
 use crate::term::asciicast::AsciicastRecorder;
 
 #[cfg(feature = "repl")]
@@ -88,34 +86,7 @@ impl Completer for TmuxCompleter {
             Ok(guard) => guard,
             Err(_) => return Vec::new(),
         };
-
-        let root = TmuxCommand::root_command();
-        let completion = analyze_completion(&root, line, pos);
-        let path_refs = completion
-            .command_path
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        let mut candidates = completion.static_candidates;
-
-        if path_refs.is_empty() {
-            for builtin in ["help", "quit"] {
-                if builtin.starts_with(&completion.prefix) {
-                    candidates.push(CompletionCandidate::new(builtin));
-                }
-            }
-        }
-
-        candidates.extend(TmuxCommand::complete(
-            CompletionRequest {
-                command_path: &path_refs,
-                arg_id: completion.arg_id.as_deref(),
-                prefix: &completion.prefix,
-            },
-            &context,
-        ));
-
-        let candidates = dedup_sorted(candidates);
+        let candidates = complete_with_context::<TmuxState, TmuxCommand>(line, pos, &context);
         let start = line
             .get(..pos)
             .and_then(|prefix| {
@@ -165,7 +136,13 @@ pub async fn run_tmux_repl(
 
                 record_output(recorder, &format!("tmux> {trimmed}\n"))?;
                 record_input(recorder, &format!("{trimmed}\n"))?;
-                let output = engine.run_line(trimmed).await?;
+                let output = match engine.run_line(trimmed).await {
+                    Ok(output) => output,
+                    Err(error) => {
+                        print_driver_error(recorder.as_mut(), &error)?;
+                        continue;
+                    }
+                };
                 for line in &output.lines {
                     println!("{line}");
                     record_output(recorder, &format!("{line}\n"))?;
@@ -424,7 +401,17 @@ async fn tmux_tui_event_loop(
                     state.cmd_history.push(trimmed.to_string());
                     state.push_output(format!("tmux> {trimmed}"));
                     record_input(recorder, &format!("{trimmed}\n"))?;
-                    let output = engine.run_line(trimmed).await?;
+                    let output = match engine.run_line(trimmed).await {
+                        Ok(output) => output,
+                        Err(error) => {
+                            let rendered = render_driver_error(&error);
+                            for line in rendered.lines() {
+                                state.push_output(line.to_string());
+                            }
+                            record_output(recorder, &rendered)?;
+                            continue;
+                        }
+                    };
                     for line in output.lines {
                         state.push_output(line.clone());
                         record_output(recorder, &format!("{line}\n"))?;
@@ -471,9 +458,11 @@ fn draw_output(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &TuiSt
     for line in state.output_lines.iter().skip(start) {
         visible.push(Line::from(TuiSpan::raw(line.as_str())));
     }
+    let cursor_byte = char_to_byte_index(&state.input, state.cursor_chars);
+    let (before_cursor, after_cursor) = state.input.split_at(cursor_byte);
     visible.push(Line::from(vec![
         TuiSpan::styled("tmux> ", Style::default().fg(ACCENT).bg(BG)),
-        TuiSpan::styled(&state.input, Style::default().fg(FG).bg(BG)),
+        TuiSpan::styled(before_cursor, Style::default().fg(FG).bg(BG)),
         TuiSpan::styled(
             "_",
             Style::default()
@@ -481,6 +470,7 @@ fn draw_output(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &TuiSt
                 .bg(BG)
                 .add_modifier(Modifier::SLOW_BLINK),
         ),
+        TuiSpan::styled(after_cursor, Style::default().fg(FG).bg(BG)),
     ]));
 
     let paragraph = Paragraph::new(visible)
@@ -646,6 +636,26 @@ fn record_resize(
 ) -> DriverResult<()> {
     if let Some(recorder) = recorder.as_mut() {
         recorder.record_resize(cols, rows)?;
+    }
+    Ok(())
+}
+
+fn render_driver_error(error: &DriverError) -> String {
+    match error {
+        DriverError::Clap(clap_error) => clap_error.render().to_string(),
+        _ => format!("error: {error}\n"),
+    }
+}
+
+#[cfg(feature = "repl")]
+fn print_driver_error(
+    recorder: Option<&mut AsciicastRecorder>,
+    error: &DriverError,
+) -> DriverResult<()> {
+    let rendered = render_driver_error(error);
+    print!("{rendered}");
+    if let Some(recorder) = recorder {
+        recorder.record_output(&rendered)?;
     }
     Ok(())
 }

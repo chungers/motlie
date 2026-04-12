@@ -45,20 +45,7 @@ async fn run_repl(
         .record_asciicast
         .as_ref()
         .map(|path| {
-            let meta = AsciicastMetadata {
-                title: "motlie-tmux-driver".to_string(),
-                command: Some(std::env::args().collect::<Vec<_>>().join(" ")),
-                term_type: std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string()),
-                cols: std::env::var("COLUMNS")
-                    .ok()
-                    .and_then(|value| value.parse::<u16>().ok())
-                    .unwrap_or(80),
-                rows: std::env::var("LINES")
-                    .ok()
-                    .and_then(|value| value.parse::<u16>().ok())
-                    .unwrap_or(24),
-            };
-            motlie_driver::term::asciicast::AsciicastRecorder::create(path, &meta)
+            motlie_driver::term::asciicast::AsciicastRecorder::create(path, &asciicast_metadata())
         })
         .transpose()?;
 
@@ -85,20 +72,7 @@ async fn run_tui(
         .record_asciicast
         .as_ref()
         .map(|path| {
-            let meta = AsciicastMetadata {
-                title: "motlie-tmux-driver".to_string(),
-                command: Some(std::env::args().collect::<Vec<_>>().join(" ")),
-                term_type: std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string()),
-                cols: std::env::var("COLUMNS")
-                    .ok()
-                    .and_then(|value| value.parse::<u16>().ok())
-                    .unwrap_or(80),
-                rows: std::env::var("LINES")
-                    .ok()
-                    .and_then(|value| value.parse::<u16>().ok())
-                    .unwrap_or(24),
-            };
-            motlie_driver::term::asciicast::AsciicastRecorder::create(path, &meta)
+            motlie_driver::term::asciicast::AsciicastRecorder::create(path, &asciicast_metadata())
         })
         .transpose()?;
     let _ = run_tmux_tui(engine, &mut recorder).await?;
@@ -137,4 +111,21 @@ fn parse_args() -> Result<DriverOptions> {
         uri,
         record_asciicast,
     })
+}
+
+#[cfg(any(feature = "repl", feature = "tui"))]
+fn asciicast_metadata() -> AsciicastMetadata {
+    AsciicastMetadata {
+        title: "motlie-tmux-driver".to_string(),
+        command: Some(std::env::args().collect::<Vec<_>>().join(" ")),
+        term_type: std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string()),
+        cols: std::env::var("COLUMNS")
+            .ok()
+            .and_then(|value| value.parse::<u16>().ok())
+            .unwrap_or(80),
+        rows: std::env::var("LINES")
+            .ok()
+            .and_then(|value| value.parse::<u16>().ok())
+            .unwrap_or(24),
+    }
 }

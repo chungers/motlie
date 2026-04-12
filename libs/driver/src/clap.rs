@@ -140,35 +140,22 @@ fn static_candidates(
 
 fn option_value_target(current: &Command, tokens: &[String]) -> Option<String> {
     let mut expecting: Option<String> = None;
+    let mut parsing_options = true;
 
     for token in tokens {
         if expecting.take().is_some() {
             continue;
         }
 
-        if let Some(long) = token.strip_prefix("--") {
-            if let Some(arg) = current
-                .get_arguments()
-                .find(|arg| arg.get_long() == Some(long))
-            {
-                if arg_takes_value(arg) {
-                    expecting = Some(arg.get_id().to_string());
-                }
-            }
+        if !parsing_options {
             continue;
         }
 
-        if token.starts_with('-') && token.len() == 2 {
-            let short = token.chars().nth(1).unwrap_or_default();
-            if let Some(arg) = current
-                .get_arguments()
-                .find(|arg| arg.get_short() == Some(short))
-            {
-                if arg_takes_value(arg) {
-                    expecting = Some(arg.get_id().to_string());
-                }
-            }
-            continue;
+        match analyze_option_token(current, token) {
+            OptionToken::Terminator => parsing_options = false,
+            OptionToken::ConsumesNextValue(arg_id) => expecting = Some(arg_id),
+            OptionToken::ConsumesInlineValue | OptionToken::NoValue => {}
+            OptionToken::NotOption => {}
         }
     }
 
@@ -182,6 +169,7 @@ fn positional_index(current: &Command, tokens: &[String], expecting_option_value
 
     let mut count = 0usize;
     let mut skip_option_value = false;
+    let mut parsing_options = true;
 
     for token in tokens {
         if skip_option_value {
@@ -189,28 +177,19 @@ fn positional_index(current: &Command, tokens: &[String], expecting_option_value
             continue;
         }
 
-        if let Some(long) = token.strip_prefix("--") {
-            if let Some(arg) = current
-                .get_arguments()
-                .find(|arg| arg.get_long() == Some(long))
-            {
-                skip_option_value = arg_takes_value(arg);
-                continue;
-            }
+        if !parsing_options {
+            count += 1;
+            continue;
         }
 
-        if token.starts_with('-') && token.len() == 2 {
-            let short = token.chars().nth(1).unwrap_or_default();
-            if let Some(arg) = current
-                .get_arguments()
-                .find(|arg| arg.get_short() == Some(short))
-            {
-                skip_option_value = arg_takes_value(arg);
-                continue;
+        match analyze_option_token(current, token) {
+            OptionToken::Terminator => parsing_options = false,
+            OptionToken::ConsumesNextValue(_) => {
+                skip_option_value = true;
             }
+            OptionToken::ConsumesInlineValue | OptionToken::NoValue => {}
+            OptionToken::NotOption => count += 1,
         }
-
-        count += 1;
     }
 
     count
@@ -225,6 +204,62 @@ fn positional_args(current: &Command) -> Vec<&Arg> {
 
 fn arg_takes_value(arg: &Arg) -> bool {
     matches!(arg.get_action(), ArgAction::Set | ArgAction::Append)
+}
+
+enum OptionToken {
+    NotOption,
+    Terminator,
+    NoValue,
+    ConsumesNextValue(String),
+    ConsumesInlineValue,
+}
+
+fn analyze_option_token(current: &Command, token: &str) -> OptionToken {
+    if token == "--" {
+        return OptionToken::Terminator;
+    }
+
+    if let Some(long) = token.strip_prefix("--") {
+        let (name, inline_value) = long
+            .split_once('=')
+            .map_or((long, None), |(name, value)| (name, Some(value)));
+        if let Some(arg) = current
+            .get_arguments()
+            .find(|arg| arg.get_long() == Some(name))
+        {
+            if arg_takes_value(arg) {
+                if inline_value.is_some() {
+                    return OptionToken::ConsumesInlineValue;
+                }
+                return OptionToken::ConsumesNextValue(arg.get_id().to_string());
+            }
+            return OptionToken::NoValue;
+        }
+        return OptionToken::NotOption;
+    }
+
+    if token.starts_with('-') && !token.starts_with("--") && token.len() > 1 {
+        for (offset, short) in token[1..].char_indices() {
+            let Some(arg) = current
+                .get_arguments()
+                .find(|arg| arg.get_short() == Some(short))
+            else {
+                return OptionToken::NotOption;
+            };
+
+            if arg_takes_value(arg) {
+                let inline_start = 1 + offset + short.len_utf8();
+                if inline_start < token.len() {
+                    return OptionToken::ConsumesInlineValue;
+                }
+                return OptionToken::ConsumesNextValue(arg.get_id().to_string());
+            }
+        }
+
+        return OptionToken::NoValue;
+    }
+
+    OptionToken::NotOption
 }
 
 #[cfg(test)]
@@ -277,5 +312,33 @@ mod tests {
         let rendered = render_help(&root(), &[String::from("stream")]).expect("stream help");
         assert!(rendered.contains("stream"));
         assert!(rendered.contains("--mode"));
+    }
+
+    #[test]
+    fn analyze_completion_handles_long_flag_with_inline_value() {
+        let completion = analyze_completion(
+            &root(),
+            "stream demo --mode=tail next",
+            "stream demo --mode=tail next".len(),
+        );
+
+        assert_eq!(completion.command_path, vec!["stream".to_string()]);
+        assert_eq!(completion.arg_id, None);
+        assert_eq!(completion.prefix, "next");
+    }
+
+    #[test]
+    fn analyze_completion_handles_combined_short_flags() {
+        let root = Command::new("demo").subcommand(
+            Command::new("run")
+                .arg(Arg::new("all").short('a').action(ArgAction::SetTrue))
+                .arg(Arg::new("binary").short('b').action(ArgAction::SetTrue))
+                .arg(Arg::new("target").required(true)),
+        );
+
+        let completion = analyze_completion(&root, "run -ab ta", "run -ab ta".len());
+        assert_eq!(completion.command_path, vec!["run".to_string()]);
+        assert_eq!(completion.arg_id.as_deref(), Some("target"));
+        assert_eq!(completion.prefix, "ta");
     }
 }
