@@ -8,6 +8,7 @@
 |------|--------|----------|
 | 2026-04-12 | @codex-xar: Initial greenfield design for packaging curated `libs/models` bundle descriptors, concrete backends, and model artifacts into a single distributable executable. Migration and backward compatibility are explicitly out of scope. | All |
 | 2026-04-12 | @codex-xar: Added an OCI-as-internal-format addendum evaluating OCI image layout and manifests inside the appended executable payload, including the hybrid raw-weight-blob idea and its implications for future mmap-capable backend contracts. | Option Comparison, OCI Addendum, Recommendation, References |
+| 2026-04-12 | @codex-xar: Refined the OCI addendum into a concrete hybrid layout with a Motlie binary preamble TOC before the OCI payload and a footer pointing back to it. Added the three-tier materialization strategy and API sketches for preamble parsing and runtime blob resolution. | OCI Addendum, Recommendation, API Sketches |
 
 This document evaluates how Motlie should ship curated model bundles as a single executable artifact that contains:
 
@@ -403,8 +404,8 @@ Evaluation:
 
 Verdict:
 
-Useful as a publication format if Motlie later wants registry-native delivery.
-Not the right primary runtime format for this task.
+Useful as a publication format, and more viable as an internal payload graph than this section originally gave it credit for.
+On its own it is still incomplete for appended-executable runtime lookup; the addendum below covers the stronger hybrid design.
 
 ### 4c. Native Resource Sections or Fat-Binary Tricks
 
@@ -434,16 +435,55 @@ Not recommended except for platform-specific polish later.
 This section re-evaluates OCI not as the external distribution mechanism, but as the logical payload format inside the appended executable region:
 
 ```text
-[ Rust executable ][ OCI image layout or OCI-like blob set ][ footer with payload start ]
+[ executable ][ preamble TOC ][ OCI image layout: manifest + config + blobs ][ footer ]
 ```
 
 The key distinction is:
 
 - OCI gives a standardized metadata and content-addressing model
-- the appended executable still needs a Motlie-specific physical framing layer so the runtime can find the OCI payload by offset
+- the appended executable still needs a Motlie-specific physical framing layer so the runtime can find the OCI payload and individual blobs by offset
 
 So this is not "OCI instead of a footer".
-It is "OCI inside a footer-discoverable appended region".
+It is "OCI plus a Motlie preamble/footer for physical layout".
+
+### Hybrid Layout
+
+The refined layout is:
+
+```text
+[ ELF / Mach-O executable ]
+[ Preamble TOC: fixed-size header + blob offset table ]
+[ OCI image layout payload: manifest + config + blobs ]
+[ Footer: magic + offset back to preamble ]
+```
+
+This resolves the biggest weakness in the earlier OCI analysis:
+
+- OCI handles semantics:
+  media type, content identity, manifest graph, registry compatibility
+- preamble handles physical placement:
+  executable-local offsets, lengths, encoding, mmap eligibility, and fast startup lookup
+
+The kernel loader still executes the file normally because ELF and Mach-O loaders ignore appended data beyond the mapped image.
+
+### Why the Preamble Matters
+
+Without a preamble, OCI inside an executable still leaves Motlie with an awkward question:
+
+- how does the runtime find blob `sha256:...` at a physical byte range inside the current executable?
+
+The preamble answers that directly.
+
+Startup becomes:
+
+1. read footer at EOF to discover `preamble_offset`
+2. read the preamble header and blob table
+3. resolve OCI descriptors by digest through the preamble table
+4. either:
+   - `mmap(fd, blob_offset, blob_length)` for raw mmap-capable blobs, or
+   - `seek + read + decompress` into `unpack_root` for extracted blobs
+
+That makes the hybrid design concrete rather than aspirational.
 
 ### Claim 1: Unified Format Across `libs/models` and `libs/vmm`
 
@@ -454,10 +494,19 @@ OCI descriptors, manifests, indexes, `artifactType`, annotations, and media type
 - safetensors model bundles
 - GGUF model bundles
 - tokenizers and config files
+- bundle descriptor metadata
 - kernels
 - initrds
 - rootfs images
 - auxiliary metadata for both model and VMM artifacts
+
+For example, Motlie-specific media types could include:
+
+- `application/vnd.motlie.model.weights.gguf`
+- `application/vnd.motlie.model.weights.safetensors`
+- `application/vnd.motlie.vm.kernel`
+- `application/vnd.motlie.vm.rootfs`
+- `application/vnd.motlie.bundle.metadata`
 
 That is a real advantage over a Motlie-only `MTLPAY01` TOC that would otherwise need its own type system for every artifact family.
 
@@ -484,11 +533,13 @@ But the "for free" part is overstated for the appended-executable use case:
 - standard OCI tooling expects either a registry or an OCI layout directory
 - an appended region inside an executable is neither of those
 - Motlie would still need a small tool to expose or materialize the appended payload as an OCI layout if operators want to use `oras`, `skopeo`, or `crane`
+- the preamble is Motlie-specific, so off-the-shelf OCI tooling will ignore it rather than consume it
 
 So the real benefit is:
 
 - OCI gives reusable metadata semantics and registry interoperability
 - Motlie still needs custom glue for the appended-executable embedding
+- that glue is now well-scoped: preamble reader, footer reader, and optional OCI-layout export
 
 ### Claim 3: Content Addressing and Dedup
 
@@ -534,29 +585,29 @@ That makes the following hybrid design plausible:
   `application/vnd.motlie.weight.safetensors.v1`
 - manifest annotations:
   declare which descriptors are mmap-candidate payloads
-- appended-payload footer:
+- preamble TOC:
   records the physical byte offset of each blob inside the executable so the runtime can open the exe and map the raw blob directly
 
 This is a real architectural path.
 
 Critical caveats:
 
-- OCI itself does not give the runtime byte offsets inside the executable; Motlie still needs an offset index
-- once Motlie adds that index, OCI is no longer the whole solution, only the logical object model
+- OCI itself does not give the runtime byte offsets inside the executable; the preamble solves that
+- once Motlie adds the preamble, OCI becomes the semantic layer and the preamble becomes the physical lookup layer
 - the current `libs/model` and backend contracts do not support `(fd, offset, len)` or equivalent mmap handles
 - safetensors is not always a single blob in practice; curated bundles often need config, tokenizer, and sometimes multiple shards
 - direct mmap from the executable is operationally cleaner for GGUF than for multi-file safetensors trees
 
-So the hybrid mmap idea is promising, but it is a second-phase architecture, not the first implementation slice.
+So the hybrid mmap idea is promising, and the preamble makes it concrete, but it is still a second-phase runtime contract change rather than the first implementation slice.
 
 ### Claim 5: Engineering Cost Delta vs Custom Format
 
-This is where OCI loses some of its appeal.
+This is where the refined hybrid design gets more balanced.
 
 If Motlie chooses OCI as the internal logical format, the implementation still needs:
 
 - a footer and payload-start locator
-- a blob-offset index for appended-executable lookup
+- a preamble blob-offset index for appended-executable lookup
 - bundle selection logic
 - extraction/materialization logic for directory-shaped artifacts
 - integrity checking
@@ -565,6 +616,7 @@ If Motlie chooses OCI as the internal logical format, the implementation still n
 At that point, the practical delta versus a Motlie custom TOC is:
 
 - OCI reduces schema-design work for manifests and blob typing
+- the preamble is small and mechanical: fixed header plus blob entries
 - OCI increases semantic surface area, because the implementation now needs to be correct with respect to OCI layout/index/manifest/blob rules as well as Motlie's appended-file framing
 
 So the engineering comparison is not:
@@ -575,9 +627,9 @@ It is:
 
 - "small Motlie-specific manifest + offset table"
   versus
-- "OCI manifest/index/config/blob semantics + Motlie offset table"
+- "OCI manifest/index/config/blob semantics + Motlie preamble/footer"
 
-That is still a reasonable trade if Motlie wants cross-subsystem convergence and registry reuse, but it is not free.
+That is now a more attractive trade if Motlie wants cross-subsystem convergence and registry reuse, because the Motlie-specific part can stay intentionally small.
 
 ### Claim 6: Future Path to mmap-Capable Backend Contracts
 
@@ -617,6 +669,22 @@ Critical caveat:
 That is plausible for a later phase, especially for GGUF.
 It is too expensive to make the first single-executable slice depend on it.
 
+### Three-Tier Materialization Strategy
+
+The preamble+OCI design supports three distinct runtime tiers:
+
+1. **Option A: Extract Everything**
+   Extract all OCI-described payloads to `unpack_root` and continue using `ArtifactPolicy::LocalOnly { root }`.
+   This requires no backend changes and is the recommended slice 1 implementation.
+2. **Option B: mmap Everything Large**
+   Store large weight blobs raw and uncompressed, then hand backends `(fd, offset, len)` or equivalent mmap-capable handles.
+   This is the slice 2 endgame for true zero-copy startup.
+3. **Option C: Hybrid**
+   Store large weights as raw blobs for direct mmap, but keep small files such as tokenizer/config/metadata in tar+zstd layers that are extracted normally.
+   This is the best long-term balance and the most plausible steady-state architecture.
+
+Option C is the most compelling end-state because it avoids pointless extraction of multi-GB weights while preserving the convenience and density of compressed archive layers for the small-file set.
+
 ### OCI-Inside-Executable Verdict
 
 OCI is a credible internal payload format if Motlie values:
@@ -636,24 +704,25 @@ My updated assessment is:
 
 - OCI is better than I gave it credit for as a logical payload graph
 - OCI is still not enough by itself for the appended-executable runtime
-- a footer-discoverable appended payload still needs Motlie-owned physical framing and likely blob-offset indexing
-- therefore OCI narrows, but does not eliminate, the gap to the custom appendix design
+- the preamble+footer layout fixes the physical lookup problem cleanly
+- with that refinement, OCI becomes a serious candidate rather than merely a future export format
+- the remaining question is not feasibility, but whether Motlie wants the extra semantic surface area in slice 1
 
 ## Recommendation
 
 ### Revised Recommendation
 
-For the first implementation slice, I still recommend:
+For the first implementation slice, I now recommend the hybrid preamble+OCI direction rather than the earlier fully custom manifest direction:
 
-- a custom footer-discoverable appended payload
-- a zstd-compressed chunked appendix as the first concrete encoding
+- a Motlie-owned binary preamble TOC plus footer for physical layout
+- OCI manifest/config/blob semantics inside the appended payload
 - extracted/materialized into `StartOptions.unpack_root`
 - handed to backends as `ArtifactPolicy::LocalOnly { root }`
 
-But the recommendation is now more specific:
+This changes the earlier recommendation in one important way:
 
-- the physical framing should remain Motlie-owned
-- the logical payload schema should stay open to an OCI-compatible evolution path
+- physical framing stays Motlie-owned
+- logical artifact semantics move to OCI now, not later
 
 ### Decision Framing
 
@@ -662,40 +731,123 @@ There are now two defensible directions:
 1. **Minimal first slice**
    Use a Motlie-native manifest/TOC now, optimized purely for appended-executable local startup.
 2. **Converged artifact graph**
-   Use OCI manifest/index/config/blob semantics inside the appended region, plus a Motlie footer and blob-offset index.
+   Use OCI manifest/index/config/blob semantics inside the appended region, plus a Motlie preamble/footer for executable-local blob lookup.
 
-I still prefer direction 1 for the first slice because it is cheaper and keeps the path-to-value shortest.
+With the preamble refinement, I now prefer direction 2.
 
-I would switch to direction 2 earlier if Motlie decides that any of the following are first-order goals rather than future possibilities:
+Why:
 
-- one packaging model across `libs/models` and `libs/vmm`
-- first-class registry publication of the same blobs
-- multi-bundle executables with meaningful shared-blob reuse
-- a near-term mmap-based zero-copy path for GGUF or other single-file weights
+- one packaging model can span `libs/models` and `libs/vmm`
+- registry publication can reuse the same blobs and digests
+- the preamble keeps the Motlie-specific part small and well-scoped
+- slice 1 can still be pure extraction-to-`LocalOnly`
+- slice 2 has a clean path to zero-copy mmap for raw blobs
 
-### Why the Minimal First Slice Still Wins
+### Slice Plan
 
-- it aligns exactly with the current bundle-wrapper pattern in `libs/models`
-- it does not force a new `libs/model` artifact contract immediately
-- it keeps backend crates ignorant of package/container semantics
-- it is enough to validate the operational model before committing Motlie to OCI semantics everywhere
+- Slice 1:
+  implement preamble+OCI packaging, extract all payloads to `unpack_root`, and keep backend contracts unchanged
+- Slice 2:
+  add additive `libs/model` artifact-handle support for raw mmap-capable blobs
+- Slice 3:
+  converge on the hybrid steady state where large weights mmap directly and small files extract normally
+
+### Why the Converged Slice Now Wins
+
+- it still matters as a fallback benchmark
+- it is still the cheapest way to validate only the extraction path
+- but it no longer wins overall once the preamble eliminates the biggest physical-layout objection to OCI
 
 ### Where OCI Still Falls Short Today
 
-- appended-executable discovery still needs a Motlie footer
+- appended-executable discovery still needs Motlie-owned preamble/footer code
 - direct use of common OCI CLI tooling still needs a conversion or export step
 - standard tar-based layers do not solve mmap for large weight files
-- the hybrid raw-blob design is attractive but depends on a later backend contract expansion
+- the hybrid raw-blob design depends on a later backend contract expansion
+- implementation still has to decide which payload classes are raw blobs versus archived layers
 
 ### Explicit Non-Recommendations
 
 - do not start with `include_bytes!` for model weights
 - do not start with squashfs unless the product is intentionally Linux-only
-- do not assume "OCI internal payload" removes the need for Motlie-specific framing, indexing, and runtime glue
+- do not assume OCI removes the need for Motlie-specific framing and runtime glue
+- do not make slice 1 depend on mmap-capable backend changes
 
 ## API Sketches
 
-### Sketch 1: Extend `ArtifactSource` at the Bundle Layer
+### Sketch 1: Preamble Header and Blob Table
+
+```rust
+const MOTLIE_PREAMBLE_MAGIC: [u8; 8] = *b"MTLOCI01";
+const MOTLIE_FOOTER_MAGIC: [u8; 8] = *b"MTLOCI02";
+
+#[repr(C)]
+struct PreambleHeader {
+    magic: [u8; 8],
+    version: u32,
+    header_len: u32,
+    blob_count: u32,
+    reserved: u32,
+    oci_layout_offset: u64,
+    oci_layout_len: u64,
+}
+
+#[repr(C)]
+struct BlobEntry {
+    digest_sha256: [u8; 32],
+    blob_offset: u64,
+    blob_len: u64,
+    uncompressed_len: u64,
+    encoding: u32,
+    flags: u32,
+}
+
+#[repr(C)]
+struct PayloadFooter {
+    magic: [u8; 8],
+    version: u32,
+    preamble_offset: u64,
+    preamble_len: u64,
+}
+
+enum BlobEncoding {
+    Stored = 0,
+    Zstd = 1,
+}
+```
+
+Notes:
+
+- the preamble maps blob digests to physical byte ranges inside the executable
+- OCI continues to identify blobs semantically by digest and media type
+- the footer gives O(1) discovery from EOF
+
+### Sketch 2: Runtime Payload Resolver
+
+```rust
+pub struct ExecutablePayload {
+    exe: std::fs::File,
+    preamble: PreambleHeader,
+    blobs: std::collections::BTreeMap<[u8; 32], BlobEntry>,
+}
+
+impl ExecutablePayload {
+    pub fn open_current() -> Result<Self, ModelsError> {
+        let exe = std::fs::File::open(std::env::current_exe()?)?;
+        let footer = read_footer(&exe)?;
+        let (preamble, blobs) = read_preamble(&exe, footer.preamble_offset)?;
+        Ok(Self { exe, preamble, blobs })
+    }
+
+    pub fn blob(&self, digest_sha256: [u8; 32]) -> Result<&BlobEntry, ModelsError> {
+        self.blobs
+            .get(&digest_sha256)
+            .ok_or_else(|| ModelsError::InvalidExecutablePayload)
+    }
+}
+```
+
+### Sketch 3: Extend `ArtifactSource` at the Bundle Layer
 
 ```rust
 pub enum ArtifactSource {
@@ -703,7 +855,7 @@ pub enum ArtifactSource {
     ExecutablePayload {
         locator: ExecutableLocator,
         bundle_key: &'static str,
-        encoding: PayloadEncoding,
+        mode: PayloadResolutionMode,
     },
 }
 
@@ -712,9 +864,10 @@ pub enum ExecutableLocator {
     Path(std::path::PathBuf),
 }
 
-pub enum PayloadEncoding {
-    RawDirectoryV1,
-    ChunkedZstdV1,
+pub enum PayloadResolutionMode {
+    ExtractAll,
+    HybridOci,
+    RawMmapPreferred,
 }
 ```
 
@@ -723,8 +876,9 @@ Notes:
 - this belongs in `libs/models`, not `libs/model`
 - `libs/model::ArtifactPolicy` can remain unchanged
 - `ExecutablePayload` is curator-owned, just like the current Hugging Face rules
+- the mode describes how curated bundle code should materialize OCI-described artifacts
 
-### Sketch 2: Materialize Before Backend Startup
+### Sketch 4: Materialize Before Backend Startup
 
 ```rust
 pub fn resolve_packaged_bundle_root(
@@ -745,11 +899,11 @@ pub fn resolve_packaged_bundle_root(
         ArtifactSource::ExecutablePayload {
             locator,
             bundle_key,
-            encoding,
+            mode,
         } => {
-            let exe = locate_payload_executable(locator)?;
+            let payload = open_executable_payload(locator)?;
             let bundle_root = unpack_root.join(bundle_key);
-            extract_payload_bundle(&exe, bundle_key, encoding, &bundle_root)?;
+            materialize_oci_bundle(&payload, bundle_key, mode, &bundle_root)?;
             Ok(bundle_root)
         }
     }
@@ -770,43 +924,25 @@ self.inner.start(options).await
 
 This keeps the generic backend untouched.
 
-### Sketch 3: Footer TOC Format
+### Sketch 5: Future mmap-Capable Resolver
 
 ```rust
-const MOTLIE_PAYLOAD_MAGIC: [u8; 8] = *b"MTLPAY01";
-
-#[repr(C)]
-struct PayloadFooter {
-    magic: [u8; 8],
-    version: u32,
-    toc_offset: u64,
-    toc_len: u64,
-    toc_sha256: [u8; 32],
-}
-
-struct TocEntry {
-    bundle_key: String,
-    relative_path: String,
-    encoding: ChunkEncoding,
-    offset: u64,
-    encoded_len: u64,
-    decoded_len: u64,
-    sha256: [u8; 32],
-}
-
-enum ChunkEncoding {
-    Stored,
-    Zstd,
+pub enum ResolvedArtifactHandle {
+    Directory { root: PathBuf },
+    File { path: PathBuf },
+    MmapBlob {
+        file: std::fs::File,
+        offset: u64,
+        len: u64,
+        media_type: String,
+    },
 }
 ```
 
-Design notes:
+This is not required for slice 1.
+It is the additive path that makes the preamble+OCI design pay off operationally for large raw blobs.
 
-- footer-at-EOF means the runtime can discover the payload with one seek
-- the TOC is the place to version bundle layout rules
-- per-file digests let curated bundle validation fail before backend startup
-
-### Sketch 4: Release Assembly Tool
+### Sketch 6: Release Assembly Tool
 
 ```rust
 pub struct DistributionPlan {
