@@ -22,9 +22,7 @@ pub use eval::EvalTrack;
 pub use generation::{
     ChatRequest, ChatResponse, CompletionRequest, CompletionResponse, GenerationParams,
 };
-pub use metrics::{
-    EmbeddingMetrics, ModelMetricSnapshot, RuntimeMetrics, TextGenerationMetrics,
-};
+pub use metrics::{EmbeddingMetrics, ModelMetricSnapshot, RuntimeMetrics, TextGenerationMetrics};
 pub use units::{Bytes, Milliseconds, Tokens, TokensPerSecond};
 
 /// Stable product-facing identifier for a curated bundle.
@@ -408,9 +406,7 @@ impl QuantizationSupport {
     }
 
     /// Bundle supports the given precisions with no curated default (F32 by default).
-    pub fn without_recommended(
-        supported: impl IntoIterator<Item = QuantizationBits>,
-    ) -> Self {
+    pub fn without_recommended(supported: impl IntoIterator<Item = QuantizationBits>) -> Self {
         Self {
             supported: supported.into_iter().collect(),
             recommended: None,
@@ -537,10 +533,13 @@ pub trait BundleHandle: Send + Sync {
 }
 
 /// Backend-specific loader for one or more checkpoint formats.
+#[async_trait]
 pub trait BackendAdapter: Send + Sync {
     fn supported_formats(&self) -> &[CheckpointFormat];
     fn backend_kind(&self) -> BackendKind;
-    fn start(
+    fn capabilities(&self) -> &Capabilities;
+    fn quantization(&self) -> &QuantizationSupport;
+    async fn start(
         &self,
         identity: &ModelIdentity,
         checkpoint: &ResolvedCheckpoint,
@@ -774,7 +773,9 @@ mod tests {
         let bundle_id = BundleId::new("test_bundle");
 
         let no_support = QuantizationSupport::none();
-        assert!(no_support.resolve(Some(QuantizationBits::Four), &bundle_id).is_err());
+        assert!(no_support
+            .resolve(Some(QuantizationBits::Four), &bundle_id)
+            .is_err());
         assert_eq!(no_support.resolve(None, &bundle_id).unwrap(), None);
 
         let q4_q8 = QuantizationSupport::with_recommended(
@@ -783,11 +784,15 @@ mod tests {
         )
         .expect("test support is valid");
         assert_eq!(
-            q4_q8.resolve(Some(QuantizationBits::Four), &bundle_id).unwrap(),
+            q4_q8
+                .resolve(Some(QuantizationBits::Four), &bundle_id)
+                .unwrap(),
             Some(QuantizationBits::Four)
         );
         assert_eq!(
-            q4_q8.resolve(Some(QuantizationBits::Eight), &bundle_id).unwrap(),
+            q4_q8
+                .resolve(Some(QuantizationBits::Eight), &bundle_id)
+                .unwrap(),
             Some(QuantizationBits::Eight)
         );
         assert_eq!(
@@ -795,12 +800,14 @@ mod tests {
             Some(QuantizationBits::Four)
         );
 
-        let q8_only = QuantizationSupport::without_recommended(
-            [QuantizationBits::Eight],
-        );
-        assert!(q8_only.resolve(Some(QuantizationBits::Four), &bundle_id).is_err());
+        let q8_only = QuantizationSupport::without_recommended([QuantizationBits::Eight]);
+        assert!(q8_only
+            .resolve(Some(QuantizationBits::Four), &bundle_id)
+            .is_err());
         assert_eq!(
-            q8_only.resolve(Some(QuantizationBits::Eight), &bundle_id).unwrap(),
+            q8_only
+                .resolve(Some(QuantizationBits::Eight), &bundle_id)
+                .unwrap(),
             Some(QuantizationBits::Eight)
         );
         assert_eq!(q8_only.resolve(None, &bundle_id).unwrap(), None);
@@ -808,13 +815,12 @@ mod tests {
 
     #[test]
     fn quantization_support_rejects_contradictory_recommended() {
-        let err = QuantizationSupport::with_recommended(
-            [],
-            QuantizationBits::Four,
-        )
-        .expect_err("contradictory recommended should fail");
+        let err = QuantizationSupport::with_recommended([], QuantizationBits::Four)
+            .expect_err("contradictory recommended should fail");
 
-        assert!(matches!(err, ModelError::InvalidConfiguration(msg) if msg.contains("must be in supported set")));
+        assert!(
+            matches!(err, ModelError::InvalidConfiguration(msg) if msg.contains("must be in supported set"))
+        );
     }
 
     #[tokio::test]

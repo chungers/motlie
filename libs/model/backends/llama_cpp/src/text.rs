@@ -10,10 +10,11 @@ use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 use motlie_model::{
-    BundleHandle, BundleId, BundleMetadata, Capabilities, CapabilityKind, ChatModel, ChatRequest,
-    ChatResponse, ChatRole, CompletionModel, CompletionRequest, CompletionResponse, EmbeddingModel,
-    GenerationParams, LoadedBundleDescriptor, ModelBundle, ModelError, ModelMetricSnapshot,
-    QuantizationBits, QuantizationSupport, StartOptions,
+    BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
+    CapabilityKind, ChatModel, ChatRequest, ChatResponse, ChatRole, CheckpointFormat,
+    CompletionModel, CompletionRequest, CompletionResponse, EmbeddingModel, GenerationParams,
+    LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot,
+    QuantizationBits, QuantizationSupport, ResolvedCheckpoint, StartOptions,
 };
 
 use crate::common::{
@@ -21,6 +22,8 @@ use crate::common::{
     observe_text_generation, resolve_gpu_layers, snapshot_text_metrics, RuntimeMetricState,
     TextMetricState,
 };
+
+const LLAMA_CPP_TEXT_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Gguf];
 
 /// Architecture discriminant selecting the correct chat template and model behavior.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,6 +83,80 @@ impl LlamaCppTextSpec {
     }
 }
 
+/// Backend adapter for `llama.cpp` text-generation over GGUF checkpoints.
+#[derive(Clone, Debug)]
+pub struct LlamaCppTextAdapter {
+    arch: LlamaCppTextArch,
+    capabilities: Capabilities,
+    quantization: QuantizationSupport,
+    default_context_length: u32,
+}
+
+impl LlamaCppTextAdapter {
+    pub fn qwen3() -> Self {
+        let spec = LlamaCppTextSpec::qwen3_4b();
+        Self {
+            arch: spec.arch,
+            capabilities: spec.capabilities,
+            quantization: spec.quantization,
+            default_context_length: spec.default_context_length,
+        }
+    }
+
+    pub fn gemma4() -> Self {
+        let spec = LlamaCppTextSpec::gemma4_e2b();
+        Self {
+            arch: spec.arch,
+            capabilities: spec.capabilities,
+            quantization: spec.quantization,
+            default_context_length: spec.default_context_length,
+        }
+    }
+}
+
+#[async_trait]
+impl BackendAdapter for LlamaCppTextAdapter {
+    fn supported_formats(&self) -> &[CheckpointFormat] {
+        &LLAMA_CPP_TEXT_FORMATS
+    }
+
+    fn backend_kind(&self) -> BackendKind {
+        BackendKind::LlamaCpp
+    }
+
+    fn capabilities(&self) -> &Capabilities {
+        &self.capabilities
+    }
+
+    fn quantization(&self) -> &QuantizationSupport {
+        &self.quantization
+    }
+
+    async fn start(
+        &self,
+        identity: &ModelIdentity,
+        checkpoint: &ResolvedCheckpoint,
+        options: StartOptions,
+    ) -> Result<Box<dyn BundleHandle>, ModelError> {
+        let resolved_quantization = self
+            .quantization
+            .resolve(options.quantization, &identity.id)?;
+        let model_path = resolve_checkpoint_model_path(checkpoint, resolved_quantization)?;
+        let built = load_llama_model(model_path)?;
+
+        Ok(new_text_handle(
+            identity.id.clone(),
+            identity.display_name.clone(),
+            self.capabilities.clone(),
+            self.quantization.clone(),
+            resolved_quantization,
+            self.arch,
+            self.default_context_length,
+            built,
+        ))
+    }
+}
+
 /// Q4 recommended, Q8 supported. Inputs are compile-time constants (Four ∈ [Four, Eight]).
 /// On the unreachable error path, degrades to no-recommended rather than panicking.
 fn curated_q4_q8_support() -> QuantizationSupport {
@@ -135,29 +212,17 @@ impl ModelBundle for LlamaCppTextBundle {
             .resolve(options.quantization, &self.metadata.id)?;
 
         let built = build_llama_model(&self.spec, resolved_quantization, options)?;
-        let metrics = Arc::new(Mutex::new(TextMetrics::default()));
-        {
-            let mut metrics = lock_metrics(&metrics, "llama-cpp-text-start");
-            observe_memory(&mut metrics.runtime);
-        }
 
-        Ok(Box::new(LlamaCppTextHandle {
-            descriptor: LoadedBundleDescriptor {
-                id: self.metadata.id.clone(),
-                display_name: self.metadata.display_name.clone(),
-                capabilities: self.metadata.capabilities.clone(),
-                quantization: self.metadata.quantization.clone(),
-                resolved_quantization,
-            },
-            runtime: Box::new(LlamaCppRuntime {
-                backend: built.backend,
-                model: built.model,
-                arch: self.spec.arch,
-                context_length: self.spec.default_context_length,
-                metrics: Arc::clone(&metrics),
-            }),
-            metrics,
-        }))
+        Ok(new_text_handle(
+            self.metadata.id.clone(),
+            self.metadata.display_name.clone(),
+            self.metadata.capabilities.clone(),
+            self.metadata.quantization.clone(),
+            resolved_quantization,
+            self.spec.arch,
+            self.spec.default_context_length,
+            built,
+        ))
     }
 }
 
@@ -195,9 +260,7 @@ impl TextRuntime for LlamaCppRuntime {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, ModelError> {
-        let chat_response = self
-            .generate_text(&request.prompt, &request.params)
-            .await?;
+        let chat_response = self.generate_text(&request.prompt, &request.params).await?;
         Ok(CompletionResponse {
             content: chat_response.content,
         })
@@ -224,24 +287,24 @@ impl LlamaCppRuntime {
         tokio::task::spawn_blocking(move || {
             let started_at = Instant::now();
 
-            let ctx_params = LlamaContextParams::default()
-                .with_n_ctx(std::num::NonZeroU32::new(context_length));
+            let ctx_params =
+                LlamaContextParams::default().with_n_ctx(std::num::NonZeroU32::new(context_length));
 
-            let mut ctx = model
-                .new_context(&backend, ctx_params)
-                .map_err(|e| ModelError::BackendExecution {
+            let mut ctx = model.new_context(&backend, ctx_params).map_err(|e| {
+                ModelError::BackendExecution {
                     backend: "llama-cpp",
                     operation: "new_context",
                     message: e.to_string(),
-                })?;
+                }
+            })?;
 
-            let tokens = model
-                .str_to_token(&prompt, AddBos::Always)
-                .map_err(|e| ModelError::BackendExecution {
+            let tokens = model.str_to_token(&prompt, AddBos::Always).map_err(|e| {
+                ModelError::BackendExecution {
                     backend: "llama-cpp",
                     operation: "tokenize",
                     message: e.to_string(),
-                })?;
+                }
+            })?;
 
             if tokens.is_empty() {
                 return Err(ModelError::BackendExecution {
@@ -256,20 +319,21 @@ impl LlamaCppRuntime {
             let mut batch = LlamaBatch::new(context_length as usize, 1);
             let last_idx = tokens.len() - 1;
             for (i, token) in tokens.iter().enumerate() {
-                batch.add(*token, i as i32, &[0], i == last_idx).map_err(|e| {
-                    ModelError::BackendExecution {
+                batch
+                    .add(*token, i as i32, &[0], i == last_idx)
+                    .map_err(|e| ModelError::BackendExecution {
                         backend: "llama-cpp",
                         operation: "batch_add",
                         message: e.to_string(),
-                    }
-                })?;
+                    })?;
             }
 
-            ctx.decode(&mut batch).map_err(|e| ModelError::BackendExecution {
-                backend: "llama-cpp",
-                operation: "decode_prompt",
-                message: e.to_string(),
-            })?;
+            ctx.decode(&mut batch)
+                .map_err(|e| ModelError::BackendExecution {
+                    backend: "llama-cpp",
+                    operation: "decode_prompt",
+                    message: e.to_string(),
+                })?;
 
             // Use process-id-derived seed so temperature produces varied output
             // across requests while remaining reproducible within a process lifetime.
@@ -300,19 +364,21 @@ impl LlamaCppRuntime {
                     break;
                 }
 
-                let piece = model.token_to_piece(token, &mut decoder, false, None).map_err(|e| {
-                    ModelError::BackendExecution {
+                let piece = model
+                    .token_to_piece(token, &mut decoder, false, None)
+                    .map_err(|e| ModelError::BackendExecution {
                         backend: "llama-cpp",
                         operation: "token_to_piece",
                         message: e.to_string(),
-                    }
-                })?;
+                    })?;
 
                 generated_text.push_str(&piece);
                 generated_token_count += 1;
 
                 // Check stop sequences on the tail of generated text.
-                let should_stop = stop_sequences.iter().any(|seq| generated_text.ends_with(seq));
+                let should_stop = stop_sequences
+                    .iter()
+                    .any(|seq| generated_text.ends_with(seq));
                 if should_stop {
                     for seq in &stop_sequences {
                         if generated_text.ends_with(seq) {
@@ -324,20 +390,21 @@ impl LlamaCppRuntime {
                 }
 
                 batch.clear();
-                batch.add(token, n_cur, &[0], true).map_err(|e| {
-                    ModelError::BackendExecution {
+                batch
+                    .add(token, n_cur, &[0], true)
+                    .map_err(|e| ModelError::BackendExecution {
                         backend: "llama-cpp",
                         operation: "batch_add_token",
                         message: e.to_string(),
-                    }
-                })?;
+                    })?;
                 n_cur += 1;
 
-                ctx.decode(&mut batch).map_err(|e| ModelError::BackendExecution {
-                    backend: "llama-cpp",
-                    operation: "decode_token",
-                    message: e.to_string(),
-                })?;
+                ctx.decode(&mut batch)
+                    .map_err(|e| ModelError::BackendExecution {
+                        backend: "llama-cpp",
+                        operation: "decode_token",
+                        message: e.to_string(),
+                    })?;
             }
 
             let elapsed = started_at.elapsed();
@@ -370,10 +437,7 @@ impl LlamaCppRuntime {
 ///
 /// Returns an error if any message contains non-text content parts (images).
 /// llama.cpp text-only backends do not support multimodal input.
-fn format_chat_prompt(
-    arch: LlamaCppTextArch,
-    request: &ChatRequest,
-) -> Result<String, ModelError> {
+fn format_chat_prompt(arch: LlamaCppTextArch, request: &ChatRequest) -> Result<String, ModelError> {
     match arch {
         LlamaCppTextArch::Qwen3 => format_qwen3_prompt(&request.messages),
         LlamaCppTextArch::Gemma4 => format_gemma4_prompt(&request.messages),
@@ -490,6 +554,41 @@ impl CompletionModel for LlamaCppTextHandle {
     }
 }
 
+fn new_text_handle(
+    id: BundleId,
+    display_name: String,
+    capabilities: Capabilities,
+    quantization: QuantizationSupport,
+    resolved_quantization: Option<QuantizationBits>,
+    arch: LlamaCppTextArch,
+    context_length: u32,
+    built: BuiltModel,
+) -> Box<dyn BundleHandle> {
+    let metrics = Arc::new(Mutex::new(TextMetrics::default()));
+    {
+        let mut metrics = lock_metrics(&metrics, "llama-cpp-text-start");
+        observe_memory(&mut metrics.runtime);
+    }
+
+    Box::new(LlamaCppTextHandle {
+        descriptor: LoadedBundleDescriptor {
+            id,
+            display_name,
+            capabilities,
+            quantization,
+            resolved_quantization,
+        },
+        runtime: Box::new(LlamaCppRuntime {
+            backend: built.backend,
+            model: built.model,
+            arch,
+            context_length,
+            metrics: Arc::clone(&metrics),
+        }),
+        metrics,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Builder
 // ---------------------------------------------------------------------------
@@ -519,13 +618,16 @@ fn build_llama_model(
     }
 
     let filename = gguf_filename(spec.model_prefix, resolved_quantization);
-
     let model_path = if let Some(artifact_policy) = artifact_policy {
         configure_artifact_policy(&filename, artifact_policy)?.model_path
     } else {
         PathBuf::from(&filename)
     };
 
+    load_llama_model(model_path)
+}
+
+fn load_llama_model(model_path: PathBuf) -> Result<BuiltModel, ModelError> {
     let backend = LlamaBackend::init().map_err(|e| ModelError::BackendInitialization {
         backend: "llama-cpp",
         message: e.to_string(),
@@ -548,10 +650,87 @@ fn build_llama_model(
     })
 }
 
+fn resolve_checkpoint_model_path(
+    checkpoint: &ResolvedCheckpoint,
+    resolved_quantization: Option<QuantizationBits>,
+) -> Result<PathBuf, ModelError> {
+    if checkpoint.checkpoint.format != CheckpointFormat::Gguf {
+        return Err(ModelError::InvalidConfiguration(format!(
+            "llama.cpp expected GGUF checkpoint, got {:?}",
+            checkpoint.checkpoint.format
+        )));
+    }
+
+    let expected_suffix = gguf_filename_suffix(resolved_quantization);
+    let path = &checkpoint.path;
+
+    if path.is_file() {
+        let filename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                ModelError::InvalidConfiguration(format!(
+                    "resolved GGUF checkpoint path `{}` has no filename",
+                    path.display()
+                ))
+            })?;
+        if filename.ends_with(expected_suffix) {
+            return Ok(path.clone());
+        }
+        return Err(ModelError::InvalidConfiguration(format!(
+            "resolved GGUF checkpoint `{}` does not match requested quantization suffix `{expected_suffix}`",
+            path.display()
+        )));
+    }
+
+    let mut matches = std::fs::read_dir(path)
+        .map_err(|e| {
+            ModelError::InvalidConfiguration(format!(
+                "failed to inspect GGUF checkpoint root `{}`: {e}",
+                path.display()
+            ))
+        })?
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .filter(|candidate| candidate.is_file())
+        .filter(|candidate| {
+            candidate
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.ends_with(expected_suffix))
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    matches.sort();
+
+    match matches.len() {
+        1 => Ok(matches.remove(0)),
+        0 => Err(ModelError::InvalidConfiguration(format!(
+            "resolved GGUF checkpoint root `{}` does not contain a file matching `{expected_suffix}`",
+            path.display()
+        ))),
+        count => Err(ModelError::InvalidConfiguration(format!(
+            "resolved GGUF checkpoint root `{}` has {count} files matching `{expected_suffix}`; expected exactly one",
+            path.display()
+        ))),
+    }
+}
+
+fn gguf_filename_suffix(bits: Option<QuantizationBits>) -> &'static str {
+    match bits {
+        Some(QuantizationBits::Four) => "-Q4_K_M.gguf",
+        Some(QuantizationBits::Eight) => "-Q8_0.gguf",
+        None => "-f16.gguf",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use motlie_model::{ChatMessage, QuantizationBits, StartOptions};
+    use motlie_model::{
+        BackendAdapter, BackendKind, ChatMessage, ModelCheckpoint, QuantizationBits, StartOptions,
+    };
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     struct StubTextRuntime;
 
@@ -603,6 +782,19 @@ mod tests {
         assert_eq!(spec.arch, LlamaCppTextArch::Gemma4);
         assert!(spec.capabilities.supports(CapabilityKind::Chat));
         assert!(spec.capabilities.supports(CapabilityKind::Completion));
+    }
+
+    #[test]
+    fn qwen3_adapter_reports_backend_metadata() {
+        let adapter = LlamaCppTextAdapter::qwen3();
+
+        assert_eq!(adapter.supported_formats(), &[CheckpointFormat::Gguf]);
+        assert_eq!(adapter.backend_kind(), BackendKind::LlamaCpp);
+        assert_eq!(adapter.capabilities(), &Capabilities::chat_and_completion());
+        assert_eq!(
+            adapter.quantization().recommended(),
+            Some(QuantizationBits::Four)
+        );
     }
 
     #[test]
@@ -734,5 +926,65 @@ mod tests {
             error,
             ModelError::UnsupportedCapability(CapabilityKind::Vision)
         ));
+    }
+
+    #[test]
+    fn resolved_checkpoint_selects_matching_quantized_file() {
+        let root = unique_temp_dir();
+        let gguf = root.join("Qwen3-4B-Q4_K_M.gguf");
+        std::fs::write(&gguf, b"stub").expect("test gguf should be writable");
+
+        let checkpoint = ResolvedCheckpoint {
+            checkpoint: ModelCheckpoint {
+                format: CheckpointFormat::Gguf,
+                source: motlie_model::ArtifactSource::HuggingFace {
+                    repo: "Qwen/Qwen3-4B-GGUF",
+                },
+                include: vec![motlie_model::ArtifactRule::Suffix(".gguf")],
+                quantization: None,
+            },
+            path: root.clone(),
+        };
+
+        let resolved = resolve_checkpoint_model_path(&checkpoint, Some(QuantizationBits::Four))
+            .expect("Q4 GGUF should be selected");
+        assert_eq!(resolved, gguf);
+    }
+
+    #[test]
+    fn resolved_checkpoint_rejects_missing_quantized_file() {
+        let root = unique_temp_dir();
+        std::fs::write(root.join("Qwen3-4B-f16.gguf"), b"stub")
+            .expect("test gguf should be writable");
+
+        let checkpoint = ResolvedCheckpoint {
+            checkpoint: ModelCheckpoint {
+                format: CheckpointFormat::Gguf,
+                source: motlie_model::ArtifactSource::HuggingFace {
+                    repo: "Qwen/Qwen3-4B-GGUF",
+                },
+                include: vec![motlie_model::ArtifactRule::Suffix(".gguf")],
+                quantization: None,
+            },
+            path: root.clone(),
+        };
+
+        let error = resolve_checkpoint_model_path(&checkpoint, Some(QuantizationBits::Four))
+            .expect_err("missing Q4 GGUF should fail");
+        assert!(matches!(
+            error,
+            ModelError::InvalidConfiguration(message)
+                if message.contains("-Q4_K_M.gguf")
+        ));
+    }
+
+    fn unique_temp_dir() -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be monotonic enough for tests")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("motlie-llama-cpp-checkpoint-{suffix}"));
+        std::fs::create_dir_all(&path).expect("unique temp dir should be creatable");
+        path
     }
 }

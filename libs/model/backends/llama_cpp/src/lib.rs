@@ -9,4 +9,4 @@
 mod common;
 mod text;
 
-pub use text::{LlamaCppTextArch, LlamaCppTextBundle, LlamaCppTextSpec};
+pub use text::{LlamaCppTextAdapter, LlamaCppTextArch, LlamaCppTextBundle, LlamaCppTextSpec};
