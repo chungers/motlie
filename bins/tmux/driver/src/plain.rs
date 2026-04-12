@@ -3,6 +3,7 @@ use anyhow::Result;
 use motlie_driver::clap::analyze_completion;
 use motlie_driver::commands::tmux::{TmuxCommand, TmuxState};
 use motlie_driver::completion::{CompletionCandidate, CompletionRequest, dedup_sorted};
+use motlie_driver::term::asciicast::AsciicastRecorder;
 use motlie_driver::{CommandEffect, CommandEngine, CommandSet};
 use reedline::{
     Completer, DefaultPrompt, DefaultPromptSegment, Reedline, Signal, Span, Suggestion,
@@ -82,7 +83,11 @@ impl Completer for TmuxCompleter {
     }
 }
 
-pub async fn run(engine: &mut CommandEngine<TmuxState, TmuxCommand>) -> Result<()> {
+pub async fn run(
+    engine: &mut CommandEngine<TmuxState, TmuxCommand>,
+    mut recorder: Option<AsciicastRecorder>,
+    host_uri: &str,
+) -> Result<()> {
     let completion_context = Arc::new(Mutex::new(engine.completion_context()));
     let completer = Box::new(TmuxCompleter::new(completion_context.clone()));
     let mut line_editor = Reedline::create().with_completer(completer);
@@ -90,6 +95,7 @@ pub async fn run(engine: &mut CommandEngine<TmuxState, TmuxCommand>) -> Result<(
         DefaultPromptSegment::Basic("tmux> ".to_string()),
         DefaultPromptSegment::Empty,
     );
+    record_output(&mut recorder, &format!("Connected to {host_uri}\n"))?;
 
     loop {
         match line_editor.read_line(&prompt)? {
@@ -99,9 +105,12 @@ pub async fn run(engine: &mut CommandEngine<TmuxState, TmuxCommand>) -> Result<(
                     continue;
                 }
 
+                record_output(&mut recorder, &format!("tmux> {trimmed}\n"))?;
+                record_input(&mut recorder, &format!("{trimmed}\n"))?;
                 let output = engine.run_line(trimmed).await?;
                 for line in &output.lines {
                     println!("{line}");
+                    record_output(&mut recorder, &format!("{line}\n"))?;
                 }
 
                 if let Ok(mut guard) = completion_context.lock() {
@@ -109,7 +118,7 @@ pub async fn run(engine: &mut CommandEngine<TmuxState, TmuxCommand>) -> Result<(
                 }
 
                 if engine.context().has_live_follow() {
-                    run_live_follow(engine).await?;
+                    run_live_follow(engine, &mut recorder).await?;
                     if let Ok(mut guard) = completion_context.lock() {
                         *guard = engine.completion_context();
                     }
@@ -131,8 +140,15 @@ pub async fn run(engine: &mut CommandEngine<TmuxState, TmuxCommand>) -> Result<(
     }
 }
 
-async fn run_live_follow(engine: &mut CommandEngine<TmuxState, TmuxCommand>) -> Result<()> {
+async fn run_live_follow(
+    engine: &mut CommandEngine<TmuxState, TmuxCommand>,
+    recorder: &mut Option<AsciicastRecorder>,
+) -> Result<()> {
     println!("Live follow attached. Press Ctrl-C to stop and return to the prompt.");
+    record_output(
+        recorder,
+        "Live follow attached. Press Ctrl-C to stop and return to the prompt.\n",
+    )?;
     let mut previous = String::new();
     let mut cursor = None;
 
@@ -142,6 +158,7 @@ async fn run_live_follow(engine: &mut CommandEngine<TmuxState, TmuxCommand>) -> 
                 engine.context_mut().shutdown_managed_state().await?;
                 println!();
                 println!("Live follow stopped.");
+                record_output(recorder, "^C\nLive follow stopped.\n")?;
                 break;
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(150)) => {}
@@ -153,6 +170,10 @@ async fn run_live_follow(engine: &mut CommandEngine<TmuxState, TmuxCommand>) -> 
             .mirror_history_page(cursor, HISTORY_PAGE_SIZE);
         for record in page.items {
             render_incremental(&mut previous, &record.item.text);
+            record_output(recorder, &record.item.text)?;
+            if !record.item.text.ends_with('\n') {
+                record_output(recorder, "\n")?;
+            }
             cursor = Some(record.seq);
         }
 
@@ -183,4 +204,18 @@ fn render_incremental(previous: &mut String, current: &str) {
 
     previous.clear();
     previous.push_str(current);
+}
+
+fn record_output(recorder: &mut Option<AsciicastRecorder>, text: &str) -> Result<()> {
+    if let Some(recorder) = recorder.as_mut() {
+        recorder.record_output(text)?;
+    }
+    Ok(())
+}
+
+fn record_input(recorder: &mut Option<AsciicastRecorder>, text: &str) -> Result<()> {
+    if let Some(recorder) = recorder.as_mut() {
+        recorder.record_input(text)?;
+    }
+    Ok(())
 }
