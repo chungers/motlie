@@ -14,24 +14,24 @@ path = "src/lib.rs"
 
 [features]
 default = ["model-google-gemma-300m", "model-qwen3-embedding-06b", "model-qwen3-4b", "model-gemma4-e2b"]
-model-google-gemma-300m = []
-model-qwen3-embedding-06b = []
-model-qwen3-4b = []
-model-gemma4-e2b = []
+model-google-gemma-300m = ["dep:motlie-model-mistral"]
+model-qwen3-embedding-06b = ["dep:motlie-model-mistral"]
+model-qwen3-4b = ["dep:motlie-model-mistral"]
+model-gemma4-e2b = ["dep:motlie-model-mistral"]
 model-qwen3-4b-gguf = ["dep:motlie-model-llama-cpp"]
 model-gemma4-e2b-gguf = ["dep:motlie-model-llama-cpp"]
-llama-cpp-cuda = ["motlie-model-llama-cpp/cuda"]
-cuda = ["motlie-model-mistral/cuda"]
-cudnn = ["motlie-model-mistral/cudnn"]
-flash-attn = ["motlie-model-mistral/flash-attn"]
-metal = ["motlie-model-mistral/metal"]
-accelerate = ["motlie-model-mistral/accelerate"]
+llama-cpp-cuda = ["dep:motlie-model-llama-cpp", "motlie-model-llama-cpp/cuda"]
+cuda = ["dep:motlie-model-mistral", "motlie-model-mistral/cuda"]
+cudnn = ["dep:motlie-model-mistral", "motlie-model-mistral/cudnn"]
+flash-attn = ["dep:motlie-model-mistral", "motlie-model-mistral/flash-attn"]
+metal = ["dep:motlie-model-mistral", "motlie-model-mistral/metal"]
+accelerate = ["dep:motlie-model-mistral", "motlie-model-mistral/accelerate"]
 
 [dependencies]
 async-trait = "0.1.89"
 hf-hub = "0.5.0"
 motlie-model = { path = "../model" }
-motlie-model-mistral = { path = "../model/backends/mistral" }
+motlie-model-mistral = { path = "../model/backends/mistral", optional = true }
 motlie-model-llama-cpp = { path = "../model/backends/llama_cpp", optional = true }
 thiserror.workspace = true
 

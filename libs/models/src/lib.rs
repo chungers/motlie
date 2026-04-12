@@ -25,11 +25,14 @@ use thiserror::Error;
 
 pub use chat::ChatModels;
 pub use embeddings::EmbeddingModels;
+use motlie_model::{
+    ArtifactPolicy, BackendAdapter, BundleMetadata, ModelError, ResolvedCheckpoint, StartOptions,
+};
 pub use motlie_model::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleFamily, BundleId,
     BundleRequirements, Capabilities, CapabilityDescriptor, CapabilityKind, CheckpointFormat,
     ContentKind, EvalTrack, InteractionStyle, ModelBundle, ModelCheckpoint, ModelIdentity,
-    PlatformConstraint,
+    PlatformConstraint, QuantizationSupport,
 };
 
 type BoxError = Box<dyn StdError + Send + Sync + 'static>;
@@ -79,6 +82,10 @@ pub enum ModelsError {
 }
 
 pub type Result<T> = std::result::Result<T, ModelsError>;
+
+fn models_error_to_model_error(error: ModelsError) -> ModelError {
+    ModelError::InvalidConfiguration(error.to_string())
+}
 
 /// Resolve a Hugging Face cache root to the concrete snapshot directory for a model.
 ///
@@ -267,7 +274,29 @@ pub fn download_bundle_artifacts_with_options(
             bundle_id: bundle_id.clone(),
         })?;
 
-    match &artifacts.source {
+    let downloaded = download_checkpoint_artifacts_with_options(
+        &ModelCheckpoint {
+            format: artifacts.format,
+            source: artifacts.source.clone(),
+            include: artifacts.include.clone(),
+            quantization: None,
+        },
+        artifact_root,
+        options,
+    )?;
+
+    Ok(ArtifactDownloadSummary {
+        bundle_id: bundle_id.clone(),
+        downloaded,
+    })
+}
+
+fn download_checkpoint_artifacts_with_options(
+    checkpoint: &ModelCheckpoint,
+    artifact_root: &Path,
+    options: &ArtifactDownloadOptions,
+) -> Result<Vec<PathBuf>> {
+    match &checkpoint.source {
         ArtifactSource::HuggingFace { repo } => {
             std::fs::create_dir_all(artifact_root).map_err(|source| {
                 ModelsError::CreateArtifactRoot {
@@ -293,7 +322,7 @@ pub fn download_bundle_artifacts_with_options(
 
             let mut downloaded = Vec::new();
             for sibling in info.siblings {
-                if artifacts.includes(&sibling.rfilename) {
+                if checkpoint.includes(&sibling.rfilename) {
                     let path = repo_api.get(&sibling.rfilename).map_err(|source| {
                         ModelsError::DownloadArtifact {
                             repo,
@@ -306,11 +335,7 @@ pub fn download_bundle_artifacts_with_options(
             }
 
             downloaded.sort();
-
-            Ok(ArtifactDownloadSummary {
-                bundle_id: bundle_id.clone(),
-                downloaded,
-            })
+            Ok(downloaded)
         }
     }
 }
@@ -359,12 +384,116 @@ impl BundleDescriptor {
     }
 }
 
+trait LocalCheckpointResolver: Send + Sync {
+    fn resolve(&self, root: &Path) -> std::result::Result<PathBuf, ModelError>;
+}
+
+impl<F> LocalCheckpointResolver for F
+where
+    F: Fn(&Path) -> std::result::Result<PathBuf, ModelError> + Send + Sync + 'static,
+{
+    fn resolve(&self, root: &Path) -> std::result::Result<PathBuf, ModelError> {
+        (self)(root)
+    }
+}
+
+#[derive(Clone)]
+struct AdapterBackedBundle {
+    metadata: BundleMetadata,
+    identity: ModelIdentity,
+    checkpoint: ModelCheckpoint,
+    adapter: Arc<dyn BackendAdapter>,
+    local_resolver: Arc<dyn LocalCheckpointResolver>,
+}
+
+#[async_trait::async_trait]
+impl ModelBundle for AdapterBackedBundle {
+    fn id(&self) -> &BundleId {
+        &self.metadata.id
+    }
+
+    fn metadata(&self) -> &BundleMetadata {
+        &self.metadata
+    }
+
+    fn capabilities(&self) -> &Capabilities {
+        &self.metadata.capabilities
+    }
+
+    async fn start(
+        &self,
+        options: StartOptions,
+    ) -> std::result::Result<Box<dyn motlie_model::BundleHandle>, ModelError> {
+        let StartOptions {
+            artifact_policy,
+            quantization,
+            unpack_root,
+            max_concurrency,
+        } = options;
+
+        let artifact_root = match artifact_policy {
+            Some(ArtifactPolicy::LocalOnly { root }) => root,
+            Some(ArtifactPolicy::AllowFetch { root }) => {
+                let root = root.unwrap_or_else(default_artifact_root);
+                download_checkpoint_artifacts_with_options(
+                    &self.checkpoint,
+                    &root,
+                    &ArtifactDownloadOptions::default(),
+                )
+                .map_err(models_error_to_model_error)?;
+                root
+            }
+            None => default_artifact_root(),
+        };
+
+        let resolved = ResolvedCheckpoint {
+            checkpoint: self.checkpoint.clone(),
+            path: self.local_resolver.resolve(&artifact_root)?,
+        };
+
+        self.adapter
+            .start(
+                &self.identity,
+                &resolved,
+                StartOptions {
+                    artifact_policy: None,
+                    quantization,
+                    unpack_root,
+                    max_concurrency,
+                },
+            )
+            .await
+    }
+}
+
+pub(crate) fn adapter_backed_bundle(
+    bundle_id: BundleId,
+    display_name: String,
+    identity: ModelIdentity,
+    checkpoint: ModelCheckpoint,
+    adapter: Arc<dyn BackendAdapter>,
+    local_resolver: Arc<dyn LocalCheckpointResolver>,
+) -> Box<dyn ModelBundle> {
+    Box::new(AdapterBackedBundle {
+        metadata: BundleMetadata {
+            id: bundle_id,
+            display_name,
+            capabilities: adapter.capabilities().clone(),
+            quantization: adapter.quantization().clone(),
+        },
+        identity,
+        checkpoint,
+        adapter,
+        local_resolver,
+    })
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelVariantDescriptor {
-    pub bundle_id: BundleId,
     pub backend: BackendKind,
     pub capabilities: Capabilities,
-    pub checkpoint: Option<ModelCheckpoint>,
+    pub quantization: QuantizationSupport,
+    pub checkpoint: ModelCheckpoint,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -586,10 +715,16 @@ struct CatalogEntry {
     factory: Arc<dyn BundleFactory>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone)]
+struct CheckpointCatalogEntry {
+    checkpoint: ModelCheckpoint,
+    local_resolver: Arc<dyn LocalCheckpointResolver>,
+}
+
 struct ModelCatalogEntry {
     identity: ModelIdentity,
-    variants: Vec<ModelVariantDescriptor>,
+    checkpoints: Vec<CheckpointCatalogEntry>,
+    adapters: Vec<Arc<dyn BackendAdapter>>,
 }
 
 /// In-memory registry of curated bundle descriptors and constructors.
@@ -608,27 +743,17 @@ impl Catalog {
         #[allow(unused_mut)]
         let mut catalog = Self::new();
         #[cfg(feature = "model-google-gemma-300m")]
-        catalog.register(embeddings::google_gemma_300m::descriptor(), || {
-            embeddings::google_gemma_300m::bundle()
-        });
+        embeddings::google_gemma_300m::register(&mut catalog);
         #[cfg(feature = "model-qwen3-embedding-06b")]
-        catalog.register(embeddings::qwen3_embedding_06b::descriptor(), || {
-            embeddings::qwen3_embedding_06b::bundle()
-        });
+        embeddings::qwen3_embedding_06b::register(&mut catalog);
         #[cfg(feature = "model-qwen3-4b")]
-        catalog.register(chat::qwen3_4b::descriptor(), || chat::qwen3_4b::bundle());
+        chat::qwen3_4b::register(&mut catalog);
         #[cfg(feature = "model-gemma4-e2b")]
-        catalog.register(chat::gemma4_e2b::descriptor(), || {
-            chat::gemma4_e2b::bundle()
-        });
+        chat::gemma4_e2b::register(&mut catalog);
         #[cfg(feature = "model-qwen3-4b-gguf")]
-        catalog.register(chat::qwen3_4b_gguf::descriptor(), || {
-            chat::qwen3_4b_gguf::bundle()
-        });
+        chat::qwen3_4b_gguf::register(&mut catalog);
         #[cfg(feature = "model-gemma4-e2b-gguf")]
-        catalog.register(chat::gemma4_e2b_gguf::descriptor(), || {
-            chat::gemma4_e2b_gguf::bundle()
-        });
+        chat::gemma4_e2b_gguf::register(&mut catalog);
         catalog
     }
 
@@ -640,8 +765,6 @@ impl Catalog {
     where
         F: Fn() -> Box<dyn ModelBundle> + Send + Sync + 'static,
     {
-        self.upsert_model_entry(&descriptor);
-
         self.bundles
             .insert(
                 descriptor.id.clone(),
@@ -653,32 +776,41 @@ impl Catalog {
             .map(|entry| entry.descriptor)
     }
 
-    fn upsert_model_entry(&mut self, descriptor: &BundleDescriptor) {
-        let identity = descriptor.identity();
-        let variant = ModelVariantDescriptor {
-            bundle_id: descriptor.id.clone(),
-            backend: descriptor.backend,
-            capabilities: descriptor.capabilities.clone(),
-            checkpoint: descriptor.checkpoint(),
-        };
-
+    pub(crate) fn register_model_variant(
+        &mut self,
+        identity: ModelIdentity,
+        checkpoint: ModelCheckpoint,
+        local_resolver: Arc<dyn LocalCheckpointResolver>,
+        adapter: Arc<dyn BackendAdapter>,
+    ) {
         let entry = self
             .models
             .entry(identity.id.clone())
             .or_insert_with(|| ModelCatalogEntry {
                 identity: identity.clone(),
-                variants: Vec::new(),
+                checkpoints: Vec::new(),
+                adapters: Vec::new(),
             });
         entry.identity = identity;
 
-        if let Some(existing) = entry
-            .variants
-            .iter_mut()
-            .find(|existing| existing.bundle_id == variant.bundle_id)
+        if !entry
+            .checkpoints
+            .iter()
+            .any(|existing| existing.checkpoint == checkpoint)
         {
-            *existing = variant;
-        } else {
-            entry.variants.push(variant);
+            entry.checkpoints.push(CheckpointCatalogEntry {
+                checkpoint,
+                local_resolver,
+            });
+        }
+
+        if !entry.adapters.iter().any(|existing| {
+            existing.backend_kind() == adapter.backend_kind()
+                && existing.supported_formats() == adapter.supported_formats()
+                && existing.capabilities() == adapter.capabilities()
+                && existing.quantization() == adapter.quantization()
+        }) {
+            entry.adapters.push(adapter);
         }
     }
 
@@ -697,8 +829,29 @@ impl Catalog {
     pub fn variants_for_model(
         &self,
         id: &BundleId,
-    ) -> Option<impl Iterator<Item = &ModelVariantDescriptor>> {
-        self.models.get(id).map(|entry| entry.variants.iter())
+    ) -> Option<impl Iterator<Item = ModelVariantDescriptor>> {
+        let entry = self.models.get(id)?;
+        let variants = entry
+            .adapters
+            .iter()
+            .flat_map(|adapter| {
+                entry
+                    .checkpoints
+                    .iter()
+                    .filter(move |checkpoint| {
+                        adapter
+                            .supported_formats()
+                            .contains(&checkpoint.checkpoint.format)
+                    })
+                    .map(move |checkpoint| ModelVariantDescriptor {
+                        backend: adapter.backend_kind(),
+                        capabilities: adapter.capabilities().clone(),
+                        quantization: adapter.quantization().clone(),
+                        checkpoint: checkpoint.checkpoint.clone(),
+                    })
+            })
+            .collect::<Vec<_>>();
+        Some(variants.into_iter())
     }
 
     pub fn artifacts(&self, id: &BundleId) -> Option<&BundleArtifacts> {
@@ -730,22 +883,37 @@ impl Catalog {
     ) -> Option<ResolvedModelDescriptor> {
         let entry = self.models.get(id)?;
 
-        let exact = entry.variants.iter().find(|variant| {
+        let exact = entry.adapters.iter().find_map(|adapter| {
             let backend_ok = options
                 .backend_preference
-                .is_none_or(|backend| variant.backend == backend);
-            let format_ok = options.format_preference.is_none_or(|format| {
-                variant
-                    .checkpoint
-                    .as_ref()
-                    .is_some_and(|checkpoint| checkpoint.format == format)
-            });
-            backend_ok && format_ok
+                .is_none_or(|backend| adapter.backend_kind() == backend);
+            if !backend_ok {
+                return None;
+            }
+
+            entry.checkpoints.iter().find_map(|checkpoint| {
+                let format_ok = options
+                    .format_preference
+                    .is_none_or(|format| checkpoint.checkpoint.format == format);
+                let supported = adapter
+                    .supported_formats()
+                    .contains(&checkpoint.checkpoint.format);
+                if !format_ok || !supported {
+                    return None;
+                }
+
+                Some(ModelVariantDescriptor {
+                    backend: adapter.backend_kind(),
+                    capabilities: adapter.capabilities().clone(),
+                    quantization: adapter.quantization().clone(),
+                    checkpoint: checkpoint.checkpoint.clone(),
+                })
+            })
         })?;
 
         Some(ResolvedModelDescriptor {
             identity: entry.identity.clone(),
-            variant: exact.clone(),
+            variant: exact,
         })
     }
 
@@ -753,7 +921,28 @@ impl Catalog {
         &self,
         resolved: &ResolvedModelDescriptor,
     ) -> Option<Box<dyn ModelBundle>> {
-        self.instantiate(&resolved.variant.bundle_id)
+        let entry = self.models.get(&resolved.identity.id)?;
+        let checkpoint = entry
+            .checkpoints
+            .iter()
+            .find(|existing| existing.checkpoint == resolved.variant.checkpoint)?;
+        let adapter = entry.adapters.iter().find(|existing| {
+            existing.backend_kind() == resolved.variant.backend
+                && existing.capabilities() == &resolved.variant.capabilities
+                && existing.quantization() == &resolved.variant.quantization
+                && existing
+                    .supported_formats()
+                    .contains(&resolved.variant.checkpoint.format)
+        })?;
+
+        Some(adapter_backed_bundle(
+            resolved.identity.id.clone(),
+            resolved.identity.display_name.clone(),
+            resolved.identity.clone(),
+            checkpoint.checkpoint.clone(),
+            Arc::clone(adapter),
+            Arc::clone(&checkpoint.local_resolver),
+        ))
     }
 
     pub fn len(&self) -> usize {
@@ -801,6 +990,43 @@ mod tests {
         }
     }
 
+    struct StubAdapter {
+        backend: BackendKind,
+        capabilities: Capabilities,
+        quantization: QuantizationSupport,
+        supported_formats: Vec<CheckpointFormat>,
+    }
+
+    #[async_trait::async_trait]
+    impl BackendAdapter for StubAdapter {
+        fn supported_formats(&self) -> &[CheckpointFormat] {
+            &self.supported_formats
+        }
+
+        fn backend_kind(&self) -> BackendKind {
+            self.backend
+        }
+
+        fn capabilities(&self) -> &Capabilities {
+            &self.capabilities
+        }
+
+        fn quantization(&self) -> &QuantizationSupport {
+            &self.quantization
+        }
+
+        async fn start(
+            &self,
+            _identity: &ModelIdentity,
+            _checkpoint: &ResolvedCheckpoint,
+            _options: StartOptions,
+        ) -> std::result::Result<Box<dyn motlie_model::BundleHandle>, ModelError> {
+            Err(ModelError::InvalidConfiguration(
+                "stub adapter is not startable".into(),
+            ))
+        }
+    }
+
     fn stub_descriptor(id: &str) -> BundleDescriptor {
         BundleDescriptor {
             id: BundleId::new(id),
@@ -827,20 +1053,18 @@ mod tests {
         let first_for_factory = first.clone();
         let second_for_factory = second.clone();
 
-        assert!(
-            catalog
-                .register(first.clone(), move || {
-                    Box::new(StubBundle {
-                        metadata: BundleMetadata {
-                            id: first_for_factory.id.clone(),
-                            display_name: first_for_factory.display_name.clone(),
-                            capabilities: first_for_factory.capabilities.clone(),
-                            quantization: motlie_model::QuantizationSupport::none(),
-                        },
-                    })
+        assert!(catalog
+            .register(first.clone(), move || {
+                Box::new(StubBundle {
+                    metadata: BundleMetadata {
+                        id: first_for_factory.id.clone(),
+                        display_name: first_for_factory.display_name.clone(),
+                        capabilities: first_for_factory.capabilities.clone(),
+                        quantization: motlie_model::QuantizationSupport::none(),
+                    },
                 })
-                .is_none()
-        );
+            })
+            .is_none());
 
         let replaced = catalog.register(second.clone(), move || {
             Box::new(StubBundle {
@@ -860,12 +1084,7 @@ mod tests {
                 .map(|bundle| &bundle.display_name),
             Some(&"Bundle v2".to_string())
         );
-        assert_eq!(
-            catalog
-                .model(&BundleId::new("bundle"))
-                .map(|model| model.display_name.as_str()),
-            Some("Bundle v2")
-        );
+        assert!(catalog.model(&BundleId::new("bundle")).is_none());
     }
 
     #[test]
@@ -904,13 +1123,17 @@ mod tests {
             }),
             ..mistral.clone()
         };
+        let mistral_capabilities = mistral.capabilities.clone();
+        let llama_capabilities = llama.capabilities.clone();
+        let mistral_for_factory = mistral.clone();
+        let llama_for_factory = llama.clone();
 
         catalog.register(mistral.clone(), move || {
             Box::new(StubBundle {
                 metadata: BundleMetadata {
-                    id: mistral.id.clone(),
-                    display_name: mistral.display_name.clone(),
-                    capabilities: mistral.capabilities.clone(),
+                    id: mistral_for_factory.id.clone(),
+                    display_name: mistral_for_factory.display_name.clone(),
+                    capabilities: mistral_capabilities.clone(),
                     quantization: motlie_model::QuantizationSupport::none(),
                 },
             })
@@ -918,13 +1141,57 @@ mod tests {
         catalog.register(llama.clone(), move || {
             Box::new(StubBundle {
                 metadata: BundleMetadata {
-                    id: llama.id.clone(),
-                    display_name: llama.display_name.clone(),
-                    capabilities: llama.capabilities.clone(),
+                    id: llama_for_factory.id.clone(),
+                    display_name: llama_for_factory.display_name.clone(),
+                    capabilities: llama_capabilities.clone(),
                     quantization: motlie_model::QuantizationSupport::none(),
                 },
             })
         });
+        catalog.register_model_variant(
+            ModelIdentity {
+                id: BundleId::new("qwen3_4b"),
+                display_name: "Qwen3 4B".into(),
+                family: BundleFamily::Qwen,
+                capabilities: Capabilities::chat_and_completion(),
+                eval_tracks: vec![EvalTrack::Chat],
+                requirements: BundleRequirements::default(),
+            },
+            mistral
+                .checkpoint()
+                .expect("mistral descriptor should expose checkpoint"),
+            Arc::new(|root: &Path| Ok(root.to_path_buf())),
+            Arc::new(StubAdapter {
+                backend: BackendKind::MistralRs,
+                capabilities: Capabilities::chat_and_completion(),
+                quantization: QuantizationSupport::none(),
+                supported_formats: vec![CheckpointFormat::Safetensors],
+            }),
+        );
+        catalog.register_model_variant(
+            ModelIdentity {
+                id: BundleId::new("qwen3_4b"),
+                display_name: "Qwen3 4B".into(),
+                family: BundleFamily::Qwen,
+                capabilities: Capabilities::chat_and_completion(),
+                eval_tracks: vec![EvalTrack::Chat],
+                requirements: BundleRequirements::default(),
+            },
+            llama
+                .checkpoint()
+                .expect("llama descriptor should expose checkpoint"),
+            Arc::new(|root: &Path| Ok(root.to_path_buf())),
+            Arc::new(StubAdapter {
+                backend: BackendKind::LlamaCpp,
+                capabilities: Capabilities::chat_and_completion(),
+                quantization: QuantizationSupport::with_recommended(
+                    [motlie_model::QuantizationBits::Four],
+                    motlie_model::QuantizationBits::Four,
+                )
+                .expect("test quantization support should be valid"),
+                supported_formats: vec![CheckpointFormat::Gguf],
+            }),
+        );
 
         let resolved = catalog
             .resolve_model(
@@ -937,12 +1204,8 @@ mod tests {
             .expect("requested llama.cpp gguf variant should resolve");
 
         assert_eq!(resolved.identity.id.as_str(), "qwen3_4b");
-        assert_eq!(resolved.variant.bundle_id.as_str(), "qwen3_4b_gguf");
         assert_eq!(resolved.variant.backend, BackendKind::LlamaCpp);
-        assert_eq!(
-            resolved.variant.checkpoint.as_ref().map(|checkpoint| checkpoint.format),
-            Some(CheckpointFormat::Gguf)
-        );
+        assert_eq!(resolved.variant.checkpoint.format, CheckpointFormat::Gguf);
         assert!(catalog.instantiate_resolved(&resolved).is_some());
     }
 
@@ -955,11 +1218,9 @@ mod tests {
             let bundle_id = BundleId::new("embeddinggemma_300m");
             assert!(catalog.len() >= 1);
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(
-                catalog
-                    .bundles_for_track(EvalTrack::Embeddings)
-                    .any(|bundle| bundle.id == bundle_id)
-            );
+            assert!(catalog
+                .bundles_for_track(EvalTrack::Embeddings)
+                .any(|bundle| bundle.id == bundle_id));
 
             let artifacts = catalog
                 .artifacts(&bundle_id)
@@ -978,11 +1239,9 @@ mod tests {
         {
             let bundle_id = BundleId::new("qwen3_embedding_06b");
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(
-                catalog
-                    .bundles_for_track(EvalTrack::Embeddings)
-                    .any(|bundle| bundle.id == bundle_id)
-            );
+            assert!(catalog
+                .bundles_for_track(EvalTrack::Embeddings)
+                .any(|bundle| bundle.id == bundle_id));
 
             let artifacts = catalog
                 .artifacts(&bundle_id)

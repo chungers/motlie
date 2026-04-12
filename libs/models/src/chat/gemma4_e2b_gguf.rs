@@ -1,8 +1,11 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use motlie_model::eval::EvalTrack;
-use motlie_model::{BundleId, CheckpointFormat, ModelBundle, ModelError, StartOptions};
-use motlie_model_llama_cpp::{LlamaCppTextBundle, LlamaCppTextSpec};
+use motlie_model::{
+    BundleId, CheckpointFormat, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
+};
+use motlie_model_llama_cpp::LlamaCppTextAdapter;
 
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleArtifacts, BundleDescriptor,
@@ -11,65 +14,51 @@ use crate::{
 
 pub const SELECTOR: &str = "google/gemma4_e2b_gguf";
 
-#[derive(Clone, Debug)]
-#[allow(non_camel_case_types)]
-pub struct Gemma4E2B_Gguf {
-    inner: LlamaCppTextBundle,
+pub(crate) fn register(catalog: &mut crate::Catalog) {
+    catalog.register(descriptor(), bundle);
+    catalog.register_model_variant(
+        identity(),
+        checkpoint(),
+        Arc::new(resolve_local_gguf_root),
+        Arc::new(LlamaCppTextAdapter::gemma4()),
+    );
 }
 
-impl Gemma4E2B_Gguf {
-    pub fn new() -> Self {
-        Self {
-            inner: LlamaCppTextBundle::new(LlamaCppTextSpec::gemma4_e2b()),
-        }
+pub(crate) fn identity() -> ModelIdentity {
+    ModelIdentity {
+        id: BundleId::new("gemma4_e2b"),
+        display_name: "Gemma 4 E2B-it".into(),
+        family: BundleFamily::Gemma,
+        capabilities: motlie_model::Capabilities::new(vec![
+            motlie_model::CapabilityDescriptor::multimodal_chat(),
+            motlie_model::CapabilityDescriptor::vision(),
+            motlie_model::CapabilityDescriptor::completion(),
+        ]),
+        eval_tracks: vec![
+            EvalTrack::Chat,
+            EvalTrack::Reasoning,
+            EvalTrack::Summarization,
+            EvalTrack::Classification,
+        ],
+        requirements: BundleRequirements {
+            platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
+            build: vec![],
+        },
     }
 }
 
-impl Default for Gemma4E2B_Gguf {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait::async_trait]
-impl ModelBundle for Gemma4E2B_Gguf {
-    fn id(&self) -> &BundleId {
-        self.inner.id()
-    }
-
-    fn metadata(&self) -> &motlie_model::BundleMetadata {
-        self.inner.metadata()
-    }
-
-    fn capabilities(&self) -> &motlie_model::Capabilities {
-        self.inner.capabilities()
-    }
-
-    async fn start(
-        &self,
-        options: StartOptions,
-    ) -> Result<Box<dyn motlie_model::BundleHandle>, ModelError> {
-        let StartOptions {
-            artifact_policy,
-            quantization,
-            unpack_root,
-            max_concurrency,
-        } = options;
-        let artifact_policy = match artifact_policy {
-            Some(motlie_model::ArtifactPolicy::LocalOnly { root }) => {
-                Some(motlie_model::ArtifactPolicy::LocalOnly {
-                    root: resolve_local_gguf_root(&root)?,
-                })
-            }
-            other => other,
-        };
-        let options = StartOptions {
-            artifact_policy,
-            quantization,
-            unpack_root,
-            max_concurrency,
-        };
-        self.inner.start(options).await
+pub(crate) fn checkpoint() -> ModelCheckpoint {
+    ModelCheckpoint {
+        format: CheckpointFormat::Gguf,
+        source: ArtifactSource::HuggingFace {
+            repo: "unsloth/gemma-4-E2B-it-GGUF",
+        },
+        include: vec![
+            ArtifactRule::Suffix("-Q4_K_M.gguf"),
+            ArtifactRule::Suffix("-Q8_0.gguf"),
+            ArtifactRule::Suffix("-f16.gguf"),
+        ],
+        quantization: None,
     }
 }
 
@@ -122,7 +111,15 @@ pub fn descriptor() -> BundleDescriptor {
 }
 
 pub fn bundle() -> Box<dyn ModelBundle> {
-    Box::new(Gemma4E2B_Gguf::new())
+    let descriptor = descriptor();
+    crate::adapter_backed_bundle(
+        descriptor.id,
+        descriptor.display_name,
+        identity(),
+        checkpoint(),
+        Arc::new(LlamaCppTextAdapter::gemma4()),
+        Arc::new(resolve_local_gguf_root),
+    )
 }
 
 fn resolve_local_gguf_root(root: &Path) -> Result<PathBuf, ModelError> {
@@ -158,8 +155,7 @@ mod tests {
     fn local_gguf_resolution_rejects_missing_cache() {
         let root = unique_temp_dir();
 
-        let error =
-            resolve_local_gguf_root(&root).expect_err("missing cache should fail closed");
+        let error = resolve_local_gguf_root(&root).expect_err("missing cache should fail closed");
 
         assert!(matches!(
             error,
@@ -172,8 +168,7 @@ mod tests {
         let root = unique_temp_dir();
         let _snapshot = create_fake_hf_gguf_cache(&root, "unsloth/gemma-4-E2B-it-GGUF");
 
-        let error = resolve_local_gguf_root(&root)
-            .expect_err("cache without .gguf should fail");
+        let error = resolve_local_gguf_root(&root).expect_err("cache without .gguf should fail");
 
         assert!(matches!(
             error,
@@ -190,8 +185,7 @@ mod tests {
         std::fs::write(snapshot.join("gemma-4-E2B-it-Q4_K_M.gguf"), "stub")
             .expect("gguf stub should be writable");
 
-        let resolved =
-            resolve_local_gguf_root(&root).expect("cache with .gguf should resolve");
+        let resolved = resolve_local_gguf_root(&root).expect("cache with .gguf should resolve");
 
         assert_eq!(resolved, snapshot);
         std::fs::remove_dir_all(&root).ok();
