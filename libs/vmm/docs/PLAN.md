@@ -87,10 +87,10 @@ Turn the working `v1.3` example into:
 - [ ] `examples/v1.4/harness` becomes the primary driver:
   - [x] `smoke` scenario
   - [x] `pty` scenario
-  - [ ] multi-guest named scenarios
-  - [ ] interactive/manual shell mode
+  - [x] multi-guest named scenarios
+  - [x] interactive/manual shell mode
   - [x] transcript/log bundle capture
-  - [ ] action/expectation script format
+  - [x] action/expectation script format
 
 The rule for this plan is:
 
@@ -372,8 +372,8 @@ Tasks:
 Acceptance:
 - `ssh alice@localhost` and `ssh bob@localhost` resolve predictably to their
   guests
-- `ssh jane@localhost` and `ssh mike@localhost` can create new guests on first
-  contact
+- `ssh joe@localhost` and `ssh zoe@localhost` can create new guests on first
+  contact when auto-provisioning is enabled
 - assignments are stable across relaunch within the same harness run
 - capacity exhaustion fails with a typed error instead of producing collisions
 

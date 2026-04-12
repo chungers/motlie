@@ -223,15 +223,19 @@ Current status against those criteria:
 
 `v1.4` now supports on-demand guest provisioning driven by incoming SSH
 principals through the library-owned `libs/vmm/src/provisioning.rs` registry.
+In `repl_host_v1_4`, this mode is disabled by default and must be enabled
+explicitly with `auto-provision on`.
 
 Example flow:
 
 - `ssh alice@localhost` -> use existing `alice` guest if already known
 - `ssh bob@localhost` -> provision and boot a new `bob` guest if missing
 - `ssh joe@localhost` -> allocate a new guest identity, boot it, and continue
-  the SSH session once the bridge is ready
+  the SSH session once the bridge is ready, when auto-provisioning is enabled
 - `ssh joe@localhost` again -> reuse the same provisioned guest and stable slot
   assignment within the current harness run
+- `boot alice` -> still boots a guest explicitly regardless of whether
+  auto-provisioning is currently on or off
 
 Current implementation notes:
 
@@ -241,12 +245,13 @@ Current implementation notes:
 - new guest names consume the next free slot
 - the SSH proxy can now call into the provisioner before opening a guest
   session, so external localhost SSH and harness `proxy_exec` both exercise the
-  same resolve-or-create path
+  same resolve-or-create path when auto-provisioning is enabled
 - `examples/v1.4/scenarios/auto-provision-ssh.json` is the regression scenario
   covering first-contact provisioning and guest reuse
 - `integration/repl-auto-provision-smoke.sh` is the external-SSH regression for
   the real `ssh -p <proxy_port> joe@localhost uname -s` flow through
-  `repl_host_v1_4`
+  `repl_host_v1_4`, and it also verifies that manual `boot` continues to work
+  with auto-provisioning both off and on
 
 The assignment should include:
 
