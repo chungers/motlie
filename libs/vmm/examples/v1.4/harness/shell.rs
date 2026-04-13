@@ -1,8 +1,7 @@
 use std::collections::HashMap;
-use std::io::{self, BufRead, Write};
+use std::io::{self};
 use std::path::Path;
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
 
 use motlie_vmm::ca::SshCa;
@@ -11,10 +10,12 @@ use motlie_vmm::provisioning::GuestProvisioner;
 use motlie_vmm::runtime::{
     ControlPlaneBacking, FilesystemBacking, HypervisorBacking, NetworkBacking, Runtime,
 };
-use motlie_vmm::ssh::{self, new_guest_registry, ExecOutput, PtyRequest, SshProxyConfig};
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+use motlie_vmm::ssh::{new_guest_registry, ExecOutput, PtyRequest, SshProxyConfig};
 
+use crate::demo_support::{
+    guest_runtime_paths, install_signal_watchers, prompt, shutdown_active_guests,
+    spawn_host_events, spawn_proxy_task, stdin_line_or_detach, HostEvent, ProxyRestartState,
+};
 use crate::terminal::{HarnessTerminalSession, TerminalBackendKind};
 use crate::{
     build_guest_provisioner, ensure_file_exists, print_instance_details, wait_for_egress_ready,
@@ -67,6 +68,7 @@ pub async fn run_shell(
         principal_resolver: Some(provisioner.ssh_principal_resolver()),
     };
     let mut proxy_task = spawn_proxy_task(proxy_config.clone(), Arc::clone(&guest_registry));
+    let mut proxy_restart_state = ProxyRestartState::new();
     print_instance_details(instance, &proxy_config);
 
     let mut terminals: HashMap<String, HarnessTerminalSession> = HashMap::new();
@@ -79,28 +81,32 @@ pub async fn run_shell(
         "Commands: help | boot <guest> | ready <guest> | exec <guest> <cmd> | validate <guest> | pty-open <guest> <session> | pty-send <session> <text> | pty-send-line <session> <text> | pty-read <session> [timeout_ms] | pty-expect <session> <text> | pty-expect-screen <session> <text> | pty-resize <session> <cols> <rows> | pty-screen <session> | shutdown <guest> | status | guests | capacity | where [guest] | quit"
     );
 
-    let mut events = spawn_stdin_reader();
-    install_signal_watchers(events.sender().clone())?;
-    let mut stdin_closed = false;
-    print_prompt(&mut stdout)?;
+    let (mut events, event_tx) = spawn_host_events();
+    install_signal_watchers(event_tx)?;
+    let mut events_open = true;
+    let mut headless = false;
+    prompt(&mut stdout, "v14-harness> ", &mut headless);
     loop {
         tokio::select! {
-            event = events.recv() => {
+            event = events.recv(), if events_open => {
                 let Some(event) = event else {
-                    stdin_closed = true;
-                    println!("notice: stdin reader disconnected; continuing headless");
+                    events_open = false;
+                    if !headless {
+                        headless = true;
+                        eprintln!("notice: operator event stream closed; continuing headless");
+                    }
                     continue;
                 };
 
                 match event {
                     HostEvent::StdinLine(line_result) => {
-                        let line = line_result?;
+                        let Some(line) = stdin_line_or_detach(line_result, &mut headless) else {
+                            continue;
+                        };
                         let trimmed = line.trim();
 
                         if trimmed.is_empty() || trimmed.starts_with('#') {
-                            if !stdin_closed {
-                                print_prompt(&mut stdout)?;
-                            }
+                            prompt(&mut stdout, "v14-harness> ", &mut headless);
                             continue;
                         }
 
@@ -187,36 +193,40 @@ pub async fn run_shell(
                         if should_exit {
                             break;
                         }
-                        if !stdin_closed {
-                            print_prompt(&mut stdout)?;
-                        }
+                        prompt(&mut stdout, "v14-harness> ", &mut headless);
                     }
                     HostEvent::StdinClosed => {
-                        if !stdin_closed {
-                            stdin_closed = true;
-                            println!("notice: stdin closed; continuing headless. Use SIGINT or SIGTERM to stop the harness.");
+                        if !headless {
+                            headless = true;
+                            eprintln!("notice: stdin closed; continuing headless. Use SIGINT or SIGTERM to stop the harness.");
                         }
                     }
                     HostEvent::Terminate(signal_name) => {
-                        println!("notice: received {signal_name}; shutting down");
+                        eprintln!("notice: received {signal_name}; shutting down");
                         break;
                     }
                     HostEvent::Hangup => {
-                        println!("notice: received SIGHUP; keeping proxy and guests alive");
+                        if !headless {
+                            headless = true;
+                        }
+                        eprintln!("notice: received SIGHUP; keeping proxy and guests alive");
                     }
                 }
             }
             proxy_result = &mut proxy_task => {
                 match proxy_result {
-                    Ok(Ok(())) => println!("warning: SSH proxy exited unexpectedly; restarting"),
-                    Ok(Err(err)) => println!("warning: SSH proxy failed: {err}; restarting"),
-                    Err(err) => println!("warning: SSH proxy task aborted: {err}; restarting"),
+                    Ok(Ok(())) => eprintln!("warning: SSH proxy exited unexpectedly"),
+                    Ok(Err(err)) => eprintln!("warning: SSH proxy failed: {err}"),
+                    Err(err) => eprintln!("warning: SSH proxy task aborted: {err}"),
                 }
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                let delay = proxy_restart_state
+                    .next_delay()
+                    .map_err(|err| -> DynError { err.into() })?;
+                eprintln!("warning: restarting SSH proxy in {}s", delay.as_secs());
+                tokio::time::sleep(delay).await;
                 proxy_task = spawn_proxy_task(proxy_config.clone(), Arc::clone(&guest_registry));
-                if !stdin_closed {
-                    print_prompt(&mut stdout)?;
-                }
+                proxy_restart_state.mark_started();
+                prompt(&mut stdout, "v14-harness> ", &mut headless);
             }
         }
     }
@@ -226,89 +236,7 @@ pub async fn run_shell(
     for (_session, terminal) in terminals.drain() {
         let _ = terminal.persist_artifacts();
     }
-    for guest in provisioner
-        .guests()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|guest| guest.active)
-        .map(|guest| guest.principal)
-    {
-        let _ = provisioner.shutdown_guest(&guest).await;
-    }
-
-    Ok(())
-}
-
-enum HostEvent {
-    StdinLine(Result<String, io::Error>),
-    StdinClosed,
-    Terminate(&'static str),
-    Hangup,
-}
-
-struct HostEvents {
-    rx: mpsc::UnboundedReceiver<HostEvent>,
-    tx: mpsc::UnboundedSender<HostEvent>,
-}
-
-impl HostEvents {
-    fn sender(&self) -> &mpsc::UnboundedSender<HostEvent> {
-        &self.tx
-    }
-
-    async fn recv(&mut self) -> Option<HostEvent> {
-        self.rx.recv().await
-    }
-
-}
-
-fn spawn_stdin_reader() -> HostEvents {
-    let (tx, rx) = mpsc::unbounded_channel();
-    let stdin_tx = tx.clone();
-    thread::spawn(move || {
-        for line in io::stdin().lock().lines() {
-            if stdin_tx.send(HostEvent::StdinLine(line)).is_err() {
-                break;
-            }
-        }
-        let _ = stdin_tx.send(HostEvent::StdinClosed);
-    });
-    HostEvents { rx, tx }
-}
-
-fn spawn_proxy_task(
-    config: SshProxyConfig,
-    registry: ssh::GuestRegistry,
-) -> JoinHandle<Result<(), ssh::SshProxyError>> {
-    tokio::spawn(ssh::run_proxy(config, registry))
-}
-
-fn install_signal_watchers(tx: mpsc::UnboundedSender<HostEvent>) -> Result<(), DynError> {
-    let ctrlc_tx = tx.clone();
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            let _ = ctrlc_tx.send(HostEvent::Terminate("SIGINT"));
-        }
-    });
-
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-
-        let mut sigterm = signal(SignalKind::terminate())?;
-        let sigterm_tx = tx.clone();
-        tokio::spawn(async move {
-            sigterm.recv().await;
-            let _ = sigterm_tx.send(HostEvent::Terminate("SIGTERM"));
-        });
-
-        let mut sighup = signal(SignalKind::hangup())?;
-        tokio::spawn(async move {
-            while sighup.recv().await.is_some() {
-                let _ = tx.send(HostEvent::Hangup);
-            }
-        });
-    }
+    shutdown_active_guests(&provisioner, "harness shell").await;
 
     Ok(())
 }
@@ -342,9 +270,13 @@ fn print_status(provisioner: &GuestProvisioner) {
     }
 
     for guest in active {
-        let runtime_paths = guest
-            .runtime_paths
-            .expect("active guest snapshots always include runtime paths");
+        let Some(runtime_paths) = guest_runtime_paths(&guest) else {
+            println!(
+                "{} pid={:?} runtime_paths=(missing)",
+                guest.principal, guest.pid
+            );
+            continue;
+        };
         println!(
             "{} pid={:?} api={} vnet={} vsock={}",
             guest.principal,
@@ -620,11 +552,11 @@ fn print_pty_read(output: &str, exit_status: Option<u32>, eof: bool, closed: boo
 }
 
 fn print_guest_where(demo_root: &Path, guest: &motlie_vmm::provisioning::ProvisionedGuestSnapshot) {
-    let runtime_paths = guest
-        .runtime_paths
-        .clone()
-        .expect("active guest snapshots always include runtime paths");
     println!("[{}]", guest.principal);
+    let Some(runtime_paths) = guest_runtime_paths(guest) else {
+        println!("  runtime_paths=(missing)");
+        return;
+    };
     println!(
         "  home_host={}",
         demo_root
@@ -665,12 +597,6 @@ fn print_guest_where(demo_root: &Path, guest: &motlie_vmm::provisioning::Provisi
     println!("  egress_mac={:02x?}", guest.net_assignment.egress_mac);
     println!("  launch_log={}", runtime_paths.launch_log.display());
     println!("  serial_log={}", runtime_paths.serial_log.display());
-}
-
-fn print_prompt(stdout: &mut io::Stdout) -> Result<(), DynError> {
-    print!("v14-harness> ");
-    stdout.flush()?;
-    Ok(())
 }
 
 async fn boot_guest(guest_id: &str, provisioner: &GuestProvisioner) -> Result<(), DynError> {
