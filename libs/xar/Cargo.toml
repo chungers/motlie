@@ -1,0 +1,17 @@
+[package]
+name = "motlie-xar"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Unified archive and distribution format for large Motlie artifacts"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+
+[[example]]
+name = "xar_v0_1"
+path = "examples/v0.1/main.rs"

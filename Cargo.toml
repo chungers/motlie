@@ -9,6 +9,7 @@ members = [
     "libs/model-eval",
     "libs/models",
     "libs/tmux",
+    "libs/xar",
 ]
 resolver = "2"
 
