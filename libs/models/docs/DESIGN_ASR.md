@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-04-13 | @codex-asr: Addressed R1 review feedback by stream-scoping `AudioSpec`, changing `push_chunk()` to return `Option`, documenting `Send`/not-`Sync` stream ownership, making quantization explicit, tightening edge-case semantics, and narrowing the first implementation slice to the `.wav` path. | Core Contract Changes in `libs/model`, Generic Backend Design, Curated Bundle Design in `libs/models`, Streaming PCM API Contract, Migration and Compatibility Strategy, API Sketch, Testing Scope for PLAN |
 | 2026-04-12 | @codex-asr: Initial brownfield design for a voice-to-text (ASR) vertical slice in the Motlie model stack. Recommends a `whisper.cpp` backend with a curated `whisper-base.en` bundle, documents the streaming PCM contract, and evaluates `faster-whisper` and streaming ONNX alternatives. | All |
 
 This document defines the design for adding voice-to-text transcription to the existing `libs/model` and `libs/models` architecture. The design is intentionally narrow: one end-to-end vertical slice from curated artifact download to transcription output, with the API shaped around streaming PCM chunks so both `.wav` files and websocket audio streams map to the same contract.

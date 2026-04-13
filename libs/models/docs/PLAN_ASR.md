@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-13 | @codex-asr | Addressed R1 review feedback by adding explicit tasks for the stream-scoped `AudioSpec`, `Option<TranscriptionUpdate>`, runtime metrics, exact brownfield file touch points, `QuantizationSupport::none()`, and the websocket deferral details for the first implementation slice. |
 | 2026-04-12 | @codex-asr | Initial PLAN for the first ASR vertical slice. Covers the brownfield contract extension in `libs/model`, a new `whisper.cpp` backend crate, the curated `whisper_base_en` bundle in `libs/models`, and example validation for `.wav` and websocket-fed PCM. |
 
 Derived from [DESIGN_ASR.md](./DESIGN_ASR.md). This PLAN is intentionally vertical-slice oriented: one curated model, one backend family, one streaming transcription contract, and one example path from artifact download to emitted transcript text.
