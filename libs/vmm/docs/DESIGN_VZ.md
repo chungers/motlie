@@ -775,6 +775,335 @@ Testing expectations:
 - `vz-runner` should also have its own Swift-side unit coverage for config
   decoding, control protocol handling, and readiness-state transitions
 
+## Feature Parity Evaluation Against CH
+
+The long-term requirement is stronger than "a usable macOS backend." The Vz
+path must satisfy the same product contracts the current CH/Motlie path
+already proves in `feature/vmm`:
+
+- guest lifecycle parity:
+  - `prepare()`
+  - `boot()`
+  - `VmHandle::ready(...)`
+  - `VmHandle::exec(...)`
+  - `VmHandle::open_pty(...)`
+  - `VmHandle::shutdown()`
+- outbound internet egress
+- SSH ingress through the localhost proxy
+- auto-provisioning from incoming SSH principals
+- per-guest mount visibility and isolation
+- multi-tenant guest provisioning and stable guest reuse
+
+The current Vz design is directionally correct, but it is not yet full parity
+with the CH/Motlie stack. The main gaps are below.
+
+### 1. VNet Integration
+
+#### What Works As-Is
+
+- The host-side SSH proxy and programmatic control plane already live above the
+  hypervisor in `libs/vmm/src/ssh.rs`.
+- The guest-visible contract for SSH/control is already a guest-initiated
+  vsock stream on port `2222`.
+- NAT-style outbound connectivity exists in Vz through
+  `VZNATNetworkDeviceAttachment`, so a Vz guest can reach the internet without
+  requiring host TAP setup.
+- The auto-provisioning resolver path in `libs/vmm/src/provisioning.rs` is
+  backend-agnostic once a guest is booted and reachable through the control
+  plane.
+
+#### What Does Not Have Parity Yet
+
+- The current CH path proves outbound internet through `libs/vnet` and
+  `MotlieVnetBacking`, not merely "some form of guest networking."
+- `libs/vnet` today is Linux/CH-specific:
+  - it exposes a vhost-user-net backend for Cloud Hypervisor
+  - it assumes a Unix socket presented to a virtio-net frontend
+  - it is documented as the owner of outbound egress in the composed harness
+- The current Vz design replaces that with Apple NAT inside the helper. That is
+  functional for internet access, but it is not strict implementation parity
+  with the CH path because:
+  - no `libs/vnet` backend is started
+  - no `runtime_paths.vnet_socket` artifact is consumed by the hypervisor
+  - no shared `motlie-vnet` observability or failure surface exists
+  - current harness assertions about "Motlie vnet" and guest routing are too
+    CH-specific to reuse unchanged
+- Bridged networking parity is also missing:
+  - CH currently has a TAP-based admin option
+  - Vz bridged networking is deferred and requires the
+    `com.apple.vm.networking` entitlement
+  - `VZVmnetNetworkDeviceAttachment` is not a practical parity path because it
+    is macOS 26+ only
+
+#### Required Changes
+
+- `libs/vnet` does not need to become the phase-1 Vz egress backend.
+- `libs/vmm` does need a backend-neutral network intent/observability layer so
+  both backends satisfy the same product requirement through different
+  realizations.
+- Required `libs/vmm` changes:
+  - replace CH-specific "vnet socket implies egress readiness" assumptions with
+    backend-specific network observability
+  - separate "guest has outbound egress" from "guest is using `motlie-vnet`"
+  - teach harness checks to validate backend-neutral outcomes:
+    - default route exists
+    - DNS works
+    - HTTPS fetch works
+- Optional future `libs/vnet` work:
+  - if strict subsystem reuse is desired, introduce a backend-neutral egress
+    facade above `motlie-vnet`, but this is not required for parity of product
+    behavior
+
+#### Blocking Items
+
+- No phase-1 design yet for bridged/admin-network parity on macOS
+- No reviewed backend-neutral replacement for CH-specific `vnet` artifacts in
+  harness assertions and observability
+
+### 2. VFS Integration
+
+#### What Works As-Is
+
+- `GuestMountSpec` already carries the key guest-facing shape:
+  - mount tag
+  - guest path
+  - host path
+- The CH orchestrator already treats filesystem backing as an injected runtime
+  concern through `FilesystemBacking`.
+- The current product-level requirement is "the guest sees the right mount
+  points and isolation boundaries," not "the backend must literally use the
+  same transport."
+- Vz VirtioFS can expose host directories directly with matching tags, so
+  static host-directory sharing can satisfy the same guest-visible mount
+  contract.
+
+#### What Does Not Have Parity Yet
+
+- The current CH/Motlie path uses `libs/vfs` as a managed filesystem service:
+  - host-side `FsServer`
+  - vsock transport handshake by mount tag
+  - policy hook (`PolicyFn`)
+  - overlay-capable server behavior
+- The current Vz design only covers direct VirtioFS sharing. That is not full
+  parity with CH because it bypasses:
+  - the host-managed `FsServer`
+  - the existing policy engine in `libs/vfs/src/core/policy.rs`
+  - overlay-managed mutation/event semantics
+  - the current readiness rule that waits for all required mount tags to attach
+- If the product requires the same managed filesystem semantics as CH, pure
+  VirtioFS pass-through is insufficient.
+
+#### Required Changes
+
+- If parity means static host-directory mounts only:
+  - no `libs/vfs` changes are required
+  - `libs/vmm` only needs backend-specific filesystem observability
+- If parity means the existing CH managed-filesystem behavior:
+  - Vz needs a way to run the current `libs/vfs` guest path inside the guest
+    and keep the host `FsServer` in play
+  - the simplest parity-preserving design is:
+    - keep the current `libs/vfs` host service in `FilesystemBacking::MotlieVfs`
+    - keep the guest mounter binary and `mounts.yaml`
+    - use Vz virtio-socket as the transport carrier for the same logical
+      guestfs channel instead of replacing guestfs with raw VirtioFS
+- That implies `libs/vfs` itself should not need a policy-engine rewrite, but
+  it does need transport abstraction if the existing implementation is too
+  tightly coupled to the current CH-style Unix-socket-vsock path.
+
+#### Likely `libs/vfs` Work
+
+- factor transport assumptions so the guestfs server/client can run over:
+  - current CH-style host UDS bridge
+  - Vz host-side virtio-socket listeners
+- preserve mount-tag handshake and `PolicyFn` behavior regardless of hypervisor
+
+#### Blocking Items
+
+- The current Vz design does not yet commit to whether parity means:
+  - VirtioFS-only mount visibility parity
+  - or full `libs/vfs` managed-filesystem parity
+- Until that is decided, VFS parity is partially blocked by product-definition
+  ambiguity
+
+### 3. Guest Bootup Lifecycle
+
+#### What Works As-Is
+
+- `prepare()` and `boot()` already separate pure guest shaping from backend
+  realization.
+- `VmHandle` is already the common lifecycle surface for both backends.
+- `exec`, `open_pty`, and auto-provisioning all run through the backend-neutral
+  SSH control plane once the guest bridge is connected.
+- The helper-process model matches the CH shell backend pattern well enough to
+  preserve `pid`, shutdown fallback, and filesystem-log observability.
+
+#### What Does Not Have Parity Yet
+
+- The CH shell backend today is simpler than the proposed Vz helper because it
+  shells out to an existing launcher script and relies on CH’s own host socket
+  model.
+- The Vz helper still has unimplemented parity-critical responsibilities:
+  - host-side virtio-socket listener management
+  - cloud-init disk creation and attachment
+  - backend-specific readiness/status reporting
+  - structured propagation of launch/configuration errors
+- `VmHandle::ready(...)` parity is not complete until the backend-neutral
+  readiness probe lands and the Vz path proves the same stage ordering:
+  - backend ready
+  - filesystem ready when applicable
+  - SSH bridge ready
+  - exec ready
+
+#### Required Changes
+
+- `libs/vmm` must add backend-neutral readiness semantics exactly as described
+  earlier in this document
+- `vz-runner` must implement:
+  - a real status/control protocol
+  - two-phase readiness
+  - clean shutdown reporting
+  - bridge/error propagation strong enough to classify failures the same way the
+    harness does for CH
+
+#### Blocking Items
+
+- None architecturally, but the helper is still the critical implementation
+  risk because several parity features currently collapse into it
+
+### 4. Userspace Management, Provisioning, And Isolation
+
+#### What Works As-Is
+
+- `libs/vmm/src/provisioning.rs` is already mostly backend-neutral:
+  - principal -> `GuestSpec` creation
+  - stable guest reuse
+  - allocator-driven slot/CID/IP assignment
+  - host seeding hooks
+  - `ensure_guest_for_principal(...)`
+- SSH key/cert policy is also already hypervisor-neutral at the library layer:
+  - guest `GuestSshAccess`
+  - CA-signed ephemeral auth
+  - principal resolver integration in `ssh.rs`
+- Multi-tenant isolation at the orchestrator layer already exists:
+  - one provisioned record per principal
+  - per-guest runtime paths
+  - per-guest mount roots and network assignment
+
+#### What Does Not Have Parity Yet
+
+- The current Vz design only partially describes how guest image customization
+  carries over:
+  - user account creation
+  - SSH authorized principals/key injection
+  - agent-state/home/workspace mount wiring
+  - boot-time services such as the guest vsock SSH loop and guestfs mounter
+- CH currently proves this through the existing image and cloud-init path in
+  `examples/v1.4/build-guest.sh`.
+- Vz must either reuse that exact guest image flow or define a reviewed macOS
+  equivalent that produces the same guest-side services.
+
+#### Required Changes
+
+- No major `libs/vfs` or `libs/vnet` API work is required for provisioning
+  itself.
+- `libs/vmm` does need to state explicitly that the Vz path reuses the same
+  guest image contents and cloud-init provisioning semantics as CH:
+  - same users
+  - same CA trust model
+  - same `motlie-vmm-vsock-ssh` guest service
+  - same guestfs/agent-state/bootstrap units where required
+
+#### Blocking Items
+
+- Until the Vz image build path is defined as "same guest image contract,
+  different hypervisor realization," userspace-management parity remains
+  under-specified
+
+### 5. SSH Proxy And Auto-Provision Parity
+
+#### What Works As-Is
+
+- The hardened SSH proxy path in `libs/vmm/src/ssh.rs` is already designed to
+  sit above the hypervisor:
+  - localhost russh ingress
+  - principal resolver hook
+  - guest bridge registry
+  - exec and PTY over the same authenticated guest bridge
+- `GuestProvisioner::ssh_principal_resolver()` already resolves or provisions a
+  guest before the proxy opens the guest channel.
+- That means the auto-provision contract can remain identical for Vz if the Vz
+  backend delivers the same bridge semantics and readiness ordering.
+
+#### What Does Not Have Parity Yet
+
+- The current Vz design mentions the bridge, but not the stronger guarantee now
+  required by the hardened auto-provision path:
+  - first-contact SSH must block until the guest is provisioned, booted, and
+    the bridge is authenticated
+  - repeat SSH to the same principal must reuse the same live guest record
+  - turning auto-provision off must fail unknown principals without accidentally
+    creating Vz guests
+- Those rules are enforced in `ssh.rs` and provisioning today, but Vz still has
+  to preserve the same observable timing and failure modes.
+
+#### Required Changes
+
+- No new `libs/vnet` changes are required for SSH proxy parity
+- No new `libs/vfs` changes are required for SSH proxy parity directly
+- `vz-runner` must expose enough status to let Rust distinguish:
+  - VM running but guest bridge not ready
+  - guest bridge ready
+  - guest bridge failed
+- `libs/vmm` harness/docs should add an explicit Vz parity requirement:
+  - the existing `auto-provision-ssh` scenario must pass unchanged against a Vz
+    backend selection, not just against CH
+
+#### Blocking Items
+
+- The current design does not yet state that `auto-provision-ssh.json` and
+  `repl-auto-provision-smoke.sh` are acceptance criteria for Vz parity
+
+## Parity Summary
+
+### Works As-Is
+
+- backend-neutral provisioning core in `libs/vmm`
+- backend-neutral SSH proxy / exec / PTY control surface in `libs/vmm`
+- Vz can support vsock-based control-plane transport without redesigning the
+  proxy architecture
+- guest-visible static host-directory sharing is possible without changing
+  `GuestMountSpec`
+
+### Needs `libs/vmm` Changes
+
+- backend-neutral readiness and network/filesystem observability
+- explicit parity requirement that Vz passes the same lifecycle and
+  auto-provision acceptance scenarios as CH
+- explicit reuse of the same guest image / cloud-init / guest-service contract
+- backend-neutral egress assertions in the harness instead of CH-specific
+  `motlie-vnet` assumptions
+
+### Likely Needs `libs/vfs` Changes
+
+- only if Vz must preserve the current managed-filesystem semantics rather than
+  downgraded static VirtioFS sharing
+- likely transport abstraction so the same host `FsServer` / policy model can
+  ride a Vz host-side virtio-socket path
+
+### Likely Needs `libs/vnet` Changes
+
+- no mandatory phase-1 crate changes if Vz uses Apple NAT for outbound internet
+- possible future refactor if the project wants a backend-neutral "egress
+  service" abstraction above `motlie-vnet`
+
+### Blocked Or Still Under-Specified
+
+- bridged/admin-network parity on macOS
+- whether VFS parity means static mount visibility or full managed-filesystem
+  semantics including the current `libs/vfs` policy engine
+- explicit acceptance criterion that the hardened SSH auto-provision tests must
+  pass unchanged on Vz
+
 ## Explicit Non-Goals for the First Slice
 
 - macOS guests
