@@ -15,6 +15,7 @@
 //! This design avoids unsafe Send impls on libslirp's C state.
 
 pub mod slirp;
+pub mod policy;
 mod backend;
 mod error;
 mod config;
