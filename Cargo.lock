@@ -5199,6 +5199,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "hf-hub 0.5.0",
+ "hound",
  "motlie-model",
  "motlie-model-llama-cpp",
  "motlie-model-mistral",
