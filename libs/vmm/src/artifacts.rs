@@ -54,6 +54,10 @@ pub fn render_cloud_init(guest: &GuestSpec) -> Result<String, ArtifactError> {
     writeln!(&mut out, "    gid: {}", guest.user.gid).expect("writing to String cannot fail");
     writeln!(&mut out, "    home: {}", guest.user.home.display())
         .expect("writing to String cannot fail");
+    writeln!(&mut out, "    shell: /bin/bash").expect("writing to String cannot fail");
+    writeln!(&mut out, "    groups: [sudo]").expect("writing to String cannot fail");
+    writeln!(&mut out, "    sudo: ALL=(ALL) NOPASSWD:ALL").expect("writing to String cannot fail");
+    writeln!(&mut out, "    lock_passwd: true").expect("writing to String cannot fail");
 
     if !guest.software.packages.is_empty() {
         writeln!(&mut out, "packages:").expect("writing to String cannot fail");
@@ -213,8 +217,14 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
     .expect("writing to String cannot fail");
     writeln!(
         &mut out,
-        "SSH_USER={}",
-        shell_single_quote(&cfg.guest.user.name)
+        "SSH_LOGIN_USER={}",
+        shell_single_quote(&cfg.guest.ssh.login_user)
+    )
+    .expect("writing to String cannot fail");
+    writeln!(
+        &mut out,
+        "SSH_PRINCIPAL={}",
+        shell_single_quote(&cfg.guest.ssh.principal)
     )
     .expect("writing to String cannot fail");
     writeln!(
@@ -269,7 +279,10 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
     out.push_str(
         "LAUNCH_ARGS+=(--egress-host-ip \"$EGRESS_HOST_IP\" --egress-guest-ip \"$EGRESS_GUEST_IP\" --egress-dns-ip \"$EGRESS_DNS_IP\")\n",
     );
-    out.push_str("LAUNCH_ARGS+=(--ssh-user \"$SSH_USER\" --hostname \"$GUEST_HOSTNAME\" --login-home \"$LOGIN_HOME\")\n");
+    out.push_str(
+        "LAUNCH_ARGS+=(--ssh-user \"$SSH_LOGIN_USER\" --ssh-principal \"$SSH_PRINCIPAL\")\n",
+    );
+    out.push_str("LAUNCH_ARGS+=(--hostname \"$GUEST_HOSTNAME\" --login-home \"$LOGIN_HOME\")\n");
     out.push_str("LAUNCH_ARGS+=(--overlay-size \"$OVERLAY_SIZE\")\n");
     out.push_str("LAUNCH_ARGS+=(--vnet-socket \"$VNET_SOCKET\")\n");
     if cfg.ssh_ca_pubkey.is_some() {
@@ -418,9 +431,7 @@ mod tests {
         assert!(script.contains("GUEST_ID='alice'"));
         assert!(script.contains("SEED_DIR=\"${SEED_DIR:-/tmp/motlie-vmm-v14-cloud-init-alice}\""));
         assert!(script.contains("RUNTIME_ROOT=\"${RUNTIME_ROOT:-/tmp/motlie-vmm-v14-runtime}\""));
-        assert!(
-            script.contains("API_SOCKET=\"${API_SOCKET:-/tmp/motlie-vmm-v14-alice-api.sock}\"")
-        );
+        assert!(script.contains("API_SOCKET=\"${API_SOCKET:-/tmp/motlie-vmm-v14-alice-api.sock}\""));
         assert!(
             script.contains("VSOCK_SOCKET=\"${VSOCK_SOCKET:-/tmp/motlie-vmm-v14-alice.vsock}\"")
         );
