@@ -384,7 +384,9 @@ setup_user() {
     mount --bind /agent-state/claude-code "$claude_code_dst"
 }
 
-for user_name in alice bob; do
+for home_dir in /home/*; do
+    [ -d "$home_dir" ] || continue
+    user_name="$(basename "$home_dir")"
     if id -u "$user_name" >/dev/null 2>&1; then
         setup_user "$user_name"
     fi
