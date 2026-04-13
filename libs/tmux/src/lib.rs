@@ -23,7 +23,10 @@ pub use filter::{
     clean_line, diff_new_lines, is_tui_chrome,
 };
 pub use fleet::{Fleet, HostStatus, SessionMonitorStatus};
-pub use host::{ExecHandle, HostHandle, Target};
+pub use host::{
+    ExecHandle, HostHandle, PaneTargetTree, SessionTargetTree, SessionWatchHandle,
+    SessionWatchOptions, Target, WindowTargetTree,
+};
 pub use keys::{KeySequence, SpecialKey};
 pub use monitor::{MonitorExitReason, MonitorHandle, MonitorHealth, SessionMonitorHandle};
 pub use sink::{

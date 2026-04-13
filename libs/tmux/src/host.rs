@@ -11,7 +11,9 @@ use crate::keys::KeySequence;
 use crate::monitor::{
     MonitorExitReason, MonitorHandle, MonitorHealth, SessionMonitor, SessionMonitorHandle,
 };
-use crate::sink::{OutputBus, TargetOutput};
+use crate::sink::{
+    HistoryHandle, HistoryOptions, HistorySnapshot, OutputBus, SinkFilter, TargetOutput,
+};
 use crate::transport::TransportKind;
 use crate::types::*;
 
@@ -118,6 +120,83 @@ impl HostHandleInner {
 #[derive(Clone)]
 pub struct HostHandle {
     inner: Arc<HostHandleInner>,
+}
+
+#[derive(Clone)]
+pub struct SessionWatchOptions {
+    pub queue_capacity: usize,
+    pub history: HistoryOptions,
+}
+
+impl Default for SessionWatchOptions {
+    fn default() -> Self {
+        Self {
+            queue_capacity: 64,
+            history: HistoryOptions::default(),
+        }
+    }
+}
+
+pub struct SessionWatchHandle {
+    session_name: String,
+    bus: Arc<OutputBus>,
+    monitor: SessionMonitorHandle,
+    history: HistoryHandle,
+}
+
+impl SessionWatchHandle {
+    pub fn session_name(&self) -> &str {
+        &self.session_name
+    }
+
+    pub fn monitor(&self) -> &SessionMonitorHandle {
+        &self.monitor
+    }
+
+    pub fn history(&self) -> &HistoryHandle {
+        &self.history
+    }
+
+    pub fn health(&self) -> MonitorHealth {
+        self.monitor.health()
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.monitor.is_active()
+    }
+
+    pub async fn render_text(&self) -> String {
+        self.history.render_text().await
+    }
+
+    pub async fn snapshot(&self) -> HistorySnapshot {
+        self.history.snapshot().await
+    }
+
+    pub async fn shutdown(self) -> Result<HistorySnapshot> {
+        self.monitor.shutdown().await?;
+        let _ = self.bus.unsubscribe(self.history.id());
+        self.history.join().await
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionTargetTree {
+    pub info: SessionInfo,
+    pub windows: Vec<WindowTargetTree>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WindowTargetTree {
+    pub info: WindowInfo,
+    pub target: String,
+    pub panes: Vec<PaneTargetTree>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PaneTargetTree {
+    pub address: PaneAddress,
+    pub target: String,
 }
 
 impl HostHandle {
@@ -340,6 +419,82 @@ impl HostHandle {
                 }))
             }
         }
+    }
+
+    /// Parse and resolve a canonical tmux target string.
+    pub async fn resolve_target_str(&self, target_str: &str) -> Result<Option<Target>> {
+        let spec = TargetSpec::parse(target_str)?;
+        self.target(&spec).await
+    }
+
+    /// Build a discovery snapshot of sessions, windows, and panes.
+    pub async fn snapshot_targets(&self) -> Result<Vec<SessionTargetTree>> {
+        let sessions = self.list_sessions().await?;
+        let mut trees = Vec::with_capacity(sessions.len());
+
+        for session in sessions {
+            let session_target = Target {
+                inner: self.inner.clone(),
+                address: TargetAddress::Session(session.clone()),
+            };
+            let windows = session_target.children().await?;
+            let mut window_trees = Vec::with_capacity(windows.len());
+
+            for window in windows {
+                let info = window.window_info().cloned().ok_or_else(|| {
+                    Error::State(format!(
+                        "window target '{}' missing window info",
+                        window.target_string()
+                    ))
+                })?;
+                let panes = window.children().await?;
+                let mut pane_trees = Vec::with_capacity(panes.len());
+
+                for pane in panes {
+                    let address = pane.pane_address().cloned().ok_or_else(|| {
+                        Error::State(format!(
+                            "pane target '{}' missing pane address",
+                            pane.target_string()
+                        ))
+                    })?;
+                    pane_trees.push(PaneTargetTree {
+                        address,
+                        target: pane.target_string(),
+                    });
+                }
+
+                window_trees.push(WindowTargetTree {
+                    info,
+                    target: window.target_string(),
+                    panes: pane_trees,
+                });
+            }
+
+            trees.push(SessionTargetTree {
+                info: session,
+                windows: window_trees,
+            });
+        }
+
+        Ok(trees)
+    }
+
+    /// Flatten the current target tree into canonical target strings.
+    pub async fn list_target_strings(&self) -> Result<Vec<String>> {
+        let trees = self.snapshot_targets().await?;
+        let mut out = Vec::new();
+
+        for session in trees {
+            out.push(session.info.name.clone());
+            for window in session.windows {
+                out.push(window.target.clone());
+                for pane in window.panes {
+                    out.push(pane.target);
+                }
+            }
+        }
+
+        Ok(out)
     }
 
     /// Upload a file or directory to the host (DC23).
@@ -676,6 +831,43 @@ impl HostHandle {
         })?;
 
         Ok(SessionMonitorHandle::new(target, stop_tx, task, health))
+    }
+
+    /// Start a higher-level session watch with rolling transcript state.
+    ///
+    /// This composes:
+    /// 1. `OutputBus::subscribe()` with a session filter
+    /// 2. `start_monitoring_session()`
+    /// 3. `Subscription::history(...)`
+    ///
+    /// It is intended for driver, REPL, and TUI integration layers that want
+    /// one owned handle for watch lifecycle rather than managing monitor and
+    /// transcript pieces separately.
+    pub async fn watch_session(
+        &self,
+        session_name: &str,
+        opts: &SessionWatchOptions,
+    ) -> Result<SessionWatchHandle> {
+        let bus = self.output_bus();
+        let filter = SinkFilter::for_session(session_name);
+        let subscription = bus.subscribe(vec![filter], opts.queue_capacity)?;
+        let subscription_id = subscription.id();
+
+        match self.start_monitoring_session(session_name).await {
+            Ok(monitor) => {
+                let history = subscription.history(opts.history.clone());
+                Ok(SessionWatchHandle {
+                    session_name: session_name.to_string(),
+                    bus,
+                    monitor,
+                    history,
+                })
+            }
+            Err(err) => {
+                let _ = bus.unsubscribe(subscription_id);
+                Err(err)
+            }
+        }
     }
 
     /// Start monitoring all sessions (optionally filtered).
