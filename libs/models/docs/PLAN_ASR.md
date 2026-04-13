@@ -31,14 +31,33 @@ Add ASR to `libs/model` without disturbing the existing bundle lifecycle shape.
   DESIGN reference: `Core Contract Changes in libs/model`, `Streaming PCM API Contract`
 - [ ] Add `TranscriptionModel` and `TranscriptionStream`.
   DESIGN reference: `Core Contract Changes in libs/model`
+- [ ] Keep `AudioSpec` stream-scoped at `open_stream()` time; do not repeat it on each `PcmChunk`.
+  DESIGN reference: `Core Contract Changes in libs/model`, `Streaming PCM API Contract`
+- [ ] Make `push_chunk()` return `Option<TranscriptionUpdate>` so no-output decode steps do not force empty-update handling.
+  DESIGN reference: `Core Contract Changes in libs/model`
+- [ ] Document and test the deliberate ownership model: `TranscriptionModel` is shared, `TranscriptionStream` is `Send` and stateful, but not `Sync`.
+  DESIGN reference: `Core Contract Changes in libs/model`
 - [ ] Extend `BundleHandle` with `transcription() -> Result<&dyn TranscriptionModel, ModelError>`.
   DESIGN reference: `Core Contract Changes in libs/model`, `Migration and Compatibility Strategy`
 - [ ] Extend the fake-handle tests in `libs/model` to cover unsupported transcription behavior.
   DESIGN reference: `Migration and Compatibility Strategy`
+- [ ] Define and test the edge-case semantics for:
+  post-EOS `push_chunk`,
+  non-monotonic `sequence`,
+  empty `data`,
+  `finish()` ownership.
+  DESIGN reference: `Streaming PCM API Contract`
 
 ### 1.3 - Brownfield backend migration
 
 - [ ] Update existing backends in `mistral` and `llama_cpp` so `transcription()` returns `UnsupportedCapability(Transcription)`.
+  DESIGN reference: `Migration and Compatibility Strategy`
+- [ ] Touch the exact in-tree files required by the `BundleHandle` trait expansion:
+  `libs/model/backends/mistral/src/text.rs`,
+  `libs/model/backends/mistral/src/multimodal.rs`,
+  `libs/model/backends/mistral/src/embeddings.rs`,
+  `libs/model/backends/llama_cpp/src/text.rs`,
+  `libs/model/src/lib.rs`.
   DESIGN reference: `Migration and Compatibility Strategy`
 - [ ] Add regression tests proving the existing bundles still reject ASR cleanly.
   DESIGN reference: `Testing Scope for PLAN`
@@ -52,6 +71,8 @@ Introduce a new backend crate that follows the same adapter-backed shape as the 
 - [ ] Add `libs/model/backends/whisper_cpp/Cargo.toml` and wire it into the workspace.
   DESIGN reference: `Generic Backend Design`
 - [ ] Add `BackendKind::WhisperCpp` and `CheckpointFormat::Ggml`.
+  DESIGN reference: `Generic Backend Design`
+- [ ] Document in code comments and tests that the first curated artifact is currently true `ggml` (`ggml-base.en.bin`), not `gguf`.
   DESIGN reference: `Generic Backend Design`
 - [ ] Add crate exports for `WhisperCppTranscriptionAdapter`, `WhisperCppTranscriptionBundle`, and `WhisperCppTranscriptionSpec`.
   DESIGN reference: `Generic Backend Design`
@@ -76,6 +97,8 @@ Introduce a new backend crate that follows the same adapter-backed shape as the 
   DESIGN reference: `Generic Backend Design`
 - [ ] Emit `final_segment = false` for interim results and `final_segment = true` on committed output.
   DESIGN reference: `Streaming PCM API Contract`
+- [ ] Return `Ok(None)` from `push_chunk()` when the current chunk does not cross a decode boundary.
+  DESIGN reference: `Core Contract Changes in libs/model`
 - [ ] Add backend tests for:
   PCM normalization,
   monotonic chunk sequencing,
@@ -89,6 +112,8 @@ Introduce a new backend crate that follows the same adapter-backed shape as the 
   DESIGN reference: `Feature Flag Design`
 - [ ] Reuse the existing `MOTLIE_MODEL_FORCE_CPU` convention where practical.
   DESIGN reference: `Generic Backend Design`
+- [ ] Wire the backend through the existing runtime metric helpers so ASR surfaces latency and memory snapshots like the current backends.
+  DESIGN reference: `Testing Scope for PLAN`
 - [ ] Add at least one non-CUDA and one CUDA-build compilation check to CI or local verification guidance.
   DESIGN reference: `Feature Flag Design`, `Testing Scope for PLAN`
 
@@ -115,6 +140,8 @@ Add the first curated ASR bundle using the same registration and selector patter
   DESIGN reference: `Architecture`, `Curated Bundle Design in libs/models`
 - [ ] Keep the curated artifact declaration to a single exact include rule for `ggml-base.en.bin`.
   DESIGN reference: `Curated Bundle Design in libs/models`
+- [ ] Set `QuantizationSupport::none()` explicitly for the first ASR bundle.
+  DESIGN reference: `Curated Bundle Design in libs/models`
 - [ ] Add descriptor-reviewability tests and local-artifact resolution tests.
   DESIGN reference: `Testing Scope for PLAN`
 
@@ -131,7 +158,7 @@ Add the first curated ASR bundle using the same registration and selector patter
 
 ## Phase 4: Vertical Slice Examples and Verification Paths
 
-Prove the new contract from two caller perspectives: `.wav` file and websocket-fed PCM.
+Prove the first implementation slice through the simplest end-to-end caller path: `.wav` file transcription over the streaming PCM contract.
 
 ### 4.1 - `.wav` example
 
@@ -144,16 +171,16 @@ Prove the new contract from two caller perspectives: `.wav` file and websocket-f
 
 ### 4.2 - Websocket-fed PCM example path
 
-- [ ] Add an example mode or helper path that accepts websocket-fed PCM and routes it into the same `TranscriptionStream`.
+- [ ] Defer the websocket adapter example to a follow-up ASR PR after the `.wav` vertical slice is stable.
   DESIGN reference: `Architecture`, `API Sketch`
-- [ ] Keep the websocket transport outside the core model crates; only the example owns frame parsing and session lifecycle.
-  DESIGN reference: `Architecture`, `API Sketch`
-- [ ] Document the expected websocket audio format precisely:
-  sample rate,
-  channels,
-  encoding,
-  chunk cadence.
+- [ ] In the follow-up PR, use `tokio-tungstenite` and document a fixed binary frame contract:
+  `16 kHz`,
+  mono,
+  `S16Le`,
+  one chunk per websocket message.
   DESIGN reference: `Streaming PCM API Contract`
+- [ ] Keep the websocket transport outside the core model crates; only the follow-up example owns frame parsing and session lifecycle.
+  DESIGN reference: `Architecture`, `API Sketch`
 
 ### 4.3 - Example feature wiring
 
@@ -187,7 +214,7 @@ Land the first curated ASR slice with concrete verification commands and env-gat
 
 - [ ] Add an env-gated test that starts the curated bundle from pre-downloaded artifacts and transcribes a known short `.wav` clip.
   DESIGN reference: `Testing Scope for PLAN`
-- [ ] Add an env-gated example run that verifies live PCM chunks produce partial and final transcript updates.
+- [ ] Add an env-gated example run that verifies chunked `.wav` input produces partial and final transcript updates over the streaming contract.
   DESIGN reference: `Testing Scope for PLAN`, `Streaming PCM API Contract`
 - [ ] Record the expected artifact env var name and directory layout in the example README.
   DESIGN reference: `Curated Bundle Design in libs/models`
