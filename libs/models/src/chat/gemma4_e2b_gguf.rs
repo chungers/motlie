@@ -1,75 +1,44 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use motlie_model::eval::EvalTrack;
-use motlie_model::{BundleId, ModelBundle, ModelError, StartOptions};
-use motlie_model_llama_cpp::{LlamaCppTextBundle, LlamaCppTextSpec};
+use motlie_model::{
+    BundleId, CheckpointFormat, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
+};
+use motlie_model_llama_cpp::LlamaCppTextAdapter;
 
 use crate::{
-    ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleArtifacts, BundleDescriptor,
-    BundleFamily, BundleRequirements, PlatformConstraint,
+    ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor,
+    BundleRequirements,
 };
 
 pub const SELECTOR: &str = "google/gemma4_e2b_gguf";
 
-#[derive(Clone, Debug)]
-#[allow(non_camel_case_types)]
-pub struct Gemma4E2B_Gguf {
-    inner: LlamaCppTextBundle,
+pub(crate) fn register(catalog: &mut crate::Catalog) {
+    catalog.register(descriptor(), bundle);
+    catalog.register_model_variant(
+        identity(),
+        checkpoint(),
+        Arc::new(resolve_local_gguf_root),
+        Arc::new(LlamaCppTextAdapter::gemma4()),
+    );
 }
 
-impl Gemma4E2B_Gguf {
-    pub fn new() -> Self {
-        Self {
-            inner: LlamaCppTextBundle::new(LlamaCppTextSpec::gemma4_e2b()),
-        }
-    }
+pub(crate) fn identity() -> ModelIdentity {
+    super::gemma4_e2b_identity()
 }
 
-impl Default for Gemma4E2B_Gguf {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait::async_trait]
-impl ModelBundle for Gemma4E2B_Gguf {
-    fn id(&self) -> &BundleId {
-        self.inner.id()
-    }
-
-    fn metadata(&self) -> &motlie_model::BundleMetadata {
-        self.inner.metadata()
-    }
-
-    fn capabilities(&self) -> &motlie_model::Capabilities {
-        self.inner.capabilities()
-    }
-
-    async fn start(
-        &self,
-        options: StartOptions,
-    ) -> Result<Box<dyn motlie_model::BundleHandle>, ModelError> {
-        let StartOptions {
-            artifact_policy,
-            quantization,
-            unpack_root,
-            max_concurrency,
-        } = options;
-        let artifact_policy = match artifact_policy {
-            Some(motlie_model::ArtifactPolicy::LocalOnly { root }) => {
-                Some(motlie_model::ArtifactPolicy::LocalOnly {
-                    root: resolve_local_gguf_root(&root)?,
-                })
-            }
-            other => other,
-        };
-        let options = StartOptions {
-            artifact_policy,
-            quantization,
-            unpack_root,
-            max_concurrency,
-        };
-        self.inner.start(options).await
+pub(crate) fn checkpoint() -> ModelCheckpoint {
+    ModelCheckpoint {
+        format: CheckpointFormat::Gguf,
+        source: ArtifactSource::HuggingFace {
+            repo: "unsloth/gemma-4-E2B-it-GGUF",
+        },
+        include: vec![
+            ArtifactRule::Suffix("-Q4_K_M.gguf"),
+            ArtifactRule::Suffix("-Q8_0.gguf"),
+            ArtifactRule::Suffix("-f16.gguf"),
+        ],
+        quantization: None,
     }
 }
 
@@ -89,38 +58,37 @@ impl ModelBundle for Gemma4E2B_Gguf {
 /// the Gemma 4 GGUF is a community quantization. The curated artifact rules
 /// target the unsloth quantization repository on Hugging Face.
 pub fn descriptor() -> BundleDescriptor {
+    let identity = identity();
+    let checkpoint = checkpoint();
     BundleDescriptor {
         id: BundleId::new("gemma4_e2b_gguf"),
+        model_id: identity.id,
         display_name: "Gemma 4 E2B-it (GGUF/llama.cpp)".into(),
-        family: BundleFamily::Gemma,
+        family: identity.family,
         capabilities: motlie_model::Capabilities::chat_and_completion(),
         backend: BackendKind::LlamaCpp,
         requirements: BundleRequirements {
-            platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
+            platform: identity.requirements.platform,
             build: vec![BuildConstraint::Feature("backend-llama-cpp".into())],
         },
-        eval_tracks: vec![
-            EvalTrack::Chat,
-            EvalTrack::Reasoning,
-            EvalTrack::Summarization,
-            EvalTrack::Classification,
-        ],
-        artifacts: Some(BundleArtifacts {
-            control_name: "gemma4_e2b_gguf",
-            source: ArtifactSource::HuggingFace {
-                repo: "unsloth/gemma-4-E2B-it-GGUF",
-            },
-            include: vec![
-                ArtifactRule::Suffix("-Q4_K_M.gguf"),
-                ArtifactRule::Suffix("-Q8_0.gguf"),
-                ArtifactRule::Suffix("-f16.gguf"),
-            ],
-        }),
+        eval_tracks: identity.eval_tracks,
+        artifacts: Some(crate::bundle_artifacts_from_checkpoint(
+            "gemma4_e2b_gguf",
+            &checkpoint,
+        )),
     }
 }
 
 pub fn bundle() -> Box<dyn ModelBundle> {
-    Box::new(Gemma4E2B_Gguf::new())
+    let descriptor = descriptor();
+    crate::adapter_backed_bundle(
+        descriptor.id,
+        descriptor.display_name,
+        identity(),
+        checkpoint(),
+        Arc::new(LlamaCppTextAdapter::gemma4()),
+        Arc::new(resolve_local_gguf_root),
+    )
 }
 
 fn resolve_local_gguf_root(root: &Path) -> Result<PathBuf, ModelError> {
@@ -130,6 +98,7 @@ fn resolve_local_gguf_root(root: &Path) -> Result<PathBuf, ModelError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BundleFamily;
     use motlie_model::CapabilityKind;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -153,11 +122,15 @@ mod tests {
     }
 
     #[test]
+    fn identity_matches_logical_gemma4_model() {
+        assert_eq!(identity(), super::gemma4_e2b::identity());
+    }
+
+    #[test]
     fn local_gguf_resolution_rejects_missing_cache() {
         let root = unique_temp_dir();
 
-        let error =
-            resolve_local_gguf_root(&root).expect_err("missing cache should fail closed");
+        let error = resolve_local_gguf_root(&root).expect_err("missing cache should fail closed");
 
         assert!(matches!(
             error,
@@ -170,8 +143,7 @@ mod tests {
         let root = unique_temp_dir();
         let _snapshot = create_fake_hf_gguf_cache(&root, "unsloth/gemma-4-E2B-it-GGUF");
 
-        let error = resolve_local_gguf_root(&root)
-            .expect_err("cache without .gguf should fail");
+        let error = resolve_local_gguf_root(&root).expect_err("cache without .gguf should fail");
 
         assert!(matches!(
             error,
@@ -188,8 +160,7 @@ mod tests {
         std::fs::write(snapshot.join("gemma-4-E2B-it-Q4_K_M.gguf"), "stub")
             .expect("gguf stub should be writable");
 
-        let resolved =
-            resolve_local_gguf_root(&root).expect("cache with .gguf should resolve");
+        let resolved = resolve_local_gguf_root(&root).expect("cache with .gguf should resolve");
 
         assert_eq!(resolved, snapshot);
         std::fs::remove_dir_all(&root).ok();

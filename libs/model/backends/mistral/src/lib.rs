@@ -5,6 +5,10 @@ mod embeddings;
 mod multimodal;
 mod text;
 
-pub use embeddings::{MistralEmbeddingArch, MistralEmbeddingBundle, MistralEmbeddingSpec};
-pub use multimodal::{MistralMultimodalArch, MistralMultimodalBundle, MistralMultimodalSpec};
-pub use text::{MistralTextArch, MistralTextBundle, MistralTextSpec};
+pub use embeddings::{
+    MistralEmbeddingAdapter, MistralEmbeddingArch, MistralEmbeddingBundle, MistralEmbeddingSpec,
+};
+pub use multimodal::{
+    MistralMultimodalAdapter, MistralMultimodalArch, MistralMultimodalBundle, MistralMultimodalSpec,
+};
+pub use text::{MistralTextAdapter, MistralTextArch, MistralTextBundle, MistralTextSpec};

@@ -6,9 +6,10 @@ use mistralrs::core::StopTokens;
 use mistralrs::core::Usage;
 use mistralrs::{IsqBits, RequestBuilder, SamplingParams};
 use motlie_model::{
-    ArtifactPolicy, Bytes, ChatRole, EmbeddingMetrics, GenerationParams, Milliseconds,
-    ModelError, ModelMetricSnapshot, QuantizationBits, RuntimeMetrics, TextGenerationMetrics,
-    Tokens, TokensPerSecond,
+    ArtifactPolicy, ArtifactSource, Bytes, ChatRole, CheckpointFormat, EmbeddingMetrics,
+    GenerationParams, Milliseconds, ModelError, ModelMetricSnapshot, QuantizationBits,
+    ResolvedCheckpoint, RuntimeMetrics, StartOptions, TextGenerationMetrics, Tokens,
+    TokensPerSecond,
 };
 
 pub(crate) struct ConfiguredBuilder {
@@ -30,6 +31,33 @@ pub(crate) fn configure_artifact_policy(
             hf_cache_root: None,
         }),
     }
+}
+
+pub(crate) fn resolve_local_checkpoint(
+    checkpoint: &ResolvedCheckpoint,
+    expected_format: CheckpointFormat,
+    options: StartOptions,
+) -> Result<(&'static str, StartOptions), ModelError> {
+    if checkpoint.checkpoint.format != expected_format {
+        return Err(ModelError::InvalidConfiguration(format!(
+            "mistralrs expected {expected_format:?} checkpoint, got {:?}",
+            checkpoint.checkpoint.format
+        )));
+    }
+
+    let repo = match checkpoint.checkpoint.source {
+        ArtifactSource::HuggingFace { repo } => repo,
+    };
+
+    Ok((
+        repo,
+        StartOptions {
+            artifact_policy: Some(ArtifactPolicy::LocalOnly {
+                root: checkpoint.path.clone(),
+            }),
+            ..options
+        },
+    ))
 }
 
 pub(crate) fn map_quantization_bits(bits: QuantizationBits) -> IsqBits {
@@ -90,10 +118,7 @@ pub(crate) fn apply_generation_params(
     builder.set_sampling(sampling)
 }
 
-pub(crate) fn lock_metrics<'a, T>(
-    mutex: &'a Mutex<T>,
-    context: &'static str,
-) -> MutexGuard<'a, T> {
+pub(crate) fn lock_metrics<'a, T>(mutex: &'a Mutex<T>, context: &'static str) -> MutexGuard<'a, T> {
     match mutex.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
@@ -147,10 +172,8 @@ pub(crate) fn observe_latency(runtime: &mut RuntimeMetricState, elapsed: Duratio
 
 pub(crate) fn observe_memory(runtime: &mut RuntimeMetricState) {
     let resident_memory_bytes = current_resident_memory_bytes();
-    runtime.peak_resident_memory_bytes = max_opt_u64(
-        runtime.peak_resident_memory_bytes,
-        resident_memory_bytes,
-    );
+    runtime.peak_resident_memory_bytes =
+        max_opt_u64(runtime.peak_resident_memory_bytes, resident_memory_bytes);
 }
 
 pub(crate) fn observe_text_usage(state: &mut TextMetricState, usage: &Usage) {
@@ -241,7 +264,9 @@ fn seconds_to_milliseconds(seconds: f32) -> u128 {
     if !seconds.is_finite() || seconds <= 0.0 {
         return 0;
     }
-    (seconds as f64 * 1000.0).round().clamp(0.0, u64::MAX as f64) as u128
+    (seconds as f64 * 1000.0)
+        .round()
+        .clamp(0.0, u64::MAX as f64) as u128
 }
 
 fn average_latency(runtime: &RuntimeMetricState) -> Option<Milliseconds> {
@@ -249,8 +274,8 @@ fn average_latency(runtime: &RuntimeMetricState) -> Option<Milliseconds> {
         return None;
     }
     Some(Milliseconds(
-        (runtime.total_latency_msec / runtime.request_count as u128)
-            .min(u128::from(u64::MAX)) as u64,
+        (runtime.total_latency_msec / runtime.request_count as u128).min(u128::from(u64::MAX))
+            as u64,
     ))
 }
 
@@ -258,14 +283,11 @@ fn aggregate_tokens_per_second(tokens: u64, total_time_msec: u128) -> Option<u64
     if tokens == 0 || total_time_msec == 0 {
         return None;
     }
-    Some(
-        ((tokens as u128 * 1000) / total_time_msec)
-            .min(u128::from(u64::MAX)) as u64,
-    )
+    Some(((tokens as u128 * 1000) / total_time_msec).min(u128::from(u64::MAX)) as u64)
 }
 
 fn current_resident_memory_bytes() -> Option<u64> {
-    use sysinfo::{ProcessesToUpdate, System, get_current_pid};
+    use sysinfo::{get_current_pid, ProcessesToUpdate, System};
 
     let pid = get_current_pid().ok()?;
     let mut system = System::new();
@@ -333,7 +355,10 @@ mod tests {
         assert_eq!(text_metrics.total_prompt_tokens, Some(Tokens(40)));
         assert_eq!(text_metrics.total_generated_tokens, Some(Tokens(50)));
         assert_eq!(text_metrics.total_tokens, Some(Tokens(90)));
-        assert_eq!(text_metrics.avg_prompt_tokens_per_sec, Some(TokensPerSecond(133)));
+        assert_eq!(
+            text_metrics.avg_prompt_tokens_per_sec,
+            Some(TokensPerSecond(133))
+        );
         assert_eq!(
             text_metrics.avg_generated_tokens_per_sec,
             Some(TokensPerSecond(166))
