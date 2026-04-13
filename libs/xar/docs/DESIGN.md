@@ -1,4 +1,4 @@
-# Model Bundle Distribution Design
+# XAR Unified Artifact Distribution Design
 
 ## Status: Draft
 
@@ -9,20 +9,24 @@
 | 2026-04-12 | @codex-xar: Initial greenfield design for packaging curated `libs/models` bundle descriptors, concrete backends, and model artifacts into a single distributable executable. Migration and backward compatibility are explicitly out of scope. | All |
 | 2026-04-12 | @codex-xar: Added an OCI-as-internal-format addendum evaluating OCI image layout and manifests inside the appended executable payload, including the hybrid raw-weight-blob idea and its implications for future mmap-capable backend contracts. | Option Comparison, OCI Addendum, Recommendation, References |
 | 2026-04-12 | @codex-xar: Refined the OCI addendum into a concrete hybrid layout with a Motlie binary preamble TOC before the OCI payload and a footer pointing back to it. Added the three-tier materialization strategy and API sketches for preamble parsing and runtime blob resolution. | OCI Addendum, Recommendation, API Sketches |
+| 2026-04-12 | @codex-xar: Moved this design into `libs/xar/docs/DESIGN.md` and generalized scope from model-only distribution to the unified packaging format for large Motlie artifacts, including model weights, checkpoints, kernels, initrds, rootfs images, and VM disk images. | Title, Overview, Scope, Recommendation, API Sketches |
 
-This document evaluates how Motlie should ship curated model bundles as a single executable artifact that contains:
+This document defines `libs/xar`, Motlie's unified distribution and packaging format for large artifacts. `xar` is not model-only. It is the common archive and executable-payload format for:
 
 1. the launcher / application binary
-2. the curated `libs/models` bundle descriptors
-3. the linked `libs/model/backends/*` runtime implementation(s)
-4. the model weights and auxiliary files currently described by `BundleArtifacts`
+2. model bundle descriptors and backend-linked model runtimes
+3. model weights, checkpoints, tokenizers, and related metadata
+4. VM guest boot artifacts such as kernels and initrds
+5. guest root filesystems and disk images
+6. future large artifact classes that benefit from one content-addressed packaging model
 
-The goal is not merely "embed files into an exe". The goal is to preserve the current layering and operator model:
+The goal is not merely "embed files into an exe". The goal is to give Motlie one artifact story for all large payloads while preserving current layering for consumers:
 
-- `libs/model` remains the stable lifecycle and capability contract
-- `libs/models` remains the curator-owned bundle and artifact layer
-- backend crates continue to consume a resolved local artifact root or an explicit fetch policy
-- distribution-specific logic stays above the generic backends
+- `libs/xar` owns packaging, framing, payload lookup, and shared materialization rules
+- `libs/model` remains the stable lifecycle and capability contract for model consumers
+- `libs/models` remains the curator-owned bundle and artifact layer above `libs/model`
+- future VM/VMM consumers can use the same packaged blobs without inventing a second large-artifact format
+- distribution-specific logic stays above generic model backends and future VM boot/runtime layers
 
 ## Table of Contents
 
@@ -47,31 +51,35 @@ The goal is not merely "embed files into an exe". The goal is to preserve the cu
 
 ### Problem Statement
 
-Today the curated bundle model is optimized for:
+Today Motlie has a packaging asymmetry:
 
-- bundle descriptors in `libs/models`
-- explicit artifact download from Hugging Face
-- local cache resolution and validation in curated bundle modules
-- backend startup from `ArtifactPolicy::{AllowFetch, LocalOnly}`
+- model bundles are curated through `libs/models` and consumed through `libs/model`
+- model artifacts are currently fetched or resolved through model-specific paths such as Hugging Face caches
+- VM guest artifacts such as kernels, initrds, rootfs images, and disk images need the same distribution story, but should not force a second packaging format beside the model path
 
-That is correct for development and curation, but it is not sufficient for a "single-file distribution" story where one executable should be enough to launch a vetted bundle without a separate artifact download step.
+That split is workable for development, but it is not sufficient for a unified "single-file distribution" story where one executable or one package should be enough to launch:
 
-The hard part is not descriptor registration. The hard part is that the current backends still expect filesystem-shaped artifacts:
+- a vetted model bundle
+- a VM guest image set
+- or a mixed distribution containing both
+
+The hard part is not descriptor registration. The hard part is that Motlie consumers still expect filesystem-shaped artifacts or path-based startup:
 
 - Mistral-backed safetensors bundles expect a resolved directory tree
 - llama.cpp-backed GGUF bundles expect a concrete GGUF file path
-- current backend implementations reject `StartOptions.unpack_root`
+- guest boot stacks typically expect kernel/initrd/rootfs or disk image paths
+- current model backends reject `StartOptions.unpack_root` as a direct backend concern rather than owning extraction themselves
 
 Therefore, any single-file distribution design that preserves the present layering must solve one of two problems:
 
-1. materialize a local artifact root before backend startup, or
-2. introduce a new lower-level backend contract for file descriptors / byte ranges / virtual filesystems
+1. materialize local artifact roots before consumer startup, or
+2. introduce richer lower-level contracts for file descriptors / byte ranges / virtual filesystems
 
 For the first slice, the first approach is cheaper and fits the current code better.
 
 ## Current Codebase Fit
 
-The relevant surfaces today are:
+The concrete in-tree pressure today mostly comes from the model side. The relevant existing surfaces are:
 
 - `libs/models/src/lib.rs`
   `ArtifactSource` currently has only `HuggingFace { repo }`
@@ -86,10 +94,12 @@ The relevant surfaces today are:
 - `libs/model/backends/llama_cpp/*`
   startup currently rejects `unpack_root`
 
+The VM side does not yet have the same unified packaging surface in-tree, which is exactly why `libs/xar` should exist as a shared crate rather than as another model-local document.
+
 This leads to an important design conclusion:
 
-- single-file distribution should not be implemented by teaching generic backends about Hugging Face snapshots, executable offsets, squashfs images, or bundle-local packaging formats
-- instead, `libs/models` should resolve a packaged artifact source into a normal local root, then pass `ArtifactPolicy::LocalOnly { root }` to the backend
+- single-file distribution should not be implemented by teaching generic consumers about Hugging Face snapshots, executable offsets, squashfs images, or bundle-local packaging formats
+- instead, consumer-specific crates such as `libs/models` and future VM loaders should resolve a packaged `xar` artifact source into normal local roots or additive raw-blob handles
 
 That keeps the reviewed boundary intact.
 
@@ -97,21 +107,24 @@ That keeps the reviewed boundary intact.
 
 ### Requirements
 
-- Ship one executable containing launcher, descriptors, backends, and model artifacts
-- Preserve the current `libs/model` to `libs/models` to backend layering
+- Ship one executable or one archive format containing launcher code plus large artifacts
+- Cover model weights, checkpoints, tokenizers, kernels, initrds, guest rootfs images, and VM disk images under one format
+- Preserve the current `libs/model` to `libs/models` to backend layering for model consumers
+- Leave room for future VM/VMM consumers to adopt the same package without reformatting artifacts
 - Keep regulated local-only deployments able to fail closed
 - Support multi-GB artifacts without pathological compile or link behavior
-- Support curated bundle validation before backend startup
+- Support curated validation before model or VM startup
 - Support at least Linux and macOS cleanly; avoid painting the project into a Linux-only corner unless explicitly chosen
-- Keep future room for multiple bundles in one distribution
+- Keep future room for multiple bundles, guest images, or mixed payloads in one distribution
 - Leave room for additive integrity features such as per-file digests or signatures
 
 ### Non-Goals
 
 - Migration from prior packaging formats
 - Arbitrary user-supplied checkpoints
+- Arbitrary user-supplied VM images in the first slice
 - Full in-memory backend loading in the first slice
-- Introducing a container runtime requirement just to run a local model
+- Introducing a container runtime requirement just to run a local model or boot a local guest image
 
 ## Evaluation Criteria
 
@@ -122,7 +135,7 @@ Each option is evaluated on:
 - runtime overhead
 - cross-platform support
 - incremental update story
-- integration with existing `ArtifactSource` / `ArtifactPolicy`
+- integration with existing model-side `ArtifactSource` / `ArtifactPolicy` and future VM-side consumers
 - engineering cost
 
 ## Option Comparison
@@ -506,6 +519,7 @@ For example, Motlie-specific media types could include:
 - `application/vnd.motlie.model.weights.safetensors`
 - `application/vnd.motlie.vm.kernel`
 - `application/vnd.motlie.vm.rootfs`
+- `application/vnd.motlie.vm.disk`
 - `application/vnd.motlie.bundle.metadata`
 
 That is a real advantage over a Motlie-only `MTLPAY01` TOC that would otherwise need its own type system for every artifact family.
@@ -674,16 +688,17 @@ It is too expensive to make the first single-executable slice depend on it.
 The preamble+OCI design supports three distinct runtime tiers:
 
 1. **Option A: Extract Everything**
-   Extract all OCI-described payloads to `unpack_root` and continue using `ArtifactPolicy::LocalOnly { root }`.
-   This requires no backend changes and is the recommended slice 1 implementation.
+   Extract all OCI-described payloads to `unpack_root` and let each consumer continue with its existing path-based startup contract.
+   For models that means `ArtifactPolicy::LocalOnly { root }`. For VM consumers that means ordinary kernel/initrd/rootfs/disk paths.
+   This requires no backend or boot-loader changes and is the recommended slice 1 implementation.
 2. **Option B: mmap Everything Large**
-   Store large weight blobs raw and uncompressed, then hand backends `(fd, offset, len)` or equivalent mmap-capable handles.
-   This is the slice 2 endgame for true zero-copy startup.
+   Store large blobs raw and uncompressed, then hand consumers `(fd, offset, len)` or equivalent mmap-capable handles.
+   This is the slice 2 endgame for true zero-copy startup of GGUF weights, large safetensors blobs where practical, and potentially raw guest disk images.
 3. **Option C: Hybrid**
-   Store large weights as raw blobs for direct mmap, but keep small files such as tokenizer/config/metadata in tar+zstd layers that are extracted normally.
+   Store large weights and other large opaque blobs such as VM images as raw blobs for direct mmap or direct file access, but keep small files such as tokenizer/config/metadata in tar+zstd layers that are extracted normally.
    This is the best long-term balance and the most plausible steady-state architecture.
 
-Option C is the most compelling end-state because it avoids pointless extraction of multi-GB weights while preserving the convenience and density of compressed archive layers for the small-file set.
+Option C is the most compelling end-state because it avoids pointless extraction of multi-GB weights and VM images while preserving the convenience and density of compressed archive layers for the small-file set.
 
 ### OCI-Inside-Executable Verdict
 
@@ -716,8 +731,9 @@ For the first implementation slice, I now recommend the hybrid preamble+OCI dire
 
 - a Motlie-owned binary preamble TOC plus footer for physical layout
 - OCI manifest/config/blob semantics inside the appended payload
-- extracted/materialized into `StartOptions.unpack_root`
-- handed to backends as `ArtifactPolicy::LocalOnly { root }`
+- extracted/materialized into consumer-owned working roots in slice 1
+- handed to model backends as `ArtifactPolicy::LocalOnly { root }`
+- handed to VM/guest consumers as ordinary artifact paths resolved from the extracted root
 
 This changes the earlier recommendation in one important way:
 
@@ -740,17 +756,17 @@ Why:
 - one packaging model can span `libs/models` and `libs/vmm`
 - registry publication can reuse the same blobs and digests
 - the preamble keeps the Motlie-specific part small and well-scoped
-- slice 1 can still be pure extraction-to-`LocalOnly`
+- slice 1 can still be pure extraction to ordinary local paths
 - slice 2 has a clean path to zero-copy mmap for raw blobs
 
 ### Slice Plan
 
 - Slice 1:
-  implement preamble+OCI packaging, extract all payloads to `unpack_root`, and keep backend contracts unchanged
+  implement preamble+OCI packaging, extract all payloads to local working roots, and keep consumer contracts unchanged
 - Slice 2:
-  add additive `libs/model` artifact-handle support for raw mmap-capable blobs
+  add additive consumer-facing raw-blob handle support, starting with `libs/model` and extending to VM artifact consumers as needed
 - Slice 3:
-  converge on the hybrid steady state where large weights mmap directly and small files extract normally
+  converge on the hybrid steady state where large blobs mmap or stream directly and small files extract normally
 
 ### Why the Converged Slice Now Wins
 
@@ -832,53 +848,44 @@ pub struct ExecutablePayload {
 }
 
 impl ExecutablePayload {
-    pub fn open_current() -> Result<Self, ModelsError> {
+    pub fn open_current() -> Result<Self, XarError> {
         let exe = std::fs::File::open(std::env::current_exe()?)?;
         let footer = read_footer(&exe)?;
         let (preamble, blobs) = read_preamble(&exe, footer.preamble_offset)?;
         Ok(Self { exe, preamble, blobs })
     }
 
-    pub fn blob(&self, digest_sha256: [u8; 32]) -> Result<&BlobEntry, ModelsError> {
+    pub fn blob(&self, digest_sha256: [u8; 32]) -> Result<&BlobEntry, XarError> {
         self.blobs
             .get(&digest_sha256)
-            .ok_or_else(|| ModelsError::InvalidExecutablePayload)
+            .ok_or_else(|| XarError::InvalidExecutablePayload)
     }
 }
 ```
 
-### Sketch 3: Extend `ArtifactSource` at the Bundle Layer
+### Sketch 3: Generic XAR Resolver Output
 
 ```rust
-pub enum ArtifactSource {
-    HuggingFace { repo: &'static str },
-    ExecutablePayload {
-        locator: ExecutableLocator,
-        bundle_key: &'static str,
-        mode: PayloadResolutionMode,
+pub enum XarResolvedArtifact {
+    Directory { root: std::path::PathBuf },
+    File { path: std::path::PathBuf },
+    RawBlob {
+        file: std::fs::File,
+        offset: u64,
+        len: u64,
+        media_type: String,
     },
-}
-
-pub enum ExecutableLocator {
-    CurrentExecutable,
-    Path(std::path::PathBuf),
-}
-
-pub enum PayloadResolutionMode {
-    ExtractAll,
-    HybridOci,
-    RawMmapPreferred,
 }
 ```
 
 Notes:
 
-- this belongs in `libs/models`, not `libs/model`
-- `libs/model::ArtifactPolicy` can remain unchanged
-- `ExecutablePayload` is curator-owned, just like the current Hugging Face rules
-- the mode describes how curated bundle code should materialize OCI-described artifacts
+- this is the crate-local abstraction `libs/xar` should own
+- model and VM consumers can adapt it to their own startup surfaces
+- slice 1 mostly returns `Directory` and `File`
+- later slices can use `RawBlob` for mmap-capable startup
 
-### Sketch 4: Materialize Before Backend Startup
+### Sketch 4: Model-Side Integration
 
 ```rust
 pub fn resolve_packaged_bundle_root(
@@ -924,7 +931,28 @@ self.inner.start(options).await
 
 This keeps the generic backend untouched.
 
-### Sketch 5: Future mmap-Capable Resolver
+### Sketch 5: VM-Side Integration
+
+```rust
+pub struct GuestArtifactSet {
+    pub kernel: std::path::PathBuf,
+    pub initrd: Option<std::path::PathBuf>,
+    pub rootfs: Option<std::path::PathBuf>,
+    pub disk: Option<std::path::PathBuf>,
+}
+
+pub fn resolve_guest_artifacts(
+    payload: &ExecutablePayload,
+    guest_key: &str,
+    unpack_root: &std::path::Path,
+) -> Result<GuestArtifactSet, XarError> {
+    materialize_guest_payload(payload, guest_key, unpack_root)
+}
+```
+
+This is the VM analogue to the model-side bundle-root resolver.
+
+### Sketch 6: Future mmap-Capable Resolver
 
 ```rust
 pub enum ResolvedArtifactHandle {
@@ -942,12 +970,12 @@ pub enum ResolvedArtifactHandle {
 This is not required for slice 1.
 It is the additive path that makes the preamble+OCI design pay off operationally for large raw blobs.
 
-### Sketch 6: Release Assembly Tool
+### Sketch 7: Release Assembly Tool
 
 ```rust
 pub struct DistributionPlan {
     pub executable: std::path::PathBuf,
-    pub bundles: Vec<BundleId>,
+    pub payloads: Vec<String>,
     pub artifact_roots: Vec<std::path::PathBuf>,
     pub output: std::path::PathBuf,
 }
@@ -955,7 +983,7 @@ pub struct DistributionPlan {
 pub fn assemble_distribution(plan: &DistributionPlan) -> anyhow::Result<()> {
     let mut writer = std::fs::File::create(&plan.output)?;
     copy_executable(&plan.executable, &mut writer)?;
-    let toc = append_bundle_payloads(&mut writer, &plan.bundles, &plan.artifact_roots)?;
+    let toc = append_payloads(&mut writer, &plan.payloads, &plan.artifact_roots)?;
     append_footer(&mut writer, &toc)?;
     Ok(())
 }
@@ -969,16 +997,16 @@ The follow-up PLAN should cover:
 
 1. Packaging correctness
    verify footer discovery, digest validation, truncated payload detection, and version mismatch handling
-2. Bundle materialization
-   verify extraction produces the exact directory/file layout expected by current curated bundle validators
-3. Backend compatibility
-   verify both a safetensors bundle and a GGUF bundle start from packaged `LocalOnly` roots without backend code changes
+2. Payload materialization
+   verify extraction produces the exact directory/file layout expected by current model bundle validators and by guest boot consumers
+3. Consumer compatibility
+   verify both a safetensors bundle and a GGUF bundle start from packaged `LocalOnly` roots without backend code changes, and verify a guest artifact set resolves to ordinary kernel/rootfs/disk paths
 4. Cross-platform launcher behavior
    verify current-executable discovery and appended-payload reads on Linux and macOS
 5. Failure policy
    verify missing `unpack_root`, unwritable unpack dir, corrupted chunks, and partial extraction cleanup
 6. Performance
-   measure first-start extraction latency, steady-state restart latency, and binary size deltas for at least one small and one large bundle
+   measure first-start extraction latency, steady-state restart latency, and binary size deltas for at least one model bundle and one large guest-image payload
 
 ## References
 
