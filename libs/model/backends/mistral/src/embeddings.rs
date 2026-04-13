@@ -2,19 +2,22 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::common::{
-    EmbeddingMetricState, RuntimeMetricState, configure_artifact_policy, lock_metrics,
-    map_quantization_bits, observe_embedding_request, observe_memory, should_force_cpu,
-    snapshot_embedding_metrics,
+    configure_artifact_policy, lock_metrics, map_quantization_bits, observe_embedding_request,
+    observe_memory, should_force_cpu, snapshot_embedding_metrics, EmbeddingMetricState,
+    RuntimeMetricState,
 };
 use async_trait::async_trait;
 use mistralrs::core::EmbeddingLoaderType;
 use mistralrs::{EmbeddingModelBuilder, EmbeddingRequest, ModelDType};
 use motlie_model::{
-    BundleHandle, BundleId, BundleMetadata, Capabilities, CapabilityKind, ChatModel,
-    CompletionModel, EmbeddingModel, EmbeddingRequest as ModelEmbeddingRequest, EmbeddingResponse,
-    LoadedBundleDescriptor, ModelBundle, ModelError, ModelMetricSnapshot, QuantizationBits,
-    QuantizationSupport, StartOptions,
+    BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
+    CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
+    EmbeddingRequest as ModelEmbeddingRequest, EmbeddingResponse, LoadedBundleDescriptor,
+    ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot, QuantizationBits,
+    QuantizationSupport, ResolvedCheckpoint, StartOptions,
 };
+
+const MISTRAL_EMBEDDING_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Safetensors];
 
 /// Embedding architecture discriminant that selects the correct `mistralrs` loader path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -67,6 +70,80 @@ impl MistralEmbeddingSpec {
     }
 }
 
+/// Backend adapter for `mistralrs` embedding models over safetensors checkpoints.
+#[derive(Clone, Debug)]
+pub struct MistralEmbeddingAdapter {
+    arch: MistralEmbeddingArch,
+    capabilities: Capabilities,
+    quantization: QuantizationSupport,
+}
+
+impl MistralEmbeddingAdapter {
+    pub fn embedding_gemma() -> Self {
+        let spec = MistralEmbeddingSpec::embeddinggemma_300m();
+        Self {
+            arch: spec.arch,
+            capabilities: spec.capabilities,
+            quantization: spec.quantization,
+        }
+    }
+
+    pub fn qwen3_embedding() -> Self {
+        let spec = MistralEmbeddingSpec::qwen3_embedding_06b();
+        Self {
+            arch: spec.arch,
+            capabilities: spec.capabilities,
+            quantization: spec.quantization,
+        }
+    }
+}
+
+#[async_trait]
+impl BackendAdapter for MistralEmbeddingAdapter {
+    fn supported_formats(&self) -> &[CheckpointFormat] {
+        &MISTRAL_EMBEDDING_FORMATS
+    }
+
+    fn backend_kind(&self) -> BackendKind {
+        BackendKind::MistralRs
+    }
+
+    fn capabilities(&self) -> &Capabilities {
+        &self.capabilities
+    }
+
+    fn quantization(&self) -> &QuantizationSupport {
+        &self.quantization
+    }
+
+    async fn start(
+        &self,
+        identity: &ModelIdentity,
+        checkpoint: &ResolvedCheckpoint,
+        options: StartOptions,
+    ) -> Result<Box<dyn BundleHandle>, ModelError> {
+        let resolved_quantization = self
+            .quantization
+            .resolve(options.quantization, &identity.id)?;
+        let (model_id, options) = crate::common::resolve_local_checkpoint(
+            checkpoint,
+            CheckpointFormat::Safetensors,
+            options,
+        )?;
+        let model =
+            build_embedding_model(model_id, self.arch, resolved_quantization, options).await?;
+
+        Ok(new_embedding_handle(
+            identity.id.clone(),
+            identity.display_name.clone(),
+            self.capabilities.clone(),
+            self.quantization.clone(),
+            resolved_quantization,
+            model,
+        ))
+    }
+}
+
 /// Generic `ModelBundle` implementation backed by `mistralrs` embeddings.
 #[derive(Clone, Debug)]
 pub struct MistralEmbeddingBundle {
@@ -111,26 +188,15 @@ impl ModelBundle for MistralEmbeddingBundle {
             .resolve(options.quantization, &self.metadata.id)?;
         let model =
             build_embedding_model(self.model_id, self.arch, resolved_quantization, options).await?;
-        let metrics = Arc::new(Mutex::new(EmbeddingMetricsState::default()));
-        {
-            let mut metrics = lock_metrics(&metrics, "mistral-embeddings-start");
-            observe_memory(&mut metrics.runtime);
-        }
 
-        Ok(Box::new(MistralEmbeddingHandle {
-            descriptor: LoadedBundleDescriptor {
-                id: self.metadata.id.clone(),
-                display_name: self.metadata.display_name.clone(),
-                capabilities: self.metadata.capabilities.clone(),
-                quantization: self.metadata.quantization.clone(),
-                resolved_quantization,
-            },
-            runtime: Box::new(MistralRuntime {
-                model,
-                metrics: Arc::clone(&metrics),
-            }),
-            metrics,
-        }))
+        Ok(new_embedding_handle(
+            self.metadata.id.clone(),
+            self.metadata.display_name.clone(),
+            self.metadata.capabilities.clone(),
+            self.metadata.quantization.clone(),
+            resolved_quantization,
+            model,
+        ))
     }
 }
 
@@ -236,6 +302,36 @@ struct EmbeddingMetricsState {
     embeddings: EmbeddingMetricState,
 }
 
+fn new_embedding_handle(
+    id: BundleId,
+    display_name: String,
+    capabilities: Capabilities,
+    quantization: QuantizationSupport,
+    resolved_quantization: Option<QuantizationBits>,
+    model: mistralrs::Model,
+) -> Box<dyn BundleHandle> {
+    let metrics = Arc::new(Mutex::new(EmbeddingMetricsState::default()));
+    {
+        let mut metrics = lock_metrics(&metrics, "mistral-embeddings-start");
+        observe_memory(&mut metrics.runtime);
+    }
+
+    Box::new(MistralEmbeddingHandle {
+        descriptor: LoadedBundleDescriptor {
+            id,
+            display_name,
+            capabilities,
+            quantization,
+            resolved_quantization,
+        },
+        runtime: Box::new(MistralRuntime {
+            model,
+            metrics: Arc::clone(&metrics),
+        }),
+        metrics,
+    })
+}
+
 async fn build_embedding_model(
     model_id: &str,
     arch: MistralEmbeddingArch,
@@ -295,8 +391,7 @@ async fn build_embedding_model(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use motlie_model::ArtifactPolicy;
-    use motlie_model::StartOptions;
+    use motlie_model::{ArtifactPolicy, BackendAdapter, BackendKind, StartOptions};
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -341,6 +436,20 @@ mod tests {
         assert_eq!(spec.quantization.recommended(), None);
         assert!(spec.quantization.supports(QuantizationBits::Eight));
         assert!(!spec.quantization.supports(QuantizationBits::Four));
+    }
+
+    #[test]
+    fn qwen3_embedding_adapter_reports_backend_metadata() {
+        let adapter = MistralEmbeddingAdapter::qwen3_embedding();
+
+        assert_eq!(
+            adapter.supported_formats(),
+            &[CheckpointFormat::Safetensors]
+        );
+        assert_eq!(adapter.backend_kind(), BackendKind::MistralRs);
+        assert_eq!(adapter.capabilities(), &Capabilities::embeddings_only());
+        assert_eq!(adapter.quantization().recommended(), None);
+        assert!(adapter.quantization().supports(QuantizationBits::Eight));
     }
 
     #[tokio::test]

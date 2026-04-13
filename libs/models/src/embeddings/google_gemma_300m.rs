@@ -1,14 +1,16 @@
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
-    BundleId, CapabilityDescriptor, ContentKind, Embedding as EmbeddingBundle, EmbeddingDistance,
-    EmbeddingNormalization, EmbeddingSpec, ModelBundle, ModelError, StartOptions,
+    BundleId, CapabilityDescriptor, CheckpointFormat, ContentKind, EmbeddingDistance,
+    EmbeddingNormalization, EmbeddingSpec, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
 };
-use motlie_model_mistral::{MistralEmbeddingBundle, MistralEmbeddingSpec};
-use std::path::{Path, PathBuf};
+use motlie_model_mistral::MistralEmbeddingAdapter;
 
 use crate::{
-    ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleArtifacts, BundleDescriptor,
-    BundleFamily, BundleRequirements, PlatformConstraint,
+    ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor, BundleFamily,
+    BundleRequirements, PlatformConstraint,
 };
 
 pub const SELECTOR: &str = "google/embeddinggemma_300m";
@@ -30,70 +32,50 @@ const EMBEDDING_SPEC: EmbeddingSpec = EmbeddingSpec {
     summary: "Normalized text embeddings for semantic similarity and retrieval.",
 };
 
-#[derive(Clone, Debug)]
-pub struct GoogleGemma300m {
-    inner: MistralEmbeddingBundle,
+pub(crate) fn register(catalog: &mut crate::Catalog) {
+    catalog.register(descriptor(), bundle);
+    catalog.register_model_variant(
+        identity(),
+        checkpoint(),
+        Arc::new(resolve_local_snapshot_root),
+        Arc::new(MistralEmbeddingAdapter::embedding_gemma()),
+    );
 }
 
-impl GoogleGemma300m {
-    pub fn new() -> Self {
-        Self {
-            inner: MistralEmbeddingBundle::new(MistralEmbeddingSpec::embeddinggemma_300m()),
-        }
-    }
-}
-
-impl Default for GoogleGemma300m {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait::async_trait]
-impl ModelBundle for GoogleGemma300m {
-    fn id(&self) -> &BundleId {
-        self.inner.id()
-    }
-
-    fn metadata(&self) -> &motlie_model::BundleMetadata {
-        self.inner.metadata()
-    }
-
-    fn capabilities(&self) -> &motlie_model::Capabilities {
-        self.inner.capabilities()
-    }
-
-    async fn start(
-        &self,
-        options: StartOptions,
-    ) -> Result<Box<dyn motlie_model::BundleHandle>, ModelError> {
-        let StartOptions {
-            artifact_policy,
-            quantization,
-            unpack_root,
-            max_concurrency,
-        } = options;
-        let artifact_policy = match artifact_policy {
-            Some(motlie_model::ArtifactPolicy::LocalOnly { root }) => {
-                Some(motlie_model::ArtifactPolicy::LocalOnly {
-                    root: resolve_local_snapshot_root(&root)?,
-                })
-            }
-            other => other,
-        };
-        let options = StartOptions {
-            artifact_policy,
-            quantization,
-            unpack_root,
-            max_concurrency,
-        };
-        self.inner.start(options).await
+pub(crate) fn identity() -> ModelIdentity {
+    ModelIdentity {
+        id: BundleId::new("embeddinggemma_300m"),
+        display_name: "EmbeddingGemma 300M".into(),
+        family: BundleFamily::Embeddings,
+        capabilities: motlie_model::Capabilities::new(vec![CapabilityDescriptor::embeddings()]),
+        eval_tracks: vec![EvalTrack::Embeddings],
+        requirements: BundleRequirements {
+            platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
+            build: vec![],
+        },
     }
 }
 
-impl EmbeddingBundle for GoogleGemma300m {
-    fn embedding_spec(&self) -> &EmbeddingSpec {
-        &EMBEDDING_SPEC
+pub(crate) fn checkpoint() -> ModelCheckpoint {
+    ModelCheckpoint {
+        format: CheckpointFormat::Safetensors,
+        source: ArtifactSource::HuggingFace {
+            repo: "google/embeddinggemma-300m",
+        },
+        include: vec![
+            ArtifactRule::Exact("config.json"),
+            ArtifactRule::Exact("modules.json"),
+            ArtifactRule::Exact("tokenizer.json"),
+            ArtifactRule::Exact("tokenizer.model"),
+            ArtifactRule::Exact("tokenizer_config.json"),
+            ArtifactRule::Exact("special_tokens_map.json"),
+            ArtifactRule::Exact("1_Pooling/config.json"),
+            ArtifactRule::Exact("2_Dense/config.json"),
+            ArtifactRule::Exact("3_Dense/config.json"),
+            ArtifactRule::Suffix(".safetensors"),
+            ArtifactRule::Suffix(".safetensors.index.json"),
+        ],
+        quantization: None,
     }
 }
 
@@ -102,41 +84,37 @@ pub fn embedding_spec() -> &'static EmbeddingSpec {
 }
 
 pub fn descriptor() -> BundleDescriptor {
+    let identity = identity();
+    let checkpoint = checkpoint();
     BundleDescriptor {
-        id: BundleId::new("embeddinggemma_300m"),
-        display_name: "EmbeddingGemma 300M".into(),
-        family: BundleFamily::Embeddings,
-        capabilities: motlie_model::Capabilities::new(vec![CapabilityDescriptor::embeddings()]),
+        id: identity.id.clone(),
+        model_id: identity.id,
+        display_name: identity.display_name.clone(),
+        family: identity.family,
+        capabilities: identity.capabilities,
         backend: BackendKind::MistralRs,
         requirements: BundleRequirements {
-            platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
+            platform: identity.requirements.platform,
             build: vec![BuildConstraint::Feature("backend-mistral".into())],
         },
-        eval_tracks: vec![EvalTrack::Embeddings],
-        artifacts: Some(BundleArtifacts {
-            control_name: "embeddinggemma_300m",
-            source: ArtifactSource::HuggingFace {
-                repo: "google/embeddinggemma-300m",
-            },
-            include: vec![
-                ArtifactRule::Exact("config.json"),
-                ArtifactRule::Exact("modules.json"),
-                ArtifactRule::Exact("tokenizer.json"),
-                ArtifactRule::Exact("tokenizer.model"),
-                ArtifactRule::Exact("tokenizer_config.json"),
-                ArtifactRule::Exact("special_tokens_map.json"),
-                ArtifactRule::Exact("1_Pooling/config.json"),
-                ArtifactRule::Exact("2_Dense/config.json"),
-                ArtifactRule::Exact("3_Dense/config.json"),
-                ArtifactRule::Suffix(".safetensors"),
-                ArtifactRule::Suffix(".safetensors.index.json"),
-            ],
-        }),
+        eval_tracks: identity.eval_tracks,
+        artifacts: Some(crate::bundle_artifacts_from_checkpoint(
+            "embeddinggemma_300m",
+            &checkpoint,
+        )),
     }
 }
 
 pub fn bundle() -> Box<dyn ModelBundle> {
-    Box::new(GoogleGemma300m::new())
+    let descriptor = descriptor();
+    crate::adapter_backed_bundle(
+        descriptor.id,
+        descriptor.display_name,
+        identity(),
+        checkpoint(),
+        Arc::new(MistralEmbeddingAdapter::embedding_gemma()),
+        Arc::new(resolve_local_snapshot_root),
+    )
 }
 
 fn resolve_local_snapshot_root(root: &Path) -> Result<PathBuf, ModelError> {
@@ -171,11 +149,9 @@ mod tests {
         assert_eq!(descriptor.family, BundleFamily::Embeddings);
         assert_eq!(descriptor.backend, BackendKind::MistralRs);
         assert_eq!(descriptor.eval_tracks, vec![EvalTrack::Embeddings]);
-        assert!(
-            descriptor
-                .capabilities
-                .supports(motlie_model::CapabilityKind::Embeddings)
-        );
+        assert!(descriptor
+            .capabilities
+            .supports(motlie_model::CapabilityKind::Embeddings));
         assert_eq!(
             descriptor.capability_descriptors(),
             &[CapabilityDescriptor::embeddings()]

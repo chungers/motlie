@@ -18,12 +18,11 @@ pub mod units;
 
 pub use chat::{ChatMessage, ChatRole, ContentPart};
 pub use embedding::{Embedding, EmbeddingDistance, EmbeddingNormalization, EmbeddingSpec};
+pub use eval::EvalTrack;
 pub use generation::{
     ChatRequest, ChatResponse, CompletionRequest, CompletionResponse, GenerationParams,
 };
-pub use metrics::{
-    EmbeddingMetrics, ModelMetricSnapshot, RuntimeMetrics, TextGenerationMetrics,
-};
+pub use metrics::{EmbeddingMetrics, ModelMetricSnapshot, RuntimeMetrics, TextGenerationMetrics};
 pub use units::{Bytes, Milliseconds, Tokens, TokensPerSecond};
 
 /// Stable product-facing identifier for a curated bundle.
@@ -55,6 +54,73 @@ impl From<String> for BundleId {
 impl fmt::Display for BundleId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
+    }
+}
+
+/// Organizational family for related curated bundles.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BundleFamily {
+    Embeddings,
+    Gemma,
+    Gpt,
+    Hermes,
+    Other(String),
+    Qwen,
+}
+
+/// Internal execution substrate chosen for a bundle or adapter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackendKind {
+    Http,
+    LlamaCpp,
+    MistralRs,
+    Ort,
+}
+
+/// Platform scoping visible to operators and release tooling.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PlatformConstraint {
+    Linux,
+    Macos,
+    Distribution(String),
+    Architecture(String),
+}
+
+/// Build-time constraints kept close to the model declaration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BuildConstraint {
+    CpuOnly,
+    CudaRequired,
+    Feature(String),
+    Profile(String),
+}
+
+/// Requirements that affect whether and how a model may be loaded or built.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BundleRequirements {
+    pub platform: Vec<PlatformConstraint>,
+    pub build: Vec<BuildConstraint>,
+}
+
+/// Artifact source backing a curated checkpoint declaration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ArtifactSource {
+    HuggingFace { repo: &'static str },
+}
+
+/// Rule used to include concrete artifacts from a source.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ArtifactRule {
+    Exact(&'static str),
+    Suffix(&'static str),
+}
+
+impl ArtifactRule {
+    pub fn matches(&self, filename: &str) -> bool {
+        match self {
+            Self::Exact(expected) => filename == *expected,
+            Self::Suffix(suffix) => filename.ends_with(suffix),
+        }
     }
 }
 
@@ -233,6 +299,54 @@ pub struct BundleMetadata {
     pub quantization: QuantizationSupport,
 }
 
+/// Stable metadata for a logical model independent of checkpoint format or backend.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelIdentity {
+    pub id: BundleId,
+    pub display_name: String,
+    pub family: BundleFamily,
+    pub capabilities: Capabilities,
+    pub eval_tracks: Vec<EvalTrack>,
+    pub requirements: BundleRequirements,
+}
+
+/// Physical checkpoint format used to package model weights.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum CheckpointFormat {
+    Safetensors,
+    Gguf,
+    Onnx,
+}
+
+/// Checkpoint-native quantization metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CheckpointQuantization {
+    Gguf { label: String },
+    Onnx { bits: u8 },
+}
+
+/// Artifact declaration for a concrete checkpoint variant of a model.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelCheckpoint {
+    pub format: CheckpointFormat,
+    pub source: ArtifactSource,
+    pub include: Vec<ArtifactRule>,
+    pub quantization: Option<CheckpointQuantization>,
+}
+
+impl ModelCheckpoint {
+    pub fn includes(&self, filename: &str) -> bool {
+        self.include.iter().any(|rule| rule.matches(filename))
+    }
+}
+
+/// Checkpoint resolved to a local path that a backend can open.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedCheckpoint {
+    pub checkpoint: ModelCheckpoint,
+    pub path: PathBuf,
+}
+
 /// Artifact acquisition policy that bundle startup must honor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ArtifactPolicy {
@@ -292,9 +406,7 @@ impl QuantizationSupport {
     }
 
     /// Bundle supports the given precisions with no curated default (F32 by default).
-    pub fn without_recommended(
-        supported: impl IntoIterator<Item = QuantizationBits>,
-    ) -> Self {
+    pub fn without_recommended(supported: impl IntoIterator<Item = QuantizationBits>) -> Self {
         Self {
             supported: supported.into_iter().collect(),
             recommended: None,
@@ -418,6 +530,21 @@ pub trait BundleHandle: Send + Sync {
     fn embeddings(&self) -> Result<&dyn EmbeddingModel, ModelError>;
 
     async fn shutdown(self: Box<Self>) -> Result<(), ModelError>;
+}
+
+/// Backend-specific loader for one or more checkpoint formats.
+#[async_trait]
+pub trait BackendAdapter: Send + Sync {
+    fn supported_formats(&self) -> &[CheckpointFormat];
+    fn backend_kind(&self) -> BackendKind;
+    fn capabilities(&self) -> &Capabilities;
+    fn quantization(&self) -> &QuantizationSupport;
+    async fn start(
+        &self,
+        identity: &ModelIdentity,
+        checkpoint: &ResolvedCheckpoint,
+        options: StartOptions,
+    ) -> Result<Box<dyn BundleHandle>, ModelError>;
 }
 
 /// Chat generation capability.
@@ -566,6 +693,46 @@ mod tests {
     }
 
     #[test]
+    fn artifact_rule_and_checkpoint_match_expected_filenames() {
+        let checkpoint = ModelCheckpoint {
+            format: CheckpointFormat::Gguf,
+            source: ArtifactSource::HuggingFace {
+                repo: "Qwen/Qwen3-4B-GGUF",
+            },
+            include: vec![
+                ArtifactRule::Suffix("-Q4_K_M.gguf"),
+                ArtifactRule::Suffix("-Q8_0.gguf"),
+            ],
+            quantization: Some(CheckpointQuantization::Gguf {
+                label: "Q4_K_M".into(),
+            }),
+        };
+
+        assert!(checkpoint.includes("Qwen3-4B-Q4_K_M.gguf"));
+        assert!(!checkpoint.includes("config.json"));
+    }
+
+    #[test]
+    fn model_identity_is_decoupled_from_checkpoint_and_backend_details() {
+        let identity = ModelIdentity {
+            id: BundleId::new("qwen3_4b"),
+            display_name: "Qwen3 4B".into(),
+            family: BundleFamily::Qwen,
+            capabilities: Capabilities::chat_and_completion(),
+            eval_tracks: vec![EvalTrack::Chat, EvalTrack::Reasoning],
+            requirements: BundleRequirements {
+                platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
+                build: vec![BuildConstraint::Feature("backend-mistral".into())],
+            },
+        };
+
+        assert_eq!(identity.id.as_str(), "qwen3_4b");
+        assert_eq!(identity.family, BundleFamily::Qwen);
+        assert!(identity.capabilities.supports(CapabilityKind::Chat));
+        assert!(identity.eval_tracks.contains(&EvalTrack::Reasoning));
+    }
+
+    #[test]
     fn artifact_policy_is_part_of_start_options() {
         let options = StartOptions {
             artifact_policy: Some(ArtifactPolicy::LocalOnly {
@@ -606,7 +773,9 @@ mod tests {
         let bundle_id = BundleId::new("test_bundle");
 
         let no_support = QuantizationSupport::none();
-        assert!(no_support.resolve(Some(QuantizationBits::Four), &bundle_id).is_err());
+        assert!(no_support
+            .resolve(Some(QuantizationBits::Four), &bundle_id)
+            .is_err());
         assert_eq!(no_support.resolve(None, &bundle_id).unwrap(), None);
 
         let q4_q8 = QuantizationSupport::with_recommended(
@@ -615,11 +784,15 @@ mod tests {
         )
         .expect("test support is valid");
         assert_eq!(
-            q4_q8.resolve(Some(QuantizationBits::Four), &bundle_id).unwrap(),
+            q4_q8
+                .resolve(Some(QuantizationBits::Four), &bundle_id)
+                .unwrap(),
             Some(QuantizationBits::Four)
         );
         assert_eq!(
-            q4_q8.resolve(Some(QuantizationBits::Eight), &bundle_id).unwrap(),
+            q4_q8
+                .resolve(Some(QuantizationBits::Eight), &bundle_id)
+                .unwrap(),
             Some(QuantizationBits::Eight)
         );
         assert_eq!(
@@ -627,12 +800,14 @@ mod tests {
             Some(QuantizationBits::Four)
         );
 
-        let q8_only = QuantizationSupport::without_recommended(
-            [QuantizationBits::Eight],
-        );
-        assert!(q8_only.resolve(Some(QuantizationBits::Four), &bundle_id).is_err());
+        let q8_only = QuantizationSupport::without_recommended([QuantizationBits::Eight]);
+        assert!(q8_only
+            .resolve(Some(QuantizationBits::Four), &bundle_id)
+            .is_err());
         assert_eq!(
-            q8_only.resolve(Some(QuantizationBits::Eight), &bundle_id).unwrap(),
+            q8_only
+                .resolve(Some(QuantizationBits::Eight), &bundle_id)
+                .unwrap(),
             Some(QuantizationBits::Eight)
         );
         assert_eq!(q8_only.resolve(None, &bundle_id).unwrap(), None);
@@ -640,13 +815,12 @@ mod tests {
 
     #[test]
     fn quantization_support_rejects_contradictory_recommended() {
-        let err = QuantizationSupport::with_recommended(
-            [],
-            QuantizationBits::Four,
-        )
-        .expect_err("contradictory recommended should fail");
+        let err = QuantizationSupport::with_recommended([], QuantizationBits::Four)
+            .expect_err("contradictory recommended should fail");
 
-        assert!(matches!(err, ModelError::InvalidConfiguration(msg) if msg.contains("must be in supported set")));
+        assert!(
+            matches!(err, ModelError::InvalidConfiguration(msg) if msg.contains("must be in supported set"))
+        );
     }
 
     #[tokio::test]

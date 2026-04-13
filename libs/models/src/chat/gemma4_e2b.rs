@@ -1,118 +1,87 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use motlie_model::eval::EvalTrack;
-use motlie_model::{BundleId, ModelBundle, ModelError, StartOptions};
-use motlie_model_mistral::{MistralMultimodalBundle, MistralMultimodalSpec};
+use motlie_model::{
+    BundleId, CheckpointFormat, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
+};
+use motlie_model_mistral::MistralMultimodalAdapter;
 
 use crate::{
-    ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleArtifacts, BundleDescriptor,
-    BundleFamily, BundleRequirements, PlatformConstraint,
+    ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor,
+    BundleRequirements,
 };
 
 pub const SELECTOR: &str = "google/gemma4_e2b";
 
-#[derive(Clone, Debug)]
-pub struct Gemma4E2B {
-    inner: MistralMultimodalBundle,
+pub(crate) fn register(catalog: &mut crate::Catalog) {
+    catalog.register(descriptor(), bundle);
+    catalog.register_model_variant(
+        identity(),
+        checkpoint(),
+        Arc::new(resolve_local_snapshot_root),
+        Arc::new(MistralMultimodalAdapter::gemma4()),
+    );
 }
 
-impl Gemma4E2B {
-    pub fn new() -> Self {
-        Self {
-            inner: MistralMultimodalBundle::new(MistralMultimodalSpec::gemma4_e2b()),
-        }
-    }
+pub(crate) fn identity() -> ModelIdentity {
+    super::gemma4_e2b_identity()
 }
 
-impl Default for Gemma4E2B {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait::async_trait]
-impl ModelBundle for Gemma4E2B {
-    fn id(&self) -> &BundleId {
-        self.inner.id()
-    }
-
-    fn metadata(&self) -> &motlie_model::BundleMetadata {
-        self.inner.metadata()
-    }
-
-    fn capabilities(&self) -> &motlie_model::Capabilities {
-        self.inner.capabilities()
-    }
-
-    async fn start(
-        &self,
-        options: StartOptions,
-    ) -> Result<Box<dyn motlie_model::BundleHandle>, ModelError> {
-        let StartOptions {
-            artifact_policy,
-            quantization,
-            unpack_root,
-            max_concurrency,
-        } = options;
-        let artifact_policy = match artifact_policy {
-            Some(motlie_model::ArtifactPolicy::LocalOnly { root }) => {
-                Some(motlie_model::ArtifactPolicy::LocalOnly {
-                    root: resolve_local_snapshot_root(&root)?,
-                })
-            }
-            other => other,
-        };
-        let options = StartOptions {
-            artifact_policy,
-            quantization,
-            unpack_root,
-            max_concurrency,
-        };
-        self.inner.start(options).await
+pub(crate) fn checkpoint() -> ModelCheckpoint {
+    ModelCheckpoint {
+        format: CheckpointFormat::Safetensors,
+        source: ArtifactSource::HuggingFace {
+            repo: "google/gemma-4-E2B-it",
+        },
+        include: vec![
+            ArtifactRule::Exact("chat_template.jinja"),
+            ArtifactRule::Exact("config.json"),
+            ArtifactRule::Exact("generation_config.json"),
+            ArtifactRule::Exact("tokenizer.json"),
+            ArtifactRule::Exact("tokenizer.model"),
+            ArtifactRule::Exact("tokenizer_config.json"),
+            ArtifactRule::Exact("special_tokens_map.json"),
+            ArtifactRule::Exact("preprocessor_config.json"),
+            ArtifactRule::Exact("processor_config.json"),
+            ArtifactRule::Suffix(".safetensors"),
+            ArtifactRule::Suffix(".safetensors.index.json"),
+        ],
+        quantization: None,
     }
 }
 
 pub fn descriptor() -> BundleDescriptor {
+    let identity = identity();
+    let checkpoint = checkpoint();
     BundleDescriptor {
         id: BundleId::new("gemma4_e2b"),
-        display_name: "Gemma 4 E2B-it".into(),
-        family: BundleFamily::Gemma,
-        capabilities: motlie_model::Capabilities::multimodal_chat_and_vision(),
+        model_id: identity.id.clone(),
+        display_name: identity.display_name.clone(),
+        family: identity.family,
+        capabilities: identity.capabilities,
         backend: BackendKind::MistralRs,
         requirements: BundleRequirements {
-            platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
+            platform: identity.requirements.platform,
             build: vec![BuildConstraint::Feature("backend-mistral".into())],
         },
-        eval_tracks: vec![
-            EvalTrack::Chat,
-            EvalTrack::Reasoning,
-            EvalTrack::Summarization,
-            EvalTrack::Classification,
-        ],
-        artifacts: Some(BundleArtifacts {
-            control_name: "gemma4_e2b",
-            source: ArtifactSource::HuggingFace {
-                repo: "google/gemma-4-E2B-it",
-            },
-            include: vec![
-                ArtifactRule::Exact("chat_template.jinja"),
-                ArtifactRule::Exact("config.json"),
-                ArtifactRule::Exact("generation_config.json"),
-                ArtifactRule::Exact("tokenizer.json"),
-                ArtifactRule::Exact("tokenizer.model"),
-                ArtifactRule::Exact("tokenizer_config.json"),
-                ArtifactRule::Exact("special_tokens_map.json"),
-                ArtifactRule::Exact("preprocessor_config.json"),
-                ArtifactRule::Exact("processor_config.json"),
-                ArtifactRule::Suffix(".safetensors"),
-                ArtifactRule::Suffix(".safetensors.index.json"),
-            ],
-        }),
+        eval_tracks: identity.eval_tracks,
+        artifacts: Some(crate::bundle_artifacts_from_checkpoint(
+            "gemma4_e2b",
+            &checkpoint,
+        )),
     }
 }
 
 pub fn bundle() -> Box<dyn ModelBundle> {
-    Box::new(Gemma4E2B::new())
+    let descriptor = descriptor();
+    crate::adapter_backed_bundle(
+        descriptor.id,
+        descriptor.display_name,
+        identity(),
+        checkpoint(),
+        Arc::new(MistralMultimodalAdapter::gemma4()),
+        Arc::new(resolve_local_snapshot_root),
+    )
 }
 
 fn resolve_local_snapshot_root(root: &Path) -> Result<PathBuf, ModelError> {
@@ -137,7 +106,8 @@ fn resolve_local_snapshot_root(root: &Path) -> Result<PathBuf, ModelError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Catalog;
+    use crate::{BundleFamily, Catalog};
+    use motlie_model::eval::EvalTrack;
     use motlie_model::CapabilityKind;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -161,6 +131,15 @@ mod tests {
     }
 
     #[test]
+    fn identity_exposes_logical_multimodal_capabilities_only() {
+        let identity = identity();
+
+        assert!(identity.capabilities.supports(CapabilityKind::Chat));
+        assert!(identity.capabilities.supports(CapabilityKind::Vision));
+        assert!(!identity.capabilities.supports(CapabilityKind::Completion));
+    }
+
+    #[test]
     fn default_catalog_includes_gemma4_bundle() {
         let catalog = Catalog::with_defaults();
         let bundle_id = BundleId::new("gemma4_e2b");
@@ -168,11 +147,9 @@ mod tests {
         #[cfg(feature = "model-gemma4-e2b")]
         {
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(
-                catalog
-                    .bundles_for_track(EvalTrack::Chat)
-                    .any(|b| b.id == bundle_id)
-            );
+            assert!(catalog
+                .bundles_for_track(EvalTrack::Chat)
+                .any(|b| b.id == bundle_id));
         }
     }
 
