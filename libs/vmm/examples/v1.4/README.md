@@ -253,6 +253,34 @@ Current implementation notes:
   `repl_host_v1_4`, and it also verifies that manual `boot` continues to work
   with auto-provisioning both off and on
 
+## Host Lifetime Policy
+
+`repl_host_v1_4` and the interactive harness shell now treat operator
+disconnects as detach, not shutdown.
+
+This is intentional and should carry forward into the real vmm host:
+
+- stdin EOF must not stop the SSH proxy
+- `SIGHUP` must not stop the SSH proxy
+- existing guests must stay running after the controlling terminal goes away
+- new SSH logins must still work after the operator disconnects
+- only explicit `quit` / `exit` or process termination signals such as
+  `SIGINT` / `SIGTERM` should trigger guest shutdown
+
+This policy belongs in the host application layer rather than the core
+`libs/vmm` library. The library should provide proxy/provisioning primitives;
+the host decides whether losing its REPL client means `detach` or `terminate`.
+
+Current hardening notes:
+
+- `repl_host_v1_4` now supervises the proxy task and restarts it if the task
+  exits unexpectedly
+- `examples/v1.4/harness/shell.rs` applies the same policy so the manual
+  harness shell does not tear down active guests on stdin close
+- `integration/repl-headless-hardening-smoke.sh` is the regression that closes
+  REPL stdin deliberately, then verifies real external SSH auto-provisioning and
+  reconnects still work
+
 The assignment should include:
 
 - guest slot

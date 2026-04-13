@@ -13,6 +13,7 @@ use motlie_vmm::runtime::{
 };
 use motlie_vmm::ssh::{self, new_guest_registry, ExecOutput, PtyRequest, SshProxyConfig};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use crate::terminal::{HarnessTerminalSession, TerminalBackendKind};
 use crate::{
@@ -65,10 +66,7 @@ pub async fn run_shell(
         ),
         principal_resolver: Some(provisioner.ssh_principal_resolver()),
     };
-    tokio::spawn(ssh::run_proxy(
-        proxy_config.clone(),
-        Arc::clone(&guest_registry),
-    ));
+    let mut proxy_task = spawn_proxy_task(proxy_config.clone(), Arc::clone(&guest_registry));
     print_instance_details(instance, &proxy_config);
 
     let mut terminals: HashMap<String, HarnessTerminalSession> = HashMap::new();
@@ -81,98 +79,149 @@ pub async fn run_shell(
         "Commands: help | boot <guest> | ready <guest> | exec <guest> <cmd> | validate <guest> | pty-open <guest> <session> | pty-send <session> <text> | pty-send-line <session> <text> | pty-read <session> [timeout_ms] | pty-expect <session> <text> | pty-expect-screen <session> <text> | pty-resize <session> <cols> <rows> | pty-screen <session> | shutdown <guest> | status | guests | capacity | where [guest] | quit"
     );
 
-    let mut lines = spawn_stdin_reader();
+    let mut events = spawn_stdin_reader();
+    install_signal_watchers(events.sender().clone())?;
+    let mut stdin_closed = false;
     print_prompt(&mut stdout)?;
-    while let Some(line_result) = lines.recv().await {
-        let line = line_result?;
-        let trimmed = line.trim();
+    loop {
+        tokio::select! {
+            event = events.recv() => {
+                let Some(event) = event else {
+                    stdin_closed = true;
+                    println!("notice: stdin reader disconnected; continuing headless");
+                    continue;
+                };
 
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            print_prompt(&mut stdout)?;
-            continue;
-        }
+                match event {
+                    HostEvent::StdinLine(line_result) => {
+                        let line = line_result?;
+                        let trimmed = line.trim();
 
-        let result = if trimmed == "help" {
-            print_help();
-            Ok(())
-        } else if trimmed == "status" || trimmed == "guests" {
-            print_status(&provisioner);
-            Ok(())
-        } else if trimmed == "capacity" {
-            print_capacity(&provisioner);
-            Ok(())
-        } else if trimmed == "where" {
-            print_where(
-                instance,
-                &proxy_config,
-                &provisioner,
-                terminal_backend,
-                None,
-            );
-            Ok(())
-        } else if let Some(rest) = trimmed.strip_prefix("where ") {
-            let guest_id = rest.trim();
-            let guest = (!guest_id.is_empty()).then_some(guest_id);
-            print_where(
-                instance,
-                &proxy_config,
-                &provisioner,
-                terminal_backend,
-                guest,
-            );
-            Ok(())
-        } else if trimmed == "quit" || trimmed == "exit" {
-            break;
-        } else if let Some(rest) = trimmed.strip_prefix("boot ") {
-            let guest_id = rest.trim();
-            if guest_id.is_empty() {
-                Err::<(), DynError>("boot <guest>".into())
-            } else {
-                boot_guest(guest_id, &provisioner).await
+                        if trimmed.is_empty() || trimmed.starts_with('#') {
+                            if !stdin_closed {
+                                print_prompt(&mut stdout)?;
+                            }
+                            continue;
+                        }
+
+                        let mut should_exit = false;
+                        let result = if trimmed == "help" {
+                            print_help();
+                            Ok(())
+                        } else if trimmed == "status" || trimmed == "guests" {
+                            print_status(&provisioner);
+                            Ok(())
+                        } else if trimmed == "capacity" {
+                            print_capacity(&provisioner);
+                            Ok(())
+                        } else if trimmed == "where" {
+                            print_where(
+                                instance,
+                                &proxy_config,
+                                &provisioner,
+                                terminal_backend,
+                                None,
+                            );
+                            Ok(())
+                        } else if let Some(rest) = trimmed.strip_prefix("where ") {
+                            let guest_id = rest.trim();
+                            let guest = (!guest_id.is_empty()).then_some(guest_id);
+                            print_where(
+                                instance,
+                                &proxy_config,
+                                &provisioner,
+                                terminal_backend,
+                                guest,
+                            );
+                            Ok(())
+                        } else if trimmed == "quit" || trimmed == "exit" {
+                            should_exit = true;
+                            Ok(())
+                        } else if let Some(rest) = trimmed.strip_prefix("boot ") {
+                            let guest_id = rest.trim();
+                            if guest_id.is_empty() {
+                                Err::<(), DynError>("boot <guest>".into())
+                            } else {
+                                boot_guest(guest_id, &provisioner).await
+                            }
+                        } else if let Some(rest) = trimmed.strip_prefix("ready ") {
+                            ready_guest(rest.trim(), &provisioner).await
+                        } else if let Some(rest) = trimmed.strip_prefix("shutdown ") {
+                            shutdown_guest(rest.trim(), &provisioner).await
+                        } else if let Some(rest) = trimmed.strip_prefix("validate ") {
+                            validate_guest(rest.trim(), &provisioner).await
+                        } else if let Some(rest) = trimmed.strip_prefix("exec ") {
+                            exec_guest(rest, &provisioner).await
+                        } else if let Some(rest) = trimmed.strip_prefix("pty-open ") {
+                            pty_open(
+                                rest,
+                                instance,
+                                &provisioner,
+                                &mut terminals,
+                                terminal_backend,
+                            )
+                            .await
+                        } else if let Some(rest) = trimmed.strip_prefix("pty-send-line ") {
+                            pty_send_line(rest, &terminals).await
+                        } else if let Some(rest) = trimmed.strip_prefix("pty-send ") {
+                            pty_send(rest, &terminals).await
+                        } else if let Some(rest) = trimmed.strip_prefix("pty-read ") {
+                            pty_read(rest, &terminals).await
+                        } else if let Some(rest) = trimmed.strip_prefix("pty-expect ") {
+                            pty_expect(rest, &terminals).await
+                        } else if let Some(rest) = trimmed.strip_prefix("pty-expect-screen ") {
+                            pty_expect_screen(rest, &terminals).await
+                        } else if let Some(rest) = trimmed.strip_prefix("pty-resize ") {
+                            pty_resize(rest, &terminals).await
+                        } else if let Some(rest) = trimmed.strip_prefix("pty-screen ") {
+                            pty_screen(rest, &terminals)
+                        } else if let Some(rest) = trimmed.strip_prefix("launch ") {
+                            Err::<(), DynError>(format!("use 'boot {}' instead", rest.trim()).into())
+                        } else {
+                            Err::<(), DynError>(format!("unknown command: {trimmed}").into())
+                        };
+
+                        if let Err(err) = result {
+                            println!("error: {err}");
+                        }
+                        if should_exit {
+                            break;
+                        }
+                        if !stdin_closed {
+                            print_prompt(&mut stdout)?;
+                        }
+                    }
+                    HostEvent::StdinClosed => {
+                        if !stdin_closed {
+                            stdin_closed = true;
+                            println!("notice: stdin closed; continuing headless. Use SIGINT or SIGTERM to stop the harness.");
+                        }
+                    }
+                    HostEvent::Terminate(signal_name) => {
+                        println!("notice: received {signal_name}; shutting down");
+                        break;
+                    }
+                    HostEvent::Hangup => {
+                        println!("notice: received SIGHUP; keeping proxy and guests alive");
+                    }
+                }
             }
-        } else if let Some(rest) = trimmed.strip_prefix("ready ") {
-            ready_guest(rest.trim(), &provisioner).await
-        } else if let Some(rest) = trimmed.strip_prefix("shutdown ") {
-            shutdown_guest(rest.trim(), &provisioner).await
-        } else if let Some(rest) = trimmed.strip_prefix("validate ") {
-            validate_guest(rest.trim(), &provisioner).await
-        } else if let Some(rest) = trimmed.strip_prefix("exec ") {
-            exec_guest(rest, &provisioner).await
-        } else if let Some(rest) = trimmed.strip_prefix("pty-open ") {
-            pty_open(
-                rest,
-                instance,
-                &provisioner,
-                &mut terminals,
-                terminal_backend,
-            )
-            .await
-        } else if let Some(rest) = trimmed.strip_prefix("pty-send-line ") {
-            pty_send_line(rest, &terminals).await
-        } else if let Some(rest) = trimmed.strip_prefix("pty-send ") {
-            pty_send(rest, &terminals).await
-        } else if let Some(rest) = trimmed.strip_prefix("pty-read ") {
-            pty_read(rest, &terminals).await
-        } else if let Some(rest) = trimmed.strip_prefix("pty-expect ") {
-            pty_expect(rest, &terminals).await
-        } else if let Some(rest) = trimmed.strip_prefix("pty-expect-screen ") {
-            pty_expect_screen(rest, &terminals).await
-        } else if let Some(rest) = trimmed.strip_prefix("pty-resize ") {
-            pty_resize(rest, &terminals).await
-        } else if let Some(rest) = trimmed.strip_prefix("pty-screen ") {
-            pty_screen(rest, &terminals)
-        } else if let Some(rest) = trimmed.strip_prefix("launch ") {
-            Err::<(), DynError>(format!("use 'boot {}' instead", rest.trim()).into())
-        } else {
-            Err::<(), DynError>(format!("unknown command: {trimmed}").into())
-        };
-
-        if let Err(err) = result {
-            println!("error: {err}");
+            proxy_result = &mut proxy_task => {
+                match proxy_result {
+                    Ok(Ok(())) => println!("warning: SSH proxy exited unexpectedly; restarting"),
+                    Ok(Err(err)) => println!("warning: SSH proxy failed: {err}; restarting"),
+                    Err(err) => println!("warning: SSH proxy task aborted: {err}; restarting"),
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                proxy_task = spawn_proxy_task(proxy_config.clone(), Arc::clone(&guest_registry));
+                if !stdin_closed {
+                    print_prompt(&mut stdout)?;
+                }
+            }
         }
-
-        print_prompt(&mut stdout)?;
     }
+
+    proxy_task.abort();
 
     for (_session, terminal) in terminals.drain() {
         let _ = terminal.persist_artifacts();
@@ -190,16 +239,78 @@ pub async fn run_shell(
     Ok(())
 }
 
-fn spawn_stdin_reader() -> mpsc::UnboundedReceiver<Result<String, io::Error>> {
+enum HostEvent {
+    StdinLine(Result<String, io::Error>),
+    StdinClosed,
+    Terminate(&'static str),
+    Hangup,
+}
+
+struct HostEvents {
+    rx: mpsc::UnboundedReceiver<HostEvent>,
+    tx: mpsc::UnboundedSender<HostEvent>,
+}
+
+impl HostEvents {
+    fn sender(&self) -> &mpsc::UnboundedSender<HostEvent> {
+        &self.tx
+    }
+
+    async fn recv(&mut self) -> Option<HostEvent> {
+        self.rx.recv().await
+    }
+
+}
+
+fn spawn_stdin_reader() -> HostEvents {
     let (tx, rx) = mpsc::unbounded_channel();
+    let stdin_tx = tx.clone();
     thread::spawn(move || {
         for line in io::stdin().lock().lines() {
-            if tx.send(line).is_err() {
+            if stdin_tx.send(HostEvent::StdinLine(line)).is_err() {
                 break;
             }
         }
+        let _ = stdin_tx.send(HostEvent::StdinClosed);
     });
-    rx
+    HostEvents { rx, tx }
+}
+
+fn spawn_proxy_task(
+    config: SshProxyConfig,
+    registry: ssh::GuestRegistry,
+) -> JoinHandle<Result<(), ssh::SshProxyError>> {
+    tokio::spawn(ssh::run_proxy(config, registry))
+}
+
+fn install_signal_watchers(tx: mpsc::UnboundedSender<HostEvent>) -> Result<(), DynError> {
+    let ctrlc_tx = tx.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            let _ = ctrlc_tx.send(HostEvent::Terminate("SIGINT"));
+        }
+    });
+
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        let mut sigterm = signal(SignalKind::terminate())?;
+        let sigterm_tx = tx.clone();
+        tokio::spawn(async move {
+            sigterm.recv().await;
+            let _ = sigterm_tx.send(HostEvent::Terminate("SIGTERM"));
+        });
+
+        let mut sighup = signal(SignalKind::hangup())?;
+        tokio::spawn(async move {
+            while sighup.recv().await.is_some() {
+                let _ = tx.send(HostEvent::Hangup);
+            }
+        });
+    }
+
+    Ok(())
 }
 
 fn print_help() {
