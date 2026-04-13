@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-13 | @codex-vz | Address PR 163 review findings: declare the macOS 12 floor, add the helper entitlement/signing and build/discovery story, define the Rust↔Swift config/control contracts, harden readiness, describe vsock/cloud-init delivery, and tighten several factual details |
 | 2026-04-12 | @codex-vz | Initial design for a macOS `backend::vz` that satisfies the current `Runtime` / `VmHandle` contracts with Apple `Virtualization.framework`, recommends a Swift helper process for the first slice, and defines the portability gaps that need small API cleanup in `libs/vmm` |
 
 ## Goal
@@ -45,7 +46,7 @@ few CH-shaped assumptions that must be relaxed for Vz:
   - placeholder only
 - [`libs/vmm/src/orchestrator.rs`](../src/orchestrator.rs)
   - `ready()` unconditionally waits for `runtime_paths.api_socket`
-  - `observability()` treats `api_socket` as a required run artifact
+  - run-artifact reporting treats `api_socket` as a required run artifact
 - [`libs/vmm/src/spec.rs`](../src/spec.rs)
   - `GuestRuntimePaths` is generic enough for Vz, but the semantic meaning of
     `api_socket` is CH-specific today
@@ -62,19 +63,21 @@ As of 2026-04-12, the relevant Apple and Rust surfaces look like this:
 
 - Apple `Virtualization.framework` directly supports the primitives we need for
   a Linux guest:
-  - `VZLinuxBootLoader`
-  - `VZVirtioFileSystemDeviceConfiguration`
-  - `VZVirtioSocketDeviceConfiguration`
-  - `VZNATNetworkDeviceAttachment`
-  - `VZFileHandleSerialPortAttachment`
-  - `VZVirtualMachineConfiguration.platform = VZGenericPlatformConfiguration`
+  - `VZLinuxBootLoader` on macOS 11+, but it must be paired with
+    `VZGenericPlatformConfiguration`
+  - `VZVirtioFileSystemDeviceConfiguration` on macOS 12+
+  - `VZVirtioSocketDeviceConfiguration` on macOS 11+
+  - `VZNATNetworkDeviceAttachment` on macOS 11+
+  - `VZFileHandleSerialPortAttachment` on macOS 11+
+  - `VZVirtualMachineConfiguration.platform` on macOS 12+
 - Apple also exposes higher-end options we can defer:
-  - `VZBridgedNetworkDeviceAttachment`
-  - `VZVmnetNetworkDeviceAttachment`
+  - `VZBridgedNetworkDeviceAttachment` with the
+    `com.apple.vm.networking` entitlement
+  - `VZVmnetNetworkDeviceAttachment` on macOS 26+ only
   - graphics, ballooning, Rosetta directory sharing, NBD, USB
 - The older `virtualization-rs` crate is not a good primary choice:
   - docs.rs shows version `0.1.2`
-  - docs.rs lists only `x86_64-apple-darwin`
+  - docs.rs does not list `aarch64-apple-darwin`
   - it uses the older `objc` crate bindings
 - The current Rust binding surface is `objc2-virtualization`:
   - docs.rs shows version `0.3.2`
@@ -85,6 +88,31 @@ As of 2026-04-12, the relevant Apple and Rust surfaces look like this:
 The `!Send` / `!Sync` point matters because the current orchestrator stores
 backend state inside `VmHandle`, and those handles are expected to be usable
 from ordinary async Rust code.
+
+## Platform Floor
+
+The effective phase-1 deployment floor is macOS 12.0 (Monterey).
+
+Reasoning:
+
+- Linux boot, vsock, serial, and NAT all exist on macOS 11+
+- phase 1 also requires VirtioFS host directory sharing
+- the required VirtioFS/share APIs are macOS 12+:
+  - `VZVirtioFileSystemDeviceConfiguration`
+  - `VZSharedDirectory`
+  - `VZMultipleDirectoryShare`
+  - `VZVirtualMachineConfiguration.platform`
+
+This needs to be explicit in both implementation and build settings:
+
+- `vz-runner` should compile with a minimum deployment target of macOS 12.0
+- Rust `backend::vz` code should be `#[cfg(target_os = "macos")]`
+- any future Rust-native Vz bindings should also assume a macOS 12 floor unless
+  the design is split into a reduced non-VirtioFS path
+
+Apple Silicon is the primary target for phase 1, but the helper binary should
+be built as a universal macOS binary where practical so Intel developer hosts
+remain usable.
 
 ## Decision
 
@@ -127,6 +155,123 @@ It is viable long term, but it raises complexity immediately:
 - more unsafe surface before we have even proven the backend contract
 
 That is the wrong order for a first backend slice.
+
+## Entitlements And Signing
+
+`Virtualization.framework` changes the deployment story relative to the current
+pure-Rust CH shell backend.
+
+### Required Entitlements
+
+Phase 1 `vz-runner` needs:
+
+- `com.apple.security.virtualization`
+
+Deferred/network-expansion work would additionally need:
+
+- `com.apple.vm.networking`
+  - only for bridged networking, not for the phase-1 NAT path
+
+### Which Binary Carries The Entitlement
+
+The entitlement belongs on the process that directly instantiates
+`Virtualization.framework` objects.
+
+For the helper-process design, that means:
+
+- `vz-runner` must be signed with the virtualization entitlement
+- the Rust `motlie-vmm` binary does not need that entitlement merely to spawn
+  `vz-runner`
+- if the helper is ever embedded into a single macOS app bundle or replaced by
+  an in-process backend, the entitlement story must be re-evaluated for the new
+  executable boundary
+
+### Development Signing
+
+The design should assume:
+
+- local development uses either ad-hoc signing or a development certificate
+- `vz-runner` still needs an entitlements plist during local development
+- "unsigned helper" is not a supported assumption for this design; the
+  implementation should require explicit signing rather than depending on
+  environment-specific SIP behavior
+
+### Distribution Signing
+
+For distribution:
+
+- `vz-runner` must ship signed with the virtualization entitlement
+- bridged-network builds would require an additional signing profile carrying
+  `com.apple.vm.networking`
+- the design should treat helper signing as part of the build artifact, not as
+  a post-install manual step
+
+### Repository Artifacts
+
+Phase 2 should add a checked-in entitlements file such as:
+
+- `libs/vmm/vz/vz-runner.entitlements`
+
+with at least:
+
+```xml
+<key>com.apple.security.virtualization</key>
+<true/>
+```
+
+This makes the entitlement requirement visible in version control instead of
+burying it in local Xcode state.
+
+## Helper Discovery And Build Integration
+
+The design needs one explicit rule for how Rust discovers the Swift helper and
+how the workspace builds it.
+
+### Runtime Discovery
+
+Phase 1 should resolve `vz-runner` in this order:
+
+1. `MOTLIE_VZ_RUNNER=/abs/path/to/vz-runner`
+2. a sibling binary next to the Rust executable
+3. a checked repository build output under a known relative path
+4. `$PATH` as a last-resort developer convenience
+
+That order keeps distribution deterministic while still allowing local override.
+
+The backend should report the resolved path in observability and launch logs.
+
+### Build Integration
+
+Phase 1 should define one supported build path:
+
+- `cargo build -p motlie-vmm` builds Rust only
+- a dedicated repo script or Make target builds and signs `vz-runner`
+- Rust runtime code fails fast with a clear error if `AppleVirtualization` is
+  selected and the helper is missing
+
+This keeps Swift/Xcode toolchain requirements out of normal Linux CI and
+non-macOS Rust builds.
+
+Recommended repo-owned build entrypoint:
+
+- `libs/vmm/vz/build-vz-runner.sh`
+
+Responsibilities:
+
+- invoke `xcodebuild` or `swift build`
+- set the minimum deployment target to macOS 12.0
+- build a universal binary where feasible
+- sign the resulting binary with the checked-in entitlements plist
+- place the final artifact in a predictable repo-local output path
+
+### CI
+
+The design should explicitly assume:
+
+- Linux CI does not build or test `vz-runner`
+- macOS CI builds `vz-runner` only in dedicated jobs
+- integration tests needing live virtualization run only on macOS runners with
+  the required entitlement/signing setup
 
 ## Backend Shape
 
@@ -210,6 +355,12 @@ For CH, the probe remains `runtime_paths.api_socket`.
 
 For Vz, the probe is `runtime_paths.launch_dir.join("vz-ready")`.
 
+Behavioral compatibility requirement:
+
+- CH remains `Path(runtime_paths.api_socket)`
+- existing CH tests should continue to pass without semantic changes
+- the abstraction must stay as a cheap enum/path lookup, not a new async layer
+
 ### 2. Make observability backend-aware
 
 `VmObservability` should continue exposing `runtime_paths.api_socket`, but the
@@ -245,8 +396,9 @@ Current `GuestSpec.boot` maps cleanly:
 - `boot.cmdline` -> `commandLine`
 - `boot.firmware`
   - not used for the normal Linux path in phase 1
-  - if present, backend should reject it with a clear unsupported error until a
-    reviewed EFI story is added
+  - if present, backend should reject it with a clear unsupported error that
+    explains EFI boot on Vz requires a different configuration path than
+    `VZLinuxBootLoader`, not merely that the field is temporarily unsupported
 
 ### CPU / Memory
 
@@ -257,6 +409,15 @@ Current `GuestResources` maps directly:
 - `max_vcpus`
   - no phase-1 use
   - ignore or reject until hotplug / topology policy exists
+
+The helper should validate CPU and memory against the runtime-reported Vz
+limits before calling `validate()`:
+
+- `minimumAllowedCPUCount ..= maximumAllowedCPUCount`
+- `minimumAllowedMemorySize ..= maximumAllowedMemorySize`
+
+Those validation failures should come back to Rust as structured launch errors,
+not as opaque helper crashes.
 
 ### Storage
 
@@ -283,9 +444,22 @@ Current `GuestMountSpec` can map to VirtioFS:
 - host path -> `VZSharedDirectory`
 - one mount per device in phase 1
 
-Inside the guest, the existing cloud-init `mounts.yaml` flow can stay in place.
-The backend only needs to guarantee that the host shares exist with matching
-tags before boot.
+Inside the guest, the existing cloud-init `mounts.yaml` flow can stay in place,
+but Vz still needs an explicit cloud-init delivery path.
+
+Phase 1 delivery mechanism:
+
+- create a small `cidata` disk image from the already-rendered `meta-data`,
+  `user-data`, and `mounts.yaml`
+- attach that disk as a read-only block device so cloud-init can consume the
+  normal NoCloud datasource during boot
+- keep VirtioFS responsible only for host-directory sharing, not for delivering
+  the cloud-init datasource itself
+
+The backend therefore has two separate responsibilities:
+
+- ensure host shares exist with matching tags before boot
+- ensure the NoCloud datasource is attached as a separate boot-time artifact
 
 This means `FilesystemBacking::HypervisorManaged` is the correct default Vz path
 for shared directories. We do not need `backend::motlie::vfs` for the first Vz
@@ -333,6 +507,22 @@ same host UDS path that the existing Rust SSH proxy expects.
 
 That keeps `VmHandle::exec(...)` and `VmHandle::open_pty(...)` unchanged.
 
+Bridge shape in phase 1:
+
+- Rust still owns the SSH proxy logic and its Unix domain listener path
+- `vz-runner` owns the Vz host-side virtio-socket listener
+- for each guest-initiated connection to the SSH bridge port, `vz-runner`
+  opens a fresh Unix stream connection to the Rust-owned UDS
+- it then performs a byte-for-byte duplex copy until EOF on either side
+- no additional framing or protocol translation is introduced
+
+Lifecycle requirements:
+
+- multiple sequential or concurrent guest bridge connections must be supported
+- bridge tasks must be cancelled when the VM exits or helper shutdown begins
+- helper-side bridge errors must be reflected in control-socket status so Rust
+  can fail readiness and emit actionable diagnostics
+
 ## `vz-runner` Process Model
 
 The helper should take a fully materialized launch description from Rust and
@@ -343,7 +533,7 @@ own the VM until exit.
 `VzBackend::boot(prepared)` should:
 
 1. create launch/runtime directories
-2. materialize a small JSON config file in `runtime_paths.launch_dir`
+2. materialize a versioned JSON config file in `runtime_paths.launch_dir`
 3. pre-create files and sockets needed for logs/control
 4. spawn `vz-runner`
 5. return `BackendHandle::Vz(VzHandle { ... })`
@@ -357,8 +547,117 @@ own the VM until exit.
 3. validate configuration before launch
 4. construct `VZVirtualMachine`
 5. start the VM
-6. mark readiness by creating `vz-ready`
-7. service a tiny control socket until the VM exits or shutdown is requested
+6. wait until:
+   - the VM reports `running`
+   - the control socket is accepting requests
+   - the vsock bridge listener is accepting guest connections
+7. mark readiness by creating `vz-ready`
+8. service a tiny control socket until the VM exits or shutdown is requested
+
+### `vz-config.json` Contract
+
+The Rust->Swift config file should be a stable versioned schema, not an ad hoc
+bag of launch arguments.
+
+Recommended top-level shape:
+
+```json
+{
+  "schema_version": 1,
+  "guest_id": "alice",
+  "platform": {
+    "minimum_macos": "12.0"
+  },
+  "boot": {
+    "kernel": "/abs/path/Image",
+    "initramfs": "/abs/path/initrd.img",
+    "cmdline": "console=hvc0"
+  },
+  "resources": {
+    "cpu_count": 2,
+    "memory_bytes": 536870912
+  },
+  "storage": {
+    "root_disk": "/abs/path/root.qcow2",
+    "cloud_init_disk": "/abs/path/cidata.iso"
+  },
+  "mounts": [
+    {
+      "tag": "alice-home",
+      "host_path": "/abs/path/alice-home",
+      "read_only": false
+    }
+  ],
+  "network": {
+    "mode": "nat"
+  },
+  "vsock": {
+    "ssh_port": 2222,
+    "bridge_uds_path": "/abs/path/motlie-vmm-v14-alice.vsock_2222"
+  },
+  "artifacts": {
+    "serial_log_path": "/abs/path/serial.log",
+    "launch_log_path": "/abs/path/launch.log",
+    "readiness_path": "/abs/path/vz-ready",
+    "control_socket_path": "/abs/path/vz-control.sock"
+  }
+}
+```
+
+Field-level notes:
+
+- `schema_version` must be mandatory so Rust and Swift can reject mismatched
+  helper/runtime revisions cleanly
+- all file paths should be absolute before handoff to Swift
+- the config should carry only already-materialized paths, not unresolved
+  repository-relative guesses
+
+### Control Socket Protocol
+
+The helper control socket should use line-delimited JSON messages for phase 1.
+
+Rust -> Swift requests:
+
+```json
+{"id":1,"command":"status"}
+{"id":2,"command":"shutdown"}
+```
+
+Swift -> Rust responses/events:
+
+```json
+{"id":1,"ok":true,"state":"running","pid":12345,"vsock_bridge_ready":true}
+{"id":2,"ok":true,"state":"stopping"}
+{"event":"state_changed","state":"stopped","reason":"guest_shutdown"}
+{"event":"error","stage":"launch","message":"cpu_count below minimumAllowedCPUCount"}
+```
+
+Protocol requirements:
+
+- `status` reports VM lifecycle state, helper pid, and bridge/control readiness
+- `shutdown` requests graceful stop and returns an immediate ack
+- asynchronous `error` and `state_changed` events are allowed at any time
+- unrecoverable helper/bootstrap errors must cross the socket as structured
+  events before process exit when possible
+- Rust should treat socket disconnect before `stopped` as a launch/shutdown
+  failure unless the child has already exited cleanly
+
+### Readiness Robustness
+
+`vz-ready` should not be treated as a blind single-bit success flag.
+
+Phase 1 readiness should be two-phase:
+
+1. `vz-ready` exists and contains:
+   - helper pid
+   - schema version
+   - final transition state used to mark ready
+2. a control-socket `status` request succeeds and reports:
+   - `state = running`
+   - `vsock_bridge_ready = true`
+
+This keeps the simple file-based probe for orchestration while preventing the
+obvious stale-sentinel failure mode.
 
 ### Suggested On-Disk Artifacts
 
@@ -369,6 +668,7 @@ Under `runtime_paths.launch_dir`:
 - `vz-control.sock`
 - `launch.log`
 - `serial.log`
+- `cloud-init.iso`
 
 Under `runtime_paths.runtime_dir`:
 
@@ -376,6 +676,15 @@ Under `runtime_paths.runtime_dir`:
 
 This is intentionally parallel to the CH shell backend’s file-oriented
 observability.
+
+### Serial Policy
+
+Phase 1 serial support is capture-only:
+
+- `vz-runner` writes the guest serial stream to `serial.log`
+- interactive serial console forwarding is out of scope for the first slice
+- future manual-debug tooling can add bidirectional serial later if the harness
+  actually needs it
 
 ## Shutdown Model
 
@@ -392,7 +701,8 @@ The backend shutdown contract should match the CH model:
   - rename later to something backend-neutral such as `graceful_attempted`
   - until then, Vz can set it to `true` when the control socket path was used
 - `forced`
-  - unchanged
+  - remains `Option<&'static str>` with CH-style values such as `"term"` or
+    `"kill"`
 
 The helper should implement graceful shutdown by requesting VM stop through
 `Virtualization.framework` and then exiting only after the VM reaches a terminal
@@ -409,6 +719,10 @@ Add `VzError` under `backend::vz` for:
 - helper control-socket failure
 - early VM exit before readiness
 - invalid/missing boot artifacts
+- helper/helper-schema version mismatch
+- CPU or memory outside Vz-supported bounds
+- vsock bridge bootstrap failure
+- missing helper binary or missing helper entitlement/signing
 
 Keep those surfaced through `BackendError` and `RuntimeError` so callers still
 see them as normal orchestrator failures.
@@ -432,12 +746,15 @@ see them as normal orchestrator failures.
   - one serial attachment
   - zero or more virtio-fs shares
 - implement graceful shutdown over control socket
+- add checked-in entitlements plist and repo-owned helper build script
 
 ### Phase 3: Rust integration
 
 - implement `backend::vz::VzBackend`
 - wire `HypervisorBacking::AppleVirtualization` to the backend
 - add tests for handle kind, shutdown behavior, and readiness probe behavior
+- add unit tests for config serialization and control-protocol parsing on
+  non-macOS hosts
 
 ### Phase 4: Harness validation
 
@@ -448,6 +765,15 @@ see them as normal orchestrator failures.
   - PTY opens over the existing SSH bridge
   - host mount is visible in guest
   - serial log and readiness artifacts are captured
+
+Testing expectations:
+
+- non-macOS CI can still compile the Rust-side config/handle/control-path code
+  behind lightweight mocks or platform-gated unit tests
+- live VM integration tests require macOS runners with the helper already built
+  and signed with the required entitlement
+- `vz-runner` should also have its own Swift-side unit coverage for config
+  decoding, control protocol handling, and readiness-state transitions
 
 ## Explicit Non-Goals for the First Slice
 
@@ -493,6 +819,14 @@ Primary external references consulted for this design on 2026-04-12:
     - <https://developer.apple.com/documentation/virtualization/vzvirtualmachineconfiguration/platform>
   - `VZMultipleDirectoryShare`
     - <https://developer.apple.com/documentation/virtualization/vzmultipledirectoryshare/init(directories:)>
+  - `VZVirtioFileSystemDeviceConfiguration`
+    - <https://developer.apple.com/documentation/virtualization/vzvirtiofilesystemdeviceconfiguration>
+  - `VZSharedDirectory`
+    - <https://developer.apple.com/documentation/virtualization/vzshareddirectory>
+  - `VZBridgedNetworkDeviceAttachment`
+    - <https://developer.apple.com/documentation/virtualization/vzbridgednetworkdeviceattachment>
+  - `VZVmnetNetworkDeviceAttachment`
+    - <https://developer.apple.com/documentation/virtualization/vzvmnetnetworkdeviceattachment>
 - Rust docs:
   - `virtualization-rs 0.1.2`
     - <https://docs.rs/virtualization-rs/latest/virtualization_rs/>
