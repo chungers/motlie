@@ -243,7 +243,6 @@ pub struct AudioSpec {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PcmChunk {
-    pub spec: AudioSpec,
     pub data: Vec<u8>,
     pub sequence: u64,
     pub end_of_stream: bool,
@@ -286,11 +285,21 @@ pub trait TranscriptionStream: Send {
     async fn push_chunk(
         &mut self,
         chunk: PcmChunk,
-    ) -> Result<TranscriptionUpdate, ModelError>;
+    ) -> Result<Option<TranscriptionUpdate>, ModelError>;
 
     async fn finish(self: Box<Self>) -> Result<TranscriptionUpdate, ModelError>;
 }
 ```
+
+`TranscriptionStream` is intentionally `Send` but not `Sync`.
+
+Why this departs from the existing `ChatModel` / `CompletionModel` / `EmbeddingModel` pattern:
+
+- a transcription stream owns mutable rolling-buffer state
+- `push_chunk()` requires ordered, exclusive mutation
+- callers should not share one live stream across tasks without their own synchronization layer
+
+The sharable capability object remains `TranscriptionModel: Send + Sync`; the per-stream session is the stateful, exclusive object.
 
 ### Why the Contract Is Streaming-Only
 
@@ -301,6 +310,13 @@ The simpler design is:
 - ASR is a streaming capability
 - `.wav` transcription is implemented by reading and chunking the file into the same stream contract
 
+`push_chunk()` should return:
+
+- `Ok(None)` when the new chunk does not cross a decode boundary and no new transcript output is available
+- `Ok(Some(update))` when the backend emits new partial or final segments
+
+This avoids the awkward empty-update pattern on every audio chunk while keeping the API pull-free.
+
 This avoids unnecessary contract churn and is a cleaner fit to the user requirement that the API handle PCM chunks from a stream.
 
 ### Eval and Metadata Additions
@@ -309,6 +325,10 @@ Add:
 
 - `EvalTrack::Transcription`
 - `BundleFamily::Whisper`
+
+For the first curated bundle and the first backend adapter, quantization should remain explicit and empty:
+
+- `QuantizationSupport::none()`
 
 `EvalTrack::primary_for_descriptor()` should map `CapabilityKind::Transcription` to `EvalTrack::Transcription` in the same way embeddings currently map directly to `EvalTrack::Embeddings`.
 
@@ -332,6 +352,16 @@ Add:
 - `CheckpointFormat::Ggml`
 
 This is an additive extension that matches the current enum-based backend and checkpoint design. The ASR slice should not overload `Gguf` or `Onnx` for a `ggml` Whisper artifact.
+
+Current upstream verification:
+
+- the `whisper.cpp` quick-start and model download scripts still describe the curated Whisper artifacts as `ggml` format
+- the canonical first-slice filename remains `ggml-base.en.bin`
+
+Design implication:
+
+- add `CheckpointFormat::Ggml` now for the current artifact reality
+- document that a future upstream migration to GGUF would justify either a second curated checkpoint variant or a later format migration plan
 
 ### Third-Party Dependency Choice
 
@@ -427,6 +457,7 @@ Recommended descriptor contents:
 - `family = BundleFamily::Whisper`
 - `backend = BackendKind::WhisperCpp`
 - `capabilities = Capabilities::new(vec![CapabilityDescriptor::transcription_stream()])`
+- `quantization = QuantizationSupport::none()`
 - `eval_tracks = vec![EvalTrack::Transcription]`
 - `requirements.platform = [Linux, Macos]`
 - `requirements.build = [Feature("backend-whisper-cpp".into())]`
@@ -473,11 +504,25 @@ For v1:
 
 - supported encodings: `S16Le`, `F32Le`
 - required stream semantics: monotonically increasing `sequence`
+- `open_stream()` establishes the immutable `AudioSpec` for the lifetime of the stream
 - accepted source types:
   `.wav` decoded into PCM chunks by caller-side helper
   websocket binary frames mapped into PCM chunks by caller-side transport code
 - finalization:
   callers must send `end_of_stream = true` on the last chunk or call `finish()`
+
+Edge-case semantics for v1:
+
+- `push_chunk()` after a chunk marked `end_of_stream = true`
+  return `ModelError::InvalidConfiguration`
+- non-monotonic `sequence`
+  return `ModelError::InvalidConfiguration`
+- empty `data` with `end_of_stream = false`
+  return `Ok(None)` and do no work
+- calling after `finish()`
+  impossible by construction because `finish()` consumes `Box<Self>`
+
+The first ASR slice reuses the existing `ModelError` surface. If request-validation failure modes grow materially, a future additive error variant can separate caller misuse from startup configuration issues.
 
 ### Normalization Rule
 
@@ -501,6 +546,8 @@ Streaming ASR is only useful if partials are represented explicitly. The `final_
   committed text that should not be rewritten later
 
 This is intentionally smaller than a full diff protocol. The caller can reconcile partials by segment timing.
+
+Because `push_chunk()` returns `Option<TranscriptionUpdate>`, callers only handle transcript material when the backend actually emits it.
 
 ## Feature Flag Design
 
@@ -559,6 +606,14 @@ This is the same unsupported-capability behavior used today for chat, completion
 
 The only intentional source break inside the workspace is the `BundleHandle` trait expansion. That break is acceptable because all implementers are in-tree and can be migrated in the same change series.
 
+The exact in-tree handle implementations that must be updated are:
+
+- `libs/model/backends/mistral/src/text.rs`
+- `libs/model/backends/mistral/src/multimodal.rs`
+- `libs/model/backends/mistral/src/embeddings.rs`
+- `libs/model/backends/llama_cpp/src/text.rs`
+- `libs/model/src/lib.rs` test `FakeHandle`
+
 ### No Existing Caller Migration
 
 There is no public ASR surface to deprecate or preserve. Existing catalog selectors and bundle IDs remain unchanged. The ASR slice only adds:
@@ -606,19 +661,16 @@ let mut stream = asr
 
 let update = stream
     .push_chunk(PcmChunk {
-        spec: AudioSpec {
-            sample_rate_hz: 16_000,
-            channels: 1,
-            encoding: PcmEncoding::S16Le,
-        },
         data: pcm_bytes,
         sequence: 0,
         end_of_stream: false,
     })
     .await?;
 
-for segment in update.segments {
-    println!("{}", segment.text);
+if let Some(update) = update {
+    for segment in update.segments {
+        println!("{}", segment.text);
+    }
 }
 
 let final_update = stream.finish().await?;
@@ -709,10 +761,11 @@ The implementation plan should cover:
 - contract-level unit tests for the new transcription types and capability discovery
 - migration tests proving older backends reject `transcription()` cleanly
 - backend tests for PCM normalization, rolling-window decode, and partial/final segment behavior
+- backend runtime-metrics wiring using the existing latency/memory snapshot helpers
 - curated bundle tests for descriptor reviewability and local artifact resolution
 - selector and feature-gating tests in `libs/models`
 - env-gated end-to-end `.wav` transcription test with pre-downloaded artifacts
-- example validation for both `.wav` and websocket-fed PCM flows
+- example validation for the `.wav` vertical slice, with websocket adaptation verified in a follow-up slice
 
 ## Open Concerns
 
