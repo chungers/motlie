@@ -1019,13 +1019,14 @@ fn scenario_exit(result: ScenarioRunResult) -> Result<(), DynError> {
 }
 
 fn new_harness_instance(root_dir: &Path) -> Result<HarnessInstance, DynError> {
-    let namespace = RuntimeNamespace::for_process("motlie-vmm-v14", "h", root_dir)?;
+    // The harness can keep serving after stdin/SIGHUP detach, so delayed guest
+    // boots must still fit every AF_UNIX socket under a user-supplied root.
+    // Keep the namespace prefix and vnet socket directory intentionally short.
+    let namespace = RuntimeNamespace::for_process("v14", "h", root_dir)?;
     let demo_root = namespace
         .temp_root
         .join(format!("{}-demo", namespace.prefix));
-    let socket_root = namespace
-        .temp_root
-        .join(format!("{}-sockets", namespace.prefix));
+    let socket_root = namespace.temp_root.join("s");
     let proxy_port = 32000 + port_offset(&namespace.prefix);
     Ok(HarnessInstance {
         namespace,

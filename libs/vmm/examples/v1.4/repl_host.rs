@@ -1,11 +1,10 @@
 mod demo_support;
 
-use std::io::{self, BufRead, Write};
+use std::io::{self};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
 
 use motlie_vmm::ca::SshCa;
@@ -23,21 +22,18 @@ use motlie_vmm::spec::{
     GuestUser, RuntimeNamespace, SoftwareProfile,
 };
 use motlie_vmm::ssh::{
-    self, new_guest_registry, ExecOutput, PrincipalResolver, SshProxyConfig, SshProxyError,
+    new_guest_registry, ExecOutput, PrincipalResolver, SshProxyConfig, SshProxyError,
 };
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 
-use demo_support::{demo_guest_ids, demo_guest_socket_path};
+use demo_support::{
+    demo_guest_ids, demo_guest_socket_path, guest_runtime_paths, install_signal_watchers, prompt,
+    shutdown_active_guests, spawn_host_events, spawn_proxy_task, stdin_line_or_detach, HostEvent,
+    ProxyRestartState,
+};
 
 type DynError = Box<dyn std::error::Error + Send + Sync>;
 
-enum HostEvent {
-    StdinLine(Result<String, io::Error>),
-    StdinClosed,
-    Terminate(&'static str),
-    Hangup,
-}
+const REPL_PROXY_BASE_PORT: u16 = 42_000;
 
 struct ReplInstance {
     namespace: RuntimeNamespace,
@@ -186,6 +182,7 @@ async fn main() -> Result<(), DynError> {
         )),
     };
     let mut proxy_task = spawn_proxy_task(proxy_config.clone(), Arc::clone(&guest_registry));
+    let mut proxy_restart_state = ProxyRestartState::new();
 
     let mut stdout = io::stdout();
 
@@ -201,29 +198,33 @@ async fn main() -> Result<(), DynError> {
         "Commands: help | auto-provision <on|off|status> | boot <guest> | ready <guest> | exec <guest> <cmd> | validate <guest> | shutdown <guest> | status | guests | where [guest] | quit"
     );
 
-    let mut events = spawn_stdin_reader();
-    install_signal_watchers(events.sender().clone())?;
-    let mut stdin_closed = false;
+    let (mut events, event_tx) = spawn_host_events();
+    install_signal_watchers(event_tx)?;
+    let mut events_open = true;
+    let mut headless = false;
 
-    print_prompt(&mut stdout)?;
+    prompt(&mut stdout, "v14> ", &mut headless);
     loop {
         tokio::select! {
-            event = events.recv() => {
+            event = events.recv(), if events_open => {
                 let Some(event) = event else {
-                    stdin_closed = true;
-                    println!("notice: stdin reader disconnected; continuing headless");
+                    events_open = false;
+                    if !headless {
+                        headless = true;
+                        eprintln!("notice: operator event stream closed; continuing headless");
+                    }
                     continue;
                 };
 
                 match event {
                     HostEvent::StdinLine(line_result) => {
-                        let line = line_result?;
+                        let Some(line) = stdin_line_or_detach(line_result, &mut headless) else {
+                            continue;
+                        };
                         let trimmed = line.trim();
 
-                        if trimmed.is_empty() {
-                            if !stdin_closed {
-                                print_prompt(&mut stdout)?;
-                            }
+                        if trimmed.is_empty() || trimmed.starts_with('#') {
+                            prompt(&mut stdout, "v14> ", &mut headless);
                             continue;
                         }
 
@@ -300,118 +301,46 @@ async fn main() -> Result<(), DynError> {
                         if should_exit {
                             break;
                         }
-                        if !stdin_closed {
-                            print_prompt(&mut stdout)?;
-                        }
+                        prompt(&mut stdout, "v14> ", &mut headless);
                     }
                     HostEvent::StdinClosed => {
-                        if !stdin_closed {
-                            stdin_closed = true;
-                            println!("notice: stdin closed; continuing headless. Use SIGINT or SIGTERM to stop the host.");
+                        if !headless {
+                            headless = true;
+                            eprintln!("notice: stdin closed; continuing headless. Use SIGINT or SIGTERM to stop the host.");
                         }
                     }
                     HostEvent::Terminate(signal_name) => {
-                        println!("notice: received {signal_name}; shutting down");
+                        eprintln!("notice: received {signal_name}; shutting down");
                         break;
                     }
                     HostEvent::Hangup => {
-                        println!("notice: received SIGHUP; keeping proxy and guests alive");
+                        if !headless {
+                            headless = true;
+                        }
+                        eprintln!("notice: received SIGHUP; keeping proxy and guests alive");
                     }
                 }
             }
             proxy_result = &mut proxy_task => {
                 match proxy_result {
-                    Ok(Ok(())) => println!("warning: SSH proxy exited unexpectedly; restarting"),
-                    Ok(Err(err)) => println!("warning: SSH proxy failed: {err}; restarting"),
-                    Err(err) => println!("warning: SSH proxy task aborted: {err}; restarting"),
+                    Ok(Ok(())) => eprintln!("warning: SSH proxy exited unexpectedly"),
+                    Ok(Err(err)) => eprintln!("warning: SSH proxy failed: {err}"),
+                    Err(err) => eprintln!("warning: SSH proxy task aborted: {err}"),
                 }
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                let delay = proxy_restart_state
+                    .next_delay()
+                    .map_err(|err| -> DynError { err.into() })?;
+                eprintln!("warning: restarting SSH proxy in {}s", delay.as_secs());
+                tokio::time::sleep(delay).await;
                 proxy_task = spawn_proxy_task(proxy_config.clone(), Arc::clone(&guest_registry));
-                if !stdin_closed {
-                    print_prompt(&mut stdout)?;
-                }
+                proxy_restart_state.mark_started();
+                prompt(&mut stdout, "v14> ", &mut headless);
             }
         }
     }
 
     proxy_task.abort();
-
-    for guest in provisioner
-        .guests()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|guest| guest.active)
-        .map(|guest| guest.principal)
-    {
-        let _ = provisioner.shutdown_guest(&guest).await;
-    }
-
-    Ok(())
-}
-
-struct HostEvents {
-    rx: mpsc::UnboundedReceiver<HostEvent>,
-    tx: mpsc::UnboundedSender<HostEvent>,
-}
-
-impl HostEvents {
-    fn sender(&self) -> &mpsc::UnboundedSender<HostEvent> {
-        &self.tx
-    }
-
-    async fn recv(&mut self) -> Option<HostEvent> {
-        self.rx.recv().await
-    }
-
-}
-
-fn spawn_stdin_reader() -> HostEvents {
-    let (tx, rx) = mpsc::unbounded_channel();
-    let stdin_tx = tx.clone();
-    thread::spawn(move || {
-        for line in io::stdin().lock().lines() {
-            if stdin_tx.send(HostEvent::StdinLine(line)).is_err() {
-                break;
-            }
-        }
-        let _ = stdin_tx.send(HostEvent::StdinClosed);
-    });
-    HostEvents { rx, tx }
-}
-
-fn spawn_proxy_task(
-    config: SshProxyConfig,
-    registry: ssh::GuestRegistry,
-) -> JoinHandle<Result<(), SshProxyError>> {
-    tokio::spawn(ssh::run_proxy(config, registry))
-}
-
-fn install_signal_watchers(tx: mpsc::UnboundedSender<HostEvent>) -> Result<(), DynError> {
-    let ctrlc_tx = tx.clone();
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            let _ = ctrlc_tx.send(HostEvent::Terminate("SIGINT"));
-        }
-    });
-
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-
-        let mut sigterm = signal(SignalKind::terminate())?;
-        let sigterm_tx = tx.clone();
-        tokio::spawn(async move {
-            sigterm.recv().await;
-            let _ = sigterm_tx.send(HostEvent::Terminate("SIGTERM"));
-        });
-
-        let mut sighup = signal(SignalKind::hangup())?;
-        tokio::spawn(async move {
-            while sighup.recv().await.is_some() {
-                let _ = tx.send(HostEvent::Hangup);
-            }
-        });
-    }
+    shutdown_active_guests(&provisioner, "repl host").await;
 
     Ok(())
 }
@@ -453,9 +382,13 @@ fn print_status(provisioner: &GuestProvisioner, auto_provision_enabled: bool) {
     }
 
     for guest in active {
-        let runtime_paths = guest
-            .runtime_paths
-            .expect("active guest snapshots always include runtime paths");
+        let Some(runtime_paths) = guest_runtime_paths(&guest) else {
+            println!(
+                "{} pid={:?} runtime_paths=(missing)",
+                guest.principal, guest.pid
+            );
+            continue;
+        };
         println!(
             "{} pid={:?} api={} vnet={} vsock={}",
             guest.principal,
@@ -504,11 +437,11 @@ fn print_where(
 }
 
 fn print_guest_where(demo_root: &Path, guest: &ProvisionedGuestSnapshot) {
-    let runtime_paths = guest
-        .runtime_paths
-        .clone()
-        .expect("active guest snapshots always include runtime paths");
     println!("[{}]", guest.principal);
+    let Some(runtime_paths) = guest_runtime_paths(guest) else {
+        println!("  runtime_paths=(missing)");
+        return;
+    };
     println!(
         "  home_host={}",
         demo_root
@@ -538,12 +471,6 @@ fn print_guest_where(demo_root: &Path, guest: &ProvisionedGuestSnapshot) {
     println!("  vsock_socket={}", runtime_paths.vsock_socket.display());
     println!("  launch_log={}", runtime_paths.launch_log.display());
     println!("  serial_log={}", runtime_paths.serial_log.display());
-}
-
-fn print_prompt(stdout: &mut io::Stdout) -> Result<(), DynError> {
-    print!("v14> ");
-    stdout.flush()?;
-    Ok(())
 }
 
 async fn boot_guest(
@@ -706,14 +633,16 @@ fn print_usage() {
 }
 
 fn new_repl_instance(root_dir: &Path) -> Result<ReplInstance, DynError> {
-    let namespace = RuntimeNamespace::for_process("motlie-vmm-v14", "r", root_dir)?;
+    // Auto-provision can defer the first guest boot until after the operator
+    // has detached. In that headless path we still allocate guestfs/vsock/vnet
+    // AF_UNIX sockets under the explicit --root, so the per-instance prefix and
+    // socket directory must stay compact enough to fit sun_path.
+    let namespace = RuntimeNamespace::for_process("v14", "r", root_dir)?;
     let demo_root = namespace
         .temp_root
         .join(format!("{}-demo", namespace.prefix));
-    let socket_root = namespace
-        .temp_root
-        .join(format!("{}-sockets", namespace.prefix));
-    let proxy_port = 42000 + port_offset(&namespace.prefix);
+    let socket_root = namespace.temp_root.join("s");
+    let proxy_port = REPL_PROXY_BASE_PORT + port_offset(&namespace.prefix);
     Ok(ReplInstance {
         namespace,
         demo_root,

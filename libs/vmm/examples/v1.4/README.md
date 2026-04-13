@@ -273,6 +273,9 @@ the host decides whether losing its REPL client means `detach` or `terminate`.
 
 Current hardening notes:
 
+- delayed auto-provision after detach exposed a separate AF_UNIX path-budget
+  constraint: compact namespace prefixes and socket directories are required so
+  first-contact guest boots still fit `sun_path` under long explicit roots
 - `repl_host_v1_4` now supervises the proxy task and restarts it if the task
   exits unexpectedly
 - `examples/v1.4/harness/shell.rs` applies the same policy so the manual

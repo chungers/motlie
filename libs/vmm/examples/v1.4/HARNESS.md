@@ -714,6 +714,9 @@ will need:
 
 This policy is intentional:
 
+- delayed auto-provision after detach still needs to allocate guestfs/vsock/vnet
+  AF_UNIX sockets, so compact namespace prefixes and socket directories are part
+  of the host-lifetime contract, not just cosmetic naming
 - stdin EOF is detach, not shutdown
 - `SIGHUP` is detach, not shutdown
 - explicit `quit` / `exit` or `SIGINT` / `SIGTERM` are shutdown
