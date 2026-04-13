@@ -483,6 +483,12 @@ Reasoning:
 
 - Vz does not consume the existing userspace `motlie-vnet` vhost-user socket
 - simple NAT is the closest equivalent to “guest has outbound network access”
+- the intended phase-1 property is no persistent host network configuration
+  changes:
+  - no TAP device creation
+  - no route or pf rule changes
+  - no manual interface provisioning
+  - only helper/OS-owned ephemeral runtime networking state while the VM runs
 - bridged and vmnet custom topologies can come later, but they should be added
   as explicit Vz network modes, not hidden behind CH vocabulary
 
