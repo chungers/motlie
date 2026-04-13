@@ -6,21 +6,18 @@ use std::thread;
 use std::time::Duration;
 
 use motlie_vmm::ca::SshCa;
-use motlie_vmm::network::{AdminNetMode, EgressNetMode, NetworkModes};
-use motlie_vmm::network_alloc::{GuestNetAllocator, GuestNetAllocatorConfig};
-use motlie_vmm::orchestrator::{
-    LifecycleServices, PrepareRequest, ReadinessPolicy, VmHandle, boot, prepare,
-};
+use motlie_vmm::network_alloc::GuestNetAllocatorConfig;
+use motlie_vmm::provisioning::GuestProvisioner;
 use motlie_vmm::runtime::{
     ControlPlaneBacking, FilesystemBacking, HypervisorBacking, NetworkBacking, Runtime,
 };
-use motlie_vmm::ssh::{self, ExecOutput, PtyRequest, SshProxyConfig, new_guest_registry};
+use motlie_vmm::ssh::{self, new_guest_registry, ExecOutput, PtyRequest, SshProxyConfig};
 use tokio::sync::mpsc;
 
 use crate::terminal::{HarnessTerminalSession, TerminalBackendKind};
 use crate::{
-    APT_UPDATE_COMMAND, DynError, HarnessInstance, PACKAGE_MANAGER_QUIESCENT_COMMAND, demo_guest,
-    ensure_file_exists, print_instance_details, seed_host_mounts, wait_for_egress_ready,
+    build_guest_provisioner, ensure_file_exists, print_instance_details, wait_for_egress_ready,
+    DynError, HarnessInstance, APT_UPDATE_COMMAND, PACKAGE_MANAGER_QUIESCENT_COMMAND,
 };
 
 pub async fn run_shell(
@@ -36,18 +33,6 @@ pub async fn run_shell(
 
     let ca = Arc::new(SshCa::new()?);
     let guest_registry = new_guest_registry();
-    let proxy_config = SshProxyConfig {
-        listen: std::net::SocketAddr::new(
-            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-            instance.proxy_port,
-        ),
-    };
-    tokio::spawn(ssh::run_proxy(
-        proxy_config.clone(),
-        Arc::clone(&guest_registry),
-    ));
-    print_instance_details(instance, &proxy_config);
-
     let runtime = Arc::new(Runtime {
         hypervisor: HypervisorBacking::CloudHypervisorShell(
             motlie_vmm::backend::ch::shell::ChShellBackend::new(),
@@ -65,9 +50,27 @@ pub async fn run_shell(
             ),
         ),
     });
+    let provisioner = build_guest_provisioner(
+        base_dir,
+        artifacts_dir,
+        instance,
+        allocator_config,
+        &ca,
+        &runtime,
+    )?;
+    let proxy_config = SshProxyConfig {
+        listen: std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            instance.proxy_port,
+        ),
+        principal_resolver: Some(provisioner.ssh_principal_resolver()),
+    };
+    tokio::spawn(ssh::run_proxy(
+        proxy_config.clone(),
+        Arc::clone(&guest_registry),
+    ));
+    print_instance_details(instance, &proxy_config);
 
-    let mut allocator = GuestNetAllocator::new(allocator_config)?;
-    let mut handles: HashMap<String, VmHandle> = HashMap::new();
     let mut terminals: HashMap<String, HarnessTerminalSession> = HashMap::new();
     let mut stdout = io::stdout();
 
@@ -93,19 +96,18 @@ pub async fn run_shell(
             print_help();
             Ok(())
         } else if trimmed == "status" || trimmed == "guests" {
-            print_status(&handles);
+            print_status(&provisioner);
             Ok(())
         } else if trimmed == "capacity" {
-            print_capacity(&allocator);
+            print_capacity(&provisioner);
             Ok(())
         } else if trimmed == "where" {
             print_where(
                 instance,
                 &proxy_config,
-                &allocator,
+                &provisioner,
                 terminal_backend,
                 None,
-                &handles,
             );
             Ok(())
         } else if let Some(rest) = trimmed.strip_prefix("where ") {
@@ -114,10 +116,9 @@ pub async fn run_shell(
             print_where(
                 instance,
                 &proxy_config,
-                &allocator,
+                &provisioner,
                 terminal_backend,
                 guest,
-                &handles,
             );
             Ok(())
         } else if trimmed == "quit" || trimmed == "exit" {
@@ -127,28 +128,25 @@ pub async fn run_shell(
             if guest_id.is_empty() {
                 Err::<(), DynError>("boot <guest>".into())
             } else {
-                boot_guest(
-                    guest_id,
-                    artifacts_dir,
-                    instance,
-                    base_dir,
-                    &ca,
-                    &runtime,
-                    &mut allocator,
-                    &mut handles,
-                )
-                .await
+                boot_guest(guest_id, &provisioner).await
             }
         } else if let Some(rest) = trimmed.strip_prefix("ready ") {
-            ready_guest(rest.trim(), &handles).await
+            ready_guest(rest.trim(), &provisioner).await
         } else if let Some(rest) = trimmed.strip_prefix("shutdown ") {
-            shutdown_guest(rest.trim(), &mut handles).await
+            shutdown_guest(rest.trim(), &provisioner).await
         } else if let Some(rest) = trimmed.strip_prefix("validate ") {
-            validate_guest(rest.trim(), &handles).await
+            validate_guest(rest.trim(), &provisioner).await
         } else if let Some(rest) = trimmed.strip_prefix("exec ") {
-            exec_guest(rest, &handles).await
+            exec_guest(rest, &provisioner).await
         } else if let Some(rest) = trimmed.strip_prefix("pty-open ") {
-            pty_open(rest, instance, &handles, &mut terminals, terminal_backend).await
+            pty_open(
+                rest,
+                instance,
+                &provisioner,
+                &mut terminals,
+                terminal_backend,
+            )
+            .await
         } else if let Some(rest) = trimmed.strip_prefix("pty-send-line ") {
             pty_send_line(rest, &terminals).await
         } else if let Some(rest) = trimmed.strip_prefix("pty-send ") {
@@ -179,8 +177,14 @@ pub async fn run_shell(
     for (_session, terminal) in terminals.drain() {
         let _ = terminal.persist_artifacts();
     }
-    for (_guest_id, handle) in handles.drain() {
-        let _ = handle.shutdown().await;
+    for guest in provisioner
+        .guests()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|guest| guest.active)
+        .map(|guest| guest.principal)
+    {
+        let _ = provisioner.shutdown_guest(&guest).await;
     }
 
     Ok(())
@@ -218,20 +222,25 @@ fn print_help() {
     println!("quit                     exit the harness shell");
 }
 
-fn print_status(handles: &HashMap<String, VmHandle>) {
-    if handles.is_empty() {
+fn print_status(provisioner: &GuestProvisioner) {
+    let guests = provisioner.guests().unwrap_or_default();
+    let active: Vec<_> = guests.into_iter().filter(|guest| guest.active).collect();
+    if active.is_empty() {
         println!("(no guests)");
         return;
     }
 
-    for (guest_id, handle) in handles {
+    for guest in active {
+        let runtime_paths = guest
+            .runtime_paths
+            .expect("active guest snapshots always include runtime paths");
         println!(
             "{} pid={:?} api={} vnet={} vsock={}",
-            guest_id,
-            handle.pid,
-            handle.runtime_paths.api_socket.display(),
-            handle.runtime_paths.vnet_socket.display(),
-            handle.runtime_paths.vsock_socket.display(),
+            guest.principal,
+            guest.pid,
+            runtime_paths.api_socket.display(),
+            runtime_paths.vnet_socket.display(),
+            runtime_paths.vsock_socket.display(),
         );
     }
 }
@@ -239,10 +248,9 @@ fn print_status(handles: &HashMap<String, VmHandle>) {
 fn print_where(
     instance: &HarnessInstance,
     proxy_config: &SshProxyConfig,
-    allocator: &GuestNetAllocator,
+    provisioner: &GuestProvisioner,
     terminal_backend: TerminalBackendKind,
     guest_id: Option<&str>,
-    handles: &HashMap<String, VmHandle>,
 ) {
     println!("namespace={}", instance.namespace.prefix);
     println!("temp_root={}", instance.namespace.temp_root.display());
@@ -250,32 +258,38 @@ fn print_where(
     println!("socket_root={}", instance.socket_root.display());
     println!("proxy=ssh://localhost:{}", proxy_config.listen.port());
     println!("terminal_backend={terminal_backend}");
-    print_capacity(allocator);
+    print_capacity(provisioner);
 
     match guest_id {
         Some(guest_id) => {
-            let Some(handle) = handles.get(guest_id) else {
+            let Some(guest) = provisioner
+                .snapshot(guest_id)
+                .unwrap_or(None)
+                .filter(|guest| guest.active)
+            else {
                 println!("guest '{guest_id}' is not currently booted");
                 return;
             };
-            print_guest_where(guest_id, &instance.demo_root, handle);
+            print_guest_where(&instance.demo_root, &guest);
         }
         None => {
-            for (guest_id, handle) in handles {
-                print_guest_where(guest_id, &instance.demo_root, handle);
+            for guest in provisioner.guests().unwrap_or_default() {
+                if guest.active {
+                    print_guest_where(&instance.demo_root, &guest);
+                }
             }
         }
     }
 }
 
-fn print_capacity(allocator: &GuestNetAllocator) {
-    let config = allocator.config();
+fn print_capacity(provisioner: &GuestProvisioner) {
+    let config = provisioner.allocator_config().unwrap();
     println!("allocator.first_cid={}", config.first_cid);
     println!(
         "allocator.capacity={} next_slot={} remaining={}",
-        allocator.capacity().unwrap_or_default(),
-        allocator.next_slot(),
-        allocator.remaining_capacity().unwrap_or_default(),
+        provisioner.capacity().unwrap_or_default(),
+        provisioner.next_slot().unwrap_or_default(),
+        provisioner.remaining_capacity().unwrap_or_default(),
     );
     println!(
         "allocator.admin_pool={} -> /{} first_subnet_slot={} host_offset={} guest_offset={}",
@@ -299,7 +313,7 @@ fn print_capacity(allocator: &GuestNetAllocator) {
 async fn pty_open(
     rest: &str,
     instance: &HarnessInstance,
-    handles: &HashMap<String, VmHandle>,
+    provisioner: &GuestProvisioner,
     terminals: &mut HashMap<String, HarnessTerminalSession>,
     terminal_backend: TerminalBackendKind,
 ) -> Result<(), DynError> {
@@ -312,12 +326,9 @@ async fn pty_open(
     if terminals.contains_key(session_name) {
         return Err(format!("PTY session '{session_name}' already exists").into());
     }
-    let handle = handles
-        .get(guest_id)
-        .ok_or_else(|| format!("unknown guest '{guest_id}'"))?;
     let request = PtyRequest::default();
-    let guest_session = handle
-        .open_pty(request.clone(), Duration::from_secs(10))
+    let guest_session = provisioner
+        .open_pty(guest_id, request.clone(), Duration::from_secs(10))
         .await?;
     let session_root = instance
         .namespace
@@ -497,51 +508,52 @@ fn print_pty_read(output: &str, exit_status: Option<u32>, eof: bool, closed: boo
     println!("pty: exit_status={exit_status:?} eof={eof} closed={closed}");
 }
 
-fn print_guest_where(guest_id: &str, demo_root: &Path, handle: &VmHandle) {
-    println!("[{guest_id}]");
+fn print_guest_where(demo_root: &Path, guest: &motlie_vmm::provisioning::ProvisionedGuestSnapshot) {
+    let runtime_paths = guest
+        .runtime_paths
+        .clone()
+        .expect("active guest snapshots always include runtime paths");
+    println!("[{}]", guest.principal);
     println!(
         "  home_host={}",
-        demo_root.join(format!("{guest_id}-home")).display()
+        demo_root
+            .join(format!("{}-home", guest.principal))
+            .display()
     );
     println!(
         "  workspace_host={}",
-        demo_root.join(format!("{guest_id}-workspace")).display()
+        demo_root
+            .join(format!("{}-workspace", guest.principal))
+            .display()
     );
     println!(
         "  agent_state_host={}",
-        demo_root.join(format!("{guest_id}-agent-state")).display()
+        demo_root
+            .join(format!("{}-agent-state", guest.principal))
+            .display()
     );
-    println!(
-        "  runtime_dir={}",
-        handle.runtime_paths.runtime_dir.display()
-    );
-    println!("  launch_dir={}", handle.runtime_paths.launch_dir.display());
+    println!("  runtime_dir={}", runtime_paths.runtime_dir.display());
+    println!("  launch_dir={}", runtime_paths.launch_dir.display());
     println!(
         "  cloud_init_dir={}",
-        handle.runtime_paths.cloud_init_dir.display()
+        runtime_paths.cloud_init_dir.display()
     );
-    println!("  api_socket={}", handle.runtime_paths.api_socket.display());
-    println!(
-        "  vnet_socket={}",
-        handle.runtime_paths.vnet_socket.display()
-    );
-    println!(
-        "  vsock_socket={}",
-        handle.runtime_paths.vsock_socket.display()
-    );
-    println!("  cid={}", handle.net_assignment.cid);
-    println!("  slot={}", handle.net_assignment.slot);
-    println!("  admin_subnet={}", handle.net_assignment.admin_subnet);
-    println!("  admin_host={}", handle.net_assignment.admin_ipv4.host);
-    println!("  admin_guest={}", handle.net_assignment.admin_ipv4.guest);
-    println!("  admin_mac={:02x?}", handle.net_assignment.admin_mac);
-    println!("  egress_subnet={}", handle.net_assignment.egress_subnet);
-    println!("  egress_host={}", handle.net_assignment.egress_ipv4.host);
-    println!("  egress_guest={}", handle.net_assignment.egress_ipv4.guest);
-    println!("  egress_dns={}", handle.net_assignment.egress_ipv4.dns);
-    println!("  egress_mac={:02x?}", handle.net_assignment.egress_mac);
-    println!("  launch_log={}", handle.runtime_paths.launch_log.display());
-    println!("  serial_log={}", handle.runtime_paths.serial_log.display());
+    println!("  api_socket={}", runtime_paths.api_socket.display());
+    println!("  vnet_socket={}", runtime_paths.vnet_socket.display());
+    println!("  vsock_socket={}", runtime_paths.vsock_socket.display());
+    println!("  cid={}", guest.net_assignment.cid);
+    println!("  slot={}", guest.net_assignment.slot);
+    println!("  admin_subnet={}", guest.net_assignment.admin_subnet);
+    println!("  admin_host={}", guest.net_assignment.admin_ipv4.host);
+    println!("  admin_guest={}", guest.net_assignment.admin_ipv4.guest);
+    println!("  admin_mac={:02x?}", guest.net_assignment.admin_mac);
+    println!("  egress_subnet={}", guest.net_assignment.egress_subnet);
+    println!("  egress_host={}", guest.net_assignment.egress_ipv4.host);
+    println!("  egress_guest={}", guest.net_assignment.egress_ipv4.guest);
+    println!("  egress_dns={}", guest.net_assignment.egress_ipv4.dns);
+    println!("  egress_mac={:02x?}", guest.net_assignment.egress_mac);
+    println!("  launch_log={}", runtime_paths.launch_log.display());
+    println!("  serial_log={}", runtime_paths.serial_log.display());
 }
 
 fn print_prompt(stdout: &mut io::Stdout) -> Result<(), DynError> {
@@ -550,82 +562,35 @@ fn print_prompt(stdout: &mut io::Stdout) -> Result<(), DynError> {
     Ok(())
 }
 
-async fn boot_guest(
-    guest_id: &str,
-    artifacts_dir: &Path,
-    instance: &HarnessInstance,
-    base_dir: &Path,
-    ca: &Arc<SshCa>,
-    runtime: &Arc<Runtime>,
-    allocator: &mut GuestNetAllocator,
-    handles: &mut HashMap<String, VmHandle>,
-) -> Result<(), DynError> {
-    if handles.contains_key(guest_id) {
+async fn boot_guest(guest_id: &str, provisioner: &GuestProvisioner) -> Result<(), DynError> {
+    if provisioner
+        .snapshot(guest_id)?
+        .is_some_and(|guest| guest.active)
+    {
         return Err(format!("guest '{guest_id}' already booted").into());
     }
 
-    let guest = demo_guest(
-        guest_id,
-        artifacts_dir,
-        &instance.demo_root,
-        &instance.namespace,
-    )?;
-    seed_host_mounts(&guest)?;
-
-    let prepared = prepare(
-        PrepareRequest {
-            guest,
-            namespace: instance.namespace.clone(),
-            network_modes: NetworkModes {
-                admin: AdminNetMode::None,
-                egress: EgressNetMode::VhostUser,
-            },
-            base_dir: base_dir.to_path_buf(),
-            ssh_ca_pubkey: Some(ca.public_key_openssh()?),
-        },
-        allocator,
-    )?;
-
-    let handle = boot(
-        prepared,
-        LifecycleServices {
-            runtime: Arc::clone(runtime),
-        },
-    )
-    .await?;
+    let handle = provisioner.ensure_guest_for_principal(guest_id).await?;
     println!(
-        "waiting for {}: api socket + guestfs + ssh bridge + exec-ready",
-        guest_id
-    );
-    handle.ready(&ReadinessPolicy::default()).await?;
-    println!(
-        "ok: booted {} pid={:?} api={} proxy=127.0.0.1:{}",
+        "ok: booted {} pid={:?} api={}",
         guest_id,
-        handle.pid,
-        handle.runtime_paths.api_socket.display(),
-        instance.proxy_port,
+        handle.handle.pid,
+        handle.handle.runtime_paths.api_socket.display(),
     );
-    handles.insert(guest_id.to_string(), handle);
     Ok(())
 }
 
-async fn ready_guest(guest_id: &str, handles: &HashMap<String, VmHandle>) -> Result<(), DynError> {
-    let handle = handles
-        .get(guest_id)
-        .ok_or_else(|| format!("unknown guest '{guest_id}'"))?;
-    handle.ready(&ReadinessPolicy::default()).await?;
+async fn ready_guest(guest_id: &str, provisioner: &GuestProvisioner) -> Result<(), DynError> {
+    provisioner.ready(guest_id).await?;
     println!("ok: {guest_id} ready");
     Ok(())
 }
 
-async fn shutdown_guest(
-    guest_id: &str,
-    handles: &mut HashMap<String, VmHandle>,
-) -> Result<(), DynError> {
-    let handle = handles
-        .remove(guest_id)
+async fn shutdown_guest(guest_id: &str, provisioner: &GuestProvisioner) -> Result<(), DynError> {
+    let report = provisioner
+        .shutdown_guest(guest_id)
+        .await?
         .ok_or_else(|| format!("unknown guest '{guest_id}'"))?;
-    let report = handle.shutdown().await?;
     println!(
         "ok: shutdown {} pid={:?} forced={:?}",
         guest_id, report.pid, report.forced
@@ -633,7 +598,7 @@ async fn shutdown_guest(
     Ok(())
 }
 
-async fn exec_guest(rest: &str, handles: &HashMap<String, VmHandle>) -> Result<(), DynError> {
+async fn exec_guest(rest: &str, provisioner: &GuestProvisioner) -> Result<(), DynError> {
     let mut parts = rest.trim().splitn(2, char::is_whitespace);
     let guest_id = parts.next().unwrap_or("").trim();
     let command = parts.next().unwrap_or("").trim();
@@ -641,21 +606,15 @@ async fn exec_guest(rest: &str, handles: &HashMap<String, VmHandle>) -> Result<(
         return Err("exec <guest> <command>".into());
     }
 
-    let handle = handles
-        .get(guest_id)
-        .ok_or_else(|| format!("unknown guest '{guest_id}'"))?;
-    let output = handle.exec(command, Duration::from_secs(20)).await?;
+    let output = provisioner
+        .exec(guest_id, command, Duration::from_secs(20))
+        .await?;
     print_exec_output(&output);
     Ok(())
 }
 
-async fn validate_guest(
-    guest_id: &str,
-    handles: &HashMap<String, VmHandle>,
-) -> Result<(), DynError> {
-    let handle = handles
-        .get(guest_id)
-        .ok_or_else(|| format!("unknown guest '{guest_id}'"))?;
+async fn validate_guest(guest_id: &str, provisioner: &GuestProvisioner) -> Result<(), DynError> {
+    let handle = provisioner.active_vm_handle(guest_id)?;
     let expected_gateway = handle.net_assignment.egress_ipv4.host;
 
     let checks = vec![
@@ -731,7 +690,7 @@ async fn validate_guest(
         }
     }
 
-    match wait_for_egress_ready(handle, Duration::from_secs(30)).await {
+    match wait_for_egress_ready(&handle, Duration::from_secs(30)).await {
         Ok(output) if output.exit_code == 0 && output.stdout.contains("EGRESS_OK") => {
             println!("ok: egress: DNS + HTTPS ready for example.com and www.google.com");
             passed += 1;
