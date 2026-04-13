@@ -1,15 +1,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use motlie_model::eval::EvalTrack;
 use motlie_model::{
     BundleId, CheckpointFormat, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
 };
 use motlie_model_llama_cpp::LlamaCppTextAdapter;
 
 use crate::{
-    ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleArtifacts, BundleDescriptor,
-    BundleFamily, BundleRequirements, PlatformConstraint,
+    ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor,
+    BundleRequirements,
 };
 
 pub const SELECTOR: &str = "google/gemma4_e2b_gguf";
@@ -99,6 +98,7 @@ fn resolve_local_gguf_root(root: &Path) -> Result<PathBuf, ModelError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BundleFamily;
     use motlie_model::CapabilityKind;
     use std::time::{SystemTime, UNIX_EPOCH};
 
