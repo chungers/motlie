@@ -5202,6 +5202,7 @@ dependencies = [
  "motlie-model",
  "motlie-model-llama-cpp",
  "motlie-model-mistral",
+ "motlie-model-whisper-cpp",
  "sysinfo",
  "thiserror 2.0.18",
  "tokio",
