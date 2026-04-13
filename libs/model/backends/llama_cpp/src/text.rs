@@ -145,13 +145,15 @@ impl BackendAdapter for LlamaCppTextAdapter {
         let built = load_llama_model(model_path)?;
 
         Ok(new_text_handle(
-            identity.id.clone(),
-            identity.display_name.clone(),
-            self.capabilities.clone(),
-            self.quantization.clone(),
-            resolved_quantization,
-            self.arch,
-            self.default_context_length,
+            TextHandleConfig {
+                id: identity.id.clone(),
+                display_name: identity.display_name.clone(),
+                capabilities: self.capabilities.clone(),
+                quantization: self.quantization.clone(),
+                resolved_quantization,
+                arch: self.arch,
+                context_length: self.default_context_length,
+            },
             built,
         ))
     }
@@ -214,13 +216,15 @@ impl ModelBundle for LlamaCppTextBundle {
         let built = build_llama_model(&self.spec, resolved_quantization, options)?;
 
         Ok(new_text_handle(
-            self.metadata.id.clone(),
-            self.metadata.display_name.clone(),
-            self.metadata.capabilities.clone(),
-            self.metadata.quantization.clone(),
-            resolved_quantization,
-            self.spec.arch,
-            self.spec.default_context_length,
+            TextHandleConfig {
+                id: self.metadata.id.clone(),
+                display_name: self.metadata.display_name.clone(),
+                capabilities: self.metadata.capabilities.clone(),
+                quantization: self.metadata.quantization.clone(),
+                resolved_quantization,
+                arch: self.spec.arch,
+                context_length: self.spec.default_context_length,
+            },
             built,
         ))
     }
@@ -558,7 +562,7 @@ impl CompletionModel for LlamaCppTextHandle {
     }
 }
 
-fn new_text_handle(
+struct TextHandleConfig {
     id: BundleId,
     display_name: String,
     capabilities: Capabilities,
@@ -566,13 +570,24 @@ fn new_text_handle(
     resolved_quantization: Option<QuantizationBits>,
     arch: LlamaCppTextArch,
     context_length: u32,
-    built: BuiltModel,
-) -> Box<dyn BundleHandle> {
+}
+
+fn new_text_handle(config: TextHandleConfig, built: BuiltModel) -> Box<dyn BundleHandle> {
     let metrics = Arc::new(Mutex::new(TextMetrics::default()));
     {
         let mut metrics = lock_metrics(&metrics, "llama-cpp-text-start");
         observe_memory(&mut metrics.runtime);
     }
+
+    let TextHandleConfig {
+        id,
+        display_name,
+        capabilities,
+        quantization,
+        resolved_quantization,
+        arch,
+        context_length,
+    } = config;
 
     Box::new(LlamaCppTextHandle {
         descriptor: LoadedBundleDescriptor {
