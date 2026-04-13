@@ -1,7 +1,9 @@
 [workspace]
 members = [
+    "bins/tmux/driver",
     "libs/core",
     "libs/db",
+    "libs/driver",
     "libs/mcp",
     "libs/tmux",
 ]
@@ -36,6 +38,15 @@ description = "Motlie workspace with examples"
 
 [features]
 default = []
+driver = ["dep:motlie-driver"]
+driver-repl = ["driver", "motlie-driver/repl"]
+driver-tui = ["driver", "motlie-driver/tui"]
+driver-term-vt100 = ["driver", "motlie-driver/term-vt100"]
+driver-term-shadow = ["driver", "motlie-driver/term-shadow"]
+driver-commands-vmm = ["driver", "motlie-driver/commands-vmm"]
+driver-commands-vnet = ["driver", "motlie-driver/commands-vnet"]
+driver-commands-vfs = ["driver", "motlie-driver/commands-vfs"]
+driver-commands-tmux = ["driver", "motlie-driver/commands-tmux"]
 dtrace-otel = ["motlie-core/dtrace-otel"]
 
 # Benchmark infrastructure - enables vector::benchmark module and all dataset formats
@@ -59,6 +70,7 @@ simd-simsimd = ["motlie-core/simd-simsimd"]
 [dependencies]
 motlie-core = { path = "libs/core" }
 motlie-db = { path = "libs/db" }
+motlie-driver = { path = "libs/driver", optional = true }
 motlie-mcp = { path = "libs/mcp" }
 csv.workspace = true
 tokio.workspace = true

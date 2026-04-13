@@ -1,0 +1,24 @@
+Connected to ssh://dchung@motliehost?identity-file=/home/dchung/.ssh/motliehost
+tmux> 〉send codex-e2e-smoke-20260411a echo validation-monitor-line
+Sent to codex-e2e-smoke-20260411a
+tmux> 〉
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
