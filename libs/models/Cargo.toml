@@ -40,6 +40,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
+hound = "3.5"
 sysinfo = "0.36.1"
 tokio.workspace = true
 
@@ -66,6 +67,11 @@ required-features = ["model-gemma4-e2b"]
 name = "models_v0_4"
 path = "examples/v0.4/main.rs"
 required-features = ["model-qwen3-4b-gguf"]
+
+[[example]]
+name = "models_v0_5"
+path = "examples/v0.5/main.rs"
+required-features = ["model-whisper-base-en"]
 
 [[example]]
 name = "bench_chat"
