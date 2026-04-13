@@ -10,6 +10,7 @@
 | 2026-04-12 | @codex-xar: Added an OCI-as-internal-format addendum evaluating OCI image layout and manifests inside the appended executable payload, including the hybrid raw-weight-blob idea and its implications for future mmap-capable backend contracts. | Option Comparison, OCI Addendum, Recommendation, References |
 | 2026-04-12 | @codex-xar: Refined the OCI addendum into a concrete hybrid layout with a Motlie binary preamble TOC before the OCI payload and a footer pointing back to it. Added the three-tier materialization strategy and API sketches for preamble parsing and runtime blob resolution. | OCI Addendum, Recommendation, API Sketches |
 | 2026-04-12 | @codex-xar: Moved this design into `libs/xar/docs/DESIGN.md` and generalized scope from model-only distribution to the unified packaging format for large Motlie artifacts, including model weights, checkpoints, kernels, initrds, rootfs images, and VM disk images. | Title, Overview, Scope, Recommendation, API Sketches |
+| 2026-04-12 | @codex-xar: Added a Phase 1 rationale section that makes GGUF model weights the explicit `v0.1` target, and tied the first `libs/xar/examples/v0.1` skeleton to that GGUF round-trip scope. | Table of Contents, Phase 1 Rationale, Recommendation, Testing Scope for PLAN |
 
 This document defines `libs/xar`, Motlie's unified distribution and packaging format for large artifacts. `xar` is not model-only. It is the common archive and executable-payload format for:
 
@@ -40,6 +41,7 @@ The goal is not merely "embed files into an exe". The goal is to give Motlie one
 - [Option 3: Squashfs plus `memfd` Loader](#option-3-squashfs-plus-memfd-loader)
 - [Option 4: Other Viable Options](#option-4-other-viable-options)
 - [Addendum: OCI as Internal Payload Format](#addendum-oci-as-internal-payload-format)
+- [Phase 1 Rationale](#phase-1-rationale)
 - [Recommendation](#recommendation)
 - [API Sketches](#api-sketches)
 - [Testing Scope for PLAN](#testing-scope-for-plan)
@@ -723,6 +725,45 @@ My updated assessment is:
 - with that refinement, OCI becomes a serious candidate rather than merely a future export format
 - the remaining question is not feasibility, but whether Motlie wants the extra semantic surface area in slice 1
 
+## Phase 1 Rationale
+
+`xar` is the unified format for model and VM artifacts, but `v0.1` should still target one narrow path first: GGUF model weights consumed through `libs/model`.
+
+Why GGUF first:
+
+- GGUF is typically one large opaque blob rather than a deep directory tree of shards and metadata.
+- The blob structure is well-defined and already expected by an existing in-tree consumer.
+- GGUF has the cleanest path to direct mmap once `libs/model` grows additive raw-blob handle support.
+- `libs/model` already has a concrete GGUF consumer path through llama.cpp-backed bundles, so the first end-to-end validation can reuse an existing runtime boundary rather than inventing a new VM loader at the same time.
+- The number of moving parts is minimal compared with safetensors bundles or VM guest payload sets.
+
+This means `v0.1` is intentionally not trying to validate every `xar` promise at once.
+
+It is validating:
+
+- executable plus preamble plus OCI payload framing
+- digest-to-offset lookup through the preamble
+- model-side extraction or future mmap eligibility for one large raw artifact
+- handoff into an existing `libs/model` consumer path
+
+It is explicitly not trying to validate yet:
+
+- kernel plus initrd plus rootfs plus disk-image composition
+- mixed guest-image payload graphs
+- multi-artifact boot orchestration
+- the full hybrid raw-blob plus archive-layer policy across all artifact classes
+
+VM artifacts should come after the format is proven end to end on the simpler GGUF path. Once `xar` successfully proves:
+
+1. pack
+2. append
+3. locate
+4. validate
+5. extract or mmap
+6. hand off to an existing consumer
+
+then the same format can be extended to kernels, initrds, rootfs images, and VM disk images with much lower risk.
+
 ## Recommendation
 
 ### Revised Recommendation
@@ -734,6 +775,12 @@ For the first implementation slice, I now recommend the hybrid preamble+OCI dire
 - extracted/materialized into consumer-owned working roots in slice 1
 - handed to model backends as `ArtifactPolicy::LocalOnly { root }`
 - handed to VM/guest consumers as ordinary artifact paths resolved from the extracted root
+
+For `v0.1`, the concrete validation target should be narrower:
+
+- one GGUF payload
+- one `libs/model` consumer path
+- one round-trip example that shows pack -> append -> locate -> mmap-or-extract -> load
 
 This changes the earlier recommendation in one important way:
 
@@ -762,7 +809,7 @@ Why:
 ### Slice Plan
 
 - Slice 1:
-  implement preamble+OCI packaging, extract all payloads to local working roots, and keep consumer contracts unchanged
+  implement preamble+OCI packaging, validate the GGUF round-trip through `libs/model`, extract all payloads to local working roots, and keep consumer contracts unchanged
 - Slice 2:
   add additive consumer-facing raw-blob handle support, starting with `libs/model` and extending to VM artifact consumers as needed
 - Slice 3:
@@ -997,16 +1044,18 @@ The follow-up PLAN should cover:
 
 1. Packaging correctness
    verify footer discovery, digest validation, truncated payload detection, and version mismatch handling
-2. Payload materialization
+2. Phase 1 GGUF round-trip
+   verify the `libs/xar/examples/v0.1` path can describe pack -> append -> locate -> mmap-or-extract -> `libs/model` load for one GGUF payload
+3. Payload materialization
    verify extraction produces the exact directory/file layout expected by current model bundle validators and by guest boot consumers
-3. Consumer compatibility
-   verify both a safetensors bundle and a GGUF bundle start from packaged `LocalOnly` roots without backend code changes, and verify a guest artifact set resolves to ordinary kernel/rootfs/disk paths
-4. Cross-platform launcher behavior
+4. Consumer compatibility
+   verify a GGUF bundle starts from packaged `LocalOnly` roots without backend code changes, then extend to safetensors bundles and guest artifact sets in later phases
+5. Cross-platform launcher behavior
    verify current-executable discovery and appended-payload reads on Linux and macOS
-5. Failure policy
+6. Failure policy
    verify missing `unpack_root`, unwritable unpack dir, corrupted chunks, and partial extraction cleanup
-6. Performance
-   measure first-start extraction latency, steady-state restart latency, and binary size deltas for at least one model bundle and one large guest-image payload
+7. Performance
+   measure first-start extraction latency, steady-state restart latency, and binary size deltas for at least one GGUF payload in phase 1, then expand to guest-image payloads later
 
 ## References
 

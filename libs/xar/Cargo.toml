@@ -11,3 +11,7 @@ description = "Unified archive and distribution format for large Motlie artifact
 path = "src/lib.rs"
 
 [dependencies]
+
+[[example]]
+name = "xar_v0_1"
+path = "examples/v0.1/main.rs"
