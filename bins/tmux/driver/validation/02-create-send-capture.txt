@@ -1,0 +1,24 @@
+    jarvis:0           (Window, 'node', 1 pane)
+      jarvis:0.0       (Pane, %2)
+  mistral-cdx          (Session, 1 window)
+    mistral-cdx:0      (Window, 'node', 1 pane)
+      mistral-cdx:0.0  (Pane, %0)
+  mistral-cld          (Session, 1 window)
+    mistral-cld:0      (Window, 'node', 1 pane)
+      mistral-cld:0.0  (Pane, %1)
+  tmux-cdx             (Session, 1 window)
+    tmux-cdx:0         (Window, 'node', 1 pane)
+      tmux-cdx:0.0     (Pane, %35)
+  tmux-cld             (Session, 1 window)
+    tmux-cld:0         (Window, 'node', 1 pane)
+      tmux-cld:0.0     (Pane, %37)
+tmux> 〉create codex-e2e-smoke-20260411a
+Created: codex-e2e-smoke-20260411a
+tmux> 〉send codex-e2e-smoke-20260411a echo hello-from-validation
+Sent to codex-e2e-smoke-20260411a
+tmux> 〉capture codex-e2e-smoke-20260411a 20
+
+dchung@mac-mini-m4pro ~ % echo hello-from-validation
+hello-from-validation
+dchung@mac-mini-m4pro ~ %
+tmux> 〉
