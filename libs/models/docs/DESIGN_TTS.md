@@ -1,0 +1,815 @@
+# TTS Model Support Design
+
+## Status: Draft
+
+## Change Log
+
+| Date | Who | Summary |
+|------|-----|---------|
+| 2026-04-13 | @codex-tts | Initial brownfield design for a text-to-speech vertical slice in the Motlie model stack. Evaluates local-first TTS candidates, recommends a Piper ONNX bundle as the first implementation, and defines a streamed PCM output contract that mirrors the ASR PCM input shape. |
+
+This document defines the design for adding text-to-speech (TTS) support to the existing `libs/model` and `libs/models` architecture.
+
+Assumption for this draft: this is brownfield product work. Motlie already has stable model contracts, curated bundle registration, feature-gated bundle selection, and artifact download infrastructure. The TTS work should extend those seams additively. If the product context is later confirmed as greenfield, the migration section can be reduced, but the recommended architecture is unchanged.
+
+The design is intentionally narrow. It focuses on one end-to-end vertical slice from curated artifact download to streamed PCM output, with adapters above the model layer for `.wav`, local playback, and telephony/websocket transports.
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Goals and Non-Goals](#goals-and-non-goals)
+- [Research Summary](#research-summary)
+- [Recommended Vertical Slice](#recommended-vertical-slice)
+- [Architecture](#architecture)
+- [Streaming PCM API Contract](#streaming-pcm-api-contract)
+- [Core Contract Changes in `libs/model`](#core-contract-changes-in-libsmodel)
+- [Generic Backend Design](#generic-backend-design)
+- [Curated Bundle Design in `libs/models`](#curated-bundle-design-in-libsmodels)
+- [Feature Flag Design](#feature-flag-design)
+- [Output Adapter Boundary](#output-adapter-boundary)
+- [Distribution Considerations](#distribution-considerations)
+- [Migration and Compatibility Strategy](#migration-and-compatibility-strategy)
+- [API Sketch](#api-sketch)
+- [Alternatives Considered](#alternatives-considered)
+- [Testing Scope for PLAN](#testing-scope-for-plan)
+- [References](#references)
+
+---
+
+## Overview
+
+### Problem Statement
+
+Motlie currently has no first-class speech synthesis capability. The existing model stack already separates:
+
+- stable capability contracts in `libs/model`
+- generic runtime adapters in `libs/model/backends/*`
+- curated bundle registration and artifact download in `libs/models`
+
+TTS should follow the same architecture as ASR, but in reverse.
+
+ASR normalizes many upstream inputs into streamed PCM chunks in. TTS should normalize many downstream consumers into streamed PCM chunks out.
+
+The required TTS surface is:
+
+- real-time local generation
+- CPU-first execution on macOS and Linux
+- optional CUDA acceleration where it is actually beneficial
+- `.wav` file output
+- streamed output suitable for immediate playback or telephony transport adapters
+- future room for speaker selection and reference-audio conditioning without overfitting v1 to cloning-only models
+- compatibility with the current curated bundle and feature-gated selector patterns
+
+### Solution
+
+Add a new speech synthesis capability to `libs/model`, implement a new TTS backend crate for the first runtime family, and expose one curated TTS bundle from `libs/models`.
+
+Recommended first slice:
+
+1. `libs/model`
+   Add `SpeechModel` / `SpeechStream` traits and PCM-output request/response types.
+2. `libs/model/backends/piper`
+   Provide a generic backend adapter over Piper-format ONNX voices, implemented on top of ONNX Runtime.
+3. `libs/models`
+   Add a `tts/` namespace with one curated bundle file, one direct enum family, one selector family, and bundle-local artifact resolution/download rules.
+
+This preserves the existing layering:
+
+- `libs/model` owns the stable contract
+- backend crates own runtime integration and model-family specifics
+- `libs/models` owns curated identity, artifact download rules, selectors, and feature flags
+
+## Goals and Non-Goals
+
+### Goals
+
+- Add a first-class TTS capability to the Motlie model contract
+- Mirror the ASR architectural pattern instead of inventing a parallel subsystem
+- Standardize on streamed PCM output so `.wav`, PulseAudio/ALSA, and telephony transports all consume the same contract
+- Prefer CPU-viable defaults on macOS and Linux
+- Keep CUDA optional and backend-local
+- Ship one curated vertical slice end to end before broadening model coverage
+- Keep future room for speaker IDs and reference-audio conditioning
+- Reuse the existing `Catalog`, `ModelSelector`, artifact download, and per-bundle feature conventions
+
+### Non-Goals
+
+- Broad model-family coverage in the first cut
+- Best-in-class zero-shot voice cloning in the first cut
+- A telephony RTP/websocket server inside `libs/model` or `libs/models`
+- Browser/mobile deployment in the first cut
+- Generic user-supplied TTS checkpoint loading in the first cut
+- SSML, prosody markup, word timing, or phoneme-level callbacks in the first cut
+
+## Research Summary
+
+### Candidate Comparison
+
+The table below focuses on local inference fit for Motlie rather than absolute research quality. Latency entries use upstream claims where available; otherwise they state the best stable inference from upstream packaging/runtime evidence.
+
+| Candidate | Representative Size | Latency / Realtime Evidence | CPU Fit on macOS/Linux | CUDA Fit | Voice Cloning | Streaming Capability | Rust Integration Path | License | Fit for Motlie |
+|-----------|---------------------|-----------------------------|------------------------|----------|---------------|----------------------|-----------------------|---------|----------------|
+| Piper TTS | `en_US-ljspeech-medium.onnx` is about `63.5 MB`; sidecar config is a few KB | Strong. Upstream positions Piper as fast/local, optimized for Raspberry Pi 4, and exposes raw streaming synthesis APIs and CLI flows. | Strong. This is the cleanest CPU-first candidate in the set. | Good. Upstream supports `onnxruntime-gpu` with `--cuda`, but GPU is optional. | Limited. Some voices are multi-speaker, but this is not a zero-shot cloning system. | Strong. Raw audio can be produced incrementally; `.wav` output is already a first-class path. | Strong. ONNX already fits `CheckpointFormat::Onnx`; backend can target `BackendKind::Ort` with Rust ORT bindings. | Code MIT; voice licenses must be reviewed per `MODEL_CARD`; upstream repo archived on 2025-10-06 and points to GPL successor. | Recommended v1 despite upstream maintenance risk because it best matches the architecture and CPU requirement. |
+| Coqui XTTS v2 | Hugging Face repo is about `2.09 GB`; `model.pth` alone is about `1.87 GB` | Strong upstream claim: XTTS can stream with sub-`200 ms` latency. | Weak for Motlie v1. Coqui's own streaming server docs say CPU is not recommended. | Good. Common deployment path is CUDA/PyTorch. | Strong. This is the main attraction. | Good. Official streaming server exists. | Weak-to-medium. Would require a new PyTorch/Python-serving boundary or heavyweight FFI; current Motlie backends are not set up for that. | Coqui Public Model License for weights; code in repo is permissive, but weight license is not as operationally simple as MIT/Apache. | Good phase-2 cloning candidate, not the first vertical slice. |
+| Bark | `bark-small` checkpoint family is roughly `1.5-1.7 GB` class | Weak for real-time speech calls. Bark is expressive but not shaped around low-latency speech streaming. | Weak. Heavy autoregressive pipeline and multi-stage generation hurt CPU viability. | Medium. GPU helps, but that does not solve product-fit issues. | Weak. Voice presets exist, but it is not the right cloning/runtime story for this product. | Weak. No strong official streaming path. | Weak. PyTorch-heavy, no clean Rust-native backend path. | MIT | Rejected for v1. Interesting research model, poor fit for telephony-style realtime output. |
+| StyleTTS 2 | LibriTTS checkpoint is about `771 MB`; common ONNX conversions are secondary/community artifacts | Medium. Excellent quality, but the official runtime story is notebook/PyTorch-centric. | Medium on paper, but packaging is messy and the official import path depends on a GPL-licensed package for inference. | Good for research GPUs. | Strong. Zero-shot speaker adaptation is a headline capability. | Weak-to-medium. Official repo points to a GPL fork for an experimental streaming API. | Weak. Rust-native path is poor unless Motlie adopts an unsupported/community ONNX conversion. | Code MIT; pretrained-model use terms are narrower than pure MIT; practical inference packaging drifts into GPL forks. | Rejected for v1 due licensing and runtime-integration friction. |
+| F5-TTS | `F5TTS_Base` weights are about `1.35 GB` | Strong GPU evidence: upstream reports about `253 ms` average latency on a single L20 with Triton/TensorRT-LLM; also supports chunk inference. | Weak for required CPU-first deployment. Upstream installation supports Apple Silicon, but benchmark guidance is GPU-centered. | Strong. This is one of the better CUDA bonus candidates. | Strong. Multi-speaker/style conditioning is supported. | Good. Chunk inference exists. | Weak-to-medium. Official stack is Python/Torch/Triton; ONNX path is community-maintained, not the primary runtime. | Code MIT, weights `CC-BY-NC-4.0` | Rejected for v1 because the weight license is non-commercial and CPU evidence is weak. |
+| Parler-TTS Mini | `880M` params; `model.safetensors` is about `3.75 GB` for Mini v1.1 | Medium. Upstream emphasizes faster generation, `torch.compile`, SDPA/FA2, and provides a streaming guide. | Weak-to-medium. Apple Silicon CPU install exists, but model size is still far too large for a CPU-first Motlie slice. | Good. CUDA and flash-attention paths are first-class. | Weak. Speaker/style prompting exists, but not reference-audio cloning. | Medium. Upstream documents streaming optimization. | Weak. Transformer/PyTorch stack would require a new backend substrate not yet present in Motlie. | Apache-2.0 | Good open research option, poor fit for a first local CPU bundle. |
+| Kokoro-82M | `82M` params; Hugging Face tree shows `kokoro-v0_19.onnx` about `346 MB` and `.pth` about `327 MB` | Good qualitative evidence. Upstream positions Kokoro as significantly faster and more cost-efficient than larger models and exposes a generator-style pipeline. | Good. This is the strongest non-Piper CPU candidate. | Medium. Apple Silicon/MPS support exists; CUDA story is not the main attraction. | Weak. This is primarily a compact high-quality voice model, not a cloning-first stack. | Medium. Pipeline yields generated chunks/segments, but transport-focused streaming is less mature than Piper. | Medium. There is an ONNX artifact in the model tree, but the official library path is still Python-first; Rust integration is less stable than Piper. | Apache-2.0 | Best alternate v1 candidate if Piper maintenance risk becomes unacceptable. |
+
+### Why Piper Is the Best First Slice
+
+The first Motlie TTS slice should optimize for architecture fit, operability, and CPU viability, not for maximum cloning quality.
+
+Piper is the best first slice because it aligns with the highest-priority constraints:
+
+- explicit local-first CPU design
+- ONNX artifacts that already fit `CheckpointFormat::Onnx`
+- straightforward `.wav` and raw audio streaming paths
+- easy separation between model output and higher-level playback/transport adapters
+- no requirement to embed a Python service or introduce PyTorch as a foundational runtime in `libs/model`
+
+Piper is not the best candidate for zero-shot cloning. It is still the best Motlie v1 candidate because voice cloning is explicitly desirable but not mandatory, while CPU viability and clean bundle/backend integration are mandatory.
+
+### Major Risks and Constraints
+
+#### Piper maintenance risk
+
+The original `rhasspy/piper` repository was archived on 2025-10-06 and points new development to `OHF-Voice/piper1-gpl`. That does not invalidate Piper voices or the ONNX format, but it does mean Motlie should avoid coupling itself to the archived C++ runtime or the GPL successor.
+
+Recommended mitigation:
+
+- treat Piper as a voice/checkpoint format, not as a library dependency
+- implement Motlie's backend directly against ONNX Runtime
+- keep phonemization and sidecar-config parsing inside Motlie's backend crate
+
+This preserves the curated artifact format while avoiding the upstream packaging/licensing churn.
+
+#### Voice license variance
+
+Piper voice availability is attractive, but individual voices may carry different dataset/model-card restrictions. The first curated bundle should use a voice whose `MODEL_CARD` terms are operationally acceptable for the intended distribution.
+
+Recommended design stance:
+
+- the design recommends the Piper runtime family
+- the exact first curated voice remains a curation decision to confirm during implementation
+- `en_US-ljspeech-medium` is the provisional reference voice because it is compact and tied to a published upstream path in `rhasspy/piper-voices`
+
+#### Why XTTS v2 is not v1
+
+XTTS v2 is the best phase-2 candidate if the product later prioritizes voice cloning over bundle simplicity. It is not v1 because:
+
+- the official fast path is CUDA/PyTorch, not CPU-first
+- the official streaming server says CPU is not recommended
+- the weight format does not fit the current `libs/model` backend substrate
+- a Python-serving backend would be a materially different operational model than the existing Motlie backends
+
+## Recommended Vertical Slice
+
+### Curated Model Choice
+
+Recommended first bundle:
+
+- logical model family: Piper
+- runtime/backend: `motlie-model-piper` on top of ONNX Runtime
+- checkpoint format: ONNX
+- provisional curated voice: `en_US-ljspeech-medium`
+- capability surface: streamed speech synthesis only
+- primary deployment targets: Linux and macOS CPU
+- optional acceleration target: CUDA builds that enable the ORT CUDA provider
+
+### Why `en_US-ljspeech-medium`
+
+This voice is a good benchmark-shaped first artifact because it is:
+
+- compact at about `63.5 MB`
+- mono voice output with a simple artifact story
+- already published with the `.onnx` + `.onnx.json` pair that Piper expects
+- small enough that bundle download and local-only startup remain operationally cheap
+
+The voice choice is intentionally not overfit into the contract. If curation later prefers a different Piper voice with cleaner license terms, the same API and backend design still hold.
+
+### What Is Intentionally Deferred
+
+- zero-shot cloning bundles
+- multi-speaker bundle families
+- SSML and timing marks
+- vendor-specific telephony codecs in the core model crates
+- PyTorch-based TTS families such as XTTS v2 or F5-TTS
+
+## Architecture
+
+### Crate Layout
+
+```text
+libs/model/
+  src/
+    lib.rs
+    speech.rs
+
+libs/model/backends/piper/
+  Cargo.toml
+  src/
+    lib.rs
+    common.rs
+    speech.rs
+    phonemize.rs
+
+libs/models/
+  src/
+    tts/
+      mod.rs
+      piper_en_us_ljspeech_medium.rs
+```
+
+### High-Level Data Flow
+
+1. Caller chooses a curated selector such as `tts:piper/en_us_ljspeech_medium`.
+2. `libs/models` resolves the curated descriptor and artifact rules.
+3. On `start()`, the bundle resolves local artifacts or downloads them through the existing curated artifact path.
+4. The bundle passes the resolved local `.onnx` checkpoint path to the generic Piper backend adapter.
+5. The backend loads the ONNX session, the sidecar config, and phonemization resources.
+6. Caller opens a speech stream with a text request.
+7. The backend emits PCM chunks through `SpeechStream`.
+8. Higher layers choose an adapter:
+   `.wav` writer,
+   PulseAudio/ALSA sink,
+   telephony websocket/RTP adapter,
+   or any other consumer of PCM chunks.
+
+### Boundary Rule
+
+The model-layer capability should not accept or own:
+
+- filesystem writers
+- PulseAudio/ALSA devices
+- RTP sockets
+- websocket sessions
+
+Those belong above the model crates.
+
+The TTS capability should only own:
+
+- text input
+- voice/synthesis parameters
+- streamed PCM chunk output
+- audio-format metadata
+
+## Streaming PCM API Contract
+
+### Design Principle
+
+ASR converges multiple input sources into `PcmChunk` input. TTS should converge multiple output consumers onto the same `PcmChunk` output shape.
+
+The stream contract should therefore be:
+
+- transport-neutral
+- chunk-oriented
+- stateful per stream
+- able to emit partial output before the full utterance completes
+
+### Proposed Core Types
+
+```rust
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PcmEncoding {
+    S16Le,
+    F32Le,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AudioSpec {
+    pub sample_rate_hz: u32,
+    pub channels: u16,
+    pub encoding: PcmEncoding,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PcmChunk {
+    pub data: Vec<u8>,
+    pub sequence: u64,
+    pub end_of_stream: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SpeechParams {
+    pub speaking_rate: Option<f32>,
+    pub speaker_id: Option<u32>,
+    pub seed: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum VoiceConditioning {
+    SpeakerId(u32),
+    ReferenceAudio {
+        audio_spec: AudioSpec,
+        pcm: Vec<u8>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpeechRequest {
+    pub text: String,
+    pub params: SpeechParams,
+    pub conditioning: Option<VoiceConditioning>,
+}
+```
+
+### Stream Traits
+
+```rust
+#[async_trait]
+pub trait SpeechModel: Send + Sync {
+    async fn open_stream(
+        &self,
+        request: SpeechRequest,
+    ) -> Result<Box<dyn SpeechStream>, ModelError>;
+}
+
+#[async_trait]
+pub trait SpeechStream: Send {
+    fn audio_spec(&self) -> &AudioSpec;
+    async fn next_chunk(&mut self) -> Result<Option<PcmChunk>, ModelError>;
+    async fn finish(self: Box<Self>) -> Result<(), ModelError>;
+}
+```
+
+### Semantics
+
+- `SpeechModel` is shareable and stateless at the contract boundary.
+- `SpeechStream` is stateful and owned by one task; it should be `Send`, not `Sync`, matching the ASR stream-ownership design.
+- `next_chunk()` returns `Ok(Some(chunk))` while output is still available.
+- `next_chunk()` returns `Ok(None)` only after the stream is exhausted.
+- `chunk.end_of_stream` is set on the final emitted chunk; `None` after that is the stream-termination signal.
+
+### Why This Shape
+
+- `.wav` output can collect chunks and write one file
+- PulseAudio/ALSA can play chunks immediately
+- websocket/RTP adapters can re-frame the same PCM into transport-sized frames
+- future cloning models can reuse the request shape without replacing the stream contract
+
+## Core Contract Changes in `libs/model`
+
+### Additive Capability Extension
+
+Add:
+
+- `CapabilityKind::Speech`
+- `CapabilityDescriptor::speech_stream()`
+- `BundleHandle::speech() -> Result<&dyn SpeechModel, ModelError>`
+- `SpeechModel`
+- `SpeechStream`
+- `SpeechRequest`, `SpeechParams`, `VoiceConditioning`, `AudioSpec`, `PcmEncoding`, `PcmChunk`
+
+Reuse:
+
+- `ContentKind::Text` for input
+- `ContentKind::Audio` for output
+- `InteractionStyle::Streaming`
+
+### Proposed Metadata Behavior
+
+Recommended descriptor:
+
+```rust
+pub fn speech_stream() -> Self {
+    Self::new(
+        CapabilityKind::Speech,
+        "Streaming text-to-speech synthesis with PCM audio output.",
+        vec![ContentKind::Text],
+        vec![ContentKind::Audio],
+        InteractionStyle::Streaming,
+    )
+}
+```
+
+### Eval and Family Additions
+
+Add:
+
+- `EvalTrack::Speech`
+- `BundleFamily::Piper`
+
+Do not add bundle families for every TTS candidate in v1. Only the curated first slice should become a first-class family.
+
+## Generic Backend Design
+
+### Backend Choice
+
+Recommended crate:
+
+- crate name: `motlie-model-piper`
+- path: `libs/model/backends/piper`
+- reported backend kind: `BackendKind::Ort`
+
+Rationale:
+
+- `BackendKind::Ort` already exists
+- the actual generic runtime is ONNX Runtime
+- Piper is the model-family-specific logic layered on top of ORT
+
+### Runtime Responsibilities
+
+The backend crate should own:
+
+- loading the `.onnx` checkpoint
+- parsing the adjacent `.onnx.json` sidecar
+- text normalization and phonemization
+- converting backend outputs into Motlie `PcmChunk`
+- optional ORT CUDA provider wiring
+
+The backend crate should not own:
+
+- model download policy
+- Hugging Face cache layout rules
+- telephony packetization
+- `.wav` writing
+
+### Artifact Layout
+
+Piper bundles need both:
+
+- the model checkpoint: `en/en_US/ljspeech/medium/en_US-ljspeech-medium.onnx`
+- the sidecar config: `en/en_US/ljspeech/medium/en_US-ljspeech-medium.onnx.json`
+
+That fits the current artifact system because `download_checkpoint_artifacts_with_options()` matches repo-relative filenames, not just basenames.
+
+### Phonemization
+
+This is the main backend-specific complication.
+
+Design recommendation:
+
+- keep phonemization inside `motlie-model-piper`
+- depend on a local phonemization library or FFI boundary appropriate for the target platforms
+- do not shell out to a `piper` executable as the long-term architecture
+
+Why:
+
+- Motlie backends are in-process libraries today
+- process management would complicate streaming, error handling, and deployment
+- a direct ORT backend keeps the resulting crate aligned with the rest of the stack
+
+### CUDA Support
+
+CUDA is a bonus, not a public-contract fork.
+
+The backend should:
+
+- compile without CUDA by default
+- optionally enable the ORT CUDA provider behind a Cargo feature
+- continue to expose the same `SpeechModel` / `SpeechStream` contract in both modes
+
+## Curated Bundle Design in `libs/models`
+
+### New Namespace
+
+Add:
+
+```text
+libs/models/src/tts/
+  mod.rs
+  piper_en_us_ljspeech_medium.rs
+```
+
+Recommended direct module path:
+
+```rust
+motlie_models::tts::piper_en_us_ljspeech_medium::descriptor()
+motlie_models::tts::piper_en_us_ljspeech_medium::bundle()
+```
+
+### Selector and Enum
+
+Add:
+
+- `TtsModels`
+- `ModelSelector::Tts(TtsModels)`
+- selector string `tts:piper/en_us_ljspeech_medium`
+
+Recommended curated bundle id:
+
+- `piper_en_us_ljspeech_medium`
+
+### Bundle Descriptor Shape
+
+Recommended curated descriptor:
+
+- family: `BundleFamily::Piper`
+- backend: `BackendKind::Ort`
+- capabilities: `Capabilities::new(vec![CapabilityDescriptor::speech_stream()])`
+- eval tracks: `vec![EvalTrack::Speech]`
+- platform constraints: Linux and macOS
+- build constraints: feature-gated backend, optional CUDA feature
+
+### Artifact Declaration
+
+The curated bundle should use exact repo-relative include rules:
+
+```rust
+include: vec![
+    ArtifactRule::Exact("en/en_US/ljspeech/medium/en_US-ljspeech-medium.onnx"),
+    ArtifactRule::Exact("en/en_US/ljspeech/medium/en_US-ljspeech-medium.onnx.json"),
+]
+```
+
+This avoids the ambiguity that would come from suffix-only matching inside the shared `rhasspy/piper-voices` repository.
+
+### Local Artifact Resolution
+
+The local resolver should:
+
+1. resolve the Hugging Face snapshot root for `rhasspy/piper-voices`
+2. return the concrete `.onnx` file path under that snapshot
+3. let the backend derive the sidecar `.onnx.json` path from the resolved checkpoint path
+
+## Feature Flag Design
+
+Recommended initial features in `libs/models/Cargo.toml`:
+
+```toml
+[features]
+model-piper-en-us-ljspeech-medium = ["dep:motlie-model-piper"]
+piper-cuda = ["dep:motlie-model-piper", "motlie-model-piper/cuda"]
+```
+
+Recommendations:
+
+- keep the TTS bundle out of `default` features in the first PR
+- gate `TtsModels`, selector parsing, and catalog registration together
+- follow the existing `ModelUnavailable` behavior for known-but-disabled selectors
+
+Possible follow-up profile features:
+
+```toml
+profile-voice-local = ["model-piper-en-us-ljspeech-medium"]
+profile-voice-dgx = ["model-piper-en-us-ljspeech-medium", "piper-cuda"]
+```
+
+## Output Adapter Boundary
+
+### Principle
+
+`libs/model` and `libs/models` should end at PCM chunks.
+
+All format conversion and transport adaptation should sit above them.
+
+### Adapter Families
+
+#### `.wav` file sink
+
+- collects the stream
+- writes headers plus PCM frames
+- best first example path because it is deterministic and easy to validate
+
+#### PulseAudio / ALSA sink
+
+- consumes `AudioSpec` plus PCM chunks
+- writes to local playback buffers
+- no model-crate changes required beyond the PCM stream contract
+
+#### Telephony websocket / RTP sink
+
+- consumes PCM chunks
+- performs resampling and codec conversion as needed by the transport
+- packetizes into transport-sized frames
+- owns websocket session lifecycle or RTP socket lifecycle
+
+### Why This Boundary Matters
+
+Telephony adapters will often need:
+
+- resampling to transport sample rates
+- channel normalization
+- codec transforms such as mu-law
+- chunk/frame re-packetization
+
+Those are transport responsibilities, not model responsibilities.
+
+Keeping the boundary at PCM chunks means:
+
+- the same model stream can drive a `.wav` file, local speaker output, or a websocket sender
+- transport-specific failures do not contaminate the stable model API
+- Motlie does not have to encode vendor-specific telephony behavior into the model crates
+
+## Distribution Considerations
+
+### Format Choice
+
+Piper's ONNX format is the strongest distribution fit for Motlie today because:
+
+- `CheckpointFormat::Onnx` already exists
+- artifacts are small relative to the other serious candidates
+- local-only startup and fetch-on-demand remain reasonable
+- the format works on CPU-first deployments
+
+### Why Not GGUF for v1
+
+GGUF is currently a poor fit for TTS v1:
+
+- the strongest TTS candidates are not natively distributed in GGUF
+- the telephony/output problem is not helped by GGUF
+- forcing a conversion pipeline would add moving parts without improving product fit
+
+### Artifact Size Comparison
+
+Approximate footprint pressure from the evaluated candidates:
+
+- Piper voice: about `63 MB`
+- Kokoro-82M ONNX: about `346 MB`
+- StyleTTS 2 LibriTTS: about `771 MB`
+- F5-TTS Base: about `1.35 GB`
+- XTTS v2: about `2.09 GB`
+- Parler-TTS Mini v1.1: about `3.75 GB`
+
+That gap matters for:
+
+- artifact download time
+- CI cache pressure
+- local-first operator experience
+- bundled distribution options
+
+### Recommended Bundle Download Policy
+
+- support both `LocalOnly` and `AllowFetch`
+- lock the curated bundle to explicit repo-relative artifact paths
+- prefer exact include rules over suffix rules
+- document the artifact root and local snapshot expectations in the example README
+
+## Migration and Compatibility Strategy
+
+This is additive brownfield work.
+
+Recommended compatibility strategy:
+
+- extend `BundleHandle` with `speech()`
+- update existing backends so `speech()` returns `UnsupportedCapability(CapabilityKind::Speech)`
+- keep existing chat/completion/embedding behaviors unchanged
+- add capability discovery and selector parsing in a strictly additive way
+
+There is no need for a migration path in application code beyond:
+
+- opting into the new Cargo features
+- selecting a TTS bundle
+- consuming the new speech capability
+
+## API Sketch
+
+### Core usage
+
+```rust
+use motlie_model::{ArtifactPolicy, SpeechRequest, SpeechParams};
+use motlie_models::{Catalog, ModelSelector};
+
+let selector: ModelSelector = "tts:piper/en_us_ljspeech_medium".parse()?;
+let bundle = selector.bundle();
+let handle = bundle
+    .start(motlie_model::StartOptions {
+        artifact_policy: Some(ArtifactPolicy::AllowFetch { root: None }),
+        ..Default::default()
+    })
+    .await?;
+
+let speech = handle.speech()?;
+let mut stream = speech
+    .open_stream(SpeechRequest {
+        text: "Hello from Motlie.".into(),
+        params: SpeechParams::default(),
+        conditioning: None,
+    })
+    .await?;
+
+let spec = stream.audio_spec().clone();
+let mut chunks = Vec::new();
+while let Some(chunk) = stream.next_chunk().await? {
+    chunks.push(chunk);
+}
+```
+
+### Output adapter sketch
+
+```rust
+async fn write_wav_from_stream(
+    mut stream: Box<dyn motlie_model::SpeechStream>,
+    path: &std::path::Path,
+) -> anyhow::Result<()> {
+    let spec = stream.audio_spec().clone();
+    let mut writer = wav_sink::open(path, &spec)?;
+
+    while let Some(chunk) = stream.next_chunk().await? {
+        writer.write_pcm(&chunk.data)?;
+        if chunk.end_of_stream {
+            break;
+        }
+    }
+
+    writer.finish()?;
+    Ok(())
+}
+```
+
+## Alternatives Considered
+
+### XTTS v2 as v1
+
+Pros:
+
+- strong cloning capability
+- official streaming story
+- good CUDA upside
+
+Cons:
+
+- CPU is explicitly not recommended by the official streaming server
+- much larger artifacts
+- would pull Motlie toward a Python/Torch-serving backend model
+- less comfortable weight-license posture than Apache/MIT
+
+Decision:
+
+- keep as the leading phase-2 cloning candidate, not v1
+
+### Kokoro as v1
+
+Pros:
+
+- compact compared with most modern expressive TTS models
+- promising CPU-first profile
+- Apache-2.0
+
+Cons:
+
+- official integration path is still Python-first
+- runtime/format story is less stable for a Rust backend than Piper
+- weaker transport-streaming story than Piper
+
+Decision:
+
+- best fallback if Piper ecosystem churn makes direct ORT support unattractive
+
+### Parler-TTS Mini as v1
+
+Pros:
+
+- Apache-2.0
+- high-quality controllable synthesis
+- open training/inference stack
+
+Cons:
+
+- still much too large for the first CPU-first curated slice
+- PyTorch-heavy runtime
+- not a cloning-first model anyway
+
+Decision:
+
+- not the best use of the first TTS integration slot
+
+## Testing Scope for PLAN
+
+PLAN should make the following verification concrete:
+
+- capability discovery in `libs/model`
+- unsupported-capability behavior in existing backends
+- ORT backend startup with missing/wrong artifacts
+- local-only artifact resolution for the curated Piper voice
+- chunked speech synthesis over the new stream contract
+- `.wav` end-to-end example from fetch to output file
+- optional local playback example
+- optional CUDA compilation and startup checks when the feature is enabled
+
+## References
+
+- ASR design template in-repo:
+  `libs/models/docs/DESIGN_ASR.md`
+- Motlie curated bundle architecture in-repo:
+  `libs/models/docs/DESIGN.md`
+- Motlie core contract crate in-repo:
+  `libs/model/src/lib.rs`
+- Coqui TTS repository:
+  https://github.com/coqui-ai/TTS
+- XTTS v2 model card:
+  https://huggingface.co/coqui/XTTS-v2
+- Piper repository archive:
+  https://github.com/rhasspy/piper
+- Piper voice repository:
+  https://huggingface.co/rhasspy/piper-voices
+- Bark model card:
+  https://huggingface.co/suno/bark-small
+- StyleTTS 2 repository:
+  https://github.com/yl4579/StyleTTS2
+- StyleTTS 2 LibriTTS checkpoint:
+  https://huggingface.co/yl4579/StyleTTS2-LibriTTS
+- F5-TTS repository:
+  https://github.com/SWivid/F5-TTS
+- F5-TTS weights:
+  https://huggingface.co/SWivid/F5-TTS
+- Parler-TTS repository:
+  https://github.com/huggingface/parler-tts
+- Parler-TTS Mini v1.1 weights:
+  https://huggingface.co/parler-tts/parler-tts-mini-v1.1
+- Kokoro repository:
+  https://github.com/hexgrad/kokoro
+- Kokoro-82M model tree:
+  https://huggingface.co/hexgrad/Kokoro-82M
