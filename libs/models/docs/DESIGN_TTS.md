@@ -109,15 +109,19 @@ The table below focuses on local inference fit for Motlie rather than absolute r
 
 | Candidate | Representative Size | Latency / Realtime Evidence | CPU Fit on macOS/Linux | CUDA Fit | Voice Cloning | Streaming Capability | Rust Integration Path | License | Fit for Motlie |
 |-----------|---------------------|-----------------------------|------------------------|----------|---------------|----------------------|-----------------------|---------|----------------|
-| Piper TTS | `en_US-ljspeech-medium.onnx` is about `63.5 MB`; sidecar config is a few KB | Strong. Upstream positions Piper as fast/local, optimized for Raspberry Pi 4, and exposes raw streaming synthesis APIs and CLI flows. | Strong. This is the cleanest CPU-first candidate in the set. | Good. Upstream supports `onnxruntime-gpu` with `--cuda`, but GPU is optional. | Limited. Some voices are multi-speaker, but this is not a zero-shot cloning system. | Strong. Raw audio can be produced incrementally; `.wav` output is already a first-class path. | Strong. ONNX already fits `CheckpointFormat::Onnx`; backend can target `BackendKind::Ort` with Rust ORT bindings. | Code MIT; voice licenses must be reviewed per `MODEL_CARD`; upstream repo archived on 2025-10-06 and points to GPL successor. | Recommended v1 despite upstream maintenance risk because it best matches the architecture and CPU requirement. |
-| Coqui XTTS v2 | Hugging Face repo is about `2.09 GB`; `model.pth` alone is about `1.87 GB` | Strong upstream claim: XTTS can stream with sub-`200 ms` latency. | Weak for Motlie v1. Coqui's own streaming server docs say CPU is not recommended. | Good. Common deployment path is CUDA/PyTorch. | Strong. This is the main attraction. | Good. Official streaming server exists. | Weak-to-medium. Would require a new PyTorch/Python-serving boundary or heavyweight FFI; current Motlie backends are not set up for that. | Coqui Public Model License for weights; code in repo is permissive, but weight license is not as operationally simple as MIT/Apache. | Good phase-2 cloning candidate, not the first vertical slice. |
+| Piper TTS | `en_US-ljspeech-medium.onnx` is about `63.5 MB`; sidecar config is a few KB | Strong. Upstream positions Piper as fast/local, optimized for Raspberry Pi 4, and exposes raw streaming synthesis APIs and CLI flows. | Strong. This is still the cleanest CPU-first candidate in the set. | Good. Upstream supports `onnxruntime-gpu` with `--cuda`, but GPU is optional. | Limited. Some voices are multi-speaker, but this is not a zero-shot cloning system. | Strong. Raw audio can be produced incrementally; `.wav` output is already a first-class path. | Strong. ONNX already fits `CheckpointFormat::Onnx`; backend can target `BackendKind::Ort` with Rust ORT bindings. | Code MIT; voice licenses must be reviewed per `MODEL_CARD`; upstream repo archived on 2025-10-06 and points to GPL successor. | Recommended v1 despite upstream maintenance risk because it best matches the architecture and CPU requirement. |
+| Fish Speech 1.5 + `fish-speech.rs` | Fish Speech 1.5 weights are about `1.28 GB`; the Rust server compiles to a static binary of about `15 MB` | Good. `fish-speech.rs` advertises streaming audio and `.wav`; official Fish Audio S2 Pro reports about `100 ms` TTFA and `RTF 0.195` on one H200, but that is a different, newer runtime family. | Medium. `fish-speech.rs` says CPU is supported on Linux and macOS, but the official flagship evidence is GPU-first and the Rust runtime currently targets Fish 1.5 and below, not the latest S2 line. | Strong. Official Fish Audio S2 Pro explicitly publishes high streaming performance on NVIDIA GPUs; the Rust runtime also has CUDA and Metal features. | Strong. Official Fish Audio supports rapid voice cloning from short references; `fish-speech.rs` exposes temporary and persisted cloned voices. | Strong. Both official Fish Audio and `fish-speech.rs` expose streaming/server paths. | Medium. This is the best Rust-native candidate, but the Rust engine is third-party and tied to older Fish checkpoints while the official project has moved to S2 Pro. | Code Apache-2.0 or research license depending on repo; weights are non-commercial (`CC-BY-NC-SA-4.0` / Fish Audio Research License). | Strong technically, but blocked for a general Motlie bundle by weight-license restrictions and ecosystem split. |
+| Qwen3-TTS | `Qwen3-TTS-12Hz-0.6B-Base` tree is about `2.52 GB`; `model.safetensors` is about `1.83 GB` | Strong. Official repo claims end-to-end streaming latency as low as `97 ms` and supports streaming/non-streaming in one model family. | Medium-to-weak for v1. The smallest public model is still much larger than Piper and the official quickstart/examples are CUDA-first PyTorch flows. | Strong. Official examples load with `cuda:0`, `bfloat16`, and `flash_attention_2`; this is a good GB10 candidate. | Strong. Officially supports 3-second voice cloning, custom voices, and voice design. | Strong. Streaming is a first-class feature in the official repo and API docs. | Weak-to-medium. Open license is excellent, but the current path is Python package + Transformers/vLLM, not a Rust-native backend. | Apache-2.0 | Strongest phase-2 candidate for quality and feature breadth, but not the simplest v1 backend or artifact story. |
+| Coqui XTTS v2 | Hugging Face repo is about `2.09 GB`; `model.pth` alone is about `1.87 GB` | Strong upstream claim: XTTS can stream with sub-`200 ms` latency. | Weak for Motlie v1. Coqui's own streaming server docs say CPU is not recommended. | Good. Common deployment path is CUDA/PyTorch. | Strong. This is the main attraction. | Good. Official streaming server exists. | Weak-to-medium. Would require a new PyTorch/Python-serving boundary or heavyweight FFI; current Motlie backends are not set up for that. | Coqui Public Model License for weights; code in repo is permissive, but weight license is not as operationally simple as MIT/Apache. | Still viable as a cloning-focused backend family, but Qwen3-TTS now looks like the better open phase-2 candidate. |
 | Bark | `bark-small` checkpoint family is roughly `1.5-1.7 GB` class | Weak for real-time speech calls. Bark is expressive but not shaped around low-latency speech streaming. | Weak. Heavy autoregressive pipeline and multi-stage generation hurt CPU viability. | Medium. GPU helps, but that does not solve product-fit issues. | Weak. Voice presets exist, but it is not the right cloning/runtime story for this product. | Weak. No strong official streaming path. | Weak. PyTorch-heavy, no clean Rust-native backend path. | MIT | Rejected for v1. Interesting research model, poor fit for telephony-style realtime output. |
 | StyleTTS 2 | LibriTTS checkpoint is about `771 MB`; common ONNX conversions are secondary/community artifacts | Medium. Excellent quality, but the official runtime story is notebook/PyTorch-centric. | Medium on paper, but packaging is messy and the official import path depends on a GPL-licensed package for inference. | Good for research GPUs. | Strong. Zero-shot speaker adaptation is a headline capability. | Weak-to-medium. Official repo points to a GPL fork for an experimental streaming API. | Weak. Rust-native path is poor unless Motlie adopts an unsupported/community ONNX conversion. | Code MIT; pretrained-model use terms are narrower than pure MIT; practical inference packaging drifts into GPL forks. | Rejected for v1 due licensing and runtime-integration friction. |
 | F5-TTS | `F5TTS_Base` weights are about `1.35 GB` | Strong GPU evidence: upstream reports about `253 ms` average latency on a single L20 with Triton/TensorRT-LLM; also supports chunk inference. | Weak for required CPU-first deployment. Upstream installation supports Apple Silicon, but benchmark guidance is GPU-centered. | Strong. This is one of the better CUDA bonus candidates. | Strong. Multi-speaker/style conditioning is supported. | Good. Chunk inference exists. | Weak-to-medium. Official stack is Python/Torch/Triton; ONNX path is community-maintained, not the primary runtime. | Code MIT, weights `CC-BY-NC-4.0` | Rejected for v1 because the weight license is non-commercial and CPU evidence is weak. |
 | Parler-TTS Mini | `880M` params; `model.safetensors` is about `3.75 GB` for Mini v1.1 | Medium. Upstream emphasizes faster generation, `torch.compile`, SDPA/FA2, and provides a streaming guide. | Weak-to-medium. Apple Silicon CPU install exists, but model size is still far too large for a CPU-first Motlie slice. | Good. CUDA and flash-attention paths are first-class. | Weak. Speaker/style prompting exists, but not reference-audio cloning. | Medium. Upstream documents streaming optimization. | Weak. Transformer/PyTorch stack would require a new backend substrate not yet present in Motlie. | Apache-2.0 | Good open research option, poor fit for a first local CPU bundle. |
-| Kokoro-82M | `82M` params; Hugging Face tree shows `kokoro-v0_19.onnx` about `346 MB` and `.pth` about `327 MB` | Good qualitative evidence. Upstream positions Kokoro as significantly faster and more cost-efficient than larger models and exposes a generator-style pipeline. | Good. This is the strongest non-Piper CPU candidate. | Medium. Apple Silicon/MPS support exists; CUDA story is not the main attraction. | Weak. This is primarily a compact high-quality voice model, not a cloning-first stack. | Medium. Pipeline yields generated chunks/segments, but transport-focused streaming is less mature than Piper. | Medium. There is an ONNX artifact in the model tree, but the official library path is still Python-first; Rust integration is less stable than Piper. | Apache-2.0 | Best alternate v1 candidate if Piper maintenance risk becomes unacceptable. |
+| Chroma 1.0 | `Chroma-4B` files total about `14.3 GB` across three safetensors shards; gated model | Medium-to-strong for its intended problem. Officially positioned as a real-time spoken dialogue model. | Weak for Motlie v1. Weight size and multimodal dialogue framing make CPU deployment implausible. | Good. `transformers` + `device_map="auto"` is the published path. | Strong. Officially supports reference-audio voice cloning. | Strong in the speech-to-speech sense. | Weak for Motlie TTS. It is a custom-code `transformers` model that expects audio input and multimodal dialogue state, not a simple text-to-PCM backend. | Apache-2.0, but gated behind contact-info sharing on Hugging Face. | Not a good fit for the current TTS scope. Better viewed as a future speech-to-speech/dialogue stack, not a `SpeechRequest { text }` bundle. |
+| Kokoro-82M | `82M` params; Hugging Face tree shows `kokoro-v0_19.onnx` about `346 MB` and `.pth` about `327 MB` | Good qualitative evidence. Upstream positions Kokoro as significantly faster and more cost-efficient than larger models and exposes a generator-style pipeline. | Good. This remains the strongest non-Piper CPU candidate. | Medium. Apple Silicon/MPS support exists; CUDA story is not the main attraction. | Weak. This is primarily a compact high-quality voice model, not a cloning-first stack. | Medium. Pipeline yields generated chunks/segments, but transport-focused streaming is less mature than Piper. | Medium. There is an ONNX artifact in the model tree, but the official library path is still Python-first; Rust integration is less stable than Piper. | Apache-2.0 | Best alternate v1 candidate if Piper maintenance risk becomes unacceptable. |
+| PersonaPlex | `personaplex-7b-v1` tree is about `17.1 GB`; `model.safetensors` is about `16.7 GB`; gated model | Strong for full-duplex speech dialogue. Official model card reports real-time use and evaluates on turn-taking latency on A100. | Weak for Motlie v1. Even NVIDIA's own docs center GPU deployment and CPU offload, not CPU-native realtime use. | Strong. This is explicitly an NVIDIA CUDA-oriented deployment story and a plausible GB10 research target. | Medium. Voice conditioning is supported, but the model is persona-conditioned speech dialogue rather than standalone TTS. | Strong in the speech-to-speech sense. | Weak for current scope. Official code is a Python/Moshi server with audio input and voice/text prompting; it is not a drop-in text-to-speech backend. | NVIDIA Open Model License, gated access, commercial use permitted. | Strong future research candidate for duplex voice agents, but out of scope for Motlie's first TTS bundle because it is speech-to-speech rather than text-to-speech. |
 
-### Why Piper Is the Best First Slice
+### Why Piper Is Still the Best First Slice
 
 The first Motlie TTS slice should optimize for architecture fit, operability, and CPU viability, not for maximum cloning quality.
 
@@ -130,6 +134,25 @@ Piper is the best first slice because it aligns with the highest-priority constr
 - no requirement to embed a Python service or introduce PyTorch as a foundational runtime in `libs/model`
 
 Piper is not the best candidate for zero-shot cloning. It is still the best Motlie v1 candidate because voice cloning is explicitly desirable but not mandatory, while CPU viability and clean bundle/backend integration are mandatory.
+
+### Ranking After the Additional Candidates
+
+The extra candidates change the phase-2 roadmap more than they change the v1 decision.
+
+Updated ranking for Motlie:
+
+1. Piper
+   Best first vertical slice for CPU-first local inference, artifact simplicity, and a clean Rust/ONNX integration path.
+2. Qwen3-TTS
+   Best phase-2 candidate for high-quality open-license streaming TTS with strong cloning and voice-design features, especially if GB10/CUDA becomes a meaningful target.
+3. Kokoro-82M
+   Best alternate CPU-oriented v1 if Piper maintenance risk outweighs its current integration advantage.
+4. Fish Speech
+   Technically strong and the best Rust-native story, but the weight-license posture and split between official/new models and third-party/older Rust runtime make it hard to curate cleanly in Motlie.
+5. XTTS v2
+   Still interesting for cloning, but now less attractive than Qwen3-TTS because the open-license and model-family story are weaker.
+
+Chroma and PersonaPlex do not belong in the same shortlist for this v1 because they are full speech-to-speech dialogue systems rather than pure text-to-speech bundles.
 
 ### Major Risks and Constraints
 
@@ -155,9 +178,23 @@ Recommended design stance:
 - the exact first curated voice remains a curation decision to confirm during implementation
 - `en_US-ljspeech-medium` is the provisional reference voice because it is compact and tied to a published upstream path in `rhasspy/piper-voices`
 
+#### Why Qwen3-TTS is not v1
+
+Qwen3-TTS is the most serious challenger to Piper after this additional research. It is still not the right first slice because:
+
+- the smallest official model is still much larger than Piper
+- the published integration path is Python package + Transformers/vLLM, not a Rust-native runtime
+- the official examples are CUDA-first and tuned around `flash_attention_2`
+- Motlie would need a substantially heavier backend substrate before Qwen3-TTS becomes a clean curated bundle family
+
+Inference from the official sources:
+
+- if Motlie later prioritizes voice quality, voice design, and 3-second cloning over minimal artifact/runtime complexity, Qwen3-TTS should likely be the next family evaluated after Piper
+- if Motlie later wants to exploit GB10/CUDA specifically, Qwen3-TTS is a better fit than Piper
+
 #### Why XTTS v2 is not v1
 
-XTTS v2 is the best phase-2 candidate if the product later prioritizes voice cloning over bundle simplicity. It is not v1 because:
+XTTS v2 remains a plausible cloning-focused follow-on, but it is no longer the leading phase-2 recommendation after adding Qwen3-TTS to the evaluation set. It is not v1 because:
 
 - the official fast path is CUDA/PyTorch, not CPU-first
 - the official streaming server says CPU is not recommended
@@ -195,7 +232,7 @@ The voice choice is intentionally not overfit into the contract. If curation lat
 - multi-speaker bundle families
 - SSML and timing marks
 - vendor-specific telephony codecs in the core model crates
-- PyTorch-based TTS families such as XTTS v2 or F5-TTS
+- PyTorch-based TTS families such as Qwen3-TTS, XTTS v2, or F5-TTS
 
 ## Architecture
 
@@ -619,9 +656,13 @@ Approximate footprint pressure from the evaluated candidates:
 - Piper voice: about `63 MB`
 - Kokoro-82M ONNX: about `346 MB`
 - StyleTTS 2 LibriTTS: about `771 MB`
+- Fish Speech 1.5: about `1.28 GB`
 - F5-TTS Base: about `1.35 GB`
+- Qwen3-TTS 0.6B Base tree: about `2.52 GB`
 - XTTS v2: about `2.09 GB`
 - Parler-TTS Mini v1.1: about `3.75 GB`
+- Chroma-4B: about `14.3 GB`
+- PersonaPlex-7B: about `17.1 GB`
 
 That gap matters for:
 
@@ -711,6 +752,45 @@ async fn write_wav_from_stream(
 
 ## Alternatives Considered
 
+### Qwen3-TTS as v1
+
+Pros:
+
+- Apache-2.0
+- official streaming support with published low-latency claims
+- strong open voice cloning and voice-design support
+- better long-term quality ceiling than Piper
+- strong fit for GB10/CUDA follow-on work
+
+Cons:
+
+- much heavier artifacts than Piper even for the `0.6B` line
+- official integration path is Python-first, not Rust-first
+- published examples are tuned for CUDA + FlashAttention
+- not a natural `BackendKind::Ort` / `CheckpointFormat::Onnx` fit
+
+Decision:
+
+- best phase-2 TTS family after Piper, but too heavy for the first CPU-first Rust bundle
+
+### Fish Speech as v1
+
+Pros:
+
+- excellent official quality/cloning story
+- strongest Rust-native path among the newer candidates because `fish-speech.rs` exists
+- streaming and `.wav` are both already exposed in the Rust server
+
+Cons:
+
+- weight license is non-commercial
+- the Rust engine is third-party and currently targets Fish 1.5 and below, while the official project has moved to S2 Pro
+- official flagship performance story is GPU/SGLang-oriented, not the simple CPU-first path Motlie wants for v1
+
+Decision:
+
+- technically compelling, but not suitable as the first curated Motlie bundle under the current product and licensing constraints
+
 ### XTTS v2 as v1
 
 Pros:
@@ -728,7 +808,7 @@ Cons:
 
 Decision:
 
-- keep as the leading phase-2 cloning candidate, not v1
+- keep as a secondary cloning candidate behind Qwen3-TTS, not v1
 
 ### Kokoro as v1
 
@@ -765,6 +845,25 @@ Cons:
 Decision:
 
 - not the best use of the first TTS integration slot
+
+### Chroma or PersonaPlex as v1
+
+Pros:
+
+- both are modern, low-latency voice-interaction systems
+- both support conditioning/persona control beyond plain TTS
+- PersonaPlex in particular is a plausible NVIDIA GPU research target
+
+Cons:
+
+- both are fundamentally speech-to-speech conversational models, not text-to-speech bundles
+- both are much larger than the CPU-first TTS candidates
+- both use Python/custom runtime stacks far outside Motlie's current backend substrate
+- both are gated models, which is awkward for a curated fetch/download workflow
+
+Decision:
+
+- out of scope for the first TTS design; reconsider later as separate duplex voice-agent work
 
 ## Testing Scope for PLAN
 
@@ -813,3 +912,19 @@ PLAN should make the following verification concrete:
   https://github.com/hexgrad/kokoro
 - Kokoro-82M model tree:
   https://huggingface.co/hexgrad/Kokoro-82M
+- Fish Speech official repository:
+  https://github.com/fishaudio/fish-speech
+- Fish Speech 1.5 model card:
+  https://huggingface.co/fishaudio/fish-speech-1.5
+- `fish-speech.rs` Rust runtime:
+  https://github.com/EndlessReform/fish-speech.rs
+- Qwen3-TTS official repository:
+  https://github.com/QwenLM/Qwen3-TTS
+- Qwen3-TTS 0.6B Base model card:
+  https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base
+- FlashLabs Chroma model card:
+  https://huggingface.co/FlashLabs/Chroma-4B
+- PersonaPlex official repository:
+  https://github.com/NVIDIA/personaplex
+- PersonaPlex model card:
+  https://huggingface.co/nvidia/personaplex-7b-v1
