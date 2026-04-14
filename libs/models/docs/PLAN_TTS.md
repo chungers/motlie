@@ -1,0 +1,256 @@
+# TTS Model Support - Implementation Plan
+
+## Change Log
+
+| Date | Who | Summary |
+|------|-----|---------|
+| 2026-04-13 | @codex-tts | Initial PLAN for the first TTS vertical slice. Centers on one Piper ONNX voice, streamed PCM output, and a `.wav` end-to-end example from artifact download through playback-ready output. |
+
+Derived from [DESIGN_TTS.md](./DESIGN_TTS.md). This PLAN is intentionally vertical-slice oriented: one curated model, one runtime family, one streamed PCM output contract, and one deterministic example path from artifact download to emitted speech.
+
+---
+
+## Phase 1: Extend the Core Model Contract
+
+Add TTS to `libs/model` without disturbing the existing bundle lifecycle shape.
+
+### 1.1 - Capability and metadata additions
+
+- [ ] Add `CapabilityKind::Speech` and `CapabilityDescriptor::speech_stream()`.
+  DESIGN reference: `Core Contract Changes in libs/model`
+- [ ] Add `BundleFamily::Piper`.
+  DESIGN reference: `Core Contract Changes in libs/model`
+- [ ] Add `EvalTrack::Speech` and map it from the new capability descriptor.
+  DESIGN reference: `Core Contract Changes in libs/model`
+- [ ] Add unit tests for capability discovery and eval-track projection.
+  DESIGN reference: `Testing Scope for PLAN`
+
+### 1.2 - Streaming speech traits and types
+
+- [ ] Add `PcmEncoding`, `AudioSpec`, `PcmChunk`, `SpeechParams`, `VoiceConditioning`, and `SpeechRequest`.
+  DESIGN reference: `Streaming PCM API Contract`
+- [ ] Add `SpeechModel` and `SpeechStream`.
+  DESIGN reference: `Streaming PCM API Contract`, `Core Contract Changes in libs/model`
+- [ ] Extend `BundleHandle` with `speech() -> Result<&dyn SpeechModel, ModelError>`.
+  DESIGN reference: `Core Contract Changes in libs/model`, `Migration and Compatibility Strategy`
+- [ ] Document and test the stream ownership model: `SpeechModel` is shareable, `SpeechStream` is `Send` and stateful, but not `Sync`.
+  DESIGN reference: `Streaming PCM API Contract`
+- [ ] Define and test the edge-case semantics for:
+  empty text,
+  repeated `next_chunk()` after exhaustion,
+  `finish()` ownership,
+  final `end_of_stream` chunk behavior.
+  DESIGN reference: `Streaming PCM API Contract`
+
+### 1.3 - Brownfield backend migration
+
+- [ ] Update existing backends in `mistral` and `llama_cpp` so `speech()` returns `UnsupportedCapability(Speech)`.
+  DESIGN reference: `Migration and Compatibility Strategy`
+- [ ] Touch the exact in-tree files required by the `BundleHandle` trait expansion:
+  `libs/model/src/lib.rs`,
+  `libs/model/src/eval.rs`,
+  `libs/model/backends/mistral/src/text.rs`,
+  `libs/model/backends/mistral/src/multimodal.rs`,
+  `libs/model/backends/mistral/src/embeddings.rs`,
+  `libs/model/backends/llama_cpp/src/text.rs`.
+  DESIGN reference: `Migration and Compatibility Strategy`
+- [ ] Add regression tests proving existing bundles still reject TTS cleanly.
+  DESIGN reference: `Testing Scope for PLAN`
+
+## Phase 2: Add a Generic Piper Backend Crate
+
+Introduce a new backend crate that follows the same adapter-backed shape as the existing inference backends.
+
+### 2.1 - Crate scaffolding and backend enums
+
+- [ ] Add `libs/model/backends/piper/Cargo.toml` and wire it into the workspace.
+  DESIGN reference: `Generic Backend Design`
+- [ ] Reuse `BackendKind::Ort` and `CheckpointFormat::Onnx`; do not add a new runtime kind for the first slice.
+  DESIGN reference: `Generic Backend Design`, `Distribution Considerations`
+- [ ] Add crate exports for `PiperSpeechAdapter`, `PiperSpeechBundle`, and `PiperSpeechSpec`.
+  DESIGN reference: `Generic Backend Design`
+
+### 2.2 - Backend startup and artifact policy
+
+- [ ] Validate that the resolved checkpoint path ends in `.onnx` and that the adjacent `.onnx.json` sidecar exists.
+  DESIGN reference: `Generic Backend Design`
+- [ ] Parse the sidecar config into backend-local structs with explicit error context.
+  DESIGN reference: `Generic Backend Design`
+- [ ] Keep provider-specific cache-layout logic out of this crate; consume only a resolved local checkpoint path from `libs/models`.
+  DESIGN reference: `Curated Bundle Design in libs/models`
+- [ ] Add unit tests for missing-artifact, missing-sidecar, and wrong-format failures.
+  DESIGN reference: `Testing Scope for PLAN`
+
+### 2.3 - Text normalization and phonemization
+
+- [ ] Implement backend-local text normalization suitable for the curated first voice.
+  DESIGN reference: `Generic Backend Design`
+- [ ] Implement phonemization in-process; do not shell out to a `piper` binary for the production backend.
+  DESIGN reference: `Generic Backend Design`
+- [ ] Add tests for common ASCII text, punctuation, and empty-input handling.
+  DESIGN reference: `Testing Scope for PLAN`
+
+### 2.4 - Streamed PCM generation
+
+- [ ] Implement `SpeechModel::open_stream()` over the Piper backend.
+  DESIGN reference: `Streaming PCM API Contract`, `Generic Backend Design`
+- [ ] Expose backend audio-format metadata through `AudioSpec`.
+  DESIGN reference: `Streaming PCM API Contract`
+- [ ] Convert backend inference output into monotonic `PcmChunk` emission.
+  DESIGN reference: `Streaming PCM API Contract`
+- [ ] Emit the final chunk with `end_of_stream = true`, then `Ok(None)` on further reads.
+  DESIGN reference: `Streaming PCM API Contract`
+- [ ] Add backend tests for:
+  monotonic chunk sequencing,
+  non-empty output for normal text,
+  final-chunk semantics,
+  deterministic `.wav`-collectable output.
+  DESIGN reference: `Testing Scope for PLAN`
+
+### 2.5 - CPU and CUDA feature support
+
+- [ ] Add a backend-local `cuda` Cargo feature that enables the ORT CUDA provider.
+  DESIGN reference: `Generic Backend Design`, `Feature Flag Design`
+- [ ] Keep CPU as the default startup mode.
+  DESIGN reference: `Recommended Vertical Slice`
+- [ ] Add at least one non-CUDA and one CUDA-build compilation check to local verification guidance or CI.
+  DESIGN reference: `Feature Flag Design`, `Testing Scope for PLAN`
+
+## Phase 3: Curated Bundle and Catalog Integration in `libs/models`
+
+Add the first curated TTS bundle using the same registration and selector patterns as the current model families.
+
+### 3.1 - `tts/` namespace and direct enum
+
+- [ ] Add `src/tts/mod.rs` with `TtsModels` and feature-gated `PiperEnUsLjspeechMedium`.
+  DESIGN reference: `Curated Bundle Design in libs/models`
+- [ ] Add `ModelsError::UnknownTtsModel`.
+  DESIGN reference: `Curated Bundle Design in libs/models`
+- [ ] Add `ModelSelector::Tts(TtsModels)` with `tts:piper/en_us_ljspeech_medium` parsing.
+  DESIGN reference: `Curated Bundle Design in libs/models`
+- [ ] Add selector round-trip and disabled-feature `ModelUnavailable` tests.
+  DESIGN reference: `Testing Scope for PLAN`
+
+### 3.2 - Curated bundle module
+
+- [ ] Add `src/tts/piper_en_us_ljspeech_medium.rs` with `SELECTOR`, `identity()`, `checkpoint()`, `descriptor()`, `bundle()`, and `register()`.
+  DESIGN reference: `Curated Bundle Design in libs/models`
+- [ ] Register the curated model variant through `adapter_backed_bundle()` and `register_model_variant()`.
+  DESIGN reference: `Architecture`, `Curated Bundle Design in libs/models`
+- [ ] Use repo-relative exact artifact rules for:
+  `en/en_US/ljspeech/medium/en_US-ljspeech-medium.onnx`,
+  `en/en_US/ljspeech/medium/en_US-ljspeech-medium.onnx.json`.
+  DESIGN reference: `Curated Bundle Design in libs/models`
+- [ ] Add a local checkpoint resolver that returns the concrete `.onnx` file path under the downloaded HF snapshot.
+  DESIGN reference: `Curated Bundle Design in libs/models`
+- [ ] Add descriptor-reviewability tests and local-artifact resolution tests.
+  DESIGN reference: `Testing Scope for PLAN`
+
+### 3.3 - Feature flags
+
+- [ ] Add `model-piper-en-us-ljspeech-medium = ["dep:motlie-model-piper"]`.
+  DESIGN reference: `Feature Flag Design`
+- [ ] Add `piper-cuda = ["dep:motlie-model-piper", "motlie-model-piper/cuda"]`.
+  DESIGN reference: `Feature Flag Design`
+- [ ] Keep the TTS bundle out of `default` features in the first implementation PR.
+  DESIGN reference: `Feature Flag Design`
+- [ ] Add `Catalog::with_defaults()` registration only when `model-piper-en-us-ljspeech-medium` is compiled in.
+  DESIGN reference: `Curated Bundle Design in libs/models`
+
+## Phase 4: Vertical Slice Output Adapters and Example
+
+Prove the first implementation slice through the simplest end-to-end caller path: synthesize text and write a `.wav` file while preserving the same streamed PCM contract for future sinks.
+
+### 4.1 - `.wav` example
+
+- [ ] Add `examples/v0.5/main.rs` as the first TTS example binary.
+  DESIGN reference: `API Sketch`, `Output Adapter Boundary`
+- [ ] Support `--text <value>` and `--wav <path>` by opening a speech stream and collecting PCM into a `.wav` sink.
+  DESIGN reference: `Streaming PCM API Contract`, `Output Adapter Boundary`
+- [ ] Document expected preconditions and output in `examples/v0.5/README.md`.
+  DESIGN reference: `API Sketch`
+
+### 4.2 - Local playback sink
+
+- [ ] Keep PulseAudio/ALSA playback out of the first implementation PR unless it is nearly free once the PCM stream exists.
+  DESIGN reference: `Output Adapter Boundary`
+- [ ] If included, implement it as an example-layer sink, not as part of the backend crate.
+  DESIGN reference: `Output Adapter Boundary`
+
+### 4.3 - Telephony/websocket adapters
+
+- [ ] Defer Telnyx/Twilio websocket or RTP adapters to a follow-up PR after the `.wav` path is stable.
+  DESIGN reference: `Output Adapter Boundary`
+- [ ] In the follow-up PR, keep resampling, codec conversion, and transport framing in the adapter layer outside the core model crates.
+  DESIGN reference: `Output Adapter Boundary`
+- [ ] Document a simple internal contract for follow-up adapters:
+  consume `AudioSpec` + `PcmChunk`,
+  own resampling/codec/framing,
+  own session lifecycle.
+  DESIGN reference: `Output Adapter Boundary`
+
+### 4.4 - Example feature wiring
+
+- [ ] Add a `models_v0_5` example target with `required-features = ["model-piper-en-us-ljspeech-medium"]`.
+  DESIGN reference: `Feature Flag Design`
+- [ ] Ensure the example builds both with default CPU features and, where available, with `piper-cuda`.
+  DESIGN reference: `Feature Flag Design`
+
+## Phase 5: End-to-End Validation
+
+Land the first curated TTS slice with concrete verification commands and env-gated runtime checks.
+
+### 5.1 - Required build and test commands
+
+- [ ] `cargo check -p motlie-model`
+  DESIGN reference: `Testing Scope for PLAN`
+- [ ] `cargo test -p motlie-model --lib`
+  DESIGN reference: `Testing Scope for PLAN`
+- [ ] `cargo check -p motlie-model-piper`
+  DESIGN reference: `Testing Scope for PLAN`
+- [ ] `cargo test -p motlie-model-piper --lib`
+  DESIGN reference: `Testing Scope for PLAN`
+- [ ] `cargo check -p motlie-models --no-default-features --features "model-piper-en-us-ljspeech-medium"`
+  DESIGN reference: `Testing Scope for PLAN`
+- [ ] `cargo test -p motlie-models --lib --no-default-features --features "model-piper-en-us-ljspeech-medium"`
+  DESIGN reference: `Testing Scope for PLAN`
+- [ ] `cargo build -p motlie-models --example models_v0_5 --no-default-features --features "model-piper-en-us-ljspeech-medium"`
+  DESIGN reference: `Testing Scope for PLAN`
+
+### 5.2 - Env-gated runtime checks
+
+- [ ] Add an env-gated test that starts the curated bundle from pre-downloaded artifacts and synthesizes a known short sentence.
+  DESIGN reference: `Testing Scope for PLAN`
+- [ ] Add an env-gated example run that verifies chunked output can be collected into a valid `.wav` file.
+  DESIGN reference: `Testing Scope for PLAN`, `Output Adapter Boundary`
+- [ ] Record the expected artifact env var names and directory layout in the example README.
+  DESIGN reference: `Curated Bundle Design in libs/models`
+
+## Phase 6: Follow-On Breadth After the Vertical Slice
+
+Only broaden after the Piper slice is stable and the speech contract has held up under real usage.
+
+### 6.1 - Higher-value follow-ons
+
+- [ ] Add a second curated Piper voice, ideally one that exercises speaker selection or a different sample rate.
+  DESIGN reference: `Recommended Vertical Slice`, `Distribution Considerations`
+- [ ] Evaluate Kokoro as the first higher-quality CPU-oriented alternate backend family if Piper maintenance risk becomes material.
+  DESIGN reference: `Alternatives Considered`
+- [ ] Evaluate XTTS v2 as the first cloning-focused backend family if the product later prioritizes reference-audio conditioning over CPU-first simplicity.
+  DESIGN reference: `Alternatives Considered`
+
+### 6.2 - Doc synchronization
+
+- [ ] Update `libs/model/docs/DESIGN.md` and `libs/model/docs/PLAN.md` if the implemented speech contract differs materially from this proposal.
+  DESIGN reference: `Migration and Compatibility Strategy`
+- [ ] Update `libs/models/docs/DESIGN.md`, `PLAN.md`, and `API.md` once the TTS slice is implemented.
+  DESIGN reference: `Curated Bundle Design in libs/models`, `API Sketch`
+- [ ] Add changelog entries with `@codex-tts` and the implementation date in each modified doc.
+  DESIGN reference: `Migration and Compatibility Strategy`
+
+## Phase 7: Commit and PR Hygiene
+
+- [ ] Keep commits scoped to the TTS contract, backend, curated bundle, examples, and related docs.
+- [ ] Do not stage harness files such as `AGENTS.md`.
+- [ ] Push the feature branch only after the relevant checks for the current patch set pass.
+- [ ] Summarize any design-vs-implementation deltas clearly in the PR body.
