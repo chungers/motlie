@@ -3521,6 +3521,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "hmac-sha256"
+version = "1.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec9d92d097f4749b64e8cc33d924d9f40a2d4eb91402b458014b781f5733d60f"
+
+[[package]]
 name = "home"
 version = "0.5.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4198,6 +4204,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "kaldi-native-fbank"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f297ca19f4c2069ccc7969cba1d4c496b46c0b88f6ceddb88a9ae3200a6cf506"
+dependencies = [
+ "anyhow",
+ "log",
+ "rand 0.8.5",
+ "rand_distr 0.4.3",
+ "realfft",
+ "rustfft",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "kasuari"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4536,6 +4557,12 @@ name = "lz4_flex"
 version = "0.11.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
+
+[[package]]
+name = "lzma-rust2"
+version = "0.15.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1670343e58806300d87950e3401e820b519b9384281bbabfb15e3636689ffd69"
 
 [[package]]
 name = "mac"
@@ -5182,6 +5209,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "motlie-model-sherpa-onnx"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "kaldi-native-fbank",
+ "motlie-model",
+ "ndarray",
+ "ort",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "motlie-model-whisper-cpp"
 version = "0.1.0"
 dependencies = [
@@ -5203,6 +5243,7 @@ dependencies = [
  "motlie-model",
  "motlie-model-llama-cpp",
  "motlie-model-mistral",
+ "motlie-model-sherpa-onnx",
  "motlie-model-whisper-cpp",
  "sysinfo",
  "thiserror 2.0.18",
@@ -5824,6 +5865,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7d950ca161dc355eaf28f82b11345ed76c6e1f6eb1f4f4479e0323b9e2fbd0e"
 dependencies = [
  "num-traits",
+]
+
+[[package]]
+name = "ort"
+version = "2.0.0-rc.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7de3af33d24a745ffb8fab904b13478438d1cd52868e6f17735ef6e1f8bf133"
+dependencies = [
+ "ndarray",
+ "ort-sys",
+ "smallvec 1.15.1",
+ "tracing",
+ "ureq 3.3.0",
+]
+
+[[package]]
+name = "ort-sys"
+version = "2.0.0-rc.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7b497d21a8b6fbb4b5a544f8fadb77e801a09ae0add9e411d31c6f89e3c1e90"
+dependencies = [
+ "hmac-sha256",
+ "lzma-rust2",
+ "ureq 3.3.0",
 ]
 
 [[package]]
