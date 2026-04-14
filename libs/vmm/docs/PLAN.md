@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-13 | @codex-vz | Add the parallel Apple Vz support track via `PLAN_XBACKENDS.md` / `DESIGN_XBACKENDS.md`: `motlie-vnet` is now treated as core `vmm` infrastructure, so cross-backend work is sequenced as `#170` Vz egress PoC first, `#169` CH-safe `vnet` refactor second, `#133` policy engine third, and full `backend::vz` integration last |
 | 2026-04-08 | @codex | Address PR 140 review items: remove the dead `VmBackend` / `BackendSet` transitional layer, tighten shutdown/readiness/terminal correctness, and update the plan language to match the direct enum-dispatch runtime that is now in code |
 | 2026-04-08 | @codex | Add a switchable harness terminal backend, make `shadow-terminal` the default PTY/TUI renderer with `vt100` as an explicit fallback, and record that GIF/PNG/movie output stays deferred outside `v1.4` |
 | 2026-04-08 | @codex | Add asciicast export to the PTY artifact plan and standardize the scope boundary: NDJSON transcript + VTE screen JSON remain canonical, asciicast is the portable replay export, and PNG/GIF/movie generation is explicitly deferred out of `v1.4` scope |
@@ -58,6 +59,19 @@ What is still missing for a polished, reusable harness:
 - automatic guest provisioning when a new SSH principal appears
 - an explicit programmatic harness layer that later phases can target directly
 - a practical single-binary distribution prototype for the curated guest image
+
+Parallel cross-backend planning source of truth:
+
+- `libs/vmm/docs/DESIGN_XBACKENDS.md`
+- `libs/vmm/docs/PLAN_XBACKENDS.md`
+
+That track should run in parallel with the stable `v1.4` CH path rather than
+forcing immediate `vmm` example forks. The current order is:
+
+1. `#170` Vz egress PoC in `libs/vnet/vz` / `libs/vnet/examples/v1.25`
+2. `#169` `motlie-vnet` reusable-core / CH-adapter refactor
+3. `#133` policy engine
+4. future full `backend::vz` vertical slice in `libs/vmm`
 
 ## Objective
 

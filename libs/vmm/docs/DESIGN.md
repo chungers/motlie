@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-13 | @codex-vz | Add `DESIGN_XBACKENDS.md` / `PLAN_XBACKENDS.md` as the cross-backend infrastructure track for `libs/vmm`: treat `motlie-vnet` as core VMM infrastructure, record the no-host-config-drift/all-userspace/ephemeral-lifetime constraints, and sequence Apple Vz support as `#170` PoC first, `#169` CH-safe `vnet` refactor second, `#133` policy engine third, and full `backend::vz` integration last |
 | 2026-04-08 | @codex | Address PR 140 review drift: remove the dead `VmBackend` / `BackendSet` transitional story from the design, update `GuestSpec` / `PreparedGuest` / shutdown snippets to match code, and record the typed `OverlaySize` plus namespace-sensitive socket-path allocation details |
 | 2026-04-08 | @codex | Make the harness terminal-state engine switchable, adopt `shadow-terminal` as the default high-fidelity backend for PTY/TUI validation, keep `vt100` as an explicit fallback backend, and keep PNG/GIF/movie generation out of scope for `v1.4` |
 | 2026-04-08 | @codex | Add the PTY export design decision: keep NDJSON transcript plus VTE screen JSON as canonical validation artifacts, add asciicast export for portable replay/interchange, and explicitly defer PNG/GIF/movie generation as out of scope for `v1.4` |
@@ -60,6 +61,22 @@ The active next step is `v1.4`:
   library-owned allocation and lifecycle services
 - add a reporting layer that can answer both host-visible and guest-visible
   health/metrics questions during automated runs
+
+Parallel cross-backend track:
+
+- Apple Vz support now has an explicit parallel infrastructure track under:
+  - `libs/vmm/docs/DESIGN_XBACKENDS.md`
+  - `libs/vmm/docs/PLAN_XBACKENDS.md`
+- that track exists because `motlie-vnet` is now part of real `vmm`
+  infrastructure, and future backend work must preserve:
+  - no persistent host network configuration changes
+  - all userspace
+  - runtime networking state that is ephemeral during process lifetime
+- current execution order:
+  1. `#170` Vz egress PoC in `libs/vnet/vz` / `libs/vnet/examples/v1.25`
+  2. `#169` `motlie-vnet` reusable-core / CH-adapter refactor
+  3. `#133` policy engine
+  4. full `backend::vz` vertical slice in `libs/vmm`
 
 Current `v1.4` implementation status:
 
