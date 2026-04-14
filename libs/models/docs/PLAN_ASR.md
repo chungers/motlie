@@ -4,10 +4,11 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-14 | @codex-asr | Added the concrete Phase 2 `sherpa-onnx` follow-on slice to keep the PLAN aligned with the implemented backend crate, curated bundle, feature flags, explicit ONNX Runtime provisioning, and `models_v0_6` example. |
 | 2026-04-13 | @codex-asr | Addressed R1 review feedback by adding explicit tasks for the stream-scoped `AudioSpec`, `Option<TranscriptionUpdate>`, runtime metrics, exact brownfield file touch points, `QuantizationSupport::none()`, and the websocket deferral details for the first implementation slice. |
 | 2026-04-12 | @codex-asr | Initial PLAN for the first ASR vertical slice. Covers the brownfield contract extension in `libs/model`, a new `whisper.cpp` backend crate, the curated `whisper_base_en` bundle in `libs/models`, and example validation for `.wav` and websocket-fed PCM. |
 
-Derived from [DESIGN_ASR.md](./DESIGN_ASR.md). This PLAN is intentionally vertical-slice oriented: one curated model, one backend family, one streaming transcription contract, and one example path from artifact download to emitted transcript text.
+Derived from [DESIGN_ASR.md](./DESIGN_ASR.md). This PLAN is intentionally vertical-slice oriented: one shared streaming transcription contract, an initial `whisper.cpp` slice, and a follow-on `sherpa-onnx` slice with its own curated model and example path.
 
 ---
 
@@ -219,6 +220,51 @@ Land the first curated ASR slice with concrete verification commands and env-gat
   DESIGN reference: `Testing Scope for PLAN`, `Streaming PCM API Contract`
 - [ ] Record the expected artifact env var name and directory layout in the example README.
   DESIGN reference: `Curated Bundle Design in libs/models`
+
+## Phase 5B: `sherpa-onnx` Follow-On Slice
+
+Track the true-streaming ONNX backend as the second ASR slice on top of the same contract surface.
+
+### 5B.1 - Backend crate and runtime
+
+- [x] Add `libs/model/backends/sherpa_onnx/Cargo.toml` and wire it into the workspace.
+  DESIGN reference: `Generic Backend Design`
+- [x] Add `BackendKind::SherpaOnnx` and use `CheckpointFormat::Onnx` for the curated streaming bundle.
+  DESIGN reference: `Generic Backend Design`
+- [x] Implement the streaming transducer runtime with persistent stream state and incremental decode over `ort`.
+  DESIGN reference: `Recommended Vertical Slice`, `Generic Backend Design`
+- [x] Keep ONNX Runtime provisioning explicit by avoiding `ort` build-time binary download; require ONNX Runtime through `ORT_LIB_PATH`, `pkg-config`, or another explicit system installation path.
+  DESIGN reference: `Generic Backend Design`
+- [x] Reuse the existing `MOTLIE_MODEL_FORCE_CPU` convention as the runtime escape hatch when the backend is compiled with CUDA support.
+  DESIGN reference: `Generic Backend Design`, `Feature Flag Design`
+
+### 5B.2 - Curated bundle, flags, and example
+
+- [x] Add the curated `sherpa_onnx_streaming_zipformer_en` bundle under `libs/models/src/asr/`.
+  DESIGN reference: `Phase 2 Extension: sherpa-onnx`, `Curated Bundle Design in libs/models`
+- [x] Add `model-sherpa-onnx-streaming` and `sherpa-onnx-cuda` feature flags in `libs/models`.
+  DESIGN reference: `Feature Flag Design`
+- [x] Add the `models_v0_6` example demonstrating `.wav` input over the shared streaming PCM contract.
+  DESIGN reference: `Phase 2 Extension: sherpa-onnx`, `API Sketch`
+- [x] Document ONNX Runtime and artifact preconditions in the example README.
+  DESIGN reference: `Phase 2 Extension: sherpa-onnx`, `Testing Scope for PLAN`
+
+### 5B.3 - Verification commands
+
+- [x] `cargo check -p motlie-model-sherpa-onnx`
+  DESIGN reference: `Testing Scope for PLAN`
+- [x] `cargo test -p motlie-model-sherpa-onnx --lib`
+  DESIGN reference: `Testing Scope for PLAN`
+- [x] `cargo clippy -p motlie-model-sherpa-onnx --all-targets -- -D warnings`
+  DESIGN reference: `Testing Scope for PLAN`
+- [x] `cargo check -p motlie-models --no-default-features --features "model-sherpa-onnx-streaming"`
+  DESIGN reference: `Testing Scope for PLAN`
+- [x] `cargo test -p motlie-models --lib --no-default-features --features "model-sherpa-onnx-streaming"`
+  DESIGN reference: `Testing Scope for PLAN`
+- [x] `cargo clippy -p motlie-models --lib --example models_v0_6 --no-default-features --features "model-sherpa-onnx-streaming" -- -D warnings`
+  DESIGN reference: `Testing Scope for PLAN`
+- [x] `cargo build -p motlie-models --example models_v0_6 --no-default-features --features "model-sherpa-onnx-streaming"`
+  DESIGN reference: `Testing Scope for PLAN`
 
 ## Phase 6: Brownfield Cleanup and Follow-Through
 

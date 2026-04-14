@@ -6,10 +6,11 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-04-14 | @codex-asr: Documented the implemented Phase 2 `sherpa-onnx` backend slice, including explicit ONNX Runtime provisioning, curated bundle wiring, and feature-flag status alongside the original `whisper.cpp` recommendation. | Overview, Research Summary, Recommended Vertical Slice, Generic Backend Design, Feature Flag Design, Alternatives Considered |
 | 2026-04-13 | @codex-asr: Addressed R1 review feedback by stream-scoping `AudioSpec`, changing `push_chunk()` to return `Option`, documenting `Send`/not-`Sync` stream ownership, making quantization explicit, tightening edge-case semantics, and narrowing the first implementation slice to the `.wav` path. | Core Contract Changes in `libs/model`, Generic Backend Design, Curated Bundle Design in `libs/models`, Streaming PCM API Contract, Migration and Compatibility Strategy, API Sketch, Testing Scope for PLAN |
 | 2026-04-12 | @codex-asr: Initial brownfield design for a voice-to-text (ASR) vertical slice in the Motlie model stack. Recommends a `whisper.cpp` backend with a curated `whisper-base.en` bundle, documents the streaming PCM contract, and evaluates `faster-whisper` and streaming ONNX alternatives. | All |
 
-This document defines the design for adding voice-to-text transcription to the existing `libs/model` and `libs/models` architecture. The design is intentionally narrow: one end-to-end vertical slice from curated artifact download to transcription output, with the API shaped around streaming PCM chunks so both `.wav` files and websocket audio streams map to the same contract.
+This document defines the design for adding voice-to-text transcription to the existing `libs/model` and `libs/models` architecture. The design is intentionally narrow: one end-to-end vertical slice from curated artifact download to transcription output, with the API shaped around streaming PCM chunks so both `.wav` files and websocket audio streams map to the same contract. The current brownfield plan now has two concrete backend slices on that shared contract: the original `whisper.cpp` rollout and the implemented Phase 2 `sherpa-onnx` streaming backend.
 
 This is brownfield product work. Motlie already has a stable contract crate, backend crates, curated bundle registration, and feature-gated selector patterns. The ASR addition must extend those seams additively rather than creating a parallel subsystem.
 
@@ -19,6 +20,7 @@ This is brownfield product work. Motlie already has a stable contract crate, bac
 - [Goals and Non-Goals](#goals-and-non-goals)
 - [Research Summary](#research-summary)
 - [Recommended Vertical Slice](#recommended-vertical-slice)
+- [Phase 2 Extension: `sherpa-onnx`](#phase-2-extension-sherpa-onnx)
 - [Architecture](#architecture)
 - [Core Contract Changes in `libs/model`](#core-contract-changes-in-libsmodel)
 - [Generic Backend Design](#generic-backend-design)
@@ -53,16 +55,18 @@ The key design constraint is that `.wav` files and websocket streams are source 
 
 ### Solution
 
-Add a new ASR capability to `libs/model`, implement a new generic `whisper.cpp` backend crate under `libs/model/backends/`, and expose the first curated ASR bundle from `libs/models` as `whisper-base.en`.
+Add a new ASR capability to `libs/model`, implement generic ASR backend crates under `libs/model/backends/`, and expose curated ASR bundles from `libs/models`.
 
-The recommended first slice is:
+The rollout is:
 
 1. `libs/model`
    Add transcription capability traits and streaming PCM request/response types.
 2. `libs/model/backends/whisper_cpp`
-   Provide a generic backend adapter and bundle implementation over `whisper.cpp`.
-3. `libs/models`
-   Add an `asr/` namespace with one curated bundle file, one direct enum family, one selector family, and bundle-local artifact resolution and feature gating.
+   Provide the CPU-first Phase 1 backend adapter and bundle implementation over `whisper.cpp`.
+3. `libs/model/backends/sherpa_onnx`
+   Provide the true-streaming Phase 2 backend adapter and bundle implementation over ONNX Runtime.
+4. `libs/models`
+   Add an `asr/` namespace with curated bundle files, one direct enum family, one selector family, and bundle-local artifact resolution and feature gating.
 
 This keeps the existing layering intact:
 
@@ -100,7 +104,7 @@ This keeps the existing layering intact:
 |-----------|-------------------------|---------|----------|----------------------|---------------------|----------|
 | `whisper.cpp` + Whisper | Good. Streaming is implemented as repeated decode over rolling PCM windows, with realtime and VAD examples upstream. | Good for `tiny/base/small`; upstream is explicitly CPU-capable and memory requirements are clear. | Good. Upstream supports NVIDIA GPU via CUDA and cuBLAS. | Strong. `whisper.cpp` exposes a C API and upstream lists `whisper-rs` bindings. | Strong. Single-file `ggml` model artifacts can be curated with exact include rules. | Recommended for v1 |
 | `faster-whisper` + Distil-Whisper / Whisper | Good for service-style streaming, but not as a native Rust backend. Real-time use is typically built around higher-level Python services. | Very good, especially with int8 CPU. | Very good. Benchmarks are strong on RTX-class GPUs. | Weak-to-medium. Best-supported path is Python/CTranslate2 rather than a Motlie-native Rust backend crate. | Medium. Converted CTranslate2 directories are manageable but less aligned with current backend patterns. | Keep as a performance reference, not v1 |
-| Streaming ONNX models via `sherpa-onnx` / Moonshine / Zipformer | Excellent. Streaming, websocket, microphone, and Rust bindings already exist upstream. | Very good, especially for streaming-focused small models. | Good through ONNX Runtime providers. | Medium. Strong runtime fit, but model/runtime surface is more specialized and multi-file. | Medium. Fits `CheckpointFormat::Onnx`, but curated artifact sets are larger and runtime behavior is less Whisper-compatible. | Phase 2 candidate |
+| Streaming ONNX models via `sherpa-onnx` / Moonshine / Zipformer | Excellent. Streaming, websocket, microphone, and Rust bindings already exist upstream. | Very good, especially for streaming-focused small models. | Good through ONNX Runtime providers. | Medium. Strong runtime fit, but model/runtime surface is more specialized and multi-file. | Medium. Fits `CheckpointFormat::Onnx`, but curated artifact sets are larger and runtime behavior is less Whisper-compatible. | Implemented in Phase 2 |
 
 ### Why Whisper Is Still the Best First Slice
 
@@ -162,6 +166,19 @@ Recommended first bundle:
 - ONNX-native streaming bundles
 - diarization and speaker labels
 
+### Phase 2 Extension: `sherpa-onnx`
+
+The follow-on backend slice uses the same `TranscriptionModel` and `TranscriptionStream` contract but swaps the runtime strategy:
+
+- logical model: streaming Zipformer via `sherpa-onnx`
+- backend/runtime: `ort` with explicit operator-provided ONNX Runtime linkage and persistent stream state
+- curated artifact set: encoder, decoder, joiner, and `tokens.txt`
+- capability surface: streaming transcription only
+- primary deployment target: Linux and macOS CPU
+- optional acceleration target: CUDA-enabled builds via ONNX Runtime execution providers
+
+This second slice exists because it is a better fit for true incremental decode than the rolling-window `whisper.cpp` implementation. It does not replace the Phase 1 recommendation; it broadens the backend menu while keeping the stable PCM contract unchanged.
+
 ## Architecture
 
 ### Crate Layout
@@ -179,19 +196,27 @@ libs/model/backends/whisper_cpp/
     common.rs
     transcription.rs
 
+libs/model/backends/sherpa_onnx/
+  Cargo.toml
+  src/
+    lib.rs
+    common.rs
+    transcription.rs
+
 libs/models/
   src/
     asr/
       mod.rs
       whisper_base_en.rs
+      sherpa_onnx_streaming_en.rs
 ```
 
 ### High-Level Data Flow
 
-1. Caller chooses the curated selector `asr:openai/whisper_base_en` or the direct enum `AsrModels::WhisperBaseEn`.
+1. Caller chooses a curated selector such as `asr:openai/whisper_base_en` or `asr:sherpa-onnx/streaming_zipformer_en`, or the corresponding `AsrModels` enum.
 2. `libs/models` resolves the curated descriptor and artifact rules.
 3. On `start()`, the bundle resolves local artifacts or downloads them through the existing curated artifact path.
-4. The curated bundle passes a resolved local checkpoint path to the generic `whisper.cpp` backend adapter.
+4. The curated bundle passes resolved local artifacts to the selected backend adapter.
 5. The backend starts a loaded bundle handle that exposes the ASR capability.
 6. Caller opens a transcription stream and pushes PCM chunks.
 7. The backend emits partial/final transcript updates.
@@ -335,9 +360,9 @@ For the first curated bundle and the first backend adapter, quantization should 
 
 ## Generic Backend Design
 
-### New Backend Crate
+### New Backend Crates
 
-Add `libs/model/backends/whisper_cpp` with the same structure as the existing backend crates:
+Add ASR backend crates with the same structure as the existing backend crates:
 
 - backend-specific spec type
 - backend adapter implementing `BackendAdapter`
@@ -345,14 +370,18 @@ Add `libs/model/backends/whisper_cpp` with the same structure as the existing ba
 - loaded handle implementing `BundleHandle`
 - backend-local helper module for artifact policy, CPU/GPU selection, and streaming defaults
 
+The first concrete crate is `libs/model/backends/whisper_cpp`. The second concrete crate is `libs/model/backends/sherpa_onnx`.
+
 ### Backend Kind and Checkpoint Format
 
 Add:
 
 - `BackendKind::WhisperCpp`
+- `BackendKind::SherpaOnnx`
 - `CheckpointFormat::Ggml`
+- `CheckpointFormat::Onnx`
 
-This is an additive extension that matches the current enum-based backend and checkpoint design. The ASR slice should not overload `Gguf` or `Onnx` for a `ggml` Whisper artifact.
+This is an additive extension that matches the current enum-based backend and checkpoint design. The ASR slices should not overload `Gguf` for a `ggml` Whisper artifact or overload `Ort` for the `sherpa-onnx` backend-specific execution path.
 
 Current upstream verification:
 
@@ -404,6 +433,8 @@ Follow the current backend-local pattern:
 - CPU-only builds work without extra public API
 - CUDA support is enabled by Cargo feature on the backend crate
 - runtime still honors the existing `MOTLIE_MODEL_FORCE_CPU` convention where practical
+
+For the `sherpa-onnx` backend specifically, ONNX Runtime provisioning should be explicit. Do not enable `ort` build-time binary download inside the library crate. Require operators to provide ONNX Runtime through `ORT_LIB_PATH`, `pkg-config`, or another explicit system installation path, then layer the backend-local CUDA execution-provider selection on top of that runtime.
 
 This avoids expanding `StartOptions` in the first ASR slice. If multiple backends later need explicit accelerator selection, that can be added as a generic model-layer startup option.
 
@@ -552,7 +583,7 @@ Because `push_chunk()` returns `Option<TranscriptionUpdate>`, callers only handl
 
 ## Feature Flag Design
 
-### `libs/model/backends/whisper_cpp`
+### `libs/model/backends/*`
 
 Recommended features:
 
@@ -564,6 +595,8 @@ Optional later:
 - `openvino`
 - `metal`
 
+For the implemented backends, this maps to `whisper.cpp`'s `cuda` feature and `sherpa-onnx`'s `cuda` feature.
+
 ### `libs/models`
 
 Recommended features:
@@ -574,6 +607,11 @@ model-whisper-base-en = ["dep:motlie-model-whisper-cpp"]
 whisper-cpp-cuda = [
   "dep:motlie-model-whisper-cpp",
   "motlie-model-whisper-cpp/cuda",
+]
+model-sherpa-onnx-streaming = ["dep:motlie-model-sherpa-onnx"]
+sherpa-onnx-cuda = [
+  "dep:motlie-model-sherpa-onnx",
+  "motlie-model-sherpa-onnx/cuda",
 ]
 ```
 
@@ -726,7 +764,7 @@ Pros:
 
 - best fit for true low-latency streaming
 - good CPU story
-- aligns with existing `CheckpointFormat::Onnx` and `BackendKind::Ort`
+- aligns with `CheckpointFormat::Onnx` and the dedicated `BackendKind::SherpaOnnx`
 - upstream `sherpa-onnx` has Rust and websocket examples
 
 Cons:
@@ -737,7 +775,7 @@ Cons:
 - higher complexity for the first bundle than a single Whisper artifact
 
 Decision:
-Rejected for v1 but strongly recommended as the second ASR backend family once the generic transcription capability lands.
+Rejected for v1 but implemented as the second ASR backend family once the generic transcription capability landed.
 
 ### Alternative 3: Add a File-Oriented `transcribe_file()` API Instead of a Streaming Contract
 

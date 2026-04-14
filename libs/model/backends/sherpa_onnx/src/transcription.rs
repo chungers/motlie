@@ -7,6 +7,8 @@ use async_trait::async_trait;
 use kaldi_native_fbank::fbank::{FbankComputer, FbankOptions};
 use kaldi_native_fbank::mel::MelOptions;
 use kaldi_native_fbank::online::{FeatureComputer, OnlineFeature};
+#[cfg(feature = "cuda")]
+use motlie_model::metrics_runtime::should_force_cpu;
 use motlie_model::{
     AudioSpec, BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
     CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
@@ -14,13 +16,13 @@ use motlie_model::{
     PcmEncoding, QuantizationSupport, ResolvedCheckpoint, StartOptions, TranscriptSegment,
     TranscriptionModel, TranscriptionParams, TranscriptionStream, TranscriptionUpdate,
 };
-use ndarray::{ArrayViewD, Ix3};
+use ndarray::ArrayView3;
 use ort::session::{Session, SessionInputValue};
 use ort::value::{DynValue, Tensor};
 
 use crate::common::{
-    configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
-    resolve_onnx_artifacts, RuntimeMetricState, SherpaArtifactPaths, SherpaArtifactSpec,
+    RuntimeMetricState, SherpaArtifactPaths, SherpaArtifactSpec, configure_artifact_policy,
+    lock_metrics, observe_latency, observe_memory, resolve_onnx_artifacts,
 };
 
 const SHERPA_ONNX_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Onnx];
@@ -315,8 +317,8 @@ struct SherpaOnnxRuntime {
 struct ZipformerConfig {
     feature_dim: usize,
     context_size: usize,
-    chunk_size: usize,
-    chunk_shift: usize,
+    encoder_input_frames: usize,
+    decode_chunk_len: usize,
     frame_shift_ms: u64,
     unk_id: Option<i64>,
     state_layout: StateLayout,
@@ -324,11 +326,16 @@ struct ZipformerConfig {
 
 #[derive(Clone, Debug)]
 struct StateLayout {
-    encoder_dims: Vec<usize>,
-    attention_dims: Vec<usize>,
-    num_encoder_layers: Vec<usize>,
-    cnn_module_kernels: Vec<usize>,
-    left_context_len: Vec<usize>,
+    stacks: Vec<EncoderStackSpec>,
+}
+
+#[derive(Clone, Debug)]
+struct EncoderStackSpec {
+    encoder_dim: usize,
+    attention_dim: usize,
+    num_layers: usize,
+    cnn_module_kernel: usize,
+    left_context_len: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -429,12 +436,16 @@ fn build_session(model_path: &Path) -> Result<Session, ModelError> {
     })?;
 
     #[cfg(feature = "cuda")]
-    let builder = builder
-        .with_execution_providers([ort::ep::CUDA::default().build()])
-        .map_err(|err| ModelError::BackendInitialization {
-            backend: "sherpa-onnx",
-            message: format!("failed to configure CUDA execution provider: {err}"),
-        })?;
+    let builder = if should_force_cpu() {
+        builder
+    } else {
+        builder
+            .with_execution_providers([ort::ep::CUDA::default().build()])
+            .map_err(|err| ModelError::BackendInitialization {
+                backend: "sherpa-onnx",
+                message: format!("failed to configure CUDA execution provider: {err}"),
+            })?
+    };
 
     builder
         .commit_from_file(model_path)
@@ -462,29 +473,90 @@ impl ZipformerConfig {
                 message: format!("failed to inspect decoder metadata: {err}"),
             })?;
 
-        let state_layout = StateLayout {
-            encoder_dims: parse_i32_list(metadata_value(&encoder_meta, "encoder_dims")?)?,
-            attention_dims: parse_i32_list(metadata_value(&encoder_meta, "attention_dims")?)?,
-            num_encoder_layers: parse_i32_list(metadata_value(
-                &encoder_meta,
-                "num_encoder_layers",
-            )?)?,
-            cnn_module_kernels: parse_i32_list(metadata_value(
-                &encoder_meta,
-                "cnn_module_kernels",
-            )?)?,
-            left_context_len: parse_i32_list(metadata_value(&encoder_meta, "left_context_len")?)?,
-        };
+        let encoder_dims = parse_i32_list(metadata_value(&encoder_meta, "encoder_dims")?)?;
+        let attention_dims = parse_i32_list(metadata_value(&encoder_meta, "attention_dims")?)?;
+        let num_encoder_layers =
+            parse_i32_list(metadata_value(&encoder_meta, "num_encoder_layers")?)?;
+        let cnn_module_kernels =
+            parse_i32_list(metadata_value(&encoder_meta, "cnn_module_kernels")?)?;
+        let left_context_len = parse_i32_list(metadata_value(&encoder_meta, "left_context_len")?)?;
+        let state_layout = StateLayout::try_from_parts(
+            encoder_dims,
+            attention_dims,
+            num_encoder_layers,
+            cnn_module_kernels,
+            left_context_len,
+        )?;
 
         Ok(Self {
             feature_dim: 80,
             context_size: parse_i32_scalar(metadata_value(&decoder_meta, "context_size")?)?,
-            chunk_size: parse_i32_scalar(metadata_value(&encoder_meta, "T")?)?,
-            chunk_shift: parse_i32_scalar(metadata_value(&encoder_meta, "decode_chunk_len")?)?,
+            encoder_input_frames: parse_i32_scalar(metadata_value(&encoder_meta, "T")?)?,
+            decode_chunk_len: parse_i32_scalar(metadata_value(&encoder_meta, "decode_chunk_len")?)?,
             frame_shift_ms: TARGET_FRAME_SHIFT_MS,
             unk_id: None,
             state_layout,
         })
+    }
+}
+
+impl StateLayout {
+    fn try_from_parts(
+        encoder_dims: Vec<usize>,
+        attention_dims: Vec<usize>,
+        num_encoder_layers: Vec<usize>,
+        cnn_module_kernels: Vec<usize>,
+        left_context_len: Vec<usize>,
+    ) -> Result<Self, ModelError> {
+        let stack_count = encoder_dims.len();
+        if stack_count == 0 {
+            return Err(invalid_metadata(
+                "zipformer encoder metadata declared zero encoder stacks",
+            ));
+        }
+
+        for (name, values) in [
+            ("attention_dims", &attention_dims),
+            ("num_encoder_layers", &num_encoder_layers),
+            ("cnn_module_kernels", &cnn_module_kernels),
+            ("left_context_len", &left_context_len),
+        ] {
+            if values.len() != stack_count {
+                return Err(invalid_metadata(format!(
+                    "zipformer encoder metadata length mismatch: encoder_dims has {stack_count} entries but {name} has {}",
+                    values.len()
+                )));
+            }
+        }
+
+        let mut stacks = Vec::with_capacity(stack_count);
+        for (
+            stack_index,
+            ((((encoder_dim, attention_dim), num_layers), cnn_module_kernel), left_context_len),
+        ) in encoder_dims
+            .into_iter()
+            .zip(attention_dims)
+            .zip(num_encoder_layers)
+            .zip(cnn_module_kernels)
+            .zip(left_context_len)
+            .enumerate()
+        {
+            if cnn_module_kernel == 0 {
+                return Err(invalid_metadata(format!(
+                    "zipformer encoder metadata stack {stack_index} has cnn_module_kernel=0"
+                )));
+            }
+
+            stacks.push(EncoderStackSpec {
+                encoder_dim,
+                attention_dim,
+                num_layers,
+                cnn_module_kernel,
+                left_context_len,
+            });
+        }
+
+        Ok(Self { stacks })
     }
 }
 
@@ -524,6 +596,13 @@ fn parse_i32_list(value: String) -> Result<Vec<usize>, ModelError> {
         .collect()
 }
 
+fn invalid_metadata(message: impl Into<String>) -> ModelError {
+    ModelError::BackendInitialization {
+        backend: "sherpa-onnx",
+        message: message.into(),
+    }
+}
+
 struct SherpaOnnxStream {
     runtime: Arc<SherpaOnnxRuntime>,
     metrics: Arc<Mutex<AsrMetrics>>,
@@ -559,8 +638,8 @@ impl SherpaOnnxStream {
     }
 
     fn is_ready(&self) -> bool {
-        self.decoder_state.processed_frames + self.runtime.config.chunk_size
-            < self.features.num_frames_ready()
+        self.decoder_state.processed_frames + self.runtime.config.encoder_input_frames
+            <= self.features.num_frames_ready()
     }
 
     fn accept_samples(&mut self, samples: &[f32]) {
@@ -580,8 +659,8 @@ impl SherpaOnnxStream {
 
     fn decode_next_chunk(&mut self) -> Result<Vec<TranscriptSegment>, ModelError> {
         let started_at = Instant::now();
-        let chunk_size = self.runtime.config.chunk_size;
-        let chunk_shift = self.runtime.config.chunk_shift;
+        let encoder_input_frames = self.runtime.config.encoder_input_frames;
+        let decode_chunk_len = self.runtime.config.decode_chunk_len;
         let feature_dim = self.runtime.config.feature_dim;
         let context_size = self.runtime.config.context_size;
         let frame_shift_ms = self.runtime.config.frame_shift_ms;
@@ -589,12 +668,12 @@ impl SherpaOnnxStream {
         let features = collect_feature_chunk(
             &self.features,
             self.decoder_state.processed_frames,
-            chunk_size,
+            encoder_input_frames,
             feature_dim,
         )?;
 
         let feature_tensor = Tensor::<f32>::from_array((
-            vec![1_i64, chunk_size as i64, feature_dim as i64],
+            vec![1_i64, encoder_input_frames as i64, feature_dim as i64],
             features,
         ))
         .map_err(ort_tensor_error)?;
@@ -618,7 +697,7 @@ impl SherpaOnnxStream {
         };
 
         self.run_greedy_decoder(encoder_out)?;
-        self.decoder_state.processed_frames += chunk_shift;
+        self.decoder_state.processed_frames += decode_chunk_len;
 
         {
             let mut state = lock_metrics(&self.metrics, "sherpa-onnx-decode");
@@ -636,29 +715,15 @@ impl SherpaOnnxStream {
     }
 
     fn run_greedy_decoder(&mut self, encoder_out: DynValue) -> Result<(), ModelError> {
-        let chunk_size = self.runtime.config.chunk_size;
         let unk_id = self.runtime.config.unk_id;
-        let (_, raw) = encoder_out
-            .try_extract_tensor::<f32>()
-            .map_err(ort_extract_error)?;
-        let frame_view = ArrayViewD::from_shape(vec![1, chunk_size, raw.len() / chunk_size], raw)
-            .map_err(|err| ModelError::BackendExecution {
-                backend: "sherpa-onnx",
-                operation: "encoder_out_shape",
-                message: err.to_string(),
-            })?
-            .into_dimensionality::<Ix3>()
-            .map_err(|err| ModelError::BackendExecution {
-                backend: "sherpa-onnx",
-                operation: "encoder_out_dimensionality",
-                message: err.to_string(),
-            })?;
+        let frame_view = extract_encoder_frames(&encoder_out)?;
 
         if self.decoder_state.decoder_out.is_none() {
             self.decoder_state.decoder_out = Some(self.run_decoder()?);
         }
 
-        for frame_idx in 0..frame_view.shape()[1] {
+        let emitted_frames = frame_view.shape()[1];
+        for frame_idx in 0..emitted_frames {
             let frame = frame_view
                 .index_axis(ndarray::Axis(1), frame_idx)
                 .to_owned();
@@ -705,7 +770,7 @@ impl SherpaOnnxStream {
             }
         }
 
-        self.decoder_state.frame_offset += frame_view.shape()[1];
+        self.decoder_state.frame_offset += emitted_frames;
         Ok(())
     }
 
@@ -899,6 +964,30 @@ fn argmax(values: &[f32]) -> Option<usize> {
         .map(|(index, _)| index)
 }
 
+fn extract_encoder_frames<'a>(
+    encoder_out: &'a DynValue,
+) -> Result<ArrayView3<'a, f32>, ModelError> {
+    let (shape, raw) = encoder_out
+        .try_extract_tensor::<f32>()
+        .map_err(ort_extract_error)?;
+
+    if shape.len() != 3 || shape[0] != 1 || shape[1] < 0 || shape[2] < 0 {
+        return Err(ModelError::BackendExecution {
+            backend: "sherpa-onnx",
+            operation: "encoder_out_shape",
+            message: format!("expected encoder output shape [1, T, C], got {shape}"),
+        });
+    }
+
+    ArrayView3::from_shape((1, shape[1] as usize, shape[2] as usize), raw).map_err(|err| {
+        ModelError::BackendExecution {
+            backend: "sherpa-onnx",
+            operation: "encoder_out_shape",
+            message: err.to_string(),
+        }
+    })
+}
+
 struct DecoderState {
     processed_frames: usize,
     frame_offset: usize,
@@ -931,12 +1020,12 @@ impl DecoderState {
 fn initial_encoder_state(layout: &StateLayout) -> Result<Vec<DynValue>, ModelError> {
     let mut state = Vec::new();
 
-    for i in 0..layout.encoder_dims.len() {
-        let layers = layout.num_encoder_layers[i];
-        let encoder_dim = layout.encoder_dims[i];
-        let attention_dim = layout.attention_dims[i];
-        let left_context = layout.left_context_len[i];
-        let cnn_kernel = layout.cnn_module_kernels[i];
+    for stack in &layout.stacks {
+        let layers = stack.num_layers;
+        let encoder_dim = stack.encoder_dim;
+        let attention_dim = stack.attention_dim;
+        let left_context = stack.left_context_len;
+        let cnn_kernel = stack.cnn_module_kernel;
 
         state.push(
             Tensor::<i64>::from_array((vec![layers as i64, 1], vec![0_i64; layers]))
@@ -1228,9 +1317,11 @@ mod tests {
 
         assert_eq!(adapter.supported_formats(), &[CheckpointFormat::Onnx]);
         assert_eq!(adapter.backend_kind(), BackendKind::SherpaOnnx);
-        assert!(adapter
-            .capabilities()
-            .supports(CapabilityKind::Transcription));
+        assert!(
+            adapter
+                .capabilities()
+                .supports(CapabilityKind::Transcription)
+        );
         assert_eq!(adapter.quantization(), &QuantizationSupport::none());
     }
 
@@ -1239,16 +1330,18 @@ mod tests {
         let state = DecoderState::new(&ZipformerConfig {
             feature_dim: 80,
             context_size: 2,
-            chunk_size: 16,
-            chunk_shift: 8,
+            encoder_input_frames: 16,
+            decode_chunk_len: 8,
             frame_shift_ms: TARGET_FRAME_SHIFT_MS,
             unk_id: Some(1),
             state_layout: StateLayout {
-                encoder_dims: vec![4],
-                attention_dims: vec![4],
-                num_encoder_layers: vec![2],
-                cnn_module_kernels: vec![3],
-                left_context_len: vec![2],
+                stacks: vec![EncoderStackSpec {
+                    encoder_dim: 4,
+                    attention_dim: 4,
+                    num_layers: 2,
+                    cnn_module_kernel: 3,
+                    left_context_len: 2,
+                }],
             },
         })
         .expect("decoder state should initialize");
@@ -1285,5 +1378,28 @@ mod tests {
         assert_eq!(segments[0].text, "helloworld");
         assert!(!segments[1].final_segment);
         assert_eq!(segments[1].text, "again");
+    }
+
+    #[test]
+    fn state_layout_rejects_mismatched_metadata_lengths() {
+        let err =
+            StateLayout::try_from_parts(vec![4, 8], vec![4], vec![2, 2], vec![3, 3], vec![2, 2])
+                .expect_err("metadata length mismatch should fail");
+
+        assert!(matches!(err, ModelError::BackendInitialization { .. }));
+        assert!(
+            err.to_string()
+                .contains("zipformer encoder metadata length mismatch")
+        );
+    }
+
+    #[test]
+    fn encoder_frame_extraction_uses_returned_tensor_shape() {
+        let encoder_out = Tensor::<f32>::from_array((vec![1_i64, 7, 4], vec![0.0_f32; 28]))
+            .expect("tensor shape should be valid")
+            .into_dyn();
+
+        let frame_view = extract_encoder_frames(&encoder_out).expect("shape should be accepted");
+        assert_eq!(frame_view.shape(), &[1, 7, 4]);
     }
 }
