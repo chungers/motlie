@@ -19,7 +19,7 @@ async-trait = "0.1.89"
 kaldi-native-fbank = "0.1.0"
 motlie-model = { path = "../..", features = ["metrics-runtime"] }
 ndarray = "0.17"
-ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "download-binaries", "copy-dylibs", "tls-native"] }
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray"] }
 tokio = { version = "1", features = ["rt"] }
 tracing = "0.1"
 

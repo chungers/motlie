@@ -15,8 +15,10 @@ cargo run -p motlie-models --example models_v0_6 \
 
 - The curated sherpa-onnx artifacts must already be downloaded under the
   default artifact root or the path passed with `--artifact-root`.
-- A compatible ONNX Runtime shared library must be available for the `ort`
-  crate. If it is not on the system library path, set `ORT_DYLIB_PATH`.
+- A compatible ONNX Runtime installation must be provided explicitly for the
+  `ort` crate. Set `ORT_LIB_PATH` to the ONNX Runtime library directory unless
+  the runtime is already discoverable via `pkg-config` or another explicit
+  system installation path.
 - The `.wav` file must be PCM audio (`i16` or `f32`).
 
 ## Expected Behavior
