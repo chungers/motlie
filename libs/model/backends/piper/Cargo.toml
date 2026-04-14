@@ -20,6 +20,7 @@ espeak-rs = { version = "0.1.9", default-features = false }
 motlie-model = { path = "../..", features = ["metrics-runtime"] }
 motlie-model-ort = { path = "../ort" }
 ndarray = "0.17"
+# TODO(@codex-tts): upgrade `ort` to stable 2.x once it is released.
 ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

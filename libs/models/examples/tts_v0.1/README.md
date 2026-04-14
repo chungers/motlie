@@ -29,4 +29,6 @@ cargo run -p motlie-models --example models_tts_v0_1 \
 - The example opens the curated `Piper en_US ljspeech medium` bundle.
 - Text is synthesized through the shared `SpeechModel` / `SpeechStream`
   contract and collected into a `.wav` file.
+- In Phase 1, Piper performs whole-utterance synthesis in `open_stream()` and
+  then emits buffered PCM chunks through `next_chunk()`.
 - The resulting file uses the backend-reported sample rate and PCM encoding.

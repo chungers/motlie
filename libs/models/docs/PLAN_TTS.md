@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-14 | @codex-tts | Addressed PR #179 review R1 by documenting the Phase 1 batch-then-chunk stream behavior, the Piper-only `SpeechParams.seed` rejection, and the current `ort` RC session-mutability constraint while keeping the validated artifact-policy fix in scope. |
 | 2026-04-14 | @codex-tts | Implemented the Phase 1 Piper slice end to end: additive speech contracts in `libs/model`, shared ONNX helper extraction for Piper and sherpa, the `motlie-model-piper` backend, curated bundle/selector wiring in `libs/models`, the `models_tts_v0_1` example, and env-gated runtime verification. |
 | 2026-04-14 | @codex-tts | Addressed R1 review by aligning the plan with the explicit Qwen3-TTS phase-2 slice, adding the shared ONNX Runtime refactor target with ASR sherpa-onnx, removing the duplicate `speaker_id` input path, turning stream edge cases into concrete validation work instead of open contract design, and renaming the planned TTS example path to avoid collision with the live ASR `v0.5` example. |
 | 2026-04-13 | @codex-tts | Initial PLAN for the first TTS vertical slice. Centers on one Piper ONNX voice, streamed PCM output, and a `.wav` end-to-end example from artifact download through playback-ready output. |
@@ -105,6 +106,10 @@ Introduce a new backend crate that follows the same adapter-backed shape as the 
   DESIGN reference: `Streaming PCM API Contract`
 - [x] Emit the final chunk with `end_of_stream = true`, then `Ok(None)` on further reads.
   DESIGN reference: `Streaming PCM API Contract`
+- [x] Document the current Piper implementation detail: `open_stream()` performs whole-utterance synthesis first, and `next_chunk()` then drains buffered PCM in order.
+  DESIGN reference: `Recommended Vertical Slice`, `Streaming PCM API Contract`
+- [x] Document the current Piper parameter surface: `speaking_rate` is supported; `seed` and reference-audio conditioning are rejected at runtime.
+  DESIGN reference: `Recommended Vertical Slice`, `Streaming PCM API Contract`
 - [x] Add backend tests for:
   monotonic chunk sequencing,
   non-empty output for normal text,
@@ -120,6 +125,8 @@ Introduce a new backend crate that follows the same adapter-backed shape as the 
   DESIGN reference: `Recommended Vertical Slice`
 - [x] Add at least one non-CUDA and one CUDA-build compilation check to local verification guidance or CI.
   DESIGN reference: `Feature Flag Design`, `Testing Scope for PLAN`
+- [x] Keep shared-session inference serialized until Motlie can upgrade off the current `ort` RC or introduce a validated session-pool design.
+  DESIGN reference: `Cross-Capability ONNX Runtime Refactor Target`
 
 ### 2.6 - Shared ONNX Runtime refactor target
 

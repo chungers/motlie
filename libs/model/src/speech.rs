@@ -9,6 +9,10 @@ use async_trait::async_trait;
 use crate::{AudioSpec, ModelError, PcmChunk};
 
 /// Stream-scoped speech synthesis parameters.
+///
+/// Backends may support only a subset of these controls. The v1 Piper backend
+/// supports `speaking_rate` and rejects `seed` with `InvalidConfiguration`.
+/// Future backends may accept a larger subset without changing the public API.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SpeechParams {
     pub speaking_rate: Option<f32>,
@@ -65,7 +69,7 @@ pub trait SpeechStream: Send {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{transcription::AudioSpec, PcmEncoding};
+    use crate::{AudioSpec, PcmEncoding};
 
     #[test]
     fn speech_request_defaults_to_empty_text_and_no_conditioning() {

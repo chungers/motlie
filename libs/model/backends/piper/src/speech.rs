@@ -141,10 +141,12 @@ impl ModelBundle for PiperSpeechBundle {
         let artifacts = if let Some(policy) = options.artifact_policy {
             configure_artifact_policy(self.spec.model_filename, policy)?
         } else {
-            let root = PathBuf::from(".");
-            let model = root.join(self.spec.model_filename);
-            let config = model.with_extension("onnx.json");
-            PiperArtifactPaths { model, config }
+            configure_artifact_policy(
+                self.spec.model_filename,
+                motlie_model::ArtifactPolicy::LocalOnly {
+                    root: PathBuf::from("."),
+                },
+            )?
         };
         let runtime = Arc::new(load_runtime(&artifacts)?);
 
@@ -281,6 +283,8 @@ fn new_speech_handle(
 }
 
 struct PiperRuntime {
+    // The current `ort` RC used by Motlie exposes `Session::run(&mut self, ...)`,
+    // so shared bundle handles must serialize access around the loaded session.
     session: Mutex<Session>,
     config: PiperConfig,
 }
@@ -358,6 +362,11 @@ impl PiperRuntime {
     }
 }
 
+/// Piper streams expose already-synthesized PCM in monotonic chunks.
+///
+/// Piper is a non-autoregressive VITS-style model in this slice, so
+/// `open_stream()` performs the full synthesis up front and `next_chunk()`
+/// subsequently yields buffered PCM for sink adapters.
 struct PiperSpeechStream {
     audio_spec: motlie_model::AudioSpec,
     pcm: Vec<u8>,

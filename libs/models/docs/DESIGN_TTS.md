@@ -6,6 +6,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-14 | @codex-tts | Addressed PR #179 review R1 by fixing the local-only startup path to reuse the same Piper artifact validation as curated checkpoints, documenting the batch-then-chunk `open_stream()` behavior and Piper's runtime rejection of `SpeechParams.seed`, and recording the current `ort` RC dependency/runtime constraint explicitly. |
 | 2026-04-14 | @codex-tts | Implemented the Phase 1 Piper slice with additive `SpeechModel` / `SpeechStream` contracts, a shared `motlie-model-ort` ONNX helper reused by the sherpa backend, a `motlie-model-piper` backend using eSpeak-ng phonemization plus Piper sidecar parsing, the curated `piper_en_us_ljspeech_medium` bundle, and the `models_tts_v0_1` example/validation path. |
 | 2026-04-14 | @codex-tts | Addressed R1 review by defining the Qwen3-TTS phase-2 slice, adding the shared ONNX Runtime refactor target with the ASR sherpa-onnx path, removing the duplicate speaker-selection knob from `SpeechParams`, tightening `SpeechStream` state semantics, and switching the planned example naming to a capability-specific path that does not collide with ASR `v0.5`. |
 | 2026-04-13 | @codex-tts | Initial brownfield design for a text-to-speech vertical slice in the Motlie model stack. Evaluates local-first TTS candidates, recommends a Piper ONNX bundle as the first implementation, and defines a streamed PCM output contract that mirrors the ASR PCM input shape. |
@@ -223,6 +224,7 @@ Current implementation note:
 
 - the v1 backend preserves the streamed PCM contract but synthesizes the utterance during `open_stream()` and then exposes buffered `S16Le` PCM through `next_chunk()`
 - this keeps the public stream contract stable while the first Piper slice proves artifact resolution, phonemization, ONNX inference, and sink integration end to end
+- the v1 Piper backend supports `SpeechParams.speaking_rate`, rejects `SpeechParams.seed`, accepts `VoiceConditioning::SpeakerId` only for multi-speaker voices, and rejects reference-audio conditioning
 
 ### Why `en_US-ljspeech-medium`
 
@@ -386,6 +388,7 @@ pub trait SpeechStream: Send {
 - `SpeechRequest.conditioning` is the only source of truth for fixed speaker selection or reference-audio cloning.
 - `VoiceConditioning::SpeakerId` and `VoiceConditioning::ReferenceAudio` are mutually exclusive by construction.
 - `SpeechRequest.text` must contain at least one non-whitespace character. Empty or whitespace-only text returns `ModelError::InvalidConfiguration`.
+- `open_stream()` may front-load synthesis work and return a stream that later drains buffered PCM; callers should rely on chunk ordering and `end_of_stream`, not on token-by-token generation assumptions.
 - `next_chunk()` returns `Ok(Some(chunk))` while output is still available.
 - `next_chunk()` returns `Ok(None)` only after the stream is exhausted.
 - `chunk.sequence` must be monotonic and start at `0` for the first emitted chunk.
@@ -525,6 +528,7 @@ The ASR roadmap already points at a `sherpa-onnx`-based backend family for phase
 Design requirement:
 
 - the first Piper implementation may start as `motlie-model-piper`, but it should keep its ORT session/provider/config scaffolding factored so it can later move into a shared ONNX helper layer rather than being duplicated again for ASR
+- the current implementation still depends on `ort = 2.0.0-rc.12`; shared-session inference remains serialized because this release exposes mutable `Session::run(...)`
 
 Recommended future split:
 
