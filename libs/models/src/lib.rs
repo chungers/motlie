@@ -11,6 +11,7 @@ use std::error::Error as StdError;
     feature = "model-qwen3-embedding-06b",
     feature = "model-gemma4-e2b",
     feature = "model-gemma4-e2b-gguf",
+    feature = "model-sherpa-onnx-streaming",
     feature = "model-whisper-base-en",
 ))]
 use std::fmt;
@@ -538,7 +539,10 @@ pub struct ResolvedModelDescriptor {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ModelSelector {
-    #[cfg(feature = "model-whisper-base-en")]
+    #[cfg(any(
+        feature = "model-sherpa-onnx-streaming",
+        feature = "model-whisper-base-en"
+    ))]
     Asr(AsrModels),
     #[cfg(any(
         feature = "model-qwen3-4b",
@@ -561,12 +565,16 @@ pub enum ModelSelector {
     feature = "model-qwen3-embedding-06b",
     feature = "model-gemma4-e2b",
     feature = "model-gemma4-e2b-gguf",
+    feature = "model-sherpa-onnx-streaming",
     feature = "model-whisper-base-en",
 ))]
 impl ModelSelector {
     pub fn as_str(&self) -> String {
         match self {
-            #[cfg(feature = "model-whisper-base-en")]
+            #[cfg(any(
+                feature = "model-sherpa-onnx-streaming",
+                feature = "model-whisper-base-en"
+            ))]
             Self::Asr(model) => format!("asr:{}", model.as_str()),
             #[cfg(any(
                 feature = "model-qwen3-4b",
@@ -585,7 +593,10 @@ impl ModelSelector {
 
     pub fn bundle_id(&self) -> BundleId {
         match self {
-            #[cfg(feature = "model-whisper-base-en")]
+            #[cfg(any(
+                feature = "model-sherpa-onnx-streaming",
+                feature = "model-whisper-base-en"
+            ))]
             Self::Asr(model) => model.bundle_id(),
             #[cfg(any(
                 feature = "model-qwen3-4b",
@@ -604,7 +615,10 @@ impl ModelSelector {
 
     pub fn descriptor(&self) -> BundleDescriptor {
         match self {
-            #[cfg(feature = "model-whisper-base-en")]
+            #[cfg(any(
+                feature = "model-sherpa-onnx-streaming",
+                feature = "model-whisper-base-en"
+            ))]
             Self::Asr(model) => model.descriptor(),
             #[cfg(any(
                 feature = "model-qwen3-4b",
@@ -623,7 +637,10 @@ impl ModelSelector {
 
     pub fn bundle(&self) -> Box<dyn ModelBundle> {
         match self {
-            #[cfg(feature = "model-whisper-base-en")]
+            #[cfg(any(
+                feature = "model-sherpa-onnx-streaming",
+                feature = "model-whisper-base-en"
+            ))]
             Self::Asr(model) => model.bundle(),
             #[cfg(any(
                 feature = "model-qwen3-4b",
@@ -648,6 +665,7 @@ impl ModelSelector {
     feature = "model-qwen3-embedding-06b",
     feature = "model-gemma4-e2b",
     feature = "model-gemma4-e2b-gguf",
+    feature = "model-sherpa-onnx-streaming",
     feature = "model-whisper-base-en",
 ))]
 impl fmt::Display for ModelSelector {
@@ -731,15 +749,27 @@ impl FromStr for ModelSelector {
         }
 
         if let Some(raw) = value.strip_prefix("asr:") {
+            #[cfg(not(feature = "model-sherpa-onnx-streaming"))]
+            if raw == asr::SHERPA_ONNX_STREAMING_SELECTOR {
+                return Err(ModelsError::ModelUnavailable {
+                    selector: value.to_owned(),
+                });
+            }
             #[cfg(not(feature = "model-whisper-base-en"))]
             if raw == asr::WHISPER_BASE_EN_SELECTOR {
                 return Err(ModelsError::ModelUnavailable {
                     selector: value.to_owned(),
                 });
             }
-            #[cfg(feature = "model-whisper-base-en")]
+            #[cfg(any(
+                feature = "model-sherpa-onnx-streaming",
+                feature = "model-whisper-base-en"
+            ))]
             return Ok(Self::Asr(raw.parse()?));
-            #[cfg(not(feature = "model-whisper-base-en"))]
+            #[cfg(not(any(
+                feature = "model-sherpa-onnx-streaming",
+                feature = "model-whisper-base-en"
+            )))]
             return Err(ModelsError::UnknownModelSelector {
                 selector: value.to_owned(),
             });
@@ -808,6 +838,8 @@ impl Catalog {
         chat::qwen3_4b_gguf::register(&mut catalog);
         #[cfg(feature = "model-gemma4-e2b-gguf")]
         chat::gemma4_e2b_gguf::register(&mut catalog);
+        #[cfg(feature = "model-sherpa-onnx-streaming")]
+        asr::sherpa_onnx_streaming_en::register(&mut catalog);
         #[cfg(feature = "model-whisper-base-en")]
         asr::whisper_base_en::register(&mut catalog);
         catalog
