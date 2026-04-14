@@ -6,6 +6,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-14 | @codex-tts | Addressed R1 review by defining the Qwen3-TTS phase-2 slice, adding the shared ONNX Runtime refactor target with the ASR sherpa-onnx path, removing the duplicate speaker-selection knob from `SpeechParams`, tightening `SpeechStream` state semantics, and switching the planned example naming to a capability-specific path that does not collide with ASR `v0.5`. |
 | 2026-04-13 | @codex-tts | Initial brownfield design for a text-to-speech vertical slice in the Motlie model stack. Evaluates local-first TTS candidates, recommends a Piper ONNX bundle as the first implementation, and defines a streamed PCM output contract that mirrors the ASR PCM input shape. |
 
 This document defines the design for adding text-to-speech (TTS) support to the existing `libs/model` and `libs/models` architecture.
@@ -13,6 +14,8 @@ This document defines the design for adding text-to-speech (TTS) support to the 
 Assumption for this draft: this is brownfield product work. Motlie already has stable model contracts, curated bundle registration, feature-gated bundle selection, and artifact download infrastructure. The TTS work should extend those seams additively. If the product context is later confirmed as greenfield, the migration section can be reduced, but the recommended architecture is unchanged.
 
 The design is intentionally narrow. It focuses on one end-to-end vertical slice from curated artifact download to streamed PCM output, with adapters above the model layer for `.wav`, local playback, and telephony/websocket transports.
+
+The roadmap beyond that first slice is also explicit: if the Piper slice proves out, the next end-to-end family to add should be Qwen3-TTS rather than leaving the phase-2 story implicit.
 
 ## Table of Contents
 
@@ -331,7 +334,6 @@ pub struct PcmChunk {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SpeechParams {
     pub speaking_rate: Option<f32>,
-    pub speaker_id: Option<u32>,
     pub seed: Option<u64>,
 }
 
@@ -375,9 +377,16 @@ pub trait SpeechStream: Send {
 
 - `SpeechModel` is shareable and stateless at the contract boundary.
 - `SpeechStream` is stateful and owned by one task; it should be `Send`, not `Sync`, matching the ASR stream-ownership design.
+- `SpeechRequest.conditioning` is the only source of truth for fixed speaker selection or reference-audio cloning.
+- `VoiceConditioning::SpeakerId` and `VoiceConditioning::ReferenceAudio` are mutually exclusive by construction.
+- `SpeechRequest.text` must contain at least one non-whitespace character. Empty or whitespace-only text returns `ModelError::InvalidConfiguration`.
 - `next_chunk()` returns `Ok(Some(chunk))` while output is still available.
 - `next_chunk()` returns `Ok(None)` only after the stream is exhausted.
-- `chunk.end_of_stream` is set on the final emitted chunk; `None` after that is the stream-termination signal.
+- `chunk.sequence` must be monotonic and start at `0` for the first emitted chunk.
+- all non-final chunks must have `end_of_stream = false`.
+- the final emitted chunk must set `end_of_stream = true`.
+- after the final chunk has been emitted, all subsequent `next_chunk()` calls must return `Ok(None)` idempotently.
+- `finish(self: Box<Self>)` is an early-termination hook that releases backend resources; it does not promise to synthesize or flush any unread trailing audio. Callers that need the full utterance must continue polling `next_chunk()` until `Ok(None)` before calling `finish()`.
 
 ### Why This Shape
 
@@ -498,6 +507,26 @@ The backend should:
 - optionally enable the ORT CUDA provider behind a Cargo feature
 - continue to expose the same `SpeechModel` / `SpeechStream` contract in both modes
 
+### Cross-Capability ONNX Runtime Refactor Target
+
+The Piper backend should not become a dead-end ORT wrapper.
+
+The ASR roadmap already points at a `sherpa-onnx`-based backend family for phase 2. That means Motlie is on track to have at least two ONNX-driven speech capabilities:
+
+- TTS Piper
+- ASR sherpa-onnx
+
+Design requirement:
+
+- the first Piper implementation may start as `motlie-model-piper`, but it should keep its ORT session/provider/config scaffolding factored so it can later move into a shared ONNX helper layer rather than being duplicated again for ASR
+
+Recommended future split:
+
+- capability-neutral ORT bootstrap and provider/config helpers in a shared ONNX support module or crate
+- capability-specific graph/session logic in `motlie-model-piper` and the future ASR `motlie-model-sherpa-onnx` backend
+
+This keeps the v1 TTS slice pragmatic without baking duplicated ORT initialization, provider selection, or session tuning paths into multiple speech backends.
+
 ## Curated Bundle Design in `libs/models`
 
 ### New Namespace
@@ -582,6 +611,13 @@ Possible follow-up profile features:
 ```toml
 profile-voice-local = ["model-piper-en-us-ljspeech-medium"]
 profile-voice-dgx = ["model-piper-en-us-ljspeech-medium", "piper-cuda"]
+```
+
+For the Qwen3-TTS phase-2 slice, use separate feature gates rather than overloading the Piper ones:
+
+```toml
+model-qwen3-tts-0_6b = ["dep:motlie-model-qwen3-tts"]
+qwen3-tts-cuda = ["dep:motlie-model-qwen3-tts", "motlie-model-qwen3-tts/cuda"]
 ```
 
 ## Output Adapter Boundary
@@ -677,6 +713,31 @@ That gap matters for:
 - lock the curated bundle to explicit repo-relative artifact paths
 - prefer exact include rules over suffix rules
 - document the artifact root and local snapshot expectations in the example README
+
+### Phase-2 Qwen3-TTS Vertical Slice
+
+If Motlie adds a second TTS family after Piper, the explicit next vertical slice should be Qwen3-TTS.
+
+Recommended phase-2 shape:
+
+- contract surface: reuse the same `SpeechRequest` / `SpeechStream` API
+- runtime/backend boundary: a new `motlie-model-qwen3-tts` backend crate over the official Python/Transformers/vLLM runtime boundary or a thinner accelerator-oriented service boundary if a direct in-process Rust path remains unavailable
+- curated bundle: start with `Qwen3-TTS-12Hz-0.6B-Base`
+- selector shape: `tts:qwen/qwen3_tts_12hz_0_6b`
+- feature flags:
+  `model-qwen3-tts-0_6b`,
+  `qwen3-tts-cuda`
+- validation target:
+  artifact resolution,
+  streamed synthesis,
+  voice-cloning request path via `VoiceConditioning::ReferenceAudio`,
+  `.wav` output parity with the Piper example,
+  and one CUDA-oriented runtime smoke test on GB10-class hardware when available
+
+The purpose of that phase-2 slice is different from Piper:
+
+- Piper proves the small CPU-first local path
+- Qwen3-TTS proves the higher-quality cloning-oriented path without changing the public TTS contract
 
 ## Migration and Compatibility Strategy
 

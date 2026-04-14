@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-14 | @codex-tts | Addressed R1 review by aligning the plan with the explicit Qwen3-TTS phase-2 slice, adding the shared ONNX Runtime refactor target with ASR sherpa-onnx, removing the duplicate `speaker_id` input path, turning stream edge cases into concrete validation work instead of open contract design, and renaming the planned TTS example path to avoid collision with the live ASR `v0.5` example. |
 | 2026-04-13 | @codex-tts | Initial PLAN for the first TTS vertical slice. Centers on one Piper ONNX voice, streamed PCM output, and a `.wav` end-to-end example from artifact download through playback-ready output. |
 
 Derived from [DESIGN_TTS.md](./DESIGN_TTS.md). This PLAN is intentionally vertical-slice oriented: one curated model, one runtime family, one streamed PCM output contract, and one deterministic example path from artifact download to emitted speech.
@@ -29,16 +30,19 @@ Add TTS to `libs/model` without disturbing the existing bundle lifecycle shape.
 
 - [ ] Add `PcmEncoding`, `AudioSpec`, `PcmChunk`, `SpeechParams`, `VoiceConditioning`, and `SpeechRequest`.
   DESIGN reference: `Streaming PCM API Contract`
+- [ ] Keep `VoiceConditioning` as the single source of truth for speaker selection and cloning; do not add a duplicate `speaker_id` field on `SpeechParams`.
+  DESIGN reference: `Streaming PCM API Contract`
 - [ ] Add `SpeechModel` and `SpeechStream`.
   DESIGN reference: `Streaming PCM API Contract`, `Core Contract Changes in libs/model`
 - [ ] Extend `BundleHandle` with `speech() -> Result<&dyn SpeechModel, ModelError>`.
   DESIGN reference: `Core Contract Changes in libs/model`, `Migration and Compatibility Strategy`
 - [ ] Document and test the stream ownership model: `SpeechModel` is shareable, `SpeechStream` is `Send` and stateful, but not `Sync`.
   DESIGN reference: `Streaming PCM API Contract`
-- [ ] Define and test the edge-case semantics for:
+- [ ] Implement and test the already-designed edge-case semantics for:
   empty text,
   repeated `next_chunk()` after exhaustion,
   `finish()` ownership,
+  monotonic chunk sequencing,
   final `end_of_stream` chunk behavior.
   DESIGN reference: `Streaming PCM API Contract`
 
@@ -116,6 +120,13 @@ Introduce a new backend crate that follows the same adapter-backed shape as the 
 - [ ] Add at least one non-CUDA and one CUDA-build compilation check to local verification guidance or CI.
   DESIGN reference: `Feature Flag Design`, `Testing Scope for PLAN`
 
+### 2.6 - Shared ONNX Runtime refactor target
+
+- [ ] Factor ORT session/provider/config helpers so they can later be shared with the planned ASR `sherpa-onnx` backend rather than duplicated.
+  DESIGN reference: `Generic Backend Design`, `Cross-Capability ONNX Runtime Refactor Target`
+- [ ] Keep capability-specific graph/session code in the Piper backend while isolating capability-neutral ORT bootstrap and provider selection.
+  DESIGN reference: `Cross-Capability ONNX Runtime Refactor Target`
+
 ## Phase 3: Curated Bundle and Catalog Integration in `libs/models`
 
 Add the first curated TTS bundle using the same registration and selector patterns as the current model families.
@@ -163,11 +174,11 @@ Prove the first implementation slice through the simplest end-to-end caller path
 
 ### 4.1 - `.wav` example
 
-- [ ] Add `examples/v0.5/main.rs` as the first TTS example binary.
+- [ ] Add `examples/tts_v0.1/main.rs` as the first TTS example binary.
   DESIGN reference: `API Sketch`, `Output Adapter Boundary`
 - [ ] Support `--text <value>` and `--wav <path>` by opening a speech stream and collecting PCM into a `.wav` sink.
   DESIGN reference: `Streaming PCM API Contract`, `Output Adapter Boundary`
-- [ ] Document expected preconditions and output in `examples/v0.5/README.md`.
+- [ ] Document expected preconditions and output in `examples/tts_v0.1/README.md`.
   DESIGN reference: `API Sketch`
 
 ### 4.2 - Local playback sink
@@ -191,7 +202,7 @@ Prove the first implementation slice through the simplest end-to-end caller path
 
 ### 4.4 - Example feature wiring
 
-- [ ] Add a `models_v0_5` example target with `required-features = ["model-piper-en-us-ljspeech-medium"]`.
+- [ ] Add a `models_tts_v0_1` example target with `required-features = ["model-piper-en-us-ljspeech-medium"]`.
   DESIGN reference: `Feature Flag Design`
 - [ ] Ensure the example builds both with default CPU features and, where available, with `piper-cuda`.
   DESIGN reference: `Feature Flag Design`
@@ -214,7 +225,7 @@ Land the first curated TTS slice with concrete verification commands and env-gat
   DESIGN reference: `Testing Scope for PLAN`
 - [ ] `cargo test -p motlie-models --lib --no-default-features --features "model-piper-en-us-ljspeech-medium"`
   DESIGN reference: `Testing Scope for PLAN`
-- [ ] `cargo build -p motlie-models --example models_v0_5 --no-default-features --features "model-piper-en-us-ljspeech-medium"`
+- [ ] `cargo build -p motlie-models --example models_tts_v0_1 --no-default-features --features "model-piper-en-us-ljspeech-medium"`
   DESIGN reference: `Testing Scope for PLAN`
 
 ### 5.2 - Env-gated runtime checks
@@ -226,20 +237,56 @@ Land the first curated TTS slice with concrete verification commands and env-gat
 - [ ] Record the expected artifact env var names and directory layout in the example README.
   DESIGN reference: `Curated Bundle Design in libs/models`
 
-## Phase 6: Follow-On Breadth After the Vertical Slice
+## Phase 6: Qwen3-TTS Second Vertical Slice
+
+Only start this after the Piper slice is stable and the speech contract has held up under real usage.
+
+### 6.1 - Backend/runtime boundary
+
+- [ ] Add `libs/model/backends/qwen3_tts/` as a distinct backend family rather than extending the Piper backend.
+  DESIGN reference: `Phase-2 Qwen3-TTS Vertical Slice`
+- [ ] Keep the public `SpeechRequest` / `SpeechStream` contract unchanged; all Qwen3-specific cloning and voice-design behavior must map onto the existing request surface.
+  DESIGN reference: `Phase-2 Qwen3-TTS Vertical Slice`, `Streaming PCM API Contract`
+- [ ] Choose and document the runtime boundary explicitly:
+  direct Python/Transformers embedding,
+  vLLM-backed service boundary,
+  or another accelerator-oriented service wrapper.
+  DESIGN reference: `Phase-2 Qwen3-TTS Vertical Slice`
+
+### 6.2 - Curated bundle shape and feature flags
+
+- [ ] Add `src/tts/qwen3_tts_12hz_0_6b.rs` with curated selector, descriptor, bundle, and registration.
+  DESIGN reference: `Phase-2 Qwen3-TTS Vertical Slice`
+- [ ] Add `model-qwen3-tts-0_6b = ["dep:motlie-model-qwen3-tts"]`.
+  DESIGN reference: `Feature Flag Design`, `Phase-2 Qwen3-TTS Vertical Slice`
+- [ ] Add `qwen3-tts-cuda = ["dep:motlie-model-qwen3-tts", "motlie-model-qwen3-tts/cuda"]`.
+  DESIGN reference: `Feature Flag Design`, `Phase-2 Qwen3-TTS Vertical Slice`
+- [ ] Keep the Qwen3-TTS bundle out of `default` features until artifact size and runtime deployment are proven manageable.
+  DESIGN reference: `Phase-2 Qwen3-TTS Vertical Slice`
+
+### 6.3 - End-to-end validation
+
+- [ ] Add one `.wav` parity example that uses the same sink contract as the Piper example.
+  DESIGN reference: `Phase-2 Qwen3-TTS Vertical Slice`, `Output Adapter Boundary`
+- [ ] Add one reference-audio cloning example using `VoiceConditioning::ReferenceAudio`.
+  DESIGN reference: `Phase-2 Qwen3-TTS Vertical Slice`, `Streaming PCM API Contract`
+- [ ] Add one CUDA-oriented smoke test on GB10-class hardware when such hardware is available in the validation environment.
+  DESIGN reference: `Phase-2 Qwen3-TTS Vertical Slice`
+
+## Phase 7: Follow-On Breadth After the Vertical Slice
 
 Only broaden after the Piper slice is stable and the speech contract has held up under real usage.
 
-### 6.1 - Higher-value follow-ons
+### 7.1 - Higher-value follow-ons
 
 - [ ] Add a second curated Piper voice, ideally one that exercises speaker selection or a different sample rate.
   DESIGN reference: `Recommended Vertical Slice`, `Distribution Considerations`
 - [ ] Evaluate Kokoro as the first higher-quality CPU-oriented alternate backend family if Piper maintenance risk becomes material.
   DESIGN reference: `Alternatives Considered`
-- [ ] Evaluate XTTS v2 as the first cloning-focused backend family if the product later prioritizes reference-audio conditioning over CPU-first simplicity.
+- [ ] Evaluate XTTS v2 as a secondary cloning-focused backend family after Qwen3-TTS if the product later prioritizes reference-audio conditioning over CPU-first simplicity.
   DESIGN reference: `Alternatives Considered`
 
-### 6.2 - Doc synchronization
+### 7.2 - Doc synchronization
 
 - [ ] Update `libs/model/docs/DESIGN.md` and `libs/model/docs/PLAN.md` if the implemented speech contract differs materially from this proposal.
   DESIGN reference: `Migration and Compatibility Strategy`
@@ -248,7 +295,7 @@ Only broaden after the Piper slice is stable and the speech contract has held up
 - [ ] Add changelog entries with `@codex-tts` and the implementation date in each modified doc.
   DESIGN reference: `Migration and Compatibility Strategy`
 
-## Phase 7: Commit and PR Hygiene
+## Phase 8: Commit and PR Hygiene
 
 - [ ] Keep commits scoped to the TTS contract, backend, curated bundle, examples, and related docs.
 - [ ] Do not stage harness files such as `AGENTS.md`.
