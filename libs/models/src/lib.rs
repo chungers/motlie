@@ -11,6 +11,7 @@ use std::error::Error as StdError;
     feature = "model-qwen3-embedding-06b",
     feature = "model-gemma4-e2b",
     feature = "model-gemma4-e2b-gguf",
+    feature = "model-piper-en-us-ljspeech-medium",
     feature = "model-sherpa-onnx-streaming",
     feature = "model-whisper-base-en",
 ))]
@@ -22,6 +23,7 @@ use std::sync::Arc;
 pub mod asr;
 pub mod chat;
 pub mod embeddings;
+pub mod tts;
 
 use hf_hub::api::sync::ApiBuilder;
 use thiserror::Error;
@@ -38,6 +40,7 @@ pub use motlie_model::{
     ContentKind, EvalTrack, InteractionStyle, ModelBundle, ModelCheckpoint, ModelIdentity,
     PlatformConstraint, QuantizationSupport,
 };
+pub use tts::TtsModels;
 
 type BoxError = Box<dyn StdError + Send + Sync + 'static>;
 
@@ -75,6 +78,8 @@ pub enum ModelsError {
     UnknownEmbeddingModel { selector: String },
     #[error("unknown ASR model selector `{selector}`")]
     UnknownAsrModel { selector: String },
+    #[error("unknown TTS model selector `{selector}`")]
+    UnknownTtsModel { selector: String },
     #[error("unknown chat model selector `{selector}`")]
     UnknownChatModel { selector: String },
     #[error("unknown model selector `{selector}`")]
@@ -539,6 +544,8 @@ pub struct ResolvedModelDescriptor {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ModelSelector {
+    #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+    Tts(TtsModels),
     #[cfg(any(
         feature = "model-sherpa-onnx-streaming",
         feature = "model-whisper-base-en"
@@ -565,12 +572,15 @@ pub enum ModelSelector {
     feature = "model-qwen3-embedding-06b",
     feature = "model-gemma4-e2b",
     feature = "model-gemma4-e2b-gguf",
+    feature = "model-piper-en-us-ljspeech-medium",
     feature = "model-sherpa-onnx-streaming",
     feature = "model-whisper-base-en",
 ))]
 impl ModelSelector {
     pub fn as_str(&self) -> String {
         match self {
+            #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+            Self::Tts(model) => format!("tts:{}", model.as_str()),
             #[cfg(any(
                 feature = "model-sherpa-onnx-streaming",
                 feature = "model-whisper-base-en"
@@ -593,6 +603,8 @@ impl ModelSelector {
 
     pub fn bundle_id(&self) -> BundleId {
         match self {
+            #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+            Self::Tts(model) => model.bundle_id(),
             #[cfg(any(
                 feature = "model-sherpa-onnx-streaming",
                 feature = "model-whisper-base-en"
@@ -615,6 +627,8 @@ impl ModelSelector {
 
     pub fn descriptor(&self) -> BundleDescriptor {
         match self {
+            #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+            Self::Tts(model) => model.descriptor(),
             #[cfg(any(
                 feature = "model-sherpa-onnx-streaming",
                 feature = "model-whisper-base-en"
@@ -637,6 +651,8 @@ impl ModelSelector {
 
     pub fn bundle(&self) -> Box<dyn ModelBundle> {
         match self {
+            #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+            Self::Tts(model) => model.bundle(),
             #[cfg(any(
                 feature = "model-sherpa-onnx-streaming",
                 feature = "model-whisper-base-en"
@@ -665,6 +681,7 @@ impl ModelSelector {
     feature = "model-qwen3-embedding-06b",
     feature = "model-gemma4-e2b",
     feature = "model-gemma4-e2b-gguf",
+    feature = "model-piper-en-us-ljspeech-medium",
     feature = "model-sherpa-onnx-streaming",
     feature = "model-whisper-base-en",
 ))]
@@ -678,6 +695,21 @@ impl FromStr for ModelSelector {
     type Err = ModelsError;
 
     fn from_str(value: &str) -> Result<Self> {
+        if let Some(raw) = value.strip_prefix("tts:") {
+            #[cfg(not(feature = "model-piper-en-us-ljspeech-medium"))]
+            if raw == tts::PIPER_EN_US_LJSPEECH_MEDIUM_SELECTOR {
+                return Err(ModelsError::ModelUnavailable {
+                    selector: value.to_owned(),
+                });
+            }
+            #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+            return Ok(Self::Tts(raw.parse()?));
+            #[cfg(not(feature = "model-piper-en-us-ljspeech-medium"))]
+            return Err(ModelsError::UnknownModelSelector {
+                selector: value.to_owned(),
+            });
+        }
+
         if let Some(raw) = value.strip_prefix("chat:") {
             #[cfg(not(feature = "model-gemma4-e2b"))]
             if raw == chat::GEMMA4_E2B_SELECTOR {
@@ -838,6 +870,8 @@ impl Catalog {
         chat::qwen3_4b_gguf::register(&mut catalog);
         #[cfg(feature = "model-gemma4-e2b-gguf")]
         chat::gemma4_e2b_gguf::register(&mut catalog);
+        #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+        tts::piper_en_us_ljspeech_medium::register(&mut catalog);
         #[cfg(feature = "model-sherpa-onnx-streaming")]
         asr::sherpa_onnx_streaming_en::register(&mut catalog);
         #[cfg(feature = "model-whisper-base-en")]
@@ -1559,6 +1593,49 @@ mod tests {
             err,
             ModelsError::ModelUnavailable { selector }
             if selector == "chat:google/gemma4_e2b"
+        ));
+    }
+
+    #[test]
+    fn tts_models_round_trip_string_selectors() {
+        #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+        {
+            let model: TtsModels = "piper/en_us_ljspeech_medium"
+                .parse()
+                .expect("known TTS selector should parse");
+
+            assert_eq!(model, TtsModels::PiperEnUsLjspeechMedium);
+            assert_eq!(model.to_string(), "piper/en_us_ljspeech_medium");
+        }
+    }
+
+    #[test]
+    fn model_selector_parses_tts_prefix() {
+        #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+        {
+            let selector: ModelSelector = "tts:piper/en_us_ljspeech_medium"
+                .parse()
+                .expect("known TTS selector should parse");
+
+            assert_eq!(
+                selector,
+                ModelSelector::Tts(TtsModels::PiperEnUsLjspeechMedium)
+            );
+            assert_eq!(selector.to_string(), "tts:piper/en_us_ljspeech_medium");
+        }
+    }
+
+    #[cfg(not(feature = "model-piper-en-us-ljspeech-medium"))]
+    #[test]
+    fn tts_selector_reports_unavailable_for_disabled_bundles() {
+        let err = "tts:piper/en_us_ljspeech_medium"
+            .parse::<ModelSelector>()
+            .expect_err("disabled known TTS selector should be unavailable");
+
+        assert!(matches!(
+            err,
+            ModelsError::ModelUnavailable { selector }
+            if selector == "tts:piper/en_us_ljspeech_medium"
         ));
     }
 

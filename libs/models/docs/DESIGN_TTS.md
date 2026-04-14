@@ -1,11 +1,12 @@
 # TTS Model Support Design
 
-## Status: Draft
+## Status: Implemented (Phase 1 Piper Slice)
 
 ## Change Log
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-14 | @codex-tts | Implemented the Phase 1 Piper slice with additive `SpeechModel` / `SpeechStream` contracts, a shared `motlie-model-ort` ONNX helper reused by the sherpa backend, a `motlie-model-piper` backend using eSpeak-ng phonemization plus Piper sidecar parsing, the curated `piper_en_us_ljspeech_medium` bundle, and the `models_tts_v0_1` example/validation path. |
 | 2026-04-14 | @codex-tts | Addressed R1 review by defining the Qwen3-TTS phase-2 slice, adding the shared ONNX Runtime refactor target with the ASR sherpa-onnx path, removing the duplicate speaker-selection knob from `SpeechParams`, tightening `SpeechStream` state semantics, and switching the planned example naming to a capability-specific path that does not collide with ASR `v0.5`. |
 | 2026-04-13 | @codex-tts | Initial brownfield design for a text-to-speech vertical slice in the Motlie model stack. Evaluates local-first TTS candidates, recommends a Piper ONNX bundle as the first implementation, and defines a streamed PCM output contract that mirrors the ASR PCM input shape. |
 
@@ -217,6 +218,11 @@ Recommended first bundle:
 - capability surface: streamed speech synthesis only
 - primary deployment targets: Linux and macOS CPU
 - optional acceleration target: CUDA builds that enable the ORT CUDA provider
+
+Current implementation note:
+
+- the v1 backend preserves the streamed PCM contract but synthesizes the utterance during `open_stream()` and then exposes buffered `S16Le` PCM through `next_chunk()`
+- this keeps the public stream contract stable while the first Piper slice proves artifact resolution, phonemization, ONNX inference, and sink integration end to end
 
 ### Why `en_US-ljspeech-medium`
 

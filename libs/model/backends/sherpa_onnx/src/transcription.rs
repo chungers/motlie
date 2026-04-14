@@ -7,22 +7,22 @@ use async_trait::async_trait;
 use kaldi_native_fbank::fbank::{FbankComputer, FbankOptions};
 use kaldi_native_fbank::mel::MelOptions;
 use kaldi_native_fbank::online::{FeatureComputer, OnlineFeature};
-#[cfg(feature = "cuda")]
-use motlie_model::metrics_runtime::should_force_cpu;
 use motlie_model::{
     AudioSpec, BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
     CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
     LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot, PcmChunk,
-    PcmEncoding, QuantizationSupport, ResolvedCheckpoint, StartOptions, TranscriptSegment,
-    TranscriptionModel, TranscriptionParams, TranscriptionStream, TranscriptionUpdate,
+    PcmEncoding, QuantizationSupport, ResolvedCheckpoint, SpeechModel, StartOptions,
+    TranscriptSegment, TranscriptionModel, TranscriptionParams, TranscriptionStream,
+    TranscriptionUpdate,
 };
+use motlie_model_ort::build_session;
 use ndarray::ArrayView3;
 use ort::session::{Session, SessionInputValue};
 use ort::value::{DynValue, Tensor};
 
 use crate::common::{
-    RuntimeMetricState, SherpaArtifactPaths, SherpaArtifactSpec, configure_artifact_policy,
-    lock_metrics, observe_latency, observe_memory, resolve_onnx_artifacts,
+    configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
+    resolve_onnx_artifacts, RuntimeMetricState, SherpaArtifactPaths, SherpaArtifactSpec,
 };
 
 const SHERPA_ONNX_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Onnx];
@@ -243,6 +243,10 @@ impl BundleHandle for SherpaOnnxHandle {
         ))
     }
 
+    fn speech(&self) -> Result<&dyn SpeechModel, ModelError> {
+        Err(ModelError::UnsupportedCapability(CapabilityKind::Speech))
+    }
+
     fn transcription(&self) -> Result<&dyn TranscriptionModel, ModelError> {
         Ok(self)
     }
@@ -411,10 +415,13 @@ impl TokenTable {
 }
 
 fn load_runtime(artifacts: &SherpaArtifactPaths) -> Result<SherpaOnnxRuntime, ModelError> {
-    let encoder = build_session(&artifacts.encoder)?;
-    let config = ZipformerConfig::from_sessions(&encoder, &build_session(&artifacts.decoder)?)?;
-    let decoder = build_session(&artifacts.decoder)?;
-    let joiner = build_session(&artifacts.joiner)?;
+    let encoder = build_session("sherpa-onnx", &artifacts.encoder)?;
+    let config = ZipformerConfig::from_sessions(
+        &encoder,
+        &build_session("sherpa-onnx", &artifacts.decoder)?,
+    )?;
+    let decoder = build_session("sherpa-onnx", &artifacts.decoder)?;
+    let joiner = build_session("sherpa-onnx", &artifacts.joiner)?;
     let tokens = TokenTable::from_path(&artifacts.tokens)?;
 
     Ok(SherpaOnnxRuntime {
@@ -427,35 +434,6 @@ fn load_runtime(artifacts: &SherpaArtifactPaths) -> Result<SherpaOnnxRuntime, Mo
         },
         tokens,
     })
-}
-
-fn build_session(model_path: &Path) -> Result<Session, ModelError> {
-    let mut builder = Session::builder().map_err(|err| ModelError::BackendInitialization {
-        backend: "sherpa-onnx",
-        message: format!("failed to create ONNX Runtime session builder: {err}"),
-    })?;
-
-    #[cfg(feature = "cuda")]
-    let builder = if should_force_cpu() {
-        builder
-    } else {
-        builder
-            .with_execution_providers([ort::ep::CUDA::default().build()])
-            .map_err(|err| ModelError::BackendInitialization {
-                backend: "sherpa-onnx",
-                message: format!("failed to configure CUDA execution provider: {err}"),
-            })?
-    };
-
-    builder
-        .commit_from_file(model_path)
-        .map_err(|err| ModelError::BackendInitialization {
-            backend: "sherpa-onnx",
-            message: format!(
-                "failed to load ONNX model from `{}`: {err}",
-                model_path.display()
-            ),
-        })
 }
 
 impl ZipformerConfig {
@@ -1317,11 +1295,9 @@ mod tests {
 
         assert_eq!(adapter.supported_formats(), &[CheckpointFormat::Onnx]);
         assert_eq!(adapter.backend_kind(), BackendKind::SherpaOnnx);
-        assert!(
-            adapter
-                .capabilities()
-                .supports(CapabilityKind::Transcription)
-        );
+        assert!(adapter
+            .capabilities()
+            .supports(CapabilityKind::Transcription));
         assert_eq!(adapter.quantization(), &QuantizationSupport::none());
     }
 
@@ -1387,10 +1363,9 @@ mod tests {
                 .expect_err("metadata length mismatch should fail");
 
         assert!(matches!(err, ModelError::BackendInitialization { .. }));
-        assert!(
-            err.to_string()
-                .contains("zipformer encoder metadata length mismatch")
-        );
+        assert!(err
+            .to_string()
+            .contains("zipformer encoder metadata length mismatch"));
     }
 
     #[test]
