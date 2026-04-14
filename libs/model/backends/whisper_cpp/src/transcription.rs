@@ -6,10 +6,9 @@ use async_trait::async_trait;
 use motlie_model::{
     AudioSpec, BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
     CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
-    LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity,
-    ModelMetricSnapshot, PcmChunk, PcmEncoding, QuantizationSupport, ResolvedCheckpoint,
-    StartOptions, TranscriptSegment, TranscriptionModel, TranscriptionParams, TranscriptionStream,
-    TranscriptionUpdate,
+    LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot, PcmChunk,
+    PcmEncoding, QuantizationSupport, ResolvedCheckpoint, StartOptions, TranscriptSegment,
+    TranscriptionModel, TranscriptionParams, TranscriptionStream, TranscriptionUpdate,
 };
 
 use crate::common::{
@@ -18,6 +17,15 @@ use crate::common::{
 };
 
 const WHISPER_CPP_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Ggml];
+
+/// Whisper expects mono 16 kHz f32 PCM.
+const WHISPER_SAMPLE_RATE: u32 = 16_000;
+
+/// Decode step: trigger a decode every 500ms of new audio (8000 samples at 16kHz).
+const DECODE_STEP_SAMPLES: usize = WHISPER_SAMPLE_RATE as usize / 2;
+
+/// Rolling window: decode the last 5 seconds of audio (80000 samples at 16kHz).
+const WINDOW_SAMPLES: usize = WHISPER_SAMPLE_RATE as usize * 5;
 
 /// Static bundle specification for a curated whisper.cpp-backed ASR stack.
 #[derive(Clone, Debug)]
@@ -80,8 +88,12 @@ impl BackendAdapter for WhisperCppTranscriptionAdapter {
         &self,
         identity: &ModelIdentity,
         checkpoint: &ResolvedCheckpoint,
-        _options: StartOptions,
+        options: StartOptions,
     ) -> Result<Box<dyn BundleHandle>, ModelError> {
+        // Reject unsupported quantization requests explicitly.
+        self.quantization
+            .resolve(options.quantization, &identity.id)?;
+
         let model_path = resolve_ggml_model_path(checkpoint)?;
         let ctx = load_whisper_model(&model_path)?;
 
@@ -131,6 +143,11 @@ impl ModelBundle for WhisperCppTranscriptionBundle {
     }
 
     async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
+        // Reject unsupported quantization requests explicitly.
+        self.metadata
+            .quantization
+            .resolve(options.quantization, &self.metadata.id)?;
+
         let model_path = if let Some(artifact_policy) = options.artifact_policy {
             configure_artifact_policy(self.model_filename, artifact_policy)?
         } else {
@@ -166,7 +183,10 @@ fn load_whisper_model(
         })?, params)
         .map_err(|err| ModelError::BackendInitialization {
             backend: "whisper-cpp",
-            message: format!("failed to load whisper model from `{}`: {err}", model_path.display()),
+            message: format!(
+                "failed to load whisper model from `{}`: {err}",
+                model_path.display()
+            ),
         })?;
 
     Ok(Arc::new(ctx))
@@ -250,6 +270,8 @@ impl TranscriptionModel for WhisperCppHandle {
             spec,
             params,
             pcm_buffer: Vec::new(),
+            samples_at_last_decode: 0,
+            committed_segment_count: 0,
             last_sequence: None,
             end_of_stream_received: false,
             metrics: Arc::clone(&self.metrics),
@@ -284,54 +306,117 @@ fn new_transcription_handle(
 }
 
 // ---------------------------------------------------------------------------
-// Streaming runtime
+// Audio normalization: resample to 16kHz mono f32
 // ---------------------------------------------------------------------------
 
-/// Decode step interval in seconds worth of audio samples.
-const DECODE_STEP_SAMPLES: usize = 16_000 / 2; // 500ms at 16kHz
+/// Decode raw PCM bytes into f32 samples according to the stream's encoding.
+fn decode_pcm_to_f32(data: &[u8], encoding: PcmEncoding) -> Result<Vec<f32>, ModelError> {
+    match encoding {
+        PcmEncoding::S16Le => {
+            if !data.len().is_multiple_of(2) {
+                return Err(ModelError::InvalidConfiguration(
+                    "S16Le PCM data length must be even".into(),
+                ));
+            }
+            Ok(data
+                .chunks_exact(2)
+                .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
+                .collect())
+        }
+        PcmEncoding::F32Le => {
+            if !data.len().is_multiple_of(4) {
+                return Err(ModelError::InvalidConfiguration(
+                    "F32Le PCM data length must be a multiple of 4".into(),
+                ));
+            }
+            Ok(data
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .collect())
+        }
+    }
+}
+
+/// Downmix multi-channel audio to mono by averaging channels.
+fn downmix_to_mono(samples: &[f32], channels: u16) -> Vec<f32> {
+    if channels <= 1 {
+        return samples.to_vec();
+    }
+    let ch = channels as usize;
+    samples
+        .chunks_exact(ch)
+        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+        .collect()
+}
+
+/// Resample audio from `src_rate` to `dst_rate` using linear interpolation.
+///
+/// This is a simple resampler suitable for the v1 ASR vertical slice. A
+/// higher-quality resampler (e.g., sinc-based) can replace this if needed.
+fn resample_linear(samples: &[f32], src_rate: u32, dst_rate: u32) -> Vec<f32> {
+    if src_rate == dst_rate || samples.is_empty() {
+        return samples.to_vec();
+    }
+
+    let ratio = src_rate as f64 / dst_rate as f64;
+    let output_len = ((samples.len() as f64) / ratio).ceil() as usize;
+    let mut output = Vec::with_capacity(output_len);
+
+    for i in 0..output_len {
+        let src_pos = i as f64 * ratio;
+        let idx = src_pos as usize;
+        let frac = src_pos - idx as f64;
+
+        let sample = if idx + 1 < samples.len() {
+            samples[idx] as f64 * (1.0 - frac) + samples[idx + 1] as f64 * frac
+        } else if idx < samples.len() {
+            samples[idx] as f64
+        } else {
+            0.0
+        };
+        output.push(sample as f32);
+    }
+
+    output
+}
+
+/// Full normalization pipeline: decode → downmix → resample → mono 16kHz f32.
+fn normalize_chunk(
+    data: &[u8],
+    spec: &AudioSpec,
+) -> Result<Vec<f32>, ModelError> {
+    let decoded = decode_pcm_to_f32(data, spec.encoding)?;
+    let mono = downmix_to_mono(&decoded, spec.channels);
+    Ok(resample_linear(&mono, spec.sample_rate_hz, WHISPER_SAMPLE_RATE))
+}
+
+// ---------------------------------------------------------------------------
+// Streaming runtime
+// ---------------------------------------------------------------------------
 
 struct WhisperCppStream {
     ctx: Arc<whisper_rs::WhisperContext>,
     spec: AudioSpec,
     params: TranscriptionParams,
+    /// Accumulated mono 16kHz f32 PCM ready for whisper.
     pcm_buffer: Vec<f32>,
+    /// Buffer length at the time of the last decode, used to detect step boundaries.
+    samples_at_last_decode: usize,
+    /// Number of segments from the previous decode that have been committed (emitted as final).
+    committed_segment_count: usize,
     last_sequence: Option<u64>,
     end_of_stream_received: bool,
     metrics: Arc<Mutex<AsrMetrics>>,
 }
 
 impl WhisperCppStream {
-    fn normalize_and_append(&mut self, chunk: &PcmChunk) -> Result<(), ModelError> {
-        match self.spec.encoding {
-            PcmEncoding::S16Le => {
-                if chunk.data.len() % 2 != 0 {
-                    return Err(ModelError::InvalidConfiguration(
-                        "S16Le PCM data length must be even".into(),
-                    ));
-                }
-                for sample_bytes in chunk.data.chunks_exact(2) {
-                    let sample = i16::from_le_bytes([sample_bytes[0], sample_bytes[1]]);
-                    self.pcm_buffer.push(sample as f32 / 32768.0);
-                }
-            }
-            PcmEncoding::F32Le => {
-                if chunk.data.len() % 4 != 0 {
-                    return Err(ModelError::InvalidConfiguration(
-                        "F32Le PCM data length must be a multiple of 4".into(),
-                    ));
-                }
-                for sample_bytes in chunk.data.chunks_exact(4) {
-                    let sample =
-                        f32::from_le_bytes([sample_bytes[0], sample_bytes[1], sample_bytes[2], sample_bytes[3]]);
-                    self.pcm_buffer.push(sample);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn run_decode(&self) -> Result<TranscriptionUpdate, ModelError> {
+    /// Decode the rolling window and return new segments, respecting `emit_partials`.
+    fn run_decode(&mut self, is_final: bool) -> Result<TranscriptionUpdate, ModelError> {
         let started_at = Instant::now();
+
+        // Use the rolling window: decode the last WINDOW_SAMPLES (or entire buffer if shorter).
+        let window_start = self.pcm_buffer.len().saturating_sub(WINDOW_SAMPLES);
+        let window = &self.pcm_buffer[window_start..];
 
         let mut state = self.ctx.create_state().map_err(|err| {
             ModelError::BackendExecution {
@@ -341,7 +426,8 @@ impl WhisperCppStream {
             }
         })?;
 
-        let mut params = whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
+        let mut params =
+            whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
         if let Some(ref lang) = self.params.language {
             params.set_language(Some(lang));
         }
@@ -352,7 +438,7 @@ impl WhisperCppStream {
         params.set_single_segment(false);
 
         state
-            .full(params, &self.pcm_buffer)
+            .full(params, window)
             .map_err(|err| ModelError::BackendExecution {
                 backend: "whisper-cpp",
                 operation: "full",
@@ -365,10 +451,12 @@ impl WhisperCppStream {
                 operation: "full_n_segments",
                 message: err.to_string(),
             }
-        })?;
+        })? as usize;
 
-        let mut segments = Vec::with_capacity(num_segments as usize);
-        for i in 0..num_segments {
+        // Collect all decoded segments with timing relative to the window start.
+        let window_offset_ms = (window_start as u64 * 1000) / WHISPER_SAMPLE_RATE as u64;
+        let mut all_segments = Vec::with_capacity(num_segments);
+        for i in 0..num_segments as i32 {
             let text = state.full_get_segment_text(i).map_err(|err| {
                 ModelError::BackendExecution {
                     backend: "whisper-cpp",
@@ -391,13 +479,50 @@ impl WhisperCppStream {
                 }
             })?;
 
-            segments.push(TranscriptSegment {
-                start_ms: (start * 10) as u64,
-                end_ms: (end * 10) as u64,
+            all_segments.push(TranscriptSegment {
+                start_ms: window_offset_ms + (start * 10) as u64,
+                end_ms: window_offset_ms + (end * 10) as u64,
                 text,
-                final_segment: true,
+                final_segment: false, // will be set below
             });
         }
+
+        // Determine which segments are new (not yet committed).
+        let new_start = self.committed_segment_count.min(all_segments.len());
+        let mut output_segments = Vec::new();
+
+        if is_final {
+            // On finish: all segments from new_start onward are final.
+            for seg in &mut all_segments[new_start..] {
+                seg.final_segment = true;
+                output_segments.push(seg.clone());
+            }
+            self.committed_segment_count = all_segments.len();
+        } else if self.params.emit_partials {
+            // Streaming with partials: segments except the last are final (stable),
+            // the last is partial (may still be extended by incoming audio).
+            let new_segments = &mut all_segments[new_start..];
+            let new_len = new_segments.len();
+            for (i, seg) in new_segments.iter_mut().enumerate() {
+                seg.final_segment = i < new_len.saturating_sub(1);
+                output_segments.push(seg.clone());
+            }
+            // Commit the final segments (all except the last partial).
+            let finals_emitted = new_len.saturating_sub(1);
+            self.committed_segment_count = new_start + finals_emitted;
+        } else {
+            // No partials: commit all except the last segment, emit only committed ones.
+            let new_segments = &mut all_segments[new_start..];
+            let new_len = new_segments.len();
+            let finals_to_emit = new_len.saturating_sub(1);
+            for seg in new_segments.iter_mut().take(finals_to_emit) {
+                seg.final_segment = true;
+                output_segments.push(seg.clone());
+            }
+            self.committed_segment_count = new_start + finals_to_emit;
+        }
+
+        self.samples_at_last_decode = self.pcm_buffer.len();
 
         let elapsed = started_at.elapsed();
         {
@@ -405,7 +530,9 @@ impl WhisperCppStream {
             observe_latency(&mut m.runtime, elapsed);
         }
 
-        Ok(TranscriptionUpdate { segments })
+        Ok(TranscriptionUpdate {
+            segments: output_segments,
+        })
     }
 }
 
@@ -443,12 +570,14 @@ impl TranscriptionStream for WhisperCppStream {
         }
 
         if !chunk.data.is_empty() {
-            self.normalize_and_append(&chunk)?;
+            let normalized = normalize_chunk(&chunk.data, &self.spec)?;
+            self.pcm_buffer.extend(normalized);
         }
 
-        // Trigger decode when we have enough samples
-        if self.pcm_buffer.len() >= DECODE_STEP_SAMPLES {
-            let update = self.run_decode()?;
+        // Trigger decode when enough new audio has accumulated since last decode.
+        let new_samples = self.pcm_buffer.len() - self.samples_at_last_decode;
+        if new_samples >= DECODE_STEP_SAMPLES {
+            let update = self.run_decode(false)?;
             if update.segments.is_empty() {
                 return Ok(None);
             }
@@ -458,11 +587,11 @@ impl TranscriptionStream for WhisperCppStream {
         Ok(None)
     }
 
-    async fn finish(self: Box<Self>) -> Result<TranscriptionUpdate, ModelError> {
+    async fn finish(mut self: Box<Self>) -> Result<TranscriptionUpdate, ModelError> {
         if self.pcm_buffer.is_empty() {
             return Ok(TranscriptionUpdate::default());
         }
-        self.run_decode()
+        self.run_decode(true)
     }
 }
 
@@ -488,27 +617,32 @@ mod tests {
 
         assert_eq!(adapter.supported_formats(), &[CheckpointFormat::Ggml]);
         assert_eq!(adapter.backend_kind(), BackendKind::WhisperCpp);
-        assert!(adapter.capabilities().supports(CapabilityKind::Transcription));
+        assert!(
+            adapter
+                .capabilities()
+                .supports(CapabilityKind::Transcription)
+        );
         assert_eq!(adapter.quantization(), &QuantizationSupport::none());
     }
 
     #[test]
     fn bundle_metadata_matches_spec() {
-        let bundle = WhisperCppTranscriptionBundle::new(
-            WhisperCppTranscriptionSpec::whisper_base_en(),
-        );
+        let bundle =
+            WhisperCppTranscriptionBundle::new(WhisperCppTranscriptionSpec::whisper_base_en());
 
         assert_eq!(bundle.id().as_str(), "whisper_base_en");
-        assert!(bundle.capabilities().supports(CapabilityKind::Transcription));
+        assert!(
+            bundle
+                .capabilities()
+                .supports(CapabilityKind::Transcription)
+        );
         assert_eq!(bundle.metadata().quantization, QuantizationSupport::none());
     }
 
     #[test]
     fn s16le_normalization_produces_correct_f32_range() {
-        // Test the normalization math in isolation without requiring a WhisperContext.
         let max_s16: i16 = i16::MAX;
         let bytes = max_s16.to_le_bytes();
-        // S16Le: divide by 32768.0 to normalize to [-1.0, 1.0)
         let normalized = i16::from_le_bytes([bytes[0], bytes[1]]) as f32 / 32768.0;
         assert!((normalized - (32767.0 / 32768.0)).abs() < 1e-5);
 
@@ -516,5 +650,64 @@ mod tests {
         let bytes = min_s16.to_le_bytes();
         let normalized = i16::from_le_bytes([bytes[0], bytes[1]]) as f32 / 32768.0;
         assert!((normalized - (-1.0)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn downmix_stereo_to_mono_averages_channels() {
+        let stereo = vec![1.0f32, -1.0, 0.5, 0.5, 0.0, 0.0];
+        let mono = downmix_to_mono(&stereo, 2);
+
+        assert_eq!(mono.len(), 3);
+        assert!((mono[0] - 0.0).abs() < 1e-6);
+        assert!((mono[1] - 0.5).abs() < 1e-6);
+        assert!((mono[2] - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn downmix_mono_is_passthrough() {
+        let mono = vec![1.0f32, 0.5, -0.5];
+        let result = downmix_to_mono(&mono, 1);
+
+        assert_eq!(result, mono);
+    }
+
+    #[test]
+    fn resample_same_rate_is_passthrough() {
+        let samples = vec![1.0f32, 2.0, 3.0];
+        let result = resample_linear(&samples, 16000, 16000);
+
+        assert_eq!(result, samples);
+    }
+
+    #[test]
+    fn resample_halves_sample_count_for_2x_downsample() {
+        // 32kHz → 16kHz should roughly halve the sample count.
+        let samples: Vec<f32> = (0..100).map(|i| i as f32).collect();
+        let result = resample_linear(&samples, 32000, 16000);
+
+        // Output should be approximately half the input length.
+        assert!(result.len() >= 49 && result.len() <= 51);
+    }
+
+    #[test]
+    fn normalize_chunk_downmixes_and_resamples() {
+        // 2-channel S16Le at 32kHz: 4 stereo frames → 2 mono samples at 16kHz (approx)
+        let spec = AudioSpec {
+            sample_rate_hz: 32_000,
+            channels: 2,
+            encoding: PcmEncoding::S16Le,
+        };
+        // 4 stereo frames = 8 i16 samples = 16 bytes
+        let mut data = Vec::new();
+        for _ in 0..8 {
+            data.extend_from_slice(&1000i16.to_le_bytes());
+        }
+
+        let result = normalize_chunk(&data, &spec).expect("normalization should succeed");
+
+        // After downmix: 4 mono samples; after resample 32k→16k: ~2 samples
+        assert!(!result.is_empty());
+        // All values should be valid finite floats
+        assert!(result.iter().all(|v| v.is_finite()));
     }
 }
