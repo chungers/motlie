@@ -324,6 +324,11 @@ struct NormalizerState {
     /// Fractional resampler position carried across chunks so that linear
     /// interpolation is phase-continuous at chunk boundaries.
     resample_cursor: f64,
+    /// The last mono sample from the previous chunk, retained so that
+    /// cross-chunk linear interpolation can reference it. Without this, the
+    /// resampler would duplicate the boundary sample instead of interpolating
+    /// between the last sample of chunk N and the first sample of chunk N+1.
+    carry_sample: Option<f32>,
 }
 
 impl NormalizerState {
@@ -332,6 +337,7 @@ impl NormalizerState {
             pending_bytes: Vec::new(),
             pending_channel_samples: Vec::new(),
             resample_cursor: 0.0,
+            carry_sample: None,
         }
     }
 
@@ -384,30 +390,54 @@ impl NormalizerState {
                 .collect()
         };
 
-        // 3. Resample to 16 kHz with phase-continuous cursor.
+        // 3. Resample to 16 kHz with phase-continuous cursor and carry sample.
+        //
+        // The carry sample is the last mono sample from the previous chunk.
+        // It's prepended to the current chunk's mono data so that linear
+        // interpolation can reference both sides of the chunk boundary.
+        //
+        // Cursor convention: `resample_cursor` is the fractional source
+        // position relative to the start of the `samples` array (which
+        // includes the prepended carry at index 0, if present).
         if spec.sample_rate_hz == WHISPER_SAMPLE_RATE || mono.is_empty() {
+            if let Some(&last) = mono.last() {
+                self.carry_sample = Some(last);
+            }
             return Ok(mono);
         }
+
+        // Build the interpolation array: [carry?, mono[0], mono[1], ...]
+        let samples: Vec<f32> = if let Some(carry) = self.carry_sample {
+            let mut s = Vec::with_capacity(1 + mono.len());
+            s.push(carry);
+            s.extend_from_slice(&mono);
+            s
+        } else {
+            mono
+        };
 
         let ratio = spec.sample_rate_hz as f64 / WHISPER_SAMPLE_RATE as f64;
         let mut output = Vec::new();
         let mut cursor = self.resample_cursor;
 
-        while cursor < mono.len() as f64 {
+        // Interpolate while both neighbors are available.
+        while (cursor as usize) + 1 < samples.len() {
             let idx = cursor as usize;
             let frac = cursor - idx as f64;
-
-            let sample = if idx + 1 < mono.len() {
-                mono[idx] as f64 * (1.0 - frac) + mono[idx + 1] as f64 * frac
-            } else {
-                mono[idx] as f64
-            };
-            output.push(sample as f32);
+            let interpolated =
+                samples[idx] as f64 * (1.0 - frac) + samples[idx + 1] as f64 * frac;
+            output.push(interpolated as f32);
             cursor += ratio;
         }
 
-        // Carry the fractional cursor for the next chunk, offset by the samples consumed.
-        self.resample_cursor = cursor - mono.len() as f64;
+        // The last sample in `samples` becomes the carry for the next chunk.
+        // The next call will prepend it at index 0, so the cursor must be
+        // expressed relative to that future array where carry is at index 0.
+        // Currently, carry is at index `samples.len() - 1`. After prepend it
+        // will be at index 0, so offset the cursor by `-(samples.len() - 1)`.
+        let last_idx = samples.len().saturating_sub(1) as f64;
+        self.resample_cursor = (cursor - last_idx).max(0.0);
+        self.carry_sample = samples.last().copied();
 
         Ok(output)
     }
@@ -757,6 +787,44 @@ mod tests {
         for w in combined.windows(2) {
             assert!(w[1] >= w[0], "resampled ramp should be monotonic");
         }
+    }
+
+    #[test]
+    fn normalizer_resampler_interpolates_across_chunk_boundary() {
+        // Repro from R3 review: upsample 8kHz → 16kHz with one-source-sample
+        // chunks. The midpoint sample must be a linear interpolation between
+        // adjacent source samples, not a duplicate of the prior sample.
+        let spec = AudioSpec {
+            sample_rate_hz: 8_000,
+            channels: 1,
+            encoding: PcmEncoding::F32Le,
+        };
+        let mut norm = NormalizerState::new();
+
+        // Source: [0.0, 1.0] at 8kHz → expected ~[0.0, 0.5, 1.0] at 16kHz
+        // Send as two single-sample chunks to exercise cross-chunk interpolation.
+        let chunk1: Vec<u8> = (0.0f32).to_le_bytes().to_vec();
+        let out1 = norm.normalize(&chunk1, &spec).expect("chunk 1");
+
+        let chunk2: Vec<u8> = (1.0f32).to_le_bytes().to_vec();
+        let out2 = norm.normalize(&chunk2, &spec).expect("chunk 2");
+
+        let combined: Vec<f32> = out1.into_iter().chain(out2).collect();
+
+        // We expect approximately 3 output samples for 2 input samples (2x upsample).
+        // The key invariant: the midpoint sample is ~0.5 (interpolated), not 0.0 (duplicated).
+        assert!(
+            combined.len() >= 2,
+            "expected at least 2 output samples for 8kHz→16kHz upsample of 2 source samples, got {}",
+            combined.len()
+        );
+
+        // Find the sample closest to the midpoint and verify it's interpolated.
+        let has_interpolated_midpoint = combined.iter().any(|&v| (v - 0.5).abs() < 0.15);
+        assert!(
+            has_interpolated_midpoint,
+            "expected an interpolated midpoint sample near 0.5, got: {combined:?}"
+        );
     }
 
     #[test]
