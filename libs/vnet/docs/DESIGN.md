@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-13 | @codex-vz | Add [`DESIGN_XBACKENDS.md`](./DESIGN_XBACKENDS.md) as the detailed cross-backend evolution plan: preserve the no-host-config-drift/all-userspace/ephemeral-lifetime requirements while splitting `motlie-vnet` into a reusable slirp/policy/flow core plus thin hypervisor adapters |
 | 2026-04-06 | @codex | Re-baseline docs around the implemented `v1.2` harness: `motlie-vnet` owns the `v1.2+` example line, the current composed flow lives under `libs/vnet/examples/v1.2`, and the design now distinguishes current implementation from future standalone/demo targets |
 | 2026-04-03 | @codex | Address final PR review nits: align `VnetError` variants with PLAN and remove stale `--net-mode` wording |
 | 2026-04-03 | @codex | Address review follow-ups: document why long-term SSH ingress moves into a host-side proxy, make short-term dual-NIC route ownership explicit, and align migration/docs with the public `start()` / `VnetHandle` API |
@@ -48,6 +49,16 @@ Provide guest internet access with **zero host networking configuration** and
 **no elevated privileges** — the host-side binary runs as a regular user with
 no capabilities, no sudo, and no kernel module requirements beyond KVM and
 vhost-vsock (which the user already has via the `kvm` group).
+
+Cross-backend note:
+
+- the detailed plan for preserving these same requirements while evolving toward
+  Vz and future backends lives in
+  [`DESIGN_XBACKENDS.md`](./DESIGN_XBACKENDS.md)
+- that document keeps the same product constraints explicit:
+  - no persistent host network configuration changes
+  - all userspace
+  - runtime networking state is ephemeral and tied to process lifetime
 
 ## Non-Goals
 
@@ -255,6 +266,11 @@ libslirp for user-mode TCP/IP translation.
   host-side ports), it can run each backend in a separate network
   namespace. But this is not required and is outside the scope of
   this library.
+
+  Cross-backend note:
+  - the same no-persistent-host-config-drift requirement applies to the
+    cross-backend split documented in
+    [`DESIGN_XBACKENDS.md`](./DESIGN_XBACKENDS.md)
 
 ### Performance Characteristics
 
