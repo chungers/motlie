@@ -341,6 +341,17 @@ impl NormalizerState {
         }
     }
 
+    /// Flush any deferred state into `pcm_buffer` at end-of-stream.
+    ///
+    /// The resampler defers the final sample when it can't interpolate with the
+    /// next chunk. At EOS there is no next chunk, so we emit the carry sample
+    /// directly — it's the best estimate available without a future neighbor.
+    fn flush(&mut self, pcm_buffer: &mut Vec<f32>) {
+        if let Some(carry) = self.carry_sample.take() {
+            pcm_buffer.push(carry);
+        }
+    }
+
     /// Normalize a chunk of raw PCM bytes into mono 16 kHz f32 samples, carrying
     /// state across chunk boundaries for byte alignment, channel framing, and
     /// resampler phase continuity.
@@ -658,6 +669,10 @@ impl TranscriptionStream for WhisperCppStream {
     }
 
     async fn finish(mut self: Box<Self>) -> Result<TranscriptionUpdate, ModelError> {
+        // Flush the normalizer's carry sample so the final deferred sample
+        // reaches pcm_buffer before the terminal decode.
+        self.normalizer.flush(&mut self.pcm_buffer);
+
         if self.pcm_buffer.is_empty() {
             return Ok(TranscriptionUpdate::default());
         }
