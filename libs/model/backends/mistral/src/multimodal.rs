@@ -9,6 +9,7 @@ use motlie_model::{
     CapabilityKind, ChatModel, ChatRequest, ChatResponse, CheckpointFormat, CompletionModel,
     ContentPart, EmbeddingModel, LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity,
     ModelMetricSnapshot, QuantizationBits, QuantizationSupport, ResolvedCheckpoint, StartOptions,
+    TranscriptionModel,
 };
 
 use crate::common::{
@@ -303,6 +304,12 @@ impl BundleHandle for MistralMultimodalHandle {
     fn embeddings(&self) -> Result<&dyn EmbeddingModel, ModelError> {
         Err(ModelError::UnsupportedCapability(
             CapabilityKind::Embeddings,
+        ))
+    }
+
+    fn transcription(&self) -> Result<&dyn TranscriptionModel, ModelError> {
+        Err(ModelError::UnsupportedCapability(
+            CapabilityKind::Transcription,
         ))
     }
 
