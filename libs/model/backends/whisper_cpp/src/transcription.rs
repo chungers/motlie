@@ -324,6 +324,11 @@ struct NormalizerState {
     /// Fractional resampler position carried across chunks so that linear
     /// interpolation is phase-continuous at chunk boundaries.
     resample_cursor: f64,
+    /// Whether the source sample rate differs from WHISPER_SAMPLE_RATE,
+    /// meaning the resampler is active and may defer terminal samples.
+    /// When false (passthrough), carry_sample is set for state consistency
+    /// but was already emitted — flush() must not re-emit it.
+    resampling_active: bool,
     /// The last mono sample from the previous chunk, retained so that
     /// cross-chunk linear interpolation can reference it. Without this, the
     /// resampler would duplicate the boundary sample instead of interpolating
@@ -337,6 +342,7 @@ impl NormalizerState {
             pending_bytes: Vec::new(),
             pending_channel_samples: Vec::new(),
             resample_cursor: 0.0,
+            resampling_active: false,
             carry_sample: None,
         }
     }
@@ -347,8 +353,13 @@ impl NormalizerState {
     /// next chunk. At EOS there is no next chunk, so we emit the carry sample
     /// directly — it's the best estimate available without a future neighbor.
     fn flush(&mut self, pcm_buffer: &mut Vec<f32>) {
-        if let Some(carry) = self.carry_sample.take() {
-            pcm_buffer.push(carry);
+        // Only emit the carry sample when the resampler is active and actually
+        // deferred a terminal sample. In passthrough mode (16kHz source), the
+        // carry was already emitted during push_chunk — flushing would duplicate.
+        if self.resampling_active {
+            if let Some(carry) = self.carry_sample.take() {
+                pcm_buffer.push(carry);
+            }
         }
     }
 
@@ -411,11 +422,15 @@ impl NormalizerState {
         // position relative to the start of the `samples` array (which
         // includes the prepended carry at index 0, if present).
         if spec.sample_rate_hz == WHISPER_SAMPLE_RATE || mono.is_empty() {
+            // Passthrough: samples already at target rate, no resampler deferral.
+            self.resampling_active = false;
             if let Some(&last) = mono.last() {
                 self.carry_sample = Some(last);
             }
             return Ok(mono);
         }
+
+        self.resampling_active = true;
 
         // Build the interpolation array: [carry?, mono[0], mono[1], ...]
         let samples: Vec<f32> = if let Some(carry) = self.carry_sample {
