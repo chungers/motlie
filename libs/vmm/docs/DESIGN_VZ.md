@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-14 | @codex-vz | Add `DESIGN_GUEST_IMAGE.md` as the owning prerequisite for the Apple Vz guest image pipeline: define the boot artifacts, guest image build options, aarch64 kernel constraints, packaging direction, and the shared-guest-contract vs hypervisor-specific-packaging split |
 | 2026-04-13 | @codex-vz | Address PR 163 review findings: declare the macOS 12 floor, add the helper entitlement/signing and build/discovery story, define the Rust↔Swift config/control contracts, harden readiness, describe vsock/cloud-init delivery, and tighten several factual details |
 | 2026-04-12 | @codex-vz | Initial design for a macOS `backend::vz` that satisfies the current `Runtime` / `VmHandle` contracts with Apple `Virtualization.framework`, recommends a Swift helper process for the first slice, and defines the portability gaps that need small API cleanup in `libs/vmm` |
 
@@ -1053,6 +1054,7 @@ with the CH/Motlie stack. The main gaps are below.
 - Until the Vz image build path is defined as "same guest image contract,
   different hypervisor realization," userspace-management parity remains
   under-specified
+- `DESIGN_GUEST_IMAGE.md` is the owning prerequisite for that work
 
 ### 5. SSH Proxy And Auto-Provision Parity
 
