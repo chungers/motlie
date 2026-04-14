@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-14 | @codex-vz | Align the Vz backend phases with the cross-backend slice order, formalize the hardened SSH auto-provision checks as parity acceptance tests, and replace the stale VFS-parity-definition ambiguity with an explicit `v1.15` feasibility gate |
 | 2026-04-14 | @codex-vz | Add `DESIGN_GUEST_IMAGE.md` as the owning prerequisite for the Apple Vz guest image pipeline: define the boot artifacts, guest image build options, aarch64 kernel constraints, packaging direction, and the shared-guest-contract vs hypervisor-specific-packaging split |
 | 2026-04-13 | @codex-vz | Address PR 163 review findings: declare the macOS 12 floor, add the helper entitlement/signing and build/discovery story, define the Rust↔Swift config/control contracts, harden readiness, describe vsock/cloud-init delivery, and tighten several factual details |
 | 2026-04-12 | @codex-vz | Initial design for a macOS `backend::vz` that satisfies the current `Runtime` / `VmHandle` contracts with Apple `Virtualization.framework`, recommends a Swift helper process for the first slice, and defines the portability gaps that need small API cleanup in `libs/vmm` |
@@ -773,6 +774,23 @@ see them as normal orchestrator failures.
 
 ## Implementation Plan
 
+The phase numbering in this document describes the eventual `backend::vz`
+implementation inside `libs/vmm`.
+
+It does not replace the earlier proving order in
+`libs/vmm/docs/DESIGN_XBACKENDS.md`.
+
+Cross-reference:
+
+| `DESIGN_XBACKENDS.md` stage | Meaning | `DESIGN_VZ.md` relationship |
+|---|---|---|
+| Stage 0 / `v1.05` | guest image/build proof | prerequisite before Vz backend implementation starts |
+| Stage 1 / `v1.15` | managed guestfs proof | prerequisite before Vz backend implementation starts |
+| Stage 2 / `v1.25` | policy-capable egress proof | prerequisite before Vz backend implementation starts |
+| Stage 3 / CH-safe refactors | reusable infra cleanup | prerequisite or parallel prep for implementation |
+| Stage 4 / policy phases | reusable policy semantics | prerequisite for full parity claims |
+| Stage 5 / `v1.45` | full VMM Vz slice | maps to the implementation phases below |
+
 ### Phase 1: Documented contract cleanup
 
 - add `VzHandle` and `BackendHandle::Vz`
@@ -1106,10 +1124,11 @@ with the CH/Motlie stack. The main gaps are below.
   - the existing `auto-provision-ssh` scenario must pass unchanged against a Vz
     backend selection, not just against CH
 
-#### Blocking Items
+#### Acceptance Criteria
 
-- The current design does not yet state that `auto-provision-ssh.json` and
-  `repl-auto-provision-smoke.sh` are acceptance criteria for Vz parity
+- `examples/v1.4/scenarios/auto-provision-ssh.json` must pass unchanged on Vz
+- `examples/v1.4/integration/repl-auto-provision-smoke.sh` must pass unchanged
+  on Vz
 
 ## Parity Summary
 
@@ -1150,10 +1169,17 @@ with the CH/Motlie stack. The main gaps are below.
 ### Blocked Or Still Under-Specified
 
 - bridged/admin-network parity on macOS
-- whether VFS parity means static mount visibility or full managed-filesystem
-  semantics including the current `libs/vfs` policy engine
-- explicit acceptance criterion that the hardened SSH auto-provision tests must
-  pass unchanged on Vz
+- VFS parity is defined as full managed-filesystem semantics in
+  `libs/vfs/docs/DESIGN_XBACKENDS.md`; what remains unproven is whether the
+  `v1.15` guestfs PoC can actually preserve that managed path on Vz
+
+If `v1.15` fails to preserve managed guestfs semantics:
+
+- Vz falls back only to explicitly degraded static `VirtioFS` sharing for
+  bootstrap/debug use
+- that fallback does not count as `motlie-vfs` parity
+- full `v1.45` parity remains blocked until a different managed transport path
+  is designed and proven
 
 ## Explicit Non-Goals for the First Slice
 

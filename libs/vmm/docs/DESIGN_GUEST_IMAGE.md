@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-14 | @codex-vz | Make kernel virtio-driver verification a required image-level gate, document Linux-built artifact publication for macOS CI consumers, and call out the CH vs Vz storage-layout divergence as an explicit follow-up concern |
 | 2026-04-14 | @codex-vz | Initial design for the Apple Vz guest image pipeline: define the boot artifacts for `vz-runner`, compare image-build options, state the aarch64 Linux requirements for `VZLinuxBootLoader` + `VZGenericPlatformConfiguration`, and define how Vz guest images relate to the existing CH image contract |
 
 ## Goal
@@ -116,6 +117,9 @@ Recommended kernel source for phase 1:
   prove the stock kernel insufficient
 - verify that the selected kernel has the virtio-fs, vsock, virtio-net, and
   block drivers needed by the Vz slices before claiming parity
+
+This verification is part of the `v1.05` exit gate, not a soft recommendation.
+Later guestfs and egress PoCs should not fail for image-level driver reasons.
 
 Guest userspace must also assume:
 
@@ -286,9 +290,19 @@ Expected build environments:
   current Debian rootfs tooling is Linux-first
 - macOS developers should consume those produced artifacts directly for `v1.05`
   and later Vz slices
+- macOS CI should also consume Linux-built published artifacts rather than
+  trying to rebuild the guest image natively on every macOS runner
 - if local rebuild-on-macOS becomes necessary, the acceptable fallback is a
   Linux container or VM that runs the same repo-owned image build script rather
   than inventing a separate macOS-native image pipeline
+
+Recommended publication model:
+
+- Linux CI builds and verifies the guest image bundle
+- the resulting kernel/root/initrd/NoCloud artifacts are published to the
+  project artifact store or release bucket
+- macOS developers and macOS CI jobs fetch those reviewed artifacts by version
+  when running `v1.05`, `v1.15`, `v1.25`, and later Vz slices
 
 That means the image pipeline should look like:
 
@@ -425,6 +439,16 @@ They should not be forced to share:
 - root-disk wiring
 - launch-time NoCloud delivery mechanism
 - CH stacked-root `overlay-init` assumptions
+
+This storage-layout divergence is the largest remaining guest-shape mismatch
+between CH and Vz:
+
+- CH examples currently lean on squashfs + ext4 overlay composition
+- Vz phase 1 wants a single writable raw root disk plus a separate NoCloud disk
+
+That divergence is acceptable for the first Vz slices, but it needs an explicit
+follow-up review once `v1.05` proves the image path so guest behavior does not
+drift silently across backends.
 
 So the right mental model is:
 

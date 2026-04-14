@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-14 | @codex-vz | Add the explicit `v1.15` failure decision gate: degraded static `VirtioFS` is allowed only as a bootstrap/debug fallback and does not count as full `motlie-vfs` parity |
 | 2026-04-14 | @codex-vz | Clarify that `motlie-vfs` parity means the full managed-filesystem semantics, move the Vz image PoC to `libs/vmm/examples/v1.05`, and add measurable gates for `v1.05` and `v1.15` |
 | 2026-04-13 | @codex-vz | Add a first-step Apple Vz image-contract phase: prove Vz guest image / cloud-init / guest-binary delivery before the `v1.15` guestfs PoC, then keep the cleanup and `#134` policy work sequenced after those proofs |
 
@@ -93,6 +94,14 @@ Exit gates:
 - a tagged share is visible in the guest
 - an overlay write is visible through the guest mount
 - readiness fires only after the managed path is live
+
+Decision gate if this fails:
+
+- static `VirtioFS` may still be used as a degraded bootstrap/debug sharing
+  mode
+- that degraded mode does not count as `motlie-vfs` parity
+- full Vz parity remains blocked until a different managed transport path is
+  designed and proven
 
 ## Long-Term Boundary
 

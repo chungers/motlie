@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-14 | @codex-vz | Add a hard fallback decision for failed managed guestfs in `v1.15`, make kernel virtio-driver verification mandatory in `v1.05`, and formalize the hardened SSH auto-provision checks as `v1.45` validation |
 | 2026-04-14 | @codex-vz | Rewrite the cross-backend plan into numbered, checkable phases with explicit validation gates; move `v1.05` under `libs/vmm/examples/`; and make the Apple Vz execution order image -> VFS -> VNET -> cleanup -> policy -> full `v1.45` explicit |
 | 2026-04-13 | @codex-vz | Add a first-step Apple Vz image track to the cross-backend plan: prioritize `v1.05` image/build proving before `v1.15` guestfs and `v1.25` egress, then run the cleanup phases and the separate policy phases (`#134`, `#133`) before `v1.45` full Vz integration |
 
@@ -32,6 +33,8 @@ Tasks:
 
 - [ ] build a bootable aarch64 guest artifact set for Apple Vz
 - [ ] prove the kernel, initrd, raw root disk, and NoCloud disk contract
+- [ ] verify that the selected kernel exposes virtio-block, virtio-vsock,
+      virtio-net, and, where required, virtio-fs guest drivers
 - [ ] prove cloud-init user creation and SSH-key injection
 - [ ] prove `motlie-vfs-guest` is present in the guest image
 
@@ -40,6 +43,7 @@ Validation:
 - [ ] guest boots to a serial or login prompt
 - [ ] cloud-init provisions the intended user and SSH key
 - [ ] `motlie-vfs-guest` is present in the booted image
+- [ ] kernel virtio-driver verification is recorded before `v1.05` exits
 - [ ] host-side state remains userspace-only and ephemeral
 
 References:
@@ -60,6 +64,8 @@ Tasks:
 - [ ] keep `FsServer` in the managed I/O path
 - [ ] preserve overlay write/read semantics
 - [ ] capture the readiness signal shape needed by future `libs/vmm`
+- [ ] make an explicit decision if managed guestfs cannot be preserved on Vz:
+      block parity or downgrade to static `VirtioFS`
 
 Validation:
 
@@ -67,6 +73,8 @@ Validation:
 - [ ] an overlay write through the managed path becomes visible in the guest
 - [ ] readiness fires only after the managed path is actually live
 - [ ] host-side state remains userspace-only and ephemeral
+- [ ] if managed guestfs fails, the docs record that static `VirtioFS` is a
+      degraded mode only and does not count as full parity
 
 References:
 
@@ -83,6 +91,8 @@ Scope:
 Tasks:
 
 - [ ] prove the Vz raw-packet path into a Rust-owned engine
+- [ ] validate the concrete transport shape:
+      socketpair -> `VZFileHandleNetworkDeviceAttachment` -> Rust raw-frame fd
 - [ ] capture the egress observability shape needed by future `libs/vmm`
 - [ ] confirm the path still satisfies the no-persistent-host-config rule
 
@@ -191,6 +201,7 @@ Tasks:
 Validation:
 
 - [ ] `auto-provision-ssh.json` passes on Vz
+- [ ] `repl-auto-provision-smoke.sh` passes on Vz
 - [ ] lifecycle and observability are backend-neutral at the VMM contract layer
 
 References:

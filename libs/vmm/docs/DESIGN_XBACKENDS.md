@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-14 | @codex-vz | Add explicit fallback gates for `v1.15` managed guestfs failure, make kernel virtio-driver verification a required `v1.05` exit gate, and formalize the hardened SSH auto-provision checks as `v1.45` acceptance tests |
 | 2026-04-14 | @codex-vz | Clarify the Apple Vz execution order as `v1.05` image/build -> `v1.15` guestfs -> `v1.25` egress -> CH-safe refactors -> policy phases -> `v1.45` full VMM, move `v1.05` under `libs/vmm/examples/`, and add measurable exit gates for each vertical slice |
 | 2026-04-13 | @codex-vz | Add a first-step Apple Vz image track to the cross-backend sequence: `v1.05` image/build proving first, then `v1.15` guestfs, `v1.25` egress, the cleanup phases, the separate policy phases (`#134`, `#133`), and finally the `v1.45` full `libs/vmm` Vz vertical slice |
 
@@ -78,6 +79,9 @@ Exit gates:
 - guest boots to a reachable login/serial prompt
 - cloud-init provisions the intended guest user and SSH key
 - the image contains `motlie-vfs-guest`
+- the selected kernel is verified to expose the virtio-block, virtio-vsock,
+  virtio-net, and, where needed, virtio-fs guest drivers required by later Vz
+  slices
 - the image path still satisfies the host-impact constraints above
 
 ### Stage 1: `v1.15` VFS Guestfs PoC
@@ -104,6 +108,15 @@ Exit gates:
 - an overlay write made through the managed path is visible in the guest
 - guestfs readiness fires only after the managed path is actually live
 
+Decision gate if this fails:
+
+- if managed guestfs cannot ride a Vz-compatible transport cleanly, Vz does not
+  claim `motlie-vfs` parity
+- the fallback is an explicitly degraded static `VirtioFS` sharing mode for
+  bootstrap/debug use only
+- full `v1.45` parity is blocked until a different managed transport path is
+  designed and proven
+
 ### Stage 2: `v1.25` VNET Egress PoC
 
 This stage proves whether Apple Vz can feed packets through a Rust-owned egress
@@ -114,6 +127,15 @@ Responsibilities:
 - prove the Vz raw-packet path into the reusable engine
 - preserve the no-persistent-host-config property
 - preserve enough visibility for `#133`
+
+Expected transport shape:
+
+- `vz-runner` creates a datagram socketpair for
+  `VZFileHandleNetworkDeviceAttachment`
+- one fd is handed to Apple Vz as the guest NIC attachment
+- the peer fd stays in Rust and carries raw L2 Ethernet frames into the
+  reusable packet engine
+- the PoC validates framing, lifecycle, and observability on that concrete path
 
 `libs/vmm` implication:
 
@@ -176,6 +198,9 @@ Responsibilities:
 Exit gates:
 
 - the existing auto-provision scenario passes on Vz
+- `examples/v1.4/scenarios/auto-provision-ssh.json` passes unchanged on Vz
+- `examples/v1.4/integration/repl-auto-provision-smoke.sh` passes unchanged on
+  Vz
 - the backend exposes parity-capable observability
 - the lifecycle works end to end without CH-specific transport assumptions
 
