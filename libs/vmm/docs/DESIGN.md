@@ -7,6 +7,8 @@
 | 2026-04-13 | @codex-vz | Expand the parallel Apple Vz support track again: add `v1.05` image/build proving ahead of `v1.15` guestfs and `v1.25` egress, then sequence the cleanup and policy phases before full `backend::vz` integration |
 | 2026-04-13 | @codex-vz | Expand the parallel Apple Vz support track: treat both `motlie-vfs` and `motlie-vnet` as core VMM infrastructure, reference the `v1.15` / `v1.25` / `v1.45` Vz proving line, and sequence guestfs/egress cleanup plus the separate policy phases (`#134`, `#133`) before full `backend::vz` integration |
 | 2026-04-13 | @codex-vz | Add `DESIGN_XBACKENDS.md` / `PLAN_XBACKENDS.md` as the cross-backend infrastructure track for `libs/vmm`: treat `motlie-vnet` as core VMM infrastructure, record the no-host-config-drift/all-userspace/ephemeral-lifetime constraints, and sequence Apple Vz support as `#170` PoC first, `#169` CH-safe `vnet` refactor second, `#133` policy engine third, and full `backend::vz` integration last |
+| 2026-04-12 | @codex-vmm | Refresh DESIGN from current merged reality: `v1.4` harness and PR #159 auto-provisioning are already proven, and the remaining work is reusable harness-core extraction, typed validation profiles, and the standard guest-path follow-up |
+| 2026-04-09 | @codex | Rescope the post-merge harness direction: preserve `examples/v1.4/harness` as the historical origin and first consumer, but extract reusable scenario/validation infrastructure into `libs/vmm` without rewriting away the existing `v1.4` harness artifacts |
 | 2026-04-08 | @codex | Address PR 140 review drift: remove the dead `VmBackend` / `BackendSet` transitional story from the design, update `GuestSpec` / `PreparedGuest` / shutdown snippets to match code, and record the typed `OverlaySize` plus namespace-sensitive socket-path allocation details |
 | 2026-04-08 | @codex | Make the harness terminal-state engine switchable, adopt `shadow-terminal` as the default high-fidelity backend for PTY/TUI validation, keep `vt100` as an explicit fallback backend, and keep PNG/GIF/movie generation out of scope for `v1.4` |
 | 2026-04-08 | @codex | Add the PTY export design decision: keep NDJSON transcript plus VTE screen JSON as canonical validation artifacts, add asciicast export for portable replay/interchange, and explicitly defer PNG/GIF/movie generation as out of scope for `v1.4` |
@@ -59,8 +61,11 @@ The active next step is `v1.4`:
   guest image in the harness ELF and boots from memfd-backed artifacts
 - move all `v1.4` bins, scripts, and runtime assets onto a distinct namespace
   so `v1.3` and `v1.4` can run side by side
-- allow new incoming SSH principals to trigger guest auto-provisioning through
-  library-owned allocation and lifecycle services
+- principal-driven guest auto-provisioning is now part of the merged `v1.4` line
+- the next remaining work is to extract reusable harness and validation core
+  into `libs/vmm`
+- the next API-model follow-up after that extraction is guest-shape cleanup
+  around `VmSpec` plus a simple standard Cloud Hypervisor guest path
 - add a reporting layer that can answer both host-visible and guest-visible
   health/metrics questions during automated runs
 
@@ -141,13 +146,18 @@ Current `v1.4` implementation status:
 - generic orchestrator code no longer imports Motlie guestfs, userspace vnet,
   or SSH-bridge implementation modules directly either; those are now reached
   through reviewed `Runtime` composition
-- the next convergence step is guest-shape cleanup around `VmSpec` plus the
-  simple Cloud Hypervisor “hello world” example
-- the next harness step is to absorb ad-hoc/manual REPL use cases into
-  `examples/v1.4/harness/` so the harness becomes the primary driver for:
+- the next remaining API-model step is guest-shape cleanup around `VmSpec`
+  plus the simple Cloud Hypervisor “hello world” example
+- the next harness step is direct:
+  - extract reusable scenario, validation, and result infrastructure from
+    `examples/v1.4/harness/` into `libs/vmm`
+  - keep `examples/v1.4/harness/` as the concrete operator-facing harness that
+    consumes that extracted core
+  so the same harness machinery can serve:
   - scripted scenarios
   - coding-agent experimentation
   - human manual validation
+  - future non-`v1.4` harness consumers
 - `examples/v1.4/build-guest.sh` and `examples/v1.4/launch-ch.sh` exist under
   the `motlie-vmm-v14-*` namespace
 - `RuntimeNamespace` now owns the core runtime-environment rules used by the
@@ -179,12 +189,21 @@ Current `v1.4` implementation status:
      `shutdown()` lifecycle API without using Motlie guest backing providers.
    - The same portable slice should later map to `backend::vz::*`.
 
-3. `examples/v1.4/harness` becomes the main runnable control surface.
-   - It should support repeatable scenarios and ad-hoc/manual operation.
-   - It should be able to drive PTY sessions, capture transcripts, and bundle
+3. `examples/v1.4/harness` is the concrete operator-facing harness for the
+   merged `v1.4` line.
+   - It should keep supporting repeatable scenarios and ad-hoc/manual
+     operation.
+   - It should keep driving PTY sessions, capturing transcripts, and bundling
      useful run artifacts such as launch logs and serial logs.
    - The old `repl_host_v1_4` is transitional and should not accumulate unique
      control-plane logic.
+
+4. Reusable harness core should live in `libs/vmm`.
+   - Reusable scenario definitions, step/result types, validation profiles,
+     and driver/result plumbing should move into the library.
+   - `examples/v1.4/harness` should consume that extracted core.
+   - `v1.4`-specific guest/image setup, guest catalog, runbook docs, and
+     operator-facing UX should stay in `examples/v1.4`.
 
 ## Cloud Hypervisor API Analysis
 
@@ -255,15 +274,20 @@ The critical constraint is:
   stay above the CH adapter
 - CH-facing configuration should be modeled explicitly enough that a future
   `to_ch_vm_config(...)` step is straightforward
-- harness-specific scenario or interactive UX should stay above `libs/vmm`; the
-  library should expose the lifecycle, exec, PTY, and observability primitives
-  that the harness consumes
+- product/example-specific guest catalogs and operator UX should stay above
+  `libs/vmm`
+- reusable harness-core infrastructure may move into `libs/vmm` once proven in
+  `examples/v1.4`
+- the library should expose both:
+  - lifecycle, exec, PTY, and observability primitives for any caller
+  - reusable scenario/validation core that later harnesses can consume without
+    cloning the `v1.4` engine
 
 ## Harness Direction
 
-`examples/v1.4/harness/` is now the future primary driver for `v1.4`.
+`examples/v1.4/harness/` is the concrete `v1.4` operator harness.
 
-The intended modes are:
+It must keep supporting:
 
 - scripted scenario mode
   - action/expectation pairs for repeatable regression tests
@@ -271,7 +295,14 @@ The intended modes are:
   - human-driven exploratory testing
   - coding-agent-driven ad-hoc reproduction and debugging
 
-Both modes must use the same `libs/vmm` lifecycle/control-plane APIs:
+The extraction rule is:
+
+- move reusable harness-core modules into `libs/vmm`
+- keep `examples/v1.4/harness/` as the `v1.4`-specific harness binary and UX
+- keep `v1.4`-specific guest/image/runbook content in `examples/v1.4`
+
+Both the original `v1.4` harness and the extracted harness core must use the
+same `libs/vmm` lifecycle/control-plane APIs:
 
 - `prepare(...)`
 - `boot(...)`
@@ -299,12 +330,12 @@ The terminal/reporting contract is now:
 
 - rendered terminal state / VTE capture is in scope and part of the harness
   contract
-- the terminal-state engine is switchable inside `examples/v1.4/harness`
+- the terminal-state engine is switchable inside the harness line
   - `shadow` is the default high-fidelity backend for PTY/TUI validation
   - `vt100` remains available as an explicit fallback/backend-comparison mode
-- the key decision is to keep the backend boundary inside the harness rather
-  than inside `libs/vmm`, because the harness already owns the live PTY stream
-  and artifact persistence
+- the key decision is to keep the terminal backend boundary inside the harness
+  layer rather than inside the lower-level VM lifecycle primitives, because
+  the harness line owns the live PTY stream and artifact persistence
 - chosen `v1.4` recording direction: asciicast export is in scope as a
   portable text/timing replay format layered on top of the canonical NDJSON
   transcript and rendered screen JSON
@@ -323,8 +354,12 @@ This is explicitly meant to replace the old split between:
 - standalone REPL for ad-hoc use
 - separate smoke binaries/scripts for automation
 
-The harness should become the single coherent driver over the same underlying
-library APIs.
+The harness line should become the single coherent driver over the same
+underlying library APIs.
+
+The extracted `libs/vmm` harness core should sit underneath
+`examples/v1.4/harness`, while `v1.4`-specific guest, image, and operator
+artifacts stay in `examples/v1.4`.
 
 One specific design correction from this analysis:
 

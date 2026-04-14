@@ -1,11 +1,10 @@
 mod demo_support;
 
-use std::io::{self, BufRead, Write};
+use std::io::{self};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
 
 use motlie_vmm::ca::SshCa;
@@ -23,13 +22,18 @@ use motlie_vmm::spec::{
     GuestUser, RuntimeNamespace, SoftwareProfile,
 };
 use motlie_vmm::ssh::{
-    self, new_guest_registry, ExecOutput, PrincipalResolver, SshProxyConfig, SshProxyError,
+    new_guest_registry, ExecOutput, PrincipalResolver, SshProxyConfig, SshProxyError,
 };
-use tokio::sync::mpsc;
 
-use demo_support::{demo_guest_ids, demo_guest_socket_path};
+use demo_support::{
+    demo_guest_ids, demo_guest_socket_path, guest_runtime_paths, install_signal_watchers, prompt,
+    shutdown_active_guests, spawn_host_events, spawn_proxy_task, stdin_line_or_detach, HostEvent,
+    ProxyRestartState,
+};
 
 type DynError = Box<dyn std::error::Error + Send + Sync>;
+
+const REPL_PROXY_BASE_PORT: u16 = 42_000;
 
 struct ReplInstance {
     namespace: RuntimeNamespace,
@@ -177,10 +181,8 @@ async fn main() -> Result<(), DynError> {
             &auto_provision_enabled,
         )),
     };
-    tokio::spawn(ssh::run_proxy(
-        proxy_config.clone(),
-        Arc::clone(&guest_registry),
-    ));
+    let mut proxy_task = spawn_proxy_task(proxy_config.clone(), Arc::clone(&guest_registry));
+    let mut proxy_restart_state = ProxyRestartState::new();
 
     let mut stdout = io::stdout();
 
@@ -196,113 +198,151 @@ async fn main() -> Result<(), DynError> {
         "Commands: help | auto-provision <on|off|status> | boot <guest> | ready <guest> | exec <guest> <cmd> | validate <guest> | shutdown <guest> | status | guests | where [guest] | quit"
     );
 
-    let mut lines = spawn_stdin_reader();
+    let (mut events, event_tx) = spawn_host_events();
+    install_signal_watchers(event_tx)?;
+    let mut events_open = true;
+    let mut headless = false;
 
-    print_prompt(&mut stdout)?;
-    while let Some(line_result) = lines.recv().await {
-        let line = line_result?;
-        let trimmed = line.trim();
+    prompt(&mut stdout, "v14> ", &mut headless);
+    loop {
+        tokio::select! {
+            event = events.recv(), if events_open => {
+                let Some(event) = event else {
+                    events_open = false;
+                    if !headless {
+                        headless = true;
+                        eprintln!("notice: operator event stream closed; continuing headless");
+                    }
+                    continue;
+                };
 
-        if trimmed.is_empty() {
-            print_prompt(&mut stdout)?;
-            continue;
-        }
+                match event {
+                    HostEvent::StdinLine(line_result) => {
+                        let Some(line) = stdin_line_or_detach(line_result, &mut headless) else {
+                            continue;
+                        };
+                        let trimmed = line.trim();
 
-        let result = if trimmed == "help" {
-            print_help();
-            Ok(())
-        } else if trimmed == "auto-provision" || trimmed == "auto-provision status" {
-            println!(
-                "auto-provision={}",
-                auto_provision_status(auto_provision_enabled.load(Ordering::SeqCst))
-            );
-            Ok(())
-        } else if trimmed == "auto-provision on" {
-            auto_provision_enabled.store(true, Ordering::SeqCst);
-            println!("ok: auto-provision enabled");
-            Ok(())
-        } else if trimmed == "auto-provision off" {
-            auto_provision_enabled.store(false, Ordering::SeqCst);
-            println!("ok: auto-provision disabled");
-            Ok(())
-        } else if trimmed == "status" || trimmed == "guests" {
-            print_status(&provisioner, auto_provision_enabled.load(Ordering::SeqCst));
-            Ok(())
-        } else if trimmed == "where" {
-            print_where(
-                &instance.namespace,
-                &instance.demo_root,
-                &instance.socket_root,
-                &proxy_config,
-                None,
-                &provisioner,
-            );
-            Ok(())
-        } else if let Some(rest) = trimmed.strip_prefix("where ") {
-            let guest_id = rest.trim();
-            let guest = (!guest_id.is_empty()).then_some(guest_id);
-            print_where(
-                &instance.namespace,
-                &instance.demo_root,
-                &instance.socket_root,
-                &proxy_config,
-                guest,
-                &provisioner,
-            );
-            Ok(())
-        } else if trimmed == "quit" || trimmed == "exit" {
-            break;
-        } else if let Some(rest) = trimmed.strip_prefix("boot ") {
-            let guest_id = rest.trim();
-            if guest_id.is_empty() {
-                Err::<(), DynError>("boot <guest>".into())
-            } else {
-                boot_guest(guest_id, &proxy_config, &provisioner).await
+                        if trimmed.is_empty() || trimmed.starts_with('#') {
+                            prompt(&mut stdout, "v14> ", &mut headless);
+                            continue;
+                        }
+
+                        let mut should_exit = false;
+                        let result = if trimmed == "help" {
+                            print_help();
+                            Ok(())
+                        } else if trimmed == "auto-provision" || trimmed == "auto-provision status" {
+                            println!(
+                                "auto-provision={}",
+                                auto_provision_status(auto_provision_enabled.load(Ordering::SeqCst))
+                            );
+                            Ok(())
+                        } else if trimmed == "auto-provision on" {
+                            auto_provision_enabled.store(true, Ordering::SeqCst);
+                            println!("ok: auto-provision enabled");
+                            Ok(())
+                        } else if trimmed == "auto-provision off" {
+                            auto_provision_enabled.store(false, Ordering::SeqCst);
+                            println!("ok: auto-provision disabled");
+                            Ok(())
+                        } else if trimmed == "status" || trimmed == "guests" {
+                            print_status(&provisioner, auto_provision_enabled.load(Ordering::SeqCst));
+                            Ok(())
+                        } else if trimmed == "where" {
+                            print_where(
+                                &instance.namespace,
+                                &instance.demo_root,
+                                &instance.socket_root,
+                                &proxy_config,
+                                None,
+                                &provisioner,
+                            );
+                            Ok(())
+                        } else if let Some(rest) = trimmed.strip_prefix("where ") {
+                            let guest_id = rest.trim();
+                            let guest = (!guest_id.is_empty()).then_some(guest_id);
+                            print_where(
+                                &instance.namespace,
+                                &instance.demo_root,
+                                &instance.socket_root,
+                                &proxy_config,
+                                guest,
+                                &provisioner,
+                            );
+                            Ok(())
+                        } else if trimmed == "quit" || trimmed == "exit" {
+                            should_exit = true;
+                            Ok(())
+                        } else if let Some(rest) = trimmed.strip_prefix("boot ") {
+                            let guest_id = rest.trim();
+                            if guest_id.is_empty() {
+                                Err::<(), DynError>("boot <guest>".into())
+                            } else {
+                                boot_guest(guest_id, &proxy_config, &provisioner).await
+                            }
+                        } else if let Some(rest) = trimmed.strip_prefix("ready ") {
+                            ready_guest(rest.trim(), &provisioner).await
+                        } else if let Some(rest) = trimmed.strip_prefix("shutdown ") {
+                            shutdown_guest(rest.trim(), &provisioner).await
+                        } else if let Some(rest) = trimmed.strip_prefix("validate ") {
+                            validate_guest(rest.trim(), &provisioner).await
+                        } else if let Some(rest) = trimmed.strip_prefix("exec ") {
+                            exec_guest(rest, &provisioner).await
+                        } else if let Some(rest) = trimmed.strip_prefix("launch ") {
+                            Err::<(), DynError>(format!("use 'boot {}' instead", rest.trim()).into())
+                        } else {
+                            Err::<(), DynError>(format!("unknown command: {trimmed}").into())
+                        };
+
+                        if let Err(err) = result {
+                            println!("error: {err}");
+                        }
+                        if should_exit {
+                            break;
+                        }
+                        prompt(&mut stdout, "v14> ", &mut headless);
+                    }
+                    HostEvent::StdinClosed => {
+                        if !headless {
+                            headless = true;
+                            eprintln!("notice: stdin closed; continuing headless. Use SIGINT or SIGTERM to stop the host.");
+                        }
+                    }
+                    HostEvent::Terminate(signal_name) => {
+                        eprintln!("notice: received {signal_name}; shutting down");
+                        break;
+                    }
+                    HostEvent::Hangup => {
+                        if !headless {
+                            headless = true;
+                        }
+                        eprintln!("notice: received SIGHUP; keeping proxy and guests alive");
+                    }
+                }
             }
-        } else if let Some(rest) = trimmed.strip_prefix("ready ") {
-            ready_guest(rest.trim(), &provisioner).await
-        } else if let Some(rest) = trimmed.strip_prefix("shutdown ") {
-            shutdown_guest(rest.trim(), &provisioner).await
-        } else if let Some(rest) = trimmed.strip_prefix("validate ") {
-            validate_guest(rest.trim(), &provisioner).await
-        } else if let Some(rest) = trimmed.strip_prefix("exec ") {
-            exec_guest(rest, &provisioner).await
-        } else if let Some(rest) = trimmed.strip_prefix("launch ") {
-            Err::<(), DynError>(format!("use 'boot {}' instead", rest.trim()).into())
-        } else {
-            Err::<(), DynError>(format!("unknown command: {trimmed}").into())
-        };
-
-        if let Err(err) = result {
-            println!("error: {err}");
+            proxy_result = &mut proxy_task => {
+                match proxy_result {
+                    Ok(Ok(())) => eprintln!("warning: SSH proxy exited unexpectedly"),
+                    Ok(Err(err)) => eprintln!("warning: SSH proxy failed: {err}"),
+                    Err(err) => eprintln!("warning: SSH proxy task aborted: {err}"),
+                }
+                let delay = proxy_restart_state
+                    .next_delay()
+                    .map_err(|err| -> DynError { err.into() })?;
+                eprintln!("warning: restarting SSH proxy in {}s", delay.as_secs());
+                tokio::time::sleep(delay).await;
+                proxy_task = spawn_proxy_task(proxy_config.clone(), Arc::clone(&guest_registry));
+                proxy_restart_state.mark_started();
+                prompt(&mut stdout, "v14> ", &mut headless);
+            }
         }
-
-        print_prompt(&mut stdout)?;
     }
 
-    for guest in provisioner
-        .guests()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|guest| guest.active)
-        .map(|guest| guest.principal)
-    {
-        let _ = provisioner.shutdown_guest(&guest).await;
-    }
+    proxy_task.abort();
+    shutdown_active_guests(&provisioner, "repl host").await;
 
     Ok(())
-}
-
-fn spawn_stdin_reader() -> mpsc::UnboundedReceiver<Result<String, io::Error>> {
-    let (tx, rx) = mpsc::unbounded_channel();
-    thread::spawn(move || {
-        for line in io::stdin().lock().lines() {
-            if tx.send(line).is_err() {
-                break;
-            }
-        }
-    });
-    rx
 }
 
 fn print_help() {
@@ -342,9 +382,13 @@ fn print_status(provisioner: &GuestProvisioner, auto_provision_enabled: bool) {
     }
 
     for guest in active {
-        let runtime_paths = guest
-            .runtime_paths
-            .expect("active guest snapshots always include runtime paths");
+        let Some(runtime_paths) = guest_runtime_paths(&guest) else {
+            println!(
+                "{} pid={:?} runtime_paths=(missing)",
+                guest.principal, guest.pid
+            );
+            continue;
+        };
         println!(
             "{} pid={:?} api={} vnet={} vsock={}",
             guest.principal,
@@ -393,11 +437,11 @@ fn print_where(
 }
 
 fn print_guest_where(demo_root: &Path, guest: &ProvisionedGuestSnapshot) {
-    let runtime_paths = guest
-        .runtime_paths
-        .clone()
-        .expect("active guest snapshots always include runtime paths");
     println!("[{}]", guest.principal);
+    let Some(runtime_paths) = guest_runtime_paths(guest) else {
+        println!("  runtime_paths=(missing)");
+        return;
+    };
     println!(
         "  home_host={}",
         demo_root
@@ -427,12 +471,6 @@ fn print_guest_where(demo_root: &Path, guest: &ProvisionedGuestSnapshot) {
     println!("  vsock_socket={}", runtime_paths.vsock_socket.display());
     println!("  launch_log={}", runtime_paths.launch_log.display());
     println!("  serial_log={}", runtime_paths.serial_log.display());
-}
-
-fn print_prompt(stdout: &mut io::Stdout) -> Result<(), DynError> {
-    print!("v14> ");
-    stdout.flush()?;
-    Ok(())
 }
 
 async fn boot_guest(
@@ -595,14 +633,16 @@ fn print_usage() {
 }
 
 fn new_repl_instance(root_dir: &Path) -> Result<ReplInstance, DynError> {
-    let namespace = RuntimeNamespace::for_process("motlie-vmm-v14", "r", root_dir)?;
+    // Auto-provision can defer the first guest boot until after the operator
+    // has detached. In that headless path we still allocate guestfs/vsock/vnet
+    // AF_UNIX sockets under the explicit --root, so the per-instance prefix and
+    // socket directory must stay compact enough to fit sun_path.
+    let namespace = RuntimeNamespace::for_process("v14", "r", root_dir)?;
     let demo_root = namespace
         .temp_root
         .join(format!("{}-demo", namespace.prefix));
-    let socket_root = namespace
-        .temp_root
-        .join(format!("{}-sockets", namespace.prefix));
-    let proxy_port = 42000 + port_offset(&namespace.prefix);
+    let socket_root = namespace.temp_root.join("s");
+    let proxy_port = REPL_PROXY_BASE_PORT + port_offset(&namespace.prefix);
     Ok(ReplInstance {
         namespace,
         demo_root,

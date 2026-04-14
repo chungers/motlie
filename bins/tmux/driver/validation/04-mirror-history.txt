@@ -1,0 +1,24 @@
+dchung@mac-mini-m4pro ~ % echo hello-from-validation
+hello-from-validation
+dchung@mac-mini-m4pro ~ %
+[motliehost:codex-e2e-smoke-20260411a(%39)] echo validation-monitor-line
+validation-monitor-line
+%
+ dchung@mac-mini-m4pro ~ %
+^C
+Live follow stopped.
+tmux> 〉mirror history --limit 10
+mirror history: 3 item(s) oldest=1 newest=3 next-after=3
+[seq=1 label=capture: codex-e2e-smoke-20260411a (last 20) ansi=false watch=idle]
+
+  dchung@mac-mini-m4pro ~ % echo hello-from-validation
+  hello-from-validation
+  dchung@mac-mini-m4pro ~ %
+[seq=2 label=watching: codex-e2e-smoke-20260411a ansi=false watch=Streaming]
+  (empty)
+[seq=3 label=watching: codex-e2e-smoke-20260411a ansi=false watch=Streaming]
+  [motliehost:codex-e2e-smoke-20260411a(%39)] echo validation-monitor-line
+  validation-monitor-line
+  %
+   dchung@mac-mini-m4pro ~ %
+tmux> 〉
