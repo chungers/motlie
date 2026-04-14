@@ -1,4 +1,6 @@
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
@@ -148,6 +150,37 @@ pub struct RuntimeNamespace {
     pub temp_root: PathBuf,
 }
 
+// Linux AF_UNIX socket addresses include the full path inside sun_path.
+// Delayed guest creation, such as SSH-triggered auto-provision after the
+// operator detaches, allocates these paths at first contact rather than at
+// host startup, so long explicit roots can fail much later unless callers keep
+// their namespace roots and prefixes compact.
+pub(crate) const UNIX_SOCKET_PATH_MAX_BYTES: usize = 107;
+
+fn unix_socket_path_len(path: &Path) -> usize {
+    #[cfg(unix)]
+    {
+        path.as_os_str().as_bytes().len()
+    }
+
+    #[cfg(not(unix))]
+    {
+        path.as_os_str().to_string_lossy().len()
+    }
+}
+
+fn validate_unix_socket_path(path: &Path) -> Result<(), SpecError> {
+    let len = unix_socket_path_len(path);
+    if len > UNIX_SOCKET_PATH_MAX_BYTES {
+        return Err(SpecError::UnixSocketPathTooLong {
+            path: path.to_path_buf(),
+            len,
+            max_len: UNIX_SOCKET_PATH_MAX_BYTES,
+        });
+    }
+    Ok(())
+}
+
 impl RuntimeNamespace {
     pub fn new(
         prefix: impl Into<String>,
@@ -196,9 +229,11 @@ impl RuntimeNamespace {
         if guest_name.trim().is_empty() {
             return Err(SpecError::EmptyGuestId);
         }
-        Ok(self
+        let path = self
             .temp_root
-            .join(format!("{}-{guest_name}.vsock_{port}", self.prefix)))
+            .join(format!("{}-{guest_name}.vsock_{port}", self.prefix));
+        validate_unix_socket_path(&path)?;
+        Ok(path)
     }
 }
 
@@ -244,6 +279,10 @@ impl GuestRuntimePaths {
         let serial_log = launch_dir.join("serial.log");
         let launch_log = launch_dir.join("launch.log");
 
+        for socket_path in [&api_socket, &vnet_socket, &vsock_socket] {
+            validate_unix_socket_path(socket_path)?;
+        }
+
         Ok(Self {
             runtime_dir,
             launch_dir,
@@ -275,6 +314,12 @@ pub enum SpecError {
     InvalidOverlaySize { value: String, reason: String },
     #[error("system clock is invalid for instance namespace generation")]
     InvalidClock,
+    #[error("unix socket path is too long ({len} bytes > {max_len}): {path}")]
+    UnixSocketPathTooLong {
+        path: PathBuf,
+        len: usize,
+        max_len: usize,
+    },
 }
 
 pub fn pathbuf_from_optional_str(value: Option<&str>) -> Option<PathBuf> {
@@ -356,6 +401,20 @@ mod tests {
     fn namespace_rejects_empty_prefix() {
         let err = RuntimeNamespace::new("", "/tmp").unwrap_err();
         assert_eq!(err, SpecError::EmptyNamespacePrefix);
+    }
+
+    #[test]
+    fn runtime_namespace_rejects_overlong_unix_socket_paths() {
+        let namespace = RuntimeNamespace::new(
+            "v14-r2556482-9190",
+            "/home/dchung/cdx-autopro/this/path/is/intentionally/much/longer/than/the-unix-domain-socket-budget/live",
+        )
+        .unwrap();
+        let err = namespace.guest_vsock_port_socket("alice", 5000).unwrap_err();
+        assert!(matches!(
+            err,
+            SpecError::UnixSocketPathTooLong { .. }
+        ));
     }
 
     #[test]

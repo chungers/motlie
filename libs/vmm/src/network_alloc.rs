@@ -1,15 +1,43 @@
-use std::collections::{BTreeMap, btree_map::Entry};
+use std::collections::{btree_map::Entry, BTreeMap};
 use std::fmt;
 use std::net::Ipv4Addr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 use std::str::FromStr;
 
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::spec::UNIX_SOCKET_PATH_MAX_BYTES;
+
 const MAX_MAC_SLOT_CAPACITY: u32 = 1 << 20;
 const DEFAULT_SOCKET_NAME_PREFIX: &str = "motlie-vmm";
 const MAC_OUI_PREFIX: [u8; 3] = [0x52, 0x54, 0x00];
+
+fn unix_socket_path_len(path: &Path) -> usize {
+    #[cfg(unix)]
+    {
+        path.as_os_str().as_bytes().len()
+    }
+
+    #[cfg(not(unix))]
+    {
+        path.as_os_str().to_string_lossy().len()
+    }
+}
+
+fn validate_unix_socket_path(path: &Path) -> Result<(), GuestNetAllocatorError> {
+    let len = unix_socket_path_len(path);
+    if len > UNIX_SOCKET_PATH_MAX_BYTES {
+        return Err(GuestNetAllocatorError::SocketPathTooLong {
+            path: path.to_path_buf(),
+            len,
+            max_len: UNIX_SOCKET_PATH_MAX_BYTES,
+        });
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Ipv4Subnet {
@@ -238,9 +266,12 @@ pub struct GuestNetAllocatorConfig {
     pub first_cid: u32,
     /// Optional explicit capacity clamp after the subnet pools are evaluated.
     pub max_guests: Option<u32>,
-    /// Prefix used for vhost-user socket paths.
+    /// Prefix used for vhost-user socket paths. Keep this directory short: it
+    /// participates directly in AF_UNIX socket addresses, including delayed
+    /// auto-provisioned boots that happen after the operator detaches.
     pub socket_dir: PathBuf,
-    /// Namespace-sensitive socket name prefix used for vhost-user sockets.
+    /// Namespace-sensitive socket name prefix used for vhost-user sockets. Keep
+    /// the combined socket_dir + socket_name_prefix budget under sun_path.
     pub socket_name_prefix: String,
     /// Admin ingress subnet pool.
     pub admin_pool: Ipv4SubnetPool,
@@ -344,6 +375,12 @@ pub enum GuestNetAllocatorError {
         "guest slot space exhausted: next slot {next_slot} exceeds configured capacity {capacity}"
     )]
     Exhausted { next_slot: u32, capacity: u32 },
+    #[error("unix socket path is too long ({len} bytes > {max_len}): {path}")]
+    SocketPathTooLong {
+        path: PathBuf,
+        len: usize,
+        max_len: usize,
+    },
 }
 
 /// Stable guest network allocation table.
@@ -439,6 +476,11 @@ impl GuestNetAllocator {
         )?;
         let egress_netmask = Ipv4Addr::from(prefix_mask(egress_subnet.prefix_len));
 
+        let vnet_socket_path = config
+            .socket_dir
+            .join(format!("{}-{guest_name}.sock", config.socket_name_prefix));
+        validate_unix_socket_path(&vnet_socket_path)?;
+
         Ok(GuestNetAssignment {
             guest_name: guest_name.to_string(),
             slot,
@@ -457,9 +499,7 @@ impl GuestNetAllocator {
                 netmask: egress_netmask,
             },
             egress_mac: mac_from_slot(slot, 0xe0),
-            vnet_socket_path: config
-                .socket_dir
-                .join(format!("{}-{guest_name}.sock", config.socket_name_prefix)),
+            vnet_socket_path,
         })
     }
 }
@@ -561,6 +601,22 @@ mod tests {
                 capacity: 2,
             }
         );
+    }
+
+    #[test]
+    fn ensure_rejects_overlong_vnet_socket_paths() {
+        let mut alloc = GuestNetAllocator::new(GuestNetAllocatorConfig {
+            socket_dir: PathBuf::from("/home/dchung/cdx-autopro/this/path/is/intentionally/much/longer/than/the-unix-domain-socket-budget/live/s"),
+            socket_name_prefix: "v14-r2556482-9190".to_string(),
+            ..GuestNetAllocatorConfig::default()
+        })
+        .unwrap();
+
+        let err = alloc.ensure("alice").unwrap_err();
+        assert!(matches!(
+            err,
+            GuestNetAllocatorError::SocketPathTooLong { .. }
+        ));
     }
 
     #[test]

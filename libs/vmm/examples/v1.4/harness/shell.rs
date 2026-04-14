@@ -1,8 +1,7 @@
 use std::collections::HashMap;
-use std::io::{self, BufRead, Write};
+use std::io::{self};
 use std::path::Path;
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
 
 use motlie_vmm::ca::SshCa;
@@ -11,9 +10,12 @@ use motlie_vmm::provisioning::GuestProvisioner;
 use motlie_vmm::runtime::{
     ControlPlaneBacking, FilesystemBacking, HypervisorBacking, NetworkBacking, Runtime,
 };
-use motlie_vmm::ssh::{self, new_guest_registry, ExecOutput, PtyRequest, SshProxyConfig};
-use tokio::sync::mpsc;
+use motlie_vmm::ssh::{new_guest_registry, ExecOutput, PtyRequest, SshProxyConfig};
 
+use crate::demo_support::{
+    guest_runtime_paths, install_signal_watchers, prompt, shutdown_active_guests,
+    spawn_host_events, spawn_proxy_task, stdin_line_or_detach, HostEvent, ProxyRestartState,
+};
 use crate::terminal::{HarnessTerminalSession, TerminalBackendKind};
 use crate::{
     build_guest_provisioner, ensure_file_exists, print_instance_details, wait_for_egress_ready,
@@ -65,10 +67,8 @@ pub async fn run_shell(
         ),
         principal_resolver: Some(provisioner.ssh_principal_resolver()),
     };
-    tokio::spawn(ssh::run_proxy(
-        proxy_config.clone(),
-        Arc::clone(&guest_registry),
-    ));
+    let mut proxy_task = spawn_proxy_task(proxy_config.clone(), Arc::clone(&guest_registry));
+    let mut proxy_restart_state = ProxyRestartState::new();
     print_instance_details(instance, &proxy_config);
 
     let mut terminals: HashMap<String, HarnessTerminalSession> = HashMap::new();
@@ -81,125 +81,164 @@ pub async fn run_shell(
         "Commands: help | boot <guest> | ready <guest> | exec <guest> <cmd> | validate <guest> | pty-open <guest> <session> | pty-send <session> <text> | pty-send-line <session> <text> | pty-read <session> [timeout_ms] | pty-expect <session> <text> | pty-expect-screen <session> <text> | pty-resize <session> <cols> <rows> | pty-screen <session> | shutdown <guest> | status | guests | capacity | where [guest] | quit"
     );
 
-    let mut lines = spawn_stdin_reader();
-    print_prompt(&mut stdout)?;
-    while let Some(line_result) = lines.recv().await {
-        let line = line_result?;
-        let trimmed = line.trim();
+    let (mut events, event_tx) = spawn_host_events();
+    install_signal_watchers(event_tx)?;
+    let mut events_open = true;
+    let mut headless = false;
+    prompt(&mut stdout, "v14-harness> ", &mut headless);
+    loop {
+        tokio::select! {
+            event = events.recv(), if events_open => {
+                let Some(event) = event else {
+                    events_open = false;
+                    if !headless {
+                        headless = true;
+                        eprintln!("notice: operator event stream closed; continuing headless");
+                    }
+                    continue;
+                };
 
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            print_prompt(&mut stdout)?;
-            continue;
-        }
+                match event {
+                    HostEvent::StdinLine(line_result) => {
+                        let Some(line) = stdin_line_or_detach(line_result, &mut headless) else {
+                            continue;
+                        };
+                        let trimmed = line.trim();
 
-        let result = if trimmed == "help" {
-            print_help();
-            Ok(())
-        } else if trimmed == "status" || trimmed == "guests" {
-            print_status(&provisioner);
-            Ok(())
-        } else if trimmed == "capacity" {
-            print_capacity(&provisioner);
-            Ok(())
-        } else if trimmed == "where" {
-            print_where(
-                instance,
-                &proxy_config,
-                &provisioner,
-                terminal_backend,
-                None,
-            );
-            Ok(())
-        } else if let Some(rest) = trimmed.strip_prefix("where ") {
-            let guest_id = rest.trim();
-            let guest = (!guest_id.is_empty()).then_some(guest_id);
-            print_where(
-                instance,
-                &proxy_config,
-                &provisioner,
-                terminal_backend,
-                guest,
-            );
-            Ok(())
-        } else if trimmed == "quit" || trimmed == "exit" {
-            break;
-        } else if let Some(rest) = trimmed.strip_prefix("boot ") {
-            let guest_id = rest.trim();
-            if guest_id.is_empty() {
-                Err::<(), DynError>("boot <guest>".into())
-            } else {
-                boot_guest(guest_id, &provisioner).await
+                        if trimmed.is_empty() || trimmed.starts_with('#') {
+                            prompt(&mut stdout, "v14-harness> ", &mut headless);
+                            continue;
+                        }
+
+                        let mut should_exit = false;
+                        let result = if trimmed == "help" {
+                            print_help();
+                            Ok(())
+                        } else if trimmed == "status" || trimmed == "guests" {
+                            print_status(&provisioner);
+                            Ok(())
+                        } else if trimmed == "capacity" {
+                            print_capacity(&provisioner);
+                            Ok(())
+                        } else if trimmed == "where" {
+                            print_where(
+                                instance,
+                                &proxy_config,
+                                &provisioner,
+                                terminal_backend,
+                                None,
+                            );
+                            Ok(())
+                        } else if let Some(rest) = trimmed.strip_prefix("where ") {
+                            let guest_id = rest.trim();
+                            let guest = (!guest_id.is_empty()).then_some(guest_id);
+                            print_where(
+                                instance,
+                                &proxy_config,
+                                &provisioner,
+                                terminal_backend,
+                                guest,
+                            );
+                            Ok(())
+                        } else if trimmed == "quit" || trimmed == "exit" {
+                            should_exit = true;
+                            Ok(())
+                        } else if let Some(rest) = trimmed.strip_prefix("boot ") {
+                            let guest_id = rest.trim();
+                            if guest_id.is_empty() {
+                                Err::<(), DynError>("boot <guest>".into())
+                            } else {
+                                boot_guest(guest_id, &provisioner).await
+                            }
+                        } else if let Some(rest) = trimmed.strip_prefix("ready ") {
+                            ready_guest(rest.trim(), &provisioner).await
+                        } else if let Some(rest) = trimmed.strip_prefix("shutdown ") {
+                            shutdown_guest(rest.trim(), &provisioner).await
+                        } else if let Some(rest) = trimmed.strip_prefix("validate ") {
+                            validate_guest(rest.trim(), &provisioner).await
+                        } else if let Some(rest) = trimmed.strip_prefix("exec ") {
+                            exec_guest(rest, &provisioner).await
+                        } else if let Some(rest) = trimmed.strip_prefix("pty-open ") {
+                            pty_open(
+                                rest,
+                                instance,
+                                &provisioner,
+                                &mut terminals,
+                                terminal_backend,
+                            )
+                            .await
+                        } else if let Some(rest) = trimmed.strip_prefix("pty-send-line ") {
+                            pty_send_line(rest, &terminals).await
+                        } else if let Some(rest) = trimmed.strip_prefix("pty-send ") {
+                            pty_send(rest, &terminals).await
+                        } else if let Some(rest) = trimmed.strip_prefix("pty-read ") {
+                            pty_read(rest, &terminals).await
+                        } else if let Some(rest) = trimmed.strip_prefix("pty-expect ") {
+                            pty_expect(rest, &terminals).await
+                        } else if let Some(rest) = trimmed.strip_prefix("pty-expect-screen ") {
+                            pty_expect_screen(rest, &terminals).await
+                        } else if let Some(rest) = trimmed.strip_prefix("pty-resize ") {
+                            pty_resize(rest, &terminals).await
+                        } else if let Some(rest) = trimmed.strip_prefix("pty-screen ") {
+                            pty_screen(rest, &terminals)
+                        } else if let Some(rest) = trimmed.strip_prefix("launch ") {
+                            Err::<(), DynError>(format!("use 'boot {}' instead", rest.trim()).into())
+                        } else {
+                            Err::<(), DynError>(format!("unknown command: {trimmed}").into())
+                        };
+
+                        if let Err(err) = result {
+                            println!("error: {err}");
+                        }
+                        if should_exit {
+                            break;
+                        }
+                        prompt(&mut stdout, "v14-harness> ", &mut headless);
+                    }
+                    HostEvent::StdinClosed => {
+                        if !headless {
+                            headless = true;
+                            eprintln!("notice: stdin closed; continuing headless. Use SIGINT or SIGTERM to stop the harness.");
+                        }
+                    }
+                    HostEvent::Terminate(signal_name) => {
+                        eprintln!("notice: received {signal_name}; shutting down");
+                        break;
+                    }
+                    HostEvent::Hangup => {
+                        if !headless {
+                            headless = true;
+                        }
+                        eprintln!("notice: received SIGHUP; keeping proxy and guests alive");
+                    }
+                }
             }
-        } else if let Some(rest) = trimmed.strip_prefix("ready ") {
-            ready_guest(rest.trim(), &provisioner).await
-        } else if let Some(rest) = trimmed.strip_prefix("shutdown ") {
-            shutdown_guest(rest.trim(), &provisioner).await
-        } else if let Some(rest) = trimmed.strip_prefix("validate ") {
-            validate_guest(rest.trim(), &provisioner).await
-        } else if let Some(rest) = trimmed.strip_prefix("exec ") {
-            exec_guest(rest, &provisioner).await
-        } else if let Some(rest) = trimmed.strip_prefix("pty-open ") {
-            pty_open(
-                rest,
-                instance,
-                &provisioner,
-                &mut terminals,
-                terminal_backend,
-            )
-            .await
-        } else if let Some(rest) = trimmed.strip_prefix("pty-send-line ") {
-            pty_send_line(rest, &terminals).await
-        } else if let Some(rest) = trimmed.strip_prefix("pty-send ") {
-            pty_send(rest, &terminals).await
-        } else if let Some(rest) = trimmed.strip_prefix("pty-read ") {
-            pty_read(rest, &terminals).await
-        } else if let Some(rest) = trimmed.strip_prefix("pty-expect ") {
-            pty_expect(rest, &terminals).await
-        } else if let Some(rest) = trimmed.strip_prefix("pty-expect-screen ") {
-            pty_expect_screen(rest, &terminals).await
-        } else if let Some(rest) = trimmed.strip_prefix("pty-resize ") {
-            pty_resize(rest, &terminals).await
-        } else if let Some(rest) = trimmed.strip_prefix("pty-screen ") {
-            pty_screen(rest, &terminals)
-        } else if let Some(rest) = trimmed.strip_prefix("launch ") {
-            Err::<(), DynError>(format!("use 'boot {}' instead", rest.trim()).into())
-        } else {
-            Err::<(), DynError>(format!("unknown command: {trimmed}").into())
-        };
-
-        if let Err(err) = result {
-            println!("error: {err}");
+            proxy_result = &mut proxy_task => {
+                match proxy_result {
+                    Ok(Ok(())) => eprintln!("warning: SSH proxy exited unexpectedly"),
+                    Ok(Err(err)) => eprintln!("warning: SSH proxy failed: {err}"),
+                    Err(err) => eprintln!("warning: SSH proxy task aborted: {err}"),
+                }
+                let delay = proxy_restart_state
+                    .next_delay()
+                    .map_err(|err| -> DynError { err.into() })?;
+                eprintln!("warning: restarting SSH proxy in {}s", delay.as_secs());
+                tokio::time::sleep(delay).await;
+                proxy_task = spawn_proxy_task(proxy_config.clone(), Arc::clone(&guest_registry));
+                proxy_restart_state.mark_started();
+                prompt(&mut stdout, "v14-harness> ", &mut headless);
+            }
         }
-
-        print_prompt(&mut stdout)?;
     }
+
+    proxy_task.abort();
 
     for (_session, terminal) in terminals.drain() {
         let _ = terminal.persist_artifacts();
     }
-    for guest in provisioner
-        .guests()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|guest| guest.active)
-        .map(|guest| guest.principal)
-    {
-        let _ = provisioner.shutdown_guest(&guest).await;
-    }
+    shutdown_active_guests(&provisioner, "harness shell").await;
 
     Ok(())
-}
-
-fn spawn_stdin_reader() -> mpsc::UnboundedReceiver<Result<String, io::Error>> {
-    let (tx, rx) = mpsc::unbounded_channel();
-    thread::spawn(move || {
-        for line in io::stdin().lock().lines() {
-            if tx.send(line).is_err() {
-                break;
-            }
-        }
-    });
-    rx
 }
 
 fn print_help() {
@@ -231,9 +270,13 @@ fn print_status(provisioner: &GuestProvisioner) {
     }
 
     for guest in active {
-        let runtime_paths = guest
-            .runtime_paths
-            .expect("active guest snapshots always include runtime paths");
+        let Some(runtime_paths) = guest_runtime_paths(&guest) else {
+            println!(
+                "{} pid={:?} runtime_paths=(missing)",
+                guest.principal, guest.pid
+            );
+            continue;
+        };
         println!(
             "{} pid={:?} api={} vnet={} vsock={}",
             guest.principal,
@@ -509,11 +552,11 @@ fn print_pty_read(output: &str, exit_status: Option<u32>, eof: bool, closed: boo
 }
 
 fn print_guest_where(demo_root: &Path, guest: &motlie_vmm::provisioning::ProvisionedGuestSnapshot) {
-    let runtime_paths = guest
-        .runtime_paths
-        .clone()
-        .expect("active guest snapshots always include runtime paths");
     println!("[{}]", guest.principal);
+    let Some(runtime_paths) = guest_runtime_paths(guest) else {
+        println!("  runtime_paths=(missing)");
+        return;
+    };
     println!(
         "  home_host={}",
         demo_root
@@ -554,12 +597,6 @@ fn print_guest_where(demo_root: &Path, guest: &motlie_vmm::provisioning::Provisi
     println!("  egress_mac={:02x?}", guest.net_assignment.egress_mac);
     println!("  launch_log={}", runtime_paths.launch_log.display());
     println!("  serial_log={}", runtime_paths.serial_log.display());
-}
-
-fn print_prompt(stdout: &mut io::Stdout) -> Result<(), DynError> {
-    print!("v14-harness> ");
-    stdout.flush()?;
-    Ok(())
 }
 
 async fn boot_guest(guest_id: &str, provisioner: &GuestProvisioner) -> Result<(), DynError> {

@@ -694,6 +694,37 @@ cannot be proven by `boot <guest>` alone:
 - turn `auto-provision off` again and verify an unknown principal no longer
   provisions a guest
 
+REPL headless hardening wrapper:
+
+```bash
+./libs/vmm/examples/v1.4/integration/repl-headless-hardening-smoke.sh
+```
+
+This wrapper exists to preserve the host lifetime policy that the real vmm host
+will need:
+
+- launch `repl_host_v1_4`
+- turn `auto-provision on`
+- close the REPL stdin to simulate the operator logging off
+- verify `repl_host_v1_4` stays alive headlessly
+- use real external SSH to provision 5 principals
+- reconnect to each principal 3 additional times
+- verify each reconnect lands in the same guest by comparing `boot_id`
+- stop the host with `SIGTERM`
+
+This policy is intentional:
+
+- delayed auto-provision after detach still needs to allocate guestfs/vsock/vnet
+  AF_UNIX sockets, so compact namespace prefixes and socket directories are part
+  of the host-lifetime contract, not just cosmetic naming
+- stdin EOF is detach, not shutdown
+- `SIGHUP` is detach, not shutdown
+- explicit `quit` / `exit` or `SIGINT` / `SIGTERM` are shutdown
+
+Do not regress this when building the actual vmm host. If a future host wants a
+different policy, it should be a deliberate product decision, not a side-effect
+of using a terminal-bound REPL loop.
+
 Saved shell command sequence:
 
 ```bash
@@ -757,6 +788,10 @@ For login, banner, TUI, PTY, or proxy changes, also run:
 2. `./libs/vmm/examples/v1.4/integration/repl-auto-provision-smoke.sh`
 3. a live external SSH attach and manual probe
 
+For host lifetime, detach, or operator-session changes, also run:
+
+1. `./libs/vmm/examples/v1.4/integration/repl-headless-hardening-smoke.sh`
+
 If a future agent changes `vnet`, allocator defaults, guest DNS, or image
 network tooling, `agent-bootstrap.json` is mandatory because it now captures
 the regressions that mattered here:
@@ -779,6 +814,7 @@ image seeding, rerun at least:
 6. `./target/debug/examples/harness_v1_4 scenario ./libs/vmm/examples/v1.4/scenarios/multiguest-validate.json`
 7. `./libs/vmm/examples/v1.4/integration/harness-shell-smoke.sh`
 8. `./libs/vmm/examples/v1.4/integration/repl-auto-provision-smoke.sh`
+9. `./libs/vmm/examples/v1.4/integration/repl-headless-hardening-smoke.sh`
 
 And when changing login/banner/proxy or PTY handling, also run a live external
 SSH check.
