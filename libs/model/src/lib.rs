@@ -14,6 +14,7 @@ pub mod generation;
 pub mod metrics;
 #[cfg(feature = "metrics-runtime")]
 pub mod metrics_runtime;
+pub mod transcription;
 pub mod units;
 
 pub use chat::{ChatMessage, ChatRole, ContentPart};
@@ -23,6 +24,10 @@ pub use generation::{
     ChatRequest, ChatResponse, CompletionRequest, CompletionResponse, GenerationParams,
 };
 pub use metrics::{EmbeddingMetrics, ModelMetricSnapshot, RuntimeMetrics, TextGenerationMetrics};
+pub use transcription::{
+    AudioSpec, PcmChunk, PcmEncoding, TranscriptSegment, TranscriptionModel, TranscriptionParams,
+    TranscriptionStream, TranscriptionUpdate,
+};
 pub use units::{Bytes, Milliseconds, Tokens, TokensPerSecond};
 
 /// Stable product-facing identifier for a curated bundle.
@@ -66,6 +71,7 @@ pub enum BundleFamily {
     Hermes,
     Other(String),
     Qwen,
+    Whisper,
 }
 
 /// Internal execution substrate chosen for a bundle or adapter.
@@ -75,6 +81,7 @@ pub enum BackendKind {
     LlamaCpp,
     MistralRs,
     Ort,
+    WhisperCpp,
 }
 
 /// Platform scoping visible to operators and release tooling.
@@ -131,6 +138,7 @@ pub enum CapabilityKind {
     Completion,
     Embeddings,
     Ocr,
+    Transcription,
     Vision,
 }
 
@@ -229,6 +237,16 @@ impl CapabilityDescriptor {
             InteractionStyle::MultiTurn,
         )
     }
+
+    pub fn transcription_stream() -> Self {
+        Self::new(
+            CapabilityKind::Transcription,
+            "Streaming voice-to-text transcription from PCM audio chunks.",
+            vec![ContentKind::Audio],
+            vec![ContentKind::Text],
+            InteractionStyle::Streaming,
+        )
+    }
 }
 
 /// Supported capability set plus introspective metadata.
@@ -288,6 +306,10 @@ impl Capabilities {
             CapabilityDescriptor::vision(),
         ])
     }
+
+    pub fn transcription_stream_only() -> Self {
+        Self::new(vec![CapabilityDescriptor::transcription_stream()])
+    }
 }
 
 /// Stable metadata for a curated bundle definition or a loaded bundle instance.
@@ -315,6 +337,9 @@ pub struct ModelIdentity {
 pub enum CheckpointFormat {
     Safetensors,
     Gguf,
+    /// Legacy ggml format used by whisper.cpp curated artifacts.
+    /// The canonical first-slice artifact is `ggml-base.en.bin`.
+    Ggml,
     Onnx,
 }
 
@@ -528,6 +553,7 @@ pub trait BundleHandle: Send + Sync {
     fn chat(&self) -> Result<&dyn ChatModel, ModelError>;
     fn completion(&self) -> Result<&dyn CompletionModel, ModelError>;
     fn embeddings(&self) -> Result<&dyn EmbeddingModel, ModelError>;
+    fn transcription(&self) -> Result<&dyn TranscriptionModel, ModelError>;
 
     async fn shutdown(self: Box<Self>) -> Result<(), ModelError>;
 }
@@ -595,6 +621,12 @@ mod tests {
 
         fn embeddings(&self) -> Result<&dyn EmbeddingModel, ModelError> {
             Ok(self)
+        }
+
+        fn transcription(&self) -> Result<&dyn TranscriptionModel, ModelError> {
+            Err(ModelError::UnsupportedCapability(
+                CapabilityKind::Transcription,
+            ))
         }
 
         async fn shutdown(self: Box<Self>) -> Result<(), ModelError> {
@@ -878,6 +910,46 @@ mod tests {
         assert!(chat.params.stop_sequences.is_empty());
         assert_eq!(multi.inputs.len(), 2);
         assert_eq!(response.vectors.len(), 2);
+    }
+
+    #[test]
+    fn transcription_descriptor_uses_audio_input_and_streaming_interaction() {
+        let descriptor = CapabilityDescriptor::transcription_stream();
+
+        assert_eq!(descriptor.kind, CapabilityKind::Transcription);
+        assert_eq!(descriptor.inputs, vec![ContentKind::Audio]);
+        assert_eq!(descriptor.outputs, vec![ContentKind::Text]);
+        assert_eq!(descriptor.interaction, InteractionStyle::Streaming);
+    }
+
+    #[test]
+    fn transcription_stream_only_capabilities_supports_transcription_but_not_chat() {
+        let capabilities = Capabilities::transcription_stream_only();
+
+        assert!(capabilities.supports(CapabilityKind::Transcription));
+        assert!(!capabilities.supports(CapabilityKind::Chat));
+        assert!(!capabilities.supports(CapabilityKind::Embeddings));
+    }
+
+    #[tokio::test]
+    async fn embedding_handle_rejects_transcription_cleanly() {
+        let handle = FakeHandle {
+            descriptor: LoadedBundleDescriptor {
+                id: BundleId::new("embedder"),
+                display_name: "Embedder".into(),
+                capabilities: Capabilities::embeddings_only(),
+                quantization: QuantizationSupport::none(),
+                resolved_quantization: None,
+            },
+        };
+
+        assert!(!handle.supports(CapabilityKind::Transcription));
+        assert!(matches!(
+            handle.transcription(),
+            Err(ModelError::UnsupportedCapability(
+                CapabilityKind::Transcription
+            ))
+        ));
     }
 
     #[test]

@@ -14,7 +14,7 @@ use motlie_model::{
     CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
     EmbeddingRequest as ModelEmbeddingRequest, EmbeddingResponse, LoadedBundleDescriptor,
     ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot, QuantizationBits,
-    QuantizationSupport, ResolvedCheckpoint, StartOptions,
+    QuantizationSupport, ResolvedCheckpoint, StartOptions, TranscriptionModel,
 };
 
 const MISTRAL_EMBEDDING_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Safetensors];
@@ -282,6 +282,12 @@ impl BundleHandle for MistralEmbeddingHandle {
 
     fn embeddings(&self) -> Result<&dyn EmbeddingModel, ModelError> {
         Ok(self)
+    }
+
+    fn transcription(&self) -> Result<&dyn TranscriptionModel, ModelError> {
+        Err(ModelError::UnsupportedCapability(
+            CapabilityKind::Transcription,
+        ))
     }
 
     async fn shutdown(self: Box<Self>) -> Result<(), ModelError> {

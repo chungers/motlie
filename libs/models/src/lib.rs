@@ -11,18 +11,21 @@ use std::error::Error as StdError;
     feature = "model-qwen3-embedding-06b",
     feature = "model-gemma4-e2b",
     feature = "model-gemma4-e2b-gguf",
+    feature = "model-whisper-base-en",
 ))]
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
+pub mod asr;
 pub mod chat;
 pub mod embeddings;
 
 use hf_hub::api::sync::ApiBuilder;
 use thiserror::Error;
 
+pub use asr::AsrModels;
 pub use chat::ChatModels;
 pub use embeddings::EmbeddingModels;
 use motlie_model::{
@@ -69,6 +72,8 @@ pub enum ModelsError {
     },
     #[error("unknown embedding model selector `{selector}`")]
     UnknownEmbeddingModel { selector: String },
+    #[error("unknown ASR model selector `{selector}`")]
+    UnknownAsrModel { selector: String },
     #[error("unknown chat model selector `{selector}`")]
     UnknownChatModel { selector: String },
     #[error("unknown model selector `{selector}`")]
@@ -533,6 +538,8 @@ pub struct ResolvedModelDescriptor {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ModelSelector {
+    #[cfg(feature = "model-whisper-base-en")]
+    Asr(AsrModels),
     #[cfg(any(
         feature = "model-qwen3-4b",
         feature = "model-qwen3-4b-gguf",
@@ -554,10 +561,13 @@ pub enum ModelSelector {
     feature = "model-qwen3-embedding-06b",
     feature = "model-gemma4-e2b",
     feature = "model-gemma4-e2b-gguf",
+    feature = "model-whisper-base-en",
 ))]
 impl ModelSelector {
     pub fn as_str(&self) -> String {
         match self {
+            #[cfg(feature = "model-whisper-base-en")]
+            Self::Asr(model) => format!("asr:{}", model.as_str()),
             #[cfg(any(
                 feature = "model-qwen3-4b",
                 feature = "model-qwen3-4b-gguf",
@@ -575,6 +585,8 @@ impl ModelSelector {
 
     pub fn bundle_id(&self) -> BundleId {
         match self {
+            #[cfg(feature = "model-whisper-base-en")]
+            Self::Asr(model) => model.bundle_id(),
             #[cfg(any(
                 feature = "model-qwen3-4b",
                 feature = "model-qwen3-4b-gguf",
@@ -592,6 +604,8 @@ impl ModelSelector {
 
     pub fn descriptor(&self) -> BundleDescriptor {
         match self {
+            #[cfg(feature = "model-whisper-base-en")]
+            Self::Asr(model) => model.descriptor(),
             #[cfg(any(
                 feature = "model-qwen3-4b",
                 feature = "model-qwen3-4b-gguf",
@@ -609,6 +623,8 @@ impl ModelSelector {
 
     pub fn bundle(&self) -> Box<dyn ModelBundle> {
         match self {
+            #[cfg(feature = "model-whisper-base-en")]
+            Self::Asr(model) => model.bundle(),
             #[cfg(any(
                 feature = "model-qwen3-4b",
                 feature = "model-qwen3-4b-gguf",
@@ -632,6 +648,7 @@ impl ModelSelector {
     feature = "model-qwen3-embedding-06b",
     feature = "model-gemma4-e2b",
     feature = "model-gemma4-e2b-gguf",
+    feature = "model-whisper-base-en",
 ))]
 impl fmt::Display for ModelSelector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -713,6 +730,21 @@ impl FromStr for ModelSelector {
             });
         }
 
+        if let Some(raw) = value.strip_prefix("asr:") {
+            #[cfg(not(feature = "model-whisper-base-en"))]
+            if raw == asr::WHISPER_BASE_EN_SELECTOR {
+                return Err(ModelsError::ModelUnavailable {
+                    selector: value.to_owned(),
+                });
+            }
+            #[cfg(feature = "model-whisper-base-en")]
+            return Ok(Self::Asr(raw.parse()?));
+            #[cfg(not(feature = "model-whisper-base-en"))]
+            return Err(ModelsError::UnknownModelSelector {
+                selector: value.to_owned(),
+            });
+        }
+
         Err(ModelsError::UnknownModelSelector {
             selector: value.to_owned(),
         })
@@ -776,6 +808,8 @@ impl Catalog {
         chat::qwen3_4b_gguf::register(&mut catalog);
         #[cfg(feature = "model-gemma4-e2b-gguf")]
         chat::gemma4_e2b_gguf::register(&mut catalog);
+        #[cfg(feature = "model-whisper-base-en")]
+        asr::whisper_base_en::register(&mut catalog);
         catalog
     }
 
