@@ -81,6 +81,7 @@ pub enum BackendKind {
     LlamaCpp,
     MistralRs,
     Ort,
+    SherpaOnnx,
     WhisperCpp,
 }
 

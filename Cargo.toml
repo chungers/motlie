@@ -6,6 +6,7 @@ members = [
     "libs/model",
     "libs/model/backends/mistral",
     "libs/model/backends/llama_cpp",
+    "libs/model/backends/sherpa_onnx",
     "libs/model/backends/whisper_cpp",
     "libs/model-eval",
     "libs/models",
