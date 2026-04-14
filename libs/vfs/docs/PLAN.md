@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-13 | @codex-vz | Add the parallel Apple Vz support track via `PLAN_XBACKENDS.md` / `DESIGN_XBACKENDS.md`: sequence a `v1.15` guestfs PoC before transport cleanup, preserve the userspace / no-persistent-host-change constraints, and keep `#134` separate as the policy-engine phase |
 | 2026-03-28 | @codex-pm | Resolve PR #117 round-3 follow-ups: fix stale traceability phase references, add explicit PLAN coverage for v1 symlink/file-handle behavior, and align the plan with the completed event-emission contract |
 | 2026-03-28 | @codex-pm | Address PR #117 review feedback: convert DESIGN links to relative paths, fix phase/task numbering, and make the v2 RPC phase specification-oriented instead of implementation-oriented |
 | 2026-03-28 | @codex-pm | Align the plan title with the product framing: layered guest filesystem composition rather than transport plumbing |
@@ -46,6 +47,18 @@ Harness lineage handoff:
   - implementation and runbooks: `libs/vnet/examples/v1.2/`
   - design and forward plan: `libs/vnet/docs/DESIGN.md` and
     `libs/vnet/docs/PLAN.md`
+
+Parallel Apple Vz planning source of truth:
+
+- `libs/vfs/docs/DESIGN_XBACKENDS.md`
+- `libs/vfs/docs/PLAN_XBACKENDS.md`
+
+That track should proceed in this order:
+
+1. Vz guestfs PoC in `libs/vfs/examples/v1.15` and `libs/vfs/vz`
+2. `motlie-vfs` transport cleanup and CH-safe cross-backend refactor
+3. `#134` policy engine implementation
+4. later `libs/vmm` integration through `guestfs_vz.rs` / `backend::vz`
 
 Roadmap-specific implementation choices:
 

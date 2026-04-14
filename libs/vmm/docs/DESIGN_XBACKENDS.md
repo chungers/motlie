@@ -4,43 +4,91 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-13 | @codex-vz | Expand the cross-backend sequencing to include `motlie-vfs` as core VMM infrastructure: prioritize a `v1.15` Vz guestfs PoC first, then a `v1.25` Vz egress PoC, then the `motlie-vfs` / `motlie-vnet` cleanup phases and the separate policy phases (`#134`, `#133`) before the eventual `v1.45` full `libs/vmm` Vz vertical slice |
 | 2026-04-13 | @codex-vz | Initial cross-backend design note for `libs/vmm`: treat `motlie-vnet` as core VMM infrastructure, sequence the work as Vz egress PoC first (`#170`), then `motlie-vnet` CH-safe refactor (`#169`), then the policy engine (`#133`), then full Vz backend integration |
 
 ## Purpose
 
-`libs/vmm` now depends on `motlie-vnet` as core infrastructure, not as an
-optional sidecar:
+`libs/vmm` now depends on both `motlie-vfs` and `motlie-vnet` as core
+infrastructure, not as optional sidecars:
 
+- `examples/v1.4` uses `motlie-vfs` for guest filesystem mounts and runtime
+  layering
 - `examples/v1.4` uses `motlie-vnet` for outbound guest internet
-- harness validation checks depend on egress correctness
-- the future Apple Vz backend needs an answer for policy-capable egress, not
-  just "some networking"
+- harness validation depends on both
+- the future Apple Vz backend needs answers for both:
+  - managed guestfs semantics, not just raw host sharing
+  - policy-capable egress, not just "some networking"
 
-That means cross-backend planning cannot live only in `libs/vnet`.
+That means cross-backend planning cannot live only in `libs/vnet` or only in
+`libs/vfs`.
 
-This document explains how `libs/vmm` should consume the evolving `vnet`
-architecture and why the execution order is:
+This document explains how `libs/vmm` should consume the evolving `vfs` and
+`vnet` architecture and why the execution order is:
 
-1. `#170` Vz vertical-slice egress PoC first
-2. `#169` `motlie-vnet` reusable-core / CH-adapter refactor second
-3. `#133` policy engine implementation on top of that refactor
-4. full `backend::vz` vertical slice in `libs/vmm` after the egress path is
-   proven
+1. Vz guestfs PoC first (`v1.15`)
+2. Vz egress PoC second (`v1.25`)
+3. `motlie-vfs` cleanup / adapter refactor
+4. `motlie-vnet` cleanup / adapter refactor (`#169`)
+5. `#134` VFS policy engine
+6. `#133` VNET policy engine
+7. full `backend::vz` vertical slice in `libs/vmm` / `examples/v1.45`
 
-## Why `#170` Comes First
+## Why `v1.15` Comes First
 
-The key uncertainty is not whether `libslirp` is portable. It is whether Apple
-Vz can expose a packet path that lets Rust preserve the same egress policy and
-observability semantics that `motlie-vnet` is being designed to own.
+The first uncertainty on Apple Vz is not the `motlie-vfs` semantic core. It is
+whether a Linux guest on Vz can preserve the same managed guestfs behavior
+through a Vz-specific host/guest transport path.
 
-If we refactor `motlie-vnet` first without that evidence, we risk:
+If we refactor first without that evidence, we risk:
 
-- introducing adapter boundaries based on the wrong Vz assumptions
+- introducing adapter boundaries based on guessed Vz assumptions
 - over-generalizing public API too early
 - taking regression risk in the Linux CH path without first proving there is a
-  real second backend worth accommodating
+  real second backend path worth accommodating
 
-So `libs/vmm` should explicitly treat the Vz egress PoC as a design gate.
+This is why the `motlie-vfs` vertical slice should come before the networking
+slice. It follows the same shape as the CH lineage:
+
+- `v1` / `v1.1`: filesystem-first proving ground
+- `v1.2`: networking expansion
+- `v1.4`: full VMM integration
+
+For Apple Vz, the parallel line should be:
+
+- `v1.15`: VFS guestfs vertical slice
+- `v1.25`: VNET egress vertical slice
+- `v1.45`: full VMM vertical slice
+
+## `motlie-vfs` As VMM Infrastructure
+
+From the `libs/vmm` point of view, `motlie-vfs` is responsible for:
+
+- guest mount routing and readiness
+- overlay and shared-layer semantics
+- future filesystem policy and enriched observability from `#134`
+- preserving the product constraints:
+  - all userspace on the host side
+  - no persistent host configuration changes
+  - no persistent host traces other than selected backing directories
+  - runtime state that is ephemeral during host lifetime
+
+That means `libs/vmm` should depend on guestfs capabilities, not on the current
+CH-shaped socket path.
+
+Required `libs/vmm` abstractions over time:
+
+- guestfs available / guestfs unavailable
+- managed guestfs semantics / raw host sharing only
+- policy-capable guestfs / not policy-capable
+- backend-neutral guestfs observability
+- backend-neutral validation criteria in the harness
+
+`libs/vmm` should not permanently depend on assumptions like:
+
+- the current Unix socket listener shape is universal
+- current CH-style mount readiness is the only valid signal
+- raw VirtioFS pass-through is equivalent to `motlie-vfs`
 
 ## `motlie-vnet` As VMM Infrastructure
 
@@ -71,22 +119,45 @@ Required `libs/vmm` abstractions over time:
 
 ## VMM Implications Of The New Issue Order
 
-### Stage 1: `#170` Vz Egress PoC
+### Stage 1: `v1.15` Vz Guestfs PoC
 
-No `libs/vmm` integration is required yet.
+Minimal or no `libs/vmm` integration is required yet.
 
-Expected output from `#170` that matters to `libs/vmm`:
+Expected output that matters to `libs/vmm`:
+
+- is managed guestfs on Vz feasible at all?
+- what host/guest transport and readiness signals are available?
+- can the current `FsServer` semantics survive unchanged?
+- what does the eventual `guestfs_vz.rs` adapter need from `vmm`?
+
+At this stage, `libs/vmm` remains CH-first and stable.
+
+### Stage 2: `v1.25` Vz Egress PoC
+
+Again, `libs/vmm` should prefer documentation-level consumption of the PoC
+findings over early code changes.
+
+Expected output:
 
 - is policy-capable egress on Vz feasible at all?
 - what packet/lifecycle/observability signals are available?
 - what does the eventual Vz egress adapter need from `vmm`?
 - can the no-host-config-drift requirement still hold?
 
-At this stage, `libs/vmm` remains CH-first and stable.
+### Stage 3: `motlie-vfs` Cleanup
 
-### Stage 2: `#169` `motlie-vnet` Refactor
+This is where `libs/vmm` should begin preparing for backend-neutral guestfs
+readiness and observability, but still without a live Vz backend.
 
-This is where `libs/vmm` should begin preparing for backend-neutrality, but
+Expected `libs/vmm` work after or alongside the cleanup:
+
+- remove CH-specific guestfs assumptions from readiness language
+- define capability-style reporting for guestfs connection state
+- preserve existing `examples/v1.4` outcomes for CH
+
+### Stage 4: `#169` `motlie-vnet` Refactor
+
+This is where `libs/vmm` should begin preparing for backend-neutral egress, but
 still without a live Vz backend.
 
 Expected `libs/vmm` work after or alongside `#169`:
@@ -99,7 +170,18 @@ Expected `libs/vmm` work after or alongside `#169`:
 - keep `examples/v1.4` validation unchanged in outcome, not necessarily in
   transport labels
 
-### Stage 3: `#133` Policy Engine
+### Stage 5: `#134` Policy Engine
+
+Once `motlie-vfs` has the right transport boundary, `#134` becomes a direct VMM
+concern because backend parity now includes filesystem policy and observability.
+
+Implications for `libs/vmm`:
+
+- harness coverage eventually needs policy-aware filesystem scenarios
+- backend parity should mean not just "mounts work", but preserved policy
+  semantics where the backend claims full parity
+
+### Stage 6: `#133` Policy Engine
 
 Once `motlie-vnet` has the right reusable core shape, `#133` becomes a direct
 VMM concern because `libs/vmm` acceptance now includes policy-capable egress as
@@ -107,14 +189,14 @@ part of backend parity.
 
 Implications for `libs/vmm`:
 
-- harness coverage eventually needs policy-aware scenarios
+- harness coverage eventually needs policy-aware networking scenarios
 - backend parity should mean not just internet access, but preserved policy
   semantics where the backend claims full parity
 
-### Stage 4: Full Vz Backend Slice
+### Stage 7: Full Vz Backend Slice
 
-Only after the egress path is proven should `libs/vmm` absorb Vz into the full
-lifecycle stack:
+Only after the filesystem and egress paths are proven should `libs/vmm` absorb
+Vz into the full lifecycle stack:
 
 - `prepare()`
 - `boot()`
@@ -124,6 +206,7 @@ lifecycle stack:
 - `shutdown()`
 - provisioning
 - SSH proxy / auto-provision
+- guestfs
 - egress
 
 ## Acceptance Implications For `libs/vmm`
@@ -134,11 +217,12 @@ When Vz becomes real in `libs/vmm`, parity should be judged in layers:
 
 - backend boots
 - readiness works
-- exec/PTy/shutdown work
+- exec/PTY/shutdown work
 
 ### Layer B: Guest Services
 
 - guest image / cloud-init / ssh / users / mount wiring still behave correctly
+- managed guestfs semantics remain intact
 
 ### Layer C: Egress
 
@@ -147,12 +231,15 @@ When Vz becomes real in `libs/vmm`, parity should be judged in layers:
 
 ### Layer D: Policy Parity
 
+- only claim full parity if the filesystem path preserves the `#134`
+  filesystem policy and observability semantics
 - only claim full parity if the final egress path preserves the `#133`
   DNS/TCP policy and observability semantics
 
-This layered acceptance model matters because `#170` may prove:
+This layered acceptance model matters because the Apple Vz slices may prove:
 
 - lifecycle feasibility is high
+- guestfs feasibility is high
 - basic internet egress is feasible
 - full policy parity is blocked or delayed
 
@@ -163,6 +250,8 @@ binary "Vz works / Vz does not work."
 
 This document depends on and should stay aligned with:
 
+- `libs/vfs/docs/DESIGN.md`
+- `libs/vfs/docs/DESIGN_XBACKENDS.md`
 - `libs/vnet/docs/DESIGN.md`
 - `libs/vnet/docs/DESIGN_XBACKENDS.md`
 - `libs/vmm/docs/DESIGN_VZ.md`
@@ -171,4 +260,4 @@ This document depends on and should stay aligned with:
 
 This document explains the surrounding `vmm` infrastructure sequencing so the
 backend does not get implemented against unstable or incorrect assumptions about
-how `motlie-vnet` will evolve.
+how `motlie-vfs` and `motlie-vnet` will evolve.

@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-13 | @codex-vz | Add the cross-backend Apple Vz planning track via `DESIGN_XBACKENDS.md` / `PLAN_XBACKENDS.md`: preserve managed `motlie-vfs` semantics under CH and Vz, require userspace-only / no-persistent-host-change behavior, sequence a `v1.15` Vz guestfs PoC before cleanup, and keep `#134` as the separate policy-engine phase |
 | 2026-04-06 | @codex | Record the harness ownership handoff: `v1` and `v1.1` remain VFS-owned, while the `v1.2+` example / validation harness moves to `motlie-vnet` with `libs/vnet/docs/{DESIGN,PLAN}.md` as the networking source of truth |
 | 2026-04-05 | @codex | Extend the v1 wire protocol and semantics with `Access`, xattrs, and byte-range locks; document handle-based fsync/rename behavior and the remaining lock-limitations for the compatibility pass |
 | 2026-04-02 | @codex | Split the host/guest example boundary so `examples/v1/repl_host.rs` remains the stable v1 single-guest harness, `examples/v1.1/repl_host.rs` carries the v1.1 multi-guest control-plane extensions, and the guest mounters now live under `bins/v1/` and `bins/v1.1/` |
@@ -54,6 +55,25 @@ valuable deployment models:
 
 The FS server and FUSE client need to be extracted into a standalone library with pluggable
 transports and cross-platform FUSE support.
+
+Parallel Apple Vz track:
+
+- `libs/vfs/docs/DESIGN_XBACKENDS.md`
+- `libs/vfs/docs/PLAN_XBACKENDS.md`
+
+That track keeps the same product constraints:
+
+- userspace-only host services
+- no persistent host configuration drift
+- no persistent host traces other than caller-selected backing directories
+- runtime-only connection state that disappears with the host process
+
+The current execution order for Apple Vz support is:
+
+1. Vz guestfs PoC in `libs/vfs/examples/v1.15` and `libs/vfs/vz`
+2. `motlie-vfs` transport cleanup and cross-backend boundary refactor
+3. `#134` policy engine implementation on the clarified core
+4. later `libs/vmm` `guestfs_vz.rs` / `backend::vz` integration
 
 That extraction is not only about transport reuse. It is also about supporting a more
 expressive **guest runtime filesystem policy** than the current "static pass-through mount"

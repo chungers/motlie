@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-13 | @codex-vz | Expand the parallel Apple Vz support track: treat both `motlie-vfs` and `motlie-vnet` as core VMM infrastructure, reference the `v1.15` / `v1.25` / `v1.45` Vz proving line, and sequence guestfs/egress cleanup plus the separate policy phases (`#134`, `#133`) before full `backend::vz` integration |
 | 2026-04-13 | @codex-vz | Add `DESIGN_XBACKENDS.md` / `PLAN_XBACKENDS.md` as the cross-backend infrastructure track for `libs/vmm`: treat `motlie-vnet` as core VMM infrastructure, record the no-host-config-drift/all-userspace/ephemeral-lifetime constraints, and sequence Apple Vz support as `#170` PoC first, `#169` CH-safe `vnet` refactor second, `#133` policy engine third, and full `backend::vz` integration last |
 | 2026-04-08 | @codex | Address PR 140 review drift: remove the dead `VmBackend` / `BackendSet` transitional story from the design, update `GuestSpec` / `PreparedGuest` / shutdown snippets to match code, and record the typed `OverlaySize` plus namespace-sensitive socket-path allocation details |
 | 2026-04-08 | @codex | Make the harness terminal-state engine switchable, adopt `shadow-terminal` as the default high-fidelity backend for PTY/TUI validation, keep `vt100` as an explicit fallback backend, and keep PNG/GIF/movie generation out of scope for `v1.4` |
@@ -67,16 +68,20 @@ Parallel cross-backend track:
 - Apple Vz support now has an explicit parallel infrastructure track under:
   - `libs/vmm/docs/DESIGN_XBACKENDS.md`
   - `libs/vmm/docs/PLAN_XBACKENDS.md`
-- that track exists because `motlie-vnet` is now part of real `vmm`
-  infrastructure, and future backend work must preserve:
-  - no persistent host network configuration changes
+- that track exists because `motlie-vfs` and `motlie-vnet` are now part of
+  real `vmm` infrastructure, and future backend work must preserve:
+  - no persistent host configuration changes beyond caller-selected backing
+    directories and ordinary runtime artifacts
   - all userspace
-  - runtime networking state that is ephemeral during process lifetime
+  - runtime state that is ephemeral during process lifetime
 - current execution order:
-  1. `#170` Vz egress PoC in `libs/vnet/vz` / `libs/vnet/examples/v1.25`
-  2. `#169` `motlie-vnet` reusable-core / CH-adapter refactor
-  3. `#133` policy engine
-  4. full `backend::vz` vertical slice in `libs/vmm`
+  1. Vz guestfs PoC in `libs/vfs/vz` / `libs/vfs/examples/v1.15`
+  2. `#170` Vz egress PoC in `libs/vnet/vz` / `libs/vnet/examples/v1.25`
+  3. `motlie-vfs` cleanup / adapter refactor
+  4. `#169` `motlie-vnet` reusable-core / CH-adapter refactor
+  5. `#134` VFS policy engine
+  6. `#133` VNET policy engine
+  7. full `backend::vz` vertical slice in `libs/vmm` / `examples/v1.45`
 
 Current `v1.4` implementation status:
 
