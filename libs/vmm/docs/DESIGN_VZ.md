@@ -29,7 +29,7 @@ orchestrator contracts with a narrower backend capability set:
 - SSH control plane over virtio-vsock
 - host-visible serial log capture
 - host directory sharing for guest mounts
-- simple host-managed networking
+- policy-capable outbound guest networking
 - deterministic shutdown and exit observation
 
 ## Current Local Constraints
@@ -470,25 +470,52 @@ slice.
 The current `NetworkModes` model is CH/Motlie-oriented. Vz phase 1 should not
 try to emulate every existing mode.
 
+Revised decision:
+
+- Apple NAT may exist as a helper/bootstrap mode for bring-up and local
+  debugging, but it is not sufficient for backend parity
+- the parity path must preserve the policy and observability requirements being
+  designed for `motlie-vnet` in issue/PR `#133`
+- therefore Vz networking should be designed around a policy-capable egress
+  backend, not around `VZNATNetworkDeviceAttachment` alone
+
+Required parity properties for outbound egress:
+
+- DNS query/response observability
+- TCP connect observability
+- policy callbacks at the Rust packet/flow layer
+- domain-to-IP correlation for policy decisions
+- deny behavior that can fail closed before host egress occurs
+
 Recommended Vz mapping:
 
 - `AdminNetMode::None + EgressNetMode::None`
   - boot without a network device
 - `AdminNetMode::None + EgressNetMode::VhostUser`
-  - map to one NAT-backed virtio NIC with `VZNATNetworkDeviceAttachment`
+  - do not map directly to Apple NAT for the parity implementation
+  - instead, represent "policy-capable outbound egress required"
+  - the concrete Vz realization still needs design work:
+    - adapt `motlie-vnet` or an equivalent policy-capable egress engine to a
+      Vz-compatible frontend path
+    - or explicitly introduce a separate Vz-specific policy-capable egress
+      layer with the same semantics as `motlie-vnet`
 - all other combinations
   - reject as unsupported for Vz phase 1
 
 Reasoning:
 
-- Vz does not consume the existing userspace `motlie-vnet` vhost-user socket
-- simple NAT is the closest equivalent to “guest has outbound network access”
+- `motlie-vnet` is the reusable policy-capable egress subsystem in the current
+  crate set; Apple NAT is a backend-native capability, not a reusable service
+- simple NAT is close to "guest has outbound network access", but it cannot by
+  itself satisfy the observability/policy requirements from `#133`
 - the intended phase-1 property is no persistent host network configuration
   changes:
   - no TAP device creation
   - no route or pf rule changes
   - no manual interface provisioning
   - only helper/OS-owned ephemeral runtime networking state while the VM runs
+- preserving that host-impact property remains a requirement even if the final
+  Vz parity path is not Apple NAT
 - bridged and vmnet custom topologies can come later, but they should be added
   as explicit Vz network modes, not hidden behind CH vocabulary
 
@@ -811,12 +838,12 @@ with the CH/Motlie stack. The main gaps are below.
   hypervisor in `libs/vmm/src/ssh.rs`.
 - The guest-visible contract for SSH/control is already a guest-initiated
   vsock stream on port `2222`.
-- NAT-style outbound connectivity exists in Vz through
-  `VZNATNetworkDeviceAttachment`, so a Vz guest can reach the internet without
-  requiring host TAP setup.
 - The auto-provisioning resolver path in `libs/vmm/src/provisioning.rs` is
   backend-agnostic once a guest is booted and reachable through the control
   plane.
+- The "no persistent host network configuration changes" requirement is still
+  compatible with the Vz direction; the missing piece is policy-capable egress,
+  not host-impact minimization.
 
 #### What Does Not Have Parity Yet
 
@@ -826,14 +853,12 @@ with the CH/Motlie stack. The main gaps are below.
   - it exposes a vhost-user-net backend for Cloud Hypervisor
   - it assumes a Unix socket presented to a virtio-net frontend
   - it is documented as the owner of outbound egress in the composed harness
-- The current Vz design replaces that with Apple NAT inside the helper. That is
-  functional for internet access, but it is not strict implementation parity
-  with the CH path because:
-  - no `libs/vnet` backend is started
-  - no `runtime_paths.vnet_socket` artifact is consumed by the hypervisor
-  - no shared `motlie-vnet` observability or failure surface exists
-  - current harness assertions about "Motlie vnet" and guest routing are too
-    CH-specific to reuse unchanged
+- Apple NAT by itself is now explicitly out of scope as the parity solution
+  because it cannot satisfy the vnet policy-engine requirements from `#133`:
+  - no Rust-owned DNS query/response interception
+  - no Rust-owned TCP connect interception
+  - no shared `motlie-vnet` policy callback surface
+  - no shared domain-to-IP reverse map / deny-forging behavior
 - Bridged networking parity is also missing:
   - CH currently has a TAP-based admin option
   - Vz bridged networking is deferred and requires the
@@ -843,10 +868,11 @@ with the CH/Motlie stack. The main gaps are below.
 
 #### Required Changes
 
-- `libs/vnet` does not need to become the phase-1 Vz egress backend.
 - `libs/vmm` does need a backend-neutral network intent/observability layer so
   both backends satisfy the same product requirement through different
   realizations.
+- `libs/vnet` remains the canonical reusable home for DNS/TCP observability and
+  egress policy control.
 - Required `libs/vmm` changes:
   - replace CH-specific "vnet socket implies egress readiness" assumptions with
     backend-specific network observability
@@ -855,10 +881,13 @@ with the CH/Motlie stack. The main gaps are below.
     - default route exists
     - DNS works
     - HTTPS fetch works
-- Optional future `libs/vnet` work:
-  - if strict subsystem reuse is desired, introduce a backend-neutral egress
-    facade above `motlie-vnet`, but this is not required for parity of product
-    behavior
+  - make policy-capable egress, not merely "some internet path", part of the
+    parity contract
+- Required `libs/vnet` / egress-architecture change:
+  - define how a Vz guest reaches a reusable Rust-owned egress engine with the
+    same policy surface as `motlie-vnet`
+  - do not bury that behavior inside Apple NAT where Rust cannot observe or
+    control DNS/TCP intent decisions
 
 #### Blocking Items
 
@@ -1098,9 +1127,12 @@ with the CH/Motlie stack. The main gaps are below.
 
 ### Likely Needs `libs/vnet` Changes
 
-- no mandatory phase-1 crate changes if Vz uses Apple NAT for outbound internet
-- possible future refactor if the project wants a backend-neutral "egress
-  service" abstraction above `motlie-vnet`
+- Vz parity now likely requires `libs/vnet` or a sibling reusable egress layer
+  to expose the same policy-capable service to non-CH backends
+- the key requirement is preserving the `#133` policy/observability surface,
+  not preserving the exact current vhost-user transport
+- a transport abstraction or higher-level reusable egress facade is more likely
+  than a new Vz-specific NAT module inside `libs/vnet`
 
 ### Blocked Or Still Under-Specified
 
