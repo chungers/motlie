@@ -20,9 +20,11 @@ model-qwen3-4b = ["dep:motlie-model-mistral"]
 model-gemma4-e2b = ["dep:motlie-model-mistral"]
 model-qwen3-4b-gguf = ["dep:motlie-model-llama-cpp"]
 model-gemma4-e2b-gguf = ["dep:motlie-model-llama-cpp"]
+model-piper-en-us-ljspeech-medium = ["dep:motlie-model-piper"]
 model-sherpa-onnx-streaming = ["dep:motlie-model-sherpa-onnx"]
 model-whisper-base-en = ["dep:motlie-model-whisper-cpp"]
 llama-cpp-cuda = ["dep:motlie-model-llama-cpp", "motlie-model-llama-cpp/cuda"]
+piper-cuda = ["dep:motlie-model-piper", "motlie-model-piper/cuda"]
 sherpa-onnx-cuda = ["dep:motlie-model-sherpa-onnx", "motlie-model-sherpa-onnx/cuda"]
 whisper-cpp-cuda = ["dep:motlie-model-whisper-cpp", "motlie-model-whisper-cpp/cuda"]
 cuda = ["dep:motlie-model-mistral", "motlie-model-mistral/cuda"]
@@ -37,6 +39,7 @@ hf-hub = "0.5.0"
 motlie-model = { path = "../model" }
 motlie-model-mistral = { path = "../model/backends/mistral", optional = true }
 motlie-model-llama-cpp = { path = "../model/backends/llama_cpp", optional = true }
+motlie-model-piper = { path = "../model/backends/piper", optional = true }
 motlie-model-sherpa-onnx = { path = "../model/backends/sherpa_onnx", optional = true }
 motlie-model-whisper-cpp = { path = "../model/backends/whisper_cpp", optional = true }
 thiserror.workspace = true
@@ -80,6 +83,11 @@ required-features = ["model-whisper-base-en"]
 name = "models_v0_6"
 path = "examples/v0.6/main.rs"
 required-features = ["model-sherpa-onnx-streaming"]
+
+[[example]]
+name = "models_tts_v0_1"
+path = "examples/tts_v0.1/main.rs"
+required-features = ["model-piper-en-us-ljspeech-medium"]
 
 [[example]]
 name = "bench_chat"

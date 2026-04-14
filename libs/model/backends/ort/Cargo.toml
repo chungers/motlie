@@ -1,0 +1,19 @@
+[package]
+name = "motlie-model-ort"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared ONNX Runtime helpers for Motlie model backends"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+cuda = ["ort/cuda"]
+
+[dependencies]
+motlie-model = { path = "../..", features = ["metrics-runtime"] }
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray"] }
