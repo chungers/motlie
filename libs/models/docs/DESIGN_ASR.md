@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-04-14 | @codex-asr: Added evaluation of NVIDIA Nemotron Speech Streaming and Qwen3-ASR as future backends, including Phase 2 fit analysis versus `sherpa-onnx`, `faster-whisper`, and the current `whisper.cpp` backend. | Research Summary, Additional Backend Candidates, References |
 | 2026-04-13 | @codex-asr: Addressed R1 review feedback by stream-scoping `AudioSpec`, changing `push_chunk()` to return `Option`, documenting `Send`/not-`Sync` stream ownership, making quantization explicit, tightening edge-case semantics, and narrowing the first implementation slice to the `.wav` path. | Core Contract Changes in `libs/model`, Generic Backend Design, Curated Bundle Design in `libs/models`, Streaming PCM API Contract, Migration and Compatibility Strategy, API Sketch, Testing Scope for PLAN |
 | 2026-04-12 | @codex-asr: Initial brownfield design for a voice-to-text (ASR) vertical slice in the Motlie model stack. Recommends a `whisper.cpp` backend with a curated `whisper-base.en` bundle, documents the streaming PCM contract, and evaluates `faster-whisper` and streaming ONNX alternatives. | All |
 
@@ -18,6 +19,7 @@ This is brownfield product work. Motlie already has a stable contract crate, bac
 - [Overview](#overview)
 - [Goals and Non-Goals](#goals-and-non-goals)
 - [Research Summary](#research-summary)
+- [Additional Backend Candidates](#additional-backend-candidates)
 - [Recommended Vertical Slice](#recommended-vertical-slice)
 - [Architecture](#architecture)
 - [Core Contract Changes in `libs/model`](#core-contract-changes-in-libsmodel)
@@ -132,6 +134,78 @@ Inference from these sources:
 - `whisper-base.en` is the lowest-risk first curated bundle for CPU-first Motlie deployments.
 - `whisper-small.en` is a plausible second curated bundle once the contract and backend are validated.
 - CUDA support should remain backend-local and optional. The public ASR capability API should not fork into separate CPU and GPU contracts.
+
+## Additional Backend Candidates
+
+This section evaluates two newer candidates that were not part of the original 2026-04-12 comparison set:
+
+- NVIDIA `nemotron-speech-streaming-en-0.6b`
+- Alibaba `Qwen3-ASR`
+
+The question here is narrower than the v1 decision: whether either candidate should replace `sherpa-onnx` as the recommended Phase 2 backend family once the current `whisper.cpp` slice is stable.
+
+### Comparative Summary
+
+| Candidate | Streaming Fit | CPU / GB10 Fit | Export / Runtime Path | Rust Integration Path | Model / Artifact Size | License | Phase 2 Decision |
+|-----------|---------------|----------------|-----------------------|-----------------------|-----------------------|---------|------------------|
+| `nvidia/nemotron-speech-streaming-en-0.6b` | Excellent. Native cache-aware streaming model with configurable chunk sizes from `80 ms` to `1120 ms`. | CPU: weak. Official materials are GPU-first and explicitly position it as faster than CPU-only solutions. GB10 / Blackwell: promising, because NVIDIA lists Blackwell compatibility and Blackwell test hardware, but as of `2026-04-14` I did not find official GB10-specific throughput or latency numbers. | Strong for NVIDIA service deployment through NeMo, Riva, Triton, and NIM. Weak for a Motlie-native ONNX/TensorRT artifact pipeline: I did not find an official ONNX export path for this ASR model, and NVIDIA's public integration surface is Riva/NIM-first. | Medium for service-backed Rust via gRPC or generated protobuf clients. Weak for an in-process Rust backend that follows the current Motlie bundle/adapter pattern. | `600M` params; Hugging Face checkpoint is about `2.47 GB` as a `.nemo` artifact. | NVIDIA Open Model License | Do not replace `sherpa-onnx` for Phase 2. Keep as a later GPU-appliance / service-backend candidate. |
+| `Qwen/Qwen3-ASR-0.6B` and `Qwen/Qwen3-ASR-1.7B` | Strong. Official repo supports offline plus streaming inference; streaming is currently exposed through the `vLLM` backend. | CPU: unclear-to-weak for Motlie's current goals. Official local paths center on `transformers` and `vLLM`, with CUDA examples and server flows rather than CPU-first runtimes. GB10: plausible via GPU-serving, but no GB10-specific guidance was found. | Official runtime story is `transformers`, `vLLM`, and DashScope. I did not find official ONNX export guidance. That makes it weaker than an ONNX-native Phase 2 backend even though the model itself is capable. | Medium for service-backed Rust through OpenAI-compatible `vLLM` HTTP or custom websocket clients. Weak for a native in-process Rust backend in the current Motlie shape. | `0.6B` and `1.7B` variants; the `0.6B` Hugging Face weight set is about `1.88 GB`. | Apache-2.0 | Do not replace `sherpa-onnx` for Phase 2. Keep as a multilingual service/GPU candidate for a later backend family. |
+
+### NVIDIA Nemotron Speech Streaming
+
+What it gets right:
+
+- It is a purpose-built streaming ASR model rather than a repeated-decode approximation over buffered audio.
+- The official runtime exposes explicit chunk-size tradeoffs (`80 ms`, `160 ms`, `560 ms`, `1120 ms`), which is a clean fit for a future lower-latency streaming backend.
+- NVIDIA publishes supported Blackwell hardware and Blackwell test hardware, so a GB10-class deployment is clearly in-family.
+
+What makes it a weaker Motlie Phase 2 fit than `sherpa-onnx`:
+
+- The official integration path is NeMo / Riva / NIM / Triton, not a small in-process runtime crate.
+- The official client surface is gRPC-first. That is workable for Rust, but it points toward a service backend rather than the current Motlie `BundleHandle` + local-artifact pattern.
+- The artifact is a large `.nemo` checkpoint instead of a small, reviewable curated file set.
+- CPU is not a strength. NVIDIA's own materials position the model as benefiting from NVIDIA GPU hardware and compare it favorably to CPU-only operation rather than documenting a CPU-first deployment path.
+
+Motlie conclusion:
+
+- Nemotron is a strong later candidate if Motlie wants a GPU-appliance backend with service orchestration, especially on NVIDIA-only infrastructure.
+- It should not replace `sherpa-onnx` as the recommended Phase 2 backend because it moves the integration center of gravity away from Motlie-native Rust bundles and toward external NVIDIA runtime surfaces.
+
+### Qwen3-ASR Family
+
+What it gets right:
+
+- This is a dedicated ASR family, not a generic multimodal model being stretched into transcription.
+- The official project supports `52` languages and dialects, making it the strongest multilingual roadmap candidate in this comparison.
+- The official toolkit supports both offline and streaming inference, and the `0.6B` size is materially smaller than many service-grade speech models.
+
+What makes it a weaker Motlie Phase 2 fit than `sherpa-onnx`:
+
+- Official streaming support is currently tied to the `vLLM` backend. That is an acceptable service deployment path, but it is not a natural fit for a Motlie-native in-process Rust backend.
+- The official runtime guidance is `transformers`, `vLLM`, and DashScope. I did not find an official ONNX export or ONNX Runtime path.
+- The model family is stronger for multilingual expansion than for Motlie's current CPU-first, local-bundle, static-dispatch backend shape.
+
+Motlie conclusion:
+
+- Qwen3-ASR is a strong future candidate if Motlie wants multilingual ASR through a service-backed backend or a GPU-oriented runtime family.
+- It should not replace `sherpa-onnx` as the Phase 2 recommendation because `sherpa-onnx` still has the better combination of Rust bindings, websocket examples, streaming-first design, and ONNX-friendly artifact/runtime composition.
+
+### Phase 2 Recommendation Update
+
+The recommendation does not change:
+
+- keep `whisper.cpp` as the current first backend
+- keep `sherpa-onnx` as the recommended Phase 2 backend family
+- keep `faster-whisper` as a performance reference rather than the preferred Motlie-native integration
+- track NVIDIA Nemotron as a future NVIDIA-service backend option
+- track Qwen3-ASR as a future multilingual service/GPU backend option
+
+If Motlie later adds a second backend class oriented around external inference services rather than local bundle loading, the ordering may change:
+
+- Nemotron becomes attractive for NVIDIA-only GPU fleets
+- Qwen3-ASR becomes attractive for multilingual API-style deployments
+
+That is a different architectural step than the current Phase 2 goal, and should not be folded into the first post-Whisper backend.
 
 ## Recommended Vertical Slice
 
@@ -792,3 +866,18 @@ The implementation plan should cover:
   https://k2-fsa.github.io/sherpa/onnx/python/streaming-websocket-server.html
 - ONNX Runtime install docs: CPU/GPU execution-provider packaging expectations
   https://onnxruntime.ai/docs/install
+- NVIDIA Nemotron Speech Streaming Hugging Face model card: streaming chunk sizes, `600M` params, NeMo runtime path, and NIM/Riva positioning
+  https://huggingface.co/nvidia/nemotron-speech-streaming-en-0.6b
+- NVIDIA Nemotron Speech Streaming Hugging Face files view: `.nemo` artifact size
+  https://huggingface.co/nvidia/nemotron-speech-streaming-en-0.6b/tree/main
+- NVIDIA NIM model card for Nemotron ASR Streaming: Blackwell compatibility, Triton acceleration, and Riva integration surface
+  https://build.nvidia.com/nvidia/nemotron-asr-streaming/modelcard
+- NVIDIA NIM deploy and API docs for Nemotron ASR Streaming: Docker deployment plus gRPC client surface
+  https://build.nvidia.com/nvidia/nemotron-asr-streaming/deploy
+  https://build.nvidia.com/nvidia/nemotron-asr-streaming/api
+- Qwen3-ASR official repository: multilingual scope, streaming support, and runtime toolkit overview
+  https://github.com/QwenLM/Qwen3-ASR
+- Qwen3-ASR Hugging Face model card: official `vLLM` / streaming notes
+  https://huggingface.co/Qwen/Qwen3-ASR-0.6B
+- Qwen3-ASR Hugging Face files view: `0.6B` artifact size and Apache-2.0 licensing
+  https://huggingface.co/Qwen/Qwen3-ASR-0.6B/tree/main
