@@ -1,0 +1,27 @@
+[package]
+name = "motlie-model-sherpa-onnx"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "sherpa-onnx streaming backend implementations for motlie-model ASR contracts"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+cuda = ["ort/cuda"]
+
+[dependencies]
+async-trait = "0.1.89"
+kaldi-native-fbank = "0.1.0"
+motlie-model = { path = "../..", features = ["metrics-runtime"] }
+ndarray = "0.17"
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray"] }
+tokio = { version = "1", features = ["rt"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
