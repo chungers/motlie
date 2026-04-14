@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-14 | @codex-vz | Clarify the Apple Vz parallel track for VFS: move the `v1.05` guest-image proving step under `libs/vmm/examples/`, keep `v1.15` as the managed guestfs proof, and sequence cleanup plus `#134` after those proofs |
 | 2026-04-13 | @codex-vz | Expand the cross-backend Apple Vz planning track: add `v1.05` as the first image/build proving step before `v1.15` guestfs, then sequence cleanup and `#134` after those proofs |
 | 2026-04-13 | @codex-vz | Add the cross-backend Apple Vz planning track via `DESIGN_XBACKENDS.md` / `PLAN_XBACKENDS.md`: preserve managed `motlie-vfs` semantics under CH and Vz, require userspace-only / no-persistent-host-change behavior, sequence a `v1.15` Vz guestfs PoC before cleanup, and keep `#134` as the separate policy-engine phase |
 | 2026-04-06 | @codex | Record the harness ownership handoff: `v1` and `v1.1` remain VFS-owned, while the `v1.2+` example / validation harness moves to `motlie-vnet` with `libs/vnet/docs/{DESIGN,PLAN}.md` as the networking source of truth |
@@ -71,7 +72,7 @@ That track keeps the same product constraints:
 
 The current execution order for Apple Vz support is:
 
-1. Vz image/build PoC in `libs/vfs/examples/v1.05`
+1. Vz image/build PoC in `libs/vmm/examples/v1.05`
 2. Vz guestfs PoC in `libs/vfs/examples/v1.15` and `libs/vfs/vz`
 3. `motlie-vfs` transport cleanup and cross-backend boundary refactor
 4. `#134` policy engine implementation on the clarified core

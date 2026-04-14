@@ -108,6 +108,15 @@ The guest kernel must satisfy:
   host sharing
 - support for the selected root filesystem and initramfs flow
 
+Recommended kernel source for phase 1:
+
+- start with the distro kernel shipped by Debian Bookworm on arm64, for example
+  `linux-image-arm64`
+- avoid a custom kernel unless Apple Vz validation or required virtio features
+  prove the stock kernel insufficient
+- verify that the selected kernel has the virtio-fs, vsock, virtio-net, and
+  block drivers needed by the Vz slices before claiming parity
+
 Guest userspace must also assume:
 
 - `cloud-init` present and enabled
@@ -271,6 +280,16 @@ Phase 1 should use:
 - separate NoCloud disk creation
 - guest binaries baked into the root image
 
+Expected build environments:
+
+- CI or a Linux builder remains the primary image-build environment because the
+  current Debian rootfs tooling is Linux-first
+- macOS developers should consume those produced artifacts directly for `v1.05`
+  and later Vz slices
+- if local rebuild-on-macOS becomes necessary, the acceptable fallback is a
+  Linux container or VM that runs the same repo-owned image build script rather
+  than inventing a separate macOS-native image pipeline
+
 That means the image pipeline should look like:
 
 1. build guest-side Rust binaries on Linux:
@@ -363,6 +382,14 @@ cleanly to:
 - kernel layer/artifact
 - initrd layer/artifact
 - root-disk layer/artifact
+
+The root disk format should be committed to as:
+
+- raw disk image attached through `VZDiskImageStorageDeviceAttachment`
+- filename convention `root.img`
+
+Phase 1 should avoid qcow2 in the Vz contract so the helper/runtime boundary
+stays aligned with the native `Virtualization.framework` storage attachment API.
 
 Important caveat:
 

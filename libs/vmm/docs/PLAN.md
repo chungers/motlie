@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-14 | @codex-vz | Clarify the Apple Vz parallel workstream sequencing: start with `libs/vmm/examples/v1.05` for guest image/build, then `v1.15` guestfs, `v1.25` egress, cleanup/refactor phases, policy phases, and finally `v1.45` full Vz integration |
 | 2026-04-13 | @codex-vz | Expand the parallel Apple Vz support track again: prioritize `v1.05` image/build proving before `v1.15` guestfs and `v1.25` egress, then run the cleanup and policy phases before the eventual `v1.45` full Vz vertical slice |
 | 2026-04-13 | @codex-vz | Expand the parallel Apple Vz support track: prioritize `v1.15` guestfs PoC before `v1.25` egress PoC, then run the `motlie-vfs` / `motlie-vnet` cleanup phases and the separate policy phases (`#134`, `#133`) before the eventual `v1.45` full Vz vertical slice |
 | 2026-04-13 | @codex-vz | Add the parallel Apple Vz support track via `PLAN_XBACKENDS.md` / `DESIGN_XBACKENDS.md`: `motlie-vnet` is now treated as core `vmm` infrastructure, so cross-backend work is sequenced as `#170` Vz egress PoC first, `#169` CH-safe `vnet` refactor second, `#133` policy engine third, and full `backend::vz` integration last |
@@ -76,7 +77,7 @@ Parallel cross-backend planning source of truth:
 That track should run in parallel with the stable `v1.4` CH path rather than
 forcing immediate `vmm` example forks. The current order is:
 
-1. Vz image/build PoC in `libs/vfs/examples/v1.05`
+1. Vz image/build PoC in `libs/vmm/examples/v1.05`
 2. Vz guestfs PoC in `libs/vfs/vz` / `libs/vfs/examples/v1.15`
 3. `#170` Vz egress PoC in `libs/vnet/vz` / `libs/vnet/examples/v1.25`
 4. `motlie-vfs` cleanup / adapter refactor

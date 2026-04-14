@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-14 | @codex-vz | Clarify the Apple Vz parallel workstream for VFS: start with `libs/vmm/examples/v1.05` for guest image/build, then `v1.15` guestfs, then cleanup and `#134` |
 | 2026-04-13 | @codex-vz | Expand the parallel Apple Vz support track: add `v1.05` as the first image/build proving step before `v1.15` guestfs, then keep transport cleanup and `#134` after those proofs |
 | 2026-04-13 | @codex-vz | Add the parallel Apple Vz support track via `PLAN_XBACKENDS.md` / `DESIGN_XBACKENDS.md`: sequence a `v1.15` guestfs PoC before transport cleanup, preserve the userspace / no-persistent-host-change constraints, and keep `#134` separate as the policy-engine phase |
 | 2026-03-28 | @codex-pm | Resolve PR #117 round-3 follow-ups: fix stale traceability phase references, add explicit PLAN coverage for v1 symlink/file-handle behavior, and align the plan with the completed event-emission contract |
@@ -56,7 +57,7 @@ Parallel Apple Vz planning source of truth:
 
 That track should proceed in this order:
 
-1. Vz image/build PoC in `libs/vfs/examples/v1.05`
+1. Vz image/build PoC in `libs/vmm/examples/v1.05`
 2. Vz guestfs PoC in `libs/vfs/examples/v1.15` and `libs/vfs/vz`
 3. `motlie-vfs` transport cleanup and CH-safe cross-backend refactor
 4. `#134` policy engine implementation

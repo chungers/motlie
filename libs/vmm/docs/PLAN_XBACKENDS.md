@@ -4,252 +4,203 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-14 | @codex-vz | Rewrite the cross-backend plan into numbered, checkable phases with explicit validation gates; move `v1.05` under `libs/vmm/examples/`; and make the Apple Vz execution order image -> VFS -> VNET -> cleanup -> policy -> full `v1.45` explicit |
 | 2026-04-13 | @codex-vz | Add a first-step Apple Vz image track to the cross-backend plan: prioritize `v1.05` image/build proving before `v1.15` guestfs and `v1.25` egress, then run the cleanup phases and the separate policy phases (`#134`, `#133`) before `v1.45` full Vz integration |
-| 2026-04-13 | @codex-vz | Expand the cross-backend plan to include `motlie-vfs`: prioritize `v1.15` guestfs PoC first, `v1.25` egress PoC second, then the `motlie-vfs` / `motlie-vnet` cleanup phases and the separate policy phases (`#134`, `#133`) before `v1.45` full Vz integration |
-| 2026-04-13 | @codex-vz | Initial cross-backend plan for `libs/vmm`: sequence the work as `#170` Vz egress PoC first, `#169` `motlie-vnet` refactor second, `#133` policy engine third, and full `backend::vz` integration last |
 
 ## Goal
 
-Make `libs/vmm` ready for multiple hypervisor backends without destabilizing
-the current CH + `motlie-vfs` + `motlie-vnet` path.
-
-The main constraint is that both subsystems are already part of real `vmm`
-behavior:
-
-- `examples/v1.4` uses `motlie-vfs` for guest mounts and runtime layering
-- `examples/v1.4` uses `motlie-vnet` for outbound internet
-- the harness validates both
-- future backend parity depends on how filesystem and egress evolve
-
-So the plan must:
-
-- preserve Linux CH behavior first
-- gather Vz image, guestfs, and packet-path evidence before freezing architecture
-- keep `#134` and `#133` visible as separate semantic phases rather than losing
-  them inside larger refactors
-
-## Issue Order
-
-1. Vz image/build PoC in `libs/vfs/examples/v1.05`
-2. Vz guestfs PoC in `libs/vfs/vz` and `libs/vfs/examples/v1.15`
-3. `#170` Vz egress PoC in `libs/vnet/vz` and `libs/vnet/examples/v1.25`
-4. `motlie-vfs` cross-backend cleanup / adapter refactor
-5. `#169` `motlie-vnet` reusable-core / CH-adapter refactor
-6. `#134` VFS policy engine
-7. `#133` VNET policy engine
-8. future Vz `libs/vmm` backend vertical slice in `examples/v1.45`
-
-## Phase 1: Vz Image / Build PoC (`v1.05`)
-
-Objective:
-
-- determine whether the current Linux guest contract can be repackaged for
-  Apple Vz without keeping CH-specific boot assumptions
-
-Expected outputs:
-
-- concrete notes on guest disk artifact format under Vz
-- evidence on NoCloud/cloud-init delivery under Vz
-- evidence on how guest binaries and services should be baked in or delivered
-- a judgment on whether the current guest-side userspace contract is reusable
-
-`libs/vmm` work in this phase:
-
-- none required in code
-- consume findings into documentation only
-
-Exit criteria:
-
-- enough evidence exists to refine or confirm the guest image contract for Vz
-- we know what is reusable from CH guest payloads and what must differ in Vz
-  packaging
-
-## Phase 2: Vz Guestfs PoC (`v1.15`)
-
-Objective:
-
-- determine whether Apple Vz can expose a guestfs path that preserves the
-  long-term `motlie-vfs` managed semantics
-
-Expected outputs:
-
-- concrete notes on what Vz guestfs transport APIs can and cannot do
-- evidence on whether `FsServer` semantics survive unchanged
-- evidence on whether userspace / no-persistent-host-change constraints hold
-- a judgment on whether `#134` semantics remain plausible on Vz
-
-`libs/vmm` work in this phase:
-
-- none required in code
-- consume findings into documentation only
-
-Exit criteria:
-
-- enough evidence exists to refine or confirm
-  `libs/vfs/docs/DESIGN_XBACKENDS.md`
-- we know whether managed guestfs parity is plausible, blocked, or uncertain
-
-## Phase 3: Vz Egress PoC (`#170`)
-
-Objective:
-
-- determine whether Apple Vz can expose a packet path that preserves the
-  long-term `motlie-vnet` policy direction
-
-Expected outputs:
-
-- concrete notes on what Vz networking APIs can and cannot do
-- evidence on whether guest packet TX/RX can flow through a Rust-owned path
-- evidence on whether no-host-config-drift still holds
-- a judgment on whether `#133` semantics are plausible on Vz
-
-`libs/vmm` work in this phase:
-
-- none required in code
-- consume findings into documentation only
-
-Exit criteria:
-
-- enough evidence exists to refine or confirm
-  `libs/vnet/docs/DESIGN_XBACKENDS.md`
-- we know whether full policy parity is plausible, blocked, or uncertain
-
-## Phase 4: `motlie-vfs` CH-Safe Refactor
-
-Objective:
-
-- split `motlie-vfs` into reusable semantic core + cleaner transport boundary
-  without changing Linux behavior
-
-`libs/vmm` tasks:
-
-- identify CH-specific guestfs assumptions in readiness / observability
-- define the backend-neutral guestfs signals `vmm` will eventually need
-- preserve existing validation outcomes for `examples/v1.4`
-
-Required validation:
-
-- existing CH guestfs behavior inside `examples/v1.4`
-- existing `libs/vfs/examples/v1` and `v1.1` behavior where still applicable
-- eventual `v1.05` and `v1.15` lessons
-
-Exit criteria:
-
-- CH remains stable
-- `vmm` no longer bakes unnecessary CH guestfs assumptions into future
-  cross-backend interfaces
-
-## Phase 5: `motlie-vnet` CH-Safe Refactor (`#169`)
-
-Objective:
-
-- split `motlie-vnet` into reusable egress engine + CH transport adapter without
-  changing Linux behavior
-
-`libs/vmm` tasks:
-
-- identify CH-specific egress assumptions in harness / observability
-- define the backend-neutral egress signals `vmm` will eventually need
-- preserve existing validation outcomes for `examples/v1.4`
-
-Required validation:
-
-- `libs/vmm/examples/v1.4/repl_host.rs`
-- `libs/vmm/examples/v1.4/harness`
-- relevant `v1.4` integration smoke scripts that exercise egress
-
-Exit criteria:
-
-- CH remains stable
-- `vmm` no longer bakes unnecessary CH transport assumptions into future
-  cross-backend interfaces
-
-## Phase 6: VFS Policy Engine (`#134`)
-
-Objective:
-
-- implement filesystem observability and policy control on top of the
-  refactored reusable guestfs path
-
-`libs/vmm` tasks:
-
-- update parity language so "mounts work" and "policy-capable guestfs" are
-  distinct
-- identify what future harness coverage should validate for policy-aware
-  filesystem scenarios
-
-Exit criteria:
-
-- the reusable guestfs core owns the `#134` semantics cleanly
-- `libs/vmm` can reason about policy-capable guestfs as an infrastructure
-  capability
-
-## Phase 7: VNET Policy Engine (`#133`)
-
-Objective:
-
-- implement DNS/TCP observability and policy control on top of the refactored
-  reusable egress engine
-
-`libs/vmm` tasks:
-
-- update parity language so "egress" and "policy-capable egress" are distinct
-- identify what future harness coverage should validate for policy-aware
-  networking scenarios
-
-Exit criteria:
-
-- the reusable egress engine owns the `#133` semantics cleanly
-- `libs/vmm` can reason about policy-capable egress as an infrastructure
-  capability
-
-## Phase 8: Vz Backend Integration
-
-Objective:
-
-- only after guestfs and egress feasibility and architecture are sufficiently
-  clear, begin the full Vz backend slice in `libs/vmm`
+Execute the Apple Vz support track without destabilizing the stable CH `v1.4`
+line and without committing `libs/vmm` to speculative abstractions before the
+lower-level Vz proofs exist.
+
+References:
+
+- [`DESIGN_XBACKENDS.md`](./DESIGN_XBACKENDS.md)
+- [`DESIGN_VZ.md`](./DESIGN_VZ.md)
+- [`DESIGN_GUEST_IMAGE.md`](./DESIGN_GUEST_IMAGE.md)
+- `libs/vfs/docs/DESIGN_XBACKENDS.md`
+- `libs/vnet/docs/DESIGN_XBACKENDS.md`
+
+## Phase 0: `v1.05` Guest Image / Build PoC
 
 Scope:
 
-- backend lifecycle
-- provisioning
-- SSH proxy / auto-provision
-- mount / guest service integration
-- egress integration using the agreed `vnet` outcome
+- `libs/vmm/examples/v1.05`
+- guest artifact build scripts and notes only
 
-Exit criteria:
+Tasks:
 
-- Vz is integrated against real, reviewed filesystem and egress stories rather
-  than unstable or speculative ones
+- [ ] build a bootable aarch64 guest artifact set for Apple Vz
+- [ ] prove the kernel, initrd, raw root disk, and NoCloud disk contract
+- [ ] prove cloud-init user creation and SSH-key injection
+- [ ] prove `motlie-vfs-guest` is present in the guest image
 
-## `libs/vmm` Review Checklist
+Validation:
 
-Before merging any cross-backend `vmm` work, verify:
+- [ ] guest boots to a serial or login prompt
+- [ ] cloud-init provisions the intended user and SSH key
+- [ ] `motlie-vfs-guest` is present in the booted image
+- [ ] host-side state remains userspace-only and ephemeral
 
-- are we preserving current CH behavior?
-- are we preserving current CH guestfs semantics?
-- are we depending on capabilities/outcomes rather than CH transport details?
-- are we keeping `#134` visible in the acceptance story?
-- are we accidentally assuming Apple NAT is sufficient for parity?
-- are we keeping `#133` visible in the acceptance story?
-- are we sequencing `v1.05` -> `v1.15` -> `v1.25` -> `v1.45` rather than jumping directly
-  to `vmm` example forks?
+References:
 
-## Near-Term Recommendation
+- DESIGN_XBACKENDS Stage 0
+- DESIGN_GUEST_IMAGE.md
 
-Start with:
+## Phase 1: `v1.15` VFS Guestfs PoC
 
-- `v1.05` first
-- then `v1.15`
-- then `#170`
+Scope:
 
-Then revisit:
+- `libs/vfs/examples/v1.15`
+- `libs/vfs/vz`
 
+Tasks:
+
+- [ ] prove multi-guest / multi-tag Vz guestfs transport viability
+- [ ] keep `FsServer` in the managed I/O path
+- [ ] preserve overlay write/read semantics
+- [ ] capture the readiness signal shape needed by future `libs/vmm`
+
+Validation:
+
+- [ ] a tagged share becomes visible in the guest
+- [ ] an overlay write through the managed path becomes visible in the guest
+- [ ] readiness fires only after the managed path is actually live
+- [ ] host-side state remains userspace-only and ephemeral
+
+References:
+
+- DESIGN_XBACKENDS Stage 1
 - `libs/vfs/docs/DESIGN_XBACKENDS.md`
-- `libs/vnet/docs/DESIGN_XBACKENDS.md`
-- `libs/vmm/docs/DESIGN_VZ.md`
-- this plan
 
-Only after that should the broader `motlie-vfs` / `motlie-vnet` cleanup
-proceed.
+## Phase 2: `v1.25` VNET Egress PoC
+
+Scope:
+
+- `libs/vnet/examples/v1.25`
+- `libs/vnet/vz`
+
+Tasks:
+
+- [ ] prove the Vz raw-packet path into a Rust-owned engine
+- [ ] capture the egress observability shape needed by future `libs/vmm`
+- [ ] confirm the path still satisfies the no-persistent-host-config rule
+
+Validation:
+
+- [ ] guest can `curl https://example.com`
+- [ ] guest DNS activity is visible to the Rust-owned engine
+- [ ] host-side state remains userspace-only and ephemeral
+
+References:
+
+- DESIGN_XBACKENDS Stage 2
+- `libs/vnet/docs/DESIGN_XBACKENDS.md`
+
+## Phase 3: `motlie-vfs` CH-Safe Refactor
+
+Scope:
+
+- transport-boundary cleanup in `motlie-vfs`
+- `libs/vmm` guestfs readiness/observability cleanup
+
+Tasks:
+
+- [ ] remove CH-only guestfs assumptions from `libs/vmm` readiness language
+- [ ] preserve current CH guestfs outcomes in `examples/v1.4`
+- [ ] align the future VMM boundary with the Vz guestfs findings
+
+Validation:
+
+- [ ] `examples/v1.4/repl_host.rs` still works on CH
+- [ ] `examples/v1.4/harness` still works on CH
+
+References:
+
+- DESIGN_XBACKENDS Stage 3
+- `libs/vfs/docs/PLAN_XBACKENDS.md`
+
+## Phase 4: `motlie-vnet` CH-Safe Refactor (`#169`)
+
+Scope:
+
+- engine/adapter split in `motlie-vnet`
+- `libs/vmm` egress observability cleanup
+
+Tasks:
+
+- [ ] remove CH-only egress assumptions from `libs/vmm`
+- [ ] preserve current CH egress outcomes in `examples/v1.4`
+- [ ] align the future VMM boundary with the Vz egress findings
+
+Validation:
+
+- [ ] `examples/v1.4/repl_host.rs` still works on CH
+- [ ] `examples/v1.4/harness` still works on CH
+- [ ] egress validation still passes end to end on CH
+
+References:
+
+- DESIGN_XBACKENDS Stage 3
+- `libs/vnet/docs/DESIGN_XBACKENDS.md`
+
+## Phase 5: `#134` VFS Policy Engine
+
+Tasks:
+
+- [ ] preserve policy/event semantics in the reusable guestfs core
+- [ ] update VMM parity language so "managed guestfs" and
+      "policy-capable guestfs" are distinct capabilities
+
+Validation:
+
+- [ ] policy semantics are testable without backend-specific glue
+
+References:
+
+- DESIGN_XBACKENDS Stage 4
+
+## Phase 6: `#133` VNET Policy Engine
+
+Tasks:
+
+- [ ] preserve DNS/TCP policy semantics in the reusable egress core
+- [ ] update VMM parity language so "guest has egress" and
+      "policy-capable egress" are distinct capabilities
+
+Validation:
+
+- [ ] policy semantics are testable without backend-specific glue
+
+References:
+
+- DESIGN_XBACKENDS Stage 4
+
+## Phase 7: `v1.45` Full VMM Slice
+
+Scope:
+
+- full `backend::vz` lifecycle and integration work
+
+Tasks:
+
+- [ ] implement `prepare/boot/ready/exec/pty/shutdown`
+- [ ] integrate provisioning and SSH proxy
+- [ ] integrate guestfs and egress using the reviewed lower-layer outcomes
+
+Validation:
+
+- [ ] `auto-provision-ssh.json` passes on Vz
+- [ ] lifecycle and observability are backend-neutral at the VMM contract layer
+
+References:
+
+- DESIGN_XBACKENDS Stage 5
+- DESIGN_VZ.md
+
+## Merge Checklist
+
+- [ ] CH remains stable
+- [ ] each phase is justified by concrete evidence from the prior one
+- [ ] bootstrap/debug paths are not mislabeled as full parity
+- [ ] host-impact constraints remain intact

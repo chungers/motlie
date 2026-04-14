@@ -612,7 +612,7 @@ Recommended top-level shape:
     "memory_bytes": 536870912
   },
   "storage": {
-    "root_disk": "/abs/path/root.qcow2",
+    "root_disk": "/abs/path/root.img",
     "cloud_init_disk": "/abs/path/cidata.iso"
   },
   "mounts": [
@@ -623,7 +623,7 @@ Recommended top-level shape:
     }
   ],
   "network": {
-    "mode": "nat"
+    "mode": "engine"
   },
   "vsock": {
     "ssh_port": 2222,
@@ -645,6 +645,16 @@ Field-level notes:
 - all file paths should be absolute before handoff to Swift
 - the config should carry only already-materialized paths, not unresolved
   repository-relative guesses
+- `network.mode` must distinguish:
+  - `nat`
+    - Apple `VZNATNetworkDeviceAttachment`
+    - bootstrap/debug only
+    - not sufficient for policy parity
+  - `engine`
+    - policy-capable path using
+      `VZFileHandleNetworkDeviceAttachment` plus the Rust-owned
+      `PacketEgressEngine`
+    - intended parity path for `motlie-vnet`
 
 ### Control Socket Protocol
 
@@ -887,6 +897,8 @@ with the CH/Motlie stack. The main gaps are below.
 - Required `libs/vnet` / egress-architecture change:
   - define how a Vz guest reaches a reusable Rust-owned egress engine with the
     same policy surface as `motlie-vnet`
+  - the concrete Vz raw-packet attachment for that parity path should be
+    `VZFileHandleNetworkDeviceAttachment`
   - do not bury that behavior inside Apple NAT where Rust cannot observe or
     control DNS/TCP intent decisions
 
@@ -931,17 +943,16 @@ with the CH/Motlie stack. The main gaps are below.
 
 #### Required Changes
 
-- If parity means static host-directory mounts only:
-  - no `libs/vfs` changes are required
-  - `libs/vmm` only needs backend-specific filesystem observability
-- If parity means the existing CH managed-filesystem behavior:
-  - Vz needs a way to run the current `libs/vfs` guest path inside the guest
-    and keep the host `FsServer` in play
-  - the simplest parity-preserving design is:
-    - keep the current `libs/vfs` host service in `FilesystemBacking::MotlieVfs`
-    - keep the guest mounter binary and `mounts.yaml`
-    - use Vz virtio-socket as the transport carrier for the same logical
-      guestfs channel instead of replacing guestfs with raw VirtioFS
+- VFS parity is defined as the full managed-filesystem semantics documented in
+  `libs/vfs/docs/DESIGN_XBACKENDS.md`, not as simple host-directory visibility.
+- The parity-preserving Vz design is therefore:
+  - keep the current `libs/vfs` host service in `FilesystemBacking::MotlieVfs`
+  - keep the guest mounter binary and `mounts.yaml`
+  - keep the host `FsServer` in the request path for guest I/O
+  - use a Vz-specific guestfs transport instead of replacing guestfs with raw
+    VirtioFS
+- `VirtioFS` may still be useful for narrow bootstrap/debug sharing, but it is
+  not the parity path.
 - That implies `libs/vfs` itself should not need a policy-engine rewrite, but
   it does need transport abstraction if the existing implementation is too
   tightly coupled to the current CH-style Unix-socket-vsock path.
@@ -955,11 +966,11 @@ with the CH/Motlie stack. The main gaps are below.
 
 #### Blocking Items
 
-- The current Vz design does not yet commit to whether parity means:
-  - VirtioFS-only mount visibility parity
-  - or full `libs/vfs` managed-filesystem parity
-- Until that is decided, VFS parity is partially blocked by product-definition
-  ambiguity
+- Product parity is defined.
+- The remaining VFS uncertainty is feasibility:
+  - whether Apple Vz exposes a clean enough host/guest stream path to carry the
+    existing managed guestfs semantics end to end
+  - whether that path preserves the same readiness and lifecycle guarantees
 
 ### 3. Guest Bootup Lifecycle
 

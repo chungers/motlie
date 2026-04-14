@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-14 | @codex-vz | Clarify the Apple Vz parallel track: the first proving step is now `libs/vmm/examples/v1.05` for guest image/build, followed by `v1.15` guestfs, `v1.25` egress, cleanup/refactor phases, policy phases, and finally `v1.45` full Vz integration |
 | 2026-04-13 | @codex-vz | Expand the parallel Apple Vz support track again: add `v1.05` image/build proving ahead of `v1.15` guestfs and `v1.25` egress, then sequence the cleanup and policy phases before full `backend::vz` integration |
 | 2026-04-13 | @codex-vz | Expand the parallel Apple Vz support track: treat both `motlie-vfs` and `motlie-vnet` as core VMM infrastructure, reference the `v1.15` / `v1.25` / `v1.45` Vz proving line, and sequence guestfs/egress cleanup plus the separate policy phases (`#134`, `#133`) before full `backend::vz` integration |
 | 2026-04-13 | @codex-vz | Add `DESIGN_XBACKENDS.md` / `PLAN_XBACKENDS.md` as the cross-backend infrastructure track for `libs/vmm`: treat `motlie-vnet` as core VMM infrastructure, record the no-host-config-drift/all-userspace/ephemeral-lifetime constraints, and sequence Apple Vz support as `#170` PoC first, `#169` CH-safe `vnet` refactor second, `#133` policy engine third, and full `backend::vz` integration last |
@@ -81,7 +82,7 @@ Parallel cross-backend track:
   - all userspace
   - runtime state that is ephemeral during process lifetime
 - current execution order:
-  1. Vz image/build PoC in `libs/vfs/examples/v1.05`
+  1. Vz image/build PoC in `libs/vmm/examples/v1.05`
   2. Vz guestfs PoC in `libs/vfs/vz` / `libs/vfs/examples/v1.15`
   3. `#170` Vz egress PoC in `libs/vnet/vz` / `libs/vnet/examples/v1.25`
   4. `motlie-vfs` cleanup / adapter refactor

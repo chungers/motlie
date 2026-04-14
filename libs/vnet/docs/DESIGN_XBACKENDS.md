@@ -250,6 +250,22 @@ Non-responsibilities:
 - DNS/TCP semantics
 - observability meaning beyond local transport status
 
+### Apple Vz Adapter Note
+
+The Vz parity path must use
+`VZFileHandleNetworkDeviceAttachment`, not Apple NAT.
+
+That distinction matters because:
+
+- `VZNATNetworkDeviceAttachment`
+  - is useful for bootstrap/debug internet access
+  - preserves the no-persistent-host-config property
+  - does not expose packets to the Rust-owned policy engine
+- `VZFileHandleNetworkDeviceAttachment`
+  - is the concrete Vz API that can plausibly feed guest TX/RX packets into the
+    reusable `PacketEgressEngine`
+  - is therefore the only Vz path that can claim `#133`-style policy parity
+
 ### `AdapterLifecycleSink`
 
 This should be a small shared reporting surface for adapters.
