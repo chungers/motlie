@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-13 | @codex-vz | Add a first-step Apple Vz image-contract phase: prove Vz guest image / cloud-init / guest-binary delivery in `examples/v1.05` before the `v1.15` guestfs PoC, then keep the cleanup and `#134` policy work sequenced after those proofs |
 | 2026-04-13 | @codex-vz | Initial cross-backend design note for `libs/vfs`: preserve the managed `FsServer` / overlay / policy semantics across CH and Apple Vz, sequence Vz guestfs PoC work before cleanup, and keep `#134` as the policy-engine follow-up rather than collapsing it into transport work |
 
 ## Purpose
@@ -25,10 +26,11 @@ specific hypervisor to the host-side `FsServer`.
 
 This document records the long-term target and the implementation order:
 
-1. Vz guestfs vertical-slice PoC first
-2. `motlie-vfs` transport cleanup and backend boundary refactor second
-3. `#134` policy engine implementation on top of the clarified core
-4. full `libs/vmm` Vz backend integration after the filesystem path is proven
+1. Vz image/build vertical-slice PoC first (`v1.05`)
+2. Vz guestfs vertical-slice PoC second (`v1.15`)
+3. `motlie-vfs` transport cleanup and backend boundary refactor third
+4. `#134` policy engine implementation on top of the clarified core
+5. full `libs/vmm` Vz backend integration after the filesystem path is proven
 
 ## Non-Negotiable Product Constraints
 
@@ -91,7 +93,23 @@ The delivery model is likely still reusable:
 
 The current `vsock` realization is not.
 
-## Why The Vz PoC Comes First
+## Why The Vz Image PoC Comes First
+
+The very first unknown is not even the guestfs transport. It is whether the
+current Linux guest contract can be repackaged for Apple Vz without dragging CH
+boot assumptions along with it.
+
+Before asking whether guestfs semantics survive, we need to know:
+
+- what guest disk artifact boots cleanly under Vz
+- how cloud-init is delivered on Vz
+- how `motlie-vfs-guest` is baked into or otherwise delivered into the guest
+- whether the same guest-side systemd/unit contract can come up at boot
+
+That is why the first step should be a Vz-specific image/build PoC forked from
+`examples/v1`.
+
+## Why The Vz Guestfs PoC Comes Second
 
 The biggest unknown is whether Apple Vz provides a clean enough host/guest
 stream path to carry the existing `FsOp` / `FsResult` traffic while preserving:
@@ -112,17 +130,31 @@ backend-specific and non-final.
 
 The recommended proving-ground sequence is:
 
-1. `libs/vfs/examples/v1.15`
+1. `libs/vfs/examples/v1.05`
+   - forked from `examples/v1`
+   - narrow Vz image/build proving ground
+   - proves guest boot artifact shape, NoCloud delivery, and guest-binary
+     installation strategy
+2. `libs/vfs/examples/v1.15`
    - forked from `examples/v1.1`
-   - narrow host/guest harness for Vz guestfs proof
-2. `libs/vfs/vz`
+   - multi-guest / multi-tag Vz guestfs proof
+3. `libs/vfs/vz`
    - Vz-specific transport / bridge experiment
    - no claim of final architecture
-3. `libs/vmm/src/guestfs_vz.rs`
+4. `libs/vmm/src/guestfs_vz.rs`
    - minimal lifecycle wrapper only after the standalone `vfs` PoC shows the
      path is viable
 
-The PoC should answer:
+The `v1.05` image/build PoC should answer:
+
+- can the guest-side Linux contract from the CH line be reused at all?
+- do we reuse the same guest userspace payload but different boot packaging?
+- how does Vz consume cloud-init compared with the CH launch-time overlay
+  seeding path?
+- should guest binaries remain baked into the image rather than fetched at
+  first boot?
+
+The `v1.15` guestfs PoC should answer:
 
 - can a Linux guest on Vz mount through the same `FuseClient` model?
 - can host-side `FsServer` stay in charge of filesystem semantics?
@@ -195,9 +227,10 @@ today, but it should not define the future boundary.
 
 The intended sequence is:
 
-1. prove a standalone `vfs` Vz path in `examples/v1.15`
-2. learn what transport and readiness boundaries are real
-3. then update `libs/vmm`:
+1. prove a standalone Vz image/build path in `examples/v1.05`
+2. prove a standalone `vfs` Vz guestfs path in `examples/v1.15`
+3. learn what transport and readiness boundaries are real
+4. then update `libs/vmm`:
    - `guestfs_vz.rs`
    - backend-neutral readiness language
    - eventual `backend::vz` integration

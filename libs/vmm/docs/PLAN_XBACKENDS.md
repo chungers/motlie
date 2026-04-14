@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-13 | @codex-vz | Add a first-step Apple Vz image track to the cross-backend plan: prioritize `v1.05` image/build proving before `v1.15` guestfs and `v1.25` egress, then run the cleanup phases and the separate policy phases (`#134`, `#133`) before `v1.45` full Vz integration |
 | 2026-04-13 | @codex-vz | Expand the cross-backend plan to include `motlie-vfs`: prioritize `v1.15` guestfs PoC first, `v1.25` egress PoC second, then the `motlie-vfs` / `motlie-vnet` cleanup phases and the separate policy phases (`#134`, `#133`) before `v1.45` full Vz integration |
 | 2026-04-13 | @codex-vz | Initial cross-backend plan for `libs/vmm`: sequence the work as `#170` Vz egress PoC first, `#169` `motlie-vnet` refactor second, `#133` policy engine third, and full `backend::vz` integration last |
 
@@ -23,21 +24,47 @@ behavior:
 So the plan must:
 
 - preserve Linux CH behavior first
-- gather Vz guestfs and packet-path evidence before freezing architecture
+- gather Vz image, guestfs, and packet-path evidence before freezing architecture
 - keep `#134` and `#133` visible as separate semantic phases rather than losing
   them inside larger refactors
 
 ## Issue Order
 
-1. Vz guestfs PoC in `libs/vfs/vz` and `libs/vfs/examples/v1.15`
-2. `#170` Vz egress PoC in `libs/vnet/vz` and `libs/vnet/examples/v1.25`
-3. `motlie-vfs` cross-backend cleanup / adapter refactor
-4. `#169` `motlie-vnet` reusable-core / CH-adapter refactor
-5. `#134` VFS policy engine
-6. `#133` VNET policy engine
-7. future Vz `libs/vmm` backend vertical slice in `examples/v1.45`
+1. Vz image/build PoC in `libs/vfs/examples/v1.05`
+2. Vz guestfs PoC in `libs/vfs/vz` and `libs/vfs/examples/v1.15`
+3. `#170` Vz egress PoC in `libs/vnet/vz` and `libs/vnet/examples/v1.25`
+4. `motlie-vfs` cross-backend cleanup / adapter refactor
+5. `#169` `motlie-vnet` reusable-core / CH-adapter refactor
+6. `#134` VFS policy engine
+7. `#133` VNET policy engine
+8. future Vz `libs/vmm` backend vertical slice in `examples/v1.45`
 
-## Phase 1: Vz Guestfs PoC (`v1.15`)
+## Phase 1: Vz Image / Build PoC (`v1.05`)
+
+Objective:
+
+- determine whether the current Linux guest contract can be repackaged for
+  Apple Vz without keeping CH-specific boot assumptions
+
+Expected outputs:
+
+- concrete notes on guest disk artifact format under Vz
+- evidence on NoCloud/cloud-init delivery under Vz
+- evidence on how guest binaries and services should be baked in or delivered
+- a judgment on whether the current guest-side userspace contract is reusable
+
+`libs/vmm` work in this phase:
+
+- none required in code
+- consume findings into documentation only
+
+Exit criteria:
+
+- enough evidence exists to refine or confirm the guest image contract for Vz
+- we know what is reusable from CH guest payloads and what must differ in Vz
+  packaging
+
+## Phase 2: Vz Guestfs PoC (`v1.15`)
 
 Objective:
 
@@ -62,7 +89,7 @@ Exit criteria:
   `libs/vfs/docs/DESIGN_XBACKENDS.md`
 - we know whether managed guestfs parity is plausible, blocked, or uncertain
 
-## Phase 2: Vz Egress PoC (`#170`)
+## Phase 3: Vz Egress PoC (`#170`)
 
 Objective:
 
@@ -87,7 +114,7 @@ Exit criteria:
   `libs/vnet/docs/DESIGN_XBACKENDS.md`
 - we know whether full policy parity is plausible, blocked, or uncertain
 
-## Phase 3: `motlie-vfs` CH-Safe Refactor
+## Phase 4: `motlie-vfs` CH-Safe Refactor
 
 Objective:
 
@@ -104,7 +131,7 @@ Required validation:
 
 - existing CH guestfs behavior inside `examples/v1.4`
 - existing `libs/vfs/examples/v1` and `v1.1` behavior where still applicable
-- eventual `v1.15` lessons
+- eventual `v1.05` and `v1.15` lessons
 
 Exit criteria:
 
@@ -112,7 +139,7 @@ Exit criteria:
 - `vmm` no longer bakes unnecessary CH guestfs assumptions into future
   cross-backend interfaces
 
-## Phase 4: `motlie-vnet` CH-Safe Refactor (`#169`)
+## Phase 5: `motlie-vnet` CH-Safe Refactor (`#169`)
 
 Objective:
 
@@ -137,7 +164,7 @@ Exit criteria:
 - `vmm` no longer bakes unnecessary CH transport assumptions into future
   cross-backend interfaces
 
-## Phase 5: VFS Policy Engine (`#134`)
+## Phase 6: VFS Policy Engine (`#134`)
 
 Objective:
 
@@ -157,7 +184,7 @@ Exit criteria:
 - `libs/vmm` can reason about policy-capable guestfs as an infrastructure
   capability
 
-## Phase 6: VNET Policy Engine (`#133`)
+## Phase 7: VNET Policy Engine (`#133`)
 
 Objective:
 
@@ -176,7 +203,7 @@ Exit criteria:
 - `libs/vmm` can reason about policy-capable egress as an infrastructure
   capability
 
-## Phase 7: Vz Backend Integration
+## Phase 8: Vz Backend Integration
 
 Objective:
 
@@ -206,14 +233,15 @@ Before merging any cross-backend `vmm` work, verify:
 - are we keeping `#134` visible in the acceptance story?
 - are we accidentally assuming Apple NAT is sufficient for parity?
 - are we keeping `#133` visible in the acceptance story?
-- are we sequencing `v1.15` -> `v1.25` -> `v1.45` rather than jumping directly
+- are we sequencing `v1.05` -> `v1.15` -> `v1.25` -> `v1.45` rather than jumping directly
   to `vmm` example forks?
 
 ## Near-Term Recommendation
 
 Start with:
 
-- `v1.15` first
+- `v1.05` first
+- then `v1.15`
 - then `#170`
 
 Then revisit:

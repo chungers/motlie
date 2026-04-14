@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-13 | @codex-vz | Add a first-step Apple Vz image-contract phase: execute a `v1.05` image/build PoC before the `v1.15` guestfs PoC, then refactor transport boundaries, then implement the richer policy engine from `#134` |
 | 2026-04-13 | @codex-vz | Initial cross-backend plan for `libs/vfs`: execute a Vz guestfs vertical slice first (`v1.15` + `libs/vfs/vz`), then refactor transport boundaries, then implement the richer policy engine from `#134` |
 
 ## Goal
@@ -13,19 +14,55 @@ CH semantics or prematurely freezing the wrong abstraction boundary.
 
 This plan intentionally separates three concerns:
 
-1. feasibility of a Vz guestfs path
-2. cleanup of `motlie-vfs` transport boundaries
-3. richer policy and observability from `#134`
+1. feasibility of a Vz image/build path
+2. feasibility of a Vz guestfs path
+3. cleanup of `motlie-vfs` transport boundaries
+4. richer policy and observability from `#134`
 
 ## Issue Order
 
-1. Vz guestfs vertical-slice PoC in `libs/vfs/vz` and
+1. Vz image/build vertical-slice PoC in `libs/vfs/examples/v1.05`
+2. Vz guestfs vertical-slice PoC in `libs/vfs/vz` and
    `libs/vfs/examples/v1.15`
-2. `motlie-vfs` cross-backend transport cleanup and CH-safe refactor
-3. `#134` VFS policy engine implementation
-4. full `libs/vmm` guestfs / `backend::vz` integration
+3. `motlie-vfs` cross-backend transport cleanup and CH-safe refactor
+4. `#134` VFS policy engine implementation
+5. full `libs/vmm` guestfs / `backend::vz` integration
 
-## Phase 1: Vz Guestfs PoC
+## Phase 1: Vz Image / Build PoC
+
+Objective:
+
+- determine whether the current Linux guest contract can be repackaged for
+  Apple Vz without keeping Cloud Hypervisor-specific boot assumptions
+
+Scope:
+
+- `libs/vfs/examples/v1.05`
+- Vz-specific image/build helpers only
+
+Required success criteria:
+
+- a Vz-suitable guest artifact boots
+- NoCloud/cloud-init delivery is proven in a Vz-compatible form
+- `motlie-vfs-guest` can be baked into or otherwise delivered into the guest in
+  a repeatable way
+- the guest-side service/unit contract can come up at boot
+- runtime state remains userspace-only and ephemeral
+
+Non-goals:
+
+- no guestfs transport proof yet
+- no final image pipeline yet
+- no full `libs/vmm` API yet
+
+Exit criteria:
+
+- feasibility of the guest image / boot contract is judged with concrete
+  evidence
+- we know what can be reused from the CH guest payload and what must differ in
+  Vz packaging
+
+## Phase 2: Vz Guestfs PoC
 
 Objective:
 
@@ -61,7 +98,7 @@ Exit criteria:
   evidence
 - the PoC teaches what should move into a transport boundary
 
-## Phase 2: `motlie-vfs` Cleanup
+## Phase 3: `motlie-vfs` Cleanup
 
 Objective:
 
@@ -79,6 +116,7 @@ Required validation:
 
 - existing `libs/vfs/examples/v1`
 - existing `libs/vfs/examples/v1.1`
+- Vz image/build learnings from `v1.05`
 - Vz PoC learnings from `v1.15`
 - current `libs/vmm` guestfs harness checks that depend on the same path
 
@@ -88,7 +126,7 @@ Exit criteria:
 - the reusable core is clearer
 - the adapter boundary is informed by the PoC rather than guessed up front
 
-## Phase 3: `#134` Policy Engine
+## Phase 4: `#134` Policy Engine
 
 Objective:
 
@@ -112,7 +150,7 @@ Exit criteria:
 - CH uses the new policy path through the reusable core
 - the design remains compatible with the Vz path proven in earlier phases
 
-## Phase 4: VMM Integration
+## Phase 5: VMM Integration
 
 Objective:
 
