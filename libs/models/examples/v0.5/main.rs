@@ -8,7 +8,8 @@
 //! Preconditions:
 //!   - The `ggml-base.en.bin` model must be pre-downloaded under the default
 //!     artifact root or the path specified by `--artifact-root`.
-//!   - The `.wav` file must be a valid PCM audio file (any sample rate / channels).
+//!   - The `.wav` file must be a valid PCM audio file (16-bit int or 32-bit float).
+//!     The backend normalizes any sample rate and channel count to mono 16 kHz.
 //!
 //! The example reads the `.wav` file, decodes it to raw PCM, chunks it into
 //! the streaming `TranscriptionStream` contract, and prints partial and final

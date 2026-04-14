@@ -11,7 +11,10 @@ First ASR example: `.wav` file transcription via the streaming PCM contract.
      -- whisper_base_en
    ```
 
-2. Prepare a `.wav` audio file (any sample rate, mono or stereo, 16-bit int or 32-bit float).
+2. Prepare a `.wav` audio file. The backend accepts any sample rate and channel
+   count (mono or stereo) and normalizes to mono 16 kHz f32 internally via
+   channel averaging and linear-interpolation resampling. Supported PCM
+   encodings: 16-bit signed integer or 32-bit float.
 
 ## Run
 
