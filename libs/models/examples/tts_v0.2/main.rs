@@ -38,6 +38,7 @@ struct Args {
     wav_path: PathBuf,
     artifact_root: Option<PathBuf>,
     reference_audio: Option<PathBuf>,
+    reference_text: Option<String>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -45,6 +46,7 @@ fn parse_args() -> Result<Args> {
     let mut wav_path = None;
     let mut artifact_root = None;
     let mut reference_audio = None;
+    let mut reference_text = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -69,6 +71,12 @@ fn parse_args() -> Result<Args> {
                         .context("--reference-audio requires a path argument")?,
                 ));
             }
+            "--reference-text" => {
+                reference_text = Some(
+                    args.next()
+                        .context("--reference-text requires a value")?,
+                );
+            }
             other => bail!("unknown argument: {other}"),
         }
     }
@@ -78,6 +86,7 @@ fn parse_args() -> Result<Args> {
         wav_path: wav_path.context("--wav <path> is required")?,
         artifact_root,
         reference_audio,
+        reference_text,
     })
 }
 
@@ -112,6 +121,7 @@ async fn run(args: Args) -> Result<()> {
                 encoding,
             },
             pcm,
+            reference_text: args.reference_text.clone(),
         })
     } else {
         None

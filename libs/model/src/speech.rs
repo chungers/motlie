@@ -23,7 +23,15 @@ pub struct SpeechParams {
 #[derive(Clone, Debug, PartialEq)]
 pub enum VoiceConditioning {
     SpeakerId(u32),
-    ReferenceAudio { audio_spec: AudioSpec, pcm: Vec<u8> },
+    /// Reference-audio voice cloning. `reference_text` is the transcript of the
+    /// reference audio — required by models like Qwen3-TTS that use prompted
+    /// cloning. Backends that do not need the transcript (e.g., x-vector-only
+    /// models) may ignore it with a documented quality caveat.
+    ReferenceAudio {
+        audio_spec: AudioSpec,
+        pcm: Vec<u8>,
+        reference_text: Option<String>,
+    },
 }
 
 /// Speech synthesis request.
@@ -97,14 +105,20 @@ mod tests {
                 encoding: PcmEncoding::S16Le,
             },
             pcm: vec![0_u8; 320],
+            reference_text: Some("test transcript".into()),
         };
 
         match conditioning {
-            VoiceConditioning::ReferenceAudio { audio_spec, pcm } => {
+            VoiceConditioning::ReferenceAudio {
+                audio_spec,
+                pcm,
+                reference_text,
+            } => {
                 assert_eq!(audio_spec.sample_rate_hz, 16_000);
                 assert_eq!(audio_spec.channels, 1);
                 assert_eq!(audio_spec.encoding, PcmEncoding::S16Le);
                 assert_eq!(pcm.len(), 320);
+                assert_eq!(reference_text.as_deref(), Some("test transcript"));
             }
             VoiceConditioning::SpeakerId(_) => panic!("expected reference audio"),
         }

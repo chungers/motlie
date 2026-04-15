@@ -142,6 +142,10 @@ impl ModelBundle for Qwen3TtsSpeechBundle {
         let artifacts = if let Some(policy) = options.artifact_policy {
             configure_artifact_policy(policy)?
         } else {
+            tracing::warn!(
+                "no artifact_policy provided for qwen3-tts bundle; \
+                 defaulting to LocalOnly with current working directory"
+            );
             configure_artifact_policy(motlie_model::ArtifactPolicy::LocalOnly {
                 root: PathBuf::from("."),
             })?
@@ -289,13 +293,18 @@ fn new_speech_handle(
 // ---------------------------------------------------------------------------
 
 struct Qwen3TtsRuntime {
-    // The current `ort` RC exposes `Session::run(&mut self, ...)`, so shared
-    // bundle handles must serialize access around the loaded sessions.
-    encoder: Mutex<Session>,
-    decoder: Mutex<Session>,
-    vocoder: Mutex<Session>,
+    // The full encoder → decoder → vocoder pipeline is serialized behind a
+    // single mutex to prevent interleaved stage execution across concurrent
+    // callers. Individual sessions also need `&mut self` for the current `ort` RC.
+    pipeline: Mutex<Qwen3TtsPipeline>,
     config: Qwen3TtsConfig,
     vocab: Vocabulary,
+}
+
+struct Qwen3TtsPipeline {
+    encoder: Session,
+    decoder: Session,
+    vocoder: Session,
 }
 
 /// Shape metadata carried between pipeline stages to avoid flattening tensor ranks.
@@ -322,8 +331,18 @@ impl Qwen3TtsRuntime {
 
         // Encode reference audio conditioning if provided.
         let ref_mel = match &request.conditioning {
-            Some(VoiceConditioning::ReferenceAudio { audio_spec, pcm }) => {
-                Some(self.encode_reference_audio(audio_spec, pcm)?)
+            Some(VoiceConditioning::ReferenceAudio {
+                audio_spec,
+                pcm,
+                reference_text,
+            }) => {
+                if reference_text.is_none() {
+                    tracing::warn!(
+                        "qwen3-tts voice cloning without reference_text may produce \
+                         lower-quality output; the official API requires both audio and transcript"
+                    );
+                }
+                Some(self.encode_reference_audio(audio_spec, pcm, reference_text.as_deref())?)
             }
             Some(VoiceConditioning::SpeakerId(_)) => {
                 return Err(ModelError::InvalidConfiguration(
@@ -335,10 +354,9 @@ impl Qwen3TtsRuntime {
             None => None,
         };
 
-        // Step 1: Tokenize text using the model's vocabulary.
+        // Tokenize text using the model's vocabulary.
         let token_ids = self.vocab.tokenize(text);
         if token_ids.len() <= 2 {
-            // Only BOS + EOS — no actual content tokens.
             return Err(ModelError::BackendExecution {
                 backend: "qwen3-tts",
                 operation: "tokenize",
@@ -346,14 +364,18 @@ impl Qwen3TtsRuntime {
             });
         }
 
-        // Step 2: Encoder — token IDs → hidden states (preserving tensor shape).
-        let hidden = self.run_encoder(&token_ids)?;
+        // Lock the entire pipeline for the full encoder → decoder → vocoder flow
+        // to prevent interleaved stage execution across concurrent callers.
+        let mut pipeline = self
+            .pipeline
+            .lock()
+            .map_err(|_| ModelError::Internal("qwen3-tts pipeline mutex poisoned".into()))?;
 
-        // Step 3: Decoder — hidden states (+ optional ref mel) → mel spectrogram.
-        let mel = self.run_decoder(&hidden, ref_mel.as_ref())?;
+        let hidden = run_encoder(&mut pipeline.encoder, &token_ids)?;
+        let mel = run_decoder(&mut pipeline.decoder, &hidden, ref_mel.as_ref(), &self.config)?;
+        let samples = run_vocoder(&mut pipeline.vocoder, &mel, &self.config)?;
 
-        // Step 4: Vocoder — mel spectrogram → raw audio samples.
-        let samples = self.run_vocoder(&mel)?;
+        drop(pipeline); // release lock before PCM encoding
 
         let pcm = encode_pcm(&samples.data, self.config.audio_spec().encoding);
 
@@ -372,7 +394,12 @@ impl Qwen3TtsRuntime {
         &self,
         audio_spec: &AudioSpec,
         pcm: &[u8],
+        _ref_text: Option<&str>,
     ) -> Result<TensorWithShape, ModelError> {
+        // TODO(@cld-review-models): When the ONNX export supports prompted
+        // cloning, tokenize `ref_text` and pass it as an additional decoder
+        // input alongside the mel conditioning. The current implementation
+        // only uses the mel spectrogram path (equivalent to x-vector mode).
         let samples = decode_pcm_to_f32(pcm, audio_spec.encoding)?;
         if samples.is_empty() {
             return Err(ModelError::InvalidConfiguration(
@@ -380,11 +407,9 @@ impl Qwen3TtsRuntime {
             ));
         }
 
-        // Normalize to mono at model's sample rate.
         let mono = downmix_to_mono(&samples, audio_spec.channels);
         let resampled = resample_mono(&mono, audio_spec.sample_rate_hz, self.config.sample_rate);
 
-        // Compute proper log-mel spectrogram using Hann-windowed DFT + mel filterbank.
         let mel_channels = self.config.mel_channels as usize;
         let mel = compute_log_mel_spectrogram(
             &resampled,
@@ -400,157 +425,147 @@ impl Qwen3TtsRuntime {
             shape: vec![1, mel_frames as i64, mel_channels as i64],
         })
     }
+}
 
-    fn run_encoder(&self, token_ids: &[i64]) -> Result<TensorWithShape, ModelError> {
-        let seq_len = token_ids.len();
-        let input = Array2::<i64>::from_shape_vec((1, seq_len), token_ids.to_vec()).map_err(
-            |err| ModelError::BackendExecution {
-                backend: "qwen3-tts",
-                operation: "build_encoder_input",
-                message: err.to_string(),
-            },
-        )?;
+// Pipeline stage functions take `&mut Session` directly (no per-session mutex).
 
-        let input_tensor = Tensor::<i64>::from_array(input).map_err(ort_error)?;
-        let inputs = vec![SessionInputValue::from(input_tensor)];
+fn run_encoder(encoder: &mut Session, token_ids: &[i64]) -> Result<TensorWithShape, ModelError> {
+    let seq_len = token_ids.len();
+    let input = Array2::<i64>::from_shape_vec((1, seq_len), token_ids.to_vec()).map_err(|err| {
+        ModelError::BackendExecution {
+            backend: "qwen3-tts",
+            operation: "build_encoder_input",
+            message: err.to_string(),
+        }
+    })?;
 
-        let mut session = self
-            .encoder
-            .lock()
-            .map_err(|_| ModelError::Internal("qwen3-tts encoder mutex poisoned".into()))?;
-        let outputs = session
-            .run(inputs.as_slice())
-            .map_err(|err| ModelError::BackendExecution {
-                backend: "qwen3-tts",
-                operation: "run_encoder",
-                message: err.to_string(),
-            })?;
+    let input_tensor = Tensor::<i64>::from_array(input).map_err(ort_error)?;
+    let inputs = vec![SessionInputValue::from(input_tensor)];
 
-        let (shape, hidden) =
-            outputs[0]
-                .try_extract_tensor::<f32>()
-                .map_err(|err| ModelError::BackendExecution {
-                    backend: "qwen3-tts",
-                    operation: "extract_encoder_output",
-                    message: err.to_string(),
-                })?;
-
-        Ok(TensorWithShape {
-            data: hidden.to_vec(),
-            shape: shape.to_vec(),
-        })
-    }
-
-    fn run_decoder(
-        &self,
-        hidden: &TensorWithShape,
-        ref_mel: Option<&TensorWithShape>,
-    ) -> Result<TensorWithShape, ModelError> {
-        // Reconstruct encoder output tensor with its original shape.
-        let hidden_array = ndarray::ArrayD::<f32>::from_shape_vec(
-            ndarray::IxDyn(&hidden.shape_as_usize()),
-            hidden.data.clone(),
-        )
+    let outputs = encoder
+        .run(inputs.as_slice())
         .map_err(|err| ModelError::BackendExecution {
             backend: "qwen3-tts",
-            operation: "rebuild_encoder_tensor",
-            message: format!(
-                "failed to reconstruct encoder output with shape {:?}: {err}",
-                hidden.shape
-            ),
+            operation: "run_encoder",
+            message: err.to_string(),
         })?;
-        let hidden_tensor = Tensor::<f32>::from_array(hidden_array).map_err(ort_error)?;
 
-        let mut inputs = vec![SessionInputValue::from(hidden_tensor)];
+    let (shape, hidden) = outputs[0]
+        .try_extract_tensor::<f32>()
+        .map_err(|err| ModelError::BackendExecution {
+            backend: "qwen3-tts",
+            operation: "extract_encoder_output",
+            message: err.to_string(),
+        })?;
 
-        if let Some(mel) = ref_mel {
-            let mel_array = ndarray::ArrayD::<f32>::from_shape_vec(
-                ndarray::IxDyn(&mel.shape_as_usize()),
-                mel.data.clone(),
-            )
-            .map_err(|err| ModelError::BackendExecution {
-                backend: "qwen3-tts",
-                operation: "rebuild_ref_mel_tensor",
-                message: format!(
-                    "failed to reconstruct reference mel with shape {:?}: {err}",
-                    mel.shape
-                ),
-            })?;
-            let mel_tensor = Tensor::<f32>::from_array(mel_array).map_err(ort_error)?;
-            inputs.push(SessionInputValue::from(mel_tensor));
-        }
+    Ok(TensorWithShape {
+        data: hidden.to_vec(),
+        shape: shape.to_vec(),
+    })
+}
 
-        let mut session = self
-            .decoder
-            .lock()
-            .map_err(|_| ModelError::Internal("qwen3-tts decoder mutex poisoned".into()))?;
-        let outputs = session
-            .run(inputs.as_slice())
-            .map_err(|err| ModelError::BackendExecution {
-                backend: "qwen3-tts",
-                operation: "run_decoder",
-                message: err.to_string(),
-            })?;
+fn run_decoder(
+    decoder: &mut Session,
+    hidden: &TensorWithShape,
+    ref_mel: Option<&TensorWithShape>,
+    _config: &Qwen3TtsConfig,
+) -> Result<TensorWithShape, ModelError> {
+    let hidden_array = ndarray::ArrayD::<f32>::from_shape_vec(
+        ndarray::IxDyn(&hidden.shape_as_usize()),
+        hidden.data.clone(),
+    )
+    .map_err(|err| ModelError::BackendExecution {
+        backend: "qwen3-tts",
+        operation: "rebuild_encoder_tensor",
+        message: format!(
+            "failed to reconstruct encoder output with shape {:?}: {err}",
+            hidden.shape
+        ),
+    })?;
+    let hidden_tensor = Tensor::<f32>::from_array(hidden_array).map_err(ort_error)?;
 
-        let (shape, mel_out) =
-            outputs[0]
-                .try_extract_tensor::<f32>()
-                .map_err(|err| ModelError::BackendExecution {
-                    backend: "qwen3-tts",
-                    operation: "extract_decoder_output",
-                    message: err.to_string(),
-                })?;
+    let mut inputs = vec![SessionInputValue::from(hidden_tensor)];
 
-        Ok(TensorWithShape {
-            data: mel_out.to_vec(),
-            shape: shape.to_vec(),
-        })
-    }
-
-    fn run_vocoder(&self, mel: &TensorWithShape) -> Result<TensorWithShape, ModelError> {
-        // Reconstruct decoder output tensor with its original shape.
+    if let Some(mel) = ref_mel {
         let mel_array = ndarray::ArrayD::<f32>::from_shape_vec(
             ndarray::IxDyn(&mel.shape_as_usize()),
             mel.data.clone(),
         )
         .map_err(|err| ModelError::BackendExecution {
             backend: "qwen3-tts",
-            operation: "rebuild_decoder_tensor",
+            operation: "rebuild_ref_mel_tensor",
             message: format!(
-                "failed to reconstruct decoder mel output with shape {:?}: {err}",
+                "failed to reconstruct reference mel with shape {:?}: {err}",
                 mel.shape
             ),
         })?;
-
         let mel_tensor = Tensor::<f32>::from_array(mel_array).map_err(ort_error)?;
-        let inputs = vec![SessionInputValue::from(mel_tensor)];
-
-        let mut session = self
-            .vocoder
-            .lock()
-            .map_err(|_| ModelError::Internal("qwen3-tts vocoder mutex poisoned".into()))?;
-        let outputs = session
-            .run(inputs.as_slice())
-            .map_err(|err| ModelError::BackendExecution {
-                backend: "qwen3-tts",
-                operation: "run_vocoder",
-                message: err.to_string(),
-            })?;
-
-        let (shape, audio) =
-            outputs[0]
-                .try_extract_tensor::<f32>()
-                .map_err(|err| ModelError::BackendExecution {
-                    backend: "qwen3-tts",
-                    operation: "extract_vocoder_output",
-                    message: err.to_string(),
-                })?;
-
-        Ok(TensorWithShape {
-            data: audio.to_vec(),
-            shape: shape.to_vec(),
-        })
+        inputs.push(SessionInputValue::from(mel_tensor));
     }
+
+    let outputs = decoder
+        .run(inputs.as_slice())
+        .map_err(|err| ModelError::BackendExecution {
+            backend: "qwen3-tts",
+            operation: "run_decoder",
+            message: err.to_string(),
+        })?;
+
+    let (shape, mel_out) = outputs[0]
+        .try_extract_tensor::<f32>()
+        .map_err(|err| ModelError::BackendExecution {
+            backend: "qwen3-tts",
+            operation: "extract_decoder_output",
+            message: err.to_string(),
+        })?;
+
+    Ok(TensorWithShape {
+        data: mel_out.to_vec(),
+        shape: shape.to_vec(),
+    })
+}
+
+fn run_vocoder(
+    vocoder: &mut Session,
+    mel: &TensorWithShape,
+    _config: &Qwen3TtsConfig,
+) -> Result<TensorWithShape, ModelError> {
+    let mel_array = ndarray::ArrayD::<f32>::from_shape_vec(
+        ndarray::IxDyn(&mel.shape_as_usize()),
+        mel.data.clone(),
+    )
+    .map_err(|err| ModelError::BackendExecution {
+        backend: "qwen3-tts",
+        operation: "rebuild_decoder_tensor",
+        message: format!(
+            "failed to reconstruct decoder mel output with shape {:?}: {err}",
+            mel.shape
+        ),
+    })?;
+
+    let mel_tensor = Tensor::<f32>::from_array(mel_array).map_err(ort_error)?;
+    let inputs = vec![SessionInputValue::from(mel_tensor)];
+
+    let outputs = vocoder
+        .run(inputs.as_slice())
+        .map_err(|err| ModelError::BackendExecution {
+            backend: "qwen3-tts",
+            operation: "run_vocoder",
+            message: err.to_string(),
+        })?;
+
+    let (shape, audio) = outputs[0]
+        .try_extract_tensor::<f32>()
+        .map_err(|err| ModelError::BackendExecution {
+            backend: "qwen3-tts",
+            operation: "extract_vocoder_output",
+            message: err.to_string(),
+        })?;
+
+    Ok(TensorWithShape {
+        data: audio.to_vec(),
+        shape: shape.to_vec(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -625,10 +640,13 @@ impl SpeechStream for Qwen3TtsSpeechStream {
 // ---------------------------------------------------------------------------
 
 fn load_runtime(artifacts: &Qwen3TtsArtifactPaths) -> Result<Qwen3TtsRuntime, ModelError> {
+    let pipeline = Qwen3TtsPipeline {
+        encoder: build_session("qwen3-tts", &artifacts.encoder)?,
+        decoder: build_session("qwen3-tts", &artifacts.decoder)?,
+        vocoder: build_session("qwen3-tts", &artifacts.vocoder)?,
+    };
     Ok(Qwen3TtsRuntime {
-        encoder: Mutex::new(build_session("qwen3-tts", &artifacts.encoder)?),
-        decoder: Mutex::new(build_session("qwen3-tts", &artifacts.decoder)?),
-        vocoder: Mutex::new(build_session("qwen3-tts", &artifacts.vocoder)?),
+        pipeline: Mutex::new(pipeline),
         config: Qwen3TtsConfig::from_path(&artifacts.config)?,
         vocab: Vocabulary::from_path(&artifacts.vocab)?,
     })
