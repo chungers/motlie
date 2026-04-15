@@ -6,6 +6,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-15 | @codex-tts | Added a reproducible Qwen3-TTS ONNX export runbook and checked in the export script under `libs/models/scripts/`. Documented the current adapter-graph workaround and the gap between the official Qwen runtime and the current Rust backend contract. |
 | 2026-04-15 | @cld-review-models | Implemented Phase 2 Qwen3-TTS vertical slice. Runtime boundary: in-process ONNX via `motlie-model-ort` with pre-exported model components (encoder, decoder, vocoder). Upstream safetensors must be exported to ONNX offline before the curated bundle can start. Added vocabulary-based tokenizer, proper Hann-windowed DFT mel spectrogram for reference-audio conditioning, and shape-preserving tensor pipeline between ONNX stages. |
 | 2026-04-14 | @codex-tts | Addressed PR #179 review R1 by fixing the local-only startup path to reuse the same Piper artifact validation as curated checkpoints, documenting the batch-then-chunk `open_stream()` behavior and Piper's runtime rejection of `SpeechParams.seed`, and recording the current `ort` RC dependency/runtime constraint explicitly. |
 | 2026-04-14 | @codex-tts | Implemented the Phase 1 Piper slice with additive `SpeechModel` / `SpeechStream` contracts, a shared `motlie-model-ort` ONNX helper reused by the sherpa backend, a `motlie-model-piper` backend using eSpeak-ng phonemization plus Piper sidecar parsing, the curated `piper_en_us_ljspeech_medium` bundle, and the `models_tts_v0_1` example/validation path. |
@@ -19,6 +20,11 @@ Assumption for this draft: this is brownfield product work. Motlie already has s
 The design is intentionally narrow. It focuses on one end-to-end vertical slice from curated artifact download to streamed PCM output, with adapters above the model layer for `.wav`, local playback, and telephony/websocket transports.
 
 The roadmap beyond that first slice is also explicit: if the Piper slice proves out, the next end-to-end family to add should be Qwen3-TTS rather than leaving the phase-2 story implicit.
+
+The exact re-export flow for the current Qwen3-TTS ONNX artifacts lives in
+`docs/EXPORT_QWEN3_TTS_ONNX.md`. That runbook is the source of truth for the
+Python environment, Hugging Face download path, emitted artifact sizes, and the
+current adapter-graph workaround used to satisfy the Rust backend contract.
 
 ## Table of Contents
 
