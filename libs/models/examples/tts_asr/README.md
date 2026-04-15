@@ -144,6 +144,39 @@ Best WER (accuracy):  piper_whisper (mean WER = 0.080)
 Best latency (speed): piper_sherpa (mean = 1200ms)
 ```
 
+## Predicted Pipeline Rankings
+
+Based on model architecture characteristics (not yet validated with real data):
+
+### CPU (no CUDA)
+
+| Rank | Pipeline | Rationale |
+|------|----------|-----------|
+| 1 | Piper → whisper.cpp | Both CPU-optimized. Piper ~60 MiB ONNX + whisper-base.en ~142 MiB ggml. Fastest startup, lowest memory. |
+| 2 | Piper → sherpa-onnx | True streaming ASR but heavier ORT runtime overhead |
+| 3 | Qwen3-TTS → whisper.cpp | Qwen3 ~1.2 GiB 3-model pipeline too heavy for CPU |
+| 4 | Qwen3-TTS → sherpa-onnx | Both heavy, slowest CPU path |
+
+### CUDA (DGX Spark GB10)
+
+| Rank | Pipeline | Rationale |
+|------|----------|-----------|
+| 1 (quality) | Qwen3-TTS → whisper.cpp | Best voice quality on GPU + proven ASR |
+| 1 (streaming) | Qwen3-TTS → sherpa-onnx | Both true streaming on ORT/CUDA |
+| 3 | Piper → sherpa-onnx | Piper already fast on CPU, CUDA adds less |
+| 4 | Piper → whisper.cpp | Both already CPU-fast, least CUDA benefit |
+
+### By text length
+
+| Length | Best CPU | Best CUDA |
+|--------|----------|-----------|
+| Short (5-15 words) | Piper → whisper.cpp (least overhead) | Piper → whisper.cpp (startup dominates) |
+| Medium (30-60 words) | Piper → whisper.cpp | Qwen3-TTS → whisper.cpp (quality wins) |
+| Long (100-200 words) | Piper → sherpa-onnx (streaming) | Qwen3-TTS → sherpa-onnx (quality + streaming) |
+| Paragraphs (300-1000) | Piper → sherpa-onnx (memory bounded) | Qwen3-TTS → sherpa-onnx (best quality at scale) |
+
+These are **PREDICTIONS** based on design characteristics. Run the validation matrix to produce real data.
+
 ## Interpreting Results
 
 - **WER** (Word Error Rate): lower is better. 0.0 = perfect transcription.
