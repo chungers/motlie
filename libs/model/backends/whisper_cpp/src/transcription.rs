@@ -28,6 +28,13 @@ const DECODE_STEP_SAMPLES: usize = WHISPER_SAMPLE_RATE as usize / 2;
 /// Rolling window: decode the last 5 seconds of audio (80000 samples at 16kHz).
 const WINDOW_SAMPLES: usize = WHISPER_SAMPLE_RATE as usize * 5;
 
+fn decode_thread_count() -> i32 {
+    std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(4)
+        .min(i32::MAX as usize) as i32
+}
+
 /// Static bundle specification for a curated whisper.cpp-backed ASR stack.
 #[derive(Clone, Debug)]
 pub struct WhisperCppTranscriptionSpec {
@@ -521,6 +528,7 @@ impl WhisperCppStream {
 
         let mut params =
             whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
+        params.set_n_threads(decode_thread_count());
         if let Some(ref lang) = self.params.language {
             params.set_language(Some(lang));
         }

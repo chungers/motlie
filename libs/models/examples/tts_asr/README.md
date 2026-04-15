@@ -144,6 +144,36 @@ Best WER (accuracy):  piper_whisper (mean WER = 0.080)
 Best latency (speed): piper_sherpa (mean = 1200ms)
 ```
 
+When the input filenames include `_cpu` / `_cuda`, the aggregator reports them as
+separate variants and prints a CPU-vs-CUDA comparison section.
+
+## Measured DGX Spark Results
+
+Measured on `2026-04-15` by `@codex-dgx-e2e` on the DGX Spark GB10 host used for PR
+`#182`. Full run notes and tables are in [RESULTS.md](RESULTS.md).
+
+### Matrix status
+
+| Pipeline | CPU | CUDA | Notes |
+|----------|-----|------|-------|
+| Piper → whisper.cpp | 100/100 samples completed | 100/100 samples completed | Full benchmark data captured |
+| Piper → sherpa-onnx | Blocked at startup | Blocked at startup | Current sherpa checkpoint metadata does not match backend parser expectations |
+| Qwen3-TTS → whisper.cpp | Blocked at startup | Blocked at startup | Required ONNX exports (`encoder.onnx`, `decoder.onnx`, `vocoder.onnx`) were not available in the cached artifact snapshot |
+| Qwen3-TTS → sherpa-onnx | Blocked at startup | Blocked at startup | Same missing Qwen3-TTS ONNX exports blocked startup before ASR initialization |
+
+### Actual benchmark summary
+
+| Pipeline | Mode | Samples | Mean WER | Mean Total Latency | Mean TTS | Mean ASR |
+|----------|------|---------|----------|--------------------|----------|----------|
+| Piper → whisper.cpp | CPU | 100 | 0.459 | 58,090 ms | 1,366 ms | 56,723 ms |
+| Piper → whisper.cpp | CUDA | 100 | 0.458 | 7,921 ms | 1,379 ms | 6,541 ms |
+
+### CPU vs CUDA
+
+| Pipeline | CPU Mean WER | CUDA Mean WER | CPU Mean Latency | CUDA Mean Latency | Speedup |
+|----------|--------------|---------------|------------------|-------------------|---------|
+| Piper → whisper.cpp | 0.459 | 0.458 | 58,090 ms | 7,921 ms | 7.33x |
+
 ## Predicted Pipeline Rankings
 
 Based on model architecture characteristics (not yet validated with real data):
