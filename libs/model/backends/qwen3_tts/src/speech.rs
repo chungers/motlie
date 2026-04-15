@@ -774,20 +774,14 @@ mod tests {
     #[test]
     fn reference_conditioning_with_text_carries_token_ids() {
         use crate::common::Vocabulary;
-        use std::collections::HashMap;
 
-        let mut map = HashMap::new();
-        map.insert("<unk>".to_string(), 0_i64);
-        map.insert("<bos>".to_string(), 1);
-        map.insert("<eos>".to_string(), 2);
-        map.insert("hi".to_string(), 10);
-        let vocab = Vocabulary {
-            token_to_id: map,
-            unk_id: 0,
-            bos_id: 1,
-            eos_id: 2,
-            max_token_len: 2,
-        };
+        let vocab = Vocabulary::from_entries(&[
+            ("<unk>", 0),
+            ("<bos>", 1),
+            ("<eos>", 2),
+            ("hi", 10),
+        ])
+        .expect("test vocab");
 
         let mel = TensorWithShape {
             data: vec![0.1, 0.2, 0.3],

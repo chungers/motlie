@@ -211,6 +211,37 @@ impl Vocabulary {
         })
     }
 
+    /// Build a vocabulary from raw entries. Test-only.
+    #[cfg(test)]
+    pub(crate) fn from_entries(entries: &[(&str, i64)]) -> Result<Self, ModelError> {
+        let mut map = HashMap::new();
+        for &(token, id) in entries {
+            map.insert(token.to_string(), id);
+        }
+        let unk_id = map.get("<unk>").copied().ok_or_else(|| {
+            ModelError::InvalidConfiguration("test vocab missing <unk>".into())
+        })?;
+        let bos_id = map.get("<bos>").copied().ok_or_else(|| {
+            ModelError::InvalidConfiguration("test vocab missing <bos>".into())
+        })?;
+        let eos_id = map.get("<eos>").copied().ok_or_else(|| {
+            ModelError::InvalidConfiguration("test vocab missing <eos>".into())
+        })?;
+        let max_token_len = map
+            .keys()
+            .filter(|k| !k.starts_with('<'))
+            .map(|k| k.chars().count())
+            .max()
+            .unwrap_or(1);
+        Ok(Self {
+            token_to_id: map,
+            unk_id,
+            bos_id,
+            eos_id,
+            max_token_len,
+        })
+    }
+
     /// Tokenize text using greedy longest-match against the vocabulary.
     ///
     /// Scans the input left-to-right, greedily matching the longest vocabulary
@@ -511,29 +542,9 @@ mod tests {
         assert!(matches!(err, ModelError::InvalidConfiguration(msg) if msg.contains("Onnx")));
     }
 
-    fn make_test_vocab(entries: &[(&str, i64)]) -> Vocabulary {
-        let mut map = HashMap::new();
-        for &(token, id) in entries {
-            map.insert(token.to_string(), id);
-        }
-        let max_token_len = map
-            .keys()
-            .filter(|k| !k.starts_with('<'))
-            .map(|k| k.chars().count())
-            .max()
-            .unwrap_or(1);
-        Vocabulary {
-            token_to_id: map,
-            unk_id: 0,
-            bos_id: 1,
-            eos_id: 2,
-            max_token_len,
-        }
-    }
-
     #[test]
     fn tokenizer_longest_match_prefers_longer_tokens() {
-        let vocab = make_test_vocab(&[
+        let vocab = Vocabulary::from_entries(&[
             ("<unk>", 0),
             ("<bos>", 1),
             ("<eos>", 2),
@@ -541,7 +552,8 @@ mod tests {
             ("ab", 11),
             ("abc", 12),
             ("d", 13),
-        ]);
+        ])
+        .expect("test vocab");
 
         let ids = vocab.tokenize("abcd");
         // Expected: BOS, "abc"=12, "d"=13, EOS
@@ -550,13 +562,14 @@ mod tests {
 
     #[test]
     fn tokenizer_falls_back_to_unk_and_advances() {
-        let vocab = make_test_vocab(&[
+        let vocab = Vocabulary::from_entries(&[
             ("<unk>", 0),
             ("<bos>", 1),
             ("<eos>", 2),
             ("a", 10),
             ("c", 12),
-        ]);
+        ])
+        .expect("test vocab");
 
         let ids = vocab.tokenize("abc");
         // "a"=10, "b"=unk(0), "c"=12
@@ -565,13 +578,14 @@ mod tests {
 
     #[test]
     fn tokenizer_handles_single_char_vocab() {
-        let vocab = make_test_vocab(&[
+        let vocab = Vocabulary::from_entries(&[
             ("<unk>", 0),
             ("<bos>", 1),
             ("<eos>", 2),
             ("h", 10),
             ("i", 11),
-        ]);
+        ])
+        .expect("test vocab");
 
         let ids = vocab.tokenize("hi");
         assert_eq!(ids, vec![1, 10, 11, 2]);
@@ -579,11 +593,12 @@ mod tests {
 
     #[test]
     fn tokenizer_empty_text_produces_only_bos_eos() {
-        let vocab = make_test_vocab(&[
+        let vocab = Vocabulary::from_entries(&[
             ("<unk>", 0),
             ("<bos>", 1),
             ("<eos>", 2),
-        ]);
+        ])
+        .expect("test vocab");
 
         let ids = vocab.tokenize("");
         assert_eq!(ids, vec![1, 2]);
@@ -591,11 +606,12 @@ mod tests {
 
     #[test]
     fn tokenizer_all_unknown_advances_one_char_at_a_time() {
-        let vocab = make_test_vocab(&[
+        let vocab = Vocabulary::from_entries(&[
             ("<unk>", 0),
             ("<bos>", 1),
             ("<eos>", 2),
-        ]);
+        ])
+        .expect("test vocab");
 
         let ids = vocab.tokenize("xyz");
         // Each char is unknown, advances by 1
