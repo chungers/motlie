@@ -29,6 +29,7 @@ from huggingface_hub import snapshot_download
 from qwen_tts.inference.qwen3_tts_model import Qwen3TTSModel
 
 DEFAULT_REPO_ID = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+SCRIPT_VERSION = "0.2.0"
 DEFAULT_SAMPLE_INPUT_IDS = [
     151644,  # <|im_start|>
     77091,  # assistant
@@ -120,24 +121,47 @@ class VocoderAdapter(torch.nn.Module):
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--repo-id", default=DEFAULT_REPO_ID)
+    parser = argparse.ArgumentParser(
+        prog="export_qwen3_tts_onnx.py",
+        description=(
+            "Export the Qwen3-TTS curated-bundle artifacts expected by the Motlie "
+            "Rust backend: encoder.onnx, decoder.onnx, vocoder.onnx, and a "
+            "flattened vocab.json."
+        ),
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {SCRIPT_VERSION}",
+    )
+    parser.add_argument(
+        "--repo-id",
+        default=DEFAULT_REPO_ID,
+        help="Hugging Face repo ID to download when --snapshot-dir is omitted.",
+    )
     parser.add_argument(
         "--snapshot-dir",
         type=Path,
         default=None,
-        help="Existing HF snapshot directory. If omitted, snapshot_download() is used.",
+        help=(
+            "Existing HF snapshot directory containing config/tokenizer/safetensors. "
+            "If omitted, snapshot_download() is used."
+        ),
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
         default=None,
-        help="Directory for encoder.onnx/decoder.onnx/vocoder.onnx. Defaults to snapshot-dir.",
+        help=(
+            "Directory for encoder.onnx/decoder.onnx/vocoder.onnx/vocab.json. "
+            "Defaults to --snapshot-dir."
+        ),
     )
     parser.add_argument(
         "--cache-dir",
         type=Path,
         default=Path.home() / ".cache" / "huggingface" / "hub",
+        help="HF cache root used when --snapshot-dir is omitted.",
     )
     return parser.parse_args()
 
@@ -158,6 +182,8 @@ def ensure_required_files(snapshot_dir: Path) -> None:
     for required in [
         snapshot_dir / "config.json",
         snapshot_dir / "vocab.json",
+        snapshot_dir / "merges.txt",
+        snapshot_dir / "tokenizer_config.json",
         snapshot_dir / "model.safetensors",
         snapshot_dir / "speech_tokenizer" / "config.json",
         snapshot_dir / "speech_tokenizer" / "model.safetensors",
@@ -170,6 +196,50 @@ def load_upstream_model(snapshot_dir: Path) -> Qwen3TTSModel:
     loaded = Qwen3TTSModel.from_pretrained(str(snapshot_dir))
     loaded.model.eval()
     return loaded
+
+
+def export_flattened_vocab(loaded: Qwen3TTSModel, output_dir: Path) -> Path:
+    """Export the flattened token->id map used by the Rust greedy tokenizer.
+
+    The upstream repo ships a BPE tokenizer split across `vocab.json`,
+    `merges.txt`, and `tokenizer_config.json`. The Rust backend does not apply
+    BPE merges at runtime; instead it expects one flattened map that already
+    contains the tokenizer's full vocabulary and the special-token aliases it
+    uses internally.
+    """
+
+    tokenizer = loaded.processor.tokenizer
+    vocab = dict(tokenizer.get_vocab())
+
+    unk_id = vocab.get("<unk>")
+    if unk_id is None:
+        unk_token = getattr(tokenizer, "unk_token", None)
+        unk_id = tokenizer.convert_tokens_to_ids(unk_token) if unk_token else None
+    if unk_id is None:
+        raise RuntimeError("tokenizer does not expose an <unk> token ID")
+
+    eos_id = getattr(tokenizer, "eos_token_id", None)
+    if eos_id is None:
+        eos_token = getattr(tokenizer, "eos_token", None)
+        eos_id = tokenizer.convert_tokens_to_ids(eos_token) if eos_token else None
+    if eos_id is None:
+        raise RuntimeError("tokenizer does not expose an eos token ID")
+
+    # Qwen3-TTS does not expose a conventional `bos_token`; use the
+    # conversation-start marker as the bundle-local BOS alias.
+    bos_id = vocab.get("<|im_start|>")
+    if bos_id is None:
+        raise RuntimeError("tokenizer vocabulary is missing <|im_start|> for <bos> alias")
+
+    vocab["<unk>"] = int(unk_id)
+    vocab["<bos>"] = int(bos_id)
+    vocab["<eos>"] = int(eos_id)
+
+    output_path = output_dir / "vocab.json"
+    with output_path.open("w", encoding="utf-8") as handle:
+        json.dump(vocab, handle, ensure_ascii=False, sort_keys=True)
+
+    return output_path
 
 
 def export_module(
@@ -256,6 +326,7 @@ def main() -> int:
     encoder_path = output_dir / "encoder.onnx"
     decoder_path = output_dir / "decoder.onnx"
     vocoder_path = output_dir / "vocoder.onnx"
+    vocab_path = export_flattened_vocab(loaded, output_dir)
 
     export_module(
         encoder,
@@ -284,6 +355,7 @@ def main() -> int:
 
     verify_pipeline(encoder_path, decoder_path, vocoder_path)
 
+    print(f"exported flattened vocabulary to {vocab_path}")
     print(f"exported ONNX artifacts to {output_dir}")
     return 0
 
