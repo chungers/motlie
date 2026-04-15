@@ -25,6 +25,7 @@ const ENCODER_FILE: &str = "encoder.onnx";
 const DECODER_FILE: &str = "decoder.onnx";
 const VOCODER_FILE: &str = "vocoder.onnx";
 const CONFIG_FILE: &str = "config.json";
+const VOCAB_FILE: &str = "vocab.json";
 
 pub(crate) fn register(catalog: &mut crate::Catalog) {
     catalog.register(descriptor(), bundle);
@@ -59,6 +60,7 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
             ArtifactRule::Exact(DECODER_FILE),
             ArtifactRule::Exact(VOCODER_FILE),
             ArtifactRule::Exact(CONFIG_FILE),
+            ArtifactRule::Exact(VOCAB_FILE),
         ],
         quantization: None,
     }
@@ -128,7 +130,7 @@ fn resolve_local_model_path(root: &Path) -> Result<PathBuf, ModelError> {
         )));
     }
 
-    for filename in [ENCODER_FILE, DECODER_FILE, VOCODER_FILE, CONFIG_FILE] {
+    for filename in [ENCODER_FILE, DECODER_FILE, VOCODER_FILE, CONFIG_FILE, VOCAB_FILE] {
         let path = snapshot_dir.join(filename);
         if !path.exists() {
             return Err(ModelError::InvalidConfiguration(format!(
@@ -170,6 +172,7 @@ mod tests {
         assert!(artifacts.includes("decoder.onnx"));
         assert!(artifacts.includes("vocoder.onnx"));
         assert!(artifacts.includes("config.json"));
+        assert!(artifacts.includes("vocab.json"));
         assert!(!artifacts.includes("README.md"));
     }
 
@@ -224,7 +227,7 @@ mod tests {
     #[test]
     fn local_resolution_rejects_missing_onnx_components() {
         let root = unique_temp_dir();
-        let snapshot = create_fake_hf_cache(&root);
+        let _snapshot = create_fake_hf_cache(&root);
         // Snapshot exists but has no ONNX files.
 
         let error = resolve_local_model_path(&root)
@@ -243,7 +246,7 @@ mod tests {
         let root = unique_temp_dir();
         let snapshot = create_fake_hf_cache(&root);
 
-        for filename in [ENCODER_FILE, DECODER_FILE, VOCODER_FILE, CONFIG_FILE] {
+        for filename in [ENCODER_FILE, DECODER_FILE, VOCODER_FILE, CONFIG_FILE, VOCAB_FILE] {
             std::fs::write(snapshot.join(filename), "stub")
                 .expect("stub file should be writable");
         }
