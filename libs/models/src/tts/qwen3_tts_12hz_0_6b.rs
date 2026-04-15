@@ -25,6 +25,12 @@ const ENCODER_FILE: &str = "encoder.onnx";
 const DECODER_FILE: &str = "decoder.onnx";
 const VOCODER_FILE: &str = "vocoder.onnx";
 const CONFIG_FILE: &str = "config.json";
+/// Custom tokenizer vocabulary produced by the ONNX export step. This is NOT
+/// the upstream `vocab.json` from the HuggingFace model tree — it is a
+/// flattened token→ID mapping derived from the full BPE tokenizer
+/// (`vocab.json` + `merges.txt` + `tokenizer_config.json`) during export.
+/// The greedy longest-match tokenizer in `motlie-model-qwen3-tts` consumes
+/// this flattened format directly without needing the BPE merge rules.
 const VOCAB_FILE: &str = "vocab.json";
 
 pub(crate) fn register(catalog: &mut crate::Catalog) {

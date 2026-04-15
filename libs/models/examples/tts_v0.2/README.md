@@ -12,10 +12,11 @@ This backend requires pre-exported ONNX components:
 - `decoder.onnx` — flow-matching mel decoder
 - `vocoder.onnx` — mel-to-waveform vocoder (BigVGAN-derived)
 - `config.json` — model configuration
+- `vocab.json` — flattened BPE vocabulary (custom export, not upstream `vocab.json`)
 
-Export these from the upstream model and place them under the artifact root
-(or a custom `--artifact-root` path). See `libs/models/docs/DESIGN_TTS.md`
-Phase 2 for the full export guide.
+The `vocab.json` must be a flattened `{ token: id }` mapping containing all
+BPE-merged subword tokens plus `<bos>`, `<eos>`, `<unk>`. See
+`libs/models/docs/DESIGN_TTS.md` Phase 2 for the full export procedure.
 
 ## Run
 
@@ -27,7 +28,23 @@ cargo run -p motlie-models --example models_tts_v0_2 \
   -- --text "Hello from Motlie." --wav /tmp/motlie-qwen3-tts.wav
 ```
 
-### With voice cloning (3-second reference audio)
+### With prompted voice cloning (reference audio + transcript)
+
+Full quality cloning requires both `--reference-audio` and `--reference-text`:
+
+```bash
+cargo run -p motlie-models --example models_tts_v0_2 \
+  --no-default-features --features model-qwen3-tts-0_6b \
+  -- --text "Hello from Motlie." --wav /tmp/motlie-qwen3-tts.wav \
+     --reference-audio /path/to/reference.wav \
+     --reference-text "The transcript of the reference audio."
+```
+
+### Audio-only cloning (reduced quality)
+
+Omitting `--reference-text` uses audio-only mel conditioning. This is a
+reduced-quality mode — the official Qwen3-TTS API requires both ref_audio
+and ref_text for prompted cloning.
 
 ```bash
 cargo run -p motlie-models --example models_tts_v0_2 \
@@ -44,6 +61,7 @@ cargo run -p motlie-models --example models_tts_v0_2 \
 | `--wav <path>` | Output `.wav` file path (required) |
 | `--artifact-root <path>` | Override the default HF cache root for ONNX artifacts |
 | `--reference-audio <path>` | `.wav` file for voice cloning conditioning (optional) |
+| `--reference-text <value>` | Transcript of the reference audio for prompted cloning (optional, recommended when `--reference-audio` is used) |
 
 ## Environment
 
@@ -57,8 +75,11 @@ cargo run -p motlie-models --example models_tts_v0_2 \
 - The example opens the curated `Qwen3-TTS 12Hz 0.6B` bundle.
 - Text is synthesized through the multi-model ONNX pipeline
   (encoder → decoder → vocoder) via the shared `SpeechModel`/`SpeechStream` contract.
-- If `--reference-audio` is provided, the decoder receives mel-spectrogram
-  conditioning extracted from the reference audio for voice cloning.
+- **With both `--reference-audio` and `--reference-text`:** the decoder receives
+  mel conditioning from the reference audio AND tokenized reference transcript
+  for full prompted cloning (3 decoder inputs: hidden, mel, ref_token_ids).
+- **With only `--reference-audio`:** audio-only mel conditioning (2 decoder inputs:
+  hidden, mel). Reduced quality — a warning is logged.
 - The resulting `.wav` file uses the backend-reported sample rate and encoding.
 - Like Piper Phase 1, Qwen3-TTS performs whole-utterance synthesis in
   `open_stream()` and then emits buffered PCM chunks through `next_chunk()`.
@@ -68,5 +89,6 @@ cargo run -p motlie-models --example models_tts_v0_2 \
 This example demonstrates the Phase 2 TTS vertical slice:
 - Same `SpeechModel`/`SpeechStream` contract as Piper Phase 1
 - Reuses the shared `motlie-model-ort` ONNX Runtime helpers
-- Adds `VoiceConditioning::ReferenceAudio` for voice cloning
+- Adds `VoiceConditioning::ReferenceAudio` with `reference_text` for prompted cloning
 - Multi-model ONNX pipeline (3 sessions: encoder, decoder, vocoder)
+- Greedy longest-match subword tokenizer against flattened BPE vocabulary
