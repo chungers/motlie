@@ -314,6 +314,15 @@ struct TensorWithShape {
     shape: Vec<i64>,
 }
 
+/// Reference conditioning for voice cloning: mel spectrogram + optional transcript tokens.
+struct ReferenceConditioning {
+    mel: TensorWithShape,
+    /// Tokenized reference transcript for prompted cloning. When present, passed
+    /// as an additional decoder input alongside the mel conditioning. When absent,
+    /// the decoder operates in audio-only (reduced-quality) mode.
+    ref_token_ids: Option<Vec<i64>>,
+}
+
 impl TensorWithShape {
     fn shape_as_usize(&self) -> Vec<usize> {
         self.shape.iter().map(|&d| d as usize).collect()
@@ -329,8 +338,8 @@ impl Qwen3TtsRuntime {
             ));
         }
 
-        // Encode reference audio conditioning if provided.
-        let ref_mel = match &request.conditioning {
+        // Encode reference audio + transcript conditioning if provided.
+        let ref_conditioning = match &request.conditioning {
             Some(VoiceConditioning::ReferenceAudio {
                 audio_spec,
                 pcm,
@@ -338,11 +347,19 @@ impl Qwen3TtsRuntime {
             }) => {
                 if reference_text.is_none() {
                     tracing::warn!(
-                        "qwen3-tts voice cloning without reference_text may produce \
-                         lower-quality output; the official API requires both audio and transcript"
+                        "qwen3-tts voice cloning without reference_text uses audio-only \
+                         conditioning (reduced quality); the official API requires both \
+                         ref_audio and ref_text for prompted cloning"
                     );
                 }
-                Some(self.encode_reference_audio(audio_spec, pcm, reference_text.as_deref())?)
+                let mel = self.encode_reference_audio(audio_spec, pcm)?;
+                let ref_token_ids = reference_text
+                    .as_deref()
+                    .map(|text| self.vocab.tokenize(text));
+                Some(ReferenceConditioning {
+                    mel,
+                    ref_token_ids,
+                })
             }
             Some(VoiceConditioning::SpeakerId(_)) => {
                 return Err(ModelError::InvalidConfiguration(
@@ -364,15 +381,19 @@ impl Qwen3TtsRuntime {
             });
         }
 
-        // Lock the entire pipeline for the full encoder → decoder → vocoder flow
-        // to prevent interleaved stage execution across concurrent callers.
+        // Lock the entire pipeline for the full encoder → decoder → vocoder flow.
         let mut pipeline = self
             .pipeline
             .lock()
             .map_err(|_| ModelError::Internal("qwen3-tts pipeline mutex poisoned".into()))?;
 
         let hidden = run_encoder(&mut pipeline.encoder, &token_ids)?;
-        let mel = run_decoder(&mut pipeline.decoder, &hidden, ref_mel.as_ref(), &self.config)?;
+        let mel = run_decoder(
+            &mut pipeline.decoder,
+            &hidden,
+            ref_conditioning.as_ref(),
+            &self.config,
+        )?;
         let samples = run_vocoder(&mut pipeline.vocoder, &mel, &self.config)?;
 
         drop(pipeline); // release lock before PCM encoding
@@ -394,12 +415,7 @@ impl Qwen3TtsRuntime {
         &self,
         audio_spec: &AudioSpec,
         pcm: &[u8],
-        _ref_text: Option<&str>,
     ) -> Result<TensorWithShape, ModelError> {
-        // TODO(@cld-review-models): When the ONNX export supports prompted
-        // cloning, tokenize `ref_text` and pass it as an additional decoder
-        // input alongside the mel conditioning. The current implementation
-        // only uses the mel spectrogram path (equivalent to x-vector mode).
         let samples = decode_pcm_to_f32(pcm, audio_spec.encoding)?;
         if samples.is_empty() {
             return Err(ModelError::InvalidConfiguration(
@@ -467,7 +483,7 @@ fn run_encoder(encoder: &mut Session, token_ids: &[i64]) -> Result<TensorWithSha
 fn run_decoder(
     decoder: &mut Session,
     hidden: &TensorWithShape,
-    ref_mel: Option<&TensorWithShape>,
+    ref_cond: Option<&ReferenceConditioning>,
     _config: &Qwen3TtsConfig,
 ) -> Result<TensorWithShape, ModelError> {
     let hidden_array = ndarray::ArrayD::<f32>::from_shape_vec(
@@ -486,21 +502,37 @@ fn run_decoder(
 
     let mut inputs = vec![SessionInputValue::from(hidden_tensor)];
 
-    if let Some(mel) = ref_mel {
+    if let Some(cond) = ref_cond {
+        // Add mel conditioning.
         let mel_array = ndarray::ArrayD::<f32>::from_shape_vec(
-            ndarray::IxDyn(&mel.shape_as_usize()),
-            mel.data.clone(),
+            ndarray::IxDyn(&cond.mel.shape_as_usize()),
+            cond.mel.data.clone(),
         )
         .map_err(|err| ModelError::BackendExecution {
             backend: "qwen3-tts",
             operation: "rebuild_ref_mel_tensor",
             message: format!(
                 "failed to reconstruct reference mel with shape {:?}: {err}",
-                mel.shape
+                cond.mel.shape
             ),
         })?;
         let mel_tensor = Tensor::<f32>::from_array(mel_array).map_err(ort_error)?;
         inputs.push(SessionInputValue::from(mel_tensor));
+
+        // Add tokenized reference transcript for prompted cloning.
+        if let Some(ref_ids) = &cond.ref_token_ids {
+            let ref_len = ref_ids.len();
+            let ref_input =
+                Array2::<i64>::from_shape_vec((1, ref_len), ref_ids.clone()).map_err(|err| {
+                    ModelError::BackendExecution {
+                        backend: "qwen3-tts",
+                        operation: "build_ref_text_input",
+                        message: err.to_string(),
+                    }
+                })?;
+            let ref_tensor = Tensor::<i64>::from_array(ref_input).map_err(ort_error)?;
+            inputs.push(SessionInputValue::from(ref_tensor));
+        }
     }
 
     let outputs = decoder

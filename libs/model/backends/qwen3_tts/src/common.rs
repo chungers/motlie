@@ -157,6 +157,8 @@ pub(crate) struct Vocabulary {
     unk_id: i64,
     bos_id: i64,
     eos_id: i64,
+    /// Longest token in the vocabulary (in chars), used as the greedy match window.
+    max_token_len: usize,
 }
 
 impl Vocabulary {
@@ -193,34 +195,60 @@ impl Vocabulary {
             ))
         })?;
 
+        let max_token_len = raw
+            .keys()
+            .filter(|k| !k.starts_with('<'))
+            .map(|k| k.chars().count())
+            .max()
+            .unwrap_or(1);
+
         Ok(Self {
             token_to_id: raw,
             unk_id,
             bos_id,
             eos_id,
+            max_token_len,
         })
     }
 
-    /// Tokenize text by looking up each character in the vocabulary.
-    /// Unknown characters map to `<unk>`. Result is wrapped with BOS/EOS.
+    /// Tokenize text using greedy longest-match against the vocabulary.
     ///
-    /// **Limitation:** This is character-level tokenization against `vocab.json`,
-    /// not the official `Qwen3-TTS-Tokenizer-12Hz` speech tokenizer. The official
-    /// Qwen3-TTS tokenizer is a specialized SentencePiece/BPE model that produces
-    /// subword tokens; this simplified tokenizer feeds individual characters with
-    /// `<unk>` fallback for out-of-vocabulary characters. The ONNX encoder must
-    /// be exported to accept this character-level input format, or `vocab.json`
-    /// must contain the full SentencePiece vocabulary for correct subword mapping.
-    /// Silent quality degradation will occur if the vocabulary doesn't match the
-    /// encoder's expected token distribution.
+    /// Scans the input left-to-right, greedily matching the longest vocabulary
+    /// token at each position (up to `max_token_len` characters). Falls back to
+    /// single-character `<unk>` for unmatched positions. Result is wrapped with
+    /// BOS/EOS.
+    ///
+    /// This supports both character-level and subword vocabularies. When
+    /// `vocab.json` contains multi-character subword entries (e.g., from the
+    /// official `Qwen3-TTS-Tokenizer-12Hz` SentencePiece export), the greedy
+    /// match correctly emits subword token IDs. When it only contains single
+    /// characters, behavior is equivalent to per-character lookup.
     pub(crate) fn tokenize(&self, text: &str) -> Vec<i64> {
         let mut ids = Vec::with_capacity(text.len() + 2);
         ids.push(self.bos_id);
-        for ch in text.chars() {
-            let token = ch.to_string();
-            let id = self.token_to_id.get(&token).copied().unwrap_or(self.unk_id);
-            ids.push(id);
+
+        let chars: Vec<char> = text.chars().collect();
+        let mut pos = 0;
+
+        while pos < chars.len() {
+            let mut best_len = 0;
+            let mut best_id = self.unk_id;
+
+            // Try longest match first, shrinking to single character.
+            let max_end = (pos + self.max_token_len).min(chars.len());
+            for end in (pos + 1..=max_end).rev() {
+                let candidate: String = chars[pos..end].iter().collect();
+                if let Some(&id) = self.token_to_id.get(&candidate) {
+                    best_len = end - pos;
+                    best_id = id;
+                    break;
+                }
+            }
+
+            ids.push(best_id);
+            pos += best_len.max(1); // advance at least one character on unk
         }
+
         ids.push(self.eos_id);
         ids
     }
