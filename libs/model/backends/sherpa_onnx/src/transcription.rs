@@ -1161,7 +1161,13 @@ fn initial_encoder_state(
 }
 
 fn initial_zipformer_state(stacks: &[EncoderStackSpec]) -> Result<Vec<DynValue>, ModelError> {
-    let mut state = Vec::new();
+    let mut cached_len = Vec::with_capacity(stacks.len());
+    let mut cached_avg = Vec::with_capacity(stacks.len());
+    let mut cached_key = Vec::with_capacity(stacks.len());
+    let mut cached_val = Vec::with_capacity(stacks.len());
+    let mut cached_val2 = Vec::with_capacity(stacks.len());
+    let mut cached_conv1 = Vec::with_capacity(stacks.len());
+    let mut cached_conv2 = Vec::with_capacity(stacks.len());
 
     for stack in stacks {
         let layers = stack.num_layers;
@@ -1170,12 +1176,12 @@ fn initial_zipformer_state(stacks: &[EncoderStackSpec]) -> Result<Vec<DynValue>,
         let left_context = stack.left_context_len;
         let cnn_kernel = stack.cnn_module_kernel;
 
-        state.push(
+        cached_len.push(
             Tensor::<i64>::from_array((vec![layers as i64, 1], vec![0_i64; layers]))
                 .map_err(ort_tensor_error)?
                 .into_dyn(),
         );
-        state.push(
+        cached_avg.push(
             Tensor::<f32>::from_array((
                 vec![layers as i64, 1, encoder_dim as i64],
                 vec![0.0_f32; layers * encoder_dim],
@@ -1183,7 +1189,7 @@ fn initial_zipformer_state(stacks: &[EncoderStackSpec]) -> Result<Vec<DynValue>,
             .map_err(ort_tensor_error)?
             .into_dyn(),
         );
-        state.push(
+        cached_key.push(
             Tensor::<f32>::from_array((
                 vec![layers as i64, left_context as i64, 1, attention_dim as i64],
                 vec![0.0_f32; layers * left_context * attention_dim],
@@ -1192,7 +1198,7 @@ fn initial_zipformer_state(stacks: &[EncoderStackSpec]) -> Result<Vec<DynValue>,
             .into_dyn(),
         );
         let half_attention = attention_dim / 2;
-        state.push(
+        cached_val.push(
             Tensor::<f32>::from_array((
                 vec![layers as i64, left_context as i64, 1, half_attention as i64],
                 vec![0.0_f32; layers * left_context * half_attention],
@@ -1200,7 +1206,7 @@ fn initial_zipformer_state(stacks: &[EncoderStackSpec]) -> Result<Vec<DynValue>,
             .map_err(ort_tensor_error)?
             .into_dyn(),
         );
-        state.push(
+        cached_val2.push(
             Tensor::<f32>::from_array((
                 vec![layers as i64, left_context as i64, 1, half_attention as i64],
                 vec![0.0_f32; layers * left_context * half_attention],
@@ -1208,7 +1214,7 @@ fn initial_zipformer_state(stacks: &[EncoderStackSpec]) -> Result<Vec<DynValue>,
             .map_err(ort_tensor_error)?
             .into_dyn(),
         );
-        state.push(
+        cached_conv1.push(
             Tensor::<f32>::from_array((
                 vec![
                     layers as i64,
@@ -1221,7 +1227,7 @@ fn initial_zipformer_state(stacks: &[EncoderStackSpec]) -> Result<Vec<DynValue>,
             .map_err(ort_tensor_error)?
             .into_dyn(),
         );
-        state.push(
+        cached_conv2.push(
             Tensor::<f32>::from_array((
                 vec![
                     layers as i64,
@@ -1235,6 +1241,15 @@ fn initial_zipformer_state(stacks: &[EncoderStackSpec]) -> Result<Vec<DynValue>,
             .into_dyn(),
         );
     }
+
+    let mut state = Vec::with_capacity(stacks.len() * 7);
+    state.extend(cached_len);
+    state.extend(cached_avg);
+    state.extend(cached_key);
+    state.extend(cached_val);
+    state.extend(cached_val2);
+    state.extend(cached_conv1);
+    state.extend(cached_conv2);
 
     Ok(state)
 }
@@ -1580,6 +1595,51 @@ mod tests {
         assert_eq!(state.tokens, vec![-1, BLANK_ID]);
         assert!(state.timestamps.is_empty());
         assert_eq!(state.encoder_state.len(), 7);
+    }
+
+    #[test]
+    fn zipformer_initial_state_matches_upstream_grouped_ordering() {
+        let layout = StateLayout::Zipformer {
+            stacks: vec![
+                EncoderStackSpec {
+                    encoder_dim: 4,
+                    attention_dim: 8,
+                    num_layers: 2,
+                    cnn_module_kernel: 3,
+                    left_context_len: 5,
+                },
+                EncoderStackSpec {
+                    encoder_dim: 6,
+                    attention_dim: 10,
+                    num_layers: 3,
+                    cnn_module_kernel: 7,
+                    left_context_len: 4,
+                },
+            ],
+        };
+
+        let state = initial_encoder_state(&layout, 80).expect("zipformer state should initialize");
+        assert_eq!(state.len(), 14);
+
+        let (shape, _) = state[0]
+            .try_extract_tensor::<i64>()
+            .expect("first state should be i64 cached_len for stack 0");
+        assert_eq!(shape.iter().copied().collect::<Vec<_>>(), vec![2, 1]);
+
+        let (shape, _) = state[1]
+            .try_extract_tensor::<i64>()
+            .expect("second state should be i64 cached_len for stack 1");
+        assert_eq!(shape.iter().copied().collect::<Vec<_>>(), vec![3, 1]);
+
+        let (shape, _) = state[2]
+            .try_extract_tensor::<f32>()
+            .expect("third state should be f32 cached_avg for stack 0");
+        assert_eq!(shape.iter().copied().collect::<Vec<_>>(), vec![2, 1, 4]);
+
+        let (shape, _) = state[8]
+            .try_extract_tensor::<f32>()
+            .expect("ninth state should be f32 cached_val2 for stack 0");
+        assert_eq!(shape.iter().copied().collect::<Vec<_>>(), vec![2, 5, 1, 4]);
     }
 
     #[test]
