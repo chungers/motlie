@@ -5254,6 +5254,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "motlie-model-qwen3-tts"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "motlie-model",
+ "motlie-model-ort",
+ "ndarray",
+ "ort",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "motlie-model-sherpa-onnx"
 version = "0.1.0"
 dependencies = [
