@@ -6,6 +6,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-15 | @cld-review-models | Implemented Phase 2 Qwen3-TTS vertical slice. Runtime boundary: in-process ONNX via `motlie-model-ort` with pre-exported model components (encoder, decoder, vocoder). Upstream safetensors must be exported to ONNX offline before the curated bundle can start. Added vocabulary-based tokenizer, proper Hann-windowed DFT mel spectrogram for reference-audio conditioning, and shape-preserving tensor pipeline between ONNX stages. |
 | 2026-04-14 | @codex-tts | Addressed PR #179 review R1 by fixing the local-only startup path to reuse the same Piper artifact validation as curated checkpoints, documenting the batch-then-chunk `open_stream()` behavior and Piper's runtime rejection of `SpeechParams.seed`, and recording the current `ort` RC dependency/runtime constraint explicitly. |
 | 2026-04-14 | @codex-tts | Implemented the Phase 1 Piper slice with additive `SpeechModel` / `SpeechStream` contracts, a shared `motlie-model-ort` ONNX helper reused by the sherpa backend, a `motlie-model-piper` backend using eSpeak-ng phonemization plus Piper sidecar parsing, the curated `piper_en_us_ljspeech_medium` bundle, and the `models_tts_v0_1` example/validation path. |
 | 2026-04-14 | @codex-tts | Addressed R1 review by defining the Qwen3-TTS phase-2 slice, adding the shared ONNX Runtime refactor target with the ASR sherpa-onnx path, removing the duplicate speaker-selection knob from `SpeechParams`, tightening `SpeechStream` state semantics, and switching the planned example naming to a capability-specific path that does not collide with ASR `v0.5`. |
@@ -731,7 +732,7 @@ If Motlie adds a second TTS family after Piper, the explicit next vertical slice
 Recommended phase-2 shape:
 
 - contract surface: reuse the same `SpeechRequest` / `SpeechStream` API
-- runtime/backend boundary: a new `motlie-model-qwen3-tts` backend crate over the official Python/Transformers/vLLM runtime boundary or a thinner accelerator-oriented service boundary if a direct in-process Rust path remains unavailable
+- runtime/backend boundary: a new `motlie-model-qwen3-tts` backend crate using in-process ONNX Runtime via the shared `motlie-model-ort` helper. The upstream model (`Qwen/Qwen3-TTS-12Hz-0.6B-Base`) ships as safetensors; an offline ONNX export step produces the required `encoder.onnx`, `decoder.onnx`, `vocoder.onnx`, `config.json`, and `vocab.json` components. The curated bundle descriptor references these ONNX artifacts, not the original safetensors.
 - curated bundle: start with `Qwen3-TTS-12Hz-0.6B-Base`
 - selector shape: `tts:qwen/qwen3_tts_12hz_0_6b`
 - feature flags:

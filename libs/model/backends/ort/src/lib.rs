@@ -12,7 +12,7 @@ pub fn build_session(backend: &'static str, model_path: &Path) -> Result<Session
     })?;
 
     #[cfg(feature = "cuda")]
-    let builder = if should_force_cpu() {
+    let mut builder = if should_force_cpu() {
         builder
     } else {
         builder

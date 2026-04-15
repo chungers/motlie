@@ -11,13 +11,14 @@ use motlie_model::{
     StartOptions, TranscriptionModel, VoiceConditioning,
 };
 use motlie_model_ort::build_session;
-use ndarray::{Array2, Array3};
+use ndarray::Array2;
 use ort::session::{Session, SessionInputValue};
 use ort::value::Tensor;
 
 use crate::common::{
-    configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
-    resolve_onnx_artifacts, Qwen3TtsArtifactPaths, Qwen3TtsConfig, RuntimeMetricState,
+    compute_log_mel_spectrogram, configure_artifact_policy, decode_pcm_to_f32, downmix_to_mono,
+    encode_pcm, lock_metrics, observe_latency, observe_memory, resample_mono,
+    resolve_onnx_artifacts, Qwen3TtsArtifactPaths, Qwen3TtsConfig, RuntimeMetricState, Vocabulary,
 };
 
 const QWEN3_TTS_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Onnx];
@@ -294,6 +295,20 @@ struct Qwen3TtsRuntime {
     decoder: Mutex<Session>,
     vocoder: Mutex<Session>,
     config: Qwen3TtsConfig,
+    vocab: Vocabulary,
+}
+
+/// Shape metadata carried between pipeline stages to avoid flattening tensor ranks.
+struct TensorWithShape {
+    data: Vec<f32>,
+    /// Shape as reported by ORT (i64). Convert to usize when building arrays.
+    shape: Vec<i64>,
+}
+
+impl TensorWithShape {
+    fn shape_as_usize(&self) -> Vec<usize> {
+        self.shape.iter().map(|&d| d as usize).collect()
+    }
 }
 
 impl Qwen3TtsRuntime {
@@ -312,33 +327,35 @@ impl Qwen3TtsRuntime {
             }
             Some(VoiceConditioning::SpeakerId(_)) => {
                 return Err(ModelError::InvalidConfiguration(
-                    "qwen3-tts backend uses VoiceConditioning::ReferenceAudio for voice cloning; SpeakerId is not supported".into(),
+                    "qwen3-tts backend uses VoiceConditioning::ReferenceAudio for voice cloning; \
+                     SpeakerId is not supported"
+                        .into(),
                 ));
             }
             None => None,
         };
 
-        // Step 1: Tokenize text → token IDs.
-        let token_ids = self.tokenize(text)?;
-        if token_ids.is_empty() {
+        // Step 1: Tokenize text using the model's vocabulary.
+        let token_ids = self.vocab.tokenize(text);
+        if token_ids.len() <= 2 {
+            // Only BOS + EOS — no actual content tokens.
             return Err(ModelError::BackendExecution {
                 backend: "qwen3-tts",
                 operation: "tokenize",
-                message: "tokenizer produced no tokens for request text".into(),
+                message: "tokenizer produced no content tokens for request text".into(),
             });
         }
 
-        // Step 2: Encoder — token IDs → hidden states.
+        // Step 2: Encoder — token IDs → hidden states (preserving tensor shape).
         let hidden = self.run_encoder(&token_ids)?;
 
         // Step 3: Decoder — hidden states (+ optional ref mel) → mel spectrogram.
-        let mel = self.run_decoder(&hidden, ref_mel.as_deref())?;
+        let mel = self.run_decoder(&hidden, ref_mel.as_ref())?;
 
         // Step 4: Vocoder — mel spectrogram → raw audio samples.
         let samples = self.run_vocoder(&mel)?;
 
-        // Convert f32 samples → PCM bytes matching the configured encoding.
-        let pcm = encode_pcm(&samples, self.config.audio_spec().encoding);
+        let pcm = encode_pcm(&samples.data, self.config.audio_spec().encoding);
 
         if pcm.is_empty() {
             return Err(ModelError::BackendExecution {
@@ -351,22 +368,11 @@ impl Qwen3TtsRuntime {
         Ok(pcm)
     }
 
-    fn tokenize(&self, text: &str) -> Result<Vec<i64>, ModelError> {
-        // Simple character-level tokenization for the ONNX-exported encoder.
-        // The actual Qwen3-TTS model uses a SentencePiece/BPE tokenizer;
-        // a proper tokenizer should replace this once the ONNX export pipeline
-        // and vocabulary files are standardized.
-        let ids: Vec<i64> = text.chars().map(|c| c as i64).collect();
-        Ok(ids)
-    }
-
     fn encode_reference_audio(
         &self,
         audio_spec: &AudioSpec,
         pcm: &[u8],
-    ) -> Result<Vec<f32>, ModelError> {
-        // Decode PCM to f32 samples, then compute a simple log-mel spectrogram
-        // as conditioning input for the decoder.
+    ) -> Result<TensorWithShape, ModelError> {
         let samples = decode_pcm_to_f32(pcm, audio_spec.encoding)?;
         if samples.is_empty() {
             return Err(ModelError::InvalidConfiguration(
@@ -374,34 +380,28 @@ impl Qwen3TtsRuntime {
             ));
         }
 
-        // Compute simplified mel spectrogram: chunk samples into frames,
-        // compute energy per mel bin via simple FFT-free approximation.
-        // A production implementation should use a proper STFT + mel filterbank.
+        // Normalize to mono at model's sample rate.
+        let mono = downmix_to_mono(&samples, audio_spec.channels);
+        let resampled = resample_mono(&mono, audio_spec.sample_rate_hz, self.config.sample_rate);
+
+        // Compute proper log-mel spectrogram using Hann-windowed DFT + mel filterbank.
         let mel_channels = self.config.mel_channels as usize;
-        let hop_length = self.config.hop_length as usize;
-        let num_frames = samples.len() / hop_length.max(1);
+        let mel = compute_log_mel_spectrogram(
+            &resampled,
+            self.config.sample_rate,
+            self.config.fft_size,
+            self.config.hop_length as usize,
+            mel_channels,
+        );
 
-        let mut mel = Vec::with_capacity(num_frames * mel_channels);
-        for frame_idx in 0..num_frames {
-            let start = frame_idx * hop_length;
-            let end = (start + hop_length).min(samples.len());
-            let frame = &samples[start..end];
-
-            // Distribute frame energy across mel bins.
-            let energy: f32 = frame.iter().map(|s| s * s).sum::<f32>() / frame.len().max(1) as f32;
-            let log_energy = (energy + 1e-10).ln();
-
-            for bin in 0..mel_channels {
-                // Spread energy with a frequency-dependent offset per bin.
-                let bin_weight = (bin as f32 + 1.0) / mel_channels as f32;
-                mel.push(log_energy * bin_weight);
-            }
-        }
-
-        Ok(mel)
+        let mel_frames = mel.len() / mel_channels.max(1);
+        Ok(TensorWithShape {
+            data: mel,
+            shape: vec![1, mel_frames as i64, mel_channels as i64],
+        })
     }
 
-    fn run_encoder(&self, token_ids: &[i64]) -> Result<Vec<f32>, ModelError> {
+    fn run_encoder(&self, token_ids: &[i64]) -> Result<TensorWithShape, ModelError> {
         let seq_len = token_ids.len();
         let input = Array2::<i64>::from_shape_vec((1, seq_len), token_ids.to_vec()).map_err(
             |err| ModelError::BackendExecution {
@@ -426,7 +426,7 @@ impl Qwen3TtsRuntime {
                 message: err.to_string(),
             })?;
 
-        let (_, hidden) =
+        let (shape, hidden) =
             outputs[0]
                 .try_extract_tensor::<f32>()
                 .map_err(|err| ModelError::BackendExecution {
@@ -435,39 +435,48 @@ impl Qwen3TtsRuntime {
                     message: err.to_string(),
                 })?;
 
-        Ok(hidden.to_vec())
+        Ok(TensorWithShape {
+            data: hidden.to_vec(),
+            shape: shape.to_vec(),
+        })
     }
 
     fn run_decoder(
         &self,
-        hidden: &[f32],
-        ref_mel: Option<&[f32]>,
-    ) -> Result<Vec<f32>, ModelError> {
-        // Build decoder input: hidden states as a 1×T×D tensor.
-        // For simplicity, infer dimensions from the flat hidden vector.
-        let hidden_len = hidden.len();
-        let hidden_input = Array2::<f32>::from_shape_vec((1, hidden_len), hidden.to_vec())
-            .map_err(|err| ModelError::BackendExecution {
-                backend: "qwen3-tts",
-                operation: "build_decoder_input",
-                message: err.to_string(),
-            })?;
-        let hidden_tensor = Tensor::<f32>::from_array(hidden_input).map_err(ort_error)?;
+        hidden: &TensorWithShape,
+        ref_mel: Option<&TensorWithShape>,
+    ) -> Result<TensorWithShape, ModelError> {
+        // Reconstruct encoder output tensor with its original shape.
+        let hidden_array = ndarray::ArrayD::<f32>::from_shape_vec(
+            ndarray::IxDyn(&hidden.shape_as_usize()),
+            hidden.data.clone(),
+        )
+        .map_err(|err| ModelError::BackendExecution {
+            backend: "qwen3-tts",
+            operation: "rebuild_encoder_tensor",
+            message: format!(
+                "failed to reconstruct encoder output with shape {:?}: {err}",
+                hidden.shape
+            ),
+        })?;
+        let hidden_tensor = Tensor::<f32>::from_array(hidden_array).map_err(ort_error)?;
 
         let mut inputs = vec![SessionInputValue::from(hidden_tensor)];
 
-        // If reference mel is provided, add it as the second input for voice cloning.
         if let Some(mel) = ref_mel {
-            let mel_channels = self.config.mel_channels as usize;
-            let mel_frames = mel.len() / mel_channels.max(1);
-            let mel_input =
-                Array3::<f32>::from_shape_vec((1, mel_frames, mel_channels), mel.to_vec())
-                    .map_err(|err| ModelError::BackendExecution {
-                        backend: "qwen3-tts",
-                        operation: "build_decoder_ref_mel",
-                        message: err.to_string(),
-                    })?;
-            let mel_tensor = Tensor::<f32>::from_array(mel_input).map_err(ort_error)?;
+            let mel_array = ndarray::ArrayD::<f32>::from_shape_vec(
+                ndarray::IxDyn(&mel.shape_as_usize()),
+                mel.data.clone(),
+            )
+            .map_err(|err| ModelError::BackendExecution {
+                backend: "qwen3-tts",
+                operation: "rebuild_ref_mel_tensor",
+                message: format!(
+                    "failed to reconstruct reference mel with shape {:?}: {err}",
+                    mel.shape
+                ),
+            })?;
+            let mel_tensor = Tensor::<f32>::from_array(mel_array).map_err(ort_error)?;
             inputs.push(SessionInputValue::from(mel_tensor));
         }
 
@@ -483,7 +492,7 @@ impl Qwen3TtsRuntime {
                 message: err.to_string(),
             })?;
 
-        let (_, mel_out) =
+        let (shape, mel_out) =
             outputs[0]
                 .try_extract_tensor::<f32>()
                 .map_err(|err| ModelError::BackendExecution {
@@ -492,22 +501,28 @@ impl Qwen3TtsRuntime {
                     message: err.to_string(),
                 })?;
 
-        Ok(mel_out.to_vec())
+        Ok(TensorWithShape {
+            data: mel_out.to_vec(),
+            shape: shape.to_vec(),
+        })
     }
 
-    fn run_vocoder(&self, mel: &[f32]) -> Result<Vec<f32>, ModelError> {
-        let mel_channels = self.config.mel_channels as usize;
-        let mel_frames = mel.len() / mel_channels.max(1);
-        let mel_input =
-            Array3::<f32>::from_shape_vec((1, mel_channels, mel_frames), mel.to_vec()).map_err(
-                |err| ModelError::BackendExecution {
-                    backend: "qwen3-tts",
-                    operation: "build_vocoder_input",
-                    message: err.to_string(),
-                },
-            )?;
+    fn run_vocoder(&self, mel: &TensorWithShape) -> Result<TensorWithShape, ModelError> {
+        // Reconstruct decoder output tensor with its original shape.
+        let mel_array = ndarray::ArrayD::<f32>::from_shape_vec(
+            ndarray::IxDyn(&mel.shape_as_usize()),
+            mel.data.clone(),
+        )
+        .map_err(|err| ModelError::BackendExecution {
+            backend: "qwen3-tts",
+            operation: "rebuild_decoder_tensor",
+            message: format!(
+                "failed to reconstruct decoder mel output with shape {:?}: {err}",
+                mel.shape
+            ),
+        })?;
 
-        let mel_tensor = Tensor::<f32>::from_array(mel_input).map_err(ort_error)?;
+        let mel_tensor = Tensor::<f32>::from_array(mel_array).map_err(ort_error)?;
         let inputs = vec![SessionInputValue::from(mel_tensor)];
 
         let mut session = self
@@ -522,7 +537,7 @@ impl Qwen3TtsRuntime {
                 message: err.to_string(),
             })?;
 
-        let (_, audio) =
+        let (shape, audio) =
             outputs[0]
                 .try_extract_tensor::<f32>()
                 .map_err(|err| ModelError::BackendExecution {
@@ -531,7 +546,10 @@ impl Qwen3TtsRuntime {
                     message: err.to_string(),
                 })?;
 
-        Ok(audio.to_vec())
+        Ok(TensorWithShape {
+            data: audio.to_vec(),
+            shape: shape.to_vec(),
+        })
     }
 }
 
@@ -612,55 +630,8 @@ fn load_runtime(artifacts: &Qwen3TtsArtifactPaths) -> Result<Qwen3TtsRuntime, Mo
         decoder: Mutex::new(build_session("qwen3-tts", &artifacts.decoder)?),
         vocoder: Mutex::new(build_session("qwen3-tts", &artifacts.vocoder)?),
         config: Qwen3TtsConfig::from_path(&artifacts.config)?,
+        vocab: Vocabulary::from_path(&artifacts.vocab)?,
     })
-}
-
-fn decode_pcm_to_f32(pcm: &[u8], encoding: PcmEncoding) -> Result<Vec<f32>, ModelError> {
-    match encoding {
-        PcmEncoding::S16Le => {
-            if !pcm.len().is_multiple_of(2) {
-                return Err(ModelError::InvalidConfiguration(
-                    "S16Le reference audio length must be even".into(),
-                ));
-            }
-            Ok(pcm
-                .chunks_exact(2)
-                .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
-                .collect())
-        }
-        PcmEncoding::F32Le => {
-            if !pcm.len().is_multiple_of(4) {
-                return Err(ModelError::InvalidConfiguration(
-                    "F32Le reference audio length must be a multiple of 4".into(),
-                ));
-            }
-            Ok(pcm
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                .collect())
-        }
-    }
-}
-
-fn encode_pcm(samples: &[f32], encoding: PcmEncoding) -> Vec<u8> {
-    match encoding {
-        PcmEncoding::S16Le => {
-            let mut out = Vec::with_capacity(samples.len() * 2);
-            for sample in samples {
-                let clamped = sample.clamp(-1.0, 1.0);
-                let as_i16 = (clamped * i16::MAX as f32) as i16;
-                out.extend_from_slice(&as_i16.to_le_bytes());
-            }
-            out
-        }
-        PcmEncoding::F32Le => {
-            let mut out = Vec::with_capacity(samples.len() * 4);
-            for sample in samples {
-                out.extend_from_slice(&sample.to_le_bytes());
-            }
-            out
-        }
-    }
 }
 
 fn ort_error(err: ort::Error) -> ModelError {
@@ -736,6 +707,8 @@ mod tests {
 
     #[test]
     fn encode_pcm_s16le_round_trips() {
+        use crate::common::{decode_pcm_to_f32, encode_pcm};
+
         let samples = vec![0.5_f32, -0.5, 0.0, 1.0, -1.0];
         let encoded = encode_pcm(&samples, PcmEncoding::S16Le);
         assert_eq!(encoded.len(), samples.len() * 2);
@@ -745,32 +718,5 @@ mod tests {
         for (orig, dec) in samples.iter().zip(decoded.iter()) {
             assert!((orig - dec).abs() < 0.001, "orig={orig}, decoded={dec}");
         }
-    }
-
-    #[test]
-    fn encode_pcm_f32le_round_trips() {
-        let samples = vec![0.5_f32, -0.5, 0.0];
-        let encoded = encode_pcm(&samples, PcmEncoding::F32Le);
-        assert_eq!(encoded.len(), samples.len() * 4);
-
-        let decoded = decode_pcm_to_f32(&encoded, PcmEncoding::F32Le)
-            .expect("round-trip should succeed");
-        assert_eq!(samples, decoded);
-    }
-
-    #[test]
-    fn decode_pcm_rejects_misaligned_s16le() {
-        let err = decode_pcm_to_f32(&[0x00, 0x01, 0x02], PcmEncoding::S16Le)
-            .expect_err("odd-length S16Le should fail");
-
-        assert!(matches!(err, ModelError::InvalidConfiguration(msg) if msg.contains("even")));
-    }
-
-    #[test]
-    fn decode_pcm_rejects_misaligned_f32le() {
-        let err = decode_pcm_to_f32(&[0x00, 0x01], PcmEncoding::F32Le)
-            .expect_err("non-4-aligned F32Le should fail");
-
-        assert!(matches!(err, ModelError::InvalidConfiguration(msg) if msg.contains("multiple of 4")));
     }
 }
