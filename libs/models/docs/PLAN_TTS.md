@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-15 | @cld-review-models | Implemented Phase 2 Qwen3-TTS slice: `motlie-model-qwen3-tts` backend with multi-model ONNX pipeline, vocabulary-based tokenizer, proper log-mel reference-audio conditioning, shape-preserving tensor pipeline, curated bundle `qwen3_tts_12hz_0_6b`, and `tts_v0.2` example with voice cloning. Runtime boundary is in-process ONNX via `motlie-model-ort` with offline safetensors-to-ONNX export prerequisite. |
 | 2026-04-14 | @codex-tts | Addressed PR #179 review R1 by documenting the Phase 1 batch-then-chunk stream behavior, the Piper-only `SpeechParams.seed` rejection, and the current `ort` RC session-mutability constraint while keeping the validated artifact-policy fix in scope. |
 | 2026-04-14 | @codex-tts | Implemented the Phase 1 Piper slice end to end: additive speech contracts in `libs/model`, shared ONNX helper extraction for Piper and sherpa, the `motlie-model-piper` backend, curated bundle/selector wiring in `libs/models`, the `models_tts_v0_1` example, and env-gated runtime verification. |
 | 2026-04-14 | @codex-tts | Addressed R1 review by aligning the plan with the explicit Qwen3-TTS phase-2 slice, adding the shared ONNX Runtime refactor target with ASR sherpa-onnx, removing the duplicate `speaker_id` input path, turning stream edge cases into concrete validation work instead of open contract design, and renaming the planned TTS example path to avoid collision with the live ASR `v0.5` example. |
@@ -251,33 +252,36 @@ Only start this after the Piper slice is stable and the speech contract has held
 
 ### 6.1 - Backend/runtime boundary
 
-- [ ] Add `libs/model/backends/qwen3_tts/` as a distinct backend family rather than extending the Piper backend.
+- [x] Add `libs/model/backends/qwen3_tts/` as a distinct backend family rather than extending the Piper backend.
   DESIGN reference: `Phase-2 Qwen3-TTS Vertical Slice`
-- [ ] Keep the public `SpeechRequest` / `SpeechStream` contract unchanged; all Qwen3-specific cloning and voice-design behavior must map onto the existing request surface.
+  @cld-review-models 2026-04-15 — implemented as `motlie-model-qwen3-tts` with multi-model ONNX pipeline.
+- [x] Keep the public `SpeechRequest` / `SpeechStream` contract unchanged; all Qwen3-specific cloning and voice-design behavior must map onto the existing request surface.
   DESIGN reference: `Phase-2 Qwen3-TTS Vertical Slice`, `Streaming PCM API Contract`
-- [ ] Choose and document the runtime boundary explicitly:
-  direct Python/Transformers embedding,
-  vLLM-backed service boundary,
-  or another accelerator-oriented service wrapper.
+  @cld-review-models 2026-04-15 — extended `VoiceConditioning::ReferenceAudio` with `reference_text: Option<String>` for prompted cloning.
+- [x] Choose and document the runtime boundary explicitly: in-process ONNX Runtime via `motlie-model-ort` with offline safetensors-to-ONNX export prerequisite.
   DESIGN reference: `Phase-2 Qwen3-TTS Vertical Slice`
+  @cld-review-models 2026-04-15 — documented in DESIGN_TTS.md Phase 2 section and export guide.
 
 ### 6.2 - Curated bundle shape and feature flags
 
-- [ ] Add `src/tts/qwen3_tts_12hz_0_6b.rs` with curated selector, descriptor, bundle, and registration.
+- [x] Add `src/tts/qwen3_tts_12hz_0_6b.rs` with curated selector, descriptor, bundle, and registration.
   DESIGN reference: `Phase-2 Qwen3-TTS Vertical Slice`
-- [ ] Add `model-qwen3-tts-0_6b = ["dep:motlie-model-qwen3-tts"]`.
+  @cld-review-models 2026-04-15 — implemented with identity/checkpoint/descriptor/bundle/register pattern.
+- [x] Add `model-qwen3-tts-0_6b = ["dep:motlie-model-qwen3-tts"]`.
   DESIGN reference: `Feature Flag Design`, `Phase-2 Qwen3-TTS Vertical Slice`
-- [ ] Add `qwen3-tts-cuda = ["dep:motlie-model-qwen3-tts", "motlie-model-qwen3-tts/cuda"]`.
+- [x] Add `qwen3-tts-cuda = ["dep:motlie-model-qwen3-tts", "motlie-model-qwen3-tts/cuda"]`.
   DESIGN reference: `Feature Flag Design`, `Phase-2 Qwen3-TTS Vertical Slice`
-- [ ] Keep the Qwen3-TTS bundle out of `default` features until artifact size and runtime deployment are proven manageable.
+- [x] Keep the Qwen3-TTS bundle out of `default` features until artifact size and runtime deployment are proven manageable.
   DESIGN reference: `Phase-2 Qwen3-TTS Vertical Slice`
 
 ### 6.3 - End-to-end validation
 
-- [ ] Add one `.wav` parity example that uses the same sink contract as the Piper example.
+- [x] Add one `.wav` parity example that uses the same sink contract as the Piper example.
   DESIGN reference: `Phase-2 Qwen3-TTS Vertical Slice`, `Output Adapter Boundary`
-- [ ] Add one reference-audio cloning example using `VoiceConditioning::ReferenceAudio`.
+  @cld-review-models 2026-04-15 — `tts_v0.2` example with `--text` and `--wav` flags.
+- [x] Add one reference-audio cloning example using `VoiceConditioning::ReferenceAudio`.
   DESIGN reference: `Phase-2 Qwen3-TTS Vertical Slice`, `Streaming PCM API Contract`
+  @cld-review-models 2026-04-15 — `--reference-audio` and `--reference-text` flags in `tts_v0.2`.
 - [ ] Add one CUDA-oriented smoke test on GB10-class hardware when such hardware is available in the validation environment.
   DESIGN reference: `Phase-2 Qwen3-TTS Vertical Slice`
 

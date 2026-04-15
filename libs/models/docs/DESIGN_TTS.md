@@ -6,6 +6,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-15 | @cld-review-models | Implemented Phase 2 Qwen3-TTS vertical slice. Runtime boundary: in-process ONNX via `motlie-model-ort` with pre-exported model components (encoder, decoder, vocoder). Upstream safetensors must be exported to ONNX offline before the curated bundle can start. Added vocabulary-based tokenizer, proper Hann-windowed DFT mel spectrogram for reference-audio conditioning, and shape-preserving tensor pipeline between ONNX stages. |
 | 2026-04-14 | @codex-tts | Addressed PR #179 review R1 by fixing the local-only startup path to reuse the same Piper artifact validation as curated checkpoints, documenting the batch-then-chunk `open_stream()` behavior and Piper's runtime rejection of `SpeechParams.seed`, and recording the current `ort` RC dependency/runtime constraint explicitly. |
 | 2026-04-14 | @codex-tts | Implemented the Phase 1 Piper slice with additive `SpeechModel` / `SpeechStream` contracts, a shared `motlie-model-ort` ONNX helper reused by the sherpa backend, a `motlie-model-piper` backend using eSpeak-ng phonemization plus Piper sidecar parsing, the curated `piper_en_us_ljspeech_medium` bundle, and the `models_tts_v0_1` example/validation path. |
 | 2026-04-14 | @codex-tts | Addressed R1 review by defining the Qwen3-TTS phase-2 slice, adding the shared ONNX Runtime refactor target with the ASR sherpa-onnx path, removing the duplicate speaker-selection knob from `SpeechParams`, tightening `SpeechStream` state semantics, and switching the planned example naming to a capability-specific path that does not collide with ASR `v0.5`. |
@@ -243,7 +244,7 @@ The voice choice is intentionally not overfit into the contract. If curation lat
 - multi-speaker bundle families
 - SSML and timing marks
 - vendor-specific telephony codecs in the core model crates
-- PyTorch-based TTS families such as Qwen3-TTS, XTTS v2, or F5-TTS
+- TTS families requiring non-ONNX runtimes, such as XTTS v2 or F5-TTS (note: Qwen3-TTS is now implemented via ONNX export in Phase 2)
 
 ## Architecture
 
@@ -731,7 +732,7 @@ If Motlie adds a second TTS family after Piper, the explicit next vertical slice
 Recommended phase-2 shape:
 
 - contract surface: reuse the same `SpeechRequest` / `SpeechStream` API
-- runtime/backend boundary: a new `motlie-model-qwen3-tts` backend crate over the official Python/Transformers/vLLM runtime boundary or a thinner accelerator-oriented service boundary if a direct in-process Rust path remains unavailable
+- runtime/backend boundary: a new `motlie-model-qwen3-tts` backend crate using in-process ONNX Runtime via the shared `motlie-model-ort` helper. The upstream model (`Qwen/Qwen3-TTS-12Hz-0.6B-Base`) ships as safetensors; an offline ONNX export step produces the required `encoder.onnx`, `decoder.onnx`, `vocoder.onnx`, `config.json`, and `vocab.json` components. The curated bundle descriptor references these ONNX artifacts, not the original safetensors.
 - curated bundle: start with `Qwen3-TTS-12Hz-0.6B-Base`
 - selector shape: `tts:qwen/qwen3_tts_12hz_0_6b`
 - feature flags:
@@ -748,6 +749,39 @@ The purpose of that phase-2 slice is different from Piper:
 
 - Piper proves the small CPU-first local path
 - Qwen3-TTS proves the higher-quality cloning-oriented path without changing the public TTS contract
+
+### Qwen3-TTS ONNX Export Procedure
+
+The curated bundle expects pre-exported ONNX model components. The upstream
+`Qwen/Qwen3-TTS-12Hz-0.6B-Base` model ships as safetensors; the following
+offline export step produces the required artifacts:
+
+1. Install the official `qwen-tts` Python package and `torch`, `onnx`, `onnxruntime`.
+2. Load the model from the Hugging Face repo.
+3. Export the three components separately:
+   - `encoder.onnx` — the text/phoneme encoder (input: `[batch, seq_len]` int64 token IDs; output: `[batch, seq_len, hidden_dim]` float32)
+   - `decoder.onnx` — the flow-matching mel decoder (input: encoder hidden states + optional reference mel; output: `[batch, mel_channels, mel_frames]` float32)
+   - `vocoder.onnx` — the BigVGAN-derived vocoder (input: `[batch, mel_channels, mel_frames]` float32; output: `[batch, 1, audio_samples]` float32)
+4. Export `config.json` with `sample_rate`, `hop_length`, `mel_channels`, and `fft_size`.
+5. Flatten the BPE tokenizer into `vocab.json`:
+   The upstream repo ships `vocab.json`, `merges.txt`, and `tokenizer_config.json`
+   as separate BPE tokenizer components. The export step must merge these into a
+   single flat `{ token: id }` JSON mapping that contains all subword tokens
+   (including multi-character entries from BPE merges) plus the special tokens
+   `<bos>`, `<eos>`, `<unk>`. The `motlie-model-qwen3-tts` backend uses greedy
+   longest-match tokenization against this flattened vocabulary — it does NOT
+   apply BPE merge rules at runtime. The flattened vocab must therefore contain
+   every token the encoder expects, at the correct ID.
+6. Place all five files in a directory that the artifact resolver can discover.
+
+**Important:** The curated `vocab.json` is a custom export artifact, not the
+upstream `vocab.json` from the HuggingFace model tree. The upstream file contains
+only the base vocabulary without merged subword entries. The export step must
+produce a flattened vocabulary that includes all BPE-merged tokens.
+
+Note: the tensor shapes listed above are the expected ONNX input/output signatures.
+The `motlie-model-qwen3-tts` backend preserves ORT-reported tensor shapes between
+stages rather than assuming fixed dimensions.
 
 ## Migration and Compatibility Strategy
 
