@@ -100,7 +100,8 @@ pub(crate) struct Qwen3TtsConfig {
 }
 
 fn default_sample_rate() -> u32 {
-    22_050
+    // CosyVoice2 / Qwen3-TTS canonical sample rate.
+    24_000
 }
 
 fn default_hop_length() -> u32 {
@@ -179,8 +180,18 @@ impl Vocabulary {
                 path.display()
             ))
         })?;
-        let bos_id = raw.get("<bos>").copied().unwrap_or(1);
-        let eos_id = raw.get("<eos>").copied().unwrap_or(2);
+        let bos_id = raw.get("<bos>").copied().ok_or_else(|| {
+            ModelError::InvalidConfiguration(format!(
+                "qwen3-tts vocabulary `{}` is missing `<bos>` token",
+                path.display()
+            ))
+        })?;
+        let eos_id = raw.get("<eos>").copied().ok_or_else(|| {
+            ModelError::InvalidConfiguration(format!(
+                "qwen3-tts vocabulary `{}` is missing `<eos>` token",
+                path.display()
+            ))
+        })?;
 
         Ok(Self {
             token_to_id: raw,
@@ -192,6 +203,16 @@ impl Vocabulary {
 
     /// Tokenize text by looking up each character in the vocabulary.
     /// Unknown characters map to `<unk>`. Result is wrapped with BOS/EOS.
+    ///
+    /// **Limitation:** This is character-level tokenization against `vocab.json`,
+    /// not the official `Qwen3-TTS-Tokenizer-12Hz` speech tokenizer. The official
+    /// Qwen3-TTS tokenizer is a specialized SentencePiece/BPE model that produces
+    /// subword tokens; this simplified tokenizer feeds individual characters with
+    /// `<unk>` fallback for out-of-vocabulary characters. The ONNX encoder must
+    /// be exported to accept this character-level input format, or `vocab.json`
+    /// must contain the full SentencePiece vocabulary for correct subword mapping.
+    /// Silent quality degradation will occur if the vocabulary doesn't match the
+    /// encoder's expected token distribution.
     pub(crate) fn tokenize(&self, text: &str) -> Vec<i64> {
         let mut ids = Vec::with_capacity(text.len() + 2);
         ids.push(self.bos_id);
@@ -298,7 +319,11 @@ fn build_mel_filterbank(
     let hz_points: Vec<f32> = mel_points.iter().map(|&m| mel_to_hz(m)).collect();
     let bin_points: Vec<usize> = hz_points
         .iter()
-        .map(|&hz| ((hz / f_max) * (num_bins - 1) as f32).round() as usize)
+        .map(|&hz| {
+            ((hz / f_max) * (num_bins - 1) as f32)
+                .round()
+                .clamp(0.0, (num_bins - 1) as f32) as usize
+        })
         .collect();
 
     (0..mel_channels)
@@ -308,14 +333,21 @@ fn build_mel_filterbank(
             let center = bin_points[i + 1];
             let right = bin_points[i + 2];
 
+            // Rising slope: left → center
             if center > left {
                 for (j, val) in filter[left..center].iter_mut().enumerate() {
-                    *val = (j) as f32 / (center - left) as f32;
+                    *val = j as f32 / (center - left) as f32;
                 }
             }
+            // Center peak: always 1.0 (prevents zero-energy on degenerate filters
+            // where center == left or center == right).
+            if center < num_bins {
+                filter[center] = 1.0;
+            }
+            // Falling slope: center → right
             if right > center {
-                for (j, val) in filter[center..right].iter_mut().enumerate() {
-                    *val = (right - center - j) as f32 / (right - center) as f32;
+                for (j, val) in filter[(center + 1)..right].iter_mut().enumerate() {
+                    *val = (right - center - 1 - j) as f32 / (right - center) as f32;
                 }
             }
             filter

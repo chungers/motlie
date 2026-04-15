@@ -244,7 +244,7 @@ The voice choice is intentionally not overfit into the contract. If curation lat
 - multi-speaker bundle families
 - SSML and timing marks
 - vendor-specific telephony codecs in the core model crates
-- PyTorch-based TTS families such as Qwen3-TTS, XTTS v2, or F5-TTS
+- TTS families requiring non-ONNX runtimes, such as XTTS v2 or F5-TTS (note: Qwen3-TTS is now implemented via ONNX export in Phase 2)
 
 ## Architecture
 
@@ -749,6 +749,26 @@ The purpose of that phase-2 slice is different from Piper:
 
 - Piper proves the small CPU-first local path
 - Qwen3-TTS proves the higher-quality cloning-oriented path without changing the public TTS contract
+
+### Qwen3-TTS ONNX Export Procedure
+
+The curated bundle expects pre-exported ONNX model components. The upstream
+`Qwen/Qwen3-TTS-12Hz-0.6B-Base` model ships as safetensors; the following
+offline export step produces the required artifacts:
+
+1. Install the official `qwen-tts` Python package and `torch`, `onnx`, `onnxruntime`.
+2. Load the model from the Hugging Face repo.
+3. Export the three components separately:
+   - `encoder.onnx` — the text/phoneme encoder (input: `[batch, seq_len]` int64 token IDs; output: `[batch, seq_len, hidden_dim]` float32)
+   - `decoder.onnx` — the flow-matching mel decoder (input: encoder hidden states + optional reference mel; output: `[batch, mel_channels, mel_frames]` float32)
+   - `vocoder.onnx` — the BigVGAN-derived vocoder (input: `[batch, mel_channels, mel_frames]` float32; output: `[batch, 1, audio_samples]` float32)
+4. Export `config.json` with `sample_rate`, `hop_length`, `mel_channels`, and `fft_size`.
+5. Export `vocab.json` as a `{ token: id }` mapping including `<bos>`, `<eos>`, `<unk>`.
+6. Place all five files in a directory that the artifact resolver can discover.
+
+Note: the tensor shapes listed above are the expected ONNX input/output signatures.
+The `motlie-model-qwen3-tts` backend preserves ORT-reported tensor shapes between
+stages rather than assuming fixed dimensions.
 
 ## Migration and Compatibility Strategy
 

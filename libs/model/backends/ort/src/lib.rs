@@ -6,6 +6,7 @@ use motlie_model::ModelError;
 use ort::session::Session;
 
 pub fn build_session(backend: &'static str, model_path: &Path) -> Result<Session, ModelError> {
+    #[allow(unused_mut)]
     let mut builder = Session::builder().map_err(|err| ModelError::BackendInitialization {
         backend,
         message: format!("failed to create ONNX Runtime session builder: {err}"),
