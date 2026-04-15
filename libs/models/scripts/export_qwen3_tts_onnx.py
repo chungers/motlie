@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -236,8 +237,17 @@ def export_flattened_vocab(loaded: Qwen3TTSModel, output_dir: Path) -> Path:
     vocab["<eos>"] = int(eos_id)
 
     output_path = output_dir / "vocab.json"
-    with output_path.open("w", encoding="utf-8") as handle:
+    temp_path = output_path.with_name(f"{output_path.name}.tmp")
+
+    # HF snapshots often materialize files as symlinks into the shared blob
+    # store. Break that link first so the curated export becomes a snapshot-
+    # local regular file rather than mutating shared content-addressed blobs.
+    if output_path.is_symlink():
+        output_path.unlink()
+
+    with temp_path.open("w", encoding="utf-8") as handle:
         json.dump(vocab, handle, ensure_ascii=False, sort_keys=True)
+    os.replace(temp_path, output_path)
 
     return output_path
 
