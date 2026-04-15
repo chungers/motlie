@@ -21,8 +21,8 @@ use ort::session::{Session, SessionInputValue};
 use ort::value::{DynValue, Tensor};
 
 use crate::common::{
-    configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
-    resolve_onnx_artifacts, RuntimeMetricState, SherpaArtifactPaths, SherpaArtifactSpec,
+    RuntimeMetricState, SherpaArtifactPaths, SherpaArtifactSpec, configure_artifact_policy,
+    lock_metrics, observe_latency, observe_memory, resolve_onnx_artifacts,
 };
 
 const SHERPA_ONNX_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Onnx];
@@ -329,14 +329,26 @@ struct ZipformerConfig {
 }
 
 #[derive(Clone, Debug)]
-struct StateLayout {
-    stacks: Vec<EncoderStackSpec>,
+enum StateLayout {
+    Zipformer { stacks: Vec<EncoderStackSpec> },
+    Zipformer2 { stacks: Vec<Zipformer2StackSpec> },
 }
 
 #[derive(Clone, Debug)]
 struct EncoderStackSpec {
     encoder_dim: usize,
     attention_dim: usize,
+    num_layers: usize,
+    cnn_module_kernel: usize,
+    left_context_len: usize,
+}
+
+#[derive(Clone, Debug)]
+struct Zipformer2StackSpec {
+    encoder_dim: usize,
+    query_head_dim: usize,
+    value_head_dim: usize,
+    num_heads: usize,
     num_layers: usize,
     cnn_module_kernel: usize,
     left_context_len: usize,
@@ -451,26 +463,19 @@ impl ZipformerConfig {
                 message: format!("failed to inspect decoder metadata: {err}"),
             })?;
 
-        let encoder_dims = parse_i32_list(metadata_value(&encoder_meta, "encoder_dims")?)?;
-        let attention_dims = parse_i32_list(metadata_value(&encoder_meta, "attention_dims")?)?;
-        let num_encoder_layers =
-            parse_i32_list(metadata_value(&encoder_meta, "num_encoder_layers")?)?;
-        let cnn_module_kernels =
-            parse_i32_list(metadata_value(&encoder_meta, "cnn_module_kernels")?)?;
-        let left_context_len = parse_i32_list(metadata_value(&encoder_meta, "left_context_len")?)?;
-        let state_layout = StateLayout::try_from_parts(
-            encoder_dims,
-            attention_dims,
-            num_encoder_layers,
-            cnn_module_kernels,
-            left_context_len,
-        )?;
+        let state_layout = StateLayout::from_metadata(&encoder_meta)?;
 
         Ok(Self {
             feature_dim: 80,
-            context_size: parse_i32_scalar(metadata_value(&decoder_meta, "context_size")?)?,
-            encoder_input_frames: parse_i32_scalar(metadata_value(&encoder_meta, "T")?)?,
-            decode_chunk_len: parse_i32_scalar(metadata_value(&encoder_meta, "decode_chunk_len")?)?,
+            context_size: parse_i32_scalar(metadata_value_required(
+                &decoder_meta,
+                "context_size",
+            )?)?,
+            encoder_input_frames: parse_i32_scalar(metadata_value_required(&encoder_meta, "T")?)?,
+            decode_chunk_len: parse_i32_scalar(metadata_value_required(
+                &encoder_meta,
+                "decode_chunk_len",
+            )?)?,
             frame_shift_ms: TARGET_FRAME_SHIFT_MS,
             unk_id: None,
             state_layout,
@@ -479,7 +484,68 @@ impl ZipformerConfig {
 }
 
 impl StateLayout {
-    fn try_from_parts(
+    fn from_metadata(metadata: &ort::session::ModelMetadata<'_>) -> Result<Self, ModelError> {
+        let model_type = metadata_value_optional(metadata, "model_type")?;
+        let encoder_dims = parse_i32_list(metadata_value_required(metadata, "encoder_dims")?)?;
+        let num_encoder_layers =
+            parse_i32_list(metadata_value_required(metadata, "num_encoder_layers")?)?;
+        let cnn_module_kernels =
+            parse_i32_list(metadata_value_required(metadata, "cnn_module_kernels")?)?;
+        let left_context_len =
+            parse_i32_list(metadata_value_required(metadata, "left_context_len")?)?;
+        let attention_dims = metadata_value_optional(metadata, "attention_dims")?
+            .map(parse_i32_list)
+            .transpose()?;
+        let query_head_dims = metadata_value_optional(metadata, "query_head_dims")?
+            .map(parse_i32_list)
+            .transpose()?;
+        let value_head_dims = metadata_value_optional(metadata, "value_head_dims")?
+            .map(parse_i32_list)
+            .transpose()?;
+        let num_heads = metadata_value_optional(metadata, "num_heads")?
+            .map(parse_i32_list)
+            .transpose()?;
+
+        let use_zipformer2 = matches!(model_type.as_deref(), Some("zipformer2" | "zipformer2r"))
+            || (attention_dims.is_none()
+                && query_head_dims.is_some()
+                && value_head_dims.is_some()
+                && num_heads.is_some());
+
+        if use_zipformer2 {
+            return Self::try_from_zipformer2_parts(
+                encoder_dims,
+                query_head_dims.ok_or_else(|| {
+                    invalid_metadata(
+                        "zipformer2 encoder metadata missing required key `query_head_dims`",
+                    )
+                })?,
+                value_head_dims.ok_or_else(|| {
+                    invalid_metadata(
+                        "zipformer2 encoder metadata missing required key `value_head_dims`",
+                    )
+                })?,
+                num_heads.ok_or_else(|| {
+                    invalid_metadata("zipformer2 encoder metadata missing required key `num_heads`")
+                })?,
+                num_encoder_layers,
+                cnn_module_kernels,
+                left_context_len,
+            );
+        }
+
+        Self::try_from_zipformer_parts(
+            encoder_dims,
+            attention_dims.ok_or_else(|| {
+                invalid_metadata("zipformer encoder metadata missing required key `attention_dims`")
+            })?,
+            num_encoder_layers,
+            cnn_module_kernels,
+            left_context_len,
+        )
+    }
+
+    fn try_from_zipformer_parts(
         encoder_dims: Vec<usize>,
         attention_dims: Vec<usize>,
         num_encoder_layers: Vec<usize>,
@@ -534,20 +600,109 @@ impl StateLayout {
             });
         }
 
-        Ok(Self { stacks })
+        Ok(Self::Zipformer { stacks })
+    }
+
+    fn try_from_zipformer2_parts(
+        encoder_dims: Vec<usize>,
+        query_head_dims: Vec<usize>,
+        value_head_dims: Vec<usize>,
+        num_heads: Vec<usize>,
+        num_encoder_layers: Vec<usize>,
+        cnn_module_kernels: Vec<usize>,
+        left_context_len: Vec<usize>,
+    ) -> Result<Self, ModelError> {
+        let stack_count = encoder_dims.len();
+        if stack_count == 0 {
+            return Err(invalid_metadata(
+                "zipformer2 encoder metadata declared zero encoder stacks",
+            ));
+        }
+
+        for (name, values) in [
+            ("query_head_dims", &query_head_dims),
+            ("value_head_dims", &value_head_dims),
+            ("num_heads", &num_heads),
+            ("num_encoder_layers", &num_encoder_layers),
+            ("cnn_module_kernels", &cnn_module_kernels),
+            ("left_context_len", &left_context_len),
+        ] {
+            if values.len() != stack_count {
+                return Err(invalid_metadata(format!(
+                    "zipformer2 encoder metadata length mismatch: encoder_dims has {stack_count} entries but {name} has {}",
+                    values.len()
+                )));
+            }
+        }
+
+        let mut stacks = Vec::with_capacity(stack_count);
+        for (
+            stack_index,
+            (
+                (
+                    ((((encoder_dim, query_head_dim), value_head_dim), num_heads), num_layers),
+                    cnn_module_kernel,
+                ),
+                left_context_len,
+            ),
+        ) in encoder_dims
+            .into_iter()
+            .zip(query_head_dims)
+            .zip(value_head_dims)
+            .zip(num_heads)
+            .zip(num_encoder_layers)
+            .zip(cnn_module_kernels)
+            .zip(left_context_len)
+            .enumerate()
+        {
+            if query_head_dim == 0 || value_head_dim == 0 || num_heads == 0 {
+                return Err(invalid_metadata(format!(
+                    "zipformer2 encoder metadata stack {stack_index} has zero-valued attention geometry"
+                )));
+            }
+            if cnn_module_kernel < 2 {
+                return Err(invalid_metadata(format!(
+                    "zipformer2 encoder metadata stack {stack_index} has cnn_module_kernel={cnn_module_kernel}, expected >= 2"
+                )));
+            }
+
+            stacks.push(Zipformer2StackSpec {
+                encoder_dim,
+                query_head_dim,
+                value_head_dim,
+                num_heads,
+                num_layers,
+                cnn_module_kernel,
+                left_context_len,
+            });
+        }
+
+        Ok(Self::Zipformer2 { stacks })
     }
 }
 
-fn metadata_value(
+fn metadata_value_optional(
+    metadata: &ort::session::ModelMetadata<'_>,
+    key: &str,
+) -> Result<Option<String>, ModelError> {
+    Ok(metadata.custom(key).and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_owned())
+        }
+    }))
+}
+
+fn metadata_value_required(
     metadata: &ort::session::ModelMetadata<'_>,
     key: &str,
 ) -> Result<String, ModelError> {
-    metadata
-        .custom(key)
-        .ok_or_else(|| ModelError::BackendInitialization {
-            backend: "sherpa-onnx",
-            message: format!("missing required ONNX metadata key `{key}`"),
-        })
+    metadata_value_optional(metadata, key)?.ok_or_else(|| ModelError::BackendInitialization {
+        backend: "sherpa-onnx",
+        message: format!("missing required ONNX metadata key `{key}`"),
+    })
 }
 
 fn parse_i32_scalar(value: String) -> Result<usize, ModelError> {
@@ -989,28 +1144,44 @@ impl DecoderState {
             num_trailing_blanks: 0,
             tokens,
             timestamps: Vec::new(),
-            encoder_state: initial_encoder_state(&config.state_layout)?,
+            encoder_state: initial_encoder_state(&config.state_layout, config.feature_dim)?,
             decoder_out: None,
         })
     }
 }
 
-fn initial_encoder_state(layout: &StateLayout) -> Result<Vec<DynValue>, ModelError> {
-    let mut state = Vec::new();
+fn initial_encoder_state(
+    layout: &StateLayout,
+    feature_dim: usize,
+) -> Result<Vec<DynValue>, ModelError> {
+    match layout {
+        StateLayout::Zipformer { stacks } => initial_zipformer_state(stacks),
+        StateLayout::Zipformer2 { stacks } => initial_zipformer2_state(stacks, feature_dim),
+    }
+}
 
-    for stack in &layout.stacks {
+fn initial_zipformer_state(stacks: &[EncoderStackSpec]) -> Result<Vec<DynValue>, ModelError> {
+    let mut cached_len = Vec::with_capacity(stacks.len());
+    let mut cached_avg = Vec::with_capacity(stacks.len());
+    let mut cached_key = Vec::with_capacity(stacks.len());
+    let mut cached_val = Vec::with_capacity(stacks.len());
+    let mut cached_val2 = Vec::with_capacity(stacks.len());
+    let mut cached_conv1 = Vec::with_capacity(stacks.len());
+    let mut cached_conv2 = Vec::with_capacity(stacks.len());
+
+    for stack in stacks {
         let layers = stack.num_layers;
         let encoder_dim = stack.encoder_dim;
         let attention_dim = stack.attention_dim;
         let left_context = stack.left_context_len;
         let cnn_kernel = stack.cnn_module_kernel;
 
-        state.push(
+        cached_len.push(
             Tensor::<i64>::from_array((vec![layers as i64, 1], vec![0_i64; layers]))
                 .map_err(ort_tensor_error)?
                 .into_dyn(),
         );
-        state.push(
+        cached_avg.push(
             Tensor::<f32>::from_array((
                 vec![layers as i64, 1, encoder_dim as i64],
                 vec![0.0_f32; layers * encoder_dim],
@@ -1018,7 +1189,7 @@ fn initial_encoder_state(layout: &StateLayout) -> Result<Vec<DynValue>, ModelErr
             .map_err(ort_tensor_error)?
             .into_dyn(),
         );
-        state.push(
+        cached_key.push(
             Tensor::<f32>::from_array((
                 vec![layers as i64, left_context as i64, 1, attention_dim as i64],
                 vec![0.0_f32; layers * left_context * attention_dim],
@@ -1027,7 +1198,7 @@ fn initial_encoder_state(layout: &StateLayout) -> Result<Vec<DynValue>, ModelErr
             .into_dyn(),
         );
         let half_attention = attention_dim / 2;
-        state.push(
+        cached_val.push(
             Tensor::<f32>::from_array((
                 vec![layers as i64, left_context as i64, 1, half_attention as i64],
                 vec![0.0_f32; layers * left_context * half_attention],
@@ -1035,7 +1206,7 @@ fn initial_encoder_state(layout: &StateLayout) -> Result<Vec<DynValue>, ModelErr
             .map_err(ort_tensor_error)?
             .into_dyn(),
         );
-        state.push(
+        cached_val2.push(
             Tensor::<f32>::from_array((
                 vec![layers as i64, left_context as i64, 1, half_attention as i64],
                 vec![0.0_f32; layers * left_context * half_attention],
@@ -1043,7 +1214,7 @@ fn initial_encoder_state(layout: &StateLayout) -> Result<Vec<DynValue>, ModelErr
             .map_err(ort_tensor_error)?
             .into_dyn(),
         );
-        state.push(
+        cached_conv1.push(
             Tensor::<f32>::from_array((
                 vec![
                     layers as i64,
@@ -1056,7 +1227,7 @@ fn initial_encoder_state(layout: &StateLayout) -> Result<Vec<DynValue>, ModelErr
             .map_err(ort_tensor_error)?
             .into_dyn(),
         );
-        state.push(
+        cached_conv2.push(
             Tensor::<f32>::from_array((
                 vec![
                     layers as i64,
@@ -1070,6 +1241,103 @@ fn initial_encoder_state(layout: &StateLayout) -> Result<Vec<DynValue>, ModelErr
             .into_dyn(),
         );
     }
+
+    let mut state = Vec::with_capacity(stacks.len() * 7);
+    state.extend(cached_len);
+    state.extend(cached_avg);
+    state.extend(cached_key);
+    state.extend(cached_val);
+    state.extend(cached_val2);
+    state.extend(cached_conv1);
+    state.extend(cached_conv2);
+
+    Ok(state)
+}
+
+fn initial_zipformer2_state(
+    stacks: &[Zipformer2StackSpec],
+    feature_dim: usize,
+) -> Result<Vec<DynValue>, ModelError> {
+    let layer_count = stacks.iter().map(|stack| stack.num_layers).sum::<usize>();
+    let mut state = Vec::with_capacity(layer_count * 6 + 2);
+
+    for stack in stacks {
+        let key_dim = stack.query_head_dim * stack.num_heads;
+        let value_dim = stack.value_head_dim * stack.num_heads;
+        let nonlin_attn_head_dim = 3 * stack.encoder_dim / 4;
+        let conv_cache_len = stack.cnn_module_kernel / 2;
+
+        for _ in 0..stack.num_layers {
+            state.push(
+                Tensor::<f32>::from_array((
+                    vec![stack.left_context_len as i64, 1, key_dim as i64],
+                    vec![0.0_f32; stack.left_context_len * key_dim],
+                ))
+                .map_err(ort_tensor_error)?
+                .into_dyn(),
+            );
+            state.push(
+                Tensor::<f32>::from_array((
+                    vec![
+                        1,
+                        1,
+                        stack.left_context_len as i64,
+                        nonlin_attn_head_dim as i64,
+                    ],
+                    vec![0.0_f32; stack.left_context_len * nonlin_attn_head_dim],
+                ))
+                .map_err(ort_tensor_error)?
+                .into_dyn(),
+            );
+            state.push(
+                Tensor::<f32>::from_array((
+                    vec![stack.left_context_len as i64, 1, value_dim as i64],
+                    vec![0.0_f32; stack.left_context_len * value_dim],
+                ))
+                .map_err(ort_tensor_error)?
+                .into_dyn(),
+            );
+            state.push(
+                Tensor::<f32>::from_array((
+                    vec![stack.left_context_len as i64, 1, value_dim as i64],
+                    vec![0.0_f32; stack.left_context_len * value_dim],
+                ))
+                .map_err(ort_tensor_error)?
+                .into_dyn(),
+            );
+            state.push(
+                Tensor::<f32>::from_array((
+                    vec![1, stack.encoder_dim as i64, conv_cache_len as i64],
+                    vec![0.0_f32; stack.encoder_dim * conv_cache_len],
+                ))
+                .map_err(ort_tensor_error)?
+                .into_dyn(),
+            );
+            state.push(
+                Tensor::<f32>::from_array((
+                    vec![1, stack.encoder_dim as i64, conv_cache_len as i64],
+                    vec![0.0_f32; stack.encoder_dim * conv_cache_len],
+                ))
+                .map_err(ort_tensor_error)?
+                .into_dyn(),
+            );
+        }
+    }
+
+    let embed_dim = (((feature_dim.saturating_sub(1)) / 2).saturating_sub(1)) / 2;
+    state.push(
+        Tensor::<f32>::from_array((
+            vec![1, 128, 3, embed_dim as i64],
+            vec![0.0_f32; 128 * 3 * embed_dim],
+        ))
+        .map_err(ort_tensor_error)?
+        .into_dyn(),
+    );
+    state.push(
+        Tensor::<i64>::from_array((vec![1], vec![0_i64]))
+            .map_err(ort_tensor_error)?
+            .into_dyn(),
+    );
 
     Ok(state)
 }
@@ -1295,9 +1563,11 @@ mod tests {
 
         assert_eq!(adapter.supported_formats(), &[CheckpointFormat::Onnx]);
         assert_eq!(adapter.backend_kind(), BackendKind::SherpaOnnx);
-        assert!(adapter
-            .capabilities()
-            .supports(CapabilityKind::Transcription));
+        assert!(
+            adapter
+                .capabilities()
+                .supports(CapabilityKind::Transcription)
+        );
         assert_eq!(adapter.quantization(), &QuantizationSupport::none());
     }
 
@@ -1310,7 +1580,7 @@ mod tests {
             decode_chunk_len: 8,
             frame_shift_ms: TARGET_FRAME_SHIFT_MS,
             unk_id: Some(1),
-            state_layout: StateLayout {
+            state_layout: StateLayout::Zipformer {
                 stacks: vec![EncoderStackSpec {
                     encoder_dim: 4,
                     attention_dim: 4,
@@ -1325,6 +1595,51 @@ mod tests {
         assert_eq!(state.tokens, vec![-1, BLANK_ID]);
         assert!(state.timestamps.is_empty());
         assert_eq!(state.encoder_state.len(), 7);
+    }
+
+    #[test]
+    fn zipformer_initial_state_matches_upstream_grouped_ordering() {
+        let layout = StateLayout::Zipformer {
+            stacks: vec![
+                EncoderStackSpec {
+                    encoder_dim: 4,
+                    attention_dim: 8,
+                    num_layers: 2,
+                    cnn_module_kernel: 3,
+                    left_context_len: 5,
+                },
+                EncoderStackSpec {
+                    encoder_dim: 6,
+                    attention_dim: 10,
+                    num_layers: 3,
+                    cnn_module_kernel: 7,
+                    left_context_len: 4,
+                },
+            ],
+        };
+
+        let state = initial_encoder_state(&layout, 80).expect("zipformer state should initialize");
+        assert_eq!(state.len(), 14);
+
+        let (shape, _) = state[0]
+            .try_extract_tensor::<i64>()
+            .expect("first state should be i64 cached_len for stack 0");
+        assert_eq!(shape.iter().copied().collect::<Vec<_>>(), vec![2, 1]);
+
+        let (shape, _) = state[1]
+            .try_extract_tensor::<i64>()
+            .expect("second state should be i64 cached_len for stack 1");
+        assert_eq!(shape.iter().copied().collect::<Vec<_>>(), vec![3, 1]);
+
+        let (shape, _) = state[2]
+            .try_extract_tensor::<f32>()
+            .expect("third state should be f32 cached_avg for stack 0");
+        assert_eq!(shape.iter().copied().collect::<Vec<_>>(), vec![2, 1, 4]);
+
+        let (shape, _) = state[8]
+            .try_extract_tensor::<f32>()
+            .expect("ninth state should be f32 cached_val2 for stack 0");
+        assert_eq!(shape.iter().copied().collect::<Vec<_>>(), vec![2, 5, 1, 4]);
     }
 
     #[test]
@@ -1358,14 +1673,63 @@ mod tests {
 
     #[test]
     fn state_layout_rejects_mismatched_metadata_lengths() {
-        let err =
-            StateLayout::try_from_parts(vec![4, 8], vec![4], vec![2, 2], vec![3, 3], vec![2, 2])
-                .expect_err("metadata length mismatch should fail");
+        let err = StateLayout::try_from_zipformer_parts(
+            vec![4, 8],
+            vec![4],
+            vec![2, 2],
+            vec![3, 3],
+            vec![2, 2],
+        )
+        .expect_err("metadata length mismatch should fail");
 
         assert!(matches!(err, ModelError::BackendInitialization { .. }));
-        assert!(err
-            .to_string()
-            .contains("zipformer encoder metadata length mismatch"));
+        assert!(
+            err.to_string()
+                .contains("zipformer encoder metadata length mismatch")
+        );
+    }
+
+    #[test]
+    fn zipformer2_initial_state_matches_upstream_layout() {
+        let layout = StateLayout::try_from_zipformer2_parts(
+            vec![192, 256, 384, 512, 384, 256],
+            vec![32, 32, 32, 32, 32, 32],
+            vec![12, 12, 12, 12, 12, 12],
+            vec![4, 4, 4, 8, 4, 4],
+            vec![2, 2, 3, 4, 3, 2],
+            vec![31, 31, 15, 15, 15, 31],
+            vec![64, 32, 16, 8, 16, 32],
+        )
+        .expect("zipformer2 metadata should be accepted");
+
+        let state = initial_encoder_state(&layout, 80).expect("zipformer2 state should initialize");
+        assert_eq!(state.len(), 16 * 6 + 2);
+
+        let (shape, _) = state[0]
+            .try_extract_tensor::<f32>()
+            .expect("first state should be f32");
+        assert_eq!(shape.iter().copied().collect::<Vec<_>>(), vec![64, 1, 128]);
+
+        let (shape, _) = state[1]
+            .try_extract_tensor::<f32>()
+            .expect("second state should be f32");
+        assert_eq!(
+            shape.iter().copied().collect::<Vec<_>>(),
+            vec![1, 1, 64, 144]
+        );
+
+        let (shape, _) = state[state.len() - 2]
+            .try_extract_tensor::<f32>()
+            .expect("penultimate state should be f32");
+        assert_eq!(
+            shape.iter().copied().collect::<Vec<_>>(),
+            vec![1, 128, 3, 19]
+        );
+
+        let (shape, _) = state[state.len() - 1]
+            .try_extract_tensor::<i64>()
+            .expect("last state should be i64");
+        assert_eq!(shape.iter().copied().collect::<Vec<_>>(), vec![1]);
     }
 
     #[test]
