@@ -14,6 +14,7 @@ pub mod generation;
 pub mod metrics;
 #[cfg(feature = "metrics-runtime")]
 pub mod metrics_runtime;
+pub mod speech;
 pub mod transcription;
 pub mod units;
 
@@ -24,6 +25,7 @@ pub use generation::{
     ChatRequest, ChatResponse, CompletionRequest, CompletionResponse, GenerationParams,
 };
 pub use metrics::{EmbeddingMetrics, ModelMetricSnapshot, RuntimeMetrics, TextGenerationMetrics};
+pub use speech::{SpeechModel, SpeechParams, SpeechRequest, SpeechStream, VoiceConditioning};
 pub use transcription::{
     AudioSpec, PcmChunk, PcmEncoding, TranscriptSegment, TranscriptionModel, TranscriptionParams,
     TranscriptionStream, TranscriptionUpdate,
@@ -70,6 +72,7 @@ pub enum BundleFamily {
     Gpt,
     Hermes,
     Other(String),
+    Piper,
     Qwen,
     Whisper,
 }
@@ -139,6 +142,7 @@ pub enum CapabilityKind {
     Completion,
     Embeddings,
     Ocr,
+    Speech,
     Transcription,
     Vision,
 }
@@ -248,6 +252,16 @@ impl CapabilityDescriptor {
             InteractionStyle::Streaming,
         )
     }
+
+    pub fn speech_stream() -> Self {
+        Self::new(
+            CapabilityKind::Speech,
+            "Streaming text-to-speech synthesis with PCM audio output.",
+            vec![ContentKind::Text],
+            vec![ContentKind::Audio],
+            InteractionStyle::Streaming,
+        )
+    }
 }
 
 /// Supported capability set plus introspective metadata.
@@ -310,6 +324,10 @@ impl Capabilities {
 
     pub fn transcription_stream_only() -> Self {
         Self::new(vec![CapabilityDescriptor::transcription_stream()])
+    }
+
+    pub fn speech_stream_only() -> Self {
+        Self::new(vec![CapabilityDescriptor::speech_stream()])
     }
 }
 
@@ -554,6 +572,7 @@ pub trait BundleHandle: Send + Sync {
     fn chat(&self) -> Result<&dyn ChatModel, ModelError>;
     fn completion(&self) -> Result<&dyn CompletionModel, ModelError>;
     fn embeddings(&self) -> Result<&dyn EmbeddingModel, ModelError>;
+    fn speech(&self) -> Result<&dyn SpeechModel, ModelError>;
     fn transcription(&self) -> Result<&dyn TranscriptionModel, ModelError>;
 
     async fn shutdown(self: Box<Self>) -> Result<(), ModelError>;
@@ -622,6 +641,10 @@ mod tests {
 
         fn embeddings(&self) -> Result<&dyn EmbeddingModel, ModelError> {
             Ok(self)
+        }
+
+        fn speech(&self) -> Result<&dyn SpeechModel, ModelError> {
+            Err(ModelError::UnsupportedCapability(CapabilityKind::Speech))
         }
 
         fn transcription(&self) -> Result<&dyn TranscriptionModel, ModelError> {
@@ -898,6 +921,7 @@ mod tests {
         let chat = ChatRequest::default();
         let completion = CompletionRequest::default();
         let embeddings = EmbeddingRequest::default();
+        let speech = SpeechRequest::default();
         let multi = EmbeddingRequest {
             inputs: vec!["one".into(), "two".into()],
         };
@@ -908,9 +932,21 @@ mod tests {
         assert!(chat.messages.is_empty());
         assert!(completion.prompt.is_empty());
         assert!(embeddings.inputs.is_empty());
+        assert!(speech.text.is_empty());
+        assert_eq!(speech.conditioning, None);
         assert!(chat.params.stop_sequences.is_empty());
         assert_eq!(multi.inputs.len(), 2);
         assert_eq!(response.vectors.len(), 2);
+    }
+
+    #[test]
+    fn speech_descriptor_uses_text_input_and_audio_output() {
+        let descriptor = CapabilityDescriptor::speech_stream();
+
+        assert_eq!(descriptor.kind, CapabilityKind::Speech);
+        assert_eq!(descriptor.inputs, vec![ContentKind::Text]);
+        assert_eq!(descriptor.outputs, vec![ContentKind::Audio]);
+        assert_eq!(descriptor.interaction, InteractionStyle::Streaming);
     }
 
     #[test]
@@ -928,6 +964,15 @@ mod tests {
         let capabilities = Capabilities::transcription_stream_only();
 
         assert!(capabilities.supports(CapabilityKind::Transcription));
+        assert!(!capabilities.supports(CapabilityKind::Chat));
+        assert!(!capabilities.supports(CapabilityKind::Embeddings));
+    }
+
+    #[test]
+    fn speech_stream_only_capabilities_supports_speech_but_not_chat() {
+        let capabilities = Capabilities::speech_stream_only();
+
+        assert!(capabilities.supports(CapabilityKind::Speech));
         assert!(!capabilities.supports(CapabilityKind::Chat));
         assert!(!capabilities.supports(CapabilityKind::Embeddings));
     }
@@ -950,6 +995,25 @@ mod tests {
             Err(ModelError::UnsupportedCapability(
                 CapabilityKind::Transcription
             ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn embedding_handle_rejects_speech_cleanly() {
+        let handle = FakeHandle {
+            descriptor: LoadedBundleDescriptor {
+                id: BundleId::new("embedder"),
+                display_name: "Embedder".into(),
+                capabilities: Capabilities::embeddings_only(),
+                quantization: QuantizationSupport::none(),
+                resolved_quantization: None,
+            },
+        };
+
+        assert!(!handle.supports(CapabilityKind::Speech));
+        assert!(matches!(
+            handle.speech(),
+            Err(ModelError::UnsupportedCapability(CapabilityKind::Speech))
         ));
     }
 

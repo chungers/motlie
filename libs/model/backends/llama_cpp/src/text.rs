@@ -14,7 +14,8 @@ use motlie_model::{
     CapabilityKind, ChatModel, ChatRequest, ChatResponse, ChatRole, CheckpointFormat,
     CompletionModel, CompletionRequest, CompletionResponse, EmbeddingModel, GenerationParams,
     LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot,
-    QuantizationBits, QuantizationSupport, ResolvedCheckpoint, StartOptions, TranscriptionModel,
+    QuantizationBits, QuantizationSupport, ResolvedCheckpoint, SpeechModel, StartOptions,
+    TranscriptionModel,
 };
 
 use crate::common::{
@@ -535,6 +536,10 @@ impl BundleHandle for LlamaCppTextHandle {
         Err(ModelError::UnsupportedCapability(
             CapabilityKind::Embeddings,
         ))
+    }
+
+    fn speech(&self) -> Result<&dyn SpeechModel, ModelError> {
+        Err(ModelError::UnsupportedCapability(CapabilityKind::Speech))
     }
 
     fn transcription(&self) -> Result<&dyn TranscriptionModel, ModelError> {
