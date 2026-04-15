@@ -88,6 +88,11 @@ path = "examples/v0.6/main.rs"
 required-features = ["model-sherpa-onnx-streaming"]
 
 [[example]]
+name = "models_tts_v0_2"
+path = "examples/tts_v0.2/main.rs"
+required-features = ["model-qwen3-tts-0_6b"]
+
+[[example]]
 name = "models_tts_v0_1"
 path = "examples/tts_v0.1/main.rs"
 required-features = ["model-piper-en-us-ljspeech-medium"]
