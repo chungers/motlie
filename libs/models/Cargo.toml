@@ -50,6 +50,8 @@ thiserror.workspace = true
 [dev-dependencies]
 anyhow.workspace = true
 hound = "3.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 sysinfo = "0.36.1"
 tokio.workspace = true
 
@@ -96,6 +98,30 @@ required-features = ["model-qwen3-tts-0_6b"]
 name = "models_tts_v0_1"
 path = "examples/tts_v0.1/main.rs"
 required-features = ["model-piper-en-us-ljspeech-medium"]
+
+[[example]]
+name = "tts_asr_piper_whisper"
+path = "examples/tts_asr/piper_whisper/main.rs"
+required-features = ["model-piper-en-us-ljspeech-medium", "model-whisper-base-en"]
+
+[[example]]
+name = "tts_asr_piper_sherpa"
+path = "examples/tts_asr/piper_sherpa/main.rs"
+required-features = ["model-piper-en-us-ljspeech-medium", "model-sherpa-onnx-streaming"]
+
+[[example]]
+name = "tts_asr_qwen3_whisper"
+path = "examples/tts_asr/qwen3_whisper/main.rs"
+required-features = ["model-qwen3-tts-0_6b", "model-whisper-base-en"]
+
+[[example]]
+name = "tts_asr_qwen3_sherpa"
+path = "examples/tts_asr/qwen3_sherpa/main.rs"
+required-features = ["model-qwen3-tts-0_6b", "model-sherpa-onnx-streaming"]
+
+[[example]]
+name = "tts_asr_aggregate"
+path = "examples/tts_asr/aggregate/main.rs"
 
 [[example]]
 name = "bench_chat"
