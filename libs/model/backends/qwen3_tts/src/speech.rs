@@ -308,6 +308,7 @@ struct Qwen3TtsPipeline {
 }
 
 /// Shape metadata carried between pipeline stages to avoid flattening tensor ranks.
+#[derive(Clone)]
 struct TensorWithShape {
     data: Vec<f32>,
     /// Shape as reported by ORT (i64). Convert to usize when building arrays.
@@ -768,5 +769,46 @@ mod tests {
         for (orig, dec) in samples.iter().zip(decoded.iter()) {
             assert!((orig - dec).abs() < 0.001, "orig={orig}, decoded={dec}");
         }
+    }
+
+    #[test]
+    fn reference_conditioning_with_text_carries_token_ids() {
+        use crate::common::Vocabulary;
+        use std::collections::HashMap;
+
+        let mut map = HashMap::new();
+        map.insert("<unk>".to_string(), 0_i64);
+        map.insert("<bos>".to_string(), 1);
+        map.insert("<eos>".to_string(), 2);
+        map.insert("hi".to_string(), 10);
+        let vocab = Vocabulary {
+            token_to_id: map,
+            unk_id: 0,
+            bos_id: 1,
+            eos_id: 2,
+            max_token_len: 2,
+        };
+
+        let mel = TensorWithShape {
+            data: vec![0.1, 0.2, 0.3],
+            shape: vec![1, 1, 3],
+        };
+
+        // With reference_text
+        let ref_text = Some("hi");
+        let ref_ids = ref_text.map(|t| vocab.tokenize(t));
+        let cond = ReferenceConditioning {
+            mel: mel.clone(),
+            ref_token_ids: ref_ids.clone(),
+        };
+        assert!(cond.ref_token_ids.is_some());
+        assert_eq!(cond.ref_token_ids.as_ref().unwrap(), &vec![1, 10, 2]);
+
+        // Without reference_text
+        let cond_no_text = ReferenceConditioning {
+            mel,
+            ref_token_ids: None,
+        };
+        assert!(cond_no_text.ref_token_ids.is_none());
     }
 }

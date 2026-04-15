@@ -763,8 +763,21 @@ offline export step produces the required artifacts:
    - `decoder.onnx` — the flow-matching mel decoder (input: encoder hidden states + optional reference mel; output: `[batch, mel_channels, mel_frames]` float32)
    - `vocoder.onnx` — the BigVGAN-derived vocoder (input: `[batch, mel_channels, mel_frames]` float32; output: `[batch, 1, audio_samples]` float32)
 4. Export `config.json` with `sample_rate`, `hop_length`, `mel_channels`, and `fft_size`.
-5. Export `vocab.json` as a `{ token: id }` mapping including `<bos>`, `<eos>`, `<unk>`.
+5. Flatten the BPE tokenizer into `vocab.json`:
+   The upstream repo ships `vocab.json`, `merges.txt`, and `tokenizer_config.json`
+   as separate BPE tokenizer components. The export step must merge these into a
+   single flat `{ token: id }` JSON mapping that contains all subword tokens
+   (including multi-character entries from BPE merges) plus the special tokens
+   `<bos>`, `<eos>`, `<unk>`. The `motlie-model-qwen3-tts` backend uses greedy
+   longest-match tokenization against this flattened vocabulary — it does NOT
+   apply BPE merge rules at runtime. The flattened vocab must therefore contain
+   every token the encoder expects, at the correct ID.
 6. Place all five files in a directory that the artifact resolver can discover.
+
+**Important:** The curated `vocab.json` is a custom export artifact, not the
+upstream `vocab.json` from the HuggingFace model tree. The upstream file contains
+only the base vocabulary without merged subword entries. The export step must
+produce a flattened vocabulary that includes all BPE-merged tokens.
 
 Note: the tensor shapes listed above are the expected ONNX input/output signatures.
 The `motlie-model-qwen3-tts` backend preserves ORT-reported tensor shapes between
