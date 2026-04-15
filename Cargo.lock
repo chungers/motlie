@@ -5305,6 +5305,7 @@ dependencies = [
  "motlie-model-llama-cpp",
  "motlie-model-mistral",
  "motlie-model-piper",
+ "motlie-model-qwen3-tts",
  "motlie-model-sherpa-onnx",
  "motlie-model-whisper-cpp",
  "sysinfo",

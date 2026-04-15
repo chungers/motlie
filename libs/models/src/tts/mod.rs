@@ -1,50 +1,80 @@
-#[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+#[cfg(any(
+    feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-qwen3-tts-0_6b",
+))]
 use std::fmt;
 use std::str::FromStr;
 
-#[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+#[cfg(any(
+    feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-qwen3-tts-0_6b",
+))]
 use motlie_model::{BundleId, ModelBundle};
 
 pub const PIPER_EN_US_LJSPEECH_MEDIUM_SELECTOR: &str = "piper/en_us_ljspeech_medium";
+pub const QWEN3_TTS_12HZ_0_6B_SELECTOR: &str = "qwen/qwen3_tts_12hz_0_6b";
 
 #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
 pub mod piper_en_us_ljspeech_medium;
+#[cfg(feature = "model-qwen3-tts-0_6b")]
+pub mod qwen3_tts_12hz_0_6b;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
+#[allow(non_camel_case_types)]
 pub enum TtsModels {
     #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
     PiperEnUsLjspeechMedium,
+    #[cfg(feature = "model-qwen3-tts-0_6b")]
+    Qwen3Tts12Hz0_6B,
 }
 
-#[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+#[cfg(any(
+    feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-qwen3-tts-0_6b",
+))]
 impl TtsModels {
     pub fn as_str(&self) -> &'static str {
         match self {
+            #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
             Self::PiperEnUsLjspeechMedium => piper_en_us_ljspeech_medium::SELECTOR,
+            #[cfg(feature = "model-qwen3-tts-0_6b")]
+            Self::Qwen3Tts12Hz0_6B => qwen3_tts_12hz_0_6b::SELECTOR,
         }
     }
 
     pub fn bundle_id(&self) -> BundleId {
         match self {
+            #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
             Self::PiperEnUsLjspeechMedium => piper_en_us_ljspeech_medium::descriptor().id,
+            #[cfg(feature = "model-qwen3-tts-0_6b")]
+            Self::Qwen3Tts12Hz0_6B => qwen3_tts_12hz_0_6b::descriptor().id,
         }
     }
 
     pub fn descriptor(&self) -> crate::BundleDescriptor {
         match self {
+            #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
             Self::PiperEnUsLjspeechMedium => piper_en_us_ljspeech_medium::descriptor(),
+            #[cfg(feature = "model-qwen3-tts-0_6b")]
+            Self::Qwen3Tts12Hz0_6B => qwen3_tts_12hz_0_6b::descriptor(),
         }
     }
 
     pub fn bundle(&self) -> Box<dyn ModelBundle> {
         match self {
+            #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
             Self::PiperEnUsLjspeechMedium => piper_en_us_ljspeech_medium::bundle(),
+            #[cfg(feature = "model-qwen3-tts-0_6b")]
+            Self::Qwen3Tts12Hz0_6B => qwen3_tts_12hz_0_6b::bundle(),
         }
     }
 }
 
-#[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+#[cfg(any(
+    feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-qwen3-tts-0_6b",
+))]
 impl fmt::Display for TtsModels {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.as_str().fmt(f)
@@ -60,6 +90,12 @@ impl FromStr for TtsModels {
             piper_en_us_ljspeech_medium::SELECTOR => Ok(Self::PiperEnUsLjspeechMedium),
             #[cfg(not(feature = "model-piper-en-us-ljspeech-medium"))]
             PIPER_EN_US_LJSPEECH_MEDIUM_SELECTOR => Err(crate::ModelsError::ModelUnavailable {
+                selector: value.to_owned(),
+            }),
+            #[cfg(feature = "model-qwen3-tts-0_6b")]
+            qwen3_tts_12hz_0_6b::SELECTOR => Ok(Self::Qwen3Tts12Hz0_6B),
+            #[cfg(not(feature = "model-qwen3-tts-0_6b"))]
+            QWEN3_TTS_12HZ_0_6B_SELECTOR => Err(crate::ModelsError::ModelUnavailable {
                 selector: value.to_owned(),
             }),
             other => Err(crate::ModelsError::UnknownTtsModel {
