@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-16 | @codex-tts | Dropped the Fish Speech Phase 3 line of work. No `tts_v0.3` implementation will be pursued because the checkpoint license is non-commercial and `fish-speech.rs` is considered stale for Motlie adoption (`last commit: February 2025`). |
 | 2026-04-15 | @cld-review-models | Implemented Phase 2 Qwen3-TTS slice: `motlie-model-qwen3-tts` backend with multi-model ONNX pipeline, vocabulary-based tokenizer, proper log-mel reference-audio conditioning, shape-preserving tensor pipeline, curated bundle `qwen3_tts_12hz_0_6b`, and `tts_v0.2` example with voice cloning. Runtime boundary is in-process ONNX via `motlie-model-ort` with offline safetensors-to-ONNX export prerequisite. |
 | 2026-04-14 | @codex-tts | Addressed PR #179 review R1 by documenting the Phase 1 batch-then-chunk stream behavior, the Piper-only `SpeechParams.seed` rejection, and the current `ort` RC session-mutability constraint while keeping the validated artifact-policy fix in scope. |
 | 2026-04-14 | @codex-tts | Implemented the Phase 1 Piper slice end to end: additive speech contracts in `libs/model`, shared ONNX helper extraction for Piper and sherpa, the `motlie-model-piper` backend, curated bundle/selector wiring in `libs/models`, the `models_tts_v0_1` example, and env-gated runtime verification. |
