@@ -13,6 +13,7 @@ use std::error::Error as StdError;
     feature = "model-gemma4-e2b-gguf",
     feature = "model-piper-en-us-ljspeech-medium",
     feature = "model-qwen3-tts-0_6b",
+    feature = "model-moonshine-streaming",
     feature = "model-sherpa-onnx-streaming",
     feature = "model-whisper-base-en",
 ))]
@@ -551,6 +552,7 @@ pub enum ModelSelector {
     ))]
     Tts(TtsModels),
     #[cfg(any(
+        feature = "model-moonshine-streaming",
         feature = "model-sherpa-onnx-streaming",
         feature = "model-whisper-base-en"
     ))]
@@ -578,15 +580,20 @@ pub enum ModelSelector {
     feature = "model-gemma4-e2b-gguf",
     feature = "model-piper-en-us-ljspeech-medium",
     feature = "model-qwen3-tts-0_6b",
+    feature = "model-moonshine-streaming",
     feature = "model-sherpa-onnx-streaming",
     feature = "model-whisper-base-en",
 ))]
 impl ModelSelector {
     pub fn as_str(&self) -> String {
         match self {
-            #[cfg(any(feature = "model-piper-en-us-ljspeech-medium", feature = "model-qwen3-tts-0_6b"))]
+            #[cfg(any(
+                feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-qwen3-tts-0_6b"
+            ))]
             Self::Tts(model) => format!("tts:{}", model.as_str()),
             #[cfg(any(
+                feature = "model-moonshine-streaming",
                 feature = "model-sherpa-onnx-streaming",
                 feature = "model-whisper-base-en"
             ))]
@@ -608,9 +615,13 @@ impl ModelSelector {
 
     pub fn bundle_id(&self) -> BundleId {
         match self {
-            #[cfg(any(feature = "model-piper-en-us-ljspeech-medium", feature = "model-qwen3-tts-0_6b"))]
+            #[cfg(any(
+                feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-qwen3-tts-0_6b"
+            ))]
             Self::Tts(model) => model.bundle_id(),
             #[cfg(any(
+                feature = "model-moonshine-streaming",
                 feature = "model-sherpa-onnx-streaming",
                 feature = "model-whisper-base-en"
             ))]
@@ -632,9 +643,13 @@ impl ModelSelector {
 
     pub fn descriptor(&self) -> BundleDescriptor {
         match self {
-            #[cfg(any(feature = "model-piper-en-us-ljspeech-medium", feature = "model-qwen3-tts-0_6b"))]
+            #[cfg(any(
+                feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-qwen3-tts-0_6b"
+            ))]
             Self::Tts(model) => model.descriptor(),
             #[cfg(any(
+                feature = "model-moonshine-streaming",
                 feature = "model-sherpa-onnx-streaming",
                 feature = "model-whisper-base-en"
             ))]
@@ -656,9 +671,13 @@ impl ModelSelector {
 
     pub fn bundle(&self) -> Box<dyn ModelBundle> {
         match self {
-            #[cfg(any(feature = "model-piper-en-us-ljspeech-medium", feature = "model-qwen3-tts-0_6b"))]
+            #[cfg(any(
+                feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-qwen3-tts-0_6b"
+            ))]
             Self::Tts(model) => model.bundle(),
             #[cfg(any(
+                feature = "model-moonshine-streaming",
                 feature = "model-sherpa-onnx-streaming",
                 feature = "model-whisper-base-en"
             ))]
@@ -688,6 +707,7 @@ impl ModelSelector {
     feature = "model-gemma4-e2b-gguf",
     feature = "model-piper-en-us-ljspeech-medium",
     feature = "model-qwen3-tts-0_6b",
+    feature = "model-moonshine-streaming",
     feature = "model-sherpa-onnx-streaming",
     feature = "model-whisper-base-en",
 ))]
@@ -714,9 +734,15 @@ impl FromStr for ModelSelector {
                     selector: value.to_owned(),
                 });
             }
-            #[cfg(any(feature = "model-piper-en-us-ljspeech-medium", feature = "model-qwen3-tts-0_6b"))]
+            #[cfg(any(
+                feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-qwen3-tts-0_6b"
+            ))]
             return Ok(Self::Tts(raw.parse()?));
-            #[cfg(not(any(feature = "model-piper-en-us-ljspeech-medium", feature = "model-qwen3-tts-0_6b")))]
+            #[cfg(not(any(
+                feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-qwen3-tts-0_6b"
+            )))]
             return Err(ModelsError::UnknownModelSelector {
                 selector: value.to_owned(),
             });
@@ -793,6 +819,12 @@ impl FromStr for ModelSelector {
         }
 
         if let Some(raw) = value.strip_prefix("asr:") {
+            #[cfg(not(feature = "model-moonshine-streaming"))]
+            if raw == asr::MOONSHINE_STREAMING_SELECTOR {
+                return Err(ModelsError::ModelUnavailable {
+                    selector: value.to_owned(),
+                });
+            }
             #[cfg(not(feature = "model-sherpa-onnx-streaming"))]
             if raw == asr::SHERPA_ONNX_STREAMING_SELECTOR {
                 return Err(ModelsError::ModelUnavailable {
@@ -806,11 +838,13 @@ impl FromStr for ModelSelector {
                 });
             }
             #[cfg(any(
+                feature = "model-moonshine-streaming",
                 feature = "model-sherpa-onnx-streaming",
                 feature = "model-whisper-base-en"
             ))]
             return Ok(Self::Asr(raw.parse()?));
             #[cfg(not(any(
+                feature = "model-moonshine-streaming",
                 feature = "model-sherpa-onnx-streaming",
                 feature = "model-whisper-base-en"
             )))]
@@ -886,6 +920,8 @@ impl Catalog {
         tts::piper_en_us_ljspeech_medium::register(&mut catalog);
         #[cfg(feature = "model-qwen3-tts-0_6b")]
         tts::qwen3_tts_12hz_0_6b::register(&mut catalog);
+        #[cfg(feature = "model-moonshine-streaming")]
+        asr::moonshine_streaming_en::register(&mut catalog);
         #[cfg(feature = "model-sherpa-onnx-streaming")]
         asr::sherpa_onnx_streaming_en::register(&mut catalog);
         #[cfg(feature = "model-whisper-base-en")]
