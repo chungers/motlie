@@ -6,7 +6,7 @@
 
 | Date | Change |
 |------|--------|
-| 2026-04-16 | @cdx-models: Added concrete telephony gating requirements and real prototype measurements comparing Motlie `sherpa-onnx` against patched local `Moonshine Streaming` chunk-by-chunk decoding on the same WAVs. |
+| 2026-04-16 | @cdx-models: Added telephony gating requirements, real `sherpa-onnx` vs `Moonshine Streaming` measurements, the DGX CUDA root-cause analysis, and a Nemotron integration-path section. |
 | 2026-04-15 | @cdx-models: Initial Phase 3 research note covering `transcribe-rs`, its streaming-vs-batch model support, and a ranking against Motlie's existing `whisper.cpp` and `sherpa-onnx` ASR backends under the requirement that Phase 3 must support real-time telephony streaming. |
 
 ## Overview
@@ -449,11 +449,105 @@ Interpretation:
 - I do not have evidence that the CUDA EP actually engaged during these runs
 - the most defensible reading is that this build still executed Moonshine in a CPU-equivalent path or silently fell back
 
+### Root Cause
+
+The missing GPU activity turned out not to be a `Moonshine` session-options bug. It is an ONNX Runtime packaging problem on this host.
+
+Local evidence from the DGX run:
+
+- `ort-sys` build output for the local `ort-cuda` probe logged: `looking for prebuilt binaries matching feature set: cu13` followed by `no prebuilt binaries available on this platform for combination of features 'cu13'`
+- after that warning, the build linked the same cached archive already used by the CPU path: `/home/dchung/.cache/ort.pyke.io/.../libonnxruntime.a`
+- a filesystem search on April 16, 2026 found no alternative host ORT install with CUDA provider libraries, only that single static archive
+- a direct `ort` sanity check using `CUDAExecutionProvider.error_on_failure()` and `strace` never reached `main()` output; it attempted to locate `libonnxruntime.so`, failed with `ENOENT`, then blocked in runtime initialization
+
+Practical meaning:
+
+- the local `transcribe-rs` / `ort` build never had a usable CUDA-enabled ONNX Runtime to bind against on this `aarch64` / CUDA 13 DGX host
+- forcing `CUDAExecutionProvider` in session construction cannot fix that by itself
+- to get a real Moonshine GPU benchmark here, we would first need a CUDA-capable ONNX Runtime build for this platform, plus its required runtime libraries available to the process
+
 ### Practical Verdict
 
 For Phase 3 telephony, current Motlie `sherpa-onnx` clearly wins over current `Moonshine Streaming` integration risk.
 
-The CUDA rerun did not close the gap. Until there is positive evidence of a working GPU execution path and materially lower per-chunk latency, `Moonshine Streaming` should not displace `sherpa-onnx` as the telephony path.
+The CUDA rerun did not close the gap, and the root cause is now concrete: there is no usable CUDA-enabled ORT runtime in this environment for `transcribe-rs` to load. Until that runtime problem is solved and a materially lower per-chunk latency is demonstrated, `Moonshine Streaming` should not displace `sherpa-onnx` as the telephony path.
+
+## Nemotron Integration Path
+
+### What It Is
+
+Official NVIDIA `Nemotron ASR Streaming` is not a GGUF-style checkpoint or an ONNX artifact. The public model is distributed primarily as a `.nemo` checkpoint in the NeMo ecosystem. The Hugging Face model card describes it as a cache-aware FastConformer encoder with an RNNT decoder and `600M` parameters.
+
+Important details from the official model card:
+
+- runtime family: `NVIDIA NeMo`
+- checkpoint format: `.nemo`
+- architecture: cache-aware FastConformer encoder + RNNT decoder
+- chunking model: `80 ms` frames with right-context settings that map to `0.08s`, `0.16s`, `0.56s`, and `1.12s` chunk sizes
+- software integration explicitly lists `NeMo 25.11, Riva 2.25.0 or higher`
+
+I did not find an official Nemotron ASR ONNX artifact or a Nemotron-specific ONNX deployment recipe in the current public docs. NVIDIA's generic NeMo export docs say most NeMo models can export to ONNX or TorchScript, but that is not the same thing as a supported Nemotron ASR inference path.
+
+### Streaming Capability
+
+Yes, this is a real streaming model family, not a batch wrapper. The official model card and NVIDIA NIM docs both describe it as streaming-only. The NIM deployment docs state that the input speech file is streamed chunk-by-chunk and that the model supports streaming mode only.
+
+From a contract perspective, that makes Nemotron much more aligned with Motlie `TranscriptionStream` than `whisper.cpp` or the current `transcribe-rs` public API.
+
+### How To Run On DGX
+
+The official paths today are:
+
+- NeMo Framework inference using the cache-aware streaming script referenced in the model card
+- NVIDIA Speech NIM, which packages the model behind Triton/TensorRT and exposes gRPC plus a realtime HTTP API
+
+The NIM overview says ASR NIM packages the full NVIDIA inference stack and exposes standard APIs, while the Nemotron deployment page gives `docker run` instructions with `--runtime=nvidia`, gRPC, and realtime API examples.
+
+The most realistic DGX integration path is therefore not `transcribe-rs` and not a direct ONNX path first. It is one of:
+
+- embed NeMo locally and wrap the cache-aware streaming script/runtime in a Rust service boundary
+- run NVIDIA ASR NIM and treat it as a remote streaming backend over gRPC or HTTP/WebSocket
+- investigate a later lower-level export path only if we need in-process Rust inference badly enough to justify owning that stack
+
+### Fit With Motlie `TranscriptionStream`
+
+Nemotron conceptually fits our contract well:
+
+- incremental audio chunks are native to the model design
+- partial transcripts are native to the serving story
+- the cache-aware state maps naturally to a Motlie per-stream object
+
+But the implementation boundary would be very different from `sherpa-onnx`:
+
+- `sherpa-onnx` is an in-process Rust backend today
+- Nemotron is officially documented through Python NeMo or containerized NIM/Triton deployment
+- a Motlie backend would likely be an RPC adapter first, not an in-process `libs/model/backends/*` crate
+
+That means Nemotron is viable for the *product requirement* but not automatically viable for the *current crate architecture*.
+
+### Performance vs `sherpa-onnx`
+
+Official NVIDIA numbers are promising but not apples-to-apples with our local sherpa benchmark. The NIM performance page reports Nemotron low-latency streaming on DGX Spark at `160 ms` chunks with `109.0 ms` average latency and `18.2 ms` p50 for one stream. On B200, it reports `47.9 ms` average and `11.9 ms` p50 for one stream at the same chunk size.
+
+That compares favorably to our failed Moonshine incremental results, but it is still not directly comparable to Motlie `sherpa-onnx`, because:
+
+- our local sherpa probe used `80 ms` chunks, not `160 ms`
+- our measurements were in-process Rust on one WAV corpus
+- NVIDIA's published figures are NIM service benchmarks with their own client and stack
+
+So the right conclusion is not that Nemotron beats sherpa today. The right conclusion is that Nemotron has a credible published streaming latency story on NVIDIA hardware and is worth a separate DGX-first evaluation.
+
+### Important Documentation Conflict
+
+As of April 16, 2026, NVIDIA's public docs are internally inconsistent about DGX Spark support.
+
+- the ASR NIM support matrix says: `Only Parakeet 1.1B CTC English and Parakeet 1.1B RNNT Multilingual models support DGX Spark platform`
+- the ASR NIM performance page also publishes a `DGX Spark` benchmark table for `Nemotron ASR Streaming`
+
+I do not want to smooth over that contradiction. Until NVIDIA clarifies it, the safe reading is:
+
+- Nemotron clearly has DGX-relevant performance data
+- but official DGX Spark support status for production deployment is ambiguous in the docs
 
 ## Recommendation
 
@@ -494,4 +588,7 @@ Open a single follow-up research issue with this scope:
 - `Moonshine Streaming` model card: <https://huggingface.co/UsefulSensors/moonshine-streaming-medium>
 - `Moonshine` Transformers docs: <https://huggingface.co/docs/transformers/en/model_doc/moonshine>
 - NVIDIA `nemotron-speech-streaming-en-0.6b`: <https://huggingface.co/nvidia/nemotron-speech-streaming-en-0.6b>
+- NVIDIA Speech NIM Nemotron deployment docs: <https://docs.nvidia.com/nim/speech/latest/asr/deploy-asr-models/nemotron-asr-streaming.html>
+- NVIDIA Speech NIM ASR performance docs: <https://docs.nvidia.com/nim/speech/latest/reference/performances/asr/performance.html>
+- NVIDIA NeMo export docs: <https://docs.nvidia.com/nemo-framework/user-guide/24.07/nemotoolkit/core/export.html>
 - NVIDIA `parakeet-unified-en-0.6b`: <https://huggingface.co/nvidia/parakeet-unified-en-0.6b>
