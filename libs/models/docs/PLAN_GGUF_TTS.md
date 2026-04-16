@@ -4,11 +4,12 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-15 | @codex-asr | Updated the tracking issue reference after broadening the TTS backend evaluation scope beyond the original GGUF-only framing. |
 | 2026-04-15 | @codex-asr | Initial phased plan for a `llama.cpp + ORT` Qwen3-TTS exploration that keeps Motlie at three engines total. Centers on proving the talker-stage boundary first, then only expanding to a hybrid backend if that proof succeeds. |
 
 Derived from [DESIGN_GGUF_TTS.md](./DESIGN_GGUF_TTS.md).
 
-Tracking issue: `#188` "Qwen3-TTS via GGUF — llama.cpp multi-stage pipeline and qwen3tts.cpp evaluation"
+Tracking issue: `#188` "Qwen3-TTS backend evaluation — qwen3_tts_rs, F5-TTS ONNX, and GGUF paths"
 
 This plan is intentionally gated. The key architectural risk is not "can we write Rust around Qwen3-TTS?" The key risk is whether Motlie can make the large talker stage `llama.cpp`-compatible without dragging in a fourth runtime engine. The early phases exist to answer that question before implementation breadth expands.
 

@@ -1,13 +1,14 @@
-# GGUF-Based Qwen3-TTS Design
+# Qwen3-TTS Backend Evaluation Design
 
 ## Status: Proposed
 
-Tracking issue: `#188` "Qwen3-TTS via GGUF — llama.cpp multi-stage pipeline and qwen3tts.cpp evaluation"
+Tracking issue: `#188` "Qwen3-TTS backend evaluation — qwen3_tts_rs, F5-TTS ONNX, and GGUF paths"
 
 ## Change Log
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-15 | @codex-asr | Broadened the document from a pure GGUF question into a backend-evaluation note after validating `qwen3_tts_rs` end to end on real weights. Added the current backend priority ranking and recorded the Rust-native feasibility result, including the local source-build caveat. |
 | 2026-04-15 | @codex-asr | Initial brownfield design for evaluating GGUF-based Qwen3-TTS without adding a fourth runtime engine. Focuses on whether `llama.cpp` can own the large causal LM stage, how ORT can own the smaller post-LM stages, and why the current public `qwen3-tts.cpp` ecosystem is not yet the right engine boundary for Motlie. |
 
 This document is brownfield product work. It assumes Motlie keeps the existing `libs/model` / `libs/models` layering, the existing checkpoint/runtime separation from [DESIGN_CHECKPOINT_SEPARATION.md](../../model/docs/DESIGN_CHECKPOINT_SEPARATION.md), and the current engine set:
@@ -31,7 +32,7 @@ Can Motlie reuse `llama.cpp` for the large text-to-speech-token stage of Qwen3-T
 - [Recommended Architecture for Motlie](#recommended-architecture-for-motlie)
 - [Shared GGUF / GGML Substrate Design](#shared-gguf--ggml-substrate-design)
 - [Curated Bundle Design Impact](#curated-bundle-design-impact)
-- [Three-Way Comparison](#three-way-comparison)
+- [Backend Candidate Comparison](#backend-candidate-comparison)
 - [Recommendation](#recommendation)
 - [Risks and Open Questions](#risks-and-open-questions)
 - [References](#references)
@@ -53,6 +54,8 @@ The answer from current upstream evidence is:
 
 - not directly, not today, for the public Qwen3-TTS GGUF artifacts
 - but a `llama.cpp`-first Motlie architecture is still viable if Motlie deliberately exports or isolates the causal talker stage rather than treating the community full-pipeline GGUFs as drop-in `llama.cpp` checkpoints
+
+Since the initial draft, one additional path moved from research to feasibility evidence: `qwen3_tts_rs` now has a verified end-to-end local run on this host with real Qwen weights. That changes the short-term evaluation order even though it does not change the long-term checkpoint/runtime decoupling goal.
 
 ## Goals and Non-Goals
 
@@ -81,6 +84,68 @@ The answer from current upstream evidence is:
 - Defining a generic user-supplied arbitrary TTS checkpoint loader
 
 ## Research Summary
+
+### Current Priority Ranking
+
+As of 2026-04-15, the backend evaluation order is:
+
+1. `qwen3_tts_rs`
+   Top priority because it is real, Rust-native, Apache-2.0 on crates.io, and already demonstrated speech generation from real Qwen3-TTS weights on this host without any C++ FFI.
+2. `F5-TTS via ONNX`
+   Next-best option because it reuses Motlie's existing ORT substrate and appears to have a healthier export story than the failed Qwen3-TTS ONNX path.
+3. `qwen3-tts.cpp`
+   Technically viable and already proven to produce speech locally, but still a C++ FFI path with a weaker license and maintenance posture than the Rust-native alternative.
+4. `fish-speech.rs`
+   Still technically credible, but the default model-family and checkpoint-license story remain mismatched with Motlie's preferred direction.
+5. `index-tts-rust`
+   Kept as a low-priority placeholder only; no convincing mature Rust implementation surfaced in this research pass.
+
+### `qwen3_tts_rs`
+
+`second-state/qwen3_tts_rs` is now a confirmed candidate rather than a hypothetical one.
+
+Signals checked on 2026-04-15:
+
+- crate: `qwen3-tts-rs = 0.2.2`
+- repository: `second-state/qwen3_tts_rs`
+- crates.io license: Apache-2.0
+- GitHub stars: `202`
+- GitHub forks: `30`
+- last push timestamp: `2026-03-29T08:13:51Z`
+- default backend: `tch` / libtorch
+- alternate backend: MLX on Apple Silicon
+
+What the project claims upstream:
+
+- CLI for named-voice TTS
+- voice cloning
+- OpenAI-compatible API server
+- streaming PCM output mode
+
+Local feasibility result on this host:
+
+- cloned repository revision: `4f98eb7`
+- real model used: `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice`
+- generated `output.wav` successfully from the prompt `Hello, this is a test of Qwen3 text to speech.`
+- output properties:
+  - `24 kHz`
+  - mono
+  - 16-bit PCM
+  - `4.24 s`
+- runtime from the official ARM64 release binary on this host:
+  - wall time: `40.69 s`
+  - peak RSS: `6.85 GB`
+
+Important caveat:
+
+- the local source build did not complete on this host because `audiopus_sys` attempted to autogen bundled `libopus` and required missing system `libtool` tooling
+- the runtime feasibility result is therefore based on the project's official ARM64 release binary plus real downloaded weights, not on a locally compiled binary
+
+Interpretation:
+
+- `qwen3_tts_rs` is already strong enough to justify becoming the top near-term evaluation target
+- it does not satisfy the original "reuse only `llama.cpp` + ORT" constraint, because it is a separate `tch` / libtorch runtime family
+- it is still a better immediate prototype target than `qwen3-tts.cpp` because it avoids C++ FFI and has a clearer packaging and license story
 
 ### Upstream Qwen3-TTS
 
@@ -475,15 +540,56 @@ This keeps the Motlie UX aligned with existing curated bundles:
 - they do not manually compose engines
 - feature flags gate the bundle and optional accelerators
 
-## Three-Way Comparison
+## Backend Candidate Comparison
 
 ### Summary Table
 
-| Option | Runtime count impact | Checkpoint fit | Technical maturity | Licensing posture | Recommendation |
-|--------|----------------------|----------------|--------------------|------------------|----------------|
-| `llama.cpp` multi-stage hybrid | stays at 3 engines total | best long-term fit if Motlie controls talker export and lets ORT handle smaller stages | medium, because export / compatibility work is still needed | strongest path if built around official Qwen code plus Motlie-owned export tooling | recommended direction |
-| `qwen3-tts.cpp` | adds a 4th engine | strong for today's public community GGUFs | low-to-medium; young repo, 29 commits, 5 contributors, real C API but custom runtime | currently weak because inspected repo snapshot did not present a clear license | do not adopt as Motlie engine |
-| `fish-speech.rs` | adds or substitutes a separate TTS runtime | unrelated checkpoint family | medium; older but still single-maintainer | code Apache-2.0, common weights non-commercial | keep as a research fallback, not the preferred path |
+| Option | Runtime count impact | Checkpoint fit | Technical maturity | Licensing posture | Current rank |
+|--------|----------------------|----------------|--------------------|------------------|--------------|
+| `qwen3_tts_rs` | adds a dedicated `tch` / libtorch runtime | direct fit for official Qwen3-TTS safetensors checkpoints | medium; real crate, active enough repo, successful local speech generation on real weights | strongest of the immediate alternatives; crate declares Apache-2.0 | `#1` near-term prototype candidate |
+| `F5-TTS via ONNX` | reuses existing ORT engine | unrelated checkpoint family but fits Motlie's ORT substrate cleanly | medium from repo signals, but not yet locally validated in this design pass | promising if upstream ONNX artifacts and licenses hold up | `#2` |
+| `qwen3-tts.cpp` | adds a 4th engine | strong for today's public community GGUFs | low-to-medium; young repo, 29 commits, 5 contributors, real C API but custom runtime | currently weak because inspected repo snapshot did not present a clear license | `#3` fallback evidence source, not preferred engine |
+| `fish-speech.rs` | adds or substitutes a separate TTS runtime | unrelated checkpoint family | medium; older but still single-maintainer | code Apache-2.0, common weights non-commercial | `#4` |
+| `index-tts-rust` | unknown | unknown | weak; no convincing maintained Rust implementation identified in this pass | unknown | `#5` watch-only |
+| `llama.cpp` multi-stage hybrid | stays at 3 engines total | best long-term fit if Motlie controls talker export and lets ORT handle smaller stages | medium, because export / compatibility work is still needed | strongest long-term architecture if built around official Qwen code plus Motlie-owned export tooling | strategic architecture target, not the easiest next prototype |
+
+### `qwen3_tts_rs`
+
+Strengths:
+
+- Rust-native implementation with no C++ FFI boundary in Motlie
+- direct fit for official Qwen3-TTS checkpoint layout rather than community GGUF repackaging
+- already demonstrated real speech generation on this host
+- supports voice cloning and a streaming API mode upstream
+
+Weaknesses:
+
+- adds a fourth runtime family to Motlie unless it is treated as a temporary evaluation-only path
+- depends on `tch` / libtorch rather than reusing Motlie's existing `llama.cpp` or ORT substrates
+- source build environment still has native dependency friction on this host
+
+Interpretation:
+
+- best immediate way to learn the real Qwen3-TTS runtime behavior in Rust
+- not the cleanest final architecture if Motlie wants to keep the engine set minimal
+
+### `F5-TTS via ONNX`
+
+Strengths:
+
+- strongest reuse story with Motlie's current ORT substrate
+- likely the simplest path to a curated TTS bundle if upstream artifacts are stable
+- avoids adding a brand-new runtime boundary
+
+Weaknesses:
+
+- not the Qwen3-TTS family
+- quality, streaming behavior, and cloning ergonomics still need local validation
+
+Interpretation:
+
+- best backup plan if Qwen3-specific runtime reuse becomes too expensive
+- should remain ahead of any new C++ GGUF runtime adoption
 
 ### `llama.cpp` Multi-Stage Hybrid
 
@@ -543,12 +649,23 @@ Interpretation:
 
 ### Primary Recommendation
 
-Motlie should not replace the Phase-2-style Qwen3-TTS exploration with `qwen3-tts.cpp`.
+Motlie should update the evaluation order immediately:
+
+1. prototype `qwen3_tts_rs` first
+2. evaluate `F5-TTS` via ORT second
+3. keep `qwen3-tts.cpp` only as a lower-priority fallback and evidence source
+
+Motlie should still not replace the long-term architecture target with `qwen3-tts.cpp`.
 
 Instead Motlie should pursue a hybrid backend design:
 
 - `llama.cpp` for the large talker stage
 - ORT for code predictor, tokenizer decoder, and optional speaker encoder
+
+That leaves two truths that both need to be documented:
+
+- near-term prototype priority: `qwen3_tts_rs`
+- long-term engine-minimizing architecture target: `llama.cpp` + ORT
 
 ### Practical Answer to the Priority Question
 
@@ -562,7 +679,7 @@ What Motlie can do next without adding a fourth engine is:
 2. define a Motlie-owned export path for the talker stage that targets `llama.cpp`
 3. keep the smaller decoder stages in ORT
 
-That is the only path in the current evidence set that both:
+That remains the only path in the current evidence set that both:
 
 - respects the user's engine-minimization constraint
 - fits Motlie's existing architecture
@@ -580,7 +697,9 @@ That is the only path in the current evidence set that both:
 - Official Qwen3-TTS repo: <https://github.com/QwenLM/Qwen3-TTS>
 - Official Qwen3-TTS GitHub metadata checked 2026-04-15: <https://github.com/QwenLM/Qwen3-TTS>
 - `predict-woo/qwen3-tts.cpp`: <https://github.com/predict-woo/qwen3-tts.cpp>
+- `second-state/qwen3_tts_rs`: <https://github.com/second-state/qwen3_tts_rs>
 - `femelo/py-qwen3-tts-cpp`: <https://github.com/femelo/py-qwen3-tts-cpp>
+- `DakeQQ/F5-TTS-ONNX`: <https://github.com/DakeQQ/F5-TTS-ONNX>
 - `EndlessReform/fish-speech.rs`: <https://github.com/EndlessReform/fish-speech.rs>
 - `Volko76/Qwen3-TTS-12Hz-0.6B-Base-Qwen3tts.cpp_quants-GGUF`: <https://huggingface.co/Volko76/Qwen3-TTS-12Hz-0.6B-Base-Qwen3tts.cpp_quants-GGUF>
 - `mradermacher/Qwen3-1.7B-Multilingual-TTS-GGUF`: <https://huggingface.co/mradermacher/Qwen3-1.7B-Multilingual-TTS-GGUF>
