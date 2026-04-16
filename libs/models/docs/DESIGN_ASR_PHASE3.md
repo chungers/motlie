@@ -6,6 +6,7 @@
 
 | Date | Change |
 |------|--------|
+| 2026-04-16 | @cdx-models: Added concrete telephony gating requirements and real prototype measurements comparing Motlie `sherpa-onnx` against patched local `Moonshine Streaming` chunk-by-chunk decoding on the same WAVs. |
 | 2026-04-15 | @cdx-models: Initial Phase 3 research note covering `transcribe-rs`, its streaming-vs-batch model support, and a ranking against Motlie's existing `whisper.cpp` and `sherpa-onnx` ASR backends under the requirement that Phase 3 must support real-time telephony streaming. |
 
 ## Overview
@@ -24,6 +25,18 @@ Phase 3 is not a general ASR bake-off. The requirement is narrower:
 That immediately changes the ranking. A backend that only exposes whole-buffer transcription is not viable for Phase 3 even if its offline WER is strong.
 
 This document evaluates `transcribe-rs` with that constraint in mind.
+
+## Telephony Requirements
+
+Phase 3 is for live Telnyx telephony, not offline transcription. That creates hard requirements:
+
+- real-time streaming input is mandatory
+- sub-second chunk processing is mandatory
+- chunk-by-chunk incremental processing is mandatory
+- batch-only models are ruled out for Phase 3 selection
+- comparisons against `sherpa-onnx` must use the same audio and chunk size
+
+For this evaluation, the comparison chunk size is `1280` samples at `16 kHz`, which is `80 ms` per chunk. That is small enough to expose whether a candidate can realistically keep up with telephony-style incremental decode.
 
 ## Executive Summary
 
@@ -377,6 +390,52 @@ This ranking is strictly for **Phase 3 streaming telephony**, not generic offlin
 | 3 | NVIDIA Nemotron | Strong in principle | Weak today | Interesting separate research track, but not through `transcribe-rs` as it exists now. |
 | 4 | `transcribe-rs` Parakeet | Weak for Phase 3 | Medium | Do not pursue for Phase 3 unless `transcribe-rs` gains a real streaming Parakeet path. |
 | 5 | Motlie `whisper.cpp` | Weak for Phase 3 | Already done | Keep as legacy baseline only; not viable for telephony streaming. |
+
+## Sherpa vs Moonshine Streaming
+
+This is the closest head-to-head that matters for Phase 3.
+
+Method:
+
+- audio: sherpa upstream `0.wav` and `1.wav` from `csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26`
+- reference text: upstream `test_wavs/trans.txt`
+- sherpa path: Motlie `models_v0_6` backend stack and a dedicated local probe using the real `TranscriptionStream` contract
+- Moonshine path: local `transcribe-rs` clone plus `moonshine-tiny-streaming-en` weights
+- chunk size: `1280` samples / `80 ms`
+- chunk metric for Moonshine: local prototype that exposed a minimal session API and forced a partial decode attempt after each chunk
+- memory metric: `/usr/bin/time -v` maximum resident set size
+
+Important interpretation note:
+
+- stock `transcribe-rs` Moonshine whole-file transcription is fast and produced good transcripts on these WAVs
+- but that is not the Phase 3 requirement
+- once Moonshine was forced into telephony-style incremental decode with a partial transcript attempt every `80 ms`, latency and memory both ballooned
+
+### Measured Results
+
+| Audio | Backend | WER | Avg chunk latency | Median chunk latency | Max chunk latency | End-to-end decode | Max RSS | Streaming granularity |
+|------|---------|-----|-------------------|----------------------|-------------------|-------------------|---------|----------------------|
+| `0.wav` (`6.62s`) | Motlie `sherpa-onnx` | `0.0556` | `5.917 ms` | `2.084 ms` | `20.710 ms` | `515.685 ms` | `227160 KB` | true `80 ms` PCM chunks via `push_chunk()` |
+| `0.wav` (`6.62s`) | `Moonshine Streaming` tiny | `0.0000` | `183.769 ms` | `190.833 ms` | `391.420 ms` | `15611.807 ms` | `471872 KB` | internal `80 ms` chunks, but partial decode had to be forced through a local prototype |
+| `1.wav` (`16.71s`) | Motlie `sherpa-onnx` | `0.0208` | `6.570 ms` | `2.107 ms` | `22.701 ms` | `1400.724 ms` | `236772 KB` | true `80 ms` PCM chunks via `push_chunk()` |
+| `1.wav` (`16.71s`) | `Moonshine Streaming` tiny | `0.0625` | `445.322 ms` | `454.603 ms` | `847.299 ms` | `93909.344 ms` | `948292 KB` | internal `80 ms` chunks, but partial decode had to be forced through a local prototype |
+
+### What These Results Mean
+
+For telephony, `Moonshine Streaming` is not currently competitive with Motlie `sherpa-onnx` in the shape that matters.
+
+- `Moonshine Streaming` can produce good final transcripts. Accuracy is not the main problem.
+- The problem is stream semantics and incremental cost.
+- `sherpa-onnx` stays in the low-single-digit millisecond range for most `80 ms` chunks.
+- The Moonshine prototype needed hundreds of milliseconds per chunk once partial decode was forced into the loop.
+- On the longer file, Moonshine exceeded the chunk duration by roughly `5.6x` on average (`445 ms` work for an `80 ms` chunk).
+- Peak RSS for Moonshine was roughly `2.1x` sherpa on `0.wav` and `4.0x` sherpa on `1.wav`.
+
+### Practical Verdict
+
+For Phase 3 telephony, current Motlie `sherpa-onnx` clearly wins over current `Moonshine Streaming` integration risk.
+
+The only defensible reason to continue Moonshine work would be if we believe a much better incremental decode API exists or can be implemented upstream without recomputing so much state per partial update. Until that is proven, it should not displace `sherpa-onnx` as the telephony path.
 
 ## Recommendation
 
