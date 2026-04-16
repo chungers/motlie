@@ -150,21 +150,24 @@ separate variants and prints a CPU-vs-CUDA comparison section.
 ## Measured DGX Spark Results
 
 Measured on `2026-04-15` by `@codex-dgx-e2e` on the DGX Spark GB10 host used for PR
-`#182`. Full run notes and tables are in [RESULTS.md](RESULTS.md).
+`#182`. `Piper → sherpa-onnx` was rerun after the merged PR `#183` fix on
+`feature/models`. Full run notes and tables are in [RESULTS.md](RESULTS.md).
 
 ### Matrix status
 
 | Pipeline | CPU | CUDA | Notes |
 |----------|-----|------|-------|
 | Piper → whisper.cpp | 100/100 samples completed | 100/100 samples completed | Full benchmark data captured |
-| Piper → sherpa-onnx | Blocked at startup | Blocked at startup | Current sherpa checkpoint metadata does not match backend parser expectations |
-| Qwen3-TTS → whisper.cpp | Blocked at startup | Blocked at startup | Required ONNX exports (`encoder.onnx`, `decoder.onnx`, `vocoder.onnx`) were not available in the cached artifact snapshot |
-| Qwen3-TTS → sherpa-onnx | Blocked at startup | Blocked at startup | Same missing Qwen3-TTS ONNX exports blocked startup before ASR initialization |
+| Piper → sherpa-onnx | 100/100 samples completed | 100/100 samples completed | Full benchmark data captured after PR `#183` |
+| Qwen3-TTS → whisper.cpp | Skipped | Skipped | Current exported decoder/vocoder produce noisy output and ~100% WER, so the lane was excluded from benchmarking |
+| Qwen3-TTS → sherpa-onnx | Skipped | Skipped | Same noisy Qwen3-TTS export state made the lane uninformative for benchmarking |
 
 ### Actual benchmark summary
 
 | Pipeline | Mode | Samples | Mean WER | Mean Total Latency | Mean TTS | Mean ASR |
 |----------|------|---------|----------|--------------------|----------|----------|
+| Piper → sherpa-onnx | CPU | 100 | 0.308 | 5,303 ms | 1,362 ms | 3,940 ms |
+| Piper → sherpa-onnx | CUDA | 100 | 0.298 | 5,347 ms | 1,360 ms | 3,986 ms |
 | Piper → whisper.cpp | CPU | 100 | 0.459 | 58,090 ms | 1,366 ms | 56,723 ms |
 | Piper → whisper.cpp | CUDA | 100 | 0.458 | 7,921 ms | 1,379 ms | 6,541 ms |
 
@@ -172,7 +175,12 @@ Measured on `2026-04-15` by `@codex-dgx-e2e` on the DGX Spark GB10 host used for
 
 | Pipeline | CPU Mean WER | CUDA Mean WER | CPU Mean Latency | CUDA Mean Latency | Speedup |
 |----------|--------------|---------------|------------------|-------------------|---------|
+| Piper → sherpa-onnx | 0.308 | 0.298 | 5,303 ms | 5,347 ms | 0.99x |
 | Piper → whisper.cpp | 0.459 | 0.458 | 58,090 ms | 7,921 ms | 7.33x |
+
+Overall, `Piper → sherpa-onnx` is now the best measured pipeline on this host for
+aggregate WER and end-to-end latency. `Piper → whisper.cpp` still sees the only
+meaningful CUDA acceleration in this matrix.
 
 ## Predicted Pipeline Rankings
 
@@ -212,5 +220,6 @@ These are **PREDICTIONS** based on design characteristics. Run the validation ma
 - **WER** (Word Error Rate): lower is better. 0.0 = perfect transcription.
   WER = (substitutions + insertions + deletions) / reference_word_count
 - **Latency**: TTS + ASR combined. Lower is better.
-- **CPU-only recommendation**: Piper pipelines (lightweight, no GPU required)
-- **CUDA recommendation**: Qwen3-TTS pipelines (higher quality potential with GPU acceleration)
+- **Current measured CPU recommendation**: `Piper → sherpa-onnx`
+- **Current measured CUDA recommendation**: `Piper → sherpa-onnx` for best aggregate WER/latency, or `Piper → whisper.cpp` if the main goal is GPU speedup over CPU baseline
+- **Qwen3 status**: current ONNX decoder/vocoder exports are excluded from benchmarking because they produce noisy output and ~100% WER
