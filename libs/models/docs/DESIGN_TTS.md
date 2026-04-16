@@ -6,6 +6,8 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-16 | @codex-tts | ~~Fish Speech Phase 3~~ dropped. Motlie will not pursue `fish-speech.rs` integration because the usable checkpoints remain non-commercial and the Rust crate is considered stale for product adoption (`last commit: February 2025`). |
+| 2026-04-15 | @codex-tts | Added a reproducible Qwen3-TTS ONNX export runbook and checked in the export script under `libs/models/scripts/`. Documented the current adapter-graph workaround and the gap between the official Qwen runtime and the current Rust backend contract. |
 | 2026-04-15 | @cld-review-models | Implemented Phase 2 Qwen3-TTS vertical slice. Runtime boundary: in-process ONNX via `motlie-model-ort` with pre-exported model components (encoder, decoder, vocoder). Upstream safetensors must be exported to ONNX offline before the curated bundle can start. Added vocabulary-based tokenizer, proper Hann-windowed DFT mel spectrogram for reference-audio conditioning, and shape-preserving tensor pipeline between ONNX stages. |
 | 2026-04-14 | @codex-tts | Addressed PR #179 review R1 by fixing the local-only startup path to reuse the same Piper artifact validation as curated checkpoints, documenting the batch-then-chunk `open_stream()` behavior and Piper's runtime rejection of `SpeechParams.seed`, and recording the current `ort` RC dependency/runtime constraint explicitly. |
 | 2026-04-14 | @codex-tts | Implemented the Phase 1 Piper slice with additive `SpeechModel` / `SpeechStream` contracts, a shared `motlie-model-ort` ONNX helper reused by the sherpa backend, a `motlie-model-piper` backend using eSpeak-ng phonemization plus Piper sidecar parsing, the curated `piper_en_us_ljspeech_medium` bundle, and the `models_tts_v0_1` example/validation path. |
@@ -19,6 +21,13 @@ Assumption for this draft: this is brownfield product work. Motlie already has s
 The design is intentionally narrow. It focuses on one end-to-end vertical slice from curated artifact download to streamed PCM output, with adapters above the model layer for `.wav`, local playback, and telephony/websocket transports.
 
 The roadmap beyond that first slice is also explicit: if the Piper slice proves out, the next end-to-end family to add should be Qwen3-TTS rather than leaving the phase-2 story implicit.
+
+`~~Fish Speech~~` was evaluated as the Phase 3 native-Rust candidate and then dropped. The deciding blockers were the non-commercial checkpoint license and a stale `fish-speech.rs` maintenance story (`last commit: February 2025`), which make it unsuitable for Motlie product work even though the runtime direction was technically promising.
+
+The exact re-export flow for the current Qwen3-TTS ONNX artifacts lives in
+`docs/EXPORT_QWEN3_TTS_ONNX.md`. That runbook is the source of truth for the
+Python environment, Hugging Face download path, emitted artifact sizes, and the
+current adapter-graph workaround used to satisfy the Rust backend contract.
 
 ## Table of Contents
 
@@ -116,7 +125,7 @@ The table below focuses on local inference fit for Motlie rather than absolute r
 | Candidate | Representative Size | Latency / Realtime Evidence | CPU Fit on macOS/Linux | CUDA Fit | Voice Cloning | Streaming Capability | Rust Integration Path | License | Fit for Motlie |
 |-----------|---------------------|-----------------------------|------------------------|----------|---------------|----------------------|-----------------------|---------|----------------|
 | Piper TTS | `en_US-ljspeech-medium.onnx` is about `63.5 MB`; sidecar config is a few KB | Strong. Upstream positions Piper as fast/local, optimized for Raspberry Pi 4, and exposes raw streaming synthesis APIs and CLI flows. | Strong. This is still the cleanest CPU-first candidate in the set. | Good. Upstream supports `onnxruntime-gpu` with `--cuda`, but GPU is optional. | Limited. Some voices are multi-speaker, but this is not a zero-shot cloning system. | Strong. Raw audio can be produced incrementally; `.wav` output is already a first-class path. | Strong. ONNX already fits `CheckpointFormat::Onnx`; backend can target `BackendKind::Ort` with Rust ORT bindings. | Code MIT; voice licenses must be reviewed per `MODEL_CARD`; upstream repo archived on 2025-10-06 and points to GPL successor. | Recommended v1 despite upstream maintenance risk because it best matches the architecture and CPU requirement. |
-| Fish Speech 1.5 + `fish-speech.rs` | Fish Speech 1.5 weights are about `1.28 GB`; the Rust server compiles to a static binary of about `15 MB` | Good. `fish-speech.rs` advertises streaming audio and `.wav`; official Fish Audio S2 Pro reports about `100 ms` TTFA and `RTF 0.195` on one H200, but that is a different, newer runtime family. | Medium. `fish-speech.rs` says CPU is supported on Linux and macOS, but the official flagship evidence is GPU-first and the Rust runtime currently targets Fish 1.5 and below, not the latest S2 line. | Strong. Official Fish Audio S2 Pro explicitly publishes high streaming performance on NVIDIA GPUs; the Rust runtime also has CUDA and Metal features. | Strong. Official Fish Audio supports rapid voice cloning from short references; `fish-speech.rs` exposes temporary and persisted cloned voices. | Strong. Both official Fish Audio and `fish-speech.rs` expose streaming/server paths. | Medium. This is the best Rust-native candidate, but the Rust engine is third-party and tied to older Fish checkpoints while the official project has moved to S2 Pro. | Code Apache-2.0 or research license depending on repo; weights are non-commercial (`CC-BY-NC-SA-4.0` / Fish Audio Research License). | Strong technically, but blocked for a general Motlie bundle by weight-license restrictions and ecosystem split. |
+| ~~Fish Speech 1.5 + `fish-speech.rs`~~ | Fish Speech 1.5 weights are about `1.28 GB`; the Rust server compiles to a static binary of about `15 MB` | Good. `fish-speech.rs` advertises streaming audio and `.wav`; official Fish Audio S2 Pro reports about `100 ms` TTFA and `RTF 0.195` on one H200, but that is a different, newer runtime family. | Medium. `fish-speech.rs` says CPU is supported on Linux and macOS, but the official flagship evidence is GPU-first and the Rust runtime currently targets Fish 1.5 and below, not the latest S2 line. | Strong. Official Fish Audio S2 Pro explicitly publishes high streaming performance on NVIDIA GPUs; the Rust runtime also has CUDA and Metal features. | Strong. Official Fish Audio supports rapid voice cloning from short references; `fish-speech.rs` exposes temporary and persisted cloned voices. | Strong. Both official Fish Audio and `fish-speech.rs` expose streaming/server paths. | Medium. This is the best Rust-native candidate, but the Rust engine is third-party and tied to older Fish checkpoints while the official project has moved to S2 Pro. | Code Apache-2.0 or research license depending on repo; weights are non-commercial (`CC-BY-NC-SA-4.0` / Fish Audio Research License). | ~~Dropped for Motlie.~~ Blocked by non-commercial checkpoints and stale crate maintenance (`last commit: February 2025`). |
 | Qwen3-TTS | `Qwen3-TTS-12Hz-0.6B-Base` tree is about `2.52 GB`; `model.safetensors` is about `1.83 GB` | Strong. Official repo claims end-to-end streaming latency as low as `97 ms` and supports streaming/non-streaming in one model family. | Medium-to-weak for v1. The smallest public model is still much larger than Piper and the official quickstart/examples are CUDA-first PyTorch flows. | Strong. Official examples load with `cuda:0`, `bfloat16`, and `flash_attention_2`; this is a good GB10 candidate. | Strong. Officially supports 3-second voice cloning, custom voices, and voice design. | Strong. Streaming is a first-class feature in the official repo and API docs. | Weak-to-medium. Open license is excellent, but the current path is Python package + Transformers/vLLM, not a Rust-native backend. | Apache-2.0 | Strongest phase-2 candidate for quality and feature breadth, but not the simplest v1 backend or artifact story. |
 | Coqui XTTS v2 | Hugging Face repo is about `2.09 GB`; `model.pth` alone is about `1.87 GB` | Strong upstream claim: XTTS can stream with sub-`200 ms` latency. | Weak for Motlie v1. Coqui's own streaming server docs say CPU is not recommended. | Good. Common deployment path is CUDA/PyTorch. | Strong. This is the main attraction. | Good. Official streaming server exists. | Weak-to-medium. Would require a new PyTorch/Python-serving boundary or heavyweight FFI; current Motlie backends are not set up for that. | Coqui Public Model License for weights; code in repo is permissive, but weight license is not as operationally simple as MIT/Apache. | Still viable as a cloning-focused backend family, but Qwen3-TTS now looks like the better open phase-2 candidate. |
 | Bark | `bark-small` checkpoint family is roughly `1.5-1.7 GB` class | Weak for real-time speech calls. Bark is expressive but not shaped around low-latency speech streaming. | Weak. Heavy autoregressive pipeline and multi-stage generation hurt CPU viability. | Medium. GPU helps, but that does not solve product-fit issues. | Weak. Voice presets exist, but it is not the right cloning/runtime story for this product. | Weak. No strong official streaming path. | Weak. PyTorch-heavy, no clean Rust-native backend path. | MIT | Rejected for v1. Interesting research model, poor fit for telephony-style realtime output. |
@@ -153,8 +162,8 @@ Updated ranking for Motlie:
    Best phase-2 candidate for high-quality open-license streaming TTS with strong cloning and voice-design features, especially if GB10/CUDA becomes a meaningful target.
 3. Kokoro-82M
    Best alternate CPU-oriented v1 if Piper maintenance risk outweighs its current integration advantage.
-4. Fish Speech
-   Technically strong and the best Rust-native story, but the weight-license posture and split between official/new models and third-party/older Rust runtime make it hard to curate cleanly in Motlie.
+4. ~~Fish Speech~~
+   Dropped. The checkpoint license is non-commercial and `fish-speech.rs` is considered stale for Motlie adoption (`last commit: February 2025`), so this is no longer a live Phase 3 option.
 5. XTTS v2
    Still interesting for cloning, but now less attractive than Qwen3-TTS because the open-license and model-family story are weaker.
 
@@ -703,7 +712,7 @@ Approximate footprint pressure from the evaluated candidates:
 - Piper voice: about `63 MB`
 - Kokoro-82M ONNX: about `346 MB`
 - StyleTTS 2 LibriTTS: about `771 MB`
-- Fish Speech 1.5: about `1.28 GB`
+- ~~Fish Speech 1.5~~: about `1.28 GB`
 - F5-TTS Base: about `1.35 GB`
 - Qwen3-TTS 0.6B Base tree: about `2.52 GB`
 - XTTS v2: about `2.09 GB`
@@ -878,23 +887,15 @@ Decision:
 
 - best phase-2 TTS family after Piper, but too heavy for the first CPU-first Rust bundle
 
-### Fish Speech as v1
+### ~~Fish Speech as v1~~
 
-Pros:
+Dropped.
 
-- excellent official quality/cloning story
-- strongest Rust-native path among the newer candidates because `fish-speech.rs` exists
-- streaming and `.wav` are both already exposed in the Rust server
+Reason:
 
-Cons:
-
-- weight license is non-commercial
-- the Rust engine is third-party and currently targets Fish 1.5 and below, while the official project has moved to S2 Pro
-- official flagship performance story is GPU/SGLang-oriented, not the simple CPU-first path Motlie wants for v1
-
-Decision:
-
-- technically compelling, but not suitable as the first curated Motlie bundle under the current product and licensing constraints
+- the usable checkpoints are non-commercial, which blocks general Motlie product adoption
+- `fish-speech.rs` is treated as stale for this codebase (`last commit: February 2025`)
+- the official performance story is GPU/SGLang-oriented rather than the CPU-first local path Motlie needs
 
 ### XTTS v2 as v1
 
