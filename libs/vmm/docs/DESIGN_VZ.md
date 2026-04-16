@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-15 | @codex-vz | Rewrite Vz parity acceptance to target the extracted Phase 8A `libs/vmm` harness core and typed validation profiles rather than the older example-local smoke wrappers |
 | 2026-04-14 | @codex-vz | Align the Vz backend phases with the cross-backend slice order, formalize the hardened SSH auto-provision checks as parity acceptance tests, and replace the stale VFS-parity-definition ambiguity with an explicit `v1.15` feasibility gate |
 | 2026-04-14 | @codex-vz | Add `DESIGN_GUEST_IMAGE.md` as the owning prerequisite for the Apple Vz guest image pipeline: define the boot artifacts, guest image build options, aarch64 kernel constraints, packaging direction, and the shared-guest-contract vs hypervisor-specific-packaging split |
 | 2026-04-13 | @codex-vz | Address PR 163 review findings: declare the macOS 12 floor, add the helper entitlement/signing and build/discovery story, define the Rust↔Swift config/control contracts, harden readiness, describe vsock/cloud-init delivery, and tighten several factual details |
@@ -820,13 +821,16 @@ Cross-reference:
 
 ### Phase 4: Harness validation
 
-- add a macOS-only `examples/v1.4` scenario or smoke target
+- add a macOS-capable validation path on top of the extracted Phase 8A
+  `libs/vmm` harness core
 - verify:
   - boot reaches readiness
   - `VmHandle::exec("/bin/true", ...)` works
   - PTY opens over the existing SSH bridge
   - host mount is visible in guest
   - serial log and readiness artifacts are captured
+  - typed validation profiles can assert hardened SSH auto-provision parity on
+    Vz
 
 Testing expectations:
 
@@ -1121,14 +1125,16 @@ with the CH/Motlie stack. The main gaps are below.
   - guest bridge ready
   - guest bridge failed
 - `libs/vmm` harness/docs should add an explicit Vz parity requirement:
-  - the existing `auto-provision-ssh` scenario must pass unchanged against a Vz
+  - the extracted Phase 8A `libs/vmm` harness core and typed validation
+    profile for hardened SSH auto-provision parity must pass against a Vz
     backend selection, not just against CH
 
 #### Acceptance Criteria
 
-- `examples/v1.4/scenarios/auto-provision-ssh.json` must pass unchanged on Vz
-- `examples/v1.4/integration/repl-auto-provision-smoke.sh` must pass unchanged
-  on Vz
+- the extracted Phase 8A `libs/vmm` harness core can run Vz through the same
+  library-owned validation path as CH
+- the typed validation profile covering hardened SSH auto-provision behavior
+  passes on Vz
 
 ## Parity Summary
 

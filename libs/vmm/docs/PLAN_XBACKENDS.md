@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-15 | @codex-vz | Rewrite `v1.45` validation against the extracted Phase 8A `libs/vmm` harness core and typed validation profiles instead of the older example-local smoke wrappers |
 | 2026-04-14 | @codex-vz | Add a hard fallback decision for failed managed guestfs in `v1.15`, make kernel virtio-driver verification mandatory in `v1.05`, and formalize the hardened SSH auto-provision checks as `v1.45` validation |
 | 2026-04-14 | @codex-vz | Rewrite the cross-backend plan into numbered, checkable phases with explicit validation gates; move `v1.05` under `libs/vmm/examples/`; and make the Apple Vz execution order image -> VFS -> VNET -> cleanup -> policy -> full `v1.45` explicit |
 | 2026-04-13 | @codex-vz | Add a first-step Apple Vz image track to the cross-backend plan: prioritize `v1.05` image/build proving before `v1.15` guestfs and `v1.25` egress, then run the cleanup phases and the separate policy phases (`#134`, `#133`) before `v1.45` full Vz integration |
@@ -197,17 +198,24 @@ Tasks:
 - [ ] implement `prepare/boot/ready/exec/pty/shutdown`
 - [ ] integrate provisioning and SSH proxy
 - [ ] integrate guestfs and egress using the reviewed lower-layer outcomes
+- [ ] wire Vz into the extracted Phase 8A `libs/vmm` harness core
+- [ ] add typed validation profiles for Vz lifecycle parity and hardened SSH
+      auto-provision parity
 
 Validation:
 
-- [ ] `auto-provision-ssh.json` passes on Vz
-- [ ] `repl-auto-provision-smoke.sh` passes on Vz
+- [ ] the extracted Phase 8A `libs/vmm` harness core can execute Vz through the
+      same validation path used for CH
+- [ ] the typed validation profile for hardened SSH auto-provision parity
+      passes on Vz
+- [ ] the typed validation profile for lifecycle parity passes on Vz
 - [ ] lifecycle and observability are backend-neutral at the VMM contract layer
 
 References:
 
 - DESIGN_XBACKENDS Stage 5
 - DESIGN_VZ.md
+- PLAN.md Phase 8A
 
 ## Merge Checklist
 

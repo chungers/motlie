@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-15 | @codex-vz | Rewrite the `v1.45` Vz exit gates against the extracted Phase 8A `libs/vmm` harness core and typed validation profiles instead of the older example-local smoke wrappers |
 | 2026-04-14 | @codex-vz | Add explicit fallback gates for `v1.15` managed guestfs failure, make kernel virtio-driver verification a required `v1.05` exit gate, and formalize the hardened SSH auto-provision checks as `v1.45` acceptance tests |
 | 2026-04-14 | @codex-vz | Clarify the Apple Vz execution order as `v1.05` image/build -> `v1.15` guestfs -> `v1.25` egress -> CH-safe refactors -> policy phases -> `v1.45` full VMM, move `v1.05` under `libs/vmm/examples/`, and add measurable exit gates for each vertical slice |
 | 2026-04-13 | @codex-vz | Add a first-step Apple Vz image track to the cross-backend sequence: `v1.05` image/build proving first, then `v1.15` guestfs, `v1.25` egress, the cleanup phases, the separate policy phases (`#134`, `#133`), and finally the `v1.45` full `libs/vmm` Vz vertical slice |
@@ -197,12 +198,17 @@ Responsibilities:
 
 Exit gates:
 
-- the existing auto-provision scenario passes on Vz
-- `examples/v1.4/scenarios/auto-provision-ssh.json` passes unchanged on Vz
-- `examples/v1.4/integration/repl-auto-provision-smoke.sh` passes unchanged on
-  Vz
+- the extracted Phase 8A `libs/vmm` harness core can execute Vz through the
+  same library-owned validation path used for CH
+- the typed validation profile covering hardened SSH auto-provision behavior
+  passes on Vz
+- the typed validation profile covering lifecycle parity passes on Vz
 - the backend exposes parity-capable observability
 - the lifecycle works end to end without CH-specific transport assumptions
+
+The semantic requirement remains parity with the hardened SSH auto-provision
+flow, but the acceptance entrypoint is the extracted harness core and typed
+validation profiles rather than the older example-local smoke wrappers.
 
 ## Design Consequences For `libs/vmm`
 
