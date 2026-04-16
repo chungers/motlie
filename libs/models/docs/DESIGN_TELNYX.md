@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-04-15 | @codex-macmini-telnyx: Added the recommended v1 ASR/TTS stack, concrete telephony pipeline, and latency budget based on current Motlie benchmark results and backend readiness. | Recommended ASR/TTS Stack, Gap Analysis, Open Concerns |
 | 2026-04-15 | @codex-macmini-telnyx: Initial Telnyx real-time voice integration design for Motlie. Documents Telnyx API research, recommends a WebSocket media gateway over the existing ASR/TTS contracts, and outlines brownfield gaps around codecs, resampling, duplex orchestration, and deployment. | All |
 
 This document defines a brownfield design for integrating Telnyx programmable voice with Motlie's existing speech stack. The current session-specific product classification has not yet been confirmed by the user, but this proposal assumes brownfield work because Motlie already has established `libs/model` speech and transcription contracts plus curated backends in `libs/models`. The Telnyx integration should extend those seams instead of introducing a parallel speech subsystem.
@@ -16,6 +17,7 @@ This document defines a brownfield design for integrating Telnyx programmable vo
 - [Goals and Non-Goals](#goals-and-non-goals)
 - [Telnyx API Research](#telnyx-api-research)
 - [Recommended Integration Shape](#recommended-integration-shape)
+- [Recommended ASR/TTS Stack](#recommended-asrtts-stack)
 - [Inbound Call Handler Design](#inbound-call-handler-design)
 - [Outbound Call Handler Design](#outbound-call-handler-design)
 - [Gap Analysis](#gap-analysis)
@@ -319,6 +321,110 @@ Why:
 - it minimizes surprises across the current ASR/TTS backends
 
 If a TTS backend emits a different format, the gateway should resample before sending to Telnyx.
+
+## Recommended ASR/TTS Stack
+
+### Recommended v1 Stack
+
+For Telnyx real-time voice, the recommended Motlie v1 stack is:
+
+- ASR: `sherpa-onnx` streaming Zipformer2
+- TTS: Piper
+
+This recommendation is based on the current Motlie benchmark and implementation status, not on long-term model ambition.
+
+### Recommended ASR: `sherpa-onnx`
+
+`sherpa-onnx` is the only viable ASR backend for Telnyx live telephony in the current Motlie stack.
+
+Current evidence from Motlie's benchmarks and implementation status:
+
+- `sherpa-onnx` streaming Zipformer2: about `5.2 s` mean latency on CPU, `0.30` WER, true chunk-by-chunk streaming
+- `whisper.cpp`: about `19.7 s` mean latency, batch-oriented in Motlie today, not suitable for live telephony turn handling
+
+Implications:
+
+- telephony needs incremental processing and sub-second chunk handling
+- `sherpa-onnx` is the only backend that satisfies that shape today
+- `whisper.cpp` remains useful for offline or file-oriented ASR, but it should not be selected for the Telnyx conversational path
+
+Recommended design rule:
+
+- Telnyx v1 should treat `sherpa-onnx` as the default and only supported ASR backend for the real-time conversational flow
+
+### Recommended TTS: Piper
+
+Piper is the recommended Telnyx v1 TTS backend because it is the only TTS backend currently producing working speech in Motlie.
+
+Current evidence from Motlie's implementation status:
+
+- short utterance generation: about `70 ms`
+- paragraph generation: about `3.6 s`
+- stable working output today
+
+Why Piper is good enough for Telnyx v1:
+
+- short telephony responses are the common case
+- `~70 ms` generation for short responses is fast enough for conversational turn taking
+- output is already PCM, which fits the gateway normalization and re-encoding pipeline cleanly
+
+Current Piper limitations:
+
+- no voice cloning
+- one pre-trained voice per model
+- less flexibility than future expressive or clone-capable TTS stacks
+
+Phase 3 status:
+
+- Fish Speech is not yet producing speech in Motlie
+- Qwen3-TTS via GGUF is not yet producing speech in Motlie
+
+Recommended design rule:
+
+- Telnyx v1 should standardize on Piper and defer richer voice-selection work until a second TTS backend is actually operational
+
+### Recommended Telnyx v1 Pipeline
+
+The recommended end-to-end voice path is:
+
+```text
+Inbound Telnyx audio
+-> G.711 decode
+-> resample 8 kHz to 16 kHz
+-> sherpa-onnx streaming ASR
+-> transcript
+-> application logic
+-> response text
+-> Piper TTS
+-> PCM at about 22 kHz
+-> resample to 16 kHz
+-> encode G.711 or L16
+-> outbound Telnyx media
+```
+
+This pipeline aligns with what currently works instead of over-optimizing for future model combinations that are not yet production-viable.
+
+### Latency Budget
+
+Recommended conversational target:
+
+- Telnyx inbound audio chunk cadence: about `20 ms` for G.711 at `8 kHz`
+- ASR processing: `sherpa-onnx` chunk-by-chunk streaming
+- TTS generation: about `70 ms` for short Piper responses
+- total round-trip target: under `500 ms`
+
+Inference from the current stack:
+
+- the main latency risks are not model startup or raw short-utterance TTS generation
+- the main risks are transport buffering, resampling, end-of-turn detection, and oversized outbound packetization
+
+Design implications:
+
+- prefer `sherpa-onnx` over `whisper.cpp` for any real-time Telnyx path
+- keep inbound jitter buffers small
+- keep TTS responses concise when possible
+- packetize outbound audio at telephony-friendly intervals instead of large queued chunks
+- prefer RTP mode over MP3 mode to avoid avoidable playback delay
 
 ## Inbound Call Handler Design
 
