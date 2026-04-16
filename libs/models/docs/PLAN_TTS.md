@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-15 | @codex-tts | Added a Phase 3 Fish Speech research plan. Scopes `tts_v0.3` around `fish-speech.rs` / `fish_speech_core`, keeps the slice explicitly gated on non-commercial checkpoint acceptance, and compares that path against Candle and the existing Qwen3-TTS ONNX adapters. |
 | 2026-04-15 | @cld-review-models | Implemented Phase 2 Qwen3-TTS slice: `motlie-model-qwen3-tts` backend with multi-model ONNX pipeline, vocabulary-based tokenizer, proper log-mel reference-audio conditioning, shape-preserving tensor pipeline, curated bundle `qwen3_tts_12hz_0_6b`, and `tts_v0.2` example with voice cloning. Runtime boundary is in-process ONNX via `motlie-model-ort` with offline safetensors-to-ONNX export prerequisite. |
 | 2026-04-14 | @codex-tts | Addressed PR #179 review R1 by documenting the Phase 1 batch-then-chunk stream behavior, the Piper-only `SpeechParams.seed` rejection, and the current `ort` RC session-mutability constraint while keeping the validated artifact-policy fix in scope. |
 | 2026-04-14 | @codex-tts | Implemented the Phase 1 Piper slice end to end: additive speech contracts in `libs/model`, shared ONNX helper extraction for Piper and sherpa, the `motlie-model-piper` backend, curated bundle/selector wiring in `libs/models`, the `models_tts_v0_1` example, and env-gated runtime verification. |
@@ -285,11 +286,59 @@ Only start this after the Piper slice is stable and the speech contract has held
 - [ ] Add one CUDA-oriented smoke test on GB10-class hardware when such hardware is available in the validation environment.
   DESIGN reference: `Phase-2 Qwen3-TTS Vertical Slice`
 
-## Phase 7: Follow-On Breadth After the Vertical Slice
+## Phase 7: Fish Speech `tts_v0.3` Research Slice
+
+Only start this if the product accepts a research-only / non-commercial checkpoint story for the upstream Fish Audio weights.
+
+### 7.1 - Runtime boundary and licensing gate
+
+- [ ] Confirm the product can tolerate the Fish Audio Research License / non-commercial checkpoint terms for an opt-in research bundle.
+  DESIGN reference: `Phase-3 Fish Speech via fish-speech.rs`
+- [ ] Add `libs/model/backends/fish_speech/` as a distinct native-Rust backend family rather than extending the ONNX backends.
+  DESIGN reference: `Phase-3 Fish Speech via fish-speech.rs`
+- [ ] Prefer direct embedding through `fish_speech_core`; keep the `server` crate as a validation harness and sidecar fallback only.
+  DESIGN reference: `Phase-3 Fish Speech via fish-speech.rs`
+- [ ] Document any unavoidable upstream/runtime drift between Fish Speech 1.5 in `fish-speech.rs` and the newer official S2 family.
+  DESIGN reference: `Phase-3 Fish Speech via fish-speech.rs`
+
+### 7.2 - Artifact validation and curated bundle shape
+
+- [ ] Define a Fish-specific artifact validator for `model.pth`, vocoder checkpoint, tokenizer assets, config, and optional voice-conditioning assets.
+  DESIGN reference: `Phase-3 Fish Speech via fish-speech.rs`
+- [ ] Add `src/tts/fish_speech_1_5.rs` with a research selector shape such as `tts:fish/fish_speech_1_5`.
+  DESIGN reference: `Phase-3 Fish Speech via fish-speech.rs`
+- [ ] Keep the bundle feature-gated and out of `default` features.
+  DESIGN reference: `Phase-3 Fish Speech via fish-speech.rs`, `Feature Flag Design`
+- [ ] Add backend-local feature flags for accelerator choices, for example `fish-speech-cuda` and `fish-speech-metal`, without changing the stable speech contract.
+  DESIGN reference: `Phase-3 Fish Speech via fish-speech.rs`
+
+### 7.3 - Speech stream and conditioning path
+
+- [ ] Map text synthesis onto the existing `SpeechRequest` / `SpeechStream` contract with mono PCM output and stable `AudioSpec`.
+  DESIGN reference: `Phase-3 Fish Speech via fish-speech.rs`, `Streaming PCM API Contract`
+- [ ] Implement `VoiceConditioning::ReferenceAudio { pcm, audio_spec, reference_text }` as the primary cloning path; fail early when `reference_text` is missing if the upstream prompted-cloning path requires it.
+  DESIGN reference: `Phase-3 Fish Speech via fish-speech.rs`, `Streaming PCM API Contract`
+- [ ] Map persisted conditioning-token assets onto `VoiceConditioning::SpeakerId`.
+  DESIGN reference: `Phase-3 Fish Speech via fish-speech.rs`, `Streaming PCM API Contract`
+- [ ] Emit `PcmChunk` frames directly from the backend; do not leak OGG or WAV containers through the model-layer contract.
+  DESIGN reference: `Phase-3 Fish Speech via fish-speech.rs`, `Output Adapter Boundary`
+
+### 7.4 - `tts_v0.3` example and validation
+
+- [ ] Add `examples/tts_v0.3/main.rs` with `--text`, `--wav`, `--reference-audio`, `--reference-text`, and optional named-voice selection.
+  DESIGN reference: `Phase-3 Fish Speech via fish-speech.rs`, `API Sketch`
+- [ ] Document the required artifact layout, voice-cache layout, and expected outputs in `examples/tts_v0.3/README.md`.
+  DESIGN reference: `Phase-3 Fish Speech via fish-speech.rs`
+- [ ] Add env-gated runtime checks for one CPU path on macOS/Linux and one accelerator smoke test where CUDA or Metal hardware is available.
+  DESIGN reference: `Phase-3 Fish Speech via fish-speech.rs`, `Testing Scope for PLAN`
+- [ ] Record CPU latency and intelligibility observations next to the plan once measurements exist; do not promote the bundle without that evidence.
+  DESIGN reference: `Phase-3 Fish Speech via fish-speech.rs`
+
+## Phase 8: Follow-On Breadth After the Vertical Slice
 
 Only broaden after the Piper slice is stable and the speech contract has held up under real usage.
 
-### 7.1 - Higher-value follow-ons
+### 8.1 - Higher-value follow-ons
 
 - [ ] Add a second curated Piper voice, ideally one that exercises speaker selection or a different sample rate.
   DESIGN reference: `Recommended Vertical Slice`, `Distribution Considerations`
@@ -297,8 +346,10 @@ Only broaden after the Piper slice is stable and the speech contract has held up
   DESIGN reference: `Alternatives Considered`
 - [ ] Evaluate XTTS v2 as a secondary cloning-focused backend family after Qwen3-TTS if the product later prioritizes reference-audio conditioning over CPU-first simplicity.
   DESIGN reference: `Alternatives Considered`
+- [ ] Keep Candle under active watch as the long-term native Rust runtime substrate if Motlie later wants to replace per-model ONNX export work with direct model ports.
+  DESIGN reference: `Fish Speech vs Candle vs Qwen3-TTS ONNX adapters`
 
-### 7.2 - Doc synchronization
+### 8.2 - Doc synchronization
 
 - [ ] Update `libs/model/docs/DESIGN.md` and `libs/model/docs/PLAN.md` if the implemented speech contract differs materially from this proposal.
   DESIGN reference: `Migration and Compatibility Strategy`
@@ -307,7 +358,7 @@ Only broaden after the Piper slice is stable and the speech contract has held up
 - [ ] Add changelog entries with `@codex-tts` and the implementation date in each modified doc.
   DESIGN reference: `Migration and Compatibility Strategy`
 
-## Phase 8: Commit and PR Hygiene
+## Phase 9: Commit and PR Hygiene
 
 - [ ] Keep commits scoped to the TTS contract, backend, curated bundle, examples, and related docs.
 - [ ] Do not stage harness files such as `AGENTS.md`.
