@@ -4,7 +4,6 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-04-15 | @codex-tts | Implemented the initial Fish Speech `tts_v0.3` vertical slice: native-Rust backend crate, curated `fish_speech_1_5` bundle, embedded default-voice assets, and `.wav` example. The first slice intentionally stops short of reference-audio cloning and named speaker selection, and validation on this Apple Silicon host required `RUSTFLAGS='-C target-cpu=native'` for upstream Candle/GEMM test and clippy paths. |
 | 2026-04-15 | @codex-tts | Added a Phase 3 Fish Speech research plan. Scopes `tts_v0.3` around `fish-speech.rs` / `fish_speech_core`, keeps the slice explicitly gated on non-commercial checkpoint acceptance, and compares that path against Candle and the existing Qwen3-TTS ONNX adapters. |
 | 2026-04-15 | @cld-review-models | Implemented Phase 2 Qwen3-TTS slice: `motlie-model-qwen3-tts` backend with multi-model ONNX pipeline, vocabulary-based tokenizer, proper log-mel reference-audio conditioning, shape-preserving tensor pipeline, curated bundle `qwen3_tts_12hz_0_6b`, and `tts_v0.2` example with voice cloning. Runtime boundary is in-process ONNX via `motlie-model-ort` with offline safetensors-to-ONNX export prerequisite. |
 | 2026-04-14 | @codex-tts | Addressed PR #179 review R1 by documenting the Phase 1 batch-then-chunk stream behavior, the Piper-only `SpeechParams.seed` rejection, and the current `ort` RC session-mutability constraint while keeping the validated artifact-policy fix in scope. |
@@ -295,9 +294,8 @@ Only start this if the product accepts a research-only / non-commercial checkpoi
 
 - [ ] Confirm the product can tolerate the Fish Audio Research License / non-commercial checkpoint terms for an opt-in research bundle.
   DESIGN reference: `Phase-3 Fish Speech via fish-speech.rs`
-- [x] Add `libs/model/backends/fish_speech/` as a distinct native-Rust backend family rather than extending the ONNX backends.
+- [ ] Add `libs/model/backends/fish_speech/` as a distinct native-Rust backend family rather than extending the ONNX backends.
   DESIGN reference: `Phase-3 Fish Speech via fish-speech.rs`
-  @codex-tts 2026-04-15 — implemented as `motlie-model-fish-speech`.
 - [ ] Prefer direct embedding through `fish_speech_core`; keep the `server` crate as a validation harness and sidecar fallback only.
   DESIGN reference: `Phase-3 Fish Speech via fish-speech.rs`
 - [ ] Document any unavoidable upstream/runtime drift between Fish Speech 1.5 in `fish-speech.rs` and the newer official S2 family.
@@ -305,46 +303,36 @@ Only start this if the product accepts a research-only / non-commercial checkpoi
 
 ### 7.2 - Artifact validation and curated bundle shape
 
-- [x] Define a Fish-specific artifact validator for the Fish 1.5 safetensor mirror (`model.safetensors`, vocoder checkpoint, tokenizer assets, config, and optional voice-conditioning assets).
+- [ ] Define a Fish-specific artifact validator for `model.pth`, vocoder checkpoint, tokenizer assets, config, and optional voice-conditioning assets.
   DESIGN reference: `Phase-3 Fish Speech via fish-speech.rs`
-  @codex-tts 2026-04-15 — implemented against `jkeisling/fish-speech-1.5`, which matches the upstream Rust loader's safetensor expectations.
-- [x] Add `src/tts/fish_speech_1_5.rs` with a research selector shape such as `tts:fish/fish_speech_1_5`.
+- [ ] Add `src/tts/fish_speech_1_5.rs` with a research selector shape such as `tts:fish/fish_speech_1_5`.
   DESIGN reference: `Phase-3 Fish Speech via fish-speech.rs`
-  @codex-tts 2026-04-15 — selector is `tts:fish/fish_speech_1_5`.
-- [x] Keep the bundle feature-gated and out of `default` features.
+- [ ] Keep the bundle feature-gated and out of `default` features.
   DESIGN reference: `Phase-3 Fish Speech via fish-speech.rs`, `Feature Flag Design`
-  @codex-tts 2026-04-15 — implemented as `model-fish-speech-1_5`, not included in `default`.
-- [x] Add backend-local feature flags for accelerator choices, for example `fish-speech-cuda` and `fish-speech-metal`, without changing the stable speech contract.
+- [ ] Add backend-local feature flags for accelerator choices, for example `fish-speech-cuda` and `fish-speech-metal`, without changing the stable speech contract.
   DESIGN reference: `Phase-3 Fish Speech via fish-speech.rs`
-  @codex-tts 2026-04-15 — implemented as `fish-speech-cuda` and `fish-speech-metal`.
 
 ### 7.3 - Speech stream and conditioning path
 
-- [x] Map text synthesis onto the existing `SpeechRequest` / `SpeechStream` contract with mono PCM output and stable `AudioSpec`.
+- [ ] Map text synthesis onto the existing `SpeechRequest` / `SpeechStream` contract with mono PCM output and stable `AudioSpec`.
   DESIGN reference: `Phase-3 Fish Speech via fish-speech.rs`, `Streaming PCM API Contract`
-  @codex-tts 2026-04-15 — implemented with buffered mono `S16Le` output from `open_stream()` through `next_chunk()`.
 - [ ] Implement `VoiceConditioning::ReferenceAudio { pcm, audio_spec, reference_text }` as the primary cloning path; fail early when `reference_text` is missing if the upstream prompted-cloning path requires it.
   DESIGN reference: `Phase-3 Fish Speech via fish-speech.rs`, `Streaming PCM API Contract`
 - [ ] Map persisted conditioning-token assets onto `VoiceConditioning::SpeakerId`.
   DESIGN reference: `Phase-3 Fish Speech via fish-speech.rs`, `Streaming PCM API Contract`
-- [x] Emit `PcmChunk` frames directly from the backend; do not leak OGG or WAV containers through the model-layer contract.
+- [ ] Emit `PcmChunk` frames directly from the backend; do not leak OGG or WAV containers through the model-layer contract.
   DESIGN reference: `Phase-3 Fish Speech via fish-speech.rs`, `Output Adapter Boundary`
-  @codex-tts 2026-04-15 — the backend returns raw `PcmChunk` frames only; `.wav` remains example-layer behavior.
 
 ### 7.4 - `tts_v0.3` example and validation
 
 - [ ] Add `examples/tts_v0.3/main.rs` with `--text`, `--wav`, `--reference-audio`, `--reference-text`, and optional named-voice selection.
   DESIGN reference: `Phase-3 Fish Speech via fish-speech.rs`, `API Sketch`
-  @codex-tts 2026-04-15 — implemented as a narrower first slice with `--text`, `--wav`, and `--artifact-root`; cloning and named voices remain follow-up work.
-- [x] Document the required artifact layout, voice-cache layout, and expected outputs in `examples/tts_v0.3/README.md`.
+- [ ] Document the required artifact layout, voice-cache layout, and expected outputs in `examples/tts_v0.3/README.md`.
   DESIGN reference: `Phase-3 Fish Speech via fish-speech.rs`
-  @codex-tts 2026-04-15 — README documents the current embedded default-voice behavior and artifact-root expectations.
 - [ ] Add env-gated runtime checks for one CPU path on macOS/Linux and one accelerator smoke test where CUDA or Metal hardware is available.
   DESIGN reference: `Phase-3 Fish Speech via fish-speech.rs`, `Testing Scope for PLAN`
-  @codex-tts 2026-04-15 — added an env-gated bundle synthesis test keyed by `MOTLIE_TEST_FISH_SPEECH_ARTIFACT_ROOT`; accelerator runtime smoke remains environment-dependent.
 - [ ] Record CPU latency and intelligibility observations next to the plan once measurements exist; do not promote the bundle without that evidence.
   DESIGN reference: `Phase-3 Fish Speech via fish-speech.rs`
-  @codex-tts 2026-04-15 — validation on this Apple Silicon host required `RUSTFLAGS='-C target-cpu=native'` because upstream Candle/GEMM FP16 kernels do not compile for the generic baseline target.
 
 ## Phase 8: Follow-On Breadth After the Vertical Slice
 

@@ -1,12 +1,11 @@
 # TTS Model Support Design
 
-## Status: Implemented (Phases 1-2); Phase 3 initial vertical slice implemented
+## Status: Implemented (Phases 1-2); Phase 3 Research in Progress
 
 ## Change Log
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-04-15 | @codex-tts | Implemented the initial Fish Speech `tts_v0.3` vertical slice as a research-only bundle: `motlie-model-fish-speech`, curated `fish_speech_1_5`, and a `.wav` example that proves real speech end to end through the existing `SpeechModel` / `SpeechStream` contract. The first slice uses embedded default-voice assets, buffered `S16Le` chunk output, and explicitly rejects reference-audio cloning and non-default speaker selection until the runtime path is proven further. |
 | 2026-04-15 | @codex-tts | Added a reproducible Qwen3-TTS ONNX export runbook and checked in the export script under `libs/models/scripts/`. Documented the current adapter-graph workaround and the gap between the official Qwen runtime and the current Rust backend contract. |
 | 2026-04-15 | @codex-tts | Added Phase 3 Fish Speech research. Evaluates `fish-speech.rs` as the strongest native-Rust path to real intelligible speech, compares it against Candle and the current Qwen3-TTS ONNX-adapter path, and scopes Fish Speech as an opt-in `tts_v0.3` research slice rather than a default curated bundle because the checkpoint license is still non-commercial. |
 | 2026-04-15 | @cld-review-models | Implemented Phase 2 Qwen3-TTS vertical slice. Runtime boundary: in-process ONNX via `motlie-model-ort` with pre-exported model components (encoder, decoder, vocoder). Upstream safetensors must be exported to ONNX offline before the curated bundle can start. Added vocabulary-based tokenizer, proper Hann-windowed DFT mel spectrogram for reference-audio conditioning, and shape-preserving tensor pipeline between ONNX stages. |
@@ -772,16 +771,6 @@ Recommended Phase 3 position:
 - prefer the direct Rust crate path via `fish_speech_core`
 - keep the `server` crate as a validation reference and sidecar fallback, not as the primary Motlie backend boundary
 - require explicit product approval before curating the upstream checkpoints because the published Fish Audio weight terms are non-commercial
-
-Current implementation note:
-
-- the shipped `tts_v0.3` slice uses a dedicated `motlie-model-fish-speech` backend crate pinned to `fish-speech.rs` revision `e5a172a`
-- the backend is in-process and Rust-native, but it currently reuses both `fish_speech_core` and the upstream `server` crate's load/state helpers rather than only the core crate
-- the curated bundle targets the `jkeisling/fish-speech-1.5` safetensor mirror because the upstream Rust runtime expects `model.safetensors`, `tokenizer.json`, and the safetensor vocoder artifact
-- the backend embeds the upstream `voices-template/default.npy` and `index.json` assets so the first slice does not require caller-managed voice directories
-- the first slice synthesizes the full utterance in `open_stream()` and then drains buffered `S16Le` PCM through `next_chunk()`
-- supported request surface is intentionally narrow: plain text plus the embedded default voice; `SpeechParams.speaking_rate`, `SpeechParams.seed`, non-zero `SpeakerId`, and `ReferenceAudio` conditioning are rejected with explicit `InvalidConfiguration`
-- on this Apple Silicon validation host, upstream Candle/GEMM test and clippy paths required `RUSTFLAGS='-C target-cpu=native'` because the generic baseline target does not expose the needed FP16 instructions
 
 #### Why Fish Speech is viable
 
