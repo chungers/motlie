@@ -6,9 +6,7 @@
 //! Or with files:
 //!   cargo run -p motlie-models --example tts_asr_aggregate --no-default-features -- \
 //!     --input results_piper_whisper.jsonl \
-//!     --input results_piper_sherpa.jsonl \
-//!     --input results_qwen3_whisper.jsonl \
-//!     --input results_qwen3_sherpa.jsonl
+//!     --input results_piper_sherpa.jsonl
 
 use std::collections::BTreeMap;
 use std::io::{self, BufRead};

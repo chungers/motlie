@@ -22,9 +22,9 @@ Measured on `2026-04-15` and refreshed on `2026-04-16` by `@codex-dgx-e2e`.
   adding per-sample RSS capture (`resident_memory_bytes`,
   `peak_resident_memory_bytes`) and correcting the aggregator's even-sample
   median computation.
-- Qwen3-TTS pipelines were intentionally skipped in this follow-up because the
-  current exported decoder/vocoder produce noisy output and ~100% WER, making
-  those lanes uninformative for benchmarking.
+- The Qwen3-TTS ONNX pipeline path is now treated as dead/deprecated for this
+  suite and the example binaries were removed from PR `#182`. Follow-on TTS
+  work is expected to use `qwen3_tts_rs` and F5-TTS instead.
 
 ## Matrix Status
 
@@ -34,10 +34,10 @@ Measured on `2026-04-15` and refreshed on `2026-04-16` by `@codex-dgx-e2e`.
 | Piper → whisper.cpp | CUDA | Completed | 100/100 | Benchmark data captured |
 | Piper → sherpa-onnx | CPU | Completed | 100/100 | Benchmark data captured after PR `#183` |
 | Piper → sherpa-onnx | CUDA | Completed | 100/100 | Benchmark data captured after PR `#183` |
-| Qwen3-TTS → whisper.cpp | CPU | Skipped | 0/100 | Current ONNX export path produces noisy output and ~100% WER |
-| Qwen3-TTS → whisper.cpp | CUDA | Skipped | 0/100 | Current ONNX export path produces noisy output and ~100% WER |
-| Qwen3-TTS → sherpa-onnx | CPU | Skipped | 0/100 | Current ONNX export path produces noisy output and ~100% WER |
-| Qwen3-TTS → sherpa-onnx | CUDA | Skipped | 0/100 | Current ONNX export path produces noisy output and ~100% WER |
+| ~~Qwen3-TTS ONNX → whisper.cpp~~ | CPU | Removed | 0/100 | Dead/deprecated path removed from PR `#182` |
+| ~~Qwen3-TTS ONNX → whisper.cpp~~ | CUDA | Removed | 0/100 | Dead/deprecated path removed from PR `#182` |
+| ~~Qwen3-TTS ONNX → sherpa-onnx~~ | CPU | Removed | 0/100 | Dead/deprecated path removed from PR `#182` |
+| ~~Qwen3-TTS ONNX → sherpa-onnx~~ | CUDA | Removed | 0/100 | Dead/deprecated path removed from PR `#182` |
 
 ## Aggregate Results
 
@@ -84,14 +84,16 @@ Measured on `2026-04-15` and refreshed on `2026-04-16` by `@codex-dgx-e2e`.
 
 ## Known Exclusions
 
-### Qwen3-TTS pipelines
+### Qwen3-TTS ONNX pipelines
 
 ```text
 decoder/vocoder exports currently produce noisy output, yielding ~100% WER
 ```
 
-These lanes were intentionally skipped in the Sherpa follow-up run because their
-current export state does not produce useful benchmark comparisons.
+These lanes have now been removed from PR `#182` entirely because their ONNX
+export state does not produce useful benchmark comparisons. Replacement work is
+expected to move to `qwen3_tts_rs` and F5-TTS instead of reviving the dead ONNX
+wrappers.
 
 ## Raw Result Files
 
@@ -99,7 +101,3 @@ current export state does not produce useful benchmark comparisons.
 - `results_piper_whisper_cuda.jsonl`
 - `results_piper_sherpa_cpu.jsonl`
 - `results_piper_sherpa_cuda.jsonl`
-- `results_qwen3_whisper_cpu.jsonl`
-- `results_qwen3_whisper_cuda.jsonl`
-- `results_qwen3_sherpa_cpu.jsonl`
-- `results_qwen3_sherpa_cuda.jsonl`

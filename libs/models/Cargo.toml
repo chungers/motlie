@@ -110,16 +110,6 @@ path = "examples/tts_asr/piper_sherpa/main.rs"
 required-features = ["model-piper-en-us-ljspeech-medium", "model-sherpa-onnx-streaming"]
 
 [[example]]
-name = "tts_asr_qwen3_whisper"
-path = "examples/tts_asr/qwen3_whisper/main.rs"
-required-features = ["model-qwen3-tts-0_6b", "model-whisper-base-en"]
-
-[[example]]
-name = "tts_asr_qwen3_sherpa"
-path = "examples/tts_asr/qwen3_sherpa/main.rs"
-required-features = ["model-qwen3-tts-0_6b", "model-sherpa-onnx-streaming"]
-
-[[example]]
 name = "tts_asr_aggregate"
 path = "examples/tts_asr/aggregate/main.rs"
 
