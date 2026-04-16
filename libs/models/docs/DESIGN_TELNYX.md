@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-04-15 | @codex-macmini-telnyx: Added the pluggable `ConversationHandler` stage, made ASR/TTS injection explicit, and documented private-host deployment plus a local getting-started flow using ngrok or Tailscale Funnel. | Overview, Recommended Integration Shape, Recommended ASR/TTS Stack, Inbound Call Handler Design, Deployment: Private Host, Getting Started: Local Deployment, Open Concerns |
 | 2026-04-15 | @codex-macmini-telnyx: Added the recommended v1 ASR/TTS stack, concrete telephony pipeline, and latency budget based on current Motlie benchmark results and backend readiness. | Recommended ASR/TTS Stack, Gap Analysis, Open Concerns |
 | 2026-04-15 | @codex-macmini-telnyx: Initial Telnyx real-time voice integration design for Motlie. Documents Telnyx API research, recommends a WebSocket media gateway over the existing ASR/TTS contracts, and outlines brownfield gaps around codecs, resampling, duplex orchestration, and deployment. | All |
 
@@ -20,6 +21,9 @@ This document defines a brownfield design for integrating Telnyx programmable vo
 - [Recommended ASR/TTS Stack](#recommended-asrtts-stack)
 - [Inbound Call Handler Design](#inbound-call-handler-design)
 - [Outbound Call Handler Design](#outbound-call-handler-design)
+- [Deployment: Private Host](#deployment-private-host)
+- [Getting Started: Local Deployment](#getting-started-local-deployment)
+- [v1.1: DTMF and Call Control](#v11-dtmf-and-call-control)
 - [Gap Analysis](#gap-analysis)
 - [Alternatives Considered](#alternatives-considered)
 - [Testing Scope for PLAN](#testing-scope-for-plan)
@@ -42,7 +46,7 @@ It does not yet have a telephony transport layer that can:
 
 - receive live call audio from Telnyx
 - normalize Telnyx media frames into `TranscriptionStream`
-- route transcript updates into application logic
+- route transcript updates into application logic through a pluggable conversation stage
 - synthesize TTS responses with `SpeechModel`
 - send outbound call audio back over the same Telnyx media channel
 
@@ -68,12 +72,15 @@ This keeps telephony transport concerns out of the model contracts while preserv
 ### Goals
 
 - Integrate Telnyx inbound and outbound calls with Motlie ASR/TTS
+- Make the conversation stage explicitly pluggable for application-specific logic
 - Reuse `TranscriptionModel` / `TranscriptionStream` for inbound speech
 - Reuse `SpeechModel` / `SpeechStream` for outbound speech
+- Allow any `TranscriptionModel` and `SpeechModel` implementation to be injected without changing gateway code
 - Minimize telephony latency by preferring Telnyx bidirectional RTP streaming over queued MP3 playback
 - Keep codec and transport adaptation outside `libs/model`
 - Support interruption and barge-in at the gateway layer
 - Keep room for multiple ASR/TTS backend combinations behind the same gateway
+- Support private-host deployment behind ngrok or Tailscale Funnel for v1
 
 ### Non-Goals
 
@@ -82,6 +89,7 @@ This keeps telephony transport concerns out of the model contracts while preserv
 - Building a generic RTP or SIPREC platform before Telnyx is validated
 - Extending `libs/model` into a network server framework
 - Solving call-center features such as transfers, conferencing, queueing, or supervisor modes in the first cut
+- Assuming cloud deployment, public IPs, or load balancers in v1
 
 ## Telnyx API Research
 
@@ -265,7 +273,7 @@ Telnyx webhook -> motlie-telnyx-gateway HTTP handler
 Telnyx media WebSocket -> voice_telnyx session
                        -> codec decoder / jitter reorder / resampler
                        -> TranscriptionStream
-                       -> application dialog logic
+                       -> ConversationHandler
                        -> SpeechModel / SpeechStream
                        -> encoder / packetizer
                        -> Telnyx media WebSocket
@@ -286,7 +294,9 @@ Primary gateway subsystems:
 6. `audio_pipeline`
    Reorder chunks, resample to model-native rates, and adapt into `PcmChunk`.
 7. `conversation_orchestrator`
-   Owns ASR stream, application turn logic, TTS stream, barge-in rules, and shutdown.
+   Owns ASR stream, `ConversationHandler`, TTS stream, barge-in rules, and shutdown.
+8. `conversation_handler`
+   The application-specific async text-processing stage where LLM calls, business logic, RAG, policy checks, or workflow actions run.
 
 ### Why This Belongs Above `libs/model`
 
@@ -302,6 +312,7 @@ Telnyx integration adds:
 - codec transcoding
 - jitter and reordering
 - call-control lifecycle
+- application conversation orchestration
 
 Those are telephony concerns, not model capability concerns.
 
@@ -322,6 +333,132 @@ Why:
 
 If a TTS backend emits a different format, the gateway should resample before sending to Telnyx.
 
+### Pluggable Model Injection
+
+The gateway must not hardcode `sherpa-onnx`, `whisper.cpp`, Piper, Fish Speech, or any other concrete backend.
+
+Recommended construction rule:
+
+- the gateway accepts any `dyn TranscriptionModel` for ASR
+- the gateway accepts any `dyn SpeechModel` for TTS
+- the gateway accepts any `dyn ConversationHandler` for application logic
+
+This can be expressed with trait objects, generics, or a builder. The important point is the dependency boundary, not the exact Rust ergonomics.
+
+Example sketch:
+
+```rust
+pub struct TelnyxGateway {
+    asr: Arc<dyn TranscriptionModel>,
+    tts: Arc<dyn SpeechModel>,
+    handler: Arc<dyn ConversationHandler>,
+    telnyx: TelnyxCallControlClient,
+    sessions: Arc<SessionRegistry>,
+}
+```
+
+That keeps the transport reusable while letting callers swap:
+
+- `sherpa-onnx` for `whisper.cpp`
+- Piper for Fish Speech
+- a trivial echo handler for an LLM-backed assistant
+
+without changing gateway code.
+
+### Conversation Handler Contract
+
+Between ASR transcript output and TTS response input, the gateway should expose a dedicated pluggable processing stage.
+
+Recommended conversational pipeline:
+
+```text
+Inbound audio
+-> ASR
+-> transcript text
+-> ConversationHandler
+-> response text
+-> TTS
+-> outbound audio
+```
+
+Recommended Rust shapes:
+
+```rust
+use async_trait::async_trait;
+use std::collections::BTreeMap;
+
+pub struct ConversationTurn {
+    pub speaker: TurnSpeaker,
+    pub text: String,
+}
+
+pub enum TurnSpeaker {
+    Caller,
+    Assistant,
+    System,
+}
+
+pub struct ConversationContext {
+    pub call_id: String,
+    pub turn_history: Vec<ConversationTurn>,
+    pub custom_state: BTreeMap<String, String>,
+}
+
+pub struct ConversationError {
+    pub message: String,
+}
+
+#[async_trait]
+pub trait ConversationHandler: Send + Sync {
+    async fn handle(
+        &self,
+        transcript: &str,
+        context: &mut ConversationContext,
+    ) -> Result<String, ConversationError>;
+}
+```
+
+This is the main extensibility point for:
+
+- LLM inference
+- business logic
+- RAG lookups
+- workflow integrations
+- deterministic rule engines
+
+The transport and speech stack stay reusable infrastructure. The handler is the application-specific component.
+
+### Streaming Conversation Responses
+
+The handler should also support a streaming mode for lower latency so partial text can begin TTS before the full response is ready.
+
+Recommended extension path:
+
+```rust
+use core::pin::Pin;
+use futures_core::Stream;
+
+pub type TextChunkStream =
+    Pin<Box<dyn Stream<Item = Result<String, ConversationError>> + Send>>;
+
+#[async_trait]
+pub trait ConversationHandler: Send + Sync {
+    async fn handle(
+        &self,
+        transcript: &str,
+        context: &mut ConversationContext,
+    ) -> Result<String, ConversationError>;
+
+    async fn handle_streaming(
+        &self,
+        transcript: &str,
+        context: &mut ConversationContext,
+    ) -> Result<TextChunkStream, ConversationError>;
+}
+```
+
+The exact chunking policy should remain gateway-local so the handler returns text fragments and the gateway decides when those fragments are stable enough to synthesize.
+
 ## Recommended ASR/TTS Stack
 
 ### Recommended v1 Stack
@@ -332,6 +469,7 @@ For Telnyx real-time voice, the recommended Motlie v1 stack is:
 - TTS: Piper
 
 This recommendation is based on the current Motlie benchmark and implementation status, not on long-term model ambition.
+It is guidance for v1 defaults, not a hard dependency of the gateway architecture.
 
 ### Recommended ASR: `sherpa-onnx`
 
@@ -350,7 +488,8 @@ Implications:
 
 Recommended design rule:
 
-- Telnyx v1 should treat `sherpa-onnx` as the default and only supported ASR backend for the real-time conversational flow
+- Telnyx v1 should treat `sherpa-onnx` as the default recommended ASR backend for the real-time conversational flow
+- the gateway itself should still accept any injected `TranscriptionModel`
 
 ### Recommended TTS: Piper
 
@@ -381,7 +520,8 @@ Phase 3 status:
 
 Recommended design rule:
 
-- Telnyx v1 should standardize on Piper and defer richer voice-selection work until a second TTS backend is actually operational
+- Telnyx v1 should standardize on Piper as the default recommended backend and defer richer voice-selection work until a second TTS backend is actually operational
+- the gateway itself should still accept any injected `SpeechModel`
 
 ### Recommended Telnyx v1 Pipeline
 
@@ -393,7 +533,7 @@ Inbound Telnyx audio
 -> resample 8 kHz to 16 kHz
 -> sherpa-onnx streaming ASR
 -> transcript
--> application logic
+-> ConversationHandler
 -> response text
 -> Piper TTS
 -> PCM at about 22 kHz
@@ -445,8 +585,8 @@ Recommended inbound flow:
 5. Telnyx opens the WebSocket.
 6. On `start`, the gateway finalizes session media metadata and opens `TranscriptionStream`.
 7. Each inbound `media` event is decoded, reordered, converted to normalized PCM, and pushed into the ASR stream.
-8. ASR updates are sent to application logic.
-9. Application logic produces response text.
+8. ASR updates are sent to the `ConversationHandler`.
+9. The `ConversationHandler` produces response text.
 10. TTS converts response text into PCM chunks.
 11. Gateway encodes outbound audio into the configured Telnyx format and sends `media` events back on the same WebSocket.
 12. On hangup or `stop`, the gateway finishes the ASR stream and tears down the session.
@@ -459,7 +599,9 @@ Recommended shapes:
 pub struct TelnyxGateway {
     sessions: Arc<SessionRegistry>,
     telnyx: TelnyxCallControlClient,
-    app: Arc<dyn VoiceApplication>,
+    asr: Arc<dyn TranscriptionModel>,
+    tts: Arc<dyn SpeechModel>,
+    handler: Arc<dyn ConversationHandler>,
 }
 
 pub struct TelnyxCallSession {
@@ -472,19 +614,11 @@ pub struct TelnyxCallSession {
     pub outbound_encoder: Box<dyn AudioEncoder>,
     pub asr: Box<dyn TranscriptionStream>,
     pub current_tts: Option<Box<dyn SpeechStream>>,
-}
-
-#[async_trait]
-pub trait VoiceApplication: Send + Sync {
-    async fn on_transcription(
-        &self,
-        call: &CallContext,
-        update: TranscriptionUpdate,
-    ) -> Result<Vec<VoiceAction>, VoiceAppError>;
+    pub conversation: ConversationContext,
 }
 ```
 
-This keeps Telnyx-specific types outside the model crates while allowing application logic to remain transport-agnostic.
+This keeps Telnyx-specific types outside the model crates while allowing ASR, TTS, and conversation logic to remain transport-agnostic.
 
 ### Mapping Telnyx Frames to `TranscriptionStream`
 
@@ -515,16 +649,15 @@ Recommended gateway rule:
 
 This isolates Telnyx transport quirks from the ASR contract.
 
-### Feeding Application Logic
+### Feeding the Conversation Handler
 
 The gateway should not bake dialog policy into the Telnyx crate. Instead:
 
-- ASR partials and finals are delivered to an application callback
-- the callback returns actions such as:
-  - continue listening
-  - speak text
-  - hang up
-  - clear current playback
+- ASR partials and finals are converted into transcript text events
+- transcript text is delivered to an injected `ConversationHandler`
+- the handler reads and mutates `ConversationContext`
+- the handler returns response text or a streaming text response
+- the gateway turns that text into TTS audio
 
 This is the cleanest seam for integrating Motlie-specific agent logic later.
 
@@ -618,6 +751,525 @@ impl TelnyxGateway {
 ```
 
 The call-control client should remain explicit instead of hiding Telnyx behavior behind a generic telephony abstraction too early.
+
+## v1.1: DTMF and Call Control
+
+### DTMF During WebSocket Media Streaming
+
+Telnyx documents a dedicated WebSocket `dtmf` event during media streaming. For the gateway design, this means DTMF should be treated as an out-of-band control signal, not only as audio embedded in the media stream.
+
+Practical implication:
+
+- primary DTMF path: consume Telnyx `dtmf` WebSocket events
+- fallback path: detect tones from audio only if required by an edge case or carrier behavior
+
+This is the preferred design because it keeps keypad navigation separate from ASR and avoids confusing tone bursts with speech.
+
+### In-Band vs Out-of-Band DTMF
+
+Current Telnyx evidence:
+
+- media streaming sends a dedicated `dtmf` WebSocket event when DTMF occurs on the call
+- Call Control Applications also expose a configurable `dtmf_type` field for how DTMF is sent from Telnyx to the connection
+
+Inference from these sources:
+
+- for the Motlie WebSocket media path, DTMF should usually be modeled as out-of-band because Telnyx already surfaces it separately
+- the inbound audio stream may still contain audible DTMF energy depending on remote endpoint behavior, carrier path, or chosen call-control features
+
+Design rule:
+
+- trust the WebSocket `dtmf` event as authoritative when present
+- keep optional in-band detection and suppression as a defensive fallback rather than the main control path
+
+### Can We Detect DTMF From Audio Ourselves?
+
+Yes. If the audio stream contains in-band tones, the gateway can detect them with classic DSP approaches such as:
+
+- Goertzel detectors for the standard DTMF frequency pairs
+- narrow bandpass analysis around the DTMF rows and columns
+
+This should be treated as a fallback path only.
+
+Reasons not to make audio-only DTMF detection the default:
+
+- Telnyx already provides a control event
+- ASR and DTMF detection compete for the same audio frames
+- false positives are possible with noisy telephony audio
+
+### Sending DTMF Outbound
+
+Telnyx exposes a `send_dtmf` call-control command for active calls. That is the right mechanism for:
+
+- navigating IVR menus
+- entering voicemail PINs
+- acknowledging automated systems
+
+The gateway should use the command API rather than synthesizing DTMF tones into the outbound audio stream whenever the goal is remote IVR control.
+
+### Call Control Commands During an Active Call
+
+Telnyx Call Control supports a broad set of active-call commands. Relevant families for Motlie include:
+
+- `answer`, `hangup`, `reject`
+- `streaming_start`, `streaming_stop`
+- `gather_using_audio`
+- `send_dtmf`
+- `playback_start`, `playback_stop`
+- `speak`
+- `enqueue`
+- `transfer` / refer-style redirection and bridge-style workflows, depending on the call topology
+- recording commands
+- conference commands for join, hold, mute, and participant control when the call is moved into a conference
+
+Inference from the command model:
+
+- active-call commands operate on `call_control_id`
+- media streaming also operates on the same active call
+- therefore call-control commands can be issued while WebSocket media is active
+
+Operational caveat:
+
+- commands like `gather_using_audio`, `playback_start`, and `speak` can overlap with the custom media loop and create competing audio sources
+- v1 should avoid mixing Telnyx-hosted prompt playback with Motlie-generated TTS unless there is a clear reason
+
+### How Telnyx Gather Works
+
+Telnyx exposes `gather_using_audio` to play an audio prompt and collect digits from the caller.
+
+That feature is useful for:
+
+- legacy IVR flows
+- hybrid applications where some branches use keypad input instead of speech
+
+For the Motlie gateway, `gather_using_audio` should be treated as an optional call-control tool, not the main conversational path, because:
+
+- Motlie already has a custom media loop
+- the gateway can receive DTMF events directly
+- a local `DtmfHandler` is often simpler than temporarily delegating prompt-plus-digit control back to Telnyx
+
+Recommended rule:
+
+- use direct WebSocket `dtmf` events plus local application logic by default
+- reserve `gather_using_audio` for flows where Telnyx-hosted prompt playback is intentionally desired
+
+### Filtering DTMF From Voice Before ASR
+
+If DTMF is present in the audio path, the gateway should keep those tones from degrading ASR.
+
+Recommended handling:
+
+1. consume WebSocket `dtmf` events as the canonical keypad signal
+2. when a `dtmf` event arrives, mark the corresponding time window in session state
+3. suppress or attenuate the matching inbound audio window before feeding it to ASR
+
+If explicit event timing is insufficient or absent, use a fallback detector such as a Goertzel filter to find the DTMF tone pair and blank or attenuate those frames.
+
+Recommended v1.1 DSP policy:
+
+- zero or attenuate short DTMF windows before ASR
+- keep the original event in control flow
+- do not send DTMF-derived frames into `ConversationHandler`
+
+### Correlating DTMF Events With Audio Timeline
+
+If DTMF is surfaced out-of-band, the gateway still needs to correlate it with audio timing for filtering and observability.
+
+Recommended approach:
+
+- store arrival metadata from the `dtmf` event
+- align it to the session's media chunk clock using the latest ordered chunk index and timestamp
+- record a short mute window in normalized PCM time
+
+This does not need sample-perfect accuracy for v1.1. The practical goal is to keep tone bursts out of ASR and expose consistent keypad events to the application layer.
+
+### Proposed `DtmfHandler` Trait
+
+DTMF handling should sit alongside `ConversationHandler`.
+
+Voice path:
+
+```text
+audio -> ASR -> ConversationHandler -> TTS
+```
+
+DTMF path:
+
+```text
+dtmf event -> DtmfHandler -> CallAction
+```
+
+Recommended Rust shapes:
+
+```rust
+use async_trait::async_trait;
+
+pub enum DtmfDigit {
+    D0,
+    D1,
+    D2,
+    D3,
+    D4,
+    D5,
+    D6,
+    D7,
+    D8,
+    D9,
+    Star,
+    Hash,
+    A,
+    B,
+    C,
+    D,
+}
+
+pub enum CallAction {
+    Continue,
+    Transfer { destination: String },
+    Hold,
+    Hangup,
+    PlayAudio { path: String },
+    GatherMore { timeout_ms: u64 },
+}
+
+#[async_trait]
+pub trait DtmfHandler: Send + Sync {
+    async fn on_dtmf(
+        &self,
+        digit: DtmfDigit,
+        context: &mut ConversationContext,
+    ) -> Result<CallAction, ConversationError>;
+}
+```
+
+Design intent:
+
+- `ConversationHandler` owns spoken language
+- `DtmfHandler` owns keypad control
+- both can read and mutate shared call state
+
+### Scripted Outbound IVR Navigation
+
+For outbound calls that must navigate an IVR before reaching a human, the gateway should support a scripted sequence controller.
+
+Example behavior:
+
+- wait for prompt
+- send DTMF `1`
+- wait for next prompt
+- send DTMF `3`
+- wait for human pickup
+
+Recommended abstraction:
+
+```rust
+#[async_trait]
+pub trait IvrNavigator: Send + Sync {
+    async fn on_event(
+        &self,
+        event: IvrEvent,
+        context: &mut ConversationContext,
+    ) -> Result<Vec<CallAction>, ConversationError>;
+}
+```
+
+Useful `IvrEvent` inputs could include:
+
+- prompt started
+- prompt finished
+- DTMF acknowledged
+- silence timeout
+- transcript matched phrase
+- human detected
+
+This keeps outbound IVR automation separate from the human-conversation path while reusing the same call-control client and session state.
+
+## Deployment: Private Host
+
+### v1 Deployment Constraint
+
+The initial Telnyx integration must support running on a private host behind a tunnel, not just on the open internet.
+
+Supported v1 deployment shapes:
+
+- a private DGX host with an ngrok tunnel
+- a private mac mini with an ngrok tunnel
+- a private Tailscale-connected host using Tailscale Funnel
+
+Not assumed in v1:
+
+- public cloud deployment
+- public IP addresses
+- load balancers
+- Kubernetes ingress
+
+### Why Tunneling Is Required
+
+Telnyx requires reachable external URLs for:
+
+- voice webhooks over HTTPS
+- media WebSocket connections over `wss://`
+
+If the gateway runs on a private host, an external tunnel must expose those endpoints.
+
+### Option 1: ngrok
+
+ngrok is the simpler and more disposable option.
+
+Current documented behavior from ngrok:
+
+- `ngrok http <port>` creates a public HTTPS endpoint to a local HTTP service
+- HTTP/S endpoints support WebSockets out of the box
+- the agent establishes outbound TLS connections; no inbound port opening is required
+
+Recommended v1 ngrok workflow:
+
+1. run the gateway locally on a private host
+2. start `ngrok http <gateway-port>`
+3. use the generated `https://...ngrok.app` URL for Telnyx webhooks
+4. use the matching `wss://...ngrok.app/...` URL for Telnyx media streaming
+5. update the Telnyx application webhook URL whenever the ngrok hostname changes
+
+### Option 2: Tailscale Funnel
+
+Tailscale Funnel is the more persistent mesh-native option.
+
+Current documented behavior from Tailscale:
+
+- Funnel exposes a local service on a public `https://<node>.<tailnet>.ts.net` URL
+- it requires MagicDNS, HTTPS certificates, and Funnel permission in the tailnet
+- it only supports public HTTPS exposure on ports `443`, `8443`, and `10000`
+
+Recommended v1 Funnel workflow:
+
+1. run the gateway locally on the private host
+2. expose it with `tailscale funnel`
+3. use the resulting `https://<node>.<tailnet>.ts.net` URL for Telnyx webhooks
+4. use the matching `wss://<node>.<tailnet>.ts.net/...` URL for Telnyx media streaming
+
+### Gateway Configuration Requirement
+
+The gateway binary should accept a `--webhook-url` flag so the external public URL can be configured independently of the local listen address.
+
+Example shape:
+
+```text
+motlie-telnyx-gateway \
+  --listen 127.0.0.1:8080 \
+  --webhook-url https://example.ngrok.app \
+  --media-path /telnyx/media \
+  --webhook-path /telnyx/webhooks
+```
+
+This matters because the process may listen on `127.0.0.1:8080` while Telnyx needs the externally reachable tunnel URL, not the private bind address.
+
+### Recommended v1 Dev Workflow
+
+1. start the gateway on the private host
+2. start ngrok or Tailscale Funnel
+3. configure the Telnyx webhook URL to the tunnel URL
+4. make or receive calls
+
+## Getting Started: Local Deployment
+
+This section is intentionally operator-oriented. It describes how to go from zero to a first inbound and outbound call without assuming public cloud deployment.
+
+### Telnyx Account Setup
+
+#### 1. Create a Telnyx account and API key
+
+Create a Telnyx account in Mission Control, then create an API key for Voice API calls. All programmable voice requests use:
+
+```text
+Authorization: Bearer $TELNYX_API_KEY
+```
+
+#### 2. Purchase a phone number
+
+You can do this in the portal or via API.
+
+Example search and purchase flow:
+
+```bash
+curl -X GET \
+  --header "Authorization: Bearer $TELNYX_API_KEY" \
+  "https://api.telnyx.com/v2/available_phone_numbers?filter[country_code]=US&filter[locality]=Chicago"
+
+curl -X POST \
+  --header "Content-Type: application/json" \
+  --header "Authorization: Bearer $TELNYX_API_KEY" \
+  --data '{
+    "phone_numbers": [
+      { "phone_number": "+13125551234" }
+    ]
+  }' \
+  "https://api.telnyx.com/v2/number_orders"
+```
+
+#### 3. Create a Call Control Application
+
+For Motlie's Telnyx gateway, prefer a Call Control Application over TeXML because the design depends on programmable voice webhooks plus media streaming commands.
+
+Current Telnyx create call control application request:
+
+```bash
+curl -X POST \
+  --header "Content-Type: application/json" \
+  --header "Authorization: Bearer $TELNYX_API_KEY" \
+  --data '{
+    "application_name": "motlie-telnyx-local",
+    "webhook_event_url": "https://example.ngrok.app/telnyx/webhooks",
+    "webhook_api_version": "2"
+  }' \
+  "https://api.telnyx.com/v2/call_control_applications"
+```
+
+This returns the application `id`, which is also the `connection_id` used for outbound calls.
+
+#### 4. Configure the webhook URL
+
+If your tunnel URL changes, update the application:
+
+```bash
+curl -X PATCH \
+  --header "Content-Type: application/json" \
+  --header "Authorization: Bearer $TELNYX_API_KEY" \
+  --data '{
+    "webhook_event_url": "https://example.ngrok.app/telnyx/webhooks",
+    "webhook_api_version": "2"
+  }' \
+  "https://api.telnyx.com/v2/call_control_applications/$TELNYX_CONNECTION_ID"
+```
+
+#### 5. Assign the phone number to the application
+
+Telnyx phone numbers carry a `connection_id`. Set that to the Call Control Application ID.
+
+```bash
+curl -X PATCH \
+  --header "Content-Type: application/json" \
+  --header "Authorization: Bearer $TELNYX_API_KEY" \
+  --data "{
+    \"connection_id\": \"$TELNYX_CONNECTION_ID\"
+  }" \
+  "https://api.telnyx.com/v2/phone_numbers/$TELNYX_PHONE_NUMBER_ID"
+```
+
+You can verify the current voice settings with:
+
+```bash
+curl -X GET \
+  --header "Authorization: Bearer $TELNYX_API_KEY" \
+  "https://api.telnyx.com/v2/phone_numbers/$TELNYX_PHONE_NUMBER_ID/voice"
+```
+
+### Local Host Setup
+
+#### 6. Build the gateway binary
+
+```bash
+cargo build --release -p motlie-telnyx-gateway
+```
+
+#### 7. Download model artifacts
+
+Download the artifacts for the models you want to run.
+
+Recommended v1 defaults:
+
+- Piper voice model
+- `sherpa-onnx` Zipformer2 streaming model
+
+#### 8. Start the gateway with model paths and listen address
+
+```bash
+./target/release/motlie-telnyx-gateway \
+  --listen 127.0.0.1:8080 \
+  --webhook-url https://example.ngrok.app \
+  --webhook-path /telnyx/webhooks \
+  --media-path /telnyx/media \
+  --telnyx-api-key "$TELNYX_API_KEY" \
+  --connection-id "$TELNYX_CONNECTION_ID" \
+  --phone-number "+13125551234" \
+  --asr-model sherpa-onnx \
+  --tts-model piper
+```
+
+The exact model configuration flags can evolve, but the binary should always separate:
+
+- local listen address
+- externally reachable webhook URL
+- injected ASR/TTS backend choice
+
+#### 9. Start ngrok or Tailscale Funnel
+
+ngrok example:
+
+```bash
+ngrok http 8080
+```
+
+Tailscale Funnel example:
+
+```bash
+tailscale funnel 8080
+```
+
+#### 10. Update the Telnyx webhook URL if using ngrok
+
+If you use a randomly assigned ngrok hostname, repeat step 4 every time ngrok restarts with a different public URL.
+
+### First Call Test
+
+#### 11. Call the Telnyx number from a phone
+
+Place an inbound call to the purchased number assigned to the Call Control Application.
+
+#### 12. Verify webhook received and WebSocket media connected
+
+Confirm in gateway logs that:
+
+- `call.initiated` arrived
+- the call was answered
+- the Telnyx WebSocket `start` event connected
+
+#### 13. Speak and verify ASR transcript appears in gateway logs
+
+Speak into the call and verify transcript text appears in gateway logs or tracing output.
+
+#### 14. Verify TTS response plays back through the phone
+
+Confirm the response audio plays back to the phone and that the transcript-to-response path is working.
+
+### Outbound Call Test
+
+#### 15. Use the gateway CLI or REST to initiate an outbound call
+
+If calling Telnyx directly for a manual smoke test, the documented outbound API shape is:
+
+```bash
+curl --location 'https://api.telnyx.com/v2/calls' \
+  --header 'Accept: application/json' \
+  --header 'Content-Type: application/json' \
+  --header "Authorization: Bearer $TELNYX_API_KEY" \
+  --data "{
+    \"connection_id\": \"$TELNYX_CONNECTION_ID\",
+    \"to\": \"+1234567890\",
+    \"from\": \"+13125551234\"
+  }"
+```
+
+For the Motlie gateway, the preferred implementation is that the gateway issues this request itself and attaches the media streaming parameters described earlier in this design.
+
+#### 16. Same verification as inbound
+
+Confirm:
+
+- outbound call connects
+- WebSocket media starts
+- ASR transcripts appear
+- `ConversationHandler` generates text
+- TTS audio is sent back over the call
 
 ## Gap Analysis
 
@@ -803,14 +1455,21 @@ Cons:
 - Telnyx documents codec options broadly, but actual inbound codec selection may depend on carrier, destination, and account configuration. Phase 1 should log observed `media_format` values in real calls before broadening codec support.
 - `stream_bidirectional_target_legs=self` is the best current inference for single-leg AI-agent calls, but this should be validated on the first live call because Telnyx defaults to `opposite`.
 - If Fish Speech becomes the preferred TTS backend, its native sample rate and chunk cadence need to be measured against Telnyx's RTP pacing requirements before promotion.
+- The exact interaction between simultaneous WebSocket media streaming and specific hosted call-control features such as `gather_using_audio` or hosted prompt playback should be validated on a live test call before those mixed modes are promoted.
+- If some carriers deliver audible in-band DTMF energy even when Telnyx emits a separate `dtmf` event, the gateway should log and measure the overlap before finalizing the v1.1 suppression strategy.
 
 ## References
 
 - Telnyx media streaming docs: https://developers.telnyx.com/docs/voice/programmable-voice/media-streaming
 - Telnyx `streaming_start` API: https://developers.telnyx.com/api-reference/call-commands/streaming-start
 - Telnyx `dial` API: https://developers.telnyx.com/api-reference/call-commands/dial
+- Telnyx create call control application API: https://developers.telnyx.com/api-reference/call-control-applications/create-a-call-control-application
+- Telnyx `gather_using_audio` API: https://developers.telnyx.com/api-reference/call-commands/gather-using-audio
+- Telnyx `send_dtmf` API: https://developers.telnyx.com/api-reference/call-commands/send-dtmf
 - Telnyx voice webhooks overview: https://developers.telnyx.com/docs/voice/programmable-voice/voice-api-webhooks
 - Telnyx `call.initiated` webhook: https://developers.telnyx.com/api-reference/callbacks/call-initiated
+- Tailscale Funnel docs: https://tailscale.com/kb/1223/tailscale-funnel/
+- ngrok localhost sharing docs: https://ngrok.com/docs/guides/share-localhost/overview
 - Existing ASR design: [DESIGN_ASR.md](/Users/dchung/sessions/codex-macmini-telnyx/motlie/libs/models/docs/DESIGN_ASR.md)
 - Existing TTS design: [DESIGN_TTS.md](/Users/dchung/sessions/codex-macmini-telnyx/motlie/libs/models/docs/DESIGN_TTS.md)
 - Existing API contracts: [transcription.rs](/Users/dchung/sessions/codex-macmini-telnyx/motlie/libs/model/src/transcription.rs), [speech.rs](/Users/dchung/sessions/codex-macmini-telnyx/motlie/libs/model/src/speech.rs)
