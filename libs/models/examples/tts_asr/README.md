@@ -56,6 +56,10 @@ cargo build -p motlie-models --example tts_asr_qwen3_sherpa \
 cargo build -p motlie-models --example tts_asr_aggregate
 ```
 
+CUDA-capable binaries are separate builds that add the relevant `*-cuda`
+features. The examples do not use a runtime `--cuda` switch; CPU vs CUDA is
+selected by the compiled feature set you run.
+
 ## Run the Full Matrix
 
 ```bash
@@ -79,10 +83,9 @@ cargo run -p motlie-models --example tts_asr_qwen3_sherpa \
   -- --data-dir $DATA_DIR > results_qwen3_sherpa.jsonl 2>qwen3_sherpa.log
 ```
 
-For CUDA-enabled runs, add `--cuda` flag:
-```bash
-cargo run ... -- --data-dir $DATA_DIR --cuda > results.jsonl
-```
+For CUDA-enabled runs, build and execute the corresponding binary with the
+appropriate CUDA feature flags, and write the output to a `_cuda.jsonl` file so
+the aggregator can distinguish it from the CPU run.
 
 ## Aggregate Results
 
@@ -118,9 +121,16 @@ Each binary outputs one JSON line per sample to stdout:
   "asr_latency_ms": 450,
   "total_latency_ms": 570,
   "pcm_bytes": 44100,
-  "pcm_duration_ms": 1000
+  "pcm_duration_ms": 1000,
+  "resident_memory_bytes": 73400320,
+  "peak_resident_memory_bytes": 81264640
 }
 ```
+
+`word_count` is recomputed from `text.split_whitespace()` when the dataset is
+loaded, so the runtime metadata stays accurate even if the JSON fixture drifts.
+`resident_memory_bytes` and `peak_resident_memory_bytes` are process RSS
+snapshots captured during the sample run.
 
 Status messages go to stderr so they don't interfere with JSONL output.
 

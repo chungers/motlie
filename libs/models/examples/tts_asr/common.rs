@@ -1,12 +1,12 @@
 //! Shared types and utilities for TTS↔ASR end-to-end validation pipelines.
 
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use motlie_model::{
-    AudioSpec, PcmChunk, PcmEncoding, SpeechRequest, SpeechStream, TranscriptionParams,
-    TranscriptionStream,
+    metrics_runtime::current_resident_memory_bytes, AudioSpec, PcmChunk, PcmEncoding,
+    SpeechRequest, TranscriptionParams,
 };
 use serde::{Deserialize, Serialize};
 
@@ -34,15 +34,19 @@ pub struct PipelineResult {
     pub total_latency_ms: u64,
     pub pcm_bytes: usize,
     pub pcm_duration_ms: u64,
+    pub resident_memory_bytes: Option<u64>,
+    pub peak_resident_memory_bytes: Option<u64>,
 }
 
 /// Load the test dataset from a JSON file.
 pub fn load_dataset(path: &Path) -> Result<Vec<TestSample>> {
-    let file = std::fs::File::open(path).with_context(|| {
-        format!("failed to open dataset: {}", path.display())
-    })?;
-    let samples: Vec<TestSample> = serde_json::from_reader(file)
-        .context("failed to parse dataset JSON")?;
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("failed to open dataset: {}", path.display()))?;
+    let mut samples: Vec<TestSample> =
+        serde_json::from_reader(file).context("failed to parse dataset JSON")?;
+    for sample in &mut samples {
+        sample.word_count = sample.text.split_whitespace().count();
+    }
     Ok(samples)
 }
 
@@ -59,6 +63,8 @@ pub async fn run_pipeline(
     speech: &dyn motlie_model::SpeechModel,
     transcription: &dyn motlie_model::TranscriptionModel,
 ) -> Result<PipelineResult> {
+    let mut peak_resident_memory_bytes = current_resident_memory_bytes();
+
     // Step 1: TTS
     let tts_start = Instant::now();
     let mut speech_stream = speech
@@ -69,10 +75,10 @@ pub async fn run_pipeline(
         })
         .await
         .context("TTS open_stream failed")?;
+    observe_peak_resident_memory(&mut peak_resident_memory_bytes);
 
     let audio_spec = speech_stream.audio_spec().clone();
     let mut pcm_data = Vec::new();
-    let mut sequence = 0u64;
 
     while let Some(chunk) = speech_stream
         .next_chunk()
@@ -80,11 +86,13 @@ pub async fn run_pipeline(
         .context("TTS next_chunk failed")?
     {
         pcm_data.extend_from_slice(&chunk.data);
+        observe_peak_resident_memory(&mut peak_resident_memory_bytes);
         if chunk.end_of_stream {
             break;
         }
     }
     speech_stream.finish().await.context("TTS finish failed")?;
+    observe_peak_resident_memory(&mut peak_resident_memory_bytes);
     let tts_latency = tts_start.elapsed();
 
     if pcm_data.is_empty() {
@@ -114,11 +122,12 @@ pub async fn run_pipeline(
         )
         .await
         .context("ASR open_stream failed")?;
+    observe_peak_resident_memory(&mut peak_resident_memory_bytes);
 
     // Feed PCM in chunks
     let chunk_size = 16_000; // ~0.5s at 16kHz mono S16Le
     let mut offset = 0;
-    sequence = 0;
+    let mut sequence = 0u64;
     let mut transcript_segments = Vec::new();
 
     while offset < pcm_data.len() {
@@ -140,12 +149,14 @@ pub async fn run_pipeline(
                 transcript_segments.push(seg.text);
             }
         }
+        observe_peak_resident_memory(&mut peak_resident_memory_bytes);
 
         offset = end;
         sequence += 1;
     }
 
     let final_update = asr_stream.finish().await.context("ASR finish failed")?;
+    observe_peak_resident_memory(&mut peak_resident_memory_bytes);
     for seg in final_update.segments {
         transcript_segments.push(seg.text);
     }
@@ -153,6 +164,7 @@ pub async fn run_pipeline(
 
     let transcribed_text = transcript_segments.join(" ").trim().to_string();
     let wer = compute_wer(&sample.text, &transcribed_text);
+    let resident_memory_bytes = current_resident_memory_bytes();
 
     Ok(PipelineResult {
         pipeline: pipeline_name.to_string(),
@@ -167,6 +179,8 @@ pub async fn run_pipeline(
         total_latency_ms: (tts_latency + asr_latency).as_millis() as u64,
         pcm_bytes: pcm_data.len(),
         pcm_duration_ms,
+        resident_memory_bytes,
+        peak_resident_memory_bytes,
     })
 }
 
@@ -221,6 +235,15 @@ fn compute_pcm_duration_ms(spec: &AudioSpec, byte_len: usize) -> u64 {
         return 0;
     }
     (total_samples as u64 * 1000) / spec.sample_rate_hz as u64
+}
+
+fn observe_peak_resident_memory(peak: &mut Option<u64>) {
+    if let Some(current) = current_resident_memory_bytes() {
+        *peak = Some(match *peak {
+            Some(previous) => previous.max(current),
+            None => current,
+        });
+    }
 }
 
 /// Print a result as a JSON line to stdout.
@@ -278,5 +301,24 @@ mod tests {
         // "a b c" vs "a c" → 1 deletion / 3 words = 0.333...
         let wer = compute_wer("a b c", "a c");
         assert!((wer - 1.0 / 3.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn load_dataset_recomputes_word_count_from_text() {
+        let path = std::env::temp_dir().join(format!(
+            "tts_asr_dataset_{}_common.json",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"[{"sample_id":"sample","category":"short","word_count":999,"text":"one two three"}]"#,
+        )
+        .unwrap();
+
+        let samples = load_dataset(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].word_count, 3);
     }
 }

@@ -17,12 +17,10 @@ fn main() -> Result<()> {
 
 struct Args {
     data_dir: PathBuf,
-    cuda: bool,
 }
 
 fn parse_args() -> Result<Args> {
     let mut data_dir = None;
-    let mut cuda = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -32,14 +30,12 @@ fn parse_args() -> Result<Args> {
                     args.next().context("--data-dir requires a path")?,
                 ));
             }
-            "--cuda" => cuda = true,
             other => anyhow::bail!("unknown argument: {other}"),
         }
     }
 
     Ok(Args {
         data_dir: data_dir.context("--data-dir <path> is required")?,
-        cuda,
     })
 }
 
@@ -47,10 +43,7 @@ async fn run(args: Args) -> Result<()> {
     let dataset_path = args.data_dir.join("samples.json");
     let samples = common::load_dataset(&dataset_path)?;
 
-    eprintln!(
-        "=== qwen3_whisper pipeline: {} samples ===",
-        samples.len()
-    );
+    eprintln!("=== qwen3_whisper pipeline: {} samples ===", samples.len());
 
     let artifact_root = motlie_models::default_artifact_root();
 
