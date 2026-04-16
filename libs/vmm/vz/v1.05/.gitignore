@@ -1,0 +1,5 @@
+/.swift-module-cache/
+/build/
+/initramfs-virt
+/serial.log
+/vmlinuz-virt
