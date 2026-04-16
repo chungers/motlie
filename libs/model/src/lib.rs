@@ -68,6 +68,7 @@ impl fmt::Display for BundleId {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BundleFamily {
     Embeddings,
+    Fish,
     Gemma,
     Gpt,
     Hermes,
@@ -80,6 +81,7 @@ pub enum BundleFamily {
 /// Internal execution substrate chosen for a bundle or adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackendKind {
+    FishSpeech,
     Http,
     LlamaCpp,
     MistralRs,

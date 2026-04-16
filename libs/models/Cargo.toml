@@ -21,10 +21,13 @@ model-gemma4-e2b = ["dep:motlie-model-mistral"]
 model-qwen3-4b-gguf = ["dep:motlie-model-llama-cpp"]
 model-gemma4-e2b-gguf = ["dep:motlie-model-llama-cpp"]
 model-piper-en-us-ljspeech-medium = ["dep:motlie-model-piper"]
+model-fish-speech-1_5 = ["dep:motlie-model-fish-speech"]
 model-qwen3-tts-0_6b = ["dep:motlie-model-qwen3-tts"]
 model-sherpa-onnx-streaming = ["dep:motlie-model-sherpa-onnx"]
 model-whisper-base-en = ["dep:motlie-model-whisper-cpp"]
 llama-cpp-cuda = ["dep:motlie-model-llama-cpp", "motlie-model-llama-cpp/cuda"]
+fish-speech-cuda = ["dep:motlie-model-fish-speech", "motlie-model-fish-speech/cuda"]
+fish-speech-metal = ["dep:motlie-model-fish-speech", "motlie-model-fish-speech/metal"]
 piper-cuda = ["dep:motlie-model-piper", "motlie-model-piper/cuda"]
 qwen3-tts-cuda = ["dep:motlie-model-qwen3-tts", "motlie-model-qwen3-tts/cuda"]
 sherpa-onnx-cuda = ["dep:motlie-model-sherpa-onnx", "motlie-model-sherpa-onnx/cuda"]
@@ -42,6 +45,7 @@ motlie-model = { path = "../model" }
 motlie-model-mistral = { path = "../model/backends/mistral", optional = true }
 motlie-model-llama-cpp = { path = "../model/backends/llama_cpp", optional = true }
 motlie-model-piper = { path = "../model/backends/piper", optional = true }
+motlie-model-fish-speech = { path = "../model/backends/fish_speech", optional = true }
 motlie-model-qwen3-tts = { path = "../model/backends/qwen3_tts", optional = true }
 motlie-model-sherpa-onnx = { path = "../model/backends/sherpa_onnx", optional = true }
 motlie-model-whisper-cpp = { path = "../model/backends/whisper_cpp", optional = true }
@@ -96,6 +100,11 @@ required-features = ["model-qwen3-tts-0_6b"]
 name = "models_tts_v0_1"
 path = "examples/tts_v0.1/main.rs"
 required-features = ["model-piper-en-us-ljspeech-medium"]
+
+[[example]]
+name = "models_tts_v0_3"
+path = "examples/tts_v0.3/main.rs"
+required-features = ["model-fish-speech-1_5"]
 
 [[example]]
 name = "bench_chat"

@@ -12,6 +12,7 @@ use std::error::Error as StdError;
     feature = "model-gemma4-e2b",
     feature = "model-gemma4-e2b-gguf",
     feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-fish-speech-1_5",
     feature = "model-qwen3-tts-0_6b",
     feature = "model-sherpa-onnx-streaming",
     feature = "model-whisper-base-en",
@@ -547,6 +548,7 @@ pub struct ResolvedModelDescriptor {
 pub enum ModelSelector {
     #[cfg(any(
         feature = "model-piper-en-us-ljspeech-medium",
+        feature = "model-fish-speech-1_5",
         feature = "model-qwen3-tts-0_6b",
     ))]
     Tts(TtsModels),
@@ -577,6 +579,7 @@ pub enum ModelSelector {
     feature = "model-gemma4-e2b",
     feature = "model-gemma4-e2b-gguf",
     feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-fish-speech-1_5",
     feature = "model-qwen3-tts-0_6b",
     feature = "model-sherpa-onnx-streaming",
     feature = "model-whisper-base-en",
@@ -584,7 +587,11 @@ pub enum ModelSelector {
 impl ModelSelector {
     pub fn as_str(&self) -> String {
         match self {
-            #[cfg(any(feature = "model-piper-en-us-ljspeech-medium", feature = "model-qwen3-tts-0_6b"))]
+            #[cfg(any(
+                feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-fish-speech-1_5",
+                feature = "model-qwen3-tts-0_6b"
+            ))]
             Self::Tts(model) => format!("tts:{}", model.as_str()),
             #[cfg(any(
                 feature = "model-sherpa-onnx-streaming",
@@ -608,7 +615,11 @@ impl ModelSelector {
 
     pub fn bundle_id(&self) -> BundleId {
         match self {
-            #[cfg(any(feature = "model-piper-en-us-ljspeech-medium", feature = "model-qwen3-tts-0_6b"))]
+            #[cfg(any(
+                feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-fish-speech-1_5",
+                feature = "model-qwen3-tts-0_6b"
+            ))]
             Self::Tts(model) => model.bundle_id(),
             #[cfg(any(
                 feature = "model-sherpa-onnx-streaming",
@@ -632,7 +643,11 @@ impl ModelSelector {
 
     pub fn descriptor(&self) -> BundleDescriptor {
         match self {
-            #[cfg(any(feature = "model-piper-en-us-ljspeech-medium", feature = "model-qwen3-tts-0_6b"))]
+            #[cfg(any(
+                feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-fish-speech-1_5",
+                feature = "model-qwen3-tts-0_6b"
+            ))]
             Self::Tts(model) => model.descriptor(),
             #[cfg(any(
                 feature = "model-sherpa-onnx-streaming",
@@ -656,7 +671,11 @@ impl ModelSelector {
 
     pub fn bundle(&self) -> Box<dyn ModelBundle> {
         match self {
-            #[cfg(any(feature = "model-piper-en-us-ljspeech-medium", feature = "model-qwen3-tts-0_6b"))]
+            #[cfg(any(
+                feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-fish-speech-1_5",
+                feature = "model-qwen3-tts-0_6b"
+            ))]
             Self::Tts(model) => model.bundle(),
             #[cfg(any(
                 feature = "model-sherpa-onnx-streaming",
@@ -687,6 +706,7 @@ impl ModelSelector {
     feature = "model-gemma4-e2b",
     feature = "model-gemma4-e2b-gguf",
     feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-fish-speech-1_5",
     feature = "model-qwen3-tts-0_6b",
     feature = "model-sherpa-onnx-streaming",
     feature = "model-whisper-base-en",
@@ -708,15 +728,29 @@ impl FromStr for ModelSelector {
                     selector: value.to_owned(),
                 });
             }
+            #[cfg(not(feature = "model-fish-speech-1_5"))]
+            if raw == tts::FISH_SPEECH_1_5_SELECTOR {
+                return Err(ModelsError::ModelUnavailable {
+                    selector: value.to_owned(),
+                });
+            }
             #[cfg(not(feature = "model-qwen3-tts-0_6b"))]
             if raw == tts::QWEN3_TTS_12HZ_0_6B_SELECTOR {
                 return Err(ModelsError::ModelUnavailable {
                     selector: value.to_owned(),
                 });
             }
-            #[cfg(any(feature = "model-piper-en-us-ljspeech-medium", feature = "model-qwen3-tts-0_6b"))]
+            #[cfg(any(
+                feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-fish-speech-1_5",
+                feature = "model-qwen3-tts-0_6b"
+            ))]
             return Ok(Self::Tts(raw.parse()?));
-            #[cfg(not(any(feature = "model-piper-en-us-ljspeech-medium", feature = "model-qwen3-tts-0_6b")))]
+            #[cfg(not(any(
+                feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-fish-speech-1_5",
+                feature = "model-qwen3-tts-0_6b"
+            )))]
             return Err(ModelsError::UnknownModelSelector {
                 selector: value.to_owned(),
             });
@@ -884,6 +918,8 @@ impl Catalog {
         chat::gemma4_e2b_gguf::register(&mut catalog);
         #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
         tts::piper_en_us_ljspeech_medium::register(&mut catalog);
+        #[cfg(feature = "model-fish-speech-1_5")]
+        tts::fish_speech_1_5::register(&mut catalog);
         #[cfg(feature = "model-qwen3-tts-0_6b")]
         tts::qwen3_tts_12hz_0_6b::register(&mut catalog);
         #[cfg(feature = "model-sherpa-onnx-streaming")]

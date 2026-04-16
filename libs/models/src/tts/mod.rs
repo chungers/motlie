@@ -1,5 +1,6 @@
 #[cfg(any(
     feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-fish-speech-1_5",
     feature = "model-qwen3-tts-0_6b",
 ))]
 use std::fmt;
@@ -7,15 +8,19 @@ use std::str::FromStr;
 
 #[cfg(any(
     feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-fish-speech-1_5",
     feature = "model-qwen3-tts-0_6b",
 ))]
 use motlie_model::{BundleId, ModelBundle};
 
 pub const PIPER_EN_US_LJSPEECH_MEDIUM_SELECTOR: &str = "piper/en_us_ljspeech_medium";
+pub const FISH_SPEECH_1_5_SELECTOR: &str = "fish/fish_speech_1_5";
 pub const QWEN3_TTS_12HZ_0_6B_SELECTOR: &str = "qwen/qwen3_tts_12hz_0_6b";
 
 #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
 pub mod piper_en_us_ljspeech_medium;
+#[cfg(feature = "model-fish-speech-1_5")]
+pub mod fish_speech_1_5;
 #[cfg(feature = "model-qwen3-tts-0_6b")]
 pub mod qwen3_tts_12hz_0_6b;
 
@@ -25,12 +30,15 @@ pub mod qwen3_tts_12hz_0_6b;
 pub enum TtsModels {
     #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
     PiperEnUsLjspeechMedium,
+    #[cfg(feature = "model-fish-speech-1_5")]
+    FishSpeech1_5,
     #[cfg(feature = "model-qwen3-tts-0_6b")]
     Qwen3Tts12Hz0_6B,
 }
 
 #[cfg(any(
     feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-fish-speech-1_5",
     feature = "model-qwen3-tts-0_6b",
 ))]
 impl TtsModels {
@@ -38,6 +46,8 @@ impl TtsModels {
         match self {
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
             Self::PiperEnUsLjspeechMedium => piper_en_us_ljspeech_medium::SELECTOR,
+            #[cfg(feature = "model-fish-speech-1_5")]
+            Self::FishSpeech1_5 => fish_speech_1_5::SELECTOR,
             #[cfg(feature = "model-qwen3-tts-0_6b")]
             Self::Qwen3Tts12Hz0_6B => qwen3_tts_12hz_0_6b::SELECTOR,
         }
@@ -47,6 +57,8 @@ impl TtsModels {
         match self {
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
             Self::PiperEnUsLjspeechMedium => piper_en_us_ljspeech_medium::descriptor().id,
+            #[cfg(feature = "model-fish-speech-1_5")]
+            Self::FishSpeech1_5 => fish_speech_1_5::descriptor().id,
             #[cfg(feature = "model-qwen3-tts-0_6b")]
             Self::Qwen3Tts12Hz0_6B => qwen3_tts_12hz_0_6b::descriptor().id,
         }
@@ -56,6 +68,8 @@ impl TtsModels {
         match self {
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
             Self::PiperEnUsLjspeechMedium => piper_en_us_ljspeech_medium::descriptor(),
+            #[cfg(feature = "model-fish-speech-1_5")]
+            Self::FishSpeech1_5 => fish_speech_1_5::descriptor(),
             #[cfg(feature = "model-qwen3-tts-0_6b")]
             Self::Qwen3Tts12Hz0_6B => qwen3_tts_12hz_0_6b::descriptor(),
         }
@@ -65,6 +79,8 @@ impl TtsModels {
         match self {
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
             Self::PiperEnUsLjspeechMedium => piper_en_us_ljspeech_medium::bundle(),
+            #[cfg(feature = "model-fish-speech-1_5")]
+            Self::FishSpeech1_5 => fish_speech_1_5::bundle(),
             #[cfg(feature = "model-qwen3-tts-0_6b")]
             Self::Qwen3Tts12Hz0_6B => qwen3_tts_12hz_0_6b::bundle(),
         }
@@ -73,6 +89,7 @@ impl TtsModels {
 
 #[cfg(any(
     feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-fish-speech-1_5",
     feature = "model-qwen3-tts-0_6b",
 ))]
 impl fmt::Display for TtsModels {
@@ -90,6 +107,12 @@ impl FromStr for TtsModels {
             piper_en_us_ljspeech_medium::SELECTOR => Ok(Self::PiperEnUsLjspeechMedium),
             #[cfg(not(feature = "model-piper-en-us-ljspeech-medium"))]
             PIPER_EN_US_LJSPEECH_MEDIUM_SELECTOR => Err(crate::ModelsError::ModelUnavailable {
+                selector: value.to_owned(),
+            }),
+            #[cfg(feature = "model-fish-speech-1_5")]
+            fish_speech_1_5::SELECTOR => Ok(Self::FishSpeech1_5),
+            #[cfg(not(feature = "model-fish-speech-1_5"))]
+            FISH_SPEECH_1_5_SELECTOR => Err(crate::ModelsError::ModelUnavailable {
                 selector: value.to_owned(),
             }),
             #[cfg(feature = "model-qwen3-tts-0_6b")]

@@ -1,0 +1,33 @@
+[package]
+name = "motlie-model-fish-speech"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Fish Speech Candle backend implementations for motlie-model TTS contracts"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+cuda = ["fish-speech-core/cuda", "fish-speech-server/cuda"]
+metal = ["fish-speech-core/metal", "fish-speech-server/metal"]
+flash-attn = [
+    "fish-speech-core/flash-attn",
+    "fish-speech-server/flash-attn",
+]
+
+[dependencies]
+async-trait = "0.1.89"
+candle-core = "0.8.3"
+fish-speech-core = { package = "fish_speech_core", git = "https://github.com/EndlessReform/fish-speech.rs.git", rev = "e5a172a2b2ffe45248abb7133b2aac5b45b35b72", default-features = false }
+fish-speech-server = { package = "server", git = "https://github.com/EndlessReform/fish-speech.rs.git", rev = "e5a172a2b2ffe45248abb7133b2aac5b45b35b72", default-features = false }
+motlie-model = { path = "../..", features = ["metrics-runtime"] }
+tempfile = "3.23.0"
+tokio = { version = "1", features = ["rt", "sync"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
