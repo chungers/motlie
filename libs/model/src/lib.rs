@@ -84,6 +84,7 @@ pub enum BackendKind {
     LlamaCpp,
     MistralRs,
     Ort,
+    Qwen3TtsCpp,
     SherpaOnnx,
     WhisperCpp,
 }
@@ -829,9 +830,11 @@ mod tests {
         let bundle_id = BundleId::new("test_bundle");
 
         let no_support = QuantizationSupport::none();
-        assert!(no_support
-            .resolve(Some(QuantizationBits::Four), &bundle_id)
-            .is_err());
+        assert!(
+            no_support
+                .resolve(Some(QuantizationBits::Four), &bundle_id)
+                .is_err()
+        );
         assert_eq!(no_support.resolve(None, &bundle_id).unwrap(), None);
 
         let q4_q8 = QuantizationSupport::with_recommended(
@@ -857,9 +860,11 @@ mod tests {
         );
 
         let q8_only = QuantizationSupport::without_recommended([QuantizationBits::Eight]);
-        assert!(q8_only
-            .resolve(Some(QuantizationBits::Four), &bundle_id)
-            .is_err());
+        assert!(
+            q8_only
+                .resolve(Some(QuantizationBits::Four), &bundle_id)
+                .is_err()
+        );
         assert_eq!(
             q8_only
                 .resolve(Some(QuantizationBits::Eight), &bundle_id)

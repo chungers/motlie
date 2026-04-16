@@ -12,6 +12,7 @@ use std::error::Error as StdError;
     feature = "model-gemma4-e2b",
     feature = "model-gemma4-e2b-gguf",
     feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-qwen3-tts-cpp",
     feature = "model-qwen3-tts-0_6b",
     feature = "model-sherpa-onnx-streaming",
     feature = "model-whisper-base-en",
@@ -547,6 +548,7 @@ pub struct ResolvedModelDescriptor {
 pub enum ModelSelector {
     #[cfg(any(
         feature = "model-piper-en-us-ljspeech-medium",
+        feature = "model-qwen3-tts-cpp",
         feature = "model-qwen3-tts-0_6b",
     ))]
     Tts(TtsModels),
@@ -577,6 +579,7 @@ pub enum ModelSelector {
     feature = "model-gemma4-e2b",
     feature = "model-gemma4-e2b-gguf",
     feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-qwen3-tts-cpp",
     feature = "model-qwen3-tts-0_6b",
     feature = "model-sherpa-onnx-streaming",
     feature = "model-whisper-base-en",
@@ -584,7 +587,11 @@ pub enum ModelSelector {
 impl ModelSelector {
     pub fn as_str(&self) -> String {
         match self {
-            #[cfg(any(feature = "model-piper-en-us-ljspeech-medium", feature = "model-qwen3-tts-0_6b"))]
+            #[cfg(any(
+                feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-qwen3-tts-cpp",
+                feature = "model-qwen3-tts-0_6b"
+            ))]
             Self::Tts(model) => format!("tts:{}", model.as_str()),
             #[cfg(any(
                 feature = "model-sherpa-onnx-streaming",
@@ -608,7 +615,11 @@ impl ModelSelector {
 
     pub fn bundle_id(&self) -> BundleId {
         match self {
-            #[cfg(any(feature = "model-piper-en-us-ljspeech-medium", feature = "model-qwen3-tts-0_6b"))]
+            #[cfg(any(
+                feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-qwen3-tts-cpp",
+                feature = "model-qwen3-tts-0_6b"
+            ))]
             Self::Tts(model) => model.bundle_id(),
             #[cfg(any(
                 feature = "model-sherpa-onnx-streaming",
@@ -632,7 +643,11 @@ impl ModelSelector {
 
     pub fn descriptor(&self) -> BundleDescriptor {
         match self {
-            #[cfg(any(feature = "model-piper-en-us-ljspeech-medium", feature = "model-qwen3-tts-0_6b"))]
+            #[cfg(any(
+                feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-qwen3-tts-cpp",
+                feature = "model-qwen3-tts-0_6b"
+            ))]
             Self::Tts(model) => model.descriptor(),
             #[cfg(any(
                 feature = "model-sherpa-onnx-streaming",
@@ -656,7 +671,11 @@ impl ModelSelector {
 
     pub fn bundle(&self) -> Box<dyn ModelBundle> {
         match self {
-            #[cfg(any(feature = "model-piper-en-us-ljspeech-medium", feature = "model-qwen3-tts-0_6b"))]
+            #[cfg(any(
+                feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-qwen3-tts-cpp",
+                feature = "model-qwen3-tts-0_6b"
+            ))]
             Self::Tts(model) => model.bundle(),
             #[cfg(any(
                 feature = "model-sherpa-onnx-streaming",
@@ -687,6 +706,7 @@ impl ModelSelector {
     feature = "model-gemma4-e2b",
     feature = "model-gemma4-e2b-gguf",
     feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-qwen3-tts-cpp",
     feature = "model-qwen3-tts-0_6b",
     feature = "model-sherpa-onnx-streaming",
     feature = "model-whisper-base-en",
@@ -708,15 +728,29 @@ impl FromStr for ModelSelector {
                     selector: value.to_owned(),
                 });
             }
+            #[cfg(not(feature = "model-qwen3-tts-cpp"))]
+            if raw == tts::QWEN3_TTS_CPP_0_6B_SELECTOR {
+                return Err(ModelsError::ModelUnavailable {
+                    selector: value.to_owned(),
+                });
+            }
             #[cfg(not(feature = "model-qwen3-tts-0_6b"))]
             if raw == tts::QWEN3_TTS_12HZ_0_6B_SELECTOR {
                 return Err(ModelsError::ModelUnavailable {
                     selector: value.to_owned(),
                 });
             }
-            #[cfg(any(feature = "model-piper-en-us-ljspeech-medium", feature = "model-qwen3-tts-0_6b"))]
+            #[cfg(any(
+                feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-qwen3-tts-cpp",
+                feature = "model-qwen3-tts-0_6b"
+            ))]
             return Ok(Self::Tts(raw.parse()?));
-            #[cfg(not(any(feature = "model-piper-en-us-ljspeech-medium", feature = "model-qwen3-tts-0_6b")))]
+            #[cfg(not(any(
+                feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-qwen3-tts-cpp",
+                feature = "model-qwen3-tts-0_6b"
+            )))]
             return Err(ModelsError::UnknownModelSelector {
                 selector: value.to_owned(),
             });
@@ -884,6 +918,8 @@ impl Catalog {
         chat::gemma4_e2b_gguf::register(&mut catalog);
         #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
         tts::piper_en_us_ljspeech_medium::register(&mut catalog);
+        #[cfg(feature = "model-qwen3-tts-cpp")]
+        tts::qwen3_tts_cpp::register(&mut catalog);
         #[cfg(feature = "model-qwen3-tts-0_6b")]
         tts::qwen3_tts_12hz_0_6b::register(&mut catalog);
         #[cfg(feature = "model-sherpa-onnx-streaming")]
@@ -1189,18 +1225,20 @@ mod tests {
         let first_for_factory = first.clone();
         let second_for_factory = second.clone();
 
-        assert!(catalog
-            .register(first.clone(), move || {
-                Box::new(StubBundle {
-                    metadata: BundleMetadata {
-                        id: first_for_factory.id.clone(),
-                        display_name: first_for_factory.display_name.clone(),
-                        capabilities: first_for_factory.capabilities.clone(),
-                        quantization: motlie_model::QuantizationSupport::none(),
-                    },
+        assert!(
+            catalog
+                .register(first.clone(), move || {
+                    Box::new(StubBundle {
+                        metadata: BundleMetadata {
+                            id: first_for_factory.id.clone(),
+                            display_name: first_for_factory.display_name.clone(),
+                            capabilities: first_for_factory.capabilities.clone(),
+                            quantization: motlie_model::QuantizationSupport::none(),
+                        },
+                    })
                 })
-            })
-            .is_none());
+                .is_none()
+        );
 
         let replaced = catalog.register(second.clone(), move || {
             Box::new(StubBundle {
@@ -1354,9 +1392,11 @@ mod tests {
             let bundle_id = BundleId::new("embeddinggemma_300m");
             assert!(catalog.len() >= 1);
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(catalog
-                .bundles_for_track(EvalTrack::Embeddings)
-                .any(|bundle| bundle.id == bundle_id));
+            assert!(
+                catalog
+                    .bundles_for_track(EvalTrack::Embeddings)
+                    .any(|bundle| bundle.id == bundle_id)
+            );
 
             let artifacts = catalog
                 .artifacts(&bundle_id)
@@ -1375,9 +1415,11 @@ mod tests {
         {
             let bundle_id = BundleId::new("qwen3_embedding_06b");
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(catalog
-                .bundles_for_track(EvalTrack::Embeddings)
-                .any(|bundle| bundle.id == bundle_id));
+            assert!(
+                catalog
+                    .bundles_for_track(EvalTrack::Embeddings)
+                    .any(|bundle| bundle.id == bundle_id)
+            );
 
             let artifacts = catalog
                 .artifacts(&bundle_id)
