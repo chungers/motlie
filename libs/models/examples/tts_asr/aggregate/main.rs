@@ -1,10 +1,10 @@
 //! Aggregates JSON line results from all 4 TTS↔ASR pipeline runs.
 //!
 //! Usage:
-//!   cat results_*.jsonl | cargo run -p motlie-models --example tts_asr_aggregate
+//!   cat results_*.jsonl | cargo run -p motlie-models --example tts_asr_aggregate --no-default-features
 //!
 //! Or with files:
-//!   cargo run -p motlie-models --example tts_asr_aggregate -- \
+//!   cargo run -p motlie-models --example tts_asr_aggregate --no-default-features -- \
 //!     --input results_piper_whisper.jsonl \
 //!     --input results_piper_sherpa.jsonl \
 //!     --input results_qwen3_whisper.jsonl \
@@ -183,7 +183,7 @@ fn compute_stats(results: &[PipelineResult]) -> Vec<PipelineStats> {
             wers.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
             let mean_wer = wers.iter().sum::<f64>() / n as f64;
-            let median_wer = percentile(&wers, 50.0);
+            let median_wer = median(&wers);
             let p95_wer = percentile(&wers, 95.0);
             let max_wer = wers.last().copied().unwrap_or(0.0);
 
@@ -192,7 +192,7 @@ fn compute_stats(results: &[PipelineResult]) -> Vec<PipelineStats> {
             let mean_total = total_latencies.iter().sum::<f64>() / n as f64;
             let mut sorted_latencies = total_latencies.clone();
             sorted_latencies.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let median_total = percentile(&sorted_latencies, 50.0);
+            let median_total = median(&sorted_latencies);
 
             let mean_tts = samples.iter().map(|s| s.tts_latency_ms as f64).sum::<f64>() / n as f64;
             let mean_asr = samples.iter().map(|s| s.asr_latency_ms as f64).sum::<f64>() / n as f64;
@@ -248,6 +248,33 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
     }
     let idx = ((p / 100.0) * (sorted.len() - 1) as f64).round() as usize;
     sorted[idx.min(sorted.len() - 1)]
+}
+
+fn median(sorted: &[f64]) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+
+    let upper = sorted.len() / 2;
+    let lower = (sorted.len() - 1) / 2;
+    (sorted[lower] + sorted[upper]) / 2.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::median;
+
+    #[test]
+    fn median_odd_sample_uses_middle_value() {
+        let values = [1.0, 3.0, 5.0];
+        assert_eq!(median(&values), 3.0);
+    }
+
+    #[test]
+    fn median_even_sample_averages_middle_pair() {
+        let values = [1.0, 3.0, 5.0, 7.0];
+        assert_eq!(median(&values), 4.0);
+    }
 }
 
 fn print_report(stats: &[PipelineStats]) {

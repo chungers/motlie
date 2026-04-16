@@ -53,7 +53,7 @@ cargo build -p motlie-models --example tts_asr_qwen3_sherpa \
   --no-default-features --features model-qwen3-tts-0_6b,model-sherpa-onnx-streaming
 
 # Aggregator (no model features needed)
-cargo build -p motlie-models --example tts_asr_aggregate
+cargo build -p motlie-models --example tts_asr_aggregate --no-default-features
 ```
 
 CUDA-capable binaries are separate builds that add the relevant `*-cuda`
@@ -90,7 +90,7 @@ the aggregator can distinguish it from the CPU run.
 ## Aggregate Results
 
 ```bash
-cargo run -p motlie-models --example tts_asr_aggregate -- \
+cargo run -p motlie-models --example tts_asr_aggregate --no-default-features -- \
   --input results_piper_whisper.jsonl \
   --input results_piper_sherpa.jsonl \
   --input results_qwen3_whisper.jsonl \
@@ -99,7 +99,7 @@ cargo run -p motlie-models --example tts_asr_aggregate -- \
 
 Or via stdin:
 ```bash
-cat results_*.jsonl | cargo run -p motlie-models --example tts_asr_aggregate
+cat results_*.jsonl | cargo run -p motlie-models --example tts_asr_aggregate --no-default-features
 ```
 
 ## Output Format
@@ -159,9 +159,12 @@ separate variants and prints a CPU-vs-CUDA comparison section.
 
 ## Measured DGX Spark Results
 
-Measured on `2026-04-15` by `@codex-dgx-e2e` on the DGX Spark GB10 host used for PR
-`#182`. `Piper → sherpa-onnx` was rerun after the merged PR `#183` fix on
-`feature/models`. Full run notes and tables are in [RESULTS.md](RESULTS.md).
+Measured on `2026-04-15` and refreshed on `2026-04-16` by `@codex-dgx-e2e` on
+the DGX Spark GB10 host used for PR `#182`. The `2026-04-16` refresh reran all
+committed Piper JSONLs after adding per-sample RSS capture and correcting the
+aggregator median computation. `Piper → sherpa-onnx` was rerun after the merged
+PR `#183` fix on `feature/models`. Full run notes and tables are in
+[RESULTS.md](RESULTS.md).
 
 ### Matrix status
 
@@ -176,21 +179,22 @@ Measured on `2026-04-15` by `@codex-dgx-e2e` on the DGX Spark GB10 host used for
 
 | Pipeline | Mode | Samples | Mean WER | Mean Total Latency | Mean TTS | Mean ASR |
 |----------|------|---------|----------|--------------------|----------|----------|
-| Piper → sherpa-onnx | CPU | 100 | 0.308 | 5,303 ms | 1,362 ms | 3,940 ms |
-| Piper → sherpa-onnx | CUDA | 100 | 0.298 | 5,347 ms | 1,360 ms | 3,986 ms |
-| Piper → whisper.cpp | CPU | 100 | 0.459 | 58,090 ms | 1,366 ms | 56,723 ms |
-| Piper → whisper.cpp | CUDA | 100 | 0.458 | 7,921 ms | 1,379 ms | 6,541 ms |
+| Piper → sherpa-onnx | CPU | 100 | 0.296 | 11,195 ms | 6,544 ms | 4,651 ms |
+| Piper → sherpa-onnx | CUDA | 100 | 0.303 | 10,870 ms | 6,341 ms | 4,529 ms |
+| Piper → whisper.cpp | CPU | 100 | 0.464 | 60,223 ms | 6,104 ms | 54,119 ms |
+| Piper → whisper.cpp | CUDA | 100 | 0.441 | 13,754 ms | 6,422 ms | 7,331 ms |
 
 ### CPU vs CUDA
 
 | Pipeline | CPU Mean WER | CUDA Mean WER | CPU Mean Latency | CUDA Mean Latency | Speedup |
 |----------|--------------|---------------|------------------|-------------------|---------|
-| Piper → sherpa-onnx | 0.308 | 0.298 | 5,303 ms | 5,347 ms | 0.99x |
-| Piper → whisper.cpp | 0.459 | 0.458 | 58,090 ms | 7,921 ms | 7.33x |
+| Piper → sherpa-onnx | 0.296 | 0.303 | 11,195 ms | 10,870 ms | 1.03x |
+| Piper → whisper.cpp | 0.464 | 0.441 | 60,223 ms | 13,754 ms | 4.38x |
 
 Overall, `Piper → sherpa-onnx` is now the best measured pipeline on this host for
 aggregate WER and end-to-end latency. `Piper → whisper.cpp` still sees the only
-meaningful CUDA acceleration in this matrix.
+material GPU acceleration in this matrix, though the refreshed RSS-enabled
+harness reduced the observed speedup relative to the earlier latency-only runs.
 
 ## Predicted Pipeline Rankings
 
