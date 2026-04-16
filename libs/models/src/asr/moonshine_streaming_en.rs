@@ -15,7 +15,6 @@ use crate::{
 pub const SELECTOR: &str = "moonshine/streaming_en";
 
 const HF_REPO: &str = "UsefulSensors/moonshine-streaming";
-const MODEL_ROOT: &str = "onnx/small";
 
 const FRONTEND_FILE: &str = "onnx/small/frontend.ort";
 const ENCODER_FILE: &str = "onnx/small/encoder.ort";
@@ -150,7 +149,7 @@ fn resolve_local_model_root(root: &Path) -> Result<PathBuf, ModelError> {
         }
     }
 
-    Ok(snapshot_dir.join(MODEL_ROOT))
+    Ok(snapshot_dir)
 }
 
 #[cfg(test)]
@@ -158,6 +157,7 @@ mod tests {
     use super::*;
     use crate::Catalog;
     use motlie_model::CapabilityKind;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn descriptor_is_reviewable_as_data() {
@@ -187,5 +187,37 @@ mod tests {
                 .bundles_for_track(EvalTrack::Transcription)
                 .any(|bundle| bundle.id == bundle_id));
         }
+    }
+
+    #[test]
+    fn local_root_resolver_returns_snapshot_dir_without_double_nesting() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("moonshine-root-resolver-{unique}"));
+        let repo_root = root.join(format!("models--{}", HF_REPO.replace('/', "--")));
+        let snapshot_dir = repo_root.join("snapshots").join("test-commit");
+        std::fs::create_dir_all(snapshot_dir.join("onnx/small"))
+            .expect("should create test snapshot layout");
+        std::fs::create_dir_all(repo_root.join("refs")).expect("should create refs dir");
+        std::fs::write(repo_root.join("refs/main"), "test-commit\n").expect("should write ref");
+
+        for filename in [
+            FRONTEND_FILE,
+            ENCODER_FILE,
+            ADAPTER_FILE,
+            CROSS_KV_FILE,
+            DECODER_KV_FILE,
+            STREAMING_CONFIG_FILE,
+            TOKENIZER_JSON_FILE,
+        ] {
+            std::fs::write(snapshot_dir.join(filename), b"test").expect("should write artifact");
+        }
+
+        let resolved = resolve_local_model_root(&root).expect("resolver should succeed");
+        assert_eq!(resolved, snapshot_dir);
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }
