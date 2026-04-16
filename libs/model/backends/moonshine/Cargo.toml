@@ -1,0 +1,25 @@
+[package]
+name = "motlie-model-moonshine"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Moonshine backend implementations for motlie-model ASR contracts"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+
+[dependencies]
+async-trait = "0.1.89"
+motlie-model = { path = "../..", features = ["metrics-runtime"] }
+tokio = { version = "1", features = ["rt"] }
+tokenizers = "0.21"
+tracing = "0.1"
+transcribe-rs = { version = "0.3.11", default-features = false, features = ["onnx"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
