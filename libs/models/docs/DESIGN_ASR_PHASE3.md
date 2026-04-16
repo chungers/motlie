@@ -431,11 +431,29 @@ For telephony, `Moonshine Streaming` is not currently competitive with Motlie `s
 - On the longer file, Moonshine exceeded the chunk duration by roughly `5.6x` on average (`445 ms` work for an `80 ms` chunk).
 - Peak RSS for Moonshine was roughly `2.1x` sherpa on `0.wav` and `4.0x` sherpa on `1.wav`.
 
+### CUDA Rerun On DGX
+
+I reran the same `80 ms` incremental probe on the DGX host after rebuilding the local prototype with `transcribe-rs` feature `ort-cuda` and explicitly selecting `OrtAccelerator::Cuda`.
+
+Measured CUDA-attempt results:
+
+| Audio | Backend | Avg chunk latency | Median chunk latency | Max chunk latency | End-to-end decode | Max RSS | GPU evidence |
+|------|---------|-------------------|----------------------|-------------------|-------------------|---------|--------------|
+| `0.wav` (`6.62s`) | `Moonshine Streaming` tiny + `ort-cuda` | `181.840 ms` | `190.640 ms` | `390.563 ms` | `15472.240 ms` | `480228 KB` | `nvidia-smi --query-compute-apps` stayed empty |
+| `1.wav` (`16.71s`) | `Moonshine Streaming` tiny + `ort-cuda` | `453.887 ms` | `457.713 ms` | `890.294 ms` | `95727.316 ms` | `974216 KB` | `nvidia-smi --query-compute-apps` stayed empty |
+
+Interpretation:
+
+- these numbers are effectively unchanged from the earlier CPU-attempt Moonshine runs
+- they are still nowhere near Motlie `sherpa-onnx` CPU on the same WAVs (`5.917 ms` / `6.570 ms` average chunk latency)
+- I do not have evidence that the CUDA EP actually engaged during these runs
+- the most defensible reading is that this build still executed Moonshine in a CPU-equivalent path or silently fell back
+
 ### Practical Verdict
 
 For Phase 3 telephony, current Motlie `sherpa-onnx` clearly wins over current `Moonshine Streaming` integration risk.
 
-The only defensible reason to continue Moonshine work would be if we believe a much better incremental decode API exists or can be implemented upstream without recomputing so much state per partial update. Until that is proven, it should not displace `sherpa-onnx` as the telephony path.
+The CUDA rerun did not close the gap. Until there is positive evidence of a working GPU execution path and materially lower per-chunk latency, `Moonshine Streaming` should not displace `sherpa-onnx` as the telephony path.
 
 ## Recommendation
 
