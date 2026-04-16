@@ -247,6 +247,11 @@ fn write_token_bytes(out: &mut Vec<u8>, bytes: Vec<u8>) -> Result<(), ModelError
         let encoded = u8::try_from(len).map_err(|err| ModelError::Internal(err.to_string()))?;
         out.push(encoded);
     } else {
+        if len >= 16_384 {
+            return Err(ModelError::InvalidConfiguration(format!(
+                "moonshine tokenizer token length {len} exceeds 16,383-byte binary encoding limit"
+            )));
+        }
         let low =
             u8::try_from((len % 128) + 128).map_err(|err| ModelError::Internal(err.to_string()))?;
         let high = u8::try_from(len / 128).map_err(|err| ModelError::Internal(err.to_string()))?;
@@ -335,5 +340,12 @@ mod tests {
     fn s16le_decode_requires_even_length() {
         let err = decode_pcm_to_f32(&[1], PcmEncoding::S16Le).expect_err("odd len must fail");
         assert!(matches!(err, ModelError::InvalidConfiguration(msg) if msg.contains("even")));
+    }
+
+    #[test]
+    fn oversized_token_lengths_fail_with_explicit_error() {
+        let err = write_token_bytes(&mut Vec::new(), vec![0_u8; 16_384])
+            .expect_err("oversized token must fail");
+        assert!(matches!(err, ModelError::InvalidConfiguration(msg) if msg.contains("16,383")));
     }
 }
