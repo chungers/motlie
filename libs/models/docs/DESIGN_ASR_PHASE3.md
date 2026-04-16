@@ -433,46 +433,69 @@ For telephony, `Moonshine Streaming` is not currently competitive with Motlie `s
 
 ### CUDA Rerun On DGX
 
-I reran the same `80 ms` incremental probe on the DGX host after rebuilding the local prototype with `transcribe-rs` feature `ort-cuda` and explicitly selecting `OrtAccelerator::Cuda`.
+I reran the same DGX experiment with a real CUDA-capable ONNX Runtime instead of the earlier CPU-only fallback.
 
-Measured CUDA-attempt results:
+What changed:
 
-| Audio | Backend | Avg chunk latency | Median chunk latency | Max chunk latency | End-to-end decode | Max RSS | GPU evidence |
-|------|---------|-------------------|----------------------|-------------------|-------------------|---------|--------------|
-| `0.wav` (`6.62s`) | `Moonshine Streaming` tiny + `ort-cuda` | `181.840 ms` | `190.640 ms` | `390.563 ms` | `15472.240 ms` | `480228 KB` | `nvidia-smi --query-compute-apps` stayed empty |
-| `1.wav` (`16.71s`) | `Moonshine Streaming` tiny + `ort-cuda` | `453.887 ms` | `457.713 ms` | `890.294 ms` | `95727.316 ms` | `974216 KB` | `nvidia-smi --query-compute-apps` stayed empty |
+- the stock `ort` crate path on this `aarch64` / CUDA 13 host did not ship a usable prebuilt `cu13` runtime
+- I built ONNX Runtime `v1.24.4` from source with CUDA 13 and cuDNN 9, targeting `sm_121`
+- the resulting runtime exported `libonnxruntime.so`, `libonnxruntime_providers_shared.so`, and `libonnxruntime_providers_cuda.so`
+- a direct `ort` smoke test with `CUDAExecutionProvider.error_on_failure()` succeeded outside the sandbox and created a CUDA-backed session
+
+That means the old packaging blocker is now solved locally for this evaluation.
+
+#### Whole-file control check
+
+Before retesting the telephony probe, I ran the upstream `transcribe-rs` `moonshine_streaming` example against the custom CUDA ORT runtime.
+
+| Audio | Backend | Result | Decode time | Real-time speedup | Max RSS |
+|------|---------|--------|-------------|-------------------|---------|
+| `0.wav` (`6.62s`) | upstream `moonshine_streaming` example + CUDA ORT | success, plausible transcript | `499.76 ms` | `13.26x` | `302428 KB` |
+
+So Moonshine on CUDA is viable for the whole-file path.
+
+#### Telephony-style incremental rerun
+
+I then reran the `80 ms` incremental probe outside the sandbox with:
+
+- `ORT_DYLIB_PATH=/tmp/onnxruntime-cuda/build/Linux-sm121/Release/libonnxruntime.so`
+- `LD_LIBRARY_PATH` including the ORT build directory, CUDA 13 libs, and cuDNN 9 libs
+- explicit `OrtAccelerator::Cuda`
+
+Observed results:
+
+| Audio | Backend | Outcome | Wall time before crash | Max RSS | GPU evidence |
+|------|---------|---------|------------------------|---------|--------------|
+| `0.wav` (`6.62s`) | `Moonshine Streaming` tiny incremental probe + CUDA ORT | crashed with `SIGSEGV` | `1.72 s` | `464388 KB` | `nvidia-smi` showed `./target/debug/asr-phase3-probe` at `252-320 MiB` |
+| `1.wav` (`16.71s`) | `Moonshine Streaming` tiny incremental probe + CUDA ORT | crashed with `SIGSEGV` | `1.79 s` | `465548 KB` | `nvidia-smi` showed `./target/debug/asr-phase3-probe` at `350 MiB` |
+
+The crash persisted even after removing the forced per-chunk `partial_stream_text()` call from the local probe, so it is not just the partial-text extraction helper.
+
+`gdb` on the real CUDA run showed the crash inside the ONNX Runtime CUDA provider while executing the Moonshine graph:
+
+- signal: `SIGSEGV`
+- failing area: `onnxruntime::cuda::Slice<true>::ComputeInternal`
+- stack included `libonnxruntime_providers_cuda.so` and `onnxruntime::SliceBase::FillVectorsFromInput`
 
 Interpretation:
 
-- these numbers are effectively unchanged from the earlier CPU-attempt Moonshine runs
-- they are still nowhere near Motlie `sherpa-onnx` CPU on the same WAVs (`5.917 ms` / `6.570 ms` average chunk latency)
-- I do not have evidence that the CUDA EP actually engaged during these runs
-- the most defensible reading is that this build still executed Moonshine in a CPU-equivalent path or silently fell back
-
-### Root Cause
-
-The missing GPU activity turned out not to be a `Moonshine` session-options bug. It is an ONNX Runtime packaging problem on this host.
-
-Local evidence from the DGX run:
-
-- `ort-sys` build output for the local `ort-cuda` probe logged: `looking for prebuilt binaries matching feature set: cu13` followed by `no prebuilt binaries available on this platform for combination of features 'cu13'`
-- after that warning, the build linked the same cached archive already used by the CPU path: `/home/dchung/.cache/ort.pyke.io/.../libonnxruntime.a`
-- a filesystem search on April 16, 2026 found no alternative host ORT install with CUDA provider libraries, only that single static archive
-- a direct `ort` sanity check using `CUDAExecutionProvider.error_on_failure()` and `strace` never reached `main()` output; it attempted to locate `libonnxruntime.so`, failed with `ENOENT`, then blocked in runtime initialization
-
-Practical meaning:
-
-- the local `transcribe-rs` / `ort` build never had a usable CUDA-enabled ONNX Runtime to bind against on this `aarch64` / CUDA 13 DGX host
-- forcing `CUDAExecutionProvider` in session construction cannot fix that by itself
-- to get a real Moonshine GPU benchmark here, we would first need a CUDA-capable ONNX Runtime build for this platform, plus its required runtime libraries available to the process
+- the earlier “CUDA never engaged” result was a packaging artifact and is no longer the right conclusion
+- with a real CUDA-enabled ORT, GPU residency is confirmed
+- the whole-file Moonshine path works on CUDA
+- the telephony-style incremental path still fails under CUDA on both WAVs before producing usable chunk metrics
+- that makes Moonshine unsuitable for Motlie Phase 3 telephony today, even after fixing ORT packaging
 
 ### Practical Verdict
 
 For Phase 3 telephony, current Motlie `sherpa-onnx` clearly wins over current `Moonshine Streaming` integration risk.
 
-The CUDA rerun did not close the gap, and the root cause is now concrete: there is no usable CUDA-enabled ORT runtime in this environment for `transcribe-rs` to load. Until that runtime problem is solved and a materially lower per-chunk latency is demonstrated, `Moonshine Streaming` should not displace `sherpa-onnx` as the telephony path.
+The current verdict is stronger than before:
 
-## Nemotron Integration Path
+- `Moonshine Streaming` can run on CUDA for whole-file decoding if given a custom CUDA-enabled ORT build
+- but the chunk-by-chunk incremental path required for Telnyx telephony still crashes under CUDA on the tested DGX setup
+- `sherpa-onnx` remains the only working telephony-grade streaming path in Motlie today
+
+Until Moonshine can process real `80 ms` incremental chunks without crashing and demonstrate chunk latencies competitive with `sherpa-onnx`, it should not displace `sherpa-onnx` as the telephony backend.
 
 ### What It Is
 
