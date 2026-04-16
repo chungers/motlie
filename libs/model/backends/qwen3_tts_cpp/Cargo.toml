@@ -1,0 +1,27 @@
+[package]
+name = "motlie-model-qwen3-tts-cpp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "qwen3-tts.cpp backend implementations for motlie-model TTS contracts"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+cuda = []
+
+[dependencies]
+async-trait = "0.1.89"
+motlie-model = { path = "../..", features = ["metrics-runtime"] }
+tokio = { version = "1", features = ["rt", "sync"] }
+tracing = "0.1"
+
+[build-dependencies]
+cmake = "0.1.54"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
