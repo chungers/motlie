@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use clap::{Arg, Command};
 
 use crate::commands::tmux::{
-    execute_tmux_command, tmux_complete, tmux_help, TargetsCommand, TmuxCommand,
-    TmuxCompletionContext, TmuxFrontendState, TmuxMirrorSnapshot, TmuxState,
+    execute_tmux_command, tmux_complete, tmux_help, TmuxCommand, TmuxCompletionContext,
+    TmuxFrontendState, TmuxMirrorSnapshot, TmuxState,
 };
 use crate::completion::{CompletionCandidate, CompletionRequest};
 use crate::engine::{CommandOutput, CommandSet};
@@ -68,6 +68,13 @@ impl TmuxAppState {
         Ok(())
     }
 
+    pub async fn shutdown_all_managed_state(&mut self) -> DriverResult<()> {
+        for state in self.connections.values_mut() {
+            state.shutdown_managed_state().await?;
+        }
+        Ok(())
+    }
+
     fn connection_mut(&mut self, alias: &str) -> DriverResult<&mut TmuxState> {
         self.connections
             .get_mut(alias)
@@ -98,7 +105,7 @@ impl TmuxFrontendState for TmuxAppState {
                 Some(state) => format!("{alias} ({})", state.host_uri),
                 None => "(current connection missing)".to_string(),
             },
-            None => "(no current connection selected)".to_string(),
+            None => "(select a connection with `use <alias>`)".to_string(),
         }
     }
 
@@ -237,7 +244,6 @@ pub enum TmuxAppResolved {
         alias: String,
     },
     Connections,
-    TargetsAll,
     Tmux {
         scope: ResolvedTmuxScope,
         command: TmuxCommand,
@@ -309,6 +315,7 @@ impl CommandSet<TmuxAppState> for TmuxAppCommand {
 
     fn help(topic: &[String]) -> Option<String> {
         match topic {
+            [] => Some(tmux_app_root_help()),
             [name] if name == "connect" => Some(connect_help()),
             [name] if name == "disconnect" => Some(disconnect_help()),
             [name] if name == "use" => Some(use_help()),
@@ -362,7 +369,6 @@ impl CommandSet<TmuxAppState> for TmuxAppCommand {
             TmuxAppResolved::Disconnect { alias } => execute_disconnect(context, &alias).await,
             TmuxAppResolved::Use { alias } => execute_use(context, &alias),
             TmuxAppResolved::Connections => execute_connections(context),
-            TmuxAppResolved::TargetsAll => execute_targets_all(context).await,
             TmuxAppResolved::Tmux { scope, command } => {
                 let state = context.connection_mut(&scope.alias)?;
                 execute_tmux_command(state, command).await
@@ -407,11 +413,32 @@ fn required_string(matches: &clap::ArgMatches, name: &str) -> DriverResult<Strin
         .ok_or_else(|| DriverError::message(format!("missing required argument '{name}'")))
 }
 
+fn tmux_app_root_help() -> String {
+    let mut sections = vec![
+        "tmux multi-host commands".to_string(),
+        "".to_string(),
+        "Connection management:".to_string(),
+        "  connect <ssh-uri> as <alias>".to_string(),
+        "  disconnect <alias>".to_string(),
+        "  use <alias>".to_string(),
+        "  connections".to_string(),
+        "".to_string(),
+    ];
+    sections.extend(
+        tmux_help(&[])
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string),
+    );
+    sections.join("\n")
+}
+
 fn connect_help() -> String {
     [
         "connect <ssh-uri> as <alias>",
         "",
         "Connect to a tmux host and register it under an alias for namespaced commands.",
+        "The `as` token is a literal keyword in the command shape.",
         "",
         "Example:",
         "  connect ssh://dchung@motliehost?identity-file=/home/dchung/.ssh/motliehost as prod",
@@ -503,16 +530,11 @@ fn resolve_tmux_command(
             })
         }
         TmuxCommand::Targets(cmd) => {
-            if let Some(alias) = context.current_alias() {
-                Ok(TmuxAppResolved::Tmux {
-                    scope: ResolvedTmuxScope {
-                        alias: alias.to_string(),
-                    },
-                    command: TmuxCommand::Targets(cmd),
-                })
-            } else {
-                Ok(TmuxAppResolved::TargetsAll)
-            }
+            let alias = context.resolve_command_scope()?;
+            Ok(TmuxAppResolved::Tmux {
+                scope: ResolvedTmuxScope { alias },
+                command: TmuxCommand::Targets(cmd),
+            })
         }
         TmuxCommand::Send(mut cmd) => {
             let resolved = context.resolve_scope(&cmd.target)?;
@@ -565,21 +587,35 @@ fn resolve_tmux_command(
             }
         },
         TmuxCommand::History(mut cmd) => {
-            let mut resolved_scope = None;
+            let mut resolved_scope: Option<String> = None;
             let mut sessions = Vec::with_capacity(cmd.sessions.len());
             for session in &cmd.sessions {
-                let resolved = context.resolve_scope(session)?;
-                if let Some(scope) = resolved_scope.as_ref() {
-                    if scope != &resolved.scope {
+                let qualified = validate_qualified_name(session)?;
+                let scope = match qualified.scope {
+                    Some(scope) => {
+                        if !context.connections.contains_key(scope) {
+                            return Err(DriverError::unknown_scope(scope));
+                        }
+                        scope.to_string()
+                    }
+                    None => match resolved_scope.as_ref() {
+                        Some(scope) => scope.clone(),
+                        None => context.resolve_command_scope()?,
+                    },
+                };
+
+                if let Some(existing) = resolved_scope.as_ref() {
+                    if existing != &scope {
                         return Err(DriverError::invalid_argument(
                             "sessions",
                             "all sessions in one history command must belong to the same alias",
                         ));
                     }
                 } else {
-                    resolved_scope = Some(resolved.scope.clone());
+                    resolved_scope = Some(scope.clone());
                 }
-                sessions.push(resolved.value);
+
+                sessions.push(qualified.value.to_string());
             }
             cmd.sessions = sessions;
             Ok(TmuxAppResolved::Tmux {
@@ -653,26 +689,6 @@ fn execute_connections(context: &TmuxAppState) -> DriverResult<CommandOutput> {
             " "
         };
         lines.push(format!("{marker} {alias} -> {}", state.host_uri));
-    }
-
-    Ok(CommandOutput {
-        lines,
-        effects: Vec::new(),
-    })
-}
-
-async fn execute_targets_all(context: &mut TmuxAppState) -> DriverResult<CommandOutput> {
-    if context.connections.is_empty() {
-        return Ok(CommandOutput::line("No connected tmux hosts"));
-    }
-
-    let mut lines = Vec::new();
-    for (alias, state) in &mut context.connections {
-        lines.push(format!("[{alias}] {}", state.host_uri));
-        let output = execute_tmux_command(state, TmuxCommand::Targets(TargetsCommand)).await?;
-        for line in output.lines {
-            lines.push(line);
-        }
     }
 
     Ok(CommandOutput {
@@ -858,16 +874,55 @@ mod tests {
         }
     }
 
-    #[test]
-    fn multi_host_targets_without_current_resolve_to_all_connections() {
+    #[tokio::test]
+    async fn multi_host_targets_without_current_require_current_scope() {
         let state = test_state();
+        let mut engine = CommandEngine::<TmuxAppState, TmuxAppCommand>::new(state);
+        let error = engine
+            .run_line("targets")
+            .await
+            .expect_err("targets should require current scope");
+
+        assert!(matches!(error, DriverError::MissingCurrentScope));
+    }
+
+    #[tokio::test]
+    async fn multi_host_help_includes_app_level_commands() {
+        let state = test_state();
+        let mut engine = CommandEngine::<TmuxAppState, TmuxAppCommand>::new(state);
+        let output = engine.run_line("help").await.expect("help output");
+        let rendered = output.lines.join("\n");
+
+        assert!(rendered.contains("connect <ssh-uri> as <alias>"));
+        assert!(rendered.contains("disconnect <alias>"));
+        assert!(rendered.contains("use <alias>"));
+        assert!(rendered.contains("connections"));
+    }
+
+    #[tokio::test]
+    async fn multi_host_history_uses_first_explicit_scope_for_bare_names() {
+        let mut state = test_state();
+        state.current = Some("beta".to_string());
         let resolved = super::resolve_tmux_command(
             &state,
-            crate::commands::tmux::TmuxCommand::Targets(crate::commands::tmux::TargetsCommand),
+            crate::commands::tmux::TmuxCommand::History(crate::commands::tmux::HistoryCommand {
+                sessions: vec!["alpha/demo".to_string(), "demo".to_string()],
+            }),
         )
-        .expect("targets resolve");
+        .expect("history should resolve against first explicit scope");
 
-        assert!(matches!(resolved, super::TmuxAppResolved::TargetsAll));
+        match resolved {
+            super::TmuxAppResolved::Tmux { scope, command } => {
+                assert_eq!(scope.alias, "alpha");
+                match command {
+                    crate::commands::tmux::TmuxCommand::History(cmd) => {
+                        assert_eq!(cmd.sessions, vec!["demo", "demo"]);
+                    }
+                    _ => panic!("expected history command"),
+                }
+            }
+            _ => panic!("expected scoped tmux resolution"),
+        }
     }
 
     #[tokio::test]
