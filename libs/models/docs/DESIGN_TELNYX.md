@@ -333,37 +333,103 @@ Why:
 
 If a TTS backend emits a different format, the gateway should resample before sending to Telnyx.
 
-### Pluggable Model Injection
+### Static-Dispatch Model Injection
 
-The gateway must not hardcode `sherpa-onnx`, `whisper.cpp`, Piper, Fish Speech, or any other concrete backend.
+The gateway must not hardcode `sherpa-onnx`, `whisper.cpp`, Piper, Fish Speech, or any other concrete backend. It also should not use `dyn` at the gateway boundary, because the supported model universe is known at build time through Cargo features.
 
 Recommended construction rule:
 
-- the gateway accepts any `dyn TranscriptionModel` for ASR
-- the gateway accepts any `dyn SpeechModel` for TTS
-- the gateway accepts any `dyn ConversationHandler` for application logic
+- make the Telnyx gateway generic over ASR, TTS, and conversation-handler types
+- choose concrete model bundles at build time through `motlie-models` feature flags
+- use closed enums for operator-facing selection when more than one compiled model is present
 
-This can be expressed with trait objects, generics, or a builder. The important point is the dependency boundary, not the exact Rust ergonomics.
-
-Example sketch:
+Recommended generic shape:
 
 ```rust
-pub struct TelnyxGateway {
-    asr: Arc<dyn TranscriptionModel>,
-    tts: Arc<dyn SpeechModel>,
-    handler: Arc<dyn ConversationHandler>,
+pub struct TelnyxGateway<A, T, H> {
+    asr: A,
+    tts: T,
+    handler: H,
     telnyx: TelnyxCallControlClient,
-    sessions: Arc<SessionRegistry>,
+    sessions: SessionRegistry,
 }
 ```
 
-That keeps the transport reusable while letting callers swap:
+Where:
 
-- `sherpa-onnx` for `whisper.cpp`
-- Piper for Fish Speech
+- `A` is the concrete ASR capability handle or wrapper
+- `T` is the concrete TTS capability handle or wrapper
+- `H` is the concrete `ConversationHandler`
+
+This keeps the transport reusable while letting callers swap:
+
+- `sherpa-onnx` for Moonshine or `whisper.cpp`
+- Piper for Qwen3-TTS
 - a trivial echo handler for an LLM-backed assistant
 
-without changing gateway code.
+without changing gateway code and without introducing gateway-level trait-object dispatch.
+
+### Build-Time Model Surface
+
+The relevant `motlie-models` feature flags are:
+
+- ASR:
+  - `model-sherpa-onnx-streaming`
+  - `model-moonshine-streaming`
+  - `model-whisper-base-en`
+- TTS:
+  - `model-piper-en-us-ljspeech-medium`
+  - `model-qwen3-tts-0_6b`
+
+Examples:
+
+```bash
+cargo build --release -p motlie-telnyx-gateway \
+  --no-default-features \
+  --features "model-sherpa-onnx-streaming model-piper-en-us-ljspeech-medium"
+
+cargo build --release -p motlie-telnyx-gateway \
+  --no-default-features \
+  --features "model-moonshine-streaming model-qwen3-tts-0_6b"
+```
+
+Design implication:
+
+- a Telnyx deployment should compile only the ASR/TTS bundles it intends to operate
+- the gateway binary should fail at compile time if the required model feature set is not enabled
+- when multiple ASR or TTS bundles are compiled in, selection should be done via closed enums from `motlie_models::AsrModels` and `motlie_models::TtsModels`, not via open-ended runtime plugin loading
+
+### Closed-Enum Selection
+
+For builds that include more than one ASR or TTS backend, the gateway should prefer closed enums over trait objects.
+
+Sketch:
+
+```rust
+pub enum TelnyxAsrSelection {
+    #[cfg(feature = "model-sherpa-onnx-streaming")]
+    SherpaOnnxStreaming,
+    #[cfg(feature = "model-moonshine-streaming")]
+    MoonshineStreaming,
+    #[cfg(feature = "model-whisper-base-en")]
+    WhisperBaseEn,
+}
+
+pub enum TelnyxTtsSelection {
+    #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+    PiperEnUsLjspeechMedium,
+    #[cfg(feature = "model-qwen3-tts-0_6b")]
+    Qwen3Tts12Hz0_6B,
+}
+```
+
+These enums map cleanly onto the existing `motlie_models::AsrModels` and `motlie_models::TtsModels` surfaces.
+
+### Current Lower-Layer Constraint
+
+The current `libs/model` and `libs/models` internals still use dynamic capability return types in `ModelBundle` and `BundleHandle`. So the design can remove `dyn` from the gateway architecture immediately, but a fully static-dispatch implementation all the way down would require follow-on work in the model layer itself.
+
+That should be documented explicitly so the design does not pretend the existing lower-level loader surface is already fully monomorphized.
 
 ### Conversation Handler Contract
 
@@ -599,9 +665,9 @@ Recommended shapes:
 pub struct TelnyxGateway {
     sessions: Arc<SessionRegistry>,
     telnyx: TelnyxCallControlClient,
-    asr: Arc<dyn TranscriptionModel>,
-    tts: Arc<dyn SpeechModel>,
-    handler: Arc<dyn ConversationHandler>,
+    asr: TelnyxAsrRuntime,
+    tts: TelnyxTtsRuntime,
+    handler: H,
 }
 
 pub struct TelnyxCallSession {
@@ -617,6 +683,8 @@ pub struct TelnyxCallSession {
     pub conversation: ConversationContext,
 }
 ```
+
+Where `TelnyxAsrRuntime` and `TelnyxTtsRuntime` are concrete, feature-gated runtime wrappers selected from the compiled model set rather than open-ended trait-object slots.
 
 This keeps Telnyx-specific types outside the model crates while allowing ASR, TTS, and conversation logic to remain transport-agnostic.
 
