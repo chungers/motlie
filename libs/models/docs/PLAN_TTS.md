@@ -4,7 +4,8 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-04-16 | @codex-tts | Implemented the official backup TTS backend `motlie-model-qwen3-tts-cpp` with a vendored C API wrapper, curated GGUF bundle wiring, and the `tts_v0.4` example. Validated real CPU synthesis from local GGUF artifacts, validated the optional CUDA build/clippy path on GB10, and documented the current local CUDA runtime fallback to CPU. |
+| 2026-04-16 | @codex-tts | Replaced the large `qwen3-tts.cpp` vendor tree with a pinned git submodule at `libs/model/backends/qwen3_tts_cpp/vendor/qwen3-tts.cpp` and tightened the build/docs contract around `git submodule update --init --recursive` for fresh checkouts. |
+| 2026-04-16 | @codex-tts | Implemented the official backup TTS backend `motlie-model-qwen3-tts-cpp` with a submodule-backed C API wrapper, curated GGUF bundle wiring, and the `tts_v0.4` example. Validated real CPU synthesis from local GGUF artifacts, validated the optional CUDA build/clippy path on GB10, and documented the current local CUDA runtime fallback to CPU. |
 | 2026-04-15 | @cld-review-models | Implemented Phase 2 Qwen3-TTS slice: `motlie-model-qwen3-tts` backend with multi-model ONNX pipeline, vocabulary-based tokenizer, proper log-mel reference-audio conditioning, shape-preserving tensor pipeline, curated bundle `qwen3_tts_12hz_0_6b`, and `tts_v0.2` example with voice cloning. Runtime boundary is in-process ONNX via `motlie-model-ort` with offline safetensors-to-ONNX export prerequisite. |
 | 2026-04-14 | @codex-tts | Addressed PR #179 review R1 by documenting the Phase 1 batch-then-chunk stream behavior, the Piper-only `SpeechParams.seed` rejection, and the current `ort` RC session-mutability constraint while keeping the validated artifact-policy fix in scope. |
 | 2026-04-14 | @codex-tts | Implemented the Phase 1 Piper slice end to end: additive speech contracts in `libs/model`, shared ONNX helper extraction for Piper and sherpa, the `motlie-model-piper` backend, curated bundle/selector wiring in `libs/models`, the `models_tts_v0_1` example, and env-gated runtime verification. |
@@ -292,7 +293,7 @@ This phase is the official backup-TTS track attached to issue `#188`.
 
 ### 7.1 - Backend/runtime boundary
 
-- [x] Add `libs/model/backends/qwen3_tts_cpp/` as a distinct backend family that wraps the vendored `qwen3tts_c_api.h` boundary rather than extending the ONNX-based Qwen backend.
+- [x] Add `libs/model/backends/qwen3_tts_cpp/` as a distinct backend family that wraps the pinned submodule `qwen3tts_c_api.h` boundary rather than extending the ONNX-based Qwen backend.
   DESIGN reference: `Phase-3 qwen3-tts.cpp Backup Vertical Slice`
 - [x] Reuse the public `SpeechRequest` / `SpeechStream` contract with buffered PCM chunk emission in front of whole-utterance native synthesis.
   DESIGN reference: `Phase-3 qwen3-tts.cpp Backup Vertical Slice`, `Streaming PCM API Contract`

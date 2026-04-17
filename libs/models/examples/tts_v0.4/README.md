@@ -21,6 +21,13 @@ The default artifact root is Motlie's standard HF cache root. Override it with
 
 ## Run
 
+Before building the example, initialize the native runtime checkout:
+
+```bash
+git submodule update --init --recursive \
+  libs/model/backends/qwen3_tts_cpp/vendor/qwen3-tts.cpp
+```
+
 ### Basic synthesis
 
 ```bash
@@ -50,7 +57,7 @@ cargo run -p motlie-models --example models_tts_v0_4 \
 ## Expected Behavior
 
 - The example opens the curated `Qwen3-TTS CPP 0.6B` bundle.
-- Text is synthesized through the vendored `qwen3-tts.cpp` C API.
+- Text is synthesized through the pinned `qwen3-tts.cpp` submodule C API.
 - If `--reference-audio` is provided, the backend downsamples it to 24 kHz mono
   float PCM before passing it through the voice-cloning entry point.
 - The backend performs whole-utterance synthesis in `open_stream()` and then
