@@ -20,7 +20,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use motlie_model::{
     ArtifactPolicy, AudioSpec, PcmEncoding, SpeechParams, SpeechRequest, StartOptions,
     VoiceConditioning,
@@ -72,10 +72,7 @@ fn parse_args() -> Result<Args> {
                 ));
             }
             "--reference-text" => {
-                reference_text = Some(
-                    args.next()
-                        .context("--reference-text requires a value")?,
-                );
+                reference_text = Some(args.next().context("--reference-text requires a value")?);
             }
             other => bail!("unknown argument: {other}"),
         }
@@ -119,6 +116,7 @@ async fn run(args: Args) -> Result<()> {
                 sample_rate_hz: ref_spec.sample_rate,
                 channels: ref_spec.channels,
                 encoding,
+                preferred_chunk_bytes: 0,
             },
             pcm,
             reference_text: args.reference_text.clone(),

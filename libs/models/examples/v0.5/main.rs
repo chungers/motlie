@@ -17,7 +17,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use motlie_model::{
     ArtifactPolicy, AudioSpec, PcmChunk, PcmEncoding, StartOptions, TranscriptionParams,
 };
@@ -56,10 +56,7 @@ fn parse_args() -> Result<Args> {
                 ));
             }
             "--language" => {
-                language = Some(
-                    args.next()
-                        .context("--language requires a language code")?,
-                );
+                language = Some(args.next().context("--language requires a language code")?);
             }
             other => bail!("unknown argument: {other}"),
         }
@@ -92,6 +89,7 @@ async fn run(args: Args) -> Result<()> {
         sample_rate_hz: wav_spec.sample_rate,
         channels: wav_spec.channels,
         encoding,
+        preferred_chunk_bytes: 0,
     };
 
     // 2. Start the curated ASR bundle
@@ -128,8 +126,8 @@ async fn run(args: Args) -> Result<()> {
         .await
         .context("failed to open transcription stream")?;
 
-    // 4. Feed PCM chunks (16KB per chunk ≈ 0.5s at 16kHz mono S16)
-    let chunk_size = 16_000;
+    // 4. Feed PCM chunks using the backend's preferred chunking.
+    let chunk_size = stream.audio_spec().normalized_chunk_size();
     let total_bytes = pcm_bytes.len();
     let mut offset = 0;
     let mut sequence = 0u64;
@@ -171,10 +169,7 @@ async fn run(args: Args) -> Result<()> {
     }
 
     // 5. Flush remaining audio
-    let final_update = stream
-        .finish()
-        .await
-        .context("finish() failed")?;
+    let final_update = stream.finish().await.context("finish() failed")?;
 
     if !final_update.segments.is_empty() {
         println!("\n--- final flush ---\n");
@@ -190,15 +185,14 @@ async fn run(args: Args) -> Result<()> {
 
     println!("\n--- done ---");
 
-    handle
-        .shutdown()
-        .await
-        .context("shutdown failed")?;
+    handle.shutdown().await.context("shutdown failed")?;
 
     Ok(())
 }
 
-fn decode_wav(reader: hound::WavReader<std::io::BufReader<std::fs::File>>) -> Result<(Vec<u8>, PcmEncoding)> {
+fn decode_wav(
+    reader: hound::WavReader<std::io::BufReader<std::fs::File>>,
+) -> Result<(Vec<u8>, PcmEncoding)> {
     let spec = reader.spec();
     match spec.sample_format {
         hound::SampleFormat::Int => {
@@ -207,10 +201,7 @@ fn decode_wav(reader: hound::WavReader<std::io::BufReader<std::fs::File>>) -> Re
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .context("failed to decode wav samples")?;
 
-            let bytes: Vec<u8> = samples
-                .iter()
-                .flat_map(|s| s.to_le_bytes())
-                .collect();
+            let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
 
             Ok((bytes, PcmEncoding::S16Le))
         }
@@ -220,10 +211,7 @@ fn decode_wav(reader: hound::WavReader<std::io::BufReader<std::fs::File>>) -> Re
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .context("failed to decode wav samples")?;
 
-            let bytes: Vec<u8> = samples
-                .iter()
-                .flat_map(|s| s.to_le_bytes())
-                .collect();
+            let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
 
             Ok((bytes, PcmEncoding::F32Le))
         }

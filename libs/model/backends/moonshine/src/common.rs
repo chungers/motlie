@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use motlie_model::{ArtifactPolicy, CheckpointFormat, ModelError, PcmEncoding, ResolvedCheckpoint};
 use tokenizers::Tokenizer;
 
-pub(crate) use motlie_model::metrics_runtime::{lock_metrics, observe_latency, RuntimeMetricState};
+pub(crate) use motlie_model::metrics_runtime::{RuntimeMetricState, lock_metrics, observe_latency};
 
 const TARGET_SAMPLE_RATE_HZ: u32 = 16_000;
 
@@ -361,8 +361,7 @@ impl NormalizerState {
         while (cursor as usize) + 1 < samples.len() {
             let idx = cursor as usize;
             let frac = cursor - idx as f64;
-            let interpolated =
-                samples[idx] as f64 * (1.0 - frac) + samples[idx + 1] as f64 * frac;
+            let interpolated = samples[idx] as f64 * (1.0 - frac) + samples[idx + 1] as f64 * frac;
             output.push(interpolated as f32);
             cursor += ratio;
         }
@@ -392,9 +391,12 @@ mod tests {
             sample_rate_hz: TARGET_SAMPLE_RATE_HZ,
             channels: 1,
             encoding: PcmEncoding::S16Le,
+            preferred_chunk_bytes: 0,
         };
 
-        let out = norm.normalize(&[1], &spec).expect("partial sample should be buffered");
+        let out = norm
+            .normalize(&[1], &spec)
+            .expect("partial sample should be buffered");
         assert!(out.is_empty());
     }
 
@@ -412,11 +414,17 @@ mod tests {
             sample_rate_hz: 8_000,
             channels: 1,
             encoding: PcmEncoding::F32Le,
+            preferred_chunk_bytes: 0,
         };
         let input = [0.0_f32, 1.0_f32];
-        let bytes: Vec<u8> = input.iter().flat_map(|sample| sample.to_le_bytes()).collect();
+        let bytes: Vec<u8> = input
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect();
 
-        let out = norm.normalize(&bytes, &spec).expect("normalize should succeed");
+        let out = norm
+            .normalize(&bytes, &spec)
+            .expect("normalize should succeed");
         assert!(!out.is_empty());
 
         let mut flushed = out.clone();

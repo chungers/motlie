@@ -66,6 +66,7 @@ pub(crate) fn audio_spec() -> AudioSpec {
         sample_rate_hz: DEFAULT_SAMPLE_RATE_HZ,
         channels: 1,
         encoding: PcmEncoding::F32Le,
+        preferred_chunk_bytes: 0,
     }
 }
 

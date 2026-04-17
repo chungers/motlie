@@ -27,8 +27,8 @@ pub use generation::{
 pub use metrics::{EmbeddingMetrics, ModelMetricSnapshot, RuntimeMetrics, TextGenerationMetrics};
 pub use speech::{SpeechModel, SpeechParams, SpeechRequest, SpeechStream, VoiceConditioning};
 pub use transcription::{
-    AudioSpec, PcmChunk, PcmEncoding, TranscriptSegment, TranscriptionModel, TranscriptionParams,
-    TranscriptionStream, TranscriptionUpdate,
+    AudioSpec, BackendMode, PcmChunk, PcmEncoding, TranscriptSegment, TranscriptionModel,
+    TranscriptionParams, TranscriptionStream, TranscriptionUpdate,
 };
 pub use units::{Bytes, Milliseconds, Tokens, TokensPerSecond};
 

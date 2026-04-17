@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 
-use crate::{AudioSpec, ModelError, PcmChunk};
+use crate::{AudioSpec, BackendMode, ModelError, PcmChunk};
 
 /// Stream-scoped speech synthesis parameters.
 ///
@@ -50,6 +50,8 @@ pub struct SpeechRequest {
 /// iteration state and requires ordered, exclusive access.
 #[async_trait]
 pub trait SpeechModel: Send + Sync {
+    fn backend_mode(&self) -> BackendMode;
+
     async fn open_stream(
         &self,
         request: SpeechRequest,
@@ -103,6 +105,7 @@ mod tests {
                 sample_rate_hz: 16_000,
                 channels: 1,
                 encoding: PcmEncoding::S16Le,
+                preferred_chunk_bytes: 0,
             },
             pcm: vec![0_u8; 320],
             reference_text: Some("test transcript".into()),

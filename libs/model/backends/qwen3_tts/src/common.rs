@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use motlie_model::{ArtifactPolicy, AudioSpec, CheckpointFormat, ModelError, PcmEncoding, ResolvedCheckpoint};
+use motlie_model::{
+    ArtifactPolicy, AudioSpec, CheckpointFormat, ModelError, PcmEncoding, ResolvedCheckpoint,
+};
 use serde::Deserialize;
 
 pub(crate) use motlie_model::metrics_runtime::{
-    lock_metrics, observe_latency, observe_memory, RuntimeMetricState,
+    RuntimeMetricState, lock_metrics, observe_latency, observe_memory,
 };
 
 /// Paths to the three ONNX model components, config, and vocabulary.
@@ -146,6 +148,7 @@ impl Qwen3TtsConfig {
             sample_rate_hz: self.sample_rate,
             channels: 1,
             encoding: PcmEncoding::F32Le,
+            preferred_chunk_bytes: 0,
         }
     }
 }
@@ -218,15 +221,18 @@ impl Vocabulary {
         for &(token, id) in entries {
             map.insert(token.to_string(), id);
         }
-        let unk_id = map.get("<unk>").copied().ok_or_else(|| {
-            ModelError::InvalidConfiguration("test vocab missing <unk>".into())
-        })?;
-        let bos_id = map.get("<bos>").copied().ok_or_else(|| {
-            ModelError::InvalidConfiguration("test vocab missing <bos>".into())
-        })?;
-        let eos_id = map.get("<eos>").copied().ok_or_else(|| {
-            ModelError::InvalidConfiguration("test vocab missing <eos>".into())
-        })?;
+        let unk_id = map
+            .get("<unk>")
+            .copied()
+            .ok_or_else(|| ModelError::InvalidConfiguration("test vocab missing <unk>".into()))?;
+        let bos_id = map
+            .get("<bos>")
+            .copied()
+            .ok_or_else(|| ModelError::InvalidConfiguration("test vocab missing <bos>".into()))?;
+        let eos_id = map
+            .get("<eos>")
+            .copied()
+            .ok_or_else(|| ModelError::InvalidConfiguration("test vocab missing <eos>".into()))?;
         let max_token_len = map
             .keys()
             .filter(|k| !k.starts_with('<'))
@@ -349,8 +355,7 @@ fn compute_power_spectrum(
                 } else {
                     0.0
                 };
-                let angle =
-                    -2.0 * std::f64::consts::PI * k as f64 * n as f64 / fft_size as f64;
+                let angle = -2.0 * std::f64::consts::PI * k as f64 * n as f64 / fft_size as f64;
                 real += sample * angle.cos();
                 imag += sample * angle.sin();
             }
@@ -521,7 +526,9 @@ mod tests {
         let paths = build_artifact_paths(&root);
         let err = validate_artifacts(&paths).expect_err("missing components should fail");
 
-        assert!(matches!(err, ModelError::InvalidConfiguration(msg) if msg.contains("does not exist")));
+        assert!(
+            matches!(err, ModelError::InvalidConfiguration(msg) if msg.contains("does not exist"))
+        );
     }
 
     #[test]
@@ -593,12 +600,8 @@ mod tests {
 
     #[test]
     fn tokenizer_empty_text_produces_only_bos_eos() {
-        let vocab = Vocabulary::from_entries(&[
-            ("<unk>", 0),
-            ("<bos>", 1),
-            ("<eos>", 2),
-        ])
-        .expect("test vocab");
+        let vocab = Vocabulary::from_entries(&[("<unk>", 0), ("<bos>", 1), ("<eos>", 2)])
+            .expect("test vocab");
 
         let ids = vocab.tokenize("");
         assert_eq!(ids, vec![1, 2]);
@@ -606,12 +609,8 @@ mod tests {
 
     #[test]
     fn tokenizer_all_unknown_advances_one_char_at_a_time() {
-        let vocab = Vocabulary::from_entries(&[
-            ("<unk>", 0),
-            ("<bos>", 1),
-            ("<eos>", 2),
-        ])
-        .expect("test vocab");
+        let vocab = Vocabulary::from_entries(&[("<unk>", 0), ("<bos>", 1), ("<eos>", 2)])
+            .expect("test vocab");
 
         let ids = vocab.tokenize("xyz");
         // Each char is unknown, advances by 1

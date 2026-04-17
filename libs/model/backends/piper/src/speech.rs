@@ -5,7 +5,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use espeak_rs::text_to_phonemes;
 use motlie_model::{
-    BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
+    BackendAdapter, BackendKind, BackendMode, BundleHandle, BundleId, BundleMetadata, Capabilities,
     CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
     LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot, PcmChunk,
     QuantizationSupport, ResolvedCheckpoint, SpeechModel, SpeechParams, SpeechRequest,
@@ -17,8 +17,8 @@ use ort::session::{Session, SessionInputValue};
 use ort::value::Tensor;
 
 use crate::common::{
-    configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
-    resolve_onnx_artifacts, PiperArtifactPaths, PiperConfig, RuntimeMetricState,
+    PiperArtifactPaths, PiperConfig, RuntimeMetricState, configure_artifact_policy, lock_metrics,
+    observe_latency, observe_memory, resolve_onnx_artifacts,
 };
 
 const PIPER_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Onnx];
@@ -236,6 +236,10 @@ impl BundleHandle for PiperHandle {
 
 #[async_trait]
 impl SpeechModel for PiperHandle {
+    fn backend_mode(&self) -> BackendMode {
+        BackendMode::Batch
+    }
+
     async fn open_stream(
         &self,
         request: SpeechRequest,
@@ -376,7 +380,7 @@ struct PiperSpeechStream {
 }
 
 impl PiperSpeechStream {
-    fn new(audio_spec: motlie_model::AudioSpec, pcm: Vec<u8>) -> Result<Self, ModelError> {
+    fn new(mut audio_spec: motlie_model::AudioSpec, pcm: Vec<u8>) -> Result<Self, ModelError> {
         let bytes_per_sample = match audio_spec.encoding {
             motlie_model::PcmEncoding::S16Le => 2,
             motlie_model::PcmEncoding::F32Le => 4,
@@ -385,6 +389,7 @@ impl PiperSpeechStream {
             ((audio_spec.sample_rate_hz as u64 * OUTPUT_CHUNK_DURATION_MS as u64) / 1000) as usize;
         let chunk_len_bytes =
             frames_per_chunk.max(1) * audio_spec.channels as usize * bytes_per_sample;
+        audio_spec.preferred_chunk_bytes = chunk_len_bytes;
 
         Ok(Self {
             audio_spec,
@@ -564,6 +569,7 @@ mod tests {
             sample_rate_hz: 16_000,
             channels: 1,
             encoding: PcmEncoding::S16Le,
+            preferred_chunk_bytes: 0,
         };
         let pcm = vec![1_u8; 10_000];
         let mut stream = PiperSpeechStream::new(audio_spec, pcm).expect("stream should build");
@@ -579,11 +585,13 @@ mod tests {
         }
 
         assert!(saw_final);
-        assert!(stream
-            .next_chunk()
-            .await
-            .expect("stream should stay exhausted")
-            .is_none());
+        assert!(
+            stream
+                .next_chunk()
+                .await
+                .expect("stream should stay exhausted")
+                .is_none()
+        );
     }
 
     #[test]
@@ -593,6 +601,7 @@ mod tests {
                 sample_rate_hz: 22_050,
                 channels: 1,
                 encoding: PcmEncoding::S16Le,
+                preferred_chunk_bytes: 0,
             },
             espeak_voice: "en-us".into(),
             num_speakers: 1,
@@ -633,6 +642,7 @@ mod tests {
                 sample_rate_hz: 22_050,
                 channels: 1,
                 encoding: PcmEncoding::S16Le,
+                preferred_chunk_bytes: 0,
             },
             espeak_voice: "en-us".into(),
             num_speakers: 1,

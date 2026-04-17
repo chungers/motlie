@@ -4,8 +4,8 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use motlie_model::{
-    AudioSpec, BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
-    CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
+    AudioSpec, BackendAdapter, BackendKind, BackendMode, BundleHandle, BundleId, BundleMetadata,
+    Capabilities, CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
     LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot, PcmChunk,
     PcmEncoding, QuantizationSupport, ResolvedCheckpoint, SpeechModel, SpeechRequest, SpeechStream,
     StartOptions, TranscriptionModel, VoiceConditioning,
@@ -16,9 +16,10 @@ use ort::session::{Session, SessionInputValue};
 use ort::value::Tensor;
 
 use crate::common::{
+    Qwen3TtsArtifactPaths, Qwen3TtsConfig, RuntimeMetricState, Vocabulary,
     compute_log_mel_spectrogram, configure_artifact_policy, decode_pcm_to_f32, downmix_to_mono,
     encode_pcm, lock_metrics, observe_latency, observe_memory, resample_mono,
-    resolve_onnx_artifacts, Qwen3TtsArtifactPaths, Qwen3TtsConfig, RuntimeMetricState, Vocabulary,
+    resolve_onnx_artifacts,
 };
 
 const QWEN3_TTS_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Onnx];
@@ -242,6 +243,10 @@ impl BundleHandle for Qwen3TtsHandle {
 
 #[async_trait]
 impl SpeechModel for Qwen3TtsHandle {
+    fn backend_mode(&self) -> BackendMode {
+        BackendMode::Batch
+    }
+
     async fn open_stream(
         &self,
         request: SpeechRequest,
@@ -357,10 +362,7 @@ impl Qwen3TtsRuntime {
                 let ref_token_ids = reference_text
                     .as_deref()
                     .map(|text| self.vocab.tokenize(text));
-                Some(ReferenceConditioning {
-                    mel,
-                    ref_token_ids,
-                })
+                Some(ReferenceConditioning { mel, ref_token_ids })
             }
             Some(VoiceConditioning::SpeakerId(_)) => {
                 return Err(ModelError::InvalidConfiguration(
@@ -467,13 +469,14 @@ fn run_encoder(encoder: &mut Session, token_ids: &[i64]) -> Result<TensorWithSha
             message: err.to_string(),
         })?;
 
-    let (shape, hidden) = outputs[0]
-        .try_extract_tensor::<f32>()
-        .map_err(|err| ModelError::BackendExecution {
-            backend: "qwen3-tts",
-            operation: "extract_encoder_output",
-            message: err.to_string(),
-        })?;
+    let (shape, hidden) =
+        outputs[0]
+            .try_extract_tensor::<f32>()
+            .map_err(|err| ModelError::BackendExecution {
+                backend: "qwen3-tts",
+                operation: "extract_encoder_output",
+                message: err.to_string(),
+            })?;
 
     Ok(TensorWithShape {
         data: hidden.to_vec(),
@@ -544,13 +547,14 @@ fn run_decoder(
             message: err.to_string(),
         })?;
 
-    let (shape, mel_out) = outputs[0]
-        .try_extract_tensor::<f32>()
-        .map_err(|err| ModelError::BackendExecution {
-            backend: "qwen3-tts",
-            operation: "extract_decoder_output",
-            message: err.to_string(),
-        })?;
+    let (shape, mel_out) =
+        outputs[0]
+            .try_extract_tensor::<f32>()
+            .map_err(|err| ModelError::BackendExecution {
+                backend: "qwen3-tts",
+                operation: "extract_decoder_output",
+                message: err.to_string(),
+            })?;
 
     Ok(TensorWithShape {
         data: mel_out.to_vec(),
@@ -587,13 +591,14 @@ fn run_vocoder(
             message: err.to_string(),
         })?;
 
-    let (shape, audio) = outputs[0]
-        .try_extract_tensor::<f32>()
-        .map_err(|err| ModelError::BackendExecution {
-            backend: "qwen3-tts",
-            operation: "extract_vocoder_output",
-            message: err.to_string(),
-        })?;
+    let (shape, audio) =
+        outputs[0]
+            .try_extract_tensor::<f32>()
+            .map_err(|err| ModelError::BackendExecution {
+                backend: "qwen3-tts",
+                operation: "extract_vocoder_output",
+                message: err.to_string(),
+            })?;
 
     Ok(TensorWithShape {
         data: audio.to_vec(),
@@ -620,7 +625,7 @@ struct Qwen3TtsSpeechStream {
 }
 
 impl Qwen3TtsSpeechStream {
-    fn new(audio_spec: AudioSpec, pcm: Vec<u8>) -> Result<Self, ModelError> {
+    fn new(mut audio_spec: AudioSpec, pcm: Vec<u8>) -> Result<Self, ModelError> {
         let bytes_per_sample = match audio_spec.encoding {
             PcmEncoding::S16Le => 2,
             PcmEncoding::F32Le => 4,
@@ -629,6 +634,7 @@ impl Qwen3TtsSpeechStream {
             ((audio_spec.sample_rate_hz as u64 * OUTPUT_CHUNK_DURATION_MS as u64) / 1000) as usize;
         let chunk_len_bytes =
             frames_per_chunk.max(1) * audio_spec.channels as usize * bytes_per_sample;
+        audio_spec.preferred_chunk_bytes = chunk_len_bytes;
 
         Ok(Self {
             audio_spec,
@@ -733,10 +739,10 @@ mod tests {
             sample_rate_hz: 22_050,
             channels: 1,
             encoding: PcmEncoding::F32Le,
+            preferred_chunk_bytes: 0,
         };
         let pcm = vec![0_u8; 10_000];
-        let mut stream =
-            Qwen3TtsSpeechStream::new(audio_spec, pcm).expect("stream should build");
+        let mut stream = Qwen3TtsSpeechStream::new(audio_spec, pcm).expect("stream should build");
 
         let mut prev_seq = None;
         let mut saw_final = false;
@@ -749,11 +755,13 @@ mod tests {
         }
 
         assert!(saw_final);
-        assert!(stream
-            .next_chunk()
-            .await
-            .expect("should stay exhausted")
-            .is_none());
+        assert!(
+            stream
+                .next_chunk()
+                .await
+                .expect("should stay exhausted")
+                .is_none()
+        );
     }
 
     #[test]
@@ -764,8 +772,8 @@ mod tests {
         let encoded = encode_pcm(&samples, PcmEncoding::S16Le);
         assert_eq!(encoded.len(), samples.len() * 2);
 
-        let decoded = decode_pcm_to_f32(&encoded, PcmEncoding::S16Le)
-            .expect("round-trip should succeed");
+        let decoded =
+            decode_pcm_to_f32(&encoded, PcmEncoding::S16Le).expect("round-trip should succeed");
         for (orig, dec) in samples.iter().zip(decoded.iter()) {
             assert!((orig - dec).abs() < 0.001, "orig={orig}, decoded={dec}");
         }
@@ -775,13 +783,9 @@ mod tests {
     fn reference_conditioning_with_text_carries_token_ids() {
         use crate::common::Vocabulary;
 
-        let vocab = Vocabulary::from_entries(&[
-            ("<unk>", 0),
-            ("<bos>", 1),
-            ("<eos>", 2),
-            ("hi", 10),
-        ])
-        .expect("test vocab");
+        let vocab =
+            Vocabulary::from_entries(&[("<unk>", 0), ("<bos>", 1), ("<eos>", 2), ("hi", 10)])
+                .expect("test vocab");
 
         let mel = TensorWithShape {
             data: vec![0.1, 0.2, 0.3],

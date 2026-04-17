@@ -7,8 +7,8 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use motlie_model::{
-    AudioSpec, BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
-    CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
+    AudioSpec, BackendAdapter, BackendKind, BackendMode, BundleHandle, BundleId, BundleMetadata,
+    Capabilities, CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
     LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot, PcmChunk,
     PcmEncoding, QuantizationBits, QuantizationSupport, ResolvedCheckpoint, SpeechModel,
     SpeechParams, SpeechRequest, SpeechStream, StartOptions, TranscriptionModel, VoiceConditioning,
@@ -240,6 +240,10 @@ impl BundleHandle for Qwen3TtsCppHandle {
 
 #[async_trait]
 impl SpeechModel for Qwen3TtsCppHandle {
+    fn backend_mode(&self) -> BackendMode {
+        BackendMode::Batch
+    }
+
     async fn open_stream(
         &self,
         request: SpeechRequest,
@@ -363,7 +367,16 @@ struct Qwen3TtsCppSpeechStream {
 }
 
 impl Qwen3TtsCppSpeechStream {
-    fn new(audio_spec: AudioSpec, pcm: Vec<u8>) -> Self {
+    fn new(mut audio_spec: AudioSpec, pcm: Vec<u8>) -> Self {
+        let samples_per_chunk =
+            (audio_spec.sample_rate_hz as usize * OUTPUT_CHUNK_DURATION_MS as usize) / 1000;
+        let bytes_per_sample = match audio_spec.encoding {
+            PcmEncoding::S16Le => 2,
+            PcmEncoding::F32Le => 4,
+        };
+        audio_spec.preferred_chunk_bytes =
+            samples_per_chunk * bytes_per_sample * audio_spec.channels as usize;
+
         Self {
             audio_spec,
             pcm,
