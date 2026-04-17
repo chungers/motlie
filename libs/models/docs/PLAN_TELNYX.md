@@ -4,11 +4,18 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-17 | @codex-macmini-telnyx | Tightened the execution policy further so no initial acceptance criteria, examples, or live validation steps can rely on Moonshine or Qwen3-TTS. The first complete Telnyx slice is Sherpa + Piper only. |
 | 2026-04-17 | @codex-macmini-telnyx | Tightened the PLAN so Sherpa + Piper is the explicit first vertical slice. Follow-on pairings such as Sherpa + Qwen3-TTS and Moonshine + Qwen3-TTS are now deferred to a later phase instead of treated as peer initial targets. |
 | 2026-04-16 | @codex-macmini-telnyx | Reworked the PLAN to match the new hierarchy: provider-agnostic `libs/voice`, Telnyx-specific `libs/voice_telnyx`, and a thin `bins/motlie-telnyx-gateway` binary. |
 | 2026-04-15 | @codex-macmini-telnyx | Initial Telnyx integration PLAN derived from `DESIGN_TELNYX.md`. Covers the transport gateway, codec normalization, inbound and outbound call flows, application orchestration, and validation. |
 
 Derived from [DESIGN_TELNYX.md](./DESIGN_TELNYX.md). This PLAN assumes brownfield work against the existing `libs/model` and `libs/models` speech stack and now explicitly separates provider-neutral voice infrastructure from the Telnyx-specific transport adapter.
+
+Execution policy for the initial implementation:
+
+- the first complete implementation, operator example, and live validation path is `Sherpa + Piper`
+- `Moonshine` and `Qwen3-TTS` may influence generic pipeline design, but they must not add blocking requirements to phases 1 through 9
+- all work needed only for those follow-on pairings belongs in phase 10 or later
 
 ---
 
@@ -116,6 +123,8 @@ Assemble and validate the first end-to-end Telnyx slice with the most proven rea
   DESIGN reference: `Concrete Backend Requirements Matrix`
 - [ ] Keep Moonshine and Qwen3-TTS support out of the first live Telnyx validation path even if the provider-neutral abstractions are designed broadly enough to support them later.
   DESIGN reference: `Recommended ASR/TTS Stack`, `Concrete Combination Requirements`
+- [ ] Do not add first-slice code paths, examples, or acceptance checks that require Moonshine-specific rechunking or Qwen3-TTS-specific `F32Le 24 kHz` conversion.
+  DESIGN reference: `Concrete Combination Requirements`
 
 ## Phase 5: Telnyx Protocol and Adapter Layer
 
@@ -315,3 +324,5 @@ After the Sherpa + Piper slice is implemented and validated end to end, broaden 
   DESIGN reference: `Concrete Backend Requirements Matrix`
 - [ ] Reuse `libs/voice` for future provider adapters without backfilling provider-specific assumptions into the generic pipeline.
   DESIGN reference: `Provider-Neutral API Rule`
+- [ ] Treat all non-`Sherpa + Piper` combinations as explicit follow-on slices with their own validation notes rather than opportunistic add-ons to the first slice.
+  DESIGN reference: `Concrete Combination Requirements`
