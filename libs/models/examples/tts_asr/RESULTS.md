@@ -1,6 +1,6 @@
 # TTS↔ASR DGX Spark Results
 
-Measured on `2026-04-15` and refreshed on `2026-04-16` by `@codex-dgx-e2e`.
+Measured on `2026-04-16` by `@codex-dgx-e2e`.
 
 ## Environment
 
@@ -13,104 +13,107 @@ Measured on `2026-04-15` and refreshed on `2026-04-16` by `@codex-dgx-e2e`.
 
 ## Notes
 
-- The whisper backend on this branch was tuned to set decode threads from
-  `std::thread::available_parallelism()`. Without that change, the CPU
-  `piper_whisper` pass was impractically slow on this host.
-- `Piper → sherpa-onnx` was rerun after the merged PR `#183` fix on
-  `feature/models`, and both CPU/CUDA lanes completed successfully.
-- The `2026-04-16` refresh reran all committed Piper benchmark files after
-  adding per-sample RSS capture (`resident_memory_bytes`,
-  `peak_resident_memory_bytes`) and correcting the aggregator's even-sample
-  median computation.
-- The Qwen3-TTS ONNX pipeline path is now treated as dead/deprecated for this
-  suite and the example binaries were removed from PR `#182`.
-- Merged backend PR `#193` added Moonshine ASR and merged backend PR `#194`
-  added qwen3-tts.cpp TTS. PR `#182` now includes four new TTS↔ASR binaries for
-  those backends; their DGX benchmark execution is pending.
+- All successful runs used release builds.
+- `piper_whisper` and `piper_sherpa` completed on both CPU and CUDA with full
+  `100/100` sample coverage.
+- `piper_moonshine` CPU completed a full `100`-sample pass but Moonshine ASR
+  rejected every sample. No transcript rows were emitted.
+- `piper_moonshine` CUDA reproduced the same deterministic Moonshine failure in
+  a `60s` confirmation run. I did not spend another multi-hour full pass on a
+  lane that never emitted a single transcript and whose ASR half is CPU-only.
+- Every `qwen3cpp_*` lane aborted during TTS initialization before the first
+  sample with the same `ggml` assertion while loading the curated
+  `qwen3-tts-0.6b-q8_0.gguf` snapshot.
 
-## Matrix Status
+## Full Matrix Status
 
-| Pipeline | Mode | Status | Samples | Result |
-|----------|------|--------|---------|--------|
-| Piper → whisper.cpp | CPU | Completed | 100/100 | Benchmark data captured |
-| Piper → whisper.cpp | CUDA | Completed | 100/100 | Benchmark data captured |
-| Piper → sherpa-onnx | CPU | Completed | 100/100 | Benchmark data captured after PR `#183` |
-| Piper → sherpa-onnx | CUDA | Completed | 100/100 | Benchmark data captured after PR `#183` |
-| Piper → Moonshine | CPU | Pending | 0/100 | Binary added; DGX run not started yet |
-| Piper → Moonshine | CUDA | Pending | 0/100 | Hybrid CUDA build will accelerate Piper only; Moonshine ASR remains CPU-only |
-| qwen3-tts.cpp → whisper.cpp | CPU | Pending | 0/100 | Binary added; DGX run not started yet |
-| qwen3-tts.cpp → whisper.cpp | CUDA | Pending | 0/100 | Full CUDA-capable lane after merged PR `#194` |
-| qwen3-tts.cpp → sherpa-onnx | CPU | Pending | 0/100 | Binary added; DGX run not started yet |
-| qwen3-tts.cpp → sherpa-onnx | CUDA | Pending | 0/100 | Full CUDA-capable lane after merged PRs `#193` and `#194` |
-| qwen3-tts.cpp → Moonshine | CPU | Pending | 0/100 | Binary added; DGX run not started yet |
-| qwen3-tts.cpp → Moonshine | CUDA | Pending | 0/100 | Hybrid CUDA build will accelerate qwen3-tts.cpp only; Moonshine ASR remains CPU-only |
+| Pipeline | Mode | Status | Samples | Mean WER | Mean Total Latency | Wall Clock | Notes |
+|----------|------|--------|---------|----------|--------------------|------------|-------|
+| Piper → whisper.cpp | CPU | Completed | 100/100 | 0.463 | 61,960 ms | 6,198.48 s | Full release run |
+| Piper → whisper.cpp | CUDA | Completed | 100/100 | 0.459 | 13,261 ms | 1,328.87 s | Full release run |
+| Piper → sherpa-onnx | CPU | Completed | 100/100 | 0.285 | 10,988 ms | 1,101.66 s | Full release run |
+| Piper → sherpa-onnx | CUDA | Completed | 100/100 | 0.300 | 10,826 ms | 1,085.57 s | Full release run |
+| Piper → Moonshine | CPU | Blocked | 0/100 successful | N/A | N/A | 9,313.88 s | Full 100-sample pass, every sample failed in Moonshine ASR |
+| Piper → Moonshine | CUDA | Blocked | 0/100 successful | N/A | N/A | 60.17 s | `60s` confirmation run only; same Moonshine failure as CPU |
+| qwen3-tts.cpp → whisper.cpp | CPU | Blocked | 0/100 | N/A | N/A | 1.24 s | TTS init aborts in `ggml` before first sample |
+| qwen3-tts.cpp → whisper.cpp | CUDA | Blocked | 0/100 | N/A | N/A | 3.32 s | TTS init aborts in `ggml` before first sample |
+| qwen3-tts.cpp → sherpa-onnx | CPU | Blocked | 0/100 | N/A | N/A | 1.24 s | TTS init aborts in `ggml` before first sample |
+| qwen3-tts.cpp → sherpa-onnx | CUDA | Blocked | 0/100 | N/A | N/A | 2.28 s | TTS init aborts in `ggml` before first sample |
+| qwen3-tts.cpp → Moonshine | CPU | Blocked | 0/100 | N/A | N/A | 2.29 s | TTS init aborts in `ggml` before first sample |
+| qwen3-tts.cpp → Moonshine | CUDA | Blocked | 0/100 | N/A | N/A | 1.31 s | TTS init aborts in `ggml` before first sample |
 
 ## Aggregate Results
+
+Only the four successful Piper result files are numerically comparable.
 
 ### Overall
 
 | Pipeline | Mode | Samples | Mean WER | Median WER | P95 WER | Max WER | Mean Total Latency | Median Total Latency | Mean TTS | Mean ASR |
 |----------|------|---------|----------|------------|---------|---------|--------------------|----------------------|----------|----------|
-| Piper → sherpa-onnx | CPU | 100 | 0.296 | 0.251 | 0.714 | 1.000 | 11,195 ms | 7,127 ms | 6,544 ms | 4,651 ms |
-| Piper → sherpa-onnx | CUDA | 100 | 0.303 | 0.251 | 0.800 | 1.000 | 10,870 ms | 7,526 ms | 6,341 ms | 4,529 ms |
-| Piper → whisper.cpp | CPU | 100 | 0.464 | 0.552 | 0.776 | 0.935 | 60,223 ms | 40,198 ms | 6,104 ms | 54,119 ms |
-| Piper → whisper.cpp | CUDA | 100 | 0.441 | 0.553 | 0.730 | 0.844 | 13,754 ms | 9,069 ms | 6,422 ms | 7,331 ms |
+| Piper → sherpa-onnx | CPU | 100 | 0.285 | 0.243 | 0.600 | 1.000 | 10,988 ms | 7,158 ms | 6,375 ms | 4,612 ms |
+| Piper → sherpa-onnx | CUDA | 100 | 0.300 | 0.245 | 0.750 | 1.000 | 10,826 ms | 7,520 ms | 6,266 ms | 4,560 ms |
+| Piper → whisper.cpp | CPU | 100 | 0.463 | 0.558 | 0.746 | 0.950 | 61,960 ms | 42,736 ms | 6,140 ms | 55,819 ms |
+| Piper → whisper.cpp | CUDA | 100 | 0.459 | 0.556 | 0.764 | 1.200 | 13,261 ms | 8,620 ms | 6,134 ms | 7,126 ms |
 
 ### By Category
 
 | Category | Pipeline | CPU Mean WER | CUDA Mean WER | CPU Mean Latency | CUDA Mean Latency | Speedup |
 |----------|----------|--------------|---------------|------------------|-------------------|---------|
-| Short | Piper → sherpa-onnx | 0.466 | 0.505 | 522 ms | 520 ms | 1.00x |
-| Short | Piper → whisper.cpp | 0.075 | 0.053 | 2,312 ms | 570 ms | 4.06x |
-| Medium | Piper → sherpa-onnx | 0.239 | 0.223 | 3,809 ms | 3,875 ms | 0.98x |
-| Medium | Piper → whisper.cpp | 0.528 | 0.477 | 21,533 ms | 4,829 ms | 4.46x |
-| Long | Piper → sherpa-onnx | 0.242 | 0.243 | 12,269 ms | 12,017 ms | 1.02x |
-| Long | Piper → whisper.cpp | 0.613 | 0.585 | 65,600 ms | 15,084 ms | 4.35x |
-| Paragraph | Piper → sherpa-onnx | 0.239 | 0.241 | 28,181 ms | 27,069 ms | 1.04x |
-| Paragraph | Piper → whisper.cpp | 0.640 | 0.651 | 151,447 ms | 34,531 ms | 4.39x |
+| Short | Piper → sherpa-onnx | 0.431 | 0.485 | 522 ms | 477 ms | 1.09x |
+| Short | Piper → whisper.cpp | 0.095 | 0.073 | 2,286 ms | 536 ms | 4.27x |
+| Medium | Piper → sherpa-onnx | 0.233 | 0.233 | 3,988 ms | 3,836 ms | 1.04x |
+| Medium | Piper → whisper.cpp | 0.513 | 0.522 | 22,296 ms | 4,550 ms | 4.90x |
+| Long | Piper → sherpa-onnx | 0.237 | 0.239 | 12,032 ms | 12,232 ms | 0.98x |
+| Long | Piper → whisper.cpp | 0.627 | 0.607 | 69,229 ms | 14,357 ms | 4.82x |
+| Paragraph | Piper → sherpa-onnx | 0.238 | 0.242 | 27,410 ms | 26,759 ms | 1.02x |
+| Paragraph | Piper → whisper.cpp | 0.620 | 0.635 | 154,028 ms | 33,601 ms | 4.58x |
 
 ### CPU vs CUDA Summary
 
-| Pipeline | CPU Mean WER | CUDA Mean WER | CPU Mean Latency | CUDA Mean Latency | Speedup |
-|----------|--------------|---------------|------------------|-------------------|---------|
-| Piper → sherpa-onnx | 0.296 | 0.303 | 11,195 ms | 10,870 ms | 1.03x |
-| Piper → whisper.cpp | 0.464 | 0.441 | 60,223 ms | 13,754 ms | 4.38x |
+| Pipeline | CPU Mean WER | CUDA Mean WER | CPU Mean Latency | CUDA Mean Latency | Latency Speedup | CPU Wall Clock | CUDA Wall Clock | Wall-Clock Speedup |
+|----------|--------------|---------------|------------------|-------------------|-----------------|----------------|-----------------|--------------------|
+| Piper → sherpa-onnx | 0.285 | 0.300 | 10,988 ms | 10,826 ms | 1.01x | 1,101.66 s | 1,085.57 s | 1.01x |
+| Piper → whisper.cpp | 0.463 | 0.459 | 61,960 ms | 13,261 ms | 4.67x | 6,198.48 s | 1,328.87 s | 4.67x |
 
 ## Findings
 
-- Best aggregate WER: `Piper → sherpa-onnx` CPU (`0.296`)
-- Best aggregate latency: `Piper → sherpa-onnx` CUDA (`10,870 ms`)
-- Largest CUDA gain: `Piper → whisper.cpp` (`4.38x` mean latency speedup)
-- `Piper → sherpa-onnx` sees essentially no CUDA benefit on this host. Mean
-  latency was only marginally better on CUDA (`10,870 ms`) than CPU (`11,195 ms`),
-  with the win coming from ASR model choice rather than GPU acceleration.
-- The refreshed RSS-enabled harness substantially increased measured TTS
-  overhead versus the earlier latency-only numbers, so the current JSONLs and
-  tables should be treated as the source of truth for PR `#182`.
-- The active matrix is now larger than the currently measured subset: four new
-  binaries landed with the Moonshine and qwen3-tts.cpp backend merges, but only
-  the original Piper→whisper and Piper→sherpa lanes have DGX numbers so far.
+- Best aggregate WER: `Piper → sherpa-onnx` CPU (`0.285`)
+- Best aggregate latency: `Piper → sherpa-onnx` CUDA (`10,826 ms`)
+- Largest CUDA gain: `Piper → whisper.cpp` (`4.67x` by both mean latency and
+  full-run wall clock)
+- `Piper → sherpa-onnx` still gets essentially no useful GPU acceleration on
+  this host.
+- `Piper → Moonshine` is not benchmarkable in the current harness/backend
+  combination: the CPU full pass produced `0/100` transcripts and the CUDA
+  confirmation reproduced the same deterministic ASR shape failures.
+- Every `qwen3cpp_*` lane is blocked earlier, in shared TTS initialization,
+  before the first sample can run. The failure is independent of ASR backend and
+  reproduces in both CPU and CUDA builds.
 
-## Known Exclusions
+## Failure Details
 
-### Qwen3-TTS ONNX pipelines
+### qwen3-tts.cpp TTS init
+
+All `qwen3cpp_*` runs fail with the same startup abort:
 
 ```text
-decoder/vocoder exports currently produce noisy output, yielding ~100% WER
+GGML_ASSERT(key_id >= 0 && key_id < gguf_get_n_kv(ctx)) failed
 ```
 
-These lanes have now been removed from PR `#182` entirely because their ONNX
-export state does not produce useful benchmark comparisons.
+This triggers while loading the curated `qwen3-tts-0.6b-q8_0.gguf` snapshot, so
+the qwen half of the matrix is blocked before ASR startup.
 
-### Newly added, not yet benchmarked
+### Moonshine ASR pipeline
 
-- `piper_moonshine`
-- `qwen3cpp_whisper`
-- `qwen3cpp_sherpa`
-- `qwen3cpp_moonshine`
+`piper_moonshine` fails deterministically for every sample:
 
-These binaries now build on the merged `feature/models` base and are queued for
-the next DGX validation pass.
+- short/medium/long samples fail in `process_audio_chunk` with
+  `Conv ... Invalid input shape: {4}`
+- paragraph samples later fail in `encode_streaming` with an ONNX broadcast
+  mismatch (`8 by 18`)
+
+Because no sample ever produced a transcript, I did not treat Moonshine as a
+comparable benchmark lane.
 
 ## Raw Result Files
 
@@ -118,3 +121,11 @@ the next DGX validation pass.
 - `results_piper_whisper_cuda.jsonl`
 - `results_piper_sherpa_cpu.jsonl`
 - `results_piper_sherpa_cuda.jsonl`
+- `results_piper_moonshine_cpu.jsonl`
+- `results_piper_moonshine_cuda.jsonl`
+- `results_qwen3cpp_whisper_cpu.jsonl`
+- `results_qwen3cpp_whisper_cuda.jsonl`
+- `results_qwen3cpp_sherpa_cpu.jsonl`
+- `results_qwen3cpp_sherpa_cuda.jsonl`
+- `results_qwen3cpp_moonshine_cpu.jsonl`
+- `results_qwen3cpp_moonshine_cuda.jsonl`
