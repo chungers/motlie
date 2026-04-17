@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-04-17 | @codex-macmini-telnyx: Tightened the execution policy so the first live Telnyx implementation and validation slice is explicitly `Sherpa + Piper`. Other pairings remain documented as follow-on combinations, not peer initial targets. | Overview, Goals and Non-Goals, Concrete Combination Requirements |
 | 2026-04-16 | @codex-macmini-telnyx: Split the proposed implementation into provider-agnostic `libs/voice` and Telnyx-specific `libs/voice_telnyx`, and documented the crate hierarchy plus API surfaces explicitly in both DESIGN and PLAN. | Overview, Recommended Integration Shape, Crate Hierarchy and API Surfaces, Deployment: Private Host, Getting Started: Local Deployment |
 | 2026-04-16 | @codex-macmini-telnyx: Added an explicit media-adaptation pipeline design with typed stage contracts, marker types, and compile-time pipeline assembly guidance for codecs, resampling, framing, and model-specific normalization. | Recommended Integration Shape, Media Adaptation Pipeline, Inbound Call Handler Design, Gap Analysis |
 | 2026-04-15 | @codex-macmini-telnyx: Added the pluggable `ConversationHandler` stage, made ASR/TTS injection explicit, and documented private-host deployment plus a local getting-started flow using ngrok or Tailscale Funnel. | Overview, Recommended Integration Shape, Recommended ASR/TTS Stack, Inbound Call Handler Design, Deployment: Private Host, Getting Started: Local Deployment, Open Concerns |
@@ -73,6 +74,12 @@ Recommended deployment shape:
 
 This keeps telephony transport concerns out of the model contracts while also preventing Telnyx-specific protocol types from leaking into the reusable media pipeline.
 
+Execution policy for v1:
+
+- the first implemented, validated, and operator-documented live path must be `Sherpa + Piper`
+- `Moonshine` and `Qwen3-TTS` remain supported design targets for follow-on slices, not peer initial implementation targets
+- provider-neutral abstractions in `libs/voice` must be broad enough to support those later pairings without redesign, but first-slice acceptance must not depend on them
+
 ## Goals and Non-Goals
 
 ### Goals
@@ -87,6 +94,7 @@ This keeps telephony transport concerns out of the model contracts while also pr
 - Support interruption and barge-in at the gateway layer
 - Keep room for multiple ASR/TTS backend combinations behind the same gateway
 - Support private-host deployment behind ngrok or Tailscale Funnel for v1
+- Make `Sherpa + Piper` the only required end-to-end backend pairing for the first live Telnyx slice
 
 ### Non-Goals
 
@@ -606,7 +614,13 @@ The implementation must not leave ASR/TTS media requirements to backend-specific
 
 ### Concrete Combination Requirements
 
-The initial Telnyx design should explicitly document the supported media-adaptation plans for the currently relevant ASR/TTS pairings.
+The design documents multiple pairings because the media adaptation requirements differ materially across them. That does not make them equal implementation targets.
+
+Execution rule:
+
+- `Sherpa + Piper` is the first and only required live v1 implementation slice
+- all other pairings in this section are specified so the generic pipeline can be designed correctly up front
+- no first-slice acceptance criteria, examples, or operator docs may depend on `Moonshine` or `Qwen3-TTS`
 
 #### Sherpa + Piper
 
@@ -631,6 +645,10 @@ Outbound:
 
 #### Sherpa + Qwen3-TTS
 
+Status:
+
+- follow-on pairing, not part of the first live Telnyx acceptance slice
+
 Inbound:
 
 - same Sherpa inbound path as above: normalized mono `16 kHz`
@@ -647,6 +665,10 @@ Design implication:
 - this combination requires both sample-format conversion and sample-rate conversion on the outbound side
 
 #### Moonshine + Qwen3-TTS
+
+Status:
+
+- follow-on pairing, not part of the first live Telnyx acceptance slice
 
 Inbound:
 
