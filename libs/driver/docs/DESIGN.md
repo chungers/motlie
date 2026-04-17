@@ -29,6 +29,7 @@ surface level.
 
 - `(2026-04-13, Codex, documented the implemented driver runtime, tmux adapter, shared frontends, and validation slice)`
 - `(2026-04-16, Codex, proposed an optional semantic-resolution stage, generic naming support, and tmux multi-host verification mode)`
+- `(2026-04-17, @driver-cdx, implemented semantic resolution, generic naming support, tmux multi-host mode, and namespaced completion)`
 
 
 ## New Problem: Semantic Name Resolution
@@ -152,12 +153,18 @@ pub trait CommandSet<C>: Sized {
     fn root_command() -> clap::Command;
     fn from_matches(matches: &clap::ArgMatches) -> DriverResult<Self>;
     fn completion_context(context: &C) -> Self::CompletionContext;
+    type Resolved;
+
     fn help(topic: &[String]) -> Option<String> { None }
     fn complete(
         request: CompletionRequest<'_>,
         context: &Self::CompletionContext,
     ) -> Vec<CompletionCandidate> { Vec::new() }
-    async fn execute(self, context: &mut C) -> DriverResult<CommandOutput>;
+    fn resolve_command(self, context: &C) -> DriverResult<Self::Resolved>;
+    async fn execute(
+        resolved: Self::Resolved,
+        context: &mut C,
+    ) -> DriverResult<CommandOutput>;
 }
 
 pub struct CommandEngine<C, S> {
@@ -568,6 +575,34 @@ the entry from `connections`.
 That means calling `shutdown_managed_state()` or equivalent on the selected
 `TmuxState` before the alias is dropped, so watches/streams and retained mirror
 state do not leak.
+
+### Multi-host `targets` semantics
+
+Multi-host mode keeps `targets` aligned with the other scope-less tmux commands.
+
+Rules:
+- if `current` is set, bare `targets` resolves against that one alias
+- if `current` is not set, bare `targets` returns `MissingCurrentScope`
+- cross-host fan-out is not implicit behavior in the command layer
+
+This keeps resolution rules consistent for `targets`, `mirror`, `tui`,
+`upload`, `download`, and `monitor stop`: the user must either select a current
+alias with `use <alias>` or provide an explicit qualified name where the command
+shape allows one.
+
+### Multi-host `history` scope normalization
+
+`history` is constrained to one alias per invocation.
+
+Rules:
+- if the first session name is explicitly scoped, that alias becomes the default
+  for later bare session names in the same command
+- if there is no explicit alias yet, bare names resolve against `current`
+- mixing aliases in the same `history` command is rejected
+
+Example:
+- `history alpha/demo demo` resolves both session names against `alpha`
+- `history alpha/demo beta/build` is rejected
 
 ### Why this slice is a good proof
 

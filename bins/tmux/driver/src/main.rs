@@ -29,10 +29,13 @@ async fn main() -> DriverResult<()> {
     if options.multi_host {
         let state = TmuxAppState::new();
         let mut engine = CommandEngine::<TmuxAppState, TmuxAppCommand>::new(state);
-        if options.use_tui {
-            return run_tui(&mut engine, &options).await;
-        }
-        return run_repl(&mut engine, &options, "multi-host tmux session").await;
+        let result = if options.use_tui {
+            run_tui(&mut engine, &options).await
+        } else {
+            run_repl(&mut engine, &options, "multi-host tmux session").await
+        };
+        let shutdown_result = engine.context_mut().shutdown_all_managed_state().await;
+        return result.and(shutdown_result);
     }
 
     let uri = options
