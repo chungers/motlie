@@ -111,7 +111,7 @@ pub trait CommandSet<C>: Sized {
         request: CompletionRequest<'_>,
         context: &Self::CompletionContext,
     ) -> Vec<CompletionCandidate> { Vec::new() }
-    fn resolve(self, context: &C) -> DriverResult<Self::Resolved>;
+    fn resolve_command(self, context: &C) -> DriverResult<Self::Resolved>;
     async fn execute(
         resolved: Self::Resolved,
         context: &mut C,
@@ -119,11 +119,23 @@ pub trait CommandSet<C>: Sized {
 }
 ```
 
+This is a breaking change to the current `CommandSet<C>` contract. That is
+intentional and acceptable because the semantic-resolution work is still
+greenfield from a product-surface perspective: only the tmux adapter exists on
+`main`, and no compatibility shim is planned.
+
 Planned compositional rule:
 - simple adapters use identity resolution
 - `type Resolved = Self`
-- `resolve(self, _) -> Ok(self)`
+- `fn resolve_command(self, _) -> DriverResult<Self> { Ok(self) }`
 - namespace-aware adapters return a distinct resolved type when needed
+
+Rust cannot provide that identity body conditionally based on `Resolved = Self`,
+so identity adapters still carry the explicit one-line boilerplate.
+
+Sync/async rule:
+- `resolve_command()` is sync and only performs in-memory scope/namespace lookup
+- async or remote validation remains in `execute()`
 
 Responsibilities:
 
@@ -134,7 +146,8 @@ Responsibilities:
 | `completion_context()` | Produce a read-only sync snapshot for completion |
 | `help()` | Optional rich help topics that override plain `clap` help |
 | `complete()` | Adapter-owned dynamic completion |
-| `execute()` | Run the typed command against mutable session state |
+| `resolve_command()` | Normalize parsed names and select scope using read-only context |
+| `execute()` | Run the resolved command against mutable session state |
 
 ## CommandEngine Contract
 
@@ -152,6 +165,10 @@ Planned execution flow after semantic-resolution support:
 - build typed parsed command
 - resolve parsed names/references against read-only context
 - execute resolved command against mutable context
+
+The split is deliberate:
+- `resolve_command()` is sync and handles namespace/scope selection only
+- `execute()` remains the place for async target/guest validation or remote I/O
 
 Current stable methods:
 - `new(context)`
@@ -204,6 +221,20 @@ This support is intended for:
 - tmux connection aliases like `alias/target`
 - future VMM guest or namespace-qualified names
 - app-level command sets that compose multiple scoped adapters
+
+Planned generic resolution errors in `DriverError`:
+- `MalformedQualifiedName { raw }`
+- `MissingCurrentScope`
+- `UnknownScope { scope }`
+- `AmbiguousName { name, candidates }`
+
+Existing variants remain useful for:
+- `NotFound { kind, name }` once a scope has already been selected
+- `InvalidArgument { name, reason }` for adapter-specific argument issues
+
+Naming distinction:
+- `resolve_command()` resolves a whole parsed command
+- `resolve_name()` resolves an individual scoped token
 
 ## History API
 

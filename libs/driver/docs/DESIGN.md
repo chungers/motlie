@@ -13,6 +13,23 @@ Implemented feasibility slice on `main`:
 This document describes the code that exists today. Future adapters such as
 VMM/VNET/VFS are design targets only and are not scaffolded as code on `main`.
 
+## Product Scope
+
+This proposal is brownfield at the crate level and greenfield at the product
+surface level.
+
+- brownfield: `libs/driver` and the tmux adapter already exist on `main`
+- greenfield: there is only one real adapter today, no external ecosystem of
+  `CommandSet<C>` implementations, and no compatibility shim is planned
+- consequence: the semantic-resolution proposal is allowed to make a breaking
+  contract change to `CommandSet<C>` when implemented, as long as `main` is
+  updated in one pass
+
+## Changelog
+
+- `(2026-04-13, Codex, documented the implemented driver runtime, tmux adapter, shared frontends, and validation slice)`
+- `(2026-04-16, Codex, proposed an optional semantic-resolution stage, generic naming support, and tmux multi-host verification mode)`
+
 
 ## New Problem: Semantic Name Resolution
 
@@ -196,12 +213,22 @@ The key design rule is:
 This stage must be optional-by-default.
 
 If an adapter does not need semantic resolution, the design should collapse back
-to today's namespace-less behavior with no extra ceremony.
+to today's namespace-less behavior.
 
 That means:
 - parsed command type may equal resolved command type
-- `resolve()` may be identity
-- simple adapters pay no extra complexity tax
+- `resolve_command()` may be identity
+- simple adapters keep the same runtime flow with only a one-line identity
+  boilerplate
+
+Rust cannot express a conditional default method body that returns `self` only
+when `type Resolved = Self`, so identity adapters still have to write the
+one-line adapter glue explicitly:
+- `type Resolved = Self`
+- `fn resolve_command(self, _) -> DriverResult<Self> { Ok(self) }`
+
+That is acceptable and should be documented honestly rather than described as
+zero-cost.
 
 The design must support three cases cleanly:
 
@@ -238,7 +265,7 @@ pub trait CommandSet<C>: Sized {
         Vec::new()
     }
 
-    fn resolve(self, context: &C) -> DriverResult<Self::Resolved>;
+    fn resolve_command(self, context: &C) -> DriverResult<Self::Resolved>;
 
     async fn execute(
         resolved: Self::Resolved,
@@ -247,19 +274,46 @@ pub trait CommandSet<C>: Sized {
 }
 ```
 
+This is a breaking extension to the current `CommandSet<C>` contract because:
+- `execute(self, &mut C)` becomes `execute(resolved, &mut C)`
+- every existing adapter moves execution logic behind the resolved type
+- every identity adapter must add the one-line `resolve_command()` boilerplate
+
+That is acceptable for this proposal because the product surface is still
+greenfield enough that no compatibility shim or dual-trait migration is needed.
+
 Then the engine becomes:
 
 ```rust
 let parsed = S::from_matches(&matches)?;
-let resolved = parsed.resolve(&self.context)?;
+let resolved = parsed.resolve_command(&self.context)?;
 S::execute(resolved, &mut self.context).await
 ```
 
-Identity adapters use:
-- `type Resolved = Self`
-- `resolve(self, _) -> Ok(self)`
+### Sync resolution rule
 
-This keeps the design compositional.
+`resolve_command()` is intentionally synchronous.
+
+The rule is:
+- `resolve_command()` performs only in-memory, read-only scope selection and
+  command normalization against already-held driver state
+- `execute()` performs any async or remote validation that requires live I/O
+
+For the tmux multi-host slice that means:
+- `resolve_command()` chooses the connection alias from either `alias/...` or
+  `current`
+- `execute()` still performs live host-side lookup such as
+  `resolve_target_str(...).await?` inside the selected `TmuxState`
+
+Future VMM should follow the same split:
+- namespace selection and default-scope fallback stay in sync
+  `resolve_command()`
+- live guest probes, PTY attachment, or other remote validation remain in
+  async `execute()`
+
+If a future adapter produces a real need for async preflight resolution, that
+should be introduced deliberately as a new design change rather than allowed to
+drift ad hoc.
 
 ### Alternative trait split
 
@@ -306,13 +360,24 @@ This is intentionally generic:
 - VMM can resolve namespace + guest / PTY / handle
 - future adapters can reuse the same structure
 
-The driver should also own the generic error vocabulary for this stage:
-- malformed qualified name
-- missing current scope
-- unknown scope
-- ambiguous name
-- resource not found in scope
+The driver should also own the generic error vocabulary for this stage in
+`libs/driver/src/error.rs`.
 
+Planned additions:
+- `MalformedQualifiedName { raw: String }`
+- `MissingCurrentScope`
+- `UnknownScope { scope: String }`
+- `AmbiguousName { name: String, candidates: Vec<String> }`
+
+Planned reuse of existing variants:
+- `NotFound { kind, name }` for resource-not-found within a chosen scope
+- `InvalidArgument { name, reason }` for adapter-specific argument issues that
+  are not generic namespace failures
+
+The naming here is intentional:
+- `resolve_command()` means whole parsed command -> resolved command
+- `ResolveName::resolve_name()` means string token -> adapter-relative resolved
+  reference
 
 ### Shared namespace, adapter-relative resolution
 
@@ -368,12 +433,38 @@ The completion rule should match the resolution rule:
 - if the user provides an explicit scope, complete inside that scope
 - otherwise use current/default scope when one exists
 
+For the tmux proving slice, the outer command family should own a composed
+completion snapshot rather than forcing `TmuxCommand` to understand app-level
+connection management directly.
+
+Planned shape:
+
+```rust
+pub struct TmuxAppCompletionContext {
+    pub aliases: Vec<String>,
+    pub current: Option<String>,
+    pub per_scope: BTreeMap<String, TmuxCompletionContext>,
+}
+```
+
+Expected behavior:
+- `connect`, `disconnect`, `use`, and `connections` complete over `aliases`
+- tmux operational commands reuse the existing tmux completion logic against a
+  filtered `TmuxCompletionContext` for one selected scope
+- if the prefix already contains `alias/`, the outer command family selects that
+  alias and returns qualified completion candidates
+- if no explicit alias is present and `current` is set, bare names continue to
+  behave like the current single-host tmux driver
+
+This keeps the inner tmux command semantics reusable while making the outer app
+command family responsible for scope-aware completion.
+
 ## Verification Slice: tmux Multi-host Namespaced Mode
 
 The proposed proving slice for this design is the top-level tmux driver binary.
 
-Add an opt-in mode that turns the current single-host tmux binary into a
-multi-host session manager.
+Add an opt-in `--multi-host` mode that turns the current single-host tmux
+binary into a multi-host session manager. Single-host mode remains the default.
 
 ### User-facing shape
 
@@ -404,6 +495,11 @@ send demo:0.1 echo hello
 capture demo 50
 ```
 
+That compatibility point is important: once `current` is selected, the existing
+single-host tmux command surface continues to work unchanged for bare names.
+The proposal composes on top of PR #164; it does not replace those tmux command
+shapes with a new syntax.
+
 ### Planned context shape
 
 The current one-host `TmuxState` would become a lower-level connection state.
@@ -417,9 +513,61 @@ pub struct TmuxAppState {
 }
 ```
 
-And the app-level command family would compose:
-- connection-management commands
-- tmux operational commands
+### Planned composed command-family shape
+
+The app-level command family should compose connection management with the
+existing tmux operational surface.
+
+```rust
+pub enum TmuxAppCommand {
+    Connect(ConnectCommand),
+    Disconnect(DisconnectCommand),
+    Use(UseCommand),
+    Connections,
+    Tmux(TmuxCommand),
+}
+
+pub struct ResolvedTmuxScope {
+    pub alias: String,
+}
+
+pub enum TmuxAppResolved {
+    Connect(ConnectCommand),
+    Disconnect { alias: String },
+    Use { alias: String },
+    Connections,
+    Tmux {
+        scope: ResolvedTmuxScope,
+        command: TmuxCommand,
+    },
+}
+```
+
+Outer `resolve_command()` behavior:
+- `Connect`, `Disconnect`, `Use`, and `Connections` are mostly identity
+  resolution with argument normalization
+- the `Tmux(TmuxCommand)` arm chooses the connection alias from either an
+  explicit `alias/...` prefix or `current`
+- the chosen alias is carried in `ResolvedTmuxScope`; target existence is still
+  validated later inside async `execute()` on the selected `TmuxState`
+
+This composition detail matters: the existing `impl CommandSet<TmuxState> for
+TmuxCommand` cannot be reused verbatim under `TmuxAppState` because the trait is
+keyed on `C`. The intended implementation path is:
+- keep the current single-host impl for `TmuxState`
+- extract inner tmux execution/completion helpers that operate on `&mut TmuxState`
+  or `&TmuxCompletionContext`
+- add a new outer `impl CommandSet<TmuxAppState> for TmuxAppCommand` that
+  selects one `TmuxState` and delegates to those helpers
+
+### Lifecycle rule for `disconnect`
+
+`disconnect <alias>` must shut down driver-managed sidecar state before removing
+the entry from `connections`.
+
+That means calling `shutdown_managed_state()` or equivalent on the selected
+`TmuxState` before the alias is dropped, so watches/streams and retained mirror
+state do not leak.
 
 ### Why this slice is a good proof
 
@@ -428,6 +576,7 @@ It exercises all of the new generic concerns:
 - current/default scope behavior
 - dynamic completion over scoped names
 - one command family reused inside a larger app-level command surface
+- explicit teardown of per-scope managed state
 
 And it does so without requiring VMM to land first.
 
