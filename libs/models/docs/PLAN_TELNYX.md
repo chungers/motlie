@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-17 | @codex-macmini-telnyx | Tightened the PLAN so Sherpa + Piper is the explicit first vertical slice. Follow-on pairings such as Sherpa + Qwen3-TTS and Moonshine + Qwen3-TTS are now deferred to a later phase instead of treated as peer initial targets. |
 | 2026-04-16 | @codex-macmini-telnyx | Reworked the PLAN to match the new hierarchy: provider-agnostic `libs/voice`, Telnyx-specific `libs/voice_telnyx`, and a thin `bins/motlie-telnyx-gateway` binary. |
 | 2026-04-15 | @codex-macmini-telnyx | Initial Telnyx integration PLAN derived from `DESIGN_TELNYX.md`. Covers the transport gateway, codec normalization, inbound and outbound call flows, application orchestration, and validation. |
 
@@ -91,37 +92,30 @@ Build the provider-neutral media adaptation pipeline with explicit stage contrac
 - [ ] Keep stage responsibilities split; do not collapse decode, resample, and packetization into one opaque adapter.
   DESIGN reference: `Required Concrete Stage Inventory`
 
-## Phase 4: Backend-Specific Media Assemblies
+## Phase 4: First Vertical Slice - Sherpa + Piper
 
-Assemble the exact media pipelines required by the currently relevant ASR/TTS combinations.
+Assemble and validate the first end-to-end Telnyx slice with the most proven real-time stack: Sherpa ONNX streaming ASR plus Piper TTS.
 
-### 4.1 - Inbound assemblies
+### 4.1 - Sherpa inbound assembly
 
 - [ ] Implement the Sherpa inbound path:
   Telnyx decode -> mono normalize -> `16 kHz` resample -> Sherpa chunk flow.
   DESIGN reference: `Concrete Combination Requirements`
-- [ ] Implement the Moonshine inbound path:
-  Telnyx decode -> mono normalize -> `16 kHz` resample -> fixed `1280`-sample rechunking.
-  DESIGN reference: `Concrete Combination Requirements`
 
-### 4.2 - Outbound assemblies
+### 4.2 - Piper outbound assembly
 
 - [ ] Implement the Piper outbound path:
   `22.05 kHz` `S16Le` -> target-rate resample -> telephony packetize -> Telnyx encode.
   DESIGN reference: `Concrete Combination Requirements`
-- [ ] Implement the Qwen3-TTS outbound path:
-  `24 kHz` `F32Le` -> optional PCM conversion -> target-rate resample -> telephony packetize -> Telnyx encode.
-  DESIGN reference: `Concrete Combination Requirements`
 
-### 4.3 - Supported pairings
+### 4.3 - First-slice pairing constraints
 
-- [ ] Add explicit assembly coverage for:
-  Sherpa + Piper,
-  Sherpa + Qwen3-TTS,
-  Moonshine + Qwen3-TTS.
+- [ ] Add explicit assembly coverage for Sherpa + Piper only in the first implementation slice.
   DESIGN reference: `Concrete Combination Requirements`
-- [ ] Reject unsupported or undeclared pairings cleanly instead of falling back to guessed pipeline behavior.
+- [ ] Reject undeclared pairings cleanly instead of falling back to guessed pipeline behavior.
   DESIGN reference: `Concrete Backend Requirements Matrix`
+- [ ] Keep Moonshine and Qwen3-TTS support out of the first live Telnyx validation path even if the provider-neutral abstractions are designed broadly enough to support them later.
+  DESIGN reference: `Recommended ASR/TTS Stack`, `Concrete Combination Requirements`
 
 ## Phase 5: Telnyx Protocol and Adapter Layer
 
@@ -282,8 +276,7 @@ Make the first slice reviewable and runnable.
   environment variables,
   chosen ASR/TTS bundles.
   DESIGN reference: `Overview`, `Open Concerns`
-- [ ] Add one end-to-end example configuration for:
-  Sherpa + Piper.
+- [ ] Add one end-to-end example configuration for Sherpa + Piper as the first and only required example in the initial slice.
   DESIGN reference: `Concrete Combination Requirements`
 - [ ] Document the first live-call checklist, including observed codec logging and `stream_bidirectional_target_legs` validation.
   DESIGN reference: `Open Concerns`
@@ -294,5 +287,31 @@ Make the first slice reviewable and runnable.
   DESIGN reference: `Testing Scope for PLAN`
 - [ ] Capture and review the exact observed `start.media_format` values from Telnyx.
   DESIGN reference: `Open Concerns`
-- [ ] Verify conversational latency is acceptable for the first backend pair and document measured numbers nearby in this PLAN or a follow-up note.
+- [ ] Verify conversational latency is acceptable for the Sherpa + Piper first backend pair and document measured numbers nearby in this PLAN or a follow-up note.
   DESIGN reference: `Real-Time Latency Requirements`
+
+## Phase 10: Follow-On Backend Pairings
+
+After the Sherpa + Piper slice is implemented and validated end to end, broaden the backend menu.
+
+### 10.1 - Sherpa + Qwen3-TTS
+
+- [ ] Implement and validate the Qwen3-TTS outbound path after the first slice is stable.
+  DESIGN reference: `Concrete Combination Requirements`
+- [ ] Measure the added cost of `F32Le` conversion plus `24 kHz` resampling in live telephony conditions.
+  DESIGN reference: `Concrete Combination Requirements`, `Real-Time Latency Requirements`
+
+### 10.2 - Moonshine + Qwen3-TTS
+
+- [ ] Implement the Moonshine inbound path:
+  Telnyx decode -> mono normalize -> `16 kHz` resample -> fixed `1280`-sample rechunking.
+  DESIGN reference: `Concrete Combination Requirements`
+- [ ] Validate that Moonshine's fixed `1280`-sample cadence remains acceptable under Telnyx media pacing and jitter conditions.
+  DESIGN reference: `Concrete Combination Requirements`
+
+### 10.3 - Additional pairings and provider expansion
+
+- [ ] Add any additional ASR/TTS pairings only after documenting their exact adaptation requirements alongside the existing matrix.
+  DESIGN reference: `Concrete Backend Requirements Matrix`
+- [ ] Reuse `libs/voice` for future provider adapters without backfilling provider-specific assumptions into the generic pipeline.
+  DESIGN reference: `Provider-Neutral API Rule`
