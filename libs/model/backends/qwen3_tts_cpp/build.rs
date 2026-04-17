@@ -1,4 +1,5 @@
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -49,38 +50,14 @@ fn main() {
     }
 
     let dst = config.build();
-    let lib_dir = dst.join("lib");
-    let ggml_build_dir = ggml_dir.join("build");
-    let ggml_lib_dir = ggml_build_dir.join("src");
-    let ggml_metal_lib_dir = ggml_lib_dir.join("ggml-metal");
+    let lib_dir = canonicalize_existing_path(dst.join("lib"));
 
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
-    println!("cargo:rustc-link-search=native={}", ggml_lib_dir.display());
-    println!("cargo:rustc-link-lib=static=qwen3tts");
-    println!("cargo:rustc-link-lib=static=qwen3_tts");
-    println!("cargo:rustc-link-lib=static=text_tokenizer");
-    println!("cargo:rustc-link-lib=static=tts_transformer");
-    println!("cargo:rustc-link-lib=static=audio_tokenizer_encoder");
-    println!("cargo:rustc-link-lib=static=audio_tokenizer_decoder");
-    println!("cargo:rustc-link-lib=static=ggml");
-    println!("cargo:rustc-link-lib=static=ggml-base");
-    println!("cargo:rustc-link-lib=static=ggml-cpu");
+    println!("cargo:rustc-link-lib=dylib=qwen3tts");
     if cfg!(feature = "cuda") {
         for cuda_lib_dir in discover_cuda_lib_dirs() {
             println!("cargo:rustc-link-search=native={}", cuda_lib_dir.display());
         }
-        println!("cargo:rustc-link-lib=static=ggml-cuda");
-        println!("cargo:rustc-link-lib=dylib=cudart");
-        println!("cargo:rustc-link-lib=dylib=cublas");
-        println!("cargo:rustc-link-lib=dylib=cublasLt");
-        println!("cargo:rustc-link-lib=dylib=cuda");
-    }
-    if cfg!(target_os = "macos") {
-        println!(
-            "cargo:rustc-link-search=native={}",
-            ggml_metal_lib_dir.display()
-        );
-        println!("cargo:rustc-link-lib=static=ggml-metal");
     }
 
     if cfg!(target_os = "macos") {
@@ -162,6 +139,11 @@ fn build_ggml_submodule(ggml_dir: &Path) {
     build.arg("--build").arg(&build_dir);
     build.arg("--config").arg("Release");
     run_or_panic(&mut build, "build nested ggml submodule");
+}
+
+fn canonicalize_existing_path(path: PathBuf) -> PathBuf {
+    fs::canonicalize(&path)
+        .unwrap_or_else(|error| panic!("failed to canonicalize `{}`: {error}", path.display()))
 }
 
 fn run_or_panic(command: &mut Command, action: &str) {

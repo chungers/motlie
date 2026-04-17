@@ -493,6 +493,9 @@ struct Qwen3TtsEngine {
     raw: *mut ffi::Qwen3Tts,
 }
 
+// SAFETY: `Qwen3TtsEngine` owns the native pointer and all access goes through
+// `&mut self`, so the Rust side never aliases concurrent calls into the same
+// engine. Destruction also stays tied to ownership of the wrapper.
 unsafe impl Send for Qwen3TtsEngine {}
 
 impl Qwen3TtsEngine {
