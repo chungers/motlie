@@ -378,6 +378,93 @@ TTS model
 -> Telnyx media payload
 ```
 
+### Telnyx Media Schema Mapping
+
+The gateway should map Telnyx WebSocket fields into typed transport values explicitly:
+
+- `start.media_format.encoding` selects the inbound transport codec marker, for example `Pcmu`, `Pcma`, or `L16`
+- `start.media_format.sample_rate` selects the inbound transport sample-rate marker, for example `Hz8000` or `Hz16000`
+- `start.media_format.channels` selects the inbound channel-layout marker; current telephony expectation is mono
+- each `media.payload` becomes one `EncodedFrame<C>`
+- `media.chunk` is the transport ordering key before conversion into gateway-local monotonic sequence numbers
+
+Design rule:
+
+- do not bypass `start.media_format`
+- do not infer codec or sample rate from payload length alone
+- instantiate inbound decode and normalization stages only after the `start` frame is received
+
+### Concrete Backend Requirements Matrix
+
+The implementation must not leave ASR/TTS media requirements to backend-specific experimentation. The current concrete backends imply the following adaptation targets.
+
+| Backend | Capability | Runtime-facing Input / Output | Required Gateway Adaptation | Concrete Notes |
+|---------|------------|-------------------------------|-----------------------------|----------------|
+| `sherpa-onnx` streaming Zipformer | ASR | Input stream is normalized to mono `16 kHz` float PCM internally | decode Telnyx transport -> mono mixdown if needed -> resample to `16 kHz` -> feed ordered `PcmChunk` values | `TARGET_SAMPLE_RATE_HZ = 16_000`; frame shift is `40 ms`; backend normalizer accepts `S16Le` or `F32Le` and resamples to `16 kHz` internally |
+| Moonshine streaming | ASR | Input stream is normalized to mono `16 kHz`; decode loop processes fixed `1280`-sample chunks | decode Telnyx transport -> mono mixdown if needed -> resample to `16 kHz` -> rechunk into `1280`-sample windows before runtime inference | `CHUNK_SIZE = 1280` samples, which is `80 ms` at `16 kHz`; chunk sequence is strict equality, not just monotonic increase |
+| Piper `en_US ljspeech medium` | TTS | Output PCM is mono `S16Le`; current curated bundle audio spec is `22.05 kHz` | drain TTS chunks -> resample `22.05 kHz` to Telnyx outbound rate -> packetize -> encode transport codec | emits buffered PCM after full synthesis; output chunks are `40 ms` of PCM at model rate |
+| Qwen3-TTS `12Hz 0.6B` | TTS | Output PCM is mono `F32Le` at config sample rate; current default config is `24 kHz` | drain TTS chunks -> if needed convert `F32Le` to outbound working PCM format -> resample `24 kHz` to Telnyx outbound rate -> packetize -> encode transport codec | current config default is `24_000 Hz`; output chunks are `40 ms`; reference-audio conditioning path also resamples inbound reference audio to model rate |
+
+### Concrete Combination Requirements
+
+The initial Telnyx design should explicitly document the supported media-adaptation plans for the currently relevant ASR/TTS pairings.
+
+#### Sherpa + Piper
+
+Inbound:
+
+- Telnyx preferred inbound codec: `L16` at `16 kHz`, fallback `PCMU` / `PCMA` at `8 kHz`
+- gateway inbound target before ASR push: mono `16 kHz`
+- if Telnyx starts in `PCMU` or `PCMA`, decode G.711 and resample `8 kHz -> 16 kHz`
+- emit `PcmChunk` values in strict arrival order after reorder buffering
+
+ASR behavior:
+
+- Sherpa normalizer accepts `S16Le` or `F32Le`
+- Sherpa internally converts to mono float samples and extracts features at `16 kHz`
+- Sherpa decode cadence is governed by ONNX metadata plus a `40 ms` frame shift
+
+Outbound:
+
+- Piper emits mono `S16Le` at `22.05 kHz`
+- gateway must resample `22.05 kHz -> 16 kHz` if Telnyx outbound uses `L16 16 kHz`
+- then packetize into telephony-sized outbound frames and encode as `L16` or G.711
+
+#### Sherpa + Qwen3-TTS
+
+Inbound:
+
+- same Sherpa inbound path as above: normalized mono `16 kHz`
+
+Outbound:
+
+- Qwen3-TTS emits mono `F32Le` at `24 kHz`
+- gateway must convert `F32Le` to the chosen outbound working PCM representation if the packetizer expects `S16Le`
+- gateway must resample `24 kHz -> 16 kHz` for Telnyx `L16 16 kHz`, or `24 kHz -> 8 kHz` if forced onto G.711
+- packetizer must preserve the `40 ms` chunk cadence or split it into smaller telephony packets if lower playback latency is needed
+
+Design implication:
+
+- this combination requires both sample-format conversion and sample-rate conversion on the outbound side
+
+#### Moonshine + Qwen3-TTS
+
+Inbound:
+
+- Telnyx preferred inbound codec remains `L16 16 kHz`, fallback `PCMU` / `PCMA 8 kHz`
+- gateway inbound target before Moonshine runtime: mono `16 kHz`
+- gateway must rechunk normalized PCM into fixed `1280`-sample blocks, which is `80 ms` at `16 kHz`
+- sequence numbers must be gap-free because the Moonshine stream expects exact next sequence values
+
+Outbound:
+
+- same Qwen3-TTS outbound adaptation as above: mono `F32Le 24 kHz` -> convert -> resample -> packetize -> encode
+
+Design implication:
+
+- Moonshine is less tolerant of arbitrary telephony frame sizes than Sherpa because the runtime loop is structured around fixed `1280`-sample chunk inference
+- the inbound chunker for Moonshine should therefore be a dedicated stage, not a parameter tweak on the Sherpa path
+
 ### Stage API Surface
 
 Recommended common stage shape:
@@ -580,6 +667,44 @@ where
     ) -> Result<Vec<EncodedFrame<C>>, MediaError>;
 }
 ```
+
+### Required Concrete Stage Inventory
+
+To avoid implementation drift, the first Telnyx slice should build the following concrete stages explicitly.
+
+Inbound mandatory stages:
+
+1. `TelnyxFrameReorder<C>`
+   Input: `EncodedFrame<C>`
+   Output: `EncodedFrame<C>`
+   Contract: reorder by Telnyx `media.chunk`, assign gateway-local sequence, reject unbounded gaps after timeout.
+2. `G711Decoder<Pcmu, Hz8000, Mono, S16Le>` and `G711Decoder<Pcma, Hz8000, Mono, S16Le>`
+   Contract: decode base64 RTP payload bytes into linear PCM, no RTP header parsing inside this stage.
+3. `L16Decoder<Hz16000, Mono, S16Le>`
+   Contract: reinterpret Telnyx `L16` payload bytes as linear PCM without codec compression loss.
+4. `MonoNormalizer<R, Ch, E>`
+   Contract: collapse multi-channel PCM to mono if ever required; current telephony expectation is mono passthrough.
+5. `PcmResampler<Hz8000, Hz16000, Mono, S16Le>` and related variants
+   Contract: produce deterministic resampled output, preserve end-of-stream, document buffering.
+6. `SherpaChunker` or `MoonshineChunker`
+   Contract:
+   Sherpa path emits ordered `PcmChunk` values suitable for immediate `push_chunk()`;
+   Moonshine path emits fixed `1280`-sample windows.
+
+Outbound mandatory stages:
+
+1. `TtsDrain<R, Mono, E>`
+   Contract: consume `SpeechStream::next_chunk()` until exhaustion or interruption and expose typed PCM frames.
+2. `PcmFormatConverter<R, Mono, F32Le, S16Le>` where needed
+   Contract: used for Qwen3-TTS outbound adaptation before transport encoding if the packetizer or codec path expects `S16Le`.
+3. `PcmResampler<Hz22050, Hz16000, Mono, S16Le>` for Piper and `PcmResampler<Hz24000, Hz16000, Mono, _>` for Qwen3-TTS
+   Contract: make outbound target rate explicit instead of inferred.
+4. `TelephonyPacketizer<Hz16000, Mono, S16Le, L16>` or G.711 variant
+   Contract: emit telephony-sized packets rather than full TTS chunks.
+5. `G711Encoder` or `L16Encoder`
+   Contract: produce outbound Telnyx payload bytes only after packetization.
+
+The first implementation should not merge these responsibilities into one opaque “audio adapter” component.
 
 ### Behavior Contracts
 
