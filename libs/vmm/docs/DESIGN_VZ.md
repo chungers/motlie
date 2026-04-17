@@ -4,6 +4,8 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-17 | @codex-vz | Add explicit external references for the Vz design, including Apple Virtualization/Hypervisor entitlement and process-model docs plus Linux KVM API docs for the threaded-mode comparison |
+| 2026-04-17 | @codex-vz | Add the launcher-boundary analysis: distinguish Tart from a Motlie-owned `vz-runner`, record that Vz should start as a helper-process backend analogous to `ChShell` / `ChForkExec`, and explain why an eventual in-process threaded Vz mode is secondary rather than the default |
 | 2026-04-15 | @codex-vz | Rewrite Vz parity acceptance to target the extracted Phase 8A `libs/vmm` harness core and typed validation profiles rather than the older example-local smoke wrappers |
 | 2026-04-14 | @codex-vz | Align the Vz backend phases with the cross-backend slice order, formalize the hardened SSH auto-provision checks as parity acceptance tests, and replace the stale VFS-parity-definition ambiguity with an explicit `v1.15` feasibility gate |
 | 2026-04-14 | @codex-vz | Add `DESIGN_GUEST_IMAGE.md` as the owning prerequisite for the Apple Vz guest image pipeline: define the boot artifacts, guest image build options, aarch64 kernel constraints, packaging direction, and the shared-guest-contract vs hypervisor-specific-packaging split |
@@ -131,6 +133,87 @@ Phase 1 should implement Vz through a small helper process written in Swift:
 
 Rust should not directly own `VZVirtualMachine` objects in phase 1.
 
+## Launcher Boundary: `tart` vs `vz-runner`
+
+The design needs one explicit distinction between:
+
+- a third-party Vz product/runtime such as Tart
+- a Motlie-owned Vz backend helper, `vz-runner`
+
+These solve different problems.
+
+### What Tart Provides
+
+Tart is a prebuilt CLI/app on top of Apple `Virtualization.framework` that:
+
+- ships with its own app-bundle signing/provisioning story
+- manages Linux and macOS VM images
+- supports OCI-backed VM image distribution
+- exposes a CLI for create/clone/run/ip/push/pull workflows
+- supports Linux guests, SSH access, and VirtioFS directory mounting
+
+This makes Tart useful for:
+
+- early host feasibility checks (`v1.05`)
+- proving that Apple Vz can run Linux guests on supported hosts
+- trying Vz-backed Linux images without first solving Motlie-owned helper
+  signing and packaging
+- exploring whether OCI-backed VM artifact packaging is a better long-term fit
+  for `xar`
+
+Tart is therefore a valid temporary launcher for the Apple Vz proving track.
+
+### What `vz-runner` Provides
+
+`vz-runner` is not a VM product. It is the smallest Motlie-owned runtime shim
+that directly calls `Virtualization.framework`.
+
+Its job is to:
+
+- accept a fully resolved, Motlie-owned VM config
+- materialize the exact Vz device configuration required by that config
+- boot and supervise the guest
+- expose status, readiness, serial, shutdown, and error reporting back to Rust
+- attach only the devices and runtime surfaces Motlie actually needs
+
+Unlike Tart, `vz-runner` does not need:
+
+- its own image registry abstraction
+- Tart-style VM state UX
+- a user-facing VM management model beyond Motlie's backend contract
+
+### Why Tart Is Not The Final Backend Boundary
+
+Tart is attractive for feasibility and possibly for image distribution, but it
+is not the right long-term backend seam for `libs/vmm` because Motlie needs
+control over:
+
+- the Rust-owned orchestrator lifecycle
+- typed readiness and validation gates
+- exact `vfs` / `vnet` attachment behavior
+- Motlie-specific control-plane sockets and observability
+- backend-neutral `VmHandle` semantics
+
+That means the most likely durable split is:
+
+- OCI / `xar` image artifacts may converge with the style of VM packaging used
+  by Tart
+- `vz-runner` remains the Motlie-owned Vz launcher/runtime boundary
+
+### Resulting Design Rule
+
+Phase 1 may use Tart to answer host/image feasibility questions, but Tart
+should be treated as:
+
+- a proving tool
+- a temporary launcher option
+- a source of packaging ideas
+
+not as the final `backend::vz` contract.
+
+The final Vz backend should continue to target a Motlie-owned `vz-runner`
+process.
+
 ### Why Swift First
 
 This is the lowest-risk path for the current codebase:
@@ -158,6 +241,184 @@ It is viable long term, but it raises complexity immediately:
 - more unsafe surface before we have even proven the backend contract
 
 That is the wrong order for a first backend slice.
+
+## Backend Shape Relative To CH
+
+The initial Vz backend should behave most like the current process-backed CH
+launch modes, not like an in-process threaded backend.
+
+The closest analogies are:
+
+- `ChShellBackend`
+- future `ChForkExecBackend`
+
+The wrong default analogy is:
+
+- future `ChVmmThreadBackend`
+
+### Why Vz Maps Naturally To A Process Backend
+
+The helper-process boundary gives Vz a clean place to isolate:
+
+- Apple entitlement and signing requirements
+- Objective-C / Swift object ownership and delegate callbacks
+- `Virtualization.framework` queue and run-loop expectations
+- Vz-specific crash and failure containment
+
+That matches the reviewed backend seam in `libs/vmm/docs/DESIGN.md`, where
+shell/fork-exec/threaded CH launchers are distinct backends because their:
+
+- boot mechanics
+- shutdown mechanics
+- cleanup behavior
+- control-plane attachment
+- isolation boundaries
+
+are materially different.
+
+Vz has the same distinction. A helper process is therefore a backend choice,
+not merely an implementation detail.
+
+## Could Vz Have A Threaded Mode?
+
+Possibly, but it should be considered a later optimization/backend variant, not
+the default implementation target.
+
+Call this hypothetical mode `VzThreadedBackend`:
+
+- `vmm-host` (or another Rust host binary) would directly instantiate
+  `Virtualization.framework`
+- the VM would be owned in-process
+- a dedicated thread or queue would run the Vz event/delegate loop
+- the top-level Rust process would hold the runtime state directly, analogous
+  to the future CH `start_vmm_thread(...)` direction
+
+### Attractive Properties Of A Threaded Vz Mode
+
+It has real benefits:
+
+- lower process-management overhead
+- fewer control-protocol translation layers
+- simpler direct access to runtime state once inside the same address space
+- easier zero-copy or shared-memory handoff for some future data paths
+- closer symmetry with a future in-process CH backend family
+
+Those are legitimate reasons to keep the option open.
+
+### Why It Is Still Secondary
+
+Even with those benefits, threaded Vz is not the right first serious path.
+
+The biggest reasons are:
+
+1. Entitlement blast radius
+- the process that instantiates `Virtualization.framework` needs the
+  virtualization entitlement
+- with an in-process design, the larger host binary would need that
+  entitlement, not just a small helper
+
+2. Runtime model mismatch
+- Vz relies on Apple object lifetime, delegate, and queue semantics
+- the current Rust orchestrator and handle model is simpler when those stay
+  behind a process boundary
+
+3. Fault containment
+- a helper crash is isolated and diagnosable
+- an in-process Vz crash or framework misuse can take down the main
+  `vmm-host` process
+- this is a process-isolation concern, not a claim that Apple Vz normally
+  takes down the whole macOS host machine
+
+4. Packaging flexibility
+- a helper process can be distributed, replaced, or signed independently
+- that is harder once Vz is folded into the main host binary
+
+### Design Conclusion For Threaded Mode
+
+The reviewed ordering should therefore be:
+
+1. `VzShellBackend` / `VzRunnerBackend`
+2. optional later `VzForkExecBackend` variants if process launch details split
+3. only then consider `VzThreadedBackend` if there is a clear measured reason
+
+Threaded Vz should remain architecturally possible, but it should not drive
+the initial backend shape.
+
+### Clarification: Host Process vs Host Machine
+
+The primary isolation concern for threaded Vz is the host process boundary.
+
+What is at risk first in an in-process design is:
+
+- the `vmm-host` process
+- its orchestrator state
+- its open control sockets and in-memory runtime state
+
+not the whole Mac by default.
+
+Apple's lower-level Hypervisor framework is explicitly documented as a
+user-space interface:
+
+- each virtual machine corresponds to a host process
+- vCPUs map to host threads
+- guest physical memory maps into host process virtual memory
+
+That is broadly similar in shape to KVM-based designs where a userspace VMM
+owns process state while the kernel provides virtualization primitives.
+
+The important reviewed difference is not "macOS is kernel-heavy while KVM is
+not." The difference relevant to this design is:
+
+- CH on Linux is already modeled in Motlie as an external VMM process family
+- Apple Vz adds a higher-level Objective-C / delegate / queue runtime model and
+  a stronger entitlement boundary around the host process that calls the API
+
+So the threaded-Vz concern is:
+
+- bigger entitlement blast radius
+- tighter coupling between the Rust host process and the Apple runtime model
+- weaker fault containment for Motlie's own host-side control process
+
+not a claim that macOS virtualization is inherently more likely than KVM to
+crash the host machine.
+
+## External References
+
+Apple Virtualization / Hypervisor:
+
+- Apple Virtualization framework overview
+  - https://developer.apple.com/documentation/virtualization
+- `VZVirtualMachine`
+  - https://developer.apple.com/documentation/virtualization/vzvirtualmachine
+- `VZVirtualMachineConfiguration`
+  - https://developer.apple.com/documentation/virtualization/vzvirtualmachineconfiguration
+- Adding the Virtualization entitlement
+  - https://developer.apple.com/documentation/virtualization/adding-the-virtualization-entitlement-to-your-project
+- `com.apple.security.virtualization`
+  - https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.virtualization
+- Apple Hypervisor framework overview
+  - https://developer.apple.com/documentation/hypervisor
+
+Apple sample / guest setup references:
+
+- Virtualize Linux on a Mac
+  - https://developer.apple.com/documentation/virtualization/virtualize_linux_on_a_mac
+- Running GUI Linux in a virtual machine on a Mac
+  - https://developer.apple.com/documentation/virtualization/running-gui-linux-in-a-virtual-machine-on-a-mac
+
+Tart references:
+
+- Tart repository
+  - https://github.com/cirruslabs/tart
+- Tart quick start and Linux VM workflow
+  - https://tart.run/quick-start/
+- Tart FAQ
+  - https://tart.run/faq/
+
+Linux KVM reference used for the userspace-VMM comparison:
+
+- KVM API documentation
+  - https://docs.kernel.org/6.10/virt/kvm/index.html
 
 ## Entitlements And Signing
 
