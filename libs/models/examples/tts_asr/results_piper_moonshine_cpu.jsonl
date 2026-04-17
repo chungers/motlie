@@ -1,0 +1,1 @@
+{"pipeline":"piper_moonshine","mode":"cpu","status":"blocked","attempted_samples":100,"completed_samples":0,"wallclock_seconds":9313.88,"error":"Moonshine ASR rejected every sample in the full 100-sample pass with invalid frontend/encoder tensor shapes (Conv invalid input shape {4}; later Add broadcast 8 by 18)"}

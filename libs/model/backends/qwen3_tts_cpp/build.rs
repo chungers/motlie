@@ -46,7 +46,12 @@ fn main() {
     }
     if cfg!(target_env = "gnu") {
         config.define("CMAKE_EXE_LINKER_FLAGS", "-fopenmp");
-        config.define("CMAKE_SHARED_LINKER_FLAGS", "-fopenmp");
+        // qwen3-tts.cpp and whisper.cpp both embed ggml/gguf. When they are
+        // co-linked into the same process, GNU ld can let whisper's global
+        // ggml symbols override qwen3-tts.cpp's internal references at runtime,
+        // which silently breaks GGUF loading. Bind qwen3tts.so to its own
+        // bundled ggml/gguf implementation to prevent symbol interposition.
+        config.define("CMAKE_SHARED_LINKER_FLAGS", "-fopenmp -Wl,-Bsymbolic");
     }
 
     let dst = config.build();

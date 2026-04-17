@@ -5351,6 +5351,8 @@ dependencies = [
  "motlie-model-qwen3-tts-cpp",
  "motlie-model-sherpa-onnx",
  "motlie-model-whisper-cpp",
+ "serde",
+ "serde_json",
  "sysinfo",
  "thiserror 2.0.18",
  "tokio",

@@ -1,0 +1,1 @@
+{"pipeline":"piper_moonshine","mode":"cuda","status":"blocked","attempted_samples":29,"completed_samples":0,"wallclock_seconds":60.17,"error":"60s confirmation run reproduced the same Moonshine ASR tensor-shape failures as CPU; full 100-sample CUDA rerun was not continued because the lane never produced a transcript and Moonshine ASR is CPU-only"}
