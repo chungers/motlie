@@ -1,7 +1,8 @@
 //! qwen3-tts.cpp backend implementations for `motlie-model` TTS contracts.
 //!
-//! This backend wraps the vendored C API from `predict-woo/qwen3-tts.cpp`
-//! through a safe Rust `SpeechModel` / `SpeechStream` adapter.
+//! This backend wraps the upstream `predict-woo/qwen3-tts.cpp` C API through a
+//! pinned git submodule and exposes it via a safe Rust `SpeechModel` /
+//! `SpeechStream` adapter.
 //!
 //! The runtime expects GGUF artifacts in a model directory:
 //! - `qwen3-tts-0.6b-q8_0.gguf` or `qwen3-tts-0.6b-f16.gguf`
