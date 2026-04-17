@@ -3,11 +3,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ARTIFACTS_DIR="$SCRIPT_DIR/artifacts"
-VM_NAME="${MOTLIE_VZ_VM_NAME:-motlie-v1-05-ubuntu}"
-SOURCE_IMAGE="${MOTLIE_VZ_SOURCE_IMAGE:-ghcr.io/cirruslabs/ubuntu:latest}"
+BASE_VM_NAME="${MOTLIE_VZ_BASE_VM_NAME:-motlie-v1-05-ubuntu}"
+RUN_VM_NAME="${MOTLIE_VZ_RUN_VM_NAME:-motlie-v1-05-ubuntu-run}"
+SOURCE_IMAGE="${MOTLIE_VZ_SOURCE_IMAGE:-ghcr.io/cirruslabs/ubuntu@sha256:1e23e6fe5a6d3fb2089652229a09d71742617758b15aa311cecf1c05985d3021}"
 RUN_LOG="$ARTIFACTS_DIR/tart-run.log"
 RESULT_JSON="$ARTIFACTS_DIR/result.json"
 TIMEOUT_SECONDS="${MOTLIE_VZ_TIMEOUT_SECONDS:-180}"
+
+zmodload zsh/datetime
 
 mkdir -p "$ARTIFACTS_DIR"
 
@@ -21,34 +24,44 @@ require_cmd() {
 require_cmd tart
 require_cmd python3
 
+local_vm_exists() {
+  tart list 2>/dev/null | awk 'NR>1 {print $2}' | grep -Fx "$1" >/dev/null 2>&1
+}
+
 cleanup() {
-  if tart list 2>/dev/null | awk 'NR>1 {print $1}' | grep -Fx "$VM_NAME" >/dev/null 2>&1; then
-    tart stop "$VM_NAME" >/dev/null 2>&1 || true
+  if local_vm_exists "$RUN_VM_NAME"; then
+    tart stop "$RUN_VM_NAME" >/dev/null 2>&1 || true
+    tart delete "$RUN_VM_NAME" >/dev/null 2>&1 || true
   fi
 }
 
 trap cleanup EXIT
 
 echo "=== Vz v1.05 Tart smoke ==="
-echo "VM name:      $VM_NAME"
+echo "Base VM name: $BASE_VM_NAME"
+echo "Run VM name:  $RUN_VM_NAME"
 echo "Source image: $SOURCE_IMAGE"
 echo "Artifacts:    $ARTIFACTS_DIR"
 
-if ! tart list 2>/dev/null | awk 'NR>1 {print $1}' | grep -Fx "$VM_NAME" >/dev/null 2>&1; then
+if ! local_vm_exists "$BASE_VM_NAME"; then
   echo "--- cloning remote image ---"
-  tart clone "$SOURCE_IMAGE" "$VM_NAME"
+  tart clone "$SOURCE_IMAGE" "$BASE_VM_NAME"
 else
-  echo "--- reusing existing local VM ---"
+  echo "--- reusing existing local base VM ---"
 fi
+
+if local_vm_exists "$RUN_VM_NAME"; then
+  echo "--- deleting stale run VM clone ---"
+  tart delete "$RUN_VM_NAME" >/dev/null
+fi
+
+echo "--- cloning throwaway run VM ---"
+tart clone "$BASE_VM_NAME" "$RUN_VM_NAME" >/dev/null
 
 echo "--- starting headless guest ---"
 : > "$RUN_LOG"
-START_EPOCH="$(python3 - <<'PY'
-import time
-print(f"{time.time():.6f}")
-PY
-)"
-/bin/zsh -lc "tart run --no-graphics '$VM_NAME'" >"$RUN_LOG" 2>&1 &
+START_EPOCH="$EPOCHREALTIME"
+tart run --no-graphics "$RUN_VM_NAME" >"$RUN_LOG" 2>&1 &
 RUN_PID="$!"
 
 IP_ADDR=""
@@ -61,7 +74,7 @@ while [[ $ATTEMPTS -lt $MAX_ATTEMPTS ]]; do
     exit 1
   fi
 
-  IP_ADDR="$(tart ip "$VM_NAME" 2>/dev/null || true)"
+  IP_ADDR="$(tart ip "$RUN_VM_NAME" 2>/dev/null || true)"
   if [[ -n "$IP_ADDR" ]]; then
     break
   fi
@@ -76,36 +89,27 @@ if [[ -z "$IP_ADDR" ]]; then
   exit 1
 fi
 
-READY_EPOCH="$(python3 - <<'PY'
-import time
-print(f"{time.time():.6f}")
-PY
-)"
-BOOT_SECONDS="$(python3 - "$START_EPOCH" "$READY_EPOCH" <<'PY'
-import sys
-start = float(sys.argv[1])
-ready = float(sys.argv[2])
-print(f"{ready - start:.3f}")
-PY
-)"
+READY_EPOCH="$EPOCHREALTIME"
+BOOT_SECONDS="$(awk -v start="$START_EPOCH" -v ready="$READY_EPOCH" 'BEGIN { printf "%.3f", ready - start }')"
 
 echo "--- guest is reachable ---"
 echo "IP: $IP_ADDR"
 echo "Boot-to-IP: ${BOOT_SECONDS}s"
 
-UNAME_OUTPUT="$(tart exec "$VM_NAME" uname -a)"
-ID_OUTPUT="$(tart exec "$VM_NAME" id)"
+UNAME_OUTPUT="$(tart exec "$RUN_VM_NAME" uname -a)"
+ID_OUTPUT="$(tart exec "$RUN_VM_NAME" id)"
 
-python3 - "$RESULT_JSON" "$VM_NAME" "$SOURCE_IMAGE" "$IP_ADDR" "$BOOT_SECONDS" "$UNAME_OUTPUT" "$ID_OUTPUT" <<'PY'
+python3 - "$RESULT_JSON" "$BASE_VM_NAME" "$RUN_VM_NAME" "$SOURCE_IMAGE" "$IP_ADDR" "$BOOT_SECONDS" "$UNAME_OUTPUT" "$ID_OUTPUT" <<'PY'
 import json
 import sys
 
-path, vm_name, source_image, ip_addr, boot_seconds, uname_output, id_output = sys.argv[1:]
+path, base_vm_name, run_vm_name, source_image, ip_addr, boot_seconds, uname_output, id_output = sys.argv[1:]
 with open(path, "w", encoding="utf-8") as fh:
     json.dump(
         {
             "backend": "vz-tart",
-            "vm_name": vm_name,
+            "base_vm_name": base_vm_name,
+            "run_vm_name": run_vm_name,
             "source_image": source_image,
             "ip_addr": ip_addr,
             "boot_to_ip_seconds": float(boot_seconds),
@@ -125,6 +129,7 @@ echo "--- result written ---"
 cat "$RESULT_JSON"
 
 echo "--- stopping guest ---"
-tart stop "$VM_NAME" >/dev/null
+tart stop "$RUN_VM_NAME" >/dev/null
+tart delete "$RUN_VM_NAME" >/dev/null
 
 echo "=== success ==="

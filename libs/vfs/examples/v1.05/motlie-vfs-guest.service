@@ -1,0 +1,13 @@
+[Unit]
+Description=motlie-vfs guest filesystem mounter
+After=local-fs.target
+Before=ssh.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/motlie-vfs-guest /etc/motlie-vfs/mounts.yaml
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
