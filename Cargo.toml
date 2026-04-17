@@ -9,6 +9,8 @@ members = [
     "libs/model-eval",
     "libs/models",
     "libs/tmux",
+    "libs/driver",
+    "bins/tmux/driver",
 ]
 resolver = "2"
 

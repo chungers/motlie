@@ -44,6 +44,7 @@ impl CommandOutput {
 #[async_trait]
 pub trait CommandSet<C>: Sized {
     type CompletionContext: Send + 'static;
+    type Resolved;
 
     fn root_command() -> clap::Command;
     fn from_matches(matches: &clap::ArgMatches) -> DriverResult<Self>;
@@ -57,7 +58,8 @@ pub trait CommandSet<C>: Sized {
     ) -> Vec<CompletionCandidate> {
         Vec::new()
     }
-    async fn execute(self, context: &mut C) -> DriverResult<CommandOutput>;
+    fn resolve_command(self, context: &C) -> DriverResult<Self::Resolved>;
+    async fn execute(resolved: Self::Resolved, context: &mut C) -> DriverResult<CommandOutput>;
 }
 
 #[derive(Debug)]
@@ -127,7 +129,8 @@ where
 
         let matches = root.try_get_matches_from(argv)?;
         let command = S::from_matches(&matches)?;
-        command.execute(&mut self.context).await
+        let resolved = command.resolve_command(&self.context)?;
+        S::execute(resolved, &mut self.context).await
     }
 
     pub fn complete(&self, line: &str, cursor: usize) -> Vec<CompletionCandidate> {
@@ -213,6 +216,7 @@ mod tests {
     #[async_trait]
     impl CommandSet<DemoContext> for DemoCommand {
         type CompletionContext = usize;
+        type Resolved = Self;
 
         fn root_command() -> clap::Command {
             DemoRoot::command().name("demo")
@@ -243,8 +247,15 @@ mod tests {
             Vec::new()
         }
 
-        async fn execute(self, context: &mut DemoContext) -> DriverResult<CommandOutput> {
-            match self {
+        fn resolve_command(self, _context: &DemoContext) -> DriverResult<Self::Resolved> {
+            Ok(self)
+        }
+
+        async fn execute(
+            resolved: Self::Resolved,
+            context: &mut DemoContext,
+        ) -> DriverResult<CommandOutput> {
+            match resolved {
                 DemoCommand::Echo(cmd) => Ok(CommandOutput::line(cmd.value)),
                 DemoCommand::Count(cmd) => {
                     context.counter += cmd.value;
