@@ -4,6 +4,7 @@ members = [
     "libs/db",
     "libs/mcp",
     "libs/model",
+    "libs/model/backends/moonshine",
     "libs/model/backends/mistral",
     "libs/model/backends/llama_cpp",
     "libs/model/backends/ort",
