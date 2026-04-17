@@ -9,6 +9,8 @@ use anyhow::{Context, Result};
 use motlie_model::{ArtifactPolicy, StartOptions};
 use std::path::PathBuf;
 
+const PIPELINE_CHUNK_BYTES: usize = 16_000;
+
 fn main() -> Result<()> {
     let args = parse_args()?;
     let runtime = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
@@ -79,7 +81,15 @@ async fn run(args: Args) -> Result<()> {
 
     // Run pipeline for each sample
     for sample in &samples {
-        match common::run_pipeline("piper_whisper", sample, speech, transcription).await {
+        match common::run_pipeline_with_asr_chunk_bytes(
+            "piper_whisper",
+            sample,
+            speech,
+            transcription,
+            PIPELINE_CHUNK_BYTES,
+        )
+        .await
+        {
             Ok(result) => common::emit_jsonl(&result),
             Err(err) => {
                 eprintln!("WARN: sample {} failed: {err:#}", sample.sample_id);

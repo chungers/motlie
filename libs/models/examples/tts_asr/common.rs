@@ -5,8 +5,8 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use motlie_model::{
-    metrics_runtime::current_resident_memory_bytes, AudioSpec, PcmChunk, PcmEncoding,
-    SpeechRequest, TranscriptionParams,
+    AudioSpec, PcmChunk, PcmEncoding, SpeechRequest, TranscriptionParams,
+    metrics_runtime::current_resident_memory_bytes,
 };
 use serde::{Deserialize, Serialize};
 
@@ -50,18 +50,13 @@ pub fn load_dataset(path: &Path) -> Result<Vec<TestSample>> {
     Ok(samples)
 }
 
-/// Run the TTS→ASR pipeline for a single sample.
-///
-/// 1. Synthesizes `sample.text` via `speech_model.open_stream()`
-/// 2. Collects all PCM chunks from the speech stream
-/// 3. Feeds the PCM into `transcription_model.open_stream()` + `push_chunk()`
-/// 4. Collects final transcript text
-/// 5. Computes WER between original and transcribed text
-pub async fn run_pipeline(
+/// Run the TTS→ASR pipeline with a fixed ASR input chunk size in bytes.
+pub async fn run_pipeline_with_asr_chunk_bytes(
     pipeline_name: &str,
     sample: &TestSample,
     speech: &dyn motlie_model::SpeechModel,
     transcription: &dyn motlie_model::TranscriptionModel,
+    asr_chunk_bytes: usize,
 ) -> Result<PipelineResult> {
     let mut peak_resident_memory_bytes = current_resident_memory_bytes();
 
@@ -112,6 +107,7 @@ pub async fn run_pipeline(
         encoding: audio_spec.encoding,
     };
 
+    let chunk_size = normalize_chunk_size(asr_chunk_bytes, &asr_spec);
     let mut asr_stream = transcription
         .open_stream(
             asr_spec,
@@ -124,8 +120,8 @@ pub async fn run_pipeline(
         .context("ASR open_stream failed")?;
     observe_peak_resident_memory(&mut peak_resident_memory_bytes);
 
-    // Feed PCM in chunks
-    let chunk_size = 16_000; // ~0.5s at 16kHz mono S16Le
+    // Feed PCM in chunks. Some streaming ASR backends are sensitive to chunk
+    // cadence; the Moonshine examples use a smaller, frame-aligned chunk size.
     let mut offset = 0;
     let mut sequence = 0u64;
     let mut transcript_segments = Vec::new();
@@ -202,11 +198,11 @@ pub fn compute_wer(reference: &str, hypothesis: &str) -> f64 {
     // Levenshtein distance on word sequences
     let mut dp = vec![vec![0usize; m + 1]; n + 1];
 
-    for i in 0..=n {
-        dp[i][0] = i;
+    for (i, row) in dp.iter_mut().enumerate().take(n + 1) {
+        row[0] = i;
     }
-    for j in 0..=m {
-        dp[0][j] = j;
+    for (j, value) in dp[0].iter_mut().enumerate().take(m + 1) {
+        *value = j;
     }
 
     for i in 1..=n {
@@ -235,6 +231,15 @@ fn compute_pcm_duration_ms(spec: &AudioSpec, byte_len: usize) -> u64 {
         return 0;
     }
     (total_samples as u64 * 1000) / spec.sample_rate_hz as u64
+}
+
+fn normalize_chunk_size(chunk_bytes: usize, spec: &AudioSpec) -> usize {
+    let frame_bytes = match spec.encoding {
+        PcmEncoding::S16Le => 2,
+        PcmEncoding::F32Le => 4,
+    } * spec.channels.max(1) as usize;
+    let aligned = chunk_bytes - (chunk_bytes % frame_bytes);
+    aligned.max(frame_bytes)
 }
 
 fn observe_peak_resident_memory(peak: &mut Option<u64>) {
@@ -301,6 +306,17 @@ mod tests {
         // "a b c" vs "a c" → 1 deletion / 3 words = 0.333...
         let wer = compute_wer("a b c", "a c");
         assert!((wer - 1.0 / 3.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn normalize_chunk_size_preserves_frame_alignment() {
+        let spec = AudioSpec {
+            sample_rate_hz: 22_050,
+            channels: 2,
+            encoding: PcmEncoding::S16Le,
+        };
+        assert_eq!(normalize_chunk_size(16_001, &spec), 16_000);
+        assert_eq!(normalize_chunk_size(1, &spec), 4);
     }
 
     #[test]
