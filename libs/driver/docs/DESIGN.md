@@ -313,6 +313,40 @@ The driver should also own the generic error vocabulary for this stage:
 - ambiguous name
 - resource not found in scope
 
+
+### Shared namespace, adapter-relative resolution
+
+A namespace label must not imply one universal object.
+
+The design must support the same scope label existing across multiple adapters at
+once.
+
+Example:
+- `alice` may name a tmux session scope
+- `alice` may also name a vnet allocation
+- `alice` may also name a vfs mount set
+- later, `alice` may also name a VMM guest or PTY scope
+
+That means resolution must stay relative to command context and resource kind,
+not just the raw namespace string.
+
+The intended model is:
+- the application owns a shared namespace vocabulary
+- each adapter owns its own resource registry within that vocabulary
+- commands resolve names relative to adapter/resource kind
+- composed commands may intentionally coordinate several resource kinds under
+  the same namespace label
+
+So `alice` is a shared scope label, not "the one thing called alice".
+
+This is important for future composed commands such as:
+- `workspace create alice`
+- `workspace destroy alice`
+- `workspace status alice`
+
+Those commands should be able to orchestrate multiple adapter-owned resources
+under the same namespace without introducing global name ambiguity.
+
 ## Completion Impact
 
 Completion should continue to work compositionally with the new stage.
