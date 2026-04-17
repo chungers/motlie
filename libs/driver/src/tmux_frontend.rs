@@ -1,7 +1,10 @@
-#[cfg(feature = "repl")]
-use std::sync::{Arc, Mutex};
 #[cfg(feature = "tui")]
 use std::{collections::VecDeque, io, time::Duration};
+#[cfg(feature = "repl")]
+use std::{
+    marker::PhantomData,
+    sync::{Arc, Mutex},
+};
 
 #[cfg(feature = "tui")]
 use ansi_to_tui::IntoText;
@@ -9,30 +12,26 @@ use ansi_to_tui::IntoText;
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 #[cfg(feature = "tui")]
 use ratatui::{
-    Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span as TuiSpan},
     widgets::{Block, Borders, Paragraph, Wrap},
+    Frame, Terminal,
 };
 #[cfg(feature = "repl")]
 use reedline::{
     Completer, DefaultPrompt, DefaultPromptSegment, Reedline, Signal, Span, Suggestion,
 };
 
-#[cfg(feature = "tui")]
-use crate::commands::tmux::TmuxMirrorSnapshot;
-use crate::commands::tmux::{TmuxCommand, TmuxState};
-#[cfg(feature = "repl")]
-use crate::engine::CommandSet;
+use crate::commands::tmux::{TmuxFrontendState, TmuxMirrorSnapshot};
 #[cfg(feature = "repl")]
 use crate::engine::complete_with_context;
-use crate::engine::{CommandEffect, CommandEngine};
+use crate::engine::{CommandEffect, CommandEngine, CommandSet};
 use crate::error::{DriverError, DriverResult};
 use crate::term::asciicast::AsciicastRecorder;
 
@@ -56,37 +55,53 @@ pub enum TuiAction {
 }
 
 #[cfg(not(feature = "tui"))]
-pub async fn run_tmux_tui(
-    _engine: &mut CommandEngine<TmuxState, TmuxCommand>,
+pub async fn run_tmux_tui<C, S>(
+    _engine: &mut CommandEngine<C, S>,
     _recorder: &mut Option<AsciicastRecorder>,
-) -> DriverResult<TuiAction> {
+) -> DriverResult<TuiAction>
+where
+    C: TmuxFrontendState + Send + 'static,
+    S: CommandSet<C> + Send + 'static,
+{
     Err(crate::error::DriverError::message(
         "tmux TUI frontend requires the `tui` feature",
     ))
 }
 
 #[cfg(feature = "repl")]
-pub struct TmuxCompleter {
-    context: Arc<Mutex<<TmuxCommand as CommandSet<TmuxState>>::CompletionContext>>,
+pub struct TmuxCompleter<C, S>
+where
+    S: CommandSet<C>,
+{
+    context: Arc<Mutex<S::CompletionContext>>,
+    _marker: PhantomData<(C, S)>,
 }
 
 #[cfg(feature = "repl")]
-impl TmuxCompleter {
-    pub fn new(
-        context: Arc<Mutex<<TmuxCommand as CommandSet<TmuxState>>::CompletionContext>>,
-    ) -> Self {
-        Self { context }
+impl<C, S> TmuxCompleter<C, S>
+where
+    S: CommandSet<C>,
+{
+    pub fn new(context: Arc<Mutex<S::CompletionContext>>) -> Self {
+        Self {
+            context,
+            _marker: PhantomData,
+        }
     }
 }
 
 #[cfg(feature = "repl")]
-impl Completer for TmuxCompleter {
+impl<C, S> Completer for TmuxCompleter<C, S>
+where
+    C: Send + 'static,
+    S: CommandSet<C> + Send + 'static,
+{
     fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
         let context = match self.context.lock() {
             Ok(guard) => guard,
             Err(_) => return Vec::new(),
         };
-        let candidates = complete_with_context::<TmuxState, TmuxCommand>(line, pos, &context);
+        let candidates = complete_with_context::<C, S>(line, pos, &context);
         let start = line
             .get(..pos)
             .and_then(|prefix| {
@@ -112,13 +127,17 @@ impl Completer for TmuxCompleter {
 }
 
 #[cfg(feature = "repl")]
-pub async fn run_tmux_repl(
-    engine: &mut CommandEngine<TmuxState, TmuxCommand>,
+pub async fn run_tmux_repl<C, S>(
+    engine: &mut CommandEngine<C, S>,
     recorder: &mut Option<AsciicastRecorder>,
     host_uri: &str,
-) -> DriverResult<()> {
+) -> DriverResult<()>
+where
+    C: TmuxFrontendState + Send + 'static,
+    S: CommandSet<C> + Send + 'static,
+{
     let completion_context = Arc::new(Mutex::new(engine.completion_context()));
-    let completer = Box::new(TmuxCompleter::new(completion_context.clone()));
+    let completer = Box::new(TmuxCompleter::<C, S>::new(completion_context.clone()));
     let mut line_editor = Reedline::create().with_completer(completer);
     let prompt = DefaultPrompt::new(
         DefaultPromptSegment::Basic("tmux> ".to_string()),
@@ -176,10 +195,14 @@ pub async fn run_tmux_repl(
 }
 
 #[cfg(feature = "repl")]
-async fn run_live_follow(
-    engine: &mut CommandEngine<TmuxState, TmuxCommand>,
+async fn run_live_follow<C, S>(
+    engine: &mut CommandEngine<C, S>,
     recorder: &mut Option<AsciicastRecorder>,
-) -> DriverResult<()> {
+) -> DriverResult<()>
+where
+    C: TmuxFrontendState + Send + 'static,
+    S: CommandSet<C> + Send + 'static,
+{
     println!("Live follow attached. Press Ctrl-C to stop and return to the prompt.");
     record_output(
         recorder,
@@ -263,10 +286,14 @@ impl TuiState {
 }
 
 #[cfg(feature = "tui")]
-pub async fn run_tmux_tui(
-    engine: &mut CommandEngine<TmuxState, TmuxCommand>,
+pub async fn run_tmux_tui<C, S>(
+    engine: &mut CommandEngine<C, S>,
     recorder: &mut Option<AsciicastRecorder>,
-) -> DriverResult<TuiAction> {
+) -> DriverResult<TuiAction>
+where
+    C: TmuxFrontendState + Send + 'static,
+    S: CommandSet<C> + Send + 'static,
+{
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -286,7 +313,7 @@ pub async fn run_tmux_tui(
         hook_for_panic(info);
     }));
 
-    let host_uri = engine.context().host_uri.clone();
+    let host_uri = engine.context().frontend_host_uri();
     let mirror = engine.context().mirror_snapshot();
     let mut state = TuiState::new(host_uri, mirror);
     state.push_output("tui: split-screen mode enabled");
@@ -306,12 +333,16 @@ pub async fn run_tmux_tui(
 }
 
 #[cfg(feature = "tui")]
-async fn tmux_tui_event_loop(
+async fn tmux_tui_event_loop<C, S>(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &mut TuiState,
-    engine: &mut CommandEngine<TmuxState, TmuxCommand>,
+    engine: &mut CommandEngine<C, S>,
     recorder: &mut Option<AsciicastRecorder>,
-) -> DriverResult<TuiAction> {
+) -> DriverResult<TuiAction>
+where
+    C: TmuxFrontendState + Send + 'static,
+    S: CommandSet<C> + Send + 'static,
+{
     loop {
         terminal.draw(|frame| draw_tmux_tui(frame, state))?;
 
@@ -429,6 +460,7 @@ async fn tmux_tui_event_loop(
         }
 
         engine.context_mut().refresh_mirror().await?;
+        state.host_uri = engine.context().frontend_host_uri();
         state.mirror = engine.context().mirror_snapshot();
     }
 }
