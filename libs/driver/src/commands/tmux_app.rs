@@ -36,6 +36,7 @@ impl TmuxAppState {
     }
 
     pub async fn connect_alias(&mut self, uri: &str, alias: &str) -> DriverResult<()> {
+        validate_alias(alias)?;
         if self.connections.contains_key(alias) {
             return Err(DriverError::invalid_argument(
                 "alias",
@@ -49,11 +50,16 @@ impl TmuxAppState {
     }
 
     pub async fn disconnect_alias(&mut self, alias: &str) -> DriverResult<()> {
-        let Some(mut state) = self.connections.remove(alias) else {
+        let Some(state) = self.connections.get_mut(alias) else {
             return Err(DriverError::unknown_scope(alias));
         };
 
         state.shutdown_managed_state().await?;
+        let removed = self.connections.remove(alias);
+        debug_assert!(
+            removed.is_some(),
+            "checked alias should still exist before removal"
+        );
         if self.current.as_deref() == Some(alias) {
             self.current = None;
         }
@@ -342,7 +348,10 @@ impl CommandSet<TmuxAppState> for TmuxAppCommand {
 
     fn resolve_command(self, context: &TmuxAppState) -> DriverResult<Self::Resolved> {
         match self {
-            Self::Connect(cmd) => Ok(TmuxAppResolved::Connect(cmd)),
+            Self::Connect(cmd) => {
+                validate_alias(&cmd.alias)?;
+                Ok(TmuxAppResolved::Connect(cmd))
+            }
             Self::Disconnect(cmd) => {
                 if !context.connections.contains_key(&cmd.alias) {
                     return Err(DriverError::unknown_scope(cmd.alias));
@@ -404,6 +413,16 @@ fn use_subcommand() -> Command {
 
 fn connections_subcommand() -> Command {
     Command::new("connections").about("List registered tmux connection aliases")
+}
+
+fn validate_alias(alias: &str) -> DriverResult<()> {
+    if alias.is_empty() || alias.contains('/') {
+        return Err(DriverError::invalid_argument(
+            "alias",
+            "must be non-empty and must not contain '/'",
+        ));
+    }
+    Ok(())
 }
 
 fn required_string(matches: &clap::ArgMatches, name: &str) -> DriverResult<String> {
@@ -923,6 +942,44 @@ mod tests {
             }
             _ => panic!("expected scoped tmux resolution"),
         }
+    }
+
+    #[test]
+    fn multi_host_connect_rejects_alias_with_namespace_separator() {
+        let state = test_state();
+        let command = TmuxAppCommand::Connect(super::ConnectCommand {
+            uri: "ssh://alpha".to_string(),
+            alias: "alpha/beta".to_string(),
+        });
+
+        let error =
+            match <TmuxAppCommand as crate::engine::CommandSet<TmuxAppState>>::resolve_command(
+                command, &state,
+            ) {
+                Ok(_) => panic!("alias with slash should be rejected"),
+                Err(error) => error,
+            };
+
+        assert!(matches!(error, DriverError::InvalidArgument { name, .. } if name == "alias"));
+    }
+
+    #[test]
+    fn multi_host_connect_rejects_empty_alias() {
+        let state = test_state();
+        let command = TmuxAppCommand::Connect(super::ConnectCommand {
+            uri: "ssh://alpha".to_string(),
+            alias: String::new(),
+        });
+
+        let error =
+            match <TmuxAppCommand as crate::engine::CommandSet<TmuxAppState>>::resolve_command(
+                command, &state,
+            ) {
+                Ok(_) => panic!("empty alias should be rejected"),
+                Err(error) => error,
+            };
+
+        assert!(matches!(error, DriverError::InvalidArgument { name, .. } if name == "alias"));
     }
 
     #[tokio::test]
