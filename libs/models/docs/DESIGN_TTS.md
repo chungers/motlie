@@ -1,11 +1,13 @@
 # TTS Model Support Design
 
-## Status: Implemented (Phase 1 Piper Slice)
+## Status: Implemented (Piper + Qwen3-TTS ONNX + qwen3-tts.cpp Backup Slice)
 
 ## Change Log
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-16 | @codex-tts | Replaced the large vendored `qwen3-tts.cpp` source tree with a pinned git submodule at `libs/model/backends/qwen3_tts_cpp/vendor/qwen3-tts.cpp` (`predict-woo/qwen3-tts.cpp` @ `7a762e2ad4bacc6fdda81d81bf10a09ffb546f29`). Tightened the build/docs contract so fresh checkouts explicitly require `git submodule update --init --recursive` before building the backup TTS backend. |
+| 2026-04-16 | @codex-tts | Implemented the official backup TTS track with a submodule-backed `qwen3-tts.cpp` backend (`motlie-model-qwen3-tts-cpp`), curated GGUF bundle wiring, and the `tts_v0.4` example. Recorded the project-level decision rationale: Piper remains primary for real-time CPU, `qwen3-tts.cpp` is the secondary cloning-capable backend, and `qwen3_tts_rs`, F5-TTS ONNX, and Fish Speech are now explicitly dropped. Local validation produced real intelligible speech on CPU; the optional CUDA build compiled and clippy-checked on GB10, but local runtime still fell back to CPU with `ggml_cuda_init: no CUDA-capable device is detected`. |
 | 2026-04-15 | @codex-tts | Added a reproducible Qwen3-TTS ONNX export runbook and checked in the export script under `libs/models/scripts/`. Documented the current adapter-graph workaround and the gap between the official Qwen runtime and the current Rust backend contract. |
 | 2026-04-15 | @cld-review-models | Implemented Phase 2 Qwen3-TTS vertical slice. Runtime boundary: in-process ONNX via `motlie-model-ort` with pre-exported model components (encoder, decoder, vocoder). Upstream safetensors must be exported to ONNX offline before the curated bundle can start. Added vocabulary-based tokenizer, proper Hann-windowed DFT mel spectrogram for reference-audio conditioning, and shape-preserving tensor pipeline between ONNX stages. |
 | 2026-04-14 | @codex-tts | Addressed PR #179 review R1 by fixing the local-only startup path to reuse the same Piper artifact validation as curated checkpoints, documenting the batch-then-chunk `open_stream()` behavior and Piper's runtime rejection of `SpeechParams.seed`, and recording the current `ort` RC dependency/runtime constraint explicitly. |
@@ -19,7 +21,7 @@ Assumption for this draft: this is brownfield product work. Motlie already has s
 
 The design is intentionally narrow. It focuses on one end-to-end vertical slice from curated artifact download to streamed PCM output, with adapters above the model layer for `.wav`, local playback, and telephony/websocket transports.
 
-The roadmap beyond that first slice is also explicit: if the Piper slice proves out, the next end-to-end family to add should be Qwen3-TTS rather than leaving the phase-2 story implicit.
+The roadmap beyond that first slice is also explicit: Piper remains the primary path, `qwen3-tts.cpp` is the official backup path for cloning-capable native inference, and the ONNX-exported Qwen3-TTS slice remains documented as a separate higher-complexity runtime family rather than an implicit follow-on.
 
 The exact re-export flow for the current Qwen3-TTS ONNX artifacts lives in
 `docs/EXPORT_QWEN3_TTS_ONNX.md`. That runbook is the source of truth for the
@@ -122,6 +124,7 @@ The table below focuses on local inference fit for Motlie rather than absolute r
 | Candidate | Representative Size | Latency / Realtime Evidence | CPU Fit on macOS/Linux | CUDA Fit | Voice Cloning | Streaming Capability | Rust Integration Path | License | Fit for Motlie |
 |-----------|---------------------|-----------------------------|------------------------|----------|---------------|----------------------|-----------------------|---------|----------------|
 | Piper TTS | `en_US-ljspeech-medium.onnx` is about `63.5 MB`; sidecar config is a few KB | Strong. Upstream positions Piper as fast/local, optimized for Raspberry Pi 4, and exposes raw streaming synthesis APIs and CLI flows. | Strong. This is still the cleanest CPU-first candidate in the set. | Good. Upstream supports `onnxruntime-gpu` with `--cuda`, but GPU is optional. | Limited. Some voices are multi-speaker, but this is not a zero-shot cloning system. | Strong. Raw audio can be produced incrementally; `.wav` output is already a first-class path. | Strong. ONNX already fits `CheckpointFormat::Onnx`; backend can target `BackendKind::Ort` with Rust ORT bindings. | Code MIT; voice licenses must be reviewed per `MODEL_CARD`; upstream repo archived on 2025-10-06 and points to GPL successor. | Recommended v1 despite upstream maintenance risk because it best matches the architecture and CPU requirement. |
+| qwen3-tts.cpp | Transformer GGUF is about `1.83 GB` in `f16`; tokenizer GGUF is about `326 MB`; a `q8_0` transformer variant is also distributed for smaller CPU-first installs | Project decision benchmark: about `5.7 s` CPU and `6.6 s` CUDA for the evaluated short-sample path, with WER about `0.404`; local Motlie validation on 2026-04-16 produced real intelligible CPU speech end to end. | Medium. Not real-time on CPU, but it is viable local inference and produces real speech without Python. | Medium-to-good. The submodule-backed `GGML_CUDA` path compiles on GB10-class Linux hosts, but local Motlie validation still observed runtime fallback to CPU on this host. | Strong. The upstream C API exposes reference-audio cloning from WAV or raw samples. | Medium. The runtime is whole-utterance generation internally; Motlie streams buffered PCM chunks on top of it. | Strong. A pinned native submodule with a narrow Rust FFI boundary fits the same adapter pattern as `whisper.cpp`. | Runtime provenance must be revalidated before merge; the implementation used the `predict-woo/qwen3-tts.cpp` snapshot plus GGUF artifacts from `koboldcpp/tts`, and the current upstream snapshot did not expose a clear top-level license file during implementation. | Recommended secondary / backup backend when cloning matters and Piper's CPU-first simplicity is not enough. |
 | Fish Speech 1.5 + `fish-speech.rs` | Fish Speech 1.5 weights are about `1.28 GB`; the Rust server compiles to a static binary of about `15 MB` | Good. `fish-speech.rs` advertises streaming audio and `.wav`; official Fish Audio S2 Pro reports about `100 ms` TTFA and `RTF 0.195` on one H200, but that is a different, newer runtime family. | Medium. `fish-speech.rs` says CPU is supported on Linux and macOS, but the official flagship evidence is GPU-first and the Rust runtime currently targets Fish 1.5 and below, not the latest S2 line. | Strong. Official Fish Audio S2 Pro explicitly publishes high streaming performance on NVIDIA GPUs; the Rust runtime also has CUDA and Metal features. | Strong. Official Fish Audio supports rapid voice cloning from short references; `fish-speech.rs` exposes temporary and persisted cloned voices. | Strong. Both official Fish Audio and `fish-speech.rs` expose streaming/server paths. | Medium. This is the best Rust-native candidate, but the Rust engine is third-party and tied to older Fish checkpoints while the official project has moved to S2 Pro. | Code Apache-2.0 or research license depending on repo; weights are non-commercial (`CC-BY-NC-SA-4.0` / Fish Audio Research License). | Strong technically, but blocked for a general Motlie bundle by weight-license restrictions and ecosystem split. |
 | Qwen3-TTS | `Qwen3-TTS-12Hz-0.6B-Base` tree is about `2.52 GB`; `model.safetensors` is about `1.83 GB` | Strong. Official repo claims end-to-end streaming latency as low as `97 ms` and supports streaming/non-streaming in one model family. | Medium-to-weak for v1. The smallest public model is still much larger than Piper and the official quickstart/examples are CUDA-first PyTorch flows. | Strong. Official examples load with `cuda:0`, `bfloat16`, and `flash_attention_2`; this is a good GB10 candidate. | Strong. Officially supports 3-second voice cloning, custom voices, and voice design. | Strong. Streaming is a first-class feature in the official repo and API docs. | Weak-to-medium. Open license is excellent, but the current path is Python package + Transformers/vLLM, not a Rust-native backend. | Apache-2.0 | Strongest phase-2 candidate for quality and feature breadth, but not the simplest v1 backend or artifact story. |
 | Coqui XTTS v2 | Hugging Face repo is about `2.09 GB`; `model.pth` alone is about `1.87 GB` | Strong upstream claim: XTTS can stream with sub-`200 ms` latency. | Weak for Motlie v1. Coqui's own streaming server docs say CPU is not recommended. | Good. Common deployment path is CUDA/PyTorch. | Strong. This is the main attraction. | Good. Official streaming server exists. | Weak-to-medium. Would require a new PyTorch/Python-serving boundary or heavyweight FFI; current Motlie backends are not set up for that. | Coqui Public Model License for weights; code in repo is permissive, but weight license is not as operationally simple as MIT/Apache. | Still viable as a cloning-focused backend family, but Qwen3-TTS now looks like the better open phase-2 candidate. |
@@ -132,6 +135,22 @@ The table below focuses on local inference fit for Motlie rather than absolute r
 | Chroma 1.0 | `Chroma-4B` files total about `14.3 GB` across three safetensors shards; gated model | Medium-to-strong for its intended problem. Officially positioned as a real-time spoken dialogue model. | Weak for Motlie v1. Weight size and multimodal dialogue framing make CPU deployment implausible. | Good. `transformers` + `device_map="auto"` is the published path. | Strong. Officially supports reference-audio voice cloning. | Strong in the speech-to-speech sense. | Weak for Motlie TTS. It is a custom-code `transformers` model that expects audio input and multimodal dialogue state, not a simple text-to-PCM backend. | Apache-2.0, but gated behind contact-info sharing on Hugging Face. | Not a good fit for the current TTS scope. Better viewed as a future speech-to-speech/dialogue stack, not a `SpeechRequest { text }` bundle. |
 | Kokoro-82M | `82M` params; Hugging Face tree shows `kokoro-v0_19.onnx` about `346 MB` and `.pth` about `327 MB` | Good qualitative evidence. Upstream positions Kokoro as significantly faster and more cost-efficient than larger models and exposes a generator-style pipeline. | Good. This remains the strongest non-Piper CPU candidate. | Medium. Apple Silicon/MPS support exists; CUDA story is not the main attraction. | Weak. This is primarily a compact high-quality voice model, not a cloning-first stack. | Medium. Pipeline yields generated chunks/segments, but transport-focused streaming is less mature than Piper. | Medium. There is an ONNX artifact in the model tree, but the official library path is still Python-first; Rust integration is less stable than Piper. | Apache-2.0 | Best alternate v1 candidate if Piper maintenance risk becomes unacceptable. |
 | PersonaPlex | `personaplex-7b-v1` tree is about `17.1 GB`; `model.safetensors` is about `16.7 GB`; gated model | Strong for full-duplex speech dialogue. Official model card reports real-time use and evaluates on turn-taking latency on A100. | Weak for Motlie v1. Even NVIDIA's own docs center GPU deployment and CPU offload, not CPU-native realtime use. | Strong. This is explicitly an NVIDIA CUDA-oriented deployment story and a plausible GB10 research target. | Medium. Voice conditioning is supported, but the model is persona-conditioned speech dialogue rather than standalone TTS. | Strong in the speech-to-speech sense. | Weak for current scope. Official code is a Python/Moshi server with audio input and voice/text prompting; it is not a drop-in text-to-speech backend. | NVIDIA Open Model License, gated access, commercial use permitted. | Strong future research candidate for duplex voice agents, but out of scope for Motlie's first TTS bundle because it is speech-to-speech rather than text-to-speech. |
+
+### Official Track Decision Update
+
+The TTS backend decision is now explicit rather than implicit:
+
+- Piper remains the primary TTS backend because the product needs a real-time CPU path first. Project decision input for the curated Piper slice is about `70 ms` CPU latency with no voice cloning requirement.
+- `qwen3-tts.cpp` is the secondary / backup backend because it adds voice cloning while still staying inside a Rust-native deployment boundary. Project decision input for that path is about `5.7 s` CPU, `6.6 s` CUDA, and WER about `0.404`.
+- `qwen3_tts_rs` is dropped. The measured CUDA path was about `50 s`, which is materially worse than the `qwen3-tts.cpp` path and does not justify a parallel Rust-native Qwen runtime.
+- F5-TTS ONNX is dropped. The evaluated ONNX path produced WER `1.0`, which is effectively unintelligible for Motlie's use case even before the licensing issues.
+- Fish Speech is dropped. The decisive blockers are the non-commercial checkpoint license and the stale `fish-speech.rs` maintenance posture (last relevant commit observed in February 2025).
+
+This means the official TTS track is:
+
+1. Piper for the primary real-time CPU bundle.
+2. `qwen3-tts.cpp` for the secondary cloning-capable bundle.
+3. All other previously explored backup tracks are documented as rejected rather than kept half-open.
 
 ### Why Piper Is Still the Best First Slice
 
@@ -155,13 +174,15 @@ Updated ranking for Motlie:
 
 1. Piper
    Best first vertical slice for CPU-first local inference, artifact simplicity, and a clean Rust/ONNX integration path.
-2. Qwen3-TTS
-   Best phase-2 candidate for high-quality open-license streaming TTS with strong cloning and voice-design features, especially if GB10/CUDA becomes a meaningful target.
-3. Kokoro-82M
+2. qwen3-tts.cpp
+   Best backup backend once cloning becomes important and the project is willing to pay the heavier GGUF/runtime cost for real speech quality.
+3. Qwen3-TTS
+   Best ONNX / Python-export phase-2 candidate for high-quality open-license streaming TTS, but no longer the preferred backup runtime once `qwen3-tts.cpp` is available.
+4. Kokoro-82M
    Best alternate CPU-oriented v1 if Piper maintenance risk outweighs its current integration advantage.
-4. Fish Speech
+5. Fish Speech
    Technically strong and the best Rust-native story, but the weight-license posture and split between official/new models and third-party/older Rust runtime make it hard to curate cleanly in Motlie.
-5. XTTS v2
+6. XTTS v2
    Still interesting for cloning, but now less attractive than Qwen3-TTS because the open-license and model-family story are weaker.
 
 Chroma and PersonaPlex do not belong in the same shortlist for this v1 because they are full speech-to-speech dialogue systems rather than pure text-to-speech bundles.
@@ -637,6 +658,13 @@ model-qwen3-tts-0_6b = ["dep:motlie-model-qwen3-tts"]
 qwen3-tts-cuda = ["dep:motlie-model-qwen3-tts", "motlie-model-qwen3-tts/cuda"]
 ```
 
+For the official backup backend, use separate GGUF/C++ feature gates:
+
+```toml
+model-qwen3-tts-cpp = ["dep:motlie-model-qwen3-tts-cpp"]
+qwen3-tts-cpp-cuda = ["dep:motlie-model-qwen3-tts-cpp", "motlie-model-qwen3-tts-cpp/cuda"]
+```
+
 ## Output Adapter Boundary
 
 ### Principle
@@ -694,13 +722,20 @@ Piper's ONNX format is the strongest distribution fit for Motlie today because:
 - local-only startup and fetch-on-demand remain reasonable
 - the format works on CPU-first deployments
 
-### Why Not GGUF for v1
+### Why GGUF Is Not the Primary Path, but Is Justified for `qwen3-tts.cpp`
 
-GGUF is currently a poor fit for TTS v1:
+GGUF is still not the right primary format for Motlie's TTS strategy:
 
-- the strongest TTS candidates are not natively distributed in GGUF
-- the telephony/output problem is not helped by GGUF
-- forcing a conversion pipeline would add moving parts without improving product fit
+- Piper is smaller, faster on CPU, and already packaged as ONNX
+- the telephony/output problem is not helped by GGUF by itself
+- the primary bundle should still optimize for simple CPU deployment
+
+GGUF is justified for the secondary `qwen3-tts.cpp` path because:
+
+- the runtime itself is purpose-built around GGUF and produces real speech today
+- the ONNX-adapter Qwen path already proved much more fragile operationally
+- the C++ runtime boundary is materially simpler than carrying a Python service into the Motlie runtime
+- the project explicitly wants a backup backend with cloning support, not a second copy of Piper's design constraints
 
 ### Artifact Size Comparison
 
@@ -711,6 +746,7 @@ Approximate footprint pressure from the evaluated candidates:
 - StyleTTS 2 LibriTTS: about `771 MB`
 - Fish Speech 1.5: about `1.28 GB`
 - F5-TTS Base: about `1.35 GB`
+- qwen3-tts.cpp GGUF (`f16` transformer + tokenizer): about `2.16 GB`
 - Qwen3-TTS 0.6B Base tree: about `2.52 GB`
 - XTTS v2: about `2.09 GB`
 - Parler-TTS Mini v1.1: about `3.75 GB`
@@ -755,6 +791,35 @@ The purpose of that phase-2 slice is different from Piper:
 
 - Piper proves the small CPU-first local path
 - Qwen3-TTS proves the higher-quality cloning-oriented path without changing the public TTS contract
+
+### Phase-3 `qwen3-tts.cpp` Backup Vertical Slice
+
+The official backup backend after Piper is now `qwen3-tts.cpp`, not another ONNX export path.
+
+Recommended phase-3 shape:
+
+- contract surface: reuse the same `SpeechRequest` / `SpeechStream` API already exercised by Piper and the ONNX-backed Qwen slice
+- runtime/backend boundary: `motlie-model-qwen3-tts-cpp`, a submodule-backed C/C++ backend crate that wraps the narrow `qwen3tts_c_api.h` surface via Rust FFI
+- checkpoint/artifact format: GGUF, with a curated bundle rooted at `koboldcpp/tts`
+- required artifacts:
+  `qwen3-tts-0.6b-q8_0.gguf` or `qwen3-tts-0.6b-f16.gguf`,
+  `qwen3-tts-tokenizer-f16.gguf`
+- selector shape: `tts:qwen/qwen3_tts_cpp_0_6b`
+- feature flags:
+  `model-qwen3-tts-cpp`,
+  `qwen3-tts-cpp-cuda`
+- example path: `examples/tts_v0.4`
+- validation target:
+  real artifact-backed `.wav` synthesis,
+  reference-audio cloning path through `VoiceConditioning::ReferenceAudio`,
+  CPU build/test/clippy,
+  GGML_CUDA compile validation on GB10-class hardware
+
+Current implementation note:
+
+- the backend performs whole-utterance synthesis in `open_stream()` and then emits buffered `F32Le` PCM chunks through `next_chunk()`
+- local CPU validation on 2026-04-16 produced real intelligible speech from the curated GGUF artifacts
+- the optional CUDA build compiled and clippy-checked on a GB10 host, but local runtime still logged `ggml_cuda_init: failed to initialize CUDA: no CUDA-capable device is detected` and fell back to CPU; this is documented as an implementation note, not hidden as a success claim
 
 ### Qwen3-TTS ONNX Export Procedure
 
@@ -883,6 +948,26 @@ Cons:
 Decision:
 
 - best phase-2 TTS family after Piper, but too heavy for the first CPU-first Rust bundle
+
+### `qwen3-tts.cpp` as the Backup Backend
+
+Pros:
+
+- produces real speech through a narrow native runtime boundary with no Python service at inference time
+- exposes reference-audio voice cloning directly in the C API
+- uses the same Motlie `SpeechModel` / `SpeechStream` contract as the primary Piper path
+- compiled cleanly with optional `GGML_CUDA` on GB10-class Linux during local validation
+
+Cons:
+
+- still far heavier than Piper in artifact size and startup memory
+- not real-time on CPU
+- the pinned submodule runtime provenance still needs explicit re-validation before merge because the upstream snapshot used during implementation did not surface a clear top-level license file
+- local GB10 runtime validation still fell back to CPU even with the CUDA feature enabled
+
+Decision:
+
+- adopt as the official secondary / backup backend behind Piper, while keeping the provenance and CUDA-runtime caveats explicit
 
 ### Fish Speech as v1
 
